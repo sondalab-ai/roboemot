@@ -1,0 +1,60 @@
+# SPEC 14: unit tests and lint on every commit; the MuJoCo simulation layer nightly.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+jobs:
+  python:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e "packages/roboemot-core[dev]" -e "packages/roboemot-reachymini[dev]"
+      - run: ruff check . && ruff format --check .
+      - run: pytest
+
+  rt:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S rt -B rt/build && cmake --build rt/build && ctest --test-dir rt/build --output-on-failure
+
+  sim:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    env:
+      MUJOCO_GL: osmesa
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # GStreamer/GObject for the reachy-mini SDK, OSMesa for headless MuJoCo.
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libcairo2-dev \
+            libgirepository-2.0-dev gir1.2-gstreamer-1.0 gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good libosmesa6
+      - run: pip install -e "packages/roboemot-core[dev]" -e "packages/roboemot-reachymini[dev,sim]"
+      - name: start the simulated daemon
+        run: |
+          scripts/sim-daemon.sh > sim-daemon.log 2>&1 &
+          for _ in $(seq 60); do
+            curl -sf http://localhost:8000/api/daemon/status && exit 0
+            sleep 2
+          done
+          cat sim-daemon.log; exit 1
+      - run: pytest -m sim -s
+      - if: failure()
+        run: cat sim-daemon.log
