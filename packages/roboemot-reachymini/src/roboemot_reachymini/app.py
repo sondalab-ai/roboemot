@@ -3,7 +3,8 @@
 The daemon starts this as a subprocess and passes a connected ``ReachyMini``; this process is
 the SDK bridge (the only owner of the SDK client and its media). It never wakes or sleeps the
 robot: the platform does. M0 scope: load config and manifest, run the motion loop with idle
-motion, stop cleanly on ``stop_event``.
+motion, track connectivity (SPEC 12A: robot link in the loop, LLM routes when configured) with
+the offline responder's gestures, stop cleanly on ``stop_event``.
 """
 
 from __future__ import annotations
@@ -14,7 +15,10 @@ import time
 from pathlib import Path
 from typing import Any
 
+from roboemot.affect import AffectEngine
 from roboemot.config import ConfigStack
+from roboemot.health.network import NetworkMonitor
+from roboemot.health.responder import OfflineResponder
 from roboemot.manifest import load_manifest
 from roboemot.motion import Command, MotionLoop, Priority
 
@@ -49,16 +53,43 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             allow_unmeasured_dynamics=cfg.safety.allow_unmeasured_dynamics,
             safety=cfg.safety,
         )
-        loop = MotionLoop(manifest, ReachyMiniDriver(reachy_mini), cfg, rate_hz=50.0)
-        stack.subscribe(lambda change: loop.apply_config(change.config))
+        responder = OfflineResponder(
+            cfg.connectivity,
+            set(manifest.dofs),
+            cfg.conversation.language,
+            affect=AffectEngine(cfg.affect, cfg.appraisal),
+        )
+        loop = MotionLoop(
+            manifest,
+            ReachyMiniDriver(reachy_mini),
+            cfg,
+            rate_hz=50.0,
+            on_link_change=responder.on_event,
+        )
+        # The conversation pipeline (M3) will share this monitor with its Router.
+        network = NetworkMonitor(
+            cfg.llm_routes, cfg.connectivity.network, on_change=responder.on_event
+        )
+
+        def reload(change: Any) -> None:
+            loop.apply_config(change.config)
+            responder.cfg = change.config.connectivity
+            network.set_policy(change.config.connectivity.network)
+
+        stack.subscribe(reload)
         stop_watch = stack.start_watcher()
         loop.start()
+        network.start()
         try:
             while not stop_event.is_set():
-                loop.feed(idle_command(stack.effective(), time.monotonic()))
+                now = time.monotonic()
+                loop.feed(idle_command(stack.effective(), now))
+                for cmd in responder.commands(now):
+                    loop.feed(cmd)
                 stop_event.wait(0.05)
         finally:
             stop_watch.set()
+            network.stop()
             loop.stop()
 
 

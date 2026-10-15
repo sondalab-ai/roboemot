@@ -22,6 +22,10 @@ class PoseGroupDriver(ABC):
     @abstractmethod
     def set_mode(self, mode: MotorMode) -> None: ...
 
+    def reconnect(self, timeout_s: float) -> None:  # noqa: B027 - optional hook, not abstract
+        """Re-open the link after a loss (SPEC 12A); raise if the robot is still unreachable.
+        Drivers whose transport recovers by itself keep this no-op."""
+
 
 @dataclass
 class MockPoseDriver(PoseGroupDriver):

@@ -17,8 +17,26 @@ REPO = Path(__file__).resolve().parents[3]
 DATA = REPO / "packages/roboemot-reachymini/src/roboemot_reachymini/data"
 
 
+class FakeClient:
+    """The SDK's WSClient surface the driver relies on."""
+
+    def __init__(self, host: str = "localhost", port: int = 8000) -> None:
+        self.host, self.port = host, port
+        self._is_alive = True
+        self.disconnected = False
+        self.fail_connect = False
+
+    def wait_for_connection(self, timeout: float = 5.0) -> None:
+        if self.fail_connect:
+            raise TimeoutError("Timeout while waiting for connection with the server.")
+
+    def disconnect(self) -> None:
+        self.disconnected = True
+
+
 class FakeMini:
     def __init__(self) -> None:
+        self.client = FakeClient()
         self.calls: list[tuple[str, dict]] = []
         self.auto_body_yaw = True
         self.pose = np.eye(4)
@@ -166,3 +184,47 @@ def test_loop_survives_bad_tick_and_applies_config():
     loop.set_mode("active")
     with pytest.raises(ValueError):
         loop.step_once(0.0, 0.0)  # step_once raises; the thread wrapper counts and continues
+
+
+def test_read_state_raises_on_dead_connection():
+    """SPEC 12A: the SDK serves cached state on a dead link; the driver must not."""
+    mini = FakeMini()
+    driver = ReachyMiniDriver(mini)
+    mini.client._is_alive = False
+    with pytest.raises(ConnectionError):
+        driver.read_state()
+
+
+def test_reconnect_swaps_client_and_restores_body_yaw(monkeypatch):
+    ws = pytest.importorskip("reachy_mini.io.ws_client")
+
+    made: list[FakeClient] = []
+
+    def factory(host, port):
+        made.append(FakeClient(host, port))
+        return made[-1]
+
+    monkeypatch.setattr(ws, "WSClient", factory)
+    mini = FakeMini()
+    old = mini.client
+    driver = ReachyMiniDriver(mini)
+    mini.auto_body_yaw = True  # the restarted daemon is back to its default
+    driver.reconnect(0.5)
+    assert mini.client is made[0] and old.disconnected and not mini.auto_body_yaw
+    assert (made[0].host, made[0].port) == ("localhost", 8000)
+
+
+def test_reconnect_failure_keeps_old_client(monkeypatch):
+    ws = pytest.importorskip("reachy_mini.io.ws_client")
+
+    def factory(host, port):
+        c = FakeClient(host, port)
+        c.fail_connect = True
+        return c
+
+    monkeypatch.setattr(ws, "WSClient", factory)
+    mini = FakeMini()
+    old = mini.client
+    with pytest.raises(TimeoutError):
+        ReachyMiniDriver(mini).reconnect(0.5)
+    assert mini.client is old and not old.disconnected

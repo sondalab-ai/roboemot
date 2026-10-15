@@ -10,6 +10,14 @@ Safety properties (independent review fixes):
   ``safety.watchdog_ms`` is a ceiling the config cannot raise;
 - an exception in a tick (bad input, driver error) never kills the thread: the tick is
   skipped, the error is counted and kept in ``last_error``, and the watchdog takes over.
+
+Robot link (SPEC 12A): ``connectivity.robot.failures_to_offline`` failed ticks in a row mark
+the link lost (``link.robot.lost``). The loop then stops writing and retries ``read_state``
+with backoff, calling ``driver.reconnect`` when a check fails; on recovery it re-enables the
+motors (if active), re-aligns the limiter and the arbiter to the measured pose, and only then
+reports ``link.robot.restored``, so motion resumes
+from where the robot really is, under the velocity and acceleration limits, without a jump.
+Sources keep feeding the arbiter meanwhile. A robot unreachable at ``start`` begins lost.
 """
 
 from __future__ import annotations
@@ -22,6 +30,7 @@ from collections.abc import Callable
 
 from ..config.schema import RoboEmotConfig
 from ..drivers import MotorMode, PoseGroupDriver
+from ..health import Link, OnChange
 from ..manifest import Manifest
 from .core import Command, MotionCore
 
@@ -38,8 +47,10 @@ class MotionLoop:
         *,
         rate_hz: float | None = None,
         clock: Callable[[], float] = time.monotonic,
+        on_link_change: OnChange | None = None,
     ) -> None:
         self.driver = driver
+        self.link = Link("robot", cfg.connectivity.robot, on_link_change)
         self.manifest = manifest
         self.rate_hz = rate_hz or cfg.motion.arbiter.loop_hz
         self.clock = clock
@@ -75,6 +86,7 @@ class MotionLoop:
         self.core.minor_factor = cfg.safety.minor_motion_factor
         self.core.watchdog_return_factor = cfg.safety.watchdog_return_factor
         self.core.limiter.constraint_margin = math.radians(cfg.safety.constraint_margin_deg)
+        self.link.policy = cfg.connectivity.robot
 
     # ---- inputs
 
@@ -96,7 +108,12 @@ class MotionLoop:
     # ---- lifecycle
 
     def start(self) -> None:
-        self.set_mode("active")
+        try:
+            self.set_mode("active")
+        except Exception as exc:  # robot not reachable yet: recover in the loop
+            self.mode = "active"
+            self._note_error(exc)
+            self.link.set(False, self.clock())
         self._thread = threading.Thread(target=self._run, name="motion-loop", daemon=True)
         self._thread.start()
 
@@ -123,18 +140,54 @@ class MotionLoop:
         self.core.arbiter.last = {**self.core.arbiter.last, **state}
         return state
 
+    def cycle(self, now: float, dt: float) -> None:
+        """One loop period: a tick while the robot link is up, else a due recovery check."""
+        if self.link.online:
+            try:
+                self.step_once(now, dt)
+                self.link.report(True, now)
+            except Exception as exc:  # keep the loop alive; the watchdog covers missed ticks
+                self._note_error(exc)
+                self.link.report(False, now)
+        elif self.link.due(now):
+            self._try_recover(now)
+
+    def _note_error(self, exc: Exception) -> None:
+        self.errors += 1
+        self.last_error = f"{type(exc).__name__}: {exc}"
+        log.warning("motion: %s", self.last_error)
+
+    def _try_recover(self, now: float) -> None:
+        """One recovery check; the final one also restores the motors and the pose."""
+        try:
+            self._probe()
+            ok = True
+        except Exception as exc:
+            self._note_error(exc)
+            ok = False
+        self.link.report(ok, now)
+
+    def _probe(self) -> None:
+        try:
+            with self._lock:
+                self.driver.read_state()
+        except Exception:
+            # A dead transport may need a new connection (outside the lock: it can block).
+            self.driver.reconnect(self.link.policy.probe_timeout_s)
+        with self._lock:
+            self.driver.read_state()
+            if self.link.would_restore():
+                if self.mode == "active":
+                    self.driver.set_mode("active")
+                self._resync()
+
     def _run(self) -> None:
         period = 1.0 / self.rate_hz
         next_t = self.clock()
         while not self._stop.is_set():
             now = self.clock()
             self.max_jitter_s = max(self.max_jitter_s, abs(now - next_t))
-            try:
-                self.step_once(now, period)
-            except Exception as exc:  # keep the loop alive; the watchdog covers missed ticks
-                self.errors += 1
-                self.last_error = f"{type(exc).__name__}: {exc}"
-                log.exception("motion tick failed")
+            self.cycle(now, period)
             next_t += period
             delay = next_t - self.clock()
             if delay < 0:

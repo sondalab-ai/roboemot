@@ -449,7 +449,7 @@ Voice has two paths: a fast on-board path that triggers emotional reactions with
 - Route order is configured per app, for example: LAN server → cloud provider. Fallback triggers on timeout (first token later than 1.5 s) or error.
 - Only text leaves the robot: transcripts and the scene summary. Audio and images are never sent unless an app enables a multimodal route explicitly.
 - A per-route flag `allowed_for_minors` blocks routes that are not approved when a minor is present.
-- When no route answers, the robot plays a register-appropriate fallback ("I can't think right now") and keeps reflexes running.
+- When no route answers, the robot plays a register-appropriate fallback ("I can't think right now") and keeps reflexes running. When no route is even reachable, the router says so at once (`Offline`) instead of waiting for timeouts, and the robot replies nonverbally (section 12A).
 
 ### OpenAI-compatible routes
 
@@ -716,6 +716,7 @@ The effective configuration is the merge of six layers; a later layer overrides 
 | `llm_routes` | endpoints, timeouts, token budgets, minors flag | Section 8 |
 | `safety` (conservative only at runtime) | minor-present motion factor, watchdog, stop behaviour | Section 12 |
 | `privacy` (opt-in) | multimodal frames, pseudonyms to cloud, keeping enrollment images, debug recording | Section 12 |
+| `connectivity` | per link (network, robot): failure and success thresholds, check backoff and jitter, check timeout; offline gestures, spoken offline phrase per language, cue cooldown | Section 12A |
 
 ### Personality preset example
 
@@ -767,6 +768,25 @@ RoboEmot processes biometric data of adults and children in a home, so privacy a
 - With a minor present, a stricter content policy applies on every LLM route and a filter on the output before TTS.
 - The robot does not claim to be human or to have feelings it does not model; the affect state is an expressive model, and documentation says so.
 - Gender and age estimates are never spoken aloud or exposed to the LLM as facts about a person; the LLM receives only the resolved form of address.
+
+## 12A. Connectivity and degradation
+
+RoboEmot runs on the robot (section 4A), so "offline" mostly means the robot lost its Wi-Fi or internet: model routes in the cloud or on the LAN, and an optional edge box, stop answering. Everything on the CM4 keeps running. Less often the link to the robot's own daemon breaks (a daemon backend restart, or Wi-Fi in client mode). In both cases the robot must not look stuck: it keeps its liveness (idle, gaze, antennas, affect), shows the outage through body language, and recovers by itself.
+
+### Links
+
+Every outside dependency is a link with an online or offline state. A link goes offline after `failures_to_offline` failures in a row and comes back after `successes_to_online` successes, so one slow answer does not flap it. While online it is checked every `probe_max_s`; once offline, checks start at `probe_initial_s` and grow by `probe_backoff` up to `probe_max_s`, each delay spread by `probe_jitter`. Changes go on the bus as `link.<name>.lost` and `link.<name>.restored`. Parameters live in `connectivity.network` and `connectivity.robot` (section 11A).
+
+- **Model routes.** Each route is checked with a TCP connection to its host and port: no API call, no credentials, nothing outside the OpenAI-compatible subset (section 8). Real requests also count: connection errors and timeouts are failures, an HTTP error status means the server is reachable. The `network` link is offline when every route is. The router skips unreachable routes without waiting for their timeouts and raises `Offline` when none is reachable.
+- **Robot.** `connectivity.robot.failures_to_offline` failed motion ticks in a row mark the robot link lost. The loop stops writing targets and retries `read_state` with backoff, asking the driver to `reconnect` when a check fails (the Reachy Mini SDK's websocket never reconnects by itself, and its state getters return cached values on a dead link, so the driver checks the connection's liveness). On recovery the loop re-enables the motors if they were active, re-aligns the limiter and the arbiter to the measured pose, and only then reports `link.robot.restored`: motion resumes from where the robot really is, under its velocity and acceleration limits. A robot unreachable at start-up begins lost and is recovered the same way.
+
+### Behaviour while offline
+
+- Appraisal rules (section 7) colour the affect state: `link.network.lost` lowers valence and arousal (subdued), `link.network.restored` and `link.robot.restored` raise them (perking up).
+- On recovery the robot plays a short perk-up gesture (head up, antennas toward vertical).
+- When someone speaks while the network is down, the robot does not wait for a model that cannot answer: it attends to the speaker and plays a puzzled, slightly apologetic gesture (head tilt, antennas spreading), and no request is sent.
+- A spoken cue, `connectivity.offline_phrases[language]`, is said once per outage and on speech while offline, at most every `cue_cooldown_s`. It goes through the voice pipeline once TTS is wired (section 8); until then it is silent.
+- Gestures are additive primitives (section 10) over whichever of their dofs the manifest declares, so robots without antennas or head roll show the part they can.
 
 ## 13. Reference hardware and performance budgets
 
