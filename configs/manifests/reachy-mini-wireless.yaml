@@ -1,0 +1,54 @@
+# Reachy Mini Wireless (SPEC 4A). Limits from the SDK docs (head pitch/roll ±40°, head yaw
+# ±180°, body ±160°, head-body yaw delta 65°) and the SDK hardware config (antennas: full turn;
+# sleep pose at ±175°). Dynamics are null until measured in M0: load with --dev until then.
+robot:
+  id: reachy-mini-wireless
+  driver: reachy_mini_sdk
+  profile: cm4                    # CPU-only, runs on the robot's CM4
+  connection: {mode: localhost_only, media_backend: local}
+pose_groups:                      # the SDK addresses poses, not servos
+  head:
+    type: pose6d
+    limits:
+      pitch_deg: [-40, 40]
+      roll_deg: [-40, 40]
+      yaw_deg: [-180, 180]
+      # Translations: placeholders to be measured in M0. They must include the SDK sleep pose
+      # (x -21 mm, z -44 mm; -50 mm measured in the MuJoCo sim), or start-up would fight it.
+      x_mm: [-25, 15]
+      y_mm: [-15, 15]
+      z_mm: [-55, 15]
+  body_yaw:
+    type: joint
+    limits: {min_deg: -160, max_deg: 160}
+  antennas:
+    type: joint_pair
+    names: [antenna_right, antenna_left]      # SDK order is [right, left]
+    limits: {min_deg: -175, max_deg: 175}
+    home_deg: [-10, 10]                       # SDK INIT_ANTENNAS_JOINT_POSITIONS
+constraints:
+  - {type: yaw_delta, a: head.yaw, b: body_yaw, max_deg: 65}
+dynamics:               # velocity and acceleration caps, measured in M0; required before release
+  head:     {max_vel_dps: null, max_acc_dps2: null, max_lin_vel_mps: null, max_lin_acc_mps2: null}
+  body_yaw: {max_vel_dps: null, max_acc_dps2: null}
+  antennas: {max_vel_dps: null, max_acc_dps2: null}
+sensors:
+  camera_main: {driver: reachy_mini_media}
+  mic_array:   {driver: reachy_mini_media, doa: true}
+  imu:         {driver: reachy_mini_imu}      # Wireless only
+expressive_channels:
+  voice: {type: speaker, driver: reachy_mini_media}
+  body:  {type: pose_groups, groups: [head, body_yaw, antennas]}
+motor_modes: {active: enabled, limp: disabled, teach: gravity_compensation}
+retargeting:            # mirror module (SPEC 9)
+  head.yaw:      {source: head_yaw,   scale: 1.0}
+  head.pitch:    {source: head_pitch, scale: 1.0}
+  head.roll:     {source: head_roll,  scale: 1.0}
+  body_yaw:      {source: torso_yaw,  scale: 1.0}
+  antenna_left:  {source: left_arm_elevation,  scale: 0.5}
+  antenna_right: {source: right_arm_elevation, scale: 0.5}
+safety:
+  estop: none                 # no hardware e-stop input on Reachy Mini
+  soft_stop: hold_position
+  hard_stop: disable_motors
+  watchdog_ms: 200

@@ -1,0 +1,30 @@
+# Example micro-robot head on an ESP32-S3 coprocessor (SPEC 4)
+robot:
+  id: desk-head-v1
+  frame: base_link
+joints:
+  - name: neck_pan
+    driver: esp32_servo_bus
+    channel: 0
+    limits: {min_deg: -60, max_deg: 60, max_vel_dps: 180, max_acc_dps2: 900}
+    home_deg: 0
+    compliance: spring_return
+  - name: neck_tilt
+    driver: esp32_servo_bus
+    channel: 1
+    limits: {min_deg: -20, max_deg: 30, max_vel_dps: 120, max_acc_dps2: 600}
+sensors:
+  camera_main: {driver: v4l2, device: /dev/video0, fov_deg: 78, mount: neck_tilt}
+  mic_array:   {driver: alsa, device: "hw:1", channels: 2}
+  imu:         {driver: esp32_imu, model: mpu6050}
+  proximity:   [{driver: esp32_tof, model: vl53l0x, mount: front}]
+expressive_channels:
+  eyes:  {type: led_matrix, driver: esp32_ws2812, pixels: 64}
+  voice: {type: speaker, driver: alsa, device: "hw:0"}
+  body:  {type: joints, joints: [neck_pan, neck_tilt]}
+retargeting:
+  neck_pan:  {source: head_yaw,   scale: 1.0, offset_deg: 0}
+  neck_tilt: {source: head_pitch, scale: 0.8, offset_deg: 5}
+safety:
+  estop: {driver: gpio, pin: 17, active_low: true}
+  watchdog_ms: 200

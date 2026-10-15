@@ -1,0 +1,14 @@
+# Personality preset: curious (SPEC 11A example)
+extends: default
+schema_version: 1
+affect:
+  half_life_s: 6
+appraisal:
+  rules:            # merged with the default rules by `event`
+    - {event: person.unknown_appears, valence: 0.2, arousal: 0.4, label: curiosity, cooldown_s: 30}
+register:
+  adult: {motion_amplitude: 1.2, reaction_intensity: high}
+motion:
+  idle: {breathing_period_s: 3.5, gaze_shift_interval_s: [2, 6]}
+circadian:
+  quiet_hours: ["22:30", "07:00"]

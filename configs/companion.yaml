@@ -1,0 +1,16 @@
+# Example app config (layer 4)
+schema_version: 1
+conversation:
+  language: it
+llm_routes:
+  - name: lan
+    base_url: http://192.168.1.20:1234/v1     # LM Studio, llama.cpp server, vLLM, Ollama
+    api_key: none
+    model: local-model
+    first_token_timeout_s: 1.5
+  - name: cloud
+    base_url: https://api.openai.com/v1       # or OpenRouter, Anthropic, any compatible provider
+    api_key: ${secret:cloud_key}
+    model: <model-id>
+    allowed_for_minors: false
+    daily_token_budget: 200000

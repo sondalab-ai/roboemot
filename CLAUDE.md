@@ -1,0 +1,56 @@
+# RoboEmot: working notes for coding agents
+
+RoboEmot is a robot-agnostic library for social and emotional robot behaviour.
+`SPEC.md` is the engineering specification and the source of truth for every
+design decision. Read the relevant section before changing a module, and cite the
+section number in commit messages that implement or change behaviour.
+
+## Repository layout
+
+| Path | What |
+| --- | --- |
+| `SPEC.md` | Engineering spec (export of the shared doc; edit the doc, then re-export) |
+| `packages/roboemot-core/` | Python package `roboemot`: config, manifest, motion reference, affect, circadian, LLM router, bus |
+| `packages/roboemot-reachymini/` | Python package `roboemot_reachymini`: Reachy Mini driver and SDK bridge |
+| `rt/` | C++ real-time core (`roboemot-rt`): arbiter and safety limiter, CMake + ctest |
+| `configs/` | Library defaults, robot manifests, personality presets |
+| `scripts/` | Dev helpers (simulation daemon, install script for the robot) |
+
+## Rules that come from the spec
+
+- **No magic numbers in behaviour code (SPEC 11A).** Every behavioural constant is a
+  field in `roboemot.config.schema` with default, unit and range. Code reads it from
+  the merged config. `tests/test_no_magic_numbers.py` enforces this for behaviour modules.
+- **Safety only gets more conservative at runtime (SPEC 11A, 12).** Runtime overrides of
+  `safety.*` may tighten, never loosen. Manifest hardware limits are ceilings.
+- **A manifest without limits is rejected (SPEC 12).** `null` dynamics are allowed only
+  with `allow_unmeasured_dynamics: true` in dev, and the limiter then uses conservative
+  fallbacks.
+- **Reachy Mini (SPEC 4A):** stream with `set_target` only; never call `goto_target` in a
+  session (it blocks). Connect with `automatic_body_yaw=False`. Call `set_target` only after
+  `enable_motors()`. Antenna order in the SDK is `[right, left]`. One process owns the SDK
+  client and its media.
+- **LLM routes are OpenAI-compatible only (SPEC 8).** Use the common subset: streaming,
+  `tools` with `tool_choice="auto"`, `max_tokens`. Do not rely on `response_format`,
+  forced tool choice, `seed` or non-default sampling.
+- **Privacy (SPEC 12):** never write frames, audio or embeddings to logs.
+
+## Commands
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install -e "packages/roboemot-core[dev]" -e "packages/roboemot-reachymini[dev]"
+pytest                                   # unit tests (no robot, no simulator)
+scripts/sim-daemon.sh &                  # MuJoCo Reachy Mini daemon, headless, port 8000
+pytest -m sim                            # integration tests against the simulated robot
+cmake -S rt -B rt/build && cmake --build rt/build && ctest --test-dir rt/build
+ruff check . && ruff format --check .
+```
+
+## Conventions
+
+- Python 3.11+, type hints everywhere, `ruff` for lint and format, `pytest` for tests.
+- Units in names: `_deg`, `_rad`, `_s`, `_ms`, `_hz`, `_db`, `_st` (semitones).
+- Angles are radians inside the code; degrees only in YAML files for humans, converted at load.
+- Tests that need the simulator are marked `@pytest.mark.sim`; tests that need the real
+  robot are marked `@pytest.mark.hil` and never run in CI.

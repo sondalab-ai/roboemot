@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "roboemot-core"
+version = "0.1.0.dev0"
+description = "RoboEmot core: configuration, manifest, motion reference, affect, circadian rhythm, LLM router"
+requires-python = ">=3.11"
+dependencies = [
+  "pydantic>=2.7,<3",
+  "pyyaml>=6",
+  "numpy>=1.26",
+  "openai>=1.40",
+  "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6"]
+
+[project.scripts]
+roboemot = "roboemot.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/roboemot"]

@@ -1,0 +1,233 @@
+"""OpenAI-compatible LLM router (SPEC 8, LLM router and OpenAI-compatible routes).
+
+Uses only the common subset of Chat Completions: messages with system/user/assistant/tool
+roles, ``stream=True``, ``tools`` with ``tool_choice="auto"``, ``max_tokens``. Routes are tried
+in order; a route is skipped when it is not cleared for minors (while a minor is present) or
+its daily token budget is spent, and abandoned for the next one on error or when the first
+token arrives later than ``first_token_timeout_s``, as long as nothing was yielded yet.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import datetime as dt
+import json
+import re
+from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass, field
+from typing import Any
+
+import httpx
+from openai import AsyncOpenAI
+
+from ..config.schema import LLMRoute, SafetyConfig
+
+SECRET = re.compile(r"^\$\{secret:([A-Za-z0-9_.-]+)\}$")
+CHARS_PER_TOKEN = 4  # usage estimate when a server does not report usage
+
+
+@dataclass
+class TextDelta:
+    text: str
+
+
+@dataclass
+class ToolCall:
+    id: str
+    name: str
+    arguments: dict[str, Any]
+
+
+@dataclass
+class Done:
+    route: str
+    tokens: int
+    estimated: bool
+
+
+Event = TextDelta | ToolCall | Done
+
+
+class NoRouteAvailable(RuntimeError):
+    """Every route was skipped or failed; the caller plays the register fallback (SPEC 8)."""
+
+
+@dataclass
+class _Budget:
+    day: dt.date
+    used: int = 0
+
+
+@dataclass
+class Router:
+    routes: list[LLMRoute]
+    safety: SafetyConfig
+    secrets: Callable[[str], str] = lambda name: ""
+    http_client_factory: Callable[[], httpx.AsyncClient] | None = None
+    today: Callable[[], dt.date] = dt.date.today
+    _budgets: dict[str, _Budget] = field(default_factory=dict)
+    failures: list[tuple[str, str]] = field(default_factory=list)
+
+    def eligible(self, minor_present: bool) -> list[LLMRoute]:
+        out = []
+        for r in self.routes:
+            if minor_present and not (r.allowed_for_minors and self.safety.minors_allowed_llm):
+                continue
+            if self.used(r.name) >= r.daily_token_budget:
+                continue
+            out.append(r)
+        return out
+
+    def used(self, name: str) -> int:
+        b = self._budgets.get(name)
+        return b.used if b and b.day == self.today() else 0
+
+    def _charge(self, name: str, tokens: int) -> None:
+        b = self._budgets.get(name)
+        if not b or b.day != self.today():
+            b = self._budgets[name] = _Budget(self.today())
+        b.used += tokens
+
+    def _client(self, route: LLMRoute) -> AsyncOpenAI:
+        key = route.api_key
+        m = SECRET.match(key)
+        if m:
+            key = self.secrets(m.group(1))
+        http = self.http_client_factory() if self.http_client_factory else None
+        return AsyncOpenAI(
+            base_url=route.base_url, api_key=key or "none", http_client=http, max_retries=0
+        )
+
+    async def stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        *,
+        minor_present: bool = False,
+    ) -> AsyncIterator[Event]:
+        routes = self.eligible(minor_present)
+        if not routes:
+            raise NoRouteAvailable("no eligible route (minor present or budgets spent)")
+        for route in routes:
+            yielded = False
+            gen = self._stream_route(route, messages, tools)
+            try:
+                async for ev in gen:
+                    yielded = True
+                    yield ev
+                return
+            except Exception as exc:  # CancelledError/GeneratorExit are not caught
+                self.failures.append((route.name, type(exc).__name__))
+                if yielded:
+                    raise  # mid-answer failure: no silent switch to another model
+            finally:
+                await gen.aclose()  # barge-in: closes the HTTP stream and charges the budget
+        raise NoRouteAvailable(f"all routes failed: {self.failures[-len(routes) :]}")
+
+    async def _stream_route(
+        self, route: LLMRoute, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None
+    ) -> AsyncIterator[Event]:
+        """Stream one route. ``first_token_timeout_s`` bounds the time from the request to the
+        first real content (text or tool call; role-only chunks do not count);
+        ``stall_timeout_s`` bounds every later gap. Tokens are charged even when the stream
+        ends early (barge-in, timeout, error)."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + route.first_token_timeout_s
+        client = self._client(route)
+        kwargs: dict[str, Any] = {
+            "model": route.model,
+            "messages": messages,
+            "stream": True,
+            "max_tokens": route.max_tokens,
+        }
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+        stream = None
+        out_chars, usage_tokens = 0, None
+        prompt_chars = sum(len(str(m.get("content", ""))) for m in messages)
+        try:
+            stream = await asyncio.wait_for(
+                client.chat.completions.create(**kwargs), max(0.0, deadline - loop.time())
+            )
+            it = stream.__aiter__()
+            calls: dict[int, dict[str, Any]] = {}
+            got_content = False
+            while True:
+                timeout = route.stall_timeout_s if got_content else deadline - loop.time()
+                if timeout <= 0:
+                    raise TimeoutError("first token timeout")
+                try:
+                    chunk = await asyncio.wait_for(it.__anext__(), timeout)
+                except StopAsyncIteration:
+                    break
+                if getattr(chunk, "usage", None):
+                    usage_tokens = chunk.usage.total_tokens
+                for choice in chunk.choices or []:
+                    delta = choice.delta
+                    if delta.content:
+                        got_content = True
+                        out_chars += len(delta.content)
+                        yield TextDelta(delta.content)
+                    for tc in delta.tool_calls or []:
+                        got_content = True
+                        slot = calls.setdefault(tc.index, {"id": "", "name": "", "args": ""})
+                        if tc.id:
+                            slot["id"] = tc.id
+                        if tc.function and tc.function.name:
+                            slot["name"] = tc.function.name
+                        if tc.function and tc.function.arguments:
+                            slot["args"] += tc.function.arguments
+                            out_chars += len(tc.function.arguments)
+            for slot in calls.values():
+                try:
+                    args = json.loads(slot["args"] or "{}")
+                except json.JSONDecodeError:
+                    args = {"_raw": slot["args"]}
+                yield ToolCall(slot["id"], slot["name"], args)
+            tokens = self._tokens(usage_tokens, prompt_chars, out_chars)
+            yield Done(route.name, tokens, usage_tokens is None)
+        finally:
+            # Charged once, also on barge-in / timeout / error (review finding 9).
+            self._charge(route.name, self._tokens(usage_tokens, prompt_chars, out_chars))
+            if stream is not None:
+                with contextlib.suppress(Exception):
+                    await stream.close()
+            with contextlib.suppress(Exception):
+                await client.close()
+
+    @staticmethod
+    def _tokens(usage: int | None, prompt_chars: int, out_chars: int) -> int:
+        return usage if usage is not None else (prompt_chars + out_chars) // CHARS_PER_TOKEN
+
+
+def build_messages(
+    *,
+    system: str,
+    persona_fragment: str,
+    profile_summary: str | None,
+    scene_summary: str | None,
+    history: list[dict[str, str]],
+    user_text: str,
+    names: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Text-only request (SPEC 8, 12). ``names`` maps real names to pseudonyms when the route
+    option is on; embeddings, audio and images never enter this function."""
+
+    def scrub(text: str | None) -> str | None:
+        if text is None or not names:
+            return text
+        for real, alias in names.items():
+            text = text.replace(real, alias)
+        return text
+
+    sys_parts = [system, persona_fragment]
+    if profile_summary:
+        sys_parts.append(f"Speaker: {scrub(profile_summary)}")
+    if scene_summary:
+        sys_parts.append(f"Scene: {scrub(scene_summary)}")
+    msgs: list[dict[str, Any]] = [{"role": "system", "content": "\n".join(sys_parts)}]
+    msgs += [{"role": m["role"], "content": scrub(m["content"])} for m in history]
+    msgs.append({"role": "user", "content": scrub(user_text)})
+    return msgs

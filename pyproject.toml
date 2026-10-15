@@ -1,0 +1,17 @@
+# Workspace-level tooling configuration (the installable packages live in packages/).
+[tool.pytest.ini_options]
+testpaths = ["packages/roboemot-core/tests", "packages/roboemot-reachymini/tests"]
+markers = [
+  "sim: needs the MuJoCo Reachy Mini daemon (scripts/sim-daemon.sh)",
+  "hil: needs the real robot; never runs in CI",
+]
+addopts = "-m 'not sim and not hil'"
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["*.md"]  # SPEC.md is an export of the shared doc: never reformat
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]

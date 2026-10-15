@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "roboemot-reachymini"
+version = "0.1.0.dev0"
+description = "RoboEmot driver and SDK bridge for Pollen Robotics' Reachy Mini"
+requires-python = ">=3.11"
+dependencies = ["roboemot-core", "numpy>=1.26", "scipy>=1.11"]
+
+[project.optional-dependencies]
+# The SDK pulls GStreamer/PyGObject; keep it optional so unit tests run without it.
+sdk = ["reachy-mini>=1.11"]
+sim = ["reachy-mini[mujoco]>=1.11"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6"]
+
+[project.entry-points."reachy_mini_apps"]
+roboemot = "roboemot_reachymini.app:RoboEmotApp"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/roboemot_reachymini"]

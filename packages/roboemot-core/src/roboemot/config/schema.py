@@ -1,0 +1,582 @@
+"""Typed parameter schema for every behaviour and expression setting (SPEC 11A).
+
+Every field carries a default, a unit and a range. Field metadata (``json_schema_extra``):
+
+- ``unit``: physical unit, shown in the generated reference and web UI.
+- ``restart``: True when a change needs a process restart instead of hot reload.
+- ``conservative``: for safety parameters, which direction is safer at runtime:
+  ``"lower"`` (smaller values are safer), ``"higher"``, ``"false"`` / ``"true"`` for booleans
+  that are safer off / on. Changes in the other direction need admin approval (stack.py).
+- ``opt_in``: privacy options; turning them on needs the admin confirmation.
+"""
+
+from __future__ import annotations
+
+import re
+import warnings
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+ROUTE_NAME = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def param(
+    default: Any,
+    description: str,
+    *,
+    unit: str | None = None,
+    ge: float | None = None,
+    le: float | None = None,
+    restart: bool = False,
+    conservative: Literal["lower", "higher", "false", "true"] | None = None,
+    opt_in: bool = False,
+) -> Any:
+    extra: dict[str, Any] = {"restart": restart}
+    if unit:
+        extra["unit"] = unit
+    if conservative:
+        extra["conservative"] = conservative
+    if opt_in:
+        extra["opt_in"] = True
+    kwargs: dict[str, Any] = {"description": description, "json_schema_extra": extra}
+    if ge is not None:
+        kwargs["ge"] = ge
+    if le is not None:
+        kwargs["le"] = le
+    if isinstance(default, (list, dict)):
+        return Field(default_factory=lambda d=default: _copy(d), **kwargs)
+    return Field(default, **kwargs)
+
+
+def _copy(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: _copy(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_copy(v) for v in value]
+    return value
+
+
+class Strict(BaseModel):
+    """Base model: unknown keys are rejected (SPEC 11A, Rules: Schema)."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True, validate_default=True)
+
+
+# --------------------------------------------------------------------------- affect (SPEC 7)
+
+
+class LabelRegion(Strict):
+    valence: float = param(0.0, "Prototype valence of the label", ge=-1, le=1)
+    arousal: float = param(0.0, "Prototype arousal of the label", ge=-1, le=1)
+
+
+class AffectConfig(Strict):
+    update_hz: float = param(20.0, "Affect engine update rate", unit="Hz", ge=1, le=200)
+    half_life_s: float = param(8.0, "Decay half-life toward the baseline", unit="s", ge=0.1, le=600)
+    llm_impulse_max: float = param(
+        0.3, "Max impulse magnitude the LLM may apply per turn", ge=0, le=1
+    )
+    event_label_hold_s: float = param(
+        3.0, "How long an appraisal label overrides the region label", unit="s", ge=0, le=60
+    )
+    labels: dict[str, LabelRegion] = param(
+        {
+            "calm": {"valence": 0.2, "arousal": -0.2},
+            "joy": {"valence": 0.7, "arousal": 0.5},
+            "curiosity": {"valence": 0.3, "arousal": 0.4},
+            "surprise": {"valence": 0.0, "arousal": 0.8},
+            "sadness": {"valence": -0.6, "arousal": -0.4},
+            "fear": {"valence": -0.7, "arousal": 0.7},
+            "annoyance": {"valence": -0.5, "arousal": 0.3},
+            "sleepy": {"valence": 0.0, "arousal": -0.8},
+        },
+        "Label prototypes in the valence/arousal plane; the nearest one names the state",
+    )
+
+
+class AppraisalRule(Strict):
+    event: str = param("", "Bus event name that triggers the rule")
+    valence: float = param(0.0, "Valence impulse", ge=-1, le=1)
+    arousal: float = param(0.0, "Arousal impulse", ge=-1, le=1)
+    label: str | None = param(None, "Label forced for event_label_hold_s, if any")
+    cooldown_s: float = param(5.0, "Minimum time between two firings", unit="s", ge=0, le=3600)
+
+
+class AppraisalConfig(Strict):
+    rules: list[AppraisalRule] = param(
+        [
+            {"event": "person.recognized", "valence": 0.4, "arousal": 0.2, "cooldown_s": 60},
+            {"event": "sound.loud", "arousal": 0.6, "label": "surprise", "cooldown_s": 5},
+            {"event": "idle.long", "arousal": -0.6, "label": "sleepy", "cooldown_s": 600},
+            {"event": "light.on", "arousal": 0.3, "label": "surprise", "cooldown_s": 30},
+        ],
+        "Event to impulse rules (SPEC 7, Affect state)",
+    )
+
+
+# --------------------------------------------------------------------------- register (SPEC 7)
+
+
+class RegisterParams(Strict):
+    speech_rate: float = param(1.0, "Speech rate multiplier", ge=0.5, le=1.5)
+    pitch_st: float = param(0.0, "Pitch shift", unit="semitones", ge=-6, le=6)
+    vocabulary: Literal["simple", "normal", "formal"] = param("normal", "LLM vocabulary level")
+    persona_fragment: str = param("Friendly, direct.", "Text added to the LLM system prompt")
+    motion_amplitude: float = param(1.0, "Motion amplitude multiplier", ge=0, le=2)
+    approach_allowed: bool = param(
+        True, "Whether the robot may move toward the person", conservative="false"
+    )
+    reaction_intensity: Literal["low", "medium", "high"] = param("medium", "Reaction intensity")
+    minor_content_policy: bool = param(False, "Apply the minor content policy", conservative="true")
+
+
+class RegisterConfig(Strict):
+    child: RegisterParams = param(
+        {
+            "speech_rate": 0.9,
+            "pitch_st": 2.0,
+            "vocabulary": "simple",
+            "persona_fragment": "Playful, encouraging, child-safe.",
+            "motion_amplitude": 1.2,
+            "approach_allowed": False,
+            "reaction_intensity": "high",
+            "minor_content_policy": True,
+        },
+        "Register for children",
+    )
+    teen: RegisterParams = param({"minor_content_policy": True}, "Register for teens")
+    adult: RegisterParams = param({}, "Register for adults")
+    senior: RegisterParams = param({}, "Register for seniors")
+    unknown: RegisterParams = param(
+        {
+            "vocabulary": "formal",
+            "persona_fragment": "Polite, reserved.",
+            "motion_amplitude": 0.7,
+            "approach_allowed": False,
+            "reaction_intensity": "low",
+            "minor_content_policy": True,
+        },
+        "Register for people of unknown age group (treated as possible minors)",
+    )
+    gender_affects_params: bool = param(
+        False, "If true, gender may change register parameters, not only forms of address"
+    )
+
+
+# --------------------------------------------------------------------------- circadian (SPEC 7A)
+
+
+class StateEffects(Strict):
+    arousal_baseline: float = param(0.0, "Affect arousal baseline in this state", ge=-1, le=1)
+    idle_motion_scale: float = param(1.0, "Idle motion amplitude multiplier", ge=0, le=2)
+    speech_rate: float = param(1.0, "Speech rate multiplier", ge=0.5, le=1.5)
+    volume_db: float = param(0.0, "Volume offset", unit="dB", ge=-24, le=6)
+    vision_rate_scale: float = param(1.0, "Vision rate multiplier", ge=0, le=1)
+
+
+class CircadianConfig(Strict):
+    enabled: bool = param(True, "Enable the simulated circadian rhythm")
+    period_h: float = param(24.0, "Free-running period of process C", unit="h", ge=20, le=28)
+    peak_hour: float = param(
+        15.0, "Hour of the day at which alertness (process C) peaks", unit="h", ge=0, le=24
+    )
+    c_amplitude: float = param(0.5, "Amplitude of process C", ge=0, le=1)
+    s_rise_tau_h: float = param(18.0, "Sleep pressure rise time constant", unit="h", ge=1, le=72)
+    s_decay_tau_h: float = param(4.0, "Sleep pressure decay time constant", unit="h", ge=0.5, le=24)
+    max_shift_h_per_day: float = param(
+        1.0, "Max phase shift caused by light per day", unit="h", ge=0, le=6
+    )
+    drowsy_threshold: float = param(0.55, "Sleepiness above which the robot is drowsy", ge=0, le=1)
+    resting_threshold: float = param(0.75, "Sleepiness above which the robot rests", ge=0, le=1)
+    hysteresis: float = param(0.05, "Hysteresis on state thresholds", ge=0, le=0.3)
+    light_source: Literal["camera", "clock_only"] = param("camera", "Entrainment source")
+    idle_sample_interval_s: float = param(
+        30.0, "Light sampling interval when vision is idle", unit="s", ge=1, le=600
+    )
+    location: dict[str, float] | None = param(None, "Optional {lat, lon} for clock-only mode")
+    quiet_hours: tuple[str, str] = param(("22:30", "07:00"), "Window in which resting is forced")
+    presence_keeps_awake: bool = param(True, "People present and active prevent resting")
+    initial_sleep_pressure: float = param(0.3, "Process S value at start-up", ge=0, le=1)
+    wake_hold_s: float = param(
+        300.0, "How long the wake word keeps a resting robot awake", unit="s", ge=10, le=3600
+    )
+    states: dict[str, StateEffects] = param(
+        {
+            "awake": {"arousal_baseline": 0.2},
+            "drowsy": {
+                "arousal_baseline": -0.3,
+                "idle_motion_scale": 0.6,
+                "speech_rate": 0.9,
+                "volume_db": -3.0,
+                "vision_rate_scale": 0.5,
+            },
+            "resting": {
+                "arousal_baseline": -0.7,
+                "idle_motion_scale": 0.0,
+                "speech_rate": 0.85,
+                "volume_db": -6.0,
+                "vision_rate_scale": 0.05,
+            },
+        },
+        "Effects applied in each circadian state (SPEC 7A, Effects by state)",
+    )
+
+    @model_validator(mode="after")
+    def _check(self) -> CircadianConfig:
+        missing = {"awake", "drowsy", "resting"} - set(self.states)
+        if missing:
+            raise ValueError(f"circadian.states missing {sorted(missing)}")
+        if self.resting_threshold <= self.drowsy_threshold:
+            raise ValueError("circadian.resting_threshold must exceed drowsy_threshold")
+        for t in self.quiet_hours:
+            h, _, m = t.partition(":")
+            if not (h.isdigit() and m.isdigit() and int(h) < 24 and int(m) < 60):
+                raise ValueError(f"circadian.quiet_hours: bad time {t!r}, use HH:MM")
+        return self
+
+
+class LightConfig(Strict):
+    dark_luma: float = param(0.12, "Normalised luminance below which the room is dark", ge=0, le=1)
+    bright_luma: float = param(
+        0.35, "Normalised luminance above which the room is bright", ge=0, le=1
+    )
+    hysteresis: float = param(0.03, "Hysteresis on light levels", ge=0, le=0.2)
+    noise_dark_threshold: float = param(
+        0.04,
+        "Image noise (std of a high-pass) above which a dim image is classed dark when no "
+        "exposure metadata exists",
+        ge=0,
+        le=1,
+    )
+    calibration_k: float | None = param(None, "Lux calibration constant with exposure metadata")
+
+
+# --------------------------------------------------------------------------- motion (SPEC 10)
+
+
+class ArbiterConfig(Strict):
+    loop_hz: float = param(
+        100.0, "Arbiter rate (50 towards the Reachy Mini daemon)", unit="Hz", ge=10, le=500
+    )
+    crossfade_ms: float = param(
+        150.0, "Cross-fade when the winning source changes", unit="ms", ge=0, le=2000
+    )
+    source_timeout_ms: float = param(
+        250.0, "A streamed source is dropped after this silence", unit="ms", ge=10, le=5000
+    )
+
+
+class IdleConfig(Strict):
+    breathing_period_s: float = param(4.0, "Breathing motion period", unit="s", ge=1, le=20)
+    breathing_amplitude: float = param(
+        0.02, "Breathing amplitude on head pitch", unit="rad", ge=0, le=0.2
+    )
+    gaze_shift_interval_s: tuple[float, float] = param(
+        (3.0, 8.0), "Random interval between gaze shifts"
+    )
+    gaze_shift_amplitude: float = param(0.15, "Max gaze shift on head yaw", unit="rad", ge=0, le=1)
+
+
+class MotionConfig(Strict):
+    arbiter: ArbiterConfig = param({}, "Arbiter parameters")
+    idle: IdleConfig = param({}, "Idle motion parameters")
+
+
+# --------------------------------------------------------------------------- safety (SPEC 12)
+
+
+class SafetyConfig(Strict):
+    minor_motion_factor: float = param(
+        0.6,
+        "Speed and amplitude factor while a minor is present",
+        ge=0.05,
+        le=1,
+        conservative="lower",
+    )
+    watchdog_ms: float = param(
+        200.0,
+        "Return home slowly when no command arrives for this long",
+        unit="ms",
+        ge=20,
+        le=2000,
+        conservative="lower",
+    )
+    watchdog_return_factor: float = param(
+        0.3, "Speed factor of the watchdog's return to home", ge=0.01, le=1, conservative="lower"
+    )
+    soft_stop: Literal["hold_position"] = param("hold_position", "Soft stop behaviour")
+    hard_stop: Literal["disable_motors"] = param("disable_motors", "Hard stop behaviour")
+    unmeasured_dynamics_fallback_vel: float = param(
+        0.5,
+        "Velocity cap used for manifest dynamics still null (dev only)",
+        unit="rad/s",
+        ge=0.01,
+        le=10,
+        conservative="lower",
+    )
+    unmeasured_dynamics_fallback_acc: float = param(
+        2.0,
+        "Acceleration cap used for manifest dynamics still null (dev only)",
+        unit="rad/s^2",
+        ge=0.01,
+        le=100,
+        conservative="lower",
+    )
+    unmeasured_dynamics_fallback_lin_vel: float = param(
+        0.02,
+        "Linear velocity cap for unmeasured translations (dev only)",
+        unit="m/s",
+        ge=0.001,
+        le=1,
+        conservative="lower",
+    )
+    unmeasured_dynamics_fallback_lin_acc: float = param(
+        0.1,
+        "Linear acceleration cap for unmeasured translations (dev only)",
+        unit="m/s^2",
+        ge=0.001,
+        le=10,
+        conservative="lower",
+    )
+    constraint_margin_deg: float = param(
+        3.0,
+        "Coupled constraints (head-body yaw) are planned this far inside their limit",
+        unit="deg",
+        ge=0,
+        le=20,
+        conservative="higher",
+    )
+    allow_unmeasured_dynamics: bool = param(
+        False,
+        "Run with manifest dynamics still null (development only, SPEC 12)",
+        conservative="false",
+    )
+    minors_allowed_llm: bool = param(
+        False,
+        "Allow conversation while a minor is present on routes cleared for minors",
+        conservative="false",
+    )
+
+
+class PrivacyConfig(Strict):
+    multimodal_frames: bool = param(
+        False, "Allow single-frame image questions to LLM routes", opt_in=True
+    )
+    pseudonyms_to_cloud: bool = param(False, "Send pseudonyms instead of names to cloud routes")
+    keep_enrollment_images: bool = param(False, "Keep enrollment face crops", opt_in=True)
+    debug_recording: bool = param(False, "Allow time-limited debug recording", opt_in=True)
+
+
+# --------------------------------------------------------------------------- identity (SPEC 5, 6)
+
+
+class IdentityConfig(Strict):
+    match_threshold: float = param(0.45, "Cosine similarity threshold", ge=0, le=1)
+    margin: float = param(0.1, "Required margin over the second best match", ge=0, le=1)
+    votes_required: int = param(3, "Positive evaluations required", ge=1, le=20)
+    votes_window: int = param(5, "Evaluations considered", ge=1, le=50)
+    estimate_confidence_min: float = param(
+        0.8, "Below this, age/gender estimates are unknown", ge=0, le=1
+    )
+    estimate_frames_min: int = param(
+        5, "Frames aggregated before an estimate is used", ge=1, le=100
+    )
+
+
+class AttentionConfig(Strict):
+    priority_order: list[str] = param(
+        ["active_speaker", "enrolled_person", "nearest_face", "salient_motion"],
+        "Attention target preference order",
+    )
+    switch_hysteresis_s: float = param(
+        1.5, "Min time before switching target", unit="s", ge=0, le=30
+    )
+
+
+# --------------------------------------------------------------------------- voice (SPEC 8)
+
+
+class Prosody(Strict):
+    rate: float = param(0.0, "Speech rate delta (additive to 1.0)", ge=-1, le=1)
+    pitch_st: float = param(0.0, "Pitch delta", unit="semitones", ge=-12, le=12)
+    volume_db: float = param(0.0, "Volume delta", unit="dB", ge=-24, le=12)
+    variability: float = param(0.0, "Variability delta", ge=-1, le=1)
+    pause_scale: float = param(1.0, "Pause length multiplier", ge=0.2, le=4)
+    instructions: str = param("", "Delivery instructions for instructable remote TTS")
+    sounds: list[str] = param([], "Non-verbal sounds allowed in this mood")
+
+
+class VoiceBase(Strict):
+    rate: float = param(1.0, "Base speech rate", ge=0.5, le=1.5)
+    pitch_st: float = param(0.0, "Base pitch", unit="semitones", ge=-6, le=6)
+    volume_db: float = param(0.0, "Base volume", unit="dB", ge=-24, le=6)
+    variability: float = param(0.6, "Base variability (maps to Piper noise scales)", ge=0, le=1)
+
+
+class VoiceLimits(Strict):
+    rate: tuple[float, float] = param((0.7, 1.3), "Allowed speech rate range")
+    pitch_st: tuple[float, float] = param((-4.0, 4.0), "Allowed pitch range")
+    volume_db: tuple[float, float] = param((-12.0, 3.0), "Allowed volume range")
+    variability: tuple[float, float] = param((0.0, 1.0), "Allowed variability range")
+
+
+class VoiceConfig(Strict):
+    backend: Literal["piper", "openai_speech", "kokoro"] = param(
+        "piper", "TTS backend", restart=True
+    )
+    fallback_backend: Literal["piper", "kokoro"] = param("piper", "Offline fallback backend")
+    voices: dict[str, str] = param(
+        {"it": "it_IT-paola-medium", "en": "en_US-amy-medium"}, "Voice per language", restart=True
+    )
+    base: VoiceBase = param({}, "Base delivery")
+    expressivity: float = param(0.7, "0 flat delivery, 1 full mood modulation", ge=0, le=1)
+    mood_source: Literal["auto", "fixed", "llm_tagged"] = param("auto", "Where mood comes from")
+    fixed_mood: str | None = param(None, "Mood used when mood_source is fixed")
+    llm_tag_max_deviation: float = param(
+        0.3, "Max distance of an LLM mood tag from the affect state", ge=0, le=2
+    )
+    moods: dict[str, Prosody] = param(
+        {
+            "joy": {
+                "rate": 0.10,
+                "pitch_st": 2,
+                "volume_db": 1,
+                "variability": 0.2,
+                "pause_scale": 0.8,
+                "instructions": "bright, warm, smiling",
+                "sounds": ["giggle"],
+            },
+            "sadness": {
+                "rate": -0.15,
+                "pitch_st": -2,
+                "volume_db": -3,
+                "variability": -0.2,
+                "pause_scale": 1.4,
+                "instructions": "soft, slow, a little down",
+            },
+            "curiosity": {
+                "rate": 0.05,
+                "pitch_st": 1,
+                "pause_scale": 1.1,
+                "instructions": "intrigued, rising intonation",
+            },
+            "sleepy": {
+                "rate": -0.20,
+                "volume_db": -6,
+                "pause_scale": 1.6,
+                "instructions": "drowsy, quiet, near a whisper",
+                "sounds": ["yawn"],
+            },
+        },
+        "Per-mood prosody deltas",
+    )
+    limits: VoiceLimits = param({}, "Clamp for the final delivery")
+    piper_noise_scale: tuple[float, float] = param(
+        (0.33, 1.0), "Piper noise_scale mapped from variability 0..1"
+    )
+    piper_noise_w_scale: tuple[float, float] = param(
+        (0.4, 1.2), "Piper noise_w_scale mapped from variability 0..1"
+    )
+    pitch_shift_backend: Literal["none", "dsp"] = param(
+        "dsp", "How pitch is applied on backends without native pitch (Piper)"
+    )
+    wake_word: str = param("reachy", "Wake word")
+    wake_word_policy: Literal["always", "never", "unless_enrolled_in_view"] = param(
+        "unless_enrolled_in_view", "When the wake word is required"
+    )
+    active_asr_language: str = param("it", "ASR language when the speaker has no preference")
+
+
+# --------------------------------------------------------------------------- conversation, LLM
+
+
+class ConversationConfig(Strict):
+    session_timeout_min: float = param(
+        5.0, "Session ends after this absence", unit="min", ge=0.5, le=120
+    )
+    history_turns: int = param(12, "Short-term turns kept in RAM", ge=0, le=100)
+    persona_prompt: str = param(
+        "You are a small expressive robot. Answer briefly, warmly and honestly.",
+        "Base system prompt",
+    )
+    max_reply_sentences: int = param(3, "Reply length cap", ge=1, le=20)
+    language: str = param("it", "Default conversation language")
+
+
+class LLMRoute(Strict):
+    name: str = param("", "Route name")
+    base_url: str = param("", "OpenAI-compatible base URL")
+    api_key: str = param("none", "API key or ${secret:name}")
+    model: str = param("", "Model id")
+    first_token_timeout_s: float = param(
+        1.5, "Fallback to next route after this", unit="s", ge=0.1, le=30
+    )
+    stall_timeout_s: float = param(
+        5.0, "Max gap between chunks once the answer started", unit="s", ge=0.1, le=60
+    )
+    max_tokens: int = param(300, "Reply token cap", ge=16, le=8192)
+    allowed_for_minors: bool = param(
+        False, "Route cleared for use while a minor is present", conservative="false"
+    )
+    daily_token_budget: int = param(200_000, "Daily token cap", ge=0)
+    supports_images: bool = param(False, "Route accepts image_url parts")
+
+    @model_validator(mode="after")
+    def _check(self) -> LLMRoute:
+        if not ROUTE_NAME.fullmatch(self.name):
+            raise ValueError(f"route name {self.name!r}: use letters, digits, '_' or '-'")
+        if not self.base_url or not self.model:
+            raise ValueError(f"route {self.name}: base_url and model are required")
+        return self
+
+
+class MirrorConfig(Strict):
+    keypoint_confidence_min: float = param(
+        0.5, "Below this a keypoint holds its last value", ge=0, le=1
+    )
+    hold_decay_s: float = param(1.0, "Decay to home after holding this long", unit="s", ge=0, le=10)
+    filter_min_cutoff_hz: float = param(
+        1.0, "One Euro filter min cutoff", unit="Hz", ge=0.01, le=20
+    )
+    filter_beta: float = param(0.05, "One Euro filter beta", ge=0, le=5)
+    mirror_image: bool = param(True, "Mirror like a reflection")
+    record_max_s: float = param(10.0, "Max demonstration length", unit="s", ge=1, le=60)
+
+
+# --------------------------------------------------------------------------- root
+
+
+# `register` is also ABCMeta.register on the metaclass; instances are unaffected, so the
+# pydantic shadowing warning is expected and silenced here.
+with warnings.catch_warnings():
+    warnings.filterwarnings("ignore", message='Field name "register"')
+
+    class RoboEmotConfig(Strict):
+        schema_version: int = param(1, "Configuration schema version", ge=1)
+        personality: str = param("default", "Name of the personality preset in effect")
+        affect: AffectConfig = param({}, "SPEC 7")
+        appraisal: AppraisalConfig = param({}, "SPEC 7")
+        register: RegisterConfig = param({}, "SPEC 7")
+        circadian: CircadianConfig = param({}, "SPEC 7A")
+        light: LightConfig = param({}, "SPEC 7A")
+        motion: MotionConfig = param({}, "SPEC 10")
+        attention: AttentionConfig = param({}, "SPEC 4A, 5")
+        identity: IdentityConfig = param({}, "SPEC 5, 6")
+        mirror: MirrorConfig = param({}, "SPEC 9")
+        voice: VoiceConfig = param({}, "SPEC 8")
+        conversation: ConversationConfig = param({}, "SPEC 8")
+        llm_routes: list[LLMRoute] = param([], "SPEC 8")
+        safety: SafetyConfig = param({}, "SPEC 12")
+        privacy: PrivacyConfig = param({}, "SPEC 12")
+
+        @model_validator(mode="after")
+        def _unique_routes(self) -> RoboEmotConfig:
+            names = [r.name for r in self.llm_routes]
+            dupes = sorted({n for n in names if names.count(n) > 1})
+            if dupes:
+                raise ValueError(f"duplicate llm route names: {dupes}")
+            return self
+
+
+SCHEMA_VERSION = 1

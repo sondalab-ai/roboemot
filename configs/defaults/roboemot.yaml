@@ -1,0 +1,3 @@
+# Library defaults that are not schema defaults. Most defaults live in the schema
+# (roboemot/config/schema.py); this file is layer 1 additions and is usually empty.
+schema_version: 1

@@ -1,0 +1,11 @@
+# Personality preset: calm
+extends: default
+schema_version: 1
+affect:
+  half_life_s: 12
+register:
+  adult: {motion_amplitude: 0.8, reaction_intensity: low}
+voice:
+  expressivity: 0.4
+motion:
+  idle: {breathing_period_s: 5.0, gaze_shift_amplitude: 0.08}

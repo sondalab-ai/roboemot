@@ -1,0 +1,5 @@
+# Development only (SPEC 12): run before the manifest dynamics are measured in M0.
+# Installed as the app's data/app.yaml by `scripts/install-on-robot.sh --dev`.
+schema_version: 1
+safety:
+  allow_unmeasured_dynamics: true
