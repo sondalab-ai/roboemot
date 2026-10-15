@@ -104,3 +104,125 @@ def test_build_metadata_from_the_checkout():
     reqs = third_party_requirements(dirs)
     assert not any(r.startswith("roboemot") for r in reqs)
     assert any(r.startswith("scipy") for r in reqs) and any(r.startswith("psutil") for r in reqs)
+
+
+# ---------------------------------------------------------------- the flow with a non-Reachy robot
+
+
+class BareRobot:
+    """A robot with no daemon: just SSH, a venv and pip (emulated)."""
+
+    target = "dev@bare"
+
+    def __init__(self) -> None:
+        self.env = {"pip": "26.0", "numpy": "2.0.0"}
+        self.files: dict[str, str] = {}
+
+    def connect(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+    def copy(self, files, dest) -> None:
+        pass
+
+    def run(self, command: str, check: bool = True) -> str:
+        import shlex as sh
+
+        if " -m pip " in command:
+            args = command.split(" -m pip ", 1)[1].split(" 2>&1", 1)[0]
+            targets = [t for t in sh.split(args) if not t.startswith("-")][1:]
+            if args.startswith("list"):
+                rows = [{"name": n, "version": v} for n, v in self.env.items()]
+                return json.dumps(rows) + "\n__rc=0"
+            if args.startswith("uninstall"):
+                for t in targets:
+                    self.env.pop(t, None)
+            elif "--dry-run" in args:
+                return json.dumps({"install": []}) + "\n__rc=0"
+            elif "--force-reinstall" not in args:
+                self.env.update({"bare-app": "1.0", "tomli": "2.0"})
+            return "\n__rc=0"
+        plain = " ".join(sh.split(command)) if command.startswith("/opt") else command
+        if command.startswith("test -"):
+            return "yes" if command.startswith("test -x") else "no"
+        if "platform.machine" in plain:
+            return "x86_64\n3.12"
+        if "distributions()" in plain:
+            return json.dumps({n: [] for n in self.env})
+        if "find_spec" in plain:
+            return json.dumps(
+                {"bare_app": ["/opt/venv/site/bare_app"]} if "bare-app" in self.env else {}
+            )
+        if "purelib" in plain:
+            return "/opt/venv/site"
+        if command.startswith("df "):
+            return "/dev/sda 1 1 99999999 1% /"
+        if command.startswith("cat "):
+            return self.files.get(sh.split(command)[1], "")
+        if command.startswith("printf %s"):
+            t = sh.split(command)
+            self.files[t[8]] = t[2]
+            return ""
+        if command.startswith("mktemp"):
+            return "/tmp/roboemot-install.a1"
+        if command.startswith("rm -f "):
+            self.files.pop(sh.split(command)[2], None)
+        return ""
+
+
+class BarePlatform:
+    manifest_id = "bare-v1"
+    display_name = "Bare robot"
+    app_name = "bare"
+    default_host = "bare.local"
+    default_user = "dev"
+    arch = "x86_64"
+    python = "/opt/venv/bin/python"
+    record_path = "/opt/.bare-install.json"
+    space_paths = ("/tmp",)
+    distributions = ("bare-app",)
+    modules = ("bare_app",)
+
+    def __init__(self, tmp: Path) -> None:
+        self.tmp = tmp
+
+    def connect(self, ui, host): ...
+    def probe(self, ui, py): ...
+    def verify(self, ui, py, dev): ...
+    def running_app(self):
+        return None
+
+    def stop_app(self): ...
+    def start(self, ui): ...
+    def autostart(self):
+        return None
+
+    def set_autostart(self, name): ...
+    def cleanup(self, ui, py, dry_run): ...
+    def verify_removed(self, ui): ...
+
+    def stage(self, root, dest, dev):
+        pkg = dest / "bare-app"
+        pkg.mkdir(parents=True)
+        (pkg / "pyproject.toml").write_text(
+            '[project]\nname = "bare-app"\nrequires-python = ">=3.10"\ndependencies = ["tomli"]\n'
+        )
+        return [pkg]
+
+
+def test_install_and_uninstall_work_without_any_reachy_code(tmp_path, monkeypatch):
+    import roboemot.install as inst
+
+    robot = BareRobot()
+    monkeypatch.setattr(inst, "load_platform", lambda rid: BarePlatform(tmp_path))
+    monkeypatch.setattr(inst, "Remote", lambda user, host, d: robot)
+    monkeypatch.setattr(inst, "build_wheels", lambda dirs, out: [out / "bare_app-1.0.whl"])
+    opts = dict(host="bare", user="dev", robot="bare-v1", dev=False, start=False, startup=False)
+    ui = inst.Ui(interactive=False, assume_yes=True)
+    before = dict(robot.env)
+    inst.run_install(inst.Options(**opts), ui, tmp_path)
+    assert json.loads(robot.files[BarePlatform.record_path])["added"] == ["tomli"]
+    inst.run_uninstall(inst.Options(**opts, uninstall=True), ui, tmp_path)
+    assert robot.env == before and robot.files == {}
