@@ -133,8 +133,8 @@ class Router:
         ``stall_timeout_s`` bounds every later gap. Tokens are charged even when the stream
         ends early (barge-in, timeout, error)."""
         loop = asyncio.get_running_loop()
+        client = self._client(route)  # not timed: the first one pays openai's lazy imports
         deadline = loop.time() + route.first_token_timeout_s
-        client = self._client(route)
         kwargs: dict[str, Any] = {
             "model": route.model,
             "messages": messages,

@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import datetime as dt
 import json
+import time
 
 import httpx
 import pytest
@@ -120,6 +121,19 @@ async def test_streams_text_and_charges_reported_usage():
     assert isinstance(done, Done) and done.tokens == 25 and not done.estimated
     body = srv.requests[0][1]
     assert body["stream"] is True and "response_format" not in body and "seed" not in body
+
+
+async def test_first_token_timeout_excludes_client_setup():
+    """Regression: a slow client construction (cold imports) is not a slow first token."""
+    srv = Server()
+
+    def slow_factory() -> httpx.AsyncClient:
+        time.sleep(0.4)  # longer than the route's 0.3 s first-token timeout
+        return httpx.AsyncClient(transport=httpx.MockTransport(srv.handler))
+
+    r = Router([route("lan", "lan.local")], SafetyConfig(), http_client_factory=slow_factory)
+    evs = await collect(r)
+    assert isinstance(evs[-1], Done) and r.failures == []
 
 
 async def test_fallback_on_timeout_and_error():
