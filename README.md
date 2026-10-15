@@ -17,6 +17,7 @@ Notes for coding agents are in [`CLAUDE.md`](CLAUDE.md).
 | Robot discovery on the LAN (mDNS, declared per manifest) | 4 | Done, tested; found Reachy Mini Wireless on a real LAN |
 | Connectivity: offline detection, backoff, recovery, offline behaviour | 12A | Done, tested; robot-link recovery checked by restarting the simulated daemon's backend; spoken cue waits for TTS |
 | Debug report: robot state, hardware, resources, system, battery (robot-agnostic, entry-point sources) | 12A | Done, tested; Reachy daemon sections read from a real Reachy Mini Wireless and the simulator; on the CM4 Linux exposes no battery (`/sys/class/power_supply` empty), only `vcgencmd` under-voltage flags and temperature |
+| Installer and clean uninstall (robot-agnostic, entry-point platforms; Reachy Mini Wireless) | 4A | Done, tested against a fake robot (install then uninstall restores the exact state); dry runs checked on a real Reachy Mini Wireless leave no file changed; a real install and uninstall cycle on the robot is still to run |
 | Arbiter + safety limiter (Python reference) | 10, 12 | Done; two independent reviews; property and fuzz tests (limits, velocity, acceleration, 65 deg coupling with a 3 deg planning margin) |
 | Arbiter + safety limiter in C++ (`rt/`) | 10 | Matches the reference on 600-tick golden vectors (tolerance 1e-9); same input validation; not yet a running process |
 | Reachy Mini driver, motion loop, app wrapper | 4A | `pytest -m sim` passes against the MuJoCo simulator (command-to-state 37-55 ms measured on a cloud dev container, not a CM4); not yet run on the real robot |
@@ -86,6 +87,17 @@ replaced the web dashboard) or through the daemon's REST API:
 ```bash
 curl -X POST http://reachy-mini.local:8000/api/apps/start-app/roboemot
 curl -X POST http://reachy-mini.local:8000/api/apps/stop-current-app
+```
+
+While RoboEmot runs, the robot stays awake: idle motion keeps the motors powered, and the
+daemon only puts the robot to sleep once the app stops. RoboEmot never wakes the robot itself,
+and if the motors are turned off from outside it follows the pose without moving. There is no
+automatic nap on inactivity yet.
+
+Debug report with the robot's own system, temperature and battery data (SPEC 12A):
+
+```bash
+ssh pollen@reachy-mini.local /venvs/apps_venv/bin/roboemot debug          # add --json
 ```
 
 ## Licence
