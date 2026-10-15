@@ -1,0 +1,106 @@
+"""SPEC 4A, Packaging: the installer's change record and uninstall plan (robot-agnostic)."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from roboemot.install.build import distribution_names, min_python, third_party_requirements
+from roboemot.install.pyenv import RemotePython, report_changes
+from roboemot.install.record import InstallRecord, Replaced, canonical, plan_uninstall
+
+ROOT = Path(__file__).resolve().parents[3]
+OWN = ["roboemot-core", "roboemot-reachymini"]
+
+
+def rec(**kw) -> InstallRecord:
+    return InstallRecord("roboemot", "bot", OWN, **kw)
+
+
+def test_canonical_names():
+    assert canonical("Foo_Bar.baz") == "foo-bar-baz"
+
+
+def test_merge_records_added_and_replaced_but_not_own():
+    r = rec()
+    before = {"numpy": "2.0.0", "pip": "26.0"}
+    after = {"numpy": "2.1.0", "pip": "26.0", "scipy": "1.18.1", "roboemot-core": "0.1"}
+    r.pending_before = before
+    r.merge(before, after)
+    assert r.added == ["scipy"]
+    assert r.replaced == {"numpy": Replaced("2.0.0", "2.1.0")}
+    assert r.pending_before is None
+
+
+def test_reinstall_merge_keeps_the_original_version():
+    r = rec(added=["scipy"], replaced={"numpy": Replaced("2.0.0", "2.1.0")})
+    r.merge({"numpy": "2.1.0", "scipy": "1.18.1"}, {"numpy": "2.2.0", "scipy": "1.18.1", "x": "1"})
+    assert r.replaced["numpy"] == Replaced("2.0.0", "2.2.0")
+    assert r.added == ["scipy", "x"]
+
+
+def test_record_round_trips_through_json():
+    r = rec(added=["scipy"], replaced={"numpy": Replaced("2.0.0", "2.1.0")}, pending_before={})
+    assert InstallRecord.from_json(json.loads(json.dumps(r.to_json()))) == r
+
+
+def test_plan_removes_own_and_added_restores_replaced():
+    r = rec(added=["scipy"], replaced={"numpy": Replaced("2.0.0", "2.1.0")})
+    installed = {
+        "roboemot-core": "0.1",
+        "roboemot-reachymini": "0.1",
+        "scipy": "1",
+        "numpy": "2.1.0",
+    }
+    requires = {"roboemot-core": ["numpy", "scipy"], "roboemot-reachymini": ["roboemot-core"]}
+    plan = plan_uninstall(r, installed, requires)
+    assert plan.remove == ["roboemot-core", "roboemot-reachymini", "scipy"]
+    assert plan.restore == {"numpy": "2.0.0"}
+    assert plan.kept == {} and plan.drifted == {}
+
+
+def test_plan_keeps_what_another_app_now_needs_and_its_dependencies():
+    r = rec(added=["scipy", "fortran-rt"])
+    installed = {"roboemot-core": "0.1", "scipy": "1", "fortran-rt": "1", "other-app": "3"}
+    requires = {"scipy": ["fortran-rt"], "other-app": ["scipy"], "roboemot-core": ["scipy"]}
+    plan = plan_uninstall(r, installed, requires)
+    assert plan.remove == ["roboemot-core"]
+    assert plan.kept == {"scipy": ["other-app"], "fortran-rt": ["scipy"]}
+
+
+def test_plan_leaves_versions_someone_else_changed():
+    r = rec(replaced={"numpy": Replaced("2.0.0", "2.1.0"), "httpx": Replaced("0.27", "0.28")})
+    plan = plan_uninstall(r, {"numpy": "2.3.0", "httpx": "0.27"}, {})
+    assert plan.restore == {} and plan.drifted == {"numpy": "2.3.0"}
+    assert plan.empty
+
+
+def test_plan_without_record_removes_only_own_installed_packages():
+    plan = plan_uninstall(rec(), {"roboemot-core": "0.1", "scipy": "1"}, {})
+    assert plan.remove == ["roboemot-core"]
+
+
+def test_constraints_pin_everything_but_own():
+    pins = RemotePython.constraints({"numpy": "2.0", "roboemot-core": "0.1"}, {"roboemot-core"})
+    assert pins == "numpy==2.0\n"
+
+
+def test_report_changes_splits_added_and_changed():
+    report = {
+        "install": [
+            {"metadata": {"name": "SciPy", "version": "1.18.1"}},
+            {"metadata": {"name": "numpy", "version": "2.1.0"}},
+            {"metadata": {"name": "httpx", "version": "0.28"}},
+        ]
+    }
+    added, changed = report_changes(report, {"numpy": "2.0.0", "httpx": "0.28"})
+    assert added == {"scipy": "1.18.1"} and changed == {"numpy": "2.0.0 -> 2.1.0"}
+
+
+def test_build_metadata_from_the_checkout():
+    dirs = [ROOT / "packages" / p for p in OWN]
+    assert distribution_names(dirs) == OWN
+    assert min_python(dirs) == (3, 11)
+    reqs = third_party_requirements(dirs)
+    assert not any(r.startswith("roboemot") for r in reqs)
+    assert any(r.startswith("scipy") for r in reqs) and any(r.startswith("psutil") for r in reqs)

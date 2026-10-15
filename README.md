@@ -58,6 +58,8 @@ Run the install wizard from a computer on the same network as the robot (not on 
 ```bash
 python scripts/install_on_robot.py --dry-run   # read-only checks; nothing on the robot changes
 python scripts/install_on_robot.py             # install, verify, optionally start
+python scripts/install_on_robot.py --uninstall --dry-run   # what uninstall would undo
+python scripts/install_on_robot.py --uninstall # put the robot back as it was
 ```
 
 It lists the robots it finds on the network by mDNS (or asks for a host, default
@@ -68,7 +70,15 @@ locally, installs them into `/venvs/apps_venv`, and checks that the daemon lists
 asked, it stops the running app (one app at a time), wakes the robot, starts RoboEmot, and makes
 it the startup app (the daemon starts it on the robot's first wake-up). Choose dev mode until
 the manifest dynamics are measured, or the app refuses to start (SPEC 12). Every prompt has a
-flag for unattended runs: `--host`, `--user`, `--dev`, `--start`, `--startup-app`, `--yes`.
+flag for unattended runs: `--host`, `--user`, `--robot`, `--dev`, `--start`, `--startup-app`, `--yes`.
+
+The installer leaves the robot as it found it. It keeps the package versions already in the
+shared apps venv (it asks before changing one), and it writes no pip cache. It records what it
+added or replaced in `/venvs/.roboemot-install.json`. `--uninstall` then removes exactly that:
+the app, the dependencies it added (unless another app now needs them), the original versions
+of anything it replaced, and the startup-app setting if it still names RoboEmot. It verifies
+the result before deleting the record. The installer is robot-agnostic (`roboemot.install`);
+each robot package plugs in its own part (SPEC 4A, Installer).
 
 Afterwards the app is started and stopped from the Reachy Mini Control desktop app (which
 replaced the web dashboard) or through the daemon's REST API:

@@ -14,7 +14,7 @@ section number in commit messages that implement or change behaviour.
 | `packages/roboemot-reachymini/` | Python package `roboemot_reachymini`: Reachy Mini driver and SDK bridge |
 | `rt/` | C++ real-time core (`roboemot-rt`): arbiter and safety limiter, CMake + ctest |
 | `configs/` | Library defaults, robot manifests, personality presets |
-| `scripts/` | Dev helpers (simulation daemon, install wizard for the robot: `install_on_robot.py`) |
+| `scripts/` | Dev helpers (simulation daemon, `install_on_robot.py`: wrapper over the robot-agnostic installer `roboemot.install`) |
 
 ## Rules that come from the spec
 
@@ -36,6 +36,9 @@ section number in commit messages that implement or change behaviour.
 - **Privacy (SPEC 12):** never write frames, audio or embeddings to logs.
 - **Diagnostics (SPEC 12A):** robot-specific debug sources are registered in the
   `roboemot.diagnostics` entry-point group under the manifest `robot.id`; core stays robot-agnostic.
+- **Installer (SPEC 4A, Installer):** same pattern, entry-point group `roboemot.installers`. It
+  must leave the robot clean: record only its own changes, pin existing versions, `--no-cache-dir`
+  on every pip call, and the dry run never writes.
 
 ## Commands
 
@@ -48,6 +51,7 @@ pytest -m sim                            # integration tests against the simulat
 cmake -S rt -B rt/build && cmake --build rt/build && ctest --test-dir rt/build
 ruff check . && ruff format --check .
 python scripts/install_on_robot.py --dry-run   # read-only checks against the real robot
+python scripts/install_on_robot.py --uninstall --dry-run   # what uninstall would undo
 roboemot debug --host <robot> --json     # debug report (SPEC 12A); system/battery need it run on the robot
 ```
 
