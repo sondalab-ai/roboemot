@@ -36,13 +36,31 @@ Known limits: the Reachy Mini manifest has placeholder translation limits and nu
 python3 -m venv .venv && . .venv/bin/activate
 pip install -e "packages/roboemot-core[dev]" -e "packages/roboemot-reachymini[dev]"
 pytest                                    # unit tests
-roboemot config validate --app configs/companion.yaml --preset curious
-roboemot manifest check configs/manifests/reachy-mini-wireless.yaml --dev
-roboemot discover                         # robots on the LAN, matched to configs/manifests
-roboemot debug --discover                 # robot state from its platform (add --json)
-roboemot debug                            # on the robot: also system, resources, temperatures, battery
 cmake -S rt -B rt/build && cmake --build rt/build && ctest --test-dir rt/build
 ```
+
+### Commands
+
+`roboemot` CLI (installed with `roboemot-core`; `roboemot <command> --help` for every flag):
+
+| Command | What it does |
+| --- | --- |
+| `roboemot config validate --app configs/companion.yaml --preset curious` | Check a layered configuration (defaults, preset, app file) against the schema and guardrails (SPEC 11A) |
+| `roboemot config dump ...` | Print the effective merged configuration as YAML |
+| `roboemot config schema` | Print the configuration JSON schema |
+| `roboemot manifest check configs/manifests/reachy-mini-wireless.yaml --dev` | Validate a robot manifest and list its capabilities (SPEC 4, 12) |
+| `roboemot discover [--json]` | Find robots on the LAN by mDNS, matched to the manifests in `configs/manifests` (SPEC 4) |
+| `roboemot debug --discover` / `--host <ip>` | Debug report from the robot's platform: daemon, motors, pose, IMU, current app (SPEC 12A) |
+| `roboemot debug [--json]` | Run on the robot: adds system, resources, temperatures, battery and the app process |
+
+Scripts (run from the repository root):
+
+| Script | What it does |
+| --- | --- |
+| `scripts/install_on_robot.py [--dry-run] [--uninstall]` | Install, start, or cleanly uninstall the app on a robot over SSH (see below; SPEC 4A) |
+| `scripts/sim-daemon.sh` | Headless MuJoCo Reachy Mini daemon on `localhost:8000` for `pytest -m sim` |
+| `scripts/sync-package-data.sh` | Copy manifest and presets into the Reachy app's package data |
+| `scripts/gen_golden.py` | Regenerate the golden vectors the C++ core is tested against |
 
 Simulator (needs GStreamer/GObject system packages, see `.github/workflows/ci.yml`):
 
