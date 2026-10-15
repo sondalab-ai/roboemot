@@ -805,7 +805,7 @@ A debug report describes the robot state, hardware, resource use, system and bat
   - `robot.state`: `/api/state/full`, with joints, direction of arrival and IMU (including board temperature);
   - `robot.app`: `/api/apps/current-app-status`.
 
-  The daemon reports no battery, CPU or memory data, so those come only from the `local` sections built on the robot.
+  The daemon reports no battery, CPU or memory data, so those come only from the `local` sections built on the robot. Motor input-voltage errors, the closest signal it has to a weak supply, are only written to the daemon log (checked against the SDK source), not to its status.
 - **Remote use.** `roboemot debug --host <robot>` or `--discover` from a PC returns only the robot's platform sections. The `local` sections would describe the PC, so they are left out and the report says so. To get them, run the command on the robot over SSH.
 
 ## 13. Reference hardware and performance budgets
@@ -916,6 +916,7 @@ These are facts to measure, not decisions:
 - [ ] The robot OS is 64-bit (aarch64) and `pollen` has sudo, for native builds and real-time priority.
 - [ ] Velocity and acceleration caps for head, body and antennas, then re-check that the 3 degree planning margin of the head-body coupling (safety.constraint\_margin\_deg) still keeps it under 65 degrees (manifest `dynamics`).
 - [ ] Reflex latency through the Python bridge stays within 100 ms.
+- [ ] Diagnostics (section 12A) on the CM4: whether `/sys/class/power_supply` reports the battery (charge, status, voltage, health); whether the app's user can run `vcgencmd get_throttled`; that `roboemot debug` on the robot finds the app process (the daemon runs it as `python -u -m roboemot_reachymini.main`).
 - [ ] Connectivity gestures (section 12A): antenna directions (droop spreads outward, perk-up rises toward vertical; signs inferred from the home pose) and amplitudes look right; behaviour on a real Wi-Fi loss; whether an app survives a daemon backend restart in app mode (only client mode was simulated).
 
 ## Sources

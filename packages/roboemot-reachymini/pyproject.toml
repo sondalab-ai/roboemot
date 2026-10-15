@@ -17,7 +17,9 @@ sim = ["reachy-mini[mujoco]>=1.11"]
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6", "sondalab-palette>=0.3.8"]
 
 [project.entry-points."reachy_mini_apps"]
-roboemot = "roboemot_reachymini.app:RoboEmotApp"
+# The daemon runs `python -m <module of this entry point>`, so it must be the module with the
+# __main__ runner (main.py), not app.py.
+roboemot = "roboemot_reachymini.main:RoboEmotApp"
 
 # Debug report sources, keyed by manifest robot.id (SPEC 12A, Diagnostics).
 [project.entry-points."roboemot.diagnostics"]

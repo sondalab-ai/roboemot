@@ -224,3 +224,28 @@ def test_cli_exit_code_reports_failed_sections(monkeypatch, capsys):
     )
     assert cli.main(["debug", "--robot", "bot-v1", "--host", "10.9.9.9"]) == 1
     assert "error: TypeError" in capsys.readouterr().out
+
+
+def test_numpy_arrays_become_lists():
+    report = collect([FnSource("s", lambda: {"v": np.arange(3), "m": np.eye(4)})])
+    data = report["sections"]["s"]["data"]
+    assert data["v"] == [0, 1, 2] and data["m"][0] == [1.0, 0.0, 0.0, 0.0]
+    assert json.loads(json.dumps(report)) == report
+
+
+def test_render_text_escapes_terminal_control_sequences():
+    evil = "Neve\x1b]0;pwned\x07\x1b[2J"
+    text = render_text(collect([FnSource("robot", lambda: {"name": evil, evil: 1})]))
+    assert "\x1b" not in text and "\x07" not in text
+    assert "Neve\\x1b]0;pwned\\x07" in text
+
+
+def test_broken_platform_plugin_becomes_an_error_section(monkeypatch):
+    def broken_load():
+        raise ImportError("missing dependency")
+
+    eps = [SimpleNamespace(name="bot-v1", load=broken_load)]
+    monkeypatch.setattr(diagnostics, "entry_points", lambda group: eps)
+    (src,) = platform_sources("bot-v1", Target())
+    sec = diagnostics.collect_section(src)
+    assert not sec["ok"] and sec["error"] == "ImportError: missing dependency"

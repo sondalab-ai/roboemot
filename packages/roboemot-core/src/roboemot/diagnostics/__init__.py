@@ -76,7 +76,10 @@ def platform_sources(manifest_id: str, target: Target) -> list[Source]:
     """Sources the platform package registered for ``manifest_id``, or one error section."""
     for ep in entry_points(group=ENTRY_POINT_GROUP):
         if ep.name == manifest_id:
-            return list(ep.load()(target))
+            try:
+                return list(ep.load()(target))
+            except Exception as exc:  # a broken plugin must not take the report (or app) down
+                return [FnSource("platform", _raise(exc), scope="robot")]
     msg = f"no diagnostics source installed for {manifest_id}"
     return [FnSource("platform", _raise(LookupError(msg)), scope="robot")]
 
@@ -170,8 +173,8 @@ def jsonable(value: Any) -> Any:
         value = value._asdict()
     elif hasattr(value, "model_dump"):  # pydantic
         value = value.model_dump(mode="json")
-    elif hasattr(value, "item"):  # numpy scalar
-        return jsonable(value.item())
+    elif hasattr(value, "tolist"):  # numpy scalar or array
+        return jsonable(value.tolist())
     if isinstance(value, dict):
         return {str(k): REDACTED if _secret(str(k)) else jsonable(v) for k, v in value.items()}
     if isinstance(value, list | tuple | set | frozenset):
@@ -184,15 +187,21 @@ def _secret(key: str) -> bool:
     return any(w in k for w in SECRET_WORDS)
 
 
+def _printable(text: str) -> str:
+    """Escape control characters: report strings come from devices and must not drive the
+    terminal (ANSI/OSC escape sequences)."""
+    return "".join(c if c.isprintable() else repr(c)[1:-1] for c in text)
+
+
 def render_text(report: dict[str, Any]) -> str:
     """Human-readable form of a report, for the terminal."""
     lines = [f"roboemot debug report  host={report['host']}  at={report['generated_at']}"]
-    lines += [f"note: {n}" for n in report.get("notes", [])]
+    lines += [f"note: {_printable(n)}" for n in report.get("notes", [])]
     for name, sec in report["sections"].items():
         lines.append("")
-        lines.append(f"[{name}] ({sec['scope']})")
+        lines.append(f"[{_printable(name)}] ({sec['scope']})")
         if not sec["ok"]:
-            lines.append(f"  error: {sec['error']}")
+            lines.append(f"  error: {_printable(sec['error'])}")
             continue
         lines += _render_value(sec["data"], 1)
     return "\n".join(lines)
@@ -204,10 +213,10 @@ def _render_value(value: Any, depth: int) -> list[str]:
         out = []
         for k, v in value.items():
             if isinstance(v, dict | list) and v:
-                out.append(f"{pad}{k}:")
+                out.append(f"{pad}{_printable(k)}:")
                 out += _render_value(v, depth + 1)
             else:
-                out.append(f"{pad}{k}: {_scalar(v)}")
+                out.append(f"{pad}{_printable(k)}: {_scalar(v)}")
         return out
     if isinstance(value, list):
         out = []
@@ -228,7 +237,7 @@ def _scalar(v: Any) -> str:
         return f"{v:.4g}"
     if isinstance(v, list | dict):
         return "[]" if isinstance(v, list) else "{}"
-    return str(v)
+    return _printable(str(v))
 
 
 __all__ = [
