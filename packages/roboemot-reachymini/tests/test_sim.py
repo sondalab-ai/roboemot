@@ -101,3 +101,69 @@ def test_command_to_state_latency(loop):
         f"state read: {statistics.median(samples) * 1000:.1f} ms median"
     )
     assert latency is not None and latency < 0.25
+
+
+def _daemon_post(path: str) -> None:
+    import urllib.request
+
+    req = urllib.request.Request(f"http://localhost:8000/api{path}", method="POST")
+    urllib.request.urlopen(req, timeout=30).read()
+
+
+def test_robot_link_recovers_after_daemon_backend_restart(mini):
+    """SPEC 12A: backend stop -> link.robot.lost; restart -> reconnect, link.robot.restored."""
+    from roboemot_reachymini.app import idle_command
+
+    events: list[str] = []
+    cfg = ConfigStack().effective()
+    manifest = load_manifest(DATA / "reachy-mini-wireless.yaml", allow_unmeasured_dynamics=True)
+    loop = MotionLoop(
+        manifest,
+        ReachyMiniDriver(mini),
+        cfg,
+        rate_hz=50,
+        on_link_change=lambda e, n: events.append(e),
+    )
+    stop = threading.Event()
+
+    def feed() -> None:
+        while not stop.is_set():
+            loop.feed(idle_command(cfg, time.monotonic()))
+            stop.wait(0.05)
+
+    loop.start()
+    threading.Thread(target=feed, daemon=True).start()
+    try:
+        time.sleep(1.0)
+        _daemon_post("/daemon/stop?goto_sleep=false")
+        deadline = time.monotonic() + 10
+        while "link.robot.lost" not in events and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert events == ["link.robot.lost"]
+        _daemon_post("/daemon/start?wake_up=false")
+        deadline = time.monotonic() + 30
+        while "link.robot.restored" not in events and time.monotonic() < deadline:
+            time.sleep(0.2)
+        assert events == ["link.robot.lost", "link.robot.restored"]
+        # The MuJoCo backend ignores motor-mode changes (always "enabled"), so the motors-off
+        # path is covered by unit tests (test_health.py); here streaming must simply resume.
+        assert loop.driver.motors_enabled() is True
+        ticks = loop.ticks
+        time.sleep(1.0)
+        assert loop.ticks > ticks
+        assert not loop.motors_off and loop.link.online
+    finally:
+        stop.set()
+        loop.stop()
+
+
+def test_debug_report_against_the_simulated_daemon():
+    """SPEC 12A, Diagnostics: every daemon section answers; IMU is null in simulation."""
+    from roboemot.diagnostics import Target, collect, platform_sources
+
+    report = collect(platform_sources("reachy-mini-wireless", Target()))
+    s = report["sections"]
+    assert all(sec["ok"] for sec in s.values()), s
+    assert s["robot.daemon"]["data"]["simulation_enabled"] is True
+    assert s["robot.motors"]["data"]["mode"] in ("enabled", "disabled", "gravity_compensation")
+    assert s["robot.state"]["data"]["imu"] is None

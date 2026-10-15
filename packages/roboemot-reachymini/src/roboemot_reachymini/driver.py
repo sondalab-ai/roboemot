@@ -9,6 +9,16 @@ Facts from the SDK source (reachy_mini 1.11) that shape this driver:
 - ``enable_motors()`` pins all targets to the present pose; ``set_target`` must come after it.
 - Antenna order is ``[right, left]``; head pose is a 4x4 matrix from ``create_head_pose``
   with Euler order ``xyz`` (roll, pitch, yaw).
+- The SDK talks to the daemon over one websocket (``mini.client``, a ``WSClient``). When the
+  daemon's backend stops, every call raises ``ConnectionError("Lost connection with the
+  server.")`` and the client never reconnects by itself, so :meth:`reconnect` swaps in a new
+  ``WSClient`` to the same host and port (checked in the MuJoCo simulation, SPEC 12A).
+- The state getters return the last cached values even on a dead connection; only
+  ``WSClient._is_alive`` (refreshed every second from the state stream) tells, so
+  :meth:`read_state` checks it.
+- The motor mode is in the daemon status the client receives
+  (``backend_status.motor_control_mode``: enabled, disabled, gravity_compensation).
+- Checked against the v1.11.0 source (the robot's version) and run against 1.12.0 in MuJoCo.
 """
 
 from __future__ import annotations
@@ -64,11 +74,36 @@ class ReachyMiniDriver(PoseGroupDriver):
             self.mini.set_target(**kwargs)
 
     def read_state(self) -> dict[str, float]:
+        if not getattr(self.mini.client, "_is_alive", True):
+            raise ConnectionError("Reachy Mini daemon: no state received (connection lost)")
         state = head_values(self.mini.get_current_head_pose())
         head_joints, antennas = self.mini.get_current_joint_positions()
         state["body_yaw"] = float(head_joints[0])  # first head joint is the body rotation
         state.update(zip(ANTENNAS, (float(a) for a in antennas), strict=True))
         return state
+
+    def motors_enabled(self) -> bool | None:
+        """From the last daemon status; None until one has arrived."""
+        client = self.mini.client
+        if getattr(client, "_last_status", None) is None:
+            return None
+        backend = client.get_status(wait=False).backend_status
+        return None if backend is None else backend.motor_control_mode == "enabled"
+
+    def reconnect(self, timeout_s: float) -> None:
+        """New SDK websocket to the same daemon; body yaw is the arbiter's again afterwards."""
+        from reachy_mini.io.ws_client import WSClient
+
+        old = self.mini.client
+        client = WSClient(old.host, old.port)
+        try:
+            client.wait_for_connection(timeout=timeout_s)
+        except Exception:
+            client.disconnect()
+            raise
+        old.disconnect()
+        self.mini.client = client
+        self.mini.set_automatic_body_yaw(False)  # the restarted daemon is back to its default
 
     def set_mode(self, mode: MotorMode) -> None:
         if mode == "active":

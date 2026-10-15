@@ -17,6 +17,9 @@ BEHAVIOUR_MODULES = [
     "llm/router.py",
     "motion/loop.py",
     "motion/primitives.py",
+    "health/__init__.py",
+    "health/network.py",
+    "health/responder.py",
 ]
 ALLOWED = {0, 1, -1, 2, 0.5, -1.0}
 

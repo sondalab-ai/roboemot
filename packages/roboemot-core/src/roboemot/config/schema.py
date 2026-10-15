@@ -110,6 +110,23 @@ class AppraisalConfig(Strict):
             {"event": "sound.loud", "arousal": 0.6, "label": "surprise", "cooldown_s": 5},
             {"event": "idle.long", "arousal": -0.6, "label": "sleepy", "cooldown_s": 600},
             {"event": "light.on", "arousal": 0.3, "label": "surprise", "cooldown_s": 30},
+            # Connectivity (SPEC 12A): subdued while offline, perks up when back.
+            {"event": "link.network.lost", "valence": -0.2, "arousal": -0.3, "cooldown_s": 300},
+            {
+                "event": "link.network.restored",
+                "valence": 0.3,
+                "arousal": 0.4,
+                "label": "joy",
+                "cooldown_s": 60,
+            },
+            {"event": "link.robot.restored", "arousal": 0.3, "label": "surprise", "cooldown_s": 30},
+            {
+                "event": "conversation.unavailable",
+                "valence": -0.1,
+                "arousal": 0.1,
+                "label": "curiosity",
+                "cooldown_s": 10,
+            },
         ],
         "Event to impulse rules (SPEC 7, Affect state)",
     )
@@ -544,6 +561,59 @@ class MirrorConfig(Strict):
     record_max_s: float = param(10.0, "Max demonstration length", unit="s", ge=1, le=60)
 
 
+# ---------------------------------------------------------------------- connectivity (SPEC 12A)
+
+
+class LinkPolicy(Strict):
+    failures_to_offline: int = param(
+        3, "Consecutive failures before a link is offline", ge=1, le=1000
+    )
+    successes_to_online: int = param(2, "Consecutive successes before it is back", ge=1, le=100)
+    probe_initial_s: float = param(2.0, "First retry delay once offline", unit="s", ge=0.05, le=600)
+    probe_max_s: float = param(
+        60.0, "Retry delay cap; also the check interval while online", unit="s", ge=0.1, le=3600
+    )
+    probe_backoff: float = param(2.0, "Retry delay multiplier per failed check", ge=1, le=10)
+    probe_jitter: float = param(0.2, "Random spread of each delay, as a fraction of it", ge=0, le=1)
+    probe_timeout_s: float = param(1.5, "Timeout of one check", unit="s", ge=0.05, le=30)
+
+
+class GestureConfig(Strict):
+    duration_s: float = param(1.2, "Length of a connectivity gesture", unit="s", ge=0.2, le=5)
+    head_roll_rad: float = param(0.15, "Puzzled head tilt (roll)", unit="rad", ge=0, le=0.5)
+    head_pitch_rad: float = param(
+        0.08, "Perk-up head lift (pitch, negative is up)", unit="rad", ge=0, le=0.3
+    )
+    antenna_rad: float = param(
+        0.4, "Antenna droop (puzzled) or lift (perk up)", unit="rad", ge=0, le=1.5
+    )
+
+
+class ConnectivityConfig(Strict):
+    network: LinkPolicy = param({}, "Model routes: reachability checks and backoff")
+    robot: LinkPolicy = param(
+        {
+            "failures_to_offline": 10,
+            "successes_to_online": 3,
+            "probe_initial_s": 0.2,
+            "probe_max_s": 5.0,
+            "probe_timeout_s": 0.5,
+        },
+        "Robot driver link: failed motion ticks, then read_state retries",
+    )
+    gestures: GestureConfig = param({}, "Nonverbal replies while offline and on recovery")
+    offline_phrases: dict[str, str] = param(
+        {
+            "it": "Scusa, ora non riesco a pensare bene: sono senza rete.",
+            "en": "Sorry, I can't think clearly right now: I'm offline.",
+        },
+        "Spoken cue per language while offline (used once speech output is wired)",
+    )
+    cue_cooldown_s: float = param(
+        120.0, "Minimum time between two spoken offline cues", unit="s", ge=0, le=3600
+    )
+
+
 # --------------------------------------------------------------------------- root
 
 
@@ -569,6 +639,7 @@ with warnings.catch_warnings():
         llm_routes: list[LLMRoute] = param([], "SPEC 8")
         safety: SafetyConfig = param({}, "SPEC 12")
         privacy: PrivacyConfig = param({}, "SPEC 12")
+        connectivity: ConnectivityConfig = param({}, "SPEC 12A")
 
         @model_validator(mode="after")
         def _unique_routes(self) -> RoboEmotConfig:

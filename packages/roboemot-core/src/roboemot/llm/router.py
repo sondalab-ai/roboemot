@@ -5,6 +5,12 @@ roles, ``stream=True``, ``tools`` with ``tool_choice="auto"``, ``max_tokens``. R
 in order; a route is skipped when it is not cleared for minors (while a minor is present) or
 its daily token budget is spent, and abandoned for the next one on error or when the first
 token arrives later than ``first_token_timeout_s``, as long as nothing was yielded yet.
+
+With a :class:`~roboemot.health.network.NetworkMonitor` (SPEC 12A), routes known to be
+unreachable are skipped without waiting for their timeouts, every request reports whether its
+route was reachable (a timeout only asks for a prompt reachability check), and when no route
+is reachable :class:`Offline` is raised at once, so the caller can answer nonverbally instead
+of leaving the robot waiting.
 """
 
 from __future__ import annotations
@@ -19,9 +25,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
-from openai import AsyncOpenAI
+from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
 
 from ..config.schema import LLMRoute, SafetyConfig
+from ..health.network import NetworkMonitor
 
 SECRET = re.compile(r"^\$\{secret:([A-Za-z0-9_.-]+)\}$")
 CHARS_PER_TOKEN = 4  # usage estimate when a server does not report usage
@@ -53,6 +60,15 @@ class NoRouteAvailable(RuntimeError):
     """Every route was skipped or failed; the caller plays the register fallback (SPEC 8)."""
 
 
+class Offline(NoRouteAvailable):
+    """No route is reachable (SPEC 12A): reply nonverbally, do not wait for timeouts."""
+
+
+# A timeout may be a slow model on a fine network: it triggers a reachability check instead.
+SLOW = (TimeoutError, APITimeoutError)
+UNREACHABLE = (APIConnectionError, OSError)  # checked after SLOW (both contain timeouts)
+
+
 @dataclass
 class _Budget:
     day: dt.date
@@ -66,12 +82,19 @@ class Router:
     secrets: Callable[[str], str] = lambda name: ""
     http_client_factory: Callable[[], httpx.AsyncClient] | None = None
     today: Callable[[], dt.date] = dt.date.today
+    monitor: NetworkMonitor | None = None
     _budgets: dict[str, _Budget] = field(default_factory=dict)
     failures: list[tuple[str, str]] = field(default_factory=list)
+
+    @property
+    def offline(self) -> bool:
+        return self.monitor is not None and not self.monitor.online
 
     def eligible(self, minor_present: bool) -> list[LLMRoute]:
         out = []
         for r in self.routes:
+            if self.monitor and not self.monitor.is_online(r.name):
+                continue
             if minor_present and not (r.allowed_for_minors and self.safety.minors_allowed_llm):
                 continue
             if self.used(r.name) >= r.daily_token_budget:
@@ -106,9 +129,13 @@ class Router:
         *,
         minor_present: bool = False,
     ) -> AsyncIterator[Event]:
+        if self.offline:
+            raise Offline("no route reachable")
         routes = self.eligible(minor_present)
         if not routes:
-            raise NoRouteAvailable("no eligible route (minor present or budgets spent)")
+            raise NoRouteAvailable(
+                "no eligible route (minor present, budgets spent or unreachable)"
+            )
         for route in routes:
             yielded = False
             gen = self._stream_route(route, messages, tools)
@@ -116,14 +143,29 @@ class Router:
                 async for ev in gen:
                     yielded = True
                     yield ev
+                self._reachable(route, True)
                 return
             except Exception as exc:  # CancelledError/GeneratorExit are not caught
                 self.failures.append((route.name, type(exc).__name__))
+                if isinstance(exc, SLOW):
+                    if self.monitor:
+                        self.monitor.recheck(route.name)
+                elif isinstance(exc, UNREACHABLE):
+                    self._reachable(route, False)
+                elif isinstance(exc, APIStatusError):
+                    self._reachable(route, True)  # the server answered: the network is fine
                 if yielded:
                     raise  # mid-answer failure: no silent switch to another model
             finally:
                 await gen.aclose()  # barge-in: closes the HTTP stream and charges the budget
-        raise NoRouteAvailable(f"all routes failed: {self.failures[-len(routes) :]}")
+        failed = self.failures[-len(routes) :]
+        if self.offline:
+            raise Offline(f"no route reachable: {failed}")
+        raise NoRouteAvailable(f"all routes failed: {failed}")
+
+    def _reachable(self, route: LLMRoute, ok: bool) -> None:
+        if self.monitor:
+            self.monitor.report(route.name, ok)
 
     async def _stream_route(
         self, route: LLMRoute, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None

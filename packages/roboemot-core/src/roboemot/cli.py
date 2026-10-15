@@ -1,10 +1,12 @@
-"""Command line: ``roboemot config {validate,schema,dump}`` and ``roboemot manifest check``."""
+"""Command line: ``roboemot config {validate,schema,dump}``, ``roboemot manifest check``,
+``roboemot discover`` and ``roboemot debug``."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 import yaml
@@ -19,6 +21,65 @@ def _stack(args: argparse.Namespace) -> ConfigStack:
         preset_dirs=[Path(p) for p in args.preset_dir],
         app=Path(args.app) if args.app else None,
     )
+
+
+def _discover(args: argparse.Namespace) -> int:
+    """List robots answering on the LAN, matched to the manifests in ``--manifest-dir``."""
+    from . import discovery
+
+    hints = discovery.load_hints(sorted(Path(args.manifest_dir).glob("*.yaml")))
+    timeout = args.timeout if args.timeout is not None else discovery.DEFAULT_TIMEOUT_S
+    found = discovery.discover(hints, timeout)
+    if args.json:
+        rows = [{"manifest": f.manifest_id, "address": f.address} | asdict(f.record) for f in found]
+        print(json.dumps(rows, indent=2))
+    elif not found:
+        looked_for = ", ".join(h.id for h in hints) or "no manifest declares discovery"
+        print(f"no robot found ({looked_for})")
+    for f in [] if args.json else found:
+        r = f.record
+        print(f"{r.name}  {f.manifest_id}  {f.address}:{r.port}  ({r.host})")
+    return 0 if found else 1
+
+
+def _debug(args: argparse.Namespace) -> int:
+    """Print the debug report (SPEC 12A, Diagnostics) for this machine and its robot."""
+    from . import diagnostics
+    from .diagnostics.system import local_sources
+
+    host, port, robot = args.host, args.port, args.robot
+    if args.discover:
+        from . import discovery
+
+        hints = discovery.load_hints(sorted(Path(args.manifest_dir).glob("*.yaml")))
+        found = discovery.discover(hints)
+        if not found:
+            raise RuntimeError("no robot found on the LAN")
+        host, port, robot = found[0].address, found[0].record.port, robot or found[0].manifest_id
+    installed = diagnostics.installed_platforms()
+    if robot is None and len(installed) == 1:
+        robot = installed[0]
+    target = diagnostics.Target(host, port)
+    notes, sources = [], []
+    if target.remote:
+        notes.append(
+            f"system, temperatures and battery describe the machine that runs this command, "
+            f"so they are left out for the remote robot {host}; run `roboemot debug` on the "
+            f"robot (e.g. over ssh) to include them"
+        )
+    else:
+        sources += local_sources(process_match=args.process)
+    if robot is None:
+        notes.append(f"no robot selected (--robot); installed platforms: {installed or 'none'}")
+    else:
+        sources += diagnostics.platform_sources(robot, target)
+    timeout = args.timeout if args.timeout is not None else diagnostics.SECTION_TIMEOUT_S
+    report = diagnostics.collect(sources, timeout_s=timeout, notes=notes)
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(diagnostics.render_text(report))
+    return 0 if all(s["ok"] for s in report["sections"].values()) else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -36,6 +97,21 @@ def main(argv: list[str] | None = None) -> int:
     man.add_argument("action", choices=["check"])
     man.add_argument("path")
     man.add_argument("--dev", action="store_true", help="allow unmeasured dynamics")
+
+    disc = sub.add_parser("discover", help="find robots on the LAN by mDNS (SPEC 4)")
+    disc.add_argument("--manifest-dir", default="configs/manifests")
+    disc.add_argument("--timeout", type=float, default=None, help="seconds to listen")
+    disc.add_argument("--json", action="store_true")
+
+    dbg = sub.add_parser("debug", help="robot, hardware, resources, system, battery (SPEC 12A)")
+    dbg.add_argument("--robot", help="manifest robot.id (default: the only installed platform)")
+    dbg.add_argument("--host", help="robot address (default: this machine)")
+    dbg.add_argument("--port", type=int, default=None, help="platform API port")
+    dbg.add_argument("--discover", action="store_true", help="find the robot by mDNS")
+    dbg.add_argument("--manifest-dir", default="configs/manifests")
+    dbg.add_argument("--process", default="roboemot", help="command-line match for the app")
+    dbg.add_argument("--timeout", type=float, default=None, help="seconds per section")
+    dbg.add_argument("--json", action="store_true")
 
     args = parser.parse_args(argv)
     try:
@@ -55,7 +131,11 @@ def main(argv: list[str] | None = None) -> int:
             m = load_manifest(Path(args.path), allow_unmeasured_dynamics=args.dev)
             print(f"manifest {m.robot.id} valid; capabilities: {sorted(m.capabilities())}")
             return 0
-    except (ConfigError, ValueError) as exc:
+        if args.cmd == "discover":
+            return _discover(args)
+        if args.cmd == "debug":
+            return _debug(args)
+    except (ConfigError, ValueError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     return 2
