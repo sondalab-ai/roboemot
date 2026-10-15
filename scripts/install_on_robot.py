@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Install wizard for the RoboEmot app on Reachy Mini Wireless (SPEC 4A, Packaging).
 
-Runs on a PC on the same LAN as the robot, never on the robot. It builds the two wheels
+Runs on a PC on the same LAN as the robot, never on the robot. It finds the robot by mDNS
+(roboemot.discovery, SPEC 4) or takes a host, builds the two wheels
 locally, copies them over SSH, installs them into the robot's apps venv, checks that the
 daemon sees the app, and optionally stops the running app, wakes the robot, starts RoboEmot
 and sets it as the startup app. Every prompt has a flag, so it also runs unattended.
@@ -47,6 +48,7 @@ except ImportError:  # pragma: no cover
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_NAME = "roboemot"
+DEFAULT_HOST = "reachy-mini.local"
 APPS_VENV = "/venvs/apps_venv"
 DAEMON_PORT = 8000
 REMOTE_TMP = "/tmp/roboemot-install"
@@ -109,6 +111,16 @@ class Ui:
         except EOFError:
             return default
         return answer.strip() or default
+
+    def choose(self, question: str, options: list[str]) -> int:
+        """Numbered pick list; returns the chosen index (the first one by default)."""
+        for n, label in enumerate(options, 1):
+            print(f"    {paint(str(n), 'accent')}  {label}")
+        while True:
+            answer = self.ask(question, "1")
+            if answer.isdigit() and 1 <= int(answer) <= len(options):
+                return int(answer) - 1
+            self.warn(f"pick a number from 1 to {len(options)}")
 
     def confirm(self, question: str, default: bool) -> bool:
         if self.assume_yes:
@@ -336,6 +348,29 @@ class Options:
     yes: bool
 
 
+def find_robots() -> list[tuple[str, str]]:
+    """Robots announcing themselves on the LAN as (label, address), via roboemot.discovery."""
+    from roboemot.discovery import discover, load_hints
+
+    found = discover(load_hints([ROOT / "configs/manifests/reachy-mini-wireless.yaml"]))
+    return [(f"{f.record.name}  {f.address}  ({f.record.host})", f.address) for f in found]
+
+
+def pick_host(ui: Ui) -> str:
+    """Offer the robots found by mDNS, or ask for a host when none answers."""
+    ui.info("looking for robots on the network (mDNS)")
+    try:
+        found = find_robots()
+    except (ImportError, RuntimeError, OSError) as e:
+        ui.warn(f"discovery unavailable: {e}")
+        found = []
+    if not found:
+        return ui.ask("No robot found. Robot hostname or IP", DEFAULT_HOST)
+    other = "another host or IP"
+    i = ui.choose("Which robot?", [label for label, _ in found] + [other])
+    return found[i][1] if i < len(found) else ui.ask("Robot hostname or IP", DEFAULT_HOST)
+
+
 def check_robot(ui: Ui, host: str) -> DaemonApi:
     """Resolve the host and reach the daemon."""
     try:
@@ -446,7 +481,7 @@ def run(opts: Options, ui: Ui) -> None:
     )
 
     ui.step("Robot")
-    host = opts.host or ui.ask("Robot hostname or IP", "reachy-mini.local")
+    host = opts.host or pick_host(ui)
     api = check_robot(ui, host)
 
     ui.step("SSH access")
@@ -503,7 +538,7 @@ def run(opts: Options, ui: Ui) -> None:
 
 def parse_args(argv: list[str] | None = None) -> Options:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("--host", help="robot hostname or IP (default: ask, reachy-mini.local)")
+    p.add_argument("--host", help="robot hostname or IP (default: pick from robots found by mDNS)")
     p.add_argument("--user", help="SSH user (default: ask, pollen)")
     p.add_argument("--dev", action=argparse.BooleanOptionalAction, help="dev config (SPEC 12)")
     p.add_argument(

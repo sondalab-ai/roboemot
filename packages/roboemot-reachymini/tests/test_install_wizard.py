@@ -297,3 +297,37 @@ def test_daemon_api_against_simulator():
     assert real.startup_app() is None
     with pytest.raises(wiz.WizardError, match="HTTP 400"):
         real.set_startup_app("roboemot-not-installed")
+
+
+def test_pick_host_takes_first_robot_found(monkeypatch):
+    found = [
+        ("Neve  192.168.88.198  (reachy-mini.local)", "192.168.88.198"),
+        ("Bo  10.0.0.9", "10.0.0.9"),
+    ]
+    monkeypatch.setattr(wiz, "find_robots", lambda: found)
+    assert wiz.pick_host(quiet_ui()) == "192.168.88.198"
+
+
+def test_pick_host_other_asks_for_host(monkeypatch):
+    monkeypatch.setattr(wiz, "find_robots", lambda: [("Neve", "192.168.88.198")])
+    ui = quiet_ui()
+    ui.choose = lambda question, options: len(options) - 1
+    assert wiz.pick_host(ui) == wiz.DEFAULT_HOST
+
+
+@pytest.mark.parametrize("found", [[], RuntimeError("discovery needs zeroconf")])
+def test_pick_host_falls_back_to_default(monkeypatch, found):
+    def fake():
+        if isinstance(found, Exception):
+            raise found
+        return found
+
+    monkeypatch.setattr(wiz, "find_robots", fake)
+    assert wiz.pick_host(quiet_ui()) == wiz.DEFAULT_HOST
+
+
+def test_choose_reprompts_until_valid(monkeypatch):
+    ui = wiz.Ui(interactive=True, assume_yes=False)
+    answers = iter(["9", "x", "2"])
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+    assert ui.choose("Which robot?", ["a", "b"]) == 1

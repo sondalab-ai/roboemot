@@ -14,6 +14,7 @@ Notes for coding agents are in [`CLAUDE.md`](CLAUDE.md).
 | --- | --- | --- |
 | Layered configuration, presets, guardrails, hot reload | 11A | Done, tested. Every change from any layer is checked as a whole candidate config against an admin-approved baseline; runtime approvals lapse with their override |
 | Robot manifest, limits, capability negotiation | 4, 12 | Done, tested |
+| Robot discovery on the LAN (mDNS, declared per manifest) | 4 | Done, tested; found Reachy Mini Wireless on a real LAN |
 | Arbiter + safety limiter (Python reference) | 10, 12 | Done; two independent reviews; property and fuzz tests (limits, velocity, acceleration, 65 deg coupling with a 3 deg planning margin) |
 | Arbiter + safety limiter in C++ (`rt/`) | 10 | Matches the reference on 600-tick golden vectors (tolerance 1e-9); same input validation; not yet a running process |
 | Reachy Mini driver, motion loop, app wrapper | 4A | `pytest -m sim` passes against the MuJoCo simulator (command-to-state 37-55 ms measured on a cloud dev container, not a CM4); not yet run on the real robot |
@@ -34,6 +35,7 @@ pip install -e "packages/roboemot-core[dev]" -e "packages/roboemot-reachymini[de
 pytest                                    # unit tests
 roboemot config validate --app configs/companion.yaml --preset curious
 roboemot manifest check configs/manifests/reachy-mini-wireless.yaml --dev
+roboemot discover                         # robots on the LAN, matched to configs/manifests
 cmake -S rt -B rt/build && cmake --build rt/build && ctest --test-dir rt/build
 ```
 
@@ -54,7 +56,8 @@ python scripts/install_on_robot.py --dry-run   # read-only checks; nothing on th
 python scripts/install_on_robot.py             # install, verify, optionally start
 ```
 
-It asks for the robot's host (default `reachy-mini.local`) and SSH user (default `pollen`);
+It lists the robots it finds on the network by mDNS (or asks for a host, default
+`reachy-mini.local`) and asks for the SSH user (default `pollen`);
 `ssh` asks for the password once per run (`ssh-copy-id pollen@reachy-mini.local` avoids it).
 Then it checks the daemon, architecture and Python of the robot's apps venv, builds the wheels
 locally, installs them into `/venvs/apps_venv`, and checks that the daemon lists the app. If

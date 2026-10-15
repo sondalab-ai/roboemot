@@ -107,12 +107,20 @@ class Safety(_M):
     watchdog_ms: float = Field(200, gt=0)
 
 
+class Discovery(_M):
+    """How the robot announces itself on the LAN (SPEC 4, Discovery)."""
+
+    mdns_service: str = Field(pattern=r"^_[a-z0-9-]+\._(tcp|udp)$")
+    match_txt: dict[str, str] = {}  # TXT values that must match, e.g. {model: ...}
+
+
 class RobotInfo(_M):
     id: str
     driver: str | None = None
     profile: Literal["cm4", "npu"] | None = None
     frame: str | None = None
     connection: dict[str, Any] | None = None
+    discovery: Discovery | None = None
 
 
 class ManifestModel(_M):

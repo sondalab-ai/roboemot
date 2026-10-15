@@ -1,10 +1,12 @@
-"""Command line: ``roboemot config {validate,schema,dump}`` and ``roboemot manifest check``."""
+"""Command line: ``roboemot config {validate,schema,dump}``, ``roboemot manifest check`` and
+``roboemot discover``."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 import yaml
@@ -19,6 +21,25 @@ def _stack(args: argparse.Namespace) -> ConfigStack:
         preset_dirs=[Path(p) for p in args.preset_dir],
         app=Path(args.app) if args.app else None,
     )
+
+
+def _discover(args: argparse.Namespace) -> int:
+    """List robots answering on the LAN, matched to the manifests in ``--manifest-dir``."""
+    from . import discovery
+
+    hints = discovery.load_hints(sorted(Path(args.manifest_dir).glob("*.yaml")))
+    timeout = args.timeout if args.timeout is not None else discovery.DEFAULT_TIMEOUT_S
+    found = discovery.discover(hints, timeout)
+    if args.json:
+        rows = [{"manifest": f.manifest_id, "address": f.address} | asdict(f.record) for f in found]
+        print(json.dumps(rows, indent=2))
+    elif not found:
+        looked_for = ", ".join(h.id for h in hints) or "no manifest declares discovery"
+        print(f"no robot found ({looked_for})")
+    for f in [] if args.json else found:
+        r = f.record
+        print(f"{r.name}  {f.manifest_id}  {f.address}:{r.port}  ({r.host})")
+    return 0 if found else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -36,6 +57,11 @@ def main(argv: list[str] | None = None) -> int:
     man.add_argument("action", choices=["check"])
     man.add_argument("path")
     man.add_argument("--dev", action="store_true", help="allow unmeasured dynamics")
+
+    disc = sub.add_parser("discover", help="find robots on the LAN by mDNS (SPEC 4)")
+    disc.add_argument("--manifest-dir", default="configs/manifests")
+    disc.add_argument("--timeout", type=float, default=None, help="seconds to listen")
+    disc.add_argument("--json", action="store_true")
 
     args = parser.parse_args(argv)
     try:
@@ -55,7 +81,9 @@ def main(argv: list[str] | None = None) -> int:
             m = load_manifest(Path(args.path), allow_unmeasured_dynamics=args.dev)
             print(f"manifest {m.robot.id} valid; capabilities: {sorted(m.capabilities())}")
             return 0
-    except (ConfigError, ValueError) as exc:
+        if args.cmd == "discover":
+            return _discover(args)
+    except (ConfigError, ValueError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     return 2

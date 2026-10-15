@@ -16,7 +16,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6"]
+# Finding robots on the LAN by mDNS (roboemot discover, the install wizard); not needed on the robot.
+discovery = ["zeroconf>=0.132"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6", "zeroconf>=0.132"]
 
 [project.scripts]
 roboemot = "roboemot.cli:main"

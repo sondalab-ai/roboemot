@@ -140,6 +140,18 @@ safety:
 
 URDF is accepted as an optional `kinematics:` reference for robots with real chains; simple robots need only the joint list.
 
+### Discovery
+
+A robot that announces itself on the LAN declares it in its manifest, so finding robots stays robot-agnostic:
+
+```yaml
+robot:
+  id: reachy-mini-wireless
+  discovery: {mdns_service: _reachy-mini._tcp, match_txt: {model: Reachy Mini Wireless}}
+```
+
+`roboemot.discovery` browses the mDNS service types that the manifests declare and pairs each answering robot with the first manifest whose service type and TXT values match (`match_txt` tells apart robots sharing a service, such as Reachy Mini Wireless and Lite). It prefers IPv4, because `.local` names often resolve to link-local IPv6 first, and falls back to the OS resolver when a responder sends its SRV and TXT records but not its addresses. `roboemot discover` lists the robots found; the install wizard offers them as a pick list. The mDNS dependency (`zeroconf`) is an optional extra, never installed on the robot. A robot without mDNS, such as an ESP32-S3 head on USB, omits `discovery` and is addressed directly.
+
 ### Driver interfaces
 
 | Interface | Methods | Notes |
@@ -231,6 +243,7 @@ robot:
   driver: reachy_mini_sdk
   profile: cm4                    # CPU-only, runs on the robot's CM4
   connection: {mode: localhost_only, media_backend: local}
+  discovery: {mdns_service: _reachy-mini._tcp, match_txt: {model: Reachy Mini Wireless}}
 pose_groups:                      # SDK addresses poses, not servos
   head:
     type: pose6d

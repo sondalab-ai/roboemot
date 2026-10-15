@@ -6,6 +6,8 @@ robot:
   driver: reachy_mini_sdk
   profile: cm4                    # CPU-only, runs on the robot's CM4
   connection: {mode: localhost_only, media_backend: local}
+  # The daemon announces _reachy-mini._tcp with TXT model/robot_name/version (SDK 1.11).
+  discovery: {mdns_service: _reachy-mini._tcp, match_txt: {model: Reachy Mini Wireless}}
 pose_groups:                      # the SDK addresses poses, not servos
   head:
     type: pose6d
