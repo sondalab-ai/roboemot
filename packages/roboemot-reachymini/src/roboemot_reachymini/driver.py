@@ -16,6 +16,9 @@ Facts from the SDK source (reachy_mini 1.11) that shape this driver:
 - The state getters return the last cached values even on a dead connection; only
   ``WSClient._is_alive`` (refreshed every second from the state stream) tells, so
   :meth:`read_state` checks it.
+- The motor mode is in the daemon status the client receives
+  (``backend_status.motor_control_mode``: enabled, disabled, gravity_compensation).
+- Checked against the v1.11.0 source (the robot's version) and run against 1.12.0 in MuJoCo.
 """
 
 from __future__ import annotations
@@ -78,6 +81,14 @@ class ReachyMiniDriver(PoseGroupDriver):
         state["body_yaw"] = float(head_joints[0])  # first head joint is the body rotation
         state.update(zip(ANTENNAS, (float(a) for a in antennas), strict=True))
         return state
+
+    def motors_enabled(self) -> bool | None:
+        """From the last daemon status; None until one has arrived."""
+        client = self.mini.client
+        if getattr(client, "_last_status", None) is None:
+            return None
+        backend = client.get_status(wait=False).backend_status
+        return None if backend is None else backend.motor_control_mode == "enabled"
 
     def reconnect(self, timeout_s: float) -> None:
         """New SDK websocket to the same daemon; body yaw is the arbiter's again afterwards."""

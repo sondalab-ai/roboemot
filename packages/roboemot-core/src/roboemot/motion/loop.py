@@ -13,11 +13,16 @@ Safety properties (independent review fixes):
 
 Robot link (SPEC 12A): ``connectivity.robot.failures_to_offline`` failed ticks in a row mark
 the link lost (``link.robot.lost``). The loop then stops writing and retries ``read_state``
-with backoff, calling ``driver.reconnect`` when a check fails; on recovery it re-enables the
-motors (if active), re-aligns the limiter and the arbiter to the measured pose, and only then
-reports ``link.robot.restored``, so motion resumes
-from where the robot really is, under the velocity and acceleration limits, without a jump.
-Sources keep feeding the arbiter meanwhile. A robot unreachable at ``start`` begins lost.
+with backoff, calling ``driver.reconnect`` when a check fails; on recovery it re-aligns the
+limiter and the arbiter to the measured pose and only then reports ``link.robot.restored``, so
+motion resumes from where the robot really is, under the velocity and acceleration limits.
+Only driver failures count against the link, not faults in RoboEmot's own code.
+
+Motors (SPEC 4A, 12A): the loop never turns the motors on after start-up. It polls
+``driver.motors_enabled`` every ``probe_initial_s``; while the platform keeps them off (robot
+asleep, stopped by its owner, a backend restarted without wake-up) it follows the measured pose
+without writing, and resumes from that pose once they are on again. Sources keep feeding the
+arbiter meanwhile. A robot unreachable at ``start`` begins lost.
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ import math
 import threading
 import time
 from collections.abc import Callable
+from typing import Any
 
 from ..config.schema import RoboEmotConfig
 from ..drivers import MotorMode, PoseGroupDriver
@@ -36,6 +42,10 @@ from .core import Command, MotionCore
 
 MS_PER_S = 1000.0
 log = logging.getLogger(__name__)
+
+
+class DriverError(RuntimeError):
+    """A driver call failed: counts against the robot link (SPEC 12A)."""
 
 
 class MotionLoop:
@@ -72,6 +82,8 @@ class MotionLoop:
         self.errors = 0
         self.last_error: str | None = None
         self.max_jitter_s = 0.0
+        self.motors_off = False  # the platform holds the motors off: track, do not write
+        self._next_motor_check = -math.inf
 
     # ---- configuration (SPEC 11A hot reload)
 
@@ -124,33 +136,60 @@ class MotionLoop:
 
     def step_once(self, now: float, dt: float) -> dict[str, float]:
         with self._lock:
-            if self.mode != "active":
-                # limp / teach: follow the measured pose so re-enabling never jumps
+            if self.mode != "active" or self.motors_off:
+                # limp / teach / motors held off by the platform: follow the measured pose so
+                # re-enabling never jumps
                 state = self._resync()
                 self.ticks += 1
                 return state
             out = self.core.tick(now, dt)
-            self.driver.write_pose_targets(now, out)
+            self._call(self.driver.write_pose_targets, now, out)
             self.ticks += 1
             return out
 
     def _resync(self) -> dict[str, float]:
-        state = {k: v for k, v in self.driver.read_state().items() if k in self.core.limiter.pos}
+        measured = self._call(self.driver.read_state)
+        state = {k: v for k, v in measured.items() if k in self.core.limiter.pos}
         self.core.limiter.reset(state)
         self.core.arbiter.last = {**self.core.arbiter.last, **state}
         return state
+
+    @staticmethod
+    def _call(fn: Callable[..., Any], *args: Any) -> Any:
+        """Driver call; its failures count against the robot link, ours do not."""
+        try:
+            return fn(*args)
+        except Exception as exc:
+            raise DriverError(f"{type(exc).__name__}: {exc}") from exc
 
     def cycle(self, now: float, dt: float) -> None:
         """One loop period: a tick while the robot link is up, else a due recovery check."""
         if self.link.online:
             try:
+                self._check_motors(now)
                 self.step_once(now, dt)
                 self.link.report(True, now)
-            except Exception as exc:  # keep the loop alive; the watchdog covers missed ticks
+            except DriverError as exc:  # the watchdog covers missed ticks
                 self._note_error(exc)
                 self.link.report(False, now)
+            except Exception as exc:  # a fault in RoboEmot itself: not a robot link problem
+                self._note_error(exc)
         elif self.link.due(now):
             self._try_recover(now)
+
+    def _check_motors(self, now: float) -> None:
+        """Track whether the platform keeps the motors off (asleep, stopped by its owner).
+        The loop never turns them on itself (SPEC 4A, 12A); it resumes when they are on."""
+        if self.mode != "active" or now < self._next_motor_check:
+            return
+        self._next_motor_check = now + self.link.policy.probe_initial_s
+        enabled = self._call(self.driver.motors_enabled)
+        if enabled is None:
+            return
+        if enabled and self.motors_off:
+            with self._lock:
+                self._resync()  # resume from wherever the platform's wake-up left the robot
+        self.motors_off = not enabled
 
     def _note_error(self, exc: Exception) -> None:
         self.errors += 1
@@ -158,7 +197,7 @@ class MotionLoop:
         log.warning("motion: %s", self.last_error)
 
     def _try_recover(self, now: float) -> None:
-        """One recovery check; the final one also restores the motors and the pose."""
+        """One recovery check; the confirming one re-aligns to the measured pose."""
         try:
             self._probe()
             ok = True
@@ -177,9 +216,8 @@ class MotionLoop:
         with self._lock:
             self.driver.read_state()
             if self.link.would_restore():
-                if self.mode == "active":
-                    self.driver.set_mode("active")
                 self._resync()
+                self._next_motor_check = -math.inf  # learn the motor state on the next tick
 
     def _run(self) -> None:
         period = 1.0 / self.rate_hz

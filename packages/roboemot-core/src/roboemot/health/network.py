@@ -1,14 +1,16 @@
 """Reachability of the LLM routes (SPEC 12A; routes in SPEC 8).
 
 Each route gets a :class:`~roboemot.health.Link`. Real requests report their outcome
-(``report``); a background thread checks due routes with a TCP connect to the route's host and
-port, which needs no API feature beyond the OpenAI-compatible subset and no credentials. The
-aggregate ``network`` link is online while any route is: it emits ``link.network.lost`` when
-the last route goes down and ``link.network.restored`` when one comes back.
+(``report``), or ask for a prompt check after a timeout (``recheck``). A background thread
+checks due routes with a TCP connect to the route's host and port, which needs no API feature
+beyond the OpenAI-compatible subset and no credentials. The aggregate ``network`` link is
+online while any route is: it emits ``link.network.lost`` when the last route goes down and
+``link.network.restored`` when one comes back.
 """
 
 from __future__ import annotations
 
+import math
 import socket
 import threading
 import time
@@ -73,6 +75,11 @@ class NetworkMonitor:
         """Outcome of a real request on ``route`` (passive detection)."""
         if route in self.links:
             self.links[route].report(ok, self.clock() if now is None else now)
+
+    def recheck(self, route: str) -> None:
+        """Check ``route`` at the next opportunity (after a timeout: slow, or unreachable?)."""
+        if route in self.links:
+            self.links[route].next_check = -math.inf
 
     def check_due(self, now: float | None = None) -> None:
         """Run the checks that are due (blocking up to ``probe_timeout_s`` each)."""

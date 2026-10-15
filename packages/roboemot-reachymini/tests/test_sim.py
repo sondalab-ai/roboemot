@@ -145,9 +145,13 @@ def test_robot_link_recovers_after_daemon_backend_restart(mini):
         while "link.robot.restored" not in events and time.monotonic() < deadline:
             time.sleep(0.2)
         assert events == ["link.robot.lost", "link.robot.restored"]
+        # The MuJoCo backend ignores motor-mode changes (always "enabled"), so the motors-off
+        # path is covered by unit tests (test_health.py); here streaming must simply resume.
+        assert loop.driver.motors_enabled() is True
         ticks = loop.ticks
         time.sleep(1.0)
-        assert loop.ticks > ticks  # streaming again
+        assert loop.ticks > ticks
+        assert not loop.motors_off and loop.link.online
     finally:
         stop.set()
         loop.stop()

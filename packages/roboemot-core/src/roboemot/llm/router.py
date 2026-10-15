@@ -8,8 +8,9 @@ token arrives later than ``first_token_timeout_s``, as long as nothing was yield
 
 With a :class:`~roboemot.health.network.NetworkMonitor` (SPEC 12A), routes known to be
 unreachable are skipped without waiting for their timeouts, every request reports whether its
-route was reachable, and when no route is reachable :class:`Offline` is raised at once so the
-caller can answer nonverbally instead of leaving the robot waiting.
+route was reachable (a timeout only asks for a prompt reachability check), and when no route
+is reachable :class:`Offline` is raised at once, so the caller can answer nonverbally instead
+of leaving the robot waiting.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
-from openai import APIConnectionError, APIStatusError, AsyncOpenAI
+from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
 
 from ..config.schema import LLMRoute, SafetyConfig
 from ..health.network import NetworkMonitor
@@ -63,7 +64,9 @@ class Offline(NoRouteAvailable):
     """No route is reachable (SPEC 12A): reply nonverbally, do not wait for timeouts."""
 
 
-UNREACHABLE = (APIConnectionError, TimeoutError, OSError)  # APITimeoutError included
+# A timeout may be a slow model on a fine network: it triggers a reachability check instead.
+SLOW = (TimeoutError, APITimeoutError)
+UNREACHABLE = (APIConnectionError, OSError)  # checked after SLOW (both contain timeouts)
 
 
 @dataclass
@@ -144,7 +147,10 @@ class Router:
                 return
             except Exception as exc:  # CancelledError/GeneratorExit are not caught
                 self.failures.append((route.name, type(exc).__name__))
-                if isinstance(exc, UNREACHABLE):
+                if isinstance(exc, SLOW):
+                    if self.monitor:
+                        self.monitor.recheck(route.name)
+                elif isinstance(exc, UNREACHABLE):
                     self._reachable(route, False)
                 elif isinstance(exc, APIStatusError):
                     self._reachable(route, True)  # the server answered: the network is fine

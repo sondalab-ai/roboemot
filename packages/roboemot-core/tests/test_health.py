@@ -233,6 +233,28 @@ async def test_connection_errors_take_the_network_offline():
     assert "link.network.lost" in ev
 
 
+async def test_slow_but_reachable_route_never_goes_offline():
+    """A timeout asks for a TCP check; the check says reachable, so the network stays up."""
+    import asyncio
+
+    ev, clock = Events(), Clock()
+    mon = monitor({"cloud": True, "lan": True}, ev, clock)
+    mon.routes, mon.links = mon.routes[:1], {"cloud": mon.links["cloud"]}
+
+    async def slow(request):
+        await asyncio.sleep(1.0)  # past the 0.3 s first-token timeout
+        return ok_handler(request)
+
+    r = router_with(mon, slow)
+    for _ in range(5):
+        with pytest.raises(NoRouteAvailable) as e:
+            await collect(r)
+        assert not isinstance(e.value, Offline)
+        assert mon.links["cloud"].due(clock())  # a check was requested
+        mon.check_due()
+    assert mon.online and ev == []
+
+
 async def test_http_errors_mean_reachable():
     mon = monitor({"cloud": True, "lan": True}, Events(), Clock())
     r = router_with(mon, lambda request: httpx.Response(503, json={"error": {"message": "x"}}))
@@ -310,7 +332,7 @@ def test_robot_link_lost_then_recovered_without_jump():
     driver.down = False
     t = drive(loop, t, CFG.connectivity.robot.probe_max_s * 2, yaw=0.3)  # backoff + confirmation
     assert ev == ["link.robot.lost", "link.robot.restored"] and loop.link.online
-    assert driver.modes[-1] == "active"  # motors re-enabled before streaming again
+    assert driver.modes == ["active"]  # recovery never re-enables the motors itself
     resumed = [v["head.yaw"] for _, v in driver.writes[writes_while_down:]]
     vmax = DOFS["head.yaw"].max_vel
     assert resumed[0] == pytest.approx(-0.5, abs=vmax * 0.02 + 1e-9)  # from the real pose
@@ -318,7 +340,7 @@ def test_robot_link_lost_then_recovered_without_jump():
     assert resumed[-1] == pytest.approx(0.3, abs=1e-6)
 
 
-def test_robot_unreachable_at_start_recovers_in_the_loop():
+def test_robot_unreachable_at_start_waits_for_the_platform_to_enable_motors():
     ev = Events()
     driver = FlakyDriver(home={"head.pitch": 0.0, "head.yaw": 0.0})
     driver.down = True
@@ -327,29 +349,50 @@ def test_robot_unreachable_at_start_recovers_in_the_loop():
     loop.stop()
     assert ev == ["link.robot.lost"] and loop.mode == "active"
     driver.down = False
-    drive(loop, 10.0, 2.0)
-    assert ev[-1] == "link.robot.restored" and driver.mode == "active" and driver.writes
+    t = drive(loop, 10.0, CFG.connectivity.robot.probe_max_s * 2)
+    assert ev[-1] == "link.robot.restored"
+    assert driver.modes == [] and driver.writes == []  # never enabled the motors itself
+    driver.mode = "active"  # the platform wakes the robot
+    drive(loop, t, 1.0)
+    assert driver.writes and driver.modes == []
 
 
-def test_recovery_failing_at_motor_enable_stays_lost():
+def test_motors_turned_off_by_platform_are_tracked_not_overridden():
+    """SPEC 4A, 12A: a restart without wake-up (or the robot put to sleep) must not be undone."""
     ev = Events()
     driver = FlakyDriver(home={"head.pitch": 0.0, "head.yaw": 0.0})
     loop = loop_with(driver, ev)
     loop.set_mode("active")
+    t = drive(loop, 0.0, 0.5, yaw=0.3)
     driver.down = True
-    t = drive(loop, 0.0, 1.0)
-    driver.down = False
-    original = driver.set_mode
+    t = drive(loop, t, 1.0, yaw=0.3)
+    driver.down, driver.mode = False, "limp"  # daemon back, motors off
+    driver.home = {"head.pitch": 0.2, "head.yaw": -0.4}  # sleep pose
+    n = len(driver.writes)
+    t = drive(loop, t, CFG.connectivity.robot.probe_max_s * 2, yaw=0.3)
+    assert ev == ["link.robot.lost", "link.robot.restored"]
+    assert len(driver.writes) == n and driver.modes == ["active"]  # only the initial enable
+    assert loop.motors_off
+    driver.mode = "active"  # woken by the platform
+    drive(loop, t, 3.0, yaw=0.3)
+    resumed = [v["head.yaw"] for _, v in driver.writes[n:]]
+    vmax = DOFS["head.yaw"].max_vel
+    assert resumed[0] == pytest.approx(-0.4, abs=vmax * 0.02 + 1e-9)  # from the sleep pose
+    assert resumed[-1] == pytest.approx(0.3, abs=1e-6) and not loop.motors_off
 
-    def refuse(mode):
-        raise RuntimeError("motors unpowered")
 
-    driver.set_mode = refuse
-    t = drive(loop, t, 3.0)
-    assert ev == ["link.robot.lost"] and not loop.link.online
-    driver.set_mode = original
-    drive(loop, t, 10.0)
-    assert ev[-1] == "link.robot.restored"
+def test_own_faults_do_not_take_the_robot_link_down():
+    ev = Events()
+    driver = FlakyDriver(home={"head.pitch": 0.0, "head.yaw": 0.0})
+    loop = loop_with(driver, ev)
+    loop.set_mode("active")
+
+    def broken(now, dt):
+        raise ValueError("bug in the arbiter")
+
+    loop.core.tick = broken
+    drive(loop, 0.0, 2.0)
+    assert ev == [] and loop.link.online and loop.errors == 100
 
 
 # ---------------------------------------------------------------- responder
