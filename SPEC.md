@@ -789,6 +789,25 @@ Every outside dependency is a link with an online or offline state. A link goes 
 - A spoken cue, `connectivity.offline_phrases[language]`, is said once per outage and on speech while offline, at most every `cue_cooldown_s`. It goes through the voice pipeline once TTS is wired (section 8); until then it is silent.
 - Gestures are additive primitives (section 10) over whichever of their dofs the manifest declares, so robots without antennas or head roll show the part they can.
 
+### Diagnostics
+
+A debug report describes the robot state, hardware, resource use, system and battery in one JSON document. The CLI prints it (`roboemot debug`), and the running app keeps the same report in a registry, so the web page (M1) only has to serve it as JSON.
+
+- **Sections.** Each source fills one named section with `ok` and `data`, or `ok: false` and `error`. Sources run in parallel, each with its own time limit, so a failed or hung source shows as an error and the rest still report. The report holds plain JSON values only, and any field whose name contains key, token, secret, password or credential is redacted. Frames, audio and embeddings never appear in it (section 12).
+- **Scope.** Each section says where its data comes from:
+  - `local`: the machine that builds the report. This covers OS and board, uptime, CPU, memory, disks and network interfaces. It also covers temperatures, plus Raspberry Pi throttling and under-voltage flags. It also covers battery and power supplies: the OS battery summary and `/sys/class/power_supply` in SI units. Values the platform does not report are left out and labelled, never guessed. The `process` section is the app process.
+  - `robot`: the robot's platform.
+  - `runtime`: the running app. This covers the motion loop (mode, motors off, ticks, overruns, errors, jitter, robot link), the network links per route (endpoint only), and the manifest and mood.
+- **Robot-agnostic.** Generic sources live in the core. A platform package registers its robot sources in the `roboemot.diagnostics` entry-point group under the manifest's `robot.id`. A robot with no registered sources still gets the generic sections, plus a section saying that no platform sources are installed.
+- **Reachy Mini.** Read-only daemon calls (1.11):
+  - `robot.daemon`: `/api/daemon/status`, with version, hardware id, backend control-loop stats and errors;
+  - `robot.motors`: `/api/motors/status`;
+  - `robot.state`: `/api/state/full`, with joints, direction of arrival and IMU (including board temperature);
+  - `robot.app`: `/api/apps/current-app-status`.
+
+  The daemon reports no battery, CPU or memory data, so those come only from the `local` sections built on the robot.
+- **Remote use.** `roboemot debug --host <robot>` or `--discover` from a PC returns only the robot's platform sections. The `local` sections would describe the PC, so they are left out and the report says so. To get them, run the command on the robot over SSH.
+
 ## 13. Reference hardware and performance budgets
 
 v1's primary reference is Reachy Mini Wireless running the `cm4` profile on its Raspberry Pi CM4 (4x Cortex-A72, no NPU); NPU boards run the `npu` profile with the same API. NPU figures are vendor peak numbers from memory, approximate; all `cm4` rates and budgets below are targets to validate in M0, not measurements.

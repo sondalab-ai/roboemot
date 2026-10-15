@@ -10,7 +10,7 @@ section number in commit messages that implement or change behaviour.
 | Path | What |
 | --- | --- |
 | `SPEC.md` | Engineering spec (export of the shared doc; edit the doc, then re-export) |
-| `packages/roboemot-core/` | Python package `roboemot`: config, manifest, discovery, health (connectivity), motion reference, affect, circadian, LLM router, bus |
+| `packages/roboemot-core/` | Python package `roboemot`: config, manifest, discovery, health (connectivity), diagnostics (debug report), motion reference, affect, circadian, LLM router, bus |
 | `packages/roboemot-reachymini/` | Python package `roboemot_reachymini`: Reachy Mini driver and SDK bridge |
 | `rt/` | C++ real-time core (`roboemot-rt`): arbiter and safety limiter, CMake + ctest |
 | `configs/` | Library defaults, robot manifests, personality presets |
@@ -34,6 +34,8 @@ section number in commit messages that implement or change behaviour.
   `tools` with `tool_choice="auto"`, `max_tokens`. Do not rely on `response_format`,
   forced tool choice, `seed` or non-default sampling.
 - **Privacy (SPEC 12):** never write frames, audio or embeddings to logs.
+- **Diagnostics (SPEC 12A):** robot-specific debug sources are registered in the
+  `roboemot.diagnostics` entry-point group under the manifest `robot.id`; core stays robot-agnostic.
 
 ## Commands
 
@@ -46,6 +48,7 @@ pytest -m sim                            # integration tests against the simulat
 cmake -S rt -B rt/build && cmake --build rt/build && ctest --test-dir rt/build
 ruff check . && ruff format --check .
 python scripts/install_on_robot.py --dry-run   # read-only checks against the real robot
+roboemot debug --host <robot> --json     # debug report (SPEC 12A); system/battery need it run on the robot
 ```
 
 ## Conventions

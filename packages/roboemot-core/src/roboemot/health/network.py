@@ -81,6 +81,17 @@ class NetworkMonitor:
         if route in self.links:
             self.links[route].next_check = -math.inf
 
+    def snapshot(self) -> dict[str, object]:
+        """Aggregate and per-route state for diagnostics; endpoints only, never credentials."""
+        now = self.clock()
+        routes = {}
+        for route in self.routes:
+            host, port = route_endpoint(route)
+            routes[route.name] = {"endpoint": f"{host}:{port}"} | self.links[route.name].snapshot(
+                now
+            )
+        return {"online": self.online, "routes": routes}
+
     def check_due(self, now: float | None = None) -> None:
         """Run the checks that are due (blocking up to ``probe_timeout_s`` each)."""
         now = self.clock() if now is None else now

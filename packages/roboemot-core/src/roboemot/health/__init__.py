@@ -64,6 +64,16 @@ class Link:
         """True if one more success brings the link back online."""
         return not self.online and self._oks + 1 >= self.policy.successes_to_online
 
+    def snapshot(self, now: float) -> dict[str, object]:
+        """State for diagnostics (SPEC 12A); safe to call from any thread."""
+        with self._lock:
+            return {
+                "online": self.online,
+                "consecutive_failures": self._fails,
+                "consecutive_successes": self._oks,
+                "next_check_in_s": max(0.0, self.next_check - now),
+            }
+
     def due(self, now: float) -> bool:
         return now >= self.next_check
 

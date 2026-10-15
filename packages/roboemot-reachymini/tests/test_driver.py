@@ -228,3 +228,33 @@ def test_reconnect_failure_keeps_old_client(monkeypatch):
     with pytest.raises(TimeoutError):
         ReachyMiniDriver(mini).reconnect(0.5)
     assert mini.client is old and not old.disconnected
+
+
+# ---------------------------------------------------------------- diagnostics (SPEC 12A)
+
+
+def test_diagnostics_sources_read_the_daemon_api():
+    import httpx
+    from roboemot.diagnostics import Target, collect, platform_sources
+    from roboemot_reachymini import diagnostics
+
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.path, dict(request.url.params)))
+        if request.url.path == "/api/apps/current-app-status":
+            return httpx.Response(500, json={"detail": "boom"})
+        return httpx.Response(200, json={"path": request.url.path})
+
+    client = httpx.Client(base_url="http://robot:8000", transport=httpx.MockTransport(handler))
+    report = collect(diagnostics.sources(Target("robot"), client))
+    s = report["sections"]
+    assert s["robot.daemon"]["data"] == {"path": "/api/daemon/status"}
+    assert s["robot.motors"]["ok"] and s["robot.state"]["ok"]
+    assert s["robot.app"]["ok"] is False and "500" in s["robot.app"]["error"]
+    state_params = dict(seen)["/api/state/full"]
+    assert state_params["with_imu"] == "true"
+    assert {sec["scope"] for sec in s.values()} == {"robot"}
+    # registered under the manifest id (entry point installed with the package)
+    names = [src.name for src in platform_sources("reachy-mini-wireless", Target())]
+    assert names == ["robot.daemon", "robot.motors", "robot.state", "robot.app"]

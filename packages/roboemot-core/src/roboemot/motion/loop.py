@@ -117,6 +117,22 @@ class MotionLoop:
                 self._resync()  # the robot may have been moved by hand: start from there
             self.mode = mode
 
+    def snapshot(self) -> dict[str, object]:
+        """Loop health for diagnostics (SPEC 12A); safe to call from any thread."""
+        with self._lock:
+            out: dict[str, object] = {
+                "mode": self.mode,
+                "motors_off": self.motors_off,
+                "rate_hz": self.rate_hz,
+                "ticks": self.ticks,
+                "overruns": self.overruns,
+                "errors": self.errors,
+                "last_error": self.last_error,
+                "max_jitter_s": self.max_jitter_s,
+                "running": self._thread is not None and self._thread.is_alive(),
+            }
+        return out | {"robot_link": self.link.snapshot(self.clock())}
+
     # ---- lifecycle
 
     def start(self) -> None:

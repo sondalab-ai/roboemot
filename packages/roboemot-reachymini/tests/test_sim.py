@@ -155,3 +155,15 @@ def test_robot_link_recovers_after_daemon_backend_restart(mini):
     finally:
         stop.set()
         loop.stop()
+
+
+def test_debug_report_against_the_simulated_daemon():
+    """SPEC 12A, Diagnostics: every daemon section answers; IMU is null in simulation."""
+    from roboemot.diagnostics import Target, collect, platform_sources
+
+    report = collect(platform_sources("reachy-mini-wireless", Target()))
+    s = report["sections"]
+    assert all(sec["ok"] for sec in s.values()), s
+    assert s["robot.daemon"]["data"]["simulation_enabled"] is True
+    assert s["robot.motors"]["data"]["mode"] in ("enabled", "disabled", "gravity_compensation")
+    assert s["robot.state"]["data"]["imu"] is None

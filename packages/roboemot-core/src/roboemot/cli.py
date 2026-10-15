@@ -1,5 +1,5 @@
-"""Command line: ``roboemot config {validate,schema,dump}``, ``roboemot manifest check`` and
-``roboemot discover``."""
+"""Command line: ``roboemot config {validate,schema,dump}``, ``roboemot manifest check``,
+``roboemot discover`` and ``roboemot debug``."""
 
 from __future__ import annotations
 
@@ -42,6 +42,46 @@ def _discover(args: argparse.Namespace) -> int:
     return 0 if found else 1
 
 
+def _debug(args: argparse.Namespace) -> int:
+    """Print the debug report (SPEC 12A, Diagnostics) for this machine and its robot."""
+    from . import diagnostics
+    from .diagnostics.system import local_sources
+
+    host, port, robot = args.host, args.port, args.robot
+    if args.discover:
+        from . import discovery
+
+        hints = discovery.load_hints(sorted(Path(args.manifest_dir).glob("*.yaml")))
+        found = discovery.discover(hints)
+        if not found:
+            raise RuntimeError("no robot found on the LAN")
+        host, port, robot = found[0].address, found[0].record.port, robot or found[0].manifest_id
+    installed = diagnostics.installed_platforms()
+    if robot is None and len(installed) == 1:
+        robot = installed[0]
+    target = diagnostics.Target(host, port)
+    notes, sources = [], []
+    if target.remote:
+        notes.append(
+            f"system, temperatures and battery describe the machine that runs this command, "
+            f"so they are left out for the remote robot {host}; run `roboemot debug` on the "
+            f"robot (e.g. over ssh) to include them"
+        )
+    else:
+        sources += local_sources(process_match=args.process)
+    if robot is None:
+        notes.append(f"no robot selected (--robot); installed platforms: {installed or 'none'}")
+    else:
+        sources += diagnostics.platform_sources(robot, target)
+    timeout = args.timeout if args.timeout is not None else diagnostics.SECTION_TIMEOUT_S
+    report = diagnostics.collect(sources, timeout_s=timeout, notes=notes)
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(diagnostics.render_text(report))
+    return 0 if all(s["ok"] for s in report["sections"].values()) else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="roboemot")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -63,6 +103,16 @@ def main(argv: list[str] | None = None) -> int:
     disc.add_argument("--timeout", type=float, default=None, help="seconds to listen")
     disc.add_argument("--json", action="store_true")
 
+    dbg = sub.add_parser("debug", help="robot, hardware, resources, system, battery (SPEC 12A)")
+    dbg.add_argument("--robot", help="manifest robot.id (default: the only installed platform)")
+    dbg.add_argument("--host", help="robot address (default: this machine)")
+    dbg.add_argument("--port", type=int, default=None, help="platform API port")
+    dbg.add_argument("--discover", action="store_true", help="find the robot by mDNS")
+    dbg.add_argument("--manifest-dir", default="configs/manifests")
+    dbg.add_argument("--process", default="roboemot", help="command-line match for the app")
+    dbg.add_argument("--timeout", type=float, default=None, help="seconds per section")
+    dbg.add_argument("--json", action="store_true")
+
     args = parser.parse_args(argv)
     try:
         if args.cmd == "config":
@@ -83,6 +133,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.cmd == "discover":
             return _discover(args)
+        if args.cmd == "debug":
+            return _debug(args)
     except (ConfigError, ValueError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

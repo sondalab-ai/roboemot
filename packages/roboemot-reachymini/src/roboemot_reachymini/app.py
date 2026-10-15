@@ -10,6 +10,7 @@ the offline responder's gestures, stop cleanly on ``stop_event``.
 from __future__ import annotations
 
 import math
+import os
 import threading
 import time
 from pathlib import Path
@@ -17,6 +18,8 @@ from typing import Any
 
 from roboemot.affect import AffectEngine
 from roboemot.config import ConfigStack
+from roboemot.diagnostics import Diagnostics, FnSource, Target, platform_sources
+from roboemot.diagnostics.system import local_sources
 from roboemot.health.network import NetworkMonitor
 from roboemot.health.responder import OfflineResponder
 from roboemot.manifest import load_manifest
@@ -41,6 +44,7 @@ def idle_command(cfg: Any, t: float) -> Command:
 
 class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
     custom_app_url: str | None = None  # web UI arrives with enrollment (M1)
+    diagnostics: Diagnostics | None = None
 
     def run(self, reachy_mini: Any, stop_event: threading.Event) -> None:
         stack = ConfigStack.from_files(
@@ -69,6 +73,23 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         # The conversation pipeline (M3) will share this monitor with its Router.
         network = NetworkMonitor(
             cfg.llm_routes, cfg.connectivity.network, on_change=responder.on_event
+        )
+
+        affect = responder.affect
+        self.diagnostics = Diagnostics().add(
+            *local_sources(process_pid=os.getpid()),
+            *platform_sources(manifest.robot.id, Target()),
+            FnSource("roboemot.motion", loop.snapshot),
+            FnSource("roboemot.network", network.snapshot),
+            FnSource(
+                "roboemot.app",
+                lambda: {
+                    "manifest": manifest.robot.id,
+                    "language": stack.effective().conversation.language,
+                    "valence": affect.valence if affect else None,
+                    "arousal": affect.arousal if affect else None,
+                },
+            ),
         )
 
         def reload(change: Any) -> None:

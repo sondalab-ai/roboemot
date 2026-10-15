@@ -455,3 +455,43 @@ def test_no_phrase_for_unknown_language_is_silent():
     r, cue, _ = responder(language="fr")
     r.on_event("link.network.lost", 0.0)
     assert cue.said == []
+
+
+# ---------------------------------------------------------------- snapshots for diagnostics
+
+
+def test_link_snapshot_reports_counters_and_next_check():
+    link = Link("x", POLICY)
+    link.report(False, now=10.0)
+    snap = link.snapshot(now=10.25)
+    assert snap == {
+        "online": True,
+        "consecutive_failures": 1,
+        "consecutive_successes": 0,
+        "next_check_in_s": 0.75,
+    }
+
+
+def test_network_snapshot_lists_routes_by_endpoint_without_credentials():
+    ev, clock = Events(), Clock()
+    mon = monitor({"cloud": False, "lan": False}, ev, clock)
+    run_checks(mon, clock, 3)
+    snap = mon.snapshot()
+    assert snap["online"] is False
+    assert snap["routes"]["cloud"]["endpoint"] == "api.example.com:443"
+    assert snap["routes"]["lan"]["endpoint"] == "lan.local:8080"
+    assert "api_key" not in str(snap)
+
+
+def test_motion_snapshot_reflects_link_loss():
+    ev = Events()
+    driver = FlakyDriver(home=dict.fromkeys(DOFS, 0.0))
+    loop = loop_with(driver, ev)
+    loop.set_mode("active")
+    t = drive(loop, 0.0, 0.2)
+    driver.down = True
+    drive(loop, t, 0.2)
+    snap = loop.snapshot()
+    assert snap["mode"] == "active" and snap["errors"] >= CFG.connectivity.robot.failures_to_offline
+    assert snap["robot_link"]["online"] is False
+    assert "ConnectionError" in snap["last_error"]
