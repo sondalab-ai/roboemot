@@ -13,7 +13,8 @@ dependencies = ["roboemot-core", "numpy>=1.26", "scipy>=1.11"]
 # The SDK pulls GStreamer/PyGObject; keep it optional so unit tests run without it.
 sdk = ["reachy-mini>=1.11"]
 sim = ["reachy-mini[mujoco]>=1.11"]
-dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6"]
+# sondalab-palette: terminal colour roles for scripts/install_on_robot.py (runs on the PC only).
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6", "sondalab-palette>=0.3.8"]
 
 [project.entry-points."reachy_mini_apps"]
 roboemot = "roboemot_reachymini.app:RoboEmotApp"

@@ -14,7 +14,7 @@ section number in commit messages that implement or change behaviour.
 | `packages/roboemot-reachymini/` | Python package `roboemot_reachymini`: Reachy Mini driver and SDK bridge |
 | `rt/` | C++ real-time core (`roboemot-rt`): arbiter and safety limiter, CMake + ctest |
 | `configs/` | Library defaults, robot manifests, personality presets |
-| `scripts/` | Dev helpers (simulation daemon, install script for the robot) |
+| `scripts/` | Dev helpers (simulation daemon, install wizard for the robot: `install_on_robot.py`) |
 
 ## Rules that come from the spec
 
@@ -45,6 +45,7 @@ scripts/sim-daemon.sh &                  # MuJoCo Reachy Mini daemon, headless, 
 pytest -m sim                            # integration tests against the simulated robot
 cmake -S rt -B rt/build && cmake --build rt/build && ctest --test-dir rt/build
 ruff check . && ruff format --check .
+python scripts/install_on_robot.py --dry-run   # read-only checks against the real robot
 ```
 
 ## Conventions

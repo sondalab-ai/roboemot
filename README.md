@@ -45,8 +45,31 @@ scripts/sim-daemon.sh &
 pytest -m sim -s
 ```
 
-On the robot (same LAN): `scripts/install-on-robot.sh --dev` (until dynamics are measured), then start the app from the
-dashboard or `curl -X POST http://reachy-mini.local:8000/api/apps/start-app/roboemot`.
+### On the robot
+
+Run the install wizard from a computer on the same network as the robot (not on the robot):
+
+```bash
+python scripts/install_on_robot.py --dry-run   # read-only checks; nothing on the robot changes
+python scripts/install_on_robot.py             # install, verify, optionally start
+```
+
+It asks for the robot's host (default `reachy-mini.local`) and SSH user (default `pollen`);
+`ssh` asks for the password once per run (`ssh-copy-id pollen@reachy-mini.local` avoids it).
+Then it checks the daemon, architecture and Python of the robot's apps venv, builds the wheels
+locally, installs them into `/venvs/apps_venv`, and checks that the daemon lists the app. If
+asked, it stops the running app (one app at a time), wakes the robot, starts RoboEmot, and makes
+it the startup app (the daemon starts it on the robot's first wake-up). Choose dev mode until
+the manifest dynamics are measured, or the app refuses to start (SPEC 12). Every prompt has a
+flag for unattended runs: `--host`, `--user`, `--dev`, `--start`, `--startup-app`, `--yes`.
+
+Afterwards the app is started and stopped from the Reachy Mini Control desktop app (which
+replaced the web dashboard) or through the daemon's REST API:
+
+```bash
+curl -X POST http://reachy-mini.local:8000/api/apps/start-app/roboemot
+curl -X POST http://reachy-mini.local:8000/api/apps/stop-current-app
+```
 
 ## Licence
 
