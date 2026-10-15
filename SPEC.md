@@ -916,7 +916,7 @@ These are facts to measure, not decisions:
 - [ ] The robot OS is 64-bit (aarch64) and `pollen` has sudo, for native builds and real-time priority.
 - [ ] Velocity and acceleration caps for head, body and antennas, then re-check that the 3 degree planning margin of the head-body coupling (safety.constraint\_margin\_deg) still keeps it under 65 degrees (manifest `dynamics`).
 - [ ] Reflex latency through the Python bridge stays within 100 ms.
-- [ ] Diagnostics (section 12A) on the CM4: whether `/sys/class/power_supply` reports the battery (charge, status, voltage, health); whether the app's user can run `vcgencmd get_throttled`; that `roboemot debug` on the robot finds the app process (the daemon runs it as `python -u -m roboemot_reachymini.main`).
+- [ ] Diagnostics (section 12A) on the CM4. Checked on Neve (CM4 Rev 1.1, kernel 6.18, daemon 1.11.0): `/sys/class/power_supply` is empty, so Linux exposes no battery charge or health, and no fuel-gauge driver is bound; `pollen` can run `vcgencmd get_throttled`, so under-voltage flags (the only supply-health signal) and SoC temperature are reported. Still to check: that `roboemot debug` on the robot finds the app process (the daemon runs it as `python -u -m roboemot_reachymini.main`), and whether the battery board can be read at all (ask Pollen).
 - [ ] Connectivity gestures (section 12A): antenna directions (droop spreads outward, perk-up rises toward vertical; signs inferred from the home pose) and amplitudes look right; behaviour on a real Wi-Fi loss; whether an app survives a daemon backend restart in app mode (only client mode was simulated).
 
 ## Sources
