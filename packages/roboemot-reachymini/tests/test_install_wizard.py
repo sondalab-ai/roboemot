@@ -520,6 +520,15 @@ def test_uninstall_removes_leftover_modules(offline, robot, daemon):
     assert f"rm -rf {SITE}/roboemot" in robot.commands
 
 
+def test_uninstall_never_deletes_outside_site_packages_or_tmp(offline, robot, daemon):
+    """Paths come from the robot; a crafted one must not escape (security review finding)."""
+    robot.stray = {"roboemot": [f"{SITE}/../../../../etc", SITE, "/home/pollen"]}
+    robot.tmp_dirs = {"/tmp/roboemot-install.x/../../home", "/tmp/roboemot-install.ok1"}
+    uninstall()
+    removed = [c for c in robot.commands if c.startswith("rm -rf")]
+    assert removed == ["rm -rf /tmp/roboemot-install.ok1"]
+
+
 def test_uninstall_keeps_the_record_when_verification_fails(offline, robot, daemon, monkeypatch):
     install()
     monkeypatch.setattr(robot, "_pip", _pip_ignoring_uninstall(robot._pip))

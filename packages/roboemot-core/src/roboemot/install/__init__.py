@@ -21,6 +21,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import posixpath
+import re
 import shlex
 import sys
 import tempfile
@@ -38,6 +40,7 @@ from .ui import Ui, WizardError, paint
 ENTRY_POINT_GROUP = "roboemot.installers"
 MIN_FREE_MB = 300  # wheels plus numpy/scipy/openai if the target environment lacks them
 REMOTE_TMP_PREFIX = "/tmp/roboemot-install"
+TMP_DIR_PATTERN = re.compile(re.escape(REMOTE_TMP_PREFIX) + r"\.[A-Za-z0-9]+")
 INSTALL_STEPS = 6
 UNINSTALL_STEPS = 6
 
@@ -429,7 +432,8 @@ def run_uninstall(opts: Options, ui: Ui, root: Path) -> None:
 
         ui.step("Clean up and verify")
         platform.cleanup(ui, py, opts.dry_run)
-        tmp_dirs = remote.run(f"ls -d {REMOTE_TMP_PREFIX}.* 2>/dev/null || true").split()
+        listed = remote.run(f"ls -d {REMOTE_TMP_PREFIX}.* 2>/dev/null || true").split()
+        tmp_dirs = [d for d in listed if TMP_DIR_PATTERN.fullmatch(d)]
         for d in tmp_dirs:
             if not opts.dry_run:
                 remote.run(f"rm -rf {shlex.quote(d)}")
@@ -466,9 +470,16 @@ def verify_uninstall(
 
 def leftovers(py: RemotePython, platform: Platform) -> list[tuple[str, str]]:
     """The app's modules still found inside the target environment's site-packages."""
-    site = py.site_packages().rstrip("/") + "/"
+    site = posixpath.normpath(py.site_packages())
     found = py.find_modules(list(platform.modules))
-    return [(m, p) for m, paths in found.items() for p in paths if p.startswith(site)]
+    return [(m, p) for m, paths in found.items() for p in paths if _inside(p, site)]
+
+
+def _inside(path: str, parent: str) -> bool:
+    """``path`` is strictly below ``parent`` once normalised (no ``..`` escape): it is about
+    to be deleted, and it comes from the robot."""
+    norm = posixpath.normpath(path)
+    return posixpath.isabs(norm) and norm != parent and norm.startswith(parent + "/")
 
 
 def _json(output: str) -> dict:
