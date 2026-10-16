@@ -40,6 +40,7 @@ from roboemot.persona import effects as persona_effects
 from roboemot.vision import CIRCADIAN, FrameSource
 from roboemot.vision.service import Perception, default_stages, open_perception, world_snapshot
 from roboemot.webui import Server, make_server
+from roboemot.webui.catalogue import open_catalogue
 from roboemot.world import (
     Observation,
     ObserveResult,
@@ -50,6 +51,7 @@ from roboemot.world import (
     feed_world,
     load_world_plugin,
 )
+from roboemot.world.autoenroll import AutoEnroller, open_autoenroll
 from roboemot.world.scan import SOURCE as SCAN_SOURCE
 
 from .camera import ReachyCamera
@@ -213,6 +215,8 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
     minor_present: bool = False  # the registry's age estimates (M1) set this
     perception: Perception | None = None
     enrollment: Any = None  # EnrollmentService: the web UI enrolls through it (SPEC 6)
+    autoenroll: AutoEnroller | None = None  # animals and objects that keep coming back (SPEC 5A)
+    catalogue: Any = None  # CatalogueService: XMP import, confirm "this is Mia" (SPEC 6)
 
     def make_frame_source(self, mini: Any, joint_state: Any) -> FrameSource:
         """The camera the vision pump reads (overridable: tests inject a planted scene)."""
@@ -238,6 +242,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 stack.effective,
                 paths.data_dir(cfg.data_dir),
                 robot_hosted=manifest.robot.profile is not None,
+                catalogue=self.catalogue,
             )
         except Exception as exc:
             log.error("web UI not started: %s", type(exc).__name__)
@@ -292,6 +297,11 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         def on_result(obs: Observation, result: ObserveResult) -> None:
             if scan is not None and result.unexplained_bearing is not None:
                 scan.policy.note_unexplained(*result.unexplained_bearing, obs.stamp)
+            if self.autoenroll is not None:  # runs on the vision thread: never let it raise
+                try:
+                    self.autoenroll.observe(obs, result)
+                except Exception as exc:
+                    log.warning("auto-enrollment: %s", type(exc).__name__)
 
         feed_world(bus, world, on_result)
         source = self.make_frame_source(reachy_mini, loop.driver.read_state)
@@ -304,6 +314,21 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             load_stages=self.load_vision_stages,
         )
         self.enrollment = perception.enrollment
+        appearance = getattr(perception.pipeline, "appearance_embedder", None)
+        self.autoenroll = open_autoenroll(
+            perception.registry,
+            appearance,
+            cfg.world.autoenroll,
+            world=world,
+            language=lambda: stack.effective().conversation.language,
+        )
+        self.catalogue = open_catalogue(
+            perception.registry,
+            stack.effective,
+            embedder=lambda: getattr(perception.pipeline, "appearance_embedder", None),
+            world=world,
+            purge_candidates=self.autoenroll.purge if self.autoenroll else None,
+        )
 
         def publish(obs: Observation, joint_state: Any) -> None:
             bus.publish("percept.entity", obs, obs.stamp, joint_state=joint_state)
@@ -340,6 +365,10 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 scan.apply_config(change.config.world.scan)
                 plugin.planner.apply_config(change.config)
             perception.apply_config(change.config)
+            if self.autoenroll is not None:
+                self.autoenroll.apply_config(change.config.world.autoenroll)
+            if self.catalogue is not None:
+                self.catalogue.cfg = change.config.catalogue
             responder.cfg = change.config.connectivity
             network.set_policy(change.config.connectivity.network)
 
@@ -354,6 +383,8 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             cleanup.callback(loop.stop)
             network.start()
             cleanup.callback(network.stop)
+            if self.autoenroll is not None:  # runs after perception.stop: no new sightings
+                cleanup.callback(self.autoenroll.flush)
             cleanup.callback(perception.stop)
             perception.start()
             self.start_webui(stack, cfg, manifest, cleanup)

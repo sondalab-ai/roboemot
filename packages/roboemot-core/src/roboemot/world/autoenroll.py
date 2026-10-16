@@ -75,6 +75,10 @@ DISPLAY_IT: dict[str, str] = {
 NAME_CLEAN = re.compile(r"[^\w ]+|_")
 
 
+class _HasModelId(Protocol):
+    model_id: str
+
+
 class IdentityTarget(Protocol):
     """The part of ``WorldModel`` that takes an identity for an entry."""
 
@@ -392,3 +396,23 @@ class AutoEnroller:
             self._seq += 1
             cluster.seq = self._seq
             self._clusters[cluster.cluster_id] = cluster
+
+
+def open_autoenroll(
+    registry: Registry | None,
+    appearance: _HasModelId | None,
+    cfg: WorldAutoenrollConfig,
+    *,
+    world: IdentityTarget | None = None,
+    language: Callable[[], str] = lambda: "en",
+) -> AutoEnroller | None:
+    """The app's auto-enroller, or None when there is nothing to enroll with.
+
+    It needs a registry (its store holds the candidates) and the appearance embedder (its
+    ``model_id`` keys the candidates); without either the app just runs without it.
+    """
+    if registry is None or appearance is None:
+        return None
+    return AutoEnroller(
+        registry, registry.store, cfg, appearance.model_id, world=world, language=language
+    )

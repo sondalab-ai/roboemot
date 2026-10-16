@@ -174,6 +174,59 @@ def test_app_with_fake_stages_names_an_enrolled_person_and_reports(data, tmp_pat
     assert reloaded.get_person(person.person_id).last_seen is not None  # flushed at shutdown
 
 
+class FakeObjects:
+    def detect(self, image):
+        return [Detection((100, 60, 180, 140), 0.95, label="cat")]
+
+
+class FakeAppearance:
+    model_id = "mock-appearance"
+
+    def embed(self, image, box):
+        return np.eye(DIM, dtype=np.float32)[3]
+
+
+class AppWithObjects(AppWithFakes):
+    def load_vision_stages(self, cfg, profile):
+        stages = super().load_vision_stages(cfg, profile)
+        stages.appearance_embedder = FakeAppearance()
+        return stages
+
+
+def test_app_auto_enrolls_a_cat_it_keeps_seeing_and_the_catalogue_sees_it(data, tmp_path):
+    (data / "app.yaml").write_text(
+        "schema_version: 1\n"
+        "safety: {allow_unmeasured_dynamics: true}\n"
+        "vision: {objects_enabled: true}\n"
+        "world:\n"
+        "  autoenroll: {min_days: 1, min_sightings: 3, sighting_min_interval_s: 1}\n"
+    )
+    app = new_app(AppWithObjects)
+    stop, thread, errors = start(app)
+    try:
+        assert wait_for(lambda: app.perception is not None and app.perception.pipeline)
+        app.perception.pipeline.object_detector = FakeObjects()
+        reg = app.perception.registry
+        assert wait_for(lambda: reg.entities(), timeout=30), "nothing was auto-enrolled"
+        (cat,) = reg.entities()
+        assert (cat.display_name, cat.origin, cat.category) == ("gatto 1", "auto", "cat")
+        assert wait_for(lambda: any(e.identity == cat.entity_id for e in app.world.entries))
+        assert [s.display_name for s in app.catalogue.list_entities()] == ["gatto 1"]
+    finally:
+        stop.set()
+        thread.join(15)
+    assert not errors and not thread.is_alive()
+    assert app.autoenroll.stats()["clusters"] == 0
+
+
+def test_app_without_the_appearance_model_has_no_auto_enrollment(data):
+    app = new_app(AppWithFakes)
+    stop = threading.Event()
+    stop.set()
+    app.run(fake_mini(), stop)
+    assert app.autoenroll is None and app.catalogue is not None
+
+
 def test_circadian_state_scales_the_vision_rate(data):
     app = new_app(AppWithFakes)
     app.source_class = EmptySource
