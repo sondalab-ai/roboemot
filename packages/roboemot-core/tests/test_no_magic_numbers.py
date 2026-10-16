@@ -36,6 +36,8 @@ BEHAVIOUR_MODULES = [
     "registry/matcher.py",
     "registry/estimates.py",
     "world/feed.py",
+    "world/scan.py",
+    "world/sources.py",
     "vision/__init__.py",
     "vision/attributes.py",
     "vision/geometry.py",
