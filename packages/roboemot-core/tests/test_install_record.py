@@ -163,6 +163,8 @@ class BareRobot:
             return self.files.get(sh.split(command)[1], "")
         if command == 'printf %s "$HOME"':
             return "/home/dev"
+        if command == 'printf %s "${ROBOEMOT_DATA_DIR:-}"':
+            return ""
         if command.startswith("printf %s"):
             t = sh.split(command)
             self.files[t[8]] = t[2]

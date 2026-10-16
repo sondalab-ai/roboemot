@@ -271,131 +271,178 @@ def test_full_sweep_keeps_the_world_map_correct(loop):
         assert nearest <= gate, (math.degrees(az), math.degrees(nearest))
 
 
-def test_robot_turns_to_an_enrolled_person_and_names_them(mini, tmp_path, monkeypatch):
-    """SPEC 5, 6, 10 (M1 exit): the whole app runs against the simulated robot with fake vision
-    stages. Ada is enrolled and planted 25 deg to the left of the robot; the stand-in camera
-    draws her face where the measured head pose sees her (and nothing when she is out of view).
-    The real wiring does the rest: pump thread, tracker, matcher, world model, attention. The
-    head turns to her and ``person.recognized`` names her."""
-    import shutil
-    from datetime import UTC, datetime
-    from types import SimpleNamespace
+PLANTED_AZ = math.radians(25)
 
-    import numpy as np
-    from roboemot.config.schema import RoboEmotConfig
-    from roboemot.registry import Consent, FileStore, Registry
-    from roboemot.vision import CameraModel, Detection, Frame
-    from roboemot.world import from_base_frame
-    from roboemot_reachymini import app as app_module
-    from roboemot_reachymini.gaze import FRAME
 
-    root = Path(__file__).resolve().parents[3]
-    data = tmp_path / "app-data"
-    shutil.copytree(DATA, data)
-    shutil.copy2(root / "configs/dev-unmeasured.yaml", data / "app.yaml")
-    monkeypatch.setattr(app_module, "DATA", data)
+class Scene:
+    """The whole app on the simulated robot, with ONNX faked at the stage boundary.
 
-    cfg = RoboEmotConfig()
-    face_vec = np.eye(8, dtype=np.float32)[0]
-    reg = Registry(
-        FileStore(tmp_path / "roboemot-data" / "registry", allow_plaintext=True), cfg.identity
-    )
-    ada = reg.enroll(
-        "Ada",
-        [face_vec * (1 + 0.01 * i) for i in range(5)],
-        "sim-face",
-        consent=Consent("Ada", datetime(2026, 1, 1, tzinfo=UTC), ("face", "refresh")),
-        age_group="adult",
-    )
-    planted_az = math.radians(25)
-    width, height, box = 320, 240, 80
-    camera = CameraModel(
-        width, height, cfg.world.camera_fov_h_deg, vfov_deg=cfg.world.camera_fov_v_deg
-    )
-    half_h = math.radians(cfg.world.camera_fov_h_deg) / 2 * 0.9
-    half_v = math.radians(cfg.world.camera_fov_v_deg) / 2 * 0.9
+    Only the detector, the embedder and the camera are stand-ins: the real pump thread,
+    tracker, matcher, registry, world model, attention and motion run. The camera draws a face
+    where the measured head pose sees the planted person at ``PLANTED_AZ`` (nothing when she is
+    out of view or when ``plant`` is false); the embedder returns her enrolled embedding.
+    """
 
-    class PlantedCamera:
-        """Frame source: pixel (0, 1) and (1, 1) carry the planted face centre when in view."""
+    def __init__(self, mini, tmp_path, monkeypatch, *, enroll: bool, plant: bool):
+        import shutil
+        from datetime import UTC, datetime
+        from types import SimpleNamespace
 
-        def __init__(self, joint_state):
-            self.joint_state, self.n = joint_state, 0
+        import numpy as np
+        from roboemot.config.schema import RoboEmotConfig
+        from roboemot.registry import Consent, FileStore, Registry
+        from roboemot.vision import CameraModel, Detection, Frame
+        from roboemot.world import from_base_frame
+        from roboemot_reachymini import app as app_module
+        from roboemot_reachymini.gaze import FRAME
 
-        def read(self):
-            self.n += 1
-            state = dict(self.joint_state())
-            az, el = from_base_frame(planted_az, 0.0, state, FRAME)
-            img = np.zeros((height, width, 3), np.uint8)
-            img[0, 0, 1], img[0, 0, 2] = self.n % 250, (self.n // 250) % 250  # never repeats
-            if abs(az) <= half_h and abs(el) <= half_v:
-                y = -math.tan(az)
-                u = width / 2 - camera.focal_px * math.tan(az)
-                v = height / 2 - camera.focal_y_px * math.tan(el) * math.sqrt(1 + y * y)
-                img[0, 0, 0] = 255
-                img[0, 1, 0], img[0, 1, 1] = int(u) // 256, int(u) % 256
-                img[1, 1, 0], img[1, 1, 1] = int(v) // 256, int(v) % 256
-            return Frame(img, time.monotonic(), state)
-
-    class PlantedDetector:
-        def detect(self, image):
-            if image[0, 0, 0] != 255:
-                return []
-            u = int(image[0, 1, 0]) * 256 + int(image[0, 1, 1])
-            v = int(image[1, 1, 0]) * 256 + int(image[1, 1, 1])
-            h = box / 2
-            return [Detection((u - h, v - h, u + h, v + h), 0.95, landmarks=np.zeros((5, 2)))]
-
-    class PlantedEmbedder:
-        model_id = "sim-face"
-
-        def embed(self, image, face):
-            return face_vec.copy()
-
-    class SimApp(app_module.RoboEmotApp):
-        def make_frame_source(self, mini_, joint_state):
-            return PlantedCamera(joint_state)
-
-        def load_vision_stages(self, cfg_, profile):
-            return SimpleNamespace(
-                face_detector=PlantedDetector(),
-                face_embedder=PlantedEmbedder(),
-                attribute_estimator=None,
-                appearance_embedder=None,
+        root = Path(__file__).resolve().parents[3]
+        data = tmp_path / "app-data"
+        shutil.copytree(DATA, data)
+        shutil.copy2(root / "configs/dev-unmeasured.yaml", data / "app.yaml")
+        monkeypatch.setattr(app_module, "DATA", data)
+        cfg = RoboEmotConfig()
+        face_vec = np.eye(8, dtype=np.float32)[0]
+        self.ada_id = None
+        if enroll:
+            reg = Registry(
+                FileStore(tmp_path / "roboemot-data" / "registry", allow_plaintext=True),
+                cfg.identity,
             )
+            self.ada_id = reg.enroll(
+                "Ada",
+                [face_vec * (1 + 0.01 * i) for i in range(5)],
+                "sim-face",
+                consent=Consent("Ada", datetime(2026, 1, 1, tzinfo=UTC), ("face", "refresh")),
+                age_group="adult",
+            ).person_id
+        width, height, box = 320, 240, 80
+        camera = CameraModel(
+            width, height, cfg.world.camera_fov_h_deg, vfov_deg=cfg.world.camera_fov_v_deg
+        )
+        half_h = math.radians(cfg.world.camera_fov_h_deg) / 2 * 0.9
+        half_v = math.radians(cfg.world.camera_fov_v_deg) / 2 * 0.9
 
-    app = SimApp.__new__(SimApp)
-    stop, errors, recognized = threading.Event(), [], []
-    thread = threading.Thread(
-        target=lambda: _run_app(app, mini, stop, errors), name="sim-app", daemon=True
-    )
-    reader = ReachyMiniDriver(mini)
-    thread.start()
-    yaw = 0.0
-    try:
+        class PlantedCamera:
+            def __init__(self, joint_state):
+                self.joint_state, self.n = joint_state, 0
+
+            def read(self):
+                self.n += 1
+                state = dict(self.joint_state())
+                az, el = from_base_frame(PLANTED_AZ, 0.0, state, FRAME)
+                img = np.zeros((height, width, 3), np.uint8)
+                img[0, 0, 1], img[0, 0, 2] = self.n % 250, (self.n // 250) % 250  # never repeats
+                if plant and abs(az) <= half_h and abs(el) <= half_v:
+                    y = -math.tan(az)
+                    u = width / 2 - camera.focal_px * math.tan(az)
+                    v = height / 2 - camera.focal_y_px * math.tan(el) * math.sqrt(1 + y * y)
+                    img[0, 0, 0] = 255
+                    img[0, 1, 0], img[0, 1, 1] = int(u) // 256, int(u) % 256
+                    img[1, 1, 0], img[1, 1, 1] = int(v) // 256, int(v) % 256
+                return Frame(img, time.monotonic(), state)
+
+        class PlantedDetector:
+            def detect(self, image):
+                if image[0, 0, 0] != 255:
+                    return []
+                u = int(image[0, 1, 0]) * 256 + int(image[0, 1, 1])
+                v = int(image[1, 1, 0]) * 256 + int(image[1, 1, 1])
+                h = box / 2
+                return [Detection((u - h, v - h, u + h, v + h), 0.95, landmarks=np.zeros((5, 2)))]
+
+        class PlantedEmbedder:
+            model_id = "sim-face"
+
+            def embed(self, image, face):
+                return face_vec.copy()
+
+        class SimApp(app_module.RoboEmotApp):
+            def make_frame_source(self, mini_, joint_state):
+                return PlantedCamera(joint_state)
+
+            def load_vision_stages(self, cfg_, profile):
+                return SimpleNamespace(
+                    face_detector=PlantedDetector(),
+                    face_embedder=PlantedEmbedder(),
+                    attribute_estimator=None,
+                    appearance_embedder=None,
+                )
+
+        self.mini, self.app = mini, SimApp.__new__(SimApp)
+        self.stop_event, self.errors, self.recognized = threading.Event(), [], []
+        self.reader = ReachyMiniDriver(mini)
+        self.thread = threading.Thread(target=self._run, name="sim-app", daemon=True)
+
+    def _run(self) -> None:
+        try:
+            self.app.run(self.mini, self.stop_event)
+        except Exception as exc:
+            self.errors.append(exc)
+
+    def yaw(self) -> float:
+        return self.reader.read_state()["head.yaw"]
+
+    def __enter__(self):
+        self.thread.start()
         deadline = time.monotonic() + 60
-        while app.bus is None and time.monotonic() < deadline:
+        while self.app.bus is None and time.monotonic() < deadline:
             time.sleep(0.05)
-        app.bus.subscribe("person.recognized", lambda m: recognized.append(m.payload.person_id))
+        self.app.bus.subscribe(
+            "person.recognized", lambda m: self.recognized.append(m.payload.person_id)
+        )
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.stop_event.set()
+        self.thread.join(30)
+        assert not self.errors, self.errors
+
+
+def test_robot_turns_to_an_enrolled_person_and_names_them(mini, tmp_path, monkeypatch):
+    """SPEC 5, 6, 10 (M1 exit): the app against the simulated robot; Ada is enrolled and
+    planted 25 deg to its left (see ``Scene``: only ONNX is faked, at the stage boundary).
+    The head turns to her and ``person.recognized`` names her."""
+    with Scene(mini, tmp_path, monkeypatch, enroll=True, plant=True) as scene:
+        deadline, yaw = time.monotonic() + 60, 0.0
         while time.monotonic() < deadline:
-            yaw = reader.read_state()["head.yaw"]
-            if recognized and yaw > 0.9 * planted_az:
+            yaw = scene.yaw()
+            if scene.recognized and yaw > 0.9 * PLANTED_AZ:
                 break
             time.sleep(0.1)
+        app = scene.app
         entries = [e for e in app.world.entries if e.kind == "person"]
         sections = app.diagnostics.report()["sections"]
-    finally:
-        stop.set()
-        thread.join(30)
-    assert not errors, errors
-    assert recognized and recognized[0] == ada.person_id
-    assert app.perception.registry.get_person(recognized[0]).display_name == "Ada"
-    assert yaw > 0.9 * planted_az, math.degrees(yaw)  # turned left, to her
-    assert [e.identity for e in entries] == [ada.person_id]  # one entry, named
+        name = app.perception.registry.get_person(scene.recognized[0]).display_name
+    assert scene.recognized[0] == scene.ada_id and name == "Ada"
+    assert yaw > 0.9 * PLANTED_AZ, math.degrees(yaw)  # turned left, to her
+    assert [e.identity for e in entries] == [scene.ada_id]  # one entry, named
     assert sections["roboemot.vision"]["data"]["frames"]["processed"] > 0
 
 
-def _run_app(app, mini, stop, errors) -> None:
-    try:
-        app.run(mini, stop)
-    except Exception as exc:
-        errors.append(exc)
+def test_nobody_in_view_the_robot_stays_put_and_names_nobody(mini, tmp_path, monkeypatch):
+    """Negative control for the exit test: Ada is enrolled but not in the room."""
+    with Scene(mini, tmp_path, monkeypatch, enroll=True, plant=False) as scene:
+        time.sleep(8)
+        yaw = scene.yaw()
+        persons = [e for e in scene.app.world.entries if e.kind == "person"]
+        target = scene.app.selector.target
+        processed = scene.app.diagnostics.report()["sections"]["roboemot.vision"]["data"]
+    assert processed["frames"]["processed"] > 0  # vision ran, it just saw nobody
+    assert scene.recognized == [] and persons == []
+    assert target is None or target.kind != "person"
+    assert abs(yaw) < 0.4 * PLANTED_AZ, math.degrees(yaw)
+
+
+def test_an_unenrolled_face_is_followed_but_never_named(mini, tmp_path, monkeypatch):
+    """The same face with nobody enrolled: tracked as a person entry, identity unknown."""
+    with Scene(mini, tmp_path, monkeypatch, enroll=False, plant=True) as scene:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if any(e.kind == "person" for e in scene.app.world.entries):
+                break
+            time.sleep(0.1)
+        time.sleep(3)  # long enough for recognition, were she enrolled
+        persons = [e for e in scene.app.world.entries if e.kind == "person"]
+    assert persons and all(e.identity == "unknown" for e in persons)
+    assert scene.recognized == []

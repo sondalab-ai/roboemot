@@ -44,6 +44,8 @@ class FakeRobot:
         self.copies: list[list[Path]] = []
         self.fail_install = False
         self.dirs: set[str] = {HOME}  # folders that exist (data folder emulation)
+        self.symlinks: dict[str, str] = {}  # path -> where realpath says it really is
+        self.env_data_dir = ""  # ROBOEMOT_DATA_DIR in the SSH user's environment
 
     # Remote interface
     target = "pollen@robot"
@@ -68,6 +70,11 @@ class FakeRobot:
             return "yes"
         if command == 'printf %s "$HOME"':
             return HOME
+        if command == 'printf %s "${ROBOEMOT_DATA_DIR:-}"':
+            return self.env_data_dir
+        if command.startswith("realpath "):
+            path = shlex.split(command)[1]
+            return self.symlinks.get(path, path) if path in self.dirs else ""
         if command.startswith("test -e"):
             return "yes" if shlex.split(command)[2] in self.dirs else "no"
         if command.startswith("mkdir -p -m 700 "):
@@ -653,15 +660,111 @@ def test_uninstall_verification_fails_while_the_data_folder_remains(
     assert RECORD in robot.files
 
 
-@pytest.mark.parametrize("bad", ["/", HOME, "/home/pollen/.local/share/roboemot/../x", "relative"])
-def test_uninstall_ignores_a_tampered_data_folder_record(offline, robot, daemon, bad):
-    install()
+def tamper(robot, **fields) -> None:
     record = json.loads(robot.files[RECORD])
-    record["data_dir"] = bad
+    record.update(fields)
     robot.files[RECORD] = json.dumps(record)
+
+
+def deleted(robot) -> list[str]:
+    return [c for c in robot.commands if c.startswith("rm -rf") and "roboemot-install" not in c]
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "/",
+        HOME,
+        f"{DATA}/../x",
+        "relative",
+        "/home/other/.local/share/roboemot",  # right suffix, someone else's home
+        "/tmp/.local/share/roboemot",
+    ],
+)
+def test_uninstall_refuses_a_data_folder_that_is_not_the_one_it_would_choose(
+    offline, robot, daemon, bad
+):
+    install()
+    tamper(robot, data_dir=bad)
     robot.dirs.add(bad)
+    with pytest.raises(WizardError, match="is not /home/pollen/.local/share/roboemot"):
+        uninstall()
+    assert deleted(robot) == [] and RECORD in robot.files and bad in robot.dirs
+
+
+def test_uninstall_refuses_a_symlinked_data_folder(offline, robot, daemon):
+    install()
+    robot.symlinks[DATA] = "/etc"
+    with pytest.raises(WizardError, match="resolves to /etc"):
+        uninstall()
+    assert deleted(robot) == [] and RECORD in robot.files
+
+
+def test_tampered_parent_folders_are_never_removed(offline, robot, daemon):
+    install()
+    tamper(
+        robot, data_dir_parents=["/etc", HOME, "/home", f"{HOME}/.local", f"{HOME}/.local/share"]
+    )
     uninstall()
-    assert not [c for c in robot.commands if c.startswith("rm -rf") and bad in c.split()]
+    rmdirs = [c for c in robot.commands if c.startswith("rmdir")]
+    assert rmdirs == [f"rmdir {HOME}/.local/share 2>/dev/null || true",
+                      f"rmdir {HOME}/.local 2>/dev/null || true"]  # fmt: skip
+
+
+def test_interrupted_between_the_record_write_and_mkdir_can_be_undone(
+    offline, robot, daemon, monkeypatch
+):
+    before = snapshot(robot, daemon)
+    real = robot.run
+
+    def run(command, check=True):
+        if command.startswith("mkdir -p -m 700"):
+            raise KeyboardInterrupt
+        return real(command, check)
+
+    monkeypatch.setattr(robot, "run", run)
+    with pytest.raises(KeyboardInterrupt):
+        install()
+    monkeypatch.setattr(robot, "run", real)
+    assert json.loads(robot.files[RECORD])["data_dir"] == DATA and DATA not in robot.dirs
+    uninstall()
+    assert snapshot(robot, daemon) == before
+
+
+def test_reinstall_after_the_folder_vanished_keeps_the_record_and_uninstalls_clean(
+    offline, robot, daemon
+):
+    before = snapshot(robot, daemon)
+    install()
+    robot.dirs -= {DATA}
+    install()
+    assert json.loads(robot.files[RECORD])["data_dir"] == DATA
+    uninstall()
+    assert snapshot(robot, daemon) == before
+
+
+def test_dry_run_with_a_preexisting_folder_says_it_would_not_be_recorded(
+    offline, robot, daemon, capsys
+):
+    robot.dirs.add(DATA)
+    inst.run_install(options(dry_run=True), quiet_ui(yes=True), ROOT)
+    assert "not recorded" in capsys.readouterr().out
+    assert robot.files == {} and DATA in robot.dirs
+
+
+def test_install_warns_when_the_data_folder_may_land_elsewhere(offline, robot, daemon, capsys):
+    robot.env_data_dir = "/data/elsewhere"
+    install()
+    assert "ROBOEMOT_DATA_DIR=/data/elsewhere" in capsys.readouterr().out
+
+
+def test_install_warns_about_a_data_dir_in_the_staged_config(tmp_path, capsys):
+    (tmp_path / "app.yaml").write_text("schema_version: 1\ndata_dir: /mnt/big\n")
+    (tmp_path / "other.yaml").write_text("data_dir: /ignored\n")
+    robot = FakeRobot()
+    inst.warn_data_dir_overrides(quiet_ui(), robot, [tmp_path])
+    out = capsys.readouterr().out
+    assert "data_dir=/mnt/big" in out and "/ignored" not in out
 
 
 # ---------------------------------------------------------------- robot selection

@@ -16,6 +16,7 @@ import math
 import os
 import threading
 import time
+from contextlib import ExitStack
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -304,25 +305,31 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             if scan is not None:
                 scan.apply_config(change.config.world.scan)
                 plugin.planner.apply_config(change.config)
-            if perception.pipeline is not None:
-                perception.pipeline.cfg = change.config.vision
-                perception.pipeline.governor.rates = change.config.vision.rates
+            perception.apply_config(change.config)
             responder.cfg = change.config.connectivity
             network.set_policy(change.config.connectivity.network)
 
         stack.subscribe(reload)
-        stop_watch = stack.start_watcher()
-        loop.start()
-        network.start()
-        perception.start()
         fx_for, fx = None, None
-        try:
+        # Everything started below is stopped in reverse order whatever fails: ExitStack runs
+        # every callback even when one raises, so the motion loop always stops and the camera
+        # thread is quiet before the SDK client goes away.
+        with ExitStack() as cleanup:
+            cleanup.callback(stack.start_watcher().set)
+            loop.start()
+            cleanup.callback(loop.stop)
+            network.start()
+            cleanup.callback(network.stop)
+            cleanup.callback(perception.stop)
+            perception.start()
             for world_source in plugin.sources:
+                cleanup.callback(world_source.stop)
                 world_source.start(publish)
             while not stop_event.is_set():
                 now = time.monotonic()
                 attending = attention_tick(now, world, selector, gaze, loop)
                 live = stack.effective()
+                perception.enrollment.expire()
                 if perception.pipeline is not None:
                     perception.pipeline.governor.set_scale(
                         CIRCADIAN, circadian_vision_scale(live, self.circadian)
@@ -346,13 +353,6 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 for cmd in responder.commands(now):
                     loop.feed(cmd)
                 stop_event.wait(0.05)
-        finally:
-            stop_watch.set()
-            for world_source in plugin.sources:
-                world_source.stop()
-            perception.stop()
-            network.stop()
-            loop.stop()
 
 
 def _optional(p: Path) -> Path | None:

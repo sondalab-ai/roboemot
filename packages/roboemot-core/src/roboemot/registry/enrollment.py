@@ -3,14 +3,22 @@
 The web UI (or any caller) drives one session at a time: ``start`` begins collecting,
 ``status`` reports progress, ``complete`` enrolls with a consent record, ``cancel`` discards.
 While a session runs, the pipeline calls ``on_frame`` for every processed frame. The service
-picks the largest, most central face track, rejects frames that are too small, low-scoring
-or blurred, spaces the samples in time, and embeds the face itself on the vision thread (so
-the ONNX session stays single-threaded). A sample whose embedding does not resemble the ones
-collected so far is rejected too, so two people never mix in one session.
+picks the largest, most central face track and takes a sample only from a face that is fully
+inside the frame, large enough, confidently detected and sharp, at least ``min_gap_s`` after the
+previous sample. It embeds the face itself on the vision thread (so the ONNX session stays
+single-threaded). Samples must resemble each other: the first one is only trusted once a second
+one agrees with it, so two people never mix in one session. SPEC 6 asks for varied angles: the
+session is not ready until the nose offset from the eye midline (a yaw proxy from the
+landmarks) spans ``min_pose_spread``, or the per-person cap is reached.
+
+Every quality threshold (``enrollment.*``) is untuned: set from reasoning, not yet measured on
+real camera frames.
 
 Privacy (SPEC 12): face crops are used for the sharpness check and dropped at once; embeddings
 stay in this object's memory until ``complete`` hands them to ``Registry.enroll`` and are
-zeroed on completion, cancellation or timeout. Neither embeddings nor names are logged.
+zeroed on completion, cancellation or timeout. Zeroing is best effort: NumPy or the registry may
+hold copies that are only freed by the garbage collector. Neither embeddings nor names are
+logged.
 
 Not exported from ``roboemot.registry``: it needs the vision types, and ``roboemot.vision``
 imports the registry. Import it as ``roboemot.registry.enrollment``.
@@ -41,32 +49,46 @@ log = logging.getLogger(__name__)
 IDLE = "idle"
 COLLECTING = "collecting"
 READY = "ready"
+COMPLETING = "completing"
 TIMED_OUT = "timed_out"
 COMPLETED = "completed"
 CANCELLED = "cancelled"
 UNAVAILABLE = "unavailable"
 ACTIVE_STATES = (COLLECTING, READY)
-REJECT_REASONS = ("score", "small", "blurred", "inconsistent")
+REJECT_REASONS = ("score", "small", "cropped", "blurred", "inconsistent")
 LUMA = (0.114, 0.587, 0.299)  # BGR weights of the Rec. 601 luma
 EPSILON = 1e-9
 LAPLACIAN_CENTRE = -4.0
+RIGHT_EYE, LEFT_EYE, NOSE = 0, 1, 2  # YuNet landmark order: eyes, nose tip, mouth corners
+LANDMARK_SHAPE = (5, 2)
 
 
 class EnrollmentError(RuntimeError):
     """The request does not fit the session state (busy, nothing to complete, no vision)."""
 
 
-def sharpness(crop: np.ndarray, size: int) -> float:
-    """Variance of the 4-neighbour Laplacian of a BGR crop, nearest-resized to ``size`` square.
+def _area_resize(gray: np.ndarray, size: int) -> np.ndarray:
+    """Mean-pool ``gray`` to ``size`` x ``size`` (nearest sampling when it is smaller)."""
+    rows, cols = gray.shape
+    if rows < size or cols < size:
+        picked = gray[np.linspace(0, rows - 1, size).astype(int)]
+        return picked[:, np.linspace(0, cols - 1, size).astype(int)]
+    ys = np.linspace(0, rows, size + 1).astype(int)
+    xs = np.linspace(0, cols, size + 1).astype(int)
+    pooled = np.add.reduceat(gray, ys[:-1], axis=0) / np.diff(ys)[:, None]
+    return np.add.reduceat(pooled, xs[:-1], axis=1) / np.diff(xs)[None, :]
 
-    A blurred face has little edge energy; the value is scale-normalised by the resize, not by
-    lighting. Returns 0.0 for an empty crop.
+
+def sharpness(crop: np.ndarray, size: int) -> float:
+    """Variance of the 4-neighbour Laplacian of a BGR crop, mean-pooled to ``size`` square.
+
+    Area pooling (not point sampling) keeps the value comparable between a near and a far
+    face and stops sensor noise from passing as sharpness. A blurred face has little edge
+    energy. Returns 0.0 for an empty crop.
     """
     if crop.size == 0:
         return 0.0
-    rows = np.linspace(0, crop.shape[0] - 1, size).astype(int)
-    cols = np.linspace(0, crop.shape[1] - 1, size).astype(int)
-    gray = crop[rows][:, cols].astype(np.float32) @ np.array(LUMA, np.float32)
+    gray = _area_resize(crop.astype(np.float32) @ np.array(LUMA, np.float32), size)
     lap = (
         LAPLACIAN_CENTRE * gray[1:-1, 1:-1]
         + gray[:-2, 1:-1]
@@ -77,12 +99,30 @@ def sharpness(crop: np.ndarray, size: int) -> float:
     return float(lap.var())
 
 
+def yaw_proxy(landmarks: np.ndarray | None) -> float | None:
+    """Nose offset from the eye midpoint in inter-eye distances (0 when frontal), or None.
+
+    None when the landmarks are missing or degenerate.
+    """
+    if landmarks is None or np.shape(landmarks) != LANDMARK_SHAPE:
+        return None
+    pts = np.asarray(landmarks, np.float32)
+    eye_dx = float(pts[LEFT_EYE, 0] - pts[RIGHT_EYE, 0])
+    if abs(eye_dx) < EPSILON:
+        return None
+    return float((pts[NOSE, 0] - (pts[LEFT_EYE, 0] + pts[RIGHT_EYE, 0]) / 2) / abs(eye_dx))
+
+
 class EnrollmentService:
-    """One enrollment session at a time over a registry and a live pipeline."""
+    """One enrollment session at a time over a registry and a live pipeline.
+
+    ``registry`` is None when the data folder could not be opened: every call that needs it
+    raises ``EnrollmentError``.
+    """
 
     def __init__(
         self,
-        registry: Registry,
+        registry: Registry | None,
         cfg: EnrollmentConfig,
         identity: IdentityConfig,
         clock: Callable[[], float] = time.monotonic,
@@ -99,6 +139,8 @@ class EnrollmentService:
         self._token = 0
         self._deadline = 0.0
         self._samples: list[np.ndarray] = []
+        self._poses: list[float | None] = []
+        self._validated = False
         self._mean: np.ndarray | None = None
         self._last_stamp: float | None = None
         self._track_id: int | None = None
@@ -130,18 +172,28 @@ class EnrollmentService:
             self._expire_locked()
             if self._embedder is None:
                 raise EnrollmentError(f"vision unavailable: {self._unavailable}")
-            if self._state in ACTIVE_STATES:
+            if self._state in (*ACTIVE_STATES, COMPLETING):
                 raise EnrollmentError("an enrollment session is already running")
             self._reset_locked()
             self._state, self._session = COLLECTING, session_id
-            self._token += 1
             self._deadline = self._clock() + self.cfg.timeout_s
         log.info("enrollment session started")
+
+    def expire(self) -> None:
+        """End a session that ran past ``enrollment.timeout_s``, even with no frames or calls.
+
+        The app calls it from its main loop, so abandoned samples do not outlive the timeout.
+        """
+        with self._lock:
+            self._expire_locked()
 
     def status(self) -> dict[str, Any]:
         """Progress for the UI: counts and flags only, never embeddings or names."""
         with self._lock:
             self._expire_locked()
+            hint = None
+            if self._state == COLLECTING and len(self._samples) >= self.cfg.target_samples:
+                hint = "turn the head slightly left and right"
             return {
                 "session_id": self._session,
                 "state": self._state if self._embedder is not None else UNAVAILABLE,
@@ -149,8 +201,9 @@ class EnrollmentService:
                 "collected": len(self._samples),
                 "target": self.cfg.target_samples,
                 "minimum": self.identity.enroll_min_embeddings,
-                "can_complete": self._state in ACTIVE_STATES
-                and len(self._samples) >= self.identity.enroll_min_embeddings,
+                "can_complete": self._can_complete_locked(),
+                "pose_varied": self._varied_locked(),
+                "hint": hint,
                 "face_visible": self._face_visible,
                 "rejected": dict(self._rejected),
             }
@@ -164,11 +217,13 @@ class EnrollmentService:
     ) -> str:
         """Enroll the collected samples as ``name`` and return the new person id.
 
-        Needs an active session with at least ``identity.enroll_min_embeddings`` samples. The
-        registry checks the consent (guardian for possible minors, ``face`` scope). When it
-        refuses (``ConsentError``, ``ValueError``) the samples are kept and the session stays
-        open, so the caller can correct the input and call again; ``cancel`` discards them.
-        On success the samples are zeroed and the session ends as ``completed``.
+        Needs an active session with at least ``identity.enroll_min_embeddings`` samples that
+        show varied angles. The registry (disk I/O) runs outside the service lock, in the
+        ``completing`` state: a second ``complete``, a ``start`` or a new sample meanwhile is
+        refused or ignored, so a session completes once. When the registry refuses
+        (``ConsentError``, ``ValueError``) the samples are kept and the session returns to its
+        earlier state, so the caller can correct the input and call again; ``cancel`` discards
+        them. On success the samples are zeroed and the session ends as ``completed``.
         """
         with self._lock:
             self._expire_locked()
@@ -177,23 +232,40 @@ class EnrollmentService:
             have, need = len(self._samples), self.identity.enroll_min_embeddings
             if have < need:
                 raise EnrollmentError(f"only {have} of {need} samples collected")
-            record = self.registry.enroll(
+            if not self._can_complete_locked():
+                raise EnrollmentError("the samples show too little change of head angle")
+            previous, token, model_id = self._state, self._token, self._embedder.model_id
+            matrix = np.vstack(self._samples)
+            self._state = COMPLETING
+        try:
+            record = self._reg().enroll(
                 name,
-                np.vstack(self._samples),
-                self._embedder.model_id,
+                matrix,
+                model_id,
                 consent=consent,
                 age_group=declared_age_group,
                 gender=declared_gender,
             )
+        except BaseException:
+            with self._lock:
+                if self._token == token and self._state == COMPLETING:
+                    self._state = previous
+            raise
+        with self._lock:
             self._reset_locked()
             self._state = COMPLETED
-            person_id = record.person_id
         log.info("enrollment session completed")
-        return person_id
+        return record.person_id
 
     def cancel(self) -> None:
-        """Discard the session and its samples; harmless when none is running."""
+        """Discard the session and its samples; harmless when none is running.
+
+        A session that is just being stored (``completing``) is not cancelled: the person is
+        enrolled once the registry call returns.
+        """
         with self._lock:
+            if self._state == COMPLETING:
+                return
             was_active = self._state in ACTIVE_STATES
             self._reset_locked()
             self._state = CANCELLED if was_active else self._state
@@ -209,10 +281,10 @@ class EnrollmentService:
             if self._state != COLLECTING or self._embedder is None:
                 return
             self._face_visible = bool(tracks)
-            if self._last_stamp is not None and frame.stamp - self._last_stamp < self.cfg.min_gap_s:
-                return
             track = self._pick(frame, tracks)
             if track is None or track.detection is None:
+                return
+            if self._last_stamp is not None and frame.stamp - self._last_stamp < self.cfg.min_gap_s:
                 return
             reason = self._reject_reason(frame, track)
             if reason is not None:
@@ -224,41 +296,40 @@ class EnrollmentService:
         if norm < EPSILON or not np.isfinite(norm):
             return
         embedding /= norm
+        pose = yaw_proxy(track.detection.landmarks)
         with self._lock:
             if self._state != COLLECTING or self._token != token:
+                return  # cancelled, completed or restarted while embedding: discard
+            if not self._accept_locked(embedding, pose):
                 return
-            if self._mean is not None and float(embedding @ self._mean) < self.cfg.consistency_min:
-                self._rejected["inconsistent"] += 1
-                return
-            self._samples.append(embedding)
-            mean = np.mean(self._samples, axis=0)
-            self._mean = mean / max(float(np.linalg.norm(mean)), EPSILON)
-            self._last_stamp, self._track_id = frame.stamp, track.track_id
-            if len(self._samples) >= self.cfg.target_samples:
+            self._last_stamp = frame.stamp
+            n = len(self._samples)
+            cap = self.identity.max_embeddings_per_person
+            if n >= cap or (n >= self.cfg.target_samples and self._varied_locked()):
                 self._state = READY
 
     # ------------------------------------------------------------ registry pass-throughs
 
     def list_records(self) -> list[RecordSummary]:
         """People, animals and objects without biometrics (``Registry.list``)."""
-        return self.registry.list()
+        return self._reg().list()
 
     def quarantined(self) -> list[str]:
         """Keys of people items that could not be read at startup (``Registry.quarantined``)."""
-        return self.registry.quarantined()
+        return self._reg().quarantined()
 
     def rename(self, record_id: str, display_name: str) -> None:
         """Rename a person, animal or object; ``KeyError`` when the id is unknown."""
         if self._is_person(record_id):
-            self.registry.rename_person(record_id, display_name)
+            self._reg().rename_person(record_id, display_name)
         else:
-            self.registry.rename_entity(record_id, display_name)
+            self._reg().rename_entity(record_id, display_name)
 
     def merge(self, keep_id: str, drop_id: str) -> None:
         """Merge two animals or objects (people cannot be merged); ``ValueError`` otherwise."""
         if self._is_person(keep_id) or self._is_person(drop_id):
             raise ValueError("people cannot be merged")
-        self.registry.merge_entities(keep_id, drop_id)
+        self._reg().merge_entities(keep_id, drop_id)
 
     def delete(self, record_id: str) -> None:
         """Erase a person (``forget``: embeddings, fields, history) or an animal or object.
@@ -266,24 +337,78 @@ class EnrollmentService:
         An id the registry does not know raises ``KeyError``.
         """
         if self._is_person(record_id) or record_id in self.quarantined():
-            self.registry.forget(record_id)
+            self._reg().forget(record_id)
         else:
-            self.registry.get_entity(record_id)
-            self.registry.delete_entity(record_id)
+            self._reg().get_entity(record_id)
+            self._reg().delete_entity(record_id)
 
     # ------------------------------------------------------------ internals
 
+    def _reg(self) -> Registry:
+        if self.registry is None:
+            raise EnrollmentError(f"registry unavailable: {self._unavailable}")
+        return self.registry
+
     def _is_person(self, record_id: str) -> bool:
         try:
-            self.registry.get_person(record_id)
+            self._reg().get_person(record_id)
         except KeyError:
             return False
+        return True
+
+    def _spread_locked(self) -> float | None:
+        known = [p for p in self._poses if p is not None]
+        return max(known) - min(known) if len(known) >= 2 else None
+
+    def _varied_locked(self) -> bool:
+        """Enough change of head angle (always true when the threshold is 0)."""
+        if self.cfg.min_pose_spread <= 0:
+            return True
+        spread = self._spread_locked()
+        return spread is not None and spread >= self.cfg.min_pose_spread
+
+    def _can_complete_locked(self) -> bool:
+        n = len(self._samples)
+        if self._state not in ACTIVE_STATES or not self._validated:
+            return False
+        if n < self.identity.enroll_min_embeddings:
+            return False
+        return self._varied_locked() or n >= self.identity.max_embeddings_per_person
+
+    def _accept_locked(self, embedding: np.ndarray, pose: float | None) -> bool:
+        """Add the sample if it agrees with the others; the first one waits for a second.
+
+        The first sample is a candidate. A second one that resembles it validates both; one
+        that does not replaces it (counted as inconsistent), so a wrong first face cannot
+        lock the session onto another person.
+        """
+        if self._mean is None:
+            self._samples, self._poses = [embedding], [pose]
+            self._mean = embedding.copy()
+            return True
+        similarity = float(embedding @ self._mean)
+        if similarity < self.cfg.consistency_min:
+            self._rejected["inconsistent"] += 1
+            if not self._validated:
+                for sample in self._samples:
+                    sample[:] = 0.0
+                self._samples, self._poses = [embedding], [pose]
+                self._mean = embedding.copy()
+                return True
+            return False
+        self._validated = True
+        self._samples.append(embedding)
+        self._poses.append(pose)
+        mean = np.mean(self._samples, axis=0)
+        self._mean = mean / max(float(np.linalg.norm(mean)), EPSILON)
         return True
 
     def _reset_locked(self) -> None:
         for sample in self._samples:
             sample[:] = 0.0
         self._samples = []
+        self._poses = []
+        self._validated = False
         self._mean = None
         self._last_stamp = None
         self._track_id = None
@@ -300,13 +425,16 @@ class EnrollmentService:
             log.info("enrollment session timed out")
 
     def _pick(self, frame: Frame, tracks: list[Track]) -> Track | None:
-        """The session's track while it is visible, else the largest and most central one."""
+        """The session's track while it is visible, else the largest and most central one.
+
+        The lock on a track ends with the track: when it is gone the next call chooses afresh.
+        """
         if not tracks:
+            self._track_id = None
             return None
-        if self._track_id is not None:
-            for t in tracks:
-                if t.track_id == self._track_id:
-                    return t
+        for t in tracks:
+            if t.track_id == self._track_id:
+                return t
         height, width = frame.image.shape[:2]
 
         def weight(t: Track) -> float:
@@ -317,7 +445,9 @@ class EnrollmentService:
             dist = min(1.0, (dx * dx + dy * dy) ** 0.5)
             return area * (1.0 - self.cfg.centre_weight * dist)
 
-        return max(tracks, key=weight)
+        chosen = max(tracks, key=weight)
+        self._track_id = chosen.track_id
+        return chosen
 
     def _reject_reason(self, frame: Frame, track: Track) -> str | None:
         det = track.detection
@@ -326,9 +456,11 @@ class EnrollmentService:
             return "score"
         if det.min_side < self.cfg.min_face_px:
             return "small"
-        x1, y1, x2, y2 = (int(v) for v in det.box)
         height, width = frame.image.shape[:2]
-        crop = frame.image[max(0, y1) : min(height, y2), max(0, x1) : min(width, x2)]
+        x1, y1, x2, y2 = det.box
+        if x1 < 0 or y1 < 0 or x2 > width or y2 > height:
+            return "cropped"
+        crop = frame.image[int(y1) : int(y2), int(x1) : int(x2)]
         if sharpness(crop, self.cfg.sharpness_size_px) < self.cfg.min_sharpness:
             return "blurred"
         return None
@@ -338,6 +470,7 @@ __all__ = [
     "CANCELLED",
     "COLLECTING",
     "COMPLETED",
+    "COMPLETING",
     "IDLE",
     "READY",
     "TIMED_OUT",
@@ -345,4 +478,5 @@ __all__ = [
     "EnrollmentError",
     "EnrollmentService",
     "sharpness",
+    "yaw_proxy",
 ]

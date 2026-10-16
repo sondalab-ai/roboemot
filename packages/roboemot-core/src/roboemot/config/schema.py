@@ -465,8 +465,8 @@ class EnrollmentConfig(Strict):
     )
     min_sharpness: float = param(
         25.0,
-        "Variance of the Laplacian of the grayscale face crop (resized to sharpness_size_px); "
-        "blurrier faces are rejected. Not yet tuned on real camera data",
+        "Variance of the Laplacian of the grayscale face crop (area-resized to "
+        "sharpness_size_px); blurrier faces are rejected. Not yet tuned on real camera data",
         ge=0,
         le=10000,
     )
@@ -477,11 +477,20 @@ class EnrollmentConfig(Strict):
         0.4, "Minimum time between two samples, so they differ in pose", unit="s", ge=0, le=10
     )
     consistency_min: float = param(
-        0.3,
-        "Cosine similarity a new sample needs with the mean of the ones collected, so two "
-        "people (or a wrong track) never mix in one session",
+        0.45,
+        "Cosine similarity a new sample needs with the mean of the ones collected (the same "
+        "value as identity.match_threshold), so two people never mix in one session. Not yet "
+        "tuned on real data",
         ge=-1,
         le=1,
+    )
+    min_pose_spread: float = param(
+        0.2,
+        "Spread of the nose offset from the eye midline (in inter-eye distances, a yaw proxy "
+        "from the face landmarks) the samples must cover, so they show varied angles (SPEC 6); "
+        "0 turns the check off. Not yet tuned on real data",
+        ge=0,
+        le=2,
     )
     centre_weight: float = param(
         0.5,
@@ -607,7 +616,12 @@ class VisionRates(Strict):
     )
     objects_hz: float = param(1.0, "Object detection rate when enabled", unit="Hz", ge=0.1, le=30)
     camera_hz: float = param(
-        30.0, "Upper bound on camera reads handed to vision", unit="Hz", ge=1, le=120
+        30.0,
+        "Upper bound on camera reads handed to vision (read when the camera thread starts)",
+        unit="Hz",
+        ge=1,
+        le=120,
+        restart=True,
     )
 
 
@@ -688,7 +702,11 @@ class VisionConfig(Strict):
         0.25, "Face box padding for the age and gender crop, per side", ge=0, le=1
     )
     attribute_queue_max: int = param(
-        4, "Age and gender jobs waiting for the worker; further tracks wait", ge=1, le=64
+        4,
+        "Age and gender jobs waiting for the worker; further tracks wait",
+        ge=1,
+        le=64,
+        restart=True,
     )
     models_dir: str = param(
         "",

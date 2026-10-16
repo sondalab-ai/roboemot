@@ -85,12 +85,23 @@ class VisionService:
         self._thread.start()
 
     def stop(self) -> None:
-        """Stop the camera thread, then the worker, then the pipeline's attribute worker."""
+        """Quiet the camera thread, then stop the worker and the attribute worker.
+
+        The camera thread is joined with a timeout and a timeout is logged: a read stuck in the
+        SDK cannot be interrupted, so the caller must tear the SDK down knowing it may still be
+        inside it. The worker and the pipeline are stopped even then.
+        """
         self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=JOIN_TIMEOUT_S)
-        self.runner.stop()
-        self.pipeline.close()
+        try:
+            if self._thread is not None:
+                self._thread.join(timeout=JOIN_TIMEOUT_S)
+                if self._thread.is_alive():
+                    log.warning("camera thread did not stop within %.0f s", JOIN_TIMEOUT_S)
+        finally:
+            try:
+                self.runner.stop()
+            finally:
+                self.pipeline.close()
 
     def _pump(self) -> None:
         """Pump frames; a failing camera read is counted, logged once per type, and retried."""
@@ -128,10 +139,14 @@ class VisionService:
 
 @dataclass
 class Perception:
-    """What ``open_perception`` returns; ``service`` is None while vision is unavailable."""
+    """What ``open_perception`` returns.
 
-    registry: Registry
-    matcher: Matcher
+    ``service`` is None while vision is unavailable; ``registry`` and ``matcher`` are None too
+    when the data folder could not be opened. ``unavailable`` says why, for the debug report.
+    """
+
+    registry: Registry | None
+    matcher: Matcher | None
     enrollment: EnrollmentService
     pipeline: VisionPipeline | None
     service: VisionService | None
@@ -142,13 +157,28 @@ class Perception:
             self.service.start()
 
     def stop(self) -> None:
-        """Stop the threads and write the buffered ``last_seen`` updates (never raises)."""
+        """Drop an enrollment session, stop the threads, write buffered ``last_seen`` updates.
+
+        Each step runs whatever the others do; failures are logged by type and not raised.
+        """
+        steps: list[Callable[[], None]] = [self.enrollment.cancel]
         if self.service is not None:
-            self.service.stop()
-        try:
-            self.registry.flush()
-        except Exception as exc:  # an ExceptionGroup of store errors; type only
-            log.warning("registry flush failed: %s", type(exc).__name__)
+            steps.append(self.service.stop)
+        if self.registry is not None:
+            steps.append(self.registry.flush)
+        for step in steps:
+            try:
+                step()
+            except Exception as exc:  # an ExceptionGroup of store errors; type only
+                log.warning("perception shutdown step failed: %s", type(exc).__name__)
+
+    def apply_config(self, cfg: RoboEmotConfig) -> None:
+        """Hot reload (SPEC 11A): vision, identity and enrollment settings (not restart-only)."""
+        self.enrollment.cfg, self.enrollment.identity = cfg.enrollment, cfg.identity
+        if self.registry is not None:
+            self.registry.identity = cfg.identity
+        if self.pipeline is not None:
+            self.pipeline.apply_config(cfg.vision, cfg.identity)
 
     def vision_snapshot(self) -> dict[str, Any]:
         """The ``roboemot.vision`` report section."""
@@ -158,6 +188,8 @@ class Perception:
 
     def registry_snapshot(self) -> dict[str, Any]:
         """The ``roboemot.registry`` report section: counts only, no names or ids."""
+        if self.registry is None:
+            return {"state": "unavailable", "reason": self.unavailable}
         rows = self.registry.list()
         by_kind: dict[str, int] = {}
         for row in rows:
@@ -196,14 +228,21 @@ def open_perception(
     profile (``cm4`` picks the INT8 attribute models); ``load_stages`` is a seam for tests and
     other backends. Nothing here starts a thread: call ``Perception.start``.
     """
-    data = paths.data_dir(cfg.data_dir)
-    log.warning(
-        "registry in %s is stored without encryption (pre-M5, SPEC 12 Data): "
-        "protect the folder and the robot",
-        data,
-    )
-    store = FileStore(Path(paths.registry_dir(cfg.data_dir)), allow_plaintext=True)
-    registry = Registry(store, cfg.identity)
+    try:
+        data = paths.data_dir(cfg.data_dir)
+        log.warning(
+            "registry in %s is stored without encryption (pre-M5, SPEC 12 Data): "
+            "protect the folder and the robot",
+            data,
+        )
+        store = FileStore(Path(paths.registry_dir(cfg.data_dir)), allow_plaintext=True)
+        registry = Registry(store, cfg.identity)
+    except Exception as exc:
+        reason = f"data folder: {type(exc).__name__}: {exc}"
+        log.error("registry unavailable, running without recognition (%s)", reason)
+        enrollment = EnrollmentService(None, cfg.enrollment, cfg.identity)
+        enrollment.set_unavailable(reason)
+        return Perception(None, None, enrollment, None, None, reason)
     matcher = Matcher(registry, cfg.identity)
     enrollment = EnrollmentService(registry, cfg.enrollment, cfg.identity)
     try:

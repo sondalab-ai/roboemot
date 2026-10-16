@@ -160,6 +160,11 @@ def default_dir(data_dir: str = "") -> Path:
     return Path(env) if env else paths.models_subdir(data_dir)
 
 
+def legacy_dir() -> Path:
+    """The default models folder before it moved under the app data folder."""
+    return Path.home() / ".cache" / "roboemot" / "models"
+
+
 def models_dir(configured: str = "", data_dir: str = "") -> Path:
     """The folder for ``vision.models_dir`` (empty means the default under ``data_dir``).
 

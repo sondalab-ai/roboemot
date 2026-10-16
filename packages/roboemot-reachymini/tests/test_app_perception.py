@@ -197,3 +197,57 @@ def test_circadian_scale_is_awake_while_no_model_runs():
         app_module.circadian_vision_scale(cfg, None)
         == cfg.circadian.states["awake"].vision_rate_scale
     )
+
+
+@pytest.fixture()
+def stops(monkeypatch):
+    """Record the order in which the app tears things down."""
+    order: list[str] = []
+    real_loop_stop = app_module.MotionLoop.stop
+
+    def loop_stop(self):
+        order.append("loop")
+        real_loop_stop(self)
+
+    monkeypatch.setattr(app_module.MotionLoop, "stop", loop_stop)
+    return order
+
+
+def test_the_motion_loop_stops_even_when_perception_fails_to_stop(data, monkeypatch, stops):
+    def failing_stop(self):
+        stops.append("perception")
+        raise RuntimeError("camera stuck")
+
+    monkeypatch.setattr(app_module.Perception, "stop", failing_stop)
+    stop = threading.Event()
+    stop.set()
+    with pytest.raises(RuntimeError, match="camera stuck"):
+        new_app().run(fake_mini(), stop)
+    assert stops == ["perception", "loop"]  # the camera side is quiet before the SDK goes
+
+
+def test_the_motion_loop_stops_when_perception_fails_to_start(data, monkeypatch, stops):
+    def failing_start(self):
+        raise OSError("no camera")
+
+    monkeypatch.setattr(app_module.Perception, "start", failing_start)
+    stop = threading.Event()
+    stop.set()
+    with pytest.raises(OSError, match="no camera"):
+        new_app().run(fake_mini(), stop)
+    assert stops == ["loop"]
+
+
+def test_the_app_keeps_its_motion_when_the_data_folder_is_unusable(data, tmp_path, monkeypatch):
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a folder")
+    monkeypatch.setenv("ROBOEMOT_DATA_DIR", str(blocker / "data"))
+    stop = threading.Event()
+    stop.set()
+    app = new_app(AppWithFakes)
+    app.run(fake_mini(), stop)
+    sections = app.diagnostics.report()["sections"]
+    assert sections["roboemot.motion"]["ok"]
+    assert sections["roboemot.vision"]["data"]["state"] == "unavailable"
+    assert sections["roboemot.registry"]["data"]["state"] == "unavailable"
+    assert "data folder" in sections["roboemot.registry"]["data"]["reason"]

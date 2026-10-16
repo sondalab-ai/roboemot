@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import stat
 import threading
 import time
@@ -30,8 +31,17 @@ PLANTED = np.eye(DIM, dtype=np.float32)[0]
 
 
 class Detector:
+    """One face whose nose swings left and right, so enrollment sees varied angles."""
+
+    def __init__(self):
+        self.calls = 0
+
     def detect(self, image):
-        return [Detection((100, 60, 180, 140), 0.95, landmarks=np.zeros((5, 2)))]
+        self.calls += 1
+        eye_l, eye_r, y = 120.0, 160.0, 90.0
+        nose = 140.0 + 0.3 * (eye_r - eye_l) * math.sin(self.calls / 3)
+        pts = [[eye_l, y], [eye_r, y], [nose, y + 20], [eye_l, y + 40], [eye_r, y + 40]]
+        return [Detection((100, 60, 180, 140), 0.95, landmarks=np.array(pts))]
 
 
 class Embedder:
@@ -221,3 +231,151 @@ def test_enroll_from_the_live_pipeline_then_the_person_is_named():
         p.stop()
     assert names and names[0] == person_id
     assert p.registry.get_person(person_id).display_name == NAME
+
+
+def test_an_unenrolled_face_is_tracked_but_stays_unnamed():
+    bus = Bus()
+    p = open_perception(CFG, bus, Source(), load_stages=fake_stages)
+    names, entities = [], []
+    bus.subscribe("person.recognized", lambda m: names.append(m))
+    bus.subscribe("percept.entity", lambda m: entities.append(m.payload))
+    p.start()
+    try:
+        deadline = time.monotonic() + 15
+        while len(entities) < 8 and time.monotonic() < deadline:
+            time.sleep(0.05)
+    finally:
+        p.stop()
+    assert len(entities) >= 8 and names == []
+    assert all(e.kind == "person" and e.identity is None for e in entities)
+
+
+def test_perception_stop_runs_every_step_even_when_the_service_raises(caplog):
+    p = open_perception(CFG, Bus(), Source(), load_stages=fake_stages)
+    calls = []
+
+    def boom():
+        raise RuntimeError("camera stuck")
+
+    p.service.stop = boom
+    p.registry.flush = lambda: calls.append("flush")
+    p.enrollment.start("s1")
+    with caplog.at_level(logging.WARNING):
+        p.stop()
+    assert calls == ["flush"]
+    assert p.enrollment.status()["state"] == "cancelled"
+    assert "RuntimeError" in caplog.text and "camera stuck" not in caplog.text
+
+
+def test_a_failing_camera_read_is_counted_logged_once_and_retried(monkeypatch, caplog):
+    import roboemot.vision.service as service
+
+    monkeypatch.setattr(service, "PUMP_RESTART_S", 0.05)
+
+    class Flaky(Source):
+        def read(self):
+            if self.n < 3:
+                self.n += 1
+                raise OSError("sdk: media gone")
+            return super().read()
+
+    p = open_perception(CFG, Bus(), Flaky(), load_stages=fake_stages)
+    with caplog.at_level(logging.WARNING):
+        p.start()
+        try:
+            deadline = time.monotonic() + 15
+            while p.vision_snapshot()["frames"]["processed"] < 3 and time.monotonic() < deadline:
+                time.sleep(0.05)
+            snap = p.vision_snapshot()
+        finally:
+            p.stop()
+    assert snap["camera"]["errors"] == 3 and snap["camera"]["last_error"] == "OSError"
+    assert snap["frames"]["processed"] >= 3
+    assert sum("camera read failed: OSError" in r.message for r in caplog.records) == 1
+    assert "media gone" not in caplog.text
+
+
+def test_a_raising_face_tap_does_not_break_the_frame():
+    bus = Bus()
+    p = open_perception(CFG, bus, Source(), load_stages=fake_stages)
+    faces = []
+    bus.subscribe("percept.face", lambda m: faces.append(m.payload))
+
+    def bad_tap(frame, tracks):
+        raise RuntimeError("tap exploded")
+
+    p.pipeline.face_tap = bad_tap
+    for i in range(4):
+        img = np.zeros((240, 320, 3), np.uint8)
+        img[0, 0, 0] = i
+        p.pipeline.process(Frame(img, i * 0.2))
+    assert len(faces) >= 2  # confirmed after two hits, published despite the failing tap
+
+
+def test_runner_rates_cover_more_than_256_samples_and_a_partial_window():
+    now = [0.0]
+
+    class Module:
+        name = "m"
+
+        def process(self, frame):
+            pass
+
+    runner = LatestFrameRunner(Module(), clock=lambda: now[0])
+    runner.start()
+    try:
+        frame = Frame(np.zeros((2, 2, 3), np.uint8), 0.0)
+        for _ in range(200):  # 2 s of a 100 Hz camera
+            runner.submit(frame)
+            now[0] += 0.01
+        assert runner.rates()["submitted_hz"] == pytest.approx(100, rel=0.05)  # not 200/10 s
+        for _ in range(1000):  # 12 s in all: the window is full and holds ~1000 samples
+            runner.submit(frame)
+            now[0] += 0.01
+        assert runner.rates()["submitted_hz"] == pytest.approx(100, rel=0.05)
+    finally:
+        runner.stop()
+
+
+def test_hot_reload_reaches_the_pipeline_trackers_governor_and_enrollment():
+    p = open_perception(CFG, Bus(), Source(), load_stages=fake_stages)
+    new = RoboEmotConfig.model_validate(
+        {
+            "vision": {"rates": {"detection_hz": 3}, "tracker": {"lost_s": 7}},
+            "enrollment": {"min_gap_s": 2},
+        }
+    )
+    p.apply_config(new)
+    assert p.pipeline.governor.rates.detection_hz == 3
+    assert p.pipeline.face_tracker.cfg.lost_s == 7 and p.pipeline.object_tracker.cfg.lost_s == 7
+    assert p.enrollment.cfg.min_gap_s == 2
+
+
+def test_an_unusable_data_folder_degrades_instead_of_stopping_the_app(tmp_path, monkeypatch):
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a file where the data folder should be")
+    monkeypatch.setenv("ROBOEMOT_DATA_DIR", str(blocker / "data"))
+    p = open_perception(CFG, Bus(), Source(), load_stages=fake_stages)
+    assert p.registry is None and p.pipeline is None and "data folder" in p.unavailable
+    assert p.registry_snapshot() == {"state": "unavailable", "reason": p.unavailable}
+    assert p.vision_snapshot()["state"] == "unavailable"
+    with pytest.raises(EnrollmentError, match="unavailable"):
+        p.enrollment.start("s")
+    p.start()
+    p.stop()  # harmless
+
+
+def test_models_list_points_at_weights_left_in_the_old_default_folder(
+    tmp_path, monkeypatch, capsys
+):
+    from roboemot import cli
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    legacy = tmp_path / ".cache" / "roboemot" / "models"
+    legacy.mkdir(parents=True)
+    (legacy / "yunet.onnx").write_bytes(b"x")
+    assert cli.main(["models", "list", "--cache-dir", str(tmp_path / "new")]) == 0
+    out = capsys.readouterr().out
+    assert "old default folder" in out and str(legacy) in out
+    assert cli.main(["models", "list", "--cache-dir", str(legacy)]) == 0
+    assert "old default folder" not in capsys.readouterr().out

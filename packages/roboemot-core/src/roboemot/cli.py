@@ -94,6 +94,12 @@ def _models(args: argparse.Namespace) -> int:
             state = models.status(spec, root, verify=args.verify)
             print(f"{spec.name:16} {spec.role:20} {spec.licence:11} {state}")
         print(f"folder: {root}")
+        legacy = models.legacy_dir()
+        if root != legacy and legacy.is_dir() and any(legacy.iterdir()):
+            print(
+                f"note: weights also exist in the old default folder {legacy}; move them to "
+                f"{root} or set ROBOEMOT_MODELS_DIR (the default moved under the data folder)"
+            )
         return 0
     if args.action == "prune":
         if not args.sources:

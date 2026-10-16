@@ -203,6 +203,17 @@ class VisionPipeline:
         if self.worker is not None:
             self.worker.cancel_pending()
 
+    def apply_config(self, vision: VisionConfig, identity: IdentityConfig) -> None:
+        """Hot reload (SPEC 11A): thresholds, rates and tracker settings take effect at once.
+
+        ``vision.attribute_queue_max``, the thread counts, the detector size and the models
+        folder are restart-only (the schema marks them).
+        """
+        self.cfg, self.identity = vision, identity
+        self.governor.rates = vision.rates
+        self.face_tracker.cfg = self.object_tracker.cfg = vision.tracker
+        self.matcher.config = identity
+
     def stats(self) -> dict[str, Any]:
         """Counts for the debug report (SPEC 12A): live tracks, governor scale and drops.
 

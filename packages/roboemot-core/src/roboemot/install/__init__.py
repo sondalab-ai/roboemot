@@ -33,6 +33,8 @@ from importlib.metadata import entry_points
 from pathlib import Path
 from typing import Protocol
 
+import yaml
+
 from .. import paths
 from .build import build_wheels, distribution_names, min_python, third_party_requirements
 from .pyenv import RemotePython, report_changes
@@ -257,30 +259,50 @@ def claim_data_dir(
     ui.ok(f"created the data folder {path} (registry and models live here)")
 
 
-def _safe_data_dir(path: str | None) -> str | None:
-    """The recorded folder if it has the shape the installer writes, else None.
+def checked_data_dir(remote: Remote, record: InstallRecord) -> tuple[str | None, str | None]:
+    """The recorded data folder if it is safe to delete, else a reason.
 
-    The record is read from the robot and the folder is about to be deleted recursively, so
-    only an absolute, normalised path ending in the default location is accepted.
+    The record is read from the robot and the folder is deleted recursively, so only exactly
+    the path this installer would choose now is accepted (``$HOME`` of the SSH user plus the
+    default location), and when it exists its ``realpath`` must be the same path, so no
+    symlinked parent or foreign home redirects the delete. Returns ``(path, None)``, or
+    ``(None, None)`` when nothing is recorded, or ``(None, reason)``.
     """
-    if not path or posixpath.normpath(path) != path or not posixpath.isabs(path):
-        return None
-    suffix = "/" + paths.DEFAULT_REL.as_posix()
-    return path if path.endswith(suffix) and len(path) > len(suffix) else None
+    if record.data_dir is None:
+        return None, None
+    _, expected = remote_data_dir(remote)
+    if record.data_dir != expected:
+        return None, f"recorded data folder {record.data_dir!r} is not {expected}"
+    if _exists(remote, expected):
+        real = remote.run(f"realpath {shlex.quote(expected)} 2>/dev/null || true").strip()
+        if real != expected:
+            return None, f"data folder {expected} resolves to {real or 'nothing'}: symlink?"
+    return expected, None
+
+
+def _created_parents(record: InstallRecord, home: str, path: str) -> list[str]:
+    """The recorded parents that really lie between ``home`` and ``path``, innermost first."""
+    between = set()
+    parent = posixpath.dirname(path)
+    while parent != home and parent.startswith(home + "/"):
+        between.add(parent)
+        parent = posixpath.dirname(parent)
+    return [p for p in reversed(record.data_dir_parents) if p in between]
 
 
 def remove_data_dir(ui: Ui, remote: Remote, record: InstallRecord, dry_run: bool) -> None:
     """Delete the recorded data folder (registry and models included), then the parents the
-    installer created if they are empty. Without a record nothing is deleted."""
+    installer created if they are empty. Without a record nothing is deleted; a record that
+    fails ``checked_data_dir`` is reported and left (``verify_uninstall`` then fails)."""
     would = "would " if dry_run else ""
     if record.data_dir is None:
         _, path = remote_data_dir(remote)
         if _exists(remote, path):
             ui.warn(f"no record of the data folder: {path} left as it is (delete it by hand)")
         return
-    path = _safe_data_dir(record.data_dir)
+    path, problem = checked_data_dir(remote, record)
     if path is None:
-        ui.warn(f"recorded data folder {record.data_dir!r} looks wrong: left as it is")
+        ui.warn(f"{problem}: left as it is")
         return
     if _exists(remote, path):
         if not dry_run:
@@ -288,9 +310,31 @@ def remove_data_dir(ui: Ui, remote: Remote, record: InstallRecord, dry_run: bool
         ui.ok(f"{would}delete the data folder {path} (registry and models included)")
     else:
         ui.ok(f"data folder {path} is not there")
-    for parent in reversed(record.data_dir_parents):
-        if path.startswith(parent + "/") and not dry_run:
+    home, _ = remote_data_dir(remote)
+    for parent in _created_parents(record, home, path):
+        if not dry_run:
             remote.run(f"rmdir {shlex.quote(parent)} 2>/dev/null || true", check=False)
+
+
+def warn_data_dir_overrides(ui: Ui, remote: Remote, dirs: list[Path]) -> None:
+    """Warn when the app would keep its data outside the folder the installer records.
+
+    Looks at ``ROBOEMOT_DATA_DIR`` in the SSH user's environment and at a ``data_dir`` in the
+    staged ``app.yaml``. The app's own environment may differ, so this is a hint, not a check.
+    """
+    env = remote.run('printf %s "${ROBOEMOT_DATA_DIR:-}"').strip()
+    if env:
+        ui.warn(
+            f"ROBOEMOT_DATA_DIR={env} is set for the SSH user: data may land outside the record"
+        )
+    for root in dirs:
+        for cfg in root.rglob("app.yaml"):
+            try:
+                value = (yaml.safe_load(cfg.read_text()) or {}).get("data_dir")
+            except (OSError, yaml.YAMLError, AttributeError):
+                continue
+            if value:
+                ui.warn(f"{cfg.name} sets data_dir={value}: uninstall will not remove that folder")
 
 
 # ---------------------------------------------------------------- install
@@ -306,6 +350,7 @@ def install_packages(
     dry_run: bool,
 ) -> InstallRecord:
     own = distribution_names(dirs)
+    warn_data_dir_overrides(ui, remote, dirs)
     before = py.installed()
     record = read_record(remote, platform.record_path) or InstallRecord(
         platform.app_name, platform.manifest_id, own
@@ -551,8 +596,10 @@ def verify_uninstall(
         if now.get(n) != v
     ]
     problems += [f"{p} still present ({m})" for m, p in leftovers(py, platform)]
-    data_dir = _safe_data_dir(record.data_dir)
-    if data_dir and _exists(py.remote, data_dir):
+    data_dir, bad = checked_data_dir(py.remote, record)
+    if bad:
+        problems.append(bad)
+    elif data_dir and _exists(py.remote, data_dir):
         problems.append(f"data folder {data_dir} still present")
     if problems:
         raise WizardError("uninstall incomplete (record kept, run again): " + "; ".join(problems))

@@ -10,6 +10,7 @@ and ``pump`` paces camera reads with its own injectable clock.
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from collections import deque
@@ -26,7 +27,9 @@ log = logging.getLogger(__name__)
 IDLE_WAIT_S = 0.01
 GRID = 8
 RATE_WINDOW_S = 10.0
-RATE_SAMPLES = 256
+MAX_RATE_HZ = 120.0  # vision.rates.camera_hz upper bound: sizes the rate windows
+JOIN_TIMEOUT_S = 10.0
+MIN_SPAN_S = 1e-3
 
 
 class FrameSource(Protocol):
@@ -38,15 +41,22 @@ class FrameSource(Protocol):
 class LatestFrameRunner:
     """Runs a perception module on the newest submitted frame in its own thread."""
 
-    def __init__(self, module: PerceptionModule, clock: Callable[[], float] = time.monotonic):
+    def __init__(
+        self,
+        module: PerceptionModule,
+        clock: Callable[[], float] = time.monotonic,
+        max_hz: float = MAX_RATE_HZ,
+    ):
         self.module = module
         self.dropped = 0
         self.processed = 0
         self.errors = 0
         self.last_error: str | None = None  # exception type name only, never the message
         self._clock = clock
-        self._done: deque[float] = deque(maxlen=RATE_SAMPLES)
-        self._arrived: deque[float] = deque(maxlen=RATE_SAMPLES)
+        samples = math.ceil(RATE_WINDOW_S * max_hz) + 1
+        self._done: deque[float] = deque(maxlen=samples)
+        self._arrived: deque[float] = deque(maxlen=samples)
+        self._started: float | None = None
         self._cond = threading.Condition()
         self._frame: Frame | None = None
         self._stop = False
@@ -66,31 +76,42 @@ class LatestFrameRunner:
             self._cond.notify()
 
     def rates(self) -> dict[str, float]:
-        """Frames per second handed in and processed over the last ``RATE_WINDOW_S`` seconds."""
+        """Frames per second handed in and processed over the last ``RATE_WINDOW_S`` seconds.
+
+        Before the runner has run that long, the rate is over the time since ``start``. The
+        sample buffers hold a full window at ``MAX_RATE_HZ``, so the rate does not saturate.
+        """
         with self._cond:
             now = self._clock()
             cutoff = now - RATE_WINDOW_S
+            since = self._started if self._started is not None else now
+            span = max(MIN_SPAN_S, min(RATE_WINDOW_S, now - since))
             return {
-                "submitted_hz": sum(t >= cutoff for t in self._arrived) / RATE_WINDOW_S,
-                "processed_hz": sum(t >= cutoff for t in self._done) / RATE_WINDOW_S,
+                "submitted_hz": sum(t >= cutoff for t in self._arrived) / span,
+                "processed_hz": sum(t >= cutoff for t in self._done) / span,
             }
 
     def start(self) -> None:
         """Start the worker thread."""
         self._stop = False
+        self._started = self._clock()
         self._thread = threading.Thread(target=self._loop, name="roboemot-vision", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
         """Stop the worker and wait for the frame in flight.
 
-        A frame still waiting in the slot is discarded. Safe to call once after ``start``.
+        A frame still waiting in the slot is discarded. The wait for the frame in flight is
+        bounded by ``JOIN_TIMEOUT_S``: a stage stuck in a native call is logged, not waited
+        for. Safe to call once after ``start``.
         """
         with self._cond:
             self._stop = True
             self._cond.notify()
         if self._thread is not None:
-            self._thread.join()
+            self._thread.join(timeout=JOIN_TIMEOUT_S)
+            if self._thread.is_alive():
+                log.warning("vision worker did not stop within %.0f s", JOIN_TIMEOUT_S)
 
     def _loop(self) -> None:
         while True:
