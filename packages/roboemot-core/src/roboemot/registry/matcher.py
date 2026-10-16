@@ -17,6 +17,7 @@ from __future__ import annotations
 import uuid
 from collections import Counter, deque
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Literal
 
 import numpy as np
@@ -45,8 +46,8 @@ class Identity:
 
 @dataclass
 class _Track:
-    face: deque[str | None]
-    voice: deque[str | None]
+    face: deque[tuple[str | None, datetime]]
+    voice: deque[tuple[str | None, datetime]]
     anonymous_id: str | None = None
 
 
@@ -73,7 +74,7 @@ class Matcher:
         with self._lock:
             for track in self._tracks.values():
                 for votes in (track.face, track.voice):
-                    kept = [None if v == owner_id else v for v in votes]
+                    kept = [(None if v == owner_id else v, at) for v, at in votes]
                     votes.clear()
                     votes.extend(kept)
 
@@ -115,8 +116,13 @@ class Matcher:
             return _Vote(None, best)
         return _Vote(best_owner, best)
 
-    def _winner(self, votes: deque[str | None]) -> str | None:
-        counts = Counter(v for v in votes if v is not None)
+    def _live(self, votes: deque[tuple[str | None, datetime]]) -> list[str | None]:
+        """Owners of the votes younger than ``vote_max_age_s``, oldest first."""
+        now, limit = self.registry.now(), self.config.vote_max_age_s
+        return [v for v, at in votes if (now - at).total_seconds() <= limit]
+
+    def _winner(self, votes: deque[tuple[str | None, datetime]]) -> str | None:
+        counts = Counter(v for v in self._live(votes) if v is not None)
         if not counts:
             return None
         owner, n = counts.most_common(1)[0]
@@ -135,7 +141,8 @@ class Matcher:
 
     def _conflicted(self, track: _Track, owner_id: str) -> bool:
         """True when any recent face or voice vote on the track went to someone else."""
-        return any(v is not None and v != owner_id for v in (*track.face, *track.voice))
+        live = (*self._live(track.face), *self._live(track.voice))
+        return any(v is not None and v != owner_id for v in live)
 
     def observe(
         self,
@@ -150,17 +157,14 @@ class Matcher:
 
         After a high-confidence match of a person, the embedding is offered to the registry's
         online refresh, which applies consent, cap, interval and drift rules. No refresh is
-        offered while any recent vote on the track, face or voice, names someone else. A face
-        winner that changes from one person to another clears the voice votes, which would
-        otherwise keep contradicting the new winner until they age out.
+        offered while any live vote on the track, face or voice, names someone else. Votes older
+        than ``vote_max_age_s`` are ignored; neither modality ever clears the other, so a
+        disagreement lasts until the stale votes age out or fresh ones agree.
         """
         with self._lock:
             track = self._track(track_id)
-            before = self._winner(track.face)
             vote = self._vote("entity" if kind == "entity" else "face", embedding, model_id)
-            track.face.append(vote.owner_id)
-            if before is not None and self._winner(track.face) not in (None, before):
-                track.voice.clear()
+            track.face.append((vote.owner_id, self.registry.now()))
             identity = self._resolve(track_id, kind)
             if (
                 refresh
@@ -177,8 +181,6 @@ class Matcher:
         """Evaluate a speaker embedding for a track; fused with the face votes of that track."""
         with self._lock:
             track = self._track(track_id)
-            before = self._winner(track.voice)
-            track.voice.append(self._vote("voice", embedding, model_id).owner_id)
-            if before is not None and self._winner(track.voice) not in (None, before):
-                track.face.clear()
+            owner = self._vote("voice", embedding, model_id).owner_id
+            track.voice.append((owner, self.registry.now()))
             return self._resolve(track_id, "person")

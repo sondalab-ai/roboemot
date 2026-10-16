@@ -205,17 +205,51 @@ def test_voice_alone_can_identify(tmp_path):
     assert fused.owner_id == a.person_id
 
 
-def test_a_changed_face_winner_clears_stale_voice_votes(tmp_path):
-    reg = make(tmp_path)
-    enroll_with_voice(reg, 0, "A")
-    b = enroll_with_voice(reg, 1, "B")
+def switched_to_y(tmp_path):
+    clock = Clock()
+    reg = make(tmp_path, clock)
+    x = enroll_with_voice(reg, 0, "X")
+    y = enroll_with_voice(reg, 1, "Y")
     m = matcher(reg)
     for _ in range(3):
         m.observe(1, axis(0), MODEL, refresh=False)
         m.observe_voice(1, axis(0), VOICE_MODEL)
     for _ in range(3):
         last = m.observe(1, axis(1), MODEL, refresh=False)
-    assert last.owner_id == b.person_id and not last.disagreement
+    return clock, m, x, y, last
+
+
+def test_a_face_switch_does_not_erase_voice_evidence(tmp_path):
+    _, _, _, _, last = switched_to_y(tmp_path)
+    assert not last.known and last.disagreement
+
+
+def test_disagreement_ends_when_the_stale_votes_age_out(tmp_path):
+    clock, m, _, y, _ = switched_to_y(tmp_path)
+    clock.advance(IdentityConfig().vote_max_age_s + 1)
+    for _ in range(3):
+        last = m.observe(1, axis(1), MODEL, refresh=False)
+    assert last.owner_id == y.person_id and not last.disagreement
+
+
+def test_fresh_agreeing_voice_votes_resolve_the_disagreement(tmp_path):
+    _, m, _, y, _ = switched_to_y(tmp_path)
+    for _ in range(3):
+        last = m.observe_voice(1, axis(1), VOICE_MODEL)
+    assert last.owner_id == y.person_id and not last.disagreement
+
+
+def test_refresh_resumes_once_the_conflicting_vote_expires(tmp_path):
+    clock = Clock()
+    reg = make(tmp_path, clock, refresh_min_interval_s=0)
+    a = enroll_with_voice(reg, 0, "A")
+    enroll_with_voice(reg, 1, "B")
+    m = matcher(reg)
+    m.observe_voice(1, axis(1), VOICE_MODEL)
+    clock.advance(IdentityConfig().vote_max_age_s + 1)
+    for _ in range(3):
+        m.observe(1, blend(0, 2, 0.5), MODEL)
+    assert len(reg.get_person(a.person_id).face_embeddings) == 6
 
 
 def test_entities_are_matched_by_appearance(tmp_path):

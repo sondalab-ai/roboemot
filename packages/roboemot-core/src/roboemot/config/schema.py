@@ -426,6 +426,10 @@ class IdentityConfig(Strict):
         60.0, "Minimum time between disk writes of last_seen updates", unit="s", ge=0, le=86400
     )
 
+    vote_max_age_s: float = param(
+        10.0, "Identity votes older than this are ignored", unit="s", ge=1, le=300
+    )
+
     @model_validator(mode="after")
     def _consistent(self) -> IdentityConfig:
         if self.votes_required > self.votes_window:
