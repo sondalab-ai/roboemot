@@ -105,6 +105,17 @@ class AttentionSelector:
         """Inject the active speaker; it stays valid for ``speaker_hold_s`` after its stamp."""
         self._hint = hint
 
+    @property
+    def target(self) -> AttentionTarget | None:
+        """The target chosen by the last ``update`` (None: no target)."""
+        return self._current
+
+    @property
+    def engaged(self) -> bool:
+        """Whether the current target is a person or the active speaker (scanning yields)."""
+        t = self._current
+        return t is not None and (t.kind == "person" or t.priority == "active_speaker")
+
     def update(self, now: float, entries: Sequence[Entry]) -> AttentionTarget | None:
         """Choose the target at ``now``, publish it when due and return it (None: no target)."""
         fresh = [e for e in entries if now - e.last_seen <= self.cfg.stale_s]

@@ -497,6 +497,13 @@ class AttentionConfig(Strict):
         ge=0,
         le=180,
     )
+    object_max_hold_s: float = param(
+        30.0,
+        "How long attention on an animal or object holds off a due scan; then the sweep runs",
+        unit="s",
+        ge=1,
+        le=600,
+    )
     switch_margin: float = param(
         0.25,
         "Relative advantage a same-category candidate needs to replace the current target",
@@ -659,6 +666,65 @@ class WorldHalfLife(Strict):
     )
 
 
+class WorldScanConfig(Strict):
+    idle_interval_s: float = param(
+        120.0,
+        "Idle time before the robot looks around (before the energy trait)",
+        unit="s",
+        ge=5,
+        le=3600,
+    )
+    jitter_s: float = param(30.0, "Random +- offset on the idle interval", unit="s", ge=0, le=1800)
+    dwell_s: float = param(1.0, "Pause at each sweep waypoint", unit="s", ge=0.1, le=30)
+    overlap_deg: float = param(
+        15.0, "Overlap between the views of neighbouring waypoints", unit="deg", ge=0, le=60
+    )
+    speed_dps: float = param(
+        40.0, "Sweep speed between waypoints, before the safety limiter", unit="deg/s", ge=5, le=360
+    )
+    min_amplitude: float = param(
+        0.3, "Smallest share of the full circle a sweep covers (low energy)", ge=0.1, le=1
+    )
+    arrive_tol_deg: float = param(
+        4.0,
+        "A waypoint counts as reached within this distance of the pose",
+        unit="deg",
+        ge=0.5,
+        le=30,
+    )
+    waypoint_timeout_s: float = param(
+        10.0, "Give up on a waypoint the pose does not reach in this time", unit="s", ge=1, le=120
+    )
+    min_step_ratio: float = param(
+        0.5,
+        "Smallest waypoint spacing as a share of the camera's field of view",
+        ge=0.1,
+        le=1,
+    )
+    command_ttl_s: float = param(
+        0.25, "Lifetime of a scan command if it is not renewed", unit="s", ge=0.05, le=2
+    )
+    glance_hold_s: float = param(
+        1.0, "How long a glance holds its bearing", unit="s", ge=0.1, le=10
+    )
+    glance_cooldown_s: float = param(8.0, "Minimum time between glances", unit="s", ge=0, le=600)
+    glance_max_age_s: float = param(
+        2.0, "An unexplained bearing older than this is not glanced at", unit="s", ge=0.1, le=60
+    )
+    doa_poll_hz: float = param(
+        5.0, "Sound direction read rate", unit="Hz", ge=0.5, le=50, restart=True
+    )
+    doa_confidence: float = param(
+        0.5, "Confidence of a sound direction observation", ge=0, le=1, restart=True
+    )
+
+    @model_validator(mode="after")
+    def _jitter_inside_interval(self) -> WorldScanConfig:
+        if self.jitter_s >= self.idle_interval_s:
+            raise ValueError("jitter_s must be smaller than idle_interval_s")
+        return self
+
+
 class WorldConfig(Strict):
     camera_fov_h_deg: float = param(
         78.0, "Horizontal field of view of the main camera", unit="deg", ge=10, le=360
@@ -704,6 +770,14 @@ class WorldConfig(Strict):
     min_uncertainty_deg: float = param(
         2.0, "Floor of an entry's angular uncertainty", unit="deg", ge=0, le=90
     )
+    bearing_only_gain_factor: float = param(
+        0.3,
+        "Share of the confidence gain a bearing-only observation (sound) gets; it does not "
+        "mark an entry in view",
+        ge=0,
+        le=1,
+    )
+    scan: WorldScanConfig = param({}, "Looking around (SPEC 5A, Scanning)")
 
     @model_validator(mode="after")
     def _uncertainty_order(self) -> WorldConfig:

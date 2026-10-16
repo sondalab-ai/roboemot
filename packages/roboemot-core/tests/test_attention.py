@@ -587,3 +587,23 @@ def test_released_attention_returns_the_head_towards_home(reachy):
         core.tick(t, 0.02)
     assert not g.active
     assert abs(core.limiter.pos["head.yaw"]) < 0.1 * abs(peak)
+
+
+def test_selector_engaged_only_for_a_person_or_the_speaker():
+    sel = AttentionSelector(CFG)
+    assert not sel.engaged
+    sel.update(0.0, [entry("p", "person", seen=0.0, distance_m=1.0)])
+    assert sel.engaged
+    sel = AttentionSelector(CFG)
+    moving = [entry("o", "object", az=0.0, seen=0.0)]
+    sel.update(0.0, moving)
+    moving = [entry("o", "object", az=40.0, seen=1.0)]
+    target = sel.update(1.0, moving)
+    assert target is not None and target.kind == "object"
+    assert not sel.engaged  # a held object target does not engage
+    sel = AttentionSelector(CFG)
+    sel.hint_speaker(SpeakerHint(0.0, azimuth_rad=1.0))
+    sel.update(0.0, [])
+    assert sel.engaged  # a bare speaker bearing counts
+    sel.update(30.0, [])
+    assert not sel.engaged  # the hint expired

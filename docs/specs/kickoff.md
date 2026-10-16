@@ -215,7 +215,7 @@ Off-robot compute is optional, never required. Recognition, register, affect, re
 | Camera | `mini.media.get_frame()` → `uint8` array (H, W, 3) | Implements the `camera_main` `SensorDriver` feeding vision (section 5) |
 | Microphones | `mini.media.get_audio_sample()` → `float32`, 16 kHz, 2 channels | Feeds the capture stage of the voice pipeline (section 8) |
 | Speaker | `mini.media.push_audio_sample()` (non-blocking, 16 kHz) | TTS output; the driver tracks queued duration to support barge-in |
-| Sound direction | `mini.media.get_DoA()` → angle + `is_speech_detected` (0 rad left, π/2 front, π right) | Replaces our own direction-of-arrival estimate; drives the "turn toward voice" reflex and helps pick the active speaker |
+| Sound direction | `mini.media.get_DoA()` → `(angle, is_speech_detected)` or `None` (0 rad left, π/2 front, π right; one half-plane, so front and back are not told apart) | Replaces our own direction-of-arrival estimate; drives the "turn toward voice" reflex and helps pick the active speaker |
 | Fallback face tracking | `start_head_tracking(weight)`, `get_tracked_face()` (closest face, runs in the daemon) | Follows the closest face (`weight=1`) when that face is the attention target, including between detections on the `cm4` profile, and when the vision process is down; `weight=0` when RoboEmot's attention picks someone else (active speaker, enrolled person). How it blends with `set_target` streaming is verified in M0 |
 | IMU (Wireless only) | `mini.imu` → accelerometer, gyroscope, quaternion, temperature | Lift and tilt detection for safety and for appraisal ("picked up") |
 | Recording moves | `start_recording()` / `stop_recording()` on the robot | Storage path for learned gestures (section 9) |
@@ -354,8 +354,11 @@ Positions are egocentric: bearing and distance from the robot's base, so a robot
 - A scan policy in core decides when to look around; the robot plugin's `ScanPlanner` decides how (a sequence of poses within the manifest limits, for example head and body yaw sweeps).
 - Triggers: idle for `world.scan.idle_interval_s` (jittered), wake-up from rest, and a glance toward an unexplained sound or motion (a bearing-only observation with no matching entry).
 - Never while engaged with a person (a single glance toward a sound is allowed), never during quiet hours or circadian `resting` (section 7A), and only within the minor-present motion caps.
-- Sweeps are motion requests at idle priority through the arbiter (section 10): attention, reflexes and safety always win. Pace and amplitude scale with the persona's energy trait (section 11A, Persona).
-- On Reachy Mini, body yaw (±160°) plus the head-to-body offset (up to 65°) and the 78° camera cover the whole room; sound direction covers every direction without moving.
+- Sweeps are motion requests at idle priority through the arbiter (section 10): attention, reflexes and safety always win (attention on an animal or object holds a due sweep off for at most `attention.object_max_hold_s`, then the sweep runs). Pace and amplitude scale with the persona's energy trait (section 11A, Persona).
+- On Reachy Mini, body yaw (±160°) plus the head-to-body offset (up to 65°) and the 78° camera cover the whole room; sound direction covers the front half-plane without moving (the SDK reports one half-plane, so a sound behind is mirrored in front: a glance toward it is a guess the next sweep corrects).
+- Sweeps and glances move head and body yaw only; head pitch stays with idle breathing. Pace scales with the energy trait's `idle_period_x`, amplitude (share of the full circle) with `motion_amplitude_x`, never below `world.scan.min_amplitude`; a present minor only slows the pace, since the arbiter already scales amplitude and speed (section 12).
+- Only a person target or a speaker hint (engaged) cancels a sweep, drops a pending wake-up sweep and holds the idle clock; an animal or object target holds a due scan (sweep, wake-up or glance) off for at most `attention.object_max_hold_s` (default 30 s); the timer starts when the scan becomes due, survives a switch to another object, and resets when the object target is lost. After that the sweep runs, hiding the attention command while it does. A sweep ends with a glide home at scan pace. A glance toward a sound while engaged is allowed once per engagement, at most every `world.scan.glance_cooldown_s`, and is the one scan motion above idle priority (expression, for `glance_hold_s`). Today only sound feeds unexplained bearings; vision detections that match nothing create entries instead.
+- A bearing-only observation gains `world.bearing_only_gain_factor` of the normal confidence and neither refreshes `last_seen` nor marks the entry in view, so a mirrored rear sound cannot keep an unseen entry alive.
 
 ### Known individuals and auto-enrollment
 
@@ -654,7 +657,7 @@ The motor layer moves the robot on command and also on its own: every motion req
 | 2 | Commanded | App call or LLM skill: `nod`, `look_at(person)`, `play("wave")` | Runs to completion unless pre-empted |
 | 3 | Mimicry | Mirror live mode | Continuous stream while enabled |
 | 4 | Expression | Affect-driven motion from the expression map | Layered additively on top of 2 and 3 where joints are free |
-| 5 (lowest) | Idle | Breathing, small gaze shifts, attention tracking | Always running when nothing else claims the joint |
+| 5 (lowest) | Idle | Breathing, small gaze shifts, attention tracking, scan sweeps | Always running when nothing else claims the joint. Both are idle tier, so the app orders them: a person target or speaker hint (engaged) cancels a sweep and clears the `scan` source the same tick; attention on an animal or object ("watch, then scan") holds a due scan off for at most `attention.object_max_hold_s`, after which the sweep runs and that attention command is dropped for its duration. The one exception is a single glance toward a sound while engaged, fed at expression priority (above idle) for `world.scan.glance_hold_s` |
 
 Arbitration is per joint: a commanded nod claims the neck but leaves the LEDs and other joints to expression and idle. Switching sources cross-fades over 150 ms unless the source is safety.
 
@@ -785,9 +788,9 @@ The effective configuration is the merge of six layers; a later layer overrides 
 | `motion.idle` | breathing amplitude and period, gaze-shift interval, micro-movement noise | Section 10 |
 | `motion.arbiter` | source priorities, cross-fade time, loop rate | Section 10 |
 | `reflexes` | rules: trigger, threshold, primitive, amplitude, cooldown | Section 10 |
-| `attention` | priority order, switch hysteresis, head-tracking weight policy | Sections 4A, 5 |
+| `attention` | priority order, switch hysteresis, head-tracking weight policy, maximum hold of a due scan by an animal or object target | Sections 4A, 5 |
 | `identity` | match threshold, margin, votes, estimate confidence threshold, online refresh cap | Sections 5, 6 |
-| `world` | match gate and range gate, tie tolerance, half-life per kind, out-of-view decay factor, forget confidence, moved threshold, initial confidence, confidence gain, position blend, initial and minimum uncertainty; scan interval, jitter and amplitude; auto-enrollment days and spread; history retention | Section 5A |
+| `world` | match gate and range gate, tie tolerance, half-life per kind, out-of-view decay factor, forget confidence, moved threshold, initial confidence, confidence gain, position blend, initial and minimum uncertainty; bearing-only gain factor; scan interval and jitter, waypoint dwell, overlap and speed, minimum amplitude, glance hold, cooldown and age, sound-direction rate and confidence (`world.scan.*`); auto-enrollment days and spread; history retention | Section 5A |
 | `mirror` | retargeting, filter parameters, keypoint confidence floor, hold and decay, mirror image, recording length | Section 9 |
 | `voice` | TTS backend and fallback, voice per language, base rate, pitch, volume and variability, expressivity, mood source, per-mood prosody deltas, instructions and sounds, limits; wake word and its policy, barge-in sensitivity, active ASR language | Section 8 |
 | `persona` | identity prompt and its length cap, traits (warmth, energy, playfulness, formality), trait source (manual or LLM), trait-to-parameter tables | Section 11A |

@@ -3,9 +3,10 @@
 The daemon starts this as a subprocess and passes a connected ``ReachyMini``; this process is
 the SDK bridge (the only owner of the SDK client and its media). It never wakes or sleeps the
 robot: the platform does. M0 scope: load config and manifest, run the motion loop with idle
-motion, look at the attention target chosen from the world model (SPEC 5, 10), track
-connectivity (SPEC 12A: robot link in the loop, LLM routes when configured) with
-the offline responder's gestures, stop cleanly on ``stop_event``.
+motion, look at the attention target chosen from the world model (SPEC 5, 10), look around
+when idle (SPEC 5A, Scanning: a sweep source fed only while attention is not active, so
+attention always wins), track connectivity (SPEC 12A: robot link in the loop, LLM routes when
+configured) with the offline responder's gestures, stop cleanly on ``stop_event``.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import os
 import threading
 import time
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +25,7 @@ from roboemot.affect import AffectEngine
 from roboemot.attention import SOURCE as ATTENTION_SOURCE
 from roboemot.attention import AttentionSelector, GazeController
 from roboemot.bus import Bus
+from roboemot.circadian import CircadianModel, in_window
 from roboemot.config import ConfigStack
 from roboemot.diagnostics import Diagnostics, FnSource, Target, platform_sources
 from roboemot.diagnostics.system import local_sources
@@ -31,7 +34,17 @@ from roboemot.health.responder import OfflineResponder
 from roboemot.manifest import load_manifest
 from roboemot.motion import Command, MotionLoop, Priority
 from roboemot.persona import effects as persona_effects
-from roboemot.world import WorldModel, camera_in_view
+from roboemot.world import (
+    Observation,
+    ObserveResult,
+    ScanContext,
+    ScanController,
+    WorldModel,
+    camera_in_view,
+    feed_world,
+    load_world_plugin,
+)
+from roboemot.world.scan import SOURCE as SCAN_SOURCE
 
 from .driver import ReachyMiniDriver
 from .gaze import FRAME, GAZE
@@ -43,6 +56,7 @@ except ImportError:  # pragma: no cover
 
 log = logging.getLogger(__name__)
 ADDITIVE_IDLE = "idle-additive"
+MINUTES_PER_HOUR = 60.0
 DATA = Path(__file__).resolve().parent / "data"
 
 
@@ -104,6 +118,63 @@ def attention_tick(
         return False
 
 
+def scan_context(
+    now: float,
+    cfg: Any,
+    selector: AttentionSelector,
+    *,
+    hour: float,
+    effects: Any = None,
+    circadian: CircadianModel | None = None,
+    minor_present: bool = False,
+) -> ScanContext:
+    """What the scan policy needs this tick: engagement from attention, the circadian state and
+    quiet hours (SPEC 7A) from the local ``hour``, the persona's energy effects (``effects``,
+    computed from the persona when the caller has not cached them) and the minor factor
+    (SPEC 12)."""
+    quiet = cfg.circadian.enabled and in_window(hour, cfg.circadian.quiet_hours)
+    target = selector.target
+    return ScanContext(
+        now=now,
+        engaged=selector.engaged,
+        object_target=None if target is None or selector.engaged else target.key,
+        object_max_hold_s=cfg.attention.object_max_hold_s,
+        circadian=circadian.state if circadian else "awake",
+        quiet_hours=quiet,
+        effects=effects if effects is not None else persona_effects(cfg.persona),
+        minor_factor=cfg.safety.minor_motion_factor if minor_present else 1.0,
+    )
+
+
+def scan_tick(ctx: ScanContext, scan: ScanController, loop: MotionLoop, cfg: Any) -> bool:
+    """One scan step, run right after ``attention_tick``: feed the sweep command or release it.
+
+    The policy cancels a sweep the tick attention engages with a person or a speaker, and this
+    clears the ``scan`` source in the same tick, so that attention wins within one tick (SPEC
+    10). Attention on an animal or object holds a due scan off for ``attention.object_max_hold_s``
+    (the policy); once the sweep runs, that command is dropped here (it is also idle tier), so
+    the sweep wins deterministically. Returns
+    whether a sweep or glance is in progress. A failure is logged (type and message only), the
+    sweep is dropped and idle motion carries on; the app keeps running.
+    """
+    try:
+        was_active = scan.active
+        fov = math.radians(cfg.world.camera_fov_h_deg)
+        cmd = scan.tick(ctx, loop.pose(), fov)
+        if cmd is not None:
+            if not ctx.engaged:
+                loop.clear(ATTENTION_SOURCE)
+            loop.feed(cmd)
+        elif was_active:
+            loop.clear(SCAN_SOURCE)
+        return scan.active
+    except Exception as exc:
+        log.warning("scan: %s: %s", type(exc).__name__, exc)
+        scan.reset()
+        loop.clear(SCAN_SOURCE)
+        return False
+
+
 def apply_attention_config(
     cfg: Any, world: WorldModel, selector: AttentionSelector, gaze: GazeController
 ) -> None:
@@ -119,6 +190,8 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
     bus: Bus | None = None
     world: WorldModel | None = None  # vision (M1) and the speaker hint (M3) feed these
     selector: AttentionSelector | None = None
+    circadian: CircadianModel | None = None  # the circadian runner (M2) sets this
+    minor_present: bool = False  # the registry's age estimates (M1) set this
 
     def run(self, reachy_mini: Any, stop_event: threading.Event) -> None:
         stack = ConfigStack.from_files(
@@ -154,6 +227,22 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             manifest.constraints,
             margin_rad=math.radians(cfg.safety.constraint_margin_deg),
         )
+        plugin = load_world_plugin(manifest, cfg, reachy_mini, loop.driver.read_state)
+        scan = (
+            ScanController(cfg.world.scan, plugin.planner, manifest.dofs)
+            if plugin.planner is not None
+            else None
+        )
+
+        def on_result(obs: Observation, result: ObserveResult) -> None:
+            if scan is not None and result.unexplained_bearing is not None:
+                scan.policy.note_unexplained(*result.unexplained_bearing, obs.stamp)
+
+        feed_world(bus, world, on_result)
+
+        def publish(obs: Observation, joint_state: Any) -> None:
+            bus.publish("percept.entity", obs, obs.stamp, joint_state=joint_state)
+
         # The conversation pipeline (M3) will share this monitor with its Router.
         network = NetworkMonitor(
             cfg.llm_routes, cfg.connectivity.network, on_change=responder.on_event
@@ -179,6 +268,9 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         def reload(change: Any) -> None:
             loop.apply_config(change.config)
             apply_attention_config(change.config, world, selector, gaze)
+            if scan is not None:
+                scan.apply_config(change.config.world.scan)
+                plugin.planner.apply_config(change.config)
             responder.cfg = change.config.connectivity
             network.set_policy(change.config.connectivity.network)
 
@@ -186,16 +278,37 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         stop_watch = stack.start_watcher()
         loop.start()
         network.start()
+        fx_for, fx = None, None
         try:
+            for source in plugin.sources:
+                source.start(publish)
             while not stop_event.is_set():
                 now = time.monotonic()
                 attending = attention_tick(now, world, selector, gaze, loop)
-                feed_idle(loop, stack.effective(), now, attending)
+                live = stack.effective()
+                if scan is not None:
+                    local = datetime.now()
+                    hour = local.hour + local.minute / MINUTES_PER_HOUR
+                    if live.persona is not fx_for:  # recompute only after a reload
+                        fx_for, fx = live.persona, persona_effects(live.persona)
+                    ctx = scan_context(
+                        now,
+                        live,
+                        selector,
+                        effects=fx,
+                        hour=hour,
+                        circadian=self.circadian,
+                        minor_present=self.minor_present,
+                    )
+                    scan_tick(ctx, scan, loop, live)
+                feed_idle(loop, live, now, attending)
                 for cmd in responder.commands(now):
                     loop.feed(cmd)
                 stop_event.wait(0.05)
         finally:
             stop_watch.set()
+            for source in plugin.sources:
+                source.stop()
             network.stop()
             loop.stop()
 

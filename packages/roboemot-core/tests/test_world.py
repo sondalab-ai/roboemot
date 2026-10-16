@@ -310,7 +310,8 @@ def test_bearing_only_confirmation_decays_first():
     clock.advance(h)
     w.observe(obs(clock, 0, kind="unknown", source="doa"))
     decayed = c0 * 0.5
-    assert conf(w, e) == pytest.approx(decayed + CFG.confidence_gain * (1 - decayed))
+    gain = CFG.confidence_gain * CFG.bearing_only_gain_factor
+    assert conf(w, e) == pytest.approx(decayed + gain * (1 - decayed))
 
 
 def test_tick_in_the_past_is_noop_and_never_moves_time_back():
@@ -592,3 +593,25 @@ def test_camera_in_view_follows_the_head_pose():
     js = {"head.yaw": 0.7, "head.pitch": 0.2}
     az, el = to_base_frame(0.3, -0.1, js, spec)
     assert from_base_frame(az, el, js, spec) == pytest.approx((0.3, -0.1))
+
+
+def test_bearing_only_gains_less_and_cannot_keep_an_unseen_entry_alive():
+    """SPEC 5A: a sound confirms with a reduced gain, does not refresh last_seen and does not
+    mark the entry in view, so a mirrored rear sound cannot keep a ghost entry alive."""
+    w, _, clock, _ = setup()
+    e = seen(w, obs(clock, 0, category="person"))
+    seen_at = w.get(e).last_seen
+    w.tick(clock.advance(1.0), never_in_view)
+    before = conf(w, e)
+    w.observe(obs(clock, 0, kind="unknown", source="doa"))
+    after = w.get(e)
+    assert after.last_seen == seen_at
+    sound_gain = after.confidence - before
+    assert sound_gain > 0
+    w2, _, clock2, _ = setup()
+    e2 = seen(w2, obs(clock2, 0, category="person"))
+    w2.tick(clock2.advance(1.0), never_in_view)
+    before2 = conf(w2, e2)
+    w2.observe(obs(clock2, 0, category="person"))
+    assert conf(w2, e2) - before2 > sound_gain  # a camera hit gains more than the sound did
+    assert "doa" in after.sources

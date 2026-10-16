@@ -28,5 +28,9 @@ reachy-mini-wireless = "roboemot_reachymini.diagnostics:sources"
 [project.entry-points."roboemot.installers"]
 reachy-mini-wireless = "roboemot_reachymini.install:ReachyMiniWireless"
 
+# World sources and scan planner, keyed by manifest robot.id (SPEC 5A, Observations and sources).
+[project.entry-points."roboemot.world"]
+reachy-mini-wireless = "roboemot_reachymini.world:plugin"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/roboemot_reachymini"]

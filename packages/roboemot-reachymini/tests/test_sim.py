@@ -198,3 +198,74 @@ def test_attention_turns_the_head_towards_a_world_entry(loop):
         time.sleep(0.05)
     assert state["head.yaw"] > 0.9 * az, state  # turned left
     assert state["head.pitch"] < -0.9 * el, state  # looking up (nose up is negative pitch)
+
+
+def test_full_sweep_keeps_the_world_map_correct(loop):
+    """SPEC 5A (M1 exit): two objects planted aside and behind the robot are found by one full
+    sweep, at the right base-frame bearings, with no duplicate entries.
+
+    A stand-in detector reports each planted object whenever it is inside the camera's view of
+    the measured pose; it passes that joint state so the world model rotates the bearing back
+    into the base frame. Dwell is short because the fallback dynamics are slow.
+    """
+    import random
+
+    from roboemot.attention import AttentionSelector, GazeController
+    from roboemot.config.schema import RoboEmotConfig
+    from roboemot.world import (
+        Observation,
+        ScanController,
+        WorldModel,
+        angular_distance,
+        from_base_frame,
+    )
+    from roboemot_reachymini.app import attention_tick, scan_context, scan_tick
+    from roboemot_reachymini.gaze import FRAME, GAZE
+    from roboemot_reachymini.world import ReachyScanPlanner
+
+    cfg = RoboEmotConfig.model_validate(
+        {"world": {"scan": {"idle_interval_s": 10, "jitter_s": 2, "dwell_s": 0.4}}}
+    )
+    manifest = loop.manifest
+    world = WorldModel(cfg.world, FRAME)
+    selector = AttentionSelector(cfg.attention)
+    gaze = GazeController(cfg.attention, GAZE, manifest.dofs, manifest.constraints)
+    scan = ScanController(
+        cfg.world.scan,
+        ReachyScanPlanner(manifest.dofs, manifest.constraints, cfg),
+        manifest.dofs,
+        random.Random(1),
+    )
+    planted = [math.radians(100), math.radians(-170)]
+    half_fov = math.radians(cfg.world.camera_fov_h_deg) / 2 * 0.9
+    half_fov_v = math.radians(cfg.world.camera_fov_v_deg) / 2 * 0.9
+
+    scanned = False
+    deadline = time.monotonic() + 240.0
+    while time.monotonic() < deadline:
+        now = time.monotonic()
+        state = loop.driver.read_state()
+        for az in planted:
+            s_az, s_el = from_base_frame(az, 0.0, state, FRAME)
+            if abs(s_az) <= half_fov and abs(s_el) <= half_fov_v:
+                world.observe(Observation("object", now, "sim-detector", s_az, s_el, "cup"), state)
+        attention_tick(now, world, selector, gaze, loop)
+        ctx = scan_context(now, cfg, selector, hour=12.0)
+        scanning = scan_tick(ctx, scan, loop, cfg)
+        if scanned and not scanning:
+            break
+        scanned |= scanning
+        time.sleep(0.05)
+    assert scanned and not scan.active, "the sweep did not finish in time"
+    for _ in range(40):  # let the pose settle after the glide home
+        time.sleep(0.1)
+    state = loop.driver.read_state()
+    assert abs(state["head.yaw"]) < math.radians(8), state
+    assert abs(state["body_yaw"]) < math.radians(8), state
+
+    objects = [e for e in world.entries if e.kind == "object"]
+    assert len(objects) == len(planted), objects  # found both, no duplicates
+    gate = math.radians(cfg.world.match_gate_deg)
+    for az in planted:
+        nearest = min(angular_distance(e.azimuth_rad, e.elevation_rad, az, 0.0) for e in objects)
+        assert nearest <= gate, (math.degrees(az), math.degrees(nearest))
