@@ -224,6 +224,16 @@ def test_complete_enrolls_with_consent_and_zeroes_the_samples(rig):
     assert st["state"] == COMPLETED and st["collected"] == 0
 
 
+def test_complete_replaces_the_pending_catalogue_record_of_the_same_name(rig):
+    pending = rig.reg.create_pending_person(NAME.upper())
+    other = rig.reg.create_pending_person("Someone Else")
+    rig.svc.start("s1")
+    feed(rig, 40)
+    person_id = rig.svc.complete(NAME, ADULT, "adult", "female")
+    ids = {r.id for r in rig.reg.list()}
+    assert pending.person_id not in ids and other.person_id in ids and person_id in ids
+
+
 def test_complete_with_too_few_samples_or_no_session_raises(rig):
     with pytest.raises(EnrollmentError, match="no enrollment session"):
         rig.svc.complete(NAME, ADULT, "adult")

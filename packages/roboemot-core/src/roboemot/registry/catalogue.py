@@ -131,6 +131,7 @@ class CatalogueService:
         world: LiveWorld | None = None,
         validate_name: Callable[[str], str] | None = None,
         now: Callable[[], float] | None = None,
+        purge_candidates: Callable[[], int] | None = None,
     ) -> None:
         self.registry = registry
         self.cfg = cfg
@@ -138,6 +139,7 @@ class CatalogueService:
         self.world = world
         self._validate = validate_name
         self._now = now
+        self._purge = purge_candidates
 
     # ------------------------------------------------------------------ import
 
@@ -290,6 +292,10 @@ class CatalogueService:
                     )
                 )
         return out
+
+    def purge_candidates(self) -> int:
+        """Delete the auto-enrollment candidates (appearance clusters); returns how many."""
+        return 0 if self._purge is None else self._purge()
 
     # ------------------------------------------------------------------ confirmation
 

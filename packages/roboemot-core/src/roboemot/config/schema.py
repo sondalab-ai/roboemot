@@ -1306,7 +1306,12 @@ class CatalogueConfig(Strict):
         200, "Records one sidecar may create", ge=1, le=5000, conservative="lower"
     )
     max_regions: int = param(
-        64, "Tagged regions read from one sidecar", ge=1, le=1000, conservative="lower"
+        16,
+        "Tagged regions read from one sidecar; each photo region is one model run on the "
+        "web request thread",
+        ge=1,
+        le=1000,
+        conservative="lower",
     )
     max_embeddings_per_entity: int = param(
         20, "Appearance embeddings kept per animal or object", ge=1, le=100

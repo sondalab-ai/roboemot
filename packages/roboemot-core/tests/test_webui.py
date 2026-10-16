@@ -630,10 +630,10 @@ def test_quarantined_list_and_purge(authed, service):
     assert service.keys == []
 
 
-def test_catalogue_is_a_placeholder(authed):
+def test_catalogue_without_a_service_is_unavailable(authed):
     resp = authed.request("GET", "/api/catalogue")
-    assert resp.status == 501
-    assert resp.json == {"error": "not_implemented"}
+    assert resp.status == 503
+    assert resp.json == {"error": "catalogue_unavailable"}
 
 
 # ------------------------------------------------------------------ debug and privacy

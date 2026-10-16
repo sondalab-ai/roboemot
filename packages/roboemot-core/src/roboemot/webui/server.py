@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 
 from roboemot.config.schema import RoboEmotConfig
 
-from .api import DebugReport, EnrollmentPort, Request, Response, WebApi
+from .api import CataloguePort, DebugReport, EnrollmentPort, Request, Response, WebApi
 from .auth import PinStore, check_pin_format
 from .guard import hostname_of, is_trusted_host
 
@@ -182,16 +182,17 @@ class _Handler(BaseHTTPRequestHandler):
         if self.command == "GET" and not path.startswith("/api/"):
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
             return
-        body = self._read_body()
+        headers = {k.lower(): v for k, v in self.headers.items()}
+        limit = self.server.api.body_limit(self.command, path, headers)
+        body = self._read_body(limit)
         if body is None:
             return
-        headers = {k.lower(): v for k, v in self.headers.items()}
         resp = self.server.api.handle(
             Request(self.command, path, headers, body, self.client_address[0])
         )
         self._send_response(resp)
 
-    def _read_body(self) -> bytes | None:
+    def _read_body(self, limit: int) -> bytes | None:
         """The body, or None after an error response; the size is checked before reading."""
         if "Transfer-Encoding" in self.headers:
             self._send_json(HTTPStatus.LENGTH_REQUIRED, {"error": "bad_request"})
@@ -201,7 +202,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "bad_request"})
             return None
         length = int(raw)
-        if length > self.server.max_body:
+        if length > limit:
             self.close_connection = True
             self._send_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": "body_too_large"})
             return None
@@ -286,6 +287,7 @@ def make_server(
     *,
     clock: Callable[[], float] = time.monotonic,
     robot_hosted: bool = False,
+    catalogue: CataloguePort | None = None,
 ) -> Server:
     """Build the web UI on ``cfg.webui.bind:port``; nothing is served until ``start()``.
 
@@ -297,7 +299,7 @@ def make_server(
     current = cfg() if callable(cfg) else cfg
     web = current.webui
     pins = PinStore(Path(data_dir))
-    api = WebApi(service, diagnostics, cfg, pins, clock=clock)
+    api = WebApi(service, diagnostics, cfg, pins, clock=clock, catalogue=catalogue)
     bind = web.bind or (ANY_INTERFACE if robot_hosted else LOOPBACK_INTERFACE)
     httpd = _Httpd((bind, web.port), _Handler)
     httpd.csp = CSP.format(ancestors=web.frame_ancestors)

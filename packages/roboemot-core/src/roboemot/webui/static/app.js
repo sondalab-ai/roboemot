@@ -278,9 +278,91 @@ function rowActions(r, entities) {
 
 // ---------------------------------------------------------------- catalogue, diagnostics
 
-function catalogueView() {
+async function toBase64(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(binary);
+}
+
+function importReport(report) {
+  const created = report.items.filter((i) => i.created).length;
+  const parts = [el("p", {}, t("catalogue_report", { created: created, existing: report.items.length - created }))];
+  if (report.photo !== "none") parts.push(el("p", { class: "muted" }, t("photo_" + report.photo)));
+  if (report.truncated) parts.push(el("p", { class: "muted" }, t("catalogue_truncated")));
+  if (report.conflicts.length) {
+    parts.push(el("p", {}, t("catalogue_conflicts") + ":"),
+      el("ul", {}, report.conflicts.map((c) => el("li", {}, c.name + ": " + (state.strings["conflict_" + c.code] || c.code)))));
+  }
+  return parts;
+}
+
+async function catalogueView() {
   const view = document.getElementById("view");
-  view.replaceChildren(el("section", {}, el("h2", {}, t("tab_catalogue")), el("p", {}, t("catalogue_later"))));
+  view.replaceChildren();
+  const data = await api("GET", "/api/catalogue");
+  state.pinField = el("input", { type: "password", id: "confirm_pin", autocomplete: "off", inputmode: "numeric" });
+  const xmp = el("input", { type: "file", id: "xmp_file", accept: ".xmp,application/rdf+xml,text/xml" });
+  const photo = el("input", { type: "file", id: "photo_file", accept: "image/jpeg,image/png" });
+  const result = el("div", { id: "import_result", role: "status" });
+  const form = el("form", {
+    onsubmit: (ev) => {
+      ev.preventDefault();
+      guarded(async () => {
+        const file = xmp.files[0];
+        if (!file) { notice(t("err_xmp_required"), true); return; }
+        if (file.size > data.limits.max_xmp_bytes) { notice(t("err_xmp_too_large"), true); return; }
+        const body = { xmp: await file.text() };
+        if (photo.files[0]) {
+          if (photo.files[0].size > data.limits.max_image_bytes) { notice(t("err_image_too_large"), true); return; }
+          body.image_b64 = await toBase64(photo.files[0]);
+        }
+        const report = await api("POST", "/api/catalogue/import", body);
+        notice("");
+        await catalogueView();
+        document.getElementById("import_result").replaceChildren(...importReport(report));
+      });
+    },
+  },
+  el("label", { for: "xmp_file" }, t("catalogue_xmp")), xmp,
+  el("label", { for: "photo_file" }, t("catalogue_photo")), photo,
+  el("p", {}, el("button", { type: "submit", class: "primary" }, t("catalogue_import"))));
+
+  const confirmBy = (record, entryId) => guarded(async () => {
+    await api("POST", "/api/catalogue/" + record.id + "/confirm", entryId ? { entry_id: entryId } : {});
+    notice(t("saved"));
+    await catalogueView();
+  });
+  const pending = data.records.filter((r) => r.status === "pending");
+  const origin = (r) => t("origin_" + r.origin) + ", " + (r.has_appearance ? t("has_appearance") : t("no_appearance"));
+  const records = data.records.length === 0 ? el("p", { class: "muted" }, t("catalogue_none")) : el("table", {},
+    data.records.map((r) => el("tr", {},
+      el("td", {}, r.display_name),
+      el("td", {}, t("kind_" + r.kind) + (r.category ? " (" + r.category + ")" : "") + ", " + origin(r)),
+      el("td", { class: "actions" },
+        r.status === "pending" && r.has_appearance ?
+          el("button", { type: "button", onclick: () => confirmBy(r, null) }, t("catalogue_activate")) : [],
+        data.live.filter((e) => r.status === "pending" && e.kind === r.kind && (!r.category || e.category === r.category))
+          .map((e) => el("button", { type: "button", onclick: () => confirmBy(r, e.entry_id) },
+            t("catalogue_confirm", { name: r.display_name }) + " ← " + e.category + " #" + e.entry_id.split("-").pop()))))));
+  const live = data.live.length === 0 ? el("p", { class: "muted" }, t("catalogue_live_none")) :
+    el("ul", {}, data.live.map((e) => el("li", {}, t("kind_" + e.kind) + " " + e.category + " #" + e.entry_id.split("-").pop() +
+      (e.identified ? " ✓" : ""))));
+  view.append(
+    el("section", {}, el("h2", {}, t("tab_catalogue")), el("p", { class: "muted" }, t("catalogue_intro")), form, result),
+    el("section", {}, el("h3", {}, t("catalogue_pending")), pending.length ? el("p", { class: "muted" }, t("catalogue_pick")) : [], records),
+    el("section", {}, el("h3", {}, t("catalogue_live")), live),
+    el("section", {},
+      el("label", { for: "confirm_pin" }, t("pin_confirm")), state.pinField,
+      el("button", {
+        type: "button", class: "danger",
+        onclick: () => confirm(t("catalogue_clear_confirm")) && guarded(async () => {
+          const out = await api("POST", "/api/catalogue/candidates/clear", { confirm: true, pin: takePin() });
+          notice(t("catalogue_cleared", { n: out.cleared }));
+        }),
+      }, t("catalogue_clear"))));
 }
 
 async function debugView() {

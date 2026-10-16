@@ -254,8 +254,22 @@ class EnrollmentService:
         with self._lock:
             self._reset_locked()
             self._state = COMPLETED
+        self._retire_pending(record.person_id, name)
         log.info("enrollment session completed")
         return record.person_id
+
+    def _retire_pending(self, person_id: str, name: str) -> None:
+        """Drop the name-only catalogue record (SPEC 6) that this enrollment fulfils.
+
+        A pending person with the same name, from an XMP import, never held data of its own;
+        keeping it would leave a duplicate. Failures are logged by type and not raised.
+        """
+        try:
+            for other in self._reg().people_named(name):
+                if other.status == "pending" and other.person_id != person_id:
+                    self._reg().forget(other.person_id)
+        except Exception as exc:
+            log.warning("pending catalogue record not retired: %s", type(exc).__name__)
 
     def cancel(self) -> None:
         """Discard the session and its samples; harmless when none is running.
