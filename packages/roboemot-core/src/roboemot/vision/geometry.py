@@ -4,7 +4,8 @@ Sensor frame follows REP-103: x forward, y left, z up. Azimuth is positive left 
 positive up, so a pixel right of the image centre has negative azimuth and one above it has
 positive elevation. The camera looks along x. Intrinsics come from the camera source when it
 has them (``from_intrinsics``), else from the horizontal field of view with square pixels and
-the principal point at the image centre. Lens distortion is ignored. The base-frame rotation
+the principal point at the image centre; the fallback fields are ``world.camera_fov_h_deg`` and
+``camera_fov_v_deg``. Lens distortion is ignored. The base-frame rotation
 with the joint state is done by the world model, not here.
 """
 
@@ -25,6 +26,7 @@ class CameraModel:
     fy: float | None = None
     cx: float | None = None
     cy: float | None = None
+    vfov_deg: float | None = None
 
     @classmethod
     def from_intrinsics(
@@ -46,8 +48,12 @@ class CameraModel:
 
     @property
     def focal_y_px(self) -> float:
-        """Vertical focal length in pixels (fy when given, else equal to the horizontal one)."""
-        return self.fy if self.fy is not None else self.focal_px
+        """Vertical focal length in pixels (fy, else from the vertical field of view if known)."""
+        if self.fy is not None:
+            return self.fy
+        if self.vfov_deg is not None:
+            return (self.height / 2) / math.tan(math.radians(self.vfov_deg) / 2)
+        return self.focal_px
 
     def bearing(self, u: float, v: float) -> tuple[float, float]:
         """Sensor-frame ``(azimuth, elevation)`` in radians of the ray through pixel ``(u, v)``.

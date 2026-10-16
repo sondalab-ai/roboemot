@@ -52,8 +52,8 @@ class ReachyCamera:
 
         ``media.camera.K`` is already rescaled to the streamed size, so it is used only when
         its principal point lies inside the frame; otherwise None and vision falls back to
-        ``vision.camera_fov_h_deg``. Lens distortion is ignored by the pinhole model, so
-        bearings are approximate towards the edges of this wide-angle camera.
+        ``world.camera_fov_h_deg`` and ``camera_fov_v_deg``. Lens distortion is ignored by the
+        pinhole model, so bearings are approximate towards the edges of this wide-angle camera.
         """
         k = getattr(self._mini.media.camera, "K", None)
         if k is None:

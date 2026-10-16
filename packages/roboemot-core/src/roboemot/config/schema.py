@@ -574,15 +574,6 @@ class TrackerConfig(Strict):
 class VisionConfig(Strict):
     rates: VisionRates = param({}, "Per-stage target rates, scaled by the circadian state")
     tracker: TrackerConfig = param({}, "ByteTrack-class tracker")
-    # TODO: unify with a world-level camera_fov_h_deg once the world config carries one.
-    camera_fov_h_deg: float = param(
-        78.0,
-        "Horizontal field of view of the frames fed to vision (pinhole model, square pixels); "
-        "used only when the camera source gives no intrinsics (SPEC 5A: Reachy Mini 78 deg)",
-        unit="deg",
-        ge=10,
-        le=179,
-    )
     threads: int = param(2, "CPU threads of the frame-path models", ge=1, le=8, restart=True)
     attribute_threads: int = param(
         1, "CPU threads of the age and gender models (background job)", ge=1, le=8, restart=True

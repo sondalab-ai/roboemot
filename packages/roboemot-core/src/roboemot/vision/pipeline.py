@@ -44,7 +44,7 @@ from typing import Any, Literal
 import numpy as np
 
 from ..bus import Bus
-from ..config.schema import IdentityConfig, VisionConfig
+from ..config.schema import IdentityConfig, VisionConfig, WorldConfig
 from ..registry import Estimate, Matcher
 from ..registry.records import Attribute
 from ..world import Observation
@@ -120,6 +120,7 @@ class VisionPipeline:
         source: str = "vision",
         refresh: bool = True,
         camera_model: CameraProvider | None = None,
+        world: WorldConfig | None = None,
     ):
         if cfg.embedding_burst < identity.votes_required:
             raise ValueError("vision.embedding_burst must be at least identity.votes_required")
@@ -130,6 +131,7 @@ class VisionPipeline:
         self.source = source
         self.refresh = refresh
         self.camera_model = camera_model
+        self.world = world or WorldConfig()
         self.governor = governor or RateGovernor(cfg.rates)
         self.face_detector = face_detector
         self.face_embedder = face_embedder
@@ -205,7 +207,12 @@ class VisionPipeline:
         key = (width, height)
         if key not in self._cameras:
             model = self.camera_model(width, height) if self.camera_model else None
-            self._cameras[key] = model or CameraModel(width, height, self.cfg.camera_fov_h_deg)
+            self._cameras[key] = model or CameraModel(
+                width,
+                height,
+                self.world.camera_fov_h_deg,
+                vfov_deg=self.world.camera_fov_v_deg,
+            )
         return self._cameras[key]
 
     def _publish(self, topic: str, payload: Any, stamp: float, **meta: Any) -> bool:

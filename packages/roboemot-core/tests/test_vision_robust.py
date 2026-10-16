@@ -551,3 +551,18 @@ def test_load_stages_refuses_unverified_files(tmp_path):
 
     with pytest.raises(ModelError, match="not verified"):
         onnx.load_stages(tmp_path, CFG.vision)
+
+
+def test_fallback_camera_reads_the_world_fov(tmp_path):
+    from roboemot.config.schema import WorldConfig
+
+    world = WorldConfig(camera_fov_h_deg=60, camera_fov_v_deg=40)
+    right_edge = lambda i: [face(320 - 60 - 0.01, y=90, size=60)]  # noqa: E731
+    _, _, pipe, _, got = rig(tmp_path, right_edge, world=world)
+    run(pipe, 4)
+    p = got["percept.face"][-1].payload
+    assert p.azimuth_rad == pytest.approx(
+        -np.arctan(30 / 160 * 1.0 * np.tan(np.radians(30))) * 0
+        - np.arctan((290 - 160) / (160 / np.tan(np.radians(30)))),
+        abs=0.01,
+    )
