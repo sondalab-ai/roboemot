@@ -1016,7 +1016,7 @@ Milestones are ordered by dependency; dates are not set yet.
 - [ ] Is the library open source, and under which licence? Partly answered: M1 uses a permissive-weights stack (YuNet, SFace, FairFace ViT-B, DINOv2-S; [spike](../spikes/2026-10-m1-models.md)); the library licence itself is still open. It affects the choice of pretrained models (some face models have non-commercial licences) and how Piper (GPL-3.0) is bundled.
 - [ ] Is the Reachy Mini app web UI enough for enrollment and settings, or is a phone app needed?
 - [ ] Is a learned motor policy expected in v1, or is the procedural policy with a plug-in slot acceptable?
-- [x] Done (see [spike](../spikes/2026-10-m1-models.md): dogs 97.5% rank-1, objects 66%; defaults in section 5A). Spike before M1 auto-enrollment: can a general image embedding tell individual animals and objects apart (this cat vs. that cat, my mug vs. a similar one) accurately and fast enough on the CM4? The result sets the `world.autoenroll` defaults, or limits auto-enrollment to categories.
+- [x] Resolved by the M1 model spike ([spike](../spikes/2026-10-m1-models.md)): a general image embedding (DINOv2-S) tells individual dogs apart well (97.5% rank-1) and household objects poorly (66%); auto-enrollment covers both, with defaults in section 5A.
 - [ ] Are warmth, energy, playfulness and formality the right persona traits, and do the default trait tables (section 11A, Persona) feel right on the robot?
 
 * [ ] Are the reduced cm4 rates acceptable for v1 (vision 5 to 10 fps, identity within 2.5 s, object detection off by default)?
