@@ -241,7 +241,8 @@ The installer runs on a PC on the robot's LAN and is robot-agnostic (`roboemot.i
 
 - **Leave the robot as it was.** Apps share one Python environment, so other apps may install packages after RoboEmot. A full snapshot restore would undo their changes, so the installer records only what it changed itself:
   - the distributions it added;
-  - for each distribution it replaced, the version that was there before.
+  - for each distribution it replaced, the version that was there before;
+  - the app data folder (`~/.local/share/roboemot` of the robot user: registry and models, section 12 Data), created private (0700) when it did not exist, together with any parent folder it had to create. A folder that already existed is not recorded and uninstall leaves it. Uninstall deletes the recorded folder (registry and models included), then those parents if empty, and verification fails while the folder remains. The path is checked before the recursive delete (absolute, normalised, ending in the default location).
 
   The record is merged on every reinstall, and the original versions are never overwritten. It lives outside the environment and outside `/tmp` (Reachy: `/venvs/.roboemot-install.json`). It is written before pip runs and completed afterwards, so an interrupted install can still be undone.
 - **Install.** Versions already in the environment are pinned. If the app needs to change a shared package, the installer lists the changes and asks first, and a refusal leaves everything untouched. Every pip call passes `--no-cache-dir`, so nothing is added to the robot user's pip cache. Wheels go to a `mktemp` directory under `/tmp`, which is deleted afterwards. Making the app the startup app first records which app it replaces.
@@ -254,7 +255,7 @@ The installer runs on a PC on the robot's LAN and is robot-agnostic (`roboemot.i
   - verify, and only then delete the record.
 
   If verification fails, the record is kept, so running the uninstaller again picks up where it stopped. Running it twice is harmless. With no record, it removes only the app's own distributions and says so.
-- **Dry run** (`--dry-run`, for install and uninstall). It is read-only, with no pip cache, temporary directory or record written. It lists what would be added, changed, removed or restored.
+- **Dry run** (`--dry-run`, for install and uninstall). It is read-only, with no pip cache, temporary directory or record written. It lists what would be added, changed, removed or restored, and the data folder it would create or delete.
 - Checked on Neve (daemon 1.11.0): the install dry run would add only `scipy`, with everything else pinned at the robot's versions.
 
 ### Reachy Mini manifest
@@ -871,6 +872,7 @@ RoboEmot processes biometric data of adults and children in a home, so privacy a
 
 - Face and voice embeddings used to identify people are biometric data, a special category under GDPR Art. 9. Enrollment requires recorded consent; for minors, consent from a parent or guardian.
 - Unknown people are tracked only with session-scoped anonymous IDs, never stored after the session ends; the opt-in world history (section 5A) keeps only kind, position and time for them, with no embedding and no link between sessions.
+- Everything the app writes lives in one data folder (`roboemot.paths.data_dir()`: the `data_dir` config value, else `$ROBOEMOT_DATA_DIR`, else `~/.local/share/roboemot`; mode 0700): the registry in `registry/` and, unless `vision.models_dir` is set, the models in `models/`. The installer records and removes it (section 4A, Installer). Until M5 the registry runs without encryption (`allow_plaintext`), protected by file modes only, and the app logs a warning at startup.
 - Registry and logs are encrypted at rest (key in a secure element or TPM when present; the CM4 has neither, so the key sits in a root-only file, optionally wrapped by a passphrase entered in the web UI after boot, with recognition off until it is unlocked).
 - No camera frames or audio are written to disk by default; debug recording is opt-in, time-limited and shows a visible indicator (an LED, or on Reachy Mini a fixed antenna pose plus a banner in the web UI).
 - Only text (transcript + scene summary) can reach an off-board LLM route, and that can be disabled entirely; the single-frame multimodal opt-in (section 8) is off by default and blocked while a minor is present.
@@ -1046,7 +1048,7 @@ These are facts to measure, not decisions:
 - [ ] Velocity and acceleration caps for head, body and antennas, then re-check that the 3 degree planning margin of the head-body coupling (safety.constraint\_margin\_deg) still keeps it under 65 degrees (manifest `dynamics`).
 - [ ] Reflex latency through the Python bridge stays within 100 ms.
 - [ ] SDK head yaw is a base-frame angle (not relative to the body), as the gaze split assumes.
-- [ ] Installer (section 4A, Installer): a real install then `--uninstall` on Neve leaves an empty diff (apps-venv `pip list` and `site-packages`, `~`, `/venvs`, `/tmp`, `daemon_config.json`, startup app, installed apps). Only the dry runs have run there so far, and they left no file changed.
+- [ ] Installer (section 4A, Installer): a real install then `--uninstall` on Neve leaves an empty diff (apps-venv `pip list` and `site-packages`, `~`, `/venvs`, `/tmp`, `daemon_config.json`, startup app, installed apps), including the data folder `~/.local/share/roboemot` (and `.local` or `.local/share` if the install created them), with the app having run and enrolled someone in between. Only the dry runs have run there so far, and they left no file changed.
 - [ ] Diagnostics (section 12A) on the CM4. Checked on Neve (CM4 Rev 1.1, kernel 6.18, daemon 1.11.0): `/sys/class/power_supply` is empty, so Linux exposes no battery charge or health, and no fuel-gauge driver is bound; `pollen` can run `vcgencmd get_throttled`, so under-voltage flags (the only supply-health signal) and SoC temperature are reported. Still to check: that `roboemot debug` on the robot finds the app process (the daemon runs it as `python -u -m roboemot_reachymini.main`), and whether the battery board can be read at all (ask Pollen).
 - [ ] Connectivity gestures (section 12A): antenna directions (droop spreads outward, perk-up rises toward vertical; signs inferred from the home pose) and amplitudes look right; behaviour on a real Wi-Fi loss; whether an app survives a daemon backend restart in app mode (only client mode was simulated).
 
