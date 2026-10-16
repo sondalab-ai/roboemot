@@ -9,7 +9,7 @@ payload published on the bus (SPEC 12).
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Literal
+from typing import Literal, get_args
 
 import numpy as np
 
@@ -32,6 +32,12 @@ class Observation:
     distance_m: float | None = None
     confidence: float = 1.0
     embedding: np.ndarray | None = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self.kind not in get_args(ObservationKind):
+            raise ValueError(f"unknown observation kind: {self.kind!r}")
+        if not 0.0 <= self.confidence <= 1.0:
+            raise ValueError("observation confidence must be in [0, 1]")
 
 
 @dataclass
@@ -64,8 +70,11 @@ class ObserveResult:
     ``entry`` is the matched or created entry (None for an unexplained bearing).
     ``unexplained_bearing`` is the (azimuth, elevation) in the base frame of a bearing-only
     observation that matched nothing: the caller may trigger a glance (SPEC 5A, Scanning).
+    ``rejected`` is True when a new entry would start at or below ``forget_confidence``.
+    ``entry`` is always a public copy (no embedding), a snapshot at the time of the call.
     """
 
     entry: Entry | None
     created: bool = False
+    rejected: bool = False
     unexplained_bearing: tuple[float, float] | None = None

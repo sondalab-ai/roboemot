@@ -438,14 +438,23 @@ class WorldConfig(Strict):
     match_gate_deg: float = param(
         15.0, "Angular gate for matching an observation to an entry", unit="deg", ge=0.5, le=90
     )
+    tie_tolerance_deg: float = param(
+        3.0,
+        "Candidates this close to the nearest in angle are ranked by appearance",
+        unit="deg",
+        ge=0,
+        le=90,
+    )
     range_gate_m: float = param(
         0.5, "Range gate, used when both have a distance", unit="m", ge=0.01, le=10
     )
     half_life_s: WorldHalfLife = param({}, "Confidence half-life per kind")
     out_of_view_decay_factor: float = param(
-        0.2, "Decay rate multiplier for entries outside the sensors' view", ge=0, le=1
+        0.2, "Decay rate multiplier for entries outside the sensors' view", ge=0.01, le=1
     )
-    forget_confidence: float = param(0.1, "Entries below this confidence are removed", ge=0, le=1)
+    forget_confidence: float = param(
+        0.1, "Entries below this confidence are removed", ge=0.01, le=1
+    )
     moved_threshold_deg: float = param(
         10.0, "Angular shift that publishes world.entity_moved", unit="deg", ge=0.5, le=90
     )
@@ -464,6 +473,12 @@ class WorldConfig(Strict):
     min_uncertainty_deg: float = param(
         2.0, "Floor of an entry's angular uncertainty", unit="deg", ge=0, le=90
     )
+
+    @model_validator(mode="after")
+    def _uncertainty_order(self) -> WorldConfig:
+        if self.initial_uncertainty_deg < self.min_uncertainty_deg:
+            raise ValueError("initial_uncertainty_deg must be >= min_uncertainty_deg")
+        return self
 
 
 # --------------------------------------------------------------------------- voice (SPEC 8)
