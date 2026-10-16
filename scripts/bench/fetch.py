@@ -93,7 +93,12 @@ FILES: dict[str, list[tuple[str, str, str]]] = {
             "nanodet_plus",
             "nanodet-plus-m_320.onnx",
             f"{GH}/RangiLyu/nanodet/releases/download/v1.0.0-alpha-1/nanodet-plus-m_320.onnx",
-        )
+        ),
+        (
+            "nanodet_plus",
+            "nanodet-plus-m_320.yml",
+            f"{GH}/RangiLyu/nanodet/raw/v1.0.0-alpha-1/config/nanodet-plus-m_320.yml",
+        ),
     ],
     "insightface-buffalo": [
         ("insightface", f"{n}.zip", f"{GH}/deepinsight/insightface/releases/download/v0.7/{n}.zip")

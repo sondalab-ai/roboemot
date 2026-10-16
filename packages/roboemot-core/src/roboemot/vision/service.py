@@ -213,19 +213,10 @@ class Perception:
 def default_stages(cfg: RoboEmotConfig, profile: str | None) -> Any:
     """Load the ONNX backends from the models folder (needs the ``vision`` extra)."""
     from . import models
-    from .onnx import load_object_detector, load_stages
+    from .onnx import load_stages
 
     root = models.models_dir(cfg.vision.models_dir, cfg.data_dir)
-    stages = load_stages(
-        root, cfg.vision, profile=profile, appearance=cfg.vision.objects_enabled, objects=False
-    )
-    if cfg.vision.objects_enabled:
-        try:
-            stages.object_detector = load_object_detector(root, cfg.vision)
-        except Exception as exc:
-            stages.objects_unavailable = f"{type(exc).__name__}: {exc}"
-            log.warning("object detector unavailable, running without it (%s)", exc)
-    return stages
+    return load_stages(root, cfg.vision, profile=profile, appearance=cfg.vision.objects_enabled)
 
 
 def open_perception(
@@ -277,7 +268,7 @@ def open_perception(
         face_embedder=stages.face_embedder,
         attribute_estimator=stages.attribute_estimator,
         appearance_embedder=stages.appearance_embedder,
-        object_detector=getattr(stages, "object_detector", None),
+        object_detector=stages.object_detector,
         governor=RateGovernor(cfg.vision.rates),
         camera_model=camera_model,
         world=cfg.world,
@@ -290,7 +281,7 @@ def open_perception(
         pipeline,
         VisionService(pipeline, source, cfg),
         None,
-        getattr(stages, "objects_unavailable", None),
+        stages.objects_unavailable,
     )
 
 

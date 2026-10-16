@@ -71,6 +71,8 @@ def fake_stages(cfg, profile):
         face_embedder=Embedder(),
         attribute_estimator=None,
         appearance_embedder=None,
+        object_detector=None,
+        objects_unavailable=None,
     )
 
 
@@ -379,47 +381,6 @@ def test_models_list_points_at_weights_left_in_the_old_default_folder(
     assert "old default folder" in out and str(legacy) in out
     assert cli.main(["models", "list", "--cache-dir", str(legacy)]) == 0
     assert "old default folder" not in capsys.readouterr().out
-
-
-def test_default_stages_degrade_to_no_objects_when_the_detector_file_is_unusable(
-    monkeypatch, caplog
-):
-    pytest.importorskip("onnxruntime")
-    from roboemot.vision import onnx, service
-
-    base = SimpleNamespace(**vars(fake_stages(CFG, None)), object_detector=None)
-    seen = {}
-
-    def load(root, vision, **kw):
-        seen.update(kw)
-        return base
-
-    def broken(root, vision):
-        raise ModelError("nanodet_plus/nanodet-plus-m_320.onnx: not verified")
-
-    monkeypatch.setattr(onnx, "load_stages", load)
-    monkeypatch.setattr(onnx, "load_object_detector", broken)
-    with caplog.at_level(logging.WARNING):
-        p = open_perception(CFG, Bus(), Source(), load_stages=service.default_stages)
-    assert seen["objects"] is False and p.pipeline is not None and p.service is not None
-    assert p.pipeline.object_detector is None
-    snap = p.vision_snapshot()
-    assert snap["objects"]["state"] == "unavailable" and "not verified" in snap["objects"]["reason"]
-    assert "object detector unavailable" in caplog.text
-
-
-def test_default_stages_load_the_detector_when_enabled_and_skip_it_when_off(monkeypatch):
-    pytest.importorskip("onnxruntime")
-    from roboemot.vision import onnx, service
-
-    base = SimpleNamespace(**vars(fake_stages(CFG, None)), object_detector=None)
-    monkeypatch.setattr(onnx, "load_stages", lambda *a, **kw: base)
-    monkeypatch.setattr(onnx, "load_object_detector", lambda root, vision: "detector")
-    assert service.default_stages(CFG, None).object_detector == "detector"
-    base.object_detector = None
-    vision = CFG.vision.model_copy(update={"objects_enabled": False})
-    off = CFG.model_copy(update={"vision": vision})
-    assert service.default_stages(off, None).object_detector is None
 
 
 def test_the_pipeline_gets_the_stage_detector_and_reports_objects_running():

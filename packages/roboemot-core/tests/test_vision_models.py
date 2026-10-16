@@ -373,6 +373,66 @@ def test_load_stages_builds_the_object_detector_from_the_class_mapping(monkeypat
     assert built == []
 
 
+def _optional_stage_rig(monkeypatch, tmp_path, missing):
+    from roboemot.vision import onnx
+
+    built: list[str] = []
+
+    def file(root, name, index=0):
+        if name == missing:
+            raise ModelError(f"{name}: not verified in {root}; run `roboemot models fetch`")
+        return tmp_path / name
+
+    monkeypatch.setattr(onnx, "configure", lambda threads: None)
+    monkeypatch.setattr(onnx, "_file", file)
+    monkeypatch.setattr(onnx, "YuNetDetector", lambda *a: "yunet")
+    monkeypatch.setattr(onnx, "SFaceEmbedder", lambda *a: "sface")
+    monkeypatch.setattr(onnx, "NanoDetDetector", lambda *a: built.append("nanodet") or "nanodet")
+    monkeypatch.setattr(onnx, "DinoV2Embedder", lambda *a: built.append("dino") or "dino")
+    return onnx, built
+
+
+def test_missing_dinov2_keeps_faces_and_drops_the_object_stage(monkeypatch, tmp_path, caplog):
+    pytest.importorskip("cv2")
+    pytest.importorskip("onnxruntime")
+    onnx, built = _optional_stage_rig(monkeypatch, tmp_path, "dinov2-small")
+    stages = onnx.load_stages(tmp_path, RoboEmotConfig().vision, attributes=False)
+    assert stages.face_detector == "yunet" and stages.face_embedder == "sface"
+    assert stages.appearance_embedder is None and stages.object_detector is None
+    assert (
+        "ModelError" in stages.objects_unavailable and "dinov2-small" in stages.objects_unavailable
+    )
+    assert "unavailable" in caplog.text
+
+
+def test_a_failing_detector_drops_dinov2_too_and_never_loads_it(monkeypatch, tmp_path):
+    pytest.importorskip("cv2")
+    pytest.importorskip("onnxruntime")
+    onnx, built = _optional_stage_rig(monkeypatch, tmp_path, "nanodet-plus-m-320")
+    stages = onnx.load_stages(tmp_path, RoboEmotConfig().vision, attributes=False)
+    assert stages.face_detector == "yunet"
+    assert stages.appearance_embedder is None and stages.object_detector is None
+    assert "nanodet-plus-m-320" in stages.objects_unavailable
+    assert "dino" not in built
+
+
+def test_the_object_stage_loads_whole_or_not_at_all_and_can_be_off(monkeypatch, tmp_path):
+    pytest.importorskip("cv2")
+    pytest.importorskip("onnxruntime")
+    onnx, built = _optional_stage_rig(monkeypatch, tmp_path, None)
+    cfg = RoboEmotConfig().vision
+    ok = onnx.load_stages(tmp_path, cfg, attributes=False)
+    assert (ok.object_detector, ok.appearance_embedder, ok.objects_unavailable) == (
+        "nanodet",
+        "dino",
+        None,
+    )
+    built.clear()
+    off = cfg.model_copy(update={"objects_enabled": False})
+    stages = onnx.load_stages(tmp_path, off, attributes=False, appearance=False)
+    assert stages.object_detector is None and stages.appearance_embedder is None and built == []
+
+
 def test_load_stages_int8_pair_uses_the_real_marker_check(monkeypatch, tmp_path):
     pytest.importorskip("cv2")
     pytest.importorskip("onnxruntime")

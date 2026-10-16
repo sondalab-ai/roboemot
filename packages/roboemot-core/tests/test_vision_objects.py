@@ -94,6 +94,13 @@ def test_only_the_configured_classes_above_the_threshold_are_returned():
     assert sorted(decode(out, score_min=0.3)[2].tolist()) == sorted([CAT, CUP])
 
 
+def test_uniform_distance_distribution_decodes_to_the_expectation_of_3_5_strides():
+    out = raw_output()
+    out[LEVEL1_START + 5 * 20 + 7, CAT] = 0.9  # regression logits stay 0: uniform over 8 bins
+    (box,) = decode(out)[0]
+    assert box.tolist() == pytest.approx([112 - 56, 80 - 56, 112 + 56, 80 + 56])
+
+
 def test_nothing_above_the_threshold_gives_empty_arrays():
     boxes, scores, classes = decode(raw_output())
     assert boxes.shape == (0, 4) and scores.shape == (0,) and classes.shape == (0,)
@@ -137,6 +144,9 @@ class FakeSession:
     def get_inputs(self):
         return [SimpleNamespace(name="data", shape=self.shape)]
 
+    def get_outputs(self):
+        return [SimpleNamespace(name="output", shape=[1, *self.output.shape])]
+
     def run(self, names, feed):
         self.seen = feed["data"]
         return [self.output[None]]
@@ -167,6 +177,14 @@ def test_detect_returns_nothing_for_a_quiet_frame(monkeypatch):
     assert det.detect(np.zeros((240, 320, 3), np.uint8)) == []
 
 
+def test_detector_rejects_an_output_that_does_not_match_the_labels(monkeypatch):
+    wrong_rows = raw_output()[:-1]
+    with pytest.raises(ModelError, match="output"):
+        detector(monkeypatch, wrong_rows)
+    with pytest.raises(ModelError, match="output"):
+        detector(monkeypatch, raw_output()[:, :-1])
+
+
 def test_detector_rejects_unknown_classes_and_a_wrong_input_size(monkeypatch):
     with pytest.raises(ModelError, match="not known"):
         detector(monkeypatch, raw_output(), classes=("cat", "unicorn"))
@@ -183,7 +201,19 @@ SAMPLES = {
     "000000078426.jpg": "475db6e34f57f03cf611cc4c359d8707df49628491adc27d6b5209607284778b",
     "000000002592.jpg": "ffa3d472d44184b1f48878f7b097189723e57a24f36c44c29e4bc561110fbf41",
 }
+# COCO val2017 ground truth (x1, y1, x2, y2) from instances_val2017.json.
+COCO_BOXES = {
+    "000000078426.jpg": {"cat": (0.0, 64.4, 275.7, 319.2), "cup": (267.7, 76.1, 356.4, 166.0)},
+    "000000002592.jpg": {"cup": (222.9, 34.5, 432.6, 247.5)},
+}
 BENCH = Path(__file__).resolve().parents[3] / "scripts" / "bench"
+
+
+def iou(a, b) -> float:
+    w = min(a[2], b[2]) - max(a[0], b[0])
+    h = min(a[3], b[3]) - max(a[1], b[1])
+    inter = max(w, 0.0) * max(h, 0.0)
+    return inter / ((a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter)
 
 
 def sample(name: str) -> np.ndarray:
@@ -210,10 +240,10 @@ def test_real_detector_finds_the_cat_and_the_cup(real_stages):
     assert {"cat", "cup"} <= set(found)
     cat, cup = found["cat"], found["cup"]
     assert cat.score > 0.6 and cup.score > 0.4
-    # Ground truth (COCO): cat (0, 62, 277, 316) approx, cup around (269, 76, 359, 172).
-    assert cat.box[2] < 400 and cup.box[0] > 200
-    only_cup = real_stages.object_detector.detect(sample("000000002592.jpg"))
-    assert "cup" in {d.label for d in only_cup}
+    assert iou(cat.box, COCO_BOXES["000000078426.jpg"]["cat"]) > 0.5
+    assert iou(cup.box, COCO_BOXES["000000078426.jpg"]["cup"]) > 0.5
+    only_cup = {d.label: d for d in real_stages.object_detector.detect(sample("000000002592.jpg"))}
+    assert iou(only_cup["cup"].box, COCO_BOXES["000000002592.jpg"]["cup"]) > 0.5
 
 
 @pytest.mark.models
@@ -256,6 +286,8 @@ def test_numpy_backend_matches_the_bench_reference(monkeypatch):
     specs = load_manifest()
     if models.status(specs["nanodet-plus-m-320"], CACHE) != "ok":
         pytest.skip(f"nanodet-plus-m-320 missing in {CACHE}")
+    for name in ("objects_lib", "bench_lib"):
+        monkeypatch.delitem(sys.modules, name, raising=False)  # restored when the test ends
     monkeypatch.syspath_prepend(str(BENCH))
     ref = pytest.importorskip("objects_lib").NanodetPlus(
         CACHE / specs["nanodet-plus-m-320"].files[0].path, threads=2
@@ -277,5 +309,15 @@ def test_numpy_backend_matches_the_bench_reference(monkeypatch):
         assert np.array([d.box for d in got]).reshape(-1, 4) == pytest.approx(boxes, abs=1e-2)
         total += len(got)
     assert total >= 4
-    sys.modules.pop("objects_lib", None)
-    sys.modules.pop("bench_lib", None)
+
+
+@pytest.mark.models
+def test_pinned_labels_are_the_class_list_of_the_pinned_source_file():
+    import yaml
+
+    spec = load_manifest()["nanodet-plus-m-320"]
+    source = CACHE / "nanodet_plus" / "nanodet-plus-m_320.yml"
+    if not source.exists():
+        pytest.skip(f"{source} missing (python scripts/bench/fetch.py nanodet-plus)")
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == spec.labels_sha256
+    assert yaml.safe_load(source.read_text())["class_names"] == spec.labels

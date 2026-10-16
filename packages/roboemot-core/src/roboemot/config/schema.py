@@ -676,7 +676,22 @@ class VisionConfig(Strict):
         0.25, "Minimum capture-time gap between two burst evaluations", unit="s", ge=0, le=5
     )
     max_embeds_per_frame: int = param(
-        2, "Cap on embeddings computed for one frame, to bound its latency", ge=1, le=16
+        2, "Cap on face embeddings computed for one frame, to bound its latency", ge=1, le=16
+    )
+    max_entity_embeds_per_frame: int = param(
+        1,
+        "Cap on animal and object appearance embeddings (DINOv2-S, the costly part of the "
+        "object stage) computed for one object frame; separate from max_embeds_per_frame so "
+        "entities never take a face's share. Entities are served oldest embedding first",
+        ge=1,
+        le=16,
+    )
+    entity_burst_min_gap_s: float = param(
+        1.0,
+        "Minimum capture-time gap between two burst evaluations of one animal or object track",
+        unit="s",
+        ge=0,
+        le=10,
     )
     attribute_precision: Literal["auto", "int8", "fp32"] = param(
         "auto",
@@ -742,6 +757,15 @@ class VisionConfig(Strict):
         ge=1,
         le=100,
     )
+    object_confirm_hits: int = param(
+        2,
+        "Matched detections before an animal or object track is reported. 2 at 1 fps means a "
+        "thing must be seen in two consecutive object frames: 31% of detections at the default "
+        "score are false and mostly do not repeat, at the cost of a 1 s delay and of things "
+        "seen once",
+        ge=1,
+        le=10,
+    )
     object_nms_iou: float = param(
         0.6,
         "Detections of one class overlapping more than this IoU are merged (NanoDet's own value)",
@@ -773,7 +797,6 @@ class VisionConfig(Strict):
         "is person (faces come from the face detector)",
         restart=True,
     )
-
     object_display_names: dict[str, str] = param(
         {"potted_plant": "potted plant", "cell_phone": "cell phone", "teddy_bear": "teddy bear"},
         "Readable category for a detector class in observations, placeholder names and scene "

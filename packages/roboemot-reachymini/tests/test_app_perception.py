@@ -90,6 +90,8 @@ class AppWithFakes(app_module.RoboEmotApp):
             face_embedder=FakeEmbedder(),
             attribute_estimator=None,
             appearance_embedder=None,
+            object_detector=None,
+            objects_unavailable=None,
         )
 
 

@@ -11,6 +11,7 @@ Weights are never downloaded here, see ``roboemot models fetch``.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,6 +23,8 @@ from ..config.schema import VisionConfig
 from . import models
 from .models import ModelError
 from .types import AttributeSample, Box, Detection
+
+log = logging.getLogger(__name__)
 
 LOG_ERROR = 4
 CHANNELS = 3
@@ -357,6 +360,13 @@ class NanoDetDetector:
         shape = self._sess.get_inputs()[0].shape
         if shape[2:] != [NANODET_SIZE, NANODET_SIZE]:
             raise ModelError(f"{path.name}: input {shape}, expected {NANODET_SIZE}x{NANODET_SIZE}")
+        columns = len(labels) + NANODET_SIDES * NANODET_REG_BINS
+        out_shape = self._sess.get_outputs()[0].shape
+        if out_shape[1:] != [len(self._priors), columns]:
+            raise ModelError(
+                f"{path.name}: output {out_shape}, expected rows {len(self._priors)} "
+                f"x {columns} columns ({len(labels)} classes)"
+            )
 
     def detect(self, image: np.ndarray) -> list[Detection]:
         """Labelled boxes (original pixels) of the configured classes at or above the floor.
@@ -387,7 +397,7 @@ class Stages:
     attribute_estimator: FairFaceEstimator | None
     appearance_embedder: DinoV2Embedder | None
     object_detector: NanoDetDetector | None = None
-    objects_unavailable: str | None = None
+    objects_unavailable: str | None = None  # why the animal and object stage was dropped
 
 
 def _file(root: Path, name: str, index: int = 0) -> Path:
@@ -425,9 +435,13 @@ def load_stages(
 ) -> Stages:
     """Load the backends from ``root``; the ViTs, DINOv2 and the object detector can be left out.
 
-    The object detector (NanoDet-Plus-m 320) is loaded when ``objects`` is true and
-    ``vision.objects_enabled`` is on; it returns the ``vision.animal_categories`` and
-    ``vision.object_categories`` classes only.
+    The face stack (YuNet, SFace) and the age and gender models are required: a missing or
+    unverified file raises ``ModelError``. The animal and object stage is optional: the
+    NanoDet-Plus-m 320 detector (when ``objects`` is true and ``vision.objects_enabled`` is on;
+    it returns the ``vision.animal_categories`` and ``vision.object_categories`` classes only)
+    and the DINOv2-S embedder (when ``appearance``) are loaded together, and if either fails
+    both are dropped (no 88 MB embedder kept for nothing), ``Stages.objects_unavailable`` holds
+    the reason and faces keep working.
 
     Every file must carry a valid ``.verified`` marker (``roboemot models fetch`` writes it);
     otherwise ``ModelError`` names the file. Frame-path sessions use ``vision.threads`` CPU
@@ -454,7 +468,18 @@ def load_stages(
             gender.labels,
             cfg.attribute_threads,
         )
-    detector = load_object_detector(root, cfg) if objects and cfg.objects_enabled else None
+    detector, embedder, unavailable = None, None, None
+    wanted = objects and cfg.objects_enabled
+    if wanted or appearance:
+        try:
+            detector = load_object_detector(root, cfg) if wanted else None
+            embedder = (
+                DinoV2Embedder(_file(root, "dinov2-small"), cfg.threads) if appearance else None
+            )
+        except Exception as exc:
+            detector = embedder = None
+            unavailable = f"{type(exc).__name__}: {exc}"
+            log.warning("animal and object stage unavailable, running without it (%s)", exc)
     return Stages(
         YuNetDetector(
             _file(root, "yunet"),
@@ -463,6 +488,7 @@ def load_stages(
         ),
         SFaceEmbedder(_file(root, "sface")),
         estimator,
-        DinoV2Embedder(_file(root, "dinov2-small"), cfg.threads) if appearance else None,
+        embedder,
         detector,
+        unavailable,
     )

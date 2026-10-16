@@ -145,6 +145,7 @@ class VisionPipeline:
         self.face_embedder = face_embedder
         self.appearance_embedder = appearance_embedder
         self.object_detector = object_detector
+        self._lost_held = 0.0
         ids = itertools.count(1)
         self.face_tracker = Tracker(cfg.tracker, ids)
         self.object_tracker = Tracker(self._object_tracker_cfg(), ids)
@@ -158,6 +159,8 @@ class VisionPipeline:
         self._faces: dict[int, _FaceState] = {}
         self._entities: dict[int, _EntityState] = {}
         self._budget = 0
+        self._entity_budget = 0
+        self._entity_embeds = 0
         matcher.registry.add_forget_listener(self._on_forget)
 
     def process(self, frame: Frame) -> FrameReport:
@@ -176,6 +179,7 @@ class VisionPipeline:
             return FrameReport(stamp)
         camera = self._camera(frame.image.shape[1], frame.image.shape[0])
         self._budget = self.cfg.max_embeds_per_frame
+        self._entity_embeds = 0
         faces = objects = False
         if self.governor.allow("detection", stamp):
             self._process_faces(frame, camera)
@@ -187,7 +191,8 @@ class VisionPipeline:
         ):
             self._process_objects(frame, camera)
             objects = True
-        return FrameReport(stamp, faces, objects, self.cfg.max_embeds_per_frame - self._budget)
+        embeds = self.cfg.max_embeds_per_frame - self._budget + self._entity_embeds
+        return FrameReport(stamp, faces, objects, embeds)
 
     def reset(self) -> None:
         """Forget every track and its per-track state (start of a session or replay).
@@ -203,6 +208,7 @@ class VisionPipeline:
         ids = itertools.count(1)
         self.face_tracker.reset(ids)
         self.object_tracker.reset(ids)
+        self._lost_held = 0.0
         self.governor.reset()
         if self.worker is not None:
             self.worker.cancel_pending()
@@ -219,6 +225,14 @@ class VisionPipeline:
         self.object_tracker.cfg = self._object_tracker_cfg()
         self.matcher.config = identity
 
+    def _object_lost_s(self) -> float:
+        """Lifetime of an animal or object track at the rate the governor allows now."""
+        lost = self.cfg.object_lost_s
+        period = self.governor.period("objects")
+        if math.isfinite(period):
+            lost = max(lost, self.cfg.object_lost_periods * period)
+        return lost
+
     def _object_tracker_cfg(self) -> TrackerConfig:
         """Tracker settings for animals and objects, derived from the vision config.
 
@@ -227,17 +241,15 @@ class VisionPipeline:
         ``low_score`` equals ``high_score``. A track lives for the larger of ``object_lost_s``
         and ``object_lost_periods`` object-detection periods at the rate the governor allows
         now, so a slow object stage (circadian or load scale) does not expire tracks between
-        two frames.
+        two frames. When the rate goes back up the longer lifetime is kept until the next
+        object frame has been folded in, so tracks do not expire just before it can match them.
         """
-        lost = self.cfg.object_lost_s
-        period = self.governor.period("objects")
-        if math.isfinite(period):
-            lost = max(lost, self.cfg.object_lost_periods * period)
         return self.cfg.tracker.model_copy(
             update={
                 "high_score": self.cfg.object_score_min,
                 "low_score": self.cfg.object_score_min,
-                "lost_s": lost,
+                "confirm_hits": self.cfg.object_confirm_hits,
+                "lost_s": max(self._object_lost_s(), self._lost_held),
             }
         )
 
@@ -494,11 +506,20 @@ class VisionPipeline:
             if d.score >= self.cfg.object_score_min and d.label in kinds
         ]
         result = self.object_tracker.update(dets, frame.stamp)
+        self._lost_held = self._object_lost_s()
         for track_id in result.removed_ids:
             self._drop_entity(track_id)
+        states = {
+            t.track_id: self._entities.setdefault(t.track_id, _EntityState())
+            for t in result.visible
+        }
+        self._entity_budget = self.cfg.max_entity_embeds_per_frame
+        # Oldest embedding first (never embedded first), so a crowd of tracks takes turns
+        # and new tracks are not starved by old ones.
+        for track in sorted(result.visible, key=lambda t: self._embed_age_key(states[t.track_id])):
+            self._evaluate_entity(frame, track, states[track.track_id])
         for track in result.visible:
-            state = self._entities.setdefault(track.track_id, _EntityState())
-            self._evaluate_entity(frame, track, state)
+            state = states[track.track_id]
             x1, y1, x2, y2 = track.box
             azimuth, elevation = camera.bearing((x1 + x2) / 2, (y1 + y2) / 2)
             obs = Observation(
@@ -516,18 +537,26 @@ class VisionPipeline:
             )
             self._publish("percept.entity", obs, frame.stamp, joint_state=frame.joint_state)
 
+    @staticmethod
+    def _embed_age_key(state: _EntityState) -> float:
+        return -math.inf if state.last_embed is None else state.last_embed
+
     def _evaluate_entity(self, frame: Frame, track: Track, state: _EntityState) -> None:
-        if self.appearance_embedder is None or self._budget <= 0:
+        if self.appearance_embedder is None or self._entity_budget <= 0:
             return
         stamp = frame.stamp
-        due = (
-            state.last_embed is None
-            or (state.owner_id is None and state.evals < self.cfg.embedding_burst)
-            or stamp - state.last_embed >= self.governor.period("appearance")
-        )
+        if state.last_embed is None:
+            due = True
+        else:
+            gap = stamp - state.last_embed
+            if state.owner_id is None and state.evals < self.cfg.embedding_burst:
+                due = gap >= self.cfg.entity_burst_min_gap_s
+            else:
+                due = gap >= self.governor.period("appearance")
         if not due:
             return
-        self._budget -= 1
+        self._entity_budget -= 1
+        self._entity_embeds += 1
         embedding = self.appearance_embedder.embed(frame.image, track.box)
         identity = self.matcher.observe(
             track.track_id, embedding, self.appearance_embedder.model_id, stamp, kind="entity"

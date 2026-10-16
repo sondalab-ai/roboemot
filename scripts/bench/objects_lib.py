@@ -2,8 +2,9 @@
 
 Reference implementations of preprocessing, decoding and NMS written to follow the upstream demo
 code (YOLOX ``demo_utils.demo_postprocess``, NanoDet ``nanodet_plus_head.get_bboxes``), with
-loops and ``cv2.dnn.NMSBoxes`` on purpose: ``tests/test_vision_objects.py`` checks the shipped
-numpy backend (``roboemot.vision.onnx.OnnxObjectDetector``) against these. Only loads ONNX
+loops and ``cv2.dnn.NMSBoxes`` on purpose: ``packages/roboemot-core/tests/test_vision_objects.py``
+checks the shipped numpy backend (``roboemot.vision.onnx.NanoDetDetector``) against these.
+Only loads ONNX
 weights and image data from the cache; nothing downloaded is executed.
 """
 
@@ -22,7 +23,7 @@ COCO_ANNOTATIONS = DATASETS / "coco" / "instances_val2017.json"
 YOLOX_FILE = MODELS / "yolox_nano" / "yolox_nano.onnx"
 NANODET_FILE = MODELS / "nanodet_plus" / "nanodet-plus-m_320.onnx"
 
-# The 16 household-relevant COCO classes of the spike (name -> reported as animal or object).
+# The 16 household-relevant COCO classes of the spike (person is scored but not shipped).
 RELEVANT = (
     "person",
     "cat",
