@@ -150,7 +150,7 @@ def flatten(tree: Any, prefix: str = "") -> dict[str, Any]:
 
 
 def field_meta(dotted: str) -> dict[str, Any]:
-    """Metadata (unit, restart, conservative, opt_in) of a parameter path, {} if unknown.
+    """Metadata (unit, restart, conservative, opt_in, admin_only) of a path, {} if unknown.
 
     Dict-valued fields (``voice.moods``) and list fields (``llm_routes``) consume one extra
     path element (the key or the index).
@@ -228,13 +228,17 @@ PERSON_SECTIONS = ("register", "voice", "conversation", "persona.traits")
 
 @dataclass(frozen=True)
 class Violation:
-    kind: Literal["safety", "privacy"]
+    kind: Literal["safety", "privacy", "admin"]
     path: str
     approved: Any
     candidate: Any
 
     def __str__(self) -> str:
         return f"{self.path} ({self.approved!r} -> {self.candidate!r})"
+
+
+def _guarded(meta: dict[str, Any]) -> bool:
+    return bool(meta.get("conservative") or meta.get("opt_in") or meta.get("admin_only"))
 
 
 def guarded_leaves(cfg: RoboEmotConfig) -> dict[str, tuple[Any, dict[str, Any]]]:
@@ -244,7 +248,7 @@ def guarded_leaves(cfg: RoboEmotConfig) -> dict[str, tuple[Any, dict[str, Any]]]
     out = {}
     for path, value in flatten(tree).items():
         meta = field_meta(path)
-        if meta.get("conservative") or meta.get("opt_in"):
+        if _guarded(meta):
             out[path] = (value, meta)
     return out
 
@@ -258,7 +262,7 @@ def violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Viol
         if path in base:
             ref = base[path][0]
         else:  # e.g. a new LLM route: compare against the most conservative value
-            ref = {"false": False, "true": True, "superset": []}.get(direction, value)
+            ref = {"false": False, "true": True}.get(direction, value)
             if meta.get("opt_in"):
                 ref = False
         ok = {
@@ -266,10 +270,11 @@ def violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Viol
             "higher": lambda v, r: v >= r,
             "false": lambda v, r: (not v) or v == r,
             "true": lambda v, r: bool(v) or v == r,
-            "superset": lambda v, r: set(r) <= set(v),
             None: lambda v, r: True,
         }[direction](value, ref)
-        if meta.get("opt_in") and value and not ref:
+        if meta.get("admin_only") and value != ref:
+            found.append(Violation("admin", path, ref, value))
+        elif meta.get("opt_in") and value and not ref:
             found.append(Violation("privacy", path, ref, value))
         elif not ok:
             found.append(Violation("safety", path, ref, value))
@@ -399,8 +404,9 @@ class ConfigStack:
         """Set a parameter or a whole section.
 
         ``layer="runtime"`` (default): may only make safety more conservative; a privacy
-        opt-in needs ``admin=True``. ``layer="app"``: persistent edit of the app config (written
-        back to its file); loosening safety needs ``admin=True`` (the admin PIN, SPEC 11A).
+        opt-in or an ``admin_only`` prompt change needs ``admin=True``.
+        ``layer="app"``: persistent edit of the app config (written back to its file);
+        loosening safety or changing prompt text needs ``admin=True`` (the admin PIN, SPEC 11A).
         ``layer="derived"``: a computed value just above the app config, in memory only.
         """
         with self._lock:
@@ -421,7 +427,7 @@ class ConfigStack:
                     else:
                         self._runtime[key] = prev
 
-                allow = {"privacy"} if admin else set()
+                allow = {"privacy", "admin"} if admin else set()
             elif layer == "app":
                 saved_app = copy.deepcopy(self.app)
                 set_path(self.app, key, copy.deepcopy(value))
@@ -429,7 +435,7 @@ class ConfigStack:
                 def undo() -> None:
                     self.app = saved_app
 
-                allow = {"privacy", "safety"} if admin else set()
+                allow = {"privacy", "safety", "admin"} if admin else set()
             elif layer == "derived":
                 saved_derived = copy.deepcopy(self.derived)
                 set_path(self.derived, key, copy.deepcopy(value))
@@ -473,7 +479,7 @@ class ConfigStack:
             def undo() -> None:
                 self.preset = saved[0]
 
-            self._commit(undo, {"privacy", "safety"} if admin else set(), source)
+            self._commit(undo, {"privacy", "safety", "admin"} if admin else set(), source)
             self.files["preset"] = Path("preset:" + name)
             self._record(source, "personality", self._last.personality, name)
             self._notify()
@@ -524,6 +530,7 @@ class ConfigStack:
                 "change refused, it would loosen: "
                 + "; ".join(str(v) for v in blocked)
                 + ". Safety: edit the app config with admin confirmation. Privacy: admin opt-in."
+                + " Prompt text: admin confirmation."
             )
         if base_found:
             self._approved = base
@@ -600,7 +607,7 @@ class ConfigStack:
         for path, leaf in flatten(person).items():
             meta = field_meta(path)
             allowed = any(path == s or path.startswith(s + ".") for s in PERSON_SECTIONS)
-            if not allowed or meta.get("conservative") or meta.get("opt_in"):
+            if not allowed or _guarded(meta):
                 dropped.append(path)
             else:
                 set_path(clean, path, leaf)

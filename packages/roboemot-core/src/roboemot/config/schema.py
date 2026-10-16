@@ -6,9 +6,10 @@ Every field carries a default, a unit and a range. Field metadata (``json_schema
 - ``restart``: True when a change needs a process restart instead of hot reload.
 - ``conservative``: for safety parameters, which direction is safer at runtime:
   ``"lower"`` (smaller values are safer), ``"higher"``, ``"false"`` / ``"true"`` for booleans
-  that are safer off / on, ``"superset"`` for lists that may only grow. Changes in the
-  other direction need admin approval (stack.py).
+  that are safer off / on. Changes in the other direction need admin approval (stack.py).
 - ``opt_in``: privacy options; turning them on needs the admin confirmation.
+- ``admin_only``: prompt text, where no direction is safe; any change needs the admin
+  confirmation.
 """
 
 from __future__ import annotations
@@ -30,8 +31,9 @@ def param(
     ge: float | None = None,
     le: float | None = None,
     restart: bool = False,
-    conservative: Literal["lower", "higher", "false", "true", "superset"] | None = None,
+    conservative: Literal["lower", "higher", "false", "true"] | None = None,
     opt_in: bool = False,
+    admin_only: bool = False,
 ) -> Any:
     extra: dict[str, Any] = {"restart": restart}
     if unit:
@@ -40,6 +42,8 @@ def param(
         extra["conservative"] = conservative
     if opt_in:
         extra["opt_in"] = True
+    if admin_only:
+        extra["admin_only"] = True
     kwargs: dict[str, Any] = {"description": description, "json_schema_extra": extra}
     if ge is not None:
         kwargs["ge"] = ge
@@ -307,8 +311,8 @@ class MotionConfig(Strict):
 class SafetyConfig(Strict):
     extra_prompt_rules: list[str] = param(
         [],
-        "Rules appended to the system prompt's safety block (SPEC 8); may only grow at runtime",
-        conservative="superset",
+        "Rules appended to the system prompt's safety block (SPEC 8); changes need the admin",
+        admin_only=True,
     )
     minor_motion_factor: float = param(
         0.6,
@@ -599,7 +603,11 @@ class TraitEffects(Strict):
 
 
 class PersonaConfig(Strict):
-    prompt: str = param(DEFAULT_PERSONA_PROMPT, "Robot identity, first part of the system prompt")
+    prompt: str = param(
+        DEFAULT_PERSONA_PROMPT,
+        "Robot identity, first part of the system prompt; changes need the admin",
+        admin_only=True,
+    )
     prompt_max_chars: int = param(600, "Longest accepted prompt", ge=50, le=4000)
     traits_source: Literal["manual", "llm"] = param(
         "manual", "manual: use traits; llm: ask a route to rate the prompt (falls back to traits)"
