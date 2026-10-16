@@ -787,7 +787,7 @@ The effective configuration is the merge of six layers; a later layer overrides 
 | `reflexes` | rules: trigger, threshold, primitive, amplitude, cooldown | Section 10 |
 | `attention` | priority order, switch hysteresis, head-tracking weight policy | Sections 4A, 5 |
 | `identity` | match threshold, margin, votes, estimate confidence threshold, online refresh cap | Sections 5, 6 |
-| `world` | match gates, half-life per kind, out-of-view decay, forget threshold, moved threshold; scan interval, jitter and amplitude; auto-enrollment days and spread; history retention | Section 5A |
+| `world` | match gate and range gate, tie tolerance, half-life per kind, out-of-view decay factor, forget confidence, moved threshold, initial confidence, confidence gain, position blend, initial and minimum uncertainty; scan interval, jitter and amplitude; auto-enrollment days and spread; history retention | Section 5A |
 | `mirror` | retargeting, filter parameters, keypoint confidence floor, hold and decay, mirror image, recording length | Section 9 |
 | `voice` | TTS backend and fallback, voice per language, base rate, pitch, volume and variability, expressivity, mood source, per-mood prosody deltas, instructions and sounds, limits; wake word and its policy, barge-in sensitivity, active ASR language | Section 8 |
 | `persona` | identity prompt and its length cap, traits (warmth, energy, playfulness, formality), trait source (manual or LLM), trait-to-parameter tables | Section 11A |
