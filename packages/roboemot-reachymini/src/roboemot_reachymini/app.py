@@ -51,7 +51,7 @@ from roboemot.world import (
     feed_world,
     load_world_plugin,
 )
-from roboemot.world.autoenroll import AutoEnroller, open_autoenroll
+from roboemot.world.autoenroll import AutoEnroller, open_autoenroll, purge_stored
 from roboemot.world.scan import SOURCE as SCAN_SOURCE
 
 from .camera import ReachyCamera
@@ -327,7 +327,13 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             stack.effective,
             embedder=lambda: getattr(perception.pipeline, "appearance_embedder", None),
             world=world,
-            purge_candidates=self.autoenroll.purge if self.autoenroll else None,
+            purge_candidates=(
+                self.autoenroll.purge
+                if self.autoenroll
+                else (lambda: purge_stored(perception.registry.store))
+                if perception.registry is not None
+                else None
+            ),
         )
 
         def publish(obs: Observation, joint_state: Any) -> None:
@@ -396,6 +402,8 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 attending = attention_tick(now, world, selector, gaze, loop)
                 live = stack.effective()
                 perception.enrollment.expire()
+                if self.autoenroll is not None:
+                    self.autoenroll.tick()  # retention does not wait for a sighting
                 if perception.pipeline is not None:
                     perception.pipeline.governor.set_scale(
                         CIRCADIAN, circadian_vision_scale(live, self.circadian)

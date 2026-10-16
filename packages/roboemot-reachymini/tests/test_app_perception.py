@@ -206,6 +206,33 @@ def test_app_auto_enrolls_a_cat_it_keeps_seeing_and_the_catalogue_sees_it(data, 
     assert app.autoenroll.stats()["clusters"] == 0
 
 
+def seed_candidate(store, key="left-behind"):
+    meta = {
+        "schema_version": 2,
+        "cluster_id": key,
+        "kind": "animal",
+        "category": "cat",
+        "model_id": "x",
+    }
+    store.put("candidates", key, meta, {"members": np.eye(2, DIM), "days": np.array([1, 2])})
+
+
+def test_without_the_appearance_model_candidates_are_erased_at_startup_and_on_request(
+    data, tmp_path
+):
+    store = FileStore(tmp_path / "roboemot-data" / "registry", allow_plaintext=True)
+    seed_candidate(store)
+    app = new_app(AppWithFakes)
+    stop = threading.Event()
+    stop.set()
+    app.run(fake_mini(), stop)
+    assert app.autoenroll is None
+    assert store.keys("candidates") == []  # deleted at startup
+    seed_candidate(app.perception.registry.store)
+    assert app.catalogue.purge_candidates() == 1  # the endpoint's action needs no enroller
+    assert app.perception.registry.store.keys("candidates") == []
+
+
 def test_app_without_the_appearance_model_has_no_auto_enrollment(data):
     app = new_app(AppWithFakes)
     stop = threading.Event()

@@ -884,8 +884,14 @@ class WorldScanConfig(Strict):
         return self
 
 
+CATALOGUE_BODY_SLACK = 1024
+
+
 class WorldAutoenrollConfig(Strict):
-    enabled: bool = param(True, "Auto-enroll recurring unknown animals and objects (SPEC 5A)")
+    enabled: bool = param(
+        True,
+        "Auto-enroll recurring unknown animals and objects (SPEC 5A); turning it on again needs a restart, turning it off deletes the collected candidates",
+    )
     kinds: list[Literal["animal", "object"]] = param(
         ["animal", "object"],
         "Kinds that may be auto-enrolled; people never are. The recognition spike advises "
@@ -900,9 +906,18 @@ class WorldAutoenrollConfig(Strict):
         le=1,
         conservative="lower",
     )
+    join_radius: float = param(
+        0.125,
+        "Cosine distance from a candidate cluster's centroid within which a sighting joins it; "
+        "tighter than max_spread so two look-alikes stay apart",
+        ge=0.01,
+        le=1,
+        conservative="lower",
+    )
     known_match_threshold: float = param(
-        0.75,
-        "Cosine similarity to an enrolled animal or object that attaches its identity",
+        0.875,
+        "Cosine similarity to an enrolled animal or object that attaches its identity; keep it "
+        "at or above 1 - join_radius, or a look-alike is taken for the enrolled one",
         ge=0.1,
         le=1,
     )
@@ -924,6 +939,17 @@ class WorldAutoenrollConfig(Strict):
     max_tracked_entries: int = param(
         512, "World entries remembered for the sighting throttle", ge=8, le=10000
     )
+
+    @model_validator(mode="after")
+    def _consistent(self) -> WorldAutoenrollConfig:
+        if self.join_radius > self.max_spread:
+            raise ValueError("join_radius must not exceed max_spread")
+        if self.min_sightings > self.max_members:
+            raise ValueError(
+                "min_sightings must not exceed max_members (sightings are counted "
+                "from the retained members)"
+            )
+        return self
 
 
 class WorldConfig(Strict):
@@ -1295,7 +1321,7 @@ class CatalogueConfig(Strict):
         4194304, "Largest photo accepted", unit="B", ge=1024, le=16777216, conservative="lower"
     )
     max_image_pixels: int = param(
-        25000000,
+        12000000,
         "Largest photo accepted, width times height (decompression-bomb guard)",
         unit="px",
         ge=1024,
@@ -1311,6 +1337,15 @@ class CatalogueConfig(Strict):
         "web request thread",
         ge=1,
         le=1000,
+        conservative="lower",
+    )
+    import_budget_s: float = param(
+        8.0,
+        "Time one import may spend embedding photo regions; the rest is skipped and reported "
+        "(must stay below webui.request_deadline_s)",
+        unit="s",
+        ge=1,
+        le=60,
         conservative="lower",
     )
     max_embeddings_per_entity: int = param(
@@ -1518,6 +1553,21 @@ with warnings.catch_warnings():
                 raise ValueError(
                     "enrollment.target_samples must be within identity.enroll_min_embeddings "
                     "and max_embeddings_per_person"
+                )
+            return self
+
+        @model_validator(mode="after")
+        def _catalogue_fits_the_web_ui(self) -> RoboEmotConfig:
+            cat, web = self.catalogue, self.webui
+            if cat.import_budget_s >= web.request_deadline_s:
+                raise ValueError("catalogue.import_budget_s must be below webui.request_deadline_s")
+            b64_image = -(-cat.max_image_bytes // 3) * 4
+            need = b64_image + 2 * cat.max_xmp_bytes + CATALOGUE_BODY_SLACK
+            if need > web.catalogue_max_body_bytes:
+                raise ValueError(
+                    f"webui.catalogue_max_body_bytes must be at least {need}: a base64 photo of "
+                    "catalogue.max_image_bytes plus a sidecar of catalogue.max_xmp_bytes "
+                    "(JSON-escaped) has to fit"
                 )
             return self
 

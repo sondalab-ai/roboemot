@@ -10,22 +10,30 @@ Algorithm (online, per ``(kind, category)``):
    active registry record of the same kind (and category, when the record has one) attaches
    that identity to its world entry; nothing is collected.
 2. Otherwise it is a *sighting*, at most one per world entry per ``sighting_min_interval_s``
-   (so a track seen for a minute is one sighting, not hundreds).
+   and at most one per candidate cluster per the same interval (so a track seen for a minute,
+   or an entry that keeps being recreated, is one sighting, not hundreds).
 3. A sighting joins the nearest candidate cluster of its kind and category whose centroid is
-   within ``max_spread`` (cosine distance), else it starts a cluster. A cluster keeps the last
-   ``max_members`` unit embeddings, the number of sightings, and the set of distinct local
-   days it was seen on.
-4. A cluster with at least ``min_days`` days, ``min_sightings`` sightings and a spread
-   (max over retained members of 1 - cosine to the centroid) <= ``max_spread`` is enrolled as
+   within ``join_radius`` (cosine distance; tighter than ``max_spread``), else it starts a
+   cluster. A cluster keeps the last ``max_members`` unit embeddings, each with the local day
+   it was seen on. Sightings and days are counted from the retained members only, so a member
+   that rolled out takes its day with it.
+4. A cluster with at least ``min_days`` days, ``min_sightings`` members and a spread
+   (max over members of 1 - cosine to the centroid) <= ``max_spread`` is enrolled as
    ``origin=auto`` with a placeholder name (``cat 1``, localized), and its candidate is deleted.
-   A cluster that mixes two look-alikes spreads past the gate and never enrolls: the owner
-   sees nothing, which is the safe failure.
+
+Why ``join_radius`` and not the spread gate alone: two look-alikes at cosine distance 0.23 have
+a spread of about 0.06 around their midpoint, so the spread gate would let them merge. Joining
+only within ``join_radius`` of the current centroid keeps them in separate clusters; the spread
+gate then only guards against slow drift of one cluster. The cost is slower enrollment of one
+animal whose photos vary a lot (it fragments into several clusters).
 
 Candidates persist in the registry store (collection ``candidates``: atomic, 0600, same data
 folder) even without the history opt-in, as SPEC 5A says. They are bounded (``max_clusters``,
-``max_members``), purged when enrolled and after ``retention_days`` without a sighting, and
-removed by ``purge``. Embeddings are never logged. Embeddings are model-specific: candidates
-from another model id are deleted at load.
+``max_members``) and deleted when enrolled, after ``retention_days`` without a sighting (checked
+at load, on every ``tick`` and ``flush``), when auto-enrollment is disabled or their kind is
+no longer listed, and by ``purge``. Embeddings are never logged. Embeddings are model-specific:
+candidates from another model id are deleted at load. Store writes and deletes happen outside
+the enroller's lock.
 """
 
 from __future__ import annotations
@@ -37,7 +45,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
 
@@ -51,7 +59,7 @@ from .types import Observation, ObserveResult
 log = logging.getLogger(__name__)
 
 COLLECTION = "candidates"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 ALLOWED_KINDS = ("animal", "object")
 NEVER = "person"
 DISPLAY_IT: dict[str, str] = {
@@ -74,6 +82,7 @@ DISPLAY_IT: dict[str, str] = {
     "remote": "telecomando",
 }
 NAME_CLEAN = re.compile(r"[^\w ]+|_")
+LANGUAGE_SPLIT = re.compile(r"[-_]")
 
 
 class _HasModelId(Protocol):
@@ -87,21 +96,37 @@ class IdentityTarget(Protocol):
 
 
 def display_category(category: str, language: str) -> str:
-    """The category as the owner reads it: Italian word when known, else the label itself."""
-    base = DISPLAY_IT.get(category, category) if language == "it" else category
+    """The category as the owner reads it: Italian word when known, else the label itself.
+
+    The language is matched by its primary subtag (``it-IT`` and ``it_IT`` mean ``it``).
+    """
+    primary = LANGUAGE_SPLIT.split(language.strip().lower())[0]
+    base = DISPLAY_IT.get(category, category) if primary == "it" else category
     return NAME_CLEAN.sub(" ", base).strip() or "item"
 
 
 @dataclass
 class _Cluster:
+    """Unit embeddings and the local day (ordinal) of each, oldest first."""
+
     cluster_id: str
     kind: str
     category: str
     members: np.ndarray
-    days: set[int] = field(default_factory=set)
-    sightings: int = 0
-    last_day: int = 0
+    days: np.ndarray
     seq: int = 0
+
+    @property
+    def sightings(self) -> int:
+        return len(self.members)
+
+    @property
+    def distinct_days(self) -> int:
+        return len({int(d) for d in self.days})
+
+    @property
+    def last_day(self) -> int:
+        return int(self.days.max())
 
     def centroid(self) -> np.ndarray:
         mean = self.members.mean(axis=0)
@@ -119,6 +144,25 @@ def _unit(vector: np.ndarray | None) -> np.ndarray | None:
         return None
     norm = float(np.linalg.norm(row))
     return None if norm == 0 else row / norm
+
+
+def _delete_quiet(store: RegistryStore, key: str) -> None:
+    """Delete a candidate; a failure is logged by type and never raised."""
+    try:
+        store.delete(COLLECTION, key)
+    except Exception as exc:
+        log.warning("candidate delete failed: %s", type(exc).__name__)
+
+
+def purge_stored(store: RegistryStore) -> int:
+    """Delete every stored candidate, whether or not an enroller exists; returns the count."""
+    keys = store.keys(COLLECTION)
+    for key in keys:
+        _delete_quiet(store, key)
+    return len(keys)
+
+
+_Write = tuple[str, dict[str, Any], dict[str, np.ndarray]]
 
 
 class AutoEnroller:
@@ -147,17 +191,23 @@ class AutoEnroller:
         self._lock = threading.RLock()
         self._clusters: dict[str, _Cluster] = {}
         self._dirty: set[str] = set()
+        self._doomed: list[str] = []
         self._last_seen: dict[str, float] = {}
+        self._cluster_last: dict[str, float] = {}
         self._seq = 0
-        self._last_flush = monotonic()
+        self._last_tick = monotonic()
         self._load()
+        self._settle()
 
     # ------------------------------------------------------------------ public
 
     def apply_config(self, cfg: WorldAutoenrollConfig) -> None:
-        """Hot reload: the new limits apply from the next observation."""
+        """Hot reload: new limits apply from the next observation; candidates the new
+        configuration no longer allows (disabled, kind removed) are deleted now."""
         with self._lock:
             self.cfg = cfg
+            self._expire_locked()
+        self._settle()
 
     def observe(self, obs: Observation, result: ObserveResult) -> str | None:
         """Fold one observation in; returns the registry id attached or enrolled, if any.
@@ -175,29 +225,46 @@ class AutoEnroller:
         if obs.identity not in (None, "", "unknown"):
             return None
         entry_id = result.entry.entry_id
+        known = self._known_match(obs.kind, obs.category, row)
+        if known is not None:
+            self._attach(entry_id, known)
+            return known
         with self._lock:
-            known = self._known_match(obs.kind, obs.category, row)
-            if known is not None:
-                self._attach(entry_id, known)
-                return known
-            if not self._throttle(entry_id, obs.stamp):
-                return None
-            enrolled = self._sight(obs.kind, obs.category, row, entry_id)
-            self._maintain()
-            return enrolled
+            ready = self._sight(obs, row, entry_id) if self._throttle(entry_id, obs.stamp) else None
+        owner = None if ready is None else self._enroll(ready, entry_id)
+        self.tick()
+        return owner
+
+    def tick(self, *, force: bool = False) -> None:
+        """Periodic upkeep: retention and configuration purge, then write changed candidates.
+
+        Cheap to call every loop; it works at most once per ``persist_interval_s`` (always with
+        ``force``). Independent of observations, so a robot that sees nothing still expires.
+        """
+        with self._lock:
+            now = self._mono()
+            if force or now - self._last_tick >= self.cfg.persist_interval_s:
+                self._last_tick = now
+                self._expire_locked()
+                writes = self._take_writes_locked()
+            else:
+                writes = []
+        self._settle(writes)
 
     def flush(self) -> None:
-        """Write changed candidates now (shutdown)."""
-        with self._lock:
-            self._write_dirty()
+        """Expire, then write changed candidates now (shutdown)."""
+        self.tick(force=True)
 
     def purge(self, category: str | None = None) -> int:
         """Delete candidates (all, or one category) from memory and disk; returns the count."""
         with self._lock:
-            doomed = [c for c in self._clusters.values() if category in (None, c.category)]
-            for cluster in doomed:
-                self._drop(cluster.cluster_id)
-            return len(doomed)
+            doomed = [
+                c.cluster_id for c in self._clusters.values() if category in (None, c.category)
+            ]
+            for cluster_id in doomed:
+                self._forget_locked(cluster_id)
+        self._settle()
+        return len(doomed)
 
     def stats(self) -> dict[str, int]:
         """Counts only: candidate clusters and the sightings they hold."""
@@ -207,7 +274,7 @@ class AutoEnroller:
                 "sightings": sum(c.sightings for c in self._clusters.values()),
             }
 
-    # ------------------------------------------------------------------ internals
+    # ------------------------------------------------------------------ matching
 
     def _today(self) -> int:
         return self._clock().astimezone().date().toordinal()
@@ -245,32 +312,48 @@ class AutoEnroller:
                 del self._last_seen[key]
         return True
 
-    def _sight(self, kind: str, category: str, row: np.ndarray, entry_id: str) -> str | None:
+    # ------------------------------------------------------------------ clusters
+
+    def _sight(self, obs: Observation, row: np.ndarray, entry_id: str) -> _Cluster | None:
+        """Record one sighting; returns the cluster to enroll (already detached) if it is ripe."""
         cfg = self.cfg
         today = self._today()
-        cluster = self._nearest(kind, category, row)
+        cluster = self._nearest(obs.kind, obs.category, row)
         if cluster is None:
-            cluster = _Cluster(uuid.uuid4().hex, kind, category, row[None, :])
+            cluster = _Cluster(
+                uuid.uuid4().hex,
+                obs.kind,
+                obs.category,
+                row[None, :],
+                np.array([today], dtype=np.int32),
+            )
             self._clusters[cluster.cluster_id] = cluster
         else:
-            cluster.members = np.vstack([cluster.members, row])[-cfg.max_members :]
-        cluster.sightings += 1
-        cluster.days.add(today)
-        cluster.last_day = today
+            last = self._cluster_last.get(cluster.cluster_id)
+            if last is not None and obs.stamp - last < cfg.sighting_min_interval_s:
+                return None
+            keep = cfg.max_members
+            cluster.members = np.vstack([cluster.members, row])[-keep:]
+            cluster.days = np.append(cluster.days, np.int32(today))[-keep:]
+        self._cluster_last[cluster.cluster_id] = obs.stamp
         self._seq += 1
         cluster.seq = self._seq
         self._dirty.add(cluster.cluster_id)
-        self._cap_clusters()
-        if (
-            len(cluster.days) >= cfg.min_days
+        self._cap_clusters_locked()
+        ripe = (
+            cluster.distinct_days >= cfg.min_days
             and cluster.sightings >= cfg.min_sightings
             and cluster.spread() <= cfg.max_spread
-        ):
-            return self._enroll(cluster, entry_id)
-        return None
+        )
+        if not ripe:
+            return None
+        self._clusters.pop(cluster.cluster_id, None)
+        self._dirty.discard(cluster.cluster_id)
+        self._doomed.append(cluster.cluster_id)
+        return cluster
 
     def _nearest(self, kind: str, category: str, row: np.ndarray) -> _Cluster | None:
-        best, best_dist = None, self.cfg.max_spread
+        best, best_dist = None, self.cfg.join_radius
         for cluster in self._clusters.values():
             if (cluster.kind, cluster.category) != (kind, category):
                 continue
@@ -295,8 +378,10 @@ class AutoEnroller:
             )
         except Exception as exc:
             log.warning("auto-enrollment failed: %s", type(exc).__name__)
+            with self._lock:  # keep collecting; the file is rewritten at the next tick
+                self._clusters[cluster.cluster_id] = cluster
+                self._dirty.add(cluster.cluster_id)
             return None
-        self._drop(cluster.cluster_id)
         self._attach(entry_id, record.entity_id)
         log.info("auto-enrolled a new %s", cluster.kind)
         return record.entity_id
@@ -313,31 +398,33 @@ class AutoEnroller:
         ]
         return f"{base} {max(taken, default=0) + 1}"
 
-    def _cap_clusters(self) -> None:
+    def _cap_clusters_locked(self) -> None:
         extra = len(self._clusters) - self.cfg.max_clusters
         if extra > 0:
             for cluster in sorted(self._clusters.values(), key=lambda c: c.seq)[:extra]:
-                self._drop(cluster.cluster_id)
+                self._forget_locked(cluster.cluster_id)
 
-    def _maintain(self) -> None:
-        """Purge expired candidates and write changes, at most once per persist interval."""
-        now = self._mono()
-        if now - self._last_flush < self.cfg.persist_interval_s:
-            return
-        limit = self._today() - self.cfg.retention_days
-        for cluster in [c for c in self._clusters.values() if c.last_day < limit]:
-            self._drop(cluster.cluster_id)
-        self._write_dirty()
+    def _expire_locked(self) -> None:
+        """Forget clusters past retention, or that the configuration no longer allows."""
+        cfg = self.cfg
+        limit = self._today() - cfg.retention_days
+        for cluster in list(self._clusters.values()):
+            stale = cluster.last_day < limit
+            if stale or not cfg.enabled or cluster.kind not in cfg.kinds:
+                self._forget_locked(cluster.cluster_id)
 
-    def _drop(self, cluster_id: str) -> None:
+    def _forget_locked(self, cluster_id: str) -> None:
+        """Drop a cluster from memory now; its file is deleted by the next ``_settle``."""
         self._clusters.pop(cluster_id, None)
         self._dirty.discard(cluster_id)
-        try:
-            self.store.delete(COLLECTION, cluster_id)
-        except Exception as exc:
-            log.warning("candidate delete failed: %s", type(exc).__name__)
+        self._cluster_last.pop(cluster_id, None)
+        self._doomed.append(cluster_id)
 
-    def _write_dirty(self) -> None:
+    # ------------------------------------------------------------------ storage
+
+    def _take_writes_locked(self) -> list[_Write]:
+        """Snapshot the changed clusters (copies), so the writes can run outside the lock."""
+        writes: list[_Write] = []
         for cluster_id in sorted(self._dirty):
             cluster = self._clusters.get(cluster_id)
             if cluster is None:
@@ -348,23 +435,36 @@ class AutoEnroller:
                 "kind": cluster.kind,
                 "category": cluster.category,
                 "model_id": self.model_id,
-                "sightings": cluster.sightings,
-                "days": sorted(cluster.days),
-                "last_day": cluster.last_day,
             }
+            arrays = {"members": cluster.members.copy(), "days": cluster.days.copy()}
+            writes.append((cluster_id, meta, arrays))
+        self._dirty.clear()
+        return writes
+
+    def _settle(self, writes: list[_Write] | None = None) -> None:
+        """Run the pending deletes and the given writes; no lock is held during store I/O."""
+        with self._lock:
+            doomed, self._doomed = self._doomed, []
+        for cluster_id in doomed:
+            _delete_quiet(self.store, cluster_id)
+        for cluster_id, meta, arrays in writes or []:
             try:
-                self.store.put(COLLECTION, cluster_id, meta, {"members": cluster.members})
-                self._dirty.discard(cluster_id)
+                self.store.put(COLLECTION, cluster_id, meta, arrays)
             except Exception as exc:
                 log.warning("candidate write failed: %s", type(exc).__name__)
-        self._last_flush = self._mono()
+                with self._lock:
+                    if cluster_id in self._clusters:
+                        self._dirty.add(cluster_id)
 
     def _load(self) -> None:
+        cfg = self.cfg
+        limit = self._today() - cfg.retention_days
         loaded: list[_Cluster] = []
         for key in self.store.keys(COLLECTION):
             try:
                 meta, arrays = self.store.get(COLLECTION, key)
                 members = np.asarray(arrays["members"], dtype=np.float32)
+                days = np.asarray(arrays["days"], dtype=np.int32)
                 valid = (
                     meta["schema_version"] == SCHEMA_VERSION
                     and meta["model_id"] == self.model_id
@@ -372,25 +472,20 @@ class AutoEnroller:
                     and meta["kind"] in ALLOWED_KINDS
                     and members.ndim == 2
                     and len(members)
+                    and days.shape == (len(members),)
                     and np.isfinite(members).all()
                 )
                 if not valid:
                     raise ValueError("stale candidate")
                 members = members / np.linalg.norm(members, axis=1, keepdims=True)
-                loaded.append(
-                    _Cluster(
-                        key,
-                        meta["kind"],
-                        str(meta["category"]),
-                        members,
-                        {int(d) for d in meta["days"]},
-                        int(meta["sightings"]),
-                        int(meta["last_day"]),
-                    )
-                )
+                cluster = _Cluster(key, meta["kind"], str(meta["category"]), members, days)
+                expired = cluster.last_day < limit
+                if expired or not cfg.enabled or cluster.kind not in cfg.kinds:
+                    raise ValueError("expired or not allowed")
+                loaded.append(cluster)
             except Exception as exc:
                 log.info("candidate %s dropped at load (%s)", key, type(exc).__name__)
-                self.store.delete(COLLECTION, key)
+                self._doomed.append(key)
         for cluster in sorted(loaded, key=lambda c: c.last_day):
             self._seq += 1
             cluster.seq = self._seq
@@ -408,9 +503,13 @@ def open_autoenroll(
     """The app's auto-enroller, or None when there is nothing to enroll with.
 
     It needs a registry (its store holds the candidates) and the appearance embedder (its
-    ``model_id`` keys the candidates); without either the app just runs without it.
+    ``model_id`` keys the candidates). Without the embedder, or when auto-enrollment is
+    disabled, any candidates left on disk are deleted at startup: nothing may keep them.
     """
-    if registry is None or appearance is None:
+    if registry is None:
+        return None
+    if appearance is None or not cfg.enabled:
+        purge_stored(registry.store)
         return None
     return AutoEnroller(
         registry, registry.store, cfg, appearance.model_id, world=world, language=language
