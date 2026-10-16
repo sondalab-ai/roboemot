@@ -1,7 +1,8 @@
 """ONNX backends for the vision stages (SPEC 5, 13): needs the ``vision`` extra.
 
 YuNet face detector (MIT), SFace face embedder (Apache-2.0), FairFace ViT-B age and gender
-(Apache-2.0) and DINOv2-S appearance embedder (Apache-2.0), with the preprocessing verified
+(Apache-2.0), DINOv2-S appearance embedder (Apache-2.0) and NanoDet-Plus-m object detector
+(Apache-2.0), with the preprocessing verified
 in the M1 spike (docs/spikes/2026-10-m1-models.md). Everything runs on CPU with two threads;
 the cm4 budget leaves two cores to vision, audio and core together (SPEC 13). All resizing,
 letterboxing, alignment and cropping happens here: crops live only inside a call (SPEC 12).
@@ -63,6 +64,18 @@ AGE_LABEL_GROUPS = {
     "more than 70": "senior",
 }
 GENDER_LABEL_VALUES = {"Female": "female", "Male": "male"}
+
+# NanoDet-Plus-m 320 (config nanodet-plus-m_320.yml of the release): plain resize without
+# keeping the aspect ratio, BGR mean/std, four strides, distance distribution of 8 bins per side.
+NANODET_NAME = "nanodet-plus-m-320"
+NANODET_SIZE = 320
+NANODET_MEAN = (103.53, 116.28, 123.675)
+NANODET_STD = (57.375, 57.12, 58.395)
+NANODET_STRIDES = (8, 16, 32, 64)
+NANODET_REG_BINS = 8
+NANODET_SIDES = 4
+NANODET_MAX_DETECTIONS = 100
+IOU_EPS = 1e-9
 
 DINO_MODEL_ID = "dinov2-small"
 DINO_SIZE = 224
@@ -237,6 +250,134 @@ class DinoV2Embedder:
         return _unit(tokens[0])
 
 
+def nanodet_priors(size: int = NANODET_SIZE) -> np.ndarray:
+    """Grid-cell centres of the four feature maps as ``(N, 3)`` rows ``x, y, stride`` in pixels.
+
+    Row-major per level (x fastest), levels concatenated, which is the order of the model
+    output rows (2125 rows at 320x320).
+    """
+    rows = []
+    for stride in NANODET_STRIDES:
+        n = -(-size // stride)
+        ys, xs = np.mgrid[0:n, 0:n]
+        rows.append(
+            np.stack([xs.ravel() * stride, ys.ravel() * stride, np.full(n * n, stride)], axis=1)
+        )
+    return np.concatenate(rows).astype(np.float32)
+
+
+def nms(boxes: np.ndarray, scores: np.ndarray, iou_max: float) -> list[int]:
+    """Greedy non-maximum suppression; indices kept, best score first.
+
+    ``boxes`` are ``(N, 4)`` xyxy. A box is dropped when its IoU with a better kept box exceeds
+    ``iou_max``.
+    """
+    order = np.argsort(-scores, kind="stable")
+    areas = np.prod(boxes[:, 2:] - boxes[:, :2], axis=1)
+    keep: list[int] = []
+    while order.size:
+        i = int(order[0])
+        keep.append(i)
+        rest = order[1:]
+        lt = np.maximum(boxes[i, :2], boxes[rest, :2])
+        rb = np.minimum(boxes[i, 2:], boxes[rest, 2:])
+        inter = np.prod(np.clip(rb - lt, 0, None), axis=1)
+        iou = inter / np.maximum(areas[i] + areas[rest] - inter, IOU_EPS)
+        order = rest[iou <= iou_max]
+    return keep
+
+
+def decode_nanodet(
+    output: np.ndarray,
+    priors: np.ndarray,
+    columns: np.ndarray,
+    score_min: float,
+    iou_max: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Boxes, scores and class columns from one NanoDet-Plus output, in input-image pixels.
+
+    ``output`` is ``(N, classes + 4 * bins)``: class scores (already sigmoid) then, per side
+    (left, top, right, bottom), a distribution over ``NANODET_REG_BINS`` distances in strides.
+    Only the class ``columns`` are considered. Candidates at or above ``score_min`` are
+    decoded (softmax expectation times stride, around the prior centre, clipped to the input),
+    merged per class by NMS (each class on its own) and capped at ``NANODET_MAX_DETECTIONS``.
+    """
+    scores = output[:, columns]
+    boxes_none = np.zeros((0, NANODET_SIDES), np.float32)
+    anchors, picked = np.nonzero(scores >= score_min)
+    if anchors.size == 0:
+        return boxes_none, np.zeros(0, np.float32), np.zeros(0, np.int64)
+    classes = columns[picked]
+    conf = scores[anchors, picked]
+    reg = output[anchors, -NANODET_SIDES * NANODET_REG_BINS :]
+    reg = reg.reshape(-1, NANODET_SIDES, NANODET_REG_BINS)
+    e = np.exp(reg - reg.max(axis=2, keepdims=True))
+    dist = (e / e.sum(axis=2, keepdims=True) * np.arange(NANODET_REG_BINS)).sum(axis=2)
+    cx, cy, stride = priors[anchors].T
+    left, top, right, bottom = (dist * stride[:, None]).T
+    boxes = np.stack([cx - left, cy - top, cx + right, cy + bottom], axis=1)
+    boxes = np.clip(boxes, 0, NANODET_SIZE)
+    kept: list[int] = []
+    for c in np.unique(classes):
+        same = np.flatnonzero(classes == c)
+        kept.extend(int(same[i]) for i in nms(boxes[same], conf[same], iou_max))
+    keep = sorted(kept, key=lambda i: -conf[i])[:NANODET_MAX_DETECTIONS]
+    return boxes[keep], conf[keep], classes[keep]
+
+
+class NanoDetDetector:
+    """NanoDet-Plus-m 320 (Apache-2.0) object detector for the animal and object stage.
+
+    Implements the ``ObjectDetector`` protocol: ``Detection.label`` is the class name from the
+    manifest labels. Only the classes in ``classes`` are returned (person and the rest are never
+    scored, decoded or merged), so the cost does not grow with the 80-class output.
+    """
+
+    def __init__(
+        self,
+        path: Path,
+        labels: list[str],
+        classes: list[str],
+        score_min: float,
+        nms_iou: float,
+        threads: int,
+    ):
+        unknown = sorted(set(classes) - set(labels))
+        if unknown:
+            raise ModelError(f"object classes not known to {NANODET_NAME}: {unknown}")
+        self._labels = labels
+        self._columns = np.array([labels.index(c) for c in dict.fromkeys(classes)], dtype=np.int64)
+        self._score_min = score_min
+        self._nms_iou = nms_iou
+        self._priors = nanodet_priors()
+        self._sess = _session(path, threads)
+        self._input = self._sess.get_inputs()[0].name
+        self._mean = np.array(NANODET_MEAN, np.float32)
+        self._std = np.array(NANODET_STD, np.float32)
+        shape = self._sess.get_inputs()[0].shape
+        if shape[2:] != [NANODET_SIZE, NANODET_SIZE]:
+            raise ModelError(f"{path.name}: input {shape}, expected {NANODET_SIZE}x{NANODET_SIZE}")
+
+    def detect(self, image: np.ndarray) -> list[Detection]:
+        """Labelled boxes (original pixels) of the configured classes at or above the floor.
+
+        The frame is squashed to 320x320 (the model was trained without keeping the aspect
+        ratio), run, decoded and merged per class; boxes are scaled back to ``image``.
+        """
+        height, width = image.shape[:2]
+        resized = cv2.resize(image, (NANODET_SIZE, NANODET_SIZE), interpolation=cv2.INTER_LINEAR)
+        x = ((resized.astype(np.float32) - self._mean) / self._std).transpose(2, 0, 1)[None]
+        output = self._sess.run(None, {self._input: np.ascontiguousarray(x)})[0][0]
+        boxes, scores, classes = decode_nanodet(
+            output, self._priors, self._columns, self._score_min, self._nms_iou
+        )
+        scale = np.array([width, height, width, height], np.float32) / NANODET_SIZE
+        return [
+            Detection(tuple(float(v) for v in box * scale), float(s), self._labels[c])
+            for box, s, c in zip(boxes, scores, classes, strict=True)
+        ]
+
+
 @dataclass
 class Stages:
     """The ONNX backends built from a models folder; optional ones are None when skipped."""
@@ -245,6 +386,7 @@ class Stages:
     face_embedder: SFaceEmbedder
     attribute_estimator: FairFaceEstimator | None
     appearance_embedder: DinoV2Embedder | None
+    object_detector: NanoDetDetector | None = None
 
 
 def _file(root: Path, name: str, index: int = 0) -> Path:
@@ -259,8 +401,13 @@ def load_stages(
     profile: str | None = None,
     attributes: bool = True,
     appearance: bool = True,
+    objects: bool = True,
 ) -> Stages:
-    """Load the backends from ``root``; the ViTs and DINOv2 can be left out.
+    """Load the backends from ``root``; the ViTs, DINOv2 and the object detector can be left out.
+
+    The object detector (NanoDet-Plus-m 320) is loaded when ``objects`` is true and
+    ``vision.objects_enabled`` is on; it returns the ``vision.animal_categories`` and
+    ``vision.object_categories`` classes only.
 
     Every file must carry a valid ``.verified`` marker (``roboemot models fetch`` writes it);
     otherwise ``ModelError`` names the file. Frame-path sessions use ``vision.threads`` CPU
@@ -287,6 +434,19 @@ def load_stages(
             gender.labels,
             cfg.attribute_threads,
         )
+    detector = None
+    if objects and cfg.objects_enabled:
+        spec = specs[NANODET_NAME]
+        if spec.labels is None:
+            raise ModelError("models.yaml lacks the NanoDet class labels")
+        detector = NanoDetDetector(
+            _file(root, NANODET_NAME),
+            spec.labels,
+            [*cfg.animal_categories, *cfg.object_categories],
+            cfg.object_score_min,
+            cfg.object_nms_iou,
+            cfg.threads,
+        )
     return Stages(
         YuNetDetector(
             _file(root, "yunet"),
@@ -296,4 +456,5 @@ def load_stages(
         SFaceEmbedder(_file(root, "sface")),
         estimator,
         DinoV2Embedder(_file(root, "dinov2-small"), cfg.threads) if appearance else None,
+        detector,
     )

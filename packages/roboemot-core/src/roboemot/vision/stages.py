@@ -44,7 +44,7 @@ class AppearanceEmbedder(Protocol):
 
 
 class ObjectDetector(Protocol):
-    """Labelled boxes (YOLO class); ``Detection.label`` is the class name."""
+    """Labelled boxes of animals and objects; ``Detection.label`` is the detector class name."""
 
     def detect(self, image: np.ndarray) -> list[Detection]: ...
 

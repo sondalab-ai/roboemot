@@ -713,14 +713,66 @@ class VisionConfig(Strict):
         "Folder with the ONNX model files; empty means models/ in the app data folder (data_dir)",
         restart=True,
     )
-    objects_enabled: bool = param(False, "Run the object detector (off by default on cm4)")
+    objects_enabled: bool = param(
+        True,
+        "Run the object detector (NanoDet-Plus-m 320, SPEC 5, 13) at vision.rates.objects_hz",
+        restart=True,
+    )
     object_score_min: float = param(
-        0.4, "Object detections below this score are dropped", ge=0, le=1
+        0.4,
+        "Object detections below this score are dropped; it also replaces tracker.high_score "
+        "for the animal and object tracker, so a 0.4 detection starts a track",
+        ge=0,
+        le=1,
+        restart=True,
+    )
+    object_lost_s: float = param(
+        5.0,
+        "An animal or object track unmatched for this long is removed; objects run at "
+        "vision.rates.objects_hz (1 Hz), so the face value of tracker.lost_s would drop a "
+        "track after one missed frame",
+        unit="s",
+        ge=0.1,
+        le=300,
+    )
+    object_nms_iou: float = param(
+        0.6,
+        "Detections of one class overlapping more than this IoU are merged (NanoDet's own value)",
+        ge=0.1,
+        le=0.95,
+        restart=True,
     )
     animal_categories: list[str] = param(
-        ["bird", "cat", "dog", "horse", "sheep", "cow", "rabbit", "hamster"],
-        "Detector classes reported as kind animal; other classes are objects, person is ignored",
+        ["bird", "cat", "dog", "horse", "sheep", "cow"],
+        "Detector classes (COCO names as in models.yaml) reported as kind animal",
+        restart=True,
     )
+    object_categories: list[str] = param(
+        [
+            "cup",
+            "bottle",
+            "chair",
+            "couch",
+            "potted_plant",
+            "tv",
+            "laptop",
+            "book",
+            "remote",
+            "cell_phone",
+            "bowl",
+            "teddy_bear",
+        ],
+        "Detector classes reported as kind object; a class in neither list is ignored, and so "
+        "is person (faces come from the face detector)",
+        restart=True,
+    )
+
+    @model_validator(mode="after")
+    def _disjoint_categories(self) -> VisionConfig:
+        both = set(self.animal_categories) & set(self.object_categories)
+        if both:
+            raise ValueError(f"vision categories are both animal and object: {sorted(both)}")
+        return self
 
 
 # --------------------------------------------------------------------------- world (SPEC 5A)

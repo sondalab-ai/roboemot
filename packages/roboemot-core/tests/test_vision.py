@@ -522,11 +522,62 @@ def test_animals_and_objects_publish_with_appearance_embedding(tmp_path):
     assert app.calls < len(seen)
 
 
-def test_objects_stay_off_by_default(tmp_path):
+def test_objects_can_be_switched_off(tmp_path):
     objs = ObjectMock([Detection((20, 100, 80, 160), 0.8, "cat")])
-    _, _, pipe, _, got = rig(tmp_path, lambda i: [], object_detector=objs)
+    off = CFG.vision.model_copy(update={"objects_enabled": False})
+    _, _, pipe, _, got = rig(tmp_path, lambda i: [], vision=off, object_detector=objs)
     run(pipe, 20)
     assert got["percept.entity"] == []
+
+
+def test_objects_are_on_by_default_and_defaults_cover_the_household_list():
+    v = CFG.vision
+    assert v.objects_enabled and v.rates.objects_hz == 1.0
+    assert set(v.animal_categories) == {"bird", "cat", "dog", "horse", "sheep", "cow"}
+    assert {"cup", "potted_plant", "cell_phone", "teddy_bear", "tv"} <= set(v.object_categories)
+    assert "person" not in v.animal_categories + v.object_categories
+
+
+def test_class_mapping_drops_unlisted_classes_and_person(tmp_path):
+    objs = ObjectMock(
+        [
+            Detection((20, 100, 80, 160), 0.8, "cat"),
+            Detection((200, 100, 260, 160), 0.8, "cup"),
+            Detection((120, 20, 180, 80), 0.9, "person"),
+            Detection((300, 20, 340, 80), 0.9, "car"),
+        ]
+    )
+    _, _, pipe, _, got = rig(tmp_path, lambda i: [], object_detector=objs)
+    run(pipe, 20)
+    kinds = {m.payload.category: m.payload.kind for m in got["percept.entity"]}
+    assert kinds == {"cat": "animal", "cup": "object"}
+
+
+def test_class_mapping_is_configurable(tmp_path):
+    objs = ObjectMock(
+        [Detection((20, 100, 80, 160), 0.8, "cat"), Detection((200, 100, 260, 160), 0.8, "cup")]
+    )
+    cfg = CFG.vision.model_copy(update={"animal_categories": ["cup"], "object_categories": []})
+    _, _, pipe, _, got = rig(tmp_path, lambda i: [], vision=cfg, object_detector=objs)
+    run(pipe, 20)
+    kinds = {m.payload.category: m.payload.kind for m in got["percept.entity"]}
+    assert kinds == {"cup": "animal"}
+
+
+def test_class_in_both_lists_is_rejected():
+    with pytest.raises(ValidationError, match="both animal and object"):
+        RoboEmotConfig.model_validate(
+            {"vision": {"animal_categories": ["cat"], "object_categories": ["cat"]}}
+        )
+
+
+def test_object_score_threshold_is_applied(tmp_path):
+    objs = ObjectMock(
+        [Detection((20, 100, 80, 160), 0.39, "cat"), Detection((200, 100, 260, 160), 0.41, "cup")]
+    )
+    _, _, pipe, _, got = rig(tmp_path, lambda i: [], object_detector=objs)
+    run(pipe, 20)
+    assert {m.payload.category for m in got["percept.entity"]} == {"cup"}
 
 
 def test_world_model_gets_observations_over_the_bus_with_joint_state(tmp_path):

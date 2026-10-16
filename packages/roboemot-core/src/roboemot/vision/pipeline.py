@@ -20,6 +20,8 @@ deterministic; ``LatestFrameRunner`` drives it live. Per frame, when the governo
    at capture travels in the message ``meta`` for the world model to rotate into the base
    frame). Optional object stage: same for animals and objects, whose DINOv2-class appearance
    embedding rides in the ``Observation`` (SPEC 5A) for world-model matching and the registry.
+   ``vision.animal_categories`` and ``vision.object_categories`` map detector classes to the
+   kind; any other class, ``person`` included, is ignored.
 
 ``face_tap`` (optional) is called with each processed frame and its visible face tracks, on
 the vision thread, for the enrollment service (SPEC 6); it must not keep the image.
@@ -144,7 +146,16 @@ class VisionPipeline:
         self.object_detector = object_detector
         ids = itertools.count(1)
         self.face_tracker = Tracker(cfg.tracker, ids)
-        self.object_tracker = Tracker(cfg.tracker, ids)
+        self.object_tracker = Tracker(
+            cfg.tracker.model_copy(
+                update={
+                    "high_score": cfg.object_score_min,
+                    "low_score": min(cfg.tracker.low_score, cfg.object_score_min),
+                    "lost_s": cfg.object_lost_s,
+                }
+            ),
+            ids,
+        )
         self.worker = (
             AttributeWorker(attribute_estimator, identity, cfg.attribute_queue_max, executor)
             if attribute_estimator is not None
@@ -457,10 +468,14 @@ class VisionPipeline:
 
     def _process_objects(self, frame: Frame, camera: CameraModel) -> None:
         assert self.object_detector is not None
+        kinds: dict[str, Literal["animal", "object"]] = {
+            **dict.fromkeys(self.cfg.object_categories, "object"),
+            **dict.fromkeys(self.cfg.animal_categories, "animal"),
+        }
         dets: list[Detection] = [
             d
             for d in self.object_detector.detect(frame.image)
-            if d.score >= self.cfg.object_score_min and d.label != PERSON
+            if d.score >= self.cfg.object_score_min and d.label in kinds
         ]
         result = self.object_tracker.update(dets, frame.stamp)
         for track_id in result.removed_ids:
@@ -470,9 +485,8 @@ class VisionPipeline:
             self._evaluate_entity(frame, track, state)
             x1, y1, x2, y2 = track.box
             azimuth, elevation = camera.bearing((x1 + x2) / 2, (y1 + y2) / 2)
-            kind = "animal" if track.label in self.cfg.animal_categories else "object"
             obs = Observation(
-                kind=kind,
+                kind=kinds[track.label],
                 stamp=frame.stamp,
                 source=self.source,
                 azimuth_rad=azimuth,
