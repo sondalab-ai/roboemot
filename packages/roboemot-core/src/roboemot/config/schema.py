@@ -409,6 +409,36 @@ class IdentityConfig(Strict):
     estimate_frames_min: int = param(
         5, "Frames aggregated before an estimate is used", ge=1, le=100
     )
+    enroll_min_embeddings: int = param(5, "Face embeddings required at enrollment", ge=5, le=20)
+    max_embeddings_per_person: int = param(
+        20, "Cap on stored face embeddings per person, refresh included", ge=5, le=20
+    )
+    refresh_min_similarity: float = param(
+        0.65, "Best similarity needed before a match adds an embedding", ge=0, le=1
+    )
+    refresh_max_similarity: float = param(
+        0.98, "Skip a refresh embedding this close to a stored one", ge=0, le=1
+    )
+    refresh_min_interval_s: float = param(
+        60.0, "Minimum time between refresh embeddings of one person", unit="s", ge=0, le=86400
+    )
+    last_seen_flush_interval_s: float = param(
+        60.0, "Minimum time between disk writes of last_seen updates", unit="s", ge=0, le=86400
+    )
+
+    vote_max_age_s: float = param(
+        10.0, "Identity votes older than this are ignored", unit="s", ge=1, le=300
+    )
+
+    @model_validator(mode="after")
+    def _consistent(self) -> IdentityConfig:
+        if self.votes_required > self.votes_window:
+            raise ValueError("identity.votes_required must not exceed votes_window")
+        if self.enroll_min_embeddings > self.max_embeddings_per_person:
+            raise ValueError("identity.enroll_min_embeddings exceeds max_embeddings_per_person")
+        if self.refresh_min_similarity < self.match_threshold:
+            raise ValueError("identity.refresh_min_similarity must be at least match_threshold")
+        return self
 
 
 class AttentionConfig(Strict):
