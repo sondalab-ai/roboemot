@@ -529,6 +529,115 @@ class AttentionConfig(Strict):
         return v
 
 
+# --------------------------------------------------------------------------- vision (SPEC 5, 13)
+
+
+class VisionRates(Strict):
+    detection_hz: float = param(8.0, "Face detection rate (cm4: 5 to 10)", unit="Hz", ge=0.1, le=60)
+    embedding_hz: float = param(
+        0.5, "Face embedding rate per track after the new-track burst", unit="Hz", ge=0.05, le=30
+    )
+    appearance_hz: float = param(
+        0.5,
+        "Appearance embedding rate per animal or object track after the new-track burst",
+        unit="Hz",
+        ge=0.05,
+        le=30,
+    )
+    objects_hz: float = param(1.0, "Object detection rate when enabled", unit="Hz", ge=0.1, le=30)
+    camera_hz: float = param(
+        30.0, "Upper bound on camera reads handed to vision", unit="Hz", ge=1, le=120
+    )
+
+
+class TrackerConfig(Strict):
+    high_score: float = param(
+        0.6, "Detections at or above this start tracks (the detection score threshold)", ge=0, le=1
+    )
+    low_score: float = param(
+        0.1, "Detections between this and high_score only keep existing tracks", ge=0, le=1
+    )
+    match_iou: float = param(0.3, "Minimum IoU for the first association", ge=0, le=1)
+    low_match_iou: float = param(0.5, "Minimum IoU for the low-score association", ge=0, le=1)
+    confirm_hits: int = param(2, "Matched detections before a track is reported", ge=1, le=10)
+    lost_s: float = param(
+        1.5, "A track unmatched for this long (capture stamps) is removed", unit="s", ge=0.1, le=60
+    )
+
+    @model_validator(mode="after")
+    def _ordered(self) -> TrackerConfig:
+        if self.low_score > self.high_score:
+            raise ValueError("vision.tracker.low_score must not exceed high_score")
+        return self
+
+
+class VisionConfig(Strict):
+    rates: VisionRates = param({}, "Per-stage target rates, scaled by the circadian state")
+    tracker: TrackerConfig = param({}, "ByteTrack-class tracker")
+    # TODO: unify with a world-level camera_fov_h_deg once the world config carries one.
+    camera_fov_h_deg: float = param(
+        78.0,
+        "Horizontal field of view of the frames fed to vision (pinhole model, square pixels); "
+        "used only when the camera source gives no intrinsics (SPEC 5A: Reachy Mini 78 deg)",
+        unit="deg",
+        ge=10,
+        le=179,
+    )
+    threads: int = param(2, "CPU threads of the frame-path models", ge=1, le=8, restart=True)
+    attribute_threads: int = param(
+        1, "CPU threads of the age and gender models (background job)", ge=1, le=8, restart=True
+    )
+    detector_width_px: int = param(
+        320, "Face detector input width (SPEC 13: 320x240)", unit="px", ge=64, le=1280, restart=True
+    )
+    detector_height_px: int = param(
+        240, "Face detector input height", unit="px", ge=64, le=1280, restart=True
+    )
+    face_min_px: int = param(
+        24, "Faces with a shorter box side are ignored", unit="px", ge=8, le=512
+    )
+    embed_min_face_px: int = param(
+        40, "Faces with a shorter box side are tracked but not embedded", unit="px", ge=8, le=512
+    )
+    embedding_burst: int = param(
+        5,
+        "Face evaluations at the start of a track, before the steady rate; at least the votes "
+        "required, so one missed vote still fits the SPEC 13 identity budget of 2.5 s",
+        ge=1,
+        le=10,
+    )
+    burst_min_gap_s: float = param(
+        0.25, "Minimum capture-time gap between two burst evaluations", unit="s", ge=0, le=5
+    )
+    max_embeds_per_frame: int = param(
+        2, "Cap on embeddings computed for one frame, to bound its latency", ge=1, le=16
+    )
+    attribute_crop_interval_s: float = param(
+        0.3,
+        "Minimum capture-time gap between the face crops kept for the age and gender job",
+        unit="s",
+        ge=0,
+        le=10,
+    )
+    attribute_crop_margin: float = param(
+        0.25, "Face box padding for the age and gender crop, per side", ge=0, le=1
+    )
+    attribute_queue_max: int = param(
+        4, "Age and gender jobs waiting for the worker; further tracks wait", ge=1, le=64
+    )
+    models_dir: str = param(
+        "", "Folder with the ONNX model files; empty means ~/.cache/roboemot/models", restart=True
+    )
+    objects_enabled: bool = param(False, "Run the object detector (off by default on cm4)")
+    object_score_min: float = param(
+        0.4, "Object detections below this score are dropped", ge=0, le=1
+    )
+    animal_categories: list[str] = param(
+        ["bird", "cat", "dog", "horse", "sheep", "cow", "rabbit", "hamster"],
+        "Detector classes reported as kind animal; other classes are objects, person is ignored",
+    )
+
+
 # --------------------------------------------------------------------------- world (SPEC 5A)
 
 
@@ -910,6 +1019,7 @@ with warnings.catch_warnings():
         motion: MotionConfig = param({}, "SPEC 10")
         attention: AttentionConfig = param({}, "SPEC 4A, 5")
         identity: IdentityConfig = param({}, "SPEC 5, 6")
+        vision: VisionConfig = param({}, "SPEC 5, 13")
         world: WorldConfig = param({}, "SPEC 5A")
         mirror: MirrorConfig = param({}, "SPEC 9")
         voice: VoiceConfig = param({}, "SPEC 8")
@@ -926,6 +1036,14 @@ with warnings.catch_warnings():
             dupes = sorted({n for n in names if names.count(n) > 1})
             if dupes:
                 raise ValueError(f"duplicate llm route names: {dupes}")
+            return self
+
+        @model_validator(mode="after")
+        def _vision_fits_identity(self) -> RoboEmotConfig:
+            if self.vision.embedding_burst < self.identity.votes_required:
+                raise ValueError("vision.embedding_burst must be at least identity.votes_required")
+            if self.vision.embed_min_face_px < self.vision.face_min_px:
+                raise ValueError("vision.embed_min_face_px must be at least face_min_px")
             return self
 
 

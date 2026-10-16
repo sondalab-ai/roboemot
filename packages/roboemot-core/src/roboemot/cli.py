@@ -1,5 +1,5 @@
 """Command line: ``roboemot config {validate,schema,dump}``, ``roboemot manifest check``,
-``roboemot discover`` and ``roboemot debug``."""
+``roboemot discover``, ``roboemot debug`` and ``roboemot models {list,fetch}``."""
 
 from __future__ import annotations
 
@@ -82,6 +82,29 @@ def _debug(args: argparse.Namespace) -> int:
     return 0 if all(s["ok"] for s in report["sections"].values()) else 1
 
 
+def _models(args: argparse.Namespace) -> int:
+    """List the vision models and their state, or download them with sha256 verification."""
+    from .vision import models
+
+    configured = args.cache_dir or _stack(args).effective().vision.models_dir
+    root = models.models_dir(configured)
+    specs = models.load_manifest()
+    if args.action == "list":
+        for spec in specs.values():
+            state = models.status(spec, root, verify=args.verify)
+            print(f"{spec.name:16} {spec.role:20} {spec.licence:11} {state}")
+        print(f"folder: {root}")
+        return 0
+    names = list(specs) if args.all else args.names
+    if not names:
+        raise ValueError("name the models to fetch (see `roboemot models list`) or pass --all")
+
+    report = models.fetch(names, root)
+    for path, outcome in report.files.items():
+        print(f"{outcome:10} {root / path}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="roboemot")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -113,6 +136,19 @@ def main(argv: list[str] | None = None) -> int:
     dbg.add_argument("--timeout", type=float, default=None, help="seconds per section")
     dbg.add_argument("--json", action="store_true")
 
+    mod = sub.add_parser("models", help="vision model files: list, fetch (SPEC 5, 13)")
+    mod.add_argument("action", choices=["list", "fetch"])
+    mod.add_argument("names", nargs="*", help="models to fetch (see `list`)")
+    mod.add_argument("--all", action="store_true", help="fetch every model (about 0.8 GB)")
+    mod.add_argument(
+        "--cache-dir", help="models folder (default: vision.models_dir, else ~/.cache)"
+    )
+    mod.add_argument("--verify", action="store_true", help="list: rehash the files (slow)")
+    mod.add_argument("--app")
+    mod.add_argument("--defaults")
+    mod.add_argument("--preset")
+    mod.add_argument("--preset-dir", action="append", default=["configs/presets"])
+
     args = parser.parse_args(argv)
     try:
         if args.cmd == "config":
@@ -135,6 +171,8 @@ def main(argv: list[str] | None = None) -> int:
             return _discover(args)
         if args.cmd == "debug":
             return _debug(args)
+        if args.cmd == "models":
+            return _models(args)
     except (ConfigError, ValueError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

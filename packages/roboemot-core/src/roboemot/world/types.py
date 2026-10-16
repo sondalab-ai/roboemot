@@ -3,7 +3,8 @@
 Bearings are azimuth (positive left) and elevation (positive up) in radians. Observations
 carry them in the sensor frame; entries store them in the robot base frame. Appearance
 embeddings are biometric-adjacent data: they are excluded from ``repr`` and from every
-payload published on the bus (SPEC 12).
+``world.*`` payload (SPEC 12). Only an animal or object observation on ``percept.entity``
+carries one, as input to matching; person observations never do.
 """
 
 from __future__ import annotations

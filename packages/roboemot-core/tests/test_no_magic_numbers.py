@@ -35,6 +35,19 @@ BEHAVIOUR_MODULES = [
     "registry/store.py",
     "registry/matcher.py",
     "registry/estimates.py",
+    "world/feed.py",
+    "vision/__init__.py",
+    "vision/attributes.py",
+    "vision/geometry.py",
+    "vision/governor.py",
+    "vision/models.py",
+    "vision/onnx.py",
+    "vision/pipeline.py",
+    "vision/replay.py",
+    "vision/runner.py",
+    "vision/stages.py",
+    "vision/tracker.py",
+    "vision/types.py",
 ]
 ALLOWED = {0, 1, -1, 2, 0.5, -1.0}
 
