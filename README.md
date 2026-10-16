@@ -5,7 +5,7 @@ person, affect and a simulated circadian rhythm, mimicry, voice and conversation
 OpenAI-compatible model. v1 targets Pollen Robotics' **Reachy Mini Wireless**, running entirely
 on its Raspberry Pi CM4.
 
-The design lives in [`SPEC.md`](SPEC.md) (export of the shared spec document).
+The design lives in [`docs/specs/kickoff.md`](docs/specs/kickoff.md).
 Notes for coding agents are in [`CLAUDE.md`](CLAUDE.md).
 
 ## Status: M0 skeleton (work in progress)

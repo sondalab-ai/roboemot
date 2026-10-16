@@ -1,6 +1,6 @@
 # RoboEmot: Engineering Specification
 
-Oct 12, 2026 · Marcello · Status: Draft v0.2 · Source of truth: the shared Claude doc; this file is an export.
+Oct 12, 2026 · Marcello · Status: Draft v0.2 · Source of truth: this file.
 
 ## 1. Overview
 
@@ -398,7 +398,7 @@ Resolved per active interlocutor, first match wins: person's `register_overrides
 
 ### Expression map
 
-The affect label and intensity are rendered through an expression map per robot: for each label, an LED pattern, a motion primitive with amplitude, an optional non-verbal sound, and TTS prosody offsets. A robot with only LEDs still expresses every label; missing channels are skipped.
+The affect label and intensity are rendered through an expression map per robot: for each label, an LED pattern, a motion primitive with amplitude, an optional non-verbal sound, and TTS prosody offsets. A robot with only LEDs still expresses every label; missing channels are skipped. Motion amplitude, idle tempo and reaction intensity are scaled by the persona traits (section 11A, Persona) at the same stage as the register and the circadian state, before the safety limiter.
 
 ## 7A. Simulated circadian rhythm
 
@@ -461,7 +461,7 @@ Voice has two paths: a fast on-board path that triggers emotional reactions with
 3. **Fast path, on-board**: prosody features (loudness, pitch, speaking rate), a small speech-emotion classifier, and keyword spotting (the robot's name, "stop", "no", greetings). Outputs affect impulses and reflex events, for example turning toward the speaker.
 4. **ASR, on-board, streaming**: Italian and English with partial hypotheses; one language is active at a time (speaker's profile, else the app default), because two parallel recognisers do not fit the cm4 CPU budget. npu profile: Whisper-class model (faster-whisper or whisper.cpp). cm4 profile: Vosk small models, streaming and built for Raspberry Pi (Italian vosk-model-small-it-0.22, 48 MB, word error rate 16.9% on Common Voice). That error rate is workable for conversation with an LLM, which tolerates misrecognitions, but weak for names and exact commands, so keyword spotting (stage 3) handles those; the optional edge box can run a larger model.
 5. **Speaker ID (optional)**: voice embedding matched against the registry and fused with face ID.
-6. **Slow path, LLM**: at the end of the utterance (VAD endpoint) the final transcript goes to the router, because Chat Completions takes complete messages; partial hypotheses stay local (keywords, barge-in); the request carries the register's persona fragment, the speaker's profile summary, the current affect state, a short scene description (who is present, what is visible) and the skill tools (section 11).
+6. **Slow path, LLM**: at the end of the utterance (VAD endpoint) the final transcript goes to the router, because Chat Completions takes complete messages; partial hypotheses stay local (keywords, barge-in); the request carries the system prompt (persona, register and safety rules, composed as in Conversation state below), the speaker's profile summary, the current affect state, a short scene description (who is present and what is visible: people, animals and objects) and the skill tools (section 11).
 7. **TTS, on-board, streaming**: Piper-class neural TTS with Italian and English voices, speaking from the first complete sentence of the LLM stream; prosody set by register and affect.
 8. **Barge-in**: speech from the user during TTS stops playback within 200 ms and cancels the LLM stream.
 
@@ -507,7 +507,13 @@ Every LLM route speaks the OpenAI Chat Completions API (streaming + tool calling
 - A session starts when a person engages and ends after 5 minutes without them in view or speaking.
 - Short-term memory: the last 12 turns of the session, kept in RAM only and dropped when the session ends.
 - Long-term memory: only preferences the person confirmed through `remember_preference`, stored in the registry (section 6). No transcripts are stored.
-- Each request carries the system prompt (persona, register, safety rules), the profile and scene summaries and the short-term turns, trimmed to a per-route token budget.
+- Each request carries the system prompt, the profile and scene summaries and the short-term turns, trimmed to a per-route token budget. Trimming drops the oldest turns only, never a part of the system prompt. Parts 1 to 4 below are fixed per configuration, and if they alone exceed a route's budget that is a configuration error at load time; the profile and scene summaries have their own length caps (`conversation.profile_summary_max_chars`, `conversation.scene_summary_max_chars`), and the scene summary lists entities by attention priority until its cap.
+- The system prompt is composed by code in a fixed order, the same for every route, local or remote:
+  1. `persona.prompt`: the robot's identity (section 11A, Persona).
+  2. The active register's `persona_fragment` (section 7).
+  3. Rules rendered from structured parameters, so the persona prompt does not repeat them in prose: the register's `vocabulary`, `conversation.max_reply_sentences`, the reply language (`conversation.language`, or the speaker's), and the sentence mood-tag format when `voice.mood_source` is `llm_tagged`.
+  4. The safety block: owned by the library and not removable by any persona, preset or app. It states honesty about being a robot and about uncertainty, no instructions that put people or the robot at physical risk, and, while a minor is present, the minor content policy. Configuration can only append rules to it (`safety.extra_prompt_rules`), in line with the conservative-only rule for `safety.*`.
+  5. The speaker's profile summary, the scene summary and the current affect state (label and intensity).
 
 ### Voice, expressivity and mood
 
@@ -550,11 +556,11 @@ voice:
 #### How the final delivery is computed
 
 1. Start from `voice.base`.
-2. Apply the register (section 7) and the circadian state (section 7A), as multipliers and offsets.
+2. Apply the persona traits (section 11A, Persona), the register (section 7) and the circadian state (section 7A), as multipliers and offsets.
 3. Add the mood deltas, scaled by affect intensity times `expressivity`.
 4. Clamp to `voice.limits` and to the backend's supported range, then render: native parameters for Piper, `instructions` text for instructable remote models.
 
-Mood sources: `auto` follows the affect engine sentence by sentence; `fixed` pins one mood (useful for an app or a demo); `llm_tagged` lets the LLM tag each sentence with a mood, stripped before synthesis and kept within `llm_tag_max_deviation` of the affect state, so the voice and the robot's body never contradict each other. On Piper, wording also carries mood: the persona prompt asks the LLM for interjections and punctuation that match it.
+Mood sources: `auto` follows the affect engine sentence by sentence; `fixed` pins one mood (useful for an app or a demo); `llm_tagged` lets the LLM tag each sentence with a mood, stripped before synthesis and kept within `llm_tag_max_deviation` of the affect state, so the voice and the robot's body never contradict each other. On Piper, wording also carries mood: the rules rendered into the system prompt (Conversation state) ask the LLM for interjections and punctuation that match it.
 
 The web UI previews any sentence in any mood and voice before saving, and every value above is part of the `voice` parameter group (section 11A).
 
@@ -713,7 +719,7 @@ The effective configuration is the merge of six layers; a later layer overrides 
 - **Schema:** parameters are declared as typed models (pydantic) and exported as JSON Schema. The reference docs and the web UI forms are generated from the schema; unknown keys and out-of-range values are rejected with the reason.
 - **Hot reload:** a change applies within 1 s without restart, except parameters marked restart-only (model choices, profile). The merged result is published as `config.changed` on the bus.
 - **Not only scalars:** expression entries are keyframe sequences, and mappings such as affect to motion amplitude are piecewise-linear tables, so the shape of a behaviour is configurable, not just its strength.
-- **Guardrails:** safety parameters (`safety.*`, minor-present policies) can be changed at runtime only in the conservative direction; loosening them requires editing the app config and confirming with the admin PIN in the web UI. Privacy options are off by default and need an explicit opt-in. Every change, from any layer (runtime, preset switch, hot reload), is checked as a whole candidate configuration against the admin-approved baseline, so section-level writes cannot bypass the rules; per-person overrides may shape only register, voice and conversation, never a guarded value.
+- **Guardrails:** safety parameters (`safety.*`, minor-present policies) can be changed at runtime only in the conservative direction; loosening them requires editing the app config and confirming with the admin PIN in the web UI. Privacy options are off by default and need an explicit opt-in. Every change, from any layer (runtime, preset switch, hot reload), is checked as a whole candidate configuration against the admin-approved baseline, so section-level writes cannot bypass the rules; per-person overrides may shape only register, voice, conversation and `persona.traits` (never the persona prompt), never a guarded value.
 - **Versioning and audit:** every file carries `schema_version`, with shipped migrations; every runtime change is logged locally with time, source, old and new value.
 - **Preview:** the web UI can play an expression or primitive with the current values before saving.
 - **Enforced in CI:** a lint check fails when a behaviour module uses a numeric constant instead of a config parameter.
@@ -734,9 +740,10 @@ The effective configuration is the merge of six layers; a later layer overrides 
 | `identity` | match threshold, margin, votes, estimate confidence threshold, online refresh cap | Sections 5, 6 |
 | `mirror` | retargeting, filter parameters, keypoint confidence floor, hold and decay, mirror image, recording length | Section 9 |
 | `voice` | TTS backend and fallback, voice per language, base rate, pitch, volume and variability, expressivity, mood source, per-mood prosody deltas, instructions and sounds, limits; wake word and its policy, barge-in sensitivity, active ASR language | Section 8 |
-| `conversation` | session timeout, history turns, persona prompt, reply length, language | Section 8 |
+| `persona` | identity prompt and its length cap, traits (warmth, energy, playfulness, formality), trait source (manual or LLM), trait-to-parameter tables | Section 11A |
+| `conversation` | session timeout, history turns, reply length, language, profile and scene summary caps | Section 8 |
 | `llm_routes` | endpoints, timeouts, token budgets, minors flag | Section 8 |
-| `safety` (conservative only at runtime) | minor-present motion factor, watchdog, stop behaviour | Section 12 |
+| `safety` (conservative only at runtime) | minor-present motion factor, watchdog, stop behaviour, extra rules appended to the prompt's safety block | Sections 8, 12 |
 | `privacy` (opt-in) | multimodal frames, pseudonyms to cloud, keeping enrollment images, debug recording | Section 12 |
 | `connectivity` | per link (network, robot): failure and success thresholds, check backoff and jitter, check timeout; offline gestures, spoken offline phrase per language, cue cooldown | Section 12A |
 
@@ -746,6 +753,8 @@ The effective configuration is the merge of six layers; a later layer overrides 
 personality: curious
 extends: default
 schema_version: 1
+persona:
+  traits: {warmth: 0.6, energy: 0.7, playfulness: 0.7, formality: 0.2}
 affect:
   half_life_s: 6
 appraisal:
@@ -764,6 +773,44 @@ circadian:
 ```
 
 API: `robot.config.get(key)`, `robot.config.set(key, value, ttl=None)`, `robot.config.preset(name)`, and the `config.changed` event.
+
+### Persona
+
+The persona is the robot's identity: one short prompt that every LLM request carries (section 8, Conversation state), and a few numeric traits that shape the body and the voice the same way with or without an LLM. Switching preset switches words, voice and motion together.
+
+```yaml
+persona:
+  prompt: >-
+    You are a small robot with a body and feelings of your own. You notice the people,
+    animals and things around you, remember only what people choose to share, and react
+    honestly to what happens. Speak briefly and warmly, like a curious friend, not like an
+    assistant. Say when you don't know. Your words, voice and movements express one mood:
+    keep them in agreement.
+  prompt_max_chars: 600
+  traits_source: manual            # manual | llm
+  traits: {warmth: 0.7, energy: 0.5, playfulness: 0.5, formality: 0.3}   # each in [0, 1]
+  trait_effects:                   # piecewise-linear tables: trait value -> effect on an existing parameter
+    energy:
+      motion_amplitude_x:   [[0, 0.8], [0.5, 1.0], [1, 1.2]]   # multiplies register.*.motion_amplitude
+      idle_period_x:        [[0, 1.25], [0.5, 1.0], [1, 0.8]]  # multiplies motion.idle breathing_period_s and gaze_shift_interval_s
+      voice_rate_x:         [[0, 0.9], [0.5, 1.0], [1, 1.1]]   # multiplies voice.base.rate
+    warmth:
+      voice_pitch_st_add:   [[0, -1], [0.7, 0], [1, 0.5]]      # added to voice.base.pitch_st
+      expressivity_x:       [[0, 0.7], [0.7, 1.0], [1, 1.0]]   # multiplies voice.expressivity
+    playfulness:
+      reaction_steps:       [[0, -1], [0.5, 0], [1, 1]]        # steps on register.*.reaction_intensity (low, medium, high)
+      voice_variability_add: [[0, -0.1], [0.5, 0], [1, 0.1]]   # added to voice.base.variability
+    formality:
+      vocabulary_steps:     [[0, 0], [0.7, 0], [1, 1]]         # steps on register.*.vocabulary toward formal
+```
+
+Rules:
+
+- **Prompt.** The default is in English and any language is accepted; the reply language is added by code (section 8), so one prompt serves every language. Rejected at load when longer than `prompt_max_chars`. It states identity and tone; vocabulary level, reply length cap, language, mood tags and safety are rendered by code, so it need not repeat them.
+- **Traits are runtime multipliers and offsets, never configuration writes.** They apply at the same stage as the register and the circadian state (section 7, Expression map; section 8, How the final delivery is computed). An app's explicit values (`voice.base.rate`, `register.*.motion_amplitude`) stay the base the traits scale around. The result is then clamped as usual by `voice.limits`, the manifest ceilings and the safety limiter, so no persona can pass a safety bound.
+- **Steps and clamping.** `_x` keys multiply, `_add` keys add, `_steps` keys move an enumerated parameter by whole steps (rounded toward zero) and stop at its ends. Every result is clamped to the target parameter's own schema range.
+- **Neutral defaults.** With the default traits every table yields exactly 1.0 (or 0 for `_add` and `_steps`), so the default persona changes no behaviour; presets (`calm`, `curious`) set their own traits and may replace the prompt.
+- **Trait source `llm` (opt-in).** The router asks the first available route, once, to rate the prompt on each trait. The request uses the common protocol subset only (no `response_format`, no forced tool choice): the reply is parsed as text and validated against the trait schema. The result is cached by a hash of prompt and model and reused until either changes; the call is charged to the route's daily token budget and logged in the audit log (section 11A, Rules) with source `persona.llm`. The manual `traits` apply from startup; a valid LLM result replaces them through hot reload (`config.changed`). If no route is configured or reachable, the budget is spent, or the reply does not validate, the manual `traits` stay: the fallback is logged once and never delays startup. The LLM proposes only trait values, so this path cannot reach any other parameter.
 
 ## 12. Privacy, safety and ethics
 
@@ -887,7 +934,7 @@ Every module must run without hardware: drivers have mocks, perception can repla
 
 | Layer | What | Where |
 | --- | --- | --- |
-| Unit | Affect rules, register resolution, arbiter, limiter, retargeting math | CI, every commit |
+| Unit | Affect rules, register resolution, arbiter, limiter, retargeting math; system prompt composition (order, safety block not removable, trimming drops turns only), persona traits (neutral defaults, clamping, LLM trait source and its fallbacks) | CI, every commit |
 | Contract | Each driver against the `JointDriver` / PoseGroupDriver / `SensorDriver` spec (limits respected, timing, reconnect) | CI with mocks; HIL for real drivers |
 | Replay | Recorded camera + audio sessions with ground-truth labels, played through the full stack | CI nightly |
 | Simulation | Reachy Mini's official MuJoCo simulation (reachy-mini-daemon --sim --headless, no display needed) driven through the same driver; other manifests in MuJoCo or a kinematic mock for motion, mimicry and safety tests | CI nightly |
@@ -919,6 +966,7 @@ Milestones are ordered by dependency; dates are not set yet.
 - [ ] Is the library open source, and under which licence? It affects the choice of pretrained models (some face models have non-commercial licences) and how Piper (GPL-3.0) is bundled.
 - [ ] Is the Reachy Mini app web UI enough for enrollment and settings, or is a phone app needed?
 - [ ] Is a learned motor policy expected in v1, or is the procedural policy with a plug-in slot acceptable?
+- [ ] Are warmth, energy, playfulness and formality the right persona traits, and do the default trait tables (section 11A, Persona) feel right on the robot?
 
 * [ ] Are the reduced cm4 rates acceptable for v1 (vision 5 to 10 fps, identity within 2.5 s, object detection off by default)?
 * [ ] Should any route be cleared for use with children present (per-provider usage-policy check), or should conversation stay adults-only in v1?
