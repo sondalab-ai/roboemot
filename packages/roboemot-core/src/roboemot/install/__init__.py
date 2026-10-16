@@ -46,6 +46,8 @@ ENTRY_POINT_GROUP = "roboemot.installers"
 MIN_FREE_MB = 300  # wheels plus numpy/scipy/openai if the target environment lacks them
 REMOTE_TMP_PREFIX = "/tmp/roboemot-install"
 TMP_DIR_PATTERN = re.compile(re.escape(REMOTE_TMP_PREFIX) + r"\.[A-Za-z0-9]+")
+PIN_FILE = "webui_pin.json"  # roboemot.webui.auth.PIN_FILE, inside the app data folder
+PIN_RETRIES = 3
 INSTALL_STEPS = 6
 UNINSTALL_STEPS = 6
 
@@ -259,6 +261,55 @@ def claim_data_dir(
     ui.ok(f"created the data folder {path} (registry and models live here)")
 
 
+def ask_new_pin(ui: Ui) -> str | None:
+    """Ask twice for the operator PIN on this PC (hidden); None when skipped or not interactive."""
+    from roboemot.config.schema import RoboEmotConfig
+    from roboemot.webui.auth import PinError, check_pin_format
+
+    rules = RoboEmotConfig().webui
+    for _ in range(PIN_RETRIES):
+        pin = ui.ask_secret(f"Operator PIN for the web UI ({rules.pin_min_length}+ digits)")
+        if pin is None:
+            return None
+        try:
+            check_pin_format(pin, rules)
+        except PinError as e:
+            ui.warn(f"PIN rejected: {e}")
+            continue
+        if ui.ask_secret("Repeat the PIN") == pin:
+            return pin
+        ui.warn("the two entries differ")
+    return None
+
+
+def set_operator_pin(ui: Ui, py: RemotePython, remote: Remote, dry_run: bool) -> None:
+    """Set the web UI operator PIN in the app data folder, piping it to the CLI over SSH stdin.
+
+    Runs after the data folder exists. The PIN is typed on the PC, travels only on the SSH
+    channel's standard input and appears in no command line, log or message; uninstall removes
+    it with the data folder. A dry run only says it would.
+    """
+    _, folder = remote_data_dir(remote)
+    path = posixpath.join(folder, PIN_FILE)
+    exists = _exists(remote, path)
+    if dry_run:
+        ui.info(f"would {'offer to replace' if exists else 'ask for'} the operator PIN ({path})")
+        return
+    if exists and not ui.confirm("An operator PIN is already set. Replace it?", False):
+        ui.ok("operator PIN kept")
+        return
+    pin = ask_new_pin(ui)
+    command = f"{shlex.quote(py.python)} -m roboemot.webui set-pin --data-dir {shlex.quote(folder)}"
+    if pin is None:
+        ui.warn(
+            "operator PIN not set; the web UI will not let anyone in. Set it later by running "
+            f"on the robot: {command}"
+        )
+        return
+    remote.run(command, stdin=pin + "\n")
+    ui.ok("operator PIN set")
+
+
 def checked_data_dir(remote: Remote, record: InstallRecord) -> tuple[str | None, str | None]:
     """The recorded data folder if it is safe to delete, else a reason.
 
@@ -454,6 +505,7 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
             record = install_packages(ui, platform, py, remote, dirs, wheels, opts.dry_run)
             if not opts.dry_run:
                 platform.verify(ui, py, dev)
+            set_operator_pin(ui, py, remote, opts.dry_run)
 
             ui.step("Start")
             if opts.dry_run:

@@ -146,7 +146,12 @@ def test_cli_rejects_a_weak_pin_and_takes_no_pin_argument(tmp_path, capsys):
 @pytest.fixture
 def api(tmp_path):
     cfg = RoboEmotConfig(
-        webui={"pin_max_attempts": 3, "pin_lockout_s": 60, "client_backoff_s": 1.0}
+        webui={
+            "pin_max_attempts": 3,
+            "loopback_max_attempts": 3,
+            "pin_lockout_s": 60,
+            "client_backoff_s": 1.0,
+        }
     )
     pins = PinStore(tmp_path)
     pins.set(PIN)
@@ -183,6 +188,49 @@ def test_global_budget_locks_every_remote_client_but_not_loopback(api):
     assert login(app, PIN, ip="127.0.0.1").status == 200
     clock.now += 61
     assert login(app, PIN, ip="10.0.0.99").status == 200
+
+
+def test_loopback_has_its_own_finite_budget_and_backs_off(api):
+    app, clock, _ = api
+    assert login(app, "000000", ip="127.0.0.1").status == 401
+    again = login(app, "000000", ip="127.0.0.1")  # backing off: doubles per failure
+    assert again.status == 429 and again.headers["Retry-After"] == "2"
+    for _ in range(2):
+        clock.now += 100
+        assert login(app, "000000", ip="127.0.0.1").status == 401
+    locked = login(app, PIN, ip="::1")  # three wrong PINs used the loopback budget
+    assert locked.status == 429 and locked.data == {"error": "locked"}
+    clock.now += 61 + 100
+    assert login(app, PIN, ip="127.0.0.1").status == 200
+
+
+def test_loopback_failures_do_not_lock_lan_clients(api):
+    app, clock, _ = api
+    for _ in range(3):
+        clock.now += 100
+        assert login(app, "000000", ip="127.0.0.1").status == 401
+    assert login(app, PIN, ip="127.0.0.1").status == 429  # loopback is locked
+    for n in range(2):  # the LAN budget (3) is untouched
+        assert login(app, PIN, ip=f"10.3.0.{n}").status == 200
+
+
+def test_lan_lockout_does_not_block_loopback(api):
+    app, clock, _ = api
+    for n in range(3):
+        assert login(app, "000000", ip=f"10.4.0.{n}").status == 401
+    assert login(app, PIN, ip="10.4.0.99").status == 429
+    assert login(app, PIN, ip="127.0.0.1").status == 200
+
+
+def test_new_pin_clears_a_loopback_lockout_too(api):
+    app, clock, pins = api
+    for _ in range(3):
+        clock.now += 100
+        login(app, "000000", ip="127.0.0.1")
+    assert login(app, PIN, ip="127.0.0.1").status == 429
+    time.sleep(0.01)
+    pins.set("135790")
+    assert login(app, "135790", ip="127.0.0.1").status == 200
 
 
 def test_new_pin_clears_a_lockout(api, tmp_path):
@@ -244,8 +292,8 @@ def test_one_hash_at_a_time(api, monkeypatch):
 
     monkeypatch.setattr(pins, "verify", slow)
     threads = [
-        threading.Thread(target=login, args=(app, PIN), kwargs={"ip": "127.0.0.1"})
-        for _ in range(6)
+        threading.Thread(target=login, args=(app, PIN), kwargs={"ip": f"10.2.0.{n}"})
+        for n in range(3)
     ]
     for t in threads:
         t.start()

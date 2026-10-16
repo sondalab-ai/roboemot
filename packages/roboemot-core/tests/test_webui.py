@@ -32,22 +32,30 @@ class FakeService:
         ]
         self.keys = ["badkey"]
         self.state = "collecting"
+        self.can_complete = False
         self.fail_forget: Exception | None = None
-        self.forget_result = True
+        self.known_ids = {"p1", "a1", "a2", "o1"}
 
     def start(self, session_id):
         self.calls.append(("start", len(session_id)))
 
     def status(self):
         # A hostile or sloppy service: extra fields must not reach the browser.
-        return SimpleNamespace(
-            state=self.state,
-            frames_collected=3,
-            frames_needed=8,
-            hints=["too_far", "<script>"],
-            crop=[0.1] * 128,
-            image=b"\xff\xd8",
-        )
+        return {
+            "session_id": "secret-session",
+            "state": self.state,
+            "reason": "/home/pollen/.local/share/roboemot",
+            "collected": 3,
+            "target": 8,
+            "minimum": 5,
+            "can_complete": self.can_complete,
+            "pose_varied": False,
+            "hint": "turn the head slightly left and right",
+            "face_visible": False,
+            "rejected": {"score": 1},
+            "crop": [0.1] * 128,
+            "image": b"\xff\xd8",
+        }
 
     def complete(self, name, consent, declared_age_group, declared_gender):
         if declared_age_group == "child" and consent.guardian == "Refused":
@@ -57,7 +65,7 @@ class FakeService:
     def cancel(self):
         self.calls.append(("cancel",))
 
-    def list(self):
+    def list_records(self):
         return list(self.rows)
 
     def rename(self, record_id, display_name):
@@ -69,15 +77,13 @@ class FakeService:
         self.calls.append(("merge", keep_id, drop_id))
 
     def delete(self, record_id):
-        self.calls.append(("delete", record_id))
-
-    def forget(self, person_id):
         if self.fail_forget:
             raise self.fail_forget
-        self.calls.append(("forget", person_id))
-        if person_id in self.keys:
-            self.keys.remove(person_id)
-        return self.forget_result
+        if record_id not in self.known_ids and record_id not in self.keys:
+            raise KeyError(record_id)
+        self.calls.append(("delete", record_id))
+        if record_id in self.keys:
+            self.keys.remove(record_id)
 
     def quarantined(self):
         return list(self.keys)
@@ -216,17 +222,20 @@ def test_login_sets_strict_httponly_cookie(client):
     assert client.request("GET", "/api/session").json["authenticated"] is True
 
 
-def test_loopback_is_never_locked_out(client):
-    for _ in range(10):
+def test_wrong_logins_from_the_host_itself_are_slowed_but_not_lost(client, clock):
+    for _ in range(5):
         assert client.login("000000").status == 401
+        clock.now += 100
     assert client.login(PIN).status == 200
 
 
-def test_success_resets_failure_count(client):
+def test_success_resets_failure_count(client, clock):
     assert client.login("000000").status == 401
+    clock.now += 100
     assert client.login("000000").status == 401
+    clock.now += 100
     assert client.login(PIN).status == 200
-    assert client.login("000000").status == 401
+    clock.now += 100
     assert client.login("000000").status == 401
 
 
@@ -411,9 +420,11 @@ def test_enrollment_status_is_whitelisted(authed):
         "state": "collecting",
         "frames_collected": 3,
         "frames_needed": 8,
-        "hints": ["too_far"],
+        "can_complete": False,
+        "hints": ["no_face", "turn_head"],
     }
-    assert b"image" not in resp.body and b"crop" not in resp.body
+    for leaked in (b"image", b"crop", b"secret-session", b".local/share", b"rejected"):
+        assert leaked not in resp.body
 
 
 def test_complete_builds_server_side_consent(authed, service):
@@ -553,26 +564,27 @@ def test_forget_needs_confirm_and_is_synchronous(authed, service):
     first = authed.request("POST", "/api/registry/p1/forget", {})
     assert first.status == 409
     assert first.json == {"error": "confirm_required"}
-    assert not any(c[0] == "forget" for c in service.calls)
+    assert not any(c[0] == "delete" for c in service.calls)
     assert authed.request("POST", "/api/registry/p1/forget", {"confirm": "true"}).status == 409
     done = authed.request("POST", "/api/registry/p1/forget", {"confirm": True, "pin": PIN})
     assert done.status == 200
-    assert service.calls[-1] == ("forget", "p1")
+    assert service.calls[-1] == ("delete", "p1")
 
 
-def test_forget_and_purge_ask_for_the_pin_again(authed, service):
+def test_forget_and_purge_ask_for_the_pin_again(authed, service, clock):
     forget = "/api/registry/p1/forget"
     assert authed.request("POST", forget, {"confirm": True}).status == 400
     assert authed.request("POST", forget, {"confirm": True, "pin": "000000"}).status == 401
     purge = "/api/registry/quarantined/purge"
     assert authed.request("POST", purge, {"key": "badkey", "confirm": True}).status == 400
+    clock.now += 100
     wrong = authed.request("POST", purge, {"key": "badkey", "confirm": True, "pin": "000000"})
     assert wrong.status == 401
-    assert not any(c[0] == "forget" for c in service.calls)
+    assert not any(c[0] == "delete" for c in service.calls)
 
 
-def test_forget_of_nothing_is_not_found(authed, service):
-    service.forget_result = False
+def test_forget_of_an_unknown_id_is_not_found(authed, service):
+    service.known_ids.discard("p1")
     resp = authed.request("POST", "/api/registry/p1/forget", {"confirm": True, "pin": PIN})
     assert resp.status == 404
 

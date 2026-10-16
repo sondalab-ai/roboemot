@@ -172,21 +172,34 @@ class _Client:
     blocked_until: float = 0.0
 
 
+@dataclass
+class _Pool:
+    """A guess budget: unrefunded attempts, and when the lockout it triggered ends."""
+
+    failures: int = 0
+    locked_until: float = 0.0
+
+
 class LoginLimiter:
-    """PIN guess limits: a global budget plus a per-client back-off; loopback is exempt.
+    """PIN guess limits: a global LAN budget plus a per-client back-off, and a loopback budget.
 
     ``reserve`` checks the limits and counts the attempt in one locked step, before the PIN is
     hashed, so parallel guesses cannot all slip under the budget; ``succeeded`` refunds it.
-    ``pin_max_attempts`` unrefunded attempts lock every non-loopback login for
-    ``pin_lockout_s``. Each client also waits ``client_backoff_s`` doubling per failure, so
-    one noisy address is slowed long before it exhausts the global budget for the owner.
-    A new PIN file (``sync``) or an app restart clears everything.
+    ``pin_max_attempts`` unrefunded LAN attempts lock every LAN login for ``pin_lockout_s``.
+    Each client also waits ``client_backoff_s`` doubling per failure, so one noisy address is
+    slowed long before it exhausts the global budget for the owner.
+
+    Loopback (another process on the robot's own host) has its own finite budget,
+    ``loopback_max_attempts``, with its own back-off and lockout. The two budgets are
+    independent: loopback failures never lock LAN clients and a LAN lockout never blocks
+    loopback. A new PIN file (``sync``) or an app restart clears everything.
     """
 
     def __init__(self, cfg: WebUIConfig, pin_version: int = 0) -> None:
         self.cfg = cfg
-        self._failures = 0
-        self._locked_until = 0.0
+        self._lan = _Pool()
+        self._local = _Pool()
+        self._local_client = _Client()
         self._clients: OrderedDict[str, _Client] = OrderedDict()
         self._version = pin_version
         self._lock = threading.Lock()
@@ -196,45 +209,55 @@ class LoginLimiter:
         with self._lock:
             if pin_version != self._version:
                 self._version = pin_version
-                self._failures = 0
-                self._locked_until = 0.0
+                self._lan, self._local = _Pool(), _Pool()
+                self._local_client = _Client()
                 self._clients.clear()
+
+    def _slot(self, ip: str) -> tuple[_Pool, _Client | None, int]:
+        """The pool, the client record (None if unknown) and the budget that apply to ``ip``."""
+        if ip in LOOPBACK:
+            return self._local, self._local_client, self.cfg.loopback_max_attempts
+        return self._lan, self._clients.get(ip), self.cfg.pin_max_attempts
 
     def reserve(self, ip: str, now: float) -> float:
         """0 if the attempt may go ahead (and is now counted), else seconds to wait."""
-        if ip in LOOPBACK:
-            return 0.0
         with self._lock:
-            wait = max(self._locked_until - now, 0.0)
-            client = self._clients.get(ip) or _Client()
-            wait = max(wait, client.blocked_until - now)
+            pool, client, budget = self._slot(ip)
+            client = client or _Client()
+            wait = max(pool.locked_until - now, client.blocked_until - now, 0.0)
             if wait > 0:
                 return wait
             client.failures += 1
             step = self.cfg.client_backoff_s * 2 ** (client.failures - 1)
             client.blocked_until = now + min(step, self.cfg.client_backoff_max_s)
-            self._clients[ip] = client
-            self._clients.move_to_end(ip)
-            while len(self._clients) > MAX_TRACKED_CLIENTS:
-                self._clients.popitem(last=False)
-            self._failures += 1
-            if self._failures >= self.cfg.pin_max_attempts:
-                self._locked_until = now + self.cfg.pin_lockout_s
-                self._failures = 0
+            if ip not in LOOPBACK:
+                self._clients[ip] = client
+                self._clients.move_to_end(ip)
+                while len(self._clients) > MAX_TRACKED_CLIENTS:
+                    self._clients.popitem(last=False)
+            pool.failures += 1
+            if pool.failures >= budget:
+                pool.locked_until = now + self.cfg.pin_lockout_s
+                pool.failures = 0
             return 0.0
 
     def succeeded(self, ip: str) -> None:
         """Refund the attempts of ``ip``: the PIN was right."""
         with self._lock:
-            client = self._clients.pop(ip, None)
-            if client is not None:
-                self._failures = max(self._failures - client.failures, 0)
+            pool, client, _ = self._slot(ip)
+            if client is None:
+                return
+            pool.failures = max(pool.failures - client.failures, 0)
+            if ip in LOOPBACK:
+                self._local_client = _Client()
+            else:
+                self._clients.pop(ip, None)
 
     def cancel(self, ip: str) -> None:
         """Refund the single attempt just reserved (it was never checked)."""
         with self._lock:
-            client = self._clients.get(ip)
+            pool, client, _ = self._slot(ip)
             if client is not None and client.failures > 0:
                 client.failures -= 1
                 client.blocked_until = 0.0
-                self._failures = max(self._failures - 1, 0)
+                pool.failures = max(pool.failures - 1, 0)

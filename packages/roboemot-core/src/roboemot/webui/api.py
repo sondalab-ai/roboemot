@@ -40,18 +40,18 @@ CSRF_HEADER = "x-csrf-token"
 VECTOR_GUARD_LEN = 32
 MAX_PIN_CHARS = 64
 ENROLLMENT_ID_BYTES = 8
-HINT_PATTERN = re.compile(r"[a-z_]{1,32}")
 STATE_PATTERN = re.compile(r"[a-z_]{1,32}")
 ENTITY_KINDS = frozenset({"animal", "object"})
 JSON_TYPE = "application/json; charset=utf-8"
 
 
 class EnrollmentPort(Protocol):
-    """What the web UI needs from the app's enrollment service (slice 6a, ``app.enrollment``).
+    """What the web UI needs from ``roboemot.registry.enrollment.EnrollmentService``.
 
-    ``status()`` returns a mapping or an object with ``state``, ``frames_collected``,
-    ``frames_needed`` and ``hints`` (short codes such as ``too_far``); the UI copies only those.
-    ``list()`` returns registry ``RecordSummary`` rows. ``forget`` also purges a quarantined key.
+    ``status()`` returns a mapping with ``state``, ``collected``, ``target``, ``can_complete``,
+    ``face_visible`` and ``hint``; the UI copies only those, as codes and counts. ``delete``
+    erases a person (``forget``), an animal, an object or a quarantined key; an unknown id
+    raises ``KeyError``.
     """
 
     def start(self, session_id: str) -> Any: ...
@@ -64,11 +64,10 @@ class EnrollmentPort(Protocol):
         declared_gender: str | None,
     ) -> Any: ...
     def cancel(self) -> Any: ...
-    def list(self) -> list[Any]: ...
+    def list_records(self) -> list[Any]: ...
     def rename(self, record_id: str, display_name: str) -> Any: ...
     def merge(self, keep_id: str, drop_id: str) -> Any: ...
     def delete(self, record_id: str) -> Any: ...
-    def forget(self, person_id: str) -> Any: ...
     def quarantined(self) -> list[str]: ...
 
 
@@ -277,7 +276,7 @@ class WebApi:
         )
 
     def _kind_of(self, rid: str) -> str:
-        for row in self.service.list():
+        for row in self.service.list_records():
             if row.id == rid:
                 return str(row.kind)
         raise ApiError(HTTPStatus.NOT_FOUND, "not_found")
@@ -355,24 +354,22 @@ class WebApi:
         return Response(HTTPStatus.OK, self._status_view())
 
     def _status_view(self) -> dict[str, Any]:
-        """Whitelisted status fields; anything else the service returns is dropped."""
+        """The enrollment status as counts, flags and hint codes; nothing else is copied."""
         raw = self.service.status()
-
-        def pick(key: str, default: Any) -> Any:
-            return raw.get(key, default) if isinstance(raw, dict) else getattr(raw, key, default)
-
-        state = pick("state", "idle")
-        collected, needed = pick("frames_collected", 0), pick("frames_needed", 0)
-        hints = pick("hints", [])
+        raw = raw if isinstance(raw, dict) else {}
+        state, collected, target = raw.get("state"), raw.get("collected"), raw.get("target")
+        state = str(state) if STATE_PATTERN.fullmatch(str(state)) else "idle"
+        hints = []
+        if state == "collecting" and raw.get("face_visible") is False:
+            hints.append("no_face")
+        if raw.get("hint"):
+            hints.append("turn_head")
         return {
-            "state": str(state) if STATE_PATTERN.fullmatch(str(state)) else "idle",
+            "state": state,
             "frames_collected": collected if isinstance(collected, int) else 0,
-            "frames_needed": needed if isinstance(needed, int) else 0,
-            "hints": [
-                h
-                for h in (hints if isinstance(hints, list | tuple) else [])
-                if isinstance(h, str) and HINT_PATTERN.fullmatch(h)
-            ],
+            "frames_needed": target if isinstance(target, int) else 0,
+            "can_complete": raw.get("can_complete") is True,
+            "hints": hints,
         }
 
     def _enroll_complete(self, req: Request) -> Response:
@@ -408,7 +405,7 @@ class WebApi:
                 "last_seen": None if r.last_seen is None else r.last_seen.isoformat(),
                 "age_group": getattr(r, "age_group", None),
             }
-            for r in self.service.list()
+            for r in self.service.list_records()
         ]
         return Response(HTTPStatus.OK, {"records": rows})
 
@@ -442,7 +439,7 @@ class WebApi:
         if not v.confirmed(body):
             raise ApiError(HTTPStatus.CONFLICT, "confirm_required")
         self._check_pin(req, body.get("pin"))
-        self._erase(self.service.forget, rid)
+        self._erase(self.service.delete, rid)
         return Response(HTTPStatus.OK, {"ok": True})
 
     def _delete(self, req: Request, rid: str) -> Response:
@@ -467,7 +464,7 @@ class WebApi:
         if not v.confirmed(body):
             raise ApiError(HTTPStatus.CONFLICT, "confirm_required")
         self._check_pin(req, body.get("pin"))
-        self._erase(self.service.forget, key)
+        self._erase(self.service.delete, key)
         return Response(HTTPStatus.OK, {"ok": True})
 
     def _call(self, fn: Callable[..., Any], *args: Any) -> Any:
@@ -482,6 +479,8 @@ class WebApi:
         """Synchronous erasure; a partial failure is reported so the operator retries."""
         try:
             found = fn(key)
+        except KeyError as exc:
+            raise ApiError(HTTPStatus.NOT_FOUND, "not_found") from exc
         except Exception as exc:
             log.error("erasure incomplete: %s", type(exc).__name__)
             raise ApiError(HTTPStatus.INTERNAL_SERVER_ERROR, "forget_incomplete") from exc

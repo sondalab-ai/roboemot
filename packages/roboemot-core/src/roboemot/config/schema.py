@@ -1192,6 +1192,13 @@ class WebUIConfig(Strict):
         le=86400,
         conservative="lower",
     )
+    loopback_max_attempts: int = param(
+        20,
+        "Wrong PINs from this host itself before its own lockout (separate from the LAN budget)",
+        ge=1,
+        le=1000,
+        conservative="lower",
+    )
     client_backoff_s: float = param(
         1.0,
         "Wait after a client's first wrong PIN; doubles with every further one",

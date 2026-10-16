@@ -22,6 +22,8 @@ SITE = "/venvs/apps_venv/lib/python3.12/site-packages"
 OWN = {"roboemot-core": "0.1.0.dev0", "roboemot-reachymini": "0.1.0.dev0"}
 HOME = "/home/pollen"
 DATA = f"{HOME}/.local/share/roboemot"
+PIN_PATH = f"{DATA}/webui_pin.json"
+PIN = "246810"
 
 
 # ---------------------------------------------------------------- fakes
@@ -43,6 +45,7 @@ class FakeRobot:
         self.commands: list[str] = []
         self.copies: list[list[Path]] = []
         self.fail_install = False
+        self.stdins: list[str | None] = []
         self.dirs: set[str] = {HOME}  # folders that exist (data folder emulation)
         self.symlinks: dict[str, str] = {}  # path -> where realpath says it really is
         self.env_data_dir = ""  # ROBOEMOT_DATA_DIR in the SSH user's environment
@@ -60,8 +63,12 @@ class FakeRobot:
         assert dest in self.tmp_dirs
         self.copies.append(files)
 
-    def run(self, command: str, check: bool = True) -> str:
+    def run(self, command: str, check: bool = True, stdin: str | None = None) -> str:
         self.commands.append(command)
+        if "-m roboemot.webui set-pin" in command:
+            self.stdins.append(stdin)
+            self.dirs.add(PIN_PATH)
+            return ""
         if " -m pip " in command:
             out, rc = self._pip(command)
             return f"{out}\n__rc={rc}"
@@ -818,3 +825,62 @@ def test_daemon_api_against_simulator():
     assert real.startup_app() is None
     with pytest.raises(WizardError, match="HTTP 400"):
         real.set_startup_app("roboemot-not-installed")
+
+
+# ---------------------------------------------------------------- operator PIN
+
+
+def test_install_pipes_the_pin_over_stdin_never_in_a_command(offline, robot, monkeypatch):
+    monkeypatch.setattr(Ui, "ask_secret", lambda self, question: PIN)
+    install()
+    assert robot.stdins == [PIN + "\n"]
+    assert PIN_PATH in robot.dirs
+    assert not any(PIN in c for c in robot.commands)
+    assert any(f"--data-dir {DATA}" in c for c in robot.commands)
+
+
+def test_pin_is_set_after_the_data_folder_exists(offline, robot, monkeypatch):
+    monkeypatch.setattr(Ui, "ask_secret", lambda self, question: PIN)
+    seen = []
+    real = robot.run
+
+    def spy(command, check=True, stdin=None):
+        if "set-pin" in command:
+            seen.append(DATA in robot.dirs)
+        return real(command, check, stdin)
+
+    monkeypatch.setattr(robot, "run", spy)
+    install()
+    assert seen == [True]
+
+
+def test_install_without_a_terminal_skips_the_pin_and_says_how(offline, robot, capsys):
+    install()
+    assert robot.stdins == [] and PIN_PATH not in robot.dirs
+    assert "roboemot.webui set-pin" in capsys.readouterr().out
+
+
+def test_install_dry_run_only_says_it_would_set_the_pin(offline, robot, monkeypatch, capsys):
+    monkeypatch.setattr(Ui, "ask_secret", lambda self, question: PIN)
+    inst.run_install(options(dry_run=True), quiet_ui(yes=True), ROOT)
+    assert robot.stdins == [] and PIN_PATH not in robot.dirs
+    assert "would ask for the operator PIN" in capsys.readouterr().out
+
+
+def test_install_rejects_a_weak_pin_then_accepts_a_good_one(offline, robot, monkeypatch):
+    answers = iter(["12", PIN, PIN])
+    monkeypatch.setattr(Ui, "ask_secret", lambda self, question: next(answers))
+    install()
+    assert robot.stdins == [PIN + "\n"]
+
+
+def test_uninstall_leaves_no_pin_file_with_the_data_folder_gone(
+    offline, robot, daemon, monkeypatch
+):
+    before = snapshot(robot, daemon)
+    monkeypatch.setattr(Ui, "ask_secret", lambda self, question: PIN)
+    install()
+    assert PIN_PATH in robot.dirs
+    uninstall()
+    assert PIN_PATH not in robot.dirs and DATA not in robot.dirs
+    assert snapshot(robot, daemon) == before

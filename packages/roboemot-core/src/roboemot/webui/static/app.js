@@ -1,7 +1,7 @@
 "use strict";
 // RoboEmot web UI. All text goes through textContent: names from the registry are never HTML.
 
-const state = { strings: {}, csrf: null, session: {}, tab: "enroll", timer: null };
+const state = { strings: {}, csrf: null, session: {}, tab: "enroll", timer: null, form: null };
 
 const t = (key, vars) => {
   let text = state.strings[key] || key;
@@ -110,7 +110,7 @@ function enrollmentView() {
     try {
       const s = await api("GET", "/api/enrollment/status");
       renderEnrollment(box, s);
-      if (state.tab === "enroll" && s.state === "collecting") {
+      if (state.tab === "enroll" && ["collecting", "ready"].includes(s.state)) {
         state.timer = setTimeout(poll, state.session.status_poll_ms || 1000);
       }
     } catch (err) {
@@ -126,7 +126,7 @@ function renderEnrollment(box, s) {
   box.replaceChildren(el("h2", {}, t("tab_enroll")), el("p", { class: "muted" }, t("enroll_intro")));
   const stateKey = "state_" + s.state;
   box.append(el("p", {}, t("state") + ": " + (state.strings[stateKey] || s.state)));
-  if (s.state === "idle" || s.state === "done" || s.state === "failed") {
+  if (!["collecting", "ready", "completing"].includes(s.state)) {
     box.append(el("button", {
       class: "primary", type: "button",
       onclick: () => guarded(async () => { await api("POST", "/api/enrollment/start", {}); await state.refresh(); }),
@@ -141,7 +141,12 @@ function renderEnrollment(box, s) {
   if (s.hints.length) {
     box.append(el("ul", {}, s.hints.map((h) => el("li", {}, state.strings["hint_" + h] || h))));
   }
-  if (s.state === "ready" || (s.frames_needed > 0 && s.frames_collected >= s.frames_needed)) box.append(consentForm());
+  if (s.can_complete) {
+    state.form = state.form || consentForm();
+    box.append(state.form);
+  } else {
+    state.form = null;
+  }
   box.append(el("p", {}, el("button", {
     type: "button",
     onclick: () => guarded(async () => { await api("POST", "/api/enrollment/cancel", {}); await state.refresh(); }),
