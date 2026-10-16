@@ -253,22 +253,29 @@ def _file(root: Path, name: str, index: int = 0) -> Path:
 
 
 def load_stages(
-    root: Path, cfg: VisionConfig, *, attributes: bool = True, appearance: bool = True
+    root: Path,
+    cfg: VisionConfig,
+    *,
+    profile: str | None = None,
+    attributes: bool = True,
+    appearance: bool = True,
 ) -> Stages:
     """Load the backends from ``root``; the ViTs and DINOv2 can be left out.
 
     Every file must carry a valid ``.verified`` marker (``roboemot models fetch`` writes it);
     otherwise ``ModelError`` names the file. Frame-path sessions use ``vision.threads`` CPU
     threads, the age and gender sessions ``vision.attribute_threads`` (SPEC 13: two cores are
-    shared by vision, audio and core). ``vision.attribute_precision`` picks the INT8 files
-    (default) or the 343 MB FP32 files of the age and gender models. Sets the OpenCV and ONNX
+    shared by vision, audio and core). ``vision.attribute_precision`` picks the INT8 files or the
+    343 MB FP32 files of the age and gender models; ``auto`` follows ``profile``, the robot
+    manifest's profile (``cm4`` gives INT8, anything else FP32). Sets the OpenCV and ONNX
     Runtime globals once.
     """
     configure(cfg.threads)
     specs = models.load_manifest()
     estimator = None
     if attributes:
-        suffix = "-int8" if cfg.attribute_precision == "int8" else ""
+        precision = models.resolve_precision(cfg.attribute_precision, profile)
+        suffix = "-int8" if precision == "int8" else ""
         age_name, gender_name = f"fairface-age{suffix}", f"fairface-gender{suffix}"
         age, gender = specs[age_name], specs[gender_name]
         if age.labels is None or gender.labels is None:

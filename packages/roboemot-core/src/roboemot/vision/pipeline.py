@@ -140,13 +140,8 @@ class VisionPipeline:
         ids = itertools.count(1)
         self.face_tracker = Tracker(cfg.tracker, ids)
         self.object_tracker = Tracker(cfg.tracker, ids)
-        # The job aggregates the crops it gets: with fewer crops than estimate_frames_min
-        # configured, the threshold follows attribute_crops (the 0.8 rule still applies).
-        job_identity = identity.model_copy(
-            update={"estimate_frames_min": min(identity.estimate_frames_min, cfg.attribute_crops)}
-        )
         self.worker = (
-            AttributeWorker(attribute_estimator, job_identity, cfg.attribute_queue_max, executor)
+            AttributeWorker(attribute_estimator, identity, cfg.attribute_queue_max, executor)
             if attribute_estimator is not None
             else None
         )

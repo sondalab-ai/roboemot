@@ -349,8 +349,8 @@ def test_attribute_job_runs_once_per_track_on_n_crops(tmp_path):
     assert late.gender == "female" and late.attributes_stamp is not None
 
 
-@pytest.mark.parametrize("crops", [1, 3, 5])
-def test_attribute_crops_sets_the_crops_per_track_and_the_estimate_threshold(tmp_path, crops):
+@pytest.mark.parametrize("crops", [3, 5])
+def test_attribute_crops_sets_the_crops_per_track(tmp_path, crops):
     vision = CFG.vision.model_copy(update={"attribute_crops": crops})
     est, ex = CountingEstimator(), CountingExecutor()
     _, _, pipe, _, got = rig(
@@ -358,48 +358,71 @@ def test_attribute_crops_sets_the_crops_per_track_and_the_estimate_threshold(tmp
     )
     run(pipe, 60)
     assert ex.jobs == 1 and len(est.crops) == crops
-    assert pipe.worker.config.estimate_frames_min == min(CFG.identity.estimate_frames_min, crops)
+    assert pipe.worker.config is pipe.identity
     late = got["percept.face"][-1].payload
     assert (late.age_group, late.gender) == ("adult", "female")
 
 
-def test_single_crop_still_applies_the_confidence_rule(tmp_path):
-    vision = CFG.vision.model_copy(update={"attribute_crops": 1})
-    _, _, pipe, _, got = rig(
-        tmp_path,
-        lambda i: [face(100)],
-        estimator=CountingEstimator(conf=0.5),
-        vision=vision,
-    )
-    run(pipe, 40)
-    last = got["percept.face"][-1].payload
-    assert last.age_group == "unknown" and last.possible_minor
-
-
-def test_more_crops_than_estimate_frames_min_keeps_the_configured_minimum(tmp_path):
-    identity = CFG.identity.model_copy(update={"estimate_frames_min": 2})
-    vision = CFG.vision.model_copy(update={"attribute_crops": 6})
-    est = CountingEstimator()
-    _, _, pipe, _, _ = rig(tmp_path, lambda i: [face(100)], estimator=est, vision=vision)
-    assert pipe.worker.config.estimate_frames_min == CFG.identity.estimate_frames_min
-    again = VisionPipeline(
-        vision,
-        identity,
+def test_single_crop_with_frames_min_one_gives_a_confident_value(tmp_path):
+    cfg = RoboEmotConfig(vision={"attribute_crops": 1}, identity={"estimate_frames_min": 1})
+    est, ex = CountingEstimator(conf=0.9), CountingExecutor()
+    reg = registry(tmp_path)
+    pipe = VisionPipeline(
+        cfg.vision,
+        cfg.identity,
         Bus(),
-        Matcher(registry(tmp_path / "b"), identity),
-        face_detector=ScriptedDetector(lambda i: []),
+        Matcher(reg, cfg.identity),
+        face_detector=ScriptedDetector(lambda i: [face(100)]),
         face_embedder=FixedFaceEmbedder(axis(0)),
         attribute_estimator=est,
+        executor=ex,
+    )
+    got = []
+    pipe.bus.subscribe("percept.face", got.append)
+    run(pipe, 20)
+    assert ex.jobs == 1 and len(est.crops) == 1
+    last = got[-1].payload
+    assert (last.age_group, last.gender, last.possible_minor) == ("adult", "female", False)
+
+
+def test_single_crop_still_applies_the_confidence_rule(tmp_path):
+    cfg = RoboEmotConfig(vision={"attribute_crops": 1}, identity={"estimate_frames_min": 1})
+    pipe = VisionPipeline(
+        cfg.vision,
+        cfg.identity,
+        Bus(),
+        Matcher(registry(tmp_path), cfg.identity),
+        face_detector=ScriptedDetector(lambda i: [face(100)]),
+        face_embedder=FixedFaceEmbedder(axis(0)),
+        attribute_estimator=CountingEstimator(conf=0.5),
         executor=InlineExecutor(),
     )
-    assert again.worker.config.estimate_frames_min == 2
+    got = []
+    pipe.bus.subscribe("percept.face", got.append)
+    run(pipe, 20)
+    assert got[-1].payload.age_group == "unknown" and got[-1].payload.possible_minor
 
 
-def test_attribute_crops_range_is_validated():
-    assert CFG.vision.attribute_crops == 3
+def test_track_shorter_than_the_crops_needed_runs_no_job(tmp_path):
+    est, ex = CountingEstimator(), CountingExecutor()
+    _, _, pipe, _, got = rig(
+        tmp_path, lambda i: [face(100)] if i < 3 else [], estimator=est, executor=ex
+    )
+    run(pipe, 60)
+    assert ex.jobs == 0 and est.crops == []
+    assert all(m.payload.age_group == "unknown" for m in got["percept.face"])
+
+
+def test_attribute_crops_and_frames_min_validation():
+    assert CFG.vision.attribute_crops == 3 and CFG.identity.estimate_frames_min == 3
     for bad in (0, 11):
         with pytest.raises(ValueError):
             RoboEmotConfig(vision={"attribute_crops": bad})
+    with pytest.raises(ValueError, match="attribute_crops must be at least"):
+        RoboEmotConfig(vision={"attribute_crops": 2})
+    with pytest.raises(ValueError, match="attribute_crops must be at least"):
+        RoboEmotConfig(identity={"estimate_frames_min": 5})
+    RoboEmotConfig(vision={"attribute_crops": 5}, identity={"estimate_frames_min": 5})
 
 
 def test_second_track_gets_its_own_job(tmp_path):

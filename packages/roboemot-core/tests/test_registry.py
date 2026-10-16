@@ -876,7 +876,7 @@ def test_age_estimate_is_the_median_over_enough_frames():
 
 def test_estimate_below_frame_or_confidence_floor_is_unknown_and_possibly_minor():
     cfg = IdentityConfig()
-    few = estimate_age_group([("adult", 0.99)] * 4, cfg)
+    few = estimate_age_group([("adult", 0.99)] * (cfg.estimate_frames_min - 1), cfg)
     weak = estimate_age_group([("adult", 0.5)] * 6, cfg)
     for est in (few, weak):
         assert est.value == "unknown" and est.source == "none" and est.possible_minor
