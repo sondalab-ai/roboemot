@@ -1,0 +1,130 @@
+{
+ "machine": "Apple M3 Pro, 12 logical cores, Darwin 25.6.0",
+ "protocol": {
+  "camera_hz": 30.0,
+  "definition": "first camera frame showing the person to person.recognized, seconds",
+  "enrolled": 10,
+  "identity": {
+   "votes_required": 3,
+   "votes_window": 5
+  },
+  "photo_period_s": 0.2,
+  "trials_per_scenario": 20,
+  "vision": {
+   "burst_min_gap_s": 0.25,
+   "embedding_burst": 5,
+   "max_embeds_per_frame": 2
+  }
+ },
+ "scenarios": [
+  {
+   "age_gender_available": {
+    "n": 0
+   },
+   "decisions": {
+    "max": 1.3056255000046804,
+    "n": 20,
+    "p50": 1.2851072910052608,
+    "p95": 1.3047595000025467
+   },
+   "detection_hz": 5.0,
+   "first_percept": {
+    "max": 0.4219328340041102,
+    "n": 21,
+    "p50": 0.40346483300527325,
+    "p95": 0.4160460420025629
+   },
+   "no_decision_within_window": 0,
+   "people": 1,
+   "scenario": "one_person_5hz",
+   "threads": {
+    "attribute": 2,
+    "frame_path": 2
+   }
+  },
+  {
+   "age_gender_available": {
+    "n": 0
+   },
+   "decisions": {
+    "max": 0.859669458004646,
+    "n": 20,
+    "p50": 0.8437888749976992,
+    "p95": 0.858514583997021
+   },
+   "detection_hz": 8.0,
+   "first_percept": {
+    "max": 0.4069462920015212,
+    "n": 27,
+    "p50": 0.2561427500040736,
+    "p95": 0.4011284579974017
+   },
+   "no_decision_within_window": 0,
+   "people": 1,
+   "scenario": "one_person_8hz",
+   "threads": {
+    "attribute": 2,
+    "frame_path": 2
+   }
+  },
+  {
+   "age_gender_available": {
+    "n": 0
+   },
+   "decisions": {
+    "max": 1.1588581670002895,
+    "n": 60,
+    "p50": 0.859735375001037,
+    "p95": 1.005273249997117
+   },
+   "detection_hz": 8.0,
+   "first_percept": {
+    "max": 1.0122308749996591,
+    "n": 83,
+    "p50": 0.2625528749995283,
+    "p95": 1.0068350829969859
+   },
+   "no_decision_within_window": 0,
+   "people": 3,
+   "scenario": "three_people_8hz_burst",
+   "threads": {
+    "attribute": 2,
+    "frame_path": 2
+   }
+  },
+  {
+   "age_gender_available": {
+    "max": 2.0535809580032947,
+    "n": 17,
+    "p50": 2.0179976660001557,
+    "p95": 2.0435687080025673
+   },
+   "decisions": {
+    "max": 0.8878602499971748,
+    "n": 20,
+    "p50": 0.8624562910044915,
+    "p95": 0.8761870830057887
+   },
+   "detection_hz": 8.0,
+   "first_percept": {
+    "max": 5.7759104580036364,
+    "n": 38,
+    "p50": 0.27777749999950174,
+    "p95": 3.223783875000663
+   },
+   "no_decision_within_window": 0,
+   "people": 1,
+   "scenario": "one_person_8hz_with_age_gender_job_1+1_threads",
+   "threads": {
+    "attribute": 1,
+    "frame_path": 1
+   }
+  }
+ ],
+ "versions": {
+  "numpy": "2.5.4",
+  "onnxruntime": "1.31.0",
+  "opencv": "5.0.0",
+  "python": "3.13.13"
+ }
+}

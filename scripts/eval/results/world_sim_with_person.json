@@ -1,0 +1,248 @@
+{
+ "all_faded_runs": 5,
+ "extra_entries": 0,
+ "fade_reference_one_observation_s": {
+  "in_view": {
+   "animal": 700.0,
+   "object": 4180.0,
+   "person": 280.0
+  },
+  "out_of_view": {
+   "animal": 3465.0,
+   "object": 20880.0,
+   "person": 1375.0
+  }
+ },
+ "machine": "Apple M3 Pro, 12 logical cores, Darwin 25.6.0",
+ "passed": 5,
+ "per_run": [
+  {
+   "all_faded": true,
+   "bearing_error_deg": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "extra_entries": 0,
+   "fade": [
+    {
+     "in_view_at_end": false,
+     "kind": "person",
+     "seconds_to_forget": 1355.0
+    },
+    {
+     "in_view_at_end": false,
+     "kind": "animal",
+     "seconds_to_forget": 4980.0
+    },
+    {
+     "in_view_at_end": true,
+     "kind": "object",
+     "seconds_to_forget": 5980.0
+    },
+    {
+     "in_view_at_end": false,
+     "kind": "object",
+     "seconds_to_forget": 29885.0
+    }
+   ],
+   "found_after_first_sweep": 4,
+   "found_within_gate": 4,
+   "home_yaw_deg": 143.70413198766394,
+   "pass": true,
+   "planted": 4,
+   "seed": 100,
+   "sweep_finished": true,
+   "sweep_wall_s": 25.5333068750042,
+   "sweeps": 1
+  },
+  {
+   "all_faded": true,
+   "bearing_error_deg": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "extra_entries": 0,
+   "fade": [
+    {
+     "in_view_at_end": false,
+     "kind": "person",
+     "seconds_to_forget": 1355.0
+    },
+    {
+     "in_view_at_end": false,
+     "kind": "animal",
+     "seconds_to_forget": 4970.0
+    },
+    {
+     "in_view_at_end": true,
+     "kind": "object",
+     "seconds_to_forget": 5980.0
+    },
+    {
+     "in_view_at_end": false,
+     "kind": "object",
+     "seconds_to_forget": 29890.0
+    }
+   ],
+   "found_after_first_sweep": 4,
+   "found_within_gate": 4,
+   "home_yaw_deg": 52.50403327150211,
+   "pass": true,
+   "planted": 4,
+   "seed": 101,
+   "sweep_finished": true,
+   "sweep_wall_s": 28.220714916998986,
+   "sweeps": 1
+  },
+  {
+   "all_faded": true,
+   "bearing_error_deg": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "extra_entries": 0,
+   "fade": [
+    {
+     "in_view_at_end": false,
+     "kind": "person",
+     "seconds_to_forget": 1355.0
+    },
+    {
+     "in_view_at_end": false,
+     "kind": "animal",
+     "seconds_to_forget": 4975.0
+    },
+    {
+     "in_view_at_end": true,
+     "kind": "object",
+     "seconds_to_forget": 5985.0
+    },
+    {
+     "in_view_at_end": false,
+     "kind": "object",
+     "seconds_to_forget": 29885.0
+    }
+   ],
+   "found_after_first_sweep": 4,
+   "found_within_gate": 4,
+   "home_yaw_deg": 87.14695626573473,
+   "pass": true,
+   "planted": 4,
+   "seed": 102,
+   "sweep_finished": true,
+   "sweep_wall_s": 23.005080792005174,
+   "sweeps": 1
+  },
+  {
+   "all_faded": true,
+   "bearing_error_deg": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "extra_entries": 0,
+   "fade": [
+    {
+     "in_view_at_end": false,
+     "kind": "person",
+     "seconds_to_forget": 1905.0
+    },
+    {
+     "in_view_at_end": false,
+     "kind": "animal",
+     "seconds_to_forget": 4980.0
+    },
+    {
+     "in_view_at_end": false,
+     "kind": "object",
+     "seconds_to_forget": 29880.0
+    },
+    {
+     "in_view_at_end": false,
+     "kind": "object",
+     "seconds_to_forget": 29890.0
+    }
+   ],
+   "found_after_first_sweep": 2,
+   "found_within_gate": 4,
+   "home_yaw_deg": 0.014795716986600814,
+   "pass": true,
+   "planted": 4,
+   "seed": 103,
+   "sweep_finished": true,
+   "sweep_wall_s": 53.7876295840033,
+   "sweeps": 2
+  },
+  {
+   "all_faded": true,
+   "bearing_error_deg": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "extra_entries": 0,
+   "fade": [
+    {
+     "in_view_at_end": false,
+     "kind": "person",
+     "seconds_to_forget": 1900.0
+    },
+    {
+     "in_view_at_end": false,
+     "kind": "animal",
+     "seconds_to_forget": 4980.0
+    },
+    {
+     "in_view_at_end": false,
+     "kind": "object",
+     "seconds_to_forget": 29880.0
+    },
+    {
+     "in_view_at_end": false,
+     "kind": "object",
+     "seconds_to_forget": 29890.0
+    }
+   ],
+   "found_after_first_sweep": 2,
+   "found_within_gate": 4,
+   "home_yaw_deg": 0.017474297657196807,
+   "pass": true,
+   "planted": 4,
+   "seed": 104,
+   "sweep_finished": true,
+   "sweep_wall_s": 55.542412374998094,
+   "sweeps": 2
+  }
+ ],
+ "planted_per_run": [
+  "person:person",
+  "animal:cat",
+  "object:cup",
+  "object:book"
+ ],
+ "protocol": {
+  "detector": "stand-in at the observation level (no images, no ONNX)",
+  "fade": "world clock advanced in 5 s steps (virtual time), limit 48 h",
+  "gate_deg": 15.0,
+  "min_off_home_deg": 50.0,
+  "min_separation_deg": 45.0,
+  "simulation": "MuJoCo Reachy Mini daemon, headless; the fallback dynamics are slow"
+ },
+ "runs": 5,
+ "set": "with_person",
+ "sweep_wall_s": {
+  "max": 55.542412374998094,
+  "min": 23.005080792005174
+ },
+ "sweeps_finished": 5,
+ "things_found_within_gate": 20,
+ "things_planted": 20
+}

@@ -1,0 +1,128 @@
+{
+ "machine": "Apple M3 Pro, 12 logical cores, Darwin 25.6.0",
+ "per_category": {
+  "coffee maker": {
+   "attached_to_the_wrong_individual": 0,
+   "candidate_clusters_left": 1052,
+   "duplicate_records_of_one_individual": 0,
+   "individuals_in_stream": 200,
+   "individuals_seen": 200,
+   "individuals_with_a_record": 0,
+   "records_created": 0,
+   "records_mixing_individuals": 0,
+   "records_pure": 0,
+   "sightings": 1137,
+   "sightings_attached_to_a_record": 0,
+   "streams": 10
+  },
+  "kettle": {
+   "attached_to_the_wrong_individual": 0,
+   "candidate_clusters_left": 903,
+   "duplicate_records_of_one_individual": 0,
+   "individuals_in_stream": 200,
+   "individuals_seen": 200,
+   "individuals_with_a_record": 1,
+   "records_created": 1,
+   "records_mixing_individuals": 0,
+   "records_pure": 1,
+   "sightings": 1137,
+   "sightings_attached_to_a_record": 1,
+   "streams": 10
+  },
+  "mug": {
+   "attached_to_the_wrong_individual": 0,
+   "candidate_clusters_left": 876,
+   "duplicate_records_of_one_individual": 0,
+   "individuals_in_stream": 200,
+   "individuals_seen": 200,
+   "individuals_with_a_record": 7,
+   "records_created": 7,
+   "records_mixing_individuals": 0,
+   "records_pure": 7,
+   "sightings": 1137,
+   "sightings_attached_to_a_record": 8,
+   "streams": 10
+  },
+  "stapler": {
+   "attached_to_the_wrong_individual": 0,
+   "candidate_clusters_left": 1001,
+   "duplicate_records_of_one_individual": 0,
+   "individuals_in_stream": 200,
+   "individuals_seen": 200,
+   "individuals_with_a_record": 1,
+   "records_created": 1,
+   "records_mixing_individuals": 0,
+   "records_pure": 1,
+   "sightings": 1137,
+   "sightings_attached_to_a_record": 1,
+   "streams": 10
+  },
+  "toaster": {
+   "attached_to_the_wrong_individual": 0,
+   "candidate_clusters_left": 1025,
+   "duplicate_records_of_one_individual": 0,
+   "individuals_in_stream": 200,
+   "individuals_seen": 200,
+   "individuals_with_a_record": 0,
+   "records_created": 0,
+   "records_mixing_individuals": 0,
+   "records_pure": 0,
+   "sightings": 1137,
+   "sightings_attached_to_a_record": 0,
+   "streams": 10
+  }
+ },
+ "protocol": {
+  "autoenroll_config": {
+   "enabled": true,
+   "join_radius": 0.125,
+   "kinds": [
+    "animal",
+    "object"
+   ],
+   "known_match_threshold": 0.875,
+   "max_clusters": 200,
+   "max_members": 30,
+   "max_spread": 0.25,
+   "max_tracked_entries": 512,
+   "min_days": 3,
+   "min_sightings": 5,
+   "persist_interval_s": 60.0,
+   "retention_days": 30,
+   "sighting_min_interval_s": 300.0
+  },
+  "dataset": "sop_household",
+  "days_note": "dogs: days are simulated; the dataset's capture sequences are not used",
+  "days_per_stream": 6,
+  "embedder": "DINOv2-S (shipped DinoV2Embedder, whole photo as the box)",
+  "enroller": "roboemot.world.autoenroll.AutoEnroller with the shipped defaults",
+  "images_per_individual_cap": "all for dogs; 6 for products",
+  "individuals_per_stream": 20,
+  "presence_probability_per_day": 0.8,
+  "sightings_per_individual_per_day": [
+   1,
+   2
+  ],
+  "streams_per_category": 10
+ },
+ "total": {
+  "attached_to_the_wrong_individual": 0,
+  "candidate_clusters_left": 4857,
+  "duplicate_records_of_one_individual": 0,
+  "individuals_in_stream": 1000,
+  "individuals_seen": 1000,
+  "individuals_with_a_record": 9,
+  "records_created": 9,
+  "records_mixing_individuals": 0,
+  "records_pure": 9,
+  "sightings": 5685,
+  "sightings_attached_to_a_record": 10,
+  "streams": 50
+ },
+ "versions": {
+  "numpy": "2.5.4",
+  "onnxruntime": "1.31.0",
+  "opencv": "5.0.0",
+  "python": "3.13.13"
+ }
+}

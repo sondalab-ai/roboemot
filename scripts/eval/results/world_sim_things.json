@@ -1,0 +1,215 @@
+{
+ "all_faded_runs": 5,
+ "extra_entries": 0,
+ "fade_reference_one_observation_s": {
+  "in_view": {
+   "animal": 700.0,
+   "object": 4180.0
+  },
+  "out_of_view": {
+   "animal": 3465.0,
+   "object": 20880.0
+  }
+ },
+ "machine": "Apple M3 Pro, 12 logical cores, Darwin 25.6.0",
+ "passed": 5,
+ "per_run": [
+  {
+   "all_faded": true,
+   "bearing_error_deg": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "extra_entries": 0,
+   "fade": [
+    {
+     "in_view_at_end": false,
+     "kind": "animal",
+     "seconds_to_forget": 4975.0
+    },
+    {
+     "in_view_at_end": false,
+     "kind": "object",
+     "seconds_to_forget": 29885.0
+    },
+    {
+     "in_view_at_end": false,
+     "kind": "object",
+     "seconds_to_forget": 29895.0
+    }
+   ],
+   "found_after_first_sweep": 3,
+   "found_within_gate": 3,
+   "home_yaw_deg": 0.015259648609665048,
+   "pass": true,
+   "planted": 3,
+   "seed": 100,
+   "sweep_finished": true,
+   "sweep_wall_s": 32.52766254199378,
+   "sweeps": 1
+  },
+  {
+   "all_faded": true,
+   "bearing_error_deg": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "extra_entries": 0,
+   "fade": [
+    {
+     "in_view_at_end": false,
+     "kind": "animal",
+     "seconds_to_forget": 4965.0
+    },
+    {
+     "in_view_at_end": false,
+     "kind": "object",
+     "seconds_to_forget": 29890.0
+    },
+    {
+     "in_view_at_end": false,
+     "kind": "object",
+     "seconds_to_forget": 29895.0
+    }
+   ],
+   "found_after_first_sweep": 3,
+   "found_within_gate": 3,
+   "home_yaw_deg": 0.01621507547934063,
+   "pass": true,
+   "planted": 3,
+   "seed": 101,
+   "sweep_finished": true,
+   "sweep_wall_s": 34.31885845900251,
+   "sweeps": 1
+  },
+  {
+   "all_faded": true,
+   "bearing_error_deg": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "extra_entries": 0,
+   "fade": [
+    {
+     "in_view_at_end": false,
+     "kind": "animal",
+     "seconds_to_forget": 4980.0
+    },
+    {
+     "in_view_at_end": false,
+     "kind": "object",
+     "seconds_to_forget": 29880.0
+    },
+    {
+     "in_view_at_end": false,
+     "kind": "object",
+     "seconds_to_forget": 29885.0
+    }
+   ],
+   "found_after_first_sweep": 3,
+   "found_within_gate": 3,
+   "home_yaw_deg": 0.014683745447941546,
+   "pass": true,
+   "planted": 3,
+   "seed": 102,
+   "sweep_finished": true,
+   "sweep_wall_s": 32.58127537499968,
+   "sweeps": 1
+  },
+  {
+   "all_faded": true,
+   "bearing_error_deg": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "extra_entries": 0,
+   "fade": [
+    {
+     "in_view_at_end": false,
+     "kind": "animal",
+     "seconds_to_forget": 4965.0
+    },
+    {
+     "in_view_at_end": false,
+     "kind": "object",
+     "seconds_to_forget": 29890.0
+    },
+    {
+     "in_view_at_end": false,
+     "kind": "object",
+     "seconds_to_forget": 29895.0
+    }
+   ],
+   "found_after_first_sweep": 3,
+   "found_within_gate": 3,
+   "home_yaw_deg": 0.016148677801420146,
+   "pass": true,
+   "planted": 3,
+   "seed": 103,
+   "sweep_finished": true,
+   "sweep_wall_s": 35.92927662500006,
+   "sweeps": 1
+  },
+  {
+   "all_faded": true,
+   "bearing_error_deg": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "extra_entries": 0,
+   "fade": [
+    {
+     "in_view_at_end": false,
+     "kind": "animal",
+     "seconds_to_forget": 4980.0
+    },
+    {
+     "in_view_at_end": false,
+     "kind": "object",
+     "seconds_to_forget": 29880.0
+    },
+    {
+     "in_view_at_end": false,
+     "kind": "object",
+     "seconds_to_forget": 29880.0
+    }
+   ],
+   "found_after_first_sweep": 3,
+   "found_within_gate": 3,
+   "home_yaw_deg": 0.014917857894434344,
+   "pass": true,
+   "planted": 3,
+   "seed": 104,
+   "sweep_finished": true,
+   "sweep_wall_s": 35.860673458002566,
+   "sweeps": 1
+  }
+ ],
+ "planted_per_run": [
+  "animal:cat",
+  "object:cup",
+  "object:book"
+ ],
+ "protocol": {
+  "detector": "stand-in at the observation level (no images, no ONNX)",
+  "fade": "world clock advanced in 5 s steps (virtual time), limit 48 h",
+  "gate_deg": 15.0,
+  "min_off_home_deg": 50.0,
+  "min_separation_deg": 45.0,
+  "simulation": "MuJoCo Reachy Mini daemon, headless; the fallback dynamics are slow"
+ },
+ "runs": 5,
+ "set": "things",
+ "sweep_wall_s": {
+  "max": 35.92927662500006,
+  "min": 32.52766254199378
+ },
+ "sweeps_finished": 5,
+ "things_found_within_gate": 15,
+ "things_planted": 15
+}
