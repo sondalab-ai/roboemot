@@ -1,0 +1,284 @@
+{
+ "n": 10954,
+ "confidence_rule": 0.8,
+ "genderage": {
+  "by_race": {
+   "East Asian": {
+    "n": 1550,
+    "no_face": 0.001935483870967742,
+    "gender_unknown_rate": 0.21612903225806457,
+    "gender_error_of_confident": 0.21728395061728395,
+    "age_unknown_rate": 0.001935483870967758,
+    "age_group_error_of_confident": 0.2727860374919198,
+    "minor_n": 414,
+    "minor_as_adult_or_senior_of_all_minors": 0.6859903381642513,
+    "adult_n": 1136,
+    "adult_or_senior_as_child_or_teen": 0.02030008826125331
+   },
+   "Indian": {
+    "n": 1516,
+    "no_face": 0.001978891820580475,
+    "gender_unknown_rate": 0.18799472295514508,
+    "gender_error_of_confident": 0.22177091795288384,
+    "age_unknown_rate": 0.0019788918205804196,
+    "age_group_error_of_confident": 0.3298083278255122,
+    "minor_n": 387,
+    "minor_as_adult_or_senior_of_all_minors": 0.9069767441860465,
+    "adult_n": 1129,
+    "adult_or_senior_as_child_or_teen": 0.0026619343389529724
+   },
+   "Black": {
+    "n": 1556,
+    "no_face": 0.002570694087403599,
+    "gender_unknown_rate": 0.2557840616966581,
+    "gender_error_of_confident": 0.23229706390328153,
+    "age_unknown_rate": 0.0025706940874036244,
+    "age_group_error_of_confident": 0.36533505154639173,
+    "minor_n": 484,
+    "minor_as_adult_or_senior_of_all_minors": 0.9462809917355371,
+    "adult_n": 1072,
+    "adult_or_senior_as_child_or_teen": 0.002806361085126286
+   },
+   "White": {
+    "n": 2085,
+    "no_face": 0.003357314148681055,
+    "gender_unknown_rate": 0.19616306954436447,
+    "gender_error_of_confident": 0.1509546539379475,
+    "age_unknown_rate": 0.003357314148681012,
+    "age_group_error_of_confident": 0.27382098171318575,
+    "minor_n": 407,
+    "minor_as_adult_or_senior_of_all_minors": 0.8820638820638821,
+    "adult_n": 1678,
+    "adult_or_senior_as_child_or_teen": 0.0023937761819269898
+   },
+   "Middle Eastern": {
+    "n": 1209,
+    "no_face": 0.0024813895781637717,
+    "gender_unknown_rate": 0.14226633581472292,
+    "gender_error_of_confident": 0.11378977820636452,
+    "age_unknown_rate": 0.002481389578163795,
+    "age_group_error_of_confident": 0.21724709784411278,
+    "minor_n": 211,
+    "minor_as_adult_or_senior_of_all_minors": 0.8862559241706162,
+    "adult_n": 998,
+    "adult_or_senior_as_child_or_teen": 0.003015075376884422
+   },
+   "Latino_Hispanic": {
+    "n": 1623,
+    "no_face": 0.0006161429451632779,
+    "gender_unknown_rate": 0.1786814540973506,
+    "gender_error_of_confident": 0.14928732183045762,
+    "age_unknown_rate": 0.0006161429451633227,
+    "age_group_error_of_confident": 0.3193588162762022,
+    "minor_n": 412,
+    "minor_as_adult_or_senior_of_all_minors": 0.9344660194174758,
+    "adult_n": 1211,
+    "adult_or_senior_as_child_or_teen": 0.004128819157720892
+   },
+   "Southeast Asian": {
+    "n": 1415,
+    "no_face": 0.0,
+    "gender_unknown_rate": 0.22190812720848052,
+    "gender_error_of_confident": 0.22070844686648503,
+    "age_unknown_rate": 0.0,
+    "age_group_error_of_confident": 0.3286219081272085,
+    "minor_n": 421,
+    "minor_as_adult_or_senior_of_all_minors": 0.7767220902612827,
+    "adult_n": 994,
+    "adult_or_senior_as_child_or_teen": 0.02716297786720322
+   },
+   "all": {
+    "n": 10954,
+    "no_face": 0.00191710790578784,
+    "gender_unknown_rate": 0.20111374840241003,
+    "gender_error_of_confident": 0.185007427722546,
+    "age_unknown_rate": 0.001917107905787807,
+    "age_group_error_of_confident": 0.30202140309155767,
+    "minor_n": 2736,
+    "minor_as_adult_or_senior_of_all_minors": 0.8592836257309941,
+    "adult_n": 8218,
+    "adult_or_senior_as_child_or_teen": 0.008292682926829269
+   }
+  },
+  "by_gender": {
+   "Male": {
+    "n": 5792,
+    "no_face": 0.0027624309392265192,
+    "gender_unknown_rate": 0.18732734806629836,
+    "gender_error_of_confident": 0.17569577225408967,
+    "age_unknown_rate": 0.002762430939226568,
+    "age_group_error_of_confident": 0.3014196675900277,
+    "minor_n": 1413,
+    "minor_as_adult_or_senior_of_all_minors": 0.8428874734607219,
+    "adult_n": 4379,
+    "adult_or_senior_as_child_or_teen": 0.004809894640403115
+   },
+   "Female": {
+    "n": 5162,
+    "no_face": 0.0009686168151879117,
+    "gender_unknown_rate": 0.21658271987601707,
+    "gender_error_of_confident": 0.19584569732937684,
+    "age_unknown_rate": 0.0009686168151878949,
+    "age_group_error_of_confident": 0.30269536552259063,
+    "minor_n": 1323,
+    "minor_as_adult_or_senior_of_all_minors": 0.8767951625094482,
+    "adult_n": 3839,
+    "adult_or_senior_as_child_or_teen": 0.012258737610850287
+   },
+   "all": {
+    "n": 10954,
+    "no_face": 0.00191710790578784,
+    "gender_unknown_rate": 0.20111374840241003,
+    "gender_error_of_confident": 0.185007427722546,
+    "age_unknown_rate": 0.001917107905787807,
+    "age_group_error_of_confident": 0.30202140309155767,
+    "minor_n": 2736,
+    "minor_as_adult_or_senior_of_all_minors": 0.8592836257309941,
+    "adult_n": 8218,
+    "adult_or_senior_as_child_or_teen": 0.008292682926829269
+   }
+  }
+ },
+ "vit": {
+  "by_race": {
+   "East Asian": {
+    "n": 1550,
+    "no_face": 0.0,
+    "gender_unknown_rate": 0.056774193548387086,
+    "gender_error_of_confident": 0.04035567715458276,
+    "age_unknown_rate": 0.23612903225806448,
+    "age_group_error_of_confident": 0.05574324324324324,
+    "minor_n": 414,
+    "minor_as_adult_or_senior_of_all_minors": 0.10869565217391304,
+    "adult_n": 1136,
+    "adult_or_senior_as_child_or_teen": 0.0
+   },
+   "Indian": {
+    "n": 1516,
+    "no_face": 0.0,
+    "gender_unknown_rate": 0.04221635883905017,
+    "gender_error_of_confident": 0.03650137741046832,
+    "age_unknown_rate": 0.2988126649076517,
+    "age_group_error_of_confident": 0.04891815616180621,
+    "minor_n": 387,
+    "minor_as_adult_or_senior_of_all_minors": 0.08527131782945736,
+    "adult_n": 1129,
+    "adult_or_senior_as_child_or_teen": 0.0
+   },
+   "Black": {
+    "n": 1556,
+    "no_face": 0.0,
+    "gender_unknown_rate": 0.08804627249357322,
+    "gender_error_of_confident": 0.07892882311486962,
+    "age_unknown_rate": 0.3123393316195373,
+    "age_group_error_of_confident": 0.052336448598130844,
+    "minor_n": 484,
+    "minor_as_adult_or_senior_of_all_minors": 0.05578512396694215,
+    "adult_n": 1072,
+    "adult_or_senior_as_child_or_teen": 0.001152073732718894
+   },
+   "White": {
+    "n": 2085,
+    "no_face": 0.0,
+    "gender_unknown_rate": 0.04844124700239805,
+    "gender_error_of_confident": 0.034274193548387094,
+    "age_unknown_rate": 0.20191846522781776,
+    "age_group_error_of_confident": 0.05228365384615385,
+    "minor_n": 407,
+    "minor_as_adult_or_senior_of_all_minors": 0.16216216216216217,
+    "adult_n": 1678,
+    "adult_or_senior_as_child_or_teen": 0.0
+   },
+   "Middle Eastern": {
+    "n": 1209,
+    "no_face": 0.0,
+    "gender_unknown_rate": 0.026468155500413593,
+    "gender_error_of_confident": 0.02463891248937978,
+    "age_unknown_rate": 0.21505376344086025,
+    "age_group_error_of_confident": 0.040042149631190724,
+    "minor_n": 211,
+    "minor_as_adult_or_senior_of_all_minors": 0.13744075829383887,
+    "adult_n": 998,
+    "adult_or_senior_as_child_or_teen": 0.0
+   },
+   "Latino_Hispanic": {
+    "n": 1623,
+    "no_face": 0.0,
+    "gender_unknown_rate": 0.0369685767097967,
+    "gender_error_of_confident": 0.03902751119641715,
+    "age_unknown_rate": 0.24830560690080095,
+    "age_group_error_of_confident": 0.06147540983606557,
+    "minor_n": 412,
+    "minor_as_adult_or_senior_of_all_minors": 0.1383495145631068,
+    "adult_n": 1211,
+    "adult_or_senior_as_child_or_teen": 0.0
+   },
+   "Southeast Asian": {
+    "n": 1415,
+    "no_face": 0.0,
+    "gender_unknown_rate": 0.05300353356890464,
+    "gender_error_of_confident": 0.048507462686567165,
+    "age_unknown_rate": 0.28480565371024735,
+    "age_group_error_of_confident": 0.07015810276679842,
+    "minor_n": 421,
+    "minor_as_adult_or_senior_of_all_minors": 0.12351543942992874,
+    "adult_n": 994,
+    "adult_or_senior_as_child_or_teen": 0.0
+   },
+   "all": {
+    "n": 10954,
+    "no_face": 0.0,
+    "gender_unknown_rate": 0.05084900492970601,
+    "gender_error_of_confident": 0.04299317110705011,
+    "age_unknown_rate": 0.2548840606171262,
+    "age_group_error_of_confident": 0.05452095074736584,
+    "minor_n": 2736,
+    "minor_as_adult_or_senior_of_all_minors": 0.11293859649122807,
+    "adult_n": 8218,
+    "adult_or_senior_as_child_or_teen": 0.00014825796886582654
+   }
+  },
+  "by_gender": {
+   "Male": {
+    "n": 5792,
+    "no_face": 0.0,
+    "gender_unknown_rate": 0.03435773480662985,
+    "gender_error_of_confident": 0.02467369926694082,
+    "age_unknown_rate": 0.23843232044198892,
+    "age_group_error_of_confident": 0.04760825209703015,
+    "minor_n": 1413,
+    "minor_as_adult_or_senior_of_all_minors": 0.09978768577494693,
+    "adult_n": 4379,
+    "adult_or_senior_as_child_or_teen": 0.000273972602739726
+   },
+   "Female": {
+    "n": 5162,
+    "no_face": 0.0,
+    "gender_unknown_rate": 0.0693529639674545,
+    "gender_error_of_confident": 0.06432139883430475,
+    "age_unknown_rate": 0.2733436652460287,
+    "age_group_error_of_confident": 0.06264996001066382,
+    "minor_n": 1323,
+    "minor_as_adult_or_senior_of_all_minors": 0.12698412698412698,
+    "adult_n": 3839,
+    "adult_or_senior_as_child_or_teen": 0.0
+   },
+   "all": {
+    "n": 10954,
+    "no_face": 0.0,
+    "gender_unknown_rate": 0.05084900492970601,
+    "gender_error_of_confident": 0.04299317110705011,
+    "age_unknown_rate": 0.2548840606171262,
+    "age_group_error_of_confident": 0.05452095074736584,
+    "minor_n": 2736,
+    "minor_as_adult_or_senior_of_all_minors": 0.11293859649122807,
+    "adult_n": 8218,
+    "adult_or_senior_as_child_or_teen": 0.00014825796886582654
+   }
+  }
+ },
+ "vit_age_argmax_no_threshold": {
+  "age_group_error": 0.13008946503560342,
+  "minor_as_adult_or_senior": 0.19809941520467836
+ }
+}
