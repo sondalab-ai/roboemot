@@ -119,6 +119,15 @@ def test_conflicting_categories_and_unknown_category_are_reported_not_imported()
     }
 
 
+def test_categories_match_the_detectors_display_names():
+    out = parse(subjects("Objects|Plant|Fern", "Objects|Phone|Mine", "Objects|Teddy|Bruno"))
+    assert {i.name: i.category for i in out.items} == {
+        "Fern": "potted plant",
+        "Mine": "cell phone",
+        "Bruno": "teddy bear",
+    }
+
+
 def test_italian_roots_and_aliases():
     out = parse(subjects("Animali|Gatto|Micio", "Persone|Anna"))
     assert {(i.name, i.kind, i.category) for i in out.items} == {
