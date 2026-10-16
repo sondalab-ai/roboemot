@@ -1,7 +1,7 @@
 # RoboEmot: working notes for coding agents
 
 RoboEmot is a robot-agnostic library for social and emotional robot behaviour.
-`SPEC.md` is the engineering specification and the source of truth for every
+`docs/specs/kickoff.md` (the SPEC) is the engineering specification and the source of truth for every
 design decision. Read the relevant section before changing a module, and cite the
 section number in commit messages that implement or change behaviour.
 
@@ -9,8 +9,8 @@ section number in commit messages that implement or change behaviour.
 
 | Path | What |
 | --- | --- |
-| `SPEC.md` | Engineering spec (export of the shared doc; edit the doc, then re-export) |
-| `packages/roboemot-core/` | Python package `roboemot`: config, manifest, discovery, health (connectivity), diagnostics (debug report), motion reference, affect, circadian, LLM router, bus |
+| `docs/specs/kickoff.md` | Engineering spec (SPEC), the source of truth |
+| `packages/roboemot-core/` | Python package `roboemot`: config, manifest, discovery, health (connectivity), diagnostics (debug report), motion reference, affect, circadian, persona (traits), LLM router and system prompt, bus |
 | `packages/roboemot-reachymini/` | Python package `roboemot_reachymini`: Reachy Mini driver and SDK bridge |
 | `rt/` | C++ real-time core (`roboemot-rt`): arbiter and safety limiter, CMake + ctest |
 | `configs/` | Library defaults, robot manifests, personality presets |

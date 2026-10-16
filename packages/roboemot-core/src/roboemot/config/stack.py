@@ -5,7 +5,8 @@ Layers, lowest to highest precedence (SPEC 11A, Layers):
 1. ``defaults``  library defaults (the schema defaults plus ``configs/defaults/*.yaml``)
 2. ``manifest``  behaviour-relevant settings carried by the robot manifest
 3. ``preset``    personality preset, resolved through ``extends``
-4. ``app``       the application's config file
+4. ``app``       the application's config file, then ``derived``: values the library computes
+                 in place of app values (persona traits rated by an LLM), never written to a file
 5. ``person``    per-person overrides, supplied per query
 6. ``runtime``   API / web UI overrides, optionally with a TTL
 
@@ -32,7 +33,7 @@ from pydantic import BaseModel, ValidationError
 
 from .schema import SCHEMA_VERSION, RoboEmotConfig
 
-LAYER_ORDER = ("defaults", "manifest", "preset", "app", "person", "runtime")
+LAYER_ORDER = ("defaults", "manifest", "preset", "app", "derived", "person", "runtime")
 KEYED_LISTS = {"appraisal.rules": "event", "llm_routes": "name"}
 
 
@@ -149,7 +150,7 @@ def flatten(tree: Any, prefix: str = "") -> dict[str, Any]:
 
 
 def field_meta(dotted: str) -> dict[str, Any]:
-    """Metadata (unit, restart, conservative, opt_in) of a parameter path, {} if unknown.
+    """Metadata (unit, restart, conservative, opt_in, admin_only) of a path, {} if unknown.
 
     Dict-valued fields (``voice.moods``) and list fields (``llm_routes``) consume one extra
     path element (the key or the index).
@@ -222,18 +223,22 @@ def resolve_preset(name: str, preset_dirs: Iterable[Path], _seen: tuple[str, ...
 
 # ----------------------------------------------------------------------------- guardrails
 
-PERSON_SECTIONS = ("register", "voice", "conversation")
+PERSON_SECTIONS = ("register", "voice", "conversation", "persona.traits")
 
 
 @dataclass(frozen=True)
 class Violation:
-    kind: Literal["safety", "privacy"]
+    kind: Literal["safety", "privacy", "admin"]
     path: str
     approved: Any
     candidate: Any
 
     def __str__(self) -> str:
         return f"{self.path} ({self.approved!r} -> {self.candidate!r})"
+
+
+def _guarded(meta: dict[str, Any]) -> bool:
+    return bool(meta.get("conservative") or meta.get("opt_in") or meta.get("admin_only"))
 
 
 def guarded_leaves(cfg: RoboEmotConfig) -> dict[str, tuple[Any, dict[str, Any]]]:
@@ -243,7 +248,7 @@ def guarded_leaves(cfg: RoboEmotConfig) -> dict[str, tuple[Any, dict[str, Any]]]
     out = {}
     for path, value in flatten(tree).items():
         meta = field_meta(path)
-        if meta.get("conservative") or meta.get("opt_in"):
+        if _guarded(meta):
             out[path] = (value, meta)
     return out
 
@@ -267,7 +272,9 @@ def violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Viol
             "true": lambda v, r: bool(v) or v == r,
             None: lambda v, r: True,
         }[direction](value, ref)
-        if meta.get("opt_in") and value and not ref:
+        if meta.get("admin_only") and value != ref:
+            found.append(Violation("admin", path, ref, value))
+        elif meta.get("opt_in") and value and not ref:
             found.append(Violation("privacy", path, ref, value))
         elif not ok:
             found.append(Violation("safety", path, ref, value))
@@ -283,6 +290,7 @@ class ConfigStack:
     manifest: dict = field(default_factory=dict)
     preset: dict = field(default_factory=dict)
     app: dict = field(default_factory=dict)
+    derived: dict = field(default_factory=dict)
     clock: Callable[[], float] = time.time
     audit_path: Path | None = None
     files: dict[str, Path] = field(default_factory=dict)
@@ -337,7 +345,14 @@ class ConfigStack:
             # Start from the schema defaults so keyed lists (appraisal.rules) merge with them.
             tree: dict = RoboEmotConfig().model_dump(mode="python")
             person = self._sanitize_person(person) if person else {}
-            for layer in (self.defaults, self.manifest, self.preset, self.app, person):
+            for layer in (
+                self.defaults,
+                self.manifest,
+                self.preset,
+                self.app,
+                self.derived,
+                person,
+            ):
                 tree = deep_merge(tree, layer)
             if include_runtime:
                 now = self.clock()
@@ -389,8 +404,10 @@ class ConfigStack:
         """Set a parameter or a whole section.
 
         ``layer="runtime"`` (default): may only make safety more conservative; a privacy
-        opt-in needs ``admin=True``. ``layer="app"``: persistent edit of the app config (written
-        back to its file); loosening safety needs ``admin=True`` (the admin PIN, SPEC 11A).
+        opt-in or an ``admin_only`` prompt change needs ``admin=True``.
+        ``layer="app"``: persistent edit of the app config (written back to its file);
+        loosening safety or changing prompt text needs ``admin=True`` (the admin PIN, SPEC 11A).
+        ``layer="derived"``: a computed value just above the app config, in memory only.
         """
         with self._lock:
             if not field_meta(key) and not self._known_path(key):
@@ -410,7 +427,7 @@ class ConfigStack:
                     else:
                         self._runtime[key] = prev
 
-                allow = {"privacy"} if admin else set()
+                allow = {"privacy", "admin"} if admin else set()
             elif layer == "app":
                 saved_app = copy.deepcopy(self.app)
                 set_path(self.app, key, copy.deepcopy(value))
@@ -418,7 +435,15 @@ class ConfigStack:
                 def undo() -> None:
                     self.app = saved_app
 
-                allow = {"privacy", "safety"} if admin else set()
+                allow = {"privacy", "safety", "admin"} if admin else set()
+            elif layer == "derived":
+                saved_derived = copy.deepcopy(self.derived)
+                set_path(self.derived, key, copy.deepcopy(value))
+
+                def undo() -> None:
+                    self.derived = saved_derived
+
+                allow = set()
             else:
                 raise ConfigError(f"layer {layer!r} is not writable")
             cfg = self._commit(undo, allow, source, runtime_key=key if layer == "runtime" else None)
@@ -428,12 +453,22 @@ class ConfigStack:
             self._notify()
             return cfg
 
-    def clear(self, key: str, *, source: str = "api") -> None:
+    def clear(self, key: str, *, source: str = "api", layer: str = "runtime") -> None:
+        """Remove an override from the runtime layer, or a value from the derived layer."""
         with self._lock:
-            if key in self._runtime:
+            if layer == "runtime" and key in self._runtime:
                 old = self._runtime.pop(key).value
-                self._record(source, key, old, None)
-                self._notify()
+            elif layer == "derived":
+                try:
+                    old = get_path(self.derived, key)
+                except (KeyError, AttributeError, IndexError):
+                    return
+                parent, _, leaf = key.rpartition(".")
+                (get_path(self.derived, parent) if parent else self.derived).pop(leaf)
+            else:
+                return
+            self._record(source, key, old, None)
+            self._notify()
 
     def apply_preset(self, name: str, *, source: str = "api", admin: bool = False) -> None:
         """Switch personality. A preset that loosens safety or privacy needs ``admin=True``."""
@@ -444,7 +479,7 @@ class ConfigStack:
             def undo() -> None:
                 self.preset = saved[0]
 
-            self._commit(undo, {"privacy", "safety"} if admin else set(), source)
+            self._commit(undo, {"privacy", "safety", "admin"} if admin else set(), source)
             self.files["preset"] = Path("preset:" + name)
             self._record(source, "personality", self._last.personality, name)
             self._notify()
@@ -495,6 +530,7 @@ class ConfigStack:
                 "change refused, it would loosen: "
                 + "; ".join(str(v) for v in blocked)
                 + ". Safety: edit the app config with admin confirmation. Privacy: admin opt-in."
+                + " Prompt text: admin confirmation."
             )
         if base_found:
             self._approved = base
@@ -563,20 +599,18 @@ class ConfigStack:
             return False
 
     def _sanitize_person(self, person: dict) -> dict:
-        """Per-person overrides may shape register, voice and conversation only, and never a
-        guarded (safety / minors / privacy) value; anything else is dropped and audited."""
+        """Per-person overrides may shape register, voice, conversation and persona traits only
+        (never the persona prompt), and never a guarded (safety / minors / privacy) value;
+        anything else is dropped and audited."""
         clean: dict = {}
         dropped: list[str] = []
-        for section, value in person.items():
-            if section not in PERSON_SECTIONS:
-                dropped.append(section)
-                continue
-            for path, leaf in flatten(value, section).items():
-                meta = field_meta(path)
-                if meta.get("conservative") or meta.get("opt_in"):
-                    dropped.append(path)
-                else:
-                    set_path(clean, path, leaf)
+        for path, leaf in flatten(person).items():
+            meta = field_meta(path)
+            allowed = any(path == s or path.startswith(s + ".") for s in PERSON_SECTIONS)
+            if not allowed or _guarded(meta):
+                dropped.append(path)
+            else:
+                set_path(clean, path, leaf)
         if dropped:
             self.audit.append(AuditEntry(self.clock(), "person", "dropped", None, dropped))
         return clean

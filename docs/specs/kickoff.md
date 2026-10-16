@@ -1,6 +1,6 @@
 # RoboEmot: Engineering Specification
 
-Oct 12, 2026 · Marcello · Status: Draft v0.2 · Source of truth: the shared Claude doc; this file is an export.
+Oct 12, 2026 · Marcello · Status: Draft v0.2 · Source of truth: this file.
 
 ## 1. Overview
 
@@ -57,7 +57,7 @@ The sketch defines the capabilities; the decisions below fix the architecture. A
 
 ### Assumptions to confirm
 
-- "Different empathic registry" is read as **empathic register**: the style of behaviour chosen per interlocutor. The per-person data lives in a separate **people registry** (section 6).
+- "Different empathic registry" is read as **empathic register**: the style of behaviour chosen per interlocutor. The per-person data lives in a separate **registry** of people, animals and objects (section 6).
 - Spoken languages: Italian and English in v1. Italian matters for gender, because it drives grammatical agreement ("benvenuto" / "benvenuta").
 - "Fully on-board" covers perception, reflexes, ASR and TTS. A capable LLM does not fit most edge boards, so the router may reach a LAN server or the cloud for conversation only.
 - A microcontroller (for example ESP32-S3) may sit on the robot as an I/O coprocessor for servos, LEDs and sensors. It is a driver target, not a compute node.
@@ -70,7 +70,7 @@ RoboEmot runs as a few processes on one board, joined by a local message bus: Py
 flowchart TB
   app["Application: Robot API, events, skills"]
   subgraph core["roboemot-core (Python)"]
-    reg[People registry] --- aff[Affect + register + circadian] --- conv[Conversation: LLM router, skills] --- mir[Mirror]
+    reg[Registry + world model] --- aff[Affect + register + circadian] --- conv[Conversation: LLM router, skills] --- mir[Mirror]
   end
   bus["Message bus: typed topics, shared-memory frames"]
   subgraph perc["Perception (NPU or CPU)"]
@@ -327,9 +327,51 @@ Vision is a set of small models scheduled on the NPU (npu profile) or the CPU (c
 
 Vision publishes three motor-relevant signals on the bus, consumed directly by the reflex engine in roboemot-rt without passing through the Python core: `attention.target` (the face or object to look at, with priority), `proximity.approach` (a person or object entering the near zone), and `gesture.detected` (wave, point, raised hand). Attention selection prefers, in order: the active speaker, an enrolled person, the nearest face, the most salient moving object.
 
-## 6. People registry and identity
+## 5A. World model and scanning
 
-The registry stores enrolled people as embeddings plus a profile, encrypted on the robot; identity is resolved per track by voting, never from a single frame.
+The robot keeps a "mental map" of who and what is around it, not only in front of the camera: people, animals and objects, each with a position, a confidence that fades when nothing confirms it, and the time it was last seen or heard. The map is fluid: entries appear, move, fade and disappear as observations arrive. The world model is robot-agnostic; each robot supplies its sensor sources and how it looks around through a plugin (section 4, Capability negotiation).
+
+### Observations and sources
+
+- Every source publishes observations on `percept.entity`: `kind` (person, animal, object), `category` (detector class, for example `cat`, `cup`), optional `identity` (a registry ID, when the source already resolved it), `bearing` (azimuth and elevation, radians), optional `distance_m`, `confidence`, optional appearance embedding, timestamp and `source` name.
+- Sources are plugins (`WorldSource`): the vision pipeline (section 5), sound direction (`get_DoA()` on Reachy Mini, section 4A), and any robot-specific sensor (proximity, lidar, a robot's own detectors). Robot packages register them in the `roboemot.world` entry-point group keyed by the manifest `robot.id`, like diagnostics and installers; core stays robot-agnostic.
+- A source that only hears (sound direction) produces bearing-only observations of kind `unknown`, which can confirm an entry or trigger a glance but never create a person, animal or object on their own.
+
+### Frame
+
+Positions are egocentric: bearing and distance from the robot's base, so a robot that does not move needs no mapping. Observations made with the head or body turned are rotated into the base frame using the joint state at capture time. A mobile robot's driver may report its own pose (`base_pose`); the world model then stores positions in that frame, and consumers see the same entries with no change in their interface. A room map (SLAM, rooms, zones) is not part of v1.
+
+### Entries, matching and fading
+
+- An entry holds: `entry_id`, kind, category, identity (registry ID or `unknown`), position and its uncertainty, confidence, first and last seen, sources that saw it.
+- Matching an observation to an entry, first match wins: same identity; else same kind and category within an angular gate (`world.match_gate_deg`) and, when both have distances, a range gate; else a new entry. Appearance embeddings break ties between candidates.
+- Confidence rises with each matching observation and decays with a half-life per kind (`world.half_life_s`, people shorter than objects). Out of the sensors' view the decay is slower (`world.out_of_view_decay_factor`): what the robot cannot see now is remembered, not forgotten. An entry whose bearing is in view but which is not detected decays at the full rate.
+- Below `world.forget_confidence` an entry is removed. Events on the bus: `world.entity_appeared`, `world.entity_moved` (beyond `world.moved_threshold_deg`), `world.entity_gone`, and `world.snapshot` on request.
+- Consumers: attention (look toward a known entry), appraisal rules (for example `person.returned`, `animal.appeared`), the LLM scene summary (section 8, entries by attention priority until its cap), and the registry (last seen, auto-enrollment).
+
+### Scanning
+
+- A scan policy in core decides when to look around; the robot plugin's `ScanPlanner` decides how (a sequence of poses within the manifest limits, for example head and body yaw sweeps).
+- Triggers: idle for `world.scan.idle_interval_s` (jittered), wake-up from rest, and a glance toward an unexplained sound or motion (a bearing-only observation with no matching entry).
+- Never while engaged with a person (a single glance toward a sound is allowed), never during quiet hours or circadian `resting` (section 7A), and only within the minor-present motion caps.
+- Sweeps are motion requests at idle priority through the arbiter (section 10): attention, reflexes and safety always win. Pace and amplitude scale with the persona's energy trait (section 11A, Persona).
+- On Reachy Mini, body yaw (±160°) plus the head-to-body offset (up to 65°) and the 78° camera cover the whole room; sound direction covers every direction without moving.
+
+### Known individuals and auto-enrollment
+
+- Known animals and objects are registry entries (section 6) matched by appearance embedding, like people by face.
+- Auto-enrollment (animals and objects only, never people): an unknown entry whose appearance clusters with earlier sightings on at least `world.autoenroll.min_days` different days, with a cluster tighter than `world.autoenroll.max_spread`, is enrolled with a placeholder name (`cat 1`, `mug 2`). The owner can rename, merge or delete it in the web UI. Defaults are set after the recognition spike (section 15).
+- People are enrolled only through the consent flow (section 6, Enrollment).
+
+### History (opt-in)
+
+- With `privacy.world_history` on (off by default; turning it on needs the admin confirmation, section 11A), every appear, move and gone event is stored locally with time, position and identity, for patterns such as "Marcello comes home around 18:00" and "the mug is usually on the left".
+- Retention: `world.history_retention_days`, then deleted. `export(person_id)` and `forget(person_id)` include it. For unknown people the history stores only kind, position and time: no embedding and no link between sessions. History never leaves the robot.
+- Without the opt-in, the live map stays in RAM and only the registry's `last_seen` and the auto-enrollment candidates (appearance embeddings of unknown animals and objects with the days they were seen) persist.
+
+## 6. Registry and identity
+
+The registry stores enrolled people, animals and objects as embeddings plus a profile, encrypted on the robot; identity is resolved per track by voting, never from a single frame. Animal and object records hold `entity_id`, kind, category, display name, appearance embeddings, `last_seen`, `origin` (`enrolled`, `xmp`, `auto`) and an optional description; they have no consent, age or register fields.
 
 ### Person record
 
@@ -358,6 +400,13 @@ The registry stores enrolled people as embeddings plus a profile, encrypted on t
 - Otherwise the track is `unknown` and gets a temporary anonymous ID for the session only.
 - Face and voice IDs are fused when both exist; a disagreement drops the track to `unknown`.
 - Online refresh adds a new embedding only after a high-confidence match, capped per person, to follow slow changes such as a growing child.
+
+### Catalogue import (XMP)
+
+- The owner can import a catalogue of known people, animals and objects as XMP sidecar files, written by common photo tools: MWG Regions (`mwg-rs:Regions`, with `Name` and `Type` such as `Face` and `Pet`), `dc:subject` and `lr:hierarchicalSubject` (for example `Animals|Cat|Mia`).
+- XMP alone is enough: each record is created `pending` and gets its appearance when the robot sees it and the owner confirms ("this is Mia"), or by renaming an auto-enrolled placeholder.
+- Photos are optional: when supplied with their sidecars, each tagged region is turned into an embedding in memory and the image is discarded at once (never stored unless `keep_enrollment_images: true`).
+- People in an imported catalogue stay `pending` until the consent flow completes (Enrollment); the import never creates biometric data for a person without consent.
 
 ### Deletion
 
@@ -398,7 +447,7 @@ Resolved per active interlocutor, first match wins: person's `register_overrides
 
 ### Expression map
 
-The affect label and intensity are rendered through an expression map per robot: for each label, an LED pattern, a motion primitive with amplitude, an optional non-verbal sound, and TTS prosody offsets. A robot with only LEDs still expresses every label; missing channels are skipped.
+The affect label and intensity are rendered through an expression map per robot: for each label, an LED pattern, a motion primitive with amplitude, an optional non-verbal sound, and TTS prosody offsets. A robot with only LEDs still expresses every label; missing channels are skipped. Motion amplitude, idle tempo and reaction intensity are scaled by the persona traits (section 11A, Persona) at the same stage as the register and the circadian state, before the safety limiter.
 
 ## 7A. Simulated circadian rhythm
 
@@ -461,7 +510,7 @@ Voice has two paths: a fast on-board path that triggers emotional reactions with
 3. **Fast path, on-board**: prosody features (loudness, pitch, speaking rate), a small speech-emotion classifier, and keyword spotting (the robot's name, "stop", "no", greetings). Outputs affect impulses and reflex events, for example turning toward the speaker.
 4. **ASR, on-board, streaming**: Italian and English with partial hypotheses; one language is active at a time (speaker's profile, else the app default), because two parallel recognisers do not fit the cm4 CPU budget. npu profile: Whisper-class model (faster-whisper or whisper.cpp). cm4 profile: Vosk small models, streaming and built for Raspberry Pi (Italian vosk-model-small-it-0.22, 48 MB, word error rate 16.9% on Common Voice). That error rate is workable for conversation with an LLM, which tolerates misrecognitions, but weak for names and exact commands, so keyword spotting (stage 3) handles those; the optional edge box can run a larger model.
 5. **Speaker ID (optional)**: voice embedding matched against the registry and fused with face ID.
-6. **Slow path, LLM**: at the end of the utterance (VAD endpoint) the final transcript goes to the router, because Chat Completions takes complete messages; partial hypotheses stay local (keywords, barge-in); the request carries the register's persona fragment, the speaker's profile summary, the current affect state, a short scene description (who is present, what is visible) and the skill tools (section 11).
+6. **Slow path, LLM**: at the end of the utterance (VAD endpoint) the final transcript goes to the router, because Chat Completions takes complete messages; partial hypotheses stay local (keywords, barge-in); the request carries the system prompt (persona, register and safety rules, composed as in Conversation state below), the speaker's profile summary, the current affect state, a short scene description (who is present and what is visible: people, animals and objects) and the skill tools (section 11).
 7. **TTS, on-board, streaming**: Piper-class neural TTS with Italian and English voices, speaking from the first complete sentence of the LLM stream; prosody set by register and affect.
 8. **Barge-in**: speech from the user during TTS stops playback within 200 ms and cancels the LLM stream.
 
@@ -507,7 +556,13 @@ Every LLM route speaks the OpenAI Chat Completions API (streaming + tool calling
 - A session starts when a person engages and ends after 5 minutes without them in view or speaking.
 - Short-term memory: the last 12 turns of the session, kept in RAM only and dropped when the session ends.
 - Long-term memory: only preferences the person confirmed through `remember_preference`, stored in the registry (section 6). No transcripts are stored.
-- Each request carries the system prompt (persona, register, safety rules), the profile and scene summaries and the short-term turns, trimmed to a per-route token budget.
+- Each request carries the system prompt, the profile and scene summaries and the short-term turns, trimmed to a per-route token budget. Trimming drops the oldest turns only, never a part of the system prompt. Parts 1 to 4 below are fixed per configuration, and if they alone exceed a route's budget that is a configuration error at load time; the profile and scene summaries have their own length caps (`conversation.profile_summary_max_chars`, `conversation.scene_summary_max_chars`), and the scene summary lists entities by attention priority until its cap.
+- The system prompt is composed by code in a fixed order, the same for every route, local or remote:
+  1. `persona.prompt`: the robot's identity (section 11A, Persona).
+  2. The active register's `persona_fragment` (section 7).
+  3. Rules rendered from structured parameters, so the persona prompt does not repeat them in prose: the register's `vocabulary`, `conversation.max_reply_sentences`, the reply language (`conversation.language`, or the speaker's), and the sentence mood-tag format when `voice.mood_source` is `llm_tagged`.
+  4. The safety block: owned by the library and not removable by any persona, preset or app. It states honesty about being a robot and about uncertainty, no instructions that put people or the robot at physical risk, and, while a minor is present, the minor content policy. Configuration can only append rules to it (`safety.extra_prompt_rules`). Prompt text has no safe direction, so any change to these rules or to `persona.prompt`, at runtime or in a file, needs the admin confirmation (section 11A, Guardrails).
+  5. The speaker's profile summary, the scene summary and the current affect state (label and intensity).
 
 ### Voice, expressivity and mood
 
@@ -550,11 +605,11 @@ voice:
 #### How the final delivery is computed
 
 1. Start from `voice.base`.
-2. Apply the register (section 7) and the circadian state (section 7A), as multipliers and offsets.
+2. Apply the persona traits (section 11A, Persona), the register (section 7) and the circadian state (section 7A), as multipliers and offsets.
 3. Add the mood deltas, scaled by affect intensity times `expressivity`.
 4. Clamp to `voice.limits` and to the backend's supported range, then render: native parameters for Piper, `instructions` text for instructable remote models.
 
-Mood sources: `auto` follows the affect engine sentence by sentence; `fixed` pins one mood (useful for an app or a demo); `llm_tagged` lets the LLM tag each sentence with a mood, stripped before synthesis and kept within `llm_tag_max_deviation` of the affect state, so the voice and the robot's body never contradict each other. On Piper, wording also carries mood: the persona prompt asks the LLM for interjections and punctuation that match it.
+Mood sources: `auto` follows the affect engine sentence by sentence; `fixed` pins one mood (useful for an app or a demo); `llm_tagged` lets the LLM tag each sentence with a mood, stripped before synthesis and kept within `llm_tag_max_deviation` of the affect state, so the voice and the robot's body never contradict each other. On Piper, wording also carries mood: the rules rendered into the system prompt (Conversation state) ask the LLM for interjections and punctuation that match it.
 
 The web UI previews any sentence in any mood and voice before saving, and every value above is part of the `voice` parameter group (section 11A).
 
@@ -683,11 +738,11 @@ Outside app mode, `Robot.from_manifest(path)` opens its own connection: any othe
 
 ### Plugin interfaces
 
-`JointDriver`, PoseGroupDriver, `SensorDriver`, `ChannelDriver`, `PerceptionModule`, `ASRBackend`, `TTSBackend`, `LLMBackend`, `MotionPolicy`, `AppraisalRule`. Plugins are registered through Python entry points; C++ drivers through a small C ABI loaded by `roboemot-rt`.
+`JointDriver`, PoseGroupDriver, `SensorDriver`, `ChannelDriver`, `PerceptionModule`, `WorldSource`, `ScanPlanner`, `ASRBackend`, `TTSBackend`, `LLMBackend`, `MotionPolicy`, `AppraisalRule`. Plugins are registered through Python entry points; C++ drivers through a small C ABI loaded by `roboemot-rt`.
 
 ### Bus
 
-One process per heavy module (rt, vision, audio, core; plus the SDK bridge on Reachy Mini), connected by a local message bus with shared-memory transport for frames: Zenoh or iceoryx2 are the candidates, chosen in milestone M0. Messages are typed with versioned schemas (Protobuf or FlatBuffers). Main topics: `percept.face`, `percept.pose`, `percept.utterance`, `person.recognized`, `affect.state`, `attention.target`, `motion.request`, `motion.state`, `speech.say`, `safety.event`, circadian.state; camera frames and audio in/out travel over shared memory.
+One process per heavy module (rt, vision, audio, core; plus the SDK bridge on Reachy Mini), connected by a local message bus with shared-memory transport for frames: Zenoh or iceoryx2 are the candidates, chosen in milestone M0. Messages are typed with versioned schemas (Protobuf or FlatBuffers). Main topics: `percept.face`, `percept.pose`, `percept.utterance`, `percept.entity`, `world.entity_appeared`, `world.entity_moved`, `world.entity_gone`, `person.recognized`, `affect.state`, `attention.target`, `motion.request`, `motion.state`, `speech.say`, `safety.event`, circadian.state; camera frames and audio in/out travel over shared memory.
 
 ### LLM tools
 
@@ -704,7 +759,7 @@ The effective configuration is the merge of six layers; a later layer overrides 
 1. **Library defaults:** shipped with RoboEmot, documented in the generated reference.
 2. **Robot manifest:** hardware limits, channels, expression map and retargeting for that robot. Hardware limits are ceilings no later layer can exceed.
 3. **Personality preset:** a named bundle (for example `calm`, `curious`, `playful`) that can extend another preset.
-4. **App config:** the application's own file, such as `companion.yaml`.
+4. **App config:** the application's own file, such as `companion.yaml`. Values the library derives in place of app values (persona traits rated by an LLM, section 11A Persona) sit just above it, in memory only.
 5. **Per-person overrides:** `register_overrides` and preferences in the registry (section 6).
 6. **Runtime overrides:** set from the API or the web UI, either persistent or with a time limit (`ttl`).
 
@@ -713,7 +768,7 @@ The effective configuration is the merge of six layers; a later layer overrides 
 - **Schema:** parameters are declared as typed models (pydantic) and exported as JSON Schema. The reference docs and the web UI forms are generated from the schema; unknown keys and out-of-range values are rejected with the reason.
 - **Hot reload:** a change applies within 1 s without restart, except parameters marked restart-only (model choices, profile). The merged result is published as `config.changed` on the bus.
 - **Not only scalars:** expression entries are keyframe sequences, and mappings such as affect to motion amplitude are piecewise-linear tables, so the shape of a behaviour is configurable, not just its strength.
-- **Guardrails:** safety parameters (`safety.*`, minor-present policies) can be changed at runtime only in the conservative direction; loosening them requires editing the app config and confirming with the admin PIN in the web UI. Privacy options are off by default and need an explicit opt-in. Every change, from any layer (runtime, preset switch, hot reload), is checked as a whole candidate configuration against the admin-approved baseline, so section-level writes cannot bypass the rules; per-person overrides may shape only register, voice and conversation, never a guarded value.
+- **Guardrails:** safety parameters (`safety.*`, minor-present policies) can be changed at runtime only in the conservative direction; loosening them requires editing the app config and confirming with the admin PIN in the web UI. Privacy options are off by default and need an explicit opt-in. Prompt text (`persona.prompt`, `safety.extra_prompt_rules`) changes only with the admin confirmation, in any layer. Every change, from any layer (runtime, preset switch, hot reload), is checked as a whole candidate configuration against the admin-approved baseline, so section-level writes cannot bypass the rules; per-person overrides may shape only register, voice, conversation and `persona.traits` (never the persona prompt), never a guarded value.
 - **Versioning and audit:** every file carries `schema_version`, with shipped migrations; every runtime change is logged locally with time, source, old and new value.
 - **Preview:** the web UI can play an expression or primitive with the current values before saving.
 - **Enforced in CI:** a lint check fails when a behaviour module uses a numeric constant instead of a config parameter.
@@ -732,12 +787,14 @@ The effective configuration is the merge of six layers; a later layer overrides 
 | `reflexes` | rules: trigger, threshold, primitive, amplitude, cooldown | Section 10 |
 | `attention` | priority order, switch hysteresis, head-tracking weight policy | Sections 4A, 5 |
 | `identity` | match threshold, margin, votes, estimate confidence threshold, online refresh cap | Sections 5, 6 |
+| `world` | match gates, half-life per kind, out-of-view decay, forget threshold, moved threshold; scan interval, jitter and amplitude; auto-enrollment days and spread; history retention | Section 5A |
 | `mirror` | retargeting, filter parameters, keypoint confidence floor, hold and decay, mirror image, recording length | Section 9 |
 | `voice` | TTS backend and fallback, voice per language, base rate, pitch, volume and variability, expressivity, mood source, per-mood prosody deltas, instructions and sounds, limits; wake word and its policy, barge-in sensitivity, active ASR language | Section 8 |
-| `conversation` | session timeout, history turns, persona prompt, reply length, language | Section 8 |
+| `persona` | identity prompt and its length cap, traits (warmth, energy, playfulness, formality), trait source (manual or LLM), trait-to-parameter tables | Section 11A |
+| `conversation` | session timeout, history turns, reply length, language, profile and scene summary caps | Section 8 |
 | `llm_routes` | endpoints, timeouts, token budgets, minors flag | Section 8 |
-| `safety` (conservative only at runtime) | minor-present motion factor, watchdog, stop behaviour | Section 12 |
-| `privacy` (opt-in) | multimodal frames, pseudonyms to cloud, keeping enrollment images, debug recording | Section 12 |
+| `safety` (conservative only at runtime) | minor-present motion factor, watchdog, stop behaviour, extra rules appended to the prompt's safety block | Sections 8, 12 |
+| `privacy` (opt-in) | multimodal frames, pseudonyms to cloud, keeping enrollment images, debug recording, world history | Sections 5A, 12 |
 | `connectivity` | per link (network, robot): failure and success thresholds, check backoff and jitter, check timeout; offline gestures, spoken offline phrase per language, cue cooldown | Section 12A |
 
 ### Personality preset example
@@ -746,24 +803,62 @@ The effective configuration is the merge of six layers; a later layer overrides 
 personality: curious
 extends: default
 schema_version: 1
+persona:
+  traits: {energy: 1.0, playfulness: 0.8}   # livelier motion, idle and voice; reactions one step up
 affect:
   half_life_s: 6
 appraisal:
   overrides:
     - {event: person.unknown_appears, valence: 0.2, arousal: 0.4, label: curiosity}
-register:
-  adult: {motion_amplitude: 1.2, reaction_intensity: high}
 expression_map:
   curiosity:
     antennas: {keyframes: [[0.0, up, up], [0.4, up, tilt]], wiggle_hz: 0}
     head: {tilt_deg: 15, duration_s: 0.6}
 motion:
-  idle: {breathing_period_s: 3.5, gaze_shift_interval_s: [2, 6]}
+  idle: {gaze_shift_interval_s: [2, 6]}
 circadian:
   quiet_hours: ["22:30", "07:00"]
 ```
 
 API: `robot.config.get(key)`, `robot.config.set(key, value, ttl=None)`, `robot.config.preset(name)`, and the `config.changed` event.
+
+### Persona
+
+The persona is the robot's identity: one short prompt that every LLM request carries (section 8, Conversation state), and a few numeric traits that shape the body and the voice the same way with or without an LLM. Switching preset switches words, voice and motion together.
+
+```yaml
+persona:
+  prompt: >-
+    You are a small robot with a body and feelings of your own. You notice the people,
+    animals and things around you, remember only what people choose to share, and react
+    honestly to what happens. Speak briefly and warmly, like a curious friend, not like an
+    assistant. Say when you don't know. Your words, voice and movements express one mood:
+    keep them in agreement.
+  prompt_max_chars: 600
+  traits_source: manual            # manual | llm
+  traits: {warmth: 0.7, energy: 0.5, playfulness: 0.5, formality: 0.3}   # each in [0, 1]
+  trait_effects:                   # piecewise-linear tables: trait value -> effect on an existing parameter
+    energy:
+      motion_amplitude_x:   [[0, 0.8], [0.5, 1.0], [1, 1.2]]   # multiplies register.*.motion_amplitude
+      idle_period_x:        [[0, 1.25], [0.5, 1.0], [1, 0.8]]  # multiplies motion.idle breathing_period_s and gaze_shift_interval_s
+      voice_rate_x:         [[0, 0.9], [0.5, 1.0], [1, 1.1]]   # multiplies voice.base.rate
+    warmth:
+      voice_pitch_st_add:   [[0, -1], [0.7, 0], [1, 0.5]]      # added to voice.base.pitch_st
+      expressivity_x:       [[0, 0.7], [0.7, 1.0], [1, 1.0]]   # multiplies voice.expressivity
+    playfulness:
+      reaction_steps:       [[0, -1], [0.5, 0], [1, 1]]        # steps on register.*.reaction_intensity (low, medium, high)
+      voice_variability_add: [[0, -0.1], [0.5, 0], [1, 0.1]]   # added to voice.base.variability
+    formality:
+      vocabulary_steps:     [[0, 0], [0.7, 0], [1, 1]]         # steps on register.*.vocabulary toward formal
+```
+
+Rules:
+
+- **Prompt.** The default is in English and any language is accepted; the reply language is added by code (section 8), so one prompt serves every language. Rejected at load when longer than `prompt_max_chars`. It states identity and tone; vocabulary level, reply length cap, language, mood tags and safety are rendered by code, so it need not repeat them.
+- **Traits are runtime multipliers and offsets, never configuration writes.** They apply at the same stage as the register and the circadian state (section 7, Expression map; section 8, How the final delivery is computed). An app's explicit values (`voice.base.rate`, `register.*.motion_amplitude`) stay the base the traits scale around. The result is then clamped as usual by `voice.limits`, the manifest ceilings and the safety limiter, so no persona can pass a safety bound.
+- **Steps and clamping.** `_x` keys multiply, `_add` keys add, `_steps` keys move an enumerated parameter by whole steps (rounded to the nearest step, halves away from zero) and stop at its ends. Every result is clamped to the target parameter's own schema range.
+- **Neutral defaults.** With the default traits every table yields exactly 1.0 (or 0 for `_add` and `_steps`), so the default persona changes no behaviour. Presets (`calm`, `curious`) set their own traits and may replace the prompt; traits act on every age group's register, child and unknown included, always within the register's ranges and the safety caps.
+- **Trait source `llm` (opt-in).** The router asks the first available route, once, to rate the prompt on each trait. The request uses the common protocol subset only (no `response_format`, no forced tool choice): the reply is parsed as text and validated against the trait schema. The result is cached by a hash of prompt and model and reused until either changes; the call is charged to the route's daily token budget and logged in the audit log (section 11A, Rules) with source `persona.llm`. The manual `traits` apply from startup; a valid LLM result replaces them through hot reload (`config.changed`). If no route is configured or reachable, the budget is spent, or the reply does not validate, the manual `traits` stay: the fallback is logged once and never delays startup. The rated traits sit just above the app config and below per-person and runtime overrides, so a person's own traits still win, and they are never written to a file. The LLM proposes only trait values, so this path cannot reach any other parameter.
 
 ## 12. Privacy, safety and ethics
 
@@ -772,7 +867,7 @@ RoboEmot processes biometric data of adults and children in a home, so privacy a
 ### Data
 
 - Face and voice embeddings used to identify people are biometric data, a special category under GDPR Art. 9. Enrollment requires recorded consent; for minors, consent from a parent or guardian.
-- Unknown people are tracked only with session-scoped anonymous IDs, never stored after the session ends.
+- Unknown people are tracked only with session-scoped anonymous IDs, never stored after the session ends; the opt-in world history (section 5A) keeps only kind, position and time for them, with no embedding and no link between sessions.
 - Registry and logs are encrypted at rest (key in a secure element or TPM when present; the CM4 has neither, so the key sits in a root-only file, optionally wrapped by a passphrase entered in the web UI after boot, with recognition off until it is unlocked).
 - No camera frames or audio are written to disk by default; debug recording is opt-in, time-limited and shows a visible indicator (an LED, or on Reachy Mini a fixed antenna pose plus a banner in the web UI).
 - Only text (transcript + scene summary) can reach an off-board LLM route, and that can be disabled entirely; the single-frame multimodal opt-in (section 8) is off by default and blocked while a minor is present.
@@ -887,7 +982,7 @@ Every module must run without hardware: drivers have mocks, perception can repla
 
 | Layer | What | Where |
 | --- | --- | --- |
-| Unit | Affect rules, register resolution, arbiter, limiter, retargeting math | CI, every commit |
+| Unit | Affect rules, register resolution, arbiter, limiter, retargeting math; system prompt composition (order, safety block not removable, trimming drops turns only), persona traits (neutral defaults, clamping, LLM trait source and its fallbacks) | CI, every commit |
 | Contract | Each driver against the `JointDriver` / PoseGroupDriver / `SensorDriver` spec (limits respected, timing, reconnect) | CI with mocks; HIL for real drivers |
 | Replay | Recorded camera + audio sessions with ground-truth labels, played through the full stack | CI nightly |
 | Simulation | Reachy Mini's official MuJoCo simulation (reachy-mini-daemon --sim --headless, no display needed) driven through the same driver; other manifests in MuJoCo or a kinematic mock for motion, mimicry and safety tests | CI nightly |
@@ -900,7 +995,7 @@ Endurance: before each release, a 2-hour continuous run on the CM4, on battery a
 ### Milestones
 
 1. **M0 Skeleton**: manifest parser, layered configuration with schema, validation and hot reload (section 11A), capability negotiation, bus choice (Zenoh vs iceoryx2), C++ motor loop with limiter and e-stop, mock, Reachy Mini and ESP32-S3 drivers, Reachy Mini app packaging for the CM4 with a repeatable install wizard. Exit: Reachy Mini Wireless, first in its MuJoCo simulation and then real, moves safely through the driver with RoboEmot running on its CM4, and the reflex latency is measured.
-2. **M1 Perception**: face detection, tracking, embeddings, registry with enrollment, age/gender estimation, attention target. Exit: robot looks at and names enrolled people; eval report published.
+2. **M1 Perception**: face detection, tracking, embeddings, registry with enrollment, age/gender estimation, attention target; world model with sources, scanning and the Reachy Mini plugin; animals and objects with auto-enrollment and XMP import. Exit: robot looks at and names enrolled people, and keeps a map of the people, animals and objects around it that stays correct while it scans; eval report published.
 3. **M2 Affect and expression**: affect engine, appraisal rules, expression maps, empathic register, reflex engine, circadian model with camera light sensing. Exit: robot reacts distinctly to known adult, known child and stranger with no LLM, and moves through awake, drowsy and resting on a replayed 24-hour light log.
 4. **M3 Voice**: capture with AEC, VAD, fast path, ASR, TTS, barge-in, LLM router with skills. Exit: Italian and English conversation within latency budgets.
 5. **M4 Mirror**: live mimicry and learning from demonstration. Exit: a gesture recorded on one robot replays on a second robot with a different manifest.
@@ -919,6 +1014,8 @@ Milestones are ordered by dependency; dates are not set yet.
 - [ ] Is the library open source, and under which licence? It affects the choice of pretrained models (some face models have non-commercial licences) and how Piper (GPL-3.0) is bundled.
 - [ ] Is the Reachy Mini app web UI enough for enrollment and settings, or is a phone app needed?
 - [ ] Is a learned motor policy expected in v1, or is the procedural policy with a plug-in slot acceptable?
+- [ ] Spike before M1 auto-enrollment: can a general image embedding tell individual animals and objects apart (this cat vs. that cat, my mug vs. a similar one) accurately and fast enough on the CM4? The result sets the `world.autoenroll` defaults, or limits auto-enrollment to categories.
+- [ ] Are warmth, energy, playfulness and formality the right persona traits, and do the default trait tables (section 11A, Persona) feel right on the robot?
 
 * [ ] Are the reduced cm4 rates acceptable for v1 (vision 5 to 10 fps, identity within 2.5 s, object detection off by default)?
 * [ ] Should any route be cleared for use with children present (per-provider usage-policy check), or should conversation stay adults-only in v1?

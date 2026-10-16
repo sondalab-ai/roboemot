@@ -216,7 +216,6 @@ async def test_secret_resolution():
 def test_build_messages_text_only_with_pseudonyms():
     msgs = build_messages(
         system="S",
-        persona_fragment="P",
         profile_summary="Marcello, adult",
         scene_summary="Marcello and a child",
         history=[{"role": "assistant", "content": "Ciao Marcello"}],

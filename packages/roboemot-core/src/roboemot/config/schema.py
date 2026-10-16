@@ -8,6 +8,8 @@ Every field carries a default, a unit and a range. Field metadata (``json_schema
   ``"lower"`` (smaller values are safer), ``"higher"``, ``"false"`` / ``"true"`` for booleans
   that are safer off / on. Changes in the other direction need admin approval (stack.py).
 - ``opt_in``: privacy options; turning them on needs the admin confirmation.
+- ``admin_only``: prompt text, where no direction is safe; any change needs the admin
+  confirmation.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ def param(
     restart: bool = False,
     conservative: Literal["lower", "higher", "false", "true"] | None = None,
     opt_in: bool = False,
+    admin_only: bool = False,
 ) -> Any:
     extra: dict[str, Any] = {"restart": restart}
     if unit:
@@ -39,6 +42,8 @@ def param(
         extra["conservative"] = conservative
     if opt_in:
         extra["opt_in"] = True
+    if admin_only:
+        extra["admin_only"] = True
     kwargs: dict[str, Any] = {"description": description, "json_schema_extra": extra}
     if ge is not None:
         kwargs["ge"] = ge
@@ -304,6 +309,11 @@ class MotionConfig(Strict):
 
 
 class SafetyConfig(Strict):
+    extra_prompt_rules: list[str] = param(
+        [],
+        "Rules appended to the system prompt's safety block (SPEC 8); changes need the admin",
+        admin_only=True,
+    )
     minor_motion_factor: float = param(
         0.6,
         "Speed and amplitude factor while a minor is present",
@@ -513,12 +523,105 @@ class ConversationConfig(Strict):
         5.0, "Session ends after this absence", unit="min", ge=0.5, le=120
     )
     history_turns: int = param(12, "Short-term turns kept in RAM", ge=0, le=100)
-    persona_prompt: str = param(
-        "You are a small expressive robot. Answer briefly, warmly and honestly.",
-        "Base system prompt",
-    )
     max_reply_sentences: int = param(3, "Reply length cap", ge=1, le=20)
     language: str = param("it", "Default conversation language")
+    profile_summary_max_chars: int = param(
+        400, "Cap on the speaker's profile summary in the system prompt", ge=0, le=4000
+    )
+    scene_summary_max_chars: int = param(
+        400, "Cap on the scene summary in the system prompt", ge=0, le=4000
+    )
+
+
+# --------------------------------------------------------------------------- persona (SPEC 11A)
+
+DEFAULT_PERSONA_PROMPT = (
+    "You are a small robot with a body and feelings of your own. You notice the people, "
+    "animals and things around you, remember only what people choose to share, and react "
+    "honestly to what happens. Speak briefly and warmly, like a curious friend, not like an "
+    "assistant. Say when you don't know. Your words, voice and movements express one mood: "
+    "keep them in agreement."
+)
+TRAITS = ("warmth", "energy", "playfulness", "formality")
+Curve = list[tuple[float, float]]
+
+
+class PersonaTraits(Strict):
+    warmth: float = param(0.7, "Warm and affectionate (1) or cool and detached (0)", ge=0, le=1)
+    energy: float = param(0.5, "Lively and fast (1) or slow and quiet (0)", ge=0, le=1)
+    playfulness: float = param(0.5, "Playful and reactive (1) or composed (0)", ge=0, le=1)
+    formality: float = param(0.3, "Formal (1) or casual (0) wording", ge=0, le=1)
+
+
+class EnergyEffects(Strict):
+    motion_amplitude_x: Curve = param(
+        [(0, 0.8), (0.5, 1.0), (1, 1.2)], "Multiplies register.*.motion_amplitude"
+    )
+    idle_period_x: Curve = param(
+        [(0, 1.25), (0.5, 1.0), (1, 0.8)],
+        "Multiplies motion.idle breathing_period_s and gaze_shift_interval_s",
+    )
+    voice_rate_x: Curve = param([(0, 0.9), (0.5, 1.0), (1, 1.1)], "Multiplies voice.base.rate")
+
+
+class WarmthEffects(Strict):
+    voice_pitch_st_add: Curve = param(
+        [(0, -1), (0.7, 0), (1, 0.5)], "Added to voice.base.pitch_st (semitones)"
+    )
+    expressivity_x: Curve = param([(0, 0.7), (0.7, 1.0), (1, 1.0)], "Multiplies voice.expressivity")
+
+
+class PlayfulnessEffects(Strict):
+    reaction_steps: Curve = param(
+        [(0, -1), (0.5, 0), (1, 1)], "Steps on register.*.reaction_intensity (low, medium, high)"
+    )
+    voice_variability_add: Curve = param(
+        [(0, -0.1), (0.5, 0), (1, 0.1)], "Added to voice.base.variability"
+    )
+
+
+class FormalityEffects(Strict):
+    vocabulary_steps: Curve = param(
+        [(0, 0), (0.7, 0), (1, 1)], "Steps on register.*.vocabulary toward formal"
+    )
+
+
+class TraitEffects(Strict):
+    energy: EnergyEffects = param({}, "Effects of the energy trait")
+    warmth: WarmthEffects = param({}, "Effects of the warmth trait")
+    playfulness: PlayfulnessEffects = param({}, "Effects of the playfulness trait")
+    formality: FormalityEffects = param({}, "Effects of the formality trait")
+
+    @model_validator(mode="after")
+    def _curves(self) -> TraitEffects:
+        for group in (self.energy, self.warmth, self.playfulness, self.formality):
+            for name, curve in group:
+                xs = [x for x, _ in curve]
+                if not curve or xs != sorted(set(xs)) or xs[0] < 0 or xs[-1] > 1:
+                    raise ValueError(f"{name}: points need strictly increasing x in [0, 1]")
+        return self
+
+
+class PersonaConfig(Strict):
+    prompt: str = param(
+        DEFAULT_PERSONA_PROMPT,
+        "Robot identity, first part of the system prompt; changes need the admin",
+        admin_only=True,
+    )
+    prompt_max_chars: int = param(600, "Longest accepted prompt", ge=50, le=4000)
+    traits_source: Literal["manual", "llm"] = param(
+        "manual", "manual: use traits; llm: ask a route to rate the prompt (falls back to traits)"
+    )
+    traits: PersonaTraits = param({}, "Trait values; neutral defaults change no behaviour")
+    trait_effects: TraitEffects = param({}, "Trait value to parameter effect tables")
+
+    @model_validator(mode="after")
+    def _prompt_length(self) -> PersonaConfig:
+        if len(self.prompt) > self.prompt_max_chars:
+            raise ValueError(
+                f"persona.prompt has {len(self.prompt)} characters, max {self.prompt_max_chars}"
+            )
+        return self
 
 
 class LLMRoute(Strict):
@@ -635,6 +738,7 @@ with warnings.catch_warnings():
         identity: IdentityConfig = param({}, "SPEC 5, 6")
         mirror: MirrorConfig = param({}, "SPEC 9")
         voice: VoiceConfig = param({}, "SPEC 8")
+        persona: PersonaConfig = param({}, "SPEC 11A")
         conversation: ConversationConfig = param({}, "SPEC 8")
         llm_routes: list[LLMRoute] = param([], "SPEC 8")
         safety: SafetyConfig = param({}, "SPEC 12")

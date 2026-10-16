@@ -247,15 +247,18 @@ class Router:
 def build_messages(
     *,
     system: str,
-    persona_fragment: str,
     profile_summary: str | None,
     scene_summary: str | None,
     history: list[dict[str, str]],
     user_text: str,
+    affect: str | None = None,
     names: dict[str, str] | None = None,
+    summary_max_chars: tuple[int, int] | None = None,
 ) -> list[dict[str, Any]]:
-    """Text-only request (SPEC 8, 12). ``names`` maps real names to pseudonyms when the route
-    option is on; embeddings, audio and images never enter this function."""
+    """Text-only request (SPEC 8, 12). ``system`` is parts 1 to 4 from
+    ``roboemot.llm.prompt.system_prompt``; the speaker, scene and affect parts follow, the
+    summaries cut to ``summary_max_chars`` (profile, scene). ``names`` maps real names to
+    pseudonyms when the route option is on; embeddings, audio and images never enter here."""
 
     def scrub(text: str | None) -> str | None:
         if text is None or not names:
@@ -264,11 +267,14 @@ def build_messages(
             text = text.replace(real, alias)
         return text
 
-    sys_parts = [system, persona_fragment]
+    profile_cap, scene_cap = summary_max_chars or (None, None)
+    sys_parts = [system]
     if profile_summary:
-        sys_parts.append(f"Speaker: {scrub(profile_summary)}")
+        sys_parts.append(f"Speaker: {scrub(profile_summary)[:profile_cap]}")
     if scene_summary:
-        sys_parts.append(f"Scene: {scrub(scene_summary)}")
+        sys_parts.append(f"Scene: {scrub(scene_summary)[:scene_cap]}")
+    if affect:
+        sys_parts.append(f"Your mood: {affect}")
     msgs: list[dict[str, Any]] = [{"role": "system", "content": "\n".join(sys_parts)}]
     msgs += [{"role": m["role"], "content": scrub(m["content"])} for m in history]
     msgs.append({"role": "user", "content": scrub(user_text)})
