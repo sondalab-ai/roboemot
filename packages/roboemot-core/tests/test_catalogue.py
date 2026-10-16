@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import struct
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -318,3 +320,41 @@ def test_listings_carry_no_embeddings(tmp_path):
     (live,) = svc.live_entries()
     assert (live.kind, live.category, live.identified) == ("animal", "cat", False)
     assert HEAD and TAIL
+
+
+# ------------------------------------------------------------------ real DINOv2 (opt in)
+
+BENCH_MODELS = Path(os.environ.get("ROBOEMOT_BENCH_MODELS", "~/.cache/roboemot-bench/models"))
+
+
+@pytest.fixture(scope="module")
+def dino():
+    pytest.importorskip("onnxruntime")
+    from roboemot.vision import models, onnx
+
+    spec = models.load_manifest()["dinov2-small"]
+    for root in (BENCH_MODELS.expanduser(), models.default_dir()):
+        if models.status(spec, root) == "ok":
+            return onnx.DinoV2Embedder(models.check_file(root, spec.files[0]), threads=2)
+    pytest.skip("DINOv2-S is not in the model cache (roboemot models fetch dinov2-small)")
+
+
+@pytest.mark.models
+def test_real_dinov2_embeds_photo_regions_and_keeps_them_pending(tmp_path, dino):
+    rng = np.random.default_rng(3)
+    scene = (rng.random((300, 400, 3)) * 255).astype(np.uint8)
+    photo = cv2.imencode(".png", scene)[1].tobytes()
+    reg = make_registry(tmp_path)
+    svc = CatalogueService(reg, CatalogueConfig(), embedder=lambda: dino)
+    report = svc.import_sidecar(ATTR_FORM, photo)
+    assert report.photo == "used"
+    mia = next(e for e in reg.entities() if e.display_name == "Mia")
+    assert mia.status == "pending" and mia.embedding_model_id == dino.model_id
+    assert mia.embeddings.shape == (1, 384)
+    assert float(np.linalg.norm(mia.embeddings[0])) == pytest.approx(1.0, abs=1e-4)
+    same = dino.embed(scene, (160.0, 75.0, 240.0, 165.0))
+    other = dino.embed(scene, (0.0, 150.0, 120.0, 300.0))
+    assert float(mia.embeddings[0] @ same) > 0.999 > float(mia.embeddings[0] @ other)
+    assert reg.gallery("entity", dino.model_id) == {}
+    done = svc.confirm(mia.entity_id)
+    assert done.status == "active" and mia.entity_id in reg.gallery("entity", dino.model_id)
