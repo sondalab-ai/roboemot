@@ -24,6 +24,7 @@ from roboemot.health.network import NetworkMonitor
 from roboemot.health.responder import OfflineResponder
 from roboemot.manifest import load_manifest
 from roboemot.motion import Command, MotionLoop, Priority
+from roboemot.persona import effects as persona_effects
 
 from .driver import ReachyMiniDriver
 
@@ -36,9 +37,11 @@ DATA = Path(__file__).resolve().parent / "data"
 
 
 def idle_command(cfg: Any, t: float) -> Command:
-    """Breathing on head pitch (SPEC 10, Idle; parameters from motion.idle)."""
+    """Breathing on head pitch (SPEC 10, Idle; parameters from motion.idle, period scaled by
+    the persona's energy, SPEC 11A)."""
     idle = cfg.motion.idle
-    pitch = idle.breathing_amplitude * math.sin(2 * math.pi * t / idle.breathing_period_s)
+    period = idle.breathing_period_s * persona_effects(cfg.persona).idle_period_x
+    pitch = idle.breathing_amplitude * math.sin(2 * math.pi * t / period)
     return Command("idle", Priority.IDLE, {"head.pitch": pitch}, t)
 
 

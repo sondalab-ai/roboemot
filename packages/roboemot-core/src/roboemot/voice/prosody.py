@@ -1,8 +1,8 @@
 """Compute the final voice delivery and map it onto TTS backends (SPEC 8).
 
 1. start from ``voice.base``;
-2. apply the register and the circadian state (multipliers for rate, offsets for pitch and
-   volume);
+2. apply the persona traits, the register and the circadian state (multipliers for rate,
+   offsets for pitch and volume);
 3. add the mood deltas scaled by affect intensity times ``expressivity``;
 4. clamp to ``voice.limits``, then render per backend.
 """
@@ -14,6 +14,7 @@ import re
 from dataclasses import dataclass, field
 
 from ..config.schema import AffectConfig, RegisterParams, StateEffects, VoiceConfig
+from ..persona import PersonaEffects
 
 TAG = re.compile(r"\[mood=([a-z_]+)\]\s*")
 DB_PER_DECADE = 20.0
@@ -43,17 +44,20 @@ def compose_delivery(
     circadian: StateEffects,
     mood: str | None,
     intensity: float,
+    persona: PersonaEffects | None = None,
 ) -> Delivery:
-    b = voice.base
-    rate = b.rate * register.speech_rate * circadian.speech_rate
-    pitch = b.pitch_st + register.pitch_st
+    b, fx = voice.base, persona or PersonaEffects()
+    rate = b.rate * fx.voice_rate_x * register.speech_rate * circadian.speech_rate
+    pitch = b.pitch_st + fx.voice_pitch_st_add + register.pitch_st
     volume = b.volume_db + circadian.volume_db
-    variability, pause, instructions, sounds = b.variability, 1.0, "", []
+    variability = b.variability + fx.voice_variability_add
+    expressivity = min(1.0, voice.expressivity * fx.expressivity_x)
+    pause, instructions, sounds = 1.0, "", []
     if voice.mood_source == "fixed":
         mood = voice.fixed_mood
     m = voice.moods.get(mood) if mood else None
     if m:
-        k = max(0.0, min(1.0, intensity)) * voice.expressivity
+        k = max(0.0, min(1.0, intensity)) * expressivity
         rate += m.rate * k
         pitch += m.pitch_st * k
         volume += m.volume_db * k
