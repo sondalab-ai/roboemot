@@ -18,7 +18,7 @@ import re
 import warnings
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ROUTE_NAME = re.compile(r"[A-Za-z0-9_-]+")
 
@@ -441,6 +441,9 @@ class IdentityConfig(Strict):
         return self
 
 
+ATTENTION_CATEGORIES = ("active_speaker", "enrolled_person", "nearest_face", "salient_motion")
+
+
 class AttentionConfig(Strict):
     priority_order: list[str] = param(
         ["active_speaker", "enrolled_person", "nearest_face", "salient_motion"],
@@ -449,6 +452,81 @@ class AttentionConfig(Strict):
     switch_hysteresis_s: float = param(
         1.5, "Min time before switching target", unit="s", ge=0, le=30
     )
+    stale_s: float = param(
+        4.0,
+        "An entry not confirmed for this long is no longer a candidate",
+        unit="s",
+        ge=0.1,
+        le=60,
+    )
+    speaker_hold_s: float = param(
+        1.5, "How long an active-speaker hint stays valid", unit="s", ge=0.1, le=30
+    )
+    speaker_match_deg: float = param(
+        20.0, "Angular gate to match a speaker bearing to a world entry", unit="deg", ge=0.5, le=90
+    )
+    motion_window_s: float = param(
+        0.5, "Window over which an entry's bearing change counts as motion", unit="s", ge=0.05, le=5
+    )
+    motion_min_dps: float = param(
+        10.0, "Angular speed above which an entry counts as moving", unit="deg/s", ge=0.1, le=720
+    )
+    release_s: float = param(
+        3.0, "No target for this long hands the head back to idle motion", unit="s", ge=0, le=60
+    )
+    publish_hz: float = param(
+        5.0, "Rate of attention.target while the target is unchanged", unit="Hz", ge=0.1, le=50
+    )
+    publish_move_deg: float = param(
+        5.0, "Target bearing change that is published at once", unit="deg", ge=0.1, le=90
+    )
+    follow_gain: float = param(
+        4.0, "Proportional gain of the gaze towards the target bearing", unit="1/s", ge=0.1, le=50
+    )
+    max_rate_dps: float = param(
+        120.0, "Gaze speed cap before the safety limiter", unit="deg/s", ge=1, le=720
+    )
+    head_yaw_comfort_deg: float = param(
+        45.0,
+        "Head yaw offset from the body beyond which the body turns too",
+        unit="deg",
+        ge=0,
+        le=180,
+    )
+    switch_margin: float = param(
+        0.25,
+        "Relative advantage a same-category candidate needs to replace the current target",
+        ge=0,
+        le=5,
+    )
+    rear_band_deg: float = param(
+        20.0,
+        "Width of the band around straight behind where the gaze keeps its current side",
+        unit="deg",
+        ge=0,
+        le=90,
+    )
+    body_recenter_dps: float = param(
+        5.0,
+        "Speed at which the body drifts back to home while the head is within comfort",
+        unit="deg/s",
+        ge=0,
+        le=90,
+    )
+    command_ttl_s: float = param(
+        0.5, "Lifetime of an attention command in the arbiter", unit="s", ge=0.05, le=5
+    )
+
+    @field_validator("priority_order")
+    @classmethod
+    def _known_categories(cls, v: list[str]) -> list[str]:
+        if not v:
+            raise ValueError("attention.priority_order must name at least one category")
+        if unknown := sorted(set(v) - set(ATTENTION_CATEGORIES)):
+            raise ValueError(f"attention.priority_order: unknown categories {unknown}")
+        if len(set(v)) != len(v):
+            raise ValueError("attention.priority_order: duplicate category")
+        return v
 
 
 # --------------------------------------------------------------------------- world (SPEC 5A)
@@ -465,6 +543,12 @@ class WorldHalfLife(Strict):
 
 
 class WorldConfig(Strict):
+    camera_fov_h_deg: float = param(
+        78.0, "Horizontal field of view of the main camera", unit="deg", ge=10, le=360
+    )
+    camera_fov_v_deg: float = param(
+        58.0, "Vertical field of view of the main camera", unit="deg", ge=10, le=180
+    )
     match_gate_deg: float = param(
         15.0, "Angular gate for matching an observation to an entry", unit="deg", ge=0.5, le=90
     )

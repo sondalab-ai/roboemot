@@ -167,3 +167,34 @@ def test_debug_report_against_the_simulated_daemon():
     assert s["robot.daemon"]["data"]["simulation_enabled"] is True
     assert s["robot.motors"]["data"]["mode"] in ("enabled", "disabled", "gravity_compensation")
     assert s["robot.state"]["data"]["imu"] is None
+
+
+def test_attention_turns_the_head_towards_a_world_entry(loop):
+    """SPEC 5, 10: a person injected at az +30 deg, el +10 deg makes the head turn left and up.
+
+    Runs the app's own attention step against the simulated robot; the fallback dynamics are
+    slow, so the timeout is generous.
+    """
+    from roboemot.attention import AttentionSelector, GazeController
+    from roboemot.world import Observation, WorldModel
+    from roboemot_reachymini.app import attention_tick
+    from roboemot_reachymini.gaze import FRAME, GAZE
+
+    cfg = ConfigStack().effective()
+    manifest = loop.manifest
+    world = WorldModel(cfg.world, FRAME)
+    selector = AttentionSelector(cfg.attention)
+    gaze = GazeController(cfg.attention, GAZE, manifest.dofs, manifest.constraints)
+    az, el = math.radians(30), math.radians(10)
+    deadline = time.monotonic() + 20.0
+    state: dict[str, float] = {}
+    while time.monotonic() < deadline:
+        now = time.monotonic()
+        world.observe(Observation("person", now, "sim-test", az, el, "face"))
+        assert attention_tick(now, world, selector, gaze, loop)
+        state = loop.driver.read_state()
+        if state["head.yaw"] > 0.9 * az and state["head.pitch"] < -0.9 * el:
+            break
+        time.sleep(0.05)
+    assert state["head.yaw"] > 0.9 * az, state  # turned left
+    assert state["head.pitch"] < -0.9 * el, state  # looking up (nose up is negative pitch)
