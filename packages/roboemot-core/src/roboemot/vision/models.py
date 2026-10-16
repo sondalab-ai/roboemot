@@ -26,7 +26,8 @@ into the models folder only when asked (``roboemot models fetch``), never at imp
   a failed re-quantization leaves the old file and marker untouched.
 
 Downloaded files are only ever loaded as ONNX weights. The folder is ``--cache-dir``,
-``vision.models_dir`` or, by default, ``~/.cache/roboemot/models``.
+``vision.models_dir`` or, by default, ``models/`` in the app data folder (``roboemot.paths``,
+``~/.local/share/roboemot``), so uninstalling the app removes the models with it.
 """
 
 from __future__ import annotations
@@ -43,6 +44,8 @@ from typing import Literal
 import httpx
 import yaml
 from pydantic import BaseModel, ConfigDict, model_validator
+
+from .. import paths
 
 MANIFEST = Path(__file__).with_name("models.yaml")
 ENV_DIR = "ROBOEMOT_MODELS_DIR"
@@ -146,23 +149,24 @@ def resolve_precision(configured: str, profile: str | None) -> str:
     return configured
 
 
-def default_dir() -> Path:
-    """``$ROBOEMOT_MODELS_DIR`` or ``~/.cache/roboemot/models``.
+def default_dir(data_dir: str = "") -> Path:
+    """``$ROBOEMOT_MODELS_DIR`` or ``models/`` in the app data folder.
 
-    This is where ``roboemot models fetch`` writes and where the backends look unless
-    ``--cache-dir`` or ``vision.models_dir`` says otherwise.
+    ``data_dir`` is the ``data_dir`` config value (empty: ``$ROBOEMOT_DATA_DIR`` or
+    ``~/.local/share/roboemot``). This is where ``roboemot models fetch`` writes and where the
+    backends look unless ``--cache-dir`` or ``vision.models_dir`` says otherwise.
     """
     env = os.environ.get(ENV_DIR)
-    return Path(env) if env else Path.home() / ".cache" / "roboemot" / "models"
+    return Path(env) if env else paths.models_subdir(data_dir)
 
 
-def models_dir(configured: str = "") -> Path:
-    """The folder for ``vision.models_dir`` (empty means the default).
+def models_dir(configured: str = "", data_dir: str = "") -> Path:
+    """The folder for ``vision.models_dir`` (empty means the default under ``data_dir``).
 
     A configured path has ``~`` expanded. The folder is not created here; ``fetch`` creates
     the subfolders it needs.
     """
-    return Path(configured).expanduser() if configured else default_dir()
+    return Path(configured).expanduser() if configured else default_dir(data_dir)
 
 
 def sha256_of(path: Path) -> str:

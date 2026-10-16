@@ -641,7 +641,9 @@ class VisionConfig(Strict):
         4, "Age and gender jobs waiting for the worker; further tracks wait", ge=1, le=64
     )
     models_dir: str = param(
-        "", "Folder with the ONNX model files; empty means ~/.cache/roboemot/models", restart=True
+        "",
+        "Folder with the ONNX model files; empty means models/ in the app data folder (data_dir)",
+        restart=True,
     )
     objects_enabled: bool = param(False, "Run the object detector (off by default on cm4)")
     object_score_min: float = param(
@@ -1093,6 +1095,12 @@ with warnings.catch_warnings():
     class RoboEmotConfig(Strict):
         schema_version: int = param(1, "Configuration schema version", ge=1)
         personality: str = param("default", "Name of the personality preset in effect")
+        data_dir: str = param(
+            "",
+            "App data folder (registry, models); empty means $ROBOEMOT_DATA_DIR or "
+            "~/.local/share/roboemot (SPEC 12 Data)",
+            restart=True,
+        )
         affect: AffectConfig = param({}, "SPEC 7")
         appraisal: AppraisalConfig = param({}, "SPEC 7")
         register: RegisterConfig = param({}, "SPEC 7")

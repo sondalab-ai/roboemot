@@ -20,6 +20,8 @@ ROOT = Path(__file__).resolve().parents[3]
 RECORD = ReachyMiniWireless.record_path
 SITE = "/venvs/apps_venv/lib/python3.12/site-packages"
 OWN = {"roboemot-core": "0.1.0.dev0", "roboemot-reachymini": "0.1.0.dev0"}
+HOME = "/home/pollen"
+DATA = f"{HOME}/.local/share/roboemot"
 
 
 # ---------------------------------------------------------------- fakes
@@ -41,6 +43,7 @@ class FakeRobot:
         self.commands: list[str] = []
         self.copies: list[list[Path]] = []
         self.fail_install = False
+        self.dirs: set[str] = {HOME}  # folders that exist (data folder emulation)
 
     # Remote interface
     target = "pollen@robot"
@@ -63,8 +66,21 @@ class FakeRobot:
         plain = " ".join(shlex.split(command)) if command.startswith("/venvs") else command
         if command.startswith("test -x"):
             return "yes"
+        if command == 'printf %s "$HOME"':
+            return HOME
         if command.startswith("test -e"):
-            return "no"
+            return "yes" if shlex.split(command)[2] in self.dirs else "no"
+        if command.startswith("mkdir -p -m 700 "):
+            path = shlex.split(command)[4]
+            while path != HOME:
+                self.dirs.add(path)
+                path = path.rsplit("/", 1)[0]
+            return ""
+        if command.startswith("rmdir "):
+            path = shlex.split(command)[1]
+            if not any(d.startswith(path + "/") for d in self.dirs):
+                self.dirs.discard(path)
+            return ""
         if "platform.machine" in plain:
             return "aarch64\n3.12"
         if "version('reachy_mini')" in plain:
@@ -99,6 +115,7 @@ class FakeRobot:
             return ""
         if command.startswith("rm -rf "):
             path = shlex.split(command)[2]
+            self.dirs = {d for d in self.dirs if d != path and not d.startswith(path + "/")}
             self.tmp_dirs.discard(path)
             self.stray = {m: [p for p in ps if p != path] for m, ps in self.stray.items()}
             self.stray = {m: ps for m, ps in self.stray.items() if ps}
@@ -379,10 +396,12 @@ def test_install_dry_run_touches_nothing(offline, robot, daemon, capsys):
     inst.run_install(options(dry_run=True), quiet_ui(yes=True), ROOT)
     assert daemon.mutations == [] and robot.copies == [] and robot.files == {}
     assert robot.env == env and robot.tmp_dirs == set()
-    writes = ("rm ", "mkdir", "mktemp", "mv ")
+    writes = ("rm ", "rmdir", "mkdir", "mktemp", "mv ")
     assert not [c for c in robot.commands if c.startswith(writes) or "&& mv" in c]
+    assert robot.dirs == {HOME}
     out = capsys.readouterr().out
     assert "would add scipy 1.18.1" in out
+    assert f"would create the data folder {DATA}" in out
     assert "would stop conversation" in out and "dry run passed" in out
 
 
@@ -449,6 +468,7 @@ def snapshot(robot, daemon) -> tuple:
         dict(robot.env),
         dict(robot.files),
         set(robot.tmp_dirs),
+        set(robot.dirs),
         daemon.startup,
         daemon.installed,
     )
@@ -510,7 +530,7 @@ def test_uninstall_after_an_interrupted_install(offline, robot, daemon):
     robot.fail_install = False
     robot.env.update({"scipy": "1.18.1", **OWN})  # pip got that far before the drop
     uninstall()
-    assert snapshot(robot, daemon)[:3] == (before[0], before[1], before[2])
+    assert snapshot(robot, daemon)[:4] == before[:4]
 
 
 def test_uninstall_removes_leftover_modules(offline, robot, daemon):
@@ -551,6 +571,97 @@ def test_every_pip_call_avoids_the_cache(offline, robot, daemon):
     uninstall()
     pip = [c for c in robot.commands if " -m pip " in c]
     assert pip and all("--no-cache-dir" in c for c in pip)
+
+
+# ---------------------------------------------------------------- data folder (SPEC 4A, 12)
+
+
+def test_install_creates_and_records_the_data_folder(offline, robot, daemon):
+    install()
+    record = json.loads(robot.files[RECORD])
+    assert record["data_dir"] == DATA
+    assert record["data_dir_parents"] == [f"{HOME}/.local", f"{HOME}/.local/share"]
+    assert DATA in robot.dirs
+    assert f"mkdir -p -m 700 {DATA}" in robot.commands
+
+
+def test_reinstall_keeps_the_recorded_data_folder(offline, robot, daemon):
+    install()
+    first = json.loads(robot.files[RECORD])
+    install()
+    assert json.loads(robot.files[RECORD])["data_dir_parents"] == first["data_dir_parents"]
+
+
+def test_uninstall_removes_the_data_folder_and_the_parents_it_created(offline, robot, daemon):
+    before = snapshot(robot, daemon)
+    install()
+    robot.dirs.add(f"{DATA}/registry")  # the app wrote a registry
+    uninstall()
+    assert snapshot(robot, daemon) == before
+    assert f"rm -rf {DATA}" in robot.commands
+
+
+def test_uninstall_keeps_parents_that_are_not_empty(offline, robot, daemon):
+    install()
+    robot.dirs.add(f"{HOME}/.local/share/other-app")
+    uninstall()
+    assert DATA not in robot.dirs and f"{HOME}/.local/share" in robot.dirs
+
+
+def test_a_preexisting_data_folder_is_not_ours_to_remove(offline, robot, daemon, capsys):
+    robot.dirs.add(DATA)
+    install()
+    assert json.loads(robot.files[RECORD])["data_dir"] is None
+    assert "not recorded" in capsys.readouterr().out
+    uninstall()
+    assert DATA in robot.dirs
+    assert f"rm -rf {DATA}" not in robot.commands
+
+
+def test_uninstall_without_a_record_leaves_the_data_folder_and_says_so(
+    offline, robot, daemon, capsys
+):
+    robot.dirs.add(DATA)
+    uninstall()
+    assert DATA in robot.dirs
+    assert "no record of the data folder" in capsys.readouterr().out
+
+
+def test_uninstall_dry_run_shows_the_data_folder_and_keeps_it(offline, robot, daemon, capsys):
+    install()
+    capsys.readouterr()
+    uninstall(dry_run=True)
+    assert f"would delete the data folder {DATA}" in capsys.readouterr().out
+    assert DATA in robot.dirs
+    assert not [c for c in robot.commands[-30:] if c.startswith(("rmdir", "rm -rf /home"))]
+
+
+def test_uninstall_verification_fails_while_the_data_folder_remains(
+    offline, robot, daemon, monkeypatch
+):
+    install()
+    real = robot.run
+
+    def run(command, check=True):
+        if command == f"rm -rf {DATA}":
+            return ""
+        return real(command, check)
+
+    monkeypatch.setattr(robot, "run", run)
+    with pytest.raises(WizardError, match="data folder .* still present"):
+        uninstall()
+    assert RECORD in robot.files
+
+
+@pytest.mark.parametrize("bad", ["/", HOME, "/home/pollen/.local/share/roboemot/../x", "relative"])
+def test_uninstall_ignores_a_tampered_data_folder_record(offline, robot, daemon, bad):
+    install()
+    record = json.loads(robot.files[RECORD])
+    record["data_dir"] = bad
+    robot.files[RECORD] = json.dumps(record)
+    robot.dirs.add(bad)
+    uninstall()
+    assert not [c for c in robot.commands if c.startswith("rm -rf") and bad in c.split()]
 
 
 # ---------------------------------------------------------------- robot selection

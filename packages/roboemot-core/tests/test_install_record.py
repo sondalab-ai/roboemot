@@ -161,6 +161,8 @@ class BareRobot:
             return "/dev/sda 1 1 99999999 1% /"
         if command.startswith("cat "):
             return self.files.get(sh.split(command)[1], "")
+        if command == 'printf %s "$HOME"':
+            return "/home/dev"
         if command.startswith("printf %s"):
             t = sh.split(command)
             self.files[t[8]] = t[2]

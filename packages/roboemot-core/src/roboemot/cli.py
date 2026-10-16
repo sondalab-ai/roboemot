@@ -86,8 +86,8 @@ def _models(args: argparse.Namespace) -> int:
     """List the vision models and their state, or download them with sha256 verification."""
     from .vision import models
 
-    configured = args.cache_dir or _stack(args).effective().vision.models_dir
-    root = models.models_dir(configured)
+    cfg = _stack(args).effective()
+    root = models.models_dir(args.cache_dir or cfg.vision.models_dir, cfg.data_dir)
     specs = models.load_manifest()
     if args.action == "list":
         for spec in specs.values():
@@ -163,7 +163,7 @@ def main(argv: list[str] | None = None) -> int:
         help="prune: delete FP32 files whose INT8 files are verified",
     )
     mod.add_argument(
-        "--cache-dir", help="models folder (default: vision.models_dir, else ~/.cache)"
+        "--cache-dir", help="models folder (default: vision.models_dir, else the app data folder)"
     )
     mod.add_argument("--verify", action="store_true", help="list: rehash the files (slow)")
     mod.add_argument("--app")

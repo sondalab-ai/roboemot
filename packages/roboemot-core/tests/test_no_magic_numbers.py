@@ -38,6 +38,7 @@ BEHAVIOUR_MODULES = [
     "world/feed.py",
     "world/scan.py",
     "world/sources.py",
+    "paths.py",
     "vision/__init__.py",
     "vision/attributes.py",
     "vision/geometry.py",

@@ -420,7 +420,8 @@ def test_fetch_unknown_name_and_status(tmp_path):
 
 def test_models_dir_default_and_config(tmp_path, monkeypatch):
     monkeypatch.delenv(models.ENV_DIR, raising=False)
-    assert models.models_dir("") == Path.home() / ".cache" / "roboemot" / "models"
+    monkeypatch.delenv("ROBOEMOT_DATA_DIR", raising=False)
+    assert models.models_dir("") == Path.home() / ".local" / "share" / "roboemot" / "models"
     monkeypatch.setenv(models.ENV_DIR, str(tmp_path))
     assert models.models_dir("") == tmp_path
     assert models.models_dir("/x/y") == Path("/x/y")
