@@ -877,6 +877,7 @@ RoboEmot processes biometric data of adults and children in a home, so privacy a
 - No camera frames or audio are written to disk by default; debug recording is opt-in, time-limited and shows a visible indicator (an LED, or on Reachy Mini a fixed antenna pose plus a banner in the web UI).
 - Only text (transcript + scene summary) can reach an off-board LLM route, and that can be disabled entirely; the single-frame multimodal opt-in (section 8) is off by default and blocked while a minor is present.
 - `export(person_id)` and `forget(person_id)` support access and erasure requests. Names, preferences and transcripts sent to a cloud route are personal data processed by that provider: the consent text at enrollment says so, and a per-route option sends pseudonyms instead of names.
+- The app web UI (enrollment, registry, diagnostics) is plain HTTP on the LAN until TLS lands (M5). Residual risk: on a shared or untrusted Wi-Fi the operator PIN and the session cookie cross the network in clear, so anyone who can sniff the segment can log in. Mitigations in place: the PIN is set only through the installer or the CLI, never over the web; sessions are short (`webui.session_ttl_s` idle, `webui.session_max_s` absolute) and end when the PIN changes; guesses are limited (global budget plus per-client back-off, loopback exempt); the Host header must be an IP, `localhost`, `*.local` or `webui.allowed_hosts` (DNS rebinding), state changes need a CSRF token and a same-origin Origin; forgetting a person or purging an item asks for the PIN again. The page binds to the LAN only when the manifest names a robot profile (`cm4`, `npu`); sim and dev runs bind to loopback. Deploy it on a trusted network until TLS is in.
 
 ### Physical safety
 
@@ -1006,7 +1007,7 @@ Endurance: before each release, a 2-hour continuous run on the CM4, on battery a
 3. **M2 Affect and expression**: affect engine, appraisal rules, expression maps, empathic register, reflex engine, circadian model with camera light sensing. Exit: robot reacts distinctly to known adult, known child and stranger with no LLM, and moves through awake, drowsy and resting on a replayed 24-hour light log.
 4. **M3 Voice**: capture with AEC, VAD, fast path, ASR, TTS, barge-in, LLM router with skills. Exit: Italian and English conversation within latency budgets.
 5. **M4 Mirror**: live mimicry and learning from demonstration. Exit: a gesture recorded on one robot replays on a second robot with a different manifest.
-6. **M5 Hardening**: second and third reference boards, ROS 2 adapter, privacy features (export, forget, encryption), documentation. Exit: v1.0.
+6. **M5 Hardening**: second and third reference boards, ROS 2 adapter, privacy features (export, forget, encryption), documentation, TLS for the app web UI (PIN and cookie are in clear on the LAN until then, section 12). Exit: v1.0.
 
 Milestones are ordered by dependency; dates are not set yet.
 
@@ -1020,6 +1021,7 @@ Milestones are ordered by dependency; dates are not set yet.
 - [ ] Should gender estimation also change register parameters beyond forms of address, and for which use case?
 - [ ] Is the library open source, and under which licence? Partly answered: M1 uses a permissive-weights stack (YuNet, SFace, FairFace ViT-B, DINOv2-S; [spike](../spikes/2026-10-m1-models.md)); the library licence itself is still open. It affects the choice of pretrained models (some face models have non-commercial licences) and how Piper (GPL-3.0) is bundled.
 - [ ] Is the Reachy Mini app web UI enough for enrollment and settings, or is a phone app needed?
+- [ ] To verify on hardware: does Reachy Mini Control embed `custom_app_url` in an iframe? The web UI sends `frame-ancestors 'none'` (`webui.frame_ancestors`, admin-confirmed to change). If Control frames it, set that option to the Control origin and decide the session cookie's SameSite (Strict does not travel in a cross-site frame). Also: `RoboEmotApp` sets `dont_start_webserver = True` when it sets `custom_app_url`, so the SDK does not start its own server on the same port.
 - [ ] Is a learned motor policy expected in v1, or is the procedural policy with a plug-in slot acceptable?
 - [x] Resolved by the M1 model spike ([spike](../spikes/2026-10-m1-models.md)): a general image embedding (DINOv2-S) tells individual dogs apart well (97.5% rank-1) and household objects poorly (66%); auto-enrollment covers both, with defaults in section 5A.
 - [ ] Are warmth, energy, playfulness and formality the right persona traits, and do the default trait tables (section 11A, Persona) feel right on the robot?

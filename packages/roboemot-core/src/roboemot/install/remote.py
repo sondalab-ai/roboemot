@@ -35,10 +35,17 @@ class Remote:
             "-o", f"ConnectTimeout={CONNECT_TIMEOUT_S}",
         ]  # fmt: skip
 
-    def run(self, command: str, check: bool = True) -> str:
-        """Run ``command`` on the robot and return its stdout."""
+    def run(self, command: str, check: bool = True, stdin: str | None = None) -> str:
+        """Run ``command`` on the robot and return its stdout.
+
+        ``stdin`` is sent on the command's standard input, never on its command line: use it
+        for secrets (the operator PIN).
+        """
         proc = subprocess.run(
-            ["ssh", *self._opts(), self.target, command], capture_output=True, text=True
+            ["ssh", *self._opts(), self.target, command],
+            capture_output=True,
+            text=True,
+            input=stdin,
         )
         if check and proc.returncode != 0:
             raise WizardError(f"on robot: {command}\n{proc.stderr.strip() or proc.stdout.strip()}")

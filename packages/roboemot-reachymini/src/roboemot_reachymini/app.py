@@ -22,12 +22,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from roboemot import paths
 from roboemot.affect import AffectEngine
 from roboemot.attention import SOURCE as ATTENTION_SOURCE
 from roboemot.attention import AttentionSelector, GazeController
 from roboemot.bus import Bus
 from roboemot.circadian import CircadianModel, in_window
 from roboemot.config import ConfigStack
+from roboemot.config.schema import RoboEmotConfig
 from roboemot.diagnostics import Diagnostics, FnSource, Target, platform_sources
 from roboemot.diagnostics.system import local_sources
 from roboemot.health.network import NetworkMonitor
@@ -37,6 +39,7 @@ from roboemot.motion import Command, MotionLoop, Priority
 from roboemot.persona import effects as persona_effects
 from roboemot.vision import CIRCADIAN, FrameSource
 from roboemot.vision.service import Perception, default_stages, open_perception, world_snapshot
+from roboemot.webui import Server, make_server
 from roboemot.world import (
     Observation,
     ObserveResult,
@@ -196,7 +199,12 @@ def apply_attention_config(
 
 
 class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
-    custom_app_url: str | None = None  # web UI arrives with enrollment (M1)
+    # The enrollment and registry web UI (SPEC 4A, 6): the daemon reads this class attribute to
+    # show the page; the port is webui.port (change both together). The app serves the page
+    # itself (roboemot.webui), so the SDK must not start its own server on that port.
+    custom_app_url: str | None = f"http://0.0.0.0:{RoboEmotConfig().webui.port}"
+    dont_start_webserver: bool = True
+    webui: Server | None = None
     diagnostics: Diagnostics | None = None
     bus: Bus | None = None
     world: WorldModel | None = None  # vision (M1) and the speaker hint (M3) feed these
@@ -213,6 +221,32 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
     def load_vision_stages(self, cfg: Any, profile: str | None) -> Any:
         """The vision backends (overridable: tests inject fakes)."""
         return default_stages(cfg, profile)
+
+    def start_webui(
+        self, stack: ConfigStack, cfg: Any, manifest: Any, cleanup: ExitStack
+    ) -> Server | None:
+        """Serve the web UI over the app's enrollment service and diagnostics registry.
+
+        The server is stopped by ``cleanup`` (registered before it starts). A port that is
+        taken or an unusable data folder is logged (type only) and the app runs without the
+        page: enrollment is a side channel, not a reason to stop the robot.
+        """
+        try:
+            server = make_server(
+                self.perception.enrollment,
+                self.diagnostics,
+                stack.effective,
+                paths.data_dir(cfg.data_dir),
+                robot_hosted=manifest.robot.profile is not None,
+            )
+        except Exception as exc:
+            log.error("web UI not started: %s", type(exc).__name__)
+            return None
+        cleanup.callback(server.stop)
+        server.start()
+        self.webui = server
+        log.info("web UI on %s:%d", server.host, server.port)
+        return server
 
     def run(self, reachy_mini: Any, stop_event: threading.Event) -> None:
         stack = ConfigStack.from_files(
@@ -322,6 +356,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             cleanup.callback(network.stop)
             cleanup.callback(perception.stop)
             perception.start()
+            self.start_webui(stack, cfg, manifest, cleanup)
             for world_source in plugin.sources:
                 cleanup.callback(world_source.stop)
                 world_source.start(publish)

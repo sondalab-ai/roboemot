@@ -1152,6 +1152,143 @@ class ConnectivityConfig(Strict):
     )
 
 
+FRAME_ANCESTORS = re.compile(r"[A-Za-z0-9:/.*' _-]+")
+
+
+class WebUIConfig(Strict):
+    bind: str | None = param(
+        None,
+        "Interface the web UI listens on; unset means 0.0.0.0 when the manifest names a robot "
+        "profile (cm4, npu: the app runs on the robot) and 127.0.0.1 otherwise (sim, dev)",
+        restart=True,
+    )
+    allowed_hosts: list[str] = param(
+        [],
+        "Extra DNS names accepted in the Host header, besides IP addresses, localhost and *.local "
+        "(DNS-rebinding guard)",
+        admin_only=True,
+    )
+    frame_ancestors: str = param(
+        "'none'",
+        "CSP frame-ancestors value: who may embed the page in a frame",
+        admin_only=True,
+    )
+    max_connections: int = param(
+        32, "Simultaneous connections served; more are refused", ge=1, le=256, conservative="lower"
+    )
+    request_deadline_s: float = param(
+        15.0,
+        "Overall time one request may take from connect to response (slowloris guard)",
+        unit="s",
+        ge=1,
+        le=300,
+        conservative="lower",
+    )
+    session_max_s: float = param(
+        3600.0,
+        "Absolute lifetime of a login session, however active",
+        unit="s",
+        ge=60,
+        le=86400,
+        conservative="lower",
+    )
+    loopback_max_attempts: int = param(
+        20,
+        "Wrong PINs from this host itself before its own lockout (separate from the LAN budget)",
+        ge=1,
+        le=1000,
+        conservative="lower",
+    )
+    client_backoff_s: float = param(
+        1.0,
+        "Wait after a client's first wrong PIN; doubles with every further one",
+        unit="s",
+        ge=0.1,
+        le=60,
+        conservative="higher",
+    )
+    client_backoff_max_s: float = param(
+        300.0,
+        "Longest per-client wait after wrong PINs",
+        unit="s",
+        ge=1,
+        le=86400,
+        conservative="higher",
+    )
+    port: int = param(
+        8042,
+        "TCP port of the web UI (0 picks a free one; the app's custom_app_url)",
+        ge=0,
+        le=65535,
+        restart=True,
+    )
+    session_ttl_s: float = param(
+        900.0,
+        "Idle time after which a login session ends",
+        unit="s",
+        ge=60,
+        le=86400,
+        conservative="lower",
+    )
+    max_sessions: int = param(
+        8,
+        "Logged-in sessions kept; the oldest is dropped past this",
+        ge=1,
+        le=64,
+        conservative="lower",
+    )
+    pin_min_length: int = param(
+        6, "Minimum digits of the operator PIN", ge=4, le=32, conservative="higher"
+    )
+    pin_max_attempts: int = param(
+        5, "Wrong PINs before the login locks", ge=1, le=20, conservative="lower"
+    )
+    pin_lockout_s: float = param(
+        300.0,
+        "How long a lockout refuses every login",
+        unit="s",
+        ge=10,
+        le=86400,
+        conservative="higher",
+    )
+    max_body_bytes: int = param(
+        16384,
+        "Largest accepted request body",
+        unit="B",
+        ge=1024,
+        le=1048576,
+        conservative="lower",
+    )
+    name_max_chars: int = param(
+        64, "Longest display name or consent name", ge=1, le=200, conservative="lower"
+    )
+    request_timeout_s: float = param(
+        10.0,
+        "Socket timeout per request (slow clients are dropped)",
+        unit="s",
+        ge=1,
+        le=120,
+        conservative="lower",
+    )
+    status_poll_ms: int = param(
+        1000, "How often the page polls the enrollment status", unit="ms", ge=200, le=10000
+    )
+
+    @field_validator("frame_ancestors")
+    @classmethod
+    def _csp_value(cls, value: str) -> str:
+        if FRAME_ANCESTORS.fullmatch(value) is None:
+            raise ValueError("frame_ancestors may hold source expressions only (no ; or ,)")
+        return value
+
+    @field_validator("allowed_hosts")
+    @classmethod
+    def _host_names(cls, value: list[str]) -> list[str]:
+        if any(re.fullmatch(r"[A-Za-z0-9.-]{1,253}", h) is None for h in value):
+            raise ValueError("allowed_hosts holds bare host names (no port, no scheme)")
+        return [h.lower().rstrip(".") for h in value]
+
+
 # --------------------------------------------------------------------------- root
 
 
@@ -1188,6 +1325,7 @@ with warnings.catch_warnings():
         safety: SafetyConfig = param({}, "SPEC 12")
         privacy: PrivacyConfig = param({}, "SPEC 12")
         connectivity: ConnectivityConfig = param({}, "SPEC 12A")
+        webui: WebUIConfig = param({}, "SPEC 6, 11A, 12")
 
         @model_validator(mode="after")
         def _unique_routes(self) -> RoboEmotConfig:

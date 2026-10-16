@@ -7,6 +7,7 @@ and only when stdout is a terminal. Non-interactive runs take each prompt's defa
 
 from __future__ import annotations
 
+import getpass
 import sys
 
 try:
@@ -60,6 +61,15 @@ class Ui:
         except EOFError:
             return default
         return answer.strip() or default
+
+    def ask_secret(self, question: str) -> str | None:
+        """A hidden answer from the terminal; None when not interactive."""
+        if not self.interactive:
+            return None
+        try:
+            return getpass.getpass(f"  {paint('?', 'prompt')} {question}: ")
+        except EOFError:
+            return None
 
     def choose(self, question: str, options: list[str]) -> int:
         """Numbered pick list; returns the chosen index (the first one by default)."""
