@@ -375,3 +375,215 @@ def test_idle_wins_again_once_the_attention_command_is_cleared(reachy):
     core.tick(t + 0.02, 0.02)
     assert core.arbiter.last["head.yaw"] == pytest.approx(reachy.dofs["head.yaw"].home)
     assert core.arbiter.last["head.pitch"] == pytest.approx(0.0)
+
+
+# ---- review round: speaker gate, bypass, margin, rear side, recentre, replay
+
+
+def at(e: Entry, t: float, **kw) -> Entry:
+    return dataclasses.replace(e, last_seen=t, **kw)
+
+
+def test_speaker_bearing_gate_ignores_non_person_entries():
+    sel = AttentionSelector(CFG)
+    cup = entry("o1", kind="object", az=30.0)
+    sel.hint_speaker(SpeakerHint(stamp=0.0, azimuth_rad=32 * DEG))
+    t = sel.update(0.0, [cup])
+    assert t.entry_id is None and t.priority == "active_speaker"
+
+
+def test_speaker_hint_expires():
+    sel = AttentionSelector(CFG)
+    p = entry("p1", az=30.0, distance_m=2.0)
+    sel.hint_speaker(SpeakerHint(stamp=0.0, entry_id="p2", azimuth_rad=-60 * DEG))
+    assert sel.update(0.0, [p]).entry_id is None
+    late = CFG.speaker_hold_s + 0.1
+    t = sel.update(late, [at(p, late)])
+    assert (t.entry_id, t.priority) == ("p1", "nearest_face")
+
+
+def test_stale_entry_id_hint_falls_back_to_the_bearing():
+    sel = AttentionSelector(CFG)
+    p = entry("p1", az=30.0)
+    sel.hint_speaker(SpeakerHint(stamp=0.0, entry_id="gone", azimuth_rad=31 * DEG))
+    assert sel.update(0.0, [p]).entry_id == "p1"
+    sel = AttentionSelector(CFG)
+    sel.hint_speaker(SpeakerHint(stamp=0.0, entry_id="gone"))
+    assert sel.update(0.0, [p]).priority == "nearest_face"
+
+
+def test_new_speaker_bypasses_hysteresis():
+    sel = AttentionSelector(CFG)
+    a, b = entry("p1", distance_m=1.0), entry("p2", distance_m=3.0)
+    assert sel.update(0.0, [a, b]).entry_id == "p1"
+    t = CFG.switch_hysteresis_s / 4
+    sel.hint_speaker(SpeakerHint(stamp=t, entry_id="p2"))
+    got = sel.update(t, [at(a, t), at(b, t)])
+    assert (got.entry_id, got.priority, got.reason) == ("p2", "active_speaker", "switched")
+
+
+def test_same_category_switch_needs_a_score_margin():
+    sel = AttentionSelector(CFG)
+    h = CFG.switch_hysteresis_s
+    near = 2.0 * (1 - CFG.switch_margin / 2)  # barely nearer than 2.0
+    a = entry("p1", distance_m=2.0)
+    b = entry("p2", distance_m=near)
+    assert sel.update(0.0, [a, b]).entry_id == "p2"
+    t = 0.0
+    for i in range(1, 6):  # noisy, similar distances flip which one is nearer
+        t = h * i
+        d1, d2 = (near, 2.0) if i % 2 else (2.0, near)
+        got = sel.update(t, [at(a, t, distance_m=d1), at(b, t, distance_m=d2)])
+        assert got.entry_id == "p2", i
+    far = 2.0 / (1 + 2 * CFG.switch_margin)
+    t += h
+    got = sel.update(t, [at(a, t, distance_m=far), at(b, t, distance_m=2.0)])
+    assert (got.entry_id, got.reason) == ("p1", "switched")
+
+
+def test_category_names_are_one_constant():
+    from roboemot.config.schema import ATTENTION_CATEGORIES
+
+    assert set(CFG.priority_order) == set(ATTENTION_CATEGORIES)
+    with pytest.raises(ValidationError):
+        AttentionConfig(priority_order=[])
+    assert AttentionConfig(priority_order=["nearest_face"]).priority_order == ["nearest_face"]
+    sel = AttentionSelector(AttentionConfig(priority_order=["salient_motion"]))
+    assert sel.update(0.0, [entry("p1")]) is None
+
+
+def test_replay_runs_without_a_wall_clock(monkeypatch):
+    import time
+
+    def boom(*a, **k):
+        raise AssertionError("wall clock used")
+
+    series = []
+    for i in range(60):
+        t = i * 0.1
+        series.append(
+            (
+                t,
+                [
+                    entry("p1", az=10.0 + i, seen=t, distance_m=2.0),
+                    entry("p2", identity="bob" if i > 20 else "unknown", az=-40.0, seen=t),
+                    entry("o1", kind="object", az=3.0 * i, seen=t),
+                ],
+            )
+        )
+    monkeypatch.setattr(time, "time", boom)
+    monkeypatch.setattr(time, "monotonic", boom)
+
+    def run():
+        sel = AttentionSelector(CFG, Bus())
+        return [sel.update(t, es) for t, es in series]
+
+    first, second = run(), run()
+    assert first == second
+    assert {x.priority for x in first if x} >= {"nearest_face", "enrolled_person"}
+
+
+def test_rear_target_does_not_flip_sides_on_jitter(reachy):
+    g = controller(reachy)
+    t, dt = 0.0, 0.05
+    g.step(t, target(179.0, 0.0), {"head.yaw": 170 * DEG, "body_yaw": 120 * DEG})
+    prev = None
+    for i in range(80):
+        t += dt
+        sign = 1 if i % 2 else -1
+        cmd = g.step(t, target(sign * 179.0, 0.0, now=t))
+        if prev is not None:
+            for k in ("head.yaw", "body_yaw"):
+                assert abs(cmd.targets[k] - prev[k]) <= math.radians(CFG.max_rate_dps) * dt + 1e-9
+        prev = cmd.targets
+        assert cmd.targets["head.yaw"] > 0 and cmd.targets["body_yaw"] > 0
+
+
+def test_rear_side_is_released_once_the_target_leaves_the_band(reachy):
+    g = controller(reachy)
+    g.step(0.0, target(179.0, 0.0), {"head.yaw": 170 * DEG, "body_yaw": 120 * DEG})
+    t = 0.0
+    for _ in range(200):
+        t += 0.05
+        g.step(t, target(-100.0, 0.0, now=t))
+    assert g._pos["head.yaw"] == pytest.approx(-100 * DEG, abs=0.02)
+    g.step(t + 0.05, target(-179.0, 0.0))
+    assert g._aim["head.yaw"] < 0  # the side follows the current head again
+
+
+def test_body_recentres_slowly_while_head_is_inside_comfort(reachy):
+    g = controller(reachy)
+    t, dt = 0.0, 0.05
+    start = {"head.yaw": 60 * DEG, "head.pitch": 0.0, "body_yaw": 50 * DEG}
+    g.step(t, target(60.0, 0.0), start)
+    body = [50 * DEG]
+    for _ in range(40):
+        t += dt
+        body.append(g.step(t, target(60.0, 0.0, now=t)).targets["body_yaw"])
+    cap = math.radians(CFG.body_recenter_dps) * dt
+    steps = [a - b for a, b in zip(body, body[1:], strict=False)]
+    assert all(0 <= s <= cap + 1e-9 for s in steps) and sum(steps) > 0
+    assert 60 * DEG - body[-1] <= COMFORT + 1e-9  # head stays inside the comfort band
+
+
+def test_look_at_recentre_target_stays_in_band(reachy):
+    p = pose(reachy, 60, 0, body_now=50 * DEG)
+    assert p["body_yaw"] == pytest.approx(60 * DEG - COMFORT)  # nearest to home inside band
+
+
+def test_gaze_dt_is_clamped_to_the_command_ttl(reachy):
+    g = controller(reachy)
+    g.step(0.0, target(90.0, 0.0), {"head.yaw": 0.0, "head.pitch": 0.0, "body_yaw": 0.0})
+    cmd = g.step(100.0, target(90.0, 0.0, now=100.0))
+    assert cmd.targets["head.yaw"] <= math.radians(CFG.max_rate_dps) * CFG.command_ttl_s + 1e-9
+
+
+def test_minor_present_shrinks_attention_motion(reachy):
+    def settle(minor: bool) -> float:
+        core = MotionCore(
+            reachy.dofs,
+            reachy.constraints,
+            crossfade_s=0.0,
+            watchdog_s=10.0,
+            minor_factor=0.5,
+            watchdog_return_factor=1.0,
+        )
+        core.minor_present = minor
+        g = controller(reachy)
+        t = 0.0
+        for _ in range(300):
+            t += 0.02
+            core.feed(g.step(t, target(60.0, 0.0, now=t)))
+            core.tick(t, 0.02)
+        return core.limiter.pos["head.yaw"]
+
+    assert settle(False) == pytest.approx(60 * DEG, abs=0.02)
+    assert settle(True) == pytest.approx(60 * DEG * 0.5, abs=0.02)  # amplitude around home
+
+
+def test_released_attention_returns_the_head_towards_home(reachy):
+    core = MotionCore(
+        reachy.dofs,
+        reachy.constraints,
+        crossfade_s=0.0,
+        watchdog_s=10.0,
+        minor_factor=1.0,
+        watchdog_return_factor=1.0,
+    )
+    g = controller(reachy)
+    t = 0.0
+    for _ in range(200):
+        t += 0.02
+        core.feed(g.step(t, target(30.0, 0.0, now=t)))
+        core.tick(t, 0.02)
+    peak = core.limiter.pos["head.yaw"]
+    for _ in range(round((CFG.release_s + 8.0) / 0.02)):
+        t += 0.02
+        cmd = g.step(t, None)
+        if cmd is None:
+            core.arbiter.clear(SOURCE)
+        else:
+            core.feed(cmd)
+        core.tick(t, 0.02)
+    assert not g.active
+    assert abs(core.limiter.pos["head.yaw"]) < 0.1 * abs(peak)

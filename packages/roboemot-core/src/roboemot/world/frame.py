@@ -15,7 +15,7 @@ a sensor offset from the rotation centre (parallax) is ignored in v1.
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 
@@ -63,3 +63,42 @@ def angular_distance(az1: float, el1: float, az2: float, el2: float) -> float:
     """Great-circle angle between two bearings, radians."""
     c = math.sin(el1) * math.sin(el2) + math.cos(el1) * math.cos(el2) * math.cos(az1 - az2)
     return math.acos(max(-1.0, min(1.0, c)))
+
+
+def from_base_frame(
+    azimuth_rad: float,
+    elevation_rad: float,
+    joint_state: Mapping[str, float] | None,
+    spec: FrameSpec,
+) -> tuple[float, float]:
+    """Inverse of :func:`to_base_frame`: a base-frame bearing as seen from the sensor."""
+    js = joint_state or {}
+    yaw = sum(js.get(n, 0.0) for n in spec.yaw_dofs)
+    pitch = sum(js.get(n, 0.0) for n in spec.pitch_dofs)
+    roll = sum(js.get(n, 0.0) for n in spec.roll_dofs)
+    x = math.cos(elevation_rad) * math.cos(azimuth_rad)
+    y = math.cos(elevation_rad) * math.sin(azimuth_rad)
+    z = math.sin(elevation_rad)
+    cy, sy = math.cos(-yaw), math.sin(-yaw)
+    x, y = x * cy - y * sy, x * sy + y * cy
+    cp, sp = math.cos(-pitch), math.sin(-pitch)
+    x, z = x * cp + z * sp, -x * sp + z * cp
+    cr, sr = math.cos(-roll), math.sin(-roll)
+    y, z = y * cr - z * sr, y * sr + z * cr
+    return wrap_angle(math.atan2(y, x)), math.asin(max(-1.0, min(1.0, z)))
+
+
+def camera_in_view(
+    joint_state: Mapping[str, float] | None,
+    spec: FrameSpec,
+    fov_h_rad: float,
+    fov_v_rad: float,
+) -> Callable[[float, float], bool]:
+    """A predicate for ``WorldModel.tick``: is a base-frame bearing inside the camera's view,
+    given the head pose in ``joint_state``? The view is a box of the given field of view."""
+
+    def in_view(azimuth_rad: float, elevation_rad: float) -> bool:
+        az, el = from_base_frame(azimuth_rad, elevation_rad, joint_state, spec)
+        return abs(az) <= fov_h_rad / 2 and abs(el) <= fov_v_rad / 2
+
+    return in_view

@@ -575,3 +575,20 @@ def test_world_config_validation():
         WorldConfig(forget_confidence=0.0)
     with pytest.raises(ValueError):
         WorldConfig(out_of_view_decay_factor=0.0)
+
+
+def test_camera_in_view_follows_the_head_pose():
+    from roboemot.world import camera_in_view, from_base_frame
+
+    h, v = math.radians(78), math.radians(58)
+    spec = FrameSpec(yaw_dofs=("head.yaw",), pitch_dofs=("head.pitch",))
+    ahead = camera_in_view({"head.yaw": 0.0}, spec, h, v)
+    assert ahead(0.0, 0.0) and ahead(30 * DEG, 0.0) and not ahead(60 * DEG, 0.0)
+    assert not ahead(math.pi, 0.0)
+    turned = camera_in_view({"head.yaw": 60 * DEG}, spec, h, v)
+    assert turned(60 * DEG, 0.0) and not turned(0.0, 0.0)
+    up = camera_in_view({"head.pitch": -20 * DEG}, spec, h, v)  # nose up
+    assert up(0.0, 40 * DEG) and not up(0.0, -40 * DEG)
+    js = {"head.yaw": 0.7, "head.pitch": 0.2}
+    az, el = to_base_frame(0.3, -0.1, js, spec)
+    assert from_base_frame(az, el, js, spec) == pytest.approx((0.3, -0.1))

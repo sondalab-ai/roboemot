@@ -441,6 +441,9 @@ class IdentityConfig(Strict):
         return self
 
 
+ATTENTION_CATEGORIES = ("active_speaker", "enrolled_person", "nearest_face", "salient_motion")
+
+
 class AttentionConfig(Strict):
     priority_order: list[str] = param(
         ["active_speaker", "enrolled_person", "nearest_face", "salient_motion"],
@@ -490,6 +493,26 @@ class AttentionConfig(Strict):
         ge=0,
         le=180,
     )
+    switch_margin: float = param(
+        0.25,
+        "Relative advantage a same-category candidate needs to replace the current target",
+        ge=0,
+        le=5,
+    )
+    rear_band_deg: float = param(
+        20.0,
+        "Width of the band around straight behind where the gaze keeps its current side",
+        unit="deg",
+        ge=0,
+        le=90,
+    )
+    body_recenter_dps: float = param(
+        5.0,
+        "Speed at which the body drifts back to home while the head is within comfort",
+        unit="deg/s",
+        ge=0,
+        le=90,
+    )
     command_ttl_s: float = param(
         0.5, "Lifetime of an attention command in the arbiter", unit="s", ge=0.05, le=5
     )
@@ -497,8 +520,9 @@ class AttentionConfig(Strict):
     @field_validator("priority_order")
     @classmethod
     def _known_categories(cls, v: list[str]) -> list[str]:
-        known = {"active_speaker", "enrolled_person", "nearest_face", "salient_motion"}
-        if unknown := sorted(set(v) - known):
+        if not v:
+            raise ValueError("attention.priority_order must name at least one category")
+        if unknown := sorted(set(v) - set(ATTENTION_CATEGORIES)):
             raise ValueError(f"attention.priority_order: unknown categories {unknown}")
         if len(set(v)) != len(v):
             raise ValueError("attention.priority_order: duplicate category")
@@ -519,6 +543,12 @@ class WorldHalfLife(Strict):
 
 
 class WorldConfig(Strict):
+    camera_fov_h_deg: float = param(
+        78.0, "Horizontal field of view of the main camera", unit="deg", ge=10, le=360
+    )
+    camera_fov_v_deg: float = param(
+        58.0, "Vertical field of view of the main camera", unit="deg", ge=10, le=180
+    )
     match_gate_deg: float = param(
         15.0, "Angular gate for matching an observation to an entry", unit="deg", ge=0.5, le=90
     )

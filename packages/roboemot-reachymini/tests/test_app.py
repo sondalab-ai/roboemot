@@ -110,3 +110,96 @@ def test_attention_tick_turns_the_head_then_releases_to_idle():
     cfg_a = cfg.attention
     assert not run(cfg_a.stale_s + cfg_a.release_s + 2.0, observe=False)
     assert SOURCE not in {c.source for c in loop.core.arbiter.active(clock[0])}
+
+
+def _attention_rig():
+    from roboemot.attention import AttentionSelector, GazeController
+    from roboemot.config.schema import RoboEmotConfig
+    from roboemot.drivers import MockPoseDriver
+    from roboemot.manifest import load_manifest
+    from roboemot.motion import MotionLoop
+    from roboemot.world import WorldModel
+    from roboemot_reachymini.gaze import FRAME, GAZE
+
+    cfg = RoboEmotConfig()
+    manifest = load_manifest(
+        app_module.DATA / "reachy-mini-wireless.yaml", allow_unmeasured_dynamics=True
+    )
+    driver = MockPoseDriver(home={n: d.home for n, d in manifest.dofs.items()})
+    loop = MotionLoop(manifest, driver, cfg, rate_hz=50, clock=lambda: 0.0)
+    loop.set_mode("active")
+    world = WorldModel(cfg.world, FRAME)
+    selector = AttentionSelector(cfg.attention)
+    gaze = GazeController(cfg.attention, GAZE, manifest.dofs, manifest.constraints)
+    return cfg, loop, world, selector, gaze
+
+
+def test_attention_tick_failure_is_logged_and_falls_back_to_idle(caplog):
+    from roboemot.attention import SOURCE
+    from roboemot.world import Observation
+
+    cfg, loop, world, selector, gaze = _attention_rig()
+    world.observe(Observation("person", 0.0, "t", 0.5, 0.0, "face"))
+    assert app_module.attention_tick(0.0, world, selector, gaze, loop)
+    assert SOURCE in {c.source for c in loop.core.arbiter.active(0.0)}
+
+    def boom(now, entries):
+        raise RuntimeError("selector exploded")
+
+    selector.update = boom
+    with caplog.at_level("WARNING"):
+        assert app_module.attention_tick(0.1, world, selector, gaze, loop) is False
+    assert "RuntimeError" in caplog.text and "selector exploded" in caplog.text
+    assert SOURCE not in {c.source for c in loop.core.arbiter.active(0.1)}
+    assert not gaze.active
+
+
+def test_attention_tick_uses_the_camera_view_for_world_decay():
+    from roboemot.world import Observation
+
+    cfg, loop, world, selector, gaze = _attention_rig()
+    world.observe(Observation("person", 0.0, "t", 0.0, 0.0, "face"))
+    world.observe(Observation("person", 0.0, "t", math.radians(120), 0.0, "face"))
+    app_module.attention_tick(30.0, world, selector, gaze, loop)  # remembers the view state
+    app_module.attention_tick(60.0, world, selector, gaze, loop)
+    conf = {round(e.azimuth_rad, 2): e.confidence for e in world.entries}
+    assert conf[0.0] < conf[round(math.radians(120), 2)]  # in view fades faster than out of view
+
+
+def test_reload_updates_attention_consumers():
+    cfg, loop, world, selector, gaze = _attention_rig()
+    new = cfg.model_copy(deep=True)
+    new.attention.release_s = 9.0
+    new.world.match_gate_deg = 33.0
+    new.safety.constraint_margin_deg = 7.0
+    app_module.apply_attention_config(new, world, selector, gaze)
+    assert selector.cfg.release_s == 9.0 and gaze.cfg.release_s == 9.0
+    assert world.cfg.match_gate_deg == 33.0
+    assert gaze.margin_rad == pytest.approx(math.radians(7.0))
+
+
+def test_app_exposes_its_bus():
+    assert "bus" in app_module.RoboEmotApp.__annotations__
+
+
+def test_breathing_rides_on_attention_as_an_additive_layer():
+    from roboemot.attention import SOURCE
+    from roboemot.world import Observation
+
+    cfg, loop, world, selector, gaze = _attention_rig()
+    world.observe(Observation("person", 0.0, "t", 0.0, 0.0, "face"))
+    t = 0.0
+    for _ in range(100):
+        t += 0.05
+        world.observe(Observation("person", t, "t", 0.0, 0.0, "face"))
+        attending = app_module.attention_tick(t, world, selector, gaze, loop)
+        app_module.feed_idle(loop, cfg, t, attending)
+    srcs = {c.source: c for c in loop.core.arbiter.active(t)}
+    assert SOURCE in srcs and srcs["idle-additive"].additive
+    loop.core.arbiter.crossfade_s = 0.0
+    out = loop.core.arbiter.step(t)
+    breathing = srcs["idle-additive"].targets["head.pitch"]
+    assert out["head.pitch"] == pytest.approx(srcs[SOURCE].targets["head.pitch"] + breathing)
+
+    app_module.feed_idle(loop, cfg, t, False)  # attention released: plain idle again
+    assert "idle-additive" not in {c.source for c in loop.core.arbiter.active(t)}

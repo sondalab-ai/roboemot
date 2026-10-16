@@ -18,11 +18,11 @@ published once when the target is lost.
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from ..bus import Bus
-from ..config.schema import AttentionConfig
+from ..config.schema import ATTENTION_CATEGORIES, AttentionConfig
 from ..world import Entry, angular_distance
 from ..world.types import UNKNOWN_IDENTITY
 
@@ -77,6 +77,7 @@ class _Cand:
     az: float
     el: float
     entry_id: str | None
+    score: float | None = None  # higher is better; None when the category has no scalar score
 
 
 @dataclass
@@ -120,20 +121,34 @@ class AttentionSelector:
 
         cur = self._current
         target: AttentionTarget | None
-        if cur is not None and cur.key in qualified:
-            better = best is not None and best[1].key != cur.key
-            if better and now - self._since >= self.cfg.switch_hysteresis_s:
-                target = self._switch(now, best, "switched")  # type: ignore[arg-type]
-            else:
-                reason = "held" if better else "tracking"
-                target = self._make(now, cands_by_key[cur.key], qualified[cur.key], reason)
-        elif best is not None:
-            target = self._switch(now, best, "switched" if cur is not None else "new")
-        else:
+        if best is None:
             target = None
+        elif cur is None or cur.key not in qualified:
+            target = self._switch(now, best, "new" if cur is None else "switched")
+        elif best[1].key == cur.key:
+            target = self._make(now, cands_by_key[cur.key], qualified[cur.key], "tracking")
+        elif self._may_switch(now, best, qualified[cur.key], cands_by_key[cur.key]):
+            target = self._switch(now, best, "switched")
+        else:
+            target = self._make(now, cands_by_key[cur.key], qualified[cur.key], "held")
         self._current = target
         self._publish(now, target)
         return target
+
+    def _may_switch(
+        self, now: float, best: tuple[str, _Cand], cur_category: str, cur: _Cand
+    ) -> bool:
+        """A new active speaker wins at once. Otherwise the hysteresis time must have passed,
+        and a candidate of the same category must beat the current one by ``switch_margin``
+        (so noisy, similar scores do not make the head flip-flop)."""
+        category, cand = best
+        if category == "active_speaker":
+            return True
+        if now - self._since < self.cfg.switch_hysteresis_s:
+            return False
+        if category != cur_category or cand.score is None or cur.score is None:
+            return True
+        return cur.score <= 0 or cand.score / cur.score - 1.0 >= self.cfg.switch_margin
 
     def _switch(self, now: float, best: tuple[str, _Cand], reason: str) -> AttentionTarget:
         self._since = now
@@ -171,12 +186,20 @@ class AttentionSelector:
         ]
         pools: dict[str, list[_Cand]] = {
             "active_speaker": self._speaker(now, fresh, by_id),
-            "enrolled_person": _cands(sorted(enrolled, key=lambda e: (-e.confidence, e.entry_id))),
-            "nearest_face": _cands(sorted(persons, key=_nearest_key)),
+            "enrolled_person": _cands(
+                sorted(enrolled, key=lambda e: (-e.confidence, e.entry_id)),
+                lambda e: e.confidence,
+            ),
+            "nearest_face": _cands(
+                sorted(persons, key=_nearest_key),
+                lambda e: 1.0 / e.distance_m if e.distance_m else None,
+            ),
             "salient_motion": _cands(
-                sorted(moving, key=lambda e: (-self._motion[e.entry_id].speed_dps, e.entry_id))
+                sorted(moving, key=lambda e: (-self._motion[e.entry_id].speed_dps, e.entry_id)),
+                lambda e: self._motion[e.entry_id].speed_dps,
             ),
         }
+        assert set(pools) == set(ATTENTION_CATEGORIES)
         return [(cat, pools[cat]) for cat in self.cfg.priority_order]
 
     def _speaker(self, now: float, fresh: Sequence[Entry], by_id: dict[str, Entry]) -> list[_Cand]:
@@ -193,6 +216,7 @@ class AttentionSelector:
         scored = [
             (angular_distance(h.azimuth_rad, h.elevation_rad, e.azimuth_rad, e.elevation_rad), e)
             for e in fresh
+            if e.kind == "person"
         ]
         near = [(d, e.entry_id, e) for d, e in scored if d <= gate]
         if near:
@@ -210,12 +234,9 @@ class AttentionSelector:
                 self._published = None
             return
         changed = last is None or last.key != target.key or last.priority != target.priority
-        if not changed:
+        if last is not None and not changed:
             shift = angular_distance(
-                last.azimuth_rad,  # type: ignore[union-attr]
-                last.elevation_rad,  # type: ignore[union-attr]
-                target.azimuth_rad,
-                target.elevation_rad,
+                last.azimuth_rad, last.elevation_rad, target.azimuth_rad, target.elevation_rad
             )
             changed = shift >= math.radians(self.cfg.publish_move_deg)
         due = now - self._published_at >= 1.0 / self.cfg.publish_hz
@@ -228,5 +249,10 @@ def _nearest_key(e: Entry) -> tuple[bool, float, float, str]:
     return (e.distance_m is None, e.distance_m or 0.0, -e.confidence, e.entry_id)
 
 
-def _cands(entries: Sequence[Entry]) -> list[_Cand]:
-    return [_Cand(e.entry_id, e.kind, e.azimuth_rad, e.elevation_rad, e.entry_id) for e in entries]
+def _cands(
+    entries: Sequence[Entry], score: Callable[[Entry], float | None] = lambda e: None
+) -> list[_Cand]:
+    return [
+        _Cand(e.entry_id, e.kind, e.azimuth_rad, e.elevation_rad, e.entry_id, score(e))
+        for e in entries
+    ]

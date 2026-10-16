@@ -10,10 +10,12 @@ the offline responder's gestures, stop cleanly on ``stop_event``.
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +31,7 @@ from roboemot.health.responder import OfflineResponder
 from roboemot.manifest import load_manifest
 from roboemot.motion import Command, MotionLoop, Priority
 from roboemot.persona import effects as persona_effects
-from roboemot.world import WorldModel
+from roboemot.world import WorldModel, camera_in_view
 
 from .driver import ReachyMiniDriver
 from .gaze import FRAME, GAZE
@@ -39,6 +41,8 @@ try:  # the SDK is optional so unit tests run without GStreamer
 except ImportError:  # pragma: no cover
     ReachyMiniApp = object  # type: ignore[misc,assignment]
 
+log = logging.getLogger(__name__)
+ADDITIVE_IDLE = "idle-additive"
 DATA = Path(__file__).resolve().parent / "data"
 
 
@@ -51,6 +55,22 @@ def idle_command(cfg: Any, t: float) -> Command:
     return Command("idle", Priority.IDLE, {"head.pitch": pitch}, t)
 
 
+def feed_idle(loop: MotionLoop, cfg: Any, now: float, attending: bool) -> None:
+    """Feed idle breathing. While attention owns the head it rides on top as an additive layer
+    (additive commands stack on any winner of idle priority or lower precedence); otherwise it
+    is the plain idle command."""
+    cmd = idle_command(cfg, now)
+    if attending:
+        loop.feed(
+            replace(
+                cmd, source=ADDITIVE_IDLE, additive=True, expires=now + cfg.attention.command_ttl_s
+            )
+        )
+    else:
+        loop.clear(ADDITIVE_IDLE)
+        loop.feed(cmd)
+
+
 def attention_tick(
     now: float,
     world: WorldModel,
@@ -60,24 +80,43 @@ def attention_tick(
 ) -> bool:
     """One attention step: decay the world, pick the target, feed or release the gaze command.
 
-    Returns whether attention owns the head, so the caller skips the idle command meanwhile
-    (both sit at idle priority). No camera feeds an in-view test yet, so entries count as out
-    of view and fade at the slower rate.
+    Returns whether attention owns the head. A failure inside is logged (type and message
+    only), the attention command is dropped and idle motion takes over; the app keeps running.
     """
-    world.tick(now, lambda az, el: False)
-    target = selector.update(now, world.entries)
-    was_active = gaze.active
-    cmd = gaze.step(now, target, loop.pose())
-    if cmd is not None:
-        loop.feed(cmd)
-    elif was_active:
+    try:
+        wc = world.cfg
+        in_view = camera_in_view(
+            loop.pose(), FRAME, math.radians(wc.camera_fov_h_deg), math.radians(wc.camera_fov_v_deg)
+        )
+        world.tick(now, in_view)
+        target = selector.update(now, world.entries)
+        was_active = gaze.active
+        cmd = gaze.step(now, target, None if gaze.active else loop.pose())
+        if cmd is not None:
+            loop.feed(cmd)
+        elif was_active:
+            loop.clear(ATTENTION_SOURCE)
+        return gaze.active
+    except Exception as exc:
+        log.warning("attention: %s: %s", type(exc).__name__, exc)
+        gaze.release()
         loop.clear(ATTENTION_SOURCE)
-    return gaze.active
+        return False
+
+
+def apply_attention_config(
+    cfg: Any, world: WorldModel, selector: AttentionSelector, gaze: GazeController
+) -> None:
+    """Hot reload (SPEC 11A): hand the new world and attention config to their consumers."""
+    world.cfg = cfg.world
+    selector.cfg = gaze.cfg = cfg.attention
+    gaze.margin_rad = math.radians(cfg.safety.constraint_margin_deg)
 
 
 class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
     custom_app_url: str | None = None  # web UI arrives with enrollment (M1)
     diagnostics: Diagnostics | None = None
+    bus: Bus | None = None
     world: WorldModel | None = None  # vision (M1) and the speaker hint (M3) feed these
     selector: AttentionSelector | None = None
 
@@ -105,7 +144,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             rate_hz=50.0,
             on_link_change=responder.on_event,
         )
-        bus = Bus()
+        bus = self.bus = Bus()
         world = self.world = WorldModel(cfg.world, FRAME, bus)
         selector = self.selector = AttentionSelector(cfg.attention, bus)
         gaze = GazeController(
@@ -139,9 +178,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
 
         def reload(change: Any) -> None:
             loop.apply_config(change.config)
-            world.cfg = change.config.world
-            selector.cfg = gaze.cfg = change.config.attention
-            gaze.margin_rad = math.radians(change.config.safety.constraint_margin_deg)
+            apply_attention_config(change.config, world, selector, gaze)
             responder.cfg = change.config.connectivity
             network.set_policy(change.config.connectivity.network)
 
@@ -152,8 +189,8 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         try:
             while not stop_event.is_set():
                 now = time.monotonic()
-                if not attention_tick(now, world, selector, gaze, loop):
-                    loop.feed(idle_command(stack.effective(), now))
+                attending = attention_tick(now, world, selector, gaze, loop)
+                feed_idle(loop, stack.effective(), now, attending)
                 for cmd in responder.commands(now):
                     loop.feed(cmd)
                 stop_event.wait(0.05)

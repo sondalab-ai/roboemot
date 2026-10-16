@@ -11,6 +11,11 @@ only by the excess. Limits come from the manifest; the commands still go through
 and the safety limiter, which own speed and acceleration. Which dofs are the gaze dofs is data
 (``GazeMap``) supplied by the robot plugin.
 
+Body recentring: while the head is within the comfort band, the body drifts back towards its
+home at ``body_recenter_dps`` (never so far that the head leaves the band). Straight behind
+(``rear_band_deg`` around +-180 degrees) the gaze keeps the side it is on, so a bearing
+jittering across the seam does not swing the head or body through 360 degrees.
+
 Smoothing: an exponential approach with ``follow_gain`` capped at ``max_rate_dps``. Attention
 tracking sits at idle priority (SPEC 10): any commanded, mimicry or expression motion on the
 same dof wins. When there is no target for ``release_s`` the controller stops and reports
@@ -44,6 +49,15 @@ def _clamp(v: float, lo: float, hi: float) -> float:
     return min(max(v, lo), hi)
 
 
+def yaw_reach(gaze: GazeMap, constraints: list[Constraint], margin_rad: float = 0.0) -> float:
+    """Largest head-minus-body yaw offset the manifest allows (less the margin); inf if none."""
+    reach = math.inf
+    for c in constraints:
+        if c.type == "yaw_delta" and {c.a, c.b} == {gaze.head_yaw, gaze.body_yaw}:
+            reach = min(reach, max(0.0, math.radians(c.max_deg) - margin_rad))
+    return reach
+
+
 def look_at(
     azimuth_rad: float,
     elevation_rad: float,
@@ -57,8 +71,9 @@ def look_at(
 ) -> dict[str, float]:
     """Dof targets that point the head at a base-frame bearing, within the manifest limits.
 
-    ``body_now`` is the body yaw the split starts from; it only changes when the head would
-    leave ``comfort_rad`` around it. Targets beyond reach are clamped, never wrapped.
+    ``body_now`` is the body yaw the split starts from. Within ``comfort_rad`` of it the body
+    target is the point of the comfort band nearest to the body's home (a recentring drift);
+    beyond it the body turns by the excess. Targets beyond reach are clamped, never wrapped.
     """
     head, pitch = dofs[gaze.head_yaw], dofs[gaze.head_pitch]
     out = {gaze.head_pitch: _clamp(-elevation_rad, pitch.min, pitch.max)}
@@ -66,14 +81,14 @@ def look_at(
         out[gaze.head_yaw] = _clamp(azimuth_rad, head.min, head.max)
         return out
     body = dofs[gaze.body_yaw]
-    reach = math.inf
-    for c in constraints:
-        if c.type == "yaw_delta" and {c.a, c.b} == {gaze.head_yaw, gaze.body_yaw}:
-            reach = min(reach, max(0.0, math.radians(c.max_deg) - margin_rad))
+    reach = yaw_reach(gaze, constraints, margin_rad)
     yaw = _clamp(azimuth_rad, max(head.min, body.min - reach), min(head.max, body.max + reach))
     comfort = min(comfort_rad, reach)
     offset = yaw - body_now
-    target_body = yaw - math.copysign(comfort, offset) if abs(offset) > comfort else body_now
+    if abs(offset) > comfort:
+        target_body = yaw - math.copysign(comfort, offset)
+    else:
+        target_body = _clamp(body.home, yaw - comfort, yaw + comfort)
     out[gaze.head_yaw] = yaw
     out[gaze.body_yaw] = _clamp(target_body, max(body.min, yaw - reach), min(body.max, yaw + reach))
     return out
@@ -101,6 +116,8 @@ class GazeController:
         self._aim: dict[str, float] = {}
         self._last = 0.0
         self._lost_since: float | None = None
+        self._side = 0.0
+        self._recentering = False
 
     @staticmethod
     def _names(gaze: GazeMap) -> list[str]:
@@ -115,7 +132,7 @@ class GazeController:
         """One tick: the command to feed, or None when idle (never started, or just released).
 
         ``joint_state`` seeds the start of a new acquisition from the measured pose, so the
-        head never snaps; it is ignored while the gaze is active.
+        head never snaps; it is ignored while the gaze is active (callers may then pass None).
         """
         if target is None:
             if not self.active:
@@ -129,16 +146,22 @@ class GazeController:
             self._lost_since = None
             if not self.active:
                 self._start(now, joint_state)
+            comfort = math.radians(self.cfg.head_yaw_comfort_deg)
+            body_now = self._pos.get(self.gaze.body_yaw or "", 0.0)
             self._aim = look_at(
-                target.azimuth_rad,
+                self._sticky_azimuth(target.azimuth_rad),
                 target.elevation_rad,
                 self.gaze,
                 self.dofs,
                 self.constraints,
-                comfort_rad=math.radians(self.cfg.head_yaw_comfort_deg),
+                comfort_rad=comfort,
                 margin_rad=self.margin_rad,
-                body_now=self._pos.get(self.gaze.body_yaw or "", 0.0),
+                body_now=body_now,
             )
+            reach = yaw_reach(self.gaze, self.constraints, self.margin_rad)
+            self._recentering = self.gaze.body_yaw is not None and abs(
+                self._aim[self.gaze.head_yaw] - body_now
+            ) <= min(comfort, reach)
         self._approach(now)
         return Command(
             SOURCE, Priority.IDLE, dict(self._pos), now, expires=now + self.cfg.command_ttl_s
@@ -148,6 +171,19 @@ class GazeController:
         """Stop emitting and forget the smoothed pose."""
         self.active = False
         self._pos, self._aim, self._lost_since = {}, {}, None
+        self._side = 0.0
+        self._recentering = False
+
+    def _sticky_azimuth(self, az: float) -> float:
+        """Inside the rear band keep the side the head (else body) is on, not the bearing's."""
+        if abs(az) <= math.pi - math.radians(self.cfg.rear_band_deg):
+            self._side = 0.0
+            return az
+        if self._side == 0.0:
+            body = self._pos.get(self.gaze.body_yaw or "", 0.0)
+            ref = next((v for v in (self._pos[self.gaze.head_yaw], body) if v), az)
+            self._side = math.copysign(1.0, ref)
+        return math.copysign(abs(az), self._side)
 
     def _start(self, now: float, joint_state: Mapping[str, float] | None) -> None:
         js = joint_state or {}
@@ -157,9 +193,11 @@ class GazeController:
 
     def _approach(self, now: float) -> None:
         """Move the smoothed pose towards the aim: exponential, capped at ``max_rate_dps``."""
-        dt = max(0.0, now - self._last)
+        dt = min(max(0.0, now - self._last), self.cfg.command_ttl_s)
         self._last = now
         alpha = 1.0 - math.exp(-self.cfg.follow_gain * dt)
         cap = math.radians(self.cfg.max_rate_dps) * dt
+        recenter_cap = math.radians(self.cfg.body_recenter_dps) * dt
         for name, goal in self._aim.items():
-            self._pos[name] += _clamp((goal - self._pos[name]) * alpha, -cap, cap)
+            limit = recenter_cap if self._recentering and name == self.gaze.body_yaw else cap
+            self._pos[name] += _clamp((goal - self._pos[name]) * alpha, -limit, limit)
