@@ -230,6 +230,33 @@ def single_crop(rows: list[dict], truth: dict[int, dict], conf: float) -> dict:
     return bucket(out, truth)
 
 
+def crop_stats(rows: list[dict], cfg) -> dict:
+    """Per-crop argmax age groups with their mean probability and share at the 0.8 rule.
+
+    Shows which groups the model predicts on single crops and whether they pass the confidence
+    rule. ``faces_with_two_jobs`` counts faces where the tracker split the track and a second
+    job ran (more crops than ``vision.attribute_crops``).
+    """
+    need = cfg.vision.attribute_crops
+    conf_min = cfg.identity.estimate_confidence_min
+    by: dict[str, list[float]] = {g: [] for g in GROUPS}
+    for x in rows:
+        for group, probability, _, _ in x["crops"]:
+            by[group].append(probability)
+    return {
+        "crops": sum(len(v) for v in by.values()),
+        "by_group": {
+            g: {
+                "crops": len(v),
+                "mean_probability": (sum(v) / len(v)) if v else None,
+                "share_at_or_above_rule": (sum(p >= conf_min for p in v) / len(v)) if v else None,
+            }
+            for g, v in by.items()
+        },
+        "faces_with_two_jobs": common.rate(sum(len(x["crops"]) > need for x in rows), len(rows)),
+    }
+
+
 def report(args: argparse.Namespace) -> None:
     import pyarrow.parquet as pq
 
@@ -300,6 +327,7 @@ def report(args: argparse.Namespace) -> None:
             "aggregated": by,
             "first_crop_only_all": single_crop(data, truth, cfg.identity.estimate_confidence_min),
             "age_group_confusion_true_by_estimate": confusion,
+            "per_crop_predictions": crop_stats(data, cfg),
         }
     fp32 = runs["fp32"][0]
     if fp32 and int8_rows:

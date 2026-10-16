@@ -99,7 +99,15 @@ def load_stages(cfg, *, profile: str | None = None, **kwargs: Any):
     """The shipped ONNX backends from the bench models folder (markers verified)."""
     from roboemot.vision.onnx import load_stages as load
 
+    limit_threads(cfg)
     return load(MODELS, cfg.vision, profile=profile, **kwargs)
+
+
+def limit_threads(cfg) -> None:
+    """Cap OpenCV at ``vision.threads`` (ONNX Runtime sessions take it from the stage classes)."""
+    import cv2
+
+    cv2.setNumThreads(cfg.vision.threads)
 
 
 def log(*parts: object) -> None:

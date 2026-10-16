@@ -40,6 +40,7 @@ TRACK_WINDOW_S = 6.0
 GAP_S = 2.0
 ENROLLED = 10
 CANVAS = (480, 640)
+APPROX_BELOW = 30  # a p95 from fewer samples is only approximate
 STAGE_RUNS = 60
 WARMUP = 5
 
@@ -53,6 +54,7 @@ def stats(values: list[float]) -> dict:
         "p50": common.percentile(values, 0.5),
         "p95": common.percentile(values, 0.95),
         "max": max(values),
+        "p95_approximate": len(values) < APPROX_BELOW,
     }
 
 
@@ -158,7 +160,7 @@ def run_scenario(name, args, stages_, cfg, registry, people, tracks_per_trial, a
     from roboemot.vision import LatestFrameRunner, VisionPipeline, pump
 
     rng = random.Random(1)
-    decisions, firsts, ages = [], [], []
+    decisions, firsts, ages, extra_tracks, late = [], [], [], 0, []
     for trial in range(args.trials):
         chosen = rng.sample(people, tracks_per_trial)
         scene = Scene(
@@ -207,7 +209,9 @@ def run_scenario(name, args, stages_, cfg, registry, people, tracks_per_trial, a
             time.sleep(0.01)
         for ids, _ in chosen:
             decisions.append(seen[ids] - t0 if ids in seen else None)
-        firsts += [t - t0 for t in first.values()]
+        firsts += [min(first.values()) - t0] if first else []
+        extra_tracks += max(0, len(first) - tracks_per_trial)
+        late += [t - t0 for t in sorted(first.values())[tracks_per_trial:]]
         ages += [t - t0 for t in age_at.values()]
         stop.set()
         thread.join()
@@ -224,7 +228,9 @@ def run_scenario(name, args, stages_, cfg, registry, people, tracks_per_trial, a
         "people": tracks_per_trial,
         "decisions": stats(got),
         "no_decision_within_window": len(decisions) - len(got),
-        "first_percept": stats(firsts),
+        "first_percept_earliest_track_per_trial": stats(firsts),
+        "tracks_beyond_the_planted_ones": extra_tracks,
+        "extra_track_first_percept": stats(late),
         "age_gender_available": stats(ages),
     }
 

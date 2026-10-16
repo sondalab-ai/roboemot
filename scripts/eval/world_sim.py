@@ -23,7 +23,6 @@ repo packages from this worktree through ``sys.path``). Run without ``-I``:
 from __future__ import annotations
 
 import argparse
-import json
 import math
 import random
 import sys
@@ -274,7 +273,6 @@ def main() -> None:
         },
         "machine": common.cpu_label(),
     }
-    json.dumps(summary)
     print(common.write_result(args.out, summary))
 
 

@@ -22,6 +22,7 @@ Embeddings are cached in memory and in the scratch folder only; the result file 
 from __future__ import annotations
 
 import argparse
+import json
 import random
 import shutil
 import sys
@@ -36,6 +37,7 @@ import common  # noqa: E402
 
 LFW = common.DATASETS / "lfw" / "x" / "lfw"
 TRACK_FRAMES = 5
+EMBEDDING_DIM = 128  # SFace
 FRAME_GAP_S = 0.3
 MIN_IMAGES = 11
 ENROLL_IMAGES = 5
@@ -84,7 +86,7 @@ def extract(stages, cfg, paths: dict[str, list[Path]]):
         if len(data["ok"]) == len(names):
             common.log("embeddings from the scratch cache")
             return data["emb"], data["ok"], data["multi"]
-    emb = np.zeros((len(names), 128), np.float32)
+    emb = np.zeros((len(names), EMBEDDING_DIM), np.float32)
     ok = np.zeros(len(names), bool)
     multi = np.zeros(len(names), bool)
     for n, (person, i) in enumerate(names):
@@ -135,7 +137,6 @@ class Draw:
                 age_group="adult",
             )
             self.owner[record.person_id] = person
-        self.person_of_owner = self.owner
         self.owner_of_person = {v: k for k, v in self.owner.items()}
         self.model_id = stages.face_embedder.model_id
         single = cfg.identity.model_copy(update={"votes_required": 1, "votes_window": 1})
@@ -333,7 +334,7 @@ def main() -> None:
         common.log(f"draw {d}: eval FAR {far:.5f}, track {per_draw[-1]['per_track_3_of_5']}")
         draw.pipeline.close()
         shutil.rmtree(common.SCRATCH / f"registry-{d}", ignore_errors=True)
-    spike = __import__("json").loads(LFW_BENCH.read_text())["pipelines"]["yunet+sface"]
+    spike = json.loads(LFW_BENCH.read_text())["pipelines"]["yunet+sface"]
     result = {
         "protocol": {
             "dataset": "LFW (13,233 images, 5,749 identities), open set, enrolled identities have "

@@ -22,17 +22,26 @@
     "n": 0
    },
    "decisions": {
-    "max": 1.3056255000046804,
+    "max": 1.3078535409949836,
     "n": 20,
-    "p50": 1.2851072910052608,
-    "p95": 1.3047595000025467
+    "p50": 1.2890471669961698,
+    "p95": 1.305272125006013,
+    "p95_approximate": true
    },
    "detection_hz": 5.0,
-   "first_percept": {
-    "max": 0.4219328340041102,
-    "n": 21,
-    "p50": 0.40346483300527325,
-    "p95": 0.4160460420025629
+   "extra_track_first_percept": {
+    "max": 0.41669858300156193,
+    "n": 1,
+    "p50": 0.41669858300156193,
+    "p95": 0.41669858300156193,
+    "p95_approximate": true
+   },
+   "first_percept_earliest_track_per_trial": {
+    "max": 0.41387466699961806,
+    "n": 20,
+    "p50": 0.40056879199983086,
+    "p95": 0.4116642500011949,
+    "p95_approximate": true
    },
    "no_decision_within_window": 0,
    "people": 1,
@@ -40,24 +49,34 @@
    "threads": {
     "attribute": 2,
     "frame_path": 2
-   }
+   },
+   "tracks_beyond_the_planted_ones": 1
   },
   {
    "age_gender_available": {
     "n": 0
    },
    "decisions": {
-    "max": 0.859669458004646,
+    "max": 0.8632292920010514,
     "n": 20,
-    "p50": 0.8437888749976992,
-    "p95": 0.858514583997021
+    "p50": 0.8474291669990635,
+    "p95": 0.8556857500007027,
+    "p95_approximate": true
    },
    "detection_hz": 8.0,
-   "first_percept": {
-    "max": 0.4069462920015212,
-    "n": 27,
-    "p50": 0.2561427500040736,
-    "p95": 0.4011284579974017
+   "extra_track_first_percept": {
+    "max": 0.4071199159952812,
+    "n": 7,
+    "p50": 0.4029654159967322,
+    "p95": 0.4071199159952812,
+    "p95_approximate": true
+   },
+   "first_percept_earliest_track_per_trial": {
+    "max": 0.26660766699933447,
+    "n": 20,
+    "p50": 0.25233120899792993,
+    "p95": 0.2663717919931514,
+    "p95_approximate": true
    },
    "no_decision_within_window": 0,
    "people": 1,
@@ -65,24 +84,34 @@
    "threads": {
     "attribute": 2,
     "frame_path": 2
-   }
+   },
+   "tracks_beyond_the_planted_ones": 7
   },
   {
    "age_gender_available": {
     "n": 0
    },
    "decisions": {
-    "max": 1.1588581670002895,
+    "max": 1.1263917079995736,
     "n": 60,
-    "p50": 0.859735375001037,
-    "p95": 1.005273249997117
+    "p50": 0.859213625000848,
+    "p95": 1.0078217919945018,
+    "p95_approximate": false
    },
    "detection_hz": 8.0,
-   "first_percept": {
-    "max": 1.0122308749996591,
-    "n": 83,
-    "p50": 0.2625528749995283,
-    "p95": 1.0068350829969859
+   "extra_track_first_percept": {
+    "max": 1.0155937910021748,
+    "n": 25,
+    "p50": 0.4192794589980622,
+    "p95": 1.0108471250059665,
+    "p95_approximate": true
+   },
+   "first_percept_earliest_track_per_trial": {
+    "max": 0.2681153750017984,
+    "n": 20,
+    "p50": 0.2525864589988487,
+    "p95": 0.2669042920024367,
+    "p95_approximate": true
    },
    "no_decision_within_window": 0,
    "people": 3,
@@ -90,27 +119,38 @@
    "threads": {
     "attribute": 2,
     "frame_path": 2
-   }
+   },
+   "tracks_beyond_the_planted_ones": 25
   },
   {
    "age_gender_available": {
-    "max": 2.0535809580032947,
-    "n": 17,
-    "p50": 2.0179976660001557,
-    "p95": 2.0435687080025673
+    "max": 2.0511329580040183,
+    "n": 18,
+    "p50": 1.901281750004273,
+    "p95": 2.0377125419981894,
+    "p95_approximate": true
    },
    "decisions": {
-    "max": 0.8878602499971748,
+    "max": 0.8916181249951478,
     "n": 20,
-    "p50": 0.8624562910044915,
-    "p95": 0.8761870830057887
+    "p50": 0.8687077079957817,
+    "p95": 0.8822063750048983,
+    "p95_approximate": true
    },
    "detection_hz": 8.0,
-   "first_percept": {
-    "max": 5.7759104580036364,
-    "n": 38,
-    "p50": 0.27777749999950174,
-    "p95": 3.223783875000663
+   "extra_track_first_percept": {
+    "max": 5.618779083000845,
+    "n": 16,
+    "p50": 1.0078234169995994,
+    "p95": 3.9712989999970887,
+    "p95_approximate": true
+   },
+   "first_percept_earliest_track_per_trial": {
+    "max": 0.2838526670020656,
+    "n": 20,
+    "p50": 0.2760454579984071,
+    "p95": 0.28243216600094456,
+    "p95_approximate": true
    },
    "no_decision_within_window": 0,
    "people": 1,
@@ -118,7 +158,8 @@
    "threads": {
     "attribute": 1,
     "frame_path": 1
-   }
+   },
+   "tracks_beyond_the_planted_ones": 16
   }
  ],
  "versions": {

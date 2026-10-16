@@ -3012,7 +3012,41 @@
     "start": 350,
     "threads": 2
    }
-  ]
+  ],
+  "per_crop_predictions": {
+   "by_group": {
+    "adult": {
+     "crops": 1372,
+     "mean_probability": 0.8940586970529163,
+     "share_at_or_above_rule": 0.8666180758017493
+    },
+    "child": {
+     "crops": 250,
+     "mean_probability": 0.8040342235267163,
+     "share_at_or_above_rule": 0.688
+    },
+    "senior": {
+     "crops": 58,
+     "mean_probability": 0.6530450840705427,
+     "share_at_or_above_rule": 0.0
+    },
+    "teen": {
+     "crops": 138,
+     "mean_probability": 0.615676245395688,
+     "share_at_or_above_rule": 0.0
+    }
+   },
+   "crops": 1818,
+   "faces_with_two_jobs": {
+    "ci95": [
+     0.004590859523391853,
+     0.021643835138254512
+    ],
+    "k": 6,
+    "n": 600,
+    "rate": 0.01
+   }
+  }
  },
  "int8": {
   "age_group_confusion_true_by_estimate": {
@@ -6027,7 +6061,41 @@
     "start": 700,
     "threads": 2
    }
-  ]
+  ],
+  "per_crop_predictions": {
+   "by_group": {
+    "adult": {
+     "crops": 3177,
+     "mean_probability": 0.8951059351481736,
+     "share_at_or_above_rule": 0.87598363235757
+    },
+    "child": {
+     "crops": 580,
+     "mean_probability": 0.8058857819852259,
+     "share_at_or_above_rule": 0.6810344827586207
+    },
+    "senior": {
+     "crops": 111,
+     "mean_probability": 0.6539702834980982,
+     "share_at_or_above_rule": 0.0
+    },
+    "teen": {
+     "crops": 362,
+     "mean_probability": 0.6183055260563424,
+     "share_at_or_above_rule": 0.0
+    }
+   },
+   "crops": 4230,
+   "faces_with_two_jobs": {
+    "ci95": [
+     0.0038844164909762023,
+     0.013098696133695981
+    ],
+    "k": 10,
+    "n": 1400,
+    "rate": 0.007142857142857143
+   }
+  }
  },
  "int8_vs_fp32_same_faces": {
   "age_label_differs": {

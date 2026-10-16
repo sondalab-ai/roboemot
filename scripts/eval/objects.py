@@ -44,7 +44,7 @@ STREAM_DAYS = 6
 STREAM_PRESENCE = 0.8
 STREAM_PER_DAY = (1, 2)
 STREAM_REPEATS = 10
-SIGHTING_GAP_S = 400.0  # above world.autoenroll.sighting_min_interval_s
+SIGHTING_GAP_MARGIN_S = 100.0  # added to world.autoenroll.sighting_min_interval_s
 DAY0 = datetime(2026, 1, 1, 12, 0).astimezone()
 
 
@@ -81,6 +81,7 @@ def detect(args: argparse.Namespace) -> None:
     import cv2
 
     cfg = common.config()
+    common.limit_threads(cfg)
     detector = common_detector(cfg)
     data = json.loads((COCO / "instances_val2017.json").read_text())
     names = {c["id"]: c["name"] for c in data["categories"]}
@@ -285,12 +286,22 @@ def stream(emb, ids, category: str, kind: str, rng: random.Random, cfg, tag: str
                         today.append((m, remaining[m].pop()))
         rng.shuffle(today)
         for m, row in today:
-            clock["t"] += SIGHTING_GAP_S
+            clock["t"] += cfg.world.autoenroll.sighting_min_interval_s + SIGHTING_GAP_MARGIN_S
             n_sightings += 1
             obs = Observation(kind, clock["t"], "eval", 0.0, 0.0, category, embedding=emb[row])
             entry = Entry(
-                f"e{n_sightings}", kind, category, "unknown", 0.0, 0.0, None, 0.0, 0.5, 0.0, 0.0
-            )  # type: ignore[arg-type]
+                entry_id=f"e{n_sightings}",
+                kind=kind,
+                category=category,
+                identity="unknown",
+                azimuth_rad=0.0,
+                elevation_rad=0.0,
+                distance_m=None,
+                uncertainty_rad=0.0,
+                confidence=0.5,
+                first_seen=0.0,
+                last_seen=0.0,
+            )
             owner = enroller.observe(obs, ObserveResult(entry=entry))
             if owner is not None:
                 attached.append((owner, m))
@@ -304,7 +315,7 @@ def stream(emb, ids, category: str, kind: str, rng: random.Random, cfg, tag: str
     for r in records:
         sims = np.asarray(r.embeddings) @ emb.T
         labels = [sight_label[int(j)] for j in sims.argmax(1)]
-        top, count = max(((x, labels.count(x)) for x in set(labels)), key=lambda t: t[1])
+        top = max(set(labels), key=labels.count)
         record_label[r.entity_id] = top
         if len(set(labels)) == 1:
             pure += 1
@@ -333,6 +344,7 @@ def stream(emb, ids, category: str, kind: str, rng: random.Random, cfg, tag: str
 
 def retrieval(args: argparse.Namespace, name: str, items, categories: list[str], kind: str) -> None:
     cfg = common.config()
+    common.limit_threads(cfg)
     emb, ids, cats = embed_all(items, cfg, name)
     ids_a, cats_a = np.array(ids), np.array(cats)
     runs, per_category = [], defaultdict(list)
