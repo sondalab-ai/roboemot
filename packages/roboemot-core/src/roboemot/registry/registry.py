@@ -112,10 +112,6 @@ class Registry:
                 log.error("quarantined %s item %s (%s)", collection, key, type(exc).__name__)
                 self.store.quarantine(collection, key)
 
-    def now(self) -> datetime:
-        """The registry clock, shared with the matcher for vote ageing."""
-        return self._clock()
-
     def attach_history(self, link: HistoryLink) -> None:
         """Include ``link`` in ``export`` and ``forget`` (the world history, SPEC 5A)."""
         with self.lock:

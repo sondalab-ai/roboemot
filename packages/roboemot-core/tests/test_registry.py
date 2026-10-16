@@ -93,7 +93,7 @@ def test_voting_needs_three_of_last_five(tmp_path):
     person = enroll(reg, 0)
     m = matcher(reg)
     hit, miss = axis(0), axis(5)
-    seen = [m.observe(1, e, MODEL, refresh=False) for e in (hit, miss, hit, miss, hit)]
+    seen = [m.observe(1, e, MODEL, 0.0, refresh=False) for e in (hit, miss, hit, miss, hit)]
     assert [i.known for i in seen] == [False, False, False, False, True]
     assert seen[-1].owner_id == person.person_id
     assert seen[-1].anonymous_id is None
@@ -104,7 +104,7 @@ def test_old_votes_leave_the_window(tmp_path):
     enroll(reg, 0)
     m = matcher(reg)
     for e in (axis(0), axis(0), axis(5), axis(5), axis(5)):
-        last = m.observe(1, e, MODEL, refresh=False)
+        last = m.observe(1, e, MODEL, 0.0, refresh=False)
     assert not last.known
 
 
@@ -113,10 +113,10 @@ def test_margin_over_second_best_is_required(tmp_path):
     a = enroll(reg, 0, "A")
     b = reg.enroll("B", np.stack([blend(0, 1, 0.3)] * 5), MODEL, consent=CONSENT, age_group="adult")
     m = matcher(reg)
-    assert not any(m.observe(1, axis(0), MODEL, refresh=False).known for _ in range(5))
+    assert not any(m.observe(1, axis(0), MODEL, 0.0, refresh=False).known for _ in range(5))
     reg.forget(b.person_id)
-    assert any(m.observe(2, axis(0), MODEL, refresh=False).known for _ in range(5))
-    assert m.observe(2, axis(0), MODEL, refresh=False).owner_id == a.person_id
+    assert any(m.observe(2, axis(0), MODEL, 0.0, refresh=False).known for _ in range(5))
+    assert m.observe(2, axis(0), MODEL, 0.0, refresh=False).owner_id == a.person_id
 
 
 def test_single_enrolled_owner_has_no_margin_to_beat(tmp_path):
@@ -125,7 +125,7 @@ def test_single_enrolled_owner_has_no_margin_to_beat(tmp_path):
     m = matcher(reg)
     query = blend(0, 1, 1.0)  # cosine about 0.54: above the threshold, nobody to beat
     for _ in range(3):
-        found = m.observe(1, query, MODEL, refresh=False)
+        found = m.observe(1, query, MODEL, 0.0, refresh=False)
     assert found.owner_id == a.person_id
 
 
@@ -134,28 +134,28 @@ def test_below_threshold_is_unknown(tmp_path):
     enroll(reg, 0)
     m = matcher(reg)
     query = blend(0, 1, 1.2)  # cosine about 0.36
-    assert not any(m.observe(1, query, MODEL, refresh=False).known for _ in range(5))
+    assert not any(m.observe(1, query, MODEL, 0.0, refresh=False).known for _ in range(5))
 
 
 def test_embeddings_of_another_model_are_ignored(tmp_path):
     reg = make(tmp_path)
     enroll(reg, 0)
     m = matcher(reg)
-    assert not any(m.observe(1, axis(0), "face-v2", refresh=False).known for _ in range(5))
+    assert not any(m.observe(1, axis(0), "face-v2", 0.0, refresh=False).known for _ in range(5))
 
 
 def test_anonymous_id_is_random_session_only_and_never_persisted(tmp_path):
     reg = make(tmp_path)
     m = matcher(reg)
-    first = m.observe(1, axis(3), MODEL)
-    other = m.observe(2, axis(4), MODEL)
+    first = m.observe(1, axis(3), MODEL, 0.0)
+    other = m.observe(2, axis(4), MODEL, 0.0)
     assert first.anonymous_id.startswith("anon-") and first.anonymous_id != other.anonymous_id
-    assert m.observe(1, axis(3), MODEL).anonymous_id == first.anonymous_id
+    assert m.observe(1, axis(3), MODEL, 0.0).anonymous_id == first.anonymous_id
     for path in (tmp_path / "reg").rglob("*"):
         assert path.is_dir() or b"anon-" not in path.read_bytes()
     assert reg.list() == []
     m.new_session()
-    assert m.observe(1, axis(3), MODEL).anonymous_id != first.anonymous_id
+    assert m.observe(1, axis(3), MODEL, 0.0).anonymous_id != first.anonymous_id
 
 
 def test_track_id_reuse_after_release_starts_clean(tmp_path):
@@ -163,10 +163,10 @@ def test_track_id_reuse_after_release_starts_clean(tmp_path):
     enroll(reg, 0)
     m = matcher(reg)
     for _ in range(3):
-        found = m.observe(1, axis(0), MODEL, refresh=False)
+        found = m.observe(1, axis(0), MODEL, 0.0, refresh=False)
     assert found.known
     m.release(1)
-    assert not m.observe(1, axis(5), MODEL, refresh=False).known
+    assert not m.observe(1, axis(5), MODEL, 0.0, refresh=False).known
 
 
 def enroll_with_voice(reg, i, name="A", **kw):
@@ -179,10 +179,10 @@ def test_face_voice_disagreement_drops_to_unknown(tmp_path):
     enroll_with_voice(reg, 1, "B")
     m = matcher(reg)
     for _ in range(3):
-        face = m.observe(1, axis(0), MODEL, refresh=False)
+        face = m.observe(1, axis(0), MODEL, 0.0, refresh=False)
     assert face.owner_id == a.person_id
     for _ in range(3):
-        fused = m.observe_voice(1, axis(1), VOICE_MODEL)
+        fused = m.observe_voice(1, axis(1), VOICE_MODEL, 0.0)
     assert not fused.known and fused.disagreement and fused.anonymous_id
 
 
@@ -191,8 +191,8 @@ def test_face_and_voice_agreeing_keep_the_identity(tmp_path):
     a = enroll_with_voice(reg, 0)
     m = matcher(reg)
     for _ in range(3):
-        m.observe(1, axis(0), MODEL, refresh=False)
-        fused = m.observe_voice(1, axis(0), VOICE_MODEL)
+        m.observe(1, axis(0), MODEL, 0.0, refresh=False)
+        fused = m.observe_voice(1, axis(0), VOICE_MODEL, 0.0)
     assert fused.owner_id == a.person_id and not fused.disagreement
 
 
@@ -201,22 +201,21 @@ def test_voice_alone_can_identify(tmp_path):
     a = enroll_with_voice(reg, 0)
     m = matcher(reg)
     for _ in range(3):
-        fused = m.observe_voice(1, axis(0), VOICE_MODEL)
+        fused = m.observe_voice(1, axis(0), VOICE_MODEL, 0.0)
     assert fused.owner_id == a.person_id
 
 
 def switched_to_y(tmp_path):
-    clock = Clock()
-    reg = make(tmp_path, clock)
+    reg = make(tmp_path)
     x = enroll_with_voice(reg, 0, "X")
     y = enroll_with_voice(reg, 1, "Y")
     m = matcher(reg)
     for _ in range(3):
-        m.observe(1, axis(0), MODEL, refresh=False)
-        m.observe_voice(1, axis(0), VOICE_MODEL)
+        m.observe(1, axis(0), MODEL, 0.0, refresh=False)
+        m.observe_voice(1, axis(0), VOICE_MODEL, 0.0)
     for _ in range(3):
-        last = m.observe(1, axis(1), MODEL, refresh=False)
-    return clock, m, x, y, last
+        last = m.observe(1, axis(1), MODEL, 0.0, refresh=False)
+    return None, m, x, y, last
 
 
 def test_a_face_switch_does_not_erase_voice_evidence(tmp_path):
@@ -225,30 +224,29 @@ def test_a_face_switch_does_not_erase_voice_evidence(tmp_path):
 
 
 def test_disagreement_ends_when_the_stale_votes_age_out(tmp_path):
-    clock, m, _, y, _ = switched_to_y(tmp_path)
-    clock.advance(IdentityConfig().vote_max_age_s + 1)
+    _, m, _, y, _ = switched_to_y(tmp_path)
+    later = IdentityConfig().vote_max_age_s + 1
     for _ in range(3):
-        last = m.observe(1, axis(1), MODEL, refresh=False)
+        last = m.observe(1, axis(1), MODEL, later, refresh=False)
     assert last.owner_id == y.person_id and not last.disagreement
 
 
 def test_fresh_agreeing_voice_votes_resolve_the_disagreement(tmp_path):
     _, m, _, y, _ = switched_to_y(tmp_path)
     for _ in range(3):
-        last = m.observe_voice(1, axis(1), VOICE_MODEL)
+        last = m.observe_voice(1, axis(1), VOICE_MODEL, 1.0)
     assert last.owner_id == y.person_id and not last.disagreement
 
 
 def test_refresh_resumes_once_the_conflicting_vote_expires(tmp_path):
-    clock = Clock()
-    reg = make(tmp_path, clock, refresh_min_interval_s=0)
+    reg = make(tmp_path, refresh_min_interval_s=0)
     a = enroll_with_voice(reg, 0, "A")
     enroll_with_voice(reg, 1, "B")
     m = matcher(reg)
-    m.observe_voice(1, axis(1), VOICE_MODEL)
-    clock.advance(IdentityConfig().vote_max_age_s + 1)
+    m.observe_voice(1, axis(1), VOICE_MODEL, 0.0)
+    later = IdentityConfig().vote_max_age_s + 1
     for _ in range(3):
-        m.observe(1, blend(0, 2, 0.5), MODEL)
+        m.observe(1, blend(0, 2, 0.5), MODEL, later)
     assert len(reg.get_person(a.person_id).face_embeddings) == 6
 
 
@@ -257,7 +255,7 @@ def test_entities_are_matched_by_appearance(tmp_path):
     cat = reg.enroll_entity("animal", "Mia", cluster(2), MODEL, category="cat")
     m = matcher(reg)
     for _ in range(3):
-        found = m.observe(1, axis(2), MODEL, kind="entity")
+        found = m.observe(1, axis(2), MODEL, 0.0, kind="entity")
     assert found.owner_id == cat.entity_id and found.kind == "entity"
 
 
@@ -266,7 +264,7 @@ def test_pending_records_are_never_matched(tmp_path):
     reg.create_pending_entity("animal", "Mia")
     reg.create_pending_person("P")
     m = matcher(reg)
-    assert not any(m.observe(1, axis(0), MODEL).known for _ in range(5))
+    assert not any(m.observe(1, axis(0), MODEL, 0.0).known for _ in range(5))
 
 
 def test_non_finite_queries_are_unknown(tmp_path):
@@ -274,7 +272,7 @@ def test_non_finite_queries_are_unknown(tmp_path):
     enroll(reg, 0)
     m = matcher(reg)
     for bad in (np.full(DIM, np.nan), np.full(DIM, np.inf), np.zeros(DIM)):
-        assert not any(m.observe(1, bad, MODEL).known for _ in range(5))
+        assert not any(m.observe(1, bad, MODEL, 0.0).known for _ in range(5))
 
 
 def test_matcher_requires_its_config(tmp_path):
@@ -292,7 +290,7 @@ def test_refresh_adds_after_high_confidence_match_and_respects_the_cap(tmp_path)
     rows = [len(reg.get_person(person.person_id).face_embeddings)]
     for j in (1, 2, 3, 4):
         for _ in range(3):
-            m.observe(1, blend(0, j, 0.5), MODEL)
+            m.observe(1, blend(0, j, 0.5), MODEL, 0.0)
         rows.append(len(reg.get_person(person.person_id).face_embeddings))
     stored = reg.get_person(person.person_id)
     assert rows[0] == 5 and max(rows) == 7
@@ -311,7 +309,7 @@ def test_refresh_requires_high_similarity_and_skips_duplicates(tmp_path):
     person = enroll(reg, 0)
     m = matcher(reg)
     for _ in range(5):
-        m.observe(1, blend(0, 1, 0.9), MODEL)  # cosine 0.62: matches, below refresh_min
+        m.observe(1, blend(0, 1, 0.9), MODEL, 0.0)  # cosine 0.62: matches, below refresh_min
     assert len(reg.get_person(person.person_id).face_embeddings) == 5
     assert not reg.add_refresh_embedding(person.person_id, cluster(0)[0], MODEL)
     assert not reg.add_refresh_embedding(person.person_id, blend(0, 1, 0.5), "face-v2")
@@ -346,9 +344,9 @@ def test_refresh_is_blocked_while_voice_conflicts(tmp_path):
     a = enroll_with_voice(reg, 0, "A")
     enroll_with_voice(reg, 1, "B")
     m = matcher(reg)
-    m.observe_voice(1, axis(1), VOICE_MODEL)
+    m.observe_voice(1, axis(1), VOICE_MODEL, 0.0)
     for _ in range(3):
-        found = m.observe(1, blend(0, 2, 0.5), MODEL)
+        found = m.observe(1, blend(0, 2, 0.5), MODEL, 0.0)
     assert found.owner_id == a.person_id
     assert len(reg.get_person(a.person_id).face_embeddings) == 5
 
@@ -510,10 +508,10 @@ def test_forget_purges_matcher_votes(tmp_path):
     a = enroll(reg, 0)
     m = matcher(reg)
     for _ in range(3):
-        found = m.observe(1, axis(0), MODEL, refresh=False)
+        found = m.observe(1, axis(0), MODEL, 0.0, refresh=False)
     assert found.owner_id == a.person_id
     reg.forget(a.person_id)
-    assert not m.observe(1, axis(0), MODEL, refresh=False).known
+    assert not m.observe(1, axis(0), MODEL, 0.0, refresh=False).known
 
 
 def test_forget_purges_voice_votes_too(tmp_path):
@@ -521,9 +519,9 @@ def test_forget_purges_voice_votes_too(tmp_path):
     a = enroll_with_voice(reg, 0)
     m = matcher(reg)
     for _ in range(3):
-        m.observe_voice(1, axis(0), VOICE_MODEL)
+        m.observe_voice(1, axis(0), VOICE_MODEL, 0.0)
     reg.forget(a.person_id)
-    assert not m.observe_voice(1, axis(0), VOICE_MODEL).known
+    assert not m.observe_voice(1, axis(0), VOICE_MODEL, 0.0).known
 
 
 def test_forget_survives_a_failing_history_link(tmp_path):
@@ -940,3 +938,21 @@ def test_forget_purges_quarantined_files_too(tmp_path):
     assert again.forget(bad.person_id) is True
     assert not people_files(tmp_path, bad.person_id)
     assert again.quarantined() == [] and again.forget(bad.person_id) is False
+
+
+def test_vote_age_follows_capture_stamps_not_the_wall_clock(tmp_path):
+    clock = Clock()
+    reg = make(tmp_path, clock)
+    enroll_with_voice(reg, 0, "X")
+    m = matcher(reg)
+    for _ in range(3):
+        m.observe_voice(1, axis(0), VOICE_MODEL, 100.0)
+    clock.advance(3600)
+    assert m.observe_voice(1, axis(0), VOICE_MODEL, 100.5).known
+    assert not m.observe(1, axis(5), MODEL, 100.5 + IdentityConfig().vote_max_age_s + 1).known
+
+
+def test_stamp_is_required(tmp_path):
+    m = matcher(make(tmp_path))
+    with pytest.raises(TypeError):
+        m.observe(1, axis(0), MODEL)

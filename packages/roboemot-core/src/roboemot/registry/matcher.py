@@ -17,7 +17,6 @@ from __future__ import annotations
 import uuid
 from collections import Counter, deque
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Literal
 
 import numpy as np
@@ -46,8 +45,8 @@ class Identity:
 
 @dataclass
 class _Track:
-    face: deque[tuple[str | None, datetime]]
-    voice: deque[tuple[str | None, datetime]]
+    face: deque[tuple[str | None, float]]
+    voice: deque[tuple[str | None, float]]
     anonymous_id: str | None = None
 
 
@@ -116,21 +115,21 @@ class Matcher:
             return _Vote(None, best)
         return _Vote(best_owner, best)
 
-    def _live(self, votes: deque[tuple[str | None, datetime]]) -> list[str | None]:
-        """Owners of the votes younger than ``vote_max_age_s``, oldest first."""
-        now, limit = self.registry.now(), self.config.vote_max_age_s
-        return [v for v, at in votes if (now - at).total_seconds() <= limit]
+    def _live(self, votes: deque[tuple[str | None, float]], now: float) -> list[str | None]:
+        """Owners of the votes at most ``vote_max_age_s`` older than the stamp ``now``."""
+        limit = self.config.vote_max_age_s
+        return [v for v, at in votes if now - at <= limit]
 
-    def _winner(self, votes: deque[tuple[str | None, datetime]]) -> str | None:
-        counts = Counter(v for v in self._live(votes) if v is not None)
+    def _winner(self, votes: deque[tuple[str | None, float]], now: float) -> str | None:
+        counts = Counter(v for v in self._live(votes, now) if v is not None)
         if not counts:
             return None
         owner, n = counts.most_common(1)[0]
         return owner if n >= self.config.votes_required else None
 
-    def _resolve(self, track_id: int, kind: Kind) -> Identity:
+    def _resolve(self, track_id: int, kind: Kind, now: float) -> Identity:
         track = self._track(track_id)
-        face, voice = self._winner(track.face), self._winner(track.voice)
+        face, voice = self._winner(track.face, now), self._winner(track.voice, now)
         disagreement = face is not None and voice is not None and face != voice
         owner = None if disagreement else (face or voice)
         if owner is not None:
@@ -139,9 +138,9 @@ class Matcher:
             track.anonymous_id = f"anon-{uuid.uuid4().hex[:ANON_ID_HEX_CHARS]}"
         return Identity(track_id, None, None, track.anonymous_id, disagreement)
 
-    def _conflicted(self, track: _Track, owner_id: str) -> bool:
+    def _conflicted(self, track: _Track, owner_id: str, now: float) -> bool:
         """True when any recent face or voice vote on the track went to someone else."""
-        live = (*self._live(track.face), *self._live(track.voice))
+        live = (*self._live(track.face, now), *self._live(track.voice, now))
         return any(v is not None and v != owner_id for v in live)
 
     def observe(
@@ -149,6 +148,7 @@ class Matcher:
         track_id: int,
         embedding: np.ndarray,
         model_id: str,
+        stamp: float,
         *,
         kind: Kind = "person",
         refresh: bool = True,
@@ -157,30 +157,35 @@ class Matcher:
 
         After a high-confidence match of a person, the embedding is offered to the registry's
         online refresh, which applies consent, cap, interval and drift rules. No refresh is
-        offered while any live vote on the track, face or voice, names someone else. Votes older
-        than ``vote_max_age_s`` are ignored; neither modality ever clears the other, so a
-        disagreement lasts until the stale votes age out or fresh ones agree.
+        offered while any live vote on the track, face or voice, names someone else.
+
+        ``stamp`` is the capture time in monotonic seconds, the clock of the world model's
+        observation stamps (SPEC 14 replay), never the wall clock. Votes more than
+        ``vote_max_age_s`` older than it are ignored; neither modality ever clears the other,
+        so a disagreement lasts until the stale votes age out or fresh ones agree.
         """
         with self._lock:
             track = self._track(track_id)
             vote = self._vote("entity" if kind == "entity" else "face", embedding, model_id)
-            track.face.append((vote.owner_id, self.registry.now()))
-            identity = self._resolve(track_id, kind)
+            track.face.append((vote.owner_id, stamp))
+            identity = self._resolve(track_id, kind, stamp)
             if (
                 refresh
                 and kind == "person"
                 and identity.owner_id is not None
                 and vote.owner_id == identity.owner_id
                 and vote.best >= self.config.refresh_min_similarity
-                and not self._conflicted(track, identity.owner_id)
+                and not self._conflicted(track, identity.owner_id, stamp)
             ):
                 self.registry.add_refresh_embedding(identity.owner_id, embedding, model_id)
             return identity
 
-    def observe_voice(self, track_id: int, embedding: np.ndarray, model_id: str) -> Identity:
+    def observe_voice(
+        self, track_id: int, embedding: np.ndarray, model_id: str, stamp: float
+    ) -> Identity:
         """Evaluate a speaker embedding for a track; fused with the face votes of that track."""
         with self._lock:
             track = self._track(track_id)
             owner = self._vote("voice", embedding, model_id).owner_id
-            track.voice.append((owner, self.registry.now()))
-            return self._resolve(track_id, "person")
+            track.voice.append((owner, stamp))
+            return self._resolve(track_id, "person", stamp)
