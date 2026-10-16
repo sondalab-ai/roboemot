@@ -21,9 +21,9 @@
    "engine": "onnxruntime 1.31.0",
    "threads": 2,
    "runs": 100,
-   "p50_ms": 11.82,
-   "p95_ms": 14.7,
-   "mean_ms": 13.35,
+   "p50_ms": 12.37,
+   "p95_ms": 13.06,
+   "mean_ms": 12.36,
    "peak_rss_mb": 86.0
   },
   {
@@ -40,9 +40,9 @@
    "engine": "onnxruntime 1.31.0",
    "threads": 2,
    "runs": 100,
-   "p50_ms": 10.21,
-   "p95_ms": 11.52,
-   "mean_ms": 10.73,
+   "p50_ms": 9.7,
+   "p95_ms": 10.13,
+   "mean_ms": 9.5,
    "peak_rss_mb": 84.0
   }
  ]
