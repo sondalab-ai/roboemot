@@ -88,8 +88,17 @@ def test_link_set_reports_only_changes():
 # ---------------------------------------------------------------- network
 
 
-def route(name: str, url: str = "https://api.example.com/v1") -> LLMRoute:
-    return LLMRoute(name=name, base_url=url, model="m", first_token_timeout_s=0.3)
+# Generous so a loaded machine never times out a mock route; only the timeout test goes short.
+FIRST_TOKEN_TIMEOUT_S = 5.0
+SHORT_FIRST_TOKEN_TIMEOUT_S = 0.3
+
+
+def route(
+    name: str,
+    url: str = "https://api.example.com/v1",
+    first_token_timeout_s: float = FIRST_TOKEN_TIMEOUT_S,
+) -> LLMRoute:
+    return LLMRoute(name=name, base_url=url, model="m", first_token_timeout_s=first_token_timeout_s)
 
 
 def test_route_endpoint_defaults_ports():
@@ -106,8 +115,16 @@ class Clock:
         return self.t
 
 
-def monitor(reachable: dict[str, bool], ev: Events, clock: Clock) -> NetworkMonitor:
-    routes = [route("cloud"), route("lan", "http://lan.local:8080/v1")]
+def monitor(
+    reachable: dict[str, bool],
+    ev: Events,
+    clock: Clock,
+    first_token_timeout_s: float = FIRST_TOKEN_TIMEOUT_S,
+) -> NetworkMonitor:
+    routes = [
+        route("cloud", first_token_timeout_s=first_token_timeout_s),
+        route("lan", "http://lan.local:8080/v1", first_token_timeout_s),
+    ]
     hosts = {"api.example.com": "cloud", "lan.local": "lan"}
     return NetworkMonitor(
         routes, POLICY, ev, probe=lambda host, port, t: reachable[hosts[host]], clock=clock
@@ -217,6 +234,20 @@ async def test_router_skips_unreachable_route():
     assert hosts == ["lan.local"] and isinstance(evs[-1], Done) and evs[-1].route == "lan"
 
 
+async def test_router_tolerates_a_first_token_delayed_by_load():
+    """A busy machine can delay the first token; only the timeout test should time out."""
+    import asyncio
+
+    mon = monitor({"cloud": True, "lan": True}, Events(), Clock())
+
+    async def loaded(request):
+        await asyncio.sleep(0.5)
+        return ok_handler(request)
+
+    evs = await collect(router_with(mon, loaded))
+    assert isinstance(evs[-1], Done) and evs[-1].route == "cloud"
+
+
 async def test_connection_errors_take_the_network_offline():
     ev = Events()
     mon = monitor({"cloud": True, "lan": True}, ev, Clock())
@@ -238,11 +269,11 @@ async def test_slow_but_reachable_route_never_goes_offline():
     import asyncio
 
     ev, clock = Events(), Clock()
-    mon = monitor({"cloud": True, "lan": True}, ev, clock)
+    mon = monitor({"cloud": True, "lan": True}, ev, clock, SHORT_FIRST_TOKEN_TIMEOUT_S)
     mon.routes, mon.links = mon.routes[:1], {"cloud": mon.links["cloud"]}
 
     async def slow(request):
-        await asyncio.sleep(1.0)  # past the 0.3 s first-token timeout
+        await asyncio.sleep(1.0)  # past the short first-token timeout
         return ok_handler(request)
 
     r = router_with(mon, slow)
