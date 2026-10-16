@@ -106,6 +106,16 @@ class MotionLoop:
         with self._lock:
             self.core.feed(cmd)
 
+    def clear(self, source: str) -> None:
+        """Drop a source's command so lower-priority motion (idle) takes the dofs back."""
+        with self._lock:
+            self.core.arbiter.clear(source)
+
+    def pose(self) -> dict[str, float]:
+        """The limiter's current pose (what the loop last commanded), by dof name."""
+        with self._lock:
+            return dict(self.core.limiter.pos)
+
     def set_minor_present(self, present: bool) -> None:
         with self._lock:
             self.core.minor_present = present

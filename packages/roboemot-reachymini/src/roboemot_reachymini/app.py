@@ -3,7 +3,8 @@
 The daemon starts this as a subprocess and passes a connected ``ReachyMini``; this process is
 the SDK bridge (the only owner of the SDK client and its media). It never wakes or sleeps the
 robot: the platform does. M0 scope: load config and manifest, run the motion loop with idle
-motion, track connectivity (SPEC 12A: robot link in the loop, LLM routes when configured) with
+motion, look at the attention target chosen from the world model (SPEC 5, 10), track
+connectivity (SPEC 12A: robot link in the loop, LLM routes when configured) with
 the offline responder's gestures, stop cleanly on ``stop_event``.
 """
 
@@ -17,6 +18,9 @@ from pathlib import Path
 from typing import Any
 
 from roboemot.affect import AffectEngine
+from roboemot.attention import SOURCE as ATTENTION_SOURCE
+from roboemot.attention import AttentionSelector, GazeController
+from roboemot.bus import Bus
 from roboemot.config import ConfigStack
 from roboemot.diagnostics import Diagnostics, FnSource, Target, platform_sources
 from roboemot.diagnostics.system import local_sources
@@ -25,8 +29,10 @@ from roboemot.health.responder import OfflineResponder
 from roboemot.manifest import load_manifest
 from roboemot.motion import Command, MotionLoop, Priority
 from roboemot.persona import effects as persona_effects
+from roboemot.world import WorldModel
 
 from .driver import ReachyMiniDriver
+from .gaze import FRAME, GAZE
 
 try:  # the SDK is optional so unit tests run without GStreamer
     from reachy_mini import ReachyMiniApp
@@ -45,9 +51,35 @@ def idle_command(cfg: Any, t: float) -> Command:
     return Command("idle", Priority.IDLE, {"head.pitch": pitch}, t)
 
 
+def attention_tick(
+    now: float,
+    world: WorldModel,
+    selector: AttentionSelector,
+    gaze: GazeController,
+    loop: MotionLoop,
+) -> bool:
+    """One attention step: decay the world, pick the target, feed or release the gaze command.
+
+    Returns whether attention owns the head, so the caller skips the idle command meanwhile
+    (both sit at idle priority). No camera feeds an in-view test yet, so entries count as out
+    of view and fade at the slower rate.
+    """
+    world.tick(now, lambda az, el: False)
+    target = selector.update(now, world.entries)
+    was_active = gaze.active
+    cmd = gaze.step(now, target, loop.pose())
+    if cmd is not None:
+        loop.feed(cmd)
+    elif was_active:
+        loop.clear(ATTENTION_SOURCE)
+    return gaze.active
+
+
 class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
     custom_app_url: str | None = None  # web UI arrives with enrollment (M1)
     diagnostics: Diagnostics | None = None
+    world: WorldModel | None = None  # vision (M1) and the speaker hint (M3) feed these
+    selector: AttentionSelector | None = None
 
     def run(self, reachy_mini: Any, stop_event: threading.Event) -> None:
         stack = ConfigStack.from_files(
@@ -73,6 +105,16 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             rate_hz=50.0,
             on_link_change=responder.on_event,
         )
+        bus = Bus()
+        world = self.world = WorldModel(cfg.world, FRAME, bus)
+        selector = self.selector = AttentionSelector(cfg.attention, bus)
+        gaze = GazeController(
+            cfg.attention,
+            GAZE,
+            manifest.dofs,
+            manifest.constraints,
+            margin_rad=math.radians(cfg.safety.constraint_margin_deg),
+        )
         # The conversation pipeline (M3) will share this monitor with its Router.
         network = NetworkMonitor(
             cfg.llm_routes, cfg.connectivity.network, on_change=responder.on_event
@@ -97,6 +139,9 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
 
         def reload(change: Any) -> None:
             loop.apply_config(change.config)
+            world.cfg = change.config.world
+            selector.cfg = gaze.cfg = change.config.attention
+            gaze.margin_rad = math.radians(change.config.safety.constraint_margin_deg)
             responder.cfg = change.config.connectivity
             network.set_policy(change.config.connectivity.network)
 
@@ -107,7 +152,8 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         try:
             while not stop_event.is_set():
                 now = time.monotonic()
-                loop.feed(idle_command(stack.effective(), now))
+                if not attention_tick(now, world, selector, gaze, loop):
+                    loop.feed(idle_command(stack.effective(), now))
                 for cmd in responder.commands(now):
                     loop.feed(cmd)
                 stop_event.wait(0.05)
