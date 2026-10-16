@@ -894,3 +894,15 @@ def test_person_without_age_group_is_a_possible_minor(tmp_path):
     p = reg.create_pending_person("X")
     assert p.possible_minor is True
     assert enroll(reg, 1, age_group="adult").possible_minor is False
+
+
+def test_forget_purges_quarantined_files_too(tmp_path):
+    reg = make(tmp_path)
+    bad = enroll(reg, 0, "Bad")
+    (tmp_path / "reg" / "people" / f"{bad.person_id}.json").write_text("{broken")
+    again = reopen(tmp_path)
+    assert again.quarantined() == [bad.person_id] and again.list() == []
+    assert people_files(tmp_path, bad.person_id)
+    assert again.forget(bad.person_id) is True
+    assert not people_files(tmp_path, bad.person_id)
+    assert again.quarantined() == [] and again.forget(bad.person_id) is False

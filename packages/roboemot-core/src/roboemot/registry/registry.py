@@ -337,6 +337,11 @@ class Registry:
         if errors:
             raise ExceptionGroup("last_seen flush incomplete", errors)
 
+    def quarantined(self) -> list[str]:
+        """Keys of unreadable people items set aside at startup; ``forget(key)`` purges them."""
+        with self.lock:
+            return self.store.quarantined(PEOPLE)
+
     def get_person(self, person_id: str) -> PersonRecord:
         with self.lock:
             return self._people[person_id]
@@ -369,11 +374,11 @@ class Registry:
         Order: disk first, then memory (the gallery cache is cleared even if the disk delete
         fails), then forget listeners (the matcher purges votes), then every history link. A
         failing step never skips the rest; failures are raised together afterwards as an
-        ``ExceptionGroup``. Returns False when the person was unknown.
+        ``ExceptionGroup``. Quarantined keys are purged too. Returns False if nothing was held.
         """
         errors: list[Exception] = []
         with self.lock:
-            known = person_id in self._people
+            known = person_id in self._people or person_id in self.store.quarantined(PEOPLE)
             try:
                 self.store.delete(PEOPLE, person_id)
             except Exception as exc:

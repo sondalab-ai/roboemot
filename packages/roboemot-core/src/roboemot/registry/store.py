@@ -80,6 +80,10 @@ class RegistryStore(ABC):
         """Keys currently stored in the collection."""
 
     @abstractmethod
+    def quarantined(self, collection: str) -> list[str]:
+        """Keys that have quarantined files; ``delete`` removes those files too."""
+
+    @abstractmethod
     def quarantine(self, collection: str, key: str) -> None:
         """Move an unreadable item aside so it stops failing startup."""
 
@@ -215,7 +219,8 @@ class FileStore(RegistryStore):
         if not folder.is_dir():
             return
         (folder / f"{key}.json").unlink(missing_ok=True)
-        for path in self._array_files(folder, key):
+        stray = folder.glob(f"{key}.*.corrupt")
+        for path in [*self._array_files(folder, key), *stray]:
             path.unlink(missing_ok=True)
         _fsync_dir(folder)
 
@@ -224,6 +229,13 @@ class FileStore(RegistryStore):
         if not folder.is_dir():
             return []
         return sorted(p.stem for p in folder.glob("*.json") if _SAFE_ID.fullmatch(p.stem))
+
+    def quarantined(self, collection: str) -> list[str]:
+        folder = self._folder(collection)
+        if not folder.is_dir():
+            return []
+        found = {p.name.split(".", 1)[0] for p in folder.glob(f"*{CORRUPT_SUFFIX}")}
+        return sorted(k for k in found if _SAFE_ID.fullmatch(k))
 
     def quarantine(self, collection: str, key: str) -> None:
         folder, key = self._folder(collection), _check(key)
