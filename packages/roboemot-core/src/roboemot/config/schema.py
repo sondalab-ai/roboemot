@@ -1152,8 +1152,62 @@ class ConnectivityConfig(Strict):
     )
 
 
+FRAME_ANCESTORS = re.compile(r"[A-Za-z0-9:/.*' _-]+")
+
+
 class WebUIConfig(Strict):
-    bind: str = param("0.0.0.0", "Interface the web UI listens on (the robot's LAN)", restart=True)
+    bind: str | None = param(
+        None,
+        "Interface the web UI listens on; unset means 0.0.0.0 when the manifest names a robot "
+        "profile (cm4, npu: the app runs on the robot) and 127.0.0.1 otherwise (sim, dev)",
+        restart=True,
+    )
+    allowed_hosts: list[str] = param(
+        [],
+        "Extra DNS names accepted in the Host header, besides IP addresses, localhost and *.local "
+        "(DNS-rebinding guard)",
+        admin_only=True,
+    )
+    frame_ancestors: str = param(
+        "'none'",
+        "CSP frame-ancestors value: who may embed the page in a frame",
+        admin_only=True,
+    )
+    max_connections: int = param(
+        32, "Simultaneous connections served; more are refused", ge=1, le=256, conservative="lower"
+    )
+    request_deadline_s: float = param(
+        15.0,
+        "Overall time one request may take from connect to response (slowloris guard)",
+        unit="s",
+        ge=1,
+        le=300,
+        conservative="lower",
+    )
+    session_max_s: float = param(
+        3600.0,
+        "Absolute lifetime of a login session, however active",
+        unit="s",
+        ge=60,
+        le=86400,
+        conservative="lower",
+    )
+    client_backoff_s: float = param(
+        1.0,
+        "Wait after a client's first wrong PIN; doubles with every further one",
+        unit="s",
+        ge=0.1,
+        le=60,
+        conservative="higher",
+    )
+    client_backoff_max_s: float = param(
+        300.0,
+        "Longest per-client wait after wrong PINs",
+        unit="s",
+        ge=1,
+        le=86400,
+        conservative="higher",
+    )
     port: int = param(
         8042,
         "TCP port of the web UI (0 picks a free one; the app's custom_app_url)",
@@ -1212,6 +1266,20 @@ class WebUIConfig(Strict):
     status_poll_ms: int = param(
         1000, "How often the page polls the enrollment status", unit="ms", ge=200, le=10000
     )
+
+    @field_validator("frame_ancestors")
+    @classmethod
+    def _csp_value(cls, value: str) -> str:
+        if FRAME_ANCESTORS.fullmatch(value) is None:
+            raise ValueError("frame_ancestors may hold source expressions only (no ; or ,)")
+        return value
+
+    @field_validator("allowed_hosts")
+    @classmethod
+    def _host_names(cls, value: list[str]) -> list[str]:
+        if any(re.fullmatch(r"[A-Za-z0-9.-]{1,253}", h) is None for h in value):
+            raise ValueError("allowed_hosts holds bare host names (no port, no scheme)")
+        return [h.lower().rstrip(".") for h in value]
 
 
 # --------------------------------------------------------------------------- root

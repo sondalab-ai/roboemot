@@ -11,10 +11,10 @@ from typing import Any
 
 from roboemot.config.schema import WebUIConfig
 from roboemot.registry.records import (
-    ADULT_AGE_GROUPS,
     AGE_GROUPS,
     CONSENT_SCOPES,
     GENDERS,
+    possible_minor,
 )
 
 NAME_PATTERN = re.compile(r"[^\W_][\w .'’\-]*")
@@ -89,7 +89,8 @@ def enrollment_form(body: dict[str, Any], cfg: WebUIConfig) -> dict[str, Any]:
     """The complete-enrollment form as clean values.
 
     A guardian is required unless the declared age group is adult or senior; this mirrors the
-    registry rule so the form fails early, the registry stays the authority.
+    registry rule so the form fails early, the registry stays the authority. For a possible
+    minor the consenting party is the guardian, and the guardian is never the person enrolled.
     """
     only_keys(
         body,
@@ -98,15 +99,23 @@ def enrollment_form(body: dict[str, Any], cfg: WebUIConfig) -> dict[str, Any]:
     if body.get("agreed") is not True:
         raise ValidationError("consent_not_agreed", "agreed")
     display = name(body.get("display_name"), "display_name", cfg)
-    who = name(body.get("consent_who", body.get("display_name")), "consent_who", cfg)
     age = choice(body.get("age_group"), "age_group", AGE_GROUPS, "unknown")
     gender = choice(body.get("gender"), "gender", GENDERS, "unknown")
     guardian_raw = body.get("guardian")
     guardian = None
     if guardian_raw not in (None, ""):
         guardian = name(guardian_raw, "guardian", cfg)
-    if age not in ADULT_AGE_GROUPS and guardian is None:
-        raise ValidationError("guardian_required", "guardian")
+    who_raw = body.get("consent_who")
+    if possible_minor(None if age == "unknown" else age):
+        if guardian is None:
+            raise ValidationError("guardian_required", "guardian")
+        if guardian.casefold() == display.casefold():
+            raise ValidationError("guardian_is_subject", "guardian")
+        who = guardian if who_raw in (None, "") else name(who_raw, "consent_who", cfg)
+        if who.casefold() != guardian.casefold():
+            raise ValidationError("consent_who_guardian", "consent_who")
+    else:
+        who = name(display if who_raw in (None, "") else who_raw, "consent_who", cfg)
     return {
         "display_name": display,
         "who": who,

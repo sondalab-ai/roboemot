@@ -73,10 +73,8 @@ function stopPolling() {
 function loginView() {
   const view = document.getElementById("view");
   view.replaceChildren();
-  const canSetup = !state.session.pin_set;
-  const local = ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
-  if (canSetup && !local) {
-    view.append(el("section", {}, el("h2", {}, t("setup_title")), el("p", {}, t("setup_remote"))));
+  if (!state.session.pin_set) {
+    view.append(el("section", {}, el("h2", {}, t("login_title")), el("p", {}, t("no_pin"))));
     return;
   }
   const pin = el("input", { type: "password", id: "pin", autocomplete: "off", inputmode: "numeric" });
@@ -84,7 +82,7 @@ function loginView() {
     onsubmit: (ev) => {
       ev.preventDefault();
       guarded(async () => {
-        const data = await api("POST", canSetup ? "/api/setup" : "/api/login", { pin: pin.value });
+        const data = await api("POST", "/api/login", { pin: pin.value });
         pin.value = "";
         state.csrf = data.csrf;
         notice("");
@@ -92,10 +90,10 @@ function loginView() {
       });
     },
   },
-  el("h2", {}, t(canSetup ? "setup_title" : "login_title")),
-  el("label", { for: "pin" }, t(canSetup ? "pin_new" : "pin")),
+  el("h2", {}, t("login_title")),
+  el("label", { for: "pin" }, t("pin")),
   pin,
-  el("p", {}, el("button", { type: "submit", class: "primary" }, t(canSetup ? "setup" : "login"))));
+  el("p", {}, el("button", { type: "submit", class: "primary" }, t("login"))));
   view.append(form);
   pin.focus();
 }
@@ -161,6 +159,7 @@ function consentForm() {
   const guardian = el("input", { type: "text", id: "guardian", maxlength: max });
   const age = select("age_group", ["unknown", "child", "teen", "adult", "senior"], "age_");
   const gender = select("gender", ["unknown", "female", "male"], "gender_");
+  const minor = () => !["adult", "senior"].includes(age.value);
   const scopes = ["face", "voice", "refresh"].map((s) =>
     el("label", { class: "check" }, el("input", { type: "checkbox", value: s, checked: s !== "voice" }), t("scope_" + s)));
   const agreed = el("input", { type: "checkbox", id: "agreed" });
@@ -170,7 +169,7 @@ function consentForm() {
       guarded(async () => {
         await api("POST", "/api/enrollment/complete", {
           display_name: name.value,
-          consent_who: who.value,
+          consent_who: minor() ? guardian.value : who.value,
           guardian: guardian.value,
           age_group: age.value,
           gender: gender.value,
@@ -205,6 +204,7 @@ async function registryView() {
     api("GET", "/api/registry"), api("GET", "/api/registry/quarantined"),
   ]);
   const rows = list.records;
+  state.pinField = el("input", { type: "password", id: "confirm_pin", autocomplete: "off", inputmode: "numeric" });
   const entities = rows.filter((r) => r.kind !== "person");
   const table = rows.length === 0 ? el("p", { class: "muted" }, t("registry_empty")) : el("table", {},
     el("tr", {}, el("th", {}, t("display_name")), el("th", {}, ""), el("th", {}, t("last_seen")), el("th", {}, "")),
@@ -213,16 +213,23 @@ async function registryView() {
       el("td", {}, t("kind_" + r.kind) + ", " + (state.strings["status_" + r.status] || r.status)),
       el("td", {}, r.last_seen ? new Date(r.last_seen).toLocaleString() : t("never")),
       el("td", { class: "actions" }, rowActions(r, entities)))));
-  view.append(el("section", {}, el("h2", {}, t("registry_title")), table));
+  view.append(el("section", {}, el("h2", {}, t("registry_title")),
+    el("label", { for: "confirm_pin" }, t("pin_confirm")), state.pinField, table));
   view.append(el("section", {}, el("h2", {}, t("quarantined_title")),
     quarantined.keys.length === 0 ? el("p", { class: "muted" }, t("quarantined_none")) :
       el("ul", {}, quarantined.keys.map((k) => el("li", {}, k + " ", el("button", {
         type: "button", class: "danger",
         onclick: () => confirm(t("confirm_purge")) && guarded(async () => {
-          await api("POST", "/api/registry/quarantined/purge", { key: k, confirm: true });
+          await api("POST", "/api/registry/quarantined/purge", { key: k, confirm: true, pin: takePin() });
           await registryView();
         }),
       }, t("purge")))))));
+}
+
+function takePin() {
+  const value = state.pinField.value;
+  state.pinField.value = "";
+  return value;
 }
 
 function rowActions(r, entities) {
@@ -239,7 +246,7 @@ function rowActions(r, entities) {
     buttons.push(el("button", {
       type: "button", class: "danger",
       onclick: () => confirm(t("confirm_forget", { name: r.display_name })) && guarded(async () => {
-        await api("POST", "/api/registry/" + r.id + "/forget", { confirm: true });
+        await api("POST", "/api/registry/" + r.id + "/forget", { confirm: true, pin: takePin() });
         await reload();
       }),
     }, t("forget")));

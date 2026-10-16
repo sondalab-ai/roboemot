@@ -5,18 +5,17 @@ from __future__ import annotations
 DEFAULT_LANGUAGE = "en"
 
 EN: dict[str, str] = {
+    "no_pin": "No operator PIN is set. Set the PIN with the installer or the CLI.",
+    "pin_confirm": "PIN (needed to forget or purge)",
+    "err_busy": "Busy checking another PIN. Try again in a moment.",
+    "err_consent_who_guardian": "For a minor, the person consenting is the parent or guardian.",
+    "err_guardian_is_subject": "The guardian cannot be the person being enrolled.",
+    "err_bad_host": "Host not accepted.",
     "title": "RoboEmot",
     "loading": "Loading...",
     "login_title": "Operator login",
-    "setup_title": "First run: set the operator PIN",
-    "setup_remote": (
-        "No operator PIN is set. Set it on the robot: python -m roboemot.webui set-pin "
-        "--data-dir <app data dir>"
-    ),
     "pin": "PIN",
-    "pin_new": "New PIN (digits only)",
     "login": "Log in",
-    "setup": "Set PIN",
     "logout": "Log out",
     "tab_enroll": "Enrollment",
     "tab_registry": "Registry",
@@ -105,12 +104,12 @@ EN: dict[str, str] = {
     "err_unauthorized": "Please log in.",
     "err_csrf": "Session check failed, reload the page.",
     "err_bad_pin": "Wrong PIN.",
-    "err_locked": "Too many attempts. Try again later.",
+    "err_locked": (
+        "Too many attempts. Try again later, or restart the app or run set-pin on the robot."
+    ),
     "err_pin_digits": "The PIN must be digits only.",
     "err_pin_too_short": "The PIN is too short.",
-    "err_pin_already_set": "A PIN is already set.",
     "err_pin_not_set": "No PIN is set yet.",
-    "err_setup_local_only": "First-run setup is only possible on the robot itself.",
     "err_name_required": "A name is required.",
     "err_name_invalid": "The name has characters that are not allowed.",
     "err_name_too_long": "The name is too long.",
@@ -134,18 +133,17 @@ EN: dict[str, str] = {
 }
 
 IT: dict[str, str] = {
+    "no_pin": "Nessun PIN operatore impostato. Impostalo con l'installer o con la CLI.",
+    "pin_confirm": "PIN (serve per dimenticare o eliminare)",
+    "err_busy": "Sto controllando un altro PIN. Riprova tra un momento.",
+    "err_consent_who_guardian": "Per un minore dà il consenso il genitore o tutore.",
+    "err_guardian_is_subject": "Il tutore non può essere la persona registrata.",
+    "err_bad_host": "Host non accettato.",
     "title": "RoboEmot",
     "loading": "Caricamento...",
     "login_title": "Accesso operatore",
-    "setup_title": "Primo avvio: imposta il PIN operatore",
-    "setup_remote": (
-        "Nessun PIN operatore impostato. Impostalo sul robot: python -m roboemot.webui set-pin "
-        "--data-dir <cartella dati dell'app>"
-    ),
     "pin": "PIN",
-    "pin_new": "Nuovo PIN (solo cifre)",
     "login": "Accedi",
-    "setup": "Imposta PIN",
     "logout": "Esci",
     "tab_enroll": "Registrazione",
     "tab_registry": "Anagrafica",
@@ -237,12 +235,12 @@ IT: dict[str, str] = {
     "err_unauthorized": "Accedi per continuare.",
     "err_csrf": "Controllo di sessione fallito, ricarica la pagina.",
     "err_bad_pin": "PIN errato.",
-    "err_locked": "Troppi tentativi. Riprova più tardi.",
+    "err_locked": (
+        "Troppi tentativi. Riprova più tardi, oppure riavvia l'app o esegui set-pin sul robot."
+    ),
     "err_pin_digits": "Il PIN deve contenere solo cifre.",
     "err_pin_too_short": "Il PIN è troppo corto.",
-    "err_pin_already_set": "Un PIN è già impostato.",
     "err_pin_not_set": "Nessun PIN ancora impostato.",
-    "err_setup_local_only": "Il primo avvio si può fare solo sul robot stesso.",
     "err_name_required": "Il nome è obbligatorio.",
     "err_name_invalid": "Il nome contiene caratteri non ammessi.",
     "err_name_too_long": "Il nome è troppo lungo.",

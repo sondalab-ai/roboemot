@@ -32,7 +32,8 @@ class FakeService:
         ]
         self.keys = ["badkey"]
         self.state = "collecting"
-        self.fail_forget = False
+        self.fail_forget: Exception | None = None
+        self.forget_result = True
 
     def start(self, session_id):
         self.calls.append(("start", len(session_id)))
@@ -60,6 +61,8 @@ class FakeService:
         return list(self.rows)
 
     def rename(self, record_id, display_name):
+        if display_name == "Boom":
+            raise ValueError("internal secret detail")
         self.calls.append(("rename", record_id, display_name))
 
     def merge(self, keep_id, drop_id):
@@ -70,11 +73,11 @@ class FakeService:
 
     def forget(self, person_id):
         if self.fail_forget:
-            raise ExceptionGroup("forget incomplete", [OSError("disk")])
+            raise self.fail_forget
         self.calls.append(("forget", person_id))
         if person_id in self.keys:
             self.keys.remove(person_id)
-        return True
+        return self.forget_result
 
     def quarantined(self):
         return list(self.keys)
@@ -213,13 +216,9 @@ def test_login_sets_strict_httponly_cookie(client):
     assert client.request("GET", "/api/session").json["authenticated"] is True
 
 
-def test_wrong_pin_then_lockout_even_for_right_pin(client, clock):
-    for _ in range(3):
+def test_loopback_is_never_locked_out(client):
+    for _ in range(10):
         assert client.login("000000").status == 401
-    locked = client.login(PIN)
-    assert locked.status == 429
-    assert int(locked.headers["Retry-After"]) >= 1
-    clock.now += 61
     assert client.login(PIN).status == 200
 
 
@@ -233,6 +232,27 @@ def test_success_resets_failure_count(client):
 
 def test_session_expires_when_idle(authed, clock):
     clock.now += 901
+    assert authed.request("GET", "/api/registry").status == 401
+
+
+def test_session_has_an_absolute_lifetime(authed, clock):
+    for _ in range(5):  # active the whole time, so never idle
+        clock.now += 800
+        if authed.request("GET", "/api/registry").status == 401:
+            break
+    assert authed.request("GET", "/api/registry").status == 401
+
+
+def test_session_cookie_has_no_max_age(client):
+    cookie = client.login().headers["Set-Cookie"]
+    assert "Max-Age" not in cookie and "Expires" not in cookie
+    out = client.request("POST", "/api/logout", {})
+    assert "Max-Age=0" in out.headers["Set-Cookie"]
+
+
+def test_new_pin_ends_existing_sessions(authed, server):
+    assert authed.request("GET", "/api/registry").status == 200
+    server.set_pin("135790")
     assert authed.request("GET", "/api/registry").status == 401
 
 
@@ -258,19 +278,16 @@ def test_pin_format_rules(server):
         server.set_pin("abcdefgh")
 
 
-def test_setup_without_pin(tmp_path, service):
+def test_there_is_no_web_setup_route(tmp_path, service):
     cfg = RoboEmotConfig(webui={"bind": "127.0.0.1", "port": 0})
-    srv = make_server(service, Diagnostics(), cfg, tmp_path)
-    srv.start()
+    srv = make_server(service, Diagnostics(), cfg, tmp_path).start()
     try:
         c = Client(srv.port)
         assert c.request("GET", "/api/session").json["pin_set"] is False
         assert c.login().json == {"error": "pin_not_set"}
-        assert c.request("POST", "/api/setup", {"pin": "12"}).json["error"] == "pin_too_short"
-        ok = c.request("POST", "/api/setup", {"pin": PIN})
-        assert ok.status == 200
-        assert c.request("POST", "/api/setup", {"pin": PIN}).json["error"] == "pin_already_set"
-        assert PIN not in (tmp_path / "webui_pin.json").read_text()
+        assert c.request("POST", "/api/setup", {"pin": PIN}).status in (401, 404)
+        assert not (tmp_path / "webui_pin.json").exists()
+        assert "no_pin" in c.request("GET", "/api/strings").json["strings"]
     finally:
         srv.stop()
 
@@ -427,9 +444,29 @@ def test_guardian_required_unless_adult_or_senior(authed, service, age):
 
 
 def test_guardian_accepted_for_minor(authed, service):
-    form = FORM | {"age_group": "child", "guardian": "Maria Rossi"}
+    form = {k: v for k, v in FORM.items() if k != "consent_who"}
+    form |= {"age_group": "child", "guardian": "Maria Rossi"}
     assert authed.request("POST", "/api/enrollment/complete", form).status == 200
-    assert service.calls[-1][2].guardian == "Maria Rossi"
+    consent = service.calls[-1][2]
+    assert (consent.guardian, consent.who) == ("Maria Rossi", "Maria Rossi")
+
+
+def test_minor_consent_must_come_from_the_guardian(authed, service):
+    base = FORM | {"age_group": "teen", "guardian": "Maria Rossi"}
+    mismatch = authed.request("POST", "/api/enrollment/complete", base | {"consent_who": "Anna"})
+    assert mismatch.status == 422
+    assert mismatch.json["error"] == "consent_who_guardian"
+    same = authed.request("POST", "/api/enrollment/complete", base | {"consent_who": "maria rossi"})
+    assert same.status == 200
+    assert service.calls[-1][2].who == "Maria Rossi" or service.calls[-1][2].who == "maria rossi"
+
+
+def test_guardian_cannot_be_the_person_enrolled(authed, service):
+    form = FORM | {"age_group": "child", "guardian": "anna", "consent_who": "anna"}
+    resp = authed.request("POST", "/api/enrollment/complete", form)
+    assert resp.status == 422
+    assert resp.json["error"] == "guardian_is_subject"
+    assert not service.calls
 
 
 def test_senior_needs_no_guardian(authed):
@@ -470,7 +507,8 @@ def test_unicode_names_accepted(authed):
 
 
 def test_registry_remains_the_authority_on_consent(authed):
-    form = FORM | {"age_group": "child", "guardian": "Refused"}
+    form = {k: v for k, v in FORM.items() if k != "consent_who"}
+    form |= {"age_group": "child", "guardian": "Refused"}
     resp = authed.request("POST", "/api/enrollment/complete", form)
     assert resp.status == 422
     assert resp.json["error"] == "consent_refused"
@@ -517,9 +555,33 @@ def test_forget_needs_confirm_and_is_synchronous(authed, service):
     assert first.json == {"error": "confirm_required"}
     assert not any(c[0] == "forget" for c in service.calls)
     assert authed.request("POST", "/api/registry/p1/forget", {"confirm": "true"}).status == 409
-    done = authed.request("POST", "/api/registry/p1/forget", {"confirm": True})
+    done = authed.request("POST", "/api/registry/p1/forget", {"confirm": True, "pin": PIN})
     assert done.status == 200
     assert service.calls[-1] == ("forget", "p1")
+
+
+def test_forget_and_purge_ask_for_the_pin_again(authed, service):
+    forget = "/api/registry/p1/forget"
+    assert authed.request("POST", forget, {"confirm": True}).status == 400
+    assert authed.request("POST", forget, {"confirm": True, "pin": "000000"}).status == 401
+    purge = "/api/registry/quarantined/purge"
+    assert authed.request("POST", purge, {"key": "badkey", "confirm": True}).status == 400
+    wrong = authed.request("POST", purge, {"key": "badkey", "confirm": True, "pin": "000000"})
+    assert wrong.status == 401
+    assert not any(c[0] == "forget" for c in service.calls)
+
+
+def test_forget_of_nothing_is_not_found(authed, service):
+    service.forget_result = False
+    resp = authed.request("POST", "/api/registry/p1/forget", {"confirm": True, "pin": PIN})
+    assert resp.status == 404
+
+
+def test_forget_failures_of_any_kind_are_incomplete(authed, service):
+    service.fail_forget = RuntimeError("secret detail")
+    resp = authed.request("POST", "/api/registry/p1/forget", {"confirm": True, "pin": PIN})
+    assert resp.json == {"error": "forget_incomplete"}
+    assert b"secret" not in resp.body
 
 
 def test_forget_only_for_people_and_delete_only_for_entities(authed):
@@ -534,8 +596,8 @@ def test_delete_entity_needs_confirm(authed, service):
 
 
 def test_incomplete_forget_is_reported(authed, service):
-    service.fail_forget = True
-    resp = authed.request("POST", "/api/registry/p1/forget", {"confirm": True})
+    service.fail_forget = ExceptionGroup("forget incomplete", [OSError("disk")])
+    resp = authed.request("POST", "/api/registry/p1/forget", {"confirm": True, "pin": PIN})
     assert resp.status == 500
     assert resp.json == {"error": "forget_incomplete"}
 
@@ -546,11 +608,11 @@ def test_quarantined_list_and_purge(authed, service):
         authed.request("POST", "/api/registry/quarantined/purge", {"key": "badkey"}).status == 409
     )
     other = authed.request(
-        "POST", "/api/registry/quarantined/purge", {"key": "p1", "confirm": True}
+        "POST", "/api/registry/quarantined/purge", {"key": "p1", "confirm": True, "pin": PIN}
     )
     assert other.status == 404
     done = authed.request(
-        "POST", "/api/registry/quarantined/purge", {"key": "badkey", "confirm": True}
+        "POST", "/api/registry/quarantined/purge", {"key": "badkey", "confirm": True, "pin": PIN}
     )
     assert done.status == 200
     assert service.keys == []
@@ -571,8 +633,11 @@ def test_debug_report_is_served(authed):
     assert resp.json["sections"]["demo"]["data"]["fps"] == 12.5
 
 
-def test_no_vectors_in_any_response(tmp_path, service):
-    leaky = Diagnostics().add(FnSource("emb", lambda: {"v": [0.01 * i for i in range(128)]}))
+def test_a_section_with_a_vector_is_withheld_not_the_whole_report(tmp_path, service):
+    leaky = Diagnostics().add(
+        FnSource("emb", lambda: {"v": [0.01 * i for i in range(128)]}),
+        FnSource("ok", lambda: {"fps": 3}),
+    )
     cfg = RoboEmotConfig(webui={"bind": "127.0.0.1", "port": 0})
     srv = make_server(service, leaky, cfg, tmp_path)
     srv.set_pin(PIN)
@@ -581,10 +646,23 @@ def test_no_vectors_in_any_response(tmp_path, service):
         c = Client(srv.port)
         c.login()
         resp = c.request("GET", "/api/debug")
-        assert resp.status == 500
+        assert resp.status == 200
+        assert resp.json["sections"]["emb"] == {
+            "scope": "runtime",
+            "ok": False,
+            "error": "withheld",
+        }
+        assert resp.json["sections"]["ok"]["data"] == {"fps": 3}
         assert b"0.01" not in resp.body
     finally:
         srv.stop()
+
+
+def test_service_error_text_is_never_echoed(authed):
+    resp = authed.request("POST", "/api/registry/a1/rename", {"display_name": "Boom"})
+    assert resp.status == 422
+    assert resp.json == {"error": "bad_request"}
+    assert b"secret" not in resp.body
 
 
 def test_every_normal_response_is_free_of_float_arrays(authed):

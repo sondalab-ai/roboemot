@@ -16,6 +16,7 @@ import json
 import logging
 import re
 import secrets
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -23,20 +24,19 @@ from datetime import UTC, datetime
 from http import HTTPStatus
 from http.cookies import CookieError, SimpleCookie
 from typing import Any, Protocol
-from urllib.parse import urlsplit
 
 from roboemot.config.schema import RoboEmotConfig, WebUIConfig
 from roboemot.registry.records import Consent, ConsentError
 
 from . import validation as v
-from .auth import LoginLimiter, PinError, PinStore, Sessions, check_pin_format
+from .auth import LoginLimiter, PinStore, Sessions
+from .guard import same_origin
 from .strings import STRINGS, language_for
 
 log = logging.getLogger(__name__)
 
 COOKIE = "roboemot_session"
 CSRF_HEADER = "x-csrf-token"
-LOOPBACK = frozenset({"127.0.0.1", "::1"})
 VECTOR_GUARD_LEN = 32
 MAX_PIN_CHARS = 64
 ENROLLMENT_ID_BYTES = 8
@@ -97,12 +97,16 @@ class Response:
 
 class ApiError(Exception):
     def __init__(
-        self, status: HTTPStatus, code: str, detail: str | None = None, field: str | None = None
+        self,
+        status: HTTPStatus,
+        code: str,
+        retry_after: float | None = None,
+        field: str | None = None,
     ) -> None:
         super().__init__(code)
         self.status = status
         self.code = code
-        self.detail = detail
+        self.retry_after = retry_after
         self.field = field
 
 
@@ -149,7 +153,8 @@ class WebApi:
         self.now = now
         web = self.config.webui
         self.sessions = Sessions(web)
-        self.limiter = LoginLimiter(web)
+        self.limiter = LoginLimiter(web, pin_store.version())
+        self._hashing = threading.Semaphore(1)
 
     @property
     def config(self) -> RoboEmotConfig:
@@ -167,13 +172,11 @@ class WebApi:
             resp = self._dispatch(req)
         except ApiError as exc:
             body: dict[str, Any] = {"error": exc.code}
-            if exc.detail:
-                body["detail"] = exc.detail
             if exc.field:
                 body["field"] = exc.field
             resp = Response(exc.status, body)
-            if exc.code == "locked" and exc.detail:
-                resp.headers["Retry-After"] = exc.detail
+            if exc.retry_after is not None:
+                resp.headers["Retry-After"] = str(int(exc.retry_after) + 1)
         except v.ValidationError as exc:
             resp = Response(
                 HTTPStatus.UNPROCESSABLE_ENTITY, {"error": exc.code, "field": exc.field}
@@ -196,12 +199,11 @@ class WebApi:
             ("GET", "/api/strings"): self._strings,
             ("GET", "/api/session"): self._session,
             ("POST", "/api/login"): self._login,
-            ("POST", "/api/setup"): self._setup,
         }
         if (method, path) in public:
             return public[(method, path)](req)
         token = parse_cookie(req.headers.get("cookie"))
-        session = self.sessions.get(token, self.clock())
+        session = self.sessions.get(token, self.clock(), self.pins.version())
         if session is None:
             if not path.startswith("/api/"):
                 raise ApiError(HTTPStatus.NOT_FOUND, "not_found")
@@ -216,7 +218,7 @@ class WebApi:
         method, path = req.method, req.path
         if (method, path) == ("POST", "/api/logout"):
             self.sessions.drop(token)
-            return Response(HTTPStatus.OK, {"ok": True}, cookies=[self._cookie("", 0)])
+            return Response(HTTPStatus.OK, {"ok": True}, cookies=[self._cookie("", expire=True)])
         simple: dict[tuple[str, str], Callable[[Request], Response]] = {
             ("POST", "/api/enrollment/start"): self._enroll_start,
             ("GET", "/api/enrollment/status"): self._enroll_status,
@@ -245,10 +247,7 @@ class WebApi:
 
     def _check_origin(self, req: Request) -> None:
         origin = req.headers.get("origin")
-        if origin is None:
-            return
-        host = req.headers.get("host", "")
-        if urlsplit(origin).netloc != host:
+        if origin is not None and not same_origin(origin, req.headers.get("host", "")):
             raise ApiError(HTTPStatus.FORBIDDEN, "origin")
 
     def _json_body(self, req: Request) -> dict[str, Any]:
@@ -264,15 +263,17 @@ class WebApi:
             raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
         return body
 
-    def _cookie(self, token: str, max_age: float) -> str:
-        return f"{COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={int(max_age)}"
+    def _cookie(self, token: str, expire: bool = False) -> str:
+        """A session cookie (no Max-Age: it dies with the browser); ``expire`` clears it."""
+        base = f"{COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/"
+        return f"{base}; Max-Age=0" if expire else base
 
     def _open_session(self) -> Response:
-        token, session = self.sessions.create(self.clock())
+        token, session = self.sessions.create(self.clock(), self.pins.version())
         return Response(
             HTTPStatus.OK,
             {"ok": True, "csrf": session.csrf},
-            cookies=[self._cookie(token, self.web.session_ttl_s)],
+            cookies=[self._cookie(token)],
         )
 
     def _kind_of(self, rid: str) -> str:
@@ -295,7 +296,9 @@ class WebApi:
         return Response(HTTPStatus.OK, {"language": lang, "strings": strings})
 
     def _session(self, req: Request) -> Response:
-        session = self.sessions.get(parse_cookie(req.headers.get("cookie")), self.clock())
+        session = self.sessions.get(
+            parse_cookie(req.headers.get("cookie")), self.clock(), self.pins.version()
+        )
         data: dict[str, Any] = {
             "authenticated": session is not None,
             "pin_set": self.pins.is_set(),
@@ -310,34 +313,33 @@ class WebApi:
     def _login(self, req: Request) -> Response:
         body = self._json_body(req)
         v.only_keys(body, {"pin"})
-        wait = self.limiter.retry_after_s(self.clock())
-        if wait > 0:
-            raise ApiError(HTTPStatus.TOO_MANY_REQUESTS, "locked", detail=f"{int(wait) + 1}")
-        pin = body.get("pin")
+        self._check_pin(req, body.get("pin"))
+        return self._open_session()
+
+    def _check_pin(self, req: Request, pin: object) -> None:
+        """Verify the operator PIN under the guess limits (login and destructive re-auth).
+
+        The attempt is reserved and counted before the hash runs, only one hash runs at a
+        time, and a right PIN refunds the attempt.
+        """
         if not isinstance(pin, str) or not 0 < len(pin) <= MAX_PIN_CHARS:
             raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
         if not self.pins.is_set():
             raise ApiError(HTTPStatus.CONFLICT, "pin_not_set")
-        if not self.pins.verify(pin):
-            self.limiter.failed(self.clock())
-            raise ApiError(HTTPStatus.UNAUTHORIZED, "bad_pin")
-        self.limiter.succeeded()
-        return self._open_session()
-
-    def _setup(self, req: Request) -> Response:
-        """First-run PIN, only from the robot itself; otherwise the admin path is the CLI."""
-        body = self._json_body(req)
-        v.only_keys(body, {"pin"})
-        if self.pins.is_set():
-            raise ApiError(HTTPStatus.CONFLICT, "pin_already_set")
-        if req.client_ip not in LOOPBACK:
-            raise ApiError(HTTPStatus.FORBIDDEN, "setup_local_only")
+        self.limiter.sync(self.pins.version())
+        wait = self.limiter.reserve(req.client_ip, self.clock())
+        if wait > 0:
+            raise ApiError(HTTPStatus.TOO_MANY_REQUESTS, "locked", retry_after=wait)
+        if not self._hashing.acquire(blocking=False):
+            self.limiter.cancel(req.client_ip)
+            raise ApiError(HTTPStatus.TOO_MANY_REQUESTS, "busy", retry_after=0)
         try:
-            pin = check_pin_format(body.get("pin"), self.web)
-        except PinError as exc:
-            raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, str(exc)) from exc
-        self.pins.set(pin)
-        return self._open_session()
+            ok = self.pins.verify(pin)
+        finally:
+            self._hashing.release()
+        if not ok:
+            raise ApiError(HTTPStatus.UNAUTHORIZED, "bad_pin")
+        self.limiter.succeeded(req.client_ip)
 
     # ------------------------------------------------------------------ enrollment
 
@@ -346,7 +348,7 @@ class WebApi:
         try:
             self.service.start(secrets.token_hex(ENROLLMENT_ID_BYTES))
         except (RuntimeError, ValueError) as exc:
-            raise ApiError(HTTPStatus.CONFLICT, "enrollment_not_ready", str(exc)) from exc
+            raise ApiError(HTTPStatus.CONFLICT, "enrollment_not_ready") from exc
         return Response(HTTPStatus.OK, self._status_view())
 
     def _enroll_status(self, req: Request) -> Response:
@@ -384,11 +386,9 @@ class WebApi:
             )
             self.service.complete(form["display_name"], consent, form["age_group"], form["gender"])
         except ConsentError as exc:
-            raise ApiError(
-                HTTPStatus.UNPROCESSABLE_ENTITY, "consent_refused", detail=str(exc)
-            ) from exc
+            raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, "consent_refused") from exc
         except (RuntimeError, ValueError) as exc:
-            raise ApiError(HTTPStatus.CONFLICT, "enrollment_not_ready", str(exc)) from exc
+            raise ApiError(HTTPStatus.CONFLICT, "enrollment_not_ready") from exc
         return Response(HTTPStatus.OK, {"ok": True})
 
     def _enroll_cancel(self, req: Request) -> Response:
@@ -436,11 +436,12 @@ class WebApi:
 
     def _forget(self, req: Request, rid: str) -> Response:
         body = self._json_body(req)
-        v.only_keys(body, {"confirm"})
+        v.only_keys(body, {"confirm", "pin"})
         if self._kind_of(rid) != "person":
             raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, "wrong_kind")
         if not v.confirmed(body):
             raise ApiError(HTTPStatus.CONFLICT, "confirm_required")
+        self._check_pin(req, body.get("pin"))
         self._erase(self.service.forget, rid)
         return Response(HTTPStatus.OK, {"ok": True})
 
@@ -459,12 +460,13 @@ class WebApi:
 
     def _purge(self, req: Request) -> Response:
         body = self._json_body(req)
-        v.only_keys(body, {"key", "confirm"})
+        v.only_keys(body, {"key", "confirm", "pin"})
         key = v.quarantine_key(body.get("key"))
-        if not v.confirmed(body):
-            raise ApiError(HTTPStatus.CONFLICT, "confirm_required")
         if key not in self.service.quarantined():
             raise ApiError(HTTPStatus.NOT_FOUND, "not_found")
+        if not v.confirmed(body):
+            raise ApiError(HTTPStatus.CONFLICT, "confirm_required")
+        self._check_pin(req, body.get("pin"))
         self._erase(self.service.forget, key)
         return Response(HTTPStatus.OK, {"ok": True})
 
@@ -474,20 +476,34 @@ class WebApi:
         except KeyError as exc:
             raise ApiError(HTTPStatus.NOT_FOUND, "not_found") from exc
         except ValueError as exc:
-            raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, "bad_request", str(exc)) from exc
+            raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, "bad_request") from exc
 
     def _erase(self, fn: Callable[[str], Any], key: str) -> None:
         """Synchronous erasure; a partial failure is reported so the operator retries."""
         try:
-            fn(key)
-        except ExceptionGroup as exc:
-            log.error("erasure incomplete: %d step(s) failed", len(exc.exceptions))
+            found = fn(key)
+        except Exception as exc:
+            log.error("erasure incomplete: %s", type(exc).__name__)
             raise ApiError(HTTPStatus.INTERNAL_SERVER_ERROR, "forget_incomplete") from exc
+        if found is False:
+            raise ApiError(HTTPStatus.NOT_FOUND, "not_found")
 
     # ------------------------------------------------------------------ other
 
     def _debug(self, req: Request) -> Response:
-        return Response(HTTPStatus.OK, self.diagnostics.report())
+        """The 12A report; a section that holds a long list of numbers is withheld, not the rest."""
+        report = self.diagnostics.report()
+        sections = report.get("sections")
+        if isinstance(sections, dict):
+            for name, section in list(sections.items()):
+                if holds_vector(section):
+                    log.error("debug section %r withheld: it held a long list of numbers", name)
+                    sections[name] = {
+                        "scope": section.get("scope") if isinstance(section, dict) else None,
+                        "ok": False,
+                        "error": "withheld",
+                    }
+        return Response(HTTPStatus.OK, report)
 
     def _catalogue(self, req: Request) -> Response:
         raise ApiError(HTTPStatus.NOT_IMPLEMENTED, "not_implemented")

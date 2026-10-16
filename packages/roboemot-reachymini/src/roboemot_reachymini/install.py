@@ -38,6 +38,8 @@ WAKE_SETTLE_S = 3.0
 PACKAGES = ("roboemot-core", "roboemot-reachymini")
 PKG_DATA = "roboemot-reachymini/src/roboemot_reachymini/data"
 DAEMON_METADATA = "/venvs/.app_metadata"
+# The app's data directory on the robot (registry, web UI PIN). RoboEmotApp must use this path.
+DATA_DIR = "/venvs/.roboemot-data"
 
 PROBE = "from importlib.metadata import version; print(version('reachy_mini'))"
 VERIFY = (
@@ -154,6 +156,7 @@ class ReachyMiniWireless:
     arch = "aarch64"
     python = f"{APPS_VENV}/bin/python"
     record_path = "/venvs/.roboemot-install.json"
+    data_dir = DATA_DIR
     space_paths = ("/tmp", APPS_VENV)
     distributions = PACKAGES
     modules = ("roboemot", "roboemot_reachymini")
