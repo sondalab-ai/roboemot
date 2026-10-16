@@ -14,6 +14,9 @@ dependencies = [
   "openai>=1.40",
   "httpx>=0.27",
   "psutil>=5.9",
+  # Catalogue import (XMP) parses untrusted files: defusedxml forbids DTDs and entities, which the
+  # stdlib parser only guarantees on a recent expat (a platform property).
+  "defusedxml>=0.7.1",
 ]
 
 [project.optional-dependencies]

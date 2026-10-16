@@ -109,7 +109,7 @@ function enrollmentView() {
     stopPolling();
     try {
       const s = await api("GET", "/api/enrollment/status");
-      renderEnrollment(box, s);
+      await renderEnrollment(box, s);
       if (state.tab === "enroll" && ["collecting", "ready"].includes(s.state)) {
         state.timer = setTimeout(poll, state.session.status_poll_ms || 1000);
       }
@@ -122,7 +122,7 @@ function enrollmentView() {
   poll();
 }
 
-function renderEnrollment(box, s) {
+async function renderEnrollment(box, s) {
   box.replaceChildren(el("h2", {}, t("tab_enroll")), el("p", { class: "muted" }, t("enroll_intro")));
   const stateKey = "state_" + s.state;
   box.append(el("p", {}, t("state") + ": " + (state.strings[stateKey] || s.state)));
@@ -142,7 +142,10 @@ function renderEnrollment(box, s) {
     box.append(el("ul", {}, s.hints.map((h) => el("li", {}, state.strings["hint_" + h] || h))));
   }
   if (s.can_complete) {
-    state.form = state.form || consentForm();
+    if (!state.form) {
+      const reg = await api("GET", "/api/registry");
+      state.form = consentForm(reg.records.filter((r) => r.kind === "person" && r.status === "pending"));
+    }
     box.append(state.form);
   } else {
     state.form = null;
@@ -157,7 +160,7 @@ function select(id, values, prefix) {
   return el("select", { id }, values.map((v) => el("option", { value: v }, t(prefix + v))));
 }
 
-function consentForm() {
+function consentForm(pendingPeople) {
   const max = String(state.session.name_max_chars || 64);
   const name = el("input", { type: "text", id: "display_name", maxlength: max, required: true });
   const who = el("input", { type: "text", id: "consent_who", maxlength: max, required: true });
@@ -168,6 +171,9 @@ function consentForm() {
   const scopes = ["face", "voice", "refresh"].map((s) =>
     el("label", { class: "check" }, el("input", { type: "checkbox", value: s, checked: s !== "voice" }), t("scope_" + s)));
   const agreed = el("input", { type: "checkbox", id: "agreed" });
+  const link = el("select", { id: "pending_id" },
+    el("option", { value: "" }, t("pending_none")),
+    pendingPeople.map((r) => el("option", { value: r.id }, r.display_name)));
   const form = el("form", {
     onsubmit: (ev) => {
       ev.preventDefault();
@@ -180,6 +186,7 @@ function consentForm() {
           gender: gender.value,
           scope: scopes.map((l) => l.firstChild).filter((c) => c.checked).map((c) => c.value),
           agreed: agreed.checked,
+          pending_id: link.value || null,
         });
         notice(t("saved"));
         await state.refresh();
@@ -188,6 +195,7 @@ function consentForm() {
   },
   el("h2", {}, t("consent_title")),
   el("div", { class: "consent" }, el("p", {}, t("consent_biometric")), el("p", {}, t("consent_cloud"))),
+  pendingPeople.length ? [el("label", { for: "pending_id" }, t("pending_link")), link] : [],
   el("label", { for: "display_name" }, t("display_name")), name,
   el("label", { for: "consent_who" }, t("consent_who")), who,
   el("label", { for: "age_group" }, t("age_group")), age,
@@ -278,9 +286,91 @@ function rowActions(r, entities) {
 
 // ---------------------------------------------------------------- catalogue, diagnostics
 
-function catalogueView() {
+async function toBase64(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(binary);
+}
+
+function importReport(report) {
+  const created = report.items.filter((i) => i.created).length;
+  const parts = [el("p", {}, t("catalogue_report", { created: created, existing: report.items.length - created }))];
+  if (report.photo !== "none") parts.push(el("p", { class: "muted" }, t("photo_" + report.photo)));
+  if (report.truncated) parts.push(el("p", { class: "muted" }, t("catalogue_truncated")));
+  if (report.conflicts.length) {
+    parts.push(el("p", {}, t("catalogue_conflicts") + ":"),
+      el("ul", {}, report.conflicts.map((c) => el("li", {}, c.name + ": " + (state.strings["conflict_" + c.code] || c.code)))));
+  }
+  return parts;
+}
+
+async function catalogueView() {
   const view = document.getElementById("view");
-  view.replaceChildren(el("section", {}, el("h2", {}, t("tab_catalogue")), el("p", {}, t("catalogue_later"))));
+  view.replaceChildren();
+  const data = await api("GET", "/api/catalogue");
+  state.pinField = el("input", { type: "password", id: "confirm_pin", autocomplete: "off", inputmode: "numeric" });
+  const xmp = el("input", { type: "file", id: "xmp_file", accept: ".xmp,application/rdf+xml,text/xml" });
+  const photo = el("input", { type: "file", id: "photo_file", accept: "image/jpeg,image/png" });
+  const result = el("div", { id: "import_result", role: "status" });
+  const form = el("form", {
+    onsubmit: (ev) => {
+      ev.preventDefault();
+      guarded(async () => {
+        const file = xmp.files[0];
+        if (!file) { notice(t("err_xmp_required"), true); return; }
+        if (file.size > data.limits.max_xmp_bytes) { notice(t("err_xmp_too_large"), true); return; }
+        const body = { xmp: await file.text() };
+        if (photo.files[0]) {
+          if (photo.files[0].size > data.limits.max_image_bytes) { notice(t("err_image_too_large"), true); return; }
+          body.image_b64 = await toBase64(photo.files[0]);
+        }
+        const report = await api("POST", "/api/catalogue/import", body);
+        notice("");
+        await catalogueView();
+        document.getElementById("import_result").replaceChildren(...importReport(report));
+      });
+    },
+  },
+  el("label", { for: "xmp_file" }, t("catalogue_xmp")), xmp,
+  el("label", { for: "photo_file" }, t("catalogue_photo")), photo,
+  el("p", {}, el("button", { type: "submit", class: "primary" }, t("catalogue_import"))));
+
+  const confirmBy = (record, entryId) => guarded(async () => {
+    await api("POST", "/api/catalogue/" + record.id + "/confirm", entryId ? { entry_id: entryId } : {});
+    notice(t("saved"));
+    await catalogueView();
+  });
+  const pending = data.records.filter((r) => r.status === "pending");
+  const origin = (r) => t("origin_" + r.origin) + ", " + (r.has_appearance ? t("has_appearance") : t("no_appearance"));
+  const records = data.records.length === 0 ? el("p", { class: "muted" }, t("catalogue_none")) : el("table", {},
+    data.records.map((r) => el("tr", {},
+      el("td", {}, r.display_name),
+      el("td", {}, t("kind_" + r.kind) + (r.category ? " (" + r.category + ")" : "") + ", " + origin(r)),
+      el("td", { class: "actions" },
+        r.status === "pending" && r.has_appearance ?
+          el("button", { type: "button", onclick: () => confirmBy(r, null) }, t("catalogue_activate")) : [],
+        data.live.filter((e) => r.status === "pending" && e.kind === r.kind && (!r.category || e.category === r.category))
+          .map((e) => el("button", { type: "button", onclick: () => confirmBy(r, e.entry_id) },
+            t("catalogue_confirm", { name: r.display_name }) + " ← " + e.category + " #" + e.entry_id.split("-").pop()))))));
+  const live = data.live.length === 0 ? el("p", { class: "muted" }, t("catalogue_live_none")) :
+    el("ul", {}, data.live.map((e) => el("li", {}, t("kind_" + e.kind) + " " + e.category + " #" + e.entry_id.split("-").pop() +
+      (e.identified ? " ✓" : ""))));
+  view.append(
+    el("section", {}, el("h2", {}, t("tab_catalogue")), el("p", { class: "muted" }, t("catalogue_intro")), form, result),
+    el("section", {}, el("h3", {}, t("catalogue_pending")), pending.length ? el("p", { class: "muted" }, t("catalogue_pick")) : [], records),
+    el("section", {}, el("h3", {}, t("catalogue_live")), live),
+    el("section", {},
+      el("label", { for: "confirm_pin" }, t("pin_confirm")), state.pinField,
+      el("button", {
+        type: "button", class: "danger",
+        onclick: () => confirm(t("catalogue_clear_confirm")) && guarded(async () => {
+          const out = await api("POST", "/api/catalogue/candidates/clear", { confirm: true, pin: takePin() });
+          notice(t("catalogue_cleared", { n: out.cleared }));
+        }),
+      }, t("catalogue_clear"))));
 }
 
 async function debugView() {

@@ -239,16 +239,28 @@ class Registry:
         *,
         voice_embedding: Sequence[float] | np.ndarray | None = None,
         voice_model_id: str | None = None,
+        display_name: str | None = None,
+        age_group: str | None = None,
+        gender: str | None = None,
     ) -> PersonRecord:
         """Turn a pending person active once consent exists and the faces are captured.
 
         The same consent rules as ``enroll`` apply; a pending person has no declared age group
-        unless one was set, so a guardian is normally required.
+        unless one is passed here (declared values, like ``enroll``), so a guardian is normally
+        required. ``display_name`` replaces the imported name.
         """
         with self.lock:
             pending = self._people[person_id]
             if pending.status != "pending":
                 raise ValueError(f"{person_id} is already enrolled")
+            if display_name is not None:
+                pending = replace(pending, display_name=display_name)
+            if age_group is not None:
+                pending = replace(
+                    pending, age_group=Attribute(check_age_group(age_group), "declared")
+                )
+            if gender is not None:
+                pending = replace(pending, gender=Attribute(check_gender(gender), "declared"))
             record = self._with_biometrics(
                 pending,
                 face_embeddings,
@@ -461,18 +473,96 @@ class Registry:
         return record
 
     def confirm_entity(
-        self, entity_id: str, embeddings: Vectors, embedding_model_id: str
+        self,
+        entity_id: str,
+        embeddings: Vectors,
+        embedding_model_id: str,
+        *,
+        keep_existing: bool = False,
+        category: str | None = None,
     ) -> EntityRecord:
-        """Give a pending entity its appearance (the owner confirmed "this is Mia")."""
+        """Give a pending entity its appearance (the owner confirmed "this is Mia").
+
+        With ``keep_existing`` the rows already attached (catalogue photos) are pooled with the
+        new ones when they come from the same model. ``category`` fills in an empty category.
+        """
         with self.lock:
+            current = self._entities[entity_id]
+            rows = _matrix(embeddings)
+            if (
+                keep_existing
+                and len(current.embeddings)
+                and current.embedding_model_id == embedding_model_id
+            ):
+                rows = np.vstack([current.embeddings, rows])
             record = replace(
-                self._entities[entity_id],
-                embeddings=_matrix(embeddings),
+                current,
+                embeddings=rows,
                 embedding_model_id=embedding_model_id,
                 status="active",
+                category=current.category or category or "",
             )
             self._commit_entity(record)
             return record
+
+    def attach_pending_embeddings(
+        self,
+        entity_id: str,
+        embeddings: Vectors,
+        embedding_model_id: str,
+        max_total: int,
+        keys: Sequence[str],
+    ) -> int:
+        """Store appearance rows on a pending entity; it stays pending and out of matching.
+
+        Used by the catalogue import with photos (SPEC 6). ``keys`` name where each row came
+        from (hash of the photo plus the region): a row whose key is already on the record is
+        skipped, so repeating an import adds nothing. Rows of another model replace the old
+        ones; at ``max_total`` the oldest rows go. Returns the number of rows added.
+        ``ValueError`` for an active entity or when ``keys`` does not match the rows.
+        """
+        with self.lock:
+            current = self._entities[entity_id]
+            if current.status != "pending":
+                raise ValueError("entity is not pending")
+            rows = _matrix(embeddings)
+            if len(keys) != len(rows):
+                raise ValueError("one key per row")
+            same_model = (
+                len(current.embeddings) > 0 and current.embedding_model_id == embedding_model_id
+            )
+            seen = set(current.photo_keys) if same_model else set()
+            fresh: list[int] = []
+            for i, key in enumerate(keys):
+                if key not in seen:
+                    seen.add(key)
+                    fresh.append(i)
+            if not fresh:
+                return 0
+            rows = rows[fresh]
+            kept_keys = list(current.photo_keys) if same_model else []
+            if same_model:
+                rows = np.vstack([current.embeddings, rows])
+            kept_keys = (kept_keys + [keys[i] for i in fresh])[-max_total:]
+            record = replace(
+                current,
+                embeddings=rows[-max_total:],
+                embedding_model_id=embedding_model_id,
+                photo_keys=kept_keys,
+            )
+            self._commit_entity(record)
+            return len(fresh)
+
+    def entities(self) -> list[EntityRecord]:
+        """All animals and objects, by name; the records hold embeddings, do not publish them."""
+        with self.lock:
+            return sorted(self._entities.values(), key=lambda r: (r.display_name, r.entity_id))
+
+    def people_named(self, display_name: str) -> list[PersonRecord]:
+        """People whose name equals ``display_name`` ignoring case."""
+        with self.lock:
+            key = display_name.casefold()
+            return [p for p in self._people.values() if p.display_name.casefold() == key]
 
     def get_entity(self, entity_id: str) -> EntityRecord:
         with self.lock:
@@ -521,13 +611,27 @@ class Registry:
             return merged
 
     def delete_entity(self, entity_id: str) -> None:
+        """Remove an animal or object; attached history links forget it too, like ``forget``.
+
+        A failing step never skips the rest; failures are raised together afterwards.
+        """
+        errors: list[Exception] = []
         with self.lock:
             try:
                 self.store.delete(ENTITIES, entity_id)
+            except Exception as exc:
+                errors.append(exc)
             finally:
                 self._entities.pop(entity_id, None)
                 self._dirty.discard(entity_id)
                 self._changed()
+            for link in self._history:
+                try:
+                    link.forget(entity_id)
+                except Exception as exc:
+                    errors.append(exc)
+        if errors:
+            raise ExceptionGroup("delete incomplete", errors)
 
     # ----------------------------------------------------------------- matching
 

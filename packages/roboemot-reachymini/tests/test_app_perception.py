@@ -174,6 +174,73 @@ def test_app_with_fake_stages_names_an_enrolled_person_and_reports(data, tmp_pat
     assert reloaded.get_person(person.person_id).last_seen is not None  # flushed at shutdown
 
 
+def test_app_auto_enrolls_a_cat_it_keeps_seeing_and_the_catalogue_sees_it(data, tmp_path):
+    (data / "app.yaml").write_text(
+        "schema_version: 1\n"
+        "safety: {allow_unmeasured_dynamics: true}\n"
+        "vision: {objects_enabled: true}\n"
+        "world:\n"
+        "  autoenroll: {min_days: 1, min_sightings: 3, sighting_min_interval_s: 1}\n"
+    )
+    app = new_app(AppWithObjects)
+    stop, thread, errors = start(app)
+    try:
+        assert wait_for(lambda: app.perception is not None and app.perception.registry)
+        reg = app.perception.registry
+        assert wait_for(lambda: len(reg.entities()) == 2, timeout=30), "nothing was auto-enrolled"
+        found = {r.category: r for r in reg.entities()}
+        assert set(found) == {"cat", "potted plant"}  # the person is ignored
+        assert {r.origin for r in found.values()} == {"auto"}
+        assert found["cat"].display_name == "gatto 1"
+        assert found["potted plant"].display_name == "pianta 1"  # the detector's display name
+        cat = found["cat"]
+        assert wait_for(lambda: any(e.identity == cat.entity_id for e in app.world.entries))
+        assert sorted(s.display_name for s in app.catalogue.list_entities()) == [
+            "gatto 1",
+            "pianta 1",
+        ]
+    finally:
+        stop.set()
+        thread.join(15)
+    assert not errors and not thread.is_alive()
+    assert app.autoenroll.stats()["clusters"] == 0
+
+
+def seed_candidate(store, key="left-behind"):
+    meta = {
+        "schema_version": 2,
+        "cluster_id": key,
+        "kind": "animal",
+        "category": "cat",
+        "model_id": "x",
+    }
+    store.put("candidates", key, meta, {"members": np.eye(2, DIM), "days": np.array([1, 2])})
+
+
+def test_without_the_appearance_model_candidates_are_erased_at_startup_and_on_request(
+    data, tmp_path
+):
+    store = FileStore(tmp_path / "roboemot-data" / "registry", allow_plaintext=True)
+    seed_candidate(store)
+    app = new_app(AppWithFakes)
+    stop = threading.Event()
+    stop.set()
+    app.run(fake_mini(), stop)
+    assert app.autoenroll is None
+    assert store.keys("candidates") == []  # deleted at startup
+    seed_candidate(app.perception.registry.store)
+    assert app.catalogue.purge_candidates() == 1  # the endpoint's action needs no enroller
+    assert app.perception.registry.store.keys("candidates") == []
+
+
+def test_app_without_the_appearance_model_has_no_auto_enrollment(data):
+    app = new_app(AppWithFakes)
+    stop = threading.Event()
+    stop.set()
+    app.run(fake_mini(), stop)
+    assert app.autoenroll is None and app.catalogue is not None
+
+
 def test_circadian_state_scales_the_vision_rate(data):
     app = new_app(AppWithFakes)
     app.source_class = EmptySource

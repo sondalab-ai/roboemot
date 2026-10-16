@@ -12,6 +12,7 @@ Weights are never downloaded here, see ``roboemot models fetch``.
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -227,11 +228,16 @@ class FairFaceEstimator:
 
 
 class DinoV2Embedder:
-    """DINOv2-S/14 CLS token of the whole box, squashed to 224x224 (no margin)."""
+    """DINOv2-S/14 CLS token of the whole box, squashed to 224x224 (no margin).
+
+    ``embed`` is serialised by a lock: the vision worker and the catalogue import (web UI
+    thread) share one session, which the project keeps single-threaded.
+    """
 
     model_id = DINO_MODEL_ID
 
     def __init__(self, path: Path, threads: int):
+        self._lock = threading.Lock()
         self._sess = _session(path, threads)
         self._input = self._sess.get_inputs()[0].name
 
@@ -249,7 +255,8 @@ class DinoV2Embedder:
         x = (rgb.astype(np.float32) / PIXEL_MAX - np.array(DINO_MEAN, np.float32)) / np.array(
             DINO_STD, np.float32
         )
-        tokens = self._sess.run(None, {self._input: x.transpose(2, 0, 1)[None]})[0][0]
+        with self._lock:
+            tokens = self._sess.run(None, {self._input: x.transpose(2, 0, 1)[None]})[0][0]
         return _unit(tokens[0])
 
 

@@ -83,6 +83,25 @@ class WorldModel:
             e = self._entries.get(entry_id)
             return e.public() if e else None
 
+    def embedding_of(self, entry_id: str) -> np.ndarray | None:
+        """A copy of the entry's blended appearance embedding, or None (never published)."""
+        with self._lock:
+            e = self._entries.get(entry_id)
+            return None if e is None or e.embedding is None else np.array(e.embedding)
+
+    def set_identity(self, entry_id: str, identity: str) -> bool:
+        """Attach a registry id to an entry (auto-enrollment, catalogue confirmation).
+
+        Returns False when the entry is gone. Later observations carrying another known
+        identity still overwrite it, like any identity update.
+        """
+        with self._lock:
+            e = self._entries.get(entry_id)
+            if e is None:
+                return False
+            e.identity = identity
+            return True
+
     def observe(
         self, obs: Observation, joint_state: Mapping[str, float] | None = None
     ) -> ObserveResult:

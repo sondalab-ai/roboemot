@@ -214,8 +214,13 @@ class EnrollmentService:
         consent: Consent,
         declared_age_group: str | None = None,
         declared_gender: str | None = None,
+        pending_id: str | None = None,
     ) -> str:
-        """Enroll the collected samples as ``name`` and return the new person id.
+        """Enroll the collected samples as ``name`` and return the person id.
+
+        With ``pending_id`` the owner has chosen a name-only record from a catalogue import
+        (SPEC 6) and it is completed in place (``Registry.complete_enrollment``); without it a
+        new person is made and no pending record is touched, whatever its name.
 
         Needs an active session with at least ``identity.enroll_min_embeddings`` samples that
         show varied angles. The registry (disk I/O) runs outside the service lock, in the
@@ -238,14 +243,25 @@ class EnrollmentService:
             matrix = np.vstack(self._samples)
             self._state = COMPLETING
         try:
-            record = self._reg().enroll(
-                name,
-                matrix,
-                model_id,
-                consent=consent,
-                age_group=declared_age_group,
-                gender=declared_gender,
-            )
+            if pending_id is None:
+                record = self._reg().enroll(
+                    name,
+                    matrix,
+                    model_id,
+                    consent=consent,
+                    age_group=declared_age_group,
+                    gender=declared_gender,
+                )
+            else:
+                record = self._reg().complete_enrollment(
+                    pending_id,
+                    matrix,
+                    model_id,
+                    consent,
+                    display_name=name,
+                    age_group=declared_age_group,
+                    gender=declared_gender,
+                )
         except BaseException:
             with self._lock:
                 if self._token == token and self._state == COMPLETING:

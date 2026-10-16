@@ -11,6 +11,8 @@ response that holds a long list of numbers.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hmac
 import json
 import logging
@@ -23,7 +25,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from http import HTTPStatus
 from http.cookies import CookieError, SimpleCookie
-from typing import Any, Protocol
+from typing import Any, NoReturn, Protocol
 
 from roboemot.config.schema import RoboEmotConfig, WebUIConfig
 from roboemot.registry.records import Consent, ConsentError
@@ -43,6 +45,17 @@ ENROLLMENT_ID_BYTES = 8
 STATE_PATTERN = re.compile(r"[a-z_]{1,32}")
 ENTITY_KINDS = frozenset({"animal", "object"})
 JSON_TYPE = "application/json; charset=utf-8"
+CATALOGUE_IMPORT = "/api/catalogue/import"
+BASE64_GROUP_IN = 3
+BASE64_GROUP_OUT = 4
+CATALOGUE_STATUS = {
+    "import_busy": HTTPStatus.SERVICE_UNAVAILABLE,
+    "not_pending": HTTPStatus.CONFLICT,
+    "entry_gone": HTTPStatus.CONFLICT,
+    "no_appearance": HTTPStatus.CONFLICT,
+    "kind_mismatch": HTTPStatus.UNPROCESSABLE_ENTITY,
+    "category_mismatch": HTTPStatus.UNPROCESSABLE_ENTITY,
+}
 
 
 class EnrollmentPort(Protocol):
@@ -62,6 +75,7 @@ class EnrollmentPort(Protocol):
         consent: Consent,
         declared_age_group: str | None,
         declared_gender: str | None,
+        pending_id: str | None = None,
     ) -> Any: ...
     def cancel(self) -> Any: ...
     def list_records(self) -> list[Any]: ...
@@ -69,6 +83,21 @@ class EnrollmentPort(Protocol):
     def merge(self, keep_id: str, drop_id: str) -> Any: ...
     def delete(self, record_id: str) -> Any: ...
     def quarantined(self) -> list[str]: ...
+
+
+class CataloguePort(Protocol):
+    """What the web UI needs from ``roboemot.registry.catalogue.CatalogueService``.
+
+    ``import_sidecar`` raises an exception with a ``code`` attribute for refused input;
+    ``confirm`` raises ``KeyError`` for an unknown record. The UI copies only whitelisted
+    fields of what these return: never embeddings, images or paths.
+    """
+
+    def import_sidecar(self, xmp: bytes | str, image: bytes | None = None) -> Any: ...
+    def list_entities(self) -> list[Any]: ...
+    def live_entries(self) -> list[Any]: ...
+    def confirm(self, record_id: str, entry_id: str | None = None) -> Any: ...
+    def purge_candidates(self) -> int: ...
 
 
 class DebugReport(Protocol):
@@ -143,8 +172,10 @@ class WebApi:
         *,
         clock: Callable[[], float] = time.monotonic,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        catalogue: CataloguePort | None = None,
     ) -> None:
         self.service = service
+        self.catalogue = catalogue
         self.diagnostics = diagnostics
         self._cfg = cfg
         self.pins = pin_store
@@ -188,6 +219,20 @@ class WebApi:
             return Response(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "vector_leak"})
         return resp
 
+    def body_limit(self, method: str, path: str, headers: dict[str, str]) -> int:
+        """Largest body to read for this request.
+
+        The catalogue import carries a photo, so it gets ``webui.catalogue_max_body_bytes``,
+        but only when the request already holds a live session: an anonymous client never
+        makes the server read more than ``max_body_bytes``.
+        """
+        web = self.web
+        if (method, path) == ("POST", CATALOGUE_IMPORT):
+            token = parse_cookie(headers.get("cookie"))
+            if self.sessions.get(token, self.clock(), self.pins.version()) is not None:
+                return max(web.max_body_bytes, web.catalogue_max_body_bytes)
+        return web.max_body_bytes
+
     def _dispatch(self, req: Request) -> Response:
         method, path = req.method, req.path
         if method not in ("GET", "POST"):
@@ -229,9 +274,14 @@ class WebApi:
             ("POST", "/api/registry/quarantined/purge"): self._purge,
             ("GET", "/api/debug"): self._debug,
             ("GET", "/api/catalogue"): self._catalogue,
+            ("POST", CATALOGUE_IMPORT): self._catalogue_import,
+            ("POST", "/api/catalogue/candidates/clear"): self._catalogue_clear,
         }
         if (method, path) in simple:
             return simple[(method, path)](req)
+        confirm = re.fullmatch(r"/api/catalogue/([^/]+)/confirm", path)
+        if method == "POST" and confirm:
+            return self._catalogue_confirm(req, v.record_id(confirm.group(1)))
         match = re.fullmatch(r"/api/registry/([^/]+)/(rename|forget|delete)", path)
         if method == "POST" and match:
             rid = v.record_id(match.group(1))
@@ -374,6 +424,12 @@ class WebApi:
 
     def _enroll_complete(self, req: Request) -> Response:
         form = v.enrollment_form(self._json_body(req), self.web)
+        pending = form["pending_id"]
+        if pending is not None and not any(
+            r.id == pending and r.kind == "person" and r.status == "pending"
+            for r in self.service.list_records()
+        ):
+            raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, "pending_invalid", field="pending_id")
         try:
             consent = Consent(
                 who=form["who"],
@@ -381,7 +437,13 @@ class WebApi:
                 scope=form["scope"],
                 guardian=form["guardian"],
             )
-            self.service.complete(form["display_name"], consent, form["age_group"], form["gender"])
+            self.service.complete(
+                form["display_name"],
+                consent,
+                form["age_group"],
+                form["gender"],
+                form["pending_id"],
+            )
         except ConsentError as exc:
             raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, "consent_refused") from exc
         except (RuntimeError, ValueError) as exc:
@@ -504,8 +566,129 @@ class WebApi:
                     }
         return Response(HTTPStatus.OK, report)
 
+    # ------------------------------------------------------------------ catalogue
+
+    def _port(self) -> CataloguePort:
+        if self.catalogue is None:
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "catalogue_unavailable")
+        return self.catalogue
+
     def _catalogue(self, req: Request) -> Response:
-        raise ApiError(HTTPStatus.NOT_IMPLEMENTED, "not_implemented")
+        """Pending and auto-enrolled records plus the animals and objects seen right now."""
+        port = self._port()
+        records = [
+            {
+                "id": str(r.id),
+                "display_name": str(r.display_name),
+                "kind": str(r.kind),
+                "category": str(r.category),
+                "status": str(r.status),
+                "origin": str(r.origin),
+                "has_appearance": r.has_appearance is True,
+                "last_seen": None if r.last_seen is None else r.last_seen.isoformat(),
+            }
+            for r in port.list_entities()
+        ]
+        live = [
+            {
+                "entry_id": str(e.entry_id),
+                "kind": str(e.kind),
+                "category": str(e.category),
+                "age_s": round(float(e.age_s), 1),
+                "identified": e.identified is True,
+            }
+            for e in port.live_entries()
+        ]
+        cat = self.config.catalogue
+        limits = {
+            "max_xmp_bytes": cat.max_xmp_bytes,
+            "max_image_bytes": cat.max_image_bytes,
+            "max_items": cat.max_items,
+        }
+        return Response(HTTPStatus.OK, {"records": records, "live": live, "limits": limits})
+
+    def _catalogue_import(self, req: Request) -> Response:
+        """One XMP sidecar, optionally with its photo (base64), per request (SPEC 6)."""
+        port = self._port()
+        body = self._json_body(req)
+        v.only_keys(body, {"xmp", "image_b64"})
+        cat = self.config.catalogue
+        xmp = body.get("xmp")
+        if not isinstance(xmp, str) or not xmp.strip():
+            raise v.ValidationError("xmp_required", "xmp")
+        if len(xmp) > cat.max_xmp_bytes:
+            raise v.ValidationError("xmp_too_large", "xmp")
+        image = self._image_bytes(body.get("image_b64"), cat.max_image_bytes)
+        try:
+            report = port.import_sidecar(xmp, image)
+        except Exception as exc:
+            self._catalogue_error(exc)
+        return Response(
+            HTTPStatus.OK,
+            {
+                "items": [
+                    {
+                        "id": str(i.id),
+                        "display_name": str(i.display_name),
+                        "kind": str(i.kind),
+                        "category": str(i.category),
+                        "created": i.created is True,
+                        "embeddings": int(i.embeddings),
+                    }
+                    for i in report.items
+                ],
+                "conflicts": [{"name": str(c.name), "code": str(c.code)} for c in report.conflicts],
+                "skipped": {str(k): int(n) for k, n in report.skipped.items()},
+                "photo": str(report.photo),
+                "truncated": report.truncated is True,
+            },
+        )
+
+    @staticmethod
+    def _image_bytes(value: object, max_bytes: int) -> bytes | None:
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value:
+            raise v.ValidationError("image_corrupt", "image_b64")
+        if len(value) > -(-max_bytes // BASE64_GROUP_IN) * BASE64_GROUP_OUT:
+            raise v.ValidationError("image_too_large", "image_b64")
+        try:
+            return base64.b64decode(value, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise v.ValidationError("image_corrupt", "image_b64") from exc
+
+    def _catalogue_error(self, exc: Exception) -> NoReturn:
+        """Map a refused import or confirmation to a stable code; anything else is a 500."""
+        code = getattr(exc, "code", None)
+        if isinstance(exc, KeyError):
+            raise ApiError(HTTPStatus.NOT_FOUND, "not_found") from exc
+        if isinstance(code, str) and re.fullmatch(r"[a-z_]{1,48}", code):
+            status = CATALOGUE_STATUS.get(code, HTTPStatus.UNPROCESSABLE_ENTITY)
+            raise ApiError(status, code) from exc
+        raise exc
+
+    def _catalogue_confirm(self, req: Request, rid: str) -> Response:
+        """ "This is Mia": activate a pending record from a live entry or its photo rows."""
+        port = self._port()
+        body = self._json_body(req)
+        v.only_keys(body, {"entry_id"})
+        entry = body.get("entry_id")
+        entry_id = None if entry is None else v.record_id(entry, "entry_id")
+        try:
+            port.confirm(rid, entry_id)
+        except Exception as exc:
+            self._catalogue_error(exc)
+        return Response(HTTPStatus.OK, {"ok": True})
+
+    def _catalogue_clear(self, req: Request) -> Response:
+        """Forget what auto-enrollment has collected so far (PIN again)."""
+        port = self._port()
+        body = self._json_body(req)
+        v.only_keys(body, {"confirm", "pin"})
+        if not v.confirmed(body):
+            raise ApiError(HTTPStatus.CONFLICT, "confirm_required")
+        self._check_pin(req, body.get("pin"))
+        return Response(HTTPStatus.OK, {"cleared": int(port.purge_candidates())})
 
 
 def _reject_constant(name: str) -> Any:

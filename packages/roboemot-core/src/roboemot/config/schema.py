@@ -884,6 +884,75 @@ class WorldScanConfig(Strict):
         return self
 
 
+CATALOGUE_BODY_SLACK = 1024
+
+
+class WorldAutoenrollConfig(Strict):
+    enabled: bool = param(
+        True,
+        "Auto-enroll recurring unknown animals and objects (SPEC 5A); turning it on again "
+        "needs a restart, turning it off deletes the collected candidates",
+    )
+    kinds: list[Literal["animal", "object"]] = param(
+        ["animal", "object"],
+        "Kinds that may be auto-enrolled; people never are. The recognition spike advises "
+        "animals only (objects separate poorly)",
+    )
+    min_days: int = param(3, "Distinct days a cluster must be seen on", ge=1, le=60)
+    min_sightings: int = param(5, "Sightings a cluster needs before it is enrolled", ge=1, le=500)
+    max_spread: float = param(
+        0.25,
+        "Cosine distance to the cluster centroid, max over members (DINOv2-S scale)",
+        ge=0.01,
+        le=1,
+        conservative="lower",
+    )
+    join_radius: float = param(
+        0.125,
+        "Cosine distance from a candidate cluster's centroid within which a sighting joins it; "
+        "tighter than max_spread so two look-alikes stay apart",
+        ge=0.01,
+        le=1,
+        conservative="lower",
+    )
+    known_match_threshold: float = param(
+        0.875,
+        "Cosine similarity to an enrolled animal or object that attaches its identity; keep it "
+        "at or above 1 - join_radius, or a look-alike is taken for the enrolled one",
+        ge=0.1,
+        le=1,
+    )
+    sighting_min_interval_s: float = param(
+        300.0, "At most one sighting per world entry in this time", unit="s", ge=1, le=86400
+    )
+    max_clusters: int = param(
+        200, "Candidate clusters kept; the least recently updated go first", ge=1, le=5000
+    )
+    max_members: int = param(
+        30, "Embeddings kept per candidate cluster (oldest dropped)", ge=2, le=200
+    )
+    retention_days: int = param(
+        30, "A candidate cluster not seen for this long is deleted", unit="d", ge=1, le=365
+    )
+    persist_interval_s: float = param(
+        60.0, "Longest time changed candidates stay unwritten", unit="s", ge=1, le=3600
+    )
+    max_tracked_entries: int = param(
+        512, "World entries remembered for the sighting throttle", ge=8, le=10000
+    )
+
+    @model_validator(mode="after")
+    def _consistent(self) -> WorldAutoenrollConfig:
+        if self.join_radius > self.max_spread:
+            raise ValueError("join_radius must not exceed max_spread")
+        if self.min_sightings > self.max_members:
+            raise ValueError(
+                "min_sightings must not exceed max_members (sightings are counted "
+                "from the retained members)"
+            )
+        return self
+
+
 class WorldConfig(Strict):
     camera_fov_h_deg: float = param(
         78.0, "Horizontal field of view of the main camera", unit="deg", ge=10, le=360
@@ -937,6 +1006,7 @@ class WorldConfig(Strict):
         le=1,
     )
     scan: WorldScanConfig = param({}, "Looking around (SPEC 5A, Scanning)")
+    autoenroll: WorldAutoenrollConfig = param({}, "Auto-enrollment (SPEC 5A)")
 
     @model_validator(mode="after")
     def _uncertainty_order(self) -> WorldConfig:
@@ -1244,6 +1314,49 @@ class ConnectivityConfig(Strict):
 FRAME_ANCESTORS = re.compile(r"[A-Za-z0-9:/.*' _-]+")
 
 
+class CatalogueConfig(Strict):
+    max_xmp_bytes: int = param(
+        262144, "Largest XMP sidecar accepted", unit="B", ge=1024, le=4194304, conservative="lower"
+    )
+    max_image_bytes: int = param(
+        4194304, "Largest photo accepted", unit="B", ge=1024, le=16777216, conservative="lower"
+    )
+    max_image_pixels: int = param(
+        12000000,
+        "Largest photo accepted, width times height (decompression-bomb guard)",
+        unit="px",
+        ge=1024,
+        le=100000000,
+        conservative="lower",
+    )
+    max_items: int = param(
+        200, "Records one sidecar may create", ge=1, le=5000, conservative="lower"
+    )
+    max_regions: int = param(
+        16,
+        "Tagged regions read from one sidecar; each photo region is one model run on the "
+        "web request thread",
+        ge=1,
+        le=1000,
+        conservative="lower",
+    )
+    import_budget_s: float = param(
+        8.0,
+        "Time one import may spend embedding photo regions; the rest is skipped and reported "
+        "(never more than half of webui.request_deadline_s)",
+        unit="s",
+        ge=1,
+        le=60,
+        conservative="lower",
+    )
+    max_embeddings_per_entity: int = param(
+        20, "Appearance embeddings kept per animal or object", ge=1, le=100
+    )
+    min_region_px: int = param(
+        32, "Smaller regions of a photo are skipped", unit="px", ge=8, le=2048
+    )
+
+
 class WebUIConfig(Strict):
     bind: str | None = param(
         None,
@@ -1348,6 +1461,15 @@ class WebUIConfig(Strict):
         le=1048576,
         conservative="lower",
     )
+    catalogue_max_body_bytes: int = param(
+        8388608,
+        "Largest request body of a catalogue import (one sidecar plus one photo, base64); "
+        "granted only to logged-in sessions",
+        unit="B",
+        ge=1024,
+        le=33554432,
+        conservative="lower",
+    )
     name_max_chars: int = param(
         64, "Longest display name or consent name", ge=1, le=200, conservative="lower"
     )
@@ -1415,6 +1537,7 @@ with warnings.catch_warnings():
         privacy: PrivacyConfig = param({}, "SPEC 12")
         connectivity: ConnectivityConfig = param({}, "SPEC 12A")
         webui: WebUIConfig = param({}, "SPEC 6, 11A, 12")
+        catalogue: CatalogueConfig = param({}, "SPEC 6")
 
         @model_validator(mode="after")
         def _unique_routes(self) -> RoboEmotConfig:
@@ -1431,6 +1554,19 @@ with warnings.catch_warnings():
                 raise ValueError(
                     "enrollment.target_samples must be within identity.enroll_min_embeddings "
                     "and max_embeddings_per_person"
+                )
+            return self
+
+        @model_validator(mode="after")
+        def _catalogue_fits_the_web_ui(self) -> RoboEmotConfig:
+            cat, web = self.catalogue, self.webui
+            b64_image = -(-cat.max_image_bytes // 3) * 4
+            need = b64_image + 2 * cat.max_xmp_bytes + CATALOGUE_BODY_SLACK
+            if need > web.catalogue_max_body_bytes:
+                raise ValueError(
+                    f"webui.catalogue_max_body_bytes must be at least {need}: a base64 photo of "
+                    "catalogue.max_image_bytes plus a sidecar of catalogue.max_xmp_bytes "
+                    "(JSON-escaped) has to fit"
                 )
             return self
 
