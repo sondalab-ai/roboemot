@@ -676,7 +676,22 @@ class VisionConfig(Strict):
         0.25, "Minimum capture-time gap between two burst evaluations", unit="s", ge=0, le=5
     )
     max_embeds_per_frame: int = param(
-        2, "Cap on embeddings computed for one frame, to bound its latency", ge=1, le=16
+        2, "Cap on face embeddings computed for one frame, to bound its latency", ge=1, le=16
+    )
+    max_entity_embeds_per_frame: int = param(
+        1,
+        "Cap on animal and object appearance embeddings (DINOv2-S, the costly part of the "
+        "object stage) computed for one object frame; separate from max_embeds_per_frame so "
+        "entities never take a face's share. Entities are served oldest embedding first",
+        ge=1,
+        le=16,
+    )
+    entity_burst_min_gap_s: float = param(
+        1.0,
+        "Minimum capture-time gap between two burst evaluations of one animal or object track",
+        unit="s",
+        ge=0,
+        le=10,
     )
     attribute_precision: Literal["auto", "int8", "fp32"] = param(
         "auto",
@@ -713,14 +728,88 @@ class VisionConfig(Strict):
         "Folder with the ONNX model files; empty means models/ in the app data folder (data_dir)",
         restart=True,
     )
-    objects_enabled: bool = param(False, "Run the object detector (off by default on cm4)")
+    objects_enabled: bool = param(
+        True,
+        "Run the object detector (NanoDet-Plus-m 320, SPEC 5, 13) at vision.rates.objects_hz",
+        restart=True,
+    )
     object_score_min: float = param(
-        0.4, "Object detections below this score are dropped", ge=0, le=1
+        0.4,
+        "Object detections below this score are dropped; it also replaces tracker.high_score "
+        "for the animal and object tracker, so a 0.4 detection starts a track",
+        ge=0,
+        le=1,
+        restart=True,
+    )
+    object_lost_s: float = param(
+        5.0,
+        "Shortest time an animal or object track may stay unmatched before it is removed",
+        unit="s",
+        ge=0.1,
+        le=300,
+    )
+    object_lost_periods: float = param(
+        3.0,
+        "An animal or object track also survives this many object-detection periods, at the "
+        "rate the governor currently allows (1 / (objects_hz x scale)): the lifetime is the "
+        "larger of this and object_lost_s, so slowing the detector never kills tracks between "
+        "two frames",
+        ge=1,
+        le=100,
+    )
+    object_confirm_hits: int = param(
+        2,
+        "Matched detections before an animal or object track is reported. 2 at 1 fps means a "
+        "thing must be seen in two consecutive object frames: 31% of detections at the default "
+        "score are false and mostly do not repeat, at the cost of a 1 s delay and of things "
+        "seen once",
+        ge=1,
+        le=10,
+    )
+    object_nms_iou: float = param(
+        0.6,
+        "Detections of one class overlapping more than this IoU are merged (NanoDet's own value)",
+        ge=0.1,
+        le=0.95,
+        restart=True,
     )
     animal_categories: list[str] = param(
-        ["bird", "cat", "dog", "horse", "sheep", "cow", "rabbit", "hamster"],
-        "Detector classes reported as kind animal; other classes are objects, person is ignored",
+        ["bird", "cat", "dog", "horse", "sheep", "cow"],
+        "Detector classes (COCO names as in models.yaml) reported as kind animal",
+        restart=True,
     )
+    object_categories: list[str] = param(
+        [
+            "cup",
+            "bottle",
+            "chair",
+            "couch",
+            "potted_plant",
+            "tv",
+            "laptop",
+            "book",
+            "remote",
+            "cell_phone",
+            "bowl",
+            "teddy_bear",
+        ],
+        "Detector classes reported as kind object; a class in neither list is ignored, and so "
+        "is person (faces come from the face detector)",
+        restart=True,
+    )
+    object_display_names: dict[str, str] = param(
+        {"potted_plant": "potted plant", "cell_phone": "cell phone", "teddy_bear": "teddy bear"},
+        "Readable category for a detector class in observations, placeholder names and scene "
+        "text; a class not listed uses its name with underscores turned into spaces (English "
+        "only: localised strings are not provided yet)",
+    )
+
+    @model_validator(mode="after")
+    def _disjoint_categories(self) -> VisionConfig:
+        both = set(self.animal_categories) & set(self.object_categories)
+        if both:
+            raise ValueError(f"vision categories are both animal and object: {sorted(both)}")
+        return self
 
 
 # --------------------------------------------------------------------------- world (SPEC 5A)

@@ -151,6 +151,7 @@ class Perception:
     pipeline: VisionPipeline | None
     service: VisionService | None
     unavailable: str | None
+    objects_unavailable: str | None = None
 
     def start(self) -> None:
         if self.service is not None:
@@ -184,7 +185,13 @@ class Perception:
         """The ``roboemot.vision`` report section."""
         if self.service is None:
             return {"state": "unavailable", "reason": self.unavailable}
-        return self.service.snapshot()
+        snapshot = self.service.snapshot()
+        if self.objects_unavailable is not None:
+            snapshot["objects"] = {"state": "unavailable", "reason": self.objects_unavailable}
+        elif self.pipeline is not None:
+            on = self.pipeline.object_detector is not None
+            snapshot["objects"] = {"state": "running" if on else "off"}
+        return snapshot
 
     def registry_snapshot(self) -> dict[str, Any]:
         """The ``roboemot.registry`` report section: counts only, no names or ids."""
@@ -261,13 +268,20 @@ def open_perception(
         face_embedder=stages.face_embedder,
         attribute_estimator=stages.attribute_estimator,
         appearance_embedder=stages.appearance_embedder,
+        object_detector=stages.object_detector,
         governor=RateGovernor(cfg.vision.rates),
         camera_model=camera_model,
         world=cfg.world,
     )
     enrollment.attach(pipeline)
     return Perception(
-        registry, matcher, enrollment, pipeline, VisionService(pipeline, source, cfg), None
+        registry,
+        matcher,
+        enrollment,
+        pipeline,
+        VisionService(pipeline, source, cfg),
+        None,
+        stages.objects_unavailable,
     )
 
 

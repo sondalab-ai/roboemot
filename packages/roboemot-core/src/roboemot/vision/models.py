@@ -99,9 +99,10 @@ class ModelFile(_Strict):
 class ModelSpec(_Strict):
     """A model: role, weight licence, source page, files and (classifiers) the label order.
 
-    ``labels`` is the output order of a classifier, read from the ``id2label`` of the model's
-    ``config.json`` (``labels_source``, pinned by ``labels_sha256``), so index meaning is part
-    of the pinned manifest and not assumed in code.
+    ``labels`` is the output order of a classifier or detector, read from the ``id2label`` of the
+    model's ``config.json`` or the class list of its training config (``labels_source``, pinned
+    by ``labels_sha256``), so index meaning is part of the pinned manifest and not assumed in
+    code.
     """
 
     name: str

@@ -90,6 +90,8 @@ class AppWithFakes(app_module.RoboEmotApp):
             face_embedder=FakeEmbedder(),
             attribute_estimator=None,
             appearance_embedder=None,
+            object_detector=None,
+            objects_unavailable=None,
         )
 
 
@@ -251,3 +253,73 @@ def test_the_app_keeps_its_motion_when_the_data_folder_is_unusable(data, tmp_pat
     assert sections["roboemot.vision"]["data"]["state"] == "unavailable"
     assert sections["roboemot.registry"]["data"]["state"] == "unavailable"
     assert "data folder" in sections["roboemot.registry"]["data"]["reason"]
+
+
+class FakeObjects:
+    """A detector that always sees a cat, a plant and a person (the person must be ignored)."""
+
+    def detect(self, image):
+        return [
+            Detection((20, 100, 80, 160), 0.8, "cat"),
+            Detection((200, 100, 260, 160), 0.8, "potted_plant"),
+            Detection((120, 20, 180, 80), 0.9, "person"),
+        ]
+
+
+class FakeAppearance:
+    model_id = "mock-appearance"
+
+    def embed(self, image, box):
+        return PLANTED.copy()
+
+
+class AppWithObjects(AppWithFakes):
+    objects_unavailable: str | None = None
+
+    def load_vision_stages(self, cfg, profile):
+        stages = super().load_vision_stages(cfg, profile)
+        stages.appearance_embedder = FakeAppearance()
+        stages.object_detector = None if self.objects_unavailable else FakeObjects()
+        stages.objects_unavailable = self.objects_unavailable
+        return stages
+
+
+def test_an_animal_and_an_object_reach_the_world_model_through_the_app(data):
+    app = new_app(AppWithObjects)
+    stop, thread, errors = start(app)
+    try:
+        assert wait_for(
+            lambda: (
+                app.world is not None
+                and {e.kind for e in app.world.entries} >= {"animal", "object"}
+            )
+        ), "the animal and the object never reached the world model"
+        report = app.diagnostics.report()["sections"]
+        entries = {e.kind: e for e in app.world.entries}
+    finally:
+        stop.set()
+        thread.join(15)
+    assert not errors and not thread.is_alive()
+    assert entries["animal"].category == "cat"
+    assert entries["object"].category == "potted plant"  # readable, not the class name
+    assert "person" not in {e.category for e in app.world.entries if e.kind != "person"}
+    assert report["roboemot.vision"]["data"]["objects"] == {"state": "running"}
+
+
+def test_a_missing_object_detector_leaves_the_rest_of_vision_running(data):
+    app = new_app(AppWithObjects)
+    app.objects_unavailable = "ModelError: nanodet-plus-m-320: not verified"
+    stop, thread, errors = start(app)
+    try:
+        assert wait_for(lambda: app.perception is not None and app.perception.service is not None)
+        assert wait_for(lambda: app.perception.service.runner.processed > 3)
+        report = app.diagnostics.report()["sections"]
+        kinds = {e.kind for e in app.world.entries}
+    finally:
+        stop.set()
+        thread.join(15)
+    assert not errors
+    vision = report["roboemot.vision"]["data"]
+    assert vision["state"] == "running"
+    assert vision["objects"] == {"state": "unavailable", "reason": app.objects_unavailable}
+    assert "animal" not in kinds and "object" not in kinds

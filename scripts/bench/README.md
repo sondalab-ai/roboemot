@@ -39,6 +39,9 @@ SHA-256 of the files used (as downloaded on 2026-10-16):
 | `mobileclip_s0_vision.onnx` | `17d3c037b1d488c10c50e09f6009ea5a198caef4e0e8f4ea5617b7cb2d067ac0` |
 | `buffalo_l.zip` | `80ffe37d8a5940d59a7384c201a2a38d4741f2f3c51eef46ebb28218a7b0ca2f` |
 | `buffalo_s.zip` | `d85a87f503f691807cd8bb97128bdf7a0660326cd9cd02657127fa978bab8b5e` |
+| `yolox_nano.onnx` (YOLOX release 0.1.1rc0) | `c789161ed43c8269fcd4e67c67eeeb4e80c622da2eb296a20bc6007bd18a0b7d` |
+| `nanodet-plus-m_320.onnx` (NanoDet v1.0.0-alpha-1) | `4f12723cce3d48e47ca92cb925ba74d97a965c069208edca660bbb9f7ce2c610` |
+| `annotations_trainval2017.zip` | `113a836d90195ee1f884e704da6304dfaaecff1f023f49b6ca93c4aaae470268` (md5 matches the S3 ETag) |
 | `MPDD.zip` | `6c800c1b4aa67629544dec7444dee85bc57781abde1ae1d077ea9ef1804284cd` (matches Mendeley) |
 
 No upstream checksums are published for most of these; they pin what was measured.
@@ -77,6 +80,29 @@ nice -n 10 $PY -I scripts/bench/run_cm4.py --models-dir ./models --threads 2 --i
 and gender in one process and time both per call. To bench INT8 on the robot, copy the two
 `fairface_*_vit_int8.onnx` files into the `models` dir next to the FP32 ones; the commands in the
 next section pick them up automatically, or use `--only` as above and `--threads 1` / `--threads 2`.
+
+## Object detector (SPEC 5, 13)
+
+YOLOX-Nano and NanoDet-Plus-m 320 on a seeded COCO val2017 subset (Apache-2.0 code and official
+ONNX; needs `pycocotools`, in `requirements-eval.txt`). Images are downloaded one by one into
+`datasets/coco/val2017` on first use (about 250 MB for 1,500; the COCO host is slow, so the first
+run can take 20 minutes or more; a rerun is fast). `objects_lib.py` holds the reference
+preprocessing, decode and NMS that `tests/test_vision_objects.py` checks the shipped backend
+against (`pytest -m models`).
+
+```bash
+export OMP_NUM_THREADS=2
+$PY -I scripts/bench/fetch.py yolox-nano nanodet-plus coco-annotations coco-samples
+nice -n 10 $PY -I scripts/bench/eval_objects.py --n 1500 --seed 0 --out scripts/bench/results/objects.json
+$PY -I scripts/bench/fetch.py --export-flat ./models
+nice -n 10 $PY -I scripts/bench/run_cm4.py --models-dir ./models --threads 1 --runs 100 \
+    --only yolox_nano_416,nanodet_plus_m_320 --json scripts/bench/results/objects_mac_1thread.json
+nice -n 10 $PY -I scripts/bench/run_cm4.py --models-dir ./models --threads 2 --runs 100 \
+    --only yolox_nano_416,nanodet_plus_m_320 --json scripts/bench/results/objects_mac_2threads.json
+```
+
+Pass `--threads 2 --only yolox_nano_416,nanodet_plus_m_320` to the `run_cm4.py` commands below to
+time them on the robot (network only; decode and NMS are not included).
 
 ## Latency on the robot (Raspberry Pi CM4, aarch64)
 

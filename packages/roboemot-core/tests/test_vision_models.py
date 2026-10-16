@@ -50,6 +50,7 @@ def test_manifest_is_complete_and_pinned():
         "fairface-age-int8",
         "fairface-gender-int8",
         "dinov2-small",
+        "nanodet-plus-m-320",
     }
     paths = [f.path for s in specs.values() for f in s.files]
     assert len(paths) == len(set(paths))
@@ -313,20 +314,123 @@ def test_auto_precision_follows_the_manifest_profile(monkeypatch, tmp_path):
     manifest_dir = Path(__file__).resolve().parents[3] / "configs" / "manifests"
     cm4 = load_robot(manifest_dir / "reachy-mini-wireless.yaml", allow_unmeasured_dynamics=True)
     assert cm4.robot.profile == "cm4"
-    onnx.load_stages(tmp_path, cfg, profile=cm4.robot.profile, appearance=False)
+    onnx.load_stages(tmp_path, cfg, profile=cm4.robot.profile, appearance=False, objects=False)
     assert "fairface-age-int8" in asked and "fairface-gender-int8" in asked
     asked.clear()
-    onnx.load_stages(tmp_path, cfg, profile="npu", appearance=False)
+    onnx.load_stages(tmp_path, cfg, profile="npu", appearance=False, objects=False)
     assert "fairface-age" in asked and not [n for n in asked if n.endswith("int8")]
     asked.clear()
-    onnx.load_stages(tmp_path, cfg, appearance=False)
+    onnx.load_stages(tmp_path, cfg, appearance=False, objects=False)
     assert "fairface-age" in asked
     asked.clear()
     forced = cfg.model_copy(update={"attribute_precision": "int8"})
-    onnx.load_stages(tmp_path, forced, profile="npu", appearance=False)
+    onnx.load_stages(tmp_path, forced, profile="npu", appearance=False, objects=False)
     assert "fairface-age-int8" in asked
     with pytest.raises(ValueError):
         RoboEmotConfig(vision={"attribute_precision": "int4"})
+
+
+def test_nanodet_manifest_pins_the_class_order_and_covers_the_default_mapping():
+    spec = load_manifest()["nanodet-plus-m-320"]
+    cfg = RoboEmotConfig().vision
+    assert spec.role == "object_detector" and spec.licence == "Apache-2.0"
+    assert len(spec.labels) == 80 and len(set(spec.labels)) == 80
+    assert spec.labels[:3] == ["person", "bicycle", "car"] and spec.labels[-1] == "toothbrush"
+    assert re.fullmatch(r"[0-9a-f]{64}", spec.labels_sha256) and spec.labels_source.startswith(
+        "https://"
+    )
+    assert set(cfg.animal_categories + cfg.object_categories) <= set(spec.labels)
+
+
+def test_load_stages_builds_the_object_detector_from_the_class_mapping(monkeypatch, tmp_path):
+    pytest.importorskip("cv2")
+    pytest.importorskip("onnxruntime")
+    from roboemot.vision import onnx
+
+    built: list[tuple] = []
+    monkeypatch.setattr(onnx, "configure", lambda threads: None)
+    monkeypatch.setattr(onnx, "_file", lambda root, name, index=0: tmp_path / name)
+    monkeypatch.setattr(onnx, "YuNetDetector", lambda *a: None)
+    monkeypatch.setattr(onnx, "SFaceEmbedder", lambda *a: None)
+    monkeypatch.setattr(onnx, "NanoDetDetector", lambda *a: built.append(a) or "detector")
+    cfg = RoboEmotConfig().vision
+    stages = onnx.load_stages(tmp_path, cfg, attributes=False, appearance=False)
+    path, labels, classes, score_min, nms_iou, threads = built[0]
+    assert stages.object_detector == "detector" and path.name == "nanodet-plus-m-320"
+    assert len(labels) == 80 and classes == [*cfg.animal_categories, *cfg.object_categories]
+    assert (score_min, nms_iou, threads) == (cfg.object_score_min, cfg.object_nms_iou, cfg.threads)
+    built.clear()
+    off = cfg.model_copy(update={"objects_enabled": False})
+    assert (
+        onnx.load_stages(tmp_path, off, attributes=False, appearance=False).object_detector is None
+    )
+    assert (
+        onnx.load_stages(
+            tmp_path, cfg, attributes=False, appearance=False, objects=False
+        ).object_detector
+        is None
+    )
+    assert built == []
+
+
+def _optional_stage_rig(monkeypatch, tmp_path, missing):
+    from roboemot.vision import onnx
+
+    built: list[str] = []
+
+    def file(root, name, index=0):
+        if name == missing:
+            raise ModelError(f"{name}: not verified in {root}; run `roboemot models fetch`")
+        return tmp_path / name
+
+    monkeypatch.setattr(onnx, "configure", lambda threads: None)
+    monkeypatch.setattr(onnx, "_file", file)
+    monkeypatch.setattr(onnx, "YuNetDetector", lambda *a: "yunet")
+    monkeypatch.setattr(onnx, "SFaceEmbedder", lambda *a: "sface")
+    monkeypatch.setattr(onnx, "NanoDetDetector", lambda *a: built.append("nanodet") or "nanodet")
+    monkeypatch.setattr(onnx, "DinoV2Embedder", lambda *a: built.append("dino") or "dino")
+    return onnx, built
+
+
+def test_missing_dinov2_keeps_faces_and_drops_the_object_stage(monkeypatch, tmp_path, caplog):
+    pytest.importorskip("cv2")
+    pytest.importorskip("onnxruntime")
+    onnx, built = _optional_stage_rig(monkeypatch, tmp_path, "dinov2-small")
+    stages = onnx.load_stages(tmp_path, RoboEmotConfig().vision, attributes=False)
+    assert stages.face_detector == "yunet" and stages.face_embedder == "sface"
+    assert stages.appearance_embedder is None and stages.object_detector is None
+    assert (
+        "ModelError" in stages.objects_unavailable and "dinov2-small" in stages.objects_unavailable
+    )
+    assert "unavailable" in caplog.text
+
+
+def test_a_failing_detector_drops_dinov2_too_and_never_loads_it(monkeypatch, tmp_path):
+    pytest.importorskip("cv2")
+    pytest.importorskip("onnxruntime")
+    onnx, built = _optional_stage_rig(monkeypatch, tmp_path, "nanodet-plus-m-320")
+    stages = onnx.load_stages(tmp_path, RoboEmotConfig().vision, attributes=False)
+    assert stages.face_detector == "yunet"
+    assert stages.appearance_embedder is None and stages.object_detector is None
+    assert "nanodet-plus-m-320" in stages.objects_unavailable
+    assert "dino" not in built
+
+
+def test_the_object_stage_loads_whole_or_not_at_all_and_can_be_off(monkeypatch, tmp_path):
+    pytest.importorskip("cv2")
+    pytest.importorskip("onnxruntime")
+    onnx, built = _optional_stage_rig(monkeypatch, tmp_path, None)
+    cfg = RoboEmotConfig().vision
+    ok = onnx.load_stages(tmp_path, cfg, attributes=False)
+    assert (ok.object_detector, ok.appearance_embedder, ok.objects_unavailable) == (
+        "nanodet",
+        "dino",
+        None,
+    )
+    built.clear()
+    off = cfg.model_copy(update={"objects_enabled": False})
+    stages = onnx.load_stages(tmp_path, off, attributes=False, appearance=False)
+    assert stages.object_detector is None and stages.appearance_embedder is None and built == []
 
 
 def test_load_stages_int8_pair_uses_the_real_marker_check(monkeypatch, tmp_path):
@@ -361,14 +465,14 @@ def test_load_stages_int8_pair_uses_the_real_marker_check(monkeypatch, tmp_path)
     monkeypatch.setattr(onnx, "YuNetDetector", lambda *a: None)
     monkeypatch.setattr(onnx, "SFaceEmbedder", lambda *a: None)
     cfg = RoboEmotConfig().vision
-    stages = onnx.load_stages(tmp_path, cfg, profile="cm4", appearance=False)
+    stages = onnx.load_stages(tmp_path, cfg, profile="cm4", appearance=False, objects=False)
     assert stages.attribute_estimator is not None
     assert opened == ["age_model.onnx", "gender_model.onnx"]
     (tmp_path / "fairface_int8/age_model.onnx").write_bytes(b"swapped")
     with pytest.raises(ModelError, match="changed since"):
-        onnx.load_stages(tmp_path, cfg, profile="cm4", appearance=False)
+        onnx.load_stages(tmp_path, cfg, profile="cm4", appearance=False, objects=False)
     with pytest.raises(ModelError, match="not verified"):
-        onnx.load_stages(tmp_path, cfg, profile="npu", appearance=False)
+        onnx.load_stages(tmp_path, cfg, profile="npu", appearance=False, objects=False)
 
 
 def test_fetch_downloads_verifies_and_is_idempotent(tmp_path):
@@ -446,7 +550,14 @@ def test_core_imports_do_not_need_the_vision_extra():
 # --------------------------------------------------------------- real models (opt in)
 
 CACHE = models.default_dir()
-NEEDED = ["yunet", "sface", "fairface-age-int8", "fairface-gender-int8", "dinov2-small"]
+NEEDED = [
+    "yunet",
+    "sface",
+    "fairface-age-int8",
+    "fairface-gender-int8",
+    "dinov2-small",
+    "nanodet-plus-m-320",
+]
 
 
 @pytest.fixture(scope="module")

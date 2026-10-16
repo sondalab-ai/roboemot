@@ -522,11 +522,62 @@ def test_animals_and_objects_publish_with_appearance_embedding(tmp_path):
     assert app.calls < len(seen)
 
 
-def test_objects_stay_off_by_default(tmp_path):
+def test_objects_can_be_switched_off(tmp_path):
     objs = ObjectMock([Detection((20, 100, 80, 160), 0.8, "cat")])
-    _, _, pipe, _, got = rig(tmp_path, lambda i: [], object_detector=objs)
+    off = CFG.vision.model_copy(update={"objects_enabled": False})
+    _, _, pipe, _, got = rig(tmp_path, lambda i: [], vision=off, object_detector=objs)
     run(pipe, 20)
     assert got["percept.entity"] == []
+
+
+def test_objects_are_on_by_default_and_defaults_cover_the_household_list():
+    v = CFG.vision
+    assert v.objects_enabled and v.rates.objects_hz == 1.0
+    assert set(v.animal_categories) == {"bird", "cat", "dog", "horse", "sheep", "cow"}
+    assert {"cup", "potted_plant", "cell_phone", "teddy_bear", "tv"} <= set(v.object_categories)
+    assert "person" not in v.animal_categories + v.object_categories
+
+
+def test_class_mapping_drops_unlisted_classes_and_person(tmp_path):
+    objs = ObjectMock(
+        [
+            Detection((20, 100, 80, 160), 0.8, "cat"),
+            Detection((200, 100, 260, 160), 0.8, "cup"),
+            Detection((120, 20, 180, 80), 0.9, "person"),
+            Detection((300, 20, 340, 80), 0.9, "car"),
+        ]
+    )
+    _, _, pipe, _, got = rig(tmp_path, lambda i: [], object_detector=objs)
+    run(pipe, 20)
+    kinds = {m.payload.category: m.payload.kind for m in got["percept.entity"]}
+    assert kinds == {"cat": "animal", "cup": "object"}
+
+
+def test_class_mapping_is_configurable(tmp_path):
+    objs = ObjectMock(
+        [Detection((20, 100, 80, 160), 0.8, "cat"), Detection((200, 100, 260, 160), 0.8, "cup")]
+    )
+    cfg = CFG.vision.model_copy(update={"animal_categories": ["cup"], "object_categories": []})
+    _, _, pipe, _, got = rig(tmp_path, lambda i: [], vision=cfg, object_detector=objs)
+    run(pipe, 20)
+    kinds = {m.payload.category: m.payload.kind for m in got["percept.entity"]}
+    assert kinds == {"cup": "animal"}
+
+
+def test_class_in_both_lists_is_rejected():
+    with pytest.raises(ValidationError, match="both animal and object"):
+        RoboEmotConfig.model_validate(
+            {"vision": {"animal_categories": ["cat"], "object_categories": ["cat"]}}
+        )
+
+
+def test_object_score_threshold_is_applied(tmp_path):
+    objs = ObjectMock(
+        [Detection((20, 100, 80, 160), 0.39, "cat"), Detection((200, 100, 260, 160), 0.41, "cup")]
+    )
+    _, _, pipe, _, got = rig(tmp_path, lambda i: [], object_detector=objs)
+    run(pipe, 20)
+    assert {m.payload.category for m in got["percept.entity"]} == {"cup"}
 
 
 def test_world_model_gets_observations_over_the_bus_with_joint_state(tmp_path):
@@ -644,3 +695,176 @@ def test_replay_against_one_registry_does_not_change_it(tmp_path):
     assert any(m["topic"] == "person.recognized" for m in first)
     assert first == second
     assert {k: v.shape for k, v in before.items()} == {k: v.shape for k, v in after.items()}
+
+
+def test_object_track_lifetime_follows_the_governor_scale(tmp_path):
+    _, _, pipe, _, _ = rig(tmp_path, lambda i: [], object_detector=ObjectMock([]))
+    cfg = CFG.vision
+    assert pipe.object_tracker.cfg.lost_s == cfg.object_lost_s  # 1 Hz: 3 periods < 5 s
+    pipe.governor.set_scale("circadian", 0.1)
+    pipe.process(Frame(image(0), 0.0))
+    period = 1 / (cfg.rates.objects_hz * 0.1)
+    assert pipe.object_tracker.cfg.lost_s == pytest.approx(cfg.object_lost_periods * period)
+    assert pipe.object_tracker.cfg.lost_s > cfg.object_lost_s
+    pipe.governor.set_scale("circadian", 1.0)
+    pipe.process(Frame(image(1), 1.0))  # the longer lifetime is kept until this frame is folded in
+    pipe.process(Frame(image(2), 2.0))
+    assert pipe.object_tracker.cfg.lost_s == cfg.object_lost_s
+    pipe.apply_config(cfg.model_copy(update={"object_lost_s": 9.0}), CFG.identity)
+    assert pipe.object_tracker.cfg.lost_s == 9.0 and pipe.object_tracker.cfg.high_score == 0.4
+
+
+def test_an_object_track_survives_a_missed_frame_at_a_tenth_of_the_rate(tmp_path):
+    objs = ObjectMock([Detection((20, 100, 80, 160), 0.8, "cat")])
+    _, _, pipe, _, got = rig(tmp_path, lambda i: [], object_detector=objs)
+    pipe.governor.set_scale("circadian", 0.1)  # one object frame every 10 s
+    for stamp in (0.0, 10.0):
+        pipe.process(Frame(image(int(stamp)), stamp))
+    assert {m.payload.category for m in got["percept.entity"]} == {"cat"}
+    objs.dets = []
+    pipe.process(Frame(image(20), 20.0))  # missed frame: 10 s gap, within 3 periods
+    assert len(pipe._entities) == 1
+    objs.dets = [Detection((20, 100, 80, 160), 0.8, "cat")]
+    pipe.process(Frame(image(30), 30.0))
+    assert len(pipe._entities) == 1 and len(pipe.object_tracker._tracks) == 1
+
+
+def test_the_object_tracker_has_no_low_score_pass(tmp_path):
+    _, _, pipe, _, _ = rig(tmp_path, lambda i: [], object_detector=ObjectMock([]))
+    cfg = pipe.object_tracker.cfg
+    assert cfg.low_score == cfg.high_score == CFG.vision.object_score_min
+
+
+def test_categories_are_readable_names(tmp_path):
+    objs = ObjectMock(
+        [
+            Detection((20, 100, 80, 160), 0.8, "potted_plant"),
+            Detection((200, 100, 260, 160), 0.8, "hair_drier"),
+        ]
+    )
+    cfg = CFG.vision.model_copy(update={"object_categories": ["potted_plant", "hair_drier"]})
+    _, _, pipe, _, got = rig(tmp_path, lambda i: [], vision=cfg, object_detector=objs)
+    run(pipe, 20)
+    assert {m.payload.category for m in got["percept.entity"]} == {"potted plant", "hair drier"}
+
+
+class RecordingAppearance:
+    model_id = APP_MODEL
+
+    def __init__(self):
+        self.boxes = []
+
+    def embed(self, img, box):
+        self.boxes.append(tuple(box))
+        return axis(3)
+
+
+def crowd(n, label="cup"):
+    return [Detection((10 + 50 * k, 100, 40 + 50 * k, 140), 0.8, label) for k in range(n)]
+
+
+def entity_rig(tmp_path, dets, **update):
+    cfg = CFG.vision.model_copy(update=update)
+    app = RecordingAppearance()
+    reg = registry(tmp_path)
+    bus = Bus()
+    pipe = VisionPipeline(
+        cfg,
+        CFG.identity,
+        bus,
+        Matcher(reg, CFG.identity),
+        face_detector=ScriptedDetector(lambda i: [face(100)]),
+        face_embedder=FixedFaceEmbedder(axis(0)),
+        appearance_embedder=app,
+        object_detector=ObjectMock(dets),
+    )
+    return pipe, app
+
+
+def test_entities_have_their_own_embed_budget_and_never_take_the_faces_share(tmp_path):
+    pipe, app = entity_rig(
+        tmp_path, crowd(4), max_embeds_per_frame=1, max_entity_embeds_per_frame=1
+    )
+    reports = [pipe.process(Frame(image(i), float(i))) for i in range(10)]
+    per_frame = [r.embeddings for r in reports]
+    assert max(per_frame) == 2  # one face + one entity in the same frame
+    assert len(app.boxes) <= len(reports)  # never more than one entity embed per frame
+    assert len(app.boxes) >= 4
+
+
+def test_a_crowd_of_entities_takes_turns_oldest_embedding_first(tmp_path):
+    pipe, app = entity_rig(tmp_path, crowd(6))
+    for i in range(8):
+        pipe.process(Frame(image(i), float(i)))
+    first_six = app.boxes[:6]
+    assert len(set(first_six)) == 6, "a track was embedded twice before every track had a turn"
+    assert all(s.last_embed is not None for s in pipe._entities.values())
+    assert len(pipe._entities) == 6
+
+
+def test_a_new_entity_is_not_starved_by_old_ones(tmp_path):
+    objs = ObjectMock(crowd(5))
+    cfg = CFG.vision
+    reg = registry(tmp_path)
+    app = RecordingAppearance()
+    pipe = VisionPipeline(
+        cfg,
+        CFG.identity,
+        Bus(),
+        Matcher(reg, CFG.identity),
+        face_detector=ScriptedDetector(lambda i: []),
+        face_embedder=FixedFaceEmbedder(axis(0)),
+        appearance_embedder=app,
+        object_detector=objs,
+    )
+    for i in range(12):
+        pipe.process(Frame(image(i), float(i)))
+    objs.dets = [*crowd(5), Detection((400, 100, 440, 140), 0.8, "cup")]
+    seen = len(app.boxes)
+    for i in range(12, 16):
+        pipe.process(Frame(image(i), float(i)))
+    assert (400.0, 100.0, 440.0, 140.0) in app.boxes[seen : seen + 4]  # confirmed, then served
+
+
+def test_entity_burst_evaluations_are_spaced_by_the_minimum_gap(tmp_path):
+    rates = CFG.vision.rates.model_copy(update={"objects_hz": 4.0, "appearance_hz": 0.05})
+    pipe, app = entity_rig(tmp_path, crowd(1), rates=rates, entity_burst_min_gap_s=1.0)
+    stamps = []
+    for i in range(24):
+        before = len(app.boxes)
+        pipe.process(Frame(image(i), i * 0.25))
+        if len(app.boxes) > before:
+            stamps.append(i * 0.25)
+    assert len(stamps) >= 3
+    assert all(b - a >= 1.0 for a, b in zip(stamps, stamps[1:], strict=False))
+
+
+def test_unconfirmed_object_tracks_publish_nothing_and_cost_no_embedding(tmp_path):
+    pipe, app = entity_rig(tmp_path, crowd(1))
+    pipe.object_detector.dets = crowd(1)
+    pipe.process(Frame(image(0), 0.0))
+    pipe.object_detector.dets = []
+    pipe.process(Frame(image(1), 1.0))
+    pipe.process(Frame(image(2), 2.0))
+    assert app.boxes == [] and pipe._entities == {}
+
+
+def test_object_confirm_hits_one_publishes_at_the_first_sighting(tmp_path):
+    pipe, app = entity_rig(tmp_path, crowd(1), object_confirm_hits=1)
+    pipe.process(Frame(image(0), 0.0))
+    assert len(app.boxes) == 1 and len(pipe._entities) == 1
+
+
+def test_a_track_survives_the_return_to_full_rate_for_one_frame(tmp_path):
+    objs = ObjectMock(crowd(1))
+    _, _, pipe, _, _ = rig(tmp_path, lambda i: [], object_detector=objs)
+    pipe.governor.set_scale("circadian", 0.1)
+    for stamp in (0.0, 10.0):
+        pipe.process(Frame(image(int(stamp)), stamp))
+    (track_id,) = pipe._entities
+    pipe.governor.set_scale("circadian", 1.0)  # lifetime would drop from 30 s to 5 s
+    pipe.process(Frame(image(25), 25.0))  # 15 s after the last sighting
+    assert list(pipe._entities) == [track_id]
+    pipe.process(Frame(image(26), 26.0))
+    assert pipe.object_tracker.cfg.lost_s == CFG.vision.object_lost_s
+    assert list(pipe._entities) == [track_id]

@@ -71,6 +71,8 @@ def fake_stages(cfg, profile):
         face_embedder=Embedder(),
         attribute_estimator=None,
         appearance_embedder=None,
+        object_detector=None,
+        objects_unavailable=None,
     )
 
 
@@ -347,7 +349,7 @@ def test_hot_reload_reaches_the_pipeline_trackers_governor_and_enrollment():
     )
     p.apply_config(new)
     assert p.pipeline.governor.rates.detection_hz == 3
-    assert p.pipeline.face_tracker.cfg.lost_s == 7 and p.pipeline.object_tracker.cfg.lost_s == 7
+    assert p.pipeline.face_tracker.cfg.lost_s == 7 and p.pipeline.object_tracker.cfg.lost_s == 5.0
     assert p.enrollment.cfg.min_gap_s == 2
 
 
@@ -379,3 +381,12 @@ def test_models_list_points_at_weights_left_in_the_old_default_folder(
     assert "old default folder" in out and str(legacy) in out
     assert cli.main(["models", "list", "--cache-dir", str(legacy)]) == 0
     assert "old default folder" not in capsys.readouterr().out
+
+
+def test_the_pipeline_gets_the_stage_detector_and_reports_objects_running():
+    objs = SimpleNamespace(detect=lambda image: [])
+    stages = fake_stages(CFG, None)
+    stages.object_detector = objs
+    p = open_perception(CFG, Bus(), Source(), load_stages=lambda cfg, profile: stages)
+    assert p.pipeline.object_detector is objs
+    assert p.vision_snapshot()["objects"] == {"state": "running"}
