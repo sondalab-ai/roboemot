@@ -7,9 +7,10 @@
   ranked by appearance (cosine; a missing similarity is neutral).
 - Bearing-only observations of kind ``unknown`` may confirm an entry but never create one.
 - Decay: confidence halves every ``half_life_s`` of the entry's kind, slower by
-  ``out_of_view_decay_factor`` while out of view. ``tick`` decides in-view with the injected
-  predicate and remembers the result per entry; ``observe`` first decays the gap since the
-  entry's last update with that remembered state, then gains, and marks the entry in view.
+  ``out_of_view_decay_factor`` while out of view. ``tick`` decays the past interval with the
+  remembered state, then evaluates the injected predicate and remembers the result;
+  ``observe`` first decays the gap since the entry's last update with that remembered
+  state, then gains, and marks the entry in view.
   Entries below ``forget_confidence`` are removed by ``tick``.
 - Events go to the bus (SPEC 11): appeared, moved, gone, snapshot on request. They are
   published after the lock is released; a failing subscriber is logged and skipped.
@@ -112,8 +113,8 @@ class WorldModel:
         events: list[Event] = []
         with self._lock:
             for entry in list(self._entries.values()):
-                self._in_view[entry.entry_id] = in_view_fn(entry.azimuth_rad, entry.elevation_rad)
                 self._decay(entry, now)
+                self._in_view[entry.entry_id] = in_view_fn(entry.azimuth_rad, entry.elevation_rad)
                 if entry.confidence < self.cfg.forget_confidence:
                     self._remove(entry)
                     gone.append(entry.public())

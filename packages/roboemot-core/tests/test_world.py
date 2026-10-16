@@ -250,9 +250,23 @@ def test_decay_in_view_vs_out_of_view():
     for in_view, rate in ((always_in_view, 1.0), (never_in_view, CFG.out_of_view_decay_factor)):
         w, _, clock, _ = setup()
         e = seen(w, obs(clock, 0, category="person"))
+        w.tick(clock.t, in_view)  # records the view state; nothing to decay yet
         c0 = conf(w, e)
         w.tick(clock.advance(CFG.half_life_s.person), in_view)
         assert conf(w, e) == pytest.approx(c0 * 0.5**rate)
+
+
+def test_tick_decays_past_interval_with_remembered_state():
+    h, f = CFG.half_life_s.person, CFG.out_of_view_decay_factor
+    w, _, clock, _ = setup()
+    e = seen(w, obs(clock, 0, category="person"))
+    w.tick(clock.t, never_in_view)
+    c0 = conf(w, e)
+    w.tick(clock.advance(h), always_in_view)  # past dt was out of view: slow rate
+    assert conf(w, e) == pytest.approx(c0 * 0.5**f)
+    c1 = conf(w, e)
+    w.tick(clock.advance(h), never_in_view)  # past dt was in view: full rate
+    assert conf(w, e) == pytest.approx(c1 * 0.5)
 
 
 def test_half_life_per_kind():
@@ -316,9 +330,11 @@ def test_out_of_view_to_in_view_transition():
     w, _, clock, _ = setup()
     e = seen(w, obs(clock, 0, category="person"))
     c0 = conf(w, e)
+    w.tick(clock.t, never_in_view)
     w.tick(clock.advance(h), never_in_view)
-    w.tick(clock.advance(h), always_in_view)
-    assert conf(w, e) == pytest.approx(c0 * 0.5**f * 0.5)
+    w.tick(clock.advance(h / 2), always_in_view)
+    w.tick(clock.advance(h / 2), always_in_view)
+    assert conf(w, e) == pytest.approx(c0 * 0.5**f * 0.5 ** (f / 2) * 0.5**0.5)
 
 
 def test_observe_uses_last_view_state_for_gap_then_marks_in_view():
@@ -326,13 +342,14 @@ def test_observe_uses_last_view_state_for_gap_then_marks_in_view():
     w, _, clock, _ = setup()
     e = seen(w, obs(clock, 0, category="person"))
     c0 = conf(w, e)
-    w.tick(clock.advance(h / 2), never_in_view)
+    w.tick(clock.t, never_in_view)
+    w.tick(clock.advance(h / 2), always_in_view)
     clock.advance(h / 2)
     w.observe(obs(clock, 0, category="person"))
-    decayed = c0 * 0.5 ** (f * 0.5) * 0.5 ** (f * 0.5)
+    decayed = c0 * 0.5 ** (f * 0.5) * 0.5**0.5
     assert conf(w, e) == pytest.approx(decayed + CFG.confidence_gain * (1 - decayed))
     c1 = conf(w, e)
-    w.tick(clock.advance(h), always_in_view)
+    w.tick(clock.advance(h), never_in_view)
     assert conf(w, e) == pytest.approx(c1 * 0.5)
 
 
