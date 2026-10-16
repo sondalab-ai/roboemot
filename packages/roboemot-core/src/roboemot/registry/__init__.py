@@ -5,11 +5,13 @@ from .matcher import Identity, Matcher
 from .records import (
     Attribute,
     Consent,
+    ConsentError,
     EntityRecord,
     PersonRecord,
+    RecordSummary,
     possible_minor,
 )
-from .registry import ConsentError, HistoryLink, Registry
+from .registry import HistoryLink, Registry
 from .store import Cipher, FileStore, NullCipher, RegistryStore
 
 __all__ = [
@@ -25,6 +27,7 @@ __all__ = [
     "Matcher",
     "NullCipher",
     "PersonRecord",
+    "RecordSummary",
     "Registry",
     "RegistryStore",
     "estimate_age_group",

@@ -14,8 +14,11 @@ from typing import Any, Literal
 import numpy as np
 
 AGE_GROUPS: tuple[str, ...] = ("child", "teen", "adult", "senior", "unknown")
-MINOR_AGE_GROUPS = frozenset({"child", "teen", "unknown"})
-GENDERS: tuple[str, ...] = ("female", "male", "other", "unknown")
+ADULT_AGE_GROUPS = frozenset({"adult", "senior"})
+GENDERS: tuple[str, ...] = ("female", "male", "unknown")
+CONSENT_SCOPES: tuple[str, ...] = ("face", "voice", "refresh")
+ENTITY_KINDS: tuple[str, ...] = ("animal", "object")
+SCHEMA_VERSION = 1
 
 Status = Literal["active", "pending"]
 Source = Literal["declared", "estimated"]
@@ -24,8 +27,33 @@ EntityKind = Literal["animal", "object"]
 
 
 def possible_minor(age_group: str | None) -> bool:
-    """True for a child, a teen or an unknown age group (SPEC 5, Rules for estimated attributes)."""
-    return age_group is None or age_group in MINOR_AGE_GROUPS
+    """True unless the group is exactly adult or senior; unknown or invalid counts as a minor.
+
+    Fails closed (SPEC 5, Rules for estimated attributes): only an explicit adult or senior
+    value lifts the minor policy.
+    """
+    return age_group not in ADULT_AGE_GROUPS
+
+
+def check_age_group(value: str) -> str:
+    """Return ``value`` if it is a known age group, else raise ``ValueError``."""
+    if value not in AGE_GROUPS:
+        raise ValueError(f"age_group must be one of {AGE_GROUPS}")
+    return value
+
+
+def check_gender(value: str) -> str:
+    """Return ``value`` if it is a known gender, else raise ``ValueError``."""
+    if value not in GENDERS:
+        raise ValueError(f"gender must be one of {GENDERS}")
+    return value
+
+
+def check_entity_kind(value: str) -> str:
+    """Return ``value`` if it is an entity kind (animal or object), else raise ``ValueError``."""
+    if value not in ENTITY_KINDS:
+        raise ValueError(f"kind must be one of {ENTITY_KINDS}")
+    return value
 
 
 def _iso(when: datetime | None) -> str | None:
@@ -40,6 +68,23 @@ def _no_embeddings() -> np.ndarray:
     return np.zeros((0, 0), np.float32)
 
 
+def _check_version(meta: dict[str, Any]) -> None:
+    if meta.get("schema_version") != SCHEMA_VERSION:
+        raise ValueError("unsupported schema_version")
+
+
+@dataclass(frozen=True)
+class RecordSummary:
+    """What ``Registry.list`` returns: no embeddings, no consent, no preferences."""
+
+    id: str
+    display_name: str
+    status: Status
+    kind: Literal["person", "animal", "object"]
+    last_seen: datetime | None
+    age_group: str | None = None
+
+
 @dataclass(frozen=True)
 class Attribute:
     """An age group or gender value and whether it was declared or estimated."""
@@ -48,14 +93,33 @@ class Attribute:
     source: Source
 
 
+class ConsentError(ValueError):
+    """Raised when a consent record is invalid or missing for what is being stored."""
+
+
 @dataclass(frozen=True)
 class Consent:
-    """Who consented, when and to what; the guardian is required for minors (SPEC 12, Data)."""
+    """Who consented, when and to what; the guardian is required for possible minors.
+
+    ``scope`` is a non-empty subset of ``CONSENT_SCOPES``: ``face`` and ``voice`` allow storing
+    those embeddings, ``refresh`` allows adding embeddings after enrollment (SPEC 12, Data).
+    """
 
     who: str
     when: datetime
     scope: tuple[str, ...]
     guardian: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "scope", tuple(self.scope))
+        if not self.who.strip():
+            raise ConsentError("consent needs the name of who consented")
+        if self.guardian is not None and not self.guardian.strip():
+            raise ConsentError("guardian must not be blank")
+        if self.when.tzinfo is None or self.when.utcoffset() is None:
+            raise ConsentError("consent time must be timezone-aware")
+        if not self.scope or not set(self.scope) <= set(CONSENT_SCOPES):
+            raise ConsentError(f"consent scope must be a non-empty subset of {CONSENT_SCOPES}")
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -87,15 +151,15 @@ class PersonRecord:
     display_name: str
     status: Status = "pending"
     embedding_model_id: str | None = None
-    face_embeddings: np.ndarray = field(default_factory=_no_embeddings)
+    face_embeddings: np.ndarray = field(default_factory=_no_embeddings, repr=False)
     n_enrolled: int = 0
-    voice_embedding: np.ndarray | None = None
+    voice_embedding: np.ndarray | None = field(default=None, repr=False)
     voice_model_id: str | None = None
     age_group: Attribute | None = None
     gender: Attribute | None = None
     register_overrides: dict[str, Any] = field(default_factory=dict)
-    preferences: dict[str, Any] = field(default_factory=dict)
-    consent: Consent | None = None
+    preferences: dict[str, Any] = field(default_factory=dict, repr=False)
+    consent: Consent | None = field(default=None, repr=False)
     last_seen: datetime | None = None
 
     @property
@@ -105,6 +169,7 @@ class PersonRecord:
     def meta(self) -> dict[str, Any]:
         """JSON-safe metadata; the embeddings are stored as arrays beside it."""
         return {
+            "schema_version": SCHEMA_VERSION,
             "person_id": self.person_id,
             "display_name": self.display_name,
             "status": self.status,
@@ -130,6 +195,7 @@ class PersonRecord:
     @classmethod
     def from_stored(cls, meta: dict[str, Any], arrays: dict[str, np.ndarray]) -> PersonRecord:
         consent = meta["consent"]
+        _check_version(meta)
         return cls(
             person_id=meta["person_id"],
             display_name=meta["display_name"],
@@ -167,12 +233,13 @@ class EntityRecord:
     status: Status = "pending"
     origin: Origin = "enrolled"
     embedding_model_id: str | None = None
-    embeddings: np.ndarray = field(default_factory=_no_embeddings)
+    embeddings: np.ndarray = field(default_factory=_no_embeddings, repr=False)
     description: str | None = None
     last_seen: datetime | None = None
 
     def meta(self) -> dict[str, Any]:
         return {
+            "schema_version": SCHEMA_VERSION,
             "entity_id": self.entity_id,
             "kind": self.kind,
             "display_name": self.display_name,
@@ -189,6 +256,7 @@ class EntityRecord:
 
     @classmethod
     def from_stored(cls, meta: dict[str, Any], arrays: dict[str, np.ndarray]) -> EntityRecord:
+        _check_version(meta)
         return cls(
             entity_id=meta["entity_id"],
             kind=meta["kind"],

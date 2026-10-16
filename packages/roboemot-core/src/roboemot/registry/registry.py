@@ -1,14 +1,20 @@
 """The registry of known people, animals and objects (SPEC 6, 11, 12).
 
-People are enrolled only with a recorded consent; without one they stay ``pending`` and hold
-no biometric data. Nothing here enrolls a person automatically. Embeddings and profile fields
-are removed synchronously by ``forget``. Never log embeddings or crops (SPEC 12, Privacy).
+People are enrolled only with a recorded consent whose scope covers what is stored, and a
+possible minor (anything not declared adult or senior) needs a guardian. Nothing here enrolls a
+person automatically; ``create_pending_person`` makes a name-only record with no biometrics.
+Records are replaced, never edited in place, and memory changes only after the store write
+succeeded. ``forget`` is synchronous and complete. One re-entrant lock guards all state; the
+matcher shares it. Never log embeddings or crops (SPEC 12, Privacy).
 """
 
 from __future__ import annotations
 
+import logging
+import threading
 import uuid
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, Literal, Protocol
 
@@ -18,21 +24,25 @@ from ..config.schema import IdentityConfig
 from .records import (
     Attribute,
     Consent,
+    ConsentError,
     EntityKind,
     EntityRecord,
     Origin,
     PersonRecord,
+    RecordSummary,
+    check_age_group,
+    check_entity_kind,
+    check_gender,
+    possible_minor,
 )
 from .store import RegistryStore
+
+log = logging.getLogger(__name__)
 
 PEOPLE = "people"
 ENTITIES = "entities"
 GalleryKind = Literal["face", "voice", "entity"]
-GUARDIAN_AGE_GROUPS = frozenset({"child", "teen"})
-
-
-class ConsentError(ValueError):
-    """Raised when a person would be enrolled without a valid consent record."""
+Vectors = Sequence[Sequence[float]] | np.ndarray
 
 
 class HistoryLink(Protocol):
@@ -43,16 +53,26 @@ class HistoryLink(Protocol):
     def forget(self, person_id: str) -> None: ...
 
 
-def _matrix(vectors: Sequence[Sequence[float]] | np.ndarray) -> np.ndarray:
-    array = np.asarray(vectors, dtype=np.float32)
+def _usable(array: np.ndarray) -> bool:
+    return bool(np.isfinite(array).all() and (np.linalg.norm(array, axis=-1) > 0).all())
+
+
+def _matrix(vectors: Vectors) -> np.ndarray:
+    """A non-empty (n, dim) float32 copy; NaN, infinite and zero-norm rows are rejected."""
+    array = np.array(vectors, dtype=np.float32)
     if array.ndim != 2 or not array.shape[0] or not array.shape[1]:
         raise ValueError("embeddings must be a non-empty (n, dim) matrix")
+    if not _usable(array):
+        raise ValueError("embeddings must be finite and non-zero")
     return array
 
 
+def _vector(vector: Sequence[float] | np.ndarray) -> np.ndarray:
+    return _matrix(np.asarray(vector, dtype=np.float32)[None, :])[0]
+
+
 def _unit(rows: np.ndarray) -> np.ndarray:
-    norms = np.linalg.norm(rows, axis=-1, keepdims=True)
-    return rows / np.where(norms == 0, 1, norms)
+    return rows / np.linalg.norm(rows, axis=-1, keepdims=True)
 
 
 class Registry:
@@ -66,51 +86,111 @@ class Registry:
     ) -> None:
         self.store = store
         self.identity = identity
+        self.lock = threading.RLock()
         self._clock = clock or (lambda: datetime.now(UTC))
         self._people: dict[str, PersonRecord] = {}
         self._entities: dict[str, EntityRecord] = {}
         self._history: list[HistoryLink] = []
+        self._forget_listeners: list[Callable[[str], None]] = []
         self._gallery_cache: dict[tuple[GalleryKind, str], dict[str, np.ndarray]] = {}
+        self._dirty: set[str] = set()
+        self._last_refresh: dict[str, datetime] = {}
+        self._last_flush = self._clock()
         self.version = 0
-        for key in store.keys(PEOPLE):
-            self._people[key] = PersonRecord.from_stored(*store.get(PEOPLE, key))
-        for key in store.keys(ENTITIES):
-            self._entities[key] = EntityRecord.from_stored(*store.get(ENTITIES, key))
+        self._load(PEOPLE, PersonRecord, self._people, "person_id")
+        self._load(ENTITIES, EntityRecord, self._entities, "entity_id")
+
+    def _load(self, collection: str, cls: Any, target: dict[str, Any], id_field: str) -> None:
+        """Read every item; one that fails to parse is quarantined and logged by key only."""
+        for key in self.store.keys(collection):
+            try:
+                record = cls.from_stored(*self.store.get(collection, key))
+                if getattr(record, id_field) != key:
+                    raise ValueError("key does not match the stored id")
+                target[key] = record
+            except Exception as exc:
+                log.error("quarantined %s item %s (%s)", collection, key, type(exc).__name__)
+                self.store.quarantine(collection, key)
 
     def attach_history(self, link: HistoryLink) -> None:
         """Include ``link`` in ``export`` and ``forget`` (the world history, SPEC 5A)."""
-        self._history.append(link)
+        with self.lock:
+            self._history.append(link)
 
-    def _save_person(self, record: PersonRecord) -> None:
-        self.store.put(PEOPLE, record.person_id, record.meta(), record.arrays())
-        self._people[record.person_id] = record
-        self._changed()
-
-    def _save_entity(self, record: EntityRecord) -> None:
-        self.store.put(ENTITIES, record.entity_id, record.meta(), record.arrays())
-        self._entities[record.entity_id] = record
-        self._changed()
+    def add_forget_listener(self, listener: Callable[[str], None]) -> None:
+        """Call ``listener(person_id)`` during ``forget`` (the matcher purges its votes)."""
+        with self.lock:
+            self._forget_listeners.append(listener)
 
     def _changed(self) -> None:
         self.version += 1
         self._gallery_cache.clear()
 
-    def _consent_valid(self, consent: Consent | None, age_group: str | None) -> bool:
-        if consent is None:
-            return False
-        return not (age_group in GUARDIAN_AGE_GROUPS and not consent.guardian)
+    def _commit_person(self, record: PersonRecord, *, new: bool = False) -> None:
+        """Write the record, then publish it; an id that was forgotten meanwhile raises."""
+        with self.lock:
+            if not new and record.person_id not in self._people:
+                raise KeyError(record.person_id)
+            self.store.put(PEOPLE, record.person_id, record.meta(), record.arrays())
+            self._people[record.person_id] = record
+            self._changed()
 
-    def _check_enrollment(self, embeddings: np.ndarray) -> None:
-        low, high = self.identity.enroll_min_embeddings, self.identity.max_embeddings_per_person
-        if not low <= len(embeddings) <= high:
-            raise ValueError(f"enrollment needs {low} to {high} embeddings, got {len(embeddings)}")
+    def _commit_entity(self, record: EntityRecord, *, new: bool = False) -> None:
+        with self.lock:
+            if not new and record.entity_id not in self._entities:
+                raise KeyError(record.entity_id)
+            self.store.put(ENTITIES, record.entity_id, record.meta(), record.arrays())
+            self._entities[record.entity_id] = record
+            self._changed()
 
     # ------------------------------------------------------------------ people
+
+    def _require_consent(
+        self, consent: Consent | None, age_group: str | None, needs: tuple[str, ...]
+    ) -> Consent:
+        if consent is None:
+            raise ConsentError("a consent record is required")
+        if possible_minor(age_group) and not consent.guardian:
+            raise ConsentError("a guardian is required unless the person is declared adult")
+        missing = [scope for scope in needs if scope not in consent.scope]
+        if missing:
+            raise ConsentError(f"consent scope lacks {missing}")
+        return consent
+
+    def _with_biometrics(
+        self,
+        record: PersonRecord,
+        faces: Vectors,
+        model_id: str,
+        consent: Consent | None,
+        voice: Sequence[float] | np.ndarray | None,
+        voice_model_id: str | None,
+    ) -> PersonRecord:
+        """A copy of ``record`` that is active and holds the checked biometrics."""
+        age = None if record.age_group is None else record.age_group.value
+        needs = ("face",) if voice is None else ("face", "voice")
+        granted = self._require_consent(consent, age, needs)
+        matrix = _matrix(faces)
+        low, high = self.identity.enroll_min_embeddings, self.identity.max_embeddings_per_person
+        if not low <= len(matrix) <= high:
+            raise ValueError(f"enrollment needs {low} to {high} embeddings, got {len(matrix)}")
+        if voice is not None and not voice_model_id:
+            raise ValueError("a voice embedding needs its voice_model_id")
+        return replace(
+            record,
+            status="active",
+            consent=granted,
+            embedding_model_id=model_id,
+            face_embeddings=matrix,
+            n_enrolled=len(matrix),
+            voice_embedding=None if voice is None else _vector(voice),
+            voice_model_id=voice_model_id if voice is not None else None,
+        )
 
     def enroll(
         self,
         display_name: str,
-        face_embeddings: Sequence[Sequence[float]] | np.ndarray,
+        face_embeddings: Vectors,
         embedding_model_id: str,
         *,
         consent: Consent | None = None,
@@ -121,145 +201,203 @@ class Registry:
         register_overrides: dict[str, Any] | None = None,
         preferences: dict[str, Any] | None = None,
     ) -> PersonRecord:
-        """Enroll a person; without a valid consent the record stays ``pending`` and empty.
+        """Enroll a person with consent; raises ``ConsentError`` without a valid one.
 
-        A minor needs a guardian in the consent. Embeddings given without consent are
-        discarded, never stored. The age group and gender passed here are declared values.
+        The consent scope must include ``face`` (and ``voice`` when a voice embedding is given);
+        a guardian is required unless ``age_group`` is declared adult or senior. Age group and
+        gender passed here are declared values. For a name-only record use
+        ``create_pending_person``.
         """
-        record = PersonRecord(
+        declared_age = None if age_group is None else check_age_group(age_group)
+        declared_gender = None if gender is None else check_gender(gender)
+        base = PersonRecord(
             person_id=str(uuid.uuid4()),
             display_name=display_name,
-            age_group=None if age_group is None else Attribute(age_group, "declared"),
-            gender=None if gender is None else Attribute(gender, "declared"),
+            age_group=None if declared_age is None else Attribute(declared_age, "declared"),
+            gender=None if declared_gender is None else Attribute(declared_gender, "declared"),
             register_overrides=dict(register_overrides or {}),
             preferences=dict(preferences or {}),
         )
-        if self._consent_valid(consent, age_group):
-            self._activate(
-                record,
-                face_embeddings,
-                embedding_model_id,
-                consent,
-                voice_embedding,
-                voice_model_id,
-            )
-        self._save_person(record)
+        record = self._with_biometrics(
+            base, face_embeddings, embedding_model_id, consent, voice_embedding, voice_model_id
+        )
+        self._commit_person(record, new=True)
         return record
 
     def create_pending_person(self, display_name: str) -> PersonRecord:
         """A name-only record (catalogue import, SPEC 6); it holds no biometric data."""
         record = PersonRecord(person_id=str(uuid.uuid4()), display_name=display_name)
-        self._save_person(record)
+        self._commit_person(record, new=True)
         return record
 
     def complete_enrollment(
         self,
         person_id: str,
-        face_embeddings: Sequence[Sequence[float]] | np.ndarray,
+        face_embeddings: Vectors,
         embedding_model_id: str,
         consent: Consent,
         *,
         voice_embedding: Sequence[float] | np.ndarray | None = None,
         voice_model_id: str | None = None,
     ) -> PersonRecord:
-        """Turn a pending person active once consent exists and the faces are captured."""
-        record = self._people[person_id]
-        if record.status != "pending":
-            raise ValueError(f"{person_id} is already enrolled")
-        declared = None if record.age_group is None else record.age_group.value
-        if not self._consent_valid(consent, declared):
-            raise ConsentError("a valid consent record is required (guardian for minors)")
-        self._activate(
-            record, face_embeddings, embedding_model_id, consent, voice_embedding, voice_model_id
-        )
-        self._save_person(record)
-        return record
+        """Turn a pending person active once consent exists and the faces are captured.
 
-    def _activate(
-        self,
-        record: PersonRecord,
-        face_embeddings: Sequence[Sequence[float]] | np.ndarray,
-        model_id: str,
-        consent: Consent | None,
-        voice: Sequence[float] | np.ndarray | None,
-        voice_model_id: str | None,
-    ) -> None:
-        faces = _matrix(face_embeddings)
-        self._check_enrollment(faces)
-        if voice is not None and not voice_model_id:
-            raise ValueError("a voice embedding needs its voice_model_id")
-        record.face_embeddings = faces
-        record.n_enrolled = len(faces)
-        record.embedding_model_id = model_id
-        record.voice_embedding = None if voice is None else np.asarray(voice, dtype=np.float32)
-        record.voice_model_id = voice_model_id if voice is not None else None
-        record.consent = consent
-        record.status = "active"
+        The same consent rules as ``enroll`` apply; a pending person has no declared age group
+        unless one was set, so a guardian is normally required.
+        """
+        with self.lock:
+            pending = self._people[person_id]
+            if pending.status != "pending":
+                raise ValueError(f"{person_id} is already enrolled")
+            record = self._with_biometrics(
+                pending,
+                face_embeddings,
+                embedding_model_id,
+                consent,
+                voice_embedding,
+                voice_model_id,
+            )
+            self._commit_person(record)
+            return record
 
     def add_refresh_embedding(
         self, person_id: str, embedding: Sequence[float] | np.ndarray, model_id: str
     ) -> bool:
         """Add a face embedding after a high-confidence match; True when it was stored.
 
-        Skipped when the model differs, when it nearly duplicates a stored one, or when the
-        per-person cap is reached and no refreshed embedding exists to replace. At the cap the
-        oldest refreshed one is dropped; enrollment embeddings are never replaced.
+        Requires the ``refresh`` consent scope and ``refresh_min_interval_s`` since the last
+        one. To stop template drift the embedding must be at least ``refresh_min_similarity``
+        close to an *enrollment* embedding; refreshed ones do not count. Near-duplicates of any
+        stored embedding are skipped. At the cap the oldest refreshed embedding is replaced and
+        enrollment embeddings never are.
         """
-        record = self._people.get(person_id)
-        row = np.asarray(embedding, dtype=np.float32)[None, :]
-        if record is None or record.status != "active" or record.embedding_model_id != model_id:
-            return False
-        if row.shape[1] != record.face_embeddings.shape[1]:
-            return False
-        sims = _unit(record.face_embeddings) @ _unit(row)[0]
-        if float(sims.max()) >= self.identity.refresh_max_similarity:
-            return False
-        faces = record.face_embeddings
-        if len(faces) >= self.identity.max_embeddings_per_person:
-            if len(faces) <= record.n_enrolled:
+        with self.lock:
+            record = self._people.get(person_id)
+            if (
+                record is None
+                or record.status != "active"
+                or record.embedding_model_id != model_id
+                or record.consent is None
+                or "refresh" not in record.consent.scope
+            ):
                 return False
-            faces = np.delete(faces, record.n_enrolled, axis=0)
-        record.face_embeddings = np.vstack([faces, row])
-        self._save_person(record)
-        return True
+            row = np.array(embedding, dtype=np.float32)
+            if row.ndim != 1 or row.shape[0] != record.face_embeddings.shape[1] or not _usable(row):
+                return False
+            sims = _unit(record.face_embeddings) @ (row / np.linalg.norm(row))
+            if float(sims[: record.n_enrolled].max()) < self.identity.refresh_min_similarity:
+                return False
+            if float(sims.max()) >= self.identity.refresh_max_similarity:
+                return False
+            now = self._clock()
+            last = self._last_refresh.get(person_id)
+            if last is not None and (now - last).total_seconds() < (
+                self.identity.refresh_min_interval_s
+            ):
+                return False
+            faces = record.face_embeddings
+            if len(faces) >= self.identity.max_embeddings_per_person:
+                if len(faces) <= record.n_enrolled:
+                    return False
+                faces = np.delete(faces, record.n_enrolled, axis=0)
+            self._commit_person(replace(record, face_embeddings=np.vstack([faces, row[None, :]])))
+            self._last_refresh[person_id] = now
+            return True
 
     def mark_seen(self, record_id: str) -> None:
-        """Set ``last_seen`` of a person or entity to now."""
-        now = self._clock()
-        if record_id in self._people:
-            self._people[record_id].last_seen = now
-            self._save_person(self._people[record_id])
-        elif record_id in self._entities:
-            self._entities[record_id].last_seen = now
-            self._save_entity(self._entities[record_id])
-        else:
-            raise KeyError(record_id)
+        """Set ``last_seen`` to now in memory; the disk write is throttled (see ``flush``)."""
+        with self.lock:
+            record = self._people.get(record_id) or self._entities.get(record_id)
+            if record is None:
+                raise KeyError(record_id)
+            now = self._clock()
+            record.last_seen = now
+            self._dirty.add(record_id)
+            elapsed = (now - self._last_flush).total_seconds()
+            if elapsed >= self.identity.last_seen_flush_interval_s:
+                self.flush()
+
+    def flush(self) -> None:
+        """Write buffered ``last_seen`` updates; call it on shutdown. Failures are re-raised."""
+        errors: list[Exception] = []
+        with self.lock:
+            for record_id in sorted(self._dirty):
+                person = self._people.get(record_id)
+                record = person or self._entities.get(record_id)
+                if record is None:
+                    self._dirty.discard(record_id)
+                    continue
+                collection = PEOPLE if person else ENTITIES
+                try:
+                    self.store.put(collection, record_id, record.meta(), record.arrays())
+                    self._dirty.discard(record_id)
+                except Exception as exc:
+                    errors.append(exc)
+            self._last_flush = self._clock()
+        if errors:
+            raise ExceptionGroup("last_seen flush incomplete", errors)
 
     def get_person(self, person_id: str) -> PersonRecord:
-        return self._people[person_id]
+        with self.lock:
+            return self._people[person_id]
 
-    def list(self) -> list[PersonRecord | EntityRecord]:
-        """All people then all entities, in registration order of the store keys."""
-        return [*self._people.values(), *self._entities.values()]
+    def list(self) -> list[RecordSummary]:
+        """Summaries without biometrics: people by name, then animals and objects by name."""
+        with self.lock:
+            people = sorted(self._people.values(), key=lambda r: (r.display_name, r.person_id))
+            entities = sorted(self._entities.values(), key=lambda r: (r.display_name, r.entity_id))
+            rows = [
+                RecordSummary(
+                    p.person_id,
+                    p.display_name,
+                    p.status,
+                    "person",
+                    p.last_seen,
+                    None if p.age_group is None else p.age_group.value,
+                )
+                for p in people
+            ]
+            rows += [
+                RecordSummary(e.entity_id, e.display_name, e.status, e.kind, e.last_seen)
+                for e in entities
+            ]
+            return rows
 
     def forget(self, person_id: str) -> bool:
-        """Remove every embedding, field and file of a person, and their attached history.
+        """Remove every embedding, field and file of a person, and everything attached to them.
 
-        Synchronous: when it returns, nothing about the person is left in memory or on disk.
-        Returns False when the person was unknown.
+        Order: disk first, then memory (the gallery cache is cleared even if the disk delete
+        fails), then forget listeners (the matcher purges votes), then every history link. A
+        failing step never skips the rest; failures are raised together afterwards as an
+        ``ExceptionGroup``. Returns False when the person was unknown.
         """
-        known = self._people.pop(person_id, None) is not None
-        self.store.delete(PEOPLE, person_id)
-        for link in self._history:
-            link.forget(person_id)
-        self._changed()
+        errors: list[Exception] = []
+        with self.lock:
+            known = person_id in self._people
+            try:
+                self.store.delete(PEOPLE, person_id)
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                self._people.pop(person_id, None)
+                self._dirty.discard(person_id)
+                self._last_refresh.pop(person_id, None)
+                self._changed()
+            for notify in [*self._forget_listeners, *(link.forget for link in self._history)]:
+                try:
+                    notify(person_id)
+                except Exception as exc:
+                    errors.append(exc)
+        if errors:
+            raise ExceptionGroup("forget incomplete", errors)
         return known
 
     def export(self, person_id: str) -> dict[str, Any]:
         """The person's whole record, embeddings and attached history, as JSON-safe data."""
-        data = self._people[person_id].export()
-        data["history"] = [link.export(person_id) for link in self._history]
-        return data
+        with self.lock:
+            data = self._people[person_id].export()
+            data["history"] = [link.export(person_id) for link in self._history]
+            return data
 
     # ---------------------------------------------------------------- entities
 
@@ -267,7 +405,7 @@ class Registry:
         self,
         kind: EntityKind,
         display_name: str,
-        embeddings: Sequence[Sequence[float]] | np.ndarray,
+        embeddings: Vectors,
         embedding_model_id: str,
         *,
         category: str = "",
@@ -277,7 +415,7 @@ class Registry:
         """Register an animal or object with its appearance embeddings; no consent applies."""
         record = EntityRecord(
             entity_id=str(uuid.uuid4()),
-            kind=kind,
+            kind=check_entity_kind(kind),  # type: ignore[arg-type]
             display_name=display_name,
             category=category,
             origin=origin,
@@ -286,7 +424,7 @@ class Registry:
             embeddings=_matrix(embeddings),
             status="active",
         )
-        self._save_entity(record)
+        self._commit_entity(record, new=True)
         return record
 
     def create_pending_entity(
@@ -301,85 +439,112 @@ class Registry:
         """A name-only entity (catalogue import) that gets its appearance once confirmed."""
         record = EntityRecord(
             entity_id=str(uuid.uuid4()),
-            kind=kind,
+            kind=check_entity_kind(kind),  # type: ignore[arg-type]
             display_name=display_name,
             category=category,
             origin=origin,
             description=description,
         )
-        self._save_entity(record)
+        self._commit_entity(record, new=True)
         return record
 
     def confirm_entity(
-        self,
-        entity_id: str,
-        embeddings: Sequence[Sequence[float]] | np.ndarray,
-        embedding_model_id: str,
+        self, entity_id: str, embeddings: Vectors, embedding_model_id: str
     ) -> EntityRecord:
         """Give a pending entity its appearance (the owner confirmed "this is Mia")."""
-        record = self._entities[entity_id]
-        record.embeddings = _matrix(embeddings)
-        record.embedding_model_id = embedding_model_id
-        record.status = "active"
-        self._save_entity(record)
-        return record
+        with self.lock:
+            record = replace(
+                self._entities[entity_id],
+                embeddings=_matrix(embeddings),
+                embedding_model_id=embedding_model_id,
+                status="active",
+            )
+            self._commit_entity(record)
+            return record
 
     def get_entity(self, entity_id: str) -> EntityRecord:
-        return self._entities[entity_id]
+        with self.lock:
+            return self._entities[entity_id]
 
     def rename_entity(self, entity_id: str, display_name: str) -> EntityRecord:
-        record = self._entities[entity_id]
-        record.display_name = display_name
-        self._save_entity(record)
-        return record
+        with self.lock:
+            record = replace(self._entities[entity_id], display_name=display_name)
+            self._commit_entity(record)
+            return record
 
     def merge_entities(self, keep_id: str, drop_id: str) -> EntityRecord:
-        """Fold ``drop_id`` into ``keep_id``: embeddings are pooled and the dropped one deleted."""
-        keep, drop = self._entities[keep_id], self._entities[drop_id]
-        if len(drop.embeddings):
-            if len(keep.embeddings) and keep.embedding_model_id != drop.embedding_model_id:
-                raise ValueError("cannot merge entities from different embedding models")
-            keep.embedding_model_id = drop.embedding_model_id
-            pooled = (
-                [keep.embeddings, drop.embeddings] if len(keep.embeddings) else [drop.embeddings]
+        """Fold ``drop_id`` into ``keep_id``: embeddings pooled, newest ``last_seen`` kept.
+
+        Both must exist, differ, and share kind and category and (when both have embeddings)
+        the embedding model. The kept description wins; the dropped one fills a gap.
+        """
+        with self.lock:
+            keep, drop = self._entities[keep_id], self._entities[drop_id]
+            if keep_id == drop_id:
+                raise ValueError("cannot merge an entity into itself")
+            if (keep.kind, keep.category) != (drop.kind, drop.category):
+                raise ValueError("cannot merge entities of different kind or category")
+            seen = [t for t in (keep.last_seen, drop.last_seen) if t is not None]
+            merged = replace(
+                keep,
+                description=keep.description or drop.description,
+                last_seen=max(seen) if seen else None,
             )
-            keep.embeddings = np.vstack(pooled)
-            keep.status = "active"
-        self._save_entity(keep)
-        self.delete_entity(drop_id)
-        return keep
+            if len(drop.embeddings):
+                if len(keep.embeddings) and keep.embedding_model_id != drop.embedding_model_id:
+                    raise ValueError("cannot merge entities from different embedding models")
+                pooled = (
+                    [keep.embeddings, drop.embeddings]
+                    if len(keep.embeddings)
+                    else [drop.embeddings]
+                )
+                merged = replace(
+                    merged,
+                    embedding_model_id=drop.embedding_model_id,
+                    embeddings=np.vstack(pooled),
+                    status="active",
+                )
+            self._commit_entity(merged)
+            self.delete_entity(drop_id)
+            return merged
 
     def delete_entity(self, entity_id: str) -> None:
-        self._entities.pop(entity_id, None)
-        self.store.delete(ENTITIES, entity_id)
-        self._changed()
+        with self.lock:
+            try:
+                self.store.delete(ENTITIES, entity_id)
+            finally:
+                self._entities.pop(entity_id, None)
+                self._dirty.discard(entity_id)
+                self._changed()
 
     # ----------------------------------------------------------------- matching
 
     def gallery(self, kind: GalleryKind, model_id: str) -> dict[str, np.ndarray]:
         """Unit-length embeddings per active owner for ``model_id``; other models are skipped."""
-        cached = self._gallery_cache.get((kind, model_id))
-        if cached is not None:
-            return cached
-        out: dict[str, np.ndarray] = {}
-        if kind == "entity":
-            for e in self._entities.values():
-                if e.status == "active" and e.embedding_model_id == model_id and len(e.embeddings):
-                    out[e.entity_id] = _unit(e.embeddings)
-        else:
-            for p in self._people.values():
-                if p.status != "active":
-                    continue
-                if kind == "face" and p.embedding_model_id == model_id and len(p.face_embeddings):
-                    out[p.person_id] = _unit(p.face_embeddings)
-                elif (
-                    kind == "voice"
-                    and p.voice_model_id == model_id
-                    and p.voice_embedding is not None
-                ):
-                    out[p.person_id] = _unit(p.voice_embedding[None, :])
-        self._gallery_cache[(kind, model_id)] = out
-        return out
+        with self.lock:
+            cached = self._gallery_cache.get((kind, model_id))
+            if cached is not None:
+                return cached
+            out: dict[str, np.ndarray] = {}
+            if kind == "entity":
+                for e in self._entities.values():
+                    ok = e.status == "active" and e.embedding_model_id == model_id
+                    if ok and len(e.embeddings):
+                        out[e.entity_id] = _unit(e.embeddings)
+            else:
+                for p in self._people.values():
+                    if p.status != "active":
+                        continue
+                    if kind == "face" and p.embedding_model_id == model_id:
+                        out[p.person_id] = _unit(p.face_embeddings)
+                    elif (
+                        kind == "voice"
+                        and p.voice_model_id == model_id
+                        and p.voice_embedding is not None
+                    ):
+                        out[p.person_id] = _unit(p.voice_embedding[None, :])
+            self._gallery_cache[(kind, model_id)] = out
+            return out
 
 
 __all__ = ["ConsentError", "GalleryKind", "HistoryLink", "Registry"]

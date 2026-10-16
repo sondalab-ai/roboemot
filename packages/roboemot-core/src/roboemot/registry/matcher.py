@@ -5,11 +5,16 @@ votes for the best owner when the best similarity reaches ``identity.match_thres
 ``identity.margin`` over the second best owner. A track is assigned to an owner once that owner
 holds ``votes_required`` of the last ``votes_window`` votes. Anything else is ``unknown`` with
 an anonymous ID that lives only in this object: it is never written to the registry and it
-restarts with ``new_session``. Never log embeddings or crops.
+restarts with ``new_session``. The matcher shares the registry's lock and purges a forgotten
+owner from every track. Never log embeddings or crops.
+
+With a single enrolled owner there is no second best, so the margin rule cannot apply (SPEC 6
+states it only "over the second best"); the threshold alone decides.
 """
 
 from __future__ import annotations
 
+import uuid
 from collections import Counter, deque
 from dataclasses import dataclass, field
 from typing import Literal
@@ -20,6 +25,7 @@ from ..config.schema import IdentityConfig
 from .registry import GalleryKind, Registry
 
 Kind = Literal["person", "entity"]
+ANON_ID_HEX_CHARS = 12
 
 
 @dataclass(frozen=True)
@@ -55,37 +61,49 @@ class Matcher:
     """Tracks votes per ``track_id`` over a registry and resolves each track to an identity."""
 
     registry: Registry
-    config: IdentityConfig | None = None
+    config: IdentityConfig
     _tracks: dict[int, _Track] = field(default_factory=dict)
-    _anon_count: int = 0
 
     def __post_init__(self) -> None:
-        self.config = self.config or self.registry.identity
+        self._lock = self.registry.lock
+        self.registry.add_forget_listener(self._purge)
+
+    def _purge(self, owner_id: str) -> None:
+        """Turn every vote for ``owner_id`` into a miss (called when the owner is forgotten)."""
+        with self._lock:
+            for track in self._tracks.values():
+                for votes in (track.face, track.voice):
+                    kept = [None if v == owner_id else v for v in votes]
+                    votes.clear()
+                    votes.extend(kept)
 
     def new_session(self) -> None:
-        """Forget every track and anonymous ID; the next anonymous ID starts over."""
-        self._tracks.clear()
-        self._anon_count = 0
+        """Forget every track and its anonymous ID; new tracks get new random IDs."""
+        with self._lock:
+            self._tracks.clear()
 
     def release(self, track_id: int) -> None:
-        """Drop the state of a track that ended."""
-        self._tracks.pop(track_id, None)
+        """Drop the state of a track that ended, so a reused track id starts clean."""
+        with self._lock:
+            self._tracks.pop(track_id, None)
 
     def _track(self, track_id: int) -> _Track:
-        assert self.config is not None
         if track_id not in self._tracks:
             window = self.config.votes_window
             self._tracks[track_id] = _Track(deque(maxlen=window), deque(maxlen=window))
         return self._tracks[track_id]
 
     def _vote(self, gallery_kind: GalleryKind, embedding: np.ndarray, model_id: str) -> _Vote:
-        assert self.config is not None
         query = np.asarray(embedding, dtype=np.float32)
-        norm = float(np.linalg.norm(query))
+        norm = float(np.linalg.norm(query)) if query.ndim == 1 else 0.0
+        if not np.isfinite(query).all() or not np.isfinite(norm) or norm == 0:
+            return _Vote(None)
         sims: dict[str, float] = {}
         for owner, rows in self.registry.gallery(gallery_kind, model_id).items():
-            if rows.shape[1] == query.shape[0] and norm > 0:
-                sims[owner] = float((rows @ (query / norm)).max())
+            if rows.shape[1] == query.shape[0]:
+                best_sim = float((rows @ (query / norm)).max())
+                if np.isfinite(best_sim):
+                    sims[owner] = best_sim
         if not sims:
             return _Vote(None)
         ranked = sorted(sims.items(), key=lambda kv: kv[1], reverse=True)
@@ -98,7 +116,6 @@ class Matcher:
         return _Vote(best_owner, best)
 
     def _winner(self, votes: deque[str | None]) -> str | None:
-        assert self.config is not None
         counts = Counter(v for v in votes if v is not None)
         if not counts:
             return None
@@ -113,9 +130,12 @@ class Matcher:
         if owner is not None:
             return Identity(track_id, owner, kind, None)
         if track.anonymous_id is None:
-            self._anon_count += 1
-            track.anonymous_id = f"anon-{self._anon_count}"
+            track.anonymous_id = f"anon-{uuid.uuid4().hex[:ANON_ID_HEX_CHARS]}"
         return Identity(track_id, None, None, track.anonymous_id, disagreement)
+
+    def _conflicted(self, track: _Track, owner_id: str) -> bool:
+        """True when any recent face or voice vote on the track went to someone else."""
+        return any(v is not None and v != owner_id for v in (*track.face, *track.voice))
 
     def observe(
         self,
@@ -129,25 +149,36 @@ class Matcher:
         """Evaluate a face (or, for ``kind="entity"``, appearance) embedding for a track.
 
         After a high-confidence match of a person, the embedding is offered to the registry's
-        online refresh, which applies the per-person cap. Disagreeing with voice blocks it.
+        online refresh, which applies consent, cap, interval and drift rules. No refresh is
+        offered while any recent vote on the track, face or voice, names someone else. A face
+        winner that changes from one person to another clears the voice votes, which would
+        otherwise keep contradicting the new winner until they age out.
         """
-        assert self.config is not None
-        track = self._track(track_id)
-        vote = self._vote("entity" if kind == "entity" else "face", embedding, model_id)
-        track.face.append(vote.owner_id)
-        identity = self._resolve(track_id, kind)
-        if (
-            refresh
-            and kind == "person"
-            and identity.owner_id is not None
-            and vote.owner_id == identity.owner_id
-            and vote.best >= self.config.refresh_min_similarity
-        ):
-            self.registry.add_refresh_embedding(identity.owner_id, embedding, model_id)
-        return identity
+        with self._lock:
+            track = self._track(track_id)
+            before = self._winner(track.face)
+            vote = self._vote("entity" if kind == "entity" else "face", embedding, model_id)
+            track.face.append(vote.owner_id)
+            if before is not None and self._winner(track.face) not in (None, before):
+                track.voice.clear()
+            identity = self._resolve(track_id, kind)
+            if (
+                refresh
+                and kind == "person"
+                and identity.owner_id is not None
+                and vote.owner_id == identity.owner_id
+                and vote.best >= self.config.refresh_min_similarity
+                and not self._conflicted(track, identity.owner_id)
+            ):
+                self.registry.add_refresh_embedding(identity.owner_id, embedding, model_id)
+            return identity
 
     def observe_voice(self, track_id: int, embedding: np.ndarray, model_id: str) -> Identity:
         """Evaluate a speaker embedding for a track; fused with the face votes of that track."""
-        track = self._track(track_id)
-        track.voice.append(self._vote("voice", embedding, model_id).owner_id)
-        return self._resolve(track_id, "person")
+        with self._lock:
+            track = self._track(track_id)
+            before = self._winner(track.voice)
+            track.voice.append(self._vote("voice", embedding, model_id).owner_id)
+            if before is not None and self._winner(track.voice) not in (None, before):
+                track.face.clear()
+            return self._resolve(track_id, "person")

@@ -13,10 +13,11 @@ from dataclasses import dataclass
 from typing import Literal
 
 from ..config.schema import IdentityConfig
-from .records import AGE_GROUPS, possible_minor
+from .records import AGE_GROUPS, GENDERS, check_age_group, check_gender, possible_minor
 
 UNKNOWN = "unknown"
-ORDERED_AGE_GROUPS = tuple(g for g in AGE_GROUPS if g != UNKNOWN)
+# Youngest-first with unknown below child: the median can only lean conservative.
+ORDERED_AGE_GROUPS = (UNKNOWN, *(g for g in AGE_GROUPS if g != UNKNOWN))
 
 
 @dataclass(frozen=True)
@@ -43,22 +44,32 @@ def _settle(value: str, confidences: Sequence[float], config: IdentityConfig) ->
     return Estimate(value, "estimated", confidence)
 
 
+def _vocabulary(samples: Sequence[tuple[str, float]], allowed: tuple[str, ...]) -> None:
+    for value, _ in samples:
+        if value not in allowed:
+            raise ValueError(f"unexpected estimate value {value!r}")
+
+
 def estimate_age_group(
     samples: Sequence[tuple[str, float]], config: IdentityConfig, declared: str | None = None
 ) -> Estimate:
     """Median age group of ``(group, confidence)`` frames; declared values override.
 
-    The median is taken on the ordered groups (child < teen < adult < senior); with an even
-    number of frames the younger middle one is used, the conservative choice.
+    Order is unknown < child < teen < adult < senior, so ``unknown`` frames pull the median
+    down: mostly-unknown frames give unknown. With an even number of frames the lower middle
+    one is used, the conservative choice. Fewer than ``estimate_frames_min`` frames, or a low
+    mean confidence of the winning frames, give unknown.
     """
     if declared is not None:
-        return Estimate(declared, "declared", 1.0)
-    frames = [(g, c) for g, c in samples if g in ORDERED_AGE_GROUPS]
-    if len(frames) < config.estimate_frames_min:
+        return Estimate(check_age_group(declared), "declared", 1.0)
+    _vocabulary(samples, AGE_GROUPS)
+    if len(samples) < config.estimate_frames_min:
         return Estimate(UNKNOWN, "none")
-    ranks = sorted(ORDERED_AGE_GROUPS.index(g) for g, _ in frames)
+    ranks = sorted(ORDERED_AGE_GROUPS.index(g) for g, _ in samples)
     value = ORDERED_AGE_GROUPS[ranks[(len(ranks) - 1) // 2]]
-    return _settle(value, [c for g, c in frames if g == value], config)
+    if value == UNKNOWN:
+        return Estimate(UNKNOWN, "none")
+    return _settle(value, [c for g, c in samples if g == value], config)
 
 
 def estimate_gender(
@@ -66,15 +77,16 @@ def estimate_gender(
 ) -> Estimate:
     """Most frequent gender of ``(value, confidence)`` frames (no order exists, so no median).
 
-    A tie, too few frames or a low mean confidence of the winning frames gives ``unknown``.
+    ``unknown`` frames count as a value: a tie, an unknown winner, too few frames or a low
+    mean confidence of the winning frames gives ``unknown``.
     """
     if declared is not None:
-        return Estimate(declared, "declared", 1.0)
-    frames = [(g, c) for g, c in samples if g != UNKNOWN]
-    if len(frames) < config.estimate_frames_min:
+        return Estimate(check_gender(declared), "declared", 1.0)
+    _vocabulary(samples, GENDERS)
+    if len(samples) < config.estimate_frames_min:
         return Estimate(UNKNOWN, "none")
-    ranked = Counter(g for g, _ in frames).most_common(2)
-    if len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
+    ranked = Counter(g for g, _ in samples).most_common(2)
+    if (len(ranked) > 1 and ranked[0][1] == ranked[1][1]) or ranked[0][0] == UNKNOWN:
         return Estimate(UNKNOWN, "none")
     value = ranked[0][0]
-    return _settle(value, [c for g, c in frames if g == value], config)
+    return _settle(value, [c for g, c in samples if g == value], config)
