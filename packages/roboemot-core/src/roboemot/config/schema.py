@@ -1152,6 +1152,68 @@ class ConnectivityConfig(Strict):
     )
 
 
+class WebUIConfig(Strict):
+    bind: str = param("0.0.0.0", "Interface the web UI listens on (the robot's LAN)", restart=True)
+    port: int = param(
+        8042,
+        "TCP port of the web UI (0 picks a free one; the app's custom_app_url)",
+        ge=0,
+        le=65535,
+        restart=True,
+    )
+    session_ttl_s: float = param(
+        900.0,
+        "Idle time after which a login session ends",
+        unit="s",
+        ge=60,
+        le=86400,
+        conservative="lower",
+    )
+    max_sessions: int = param(
+        8,
+        "Logged-in sessions kept; the oldest is dropped past this",
+        ge=1,
+        le=64,
+        conservative="lower",
+    )
+    pin_min_length: int = param(
+        6, "Minimum digits of the operator PIN", ge=4, le=32, conservative="higher"
+    )
+    pin_max_attempts: int = param(
+        5, "Wrong PINs before the login locks", ge=1, le=20, conservative="lower"
+    )
+    pin_lockout_s: float = param(
+        300.0,
+        "How long a lockout refuses every login",
+        unit="s",
+        ge=10,
+        le=86400,
+        conservative="higher",
+    )
+    max_body_bytes: int = param(
+        16384,
+        "Largest accepted request body",
+        unit="B",
+        ge=1024,
+        le=1048576,
+        conservative="lower",
+    )
+    name_max_chars: int = param(
+        64, "Longest display name or consent name", ge=1, le=200, conservative="lower"
+    )
+    request_timeout_s: float = param(
+        10.0,
+        "Socket timeout per request (slow clients are dropped)",
+        unit="s",
+        ge=1,
+        le=120,
+        conservative="lower",
+    )
+    status_poll_ms: int = param(
+        1000, "How often the page polls the enrollment status", unit="ms", ge=200, le=10000
+    )
+
+
 # --------------------------------------------------------------------------- root
 
 
@@ -1188,6 +1250,7 @@ with warnings.catch_warnings():
         safety: SafetyConfig = param({}, "SPEC 12")
         privacy: PrivacyConfig = param({}, "SPEC 12")
         connectivity: ConnectivityConfig = param({}, "SPEC 12A")
+        webui: WebUIConfig = param({}, "SPEC 6, 11A, 12")
 
         @model_validator(mode="after")
         def _unique_routes(self) -> RoboEmotConfig:

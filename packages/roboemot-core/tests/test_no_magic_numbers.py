@@ -53,6 +53,10 @@ BEHAVIOUR_MODULES = [
     "vision/stages.py",
     "vision/tracker.py",
     "vision/types.py",
+    "webui/api.py",
+    "webui/auth.py",
+    "webui/server.py",
+    "webui/validation.py",
 ]
 ALLOWED = {0, 1, -1, 2, 0.5, -1.0}
 
