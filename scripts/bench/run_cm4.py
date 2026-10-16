@@ -43,9 +43,25 @@ MODELS: dict[str, tuple[str, tuple[int, int, int, int], str]] = {
     "genderage_96": ("genderage.onnx", (1, 3, 96, 96), "age/gender"),
     "fairface_age_vit_224": ("fairface_age_vit.onnx", (1, 3, 224, 224), "age (ViT-B)"),
     "fairface_gender_vit_224": ("fairface_gender_vit.onnx", (1, 3, 224, 224), "gender (ViT-B)"),
+    "fairface_age_vit_int8_224": (
+        "fairface_age_vit_int8.onnx",
+        (1, 3, 224, 224),
+        "age (ViT-B, INT8 dynamic)",
+    ),
+    "fairface_gender_vit_int8_224": (
+        "fairface_gender_vit_int8.onnx",
+        (1, 3, 224, 224),
+        "gender (ViT-B, INT8 dynamic)",
+    ),
     "dinov2_s_224": ("dinov2_s.onnx", (1, 3, 224, 224), "individual embedding"),
     "clip_b32_224": ("clip_b32_vision.onnx", (1, 3, 224, 224), "individual embedding"),
     "mobileclip_s0_256": ("mobileclip_s0_vision.onnx", (1, 3, 256, 256), "individual embedding"),
+}
+
+# name: (model names run back to back per call, both loaded in one process: RSS and ms per crop)
+PAIRS: dict[str, tuple[str, str]] = {
+    "fairface_pair_fp32": ("fairface_age_vit_224", "fairface_gender_vit_224"),
+    "fairface_pair_int8": ("fairface_age_vit_int8_224", "fairface_gender_vit_int8_224"),
 }
 
 
@@ -60,12 +76,21 @@ def pct(xs: list[float], q: float) -> float:
     return s[min(len(s) - 1, int(round(q * (len(s) - 1))))]
 
 
-def run_single(name: str, models_dir: Path, threads: int, runs: int, warmup: int) -> dict:
-    """Time one model in this process; returns latency stats (ms) and peak RSS."""
+def run_single(
+    name: str, models_dir: Path, threads: int, runs: int, warmup: int, inter: int = 1
+) -> dict:
+    """Time one model (or a PAIRS entry, both models per call) in this process.
+
+    Returns latency stats (ms) and peak RSS.
+    """
     import numpy as np
 
-    fname, shape, note = MODELS[name]
-    path = models_dir / fname
+    parts = PAIRS.get(name, (name,))
+    fname, shape, note = MODELS[parts[0]]
+    if name in PAIRS:
+        note = "age + gender per crop, both loaded"
+    paths = [models_dir / MODELS[p][0] for p in parts]
+    path = paths[0]
     rng = np.random.default_rng(0)
     times: list[float] = []
     if name.startswith("yunet"):
@@ -82,12 +107,18 @@ def run_single(name: str, models_dir: Path, threads: int, runs: int, warmup: int
 
         so = ort.SessionOptions()
         so.intra_op_num_threads = threads
-        so.inter_op_num_threads = 1
+        so.inter_op_num_threads = inter
         so.log_severity_level = 3
-        sess = ort.InferenceSession(str(path), so, providers=["CPUExecutionProvider"])
-        inp = sess.get_inputs()[0].name
+        sessions = [
+            ort.InferenceSession(str(q), so, providers=["CPUExecutionProvider"]) for q in paths
+        ]
+        inp = sessions[0].get_inputs()[0].name
         x = rng.standard_normal(shape).astype(np.float32)
-        runner = lambda: sess.run(None, {inp: x})  # noqa: E731
+
+        def runner() -> None:
+            for s in sessions:
+                s.run(None, {inp: x})
+
         engine = f"onnxruntime {ort.__version__}"
     for _ in range(warmup):
         runner()
@@ -99,7 +130,7 @@ def run_single(name: str, models_dir: Path, threads: int, runs: int, warmup: int
         "model": name,
         "note": note,
         "file": fname,
-        "size_mb": round(path.stat().st_size / 1e6, 1),
+        "size_mb": round(sum(q.stat().st_size for q in paths) / 1e6, 1),
         "input": list(shape),
         "engine": engine,
         "threads": threads,
@@ -134,6 +165,7 @@ def main() -> int:
     ap.add_argument("--models-dir", type=Path, required=False, default=Path("models"))
     ap.add_argument("--threads", type=int, default=2)
     ap.add_argument("--runs", type=int, default=50)
+    ap.add_argument("--inter-threads", type=int, default=1, help="ORT inter_op_num_threads")
     ap.add_argument("--warmup", type=int, default=5)
     ap.add_argument("--only", default="", help="comma-separated model names")
     ap.add_argument("--json", type=Path)
@@ -143,16 +175,25 @@ def main() -> int:
     if args.single:
         print(
             json.dumps(
-                run_single(args.single, args.models_dir, args.threads, args.runs, args.warmup)
+                run_single(
+                    args.single,
+                    args.models_dir,
+                    args.threads,
+                    args.runs,
+                    args.warmup,
+                    args.inter_threads,
+                )
             )
         )
         return 0
 
-    names = [n for n in MODELS if not args.only or n in args.only.split(",")]
+    names = [n for n in [*MODELS, *PAIRS] if not args.only or n in args.only.split(",")]
     results = []
     for n in names:
-        if not (args.models_dir / MODELS[n][0]).exists():
-            print(f"skip {n}: {MODELS[n][0]} not in {args.models_dir}", file=sys.stderr)
+        files = [MODELS[p][0] for p in PAIRS.get(n, (n,))]
+        missing = [f for f in files if not (args.models_dir / f).exists()]
+        if missing:
+            print(f"skip {n}: {missing[0]} not in {args.models_dir}", file=sys.stderr)
             continue
         cmd = [sys.executable, __file__, "--single", n, "--models-dir", str(args.models_dir)]
         cmd += [
@@ -162,6 +203,8 @@ def main() -> int:
             str(args.runs),
             "--warmup",
             str(args.warmup),
+            "--inter-threads",
+            str(args.inter_threads),
         ]
         p = subprocess.run(cmd, capture_output=True, text=True)
         if p.returncode != 0:

@@ -55,6 +55,29 @@ nice -n 10 $PY -I scripts/bench/eval_wider.py       --out scripts/bench/results/
 `results/*.json` hold the numbers quoted in the spike document. `bench_lib.py` has the
 detectors, the 5-point ArcFace alignment and the embedders shared by the scripts.
 
+## INT8 FairFace (SPEC 5, 13)
+
+Dynamic INT8 quantization of the FairFace ViT-B pair, accuracy versus FP32 on a fixed seeded
+subset, and speed. Needs `onnx` for the quantizer (`.venv-bench/bin/pip install onnx`). Run one
+step at a time; `nice` and 2 threads keep a shared machine usable.
+
+```bash
+export OMP_NUM_THREADS=2
+nice -n 10 $PY -I scripts/bench/quantize.py             # -> ~/.cache/roboemot-bench/models/fairface_int8/
+for p in fp32 int8; do
+  nice -n 10 $PY -I scripts/bench/eval_fairface_int8.py --precision $p --n 1400 --seed 0 \
+      --out scripts/bench/results/fairface_int8_spike_$p.json
+done                                                    # ~10 min fp32, ~3 min int8 on an M3 Pro
+$PY -I scripts/bench/fetch.py --export-flat ./models    # also exports the INT8 files
+nice -n 10 $PY -I scripts/bench/run_cm4.py --models-dir ./models --threads 2 --inter-threads 2 \
+    --only fairface_age_vit_224,fairface_age_vit_int8_224,fairface_pair_fp32,fairface_pair_int8
+```
+
+`--n 0` evaluates all 10,954 images (about 70 min FP32). The `fairface_pair_*` entries load age
+and gender in one process and time both per call. To bench INT8 on the robot, copy the two
+`fairface_*_vit_int8.onnx` files into the `models` dir next to the FP32 ones; the commands in the
+next section pick them up automatically, or use `--only` as above and `--threads 1` / `--threads 2`.
+
 ## Latency on the robot (Raspberry Pi CM4, aarch64)
 
 `run_cm4.py` is self-contained (onnxruntime, numpy; OpenCV only for YuNet). On the Mac:
