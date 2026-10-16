@@ -368,6 +368,13 @@ class Registry:
             ]
             return rows
 
+    def rename_person(self, person_id: str, display_name: str) -> PersonRecord:
+        """Change the display name of a person; ``KeyError`` when the id is unknown."""
+        with self.lock:
+            record = replace(self._people[person_id], display_name=display_name)
+            self._commit_person(record)
+            return record
+
     def forget(self, person_id: str) -> bool:
         """Remove every embedding, field and file of a person, and everything attached to them.
 

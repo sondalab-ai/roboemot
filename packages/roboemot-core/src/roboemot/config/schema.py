@@ -445,6 +445,65 @@ class IdentityConfig(Strict):
         return self
 
 
+class EnrollmentConfig(Strict):
+    target_samples: int = param(
+        10,
+        "Face embeddings collected per enrollment session; between "
+        "identity.enroll_min_embeddings and identity.max_embeddings_per_person",
+        ge=5,
+        le=20,
+    )
+    min_score: float = param(
+        0.8, "Detector score a face needs to be used as an enrollment sample", ge=0, le=1
+    )
+    min_face_px: int = param(
+        64,
+        "Faces with a shorter box side are not used as enrollment samples",
+        unit="px",
+        ge=8,
+        le=512,
+    )
+    min_sharpness: float = param(
+        25.0,
+        "Variance of the Laplacian of the grayscale face crop (area-resized to "
+        "sharpness_size_px); blurrier faces are rejected. Not yet tuned on real camera data",
+        ge=0,
+        le=10000,
+    )
+    sharpness_size_px: int = param(
+        64, "Side of the square the face crop is resized to for the sharpness check", ge=16, le=256
+    )
+    min_gap_s: float = param(
+        0.4, "Minimum time between two samples, so they differ in pose", unit="s", ge=0, le=10
+    )
+    consistency_min: float = param(
+        0.45,
+        "Cosine similarity a new sample needs with the mean of the ones collected (the same "
+        "value as identity.match_threshold), so two people never mix in one session. Not yet "
+        "tuned on real data",
+        ge=-1,
+        le=1,
+    )
+    min_pose_spread: float = param(
+        0.2,
+        "Spread of the nose offset from the eye midline (in inter-eye distances, a yaw proxy "
+        "from the face landmarks) the samples must cover, so they show varied angles (SPEC 6); "
+        "0 turns the check off. Not yet tuned on real data",
+        ge=0,
+        le=2,
+    )
+    centre_weight: float = param(
+        0.5,
+        "How much a face far from the image centre loses when the largest face is chosen "
+        "(0: size only)",
+        ge=0,
+        le=1,
+    )
+    timeout_s: float = param(
+        120.0, "A session without completion is dropped after this time", unit="s", ge=5, le=3600
+    )
+
+
 ATTENTION_CATEGORIES = ("active_speaker", "enrolled_person", "nearest_face", "salient_motion")
 
 
@@ -557,7 +616,12 @@ class VisionRates(Strict):
     )
     objects_hz: float = param(1.0, "Object detection rate when enabled", unit="Hz", ge=0.1, le=30)
     camera_hz: float = param(
-        30.0, "Upper bound on camera reads handed to vision", unit="Hz", ge=1, le=120
+        30.0,
+        "Upper bound on camera reads handed to vision (read when the camera thread starts)",
+        unit="Hz",
+        ge=1,
+        le=120,
+        restart=True,
     )
 
 
@@ -638,10 +702,16 @@ class VisionConfig(Strict):
         0.25, "Face box padding for the age and gender crop, per side", ge=0, le=1
     )
     attribute_queue_max: int = param(
-        4, "Age and gender jobs waiting for the worker; further tracks wait", ge=1, le=64
+        4,
+        "Age and gender jobs waiting for the worker; further tracks wait",
+        ge=1,
+        le=64,
+        restart=True,
     )
     models_dir: str = param(
-        "", "Folder with the ONNX model files; empty means ~/.cache/roboemot/models", restart=True
+        "",
+        "Folder with the ONNX model files; empty means models/ in the app data folder (data_dir)",
+        restart=True,
     )
     objects_enabled: bool = param(False, "Run the object detector (off by default on cm4)")
     object_score_min: float = param(
@@ -1093,6 +1163,12 @@ with warnings.catch_warnings():
     class RoboEmotConfig(Strict):
         schema_version: int = param(1, "Configuration schema version", ge=1)
         personality: str = param("default", "Name of the personality preset in effect")
+        data_dir: str = param(
+            "",
+            "App data folder (registry, models); empty means $ROBOEMOT_DATA_DIR or "
+            "~/.local/share/roboemot (SPEC 12 Data)",
+            restart=True,
+        )
         affect: AffectConfig = param({}, "SPEC 7")
         appraisal: AppraisalConfig = param({}, "SPEC 7")
         register: RegisterConfig = param({}, "SPEC 7")
@@ -1101,6 +1177,7 @@ with warnings.catch_warnings():
         motion: MotionConfig = param({}, "SPEC 10")
         attention: AttentionConfig = param({}, "SPEC 4A, 5")
         identity: IdentityConfig = param({}, "SPEC 5, 6")
+        enrollment: EnrollmentConfig = param({}, "SPEC 6")
         vision: VisionConfig = param({}, "SPEC 5, 13")
         world: WorldConfig = param({}, "SPEC 5A")
         mirror: MirrorConfig = param({}, "SPEC 9")
@@ -1118,6 +1195,16 @@ with warnings.catch_warnings():
             dupes = sorted({n for n in names if names.count(n) > 1})
             if dupes:
                 raise ValueError(f"duplicate llm route names: {dupes}")
+            return self
+
+        @model_validator(mode="after")
+        def _enrollment_fits_identity(self) -> RoboEmotConfig:
+            n, ident = self.enrollment.target_samples, self.identity
+            if not ident.enroll_min_embeddings <= n <= ident.max_embeddings_per_person:
+                raise ValueError(
+                    "enrollment.target_samples must be within identity.enroll_min_embeddings "
+                    "and max_embeddings_per_person"
+                )
             return self
 
         @model_validator(mode="after")

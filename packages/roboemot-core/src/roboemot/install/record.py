@@ -5,7 +5,9 @@ full snapshot: other apps may have installed packages since. The record keeps on
 installer changed: distributions it ``added`` and the original versions of those it
 ``replaced``, merged over every reinstall without ever overwriting an original. It is written
 before pip runs (``pending_before``) and completed after, so an interrupted install still
-leaves enough to undo it.
+leaves enough to undo it. The app data folder (``roboemot.paths``: registry, models) is recorded
+the same way, with the parents the installer had to create, but only when it did not exist
+before the install: a folder that was already there is not the installer's to remove.
 """
 
 from __future__ import annotations
@@ -45,6 +47,8 @@ class InstallRecord:
     autostart_before: str | None = None
     autostart_recorded: bool = False
     pending_before: Versions | None = None  # set while pip runs
+    data_dir: str | None = None  # app data folder this installer created (absolute path)
+    data_dir_parents: list[str] = field(default_factory=list)  # parents it had to create too
     version: int = RECORD_VERSION
 
     def to_json(self) -> dict[str, Any]:
