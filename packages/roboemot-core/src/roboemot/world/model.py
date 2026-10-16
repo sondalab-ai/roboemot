@@ -182,17 +182,25 @@ class WorldModel:
         if not near:
             return ObserveResult(None, unexplained_bearing=(az, el))
         entry = min(near, key=lambda e: self._angle(e, az, el))
-        self._gain(entry, obs)
+        self._gain(entry, obs, bearing_only=True)
         return ObserveResult(entry.public())
 
-    def _gain(self, entry: Entry, obs: Observation) -> None:
-        """Decay the gap up to the observation, then raise confidence; entry is now in view."""
+    def _gain(self, entry: Entry, obs: Observation, *, bearing_only: bool = False) -> None:
+        """Decay the gap up to the observation, then raise confidence; entry is now in view.
+
+        A bearing-only observation (sound, possibly mirrored front/back) gains only
+        ``bearing_only_gain_factor`` of the usual and neither refreshes ``last_seen`` nor marks
+        the entry in view, so a sound cannot keep an entry nobody sees alive.
+        """
         self._decay(entry, obs.stamp)
         gain = self.cfg.confidence_gain * obs.confidence
+        if bearing_only:
+            gain *= self.cfg.bearing_only_gain_factor
         entry.confidence += gain * (1.0 - entry.confidence)
-        entry.last_seen = max(entry.last_seen, obs.stamp)
         entry.sources.add(obs.source)
-        self._in_view[entry.entry_id] = True
+        if not bearing_only:
+            entry.last_seen = max(entry.last_seen, obs.stamp)
+            self._in_view[entry.entry_id] = True
 
     def _create(self, obs: Observation, az: float, el: float, events: list[Event]) -> Entry | None:
         confidence = self.cfg.initial_confidence * obs.confidence

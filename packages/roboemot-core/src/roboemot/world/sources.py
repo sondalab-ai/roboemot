@@ -86,11 +86,15 @@ class WorldPlugin:
     sources: list[WorldSource] = field(default_factory=list)
 
 
-WorldFactory = Callable[[Manifest, RoboEmotConfig, Any], WorldPlugin]
+JointStateFn = Callable[[], Mapping[str, float]]
+WorldFactory = Callable[[Manifest, RoboEmotConfig, Any, JointStateFn], WorldPlugin]
 
 
-def load_world_plugin(manifest: Manifest, cfg: RoboEmotConfig, robot: Any) -> WorldPlugin:
-    """The plugin registered for ``manifest.robot.id``, built with the robot handle.
+def load_world_plugin(
+    manifest: Manifest, cfg: RoboEmotConfig, robot: Any, joint_state: JointStateFn
+) -> WorldPlugin:
+    """The plugin registered for ``manifest.robot.id``, built with the robot handle and the
+    app's measured-joint-state provider (plugins never open a second driver).
 
     A missing or broken plugin is logged (type and message only) and yields an empty plugin:
     the robot then has no scanning and no extra sources, and the app keeps running.
@@ -99,7 +103,7 @@ def load_world_plugin(manifest: Manifest, cfg: RoboEmotConfig, robot: Any) -> Wo
     for ep in entry_points(group=ENTRY_POINT_GROUP):
         if ep.name == robot_id:
             try:
-                return ep.load()(manifest, cfg, robot)  # type: ignore[no-any-return]
+                return ep.load()(manifest, cfg, robot, joint_state)  # type: ignore[no-any-return]
             except Exception as exc:
                 log.warning("world plugin %s: %s: %s", robot_id, type(exc).__name__, exc)
                 return WorldPlugin()

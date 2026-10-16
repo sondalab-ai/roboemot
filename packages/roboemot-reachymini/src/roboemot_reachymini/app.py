@@ -25,8 +25,7 @@ from roboemot.affect import AffectEngine
 from roboemot.attention import SOURCE as ATTENTION_SOURCE
 from roboemot.attention import AttentionSelector, GazeController
 from roboemot.bus import Bus
-from roboemot.circadian import CircadianModel
-from roboemot.circadian.model import in_window
+from roboemot.circadian import CircadianModel, in_window
 from roboemot.config import ConfigStack
 from roboemot.diagnostics import Diagnostics, FnSource, Target, platform_sources
 from roboemot.diagnostics.system import local_sources
@@ -124,22 +123,22 @@ def scan_context(
     cfg: Any,
     selector: AttentionSelector,
     *,
-    attending: bool,
     hour: float,
+    effects: Any = None,
     circadian: CircadianModel | None = None,
     minor_present: bool = False,
 ) -> ScanContext:
     """What the scan policy needs this tick: engagement from attention, the circadian state and
-    quiet hours (SPEC 7A) from the local ``hour``, the persona's energy effects and the minor
-    factor (SPEC 12)."""
+    quiet hours (SPEC 7A) from the local ``hour``, the persona's energy effects (``effects``,
+    computed from the persona when the caller has not cached them) and the minor factor
+    (SPEC 12)."""
     quiet = cfg.circadian.enabled and in_window(hour, cfg.circadian.quiet_hours)
     return ScanContext(
         now=now,
         engaged=selector.engaged,
-        attending=attending,
         circadian=circadian.state if circadian else "awake",
         quiet_hours=quiet,
-        effects=persona_effects(cfg.persona),
+        effects=effects if effects is not None else persona_effects(cfg.persona),
         minor_factor=cfg.safety.minor_motion_factor if minor_present else 1.0,
     )
 
@@ -147,8 +146,10 @@ def scan_context(
 def scan_tick(ctx: ScanContext, scan: ScanController, loop: MotionLoop, cfg: Any) -> bool:
     """One scan step, run right after ``attention_tick``: feed the sweep command or release it.
 
-    The policy cancels a sweep the tick attention engages with a person, and this clears the
-    ``scan`` source in the same tick, so attention wins within one tick (SPEC 10). Returns
+    The policy cancels a sweep the tick attention engages with a person or a speaker, and this
+    clears the ``scan`` source in the same tick, so that attention wins within one tick (SPEC
+    10). Attention on an animal or object does not stop scans: while a sweep runs, its command
+    is dropped here (it is also idle tier), so the sweep wins deterministically. Returns
     whether a sweep or glance is in progress. A failure is logged (type and message only), the
     sweep is dropped and idle motion carries on; the app keeps running.
     """
@@ -157,6 +158,8 @@ def scan_tick(ctx: ScanContext, scan: ScanController, loop: MotionLoop, cfg: Any
         fov = math.radians(cfg.world.camera_fov_h_deg)
         cmd = scan.tick(ctx, loop.pose(), fov)
         if cmd is not None:
+            if not ctx.engaged:
+                loop.clear(ATTENTION_SOURCE)
             loop.feed(cmd)
         elif was_active:
             loop.clear(SCAN_SOURCE)
@@ -220,7 +223,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             manifest.constraints,
             margin_rad=math.radians(cfg.safety.constraint_margin_deg),
         )
-        plugin = load_world_plugin(manifest, cfg, reachy_mini)
+        plugin = load_world_plugin(manifest, cfg, reachy_mini, loop.driver.read_state)
         scan = (
             ScanController(cfg.world.scan, plugin.planner, manifest.dofs)
             if plugin.planner is not None
@@ -271,9 +274,10 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         stop_watch = stack.start_watcher()
         loop.start()
         network.start()
-        for source in plugin.sources:
-            source.start(publish)
+        fx_for, fx = None, None
         try:
+            for source in plugin.sources:
+                source.start(publish)
             while not stop_event.is_set():
                 now = time.monotonic()
                 attending = attention_tick(now, world, selector, gaze, loop)
@@ -281,11 +285,13 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 if scan is not None:
                     local = datetime.now()
                     hour = local.hour + local.minute / MINUTES_PER_HOUR
+                    if live.persona is not fx_for:  # recompute only after a reload
+                        fx_for, fx = live.persona, persona_effects(live.persona)
                     ctx = scan_context(
                         now,
                         live,
                         selector,
-                        attending=attending,
+                        effects=fx,
                         hour=hour,
                         circadian=self.circadian,
                         minor_present=self.minor_present,

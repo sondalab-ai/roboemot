@@ -172,7 +172,100 @@ def test_doa_source_ignores_silence_missing_array_and_failures(caplog):
         [(1.0, False), None, RuntimeError("usb"), RuntimeError("usb"), (1.0, True)]
     )
     assert [src.poll_once(sink) for _ in range(5)] == [False, False, False, False, True]
-    assert caplog.text.count("doa: RuntimeError: usb") == 1  # logged once, not per poll
+    assert caplog.text.count("doa: read: RuntimeError: usb") == 1  # logged once, not per poll
+
+
+def test_doa_error_log_resets_after_a_good_read(caplog):
+    src, got, sink = doa_source([RuntimeError("usb"), (1.0, False), RuntimeError("usb")])
+    for _ in range(3):
+        src.poll_once(sink)
+    assert caplog.text.count("doa: read: RuntimeError: usb") == 2
+
+
+def test_a_raising_subscriber_is_logged_and_the_thread_survives(caplog):
+    mini = MagicMock()
+    mini.media.get_DoA.return_value = (math.pi / 2, True)
+    cfg = CFG.world.scan.model_copy(update={"doa_poll_hz": 50.0})
+    src = DoASource(mini, cfg, lambda: {})
+    calls = []
+
+    def sink(o, js):
+        calls.append(o)
+        raise RuntimeError("subscriber boom")
+
+    src.start(sink)
+    for _ in range(300):
+        if len(calls) >= 3:
+            break
+        src._stop.wait(0.01)
+    alive = src._thread.is_alive()
+    src.stop()
+    assert alive and len(calls) >= 3
+    assert caplog.text.count("doa: subscriber: RuntimeError: subscriber boom") == 1
+
+
+def test_start_twice_runs_one_thread():
+    mini = MagicMock()
+    mini.media.get_DoA.return_value = None
+    src = DoASource(mini, CFG.world.scan, lambda: {})
+    src.start(lambda o, js: None)
+    first = src._thread
+    src.start(lambda o, js: None)
+    assert src._thread is first
+    src.stop()
+    assert src._thread is None
+
+
+def test_stop_keeps_the_handle_while_the_thread_is_stuck_in_the_sdk(monkeypatch):
+    import threading
+
+    from roboemot_reachymini import world as world_module
+
+    monkeypatch.setattr(world_module, "JOIN_TIMEOUT_S", 0.05)
+    release, entered = threading.Event(), threading.Event()
+    mini = MagicMock()
+
+    def blocked():
+        entered.set()
+        release.wait(5)
+
+    mini.media.get_DoA.side_effect = blocked
+    src = DoASource(mini, CFG.world.scan, lambda: {})
+    src.start(lambda o, js: None)
+    assert entered.wait(2)
+    src.stop()
+    stuck = src._thread
+    assert stuck is not None and stuck.is_alive()
+    src.start(lambda o, js: None)  # no second thread beside the stuck one
+    assert src._thread is stuck
+    release.set()
+    src._stop.set()
+    stuck.join(2)
+
+
+def test_mute_ignores_the_microphones_until_the_stamp_passes():
+    now = [10.0]
+    mini = FakeMini([(1.0, True), (1.0, True)])
+    src = DoASource(mini, CFG.world.scan, lambda: {}, lambda: now[0])
+    got = []
+    src.mute(12.0)
+    assert not src.poll_once(lambda o, js: got.append(o))
+    now[0] = 12.5
+    assert src.poll_once(lambda o, js: got.append(o)) and len(got) == 1
+
+
+def test_doa_confirms_an_existing_entry_without_creating_one():
+    from roboemot.bus import Bus
+
+    bus = Bus()
+    world = WorldModel(CFG.world, FRAME, bus)
+    feed_world(bus, world)
+    world.observe(Observation("object", 0.0, "t", 0.0, 0.0, "cup"))
+    (before,) = world.entries
+    src, _, _ = doa_source([(math.pi / 2, True)], state={"head.yaw": 0.0}, stamp=1.0)
+    src.poll_once(lambda o, js: bus.publish("percept.entity", o, o.stamp, joint_state=js))
+    (after,) = world.entries
+    assert after.confidence > before.confidence and "doa" in after.sources
 
 
 def test_doa_source_skips_without_a_joint_state():
@@ -223,17 +316,22 @@ def test_world_entry_point_is_registered_for_the_manifest_id():
 
 
 def test_load_world_plugin_builds_planner_and_sound_source():
-    loaded = load_world_plugin(MANIFEST, CFG, MagicMock())
+    robot = MagicMock()
+    loaded = load_world_plugin(MANIFEST, CFG, robot, dict)
     assert isinstance(loaded.planner, ReachyScanPlanner)
     assert [s.name for s in loaded.sources] == ["doa"]
+    robot.set_automatic_body_yaw.assert_not_called()  # no second driver is built
 
 
 # ---- app wiring
 
 
-def rig(*, scan_cfg: dict | None = None):
+def rig(*, scan_cfg: dict | None = None, attention: dict | None = None):
     cfg = RoboEmotConfig.model_validate(
-        {"world": {"scan": {"idle_interval_s": 20.0, "jitter_s": 5.0, **(scan_cfg or {})}}}
+        {
+            "world": {"scan": {"idle_interval_s": 20.0, "jitter_s": 5.0, **(scan_cfg or {})}},
+            "attention": attention or {},
+        }
     )
     driver = MockPoseDriver(home=dict(HOME))
     clock = [0.0]
@@ -250,7 +348,7 @@ def run_tick(cfg, loop, clock, world, selector, gaze, scan, *, engaged_hint=None
     """One app cycle: attention first, then scan, then a motion tick (as in ``run``)."""
     now = clock[0]
     attending = app_module.attention_tick(now, world, selector, gaze, loop)
-    ctx = app_module.scan_context(now, cfg, selector, attending=attending, hour=12.0)
+    ctx = app_module.scan_context(now, cfg, selector, hour=12.0)
     scanning = app_module.scan_tick(ctx, scan, loop, cfg)
     loop.cycle(now, 0.02)
     clock[0] += 0.02
@@ -267,6 +365,8 @@ def test_idle_robot_sweeps_the_whole_circle_and_returns_to_idle():
         if scanned and not scanning:
             break
     assert scanned and not scan.active
+    pose = loop.pose()
+    assert abs(pose[GAZE.head_yaw]) < 0.15 and abs(pose[GAZE.body_yaw]) < 0.15  # glided home
     assert max(seen_yaw) - min(seen_yaw) > 5.0  # the full circle, not a front arc
     assert max(abs(y) for y in seen_yaw) > 3.0  # and it looked straight behind
     assert SCAN not in {c.source for c in loop.core.arbiter.active(clock[0])}
@@ -309,11 +409,75 @@ def test_scan_tick_failure_is_logged_and_falls_back_to_idle(caplog):
     assert SCAN not in {c.source for c in loop.core.arbiter.active(clock[0])}
 
 
-def test_quiet_hours_stop_scanning_in_the_app_context():
+@pytest.mark.parametrize(
+    ("hour", "quiet"),
+    [(2.0, True), (6 + 59 / 60, True), (7.0, False), (22 + 29 / 60, False), (22.5, True)],
+)
+def test_quiet_hours_boundaries_in_the_app_context(hour, quiet):
     cfg, loop, driver, clock, world, selector, gaze, scan = rig()
-    ctx = app_module.scan_context(0.0, cfg, selector, attending=False, hour=23.0)
-    assert ctx.quiet_hours and ctx.asleep
-    assert not app_module.scan_context(0.0, cfg, selector, attending=False, hour=12.0).quiet_hours
+    ctx = app_module.scan_context(0.0, cfg, selector, hour=hour)
+    assert ctx.quiet_hours is quiet and ctx.asleep is quiet
+
+
+def test_quiet_hours_do_not_apply_when_the_circadian_model_is_disabled():
+    cfg = RoboEmotConfig.model_validate({"circadian": {"enabled": False}})
+    selector = AttentionSelector(cfg.attention)
+    assert not app_module.scan_context(0.0, cfg, selector, hour=2.0).quiet_hours
+
+
+def test_resting_circadian_state_stops_scanning_in_the_app_context():
+    from roboemot.circadian import CircadianModel
+
+    cfg, loop, driver, clock, world, selector, gaze, scan = rig()
+    model = CircadianModel(cfg.circadian)
+    model.state = "resting"
+    ctx = app_module.scan_context(0.0, cfg, selector, hour=12.0, circadian=model)
+    assert ctx.asleep
+
+
+def test_object_attention_does_not_stop_scans_and_the_sweep_hides_it():
+    """SPEC 5A: only a person or speaker engages; a long-held, moving object target must not
+    suppress scanning. While the sweep runs its command is the only idle-tier head command."""
+    cfg, loop, driver, clock, world, selector, gaze, scan = rig(attention={"motion_min_dps": 0.1})
+    scanned, attention_hidden, attended_before = False, True, False
+    for _ in range(int(90 / 0.02)):
+        now = clock[0]
+        world.observe(Observation("object", now, "t", math.radians(10 + 3 * now % 40), 0.0, "cup"))
+        attending, scanning = run_tick(cfg, loop, clock, world, selector, gaze, scan)
+        sources = {c.source for c in loop.core.arbiter.active(clock[0])}
+        if scanning:
+            scanned = True
+            attention_hidden &= ATTENTION not in sources
+        elif not scanned:
+            attended_before |= attending
+        if scanned and not scanning:
+            break
+    assert attended_before  # the object really was the attention target before the sweep
+    assert scanned and attention_hidden
+    assert not selector.engaged
+
+
+def test_an_interrupted_sweep_resumes_fresh_after_a_full_interval():
+    cfg, loop, driver, clock, world, selector, gaze, scan = rig()
+    while not scan.active and clock[0] < 60:
+        run_tick(cfg, loop, clock, world, selector, gaze, scan)
+    for _ in range(50):
+        run_tick(cfg, loop, clock, world, selector, gaze, scan)
+    interrupted_at = clock[0]
+    world.observe(Observation("person", clock[0], "t", 0.3, 0.0, "face"))
+    for _ in range(int(8 / 0.02)):  # the person stays: attention holds, nothing sweeps
+        world.observe(Observation("person", clock[0], "t", 0.3, 0.0, "face"))
+        _, scanning = run_tick(cfg, loop, clock, world, selector, gaze, scan)
+        assert not scanning
+    left_at = clock[0]
+    started = None
+    for _ in range(int(120 / 0.02)):
+        _, scanning = run_tick(cfg, loop, clock, world, selector, gaze, scan)
+        if scanning:
+            started = clock[0]
+            break
+    assert started is not None and started - left_at >= 20.0 - 5.0 - 5.0  # interval - jitter
+    assert started > interrupted_at
 
 
 def test_angular_helper_sanity():

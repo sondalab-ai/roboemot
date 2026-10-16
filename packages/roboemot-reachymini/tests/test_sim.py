@@ -249,14 +249,19 @@ def test_full_sweep_keeps_the_world_map_correct(loop):
             s_az, s_el = from_base_frame(az, 0.0, state, FRAME)
             if abs(s_az) <= half_fov and abs(s_el) <= half_fov_v:
                 world.observe(Observation("object", now, "sim-detector", s_az, s_el, "cup"), state)
-        attending = attention_tick(now, world, selector, gaze, loop)
-        ctx = scan_context(now, cfg, selector, attending=attending, hour=12.0)
+        attention_tick(now, world, selector, gaze, loop)
+        ctx = scan_context(now, cfg, selector, hour=12.0)
         scanning = scan_tick(ctx, scan, loop, cfg)
         if scanned and not scanning:
             break
         scanned |= scanning
         time.sleep(0.05)
     assert scanned and not scan.active, "the sweep did not finish in time"
+    for _ in range(40):  # let the pose settle after the glide home
+        time.sleep(0.1)
+    state = loop.driver.read_state()
+    assert abs(state["head.yaw"]) < math.radians(8), state
+    assert abs(state["body_yaw"]) < math.radians(8), state
 
     objects = [e for e in world.entries if e.kind == "object"]
     assert len(objects) == len(planted), objects  # found both, no duplicates

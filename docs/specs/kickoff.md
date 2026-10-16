@@ -357,7 +357,8 @@ Positions are egocentric: bearing and distance from the robot's base, so a robot
 - Sweeps are motion requests at idle priority through the arbiter (section 10): attention, reflexes and safety always win. Pace and amplitude scale with the persona's energy trait (section 11A, Persona).
 - On Reachy Mini, body yaw (±160°) plus the head-to-body offset (up to 65°) and the 78° camera cover the whole room; sound direction covers the front half-plane without moving (the SDK reports one half-plane, so a sound behind is mirrored in front: a glance toward it is a guess the next sweep corrects).
 - Sweeps and glances move head and body yaw only; head pitch stays with idle breathing. Pace scales with the energy trait's `idle_period_x`, amplitude (share of the full circle) with `motion_amplitude_x`, never below `world.scan.min_amplitude`; a present minor only slows the pace, since the arbiter already scales amplitude and speed (section 12).
-- While attention owns the head for any target, no sweep runs; a person target or a speaker hint also restarts the idle clock. A glance toward a sound while engaged is allowed once per engagement, at most every `world.scan.glance_cooldown_s`.
+- Only a person target or a speaker hint (engaged) cancels a sweep, drops a pending wake-up sweep and holds the idle clock; an object or animal target never suppresses scanning. A sweep ends with a glide home at scan pace. A glance toward a sound while engaged is allowed once per engagement, at most every `world.scan.glance_cooldown_s`, and is the one scan motion above idle priority (expression, for `glance_hold_s`). Today only sound feeds unexplained bearings; vision detections that match nothing create entries instead.
+- A bearing-only observation gains `world.bearing_only_gain_factor` of the normal confidence and neither refreshes `last_seen` nor marks the entry in view, so a mirrored rear sound cannot keep an unseen entry alive.
 
 ### Known individuals and auto-enrollment
 
@@ -656,7 +657,7 @@ The motor layer moves the robot on command and also on its own: every motion req
 | 2 | Commanded | App call or LLM skill: `nod`, `look_at(person)`, `play("wave")` | Runs to completion unless pre-empted |
 | 3 | Mimicry | Mirror live mode | Continuous stream while enabled |
 | 4 | Expression | Affect-driven motion from the expression map | Layered additively on top of 2 and 3 where joints are free |
-| 5 (lowest) | Idle | Breathing, small gaze shifts, attention tracking, scan sweeps | Always running when nothing else claims the joint. Attention beats a sweep (both are idle tier): the app feeds the `scan` source only while attention is inactive and clears it the tick attention engages; the one exception is a single glance toward a sound while engaged, fed at expression priority for `world.scan.glance_hold_s` |
+| 5 (lowest) | Idle | Breathing, small gaze shifts, attention tracking, scan sweeps | Always running when nothing else claims the joint. Both are idle tier, so the app orders them: a person target or speaker hint (engaged) cancels a sweep and clears the `scan` source the same tick; attention on an animal or object does not stop scans, and its command is dropped while a sweep runs. The one exception is a single glance toward a sound while engaged, fed at expression priority (above idle) for `world.scan.glance_hold_s` |
 
 Arbitration is per joint: a commanded nod claims the neck but leaves the LEDs and other joints to expression and idle. Switching sources cross-fades over 150 ms unless the source is safety.
 
@@ -789,7 +790,7 @@ The effective configuration is the merge of six layers; a later layer overrides 
 | `reflexes` | rules: trigger, threshold, primitive, amplitude, cooldown | Section 10 |
 | `attention` | priority order, switch hysteresis, head-tracking weight policy | Sections 4A, 5 |
 | `identity` | match threshold, margin, votes, estimate confidence threshold, online refresh cap | Sections 5, 6 |
-| `world` | match gate and range gate, tie tolerance, half-life per kind, out-of-view decay factor, forget confidence, moved threshold, initial confidence, confidence gain, position blend, initial and minimum uncertainty; scan interval and jitter, waypoint dwell, overlap and speed, minimum amplitude, glance hold, cooldown and age, sound-direction rate and confidence (`world.scan.*`); auto-enrollment days and spread; history retention | Section 5A |
+| `world` | match gate and range gate, tie tolerance, half-life per kind, out-of-view decay factor, forget confidence, moved threshold, initial confidence, confidence gain, position blend, initial and minimum uncertainty; bearing-only gain factor; scan interval and jitter, waypoint dwell, overlap and speed, minimum amplitude, glance hold, cooldown and age, sound-direction rate and confidence (`world.scan.*`); auto-enrollment days and spread; history retention | Section 5A |
 | `mirror` | retargeting, filter parameters, keypoint confidence floor, hold and decay, mirror image, recording length | Section 9 |
 | `voice` | TTS backend and fallback, voice per language, base rate, pitch, volume and variability, expressivity, mood source, per-mood prosody deltas, instructions and sounds, limits; wake word and its policy, barge-in sensitivity, active ASR language | Section 8 |
 | `persona` | identity prompt and its length cap, traits (warmth, energy, playfulness, formality), trait source (manual or LLM), trait-to-parameter tables | Section 11A |

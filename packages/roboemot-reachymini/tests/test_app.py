@@ -203,3 +203,39 @@ def test_breathing_rides_on_attention_as_an_additive_layer():
 
     app_module.feed_idle(loop, cfg, t, False)  # attention released: plain idle again
     assert "idle-additive" not in {c.source for c in loop.core.arbiter.active(t)}
+
+
+def test_a_failing_source_start_does_not_leak_the_loop_or_network(tmp_path, monkeypatch):
+    """The sources start inside the try block, so the loop and network monitor still stop."""
+    from roboemot.world import WorldPlugin
+
+    class Boom:
+        name = "boom"
+        stopped = False
+
+        def start(self, sink):
+            raise RuntimeError("no sensor")
+
+        def stop(self):
+            Boom.stopped = True
+
+    data = tmp_path / "data"
+    shutil.copytree(app_module.DATA, data)
+    shutil.copy2(ROOT / "configs/dev-unmeasured.yaml", data / "app.yaml")
+    monkeypatch.setattr(app_module, "DATA", data)
+    monkeypatch.setattr(
+        app_module, "load_world_plugin", lambda *a, **k: WorldPlugin(None, [Boom()])
+    )
+    threads = []
+    real_start = app_module.MotionLoop.start
+
+    def tracking_start(self):
+        real_start(self)
+        threads.append(self)
+
+    monkeypatch.setattr(app_module.MotionLoop, "start", tracking_start)
+    app = app_module.RoboEmotApp.__new__(app_module.RoboEmotApp)
+    with pytest.raises(RuntimeError, match="no sensor"):
+        app.run(fake_mini(), threading.Event())
+    assert Boom.stopped
+    assert not threads[0]._thread.is_alive()

@@ -31,6 +31,7 @@ log = logging.getLogger(__name__)
 SCAN_DOFS = (GAZE.head_yaw, GAZE.body_yaw)
 FULL_CIRCLE_EPS = 1e-6
 SOUND_SOURCE = "doa"
+JOIN_TIMEOUT_S = 2.0
 
 
 def doa_azimuth(angle_rad: float) -> float:
@@ -72,7 +73,9 @@ class ReachyScanPlanner:
         crosses the rear seam in one move.
         """
         span = 2 * math.pi * min(1.0, max(0.0, amplitude))
-        step = max(fov_h_rad - math.radians(self.scan.overlap_deg), fov_h_rad / 2)
+        step = max(
+            fov_h_rad - math.radians(self.scan.overlap_deg), fov_h_rad * self.scan.min_step_ratio
+        )
         count = max(1, math.ceil(span / step)) + 1
         azimuths = [-span / 2 + k * span / (count - 1) for k in range(count)]
         if span >= 2 * math.pi - FULL_CIRCLE_EPS:
@@ -127,7 +130,9 @@ class DoASource:
     Polls ``mini.media.get_DoA()`` in a thread at ``world.scan.doa_poll_hz`` and reports a
     reading only while speech is detected. The joint state comes from ``joint_state`` (the
     measured pose); without one the reading is skipped, since it could not be rotated into the
-    base frame. Sources never create entries: they confirm one or trigger a glance.
+    base frame. Sources never create entries: they confirm one or trigger a glance. Nothing
+    that fails inside a poll (the SDK, the joint state, a raising subscriber) ends the thread.
+    ``mute`` is the hook for the robot's own speech (the voice pipeline calls it in M3).
     """
 
     name = SOUND_SOURCE
@@ -142,28 +147,45 @@ class DoASource:
         self._mini, self.cfg, self._joint_state, self._clock = mini, cfg, joint_state, clock
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self._last_error: str | None = None
+        self._errors: dict[str, str] = {}
+        self._muted_until = -math.inf
+
+    def mute(self, until_stamp: float) -> None:
+        """Ignore the microphones until the clock passes ``until_stamp`` (own speech playing)."""
+        self._muted_until = until_stamp
+
+    def _note_error(self, exc: Exception, what: str) -> None:
+        """Log a failure of stage ``what`` once per distinct message until the stage works."""
+        msg = f"{what}: {type(exc).__name__}: {exc}"
+        if self._errors.get(what) != msg:
+            log.warning("doa: %s", msg)
+            self._errors[what] = msg
 
     def poll_once(self, sink: ObservationSink) -> bool:
         """Read once; hand a speech direction to ``sink``. Returns whether one was sent.
 
-        A failing read or joint-state call is logged once per distinct message, not per poll.
+        A failure of a stage (read, joint state or sink) is logged once per distinct message,
+        not per poll; it is logged again after that stage has worked once.
         """
+        if self._clock() < self._muted_until:
+            return False
         try:
             reading = self._mini.media.get_DoA()
-            if reading is None:
-                return False
-            angle, speech = reading
-            if not speech:
-                return False
+        except Exception as exc:
+            self._note_error(exc, "read")
+            return False
+        self._errors.pop("read", None)
+        if reading is None:
+            return False
+        angle, speech = reading
+        if not speech:
+            return False
+        try:
             state = dict(self._joint_state())
         except Exception as exc:
-            msg = f"{type(exc).__name__}: {exc}"
-            if msg != self._last_error:
-                log.warning("doa: %s", msg)
-                self._last_error = msg
+            self._note_error(exc, "joint state")
             return False
-        self._last_error = None
+        self._errors.pop("joint state", None)
         obs = Observation(
             "unknown",
             self._clock(),
@@ -172,11 +194,18 @@ class DoASource:
             0.0,
             confidence=self.cfg.doa_confidence,
         )
-        sink(obs, state)
+        try:
+            sink(obs, state)
+        except Exception as exc:
+            self._note_error(exc, "subscriber")
+            return False
+        self._errors.pop("subscriber", None)
         return True
 
     def start(self, sink: ObservationSink) -> None:
-        """Poll in a daemon thread until ``stop``."""
+        """Poll in a daemon thread until ``stop``; a second start while running is a no-op."""
+        if self._thread is not None and self._thread.is_alive():
+            return
         self._stop.clear()
         self._thread = threading.Thread(
             target=self._run, args=(sink,), name="roboemot-doa", daemon=True
@@ -184,28 +213,38 @@ class DoASource:
         self._thread.start()
 
     def stop(self) -> None:
-        """Stop polling and wait for the thread."""
+        """Stop polling and wait briefly. A thread stuck in the SDK keeps its handle, so a later
+        ``start`` does not run a second one beside it."""
         self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=2)
-            self._thread = None
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=JOIN_TIMEOUT_S)
+            if not thread.is_alive():
+                self._thread = None
 
     def _run(self, sink: ObservationSink) -> None:
         while not self._stop.is_set():
-            self.poll_once(sink)
+            try:
+                self.poll_once(sink)
+            except Exception as exc:  # never end the thread
+                self._note_error(exc, "poll")
             self._stop.wait(1.0 / self.cfg.doa_poll_hz)
 
 
-def plugin(manifest: Manifest, cfg: RoboEmotConfig, robot: Any) -> WorldPlugin:
+def plugin(
+    manifest: Manifest,
+    cfg: RoboEmotConfig,
+    robot: Any,
+    joint_state: Callable[[], Mapping[str, float]],
+) -> WorldPlugin:
     """Entry point ``roboemot.world``: the Reachy Mini planner and sound-direction source.
 
-    ``robot`` is the connected ``ReachyMini``; the joint state for the sound source is read
-    from a driver on it. Without a microphone capability no sound source is offered.
+    ``robot`` is the connected ``ReachyMini``; ``joint_state`` is the app driver's measured
+    state (no second driver is built here). Without a microphone capability no sound source
+    is offered.
     """
-    from .driver import ReachyMiniDriver
-
     planner = ReachyScanPlanner(manifest.dofs, manifest.constraints, cfg)
     sources: list[Any] = []
     if "doa" in manifest.capabilities():
-        sources.append(DoASource(robot, cfg.world.scan, ReachyMiniDriver(robot).read_state))
+        sources.append(DoASource(robot, cfg.world.scan, joint_state))
     return WorldPlugin(planner, sources)

@@ -688,6 +688,12 @@ class WorldScanConfig(Strict):
     waypoint_timeout_s: float = param(
         10.0, "Give up on a waypoint the pose does not reach in this time", unit="s", ge=1, le=120
     )
+    min_step_ratio: float = param(
+        0.5,
+        "Smallest waypoint spacing as a share of the camera's field of view",
+        ge=0.1,
+        le=1,
+    )
     command_ttl_s: float = param(
         0.25, "Lifetime of a scan command if it is not renewed", unit="s", ge=0.05, le=2
     )
@@ -756,6 +762,13 @@ class WorldConfig(Strict):
     )
     min_uncertainty_deg: float = param(
         2.0, "Floor of an entry's angular uncertainty", unit="deg", ge=0, le=90
+    )
+    bearing_only_gain_factor: float = param(
+        0.3,
+        "Share of the confidence gain a bearing-only observation (sound) gets; it does not "
+        "mark an entry in view",
+        ge=0,
+        le=1,
     )
     scan: WorldScanConfig = param({}, "Looking around (SPEC 5A, Scanning)")
 

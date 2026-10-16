@@ -7,11 +7,12 @@
   in, so a replay with the same seed gives the same decisions.
 - ``SweepRunner`` walks the planner's waypoints with a rate-limited target, waits for the
   measured pose to arrive, dwells, and moves on.
-- ``ScanController`` ties both to a ``ScanPlanner``. Its command is fed by the app only while
-  attention is not active: attention wins by construction (SPEC 10, Idle row). A sweep is
-  cancelled the tick a person (or a speaker hint) engages the robot. An engaged glance is the
-  one exception: it is fed at expression priority for ``glance_hold_s`` so it can show over
-  the idle-tier attention command.
+- ``ScanController`` ties both to a ``ScanPlanner``. A sweep ends with a waypoint at home, at
+  scan pace. It is cancelled the tick a person (or a speaker hint) engages the robot, and
+  the idle clock only runs while nobody is engaged (SPEC 5A). Attention on an animal or object
+  does not stop scans; the app hides that attention command while a sweep runs (SPEC 10).
+  An engaged glance is the one exception: it is fed at expression priority for
+  ``glance_hold_s`` so it can show over the idle-tier attention command.
 
 Pace and amplitude come from the persona's energy effects (``idle_period_x``,
 ``motion_amplitude_x``); a present minor only slows the pace, because the arbiter already scales
@@ -35,6 +36,7 @@ from ..persona import PersonaEffects
 from .sources import ScanPlanner, ScanWaypoint
 
 SOURCE = "scan"
+SLEW_EPS = 1e-9
 Reason = Literal["idle", "wakeup", "unexplained"]
 
 
@@ -44,7 +46,6 @@ class ScanContext:
 
     now: float
     engaged: bool  # attention has a person target or a speaker hint
-    attending: bool = False  # attention owns the head, for any target (yields to it always)
     circadian: str = "awake"  # awake | drowsy | resting
     quiet_hours: bool = False
     effects: PersonaEffects = PersonaEffects()
@@ -110,12 +111,10 @@ class ScanPolicy:
             self._wake_pending = False
             self._next_at = None
             return None
-        if ctx.engaged or ctx.attending:
+        if ctx.engaged:
             self._wake_pending = False
             self._next_at = None  # the idle clock only runs while attention is idle
-            if self._running or not ctx.engaged:
-                return None
-            return self._engaged_glance(ctx)
+            return None if self._running else self._engaged_glance(ctx)
         self._glanced_while_engaged = False
         if self._running:
             return None
@@ -161,7 +160,7 @@ class ScanPolicy:
             return None
         if ctx.now - self._last_glance < self.cfg.glance_cooldown_s:
             return None
-        self._drop_pending()
+        self._drop_pending(pending)
         self._running = True
         self._last_glance = ctx.now
         self._glanced_while_engaged = self._glanced_while_engaged or engaged
@@ -170,9 +169,12 @@ class ScanPolicy:
             "glance", "unexplained", 0.0, pace, self.cfg.glance_hold_s / pace, az, el, engaged
         )
 
-    def _drop_pending(self) -> None:
+    def _drop_pending(self, only: tuple[float, float, float] | None = None) -> None:
+        """Forget the pending bearing; with ``only``, just if it is still that very value (a
+        newer one set from the source's thread meanwhile is kept)."""
         with self._lock:
-            self._pending = None
+            if only is None or self._pending == only:
+                self._pending = None
 
 
 class SweepRunner:
@@ -187,7 +189,7 @@ class SweepRunner:
         self._cap = 1.0
         self._priority = Priority.IDLE
         self._last = 0.0
-        self._wp_start = 0.0
+        self._slew_done_at: float | None = None
         self._arrived_at: float | None = None
 
     @property
@@ -211,8 +213,8 @@ class SweepRunner:
         names = {n for wp in self._wps for n in wp.targets}
         self._cur = {n: pose.get(n, self.dofs[n].home) for n in names}
         self._pace, self._cap, self._priority = pace_x, cap, priority
-        self._last = self._wp_start = now
-        self._arrived_at = None
+        self._last = now
+        self._arrived_at = self._slew_done_at = None
 
     def cancel(self) -> None:
         """Abandon the sweep."""
@@ -223,13 +225,22 @@ class SweepRunner:
         if not self.active:
             return None
         wp = self._wps[self._i]
-        self._slew(now, wp)
-        if self._arrived_at is None and self._reached(wp, pose):
+        slewed = self._slew(now, wp)
+        if slewed and self._slew_done_at is None:
+            self._slew_done_at = now
+        if self._arrived_at is None and slewed and self._reached(wp, pose):
             self._arrived_at = now
-        timed_out = now - self._wp_start >= self.cfg.waypoint_timeout_s
-        if self._arrived_at is not None and now - self._arrived_at >= wp.dwell_s or timed_out:
+        dwelled = self._arrived_at is not None and now - self._arrived_at >= wp.dwell_s
+        # Travel takes as long as the pace needs; only the wait for the pose to catch up after
+        # the target arrived is bounded, and the dwell never is.
+        stuck = (
+            self._arrived_at is None
+            and self._slew_done_at is not None
+            and now - self._slew_done_at >= self.cfg.waypoint_timeout_s
+        )
+        if dwelled or stuck:
             self._i += 1
-            self._arrived_at, self._wp_start = None, now
+            self._arrived_at = self._slew_done_at = None
             if not self.active:
                 self.cancel()
                 return None
@@ -237,7 +248,8 @@ class SweepRunner:
             SOURCE, self._priority, dict(self._cur), now, expires=now + self.cfg.command_ttl_s
         )
 
-    def _slew(self, now: float, wp: ScanWaypoint) -> None:
+    def _slew(self, now: float, wp: ScanWaypoint) -> bool:
+        """Move the target towards the waypoint at the pace; True once it is there."""
         dt = min(max(0.0, now - self._last), self.cfg.command_ttl_s)
         self._last = now
         step = math.radians(self.cfg.speed_dps) * self._pace * dt
@@ -246,12 +258,11 @@ class SweepRunner:
             self._cur[name] = (
                 goal if abs(gap) <= step else self._cur[name] + math.copysign(step, gap)
             )
+        return all(math.isclose(self._cur[n], g, abs_tol=SLEW_EPS) for n, g in wp.targets.items())
 
     def _reached(self, wp: ScanWaypoint, pose: Mapping[str, float]) -> bool:
         tol = math.radians(self.cfg.arrive_tol_deg)
         for name, goal in wp.targets.items():
-            if abs(self._cur[name] - goal) > 0.0:
-                return False
             home = self.dofs[name].home
             expected = home + (goal - home) * self._cap
             if name in pose and abs(pose[name] - expected) > tol:
@@ -296,9 +307,7 @@ class ScanController:
         The caller feeds a command and clears ``SOURCE`` on None. A running sweep is cancelled
         when the robot falls asleep or engages with a person (attention takes the head).
         """
-        if self.runner.active and (
-            ctx.asleep or ((ctx.engaged or ctx.attending) and not self._engaged_glance)
-        ):
+        if self.runner.active and (ctx.asleep or (ctx.engaged and not self._engaged_glance)):
             self.runner.cancel()
             self.policy.finished()
         decision = self.policy.update(ctx)
@@ -322,6 +331,10 @@ class ScanController:
         if not wps:
             self.policy.finished()
             return
+        if not d.engaged:  # glide home at scan pace instead of snapping at the limiter's speed
+            names = {n for wp in wps for n in wp.targets}
+            home = {n: self.runner.dofs[n].home for n in names}
+            wps = [*wps, ScanWaypoint(0.0, home, 0.0)]
         self._engaged_glance = d.engaged
         priority = Priority.EXPRESSION if d.engaged else Priority.IDLE
         self.runner.start(

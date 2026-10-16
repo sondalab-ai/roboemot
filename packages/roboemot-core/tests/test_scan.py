@@ -138,15 +138,6 @@ def test_never_a_sweep_while_engaged():
     assert all(p.update(ctx(float(i), engaged=True)) is None for i in range(500))
 
 
-def test_never_a_sweep_while_attention_owns_the_head():
-    p = ScanPolicy(CFG, random.Random(1))
-    for i in range(500):
-        c = ctx(float(i), attending=True)
-        assert p.update(c) is None
-    p.note_unexplained(1.0, 0.0, 500.0)
-    assert p.update(ctx(500.0, attending=True)) is None  # not engaged: no glance either
-
-
 def test_idle_clock_restarts_after_engagement():
     p = ScanPolicy(CFG, random.Random(1))
     for i in range(100):
@@ -171,14 +162,38 @@ def test_one_glance_per_engagement_toward_a_sound():
     p = ScanPolicy(CFG, random.Random(1))
     p.note_unexplained(2.0, 0.0, 0.0)
     d = p.update(ctx(0.1, engaged=True))
-    assert d.kind == "glance" and d.engaged
+    assert d is not None and d.kind == "glance" and d.engaged
     p.finished()
     p.note_unexplained(-2.0, 0.0, 20.0)  # past the cooldown, same engagement
     assert p.update(ctx(20.1, engaged=True)) is None
     p.update(ctx(30.0))  # engagement ends ...
-    p.note_unexplained(-2.0, 0.0, 40.0)
-    p.update(ctx(40.0, engaged=True))  # ... and a new one may glance again
+    p.note_unexplained(-2.0, 0.0, 40.0)  # ... and a new one may glance again
+    d2 = p.update(ctx(40.0, engaged=True))
+    assert d2 is not None and d2.engaged
     assert p.update(ctx(40.0, engaged=True)) is None  # already running: no second decision
+
+
+def test_a_newer_bearing_set_during_a_glance_decision_is_kept():
+    """The pending slot is cleared only if it still holds the bearing that was acted on."""
+    p = ScanPolicy(CFG, random.Random(1))
+    p.note_unexplained(1.0, 0.0, 0.0)
+    seen = p._pending
+    p.note_unexplained(-1.0, 0.0, 0.1)  # the source's thread wins the race
+    p._drop_pending(seen)
+    assert p._pending == (-1.0, 0.0, 0.1)
+
+
+def test_a_stale_bearing_is_dropped_without_a_glance():
+    p = ScanPolicy(CFG, random.Random(1))
+    p.note_unexplained(1.0, 0.0, 0.0)
+    assert p.update(ctx(CFG.glance_max_age_s + 0.5)) is None
+    assert p._pending is None
+
+
+def test_object_attention_does_not_suppress_scans_only_a_person_does():
+    """Only ``engaged`` (person or speaker) is an input: a held object target never blocks."""
+    p = ScanPolicy(CFG, random.Random(1))
+    assert first_decision(p, 0.0)  # engaged=False although attention may hold an object
 
 
 # ---- energy and minors
@@ -263,11 +278,11 @@ def test_runner_waits_for_the_pose_then_gives_up_on_timeout():
     stuck = {"head.yaw": 0.0, "body_yaw": 0.0}  # the robot never moves
     r.start(0.0, stuck, [wp(0.5, 0.5), wp(1.0, 1.0)])
     t = 0.0
-    while t < 2.5:  # slew done after ~0.7 s, but the pose never arrives: no dwell countdown
+    while t < 3.5:  # slew done after ~0.7 s, but the pose never arrives: no dwell countdown
         r.step(t, stuck)
         t += 0.05
     assert r._i == 0
-    while t < 3.5:
+    while t < 4.5:
         r.step(t, stuck)
         t += 0.05
     assert r._i == 1  # timed out
@@ -291,6 +306,18 @@ def test_cancel_stops_at_once():
     r.start(0.0, {}, [wp(1.0, 1.0)])
     r.cancel()
     assert not r.active and r.step(0.1, {}) is None
+
+
+def test_low_pace_and_long_dwell_are_not_cut_by_the_waypoint_timeout():
+    cfg = CFG.model_copy(update={"waypoint_timeout_s": 3.0})
+    r = SweepRunner(DOFS, cfg)
+    pose = {"head.yaw": 0.0, "body_yaw": 0.0}
+    r.start(0.0, pose, [wp(0.5, 0.5, dwell=6.0), wp(1.0, 1.0, dwell=6.0)], pace_x=0.2)
+    cmds, t = drive(r, 0.0, pose, 200.0)
+    assert not r.active
+    first = [tt for tt, c in cmds if c.targets["head.yaw"] == 0.5]
+    assert first[-1] - first[0] >= 6.0 - 0.05  # the full dwell, though longer than the timeout
+    assert cmds[-1][1].targets["head.yaw"] == 1.0  # the travel (> 3 s at this pace) finished
 
 
 # ---- controller
@@ -333,34 +360,68 @@ def test_controller_sweeps_when_idle_then_goes_quiet():
     assert planner.plans and planner.plans[0][0] == 1.0
 
 
+def test_sweep_ends_with_a_glide_home_at_scan_pace():
+    ctrl = ScanController(CFG, FakePlanner(), DOFS, random.Random(2))
+    pose = {"head.yaw": 0.0, "body_yaw": 0.0}
+    out = run_controller(ctrl, 0.0, 120.0, pose)
+    first = next(i for i, (_, c) in enumerate(out) if c is not None)
+    end = next(i for i in range(first, len(out)) if out[i][1] is None)
+    cmds = [c for _, c in out[first:end]]  # the first sweep only
+    one_step = math.radians(CFG.speed_dps) * 0.05
+    assert abs(cmds[-1].targets["head.yaw"]) <= one_step  # glided home, not cut off midway
+    yaws = [c.targets["head.yaw"] for c in cmds]
+    step = max(abs(b - a) for a, b in zip(yaws, yaws[1:], strict=False))
+    assert step <= math.radians(CFG.speed_dps) * 0.25 + 1e-9  # never a snap
+
+
+def test_interrupted_sweep_waits_a_full_interval_and_restarts_from_the_pose():
+    planner = FakePlanner()
+    ctrl = ScanController(CFG, planner, DOFS, random.Random(2))
+    pose = {"head.yaw": 0.0, "body_yaw": 0.0}
+    run_controller(ctrl, 0.0, 70.0, pose)
+    assert ctrl.active and len(planner.plans) == 1
+    pose = {"head.yaw": 0.9, "body_yaw": 0.2}
+    assert ctrl.tick(ctx(70.0, engaged=True), pose, 1.0) is None and not ctrl.active
+    out = run_controller(ctrl, 70.05, 40.0, pose, engaged=True)
+    assert all(c is None for _, c in out)
+    out = run_controller(ctrl, 110.0, 80.0, dict(pose))
+    first = next(t for t, c in out if c is not None)
+    assert first - 110.0 >= CFG.idle_interval_s - CFG.jitter_s  # a whole interval again
+    assert len(planner.plans) == 2
+
+
 def test_controller_cancels_a_sweep_the_tick_a_person_engages():
     ctrl = ScanController(CFG, FakePlanner(), DOFS, random.Random(2))
     pose = {"head.yaw": 0.0, "body_yaw": 0.0}
     out = run_controller(ctrl, 0.0, 70.0, pose)
     assert ctrl.active
-    cmd = ctrl.tick(ctx(70.0, engaged=True, attending=True), pose, 1.0)
+    cmd = ctrl.tick(ctx(70.0, engaged=True), pose, 1.0)
     assert cmd is None and not ctrl.active
     assert out[-1][1] is not None  # it was commanding up to the tick before
-
-
-def test_controller_yields_to_attention_on_any_target():
-    ctrl = ScanController(CFG, FakePlanner(), DOFS, random.Random(2))
-    pose = {"head.yaw": 0.0, "body_yaw": 0.0}
-    run_controller(ctrl, 0.0, 70.0, pose)
-    assert ctrl.active
-    assert ctrl.tick(ctx(70.0, attending=True), pose, 1.0) is None
 
 
 def test_controller_glance_while_engaged_shows_over_attention_priority():
     ctrl = ScanController(CFG, FakePlanner(), DOFS, random.Random(2))
     ctrl.policy.note_unexplained(1.5, 0.0, 0.0)
     pose = {"head.yaw": 0.0, "body_yaw": 0.0}
-    out = run_controller(ctrl, 0.0, 10.0, pose, engaged=True, attending=True)
+    out = run_controller(ctrl, 0.0, 10.0, pose, engaged=True)
     cmds = [c for _, c in out if c]
     assert cmds and all(c.priority == Priority.EXPRESSION for c in cmds)
     assert cmds[-1].targets["head.yaw"] == pytest.approx(1.5)
     assert out[-1][1] is None  # the glance ended on its own
     assert not ctrl.active
+
+
+def test_engaged_glance_expires_and_attention_resumes():
+    ctrl = ScanController(CFG, FakePlanner(), DOFS, random.Random(2))
+    ctrl.policy.note_unexplained(1.5, 0.0, 0.0)
+    pose = {"head.yaw": 0.0, "body_yaw": 0.0}
+    out = run_controller(ctrl, 0.0, 15.0, pose, engaged=True)
+    last = max(t for t, c in out if c is not None)
+    assert last < 12.0  # shorter than the run: it ended by itself
+    assert all(c is None for t, c in out if t > last)
+    assert not ctrl.active
+    assert ctrl.policy.update(ctx(20.0, engaged=True)) is None  # no repeat in this engagement
 
 
 def test_controller_stops_when_the_robot_goes_to_rest():
@@ -427,12 +488,12 @@ def test_load_world_plugin_uses_the_entry_point_of_the_robot_id():
 
         @staticmethod
         def load():
-            return lambda m, c, r: expected if r == "handle" else None
+            return lambda m, c, r, js: expected if r == "handle" and js is dict else None
 
     with patch("roboemot.world.sources.entry_points", return_value=[EP]):
-        assert load_world_plugin(manifest, None, "handle") is expected
+        assert load_world_plugin(manifest, None, "handle", dict) is expected
         other = SimpleNamespace(robot=SimpleNamespace(id="other"))
-        assert load_world_plugin(other, None, "handle") == WorldPlugin()
+        assert load_world_plugin(other, None, "handle", dict) == WorldPlugin()
 
 
 def test_a_broken_world_plugin_is_logged_not_raised(caplog):
@@ -447,7 +508,7 @@ def test_a_broken_world_plugin_is_logged_not_raised(caplog):
 
     manifest = SimpleNamespace(robot=SimpleNamespace(id="acme"))
     with patch("roboemot.world.sources.entry_points", return_value=[EP]):
-        assert load_world_plugin(manifest, None, None) == WorldPlugin()
+        assert load_world_plugin(manifest, None, None, dict) == WorldPlugin()
     assert "ImportError: no module" in caplog.text
 
 
