@@ -435,17 +435,19 @@ def test_resting_circadian_state_stops_scanning_in_the_app_context():
     assert ctx.asleep
 
 
-def test_object_attention_does_not_stop_scans_and_the_sweep_hides_it():
-    """SPEC 5A: only a person or speaker engages; a long-held, moving object target must not
-    suppress scanning. While the sweep runs its command is the only idle-tier head command."""
+def test_object_attention_holds_a_due_scan_then_the_sweep_hides_it():
+    """SPEC 5A: a moving object target holds a due scan off for at most
+    ``attention.object_max_hold_s``, then the sweep runs and hides the attention command."""
     cfg, loop, driver, clock, world, selector, gaze, scan = rig(attention={"motion_min_dps": 0.1})
     scanned, attention_hidden, attended_before = False, True, False
+    started_at = None
     for _ in range(int(90 / 0.02)):
         now = clock[0]
         world.observe(Observation("object", now, "t", math.radians(10 + 3 * now % 40), 0.0, "cup"))
         attending, scanning = run_tick(cfg, loop, clock, world, selector, gaze, scan)
         sources = {c.source for c in loop.core.arbiter.active(clock[0])}
         if scanning:
+            started_at = clock[0] if not scanned else started_at
             scanned = True
             attention_hidden &= ATTENTION not in sources
         elif not scanned:
@@ -455,6 +457,8 @@ def test_object_attention_does_not_stop_scans_and_the_sweep_hides_it():
     assert attended_before  # the object really was the attention target before the sweep
     assert scanned and attention_hidden
     assert not selector.engaged
+    # "watch, then scan": due after ~20 s, held off for attention.object_max_hold_s (30 s)
+    assert started_at >= cfg.attention.object_max_hold_s + cfg.world.scan.idle_interval_s - 5.0
 
 
 def test_an_interrupted_sweep_resumes_fresh_after_a_full_interval():

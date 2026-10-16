@@ -106,6 +106,11 @@ class AttentionSelector:
         self._hint = hint
 
     @property
+    def target(self) -> AttentionTarget | None:
+        """The target chosen by the last ``update`` (None: no target)."""
+        return self._current
+
+    @property
     def engaged(self) -> bool:
         """Whether the current target is a person or the active speaker (scanning yields)."""
         t = self._current

@@ -497,6 +497,13 @@ class AttentionConfig(Strict):
         ge=0,
         le=180,
     )
+    object_max_hold_s: float = param(
+        30.0,
+        "How long attention on an animal or object holds off a due scan; then the sweep runs",
+        unit="s",
+        ge=1,
+        le=600,
+    )
     switch_margin: float = param(
         0.25,
         "Relative advantage a same-category candidate needs to replace the current target",

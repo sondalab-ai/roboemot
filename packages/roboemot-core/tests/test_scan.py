@@ -190,10 +190,75 @@ def test_a_stale_bearing_is_dropped_without_a_glance():
     assert p._pending is None
 
 
-def test_object_attention_does_not_suppress_scans_only_a_person_does():
-    """Only ``engaged`` (person or speaker) is an input: a held object target never blocks."""
+HOLD = 30.0
+
+
+def hold_ctx(now: float, key: str | None = "cat-1", **kw) -> ScanContext:
+    return ctx(now, object_target=key, object_max_hold_s=HOLD, **kw)
+
+
+def due_time(p: ScanPolicy, **kw) -> float:
+    """When the policy would sweep with no object target (the idle clock is drawn at t=0)."""
+    return first_decision(p, 0.0, **kw)[0]
+
+
+def test_an_object_target_holds_a_due_scan_off_for_less_than_the_max():
     p = ScanPolicy(CFG, random.Random(1))
-    assert first_decision(p, 0.0)  # engaged=False although attention may hold an object
+    due = due_time(ScanPolicy(CFG, random.Random(1)))
+    t = 0.0
+    while t < due + HOLD - 1.0:
+        assert p.update(hold_ctx(t)) is None, t
+        t += 1.0
+
+
+def test_an_object_held_past_the_max_lets_the_sweep_run():
+    p = ScanPolicy(CFG, random.Random(1))
+    due = due_time(ScanPolicy(CFG, random.Random(1)))
+    t, d = 0.0, None
+    while d is None and t < due + 3 * HOLD:
+        d = p.update(hold_ctx(t))
+        t += 1.0
+    assert d is not None and d.kind == "sweep"
+    assert HOLD <= (t - 1.0) - due <= HOLD + 1.0  # held off about max_hold after it was due
+
+
+def test_the_hold_timer_survives_a_switch_between_objects_and_resets_on_loss():
+    p = ScanPolicy(CFG, random.Random(1))
+    due = due_time(ScanPolicy(CFG, random.Random(1)))
+    t = 0.0
+    while t < due + 20.0:
+        p.update(hold_ctx(t, "cat-1"))
+        t += 1.0
+    assert p.update(hold_ctx(t, "dog-2")) is None  # switched: the same hold carries on
+    t += 15.0
+    d = p.update(hold_ctx(t, "dog-2"))
+    assert d is not None  # 20 + 15 s since due: past the max in total
+    p2 = ScanPolicy(CFG, random.Random(1))
+    t = 0.0
+    while t < due + 20.0:
+        p2.update(hold_ctx(t))
+        t += 1.0
+    # the target is lost: nothing holds a due scan any more, so it runs at once
+    assert p2.update(hold_ctx(t, None)) is not None
+
+
+def test_a_person_blocks_indefinitely_whatever_the_object_hold():
+    p = ScanPolicy(CFG, random.Random(1))
+    assert all(
+        p.update(ctx(float(i), engaged=True, object_target="cat-1", object_max_hold_s=HOLD)) is None
+        for i in range(500)
+    )
+
+
+def test_a_wake_up_sweep_and_a_glance_are_held_like_an_idle_sweep():
+    p = ScanPolicy(CFG, random.Random(1))
+    p.update(ctx(0.0, circadian="resting"))
+    assert p.update(hold_ctx(1.0)) is None  # wake-up due, object held
+    assert p.update(hold_ctx(1.0 + HOLD)).reason == "wakeup"
+    q = ScanPolicy(CFG, random.Random(1))
+    q.note_unexplained(1.0, 0.0, 0.0)
+    assert q.update(hold_ctx(0.5)) is None  # held glance; it is stale by the time the hold ends
+    assert q.update(hold_ctx(0.5 + HOLD)) is None
 
 
 # ---- energy and minors
@@ -388,6 +453,20 @@ def test_interrupted_sweep_waits_a_full_interval_and_restarts_from_the_pose():
     first = next(t for t, c in out if c is not None)
     assert first - 110.0 >= CFG.idle_interval_s - CFG.jitter_s  # a whole interval again
     assert len(planner.plans) == 2
+
+
+def test_person_arriving_mid_sweep_cancels_it_after_an_object_hold_expired():
+    ctrl = ScanController(CFG, FakePlanner(), DOFS, random.Random(2))
+    pose = {"head.yaw": 0.0, "body_yaw": 0.0}
+    t, started = 0.0, None
+    while started is None and t < 300.0:
+        cmd = ctrl.tick(hold_ctx(t), pose, 1.0)
+        if cmd is not None:
+            started, _ = t, pose.update(cmd.targets)
+        t += 0.05
+    assert started is not None and started >= HOLD  # the sweep ran only after the hold
+    assert ctrl.tick(hold_ctx(t, engaged=True, key=None), pose, 1.0) is None
+    assert not ctrl.active
 
 
 def test_controller_cancels_a_sweep_the_tick_a_person_engages():

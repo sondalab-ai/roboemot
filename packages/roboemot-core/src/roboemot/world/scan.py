@@ -10,7 +10,8 @@
 - ``ScanController`` ties both to a ``ScanPlanner``. A sweep ends with a waypoint at home, at
   scan pace. It is cancelled the tick a person (or a speaker hint) engages the robot, and
   the idle clock only runs while nobody is engaged (SPEC 5A). Attention on an animal or object
-  does not stop scans; the app hides that attention command while a sweep runs (SPEC 10).
+  holds a due scan off for at most ``attention.object_max_hold_s``; then the sweep runs and the
+  app hides that attention command while it does (SPEC 10).
   An engaged glance is the one exception: it is fed at expression priority for
   ``glance_hold_s`` so it can show over the idle-tier attention command.
 
@@ -46,6 +47,8 @@ class ScanContext:
 
     now: float
     engaged: bool  # attention has a person target or a speaker hint
+    object_target: str | None = None  # key of an animal or object attention target, if any
+    object_max_hold_s: float = math.inf  # attention.object_max_hold_s
     circadian: str = "awake"  # awake | drowsy | resting
     quiet_hours: bool = False
     effects: PersonaEffects = PersonaEffects()
@@ -85,6 +88,7 @@ class ScanPolicy:
         self._pending: tuple[float, float, float] | None = None  # azimuth, elevation, stamp
         self._glanced_while_engaged = False
         self._last_glance = -math.inf
+        self._due_since: float | None = None
 
     def note_unexplained(self, azimuth_rad: float, elevation_rad: float, stamp: float) -> None:
         """Remember the newest bearing no entry explains (``ObserveResult.unexplained_bearing``).
@@ -99,6 +103,7 @@ class ScanPolicy:
         """The decided scan ended (done or cancelled); the idle clock restarts at the next tick."""
         self._running = False
         self._next_at = None
+        self._due_since = None
 
     def update(self, ctx: ScanContext) -> ScanDecision | None:
         """The scan to start now, or None. At most one decision until ``finished`` is called."""
@@ -120,6 +125,8 @@ class ScanPolicy:
             return None
         if self._next_at is None:
             self._next_at = ctx.now + self._interval(ctx)
+        if self._held_by_object(ctx):
+            return None
         if self._wake_pending:
             return self._start(ctx, "wakeup")
         glance = self._glance(ctx, engaged=False)
@@ -128,6 +135,36 @@ class ScanPolicy:
         if ctx.now >= self._next_at:
             return self._start(ctx, "idle")
         return None
+
+    def _held_by_object(self, ctx: ScanContext) -> bool:
+        """Whether an animal or object target still holds off a scan that is due.
+
+        The hold timer starts when a scan first becomes due while such a target is held and
+        runs for ``object_max_hold_s``; it resets only when the object target is lost (a switch
+        to another object keeps it, so the total hold stays bounded) or the scan starts.
+        """
+        if ctx.object_target is None:
+            self._due_since = None
+            return False
+        due = (
+            self._wake_pending
+            or self._glance_ready(ctx)
+            or (self._next_at is not None and ctx.now >= self._next_at)
+        )
+        if not due:
+            return False
+        if self._due_since is None:
+            self._due_since = ctx.now
+        return ctx.now - self._due_since < ctx.object_max_hold_s
+
+    def _glance_ready(self, ctx: ScanContext) -> bool:
+        with self._lock:
+            pending = self._pending
+        return (
+            pending is not None
+            and ctx.now - pending[2] <= self.cfg.glance_max_age_s
+            and ctx.now - self._last_glance >= self.cfg.glance_cooldown_s
+        )
 
     def _interval(self, ctx: ScanContext) -> float:
         base = self.cfg.idle_interval_s * ctx.effects.idle_period_x

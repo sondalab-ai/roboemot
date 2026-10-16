@@ -133,9 +133,12 @@ def scan_context(
     computed from the persona when the caller has not cached them) and the minor factor
     (SPEC 12)."""
     quiet = cfg.circadian.enabled and in_window(hour, cfg.circadian.quiet_hours)
+    target = selector.target
     return ScanContext(
         now=now,
         engaged=selector.engaged,
+        object_target=None if target is None or selector.engaged else target.key,
+        object_max_hold_s=cfg.attention.object_max_hold_s,
         circadian=circadian.state if circadian else "awake",
         quiet_hours=quiet,
         effects=effects if effects is not None else persona_effects(cfg.persona),
@@ -148,8 +151,9 @@ def scan_tick(ctx: ScanContext, scan: ScanController, loop: MotionLoop, cfg: Any
 
     The policy cancels a sweep the tick attention engages with a person or a speaker, and this
     clears the ``scan`` source in the same tick, so that attention wins within one tick (SPEC
-    10). Attention on an animal or object does not stop scans: while a sweep runs, its command
-    is dropped here (it is also idle tier), so the sweep wins deterministically. Returns
+    10). Attention on an animal or object holds a due scan off for ``attention.object_max_hold_s``
+    (the policy); once the sweep runs, that command is dropped here (it is also idle tier), so
+    the sweep wins deterministically. Returns
     whether a sweep or glance is in progress. A failure is logged (type and message only), the
     sweep is dropped and idle motion carries on; the app keeps running.
     """
