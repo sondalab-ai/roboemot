@@ -236,6 +236,7 @@ class EntityRecord:
     embeddings: np.ndarray = field(default_factory=_no_embeddings, repr=False)
     description: str | None = None
     last_seen: datetime | None = None
+    photo_keys: list[str] = field(default_factory=list, repr=False)
 
     def meta(self) -> dict[str, Any]:
         return {
@@ -249,6 +250,7 @@ class EntityRecord:
             "embedding_model_id": self.embedding_model_id,
             "description": self.description,
             "last_seen": _iso(self.last_seen),
+            "photo_keys": list(self.photo_keys),
         }
 
     def arrays(self) -> dict[str, np.ndarray]:
@@ -268,4 +270,5 @@ class EntityRecord:
             embeddings=arrays.get("appearance", _no_embeddings()),
             description=meta["description"],
             last_seen=_when(meta["last_seen"]),
+            photo_keys=[str(k) for k in meta.get("photo_keys", [])],
         )

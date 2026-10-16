@@ -49,6 +49,7 @@ CATALOGUE_IMPORT = "/api/catalogue/import"
 BASE64_GROUP_IN = 3
 BASE64_GROUP_OUT = 4
 CATALOGUE_STATUS = {
+    "import_busy": HTTPStatus.SERVICE_UNAVAILABLE,
     "not_pending": HTTPStatus.CONFLICT,
     "entry_gone": HTTPStatus.CONFLICT,
     "no_appearance": HTTPStatus.CONFLICT,
@@ -74,6 +75,7 @@ class EnrollmentPort(Protocol):
         consent: Consent,
         declared_age_group: str | None,
         declared_gender: str | None,
+        pending_id: str | None = None,
     ) -> Any: ...
     def cancel(self) -> Any: ...
     def list_records(self) -> list[Any]: ...
@@ -422,6 +424,12 @@ class WebApi:
 
     def _enroll_complete(self, req: Request) -> Response:
         form = v.enrollment_form(self._json_body(req), self.web)
+        pending = form["pending_id"]
+        if pending is not None and not any(
+            r.id == pending and r.kind == "person" and r.status == "pending"
+            for r in self.service.list_records()
+        ):
+            raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, "pending_invalid", field="pending_id")
         try:
             consent = Consent(
                 who=form["who"],
@@ -429,7 +437,13 @@ class WebApi:
                 scope=form["scope"],
                 guardian=form["guardian"],
             )
-            self.service.complete(form["display_name"], consent, form["age_group"], form["gender"])
+            self.service.complete(
+                form["display_name"],
+                consent,
+                form["age_group"],
+                form["gender"],
+                form["pending_id"],
+            )
         except ConsentError as exc:
             raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, "consent_refused") from exc
         except (RuntimeError, ValueError) as exc:

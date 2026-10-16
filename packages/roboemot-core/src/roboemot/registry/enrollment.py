@@ -214,8 +214,13 @@ class EnrollmentService:
         consent: Consent,
         declared_age_group: str | None = None,
         declared_gender: str | None = None,
+        pending_id: str | None = None,
     ) -> str:
-        """Enroll the collected samples as ``name`` and return the new person id.
+        """Enroll the collected samples as ``name`` and return the person id.
+
+        With ``pending_id`` the owner has chosen a name-only record from a catalogue import
+        (SPEC 6) and it is completed in place (``Registry.complete_enrollment``); without it a
+        new person is made and no pending record is touched, whatever its name.
 
         Needs an active session with at least ``identity.enroll_min_embeddings`` samples that
         show varied angles. The registry (disk I/O) runs outside the service lock, in the
@@ -238,14 +243,25 @@ class EnrollmentService:
             matrix = np.vstack(self._samples)
             self._state = COMPLETING
         try:
-            record = self._reg().enroll(
-                name,
-                matrix,
-                model_id,
-                consent=consent,
-                age_group=declared_age_group,
-                gender=declared_gender,
-            )
+            if pending_id is None:
+                record = self._reg().enroll(
+                    name,
+                    matrix,
+                    model_id,
+                    consent=consent,
+                    age_group=declared_age_group,
+                    gender=declared_gender,
+                )
+            else:
+                record = self._reg().complete_enrollment(
+                    pending_id,
+                    matrix,
+                    model_id,
+                    consent,
+                    display_name=name,
+                    age_group=declared_age_group,
+                    gender=declared_gender,
+                )
         except BaseException:
             with self._lock:
                 if self._token == token and self._state == COMPLETING:
@@ -254,22 +270,8 @@ class EnrollmentService:
         with self._lock:
             self._reset_locked()
             self._state = COMPLETED
-        self._retire_pending(record.person_id, name)
         log.info("enrollment session completed")
         return record.person_id
-
-    def _retire_pending(self, person_id: str, name: str) -> None:
-        """Drop the name-only catalogue record (SPEC 6) that this enrollment fulfils.
-
-        A pending person with the same name, from an XMP import, never held data of its own;
-        keeping it would leave a duplicate. Failures are logged by type and not raised.
-        """
-        try:
-            for other in self._reg().people_named(name):
-                if other.status == "pending" and other.person_id != person_id:
-                    self._reg().forget(other.person_id)
-        except Exception as exc:
-            log.warning("pending catalogue record not retired: %s", type(exc).__name__)
 
     def cancel(self) -> None:
         """Discard the session and its samples; harmless when none is running.

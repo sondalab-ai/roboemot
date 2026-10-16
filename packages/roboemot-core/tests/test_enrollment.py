@@ -224,14 +224,44 @@ def test_complete_enrolls_with_consent_and_zeroes_the_samples(rig):
     assert st["state"] == COMPLETED and st["collected"] == 0
 
 
-def test_complete_replaces_the_pending_catalogue_record_of_the_same_name(rig):
-    pending = rig.reg.create_pending_person(NAME.upper())
-    other = rig.reg.create_pending_person("Someone Else")
+def test_complete_without_a_choice_touches_no_pending_record(rig):
+    one = rig.reg.create_pending_person(NAME)
+    two = rig.reg.create_pending_person(NAME.upper())
     rig.svc.start("s1")
     feed(rig, 40)
     person_id = rig.svc.complete(NAME, ADULT, "adult", "female")
-    ids = {r.id for r in rig.reg.list()}
-    assert pending.person_id not in ids and other.person_id in ids and person_id in ids
+    ids = {r.id: r.status for r in rig.reg.list()}
+    assert ids[one.person_id] == "pending" and ids[two.person_id] == "pending"
+    assert ids[person_id] == "active" and len(ids) == 3
+
+
+def test_complete_with_a_chosen_pending_record_completes_that_one_only(rig):
+    one = rig.reg.create_pending_person(NAME)
+    two = rig.reg.create_pending_person(NAME)  # same name, not chosen
+    rig.svc.start("s1")
+    feed(rig, 40)
+    person_id = rig.svc.complete("Ada L.", ADULT, "adult", "female", pending_id=two.person_id)
+    assert person_id == two.person_id
+    done = rig.reg.get_person(two.person_id)
+    assert done.status == "active" and done.display_name == "Ada L."
+    assert done.age_group.value == "adult" and done.age_group.source == "declared"
+    assert len(done.face_embeddings) >= 5 and done.consent is not None
+    assert rig.reg.get_person(one.person_id).status == "pending"
+    assert len(rig.reg.list()) == 2
+
+
+def test_complete_with_an_unknown_or_already_active_pending_id_is_refused(rig):
+    rig.svc.start("s1")
+    feed(rig, 40)
+    with pytest.raises(KeyError):
+        rig.svc.complete(NAME, ADULT, "adult", None, pending_id="nope")
+    active = rig.reg.enroll(
+        "Bob", [axis(i, 0.01, i) for i in range(5)], MODEL, consent=ADULT, age_group="adult"
+    )
+    with pytest.raises(ValueError, match="already enrolled"):
+        rig.svc.complete(NAME, ADULT, "adult", None, pending_id=active.person_id)
+    assert rig.svc.status()["state"] != COMPLETED  # the session survives for a retry
+    assert rig.svc.complete(NAME, ADULT, "adult", None)  # and still completes without a choice
 
 
 def test_complete_with_too_few_samples_or_no_session_raises(rig):

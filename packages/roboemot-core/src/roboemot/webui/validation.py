@@ -7,6 +7,7 @@ length-bounded and limited to letters, digits and a few name punctuation marks.
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Any
 
 from roboemot.config.schema import WebUIConfig
@@ -42,7 +43,7 @@ def name(value: object, field: str, cfg: WebUIConfig) -> str:
     """A trimmed person, animal or consenting-party name."""
     if not isinstance(value, str):
         raise ValidationError("name_invalid", field)
-    text = value.strip()
+    text = unicodedata.normalize("NFC", value).strip()  # composed form: one spelling
     if not text:
         raise ValidationError("name_required", field)
     if len(text) > cfg.name_max_chars:
@@ -94,7 +95,16 @@ def enrollment_form(body: dict[str, Any], cfg: WebUIConfig) -> dict[str, Any]:
     """
     only_keys(
         body,
-        {"display_name", "consent_who", "scope", "age_group", "gender", "guardian", "agreed"},
+        {
+            "display_name",
+            "consent_who",
+            "scope",
+            "age_group",
+            "gender",
+            "guardian",
+            "agreed",
+            "pending_id",
+        },
     )
     if body.get("agreed") is not True:
         raise ValidationError("consent_not_agreed", "agreed")
@@ -123,4 +133,9 @@ def enrollment_form(body: dict[str, Any], cfg: WebUIConfig) -> dict[str, Any]:
         "age_group": None if age == "unknown" else age,
         "gender": None if gender == "unknown" else gender,
         "guardian": guardian,
+        "pending_id": (
+            None
+            if body.get("pending_id") in (None, "")
+            else record_id(body["pending_id"], "pending_id")
+        ),
     }

@@ -12,7 +12,7 @@ from roboemot.config.schema import CatalogueConfig, IdentityConfig, RoboEmotConf
 from roboemot.diagnostics import Diagnostics
 from roboemot.registry import FileStore, Registry
 from roboemot.registry.catalogue import CatalogueError, CatalogueService
-from roboemot.webui import make_server
+from roboemot.webui import make_server, validation
 from roboemot.webui.strings import STRINGS
 from roboemot.world import Observation, WorldModel
 from test_webui import PIN, Client, FakeService
@@ -267,6 +267,7 @@ def test_other_posts_keep_the_small_limit_even_when_logged_in(authed):
 @pytest.mark.parametrize(
     ("code", "status"),
     [
+        ("import_busy", 503),
         ("xmp_not_xml", 422),
         ("xmp_forbidden_xml", 422),
         ("image_format", 422),
@@ -297,6 +298,8 @@ def test_every_catalogue_error_has_text_in_both_languages():
         "image_too_large",
         "image_too_many_pixels",
         "image_unsupported",
+        "import_busy",
+        "pending_invalid",
         "not_pending",
         "entry_gone",
         "no_appearance",
@@ -398,3 +401,44 @@ def test_real_service_rejects_hostile_files_cleanly(real):
     )
     assert resp.status == 422 and resp.json == {"error": "image_format"}
     assert real.registry.list() == []
+
+
+def test_a_lone_surrogate_in_the_sidecar_is_a_clean_422(real):
+    resp = real.client.request("POST", "/api/catalogue/import", raw=b'{"xmp": "<a>\\ud800</a>"}')
+    assert (resp.status, resp.json) == (422, {"error": "xmp_not_xml"})
+
+
+def test_names_are_nfc_normalised_before_validation():
+    cfg = RoboEmotConfig().webui
+    assert validation.name("Re\u0301", "n", cfg) == "R\u00e9"
+    assert validation.name(" Cafe\u0301 ", "n", cfg) == "Caf\u00e9"
+
+
+def test_nfd_and_nfc_spellings_of_a_name_are_one_record(real):
+    for spelling in ("Cle\u0301o", "Cl\u00e9o"):
+        resp = real.client.request(
+            "POST", "/api/catalogue/import", {"xmp": subjects(f"Animals|Cat|{spelling}")}
+        )
+        assert resp.status == 200
+    assert len(real.registry.entities()) == 1
+
+
+def test_config_checks_the_catalogue_against_the_web_limits():
+    RoboEmotConfig()  # the defaults agree
+    with pytest.raises(ValueError, match="catalogue_max_body_bytes"):
+        RoboEmotConfig(
+            catalogue={"max_image_bytes": 4_000_000}, webui={"catalogue_max_body_bytes": 1_000_000}
+        )
+
+
+def test_the_import_budget_is_capped_by_half_the_request_deadline(tmp_path):
+    from roboemot.webui.catalogue import open_catalogue
+
+    reg = Registry(FileStore(tmp_path / "reg", allow_plaintext=True), IdentityConfig())
+    cfg = RoboEmotConfig(webui={"request_deadline_s": 4}, catalogue={"import_budget_s": 30})
+    service = open_catalogue(reg, lambda: cfg)
+    assert service._budget_cap() == 2.0 and service.cfg.import_budget_s == 30
+
+
+def test_default_pixel_cap_is_the_camera_size():
+    assert RoboEmotConfig().catalogue.max_image_pixels == 12_000_000

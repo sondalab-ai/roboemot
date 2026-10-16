@@ -16,6 +16,8 @@ from roboemot.registry.catalogue import AppearanceSource, CatalogueService, Live
 
 from . import validation as v
 
+BUDGET_SHARE = 0.5  # of the request deadline: the rest is for parsing, writing and replying
+
 
 def open_catalogue(
     registry: Registry | None,
@@ -45,5 +47,6 @@ def open_catalogue(
         validate_name=validate,
         now=monotonic,
         purge_candidates=purge_candidates,
+        budget_cap=lambda: cfg().webui.request_deadline_s * BUDGET_SHARE,
     )
     return service

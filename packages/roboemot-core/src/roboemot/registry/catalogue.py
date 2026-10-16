@@ -14,11 +14,20 @@
 
 Photos and sidecars are untrusted input with size, pixel and count limits (``catalogue.*``).
 Nothing is written to disk except the registry records; no image is ever stored or logged.
+
+Imports run one at a time (a second one is refused as ``import_busy``), the photo is decoded
+only when it can be used (an embedder exists and a sidecar item has regions), and embedding
+stops once ``catalogue.import_budget_s`` is spent: the records are still created, the report
+says what was skipped, and repeating the import finishes the rest. Each photo row carries a key
+(hash of the photo bytes and the region), so repeating an import never adds a row twice.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -35,8 +44,11 @@ from .xmp import CatalogueItem, Conflict, XmpError, parse_xmp
 log = logging.getLogger(__name__)
 
 ASPECT_TOLERANCE = 0.02
+KEY_HASH_CHARS = 16
 PHOTO_NONE = "none"
 PHOTO_USED = "used"
+PHOTO_PARTIAL = "partial"
+PHOTO_NO_REGIONS = "no_regions"
 PHOTO_NO_EMBEDDER = "no_embedder"
 PHOTO_DIMS_MISMATCH = "dims_mismatch"
 LIVE_KINDS = ("animal", "object")
@@ -93,6 +105,9 @@ class ImportReport:
     photo: str = PHOTO_NONE
     truncated: bool = False
 
+    def skip(self, code: str) -> None:
+        self.skipped[code] = self.skipped.get(code, 0) + 1
+
 
 @dataclass(frozen=True)
 class EntitySummary:
@@ -119,6 +134,15 @@ class LiveSummary:
     identified: bool
 
 
+@dataclass
+class _Photo:
+    """A decoded photo and the key prefix of its rows, alive for one import only."""
+
+    pixels: np.ndarray
+    key: str
+    deadline: float
+
+
 class CatalogueService:
     """Import, list and confirm catalogue records over a registry and the live world."""
 
@@ -132,6 +156,8 @@ class CatalogueService:
         validate_name: Callable[[str], str] | None = None,
         now: Callable[[], float] | None = None,
         purge_candidates: Callable[[], int] | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        budget_cap: Callable[[], float] = lambda: float("inf"),
     ) -> None:
         self.registry = registry
         self.cfg = cfg
@@ -140,17 +166,30 @@ class CatalogueService:
         self._validate = validate_name
         self._now = now
         self._purge = purge_candidates
+        self._clock = clock
+        self._budget_cap = budget_cap
+        self._busy = threading.Lock()
 
     # ------------------------------------------------------------------ import
 
     def import_sidecar(self, xmp: bytes | str, image: bytes | None = None) -> ImportReport:
         """Create pending records from one sidecar and, with ``image``, attach appearances.
 
-        ``CatalogueError`` for an unreadable sidecar or photo (nothing is created then).
-        Records that already exist (same name and kind, category equal or unset) are reported
-        as not created and left alone, except that a pending one still receives photo rows.
+        ``CatalogueError`` for an unreadable sidecar or photo (nothing is created then) and
+        ``import_busy`` while another import runs. Records that already exist (same name and
+        kind, category equal or unset) are reported as not created and left alone, except that
+        a pending one still receives photo rows it does not have yet.
         """
+        if not self._busy.acquire(blocking=False):
+            raise CatalogueError("import_busy")
+        try:
+            return self._import(xmp, image)
+        finally:
+            self._busy.release()
+
+    def _import(self, xmp: bytes | str, image: bytes | None) -> ImportReport:
         cfg = self.cfg
+        deadline = self._clock() + min(cfg.import_budget_s, self._budget_cap())
         kwargs: dict[str, Any] = {
             "max_bytes": cfg.max_xmp_bytes,
             "max_items": cfg.max_items,
@@ -166,26 +205,40 @@ class CatalogueService:
         report = ImportReport(
             conflicts=parsed.conflicts, skipped=dict(parsed.skipped), truncated=parsed.truncated
         )
-        decoded = self._decode(image, parsed.applied_dims, report) if image is not None else None
+        photo = None
+        if image is not None:
+            photo = self._open_photo(image, parsed.items, parsed.applied_dims, report, deadline)
         try:
             for item in parsed.items:
-                report.items.append(self._import_item(item, decoded, report))
+                report.items.append(self._import_item(item, photo, report))
         finally:
-            del decoded
+            photo = None
         return report
 
-    def _decode(
-        self, image: bytes, applied: tuple[int, int] | None, report: ImportReport
-    ) -> np.ndarray | None:
+    def _open_photo(
+        self,
+        image: bytes,
+        items: list[CatalogueItem],
+        applied: tuple[int, int] | None,
+        report: ImportReport,
+        deadline: float,
+    ) -> _Photo | None:
+        """Decode the photo only if something can use it; refuse a bad one before any write."""
+        if not any(i.kind != "person" and i.regions for i in items):
+            report.photo = PHOTO_NO_REGIONS
+            return None
+        if self._embedder() is None:
+            report.photo = PHOTO_NO_EMBEDDER
+            return None
         try:
             pixels = decode_bgr(
                 image, max_bytes=self.cfg.max_image_bytes, max_pixels=self.cfg.max_image_pixels
             )
         except ImageError as exc:
+            if exc.code == "image_unsupported":  # no OpenCV here: same as no recognition
+                report.photo = PHOTO_NO_EMBEDDER
+                return None
             raise CatalogueError(exc.code) from exc
-        if self._embedder() is None:
-            report.photo = PHOTO_NO_EMBEDDER
-            return None
         height, width = pixels.shape[:2]
         if applied is not None and abs(applied[0] / applied[1] - width / height) > (
             ASPECT_TOLERANCE * width / height
@@ -193,7 +246,8 @@ class CatalogueService:
             report.photo = PHOTO_DIMS_MISMATCH
             return None
         report.photo = PHOTO_USED
-        return pixels
+        key = hashlib.sha256(image).hexdigest()[:KEY_HASH_CHARS]
+        return _Photo(pixels, key, deadline)
 
     def _find(self, item: CatalogueItem) -> EntityRecord | None:
         for rec in self.registry.entities():
@@ -203,7 +257,7 @@ class CatalogueService:
         return None
 
     def _import_item(
-        self, item: CatalogueItem, pixels: np.ndarray | None, report: ImportReport
+        self, item: CatalogueItem, photo: _Photo | None, report: ImportReport
     ) -> ReportItem:
         if item.kind == "person":
             known = self.registry.people_named(item.name)
@@ -219,46 +273,64 @@ class CatalogueService:
                 origin="xmp",
             )
         attached = 0
-        if pixels is not None and record.status == "pending" and item.regions:
-            attached = self._attach(record.entity_id, pixels, item, report)
+        if photo is not None and record.status == "pending" and item.regions:
+            attached = self._attach(record, photo, item, report)
         return ReportItem(
             record.entity_id, record.display_name, record.kind, record.category, created, attached
         )
 
     def _attach(
-        self, entity_id: str, pixels: np.ndarray, item: CatalogueItem, report: ImportReport
+        self, record: EntityRecord, photo: _Photo, item: CatalogueItem, report: ImportReport
     ) -> int:
+        """Embed the item's regions not yet on the record; returns the rows actually added."""
         embedder = self._embedder()
         if embedder is None:
             return 0
-        height, width = pixels.shape[:2]
+        height, width = photo.pixels.shape[:2]
+        have = set(record.photo_keys) if record.embedding_model_id == embedder.model_id else set()
         rows: list[np.ndarray] = []
+        keys: list[str] = []
         for region in item.regions:
+            key = f"{photo.key}:{region.cx:.4f},{region.cy:.4f},{region.w:.4f},{region.h:.4f}"
+            if key in have or key in keys:
+                continue
+            if len(rows) >= self.cfg.max_embeddings_per_entity:
+                report.skip("cap")
+                break
             x1, x2 = (region.cx - region.w / 2) * width, (region.cx + region.w / 2) * width
             y1, y2 = (region.cy - region.h / 2) * height, (region.cy + region.h / 2) * height
             left, top = max(0.0, x1), max(0.0, y1)
             right, bottom = min(float(width), x2), min(float(height), y2)
-            box = (left, top, right, bottom)
             if min(right - left, bottom - top) < self.cfg.min_region_px:
-                report.skipped["region_small"] = report.skipped.get("region_small", 0) + 1
+                report.skip("region_small")
+                continue
+            if self._clock() > photo.deadline:
+                report.skip("budget")
+                report.photo = PHOTO_PARTIAL
                 continue
             try:
-                rows.append(np.asarray(embedder.embed(pixels, box), dtype=np.float32))
+                rows.append(
+                    np.asarray(embedder.embed(photo.pixels, (left, top, right, bottom)), np.float32)
+                )
+                keys.append(key)
             except Exception as exc:
                 log.warning("catalogue region embedding failed: %s", type(exc).__name__)
-                report.skipped["embed_failed"] = report.skipped.get("embed_failed", 0) + 1
+                report.skip("embed_failed")
         if not rows:
             return 0
         try:
-            self.registry.attach_pending_embeddings(
-                entity_id, np.vstack(rows), embedder.model_id, self.cfg.max_embeddings_per_entity
+            return self.registry.attach_pending_embeddings(
+                record.entity_id,
+                np.vstack(rows),
+                embedder.model_id,
+                self.cfg.max_embeddings_per_entity,
+                keys,
             )
         except ValueError:
-            report.skipped["embed_failed"] = report.skipped.get("embed_failed", 0) + 1
+            report.skip("embed_failed")
             return 0
         finally:
             rows.clear()
-        return min(len(item.regions), self.cfg.max_embeddings_per_entity)
 
     # ------------------------------------------------------------------ listing
 

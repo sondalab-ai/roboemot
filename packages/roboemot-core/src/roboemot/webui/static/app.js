@@ -109,7 +109,7 @@ function enrollmentView() {
     stopPolling();
     try {
       const s = await api("GET", "/api/enrollment/status");
-      renderEnrollment(box, s);
+      await renderEnrollment(box, s);
       if (state.tab === "enroll" && ["collecting", "ready"].includes(s.state)) {
         state.timer = setTimeout(poll, state.session.status_poll_ms || 1000);
       }
@@ -122,7 +122,7 @@ function enrollmentView() {
   poll();
 }
 
-function renderEnrollment(box, s) {
+async function renderEnrollment(box, s) {
   box.replaceChildren(el("h2", {}, t("tab_enroll")), el("p", { class: "muted" }, t("enroll_intro")));
   const stateKey = "state_" + s.state;
   box.append(el("p", {}, t("state") + ": " + (state.strings[stateKey] || s.state)));
@@ -142,7 +142,10 @@ function renderEnrollment(box, s) {
     box.append(el("ul", {}, s.hints.map((h) => el("li", {}, state.strings["hint_" + h] || h))));
   }
   if (s.can_complete) {
-    state.form = state.form || consentForm();
+    if (!state.form) {
+      const reg = await api("GET", "/api/registry");
+      state.form = consentForm(reg.records.filter((r) => r.kind === "person" && r.status === "pending"));
+    }
     box.append(state.form);
   } else {
     state.form = null;
@@ -157,7 +160,7 @@ function select(id, values, prefix) {
   return el("select", { id }, values.map((v) => el("option", { value: v }, t(prefix + v))));
 }
 
-function consentForm() {
+function consentForm(pendingPeople) {
   const max = String(state.session.name_max_chars || 64);
   const name = el("input", { type: "text", id: "display_name", maxlength: max, required: true });
   const who = el("input", { type: "text", id: "consent_who", maxlength: max, required: true });
@@ -168,6 +171,9 @@ function consentForm() {
   const scopes = ["face", "voice", "refresh"].map((s) =>
     el("label", { class: "check" }, el("input", { type: "checkbox", value: s, checked: s !== "voice" }), t("scope_" + s)));
   const agreed = el("input", { type: "checkbox", id: "agreed" });
+  const link = el("select", { id: "pending_id" },
+    el("option", { value: "" }, t("pending_none")),
+    pendingPeople.map((r) => el("option", { value: r.id }, r.display_name)));
   const form = el("form", {
     onsubmit: (ev) => {
       ev.preventDefault();
@@ -180,6 +186,7 @@ function consentForm() {
           gender: gender.value,
           scope: scopes.map((l) => l.firstChild).filter((c) => c.checked).map((c) => c.value),
           agreed: agreed.checked,
+          pending_id: link.value || null,
         });
         notice(t("saved"));
         await state.refresh();
@@ -188,6 +195,7 @@ function consentForm() {
   },
   el("h2", {}, t("consent_title")),
   el("div", { class: "consent" }, el("p", {}, t("consent_biometric")), el("p", {}, t("consent_cloud"))),
+  pendingPeople.length ? [el("label", { for: "pending_id" }, t("pending_link")), link] : [],
   el("label", { for: "display_name" }, t("display_name")), name,
   el("label", { for: "consent_who" }, t("consent_who")), who,
   el("label", { for: "age_group" }, t("age_group")), age,

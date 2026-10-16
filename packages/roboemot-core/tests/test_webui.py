@@ -29,12 +29,13 @@ class FakeService:
             RecordSummary("a1", "Micio", "active", "animal", None),
             RecordSummary("a2", "Micio 2", "active", "animal", None),
             RecordSummary("o1", "Tazza", "active", "object", None),
+            RecordSummary("p9", "Zed", "pending", "person", None),
         ]
         self.keys = ["badkey"]
         self.state = "collecting"
         self.can_complete = False
         self.fail_forget: Exception | None = None
-        self.known_ids = {"p1", "a1", "a2", "o1"}
+        self.known_ids = {"p1", "a1", "a2", "o1", "p9"}
 
     def start(self, session_id):
         self.calls.append(("start", len(session_id)))
@@ -57,9 +58,10 @@ class FakeService:
             "image": b"\xff\xd8",
         }
 
-    def complete(self, name, consent, declared_age_group, declared_gender):
+    def complete(self, name, consent, declared_age_group, declared_gender, pending_id=None):
         if declared_age_group == "child" and consent.guardian == "Refused":
             raise ConsentError("registry says no")
+        self.pending_seen = pending_id
         self.calls.append(("complete", name, consent, declared_age_group, declared_gender))
 
     def cancel(self):
@@ -530,7 +532,7 @@ def test_registry_remains_the_authority_on_consent(authed):
 
 def test_registry_list_has_summaries_only(authed):
     rows = authed.request("GET", "/api/registry").json["records"]
-    assert [r["id"] for r in rows] == ["p1", "a1", "a2", "o1"]
+    assert [r["id"] for r in rows] == ["p1", "a1", "a2", "o1", "p9"]
     assert set(rows[0]) == {"id", "display_name", "status", "kind", "last_seen", "age_group"}
     assert rows[0]["last_seen"].startswith("2026-01-01")
 
@@ -762,3 +764,19 @@ def test_consent_text_names_cloud_handling(tmp_path, service):
             srv.stop()
     assert "pseudonyms instead" in texts[True]
     assert "real" in texts[False]
+
+
+def test_enrollment_links_a_pending_imported_name_only_when_chosen(authed, service):
+    assert authed.request("POST", "/api/enrollment/complete", FORM).status == 200
+    assert service.pending_seen is None  # no choice: nothing pending is touched
+    chosen = authed.request("POST", "/api/enrollment/complete", {**FORM, "pending_id": "p9"})
+    assert chosen.status == 200 and service.pending_seen == "p9"
+
+
+@pytest.mark.parametrize("pending", ["p1", "a1", "nope", "../x"])
+def test_enrollment_refuses_a_pending_id_that_is_not_a_pending_person(authed, service, pending):
+    resp = authed.request("POST", "/api/enrollment/complete", {**FORM, "pending_id": pending})
+    assert resp.status == 422
+    assert resp.json["error"] in ("pending_invalid", "id_invalid")
+    assert resp.json["field"] == "pending_id"
+    assert not any(call[0] == "complete" for call in service.calls)

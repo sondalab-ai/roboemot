@@ -304,11 +304,15 @@ def parse_xmp(
     validate_name: Callable[[str], str] = default_validator,
 ) -> ParsedXmp:
     """Parse one sidecar into catalogue items; raises ``XmpError`` when it cannot be read."""
-    raw = data.encode() if isinstance(data, str) else data
-    if len(raw) > max_bytes:
+    if len(data) > max_bytes:  # characters never outnumber bytes: a cheap first cut
         raise XmpError("too_large")
     try:
+        raw = data.encode() if isinstance(data, str) else data  # a lone surrogate fails here
+        if len(raw) > max_bytes:
+            raise XmpError("too_large")
         root = SafeET.fromstring(raw, forbid_dtd=True)
+    except XmpError:
+        raise
     except DefusedXmlException as exc:
         raise XmpError("forbidden_xml") from exc
     except (ParseError, ValueError, UnicodeError, RecursionError) as exc:
