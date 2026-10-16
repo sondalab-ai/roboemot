@@ -7,6 +7,7 @@ the README can pin them.
     python scripts/bench/fetch.py --list
     python scripts/bench/fetch.py yunet sface insightface-buffalo
     python scripts/bench/fetch.py lfw mpdd fairface-val sop-test      # datasets
+    python scripts/bench/fetch.py yolox-nano nanodet-plus coco-annotations coco-samples
     python scripts/bench/fetch.py --export-flat ./models              # for run_cm4.py
 """
 
@@ -80,6 +81,20 @@ FILES: dict[str, list[tuple[str, str, str]]] = {
             f"{HF}/onnx-community/fairface_gender_image_detection-ONNX/resolve/main/onnx/model.onnx",
         ),
     ],
+    "yolox-nano": [
+        (
+            "yolox_nano",
+            "yolox_nano.onnx",
+            f"{GH}/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_nano.onnx",
+        )
+    ],
+    "nanodet-plus": [
+        (
+            "nanodet_plus",
+            "nanodet-plus-m_320.onnx",
+            f"{GH}/RangiLyu/nanodet/releases/download/v1.0.0-alpha-1/nanodet-plus-m_320.onnx",
+        )
+    ],
     "insightface-buffalo": [
         ("insightface", f"{n}.zip", f"{GH}/deepinsight/insightface/releases/download/v0.7/{n}.zip")
         for n in ("buffalo_l", "buffalo_s", "buffalo_sc")
@@ -93,9 +108,24 @@ SOP_BASE = f"{HF}/datasets/nyris/stanford-online-products-v1/resolve/main/data"
 
 # dataset name -> [(subdir under datasets/, filename, url)]
 DATA: dict[str, list[tuple[str, str, str]]] = {
+    "coco-annotations": [
+        (
+            "coco",
+            "annotations_trainval2017.zip",
+            "http://images.cocodataset.org/annotations/annotations_trainval2017.zip",
+        )
+    ],
     "lfw": [
         ("lfw", "lfw.tgz", f"{FIGSHARE}/5976018"),
         ("lfw", "pairs.txt", f"{FIGSHARE}/5976006"),
+    ],
+    "coco-samples": [
+        (
+            "coco/val2017",
+            f"{n}.jpg",
+            f"http://images.cocodataset.org/val2017/{n}.jpg",
+        )
+        for n in ("000000078426", "000000002592")
     ],
     "fairface-val": [
         (
@@ -134,6 +164,8 @@ FLAT = {
     "dinov2_s.onnx": "dinov2_small/model.onnx",
     "clip_b32_vision.onnx": "clip_b32/vision_model.onnx",
     "mobileclip_s0_vision.onnx": "mobileclip_s0/vision_model.onnx",
+    "yolox_nano.onnx": "yolox_nano/yolox_nano.onnx",
+    "nanodet_plus_m_320.onnx": "nanodet_plus/nanodet-plus-m_320.onnx",
 }
 
 
@@ -198,6 +230,11 @@ def main() -> int:
             if fname == "lfw.tgz":
                 with tarfile.open(dest) as t:
                     t.extractall(dest.parent / "x", filter="data")
+            if fname == "annotations_trainval2017.zip":
+                with zipfile.ZipFile(dest) as z:
+                    (dest.parent / "instances_val2017.json").write_bytes(
+                        z.read("annotations/instances_val2017.json")
+                    )
             if fname == "MPDD.zip":
                 with zipfile.ZipFile(dest) as z:
                     for m in z.namelist():

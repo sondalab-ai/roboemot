@@ -78,6 +78,30 @@ and gender in one process and time both per call. To bench INT8 on the robot, co
 `fairface_*_vit_int8.onnx` files into the `models` dir next to the FP32 ones; the commands in the
 next section pick them up automatically, or use `--only` as above and `--threads 1` / `--threads 2`.
 
+## Object detector (SPEC 5, 13)
+
+YOLOX-Nano and NanoDet-Plus-m 320 on a seeded COCO val2017 subset (Apache-2.0 code and official
+ONNX; needs `pycocotools`, in `requirements-eval.txt`). Images are downloaded one by one into
+`datasets/coco/val2017` on first use (about 250 MB for 1,500; the COCO host is slow, so the first
+run can take 20 minutes or more; a rerun is fast). `objects_lib.py` holds the reference
+preprocessing, decode and NMS that `tests/test_vision_objects.py` checks the shipped backend
+against (`pytest -m models`).
+
+```bash
+export OMP_NUM_THREADS=2
+$PY -I scripts/bench/fetch.py yolox-nano nanodet-plus coco-annotations coco-samples
+nice -n 10 $PY -I scripts/bench/eval_objects.py --n 1500 --seed 0 --out scripts/bench/results/objects.json
+$PY -I scripts/bench/fetch.py --export-flat ./models
+nice -n 10 $PY -I scripts/bench/run_cm4.py --models-dir ./models --threads 1 --runs 100 \
+    --only yolox_nano_416,nanodet_plus_m_320 --json scripts/bench/results/objects_mac_1thread.json
+nice -n 10 $PY -I scripts/bench/run_cm4.py --models-dir ./models --threads 2 --inter-threads 2 \
+    --runs 100 --only yolox_nano_416,nanodet_plus_m_320 \
+    --json scripts/bench/results/objects_mac_2threads.json
+```
+
+Pass `--threads 2 --only yolox_nano_416,nanodet_plus_m_320` to the `run_cm4.py` commands below to
+time them on the robot (network only; decode and NMS are not included).
+
 ## Latency on the robot (Raspberry Pi CM4, aarch64)
 
 `run_cm4.py` is self-contained (onnxruntime, numpy; OpenCV only for YuNet). On the Mac:

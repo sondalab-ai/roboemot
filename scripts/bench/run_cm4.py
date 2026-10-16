@@ -6,7 +6,8 @@ Copy this file and a models dir to the robot (Raspberry Pi CM4, aarch64, Python 
     python run_cm4.py --models-dir ./models --json cm4.json
 
 Each model runs in its own subprocess so peak RSS is per model. Inputs are random tensors of the
-shape the pipeline would feed (detection 320x240, face crops 112x112, ...); latency of these
+shape the pipeline would feed (detection 320x240, face crops 112x112, objects 416x416 or
+320x320, ...); latency of these
 networks does not depend on pixel values. ONNX Runtime CPU, intra_op_num_threads=2 by default
 (the cm4 budget gives vision two shared cores). YuNet runs through OpenCV (cv2.FaceDetectorYN),
 its reference runtime, because the zoo ONNX has a fixed 640x640 input.
@@ -56,6 +57,12 @@ MODELS: dict[str, tuple[str, tuple[int, int, int, int], str]] = {
     "dinov2_s_224": ("dinov2_s.onnx", (1, 3, 224, 224), "individual embedding"),
     "clip_b32_224": ("clip_b32_vision.onnx", (1, 3, 224, 224), "individual embedding"),
     "mobileclip_s0_256": ("mobileclip_s0_vision.onnx", (1, 3, 256, 256), "individual embedding"),
+    "yolox_nano_416": ("yolox_nano.onnx", (1, 3, 416, 416), "object detection (network only)"),
+    "nanodet_plus_m_320": (
+        "nanodet_plus_m_320.onnx",
+        (1, 3, 320, 320),
+        "object detection (network only)",
+    ),
 }
 
 # name: (model names run back to back per call, both loaded in one process: RSS and ms per crop)
