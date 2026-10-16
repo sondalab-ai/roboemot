@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 from roboemot.registry.xmp import XmpError, parse_xmp
 
@@ -194,3 +196,63 @@ def test_internal_dtd_without_entities_is_refused_too():
     with pytest.raises(XmpError) as exc:
         parse("<!DOCTYPE r [<!ELEMENT r ANY>]><r/>")
     assert exc.value.code == "forbidden_xml"
+
+
+def test_nested_lists_are_bounded_not_quadratic():
+    depth = 6000
+    inner = "<rdf:li>x</rdf:li>"
+    for _ in range(depth):
+        inner = (
+            "<rdf:li><mwg-rs:RegionList><rdf:Bag>" + inner + "</rdf:Bag></mwg-rs:RegionList></rdf:li>"
+        )
+    xml = HEAD + "<mwg-rs:RegionList><rdf:Bag>" + inner + "</rdf:Bag></mwg-rs:RegionList>" + TAIL
+    start = time.monotonic()
+    out = parse(xml, max_bytes=10_000_000)
+    assert time.monotonic() - start < 2.0
+    assert out.truncated and out.items == []
+
+
+def test_nested_subjects_are_bounded():
+    depth = 3000
+    inner = "<rdf:li>Animals|Cat|Mia</rdf:li>"
+    for _ in range(depth):
+        inner = (
+            "<rdf:li><lr:hierarchicalSubject><rdf:Bag>"
+            + inner
+            + "</rdf:Bag></lr:hierarchicalSubject></rdf:li>"
+        )
+    xml = (
+        HEAD
+        + "<lr:hierarchicalSubject><rdf:Bag>"
+        + inner
+        + "</rdf:Bag></lr:hierarchicalSubject>"
+        + TAIL
+    )
+    assert parse(xml, max_bytes=10_000_000).truncated
+
+
+@pytest.mark.parametrize("bad", ["inf", "nan", "1e309", "-5", "0", "70000", "9" * 30])
+def test_hostile_dimensions_do_not_raise(bad):
+    xml = ATTR_FORM.replace('stDim:w="4000"', f'stDim:w="{bad}"')
+    assert parse(xml, max_pixels=25_000_000).applied_dims is None
+
+
+def test_dimensions_over_the_pixel_cap_are_dropped():
+    assert parse(ATTR_FORM, max_pixels=1000).applied_dims is None
+    assert parse(ATTR_FORM, max_pixels=12_000_000).applied_dims == (4000, 3000)
+
+
+@pytest.mark.parametrize("bad", ["inf", "nan", "1e309", "-0.1", "2"])
+@pytest.mark.parametrize("axis", ["x", "y", "w", "h"])
+def test_hostile_region_numbers_drop_the_region(bad, axis):
+    good = {"x": "0.5", "y": "0.4", "w": "0.2", "h": "0.3"}[axis]
+    xml = ATTR_FORM.replace(f'stArea:{axis}="{good}"', f'stArea:{axis}="{bad}"', 1)
+    by = {i.name: i for i in parse(xml).items}
+    assert by["Mia"].regions == ()
+
+
+@pytest.mark.parametrize("axis", ["w", "h"])
+def test_zero_sized_region_is_dropped(axis):
+    good = {"w": "0.2", "h": "0.3"}[axis]
+    xml = ATTR_FORM.replace(f'stArea:{axis}="{good}"', f'stArea:{axis}="0"', 1)
+    assert {i.name: i for i in parse(xml).items}["Mia"].regions == ()

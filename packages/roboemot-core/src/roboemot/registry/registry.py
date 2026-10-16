@@ -461,18 +461,69 @@ class Registry:
         return record
 
     def confirm_entity(
-        self, entity_id: str, embeddings: Vectors, embedding_model_id: str
+        self,
+        entity_id: str,
+        embeddings: Vectors,
+        embedding_model_id: str,
+        *,
+        keep_existing: bool = False,
+        category: str | None = None,
     ) -> EntityRecord:
-        """Give a pending entity its appearance (the owner confirmed "this is Mia")."""
+        """Give a pending entity its appearance (the owner confirmed "this is Mia").
+
+        With ``keep_existing`` the rows already attached (catalogue photos) are pooled with the
+        new ones when they come from the same model. ``category`` fills in an empty category.
+        """
         with self.lock:
+            current = self._entities[entity_id]
+            rows = _matrix(embeddings)
+            if (
+                keep_existing
+                and len(current.embeddings)
+                and current.embedding_model_id == embedding_model_id
+            ):
+                rows = np.vstack([current.embeddings, rows])
             record = replace(
-                self._entities[entity_id],
-                embeddings=_matrix(embeddings),
+                current,
+                embeddings=rows,
                 embedding_model_id=embedding_model_id,
                 status="active",
+                category=current.category or category or "",
             )
             self._commit_entity(record)
             return record
+
+    def attach_pending_embeddings(
+        self, entity_id: str, embeddings: Vectors, embedding_model_id: str, max_total: int
+    ) -> EntityRecord:
+        """Store appearance rows on a pending entity; it stays pending and out of matching.
+
+        Used by the catalogue import with photos (SPEC 6). Rows of another model are
+        replaced; at ``max_total`` the oldest rows go. ``ValueError`` for an active entity.
+        """
+        with self.lock:
+            current = self._entities[entity_id]
+            if current.status != "pending":
+                raise ValueError("entity is not pending")
+            rows = _matrix(embeddings)
+            if len(current.embeddings) and current.embedding_model_id == embedding_model_id:
+                rows = np.vstack([current.embeddings, rows])
+            record = replace(
+                current, embeddings=rows[-max_total:], embedding_model_id=embedding_model_id
+            )
+            self._commit_entity(record)
+            return record
+
+    def entities(self) -> list[EntityRecord]:
+        """All animals and objects, by name; the records hold embeddings, do not publish them."""
+        with self.lock:
+            return sorted(self._entities.values(), key=lambda r: (r.display_name, r.entity_id))
+
+    def people_named(self, display_name: str) -> list[PersonRecord]:
+        """People whose name equals ``display_name`` ignoring case."""
+        with self.lock:
+            key = display_name.casefold()
+            return [p for p in self._people.values() if p.display_name.casefold() == key]
 
     def get_entity(self, entity_id: str) -> EntityRecord:
         with self.lock:

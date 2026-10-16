@@ -24,6 +24,7 @@ with different categories is a conflict and neither is imported.
 
 from __future__ import annotations
 
+import math
 import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -43,6 +44,8 @@ DC = "http://purl.org/dc/elements/1.1/"
 LR = "http://ns.adobe.com/lightroom/1.0/"
 
 PATH_SEP = "|"
+MAX_DIMENSION = 65535
+LIST_BUDGET_PER_ITEM = 2  # hierarchicalSubject and dc:subject may each list max_items
 PERSON_ROOTS = frozenset({"people", "person", "persone", "persona"})
 ANIMAL_ROOTS = frozenset({"animals", "animal", "pets", "pet", "animali"})
 OBJECT_ROOTS = frozenset({"objects", "object", "things", "oggetti"})
@@ -175,6 +178,37 @@ def _prop(nodes: list[Element], ns: str, local: str) -> str | None:
     return None
 
 
+LIST_CONTAINERS = frozenset({_q(RDF, "Bag"), _q(RDF, "Seq"), _q(RDF, "Alt")})
+LI = _q(RDF, "li")
+
+
+class _Budget:
+    """Counts every ``rdf:li`` visited, named or not, so nesting cannot multiply the work."""
+
+    def __init__(self, limit: int) -> None:
+        self.left = limit
+        self.exhausted = False
+
+    def take(self) -> bool:
+        if self.left <= 0:
+            self.exhausted = True
+            return False
+        self.left -= 1
+        return True
+
+
+def _direct_items(node: Element, budget: _Budget):
+    """The ``rdf:li`` children of the node's direct Bag, Seq or Alt, within the budget."""
+    for container in node:
+        if container.tag not in LIST_CONTAINERS:
+            continue
+        for li in container:
+            if li.tag == LI:
+                if not budget.take():
+                    return
+                yield li
+
+
 def _holders(li: Element) -> list[Element]:
     """The ``li`` itself and the ``rdf:Description`` it wraps (both serialisations)."""
     return [li, *(c for c in li if c.tag == _q(RDF, "Description"))]
@@ -200,22 +234,27 @@ def _area(holders: list[Element]) -> Region | None:
     return None
 
 
-def _applied_dims(root: Element) -> tuple[int, int] | None:
+def _applied_dims(root: Element, max_pixels: int | None) -> tuple[int, int] | None:
     for node in root.iter(_q(MWG, "AppliedToDimensions")):
         nodes = [node, *(c for c in node if c.tag == _q(RDF, "Description"))]
         try:
-            w, h = (int(float(_prop(nodes, ST_DIM, k) or "")) for k in ("w", "h"))
-        except ValueError:
+            w, h = (float(_prop(nodes, ST_DIM, k) or "") for k in ("w", "h"))
+        except (ValueError, OverflowError):
             return None
         unit = _prop(nodes, ST_DIM, "unit")
-        return (w, h) if w > 0 and h > 0 and unit in (None, "pixel") else None
+        sane = all(math.isfinite(v) and 0 < v <= MAX_DIMENSION for v in (w, h))
+        if not sane or unit not in (None, "pixel"):
+            return None
+        if max_pixels is not None and w * h > max_pixels:
+            return None
+        return int(w), int(h)
     return None
 
 
-def _bag_items(root: Element, ns: str, local: str) -> list[str]:
+def _bag_items(root: Element, ns: str, local: str, budget: _Budget) -> list[str]:
     out: list[str] = []
     for node in root.iter(_q(ns, local)):
-        for li in node.iter(_q(RDF, "li")):
+        for li in _direct_items(node, budget):
             value = _text(li)
             if value:
                 out.append(value)
@@ -240,6 +279,7 @@ def parse_xmp(
     max_bytes: int,
     max_items: int,
     max_regions: int,
+    max_pixels: int | None = None,
     validate_name: Callable[[str], str] = default_validator,
 ) -> ParsedXmp:
     """Parse one sidecar into catalogue items; raises ``XmpError`` when it cannot be read."""
@@ -252,11 +292,16 @@ def parse_xmp(
         raise XmpError("forbidden_xml") from exc
     except (ParseError, ValueError, UnicodeError, RecursionError) as exc:
         raise XmpError("not_xml") from exc
-    out = ParsedXmp(applied_dims=_applied_dims(root))
-    raws: list[CatalogueItem] = []
-    _read_regions(root, out, raws, max_regions, validate_name)
-    _read_paths(root, out, raws, validate_name)
-    _merge(raws, out, max_items)
+    budget = _Budget(max_regions + LIST_BUDGET_PER_ITEM * max_items)
+    try:
+        out = ParsedXmp(applied_dims=_applied_dims(root, max_pixels))
+        raws: list[CatalogueItem] = []
+        _read_regions(root, out, raws, max_regions, validate_name, budget)
+        _read_paths(root, out, raws, validate_name, budget)
+        _merge(raws, out, max_items)
+    except (ValueError, OverflowError, RecursionError, TypeError) as exc:
+        raise XmpError("not_xml") from exc
+    out.truncated = out.truncated or budget.exhausted
     return out
 
 
@@ -266,10 +311,11 @@ def _read_regions(
     raws: list[CatalogueItem],
     max_regions: int,
     validate_name: Callable[[str], str],
+    budget: _Budget,
 ) -> None:
     seen = 0
     for listing in root.iter(_q(MWG, "RegionList")):
-        for li in listing.iter(_q(RDF, "li")):
+        for li in _direct_items(listing, budget):
             holders = _holders(li)
             if _prop(holders, MWG, "Name") is None and _prop(holders, MWG, "Type") is None:
                 continue
@@ -313,9 +359,10 @@ def _read_paths(
     out: ParsedXmp,
     raws: list[CatalogueItem],
     validate_name: Callable[[str], str],
+    budget: _Budget,
 ) -> None:
-    paths = _bag_items(root, LR, "hierarchicalSubject")
-    paths += [p for p in _bag_items(root, DC, "subject") if PATH_SEP in p]
+    paths = _bag_items(root, LR, "hierarchicalSubject", budget)
+    paths += [p for p in _bag_items(root, DC, "subject", budget) if PATH_SEP in p]
     for path in dict.fromkeys(paths):
         parts = [p.strip() for p in path.split(PATH_SEP)]
         root_name = parts[0].casefold()
