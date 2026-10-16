@@ -1,0 +1,155 @@
+{
+ "precision": "int8",
+ "n": 1400,
+ "seed": 0,
+ "elapsed_s": 211.7,
+ "confidence_rule": 0.8,
+ "with_rule": {
+  "all": {
+   "n": 1400,
+   "minor_n": 357,
+   "age_group_error": 0.05741626794258373,
+   "age_unknown": 0.25357142857142856,
+   "gender_error": 0.037037037037037035,
+   "gender_unknown": 0.05500000000000005,
+   "minor_as_adult_or_senior": 0.12605042016806722
+  },
+  "East Asian": {
+   "n": 176,
+   "minor_n": 48,
+   "age_group_error": 0.08396946564885496,
+   "age_unknown": 0.25568181818181823,
+   "gender_error": 0.029940119760479042,
+   "gender_unknown": 0.051136363636363646,
+   "minor_as_adult_or_senior": 0.14583333333333334
+  },
+  "Indian": {
+   "n": 177,
+   "minor_n": 50,
+   "age_group_error": 0.058823529411764705,
+   "age_unknown": 0.23163841807909602,
+   "gender_error": 0.04878048780487805,
+   "gender_unknown": 0.07344632768361581,
+   "minor_as_adult_or_senior": 0.12
+  },
+  "Black": {
+   "n": 210,
+   "minor_n": 76,
+   "age_group_error": 0.06015037593984962,
+   "age_unknown": 0.3666666666666667,
+   "gender_error": 0.05263157894736842,
+   "gender_unknown": 0.09523809523809523,
+   "minor_as_adult_or_senior": 0.039473684210526314
+  },
+  "White": {
+   "n": 260,
+   "minor_n": 53,
+   "age_group_error": 0.03864734299516908,
+   "age_unknown": 0.2038461538461539,
+   "gender_error": 0.036734693877551024,
+   "gender_unknown": 0.05769230769230771,
+   "minor_as_adult_or_senior": 0.09433962264150944
+  },
+  "Middle Eastern": {
+   "n": 148,
+   "minor_n": 26,
+   "age_group_error": 0.058333333333333334,
+   "age_unknown": 0.18918918918918914,
+   "gender_error": 0.020833333333333332,
+   "gender_unknown": 0.027027027027026973,
+   "minor_as_adult_or_senior": 0.2692307692307692
+  },
+  "Latino_Hispanic": {
+   "n": 223,
+   "minor_n": 52,
+   "age_group_error": 0.07058823529411765,
+   "age_unknown": 0.2376681614349776,
+   "gender_error": 0.037209302325581395,
+   "gender_unknown": 0.0358744394618834,
+   "minor_as_adult_or_senior": 0.21153846153846154
+  },
+  "Southeast Asian": {
+   "n": 206,
+   "minor_n": 52,
+   "age_group_error": 0.04054054054054054,
+   "age_unknown": 0.2815533980582524,
+   "gender_error": 0.030303030303030304,
+   "gender_unknown": 0.03883495145631066,
+   "minor_as_adult_or_senior": 0.11538461538461539
+  }
+ },
+ "no_rule": {
+  "all": {
+   "n": 1400,
+   "minor_n": 357,
+   "age_group_error": 0.13357142857142856,
+   "age_unknown": 0.0,
+   "gender_error": 0.05928571428571429,
+   "gender_unknown": 0.0,
+   "minor_as_adult_or_senior": 0.19327731092436976
+  },
+  "East Asian": {
+   "n": 176,
+   "minor_n": 48,
+   "age_group_error": 0.16477272727272727,
+   "age_unknown": 0.0,
+   "gender_error": 0.045454545454545456,
+   "gender_unknown": 0.0,
+   "minor_as_adult_or_senior": 0.25
+  },
+  "Indian": {
+   "n": 177,
+   "minor_n": 50,
+   "age_group_error": 0.12994350282485875,
+   "age_unknown": 0.0,
+   "gender_error": 0.07909604519774012,
+   "gender_unknown": 0.0,
+   "minor_as_adult_or_senior": 0.16
+  },
+  "Black": {
+   "n": 210,
+   "minor_n": 76,
+   "age_group_error": 0.1761904761904762,
+   "age_unknown": 0.0,
+   "gender_error": 0.09523809523809523,
+   "gender_unknown": 0.0,
+   "minor_as_adult_or_senior": 0.11842105263157894
+  },
+  "White": {
+   "n": 260,
+   "minor_n": 53,
+   "age_group_error": 0.1,
+   "age_unknown": 0.0,
+   "gender_error": 0.057692307692307696,
+   "gender_unknown": 0.0,
+   "minor_as_adult_or_senior": 0.1509433962264151
+  },
+  "Middle Eastern": {
+   "n": 148,
+   "minor_n": 26,
+   "age_group_error": 0.10810810810810811,
+   "age_unknown": 0.0,
+   "gender_error": 0.033783783783783786,
+   "gender_unknown": 0.0,
+   "minor_as_adult_or_senior": 0.3076923076923077
+  },
+  "Latino_Hispanic": {
+   "n": 223,
+   "minor_n": 52,
+   "age_group_error": 0.13004484304932734,
+   "age_unknown": 0.0,
+   "gender_error": 0.06278026905829596,
+   "gender_unknown": 0.0,
+   "minor_as_adult_or_senior": 0.28846153846153844
+  },
+  "Southeast Asian": {
+   "n": 206,
+   "minor_n": 52,
+   "age_group_error": 0.13106796116504854,
+   "age_unknown": 0.0,
+   "gender_error": 0.03398058252427184,
+   "gender_unknown": 0.0,
+   "minor_as_adult_or_senior": 0.17307692307692307
+  }
+ }
+}

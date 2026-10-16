@@ -12,7 +12,7 @@ deterministic; ``LatestFrameRunner`` drives it live. Per frame, when the governo
    lets one missed vote still fit the SPEC 13 identity budget of 2.5 s with the 3-of-5 votes
    of SPEC 6. The embedding goes straight to ``Matcher.observe`` and is dropped; it is never
    published.
-3. Per track, once, the first ``identity.estimate_frames_min`` face crops go to the attribute
+3. Per track, once, the first ``vision.attribute_crops`` face crops go to the attribute
    worker (skipped when the recognised person has declared age and gender); until it answers,
    age and gender are ``unknown`` (a possible minor).
 4. Published: ``percept.face`` (no embedding), ``person.recognized`` when a track turns into a
@@ -309,7 +309,7 @@ class VisionPipeline:
         if self._declared_complete(state.owner_id):
             state.attr, state.crops = "skipped", []
             return
-        needed = self.identity.estimate_frames_min
+        needed = self.cfg.attribute_crops
         gap = self.cfg.attribute_crop_interval_s
         if len(state.crops) < needed and (
             state.last_crop is None or frame.stamp - state.last_crop >= gap

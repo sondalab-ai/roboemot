@@ -129,6 +129,8 @@ FLAT = {
     "genderage.onnx": "insightface/buffalo_l/genderage.onnx",
     "fairface_age_vit.onnx": "fairface/age_model.onnx",
     "fairface_gender_vit.onnx": "fairface/gender_model.onnx",
+    "fairface_age_vit_int8.onnx": "fairface_int8/age_model.onnx",  # from quantize.py
+    "fairface_gender_vit_int8.onnx": "fairface_int8/gender_model.onnx",
     "dinov2_s.onnx": "dinov2_small/model.onnx",
     "clip_b32_vision.onnx": "clip_b32/vision_model.onnx",
     "mobileclip_s0_vision.onnx": "mobileclip_s0/vision_model.onnx",

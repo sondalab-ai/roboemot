@@ -407,7 +407,11 @@ class IdentityConfig(Strict):
         0.8, "Below this, age/gender estimates are unknown", ge=0, le=1
     )
     estimate_frames_min: int = param(
-        5, "Frames aggregated before an estimate is used", ge=1, le=100
+        3,
+        "Frames aggregated before an estimate is used; vision.attribute_crops must be at "
+        "least this",
+        ge=1,
+        le=100,
     )
     enroll_min_embeddings: int = param(5, "Face embeddings required at enrollment", ge=5, le=20)
     max_embeddings_per_person: int = param(
@@ -602,6 +606,19 @@ class VisionConfig(Strict):
     )
     max_embeds_per_frame: int = param(
         2, "Cap on embeddings computed for one frame, to bound its latency", ge=1, le=16
+    )
+    attribute_precision: Literal["auto", "int8", "fp32"] = param(
+        "auto",
+        "Age and gender model files: int8 (dynamic INT8, about 87 MB each), fp32 (343 MB each) "
+        "or auto (int8 when the robot manifest profile is cm4, fp32 otherwise)",
+        restart=True,
+    )
+    attribute_crops: int = param(
+        3,
+        "Face crops per track for the age and gender job (SPEC 5); at least "
+        "identity.estimate_frames_min, and the 0.8 confidence rule applies at any count",
+        ge=1,
+        le=10,
     )
     attribute_crop_interval_s: float = param(
         0.3,
@@ -1033,6 +1050,10 @@ with warnings.catch_warnings():
         def _vision_fits_identity(self) -> RoboEmotConfig:
             if self.vision.embedding_burst < self.identity.votes_required:
                 raise ValueError("vision.embedding_burst must be at least identity.votes_required")
+            if self.vision.attribute_crops < self.identity.estimate_frames_min:
+                raise ValueError(
+                    "vision.attribute_crops must be at least identity.estimate_frames_min"
+                )
             if self.vision.embed_min_face_px < self.vision.face_min_px:
                 raise ValueError("vision.embed_min_face_px must be at least face_min_px")
             return self

@@ -310,7 +310,7 @@ Vision is a set of small models scheduled on the NPU (npu profile) or the CPU (c
 | --- | --- | --- | --- |
 | Face detection | Lightweight detector (npu: SCRFD class; cm4 and M1: YuNet 2023mar, MIT) | 15 fps | Boxes + 5 landmarks |
 | Face embedding | ArcFace-class encoder (cm4 and M1: SFace, Apache-2.0) | On new track, then 2 fps | Embedding for identity matching |
-| Age group and gender | Classification heads on the face crop (cm4 and M1: FairFace ViT-B pair, Apache-2.0) | On new track, then 1 fps | `age_group` in {child, teen, adult, senior, unknown}; `gender` in {male, female, unknown}; probability each |
+| Age group and gender | Classification heads on the face crop (cm4 and M1: FairFace ViT-B pair, Apache-2.0; `vision.attribute_precision` `auto` loads INT8 when the manifest `profile` is `cm4` and FP32 otherwise) | On new track, then 1 fps | `age_group` in {child, teen, adult, senior, unknown}; `gender` in {male, female, unknown}; probability each |
 | Body pose | 17-keypoint estimator (RTMPose / MoveNet class) | 15 fps when mirror or attention needs it | Keypoints + confidence |
 | Hand landmarks | Optional 21-point hand model | On demand | Hand pose for gestures |
 | Objects | YOLO-class detector, fixed classes | 5 fps | Labelled boxes |
@@ -318,7 +318,7 @@ Vision is a set of small models scheduled on the NPU (npu profile) or the CPU (c
 
 ### Rules for estimated attributes
 
-- Estimates are aggregated over a track (median of at least 5 frames) before use, and below a confidence threshold (default 0.8) the value is `unknown`.
+- Estimates are aggregated over a track (median of at least `identity.estimate_frames_min` frames, default 3; the age and gender job takes `vision.attribute_crops` crops per track, default 3, and the configuration is rejected if that is below `estimate_frames_min`, so raising the minimum for safety needs more crops explicitly) before use, and below a confidence threshold (default 0.8) the value is `unknown`.
 - A value declared at enrollment always overrides the estimate for that person.
 - Estimates can only make behaviour more conservative, never less: they select register defaults and can trigger the minor-present policy (sections 7, 8, 12), but never relax a cap or cause a refusal to interact. A person whose age group is unknown counts as a possible minor until a confident estimate or a declared value exists.
 - Age and gender classifiers are known to be less accurate for children and for some demographic groups. The evaluation plan (section 14) measures error per group before a model is accepted.
@@ -945,14 +945,14 @@ Every feature stays available on the CM4; what changes is model size and rate. A
 | Face detection | YuNet 2023mar (MIT) on CPU, 320x240 input | 5 to 10 fps |
 | Face following between detections | Daemon head tracking (`start_head_tracking`, `get_tracked_face`) | Daemon rate |
 | Face embedding | SFace (Apache-2.0) | On new track, then 0.5 fps |
-| Age group and gender | FairFace ViT-B age and gender pair (Apache-2.0), low priority | Once per new track; unknown (possible minor) until it returns |
+| Age group and gender | FairFace ViT-B age and gender pair, INT8 (Apache-2.0, dynamic QInt8 built by `roboemot models fetch`), low priority | Once per new track on `vision.attribute_crops` crops (default 3, not below `identity.estimate_frames_min`); unknown (possible minor) until it returns |
 | Body pose | MoveNet Lightning-class | 5 to 8 fps, only while mimicry or gesture detection is active |
 | Objects | Off by default; small detector on request | 1 fps when on |
 | Speech emotion | Prosody features; classifier optional | Per utterance |
 | ASR | Vosk small streaming models (vosk-model-small-it-0.22, 48 MB, WER 16.9% on Common Voice; small English model alongside) | Real time |
 | TTS | Piper, Italian voices paola, riccardo or serena (remote speech API optional for richer mood) | Faster than real time |
 
-The two ViT-B models are 343 MB each (about 690 MB, about 200 ms per call each on a Mac with 2 threads); their RAM against the 2.4 GB budget is to verify on Neve. Individual animals and objects use DINOv2-S (Apache-2.0, 88 MB). Measurements: [model spike](../spikes/2026-10-m1-models.md).
+The two ViT-B models are 343 MB each in FP32 (about 690 MB, about 200 ms per call each on a Mac with 2 threads). The cm4 profile uses INT8 dynamic quantization (`vision.attribute_precision: auto` resolves to INT8 for the `cm4` manifest profile and FP32 otherwise): about 87 MB each, about 140 ms for the pair per crop on a Mac with 2 threads, 289 MB peak RSS for the pair, and accuracy within the noise of FP32 on a 1,400-image FairFace subset (INT8 did label 0.8 points more minors as adult or senior, 3 of 357, which is inside that noise but in the unsafe direction; see section 15). The INT8 files are made on the device by `roboemot models fetch` from the FP32 files, so the FP32 pair (about 690 MB) must be on disk during fetch; `roboemot models prune --sources` then deletes it and about 174 MB remain. Quantization time and peak RAM on the CM4 are not measured (section 15). The CM4 time per crop is not measured: crops per track is configurable (`vision.attribute_crops`, 1 to 10, default 3; the 0.8 confidence rule applies at any count) and is to be tuned after running `scripts/bench/run_cm4.py` on Neve, which also settles the RAM against the 2.4 GB budget. Individual animals and objects use DINOv2-S (Apache-2.0, 88 MB). Measurements: [model spike](../spikes/2026-10-m1-models.md).
 
 Face embeddings are model-specific: moving a registry between profiles requires re-enrollment, because enrollment images are not kept by default.
 
@@ -1029,6 +1029,9 @@ Milestones are ordered by dependency; dates are not set yet.
 These are facts to measure, not decisions:
 
 - [ ] Run `scripts/bench/run_cm4.py` on Neve to replace the guessed CM4 latencies in the [model spike](../spikes/2026-10-m1-models.md), and check RAM with the two ViT-B models loaded.
+- [ ] On the CM4: time and peak RAM of the on-device INT8 quantization in `roboemot models fetch` (it loads a 343 MB FP32 model per file; the 2.4 GB budget and the daemon's memory must hold during it), and the free disk needed (about 690 MB of FP32 sources until `models prune --sources`). If it does not fit, produce the INT8 files elsewhere.
+- [ ] INT8 FairFace speed on the Cortex-A72, which has no INT8 dot-product instructions: the 2.7 to 3.0x speed-up seen on the Mac may be smaller there; it sets `vision.attribute_crops`.
+- [ ] Re-run the FairFace accuracy on all 10,954 validation images, FP32 against INT8 (about 30 minutes for INT8 alone): on the 1,400-image subset INT8 labelled 0.8 points more minors as adult or senior (inside the noise, unsafe direction), and the full set decides whether that holds.
 
 - [ ] Resolved from the SDK source: `goto_target` blocks until the move ends, so RoboEmot streams only (section 4A).
 - [ ] How daemon head tracking combines with `set_target` streaming. Per the SDK, `weight=1` lets tracking own head orientation, intermediate values blend in app motion, `0` pauses detection; the blend needs measuring on the robot.

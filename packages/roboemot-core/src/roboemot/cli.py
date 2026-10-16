@@ -95,11 +95,21 @@ def _models(args: argparse.Namespace) -> int:
             print(f"{spec.name:16} {spec.role:20} {spec.licence:11} {state}")
         print(f"folder: {root}")
         return 0
+    if args.action == "prune":
+        if not args.sources:
+            raise ValueError(
+                "prune needs --sources (delete FP32 files whose INT8 files are verified)"
+            )
+        removed = models.prune_sources(root)
+        for path in removed:
+            print(f"deleted    {path}")
+        print(f"{len(removed)} source file(s) deleted")
+        return 0
     names = list(specs) if args.all else args.names
     if not names:
         raise ValueError("name the models to fetch (see `roboemot models list`) or pass --all")
 
-    report = models.fetch(names, root)
+    report = models.fetch(names, root, requantize=args.requantize)
     for path, outcome in report.files.items():
         print(f"{outcome:10} {root / path}")
     return 0
@@ -136,10 +146,22 @@ def main(argv: list[str] | None = None) -> int:
     dbg.add_argument("--timeout", type=float, default=None, help="seconds per section")
     dbg.add_argument("--json", action="store_true")
 
-    mod = sub.add_parser("models", help="vision model files: list, fetch (SPEC 5, 13)")
-    mod.add_argument("action", choices=["list", "fetch"])
+    mod = sub.add_parser("models", help="vision model files: list, fetch, prune (SPEC 5, 13)")
+    mod.add_argument("action", choices=["list", "fetch", "prune"])
     mod.add_argument("names", nargs="*", help="models to fetch (see `list`)")
-    mod.add_argument("--all", action="store_true", help="fetch every model (about 0.8 GB)")
+    mod.add_argument(
+        "--all",
+        action="store_true",
+        help="fetch every model (about 0.8 GB, plus 0.17 GB of INT8 files made from it)",
+    )
+    mod.add_argument(
+        "--requantize", action="store_true", help="fetch: rebuild INT8 files from the FP32 sources"
+    )
+    mod.add_argument(
+        "--sources",
+        action="store_true",
+        help="prune: delete FP32 files whose INT8 files are verified",
+    )
     mod.add_argument(
         "--cache-dir", help="models folder (default: vision.models_dir, else ~/.cache)"
     )
