@@ -308,9 +308,9 @@ Vision is a set of small models scheduled on the NPU (npu profile) or the CPU (c
 
 | Stage | Default model class | Rate | Output |
 | --- | --- | --- | --- |
-| Face detection | Lightweight detector (SCRFD / YuNet class) | 15 fps | Boxes + 5 landmarks |
-| Face embedding | ArcFace-class encoder (cm4: MobileFaceNet-class) | On new track, then 2 fps | Embedding for identity matching |
-| Age group and gender | Classification heads on the face crop | On new track, then 1 fps | `age_group` in {child, teen, adult, senior, unknown}; `gender` in {male, female, unknown}; probability each |
+| Face detection | Lightweight detector (npu: SCRFD class; cm4 and M1: YuNet 2023mar, MIT) | 15 fps | Boxes + 5 landmarks |
+| Face embedding | ArcFace-class encoder (cm4 and M1: SFace, Apache-2.0) | On new track, then 2 fps | Embedding for identity matching |
+| Age group and gender | Classification heads on the face crop (cm4 and M1: FairFace ViT-B pair, Apache-2.0) | On new track, then 1 fps | `age_group` in {child, teen, adult, senior, unknown}; `gender` in {male, female, unknown}; probability each |
 | Body pose | 17-keypoint estimator (RTMPose / MoveNet class) | 15 fps when mirror or attention needs it | Keypoints + confidence |
 | Hand landmarks | Optional 21-point hand model | On demand | Hand pose for gestures |
 | Objects | YOLO-class detector, fixed classes | 5 fps | Labelled boxes |
@@ -360,7 +360,7 @@ Positions are egocentric: bearing and distance from the robot's base, so a robot
 ### Known individuals and auto-enrollment
 
 - Known animals and objects are registry entries (section 6) matched by appearance embedding, like people by face.
-- Auto-enrollment (animals and objects only, never people): an unknown entry whose appearance clusters with earlier sightings on at least `world.autoenroll.min_days` different days, with a cluster tighter than `world.autoenroll.max_spread`, is enrolled with a placeholder name (`cat 1`, `mug 2`). The owner can rename, merge or delete it in the web UI. Defaults are set after the recognition spike (section 15).
+- Auto-enrollment (animals and objects only, never people): an unknown entry whose appearance clusters with earlier sightings on at least `world.autoenroll.min_days` different days, with a cluster tighter than `world.autoenroll.max_spread`, is enrolled with a placeholder name (`cat 1`, `mug 2`). The owner can rename, merge or delete it in the web UI. Defaults after the recognition spike (section 15): `world.autoenroll.min_days` 3, at least 5 sightings, `max_spread` 0.25 (cosine distance to the cluster centroid, max over members, with DINOv2-S, Apache-2.0). These are judgement values to tune on the robot. Objects separate poorly in the spike (66% rank-1 on a product catalogue, dogs 97.5%), so wrong merges are expected and the owner fixes them in the web UI.
 - People are enrolled only through the consent flow (section 6, Enrollment).
 
 ### History (opt-in)
@@ -396,7 +396,7 @@ The registry stores enrolled people, animals and objects as embeddings plus a pr
 
 ### Matching
 
-- Cosine similarity against all stored embeddings; a track is assigned to a person when the best match exceeds the threshold (default 0.45, tuned per model) on at least 3 of the last 5 evaluations, with a margin of 0.1 over the second best.
+- Cosine similarity against all stored embeddings; a track is assigned to a person when the best match exceeds the threshold (default 0.45, which is the SFace seed; tuned per model, see the [model spike](../spikes/2026-10-m1-models.md)) on at least 3 of the last 5 evaluations, with a margin of 0.1 over the second best.
 - Otherwise the track is `unknown` and gets a temporary anonymous ID for the session only.
 - Face and voice IDs are fused when both exist; a disagreement drops the track to `unknown`.
 - Online refresh adds a new embedding only after a high-confidence match, capped per person, to follow slow changes such as a growing child.
@@ -942,15 +942,17 @@ Every feature stays available on the CM4; what changes is model size and rate. A
 
 | Stage | cm4 choice | Target rate |
 | --- | --- | --- |
-| Face detection | YuNet-class on CPU, 320x240 input | 5 to 10 fps |
+| Face detection | YuNet 2023mar (MIT) on CPU, 320x240 input | 5 to 10 fps |
 | Face following between detections | Daemon head tracking (`start_head_tracking`, `get_tracked_face`) | Daemon rate |
-| Face embedding | MobileFaceNet-class encoder | On new track, then 0.5 fps |
-| Age group and gender | Small heads on the same face crop | On new track, then every 10 s |
+| Face embedding | SFace (Apache-2.0) | On new track, then 0.5 fps |
+| Age group and gender | FairFace ViT-B age and gender pair (Apache-2.0), low priority | Once per new track; unknown (possible minor) until it returns |
 | Body pose | MoveNet Lightning-class | 5 to 8 fps, only while mimicry or gesture detection is active |
 | Objects | Off by default; small detector on request | 1 fps when on |
 | Speech emotion | Prosody features; classifier optional | Per utterance |
 | ASR | Vosk small streaming models (vosk-model-small-it-0.22, 48 MB, WER 16.9% on Common Voice; small English model alongside) | Real time |
 | TTS | Piper, Italian voices paola, riccardo or serena (remote speech API optional for richer mood) | Faster than real time |
+
+The two ViT-B models are 343 MB each (about 690 MB, about 200 ms per call each on a Mac with 2 threads); their RAM against the 2.4 GB budget is to verify on Neve. Individual animals and objects use DINOv2-S (Apache-2.0, 88 MB). Measurements: [model spike](../spikes/2026-10-m1-models.md).
 
 Face embeddings are model-specific: moving a registry between profiles requires re-enrollment, because enrollment images are not kept by default.
 
@@ -1011,10 +1013,10 @@ Milestones are ordered by dependency; dates are not set yet.
 - [ ] Which remote model is the default preset shipped with v1 (any OpenAI-compatible endpoint works)?
 - [ ] Spoken languages beyond Italian and English?
 - [ ] Should gender estimation also change register parameters beyond forms of address, and for which use case?
-- [ ] Is the library open source, and under which licence? It affects the choice of pretrained models (some face models have non-commercial licences) and how Piper (GPL-3.0) is bundled.
+- [ ] Is the library open source, and under which licence? Partly answered: M1 uses a permissive-weights stack (YuNet, SFace, FairFace ViT-B, DINOv2-S; [spike](../spikes/2026-10-m1-models.md)); the library licence itself is still open. It affects the choice of pretrained models (some face models have non-commercial licences) and how Piper (GPL-3.0) is bundled.
 - [ ] Is the Reachy Mini app web UI enough for enrollment and settings, or is a phone app needed?
 - [ ] Is a learned motor policy expected in v1, or is the procedural policy with a plug-in slot acceptable?
-- [ ] Spike before M1 auto-enrollment: can a general image embedding tell individual animals and objects apart (this cat vs. that cat, my mug vs. a similar one) accurately and fast enough on the CM4? The result sets the `world.autoenroll` defaults, or limits auto-enrollment to categories.
+- [x] Resolved by the M1 model spike ([spike](../spikes/2026-10-m1-models.md)): a general image embedding (DINOv2-S) tells individual dogs apart well (97.5% rank-1) and household objects poorly (66%); auto-enrollment covers both, with defaults in section 5A.
 - [ ] Are warmth, energy, playfulness and formality the right persona traits, and do the default trait tables (section 11A, Persona) feel right on the robot?
 
 * [ ] Are the reduced cm4 rates acceptable for v1 (vision 5 to 10 fps, identity within 2.5 s, object detection off by default)?
@@ -1025,6 +1027,8 @@ Milestones are ordered by dependency; dates are not set yet.
 ### To verify on the robot in M0
 
 These are facts to measure, not decisions:
+
+- [ ] Run `scripts/bench/run_cm4.py` on Neve to replace the guessed CM4 latencies in the [model spike](../spikes/2026-10-m1-models.md), and check RAM with the two ViT-B models loaded.
 
 - [ ] Resolved from the SDK source: `goto_target` blocks until the move ends, so RoboEmot streams only (section 4A).
 - [ ] How daemon head tracking combines with `set_target` streaming. Per the SDK, `weight=1` lets tracking own head orientation, intermediate values blend in app motion, `0` pauses detection; the blend needs measuring on the robot.

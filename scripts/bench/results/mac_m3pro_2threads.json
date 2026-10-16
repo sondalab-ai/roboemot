@@ -1,0 +1,258 @@
+{
+ "host": {
+  "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "cpu": "arm",
+  "python": "3.13.13",
+  "cores_visible": 12
+ },
+ "results": [
+  {
+   "model": "yunet_320x240",
+   "note": "face detection (cv2)",
+   "file": "face_detection_yunet_2023mar.onnx",
+   "size_mb": 0.2,
+   "input": [
+    1,
+    3,
+    240,
+    320
+   ],
+   "engine": "opencv 5.0.0",
+   "threads": 2,
+   "runs": 50,
+   "p50_ms": 2.57,
+   "p95_ms": 3.18,
+   "mean_ms": 2.6,
+   "peak_rss_mb": 73.0
+  },
+  {
+   "model": "scrfd_500m_320x240",
+   "note": "face detection",
+   "file": "det_500m.onnx",
+   "size_mb": 2.5,
+   "input": [
+    1,
+    3,
+    240,
+    320
+   ],
+   "engine": "onnxruntime 1.31.0",
+   "threads": 2,
+   "runs": 50,
+   "p50_ms": 2.75,
+   "p95_ms": 2.88,
+   "mean_ms": 2.76,
+   "peak_rss_mb": 72.0
+  },
+  {
+   "model": "scrfd_2.5g_320x240",
+   "note": "face detection",
+   "file": "scrfd_2.5g_bnkps.onnx",
+   "size_mb": 3.3,
+   "input": [
+    1,
+    3,
+    240,
+    320
+   ],
+   "engine": "onnxruntime 1.31.0",
+   "threads": 2,
+   "runs": 50,
+   "p50_ms": 9.56,
+   "p95_ms": 10.09,
+   "mean_ms": 9.59,
+   "peak_rss_mb": 73.0
+  },
+  {
+   "model": "scrfd_500m_640x480",
+   "note": "face detection (reference size)",
+   "file": "det_500m.onnx",
+   "size_mb": 2.5,
+   "input": [
+    1,
+    3,
+    480,
+    640
+   ],
+   "engine": "onnxruntime 1.31.0",
+   "threads": 2,
+   "runs": 50,
+   "p50_ms": 11.26,
+   "p95_ms": 12.34,
+   "mean_ms": 11.25,
+   "peak_rss_mb": 98.0
+  },
+  {
+   "model": "mbf_112",
+   "note": "face embedding",
+   "file": "w600k_mbf.onnx",
+   "size_mb": 13.6,
+   "input": [
+    1,
+    3,
+    112,
+    112
+   ],
+   "engine": "onnxruntime 1.31.0",
+   "threads": 2,
+   "runs": 50,
+   "p50_ms": 7.18,
+   "p95_ms": 7.89,
+   "mean_ms": 7.25,
+   "peak_rss_mb": 85.0
+  },
+  {
+   "model": "r50_112",
+   "note": "face embedding",
+   "file": "w600k_r50.onnx",
+   "size_mb": 174.4,
+   "input": [
+    1,
+    3,
+    112,
+    112
+   ],
+   "engine": "onnxruntime 1.31.0",
+   "threads": 2,
+   "runs": 50,
+   "p50_ms": 86.6,
+   "p95_ms": 91.3,
+   "mean_ms": 84.24,
+   "peak_rss_mb": 343.0
+  },
+  {
+   "model": "sface_112",
+   "note": "face embedding",
+   "file": "face_recognition_sface_2021dec.onnx",
+   "size_mb": 38.7,
+   "input": [
+    1,
+    3,
+    112,
+    112
+   ],
+   "engine": "onnxruntime 1.31.0",
+   "threads": 2,
+   "runs": 50,
+   "p50_ms": 9.57,
+   "p95_ms": 10.61,
+   "mean_ms": 9.89,
+   "peak_rss_mb": 148.0
+  },
+  {
+   "model": "genderage_96",
+   "note": "age/gender",
+   "file": "genderage.onnx",
+   "size_mb": 1.3,
+   "input": [
+    1,
+    3,
+    96,
+    96
+   ],
+   "engine": "onnxruntime 1.31.0",
+   "threads": 2,
+   "runs": 50,
+   "p50_ms": 0.38,
+   "p95_ms": 0.39,
+   "mean_ms": 0.38,
+   "peak_rss_mb": 64.0
+  },
+  {
+   "model": "fairface_age_vit_224",
+   "note": "age (ViT-B)",
+   "file": "fairface_age_vit.onnx",
+   "size_mb": 343.4,
+   "input": [
+    1,
+    3,
+    224,
+    224
+   ],
+   "engine": "onnxruntime 1.31.0",
+   "threads": 2,
+   "runs": 50,
+   "p50_ms": 198.2,
+   "p95_ms": 208.07,
+   "mean_ms": 192.48,
+   "peak_rss_mb": 430.0
+  },
+  {
+   "model": "fairface_gender_vit_224",
+   "note": "gender (ViT-B)",
+   "file": "fairface_gender_vit.onnx",
+   "size_mb": 343.4,
+   "input": [
+    1,
+    3,
+    224,
+    224
+   ],
+   "engine": "onnxruntime 1.31.0",
+   "threads": 2,
+   "runs": 50,
+   "p50_ms": 197.6,
+   "p95_ms": 209.01,
+   "mean_ms": 191.89,
+   "peak_rss_mb": 430.0
+  },
+  {
+   "model": "dinov2_s_224",
+   "note": "individual embedding",
+   "file": "dinov2_s.onnx",
+   "size_mb": 88.5,
+   "input": [
+    1,
+    3,
+    224,
+    224
+   ],
+   "engine": "onnxruntime 1.31.0",
+   "threads": 2,
+   "runs": 50,
+   "p50_ms": 76.29,
+   "p95_ms": 77.38,
+   "mean_ms": 74.34,
+   "peak_rss_mb": 167.0
+  },
+  {
+   "model": "clip_b32_224",
+   "note": "individual embedding",
+   "file": "clip_b32_vision.onnx",
+   "size_mb": 351.7,
+   "input": [
+    1,
+    3,
+    224,
+    224
+   ],
+   "engine": "onnxruntime 1.31.0",
+   "threads": 2,
+   "runs": 50,
+   "p50_ms": 52.55,
+   "p95_ms": 52.99,
+   "mean_ms": 50.92,
+   "peak_rss_mb": 416.0
+  },
+  {
+   "model": "mobileclip_s0_256",
+   "note": "individual embedding",
+   "file": "mobileclip_s0_vision.onnx",
+   "size_mb": 45.5,
+   "input": [
+    1,
+    3,
+    256,
+    256
+   ],
+   "engine": "onnxruntime 1.31.0",
+   "threads": 2,
+   "runs": 50,
+   "p50_ms": 48.25,
+   "p95_ms": 49.04,
+   "mean_ms": 47.27,
+   "peak_rss_mb": 137.0
+  }
+ ]
+}

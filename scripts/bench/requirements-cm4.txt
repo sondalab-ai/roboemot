@@ -1,0 +1,4 @@
+# run_cm4.py on the robot (aarch64 wheels exist for all of these)
+onnxruntime>=1.17
+numpy>=1.26
+opencv-python-headless>=4.9,<5   # only for the YuNet row (cv2.FaceDetectorYN)
