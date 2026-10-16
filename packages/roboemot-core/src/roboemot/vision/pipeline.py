@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+import math
 from collections.abc import Callable
 from concurrent.futures import Executor
 from dataclasses import dataclass, field
@@ -49,7 +50,7 @@ from typing import Any, Literal
 import numpy as np
 
 from ..bus import Bus
-from ..config.schema import IdentityConfig, VisionConfig, WorldConfig
+from ..config.schema import IdentityConfig, TrackerConfig, VisionConfig, WorldConfig
 from ..registry import Estimate, Matcher
 from ..registry.records import Attribute
 from ..world import Observation
@@ -146,16 +147,7 @@ class VisionPipeline:
         self.object_detector = object_detector
         ids = itertools.count(1)
         self.face_tracker = Tracker(cfg.tracker, ids)
-        self.object_tracker = Tracker(
-            cfg.tracker.model_copy(
-                update={
-                    "high_score": cfg.object_score_min,
-                    "low_score": min(cfg.tracker.low_score, cfg.object_score_min),
-                    "lost_s": cfg.object_lost_s,
-                }
-            ),
-            ids,
-        )
+        self.object_tracker = Tracker(self._object_tracker_cfg(), ids)
         self.worker = (
             AttributeWorker(attribute_estimator, identity, cfg.attribute_queue_max, executor)
             if attribute_estimator is not None
@@ -178,6 +170,7 @@ class VisionPipeline:
         """
         self._absorb_attributes()
         stamp = frame.stamp
+        self.object_tracker.cfg = self._object_tracker_cfg()
         self._expire(stamp)
         if self.governor.scale <= 0:
             return FrameReport(stamp)
@@ -222,8 +215,31 @@ class VisionPipeline:
         """
         self.cfg, self.identity = vision, identity
         self.governor.rates = vision.rates
-        self.face_tracker.cfg = self.object_tracker.cfg = vision.tracker
+        self.face_tracker.cfg = vision.tracker
+        self.object_tracker.cfg = self._object_tracker_cfg()
         self.matcher.config = identity
+
+    def _object_tracker_cfg(self) -> TrackerConfig:
+        """Tracker settings for animals and objects, derived from the vision config.
+
+        A detection at ``object_score_min`` starts a track, and there is no low-score pass: the
+        detector and ``_process_objects`` already drop everything below that score, so
+        ``low_score`` equals ``high_score``. A track lives for the larger of ``object_lost_s``
+        and ``object_lost_periods`` object-detection periods at the rate the governor allows
+        now, so a slow object stage (circadian or load scale) does not expire tracks between
+        two frames.
+        """
+        lost = self.cfg.object_lost_s
+        period = self.governor.period("objects")
+        if math.isfinite(period):
+            lost = max(lost, self.cfg.object_lost_periods * period)
+        return self.cfg.tracker.model_copy(
+            update={
+                "high_score": self.cfg.object_score_min,
+                "low_score": self.cfg.object_score_min,
+                "lost_s": lost,
+            }
+        )
 
     def stats(self) -> dict[str, Any]:
         """Counts for the debug report (SPEC 12A): live tracks, governor scale and drops.
@@ -491,7 +507,9 @@ class VisionPipeline:
                 source=self.source,
                 azimuth_rad=azimuth,
                 elevation_rad=elevation,
-                category=track.label,
+                category=self.cfg.object_display_names.get(
+                    track.label, track.label.replace("_", " ")
+                ),
                 identity=state.owner_id,
                 confidence=min(1.0, max(0.0, track.score)),
                 embedding=state.embedding,

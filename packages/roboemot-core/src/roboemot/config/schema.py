@@ -728,12 +728,19 @@ class VisionConfig(Strict):
     )
     object_lost_s: float = param(
         5.0,
-        "An animal or object track unmatched for this long is removed; objects run at "
-        "vision.rates.objects_hz (1 Hz), so the face value of tracker.lost_s would drop a "
-        "track after one missed frame",
+        "Shortest time an animal or object track may stay unmatched before it is removed",
         unit="s",
         ge=0.1,
         le=300,
+    )
+    object_lost_periods: float = param(
+        3.0,
+        "An animal or object track also survives this many object-detection periods, at the "
+        "rate the governor currently allows (1 / (objects_hz x scale)): the lifetime is the "
+        "larger of this and object_lost_s, so slowing the detector never kills tracks between "
+        "two frames",
+        ge=1,
+        le=100,
     )
     object_nms_iou: float = param(
         0.6,
@@ -765,6 +772,13 @@ class VisionConfig(Strict):
         "Detector classes reported as kind object; a class in neither list is ignored, and so "
         "is person (faces come from the face detector)",
         restart=True,
+    )
+
+    object_display_names: dict[str, str] = param(
+        {"potted_plant": "potted plant", "cell_phone": "cell phone", "teddy_bear": "teddy bear"},
+        "Readable category for a detector class in observations, placeholder names and scene "
+        "text; a class not listed uses its name with underscores turned into spaces (English "
+        "only: localised strings are not provided yet)",
     )
 
     @model_validator(mode="after")

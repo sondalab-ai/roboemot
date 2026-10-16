@@ -695,3 +695,53 @@ def test_replay_against_one_registry_does_not_change_it(tmp_path):
     assert any(m["topic"] == "person.recognized" for m in first)
     assert first == second
     assert {k: v.shape for k, v in before.items()} == {k: v.shape for k, v in after.items()}
+
+
+def test_object_track_lifetime_follows_the_governor_scale(tmp_path):
+    _, _, pipe, _, _ = rig(tmp_path, lambda i: [], object_detector=ObjectMock([]))
+    cfg = CFG.vision
+    assert pipe.object_tracker.cfg.lost_s == cfg.object_lost_s  # 1 Hz: 3 periods < 5 s
+    pipe.governor.set_scale("circadian", 0.1)
+    pipe.process(Frame(image(0), 0.0))
+    period = 1 / (cfg.rates.objects_hz * 0.1)
+    assert pipe.object_tracker.cfg.lost_s == pytest.approx(cfg.object_lost_periods * period)
+    assert pipe.object_tracker.cfg.lost_s > cfg.object_lost_s
+    pipe.governor.set_scale("circadian", 1.0)
+    pipe.process(Frame(image(1), 1.0))
+    assert pipe.object_tracker.cfg.lost_s == cfg.object_lost_s
+    pipe.apply_config(cfg.model_copy(update={"object_lost_s": 9.0}), CFG.identity)
+    assert pipe.object_tracker.cfg.lost_s == 9.0 and pipe.object_tracker.cfg.high_score == 0.4
+
+
+def test_an_object_track_survives_a_missed_frame_at_a_tenth_of_the_rate(tmp_path):
+    objs = ObjectMock([Detection((20, 100, 80, 160), 0.8, "cat")])
+    _, _, pipe, _, got = rig(tmp_path, lambda i: [], object_detector=objs)
+    pipe.governor.set_scale("circadian", 0.1)  # one object frame every 10 s
+    for stamp in (0.0, 10.0):
+        pipe.process(Frame(image(int(stamp)), stamp))
+    assert {m.payload.category for m in got["percept.entity"]} == {"cat"}
+    objs.dets = []
+    pipe.process(Frame(image(20), 20.0))  # missed frame: 10 s gap, within 3 periods
+    assert len(pipe._entities) == 1
+    objs.dets = [Detection((20, 100, 80, 160), 0.8, "cat")]
+    pipe.process(Frame(image(30), 30.0))
+    assert len(pipe._entities) == 1 and len(pipe.object_tracker._tracks) == 1
+
+
+def test_the_object_tracker_has_no_low_score_pass(tmp_path):
+    _, _, pipe, _, _ = rig(tmp_path, lambda i: [], object_detector=ObjectMock([]))
+    cfg = pipe.object_tracker.cfg
+    assert cfg.low_score == cfg.high_score == CFG.vision.object_score_min
+
+
+def test_categories_are_readable_names(tmp_path):
+    objs = ObjectMock(
+        [
+            Detection((20, 100, 80, 160), 0.8, "potted_plant"),
+            Detection((200, 100, 260, 160), 0.8, "hair_drier"),
+        ]
+    )
+    cfg = CFG.vision.model_copy(update={"object_categories": ["potted_plant", "hair_drier"]})
+    _, _, pipe, _, got = rig(tmp_path, lambda i: [], vision=cfg, object_detector=objs)
+    run(pipe, 20)
+    assert {m.payload.category for m in got["percept.entity"]} == {"potted plant", "hair drier"}

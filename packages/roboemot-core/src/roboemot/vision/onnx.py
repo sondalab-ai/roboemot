@@ -387,11 +387,31 @@ class Stages:
     attribute_estimator: FairFaceEstimator | None
     appearance_embedder: DinoV2Embedder | None
     object_detector: NanoDetDetector | None = None
+    objects_unavailable: str | None = None
 
 
 def _file(root: Path, name: str, index: int = 0) -> Path:
     spec = models.load_manifest()[name]
     return models.check_file(root, spec.files[index])
+
+
+def load_object_detector(root: Path, cfg: VisionConfig) -> NanoDetDetector:
+    """The NanoDet-Plus-m detector for the configured animal and object classes.
+
+    Raises ``ModelError`` when the file is missing or unverified. Callers that can run without
+    objects (the app) catch it so the rest of vision keeps working.
+    """
+    spec = models.load_manifest()[NANODET_NAME]
+    if spec.labels is None:
+        raise ModelError("models.yaml lacks the NanoDet class labels")
+    return NanoDetDetector(
+        _file(root, NANODET_NAME),
+        spec.labels,
+        [*cfg.animal_categories, *cfg.object_categories],
+        cfg.object_score_min,
+        cfg.object_nms_iou,
+        cfg.threads,
+    )
 
 
 def load_stages(
@@ -434,19 +454,7 @@ def load_stages(
             gender.labels,
             cfg.attribute_threads,
         )
-    detector = None
-    if objects and cfg.objects_enabled:
-        spec = specs[NANODET_NAME]
-        if spec.labels is None:
-            raise ModelError("models.yaml lacks the NanoDet class labels")
-        detector = NanoDetDetector(
-            _file(root, NANODET_NAME),
-            spec.labels,
-            [*cfg.animal_categories, *cfg.object_categories],
-            cfg.object_score_min,
-            cfg.object_nms_iou,
-            cfg.threads,
-        )
+    detector = load_object_detector(root, cfg) if objects and cfg.objects_enabled else None
     return Stages(
         YuNetDetector(
             _file(root, "yunet"),
