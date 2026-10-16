@@ -62,9 +62,11 @@ class Rig:
         self.now = START + timedelta(days=n)
 
     def files(self):
-        return sorted((self.tmp / "reg" / COLLECTION).glob("*.json")) if (
-            self.tmp / "reg" / COLLECTION
-        ).exists() else []
+        return (
+            sorted((self.tmp / "reg" / COLLECTION).glob("*.json"))
+            if (self.tmp / "reg" / COLLECTION).exists()
+            else []
+        )
 
 
 def sights(rig, count, az_step=1.0, **kw):
@@ -188,7 +190,9 @@ def test_known_individual_gets_identity_instead_of_a_candidate(tmp_path):
     rig = Rig(tmp_path)
     base = np.zeros(DIM, np.float32)
     base[0] = 1.0
-    mia = rig.registry.enroll_entity("animal", "Mia", np.vstack([base, base]), MODEL, category="cat")
+    mia = rig.registry.enroll_entity(
+        "animal", "Mia", np.vstack([base, base]), MODEL, category="cat"
+    )
     owner, result = rig.see(rig.vec(noise=0.02))
     assert owner == mia.entity_id
     assert rig.world.get(result.entry.entry_id).identity == mia.entity_id

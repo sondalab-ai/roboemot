@@ -26,10 +26,12 @@ ATTR_FORM = (
 <mwg-rs:AppliedToDimensions stDim:w="4000" stDim:h="3000" stDim:unit="pixel"/>
 <mwg-rs:RegionList><rdf:Bag>
 <rdf:li><rdf:Description mwg-rs:Name="Mia" mwg-rs:Type="Pet">
-  <mwg-rs:Area stArea:x="0.5" stArea:y="0.4" stArea:w="0.2" stArea:h="0.3" stArea:unit="normalized"/>
+  <mwg-rs:Area stArea:x="0.5" stArea:y="0.4" stArea:w="0.2" stArea:h="0.3"
+    stArea:unit="normalized"/>
 </rdf:Description></rdf:li>
 <rdf:li><rdf:Description mwg-rs:Name="Anna" mwg-rs:Type="Face">
-  <mwg-rs:Area stArea:x="0.1" stArea:y="0.1" stArea:w="0.1" stArea:h="0.1" stArea:unit="normalized"/>
+  <mwg-rs:Area stArea:x="0.1" stArea:y="0.1" stArea:w="0.1" stArea:h="0.1"
+    stArea:unit="normalized"/>
 </rdf:Description></rdf:li>
 <rdf:li><rdf:Description mwg-rs:Name="Code" mwg-rs:Type="BarCode"/></rdf:li>
 </rdf:Bag></mwg-rs:RegionList></mwg-rs:Regions></rdf:Description>"""
@@ -127,9 +129,10 @@ def test_italian_roots_and_aliases():
 
 def test_bad_names_are_skipped_and_counted():
     out = parse(subjects("Animals|Cat|", "Animals|Cat|Mia​x", "Animals|Cat|" + "x" * 80))
-    assert out.items == [] and out.skipped.get("name_invalid", 0) + out.skipped.get(
-        "path_ignored", 0
-    ) == 3
+    assert (
+        out.items == []
+        and out.skipped.get("name_invalid", 0) + out.skipped.get("path_ignored", 0) == 3
+    )
 
 
 def test_custom_name_validator():
@@ -203,7 +206,9 @@ def test_nested_lists_are_bounded_not_quadratic():
     inner = "<rdf:li>x</rdf:li>"
     for _ in range(depth):
         inner = (
-            "<rdf:li><mwg-rs:RegionList><rdf:Bag>" + inner + "</rdf:Bag></mwg-rs:RegionList></rdf:li>"
+            "<rdf:li><mwg-rs:RegionList><rdf:Bag>"
+            + inner
+            + "</rdf:Bag></mwg-rs:RegionList></rdf:li>"
         )
     xml = HEAD + "<mwg-rs:RegionList><rdf:Bag>" + inner + "</rdf:Bag></mwg-rs:RegionList>" + TAIL
     start = time.monotonic()

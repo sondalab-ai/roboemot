@@ -97,7 +97,12 @@ def build(tmp_path, catalogue, clock=None, **web):
         catalogue={"max_xmp_bytes": 4096, "max_image_bytes": 4096},
     )
     srv = make_server(
-        FakeService(), Diagnostics(), cfg, tmp_path, catalogue=catalogue, **({"clock": clock} if clock else {})
+        FakeService(),
+        Diagnostics(),
+        cfg,
+        tmp_path,
+        catalogue=catalogue,
+        **({"clock": clock} if clock else {}),
     )
     srv.set_pin(PIN)
     srv.start()
@@ -183,14 +188,22 @@ def test_listing_is_whitelisted_and_free_of_vectors(authed):
         }
     ]
     assert resp.json["live"] == [
-        {"entry_id": "animal-3", "kind": "animal", "category": "cat", "age_s": 4.3, "identified": False}
+        {
+            "entry_id": "animal-3",
+            "kind": "animal",
+            "category": "cat",
+            "age_s": 4.3,
+            "identified": False,
+        }
     ]
     assert resp.json["limits"]["max_xmp_bytes"] == 4096
     assert b"0.5" not in resp.body and b"0.2" not in resp.body
 
 
 def test_import_returns_only_names_and_counts(authed, catalogue):
-    resp = authed.request("POST", "/api/catalogue/import", {"xmp": "<x/>", "image_b64": b64(b"abc")})
+    resp = authed.request(
+        "POST", "/api/catalogue/import", {"xmp": "<x/>", "image_b64": b64(b"abc")}
+    )
     assert resp.status == 200
     assert resp.json == {
         "items": [
@@ -303,7 +316,9 @@ def test_unexpected_failure_is_a_generic_500_without_detail(authed, catalogue):
 
 
 def test_confirm(authed, catalogue):
-    assert authed.request("POST", "/api/catalogue/e1/confirm", {"entry_id": "animal-3"}).status == 200
+    assert (
+        authed.request("POST", "/api/catalogue/e1/confirm", {"entry_id": "animal-3"}).status == 200
+    )
     assert authed.request("POST", "/api/catalogue/e1/confirm", {}).status == 200
     assert catalogue.calls == [("confirm", "e1", "animal-3"), ("confirm", "e1", None)]
     assert authed.request("POST", "/api/catalogue/e1/confirm", {"entry_id": "../x"}).status == 422
@@ -356,7 +371,9 @@ def real(tmp_path):
 
 
 def test_real_service_import_and_confirm_round_trip(real):
-    resp = real.client.request("POST", "/api/catalogue/import", {"xmp": subjects("Animals|Cat|Mia")})
+    resp = real.client.request(
+        "POST", "/api/catalogue/import", {"xmp": subjects("Animals|Cat|Mia")}
+    )
     assert resp.status == 200 and resp.json["items"][0]["created"] is True
     listing = real.client.request("GET", "/api/catalogue").json
     (record,) = listing["records"]
@@ -376,6 +393,8 @@ def test_real_service_rejects_hostile_files_cleanly(real):
         resp = real.client.request("POST", "/api/catalogue/import", {"xmp": xmp})
         assert (resp.status, resp.json) == (422, {"error": code})
     gif = b64(b"GIF89a" + b"\x00" * 32)
-    resp = real.client.request("POST", "/api/catalogue/import", {"xmp": ATTR_FORM, "image_b64": gif})
+    resp = real.client.request(
+        "POST", "/api/catalogue/import", {"xmp": ATTR_FORM, "image_b64": gif}
+    )
     assert resp.status == 422 and resp.json == {"error": "image_format"}
     assert real.registry.list() == []

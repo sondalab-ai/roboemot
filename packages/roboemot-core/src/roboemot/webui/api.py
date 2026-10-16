@@ -623,9 +623,7 @@ class WebApi:
                     }
                     for i in report.items
                 ],
-                "conflicts": [
-                    {"name": str(c.name), "code": str(c.code)} for c in report.conflicts
-                ],
+                "conflicts": [{"name": str(c.name), "code": str(c.code)} for c in report.conflicts],
                 "skipped": {str(k): int(n) for k, n in report.skipped.items()},
                 "photo": str(report.photo),
                 "truncated": report.truncated is True,
@@ -656,7 +654,7 @@ class WebApi:
         raise exc
 
     def _catalogue_confirm(self, req: Request, rid: str) -> Response:
-        """"This is Mia": activate a pending record from a live entry or its photo rows."""
+        """ "This is Mia": activate a pending record from a live entry or its photo rows."""
         port = self._port()
         body = self._json_body(req)
         v.only_keys(body, {"entry_id"})

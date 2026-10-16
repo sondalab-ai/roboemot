@@ -100,7 +100,11 @@ EN: dict[str, str] = {
     "quarantined_none": "None.",
     "purge": "Purge",
     "new_name": "New name",
-    "catalogue_intro": "Import XMP sidecars written by your photo tool. People, pets and objects become pending records; people stay name-only until they go through enrollment. A photo is optional, is read in memory and is never stored.",
+    "catalogue_intro": (
+        "Import XMP sidecars written by your photo tool. People, pets and objects "
+        "become pending records; people stay name-only until they go through "
+        "enrollment. A photo is optional, is read in memory and is never stored."
+    ),
     "catalogue_xmp": "XMP sidecar (.xmp)",
     "catalogue_photo": "Its photo (JPEG or PNG, optional)",
     "catalogue_import": "Import",
@@ -115,7 +119,9 @@ EN: dict[str, str] = {
     "catalogue_conflicts": "Tags to fix",
     "catalogue_truncated": "The sidecar was longer than the limit; the rest was ignored.",
     "catalogue_clear": "Forget collected sightings",
-    "catalogue_clear_confirm": "Forget what the robot has collected about animals and objects it does not know yet?",
+    "catalogue_clear_confirm": (
+        "Forget what the robot has collected about animals and objects it does not know yet?"
+    ),
     "catalogue_cleared": "Forgotten: {n}.",
     "catalogue_read_failed": "The file could not be read.",
     "photo_used": "Photo used.",
@@ -277,7 +283,12 @@ IT: dict[str, str] = {
     "quarantined_none": "Nessuno.",
     "purge": "Elimina",
     "new_name": "Nuovo nome",
-    "catalogue_intro": "Importa i file XMP scritti dal tuo programma di foto. Persone, animali e oggetti diventano record in attesa; le persone restano solo un nome finché non fanno la registrazione. La foto è facoltativa, viene letta in memoria e non viene mai salvata.",
+    "catalogue_intro": (
+        "Importa i file XMP scritti dal tuo programma di foto. Persone, animali e "
+        "oggetti diventano record in attesa; le persone restano solo un nome finché "
+        "non fanno la registrazione. La foto è facoltativa, viene letta in memoria e "
+        "non viene mai salvata."
+    ),
     "catalogue_xmp": "File XMP (.xmp)",
     "catalogue_photo": "La sua foto (JPEG o PNG, facoltativa)",
     "catalogue_import": "Importa",
@@ -292,7 +303,9 @@ IT: dict[str, str] = {
     "catalogue_conflicts": "Etichette da correggere",
     "catalogue_truncated": "Il file superava il limite; il resto è stato ignorato.",
     "catalogue_clear": "Dimentica gli avvistamenti raccolti",
-    "catalogue_clear_confirm": "Dimenticare ciò che il robot ha raccolto su animali e oggetti che non conosce ancora?",
+    "catalogue_clear_confirm": (
+        "Dimenticare ciò che il robot ha raccolto su animali e oggetti che non conosce ancora?"
+    ),
     "catalogue_cleared": "Dimenticati: {n}.",
     "catalogue_read_failed": "Impossibile leggere il file.",
     "photo_used": "Foto usata.",

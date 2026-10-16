@@ -47,4 +47,3 @@ def open_catalogue(
         purge_candidates=purge_candidates,
     )
     return service
-

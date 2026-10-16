@@ -17,11 +17,18 @@ import numpy as np
 
 JPEG_MAGIC = b"\xff\xd8\xff"
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+PNG_TYPE_AT = 12  # signature (8) + chunk length (4)
+PNG_DATA_AT = 16
 PNG_IHDR_END = 24
+JPEG_MARKER_LEN = 2
+JPEG_SEGMENT_HEAD = 4  # marker (2) + segment length (2)
+JPEG_SOF_HEIGHT_AT = 5  # from the marker: marker (2), length (2), precision (1)
+JPEG_SOF_END = 9
 JPEG_SOF = frozenset(range(0xC0, 0xD0)) - {0xC4, 0xC8, 0xCC}
 JPEG_NO_LENGTH = frozenset({0x01, *range(0xD0, 0xDA)})
 JPEG_SCAN_START = 0xDA
 JPEG_MARKER = 0xFF
+COLOR_NDIM = 3
 
 
 class ImageError(ValueError):
@@ -33,16 +40,16 @@ class ImageError(ValueError):
 
 
 def _png_size(data: bytes) -> tuple[int, int]:
-    if len(data) < PNG_IHDR_END or data[12:16] != b"IHDR":
+    if len(data) < PNG_IHDR_END or data[PNG_TYPE_AT:PNG_DATA_AT] != b"IHDR":
         raise ImageError("image_corrupt")
-    width, height = struct.unpack(">II", data[16:PNG_IHDR_END])
+    width, height = struct.unpack(">II", data[PNG_DATA_AT:PNG_IHDR_END])
     return width, height
 
 
 def _jpeg_size(data: bytes) -> tuple[int, int]:
     """Width and height from the first start-of-frame marker; refuses a file without one."""
-    pos, end = 2, len(data)
-    while pos + 4 <= end:
+    pos, end = JPEG_MARKER_LEN, len(data)
+    while pos + JPEG_SEGMENT_HEAD <= end:
         if data[pos] != JPEG_MARKER:
             pos += 1
             continue
@@ -51,17 +58,19 @@ def _jpeg_size(data: bytes) -> tuple[int, int]:
             pos += 1
             continue
         if marker in JPEG_NO_LENGTH:
-            pos += 2
+            pos += JPEG_MARKER_LEN
             continue
         if marker == JPEG_SCAN_START:
             break
-        length = struct.unpack(">H", data[pos + 2 : pos + 4])[0]
+        length = struct.unpack(">H", data[pos + JPEG_MARKER_LEN : pos + JPEG_SEGMENT_HEAD])[0]
         if marker in JPEG_SOF:
-            if pos + 9 > end:
+            if pos + JPEG_SOF_END > end:
                 break
-            height, width = struct.unpack(">HH", data[pos + 5 : pos + 9])
+            height, width = struct.unpack(
+                ">HH", data[pos + JPEG_SOF_HEIGHT_AT : pos + JPEG_SOF_END]
+            )
             return width, height
-        pos += 2 + max(length, 2)
+        pos += JPEG_MARKER_LEN + max(length, JPEG_MARKER_LEN)
     raise ImageError("image_corrupt")
 
 
@@ -89,6 +98,6 @@ def decode_bgr(data: bytes, *, max_bytes: int, max_pixels: int) -> np.ndarray:
         image = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
     except cv2.error as exc:
         raise ImageError("image_corrupt") from exc
-    if image is None or image.ndim != 3 or image.shape[0] * image.shape[1] > max_pixels:
+    if image is None or image.ndim != COLOR_NDIM or image.shape[0] * image.shape[1] > max_pixels:
         raise ImageError("image_corrupt")
     return image

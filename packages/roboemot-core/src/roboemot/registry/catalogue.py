@@ -236,8 +236,10 @@ class CatalogueService:
         for region in item.regions:
             x1, x2 = (region.cx - region.w / 2) * width, (region.cx + region.w / 2) * width
             y1, y2 = (region.cy - region.h / 2) * height, (region.cy + region.h / 2) * height
-            box = (max(0.0, x1), max(0.0, y1), min(float(width), x2), min(float(height), y2))
-            if min(box[2] - box[0], box[3] - box[1]) < self.cfg.min_region_px:
+            left, top = max(0.0, x1), max(0.0, y1)
+            right, bottom = min(float(width), x2), min(float(height), y2)
+            box = (left, top, right, bottom)
+            if min(right - left, bottom - top) < self.cfg.min_region_px:
                 report.skipped["region_small"] = report.skipped.get("region_small", 0) + 1
                 continue
             try:

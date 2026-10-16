@@ -30,6 +30,7 @@ from another model id are deleted at load.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 import threading
@@ -230,10 +231,8 @@ class AutoEnroller:
     def _attach(self, entry_id: str, owner_id: str) -> None:
         if self.world is not None:
             self.world.set_identity(entry_id, owner_id)
-        try:
+        with contextlib.suppress(KeyError):
             self.registry.mark_seen(owner_id)
-        except KeyError:
-            pass
 
     def _throttle(self, entry_id: str, stamp: float) -> bool:
         last = self._last_seen.get(entry_id)
