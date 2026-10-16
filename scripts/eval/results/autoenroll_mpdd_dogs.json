@@ -1,0 +1,72 @@
+{
+ "machine": "Apple M3 Pro, 12 logical cores, Darwin 25.6.0",
+ "per_category": {
+  "dog": {
+   "attached_to_the_wrong_individual": 0,
+   "candidate_clusters_left": 952,
+   "duplicate_records_of_one_individual": 0,
+   "individuals_in_stream": 200,
+   "individuals_seen": 200,
+   "individuals_with_a_record": 26,
+   "records_created": 26,
+   "records_mixing_individuals": 0,
+   "records_pure": 26,
+   "sightings": 1321,
+   "sightings_attached_to_a_record": 49,
+   "streams": 10
+  }
+ },
+ "protocol": {
+  "autoenroll_config": {
+   "enabled": true,
+   "join_radius": 0.125,
+   "kinds": [
+    "animal",
+    "object"
+   ],
+   "known_match_threshold": 0.875,
+   "max_clusters": 200,
+   "max_members": 30,
+   "max_spread": 0.25,
+   "max_tracked_entries": 512,
+   "min_days": 3,
+   "min_sightings": 5,
+   "persist_interval_s": 60.0,
+   "retention_days": 30,
+   "sighting_min_interval_s": 300.0
+  },
+  "dataset": "mpdd_dogs",
+  "days_note": "dogs: days are simulated; the dataset's capture sequences are not used",
+  "days_per_stream": 6,
+  "embedder": "DINOv2-S (shipped DinoV2Embedder, whole photo as the box)",
+  "enroller": "roboemot.world.autoenroll.AutoEnroller with the shipped defaults",
+  "images_per_individual_cap": "all for dogs; 6 for products",
+  "individuals_per_stream": 20,
+  "presence_probability_per_day": 0.8,
+  "sightings_per_individual_per_day": [
+   1,
+   2
+  ],
+  "streams_per_category": 10
+ },
+ "total": {
+  "attached_to_the_wrong_individual": 0,
+  "candidate_clusters_left": 952,
+  "duplicate_records_of_one_individual": 0,
+  "individuals_in_stream": 200,
+  "individuals_seen": 200,
+  "individuals_with_a_record": 26,
+  "records_created": 26,
+  "records_mixing_individuals": 0,
+  "records_pure": 26,
+  "sightings": 1321,
+  "sightings_attached_to_a_record": 49,
+  "streams": 10
+ },
+ "versions": {
+  "numpy": "2.5.4",
+  "onnxruntime": "1.31.0",
+  "opencv": "5.0.0",
+  "python": "3.13.13"
+ }
+}

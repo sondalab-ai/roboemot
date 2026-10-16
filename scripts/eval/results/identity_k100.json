@@ -1,0 +1,397 @@
+{
+ "images": {
+  "several_faces": 2279,
+  "total": 13233,
+  "usable_face": 13233
+ },
+ "machine": "Apple M3 Pro, 12 logical cores, Darwin 25.6.0",
+ "per_draw": [
+  {
+   "per_evaluation": {
+    "enrolled_probes": 2013,
+    "far": {
+     "ci95": [
+      0.016436357767082296,
+      0.021594938778737627
+     ],
+     "k": 202,
+     "n": 10720,
+     "rate": 0.018843283582089553
+    },
+    "frr": {
+     "ci95": [
+      0.0020151152477554815,
+      0.007822841287849495
+     ],
+     "k": 8,
+     "n": 2013,
+     "rate": 0.003974167908594138
+    },
+    "frr_rejected": {
+     "ci95": [
+      0.0020151152477554815,
+      0.007822841287849495
+     ],
+     "k": 8,
+     "n": 2013,
+     "rate": 0.003974167908594138
+    },
+    "frr_rejected_by_margin_only": 2,
+    "misidentified": {
+     "ci95": [
+      1.0842021724855044e-19,
+      0.001904760393676925
+     ],
+     "k": 0,
+     "n": 2013,
+     "rate": 0.0
+    },
+    "no_face_enrolled_images": 0,
+    "no_face_stranger_images": 0,
+    "stranger_probes": 10720
+   },
+   "per_track_3_of_5": {
+    "enrolled_tracks": 600,
+    "enrolled_tracks_no_face_in_last_frame": 0,
+    "enrolled_tracks_split_in_two": 22,
+    "far": {
+     "ci95": [
+      0.0,
+      0.012643429997735661
+     ],
+     "k": 0,
+     "n": 300,
+     "rate": 0.0
+    },
+    "frr": {
+     "ci95": [
+      0.0,
+      0.006361933328210577
+     ],
+     "k": 0,
+     "n": 600,
+     "rate": 0.0
+    },
+    "frr_unknown": {
+     "ci95": [
+      0.0,
+      0.006361933328210577
+     ],
+     "k": 0,
+     "n": 600,
+     "rate": 0.0
+    },
+    "misidentified": {
+     "ci95": [
+      0.0,
+      0.006361933328210577
+     ],
+     "k": 0,
+     "n": 600,
+     "rate": 0.0
+    },
+    "stranger_tracks": 300,
+    "stranger_tracks_no_face_in_last_frame": 0
+   }
+  },
+  {
+   "per_evaluation": {
+    "enrolled_probes": 2690,
+    "far": {
+     "ci95": [
+      0.003435860250509925,
+      0.006103615319603572
+     ],
+     "k": 46,
+     "n": 10043,
+     "rate": 0.004580304689833715
+    },
+    "frr": {
+     "ci95": [
+      0.003382178423170247,
+      0.00918040135137923
+     ],
+     "k": 15,
+     "n": 2690,
+     "rate": 0.0055762081784386614
+    },
+    "frr_rejected": {
+     "ci95": [
+      0.0028264570530720755,
+      0.0082512544203865
+     ],
+     "k": 13,
+     "n": 2690,
+     "rate": 0.0048327137546468404
+    },
+    "frr_rejected_by_margin_only": 5,
+    "misidentified": {
+     "ci95": [
+      0.00020391240361668944,
+      0.0027070234138419176
+     ],
+     "k": 2,
+     "n": 2690,
+     "rate": 0.0007434944237918215
+    },
+    "no_face_enrolled_images": 0,
+    "no_face_stranger_images": 0,
+    "stranger_probes": 10043
+   },
+   "per_track_3_of_5": {
+    "enrolled_tracks": 600,
+    "enrolled_tracks_no_face_in_last_frame": 0,
+    "enrolled_tracks_split_in_two": 7,
+    "far": {
+     "ci95": [
+      0.0005886425761407379,
+      0.018637164554943353
+     ],
+     "k": 1,
+     "n": 300,
+     "rate": 0.0033333333333333335
+    },
+    "frr": {
+     "ci95": [
+      0.0,
+      0.006361933328210577
+     ],
+     "k": 0,
+     "n": 600,
+     "rate": 0.0
+    },
+    "frr_unknown": {
+     "ci95": [
+      0.0,
+      0.006361933328210577
+     ],
+     "k": 0,
+     "n": 600,
+     "rate": 0.0
+    },
+    "misidentified": {
+     "ci95": [
+      0.0,
+      0.006361933328210577
+     ],
+     "k": 0,
+     "n": 600,
+     "rate": 0.0
+    },
+    "stranger_tracks": 300,
+    "stranger_tracks_no_face_in_last_frame": 0
+   }
+  },
+  {
+   "per_evaluation": {
+    "enrolled_probes": 2696,
+    "far": {
+     "ci95": [
+      0.00369492960463815,
+      0.006447805840964339
+     ],
+     "k": 49,
+     "n": 10037,
+     "rate": 0.004881936833715254
+    },
+    "frr": {
+     "ci95": [
+      0.003374645072446356,
+      0.009160016220275409
+     ],
+     "k": 15,
+     "n": 2696,
+     "rate": 0.00556379821958457
+    },
+    "frr_rejected": {
+     "ci95": [
+      0.0030958193704336565,
+      0.008698057722207629
+     ],
+     "k": 14,
+     "n": 2696,
+     "rate": 0.0051928783382789315
+    },
+    "frr_rejected_by_margin_only": 5,
+    "misidentified": {
+     "ci95": [
+      6.547778358271779e-05,
+      0.0020982047080123447
+     ],
+     "k": 1,
+     "n": 2696,
+     "rate": 0.000370919881305638
+    },
+    "no_face_enrolled_images": 0,
+    "no_face_stranger_images": 0,
+    "stranger_probes": 10037
+   },
+   "per_track_3_of_5": {
+    "enrolled_tracks": 600,
+    "enrolled_tracks_no_face_in_last_frame": 0,
+    "enrolled_tracks_split_in_two": 11,
+    "far": {
+     "ci95": [
+      0.0,
+      0.012643429997735661
+     ],
+     "k": 0,
+     "n": 300,
+     "rate": 0.0
+    },
+    "frr": {
+     "ci95": [
+      0.0,
+      0.006361933328210577
+     ],
+     "k": 0,
+     "n": 600,
+     "rate": 0.0
+    },
+    "frr_unknown": {
+     "ci95": [
+      0.0,
+      0.006361933328210577
+     ],
+     "k": 0,
+     "n": 600,
+     "rate": 0.0
+    },
+    "misidentified": {
+     "ci95": [
+      0.0,
+      0.006361933328210577
+     ],
+     "k": 0,
+     "n": 600,
+     "rate": 0.0
+    },
+    "stranger_tracks": 300,
+    "stranger_tracks_no_face_in_last_frame": 0
+   }
+  }
+ ],
+ "pooled": {
+  "per_evaluation": {
+   "enrolled_probes": 7399,
+   "far": {
+    "ci95": [
+     0.008610977615491662,
+     0.010797043233440376
+    ],
+    "k": 297,
+    "n": 30800,
+    "rate": 0.009642857142857142
+   },
+   "frr": {
+    "ci95": [
+     0.00374417029522408,
+     0.0070410935688575175
+    ],
+    "k": 38,
+    "n": 7399,
+    "rate": 0.005135829166103527
+   },
+   "frr_rejected": {
+    "ci95": [
+     0.0034033360678921475,
+     0.006571428217216965
+    ],
+    "k": 35,
+    "n": 7399,
+    "rate": 0.004730368968779565
+   },
+   "frr_rejected_by_margin_only": 12,
+   "misidentified": {
+    "ci95": [
+     0.00013789992602498882,
+     0.0011915355167109465
+    ],
+    "k": 3,
+    "n": 7399,
+    "rate": 0.0004054601973239627
+   },
+   "no_face_enrolled_images": 0,
+   "no_face_stranger_images": 0,
+   "stranger_probes": 30800
+  },
+  "per_track_3_of_5": {
+   "enrolled_tracks": 1800,
+   "enrolled_tracks_no_face_in_last_frame": 0,
+   "enrolled_tracks_split_in_two": 40,
+   "far": {
+    "ci95": [
+     0.00019616028177490627,
+     0.006266919089654778
+    ],
+    "k": 1,
+    "n": 900,
+    "rate": 0.0011111111111111111
+   },
+   "frr": {
+    "ci95": [
+     2.168404344971009e-19,
+     0.002129677018203815
+    ],
+    "k": 0,
+    "n": 1800,
+    "rate": 0.0
+   },
+   "frr_unknown": {
+    "ci95": [
+     2.168404344971009e-19,
+     0.002129677018203815
+    ],
+    "k": 0,
+    "n": 1800,
+    "rate": 0.0
+   },
+   "misidentified": {
+    "ci95": [
+     2.168404344971009e-19,
+     0.002129677018203815
+    ],
+    "k": 0,
+    "n": 1800,
+    "rate": 0.0
+   },
+   "stranger_tracks": 900,
+   "stranger_tracks_no_face_in_last_frame": 0
+  }
+ },
+ "protocol": {
+  "dataset": "LFW (13,233 images, 5,749 identities), open set, enrolled identities have >= 11 usable images",
+  "detector_gates": {
+   "embed_min_face_px": 40,
+   "score_min": 0.6
+  },
+  "draws": 3,
+  "enroll_images_per_person": 5,
+  "frame_gap_s": 0.3,
+  "identity_config": {
+   "margin": 0.1,
+   "match_threshold": 0.45,
+   "votes_required": 3,
+   "votes_window": 5
+  },
+  "k_enrolled": 100,
+  "refresh": false,
+  "track_frames": 5
+ },
+ "spike_reference_lfw_pairs_yunet_sface": {
+  "acc_10fold_mean": 0.9891666666666667,
+  "n_pairs": 6000,
+  "std_tar@far0.001": 0.9773333333333334,
+  "wide_neg_n": 29640749,
+  "wide_tar@far0.0001": 0.9676583137884212,
+  "wide_tar@far0.001": 0.980496235032712,
+  "wide_thr@far0.0001": 0.41873830556869507,
+  "wide_thr@far0.001": 0.3623400628566742
+ },
+ "versions": {
+  "numpy": "2.5.4",
+  "onnxruntime": "1.31.0",
+  "opencv": "5.0.0",
+  "python": "3.13.13"
+ }
+}

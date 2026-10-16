@@ -1,0 +1,171 @@
+{
+ "machine": "Apple M3 Pro, 12 logical cores, Darwin 25.6.0",
+ "protocol": {
+  "camera_hz": 30.0,
+  "definition": "first camera frame showing the person to person.recognized, seconds",
+  "enrolled": 10,
+  "identity": {
+   "votes_required": 3,
+   "votes_window": 5
+  },
+  "photo_period_s": 0.2,
+  "trials_per_scenario": 20,
+  "vision": {
+   "burst_min_gap_s": 0.25,
+   "embedding_burst": 5,
+   "max_embeds_per_frame": 2
+  }
+ },
+ "scenarios": [
+  {
+   "age_gender_available": {
+    "n": 0
+   },
+   "decisions": {
+    "max": 1.3078535409949836,
+    "n": 20,
+    "p50": 1.2890471669961698,
+    "p95": 1.305272125006013,
+    "p95_approximate": true
+   },
+   "detection_hz": 5.0,
+   "extra_track_first_percept": {
+    "max": 0.41669858300156193,
+    "n": 1,
+    "p50": 0.41669858300156193,
+    "p95": 0.41669858300156193,
+    "p95_approximate": true
+   },
+   "first_percept_earliest_track_per_trial": {
+    "max": 0.41387466699961806,
+    "n": 20,
+    "p50": 0.40056879199983086,
+    "p95": 0.4116642500011949,
+    "p95_approximate": true
+   },
+   "no_decision_within_window": 0,
+   "people": 1,
+   "scenario": "one_person_5hz",
+   "threads": {
+    "attribute": 2,
+    "frame_path": 2
+   },
+   "tracks_beyond_the_planted_ones": 1
+  },
+  {
+   "age_gender_available": {
+    "n": 0
+   },
+   "decisions": {
+    "max": 0.8632292920010514,
+    "n": 20,
+    "p50": 0.8474291669990635,
+    "p95": 0.8556857500007027,
+    "p95_approximate": true
+   },
+   "detection_hz": 8.0,
+   "extra_track_first_percept": {
+    "max": 0.4071199159952812,
+    "n": 7,
+    "p50": 0.4029654159967322,
+    "p95": 0.4071199159952812,
+    "p95_approximate": true
+   },
+   "first_percept_earliest_track_per_trial": {
+    "max": 0.26660766699933447,
+    "n": 20,
+    "p50": 0.25233120899792993,
+    "p95": 0.2663717919931514,
+    "p95_approximate": true
+   },
+   "no_decision_within_window": 0,
+   "people": 1,
+   "scenario": "one_person_8hz",
+   "threads": {
+    "attribute": 2,
+    "frame_path": 2
+   },
+   "tracks_beyond_the_planted_ones": 7
+  },
+  {
+   "age_gender_available": {
+    "n": 0
+   },
+   "decisions": {
+    "max": 1.1263917079995736,
+    "n": 60,
+    "p50": 0.859213625000848,
+    "p95": 1.0078217919945018,
+    "p95_approximate": false
+   },
+   "detection_hz": 8.0,
+   "extra_track_first_percept": {
+    "max": 1.0155937910021748,
+    "n": 25,
+    "p50": 0.4192794589980622,
+    "p95": 1.0108471250059665,
+    "p95_approximate": true
+   },
+   "first_percept_earliest_track_per_trial": {
+    "max": 0.2681153750017984,
+    "n": 20,
+    "p50": 0.2525864589988487,
+    "p95": 0.2669042920024367,
+    "p95_approximate": true
+   },
+   "no_decision_within_window": 0,
+   "people": 3,
+   "scenario": "three_people_8hz_burst",
+   "threads": {
+    "attribute": 2,
+    "frame_path": 2
+   },
+   "tracks_beyond_the_planted_ones": 25
+  },
+  {
+   "age_gender_available": {
+    "max": 2.0511329580040183,
+    "n": 18,
+    "p50": 1.901281750004273,
+    "p95": 2.0377125419981894,
+    "p95_approximate": true
+   },
+   "decisions": {
+    "max": 0.8916181249951478,
+    "n": 20,
+    "p50": 0.8687077079957817,
+    "p95": 0.8822063750048983,
+    "p95_approximate": true
+   },
+   "detection_hz": 8.0,
+   "extra_track_first_percept": {
+    "max": 5.618779083000845,
+    "n": 16,
+    "p50": 1.0078234169995994,
+    "p95": 3.9712989999970887,
+    "p95_approximate": true
+   },
+   "first_percept_earliest_track_per_trial": {
+    "max": 0.2838526670020656,
+    "n": 20,
+    "p50": 0.2760454579984071,
+    "p95": 0.28243216600094456,
+    "p95_approximate": true
+   },
+   "no_decision_within_window": 0,
+   "people": 1,
+   "scenario": "one_person_8hz_with_age_gender_job_1+1_threads",
+   "threads": {
+    "attribute": 1,
+    "frame_path": 1
+   },
+   "tracks_beyond_the_planted_ones": 16
+  }
+ ],
+ "versions": {
+  "numpy": "2.5.4",
+  "onnxruntime": "1.31.0",
+  "opencv": "5.0.0",
+  "python": "3.13.13"
+ }
+}

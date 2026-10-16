@@ -1,0 +1,1013 @@
+{
+ "images": {
+  "several_faces": 2279,
+  "total": 13233,
+  "usable_face": 13233
+ },
+ "machine": "Apple M3 Pro, 12 logical cores, Darwin 25.6.0",
+ "per_draw": [
+  {
+   "per_evaluation": {
+    "enrolled_probes": 102,
+    "far": {
+     "ci95": [
+      0.0004153042511455371,
+      0.0014067735950241867
+     ],
+     "k": 10,
+     "n": 13081,
+     "rate": 0.0007644675483525725
+    },
+    "frr": {
+     "ci95": [
+      0.0017326897927338984,
+      0.05345921962662484
+     ],
+     "k": 1,
+     "n": 102,
+     "rate": 0.00980392156862745
+    },
+    "frr_rejected": {
+     "ci95": [
+      0.0017326897927338984,
+      0.05345921962662484
+     ],
+     "k": 1,
+     "n": 102,
+     "rate": 0.00980392156862745
+    },
+    "frr_rejected_by_margin_only": 0,
+    "misidentified": {
+     "ci95": [
+      0.0,
+      0.03629574760774591
+     ],
+     "k": 0,
+     "n": 102,
+     "rate": 0.0
+    },
+    "no_face_enrolled_images": 0,
+    "no_face_stranger_images": 0,
+    "stranger_probes": 13081
+   },
+   "per_track_3_of_5": {
+    "enrolled_tracks": 60,
+    "enrolled_tracks_no_face_in_last_frame": 0,
+    "enrolled_tracks_split_in_two": 4,
+    "far": {
+     "ci95": [
+      0.0,
+      0.012643429997735661
+     ],
+     "k": 0,
+     "n": 300,
+     "rate": 0.0
+    },
+    "frr": {
+     "ci95": [
+      0.0,
+      0.06017393047793289
+     ],
+     "k": 0,
+     "n": 60,
+     "rate": 0.0
+    },
+    "frr_unknown": {
+     "ci95": [
+      0.0,
+      0.06017393047793289
+     ],
+     "k": 0,
+     "n": 60,
+     "rate": 0.0
+    },
+    "misidentified": {
+     "ci95": [
+      0.0,
+      0.06017393047793289
+     ],
+     "k": 0,
+     "n": 60,
+     "rate": 0.0
+    },
+    "stranger_tracks": 300,
+    "stranger_tracks_no_face_in_last_frame": 0
+   }
+  },
+  {
+   "per_evaluation": {
+    "enrolled_probes": 655,
+    "far": {
+     "ci95": [
+      0.0011600027229885504,
+      0.002657600589201415
+     ],
+     "k": 22,
+     "n": 12528,
+     "rate": 0.001756066411238825
+    },
+    "frr": {
+     "ci95": [
+      0.0002695470590658019,
+      0.008596924032012843
+     ],
+     "k": 1,
+     "n": 655,
+     "rate": 0.0015267175572519084
+    },
+    "frr_rejected": {
+     "ci95": [
+      0.0002695470590658019,
+      0.008596924032012843
+     ],
+     "k": 1,
+     "n": 655,
+     "rate": 0.0015267175572519084
+    },
+    "frr_rejected_by_margin_only": 0,
+    "misidentified": {
+     "ci95": [
+      0.0,
+      0.005830840068386694
+     ],
+     "k": 0,
+     "n": 655,
+     "rate": 0.0
+    },
+    "no_face_enrolled_images": 0,
+    "no_face_stranger_images": 0,
+    "stranger_probes": 12528
+   },
+   "per_track_3_of_5": {
+    "enrolled_tracks": 60,
+    "enrolled_tracks_no_face_in_last_frame": 0,
+    "enrolled_tracks_split_in_two": 0,
+    "far": {
+     "ci95": [
+      0.0,
+      0.012643429997735661
+     ],
+     "k": 0,
+     "n": 300,
+     "rate": 0.0
+    },
+    "frr": {
+     "ci95": [
+      0.0,
+      0.06017393047793289
+     ],
+     "k": 0,
+     "n": 60,
+     "rate": 0.0
+    },
+    "frr_unknown": {
+     "ci95": [
+      0.0,
+      0.06017393047793289
+     ],
+     "k": 0,
+     "n": 60,
+     "rate": 0.0
+    },
+    "misidentified": {
+     "ci95": [
+      0.0,
+      0.06017393047793289
+     ],
+     "k": 0,
+     "n": 60,
+     "rate": 0.0
+    },
+    "stranger_tracks": 300,
+    "stranger_tracks_no_face_in_last_frame": 0
+   }
+  },
+  {
+   "per_evaluation": {
+    "enrolled_probes": 132,
+    "far": {
+     "ci95": [
+      0.0002598365353496352,
+      0.001106828840352817
+     ],
+     "k": 7,
+     "n": 13051,
+     "rate": 0.0005363573672515517
+    },
+    "frr": {
+     "ci95": [
+      0.0013385269033438958,
+      0.041664500151696676
+     ],
+     "k": 1,
+     "n": 132,
+     "rate": 0.007575757575757576
+    },
+    "frr_rejected": {
+     "ci95": [
+      0.0013385269033438958,
+      0.041664500151696676
+     ],
+     "k": 1,
+     "n": 132,
+     "rate": 0.007575757575757576
+    },
+    "frr_rejected_by_margin_only": 0,
+    "misidentified": {
+     "ci95": [
+      0.0,
+      0.028279996702041194
+     ],
+     "k": 0,
+     "n": 132,
+     "rate": 0.0
+    },
+    "no_face_enrolled_images": 0,
+    "no_face_stranger_images": 0,
+    "stranger_probes": 13051
+   },
+   "per_track_3_of_5": {
+    "enrolled_tracks": 60,
+    "enrolled_tracks_no_face_in_last_frame": 0,
+    "enrolled_tracks_split_in_two": 3,
+    "far": {
+     "ci95": [
+      0.0,
+      0.012643429997735661
+     ],
+     "k": 0,
+     "n": 300,
+     "rate": 0.0
+    },
+    "frr": {
+     "ci95": [
+      0.0,
+      0.06017393047793289
+     ],
+     "k": 0,
+     "n": 60,
+     "rate": 0.0
+    },
+    "frr_unknown": {
+     "ci95": [
+      0.0,
+      0.06017393047793289
+     ],
+     "k": 0,
+     "n": 60,
+     "rate": 0.0
+    },
+    "misidentified": {
+     "ci95": [
+      0.0,
+      0.06017393047793289
+     ],
+     "k": 0,
+     "n": 60,
+     "rate": 0.0
+    },
+    "stranger_tracks": 300,
+    "stranger_tracks_no_face_in_last_frame": 0
+   }
+  },
+  {
+   "per_evaluation": {
+    "enrolled_probes": 182,
+    "far": {
+     "ci95": [
+      0.0009960915223598482,
+      0.002375083717483134
+     ],
+     "k": 20,
+     "n": 13001,
+     "rate": 0.0015383432043688946
+    },
+    "frr": {
+     "ci95": [
+      0.0,
+      0.020671367444102935
+     ],
+     "k": 0,
+     "n": 182,
+     "rate": 0.0
+    },
+    "frr_rejected": {
+     "ci95": [
+      0.0,
+      0.020671367444102935
+     ],
+     "k": 0,
+     "n": 182,
+     "rate": 0.0
+    },
+    "frr_rejected_by_margin_only": 0,
+    "misidentified": {
+     "ci95": [
+      0.0,
+      0.020671367444102935
+     ],
+     "k": 0,
+     "n": 182,
+     "rate": 0.0
+    },
+    "no_face_enrolled_images": 0,
+    "no_face_stranger_images": 0,
+    "stranger_probes": 13001
+   },
+   "per_track_3_of_5": {
+    "enrolled_tracks": 60,
+    "enrolled_tracks_no_face_in_last_frame": 0,
+    "enrolled_tracks_split_in_two": 2,
+    "far": {
+     "ci95": [
+      0.0,
+      0.012643429997735661
+     ],
+     "k": 0,
+     "n": 300,
+     "rate": 0.0
+    },
+    "frr": {
+     "ci95": [
+      0.0,
+      0.06017393047793289
+     ],
+     "k": 0,
+     "n": 60,
+     "rate": 0.0
+    },
+    "frr_unknown": {
+     "ci95": [
+      0.0,
+      0.06017393047793289
+     ],
+     "k": 0,
+     "n": 60,
+     "rate": 0.0
+    },
+    "misidentified": {
+     "ci95": [
+      0.0,
+      0.06017393047793289
+     ],
+     "k": 0,
+     "n": 60,
+     "rate": 0.0
+    },
+    "stranger_tracks": 300,
+    "stranger_tracks_no_face_in_last_frame": 0
+   }
+  },
+  {
+   "per_evaluation": {
+    "enrolled_probes": 154,
+    "far": {
+     "ci95": [
+      0.0006401974482444701,
+      0.001802984244380414
+     ],
+     "k": 14,
+     "n": 13029,
+     "rate": 0.0010745260572568884
+    },
+    "frr": {
+     "ci95": [
+      0.003568687884314088,
+      0.04611149782084855
+     ],
+     "k": 2,
+     "n": 154,
+     "rate": 0.012987012987012988
+    },
+    "frr_rejected": {
+     "ci95": [
+      0.003568687884314088,
+      0.04611149782084855
+     ],
+     "k": 2,
+     "n": 154,
+     "rate": 0.012987012987012988
+    },
+    "frr_rejected_by_margin_only": 0,
+    "misidentified": {
+     "ci95": [
+      1.734723475976807e-18,
+      0.024338323990633647
+     ],
+     "k": 0,
+     "n": 154,
+     "rate": 0.0
+    },
+    "no_face_enrolled_images": 0,
+    "no_face_stranger_images": 0,
+    "stranger_probes": 13029
+   },
+   "per_track_3_of_5": {
+    "enrolled_tracks": 60,
+    "enrolled_tracks_no_face_in_last_frame": 0,
+    "enrolled_tracks_split_in_two": 1,
+    "far": {
+     "ci95": [
+      0.0,
+      0.012643429997735661
+     ],
+     "k": 0,
+     "n": 300,
+     "rate": 0.0
+    },
+    "frr": {
+     "ci95": [
+      0.0,
+      0.06017393047793289
+     ],
+     "k": 0,
+     "n": 60,
+     "rate": 0.0
+    },
+    "frr_unknown": {
+     "ci95": [
+      0.0,
+      0.06017393047793289
+     ],
+     "k": 0,
+     "n": 60,
+     "rate": 0.0
+    },
+    "misidentified": {
+     "ci95": [
+      0.0,
+      0.06017393047793289
+     ],
+     "k": 0,
+     "n": 60,
+     "rate": 0.0
+    },
+    "stranger_tracks": 300,
+    "stranger_tracks_no_face_in_last_frame": 0
+   }
+  },
+  {
+   "per_evaluation": {
+    "enrolled_probes": 383,
+    "far": {
+     "ci95": [
+      0.0004244226231327246,
+      0.0014376435242647876
+     ],
+     "k": 10,
+     "n": 12800,
+     "rate": 0.00078125
+    },
+    "frr": {
+     "ci95": [
+      0.0014331821519347372,
+      0.018837647045338773
+     ],
+     "k": 2,
+     "n": 383,
+     "rate": 0.005221932114882507
+    },
+    "frr_rejected": {
+     "ci95": [
+      0.0014331821519347372,
+      0.018837647045338773
+     ],
+     "k": 2,
+     "n": 383,
+     "rate": 0.005221932114882507
+    },
+    "frr_rejected_by_margin_only": 0,
+    "misidentified": {
+     "ci95": [
+      0.0,
+      0.009930679637350275
+     ],
+     "k": 0,
+     "n": 383,
+     "rate": 0.0
+    },
+    "no_face_enrolled_images": 0,
+    "no_face_stranger_images": 0,
+    "stranger_probes": 12800
+   },
+   "per_track_3_of_5": {
+    "enrolled_tracks": 60,
+    "enrolled_tracks_no_face_in_last_frame": 0,
+    "enrolled_tracks_split_in_two": 0,
+    "far": {
+     "ci95": [
+      0.0,
+      0.012643429997735661
+     ],
+     "k": 0,
+     "n": 300,
+     "rate": 0.0
+    },
+    "frr": {
+     "ci95": [
+      0.0,
+      0.06017393047793289
+     ],
+     "k": 0,
+     "n": 60,
+     "rate": 0.0
+    },
+    "frr_unknown": {
+     "ci95": [
+      0.0,
+      0.06017393047793289
+     ],
+     "k": 0,
+     "n": 60,
+     "rate": 0.0
+    },
+    "misidentified": {
+     "ci95": [
+      0.0,
+      0.06017393047793289
+     ],
+     "k": 0,
+     "n": 60,
+     "rate": 0.0
+    },
+    "stranger_tracks": 300,
+    "stranger_tracks_no_face_in_last_frame": 0
+   }
+  },
+  {
+   "per_evaluation": {
+    "enrolled_probes": 122,
+    "far": {
+     "ci95": [
+      0.00031040213359670655,
+      0.0012082997846875531
+     ],
+     "k": 8,
+     "n": 13061,
+     "rate": 0.0006125105275246918
+    },
+    "frr": {
+     "ci95": [
+      0.0,
+      0.0305272660233182
+     ],
+     "k": 0,
+     "n": 122,
+     "rate": 0.0
+    },
+    "frr_rejected": {
+     "ci95": [
+      0.0,
+      0.0305272660233182
+     ],
+     "k": 0,
+     "n": 122,
+     "rate": 0.0
+    },
+    "frr_rejected_by_margin_only": 0,
+    "misidentified": {
+     "ci95": [
+      0.0,
+      0.0305272660233182
+     ],
+     "k": 0,
+     "n": 122,
+     "rate": 0.0
+    },
+    "no_face_enrolled_images": 0,
+    "no_face_stranger_images": 0,
+    "stranger_probes": 13061
+   },
+   "per_track_3_of_5": {
+    "enrolled_tracks": 60,
+    "enrolled_tracks_no_face_in_last_frame": 0,
+    "enrolled_tracks_split_in_two": 2,
+    "far": {
+     "ci95": [
+      0.0,
+      0.012643429997735661
+     ],
+     "k": 0,
+     "n": 300,
+     "rate": 0.0
+    },
+    "frr": {
+     "ci95": [
+      0.0,
+      0.06017393047793289
+     ],
+     "k": 0,
+     "n": 60,
+     "rate": 0.0
+    },
+    "frr_unknown": {
+     "ci95": [
+      0.0,
+      0.06017393047793289
+     ],
+     "k": 0,
+     "n": 60,
+     "rate": 0.0
+    },
+    "misidentified": {
+     "ci95": [
+      0.0,
+      0.06017393047793289
+     ],
+     "k": 0,
+     "n": 60,
+     "rate": 0.0
+    },
+    "stranger_tracks": 300,
+    "stranger_tracks_no_face_in_last_frame": 0
+   }
+  },
+  {
+   "per_evaluation": {
+    "enrolled_probes": 180,
+    "far": {
+     "ci95": [
+      0.0012406745787771284,
+      0.002745043214541736
+     ],
+     "k": 24,
+     "n": 13003,
+     "rate": 0.0018457279089440898
+    },
+    "frr": {
+     "ci95": [
+      0.0,
+      0.02089624981505818
+     ],
+     "k": 0,
+     "n": 180,
+     "rate": 0.0
+    },
+    "frr_rejected": {
+     "ci95": [
+      0.0,
+      0.02089624981505818
+     ],
+     "k": 0,
+     "n": 180,
+     "rate": 0.0
+    },
+    "frr_rejected_by_margin_only": 0,
+    "misidentified": {
+     "ci95": [
+      0.0,
+      0.02089624981505818
+     ],
+     "k": 0,
+     "n": 180,
+     "rate": 0.0
+    },
+    "no_face_enrolled_images": 0,
+    "no_face_stranger_images": 0,
+    "stranger_probes": 13003
+   },
+   "per_track_3_of_5": {
+    "enrolled_tracks": 60,
+    "enrolled_tracks_no_face_in_last_frame": 0,
+    "enrolled_tracks_split_in_two": 1,
+    "far": {
+     "ci95": [
+      0.0,
+      0.012643429997735661
+     ],
+     "k": 0,
+     "n": 300,
+     "rate": 0.0
+    },
+    "frr": {
+     "ci95": [
+      0.0,
+      0.06017393047793289
+     ],
+     "k": 0,
+     "n": 60,
+     "rate": 0.0
+    },
+    "frr_unknown": {
+     "ci95": [
+      0.0,
+      0.06017393047793289
+     ],
+     "k": 0,
+     "n": 60,
+     "rate": 0.0
+    },
+    "misidentified": {
+     "ci95": [
+      0.0,
+      0.06017393047793289
+     ],
+     "k": 0,
+     "n": 60,
+     "rate": 0.0
+    },
+    "stranger_tracks": 300,
+    "stranger_tracks_no_face_in_last_frame": 0
+   }
+  },
+  {
+   "per_evaluation": {
+    "enrolled_probes": 261,
+    "far": {
+     "ci95": [
+      0.00162675891266063,
+      0.003312308265758143
+     ],
+     "k": 30,
+     "n": 12922,
+     "rate": 0.002321622039931899
+    },
+    "frr": {
+     "ci95": [
+      0.0,
+      0.014505274095912424
+     ],
+     "k": 0,
+     "n": 261,
+     "rate": 0.0
+    },
+    "frr_rejected": {
+     "ci95": [
+      0.0,
+      0.014505274095912424
+     ],
+     "k": 0,
+     "n": 261,
+     "rate": 0.0
+    },
+    "frr_rejected_by_margin_only": 0,
+    "misidentified": {
+     "ci95": [
+      0.0,
+      0.014505274095912424
+     ],
+     "k": 0,
+     "n": 261,
+     "rate": 0.0
+    },
+    "no_face_enrolled_images": 0,
+    "no_face_stranger_images": 0,
+    "stranger_probes": 12922
+   },
+   "per_track_3_of_5": {
+    "enrolled_tracks": 60,
+    "enrolled_tracks_no_face_in_last_frame": 0,
+    "enrolled_tracks_split_in_two": 1,
+    "far": {
+     "ci95": [
+      0.0,
+      0.012643429997735661
+     ],
+     "k": 0,
+     "n": 300,
+     "rate": 0.0
+    },
+    "frr": {
+     "ci95": [
+      0.0,
+      0.06017393047793289
+     ],
+     "k": 0,
+     "n": 60,
+     "rate": 0.0
+    },
+    "frr_unknown": {
+     "ci95": [
+      0.0,
+      0.06017393047793289
+     ],
+     "k": 0,
+     "n": 60,
+     "rate": 0.0
+    },
+    "misidentified": {
+     "ci95": [
+      0.0,
+      0.06017393047793289
+     ],
+     "k": 0,
+     "n": 60,
+     "rate": 0.0
+    },
+    "stranger_tracks": 300,
+    "stranger_tracks_no_face_in_last_frame": 0
+   }
+  },
+  {
+   "per_evaluation": {
+    "enrolled_probes": 244,
+    "far": {
+     "ci95": [
+      0.000419862604630473,
+      0.0014222058326437649
+     ],
+     "k": 10,
+     "n": 12939,
+     "rate": 0.0007728572532653219
+    },
+    "frr": {
+     "ci95": [
+      0.0,
+      0.015500222722900431
+     ],
+     "k": 0,
+     "n": 244,
+     "rate": 0.0
+    },
+    "frr_rejected": {
+     "ci95": [
+      0.0,
+      0.015500222722900431
+     ],
+     "k": 0,
+     "n": 244,
+     "rate": 0.0
+    },
+    "frr_rejected_by_margin_only": 0,
+    "misidentified": {
+     "ci95": [
+      0.0,
+      0.015500222722900431
+     ],
+     "k": 0,
+     "n": 244,
+     "rate": 0.0
+    },
+    "no_face_enrolled_images": 0,
+    "no_face_stranger_images": 0,
+    "stranger_probes": 12939
+   },
+   "per_track_3_of_5": {
+    "enrolled_tracks": 60,
+    "enrolled_tracks_no_face_in_last_frame": 0,
+    "enrolled_tracks_split_in_two": 4,
+    "far": {
+     "ci95": [
+      0.0,
+      0.012643429997735661
+     ],
+     "k": 0,
+     "n": 300,
+     "rate": 0.0
+    },
+    "frr": {
+     "ci95": [
+      0.0,
+      0.06017393047793289
+     ],
+     "k": 0,
+     "n": 60,
+     "rate": 0.0
+    },
+    "frr_unknown": {
+     "ci95": [
+      0.0,
+      0.06017393047793289
+     ],
+     "k": 0,
+     "n": 60,
+     "rate": 0.0
+    },
+    "misidentified": {
+     "ci95": [
+      0.0,
+      0.06017393047793289
+     ],
+     "k": 0,
+     "n": 60,
+     "rate": 0.0
+    },
+    "stranger_tracks": 300,
+    "stranger_tracks_no_face_in_last_frame": 0
+   }
+  }
+ ],
+ "pooled": {
+  "per_evaluation": {
+   "enrolled_probes": 2415,
+   "far": {
+    "ci95": [
+     0.0010234837972193768,
+     0.0014015232274146622
+    ],
+    "k": 155,
+    "n": 129415,
+    "rate": 0.0011976973302940154
+   },
+   "frr": {
+    "ci95": [
+     0.0014047520077076874,
+     0.005971340746774459
+    ],
+    "k": 7,
+    "n": 2415,
+    "rate": 0.002898550724637681
+   },
+   "frr_rejected": {
+    "ci95": [
+     0.0014047520077076874,
+     0.005971340746774459
+    ],
+    "k": 7,
+    "n": 2415,
+    "rate": 0.002898550724637681
+   },
+   "frr_rejected_by_margin_only": 0,
+   "misidentified": {
+    "ci95": [
+     0.0,
+     0.0015881982515928285
+    ],
+    "k": 0,
+    "n": 2415,
+    "rate": 0.0
+   },
+   "no_face_enrolled_images": 0,
+   "no_face_stranger_images": 0,
+   "stranger_probes": 129415
+  },
+  "per_track_3_of_5": {
+   "enrolled_tracks": 600,
+   "enrolled_tracks_no_face_in_last_frame": 0,
+   "enrolled_tracks_split_in_two": 18,
+   "far": {
+    "ci95": [
+     1.0842021724855044e-19,
+     0.0012788956648046956
+    ],
+    "k": 0,
+    "n": 3000,
+    "rate": 0.0
+   },
+   "frr": {
+    "ci95": [
+     0.0,
+     0.006361933328210577
+    ],
+    "k": 0,
+    "n": 600,
+    "rate": 0.0
+   },
+   "frr_unknown": {
+    "ci95": [
+     0.0,
+     0.006361933328210577
+    ],
+    "k": 0,
+    "n": 600,
+    "rate": 0.0
+   },
+   "misidentified": {
+    "ci95": [
+     0.0,
+     0.006361933328210577
+    ],
+    "k": 0,
+    "n": 600,
+    "rate": 0.0
+   },
+   "stranger_tracks": 3000,
+   "stranger_tracks_no_face_in_last_frame": 0
+  }
+ },
+ "protocol": {
+  "dataset": "LFW (13,233 images, 5,749 identities), open set, enrolled identities have >= 11 usable images",
+  "detector_gates": {
+   "embed_min_face_px": 40,
+   "score_min": 0.6
+  },
+  "draws": 10,
+  "enroll_images_per_person": 5,
+  "frame_gap_s": 0.3,
+  "identity_config": {
+   "margin": 0.1,
+   "match_threshold": 0.45,
+   "votes_required": 3,
+   "votes_window": 5
+  },
+  "k_enrolled": 10,
+  "refresh": false,
+  "track_frames": 5
+ },
+ "spike_reference_lfw_pairs_yunet_sface": {
+  "acc_10fold_mean": 0.9891666666666667,
+  "n_pairs": 6000,
+  "std_tar@far0.001": 0.9773333333333334,
+  "wide_neg_n": 29640749,
+  "wide_tar@far0.0001": 0.9676583137884212,
+  "wide_tar@far0.001": 0.980496235032712,
+  "wide_thr@far0.0001": 0.41873830556869507,
+  "wide_thr@far0.001": 0.3623400628566742
+ },
+ "versions": {
+  "numpy": "2.5.4",
+  "onnxruntime": "1.31.0",
+  "opencv": "5.0.0",
+  "python": "3.13.13"
+ }
+}
