@@ -58,8 +58,8 @@ class AuditEntry:
 class _RuntimeValue:
     value: Any
     expires_at: float | None
-    # Guarded paths an admin approved for this runtime override only; they lapse with it.
-    approved: frozenset[str] = frozenset()
+    # Guarded values an admin approved for this runtime override only; they lapse with it.
+    approved: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -497,8 +497,8 @@ class ConfigStack:
         Two configurations are checked against the approved baseline: the layers without
         runtime overrides (``base``) and the effective one. An admin-approved loosening of a
         persistent layer (app, preset) makes ``base`` the new baseline; an admin-approved
-        runtime override is approved for that override only and lapses when it is cleared or
-        expires, so the baseline never absorbs runtime values.
+        runtime override approves those exact values for that override only and lapses when it
+        is cleared or expires, so the baseline never absorbs runtime values.
         """
         try:
             cfg = self.effective()
@@ -509,19 +509,18 @@ class ConfigStack:
                 raise ConfigError(_explain(exc)) from exc
             raise
         now = self.clock()
-        live_approved = set().union(
-            *(
-                rv.approved
-                for rv in self._runtime.values()
-                if rv.expires_at is None or rv.expires_at > now
-            )
-        )
+        live_approved = [
+            (path, value)
+            for rv in self._runtime.values()
+            if rv.expires_at is None or rv.expires_at > now
+            for path, value in rv.approved.items()
+        ]
         base_found = violations(self._approved, base)
         base_paths = {v.path for v in base_found}
         rt_found = [
             v
             for v in violations(self._approved, cfg)
-            if v.path not in base_paths and v.path not in live_approved
+            if v.path not in base_paths and (v.path, v.candidate) not in live_approved
         ]
         blocked = [v for v in base_found + rt_found if v.kind not in allow]
         if blocked:
@@ -536,7 +535,7 @@ class ConfigStack:
             self._approved = base
         if rt_found and runtime_key is not None:
             rv = self._runtime[runtime_key]
-            rv.approved = frozenset(rv.approved | {v.path for v in rt_found})
+            rv.approved = rv.approved | {v.path: copy.deepcopy(v.candidate) for v in rt_found}
         if base_found or rt_found:
             self._record(source, "approved", None, [str(v) for v in base_found + rt_found])
         return cfg
