@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -16,7 +17,14 @@ import pytest
 from roboemot import cli
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.vision import models
-from roboemot.vision.models import ModelError, ModelFile, fetch, fetch_file, load_manifest
+from roboemot.vision.models import (
+    ModelError,
+    ModelFile,
+    fetch,
+    fetch_file,
+    load_manifest,
+    sha256_of,
+)
 
 BODY = b"onnx-bytes" * 100
 GOOD = ModelFile(
@@ -34,14 +42,141 @@ def client(body: bytes = BODY, status: int = 200) -> httpx.Client:
 
 def test_manifest_is_complete_and_pinned():
     specs = load_manifest()
-    assert set(specs) == {"yunet", "sface", "fairface-age", "fairface-gender", "dinov2-small"}
+    assert set(specs) == {
+        "yunet",
+        "sface",
+        "fairface-age",
+        "fairface-gender",
+        "fairface-age-int8",
+        "fairface-gender-int8",
+        "dinov2-small",
+    }
     paths = [f.path for s in specs.values() for f in s.files]
     assert len(paths) == len(set(paths))
     for spec in specs.values():
         assert spec.licence
         for f in spec.files:
-            assert re.fullmatch(r"[0-9a-f]{64}", f.sha256)
-            assert f.url.startswith("https://") and not f.path.startswith("/")
+            assert not f.path.startswith("/")
+            if f.quantize is None:
+                assert re.fullmatch(r"[0-9a-f]{64}", f.sha256)
+                assert f.url.startswith("https://")
+            else:
+                assert f.sha256 is None and f.url is None
+    for fp32, int8 in (
+        ("fairface-age", "fairface-age-int8"),
+        ("fairface-gender", "fairface-gender-int8"),
+    ):
+        assert specs[int8].labels == specs[fp32].labels
+        assert specs[int8].files[0].quantize.source == specs[fp32].files[0].path
+
+
+SOURCE_BODY = b"fp32-weights" * 50
+SOURCE = ModelFile(
+    path="fp/m.onnx",
+    url="https://example.test/m.onnx",
+    sha256=hashlib.sha256(SOURCE_BODY).hexdigest(),
+)
+DERIVED = ModelFile(path="q/m.onnx", quantize={"source": "fp/m.onnx", "weight_type": "QInt8"})
+
+
+@pytest.fixture
+def derived_manifest(monkeypatch):
+    spec = models.ModelSpec(name="src", role="r", licence="x", source="s", files=[SOURCE, DERIVED])
+    monkeypatch.setattr(models, "load_manifest", lambda path=models.MANIFEST: {"src": spec})
+    return spec
+
+
+class FakeQuantizer:
+    def __init__(self):
+        self.calls: list[tuple[str, str]] = []
+
+    def __call__(self, source: Path, dest: Path, weight_type: str) -> None:
+        self.calls.append((source.name, weight_type))
+        dest.write_bytes(b"int8:" + source.read_bytes()[:20])
+
+
+def test_derived_file_is_produced_from_the_verified_source(tmp_path, derived_manifest):
+    quant = FakeQuantizer()
+    report = fetch(["src"], tmp_path, client=client(SOURCE_BODY), quantizer=quant)
+    assert report.files == {"fp/m.onnx": "downloaded", "q/m.onnx": "produced"}
+    assert quant.calls == [("m.onnx", "QInt8")]
+    target = tmp_path / "q/m.onnx"
+    marker = json.loads((tmp_path / "q/m.onnx.verified").read_text())
+    assert marker["source_sha256"] == SOURCE.sha256 and marker["weight_type"] == "QInt8"
+    assert marker["sha256"] == sha256_of(target) and marker["size"] == target.stat().st_size
+    assert marker["ort_version"]
+    assert models.check_file(tmp_path, DERIVED) == target
+    assert models.status(derived_manifest, tmp_path, verify=True) == "ok"
+    assert not list(tmp_path.rglob("*.part"))
+    assert (target.stat().st_mode & 0o777) == 0o600
+    again = fetch(["src"], tmp_path, client=client(b"x"), quantizer=quant)
+    assert again.files["q/m.onnx"] == "present" and len(quant.calls) == 1
+
+
+def test_derived_marker_rejects_a_swapped_or_stale_file(tmp_path, derived_manifest):
+    fetch(["src"], tmp_path, client=client(SOURCE_BODY), quantizer=FakeQuantizer())
+    target = tmp_path / "q/m.onnx"
+    marker_path = tmp_path / "q/m.onnx.verified"
+    good = marker_path.read_text()
+
+    target.write_bytes(b"swapped!")
+    with pytest.raises(ModelError, match="changed since"):
+        models.check_file(tmp_path, DERIVED)
+    assert models.status(derived_manifest, tmp_path) == "unverified"
+
+    fetch(["src"], tmp_path, client=client(SOURCE_BODY), quantizer=FakeQuantizer())
+    stale = json.loads(marker_path.read_text())
+    stale["source_sha256"] = "0" * 64
+    marker_path.write_text(json.dumps(stale))
+    with pytest.raises(ModelError, match="changed since"):
+        models.check_file(tmp_path, DERIVED)
+
+    marker_path.write_text(good)
+    (tmp_path / "fp/m.onnx").write_bytes(b"source swapped")
+    with pytest.raises(ModelError):
+        models.check_file(tmp_path, DERIVED)
+
+
+def test_failed_quantization_leaves_no_file(tmp_path, derived_manifest):
+    def boom(source, dest, weight_type):
+        dest.write_bytes(b"half")
+        raise ModelError("quantizer failed")
+
+    with pytest.raises(ModelError, match="quantizer failed"):
+        fetch(["src"], tmp_path, client=client(SOURCE_BODY), quantizer=boom)
+    assert not (tmp_path / "q/m.onnx").exists() and not list(tmp_path.rglob("*.part"))
+
+
+def test_manifest_rejects_a_file_with_both_or_neither_origin():
+    with pytest.raises(ValueError, match="either url and sha256, or quantize"):
+        ModelFile(path="a.onnx")
+    with pytest.raises(ValueError, match="either url and sha256, or quantize"):
+        ModelFile(path="a.onnx", url="https://x", sha256="0" * 64, quantize={"source": "b"})
+
+
+def test_attribute_precision_selects_the_files(tmp_path, monkeypatch):
+    pytest.importorskip("cv2")
+    pytest.importorskip("onnxruntime")
+    from roboemot.vision import onnx
+
+    asked: list[str] = []
+    monkeypatch.setattr(onnx, "configure", lambda threads: None)
+    monkeypatch.setattr(onnx, "_file", lambda root, name, index=0: asked.append(name) or tmp_path)
+    monkeypatch.setattr(onnx, "FairFaceEstimator", lambda *a: "estimator")
+    monkeypatch.setattr(onnx, "YuNetDetector", lambda *a: None)
+    monkeypatch.setattr(onnx, "SFaceEmbedder", lambda *a: None)
+    cfg = RoboEmotConfig().vision
+    assert cfg.attribute_precision == "int8"
+    onnx.load_stages(tmp_path, cfg, appearance=False)
+    assert "fairface-age-int8" in asked and "fairface-gender-int8" in asked
+    asked.clear()
+    onnx.load_stages(
+        tmp_path, cfg.model_copy(update={"attribute_precision": "fp32"}), appearance=False
+    )
+    assert "fairface-age" in asked and "fairface-gender" in asked
+    assert not [n for n in asked if n.endswith("int8")]
+    with pytest.raises(ValueError):
+        RoboEmotConfig(vision={"attribute_precision": "int4"})
 
 
 def test_fetch_downloads_verifies_and_is_idempotent(tmp_path):
@@ -118,7 +253,7 @@ def test_core_imports_do_not_need_the_vision_extra():
 # --------------------------------------------------------------- real models (opt in)
 
 CACHE = models.default_dir()
-NEEDED = ["yunet", "sface", "fairface-age", "fairface-gender", "dinov2-small"]
+NEEDED = ["yunet", "sface", "fairface-age-int8", "fairface-gender-int8", "dinov2-small"]
 
 
 @pytest.fixture(scope="module")

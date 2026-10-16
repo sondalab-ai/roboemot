@@ -1,7 +1,7 @@
 """Age and gender per track, in a low-priority worker (SPEC 5, Rules; 13; 12).
 
 The estimator is slow (two ViT-B models), so it never runs in the frame path. Per track the
-pipeline collects the first ``identity.estimate_frames_min`` face crops and submits ONE job
+pipeline collects the first ``vision.attribute_crops`` face crops and submits ONE job
 that runs the estimator on each crop and aggregates the per-crop values with the registry
 helpers (median age group, majority gender, confidence threshold). Until the result comes
 back the track is ``unknown`` and so a possible minor. Crops are held in memory only for the

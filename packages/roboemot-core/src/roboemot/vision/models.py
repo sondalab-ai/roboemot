@@ -13,6 +13,12 @@ into the models folder only when asked (``roboemot models fetch``), never at imp
   already holds the right files (for example the spike cache) writes the markers after hashing.
 - Folders created by the fetcher are private (0o700), markers 0o600.
 
+- Derived files (INT8 FairFace, SPEC 5, 13) are not downloaded: ``fetch`` quantizes the verified
+  FP32 file with ONNX Runtime ``quantize_dynamic`` (the same call and settings as
+  ``scripts/bench/quantize.py``; needs the ``vision`` extra). Their marker additionally records
+  the source sha256, the weight type and the ORT version; ``check_file`` refuses a derived file
+  whose source or settings no longer match.
+
 Downloaded files are only ever loaded as ONNX weights. The folder is ``--cache-dir``,
 ``vision.models_dir`` or, by default, ``~/.cache/roboemot/models``.
 """
@@ -22,12 +28,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
 import yaml
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 MANIFEST = Path(__file__).with_name("models.yaml")
 ENV_DIR = "ROBOEMOT_MODELS_DIR"
@@ -48,13 +55,31 @@ class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class Quantize(_Strict):
+    """Dynamic INT8 quantization of another manifest file (``source`` is its path)."""
+
+    source: str
+    weight_type: str = "QInt8"
+
+
 class ModelFile(_Strict):
-    """One downloadable file: path under the models folder, https URL, size and sha256."""
+    """One file under the models folder: downloaded (https URL, size, sha256) or derived.
+
+    A derived file has ``quantize`` instead of ``url`` and ``sha256``: its digest depends on the
+    ONNX Runtime version, so it is recorded in the marker when the file is produced, not pinned.
+    """
 
     path: str
-    url: str
-    sha256: str
+    url: str | None = None
+    sha256: str | None = None
     size_bytes: int | None = None
+    quantize: Quantize | None = None
+
+    @model_validator(mode="after")
+    def _one_origin(self) -> ModelFile:
+        if (self.quantize is None) == (self.url is None or self.sha256 is None):
+            raise ValueError(f"{self.path}: give either url and sha256, or quantize")
+        return self
 
 
 class ModelSpec(_Strict):
@@ -89,6 +114,11 @@ def load_manifest(path: Path = MANIFEST) -> dict[str, ModelSpec]:
     are rejected, so a typo in a digest or URL field fails loudly.
     """
     manifest = Manifest.model_validate(yaml.safe_load(path.read_text()))
+    sources = {f.path for m in manifest.models for f in m.files if f.quantize is None}
+    for m in manifest.models:
+        for f in m.files:
+            if f.quantize is not None and f.quantize.source not in sources:
+                raise ValueError(f"{f.path}: quantize source {f.quantize.source} is not a file")
     return {m.name: m for m in manifest.models}
 
 
@@ -135,9 +165,9 @@ def _marker(target: Path) -> Path:
     return target.with_name(target.name + MARKER_SUFFIX)
 
 
-def _write_marker(target: Path, digest: str) -> None:
+def _write_marker(target: Path, digest: str, extra: dict[str, str] | None = None) -> None:
     info = target.stat()
-    data = {"sha256": digest, "size": info.st_size, "mtime_ns": info.st_mtime_ns}
+    data = {"sha256": digest, "size": info.st_size, "mtime_ns": info.st_mtime_ns, **(extra or {})}
     marker = _marker(target)
     marker.unlink(missing_ok=True)
     fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, PRIVATE_FILE_MODE)
@@ -145,11 +175,25 @@ def _write_marker(target: Path, digest: str) -> None:
         json.dump(data, out)
 
 
+def _source_of(file: ModelFile) -> ModelFile | None:
+    """The manifest file a derived file is quantized from (None for downloaded files)."""
+    if file.quantize is None:
+        return None
+    for spec in load_manifest().values():
+        for f in spec.files:
+            if f.path == file.quantize.source:
+                return f
+    raise ModelError(f"{file.path}: quantize source {file.quantize.source} not in the manifest")
+
+
 def check_file(root: Path, file: ModelFile) -> Path:
     """Path of a verified model file; ``ModelError`` if missing, unmarked or changed.
 
     Compares size and mtime with the ``.verified`` marker written after a hash check, and the
-    marker's digest with the manifest. It does not rehash; use ``status(..., verify=True)``.
+    marker's digest with the manifest. For a derived (quantized) file there is no pinned digest:
+    the marker must instead name the manifest's digest of the source file and the manifest's
+    weight type, and the source file itself must still be verified. It does not rehash; use
+    ``status(..., verify=True)``.
     """
     target = _target(root, file)
     try:
@@ -159,8 +203,20 @@ def check_file(root: Path, file: ModelFile) -> Path:
         raise ModelError(
             f"{file.path}: not verified in {root}; run `roboemot models fetch` for it"
         ) from exc
+    source = _source_of(file)
+    if source is None:
+        digest_ok = marker.get("sha256") == file.sha256
+    else:
+        assert file.quantize is not None
+        digest_ok = (
+            marker.get("source_sha256") == source.sha256
+            and marker.get("weight_type") == file.quantize.weight_type
+            and isinstance(marker.get("sha256"), str)
+        )
+        if digest_ok:
+            check_file(root, source)
     ok = (
-        marker.get("sha256") == file.sha256
+        digest_ok
         and marker.get("size") == info.st_size
         and marker.get("mtime_ns") == info.st_mtime_ns
     )
@@ -180,9 +236,21 @@ def status(spec: ModelSpec, root: Path, *, verify: bool = False) -> str:
         return "missing"
     if not all(t.exists() for t in targets):
         return "corrupt"
-    if verify and any(sha256_of(t) != f.sha256 for t, f in zip(targets, spec.files, strict=True)):
+    if verify and any(
+        sha256_of(t) != _expected_sha(root, f) for t, f in zip(targets, spec.files, strict=True)
+    ):
         return "corrupt"
     return "ok" if all(_marked(root, f) for f in spec.files) else "unverified"
+
+
+def _expected_sha(root: Path, file: ModelFile) -> str | None:
+    """Pinned digest, or for a derived file the digest its marker recorded when produced."""
+    if file.sha256 is not None:
+        return file.sha256
+    try:
+        return json.loads(_marker(_target(root, file)).read_text()).get("sha256")
+    except (OSError, ValueError):
+        return None
 
 
 def _marked(root: Path, file: ModelFile) -> bool:
@@ -251,6 +319,8 @@ def fetch_file(file: ModelFile, root: Path, client: httpx.Client) -> str:
     A mismatch, HTTP, redirect or OS error raises ``ModelError``, the partial file is deleted
     and an existing file is left untouched. Only https URLs are fetched.
     """
+    if file.url is None or file.sha256 is None:
+        raise ModelError(f"{file.path}: derived file, produced by fetch from its source")
     if not file.url.startswith("https://"):
         raise ModelError(f"{file.path}: only https URLs are fetched")
     target = _target(root, file)
@@ -277,16 +347,92 @@ def fetch_file(file: ModelFile, root: Path, client: httpx.Client) -> str:
     return "downloaded"
 
 
+Quantizer = Callable[[Path, Path, str], None]
+
+
+def quantize_dynamic_file(source: Path, dest: Path, weight_type: str) -> None:
+    """Write a dynamically quantized copy of ``source`` (ONNX Runtime ``quantize_dynamic``).
+
+    Same call as ``scripts/bench/quantize.py``: weights to INT8, activations quantized per call,
+    no calibration data. ``ModelError`` if onnxruntime or onnx is missing (the ``vision`` extra).
+    """
+    try:
+        from onnxruntime.quantization import QuantType, quantize_dynamic
+    except ImportError as exc:
+        raise ModelError("INT8 models need the `vision` extra (onnxruntime and onnx)") from exc
+    try:
+        quantize_dynamic(source, dest, weight_type=QuantType[weight_type])
+    except KeyError as exc:
+        raise ModelError(f"unknown weight type {weight_type}") from exc
+
+
+def ort_version() -> str:
+    """Installed ONNX Runtime version, recorded in the marker of quantized files."""
+    try:
+        import onnxruntime
+    except ImportError:
+        return "unknown"
+    return str(onnxruntime.__version__)
+
+
+def produce_file(
+    file: ModelFile, root: Path, client: httpx.Client, quantizer: Quantizer = quantize_dynamic_file
+) -> str:
+    """Make a derived file from its verified source; returns ``present`` or ``produced``.
+
+    The source is fetched and verified first. An existing quantized file whose marker matches
+    the source digest, weight type and ORT version is kept. Otherwise the quantizer writes a
+    fresh ``.part`` file, which replaces the target only on success; the marker records the
+    source sha256, settings, ORT version and the produced file's sha256, size and mtime.
+    """
+    assert file.quantize is not None
+    source = _source_of(file)
+    assert source is not None
+    fetch_file(source, root, client)
+    src_path, target = _target(root, source), _target(root, file)
+    version = ort_version()
+    extra = {
+        "source_sha256": str(source.sha256),
+        "weight_type": file.quantize.weight_type,
+        "ort_version": version,
+    }
+    try:
+        if _marked(root, file) and _recorded(target, "ort_version") == version:
+            return "present"
+        _make_dirs(root, target)
+        part = target.with_name(target.name + PART_SUFFIX)
+        part.unlink(missing_ok=True)
+        try:
+            quantizer(src_path, part, file.quantize.weight_type)
+            part.chmod(PRIVATE_FILE_MODE)
+            part.replace(target)
+        finally:
+            part.unlink(missing_ok=True)
+        _write_marker(target, sha256_of(target), extra)
+    except OSError as exc:
+        raise ModelError(f"{file.path}: {exc.strerror or type(exc).__name__}") from exc
+    return "produced"
+
+
+def _recorded(target: Path, key: str) -> object:
+    try:
+        return json.loads(_marker(target).read_text()).get(key)
+    except (OSError, ValueError):
+        return None
+
+
 def fetch(
     names: list[str],
     root: Path,
     *,
     client: httpx.Client | None = None,
+    quantizer: Quantizer = quantize_dynamic_file,
 ) -> FetchReport:
     """Fetch the named models (all files of each) into ``root``.
 
     Raises ``ModelError`` for an unknown name before downloading anything. Pass ``client`` to
-    control transport (tests use ``httpx.MockTransport``). Never called at import time.
+    control transport (tests use ``httpx.MockTransport``) and ``quantizer`` to replace the
+    ONNX Runtime quantization of derived files. Never called at import time.
     """
     specs = load_manifest()
     unknown = [n for n in names if n not in specs]
@@ -298,7 +444,10 @@ def fetch(
     try:
         for name in names:
             for f in specs[name].files:
-                report.files[f.path] = fetch_file(f, root, http)
+                if f.quantize is None:
+                    report.files[f.path] = fetch_file(f, root, http)
+                else:
+                    report.files[f.path] = produce_file(f, root, http, quantizer)
     finally:
         if own:
             http.close()
