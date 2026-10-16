@@ -421,6 +421,51 @@ class AttentionConfig(Strict):
     )
 
 
+# --------------------------------------------------------------------------- world (SPEC 5A)
+
+
+class WorldHalfLife(Strict):
+    person: float = param(120.0, "Confidence half-life of a person entry", unit="s", ge=1, le=86400)
+    animal: float = param(
+        300.0, "Confidence half-life of an animal entry", unit="s", ge=1, le=86400
+    )
+    object: float = param(
+        1800.0, "Confidence half-life of an object entry", unit="s", ge=1, le=86400
+    )
+
+
+class WorldConfig(Strict):
+    match_gate_deg: float = param(
+        15.0, "Angular gate for matching an observation to an entry", unit="deg", ge=0.5, le=90
+    )
+    range_gate_m: float = param(
+        0.5, "Range gate, used when both have a distance", unit="m", ge=0.01, le=10
+    )
+    half_life_s: WorldHalfLife = param({}, "Confidence half-life per kind")
+    out_of_view_decay_factor: float = param(
+        0.2, "Decay rate multiplier for entries outside the sensors' view", ge=0, le=1
+    )
+    forget_confidence: float = param(0.1, "Entries below this confidence are removed", ge=0, le=1)
+    moved_threshold_deg: float = param(
+        10.0, "Angular shift that publishes world.entity_moved", unit="deg", ge=0.5, le=90
+    )
+    initial_confidence: float = param(
+        0.5, "Confidence of a new entry, times the observation confidence", ge=0, le=1
+    )
+    confidence_gain: float = param(
+        0.3, "Share of the missing confidence gained per matching observation", ge=0, le=1
+    )
+    position_blend: float = param(
+        0.5, "Weight of a new observation when updating an entry's position", ge=0, le=1
+    )
+    initial_uncertainty_deg: float = param(
+        5.0, "Angular uncertainty of a new entry", unit="deg", ge=0, le=90
+    )
+    min_uncertainty_deg: float = param(
+        2.0, "Floor of an entry's angular uncertainty", unit="deg", ge=0, le=90
+    )
+
+
 # --------------------------------------------------------------------------- voice (SPEC 8)
 
 
@@ -736,6 +781,7 @@ with warnings.catch_warnings():
         motion: MotionConfig = param({}, "SPEC 10")
         attention: AttentionConfig = param({}, "SPEC 4A, 5")
         identity: IdentityConfig = param({}, "SPEC 5, 6")
+        world: WorldConfig = param({}, "SPEC 5A")
         mirror: MirrorConfig = param({}, "SPEC 9")
         voice: VoiceConfig = param({}, "SPEC 8")
         persona: PersonaConfig = param({}, "SPEC 11A")
