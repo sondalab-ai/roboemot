@@ -445,6 +445,56 @@ class IdentityConfig(Strict):
         return self
 
 
+class EnrollmentConfig(Strict):
+    target_samples: int = param(
+        10,
+        "Face embeddings collected per enrollment session; between "
+        "identity.enroll_min_embeddings and identity.max_embeddings_per_person",
+        ge=5,
+        le=20,
+    )
+    min_score: float = param(
+        0.8, "Detector score a face needs to be used as an enrollment sample", ge=0, le=1
+    )
+    min_face_px: int = param(
+        64,
+        "Faces with a shorter box side are not used as enrollment samples",
+        unit="px",
+        ge=8,
+        le=512,
+    )
+    min_sharpness: float = param(
+        25.0,
+        "Variance of the Laplacian of the grayscale face crop (resized to sharpness_size_px); "
+        "blurrier faces are rejected. Not yet tuned on real camera data",
+        ge=0,
+        le=10000,
+    )
+    sharpness_size_px: int = param(
+        64, "Side of the square the face crop is resized to for the sharpness check", ge=16, le=256
+    )
+    min_gap_s: float = param(
+        0.4, "Minimum time between two samples, so they differ in pose", unit="s", ge=0, le=10
+    )
+    consistency_min: float = param(
+        0.3,
+        "Cosine similarity a new sample needs with the mean of the ones collected, so two "
+        "people (or a wrong track) never mix in one session",
+        ge=-1,
+        le=1,
+    )
+    centre_weight: float = param(
+        0.5,
+        "How much a face far from the image centre loses when the largest face is chosen "
+        "(0: size only)",
+        ge=0,
+        le=1,
+    )
+    timeout_s: float = param(
+        120.0, "A session without completion is dropped after this time", unit="s", ge=5, le=3600
+    )
+
+
 ATTENTION_CATEGORIES = ("active_speaker", "enrolled_person", "nearest_face", "salient_motion")
 
 
@@ -1109,6 +1159,7 @@ with warnings.catch_warnings():
         motion: MotionConfig = param({}, "SPEC 10")
         attention: AttentionConfig = param({}, "SPEC 4A, 5")
         identity: IdentityConfig = param({}, "SPEC 5, 6")
+        enrollment: EnrollmentConfig = param({}, "SPEC 6")
         vision: VisionConfig = param({}, "SPEC 5, 13")
         world: WorldConfig = param({}, "SPEC 5A")
         mirror: MirrorConfig = param({}, "SPEC 9")
@@ -1126,6 +1177,16 @@ with warnings.catch_warnings():
             dupes = sorted({n for n in names if names.count(n) > 1})
             if dupes:
                 raise ValueError(f"duplicate llm route names: {dupes}")
+            return self
+
+        @model_validator(mode="after")
+        def _enrollment_fits_identity(self) -> RoboEmotConfig:
+            n, ident = self.enrollment.target_samples, self.identity
+            if not ident.enroll_min_embeddings <= n <= ident.max_embeddings_per_person:
+                raise ValueError(
+                    "enrollment.target_samples must be within identity.enroll_min_embeddings "
+                    "and max_embeddings_per_person"
+                )
             return self
 
         @model_validator(mode="after")

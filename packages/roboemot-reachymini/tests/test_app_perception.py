@@ -1,0 +1,199 @@
+"""Perception wired into the app (SPEC 4A, 5, 6, 12, 12A), against a mocked SDK client."""
+
+from __future__ import annotations
+
+import json
+import shutil
+import stat
+import threading
+import time
+from datetime import UTC, datetime
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+import numpy as np
+import pytest
+from roboemot.circadian import CircadianModel
+from roboemot.config.schema import RoboEmotConfig
+from roboemot.registry import Consent, FileStore, Registry
+from roboemot.registry.enrollment import EnrollmentError
+from roboemot.vision import CIRCADIAN, Detection, Frame
+from roboemot_reachymini import app as app_module
+
+ROOT = Path(__file__).resolve().parents[3]
+DIM = 8
+MODEL = "mock-face"
+PLANTED = np.eye(DIM, dtype=np.float32)[0]
+CONSENT = Consent("Ada", datetime(2026, 1, 1, tzinfo=UTC), ("face", "refresh"))
+
+
+def fake_mini() -> MagicMock:
+    mini = MagicMock()
+    mini.client._is_alive = True
+    mini.client._last_status = None
+    mini.get_current_head_pose.return_value = np.eye(4)
+    mini.get_current_joint_positions.return_value = ([0.0] * 7, [0.0, 0.0])
+    return mini
+
+
+@pytest.fixture()
+def data(tmp_path, monkeypatch):
+    folder = tmp_path / "app-data"
+    shutil.copytree(app_module.DATA, folder)
+    shutil.copy2(ROOT / "configs/dev-unmeasured.yaml", folder / "app.yaml")
+    monkeypatch.setattr(app_module, "DATA", folder)
+    return folder
+
+
+class FakeDetector:
+    def detect(self, image):
+        return [Detection((100, 60, 180, 140), 0.95, landmarks=np.zeros((5, 2)))]
+
+
+class FakeEmbedder:
+    model_id = MODEL
+
+    def embed(self, image, face):
+        return PLANTED.copy()
+
+
+class PlantedSource:
+    """A camera that sees one person: a new frame on every read."""
+
+    def __init__(self):
+        self.n = 0
+
+    def read(self):
+        self.n += 1
+        img = np.zeros((240, 320, 3), np.uint8)
+        img[0, :4, :] = self.n % 250
+        img[5, :4, :] = (self.n // 250) % 250
+        return Frame(img, time.monotonic(), None)
+
+
+class EmptySource:
+    def read(self):
+        return None
+
+
+class AppWithFakes(app_module.RoboEmotApp):
+    source_class: type = PlantedSource
+
+    def make_frame_source(self, mini, joint_state):
+        return self.source_class()
+
+    def load_vision_stages(self, cfg, profile):
+        self.profile_seen = profile
+        return SimpleNamespace(
+            face_detector=FakeDetector(),
+            face_embedder=FakeEmbedder(),
+            attribute_estimator=None,
+            appearance_embedder=None,
+        )
+
+
+def new_app(cls=app_module.RoboEmotApp):
+    return cls.__new__(cls)  # skip the SDK's daemon probe
+
+
+def start(app) -> tuple[threading.Event, threading.Thread, list]:
+    stop, errors = threading.Event(), []
+
+    def target():
+        try:
+            app.run(fake_mini(), stop)
+        except Exception as exc:  # surfaced by the test
+            errors.append(exc)
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    return stop, thread, errors
+
+
+def wait_for(predicate, timeout=20.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_app_starts_without_models_and_reports_vision_unavailable(data, tmp_path):
+    stop = threading.Event()
+    stop.set()
+    app = new_app()
+    app.run(fake_mini(), stop)  # the real loader finds no models in the empty data folder
+
+    sections = app.diagnostics.report()["sections"]
+    vision = sections["roboemot.vision"]
+    assert vision["ok"] and vision["data"]["state"] == "unavailable"
+    assert vision["data"]["reason"]
+    assert sections["roboemot.world"]["data"] == {"count": 0, "entries": []}
+    assert sections["roboemot.registry"]["data"]["records"] == {}
+    folder = tmp_path / "roboemot-data"
+    assert stat.S_IMODE(folder.stat().st_mode) == 0o700 and (folder / "registry").is_dir()
+    with pytest.raises(EnrollmentError, match="vision unavailable"):
+        app.enrollment.start("s")
+    assert app.enrollment is app.perception.enrollment
+
+
+def test_app_with_fake_stages_names_an_enrolled_person_and_reports(data, tmp_path):
+    reg = Registry(FileStore(tmp_path / "roboemot-data" / "registry", allow_plaintext=True),
+                   RoboEmotConfig().identity)  # fmt: skip
+    person = reg.enroll("Ada", [PLANTED * (1 + 0.01 * i) for i in range(5)], MODEL,
+                        consent=CONSENT, age_group="adult")  # fmt: skip
+    app = new_app(AppWithFakes)
+    stop, thread, errors = start(app)
+    try:
+        assert wait_for(lambda: app.bus is not None)
+        recognized = []
+        app.bus.subscribe("person.recognized", lambda m: recognized.append(m.payload.person_id))
+        assert wait_for(lambda: recognized), "the enrolled person was never recognised"
+        assert wait_for(lambda: any(e.identity == person.person_id for e in app.world.entries))
+        report = app.diagnostics.report()["sections"]
+    finally:
+        stop.set()
+        thread.join(15)
+    assert not errors and not thread.is_alive()
+    assert recognized[0] == person.person_id
+    assert app.profile_seen == "cm4"  # the manifest profile reaches load_stages
+    vision = report["roboemot.vision"]["data"]
+    assert vision["state"] == "running" and vision["frames"]["processed"] > 0
+    world = report["roboemot.world"]["data"]
+    assert world["count"] == 1 and world["entries"][0]["enrolled"] is True
+    assert report["roboemot.registry"]["data"]["records"] == {"person": 1}
+    text = json.dumps(report["roboemot.vision"]) + json.dumps(report["roboemot.world"])
+    assert person.person_id not in text and "Ada" not in text and "embedding" not in text
+    assert not [t for t in threading.enumerate() if t.name.startswith("roboemot-")]
+    reloaded = Registry(FileStore(tmp_path / "roboemot-data" / "registry", allow_plaintext=True),
+                        RoboEmotConfig().identity)  # fmt: skip
+    assert reloaded.get_person(person.person_id).last_seen is not None  # flushed at shutdown
+
+
+def test_circadian_state_scales_the_vision_rate(data):
+    app = new_app(AppWithFakes)
+    app.source_class = EmptySource
+    app.circadian = CircadianModel(RoboEmotConfig().circadian)
+    app.circadian.state = "resting"
+    stop, thread, errors = start(app)
+    want = RoboEmotConfig().circadian.states["resting"].vision_rate_scale
+    try:
+        assert wait_for(lambda: app.perception is not None and app.perception.pipeline is not None)
+        governor = app.perception.pipeline.governor
+        assert wait_for(lambda: governor.scale == want)
+        app.circadian.state = "awake"
+        assert wait_for(lambda: governor.scale == 1.0)
+    finally:
+        stop.set()
+        thread.join(15)
+    assert not errors and CIRCADIAN == "circadian"
+
+
+def test_circadian_scale_is_awake_while_no_model_runs():
+    cfg = RoboEmotConfig()
+    assert (
+        app_module.circadian_vision_scale(cfg, None)
+        == cfg.circadian.states["awake"].vision_rate_scale
+    )

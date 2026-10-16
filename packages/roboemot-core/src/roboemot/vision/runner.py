@@ -2,8 +2,9 @@
 
 The camera thread calls ``submit``; the worker thread takes the newest frame and runs the
 pipeline on it. A frame still waiting when the next one arrives is replaced and counted in
-``dropped``, never queued, so a slow stage cannot build latency. The runner reads no clock
-(frames carry their own capture stamps); only ``pump`` paces camera reads with an injectable clock.
+``dropped``, never queued, so a slow stage cannot build latency. The runner decides nothing
+from a clock (frames carry their own capture stamps); ``clock`` only times the rate statistics,
+and ``pump`` paces camera reads with its own injectable clock.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from typing import Protocol
 
@@ -23,6 +25,8 @@ log = logging.getLogger(__name__)
 
 IDLE_WAIT_S = 0.01
 GRID = 8
+RATE_WINDOW_S = 10.0
+RATE_SAMPLES = 256
 
 
 class FrameSource(Protocol):
@@ -34,9 +38,15 @@ class FrameSource(Protocol):
 class LatestFrameRunner:
     """Runs a perception module on the newest submitted frame in its own thread."""
 
-    def __init__(self, module: PerceptionModule):
+    def __init__(self, module: PerceptionModule, clock: Callable[[], float] = time.monotonic):
         self.module = module
         self.dropped = 0
+        self.processed = 0
+        self.errors = 0
+        self.last_error: str | None = None  # exception type name only, never the message
+        self._clock = clock
+        self._done: deque[float] = deque(maxlen=RATE_SAMPLES)
+        self._arrived: deque[float] = deque(maxlen=RATE_SAMPLES)
         self._cond = threading.Condition()
         self._frame: Frame | None = None
         self._stop = False
@@ -52,7 +62,18 @@ class LatestFrameRunner:
             if self._frame is not None:
                 self.dropped += 1
             self._frame = frame
+            self._arrived.append(self._clock())
             self._cond.notify()
+
+    def rates(self) -> dict[str, float]:
+        """Frames per second handed in and processed over the last ``RATE_WINDOW_S`` seconds."""
+        with self._cond:
+            now = self._clock()
+            cutoff = now - RATE_WINDOW_S
+            return {
+                "submitted_hz": sum(t >= cutoff for t in self._arrived) / RATE_WINDOW_S,
+                "processed_hz": sum(t >= cutoff for t in self._done) / RATE_WINDOW_S,
+            }
 
     def start(self) -> None:
         """Start the worker thread."""
@@ -81,7 +102,13 @@ class LatestFrameRunner:
                 frame, self._frame = self._frame, None
             try:
                 self.module.process(frame)
+                with self._cond:
+                    self.processed += 1
+                    self._done.append(self._clock())
             except Exception as exc:
+                with self._cond:
+                    self.errors += 1
+                    self.last_error = type(exc).__name__
                 log.warning("vision frame failed: %s", type(exc).__name__)
 
 

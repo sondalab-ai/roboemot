@@ -21,6 +21,9 @@ deterministic; ``LatestFrameRunner`` drives it live. Per frame, when the governo
    frame). Optional object stage: same for animals and objects, whose DINOv2-class appearance
    embedding rides in the ``Observation`` (SPEC 5A) for world-model matching and the registry.
 
+``face_tap`` (optional) is called with each processed frame and its visible face tracks, on
+the vision thread, for the enrollment service (SPEC 6); it must not keep the image.
+
 The world model is fed over the bus: ``world.feed_world(bus, world)`` subscribes to
 ``percept.entity``. The bus keeps vision decoupled from the world model (they may live in
 separate processes later) and the in-process bus calls subscribers synchronously, so replay
@@ -67,6 +70,7 @@ PERSON = "person"
 UNKNOWN = "unknown"
 NO_ESTIMATE = Estimate(UNKNOWN, "none")
 CameraProvider = Callable[[int, int], CameraModel | None]
+FaceTap = Callable[[Frame, list[Track]], None]
 
 
 @dataclass
@@ -132,6 +136,7 @@ class VisionPipeline:
         self.refresh = refresh
         self.camera_model = camera_model
         self.world = world or WorldConfig()
+        self.face_tap: FaceTap | None = None
         self.governor = governor or RateGovernor(cfg.rates)
         self.face_detector = face_detector
         self.face_embedder = face_embedder
@@ -197,6 +202,18 @@ class VisionPipeline:
         self.governor.reset()
         if self.worker is not None:
             self.worker.cancel_pending()
+
+    def stats(self) -> dict[str, Any]:
+        """Counts for the debug report (SPEC 12A): live tracks, governor scale and drops.
+
+        Numbers only; no identity, embedding or image.
+        """
+        return {
+            "face_tracks": len(self._faces),
+            "entity_tracks": len(self._entities),
+            "rate_scale": self.governor.scale,
+            "stage_drops": dict(self.governor.dropped),
+        }
 
     def close(self) -> None:
         """Stop the attribute worker: no new jobs, waiting ones cancelled, own pool shut down."""
@@ -264,6 +281,11 @@ class VisionPipeline:
             self._evaluate_face(frame, track, state)
             self._collect_crop(frame, track, state)
             self._publish_face(frame, camera, track, state)
+        if self.face_tap is not None:
+            try:
+                self.face_tap(frame, result.visible)
+            except Exception as exc:
+                log.warning("face tap failed: %s", type(exc).__name__)
 
     def _face_due(self, track: Track, state: _FaceState, stamp: float) -> bool:
         if track.score < self.cfg.tracker.high_score or track.detection is None:

@@ -34,6 +34,8 @@ from roboemot.health.responder import OfflineResponder
 from roboemot.manifest import load_manifest
 from roboemot.motion import Command, MotionLoop, Priority
 from roboemot.persona import effects as persona_effects
+from roboemot.vision import CIRCADIAN, FrameSource
+from roboemot.vision.service import Perception, default_stages, open_perception, world_snapshot
 from roboemot.world import (
     Observation,
     ObserveResult,
@@ -46,6 +48,7 @@ from roboemot.world import (
 )
 from roboemot.world.scan import SOURCE as SCAN_SOURCE
 
+from .camera import ReachyCamera
 from .driver import ReachyMiniDriver
 from .gaze import FRAME, GAZE
 
@@ -175,6 +178,13 @@ def scan_tick(ctx: ScanContext, scan: ScanController, loop: MotionLoop, cfg: Any
         return False
 
 
+def circadian_vision_scale(cfg: Any, circadian: CircadianModel | None) -> float:
+    """The vision rate multiplier of the circadian state (SPEC 7A): the running model's state,
+    or ``awake`` while no model is attached (the circadian runner arrives in M2)."""
+    effects = circadian.effects() if circadian is not None else cfg.circadian.states["awake"]
+    return effects.vision_rate_scale
+
+
 def apply_attention_config(
     cfg: Any, world: WorldModel, selector: AttentionSelector, gaze: GazeController
 ) -> None:
@@ -192,6 +202,16 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
     selector: AttentionSelector | None = None
     circadian: CircadianModel | None = None  # the circadian runner (M2) sets this
     minor_present: bool = False  # the registry's age estimates (M1) set this
+    perception: Perception | None = None
+    enrollment: Any = None  # EnrollmentService: the web UI enrolls through it (SPEC 6)
+
+    def make_frame_source(self, mini: Any, joint_state: Any) -> FrameSource:
+        """The camera the vision pump reads (overridable: tests inject a planted scene)."""
+        return ReachyCamera(mini, joint_state)
+
+    def load_vision_stages(self, cfg: Any, profile: str | None) -> Any:
+        """The vision backends (overridable: tests inject fakes)."""
+        return default_stages(cfg, profile)
 
     def run(self, reachy_mini: Any, stop_event: threading.Event) -> None:
         stack = ConfigStack.from_files(
@@ -239,6 +259,16 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 scan.policy.note_unexplained(*result.unexplained_bearing, obs.stamp)
 
         feed_world(bus, world, on_result)
+        source = self.make_frame_source(reachy_mini, loop.driver.read_state)
+        perception = self.perception = open_perception(
+            cfg,
+            bus,
+            source,
+            profile=manifest.robot.profile,
+            camera_model=getattr(source, "camera_model", None),
+            load_stages=self.load_vision_stages,
+        )
+        self.enrollment = perception.enrollment
 
         def publish(obs: Observation, joint_state: Any) -> None:
             bus.publish("percept.entity", obs, obs.stamp, joint_state=joint_state)
@@ -254,6 +284,9 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             *platform_sources(manifest.robot.id, Target()),
             FnSource("roboemot.motion", loop.snapshot),
             FnSource("roboemot.network", network.snapshot),
+            FnSource("roboemot.vision", perception.vision_snapshot),
+            FnSource("roboemot.world", lambda: world_snapshot(world.entries, time.monotonic())),
+            FnSource("roboemot.registry", perception.registry_snapshot),
             FnSource(
                 "roboemot.app",
                 lambda: {
@@ -271,6 +304,9 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             if scan is not None:
                 scan.apply_config(change.config.world.scan)
                 plugin.planner.apply_config(change.config)
+            if perception.pipeline is not None:
+                perception.pipeline.cfg = change.config.vision
+                perception.pipeline.governor.rates = change.config.vision.rates
             responder.cfg = change.config.connectivity
             network.set_policy(change.config.connectivity.network)
 
@@ -278,14 +314,19 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         stop_watch = stack.start_watcher()
         loop.start()
         network.start()
+        perception.start()
         fx_for, fx = None, None
         try:
-            for source in plugin.sources:
-                source.start(publish)
+            for world_source in plugin.sources:
+                world_source.start(publish)
             while not stop_event.is_set():
                 now = time.monotonic()
                 attending = attention_tick(now, world, selector, gaze, loop)
                 live = stack.effective()
+                if perception.pipeline is not None:
+                    perception.pipeline.governor.set_scale(
+                        CIRCADIAN, circadian_vision_scale(live, self.circadian)
+                    )
                 if scan is not None:
                     local = datetime.now()
                     hour = local.hour + local.minute / MINUTES_PER_HOUR
@@ -307,8 +348,9 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 stop_event.wait(0.05)
         finally:
             stop_watch.set()
-            for source in plugin.sources:
-                source.stop()
+            for world_source in plugin.sources:
+                world_source.stop()
+            perception.stop()
             network.stop()
             loop.stop()
 
