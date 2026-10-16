@@ -409,6 +409,16 @@ class IdentityConfig(Strict):
     estimate_frames_min: int = param(
         5, "Frames aggregated before an estimate is used", ge=1, le=100
     )
+    enroll_min_embeddings: int = param(5, "Face embeddings required at enrollment", ge=1, le=20)
+    max_embeddings_per_person: int = param(
+        20, "Cap on stored face embeddings per person, refresh included", ge=5, le=20
+    )
+    refresh_min_similarity: float = param(
+        0.65, "Best similarity needed before a match adds an embedding", ge=0, le=1
+    )
+    refresh_max_similarity: float = param(
+        0.98, "Skip a refresh embedding this close to a stored one", ge=0, le=1
+    )
 
 
 class AttentionConfig(Strict):

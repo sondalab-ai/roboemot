@@ -23,6 +23,12 @@ BEHAVIOUR_MODULES = [
     "health/__init__.py",
     "health/network.py",
     "health/responder.py",
+    "registry/__init__.py",
+    "registry/registry.py",
+    "registry/records.py",
+    "registry/store.py",
+    "registry/matcher.py",
+    "registry/estimates.py",
 ]
 ALLOWED = {0, 1, -1, 2, 0.5, -1.0}
 
