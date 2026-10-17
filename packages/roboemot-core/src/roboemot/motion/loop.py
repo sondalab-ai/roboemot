@@ -91,6 +91,7 @@ class MotionLoop:
         # arbiter runs: they may feed or clear ``core`` directly (never ``feed`` or ``clear`` of
         # this class, which take the lock). A raising hook is counted and skipped, the tick goes on.
         self.tick_hooks: list[Callable[[float, MotionCore], None]] = []
+        self._hook_error: str | None = None
 
     # ---- configuration (SPEC 11A hot reload)
 
@@ -177,11 +178,15 @@ class MotionLoop:
                 state = self._resync()
                 self.ticks += 1
                 return state
+            failed = False
             for hook in self.tick_hooks:
                 try:
                     hook(now, self.core)
                 except Exception as exc:
-                    self._note_error(exc)
+                    failed = True
+                    self._note_hook_error(exc)
+            if not failed:
+                self._hook_error = None
             out = self.core.tick(now, dt)
             self._call(self.driver.write_pose_targets, now, out)
             self.ticks += 1
@@ -230,6 +235,16 @@ class MotionLoop:
             with self._lock:
                 self._resync()  # resume from wherever the platform's wake-up left the robot
         self.motors_off = not enabled
+
+    def _note_hook_error(self, exc: Exception) -> None:
+        """Count a failing hook every tick but log it once per distinct message until a clean tick
+        (a hook at 50 Hz would otherwise flood the log)."""
+        msg = f"{type(exc).__name__}: {exc}"
+        self.errors += 1
+        self.last_error = msg
+        if msg != self._hook_error:
+            self._hook_error = msg
+            log.warning("motion: %s", msg)
 
     def _note_error(self, exc: Exception) -> None:
         self.errors += 1

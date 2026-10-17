@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 from roboemot.affect.appraisal import AppraisalAdapter
 from roboemot.bus import Bus
-from roboemot.config.schema import AppraisalConfig, ReflexConfig, ReflexRule, RoboEmotConfig
+from roboemot.config.schema import (
+    AppraisalConfig,
+    ReflexAudioConfig,
+    ReflexConfig,
+    ReflexRule,
+    RoboEmotConfig,
+)
 from roboemot.config.stack import violations
 from roboemot.drivers import MockPoseDriver
 from roboemot.manifest import load_manifest
@@ -262,14 +270,14 @@ def test_a_loud_withdraw_also_freezes_the_microphone_settings():
     cand = RoboEmotConfig.model_validate(
         {"reflexes": {"rules": [loud], "audio": {"floor_half_life_s": 9}}}
     )
-    assert {v.path for v in violations(approved, cand)} == {"reflexes.audio"}
+    assert "reflexes.audio" in {v.path for v in violations(approved, cand)}
 
 
 def test_a_new_reflex_setting_must_be_classified_as_shared_with_a_withdraw_or_not():
     from roboemot.config.schema import WITHDRAW_RULE_FIELDS, WITHDRAW_SHARED_FIELDS
 
     assert set(WITHDRAW_RULE_FIELDS) == set(ReflexRule.model_fields) - {"name"}
-    not_read_by_a_withdraw = {"antenna_ratio", "motion_eps_deg", "latency_window", "audio", "rules"}
+    not_read_by_a_withdraw = {"antenna_ratio", "latency_window", "audio", "rules"}
     assert set(ReflexConfig.model_fields) == set(WITHDRAW_SHARED_FIELDS) | not_read_by_a_withdraw
 
 
@@ -478,15 +486,6 @@ def test_withdraw_never_moves_the_head_forward_even_with_the_minor_band_on(minor
     assert rig.stats("w")["fired"] == 1
     assert max(during) <= start + 1e-6  # never forward of where it was
     assert min(during) < start - math.radians(2)  # and it did tip back
-
-
-def test_withdraw_at_the_back_limit_holds_instead_of_going_forward():
-    rig = Rig(cfg_with(PROXIMITY), hold={PITCH: -10.0})
-    rig.run(0.5)
-    start = rig.pitch[-1]
-    rig.bus.publish("percept.face", face(rig.t, 0.6), rig.t)
-    rig.run(0.6)
-    assert max(rig.pitch[-30:]) <= start + 1e-6
 
 
 # --------------------------------------------------------------------------- new voice
@@ -718,3 +717,161 @@ def test_a_close_face_is_judged_against_the_vision_age_not_the_audio_age():
         rig.tick()
         assert rig.stats("w")["fired"] == int(fires), age
         assert rig.stats("w")["dropped_stale"] == int(not fires)
+
+
+# --------------------------------------------------------------------------- fix round (review)
+
+
+def stall(rig: Rig, seconds: float) -> None:
+    """The app stops feeding the loop (no idle, no hold): the watchdog takes over."""
+    for _ in range(round(seconds / DT)):
+        rig.loop.step_once(rig.t, DT)
+        rig.t += DT
+
+
+def test_a_loud_onset_during_the_watchdog_hold_neither_plays_nor_cancels_the_hold():
+    rig = Rig(cfg_with(rule()))
+    rig.settle_audio()
+    stall(rig, 0.4)  # past safety.watchdog_ms (200)
+    assert rig.loop.core.holding
+    rig.engine.offer_audio_level(LOUD, rig.t)
+    stall(rig, 0.3)
+    assert rig.loop.core.holding
+    assert rig.reflex_sources() == [] and rig.stats()["fired"] == 0
+
+
+def test_a_running_reflex_does_not_keep_the_watchdog_quiet_when_the_app_stalls():
+    rig = Rig(cfg_with(rule(duration_ms=800)))
+    rig.settle_audio()
+    rig.engine.offer_audio_level(LOUD, rig.t)
+    rig.tick(2)
+    assert rig.reflex_sources() == ["reflex.r"]
+    stall(rig, 0.3)  # the reflex is still inside its 800 ms; the app fed nothing for 300 ms
+    assert rig.loop.core.holding
+    assert rig.engine.active() == []
+
+
+def test_a_withdraw_re_arms_when_the_face_leaves_the_frame_and_a_close_one_comes_back():
+    rig = Rig(cfg_with(PROXIMITY | {"cooldown_s": 1}))
+    rig.tick()
+    rig.bus.publish("percept.face", face(rig.t, 0.6), rig.t)
+    rig.tick()
+    assert rig.stats("w")["fired"] == 1
+    for _ in range(60):  # 1.2 s of processed frames with nobody in them
+        rig.bus.publish("percept.face_frame", rig.t, rig.t)
+        rig.tick()
+    rig.bus.publish("percept.face", face(rig.t, 0.6), rig.t)
+    rig.tick()
+    assert rig.stats("w")["fired"] == 2
+
+
+def test_a_face_frame_at_the_same_stamp_does_not_cancel_a_face_in_it():
+    rig = Rig(cfg_with(PROXIMITY))
+    rig.tick()
+    rig.bus.publish("percept.face_frame", rig.t, rig.t)
+    rig.bus.publish("percept.face", face(rig.t, 0.6), rig.t)
+    rig.tick()
+    assert rig.stats("w")["fired"] == 1
+
+
+NEUTRAL = {
+    ReflexConfig: {
+        "release_fraction", "proximity_rearm_ratio", "latency_window", "rules",
+        "audio",
+    },
+    ReflexAudioConfig: {"poll_hz", "loud_event_ratio", "loud_event_refractory_s"},
+    # trigger, primitive, threshold and enabled have per-trigger rules in reflex_violations
+    ReflexRule: {"name", "trigger", "primitive", "threshold", "enabled"},
+}  # fmt: skip
+
+
+@pytest.mark.parametrize("model", list(NEUTRAL))
+def test_every_reflex_field_has_a_safe_direction_or_is_listed_as_neutral(model):
+    for name, info in model.model_fields.items():
+        extra = info.json_schema_extra or {}
+        assert extra.get("conservative") or name in NEUTRAL[model], f"{model.__name__}.{name}"
+
+
+def with_top(path: str, value) -> RoboEmotConfig:
+    head, _, tail = path.partition(".")
+    reflexes = {"rules": [rule(name="a")]}
+    reflexes |= {head: {tail: value}} if tail else {head: value}
+    return RoboEmotConfig.model_validate({"reflexes": reflexes})
+
+
+@pytest.mark.parametrize(
+    ("path", "safe", "unsafe"),
+    [
+        ("audio.min_rms", 0.02, 0.005),
+        ("audio.floor_half_life_s", 1.0, 5.0),
+        ("command_ttl_ms", 50, 200),
+        ("attack_fraction", 0.4, 0.1),
+        ("max_future_ms", 10, 100),
+        ("antenna_ratio", 1.0, 4.0),
+        ("max_age_ms", 100, 300),
+        ("enabled", False, True),
+        ("audio.enabled", False, True),
+    ],
+)
+def test_shared_reflex_settings_move_only_the_safe_way_without_a_withdraw(path, safe, unsafe):
+    assert violations(with_top(path, unsafe), with_top(path, safe)) == []
+    assert violations(with_top(path, safe), with_top(path, unsafe))
+
+
+def test_a_pose_outside_the_minor_band_gets_no_withdraw_that_would_pull_it_forward():
+    rig = Rig(cfg_with(PROXIMITY))
+    rig.tick(3)
+    # tipped back past the band the minor factor will draw: the band would scale a withdraw target
+    # (-40 deg at most) to -0.42 rad, forward of this pose
+    rig.loop.core.limiter.pos[PITCH] = -0.65
+    rig.loop.set_minor_present(True)
+    rig.bus.publish("percept.face", face(rig.t, 0.6), rig.t)
+    rig.tick()
+    stats = rig.stats("w")
+    assert stats["fired"] == 0 and stats["no_motion"] == 1
+    assert rig.reflex_sources() == []
+
+
+def test_a_withdraw_that_cannot_move_the_head_is_no_motion_not_a_hold():
+    rig = Rig(cfg_with(PROXIMITY), hold={PITCH: -10.0})  # held at the back limit
+    rig.run(0.5)
+    rig.bus.publish("percept.face", face(rig.t, 0.6), rig.t)
+    rig.tick()
+    stats = rig.stats("w")
+    assert stats["fired"] == 0 and stats["no_motion"] == 1
+    assert rig.reflex_sources() == []
+
+
+def test_a_trigger_stamped_in_the_future_is_dropped_and_a_tiny_skew_counts_as_zero_latency():
+    rig = Rig(cfg_with(rule(), max_future_ms=50))
+    rig.settle_audio()
+    rig.engine.offer_audio_level(LOUD, rig.t + 5.0)
+    rig.tick()
+    assert rig.stats()["fired"] == 0 and rig.stats()["dropped_stale"] == 1
+    rig.settle_audio()
+    rig.engine.offer_audio_level(LOUD, rig.t + 0.03)
+    rig.tick()
+    assert rig.stats()["fired"] == 1
+    assert rig.engine.snapshot()["latency"]["loud_onset"]["command_ms"]["max"] == 0.0
+
+
+@pytest.mark.parametrize("payload", [None, object(), "x", (1, 2), SimpleNamespace(box=(1,))])
+def test_a_bad_payload_on_the_bus_never_raises_into_the_publisher(payload):
+    rig = Rig(cfg_with(PROXIMITY, VOICE))
+    for topic in ("percept.face", "percept.entity", "percept.face_frame"):
+        rig.bus.publish(topic, payload, "not-a-number", joint_state="bad")
+    assert rig.engine.bad_payloads >= 1
+    rig.tick()
+
+
+def test_a_failing_tick_hook_is_logged_once_per_distinct_message(caplog):
+    rig = Rig(cfg_with(rule()))
+
+    def boom(now, core):
+        raise RuntimeError("same")
+
+    rig.loop.tick_hooks.insert(0, boom)
+    with caplog.at_level(logging.WARNING):
+        rig.tick(30)
+    assert rig.loop.errors == 30
+    assert len([r for r in caplog.records if "same" in r.getMessage()]) == 1

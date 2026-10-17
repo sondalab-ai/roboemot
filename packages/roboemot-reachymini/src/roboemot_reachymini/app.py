@@ -380,10 +380,12 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             margin_rad=math.radians(cfg.safety.constraint_margin_deg),
             bus=bus,
         )
-        reflexes.attach(bus)
         loop.tick_hooks.append(reflexes.on_tick)
         audio = self.audio = ReachyAudio(
-            reachy_mini, reflexes.offer_audio_level, cfg.reflexes.audio.poll_hz
+            reachy_mini,
+            reflexes.offer_audio_level,
+            cfg.reflexes.audio.poll_hz,
+            max_gap_s=cfg.reflexes.max_age_ms / MS_PER_S,
         )
         reflexes.audio_status = audio.snapshot
         # The one affect engine: appraisal events from the bus and the responder feed it, the
@@ -423,6 +425,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             bus, cfg.safety, sink=loop.set_minor_present, period=lambda: self.detection_period()
         )
         presence.apply(time.monotonic())  # the loop's caps are on from its first tick
+        reflexes.attach(bus)  # after MinorPresence: it can never come before the minor latch
         tracker = self.register_tracker = RegisterTracker(
             bus,
             cfg.expression,

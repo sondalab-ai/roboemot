@@ -141,4 +141,40 @@ def test_no_buffer_is_kept_or_logged(caplog):
 
     assert list(arrays(audio)) == []
     assert all(str(marker) not in r.getMessage() for r in caplog.records)
-    assert set(audio.snapshot()) == {"state", "reason", "chunks"}
+    assert set(audio.snapshot()) == {"state", "reason", "chunks", "dropped_stale"}
+
+
+def test_a_drain_keeps_only_the_newest_chunk_and_counts_the_rest():
+    chunks = [np.full(8, v, np.float32) for v in (0.1, 0.2, 0.3, 0.4)]
+    mini, _ = media(chunks)
+    got = []
+    audio = ReachyAudio(mini, lambda rms, stamp: got.append(rms), 50)
+    assert audio.poll_once(drain=True)
+    assert [round(r, 3) for r in got] == [0.4]
+    assert audio.snapshot()["dropped_stale"] == 3
+
+
+def test_after_a_stall_of_the_reading_thread_the_backlog_is_dropped_not_played_late():
+    chunks = [np.full(8, v, np.float32) for v in (0.1, 0.2, 0.3)]
+    mini, _ = media(chunks)
+    got = []
+    ticks = iter(range(1000))
+    # every clock read is 1 s after the last: each loop pass looks like a stall (gap > max_gap_s)
+    audio = ReachyAudio(
+        mini, lambda rms, stamp: got.append(rms), 500, lambda: float(next(ticks)), max_gap_s=0.15
+    )
+    audio.start()
+    assert wait_for(lambda: len(got) >= 1)
+    audio.stop()
+    assert [round(r, 3) for r in got] == [0.3]
+
+
+def test_without_a_stall_every_chunk_is_used():
+    chunks = [np.full(8, v, np.float32) for v in (0.1, 0.2, 0.3)]
+    mini, _ = media(chunks)
+    got = []
+    audio = ReachyAudio(mini, lambda rms, stamp: got.append(rms), 500, max_gap_s=60.0)
+    audio.start()
+    assert wait_for(lambda: len(got) == 3)
+    audio.stop()
+    assert audio.snapshot()["dropped_stale"] == 0

@@ -122,6 +122,7 @@ class ReflexEngine:
         self.rmap, self.dofs, self.constraints, self.bus = rmap, dofs, constraints, bus
         self._gaze = GazeMap(rmap.head_yaw, rmap.head_pitch, rmap.body_yaw)
         self.audio_status: Callable[[], dict[str, Any]] | None = None
+        self.bad_payloads = 0
         self._lock = threading.Lock()
         self._inbox: deque[_Pending] = deque(maxlen=INBOX_MAX)
         self._unsubscribe: list[Callable[[], None]] = []
@@ -156,10 +157,14 @@ class ReflexEngine:
     # ---- inputs (any thread; scalars only)
 
     def attach(self, bus: Bus) -> None:
-        """Listen for voice bearings (``percept.entity``) and faces (``percept.face``)."""
+        """Listen for voice bearings (``percept.entity``) and faces (``percept.face``, and
+        ``percept.face_frame``: a processed frame without a face is a height of 0, which re-arms
+        a close-face rule). Attach after ``MinorPresence``, so a failure here can never come
+        before the minor latch in the bus's subscriber order."""
         self._unsubscribe += [
             bus.subscribe("percept.entity", self._on_entity),
             bus.subscribe("percept.face", self._on_face),
+            bus.subscribe("percept.face_frame", self._on_face_frame),
         ]
 
     def close(self) -> None:
@@ -224,15 +229,31 @@ class ReflexEngine:
             elif stamp == self._face_stamp:
                 self._face_h = max(self._face_h, height)
 
+    # Bus handlers run inside the publisher (the vision thread): a bad payload is counted and
+    # dropped, never raised into ``Bus.publish``.
+
     def _on_entity(self, msg: Message) -> None:
-        obs = msg.payload
-        if isinstance(obs, Observation) and obs.source in self.rmap.voice_sources:
-            joints = msg.meta.get("joint_state") or {}
-            self.offer_voice(obs.stamp, obs.azimuth_rad, float(joints.get(self.rmap.head_yaw, 0.0)))
+        try:
+            obs = msg.payload
+            if isinstance(obs, Observation) and obs.source in self.rmap.voice_sources:
+                joints = msg.meta.get("joint_state") or {}
+                head_yaw = float(joints.get(self.rmap.head_yaw, 0.0))
+                self.offer_voice(obs.stamp, obs.azimuth_rad, head_yaw)
+        except Exception:
+            self.bad_payloads += 1
 
     def _on_face(self, msg: Message) -> None:
-        _, y1, _, y2 = msg.payload.box
-        self.offer_face_height(msg.stamp, y2 - y1)
+        try:
+            _, y1, _, y2 = msg.payload.box
+            self.offer_face_height(float(msg.stamp), float(y2) - float(y1))
+        except Exception:
+            self.bad_payloads += 1
+
+    def _on_face_frame(self, msg: Message) -> None:
+        try:
+            self.offer_face_height(float(msg.stamp), 0.0)
+        except Exception:
+            self.bad_payloads += 1
 
     # ---- the motion loop's tick
 
@@ -240,7 +261,9 @@ class ReflexEngine:
         """Start due reflexes and advance the running ones. Called with the loop's lock held:
         it only uses ``core`` and never the loop's own methods."""
         triggers, cfg = self._collect(now)
-        if not cfg.enabled:
+        if not cfg.enabled or core.holding:
+            # Disabled, or the watchdog holds the robot (the app stalled): no new reflex, and the
+            # running ones end. The hold is at SAFETY priority and must stay (SPEC 10, 12).
             self._stop_all(core)
             return
         if core.minor_present:
@@ -265,7 +288,8 @@ class ReflexEngine:
             rule = self._rule(p.rule)
             vision = rule is not None and rule.trigger == "proximity"
             limit = cfg.max_age_vision_ms if vision else cfg.max_age_ms
-            if now - p.stamp > limit / MS_PER_S:
+            age = now - p.stamp
+            if age > limit / MS_PER_S or age < -cfg.max_future_ms / MS_PER_S:
                 self._stat(p.rule).stale += 1
             else:
                 fresh.append(p)
@@ -318,7 +342,7 @@ class ReflexEngine:
         self._players[rule.name] = Player(prim, now, source=source, priority=Priority.REFLEX)
         self._last_fire[rule.name] = now
         stats.fired += 1
-        self._record(rule.trigger, "command", now - p.stamp)
+        self._record(rule.trigger, "command", max(0.0, now - p.stamp))
         self._moving[rule.name] = (p.stamp, rule.trigger, start)
 
     def _seed(self, core: MotionCore) -> dict[str, float]:
@@ -349,21 +373,30 @@ class ReflexEngine:
             return {}
         rmap = self.rmap
         if rule.primitive == "turn_toward":
-            return self._turn(value, amp, seed, core)
+            return self._turn(value, amp, seed, core, math.radians(cfg.motion_eps_deg))
         pitch = self.dofs[rmap.head_pitch]
         away = rmap.pitch_away_sign
+        out: dict[str, float] = {}
+        eps = math.radians(cfg.motion_eps_deg)  # less than this is not a movement
         target = _clamp(seed[rmap.head_pitch] + away * amp, pitch.min, pitch.max)
-        if (target - seed[rmap.head_pitch]) * away < 0:  # never towards: hold instead
-            target = seed[rmap.head_pitch]
-        out = {rmap.head_pitch: target}
+        # The arbiter scales the target about home by the minor factor. If that lands the head
+        # forward of where it is now (a pose still outside the band), the pitch is left alone:
+        # a reflex never tips the head forward, and one that cannot move it is no_motion.
+        factor = core.minor_factor if core.minor_present else 1.0
+        scaled = pitch.home + (target - pitch.home) * factor
+        now_pitch = core.limiter.pos.get(rmap.head_pitch, pitch.home)
+        if abs(target - seed[rmap.head_pitch]) > eps and (scaled - now_pitch) * away >= 0:
+            out[rmap.head_pitch] = target
         if rule.primitive == "startle":
             for name, sign in rmap.antennas.items():
                 d = self.dofs[name]
-                out[name] = _clamp(seed[name] + sign * amp * cfg.antenna_ratio, d.min, d.max)
+                lift = _clamp(seed[name] + sign * amp * cfg.antenna_ratio, d.min, d.max)
+                if abs(lift - seed[name]) > eps:
+                    out[name] = lift
         return out
 
     def _turn(
-        self, azimuth: float, amp: float, seed: dict[str, float], core: MotionCore
+        self, azimuth: float, amp: float, seed: dict[str, float], core: MotionCore, eps: float
     ) -> dict[str, float]:
         rmap = self.rmap
         head = self.dofs[rmap.head_yaw]
@@ -375,7 +408,7 @@ class ReflexEngine:
         now_yaw = seed[rmap.head_yaw]
         aim = _clamp(azimuth, -HALF_PLANE, HALF_PLANE)
         target = _clamp(now_yaw + _clamp(aim - now_yaw, -amp, amp), lo, hi)
-        if target == now_yaw:
+        if abs(target - now_yaw) <= eps:
             return {}
         return {rmap.head_yaw: target}
 
@@ -389,12 +422,12 @@ class ReflexEngine:
                 del self._players[name]
                 self._moving.pop(name, None)
                 continue
-            core.feed(replace(cmd, expires=now + ttl))
+            core.feed(replace(cmd, expires=now + ttl), liveness=False)
             moving = self._moving.get(name)
             if moving is not None:
                 stamp, trigger, start = moving
                 if any(abs(core.limiter.pos.get(k, v) - v) > eps for k, v in start.items()):
-                    self._record(trigger, "motion", now - stamp)
+                    self._record(trigger, "motion", max(0.0, now - stamp))
                     del self._moving[name]
 
     def _stop_minor_sensitive(self, core: MotionCore) -> None:

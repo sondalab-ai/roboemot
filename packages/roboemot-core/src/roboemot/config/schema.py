@@ -697,8 +697,9 @@ WITHDRAW_RULE_FIELDS = (
     "duration_ms", "suppress_with_minor",
 )  # fmt: skip
 WITHDRAW_SHARED_FIELDS = (
-    "enabled", "max_amplitude_deg", "max_age_ms", "max_age_vision_ms", "command_ttl_ms",
-    "attack_fraction", "release_fraction", "proximity_rearm_ratio",
+    "enabled", "max_amplitude_deg", "max_age_ms", "max_age_vision_ms", "max_future_ms",
+    "command_ttl_ms", "attack_fraction", "release_fraction", "proximity_rearm_ratio",
+    "motion_eps_deg",
 )  # fmt: skip
 
 
@@ -773,15 +774,21 @@ class ReflexRule(Strict):
 
 
 class ReflexAudioConfig(Strict):
-    enabled: bool = param(True, "Read the microphone level for loud-onset reflexes", restart=True)
+    enabled: bool = param(
+        True,
+        "Read the microphone level for loud-onset reflexes",
+        restart=True,
+        conservative="false",
+    )
     poll_hz: float = param(50.0, "Audio chunk read rate", unit="Hz", ge=5, le=200, restart=True)
     floor_half_life_s: float = param(
-        2.0, "How slowly the sound floor rises to a louder room (it falls at once)",
-        unit="s", ge=0.1, le=60,
+        2.0, "How slowly the sound floor rises to a louder room (it falls at once); a shorter "
+        "half-life makes a sustained noise stop counting as an onset sooner",
+        unit="s", ge=0.1, le=60, conservative="lower",
     )  # fmt: skip
     min_rms: float = param(
-        0.01, "Lowest floor: a quieter room is treated as this level", unit="full scale",
-        ge=0.0001, le=0.5,
+        0.01, "Lowest floor: a quieter room is treated as this level, so a higher value makes "
+        "the onsets fire less", unit="full scale", ge=0.0001, le=0.5, conservative="higher",
     )  # fmt: skip
     loud_event_ratio: float = param(
         4.0, "Level over the floor that publishes sound.loud for the affect engine", ge=1.5, le=100
@@ -792,7 +799,7 @@ class ReflexAudioConfig(Strict):
 
 
 class ReflexConfig(Strict):
-    enabled: bool = param(True, "Run the reflex engine")
+    enabled: bool = param(True, "Run the reflex engine", conservative="false")
     max_amplitude_deg: float = param(
         45.0,
         "Ceiling on every rule's amplitude (the manifest limits and the minor cap still apply)",
@@ -809,12 +816,20 @@ class ReflexConfig(Strict):
         "counts (SPEC 13: vision trigger to reflex motion, 250 ms on cm4)",
         unit="ms", ge=20, le=2000, conservative="lower",
     )  # fmt: skip
+    max_future_ms: float = param(
+        50.0,
+        "A trigger stamped later than now by more than this is dropped (a bad clock); within it "
+        "the latency is counted as 0",
+        unit="ms", ge=0, le=1000, conservative="lower",
+    )  # fmt: skip
     command_ttl_ms: float = param(
-        100.0, "A reflex command expires this long after its last tick", unit="ms", ge=20, le=1000
-    )
+        100.0, "A reflex command expires this long after its last tick", unit="ms", ge=20,
+        le=1000, conservative="lower",
+    )  # fmt: skip
     attack_fraction: float = param(
-        0.25, "Share of the duration spent reaching the peak", ge=0.05, le=0.9
-    )
+        0.25, "Share of the duration spent reaching the peak (higher is gentler)", ge=0.05,
+        le=0.9, conservative="higher",
+    )  # fmt: skip
     release_fraction: float = param(
         0.4, "Share of the duration spent returning (startle and withdraw)", ge=0.05, le=0.9
     )
@@ -827,8 +842,9 @@ class ReflexConfig(Strict):
         "threshold", ge=0.1, le=1,
     )  # fmt: skip
     motion_eps_deg: float = param(
-        0.2, "Pose change that counts as the first movement in the latency figures",
-        unit="deg", ge=0.01, le=5,
+        0.2, "Pose change that counts as a movement: a smaller reflex is no_motion, and the first "
+        "such change ends the motion latency figure", unit="deg", ge=0.01, le=5,
+        conservative="higher",
     )  # fmt: skip
     latency_window: int = param(200, "Latency samples kept per trigger", ge=10, le=10000)
     audio: ReflexAudioConfig = param({}, "Microphone level source")

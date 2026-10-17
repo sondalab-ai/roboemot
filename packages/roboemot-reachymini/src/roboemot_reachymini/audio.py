@@ -11,6 +11,10 @@ when nothing is queued, and ``mini.media.audio`` is ``None`` when the robot has 
 Privacy (SPEC 12): a chunk lives in one local variable while its RMS is taken, and only that scalar
 leaves this module. No buffer is kept, queued, published or logged.
 
+Chunks carry no capture timestamp in the SDK, so the stamp is the read time. After a stall of the
+reading thread (a gap longer than ``max_gap_s``) the queue holds old audio: it is drained and
+only the newest chunk is used, so a startle is never played from sound that is already old.
+
 ``get_audio_sample`` hands each chunk to one reader. The M3 voice pipeline must take its audio from
 this producer (or replace it), not read the SDK in parallel, or the two would split the chunks.
 """
@@ -29,6 +33,7 @@ import numpy as np
 log = logging.getLogger(__name__)
 JOIN_TIMEOUT_S = 2.0
 IDLE_WAIT_S = 0.01
+DRAIN_MAX = 1000  # most chunks thrown away in one catch-up
 
 
 def chunk_rms(chunk: Any) -> float | None:
@@ -54,9 +59,12 @@ class ReachyAudio:
         sink: Callable[[float, float], None],
         poll_hz: float,
         clock: Callable[[], float] = time.monotonic,
+        max_gap_s: float = math.inf,
     ) -> None:
         self._mini, self._sink, self._clock = mini, sink, clock
         self._period = 1.0 / poll_hz
+        self._max_gap_s = max_gap_s
+        self._dropped = 0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -67,7 +75,12 @@ class ReachyAudio:
     def snapshot(self) -> dict[str, Any]:
         """State for the debug report: scalars and a reason, never audio."""
         with self._lock:
-            return {"state": self._state, "reason": self._reason, "chunks": self._chunks}
+            return {
+                "state": self._state,
+                "reason": self._reason,
+                "chunks": self._chunks,
+                "dropped_stale": self._dropped,
+            }
 
     def _set(self, state: str, reason: str | None = None) -> None:
         with self._lock:
@@ -108,10 +121,21 @@ class ReachyAudio:
                 log.warning("audio: stop_recording: %s", type(exc).__name__)
         self._set("off")
 
-    def poll_once(self) -> bool:
-        """Read one chunk and hand its RMS on. Returns whether a chunk was used."""
+    def poll_once(self, drain: bool = False) -> bool:
+        """Read one chunk and hand its RMS on. Returns whether a chunk was used. With ``drain``
+        everything queued is read and only the newest chunk is used (the rest is counted)."""
         try:
-            chunk = self._mini.media.get_audio_sample()
+            media = self._mini.media
+            chunk = media.get_audio_sample()
+            skipped = 0
+            while drain and chunk is not None and skipped < DRAIN_MAX:
+                newer = media.get_audio_sample()
+                if newer is None:
+                    break
+                chunk, skipped = newer, skipped + 1
+            if skipped:
+                with self._lock:
+                    self._dropped += skipped
             rms = chunk_rms(chunk)
             del chunk
             if rms is None:
@@ -130,7 +154,10 @@ class ReachyAudio:
         return True
 
     def _run(self) -> None:
+        last = self._clock()
         while not self._stop.is_set():
-            # Drain what is queued, then wait out the rest of the period.
-            used = self.poll_once()
+            now = self._clock()
+            # Read what is queued, then wait out the rest of the period; after a stall, catch up.
+            used = self.poll_once(drain=now - last > self._max_gap_s)
+            last = now
             self._stop.wait(IDLE_WAIT_S if used else self._period)
