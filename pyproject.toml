@@ -4,8 +4,9 @@ testpaths = ["packages/roboemot-core/tests", "packages/roboemot-reachymini/tests
 markers = [
   "sim: needs the MuJoCo Reachy Mini daemon (scripts/sim-daemon.sh)",
   "hil: needs the real robot; never runs in CI",
+  "models: runs the real ONNX models (vision extra and fetched weights); opt in with -m models",
 ]
-addopts = "-m 'not sim and not hil'"
+addopts = "-m 'not sim and not hil and not models'"
 asyncio_mode = "auto"
 
 [tool.ruff]

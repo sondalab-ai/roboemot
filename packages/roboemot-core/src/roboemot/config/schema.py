@@ -18,7 +18,7 @@ import re
 import warnings
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ROUTE_NAME = re.compile(r"[A-Za-z0-9_-]+")
 
@@ -407,8 +407,104 @@ class IdentityConfig(Strict):
         0.8, "Below this, age/gender estimates are unknown", ge=0, le=1
     )
     estimate_frames_min: int = param(
-        5, "Frames aggregated before an estimate is used", ge=1, le=100
+        3,
+        "Frames aggregated before an estimate is used; vision.attribute_crops must be at "
+        "least this",
+        ge=1,
+        le=100,
     )
+    enroll_min_embeddings: int = param(5, "Face embeddings required at enrollment", ge=5, le=20)
+    max_embeddings_per_person: int = param(
+        20, "Cap on stored face embeddings per person, refresh included", ge=5, le=20
+    )
+    refresh_min_similarity: float = param(
+        0.65, "Best similarity needed before a match adds an embedding", ge=0, le=1
+    )
+    refresh_max_similarity: float = param(
+        0.98, "Skip a refresh embedding this close to a stored one", ge=0, le=1
+    )
+    refresh_min_interval_s: float = param(
+        60.0, "Minimum time between refresh embeddings of one person", unit="s", ge=0, le=86400
+    )
+    last_seen_flush_interval_s: float = param(
+        60.0, "Minimum time between disk writes of last_seen updates", unit="s", ge=0, le=86400
+    )
+
+    vote_max_age_s: float = param(
+        10.0, "Identity votes older than this are ignored", unit="s", ge=1, le=300
+    )
+
+    @model_validator(mode="after")
+    def _consistent(self) -> IdentityConfig:
+        if self.votes_required > self.votes_window:
+            raise ValueError("identity.votes_required must not exceed votes_window")
+        if self.enroll_min_embeddings > self.max_embeddings_per_person:
+            raise ValueError("identity.enroll_min_embeddings exceeds max_embeddings_per_person")
+        if self.refresh_min_similarity < self.match_threshold:
+            raise ValueError("identity.refresh_min_similarity must be at least match_threshold")
+        return self
+
+
+class EnrollmentConfig(Strict):
+    target_samples: int = param(
+        10,
+        "Face embeddings collected per enrollment session; between "
+        "identity.enroll_min_embeddings and identity.max_embeddings_per_person",
+        ge=5,
+        le=20,
+    )
+    min_score: float = param(
+        0.8, "Detector score a face needs to be used as an enrollment sample", ge=0, le=1
+    )
+    min_face_px: int = param(
+        64,
+        "Faces with a shorter box side are not used as enrollment samples",
+        unit="px",
+        ge=8,
+        le=512,
+    )
+    min_sharpness: float = param(
+        25.0,
+        "Variance of the Laplacian of the grayscale face crop (area-resized to "
+        "sharpness_size_px); blurrier faces are rejected. Not yet tuned on real camera data",
+        ge=0,
+        le=10000,
+    )
+    sharpness_size_px: int = param(
+        64, "Side of the square the face crop is resized to for the sharpness check", ge=16, le=256
+    )
+    min_gap_s: float = param(
+        0.4, "Minimum time between two samples, so they differ in pose", unit="s", ge=0, le=10
+    )
+    consistency_min: float = param(
+        0.45,
+        "Cosine similarity a new sample needs with the mean of the ones collected (the same "
+        "value as identity.match_threshold), so two people never mix in one session. Not yet "
+        "tuned on real data",
+        ge=-1,
+        le=1,
+    )
+    min_pose_spread: float = param(
+        0.2,
+        "Spread of the nose offset from the eye midline (in inter-eye distances, a yaw proxy "
+        "from the face landmarks) the samples must cover, so they show varied angles (SPEC 6); "
+        "0 turns the check off. Not yet tuned on real data",
+        ge=0,
+        le=2,
+    )
+    centre_weight: float = param(
+        0.5,
+        "How much a face far from the image centre loses when the largest face is chosen "
+        "(0: size only)",
+        ge=0,
+        le=1,
+    )
+    timeout_s: float = param(
+        120.0, "A session without completion is dropped after this time", unit="s", ge=5, le=3600
+    )
+
+
+ATTENTION_CATEGORIES = ("active_speaker", "enrolled_person", "nearest_face", "salient_motion")
 
 
 class AttentionConfig(Strict):
@@ -419,6 +515,504 @@ class AttentionConfig(Strict):
     switch_hysteresis_s: float = param(
         1.5, "Min time before switching target", unit="s", ge=0, le=30
     )
+    stale_s: float = param(
+        4.0,
+        "An entry not confirmed for this long is no longer a candidate",
+        unit="s",
+        ge=0.1,
+        le=60,
+    )
+    speaker_hold_s: float = param(
+        1.5, "How long an active-speaker hint stays valid", unit="s", ge=0.1, le=30
+    )
+    speaker_match_deg: float = param(
+        20.0, "Angular gate to match a speaker bearing to a world entry", unit="deg", ge=0.5, le=90
+    )
+    motion_window_s: float = param(
+        0.5, "Window over which an entry's bearing change counts as motion", unit="s", ge=0.05, le=5
+    )
+    motion_min_dps: float = param(
+        10.0, "Angular speed above which an entry counts as moving", unit="deg/s", ge=0.1, le=720
+    )
+    release_s: float = param(
+        3.0, "No target for this long hands the head back to idle motion", unit="s", ge=0, le=60
+    )
+    publish_hz: float = param(
+        5.0, "Rate of attention.target while the target is unchanged", unit="Hz", ge=0.1, le=50
+    )
+    publish_move_deg: float = param(
+        5.0, "Target bearing change that is published at once", unit="deg", ge=0.1, le=90
+    )
+    follow_gain: float = param(
+        4.0, "Proportional gain of the gaze towards the target bearing", unit="1/s", ge=0.1, le=50
+    )
+    max_rate_dps: float = param(
+        120.0, "Gaze speed cap before the safety limiter", unit="deg/s", ge=1, le=720
+    )
+    head_yaw_comfort_deg: float = param(
+        45.0,
+        "Head yaw offset from the body beyond which the body turns too",
+        unit="deg",
+        ge=0,
+        le=180,
+    )
+    object_max_hold_s: float = param(
+        30.0,
+        "How long attention on an animal or object holds off a due scan; then the sweep runs",
+        unit="s",
+        ge=1,
+        le=600,
+    )
+    switch_margin: float = param(
+        0.25,
+        "Relative advantage a same-category candidate needs to replace the current target",
+        ge=0,
+        le=5,
+    )
+    rear_band_deg: float = param(
+        20.0,
+        "Width of the band around straight behind where the gaze keeps its current side",
+        unit="deg",
+        ge=0,
+        le=90,
+    )
+    body_recenter_dps: float = param(
+        5.0,
+        "Speed at which the body drifts back to home while the head is within comfort",
+        unit="deg/s",
+        ge=0,
+        le=90,
+    )
+    command_ttl_s: float = param(
+        0.5, "Lifetime of an attention command in the arbiter", unit="s", ge=0.05, le=5
+    )
+
+    @field_validator("priority_order")
+    @classmethod
+    def _known_categories(cls, v: list[str]) -> list[str]:
+        if not v:
+            raise ValueError("attention.priority_order must name at least one category")
+        if unknown := sorted(set(v) - set(ATTENTION_CATEGORIES)):
+            raise ValueError(f"attention.priority_order: unknown categories {unknown}")
+        if len(set(v)) != len(v):
+            raise ValueError("attention.priority_order: duplicate category")
+        return v
+
+
+# --------------------------------------------------------------------------- vision (SPEC 5, 13)
+
+
+class VisionRates(Strict):
+    detection_hz: float = param(8.0, "Face detection rate (cm4: 5 to 10)", unit="Hz", ge=0.1, le=60)
+    embedding_hz: float = param(
+        0.5, "Face embedding rate per track after the new-track burst", unit="Hz", ge=0.05, le=30
+    )
+    appearance_hz: float = param(
+        0.5,
+        "Appearance embedding rate per animal or object track after the new-track burst",
+        unit="Hz",
+        ge=0.05,
+        le=30,
+    )
+    objects_hz: float = param(1.0, "Object detection rate when enabled", unit="Hz", ge=0.1, le=30)
+    camera_hz: float = param(
+        30.0,
+        "Upper bound on camera reads handed to vision (read when the camera thread starts)",
+        unit="Hz",
+        ge=1,
+        le=120,
+        restart=True,
+    )
+
+
+class TrackerConfig(Strict):
+    high_score: float = param(
+        0.6, "Detections at or above this start tracks (the detection score threshold)", ge=0, le=1
+    )
+    low_score: float = param(
+        0.1, "Detections between this and high_score only keep existing tracks", ge=0, le=1
+    )
+    match_iou: float = param(0.3, "Minimum IoU for the first association", ge=0, le=1)
+    low_match_iou: float = param(0.5, "Minimum IoU for the low-score association", ge=0, le=1)
+    confirm_hits: int = param(2, "Matched detections before a track is reported", ge=1, le=10)
+    lost_s: float = param(
+        1.5, "A track unmatched for this long (capture stamps) is removed", unit="s", ge=0.1, le=60
+    )
+
+    @model_validator(mode="after")
+    def _ordered(self) -> TrackerConfig:
+        if self.low_score > self.high_score:
+            raise ValueError("vision.tracker.low_score must not exceed high_score")
+        return self
+
+
+class VisionConfig(Strict):
+    rates: VisionRates = param({}, "Per-stage target rates, scaled by the circadian state")
+    tracker: TrackerConfig = param({}, "ByteTrack-class tracker")
+    threads: int = param(2, "CPU threads of the frame-path models", ge=1, le=8, restart=True)
+    attribute_threads: int = param(
+        1, "CPU threads of the age and gender models (background job)", ge=1, le=8, restart=True
+    )
+    detector_width_px: int = param(
+        320, "Face detector input width (SPEC 13: 320x240)", unit="px", ge=64, le=1280, restart=True
+    )
+    detector_height_px: int = param(
+        240, "Face detector input height", unit="px", ge=64, le=1280, restart=True
+    )
+    face_min_px: int = param(
+        24, "Faces with a shorter box side are ignored", unit="px", ge=8, le=512
+    )
+    embed_min_face_px: int = param(
+        40, "Faces with a shorter box side are tracked but not embedded", unit="px", ge=8, le=512
+    )
+    embedding_burst: int = param(
+        5,
+        "Face evaluations at the start of a track, before the steady rate; at least the votes "
+        "required, so one missed vote still fits the SPEC 13 identity budget of 2.5 s",
+        ge=1,
+        le=10,
+    )
+    burst_min_gap_s: float = param(
+        0.25, "Minimum capture-time gap between two burst evaluations", unit="s", ge=0, le=5
+    )
+    max_embeds_per_frame: int = param(
+        2, "Cap on face embeddings computed for one frame, to bound its latency", ge=1, le=16
+    )
+    max_entity_embeds_per_frame: int = param(
+        1,
+        "Cap on animal and object appearance embeddings (DINOv2-S, the costly part of the "
+        "object stage) computed for one object frame; separate from max_embeds_per_frame so "
+        "entities never take a face's share. Entities are served oldest embedding first",
+        ge=1,
+        le=16,
+    )
+    entity_burst_min_gap_s: float = param(
+        1.0,
+        "Minimum capture-time gap between two burst evaluations of one animal or object track",
+        unit="s",
+        ge=0,
+        le=10,
+    )
+    attribute_precision: Literal["auto", "int8", "fp32"] = param(
+        "auto",
+        "Age and gender model files: int8 (dynamic INT8, about 87 MB each), fp32 (343 MB each) "
+        "or auto (int8 when the robot manifest profile is cm4, fp32 otherwise)",
+        restart=True,
+    )
+    attribute_crops: int = param(
+        3,
+        "Face crops per track for the age and gender job (SPEC 5); at least "
+        "identity.estimate_frames_min, and the 0.8 confidence rule applies at any count",
+        ge=1,
+        le=10,
+    )
+    attribute_crop_interval_s: float = param(
+        0.3,
+        "Minimum capture-time gap between the face crops kept for the age and gender job",
+        unit="s",
+        ge=0,
+        le=10,
+    )
+    attribute_crop_margin: float = param(
+        0.25, "Face box padding for the age and gender crop, per side", ge=0, le=1
+    )
+    attribute_queue_max: int = param(
+        4,
+        "Age and gender jobs waiting for the worker; further tracks wait",
+        ge=1,
+        le=64,
+        restart=True,
+    )
+    models_dir: str = param(
+        "",
+        "Folder with the ONNX model files; empty means models/ in the app data folder (data_dir)",
+        restart=True,
+    )
+    objects_enabled: bool = param(
+        True,
+        "Run the object detector (NanoDet-Plus-m 320, SPEC 5, 13) at vision.rates.objects_hz",
+        restart=True,
+    )
+    object_score_min: float = param(
+        0.4,
+        "Object detections below this score are dropped; it also replaces tracker.high_score "
+        "for the animal and object tracker, so a 0.4 detection starts a track",
+        ge=0,
+        le=1,
+        restart=True,
+    )
+    object_lost_s: float = param(
+        5.0,
+        "Shortest time an animal or object track may stay unmatched before it is removed",
+        unit="s",
+        ge=0.1,
+        le=300,
+    )
+    object_lost_periods: float = param(
+        3.0,
+        "An animal or object track also survives this many object-detection periods, at the "
+        "rate the governor currently allows (1 / (objects_hz x scale)): the lifetime is the "
+        "larger of this and object_lost_s, so slowing the detector never kills tracks between "
+        "two frames",
+        ge=1,
+        le=100,
+    )
+    object_confirm_hits: int = param(
+        2,
+        "Matched detections before an animal or object track is reported. 2 at 1 fps means a "
+        "thing must be seen in two consecutive object frames: 31% of detections at the default "
+        "score are false and mostly do not repeat, at the cost of a 1 s delay and of things "
+        "seen once",
+        ge=1,
+        le=10,
+    )
+    object_nms_iou: float = param(
+        0.6,
+        "Detections of one class overlapping more than this IoU are merged (NanoDet's own value)",
+        ge=0.1,
+        le=0.95,
+        restart=True,
+    )
+    animal_categories: list[str] = param(
+        ["bird", "cat", "dog", "horse", "sheep", "cow"],
+        "Detector classes (COCO names as in models.yaml) reported as kind animal",
+        restart=True,
+    )
+    object_categories: list[str] = param(
+        [
+            "cup",
+            "bottle",
+            "chair",
+            "couch",
+            "potted_plant",
+            "tv",
+            "laptop",
+            "book",
+            "remote",
+            "cell_phone",
+            "bowl",
+            "teddy_bear",
+        ],
+        "Detector classes reported as kind object; a class in neither list is ignored, and so "
+        "is person (faces come from the face detector)",
+        restart=True,
+    )
+    object_display_names: dict[str, str] = param(
+        {"potted_plant": "potted plant", "cell_phone": "cell phone", "teddy_bear": "teddy bear"},
+        "Readable category for a detector class in observations, placeholder names and scene "
+        "text; a class not listed uses its name with underscores turned into spaces (English "
+        "only: localised strings are not provided yet)",
+    )
+
+    @model_validator(mode="after")
+    def _disjoint_categories(self) -> VisionConfig:
+        both = set(self.animal_categories) & set(self.object_categories)
+        if both:
+            raise ValueError(f"vision categories are both animal and object: {sorted(both)}")
+        return self
+
+
+# --------------------------------------------------------------------------- world (SPEC 5A)
+
+
+class WorldHalfLife(Strict):
+    person: float = param(120.0, "Confidence half-life of a person entry", unit="s", ge=1, le=86400)
+    animal: float = param(
+        300.0, "Confidence half-life of an animal entry", unit="s", ge=1, le=86400
+    )
+    object: float = param(
+        1800.0, "Confidence half-life of an object entry", unit="s", ge=1, le=86400
+    )
+
+
+class WorldScanConfig(Strict):
+    idle_interval_s: float = param(
+        120.0,
+        "Idle time before the robot looks around (before the energy trait)",
+        unit="s",
+        ge=5,
+        le=3600,
+    )
+    jitter_s: float = param(30.0, "Random +- offset on the idle interval", unit="s", ge=0, le=1800)
+    dwell_s: float = param(1.0, "Pause at each sweep waypoint", unit="s", ge=0.1, le=30)
+    overlap_deg: float = param(
+        15.0, "Overlap between the views of neighbouring waypoints", unit="deg", ge=0, le=60
+    )
+    speed_dps: float = param(
+        40.0, "Sweep speed between waypoints, before the safety limiter", unit="deg/s", ge=5, le=360
+    )
+    min_amplitude: float = param(
+        0.3, "Smallest share of the full circle a sweep covers (low energy)", ge=0.1, le=1
+    )
+    arrive_tol_deg: float = param(
+        4.0,
+        "A waypoint counts as reached within this distance of the pose",
+        unit="deg",
+        ge=0.5,
+        le=30,
+    )
+    waypoint_timeout_s: float = param(
+        10.0, "Give up on a waypoint the pose does not reach in this time", unit="s", ge=1, le=120
+    )
+    min_step_ratio: float = param(
+        0.5,
+        "Smallest waypoint spacing as a share of the camera's field of view",
+        ge=0.1,
+        le=1,
+    )
+    command_ttl_s: float = param(
+        0.25, "Lifetime of a scan command if it is not renewed", unit="s", ge=0.05, le=2
+    )
+    glance_hold_s: float = param(
+        1.0, "How long a glance holds its bearing", unit="s", ge=0.1, le=10
+    )
+    glance_cooldown_s: float = param(8.0, "Minimum time between glances", unit="s", ge=0, le=600)
+    glance_max_age_s: float = param(
+        2.0, "An unexplained bearing older than this is not glanced at", unit="s", ge=0.1, le=60
+    )
+    doa_poll_hz: float = param(
+        5.0, "Sound direction read rate", unit="Hz", ge=0.5, le=50, restart=True
+    )
+    doa_confidence: float = param(
+        0.5, "Confidence of a sound direction observation", ge=0, le=1, restart=True
+    )
+
+    @model_validator(mode="after")
+    def _jitter_inside_interval(self) -> WorldScanConfig:
+        if self.jitter_s >= self.idle_interval_s:
+            raise ValueError("jitter_s must be smaller than idle_interval_s")
+        return self
+
+
+CATALOGUE_BODY_SLACK = 1024
+
+
+class WorldAutoenrollConfig(Strict):
+    enabled: bool = param(
+        True,
+        "Auto-enroll recurring unknown animals and objects (SPEC 5A); turning it on again "
+        "needs a restart, turning it off deletes the collected candidates",
+    )
+    kinds: list[Literal["animal", "object"]] = param(
+        ["animal", "object"],
+        "Kinds that may be auto-enrolled; people never are. The recognition spike advises "
+        "animals only (objects separate poorly)",
+    )
+    min_days: int = param(3, "Distinct days a cluster must be seen on", ge=1, le=60)
+    min_sightings: int = param(5, "Sightings a cluster needs before it is enrolled", ge=1, le=500)
+    max_spread: float = param(
+        0.25,
+        "Cosine distance to the cluster centroid, max over members (DINOv2-S scale)",
+        ge=0.01,
+        le=1,
+        conservative="lower",
+    )
+    join_radius: float = param(
+        0.125,
+        "Cosine distance from a candidate cluster's centroid within which a sighting joins it; "
+        "tighter than max_spread so two look-alikes stay apart",
+        ge=0.01,
+        le=1,
+        conservative="lower",
+    )
+    known_match_threshold: float = param(
+        0.875,
+        "Cosine similarity to an enrolled animal or object that attaches its identity; keep it "
+        "at or above 1 - join_radius, or a look-alike is taken for the enrolled one",
+        ge=0.1,
+        le=1,
+    )
+    sighting_min_interval_s: float = param(
+        300.0, "At most one sighting per world entry in this time", unit="s", ge=1, le=86400
+    )
+    max_clusters: int = param(
+        200, "Candidate clusters kept; the least recently updated go first", ge=1, le=5000
+    )
+    max_members: int = param(
+        30, "Embeddings kept per candidate cluster (oldest dropped)", ge=2, le=200
+    )
+    retention_days: int = param(
+        30, "A candidate cluster not seen for this long is deleted", unit="d", ge=1, le=365
+    )
+    persist_interval_s: float = param(
+        60.0, "Longest time changed candidates stay unwritten", unit="s", ge=1, le=3600
+    )
+    max_tracked_entries: int = param(
+        512, "World entries remembered for the sighting throttle", ge=8, le=10000
+    )
+
+    @model_validator(mode="after")
+    def _consistent(self) -> WorldAutoenrollConfig:
+        if self.join_radius > self.max_spread:
+            raise ValueError("join_radius must not exceed max_spread")
+        if self.min_sightings > self.max_members:
+            raise ValueError(
+                "min_sightings must not exceed max_members (sightings are counted "
+                "from the retained members)"
+            )
+        return self
+
+
+class WorldConfig(Strict):
+    camera_fov_h_deg: float = param(
+        78.0, "Horizontal field of view of the main camera", unit="deg", ge=10, le=360
+    )
+    camera_fov_v_deg: float = param(
+        58.0, "Vertical field of view of the main camera", unit="deg", ge=10, le=180
+    )
+    match_gate_deg: float = param(
+        15.0, "Angular gate for matching an observation to an entry", unit="deg", ge=0.5, le=90
+    )
+    tie_tolerance_deg: float = param(
+        3.0,
+        "Candidates this close to the nearest in angle are ranked by appearance",
+        unit="deg",
+        ge=0,
+        le=90,
+    )
+    range_gate_m: float = param(
+        0.5, "Range gate, used when both have a distance", unit="m", ge=0.01, le=10
+    )
+    half_life_s: WorldHalfLife = param({}, "Confidence half-life per kind")
+    out_of_view_decay_factor: float = param(
+        0.2, "Decay rate multiplier for entries outside the sensors' view", ge=0.01, le=1
+    )
+    forget_confidence: float = param(
+        0.1, "Entries below this confidence are removed", ge=0.01, le=1
+    )
+    moved_threshold_deg: float = param(
+        10.0, "Angular shift that publishes world.entity_moved", unit="deg", ge=0.5, le=90
+    )
+    initial_confidence: float = param(
+        0.5, "Confidence of a new entry, times the observation confidence", ge=0, le=1
+    )
+    confidence_gain: float = param(
+        0.3, "Share of the missing confidence gained per matching observation", ge=0, le=1
+    )
+    position_blend: float = param(
+        0.5, "Weight of a new observation when updating an entry's position", ge=0, le=1
+    )
+    initial_uncertainty_deg: float = param(
+        5.0, "Angular uncertainty of a new entry", unit="deg", ge=0, le=90
+    )
+    min_uncertainty_deg: float = param(
+        2.0, "Floor of an entry's angular uncertainty", unit="deg", ge=0, le=90
+    )
+    bearing_only_gain_factor: float = param(
+        0.3,
+        "Share of the confidence gain a bearing-only observation (sound) gets; it does not "
+        "mark an entry in view",
+        ge=0,
+        le=1,
+    )
+    scan: WorldScanConfig = param({}, "Looking around (SPEC 5A, Scanning)")
+    autoenroll: WorldAutoenrollConfig = param({}, "Auto-enrollment (SPEC 5A)")
+
+    @model_validator(mode="after")
+    def _uncertainty_order(self) -> WorldConfig:
+        if self.initial_uncertainty_deg < self.min_uncertainty_deg:
+            raise ValueError("initial_uncertainty_deg must be >= min_uncertainty_deg")
+        return self
 
 
 # --------------------------------------------------------------------------- voice (SPEC 8)
@@ -717,6 +1311,195 @@ class ConnectivityConfig(Strict):
     )
 
 
+FRAME_ANCESTORS = re.compile(r"[A-Za-z0-9:/.*' _-]+")
+
+
+class CatalogueConfig(Strict):
+    max_xmp_bytes: int = param(
+        262144, "Largest XMP sidecar accepted", unit="B", ge=1024, le=4194304, conservative="lower"
+    )
+    max_image_bytes: int = param(
+        4194304, "Largest photo accepted", unit="B", ge=1024, le=16777216, conservative="lower"
+    )
+    max_image_pixels: int = param(
+        12000000,
+        "Largest photo accepted, width times height (decompression-bomb guard)",
+        unit="px",
+        ge=1024,
+        le=100000000,
+        conservative="lower",
+    )
+    max_items: int = param(
+        200, "Records one sidecar may create", ge=1, le=5000, conservative="lower"
+    )
+    max_regions: int = param(
+        16,
+        "Tagged regions read from one sidecar; each photo region is one model run on the "
+        "web request thread",
+        ge=1,
+        le=1000,
+        conservative="lower",
+    )
+    import_budget_s: float = param(
+        8.0,
+        "Time one import may spend embedding photo regions; the rest is skipped and reported "
+        "(never more than half of webui.request_deadline_s)",
+        unit="s",
+        ge=1,
+        le=60,
+        conservative="lower",
+    )
+    max_embeddings_per_entity: int = param(
+        20, "Appearance embeddings kept per animal or object", ge=1, le=100
+    )
+    min_region_px: int = param(
+        32, "Smaller regions of a photo are skipped", unit="px", ge=8, le=2048
+    )
+
+
+class WebUIConfig(Strict):
+    bind: str | None = param(
+        None,
+        "Interface the web UI listens on; unset means 0.0.0.0 when the manifest names a robot "
+        "profile (cm4, npu: the app runs on the robot) and 127.0.0.1 otherwise (sim, dev)",
+        restart=True,
+    )
+    allowed_hosts: list[str] = param(
+        [],
+        "Extra DNS names accepted in the Host header, besides IP addresses, localhost and *.local "
+        "(DNS-rebinding guard)",
+        admin_only=True,
+    )
+    frame_ancestors: str = param(
+        "'none'",
+        "CSP frame-ancestors value: who may embed the page in a frame",
+        admin_only=True,
+    )
+    max_connections: int = param(
+        32, "Simultaneous connections served; more are refused", ge=1, le=256, conservative="lower"
+    )
+    request_deadline_s: float = param(
+        15.0,
+        "Overall time one request may take from connect to response (slowloris guard)",
+        unit="s",
+        ge=1,
+        le=300,
+        conservative="lower",
+    )
+    session_max_s: float = param(
+        3600.0,
+        "Absolute lifetime of a login session, however active",
+        unit="s",
+        ge=60,
+        le=86400,
+        conservative="lower",
+    )
+    loopback_max_attempts: int = param(
+        20,
+        "Wrong PINs from this host itself before its own lockout (separate from the LAN budget)",
+        ge=1,
+        le=1000,
+        conservative="lower",
+    )
+    client_backoff_s: float = param(
+        1.0,
+        "Wait after a client's first wrong PIN; doubles with every further one",
+        unit="s",
+        ge=0.1,
+        le=60,
+        conservative="higher",
+    )
+    client_backoff_max_s: float = param(
+        300.0,
+        "Longest per-client wait after wrong PINs",
+        unit="s",
+        ge=1,
+        le=86400,
+        conservative="higher",
+    )
+    port: int = param(
+        8042,
+        "TCP port of the web UI (0 picks a free one; the app's custom_app_url)",
+        ge=0,
+        le=65535,
+        restart=True,
+    )
+    session_ttl_s: float = param(
+        900.0,
+        "Idle time after which a login session ends",
+        unit="s",
+        ge=60,
+        le=86400,
+        conservative="lower",
+    )
+    max_sessions: int = param(
+        8,
+        "Logged-in sessions kept; the oldest is dropped past this",
+        ge=1,
+        le=64,
+        conservative="lower",
+    )
+    pin_min_length: int = param(
+        6, "Minimum digits of the operator PIN", ge=4, le=32, conservative="higher"
+    )
+    pin_max_attempts: int = param(
+        5, "Wrong PINs before the login locks", ge=1, le=20, conservative="lower"
+    )
+    pin_lockout_s: float = param(
+        300.0,
+        "How long a lockout refuses every login",
+        unit="s",
+        ge=10,
+        le=86400,
+        conservative="higher",
+    )
+    max_body_bytes: int = param(
+        16384,
+        "Largest accepted request body",
+        unit="B",
+        ge=1024,
+        le=1048576,
+        conservative="lower",
+    )
+    catalogue_max_body_bytes: int = param(
+        8388608,
+        "Largest request body of a catalogue import (one sidecar plus one photo, base64); "
+        "granted only to logged-in sessions",
+        unit="B",
+        ge=1024,
+        le=33554432,
+        conservative="lower",
+    )
+    name_max_chars: int = param(
+        64, "Longest display name or consent name", ge=1, le=200, conservative="lower"
+    )
+    request_timeout_s: float = param(
+        10.0,
+        "Socket timeout per request (slow clients are dropped)",
+        unit="s",
+        ge=1,
+        le=120,
+        conservative="lower",
+    )
+    status_poll_ms: int = param(
+        1000, "How often the page polls the enrollment status", unit="ms", ge=200, le=10000
+    )
+
+    @field_validator("frame_ancestors")
+    @classmethod
+    def _csp_value(cls, value: str) -> str:
+        if FRAME_ANCESTORS.fullmatch(value) is None:
+            raise ValueError("frame_ancestors may hold source expressions only (no ; or ,)")
+        return value
+
+    @field_validator("allowed_hosts")
+    @classmethod
+    def _host_names(cls, value: list[str]) -> list[str]:
+        if any(re.fullmatch(r"[A-Za-z0-9.-]{1,253}", h) is None for h in value):
+            raise ValueError("allowed_hosts holds bare host names (no port, no scheme)")
+        return [h.lower().rstrip(".") for h in value]
+
+
 # --------------------------------------------------------------------------- root
 
 
@@ -728,6 +1511,12 @@ with warnings.catch_warnings():
     class RoboEmotConfig(Strict):
         schema_version: int = param(1, "Configuration schema version", ge=1)
         personality: str = param("default", "Name of the personality preset in effect")
+        data_dir: str = param(
+            "",
+            "App data folder (registry, models); empty means $ROBOEMOT_DATA_DIR or "
+            "~/.local/share/roboemot (SPEC 12 Data)",
+            restart=True,
+        )
         affect: AffectConfig = param({}, "SPEC 7")
         appraisal: AppraisalConfig = param({}, "SPEC 7")
         register: RegisterConfig = param({}, "SPEC 7")
@@ -736,6 +1525,9 @@ with warnings.catch_warnings():
         motion: MotionConfig = param({}, "SPEC 10")
         attention: AttentionConfig = param({}, "SPEC 4A, 5")
         identity: IdentityConfig = param({}, "SPEC 5, 6")
+        enrollment: EnrollmentConfig = param({}, "SPEC 6")
+        vision: VisionConfig = param({}, "SPEC 5, 13")
+        world: WorldConfig = param({}, "SPEC 5A")
         mirror: MirrorConfig = param({}, "SPEC 9")
         voice: VoiceConfig = param({}, "SPEC 8")
         persona: PersonaConfig = param({}, "SPEC 11A")
@@ -744,6 +1536,8 @@ with warnings.catch_warnings():
         safety: SafetyConfig = param({}, "SPEC 12")
         privacy: PrivacyConfig = param({}, "SPEC 12")
         connectivity: ConnectivityConfig = param({}, "SPEC 12A")
+        webui: WebUIConfig = param({}, "SPEC 6, 11A, 12")
+        catalogue: CatalogueConfig = param({}, "SPEC 6")
 
         @model_validator(mode="after")
         def _unique_routes(self) -> RoboEmotConfig:
@@ -751,6 +1545,41 @@ with warnings.catch_warnings():
             dupes = sorted({n for n in names if names.count(n) > 1})
             if dupes:
                 raise ValueError(f"duplicate llm route names: {dupes}")
+            return self
+
+        @model_validator(mode="after")
+        def _enrollment_fits_identity(self) -> RoboEmotConfig:
+            n, ident = self.enrollment.target_samples, self.identity
+            if not ident.enroll_min_embeddings <= n <= ident.max_embeddings_per_person:
+                raise ValueError(
+                    "enrollment.target_samples must be within identity.enroll_min_embeddings "
+                    "and max_embeddings_per_person"
+                )
+            return self
+
+        @model_validator(mode="after")
+        def _catalogue_fits_the_web_ui(self) -> RoboEmotConfig:
+            cat, web = self.catalogue, self.webui
+            b64_image = -(-cat.max_image_bytes // 3) * 4
+            need = b64_image + 2 * cat.max_xmp_bytes + CATALOGUE_BODY_SLACK
+            if need > web.catalogue_max_body_bytes:
+                raise ValueError(
+                    f"webui.catalogue_max_body_bytes must be at least {need}: a base64 photo of "
+                    "catalogue.max_image_bytes plus a sidecar of catalogue.max_xmp_bytes "
+                    "(JSON-escaped) has to fit"
+                )
+            return self
+
+        @model_validator(mode="after")
+        def _vision_fits_identity(self) -> RoboEmotConfig:
+            if self.vision.embedding_burst < self.identity.votes_required:
+                raise ValueError("vision.embedding_burst must be at least identity.votes_required")
+            if self.vision.attribute_crops < self.identity.estimate_frames_min:
+                raise ValueError(
+                    "vision.attribute_crops must be at least identity.estimate_frames_min"
+                )
+            if self.vision.embed_min_face_px < self.vision.face_min_px:
+                raise ValueError("vision.embed_min_face_px must be at least face_min_px")
             return self
 
 

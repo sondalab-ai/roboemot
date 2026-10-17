@@ -24,6 +24,18 @@ jobs:
       - run: ruff check . && ruff format --check .
       - run: pytest
 
+  # The tests that need OpenCV or ONNX Runtime (photo decoding, vision) skip in the job above.
+  # Real-model tests stay opt-in (`-m models`, deselected by default).
+  python-vision:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e "packages/roboemot-core[dev,vision]" -e "packages/roboemot-reachymini[dev]"
+      - run: pytest packages/roboemot-core/tests/test_catalogue_photos.py packages/roboemot-core/tests/test_vision_models.py packages/roboemot-core/tests/test_vision_objects.py packages/roboemot-core/tests/test_vision.py -rs
+
   rt:
     runs-on: ubuntu-24.04
     steps:

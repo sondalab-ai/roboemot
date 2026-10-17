@@ -8,12 +8,14 @@ package in the ``roboemot.installers`` entry-point group under the manifest's ``
 Install: find the robot (mDNS, every manifest that declares discovery), check SSH, the target
 interpreter, architecture, Python and free space, build the wheels locally, install them with
 the versions already on the robot pinned, record exactly what changed, verify, optionally
-start the app and make it the autostart app.
+start the app and make it the autostart app. It also creates the private app data folder
+(``~/.local/share/roboemot``: registry, models) when it is not there yet and records it.
 
 Uninstall: stop the app, give back the previous autostart app (only if the setting still names
 this app), uninstall what the record says this installer added, reinstall the original versions
-it replaced, keep anything another distribution still needs, remove leftovers, verify, and only
-then delete the record. Running it twice is harmless. Both flows have a read-only ``--dry-run``.
+it replaced, keep anything another distribution still needs, remove leftovers and the recorded
+data folder (registry and models included), verify, and only then delete the record. Running it
+twice is harmless. Both flows have a read-only ``--dry-run``.
 """
 
 from __future__ import annotations
@@ -31,6 +33,9 @@ from importlib.metadata import entry_points
 from pathlib import Path
 from typing import Protocol
 
+import yaml
+
+from .. import paths
 from .build import build_wheels, distribution_names, min_python, third_party_requirements
 from .pyenv import RemotePython, report_changes
 from .record import InstallRecord, canonical, plan_uninstall
@@ -41,6 +46,8 @@ ENTRY_POINT_GROUP = "roboemot.installers"
 MIN_FREE_MB = 300  # wheels plus numpy/scipy/openai if the target environment lacks them
 REMOTE_TMP_PREFIX = "/tmp/roboemot-install"
 TMP_DIR_PATTERN = re.compile(re.escape(REMOTE_TMP_PREFIX) + r"\.[A-Za-z0-9]+")
+PIN_FILE = "webui_pin.json"  # roboemot.webui.auth.PIN_FILE, inside the app data folder
+PIN_RETRIES = 3
 INSTALL_STEPS = 6
 UNINSTALL_STEPS = 6
 
@@ -207,6 +214,180 @@ def _with_remote(opts: Options, ui: Ui, platform: Platform, host: str, body) -> 
             remote.close()
 
 
+# ---------------------------------------------------------------- data folder
+
+
+def remote_data_dir(remote: Remote) -> tuple[str, str]:
+    """The robot user's home and the app data folder below it (``roboemot.paths`` default)."""
+    home = posixpath.normpath(remote.run('printf %s "$HOME"').strip())
+    if not posixpath.isabs(home) or home == "/":
+        raise WizardError(f"cannot work out the robot user's home folder (got {home!r})")
+    return home, posixpath.join(home, paths.DEFAULT_REL.as_posix())
+
+
+def _exists(remote: Remote, path: str) -> bool:
+    return remote.run(f"test -e {shlex.quote(path)} && echo yes || echo no").strip() == "yes"
+
+
+def claim_data_dir(
+    ui: Ui, platform: Platform, remote: Remote, record: InstallRecord, dry_run: bool
+) -> None:
+    """Record and create the private app data folder, unless it is already there.
+
+    A folder recorded by an earlier install stays recorded. One that exists but is not in the
+    record predates the installer (or an earlier run without a record) and is left alone. The
+    record is written before the folder is created, so an interrupted install can be undone.
+    The dry run only reports.
+    """
+    home, path = remote_data_dir(remote)
+    if record.data_dir:
+        ui.ok(f"data folder {record.data_dir} already recorded")
+        return
+    if _exists(remote, path):
+        ui.warn(f"data folder {path} already exists: not recorded, uninstall will leave it")
+        return
+    parents = []
+    parent = posixpath.dirname(path)
+    while parent != home and not _exists(remote, parent):
+        parents.append(parent)
+        parent = posixpath.dirname(parent)
+    parents.reverse()
+    if dry_run:
+        ui.info(f"would create the data folder {path} (0700) and record it for uninstall")
+        return
+    record.data_dir, record.data_dir_parents = path, parents
+    write_record(remote, platform.record_path, record)
+    remote.run(f"mkdir -p -m 700 {shlex.quote(path)}")
+    ui.ok(f"created the data folder {path} (registry and models live here)")
+
+
+def ask_new_pin(ui: Ui) -> str | None:
+    """Ask twice for the operator PIN on this PC (hidden); None when skipped or not interactive."""
+    from roboemot.config.schema import RoboEmotConfig
+    from roboemot.webui.auth import PinError, check_pin_format
+
+    rules = RoboEmotConfig().webui
+    for _ in range(PIN_RETRIES):
+        pin = ui.ask_secret(f"Operator PIN for the web UI ({rules.pin_min_length}+ digits)")
+        if pin is None:
+            return None
+        try:
+            check_pin_format(pin, rules)
+        except PinError as e:
+            ui.warn(f"PIN rejected: {e}")
+            continue
+        if ui.ask_secret("Repeat the PIN") == pin:
+            return pin
+        ui.warn("the two entries differ")
+    return None
+
+
+def set_operator_pin(ui: Ui, py: RemotePython, remote: Remote, dry_run: bool) -> None:
+    """Set the web UI operator PIN in the app data folder, piping it to the CLI over SSH stdin.
+
+    Runs after the data folder exists. The PIN is typed on the PC, travels only on the SSH
+    channel's standard input and appears in no command line, log or message; uninstall removes
+    it with the data folder. A dry run only says it would.
+    """
+    _, folder = remote_data_dir(remote)
+    path = posixpath.join(folder, PIN_FILE)
+    exists = _exists(remote, path)
+    if dry_run:
+        ui.info(f"would {'offer to replace' if exists else 'ask for'} the operator PIN ({path})")
+        return
+    if exists and not ui.confirm("An operator PIN is already set. Replace it?", False):
+        ui.ok("operator PIN kept")
+        return
+    pin = ask_new_pin(ui)
+    command = f"{shlex.quote(py.python)} -m roboemot.webui set-pin --data-dir {shlex.quote(folder)}"
+    if pin is None:
+        ui.warn(
+            "operator PIN not set; the web UI will not let anyone in. Set it later by running "
+            f"on the robot: {command}"
+        )
+        return
+    remote.run(command, stdin=pin + "\n")
+    ui.ok("operator PIN set")
+
+
+def checked_data_dir(remote: Remote, record: InstallRecord) -> tuple[str | None, str | None]:
+    """The recorded data folder if it is safe to delete, else a reason.
+
+    The record is read from the robot and the folder is deleted recursively, so only exactly
+    the path this installer would choose now is accepted (``$HOME`` of the SSH user plus the
+    default location), and when it exists its ``realpath`` must be the same path, so no
+    symlinked parent or foreign home redirects the delete. Returns ``(path, None)``, or
+    ``(None, None)`` when nothing is recorded, or ``(None, reason)``.
+    """
+    if record.data_dir is None:
+        return None, None
+    _, expected = remote_data_dir(remote)
+    if record.data_dir != expected:
+        return None, f"recorded data folder {record.data_dir!r} is not {expected}"
+    if _exists(remote, expected):
+        real = remote.run(f"realpath {shlex.quote(expected)} 2>/dev/null || true").strip()
+        if real != expected:
+            return None, f"data folder {expected} resolves to {real or 'nothing'}: symlink?"
+    return expected, None
+
+
+def _created_parents(record: InstallRecord, home: str, path: str) -> list[str]:
+    """The recorded parents that really lie between ``home`` and ``path``, innermost first."""
+    between = set()
+    parent = posixpath.dirname(path)
+    while parent != home and parent.startswith(home + "/"):
+        between.add(parent)
+        parent = posixpath.dirname(parent)
+    return [p for p in reversed(record.data_dir_parents) if p in between]
+
+
+def remove_data_dir(ui: Ui, remote: Remote, record: InstallRecord, dry_run: bool) -> None:
+    """Delete the recorded data folder (registry and models included), then the parents the
+    installer created if they are empty. Without a record nothing is deleted; a record that
+    fails ``checked_data_dir`` is reported and left (``verify_uninstall`` then fails)."""
+    would = "would " if dry_run else ""
+    if record.data_dir is None:
+        _, path = remote_data_dir(remote)
+        if _exists(remote, path):
+            ui.warn(f"no record of the data folder: {path} left as it is (delete it by hand)")
+        return
+    path, problem = checked_data_dir(remote, record)
+    if path is None:
+        ui.warn(f"{problem}: left as it is")
+        return
+    if _exists(remote, path):
+        if not dry_run:
+            remote.run(f"rm -rf {shlex.quote(path)}")
+        ui.ok(f"{would}delete the data folder {path} (registry and models included)")
+    else:
+        ui.ok(f"data folder {path} is not there")
+    home, _ = remote_data_dir(remote)
+    for parent in _created_parents(record, home, path):
+        if not dry_run:
+            remote.run(f"rmdir {shlex.quote(parent)} 2>/dev/null || true", check=False)
+
+
+def warn_data_dir_overrides(ui: Ui, remote: Remote, dirs: list[Path]) -> None:
+    """Warn when the app would keep its data outside the folder the installer records.
+
+    Looks at ``ROBOEMOT_DATA_DIR`` in the SSH user's environment and at a ``data_dir`` in the
+    staged ``app.yaml``. The app's own environment may differ, so this is a hint, not a check.
+    """
+    env = remote.run('printf %s "${ROBOEMOT_DATA_DIR:-}"').strip()
+    if env:
+        ui.warn(
+            f"ROBOEMOT_DATA_DIR={env} is set for the SSH user: data may land outside the record"
+        )
+    for root in dirs:
+        for cfg in root.rglob("app.yaml"):
+            try:
+                value = (yaml.safe_load(cfg.read_text()) or {}).get("data_dir")
+            except (OSError, yaml.YAMLError, AttributeError):
+                continue
+            if value:
+                ui.warn(f"{cfg.name} sets data_dir={value}: uninstall will not remove that folder")
+
+
 # ---------------------------------------------------------------- install
 
 
@@ -220,6 +401,7 @@ def install_packages(
     dry_run: bool,
 ) -> InstallRecord:
     own = distribution_names(dirs)
+    warn_data_dir_overrides(ui, remote, dirs)
     before = py.installed()
     record = read_record(remote, platform.record_path) or InstallRecord(
         platform.app_name, platform.manifest_id, own
@@ -250,6 +432,7 @@ def install_packages(
             )
             if added:
                 ui.ok(f"would add {', '.join(f'{n} {v}' for n, v in sorted(added.items()))}")
+        claim_data_dir(ui, platform, remote, record, dry_run=True)
         ui.info(f"would record the changes in {platform.record_path}; nothing copied or installed")
         return record
     tmp = remote.run(f"mktemp -d {REMOTE_TMP_PREFIX}.XXXXXX")
@@ -278,6 +461,7 @@ def install_packages(
         py.reinstall_own(files)
         after = py.installed()
         record.merge(before, after)
+        claim_data_dir(ui, platform, remote, record, dry_run=False)
         write_record(remote, platform.record_path, record)
         added = ", ".join(record.added) or "none"
         ui.ok(
@@ -321,6 +505,7 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
             record = install_packages(ui, platform, py, remote, dirs, wheels, opts.dry_run)
             if not opts.dry_run:
                 platform.verify(ui, py, dev)
+            set_operator_pin(ui, py, remote, opts.dry_run)
 
             ui.step("Start")
             if opts.dry_run:
@@ -431,6 +616,7 @@ def run_uninstall(opts: Options, ui: Ui, root: Path) -> None:
                 ui.warn(f"{would}delete leftover {path} ({module})")
 
         ui.step("Clean up and verify")
+        remove_data_dir(ui, remote, record, opts.dry_run)
         platform.cleanup(ui, py, opts.dry_run)
         listed = remote.run(f"ls -d {REMOTE_TMP_PREFIX}.* 2>/dev/null || true").split()
         tmp_dirs = [d for d in listed if TMP_DIR_PATTERN.fullmatch(d)]
@@ -462,9 +648,14 @@ def verify_uninstall(
         if now.get(n) != v
     ]
     problems += [f"{p} still present ({m})" for m, p in leftovers(py, platform)]
+    data_dir, bad = checked_data_dir(py.remote, record)
+    if bad:
+        problems.append(bad)
+    elif data_dir and _exists(py.remote, data_dir):
+        problems.append(f"data folder {data_dir} still present")
     if problems:
         raise WizardError("uninstall incomplete (record kept, run again): " + "; ".join(problems))
-    ui.ok("app packages gone, original versions back")
+    ui.ok("app packages gone, original versions back" + (", data folder gone" if data_dir else ""))
     platform.verify_removed(ui)
 
 

@@ -10,7 +10,7 @@ section number in commit messages that implement or change behaviour.
 | Path | What |
 | --- | --- |
 | `docs/specs/kickoff.md` | Engineering spec (SPEC), the source of truth |
-| `packages/roboemot-core/` | Python package `roboemot`: config, manifest, discovery, health (connectivity), diagnostics (debug report), motion reference, affect, circadian, persona (traits), LLM router and system prompt, bus |
+| `packages/roboemot-core/` | Python package `roboemot`: config, manifest, discovery, health (connectivity), diagnostics (debug report), vision (detect, track, embed, replay, model fetcher; ONNX backends need the `vision` extra), motion reference, affect, circadian, persona (traits), LLM router and system prompt, bus |
 | `packages/roboemot-reachymini/` | Python package `roboemot_reachymini`: Reachy Mini driver and SDK bridge |
 | `rt/` | C++ real-time core (`roboemot-rt`): arbiter and safety limiter, CMake + ctest |
 | `configs/` | Library defaults, robot manifests, personality presets |
@@ -47,6 +47,8 @@ python3 -m venv .venv && . .venv/bin/activate
 pip install -e "packages/roboemot-core[dev]" -e "packages/roboemot-reachymini[dev]"
 pytest                                   # unit tests (no robot, no simulator)
 scripts/sim-daemon.sh &                  # MuJoCo Reachy Mini daemon, headless, port 8000
+roboemot models fetch --all              # vision weights (~0.8 GB) into the app data folder (~/.local/share/roboemot/models), sha256-verified
+pytest -m models                         # real ONNX models, needs the vision extra and fetched weights
 pytest -m sim                            # integration tests against the simulated robot
 cmake -S rt -B rt/build && cmake --build rt/build && ctest --test-dir rt/build
 ruff check . && ruff format --check .

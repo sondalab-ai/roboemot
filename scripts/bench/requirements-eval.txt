@@ -1,0 +1,7 @@
+# accuracy scripts (Mac or Linux dev machine); versions used: see the spike document
+onnxruntime
+numpy
+opencv-python-headless
+pyarrow
+ruff
+pycocotools

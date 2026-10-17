@@ -1,0 +1,274 @@
+"""Registry records for people, animals and objects (SPEC 6, Person record).
+
+Embeddings are model-specific, so every record names the embedding model that produced them
+and the matcher ignores records from another model. Animal and object records have no consent,
+age or register fields.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Literal
+
+import numpy as np
+
+AGE_GROUPS: tuple[str, ...] = ("child", "teen", "adult", "senior", "unknown")
+ADULT_AGE_GROUPS = frozenset({"adult", "senior"})
+GENDERS: tuple[str, ...] = ("female", "male", "unknown")
+CONSENT_SCOPES: tuple[str, ...] = ("face", "voice", "refresh")
+ENTITY_KINDS: tuple[str, ...] = ("animal", "object")
+SCHEMA_VERSION = 1
+
+Status = Literal["active", "pending"]
+Source = Literal["declared", "estimated"]
+Origin = Literal["enrolled", "xmp", "auto"]
+EntityKind = Literal["animal", "object"]
+
+
+def possible_minor(age_group: str | None) -> bool:
+    """True unless the group is exactly adult or senior; unknown or invalid counts as a minor.
+
+    Fails closed (SPEC 5, Rules for estimated attributes): only an explicit adult or senior
+    value lifts the minor policy.
+    """
+    return age_group not in ADULT_AGE_GROUPS
+
+
+def check_age_group(value: str) -> str:
+    """Return ``value`` if it is a known age group, else raise ``ValueError``."""
+    if value not in AGE_GROUPS:
+        raise ValueError(f"age_group must be one of {AGE_GROUPS}")
+    return value
+
+
+def check_gender(value: str) -> str:
+    """Return ``value`` if it is a known gender, else raise ``ValueError``."""
+    if value not in GENDERS:
+        raise ValueError(f"gender must be one of {GENDERS}")
+    return value
+
+
+def check_entity_kind(value: str) -> str:
+    """Return ``value`` if it is an entity kind (animal or object), else raise ``ValueError``."""
+    if value not in ENTITY_KINDS:
+        raise ValueError(f"kind must be one of {ENTITY_KINDS}")
+    return value
+
+
+def _iso(when: datetime | None) -> str | None:
+    return None if when is None else when.isoformat()
+
+
+def _when(text: str | None) -> datetime | None:
+    return None if text is None else datetime.fromisoformat(text)
+
+
+def _no_embeddings() -> np.ndarray:
+    return np.zeros((0, 0), np.float32)
+
+
+def _check_version(meta: dict[str, Any]) -> None:
+    if meta.get("schema_version") != SCHEMA_VERSION:
+        raise ValueError("unsupported schema_version")
+
+
+@dataclass(frozen=True)
+class RecordSummary:
+    """What ``Registry.list`` returns: no embeddings, no consent, no preferences."""
+
+    id: str
+    display_name: str
+    status: Status
+    kind: Literal["person", "animal", "object"]
+    last_seen: datetime | None
+    age_group: str | None = None
+
+
+@dataclass(frozen=True)
+class Attribute:
+    """An age group or gender value and whether it was declared or estimated."""
+
+    value: str
+    source: Source
+
+
+class ConsentError(ValueError):
+    """Raised when a consent record is invalid or missing for what is being stored."""
+
+
+@dataclass(frozen=True)
+class Consent:
+    """Who consented, when and to what; the guardian is required for possible minors.
+
+    ``scope`` is a non-empty subset of ``CONSENT_SCOPES``: ``face`` and ``voice`` allow storing
+    those embeddings, ``refresh`` allows adding embeddings after enrollment (SPEC 12, Data).
+    """
+
+    who: str
+    when: datetime
+    scope: tuple[str, ...]
+    guardian: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "scope", tuple(self.scope))
+        if not self.who.strip():
+            raise ConsentError("consent needs the name of who consented")
+        if self.guardian is not None and not self.guardian.strip():
+            raise ConsentError("guardian must not be blank")
+        if self.when.tzinfo is None or self.when.utcoffset() is None:
+            raise ConsentError("consent time must be timezone-aware")
+        if not self.scope or not set(self.scope) <= set(CONSENT_SCOPES):
+            raise ConsentError(f"consent scope must be a non-empty subset of {CONSENT_SCOPES}")
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "who": self.who,
+            "when": self.when.isoformat(),
+            "scope": list(self.scope),
+            "guardian": self.guardian,
+        }
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> Consent:
+        when = datetime.fromisoformat(data["when"])
+        return cls(data["who"], when, tuple(data["scope"]), data["guardian"])
+
+
+def _attr(data: dict[str, str] | None) -> Attribute | None:
+    return None if data is None else Attribute(data["value"], data["source"])  # type: ignore[arg-type]
+
+
+def _attr_json(attr: Attribute | None) -> dict[str, str] | None:
+    return None if attr is None else {"value": attr.value, "source": attr.source}
+
+
+@dataclass
+class PersonRecord:
+    """An enrolled or pending person. Pending people never hold biometric data."""
+
+    person_id: str
+    display_name: str
+    status: Status = "pending"
+    embedding_model_id: str | None = None
+    face_embeddings: np.ndarray = field(default_factory=_no_embeddings, repr=False)
+    n_enrolled: int = 0
+    voice_embedding: np.ndarray | None = field(default=None, repr=False)
+    voice_model_id: str | None = None
+    age_group: Attribute | None = None
+    gender: Attribute | None = None
+    register_overrides: dict[str, Any] = field(default_factory=dict)
+    preferences: dict[str, Any] = field(default_factory=dict, repr=False)
+    consent: Consent | None = field(default=None, repr=False)
+    last_seen: datetime | None = None
+
+    @property
+    def possible_minor(self) -> bool:
+        return possible_minor(None if self.age_group is None else self.age_group.value)
+
+    def meta(self) -> dict[str, Any]:
+        """JSON-safe metadata; the embeddings are stored as arrays beside it."""
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "person_id": self.person_id,
+            "display_name": self.display_name,
+            "status": self.status,
+            "embedding_model_id": self.embedding_model_id,
+            "n_enrolled": self.n_enrolled,
+            "voice_model_id": self.voice_model_id,
+            "age_group": _attr_json(self.age_group),
+            "gender": _attr_json(self.gender),
+            "register_overrides": self.register_overrides,
+            "preferences": self.preferences,
+            "consent": None if self.consent is None else self.consent.to_json(),
+            "last_seen": _iso(self.last_seen),
+        }
+
+    def arrays(self) -> dict[str, np.ndarray]:
+        out: dict[str, np.ndarray] = {}
+        if len(self.face_embeddings):
+            out["face"] = self.face_embeddings
+        if self.voice_embedding is not None:
+            out["voice"] = self.voice_embedding
+        return out
+
+    @classmethod
+    def from_stored(cls, meta: dict[str, Any], arrays: dict[str, np.ndarray]) -> PersonRecord:
+        consent = meta["consent"]
+        _check_version(meta)
+        return cls(
+            person_id=meta["person_id"],
+            display_name=meta["display_name"],
+            status=meta["status"],
+            embedding_model_id=meta["embedding_model_id"],
+            face_embeddings=arrays.get("face", _no_embeddings()),
+            n_enrolled=meta["n_enrolled"],
+            voice_embedding=arrays.get("voice"),
+            voice_model_id=meta["voice_model_id"],
+            age_group=_attr(meta["age_group"]),
+            gender=_attr(meta["gender"]),
+            register_overrides=meta["register_overrides"],
+            preferences=meta["preferences"],
+            consent=None if consent is None else Consent.from_json(consent),
+            last_seen=_when(meta["last_seen"]),
+        )
+
+    def export(self) -> dict[str, Any]:
+        """Everything held about this person, embeddings included (SPEC 12, access request)."""
+        data = self.meta()
+        data["face_embeddings"] = self.face_embeddings.tolist()
+        voice = self.voice_embedding
+        data["voice_embedding"] = None if voice is None else voice.tolist()
+        return data
+
+
+@dataclass
+class EntityRecord:
+    """An animal or object known by appearance embeddings (SPEC 6)."""
+
+    entity_id: str
+    kind: EntityKind
+    display_name: str
+    category: str = ""
+    status: Status = "pending"
+    origin: Origin = "enrolled"
+    embedding_model_id: str | None = None
+    embeddings: np.ndarray = field(default_factory=_no_embeddings, repr=False)
+    description: str | None = None
+    last_seen: datetime | None = None
+    photo_keys: list[str] = field(default_factory=list, repr=False)
+
+    def meta(self) -> dict[str, Any]:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "entity_id": self.entity_id,
+            "kind": self.kind,
+            "display_name": self.display_name,
+            "category": self.category,
+            "status": self.status,
+            "origin": self.origin,
+            "embedding_model_id": self.embedding_model_id,
+            "description": self.description,
+            "last_seen": _iso(self.last_seen),
+            "photo_keys": list(self.photo_keys),
+        }
+
+    def arrays(self) -> dict[str, np.ndarray]:
+        return {"appearance": self.embeddings} if len(self.embeddings) else {}
+
+    @classmethod
+    def from_stored(cls, meta: dict[str, Any], arrays: dict[str, np.ndarray]) -> EntityRecord:
+        _check_version(meta)
+        return cls(
+            entity_id=meta["entity_id"],
+            kind=meta["kind"],
+            display_name=meta["display_name"],
+            category=meta["category"],
+            status=meta["status"],
+            origin=meta["origin"],
+            embedding_model_id=meta["embedding_model_id"],
+            embeddings=arrays.get("appearance", _no_embeddings()),
+            description=meta["description"],
+            last_seen=_when(meta["last_seen"]),
+            photo_keys=[str(k) for k in meta.get("photo_keys", [])],
+        )
