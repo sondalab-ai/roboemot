@@ -739,3 +739,77 @@ def test_the_turn_event_has_ids_and_lengths_only(rigs):
         "outcome",
     }  # fmt: skip
     assert event["route"] == "lan" and event["sentences"] == 1 and event["minor"] is False
+
+
+# ------------------------------------------------------------------ review fixes
+
+
+def test_the_flushed_tail_is_not_spoken_when_a_minor_appears_after_the_last_delta(rigs):
+    rig = rigs(routes=(CLOUD,))
+    rig.server.scripts["cloud.local"] = ["Prima frase. ", "Coda senza punto", GATE]
+    n = rig.say("ciao")
+    assert wait_for(lambda: rig.speech.texts() == ["Prima frase."])
+    rig.minor[0] = True
+    rig.server.gate.set()
+    assert rig.done(n)
+    assert rig.speech.texts() == ["Prima frase."] and rig.speech.stops == 1
+
+
+def test_the_flushed_tail_goes_through_the_output_filter(rigs):
+    rig = rigs(routes=(CLEARED,), safety={"minors_allowed_llm": True})
+    rig.minor[0] = True
+    rig.server.scripts["lan.local"] = ["Ciao. ", "voglio uccidere"]
+    rig.turn("ciao")
+    assert "uccidere" not in " ".join(rig.speech.texts())
+
+
+def test_a_phrase_split_across_two_sentences_is_filtered(rigs):
+    rig = rigs(
+        routes=(CLEARED,),
+        safety={"minors_allowed_llm": True, "minor_output_blocklist": {"it": ["cattiva parola"]}},
+    )
+    rig.minor[0] = True
+    rig.server.scripts["lan.local"] = ["Dico una cattiva. ", "Parola davvero. ", "Fine."]
+    rig.turn("ciao")
+    assert rig.speech.texts() == [
+        "Dico una cattiva.",
+        "Preferisco parlare d'altro. Chiedi a un grande.",
+    ]
+
+
+def test_a_different_known_speaker_does_not_inherit_the_history(rigs):
+    rig = rigs()
+    who = ["p-1"]
+    rig.worker._speaker = lambda: who[0]
+    rig.turn("segreto di uno")
+    who[0] = "p-2"
+    rig.turn("sono io")
+    assert [m["role"] for m in rig.server.requests[1][1]["messages"]] == ["system", "user"]
+    assert "segreto" not in json.dumps(rig.server.requests[1][1])
+    assert rig.worker.snapshot()["speaker_changes"] == 1
+
+
+def test_an_unknown_speaker_does_not_inherit_a_known_persons_session_and_vice_versa(rigs):
+    rig = rigs()
+    who = ["p-1"]
+    rig.worker._speaker = lambda: who[0]
+    rig.turn("uno")
+    who[0] = None
+    rig.turn("due")
+    assert len(rig.server.requests[1][1]["messages"]) == 2
+    who[0] = "p-1"
+    rig.turn("tre")
+    assert len(rig.server.requests[2][1]["messages"]) == 2
+
+
+def test_the_same_speaker_keeps_the_history_and_presence_refreshes_only_that_person(rigs):
+    rig = rigs()
+    rig.worker._speaker = lambda: "p-1"
+    rig.turn("uno")
+    rig.turn("due")
+    assert len(rig.server.requests[1][1]["messages"]) == 4
+    timeout = rig.stack.effective().conversation.session_timeout_min * 60
+    rig.clock[0] += timeout - 1
+    rig.worker.note_presence(rig.clock[0], "p-2")  # somebody else in view: no refresh
+    rig.clock[0] += 2
+    assert rig.worker.expire(rig.clock[0])

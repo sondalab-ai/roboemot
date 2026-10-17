@@ -75,6 +75,7 @@ class Speech(Protocol):
 @dataclass
 class _Session:
     last_active: float
+    speaker: str | None = None  # registry id of the person it belongs to; None: unknown
 
 
 @dataclass
@@ -95,6 +96,7 @@ class _Turn:
     tokens: int = 0
     out_chars: int = 0
     stamps: dict[str, float] = field(default_factory=dict)
+    active: ActiveRoute = field(default_factory=ActiveRoute)
 
 
 class ConversationWorker:
@@ -118,13 +120,14 @@ class ConversationWorker:
         minor_present: Callable[[], bool],
         profile: Callable[[int], str | None] = lambda cap: None,
         scene: Callable[[int], str | None] = lambda cap: None,
+        speaker: Callable[[], str | None] = lambda: None,
         bus: Bus | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.stack, self.hub, self.speech = stack, hub, speech
         self.affect, self.responder = affect, responder
         self._register, self._circadian, self._minor_present = register, circadian, minor_present
-        self._profile, self._scene = profile, scene
+        self._profile, self._scene, self._speaker = profile, scene, speaker
         self.bus, self.clock = bus, clock
         self._lock = threading.Lock()
         self._pending: collections.deque[Utterance] = collections.deque()
@@ -196,10 +199,11 @@ class ConversationWorker:
                 loop.call_soon_threadsafe(wake.set)
         return True
 
-    def note_presence(self, now: float) -> None:
-        """The person is still in view (app tick): keeps the session alive."""
+    def note_presence(self, now: float, speaker: str | None = None) -> None:
+        """The session's person is still in view (app tick): keeps it alive. ``speaker`` is who
+        is in view now (registry id, None when unknown); anyone else does not refresh it."""
         with self._lock:
-            if self._session is not None:
+            if self._session is not None and self._session.speaker == speaker:
                 self._session.last_active = now
 
     # ----------------------------------------------------------------- session
@@ -226,11 +230,26 @@ class ConversationWorker:
         if had:
             log.debug("conversation: session ended (%s)", why)
 
-    def _touch(self, now: float) -> None:
-        """Start the session if none is open and stamp the activity."""
+    def _who(self) -> str | None:
+        try:
+            return self._speaker()
+        except Exception as exc:
+            log.warning("conversation: speaker unavailable (%s)", type(exc).__name__)
+            return None
+
+    def _touch(self, now: float, speaker: str | None) -> None:
+        """Start the session if none is open and stamp the activity. A session belongs to the
+        person who opened it: another speaker (a different known person, or an unknown one
+        taking over a known person's session, or the reverse) ends it first, so nobody inherits
+        someone else's history."""
+        with self._lock:
+            other = self._session is not None and self._session.speaker != speaker
+        if other:
+            self._end_session("speaker changed")
+            self._counts["speaker_changes"] += 1
         with self._lock:
             if self._session is None:
-                self._session = _Session(now)
+                self._session = _Session(now, speaker)
                 self._counts["sessions"] += 1
             else:
                 self._session.last_active = now
@@ -329,7 +348,7 @@ class ConversationWorker:
         self.apply_config(cfg)
         router = self.hub.sync(cfg)
         self.expire(now)
-        self._touch(now)
+        self._touch(now, self._who())
         minor = self._minor()
         register = self._register_for(cfg, minor)
         conv = cfg.conversation
@@ -355,7 +374,7 @@ class ConversationWorker:
             summary_max_chars=(conv.profile_summary_max_chars, conv.scene_summary_max_chars),
         )
         splitter = SentenceSplitter(cfg.voice.sentence_max_chars, strip_tags=True)
-        active = ActiveRoute()
+        active = turn.active
         turn.stamps["request"] = self.clock()
         stream = router.stream(messages, None, minor_present=minor, active=active)
         try:
@@ -414,7 +433,9 @@ class ConversationWorker:
         if turn.sentences >= turn.cap:
             turn.outcome = "capped"
             return False
-        if self._minor() and self._filter.blocked(sentence.text):
+        if self._minor_appeared(turn, turn.active):
+            return False
+        if self._minor() and self._filter.blocked(sentence.text, " ".join(turn.spoken)):
             self._say_minor_line(turn, "filtered")
             turn.outcome = "filtered"
             return False

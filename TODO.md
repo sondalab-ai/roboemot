@@ -4,12 +4,12 @@
 
 The persona pieces exist and are tested; these callers wait for the pillars they plug into.
 
-- [ ] Build each LLM request with `roboemot.llm.system_prompt` + `build_messages`, using the
+- [x] Build each LLM request with `roboemot.llm.system_prompt` + `build_messages`, using the
       register shaped by `roboemot.persona.apply_to_register` and the summary caps from
       `conversation.*_summary_max_chars`.
-- [ ] One app-wide `Router` (and daily token budget) shared by the traits worker, the conversation
+- [x] One app-wide `Router` (and daily token budget) shared by the traits worker, the conversation
       pipeline and the web UI route check (SPEC 8): today `start_webui` borrows the traits
-      worker's router (`RoboEmotApp.start_webui`), so slice 5 must wire the shared one there.
+      worker's router (`RoboEmotApp.start_webui`), done in M3 slice 5: `RouterHub`, shared by traits, conversation, speech and checks.
 - [x] Pass `roboemot.persona.effects(cfg.persona)` to `compose_delivery` in the TTS path (`SpeechOutput.say`, M3 slice 4).
 - [x] Apply `motion_amplitude` / `reaction_intensity` from the persona-shaped register in the
       expression path. Done in M2: `RegisterTracker.tick` shapes the register with
@@ -31,8 +31,7 @@ The persona pieces exist and are tested; these callers wait for the pillars they
 - [x] Per-route history trimming (SPEC 8, Conversation state). Done: `llm_routes[].context_budget_tokens`
       (8192) and `conversation.turn_reserve_tokens` (256); `trim_history` drops whole turns,
       oldest first, and the router applies it per route; load-time rejection names the route
-      (`roboemot.llm.prompt`, `test_llm_history.py`). Not done: a caller that builds the history
-      (the conversation pipeline, M3) and the `conversation.history_turns` cap.
+      (`roboemot.llm.prompt`, `test_llm_history.py`). The conversation worker (M3 slice 5) builds the history and applies the `conversation.history_turns` cap.
 - [ ] Secret store for `${secret:name}` route keys (SPEC 8: stored encrypted on the robot). The
       app's `make_router` has no resolver, so such routes send an empty key; the app logs a
       warning at startup for each one.

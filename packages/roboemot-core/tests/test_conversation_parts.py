@@ -191,3 +191,10 @@ def test_build_messages_scrubs_names_inside_tool_arguments():
     )
     assert "Marta" not in str(msgs)
     assert call["function"]["arguments"] == '{"who": "Marta"}'
+
+
+def test_filter_catches_a_phrase_split_between_two_sentences():
+    f = OutputFilter({"en": ["bad word here"]})
+    assert not f.blocked("word here")
+    assert f.blocked("word here", previous="Something bad.")
+    assert not f.blocked("word here", previous="Something good.")

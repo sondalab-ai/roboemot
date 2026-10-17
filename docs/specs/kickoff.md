@@ -594,7 +594,7 @@ Voice has two paths: a fast on-board path that triggers emotional reactions with
 - Interface `LLMBackend.stream(messages, tools, policy) -> tokens | tool_calls`; the only v1 implementation is an OpenAI-compatible client (next subsection).
 - Route order is configured per app, for example: LAN server → cloud provider. Fallback triggers on timeout (first token later than 1.5 s) or error.
 - Only text leaves the robot: transcripts and the scene summary. Audio and images are never sent unless an app enables a multimodal route explicitly.
-- A per-route flag `allowed_for_minors` blocks routes that are not approved when a minor is present.
+- A per-route flag `allowed_for_minors` (with the master switch `safety.minors_allowed_llm`) blocks routes that are not approved when a minor is present; only cleared routes are used then, with the minor content rules and the child register (section 12).
 - When no route answers, the robot plays a register-appropriate fallback ("I can't think right now") and keeps reflexes running. When no route is even reachable, the router says so at once (`Offline`) instead of waiting for timeouts, and the robot replies nonverbally (section 12A).
 
 ### OpenAI-compatible routes
@@ -624,12 +624,12 @@ Every LLM route speaks the OpenAI Chat Completions API (streaming + tool calling
 - Per-route conformance test (M3): streaming (more than one text chunk), tool call round trip (a `get_time` call with parsable arguments, its result sent back, a text answer), first-token latency (against the route's `first_token_timeout_s`, counted as in the router) and Italian output (share of Italian stopwords, `llm_check.*`). It runs against one route, bypassing fallback, and its tokens are charged to the route's daily budget (a route with a spent budget is refused). It is advisory in v1: `roboemot llm check <route>` (non-zero exit on a failed check) and the web UI Routes tab (PIN session and CSRF token; the check runs in the background for up to `llm_check.deadline_s` and the page polls) run it, show the result and keep the last report per route in the data folder (`route_checks.json`); the CLI budget is per process (a fresh router each run), the web UI's is shared with the app's router when it has one; it does not enable or block a route, because the web UI has no route-enable flow yet. Reports hold statuses and short reasons only, never prompts, replies or keys.
 - Only text is sent: transcript, scene summary, and the speaker's display name and preferences. Never embeddings or audio.
 - Optional multimodal opt-in: an app may allow sending one camera frame (`image_url`) to a route that supports images, for open-ended questions ("what am I holding?"). Off by default and blocked while a minor is present.
-- `allowed_for_minors` is false by default on every route; a route is cleared only after the deployment has been checked against that provider's usage policy for minors. Until then the robot does not converse while a minor is present but stays expressive.
+- `allowed_for_minors` is false by default on every route; a route is cleared only after the deployment has been checked against that provider's usage policy for minors, and it is used with a minor present only while `safety.minors_allowed_llm` is also on. The robot converses with children on cleared routes, with the minor content rules, the child register and its shorter replies (`register.*.max_reply_sentences`, child default 2). With no cleared route it speaks short built-in child-safe lines per language (`safety.minor_lines`: greeting, its name, "ask a grown-up"), never silence and never an uncleared route. A minor appearing mid-answer stops the speech and cancels the stream; the next turn runs under the minor rules.
 - A daily token budget per route caps spend, charged also when an answer is cut short (barge-in, timeout, error). The first-token timeout counts until the first real content (role-only chunks do not count), and stall\_timeout\_s bounds later gaps; no network means the fallback of the previous subsection applies.
 
 ### Conversation state
 
-- A session starts when a person engages and ends after 5 minutes without them in view or speaking.
+- A session starts when a person engages and ends after 5 minutes without them in view or speaking. A session belongs to the person who opened it (registry id when recognised, else unknown): an addressed utterance from anyone else, known or unknown, ends it and drops its history, and only that person in view keeps it alive.
 - Short-term memory: the last 12 turns of the session, kept in RAM only and dropped when the session ends.
 - Long-term memory: only preferences the person confirmed through `remember_preference`, stored in the registry (section 6). No transcripts are stored.
 - Each request carries the system prompt, the profile and scene summaries and the short-term turns, trimmed to a per-route token budget (`llm_routes[].context_budget_tokens`, default 8192, an estimate of the prompt only: tokens are counted as characters divided by 4, the router's own usage estimate, so leave headroom for Italian and other denser languages). The router trims each request to the budget of the route it is sending to, so a fallback route with a larger budget keeps more history. A turn runs from a user message to the next one and includes the assistant reply, its tool calls and the tool results; trimming drops whole turns, oldest first, and never part of one, never a part of the system prompt, and never the newest turn (the request being answered, with any tool exchange in it). Parts 1 to 4 below are fixed per configuration: at load time the largest system message a request can carry (parts 1 to 4 for the longest register fragment, vocabulary rule and language name with the minor rule, plus both summaries at their caps) plus `conversation.turn_reserve_tokens` (default 256, room for the newest turn) must fit every route's budget, otherwise the configuration is rejected with an error that names the route and the token counts and never quotes the prompt (the check runs when a configuration file loads and when a change commits, on the configuration without per-person layers, so a bad file or hot reload is refused while per-person lookups never pay for it or fail on it; `register.*.persona_fragment` is capped by `register.persona_fragment_max_chars`, default 300, and a per-person override that exceeds it is dropped and audited); the profile and scene summaries have their own length caps (`conversation.profile_summary_max_chars`, `conversation.scene_summary_max_chars`), and the scene summary lists entities by attention priority until its cap.
@@ -841,7 +841,7 @@ Outside app mode, `Robot.from_manifest(path)` opens its own connection: any othe
 
 ### Bus
 
-One process per heavy module (rt, vision, audio, core; plus the SDK bridge on Reachy Mini), connected by a local message bus with shared-memory transport for frames: Zenoh or iceoryx2 are the candidates, chosen in milestone M0. Messages are typed with versioned schemas (Protobuf or FlatBuffers). Main topics: `percept.face`, `percept.pose`, `percept.utterance`, `percept.entity`, `world.entity_appeared`, `world.entity_moved`, `world.entity_gone`, `person.recognized`, `affect.state`, `register.active`, `attention.target`, `motion.request`, `motion.state`, `speech.say`, `safety.event`, `sound.loud`, circadian.state; camera frames and audio in/out travel over shared memory.
+One process per heavy module (rt, vision, audio, core; plus the SDK bridge on Reachy Mini), connected by a local message bus with shared-memory transport for frames: Zenoh or iceoryx2 are the candidates, chosen in milestone M0. Messages are typed with versioned schemas (Protobuf or FlatBuffers). Main topics: `percept.face`, `percept.pose`, `percept.utterance`, `percept.entity`, `world.entity_appeared`, `world.entity_moved`, `world.entity_gone`, `person.recognized`, `affect.state`, `register.active`, `attention.target`, `motion.request`, `motion.state`, `speech.say`, `conversation.turn` (ids and lengths, never text), `safety.event`, `sound.loud`, circadian.state; camera frames and audio in/out travel over shared memory.
 
 ### LLM tools
 
@@ -984,7 +984,7 @@ RoboEmot processes biometric data of adults and children in a home, so privacy a
 
 ### Behaviour and content
 
-- With a minor present, a stricter content policy applies on every LLM route and a filter on the output before TTS.
+- With a minor present, a stricter content policy applies on every LLM route and a filter on the output before TTS: every sentence (the last one of the stream too) is checked against a per-language blocklist (`safety.minor_output_blocklist`, whole words, accents and case ignored, phrases split across two sentences included); a filtered sentence is replaced by a built-in line and the rest of the answer is dropped. If the minor signal cannot be read it counts as present.
 - The robot does not claim to be human or to have feelings it does not model; the affect state is an expressive model, and documentation says so.
 - Gender and age estimates are never spoken aloud or exposed to the LLM as facts about a person; the LLM receives only the resolved form of address.
 
@@ -1126,7 +1126,7 @@ Milestones are ordered by dependency; dates are not set yet.
 - [ ] Are warmth, energy, playfulness and formality the right persona traits, and do the default trait tables (section 11A, Persona) feel right on the robot?
 
 * [ ] Are the reduced cm4 rates acceptable for v1 (vision 5 to 10 fps, identity within 2.5 s, object detection on at 1 fps)?
-* [ ] Should any route be cleared for use with children present (per-provider usage-policy check), or should conversation stay adults-only in v1?
+* [x] Resolved (user decision 2026-10-17): converse with children on routes cleared per provider (`allowed_for_minors`), built-in child-safe lines otherwise (sections 8, 12).
 
 - [ ] Resolved: default quiet hours 22:30 to 07:00, configurable like every behaviour parameter (section 11A).
 

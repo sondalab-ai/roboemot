@@ -20,7 +20,13 @@ class OutputFilter:
         self.source = {k: list(v) for k, v in blocklist.items()}
         entries = {normalise(w) for words in blocklist.values() for w in words}
         self._entries = tuple(f" {w} " for w in sorted(entries) if w)
+        self._window = max((w.count(" ") for w in self._entries), default=0) - 1
 
-    def blocked(self, text: str) -> bool:
-        padded = f" {normalise(text)} "
+    def blocked(self, text: str, previous: str = "") -> bool:
+        """Whether ``text`` is blocked. ``previous`` is what the same answer already said: the
+        splitter can cut a phrase between two sentences, so the tail of ``previous`` (as many
+        words as the longest phrase needs, less one) is checked together with ``text``."""
+        words = normalise(previous).split()
+        tail = words[-self._window :] if self._window > 0 else []
+        padded = f" {' '.join([*tail, normalise(text)])} "
         return any(w in padded for w in self._entries)
