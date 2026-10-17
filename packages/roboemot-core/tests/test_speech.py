@@ -221,3 +221,23 @@ def test_adult_sentence_uses_the_remote_route(make):
     say(out)
     assert wait_for(lambda: out.sentences_spoken == 1) and len(server.requests) == 1
     assert isinstance(server.requests[0], httpx.Request)
+
+
+def test_factory_picks_backends_and_default_locations():
+    from roboemot import paths
+    from roboemot.llm import Router
+    from roboemot.voice.factory import build_backend, piper_locations
+    from roboemot.voice.piper_backend import PiperBackend
+
+    cfg = RoboEmotConfig()
+    router = Router([], cfg.safety)
+    python, voices = piper_locations(cfg)
+    assert python == paths.piper_python(cfg.data_dir)
+    assert voices.parts[-2:] == ("voice", "piper")
+    assert isinstance(build_backend(cfg, router), PiperBackend)
+    remote = RoboEmotConfig.model_validate({"voice": {"backend": "openai_speech"}})
+    chain = build_backend(remote, router)
+    assert isinstance(chain, FallbackTTS) and chain.primary.name == "openai_speech"
+    assert chain.fallback.name == "piper" and not chain.primary.available()  # no route set
+    with pytest.raises(ValueError, match="kokoro"):
+        build_backend(RoboEmotConfig.model_validate({"voice": {"backend": "kokoro"}}), router)

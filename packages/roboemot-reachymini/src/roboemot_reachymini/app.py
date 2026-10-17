@@ -53,6 +53,8 @@ from roboemot.vision import CIRCADIAN, FrameSource, LockedSource
 from roboemot.vision.minor import MinorPresence
 from roboemot.vision.service import Perception, default_stages, open_perception, world_snapshot
 from roboemot.voice.activity import SpeechActivity
+from roboemot.voice.factory import build_speech
+from roboemot.voice.speech import SpeechOutput
 from roboemot.webui import Server, make_server
 from roboemot.webui.catalogue import open_catalogue
 from roboemot.webui.routes import RouteChecker
@@ -277,6 +279,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
     audio: ReachyAudio | None = None  # the one reader of the microphone (reflex level, voice)
     speaker: ReachySpeaker | None = None  # playback; only when voice.enabled
     speech: SpeechActivity | None = None  # "the robot is speaking" gate (reflex, DoA)
+    speech_output: SpeechOutput | None = None  # TTS queue onto the speaker; only when voice.enabled
     traits_worker: TraitsWorker | None = None  # rates persona traits when traits_source is llm
 
     def make_router(self, cfg: Any, monitor: NetworkMonitor) -> Router:
@@ -588,6 +591,8 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             runner.apply_config(change.config.affect, change.config.appraisal)
             circ.apply_config(change.config)
             speech.set_echo_tail_ms(change.config.voice.echo_tail_ms)
+            if self.speech_output is not None:
+                self.speech_output.config = change.config
             reflexes.apply_config(
                 change.config.reflexes, math.radians(change.config.safety.constraint_margin_deg)
             )
@@ -630,6 +635,13 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             if speaker is not None:
                 cleanup.callback(speaker.close)  # flushes the player before the SDK goes away
                 speaker.start_playing()
+                # Closed before the speaker (callbacks run last in, first out). Nothing calls
+                # say() yet but tests: the conversation worker (M3 slice 5) will.
+                output = self.speech_output = build_speech(
+                    cfg, speaker, worker.router, bus, lambda: self.minor_present
+                )
+                cleanup.callback(output.close)
+                output.start()
             cleanup.callback(light_reader.stop)  # stopped before the camera thread
             cleanup.callback(self._forget_circadian)
             self.start_webui(stack, cfg, manifest, cleanup)

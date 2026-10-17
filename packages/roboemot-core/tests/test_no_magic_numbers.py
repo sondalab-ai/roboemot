@@ -28,6 +28,7 @@ BEHAVIOUR_MODULES = [
     "voice/piper_worker.py",
     "voice/openai_speech.py",
     "voice/speech.py",
+    "voice/factory.py",
     "llm/router.py",
     "llm/conformance.py",
     "llm/prompt.py",

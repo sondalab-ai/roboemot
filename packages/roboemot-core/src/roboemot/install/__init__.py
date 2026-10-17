@@ -10,7 +10,8 @@ interpreter, architecture, Python and free space, build the wheels locally, inst
 the versions already on the robot pinned, record exactly what changed, verify, optionally
 start the app and make it the autostart app. It also creates the private app data folder
 (``~/.local/share/roboemot``: registry, models, trait cache) when it is not there yet and
-records it.
+records it. Unless declined (`--no-piper`) it also creates a Piper virtualenv in the data folder
+(`piper-tts` is GPL-3.0 and runs as its own process, SPEC 8), recorded for uninstall.
 
 Uninstall: stop the app, give back the previous autostart app (only if the setting still names
 this app), uninstall what the record says this installer added, reinstall the original versions
