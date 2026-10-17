@@ -390,3 +390,36 @@ def test_a_missing_object_detector_leaves_the_rest_of_vision_running(data):
     assert vision["state"] == "running"
     assert vision["objects"] == {"state": "unavailable", "reason": app.objects_unavailable}
     assert "animal" not in kinds and "object" not in kinds
+
+
+class ToggleSource(PlantedSource):
+    blank = False
+
+    def read(self):
+        return None if self.blank else super().read()
+
+
+def test_a_possible_minor_face_engages_the_motion_caps_and_releases_after_the_hold(data):
+    (data / "app.yaml").write_text(
+        "schema_version: 1\nsafety: {allow_unmeasured_dynamics: true, minor_hold_s: 1}\n"
+    )
+    ToggleSource.blank = False
+    app = new_app(AppWithFakes)  # no attribute model: the face's age stays unknown (SPEC 5)
+    app.source_class = ToggleSource
+    stop, thread, errors = start(app)
+
+    def caps() -> bool:
+        return app.diagnostics.report()["sections"]["roboemot.motion"]["data"]["minor_present"]
+
+    try:
+        assert wait_for(lambda: app.diagnostics is not None)
+        assert wait_for(caps), "an unknown-age face did not engage the minor caps"
+        assert app.minor_present
+        ToggleSource.blank = True
+        assert wait_for(lambda: not caps()), "the caps never released"
+        assert not app.minor_present
+    finally:
+        ToggleSource.blank = False
+        stop.set()
+        thread.join(15)
+    assert not errors and not thread.is_alive()

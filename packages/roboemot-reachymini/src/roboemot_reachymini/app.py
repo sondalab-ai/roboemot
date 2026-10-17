@@ -38,6 +38,7 @@ from roboemot.manifest import load_manifest
 from roboemot.motion import Command, MotionLoop, Priority
 from roboemot.persona import effects as persona_effects
 from roboemot.vision import CIRCADIAN, FrameSource
+from roboemot.vision.minor import MinorPresence
 from roboemot.vision.service import Perception, default_stages, open_perception, world_snapshot
 from roboemot.webui import Server, make_server
 from roboemot.webui.catalogue import open_catalogue
@@ -212,7 +213,13 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
     world: WorldModel | None = None  # vision (M1) and the speaker hint (M3) feed these
     selector: AttentionSelector | None = None
     circadian: CircadianModel | None = None  # the circadian runner (M2) sets this
-    minor_present: bool = False  # the registry's age estimates (M1) set this
+    minor_presence: MinorPresence | None = None  # the one source of the minor-present signal
+
+    @property
+    def minor_present(self) -> bool:
+        """Whether a possible minor is in view or was within the hold time (SPEC 5, 12)."""
+        return self.minor_presence.present() if self.minor_presence is not None else False
+
     perception: Perception | None = None
     enrollment: Any = None  # EnrollmentService: the web UI enrolls through it (SPEC 6)
     autoenroll: AutoEnroller | None = None  # animals and objects that keep coming back (SPEC 5A)
@@ -304,6 +311,11 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                     log.warning("auto-enrollment: %s", type(exc).__name__)
 
         feed_world(bus, world, on_result)
+        presence = self.minor_presence = MinorPresence(
+            bus,
+            lambda: stack.effective().safety.minor_hold_s,
+            on_rise=lambda: loop.set_minor_present(True),
+        )
         source = self.make_frame_source(reachy_mini, loop.driver.read_state)
         perception = self.perception = open_perception(
             cfg,
@@ -353,6 +365,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             FnSource("roboemot.vision", perception.vision_snapshot),
             FnSource("roboemot.world", lambda: world_snapshot(world.entries, time.monotonic())),
             FnSource("roboemot.registry", perception.registry_snapshot),
+            FnSource("roboemot.minor", presence.snapshot),
             FnSource(
                 "roboemot.app",
                 lambda: {
@@ -384,6 +397,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         # every callback even when one raises, so the motion loop always stops and the camera
         # thread is quiet before the SDK client goes away.
         with ExitStack() as cleanup:
+            cleanup.callback(presence.close)
             cleanup.callback(stack.start_watcher().set)
             loop.start()
             cleanup.callback(loop.stop)
@@ -399,6 +413,8 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 world_source.start(publish)
             while not stop_event.is_set():
                 now = time.monotonic()
+                minor = presence.present(now)
+                loop.set_minor_present(minor)
                 attending = attention_tick(now, world, selector, gaze, loop)
                 live = stack.effective()
                 perception.enrollment.expire()
@@ -420,7 +436,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                         effects=fx,
                         hour=hour,
                         circadian=self.circadian,
-                        minor_present=self.minor_present,
+                        minor_present=minor,
                     )
                     scan_tick(ctx, scan, loop, live)
                 feed_idle(loop, live, now, attending)

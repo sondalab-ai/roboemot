@@ -448,3 +448,15 @@ def test_an_unenrolled_face_is_followed_but_never_named(mini, tmp_path, monkeypa
         persons = [e for e in scene.app.world.entries if e.kind == "person"]
     assert persons and all(e.identity == "unknown" for e in persons)
     assert scene.recognized == []
+
+
+def test_an_unknown_age_face_engages_the_minor_caps(mini, tmp_path, monkeypatch):
+    """SPEC 5, 12: no attribute model, so the planted face's age is unknown (a possible minor);
+    the motion loop's minor caps engage."""
+    with Scene(mini, tmp_path, monkeypatch, enroll=False, plant=True) as scene:
+        deadline, engaged = time.monotonic() + 30, False
+        while time.monotonic() < deadline and not engaged:
+            motion = scene.app.diagnostics.report()["sections"]["roboemot.motion"]["data"]
+            engaged = motion["minor_present"]
+            time.sleep(0.1)
+    assert engaged

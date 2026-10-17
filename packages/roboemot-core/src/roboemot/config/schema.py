@@ -321,6 +321,14 @@ class SafetyConfig(Strict):
         le=1,
         conservative="lower",
     )
+    minor_hold_s: float = param(
+        5.0,
+        "Keep the minor-present caps this long after the last possible-minor face percept",
+        unit="s",
+        ge=1,
+        le=600,
+        conservative="higher",
+    )
     watchdog_ms: float = param(
         200.0,
         "Return home slowly when no command arrives for this long",

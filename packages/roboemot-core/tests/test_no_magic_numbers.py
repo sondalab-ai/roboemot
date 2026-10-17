@@ -49,6 +49,7 @@ BEHAVIOUR_MODULES = [
     "vision/attributes.py",
     "vision/geometry.py",
     "vision/governor.py",
+    "vision/minor.py",
     "vision/models.py",
     "vision/onnx.py",
     "vision/pipeline.py",
