@@ -8,7 +8,8 @@ before pip runs (``pending_before``) and completed after, so an interrupted inst
 leaves enough to undo it. The app data folder (``roboemot.paths``: registry, models, trait
 cache) is recorded the same way, with the parents the installer had to create, but only when it
 did not exist before the install: a folder that was already there is not the installer's to
-remove.
+remove. The Piper virtualenv (SPEC 8, TTS backends) is recorded on its own, so it is removed
+even when the data folder predates the install.
 """
 
 from __future__ import annotations
@@ -50,6 +51,7 @@ class InstallRecord:
     pending_before: Versions | None = None  # set while pip runs
     data_dir: str | None = None  # app data folder this installer created (absolute path)
     data_dir_parents: list[str] = field(default_factory=list)  # parents it had to create too
+    piper_venv: str | None = None  # Piper virtualenv this installer created (absolute path)
     version: int = RECORD_VERSION
 
     def to_json(self) -> dict[str, Any]:
