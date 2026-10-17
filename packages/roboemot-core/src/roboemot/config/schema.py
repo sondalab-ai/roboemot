@@ -308,6 +308,20 @@ class RegisterConfig(Strict):
     gender_affects_params: bool = param(
         False, "If true, gender may change register parameters, not only forms of address"
     )
+    persona_fragment_max_chars: int = param(
+        300, "Longest accepted persona_fragment, in every group", ge=20, le=2000
+    )
+
+    @model_validator(mode="after")
+    def _fragments_fit(self) -> RegisterConfig:
+        for group in ("child", "teen", "adult", "senior", "unknown"):
+            n = len(getattr(self, group).persona_fragment)
+            if n > self.persona_fragment_max_chars:
+                raise ValueError(
+                    f"register.{group}.persona_fragment has {n} characters, "
+                    f"max {self.persona_fragment_max_chars}"
+                )
+        return self
 
 
 # --------------------------------------------------------------------------- expression (SPEC 7)
@@ -1816,6 +1830,14 @@ class PersonaConfig(Strict):
         admin_only=True,
     )
     prompt_max_chars: int = param(600, "Longest accepted prompt", ge=50, le=4000)
+    traits_retry_s: float = param(
+        300.0,
+        "After a failed LLM rating, wait this long before asking again for the same prompt and "
+        "routes",
+        unit="s",
+        ge=0,
+        le=86400,
+    )
     traits_source: Literal["manual", "llm"] = param(
         "manual", "manual: use traits; llm: ask a route to rate the prompt (falls back to traits)"
     )
@@ -2174,13 +2196,6 @@ with warnings.catch_warnings():
             dupes = sorted({n for n in names if names.count(n) > 1})
             if dupes:
                 raise ValueError(f"duplicate llm route names: {dupes}")
-            return self
-
-        @model_validator(mode="after")
-        def _prompt_fits_route_budgets(self) -> RoboEmotConfig:
-            from ..llm.prompt import check_route_budgets  # lazy: llm imports this module
-
-            check_route_budgets(self)
             return self
 
         @model_validator(mode="after")

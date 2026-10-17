@@ -83,8 +83,20 @@ def _ceil_tokens(chars: int) -> int:
 
 
 def message_tokens(message: dict[str, Any]) -> int:
-    """Estimated tokens of one chat message: its text plus any ``tool_calls`` payload."""
-    n = estimate_tokens(str(message.get("content") or ""))
+    """Estimated tokens of one chat message: its text plus any ``tool_calls`` payload.
+
+    List content counts its text parts only; image parts (``image_url``, possibly a base64 data
+    URL) are not estimated as text, because providers bill images by size, not by characters."""
+    content = message.get("content")
+    if isinstance(content, list):
+        text = "".join(
+            part if isinstance(part, str) else str(part.get("text") or "")
+            for part in content
+            if isinstance(part, str) or (isinstance(part, dict) and part.get("type") == "text")
+        )
+    else:
+        text = str(content or "")
+    n = estimate_tokens(text)
     if message.get("tool_calls"):
         n += estimate_tokens(json.dumps(message["tool_calls"], default=str))
     return n
@@ -110,19 +122,24 @@ def trim_history(
 ) -> tuple[list[dict[str, Any]], int]:
     """Messages cut to ``budget_tokens`` (SPEC 8, Conversation state), plus the turns dropped.
 
-    Drops the oldest turns only, whole: the system messages and the newest turn (the current
+    Drops the oldest turns only, whole: system messages (also one that sits mid-list inside a
+    dropped turn: it stays, in order, after the leading ones) and the newest turn (the current
     request, with any tool exchange in it) are always kept, even when they alone exceed the
     budget (``check_route_budgets`` rejects configurations where the system part cannot fit).
     """
     head, turns = split_turns(messages)
     total = sum(message_tokens(m) for m in messages)
-    dropped = 0
+    dropped, kept_system = 0, []
     while total > budget_tokens and len(turns) - dropped > 1:
-        total -= sum(message_tokens(m) for m in turns[dropped])
+        for m in turns[dropped]:
+            if m.get("role") == "system":
+                kept_system.append(m)
+            else:
+                total -= message_tokens(m)
         dropped += 1
     if not dropped:
         return messages, 0
-    return head + [m for turn in turns[dropped:] for m in turn], dropped
+    return head + kept_system + [m for turn in turns[dropped:] for m in turn], dropped
 
 
 def system_tokens_worst_case(cfg: RoboEmotConfig) -> int:

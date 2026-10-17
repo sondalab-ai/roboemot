@@ -27,13 +27,15 @@ class Server:
     def __init__(self, reply: str = RATED, status: int = 200, hang: bool = False) -> None:
         self.reply, self.status, self.hang = reply, status, hang
         self.requests: list[dict] = []
+        self.down: set[str] = set()  # models whose route answers 500
 
     async def handler(self, request: httpx.Request) -> httpx.Response:
-        self.requests.append(json.loads(request.content))
+        body = json.loads(request.content)
+        self.requests.append(body)
         if self.hang:
             await asyncio.sleep(3600)
-        if self.status != 200:
-            return httpx.Response(self.status, json={"error": "x"})
+        if self.status != 200 or body["model"] in self.down:
+            return httpx.Response(self.status if self.status != 200 else 500, json={"error": "x"})
         chunk = {
             "id": "x", "object": "chat.completion.chunk", "created": 0, "model": "m",
             "choices": [{"index": 0, "delta": {"content": self.reply}, "finish_reason": None}],
@@ -60,11 +62,9 @@ def wait_for(predicate, timeout=5.0) -> bool:
     return False
 
 
-def make(tmp_path, server: Server, source: str = "llm", **app):
-    stack = ConfigStack(
-        app={"persona": {"traits_source": source, "traits": {"energy": 0.1}}, "llm_routes": [ROUTE]}
-        | app
-    )
+def make(tmp_path, server: Server, source: str = "llm", retry: float = 0.0, **app):
+    persona = {"traits_source": source, "traits": {"energy": 0.1}, "traits_retry_s": retry}
+    stack = ConfigStack(app={"persona": persona, "llm_routes": [ROUTE]} | app)
     worker = TraitsWorker(
         stack, server.router(stack.effective()), TraitCache(tmp_path / "t.json"), server.router
     )
@@ -289,3 +289,144 @@ def test_the_cache_file_lives_in_the_data_folder(tmp_path, monkeypatch):
     assert path == tmp_path / "data" / paths.TRAITS_CACHE_FILE
     assert path.parent == paths.data_path()
     assert paths.traits_cache_path(str(tmp_path / "cfg")).parent == tmp_path / "cfg"
+
+
+# ----------------------------------------------------------------------------- review round
+
+
+def test_only_prompt_source_routes_and_minor_safety_wake_it():
+    def woken(*keys) -> bool:
+        worker = TraitsWorker(ConfigStack(), None, None, None)
+        calls = []
+        worker.request = lambda: calls.append(1)
+        worker.on_change(ConfigChange(list(keys), [], None))
+        return bool(calls)
+
+    assert woken("persona.prompt") and woken("persona.traits_source")
+    assert woken("llm_routes.0.model") and woken("safety.minors_allowed_llm")
+    assert not woken("persona.traits.energy", "persona.prompt_max_chars", "persona.trait_effects")
+    assert not woken("conversation.language", "safety.minor_motion_factor")
+
+
+def test_a_failed_rating_is_not_asked_again_within_the_backoff(tmp_path, started):
+    server = Server(status=500)
+    stack, worker = make(tmp_path, server, retry=60.0)
+    started.append(worker)
+    worker.start()
+    assert wait_for(lambda: len(server.requests) == 1)
+    for _ in range(3):
+        worker.request()
+        time.sleep(0.05)
+    stack.set("persona.traits_source", "manual", layer="app")
+    stack.set("persona.traits_source", "llm", layer="app")
+    time.sleep(0.2)
+    assert len(server.requests) == 1
+
+
+def test_the_backoff_ends_by_itself_or_when_the_routes_change(tmp_path, started):
+    server = Server(status=500)
+    stack, worker = make(tmp_path, server, retry=0.3)
+    started.append(worker)
+    worker.start()
+    assert wait_for(lambda: len(server.requests) == 1)
+    worker.request()
+    time.sleep(0.1)
+    assert len(server.requests) == 1
+    assert wait_for(lambda: len(server.requests) == 2)  # the scheduled wake-up after 0.3 s
+    worker.clock = lambda: 0.0  # as if it had only just failed: new routes still reset it
+    stack.set("llm_routes", [{**ROUTE, "model": "m2"}], layer="app")
+    assert wait_for(lambda: len(server.requests) == 3)
+
+
+def test_a_rating_from_the_second_route_is_found_in_the_cache_next_time(tmp_path, started):
+    routes = [ROUTE, {**ROUTE, "name": "cloud", "model": "m2"}]
+    server = Server()
+    server.down = {"m1"}
+    stack, worker = make(tmp_path, server, llm_routes=routes)
+    started.append(worker)
+    worker.start()
+    assert wait_for(lambda: energy(stack) == 0.8)
+    assert [r["model"] for r in server.requests] == ["m1", "m2"]
+    stack.set("persona.traits_source", "manual", layer="app")
+    assert wait_for(lambda: energy(stack) == 0.1)
+    stack.set("persona.traits_source", "llm", layer="app")
+    assert wait_for(lambda: energy(stack) == 0.8)
+    assert len(server.requests) == 2  # served from the cache, route 0 is not tried again
+
+
+def test_a_router_that_cannot_be_rebuilt_is_kept_and_the_worker_runs_on(tmp_path, started):
+    server = Server()
+
+    def broken(cfg):
+        raise RuntimeError("no router")
+
+    stack, worker = make(tmp_path, server)
+    worker.make_router = broken
+    started.append(worker)
+    first = worker.router
+    worker.start()
+    assert wait_for(lambda: energy(stack) == 0.8)
+    stack.set("llm_routes", [{**ROUTE, "model": "m2"}], layer="app")
+    time.sleep(0.3)
+    assert worker.router is first and worker._thread.is_alive()
+    stack.set("persona.traits_source", "manual", layer="app")
+    assert wait_for(lambda: energy(stack) == 0.1)
+
+
+def test_close_and_request_survive_a_closed_loop(tmp_path):
+    stack, worker = make(tmp_path, Server())
+    worker.start()
+    assert wait_for(lambda: energy(stack) == 0.8)
+    worker.close()
+    worker._closed = False  # as if the flag raced: both calls must still be harmless
+    worker.request()
+    worker.close()
+
+
+def test_close_after_a_start_that_timed_out_stops_the_late_worker(tmp_path, monkeypatch):
+    stack, worker = make(tmp_path, Server())
+    monkeypatch.setattr(llm_traits, "READY_TIMEOUT_S", 0.0)
+    real_run = worker._run
+    release = threading.Event()
+
+    def slow_run():
+        release.wait(2)
+        real_run()
+
+    worker._run = slow_run
+    worker.start()  # gives up waiting at once
+    worker.close()  # the flag is set before the loop exists
+    release.set()
+    worker._thread.join(3)
+    assert not worker._thread.is_alive()
+    assert energy(stack) == 0.1
+
+
+def test_cache_put_is_atomic_and_leaves_no_temp_file(tmp_path, monkeypatch):
+    cache = TraitCache(tmp_path / "data" / "t.json")
+    traits = ConfigStack().effective().persona.traits
+    cache.put("k1", traits)
+    assert [p.name for p in (tmp_path / "data").iterdir()] == ["t.json"]
+    assert (tmp_path / "data").stat().st_mode & 0o777 == 0o700
+
+    def failing_replace(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(llm_traits.os, "replace", failing_replace)
+    cache.put("k2", traits)  # logged, not raised; the old file is intact
+    monkeypatch.undo()
+    assert cache.get("k1") == traits and cache.get("k2") is None
+    assert [p.name for p in (tmp_path / "data").iterdir()] == ["t.json"]
+
+
+@pytest.mark.parametrize(
+    "content", ["{not json", "[1, 2]", '"text"', '{"k": [1]}', '{"k": {"warmth": 5}}']
+)
+def test_a_corrupt_or_wrong_shaped_cache_reads_as_empty_and_is_replaced(tmp_path, content):
+    path = tmp_path / "t.json"
+    path.write_text(content)
+    cache = TraitCache(path)
+    traits = ConfigStack().effective().persona.traits
+    assert cache.get("k") is None
+    cache.put("k", traits)
+    assert cache.get("k") == traits

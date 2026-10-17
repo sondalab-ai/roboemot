@@ -43,6 +43,7 @@ from roboemot.diagnostics.system import local_sources
 from roboemot.health.network import NetworkMonitor
 from roboemot.health.responder import OfflineResponder
 from roboemot.llm import Router
+from roboemot.llm.router import SECRET
 from roboemot.manifest import load_manifest
 from roboemot.motion import Command, MotionLoop, Priority
 from roboemot.persona import effects as persona_effects
@@ -503,6 +504,17 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         )
 
         # Trait rating (SPEC 11A, Persona) runs on its own thread; its cache is in the data folder.
+        for route in cfg.llm_routes:  # the app has no secret store yet (TODO.md)
+            if SECRET.match(route.api_key):
+                log.warning(
+                    "llm route %s: api_key is a secret reference and no secret store is wired: "
+                    "requests go out with an empty key",
+                    route.name,
+                )
+        try:
+            paths.data_dir(cfg.data_dir)  # created private (0700) when missing, SPEC 12
+        except OSError as exc:  # the cache then fails to write and the rating is just not kept
+            log.warning("data folder: %s", type(exc).__name__)
         worker = self.traits_worker = TraitsWorker(
             stack,
             self.make_router(cfg, network),

@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 
 import httpx
 import pytest
+import yaml
 from roboemot.config import ConfigStack
 from roboemot.config.schema import ConversationConfig, LLMRoute, RoboEmotConfig, SafetyConfig
 from roboemot.config.stack import ConfigError
-from roboemot.llm import Router
+from roboemot.llm import Router, prompt
 from roboemot.llm.prompt import (
     CHARS_PER_TOKEN,
     estimate_tokens,
+    message_tokens,
     split_turns,
     system_tokens_worst_case,
     trim_history,
@@ -157,64 +161,112 @@ async def test_each_route_gets_the_history_that_fits_its_own_budget():
     assert seen["small"][0] == msgs[0] and seen["big"][0] == msgs[0]
 
 
+# ----------------------------------------------------------------------------- content shapes
+
+
+def test_list_content_counts_its_text_parts_and_not_image_data():
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64," + "A" * 40_000}}
+    text = {"type": "text", "text": "x" * 40}
+    assert message_tokens({"role": "user", "content": [text, image]}) == 10
+    assert (
+        message_tokens({"role": "user", "content": ["x" * 8, {"type": "text", "text": "y" * 8}]})
+        == 4
+    )
+    assert message_tokens({"role": "assistant", "content": None}) == 0
+
+
+def test_a_trimmed_turn_with_an_image_does_not_blow_the_estimate():
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64," + "A" * 400_000}}
+    msgs = [
+        msg("system", 50),
+        {"role": "user", "content": [{"type": "text", "text": "x" * 400}, image], "n": 0},
+        msg("assistant", 100, n=0),
+        msg("user", 100, n="now"),
+    ]
+    out, dropped = trim_history(msgs, 400)
+    assert dropped == 0 and out is msgs  # 50 + 100 + 100 + 100 = 350 tokens
+
+
+def test_a_mid_list_system_message_survives_when_its_turn_is_dropped():
+    note = msg("system", 20, n="note")
+    msgs = [
+        msg("system", 50),
+        msg("user", 100, n=0),
+        note,
+        msg("assistant", 100, n=0),
+        msg("user", 100, n=1),
+        msg("assistant", 100, n=1),
+        msg("user", 100, n="now"),
+    ]
+    out, dropped = trim_history(msgs, 320)
+    assert dropped == 2
+    assert [m.get("n") for m in out if "n" in m] == ["note", "now"]
+    assert out[0] is msgs[0] and out[1] is note and out[-1] is msgs[-1]
+
+
 # ----------------------------------------------------------------------------- load time
+
+LONG = {"prompt": "p" * 1500, "prompt_max_chars": 4000}
+
+
+def refused(**app) -> str:
+    with pytest.raises(ConfigError) as err:
+        ConfigStack(app=app)
+    return str(err.value)
 
 
 def test_the_defaults_leave_room_on_a_default_route():
     cfg = RoboEmotConfig(llm_routes=[ROUTE])
     need = system_tokens_worst_case(cfg) + cfg.conversation.turn_reserve_tokens
     assert need < cfg.llm_routes[0].context_budget_tokens
+    ConfigStack(app={"llm_routes": [ROUTE]})
 
 
 def test_a_budget_too_small_for_the_system_prompt_is_rejected_naming_the_route():
     tight = {**ROUTE, "name": "tiny", "context_budget_tokens": 256}
-    with pytest.raises(ValueError, match="llm route 'tiny'") as err:
-        RoboEmotConfig(llm_routes=[tight], persona=LONG)
-    assert "context_budget_tokens is 256" in str(err.value)
-    assert "pppppppppp" not in str(err.value)  # no prompt content in the message
+    message = refused(llm_routes=[tight], persona=LONG)
+    assert "llm route 'tiny'" in message and "context_budget_tokens is 256" in message
+    assert "pppppppppp" not in message  # no prompt content in the message
 
 
 def test_only_the_route_that_is_too_small_is_named():
     ok = {**ROUTE, "name": "ok", "context_budget_tokens": 4000}
     tight = {**ROUTE, "name": "tiny", "context_budget_tokens": 256}
-    with pytest.raises(ValueError) as err:
-        RoboEmotConfig(llm_routes=[ok, tight], persona=LONG)
-    assert "'tiny'" in str(err.value) and "'ok'" not in str(err.value)
-    RoboEmotConfig(llm_routes=[ok], persona=LONG)
+    message = refused(llm_routes=[ok, tight], persona=LONG)
+    assert "'tiny'" in message and "'ok'" not in message
+    ConfigStack(app={"llm_routes": [ok], "persona": LONG})
 
 
 def test_the_turn_reserve_counts():
     need = system_tokens_worst_case(RoboEmotConfig(llm_routes=[ROUTE]))
     route = {**ROUTE, "context_budget_tokens": need + 300}
-    RoboEmotConfig(llm_routes=[route], conversation={"turn_reserve_tokens": 300})
-    with pytest.raises(ValueError, match="room for one turn"):
-        RoboEmotConfig(llm_routes=[route], conversation={"turn_reserve_tokens": 301})
+    ConfigStack(app={"llm_routes": [route], "conversation": {"turn_reserve_tokens": 300}})
+    assert "room for one turn" in refused(
+        llm_routes=[route], conversation={"turn_reserve_tokens": 301}
+    )
 
 
 def test_extra_safety_rules_and_summary_caps_count_toward_the_budget():
     route = {**ROUTE, "context_budget_tokens": 1500}
-    RoboEmotConfig(llm_routes=[route])
-    with pytest.raises(ValueError, match="'lan'"):
-        RoboEmotConfig(llm_routes=[route], safety={"extra_prompt_rules": ["r" * 400] * 12})
-    with pytest.raises(ValueError, match="'lan'"):
-        RoboEmotConfig(
-            llm_routes=[route],
-            conversation={"profile_summary_max_chars": 4000, "scene_summary_max_chars": 4000},
-        )
+    ConfigStack(app={"llm_routes": [route]})
+    assert "'lan'" in refused(llm_routes=[route], safety={"extra_prompt_rules": ["r" * 400] * 12})
+    assert "'lan'" in refused(
+        llm_routes=[route],
+        conversation={"profile_summary_max_chars": 4000, "scene_summary_max_chars": 4000},
+    )
 
 
 def test_the_worst_register_is_checked_not_the_active_one():
     route = {**ROUTE, "context_budget_tokens": 800}
-    RoboEmotConfig(llm_routes=[route])
-    with pytest.raises(ValueError, match="'lan'"):
-        RoboEmotConfig(llm_routes=[route], register={"child": {"persona_fragment": "f" * 3000}})
+    ConfigStack(app={"llm_routes": [route]})
+    long_fragment = {"child": {"persona_fragment": "f" * 300}}
+    assert "'lan'" in refused(
+        llm_routes=[{**route, "context_budget_tokens": 600}], register=long_fragment
+    )
 
 
 def test_no_routes_means_nothing_to_check():
-    RoboEmotConfig(
-        persona={"prompt": "p" * 4000, "prompt_max_chars": 4000},
-        conversation={"turn_reserve_tokens": 8192},
-    )
+    ConfigStack(app={"persona": {"prompt": "p" * 4000, "prompt_max_chars": 4000}})
 
 
 def test_a_hot_reload_with_a_too_small_budget_is_refused_and_the_old_config_stays():
@@ -222,6 +274,54 @@ def test_a_hot_reload_with_a_too_small_budget_is_refused_and_the_old_config_stay
     with pytest.raises(ConfigError, match="llm route 'lan'"):
         stack.set("llm_routes", [{**ROUTE, "context_budget_tokens": 256}], layer="app")
     assert stack.effective().llm_routes[0].context_budget_tokens == 8192
+
+
+def test_a_reloaded_file_with_a_too_small_budget_is_refused(tmp_path):
+    path = tmp_path / "app.yaml"
+    path.write_text(yaml.safe_dump({"llm_routes": [ROUTE]}))
+    stack = ConfigStack.from_files(app=path)
+    path.write_text(yaml.safe_dump({"llm_routes": [{**ROUTE, "context_budget_tokens": 256}]}))
+    os.utime(path, (time.time() + 5, time.time() + 5))
+    stack.poll()
+    assert "llm route 'lan'" in (stack.last_error or "")
+    assert stack.effective().llm_routes[0].context_budget_tokens == 8192
+
+
+def test_effective_does_not_run_the_budget_check(monkeypatch):
+    stack = ConfigStack(app={"llm_routes": [ROUTE]})
+    calls = []
+    monkeypatch.setattr(prompt, "check_route_budgets", lambda cfg: calls.append(cfg))
+    stack.effective()
+    stack.effective(person={"register": {"adult": {"speech_rate": 1.1}}})
+    assert calls == []
+
+
+def test_a_long_person_fragment_is_dropped_and_lookups_still_work():
+    stack = ConfigStack(app={"llm_routes": [ROUTE]})
+    person = {"register": {"adult": {"persona_fragment": "f" * 40_000}}}
+    cfg = stack.effective(person=person)
+    assert len(cfg.register.adult.persona_fragment) <= cfg.register.persona_fragment_max_chars
+    assert any(e.key == "dropped" and "persona_fragment" in str(e.new) for e in stack.audit)
+    ok = stack.effective(person={"register": {"adult": {"persona_fragment": "Calm."}}})
+    assert ok.register.adult.persona_fragment == "Calm."
+
+
+def test_a_person_cannot_raise_the_fragment_cap():
+    stack = ConfigStack()
+    person = {
+        "register": {"persona_fragment_max_chars": 2000, "adult": {"persona_fragment": "f" * 900}}
+    }
+    cfg = stack.effective(person=person)
+    assert cfg.register.persona_fragment_max_chars == 300
+    assert cfg.register.adult.persona_fragment != "f" * 900
+
+
+def test_the_fragment_cap_is_enforced_in_the_config():
+    with pytest.raises(ValueError, match="register.child.persona_fragment has 301"):
+        RoboEmotConfig(register={"child": {"persona_fragment": "f" * 301}})
+    RoboEmotConfig(
+        register={"child": {"persona_fragment": "f" * 301}, "persona_fragment_max_chars": 400}
+    )
 
 
 def test_budget_params_have_defaults_and_ranges():

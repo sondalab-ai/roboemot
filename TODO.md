@@ -22,7 +22,7 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       kept, shutdown cancels a request in flight). `RoboEmotApp` creates it with the shared
       `NetworkMonitor` (`make_router` is overridable). The `TraitCache` is
       `<data folder>/llm_traits.json` (`paths.traits_cache_path`), removed by uninstall with the
-      folder (SPEC 4A, Installer; `test_install_wizard.py`). Tests: `test_traits_worker.py`,
+      folder when the installer created it (SPEC 4A, Installer; `test_install_wizard.py`). Tests: `test_traits_worker.py`,
       `test_app_llm_traits.py`. Open: the `NetworkMonitor` still watches the routes it was built
       with, so a route added by hot reload is not probed until restart.
 - [x] Per-route history trimming (SPEC 8, Conversation state). Done: `llm_routes[].context_budget_tokens`
@@ -30,3 +30,6 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       oldest first, and the router applies it per route; load-time rejection names the route
       (`roboemot.llm.prompt`, `test_llm_history.py`). Not done: a caller that builds the history
       (the conversation pipeline, M3) and the `conversation.history_turns` cap.
+- [ ] Secret store for `${secret:name}` route keys (SPEC 8: stored encrypted on the robot). The
+      app's `make_router` has no resolver, so such routes send an empty key; the app logs a
+      warning at startup for each one.

@@ -183,7 +183,9 @@ class Router:
         ends early (barge-in, timeout, error)."""
         messages, dropped = trim_history(messages, route.context_budget_tokens)
         if dropped:
-            log.info("llm route %s: dropped %d oldest turns to fit the budget", route.name, dropped)
+            log.debug(
+                "llm route %s: dropped %d oldest turns to fit the budget", route.name, dropped
+            )
         loop = asyncio.get_running_loop()
         client = self._client(route)  # not timed: the first one pays openai's lazy imports
         deadline = loop.time() + route.first_token_timeout_s

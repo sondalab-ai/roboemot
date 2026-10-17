@@ -616,15 +616,33 @@ def test_uninstall_removes_the_data_folder_and_the_parents_it_created(offline, r
     assert f"rm -rf {DATA}" in robot.commands
 
 
-def test_uninstall_removes_the_persona_trait_cache_with_the_data_folder(offline, robot, daemon):
+def robot_cache_path(monkeypatch) -> str:
+    """Where the app code puts the trait cache for the robot user (default data folder)."""
+    monkeypatch.delenv(paths.ENV_DIR, raising=False)
+    monkeypatch.setattr(Path, "home", lambda: Path(HOME))
+    return str(paths.traits_cache_path())
+
+
+def test_uninstall_removes_the_persona_trait_cache_with_the_data_folder(
+    offline, robot, daemon, monkeypatch
+):
     before = snapshot(robot, daemon)
     install()
-    cache = f"{DATA}/{paths.TRAITS_CACHE_FILE}"  # written by the app (roboemot.paths)
+    cache = robot_cache_path(monkeypatch)
+    assert cache.startswith(DATA + "/")  # the app writes inside the folder the installer records
     robot.dirs.add(cache)
-    assert paths.traits_cache_path().parent == paths.data_path()
     uninstall()
     assert cache not in robot.dirs
     assert snapshot(robot, daemon) == before
+
+
+def test_a_trait_cache_in_a_preexisting_data_folder_is_left(offline, robot, daemon, monkeypatch):
+    robot.dirs.add(DATA)
+    install()
+    cache = robot_cache_path(monkeypatch)
+    robot.dirs.add(cache)
+    uninstall()
+    assert cache in robot.dirs
 
 
 def test_uninstall_keeps_parents_that_are_not_empty(offline, robot, daemon):

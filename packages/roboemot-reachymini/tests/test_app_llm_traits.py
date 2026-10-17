@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 
 import httpx
@@ -165,6 +166,39 @@ def test_the_router_shares_the_apps_network_monitor(data):  # noqa: F811
     try:
         assert wait_for(lambda: rated(app))
         assert app.monitor is not None and app.traits_worker.router.monitor is app.monitor
+    finally:
+        stop.set()
+        thread.join(15)
+    assert not errors
+
+
+def test_a_secret_reference_without_a_secret_store_warns_once_at_startup(data, caplog):  # noqa: F811
+    configure(data, None)
+    path = data / "app.yaml"
+    cfg = yaml.safe_load(path.read_text())
+    cfg["llm_routes"] = [{**ROUTE, "api_key": "${secret:cloud_key}"}, {**ROUTE, "name": "b"}]
+    path.write_text(yaml.safe_dump(cfg))
+    app = app_with(FakeRoute())
+    with caplog.at_level(logging.WARNING, logger=app_module.log.name):
+        stop, thread, errors = start(app)
+        try:
+            assert wait_for(lambda: app.diagnostics is not None)
+        finally:
+            stop.set()
+            thread.join(15)
+    warned = [r.getMessage() for r in caplog.records if "secret reference" in r.getMessage()]
+    assert len(warned) == 1 and "lan" in warned[0] and "cloud_key" not in warned[0]
+    assert not errors
+
+
+def test_the_data_folder_is_private_when_the_app_creates_it(data):  # noqa: F811
+    configure(data, "llm")
+    assert not paths.data_path().exists()
+    app = app_with(FakeRoute())
+    stop, thread, errors = start(app)
+    try:
+        assert wait_for(lambda: rated(app))
+        assert paths.data_path().stat().st_mode & 0o777 == 0o700
     finally:
         stop.set()
         thread.join(15)
