@@ -578,6 +578,8 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         )
         listener = self.voice_listener = voice_pipeline[0] if voice_pipeline else None
         voice_close = voice_pipeline[1] if voice_pipeline else None
+        if cfg.voice.enabled and listener is None:
+            audio.set_voice(False)  # no consumer: the hub must not queue audio for nobody
         affect = runner.engine
         self.diagnostics = Diagnostics().add(
             *local_sources(process_pid=os.getpid()),
@@ -660,7 +662,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 cleanup.callback(self.autoenroll.flush)
             cleanup.callback(perception.stop)
             perception.start()
-            if reflex_audio or cfg.voice.enabled:
+            if reflex_audio or listener is not None:
                 cleanup.callback(audio.stop)  # before the SDK client goes away
                 audio.start()  # degrades to "unavailable" in the debug report without a mic
             if speaker is not None:

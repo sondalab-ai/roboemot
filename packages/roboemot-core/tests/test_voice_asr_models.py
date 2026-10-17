@@ -128,6 +128,17 @@ def test_asr_transcript_and_fast_path_before_the_endpoint(
         )
 
 
+def test_asr_wake_phrases_are_in_the_vocabulary(vosk_asr, models):
+    """`reachy` is out of vocabulary in both small models, so the wake phrases use common words."""
+    vosk_asr.load(CFG.voice.asr.models)
+    for language, ks in CFG.voice.keywords.items():
+        model = vosk_asr._models[language]
+        for phrase in ks.wake_phrases:
+            for word in phrase.split():
+                assert model.vosk_model_find_word(word) >= 0, f"{language}: {word!r} not in vocab"
+        assert model.vosk_model_find_word(CFG.voice.wake_word) == -1
+
+
 def test_asr_wake_word_alias_addresses_a_stranger(models, vosk_asr):
     (u,), _, _ = run(models, vosk_asr, "it_greeting_name", "it")
     assert u.wake_word and u.addressed

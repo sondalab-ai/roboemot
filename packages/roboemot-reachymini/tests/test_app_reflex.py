@@ -126,7 +126,15 @@ def startles(app) -> int:
     return app.reflexes.snapshot()["rules"]["startle-loud"]["fired"]
 
 
-def test_the_hub_starts_for_voice_alone_and_the_reflex_sink_stays_detached(data):  # noqa: F811
+def test_the_hub_starts_for_voice_alone_and_the_reflex_sink_stays_detached(
+    data,  # noqa: F811
+    monkeypatch,
+):
+    from test_app_voice import FakeASR, voice_module
+
+    monkeypatch.setattr(voice_module.voice_models, "model_file", lambda root, name: name)
+    monkeypatch.setattr(voice_module, "SileroVAD", lambda path, threads: _Quiet())
+    monkeypatch.setattr(voice_module, "VoskASR", FakeASR)
     enable(data, VOICE_YAML + "reflexes:\n  audio:\n    enabled: false\n")
     app = new_app()
     scripted = ScriptedMini()
@@ -135,7 +143,7 @@ def test_the_hub_starts_for_voice_alone_and_the_reflex_sink_stays_detached(data)
         assert wait_for(lambda: app.audio is not None and app.speaker is not None)
         assert wait_for(lambda: (app.audio.snapshot()["voice"] or {}).get("frames", 0) > 1600)
         assert app.audio.snapshot()["state"] == "running"
-        assert app.audio.read(timeout=1.0).rate_hz == 16000
+        assert app.audio.snapshot()["voice"]["rate_hz"] == 16000
         scripted.bang.set()
         assert wait_for(lambda: not scripted.bang.is_set())  # the loud chunk was read ...
         time.sleep(0.2)
@@ -277,3 +285,15 @@ def test_voice_builds_a_speech_output_that_plays_through_the_speaker(data):  # n
         stop.set()
         thread.join(timeout=10)
     assert not errors and not thread.is_alive()
+
+
+class _Quiet:
+    """A VAD that never hears speech (the listener runs, the hub counts frames)."""
+
+    rate_hz, frame_samples = 16000, 512
+
+    def speech_prob(self, frame):
+        return 0.0
+
+    def reset(self):
+        return None

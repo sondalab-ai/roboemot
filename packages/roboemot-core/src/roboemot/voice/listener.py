@@ -99,6 +99,8 @@ class VoiceListener:
         bus: Bus | None = None,
         *,
         speaker_language: Callable[[], str | None] = lambda: None,
+        speaker_id: Callable[[], str | None] = lambda: None,
+        on_speaking_chunk: Callable[[VoiceChunkLike], None] | None = None,
         enrolled_in_view: Callable[[float], bool] = lambda now: False,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -110,14 +112,18 @@ class VoiceListener:
         self._on_utterance = on_utterance
         self._bus = bus
         self._speaker_language = speaker_language
+        self._speaker_id = speaker_id
+        self._on_speaking_chunk = on_speaking_chunk
         self._enrolled_in_view = enrolled_in_view
         self._clock = clock
-        self._gate = WakeGate("always", 0.0)
+        self._gate = WakeGate("always", 0.0)  # configured by apply_config
         self.apply_config(cfg)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._counts = {"utterances": 0, "empty": 0, "gaps": 0, "dropped_speaking": 0, "errors": 0}
+        # Written by the listener thread, read by snapshot(): single-word stores, atomic in
+        # CPython, so no lock; the counters have their own.
         self._active = False
         self._muted = False
         self._state = "off"
@@ -128,7 +134,8 @@ class VoiceListener:
         """Hot reload: keyword lists, wake policy and window, default language."""
         self._cfg = cfg
         self._fast.apply_config(cfg.voice)
-        self._gate.apply(cfg.voice.wake_word_policy, cfg.voice.fastpath.addressed_window_s)
+        fp = cfg.voice.fastpath
+        self._gate.apply(cfg.voice.wake_word_policy, fp.addressed_window_s, fp.window_max_s)
 
     # ---- lifecycle
 
@@ -154,16 +161,26 @@ class VoiceListener:
         with self._lock:
             snap: dict[str, Any] = {"state": self._state, **self._counts}
         snap["latency"] = self._fast.stats.snapshot()
+        snap["wake"] = self._gate.snapshot(self._clock())
         return snap
 
     def _run(self) -> None:
+        models = list(self._cfg.voice.asr.models)
+        primary = resolve_language(models, None, self._cfg.conversation.language)
         try:
-            self._asr.load(self._cfg.voice.asr.models)
+            self._asr.load([primary])
         except Exception as exc:
             self._state = "unavailable"
             log.warning("voice listener: models: %s", type(exc).__name__)
+            self._discard()
             return
         self._state = "running"
+        for language in models:  # the others while already listening; utterances before that
+            if language != primary and not self._stop.is_set():  # use the languages loaded so far
+                try:
+                    self._asr.load([language])
+                except Exception as exc:
+                    log.warning("voice listener: model %s: %s", language, type(exc).__name__)
         while not self._stop.is_set():
             chunk = self._source(POLL_S)
             if chunk is None:
@@ -177,6 +194,11 @@ class VoiceListener:
                 if name != self._last_error:
                     self._last_error = name
                     log.warning("voice listener: %s", name)
+
+    def _discard(self) -> None:
+        """Without a working recognizer keep draining the hub's queue so it never backs up."""
+        while not self._stop.is_set():
+            self._source(POLL_S)
 
     def _count(self, key: str) -> None:
         with self._lock:
@@ -202,6 +224,11 @@ class VoiceListener:
                 self._muted = True
                 self._abort()
             self._count("dropped_speaking")
+            if self._on_speaking_chunk is not None:
+                try:
+                    self._on_speaking_chunk(chunk)
+                except Exception as exc:
+                    log.warning("voice listener: speaking-chunk hook: %s", type(exc).__name__)
             return
         self._muted = False
         buffered: list[np.ndarray] = []
@@ -228,13 +255,14 @@ class VoiceListener:
     # ---- utterance edges
 
     def _begin(self, ev: SpeechStart, audio_end: float) -> None:
-        models = self._cfg.voice.asr.models
         try:
             speaker = self._speaker_language()
         except Exception:
             speaker = None
-        self._language = resolve_language(models, speaker, self._cfg.conversation.language)
-        self._fast.begin(audio_end, self._language)
+        self._language = resolve_language(
+            self._asr.languages, speaker, self._cfg.conversation.language
+        )
+        self._fast.begin(ev.stamp, audio_end, self._language)
         self._asr.start(self._language)
         self._active = True
         self._partial(self._asr.accept(ev.pre_roll), audio_end)
@@ -263,7 +291,9 @@ class VoiceListener:
             enrolled_in_view=self._enrolled(ev.start_stamp),
             start=ev.start_stamp,
             last_speech=ev.last_speech_stamp,
+            speaker=self._speaker(),
         )
+        self._fast.impulses(fast, addressed)
         utterance = Utterance(
             text,
             self._language,
@@ -282,6 +312,12 @@ class VoiceListener:
             self._on_utterance(utterance)
         except Exception as exc:
             log.warning("voice listener: utterance consumer raised %s", type(exc).__name__)
+
+    def _speaker(self) -> str | None:
+        try:
+            return self._speaker_id()
+        except Exception:
+            return None
 
     def _enrolled(self, stamp: float) -> bool:
         try:

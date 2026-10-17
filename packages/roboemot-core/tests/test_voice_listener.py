@@ -33,14 +33,21 @@ class FakeASR:
     def __init__(self, script, final=None):
         self.script, self.final_text = list(script), final
         self.loaded: list[str] = []
+        self.languages_loaded: list[str] | None = None  # None: whatever load() was asked for
         self.started: list[str] = []
+        self.load_calls: list[list[str]] = []
         self.accepted = 0  # samples
         self.calls = 0
         self.resets = 0
         self.last = ""
 
+    @property
+    def languages(self):
+        return self.loaded if self.languages_loaded is None else self.languages_loaded
+
     def load(self, languages):
-        self.loaded = list(languages)
+        self.load_calls.append(list(languages))
+        self.loaded += [x for x in languages if x not in self.loaded]
 
     def start(self, language):
         self.started.append(language)
@@ -92,6 +99,7 @@ class Rig:
         self.bus.subscribe("percept.utterance", lambda m: self.infos.append(m.payload))
         self.now = T0
         self.asr = FakeASR(script, final)
+        self.asr.loaded = list(self.cfg.voice.asr.models)  # as after start()
         self.speech = SpeechActivity(self.cfg.voice.echo_tail_ms)
         self.selector = Selector()
 
@@ -236,14 +244,15 @@ def test_resolve_language_rule():
         resolve_language([], "en", "it")
 
 
-def test_start_loads_every_configured_model():
-    r = Rig(["x"])
+def test_start_loads_the_primary_language_first_then_the_others():
+    r = Rig(["x"], cfg=RoboEmotConfig.model_validate({"conversation": {"language": "en"}}))
+    r.asr.loaded = []
     r.listener.start()
     deadline = time.monotonic() + 5
     while r.listener.snapshot()["state"] != "running" and time.monotonic() < deadline:
         time.sleep(0.01)
     r.listener.stop()
-    assert r.asr.loaded == ["it", "en"]
+    assert r.asr.load_calls == [["en"], ["it"]]
 
 
 def test_a_model_that_fails_to_load_leaves_the_listener_unavailable(caplog):
@@ -292,11 +301,11 @@ def test_speech_heard_and_every_event_is_a_known_appraisal_event():
 
 
 def test_loud_and_fast_prosody_impulses():
-    loud = Rig(["uno due tre quattro cinque sei sette otto"])
+    loud = Rig(["uno due tre quattro cinque sei sette otto"], enrolled_in_view=lambda now: True)
     loud.feed(voice(amp=0.6, seconds=1.5))
     loud.feed(silence(1.0))
     assert "speech.loud" in names(loud) and "speech.fast" in names(loud)
-    quiet = Rig(["uno due tre quattro cinque sei sette otto"])
+    quiet = Rig(["uno due tre quattro cinque sei sette otto"], enrolled_in_view=lambda now: True)
     quiet.feed(voice(amp=0.12, seconds=4.0))
     quiet.feed(silence(1.0))
     assert "speech.loud" not in names(quiet) and "speech.fast" not in names(quiet)
@@ -438,3 +447,111 @@ def test_latency_snapshot_has_the_slice_8_fields():
     )
     # final: the endpoint plus the frame of the last speech, as the fake clock sees it
     assert snap["latency"]["final_vs_last_speech"]["last_ms"] > 0
+
+
+# ---- review round: final text decides, wake phrases, windows, hooks
+
+
+def test_a_partial_hit_the_final_text_revises_away_does_not_address_or_wake():
+    r = Rig(["ciao reati", "ciao reati"], final="ciao rete")
+    r.say()
+    (u,) = r.utterances
+    assert "speech.name_called" in names(r)  # the early reaction happened ...
+    assert not u.wake_word and not u.addressed and "name" not in u.keywords  # ... the verdict not
+    assert r.infos[0].wake_word is False
+
+
+def test_wake_phrase_wakes_anywhere_in_a_long_final_text():
+    long_text = "oggi vorrei sapere ehi robot che tempo fa domani mattina in citta"
+    r = Rig(["oggi"], final=long_text)
+    r.say()
+    assert r.utterances[0].wake_word and r.utterances[0].addressed
+
+
+def test_alias_wakes_only_in_a_short_final_text():
+    news = "il comune di reati ha approvato oggi il nuovo bilancio"
+    r = Rig(["il"], final=news)
+    r.say()
+    assert "name" in r.utterances[0].keywords  # speech.name_called may fire ...
+    assert not r.utterances[0].wake_word and not r.utterances[0].addressed  # ... no wake
+    short = Rig(["reati"], final="ciao reati come stai")
+    short.say()
+    assert short.utterances[0].wake_word
+
+
+def test_unaddressed_speech_gives_no_prosody_impulse():
+    r = Rig(["uno due tre quattro cinque sei sette otto"])
+    r.feed(voice(amp=0.6, seconds=1.5))
+    r.feed(silence(1.0))
+    assert not r.utterances[0].addressed
+    assert "speech.loud" not in names(r) and "speech.fast" not in names(r)
+
+
+def test_loud_fast_addressed_speech_stays_below_saturation_for_a_minute():
+    cfg = RoboEmotConfig()
+    runner = AffectRunner(cfg.affect, cfg.appraisal, Bus(), 0.0)
+    t, nxt, peak = 0.0, 0.0, 0.0
+    while t < 60.0:
+        if t >= nxt:  # an utterance every 3 s, each loud and fast
+            for event in ("speech.heard", "speech.loud", "speech.fast"):
+                runner.on_event(event, t, {"language": "it"})
+            nxt += 3.0
+        peak = max(peak, runner.engine.update(t).arousal)
+        t += 0.1
+    # Measured 0.57 with the defaults (arousal 1.0 is the ceiling). 0.6 leaves some margin, and
+    # a rule change that doubles the impulses fails this: speaking at the robot must not pin it.
+    assert peak < 0.6
+
+
+def test_hot_reloaded_language_without_a_model_falls_back():
+    r = Rig(["x"], speaker_language=lambda: "en")
+    r.asr.languages_loaded = ["it"]  # en is configured but its model is not loaded
+    r.say()
+    assert r.asr.started == ["it"]
+
+
+def test_speaking_chunks_reach_the_barge_in_hook():
+    seen = []
+    r = Rig(["x"], on_speaking_chunk=seen.append)
+    r.speech.extend(r.t + 5.0)
+    r.say(1.0)
+    assert seen and r.asr.started == []
+    r.listener._on_speaking_chunk = lambda c: 1 / 0
+    r.say(0.2, tail=False)  # a raising hook does not stop the listener
+
+
+def test_followup_window_is_capped_and_follows_the_same_person():
+    who = ["p-1"]
+    r = Rig(["ciao reati"], final="ciao reati", speaker_id=lambda: who[0])
+    r.say()
+    assert r.utterances[-1].addressed
+    r.asr.script, r.asr.final_text = ["dimmi"], "dimmi"
+    who[0] = "p-2"
+    r.say()
+    assert not r.utterances[-1].addressed
+    who[0] = "p-1"
+    r.say()
+    assert r.utterances[-1].addressed
+    snap = r.listener.snapshot()["wake"]
+    assert snap["policy"] == "unless_enrolled_in_view" and "window_open" in snap
+
+
+def test_hint_records_both_lags():
+    r = Rig(["x"], bearing=lambda now: 0.1)
+    r.feed(voice(seconds=0.6))
+    snap = r.fast.stats.snapshot()
+    assert snap["hint_vs_speech_start"]["last_ms"] >= snap["hint_lag"]["last_ms"] >= 0
+
+
+def test_unavailable_models_drain_the_source(caplog):
+    r = Rig(["x"])
+    r.asr.load = lambda languages: (_ for _ in ()).throw(OSError("no model"))
+    reads = []
+    r.listener._source = lambda timeout: reads.append(timeout)
+    with caplog.at_level(logging.WARNING):
+        r.listener.start()
+        deadline = time.monotonic() + 5
+        while len(reads) < 3 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        r.listener.stop()
+    assert len(reads) >= 3 and r.listener.snapshot()["state"] == "unavailable"

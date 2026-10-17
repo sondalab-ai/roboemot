@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -46,6 +47,8 @@ class FakeASR:
 
     def __init__(self, paths, rate):
         self.paths = paths
+
+    languages = ["it", "en"]
 
     def load(self, languages):
         pass
@@ -168,3 +171,17 @@ def test_sound_bearing_is_rotated_into_the_base_frame_and_expires(fakes):
     az = fast._bearing(5.5)
     assert az == pytest.approx(0.5, abs=0.05)
     assert fast._bearing(5.0 + RoboEmotConfig().voice.fastpath.doa_max_age_ms / 1000 + 1) is None
+
+
+def test_without_a_listener_the_hub_queues_no_voice_audio(data):  # noqa: F811
+    enable(data, VOICE_YAML + "reflexes:\n  audio:\n    enabled: false\n")
+    app = app_module.RoboEmotApp.__new__(app_module.RoboEmotApp)
+    stop, thread, errors = run_app(app, ScriptedMini().mini)
+    try:
+        assert wait_for(lambda: app.audio is not None and app.voice_listener is None)
+        time.sleep(0.3)
+        assert app.audio.snapshot()["voice"] is None and app.audio.snapshot()["state"] == "off"
+    finally:
+        stop.set()
+        thread.join(timeout=10)
+    assert not errors

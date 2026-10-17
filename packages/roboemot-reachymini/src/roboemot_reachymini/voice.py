@@ -118,7 +118,15 @@ def build_listener(
             return None
         return value if isinstance(value, str) else None
 
+    def speaker_id() -> str | None:
+        """The attended person's registry id, when it is a known person (else undeterminable)."""
+        entry = attended_person()
+        return None if entry is None or entry.identity in ("", UNKNOWN_IDENTITY) else entry.identity
+
     def enrolled_in_view(now: float) -> bool:
+        # The policy default (SPEC 8 stage 2): any enrolled person in view drops the wake-word
+        # requirement for every voice, including a stranger's or a television's. Kept as
+        # specified; see the voice.wake_word_policy help for the consequence.
         stale = cfg.attention.stale_s
         return any(
             e.kind == "person"
@@ -144,6 +152,7 @@ def build_listener(
         on_utterance,
         bus,
         speaker_language=speaker_language,
+        speaker_id=speaker_id,
         enrolled_in_view=enrolled_in_view,
     )
     return listener, bearing.close

@@ -38,6 +38,11 @@ class ASRBackend(Protocol):
 
     rate_hz: int
 
+    @property
+    def languages(self) -> list[str]:
+        """Languages whose model is loaded now (what ``start`` can serve without loading)."""
+        ...
+
     def load(self, languages: Iterable[str]) -> None:
         """Load the models of ``languages`` now (raises when one is missing)."""
         ...
@@ -98,8 +103,8 @@ class VoskASR:
 
     @property
     def languages(self) -> list[str]:
-        """Languages with a configured model, in configuration order."""
-        return list(self._paths)
+        """Languages whose model is loaded, in load order."""
+        return list(self._models)
 
     def load(self, languages: Iterable[str]) -> None:
         for language in languages:
