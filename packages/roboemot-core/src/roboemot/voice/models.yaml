@@ -1,0 +1,70 @@
+# Voice model manifest (SPEC 8 stages 2, 3, 7). Same format and rules as vision/models.yaml:
+# nothing is committed or downloaded at import; `roboemot models fetch --voice` downloads into
+# the voice models folder (voice.models_dir) and verifies size and sha256. Every URL is pinned
+# to an exact release, tag or commit, and the digests were computed on the downloaded files.
+# `archive: zip` files are unpacked into the folder named by `path`; size_bytes and sha256 are
+# those of the zip, unpacked_bytes caps the unpacked total.
+# Licences: Silero VAD MIT; Vosk models Apache-2.0 (alphacephei.com/vosk/models). The Piper
+# voices are fine-tuned from the lessac voice and each MODEL_CARD only points at the dataset
+# ("License: See URL"), so the voice licence is the dataset's and was not independently verified
+# (it_IT-paola: huggingface.co/datasets/paolapersico1/Voice-Dataset-Italian; en_US-amy:
+# github.com/MycroftAI/mimic3-voices). The Piper engine is GPL-3.0 and runs as its own process.
+models:
+  - name: silero-vad
+    role: vad
+    licence: MIT
+    source: https://github.com/snakers4/silero-vad/tree/v5.1.2
+    notes: v5 interface (input 64 context + 512 samples at 16 kHz, state [2,1,128], sr)
+    files:
+      - path: silero/silero_vad_v5.1.2.onnx
+        url: https://raw.githubusercontent.com/snakers4/silero-vad/v5.1.2/src/silero_vad/data/silero_vad.onnx
+        size_bytes: 2327524
+        sha256: 2623a2953f6ff3d2c1e61740c6cdb7168133479b267dfef114a4a3cc5bdd788f
+  - name: vosk-small-it
+    role: asr_it
+    licence: Apache-2.0
+    source: https://alphacephei.com/vosk/models
+    files:
+      - path: vosk/vosk-model-small-it-0.22
+        url: https://alphacephei.com/vosk/models/vosk-model-small-it-0.22.zip
+        size_bytes: 49665141
+        sha256: 9ec65e75861d1c6c2e457cccd932705340dcdf233f5b239f00733b4de0bf3267
+        archive: zip
+        unpacked_bytes: 92000000
+  - name: vosk-small-en
+    role: asr_en
+    licence: Apache-2.0
+    source: https://alphacephei.com/vosk/models
+    files:
+      - path: vosk/vosk-model-small-en-us-0.15
+        url: https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
+        size_bytes: 41205931
+        sha256: 30f26242c4eb449f948e42cb302dd7a686cb29a3423a8367f99ff41780942498
+        archive: zip
+        unpacked_bytes: 71000000
+  - name: piper-it-paola
+    role: tts_it
+    licence: "dataset licence not stated in MODEL_CARD (see source)"
+    source: https://huggingface.co/rhasspy/piper-voices/tree/c10ece1aade47bb51c153c893d14e5bf8e5b7117/it/it_IT/paola/medium
+    files:
+      - path: piper/it_IT-paola-medium.onnx
+        url: https://huggingface.co/rhasspy/piper-voices/resolve/c10ece1aade47bb51c153c893d14e5bf8e5b7117/it/it_IT/paola/medium/it_IT-paola-medium.onnx
+        size_bytes: 63511038
+        sha256: 6fc918b5a0ea6137382833dddfa567bffbe6a5060c02043c87192ee59c04210c
+      - path: piper/it_IT-paola-medium.onnx.json
+        url: https://huggingface.co/rhasspy/piper-voices/resolve/c10ece1aade47bb51c153c893d14e5bf8e5b7117/it/it_IT/paola/medium/it_IT-paola-medium.onnx.json
+        size_bytes: 7099
+        sha256: aea19c0a7fce29fbc359b93f10e7902854401e4c95ae2ea328ae516b15d296cf
+  - name: piper-en-amy
+    role: tts_en
+    licence: "dataset licence not stated in MODEL_CARD (see source)"
+    source: https://huggingface.co/rhasspy/piper-voices/tree/c10ece1aade47bb51c153c893d14e5bf8e5b7117/en/en_US/amy/medium
+    files:
+      - path: piper/en_US-amy-medium.onnx
+        url: https://huggingface.co/rhasspy/piper-voices/resolve/c10ece1aade47bb51c153c893d14e5bf8e5b7117/en/en_US/amy/medium/en_US-amy-medium.onnx
+        size_bytes: 63201294
+        sha256: b3a6e47b57b8c7fbe6a0ce2518161a50f59a9cdd8a50835c02cb02bdd6206c18
+      - path: piper/en_US-amy-medium.onnx.json
+        url: https://huggingface.co/rhasspy/piper-voices/resolve/c10ece1aade47bb51c153c893d14e5bf8e5b7117/en/en_US/amy/medium/en_US-amy-medium.onnx.json
+        size_bytes: 4882
+        sha256: 95a23eb4d42909d38df73bb9ac7f45f597dbfcde2d1bf9526fdeaf5466977d77

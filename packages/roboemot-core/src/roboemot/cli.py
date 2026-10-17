@@ -83,22 +83,29 @@ def _debug(args: argparse.Namespace) -> int:
 
 
 def _models(args: argparse.Namespace) -> int:
-    """List the vision models and their state, or download them with sha256 verification."""
+    """List the vision and voice models and their state, or download them with sha256 checks."""
     from .vision import models
+    from .voice import models as voice_models
 
     cfg = _stack(args).effective()
-    root = models.models_dir(args.cache_dir or cfg.vision.models_dir, cfg.data_dir)
-    specs = models.load_manifest()
+    vision_root = models.models_dir(args.cache_dir or cfg.vision.models_dir, cfg.data_dir)
+    voice_root = voice_models.models_dir(args.voice_dir or cfg.voice.models_dir, cfg.data_dir)
+    groups = [
+        (models.load_manifest(), vision_root, models.MANIFEST),
+        (voice_models.load_manifest(), voice_root, voice_models.MANIFEST),
+    ]
     if args.action == "list":
-        for spec in specs.values():
-            state = models.status(spec, root, verify=args.verify)
-            print(f"{spec.name:16} {spec.role:20} {spec.licence:11} {state}")
-        print(f"folder: {root}")
+        for specs, root, _ in groups:
+            for spec in specs.values():
+                state = models.status(spec, root, verify=args.verify)
+                print(f"{spec.name:16} {spec.role:20} {spec.licence:11.11} {state}")
+            print(f"folder: {root}")
         legacy = models.legacy_dir()
-        if root != legacy and legacy.is_dir() and any(legacy.iterdir()):
+        if vision_root != legacy and legacy.is_dir() and any(legacy.iterdir()):
             print(
                 f"note: weights also exist in the old default folder {legacy}; move them to "
-                f"{root} or set ROBOEMOT_MODELS_DIR (the default moved under the data folder)"
+                f"{vision_root} or set ROBOEMOT_MODELS_DIR (the default moved under the data "
+                f"folder)"
             )
         return 0
     if args.action == "prune":
@@ -106,18 +113,32 @@ def _models(args: argparse.Namespace) -> int:
             raise ValueError(
                 "prune needs --sources (delete FP32 files whose INT8 files are verified)"
             )
-        removed = models.prune_sources(root)
+        removed = models.prune_sources(vision_root)
         for path in removed:
             print(f"deleted    {path}")
         print(f"{len(removed)} source file(s) deleted")
         return 0
-    names = list(specs) if args.all else args.names
-    if not names:
-        raise ValueError("name the models to fetch (see `roboemot models list`) or pass --all")
-
-    report = models.fetch(names, root, requantize=args.requantize)
-    for path, outcome in report.files.items():
-        print(f"{outcome:10} {root / path}")
+    wanted = set(args.names)
+    if args.all:
+        wanted |= {n for specs, _, _ in groups for n in specs}
+    if args.voice:
+        wanted |= set(groups[1][0])
+    if not wanted:
+        raise ValueError(
+            "name the models to fetch (see `roboemot models list`) or pass --all or --voice"
+        )
+    known = {n for specs, _, _ in groups for n in specs}
+    if wanted - known:
+        raise models.ModelError(
+            f"unknown model(s) {sorted(wanted - known)}; known: {sorted(known)}"
+        )
+    for specs, root, manifest in groups:
+        names = [n for n in specs if n in wanted]
+        if not names:
+            continue
+        report = models.fetch(names, root, requantize=args.requantize, manifest=manifest)
+        for path, outcome in report.files.items():
+            print(f"{outcome:10} {root / path}")
     return 0
 
 
@@ -152,14 +173,18 @@ def main(argv: list[str] | None = None) -> int:
     dbg.add_argument("--timeout", type=float, default=None, help="seconds per section")
     dbg.add_argument("--json", action="store_true")
 
-    mod = sub.add_parser("models", help="vision model files: list, fetch, prune (SPEC 5, 13)")
+    mod = sub.add_parser(
+        "models", help="vision and voice model files: list, fetch, prune (SPEC 5, 8, 13)"
+    )
     mod.add_argument("action", choices=["list", "fetch", "prune"])
     mod.add_argument("names", nargs="*", help="models to fetch (see `list`)")
     mod.add_argument(
         "--all",
         action="store_true",
-        help="fetch every model (about 0.8 GB, plus 0.17 GB of INT8 files made from it)",
+        help="fetch every vision and voice model (about 0.8 GB plus 0.17 GB of INT8 files made "
+        "from it, and about 0.3 GB of voice models)",
     )
+    mod.add_argument("--voice", action="store_true", help="fetch every voice model (about 0.3 GB)")
     mod.add_argument(
         "--requantize", action="store_true", help="fetch: rebuild INT8 files from the FP32 sources"
     )
@@ -170,6 +195,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     mod.add_argument(
         "--cache-dir", help="models folder (default: vision.models_dir, else the app data folder)"
+    )
+    mod.add_argument(
+        "--voice-dir",
+        help="voice models folder (default: voice.models_dir, else the app data folder)",
     )
     mod.add_argument("--verify", action="store_true", help="list: rehash the files (slow)")
     mod.add_argument("--app")

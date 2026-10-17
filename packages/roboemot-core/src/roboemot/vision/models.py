@@ -25,7 +25,16 @@ into the models folder only when asked (``roboemot models fetch``), never at imp
   re-quantizes only on ``requantize=True`` (``--requantize``), which needs the FP32 source again;
   a failed re-quantization leaves the old file and marker untouched.
 
-Downloaded files are only ever loaded as ONNX weights. The folder is ``--cache-dir``,
+- Archives (voice models, SPEC 8 stage 2): a file with ``archive: zip`` is downloaded and verified
+  like any other, then unpacked into a fresh folder next to its target and renamed into place;
+  ``path`` names the unpacked folder. Entries that are absolute, climb out with ``..``, are
+  symlinks or other non-regular files, or exceed ``unpacked_bytes`` in total reject the whole
+  archive (zip-slip, zip bombs). The folder's marker (``<folder>.verified``) holds the archive
+  sha256 and is written last; the archive itself is not kept. The voice registry lives in
+  ``roboemot.voice.models`` and reuses this code.
+
+Downloaded files are only ever loaded as ONNX weights (or, for archives, read by Vosk).
+The folder is ``--cache-dir``,
 ``vision.models_dir`` or, by default, ``models/`` in the app data folder (``roboemot.paths``,
 ``~/.local/share/roboemot``), so uninstalling the app removes the models with it.
 """
@@ -35,6 +44,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
+import stat
+import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import cache
@@ -56,6 +68,8 @@ PRIVATE_DIR_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
 MARKER_SUFFIX = ".verified"
 PART_SUFFIX = ".part"
+EXTRACT_SUFFIX = ".extract"
+ZIP_MODE_SHIFT = 16  # a zip entry keeps its Unix st_mode in the high 16 bits of external_attr
 
 
 class ModelError(RuntimeError):
@@ -78,6 +92,8 @@ class ModelFile(_Strict):
 
     A derived file has ``quantize`` instead of ``url`` and ``sha256``: its digest depends on the
     ONNX Runtime version, so it is recorded in the marker when the file is produced, not pinned.
+    An archive (``archive: zip``) has ``url``, ``sha256`` and ``size_bytes`` of the zip itself;
+    ``path`` is the folder it unpacks to and ``unpacked_bytes`` caps the total unpacked size.
     """
 
     path: str
@@ -85,9 +101,15 @@ class ModelFile(_Strict):
     sha256: str | None = None
     size_bytes: int | None = None
     quantize: Quantize | None = None
+    archive: Literal["zip"] | None = None
+    unpacked_bytes: int | None = None
 
     @model_validator(mode="after")
     def _one_origin(self) -> ModelFile:
+        if (self.archive is None) != (self.unpacked_bytes is None):
+            raise ValueError(f"{self.path}: archive and unpacked_bytes go together")
+        if self.archive is not None and self.quantize is not None:
+            raise ValueError(f"{self.path}: an archive cannot also be quantized")
         downloaded = (self.url is not None, self.sha256 is not None)
         if self.quantize is None and not all(downloaded):
             raise ValueError(f"{self.path}: give url and sha256 together, or quantize")
@@ -238,6 +260,12 @@ def check_file(root: Path, file: ModelFile) -> Path:
         raise ModelError(
             f"{file.path}: not verified in {root}; run `roboemot models fetch` for it"
         ) from exc
+    if file.archive is not None:
+        if not target.is_dir() or marker.get("sha256") != file.sha256:
+            raise ModelError(
+                f"{file.path}: changed since it was verified; run `roboemot models fetch`"
+            )
+        return target
     source = _source_of(file)
     if source is None:
         digest_ok = marker.get("sha256") == file.sha256
@@ -265,7 +293,8 @@ def status(spec: ModelSpec, root: Path, *, verify: bool = False) -> str:
     ``fetch --requantize`` rebuilds it.
 
     ``missing`` means none of the files exists. By default a file is trusted when its marker
-    matches (cheap); ``verify=True`` rehashes every file (slow for the 343 MB models).
+    matches (cheap); ``verify=True`` rehashes every file (slow for the 343 MB models). An
+    unpacked archive has no single file to rehash, so only its marker is checked.
     """
     targets = [_target(root, f) for f in spec.files]
     if not any(t.exists() for t in targets):
@@ -273,7 +302,8 @@ def status(spec: ModelSpec, root: Path, *, verify: bool = False) -> str:
     if not all(t.exists() for t in targets):
         return "corrupt"
     if verify and any(
-        sha256_of(t) != _expected_sha(root, f) for t, f in zip(targets, spec.files, strict=True)
+        f.archive is None and sha256_of(t) != _expected_sha(root, f)
+        for t, f in zip(targets, spec.files, strict=True)
     ):
         return "corrupt"
     if not all(_marked(root, f) for f in spec.files):
@@ -316,7 +346,7 @@ class FetchReport:
 def _make_dirs(root: Path, target: Path) -> None:
     missing = []
     d = target.parent
-    while d != root.parent and not d.exists():
+    while not d.exists():
         missing.append(d)
         d = d.parent
     try:
@@ -369,6 +399,8 @@ def fetch_file(file: ModelFile, root: Path, client: httpx.Client) -> str:
     if not file.url.startswith("https://"):
         raise ModelError(f"{file.path}: only https URLs are fetched")
     target = _target(root, file)
+    if file.archive is not None:
+        return _fetch_archive(file, root, client, target)
     try:
         if target.exists() and sha256_of(target) == file.sha256:
             if not _marked(root, file):
@@ -385,6 +417,97 @@ def fetch_file(file: ModelFile, root: Path, client: httpx.Client) -> str:
         finally:
             part.unlink(missing_ok=True)
         _write_marker(target, file.sha256)
+    except httpx.HTTPError as exc:
+        raise ModelError(f"{file.path}: download failed ({type(exc).__name__})") from exc
+    except OSError as exc:
+        raise ModelError(f"{file.path}: {exc.strerror or type(exc).__name__}") from exc
+    return "downloaded"
+
+
+def _unpack_zip(archive: Path, dest: Path, file: ModelFile) -> str:
+    """Unpack ``archive`` into the empty folder ``dest``; returns its single top-level folder.
+
+    Every entry is checked before anything is written: no absolute or drive paths, no ``..``,
+    no symlinks or other special files, one top-level folder, and the declared sizes must sum to
+    at most ``unpacked_bytes``. The bytes actually written are counted too, since the declared
+    sizes are only claims. Files are created 0o600, folders 0o700.
+    """
+    assert file.unpacked_bytes is not None
+    try:
+        zf = zipfile.ZipFile(archive)
+    except zipfile.BadZipFile as exc:
+        raise ModelError(f"{file.path}: not a zip archive") from exc
+    with zf:
+        entries = zf.infolist()
+        tops: set[str] = set()
+        for info in entries:
+            name = info.filename
+            parts = name.split("/")
+            if name.startswith("/") or "\\" in name or ":" in parts[0] or ".." in parts:
+                raise ModelError(f"{file.path}: unsafe path in archive")
+            kind = stat.S_IFMT(info.external_attr >> ZIP_MODE_SHIFT)
+            if kind and kind not in (stat.S_IFREG, stat.S_IFDIR):
+                raise ModelError(f"{file.path}: archive holds a link or special file")
+            tops.add(parts[0])
+        if len(tops) != 1 or "" in tops:
+            raise ModelError(f"{file.path}: archive must hold exactly one top-level folder")
+        if sum(i.file_size for i in entries) > file.unpacked_bytes:
+            raise ModelError(f"{file.path}: unpacked size above the manifest limit")
+        written = 0
+        for info in entries:
+            out = dest / info.filename
+            if not out.resolve().is_relative_to(dest.resolve()):
+                raise ModelError(f"{file.path}: unsafe path in archive")
+            if info.is_dir():
+                out.mkdir(mode=PRIVATE_DIR_MODE, parents=True, exist_ok=True)
+                continue
+            out.parent.mkdir(mode=PRIVATE_DIR_MODE, parents=True, exist_ok=True)
+            fd = os.open(
+                out, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, PRIVATE_FILE_MODE
+            )
+            with zf.open(info) as src, os.fdopen(fd, "wb") as dst:
+                while chunk := src.read(CHUNK_BYTES):
+                    written += len(chunk)
+                    if written > file.unpacked_bytes:
+                        raise ModelError(f"{file.path}: unpacked size above the manifest limit")
+                    dst.write(chunk)
+    return tops.pop()
+
+
+def _fetch_archive(file: ModelFile, root: Path, client: httpx.Client, target: Path) -> str:
+    """Download, verify and unpack a zip; returns ``present`` or ``downloaded``.
+
+    The folder is marked with the archive sha256 only after unpacking succeeded. A failure at
+    any step removes the partial download and the half-unpacked folder and leaves an existing
+    folder as it was.
+    """
+    assert file.url is not None and file.sha256 is not None
+    if target.is_dir() and _marked(root, file):
+        return "present"
+    scratch = target.with_name(target.name + EXTRACT_SUFFIX)
+    part = target.with_name(target.name + ".zip" + PART_SUFFIX)
+    try:
+        _make_dirs(root, target)
+        part.unlink(missing_ok=True)
+        shutil.rmtree(scratch, ignore_errors=True)
+        try:
+            digest = _stream(client, file.url, file, part)
+            if digest != file.sha256:
+                raise ModelError(f"{file.path}: sha256 mismatch, download discarded")
+            scratch.mkdir(mode=PRIVATE_DIR_MODE)
+            top = _unpack_zip(part, scratch, file)
+            _marker(target).unlink(missing_ok=True)
+            shutil.rmtree(target, ignore_errors=True)
+            (scratch / top).replace(target)
+        finally:
+            part.unlink(missing_ok=True)
+            shutil.rmtree(scratch, ignore_errors=True)
+        marker = _marker(target)
+        fd = os.open(
+            marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, PRIVATE_FILE_MODE
+        )
+        with os.fdopen(fd, "w") as out:
+            json.dump({"sha256": file.sha256, "archive": file.archive}, out)
     except httpx.HTTPError as exc:
         raise ModelError(f"{file.path}: download failed ({type(exc).__name__})") from exc
     except OSError as exc:
@@ -488,6 +611,7 @@ def fetch(
     client: httpx.Client | None = None,
     quantizer: Quantizer = quantize_dynamic_file,
     requantize: bool = False,
+    manifest: Path = MANIFEST,
 ) -> FetchReport:
     """Fetch the named models (all files of each) into ``root``.
 
@@ -496,9 +620,10 @@ def fetch(
     then derived files are produced. A derived file that is already verified is left alone,
     and its source is not even needed, unless ``requantize`` asks to rebuild it. Pass ``client``
     to control transport (tests use ``httpx.MockTransport``) and ``quantizer`` to replace the
-    ONNX Runtime quantization. Never called at import time.
+    ONNX Runtime quantization. ``manifest`` selects the registry (the voice one by
+    ``roboemot.voice.models``). Never called at import time.
     """
-    specs = load_manifest()
+    specs = load_manifest(manifest)
     unknown = [n for n in names if n not in specs]
     if unknown:
         raise ModelError(f"unknown model(s) {unknown}; known: {sorted(specs)}")
