@@ -88,9 +88,8 @@ def test_the_robot_does_not_turn_toward_a_voice_while_the_minor_flag_is_on(data)
     app = new_app()
     stop, thread, errors = run_app(app, fake_mini())
     try:
-        assert wait_for(lambda: app.reflexes is not None and app.bus is not None)
+        assert wait_for(lambda: app.minor_presence is not None and app.diagnostics is not None)
         assert app.minor_present  # starts on, fails safe (SPEC 12) ...
-        assert wait_for(lambda: app.diagnostics is not None)
 
         def loop_flag() -> bool:
             motion = app.diagnostics.report()["sections"]["roboemot.motion"]["data"]
