@@ -23,6 +23,9 @@ deterministic; ``LatestFrameRunner`` drives it live. Per frame, when the governo
    ``vision.animal_categories`` and ``vision.object_categories`` map detector classes to the
    kind; any other class, ``person`` included, is ignored.
 
+``light_tap`` (optional) receives each frame's image before anything else, for the circadian
+light sampler (SPEC 7A); it measures and keeps only numbers, never the image.
+
 ``face_tap`` (optional) is called with each processed frame and its visible face tracks, on
 the vision thread, for the enrollment service (SPEC 6); it must not keep the image.
 
@@ -74,6 +77,7 @@ UNKNOWN = "unknown"
 NO_ESTIMATE = Estimate(UNKNOWN, "none")
 CameraProvider = Callable[[int, int], CameraModel | None]
 FaceTap = Callable[[Frame, list[Track]], None]
+LightTap = Callable[[np.ndarray], object]
 
 
 @dataclass
@@ -140,6 +144,7 @@ class VisionPipeline:
         self.camera_model = camera_model
         self.world = world or WorldConfig()
         self.face_tap: FaceTap | None = None
+        self.light_tap: LightTap | None = None
         self.governor = governor or RateGovernor(cfg.rates)
         self.face_detector = face_detector
         self.face_embedder = face_embedder
@@ -172,6 +177,7 @@ class VisionPipeline:
         stage raises: ``LatestFrameRunner`` catches it per frame.
         """
         self._absorb_attributes()
+        self._tap_light(frame)
         stamp = frame.stamp
         self.object_tracker.cfg = self._object_tracker_cfg()
         self._expire(stamp)
@@ -193,6 +199,18 @@ class VisionPipeline:
             objects = True
         embeds = self.cfg.max_embeds_per_frame - self._budget + self._entity_embeds
         return FrameReport(stamp, faces, objects, embeds)
+
+    def _tap_light(self, frame: Frame) -> None:
+        """Hand the image to the light sampler (SPEC 7A), before the governor can drop the frame
+        so a resting robot still senses light. The sampler measures it at most once per
+        ``light.sample_interval_s`` on this thread and keeps only numbers; a failure is logged by
+        type and never costs the frame."""
+        if self.light_tap is None:
+            return
+        try:
+            self.light_tap(frame.image)
+        except Exception as exc:
+            log.warning("light tap failed: %s", type(exc).__name__)
 
     def reset(self) -> None:
         """Forget every track and its per-track state (start of a session or replay).

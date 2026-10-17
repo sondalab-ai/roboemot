@@ -38,6 +38,23 @@ class FrameSource(Protocol):
     def read(self) -> Frame | None: ...
 
 
+class LockedSource:
+    """One lock around a ``FrameSource``, shared by every reader (the vision pump and the
+    circadian idle light reader), so the SDK media is never read from two threads at once.
+    Other attributes (``camera_model``) pass through."""
+
+    def __init__(self, source: FrameSource) -> None:
+        self._source = source
+        self._lock = threading.Lock()
+
+    def read(self) -> Frame | None:
+        with self._lock:
+            return self._source.read()
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._source, name)
+
+
 class LatestFrameRunner:
     """Runs a perception module on the newest submitted frame in its own thread."""
 

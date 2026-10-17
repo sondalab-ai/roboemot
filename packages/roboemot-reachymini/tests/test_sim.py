@@ -505,3 +505,28 @@ def test_an_unknown_age_face_engages_the_minor_caps(mini, tmp_path, monkeypatch)
             engaged = motion["minor_present"]
             time.sleep(0.1)
     assert engaged
+
+
+def test_the_rest_posture_lowers_the_head_and_droops_the_antennas_on_the_simulated_robot(loop):
+    """SPEC 7A: resting commands the rest posture (IDLE priority) through the real loop; the
+    simulated head pitches down and the antennas droop outward, from where they settled."""
+    from roboemot.circadian import CircadianMotion
+
+    manifest = loop.manifest
+    stack = ConfigStack()
+    stack.set_manifest_behaviour(manifest.model.behaviour)
+    cfg = stack.effective()
+    names = ("head.pitch", "antenna_right", "antenna_left")
+    _hold(loop, {n: manifest.dofs[n].home for n in names}, 8.0)
+    settled = loop.driver.read_state()
+    loop.clear("test")  # the settle command is COMMANDED and never expires: it would win
+    motion = CircadianMotion(cfg.circadian, cfg.circadian_motion, manifest.dofs)
+    end = time.monotonic() + 10.0
+    while time.monotonic() < end:
+        for cmd in motion.commands(time.monotonic(), "resting"):
+            loop.feed(cmd)
+        time.sleep(0.02)
+    state = loop.driver.read_state()
+    assert state["head.pitch"] - settled["head.pitch"] > 0.05
+    assert state["antenna_right"] < settled["antenna_right"] - 0.05
+    assert state["antenna_left"] > settled["antenna_left"] + 0.05

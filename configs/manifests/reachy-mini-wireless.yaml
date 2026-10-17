@@ -103,3 +103,24 @@ behaviour:                      # config layer 2 (SPEC 11A): this robot's defaul
     annoyance:                  # short flick of the right antenna, 0.5 s
       channels:
         antenna_right: [[0.0, 0], [0.1, 20], [0.3, -6], [0.5, 0]]
+  # Circadian motion (SPEC 7A, Effects by state): same keyframe format and signs as above.
+  # `yawn` plays now and then while drowsy, `stretch` for 3 s when the robot wakes from resting,
+  # `rest_pose_deg` is the absolute rest posture (head.pitch positive is down; antennas droop
+  # outward). All starting points to tune, not yet checked on the hardware; the limiter and the
+  # minor cap apply as to every motion.
+  circadian_motion:
+    rest_pose_deg:
+      head.pitch: 20
+      antenna_right: -50
+      antenna_left: 50
+    yawn:                       # antennas droop, head tips back then tilts, 3 s
+      channels:
+        antenna_right: [[0.0, 0], [1.0, -15], [1.8, -15], [3.0, 0]]
+        antenna_left:  [[0.0, 0], [1.0, 15], [1.8, 15], [3.0, 0]]
+        head.pitch:    [[0.0, 0], [1.0, -8], [1.8, -8], [3.0, 0]]
+        head.roll:     [[0.0, 0], [1.0, 6], [1.8, 6], [3.0, 0]]
+    stretch:                    # antennas up and out, head lifts, 3 s
+      channels:
+        antenna_right: [[0.0, 0], [0.8, 25], [2.0, 25], [3.0, 0]]
+        antenna_left:  [[0.0, 0], [0.8, -25], [2.0, -25], [3.0, 0]]
+        head.pitch:    [[0.0, 0], [1.0, -12], [2.0, -12], [3.0, 0]]

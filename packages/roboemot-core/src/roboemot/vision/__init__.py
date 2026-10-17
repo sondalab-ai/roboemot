@@ -8,7 +8,7 @@ from .attributes import AttributeResult, AttributeWorker, InlineExecutor
 from .geometry import CameraModel
 from .governor import CIRCADIAN, LOAD, RateGovernor
 from .pipeline import VisionPipeline
-from .runner import FrameSource, LatestFrameRunner, pump
+from .runner import FrameSource, LatestFrameRunner, LockedSource, pump
 from .stages import (
     AppearanceEmbedder,
     AttributeEstimator,
@@ -45,6 +45,7 @@ __all__ = [
     "Frame",
     "FrameReport",
     "FrameSource",
+    "LockedSource",
     "InlineExecutor",
     "LatestFrameRunner",
     "ObjectDetector",

@@ -18,7 +18,6 @@ import threading
 import time
 from contextlib import ExitStack
 from dataclasses import replace
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +28,14 @@ from roboemot.affect.runner import AffectRunner
 from roboemot.attention import SOURCE as ATTENTION_SOURCE
 from roboemot.attention import AttentionSelector, GazeController
 from roboemot.bus import Bus
-from roboemot.circadian import CircadianModel, in_window
+from roboemot.circadian import (
+    CircadianModel,
+    CircadianRunner,
+    IdleLightReader,
+    SystemClock,
+    in_window,
+)
+from roboemot.circadian.motion import REST_SOURCE
 from roboemot.config import ConfigStack
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.diagnostics import Diagnostics, FnSource, Target, platform_sources
@@ -39,7 +45,7 @@ from roboemot.health.responder import OfflineResponder
 from roboemot.manifest import load_manifest
 from roboemot.motion import Command, MotionLoop, Priority
 from roboemot.persona import effects as persona_effects
-from roboemot.vision import CIRCADIAN, FrameSource
+from roboemot.vision import CIRCADIAN, FrameSource, LockedSource
 from roboemot.vision.minor import MinorPresence
 from roboemot.vision.service import Perception, default_stages, open_perception, world_snapshot
 from roboemot.webui import Server, make_server
@@ -68,25 +74,39 @@ except ImportError:  # pragma: no cover
 
 log = logging.getLogger(__name__)
 ADDITIVE_IDLE = "idle-additive"
-MINUTES_PER_HOUR = 60.0
 MS_PER_S = 1000.0
 DATA = Path(__file__).resolve().parent / "data"
 
 
-def idle_command(cfg: Any, t: float) -> Command:
+def idle_command(cfg: Any, t: float, scale: float = 1.0, phase_t: float | None = None) -> Command:
     """Breathing on head pitch (SPEC 10, Idle; parameters from motion.idle, period scaled by
-    the persona's energy, SPEC 11A)."""
+    the persona's energy, SPEC 11A). ``scale`` is the circadian state's idle motion scale
+    (SPEC 7A); ``phase_t`` is the breathing phase clock (default ``t``): the caller integrates it
+    at the state's slower pace so the head does not jump when the period changes."""
     idle = cfg.motion.idle
     period = idle.breathing_period_s * persona_effects(cfg.persona).idle_period_x
-    pitch = idle.breathing_amplitude * math.sin(2 * math.pi * t / period)
+    phase = t if phase_t is None else phase_t
+    pitch = scale * idle.breathing_amplitude * math.sin(2 * math.pi * phase / period)
     return Command("idle", Priority.IDLE, {"head.pitch": pitch}, t)
 
 
-def feed_idle(loop: MotionLoop, cfg: Any, now: float, attending: bool) -> None:
+def feed_idle(
+    loop: MotionLoop,
+    cfg: Any,
+    now: float,
+    attending: bool,
+    scale: float = 1.0,
+    phase_t: float | None = None,
+) -> None:
     """Feed idle breathing. While attention owns the head it rides on top as an additive layer
     (additive commands stack on any winner of idle priority or lower precedence); otherwise it
-    is the plain idle command."""
-    cmd = idle_command(cfg, now)
+    is the plain idle command. A ``scale`` of 0 (circadian resting) feeds none: the rest posture
+    replaces it."""
+    if scale <= 0:
+        loop.clear("idle")
+        loop.clear(ADDITIVE_IDLE)
+        return
+    cmd = idle_command(cfg, now, scale, phase_t)
     if attending:
         loop.feed(
             replace(
@@ -190,7 +210,7 @@ def scan_tick(ctx: ScanContext, scan: ScanController, loop: MotionLoop, cfg: Any
 
 def circadian_vision_scale(cfg: Any, circadian: CircadianModel | None) -> float:
     """The vision rate multiplier of the circadian state (SPEC 7A): the running model's state,
-    or ``awake`` while no model is attached (the circadian runner arrives in M2)."""
+    or ``awake`` while no model is attached (circadian disabled)."""
     effects = circadian.effects() if circadian is not None else cfg.circadian.states["awake"]
     return effects.vision_rate_scale
 
@@ -238,11 +258,37 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
     bus: Bus | None = None
     world: WorldModel | None = None  # vision (M1) and the speaker hint (M3) feed these
     selector: AttentionSelector | None = None
-    circadian: CircadianModel | None = None  # the circadian runner (M2) sets this
+    circadian: CircadianModel | None = None  # the circadian runner's model; None while disabled
+    circadian_runner: CircadianRunner | None = None  # light, presence, state, motion (SPEC 7A)
+    light_reader: IdleLightReader | None = None  # reads a frame when vision gave none
     affect_runner: AffectRunner | None = None  # owns the one affect engine
     minor_presence: MinorPresence | None = None  # the one source of the minor-present signal
     register_tracker: RegisterTracker | None = None  # people in view -> register.active
     expression: ExpressionRenderer | None = None  # affect label -> additive antenna/head motion
+
+    def make_circadian_clock(self) -> Any:
+        """The clock the circadian rhythm runs on: monotonic seconds and the local hour of day
+        (overridable: tests inject a fixed or accelerated clock)."""
+        return SystemClock()
+
+    def _forget_circadian(self) -> None:
+        """The app stopped: hold and wake report that it is not running."""
+        self.circadian_runner = None
+
+    def hold(self, state: str, minutes: float) -> None:
+        """``robot.circadian.hold``: keep the robot ``awake`` (or ``drowsy`` or ``resting``) for
+        ``minutes``, e.g. during a party (SPEC 7A, API)."""
+        runner = self.circadian_runner
+        if runner is None:
+            raise RuntimeError("the app is not running")
+        runner.hold(state, minutes)
+
+    def wake(self) -> None:
+        """Wake the robot as the wake word or a direct address does (SPEC 7A, Waking)."""
+        runner = self.circadian_runner
+        if runner is None:
+            raise RuntimeError("the app is not running")
+        runner.wake()
 
     def detection_period(self) -> float:
         """Seconds between face-stage runs now (infinite while vision is off)."""
@@ -368,7 +414,21 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             manifest.dofs,
             cfg.motion.arbiter.crossfade_ms / MS_PER_S,
         )
-        source = self.make_frame_source(reachy_mini, loop.driver.read_state)
+        clock = self.make_circadian_clock()
+        circ = self.circadian_runner = CircadianRunner(
+            cfg,
+            bus,
+            runner,
+            clock=clock,
+            dofs=manifest.dofs,
+            detection_period=self.detection_period,
+            engaged=lambda: selector.engaged,
+        )
+        expression.circadian_factor = circ.amplitude_factor
+        self.circadian = circ.model if cfg.circadian.enabled else None
+        # One lock for the vision pump and the idle light reader: the SDK media is read by one
+        # thread at a time.
+        source = LockedSource(self.make_frame_source(reachy_mini, loop.driver.read_state))
         perception = self.perception = open_perception(
             cfg,
             bus,
@@ -377,6 +437,9 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             camera_model=getattr(source, "camera_model", None),
             load_stages=self.load_vision_stages,
         )
+        if perception.pipeline is not None:  # light from the frames vision already captures
+            perception.pipeline.light_tap = circ.sampler.offer
+        light_reader = self.light_reader = IdleLightReader(circ.sampler, source)
         self.enrollment = perception.enrollment
         appearance = getattr(perception.pipeline, "appearance_embedder", None)
         self.autoenroll = open_autoenroll(
@@ -419,6 +482,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             FnSource("roboemot.registry", perception.registry_snapshot),
             FnSource("roboemot.minor", presence.snapshot),
             FnSource("roboemot.register", lambda: register_report(tracker)),
+            FnSource("roboemot.circadian", circ.snapshot),
             FnSource(
                 "roboemot.app",
                 lambda: {
@@ -442,6 +506,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             if self.catalogue is not None:
                 self.catalogue.cfg = change.config.catalogue
             runner.apply_config(change.config.affect, change.config.appraisal)
+            circ.apply_config(change.config)
             tracker.cfg = change.config.expression
             expression.apply_config(
                 change.config.expression,
@@ -453,6 +518,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
 
         stack.subscribe(reload)
         fx_for, fx = None, None
+        idle_last = idle_t = time.monotonic()  # idle breathing phase clock (SPEC 7A, Drowsy)
         # Everything started below is stopped in reverse order whatever fails: ExitStack runs
         # every callback even when one raises, so the motion loop always stops and the camera
         # thread is quiet before the SDK client goes away.
@@ -460,6 +526,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             cleanup.callback(presence.close)
             cleanup.callback(tracker.close)
             cleanup.callback(runner.close)
+            cleanup.callback(circ.close)
             cleanup.callback(stack.start_watcher().set)
             loop.start()
             cleanup.callback(loop.stop)
@@ -469,16 +536,26 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 cleanup.callback(self.autoenroll.flush)
             cleanup.callback(perception.stop)
             perception.start()
+            cleanup.callback(light_reader.stop)  # stopped before the camera thread
+            cleanup.callback(self._forget_circadian)
             self.start_webui(stack, cfg, manifest, cleanup)
             for world_source in plugin.sources:
                 cleanup.callback(world_source.stop)
                 world_source.start(publish)
             while not stop_event.is_set():
                 now = time.monotonic()
+                circ.tick(now)  # before the affect tick: its events and baseline apply to it
                 state = runner.tick(now)
                 minor = presence.apply(now)
                 attending = attention_tick(now, world, selector, gaze, loop)
                 live = stack.effective()
+                self.circadian = circ.model if live.circadian.enabled else None
+                if (
+                    not light_reader.running
+                    and live.circadian.enabled
+                    and live.circadian.light_source == "camera"
+                ):
+                    light_reader.start()  # lazily: never for a clock-only or disabled rhythm
                 if live.persona is not fx_for:  # recompute only after a reload
                     fx_for, fx = live.persona, persona_effects(live.persona)
                 register = tracker.tick(now, live.register, fx, minor_present=minor)
@@ -493,19 +570,32 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                         CIRCADIAN, circadian_vision_scale(live, self.circadian)
                     )
                 if scan is not None:
-                    local = datetime.now()
-                    hour = local.hour + local.minute / MINUTES_PER_HOUR
                     ctx = scan_context(
                         now,
                         live,
                         selector,
                         effects=fx,
-                        hour=hour,
+                        hour=clock.hour(),
                         circadian=self.circadian,
                         minor_present=minor,
                     )
                     scan_tick(ctx, scan, loop, live)
-                feed_idle(loop, live, now, attending)
+                state_fx = (
+                    circ.model.effects() if self.circadian else live.circadian.states["awake"]
+                )
+                idle_t += (now - idle_last) / state_fx.idle_period_scale
+                idle_last = now
+                feed_idle(loop, live, now, attending, state_fx.idle_motion_scale, idle_t)
+                if circ.motion is not None:
+                    circ.motion.set_minor_factor(live.safety.minor_motion_factor if minor else 1.0)
+                    circ.motion.set_register(
+                        register.params.motion_amplitude, live.expression.max_amplitude
+                    )
+                posture = circ.commands(now, attending)
+                if not any(c.source == REST_SOURCE for c in posture):
+                    loop.clear(REST_SOURCE)
+                for cmd in posture:
+                    loop.feed(cmd)
                 for cmd in responder.commands(now):
                     loop.feed(cmd)
                 for cmd in expression.commands(now):
