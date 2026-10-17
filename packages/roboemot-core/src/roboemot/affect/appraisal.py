@@ -13,6 +13,8 @@ appraisal rules decide what it means. Events (payload fields usable in a rule's 
   ``possible_minor``.
 - ``animal.appears`` (named ``animal.appeared`` in early drafts): ``world.entity_appeared`` of
   kind ``animal``. Payload: ``entity_id``, ``category``.
+- ``sound.loud``: a ``sound.loud`` message from the reflex engine's audio intake (a level scalar,
+  never audio). Payload: empty.
 - ``idle.long``: no face, attention target or recognised person for ``appraisal.idle_after_s``;
   once, until interaction resumes. Payload: empty.
 
@@ -70,6 +72,7 @@ class AppraisalAdapter:
             ("percept.face", self._on_face),
             ("world.entity_appeared", self._on_entity),
             ("attention.target", self._on_attention),
+            ("sound.loud", self._on_loud),
         ):
             self._unsubscribe.append(self.bus.subscribe(topic, handler))
 
@@ -156,6 +159,9 @@ class AppraisalAdapter:
                 msg.stamp,
                 {"entity_id": msg.payload.entry_id, "category": msg.payload.category},
             )
+
+    def _on_loud(self, msg: Message) -> None:
+        self.emit("sound.loud", msg.stamp, {})
 
     def _on_attention(self, msg: Message) -> None:
         if msg.payload is None:  # the target was cleared: nobody to interact with

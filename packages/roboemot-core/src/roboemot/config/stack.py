@@ -255,9 +255,11 @@ def _guarded(meta: dict[str, Any]) -> bool:
 
 
 def guarded_leaves(cfg: RoboEmotConfig) -> dict[str, tuple[Any, dict[str, Any]]]:
-    """Every safety-relevant leaf of a config, routes keyed by name instead of index."""
+    """Every safety-relevant leaf of a config, routes and reflex rules keyed by name, not index."""
     tree = cfg.model_dump(mode="python")
     tree["llm_routes"] = {r["name"]: r for r in tree.get("llm_routes", [])}
+    rules = tree.get("reflexes", {}).get("rules", [])
+    tree["reflexes"]["rules"] = {r["name"]: r for r in rules}  # by name: a removal shifts nothing
     out = {}
     for path, value in flatten(tree).items():
         meta = field_meta(path)
@@ -266,12 +268,20 @@ def guarded_leaves(cfg: RoboEmotConfig) -> dict[str, tuple[Any, dict[str, Any]]]
     return out
 
 
+NEW_RULE_REFUSED = "reflexes.rules."
+
+
 def violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Violation]:
     """Leaves where ``candidate`` is less safe than ``approved`` (SPEC 11A, Guardrails)."""
     base = guarded_leaves(approved)
     found = []
     for path, (value, meta) in guarded_leaves(candidate).items():
         direction = meta.get("conservative")
+        if path.startswith(NEW_RULE_REFUSED) and path not in base:
+            # A reflex rule (new or renamed) that the approved config does not have is a new motion
+            # the approval never saw: refused whole, not compared with anything (SPEC 10, 12).
+            found.append(Violation("safety", path, None, value))
+            continue
         if path in base:
             ref = base[path][0]
         else:  # e.g. a new LLM route: compare against the most conservative value

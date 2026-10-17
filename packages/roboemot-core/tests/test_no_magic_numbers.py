@@ -28,6 +28,8 @@ BEHAVIOUR_MODULES = [
     "persona/llm_traits.py",
     "motion/loop.py",
     "motion/primitives.py",
+    "reflex/__init__.py",
+    "reflex/engine.py",
     "attention/__init__.py",
     "attention/selector.py",
     "attention/gaze.py",
