@@ -129,11 +129,18 @@ class Router:
                 b = self._budgets[name] = _Budget(self.today())
             b.used += tokens
 
+    def charge(self, name: str, tokens: int) -> None:
+        """Count ``tokens`` against a route's daily budget (the speech backend charges the
+        characters it sends, estimated at ``CHARS_PER_TOKEN`` per token)."""
+        self._charge(name, tokens)
+
+    def api_key(self, route: LLMRoute) -> str:
+        """The route's key, with a ``${secret:name}`` reference resolved."""
+        m = SECRET.match(route.api_key)
+        return self.secrets(m.group(1)) if m else route.api_key
+
     def _client(self, route: LLMRoute) -> AsyncOpenAI:
-        key = route.api_key
-        m = SECRET.match(key)
-        if m:
-            key = self.secrets(m.group(1))
+        key = self.api_key(route)
         http = self.http_client_factory() if self.http_client_factory else None
         return AsyncOpenAI(
             base_url=route.base_url, api_key=key or "none", http_client=http, max_retries=0

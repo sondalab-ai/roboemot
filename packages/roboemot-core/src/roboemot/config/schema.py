@@ -1662,6 +1662,58 @@ class VoiceLimits(Strict):
     variability: tuple[float, float] = param((0.0, 1.0), "Allowed variability range")
 
 
+class PiperConfig(Strict):
+    """The Piper backend runs as one persistent subprocess per voice (SPEC 8, TTS backends)."""
+
+    python: str = param(
+        "",
+        "Interpreter of the Piper virtualenv (piper-tts is GPL-3.0 and runs in its own process); "
+        "empty means piper-venv/bin/python in the app data folder, where the installer puts it",
+        restart=True,
+    )
+    voices_dir: str = param(
+        "",
+        "Folder with the voice files (<voice>.onnx and <voice>.onnx.json); empty means "
+        "voice/piper in the models folder",
+        restart=True,
+    )
+    chunk_ms: float = param(
+        200.0,
+        "Audio the worker sends per message; a cancel abandons what is still unsent",
+        unit="ms", ge=20, le=2000, restart=True,
+    )  # fmt: skip
+    startup_timeout_s: float = param(
+        60.0,
+        "Time a worker gets to load its voice and report its sample rate",
+        unit="s", ge=1, le=600,
+    )  # fmt: skip
+    request_timeout_s: float = param(
+        20.0,
+        "Longest wait for the worker's next message while a sentence is synthesised",
+        unit="s", ge=0.5, le=120,
+    )  # fmt: skip
+    restart_backoff_s: tuple[float, float] = param(
+        (0.5, 30.0),
+        "First and longest wait before a crashed worker is started again (doubles each time)",
+    )
+
+
+class OpenAISpeechConfig(Strict):
+    """The remote speech backend follows the LLM routes' rules (SPEC 8, TTS backends)."""
+
+    route: str = param(
+        "",
+        "Name of the llm_routes entry whose base_url, key, timeouts and minors flag the speech "
+        "requests use; empty disables the backend",
+        restart=True,
+    )
+    model: str = param("gpt-4o-mini-tts", "Speech model sent to /audio/speech", restart=True)
+    voice: str = param("marin", "Provider voice name", restart=True)
+    instructable: bool = param(
+        True, "The model takes `instructions` (mood as natural language)", restart=True
+    )
+
+
 class VoiceConfig(Strict):
     enabled: bool = param(
         False,
@@ -1740,6 +1792,21 @@ class VoiceConfig(Strict):
         "Per-mood prosody deltas",
     )
     limits: VoiceLimits = param({}, "Clamp for the final delivery")
+    sentence_max_chars: int = param(
+        220,
+        "Longest text one TTS request carries; a longer sentence is cut at a comma or a space",
+        unit="chars", ge=40, le=2000,
+    )  # fmt: skip
+    sentence_pause_ms: float = param(
+        150.0,
+        "Silence between two sentences of one answer, before the mood's pause_scale",
+        unit="ms", ge=0, le=2000,
+    )  # fmt: skip
+    queue_max_sentences: int = param(
+        16, "Sentences waiting for synthesis; a further one is dropped", ge=1, le=256
+    )
+    piper: PiperConfig = param({}, "Piper subprocess backend", restart=True)
+    openai_speech: OpenAISpeechConfig = param({}, "Remote speech backend")
     piper_noise_scale: tuple[float, float] = param(
         (0.33, 1.0), "Piper noise_scale mapped from variability 0..1"
     )

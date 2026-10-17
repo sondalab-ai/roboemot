@@ -82,16 +82,32 @@ def route_checks_path(configured: str = "") -> Path:
     return data_path(configured) / ROUTE_CHECKS_FILE
 
 
+PIPER_VENV_SUBDIR = "piper-venv"
+
+
+def piper_venv(configured: str = "") -> Path:
+    """The virtualenv the installer creates for Piper (GPL-3.0, so it runs as its own process)."""
+    return data_path(configured) / PIPER_VENV_SUBDIR
+
+
+def piper_python(configured: str = "") -> Path:
+    """Interpreter of that virtualenv: the default for ``voice.piper.python``."""
+    return piper_venv(configured) / "bin" / "python"
+
+
 __all__ = [
     "DEFAULT_REL",
     "ENV_DIR",
     "MODELS_SUBDIR",
+    "PIPER_VENV_SUBDIR",
     "REGISTRY_SUBDIR",
     "ROUTE_CHECKS_FILE",
     "TRAITS_CACHE_FILE",
     "data_dir",
     "data_path",
     "models_subdir",
+    "piper_python",
+    "piper_venv",
     "registry_dir",
     "route_checks_path",
     "traits_cache_path",
