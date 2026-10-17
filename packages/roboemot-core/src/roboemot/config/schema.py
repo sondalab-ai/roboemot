@@ -105,13 +105,62 @@ class AppraisalRule(Strict):
     valence: float = param(0.0, "Valence impulse", ge=-1, le=1)
     arousal: float = param(0.0, "Arousal impulse", ge=-1, le=1)
     label: str | None = param(None, "Label forced for event_label_hold_s, if any")
+    when: dict[str, str | bool | float] = param(
+        {}, "Payload fields that must equal these values for the rule to fire (empty: always)"
+    )
     cooldown_s: float = param(5.0, "Minimum time between two firings", unit="s", ge=0, le=3600)
 
 
 class AppraisalConfig(Strict):
+    idle_after_s: float = param(
+        600.0,
+        "No face, attention target or recognised person for this long emits idle.long",
+        unit="s",
+        ge=1,
+        le=86400,
+    )
+    unknown_face_after_s: float = param(
+        3.0,
+        "A new face track still without an owner after this long emits person.unknown_appears "
+        "(the identity decision window, SPEC 5)",
+        unit="s",
+        ge=0,
+        le=60,
+    )
+    track_lost_s: float = param(
+        2.0,
+        "A pending unknown face not seen for this long is dropped without an event",
+        unit="s",
+        ge=0.1,
+        le=60,
+    )
     rules: list[AppraisalRule] = param(
         [
-            {"event": "person.recognized", "valence": 0.4, "arousal": 0.2, "cooldown_s": 60},
+            # Starting points (SPEC 7): an enrolled person gives +0.4/+0.2; a child adds joy, an
+            # adult stays calm, a stranger raises curiosity with almost no valence change.
+            {"event": "person.known", "valence": 0.4, "arousal": 0.2, "cooldown_s": 60},
+            {
+                "event": "person.known_child",
+                "valence": 0.3,
+                "arousal": 0.3,
+                "label": "joy",
+                "cooldown_s": 60,
+            },
+            {"event": "person.known_adult", "valence": 0.1, "label": "calm", "cooldown_s": 60},
+            {
+                "event": "person.unknown_appears",
+                "valence": 0.05,
+                "arousal": 0.3,
+                "label": "curiosity",
+                "cooldown_s": 30,
+            },
+            {
+                "event": "animal.appears",
+                "valence": 0.2,
+                "arousal": 0.3,
+                "label": "curiosity",
+                "cooldown_s": 30,
+            },
             {"event": "sound.loud", "arousal": 0.6, "label": "surprise", "cooldown_s": 5},
             {"event": "idle.long", "arousal": -0.6, "label": "sleepy", "cooldown_s": 600},
             {"event": "light.on", "arousal": 0.3, "label": "surprise", "cooldown_s": 30},

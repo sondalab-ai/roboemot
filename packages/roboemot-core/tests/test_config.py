@@ -115,7 +115,7 @@ def test_presets_extend_and_merge_rules_by_event():
     assert curious["personality"] == "curious"
     stack = ConfigStack(preset=curious, preset_dirs=[PRESETS])
     events = [r.event for r in stack.effective().appraisal.rules]
-    assert "person.recognized" in events and "person.unknown_appears" in events
+    assert "person.known" in events and events.count("person.unknown_appears") == 1
     assert stack.get("affect.half_life_s") == 6
     stack.apply_preset("calm")
     assert stack.get("voice.expressivity") == 0.4

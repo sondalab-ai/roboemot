@@ -85,11 +85,19 @@ def deep_merge(base: dict, over: dict, path: str = "") -> dict:
     return out
 
 
+def _merge_id(item: dict, key: str) -> tuple[Any, str] | None:
+    """Merge identity of a keyed-list entry: its key plus its ``when`` condition, so two rules
+    for one event with different conditions stay two rules."""
+    if item.get(key) is None:
+        return None
+    return item[key], repr(sorted((item.get("when") or {}).items()))
+
+
 def _merge_keyed(base: list, over: list, key: str) -> list:
     result = [copy.deepcopy(x) for x in base]
-    index = {x.get(key): i for i, x in enumerate(result) if isinstance(x, dict)}
+    index = {_merge_id(x, key): i for i, x in enumerate(result) if isinstance(x, dict)}
     for item in over:
-        k = item.get(key) if isinstance(item, dict) else None
+        k = _merge_id(item, key) if isinstance(item, dict) else None
         if k is not None and k in index:
             result[index[k]] = deep_merge(result[index[k]], item)
         else:

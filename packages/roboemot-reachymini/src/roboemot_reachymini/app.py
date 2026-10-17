@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from roboemot import paths
-from roboemot.affect import AffectEngine
+from roboemot.affect.runner import AffectRunner
 from roboemot.attention import SOURCE as ATTENTION_SOURCE
 from roboemot.attention import AttentionSelector, GazeController
 from roboemot.bus import Bus
@@ -192,6 +192,16 @@ def circadian_vision_scale(cfg: Any, circadian: CircadianModel | None) -> float:
     return effects.vision_rate_scale
 
 
+def affect_report(engine: Any, now: float) -> dict[str, Any]:
+    """Affect fields of the debug report: the numbers and the label, nothing about who or why."""
+    state = engine.state(now)
+    return {
+        "valence": state.valence,
+        "arousal": state.arousal,
+        "label": state.label,
+    }
+
+
 def apply_attention_config(
     cfg: Any, world: WorldModel, selector: AttentionSelector, gaze: GazeController
 ) -> None:
@@ -213,6 +223,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
     world: WorldModel | None = None  # vision (M1) and the speaker hint (M3) feed these
     selector: AttentionSelector | None = None
     circadian: CircadianModel | None = None  # the circadian runner (M2) sets this
+    affect_runner: AffectRunner | None = None  # owns the one affect engine
     minor_presence: MinorPresence | None = None  # the one source of the minor-present signal
 
     def detection_period(self) -> float:
@@ -280,7 +291,6 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             cfg.connectivity,
             set(manifest.dofs),
             cfg.conversation.language,
-            affect=AffectEngine(cfg.affect, cfg.appraisal),
         )
         loop = MotionLoop(
             manifest,
@@ -290,6 +300,10 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             on_link_change=responder.on_event,
         )
         bus = self.bus = Bus()
+        # The one affect engine: appraisal events from the bus and the responder feed it, the
+        # app tick decays it and publishes affect.state (SPEC 7).
+        runner = self.affect_runner = AffectRunner(cfg.affect, cfg.appraisal, bus, time.monotonic())
+        responder.affect = runner.engine
         world = self.world = WorldModel(cfg.world, FRAME, bus)
         selector = self.selector = AttentionSelector(cfg.attention, bus)
         gaze = GazeController(
@@ -360,7 +374,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             cfg.llm_routes, cfg.connectivity.network, on_change=responder.on_event
         )
 
-        affect = responder.affect
+        affect = runner.engine
         self.diagnostics = Diagnostics().add(
             *local_sources(process_pid=os.getpid()),
             *platform_sources(manifest.robot.id, Target()),
@@ -375,8 +389,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 lambda: {
                     "manifest": manifest.robot.id,
                     "language": stack.effective().conversation.language,
-                    "valence": affect.valence if affect else None,
-                    "arousal": affect.arousal if affect else None,
+                    **affect_report(affect, time.monotonic()),
                 },
             ),
         )
@@ -393,6 +406,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 self.autoenroll.apply_config(change.config.world.autoenroll)
             if self.catalogue is not None:
                 self.catalogue.cfg = change.config.catalogue
+            runner.apply_config(change.config.affect, change.config.appraisal)
             responder.cfg = change.config.connectivity
             network.set_policy(change.config.connectivity.network)
 
@@ -403,6 +417,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         # thread is quiet before the SDK client goes away.
         with ExitStack() as cleanup:
             cleanup.callback(presence.close)
+            cleanup.callback(runner.close)
             cleanup.callback(stack.start_watcher().set)
             loop.start()
             cleanup.callback(loop.stop)
@@ -418,6 +433,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 world_source.start(publish)
             while not stop_event.is_set():
                 now = time.monotonic()
+                runner.tick(now)
                 minor = presence.apply(now)
                 attending = attention_tick(now, world, selector, gaze, loop)
                 live = stack.effective()

@@ -348,7 +348,7 @@ Positions are egocentric: bearing and distance from the robot's base, so a robot
 - Matching an observation to an entry, first match wins: same identity; else same kind and category within an angular gate (`world.match_gate_deg`) and, when both have distances, a range gate; else a new entry. Appearance embeddings break ties between candidates.
 - Confidence rises with each matching observation and decays with a half-life per kind (`world.half_life_s`, people shorter than objects). Out of the sensors' view the decay is slower (`world.out_of_view_decay_factor`): what the robot cannot see now is remembered, not forgotten. An entry whose bearing is in view but which is not detected decays at the full rate.
 - Below `world.forget_confidence` an entry is removed. Events on the bus: `world.entity_appeared`, `world.entity_moved` (beyond `world.moved_threshold_deg`), `world.entity_gone`, and `world.snapshot` on request.
-- Consumers: attention (look toward a known entry), appraisal rules (for example `person.returned`, `animal.appeared`), the LLM scene summary (section 8, entries by attention priority until its cap), and the registry (last seen, auto-enrollment).
+- Consumers: attention (look toward a known entry), appraisal rules (for example `person.returned`, `animal.appears`), the LLM scene summary (section 8, entries by attention priority until its cap), and the registry (last seen, auto-enrollment).
 
 ### Scanning
 
@@ -440,7 +440,25 @@ The affect engine keeps one internal emotional state that every percept can nudg
 - Appraisal rules map events to impulses, for example: enrolled person appears → valence +0.4, arousal +0.2; loud sudden sound → arousal +0.6, label `surprise`; no interaction for 10 min → arousal toward -0.6, label `sleepy`.
 - The LLM can propose an impulse through the `express_emotion` tool, but it is clamped (max 0.3 per turn) so conversation cannot override the robot's own state machine.
 
-Rules are declared in YAML, so each application tunes personality without code.
+Rules are declared in YAML, so each application tunes personality without code. A rule may carry an optional `when` condition: a map of event payload fields that must equal the given values (strings, booleans or numbers; a missing field never matches). Rules merge across layers by `event` and `when`, so two rules for one event with different conditions coexist.
+
+### Appraisal events
+
+An adapter in the affect module (`roboemot.affect.appraisal`) turns bus messages into these event names; the library defaults give the starting-point impulses (all tunable, none a fixed value):
+
+| Event | Emitted when | Payload fields | Default rule (valence, arousal, label, cooldown) |
+| --- | --- | --- | --- |
+| `person.known` | any `person.recognized` | `person_id`, `age_group`, `possible_minor` | +0.4, +0.2, none, 60 s (the enrolled-person example above) |
+| `person.known_child` | recognised person with age group `child` (in addition to `person.known`) | same | +0.3, +0.3, `joy`, 60 s (stronger joy than an adult) |
+| `person.known_adult` | recognised person with age group `adult` (in addition to `person.known`) | same | +0.1, 0, `calm`, 60 s |
+| `person.known_unknown_age` | recognised person of any other age group (in addition to `person.known`) | same | none |
+| `person.unknown_appears` | a new face track still without an owner `appraisal.unknown_face_after_s` (3 s) after it appeared; never for a face that is recognised; at most once per track | `track_id`, `age_group`, `possible_minor` | +0.05, +0.3, `curiosity`, 30 s (curiosity with almost no valence change) |
+| `animal.appears` | `world.entity_appeared` of kind `animal` | `category` | +0.2, +0.3, `curiosity`, 30 s |
+| `idle.long` | no face, attention target or recognised person for `appraisal.idle_after_s` (600 s); once, until interaction resumes | none | 0, -0.6, `sleepy`, 600 s |
+| `sound.loud`, `light.on` | sound and light producers (M2, section 7A) | none | as in the example above |
+| `link.*`, `conversation.unavailable` | connectivity (section 12A) | none | section 12A |
+
+The affect state is published on `affect.state` at `affect.update_hz`, capped by the rate of the app loop that ticks the engine (50 ms).
 
 ### Empathic register
 
