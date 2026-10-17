@@ -21,7 +21,15 @@ from urllib.parse import urlsplit
 
 from roboemot.config.schema import RoboEmotConfig
 
-from .api import CataloguePort, DebugReport, EnrollmentPort, Request, Response, WebApi
+from .api import (
+    CataloguePort,
+    DebugReport,
+    EnrollmentPort,
+    Request,
+    Response,
+    RoutesPort,
+    WebApi,
+)
 from .auth import PinStore, check_pin_format
 from .guard import hostname_of, is_trusted_host
 
@@ -291,6 +299,7 @@ def make_server(
     clock: Callable[[], float] = time.monotonic,
     robot_hosted: bool = False,
     catalogue: CataloguePort | None = None,
+    routes: RoutesPort | None = None,
 ) -> Server:
     """Build the web UI on ``cfg.webui.bind:port``; nothing is served until ``start()``.
 
@@ -302,7 +311,7 @@ def make_server(
     current = cfg() if callable(cfg) else cfg
     web = current.webui
     pins = PinStore(Path(data_dir))
-    api = WebApi(service, diagnostics, cfg, pins, clock=clock, catalogue=catalogue)
+    api = WebApi(service, diagnostics, cfg, pins, clock=clock, catalogue=catalogue, routes=routes)
     bind = web.bind or (ANY_INTERFACE if robot_hosted else LOOPBACK_INTERFACE)
     httpd = _Httpd((bind, web.port), _Handler)
     httpd.csp = CSP.format(ancestors=web.frame_ancestors)

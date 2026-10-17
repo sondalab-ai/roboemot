@@ -7,6 +7,9 @@ The persona pieces exist and are tested; these callers wait for the pillars they
 - [ ] Build each LLM request with `roboemot.llm.system_prompt` + `build_messages`, using the
       register shaped by `roboemot.persona.apply_to_register` and the summary caps from
       `conversation.*_summary_max_chars`.
+- [ ] One app-wide `Router` (and daily token budget) shared by the traits worker, the conversation
+      pipeline and the web UI route check (SPEC 8): today `start_webui` borrows the traits
+      worker's router (`RoboEmotApp.start_webui`), so slice 5 must wire the shared one there.
 - [ ] Pass `roboemot.persona.effects(cfg.persona)` to `compose_delivery` in the TTS path.
 - [x] Apply `motion_amplitude` / `reaction_intensity` from the persona-shaped register in the
       expression path. Done in M2: `RegisterTracker.tick` shapes the register with

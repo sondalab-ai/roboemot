@@ -21,6 +21,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ROUTE_NAME = re.compile(r"[A-Za-z0-9_-]+")
+ROUTE_NAME_MAX_CHARS = 64
 
 
 def param(
@@ -1711,6 +1712,33 @@ class VadConfig(Strict):
 
 
 class VoiceConfig(Strict):
+    enabled: bool = param(
+        False,
+        "Run the voice pipeline: the microphone hub keeps every audio chunk for it and the "
+        "speaker is created (SPEC 8)",
+        restart=True,
+    )
+    echo_tail_ms: float = param(
+        300.0,
+        "The robot counts as speaking this long after its playback ends: the startle reflex and "
+        "the sound-direction source ignore the microphones meanwhile (room echo, mic latency)",
+        unit="ms", ge=0, le=2000, conservative="higher",
+    )  # fmt: skip
+    sample_rate_hz: int = param(
+        16000, "Rate of the audio frames the microphone hub hands to the voice pipeline",
+        unit="Hz", ge=8000, le=48000, restart=True,
+    )  # fmt: skip
+    capture_queue_s: float = param(
+        10.0,
+        "Audio the hub keeps for a slow voice consumer; beyond it the oldest chunks are dropped "
+        "and counted",
+        unit="s", ge=0.5, le=120, restart=True,
+    )  # fmt: skip
+    playback_chunk_ms: float = param(
+        100.0,
+        "Size of each piece pushed to the speaker; a barge-in abandons the pieces not yet pushed",
+        unit="ms", ge=10, le=1000, restart=True,
+    )  # fmt: skip
     backend: Literal["piper", "openai_speech", "kokoro"] = param(
         "piper", "TTS backend", restart=True
     )
@@ -1937,11 +1965,95 @@ class LLMRoute(Strict):
 
     @model_validator(mode="after")
     def _check(self) -> LLMRoute:
-        if not ROUTE_NAME.fullmatch(self.name):
-            raise ValueError(f"route name {self.name!r}: use letters, digits, '_' or '-'")
+        if not ROUTE_NAME.fullmatch(self.name) or len(self.name) > ROUTE_NAME_MAX_CHARS:
+            raise ValueError(
+                f"route name {self.name!r}: use letters, digits, '_' or '-' "
+                f"(at most {ROUTE_NAME_MAX_CHARS})"
+            )
         if not self.base_url or not self.model:
             raise ValueError(f"route {self.name}: base_url and model are required")
         return self
+
+
+class LLMCheckConfig(Strict):
+    """Route conformance test (SPEC 8): advisory in v1, run from the CLI and the web UI."""
+
+    deadline_s: float = param(
+        45.0,
+        "Longest the whole check of one route may take (three requests)",
+        unit="s",
+        ge=5,
+        le=300,
+    )
+    italian_min_words: int = param(
+        3, "Fewest words the Italian reply needs for the heuristic to judge it", ge=1, le=50
+    )
+    italian_min_stopword_ratio: float = param(
+        0.2,
+        "Share of the reply's words that must be Italian stopwords to count as Italian",
+        ge=0,
+        le=1,
+    )
+    italian_stopwords: list[str] = param(
+        [
+            "il",
+            "lo",
+            "la",
+            "gli",
+            "le",
+            "un",
+            "una",
+            "uno",
+            "di",
+            "del",
+            "della",
+            "dei",
+            "delle",
+            "da",
+            "dal",
+            "dalla",
+            "che",
+            "chi",
+            "non",
+            "per",
+            "con",
+            "sono",
+            "sei",
+            "siamo",
+            "ho",
+            "hai",
+            "ha",
+            "abbiamo",
+            "è",
+            "e",
+            "ma",
+            "se",
+            "più",
+            "molto",
+            "anche",
+            "questo",
+            "questa",
+            "quello",
+            "nel",
+            "nella",
+            "sul",
+            "sulla",
+            "ciao",
+            "oggi",
+            "buongiorno",
+            "sì",
+            "perché",
+            "mi",
+            "ti",
+            "ci",
+            "si",
+            "al",
+            "alla",
+            "c",
+            "l",
+        ],
+        "Words that mark a text as Italian (lower case, no English homographs)",
+    )
 
 
 class MirrorConfig(Strict):
@@ -2240,6 +2352,7 @@ with warnings.catch_warnings():
         persona: PersonaConfig = param({}, "SPEC 11A")
         conversation: ConversationConfig = param({}, "SPEC 8")
         llm_routes: list[LLMRoute] = param([], "SPEC 8")
+        llm_check: LLMCheckConfig = param({}, "SPEC 8: route conformance test")
         safety: SafetyConfig = param({}, "SPEC 12")
         privacy: PrivacyConfig = param({}, "SPEC 12")
         connectivity: ConnectivityConfig = param({}, "SPEC 12A")

@@ -27,6 +27,7 @@ REGISTRY_SUBDIR = "registry"
 MODELS_SUBDIR = "models"
 VOICE_MODELS_SUBDIR = "voice-models"
 TRAITS_CACHE_FILE = "llm_traits.json"
+ROUTE_CHECKS_FILE = "route_checks.json"
 
 
 def data_path(configured: str = "") -> Path:
@@ -81,17 +82,25 @@ def traits_cache_path(configured: str = "") -> Path:
     return data_path(configured) / TRAITS_CACHE_FILE
 
 
+def route_checks_path(configured: str = "") -> Path:
+    """``<data folder>/route_checks.json``, the last conformance report per LLM route (SPEC 8;
+    not created here). Inside the data folder, so uninstall removes it with the folder."""
+    return data_path(configured) / ROUTE_CHECKS_FILE
+
+
 __all__ = [
     "DEFAULT_REL",
     "ENV_DIR",
     "MODELS_SUBDIR",
     "REGISTRY_SUBDIR",
+    "ROUTE_CHECKS_FILE",
     "TRAITS_CACHE_FILE",
     "VOICE_MODELS_SUBDIR",
     "data_dir",
     "data_path",
     "models_subdir",
     "registry_dir",
+    "route_checks_path",
     "traits_cache_path",
     "voice_models_subdir",
 ]

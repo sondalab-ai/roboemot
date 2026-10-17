@@ -6,13 +6,16 @@ import asyncio
 import json
 import logging
 import time
+from types import SimpleNamespace
 
 import httpx
 import yaml
 from roboemot import paths
+from roboemot.config.schema import SafetyConfig
 from roboemot.llm import Router
 from roboemot_reachymini import app as app_module
 from test_app_perception import data, new_app, start, wait_for  # noqa: F401  (data is a fixture)
+from test_app_webui import Browser, webui_data  # noqa: F401  (webui_data is a fixture)
 
 ROUTE = {"name": "lan", "base_url": "http://lan.local/v1", "model": "m1"}
 RATED = "warmth=0.9\nenergy=0.8\nplayfulness=0.6\nformality=0.1"
@@ -199,6 +202,37 @@ def test_the_data_folder_is_private_when_the_app_creates_it(data):  # noqa: F811
     try:
         assert wait_for(lambda: rated(app))
         assert paths.data_path().stat().st_mode & 0o777 == 0o700
+    finally:
+        stop.set()
+        thread.join(15)
+    assert not errors
+
+
+def test_route_check_router_is_the_traits_workers_or_none():
+    app = app_with(FakeRoute())
+    assert app.route_check_router() is None
+    router = Router([], SafetyConfig())
+    app.traits_worker = SimpleNamespace(router=router)
+    assert app.route_check_router() is router
+
+
+def test_web_route_check_is_charged_to_the_traits_workers_router(webui_data, data):  # noqa: F811
+    configure(data, "llm")
+    app = app_with(FakeRoute())
+    stop, thread, errors = start(app)
+    try:
+        assert wait_for(lambda: app.webui is not None and rated(app))
+        page = Browser(app.webui.port)
+        assert page.login() == 200
+        before = app.traits_worker.router.used("lan")
+        assert page.call("POST", "/api/routes/lan/check", {})[0] == 202
+
+        def done():
+            routes = page.call("GET", "/api/routes")[1]["routes"]
+            return routes[0]["last_check"] is not None and not routes[0]["running"]
+
+        assert wait_for(done)
+        assert app.traits_worker.router.used("lan") > before
     finally:
         stop.set()
         thread.join(15)
