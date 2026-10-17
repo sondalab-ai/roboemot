@@ -262,17 +262,16 @@ class CatalogueService:
     def _import_item(
         self, item: CatalogueItem, photo: _Photo | None, report: ImportReport
     ) -> ReportItem | None:
-        """One item of the sidecar; None when the owner deleted this pending record before."""
+        """One item of the sidecar; None when the owner deleted this pending animal or object."""
         if item.kind == "person":
             known = self.registry.people_named(item.name)
-            if not known and self.registry.tombstones.has("person", item.name):
-                report.skip(SKIP_DELETED)
-                return None
             person = known[0] if known else self.registry.create_pending_person(item.name)
             return ReportItem(person.person_id, person.display_name, "person", "", not known)
         record = self._find(item)
         created = record is None
-        if record is None and self.registry.tombstones.has(item.kind, item.name):
+        if record is None and self.registry.tombstones.has(
+            item.kind, item.category or "", item.name
+        ):
             report.skip(SKIP_DELETED)
             return None
         if record is None:

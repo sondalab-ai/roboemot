@@ -356,9 +356,9 @@ def enrollment_for(reg):
     return EnrollmentService(reg, EnrollmentConfig(), IdentityConfig())
 
 
-def test_a_deleted_pending_record_does_not_come_back_on_reimport(tmp_path):
+def test_a_deleted_pending_entity_does_not_come_back_on_reimport(tmp_path):
     svc, reg, _ = make_service(tmp_path)
-    xmp = subjects("People|Anna", "Animals|Cat|Mia")
+    xmp = subjects("Animals|Cat|Mia", "Objects|Cup|Mug")
     first = svc.import_sidecar(xmp)
     assert [i.created for i in first.items] == [True, True] and len(reg.list()) == 2
     enrollment = enrollment_for(reg)
@@ -375,22 +375,58 @@ def test_a_deleted_pending_record_does_not_come_back_on_reimport(tmp_path):
     assert len(svc.import_sidecar(xmp).items) == 2  # the owner allowed it again
 
 
+def test_the_tombstone_is_keyed_by_category_so_another_luna_still_imports(tmp_path):
+    svc, reg, _ = make_service(tmp_path)
+    svc.import_sidecar(subjects("Animals|Cat|Luna"))
+    enrollment_for(reg).delete(reg.list()[0].id)
+    dog = svc.import_sidecar(subjects("Animals|Dog|Luna"))
+    assert [i.created for i in dog.items] == [True]
+    assert svc.import_sidecar(subjects("Animals|Cat|Luna")).skipped == {"deleted": 1}
+
+
 def test_tombstones_hold_no_name_and_survive_a_restart(tmp_path):
     svc, reg, _ = make_service(tmp_path)
-    svc.import_sidecar(subjects("People|Anna Rossi"))
+    svc.import_sidecar(subjects("Animals|Cat|Zelda"))
     enrollment_for(reg).delete(reg.list()[0].id)
     files = [p for p in (tmp_path / "reg").rglob("*") if p.is_file()]
     blob = b"".join(p.read_bytes() + p.name.encode() for p in files)
-    assert b"nna" not in blob and b"ossi" not in blob
+    assert b"elda" not in blob
     reopened = make_registry(tmp_path)
-    assert reopened.tombstones.has("person", "ANNA ROSSI")  # case-insensitive, like the import
-    assert not reopened.tombstones.has("animal", "Anna Rossi")
+    assert reopened.tombstones.has("animal", "cat", "ZELDA")  # case-insensitive, like the import
+    assert not reopened.tombstones.has("animal", "dog", "Zelda")
 
 
-def test_deleting_an_enrolled_person_leaves_no_tombstone(tmp_path):
-    reg = make_registry(tmp_path)
+def test_forgetting_a_person_leaves_no_tombstone_and_the_name_can_be_imported(tmp_path):
+    """Erasure leaves nothing (SPEC 12): people are never tombstoned, pending or enrolled."""
+    svc, reg, _ = make_service(tmp_path)
+    svc.import_sidecar(PEOPLE_ONLY)
+    enrollment_for(reg).delete(reg.list()[0].id)
+    assert svc.tombstone_count() == 0
+    assert [i.created for i in svc.import_sidecar(PEOPLE_ONLY).items] == [True]
     consent = Consent("Carl", datetime(2026, 1, 1, tzinfo=UTC), ("face",))
     vec = [[1.0] + [0.01 * i] * (DIM - 1) for i in range(5)]
     active = reg.enroll("Carl", vec, MODEL, consent=consent, age_group="adult")
     enrollment_for(reg).delete(active.person_id)
-    assert reg.tombstones.count() == 0 and not reg.tombstones.has("person", "Carl")
+    assert reg.tombstones.count() == 0
+
+
+def test_the_tombstone_is_written_before_the_record_is_deleted(tmp_path):
+    svc, reg, _ = make_service(tmp_path)
+    svc.import_sidecar(subjects("Animals|Cat|Mia"))
+    order = []
+    real_delete = reg.delete_entity
+    reg.delete_entity = lambda eid: (order.append(reg.tombstones.count()), real_delete(eid))
+    enrollment_for(reg).delete(reg.list()[0].id)
+    assert order == [1]
+
+
+def test_a_corrupt_salt_does_not_stop_the_registry_and_drops_the_orphans(tmp_path):
+    svc, reg, _ = make_service(tmp_path)
+    svc.import_sidecar(subjects("Animals|Cat|Mia"))
+    enrollment_for(reg).delete(reg.list()[0].id)
+    (tmp_path / "reg" / "tombstone_salt" / "salt.json").write_bytes(b"\x01{not json")
+    reopened = make_registry(tmp_path)  # must not raise
+    assert reopened.tombstones.count() == 0
+    assert not reopened.tombstones.has("animal", "cat", "Mia")
+    reopened.tombstones.add("animal", "cat", "Mia")  # and it works again with a new salt
+    assert reopened.tombstones.has("animal", "cat", "Mia")
