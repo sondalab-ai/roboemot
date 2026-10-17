@@ -367,6 +367,8 @@ class Scene:
                     face_embedder=PlantedEmbedder(),
                     attribute_estimator=None,
                     appearance_embedder=None,
+                    object_detector=None,
+                    objects_unavailable=None,
                 )
 
         self.mini, self.app = mini, SimApp.__new__(SimApp)
