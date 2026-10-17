@@ -250,7 +250,7 @@ class AppraisalConfig(Strict):
             # Speech fast path (SPEC 8 stage 3): keywords spotted on ASR partials and prosody of
             # the finished utterance. Starting points: a greeting or the robot's name is welcome,
             # "stop" and "no" are a mild jolt, a raised or rushed voice raises arousal.
-            {"event": "speech.heard", "arousal": 0.1, "cooldown_s": 5},
+            {"event": "speech.heard", "arousal": 0.05, "cooldown_s": 20},
             {
                 "event": "speech.keyword.greeting",
                 "valence": 0.3,
@@ -273,7 +273,7 @@ class AppraisalConfig(Strict):
                 "cooldown_s": 3,
             },
             {"event": "speech.keyword.no", "valence": -0.2, "arousal": 0.1, "cooldown_s": 3},
-            {"event": "speech.loud", "arousal": 0.3, "cooldown_s": 10},
+            {"event": "speech.loud", "arousal": 0.15, "cooldown_s": 10},
             {"event": "speech.fast", "arousal": 0.2, "cooldown_s": 10},
         ],
         "Event to impulse rules (SPEC 7, Affect state)",
@@ -1762,23 +1762,42 @@ class KeywordSet(Strict):
     stop: list[str] = param([], "Phrases that mean stop (what you are doing)")
     no: list[str] = param([], "Phrases that mean no")
     greeting: list[str] = param([], "Greeting phrases")
+    wake_phrases: list[str] = param(
+        [],
+        "Phrases that wake the robot when they occur anywhere in the final text. Use words the "
+        "recognizer's vocabulary has: `reachy` is out of vocabulary in both small Vosk models, "
+        "so the default phrases are built from common words (`ehi robot`, `hey robot`)",
+    )
     name_aliases: list[str] = param(
         [],
-        "Spellings the recognizer produces for `voice.wake_word` in this language, besides the "
-        "wake word itself. The small Vosk models do not know a made-up name (Reachy came out as "
-        "`reati` in Italian and `riyadh she` in English), so list what yours writes; a real word "
-        "here (reati) also fires when someone says it",
+        "Spellings the recognizer produces for `voice.wake_word` in this language (Reachy came "
+        "out as `reati` in Italian and `riyadh she` in English). They emit speech.name_called "
+        "and count as the wake word only in a short final text (voice.fastpath."
+        "alias_wake_max_words), because an alias can be a real word. Changing `voice.wake_word` "
+        "needs the aliases re-tuned",
     )
 
 
 class FastpathConfig(Strict):
     addressed_window_s: float = param(
-        30.0,
-        "After an utterance that is addressed to the robot (it said the wake word, or the window "
-        "was open), the next utterance that starts within this long after its last speech is "
-        "addressed too, without the wake word",
+        15.0,
+        "After an utterance that needed the wake word and was addressed, the next utterance that "
+        "starts within this long after its last speech is addressed too, without the wake word "
+        "(when both speakers are known people they must be the same person)",
         unit="s", ge=1, le=600,
     )  # fmt: skip
+    window_max_s: float = param(
+        120.0,
+        "The addressed window never reaches further than this from the wake word that opened "
+        "it, however many follow-ups extend it",
+        unit="s", ge=1, le=3600,
+    )  # fmt: skip
+    alias_wake_max_words: int = param(
+        4,
+        "A name alias counts as the wake word only in a final text of at most this many words",
+        ge=1,
+        le=20,
+    )
     doa_max_age_ms: float = param(
         1500.0,
         "A sound direction reading older than this does not point the head at the speaker",
@@ -1972,10 +1991,18 @@ class VoiceConfig(Strict):
     pitch_shift_backend: Literal["none", "dsp"] = param(
         "dsp", "How pitch is applied on backends without native pitch (Piper)"
     )
-    wake_word: str = param("reachy", "Wake word")
+    wake_word: str = param(
+        "reachy",
+        "The robot's name, for display and the prompt. It is not relied upon for spotting (out "
+        "of vocabulary in the small Vosk models): wake detection uses voice.keywords.<language>."
+        "wake_phrases and name_aliases",
+    )
     wake_word_policy: Literal["always", "never", "unless_enrolled_in_view"] = param(
         "unless_enrolled_in_view",
-        "When the wake word is required: always; never; or unless an enrolled person is in view",
+        "When the wake word is required: always; never; or unless an enrolled person is in view. "
+        "With unless_enrolled_in_view, anyone speaking while an enrolled person is in view "
+        "(a stranger, a television) is addressed without the wake word, and a stranger alone "
+        "must say it",
     )
     asr: AsrConfig = param({}, "Speech recognition (SPEC 8 stage 3)")
     keywords: dict[str, KeywordSet] = param(
@@ -1984,12 +2011,14 @@ class VoiceConfig(Strict):
                 "stop": ["stop", "fermati", "ferma", "basta", "fermo"],
                 "no": ["no"],
                 "greeting": ["ciao", "buongiorno", "buonasera", "salve"],
+                "wake_phrases": ["ehi robot", "ciao robot"],
                 "name_aliases": ["reati"],
             },
             "en": {
                 "stop": ["stop", "halt", "enough"],
                 "no": ["no"],
                 "greeting": ["hello", "hi", "hey", "good morning", "good evening"],
+                "wake_phrases": ["hey robot", "hello robot"],
                 "name_aliases": ["riyadh she"],
             },
         },

@@ -136,3 +136,52 @@ def test_apply_changes_policy_and_window():
     g = gate("always", 5.0)
     g.apply("never", 5.0)
     assert g.decide(wake_word=False, enrolled_in_view=False, start=0, last_speech=1)
+
+
+# ---- wake phrases, Unicode, window cap and speaker
+
+
+def test_wake_phrases_are_their_own_category():
+    s = spotter()
+    assert s.spot("ehi robot dimmi", "it") == {"wake"}
+    assert s.spot("Hello, ROBOT!", "en") == {"wake", "greeting"}
+    assert "wake" not in s.spot("ehi", "it") and "wake" not in s.spot("robot", "it")
+
+
+@pytest.mark.parametrize(
+    "text,expected", [("È già l'amico", "e gia l amico"), ("ÇA va", "ca va"), ("naïve", "naive")]
+)
+def test_normalise_is_unicode_aware(text, expected):
+    assert normalise(text) == expected
+
+
+def test_elided_words_match_without_the_apostrophe():
+    s = KeywordSpotter({"it": KeywordSet(greeting=["amico"], no=["è"])}, "reachy")
+    assert s.spot("l'amico", "it") == {"greeting"}
+    assert s.spot("E' vero", "it") == {"no"}  # accents fold: è, e and E' are one word
+
+
+def test_window_is_capped_from_the_wake_word():
+    g = WakeGate("always", 10.0, 25.0)
+    assert g.decide(wake_word=True, enrolled_in_view=False, start=0, last_speech=2)
+    assert g.decide(wake_word=False, enrolled_in_view=False, start=10, last_speech=12)
+    assert g.decide(wake_word=False, enrolled_in_view=False, start=20, last_speech=22)
+    # the follow-ups reached the cap (2 + 25 = 27): the window stops there
+    assert not g.decide(wake_word=False, enrolled_in_view=False, start=28, last_speech=29)
+
+
+def test_followup_by_a_different_known_person_is_not_addressed():
+    g = WakeGate("always", 10.0, 100.0)
+    assert g.decide(wake_word=True, enrolled_in_view=False, start=0, last_speech=1, speaker="p-1")
+    assert not g.decide(
+        wake_word=False, enrolled_in_view=False, start=3, last_speech=4, speaker="p-2"
+    )
+    assert g.decide(wake_word=False, enrolled_in_view=False, start=5, last_speech=6, speaker="p-1")
+    assert g.decide(wake_word=False, enrolled_in_view=False, start=7, last_speech=8, speaker=None)
+
+
+def test_gate_snapshot_has_no_content():
+    g = WakeGate("always", 10.0)
+    g.decide(wake_word=True, enrolled_in_view=False, start=0, last_speech=1)
+    assert g.snapshot(5.0) == {"policy": "always", "window_open": True, "window_left_s": 6.0}
+    assert g.snapshot(50.0)["window_open"] is False
