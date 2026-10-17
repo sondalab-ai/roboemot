@@ -215,6 +215,11 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
     circadian: CircadianModel | None = None  # the circadian runner (M2) sets this
     minor_presence: MinorPresence | None = None  # the one source of the minor-present signal
 
+    def detection_period(self) -> float:
+        """Seconds between face-stage runs now (infinite while vision is off)."""
+        pipeline = self.perception.pipeline if self.perception is not None else None
+        return math.inf if pipeline is None else pipeline.governor.period("detection")
+
     @property
     def minor_present(self) -> bool:
         """Whether a possible minor is in view or was within the hold time (SPEC 5, 12)."""
@@ -311,10 +316,9 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                     log.warning("auto-enrollment: %s", type(exc).__name__)
 
         feed_world(bus, world, on_result)
+        # No face frames (vision off or dead) keep the caps on: release needs evidence (SPEC 12).
         presence = self.minor_presence = MinorPresence(
-            bus,
-            lambda: stack.effective().safety.minor_hold_s,
-            on_rise=lambda: loop.set_minor_present(True),
+            bus, cfg.safety, sink=loop.set_minor_present, period=lambda: self.detection_period()
         )
         source = self.make_frame_source(reachy_mini, loop.driver.read_state)
         perception = self.perception = open_perception(
@@ -379,6 +383,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
 
         def reload(change: Any) -> None:
             loop.apply_config(change.config)
+            presence.configure(change.config.safety)
             apply_attention_config(change.config, world, selector, gaze)
             if scan is not None:
                 scan.apply_config(change.config.world.scan)
@@ -413,8 +418,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 world_source.start(publish)
             while not stop_event.is_set():
                 now = time.monotonic()
-                minor = presence.present(now)
-                loop.set_minor_present(minor)
+                minor = presence.apply(now)
                 attending = attention_tick(now, world, selector, gaze, loop)
                 live = stack.effective()
                 perception.enrollment.expire()

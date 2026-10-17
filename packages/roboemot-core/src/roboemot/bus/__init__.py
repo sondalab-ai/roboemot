@@ -17,6 +17,7 @@ from typing import Any
 
 TOPICS = (
     "percept.face",
+    "percept.face_frame",
     "percept.pose",
     "percept.utterance",
     "percept.entity",

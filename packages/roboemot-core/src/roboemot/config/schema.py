@@ -323,10 +323,19 @@ class SafetyConfig(Strict):
     )
     minor_hold_s: float = param(
         5.0,
-        "Keep the minor-present caps this long after the last possible-minor face percept",
+        "Keep the minor-present caps this long after the last possible-minor face; also the "
+        "evidence the face stage must deliver before they release (see minor_hold_periods)",
         unit="s",
         ge=1,
         le=600,
+        conservative="higher",
+    )
+    minor_hold_periods: float = param(
+        3.0,
+        "The minor-present hold is at least this many face-detection periods at the current "
+        "governor rate, so a throttled detector cannot make the caps flap",
+        ge=1,
+        le=100,
         conservative="higher",
     )
     watchdog_ms: float = param(
