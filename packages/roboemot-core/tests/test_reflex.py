@@ -1024,3 +1024,15 @@ def test_a_reset_lets_a_startle_through_once_the_tail_has_passed():
     rig.engine.offer_audio_level(LOUD, rig.t)
     rig.tick(2)
     assert rig.stats()["fired"] == 1
+
+
+def test_loud_then_speaking_then_one_quiet_chunk_then_loud_fires():
+    rig, _ = speaking_rig(until=1.5)
+    rig.engine.offer_audio_level(LOUD, 1.2)  # speaking: ignored
+    rig.engine.offer_audio_level(LOUD, 1.85)  # first chunk after the tail: never an edge
+    rig.engine.offer_audio_level(QUIET, 1.87)
+    assert rig.stats()["fired"] == 0
+    rig.t = 1.9
+    rig.engine.offer_audio_level(LOUD, rig.t)
+    rig.tick(2)
+    assert rig.stats()["fired"] == 1

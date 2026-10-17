@@ -186,6 +186,10 @@ class ReflexEngine:
         room level. The previous ratio is held at infinity: the first chunk after the tail
         cannot be a rising edge, a sound that is still loud then is not an onset, and a new one
         needs a quieter chunk first.
+
+        Bounded loss, by choice: the floor is frozen for the whole speaking window (a long
+        utterance leaves it as stale as the room was before), and the first chunk after the tail
+        can never fire. A real bang in that one chunk is missed; the next one fires.
         """
         if not (math.isfinite(rms) and math.isfinite(stamp)) or rms < 0:
             return

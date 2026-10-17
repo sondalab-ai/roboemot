@@ -194,16 +194,11 @@ def test_no_startle_while_the_robot_speaks_and_during_the_tail_then_startle_agai
     assert not errors and not thread.is_alive()
 
 
-class RecordingSource:
-    """A world source with the DoA mute hook, recording what the app mutes it with."""
+class GatedSource:
+    """A world source with the DoA gate attribute, recording nothing itself."""
 
     name = "doa"
-
-    def __init__(self) -> None:
-        self.muted: list[float] = []
-
-    def mute(self, until: float) -> None:
-        self.muted.append(until)
+    speaking = None
 
     def start(self, publish) -> None:
         pass
@@ -212,9 +207,9 @@ class RecordingSource:
         pass
 
 
-def test_the_sound_direction_source_is_muted_for_the_speaking_window(data, monkeypatch):  # noqa: F811
+def test_the_sound_direction_source_is_gated_by_the_speaking_window(data, monkeypatch):  # noqa: F811
     enable(data, VOICE_YAML)
-    source = RecordingSource()
+    source = GatedSource()
     real = app_module.load_world_plugin
 
     def with_source(*args):
@@ -227,12 +222,11 @@ def test_the_sound_direction_source_is_muted_for_the_speaking_window(data, monke
     scripted = ScriptedMini()
     stop, thread, errors = run_app(app, scripted.mini)
     try:
-        assert wait_for(lambda: app.speaker is not None and app.audio is not None)
-        time.sleep(0.2)
-        assert source.muted == []  # nothing spoken yet
+        assert wait_for(lambda: app.speaker is not None and source.speaking is not None)
+        assert not source.speaking(time.monotonic())  # nothing spoken yet
         until = app.speaker.push_audio_sample(np.zeros(8000, np.float32), 16000)
-        assert wait_for(lambda: bool(source.muted))
-        assert source.muted[-1] == app.speech.until() == until + 0.15
+        assert source.speaking(until - 0.1) and source.speaking(until + 0.1)
+        assert not source.speaking(until + 0.2)  # 150 ms tail
     finally:
         stop.set()
         thread.join(timeout=10)

@@ -623,15 +623,12 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             cleanup.callback(self._forget_circadian)
             self.start_webui(stack, cfg, manifest, cleanup)
             for world_source in plugin.sources:
+                if hasattr(world_source, "speaking"):  # no turning towards its own voice
+                    world_source.speaking = speech.speaking
                 cleanup.callback(world_source.stop)
                 world_source.start(publish)
             while not stop_event.is_set():
                 now = time.monotonic()
-                speech_until = speech.until()
-                if math.isfinite(speech_until):  # no turning towards its own voice
-                    for src in plugin.sources:
-                        if hasattr(src, "mute"):
-                            src.mute(speech_until)
                 circ.tick(now)  # before the affect tick: its events and baseline apply to it
                 state = runner.tick(now)
                 minor = presence.apply(now)

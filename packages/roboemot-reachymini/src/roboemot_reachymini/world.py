@@ -132,7 +132,9 @@ class DoASource:
     measured pose); without one the reading is skipped, since it could not be rotated into the
     base frame. Sources never create entries: they confirm one or trigger a glance. Nothing
     that fails inside a poll (the SDK, the joint state, a raising subscriber) ends the thread.
-    ``mute`` is the hook for the robot's own speech (the voice pipeline calls it in M3).
+    ``speaking`` (set by the app to ``SpeechActivity.speaking``) is checked on every poll, like
+    the reflex engine's gate, so the robot's own voice and its echo tail are never read;
+    ``mute`` is the one-off variant that takes a stamp.
     """
 
     name = SOUND_SOURCE
@@ -149,6 +151,7 @@ class DoASource:
         self._thread: threading.Thread | None = None
         self._errors: dict[str, str] = {}
         self._muted_until = -math.inf
+        self.speaking: Callable[[float], bool] | None = None
 
     def mute(self, until_stamp: float) -> None:
         """Ignore the microphones until the clock passes ``until_stamp`` (own speech playing)."""
@@ -167,7 +170,8 @@ class DoASource:
         A failure of a stage (read, joint state or sink) is logged once per distinct message,
         not per poll; it is logged again after that stage has worked once.
         """
-        if self._clock() < self._muted_until:
+        now = self._clock()
+        if now < self._muted_until or (self.speaking is not None and self.speaking(now)):
             return False
         try:
             reading = self._mini.media.get_DoA()
