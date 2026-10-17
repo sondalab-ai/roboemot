@@ -299,3 +299,69 @@ def test_voice_frames_are_never_logged(caplog):
         audio.stop()
     assert all(str(marker) not in r.getMessage() for r in caplog.records)
     assert all(not isinstance(v, np.ndarray) for v in audio.snapshot()["voice"].values())
+
+
+def test_stamps_of_a_drained_batch_are_monotone_and_end_at_the_read_time():
+    chunks = [np.full(1600, v, np.float32) for v in (0.1, 0.2, 0.3)]  # 0.1 s each
+    mini, _ = voice_media(chunks, channels=1)
+    audio = manual(ReachyAudio(mini, lambda *_: None, 50, clock=lambda: 50.0, voice=True), mini)
+    assert audio.poll_once(drain=True)
+    stamps = [audio.read().stamp for _ in range(3)]
+    assert stamps == pytest.approx([49.8, 49.9, 50.0])
+
+
+def test_the_resampler_lookahead_is_subtracted_from_the_stamp():
+    mini, _ = voice_media([np.zeros(4800, np.float32)] * 3, rate=48000, channels=1)
+    audio = manual(ReachyAudio(mini, None, 50, clock=lambda: 10.0, voice=True), mini)
+    while audio.poll_once():
+        pass
+    chunk = audio.read()
+    assert chunk.stamp == pytest.approx(10.0 - audio._resampler.lookahead_s)
+
+
+def test_overflow_marks_a_gap_and_counts_samples_and_chunks():
+    chunks = [np.full(1600, v, np.float32) for v in (0.1, 0.2, 0.3, 0.4, 0.5)]
+    mini, _ = voice_media(chunks, channels=1)
+    audio = manual(ReachyAudio(mini, None, 50, voice=True, voice_queue_s=0.25), mini)
+    while audio.poll_once():
+        pass
+    snap = audio.snapshot()["voice"]
+    assert snap["dropped"] == 3 and snap["dropped_samples"] == 4800
+    first, second = audio.read(), audio.read()
+    assert first.gap and not second.gap
+
+
+def test_non_finite_samples_become_silence_marked_as_a_gap():
+    bad = np.full(160, 0.3, np.float32)
+    bad[5] = np.nan
+    inf = np.full(160, 0.3, np.float32)
+    inf[0] = np.inf
+    good = np.full(160, 0.3, np.float32)
+    mini, _ = voice_media([bad, good, inf], channels=1)
+    audio = manual(ReachyAudio(mini, None, 50, voice=True), mini)
+    while audio.poll_once():
+        pass
+    a, b, c = audio.read(), audio.read(), audio.read()
+    assert a.gap and not b.gap and c.gap
+    assert not a.samples.any() and b.samples[0] == pytest.approx(0.3) and not c.samples.any()
+    assert audio.snapshot()["voice"]["sanitised"] == 2
+
+
+def test_start_clears_the_old_queue_and_stop_wakes_a_waiting_reader():
+    mini, _ = voice_media([np.full(160, 0.3, np.float32)], channels=1)
+    audio = ReachyAudio(mini, None, 50, voice=True)
+    manual(audio, mini)
+    assert audio.poll_once()
+    audio.start()  # restart: the stale chunk must not survive
+    assert audio.snapshot()["voice"]["queued_s"] == 0.0
+    out = []
+    t = threading.Thread(target=lambda: out.append(audio.read(timeout=5.0)))
+    t0 = time.monotonic()
+    t.start()
+    time.sleep(0.05)
+    audio.stop()
+    t.join(2)
+    assert out == [None] and time.monotonic() - t0 < 2.0
+    audio.start()  # start/stop/start works and reads again
+    assert audio.snapshot()["state"] in ("no_data", "running")
+    audio.stop()
