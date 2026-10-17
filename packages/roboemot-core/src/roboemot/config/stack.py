@@ -31,7 +31,13 @@ from typing import Any, Literal, Union, get_args, get_origin
 import yaml
 from pydantic import BaseModel, ValidationError
 
-from .schema import SCHEMA_VERSION, RoboEmotConfig, rule_identity
+from .schema import (
+    SCHEMA_VERSION,
+    WITHDRAW_RULE_FIELDS,
+    WITHDRAW_SHARED_FIELDS,
+    RoboEmotConfig,
+    rule_identity,
+)
 
 LAYER_ORDER = ("defaults", "manifest", "preset", "app", "derived", "person", "runtime")
 KEYED_LISTS = {"appraisal.rules": "event", "llm_routes": "name"}
@@ -304,19 +310,17 @@ def violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Viol
     return found + reflex_violations(approved, candidate)
 
 
-# A withdraw rule is protective: these fields are frozen at runtime (equal to the approved value).
-WITHDRAW_FROZEN = ("cooldown_s", "duration_ms", "amplitude_deg", "suppress_with_minor")
-
-
 def reflex_violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Violation]:
     """Reflex changes that no single field's direction can express (SPEC 10, 11A, 12).
 
-    Rules cannot be removed or renamed, and ``trigger`` and ``primitive`` are their identity. A
-    disabled rule cannot be enabled. A withdraw rule is protective: it cannot be disabled (nor
-    can ``reflexes.enabled``, while one is on), its ``WITHDRAW_FROZEN`` fields cannot change, and
-    the shared ``proximity_rearm_ratio``, ``max_age_vision_ms`` and ``max_amplitude_deg`` (as it
-    caps the withdraw) cannot move so that it fires less. The threshold is safer upward for a
-    sound or a voice (fires less) and downward for a close face (the withdraw fires earlier).
+    Rules cannot be removed, ``trigger`` and ``primitive`` are their identity, a disabled rule
+    cannot be enabled, and the threshold is safer upward for a sound or a voice (fires less) and
+    downward for a close face (the withdraw fires earlier).
+
+    A withdraw rule is protective: every field that affects it is frozen at runtime, in both
+    directions (``WITHDRAW_RULE_FIELDS``, and the shared settings in ``WITHDRAW_SHARED_FIELDS``
+    that the engine reads for it, plus ``audio`` when a sound drives it). It can only be changed
+    in the base config.
     """
     found: list[Violation] = []
 
@@ -330,13 +334,23 @@ def reflex_violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> li
             refuse(f"reflexes.rules.{name}", "present", "removed")
     protective = [r for r in base.values() if r.primitive == "withdraw" and r.enabled]
     ar, cr = approved.reflexes, candidate.reflexes
-    if protective and ar.enabled and not cr.enabled:
-        refuse("reflexes.enabled", True, False)
+    if protective:
+        shared = list(WITHDRAW_SHARED_FIELDS)
+        if any(r.trigger == "loud_onset" for r in protective):
+            shared.append("audio")
+        for attr in shared:
+            if getattr(ar, attr) != getattr(cr, attr):
+                refuse(f"reflexes.{attr}", getattr(ar, attr), getattr(cr, attr))
     for rule in candidate.reflexes.rules:
         ref = base.get(rule.name)
         if ref is None:
             continue  # refused whole by the path check
         at = f"reflexes.rules.{rule.name}"
+        if ref.primitive == "withdraw":
+            for attr in WITHDRAW_RULE_FIELDS:
+                if getattr(rule, attr) != getattr(ref, attr):
+                    refuse(f"{at}.{attr}", getattr(ref, attr), getattr(rule, attr))
+            continue
         for attr in ("trigger", "primitive"):
             if getattr(rule, attr) != getattr(ref, attr):
                 refuse(f"{at}.{attr}", getattr(ref, attr), getattr(rule, attr))
@@ -344,30 +358,8 @@ def reflex_violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> li
             continue
         if rule.enabled and not ref.enabled:
             refuse(f"{at}.enabled", False, True)
-        if ref.primitive == "withdraw":
-            if ref.enabled and not rule.enabled:
-                refuse(f"{at}.enabled", True, False)
-            for attr in WITHDRAW_FROZEN:
-                if getattr(rule, attr) != getattr(ref, attr):
-                    refuse(f"{at}.{attr}", getattr(ref, attr), getattr(rule, attr))
-        fires_earlier = rule.threshold < ref.threshold
-        fires_later = rule.threshold > ref.threshold
-        if (ref.trigger == "proximity" and fires_later) or (
-            ref.trigger != "proximity" and fires_earlier
-        ):
+        if rule.threshold < ref.threshold:  # a sound or a voice: lower fires more
             refuse(f"{at}.threshold", ref.threshold, rule.threshold)
-    if protective:
-        if cr.proximity_rearm_ratio < ar.proximity_rearm_ratio:
-            refuse(
-                "reflexes.proximity_rearm_ratio", ar.proximity_rearm_ratio, cr.proximity_rearm_ratio
-            )
-        if cr.max_age_vision_ms < ar.max_age_vision_ms:
-            refuse("reflexes.max_age_vision_ms", ar.max_age_vision_ms, cr.max_age_vision_ms)
-        if any(
-            min(r.amplitude_deg, cr.max_amplitude_deg) < min(r.amplitude_deg, ar.max_amplitude_deg)
-            for r in protective
-        ):
-            refuse("reflexes.max_amplitude_deg", ar.max_amplitude_deg, cr.max_amplitude_deg)
     return found
 
 

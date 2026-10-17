@@ -50,6 +50,9 @@ def rule(**kw) -> dict:
     return base | kw
 
 
+PROXIMITY = rule(name="w", trigger="proximity", primitive="withdraw", threshold=0.4, cooldown_s=0)
+
+
 class Rig:
     """A motion loop on a mock driver with the engine hooked in, on a simulated clock.
 
@@ -211,52 +214,71 @@ def test_a_withdraw_cannot_be_removed_or_switched_off_as_a_whole():
     }
 
 
-def test_a_withdraw_rule_is_frozen_except_for_firing_earlier():
-    base = dict(PROXIMITY, cooldown_s=4, duration_ms=500, amplitude_deg=15)
-    approved = cfg_rules(base)
-    for change in (
-        {"cooldown_s": 9},
-        {"cooldown_s": 1},
-        {"duration_ms": 300},
-        {"amplitude_deg": 5},
-        {"amplitude_deg": 20},
-        {"suppress_with_minor": True},
-    ):
-        assert flagged(approved, cfg_rules(base | change)) == set(change), change
-    assert flagged(approved, cfg_rules(base | {"threshold": 0.3})) == set()
+WITHDRAW_BASE = dict(PROXIMITY, cooldown_s=4, duration_ms=500, amplitude_deg=15)
+RULE_CHANGES = {
+    "enabled": False,
+    "threshold": [0.3, 0.6],
+    "amplitude_deg": [5, 20],
+    "cooldown_s": [1, 9],
+    "duration_ms": [300, 700],
+    "suppress_with_minor": True,
+}
+SHARED_CHANGES = {
+    "max_amplitude_deg": [10, 90],
+    "max_age_ms": [100, 400],
+    "max_age_vision_ms": [100, 400],
+    "command_ttl_ms": [50, 200],
+    "attack_fraction": [0.1, 0.4],
+    "release_fraction": [0.2, 0.5],
+    "proximity_rearm_ratio": [0.5, 0.95],
+    "enabled": False,
+}
 
 
-def test_shared_reflex_settings_cannot_weaken_an_enabled_withdraw():
-    approved = RoboEmotConfig.model_validate(
-        {"reflexes": {"rules": [PROXIMITY | {"amplitude_deg": 30}], "max_amplitude_deg": 45}}
+def values(x):
+    return x if isinstance(x, list) else [x]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"), [(f, v) for f, x in RULE_CHANGES.items() for v in values(x)]
+)
+def test_every_field_of_a_withdraw_rule_is_frozen_in_both_directions(field, value):
+    approved = cfg_rules(WITHDRAW_BASE)
+    assert flagged(approved, cfg_rules(WITHDRAW_BASE | {field: value})) == {field}
+
+
+@pytest.mark.parametrize(
+    ("field", "value"), [(f, v) for f, x in SHARED_CHANGES.items() for v in values(x)]
+)
+def test_every_shared_setting_a_withdraw_reads_is_frozen_in_both_directions(field, value):
+    approved = RoboEmotConfig.model_validate({"reflexes": {"rules": [WITHDRAW_BASE]}})
+    cand = RoboEmotConfig.model_validate({"reflexes": {"rules": [WITHDRAW_BASE], field: value}})
+    assert {v.path for v in violations(approved, cand)} == {f"reflexes.{field}"}
+
+
+def test_a_loud_withdraw_also_freezes_the_microphone_settings():
+    loud = dict(WITHDRAW_BASE, trigger="loud_onset", threshold=6.0)
+    approved = cfg_rules(loud)
+    cand = RoboEmotConfig.model_validate(
+        {"reflexes": {"rules": [loud], "audio": {"floor_half_life_s": 9}}}
     )
+    assert {v.path for v in violations(approved, cand)} == {"reflexes.audio"}
 
-    def paths(**top):
-        cand = RoboEmotConfig.model_validate(
-            {"reflexes": {"rules": [PROXIMITY | {"amplitude_deg": 30}]} | top}
-        )
-        return {v.path for v in violations(approved, cand)}
 
-    assert paths(proximity_rearm_ratio=0.5) == {"reflexes.proximity_rearm_ratio"}
-    assert paths(max_age_vision_ms=100) == {"reflexes.max_age_vision_ms"}
-    assert "reflexes.max_amplitude_deg" in paths(max_amplitude_deg=10)
-    assert "reflexes.max_amplitude_deg" not in paths(max_amplitude_deg=35)  # still above 30
-    off = RoboEmotConfig.model_validate({"reflexes": {"rules": [dict(PROXIMITY, enabled=False)]}})
-    assert not {
-        v.path
-        for v in violations(
-            off,
-            RoboEmotConfig.model_validate(
-                {
-                    "reflexes": {
-                        "rules": [dict(PROXIMITY, enabled=False)],
-                        "proximity_rearm_ratio": 0.5,
-                    }
-                }
-            ),
-        )
-        if "rearm" in v.path
-    }
+def test_a_new_reflex_setting_must_be_classified_as_shared_with_a_withdraw_or_not():
+    from roboemot.config.schema import WITHDRAW_RULE_FIELDS, WITHDRAW_SHARED_FIELDS
+
+    assert set(WITHDRAW_RULE_FIELDS) == set(ReflexRule.model_fields) - {"name"}
+    not_read_by_a_withdraw = {"antenna_ratio", "motion_eps_deg", "latency_window", "audio", "rules"}
+    assert set(ReflexConfig.model_fields) == set(WITHDRAW_SHARED_FIELDS) | not_read_by_a_withdraw
+
+
+def test_without_an_enabled_withdraw_the_shared_settings_keep_their_directions():
+    approved = cfg_rules(rule(name="a"))
+    cand = RoboEmotConfig.model_validate(
+        {"reflexes": {"rules": [rule(name="a")], "proximity_rearm_ratio": 0.5, "enabled": False}}
+    )
+    assert violations(approved, cand) == []
 
 
 # --------------------------------------------------------------------------- loud onset
@@ -412,9 +434,6 @@ def face(stamp: float, height: float, y1: float = 0.2) -> FacePercept:
         gender="unknown", gender_source="none", attribute_confidence=0.9, possible_minor=False,
         new_track=False,
     )  # fmt: skip
-
-
-PROXIMITY = rule(name="w", trigger="proximity", primitive="withdraw", threshold=0.4, cooldown_s=0)
 
 
 def test_a_close_face_withdraws_with_the_vision_budget_and_re_arms_when_it_leaves():
@@ -662,9 +681,6 @@ def test_the_threshold_may_only_move_the_safe_way_per_trigger():
     voice = cfg_rules(dict(VOICE, name="a", threshold=3.0))
     assert "threshold" in flagged(voice, cfg_rules(dict(VOICE, name="a", threshold=1.0)))
     assert "threshold" not in flagged(voice, cfg_rules(dict(VOICE, name="a", threshold=8.0)))
-    close = cfg_rules(dict(PROXIMITY, threshold=0.4))
-    assert "threshold" in flagged(close, cfg_rules(dict(PROXIMITY, threshold=0.6)))  # fires later
-    assert "threshold" not in flagged(close, cfg_rules(dict(PROXIMITY, threshold=0.3)))
 
 
 def test_a_minor_appearing_mid_turn_cuts_the_turn_off_on_the_next_tick():

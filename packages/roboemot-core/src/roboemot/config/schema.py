@@ -689,6 +689,19 @@ REFLEX_THRESHOLD_RANGE = {
 REFLEX_DURATION_MS = (100.0, 800.0)  # SPEC 10: a reflex pre-empts lower sources for 100 to 800 ms
 
 
+# The protective withdraw reflex is frozen at runtime (config/stack.py): its own fields, and the
+# shared ``reflexes`` settings the engine reads for it. A new field must be added to one of these
+# (or to the explicit "does not affect a withdraw" list in the tests).
+WITHDRAW_RULE_FIELDS = (
+    "enabled", "trigger", "primitive", "threshold", "amplitude_deg", "cooldown_s",
+    "duration_ms", "suppress_with_minor",
+)  # fmt: skip
+WITHDRAW_SHARED_FIELDS = (
+    "enabled", "max_amplitude_deg", "max_age_ms", "max_age_vision_ms", "command_ttl_ms",
+    "attack_fraction", "release_fraction", "proximity_rearm_ratio",
+)  # fmt: skip
+
+
 class ReflexRule(Strict):
     name: str = param("", "Rule name (unique; shown in the debug report)")
     enabled: bool = param(
