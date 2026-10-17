@@ -147,6 +147,10 @@ def test_robot_link_recovers_after_daemon_backend_restart(mini):
         assert events == ["link.robot.lost", "link.robot.restored"]
         # The MuJoCo backend ignores motor-mode changes (always "enabled"), so the motors-off
         # path is covered by unit tests (test_health.py); here streaming must simply resume.
+        # The new client reports None until its first daemon status arrives.
+        deadline = time.monotonic() + 5
+        while loop.driver.motors_enabled() is None and time.monotonic() < deadline:
+            time.sleep(0.1)
         assert loop.driver.motors_enabled() is True
         ticks = loop.ticks
         time.sleep(1.0)
@@ -388,8 +392,11 @@ class Scene:
     def __enter__(self):
         self.thread.start()
         deadline = time.monotonic() + 60
-        while self.app.bus is None and time.monotonic() < deadline:
+        # diagnostics is set last in RoboEmotApp.run, so the app is fully started once it exists.
+        while self.app.diagnostics is None and not self.errors and time.monotonic() < deadline:
             time.sleep(0.05)
+        assert not self.errors, self.errors
+        assert self.app.diagnostics is not None, "the app did not start within 60 s"
         self.app.bus.subscribe(
             "person.recognized", lambda m: self.recognized.append(m.payload.person_id)
         )
@@ -399,6 +406,7 @@ class Scene:
         self.stop_event.set()
         self.thread.join(30)
         assert not self.errors, self.errors
+        assert not self.thread.is_alive(), "the app did not stop within 30 s"
 
 
 def test_robot_turns_to_an_enrolled_person_and_names_them(mini, tmp_path, monkeypatch):
