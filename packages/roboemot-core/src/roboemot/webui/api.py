@@ -702,12 +702,13 @@ class WebApi:
         return Response(HTTPStatus.OK, {"cleared": int(port.purge_candidates())})
 
     def _tombstones_clear(self, req: Request) -> Response:
-        """Let a catalogue import bring back records the owner deleted (they hold no names)."""
+        """Let a catalogue import bring back records the owner deleted (PIN again)."""
         port = self._port()
         body = self._json_body(req)
-        v.only_keys(body, {"confirm"})
+        v.only_keys(body, {"confirm", "pin"})
         if not v.confirmed(body):
             raise ApiError(HTTPStatus.CONFLICT, "confirm_required")
+        self._check_pin(req, body.get("pin"))
         return Response(HTTPStatus.OK, {"cleared": int(port.clear_tombstones())})
 
 

@@ -374,7 +374,7 @@ async function catalogueView() {
       data.tombstones ? el("button", {
         type: "button",
         onclick: () => confirm(t("tombstones_clear_confirm")) && guarded(async () => {
-          const out = await api("POST", "/api/catalogue/tombstones/clear", { confirm: true });
+          const out = await api("POST", "/api/catalogue/tombstones/clear", { confirm: true, pin: takePin() });
           notice(t("tombstones_cleared", { n: out.cleared }));
           await catalogueView();
         }),

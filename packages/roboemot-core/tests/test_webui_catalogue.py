@@ -348,12 +348,15 @@ def test_clearing_candidates_needs_confirmation_and_the_pin(authed, catalogue, c
     assert resp.status == 200 and resp.json == {"cleared": 3}
 
 
-def test_tombstones_are_counted_and_cleared_with_a_confirmation(authed, catalogue):
+def test_tombstones_are_counted_and_cleared_with_confirmation_and_pin(authed, catalogue, clock):
     assert authed.request("GET", "/api/catalogue").json["tombstones"] == 2
     path = "/api/catalogue/tombstones/clear"
-    assert authed.request("POST", path, {}).status == 409
+    assert authed.request("POST", path, {"pin": PIN}).status == 409
+    assert authed.request("POST", path, {"confirm": True}).status == 400
+    assert authed.request("POST", path, {"confirm": True, "pin": "000000"}).status == 401
     assert catalogue.calls == []
-    resp = authed.request("POST", path, {"confirm": True})
+    clock.now += 5
+    resp = authed.request("POST", path, {"confirm": True, "pin": PIN})
     assert resp.status == 200 and resp.json == {"cleared": 2}
 
 
