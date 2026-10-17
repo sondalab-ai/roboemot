@@ -774,6 +774,23 @@ def test_a_face_frame_at_the_same_stamp_does_not_cancel_a_face_in_it():
     assert rig.stats("w")["fired"] == 1
 
 
+def test_a_close_face_arriving_during_the_watchdog_hold_still_withdraws_once_the_hold_ends():
+    """SPEC 10, 12: the hold drops the trigger; it must not consume the arm, or the face
+    (still close) would not withdraw until it had left and come back."""
+    rig = Rig(cfg_with(PROXIMITY))
+    rig.tick()
+    stall(rig, 0.4)
+    assert rig.loop.core.holding
+    rig.bus.publish("percept.face", face(rig.t, 0.6), rig.t)
+    stall(rig, 0.1)
+    assert rig.stats("w")["fired"] == 0 and rig.loop.core.holding
+    rig.tick()  # the app is back
+    rig.bus.publish("percept.face", face(rig.t, 0.6), rig.t)
+    rig.tick(3)
+    assert not rig.loop.core.holding
+    assert rig.stats("w")["fired"] == 1
+
+
 NEUTRAL = {
     ReflexConfig: {
         "release_fraction", "proximity_rearm_ratio", "latency_window", "rules",
