@@ -54,6 +54,7 @@ from roboemot.vision.minor import MinorPresence
 from roboemot.vision.service import Perception, default_stages, open_perception, world_snapshot
 from roboemot.webui import Server, make_server
 from roboemot.webui.catalogue import open_catalogue
+from roboemot.webui.routes import RouteChecker
 from roboemot.world import (
     Observation,
     ObserveResult,
@@ -342,6 +343,11 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 paths.data_dir(cfg.data_dir),
                 robot_hosted=manifest.robot.profile is not None,
                 catalogue=self.catalogue,
+                routes=RouteChecker(
+                    stack.effective,
+                    paths.route_checks_path(cfg.data_dir),
+                    router=lambda: self.traits_worker.router if self.traits_worker else None,
+                ),
             )
         except Exception as exc:
             log.error("web UI not started: %s", type(exc).__name__)

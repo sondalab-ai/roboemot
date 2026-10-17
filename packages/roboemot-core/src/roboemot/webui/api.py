@@ -28,11 +28,13 @@ from http.cookies import CookieError, SimpleCookie
 from typing import Any, NoReturn, Protocol
 
 from roboemot.config.schema import RoboEmotConfig, WebUIConfig
+from roboemot.llm.conformance import RouteBudgetExhausted
 from roboemot.registry.records import Consent, ConsentError
 
 from . import validation as v
 from .auth import LoginLimiter, PinStore, Sessions
 from .guard import same_origin
+from .routes import RouteBusy
 from .strings import STRINGS, language_for
 
 log = logging.getLogger(__name__)
@@ -83,6 +85,18 @@ class EnrollmentPort(Protocol):
     def merge(self, keep_id: str, drop_id: str) -> Any: ...
     def delete(self, record_id: str) -> Any: ...
     def quarantined(self) -> list[str]: ...
+
+
+class RoutesPort(Protocol):
+    """What the web UI needs from ``roboemot.webui.routes.RouteChecker`` (SPEC 8).
+
+    ``check`` raises ``KeyError`` for an unknown route, ``RouteBusy``,
+    ``RouteBudgetExhausted`` or ``TimeoutError``. The UI copies what these return as is: they
+    hold no key, prompt or reply text.
+    """
+
+    def list_routes(self) -> list[dict[str, Any]]: ...
+    def check(self, name: str) -> dict[str, Any]: ...
 
 
 class CataloguePort(Protocol):
@@ -175,9 +189,11 @@ class WebApi:
         clock: Callable[[], float] = time.monotonic,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         catalogue: CataloguePort | None = None,
+        routes: RoutesPort | None = None,
     ) -> None:
         self.service = service
         self.catalogue = catalogue
+        self.routes = routes
         self.diagnostics = diagnostics
         self._cfg = cfg
         self.pins = pin_store
@@ -275,6 +291,7 @@ class WebApi:
             ("GET", "/api/registry/quarantined"): self._quarantined,
             ("POST", "/api/registry/quarantined/purge"): self._purge,
             ("GET", "/api/debug"): self._debug,
+            ("GET", "/api/routes"): self._routes,
             ("GET", "/api/catalogue"): self._catalogue,
             ("POST", CATALOGUE_IMPORT): self._catalogue_import,
             ("POST", "/api/catalogue/candidates/clear"): self._catalogue_clear,
@@ -282,6 +299,9 @@ class WebApi:
         }
         if (method, path) in simple:
             return simple[(method, path)](req)
+        check = re.fullmatch(r"/api/routes/([A-Za-z0-9_-]{1,64})/check", path)
+        if method == "POST" and check:
+            return self._route_check(check.group(1))
         confirm = re.fullmatch(r"/api/catalogue/([^/]+)/confirm", path)
         if method == "POST" and confirm:
             return self._catalogue_confirm(req, v.record_id(confirm.group(1)))
@@ -567,6 +587,32 @@ class WebApi:
                         "ok": False,
                         "error": "withheld",
                     }
+        return Response(HTTPStatus.OK, report)
+
+    # ------------------------------------------------------------------ llm routes
+
+    def _routes_port(self) -> RoutesPort:
+        if self.routes is None:
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "routes_unavailable")
+        return self.routes
+
+    def _routes(self, req: Request) -> Response:
+        """Routes by name, model, host and minors flag, with the last conformance report."""
+        return Response(HTTPStatus.OK, {"routes": self._routes_port().list_routes()})
+
+    def _route_check(self, name: str) -> Response:
+        """Run the conformance test on one route; advisory, it does not enable or gate it."""
+        port = self._routes_port()
+        try:
+            report = port.check(name)
+        except KeyError as exc:
+            raise ApiError(HTTPStatus.NOT_FOUND, "route_unknown") from exc
+        except RouteBusy as exc:
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "route_busy") from exc
+        except RouteBudgetExhausted as exc:
+            raise ApiError(HTTPStatus.CONFLICT, "route_budget") from exc
+        except TimeoutError as exc:
+            raise ApiError(HTTPStatus.GATEWAY_TIMEOUT, "route_timeout") from exc
         return Response(HTTPStatus.OK, report)
 
     # ------------------------------------------------------------------ catalogue

@@ -381,6 +381,39 @@ async function catalogueView() {
       }, t("tombstones_clear", { n: data.tombstones })) : []));
 }
 
+async function routesView() {
+  const view = document.getElementById("view");
+  view.replaceChildren();
+  const data = await api("GET", "/api/routes");
+  const verdict = (c) => el("li", {}, t("check_" + c.name) + ": " + t("status_" + c.status) + " (" + c.reason + ")");
+  const show = (box, report) => {
+    box.replaceChildren(
+      el("p", {}, t(report.ok ? "route_ok" : "route_failed") + ". " + t("route_at", { at: report.checked_at })),
+      el("ul", {}, report.checks.map(verdict)));
+  };
+  const rows = data.routes.map((r) => {
+    const box = el("div", { role: "status" });
+    if (r.last_check) show(box, r.last_check); else box.append(el("p", { class: "muted" }, t("route_never")));
+    const button = el("button", {
+      type: "button",
+      onclick: () => guarded(async () => {
+        button.disabled = true;
+        notice(t("route_checking"));
+        try {
+          show(box, await api("POST", "/api/routes/" + encodeURIComponent(r.name) + "/check", {}));
+          notice("");
+        } finally { button.disabled = false; }
+      }),
+    }, t("route_check"));
+    return el("section", {},
+      el("h3", {}, r.name),
+      el("p", { class: "muted" }, r.model + " @ " + r.host + (r.allowed_for_minors ? ", " + t("route_minors") : "")),
+      button, box);
+  });
+  view.append(el("section", {}, el("h2", {}, t("tab_routes")), el("p", { class: "muted" }, t("routes_intro"))),
+    ...(rows.length ? rows : [el("p", { class: "muted" }, t("routes_none"))]));
+}
+
 async function debugView() {
   const view = document.getElementById("view");
   view.replaceChildren();
@@ -397,6 +430,7 @@ const TABS = {
   enroll: enrollmentView,
   registry: registryView,
   catalogue: catalogueView,
+  routes: routesView,
   debug: debugView,
 };
 
