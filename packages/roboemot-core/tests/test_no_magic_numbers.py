@@ -11,6 +11,8 @@ from pathlib import Path
 SRC = Path(__file__).resolve().parents[1] / "src" / "roboemot"
 BEHAVIOUR_MODULES = [
     "affect/__init__.py",
+    "affect/appraisal.py",
+    "affect/runner.py",
     "circadian/model.py",
     "circadian/light.py",
     "voice/prosody.py",
