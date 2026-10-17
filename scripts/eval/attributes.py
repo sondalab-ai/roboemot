@@ -14,7 +14,13 @@ and the result is ``unknown`` (counted). FairFace ages are bins; 10-19 cannot be
 and is scored as ``teen``. The minor-safety metric uses the shipped ``possible_minor``.
 
     python -I scripts/eval/attributes.py run --precision int8 --start 0 --count 700
+    python -I scripts/eval/attributes.py run --precision fp32 --full --max-seconds 3000
     python -I scripts/eval/attributes.py report --out attributes
+
+``--full`` runs all validation faces and appends one JSON line per face to
+``attrs_<precision>_full.jsonl`` in the scratch folder, so a stopped run resumes where it ended
+(``--max-seconds`` stops cleanly). The report then also prints the 1,400-face subset of the
+same run, so subset and full-set numbers come from identical per-face results.
 """
 
 from __future__ import annotations
@@ -101,7 +107,18 @@ def run(args: argparse.Namespace) -> None:
     stages = common.load_stages(cfg, profile=profile, appearance=False, objects=False)
     parquet = next(PARQUET_DIR.glob("validation-*.parquet"))
     table = pq.ParquetFile(parquet).read().to_pydict()
-    chosen = subset(len(table["age"]), SUBSET, SEED)[args.start : args.start + args.count]
+    total = len(table["age"])
+    if args.full:
+        cache = common.SCRATCH / f"{SCRATCH_PREFIX}_{args.precision}_full.jsonl"
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.touch()
+        if cache.stat().st_size and not cache.read_text().endswith("\n"):
+            cache.open("a").write("\n")
+        done = {r["idx"] for r in read_jsonl(cache)}
+        chosen = np.array([i for i in range(total) if i not in done])
+        common.log(f"{args.precision} full: {len(done)} cached, {len(chosen)} to run")
+    else:
+        chosen = subset(total, SUBSET, SEED)[args.start : args.start + args.count]
     registry = Registry(
         FileStore(common.SCRATCH / "attrs-registry", allow_plaintext=True), cfg.identity
     )
@@ -123,6 +140,10 @@ def run(args: argparse.Namespace) -> None:
     rows = []
     started = time.perf_counter()
     for n, i in enumerate(chosen):
+        if args.full and time.perf_counter() - started > args.max_seconds:
+            common.log(f"stopping after {n} faces: --max-seconds reached")
+            break
+        face_started = time.perf_counter()
         original = cv2.imdecode(
             np.frombuffer(table["image"][i]["bytes"], np.uint8), cv2.IMREAD_COLOR
         )
@@ -140,20 +161,26 @@ def run(args: argparse.Namespace) -> None:
         samples = [
             (s.age_group, s.age_confidence, s.gender, s.gender_confidence) for s in recorder.samples
         ]
-        rows.append(
-            {
-                "idx": int(i),
-                "face": last is not None,
-                "job": len(samples) == cfg.vision.attribute_crops,
-                "age": last.age_group if last else "unknown",
-                "gender": last.gender if last else "unknown",
-                "crops": samples,
-            }
-        )
+        row = {
+            "idx": int(i),
+            "face": last is not None,
+            "job": len(samples) == cfg.vision.attribute_crops,
+            "age": last.age_group if last else "unknown",
+            "gender": last.gender if last else "unknown",
+            "crops": samples,
+            "t": time.perf_counter() - face_started,
+        }
+        rows.append(row)
+        if args.full:
+            with cache.open("a") as handle:
+                handle.write(json.dumps(row) + "\n")
         if n % 50 == 0:
             common.log(f"{args.precision} {n}/{len(chosen)} {time.perf_counter() - started:.0f}s")
     elapsed = time.perf_counter() - started
     pipeline.close()
+    if args.full:
+        common.log(f"wrote {len(rows)} rows to the cache, {elapsed:.0f}s")
+        return
     out = common.SCRATCH / f"{SCRATCH_PREFIX}_{args.precision}_{args.start}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     meta = {
@@ -167,6 +194,17 @@ def run(args: argparse.Namespace) -> None:
     common.log(f"wrote {len(rows)} rows, {elapsed:.0f}s, {elapsed / max(1, len(rows)):.2f}s/face")
 
 
+def read_jsonl(path: Path) -> list[dict]:
+    """Rows of a resume cache; a last line cut short by a killed run is dropped."""
+    rows = []
+    for line in path.read_text().splitlines():
+        try:
+            rows.append(json.loads(line))
+        except ValueError:
+            continue
+    return rows
+
+
 def load_rows(precision: str) -> tuple[dict[int, dict], list[dict]]:
     """Merged per-face rows of all parts of one precision, keyed by dataset index."""
     rows: dict[int, dict] = {}
@@ -175,6 +213,18 @@ def load_rows(precision: str) -> tuple[dict[int, dict], list[dict]]:
         data = json.loads(path.read_text())
         metas.append(data["meta"])
         rows.update({r["idx"]: r for r in data["rows"]})
+    cache = common.SCRATCH / f"{SCRATCH_PREFIX}_{precision}_full.jsonl"
+    if cache.exists():
+        full = read_jsonl(cache)
+        metas.append(
+            {
+                "precision": precision,
+                "full_run": True,
+                "count": len(full),
+                "seconds": sum(r.get("t", 0.0) for r in full),
+            }
+        )
+        rows.update({r["idx"]: r for r in full})
     return rows, metas
 
 
@@ -257,6 +307,70 @@ def crop_stats(rows: list[dict], cfg) -> dict:
     }
 
 
+def paired(flags_a: list[bool], flags_b: list[bool]) -> dict:
+    """INT8 (a) minus FP32 (b) on the same faces: rates, difference, 95% CI and exact McNemar p.
+
+    ``only_int8`` / ``only_fp32`` count the faces where just one precision has the property. The
+    difference interval is the normal one on the paired discordant counts; ``p_exact`` is the
+    two-sided exact binomial test of the discordant counts (ties give 1).
+    """
+    from math import comb, sqrt
+
+    n = len(flags_a)
+    only_a = sum(x and not y for x, y in zip(flags_a, flags_b, strict=True))
+    only_b = sum(y and not x for x, y in zip(flags_a, flags_b, strict=True))
+    d = (only_a - only_b) / n if n else 0.0
+    se = sqrt(max(0.0, only_a + only_b - (only_a - only_b) ** 2 / n)) / n if n else 0.0
+    m = only_a + only_b
+    tail = sum(comb(m, k) for k in range(min(only_a, only_b) + 1)) / 2**m if m else 1.0
+    return {
+        "n": n,
+        "int8": common.rate(sum(flags_a), n),
+        "fp32": common.rate(sum(flags_b), n),
+        "only_int8": only_a,
+        "only_fp32": only_b,
+        "difference_int8_minus_fp32": d,
+        "difference_ci95": [d - common.WILSON_Z * se, d + common.WILSON_Z * se],
+        "p_exact": min(1.0, 2 * tail),
+    }
+
+
+def paired_table(a: dict[int, dict], b: dict[int, dict], ids: list[int], truth: dict) -> dict:
+    """The key safety and accuracy properties as paired INT8-vs-FP32 comparisons."""
+    adult_like = ("adult", "senior")
+    props = {
+        "minor_labelled_adult_or_senior": (
+            lambda x, t: x["age"] in adult_like,
+            lambda t: t["bin"] in MINOR_BINS,
+        ),
+        "child_labelled_adult_or_senior": (
+            lambda x, t: x["age"] in adult_like,
+            lambda t: t["bin"] in CHILD_BINS,
+        ),
+        "age_unknown": (lambda x, t: x["age"] == "unknown", lambda t: True),
+        "age_group_wrong_of_all": (
+            lambda x, t: x["age"] != "unknown" and x["age"] != t["group"],
+            lambda t: True,
+        ),
+        "gender_unknown": (lambda x, t: x["gender"] == "unknown", lambda t: True),
+        "gender_wrong_of_all": (
+            lambda x, t: x["gender"] != "unknown" and x["gender"] != t["gender"],
+            lambda t: True,
+        ),
+        "adult_or_senior_treated_as_possible_minor": (
+            lambda x, t: x["age"] not in adult_like,
+            lambda t: t["group"] in adult_like,
+        ),
+    }
+    out = {}
+    for name, (flag, select) in props.items():
+        keep = [i for i in ids if select(truth[i])]
+        out[name] = paired(
+            [flag(a[i], truth[i]) for i in keep], [flag(b[i], truth[i]) for i in keep]
+        )
+    return out
+
+
 def report(args: argparse.Namespace) -> None:
     import pyarrow.parquet as pq
 
@@ -274,9 +388,9 @@ def report(args: argparse.Namespace) -> None:
     }
     result: dict = {
         "protocol": {
-            "dataset": "FairFace validation (10,954 faces; one image per face)",
-            "subset": f"seeded random {SUBSET} (seed {SEED}, the M1 spike's indices); each "
-            "precision ran on the faces listed in its part files",
+            "dataset": f"FairFace validation ({len(truth):,} faces; one image per face)",
+            "subset": f"seeded random {SUBSET} (seed {SEED}, the M1 spike's indices); "
+            "`subset_of_this_run` and `paired_int8_vs_fp32_subset` restrict a full run to it",
             "crops_per_track": cfg.vision.attribute_crops,
             "estimate_frames_min": cfg.identity.estimate_frames_min,
             "estimate_confidence_min": cfg.identity.estimate_confidence_min,
@@ -330,6 +444,23 @@ def report(args: argparse.Namespace) -> None:
             "per_crop_predictions": crop_stats(data, cfg),
         }
     fp32 = runs["fp32"][0]
+    in_subset = set(subset(len(truth), SUBSET, SEED).tolist())
+    for precision, (rows, _) in runs.items():
+        sub = [rows[i] for i in sorted(rows) if i in in_subset]
+        if rows and len(rows) > len(sub):
+            result[precision]["subset_of_this_run"] = bucket(sub, truth)
+    if fp32 and int8_rows:
+        both = sorted(set(fp32) & set(int8_rows))
+        result["paired_int8_vs_fp32_all_common"] = paired_table(int8_rows, fp32, both, truth)
+        result["paired_int8_vs_fp32_subset"] = paired_table(
+            int8_rows, fp32, [i for i in both if i in in_subset], truth
+        )
+        for key in ("race", "gender"):
+            groups = RACES if key == "race" else GENDERS
+            result[f"paired_by_{key}"] = {
+                g: paired_table(int8_rows, fp32, [i for i in both if truth[i][key] == g], truth)
+                for g in groups
+            }
     if fp32 and int8_rows:
         common_idx = sorted(set(fp32) & set(int8_rows))
         result["int8_vs_fp32_same_faces"] = {
@@ -353,7 +484,9 @@ def main() -> None:
     r = sub.add_parser("run")
     r.add_argument("--precision", choices=["int8", "fp32"], required=True)
     r.add_argument("--start", type=int, default=0)
-    r.add_argument("--count", type=int, required=True)
+    r.add_argument("--count", type=int, default=0)
+    r.add_argument("--full", action="store_true")
+    r.add_argument("--max-seconds", type=float, default=float("inf"))
     r.add_argument("--threads", type=int, default=2)
     p = sub.add_parser("report")
     p.add_argument("--out", required=True)

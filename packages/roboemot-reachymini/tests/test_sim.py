@@ -388,8 +388,11 @@ class Scene:
     def __enter__(self):
         self.thread.start()
         deadline = time.monotonic() + 60
-        while self.app.bus is None and time.monotonic() < deadline:
+        # diagnostics is set last in RoboEmotApp.run, so the app is fully started once it exists.
+        while self.app.diagnostics is None and not self.errors and time.monotonic() < deadline:
             time.sleep(0.05)
+        assert not self.errors, self.errors
+        assert self.app.diagnostics is not None, "the app did not start within 60 s"
         self.app.bus.subscribe(
             "person.recognized", lambda m: self.recognized.append(m.payload.person_id)
         )
@@ -399,6 +402,7 @@ class Scene:
         self.stop_event.set()
         self.thread.join(30)
         assert not self.errors, self.errors
+        assert not self.thread.is_alive(), "the app did not stop within 30 s"
 
 
 def test_robot_turns_to_an_enrolled_person_and_names_them(mini, tmp_path, monkeypatch):
