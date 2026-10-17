@@ -1,0 +1,82 @@
+"""The reflex engine wired into the app (SPEC 10, 12, 12A, 13), against a mocked SDK client."""
+
+from __future__ import annotations
+
+import threading
+
+import numpy as np
+from test_app_perception import data, fake_mini, new_app, wait_for  # noqa: F401  (data: fixture)
+
+QUIET, LOUD = 0.02, 0.5
+
+
+class ScriptedMini:
+    """A mini whose microphone returns quiet chunks until ``bang`` is set, then one loud one."""
+
+    def __init__(self) -> None:
+        self.mini = fake_mini()
+        self.bang = threading.Event()
+        media = self.mini.media
+        media.audio = object()
+        media.get_audio_sample.side_effect = self._chunk
+
+    def _chunk(self):
+        level = LOUD if self.bang.is_set() else QUIET
+        self.bang.clear()
+        return np.full(160, level, np.float32)
+
+
+def run_app(app, mini):
+    stop, errors = threading.Event(), []
+
+    def target():
+        try:
+            app.run(mini, stop)
+        except Exception as exc:  # surfaced by the test
+            errors.append(exc)
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    return stop, thread, errors
+
+
+def test_the_debug_report_has_a_reflex_section_with_the_audio_state(data):  # noqa: F811
+    app = new_app()
+    stop, thread, errors = run_app(app, fake_mini())  # a MagicMock media: no usable chunks
+    try:
+        assert wait_for(lambda: app.diagnostics is not None and app.reflexes is not None)
+        assert wait_for(lambda: app.audio.snapshot()["state"] == "no_data")
+        section = app.diagnostics.report()["sections"]["roboemot.reflexes"]
+        assert section["ok"]
+        body = section["data"]
+        assert set(body["rules"]) == {"startle-loud", "withdraw-close", "turn-to-voice"}
+        assert body["audio"]["state"] == "no_data" and body["audio"]["reason"]
+        assert body["latency"] == {}
+    finally:
+        stop.set()
+        thread.join(timeout=10)
+    assert not errors and not thread.is_alive()
+    assert not [t for t in threading.enumerate() if t.name == "roboemot-audio"]
+
+
+def test_a_loud_sound_from_the_microphone_startles_through_the_motion_loop(data):  # noqa: F811
+    app = new_app()
+    scripted = ScriptedMini()
+    stop, thread, errors = run_app(app, scripted.mini)
+    try:
+        assert wait_for(lambda: app.reflexes is not None and app.audio is not None)
+        assert wait_for(lambda: app.audio.snapshot()["chunks"] > 20)  # the floor is learned
+        scripted.bang.set()
+        assert wait_for(lambda: app.reflexes.snapshot()["rules"]["startle-loud"]["fired"] == 1)
+        lat = app.reflexes.snapshot()["latency"]["loud_onset"]["command_ms"]
+        # SPEC 13 asks 100 ms at p95; the exact budget is asserted on a fake clock in core, here
+        # only that the path through real threads is nowhere near a stall.
+        assert lat["max"] < 250.0
+        report = app.diagnostics.report()["sections"]["roboemot.reflexes"]["data"]
+        assert report["audio"]["state"] == "running"
+    finally:
+        stop.set()
+        thread.join(timeout=10)
+    assert not errors and not thread.is_alive()
+    assert not [t for t in threading.enumerate() if t.name == "roboemot-audio"]
+    assert scripted.mini.media.stop_recording.called
