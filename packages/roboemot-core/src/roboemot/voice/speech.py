@@ -89,6 +89,7 @@ class SpeechOutput:
         self._wake: asyncio.Event | None = None
         self._main: asyncio.Task | None = None
         self._current: asyncio.Task | None = None
+        self._current_epoch = -1
         self._ready = threading.Event()
         self._closed = False
         self._last_utterance = 0
@@ -114,6 +115,7 @@ class SpeechOutput:
         loop, main = self._loop, self._main
         if loop is not None and main is not None:
             with contextlib.suppress(RuntimeError):
+                loop.call_soon_threadsafe(self.backend.cancel)
                 loop.call_soon_threadsafe(main.cancel)
         if self._thread is not None:
             self._thread.join(JOIN_TIMEOUT_S)
@@ -133,7 +135,10 @@ class SpeechOutput:
         self._wake = asyncio.Event()
         self._ready.set()
         cfg = self.config
-        await self.backend.warm(cfg.conversation.language, cfg.voice)
+        try:
+            await self.backend.warm(cfg.conversation.language, cfg.voice)
+        except Exception as exc:  # a failed warm-up must not end the output thread
+            log.warning("speech: warm-up failed: %s", type(exc).__name__)
         while True:
             with self._lock:
                 job = self._jobs.popleft() if self._jobs else None
@@ -143,6 +148,7 @@ class SpeechOutput:
                 continue
             if job.epoch != self._epoch:
                 continue
+            self._current_epoch = job.epoch
             self._current = asyncio.ensure_future(self._speak(job))
             await asyncio.wait({self._current})
 
@@ -205,22 +211,29 @@ class SpeechOutput:
         return job.id
 
     def stop(self) -> None:
-        """Barge-in: cut the audio now, drop the queue, cancel the synthesis in flight."""
+        """Barge-in: cut the audio now, drop the queue, cancel the synthesis in flight.
+
+        The epoch moves under the lock that guards every push, so a chunk already on its way
+        either was pushed before (and the sink flush below drops it) or sees the new epoch and
+        is discarded: nothing plays after ``stop`` returns. Only a sentence from before this
+        stop is cancelled; one said right after it is left alone."""
         with self._lock:
             self._epoch += 1
+            epoch = self._epoch
             self.sentences_dropped += len(self._jobs)
             self._jobs.clear()
         self.sink.stop()
         loop = self._loop
         if loop is not None:
             with contextlib.suppress(RuntimeError):
-                loop.call_soon_threadsafe(self._cancel_current)
+                loop.call_soon_threadsafe(self._cancel_before, epoch)
 
     def snapshot(self) -> dict[str, Any]:
         """Counts and timings for the debug report; never text."""
-        lat = list(self._latencies)
+        with self._lock:
+            lat, queued = list(self._latencies), len(self._jobs)
         return {
-            "queued": len(self._jobs),
+            "queued": queued,
             "spoken": self.sentences_spoken,
             "dropped": self.sentences_dropped,
             "failures": self.failures,
@@ -237,10 +250,30 @@ class SpeechOutput:
             with contextlib.suppress(RuntimeError):
                 loop.call_soon_threadsafe(wake.set)
 
-    def _cancel_current(self) -> None:
-        self.backend.cancel()
-        if self._current is not None and not self._current.done():
-            self._current.cancel()
+    def _cancel_before(self, epoch: int) -> None:
+        """Cancel the sentence in flight if it was queued before the stop that moved the epoch to
+        ``epoch``. Cancelling its task closes its backend generator, which cancels that request
+        only (the Piper worker is told to skip it; an HTTP stream is closed)."""
+        task = self._current
+        if task is not None and not task.done() and self._current_epoch < epoch:
+            task.cancel()
+
+    def _minor(self) -> bool:
+        """Whether a minor is present now; fail closed (True) if the signal cannot be read."""
+        try:
+            return bool(self._minor_present())
+        except Exception as exc:
+            log.warning("speech: minor signal failed, assuming a minor: %s", type(exc).__name__)
+            return True
+
+    def _push(self, job: _Job, samples: np.ndarray, rate_hz: int) -> bool:
+        """Push unless a stop happened since ``job`` was queued. The check and the push are one
+        step under the lock ``stop`` takes to move the epoch."""
+        with self._lock:
+            if job.epoch != self._epoch:
+                return False
+            self.sink.push_audio_sample(samples, rate_hz)
+            return True
 
     async def _speak(self, job: _Job) -> None:
         cfg, first = self.config, True
@@ -250,17 +283,18 @@ class SpeechOutput:
                 job.delivery,
                 language=job.language,
                 voice=cfg.voice,
-                minor_present=self._minor_present(),
+                minor_present=self._minor(),
             ):
-                if job.epoch != self._epoch:
-                    return
                 if first:
                     first = False
-                    self._pad(job, chunk.rate_hz)
-                    self._latencies.append((self.clock() - job.said_at) * MS_PER_S)
+                    if not self._pad(job, chunk.rate_hz):
+                        return
+                    with self._lock:
+                        self._latencies.append((self.clock() - job.said_at) * MS_PER_S)
                     log.debug("speech %d: first audio after %.0f ms", job.id, self._latencies[-1])
                 self._last_rate_hz = chunk.rate_hz
-                self.sink.push_audio_sample(chunk.samples, chunk.rate_hz)
+                if not self._push(job, chunk.samples, chunk.rate_hz):
+                    return
             self.sentences_spoken += 1
         except asyncio.CancelledError:
             raise
@@ -273,13 +307,15 @@ class SpeechOutput:
         finally:
             self._last_utterance = job.utterance
 
-    def _pad(self, job: _Job, rate_hz: int) -> None:
-        """Silence between two sentences of one answer, less the idle gap already there."""
+    def _pad(self, job: _Job, rate_hz: int) -> bool:
+        """Silence between two sentences of one answer, less the idle gap already there.
+        False if a stop made the sentence stale."""
         if job.utterance != self._last_utterance:
-            return
+            return job.epoch == self._epoch
         pause_s = self.config.voice.sentence_pause_ms / MS_PER_S * job.delivery.pause_scale
         playing_until = getattr(self.sink, "playing_until", None)
         if callable(playing_until):
             pause_s -= max(0.0, self.clock() - playing_until())
         if pause_s > 0:
-            self.sink.push_audio_sample(np.zeros(round(pause_s * rate_hz), np.float32), rate_hz)
+            return self._push(job, np.zeros(round(pause_s * rate_hz), np.float32), rate_hz)
+        return job.epoch == self._epoch

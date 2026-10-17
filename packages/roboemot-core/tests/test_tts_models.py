@@ -1,8 +1,8 @@
 """SPEC 8, stage 7: the real Piper worker (opt in with ``-m models``).
 
 Needs a Piper virtualenv (``ROBOEMOT_PIPER_PYTHON``, else the installer's default under the app
-data folder) and the voice files (``ROBOEMOT_PIPER_VOICES``, else ``voice/piper`` in the models
-folder). Skipped when either is missing.
+data folder) and the verified voice models (``roboemot models fetch --voice``; or a plain folder
+in ``ROBOEMOT_PIPER_VOICES``). Skipped when either is missing.
 """
 
 from __future__ import annotations
@@ -15,8 +15,8 @@ import numpy as np
 import pytest
 from roboemot import paths
 from roboemot.config.schema import PiperConfig, RoboEmotConfig
-from roboemot.vision import models
-from roboemot.voice.piper_backend import PiperBackend
+from roboemot.voice import models as voice_models
+from roboemot.voice.piper_backend import PiperBackend, manifest_voice_files
 from roboemot.voice.prosody import Delivery
 
 pytestmark = pytest.mark.models
@@ -29,24 +29,33 @@ SENTENCES = {
 FIRST_AUDIO_BUDGET_S = 2.0  # SPEC 13: end of speech to first TTS audio, of which Piper is a part
 
 
-def piper_setup() -> tuple[Path, Path]:
+def piper_setup():
+    """Interpreter and voice resolver. ``ROBOEMOT_PIPER_VOICES`` points at a plain folder of
+    ``<voice>.onnx`` files (no registry markers); else the fetched, verified voice models."""
     python = Path(os.environ.get("ROBOEMOT_PIPER_PYTHON") or paths.piper_python(CFG.data_dir))
-    voices = Path(
-        os.environ.get("ROBOEMOT_PIPER_VOICES")
-        or models.models_dir(CFG.vision.models_dir, CFG.data_dir) / "voice" / "piper"
-    )
     if not python.exists():
         pytest.skip(f"no Piper interpreter at {python}")
-    missing = [v for v in CFG.voice.voices.values() if not (voices / f"{v}.onnx").exists()]
-    if missing:
-        pytest.skip(f"voice files missing in {voices}: {missing}")
-    return python, voices
+    plain = os.environ.get("ROBOEMOT_PIPER_VOICES")
+    root = voice_models.models_dir(CFG.voice.models_dir, CFG.data_dir)
+
+    def resolve(name: str) -> tuple[Path, Path]:
+        base = Path(plain) if plain else root / "piper"
+        if not plain:
+            return manifest_voice_files(root)(name)
+        return base / f"{name}.onnx", base / f"{name}.onnx.json"
+
+    try:
+        for name in CFG.voice.voices.values():
+            resolve(name)
+    except (voice_models.ModelError, OSError) as exc:
+        pytest.skip(f"voice files unavailable: {exc}")
+    return python, resolve
 
 
 @pytest.mark.parametrize("language", ["it", "en"])
 async def test_real_piper_worker_speaks_and_reports_the_voice_rate(language, capsys):
-    python, voices = piper_setup()
-    backend = PiperBackend(PiperConfig(), python, voices)
+    python, resolve = piper_setup()
+    backend = PiperBackend(PiperConfig(), python, resolve)
     delivery = Delivery(1.0, 0.0, 0.0, 0.6, 1.0)
     try:
         t0 = time.monotonic()

@@ -134,13 +134,18 @@ class Router:
         characters it sends, estimated at ``CHARS_PER_TOKEN`` per token)."""
         self._charge(name, tokens)
 
-    def api_key(self, route: LLMRoute) -> str:
-        """The route's key, with a ``${secret:name}`` reference resolved."""
+    def auth_headers(self, route: LLMRoute) -> dict[str, str]:
+        """``Authorization`` header for ``route`` (empty for the ``none`` key), the
+        ``${secret:name}`` reference resolved. The key itself is not handed out."""
+        key = self._resolved_key(route)
+        return {"Authorization": f"Bearer {key}"} if key and key != "none" else {}
+
+    def _resolved_key(self, route: LLMRoute) -> str:
         m = SECRET.match(route.api_key)
         return self.secrets(m.group(1)) if m else route.api_key
 
     def _client(self, route: LLMRoute) -> AsyncOpenAI:
-        key = self.api_key(route)
+        key = self._resolved_key(route)
         http = self.http_client_factory() if self.http_client_factory else None
         return AsyncOpenAI(
             base_url=route.base_url, api_key=key or "none", http_client=http, max_retries=0

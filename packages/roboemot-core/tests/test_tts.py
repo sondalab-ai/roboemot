@@ -20,6 +20,7 @@ from roboemot.config.schema import (
     SafetyConfig,
 )
 from roboemot.llm import Router
+from roboemot.voice.models import ModelError
 from roboemot.voice.openai_speech import OPENAI_PCM_RATE_HZ, OpenAISpeechBackend
 from roboemot.voice.piper_backend import PiperBackend
 from roboemot.voice.prosody import Delivery
@@ -112,6 +113,16 @@ def make_voice(tmp_path: Path, name="v", rate=RATE) -> Path:
     return voices
 
 
+def resolver(voices: Path):
+    def resolve(name: str):
+        model = voices / f"{name}.onnx"
+        if not model.exists():
+            raise ModelError(f"{name}: not verified")
+        return model, Path(f"{model}.json")
+
+    return resolve
+
+
 def voice_cfg(**voices):
     return VOICE.model_copy(update={"voices": voices or {"it": "v"}})
 
@@ -119,8 +130,9 @@ def voice_cfg(**voices):
 def piper(tmp_path, *, rate=RATE, **cfg) -> PiperBackend:
     cfg = {"request_timeout_s": 5.0, "restart_backoff_s": (0.05, 0.2), "chunk_ms": 20.0} | cfg
     return PiperBackend(
-        PiperConfig(**cfg), sys.executable, make_voice(tmp_path, rate=rate), script=FAKE_WORKER
-    )
+        PiperConfig(**cfg), sys.executable, resolver(make_voice(tmp_path, rate=rate)),
+        script=FAKE_WORKER,
+    )  # fmt: skip
 
 
 async def collect(backend, text, d=None, language="it", voice=None):
@@ -263,13 +275,13 @@ async def test_piper_missing_voice_and_language_are_tts_errors(tmp_path):
     b = piper(tmp_path)
     with pytest.raises(TTSError, match="no voice"):
         await collect(b, "ciao", language="fr")
-    with pytest.raises(TTSError, match="not found"):
+    with pytest.raises(TTSUnavailable, match="not available"):  # unverified or half-downloaded
         await collect(b, "ciao", voice=voice_cfg(it="absent"))
 
 
 async def test_piper_unstartable_interpreter_is_a_tts_error(tmp_path):
     b = PiperBackend(
-        PiperConfig(), tmp_path / "no-python", make_voice(tmp_path), script=FAKE_WORKER
+        PiperConfig(), tmp_path / "no-python", resolver(make_voice(tmp_path)), script=FAKE_WORKER
     )
     with pytest.raises(TTSError, match="cannot start"):
         await collect(b, "ciao")
@@ -310,16 +322,15 @@ class SpeechServer:
         return await result if asyncio.iscoroutine(result) else result
 
 
-def openai_backend(server, *routes, safety=None, **cfg):
+def openai_backend(server, *routes, safety=None, secrets=None, **cfg):
     router = Router(
         list(routes or [route()]),
         safety or SafetyConfig(),
+        secrets=secrets or (lambda name: ""),
         http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(server)),
     )
     config = OpenAISpeechConfig(**({"route": "tts"} | cfg))
-    return OpenAISpeechBackend(
-        config, router, lambda: httpx.AsyncClient(transport=httpx.MockTransport(server))
-    ), router
+    return OpenAISpeechBackend(config, lambda: router), router
 
 
 async def test_openai_pcm_is_converted_and_the_request_is_shaped(tmp_path):
@@ -453,3 +464,117 @@ async def test_fallback_with_nothing_available_raises_unavailable():
             "x", delivery(), language="it", voice=VOICE, minor_present=True
         ):
             pass
+
+
+# ---------------------------------------------------------------- protocol hardening
+
+ROGUE = Path(__file__).with_name("rogue_piper_worker.py")
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["rate_zero", "rate_text", "rate_huge", "unknown_kind", "oversize", "odd", "big_error"],
+)
+async def test_piper_protocol_violations_kill_and_reap_the_worker(tmp_path, monkeypatch, mode):
+    monkeypatch.setenv("ROGUE_MODE", mode)
+    procs = []
+    real = asyncio.create_subprocess_exec
+
+    async def spy(*a, **k):
+        procs.append(await real(*a, **k))
+        return procs[-1]
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spy)
+    b = PiperBackend(
+        PiperConfig(request_timeout_s=5.0, startup_timeout_s=5.0, chunk_ms=20.0),
+        sys.executable,
+        resolver(make_voice(tmp_path)),
+        script=ROGUE,
+    )
+    try:
+        with pytest.raises(TTSError):  # FallbackTTS treats it as a failure before audio
+            await asyncio.wait_for(collect(b, "ciao"), 10)
+        assert "it" not in b._workers
+        for _ in range(100):
+            if procs[0].returncode is not None:
+                break
+            await asyncio.sleep(0.05)
+        assert procs[0].returncode is not None  # killed and reaped, no zombie
+    finally:
+        await b.aclose()
+
+
+async def test_piper_timeout_kills_reaps_and_drops_the_worker(tmp_path, monkeypatch):
+    monkeypatch.setenv("ROGUE_MODE", "silent")
+    procs = []
+    real = asyncio.create_subprocess_exec
+
+    async def spy(*a, **k):
+        procs.append(await real(*a, **k))
+        return procs[-1]
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spy)
+    b = PiperBackend(
+        PiperConfig(request_timeout_s=0.5, startup_timeout_s=5.0),
+        sys.executable,
+        resolver(make_voice(tmp_path)),
+        script=ROGUE,
+    )
+    try:
+        with pytest.raises(TTSError, match="timed out"):
+            await collect(b, "ciao")
+        assert "it" not in b._workers and procs[0].returncode is not None
+    finally:
+        await b.aclose()
+
+
+async def test_openai_charges_only_requests_the_server_accepted():
+    backend, router = openai_backend(
+        SpeechServer(lambda r: (_ for _ in ()).throw(httpx.ConnectError("x")))
+    )
+    with pytest.raises(TTSError):
+        await collect(backend, "frase")
+    assert router.used("tts") == 0
+
+
+async def test_openai_secret_errors_are_unavailable_not_crashes():
+    def secrets(name):
+        raise KeyError(name)
+
+    backend, _ = openai_backend(SpeechServer(), route(api_key="${secret:k}"), secrets=secrets)
+    with pytest.raises(TTSUnavailable):
+        await collect(backend, "ciao")
+
+
+async def test_openai_uses_the_router_the_app_has_now_and_its_http_client():
+    server = SpeechServer()
+    first, router_a = openai_backend(server)
+    _, router_b = openai_backend(server, route(base_url="https://other.example/v1"))
+    current = {"router": router_a}
+    backend = OpenAISpeechBackend(OpenAISpeechConfig(route="tts"), lambda: current["router"])
+    await collect(backend, "uno")
+    current["router"] = router_b  # the app rebuilt its router after a config reload
+    await collect(backend, "due")
+    assert [r.url.host for r in server.requests] == ["speech.example", "other.example"]
+    assert router_b.used("tts") == 1 and router_a.used("tts") == 1
+
+
+def test_router_does_not_hand_out_the_key():
+    router = Router([route(api_key="${secret:k}")], SafetyConfig(), secrets=lambda n: "sek")
+    assert router.auth_headers(router.routes[0]) == {"Authorization": "Bearer sek"}
+    assert not hasattr(router, "api_key")
+    assert Router([route(api_key="none")], SafetyConfig()).auth_headers(route(api_key="none")) == {}
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Ma no. Poi vado a casa.", ["Ma no.", "Poi vado a casa."]),
+        ("Ho detto di no. Poi vado.", ["Ho detto di no.", "Poi vado."]),
+        ("Sig.ra Rossi è qui.", ["Sig.ra Rossi è qui."]),
+        ("Il dott. Bianchi arriva. Ciao.", ["Il dott. Bianchi arriva.", "Ciao."]),
+        ("I love art. Then we go.", ["I love art.", "Then we go."]),
+    ],
+)
+def test_splitter_abbreviations_do_not_swallow_ordinary_words(text, expected):
+    assert [t for t, _ in split([text])] == expected

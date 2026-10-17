@@ -41,6 +41,7 @@ class FakeBackend:
     def __init__(self, pieces=1, delay=0.0, fail=False) -> None:
         self.pieces, self.delay, self.fail = pieces, delay, fail
         self.deliveries, self.minors, self.cancelled = [], [], threading.Event()
+        self.texts: list[str] = []
         self.started = threading.Event()
 
     def available(self, *, minor_present=False):
@@ -49,12 +50,17 @@ class FakeBackend:
     async def synthesize(self, text, delivery, *, language, voice, minor_present=False):
         self.deliveries.append(delivery)
         self.minors.append(minor_present)
+        self.texts.append(text)
         self.started.set()
         if self.fail:
             raise TTSError("boom")
-        for _ in range(self.pieces):
-            await asyncio.sleep(self.delay)
-            yield AudioChunk(np.ones(RATE // 10, np.float32), RATE)
+        try:
+            for _ in range(self.pieces):
+                await asyncio.sleep(self.delay)
+                yield AudioChunk(np.ones(RATE // 10, np.float32), RATE)
+        except asyncio.CancelledError:
+            self.cancelled.set()  # the task running this request was cancelled
+            raise
 
     def cancel(self):
         self.cancelled.set()
@@ -223,21 +229,110 @@ def test_adult_sentence_uses_the_remote_route(make):
     assert isinstance(server.requests[0], httpx.Request)
 
 
-def test_factory_picks_backends_and_default_locations():
+def test_factory_picks_backends_and_resolves_voices_from_the_voice_registry(tmp_path):
     from roboemot import paths
     from roboemot.llm import Router
-    from roboemot.voice.factory import build_backend, piper_locations
-    from roboemot.voice.piper_backend import PiperBackend
+    from roboemot.vision import models as vm
+    from roboemot.voice import models as voice_models
+    from roboemot.voice.factory import build_backend, piper_python
+    from roboemot.voice.piper_backend import PiperBackend, manifest_voice_files
 
     cfg = RoboEmotConfig()
     router = Router([], cfg.safety)
-    python, voices = piper_locations(cfg)
-    assert python == paths.piper_python(cfg.data_dir)
-    assert voices.parts[-2:] == ("voice", "piper")
-    assert isinstance(build_backend(cfg, router), PiperBackend)
+    assert piper_python(cfg) == paths.piper_python(cfg.data_dir)
+    assert voice_models.models_dir(cfg.voice.models_dir, cfg.data_dir).name == "voice-models"
+    assert isinstance(build_backend(cfg, lambda: router), PiperBackend)
     remote = RoboEmotConfig.model_validate({"voice": {"backend": "openai_speech"}})
-    chain = build_backend(remote, router)
+    chain = build_backend(remote, lambda: router)
     assert isinstance(chain, FallbackTTS) and chain.primary.name == "openai_speech"
     assert chain.fallback.name == "piper" and not chain.primary.available()  # no route set
+    kokoro = RoboEmotConfig.model_validate({"voice": {"backend": "kokoro"}})
     with pytest.raises(ValueError, match="kokoro"):
-        build_backend(RoboEmotConfig.model_validate({"voice": {"backend": "kokoro"}}), router)
+        build_backend(kokoro, lambda: router)
+
+    resolve = manifest_voice_files(tmp_path)  # default layout: <voice-models>/piper/<voice>.onnx
+    voice = cfg.voice.voices["it"]
+    with pytest.raises(voice_models.ModelError):  # nothing fetched
+        resolve(voice)
+    spec = next(s for s in voice_models.load_manifest().values() if s.name == "piper-it-paola")
+    for f in spec.files:
+        target = tmp_path / f.path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"x" * f.size_bytes)
+    with pytest.raises(voice_models.ModelError):  # present but no verified marker
+        resolve(voice)
+    for f in spec.files:
+        vm._write_marker(tmp_path / f.path, f.sha256)
+    model, conf = resolve(voice)
+    assert model == tmp_path / "piper" / f"{voice}.onnx" and conf.name == f"{voice}.onnx.json"
+    with pytest.raises(voice_models.ModelError):  # a voice outside the registry
+        resolve("evil")
+
+
+def test_config_refuses_unsafe_voice_names_and_relative_interpreters():
+    for bad in ("../x", "a/b", "a b", ""):
+        with pytest.raises(ValueError):
+            RoboEmotConfig.model_validate({"voice": {"voices": {"it": bad}}})
+    with pytest.raises(ValueError, match="absolute"):
+        RoboEmotConfig.model_validate({"voice": {"piper": {"python": "python3"}}})
+    ok = RoboEmotConfig.model_validate({"voice": {"piper": {"python": "/opt/pv/bin/python"}}})
+    assert ok.voice.piper.python == "/opt/pv/bin/python"
+
+
+def test_piper_interpreter_is_admin_only_and_restart():
+    from roboemot.config.stack import field_meta
+
+    meta = field_meta("voice.piper.python")
+    assert meta.get("admin_only") and meta.get("restart")
+
+
+def test_stop_then_say_before_the_loop_runs_still_speaks_the_new_sentence(make):
+    sink, backend = FakeSink(), FakeBackend(pieces=40, delay=0.05)
+    out = make(backend, sink=sink)
+    say(out, "Vecchia.")
+    assert backend.started.wait(2)
+    out.stop()
+    say(out, "Nuova.")  # queued right after the stop, before the loop handles the cancel
+    assert wait_for(lambda: backend.texts == ["Vecchia.", "Nuova."])
+    n = len(sink.pushed)
+    assert wait_for(lambda: len(sink.pushed) > n)  # the new sentence is audible
+    assert backend.cancelled.is_set()  # the old one was cancelled
+
+
+def test_no_chunk_is_pushed_after_stop_returns(make):
+    class SlowSink(FakeSink):
+        def push_audio_sample(self, samples, rate_hz):
+            time.sleep(0.03)
+            return super().push_audio_sample(samples, rate_hz)
+
+    sink, backend = SlowSink(), FakeBackend(pieces=100, delay=0.0)
+    out = make(backend, sink=sink)
+    say(out)
+    assert wait_for(lambda: len(sink.pushed_at) >= 2)
+    out.stop()
+    returned = time.monotonic()
+    pushed = len(sink.pushed_at)
+    time.sleep(0.3)
+    assert len(sink.pushed_at) == pushed and max(sink.pushed_at) <= returned
+    assert sink.stopped_at and sink.stopped_at[0] >= max(sink.pushed_at)
+
+
+def test_a_failing_minor_signal_fails_closed(make):
+    backend = FakeBackend()
+
+    def broken():
+        raise RuntimeError("no signal")
+
+    out = make(backend, minor_present=broken)
+    say(out)
+    assert wait_for(lambda: backend.minors == [True])
+
+
+def test_a_failing_warm_up_does_not_kill_the_output(make):
+    class Cold(FakeBackend):
+        async def warm(self, language, voice):
+            raise RuntimeError("cold")
+
+    out = make(Cold())
+    say(out)
+    assert wait_for(lambda: out.sentences_spoken == 1)

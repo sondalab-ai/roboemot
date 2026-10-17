@@ -32,7 +32,8 @@ from typing import Any
 
 import numpy as np
 
-from ..config.schema import PiperConfig, VoiceConfig
+from ..config.schema import VOICE_NAME, PiperConfig, VoiceConfig
+from .models import ModelError, load_manifest, model_file
 from .prosody import Delivery, to_piper
 from .tts import AudioChunk, TTSError, TTSUnavailable
 
@@ -46,7 +47,16 @@ STARTUP_TAIL_BYTES = 2000
 STDERR_READ_BYTES = 4096
 STARTUP_LOG_CHARS = 400
 QUIT_GRACE_S = 1.0
-_DEAD, _CANCELLED = b"-", b"~"  # queue markers, never sent by a worker
+HELLO_MAX_BYTES = 4096  # H, X and E payloads are tiny JSON
+FRAME_SLACK_BYTES = 4096  # audio frames may exceed chunk_ms by a little
+RATE_RANGE_HZ = (8000, 192000)  # sane voice sample rates
+BYTES_PER_SAMPLE = 2
+MS_PER_S = 1000.0
+_DEAD, _CANCELLED, _PROTOCOL = b"-", b"~", b"!"  # queue markers, never sent by a worker
+
+
+class _ProtocolError(Exception):
+    """The worker sent a frame outside the protocol."""
 
 
 @dataclass
@@ -61,6 +71,8 @@ class _Worker:
     pending: dict[int, asyncio.Queue] = field(default_factory=dict)
     next_id: int = 1
     dead: bool = False
+    protocol_error: bool = False
+    chunk_ms: float = 0.0
     stderr_bytes: int = 0
     startup_tail: bytearray = field(default_factory=bytearray)
     tasks: list[asyncio.Task] = field(default_factory=list)
@@ -75,11 +87,34 @@ class _Worker:
 
     def fail_pending(self) -> None:
         self.dead = True
+        marker = _PROTOCOL if self.protocol_error else _DEAD
         for q in self.pending.values():
-            q.put_nowait((_DEAD, b""))
+            q.put_nowait((marker, b""))
         if not self.hello.done():
-            self.hello.set_exception(TTSError("worker exited before its hello"))
+            reason = "violated the protocol" if self.protocol_error else "exited before its hello"
+            self.hello.set_exception(TTSError(f"worker {reason}"))
             self.hello.exception()  # nobody may be waiting: mark it retrieved
+
+    def _check_frame(self, kind: bytes, size: int) -> None:
+        """Reject a frame no well-behaved worker sends (the worker is a separate program)."""
+        if kind == b"A":
+            limit = int(self.rate_hz * self.chunk_ms / MS_PER_S) * BYTES_PER_SAMPLE
+            ok = self.hello.done() and size <= limit + FRAME_SLACK_BYTES
+            ok = ok and size % BYTES_PER_SAMPLE == 0
+        else:
+            ok = kind in (b"H", b"X", b"E") and size <= HELLO_MAX_BYTES
+            ok = ok and (kind != b"H" or not self.hello.done())
+        if not ok:
+            raise _ProtocolError
+
+    def _set_hello(self, payload: bytes) -> None:
+        rate = json.loads(payload)["rate_hz"]
+        if not isinstance(rate, int) or isinstance(rate, bool):
+            raise _ProtocolError
+        if not RATE_RANGE_HZ[0] <= rate <= RATE_RANGE_HZ[1]:
+            raise _ProtocolError
+        self.rate_hz = rate
+        self.hello.set_result(rate)
 
     async def read_frames(self) -> None:
         stdout = self.proc.stdout
@@ -87,16 +122,29 @@ class _Worker:
         try:
             while True:
                 kind, rid, size = HEADER.unpack(await stdout.readexactly(HEADER.size))
+                self._check_frame(kind, size)
                 payload = await stdout.readexactly(size) if size else b""
                 if kind == b"H":
-                    if not self.hello.done():
-                        self.hello.set_result(json.loads(payload)["rate_hz"])
+                    self._set_hello(payload)
                 elif (q := self.pending.get(rid)) is not None:  # unknown ids: a cancelled request
                     q.put_nowait((kind, payload))
-        except (asyncio.IncompleteReadError, ConnectionResetError, ValueError, KeyError):
+        except (_ProtocolError, ValueError, KeyError, TypeError):
+            self.protocol_error = True
+            self.kill()
+        except (asyncio.IncompleteReadError, ConnectionResetError):
             pass
         finally:
             self.fail_pending()
+            await self.reap()
+
+    def kill(self) -> None:
+        with contextlib.suppress(ProcessLookupError):
+            self.proc.kill()
+
+    async def reap(self) -> None:
+        """Wait (bounded) for the process to exit so no zombie is left."""
+        with contextlib.suppress(TimeoutError, ProcessLookupError):
+            await asyncio.wait_for(self.proc.wait(), QUIT_GRACE_S)
 
     async def drain_stderr(self) -> None:
         stderr = self.proc.stderr
@@ -114,9 +162,8 @@ class _Worker:
         try:
             await asyncio.wait_for(self.proc.wait(), QUIT_GRACE_S)
         except TimeoutError:
-            with contextlib.suppress(ProcessLookupError):
-                self.proc.kill()
-            await self.proc.wait()
+            self.kill()
+            await self.reap()
         for task in self.tasks:
             task.cancel()
         self.fail_pending()
@@ -132,12 +179,12 @@ class PiperBackend:
         self,
         config: PiperConfig,
         python: str | Path,
-        voices_dir: str | Path,
+        voice_files: Callable[[str], tuple[Path, Path]],
         *,
         script: str | Path = WORKER_SCRIPT,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self.config, self.python, self.voices_dir = config, str(python), Path(voices_dir)
+        self.config, self.python, self.voice_files = config, str(python), voice_files
         self.script, self.clock = str(script), clock
         self._workers: dict[str, _Worker] = {}
         self._starting: dict[str, asyncio.Task] = {}
@@ -163,13 +210,20 @@ class PiperBackend:
     # ----------------------------------------------------------------- workers
 
     def voice_path(self, language: str, voice: VoiceConfig) -> Path:
+        """Verified ``.onnx`` of the language's voice; unverified or missing files are
+        :class:`TTSUnavailable` (``voice_files`` enforces the model registry's sha256 marker)."""
         name = voice.voices.get(language)
         if not name:
             raise TTSError(f"no voice configured for language {language!r}")
-        path = self.voices_dir / f"{name}.onnx"
-        if not path.is_file() or not Path(f"{path}.json").is_file():
-            raise TTSError(f"voice files for {name} not found in {self.voices_dir}")
-        return path
+        if not VOICE_NAME.fullmatch(name) or ".." in name:
+            raise TTSUnavailable("invalid voice name")
+        try:
+            model, config = self.voice_files(name)
+        except (ModelError, OSError) as exc:
+            raise TTSUnavailable(f"voice {name} is not available: {type(exc).__name__}") from exc
+        if not model.is_file() or not config.is_file():
+            raise TTSUnavailable(f"voice files for {name} are missing")
+        return model
 
     async def warm(self, language: str, voice: VoiceConfig) -> None:
         """Start the language's worker now, so the first sentence does not pay the load."""
@@ -213,7 +267,7 @@ class PiperBackend:
         except OSError as exc:
             self._failed(language)
             raise TTSError(f"cannot start the Piper worker: {type(exc).__name__}") from exc
-        worker = _Worker(proc)
+        worker = _Worker(proc, chunk_ms=self.config.chunk_ms)
         worker.tasks = [
             asyncio.ensure_future(worker.read_frames()),
             asyncio.ensure_future(worker.drain_stderr()),
@@ -269,8 +323,11 @@ class PiperBackend:
                             queue.get(), self.config.request_timeout_s
                         )
                     except TimeoutError as exc:
+                        self._workers.pop(language, None)
+                        self._failed(language)
                         worker.fail_pending()
-                        self._kill(worker)
+                        worker.kill()
+                        await worker.reap()
                         raise TTSError("piper worker timed out") from exc
                     if kind == b"A":
                         yielded = True
@@ -289,6 +346,11 @@ class PiperBackend:
                     elif kind == _CANCELLED:
                         finished = True
                         return
+                    elif kind == _PROTOCOL:
+                        finished = True
+                        self._workers.pop(language, None)
+                        self._failed(language)
+                        raise TTSError("piper worker violated the protocol")
                     elif kind == _DEAD:
                         break
             finally:
@@ -301,11 +363,6 @@ class PiperBackend:
                 raise TTSError("piper worker died")
             await asyncio.sleep(max(0.0, self._retry_at[language] - self.clock()))
         raise TTSError("piper worker died")  # pragma: no cover
-
-    @staticmethod
-    def _kill(worker: _Worker) -> None:
-        with contextlib.suppress(ProcessLookupError):
-            worker.proc.kill()
 
     def cancel(self) -> None:
         """Stop forwarding every request in flight and tell the workers to skip them."""
@@ -328,3 +385,20 @@ class PiperBackend:
             "restarts": self.restarts,
             "stderr_bytes": sum(w.stderr_bytes for w in self._workers.values()),
         }
+
+
+def manifest_voice_files(root: Path) -> Callable[[str], tuple[Path, Path]]:
+    """Resolver over the voice model registry: ``<root>/piper/<voice>.onnx`` and ``.onnx.json``,
+    both with a valid ``.verified`` marker (``roboemot models fetch --voice``)."""
+
+    def resolve(voice: str) -> tuple[Path, Path]:
+        suffix = f"piper/{voice}.onnx"
+        for spec in load_manifest().values():
+            if any(f.path == suffix for f in spec.files):
+                return (
+                    model_file(root, spec.name, f"{voice}.onnx"),
+                    model_file(root, spec.name, f"{voice}.onnx.json"),
+                )
+        raise ModelError(f"voice {voice} is not in the voice model registry")
+
+    return resolve

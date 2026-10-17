@@ -2,7 +2,7 @@
 
 One folder holds everything RoboEmot writes: the registry (``registry/``), the persona trait
 ratings (``llm_traits.json``) and, unless ``vision.models_dir`` says otherwise, the downloaded
-models (``models/``). Keeping it in one
+models (``models/``, and ``voice-models/`` for the voice ones). Keeping it in one
 place lets the installer record it and the uninstaller remove it with a single path.
 
 The folder is, in order: the ``data_dir`` config value, ``$ROBOEMOT_DATA_DIR``, or
@@ -25,6 +25,7 @@ DIR_MODE = 0o700
 GROUP_OTHER_BITS = 0o077
 REGISTRY_SUBDIR = "registry"
 MODELS_SUBDIR = "models"
+VOICE_MODELS_SUBDIR = "voice-models"
 TRAITS_CACHE_FILE = "llm_traits.json"
 ROUTE_CHECKS_FILE = "route_checks.json"
 
@@ -70,6 +71,11 @@ def models_subdir(configured: str = "") -> Path:
     return data_path(configured) / MODELS_SUBDIR
 
 
+def voice_models_subdir(configured: str = "") -> Path:
+    """``<data folder>/voice-models``, the default voice models folder (not created here)."""
+    return data_path(configured) / VOICE_MODELS_SUBDIR
+
+
 def traits_cache_path(configured: str = "") -> Path:
     """``<data folder>/llm_traits.json``, the persona trait ratings cache (not created here).
     Inside the data folder, so the installer's uninstall removes it with the folder."""
@@ -103,6 +109,7 @@ __all__ = [
     "REGISTRY_SUBDIR",
     "ROUTE_CHECKS_FILE",
     "TRAITS_CACHE_FILE",
+    "VOICE_MODELS_SUBDIR",
     "data_dir",
     "data_path",
     "models_subdir",
@@ -111,4 +118,5 @@ __all__ = [
     "registry_dir",
     "route_checks_path",
     "traits_cache_path",
+    "voice_models_subdir",
 ]

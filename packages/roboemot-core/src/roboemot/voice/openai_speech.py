@@ -35,7 +35,6 @@ OPENAI_PCM_RATE_HZ = 24000
 INT16_SCALE = 32768.0
 BYTES_PER_SAMPLE = 2
 SPEECH_PATH = "/audio/speech"
-NO_KEY = "none"
 
 
 class OpenAISpeechBackend:
@@ -43,15 +42,14 @@ class OpenAISpeechBackend:
 
     name = "openai_speech"
 
-    def __init__(
-        self,
-        config: OpenAISpeechConfig,
-        router: Router,
-        http_client_factory: Callable[[], httpx.AsyncClient] | None = None,
-    ) -> None:
-        self.config, self.router = config, router
-        self.http_client_factory = http_client_factory
+    def __init__(self, config: OpenAISpeechConfig, router: Callable[[], Router]) -> None:
+        """``router`` is a getter: the app rebuilds its router when the routes change."""
+        self.config, self._router = config, router
         self.controls = frozenset({"instructions"} if config.instructable else ())
+
+    @property
+    def router(self) -> Router:
+        return self._router()
 
     def _route(self) -> LLMRoute | None:
         return next((r for r in self.router.routes if r.name == self.config.route), None)
@@ -72,8 +70,9 @@ class OpenAISpeechBackend:
         voice: VoiceConfig,
         minor_present: bool = False,
     ) -> AsyncIterator[AudioChunk]:
-        route = self._route()
-        if route is None or not self.available(minor_present=minor_present):
+        router = self.router  # one router for the whole request, even if the app swaps it
+        route = next((r for r in router.routes if r.name == self.config.route), None)
+        if route is None or route not in router.eligible(minor_present):
             raise TTSUnavailable("speech route not eligible")
         body: dict[str, Any] = {
             "model": self.config.model,
@@ -83,11 +82,13 @@ class OpenAISpeechBackend:
         }
         if self.config.instructable:
             body.update(to_openai(delivery))
-        key = self.router.api_key(route)
-        headers = {"Authorization": f"Bearer {key}"} if key and key != NO_KEY else {}
+        try:
+            headers = router.auth_headers(route)
+        except Exception as exc:  # e.g. a missing secret: treat the route as unusable
+            raise TTSUnavailable(f"speech route key unavailable: {type(exc).__name__}") from exc
         loop = asyncio.get_running_loop()
         deadline = loop.time() + route.first_token_timeout_s
-        client = self.http_client_factory() if self.http_client_factory else httpx.AsyncClient()
+        client = router.http_client_factory() if router.http_client_factory else httpx.AsyncClient()
         url = route.base_url.rstrip("/") + SPEECH_PATH
         response_cm = client.stream("POST", url, json=body, headers=headers)
         entered = False
@@ -99,7 +100,7 @@ class OpenAISpeechBackend:
                 )
                 entered = True
                 if response.status_code >= httpx.codes.BAD_REQUEST:
-                    self._report(route, True)
+                    self._report(router, route, True)
                     raise TTSError(f"speech route answered HTTP {response.status_code}")
                 chunks = response.aiter_bytes().__aiter__()
                 carry = b""
@@ -119,29 +120,30 @@ class OpenAISpeechBackend:
                     yield AudioChunk(pcm.astype(np.float32) / INT16_SCALE, OPENAI_PCM_RATE_HZ)
                 if not got_audio:
                     raise TTSError("speech route sent no audio")
-                self._report(route, True)
+                self._report(router, route, True)
             except TimeoutError as exc:
-                if self.router.monitor:
-                    self.router.monitor.recheck(route.name)
+                if router.monitor:
+                    router.monitor.recheck(route.name)
                 raise TTSError("speech route timed out") from exc
             except httpx.TimeoutException as exc:
-                if self.router.monitor:
-                    self.router.monitor.recheck(route.name)
+                if router.monitor:
+                    router.monitor.recheck(route.name)
                 raise TTSError("speech route timed out") from exc
             except (httpx.TransportError, OSError) as exc:
-                self._report(route, False)
+                self._report(router, route, False)
                 raise TTSError(f"speech route unreachable: {type(exc).__name__}") from exc
         finally:
-            self.router.charge(route.name, -(-len(text) // CHARS_PER_TOKEN))
-            if entered:
+            if entered:  # only a request the server accepted is charged
+                router.charge(route.name, -(-len(text) // CHARS_PER_TOKEN))
                 with contextlib.suppress(Exception):
                     await response_cm.__aexit__(None, None, None)
             with contextlib.suppress(Exception):
                 await client.aclose()
 
-    def _report(self, route: LLMRoute, ok: bool) -> None:
-        if self.router.monitor:
-            self.router.monitor.report(route.name, ok)
+    @staticmethod
+    def _report(router: Router, route: LLMRoute, ok: bool) -> None:
+        if router.monitor:
+            router.monitor.report(route.name, ok)
 
     def cancel(self) -> None:
         """Nothing to drain: cancelling the task that iterates :meth:`synthesize` closes the

@@ -638,7 +638,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 # Closed before the speaker (callbacks run last in, first out). Nothing calls
                 # say() yet but tests: the conversation worker (M3 slice 5) will.
                 output = self.speech_output = build_speech(
-                    cfg, speaker, worker.router, bus, lambda: self.minor_present
+                    cfg, speaker, lambda: worker.router, bus, lambda: self.minor_present
                 )
                 cleanup.callback(output.close)
                 output.start()

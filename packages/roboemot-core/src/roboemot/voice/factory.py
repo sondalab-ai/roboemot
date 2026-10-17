@@ -9,31 +9,28 @@ from .. import paths
 from ..bus import Bus
 from ..config.schema import RoboEmotConfig
 from ..llm.router import Router
-from ..vision import models
+from . import models as voice_models
 from .openai_speech import OpenAISpeechBackend
-from .piper_backend import PiperBackend
+from .piper_backend import PiperBackend, manifest_voice_files
 from .speech import AudioSink, SpeechOutput
 from .tts import FallbackTTS, TTSBackend
 
 
-def piper_locations(cfg: RoboEmotConfig) -> tuple[Path, Path]:
-    """Interpreter of the Piper virtualenv and the folder of the voice files, from the config
-    (empty fields resolve to the installer's locations in the app data folder)."""
-    python = Path(cfg.voice.piper.python) if cfg.voice.piper.python else None
-    voices = Path(cfg.voice.piper.voices_dir) if cfg.voice.piper.voices_dir else None
+def piper_python(cfg: RoboEmotConfig) -> Path:
+    """Interpreter of the Piper virtualenv: ``voice.piper.python``, else the installer's."""
     return (
-        python or paths.piper_python(cfg.data_dir),
-        voices or models.models_dir(cfg.vision.models_dir, cfg.data_dir) / "voice" / "piper",
+        Path(cfg.voice.piper.python) if cfg.voice.piper.python else paths.piper_python(cfg.data_dir)
     )
 
 
-def build_backend(cfg: RoboEmotConfig, router: Router) -> TTSBackend:
-    """``voice.backend`` with ``voice.fallback_backend`` behind it (Piper is the only local one)."""
+def build_backend(cfg: RoboEmotConfig, router: Callable[[], Router]) -> TTSBackend:
+    """``voice.backend`` with ``voice.fallback_backend`` behind it (Piper is the only local one).
+    Voice files come from the voice model registry, so only verified files are loaded."""
     chosen = {cfg.voice.backend, cfg.voice.fallback_backend}
     if "kokoro" in chosen:
         raise ValueError("the kokoro TTS backend is not implemented")
-    python, voices = piper_locations(cfg)
-    local = PiperBackend(cfg.voice.piper, python, voices)
+    root = voice_models.models_dir(cfg.voice.models_dir, cfg.data_dir)
+    local = PiperBackend(cfg.voice.piper, piper_python(cfg), manifest_voice_files(root))
     if cfg.voice.backend == "piper":
         return local
     return FallbackTTS(OpenAISpeechBackend(cfg.voice.openai_speech, router), local)
@@ -42,9 +39,10 @@ def build_backend(cfg: RoboEmotConfig, router: Router) -> TTSBackend:
 def build_speech(
     cfg: RoboEmotConfig,
     sink: AudioSink,
-    router: Router,
+    router: Callable[[], Router],
     bus: Bus | None = None,
     minor_present: Callable[[], bool] = lambda: False,
 ) -> SpeechOutput:
-    """The speech output over ``sink``; ``minor_present`` is read when each sentence starts."""
+    """The speech output over ``sink``; ``router`` is a getter (the app rebuilds its router) and
+    ``minor_present`` is read when each sentence starts."""
     return SpeechOutput(cfg, sink, build_backend(cfg, router), bus, minor_present)

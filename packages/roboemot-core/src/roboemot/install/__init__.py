@@ -286,9 +286,14 @@ def install_piper(
     passes ``--no-cache-dir``; the dry run only reports.
     """
     venv, python = piper_paths(remote)
+    recreate = True
     if record.piper_venv == venv and _exists(remote, python):
-        ui.ok(f"Piper virtualenv {venv} already installed")
-        return
+        probe = remote.run(f"{shlex.quote(python)} -I -c 'import piper' && echo yes || echo no")
+        if probe.strip().endswith("yes"):
+            ui.ok(f"Piper virtualenv {venv} already installed")
+            return
+        ui.warn(f"Piper virtualenv {venv} cannot import piper: installing piper-tts again")
+        recreate = False
     if record.piper_venv != venv and _exists(remote, venv):
         ui.warn(f"{venv} exists but is not in the install record: left alone")
         return
@@ -300,9 +305,10 @@ def install_piper(
         return
     record.piper_venv = venv
     write_record(remote, platform.record_path, record)
-    remote.run(f"mkdir -p -m 700 {shlex.quote(posixpath.dirname(venv))}")
-    remote.run(f"{shlex.quote(platform.python)} -m venv {shlex.quote(venv)}")
-    ui.ok(f"created the Piper virtualenv {venv}")
+    if recreate:
+        remote.run(f"mkdir -p -m 700 {shlex.quote(posixpath.dirname(venv))}")
+        remote.run(f"{shlex.quote(platform.python)} -m venv {shlex.quote(venv)}")
+        ui.ok(f"created the Piper virtualenv {venv}")
     result = RemotePython(remote, python).install_requirement(f"piper-tts=={PIPER_TTS_VERSION}")
     if not result.ok:
         raise WizardError(f"pip install piper-tts failed on the robot:\n{result.output}")

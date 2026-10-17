@@ -29,12 +29,12 @@ CLOSERS = "\"')]»”’"
 TAG_PREFIX = "[mood="
 TAG_MAX_CHARS = 40  # longest tag held back while it may still be completing
 CUT_AFTER = ",;:"  # preferred places to cut an over-long sentence
-# Words whose trailing dot does not end a sentence (lower case, Italian and English).
+# Abbreviations whose trailing dot does not end a sentence (lower case). Words that are also
+# ordinary words (no, on, es, st, ed, art, fig, cap, etc) are left out: a wrong join is worse.
 ABBREVIATIONS = frozenset(
     {
-        "sig", "sigg", "sig.ra", "dott", "dr", "prof", "ing", "avv", "geom", "rag", "on", "es",
-        "pag", "fig", "cap", "art", "tel", "ca", "cfr", "vs", "mr", "mrs", "ms", "st", "jr",
-        "sr", "no", "vol", "ed", "approx", "etc",
+        "sig", "sigg", "ra", "ssa", "dott", "dr", "prof", "ing", "avv", "geom", "rag", "pag",
+        "tel", "ca", "cfr", "vs", "mr", "mrs", "ms", "jr", "sr", "vol", "approx",
     }
 )  # fmt: skip
 WORD_END = re.compile(r"([^\W\d_]+)$")

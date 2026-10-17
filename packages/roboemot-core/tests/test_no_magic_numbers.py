@@ -22,6 +22,8 @@ BEHAVIOUR_MODULES = [
     "circadian/runner.py",
     "circadian/sampler.py",
     "voice/prosody.py",
+    "voice/vad.py",
+    "voice/models.py",
     "voice/activity.py",
     "voice/tts.py",
     "voice/piper_backend.py",
