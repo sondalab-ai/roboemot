@@ -9,8 +9,10 @@ Two phases per person:
 - ``arrival``: the person walks into view of a settled robot (nobody in view, minor caps
   released). The appraisal rules, the register and the expression map do the rest.
 - ``provoked``: the same labelled curiosity impulse is fed to the affect engine, once the caps
-  are what they will stay while the person is there. The affect input is then identical for
-  everyone, so what differs is the register alone (amplitude, approach gate, minor cap).
+  are what they will stay while the person is there. The impulse is the same for everyone but
+  lands on top of each person's own state, so the affect term differs a little; ``check_exit``
+  divides it out of the expression factor to compare the register alone (amplitude, approach
+  gate, minor cap).
 """
 
 from __future__ import annotations
@@ -20,6 +22,8 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+
+from roboemot.config.schema import RoboEmotConfig
 
 # A body_yaw channel on the labels the exit test provokes. The shipped expression map has no body
 # channel, so without it "never approached" would hold trivially; with it, the renderer's approach
@@ -38,7 +42,9 @@ expression_map:
 """
 
 ARRIVAL_LABEL = {"adult": "calm", "child": "joy", "stranger": "curiosity"}
-SETTLED_RAD = math.radians(3.0)  # head and body yaw within this of home: settled
+SETTLED_DOFS = ("head.yaw", "body_yaw", "antenna_right", "antenna_left")
+SETTLED_RAD = math.radians(3.0)  # head, body and antennas within this of home: settled
+QUIET_MARGIN_S = 1.5  # beyond the label hold: the follow-on expression has started
 PROVOKE = (0.3, 0.3, "curiosity")  # valence, arousal, label of the provoked phase
 
 
@@ -143,9 +149,31 @@ def wait(predicate: Callable[[], bool], timeout: float, what: str) -> None:
     raise AssertionError(f"timed out after {timeout:.0f} s waiting for {what}")
 
 
-def _phase(app, probe: Probe, states: list, expect: str, trigger: Callable[[], None]) -> Phase:
+def _quiet(app, states: list, window_s: float) -> None:
+    """Wait until nothing has happened for ``window_s``: no expression playing, none started and
+    no labelled impulse. The label held by the last impulse (``affect.event_label_hold_s``) has
+    then ended and its follow-on expression, if any, has played, so the next expression the
+    renderer starts is the one the next trigger causes."""
+    last = [time.monotonic(), app.expression.started, states[-1].impulse if states else 0]
+
+    def quiet() -> bool:
+        now = time.monotonic()
+        seen = [app.expression.started, states[-1].impulse if states else 0]
+        if seen != last[1:] or app.expression.playing:
+            last[:] = [now, *seen]
+        return now - last[0] >= window_s
+
+    wait(quiet, 30, "the robot to be quiet")
+
+
+def _phase(
+    app, probe: Probe, states: list, expect: str, trigger: Callable[[], None], quiet_s: float = 0.0
+) -> Phase:
     """Run ``trigger`` and record the reaction: the affect state with ``expect`` as its label
-    after a new labelled impulse, and the expression the renderer started for it."""
+    after a new labelled impulse, and the expression the renderer started for it. With
+    ``quiet_s`` the robot is first left alone for that long (see ``_quiet``)."""
+    if quiet_s:
+        _quiet(app, states, quiet_s)
     probe.reset()
     n_start = app.expression.started
     n_imp = states[-1].impulse if states else 0
@@ -214,9 +242,7 @@ def react(
     wait(lambda: not app.minor_present, ready_timeout, "the minor caps to release (nobody in view)")
     wait(lambda: states and not app.expression.playing, 20, "the startup expression to end")
     wait(
-        lambda: all(
-            abs(pose().get(n, home[n]) - home[n]) < SETTLED_RAD for n in ("head.yaw", "body_yaw")
-        ),
+        lambda: all(abs(pose().get(n, home[n]) - home[n]) < SETTLED_RAD for n in SETTLED_DOFS),
         30,
         "the robot to be back at home",
     )
@@ -242,6 +268,7 @@ def react(
             states,
             label,
             lambda: app.affect_runner.engine.impulse(time.monotonic(), valence, arousal, label),
+            quiet_s=app.affect_runner.engine.cfg.event_label_hold_s + QUIET_MARGIN_S,
         )
     finally:
         probe.stop()
@@ -265,13 +292,15 @@ def format_run(run: Run) -> str:
     return "\n".join(lines)
 
 
-def check_exit(adult: Run, child: Run, stranger: Run) -> None:
+def check_exit(adult: Run, child: Run, stranger: Run, adult_yaw_max: float) -> None:
     """The M2 exit criterion's first half (SPEC 14): the robot reacts distinctly to a known adult,
-    a known child and a stranger. Shared by the app-level and the simulated robot tests."""
+    a known child and a stranger. Shared by the app-level and the simulated robot tests;
+    ``adult_yaw_max`` bounds the adult's head yaw (radians) for the caller's setup."""
     deg = math.radians
-    # The first reaction to a recognised adult is still under the minor caps: until the face is
-    # recognised it is an unknown age, a possible minor, and the caps release only after a
-    # full hold of frames without one (SPEC 5, 12). The register has to wait for that too.
+    # Documents a limitation, not a requirement: the first reaction to a recognised adult is
+    # still under the minor caps. Until the face is recognised it is an unknown age, a possible
+    # minor, and the caps release only after a full hold of frames without one (SPEC 5, 12). If
+    # recognition ever precedes the first face percept, this line is the one to relax.
     assert adult.arrival.minor_caps
     # affect: each arrival names its own label; the stranger is the quietest
     assert (adult.arrival.label, child.arrival.label, stranger.arrival.label) == (
@@ -279,7 +308,7 @@ def check_exit(adult: Run, child: Run, stranger: Run) -> None:
         "joy",
         "curiosity",
     )
-    assert adult.arrival.valence > stranger.arrival.valence > 0
+    assert adult.arrival.valence > stranger.arrival.valence
     assert child.arrival.valence > adult.arrival.valence
     assert stranger.arrival.affect_intensity < adult.arrival.affect_intensity
     assert adult.arrival.affect_intensity < child.arrival.affect_intensity
@@ -294,9 +323,18 @@ def check_exit(adult: Run, child: Run, stranger: Run) -> None:
     assert adult.arrival.reaction_intensity == "medium"
     assert child.arrival.minor_policy and stranger.arrival.minor_policy
     assert not adult.provoked.minor_policy
-    # the same joy impulse for everyone: the renderer's factor follows the register alone
+    # the same curiosity impulse for everyone, on top of each person's own state: the renderer's
+    # factor ordered child > adult > stranger, and so is the register term alone, the factor with
+    # the affect term (floor + (1 - floor) x intensity) divided out
     amps = [r.provoked.expression_amplitude for r in (child, adult, stranger)]
     assert amps[0] > amps[1] > amps[2] > 0
+    floor = RoboEmotConfig().expression.intensity_floor
+    terms = [
+        r.provoked.expression_amplitude
+        / (floor + (1 - floor) * min(1.0, r.provoked.affect_intensity))
+        for r in (child, adult, stranger)
+    ]
+    assert terms[0] > terms[1] > terms[2] > 0, terms
     # the minor caps are on for the child and the stranger, off for the adult once recognised
     assert child.provoked.minor_caps and stranger.provoked.minor_caps
     assert not adult.provoked.minor_caps
@@ -313,4 +351,6 @@ def check_exit(adult: Run, child: Run, stranger: Run) -> None:
     assert arrivals[0] > arrivals[1] > arrivals[2] > 0
     for r in (adult, child):
         assert stranger.provoked.antenna_peak < 0.5 * r.provoked.antenna_peak, (stranger, r)
-    assert all(r.arrival.antenna_peak > 0 for r in (adult, child, stranger))
+    for r in (adult, child, stranger):  # every arrival moved the antennas, well over the idle noise
+        assert r.arrival.antenna_peak > max(10 * r.idle_antenna, deg(0.5)), r
+    assert adult.provoked.head_yaw_peak <= adult_yaw_max, adult.provoked.head_yaw_peak

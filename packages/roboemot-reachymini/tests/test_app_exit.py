@@ -4,6 +4,7 @@ robot test (``test_sim.py``), reading the driver's commanded targets, not the ro
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -13,7 +14,7 @@ from exit_support import BODY_MAP_YAML, Run, check_exit, format_run, react
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.manifest import load_manifest
 from roboemot.registry import Consent, FileStore, Registry
-from roboemot.vision import Detection
+from roboemot.vision import CameraModel, Detection
 from roboemot_reachymini import app as app_module
 from roboemot_reachymini.driver import ReachyMiniDriver
 from test_app_perception import (  # noqa: F401  (data is a fixture)
@@ -122,4 +123,8 @@ def test_the_robot_reacts_distinctly_to_an_adult_a_child_and_a_stranger_without_
         c: run_case(data, tmp_path, monkeypatch, commanded, c)
         for c in ("adult", "child", "stranger")
     }
-    check_exit(runs["adult"], runs["child"], runs["stranger"])
+    # the fake detector's face sits at pixel (140, 100): the commanded head yaw is its bearing,
+    # so unlike the simulated servos there is nothing to overshoot with
+    cfg = RoboEmotConfig()
+    bearing = CameraModel(320, 240, cfg.world.camera_fov_h_deg).bearing(140, 100)[0]
+    check_exit(runs["adult"], runs["child"], runs["stranger"], abs(bearing) + math.radians(1))

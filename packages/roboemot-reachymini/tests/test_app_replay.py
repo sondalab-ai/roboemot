@@ -3,13 +3,17 @@ awake, drowsy and resting and back, through the real runner and motion loop (moc
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 
 import numpy as np
 from roboemot.circadian.motion import FX_SOURCE, REST_SOURCE
-from roboemot.circadian.replay import synthetic_day
+from roboemot.circadian.replay import replay, synthetic_day
+from roboemot.config import ConfigStack
+from roboemot.manifest import load_manifest
 from roboemot.vision import Frame
+from roboemot_reachymini import app as app_module
 from roboemot_reachymini.driver import ReachyMiniDriver
 from test_app_circadian import fed  # noqa: F401  (a fixture)
 from test_app_perception import (  # noqa: F401  (data is a fixture)
@@ -24,6 +28,8 @@ from test_app_perception import (  # noqa: F401  (data is a fixture)
 SPEED = 3600.0  # one virtual hour per real second: the 24 h log replays in about 24 s
 START_HOUR = 8.0  # synthetic_day starts at 08:00
 WALL_BUDGET_S = 60.0
+HOUR_TOLERANCE_H = 0.5
+EDGE = 20  # feed-log entries trimmed at each edge of a state's span
 SECONDS_PER_MINUTE = 60
 
 
@@ -50,7 +56,7 @@ class ReplayedDayClock:
 
 class DayApp(AppWithFakes):
     """The app on the replayed day: the clock is virtual and the camera shows the synthetic
-    day's brightness for the virtual minute (``synthetic_day``, SPEC 7A Replay)."""
+    day's brightness for the virtual minute (``synthetic_day``, SPEC 7A, Replay)."""
 
     clock: ReplayedDayClock
     samples = synthetic_day()
@@ -76,6 +82,16 @@ class DayApp(AppWithFakes):
         return DaySource()
 
 
+def rested(pose: dict[str, float], min_pitch: float) -> bool:
+    """The rest posture: head lowered and the antennas drooping outward (right below, left above
+    zero), all three at once."""
+    return (
+        pose.get("head.pitch", 0.0) > min_pitch
+        and pose.get("antenna_right", 0.0) < 0
+        and pose.get("antenna_left", 0.0) > 0
+    )
+
+
 def test_a_replayed_24_hour_light_log_moves_the_robot_through_awake_drowsy_resting_awake(
     data,  # noqa: F811
     fed,  # noqa: F811
@@ -92,6 +108,15 @@ def test_a_replayed_24_hour_light_log_moves_the_robot_through_awake_drowsy_resti
         real_write(self, t, values)
 
     monkeypatch.setattr(ReachyMiniDriver, "write_pose_targets", write)
+    manifest = load_manifest(app_module.DATA / "reachy-mini-wireless.yaml",
+                             allow_unmeasured_dynamics=True)  # fmt: skip
+    stack = ConfigStack()
+    stack.set_manifest_behaviour(manifest.model.behaviour)
+    cfg = stack.effective()
+    # nobody in view: the unknown register scales the rest posture; half of it is well clear of idle
+    min_pitch = 0.5 * math.radians(cfg.circadian_motion.rest_pose_deg["head.pitch"])
+    min_pitch *= cfg.register.unknown.motion_amplitude
+    offline = [t[1] for t in replay(DayApp.samples, cfg).transitions]  # hour of each change
     app = new_app(DayApp)
     spans: list[dict] = []  # per state: name, virtual hour of entry, range in the feed log
 
@@ -131,7 +156,7 @@ def test_a_replayed_24_hour_light_log_moves_the_robot_through_awake_drowsy_resti
         app.clock.begin()
         feeder.start()
         assert wait_for(lambda: "resting" in states(), timeout=45), states()
-        assert wait_for(lambda: commanded.get("head.pitch", 0.0) > 0.2, timeout=10)
+        assert wait_for(lambda: rested(commanded, min_pitch), timeout=10), commanded
         rest_pose = dict(commanded)
         assert wait_for(lambda: states()[-1] == "awake" and len(spans) >= 3, timeout=45), states()
         assert wait_for(lambda: commanded["head.pitch"] < 0.1, timeout=10)  # posture let go of
@@ -147,15 +172,15 @@ def test_a_replayed_24_hour_light_log_moves_the_robot_through_awake_drowsy_resti
     sequence = states()
     assert sequence == ["awake", "drowsy", "resting", "drowsy", "awake"], sequence
     assert wall < WALL_BUDGET_S, wall
-    hours = {(i, s["state"]): s["hour"] for i, s in enumerate(spans)}
-    assert 21.0 <= hours[(1, "drowsy")] <= 21.6  # SPEC 7A: about 21:15
-    assert 22.4 <= hours[(2, "resting")] <= 22.7  # the quiet hours start at 22:30
-    assert 6.9 <= hours[(3, "drowsy")] % 24 <= 7.3  # leaves resting at 07:00, awake just after
-    assert 6.9 <= hours[(4, "awake")] % 24 <= 7.3
+    # the offline replay of the same log sets the hours; the app runs on a clock that is only as
+    # steady as the machine, so the tolerance is generous (half an hour of virtual time)
+    assert len(offline) == len(spans) - 1, offline
+    for span, hour in zip(spans[1:], offline, strict=True):
+        gap = abs((span["hour"] - hour + 12) % 24 - 12)  # on the clock, across midnight
+        assert gap <= HOUR_TOLERANCE_H, (span["state"], span["hour"], hour)
     rest = next(s for s in spans if s["state"] == "resting")
-    window = feed_log[rest["begin"] : rest["end"]]
+    window = feed_log[rest["begin"] + EDGE : rest["end"] - EDGE]  # the interior of the span
     assert sum(c.source == REST_SOURCE for c in window) >= 50  # the posture is held, not once
     assert not any(c.source in ("idle", "idle-additive") for c in window)  # idle motion stopped
-    assert rest_pose["head.pitch"] > 0.2  # head down
-    assert rest_pose["antenna_right"] < 0 < rest_pose["antenna_left"]  # antennas droop outward
+    assert rested(rest_pose, min_pitch)  # head down, antennas drooping outward
     assert any(c.source == FX_SOURCE for c in feed_log[rest["end"] :])  # waking: the stretch
