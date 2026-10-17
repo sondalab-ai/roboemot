@@ -52,6 +52,7 @@ from roboemot.reflex import ReflexEngine
 from roboemot.vision import CIRCADIAN, FrameSource, LockedSource
 from roboemot.vision.minor import MinorPresence
 from roboemot.vision.service import Perception, default_stages, open_perception, world_snapshot
+from roboemot.voice.activity import SpeechActivity
 from roboemot.webui import Server, make_server
 from roboemot.webui.catalogue import open_catalogue
 from roboemot.world import (
@@ -71,6 +72,7 @@ from .audio import ReachyAudio
 from .camera import ReachyCamera
 from .driver import ReachyMiniDriver
 from .gaze import FRAME, GAZE, REFLEX
+from .speaker import ReachySpeaker
 
 try:  # the SDK is optional so unit tests run without GStreamer
     from reachy_mini import ReachyMiniApp
@@ -271,7 +273,9 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
     register_tracker: RegisterTracker | None = None  # people in view -> register.active
     expression: ExpressionRenderer | None = None  # affect label -> additive antenna/head motion
     reflexes: ReflexEngine | None = None  # runs on the motion loop's tick (SPEC 10)
-    audio: ReachyAudio | None = None  # microphone level for the loud-onset reflex
+    audio: ReachyAudio | None = None  # the one reader of the microphone (reflex level, voice)
+    speaker: ReachySpeaker | None = None  # playback; only when voice.enabled
+    speech: SpeechActivity | None = None  # "the robot is speaking" gate (reflex, DoA)
     traits_worker: TraitsWorker | None = None  # rates persona traits when traits_source is llm
 
     def make_router(self, cfg: Any, monitor: NetworkMonitor) -> Router:
@@ -389,13 +393,26 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             bus=bus,
         )
         loop.tick_hooks.append(reflexes.on_tick)
+        # The robot's own voice must not startle it or draw its gaze: the speaker feeds this
+        # window (playback end + echo tail) and the reflex engine and the DoA source read it.
+        speech = self.speech = SpeechActivity(cfg.voice.echo_tail_ms)
+        reflexes.speaking = speech.speaking
+        reflex_audio = cfg.reflexes.enabled and cfg.reflexes.audio.enabled
         audio = self.audio = ReachyAudio(
             reachy_mini,
-            reflexes.offer_audio_level,
+            reflexes.offer_audio_level if reflex_audio else None,
             cfg.reflexes.audio.poll_hz,
             max_gap_s=cfg.reflexes.max_age_ms / MS_PER_S,
+            voice=cfg.voice.enabled,
+            voice_rate_hz=cfg.voice.sample_rate_hz,
+            voice_queue_s=cfg.voice.capture_queue_s,
         )
         reflexes.audio_status = audio.snapshot
+        speaker = self.speaker = (
+            ReachySpeaker(reachy_mini, cfg.voice.playback_chunk_ms, speech)
+            if cfg.voice.enabled
+            else None
+        )
         # The one affect engine: appraisal events from the bus and the responder feed it, the
         # app tick decays it and publishes affect.state (SPEC 7).
         runner = self.affect_runner = AffectRunner(
@@ -559,6 +576,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 self.catalogue.cfg = change.config.catalogue
             runner.apply_config(change.config.affect, change.config.appraisal)
             circ.apply_config(change.config)
+            speech.set_echo_tail_ms(change.config.voice.echo_tail_ms)
             reflexes.apply_config(
                 change.config.reflexes, math.radians(change.config.safety.constraint_margin_deg)
             )
@@ -595,9 +613,12 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 cleanup.callback(self.autoenroll.flush)
             cleanup.callback(perception.stop)
             perception.start()
-            if cfg.reflexes.enabled and cfg.reflexes.audio.enabled:
+            if reflex_audio or cfg.voice.enabled:
                 cleanup.callback(audio.stop)  # before the SDK client goes away
                 audio.start()  # degrades to "unavailable" in the debug report without a mic
+            if speaker is not None:
+                cleanup.callback(speaker.close)  # flushes the player before the SDK goes away
+                speaker.start_playing()
             cleanup.callback(light_reader.stop)  # stopped before the camera thread
             cleanup.callback(self._forget_circadian)
             self.start_webui(stack, cfg, manifest, cleanup)
@@ -606,6 +627,11 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 world_source.start(publish)
             while not stop_event.is_set():
                 now = time.monotonic()
+                speech_until = speech.until()
+                if math.isfinite(speech_until):  # no turning towards its own voice
+                    for src in plugin.sources:
+                        if hasattr(src, "mute"):
+                            src.mute(speech_until)
                 circ.tick(now)  # before the affect tick: its events and baseline apply to it
                 state = runner.tick(now)
                 minor = presence.apply(now)
