@@ -37,6 +37,12 @@ VOCABULARY_RULES = {
 LANGUAGE_NAMES = {"it": "Italian", "en": "English"}
 
 
+def max_reply_sentences(cfg: RoboEmotConfig, register: RegisterParams) -> int:
+    """Reply length cap: the register's own (the child's is shorter), else the conversation's."""
+    own = register.max_reply_sentences
+    return own if own is not None else cfg.conversation.max_reply_sentences
+
+
 def system_prompt(
     cfg: RoboEmotConfig,
     register: RegisterParams,
@@ -50,7 +56,7 @@ def system_prompt(
     lang = language or cfg.conversation.language
     rules = [
         VOCABULARY_RULES[register.vocabulary],
-        f"Reply in at most {cfg.conversation.max_reply_sentences} sentences.",
+        f"Reply in at most {max_reply_sentences(cfg, register)} sentences.",
         f"Always reply in {LANGUAGE_NAMES.get(lang, lang)}.",
     ]
     if cfg.voice.mood_source == "llm_tagged":

@@ -80,6 +80,14 @@ class FirstToken:
 
 
 @dataclass
+class ActiveRoute:
+    """The route a ``stream`` call is on, set before its first event. A caller that must cut
+    the answer when the situation changes (a minor appears mid-answer, SPEC 8) reads it."""
+
+    route: LLMRoute | None = None
+
+
+@dataclass
 class _Budget:
     day: dt.date
     used: int = 0
@@ -99,8 +107,10 @@ class Router:
 
     def adopt_budgets(self, other: Router) -> None:
         """Keep ``other``'s daily token accounting (a rebuilt router after a config reload must
-        not hand every route a fresh budget)."""
+        not hand every route a fresh budget). The lock is shared with the accounting: a stream
+        still running on ``other`` and one on this router charge the same dict."""
         self._budgets = other._budgets
+        self._lock = other._lock
 
     @property
     def offline(self) -> bool:
@@ -157,6 +167,7 @@ class Router:
         tools: list[dict[str, Any]] | None = None,
         *,
         minor_present: bool = False,
+        active: ActiveRoute | None = None,
     ) -> AsyncIterator[Event]:
         if self.offline:
             raise Offline("no route reachable")
@@ -167,6 +178,8 @@ class Router:
             )
         for route in routes:
             yielded = False
+            if active is not None:
+                active.route = route
             gen = self._stream_route(route, messages, tools)
             try:
                 async for ev in gen:
@@ -297,12 +310,34 @@ class Router:
         return usage if usage is not None else (prompt_chars + out_chars) // CHARS_PER_TOKEN
 
 
+def _history_message(
+    m: dict[str, Any], scrub: Callable[[str | None], str | None]
+) -> dict[str, Any]:
+    """One history message with only the chat fields (role, content, and for tool use the
+    assistant's ``tool_calls`` and a ``tool`` message's ``tool_call_id``), names scrubbed."""
+    out: dict[str, Any] = {"role": m["role"], "content": scrub(m.get("content"))}
+    if m.get("tool_calls"):
+        out["tool_calls"] = [
+            {
+                **{k: v for k, v in call.items() if k != "function"},
+                "function": {
+                    **call["function"],
+                    "arguments": scrub(call["function"].get("arguments")),
+                },
+            }
+            for call in m["tool_calls"]
+        ]
+    if m.get("tool_call_id"):
+        out["tool_call_id"] = m["tool_call_id"]
+    return out
+
+
 def build_messages(
     *,
     system: str,
     profile_summary: str | None,
     scene_summary: str | None,
-    history: list[dict[str, str]],
+    history: list[dict[str, Any]],
     user_text: str,
     affect: str | None = None,
     names: dict[str, str] | None = None,
@@ -329,6 +364,6 @@ def build_messages(
     if affect:
         sys_parts.append(f"Your mood: {affect}")
     msgs: list[dict[str, Any]] = [{"role": "system", "content": "\n".join(sys_parts)}]
-    msgs += [{"role": m["role"], "content": scrub(m["content"])} for m in history]
+    msgs += [_history_message(m, scrub) for m in history]
     msgs.append({"role": "user", "content": scrub(user_text)})
     return msgs

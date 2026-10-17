@@ -311,6 +311,13 @@ class RegisterParams(Strict):
     )
     reaction_intensity: Literal["low", "medium", "high"] = param("medium", "Reaction intensity")
     minor_content_policy: bool = param(False, "Apply the minor content policy", conservative="true")
+    max_reply_sentences: int | None = param(
+        None,
+        "Reply length cap in sentences for this register; unset uses "
+        "conversation.max_reply_sentences",
+        ge=1,
+        le=20,
+    )
 
 
 class RegisterConfig(Strict):
@@ -324,6 +331,7 @@ class RegisterConfig(Strict):
             "approach_allowed": False,
             "reaction_intensity": "high",
             "minor_content_policy": True,
+            "max_reply_sentences": 2,
         },
         "Register for children",
     )
@@ -946,6 +954,13 @@ class ReflexConfig(Strict):
 # --------------------------------------------------------------------------- safety (SPEC 12)
 
 
+class MinorLines(Strict):
+    greeting: str = param("", "Said when the person greeted the robot")
+    robot_name: str = param("", "Said when the robot's name was called")
+    ask_grown_up: str = param("", "Said for anything else")
+    filtered: str = param("", "Said in place of a sentence the output filter removed")
+
+
 class SafetyConfig(Strict):
     extra_prompt_rules: list[str] = param(
         [],
@@ -1039,6 +1054,43 @@ class SafetyConfig(Strict):
         "Allow conversation while a minor is present on routes cleared for minors",
         conservative="false",
     )
+    minor_output_blocklist: dict[str, list[str]] = param(
+        {
+            "it": [
+                "cazzo", "merda", "puttana", "troia", "stronzo", "vaffanculo", "scopare",
+                "porno", "pornografia", "uccidere", "ammazzare", "suicidio", "suicidarsi",
+                "cocaina", "eroina", "droga", "pistola", "fucile",
+            ],
+            "en": [
+                "fuck", "shit", "bitch", "asshole", "cunt", "porn", "pornography", "sex",
+                "kill", "murder", "suicide", "cocaine", "heroin", "drugs", "gun", "rifle",
+            ],
+        },
+        "Words (whole words, accents and case ignored) that never reach the speaker while a "
+        "minor is present, per language; a sentence containing one is replaced by "
+        "minor_lines.filtered and the rest of the answer is dropped (SPEC 12). Starting values "
+        "to review with the deployment, not a validated list",
+        admin_only=True,
+    )  # fmt: skip
+    minor_lines: dict[str, MinorLines] = param(
+        {
+            "it": {
+                "greeting": "Ciao! Che bello vederti.",
+                "robot_name": "Mi chiamo Reachy.",
+                "ask_grown_up": "Questa domanda falla a un grande, che ti sa rispondere meglio.",
+                "filtered": "Preferisco parlare d'altro. Chiedi a un grande.",
+            },
+            "en": {
+                "greeting": "Hello! Nice to see you.",
+                "robot_name": "My name is Reachy.",
+                "ask_grown_up": "Please ask a grown-up about that, they will know better.",
+                "filtered": "I would rather talk about something else. Ask a grown-up.",
+            },
+        },
+        "Short child-safe lines per language, spoken when no route cleared for minors can answer "
+        "and when the output filter replaces a sentence (SPEC 8, 12)",
+        admin_only=True,
+    )  # fmt: skip
 
 
 class PrivacyConfig(Strict):
@@ -2068,6 +2120,20 @@ class ConversationConfig(Strict):
         unit="tokens",
         ge=16,
         le=8192,
+    )
+    pending_utterances: int = param(
+        1,
+        "Addressed utterances that wait while an answer is being prepared; a newer one replaces "
+        "the oldest waiting",
+        ge=1,
+        le=10,
+    )
+    fallback_lines: dict[str, str] = param(
+        {
+            "it": "Scusa, adesso non riesco a pensare.",
+            "en": "Sorry, I can't think right now.",
+        },
+        "Spoken per language when no route answers or the stream fails before any sentence",
     )
 
 

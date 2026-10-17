@@ -33,6 +33,7 @@ TOPICS = (
     "motion.request",
     "motion.state",
     "speech.say",
+    "conversation.turn",
     "safety.event",
     "circadian.state",
     "config.changed",

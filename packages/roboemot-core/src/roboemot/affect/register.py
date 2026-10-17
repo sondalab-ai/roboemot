@@ -142,10 +142,10 @@ def most_restrictive(registers: Sequence[tuple[str, RegisterParams]]) -> tuple[s
 
     Each safety-relevant field takes its most restrictive value across the people: the minor
     content policy if any person has it, approach only if every person allows it, the lowest
-    motion amplitude, the lowest reaction intensity. The fields with no restrictiveness order
-    (speech rate, pitch, vocabulary, persona fragment) come from the most restrictive person,
-    ranked by those four criteria in that order, ties going to the stricter default group; that
-    person's group names the result.
+    motion amplitude, the lowest reaction intensity, the shortest reply cap that is set. The
+    fields with no restrictiveness order (speech rate, pitch, vocabulary, persona fragment) come
+    from the most restrictive person, ranked by those four criteria in that order, ties going to
+    the stricter default group; that person's group names the result.
     """
     group, lead = max(registers, key=lambda gp: _rank(*gp))
     params = lead.model_copy(
@@ -156,6 +156,10 @@ def most_restrictive(registers: Sequence[tuple[str, RegisterParams]]) -> tuple[s
             "reaction_intensity": REACTION_LEVELS[
                 min(REACTION_LEVELS.index(p.reaction_intensity) for _, p in registers)
             ],
+            "max_reply_sentences": min(
+                (p.max_reply_sentences for _, p in registers if p.max_reply_sentences is not None),
+                default=None,
+            ),
         }
     )
     return group, params

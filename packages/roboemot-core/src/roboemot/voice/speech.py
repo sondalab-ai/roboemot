@@ -95,6 +95,7 @@ class SpeechOutput:
         self._last_utterance = 0
         self._last_rate_hz = 0
         self._latencies: collections.deque[float] = collections.deque(maxlen=LATENCY_WINDOW)
+        self._first_audio: collections.OrderedDict[int, float] = collections.OrderedDict()
         self.sentences_spoken = 0
         self.sentences_dropped = 0
         self.failures = 0
@@ -228,6 +229,12 @@ class SpeechOutput:
             with contextlib.suppress(RuntimeError):
                 loop.call_soon_threadsafe(self._cancel_before, epoch)
 
+    def first_audio_at(self, utterance: int) -> float | None:
+        """Clock stamp when the first audio of answer ``utterance`` was pushed, None until then
+        (or after the last ``LATENCY_WINDOW`` answers): end-to-end latency counts from it."""
+        with self._lock:
+            return self._first_audio.get(utterance)
+
     def snapshot(self) -> dict[str, Any]:
         """Counts and timings for the debug report; never text."""
         with self._lock:
@@ -290,7 +297,12 @@ class SpeechOutput:
                     if not self._pad(job, chunk.rate_hz):
                         return
                     with self._lock:
-                        self._latencies.append((self.clock() - job.said_at) * MS_PER_S)
+                        now = self.clock()
+                        self._latencies.append((now - job.said_at) * MS_PER_S)
+                        if job.utterance not in self._first_audio:
+                            self._first_audio[job.utterance] = now
+                            while len(self._first_audio) > LATENCY_WINDOW:
+                                self._first_audio.popitem(last=False)
                     log.debug("speech %d: first audio after %.0f ms", job.id, self._latencies[-1])
                 self._last_rate_hz = chunk.rate_hz
                 if not self._push(job, chunk.samples, chunk.rate_hz):
