@@ -54,6 +54,7 @@ from roboemot.vision.minor import MinorPresence
 from roboemot.vision.service import Perception, default_stages, open_perception, world_snapshot
 from roboemot.webui import Server, make_server
 from roboemot.webui.catalogue import open_catalogue
+from roboemot.webui.routes import RouteChecker
 from roboemot.world import (
     Observation,
     ObserveResult,
@@ -325,6 +326,11 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         """The vision backends (overridable: tests inject fakes)."""
         return default_stages(cfg, profile)
 
+    def route_check_router(self) -> Router | None:
+        """The router a web UI route check is charged to: the traits worker's (TODO.md: one
+        app-wide router), None before it exists, which gives the checker a private one."""
+        return self.traits_worker.router if self.traits_worker else None
+
     def start_webui(
         self, stack: ConfigStack, cfg: Any, manifest: Any, cleanup: ExitStack
     ) -> Server | None:
@@ -342,6 +348,11 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 paths.data_dir(cfg.data_dir),
                 robot_hosted=manifest.robot.profile is not None,
                 catalogue=self.catalogue,
+                routes=RouteChecker(
+                    stack.effective,
+                    paths.route_checks_path(cfg.data_dir),
+                    router=self.route_check_router,
+                ),
             )
         except Exception as exc:
             log.error("web UI not started: %s", type(exc).__name__)

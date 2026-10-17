@@ -23,6 +23,7 @@ BEHAVIOUR_MODULES = [
     "circadian/sampler.py",
     "voice/prosody.py",
     "llm/router.py",
+    "llm/conformance.py",
     "llm/prompt.py",
     "persona/__init__.py",
     "persona/llm_traits.py",
