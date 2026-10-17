@@ -22,6 +22,8 @@ BEHAVIOUR_MODULES = [
     "circadian/runner.py",
     "circadian/sampler.py",
     "voice/prosody.py",
+    "voice/vad.py",
+    "voice/models.py",
     "llm/router.py",
     "llm/prompt.py",
     "persona/__init__.py",
