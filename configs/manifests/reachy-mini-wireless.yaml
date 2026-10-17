@@ -54,3 +54,52 @@ safety:
   soft_stop: hold_position
   hard_stop: disable_motors
   watchdog_ms: 200
+behaviour:                      # config layer 2 (SPEC 11A): this robot's defaults
+  # Expression map (SPEC 7): per affect label, keyframes per channel as [t_s, offset_deg],
+  # piecewise-linear, added on top of the current pose. Every channel starts and ends at 0 and
+  # all channels of a label end together; `repeat` plays the cycle back to back.
+  # Antennas carry most of the affect (SPEC 4A); no LED, no sound in M2. Channels the robot
+  # lacks are skipped. Signs (SDK order is [right, left]): antenna lift toward vertical is
+  # right +, left -; droop / outward is right -, left +; head.pitch negative is up. The signs
+  # follow the connectivity gestures and are not yet checked on the hardware. All offsets are
+  # starting points to tune, scaled by the register, the persona and the minor cap at runtime.
+  expression_map:
+    joy:                        # fast antenna wiggle, 3 flaps in 1.35 s
+      repeat: 3
+      channels:
+        antenna_right: [[0.0, 0], [0.15, 18], [0.3, -8], [0.45, 0]]
+        antenna_left:  [[0.0, 0], [0.15, -18], [0.3, 8], [0.45, 0]]
+    curiosity:                  # antennas raised and still, small head tilt, 2.4 s
+      channels:
+        antenna_right: [[0.0, 0], [0.5, 15], [1.8, 15], [2.4, 0]]
+        antenna_left:  [[0.0, 0], [0.5, -15], [1.8, -15], [2.4, 0]]
+        head.roll:     [[0.0, 0], [0.5, 6], [1.8, 6], [2.4, 0]]
+    sadness:                    # antennas drooping, head slightly down, 4 s
+      channels:
+        antenna_right: [[0.0, 0], [1.2, -20], [2.8, -20], [4.0, 0]]
+        antenna_left:  [[0.0, 0], [1.2, 20], [2.8, 20], [4.0, 0]]
+        head.pitch:    [[0.0, 0], [1.2, 6], [2.8, 6], [4.0, 0]]
+    surprise:                   # quick antenna lift, small head pitch up, 1.2 s
+      channels:
+        antenna_right: [[0.0, 0], [0.2, 25], [0.6, 25], [1.2, 0]]
+        antenna_left:  [[0.0, 0], [0.2, -25], [0.6, -25], [1.2, 0]]
+        head.pitch:    [[0.0, 0], [0.2, -6], [0.6, -6], [1.2, 0]]
+    sleepy:                     # slow droop with a head tilt, 5 s
+      channels:
+        antenna_right: [[0.0, 0], [2.0, -12], [3.2, -12], [5.0, 0]]
+        antenna_left:  [[0.0, 0], [2.0, 12], [3.2, 12], [5.0, 0]]
+        head.roll:     [[0.0, 0], [2.0, 8], [3.2, 8], [5.0, 0]]
+        head.pitch:    [[0.0, 0], [2.0, 4], [3.2, 4], [5.0, 0]]
+    calm:                       # gentle, small, slow, 4 s
+      channels:
+        antenna_right: [[0.0, 0], [2.0, 4], [4.0, 0]]
+        antenna_left:  [[0.0, 0], [2.0, -4], [4.0, 0]]
+        head.roll:     [[0.0, 0], [2.0, 2], [4.0, 0]]
+    fear:                       # antennas back with a tremble, a small withdraw (head pitch up, never toward), 2.2 s
+      channels:
+        antenna_right: [[0.0, 0], [0.2, -15], [0.35, -10], [0.5, -15], [0.65, -10], [0.8, -15], [1.4, -15], [2.2, 0]]
+        antenna_left:  [[0.0, 0], [0.2, 15], [0.35, 10], [0.5, 15], [0.65, 10], [0.8, 15], [1.4, 15], [2.2, 0]]
+        head.pitch:    [[0.0, 0], [0.3, -4], [1.4, -4], [2.2, 0]]
+    annoyance:                  # short flick of the right antenna, 0.5 s
+      channels:
+        antenna_right: [[0.0, 0], [0.1, 20], [0.3, -6], [0.5, 0]]

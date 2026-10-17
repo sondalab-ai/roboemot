@@ -204,6 +204,43 @@ def test_attention_turns_the_head_towards_a_world_entry(loop):
     assert state["head.pitch"] < -0.9 * el, state  # looking up (nose up is negative pitch)
 
 
+def test_a_joy_expression_moves_the_antennas_on_the_simulated_robot(loop):
+    """SPEC 7, 10: the shipped joy expression, rendered for an adult, flaps both antennas.
+
+    The robot first settles at the antenna home; the renderer then feeds additive EXPRESSION
+    commands through the real loop. The fallback dynamics are slow, so the swing asserted is
+    far below the commanded one; what counts is that both antennas move and come back.
+    """
+    from roboemot.affect import AffectState
+    from roboemot.affect.expression import ExpressionRenderer
+    from roboemot.affect.register import Person, resolve_register
+
+    manifest = loop.manifest
+    stack = ConfigStack()
+    stack.set_manifest_behaviour(manifest.model.behaviour)
+    cfg = stack.effective()
+    home = {n: manifest.dofs[n].home for n in ("antenna_right", "antenna_left")}
+    _hold(loop, home, 8.0)
+    settled = loop.driver.read_state()
+    reg = resolve_register([Person("adult", "declared", {})], cfg.register, cfg.persona)
+    renderer = ExpressionRenderer(cfg.expression, cfg.expression_map, manifest.dofs, 0.15)
+    renderer.update(AffectState(0.0, 0.0, "calm", 0.0), reg, time.monotonic())
+    assert renderer.update(AffectState(0.7, 0.5, "joy", 1.0, 1), reg, time.monotonic())
+    seen: dict[str, list[float]] = {n: [] for n in home}
+    end = time.monotonic() + 3.0
+    while time.monotonic() < end:
+        now = time.monotonic()
+        for cmd in renderer.commands(now):
+            loop.feed(cmd)
+        state = loop.driver.read_state()
+        for n in home:
+            seen[n].append(state[n])
+        time.sleep(0.02)
+    for n, values in seen.items():
+        assert max(values) - min(values) > 0.03, (n, max(values) - min(values))
+        assert values[-1] == pytest.approx(settled[n], abs=0.1), n
+
+
 def test_full_sweep_keeps_the_world_map_correct(loop):
     """SPEC 5A (M1 exit): two objects planted aside and behind the robot are found by one full
     sweep, at the right base-frame bearings, with no duplicate entries.

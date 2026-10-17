@@ -35,6 +35,7 @@ class AffectState:
     arousal: float
     label: str
     intensity: float
+    impulse: int = 0  # counts the impulses that named a label, so a repeated label is noticed
 
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -62,6 +63,7 @@ class AffectEngine:
     baseline_arousal: float = 0.0
     _last: float | None = None
     _event_label: tuple[str, float] | None = None  # (label, until)
+    _label_impulses: int = 0
     _cooldown: dict[tuple, float] = field(default_factory=dict)  # (rule, subject) -> until
     _llm_budget: float = 0.0
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
@@ -106,6 +108,7 @@ class AffectEngine:
         self.arousal = _clamp(self.arousal + arousal)
         if label:
             self._event_label = (label, now + self.cfg.event_label_hold_s)
+            self._label_impulses += 1
 
     @_locked
     def on_event(self, event: str, now: float, payload: Mapping[str, Any] | None = None) -> bool:
@@ -178,4 +181,10 @@ class AffectEngine:
             self._event_label = None
             label = self.nearest_label(self.valence, self.arousal)
         dev = math.hypot(self.valence - self.baseline_valence, self.arousal - self.baseline_arousal)
-        return AffectState(self.valence, self.arousal, label, min(1.0, dev / math.sqrt(2)))
+        return AffectState(
+            self.valence,
+            self.arousal,
+            label,
+            min(1.0, dev / math.sqrt(2)),
+            self._label_impulses,
+        )

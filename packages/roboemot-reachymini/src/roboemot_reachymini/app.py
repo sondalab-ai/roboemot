@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Any
 
 from roboemot import paths
+from roboemot.affect.expression import ExpressionRenderer
+from roboemot.affect.register import RegisterTracker
 from roboemot.affect.runner import AffectRunner
 from roboemot.attention import SOURCE as ATTENTION_SOURCE
 from roboemot.attention import AttentionSelector, GazeController
@@ -67,6 +69,7 @@ except ImportError:  # pragma: no cover
 log = logging.getLogger(__name__)
 ADDITIVE_IDLE = "idle-additive"
 MINUTES_PER_HOUR = 60.0
+MS_PER_S = 1000.0
 DATA = Path(__file__).resolve().parent / "data"
 
 
@@ -202,6 +205,19 @@ def affect_report(engine: Any, now: float) -> dict[str, Any]:
     }
 
 
+def register_report(tracker: RegisterTracker) -> dict[str, Any]:
+    """Register fields of the debug report: the group and its parameters, no person ids."""
+    return tracker.active.summary() if tracker.active is not None else {}
+
+
+def _register_overrides(registry: Any, person_id: str) -> dict[str, Any]:
+    """A registered person's ``register_overrides`` ({} without a registry). A missing record or
+    a registry error raises: the tracker then resolves that person as ``unknown``."""
+    if registry is None:
+        return {}
+    return dict(registry.get_person(person_id).register_overrides)
+
+
 def apply_attention_config(
     cfg: Any, world: WorldModel, selector: AttentionSelector, gaze: GazeController
 ) -> None:
@@ -225,6 +241,8 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
     circadian: CircadianModel | None = None  # the circadian runner (M2) sets this
     affect_runner: AffectRunner | None = None  # owns the one affect engine
     minor_presence: MinorPresence | None = None  # the one source of the minor-present signal
+    register_tracker: RegisterTracker | None = None  # people in view -> register.active
+    expression: ExpressionRenderer | None = None  # affect label -> additive antenna/head motion
 
     def detection_period(self) -> float:
         """Seconds between face-stage runs now (infinite while vision is off)."""
@@ -287,6 +305,8 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             allow_unmeasured_dynamics=cfg.safety.allow_unmeasured_dynamics,
             safety=cfg.safety,
         )
+        stack.set_manifest_behaviour(manifest.model.behaviour)  # the expression map (SPEC 11A)
+        cfg = stack.effective()
         responder = OfflineResponder(
             cfg.connectivity,
             set(manifest.dofs),
@@ -335,6 +355,18 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         # No face frames (vision off or dead) keep the caps on: release needs evidence (SPEC 12).
         presence = self.minor_presence = MinorPresence(
             bus, cfg.safety, sink=loop.set_minor_present, period=lambda: self.detection_period()
+        )
+        tracker = self.register_tracker = RegisterTracker(
+            bus,
+            cfg.expression,
+            overrides_for=lambda person_id: _register_overrides(perception.registry, person_id),
+            detection_period=self.detection_period,
+        )
+        expression = self.expression = ExpressionRenderer(
+            cfg.expression,
+            cfg.expression_map,
+            manifest.dofs,
+            cfg.motion.arbiter.crossfade_ms / MS_PER_S,
         )
         source = self.make_frame_source(reachy_mini, loop.driver.read_state)
         perception = self.perception = open_perception(
@@ -386,6 +418,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             FnSource("roboemot.world", lambda: world_snapshot(world.entries, time.monotonic())),
             FnSource("roboemot.registry", perception.registry_snapshot),
             FnSource("roboemot.minor", presence.snapshot),
+            FnSource("roboemot.register", lambda: register_report(tracker)),
             FnSource(
                 "roboemot.app",
                 lambda: {
@@ -409,6 +442,12 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             if self.catalogue is not None:
                 self.catalogue.cfg = change.config.catalogue
             runner.apply_config(change.config.affect, change.config.appraisal)
+            tracker.cfg = change.config.expression
+            expression.apply_config(
+                change.config.expression,
+                change.config.expression_map,
+                change.config.motion.arbiter.crossfade_ms / MS_PER_S,
+            )
             responder.cfg = change.config.connectivity
             network.set_policy(change.config.connectivity.network)
 
@@ -419,6 +458,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         # thread is quiet before the SDK client goes away.
         with ExitStack() as cleanup:
             cleanup.callback(presence.close)
+            cleanup.callback(tracker.close)
             cleanup.callback(runner.close)
             cleanup.callback(stack.start_watcher().set)
             loop.start()
@@ -435,10 +475,16 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 world_source.start(publish)
             while not stop_event.is_set():
                 now = time.monotonic()
-                runner.tick(now)
+                state = runner.tick(now)
                 minor = presence.apply(now)
                 attending = attention_tick(now, world, selector, gaze, loop)
                 live = stack.effective()
+                if live.persona is not fx_for:  # recompute only after a reload
+                    fx_for, fx = live.persona, persona_effects(live.persona)
+                register = tracker.tick(now, live.register, fx, minor_present=minor)
+                expression.set_register(register, live.safety.minor_motion_factor if minor else 1.0)
+                if state is not None:
+                    expression.update(state, register, now)
                 perception.enrollment.expire()
                 if self.autoenroll is not None:
                     self.autoenroll.tick()  # retention does not wait for a sighting
@@ -449,8 +495,6 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 if scan is not None:
                     local = datetime.now()
                     hour = local.hour + local.minute / MINUTES_PER_HOUR
-                    if live.persona is not fx_for:  # recompute only after a reload
-                        fx_for, fx = live.persona, persona_effects(live.persona)
                     ctx = scan_context(
                         now,
                         live,
@@ -463,6 +507,8 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                     scan_tick(ctx, scan, loop, live)
                 feed_idle(loop, live, now, attending)
                 for cmd in responder.commands(now):
+                    loop.feed(cmd)
+                for cmd in expression.commands(now):
                     loop.feed(cmd)
                 stop_event.wait(0.05)
 
