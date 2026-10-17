@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 
 import httpx
@@ -208,18 +209,31 @@ def test_unrelated_changes_do_not_wake_it(tmp_path, started, runs):
     assert runs[0] == 1
 
 
-def test_a_burst_of_requests_coalesces(tmp_path, runs):
+def test_a_burst_of_requests_during_a_run_coalesces_into_one_more_run(tmp_path, monkeypatch):
+    runs = [0]
     server = Server()
     stack, worker = make(tmp_path, server)
+    gate = threading.Event()
+    real = llm_traits.apply_llm_traits
+
+    async def gated(*args):
+        runs[0] += 1
+        while not gate.is_set():  # the run in flight takes a while
+            await asyncio.sleep(0.01)
+        return await real(*args)
+
+    monkeypatch.setattr(llm_traits, "apply_llm_traits", gated)
     worker.start()
     try:
         assert wait_for(lambda: runs[0] == 1)
         for _ in range(20):
             worker.request()
-        assert wait_for(lambda: runs[0] >= 2)
+        gate.set()
+        assert wait_for(lambda: runs[0] == 2)
         time.sleep(0.2)
-        assert runs[0] <= 3  # a burst is a run or two, never twenty
+        assert runs[0] == 2
     finally:
+        gate.set()
         worker.close()
 
 
