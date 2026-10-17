@@ -691,7 +691,11 @@ REFLEX_DURATION_MS = (100.0, 800.0)  # SPEC 10: a reflex pre-empts lower sources
 
 class ReflexRule(Strict):
     name: str = param("", "Rule name (unique; shown in the debug report)")
-    enabled: bool = param(True, "Whether the rule fires")
+    enabled: bool = param(
+        True,
+        "Whether the rule fires. A runtime override may not enable a rule the approved config "
+        "disabled, nor disable a withdraw rule (protective)",
+    )
     trigger: Literal["loud_onset", "new_voice", "proximity"] = param(
         "loud_onset", "Percept that fires the rule"
     )
@@ -703,7 +707,9 @@ class ReflexRule(Strict):
     threshold: float = param(
         3.0,
         "Trigger level: loud_onset, RMS ratio over the running floor; new_voice, seconds of "
-        "silence before a voice counts as new; proximity, face height as a fraction of the frame",
+        "silence before a voice counts as new; proximity, face height as a fraction of the frame. "
+        "Runtime overrides may only make a reflex safer: a higher threshold for loud_onset and "
+        "new_voice (fires less), a lower one for proximity (the withdraw fires earlier)",
         unit="ratio, s or frame fraction (per trigger)",
         ge=0.05,
         le=600,
@@ -800,8 +806,9 @@ class ReflexConfig(Strict):
         0.4, "Share of the duration spent returning (startle and withdraw)", ge=0.05, le=0.9
     )
     antenna_ratio: float = param(
-        2.0, "Startle antenna lift per unit of head deflection", ge=0, le=10
-    )
+        2.0, "Startle antenna lift per unit of head deflection", ge=0, le=10,
+        conservative="lower",
+    )  # fmt: skip
     proximity_rearm_ratio: float = param(
         0.8, "A close face re-arms the proximity rule once it falls below this share of the "
         "threshold", ge=0.1, le=1,

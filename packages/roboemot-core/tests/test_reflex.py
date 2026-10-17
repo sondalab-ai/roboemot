@@ -550,6 +550,55 @@ def test_a_runtime_added_or_renamed_rule_is_refused_whole():
     assert violations(approved, approved) == []
 
 
+def cfg_rules(*rules: dict) -> RoboEmotConfig:
+    return RoboEmotConfig.model_validate({"reflexes": {"rules": list(rules)}})
+
+
+def flagged(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> set[str]:
+    return {v.path.rsplit(".", 1)[-1] for v in violations(approved, candidate)}
+
+
+def test_a_runtime_layer_cannot_change_what_a_rule_is():
+    approved = cfg_rules(rule(name="a"))
+    swapped = cfg_rules(rule(name="a", primitive="withdraw"))
+    retriggered = cfg_rules(
+        rule(name="a", trigger="proximity", primitive="withdraw", threshold=0.4)
+    )
+    assert "primitive" in flagged(approved, swapped)
+    assert {"trigger", "primitive"} <= flagged(approved, retriggered)
+
+
+def test_antenna_ratio_may_only_fall():
+    approved = RoboEmotConfig.model_validate({"reflexes": {"antenna_ratio": 2.0}})
+    assert not violations(
+        approved, RoboEmotConfig.model_validate({"reflexes": {"antenna_ratio": 1}})
+    )
+    assert violations(approved, RoboEmotConfig.model_validate({"reflexes": {"antenna_ratio": 5}}))
+
+
+def test_enabling_a_disabled_rule_or_disabling_a_withdraw_is_refused():
+    off = cfg_rules(rule(name="a", enabled=False))
+    on = cfg_rules(rule(name="a", enabled=True))
+    assert "enabled" in flagged(off, on)
+    assert "enabled" not in flagged(on, off)  # switching a startle off is fine
+    w_on = cfg_rules(dict(PROXIMITY, enabled=True))
+    w_off = cfg_rules(dict(PROXIMITY, enabled=False))
+    assert "enabled" in flagged(w_on, w_off)
+    assert "enabled" not in flagged(w_off, w_off)
+
+
+def test_the_threshold_may_only_move_the_safe_way_per_trigger():
+    loud = cfg_rules(rule(name="a", threshold=6.0))
+    assert "threshold" in flagged(loud, cfg_rules(rule(name="a", threshold=3.0)))
+    assert "threshold" not in flagged(loud, cfg_rules(rule(name="a", threshold=9.0)))
+    voice = cfg_rules(dict(VOICE, name="a", threshold=3.0))
+    assert "threshold" in flagged(voice, cfg_rules(dict(VOICE, name="a", threshold=1.0)))
+    assert "threshold" not in flagged(voice, cfg_rules(dict(VOICE, name="a", threshold=8.0)))
+    close = cfg_rules(dict(PROXIMITY, threshold=0.4))
+    assert "threshold" in flagged(close, cfg_rules(dict(PROXIMITY, threshold=0.6)))  # fires later
+    assert "threshold" not in flagged(close, cfg_rules(dict(PROXIMITY, threshold=0.3)))
+
+
 def test_a_minor_appearing_mid_turn_cuts_the_turn_off_on_the_next_tick():
     rig = Rig(cfg_with(VOICE))
     rig.loop.set_minor_present(False)

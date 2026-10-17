@@ -19,9 +19,9 @@ band and the manifest ranges still apply, and REFLEX is not additive. Nothing ti
 ``startle`` and ``withdraw`` only deflect the head away (``ReflexMap.pitch_away_sign``);
 ``turn_toward`` answers a voice, stays in the front half-plane, within ``amplitude_deg`` of where
 the head points, inside the manifest range and the head-body ``yaw_delta`` reach, is never started
-while a possible minor is present, and is cut off on the first tick after one appears. The pose a reflex starts from is un-scaled by the minor
-factor, because the arbiter scales the absolute target about home: otherwise a head already tipped
-back would be pulled forward by the band.
+while a possible minor is present, and is cut off on the first tick after one appears. The pose a
+reflex starts from is un-scaled by the minor factor, because the arbiter scales the absolute target
+about home: otherwise a head already tipped back would be pulled forward by the band.
 
 Latency. Each firing records the time from the producer's stamp to the command being fed (the
 SPEC 13 budget) and to the first pose change of the commanded output. Producers stamp at read
@@ -263,7 +263,8 @@ class ReflexEngine:
         fresh = []
         for p in taken:
             rule = self._rule(p.rule)
-            limit = cfg.max_age_vision_ms if rule and rule.trigger == "proximity" else cfg.max_age_ms
+            vision = rule is not None and rule.trigger == "proximity"
+            limit = cfg.max_age_vision_ms if vision else cfg.max_age_ms
             if now - p.stamp > limit / MS_PER_S:
                 self._stat(p.rule).stale += 1
             else:

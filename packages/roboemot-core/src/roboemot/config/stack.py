@@ -301,6 +301,38 @@ def violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Viol
             found.append(Violation("privacy", path, ref, value))
         elif not ok:
             found.append(Violation("safety", path, ref, value))
+    return found + reflex_violations(approved, candidate)
+
+
+def reflex_violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Violation]:
+    """Reflex rule changes that no single field's direction can express (SPEC 10, 12): the
+    trigger and primitive are the rule's identity, a withdraw rule is protective and may not be
+    switched off, a disabled rule may not be switched on, and the threshold is safer upward for a
+    sound or a voice (fires less) and downward for a close face (the withdraw fires earlier)."""
+    base = {r.name: r for r in approved.reflexes.rules}
+    found = []
+    for rule in candidate.reflexes.rules:
+        ref = base.get(rule.name)
+        if ref is None:
+            continue  # refused whole by the path check
+        at = f"reflexes.rules.{rule.name}"
+        for attr in ("trigger", "primitive"):
+            if getattr(rule, attr) != getattr(ref, attr):
+                found.append(
+                    Violation("safety", f"{at}.{attr}", getattr(ref, attr), getattr(rule, attr))
+                )
+        if rule.trigger != ref.trigger:
+            continue
+        if rule.enabled and not ref.enabled:
+            found.append(Violation("safety", f"{at}.enabled", False, True))
+        if ref.enabled and not rule.enabled and ref.primitive == "withdraw":
+            found.append(Violation("safety", f"{at}.enabled", True, False))
+        fires_earlier = rule.threshold < ref.threshold
+        fires_later = rule.threshold > ref.threshold
+        if (ref.trigger == "proximity" and fires_later) or (
+            ref.trigger != "proximity" and fires_earlier
+        ):
+            found.append(Violation("safety", f"{at}.threshold", ref.threshold, rule.threshold))
     return found
 
 
