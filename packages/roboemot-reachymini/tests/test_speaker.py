@@ -140,3 +140,61 @@ def test_close_flushes_and_stops_the_pipeline():
     assert log.cleared == 1 and log.stopped == 1
     sp.close()
     assert log.stopped == 1
+
+
+def test_a_stop_during_a_push_leaves_the_gate_reset_not_re_extended():
+    mini, log = fake()
+    clock = Clock()
+    act = SpeechActivity(0)
+    sp = ReachySpeaker(mini, 100, act, clock)
+    sp.start_playing()
+    real = mini.media.push_audio_sample
+
+    def push(x):
+        real(x)
+        if len(log.pushed) == 2:
+            sp.stop()
+
+    mini.media.push_audio_sample = push
+    sp.push_audio_sample(np.zeros(16000, np.float32), 16000)
+    assert not act.speaking(clock.t + 0.01)  # reset won; the interrupted piece did not extend
+
+
+def test_stop_and_pushes_from_two_threads_never_leave_the_gate_ahead_of_the_speaker():
+    import threading
+
+    mini, _ = fake()
+    clock = Clock()
+    act = SpeechActivity(0)
+    sp = ReachySpeaker(mini, 10, act, clock)
+    sp.start_playing()
+    pusher = threading.Thread(
+        target=lambda: [sp.push_audio_sample(np.zeros(16000, np.float32), 16000) for _ in range(20)]
+    )
+    pusher.start()
+    for _ in range(50):
+        sp.stop()
+    pusher.join()
+    sp.stop()
+    assert act.until() <= clock.t and sp.queued_s() == 0.0
+
+
+def test_a_failed_pipeline_restart_marks_the_speaker_not_playing():
+    mini, log = fake(clear=False)
+    sp = ReachySpeaker(mini, 100, clock=Clock())
+    sp.start_playing()
+    mini.media.start_playing = lambda: (_ for _ in ()).throw(RuntimeError("x"))
+    sp.stop()
+    assert not sp.snapshot()["playing"]
+    assert sp.push_audio_sample(np.zeros(100, np.float32), 16000) == 0.0
+
+
+def test_the_return_value_is_zero_when_nothing_was_queued_and_bad_rates_are_refused():
+    mini, log = fake()
+    sp = ReachySpeaker(mini, 100, clock=Clock())
+    sp.start_playing()
+    assert sp.push_audio_sample(np.zeros(0, np.float32), 16000) == 0.0
+    assert sp.push_audio_sample(np.zeros(100, np.float32), 0) == 0.0
+    assert sp.push_audio_sample(np.zeros(100, np.float32), -5) == 0.0
+    assert log.pushed == []
+    assert sp.push_audio_sample(np.zeros(100, np.float32), 16000) > 0.0

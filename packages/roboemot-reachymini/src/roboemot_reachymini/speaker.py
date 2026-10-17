@@ -88,13 +88,14 @@ class ReachySpeaker:
     def push_audio_sample(self, samples: np.ndarray, rate_hz: int) -> float:
         """Queue mono float32 ``samples`` recorded at ``rate_hz``: resampled to the output rate
         and pushed in pieces of ``chunk_ms`` without waiting for playback. Returns the stamp
-        until which everything queued has played (0.0 if nothing was queued)."""
-        if not self._playing or self._out_hz is None or samples.size == 0:
-            return self.playing_until() if self._playing else 0.0
+        until which everything queued has played; 0.0 if this call queued nothing."""
+        if not self._playing or self._out_hz is None or samples.size == 0 or rate_hz <= 0:
+            return 0.0
         out = resample(samples.astype(np.float32, copy=False).reshape(-1), rate_hz, self._out_hz)
         step = max(1, int(self._chunk_s * self._out_hz))
         with self._lock:
             generation = self._generation
+        queued = False
         for i in range(0, out.size, step):
             piece = np.ascontiguousarray(out[i : i + step])
             with self._lock:
@@ -109,10 +110,10 @@ class ReachySpeaker:
                     break
                 self._until = max(self._until, self._clock()) + piece.size / self._out_hz
                 self._pushed += piece.size
-                until = self._until
-            if self._activity is not None:
-                self._activity.extend(until)
-        return self.playing_until()
+                queued = True
+                if self._activity is not None:  # under the lock: a stop cannot interleave
+                    self._activity.extend(self._until)
+        return self.playing_until() if queued else 0.0
 
     def playing_until(self) -> float:
         """Monotonic stamp at which everything pushed so far has played (past if idle)."""
@@ -126,23 +127,24 @@ class ReachySpeaker:
     def stop(self) -> None:
         """Barge-in: drop the queued audio now (``clear_player``, else restart the pipeline),
         abandon the pieces of a push in flight and reset the queued duration."""
-        with self._lock:
+        with self._lock:  # held throughout: no push lands between the flush and the reset
             self._generation += 1
-            self._until = self._clock()
-            now = self._until
-        if self._playing:
-            audio = getattr(self._media(), "audio", None)
-            clear = getattr(audio, "clear_player", None)
-            try:
-                if callable(clear):
-                    clear()
-                else:
-                    self._media().stop_playing()
-                    self._media().start_playing()
-            except Exception as exc:
-                log.warning("speaker: flush: %s", type(exc).__name__)
-        if self._activity is not None:
-            self._activity.reset(now)
+            self._until = now = self._clock()
+            if self._playing:
+                audio = getattr(self._media(), "audio", None)
+                clear = getattr(audio, "clear_player", None)
+                try:
+                    if callable(clear):
+                        clear()
+                    else:
+                        self._media().stop_playing()
+                        self._media().start_playing()
+                except Exception as exc:
+                    log.warning("speaker: flush: %s", type(exc).__name__)
+                    if not callable(clear):
+                        self._playing = False  # the pipeline did not come back
+            if self._activity is not None:
+                self._activity.reset(now)
 
     def snapshot(self) -> dict[str, Any]:
         """State for the debug report: counts and durations only."""

@@ -22,6 +22,8 @@ def _ratio(in_hz: int, out_hz: int) -> tuple[int, int]:
 
 def resample(x: np.ndarray, in_hz: int, out_hz: int) -> np.ndarray:
     """Whole-array conversion of mono float32 audio; returns the input itself at equal rates."""
+    if in_hz <= 0 or out_hz <= 0:
+        raise ValueError("sample rates must be positive")
     if in_hz == out_hz or x.size == 0:
         return x
     up, down = _ratio(in_hz, out_hz)
@@ -37,11 +39,19 @@ class StreamResampler:
     """
 
     def __init__(self, in_hz: int, out_hz: int) -> None:
+        if in_hz <= 0 or out_hz <= 0:
+            raise ValueError("sample rates must be positive")
+        self.in_hz = in_hz
         self.up, self.down = _ratio(in_hz, out_hz)
         half_in = math.ceil(FILTER_HALF_LEN * max(self.up, self.down) / self.up)
         self._hist = math.ceil(half_in / self.down) * self.down
         self._look = half_in + self.down
         self._buf = np.zeros(self._hist, np.float32)
+
+    @property
+    def lookahead_s(self) -> float:
+        """Input time the converter holds back: its output trails the input by this much."""
+        return self._look / self.in_hz
 
     def process(self, x: np.ndarray) -> np.ndarray:
         """Convert the next chunk; may return fewer (or no) samples while it fills a block."""
