@@ -122,6 +122,7 @@ class ReflexEngine:
         self.rmap, self.dofs, self.constraints, self.bus = rmap, dofs, constraints, bus
         self._gaze = GazeMap(rmap.head_yaw, rmap.head_pitch, rmap.body_yaw)
         self.audio_status: Callable[[], dict[str, Any]] | None = None
+        self.speaking: Callable[[float], bool] | None = None  # "is the robot speaking at stamp"
         self.bad_payloads = 0
         self._lock = threading.Lock()
         self._inbox: deque[_Pending] = deque(maxlen=INBOX_MAX)
@@ -179,8 +180,19 @@ class ReflexEngine:
         The onset is the level over a running floor that falls at once and rises with a half-life
         (``reflexes.audio``). Triggers are rising edges of each loud-onset rule's threshold;
         ``sound.loud`` goes on the bus on a rising edge of ``audio.loud_event_ratio``.
+
+        While the robot speaks (``speaking``, echo tail included) the chunk is its own voice: no
+        trigger, no ``sound.loud``, and the floor is not updated, so the voice never becomes the
+        room level. The previous ratio is held at infinity: the first chunk after the tail
+        cannot be a rising edge, a sound that is still loud then is not an onset, and a new one
+        needs a quieter chunk first.
         """
         if not (math.isfinite(rms) and math.isfinite(stamp)) or rms < 0:
+            return
+        speaking = self.speaking
+        if speaking is not None and speaking(stamp):
+            with self._lock:
+                self._audio_stamp, self._prev_ratio = stamp, math.inf
             return
         event: SoundLoud | None = None
         with self._lock:
