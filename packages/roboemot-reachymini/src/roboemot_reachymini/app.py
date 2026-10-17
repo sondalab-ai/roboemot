@@ -45,6 +45,7 @@ from roboemot.health.responder import OfflineResponder
 from roboemot.manifest import load_manifest
 from roboemot.motion import Command, MotionLoop, Priority
 from roboemot.persona import effects as persona_effects
+from roboemot.reflex import ReflexEngine
 from roboemot.vision import CIRCADIAN, FrameSource, LockedSource
 from roboemot.vision.minor import MinorPresence
 from roboemot.vision.service import Perception, default_stages, open_perception, world_snapshot
@@ -63,9 +64,10 @@ from roboemot.world import (
 from roboemot.world.autoenroll import AutoEnroller, open_autoenroll, purge_stored
 from roboemot.world.scan import SOURCE as SCAN_SOURCE
 
+from .audio import ReachyAudio
 from .camera import ReachyCamera
 from .driver import ReachyMiniDriver
-from .gaze import FRAME, GAZE
+from .gaze import FRAME, GAZE, REFLEX
 
 try:  # the SDK is optional so unit tests run without GStreamer
     from reachy_mini import ReachyMiniApp
@@ -265,6 +267,8 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
     minor_presence: MinorPresence | None = None  # the one source of the minor-present signal
     register_tracker: RegisterTracker | None = None  # people in view -> register.active
     expression: ExpressionRenderer | None = None  # affect label -> additive antenna/head motion
+    reflexes: ReflexEngine | None = None  # runs on the motion loop's tick (SPEC 10)
+    audio: ReachyAudio | None = None  # microphone level for the loud-onset reflex
 
     def make_circadian_clock(self) -> Any:
         """The clock the circadian rhythm runs on: monotonic seconds and the local hour of day
@@ -366,6 +370,24 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             on_link_change=responder.on_event,
         )
         bus = self.bus = Bus()
+        # Reflexes run in the motion loop's own tick (not the 20 Hz app tick below): audio level,
+        # voice bearing and face size in, REFLEX-priority commands to the arbiter (SPEC 10).
+        reflexes = self.reflexes = ReflexEngine(
+            cfg.reflexes,
+            REFLEX,
+            manifest.dofs,
+            manifest.constraints,
+            margin_rad=math.radians(cfg.safety.constraint_margin_deg),
+            bus=bus,
+        )
+        loop.tick_hooks.append(reflexes.on_tick)
+        audio = self.audio = ReachyAudio(
+            reachy_mini,
+            reflexes.offer_audio_level,
+            cfg.reflexes.audio.poll_hz,
+            max_gap_s=cfg.reflexes.max_age_ms / MS_PER_S,
+        )
+        reflexes.audio_status = audio.snapshot
         # The one affect engine: appraisal events from the bus and the responder feed it, the
         # app tick decays it and publishes affect.state (SPEC 7).
         runner = self.affect_runner = AffectRunner(
@@ -402,6 +424,8 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         presence = self.minor_presence = MinorPresence(
             bus, cfg.safety, sink=loop.set_minor_present, period=lambda: self.detection_period()
         )
+        presence.apply(time.monotonic())  # the loop's caps are on from its first tick
+        reflexes.attach(bus)  # after MinorPresence: it can never come before the minor latch
         tracker = self.register_tracker = RegisterTracker(
             bus,
             cfg.expression,
@@ -483,6 +507,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             FnSource("roboemot.minor", presence.snapshot),
             FnSource("roboemot.register", lambda: register_report(tracker)),
             FnSource("roboemot.circadian", circ.snapshot),
+            FnSource("roboemot.reflexes", reflexes.snapshot),
             FnSource(
                 "roboemot.app",
                 lambda: {
@@ -507,6 +532,9 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 self.catalogue.cfg = change.config.catalogue
             runner.apply_config(change.config.affect, change.config.appraisal)
             circ.apply_config(change.config)
+            reflexes.apply_config(
+                change.config.reflexes, math.radians(change.config.safety.constraint_margin_deg)
+            )
             tracker.cfg = change.config.expression
             expression.apply_config(
                 change.config.expression,
@@ -527,6 +555,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             cleanup.callback(tracker.close)
             cleanup.callback(runner.close)
             cleanup.callback(circ.close)
+            cleanup.callback(reflexes.close)
             cleanup.callback(stack.start_watcher().set)
             loop.start()
             cleanup.callback(loop.stop)
@@ -536,6 +565,9 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 cleanup.callback(self.autoenroll.flush)
             cleanup.callback(perception.stop)
             perception.start()
+            if cfg.reflexes.enabled and cfg.reflexes.audio.enabled:
+                cleanup.callback(audio.stop)  # before the SDK client goes away
+                audio.start()  # degrades to "unavailable" in the debug report without a mic
             cleanup.callback(light_reader.stop)  # stopped before the camera thread
             cleanup.callback(self._forget_circadian)
             self.start_webui(stack, cfg, manifest, cleanup)

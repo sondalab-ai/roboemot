@@ -668,6 +668,231 @@ class MotionConfig(Strict):
     idle: IdleConfig = param({}, "Idle motion parameters")
 
 
+# --------------------------------------------------------------------------- reflexes (SPEC 10)
+
+REFLEX_TRIGGERS = ("loud_onset", "new_voice", "proximity")
+REFLEX_PRIMITIVES = ("startle", "withdraw", "turn_toward")
+# Which primitives a trigger may drive. A turn needs a bearing, so only a voice can drive it; a
+# withdraw is the only answer to a close face (never towards it, SPEC 12).
+REFLEX_TRIGGER_PRIMITIVES = {
+    "loud_onset": ("startle", "withdraw"),
+    "new_voice": ("turn_toward",),
+    "proximity": ("withdraw",),
+}
+# Threshold range per trigger: onset ratio over the sound floor, silence before a new voice (s),
+# face height as a fraction of the frame.
+REFLEX_THRESHOLD_RANGE = {
+    "loud_onset": (1.5, 100.0),
+    "new_voice": (0.2, 600.0),
+    "proximity": (0.05, 1.0),
+}
+REFLEX_DURATION_MS = (100.0, 800.0)  # SPEC 10: a reflex pre-empts lower sources for 100 to 800 ms
+
+
+# The protective withdraw reflex is frozen at runtime (config/stack.py): its own fields, and the
+# shared ``reflexes`` settings the engine reads for it. A new field must be added to one of these
+# (or to the explicit "does not affect a withdraw" list in the tests).
+WITHDRAW_RULE_FIELDS = (
+    "enabled", "trigger", "primitive", "threshold", "amplitude_deg", "cooldown_s",
+    "duration_ms", "suppress_with_minor",
+)  # fmt: skip
+WITHDRAW_SHARED_FIELDS = (
+    "enabled", "max_amplitude_deg", "max_age_ms", "max_age_vision_ms", "max_future_ms",
+    "command_ttl_ms", "attack_fraction", "release_fraction", "proximity_rearm_ratio",
+    "motion_eps_deg",
+)  # fmt: skip
+
+
+class ReflexRule(Strict):
+    name: str = param("", "Rule name (unique; shown in the debug report)")
+    enabled: bool = param(
+        True,
+        "Whether the rule fires. A runtime override may not enable a rule the approved config "
+        "disabled, nor disable a withdraw rule (protective)",
+    )
+    trigger: Literal["loud_onset", "new_voice", "proximity"] = param(
+        "loud_onset", "Percept that fires the rule"
+    )
+    primitive: Literal["startle", "withdraw", "turn_toward"] = param(
+        "startle",
+        "Motion played: startle (head back, antennas up), withdraw (head back) or "
+        "turn_toward (head yaw towards a voice)",
+    )
+    threshold: float = param(
+        3.0,
+        "Trigger level: loud_onset, RMS ratio over the running floor; new_voice, seconds of "
+        "silence before a voice counts as new; proximity, face height as a fraction of the frame. "
+        "Runtime overrides may only make a reflex safer: a higher threshold for loud_onset and "
+        "new_voice (fires less), a lower one for proximity (the withdraw fires earlier)",
+        unit="ratio, s or frame fraction (per trigger)",
+        ge=0.05,
+        le=600,
+    )
+    amplitude_deg: float = param(
+        12.0,
+        "Peak head deflection (turn_toward: the most it may turn from where it points)",
+        unit="deg",
+        ge=0,
+        le=90,
+        conservative="lower",
+    )
+    cooldown_s: float = param(
+        3.0, "Minimum time between two firings", unit="s", ge=0, le=600, conservative="higher"
+    )
+    duration_ms: float = param(
+        400.0,
+        "How long the reflex pre-empts lower sources (SPEC 10: 100 to 800 ms)",
+        unit="ms",
+        ge=REFLEX_DURATION_MS[0],
+        le=REFLEX_DURATION_MS[1],
+        conservative="lower",
+    )
+    suppress_with_minor: bool = param(
+        False,
+        "Do not fire while a possible minor is present (always on for turn_toward: the robot "
+        "never moves towards a minor, SPEC 12)",
+        conservative="true",
+    )
+
+    @model_validator(mode="after")
+    def _consistent(self) -> ReflexRule:
+        if ROUTE_NAME.fullmatch(self.name) is None:
+            raise ValueError("a reflex rule needs a name of letters, digits, _ and -")
+        if self.primitive not in REFLEX_TRIGGER_PRIMITIVES[self.trigger]:
+            raise ValueError(
+                f"reflex {self.name!r}: trigger {self.trigger} drives "
+                f"{REFLEX_TRIGGER_PRIMITIVES[self.trigger]}, not {self.primitive}"
+            )
+        lo, hi = REFLEX_THRESHOLD_RANGE[self.trigger]
+        if not lo <= self.threshold <= hi:
+            raise ValueError(
+                f"reflex {self.name!r}: threshold for {self.trigger} must be within {lo} and {hi}"
+            )
+        if self.primitive == "turn_toward" and not self.suppress_with_minor:
+            raise ValueError(f"reflex {self.name!r}: turn_toward must set suppress_with_minor")
+        return self
+
+
+class ReflexAudioConfig(Strict):
+    enabled: bool = param(
+        True,
+        "Read the microphone level for loud-onset reflexes",
+        restart=True,
+        conservative="false",
+    )
+    poll_hz: float = param(50.0, "Audio chunk read rate", unit="Hz", ge=5, le=200, restart=True)
+    floor_half_life_s: float = param(
+        2.0, "How slowly the sound floor rises to a louder room (it falls at once); a shorter "
+        "half-life makes a sustained noise stop counting as an onset sooner",
+        unit="s", ge=0.1, le=60, conservative="lower",
+    )  # fmt: skip
+    min_rms: float = param(
+        0.01, "Lowest floor: a quieter room is treated as this level, so a higher value makes "
+        "the onsets fire less", unit="full scale", ge=0.0001, le=0.5, conservative="higher",
+    )  # fmt: skip
+    loud_event_ratio: float = param(
+        4.0, "Level over the floor that publishes sound.loud for the affect engine", ge=1.5, le=100
+    )
+    loud_event_refractory_s: float = param(
+        1.0, "Minimum time between two sound.loud events", unit="s", ge=0, le=60
+    )
+
+
+class ReflexConfig(Strict):
+    enabled: bool = param(True, "Run the reflex engine", conservative="false")
+    max_amplitude_deg: float = param(
+        45.0,
+        "Ceiling on every rule's amplitude (the manifest limits and the minor cap still apply)",
+        unit="deg", ge=0, le=90, conservative="lower",
+    )  # fmt: skip
+    max_age_ms: float = param(
+        150.0,
+        "A trigger older than this when the motion loop gets to it is dropped, never played late",
+        unit="ms", ge=20, le=2000, conservative="lower",
+    )  # fmt: skip
+    max_age_vision_ms: float = param(
+        250.0,
+        "Same for a close-face trigger: the frame stamp is the capture time, so detection time "
+        "counts (SPEC 13: vision trigger to reflex motion, 250 ms on cm4)",
+        unit="ms", ge=20, le=2000, conservative="lower",
+    )  # fmt: skip
+    max_future_ms: float = param(
+        50.0,
+        "A trigger stamped later than now by more than this is dropped (a bad clock); within it "
+        "the latency is counted as 0",
+        unit="ms", ge=0, le=1000, conservative="lower",
+    )  # fmt: skip
+    command_ttl_ms: float = param(
+        100.0, "A reflex command expires this long after its last tick", unit="ms", ge=20,
+        le=1000, conservative="lower",
+    )  # fmt: skip
+    attack_fraction: float = param(
+        0.25, "Share of the duration spent reaching the peak (higher is gentler)", ge=0.05,
+        le=0.9, conservative="higher",
+    )  # fmt: skip
+    release_fraction: float = param(
+        0.4, "Share of the duration spent returning (startle and withdraw)", ge=0.05, le=0.9
+    )
+    antenna_ratio: float = param(
+        2.0, "Startle antenna lift per unit of head deflection", ge=0, le=10,
+        conservative="lower",
+    )  # fmt: skip
+    proximity_rearm_ratio: float = param(
+        0.8, "A close face re-arms the proximity rule once it falls below this share of the "
+        "threshold", ge=0.1, le=1,
+    )  # fmt: skip
+    motion_eps_deg: float = param(
+        0.2, "Pose change that counts as a movement: a smaller reflex is no_motion, and the first "
+        "such change ends the motion latency figure", unit="deg", ge=0.01, le=5,
+        conservative="higher",
+    )  # fmt: skip
+    latency_window: int = param(200, "Latency samples kept per trigger", ge=10, le=10000)
+    audio: ReflexAudioConfig = param({}, "Microphone level source")
+    rules: list[ReflexRule] = param(
+        [
+            {
+                "name": "startle-loud",
+                "trigger": "loud_onset",
+                "primitive": "startle",
+                "threshold": 6.0,
+                "amplitude_deg": 12,
+                "cooldown_s": 3,
+                "duration_ms": 400,
+            },
+            {
+                "name": "withdraw-close",
+                "trigger": "proximity",
+                "primitive": "withdraw",
+                "threshold": 0.4,
+                "amplitude_deg": 15,
+                "cooldown_s": 4,
+                "duration_ms": 500,
+            },
+            {
+                "name": "turn-to-voice",
+                "trigger": "new_voice",
+                "primitive": "turn_toward",
+                "threshold": 3.0,
+                "amplitude_deg": 40,
+                "cooldown_s": 5,
+                "duration_ms": 800,
+                "suppress_with_minor": True,
+            },
+        ],
+        "Reflex rules (SPEC 10)",
+    )
+
+    @model_validator(mode="after")
+    def _shape_fits(self) -> ReflexConfig:
+        if self.attack_fraction + self.release_fraction > 1 - 0.05:
+            raise ValueError("attack_fraction + release_fraction must leave a hold of 5%")
+        names = [r.name for r in self.rules]
+        dupes = sorted({n for n in names if names.count(n) > 1})
+        if dupes:
+            raise ValueError(f"duplicate reflex rule names: {dupes}")
+        return self
+
+
 # --------------------------------------------------------------------------- safety (SPEC 12)
 
 
@@ -1910,6 +2135,7 @@ with warnings.catch_warnings():
         )
         light: LightConfig = param({}, "SPEC 7A")
         motion: MotionConfig = param({}, "SPEC 10")
+        reflexes: ReflexConfig = param({}, "SPEC 10")
         attention: AttentionConfig = param({}, "SPEC 4A, 5")
         identity: IdentityConfig = param({}, "SPEC 5, 6")
         enrollment: EnrollmentConfig = param({}, "SPEC 6")

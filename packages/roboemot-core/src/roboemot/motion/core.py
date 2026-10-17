@@ -259,9 +259,13 @@ class MotionCore:
         self._last_feed: float | None = None
         self.holding = False
 
-    def feed(self, cmd: Command) -> None:
+    def feed(self, cmd: Command, *, liveness: bool = True) -> None:
+        """Submit a command. ``liveness=False`` is for sources inside the loop (reflexes): they
+        keep running when the app has stalled, so they must not restart the watchdog (SPEC 10,
+        12)."""
         self.arbiter.submit(cmd)
-        self._last_feed = cmd.stamp
+        if liveness:
+            self._last_feed = cmd.stamp
 
     def tick(self, now: float, dt: float) -> dict[str, float]:
         if self._last_feed is not None and now - self._last_feed > self.watchdog_s:
