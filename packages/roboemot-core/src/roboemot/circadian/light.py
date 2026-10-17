@@ -44,6 +44,18 @@ class LightEstimator:
         # Noise: robust spread of horizontal pixel differences (flat regions dominate).
         diffs = np.abs(np.diff(luma_img, axis=1))
         noise = float(np.median(diffs))
+        return self.classify(luma, noise, exposure_s=exposure_s, gain=gain)
+
+    def classify(
+        self,
+        luma: float,
+        noise: float,
+        *,
+        exposure_s: float | None = None,
+        gain: float | None = None,
+    ) -> LightReading:
+        """Classify already-measured statistics (a logged sample); ``measure`` ends here, so a
+        replayed light log goes through the same thresholds and hysteresis as a live frame."""
         if exposure_s and gain and self.cfg.calibration_k:
             index = self.cfg.calibration_k * luma / (exposure_s * gain)
         else:

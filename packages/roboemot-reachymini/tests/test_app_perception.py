@@ -246,17 +246,19 @@ def test_app_without_the_appearance_model_has_no_auto_enrollment(data):
 
 
 def test_circadian_state_scales_the_vision_rate(data):
+    """The runner's model is what the governor reads: a hold on the app moves the rate."""
     app = new_app(AppWithFakes)
     app.source_class = EmptySource
-    app.circadian = CircadianModel(RoboEmotConfig().circadian)
-    app.circadian.state = "resting"
     stop, thread, errors = start(app)
     want = RoboEmotConfig().circadian.states["resting"].vision_rate_scale
     try:
         assert wait_for(lambda: app.perception is not None and app.perception.pipeline is not None)
+        assert wait_for(lambda: app.circadian_runner is not None and app.circadian is not None)
+        assert isinstance(app.circadian, CircadianModel)
         governor = app.perception.pipeline.governor
+        app.hold("resting", 5)
         assert wait_for(lambda: governor.scale == want)
-        app.circadian.state = "awake"
+        app.hold("awake", 5)
         assert wait_for(lambda: governor.scale == 1.0)
     finally:
         stop.set()

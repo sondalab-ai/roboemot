@@ -502,7 +502,10 @@ def test_manifest_behaviour_may_only_set_known_keys_and_is_audited(manifest):
         stack.set_manifest_behaviour({"expression_map": {"rage": {"channels": {}}}})
     assert stack.manifest == {}
     stack.set_manifest_behaviour(manifest.model.behaviour)
-    assert stack.audit[-1].source == "manifest" and stack.audit[-1].new == ["expression_map"]
+    assert stack.audit[-1].source == "manifest" and stack.audit[-1].new == [
+        "circadian_motion",
+        "expression_map",
+    ]
 
 
 def test_a_stricter_register_mid_expression_drops_the_body_and_the_amplitude_at_once(cfg, manifest):

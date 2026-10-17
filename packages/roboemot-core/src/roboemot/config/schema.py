@@ -114,6 +114,7 @@ APPRAISAL_EVENTS = frozenset(
         "sound.loud",
         "light.on",
         "light.off",
+        "circadian.woken_at_night",
         "conversation.unavailable",
     }
 )
@@ -212,6 +213,15 @@ class AppraisalConfig(Strict):
             {"event": "sound.loud", "arousal": 0.6, "label": "surprise", "cooldown_s": 5},
             {"event": "idle.long", "arousal": -0.6, "label": "sleepy", "cooldown_s": 600},
             {"event": "light.on", "arousal": 0.3, "label": "surprise", "cooldown_s": 30},
+            # Lights switched off: a mild drift toward sleepy (SPEC 7A, Light sensing).
+            {"event": "light.off", "arousal": -0.2, "label": "sleepy", "cooldown_s": 60},
+            # Woken in the quiet hours: brief, mild and never a refusal (SPEC 7A, Waking).
+            {
+                "event": "circadian.woken_at_night",
+                "valence": -0.3,
+                "arousal": 0.1,
+                "cooldown_s": 300,
+            },
             # Connectivity (SPEC 12A): subdued while offline, perks up when back.
             {"event": "link.network.lost", "valence": -0.2, "arousal": -0.3, "cooldown_s": 300},
             {
@@ -422,6 +432,37 @@ class StateEffects(Strict):
     speech_rate: float = param(1.0, "Speech rate multiplier", ge=0.5, le=1.5)
     volume_db: float = param(0.0, "Volume offset", unit="dB", ge=-24, le=6)
     vision_rate_scale: float = param(1.0, "Vision rate multiplier", ge=0, le=1)
+    idle_period_scale: float = param(
+        1.0, "Idle breathing period multiplier (above 1 is slower)", ge=0.5, le=4
+    )
+    expression_scale: float = param(
+        1.0,
+        "Amplitude multiplier of affect expressions in this state (the circadian factor)",
+        ge=0,
+        le=2,
+    )
+
+
+class CircadianMotion(Strict):
+    """Robot-specific circadian primitives (SPEC 7A, Effects by state); the manifest ships them.
+
+    Offsets in degrees in the file, radians in code. ``yawn`` and ``stretch`` are additive like
+    an expression (same shape and rules); ``rest_pose_deg`` is the absolute rest posture.
+    """
+
+    yawn: ExpressionEntry | None = param(None, "Drowsy yawn primitive; none: no yawn")
+    stretch: ExpressionEntry | None = param(None, "Waking stretch primitive; none: no stretch")
+    rest_pose_deg: dict[str, float] = param(
+        {}, "Absolute rest posture by channel in degrees (head lowered, antennas down)"
+    )
+
+    @field_validator("rest_pose_deg")
+    @classmethod
+    def _rest_channels(cls, pose: dict[str, float]) -> dict[str, float]:
+        for name in pose:
+            if name not in EXPRESSION_CHANNELS:
+                raise ValueError(f"unknown channel {name!r}, expected one of {EXPRESSION_CHANNELS}")
+        return pose
 
 
 class CircadianConfig(Strict):
@@ -450,12 +491,58 @@ class CircadianConfig(Strict):
     wake_hold_s: float = param(
         300.0, "How long the wake word keeps a resting robot awake", unit="s", ge=10, le=3600
     )
+    update_period_s: float = param(
+        10.0,
+        "Seconds between two model updates (process S, entrainment, state)",
+        unit="s",
+        ge=0.1,
+        le=600,
+    )
+    publish_period_s: float = param(
+        60.0, "Seconds between two periodic circadian.state messages", unit="s", ge=1, le=3600
+    )
+    presence_window_s: float = param(
+        60.0,
+        "People seen, recognised or attended to within this time count as present",
+        unit="s",
+        ge=1,
+        le=3600,
+    )
+    presence_periods: float = param(
+        3.0,
+        "Presence also lasts this many face-detection periods at the governor's current rate",
+        ge=1,
+        le=100,
+    )
+    idle_poll_s: float = param(
+        1.0,
+        "How often the idle light reader checks whether a sample is due",
+        unit="s",
+        ge=0.05,
+        le=60,
+    )
+    command_ttl_s: float = param(
+        0.5,
+        "Lifetime of the rest posture and the yawn or stretch commands",
+        unit="s",
+        ge=0.1,
+        le=5,
+    )
+    yawn_interval_s: float = param(
+        120.0, "Mean time between two yawns while drowsy", unit="s", ge=5, le=3600
+    )
+    yawn_jitter: float = param(
+        0.5, "Yawn interval jitter as a share of the interval (0: regular)", ge=0, le=0.9
+    )
+    hold_max_min: float = param(720.0, "Longest hold an app may request", unit="min", ge=1, le=1440)
     states: dict[str, StateEffects] = param(
         {
             "awake": {"arousal_baseline": 0.2},
             "drowsy": {
                 "arousal_baseline": -0.3,
                 "idle_motion_scale": 0.6,
+                "idle_period_scale": 1.5,
+                "expression_scale": 0.8,
                 "speech_rate": 0.9,
                 "volume_db": -3.0,
                 "vision_rate_scale": 0.5,
@@ -463,6 +550,7 @@ class CircadianConfig(Strict):
             "resting": {
                 "arousal_baseline": -0.7,
                 "idle_motion_scale": 0.0,
+                "expression_scale": 0.6,
                 "speech_rate": 0.85,
                 "volume_db": -6.0,
                 "vision_rate_scale": 0.05,
@@ -499,6 +587,30 @@ class LightConfig(Strict):
         le=1,
     )
     calibration_k: float | None = param(None, "Lux calibration constant with exposure metadata")
+    sample_interval_s: float = param(
+        10.0,
+        "At most one vision frame is measured for light per this time",
+        unit="s",
+        ge=0.5,
+        le=600,
+    )
+    history_h: float = param(
+        24.0, "Hours of one-per-minute light values kept in RAM", unit="h", ge=1, le=72
+    )
+    confirm_samples: int = param(
+        2,
+        "A new light level counts (and fires light.on or light.off) after this many "
+        "consecutive samples agree",
+        ge=1,
+        le=20,
+    )
+    stale_s: float = param(
+        300.0,
+        "A light reading older than this is ignored (the clock rules alone)",
+        unit="s",
+        ge=10,
+        le=3600,
+    )
 
 
 # --------------------------------------------------------------------------- motion (SPEC 10)
@@ -1769,6 +1881,9 @@ with warnings.catch_warnings():
             {}, "SPEC 7, 11A: affect label to keyframes per channel; the robot manifest ships it"
         )
         circadian: CircadianConfig = param({}, "SPEC 7A")
+        circadian_motion: CircadianMotion = param(
+            {}, "SPEC 7A: yawn, stretch and rest posture; the robot manifest ships them"
+        )
         light: LightConfig = param({}, "SPEC 7A")
         motion: MotionConfig = param({}, "SPEC 10")
         attention: AttentionConfig = param({}, "SPEC 4A, 5")

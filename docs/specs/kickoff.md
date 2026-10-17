@@ -453,7 +453,10 @@ An adapter in the affect module (`roboemot.affect.appraisal`) turns bus messages
 | `person.unknown_appears` | a new face track still without an owner `appraisal.unknown_face_after_s` (3 s) after it appeared; at most once per track. A face recognised inside that window never emits it; one recognised later has already emitted it and then emits `person.known` too | `track_id`, `age_group`, `possible_minor` | +0.05, +0.3, `curiosity`, 30 s (curiosity with almost no valence change) |
 | `animal.appears` | `world.entity_appeared` of kind `animal` | `entity_id`, `category` | +0.2, +0.3, `curiosity`, 30 s |
 | `idle.long` | no face, attention target or recognised person for `appraisal.idle_after_s` (600 s); once, until interaction resumes | none | 0, -0.6, `sleepy`, 600 s |
-| `sound.loud`, `light.on` | sound and light producers (M2, section 7A) | none | as in the example above |
+| `sound.loud` | sound producer (M2) | none | as in the example above |
+| `light.on` | the confirmed light level rises from `dark` (section 7A) | none | 0, +0.3, `surprise`, 30 s |
+| `light.off` | the confirmed light level falls to `dark` (section 7A) | none | 0, -0.2, `sleepy`, 60 s (a mild drift to sleepy) |
+| `circadian.woken_at_night` | the robot leaves `resting` inside the quiet hours because of light, a person or a wake call (section 7A, Waking) | none | -0.3, +0.1, none, 300 s (a brief dip in valence; the robot still answers) |
 | `link.*`, `conversation.unavailable` | connectivity (section 12A) | none | section 12A |
 
 Rule events are validated when the configuration loads: an unknown name (for example the retired `person.recognized`) or a `label` outside `affect.labels` is rejected; `link.*` events and names listed in `appraisal.extra_events` (for plugins) are accepted. Cooldowns are kept per rule and, when the payload names a person, entity or track, per subject. In a loop-driven tick a long track gap is tolerated: an unnamed face is dropped after the larger of `appraisal.track_lost_s` and `appraisal.track_lost_periods` face-detection periods.
@@ -523,6 +526,21 @@ A two-process model, after Borbély's model of human sleep regulation:
 - A sudden change (lamp switched on or off) is also an appraisal event for the affect engine (section 7), for example a startle or a waking sequence.
 - Presence and activity of people act as a weak second cue, so a dark room with people talking does not put the robot to rest.
 
+### Implementation (`roboemot.circadian`)
+
+- **Sampler (`LightSampler`).** The vision pipeline hands each frame's image to `light_tap` before the governor can drop the frame (so a resting robot still senses light). The sampler measures it on the vision thread, at most once per `light.sample_interval_s` (10 s), at full resolution (the noise metric depends on it), with the channels read as BGR, and keeps nothing of the image: one mean per minute (brightness index, luma, noise) in a ring of `light.history_h` hours (24, so 1440 values), plus the latest level. When no sample arrived for `circadian.idle_sample_interval_s` (30 s; vision off, no models, or a stalled camera thread), `IdleLightReader` reads one frame through the app's frame source in a thread of its own. Nothing about a frame is stored or logged (section 12). `light_source: clock_only` never reads the camera.
+- **Level and events.** The estimator's level (hysteresis as above) counts after `light.confirm_samples` (2) consecutive samples agree, and is ignored when the latest sample is older than `light.stale_s` (300 s), so the clock rules alone. A confirmed rise from `dark` raises `light.on`, a fall to `dark` raises `light.off`; the first level seen raises nothing, and dim to bright raises nothing.
+- **Runner (`CircadianRunner`).** Every `circadian.update_period_s` (10 s) it runs the model with the local hour of an injectable clock, the elapsed time, the confirmed level and presence; publishes `circadian.state` (the model's state: hour, phase shift, C, S, sleepiness, state, light) on a change and every `circadian.publish_period_s`; sets the arousal baseline of the affect engine and the circadian factor of the expression amplitude; sets `app.circadian` for the scan context and the vision governor. `circadian.enabled: false` makes it inert (awake, factor 1.0). Presence is a face, a recognised person or an attention target seen within `circadian.presence_window_s` (60 s) or `presence_periods` (3) face-detection periods at the governor's current rate, or attention engaged now.
+- **API.** `app.hold(state, minutes)` (at most `circadian.hold_max_min`) and `app.wake()`; both take effect within one app tick. A wake or a hold does not reset Process C, and while the robot is held awake Process S does not decay. The debug report has the section `roboemot.circadian` (`robot.circadian.state`): state, hour, phase (`phase_h`, the hour of the alertness peak, and `phase_shift_h`), sleepiness, S and C, light level and source, the hold left, whether a wake is playing and the sampler's counts and ages, never a frame.
+- **Motion (`CircadianMotion`).** The robot manifest's `behaviour.circadian_motion` ships `rest_pose_deg`, `yawn` and `stretch` (the same keyframe format as an expression, additive, degrees in the file). Resting feeds the rest posture (Reachy Mini: head pitch +20 degrees, antennas right -50 and left +50) as an IDLE command, replacing idle breathing, with the motors enabled and holding; attention takes the head while it is engaged because the posture is withheld then, and scanning stays off in resting (section 5A). Drowsy plays the yawn (3 s) every `circadian.yawn_interval_s` (120 s) with `yawn_jitter` (0.5) of jitter, never while attention is engaged. Leaving resting plays the 3 s stretch; if that is inside the quiet hours (a person, light or a wake call, not the end of the quiet hours) it also raises `circadian.woken_at_night`. Yawn and stretch are EXPRESSION-priority offsets clamped to the manifest range (inside the minor share while a minor is present), then summed, capped by the minor factor and rate-limited like any motion. The poses and primitives are starting points, not yet checked on the hardware.
+- **Light log and replay (`roboemot.circadian.replay`).** A light log is JSON Lines, one sample per line, normally one per minute and in time order:
+
+  ```json
+  {"t": "2026-03-02T07:05:00", "luma": 0.41, "noise": 0.012, "exposure_s": null, "gain": null, "presence": false}
+  ```
+
+  `t` is ISO 8601 local wall-clock time (a UTC offset is ignored: the hour the robot's clock showed) or epoch seconds in the machine's time zone; `luma` is the mean luminance 0..1; `noise` (default 0), `exposure_s` and `gain` (default none) and `presence` (default false; a sign of people at that minute) are optional. `replay(samples, cfg)` feeds the samples through the same sampler, estimator and runner as live frames, on a fake clock that jumps from sample to sample, so 24 hours run in well under a second; `synthetic_day()` writes a day with dawn, daylight, an evening lamp and lights off at night, with noise. The default synthetic day from 08:00 passes awake, drowsy (about 21:15), resting (22:30, the quiet hours), drowsy and awake (07:00 and 07:01), with `light.off` at about 22:16 and `light.on` at about 06:50.
+
 ### Effects by state
 
 | State | Affect baseline | Motion | Voice | Perception and compute |
@@ -531,7 +549,7 @@ A two-process model, after Borbély's model of human sleep regulation:
 | Drowsy | Arousal -0.3; label `sleepy` more likely | Slower, smaller idle motion; occasional yawn primitive (antennas droop, head tilts) | Speech rate 0.9x, volume -3 dB | Vision rates halved |
 | Resting | Arousal -0.7 | Rest posture (head lowered, antennas down), motors enabled and holding, no idle motion | Wakes on the wake word or direct address and always answers, never postpones; replies shorter, speech rate 0.85x, volume -6 dB | Vision at one frame per 30 s for light and presence; ASR only after VAD and wake word |
 
-Values are starting points to tune. Resting also cuts CPU load, heat and battery drain on the CM4.
+Values are starting points to tune. Resting also cuts CPU load, heat and battery drain on the CM4. Two more per-state fields carry the motion columns of the table: `idle_period_scale` (idle breathing period, awake 1.0, drowsy 1.5, resting 1.0, where resting has no idle motion at all) and `expression_scale` (the circadian factor of the expression amplitude in section 7: awake 1.0, drowsy 0.8, resting 0.6, so a resting robot still shows what it feels, smaller). Idle motion amplitude is `idle_motion_scale` (1.0, 0.6, 0).
 
 - **Waking:** lights on, a person approaching or the wake word starts a 3-second waking sequence (stretch primitive); being woken at night lowers valence briefly, which shows in posture and prosody but never in a refusal: the robot answers every interaction in every state, only more quietly. A wake-up does not reset Process C; it only stops S from decaying.
 - **Always active:** safety, the stop keyword, the soft and hard stops, and the minor-present policies work the same in every state.
@@ -548,7 +566,11 @@ circadian:
   idle_sample_interval_s: 30
   location: null                # {lat, lon} for the clock-only sunrise/sunset fallback
   quiet_hours: ["22:30", "07:00"]   # resting is forced at least in this window
+light:
+  sample_interval_s: 10          # at most one vision frame measured per this time
 ```
+
+Further `circadian` parameters (update, publish and presence windows, yawn timing, hold limit, per-state effects) and `light` parameters (thresholds, history, confirmation, staleness) are in the schema with units and ranges.
 
 `robot.circadian.state` returns phase, sleepiness, state and light level; changes are published as `circadian.state` on the bus; `robot.circadian.hold("awake", minutes=30)` lets an app keep the robot awake, for example during a party.
 
@@ -1030,6 +1052,7 @@ An optional ESP32-S3 coprocessor handles servos, LEDs, IMU and ToF over USB, whi
 ### Resource budgets
 
 - `npu`: vision pipeline under 70% average NPU utilisation with face, pose and object models active; one core reserved for `roboemot-rt`; core + models under 5 GB on an 8 GB board; cold start under 20 s.
+- Resting load (section 7A): a resting robot lowers the vision rate scale to 0.05 and keeps the light sample at one frame per `light.sample_interval_s` or `circadian.idle_sample_interval_s`; the cost of a sample is one pass over a frame (about one luma mean and one median of pixel differences), once per interval, and no motion is generated besides holding the rest posture.
 - `cm4`: core allocation is one core for roboemot-rt and the bridge, one for the daemon and its media pipeline, two shared by vision, audio and core; RAM under 2.4 GB, 60% of the CM4's 4 GB, the rest left to the daemon and its media pipeline; on battery (12.8 Wh) the governor also lowers rates to extend runtime; sustained load stays below the firmware's thermal throttling threshold; cold start under 30 s.
 
 ## 14. Testing, simulation and milestones

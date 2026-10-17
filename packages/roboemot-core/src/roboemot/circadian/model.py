@@ -81,6 +81,12 @@ class CircadianModel:
         """App override, e.g. ``hold("awake", 1800)`` during a party (SPEC 7A API)."""
         self._hold = (state, self._elapsed + seconds)
 
+    def hold_remaining(self) -> tuple[State, float] | None:
+        """The active hold as (state, seconds left), or None."""
+        if self._hold and self._elapsed < self._hold[1]:
+            return self._hold[0], self._hold[1] - self._elapsed
+        return None
+
     def wake(self, seconds: float | None = None) -> None:
         """Wake word or direct address while resting: awake for ``wake_hold_s``; C is not
         reset (SPEC 7A, Waking)."""
