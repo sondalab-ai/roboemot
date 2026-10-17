@@ -120,6 +120,7 @@ class VoiceListener:
         self._counts = {"utterances": 0, "empty": 0, "gaps": 0, "dropped_speaking": 0, "errors": 0}
         self._active = False
         self._muted = False
+        self._state = "off"
         self._language = ""
         self._last_error = ""
 
@@ -132,10 +133,11 @@ class VoiceListener:
     # ---- lifecycle
 
     def start(self) -> None:
-        """Load the ASR models, then read the audio in a daemon thread (no-op when running)."""
+        """Read the audio in a daemon thread (no-op when running). The thread loads the ASR
+        models first, so a slow disk never holds up the caller; a model that fails to load is
+        logged (type only) and leaves the listener ``unavailable``."""
         if self._thread is not None and self._thread.is_alive():
             return
-        self._asr.load(self._cfg.voice.asr.models)
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, name="roboemot-listener", daemon=True)
         self._thread.start()
@@ -150,11 +152,18 @@ class VoiceListener:
     def snapshot(self) -> dict[str, Any]:
         """Counters and fast-path latencies for the debug report: numbers only, no content."""
         with self._lock:
-            snap: dict[str, Any] = dict(self._counts)
+            snap: dict[str, Any] = {"state": self._state, **self._counts}
         snap["latency"] = self._fast.stats.snapshot()
         return snap
 
     def _run(self) -> None:
+        try:
+            self._asr.load(self._cfg.voice.asr.models)
+        except Exception as exc:
+            self._state = "unavailable"
+            log.warning("voice listener: models: %s", type(exc).__name__)
+            return
+        self._state = "running"
         while not self._stop.is_set():
             chunk = self._source(POLL_S)
             if chunk is None:

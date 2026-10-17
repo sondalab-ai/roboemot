@@ -53,6 +53,7 @@ from roboemot.vision import CIRCADIAN, FrameSource, LockedSource
 from roboemot.vision.minor import MinorPresence
 from roboemot.vision.service import Perception, default_stages, open_perception, world_snapshot
 from roboemot.voice.activity import SpeechActivity
+from roboemot.voice.listener import Utterance, VoiceListener
 from roboemot.webui import Server, make_server
 from roboemot.webui.catalogue import open_catalogue
 from roboemot.webui.routes import RouteChecker
@@ -74,6 +75,7 @@ from .camera import ReachyCamera
 from .driver import ReachyMiniDriver
 from .gaze import FRAME, GAZE, REFLEX
 from .speaker import ReachySpeaker
+from .voice import build_listener
 
 try:  # the SDK is optional so unit tests run without GStreamer
     from reachy_mini import ReachyMiniApp
@@ -277,11 +279,16 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
     audio: ReachyAudio | None = None  # the one reader of the microphone (reflex level, voice)
     speaker: ReachySpeaker | None = None  # playback; only when voice.enabled
     speech: SpeechActivity | None = None  # "the robot is speaking" gate (reflex, DoA)
+    voice_listener: VoiceListener | None = None  # mic -> VAD -> ASR -> utterances; voice.enabled
     traits_worker: TraitsWorker | None = None  # rates persona traits when traits_source is llm
 
     def make_router(self, cfg: Any, monitor: NetworkMonitor) -> Router:
         """The app's LLM router over the configured routes (overridable: tests inject fakes)."""
         return Router(cfg.llm_routes, cfg.safety, monitor=monitor)
+
+    def on_utterance(self, utterance: Utterance) -> None:
+        """Where finished utterances go (SPEC 8): the conversation worker (slice 5) takes this
+        over; overridable, tests inject a collector. The default drops them."""
 
     def make_circadian_clock(self) -> Any:
         """The clock the circadian rhythm runs on: monotonic seconds and the local hour of day
@@ -550,6 +557,24 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             lambda c: self.make_router(c, network),
         )
 
+        voice_pipeline = (
+            build_listener(
+                cfg,
+                audio,
+                speech,
+                bus,
+                runner.on_event,
+                selector,
+                world,
+                perception.registry,
+                FRAME,
+                lambda u: self.on_utterance(u),
+            )
+            if cfg.voice.enabled
+            else None
+        )
+        listener = self.voice_listener = voice_pipeline[0] if voice_pipeline else None
+        voice_close = voice_pipeline[1] if voice_pipeline else None
         affect = runner.engine
         self.diagnostics = Diagnostics().add(
             *local_sources(process_pid=os.getpid()),
@@ -563,6 +588,10 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             FnSource("roboemot.register", lambda: register_report(tracker)),
             FnSource("roboemot.circadian", circ.snapshot),
             FnSource("roboemot.reflexes", reflexes.snapshot),
+            FnSource(
+                "roboemot.voice",
+                lambda: listener.snapshot() if listener is not None else {"state": "off"},
+            ),
             FnSource(
                 "roboemot.app",
                 lambda: {
@@ -588,6 +617,8 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             runner.apply_config(change.config.affect, change.config.appraisal)
             circ.apply_config(change.config)
             speech.set_echo_tail_ms(change.config.voice.echo_tail_ms)
+            if listener is not None:
+                listener.apply_config(change.config)
             reflexes.apply_config(
                 change.config.reflexes, math.radians(change.config.safety.constraint_margin_deg)
             )
@@ -630,6 +661,10 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             if speaker is not None:
                 cleanup.callback(speaker.close)  # flushes the player before the SDK goes away
                 speaker.start_playing()
+            if listener is not None and voice_close is not None:
+                cleanup.callback(voice_close)
+                cleanup.callback(listener.stop)  # before the hub stops feeding its queue
+                listener.start()
             cleanup.callback(light_reader.stop)  # stopped before the camera thread
             cleanup.callback(self._forget_circadian)
             self.start_webui(stack, cfg, manifest, cleanup)

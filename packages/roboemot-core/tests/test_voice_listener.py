@@ -239,8 +239,23 @@ def test_resolve_language_rule():
 def test_start_loads_every_configured_model():
     r = Rig(["x"])
     r.listener.start()
+    deadline = time.monotonic() + 5
+    while r.listener.snapshot()["state"] != "running" and time.monotonic() < deadline:
+        time.sleep(0.01)
     r.listener.stop()
     assert r.asr.loaded == ["it", "en"]
+
+
+def test_a_model_that_fails_to_load_leaves_the_listener_unavailable(caplog):
+    r = Rig(["x"])
+    r.asr.load = lambda languages: (_ for _ in ()).throw(OSError("no model"))
+    with caplog.at_level(logging.WARNING):
+        r.listener.start()
+        deadline = time.monotonic() + 5
+        while r.listener.snapshot()["state"] == "off" and time.monotonic() < deadline:
+            time.sleep(0.01)
+        r.listener.stop()
+    assert r.listener.snapshot()["state"] == "unavailable" and "OSError" in caplog.text
 
 
 # ---- fast path

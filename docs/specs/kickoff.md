@@ -888,7 +888,7 @@ The effective configuration is the merge of six layers; a later layer overrides 
 | `identity` | match threshold, margin, votes, estimate confidence threshold, online refresh cap | Sections 5, 6 |
 | `world` | match gate and range gate, tie tolerance, half-life per kind, out-of-view decay factor, forget confidence, moved threshold, initial confidence, confidence gain, position blend, initial and minimum uncertainty; bearing-only gain factor; scan interval and jitter, waypoint dwell, overlap and speed, minimum amplitude, glance hold, cooldown and age, sound-direction rate and confidence (`world.scan.*`); auto-enrollment days and spread; history retention | Section 5A |
 | `mirror` | retargeting, filter parameters, keypoint confidence floor, hold and decay, mirror image, recording length | Section 9 |
-| `voice` | TTS backend and fallback, voice per language, base rate, pitch, volume and variability, expressivity, mood source, per-mood prosody deltas, instructions and sounds, limits; wake word and its policy, barge-in sensitivity, active ASR language | Section 8 |
+| `voice` | TTS backend and fallback, voice per language, base rate, pitch, volume and variability, expressivity, mood source, per-mood prosody deltas, instructions and sounds, limits; wake word and its policy, barge-in sensitivity, ASR model per language, keyword lists and fast-path thresholds | Section 8 |
 | `persona` | identity prompt and its length cap, traits (warmth, energy, playfulness, formality), trait source (manual or LLM), trait-to-parameter tables | Section 11A |
 | `conversation` | session timeout, history turns, reply length, language, profile and scene summary caps | Section 8 |
 | `llm_routes` | endpoints, timeouts, token budgets, minors flag | Section 8 |
