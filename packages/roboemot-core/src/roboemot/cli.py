@@ -102,9 +102,13 @@ def _models(args: argparse.Namespace) -> int:
     ]
     if args.action == "list":
         for specs, root, _ in groups:
-            for spec in specs.values():
-                state = models.status(spec, root, verify=args.verify)
-                print(f"{spec.name:16} {spec.role:20} {spec.licence:11.11} {state}")
+            rows = [
+                (s.name, s.role, s.licence, models.status(s, root, verify=args.verify))
+                for s in specs.values()
+            ]
+            widths = [max(len(r[i]) for r in rows) for i in range(3)]
+            for name, role, licence, state in rows:
+                print(f"{name:{widths[0]}}  {role:{widths[1]}}  {licence:{widths[2]}}  {state}")
             print(f"folder: {root}")
         legacy = models.legacy_dir()
         if vision_root != legacy and legacy.is_dir() and any(legacy.iterdir()):

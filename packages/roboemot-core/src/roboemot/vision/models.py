@@ -69,6 +69,9 @@ PRIVATE_FILE_MODE = 0o600
 MARKER_SUFFIX = ".verified"
 PART_SUFFIX = ".part"
 EXTRACT_SUFFIX = ".extract"
+OLD_SUFFIX = ".old"
+# Entry cap for an archive: the Vosk models have about 20 entries; this only bounds inode use.
+MAX_ARCHIVE_ENTRIES = 10_000
 ZIP_MODE_SHIFT = 16  # a zip entry keeps its Unix st_mode in the high 16 bits of external_attr
 
 
@@ -261,7 +264,11 @@ def check_file(root: Path, file: ModelFile) -> Path:
             f"{file.path}: not verified in {root}; run `roboemot models fetch` for it"
         ) from exc
     if file.archive is not None:
-        if not target.is_dir() or marker.get("sha256") != file.sha256:
+        if (
+            not target.is_dir()
+            or marker.get("sha256") != file.sha256
+            or not _unpacked_ok(target, marker)
+        ):
             raise ModelError(
                 f"{file.path}: changed since it was verified; run `roboemot models fetch`"
             )
@@ -293,18 +300,15 @@ def status(spec: ModelSpec, root: Path, *, verify: bool = False) -> str:
     ``fetch --requantize`` rebuilds it.
 
     ``missing`` means none of the files exists. By default a file is trusted when its marker
-    matches (cheap); ``verify=True`` rehashes every file (slow for the 343 MB models). An
-    unpacked archive has no single file to rehash, so only its marker is checked.
+    matches (cheap); ``verify=True`` rehashes every file (slow for the 343 MB models), and for an
+    unpacked archive every file recorded in its marker.
     """
     targets = [_target(root, f) for f in spec.files]
     if not any(t.exists() for t in targets):
         return "missing"
     if not all(t.exists() for t in targets):
         return "corrupt"
-    if verify and any(
-        f.archive is None and sha256_of(t) != _expected_sha(root, f)
-        for t, f in zip(targets, spec.files, strict=True)
-    ):
+    if verify and any(_rehash_bad(root, t, f) for t, f in zip(targets, spec.files, strict=True)):
         return "corrupt"
     if not all(_marked(root, f) for f in spec.files):
         return "unverified"
@@ -316,6 +320,17 @@ def status(spec: ModelSpec, root: Path, *, verify: bool = False) -> str:
         for f in spec.files
     )
     return "stale-ort" if stale else "ok"
+
+
+def _rehash_bad(root: Path, target: Path, file: ModelFile) -> bool:
+    """True when rehashing shows the file (or, for an archive, any unpacked file) changed."""
+    if file.archive is None:
+        return sha256_of(target) != _expected_sha(root, file)
+    try:
+        marker = json.loads(_marker(target).read_text())
+    except (OSError, ValueError):
+        return False
+    return not _unpacked_ok(target, marker, rehash=True)
 
 
 def _expected_sha(root: Path, file: ModelFile) -> str | None:
@@ -344,14 +359,15 @@ class FetchReport:
 
 
 def _make_dirs(root: Path, target: Path) -> None:
-    missing = []
-    d = target.parent
-    while not d.exists():
-        missing.append(d)
-        d = d.parent
+    """Create the models folder (parents get the default mode) and the folders below it, 0o700."""
+    d = root
     try:
-        for d in reversed(missing):
-            d.mkdir(mode=PRIVATE_DIR_MODE)
+        if not root.exists():
+            root.mkdir(mode=PRIVATE_DIR_MODE, parents=True)
+        for part in target.parent.relative_to(root.resolve()).parts:
+            d = d / part
+            if not d.exists():
+                d.mkdir(mode=PRIVATE_DIR_MODE)
     except OSError as exc:
         raise ModelError(f"cannot create {d}: {exc.strerror}") from exc
 
@@ -424,32 +440,64 @@ def fetch_file(file: ModelFile, root: Path, client: httpx.Client) -> str:
     return "downloaded"
 
 
-def _unpack_zip(archive: Path, dest: Path, file: ModelFile) -> str:
-    """Unpack ``archive`` into the empty folder ``dest``; returns its single top-level folder.
+def _unpacked_ok(folder: Path, marker: dict, *, rehash: bool = False) -> bool:
+    """Every file the marker recorded at unpack time is still there with its size (and sha256)."""
+    files = marker.get("files")
+    if not isinstance(files, dict) or not files:
+        return False
+    for rel, (size, digest) in files.items():
+        path = folder / rel
+        try:
+            if not path.is_file() or path.is_symlink() or path.stat().st_size != size:
+                return False
+            if rehash and sha256_of(path) != digest:
+                return False
+        except OSError:
+            return False
+    return True
 
-    Every entry is checked before anything is written: no absolute or drive paths, no ``..``,
-    no symlinks or other special files, one top-level folder, and the declared sizes must sum to
-    at most ``unpacked_bytes``. The bytes actually written are counted too, since the declared
-    sizes are only claims. Files are created 0o600, folders 0o700.
+
+def _entry_parts(file: ModelFile, info: zipfile.ZipInfo) -> list[str]:
+    """Path components of a zip entry; raises for anything that could leave the folder."""
+    name = info.filename
+    parts = name.rstrip("/").split("/")
+    if (
+        name.startswith("/")
+        or "\\" in name
+        or ":" in parts[0]
+        or any(p in ("", ".", "..") for p in parts)
+    ):
+        raise ModelError(f"{file.path}: unsafe path in archive")
+    kind = stat.S_IFMT(info.external_attr >> ZIP_MODE_SHIFT)
+    if kind and kind not in (stat.S_IFREG, stat.S_IFDIR):
+        raise ModelError(f"{file.path}: archive holds a link or special file")
+    if len(parts) == 1 and not info.is_dir():
+        raise ModelError(f"{file.path}: archive holds a file at the top level")
+    return parts
+
+
+def _unpack_zip(archive: Path, dest: Path, file: ModelFile) -> tuple[str, dict[str, list]]:
+    """Unpack ``archive`` into the empty folder ``dest``.
+
+    Returns the single top-level folder and ``{relative path: [size, sha256]}`` of every file
+    written (recorded in the marker). Every entry is checked before anything is written: no
+    absolute, drive, ``.``, empty or ``..`` components, no symlinks or special files, no file at
+    the top level, one top-level folder, at most ``MAX_ARCHIVE_ENTRIES`` entries, and the
+    declared sizes must sum to at most ``unpacked_bytes``. The bytes actually written are
+    counted too, since the declared sizes are only claims. Files are created 0o600, folders 0o700.
     """
     assert file.unpacked_bytes is not None
     try:
         zf = zipfile.ZipFile(archive)
     except zipfile.BadZipFile as exc:
         raise ModelError(f"{file.path}: not a zip archive") from exc
+    recorded: dict[str, list] = {}
     with zf:
         entries = zf.infolist()
-        tops: set[str] = set()
-        for info in entries:
-            name = info.filename
-            parts = name.split("/")
-            if name.startswith("/") or "\\" in name or ":" in parts[0] or ".." in parts:
-                raise ModelError(f"{file.path}: unsafe path in archive")
-            kind = stat.S_IFMT(info.external_attr >> ZIP_MODE_SHIFT)
-            if kind and kind not in (stat.S_IFREG, stat.S_IFDIR):
-                raise ModelError(f"{file.path}: archive holds a link or special file")
-            tops.add(parts[0])
-        if len(tops) != 1 or "" in tops:
+        if len(entries) > MAX_ARCHIVE_ENTRIES:
+            raise ModelError(f"{file.path}: too many entries in archive")
+        tops = {_entry_parts(file, info)[0] for info in entries}
+        if len(tops) != 1:
             raise ModelError(f"{file.path}: archive must hold exactly one top-level folder")
         if sum(i.file_size for i in entries) > file.unpacked_bytes:
             raise ModelError(f"{file.path}: unpacked size above the manifest limit")
@@ -459,55 +507,87 @@ def _unpack_zip(archive: Path, dest: Path, file: ModelFile) -> str:
             if not out.resolve().is_relative_to(dest.resolve()):
                 raise ModelError(f"{file.path}: unsafe path in archive")
             if info.is_dir():
-                out.mkdir(mode=PRIVATE_DIR_MODE, parents=True, exist_ok=True)
+                out.mkdir(parents=True, exist_ok=True)
                 continue
-            out.parent.mkdir(mode=PRIVATE_DIR_MODE, parents=True, exist_ok=True)
-            fd = os.open(
-                out, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, PRIVATE_FILE_MODE
-            )
-            with zf.open(info) as src, os.fdopen(fd, "wb") as dst:
+            out.parent.mkdir(parents=True, exist_ok=True)
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+            digest = hashlib.sha256()
+            size = 0
+            with (
+                zf.open(info) as src,
+                os.fdopen(os.open(out, flags, PRIVATE_FILE_MODE), "wb") as dst,
+            ):
                 while chunk := src.read(CHUNK_BYTES):
                     written += len(chunk)
                     if written > file.unpacked_bytes:
                         raise ModelError(f"{file.path}: unpacked size above the manifest limit")
                     dst.write(chunk)
-    return tops.pop()
+                    digest.update(chunk)
+                    size += len(chunk)
+            rel = "/".join(info.filename.rstrip("/").split("/")[1:])
+            recorded[rel] = [size, digest.hexdigest()]
+    for folder in [dest, *dest.rglob("*")]:
+        if folder.is_dir():
+            folder.chmod(PRIVATE_DIR_MODE)
+    return tops.pop(), recorded
+
+
+def _write_archive_marker(file: ModelFile, target: Path, files: dict[str, list]) -> None:
+    fd = os.open(
+        _marker(target), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, PRIVATE_FILE_MODE
+    )
+    with os.fdopen(fd, "w") as out:
+        json.dump({"sha256": file.sha256, "archive": file.archive, "files": files}, out)
 
 
 def _fetch_archive(file: ModelFile, root: Path, client: httpx.Client, target: Path) -> str:
     """Download, verify and unpack a zip; returns ``present`` or ``downloaded``.
 
-    The folder is marked with the archive sha256 only after unpacking succeeded. A failure at
-    any step removes the partial download and the half-unpacked folder and leaves an existing
-    folder as it was.
+    The zip is hashed again right before unpacking. The unpacked folder is swapped in by moving
+    an existing folder and its marker aside first; any failure puts them back, so a failed
+    update leaves the old model usable. The marker (archive sha256 plus a manifest of the
+    unpacked files) is written last.
     """
     assert file.url is not None and file.sha256 is not None
     if target.is_dir() and _marked(root, file):
         return "present"
     scratch = target.with_name(target.name + EXTRACT_SUFFIX)
     part = target.with_name(target.name + ".zip" + PART_SUFFIX)
+    old = target.with_name(target.name + OLD_SUFFIX)
+    marker, old_marker = _marker(target), _marker(old)
     try:
         _make_dirs(root, target)
         part.unlink(missing_ok=True)
         shutil.rmtree(scratch, ignore_errors=True)
+        shutil.rmtree(old, ignore_errors=True)
+        old_marker.unlink(missing_ok=True)
         try:
             digest = _stream(client, file.url, file, part)
-            if digest != file.sha256:
+            if digest != file.sha256 or sha256_of(part) != file.sha256:
                 raise ModelError(f"{file.path}: sha256 mismatch, download discarded")
             scratch.mkdir(mode=PRIVATE_DIR_MODE)
-            top = _unpack_zip(part, scratch, file)
-            _marker(target).unlink(missing_ok=True)
-            shutil.rmtree(target, ignore_errors=True)
-            (scratch / top).replace(target)
+            top, recorded = _unpack_zip(part, scratch, file)
+            had_old = target.exists() or target.is_symlink()
+            if had_old:
+                target.rename(old)
+                if marker.exists():
+                    marker.rename(old_marker)
+            try:
+                (scratch / top).replace(target)
+                _write_archive_marker(file, target, recorded)
+            except BaseException:
+                shutil.rmtree(target, ignore_errors=True)
+                marker.unlink(missing_ok=True)
+                if had_old:
+                    old.rename(target)
+                    if old_marker.exists():
+                        old_marker.rename(marker)
+                raise
+            shutil.rmtree(old, ignore_errors=True)
+            old_marker.unlink(missing_ok=True)
         finally:
             part.unlink(missing_ok=True)
             shutil.rmtree(scratch, ignore_errors=True)
-        marker = _marker(target)
-        fd = os.open(
-            marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, PRIVATE_FILE_MODE
-        )
-        with os.fdopen(fd, "w") as out:
-            json.dump({"sha256": file.sha256, "archive": file.archive}, out)
     except httpx.HTTPError as exc:
         raise ModelError(f"{file.path}: download failed ({type(exc).__name__})") from exc
     except OSError as exc:

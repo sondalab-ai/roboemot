@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import httpx
+
 from .. import paths
 from ..vision import models as _models
 from ..vision.models import FetchReport, ModelError, ModelFile, ModelSpec
@@ -27,9 +29,18 @@ def models_dir(configured: str = "", data_dir: str = "") -> Path:
     return Path(configured).expanduser() if configured else paths.voice_models_subdir(data_dir)
 
 
-def fetch(names: list[str], root: Path, **kwargs) -> FetchReport:
+def fetch(
+    names: list[str],
+    root: Path,
+    *,
+    client: httpx.Client | None = None,
+    quantizer: _models.Quantizer = _models.quantize_dynamic_file,
+    requantize: bool = False,
+) -> FetchReport:
     """Fetch the named voice models into ``root`` (see ``roboemot.vision.models.fetch``)."""
-    return _models.fetch(names, root, manifest=MANIFEST, **kwargs)
+    return _models.fetch(
+        names, root, client=client, quantizer=quantizer, requantize=requantize, manifest=MANIFEST
+    )
 
 
 def model_file(root: Path, name: str, suffix: str = "") -> Path:

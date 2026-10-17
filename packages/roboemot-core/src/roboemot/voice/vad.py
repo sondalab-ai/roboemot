@@ -36,8 +36,10 @@ SILERO_RATE_HZ = 16000
 SILERO_FRAME_SAMPLES = 512
 SILERO_CONTEXT_SAMPLES = 64
 SILERO_STATE_SHAPE = (2, 1, 128)
-SILERO_DEFAULT_THREADS = 1
+# Floor of the off-threshold: with threshold 0.05 and off_margin 0.5 it would reach 0 and make
+# every frame count as speech, so the end-silence timer could never run. Interface constant.
 MIN_OFF_THRESHOLD = 0.01
+# Reference level of EnergyVAD (tests and fallback only): an RMS of 0.1 (-20 dBFS) scores 1.
 ENERGY_FULL_SCALE_RMS = 0.1
 
 
@@ -81,14 +83,14 @@ class SileroVAD:
 
     The model inputs are ``input`` (batch of 64 samples of context from the previous frame
     followed by the 512 new ones), ``state`` (2x1x128, carried from one call to the next) and
-    ``sr``. ``reset`` zeroes both the state and the context. Load the file through
-    ``roboemot.voice.models.model_file`` so its sha256 marker is checked first.
+    ``sr``. ``reset`` zeroes both the state and the context. ``threads`` is ``voice.vad.threads``.
+    Load the file through ``roboemot.voice.models.model_file`` so its marker is checked first.
     """
 
     rate_hz = SILERO_RATE_HZ
     frame_samples = SILERO_FRAME_SAMPLES
 
-    def __init__(self, model_path: Path, threads: int = SILERO_DEFAULT_THREADS) -> None:
+    def __init__(self, model_path: Path, threads: int) -> None:
         try:
             import onnxruntime as ort
         except ImportError as exc:
@@ -140,7 +142,15 @@ class SpeechAudio:
 
 @dataclass(frozen=True)
 class SpeechEnd:
-    """An utterance ended; ``audio`` runs from ``audio_stamp`` to ``endpoint_stamp``."""
+    """An utterance ended; ``audio`` runs from ``audio_stamp`` to ``endpoint_stamp``.
+
+    ``last_speech_stamp`` is the start of the last frame judged speech at the off threshold
+    (conservative: the true end of speech lies up to one frame later). A silence ending is
+    declared ``end_silence`` frames after that frame, so ``endpoint_stamp - last_speech_stamp``
+    is the end-silence (rounded up to whole frames) plus one frame. SPEC 13 latencies count
+    from ``last_speech_stamp``. A ``max_length`` cut has no silence; the next utterance, if the
+    speech continues, starts with the cut frame.
+    """
 
     start_stamp: float
     last_speech_stamp: float
@@ -197,7 +207,7 @@ class Endpointer:
             raise ValueError(f"expected mono float32 samples, got {samples.dtype} {samples.shape}")
         if len(self._pending) == 0:
             self._pending_stamp = stamp
-        buf = np.concatenate([self._pending, samples]) if len(self._pending) else samples
+        buf = np.concatenate([self._pending, samples]) if len(self._pending) else samples.copy()
         events: list[VADEvent] = []
         pos = 0
         while len(buf) - pos >= self._size:
@@ -229,6 +239,10 @@ class Endpointer:
             events.append(self._finish("silence", frame_end))
         elif frame_end - self._start_stamp >= self._max_s:
             events.append(self._finish("max_length", frame_end))
+            if prob >= self._off:
+                self._ring.append((stamp, frame))
+                self._run = 1
+                events.append(self._begin(stamp))
         return events
 
     def _begin(self, stamp: float) -> SpeechStart:
@@ -258,5 +272,6 @@ class Endpointer:
         self._speaking = False
         self._utterance = []
         self._silence = 0
-        self._vad.reset()
+        if reason == "silence":
+            self._vad.reset()
         return end

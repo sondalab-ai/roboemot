@@ -30,7 +30,7 @@ models:
         size_bytes: 49665141
         sha256: 9ec65e75861d1c6c2e457cccd932705340dcdf233f5b239f00733b4de0bf3267
         archive: zip
-        unpacked_bytes: 92000000
+        unpacked_bytes: 96000000
   - name: vosk-small-en
     role: asr_en
     licence: Apache-2.0
@@ -41,7 +41,7 @@ models:
         size_bytes: 41205931
         sha256: 30f26242c4eb449f948e42cb302dd7a686cb29a3423a8367f99ff41780942498
         archive: zip
-        unpacked_bytes: 71000000
+        unpacked_bytes: 75000000
   - name: piper-it-paola
     role: tts_it
     licence: "dataset licence not stated in MODEL_CARD (see source)"

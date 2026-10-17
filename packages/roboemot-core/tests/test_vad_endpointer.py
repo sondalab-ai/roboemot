@@ -179,3 +179,43 @@ def test_rejects_wrong_dtype_and_shape():
 def test_events_never_carry_text_and_repr_hides_audio():
     end = kinds(run(signal((0.5, 0.0), (0.6, LOUD), (0.8, 0.0))), SpeechEnd)[0]
     assert "array" not in repr(end)
+
+
+def test_max_length_cut_loses_no_frames_and_does_not_reset_the_backend():
+    resets = []
+
+    class Counting(EnergyVAD):
+        def reset(self) -> None:
+            resets.append(1)
+
+    ep = Endpointer(Counting(RATE, FRAME), cfg())
+    x = signal((5.0, LOUD), (0.6, 0.0))
+    events = []
+    for i in range(0, len(x), FRAME):
+        events += ep.feed(x[i : i + FRAME], T0 + i / RATE)
+    ends = kinds(events, SpeechEnd)
+    starts = kinds(events, SpeechStart)
+    assert [e.reason for e in ends[:-1]] == ["max_length"] * (len(ends) - 1)
+    for prev, nxt in zip(ends, ends[1:], strict=False):
+        assert nxt.audio_stamp == pytest.approx(prev.endpoint_stamp - FRAME_S)
+    assert starts[1].stamp == pytest.approx(ends[0].endpoint_stamp - FRAME_S)
+    assert len(resets) == 1 + 1  # constructor reset plus the final silence end only
+
+
+def test_endpoint_is_end_silence_plus_one_frame_after_the_last_speech_frame():
+    end = kinds(run(signal((0.5, 0.0), (0.6, LOUD), (0.8, 0.0))), SpeechEnd)[0]
+    assert end.endpoint_stamp - end.last_speech_stamp == pytest.approx(0.2 + FRAME_S)
+
+
+def test_mutating_the_input_after_feed_does_not_change_the_audio():
+    ep = Endpointer(EnergyVAD(RATE, FRAME), cfg())
+    x = signal((0.5, 0.0), (0.6, LOUD), (0.8, 0.0))
+    ref = kinds(run(x), SpeechEnd)[0].audio
+    buf = np.empty(FRAME + 100, np.float32)
+    events = []
+    for i in range(0, len(x), len(buf)):
+        chunk = x[i : i + len(buf)]
+        buf[: len(chunk)] = chunk
+        events += ep.feed(buf[: len(chunk)], T0 + i / RATE)
+        buf[:] = 0.0
+    np.testing.assert_array_equal(kinds(events, SpeechEnd)[0].audio, ref)

@@ -59,7 +59,7 @@ def vad() -> SileroVAD:
         path = voice_models.model_file(voice_models.models_dir(), "silero-vad")
     except ModelError:
         pytest.skip("silero-vad not fetched: run `roboemot models fetch --voice`")
-    return SileroVAD(path)
+    return SileroVAD(path, VadConfig().threads)
 
 
 def probs(vad: SileroVAD, x: np.ndarray) -> list[float]:
@@ -103,3 +103,17 @@ def test_endpointer_on_voiced_burst(vad):
     speech_end_s = 1 + 12 * 0.18
     assert ends[0].last_speech_stamp == pytest.approx(speech_end_s, abs=0.15)
     assert ends[0].endpoint_stamp - ends[0].last_speech_stamp < 0.6
+
+
+def test_max_length_cut_keeps_the_backend_state_and_loses_nothing(vad):
+    x = np.concatenate([np.zeros(RATE, np.float32), speechlike(10), np.zeros(RATE, np.float32)])
+    ep = Endpointer(vad, VadConfig(max_utterance_s=1))
+    events = []
+    for i in range(0, len(x), 1600):
+        events += ep.feed(x[i : i + 1600], i / RATE)
+    ends = [e for e in events if isinstance(e, SpeechEnd)]
+    assert [e.reason for e in ends[:-1]] == ["max_length"] * (len(ends) - 1) and len(ends) >= 5
+    assert ends[-1].reason == "silence"
+    frame_s = FRAME / RATE
+    for prev, nxt in zip(ends, ends[1:], strict=False):
+        assert nxt.audio_stamp == pytest.approx(prev.endpoint_stamp - frame_s)

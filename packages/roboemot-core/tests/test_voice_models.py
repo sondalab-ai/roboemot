@@ -226,3 +226,95 @@ def test_fetch_creates_a_missing_models_folder_and_its_parents(tmp_path):
     root = tmp_path / "not" / "yet" / "there"
     fetch_file(f, root, client(GOOD))
     assert check_file(root, f) == root / "vosk/model-x"
+
+
+def test_failed_swap_restores_the_old_folder_and_marker(tmp_path, monkeypatch):
+    f = archive_file(GOOD)
+    fetch_file(f, tmp_path, client(GOOD))
+    (tmp_path / "vosk/model-x/conf.txt").unlink()  # makes the folder fail its check
+    marker_before = (tmp_path / "vosk/model-x.verified").read_text()
+    real = Path.replace
+
+    def failing(self, target):
+        if self.parent.name.endswith(".extract") or self.name == "model-x":
+            raise OSError(28, "No space left on device")
+        return real(self, target)
+
+    monkeypatch.setattr(Path, "replace", failing)
+    with pytest.raises(ModelError, match="No space"):
+        fetch_file(f, tmp_path, client(GOOD))
+    assert (tmp_path / "vosk/model-x/am/final.mdl").read_bytes() == b"weights"
+    assert not (tmp_path / "vosk/model-x/conf.txt").exists()
+    assert (tmp_path / "vosk/model-x.verified").read_text() == marker_before
+    assert sorted(p.name for p in (tmp_path / "vosk").iterdir()) == ["model-x", "model-x.verified"]
+
+
+def test_deleted_inner_file_is_detected(tmp_path):
+    f = archive_file(GOOD)
+    fetch_file(f, tmp_path, client(GOOD))
+    (tmp_path / "vosk/model-x/am/final.mdl").unlink()
+    with pytest.raises(ModelError, match="changed"):
+        check_file(tmp_path, f)
+
+
+def test_edited_inner_file_is_found_by_verify(tmp_path):
+    spec_file = archive_file(GOOD)
+    fetch_file(spec_file, tmp_path, client(GOOD))
+    spec = voice_models.ModelSpec(name="x", role="r", licence="MIT", source="s", files=[spec_file])
+    assert status(spec, tmp_path, verify=True) == "ok"
+    (tmp_path / "vosk/model-x/conf.txt").write_bytes(b"X")  # same size
+    assert status(spec, tmp_path) == "ok"
+    assert status(spec, tmp_path, verify=True) == "corrupt"
+
+
+@pytest.mark.parametrize(
+    "entries", [{"top-file": b"x"}, {"./model-x/a": b"x"}, {"model-x//a": b"x"}]
+)
+def test_odd_entries_are_rejected(tmp_path, entries):
+    body = make_zip(entries)
+    with pytest.raises(ModelError):
+        fetch_file(archive_file(body), tmp_path, client(body))
+
+
+def test_entry_count_is_capped(tmp_path, monkeypatch):
+    monkeypatch.setattr("roboemot.vision.models.MAX_ARCHIVE_ENTRIES", 3)
+    body = make_zip({f"model-x/{i}": b"x" for i in range(5)})
+    with pytest.raises(ModelError, match="too many"):
+        fetch_file(archive_file(body), tmp_path, client(body))
+
+
+def test_unpacked_folders_are_private(tmp_path):
+    body = make_zip({"model-x/a/b/c": b"x"})
+    fetch_file(archive_file(body), tmp_path, client(body))
+    for d in ("vosk", "vosk/model-x", "vosk/model-x/a", "vosk/model-x/a/b"):
+        assert stat.S_IMODE((tmp_path / d).stat().st_mode) == 0o700
+
+
+def test_ancestors_of_a_missing_root_keep_the_default_mode(tmp_path):
+    root = tmp_path / "a" / "models"
+    fetch_file(archive_file(GOOD), root, client(GOOD))
+    assert stat.S_IMODE(root.stat().st_mode) == 0o700
+    mode = stat.S_IMODE(root.parent.stat().st_mode)
+    assert mode == 0o777 & ~_umask()
+
+
+def _umask() -> int:
+    import os
+
+    current = os.umask(0)
+    os.umask(current)
+    return current
+
+
+def test_vision_file_fetch_creates_root_privately(tmp_path):
+    body = b"onnx"
+    f = ModelFile(
+        path="sub/m.onnx",
+        url="https://example.test/m.onnx",
+        sha256=hashlib.sha256(body).hexdigest(),
+        size_bytes=len(body),
+    )
+    root = tmp_path / "x" / "models"
+    fetch_file(f, root, client(body))
+    assert stat.S_IMODE(root.stat().st_mode) == 0o700
+    assert stat.S_IMODE((root / "sub").stat().st_mode) == 0o700
