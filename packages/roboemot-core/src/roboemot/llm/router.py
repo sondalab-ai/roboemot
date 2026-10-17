@@ -19,6 +19,7 @@ import asyncio
 import contextlib
 import datetime as dt
 import json
+import logging
 import re
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
@@ -29,9 +30,10 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpe
 
 from ..config.schema import LLMRoute, SafetyConfig
 from ..health.network import NetworkMonitor
+from .prompt import CHARS_PER_TOKEN, trim_history
 
+log = logging.getLogger(__name__)
 SECRET = re.compile(r"^\$\{secret:([A-Za-z0-9_.-]+)\}$")
-CHARS_PER_TOKEN = 4  # usage estimate when a server does not report usage
 
 
 @dataclass
@@ -85,6 +87,11 @@ class Router:
     monitor: NetworkMonitor | None = None
     _budgets: dict[str, _Budget] = field(default_factory=dict)
     failures: list[tuple[str, str]] = field(default_factory=list)
+
+    def adopt_budgets(self, other: Router) -> None:
+        """Keep ``other``'s daily token accounting (a rebuilt router after a config reload must
+        not hand every route a fresh budget)."""
+        self._budgets = other._budgets
 
     @property
     def offline(self) -> bool:
@@ -174,6 +181,11 @@ class Router:
         first real content (text or tool call; role-only chunks do not count);
         ``stall_timeout_s`` bounds every later gap. Tokens are charged even when the stream
         ends early (barge-in, timeout, error)."""
+        messages, dropped = trim_history(messages, route.context_budget_tokens)
+        if dropped:
+            log.debug(
+                "llm route %s: dropped %d oldest turns to fit the budget", route.name, dropped
+            )
         loop = asyncio.get_running_loop()
         client = self._client(route)  # not timed: the first one pays openai's lazy imports
         deadline = loop.time() + route.first_token_timeout_s

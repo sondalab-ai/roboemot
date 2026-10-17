@@ -42,9 +42,12 @@ from roboemot.diagnostics import Diagnostics, FnSource, Target, platform_sources
 from roboemot.diagnostics.system import local_sources
 from roboemot.health.network import NetworkMonitor
 from roboemot.health.responder import OfflineResponder
+from roboemot.llm import Router
+from roboemot.llm.router import SECRET
 from roboemot.manifest import load_manifest
 from roboemot.motion import Command, MotionLoop, Priority
 from roboemot.persona import effects as persona_effects
+from roboemot.persona.llm_traits import TraitCache, TraitsWorker
 from roboemot.reflex import ReflexEngine
 from roboemot.vision import CIRCADIAN, FrameSource, LockedSource
 from roboemot.vision.minor import MinorPresence
@@ -269,6 +272,11 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
     expression: ExpressionRenderer | None = None  # affect label -> additive antenna/head motion
     reflexes: ReflexEngine | None = None  # runs on the motion loop's tick (SPEC 10)
     audio: ReachyAudio | None = None  # microphone level for the loud-onset reflex
+    traits_worker: TraitsWorker | None = None  # rates persona traits when traits_source is llm
+
+    def make_router(self, cfg: Any, monitor: NetworkMonitor) -> Router:
+        """The app's LLM router over the configured routes (overridable: tests inject fakes)."""
+        return Router(cfg.llm_routes, cfg.safety, monitor=monitor)
 
     def make_circadian_clock(self) -> Any:
         """The clock the circadian rhythm runs on: monotonic seconds and the local hour of day
@@ -495,6 +503,25 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             cfg.llm_routes, cfg.connectivity.network, on_change=responder.on_event
         )
 
+        # Trait rating (SPEC 11A, Persona) runs on its own thread; its cache is in the data folder.
+        for route in cfg.llm_routes:  # the app has no secret store yet (TODO.md)
+            if SECRET.match(route.api_key):
+                log.warning(
+                    "llm route %s: api_key is a secret reference and no secret store is wired: "
+                    "requests go out with an empty key",
+                    route.name,
+                )
+        try:
+            paths.data_dir(cfg.data_dir)  # created private (0700) when missing, SPEC 12
+        except OSError as exc:  # the cache then fails to write and the rating is just not kept
+            log.warning("data folder: %s", type(exc).__name__)
+        worker = self.traits_worker = TraitsWorker(
+            stack,
+            self.make_router(cfg, network),
+            TraitCache(paths.traits_cache_path(cfg.data_dir)),
+            lambda c: self.make_router(c, network),
+        )
+
         affect = runner.engine
         self.diagnostics = Diagnostics().add(
             *local_sources(process_pid=os.getpid()),
@@ -545,6 +572,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             network.set_policy(change.config.connectivity.network)
 
         stack.subscribe(reload)
+        stack.subscribe(worker.on_change)
         fx_for, fx = None, None
         idle_last = idle_t = time.monotonic()  # idle breathing phase clock (SPEC 7A, Drowsy)
         # Everything started below is stopped in reverse order whatever fails: ExitStack runs
@@ -561,6 +589,8 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             cleanup.callback(loop.stop)
             network.start()
             cleanup.callback(network.stop)
+            cleanup.callback(worker.close)  # before the network monitor its router reports to
+            worker.start()
             if self.autoenroll is not None:  # runs after perception.stop: no new sightings
                 cleanup.callback(self.autoenroll.flush)
             cleanup.callback(perception.stop)

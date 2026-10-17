@@ -7,16 +7,24 @@ the trait schema. Any failure keeps the manual traits.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import hashlib
 import json
 import logging
+import os
 import re
+import threading
+import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from pydantic import ValidationError
 
-from ..config.schema import TRAITS, PersonaConfig, PersonaTraits
-from ..config.stack import ConfigStack
+from .. import paths
+from ..config.schema import TRAITS, PersonaConfig, PersonaTraits, RoboEmotConfig
+from ..config.stack import ConfigChange, ConfigStack
 from ..llm.router import Done, NoRouteAvailable, Router, TextDelta
 
 log = logging.getLogger(__name__)
@@ -56,9 +64,10 @@ class TraitCache:
 
     def _load(self) -> dict:
         try:
-            return json.loads(self.path.read_text())
+            data = json.loads(self.path.read_text())
         except (OSError, ValueError):
             return {}
+        return data if isinstance(data, dict) else {}
 
     def get(self, key: str) -> PersonaTraits | None:
         data = self._load().get(key)
@@ -70,8 +79,15 @@ class TraitCache:
     def put(self, key: str, traits: PersonaTraits) -> None:
         data = self._load()
         data[key] = traits.model_dump()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(data, indent=2))
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        try:
+            self.path.parent.mkdir(mode=paths.DIR_MODE, parents=True, exist_ok=True)
+            tmp.write_text(json.dumps(data, indent=2))
+            os.replace(tmp, self.path)  # a crash never leaves a half-written cache
+        except OSError as exc:
+            log.warning("persona traits: cache not written (%s)", type(exc).__name__)
+            with contextlib.suppress(OSError):
+                tmp.unlink()
 
 
 async def rate_traits(
@@ -82,9 +98,10 @@ async def rate_traits(
     routes = router.eligible(minor_present=False)
     if not routes:
         return None
-    cached = cache.get(cache_key(persona.prompt, routes[0].model))
-    if cached:
-        return cached
+    for route in routes:  # the answering route is not known yet: any eligible model's rating
+        cached = cache.get(cache_key(persona.prompt, route.model))
+        if cached:
+            return cached
     messages = [
         {"role": "system", "content": INSTRUCTIONS},
         {"role": "user", "content": persona.prompt},
@@ -124,3 +141,127 @@ async def apply_llm_traits(stack: ConfigStack, router: Router, cache: TraitCache
     if stack.derived.get("persona", {}).get("traits") != traits.model_dump():
         stack.set("persona.traits", traits.model_dump(), source=SOURCE, layer="derived")
     return True
+
+
+WATCHED = ("persona.prompt", "persona.traits_source", "llm_routes", "safety.minors_allowed_llm")
+JOIN_TIMEOUT_S = 2.0  # how long close() waits for the worker thread after cancelling it
+READY_TIMEOUT_S = 5.0  # how long start() waits for the worker's event loop to come up
+
+
+def _watched(key: str) -> bool:
+    return any(key == w or key.startswith(w + ".") for w in WATCHED)
+
+
+class TraitsWorker:
+    """Runs ``apply_llm_traits`` on its own thread and event loop (SPEC 11A, Persona), so a slow
+    route never blocks the app tick or the motion loop.
+
+    ``on_change`` is the ``config.changed`` listener: changes to ``persona.prompt``,
+    ``persona.traits_source``, ``llm_routes`` or ``safety.minors_allowed_llm`` wake the worker;
+    wake-ups coalesce into one run. Changes published by the worker itself (the derived layer
+    ``persona.llm``) are ignored, so it cannot trigger itself. The router is rebuilt (keeping
+    its token budgets) when the routes or the safety config change; if building it fails the
+    old one stays. After a failed rating the same prompt and routes are not asked again for
+    ``persona.traits_retry_s`` (a later wake-up is scheduled for when it ends).
+
+    ``close`` cancels a request in flight and waits at most ``JOIN_TIMEOUT_S``. Cancellation is
+    cooperative: a blocking synchronous call on the loop (not expected from the router, which is
+    async) would outlive the join; the thread is a daemon, so it never keeps the process alive.
+    """
+
+    def __init__(
+        self,
+        stack: ConfigStack,
+        router: Router,
+        cache: TraitCache,
+        make_router: Callable[[RoboEmotConfig], Router],
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.stack, self.router, self.cache, self.make_router = stack, router, cache, make_router
+        self.clock = clock
+        self._thread: threading.Thread | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._task: asyncio.Task | None = None
+        self._wake: asyncio.Event | None = None
+        self._ready = threading.Event()
+        self._closed = False
+        self._failed: tuple[Any, float] | None = None  # (prompt and routes, when it failed)
+
+    def start(self) -> None:
+        """Start the worker thread and request the first run (the startup rating)."""
+        self._thread = threading.Thread(target=self._run, name="llm-traits", daemon=True)
+        self._thread.start()
+        if not self._ready.wait(READY_TIMEOUT_S):
+            log.warning("persona traits: worker did not start in time")
+        self.request()
+
+    def request(self) -> None:
+        """Ask for a run; safe from any thread, a no-op from the worker's own."""
+        loop, wake = self._loop, self._wake
+        if self._closed or loop is None or wake is None:
+            return
+        if threading.current_thread() is self._thread:
+            return
+        with contextlib.suppress(RuntimeError):  # the loop has just closed
+            loop.call_soon_threadsafe(wake.set)
+
+    def on_change(self, change: ConfigChange) -> None:
+        """``config.changed`` listener: wake the worker when a key the rating depends on moved."""
+        if any(_watched(k) for k in change.changed_keys):
+            self.request()
+
+    def close(self) -> None:
+        """Cancel any request in flight and stop the thread (also after a slow or failed
+        ``start``: a worker that comes up late sees the flag and exits)."""
+        self._closed = True
+        loop, task = self._loop, self._task
+        if loop is not None and task is not None:
+            with contextlib.suppress(RuntimeError):  # the loop is already closed
+                loop.call_soon_threadsafe(task.cancel)
+        if self._thread is not None:
+            self._thread.join(JOIN_TIMEOUT_S)
+
+    def _run(self) -> None:
+        try:
+            asyncio.run(self._main())
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._ready.set()
+
+    async def _main(self) -> None:
+        self._loop, self._task = asyncio.get_running_loop(), asyncio.current_task()
+        self._wake = asyncio.Event()
+        self._ready.set()
+        while not self._closed:
+            await self._wake.wait()
+            self._wake.clear()
+            try:
+                await self._run_once()
+            except Exception as exc:  # the manual traits stay in effect
+                log.warning("persona traits: %s", type(exc).__name__)
+
+    async def _run_once(self) -> None:
+        cfg = self.stack.effective()
+        self._sync_router(cfg)
+        persona = cfg.persona
+        key = (persona.prompt, cfg.llm_routes)
+        if persona.traits_source == "llm" and self._failed and self._failed[0] == key:
+            left = self._failed[1] + persona.traits_retry_s - self.clock()
+            if left > 0:
+                self._loop.call_later(left, self._wake.set)
+                return
+        rated = await apply_llm_traits(self.stack, self.router, self.cache)
+        self._failed = (key, self.clock()) if persona.traits_source == "llm" and not rated else None
+
+    def _sync_router(self, cfg: RoboEmotConfig) -> None:
+        """Rebuild the router when routes or safety changed; keep the old one if that fails."""
+        if self.router.routes == cfg.llm_routes and self.router.safety == cfg.safety:
+            return
+        try:
+            fresh = self.make_router(cfg)
+        except Exception as exc:
+            log.warning("persona traits: router not rebuilt (%s)", type(exc).__name__)
+            return
+        fresh.adopt_budgets(self.router)
+        self.router = fresh

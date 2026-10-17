@@ -386,6 +386,7 @@ class ConfigStack:
         self.audit: list[AuditEntry] = []
         self.last_error: str | None = None
         self._last = self.effective()
+        self._check_route_budgets(self._last)
         # The configuration installed by the owner is the initial approved baseline.
         self._approved = self._last
 
@@ -444,7 +445,8 @@ class ConfigStack:
                         "manifest behaviour would loosen: " + "; ".join(map(str, found))
                     )
                 baseline = RoboEmotConfig.model_validate(self.merged_tree(include_runtime=False))
-            except (ValidationError, GuardrailError) as exc:
+                self._check_route_budgets(baseline)
+            except (ValidationError, GuardrailError, ConfigError) as exc:
                 self.manifest = saved
                 if isinstance(exc, ValidationError):
                     raise ConfigError(_explain(exc)) from exc
@@ -617,6 +619,7 @@ class ConfigStack:
         try:
             cfg = self.effective()
             base = RoboEmotConfig.model_validate(self.merged_tree(include_runtime=False))
+            self._check_route_budgets(cfg)
         except (ConfigError, ValidationError) as exc:
             undo()
             if isinstance(exc, ValidationError):
@@ -653,6 +656,18 @@ class ConfigStack:
         if base_found or rt_found:
             self._record(source, "approved", None, [str(v) for v in base_found + rt_found])
         return cfg
+
+    @staticmethod
+    def _check_route_budgets(cfg: RoboEmotConfig) -> None:
+        """Load-time check (SPEC 8, Conversation state) on a configuration without person
+        layers. It runs when a file loads or a change commits, not on every ``effective()``
+        call, so per-person lookups never pay for it or fail on it."""
+        from ..llm.prompt import check_route_budgets  # lazy: llm imports the config package
+
+        try:
+            check_route_budgets(cfg)
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from exc
 
     def subscribe(self, fn: Callable[[ConfigChange], None]) -> None:
         self._listeners.append(fn)
@@ -717,10 +732,18 @@ class ConfigStack:
         anything else is dropped and audited."""
         clean: dict = {}
         dropped: list[str] = []
+        cap = None
         for path, leaf in flatten(person).items():
             meta = field_meta(path)
             allowed = any(path == s or path.startswith(s + ".") for s in PERSON_SECTIONS)
-            if not allowed or _guarded(meta):
+            too_long = False
+            if path.endswith(".persona_fragment") and isinstance(leaf, str):
+                if cap is None:
+                    cap = self.merged_tree()["register"]["persona_fragment_max_chars"]
+                too_long = len(leaf) > cap
+            if path == "register.persona_fragment_max_chars" or too_long:
+                dropped.append(path)  # a person may not lengthen the system prompt
+            elif not allowed or _guarded(meta):
                 dropped.append(path)
             else:
                 set_path(clean, path, leaf)

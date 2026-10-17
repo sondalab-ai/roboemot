@@ -1,7 +1,8 @@
 """Where the app keeps its data on disk (SPEC 4A Installer, 12 Data).
 
-One folder holds everything RoboEmot writes: the registry (``registry/``) and, unless
-``vision.models_dir`` says otherwise, the downloaded models (``models/``). Keeping it in one
+One folder holds everything RoboEmot writes: the registry (``registry/``), the persona trait
+ratings (``llm_traits.json``) and, unless ``vision.models_dir`` says otherwise, the downloaded
+models (``models/``). Keeping it in one
 place lets the installer record it and the uninstaller remove it with a single path.
 
 The folder is, in order: the ``data_dir`` config value, ``$ROBOEMOT_DATA_DIR``, or
@@ -24,6 +25,7 @@ DIR_MODE = 0o700
 GROUP_OTHER_BITS = 0o077
 REGISTRY_SUBDIR = "registry"
 MODELS_SUBDIR = "models"
+TRAITS_CACHE_FILE = "llm_traits.json"
 
 
 def data_path(configured: str = "") -> Path:
@@ -67,13 +69,21 @@ def models_subdir(configured: str = "") -> Path:
     return data_path(configured) / MODELS_SUBDIR
 
 
+def traits_cache_path(configured: str = "") -> Path:
+    """``<data folder>/llm_traits.json``, the persona trait ratings cache (not created here).
+    Inside the data folder, so the installer's uninstall removes it with the folder."""
+    return data_path(configured) / TRAITS_CACHE_FILE
+
+
 __all__ = [
     "DEFAULT_REL",
     "ENV_DIR",
     "MODELS_SUBDIR",
     "REGISTRY_SUBDIR",
+    "TRAITS_CACHE_FILE",
     "data_dir",
     "data_path",
     "models_subdir",
     "registry_dir",
+    "traits_cache_path",
 ]

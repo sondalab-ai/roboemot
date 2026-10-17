@@ -308,6 +308,20 @@ class RegisterConfig(Strict):
     gender_affects_params: bool = param(
         False, "If true, gender may change register parameters, not only forms of address"
     )
+    persona_fragment_max_chars: int = param(
+        300, "Longest accepted persona_fragment, in every group", ge=20, le=2000
+    )
+
+    @model_validator(mode="after")
+    def _fragments_fit(self) -> RegisterConfig:
+        for group in ("child", "teen", "adult", "senior", "unknown"):
+            n = len(getattr(self, group).persona_fragment)
+            if n > self.persona_fragment_max_chars:
+                raise ValueError(
+                    f"register.{group}.persona_fragment has {n} characters, "
+                    f"max {self.persona_fragment_max_chars}"
+                )
+        return self
 
 
 # --------------------------------------------------------------------------- expression (SPEC 7)
@@ -1730,6 +1744,14 @@ class ConversationConfig(Strict):
     scene_summary_max_chars: int = param(
         400, "Cap on the scene summary in the system prompt", ge=0, le=4000
     )
+    turn_reserve_tokens: int = param(
+        256,
+        "Room every route's context budget must leave beyond the system prompt, for the "
+        "newest turn (load-time check, SPEC 8)",
+        unit="tokens",
+        ge=16,
+        le=8192,
+    )
 
 
 # --------------------------------------------------------------------------- persona (SPEC 11A)
@@ -1808,6 +1830,14 @@ class PersonaConfig(Strict):
         admin_only=True,
     )
     prompt_max_chars: int = param(600, "Longest accepted prompt", ge=50, le=4000)
+    traits_retry_s: float = param(
+        300.0,
+        "After a failed LLM rating, wait this long before asking again for the same prompt and "
+        "routes",
+        unit="s",
+        ge=0,
+        le=86400,
+    )
     traits_source: Literal["manual", "llm"] = param(
         "manual", "manual: use traits; llm: ask a route to rate the prompt (falls back to traits)"
     )
@@ -1839,6 +1869,14 @@ class LLMRoute(Strict):
         False, "Route cleared for use while a minor is present", conservative="false"
     )
     daily_token_budget: int = param(200_000, "Daily token cap", ge=0)
+    context_budget_tokens: int = param(
+        8192,
+        "Prompt budget per request, estimated at 4 characters per token; the oldest turns are "
+        "dropped to fit (SPEC 8)",
+        unit="tokens",
+        ge=256,
+        le=2_000_000,
+    )
     supports_images: bool = param(False, "Route accepts image_url parts")
 
     @model_validator(mode="after")

@@ -8,9 +8,11 @@ llm_routes:
     api_key: none
     model: local-model
     first_token_timeout_s: 1.5
+    context_budget_tokens: 8192               # prompt budget; oldest turns are dropped to fit
   - name: cloud
     base_url: https://api.openai.com/v1       # or OpenRouter, Anthropic, any compatible provider
     api_key: ${secret:cloud_key}
     model: <model-id>
     allowed_for_minors: false
     daily_token_budget: 200000
+    context_budget_tokens: 32000
