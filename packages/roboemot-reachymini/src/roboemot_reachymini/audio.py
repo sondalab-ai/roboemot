@@ -126,6 +126,11 @@ class ReachyAudio:
         self._chunks = 0
         self._last_error: str | None = None
 
+    def set_voice(self, enabled: bool) -> None:
+        """Turn the voice queue on or off before ``start`` (the app learns whether a listener
+        exists only after the hub is built); a hub without a consumer queues nothing."""
+        self._voice = enabled
+
     def snapshot(self) -> dict[str, Any]:
         """State for the debug report: scalars and a reason, never audio."""
         with self._lock:

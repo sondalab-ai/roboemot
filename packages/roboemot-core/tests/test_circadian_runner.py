@@ -960,3 +960,35 @@ def test_the_frame_source_is_never_read_by_two_threads_at_once():
     assert overlaps == [] and shared.camera_model == "intrinsics"
     with pytest.raises(AttributeError):
         shared.nothing  # noqa: B018
+
+
+def test_speech_is_presence_and_the_wake_word_wakes(cfg):
+    from types import SimpleNamespace
+
+    bus = Bus()
+    clock = FakeClock()
+    clock.set(0.0, 23.0)
+    r = CircadianRunner(cfg, bus, RecordingSink(), clock=clock)
+    run_for(r, clock, 60)
+    assert r.model.state == "resting" and not r.present()
+    bus.publish("percept.utterance", SimpleNamespace(addressed=True, wake_word=False), clock.t)
+    assert r.present()
+    run_for(r, clock, cfg.circadian.presence_window_s + 20)
+    assert r.model.state == "resting"
+    bus.publish("percept.utterance", SimpleNamespace(addressed=True, wake_word=True), clock.t)
+    run_for(r, clock, 20)
+    assert r.model.state == "awake"
+
+
+def test_unaddressed_speech_neither_shows_presence_nor_wakes(cfg):
+    from types import SimpleNamespace
+
+    bus = Bus()
+    clock = FakeClock()
+    clock.set(0.0, 23.0)
+    r = CircadianRunner(cfg, bus, RecordingSink(), clock=clock)
+    run_for(r, clock, 60)
+    tv = SimpleNamespace(addressed=False, wake_word=True)  # even a mis-heard wake word
+    bus.publish("percept.utterance", tv, clock.t)
+    run_for(r, clock, 20)
+    assert not r.present() and r.model.state == "resting"

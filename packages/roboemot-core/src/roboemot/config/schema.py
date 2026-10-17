@@ -117,6 +117,13 @@ APPRAISAL_EVENTS = frozenset(
         "light.off",
         "circadian.woken_at_night",
         "conversation.unavailable",
+        "speech.heard",
+        "speech.keyword.stop",
+        "speech.keyword.no",
+        "speech.keyword.greeting",
+        "speech.name_called",
+        "speech.loud",
+        "speech.fast",
     }
 )
 APPRAISAL_EVENT_PREFIXES = ("link.",)  # connectivity: link.<name>.lost / .restored (SPEC 12A)
@@ -240,6 +247,34 @@ class AppraisalConfig(Strict):
                 "label": "curiosity",
                 "cooldown_s": 10,
             },
+            # Speech fast path (SPEC 8 stage 3): keywords spotted on ASR partials and prosody of
+            # the finished utterance. Starting points: a greeting or the robot's name is welcome,
+            # "stop" and "no" are a mild jolt, a raised or rushed voice raises arousal.
+            {"event": "speech.heard", "arousal": 0.05, "cooldown_s": 20},
+            {
+                "event": "speech.keyword.greeting",
+                "valence": 0.3,
+                "arousal": 0.3,
+                "label": "joy",
+                "cooldown_s": 30,
+            },
+            {
+                "event": "speech.name_called",
+                "valence": 0.1,
+                "arousal": 0.4,
+                "label": "curiosity",
+                "cooldown_s": 5,
+            },
+            {
+                "event": "speech.keyword.stop",
+                "valence": -0.1,
+                "arousal": 0.3,
+                "label": "surprise",
+                "cooldown_s": 3,
+            },
+            {"event": "speech.keyword.no", "valence": -0.2, "arousal": 0.1, "cooldown_s": 3},
+            {"event": "speech.loud", "arousal": 0.15, "cooldown_s": 10},
+            {"event": "speech.fast", "arousal": 0.2, "cooldown_s": 10},
         ],
         "Event to impulse rules (SPEC 7, Affect state)",
     )
@@ -1711,6 +1746,92 @@ class VadConfig(Strict):
     threads: int = param(1, "ONNX Runtime threads for the Silero model", ge=1, le=4, restart=True)
 
 
+class AsrConfig(Strict):
+    models: dict[str, str] = param(
+        {"it": "vosk-small-it", "en": "vosk-small-en"},
+        "Vosk model per ASR language, by name in the voice model manifest. The language of an "
+        "utterance is the speaker's registry preference (`preferences.language` of the person "
+        "record the robot is attending to) when a model exists for it, else "
+        "`conversation.language`, else the first language listed here. All models are loaded "
+        "when the voice pipeline starts",
+        restart=True,
+    )
+
+
+class KeywordSet(Strict):
+    stop: list[str] = param([], "Phrases that mean stop (what you are doing)")
+    no: list[str] = param([], "Phrases that mean no")
+    greeting: list[str] = param([], "Greeting phrases")
+    wake_phrases: list[str] = param(
+        [],
+        "Phrases that wake the robot when they occur anywhere in the final text. Use words the "
+        "recognizer's vocabulary has: `reachy` is out of vocabulary in both small Vosk models, "
+        "so the default phrases are built from common words (`ehi robot`, `hey robot`)",
+    )
+    name_aliases: list[str] = param(
+        [],
+        "Spellings the recognizer produces for `voice.wake_word` in this language (Reachy came "
+        "out as `reati` in Italian and `riyadh she` in English). They emit speech.name_called "
+        "and count as the wake word only in a short final text (voice.fastpath."
+        "alias_wake_max_words), because an alias can be a real word. Changing `voice.wake_word` "
+        "needs the aliases re-tuned",
+    )
+
+
+class FastpathConfig(Strict):
+    addressed_window_s: float = param(
+        15.0,
+        "After an utterance that needed the wake word and was addressed, the next utterance that "
+        "starts within this long after its last speech is addressed too, without the wake word "
+        "(when both speakers are known people they must be the same person)",
+        unit="s", ge=1, le=600,
+    )  # fmt: skip
+    window_max_s: float = param(
+        120.0,
+        "The addressed window never reaches further than this from the wake word that opened "
+        "it, however many follow-ups extend it",
+        unit="s", ge=1, le=3600,
+    )  # fmt: skip
+    alias_wake_max_words: int = param(
+        4,
+        "A name alias counts as the wake word only in a final text of at most this many words",
+        ge=1,
+        le=20,
+    )
+    doa_max_age_ms: float = param(
+        1500.0,
+        "A sound direction reading older than this does not point the head at the speaker",
+        unit="ms", ge=0, le=10000,
+    )  # fmt: skip
+    loud_db: float = param(
+        -18.0,
+        "Speech louder than this RMS level (dBFS, over the speech frames of the utterance) emits "
+        "speech.loud",
+        unit="dB", ge=-60, le=0,
+    )  # fmt: skip
+    fast_words_per_s: float = param(
+        4.5,
+        "Speech faster than this emits speech.fast (needs min_words_for_rate words)",
+        unit="Hz", ge=1, le=10,
+    )  # fmt: skip
+    min_words_for_rate: int = param(
+        4, "Fewer words than this give no speaking rate (too short to measure)", ge=2, le=50
+    )
+    frame_ms: float = param(40.0, "Frame length of the prosody analysis", unit="ms", ge=10, le=100)
+    active_floor_db: float = param(
+        -55.0,
+        "Frames quieter than this RMS level (dBFS) are not analysed for pitch",
+        unit="dB", ge=-90, le=-20,
+    )  # fmt: skip
+    pitch_min_hz: float = param(70.0, "Lowest pitch looked for", unit="Hz", ge=40, le=200)
+    pitch_max_hz: float = param(400.0, "Highest pitch looked for", unit="Hz", ge=150, le=800)
+    voiced_threshold: float = param(
+        0.45,
+        "Normalised autocorrelation peak needed to call a frame voiced and take its pitch",
+        ge=0.1, le=0.95,
+    )  # fmt: skip
+
+
 VOICE_NAME = re.compile(r"[A-Za-z0-9._-]+")
 
 
@@ -1870,11 +1991,42 @@ class VoiceConfig(Strict):
     pitch_shift_backend: Literal["none", "dsp"] = param(
         "dsp", "How pitch is applied on backends without native pitch (Piper)"
     )
-    wake_word: str = param("reachy", "Wake word")
-    wake_word_policy: Literal["always", "never", "unless_enrolled_in_view"] = param(
-        "unless_enrolled_in_view", "When the wake word is required"
+    wake_word: str = param(
+        "reachy",
+        "The robot's name, for display and the prompt. It is not relied upon for spotting (out "
+        "of vocabulary in the small Vosk models): wake detection uses voice.keywords.<language>."
+        "wake_phrases and name_aliases",
     )
-    active_asr_language: str = param("it", "ASR language when the speaker has no preference")
+    wake_word_policy: Literal["always", "never", "unless_enrolled_in_view"] = param(
+        "unless_enrolled_in_view",
+        "When the wake word is required: always; never; or unless an enrolled person is in view. "
+        "With unless_enrolled_in_view, anyone speaking while an enrolled person is in view "
+        "(a stranger, a television) is addressed without the wake word, and a stranger alone "
+        "must say it",
+    )
+    asr: AsrConfig = param({}, "Speech recognition (SPEC 8 stage 3)")
+    keywords: dict[str, KeywordSet] = param(
+        {
+            "it": {
+                "stop": ["stop", "fermati", "ferma", "basta", "fermo"],
+                "no": ["no"],
+                "greeting": ["ciao", "buongiorno", "buonasera", "salve"],
+                "wake_phrases": ["ehi robot", "ciao robot"],
+                "name_aliases": ["reati"],
+            },
+            "en": {
+                "stop": ["stop", "halt", "enough"],
+                "no": ["no"],
+                "greeting": ["hello", "hi", "hey", "good morning", "good evening"],
+                "wake_phrases": ["hey robot", "hello robot"],
+                "name_aliases": ["riyadh she"],
+            },
+        },
+        "Fast-path keyword lists per language, matched on whole words in the ASR partials "
+        "(case and accents ignored; a phrase may have several words; no stemming, so list "
+        "inflections you want)",
+    )
+    fastpath: FastpathConfig = param({}, "Speech fast path: keywords, wake word window, prosody")
 
     @field_validator("voices")
     @classmethod
