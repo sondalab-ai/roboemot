@@ -39,6 +39,7 @@ BEHAVIOUR_MODULES = [
     "registry/xmp.py",
     "registry/images.py",
     "registry/catalogue.py",
+    "registry/tombstones.py",
     "world/autoenroll.py",
     "webui/catalogue.py",
     "world/feed.py",

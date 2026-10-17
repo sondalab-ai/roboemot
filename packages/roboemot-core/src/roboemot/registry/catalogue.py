@@ -52,6 +52,7 @@ PHOTO_NO_REGIONS = "no_regions"
 PHOTO_NO_EMBEDDER = "no_embedder"
 PHOTO_DIMS_MISMATCH = "dims_mismatch"
 LIVE_KINDS = ("animal", "object")
+SKIP_DELETED = "deleted"
 
 
 class CatalogueError(Exception):
@@ -210,7 +211,9 @@ class CatalogueService:
             photo = self._open_photo(image, parsed.items, parsed.applied_dims, report, deadline)
         try:
             for item in parsed.items:
-                report.items.append(self._import_item(item, photo, report))
+                done = self._import_item(item, photo, report)
+                if done is not None:
+                    report.items.append(done)
         finally:
             photo = None
         return report
@@ -258,13 +261,20 @@ class CatalogueService:
 
     def _import_item(
         self, item: CatalogueItem, photo: _Photo | None, report: ImportReport
-    ) -> ReportItem:
+    ) -> ReportItem | None:
+        """One item of the sidecar; None when the owner deleted this pending record before."""
         if item.kind == "person":
             known = self.registry.people_named(item.name)
+            if not known and self.registry.tombstones.has("person", item.name):
+                report.skip(SKIP_DELETED)
+                return None
             person = known[0] if known else self.registry.create_pending_person(item.name)
             return ReportItem(person.person_id, person.display_name, "person", "", not known)
         record = self._find(item)
         created = record is None
+        if record is None and self.registry.tombstones.has(item.kind, item.name):
+            report.skip(SKIP_DELETED)
+            return None
         if record is None:
             record = self.registry.create_pending_entity(
                 item.kind,  # type: ignore[arg-type]
@@ -331,6 +341,16 @@ class CatalogueService:
             return 0
         finally:
             rows.clear()
+
+    # ------------------------------------------------------------------ tombstones
+
+    def tombstone_count(self) -> int:
+        """How many deleted pending records an import skips (names are not kept)."""
+        return self.registry.tombstones.count()
+
+    def clear_tombstones(self) -> int:
+        """Let an import bring deleted pending records back; returns how many were cleared."""
+        return self.registry.tombstones.clear()
 
     # ------------------------------------------------------------------ listing
 

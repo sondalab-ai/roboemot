@@ -370,7 +370,15 @@ async function catalogueView() {
           const out = await api("POST", "/api/catalogue/candidates/clear", { confirm: true, pin: takePin() });
           notice(t("catalogue_cleared", { n: out.cleared }));
         }),
-      }, t("catalogue_clear"))));
+      }, t("catalogue_clear")),
+      data.tombstones ? el("button", {
+        type: "button",
+        onclick: () => confirm(t("tombstones_clear_confirm")) && guarded(async () => {
+          const out = await api("POST", "/api/catalogue/tombstones/clear", { confirm: true });
+          notice(t("tombstones_cleared", { n: out.cleared }));
+          await catalogueView();
+        }),
+      }, t("tombstones_clear", { n: data.tombstones })) : []));
 }
 
 async function debugView() {

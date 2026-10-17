@@ -10,13 +10,20 @@ import struct
 import sys
 import threading
 import zlib
+from datetime import UTC, datetime
 
 import numpy as np
 import pytest
-from roboemot.config.schema import CatalogueConfig, IdentityConfig, WorldConfig
-from roboemot.registry import FileStore, Registry
+from roboemot.config.schema import (
+    CatalogueConfig,
+    EnrollmentConfig,
+    IdentityConfig,
+    WorldConfig,
+)
+from roboemot.registry import Consent, FileStore, Registry
 from roboemot.registry import images as images_module
 from roboemot.registry.catalogue import CatalogueError, CatalogueService
+from roboemot.registry.enrollment import EnrollmentService
 from roboemot.registry.images import ImageError, decode_bgr, image_size
 from roboemot.world import Observation, WorldModel
 from test_xmp import ATTR_FORM, subjects
@@ -340,3 +347,50 @@ def test_pending_embeddings_need_one_key_per_row_and_a_pending_record(tmp_path):
     reg.confirm_entity(entity.entity_id, np.eye(1, DIM), MODEL, keep_existing=True)
     with pytest.raises(ValueError):
         reg.attach_pending_embeddings(entity.entity_id, np.eye(1, DIM), MODEL, 5, ["z"])
+
+
+# ------------------------------------------------------------------ tombstones (SPEC 6, 12)
+
+
+def enrollment_for(reg):
+    return EnrollmentService(reg, EnrollmentConfig(), IdentityConfig())
+
+
+def test_a_deleted_pending_record_does_not_come_back_on_reimport(tmp_path):
+    svc, reg, _ = make_service(tmp_path)
+    xmp = subjects("People|Anna", "Animals|Cat|Mia")
+    first = svc.import_sidecar(xmp)
+    assert [i.created for i in first.items] == [True, True] and len(reg.list()) == 2
+    enrollment = enrollment_for(reg)
+    for record in reg.list():
+        enrollment.delete(record.id)
+    assert reg.list() == []
+
+    again = svc.import_sidecar(xmp)
+    assert again.items == [] and again.skipped == {"deleted": 2}
+    assert reg.list() == []
+    assert svc.tombstone_count() == 2
+
+    assert svc.clear_tombstones() == 2 and svc.tombstone_count() == 0
+    assert len(svc.import_sidecar(xmp).items) == 2  # the owner allowed it again
+
+
+def test_tombstones_hold_no_name_and_survive_a_restart(tmp_path):
+    svc, reg, _ = make_service(tmp_path)
+    svc.import_sidecar(subjects("People|Anna Rossi"))
+    enrollment_for(reg).delete(reg.list()[0].id)
+    files = [p for p in (tmp_path / "reg").rglob("*") if p.is_file()]
+    blob = b"".join(p.read_bytes() + p.name.encode() for p in files)
+    assert b"nna" not in blob and b"ossi" not in blob
+    reopened = make_registry(tmp_path)
+    assert reopened.tombstones.has("person", "ANNA ROSSI")  # case-insensitive, like the import
+    assert not reopened.tombstones.has("animal", "Anna Rossi")
+
+
+def test_deleting_an_enrolled_person_leaves_no_tombstone(tmp_path):
+    reg = make_registry(tmp_path)
+    consent = Consent("Carl", datetime(2026, 1, 1, tzinfo=UTC), ("face",))
+    vec = [[1.0] + [0.01 * i] * (DIM - 1) for i in range(5)]
+    active = reg.enroll("Carl", vec, MODEL, consent=consent, age_group="adult")
+    enrollment_for(reg).delete(active.person_id)
+    assert reg.tombstones.count() == 0 and not reg.tombstones.has("person", "Carl")

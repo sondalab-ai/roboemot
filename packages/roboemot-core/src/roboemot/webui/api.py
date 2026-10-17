@@ -98,6 +98,8 @@ class CataloguePort(Protocol):
     def live_entries(self) -> list[Any]: ...
     def confirm(self, record_id: str, entry_id: str | None = None) -> Any: ...
     def purge_candidates(self) -> int: ...
+    def tombstone_count(self) -> int: ...
+    def clear_tombstones(self) -> int: ...
 
 
 class DebugReport(Protocol):
@@ -276,6 +278,7 @@ class WebApi:
             ("GET", "/api/catalogue"): self._catalogue,
             ("POST", CATALOGUE_IMPORT): self._catalogue_import,
             ("POST", "/api/catalogue/candidates/clear"): self._catalogue_clear,
+            ("POST", "/api/catalogue/tombstones/clear"): self._tombstones_clear,
         }
         if (method, path) in simple:
             return simple[(method, path)](req)
@@ -605,7 +608,15 @@ class WebApi:
             "max_image_bytes": cat.max_image_bytes,
             "max_items": cat.max_items,
         }
-        return Response(HTTPStatus.OK, {"records": records, "live": live, "limits": limits})
+        return Response(
+            HTTPStatus.OK,
+            {
+                "records": records,
+                "live": live,
+                "limits": limits,
+                "tombstones": int(port.tombstone_count()),
+            },
+        )
 
     def _catalogue_import(self, req: Request) -> Response:
         """One XMP sidecar, optionally with its photo (base64), per request (SPEC 6)."""
@@ -689,6 +700,15 @@ class WebApi:
             raise ApiError(HTTPStatus.CONFLICT, "confirm_required")
         self._check_pin(req, body.get("pin"))
         return Response(HTTPStatus.OK, {"cleared": int(port.purge_candidates())})
+
+    def _tombstones_clear(self, req: Request) -> Response:
+        """Let a catalogue import bring back records the owner deleted (they hold no names)."""
+        port = self._port()
+        body = self._json_body(req)
+        v.only_keys(body, {"confirm"})
+        if not v.confirmed(body):
+            raise ApiError(HTTPStatus.CONFLICT, "confirm_required")
+        return Response(HTTPStatus.OK, {"cleared": int(port.clear_tombstones())})
 
 
 def _reject_constant(name: str) -> Any:

@@ -123,6 +123,11 @@ EN: dict[str, str] = {
         "Forget what the robot has collected about animals and objects it does not know yet?"
     ),
     "catalogue_cleared": "Forgotten: {n}.",
+    "tombstones_clear": "Allow deleted imports to come back ({n})",
+    "tombstones_clear_confirm": (
+        "A new import will create the pending records you deleted before. Continue?"
+    ),
+    "tombstones_cleared": "Cleared: {n}.",
     "catalogue_read_failed": "The file could not be read.",
     "photo_used": "Photo used.",
     "photo_no_embedder": "Photo skipped: object recognition is not running.",
@@ -313,6 +318,11 @@ IT: dict[str, str] = {
         "Dimenticare ciò che il robot ha raccolto su animali e oggetti che non conosce ancora?"
     ),
     "catalogue_cleared": "Dimenticati: {n}.",
+    "tombstones_clear": "Permetti il ritorno dei record eliminati ({n})",
+    "tombstones_clear_confirm": (
+        "Un nuovo import creerà di nuovo i record in attesa che hai eliminato. Continuare?"
+    ),
+    "tombstones_cleared": "Rimossi: {n}.",
     "catalogue_read_failed": "Impossibile leggere il file.",
     "photo_used": "Foto usata.",
     "photo_no_embedder": "Foto saltata: il riconoscimento di oggetti non è attivo.",

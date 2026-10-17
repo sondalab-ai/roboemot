@@ -85,6 +85,13 @@ class FakeCatalogue:
         self.calls.append(("purge",))
         return 3
 
+    def tombstone_count(self):
+        return 2
+
+    def clear_tombstones(self):
+        self.calls.append(("tombstones",))
+        return 2
+
 
 @pytest.fixture
 def catalogue():
@@ -148,6 +155,7 @@ PROTECTED = [
     ("POST", "/api/catalogue/import"),
     ("POST", "/api/catalogue/e1/confirm"),
     ("POST", "/api/catalogue/candidates/clear"),
+    ("POST", "/api/catalogue/tombstones/clear"),
 ]
 
 
@@ -338,6 +346,15 @@ def test_clearing_candidates_needs_confirmation_and_the_pin(authed, catalogue, c
     clock.now += 5
     resp = authed.request("POST", path, {"confirm": True, "pin": PIN})
     assert resp.status == 200 and resp.json == {"cleared": 3}
+
+
+def test_tombstones_are_counted_and_cleared_with_a_confirmation(authed, catalogue):
+    assert authed.request("GET", "/api/catalogue").json["tombstones"] == 2
+    path = "/api/catalogue/tombstones/clear"
+    assert authed.request("POST", path, {}).status == 409
+    assert catalogue.calls == []
+    resp = authed.request("POST", path, {"confirm": True})
+    assert resp.status == 200 and resp.json == {"cleared": 2}
 
 
 # ------------------------------------------------------------------ with the real service
