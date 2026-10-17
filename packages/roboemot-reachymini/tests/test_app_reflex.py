@@ -231,3 +231,49 @@ def test_the_sound_direction_source_is_gated_by_the_speaking_window(data, monkey
         stop.set()
         thread.join(timeout=10)
     assert not errors
+
+
+def test_voice_builds_a_speech_output_that_plays_through_the_speaker(data):  # noqa: F811
+    from roboemot.config.schema import RegisterParams, StateEffects
+    from roboemot.voice.tts import AudioChunk
+
+    class Tone:
+        name, controls = "tone", frozenset()
+
+        def available(self, *, minor_present=False):
+            return True
+
+        async def synthesize(self, text, delivery, *, language, voice, minor_present=False):
+            yield AudioChunk(np.full(1600, 0.1, np.float32), 16000)
+
+        def cancel(self):
+            pass
+
+        async def warm(self, language, voice):
+            pass
+
+        async def aclose(self):
+            pass
+
+    enable(data, VOICE_YAML)
+    app = new_app()
+    scripted = ScriptedMini()
+    stop, thread, errors = run_app(app, scripted.mini)
+    try:
+        assert wait_for(lambda: app.speech_output is not None)
+        app.speech_output.backend = Tone()
+        pushed = scripted.mini.media.push_audio_sample
+        app.speech_output.say(
+            "Ciao.",
+            language="it",
+            register=RegisterParams(),
+            circadian=StateEffects(),
+            mood=None,
+            intensity=0.0,
+        )
+        assert wait_for(lambda: pushed.called)
+        assert wait_for(lambda: app.speech.speaking(time.monotonic()))
+    finally:
+        stop.set()
+        thread.join(timeout=10)
+    assert not errors and not thread.is_alive()
