@@ -355,16 +355,26 @@ def run_core(manifest, cfg, reg, st, minor, entry_map=None):
     r = renderer(cfg, manifest, entry_map, max_amplitude=3)
     r.update(state("calm", 0.0), reg, 0.0)
     r.update(st, reg, 1.0)
-    peak = dict.fromkeys(manifest.dofs, 0.0)
+    up = dict.fromkeys(manifest.dofs, 0.0)
+    down = dict.fromkeys(manifest.dofs, 0.0)
     t = 1.0
     while t < 9.0:
         for cmd in r.commands(t):
             core.feed(cmd)
         pos = core.tick(t, DT)
         for n, d in manifest.dofs.items():
-            peak[n] = max(peak[n], abs(pos[n] - d.home))
+            up[n] = max(up[n], pos[n] - d.home)
+            down[n] = max(down[n], d.home - pos[n])
         t += DT
-    return peak
+    return up, down
+
+
+def within_band(manifest, factor, up, down, names=None):
+    """Each side of home stays inside ``factor`` x that side's range (signed, not the wider)."""
+    for n in names or manifest.dofs:
+        d = manifest.dofs[n]
+        assert up[n] <= factor * (d.max - d.home) + 1e-9, (n, "up")
+        assert down[n] <= factor * (d.home - d.min) + 1e-9, (n, "down")
 
 
 def test_the_minor_cap_wins_over_the_child_register(cfg, manifest):
@@ -375,14 +385,12 @@ def test_the_minor_cap_wins_over_the_child_register(cfg, manifest):
     assert reg.params.motion_amplitude > 1  # the child's 1.2x
     for label in LABELS:
         st = state(label, 1.0, impulse=1)
-        capped = run_core(manifest, cfg, reg, st, minor=True)
-        free = run_core(manifest, cfg, reg, st, minor=False)
-        for n, d in manifest.dofs.items():
-            bound = factor * max(d.max - d.home, d.home - d.min)
-            assert capped[n] <= bound + 1e-9, (label, n)
-        moved = {n for n, v in capped.items() if v > 1e-4}
+        up, down = run_core(manifest, cfg, reg, st, minor=True)
+        free_up, free_down = run_core(manifest, cfg, reg, st, minor=False)
+        within_band(manifest, factor, up, down)
+        moved = {n for n in up if max(up[n], down[n]) > 1e-4}
         assert moved, label
-        assert all(capped[n] <= free[n] + 1e-9 for n in moved), label  # never more than free
+        assert all(up[n] <= free_up[n] + 1e-9 and down[n] <= free_down[n] + 1e-9 for n in moved)
 
 
 def test_the_minor_cap_holds_at_the_worst_case_the_schema_allows(cfg, manifest):
@@ -402,10 +410,10 @@ def test_the_minor_cap_holds_at_the_worst_case_the_schema_allows(cfg, manifest):
         "head.pitch": [(0, 0), (0.5, 90), (1, 0)],
         "head.roll": [(0, 0), (0.5, -90), (1, 0)],
     })  # fmt: skip
-    peak = run_core(manifest, worst, reg, state("joy", 1.0), True, {"joy": huge})
-    for n in ("antenna_right", "antenna_left", "head.pitch", "head.roll"):
-        d = manifest.dofs[n]
-        assert 0 < peak[n] <= factor * max(d.max - d.home, d.home - d.min) + 1e-9, n
+    up, down = run_core(manifest, worst, reg, state("joy", 1.0), True, {"joy": huge})
+    names = ("antenna_right", "antenna_left", "head.pitch", "head.roll")
+    within_band(manifest, factor, up, down, names)
+    assert all(max(up[n], down[n]) > 0 for n in names)
     assert RegisterParams(motion_amplitude=2).motion_amplitude == 2
 
 
@@ -436,3 +444,25 @@ def test_the_manifest_behaviour_becomes_part_of_the_installed_config(manifest):
     stack.app = {"expression_map": {"joy": {"channels": {"head.roll": [[0, 0], [0.45, 0]]}}}}
     joy = stack.effective().expression_map["joy"]
     assert set(joy.channels) == {"antenna_right", "antenna_left", "head.roll"}
+
+
+def test_a_stricter_register_mid_expression_drops_the_body_and_the_amplitude_at_once(cfg, manifest):
+    """Regression: the approach and amplitude decisions are re-checked every tick."""
+    r = renderer(cfg, manifest, {"joy": BODY})
+    adult, stranger = active("adult"), resolve_unknown(cfg)
+    r.update(state("calm", 0.5), adult, 0.0)
+    assert r.update(state("joy", 0.5), adult, 1.0)
+    assert "body_yaw" in r.commands(1.25)[0].targets
+    r.update(state("joy", 0.5), stranger, 1.26)  # someone arrives: tighter on both counts
+    after = r.commands(1.27)[0].targets
+    assert "body_yaw" not in after
+    f = cfg.expression.intensity_factor
+    ratio = 0.7 * f.low / (1.0 * f.medium)
+    assert after["antenna_right"] == pytest.approx(
+        r._player.command(1.27).targets["antenna_right"] * ratio
+    )
+    # the cross-fade's previous pose is the filtered one: a new expression starting now keeps
+    # the body out while blending
+    assert r.update(state("joy", 0.5, impulse=9), stranger, 3.0)
+    for t in (3.0, 3.05, 3.1, 3.2):
+        assert all("body_yaw" not in c.targets for c in r.commands(t))

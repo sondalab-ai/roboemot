@@ -105,6 +105,9 @@ class ExpressionRenderer:
         self._player: Player | None = None
         self._blend: tuple[float, dict[str, float]] | None = None
         self._last: dict[str, float] = {}
+        self._approach = False  # the register's latest approach_allowed: checked every tick
+        self._scale_now = 0.0  # the register's latest motion factor
+        self._scale_start = 0.0  # the same when the playing expression started
         self.last_label: str | None = None  # the label of the latest expression started
         self.last_amplitude = 0.0  # its amplitude, for tests and the debug report
 
@@ -133,6 +136,8 @@ class ExpressionRenderer:
         ``expression.min_interval_s`` after the last start), or the label has been held for
         ``retrigger_s`` with the affect intensity still at ``retrigger_min_intensity``.
         """
+        self._approach = register.params.approach_allowed
+        self._scale_now = self._register_scale(register)
         if self._label is not None:
             changed = state.label != self._label or state.impulse != self._serial
             held = (
@@ -155,6 +160,11 @@ class ExpressionRenderer:
             )
         return self._cache[key]
 
+    def _register_scale(self, register: ActiveRegister) -> float:
+        """The register's share of the amplitude: motion amplitude x reaction factor."""
+        p = register.params
+        return p.motion_amplitude * getattr(self.cfg.intensity_factor, p.reaction_intensity)
+
     def _start(self, state: AffectState, register: ActiveRegister, now: float) -> bool:
         prim = self._primitive(state.label, register.params.approach_allowed)
         amp = self.amplitude(register, state)
@@ -163,6 +173,7 @@ class ExpressionRenderer:
         if self._last and self.crossfade_s > 0:
             self._blend = (now, dict(self._last))
         self._player = Player(prim, now, source=SOURCE, amplitude=amp, priority=Priority.EXPRESSION)
+        self._scale_start = self._scale_now
         self._last_start, self.last_label, self.last_amplitude = now, state.label, amp
         return True
 
@@ -183,7 +194,14 @@ class ExpressionRenderer:
                     n: out.get(n, 0.0) * w + previous.get(n, 0.0) * (1 - w)
                     for n in out.keys() | previous.keys()
                 }
-        self._last = {n: self._clamp(n, v) for n, v in out.items()}
+        # The register can tighten while an expression plays (a child walks in): the body
+        # channel goes at once and the amplitude follows the register down, never up.
+        tighten = min(1.0, self._scale_now / self._scale_start) if self._scale_start > 0 else 1.0
+        self._last = {
+            n: self._clamp(n, v * tighten)
+            for n, v in out.items()
+            if self._approach or n != BODY_CHANNEL
+        }
         if self._player is None and self._blend is None:
             self._last = {}
         if not self._last:
