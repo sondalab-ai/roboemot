@@ -26,7 +26,10 @@ EN: dict[str, str] = {
     "err_route_unknown": "No such route.",
     "err_route_busy": "Another check is running. Try again in a moment.",
     "err_route_budget": "The daily token budget of the route is spent.",
-    "err_route_timeout": "The check took too long and was stopped.",
+    "route_error_timeout": "The check took too long and was stopped.",
+    "route_error_budget": "The daily token budget ran out during the check.",
+    "route_error_failed": "The check could not be completed.",
+    "route_running": "Check running...",
     "routes_intro": (
         "Conformance check of each LLM route: streaming, tool call, first-token latency and "
         "Italian. It is advisory: it does not enable or block a route, and it uses tokens from "
@@ -243,7 +246,10 @@ IT: dict[str, str] = {
     "err_route_unknown": "Modello sconosciuto.",
     "err_route_busy": "Un altro controllo è in corso. Riprova tra poco.",
     "err_route_budget": "Il budget giornaliero di token del modello è esaurito.",
-    "err_route_timeout": "Il controllo ha richiesto troppo tempo ed è stato fermato.",
+    "route_error_timeout": "Il controllo ha richiesto troppo tempo ed è stato fermato.",
+    "route_error_budget": "Il budget giornaliero di token è finito durante il controllo.",
+    "route_error_failed": "Non è stato possibile completare il controllo.",
+    "route_running": "Controllo in corso...",
     "routes_intro": (
         "Controllo di conformità di ogni modello LLM: streaming, chiamata di strumenti, latenza "
         "del primo token e italiano. È solo informativo: non abilita né blocca un modello e usa "

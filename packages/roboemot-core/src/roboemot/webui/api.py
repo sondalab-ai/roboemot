@@ -27,7 +27,7 @@ from http import HTTPStatus
 from http.cookies import CookieError, SimpleCookie
 from typing import Any, NoReturn, Protocol
 
-from roboemot.config.schema import RoboEmotConfig, WebUIConfig
+from roboemot.config.schema import ROUTE_NAME_MAX_CHARS, RoboEmotConfig, WebUIConfig
 from roboemot.llm.conformance import RouteBudgetExhausted
 from roboemot.registry.records import Consent, ConsentError
 
@@ -90,13 +90,13 @@ class EnrollmentPort(Protocol):
 class RoutesPort(Protocol):
     """What the web UI needs from ``roboemot.webui.routes.RouteChecker`` (SPEC 8).
 
-    ``check`` raises ``KeyError`` for an unknown route, ``RouteBusy``,
-    ``RouteBudgetExhausted`` or ``TimeoutError``. The UI copies what these return as is: they
-    hold no key, prompt or reply text.
+    ``start`` returns at once and raises ``KeyError`` for an unknown route, ``RouteBusy`` or
+    ``RouteBudgetExhausted``; the outcome shows up in ``list_routes``. The UI copies what
+    these return as is: they hold no key, prompt or reply text.
     """
 
     def list_routes(self) -> list[dict[str, Any]]: ...
-    def check(self, name: str) -> dict[str, Any]: ...
+    def start(self, name: str) -> None: ...
 
 
 class CataloguePort(Protocol):
@@ -299,7 +299,9 @@ class WebApi:
         }
         if (method, path) in simple:
             return simple[(method, path)](req)
-        check = re.fullmatch(r"/api/routes/([A-Za-z0-9_-]{1,64})/check", path)
+        check = re.fullmatch(
+            rf"/api/routes/([A-Za-z0-9_-]{{1,{ROUTE_NAME_MAX_CHARS}}})/check", path
+        )
         if method == "POST" and check:
             return self._route_check(check.group(1))
         confirm = re.fullmatch(r"/api/catalogue/([^/]+)/confirm", path)
@@ -601,19 +603,18 @@ class WebApi:
         return Response(HTTPStatus.OK, {"routes": self._routes_port().list_routes()})
 
     def _route_check(self, name: str) -> Response:
-        """Run the conformance test on one route; advisory, it does not enable or gate it."""
+        """Start the conformance test of one route in the background (it outlives the request
+        deadline); advisory, it does not enable or gate the route. The list shows the outcome."""
         port = self._routes_port()
         try:
-            report = port.check(name)
+            port.start(name)
         except KeyError as exc:
             raise ApiError(HTTPStatus.NOT_FOUND, "route_unknown") from exc
         except RouteBusy as exc:
             raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "route_busy") from exc
         except RouteBudgetExhausted as exc:
             raise ApiError(HTTPStatus.CONFLICT, "route_budget") from exc
-        except TimeoutError as exc:
-            raise ApiError(HTTPStatus.GATEWAY_TIMEOUT, "route_timeout") from exc
-        return Response(HTTPStatus.OK, report)
+        return Response(HTTPStatus.ACCEPTED, {"running": True})
 
     # ------------------------------------------------------------------ catalogue
 

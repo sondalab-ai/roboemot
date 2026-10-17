@@ -326,6 +326,11 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         """The vision backends (overridable: tests inject fakes)."""
         return default_stages(cfg, profile)
 
+    def route_check_router(self) -> Router | None:
+        """The router a web UI route check is charged to: the traits worker's (TODO.md: one
+        app-wide router), None before it exists, which gives the checker a private one."""
+        return self.traits_worker.router if self.traits_worker else None
+
     def start_webui(
         self, stack: ConfigStack, cfg: Any, manifest: Any, cleanup: ExitStack
     ) -> Server | None:
@@ -346,7 +351,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 routes=RouteChecker(
                     stack.effective,
                     paths.route_checks_path(cfg.data_dir),
-                    router=lambda: self.traits_worker.router if self.traits_worker else None,
+                    router=self.route_check_router,
                 ),
             )
         except Exception as exc:

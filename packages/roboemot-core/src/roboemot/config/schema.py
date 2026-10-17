@@ -21,6 +21,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ROUTE_NAME = re.compile(r"[A-Za-z0-9_-]+")
+ROUTE_NAME_MAX_CHARS = 64
 
 
 def param(
@@ -1881,8 +1882,11 @@ class LLMRoute(Strict):
 
     @model_validator(mode="after")
     def _check(self) -> LLMRoute:
-        if not ROUTE_NAME.fullmatch(self.name):
-            raise ValueError(f"route name {self.name!r}: use letters, digits, '_' or '-'")
+        if not ROUTE_NAME.fullmatch(self.name) or len(self.name) > ROUTE_NAME_MAX_CHARS:
+            raise ValueError(
+                f"route name {self.name!r}: use letters, digits, '_' or '-' "
+                f"(at most {ROUTE_NAME_MAX_CHARS})"
+            )
         if not self.base_url or not self.model:
             raise ValueError(f"route {self.name}: base_url and model are required")
         return self
@@ -1941,7 +1945,6 @@ class LLMCheckConfig(Strict):
             "e",
             "ma",
             "se",
-            "come",
             "più",
             "molto",
             "anche",

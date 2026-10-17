@@ -223,3 +223,32 @@ def test_italian_heuristic():
     )
     assert italian_ratio("Hello, today the sun is shining.", cfg.italian_stopwords)[1] == 0
     assert italian_ratio("", cfg.italian_stopwords) == (0, 0.0)
+
+
+async def test_stream_that_breaks_midway_fails_streaming():
+    class Cut(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield sse(text_chunks(["Ciao, ", "oggi "]))[: -len(b"data: [DONE]\n\n")]
+            raise httpx.ReadError("cut")
+
+    async def handler(request):
+        body = json.loads(request.content)
+        if "tools" in body:
+            return await Fake().handler(request)
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=Cut())
+
+    report = await check_route(
+        route(),
+        SafetyConfig(),
+        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    result = next(c for c in report.checks if c.name == "streaming")
+    assert result.status == FAIL and "stream broke after 2 chunks" in result.reason
+
+
+async def test_report_carries_model_and_endpoint_without_credentials():
+    r = LLMRoute(
+        name="lan", base_url="https://u:p@lan.local:8443/v1?k=1", model="m", api_key=SECRET_KEY
+    )
+    report = await run(Fake(), r)
+    assert (report.model, report.endpoint) == ("m", "lan.local:8443")

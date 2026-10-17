@@ -21,6 +21,7 @@ import datetime as dt
 import json
 import logging
 import re
+import threading
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -94,6 +95,7 @@ class Router:
     monitor: NetworkMonitor | None = None
     _budgets: dict[str, _Budget] = field(default_factory=dict)
     failures: list[tuple[str, str]] = field(default_factory=list)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
     def adopt_budgets(self, other: Router) -> None:
         """Keep ``other``'s daily token accounting (a rebuilt router after a config reload must
@@ -121,10 +123,11 @@ class Router:
         return b.used if b and b.day == self.today() else 0
 
     def _charge(self, name: str, tokens: int) -> None:
-        b = self._budgets.get(name)
-        if not b or b.day != self.today():
-            b = self._budgets[name] = _Budget(self.today())
-        b.used += tokens
+        with self._lock:  # the web UI's check thread charges next to the event loop
+            b = self._budgets.get(name)
+            if not b or b.day != self.today():
+                b = self._budgets[name] = _Budget(self.today())
+            b.used += tokens
 
     def _client(self, route: LLMRoute) -> AsyncOpenAI:
         key = route.api_key

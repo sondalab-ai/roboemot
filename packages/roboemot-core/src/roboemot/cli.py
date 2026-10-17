@@ -130,12 +130,20 @@ def _models(args: argparse.Namespace) -> int:
 def _llm(args: argparse.Namespace) -> int:
     """Run the conformance test (SPEC 8) against one configured route; exit 1 on any failure."""
     from .llm.conformance import check_route
+    from .llm.router import SECRET
 
     cfg = _stack(args).effective()
     route = next((r for r in cfg.llm_routes if r.name == args.route), None)
     if route is None:
         known = ", ".join(r.name for r in cfg.llm_routes) or "none configured"
         raise ValueError(f"no route named {args.route!r} (llm_routes: {known})")
+
+    if SECRET.match(route.api_key):
+        print(
+            f"warning: route {route.name}: api_key is a secret reference and no secret store is "
+            "wired: the request goes out with an empty key",
+            file=sys.stderr,
+        )
 
     async def run():
         return await asyncio.wait_for(

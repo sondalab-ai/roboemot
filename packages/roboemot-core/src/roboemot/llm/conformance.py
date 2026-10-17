@@ -19,6 +19,7 @@ import re
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from openai import APIConnectionError, APIStatusError, APITimeoutError
@@ -67,15 +68,17 @@ class CheckResult:
 class RouteReport:
     route: str
     model: str
+    endpoint: str
     checked_at: str
     checks: list[CheckResult] = field(default_factory=list)
     first_token_s: float | None = None
     tokens: int = 0
+    error: str = ""  # "timeout", "budget" or "failed": the check did not complete
 
     @property
     def ok(self) -> bool:
-        """No check failed (skipped checks do not count against the route)."""
-        return all(c.status != FAIL for c in self.checks)
+        """The check completed and no check failed (skips do not count against the route)."""
+        return not self.error and all(c.status != FAIL for c in self.checks)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self) | {"ok": self.ok}
@@ -96,6 +99,17 @@ class _Answer:
     @property
     def unreachable(self) -> bool:
         return isinstance(self.error, (APIConnectionError, OSError)) and not self.timed_out
+
+
+def route_endpoint(route: LLMRoute) -> str:
+    """``host`` or ``host:port`` of the route's base URL: no credentials, path or query."""
+    parts = urlsplit(route.base_url)
+    host = parts.hostname or ""
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    return f"{host}:{port}" if port else host
 
 
 def _why(exc: Exception) -> str:
@@ -138,6 +152,10 @@ async def _ask(
 def _streaming(ans: _Answer) -> CheckResult:
     if ans.error is not None and not ans.chunks:
         return CheckResult(STREAMING, FAIL, f"no streamed text: {_why(ans.error)}")
+    if ans.error is not None:
+        return CheckResult(
+            STREAMING, FAIL, f"stream broke after {ans.chunks} chunks: {_why(ans.error)}"
+        )
     if ans.chunks > 1:
         return CheckResult(STREAMING, PASS, f"{ans.chunks} chunks")
     return CheckResult(
@@ -153,7 +171,11 @@ def _latency(ans: _Answer, route: LLMRoute) -> CheckResult:
             return CheckResult(FIRST_TOKEN, FAIL, f"no content within {limit:g} s")
         return CheckResult(FIRST_TOKEN, SKIP, "no answer to measure")
     verdict = PASS if seconds <= limit else FAIL
-    return CheckResult(FIRST_TOKEN, verdict, f"{seconds:.2f} s of {limit:g} s allowed")
+    return CheckResult(
+        FIRST_TOKEN,
+        verdict,
+        f"{seconds:.2f} s of {limit:g} s allowed (one cold sample, TLS setup included)",
+    )
 
 
 def _italian(ans: _Answer, settings: LLMCheckConfig) -> CheckResult:
@@ -188,7 +210,9 @@ async def check_route(
     spent = router.used(route.name)
     if spent >= route.daily_token_budget:
         raise RouteBudgetExhausted(f"route {route.name}: daily token budget is spent")
-    report = RouteReport(route.name, route.model, now().isoformat(timespec="seconds"))
+    report = RouteReport(
+        route.name, route.model, route_endpoint(route), now().isoformat(timespec="seconds")
+    )
 
     ask = await _ask(router, route, [{"role": "user", "content": ITALIAN_PROMPT}], None)
     report.first_token_s = ask.timing.seconds
