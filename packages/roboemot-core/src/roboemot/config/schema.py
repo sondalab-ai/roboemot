@@ -1662,6 +1662,55 @@ class VoiceLimits(Strict):
     variability: tuple[float, float] = param((0.0, 1.0), "Allowed variability range")
 
 
+class VadConfig(Strict):
+    threshold: float = param(
+        0.5, "Speech probability at or above which a frame counts as speech", ge=0.05, le=0.95
+    )
+    off_margin: float = param(
+        0.15,
+        "Hysteresis: once speaking, a frame still counts as speech down to threshold minus this "
+        "(at least 0.01), so a dip inside a word does not start the end-silence timer",
+        ge=0,
+        le=0.5,
+    )
+    min_speech_ms: float = param(
+        200.0,
+        "Continuous speech needed before speech_start fires; shorter bursts (clicks, coughs) "
+        "are ignored. Rounded up to whole VAD frames",
+        unit="ms",
+        ge=32,
+        le=1000,
+    )
+    end_silence_ms: float = param(
+        500.0,
+        "Silence after the last speech frame that ends the utterance. It is the first term of "
+        "the end-of-speech to first-audio budget (SPEC 13: 1.5 s typical, 2.0 s limit, measured "
+        "from the last speech frame): 500 ms leaves about 1.0 s for ASR final, LLM first "
+        "sentence and TTS first chunk, and 2.0 s at the limit. Higher values wait for slower "
+        "speakers, such as children, at the cost of latency. Rounded up to whole VAD frames",
+        unit="ms",
+        ge=100,
+        le=3000,
+    )
+    pre_roll_ms: float = param(
+        300.0,
+        "Audio kept from before the detected start and handed to the consumer, so the first "
+        "syllable is not cut. Rounded up to whole VAD frames",
+        unit="ms",
+        ge=0,
+        le=2000,
+    )
+    max_utterance_s: float = param(
+        20.0,
+        "An utterance is cut after this long even if speech continues (bounds RAM and ASR "
+        "work); speech that continues starts a new utterance",
+        unit="s",
+        ge=1,
+        le=120,
+    )
+    threads: int = param(1, "ONNX Runtime threads for the Silero model", ge=1, le=4, restart=True)
+
+
 class VoiceConfig(Strict):
     enabled: bool = param(
         False,
@@ -1754,6 +1803,13 @@ class VoiceConfig(Strict):
         "unless_enrolled_in_view", "When the wake word is required"
     )
     active_asr_language: str = param("it", "ASR language when the speaker has no preference")
+    vad: VadConfig = param({}, "Voice activity detection and endpointing (SPEC 8 stage 2)")
+    models_dir: str = param(
+        "",
+        "Folder with the voice models (Silero VAD, Vosk, Piper); empty means voice-models/ in "
+        "the app data folder (data_dir)",
+        restart=True,
+    )
 
 
 # --------------------------------------------------------------------------- conversation, LLM
