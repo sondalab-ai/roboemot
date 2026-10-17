@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from roboemot.affect import AffectEngine
@@ -136,7 +137,7 @@ def test_idle_long_fires_once_and_rearms_on_interaction(rig):
     [
         ("percept.face", face(stamp=500.0, owner="p-1", new=False)),
         ("person.recognized", recognized()),
-        ("percept.utterance", object()),
+        ("percept.utterance", SimpleNamespace(addressed=True)),
     ],
 )
 def test_faces_and_recognition_count_as_interaction(rig, topic, payload):
@@ -424,3 +425,10 @@ def test_unknown_event_names_and_labels_are_rejected_at_config_load(tmp_path):
 def test_duplicate_rules_are_rejected():
     with pytest.raises(ValueError, match="same"):
         cfg_with({"event": "x"}, {"event": "x"})
+
+
+def test_unaddressed_speech_is_not_interaction(rig):
+    bus, adapter, events = rig
+    bus.publish("percept.utterance", SimpleNamespace(addressed=False), AP.idle_after_s - 1)
+    adapter.tick(AP.idle_after_s + 100)
+    assert "idle.long" in names(events)

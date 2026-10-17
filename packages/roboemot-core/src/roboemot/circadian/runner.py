@@ -124,8 +124,11 @@ class CircadianRunner:
         self._seen = self.clock.monotonic()
 
     def _on_utterance(self, msg: Message) -> None:
-        """Speech is a sign of people; the wake word (``wake_word`` in the payload) also wakes
-        the robot (SPEC 7A, Waking)."""
+        """Speech addressed to the robot is a sign of people, and the wake word (``wake_word``
+        in the payload) wakes it (SPEC 7A, Waking). Unaddressed speech (a television at night)
+        does neither."""
+        if not getattr(msg.payload, "addressed", False):
+            return
         self._seen = self.clock.monotonic()
         if getattr(msg.payload, "wake_word", False):
             self.wake()
