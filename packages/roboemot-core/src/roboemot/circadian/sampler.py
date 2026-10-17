@@ -28,11 +28,10 @@ import numpy as np
 
 from ..config.schema import CircadianConfig, LightConfig
 from .light import COLOR_NDIM, Level, LightEstimator, LightReading
+from .model import MINUTES_PER_HOUR, SECONDS_PER_MINUTE
 
 log = logging.getLogger(__name__)
 
-SECONDS_PER_MINUTE = 60.0
-MINUTES_PER_HOUR = 60.0
 JOIN_GRACE_S = 5.0
 
 
@@ -184,6 +183,10 @@ class LightSampler:
         return self._noise
 
     def _add(self, r: LightReading, now: float) -> None:
+        if self._last is not None and now - self._last > self.cfg.stale_s:
+            # A gap longer than stale_s: whatever was confirmed before is history, and a streak
+            # across the gap proves nothing. Confirm anew.
+            self._confirmed, self._streak_level = None, None
         self._last = now
         self.samples += 1
         minute = int(now // SECONDS_PER_MINUTE)
@@ -244,6 +247,10 @@ class IdleLightReader:
         self._thread: threading.Thread | None = None
         self.reads = 0
 
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
     def start(self) -> None:
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, name="roboemot-light", daemon=True)
@@ -253,6 +260,8 @@ class IdleLightReader:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=self.sampler.circadian.idle_poll_s * 2 + JOIN_GRACE_S)
+            if self._thread.is_alive():  # a camera read stuck in the SDK cannot be interrupted
+                log.warning("light reader did not stop in time")
 
     def step(self) -> bool:
         """One check: read and measure a frame if one is due. True when it measured."""

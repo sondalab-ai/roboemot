@@ -528,6 +528,14 @@ class CircadianConfig(Strict):
         ge=0.1,
         le=5,
     )
+    stretch_cooldown_s: float = param(
+        600.0,
+        "Least time between two waking stretches, so people coming and going at night do not "
+        "replay it",
+        unit="s",
+        ge=0,
+        le=86400,
+    )
     yawn_interval_s: float = param(
         120.0, "Mean time between two yawns while drowsy", unit="s", ge=5, le=3600
     )

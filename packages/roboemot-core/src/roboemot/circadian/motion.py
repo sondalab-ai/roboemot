@@ -49,6 +49,9 @@ class CircadianMotion:
         self.dofs = dofs
         self.rng = rng or random.Random()  # noqa: S311 (jitter, not security)
         self.minor_factor = 1.0
+        self._scale_now = 1.0  # the register's motion amplitude now
+        self._scale_start = 1.0  # the same when the playing primitive started
+        self._amp = 1.0  # amplitude the playing primitive started with
         self._player: Player | None = None
         self._playing = ""
         self._next_yawn: float | None = None
@@ -72,6 +75,19 @@ class CircadianMotion:
             else None
         )
 
+    def set_register(self, motion_amplitude: float, max_amplitude: float) -> None:
+        """The register's motion amplitude and ``expression.max_amplitude`` in effect now; call
+        it every tick. Yawn and stretch start at ``min(max_amplitude, motion_amplitude)`` and,
+        like an expression, follow a stricter register down while they play, never up."""
+        self._scale_now = motion_amplitude
+        self.max_amplitude = max_amplitude
+
+    max_amplitude = 2.0
+
+    def reset(self) -> None:
+        """Stop any yawn or stretch and forget the yawn schedule (the rhythm was switched off)."""
+        self._player, self._playing, self._next_yawn = None, "", None
+
     def set_minor_factor(self, factor: float) -> None:
         """``safety.minor_motion_factor`` while a minor is present, else 1.0 (SPEC 12)."""
         self.minor_factor = factor
@@ -89,8 +105,10 @@ class CircadianMotion:
         return True
 
     def _play(self, name: str, prim: Primitive, now: float) -> None:
+        self._amp = max(0.0, min(self.max_amplitude, self._scale_now))
+        self._scale_start = self._scale_now
         self._player = Player(
-            prim, now, source=FX_SOURCE, amplitude=1.0, priority=Priority.EXPRESSION
+            prim, now, source=FX_SOURCE, amplitude=self._amp, priority=Priority.EXPRESSION
         )
         self._playing = name
 
@@ -128,7 +146,12 @@ class CircadianMotion:
             )
         cmd = self._player.command(now) if self._player is not None else None
         if cmd is not None:
-            targets = {n: self._clamp(n, v) for n, v in cmd.targets.items()}
+            tighten = (
+                min(1.0, self._scale_now / self._scale_start) if self._scale_start > 0 else 1.0
+            )
+            if self._amp > self.max_amplitude:  # the ceiling was lowered by a reload
+                tighten = min(tighten, self.max_amplitude / self._amp)
+            targets = {n: self._clamp(n, v * tighten) for n, v in cmd.targets.items()}
             out.append(replace(cmd, targets=targets, expires=now + self.cfg.command_ttl_s))
         return out
 

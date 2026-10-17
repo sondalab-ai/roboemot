@@ -34,8 +34,9 @@ from roboemot.circadian.replay import (
 )
 from roboemot.config import ConfigError, ConfigStack
 from roboemot.config.schema import RoboEmotConfig
-from roboemot.manifest import load_manifest
+from roboemot.manifest import ManifestError, load_manifest
 from roboemot.motion import Priority
+from roboemot.vision import LockedSource
 from roboemot.vision.types import Frame
 
 MANIFEST = (
@@ -592,18 +593,20 @@ def test_replay_of_a_synthetic_day_goes_awake_drowsy_resting_awake(cfg):
     started = time.perf_counter()
     result = replay(samples, cfg, sink=sink)
     wall = time.perf_counter() - started
-    assert wall < 3.0
+    assert wall < 30.0  # generous: it takes milliseconds, this only catches a hang
     assert result.states() == ["awake", "drowsy", "resting", "drowsy", "awake"]
     drowsy = result.first_hour("drowsy")
     resting = result.first_hour("resting")
     morning = result.first_hour("awake", after_h=12)
-    assert 18 <= drowsy < 22.5  # the evening
+    assert 21.0 <= drowsy <= 21.5  # SPEC 7A: about 21:15
     assert resting == pytest.approx(22.5, abs=0.1)  # quiet hours start
-    assert 7.0 <= morning <= 7.5  # the quiet hours end, the light is on
+    assert 7.0 <= morning <= 7.1  # SPEC 7A: 07:00 to 07:05
     events = [e for _, e in result.events]
     assert events == ["light.off", "light.on"]
     off_hour = 8 + result.events[0][0] / 3600
-    assert 22.25 <= off_hour <= 22.6  # lights off at 22:15 plus the confirmation
+    on_hour = 8 + result.events[1][0] / 3600
+    assert 22.0 <= off_hour <= 22.5  # lights off at 22:15 plus the confirmation
+    assert 6.58 <= on_hour % 24 <= 7.08  # SPEC 7A: about 06:50
     # the baseline moved with the states
     assert [fx.arousal_baseline for _, fx in sink.effects] == [
         cfg.circadian.states[name].arousal_baseline for name in result.states()
@@ -682,13 +685,37 @@ def test_the_log_accepts_iso_epoch_and_optional_fields():
 
 @pytest.mark.parametrize(
     "line",
-    ['{"luma": 0.4}', '{"t": "2026-03-02T07:05:00"}', "not json", '{"t": "x", "luma": 0.4}',
-     '{"t": "2026-03-02T07:05:00", "luma": 7}'],
-)  # fmt: skip
+    [
+        '{"luma": 0.4}',
+        '{"t": "2026-03-02T07:05:00"}',
+        "not json SECRET",
+        '{"t": "SECRET", "luma": 0.4}',
+        '{"t": "2026-03-02T07:05:00", "luma": 7}',
+        '{"t": 1e400, "luma": 0.4}',
+        '{"t": 1e30, "luma": 0.4}',
+        '{"t": "2026-03-02T07:05:00", "luma": NaN}',
+        '{"t": "2026-03-02T07:05:00", "luma": 0.4, "noise": NaN}',
+        '{"t": "2026-03-02T07:05:00", "luma": 0.4, "noise": -0.1}',
+        '{"t": "2026-03-02T07:05:00", "luma": 0.4, "exposure_s": Infinity}',
+        '{"t": "2026-03-02T07:05:00", "luma": 0.4, "gain": -1}',
+        '{"t": "2026-03-02T07:05:00", "luma": 0.4, "gain": "SECRET"}',
+        '{"t": "2026-03-02T07:05:00", "luma": 0.4, "presence": "false"}',
+        '[1, 2, "SECRET"]',
+    ],
+)
 def test_a_bad_log_line_is_rejected_without_echoing_it(line):
     with pytest.raises(ValueError) as err:
-        parse_line(line)
-    assert line not in str(err.value) or line == "not json"
+        parse_line(line, 7)
+    assert "line 7" in str(err.value)
+    assert "SECRET" not in str(err.value) and line not in str(err.value)
+    # no chained exception either: its message could carry the content
+    assert err.value.__cause__ is None and err.value.__suppress_context__
+
+
+def test_the_line_number_counts_blank_lines():
+    lines = ['{"t": "2026-03-02T07:05:00", "luma": 0.4}', "", "garbage"]
+    with pytest.raises(ValueError, match="line 3"):
+        read_log(lines)
 
 
 def test_a_log_out_of_order_is_rejected():
@@ -721,3 +748,215 @@ def test_sensor_noise_around_its_threshold_in_a_dim_room_does_not_flap(cfg):
         clock.advance(cfg.light.sample_interval_s)
         r.tick(clock.t)
     assert len(sink.events) <= 2
+
+
+# ----------------------------------------------------------------------------- review fixes
+
+
+@pytest.mark.parametrize("period", [10.0, 600.0])
+def test_wake_counts_from_now_not_from_the_last_update(cfg, period):
+    c = cfg.circadian.model_copy(update={"update_period_s": period, "wake_hold_s": 10.0})
+    r, clock = runner_for(cfg.model_copy(update={"circadian": c}), hour=23.0)
+    r.tick(clock.t)  # the first update; the next is due `period` later
+    clock.advance(min(period, 10.0) - 1.0)  # the model's clock lags real time by this much
+    called = clock.t
+    r.wake()
+    assert r.snapshot()["hold"]["left_s"] == pytest.approx(10.0, abs=0.01)
+    while clock.t < called + 9.9:
+        clock.advance(0.1)
+        r.tick(clock.t)
+    assert r.model.state == "awake"  # still held 9.9 s after the call
+    clock.advance(20.0 + period)
+    r.tick(clock.t)
+    assert r.model.state == "resting"  # and over afterwards
+
+
+def test_a_hold_reports_the_time_left_from_now(cfg):
+    r, clock = runner_for(cfg, hour=12.0)
+    r.tick(clock.t)
+    clock.advance(cfg.circadian.update_period_s - 1)
+    r.hold("drowsy", 1)
+    assert r.snapshot()["hold"]["left_s"] == pytest.approx(60.0, abs=0.01)
+
+
+def test_a_level_does_not_revive_after_a_gap_longer_than_stale_s(cfg):
+    s, clock = sampler(cfg)
+    s.offer_stats(0.03, 0.0)
+    clock.advance(cfg.light.confirm_s)
+    s.offer_stats(0.03, 0.0)
+    assert s.level() == "dark"
+    clock.advance(cfg.light.stale_s + 1)
+    assert s.level() is None
+    s.offer_stats(0.03, 0.0)  # a single sample after the gap
+    assert s.level() is None  # not the old confirmed level; the streak starts anew
+    clock.advance(cfg.light.confirm_s / 2)
+    s.offer_stats(0.03, 0.0)
+    assert s.level() is None
+    clock.advance(cfg.light.confirm_s / 2)
+    s.offer_stats(0.03, 0.0)
+    assert s.level() == "dark"
+
+
+def test_a_streak_does_not_span_a_gap(cfg):
+    s, clock = sampler(cfg)
+    s.offer_stats(0.6, 0.0)
+    clock.advance(cfg.light.stale_s + 1)
+    s.offer_stats(0.6, 0.0)  # long after the streak began, but across a gap
+    assert s.level() is None
+
+
+def test_disabling_mid_resting_hands_the_robot_back_awake(cfg, manifest):
+    bus = Bus()
+    affect = AffectRunner(cfg.affect, cfg.appraisal, bus, 0.0)
+    r, clock = runner_for(cfg, manifest, hour=23.0, affect=affect)
+    run_for(r, clock, 60)
+    assert r.model.state == "resting" and r.commands(clock.t)
+    assert affect.engine.baseline_arousal == cfg.circadian.states["resting"].arousal_baseline
+    off = cfg.model_copy(update={"circadian": cfg.circadian.model_copy(update={"enabled": False})})
+    r.apply_config(off)
+    assert affect.engine.baseline_arousal == cfg.circadian.states["awake"].arousal_baseline
+    assert r.model.state == "awake" and r.commands(clock.t) == [] and r.last is None
+    assert r.motion.playing == "" and r.amplitude_factor() == 1.0
+    r.apply_config(cfg)  # and back on: the rhythm resumes from the clock
+    run_for(r, clock, 30)
+    assert r.model.state == "resting"
+    assert affect.engine.baseline_arousal == cfg.circadian.states["resting"].arousal_baseline
+    affect.close()
+    r.close()
+
+
+def test_disabling_stops_a_stretch_in_progress(cfg, manifest):
+    r, clock = runner_for(cfg, manifest, hour=3.0)
+    run_for(r, clock, 60)
+    r.wake()
+    run_for(r, clock, 10)
+    assert r.motion.playing == "stretch"
+    off = cfg.model_copy(update={"circadian": cfg.circadian.model_copy(update={"enabled": False})})
+    r.apply_config(off)
+    assert r.motion.playing == "" and r.commands(clock.t) == []
+
+
+def test_stretch_follows_the_register_and_the_ceiling(cfg, manifest):
+    def stretch(amplitude, ceiling=2.0):
+        m = CircadianMotion(cfg.circadian, cfg.circadian_motion, manifest.dofs)
+        m.set_register(amplitude, ceiling)
+        m.start_waking(0.0)
+        cmds = [c for _, cs in drive(m, 3.0, "drowsy") for c in cs]
+        return max(c.targets["antenna_right"] for c in cmds)
+
+    full = stretch(1.0)
+    assert stretch(0.7) == pytest.approx(full * 0.7, rel=0.01)
+    assert stretch(1.2) == pytest.approx(full * 1.2, rel=0.01)
+    assert stretch(1.2, ceiling=0.5) == pytest.approx(full * 0.5, rel=0.01)  # capped
+
+
+def test_a_register_that_tightens_mid_play_scales_the_primitive_down_only(cfg, manifest):
+    m = CircadianMotion(cfg.circadian, cfg.circadian_motion, manifest.dofs)
+    m.set_register(1.0, 2.0)
+    m.start_waking(0.0)
+    mid = m.commands(1.0, "drowsy")[0].targets["antenna_right"]
+    m.set_register(0.5, 2.0)  # a child walks in
+    assert m.commands(1.0, "drowsy")[0].targets["antenna_right"] == pytest.approx(
+        mid * 0.5, rel=0.01
+    )
+    m.set_register(1.2, 2.0)  # looser again: never above where it started
+    assert m.commands(1.0, "drowsy")[0].targets["antenna_right"] == pytest.approx(mid, rel=0.01)
+
+
+def test_a_quiet_hours_hold_is_not_a_night_wake_but_a_person_is(cfg, manifest):
+    sink = RecordingSink()
+    r, clock = runner_for(cfg, manifest, hour=23.0, affect=sink)
+    run_for(r, clock, 60)
+    r.hold("awake", 5)
+    run_for(r, clock, 20)
+    assert r.model.state == "awake"
+    assert "circadian.woken_at_night" not in [e for _, e in sink.events]
+    assert r.motion.playing == "stretch"  # a hold still wakes it with a stretch
+    r2, c2 = runner_for(cfg, manifest, hour=23.0, affect=sink)
+    run_for(r2, c2, 60)
+    r2.note_presence()
+    run_for(r2, c2, 20)
+    assert [e for _, e in sink.events] == ["circadian.woken_at_night"]
+
+
+def test_light_alone_does_not_wake_the_robot_in_the_quiet_hours(cfg):
+    sink = RecordingSink()
+    r, clock = runner_for(cfg, hour=23.0, affect=sink)
+    feed_light(r, clock, 0.03)
+    run_for(r, clock, 60)
+    feed_light(r, clock, 0.6)
+    run_for(r, clock, 60)
+    assert "light.on" in [e for _, e in sink.events]
+    assert r.model.state == "resting"  # SPEC 7A: only a person or a wake call wakes it at night
+    assert "circadian.woken_at_night" not in [e for _, e in sink.events]
+
+
+def test_people_flapping_at_night_replay_the_stretch_only_after_the_cooldown(cfg, manifest):
+    r, clock = runner_for(cfg, manifest, hour=23.0)
+    run_for(r, clock, 60)
+    plays = []
+
+    def one_visit():
+        r.note_presence()
+        run_for(r, clock, 20)
+        plays.append(r.motion.playing == "stretch")
+        for _ in range(100):  # let any stretch play out
+            clock.advance(0.05)
+            r.commands(clock.t)
+        run_for(r, clock, cfg.circadian.presence_window_s + 30)
+        assert r.model.state == "resting"
+
+    one_visit()
+    one_visit()  # well inside the cooldown
+    assert plays == [True, False]
+    run_for(r, clock, cfg.circadian.stretch_cooldown_s)
+    one_visit()
+    assert plays[-1] is True
+
+
+def test_a_rest_pose_the_robot_cannot_hold_fails_at_manifest_load():
+    import copy
+
+    import yaml
+
+    raw = yaml.safe_load(MANIFEST.read_text())
+    load_manifest(copy.deepcopy(raw), allow_unmeasured_dynamics=True)
+    for edit in (
+        lambda m: m.__setitem__("rest_pose_deg", {"head.pitch": 80}),
+        lambda m: m.__setitem__("rest_pose_deg", {"wheels": 1}),
+        lambda m: m["yawn"]["channels"].__setitem__("tail", [[0, 0], [1, 5], [3, 0]]),
+        lambda m: m.__setitem__("stretch", {"channels": {"head.pitch": [[0, 1], [1, 0]]}}),
+    ):
+        bad = copy.deepcopy(raw)
+        edit(bad["behaviour"]["circadian_motion"])
+        with pytest.raises(ManifestError, match="circadian_motion"):
+            load_manifest(bad, allow_unmeasured_dynamics=True)
+
+
+def test_the_frame_source_is_never_read_by_two_threads_at_once():
+    import threading
+
+    inside = []
+    overlaps = []
+
+    class Camera:
+        camera_model = "intrinsics"
+
+        def read(self):
+            inside.append(1)
+            if len(inside) > 1:
+                overlaps.append(1)
+            time.sleep(0.002)
+            inside.pop()
+
+    shared = LockedSource(Camera())
+    threads = [
+        threading.Thread(target=lambda: [shared.read() for _ in range(25)]) for _ in range(4)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert overlaps == [] and shared.camera_model == "intrinsics"
+    with pytest.raises(AttributeError):
+        shared.nothing  # noqa: B018

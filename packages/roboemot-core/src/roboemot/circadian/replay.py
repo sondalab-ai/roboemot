@@ -14,6 +14,7 @@ with noise) for tests and for the exit check of milestone M2.
 from __future__ import annotations
 
 import json
+import math
 import random
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -26,8 +27,8 @@ from ..config.schema import RoboEmotConfig, StateEffects
 from .model import MINUTES_PER_HOUR, SECONDS_PER_HOUR, CircadianState
 from .runner import CircadianRunner
 
-SECONDS_PER_MINUTE = 60.0
 LOG_DIGITS = 4
+FIELDS = ("luma", "noise", "exposure_s", "gain", "presence", "t")
 SMOOTH_A = 3
 
 # The synthetic scenario: fixed facts of a made-up household, not tunable robot behaviour.
@@ -63,34 +64,62 @@ class LightSample:
 def parse_time(value: str | float) -> datetime:
     """ISO 8601 text as local wall-clock time (a UTC offset in it is ignored: the log holds the
     hour the robot's clock showed), or a number as epoch seconds in the machine's time zone."""
+    if isinstance(value, bool):
+        raise ValueError("t must be text or a number")
     if isinstance(value, (int, float)):
         return datetime.fromtimestamp(value)
+    if not isinstance(value, str):
+        raise ValueError("t must be text or a number")
     return datetime.fromisoformat(value).replace(tzinfo=None)
 
 
-def parse_line(line: str) -> LightSample:
-    """One JSONL line; raises ``ValueError`` naming the problem (never echoes the content)."""
+def _number(raw: dict[str, Any], key: str, default: float | None) -> float | None:
+    """A finite, non-negative number field (None when absent or null and ``default`` is None)."""
+    value = raw.get(key)
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{key} must be a number")
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"{key} must be finite and not negative")
+    return float(value)
+
+
+def parse_line(line: str, number: int | None = None) -> LightSample:
+    """One JSONL line; raises ``ValueError`` naming the field and, if given, the line number.
+
+    The message and the exception chain never carry the line's content (``from None``)."""
+    where = f"light log line {number}" if number is not None else "light log line"
     try:
         raw = json.loads(line)
+        if not isinstance(raw, dict):
+            raise ValueError("not an object")
+        luma = _number(raw, "luma", None)
+        if luma is None or luma > 1.0:
+            raise ValueError("luma must be a number in 0..1")
+        presence = raw.get("presence", False)
+        if not isinstance(presence, bool):
+            raise ValueError("presence must be true or false")
         sample = LightSample(
             parse_time(raw["t"]),
-            float(raw["luma"]),
-            float(raw.get("noise") or 0.0),
-            None if raw.get("exposure_s") is None else float(raw["exposure_s"]),
-            None if raw.get("gain") is None else float(raw["gain"]),
-            bool(raw.get("presence", False)),
+            luma,
+            _number(raw, "noise", 0.0) or 0.0,
+            _number(raw, "exposure_s", None),
+            _number(raw, "gain", None),
+            presence,
         )
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError(f"bad light log line ({type(exc).__name__})") from exc
-    if not 0.0 <= sample.luma <= 1.0:
-        raise ValueError("bad light log line: luma outside 0..1")
+    except (KeyError, TypeError, ValueError, OverflowError, OSError) as exc:
+        reason = f"missing {exc}" if isinstance(exc, KeyError) else type(exc).__name__
+        if isinstance(exc, ValueError) and not isinstance(exc, json.JSONDecodeError):
+            reason = str(exc) if str(exc).split(" ")[0] in FIELDS else type(exc).__name__
+        raise ValueError(f"bad {where}: {reason}") from None
     return sample
 
 
 def read_log(source: str | Path | Iterable[str]) -> list[LightSample]:
     """Samples of a JSONL file (or of its lines), blank lines skipped, in time order."""
     lines = Path(source).read_text().splitlines() if isinstance(source, (str, Path)) else source
-    out = [parse_line(line) for line in lines if line.strip()]
+    out = [parse_line(line, i) for i, line in enumerate(lines, 1) if line.strip()]
     if any(b.when < a.when for a, b in zip(out, out[1:], strict=False)):
         raise ValueError("light log is not in time order")
     return out

@@ -23,6 +23,7 @@ from ..config.schema import CircadianConfig, StateEffects
 
 State = Literal["awake", "drowsy", "resting"]
 Light = Literal["dark", "dim", "bright"]
+SECONDS_PER_MINUTE = 60.0
 SECONDS_PER_HOUR = 3600.0
 HOURS_PER_DAY = 24.0
 MINUTES_PER_HOUR = 60.0
@@ -77,20 +78,26 @@ class CircadianModel:
 
     # ---- inputs
 
-    def hold(self, state: State, seconds: float) -> None:
-        """App override, e.g. ``hold("awake", 1800)`` during a party (SPEC 7A API)."""
-        self._hold = (state, self._elapsed + seconds)
+    def hold(self, state: State, seconds: float, lag_s: float = 0.0) -> None:
+        """App override, e.g. ``hold("awake", 1800)`` during a party (SPEC 7A API).
 
-    def hold_remaining(self) -> tuple[State, float] | None:
-        """The active hold as (state, seconds left), or None."""
-        if self._hold and self._elapsed < self._hold[1]:
-            return self._hold[0], self._hold[1] - self._elapsed
-        return None
+        ``lag_s`` is the time since the last update: the model's clock stands that far behind
+        real time, and the hold counts from now, not from then."""
+        self._hold = (state, self._elapsed + lag_s + seconds)
 
-    def wake(self, seconds: float | None = None) -> None:
+    def clear_hold(self) -> None:
+        """Drop any hold (the rhythm was switched off)."""
+        self._hold = None
+
+    def hold_remaining(self, lag_s: float = 0.0) -> tuple[State, float] | None:
+        """The active hold as (state, seconds left), or None; ``lag_s`` as in :meth:`hold`."""
+        left = self._hold[1] - self._elapsed - lag_s if self._hold else 0.0
+        return (self._hold[0], left) if self._hold and left > 0 else None
+
+    def wake(self, seconds: float | None = None, lag_s: float = 0.0) -> None:
         """Wake word or direct address while resting: awake for ``wake_hold_s``; C is not
-        reset (SPEC 7A, Waking)."""
-        self.hold("awake", self.cfg.wake_hold_s if seconds is None else seconds)
+        reset (SPEC 7A, Waking). ``lag_s`` as in :meth:`hold`."""
+        self.hold("awake", self.cfg.wake_hold_s if seconds is None else seconds, lag_s)
 
     def update(
         self, hour: float, dt_s: float, *, light: Light | None = None, presence_active: bool = False

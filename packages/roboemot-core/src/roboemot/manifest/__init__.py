@@ -323,7 +323,35 @@ def load_manifest(
         if target not in dofs:
             raise ManifestError(f"retargeting references unknown dof {target}")
 
+    _check_circadian_motion(model.behaviour.get("circadian_motion"), dofs)
     return Manifest(model, dofs, list(model.constraints))
+
+
+def _check_circadian_motion(raw: Any, dofs: dict[str, Dof]) -> None:
+    """Fail at load, not at the first yawn: the circadian poses and primitives (SPEC 7A) must name
+    angle dofs this robot has, and a rest pose must lie inside their limits (no silent clamp)."""
+    if not raw:
+        return
+    from ..config.schema import CircadianMotion
+
+    try:
+        motion = CircadianMotion.model_validate(raw)
+    except Exception as exc:
+        raise ManifestError(f"behaviour.circadian_motion: {exc}") from exc
+    named = {f"rest_pose_deg.{n}": n for n in motion.rest_pose_deg}
+    for label in ("yawn", "stretch"):
+        entry = getattr(motion, label)
+        if entry is not None:
+            named |= {f"{label}.{n}": n for n in entry.channels}
+    for where, name in named.items():
+        dof = dofs.get(name)
+        if dof is None or dof.kind != "angle":
+            raise ManifestError(f"behaviour.circadian_motion.{where}: no angle dof {name!r}")
+    for name, deg in motion.rest_pose_deg.items():
+        if not dofs[name].min <= _deg(deg) <= dofs[name].max:
+            raise ManifestError(
+                f"behaviour.circadian_motion.rest_pose_deg.{name}: {deg} deg is outside the limits"
+            )
 
 
 # ----------------------------------------------------------------------------- negotiation

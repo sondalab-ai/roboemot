@@ -105,9 +105,9 @@ def test_a_dark_room_late_in_the_evening_puts_the_robot_to_rest(data, fed, monke
         rest = next(c for c in reversed(fed) if c.source == REST_SOURCE)
         assert rest.priority == Priority.IDLE and rest.targets["head.pitch"] > 0
         fed.clear()
-        time.sleep(0.5)
+        # held, not released: the posture keeps being fed, and nothing else moves the head
+        assert wait_for(lambda: sum(c.source == REST_SOURCE for c in fed) >= 5)
         assert not any(c.source in ("idle", "idle-additive") for c in fed)
-        assert any(c.source == REST_SOURCE for c in fed)  # held, not released
         # the app API: wake the robot; it stretches and the posture is released
         seen: list[str] = []  # the wake hold is 300 virtual s, a fraction of a real second
         app.bus.subscribe("circadian.state", lambda m: seen.append(m.payload.state))
@@ -143,7 +143,7 @@ def test_without_vision_the_idle_reader_senses_the_light(data, monkeypatch):  # 
     assert not errors and not thread.is_alive()
 
 
-def test_clock_only_never_reads_the_camera(data, monkeypatch):  # noqa: F811
+def test_clock_only_never_reads_the_camera(data, fed, monkeypatch):  # noqa: F811
     monkeypatch.setattr(DarkSource, "reads", 0)
     (data / "app.yaml").write_text(
         (data / "app.yaml").read_text() + "circadian:\n  light_source: clock_only\n"
@@ -152,8 +152,9 @@ def test_clock_only_never_reads_the_camera(data, monkeypatch):  # noqa: F811
     stop, thread, errors = start(app)
     try:
         assert wait_for(lambda: app.diagnostics is not None)
-        assert wait_for(lambda: section(app).get("state") is not None)
-        time.sleep(1.0)
+        assert wait_for(lambda: any(c.source == "idle" for c in fed))  # a full app tick has run
+        assert section(app).get("state") is not None
+        assert app.light_reader is not None and not app.light_reader.running
         assert DarkSource.reads == 0
         assert section(app)["light"]["samples"] == 0
     finally:
@@ -170,7 +171,8 @@ def test_disabled_circadian_leaves_the_robot_awake(data, fed):  # noqa: F811
     stop, thread, errors = start(app)
     try:
         assert wait_for(lambda: app.diagnostics is not None)
-        time.sleep(1.0)
+        assert wait_for(lambda: any(c.source == "idle" for c in fed))  # a full app tick has run
+        assert not app.light_reader.running
         assert app.circadian is None
         assert section(app)["enabled"] is False and section(app)["state"] == "awake"
         assert not any(c.source == REST_SOURCE for c in fed)
@@ -271,3 +273,65 @@ def test_resting_feeds_no_idle_motion_and_clears_it():
     app_module.feed_idle(loop, cfg, 1.2, True, 0.0)
     assert not {c.source for c in loop.core.arbiter.active(1.2)} & {"idle", "idle-additive"}
     assert math.isfinite(app_module.idle_command(cfg, 1.0, 0.6).targets["head.pitch"])
+
+
+def test_the_hold_and_wake_calls_refuse_after_the_app_stopped(data):  # noqa: F811
+    app = new_app(app_module.RoboEmotApp)
+    stop, thread, errors = start(app)
+    assert wait_for(lambda: app.circadian_runner is not None)
+    stop.set()
+    thread.join(15)
+    assert not errors
+    with pytest.raises(RuntimeError, match="not running"):
+        app.hold("awake", 5)
+    with pytest.raises(RuntimeError, match="not running"):
+        app.wake()
+
+
+REAL_CLOCK = app_module.RoboEmotApp.make_circadian_clock  # before the conftest fixture patches it
+
+
+def test_the_default_clock_reads_the_local_hour(data, monkeypatch):  # noqa: F811
+    """The shipped path: ``SystemClock`` with only the wall-clock hour stubbed (23:10, quiet
+    hours) puts the robot to rest, with nothing else faked."""
+    import datetime as dt
+
+    from roboemot.circadian import runner as runner_module
+
+    class Late(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 3, 2, 23, 10, 0)
+
+    monkeypatch.setattr(app_module.RoboEmotApp, "make_circadian_clock", REAL_CLOCK)
+    monkeypatch.setattr(runner_module, "datetime", Late)
+    app = new_app(app_module.RoboEmotApp)
+    stop, thread, errors = start(app)
+    try:
+        assert wait_for(lambda: app.diagnostics is not None)
+        assert wait_for(lambda: section(app).get("state") == "resting")
+        assert section(app)["hour"] == pytest.approx(23 + 10 / 60, abs=0.01)
+    finally:
+        stop.set()
+        thread.join(15)
+    assert not errors
+
+
+def test_the_stretch_follows_the_register_amplitude_and_the_minor_cap(data, fed):  # noqa: F811
+    """Nobody is in view: the fail-closed ``unknown`` register (0.7x) and the minor caps are on,
+    so the 25 degree antenna stretch peaks at 0.7 x 25 degrees."""
+    app = new_app(app_module.RoboEmotApp)
+    stop, thread, errors = start(app)
+    try:
+        assert wait_for(lambda: app.circadian_runner is not None and app.diagnostics is not None)
+        app.hold("resting", 5)
+        assert wait_for(lambda: section(app)["state"] == "resting")
+        app.hold("awake", 5)
+        assert wait_for(lambda: any(c.source == FX_SOURCE for c in fed))
+        assert wait_for(lambda: section(app)["waking"] is False, timeout=10)
+        peak = max(c.targets["antenna_right"] for c in fed if c.source == FX_SOURCE)
+        assert peak == pytest.approx(math.radians(25) * 0.7, rel=0.05)
+    finally:
+        stop.set()
+        thread.join(15)
+    assert not errors

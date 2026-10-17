@@ -8,7 +8,8 @@ the presence cue, and on a state change it
   level changes),
 - moves the affect engine's arousal baseline (``AffectRunner.set_circadian``),
 - starts the waking stretch when the robot leaves ``resting`` and, if that is inside the quiet
-  hours, raises the appraisal event ``circadian.woken_at_night``.
+  hours because of a person or a wake call (not an app hold), raises the appraisal event
+  ``circadian.woken_at_night``. The stretch plays at most every ``circadian.stretch_cooldown_s``.
 
 A confirmed light level that rises from dark raises ``light.on``, one that falls to dark
 ``light.off``; the first level seen raises nothing. ``light_source: clock_only`` never touches
@@ -35,6 +36,7 @@ from .model import (
     HOURS_PER_DAY,
     MINUTES_PER_HOUR,
     SECONDS_PER_HOUR,
+    SECONDS_PER_MINUTE,
     CircadianModel,
     CircadianState,
     State,
@@ -45,7 +47,6 @@ from .sampler import LightSampler
 
 TOPIC = "circadian.state"
 STATES = ("awake", "drowsy", "resting")
-SECONDS_PER_MINUTE = 60.0
 REPORT_DIGITS = 3
 
 
@@ -106,6 +107,8 @@ class CircadianRunner:
         self._applied: State | None = None
         self._level: str | None = None
         self._force = False
+        self._cause: str | None = None  # "wake" or "hold" since the last update
+        self._last_stretch = -math.inf
         self.last: CircadianState | None = None
         self.woken_at_night = 0  # count, for the debug report
         self._unsubscribe = [
@@ -136,25 +139,48 @@ class CircadianRunner:
         if not (math.isfinite(minutes) and 0 < minutes <= top):
             raise ValueError(f"minutes must be in (0, {top}], got {minutes}")
         with self._lock:
-            self.model.hold(state, minutes * SECONDS_PER_MINUTE)  # type: ignore[arg-type]
+            self.model.hold(state, minutes * SECONDS_PER_MINUTE, self._lag())  # type: ignore[arg-type]
             self._force = True
+            self._cause = "hold"
 
     def wake(self) -> None:
         """Wake word or direct address: awake for ``circadian.wake_hold_s``. Process C is not
         reset, S stops decaying (SPEC 7A, Waking); the state changes within one tick."""
         with self._lock:
-            self.model.wake()
+            self.model.wake(lag_s=self._lag())
             self._force = True
+            self._cause = "wake"
+
+    def _lag(self) -> float:
+        """Seconds since the last model update: the model's clock stands that far behind, and a
+        hold or wake counts from now (caller holds the lock)."""
+        if self._last_update is None:
+            return 0.0
+        return max(0.0, self.clock.monotonic() - self._last_update)
 
     def apply_config(self, cfg: RoboEmotConfig) -> None:
-        """Hot reload: parameters, thresholds and primitives; the model state is kept."""
+        """Hot reload: parameters, thresholds and primitives; the model state is kept.
+
+        Turning the rhythm off hands the robot back to the awake state at once: the arousal
+        baseline, the rest posture and any yawn or stretch go."""
         with self._lock:
+            was = self.cfg.circadian.enabled
             self.cfg = cfg
+            if was and not cfg.circadian.enabled:
+                self.model.state = "awake"
+                self.model.clear_hold()
+                self._applied = self.last = None
+                self._last_update = None
+                self._cause = None
+                if self.motion is not None:
+                    self.motion.reset()
+                if self.affect is not None:
+                    self.affect.set_circadian(cfg.circadian.states["awake"])
             self.model.cfg = cfg.circadian
             self.sampler.apply_config(cfg.light, cfg.circadian)
             if self.motion is not None:
                 self.motion.apply_config(cfg.circadian, cfg.circadian_motion)
-            if self.affect is not None and self._applied is not None:
+            if self.affect is not None and self._applied is not None and cfg.circadian.enabled:
                 self.affect.set_circadian(self.model.effects())
 
     def close(self) -> None:
@@ -206,6 +232,7 @@ class CircadianRunner:
             self._last_update = None
             return None
         events: list[tuple[str, dict[str, Any]]] = []
+        publish: CircadianState | None = None
         t = self.clock.monotonic()
         with self._lock:
             if (
@@ -239,16 +266,20 @@ class CircadianRunner:
             if changed and self.affect is not None:
                 self.affect.set_circadian(self.model.effects())
             self._applied = st.state
+            cause, self._cause = self._cause, None
             if prev == "resting" and st.state != "resting":
-                if self.motion is not None:
-                    self.motion.start_waking(now)
-                if in_window(hour, c.quiet_hours):
+                cooled = t - self._last_stretch >= c.stretch_cooldown_s
+                if cooled and self.motion is not None and self.motion.start_waking(now):
+                    self._last_stretch = t
+                if in_window(hour, c.quiet_hours) and cause != "hold":
                     self.woken_at_night += 1
                     events.append(("circadian.woken_at_night", {}))
             self.last = st
             if changed or light_changed or t - self._last_publish >= c.publish_period_s:
                 self._last_publish = t
-                self.bus.publish(TOPIC, st, now)
+                publish = st
+        if publish is not None:  # outside the lock: a subscriber may call back into the runner
+            self.bus.publish(TOPIC, publish, now)
         if self.affect is not None:
             for name, payload in events:
                 self.affect.on_event(name, now, payload)
@@ -261,7 +292,7 @@ class CircadianRunner:
         numbers and names only, nothing about frames or people."""
         with self._lock:
             st = self.last
-            hold = self.model.hold_remaining()
+            hold = self.model.hold_remaining(self._lag())
             c = self.cfg.circadian
             out: dict[str, Any] = {
                 "enabled": c.enabled,

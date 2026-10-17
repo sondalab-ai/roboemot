@@ -19,7 +19,7 @@ Level = Literal["dark", "dim", "bright"]
 UINT8_MAX = 255.0
 COLOR_NDIM = 3  # H x W x channels
 # ITU-R BT.601 luma weights
-LUMA_WEIGHTS = np.array([0.299, 0.587, 0.114])
+LUMA_WEIGHTS = np.array([0.299, 0.587, 0.114], dtype=np.float32)
 
 
 @dataclass
@@ -38,7 +38,7 @@ class LightEstimator:
     @staticmethod
     def stats(frame: np.ndarray) -> tuple[float, float]:
         """Mean luminance and noise of a frame (RGB channel order for a colour image)."""
-        img = np.asarray(frame, dtype=np.float64) / UINT8_MAX
+        img = np.asarray(frame, dtype=np.float32) / UINT8_MAX
         luma_img = img @ LUMA_WEIGHTS if img.ndim == COLOR_NDIM else img
         luma = float(luma_img.mean())
         # Noise: robust spread of horizontal pixel differences (flat regions dominate).
