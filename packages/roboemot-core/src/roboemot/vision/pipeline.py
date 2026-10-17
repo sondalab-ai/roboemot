@@ -336,6 +336,7 @@ class VisionPipeline:
                 self.face_tap(frame, result.visible)
             except Exception as exc:
                 log.warning("face tap failed: %s", type(exc).__name__)
+        self._publish("percept.face_frame", frame.stamp, frame.stamp)
 
     def _face_due(self, track: Track, state: _FaceState, stamp: float) -> bool:
         if track.score < self.cfg.tracker.high_score or track.detection is None:

@@ -350,13 +350,19 @@ class EnrollmentService:
     def delete(self, record_id: str) -> None:
         """Erase a person (``forget``: embeddings, fields, history) or an animal or object.
 
-        An id the registry does not know raises ``KeyError``.
+        An id the registry does not know raises ``KeyError``. A pending animal or object
+        (catalogue import) also leaves a tombstone, a salted hash of its kind, category and
+        name, written before the delete, so importing the same catalogue again does not bring
+        it back (SPEC 6). People are erased with ``forget`` and leave no tombstone (SPEC 12).
         """
+        reg = self._reg()
         if self._is_person(record_id) or record_id in self.quarantined():
-            self._reg().forget(record_id)
-        else:
-            self._reg().get_entity(record_id)
-            self._reg().delete_entity(record_id)
+            reg.forget(record_id)
+            return
+        entity = reg.get_entity(record_id)
+        if entity.status == "pending":
+            reg.tombstones.add(entity.kind, entity.category, entity.display_name)
+        reg.delete_entity(record_id)
 
     # ------------------------------------------------------------ internals
 

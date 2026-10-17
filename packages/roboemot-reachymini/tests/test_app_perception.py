@@ -47,7 +47,11 @@ def data(tmp_path, monkeypatch):
 
 
 class FakeDetector:
+    empty = False  # a test can empty the room without stopping the camera
+
     def detect(self, image):
+        if self.empty:
+            return []
         return [Detection((100, 60, 180, 140), 0.95, landmarks=np.zeros((5, 2)))]
 
 
@@ -390,3 +394,63 @@ def test_a_missing_object_detector_leaves_the_rest_of_vision_running(data):
     assert vision["state"] == "running"
     assert vision["objects"] == {"state": "unavailable", "reason": app.objects_unavailable}
     assert "animal" not in kinds and "object" not in kinds
+
+
+def test_a_possible_minor_face_engages_the_motion_caps_and_releases_after_the_hold(data):
+    (data / "app.yaml").write_text(
+        "schema_version: 1\nsafety: {allow_unmeasured_dynamics: true, minor_hold_s: 1}\n"
+    )
+    FakeDetector.empty = False
+    app = new_app(AppWithFakes)  # no attribute model: the face's age stays unknown (SPEC 5)
+    stop, thread, errors = start(app)
+
+    def caps() -> bool:
+        return app.diagnostics.report()["sections"]["roboemot.motion"]["data"]["minor_present"]
+
+    try:
+        assert wait_for(lambda: app.diagnostics is not None)
+        assert wait_for(caps), "an unknown-age face did not engage the minor caps"
+        assert app.minor_present
+        FakeDetector.empty = True  # frames keep coming, with nobody in them: positive evidence
+        assert wait_for(lambda: not caps(), timeout=30), "the caps never released"
+        assert not app.minor_present
+    finally:
+        FakeDetector.empty = False
+        stop.set()
+        thread.join(15)
+    assert not errors and not thread.is_alive()
+
+
+def test_the_minor_caps_stay_on_without_vision_and_when_frames_stop(data):
+    (data / "app.yaml").write_text(
+        "schema_version: 1\nsafety: {allow_unmeasured_dynamics: true, minor_hold_s: 1}\n"
+    )
+    app = new_app()  # the real loader finds no models: perception.pipeline is None
+    stop, thread, errors = start(app)
+    try:
+        assert wait_for(lambda: app.perception is not None and app.diagnostics is not None)
+        assert app.perception.pipeline is None
+
+        def caps() -> bool:
+            sections = app.diagnostics.report()["sections"]
+            return sections["roboemot.motion"]["data"]["minor_present"]
+
+        assert wait_for(caps), "the caps were never engaged without vision"
+        time.sleep(2)  # longer than the hold
+        assert app.minor_present and caps()
+    finally:
+        stop.set()
+        thread.join(15)
+    assert not errors and not thread.is_alive()
+
+    app = new_app(AppWithFakes)
+    app.source_class = EmptySource  # the camera gives no frames at all
+    stop, thread, errors = start(app)
+    try:
+        assert wait_for(lambda: app.perception is not None and app.perception.pipeline)
+        time.sleep(2)
+        assert app.minor_present
+    finally:
+        stop.set()
+        thread.join(15)
+    assert not errors

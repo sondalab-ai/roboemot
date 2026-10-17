@@ -48,6 +48,7 @@ CSP = (
 )
 SERVER_NAME = "roboemot"
 BUSY_DRAIN = 4096
+SERVE_POLL_S = 0.5  # how often serve_forever checks for a stop; tests shorten it
 ANY_INTERFACE = "0.0.0.0"
 LOOPBACK_INTERFACE = "127.0.0.1"
 BUSY_REPLY = b"HTTP/1.0 503 Service Unavailable\r\nContent-Length: 0\r\nRetry-After: 1\r\n\r\n"
@@ -265,7 +266,9 @@ class Server:
     def start(self) -> Server:
         if self._thread is None:
             self._thread = threading.Thread(
-                target=self._httpd.serve_forever, name="roboemot-webui", daemon=True
+                target=lambda: self._httpd.serve_forever(poll_interval=SERVE_POLL_S),
+                name="roboemot-webui",
+                daemon=True,
             )
             self._thread.start()
         return self

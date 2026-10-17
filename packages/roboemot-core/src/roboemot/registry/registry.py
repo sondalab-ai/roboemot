@@ -36,6 +36,7 @@ from .records import (
     possible_minor,
 )
 from .store import RegistryStore
+from .tombstones import TombstoneSet
 
 log = logging.getLogger(__name__)
 
@@ -97,6 +98,7 @@ class Registry:
         self._last_refresh: dict[str, datetime] = {}
         self._last_flush = self._clock()
         self.version = 0
+        self.tombstones = TombstoneSet(store)
         self._load(PEOPLE, PersonRecord, self._people, "person_id")
         self._load(ENTITIES, EntityRecord, self._entities, "entity_id")
 

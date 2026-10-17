@@ -117,6 +117,7 @@ class MotionLoop:
             return dict(self.core.limiter.pos)
 
     def set_minor_present(self, present: bool) -> None:
+        """Engage or release the minor motion caps (SPEC 12); fed by ``MinorPresence``."""
         with self._lock:
             self.core.minor_present = present
 
@@ -133,6 +134,7 @@ class MotionLoop:
             out: dict[str, object] = {
                 "mode": self.mode,
                 "motors_off": self.motors_off,
+                "minor_present": self.core.minor_present,
                 "rate_hz": self.rate_hz,
                 "ticks": self.ticks,
                 "overruns": self.overruns,

@@ -1,4 +1,4 @@
-# SPEC 14: unit tests and lint on every commit; the MuJoCo simulation layer nightly.
+# SPEC 14: unit tests, lint and the MuJoCo simulation layer on every PR and push to main; the sim also runs nightly.
 name: ci
 
 on:
@@ -8,6 +8,9 @@ on:
   schedule:
     - cron: "0 2 * * *"
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   python:
@@ -43,8 +46,8 @@ jobs:
       - run: cmake -S rt -B rt/build && cmake --build rt/build && ctest --test-dir rt/build --output-on-failure
 
   sim:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     env:
       MUJOCO_GL: osmesa
     steps:
@@ -56,17 +59,19 @@ jobs:
       - run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends pkg-config libcairo2-dev \
-            libgirepository-2.0-dev gir1.2-gstreamer-1.0 gstreamer1.0-plugins-base \
+            libgirepository1.0-dev libgirepository-2.0-dev gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 gstreamer1.0-plugins-base \
             gstreamer1.0-plugins-good libosmesa6
       - run: pip install -e "packages/roboemot-core[dev]" -e "packages/roboemot-reachymini[dev,sim]"
       - name: start the simulated daemon
         run: |
-          scripts/sim-daemon.sh > sim-daemon.log 2>&1 &
+          nohup scripts/sim-daemon.sh > sim-daemon.log 2>&1 &
           for _ in $(seq 60); do
             curl -sf http://localhost:8000/api/daemon/status && exit 0
             sleep 2
           done
           cat sim-daemon.log; exit 1
-      - run: pytest -m sim -s
+      # faulthandler_timeout dumps all thread stacks if one test hangs; the step timeout kills the run.
+      - run: pytest -m sim -s -o faulthandler_timeout=120
+        timeout-minutes: 20
       - if: failure()
-        run: cat sim-daemon.log
+        run: cat sim-daemon.log || true
