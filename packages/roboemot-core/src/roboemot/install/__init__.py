@@ -49,6 +49,7 @@ REMOTE_TMP_PREFIX = "/tmp/roboemot-install"
 TMP_DIR_PATTERN = re.compile(re.escape(REMOTE_TMP_PREFIX) + r"\.[A-Za-z0-9]+")
 PIN_FILE = "webui_pin.json"  # roboemot.webui.auth.PIN_FILE, inside the app data folder
 PIN_RETRIES = 3
+PIPER_TTS_VERSION = "1.8.0"  # exact pin: the worker protocol is tested against this API
 INSTALL_STEPS = 6
 UNINSTALL_STEPS = 6
 
@@ -92,6 +93,7 @@ class Options:
     dry_run: bool = False
     yes: bool = False
     uninstall: bool = False
+    piper: bool | None = None
 
 
 # ---------------------------------------------------------------- platforms
@@ -260,6 +262,70 @@ def claim_data_dir(
     write_record(remote, platform.record_path, record)
     remote.run(f"mkdir -p -m 700 {shlex.quote(path)}")
     ui.ok(f"created the data folder {path} (registry, models and trait cache live here)")
+
+
+# ---------------------------------------------------------------- Piper virtualenv
+
+
+def piper_paths(remote: Remote) -> tuple[str, str]:
+    """The Piper virtualenv and its interpreter (``roboemot.paths.piper_python`` on the robot)."""
+    _, data = remote_data_dir(remote)
+    venv = posixpath.join(data, paths.PIPER_VENV_SUBDIR)
+    return venv, posixpath.join(venv, "bin", "python")
+
+
+def install_piper(
+    ui: Ui, platform: Platform, remote: Remote, record: InstallRecord, dry_run: bool
+) -> None:
+    """Create the Piper virtualenv in the data folder and install the pinned ``piper-tts``.
+
+    piper-tts is GPL-3.0, so it lives in its own environment and runs as its own process (SPEC
+    8). The venv is recorded before it is created, so an interrupted install can be undone; a
+    folder that exists but is not in the record is not ours and is left alone. Every pip call
+    passes ``--no-cache-dir``; the dry run only reports.
+    """
+    venv, python = piper_paths(remote)
+    if record.piper_venv == venv and _exists(remote, python):
+        ui.ok(f"Piper virtualenv {venv} already installed")
+        return
+    if record.piper_venv != venv and _exists(remote, venv):
+        ui.warn(f"{venv} exists but is not in the install record: left alone")
+        return
+    if dry_run:
+        ui.info(
+            f"would create the Piper virtualenv {venv} and install piper-tts=={PIPER_TTS_VERSION} "
+            "(recorded for uninstall)"
+        )
+        return
+    record.piper_venv = venv
+    write_record(remote, platform.record_path, record)
+    remote.run(f"mkdir -p -m 700 {shlex.quote(posixpath.dirname(venv))}")
+    remote.run(f"{shlex.quote(platform.python)} -m venv {shlex.quote(venv)}")
+    ui.ok(f"created the Piper virtualenv {venv}")
+    result = RemotePython(remote, python).install_requirement(f"piper-tts=={PIPER_TTS_VERSION}")
+    if not result.ok:
+        raise WizardError(f"pip install piper-tts failed on the robot:\n{result.output}")
+    ui.ok(f"installed piper-tts {PIPER_TTS_VERSION} (voice files: roboemot models fetch --voice)")
+
+
+def remove_piper_venv(ui: Ui, remote: Remote, record: InstallRecord, dry_run: bool) -> None:
+    """Delete the recorded Piper virtualenv, only at exactly the path this installer would pick."""
+    if record.piper_venv is None:
+        return
+    venv, _ = piper_paths(remote)
+    if record.piper_venv != venv:
+        ui.warn(f"recorded Piper virtualenv {record.piper_venv!r} is not {venv}: left as it is")
+        return
+    if not _exists(remote, venv):
+        ui.ok(f"Piper virtualenv {venv} is not there")
+        return
+    real = remote.run(f"realpath {shlex.quote(venv)} 2>/dev/null || true").strip()
+    if real != venv:
+        ui.warn(f"{venv} resolves to {real or 'nothing'}: symlink? left as it is")
+        return
+    if not dry_run:
+        remote.run(f"rm -rf {shlex.quote(venv)}")
+    ui.ok(f"{'would delete' if dry_run else 'deleted'} the Piper virtualenv {venv}")
 
 
 def ask_new_pin(ui: Ui) -> str | None:
@@ -507,6 +573,10 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
             record = install_packages(ui, platform, py, remote, dirs, wheels, opts.dry_run)
             if not opts.dry_run:
                 platform.verify(ui, py, dev)
+            if opts.piper is None:
+                opts.piper = ui.confirm("Install Piper for on-board speech (own virtualenv)?", True)
+            if opts.piper:
+                install_piper(ui, platform, remote, record, opts.dry_run)
             set_operator_pin(ui, py, remote, opts.dry_run)
 
             ui.step("Start")
@@ -618,6 +688,7 @@ def run_uninstall(opts: Options, ui: Ui, root: Path) -> None:
                 ui.warn(f"{would}delete leftover {path} ({module})")
 
         ui.step("Clean up and verify")
+        remove_piper_venv(ui, remote, record, opts.dry_run)
         remove_data_dir(ui, remote, record, opts.dry_run)
         platform.cleanup(ui, py, opts.dry_run)
         listed = remote.run(f"ls -d {REMOTE_TMP_PREFIX}.* 2>/dev/null || true").split()
@@ -650,6 +721,9 @@ def verify_uninstall(
         if now.get(n) != v
     ]
     problems += [f"{p} still present ({m})" for m, p in leftovers(py, platform)]
+    venv, _ = piper_paths(py.remote)
+    if record.piper_venv == venv and _exists(py.remote, venv):
+        problems.append(f"Piper virtualenv {venv} still present")
     data_dir, bad = checked_data_dir(py.remote, record)
     if bad:
         problems.append(bad)
@@ -710,10 +784,15 @@ def parse_args(argv: list[str] | None = None) -> Options:
     p.add_argument(
         "--dry-run", action="store_true", help="read-only checks; nothing on the robot changes"
     )
+    p.add_argument(
+        "--piper",
+        action=argparse.BooleanOptionalAction,
+        help="install Piper (on-board speech) in its own virtualenv in the data folder",
+    )
     p.add_argument("-y", "--yes", action="store_true", help="answer yes to every confirmation")
     a = p.parse_args(argv)
     return Options(
-        a.host, a.user, a.robot, a.dev, a.start, a.startup, a.dry_run, a.yes, a.uninstall
+        a.host, a.user, a.robot, a.dev, a.start, a.startup, a.dry_run, a.yes, a.uninstall, a.piper
     )
 
 

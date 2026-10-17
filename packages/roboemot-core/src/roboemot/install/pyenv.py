@@ -103,6 +103,10 @@ class RemotePython:
             f"install --quiet {PIP_FLAGS} {c}{_join(targets)}", stdin=constraints, check=False
         )
 
+    def install_requirement(self, requirement: str) -> PipResult:
+        """One pinned requirement into this interpreter's environment (no cache, no constraints)."""
+        return self._pip(f"install --quiet {PIP_FLAGS} {_join([requirement])}", check=False)
+
     def reinstall_own(self, files: list[str]) -> None:
         """Same version numbers on a reinstall: force our wheels in, dependencies untouched."""
         self._pip(f"install --quiet --no-deps --force-reinstall {PIP_FLAGS} {_join(files)}")

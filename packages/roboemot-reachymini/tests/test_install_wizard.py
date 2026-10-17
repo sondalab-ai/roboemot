@@ -24,6 +24,8 @@ OWN = {"roboemot-core": "0.1.0.dev0", "roboemot-reachymini": "0.1.0.dev0"}
 HOME = "/home/pollen"
 DATA = f"{HOME}/.local/share/roboemot"
 PIN_PATH = f"{DATA}/webui_pin.json"
+PIPER_VENV = f"{DATA}/piper-venv"
+PIPER_PYTHON = f"{PIPER_VENV}/bin/python"
 PIN = "246810"
 
 
@@ -47,6 +49,7 @@ class FakeRobot:
         self.copies: list[list[Path]] = []
         self.fail_install = False
         self.stdins: list[str | None] = []
+        self.piper_pips: list[str] = []
         self.dirs: set[str] = {HOME}  # folders that exist (data folder emulation)
         self.symlinks: dict[str, str] = {}  # path -> where realpath says it really is
         self.env_data_dir = ""  # ROBOEMOT_DATA_DIR in the SSH user's environment
@@ -66,6 +69,13 @@ class FakeRobot:
 
     def run(self, command: str, check: bool = True, stdin: str | None = None) -> str:
         self.commands.append(command)
+        if " -m venv " in command:
+            self.dirs |= {shlex.split(command)[-1], PIPER_PYTHON}
+            return ""
+        if command.startswith(f"{PIPER_PYTHON} -m pip "):
+            assert "--no-cache-dir" in command, command
+            self.piper_pips.append(command)
+            return "\n__rc=0"
         if "-m roboemot.webui set-pin" in command:
             self.stdins.append(stdin)
             self.dirs.add(PIN_PATH)
@@ -426,7 +436,11 @@ def test_install_records_changes_and_cleans_tmp(offline, robot, daemon):
     record = json.loads(robot.files[RECORD])
     assert record["added"] == ["scipy"] and record["replaced"] == {}
     assert record["pending_before"] is None
-    pip = [c for c in robot.commands if " -m pip install" in c and "--dry-run" not in c]
+    pip = [
+        c
+        for c in robot.commands
+        if " -m pip install" in c and "--dry-run" not in c and PIPER_VENV not in c
+    ]
     assert pip and all("-c /dev/stdin" in c for c in pip if "--no-deps" not in c)
 
 
@@ -704,7 +718,11 @@ def tamper(robot, **fields) -> None:
 
 
 def deleted(robot) -> list[str]:
-    return [c for c in robot.commands if c.startswith("rm -rf") and "roboemot-install" not in c]
+    return [
+        c
+        for c in robot.commands
+        if c.startswith("rm -rf") and "roboemot-install" not in c and "piper-venv" not in c
+    ]
 
 
 @pytest.mark.parametrize(
@@ -914,3 +932,69 @@ def test_uninstall_leaves_no_pin_file_with_the_data_folder_gone(
     uninstall()
     assert PIN_PATH not in robot.dirs and DATA not in robot.dirs
     assert snapshot(robot, daemon) == before
+
+
+# ---------------------------------------------------------------- Piper virtualenv (SPEC 8)
+
+
+def test_install_creates_a_recorded_piper_venv_with_a_pinned_no_cache_pip(offline, robot, daemon):
+    install()
+    assert PIPER_PYTHON in robot.dirs
+    assert json.loads(robot.files[RECORD])["piper_venv"] == PIPER_VENV
+    assert len(robot.piper_pips) == 1
+    assert f"piper-tts=={inst.PIPER_TTS_VERSION}" in robot.piper_pips[0]
+    assert any(
+        c == f"{reachy.ReachyMiniWireless.python} -m venv {PIPER_VENV}" for c in robot.commands
+    )
+
+
+def test_piper_venv_default_matches_the_core_config_default():
+    from roboemot import paths
+
+    assert paths.piper_python(f"{DATA}").as_posix() == PIPER_PYTHON
+
+
+def test_install_dry_run_only_says_it_would_create_the_piper_venv(offline, robot, daemon, capsys):
+    before = dict(robot.files), set(robot.dirs)
+    inst.run_install(options(dry_run=True, start=False, startup=False), quiet_ui(yes=True), ROOT)
+    assert (dict(robot.files), set(robot.dirs)) == before
+    assert robot.piper_pips == [] and not any(" -m venv " in c for c in robot.commands)
+    assert f"would create the Piper virtualenv {PIPER_VENV}" in capsys.readouterr().out
+
+
+def test_install_without_piper_installs_no_venv(offline, robot, daemon):
+    install(piper=False)
+    assert PIPER_VENV not in robot.dirs and robot.piper_pips == []
+    assert json.loads(robot.files[RECORD])["piper_venv"] is None
+
+
+def test_uninstall_removes_the_piper_venv_even_when_the_data_folder_predates_the_install(
+    offline, robot, daemon
+):
+    robot.dirs.add(DATA)
+    install()
+    assert PIPER_PYTHON in robot.dirs
+    uninstall()
+    assert PIPER_VENV not in robot.dirs and DATA in robot.dirs
+
+
+def test_uninstall_dry_run_keeps_the_piper_venv(offline, robot, daemon, capsys):
+    install()
+    capsys.readouterr()
+    uninstall(dry_run=True)
+    assert PIPER_VENV in robot.dirs
+    assert "would delete the Piper virtualenv" in capsys.readouterr().out
+
+
+def test_uninstall_refuses_a_piper_venv_outside_the_data_folder(offline, robot, daemon):
+    install()
+    tamper(robot, piper_venv="/etc")
+    robot.dirs.add("/etc")
+    uninstall()
+    assert "rm -rf /etc" not in robot.commands and "/etc" in robot.dirs
+
+
+def test_a_foreign_piper_folder_is_left_alone(offline, robot, daemon):
+    robot.dirs |= {DATA, PIPER_VENV}
+    install()
+    assert robot.piper_pips == [] and json.loads(robot.files[RECORD])["piper_venv"] is None
