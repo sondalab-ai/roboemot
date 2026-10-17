@@ -9,13 +9,14 @@ Install: find the robot (mDNS, every manifest that declares discovery), check SS
 interpreter, architecture, Python and free space, build the wheels locally, install them with
 the versions already on the robot pinned, record exactly what changed, verify, optionally
 start the app and make it the autostart app. It also creates the private app data folder
-(``~/.local/share/roboemot``: registry, models) when it is not there yet and records it.
+(``~/.local/share/roboemot``: registry, models, trait cache) when it is not there yet and
+records it.
 
 Uninstall: stop the app, give back the previous autostart app (only if the setting still names
 this app), uninstall what the record says this installer added, reinstall the original versions
 it replaced, keep anything another distribution still needs, remove leftovers and the recorded
-data folder (registry and models included), verify, and only then delete the record. Running it
-twice is harmless. Both flows have a read-only ``--dry-run``.
+data folder (registry, models and trait cache included), verify, and only then delete the
+record. Running it twice is harmless. Both flows have a read-only ``--dry-run``.
 """
 
 from __future__ import annotations
@@ -258,7 +259,7 @@ def claim_data_dir(
     record.data_dir, record.data_dir_parents = path, parents
     write_record(remote, platform.record_path, record)
     remote.run(f"mkdir -p -m 700 {shlex.quote(path)}")
-    ui.ok(f"created the data folder {path} (registry and models live here)")
+    ui.ok(f"created the data folder {path} (registry, models and trait cache live here)")
 
 
 def ask_new_pin(ui: Ui) -> str | None:
@@ -342,9 +343,10 @@ def _created_parents(record: InstallRecord, home: str, path: str) -> list[str]:
 
 
 def remove_data_dir(ui: Ui, remote: Remote, record: InstallRecord, dry_run: bool) -> None:
-    """Delete the recorded data folder (registry and models included), then the parents the
-    installer created if they are empty. Without a record nothing is deleted; a record that
-    fails ``checked_data_dir`` is reported and left (``verify_uninstall`` then fails)."""
+    """Delete the recorded data folder (registry, models and trait cache included), then the
+    parents the installer created if they are empty. Without a record nothing is deleted; a
+    record that fails ``checked_data_dir`` is reported and left (``verify_uninstall`` then
+    fails)."""
     would = "would " if dry_run else ""
     if record.data_dir is None:
         _, path = remote_data_dir(remote)
@@ -358,7 +360,7 @@ def remove_data_dir(ui: Ui, remote: Remote, record: InstallRecord, dry_run: bool
     if _exists(remote, path):
         if not dry_run:
             remote.run(f"rm -rf {shlex.quote(path)}")
-        ui.ok(f"{would}delete the data folder {path} (registry and models included)")
+        ui.ok(f"{would}delete the data folder {path} (registry, models and trait cache included)")
     else:
         ui.ok(f"data folder {path} is not there")
     home, _ = remote_data_dir(remote)

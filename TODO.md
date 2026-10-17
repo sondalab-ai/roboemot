@@ -15,8 +15,18 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       deliberately left out: reflexes do not read the register or the persona (SPEC 10).
 - [ ] Scale `motion.idle.gaze_shift_interval_s` by `idle_period_x` once gaze shifts run (only
       breathing and the scan interval use it today).
-- [ ] Create the app's `Router` and run `apply_llm_traits` at startup and on every
-      `config.changed` (trait source `llm`). Put the `TraitCache` file where the installer's
-      uninstall removes it (SPEC 4A, Installer: leave the robot clean).
-- [ ] Per-route history trimming (SPEC 8, Conversation state): drop oldest turns only; add a
-      per-route context budget and the load-time check that system prompt parts 1 to 4 fit it.
+- [x] Create the app's `Router` and run `apply_llm_traits` at startup and on every
+      `config.changed` (trait source `llm`). Done: `TraitsWorker` (`roboemot.persona.llm_traits`)
+      runs it on its own thread and event loop, woken by `persona.*` or `llm_routes` changes
+      (coalesced, its own derived-layer change ignored, router rebuilt with its token counts
+      kept, shutdown cancels a request in flight). `RoboEmotApp` creates it with the shared
+      `NetworkMonitor` (`make_router` is overridable). The `TraitCache` is
+      `<data folder>/llm_traits.json` (`paths.traits_cache_path`), removed by uninstall with the
+      folder (SPEC 4A, Installer; `test_install_wizard.py`). Tests: `test_traits_worker.py`,
+      `test_app_llm_traits.py`. Open: the `NetworkMonitor` still watches the routes it was built
+      with, so a route added by hot reload is not probed until restart.
+- [x] Per-route history trimming (SPEC 8, Conversation state). Done: `llm_routes[].context_budget_tokens`
+      (8192) and `conversation.turn_reserve_tokens` (256); `trim_history` drops whole turns,
+      oldest first, and the router applies it per route; load-time rejection names the route
+      (`roboemot.llm.prompt`, `test_llm_history.py`). Not done: a caller that builds the history
+      (the conversation pipeline, M3) and the `conversation.history_turns` cap.

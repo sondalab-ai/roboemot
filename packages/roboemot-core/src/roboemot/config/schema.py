@@ -1730,6 +1730,14 @@ class ConversationConfig(Strict):
     scene_summary_max_chars: int = param(
         400, "Cap on the scene summary in the system prompt", ge=0, le=4000
     )
+    turn_reserve_tokens: int = param(
+        256,
+        "Room every route's context budget must leave beyond the system prompt, for the "
+        "newest turn (load-time check, SPEC 8)",
+        unit="tokens",
+        ge=16,
+        le=8192,
+    )
 
 
 # --------------------------------------------------------------------------- persona (SPEC 11A)
@@ -1839,6 +1847,14 @@ class LLMRoute(Strict):
         False, "Route cleared for use while a minor is present", conservative="false"
     )
     daily_token_budget: int = param(200_000, "Daily token cap", ge=0)
+    context_budget_tokens: int = param(
+        8192,
+        "Prompt budget per request, estimated at 4 characters per token; the oldest turns are "
+        "dropped to fit (SPEC 8)",
+        unit="tokens",
+        ge=256,
+        le=2_000_000,
+    )
     supports_images: bool = param(False, "Route accepts image_url parts")
 
     @model_validator(mode="after")
@@ -2158,6 +2174,13 @@ with warnings.catch_warnings():
             dupes = sorted({n for n in names if names.count(n) > 1})
             if dupes:
                 raise ValueError(f"duplicate llm route names: {dupes}")
+            return self
+
+        @model_validator(mode="after")
+        def _prompt_fits_route_budgets(self) -> RoboEmotConfig:
+            from ..llm.prompt import check_route_budgets  # lazy: llm imports this module
+
+            check_route_budgets(self)
             return self
 
         @model_validator(mode="after")

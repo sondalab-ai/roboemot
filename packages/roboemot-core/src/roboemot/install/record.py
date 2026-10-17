@@ -5,9 +5,10 @@ full snapshot: other apps may have installed packages since. The record keeps on
 installer changed: distributions it ``added`` and the original versions of those it
 ``replaced``, merged over every reinstall without ever overwriting an original. It is written
 before pip runs (``pending_before``) and completed after, so an interrupted install still
-leaves enough to undo it. The app data folder (``roboemot.paths``: registry, models) is recorded
-the same way, with the parents the installer had to create, but only when it did not exist
-before the install: a folder that was already there is not the installer's to remove.
+leaves enough to undo it. The app data folder (``roboemot.paths``: registry, models, trait
+cache) is recorded the same way, with the parents the installer had to create, but only when it
+did not exist before the install: a folder that was already there is not the installer's to
+remove.
 """
 
 from __future__ import annotations

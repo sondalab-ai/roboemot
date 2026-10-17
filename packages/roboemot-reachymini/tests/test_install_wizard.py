@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 import roboemot.install as inst
+from roboemot import paths
 from roboemot.install import Options, Ui, WizardError
 from roboemot_reachymini import install as reachy
 from roboemot_reachymini.install import DaemonApi, ReachyMiniWireless
@@ -613,6 +614,17 @@ def test_uninstall_removes_the_data_folder_and_the_parents_it_created(offline, r
     uninstall()
     assert snapshot(robot, daemon) == before
     assert f"rm -rf {DATA}" in robot.commands
+
+
+def test_uninstall_removes_the_persona_trait_cache_with_the_data_folder(offline, robot, daemon):
+    before = snapshot(robot, daemon)
+    install()
+    cache = f"{DATA}/{paths.TRAITS_CACHE_FILE}"  # written by the app (roboemot.paths)
+    robot.dirs.add(cache)
+    assert paths.traits_cache_path().parent == paths.data_path()
+    uninstall()
+    assert cache not in robot.dirs
+    assert snapshot(robot, daemon) == before
 
 
 def test_uninstall_keeps_parents_that_are_not_empty(offline, robot, daemon):
