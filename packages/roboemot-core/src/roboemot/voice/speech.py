@@ -55,7 +55,6 @@ class _Job:
     text: str
     language: str
     delivery: Delivery
-    minor_present: bool
     epoch: int
     said_at: float
 
@@ -69,6 +68,7 @@ class SpeechOutput:
         sink: AudioSink,
         backend: TTSBackend,
         bus: Bus | None = None,
+        minor_present: Callable[[], bool] = lambda: False,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.config, self.sink, self.backend, self.bus, self.clock = (
@@ -78,6 +78,7 @@ class SpeechOutput:
             bus,
             clock,
         )
+        self._minor_present = minor_present  # read when synthesis starts, never at enqueue
         self._lock = threading.Lock()
         self._jobs: collections.deque[_Job] = collections.deque()
         self._epoch = 0
@@ -161,7 +162,6 @@ class SpeechOutput:
         mood: str | None,
         intensity: float,
         utterance: int | None = None,
-        minor_present: bool = False,
     ) -> int | None:
         """Queue one sentence; returns its id, or ``None`` when it was dropped (queue full or
         closed). Safe from any thread. The caller resolves ``mood`` (affect label, or the LLM's
@@ -185,7 +185,6 @@ class SpeechOutput:
                 text,
                 language,
                 delivery,
-                minor_present,
                 self._epoch,
                 self.clock(),
             )
@@ -251,7 +250,7 @@ class SpeechOutput:
                 job.delivery,
                 language=job.language,
                 voice=cfg.voice,
-                minor_present=job.minor_present,
+                minor_present=self._minor_present(),
             ):
                 if job.epoch != self._epoch:
                     return
