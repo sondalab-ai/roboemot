@@ -18,6 +18,9 @@ limiter and the arbiter to the measured pose and only then reports ``link.robot.
 motion resumes from where the robot really is, under the velocity and acceleration limits.
 Only driver failures count against the link, not faults in RoboEmot's own code.
 
+Reflexes (SPEC 10): ``tick_hooks`` run at the start of every active tick, so a reflex engine
+reacts within one loop period instead of waiting for the app's slower tick.
+
 Motors (SPEC 4A, 12A): the loop never turns the motors on after start-up. It polls
 ``driver.motors_enabled`` every ``probe_initial_s``; while the platform keeps them off (robot
 asleep, stopped by its owner, a backend restarted without wake-up) it follows the measured pose
@@ -84,6 +87,11 @@ class MotionLoop:
         self.max_jitter_s = 0.0
         self.motors_off = False  # the platform holds the motors off: track, do not write
         self._next_motor_check = -math.inf
+        # Called every active tick with ``(now, core)``, under the loop's lock and before the
+        # arbiter runs: they may feed or clear ``core`` directly (never ``feed`` or ``clear`` of
+        # this class, which take the lock). A raising hook is counted and skipped, the tick goes on.
+        self.tick_hooks: list[Callable[[float, MotionCore], None]] = []
+        self._hook_error: str | None = None
 
     # ---- configuration (SPEC 11A hot reload)
 
@@ -170,6 +178,15 @@ class MotionLoop:
                 state = self._resync()
                 self.ticks += 1
                 return state
+            failed = False
+            for hook in self.tick_hooks:
+                try:
+                    hook(now, self.core)
+                except Exception as exc:
+                    failed = True
+                    self._note_hook_error(exc)
+            if not failed:
+                self._hook_error = None
             out = self.core.tick(now, dt)
             self._call(self.driver.write_pose_targets, now, out)
             self.ticks += 1
@@ -218,6 +235,16 @@ class MotionLoop:
             with self._lock:
                 self._resync()  # resume from wherever the platform's wake-up left the robot
         self.motors_off = not enabled
+
+    def _note_hook_error(self, exc: Exception) -> None:
+        """Count a failing hook every tick but log it once per distinct message until a clean tick
+        (a hook at 50 Hz would otherwise flood the log)."""
+        msg = f"{type(exc).__name__}: {exc}"
+        self.errors += 1
+        self.last_error = msg
+        if msg != self._hook_error:
+            self._hook_error = msg
+            log.warning("motion: %s", msg)
 
     def _note_error(self, exc: Exception) -> None:
         self.errors += 1

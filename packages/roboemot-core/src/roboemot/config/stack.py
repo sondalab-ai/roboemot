@@ -31,7 +31,13 @@ from typing import Any, Literal, Union, get_args, get_origin
 import yaml
 from pydantic import BaseModel, ValidationError
 
-from .schema import SCHEMA_VERSION, RoboEmotConfig
+from .schema import (
+    SCHEMA_VERSION,
+    WITHDRAW_RULE_FIELDS,
+    WITHDRAW_SHARED_FIELDS,
+    RoboEmotConfig,
+    rule_identity,
+)
 
 LAYER_ORDER = ("defaults", "manifest", "preset", "app", "derived", "person", "runtime")
 KEYED_LISTS = {"appraisal.rules": "event", "llm_routes": "name"}
@@ -85,11 +91,21 @@ def deep_merge(base: dict, over: dict, path: str = "") -> dict:
     return out
 
 
+def _merge_id(item: dict, key: str) -> Any:
+    """Merge identity of a keyed-list entry. Appraisal rules also carry their ``when``
+    condition, so two rules for one event with different conditions stay two rules."""
+    if item.get(key) is None:
+        return None
+    if key == "event":
+        return rule_identity(item[key], item.get("when"))
+    return item[key]
+
+
 def _merge_keyed(base: list, over: list, key: str) -> list:
     result = [copy.deepcopy(x) for x in base]
-    index = {x.get(key): i for i, x in enumerate(result) if isinstance(x, dict)}
+    index = {_merge_id(x, key): i for i, x in enumerate(result) if isinstance(x, dict)}
     for item in over:
-        k = item.get(key) if isinstance(item, dict) else None
+        k = _merge_id(item, key) if isinstance(item, dict) else None
         if k is not None and k in index:
             result[index[k]] = deep_merge(result[index[k]], item)
         else:
@@ -223,6 +239,9 @@ def resolve_preset(name: str, preset_dirs: Iterable[Path], _seen: tuple[str, ...
 
 # ----------------------------------------------------------------------------- guardrails
 
+MANIFEST_BEHAVIOUR_KEYS = frozenset(
+    {"expression_map", "circadian_motion"}
+)  # what a robot manifest may set
 PERSON_SECTIONS = ("register", "voice", "conversation", "persona.traits")
 
 
@@ -242,9 +261,11 @@ def _guarded(meta: dict[str, Any]) -> bool:
 
 
 def guarded_leaves(cfg: RoboEmotConfig) -> dict[str, tuple[Any, dict[str, Any]]]:
-    """Every safety-relevant leaf of a config, routes keyed by name instead of index."""
+    """Every safety-relevant leaf of a config, routes and reflex rules keyed by name, not index."""
     tree = cfg.model_dump(mode="python")
     tree["llm_routes"] = {r["name"]: r for r in tree.get("llm_routes", [])}
+    rules = tree.get("reflexes", {}).get("rules", [])
+    tree["reflexes"]["rules"] = {r["name"]: r for r in rules}  # by name: a removal shifts nothing
     out = {}
     for path, value in flatten(tree).items():
         meta = field_meta(path)
@@ -253,12 +274,20 @@ def guarded_leaves(cfg: RoboEmotConfig) -> dict[str, tuple[Any, dict[str, Any]]]
     return out
 
 
+NEW_RULE_REFUSED = "reflexes.rules."
+
+
 def violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Violation]:
     """Leaves where ``candidate`` is less safe than ``approved`` (SPEC 11A, Guardrails)."""
     base = guarded_leaves(approved)
     found = []
     for path, (value, meta) in guarded_leaves(candidate).items():
         direction = meta.get("conservative")
+        if path.startswith(NEW_RULE_REFUSED) and path not in base:
+            # A reflex rule (new or renamed) that the approved config does not have is a new motion
+            # the approval never saw: refused whole, not compared with anything (SPEC 10, 12).
+            found.append(Violation("safety", path, None, value))
+            continue
         if path in base:
             ref = base[path][0]
         else:  # e.g. a new LLM route: compare against the most conservative value
@@ -278,6 +307,59 @@ def violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Viol
             found.append(Violation("privacy", path, ref, value))
         elif not ok:
             found.append(Violation("safety", path, ref, value))
+    return found + reflex_violations(approved, candidate)
+
+
+def reflex_violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Violation]:
+    """Reflex changes that no single field's direction can express (SPEC 10, 11A, 12).
+
+    Rules cannot be removed, ``trigger`` and ``primitive`` are their identity, a disabled rule
+    cannot be enabled, and the threshold is safer upward for a sound or a voice (fires less) and
+    downward for a close face (the withdraw fires earlier).
+
+    A withdraw rule is protective: every field that affects it is frozen at runtime, in both
+    directions (``WITHDRAW_RULE_FIELDS``, and the shared settings in ``WITHDRAW_SHARED_FIELDS``
+    that the engine reads for it, plus ``audio`` when a sound drives it). It can only be changed
+    in the base config.
+    """
+    found: list[Violation] = []
+
+    def refuse(path: str, was: Any, now: Any) -> None:
+        found.append(Violation("safety", path, was, now))
+
+    base = {r.name: r for r in approved.reflexes.rules}
+    cand = {r.name: r for r in candidate.reflexes.rules}
+    for name in base:
+        if name not in cand:
+            refuse(f"reflexes.rules.{name}", "present", "removed")
+    protective = [r for r in base.values() if r.primitive == "withdraw" and r.enabled]
+    ar, cr = approved.reflexes, candidate.reflexes
+    if protective:
+        shared = list(WITHDRAW_SHARED_FIELDS)
+        if any(r.trigger == "loud_onset" for r in protective):
+            shared.append("audio")
+        for attr in shared:
+            if getattr(ar, attr) != getattr(cr, attr):
+                refuse(f"reflexes.{attr}", getattr(ar, attr), getattr(cr, attr))
+    for rule in candidate.reflexes.rules:
+        ref = base.get(rule.name)
+        if ref is None:
+            continue  # refused whole by the path check
+        at = f"reflexes.rules.{rule.name}"
+        if ref.primitive == "withdraw":
+            for attr in WITHDRAW_RULE_FIELDS:
+                if getattr(rule, attr) != getattr(ref, attr):
+                    refuse(f"{at}.{attr}", getattr(ref, attr), getattr(rule, attr))
+            continue
+        for attr in ("trigger", "primitive"):
+            if getattr(rule, attr) != getattr(ref, attr):
+                refuse(f"{at}.{attr}", getattr(ref, attr), getattr(rule, attr))
+        if rule.trigger != ref.trigger:
+            continue
+        if rule.enabled and not ref.enabled:
+            refuse(f"{at}.enabled", False, True)
+        if rule.threshold < ref.threshold:  # a sound or a voice: lower fires more
+            refuse(f"{at}.threshold", ref.threshold, rule.threshold)
     return found
 
 
@@ -337,6 +419,38 @@ class ConfigStack:
             stack.files["preset"] = Path("preset:" + preset)
         stack._remember_mtimes()
         return stack
+
+    def set_manifest_behaviour(self, behaviour: dict) -> None:
+        """Install the robot manifest's ``behaviour`` block (layer 2) once the manifest is loaded.
+
+        It becomes part of the installed configuration, so it also resets the approved baseline.
+        """
+        unknown = sorted(set(behaviour) - MANIFEST_BEHAVIOUR_KEYS)
+        if unknown:
+            raise ConfigError(
+                f"manifest behaviour may set {sorted(MANIFEST_BEHAVIOUR_KEYS)}, not {unknown}"
+            )
+        with self._lock:
+            saved = self.manifest
+            self.manifest = behaviour
+            try:
+                defaults = RoboEmotConfig()
+                layer = RoboEmotConfig.model_validate(
+                    deep_merge(defaults.model_dump(mode="python"), behaviour)
+                )
+                found = violations(defaults, layer)  # the manifest layer alone, vs the defaults
+                if found:
+                    raise GuardrailError(
+                        "manifest behaviour would loosen: " + "; ".join(map(str, found))
+                    )
+                baseline = RoboEmotConfig.model_validate(self.merged_tree(include_runtime=False))
+            except (ValidationError, GuardrailError) as exc:
+                self.manifest = saved
+                if isinstance(exc, ValidationError):
+                    raise ConfigError(_explain(exc)) from exc
+                raise
+            self._last, self._approved = self.effective(), baseline
+            self._record("manifest", "behaviour", None, sorted(behaviour))
 
     # ---- reading
 

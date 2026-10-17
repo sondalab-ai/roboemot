@@ -8,9 +8,13 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       register shaped by `roboemot.persona.apply_to_register` and the summary caps from
       `conversation.*_summary_max_chars`.
 - [ ] Pass `roboemot.persona.effects(cfg.persona)` to `compose_delivery` in the TTS path.
-- [ ] Apply `motion_amplitude` / `reaction_intensity` from the persona-shaped register in the
-      expression and reflex paths; scale `motion.idle.gaze_shift_interval_s` by
-      `idle_period_x` once gaze shifts run (only breathing uses it today).
+- [x] Apply `motion_amplitude` / `reaction_intensity` from the persona-shaped register in the
+      expression path. Done in M2: `RegisterTracker.tick` shapes the register with
+      `apply_to_register`, `ExpressionRenderer` scales by it every tick (SPEC 7, Expression map;
+      `test_expression.py`, `test_app_expression.py`, and the M2 exit test). The reflex path is
+      deliberately left out: reflexes do not read the register or the persona (SPEC 10).
+- [ ] Scale `motion.idle.gaze_shift_interval_s` by `idle_period_x` once gaze shifts run (only
+      breathing and the scan interval use it today).
 - [ ] Create the app's `Router` and run `apply_llm_traits` at startup and on every
       `config.changed` (trait source `llm`). Put the `TraitCache` file where the installer's
       uninstall removes it (SPEC 4A, Installer: leave the robot clean).

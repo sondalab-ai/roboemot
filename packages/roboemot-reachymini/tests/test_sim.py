@@ -204,6 +204,43 @@ def test_attention_turns_the_head_towards_a_world_entry(loop):
     assert state["head.pitch"] < -0.9 * el, state  # looking up (nose up is negative pitch)
 
 
+def test_a_joy_expression_moves_the_antennas_on_the_simulated_robot(loop):
+    """SPEC 7, 10: the shipped joy expression, rendered for an adult, flaps both antennas.
+
+    The robot first settles at the antenna home; the renderer then feeds additive EXPRESSION
+    commands through the real loop. The fallback dynamics are slow, so the swing asserted is
+    far below the commanded one; what counts is that both antennas move and come back.
+    """
+    from roboemot.affect import AffectState
+    from roboemot.affect.expression import ExpressionRenderer
+    from roboemot.affect.register import Person, resolve_register
+
+    manifest = loop.manifest
+    stack = ConfigStack()
+    stack.set_manifest_behaviour(manifest.model.behaviour)
+    cfg = stack.effective()
+    home = {n: manifest.dofs[n].home for n in ("antenna_right", "antenna_left")}
+    _hold(loop, home, 8.0)
+    settled = loop.driver.read_state()
+    reg = resolve_register([Person("adult", "declared", {})], cfg.register, cfg.persona)
+    renderer = ExpressionRenderer(cfg.expression, cfg.expression_map, manifest.dofs, 0.15)
+    renderer.update(AffectState(0.0, 0.0, "calm", 0.0), reg, time.monotonic())
+    assert renderer.update(AffectState(0.7, 0.5, "joy", 1.0, 1), reg, time.monotonic())
+    seen: dict[str, list[float]] = {n: [] for n in home}
+    end = time.monotonic() + 3.0
+    while time.monotonic() < end:
+        now = time.monotonic()
+        for cmd in renderer.commands(now):
+            loop.feed(cmd)
+        state = loop.driver.read_state()
+        for n in home:
+            seen[n].append(state[n])
+        time.sleep(0.02)
+    for n, values in seen.items():
+        assert max(values) - min(values) > 0.03, (n, max(values) - min(values))
+        assert values[-1] == pytest.approx(settled[n], abs=0.1), n
+
+
 def test_full_sweep_keeps_the_world_map_correct(loop):
     """SPEC 5A (M1 exit): two objects planted aside and behind the robot are found by one full
     sweep, at the right base-frame bearings, with no duplicate entries.
@@ -287,7 +324,17 @@ class Scene:
     out of view or when ``plant`` is false); the embedder returns her enrolled embedding.
     """
 
-    def __init__(self, mini, tmp_path, monkeypatch, *, enroll: bool, plant: bool):
+    def __init__(
+        self,
+        mini,
+        tmp_path,
+        monkeypatch,
+        *,
+        enroll: bool,
+        plant: bool,
+        age_group: str = "adult",
+        extra_config: str = "",
+    ):
         import shutil
         from datetime import UTC, datetime
         from types import SimpleNamespace
@@ -304,7 +351,9 @@ class Scene:
         data = tmp_path / "app-data"
         shutil.copytree(DATA, data)
         shutil.copy2(root / "configs/dev-unmeasured.yaml", data / "app.yaml")
+        (data / "app.yaml").write_text((data / "app.yaml").read_text() + extra_config)
         monkeypatch.setattr(app_module, "DATA", data)
+        self.plant = plant  # a test may set it later: the person walks into view
         cfg = RoboEmotConfig()
         face_vec = np.eye(8, dtype=np.float32)[0]
         self.ada_id = None
@@ -317,8 +366,13 @@ class Scene:
                 "Ada",
                 [face_vec * (1 + 0.01 * i) for i in range(5)],
                 "sim-face",
-                consent=Consent("Ada", datetime(2026, 1, 1, tzinfo=UTC), ("face", "refresh")),
-                age_group="adult",
+                consent=Consent(
+                    "Ada",
+                    datetime(2026, 1, 1, tzinfo=UTC),
+                    ("face", "refresh"),
+                    guardian=None if age_group in ("adult", "senior") else "Mum",
+                ),
+                age_group=age_group,
             ).person_id
         width, height, box = 320, 240, 80
         camera = CameraModel(
@@ -326,6 +380,8 @@ class Scene:
         )
         half_h = math.radians(cfg.world.camera_fov_h_deg) / 2 * 0.9
         half_v = math.radians(cfg.world.camera_fov_v_deg) / 2 * 0.9
+
+        scene = self
 
         class PlantedCamera:
             def __init__(self, joint_state):
@@ -337,7 +393,7 @@ class Scene:
                 az, el = from_base_frame(PLANTED_AZ, 0.0, state, FRAME)
                 img = np.zeros((height, width, 3), np.uint8)
                 img[0, 0, 1], img[0, 0, 2] = self.n % 250, (self.n // 250) % 250  # never repeats
-                if plant and abs(az) <= half_h and abs(el) <= half_v:
+                if scene.plant and abs(az) <= half_h and abs(el) <= half_v:
                     y = -math.tan(az)
                     u = width / 2 - camera.focal_px * math.tan(az)
                     v = height / 2 - camera.focal_y_px * math.tan(el) * math.sqrt(1 + y * y)
@@ -468,3 +524,70 @@ def test_an_unknown_age_face_engages_the_minor_caps(mini, tmp_path, monkeypatch)
             engaged = motion["minor_present"]
             time.sleep(0.1)
     assert engaged
+
+
+def test_the_rest_posture_lowers_the_head_and_droops_the_antennas_on_the_simulated_robot(loop):
+    """SPEC 7A: resting commands the rest posture (IDLE priority) through the real loop; the
+    simulated head pitches down and the antennas droop outward, from where they settled."""
+    from roboemot.circadian import CircadianMotion
+
+    manifest = loop.manifest
+    stack = ConfigStack()
+    stack.set_manifest_behaviour(manifest.model.behaviour)
+    cfg = stack.effective()
+    names = ("head.pitch", "antenna_right", "antenna_left")
+    _hold(loop, {n: manifest.dofs[n].home for n in names}, 8.0)
+    settled = loop.driver.read_state()
+    loop.clear("test")  # the settle command is COMMANDED and never expires: it would win
+    motion = CircadianMotion(cfg.circadian, cfg.circadian_motion, manifest.dofs)
+    end = time.monotonic() + 10.0
+    while time.monotonic() < end:
+        for cmd in motion.commands(time.monotonic(), "resting"):
+            loop.feed(cmd)
+        time.sleep(0.02)
+    state = loop.driver.read_state()
+    assert state["head.pitch"] - settled["head.pitch"] > 0.05
+    assert state["antenna_right"] < settled["antenna_right"] - 0.05
+    assert state["antenna_left"] > settled["antenna_left"] + 0.05
+
+
+def test_the_robot_reacts_distinctly_to_an_adult_a_child_and_a_stranger_without_an_llm(
+    mini, tmp_path, monkeypatch
+):
+    """SPEC 14 (M2 exit, first half), on the simulated robot: the same planted face is a known
+    adult, a known child (declared age) or nobody enrolled, and walks into view of a settled
+    robot. Only ONNX is faked (see ``Scene``); no LLM. See ``exit_support`` for what is
+    measured and ``docs/eval/m2.md`` for the numbers."""
+    from exit_support import BODY_MAP_YAML, check_exit, format_run, react
+    from roboemot.config.schema import RoboEmotConfig
+
+    manifest = load_manifest(DATA / "reachy-mini-wireless.yaml", allow_unmeasured_dynamics=True)
+    home = {n: d.home for n, d in manifest.dofs.items()}
+    runs = {}
+    for case, enroll, age in (("adult", True, "adult"), ("child", True, "child"),
+                              ("stranger", False, "adult")):  # fmt: skip
+        root = tmp_path / case
+        root.mkdir()
+        monkeypatch.setenv("ROBOEMOT_DATA_DIR", str(root / "roboemot-data"))
+        with Scene(
+            mini, root, monkeypatch, enroll=enroll, plant=False, age_group=age,
+            extra_config=BODY_MAP_YAML,
+        ) as scene:  # fmt: skip
+            runs[case] = react(
+                scene.app,
+                scene.reader.read_state,
+                lambda: setattr(scene, "plant", True),
+                case,
+                home,
+            )
+        print(format_run(runs[case]))
+    # the simulated servos overshoot the planted bearing by a few degrees (28.6 against 25 once)
+    check_exit(runs["adult"], runs["child"], runs["stranger"], PLANTED_AZ + math.radians(5))
+    yaw = {c: max(r.arrival.head_yaw_peak, r.provoked.head_yaw_peak) for c, r in runs.items()}
+    cap = RoboEmotConfig().safety.minor_motion_factor
+    # all three are looked at (attention is not gated by the register); the adult is followed all
+    # the way, while the minor caps scale the child's and the stranger's head to the cap's share
+    assert yaw["adult"] > 0.9 * PLANTED_AZ
+    for case in ("child", "stranger"):
+        assert 0.5 * cap * PLANTED_AZ < yaw[case] <= cap * PLANTED_AZ + math.radians(2), yaw
+        assert yaw[case] < yaw["adult"]

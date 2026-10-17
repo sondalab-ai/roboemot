@@ -100,21 +100,128 @@ class AffectConfig(Strict):
     )
 
 
+APPRAISAL_EVENTS = frozenset(
+    {
+        "person.known",
+        "person.known_child",
+        "person.known_teen",
+        "person.known_adult",
+        "person.known_senior",
+        "person.known_unknown",
+        "person.unknown_appears",
+        "animal.appears",
+        "idle.long",
+        "sound.loud",
+        "light.on",
+        "light.off",
+        "circadian.woken_at_night",
+        "conversation.unavailable",
+    }
+)
+APPRAISAL_EVENT_PREFIXES = ("link.",)  # connectivity: link.<name>.lost / .restored (SPEC 12A)
+
+
+def rule_identity(event: str, when: Any) -> tuple[str, tuple[tuple[str, Any], ...]]:
+    """What makes two appraisal rules the same rule: the event and its normalised ``when``.
+
+    Numbers and booleans compare equal in a ``when`` match (1 == 1.0 == True), so they are
+    normalised to float here. Used by the keyed-list merge and by the engine's cooldowns.
+    """
+    items = (
+        (k, float(v) if isinstance(v, (bool, int, float)) else v)
+        for k, v in sorted((when or {}).items())
+    )
+    return event, tuple(items)
+
+
 class AppraisalRule(Strict):
     event: str = param("", "Bus event name that triggers the rule")
     valence: float = param(0.0, "Valence impulse", ge=-1, le=1)
     arousal: float = param(0.0, "Arousal impulse", ge=-1, le=1)
     label: str | None = param(None, "Label forced for event_label_hold_s, if any")
+    when: dict[str, str | bool | float] = param(
+        {}, "Payload fields that must equal these values for the rule to fire (empty: always)"
+    )
     cooldown_s: float = param(5.0, "Minimum time between two firings", unit="s", ge=0, le=3600)
 
 
 class AppraisalConfig(Strict):
+    idle_after_s: float = param(
+        600.0,
+        "No face, attention target or recognised person for this long emits idle.long",
+        unit="s",
+        ge=1,
+        le=86400,
+    )
+    unknown_face_after_s: float = param(
+        3.0,
+        "A new face track still without an owner after this long emits person.unknown_appears "
+        "(the identity decision window, SPEC 5)",
+        unit="s",
+        ge=0,
+        le=60,
+    )
+    track_lost_s: float = param(
+        2.0,
+        "A pending unknown face not seen for this long is dropped without an event",
+        unit="s",
+        ge=0.1,
+        le=60,
+    )
+    track_lost_periods: float = param(
+        3.0,
+        "A pending unknown face also survives this many face-detection periods at the rate the "
+        "governor allows now: the lifetime is the larger of this and track_lost_s, so the "
+        "resting vision rate does not drop it between two frames",
+        ge=1,
+        le=100,
+    )
+    extra_events: list[str] = param(
+        [],
+        "Event names emitted by plugins, accepted in rules besides the library's events",
+    )
     rules: list[AppraisalRule] = param(
         [
-            {"event": "person.recognized", "valence": 0.4, "arousal": 0.2, "cooldown_s": 60},
+            # Starting points (SPEC 7): an enrolled person gives +0.4/+0.2; a child adds joy, an
+            # adult stays calm, a stranger raises curiosity with almost no valence change.
+            {"event": "person.known", "valence": 0.4, "arousal": 0.2, "cooldown_s": 60},
+            {
+                "event": "person.known_child",
+                "valence": 0.3,
+                "arousal": 0.3,
+                "label": "joy",
+                "cooldown_s": 60,
+            },
+            # Teen and senior start with the adult values (SPEC 7).
+            {"event": "person.known_teen", "valence": 0.1, "label": "calm", "cooldown_s": 60},
+            {"event": "person.known_adult", "valence": 0.1, "label": "calm", "cooldown_s": 60},
+            {"event": "person.known_senior", "valence": 0.1, "label": "calm", "cooldown_s": 60},
+            {
+                "event": "person.unknown_appears",
+                "valence": 0.05,
+                "arousal": 0.3,
+                "label": "curiosity",
+                "cooldown_s": 30,
+            },
+            {
+                "event": "animal.appears",
+                "valence": 0.2,
+                "arousal": 0.3,
+                "label": "curiosity",
+                "cooldown_s": 30,
+            },
             {"event": "sound.loud", "arousal": 0.6, "label": "surprise", "cooldown_s": 5},
             {"event": "idle.long", "arousal": -0.6, "label": "sleepy", "cooldown_s": 600},
             {"event": "light.on", "arousal": 0.3, "label": "surprise", "cooldown_s": 30},
+            # Lights switched off: a mild drift toward sleepy (SPEC 7A, Light sensing).
+            {"event": "light.off", "arousal": -0.2, "label": "sleepy", "cooldown_s": 60},
+            # Woken in the quiet hours: brief, mild and never a refusal (SPEC 7A, Waking).
+            {
+                "event": "circadian.woken_at_night",
+                "valence": -0.3,
+                "arousal": 0.1,
+                "cooldown_s": 300,
+            },
             # Connectivity (SPEC 12A): subdued while offline, perks up when back.
             {"event": "link.network.lost", "valence": -0.2, "arousal": -0.3, "cooldown_s": 300},
             {
@@ -135,6 +242,23 @@ class AppraisalConfig(Strict):
         ],
         "Event to impulse rules (SPEC 7, Affect state)",
     )
+
+    @model_validator(mode="after")
+    def _rules_are_known_and_unique(self) -> AppraisalConfig:
+        known = APPRAISAL_EVENTS | set(self.extra_events)
+        seen: set[Any] = set()
+        for rule in self.rules:
+            if rule.event not in known and not rule.event.startswith(APPRAISAL_EVENT_PREFIXES):
+                raise ValueError(
+                    f"appraisal rule for unknown event {rule.event!r}; the library emits "
+                    f"{sorted(APPRAISAL_EVENTS)} and link.*; plugin events go in "
+                    "appraisal.extra_events"
+                )
+            ident = rule_identity(rule.event, rule.when)
+            if ident in seen:
+                raise ValueError(f"two appraisal rules for {rule.event!r} with the same `when`")
+            seen.add(ident)
+        return self
 
 
 # --------------------------------------------------------------------------- register (SPEC 7)
@@ -186,6 +310,119 @@ class RegisterConfig(Strict):
     )
 
 
+# --------------------------------------------------------------------------- expression (SPEC 7)
+
+EXPRESSION_MAX_CYCLE_S = 30.0  # one cycle; with repeat <= 20 an expression ends within minutes
+EXPRESSION_CHANNELS = (
+    "antenna_right",
+    "antenna_left",
+    "head.pitch",
+    "head.roll",
+    "head.yaw",
+    "body_yaw",
+)
+
+
+class IntensityFactors(Strict):
+    low: float = param(0.6, "Amplitude factor of reaction_intensity low", ge=0, le=2)
+    medium: float = param(1.0, "Amplitude factor of reaction_intensity medium", ge=0, le=2)
+    high: float = param(1.3, "Amplitude factor of reaction_intensity high", ge=0, le=2)
+
+
+class ExpressionConfig(Strict):
+    intensity_factor: IntensityFactors = param(
+        {}, "Reaction intensity (register) as an amplitude factor: starting points to tune"
+    )
+    intensity_floor: float = param(
+        0.5,
+        "Share of the amplitude kept at affect intensity 0; the amplitude grows linearly to "
+        "the full value at intensity 1",
+        ge=0,
+        le=1,
+    )
+    max_amplitude: float = param(
+        2.0,
+        "Ceiling of the product register x reaction x persona x circadian x affect factors",
+        ge=0,
+        le=3,
+    )
+    min_interval_s: float = param(
+        1.0, "Minimum time between the starts of two expressions", unit="s", ge=0, le=60
+    )
+    retrigger_s: float = param(
+        30.0,
+        "A label that stays held replays its expression at most this often",
+        unit="s",
+        ge=1,
+        le=3600,
+    )
+    retrigger_min_intensity: float = param(
+        0.15, "A held label replays only while the affect intensity is at least this", ge=0, le=1
+    )
+    command_ttl_s: float = param(
+        0.25,
+        "Lifetime of each expression command in the arbiter: the offset drops to zero by itself "
+        "if the app stops feeding it",
+        unit="s",
+        ge=0.05,
+        le=2,
+    )
+    register_hold_s: float = param(
+        2.0,
+        "A face track not seen for this long leaves the active register set",
+        unit="s",
+        ge=0.1,
+        le=60,
+    )
+    register_hold_periods: float = param(
+        3.0,
+        "A face track also stays in the active register set for this many face-detection "
+        "periods at the rate the governor allows now (the larger of the two applies)",
+        ge=1,
+        le=100,
+    )
+
+
+class ExpressionEntry(Strict):
+    """One affect label rendered as keyframes per channel (SPEC 7, Expression map)."""
+
+    channels: dict[str, list[tuple[float, float]]] = param(
+        {},
+        "Channel name to [t_s, offset_deg] keyframes of one cycle; piecewise-linear in time. "
+        "Every channel starts at t=0 and ends at the same time with offset 0",
+    )
+    repeat: int = param(1, "How many times the cycle plays back to back (a wiggle)", ge=1, le=20)
+    curve: Literal["linear", "minjerk", "ease_in_out"] = param(
+        "linear", "Easing between two keyframes"
+    )
+    additive: Literal[True] = param(
+        True, "Layered on top of other motion; only additive expressions exist in M2"
+    )
+
+    @field_validator("channels")
+    @classmethod
+    def _channels(cls, channels: dict[str, list[tuple[float, float]]]) -> dict:
+        if not channels:
+            raise ValueError("an expression needs at least one channel")
+        ends = set()
+        for name, frames in channels.items():
+            if name not in EXPRESSION_CHANNELS:
+                raise ValueError(f"unknown channel {name!r}, expected one of {EXPRESSION_CHANNELS}")
+            if len(frames) < 2:
+                raise ValueError(f"channel {name}: needs at least two keyframes")
+            times = [t for t, _ in frames]
+            if times[-1] > EXPRESSION_MAX_CYCLE_S:
+                raise ValueError(f"channel {name}: longer than {EXPRESSION_MAX_CYCLE_S} s")
+            if times[0] != 0 or any(b <= a for a, b in zip(times, times[1:], strict=False)):
+                raise ValueError(f"channel {name}: times must start at 0 and increase")
+            if frames[0][1] != 0 or frames[-1][1] != 0:
+                raise ValueError(f"channel {name}: the first and last offsets must be 0")
+            ends.add(times[-1])
+        if len(ends) != 1:
+            raise ValueError("all channels must end at the same time")
+        return channels
+
+
 # --------------------------------------------------------------------------- circadian (SPEC 7A)
 
 
@@ -195,6 +432,37 @@ class StateEffects(Strict):
     speech_rate: float = param(1.0, "Speech rate multiplier", ge=0.5, le=1.5)
     volume_db: float = param(0.0, "Volume offset", unit="dB", ge=-24, le=6)
     vision_rate_scale: float = param(1.0, "Vision rate multiplier", ge=0, le=1)
+    idle_period_scale: float = param(
+        1.0, "Idle breathing period multiplier (above 1 is slower)", ge=0.5, le=4
+    )
+    expression_scale: float = param(
+        1.0,
+        "Amplitude multiplier of affect expressions in this state (the circadian factor)",
+        ge=0,
+        le=2,
+    )
+
+
+class CircadianMotion(Strict):
+    """Robot-specific circadian primitives (SPEC 7A, Effects by state); the manifest ships them.
+
+    Offsets in degrees in the file, radians in code. ``yawn`` and ``stretch`` are additive like
+    an expression (same shape and rules); ``rest_pose_deg`` is the absolute rest posture.
+    """
+
+    yawn: ExpressionEntry | None = param(None, "Drowsy yawn primitive; none: no yawn")
+    stretch: ExpressionEntry | None = param(None, "Waking stretch primitive; none: no stretch")
+    rest_pose_deg: dict[str, float] = param(
+        {}, "Absolute rest posture by channel in degrees (head lowered, antennas down)"
+    )
+
+    @field_validator("rest_pose_deg")
+    @classmethod
+    def _rest_channels(cls, pose: dict[str, float]) -> dict[str, float]:
+        for name in pose:
+            if name not in EXPRESSION_CHANNELS:
+                raise ValueError(f"unknown channel {name!r}, expected one of {EXPRESSION_CHANNELS}")
+        return pose
 
 
 class CircadianConfig(Strict):
@@ -223,12 +491,66 @@ class CircadianConfig(Strict):
     wake_hold_s: float = param(
         300.0, "How long the wake word keeps a resting robot awake", unit="s", ge=10, le=3600
     )
+    update_period_s: float = param(
+        10.0,
+        "Seconds between two model updates (process S, entrainment, state)",
+        unit="s",
+        ge=0.1,
+        le=600,
+    )
+    publish_period_s: float = param(
+        60.0, "Seconds between two periodic circadian.state messages", unit="s", ge=1, le=3600
+    )
+    presence_window_s: float = param(
+        60.0,
+        "People seen, recognised or attended to within this time count as present",
+        unit="s",
+        ge=1,
+        le=3600,
+    )
+    presence_periods: float = param(
+        3.0,
+        "Presence also lasts this many face-detection periods at the governor's current rate",
+        ge=1,
+        le=100,
+    )
+    idle_poll_s: float = param(
+        1.0,
+        "How often the idle light reader checks whether a sample is due",
+        unit="s",
+        ge=0.05,
+        le=60,
+    )
+    command_ttl_s: float = param(
+        0.5,
+        "Lifetime of the rest posture and the yawn or stretch commands",
+        unit="s",
+        ge=0.1,
+        le=5,
+    )
+    stretch_cooldown_s: float = param(
+        600.0,
+        "Least time between two waking stretches, so people coming and going at night do not "
+        "replay it",
+        unit="s",
+        ge=0,
+        le=86400,
+    )
+    yawn_interval_s: float = param(
+        120.0, "Mean time between two yawns while drowsy", unit="s", ge=5, le=3600
+    )
+    yawn_jitter: float = param(
+        0.5, "Yawn interval jitter as a share of the interval (0: regular)", ge=0, le=0.9
+    )
+    hold_max_min: float = param(720.0, "Longest hold an app may request", unit="min", ge=1, le=1440)
     states: dict[str, StateEffects] = param(
         {
             "awake": {"arousal_baseline": 0.2},
             "drowsy": {
                 "arousal_baseline": -0.3,
                 "idle_motion_scale": 0.6,
+                "idle_period_scale": 1.5,
+                "expression_scale": 0.8,
                 "speech_rate": 0.9,
                 "volume_db": -3.0,
                 "vision_rate_scale": 0.5,
@@ -236,6 +558,7 @@ class CircadianConfig(Strict):
             "resting": {
                 "arousal_baseline": -0.7,
                 "idle_motion_scale": 0.0,
+                "expression_scale": 0.6,
                 "speech_rate": 0.85,
                 "volume_db": -6.0,
                 "vision_rate_scale": 0.05,
@@ -272,6 +595,46 @@ class LightConfig(Strict):
         le=1,
     )
     calibration_k: float | None = param(None, "Lux calibration constant with exposure metadata")
+    sample_interval_s: float = param(
+        10.0,
+        "At most one vision frame is measured for light per this time",
+        unit="s",
+        ge=0.5,
+        le=600,
+    )
+    history_h: float = param(
+        24.0, "Hours of one-per-minute light values kept in RAM", unit="h", ge=1, le=72
+    )
+    confirm_s: float = param(
+        60.0,
+        "A new light level counts (and fires light.on or light.off) only after the samples have "
+        "agreed on it for this long",
+        unit="s",
+        ge=0,
+        le=600,
+    )
+    noise_smooth_s: float = param(
+        120.0,
+        "Time constant of the smoothing of the image noise before the dark-noise rule, so one "
+        "noisy frame does not decide it",
+        unit="s",
+        ge=0,
+        le=3600,
+    )
+    noise_hysteresis: float = param(
+        0.01,
+        "Hysteresis on noise_dark_threshold: a room leaves dark by noise only below the "
+        "threshold minus this",
+        ge=0,
+        le=0.04,
+    )
+    stale_s: float = param(
+        300.0,
+        "A light reading older than this is ignored (the clock rules alone)",
+        unit="s",
+        ge=10,
+        le=3600,
+    )
 
 
 # --------------------------------------------------------------------------- motion (SPEC 10)
@@ -303,6 +666,231 @@ class IdleConfig(Strict):
 class MotionConfig(Strict):
     arbiter: ArbiterConfig = param({}, "Arbiter parameters")
     idle: IdleConfig = param({}, "Idle motion parameters")
+
+
+# --------------------------------------------------------------------------- reflexes (SPEC 10)
+
+REFLEX_TRIGGERS = ("loud_onset", "new_voice", "proximity")
+REFLEX_PRIMITIVES = ("startle", "withdraw", "turn_toward")
+# Which primitives a trigger may drive. A turn needs a bearing, so only a voice can drive it; a
+# withdraw is the only answer to a close face (never towards it, SPEC 12).
+REFLEX_TRIGGER_PRIMITIVES = {
+    "loud_onset": ("startle", "withdraw"),
+    "new_voice": ("turn_toward",),
+    "proximity": ("withdraw",),
+}
+# Threshold range per trigger: onset ratio over the sound floor, silence before a new voice (s),
+# face height as a fraction of the frame.
+REFLEX_THRESHOLD_RANGE = {
+    "loud_onset": (1.5, 100.0),
+    "new_voice": (0.2, 600.0),
+    "proximity": (0.05, 1.0),
+}
+REFLEX_DURATION_MS = (100.0, 800.0)  # SPEC 10: a reflex pre-empts lower sources for 100 to 800 ms
+
+
+# The protective withdraw reflex is frozen at runtime (config/stack.py): its own fields, and the
+# shared ``reflexes`` settings the engine reads for it. A new field must be added to one of these
+# (or to the explicit "does not affect a withdraw" list in the tests).
+WITHDRAW_RULE_FIELDS = (
+    "enabled", "trigger", "primitive", "threshold", "amplitude_deg", "cooldown_s",
+    "duration_ms", "suppress_with_minor",
+)  # fmt: skip
+WITHDRAW_SHARED_FIELDS = (
+    "enabled", "max_amplitude_deg", "max_age_ms", "max_age_vision_ms", "max_future_ms",
+    "command_ttl_ms", "attack_fraction", "release_fraction", "proximity_rearm_ratio",
+    "motion_eps_deg",
+)  # fmt: skip
+
+
+class ReflexRule(Strict):
+    name: str = param("", "Rule name (unique; shown in the debug report)")
+    enabled: bool = param(
+        True,
+        "Whether the rule fires. A runtime override may not enable a rule the approved config "
+        "disabled, nor disable a withdraw rule (protective)",
+    )
+    trigger: Literal["loud_onset", "new_voice", "proximity"] = param(
+        "loud_onset", "Percept that fires the rule"
+    )
+    primitive: Literal["startle", "withdraw", "turn_toward"] = param(
+        "startle",
+        "Motion played: startle (head back, antennas up), withdraw (head back) or "
+        "turn_toward (head yaw towards a voice)",
+    )
+    threshold: float = param(
+        3.0,
+        "Trigger level: loud_onset, RMS ratio over the running floor; new_voice, seconds of "
+        "silence before a voice counts as new; proximity, face height as a fraction of the frame. "
+        "Runtime overrides may only make a reflex safer: a higher threshold for loud_onset and "
+        "new_voice (fires less), a lower one for proximity (the withdraw fires earlier)",
+        unit="ratio, s or frame fraction (per trigger)",
+        ge=0.05,
+        le=600,
+    )
+    amplitude_deg: float = param(
+        12.0,
+        "Peak head deflection (turn_toward: the most it may turn from where it points)",
+        unit="deg",
+        ge=0,
+        le=90,
+        conservative="lower",
+    )
+    cooldown_s: float = param(
+        3.0, "Minimum time between two firings", unit="s", ge=0, le=600, conservative="higher"
+    )
+    duration_ms: float = param(
+        400.0,
+        "How long the reflex pre-empts lower sources (SPEC 10: 100 to 800 ms)",
+        unit="ms",
+        ge=REFLEX_DURATION_MS[0],
+        le=REFLEX_DURATION_MS[1],
+        conservative="lower",
+    )
+    suppress_with_minor: bool = param(
+        False,
+        "Do not fire while a possible minor is present (always on for turn_toward: the robot "
+        "never moves towards a minor, SPEC 12)",
+        conservative="true",
+    )
+
+    @model_validator(mode="after")
+    def _consistent(self) -> ReflexRule:
+        if ROUTE_NAME.fullmatch(self.name) is None:
+            raise ValueError("a reflex rule needs a name of letters, digits, _ and -")
+        if self.primitive not in REFLEX_TRIGGER_PRIMITIVES[self.trigger]:
+            raise ValueError(
+                f"reflex {self.name!r}: trigger {self.trigger} drives "
+                f"{REFLEX_TRIGGER_PRIMITIVES[self.trigger]}, not {self.primitive}"
+            )
+        lo, hi = REFLEX_THRESHOLD_RANGE[self.trigger]
+        if not lo <= self.threshold <= hi:
+            raise ValueError(
+                f"reflex {self.name!r}: threshold for {self.trigger} must be within {lo} and {hi}"
+            )
+        if self.primitive == "turn_toward" and not self.suppress_with_minor:
+            raise ValueError(f"reflex {self.name!r}: turn_toward must set suppress_with_minor")
+        return self
+
+
+class ReflexAudioConfig(Strict):
+    enabled: bool = param(
+        True,
+        "Read the microphone level for loud-onset reflexes",
+        restart=True,
+        conservative="false",
+    )
+    poll_hz: float = param(50.0, "Audio chunk read rate", unit="Hz", ge=5, le=200, restart=True)
+    floor_half_life_s: float = param(
+        2.0, "How slowly the sound floor rises to a louder room (it falls at once); a shorter "
+        "half-life makes a sustained noise stop counting as an onset sooner",
+        unit="s", ge=0.1, le=60, conservative="lower",
+    )  # fmt: skip
+    min_rms: float = param(
+        0.01, "Lowest floor: a quieter room is treated as this level, so a higher value makes "
+        "the onsets fire less", unit="full scale", ge=0.0001, le=0.5, conservative="higher",
+    )  # fmt: skip
+    loud_event_ratio: float = param(
+        4.0, "Level over the floor that publishes sound.loud for the affect engine", ge=1.5, le=100
+    )
+    loud_event_refractory_s: float = param(
+        1.0, "Minimum time between two sound.loud events", unit="s", ge=0, le=60
+    )
+
+
+class ReflexConfig(Strict):
+    enabled: bool = param(True, "Run the reflex engine", conservative="false")
+    max_amplitude_deg: float = param(
+        45.0,
+        "Ceiling on every rule's amplitude (the manifest limits and the minor cap still apply)",
+        unit="deg", ge=0, le=90, conservative="lower",
+    )  # fmt: skip
+    max_age_ms: float = param(
+        150.0,
+        "A trigger older than this when the motion loop gets to it is dropped, never played late",
+        unit="ms", ge=20, le=2000, conservative="lower",
+    )  # fmt: skip
+    max_age_vision_ms: float = param(
+        250.0,
+        "Same for a close-face trigger: the frame stamp is the capture time, so detection time "
+        "counts (SPEC 13: vision trigger to reflex motion, 250 ms on cm4)",
+        unit="ms", ge=20, le=2000, conservative="lower",
+    )  # fmt: skip
+    max_future_ms: float = param(
+        50.0,
+        "A trigger stamped later than now by more than this is dropped (a bad clock); within it "
+        "the latency is counted as 0",
+        unit="ms", ge=0, le=1000, conservative="lower",
+    )  # fmt: skip
+    command_ttl_ms: float = param(
+        100.0, "A reflex command expires this long after its last tick", unit="ms", ge=20,
+        le=1000, conservative="lower",
+    )  # fmt: skip
+    attack_fraction: float = param(
+        0.25, "Share of the duration spent reaching the peak (higher is gentler)", ge=0.05,
+        le=0.9, conservative="higher",
+    )  # fmt: skip
+    release_fraction: float = param(
+        0.4, "Share of the duration spent returning (startle and withdraw)", ge=0.05, le=0.9
+    )
+    antenna_ratio: float = param(
+        2.0, "Startle antenna lift per unit of head deflection", ge=0, le=10,
+        conservative="lower",
+    )  # fmt: skip
+    proximity_rearm_ratio: float = param(
+        0.8, "A close face re-arms the proximity rule once it falls below this share of the "
+        "threshold", ge=0.1, le=1,
+    )  # fmt: skip
+    motion_eps_deg: float = param(
+        0.2, "Pose change that counts as a movement: a smaller reflex is no_motion, and the first "
+        "such change ends the motion latency figure", unit="deg", ge=0.01, le=5,
+        conservative="higher",
+    )  # fmt: skip
+    latency_window: int = param(200, "Latency samples kept per trigger", ge=10, le=10000)
+    audio: ReflexAudioConfig = param({}, "Microphone level source")
+    rules: list[ReflexRule] = param(
+        [
+            {
+                "name": "startle-loud",
+                "trigger": "loud_onset",
+                "primitive": "startle",
+                "threshold": 6.0,
+                "amplitude_deg": 12,
+                "cooldown_s": 3,
+                "duration_ms": 400,
+            },
+            {
+                "name": "withdraw-close",
+                "trigger": "proximity",
+                "primitive": "withdraw",
+                "threshold": 0.4,
+                "amplitude_deg": 15,
+                "cooldown_s": 4,
+                "duration_ms": 500,
+            },
+            {
+                "name": "turn-to-voice",
+                "trigger": "new_voice",
+                "primitive": "turn_toward",
+                "threshold": 3.0,
+                "amplitude_deg": 40,
+                "cooldown_s": 5,
+                "duration_ms": 800,
+                "suppress_with_minor": True,
+            },
+        ],
+        "Reflex rules (SPEC 10)",
+    )
+
+    @model_validator(mode="after")
+    def _shape_fits(self) -> ReflexConfig:
+        if self.attack_fraction + self.release_fraction > 1 - 0.05:
+            raise ValueError("attack_fraction + release_fraction must leave a hold of 5%")
+        names = [r.name for r in self.rules]
+        dupes = sorted({n for n in names if names.count(n) > 1})
+        if dupes:
+            raise ValueError(f"duplicate reflex rule names: {dupes}")
+        return self
 
 
 # --------------------------------------------------------------------------- safety (SPEC 12)
@@ -1537,9 +2125,17 @@ with warnings.catch_warnings():
         affect: AffectConfig = param({}, "SPEC 7")
         appraisal: AppraisalConfig = param({}, "SPEC 7")
         register: RegisterConfig = param({}, "SPEC 7")
+        expression: ExpressionConfig = param({}, "SPEC 7")
+        expression_map: dict[str, ExpressionEntry] = param(
+            {}, "SPEC 7, 11A: affect label to keyframes per channel; the robot manifest ships it"
+        )
         circadian: CircadianConfig = param({}, "SPEC 7A")
+        circadian_motion: CircadianMotion = param(
+            {}, "SPEC 7A: yawn, stretch and rest posture; the robot manifest ships them"
+        )
         light: LightConfig = param({}, "SPEC 7A")
         motion: MotionConfig = param({}, "SPEC 10")
+        reflexes: ReflexConfig = param({}, "SPEC 10")
         attention: AttentionConfig = param({}, "SPEC 4A, 5")
         identity: IdentityConfig = param({}, "SPEC 5, 6")
         enrollment: EnrollmentConfig = param({}, "SPEC 6")
@@ -1562,6 +2158,26 @@ with warnings.catch_warnings():
             dupes = sorted({n for n in names if names.count(n) > 1})
             if dupes:
                 raise ValueError(f"duplicate llm route names: {dupes}")
+            return self
+
+        @model_validator(mode="after")
+        def _appraisal_labels_exist(self) -> RoboEmotConfig:
+            for rule in self.appraisal.rules:
+                if rule.label is not None and rule.label not in self.affect.labels:
+                    raise ValueError(
+                        f"appraisal rule for {rule.event!r} uses label {rule.label!r}, "
+                        f"not one of affect.labels {sorted(self.affect.labels)}"
+                    )
+            return self
+
+        @model_validator(mode="after")
+        def _expression_labels_exist(self) -> RoboEmotConfig:
+            unknown = sorted(set(self.expression_map) - set(self.affect.labels))
+            if unknown:
+                raise ValueError(
+                    f"expression_map has labels {unknown} that are not in affect.labels "
+                    f"{sorted(self.affect.labels)}"
+                )
             return self
 
         @model_validator(mode="after")

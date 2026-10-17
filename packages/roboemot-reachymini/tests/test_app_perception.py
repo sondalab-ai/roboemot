@@ -246,17 +246,19 @@ def test_app_without_the_appearance_model_has_no_auto_enrollment(data):
 
 
 def test_circadian_state_scales_the_vision_rate(data):
+    """The runner's model is what the governor reads: a hold on the app moves the rate."""
     app = new_app(AppWithFakes)
     app.source_class = EmptySource
-    app.circadian = CircadianModel(RoboEmotConfig().circadian)
-    app.circadian.state = "resting"
     stop, thread, errors = start(app)
     want = RoboEmotConfig().circadian.states["resting"].vision_rate_scale
     try:
         assert wait_for(lambda: app.perception is not None and app.perception.pipeline is not None)
+        assert wait_for(lambda: app.circadian_runner is not None and app.circadian is not None)
+        assert isinstance(app.circadian, CircadianModel)
         governor = app.perception.pipeline.governor
+        app.hold("resting", 5)
         assert wait_for(lambda: governor.scale == want)
-        app.circadian.state = "awake"
+        app.hold("awake", 5)
         assert wait_for(lambda: governor.scale == 1.0)
     finally:
         stop.set()
@@ -454,3 +456,30 @@ def test_the_minor_caps_stay_on_without_vision_and_when_frames_stop(data):
         stop.set()
         thread.join(15)
     assert not errors
+
+
+def test_a_known_child_gives_joy_on_affect_state_and_in_the_debug_report(data):
+    from roboemot.vision.types import PersonRecognized
+
+    app = new_app(app_module.RoboEmotApp)
+    stop, thread, errors = start(app)
+    states: list = []
+    try:
+        assert wait_for(lambda: app.bus is not None and app.diagnostics is not None)
+        app.bus.subscribe("affect.state", lambda m: states.append(m.payload))
+        assert wait_for(lambda: states), "affect.state was never published"
+        assert states[-1].valence == pytest.approx(0.0, abs=0.01)
+        app.bus.publish(
+            "person.recognized",
+            PersonRecognized(1, "p-1", time.monotonic(), 0.0, 0.0, "child", True),
+            time.monotonic(),
+        )
+        assert wait_for(lambda: states[-1].valence > 0.5), "no positive valence after the child"
+        assert states[-1].label == "joy"
+        report = app.diagnostics.report()["sections"]["roboemot.app"]["data"]
+        assert report["valence"] > 0 and report["label"] in app.affect_runner.engine.cfg.labels
+        assert "p-1" not in json.dumps(report)
+    finally:
+        stop.set()
+        thread.join(15)
+    assert not errors and not thread.is_alive()
