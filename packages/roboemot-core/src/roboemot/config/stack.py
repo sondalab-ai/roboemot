@@ -304,13 +304,34 @@ def violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Viol
     return found + reflex_violations(approved, candidate)
 
 
+# A withdraw rule is protective: these fields are frozen at runtime (equal to the approved value).
+WITHDRAW_FROZEN = ("cooldown_s", "duration_ms", "amplitude_deg", "suppress_with_minor")
+
+
 def reflex_violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Violation]:
-    """Reflex rule changes that no single field's direction can express (SPEC 10, 12): the
-    trigger and primitive are the rule's identity, a withdraw rule is protective and may not be
-    switched off, a disabled rule may not be switched on, and the threshold is safer upward for a
-    sound or a voice (fires less) and downward for a close face (the withdraw fires earlier)."""
+    """Reflex changes that no single field's direction can express (SPEC 10, 11A, 12).
+
+    Rules cannot be removed or renamed, and ``trigger`` and ``primitive`` are their identity. A
+    disabled rule cannot be enabled. A withdraw rule is protective: it cannot be disabled (nor
+    can ``reflexes.enabled``, while one is on), its ``WITHDRAW_FROZEN`` fields cannot change, and
+    the shared ``proximity_rearm_ratio``, ``max_age_vision_ms`` and ``max_amplitude_deg`` (as it
+    caps the withdraw) cannot move so that it fires less. The threshold is safer upward for a
+    sound or a voice (fires less) and downward for a close face (the withdraw fires earlier).
+    """
+    found: list[Violation] = []
+
+    def refuse(path: str, was: Any, now: Any) -> None:
+        found.append(Violation("safety", path, was, now))
+
     base = {r.name: r for r in approved.reflexes.rules}
-    found = []
+    cand = {r.name: r for r in candidate.reflexes.rules}
+    for name in base:
+        if name not in cand:
+            refuse(f"reflexes.rules.{name}", "present", "removed")
+    protective = [r for r in base.values() if r.primitive == "withdraw" and r.enabled]
+    ar, cr = approved.reflexes, candidate.reflexes
+    if protective and ar.enabled and not cr.enabled:
+        refuse("reflexes.enabled", True, False)
     for rule in candidate.reflexes.rules:
         ref = base.get(rule.name)
         if ref is None:
@@ -318,21 +339,35 @@ def reflex_violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> li
         at = f"reflexes.rules.{rule.name}"
         for attr in ("trigger", "primitive"):
             if getattr(rule, attr) != getattr(ref, attr):
-                found.append(
-                    Violation("safety", f"{at}.{attr}", getattr(ref, attr), getattr(rule, attr))
-                )
+                refuse(f"{at}.{attr}", getattr(ref, attr), getattr(rule, attr))
         if rule.trigger != ref.trigger:
             continue
         if rule.enabled and not ref.enabled:
-            found.append(Violation("safety", f"{at}.enabled", False, True))
-        if ref.enabled and not rule.enabled and ref.primitive == "withdraw":
-            found.append(Violation("safety", f"{at}.enabled", True, False))
+            refuse(f"{at}.enabled", False, True)
+        if ref.primitive == "withdraw":
+            if ref.enabled and not rule.enabled:
+                refuse(f"{at}.enabled", True, False)
+            for attr in WITHDRAW_FROZEN:
+                if getattr(rule, attr) != getattr(ref, attr):
+                    refuse(f"{at}.{attr}", getattr(ref, attr), getattr(rule, attr))
         fires_earlier = rule.threshold < ref.threshold
         fires_later = rule.threshold > ref.threshold
         if (ref.trigger == "proximity" and fires_later) or (
             ref.trigger != "proximity" and fires_earlier
         ):
-            found.append(Violation("safety", f"{at}.threshold", ref.threshold, rule.threshold))
+            refuse(f"{at}.threshold", ref.threshold, rule.threshold)
+    if protective:
+        if cr.proximity_rearm_ratio < ar.proximity_rearm_ratio:
+            refuse(
+                "reflexes.proximity_rearm_ratio", ar.proximity_rearm_ratio, cr.proximity_rearm_ratio
+            )
+        if cr.max_age_vision_ms < ar.max_age_vision_ms:
+            refuse("reflexes.max_age_vision_ms", ar.max_age_vision_ms, cr.max_age_vision_ms)
+        if any(
+            min(r.amplitude_deg, cr.max_amplitude_deg) < min(r.amplitude_deg, ar.max_amplitude_deg)
+            for r in protective
+        ):
+            refuse("reflexes.max_amplitude_deg", ar.max_amplitude_deg, cr.max_amplitude_deg)
     return found
 
 

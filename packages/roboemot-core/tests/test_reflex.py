@@ -183,12 +183,80 @@ def test_runtime_overrides_may_tighten_never_loosen_a_reflex():
     assert violations(on, off) and not violations(off, on)
 
 
-def test_removing_a_rule_does_not_read_as_loosening_the_next_one():
+def test_removing_a_rule_is_refused_and_does_not_shift_the_next_one():
     two = RoboEmotConfig.model_validate(
         {"reflexes": {"rules": [rule(name="a", amplitude_deg=5), rule(name="b", amplitude_deg=40)]}}
     )
     one = RoboEmotConfig.model_validate({"reflexes": {"rules": [rule(name="b", amplitude_deg=40)]}})
-    assert violations(two, one) == []
+    assert [v.path for v in violations(two, one)] == ["reflexes.rules.a"]
+
+
+def test_a_withdraw_cannot_be_removed_or_switched_off_as_a_whole():
+    approved = RoboEmotConfig()  # the defaults hold withdraw-close
+    no_withdraw = cfg_rules(
+        *(r.model_dump() for r in approved.reflexes.rules if "close" not in r.name)
+    )
+    assert "reflexes.rules.withdraw-close" in {v.path for v in violations(approved, no_withdraw)}
+    killed = RoboEmotConfig.model_validate({"reflexes": {"enabled": False}})
+    assert "reflexes.enabled" in {v.path for v in violations(approved, killed)}
+    no_protection = cfg_rules(rule(name="a"))
+    assert "reflexes.enabled" not in {
+        v.path
+        for v in violations(
+            no_protection,
+            RoboEmotConfig.model_validate(
+                {"reflexes": {"enabled": False, "rules": [rule(name="a")]}}
+            ),
+        )
+    }
+
+
+def test_a_withdraw_rule_is_frozen_except_for_firing_earlier():
+    base = dict(PROXIMITY, cooldown_s=4, duration_ms=500, amplitude_deg=15)
+    approved = cfg_rules(base)
+    for change in (
+        {"cooldown_s": 9},
+        {"cooldown_s": 1},
+        {"duration_ms": 300},
+        {"amplitude_deg": 5},
+        {"amplitude_deg": 20},
+        {"suppress_with_minor": True},
+    ):
+        assert flagged(approved, cfg_rules(base | change)) == set(change), change
+    assert flagged(approved, cfg_rules(base | {"threshold": 0.3})) == set()
+
+
+def test_shared_reflex_settings_cannot_weaken_an_enabled_withdraw():
+    approved = RoboEmotConfig.model_validate(
+        {"reflexes": {"rules": [PROXIMITY | {"amplitude_deg": 30}], "max_amplitude_deg": 45}}
+    )
+
+    def paths(**top):
+        cand = RoboEmotConfig.model_validate(
+            {"reflexes": {"rules": [PROXIMITY | {"amplitude_deg": 30}]} | top}
+        )
+        return {v.path for v in violations(approved, cand)}
+
+    assert paths(proximity_rearm_ratio=0.5) == {"reflexes.proximity_rearm_ratio"}
+    assert paths(max_age_vision_ms=100) == {"reflexes.max_age_vision_ms"}
+    assert "reflexes.max_amplitude_deg" in paths(max_amplitude_deg=10)
+    assert "reflexes.max_amplitude_deg" not in paths(max_amplitude_deg=35)  # still above 30
+    off = RoboEmotConfig.model_validate({"reflexes": {"rules": [dict(PROXIMITY, enabled=False)]}})
+    assert not {
+        v.path
+        for v in violations(
+            off,
+            RoboEmotConfig.model_validate(
+                {
+                    "reflexes": {
+                        "rules": [dict(PROXIMITY, enabled=False)],
+                        "proximity_rearm_ratio": 0.5,
+                    }
+                }
+            ),
+        )
+        if "rearm" in v.path
+    }
 
 
 # --------------------------------------------------------------------------- loud onset
