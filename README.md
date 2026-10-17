@@ -8,7 +8,7 @@ on its Raspberry Pi CM4.
 The design lives in [`docs/specs/kickoff.md`](docs/specs/kickoff.md).
 Notes for coding agents are in [`CLAUDE.md`](CLAUDE.md).
 
-## Status: M0 skeleton (work in progress)
+## Status: M2 affect and expression (work in progress)
 
 | Area | SPEC | State |
 | --- | --- | --- |
@@ -21,11 +21,17 @@ Notes for coding agents are in [`CLAUDE.md`](CLAUDE.md).
 | Arbiter + safety limiter (Python reference) | 10, 12 | Done; two independent reviews; property and fuzz tests (limits, velocity, acceleration, 65 deg coupling with a 3 deg planning margin) |
 | Arbiter + safety limiter in C++ (`rt/`) | 10 | Matches the reference on 600-tick golden vectors (tolerance 1e-9); same input validation; not yet a running process |
 | Reachy Mini driver, motion loop, app wrapper | 4A | `pytest -m sim` passes against the MuJoCo simulator (command-to-state 37-55 ms measured on a cloud dev container, not a CM4); not yet run on the real robot |
-| Affect engine, circadian model, camera light sensing | 7, 7A | Done, tested; no camera wiring yet |
+| Affect engine, appraisal rules, empathic register, expression maps, reflexes, circadian model with camera light sensing | 7, 7A, 10 | Done, tested; the M2 exit checks pass in the simulator and through the app on a mocked client ([M2 report](docs/eval/m2.md)); expressions, rest posture, light thresholds and reflex timing not yet seen on the real robot |
 | OpenAI-compatible LLM router | 8 | Done, tested against fake servers |
 | Voice delivery composition (Piper, speech API) | 8 | Composition only; no TTS engine wired |
 | Bus transport (Zenoh vs iceoryx2) | 11 | In-process bus only; decision pending |
-| Vision, identity, registry, ASR/TTS engines, mirror, web UI | 5, 6, 8, 9 | Not started (M1-M4) |
+| Vision, identity, registry, world model, enrollment web UI | 5, 5A, 6 | Done, tested (M1); measured on a Mac, the CM4 is not measured ([M1 report](docs/eval/m1.md)) |
+| ASR/TTS engines, mirror | 8, 9 | Not started (M3-M4) |
+
+The affect state (valence, arousal and a label) is an expressive model: it decides which gesture
+the robot plays and how large, and will shape the tone of voice and conversation once M3 lands. It is not a claim
+that the robot has feelings, and RoboEmot does not present it as one (SPEC 12, Behaviour and
+content).
 
 Known limits: the Reachy Mini manifest has placeholder translation limits and null dynamics
 (measure in M0); until then the app starts only when installed with `--dev`.

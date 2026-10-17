@@ -528,3 +528,16 @@ def test_a_stricter_register_mid_expression_drops_the_body_and_the_amplitude_at_
     assert r.update(state("joy", 0.5, impulse=9), stranger, 3.0)
     for t in (3.0, 3.05, 3.1, 3.2):
         assert all("body_yaw" not in c.targets for c in r.commands(t))
+
+
+def test_started_counts_every_expression_the_renderer_starts(cfg, manifest):
+    """The counter tests wait on: it rises once per started expression, not per tick."""
+    r = renderer(cfg, manifest)
+    r.update(state("calm", 0.5), active(), 0.0)  # the first state only sets the label
+    assert r.started == 0
+    assert r.update(state("joy", 0.5, impulse=1), active(), 2.0)
+    assert r.started == 1
+    r.update(state("joy", 0.5, impulse=1), active(), 2.1)  # nothing new: no start
+    assert r.started == 1
+    assert r.update(state("curiosity", 0.5, impulse=2), active(), 8.0)
+    assert r.started == 2

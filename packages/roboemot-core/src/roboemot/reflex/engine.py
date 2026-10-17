@@ -264,6 +264,9 @@ class ReflexEngine:
         if not cfg.enabled or core.holding:
             # Disabled, or the watchdog holds the robot (the app stalled): no new reflex, and the
             # running ones end. The hold is at SAFETY priority and must stay (SPEC 10, 12).
+            # A close-face trigger dropped here must not consume its arm: the face is still
+            # close afterwards and the next frame has to fire the withdraw.
+            self._rearm(triggers)
             self._stop_all(core)
             return
         if core.minor_present:
@@ -291,9 +294,18 @@ class ReflexEngine:
             age = now - p.stamp
             if age > limit / MS_PER_S or age < -cfg.max_future_ms / MS_PER_S:
                 self._stat(p.rule).stale += 1
+                if vision:
+                    self._rearm([p])
             else:
                 fresh.append(p)
         return fresh, cfg
+
+    def _rearm(self, dropped: list[_Pending]) -> None:
+        """Re-arm the close-face rules whose edge was dropped without playing."""
+        with self._lock:
+            for p in dropped:
+                if self._face_armed.get(p.rule) is False:
+                    self._face_armed[p.rule] = True
 
     def _face_edge(self, rule: ReflexRule, cfg: ReflexConfig) -> None:
         armed = self._face_armed.get(rule.name, True)

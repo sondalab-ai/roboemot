@@ -774,6 +774,103 @@ def test_a_face_frame_at_the_same_stamp_does_not_cancel_a_face_in_it():
     assert rig.stats("w")["fired"] == 1
 
 
+def test_a_close_face_arriving_during_the_watchdog_hold_still_withdraws_once_the_hold_ends():
+    """SPEC 10, 12: the hold drops the trigger; it must not consume the arm, or the face
+    (still close) would not withdraw until it had left and come back."""
+    rig = Rig(cfg_with(PROXIMITY))
+    rig.tick()
+    stall(rig, 0.4)
+    assert rig.loop.core.holding
+    rig.bus.publish("percept.face", face(rig.t, 0.6), rig.t)
+    stall(rig, 0.1)
+    assert rig.stats("w")["fired"] == 0 and rig.loop.core.holding
+    rig.tick()  # the app is back
+    rig.bus.publish("percept.face", face(rig.t, 0.6), rig.t)
+    rig.tick(3)
+    assert not rig.loop.core.holding
+    assert rig.stats("w")["fired"] == 1
+
+
+def test_a_close_face_dropped_as_stale_or_future_re_arms_the_rule():
+    """SPEC 10: a close-face trigger older than ``max_age_vision_ms`` or stamped beyond
+    ``max_future_ms`` is dropped and the rule is armed again, so the face (still close) fires on
+    its next fresh frame."""
+    cfg = cfg_with(PROXIMITY)
+    rig = Rig(cfg)
+    rig.tick()
+    old = rig.t - cfg.max_age_vision_ms / 1000 - 0.5
+    rig.bus.publish("percept.face", face(old, 0.6), old)
+    rig.tick()
+    assert rig.stats("w")["fired"] == 0 and rig.stats("w")["dropped_stale"] == 1
+    rig.bus.publish("percept.face", face(rig.t, 0.6), rig.t)
+    rig.tick()
+    assert rig.stats("w")["fired"] == 1
+
+    rig = Rig(cfg)
+    rig.tick()
+    future = rig.t + cfg.max_future_ms / 1000 + 0.5
+    rig.bus.publish("percept.face", face(future, 0.6), future)
+    rig.tick()
+    assert rig.stats("w")["fired"] == 0 and rig.stats("w")["dropped_stale"] == 1
+    assert rig.engine._face_armed["w"] is True  # the next face frame can fire it
+
+
+def test_a_trigger_dropped_by_cooldown_or_a_minor_keeps_the_arm_consumed_until_the_face_leaves():
+    """SPEC 10: only a hold, a disabled engine or age give the arm back. A cooldown or a minor
+    suppression is an answer: the face must leave and return to fire again."""
+
+    def leave_and_return(rig):
+        for _ in range(3):
+            rig.bus.publish("percept.face_frame", rig.t, rig.t)
+            rig.tick()
+        rig.bus.publish("percept.face", face(rig.t, 0.6), rig.t)
+        rig.tick()
+
+    def stay_close(rig, seconds):
+        for _ in range(round(seconds / DT)):
+            rig.bus.publish("percept.face", face(rig.t, 0.6), rig.t)
+            rig.tick()
+
+    rig = Rig(cfg_with(PROXIMITY | {"cooldown_s": 1}))
+    rig.tick()
+    rig.bus.publish("percept.face", face(rig.t, 0.6), rig.t)
+    rig.tick()
+    leave_and_return(rig)  # back inside the cooldown
+    assert rig.stats("w")["fired"] == 1 and rig.stats("w")["dropped_cooldown"] == 1
+    stay_close(rig, 1.5)  # the cooldown is over, the face has not left
+    assert rig.stats("w")["fired"] == 1
+    leave_and_return(rig)
+    assert rig.stats("w")["fired"] == 2
+
+    rig = Rig(cfg_with(PROXIMITY | {"suppress_with_minor": True}))
+    rig.loop.set_minor_present(True)
+    rig.tick()
+    rig.bus.publish("percept.face", face(rig.t, 0.6), rig.t)
+    rig.tick()
+    assert rig.stats("w")["suppressed_minor"] == 1
+    rig.loop.set_minor_present(False)
+    stay_close(rig, 0.5)
+    assert rig.stats("w")["fired"] == 0
+    leave_and_return(rig)
+    assert rig.stats("w")["fired"] == 1
+
+
+def test_enabling_the_reflexes_with_a_face_already_close_withdraws_once():
+    """SPEC 10: a disabled engine drops the close-face edge without consuming the arm, so the
+    face still close when the reflexes are enabled again withdraws once, on its next frame."""
+    rig = Rig(cfg_with(PROXIMITY, enabled=False))
+    rig.tick()
+    for _ in range(5):
+        rig.bus.publish("percept.face", face(rig.t, 0.6), rig.t)
+        rig.tick()
+    assert rig.stats("w")["fired"] == 0
+    rig.engine.apply_config(cfg_with(PROXIMITY), math.radians(3))
+    for _ in range(5):
+        rig.bus.publish("percept.face", face(rig.t, 0.6), rig.t)
+        rig.tick()
+    assert rig.stats("w")["fired"] == 1
+
+
 NEUTRAL = {
     ReflexConfig: {
         "release_fraction", "proximity_rearm_ratio", "latency_window", "rules",
