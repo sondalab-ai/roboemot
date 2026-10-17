@@ -11,12 +11,13 @@ copied into storage, logged or passed on. Two producers feed it:
   arrived for ``circadian.idle_sample_interval_s`` (vision idle, off or stalled).
 
 The level (dark, dim, bright) is the estimator's, with its hysteresis, and counts as the room's
-level only after ``light.confirm_samples`` consecutive samples agree.
+level only after the samples have agreed on it for ``light.confirm_s``.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 import threading
 from collections import deque
 from collections.abc import Callable
@@ -80,7 +81,9 @@ class LightSampler:
         self._last: float | None = None  # clock time of the latest sample
         self._attempt: float | None = None  # clock time of the latest idle read, kept or not
         self._streak_level: Level | None = None
-        self._streak = 0
+        self._streak_since = 0.0
+        self._noise: float | None = None  # smoothed image noise
+        self._noise_at = 0.0
         self._confirmed: Level | None = None
         self.samples = 0
 
@@ -145,8 +148,8 @@ class LightSampler:
             return False
         if bgr and img.ndim == COLOR_NDIM:
             img = img[..., ::-1]
-        with self._lock:
-            self._add(self._estimator.measure(img, exposure_s=exposure_s, gain=gain))
+        luma, noise = self._estimator.stats(img)
+        self.offer_stats(luma, noise, exposure_s=exposure_s, gain=gain)
         return True
 
     def offer_stats(
@@ -162,12 +165,25 @@ class LightSampler:
         if not self.enabled:
             return None
         with self._lock:
-            reading = self._estimator.classify(luma, noise, exposure_s=exposure_s, gain=gain)
-            self._add(reading)
+            now = self._clock()
+            smooth = self._smooth_noise(noise, now)
+            reading = self._estimator.classify(luma, smooth, exposure_s=exposure_s, gain=gain)
+            self._add(LightReading(reading.level, luma, noise, reading.index), now)
             return reading
 
-    def _add(self, r: LightReading) -> None:
-        now = self._clock()
+    def _smooth_noise(self, noise: float, now: float) -> float:
+        """Exponentially smoothed noise (``light.noise_smooth_s``) for the dark-noise rule."""
+        tau = self.cfg.noise_smooth_s
+        if self._noise is None or tau <= 0:
+            self._noise = noise
+        else:
+            self._noise += (1 - math.exp(-max(0.0, now - self._noise_at) / tau)) * (
+                noise - self._noise
+            )
+        self._noise_at = now
+        return self._noise
+
+    def _add(self, r: LightReading, now: float) -> None:
         self._last = now
         self.samples += 1
         minute = int(now // SECONDS_PER_MINUTE)
@@ -177,11 +193,9 @@ class LightSampler:
         if self._acc is None:
             self._acc = _Acc(minute)
         self._acc.add(r)
-        if r.level == self._streak_level:
-            self._streak += 1
-        else:
-            self._streak_level, self._streak = r.level, 1
-        if self._streak >= self.cfg.confirm_samples:
+        if r.level != self._streak_level:
+            self._streak_level, self._streak_since = r.level, now
+        if now - self._streak_since >= self.cfg.confirm_s:
             self._confirmed = r.level
 
     # ---- readers

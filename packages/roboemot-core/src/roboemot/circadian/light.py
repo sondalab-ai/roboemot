@@ -35,15 +35,20 @@ class LightEstimator:
         self.cfg = cfg
         self.level: Level | None = None
 
-    def measure(
-        self, frame: np.ndarray, *, exposure_s: float | None = None, gain: float | None = None
-    ) -> LightReading:
+    @staticmethod
+    def stats(frame: np.ndarray) -> tuple[float, float]:
+        """Mean luminance and noise of a frame (RGB channel order for a colour image)."""
         img = np.asarray(frame, dtype=np.float64) / UINT8_MAX
         luma_img = img @ LUMA_WEIGHTS if img.ndim == COLOR_NDIM else img
         luma = float(luma_img.mean())
         # Noise: robust spread of horizontal pixel differences (flat regions dominate).
-        diffs = np.abs(np.diff(luma_img, axis=1))
-        noise = float(np.median(diffs))
+        noise = float(np.median(np.abs(np.diff(luma_img, axis=1))))
+        return luma, noise
+
+    def measure(
+        self, frame: np.ndarray, *, exposure_s: float | None = None, gain: float | None = None
+    ) -> LightReading:
+        luma, noise = self.stats(frame)
         return self.classify(luma, noise, exposure_s=exposure_s, gain=gain)
 
     def classify(
@@ -60,10 +65,16 @@ class LightEstimator:
             index = self.cfg.calibration_k * luma / (exposure_s * gain)
         else:
             index = luma
-            if luma < self.cfg.bright_luma and noise > self.cfg.noise_dark_threshold:
+            if luma < self.cfg.bright_luma and noise > self._noise_edge():
                 index = 0.0  # pumped sensor gain: the room is dark whatever the history
         self.level = self._classify(index)
         return LightReading(self.level, luma, noise, index)
+
+    def _noise_edge(self) -> float:
+        """The noise above which a dim image reads dark: lower while it already reads dark, so
+        sensor noise hovering at the threshold does not toggle the level."""
+        edge, h = self.cfg.noise_dark_threshold, self.cfg.noise_hysteresis
+        return edge - h if self.level == "dark" else edge + h if self.level else edge
 
     def _classify(self, index: float) -> Level:
         c, h, prev = self.cfg, self.cfg.hysteresis, self.level

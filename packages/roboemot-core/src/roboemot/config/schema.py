@@ -597,12 +597,28 @@ class LightConfig(Strict):
     history_h: float = param(
         24.0, "Hours of one-per-minute light values kept in RAM", unit="h", ge=1, le=72
     )
-    confirm_samples: int = param(
-        2,
-        "A new light level counts (and fires light.on or light.off) after this many "
-        "consecutive samples agree",
-        ge=1,
-        le=20,
+    confirm_s: float = param(
+        60.0,
+        "A new light level counts (and fires light.on or light.off) only after the samples have "
+        "agreed on it for this long",
+        unit="s",
+        ge=0,
+        le=600,
+    )
+    noise_smooth_s: float = param(
+        120.0,
+        "Time constant of the smoothing of the image noise before the dark-noise rule, so one "
+        "noisy frame does not decide it",
+        unit="s",
+        ge=0,
+        le=3600,
+    )
+    noise_hysteresis: float = param(
+        0.01,
+        "Hysteresis on noise_dark_threshold: a room leaves dark by noise only below the "
+        "threshold minus this",
+        ge=0,
+        le=0.04,
     )
     stale_s: float = param(
         300.0,

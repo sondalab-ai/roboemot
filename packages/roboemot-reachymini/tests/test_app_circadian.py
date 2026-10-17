@@ -109,9 +109,11 @@ def test_a_dark_room_late_in_the_evening_puts_the_robot_to_rest(data, fed, monke
         assert not any(c.source in ("idle", "idle-additive") for c in fed)
         assert any(c.source == REST_SOURCE for c in fed)  # held, not released
         # the app API: wake the robot; it stretches and the posture is released
+        seen: list[str] = []  # the wake hold is 300 virtual s, a fraction of a real second
+        app.bus.subscribe("circadian.state", lambda m: seen.append(m.payload.state))
         app.wake()
         assert wait_for(lambda: any(c.source == FX_SOURCE for c in fed))
-        assert wait_for(lambda: section(app)["state"] != "resting")
+        assert wait_for(lambda: "awake" in seen)
         app.hold("resting", 600)  # minutes of virtual time: 20 s real
         assert wait_for(lambda: section(app)["state"] == "resting")
         assert section(app)["hold"]["state"] == "resting"

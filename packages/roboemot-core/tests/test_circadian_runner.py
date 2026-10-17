@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import random
 import time
 from dataclasses import fields
@@ -157,8 +158,10 @@ def test_the_level_needs_confirmation_and_goes_stale(cfg):
     s, clock = sampler(cfg)
     assert s.level() is None
     s.offer_stats(0.5, 0.0)
-    assert s.level() is None  # one sample: not confirmed (light.confirm_samples is 2)
     clock.advance(1)
+    s.offer_stats(0.5, 0.0)
+    assert s.level() is None  # agreed for 1 s only (light.confirm_s is 60)
+    clock.advance(cfg.light.confirm_s)
     s.offer_stats(0.5, 0.0)
     assert s.level() == "bright"
     clock.advance(cfg.light.stale_s + 1)
@@ -261,10 +264,12 @@ def run_for(r, clock, seconds, step=10.0):
         r.tick(clock.t)
 
 
-def feed_light(r, clock, luma, n=3, noise=0.0):
-    for _ in range(n):
+def feed_light(r, clock, luma, noise=0.0):
+    """Samples long enough for the level to be confirmed (light.confirm_s)."""
+    step = r.cfg.light.sample_interval_s
+    for _ in range(math.ceil(r.cfg.light.confirm_s / step) + 1):
         r.sampler.offer_stats(luma, noise)
-        clock.advance(1.0)
+        clock.advance(step)
 
 
 def test_light_changes_raise_events_only_after_a_confirmed_level(cfg):
@@ -701,3 +706,18 @@ def test_circadian_config_validation_of_the_new_fields():
     with pytest.raises(ConfigError):
         ConfigStack(app={"circadian": {"yawn_jitter": 2.0}})
     assert {f.name for f in fields(LightSample)} >= {"when", "luma", "noise", "presence"}
+
+
+def test_sensor_noise_around_its_threshold_in_a_dim_room_does_not_flap(cfg):
+    """Auto-exposure case: a dim room whose image noise hovers at the dark-noise threshold."""
+    sink = RecordingSink()
+    r, clock = runner_for(cfg, affect=sink)
+    feed_light(r, clock, 0.25)
+    run_for(r, clock, 20)
+    rng = random.Random(2)
+    edge = cfg.light.noise_dark_threshold
+    for _ in range(600):
+        r.sampler.offer_stats(0.25, max(0.0, edge + rng.gauss(0, 0.008)))
+        clock.advance(cfg.light.sample_interval_s)
+        r.tick(clock.t)
+    assert len(sink.events) <= 2
