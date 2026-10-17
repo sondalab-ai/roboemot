@@ -407,13 +407,13 @@ cmd expr 4 1 0.76 -1 2 head.pitch 0.1 antenna_right 0.3
 cmd startle 1 0 0.76 0.81 2 head.yaw -0.5 head.pitch -0.3
 expect 4 head.yaw 1.1261041362364832 head.pitch -0.08016741921482975 body_yaw 0.2 antenna_right 1.2999999999999992
 tick 0.77 0
-cmd idle 5 0 0.77 -1 1 head.pitch 0.013922704772547135
+cmd idle 5 0 0.77 -1 1 head.pitch 0.013922704772547137
 cmd app 2 0 0.77 -1 3 head.yaw 1.6 body_yaw 0.2 antenna_right 1.0
 cmd expr 4 1 0.77 -1 2 head.pitch 0.1 antenna_right 0.3
 cmd startle 1 0 0.77 0.8200000000000001 2 head.yaw -0.5 head.pitch -0.3
 expect 4 head.yaw 1.1001041362364832 head.pitch -0.10016741921482976 body_yaw 0.2 antenna_right 1.2999999999999992
 tick 0.78 0
-cmd idle 5 0 0.78 -1 1 head.pitch 0.014065588384008204
+cmd idle 5 0 0.78 -1 1 head.pitch 0.014065588384008206
 cmd app 2 0 0.78 -1 3 head.yaw 1.6 body_yaw 0.2 antenna_right 1.0
 cmd expr 4 1 0.78 -1 2 head.pitch 0.1 antenna_right 0.3
 cmd startle 1 0 0.78 0.8300000000000001 2 head.yaw -0.5 head.pitch -0.3
@@ -659,7 +659,7 @@ cmd expr 4 1 1.18 -1 2 head.pitch 0.1 antenna_right 0.3
 cmd startle 1 0 1.18 1.23 2 head.yaw -0.5 head.pitch -0.3
 expect 4 head.yaw -0.12789586376351755 head.pitch -0.2999999999999998 body_yaw 0.2 antenna_right 1.2999999999999992
 tick 1.19 0
-cmd idle 5 0 1.19 -1 1 head.pitch 0.018567379344983332
+cmd idle 5 0 1.19 -1 1 head.pitch 0.018567379344983335
 cmd app 2 0 1.19 -1 3 head.yaw 1.6 body_yaw 0.2 antenna_right 1.0
 cmd expr 4 1 1.19 -1 2 head.pitch 0.1 antenna_right 0.3
 cmd startle 1 0 1.19 1.24 2 head.yaw -0.5 head.pitch -0.3
@@ -725,7 +725,7 @@ cmd app 2 0 1.31 -1 3 head.yaw 1.6 body_yaw 0.2 antenna_right 1.0
 cmd expr 4 1 1.31 -1 2 head.pitch 0.1 antenna_right 0.3
 expect 4 head.yaw -0.4523514030894215 head.pitch -0.2606558725443201 body_yaw 0.2 antenna_right 1.2999999999999992
 tick 1.32 0
-cmd idle 5 0 1.32 -1 1 head.pitch 0.019374302002365305
+cmd idle 5 0 1.32 -1 1 head.pitch 0.01937430200236531
 cmd app 2 0 1.32 -1 3 head.yaw 1.6 body_yaw 0.2 antenna_right 1.0
 cmd expr 4 1 1.32 -1 2 head.pitch 0.1 antenna_right 0.3
 expect 4 head.yaw -0.4651583455051595 head.pitch -0.24903528290779442 body_yaw 0.2 antenna_right 1.2999999999999992
@@ -1141,7 +1141,7 @@ cmd app 2 0 2.14 -1 3 head.yaw 1.6 body_yaw 0.2 antenna_right 1.0
 cmd expr 4 1 2.14 -1 2 head.pitch 0.1 antenna_right 0.3
 expect 4 head.yaw 0.7943166910115574 head.pitch 0.07010796517964032 body_yaw 0.12000000000000034 antenna_right 0.7102000000000007
 tick 2.15 1
-cmd idle 5 0 2.15 -1 1 head.pitch 0.016737975815969953
+cmd idle 5 0 2.15 -1 1 head.pitch 0.016737975815969957
 cmd app 2 0 2.15 -1 3 head.yaw 1.6 body_yaw 0.2 antenna_right 1.0
 cmd expr 4 1 2.15 -1 2 head.pitch 0.1 antenna_right 0.3
 expect 4 head.yaw 0.8123166910115575 head.pitch 0.07004278548958233 body_yaw 0.12000000000000034 antenna_right 0.7102000000000007
@@ -1156,7 +1156,7 @@ cmd app 2 0 2.17 -1 3 head.yaw 1.6 body_yaw 0.2 antenna_right 1.0
 cmd expr 4 1 2.17 -1 2 head.pitch 0.1 antenna_right 0.3
 expect 4 head.yaw 0.8483166910115575 head.pitch 0.06990941991726773 body_yaw 0.12000000000000034 antenna_right 0.7102000000000007
 tick 2.18 1
-cmd idle 5 0 2.18 -1 1 head.pitch 0.016402078952427485
+cmd idle 5 0 2.18 -1 1 head.pitch 0.01640207895242748
 cmd app 2 0 2.18 -1 3 head.yaw 1.6 body_yaw 0.2 antenna_right 1.0
 cmd expr 4 1 2.18 -1 2 head.pitch 0.1 antenna_right 0.3
 expect 4 head.yaw 0.8663166910115575 head.pitch 0.06984124737145682 body_yaw 0.12000000000000034 antenna_right 0.7102000000000007
@@ -1186,7 +1186,7 @@ cmd app 2 0 2.23 -1 3 head.yaw 1.6 body_yaw 0.2 antenna_right 1.0
 cmd expr 4 1 2.23 -1 2 head.pitch 0.1 antenna_right 0.3
 expect 4 head.yaw 0.9379537172286353 head.pitch 0.06948576266810472 body_yaw 0.12000000000000034 antenna_right 0.7102000000000007
 tick 2.24 1
-cmd idle 5 0 2.24 -1 1 head.pitch 0.015686318501688397
+cmd idle 5 0 2.24 -1 1 head.pitch 0.0156863185016884
 cmd app 2 0 2.24 -1 3 head.yaw 1.6 body_yaw 0.2 antenna_right 1.0
 cmd expr 4 1 2.24 -1 2 head.pitch 0.1 antenna_right 0.3
 expect 4 head.yaw 0.9463629737829075 head.pitch 0.06941179110101339 body_yaw 0.12000000000000034 antenna_right 0.7102000000000007
@@ -1196,7 +1196,7 @@ cmd app 2 0 2.25 -1 3 head.yaw 1.6 body_yaw 0.2 antenna_right 1.0
 cmd expr 4 1 2.25 -1 2 head.pitch 0.1 antenna_right 0.3
 expect 4 head.yaw 0.9527722303371796 head.pitch 0.06933687836265633 body_yaw 0.12000000000000034 antenna_right 0.7102000000000007
 tick 2.26 1
-cmd idle 5 0 2.26 -1 1 head.pitch 0.01543505324040252
+cmd idle 5 0 2.26 -1 1 head.pitch 0.015435053240402521
 cmd app 2 0 2.26 -1 3 head.yaw 1.6 body_yaw 0.2 antenna_right 1.0
 cmd expr 4 1 2.26 -1 2 head.pitch 0.1 antenna_right 0.3
 expect 4 head.yaw 0.9571814868914518 head.pitch 0.06926103194424266 body_yaw 0.12000000000000034 antenna_right 0.7102000000000007
@@ -1206,22 +1206,22 @@ cmd app 2 0 2.27 -1 3 head.yaw 1.6 body_yaw 0.2 antenna_right 1.0
 cmd expr 4 1 2.27 -1 2 head.pitch 0.1 antenna_right 0.3
 expect 4 head.yaw 0.9595907434457239 head.pitch 0.06918425943035218 body_yaw 0.12000000000000034 antenna_right 0.7102000000000007
 tick 2.28 1
-cmd idle 5 0 2.28 -1 1 head.pitch 0.01517761416361844
+cmd idle 5 0 2.28 -1 1 head.pitch 0.015177614163618442
 cmd app 2 0 2.28 -1 3 head.yaw 1.6 body_yaw 0.2 antenna_right 1.0
 cmd expr 4 1 2.28 -1 2 head.pitch 0.1 antenna_right 0.3
 expect 4 head.yaw 0.9599999999999979 head.pitch 0.06910656849817215 body_yaw 0.12000000000000034 antenna_right 0.7102000000000007
 tick 2.29 1
-cmd idle 5 0 2.29 -1 1 head.pitch 0.015046611527883414
+cmd idle 5 0 2.29 -1 1 head.pitch 0.015046611527883415
 cmd app 2 0 2.29 -1 3 head.yaw 1.6 body_yaw 0.2 antenna_right 1.0
 cmd expr 4 1 2.29 -1 2 head.pitch 0.1 antenna_right 0.3
 expect 4 head.yaw 0.9599999999999996 head.pitch 0.06902796691673073 body_yaw 0.12000000000000034 antenna_right 0.7102000000000007
 tick 2.3 1
-cmd idle 5 0 2.3 -1 1 head.pitch 0.014914104243534405
+cmd idle 5 0 2.3 -1 1 head.pitch 0.014914104243534407
 cmd app 2 0 2.3 -1 3 head.yaw 1.6 body_yaw 0.2 antenna_right 1.0
 cmd expr 4 1 2.3 -1 2 head.pitch 0.1 antenna_right 0.3
 expect 4 head.yaw 0.9599999999999996 head.pitch 0.06894846254612101 body_yaw 0.12000000000000034 antenna_right 0.7102000000000007
 tick 2.31 1
-cmd idle 5 0 2.31 -1 1 head.pitch 0.014780105561189416
+cmd idle 5 0 2.31 -1 1 head.pitch 0.014780105561189418
 cmd app 2 0 2.31 -1 3 head.yaw 1.6 body_yaw 0.2 antenna_right 1.0
 cmd expr 4 1 2.31 -1 2 head.pitch 0.1 antenna_right 0.3
 expect 4 head.yaw 0.9599999999999996 head.pitch 0.06886806333671422 body_yaw 0.12000000000000034 antenna_right 0.7102000000000007
@@ -1266,12 +1266,12 @@ cmd app 2 0 2.39 -1 3 head.yaw 1.6 body_yaw 0.2 antenna_right 1.0
 cmd expr 4 1 2.39 -1 2 head.pitch 0.1 antenna_right 0.3
 expect 4 head.yaw 0.9599999999999996 head.pitch 0.06819363866316894 body_yaw 0.12000000000000034 antenna_right 0.7102000000000007
 tick 2.4 1
-cmd idle 5 0 2.4 -1 1 head.pitch 0.01350926361102302
+cmd idle 5 0 2.4 -1 1 head.pitch 0.013509263611023021
 cmd app 2 0 2.4 -1 3 head.yaw 1.6 body_yaw 0.2 antenna_right 1.0
 cmd expr 4 1 2.4 -1 2 head.pitch 0.1 antenna_right 0.3
 expect 4 head.yaw 0.9599999999999996 head.pitch 0.06810555816661519 body_yaw 0.12000000000000034 antenna_right 0.7102000000000007
 tick 2.41 1
-cmd idle 5 0 2.41 -1 1 head.pitch 0.01336111186832982
+cmd idle 5 0 2.41 -1 1 head.pitch 0.013361111868329818
 cmd app 2 0 2.41 -1 3 head.yaw 1.6 body_yaw 0.2 antenna_right 1.0
 cmd expr 4 1 2.41 -1 2 head.pitch 0.1 antenna_right 0.3
 expect 4 head.yaw 0.9599999999999996 head.pitch 0.06801666712099923 body_yaw 0.12000000000000034 antenna_right 0.7102000000000007
@@ -1286,7 +1286,7 @@ cmd app 2 0 2.43 -1 3 head.yaw 1.6 body_yaw 0.2 antenna_right 1.0
 cmd expr 4 1 2.43 -1 2 head.pitch 0.1 antenna_right 0.3
 expect 4 head.yaw 0.9599999999999996 head.pitch 0.06783648901886719 body_yaw 0.12000000000000034 antenna_right 0.7102000000000007
 tick 2.44 1
-cmd idle 5 0 2.44 -1 1 head.pitch 0.012908699966687413
+cmd idle 5 0 2.44 -1 1 head.pitch 0.012908699966687417
 cmd app 2 0 2.44 -1 3 head.yaw 1.6 body_yaw 0.2 antenna_right 1.0
 cmd expr 4 1 2.44 -1 2 head.pitch 0.1 antenna_right 0.3
 expect 4 head.yaw 0.9599999999999996 head.pitch 0.0677452199800126 body_yaw 0.12000000000000034 antenna_right 0.7102000000000007
@@ -1316,7 +1316,7 @@ cmd app 2 0 2.49 -1 3 head.yaw 1.6 body_yaw 0.2 antenna_right 1.0
 cmd expr 4 1 2.49 -1 2 head.pitch 0.1 antenna_right 0.3
 expect 4 head.yaw 0.9599999999999996 head.pitch 0.06727744228054025 body_yaw 0.12000000000000034 antenna_right 0.7102000000000007
 tick 2.5 0
-cmd idle 5 0 2.5 -1 1 head.pitch 0.01196944288207913
+cmd idle 5 0 2.5 -1 1 head.pitch 0.011969442882079129
 cmd app 2 0 2.5 -1 3 head.yaw 1.6 body_yaw 0.2 antenna_right 1.0
 cmd expr 4 1 2.5 -1 2 head.pitch 0.1 antenna_right 0.3
 expect 4 head.yaw 0.9619999999999996 head.pitch 0.06868239346741123 body_yaw 0.12060000000000035 antenna_right 0.7142000000000007
@@ -1441,7 +1441,7 @@ cmd app 2 0 2.74 -1 3 head.yaw 1.6 body_yaw 0.2 antenna_right 1.0
 cmd expr 4 1 2.74 -1 2 head.pitch 0.1 antenna_right 0.3
 expect 4 head.yaw 1.2817416583319887 head.pitch 0.10781769557796987 body_yaw 0.19999999999999973 antenna_right 1.2999999999999978
 tick 2.75 0
-cmd idle 5 0 2.75 -1 1 head.pitch 0.0076332198410466335
+cmd idle 5 0 2.75 -1 1 head.pitch 0.007633219841046634
 cmd app 2 0 2.75 -1 3 head.yaw 1.6 body_yaw 0.2 antenna_right 1.0
 cmd expr 4 1 2.75 -1 2 head.pitch 0.1 antenna_right 0.3
 expect 4 head.yaw 1.2821041362364825 head.pitch 0.10763321984104718 body_yaw 0.19999999999999973 antenna_right 1.2999999999999978
@@ -1565,603 +1565,803 @@ cmd idle 5 0 2.99 -1 1 head.pitch 0.003020254241726877
 cmd app 2 0 2.99 -1 3 head.yaw 1.6 body_yaw 0.2 antenna_right 1.0
 cmd expr 4 1 2.99 -1 2 head.pitch 0.1 antenna_right 0.3
 expect 4 head.yaw 1.2821041362364825 head.pitch 0.10302025424172691 body_yaw 0.19999999999999973 antenna_right 1.2999999999999978
-tick 3.0 0
-expect 4 head.yaw 1.2821041362364825 head.pitch 0.10302025424172691 body_yaw 0.19999999999999973 antenna_right 1.2999999999999978
-tick 3.01 0
-expect 4 head.yaw 1.2821041362364825 head.pitch 0.10302025424172691 body_yaw 0.19999999999999973 antenna_right 1.2999999999999978
-tick 3.02 0
-expect 4 head.yaw 1.2821041362364825 head.pitch 0.10302025424172691 body_yaw 0.19999999999999973 antenna_right 1.2999999999999978
-tick 3.03 0
-expect 4 head.yaw 1.2821041362364825 head.pitch 0.10302025424172691 body_yaw 0.19999999999999973 antenna_right 1.2999999999999978
-tick 3.04 0
-expect 4 head.yaw 1.2821041362364825 head.pitch 0.10302025424172691 body_yaw 0.19999999999999973 antenna_right 1.2999999999999978
-tick 3.05 0
-expect 4 head.yaw 1.2821041362364825 head.pitch 0.10302025424172691 body_yaw 0.19999999999999973 antenna_right 1.2999999999999978
-tick 3.06 0
-expect 4 head.yaw 1.2821041362364825 head.pitch 0.10302025424172691 body_yaw 0.19999999999999973 antenna_right 1.2999999999999978
-tick 3.07 0
-expect 4 head.yaw 1.2821041362364825 head.pitch 0.10302025424172691 body_yaw 0.19999999999999973 antenna_right 1.2999999999999978
-tick 3.08 0
-expect 4 head.yaw 1.2821041362364825 head.pitch 0.10302025424172691 body_yaw 0.19999999999999973 antenna_right 1.2999999999999978
-tick 3.09 0
-expect 4 head.yaw 1.2821041362364825 head.pitch 0.10302025424172691 body_yaw 0.19999999999999973 antenna_right 1.2999999999999978
-tick 3.1 0
-expect 4 head.yaw 1.2821041362364825 head.pitch 0.10302025424172691 body_yaw 0.19999999999999973 antenna_right 1.2999999999999978
-tick 3.11 0
-expect 4 head.yaw 1.2821041362364825 head.pitch 0.10302025424172691 body_yaw 0.19999999999999973 antenna_right 1.2999999999999978
-tick 3.12 0
-expect 4 head.yaw 1.2821041362364825 head.pitch 0.10302025424172691 body_yaw 0.19999999999999973 antenna_right 1.2999999999999978
-tick 3.13 0
-expect 4 head.yaw 1.2821041362364825 head.pitch 0.10302025424172691 body_yaw 0.19999999999999973 antenna_right 1.2999999999999978
-tick 3.14 0
-expect 4 head.yaw 1.2821041362364825 head.pitch 0.10302025424172691 body_yaw 0.19999999999999973 antenna_right 1.2999999999999978
-tick 3.15 0
-expect 4 head.yaw 1.2821041362364825 head.pitch 0.10302025424172691 body_yaw 0.19999999999999973 antenna_right 1.2999999999999978
-tick 3.16 0
-expect 4 head.yaw 1.2821041362364825 head.pitch 0.10302025424172691 body_yaw 0.19999999999999973 antenna_right 1.2999999999999978
-tick 3.17 0
-expect 4 head.yaw 1.2821041362364825 head.pitch 0.10302025424172691 body_yaw 0.19999999999999973 antenna_right 1.2999999999999978
-tick 3.18 0
-expect 4 head.yaw 1.2821041362364825 head.pitch 0.10302025424172691 body_yaw 0.19999999999999973 antenna_right 1.2999999999999978
-tick 3.19 0
-expect 4 head.yaw 1.2821041362364825 head.pitch 0.10302025424172691 body_yaw 0.19999999999999973 antenna_right 1.2999999999999978
-tick 3.2 0
-expect 4 head.yaw 1.2801041362364824 head.pitch 0.1015202542417269 body_yaw 0.19999999999999865 antenna_right 1.2959999999999978
-tick 3.21 0
-expect 4 head.yaw 1.2761041362364824 head.pitch 0.0985202542417269 body_yaw 0.19939999999999758 antenna_right 1.2879999999999978
-tick 3.22 0
-expect 4 head.yaw 1.2701041362364824 head.pitch 0.0940202542417269 body_yaw 0.19819999999999652 antenna_right 1.2759999999999978
-tick 3.23 0
-expect 4 head.yaw 1.2621041362364824 head.pitch 0.0880202542417269 body_yaw 0.19639999999999547 antenna_right 1.2599999999999978
-tick 3.24 0
-expect 4 head.yaw 1.2531041362364825 head.pitch 0.08202025424172689 body_yaw 0.19399999999999443 antenna_right 1.2419999999999978
-tick 3.25 0
-expect 4 head.yaw 1.2441041362364826 head.pitch 0.07602025424172688 body_yaw 0.1909999999999934 antenna_right 1.2239999999999978
-tick 3.26 0
-expect 4 head.yaw 1.2351041362364827 head.pitch 0.07002025424172688 body_yaw 0.18739999999999238 antenna_right 1.2059999999999977
-tick 3.27 0
-expect 4 head.yaw 1.2261041362364828 head.pitch 0.06402025424172687 body_yaw 0.18319999999999137 antenna_right 1.1879999999999977
-tick 3.28 0
-expect 4 head.yaw 1.217104136236483 head.pitch 0.058020254241726875 body_yaw 0.17869999999999137 antenna_right 1.1699999999999977
-tick 3.29 0
-expect 4 head.yaw 1.208104136236483 head.pitch 0.052020254241726877 body_yaw 0.17419999999999136 antenna_right 1.1519999999999977
-tick 3.3 0
-expect 4 head.yaw 1.1991041362364832 head.pitch 0.04602025424172688 body_yaw 0.16969999999999136 antenna_right 1.1339999999999977
-tick 3.31 0
-expect 4 head.yaw 1.1901041362364833 head.pitch 0.04002025424172688 body_yaw 0.16519999999999135 antenna_right 1.1159999999999977
-tick 3.32 0
-expect 4 head.yaw 1.1811041362364834 head.pitch 0.03402025424172688 body_yaw 0.16069999999999135 antenna_right 1.0979999999999976
-tick 3.33 0
-expect 4 head.yaw 1.1721041362364835 head.pitch 0.028020254241726883 body_yaw 0.15619999999999135 antenna_right 1.0799999999999976
-tick 3.34 0
-expect 4 head.yaw 1.1631041362364836 head.pitch 0.022020254241726885 body_yaw 0.15169999999999134 antenna_right 1.0619999999999976
-tick 3.35 0
-expect 4 head.yaw 1.1541041362364837 head.pitch 0.016020254241726886 body_yaw 0.14719999999999134 antenna_right 1.0439999999999976
-tick 3.36 0
-expect 4 head.yaw 1.1451041362364838 head.pitch 0.010020254241726886 body_yaw 0.14269999999999133 antenna_right 1.0259999999999976
-tick 3.37 0
-expect 4 head.yaw 1.1361041362364839 head.pitch 0.005265190681299638 body_yaw 0.13819999999999133 antenna_right 1.0079999999999976
-tick 3.38 0
-expect 4 head.yaw 1.127104136236484 head.pitch 0.002010127120868215 body_yaw 0.13369999999999133 antenna_right 0.9899999999999975
-tick 3.39 0
-expect 4 head.yaw 1.118104136236484 head.pitch 0.0002550635604344669 body_yaw 0.12919999999999132 antenna_right 0.9719999999999975
-tick 3.4 0
-expect 4 head.yaw 1.1091041362364842 head.pitch 7.185007797061438e-16 body_yaw 0.12469999999999132 antenna_right 0.9539999999999975
-tick 3.41 0
-expect 4 head.yaw 1.1001041362364843 head.pitch 7.185007797061438e-16 body_yaw 0.12019999999999131 antenna_right 0.9359999999999975
-tick 3.42 0
-expect 4 head.yaw 1.0911041362364844 head.pitch 7.185007797061438e-16 body_yaw 0.11569999999999131 antenna_right 0.9179999999999975
-tick 3.43 0
-expect 4 head.yaw 1.0821041362364845 head.pitch 7.185007797061438e-16 body_yaw 0.1111999999999913 antenna_right 0.8999999999999975
-tick 3.44 0
-expect 4 head.yaw 1.0731041362364846 head.pitch 7.185007797061438e-16 body_yaw 0.1066999999999913 antenna_right 0.8819999999999975
-tick 3.45 0
-expect 4 head.yaw 1.0641041362364847 head.pitch 7.185007797061438e-16 body_yaw 0.1021999999999913 antenna_right 0.8639999999999974
-tick 3.46 0
-expect 4 head.yaw 1.0551041362364848 head.pitch 7.185007797061438e-16 body_yaw 0.0976999999999913 antenna_right 0.8459999999999974
-tick 3.47 0
-expect 4 head.yaw 1.046104136236485 head.pitch 7.185007797061438e-16 body_yaw 0.09319999999999129 antenna_right 0.8279999999999974
-tick 3.48 0
-expect 4 head.yaw 1.037104136236485 head.pitch 7.185007797061438e-16 body_yaw 0.08869999999999129 antenna_right 0.8099999999999974
-tick 3.49 0
-expect 4 head.yaw 1.0281041362364851 head.pitch 7.185007797061438e-16 body_yaw 0.08419999999999128 antenna_right 0.7919999999999974
-tick 3.5 0
-expect 4 head.yaw 1.0191041362364852 head.pitch 7.185007797061438e-16 body_yaw 0.07969999999999128 antenna_right 0.7739999999999974
-tick 3.51 0
-expect 4 head.yaw 1.0101041362364853 head.pitch 7.185007797061438e-16 body_yaw 0.07519999999999127 antenna_right 0.7559999999999973
-tick 3.52 0
-expect 4 head.yaw 1.0011041362364854 head.pitch 7.185007797061438e-16 body_yaw 0.07069999999999127 antenna_right 0.7379999999999973
-tick 3.53 0
-expect 4 head.yaw 0.9921041362364854 head.pitch 7.185007797061438e-16 body_yaw 0.06619999999999127 antenna_right 0.7199999999999973
-tick 3.54 0
-expect 4 head.yaw 0.9831041362364854 head.pitch 7.185007797061438e-16 body_yaw 0.06169999999999127 antenna_right 0.7019999999999973
-tick 3.55 0
-expect 4 head.yaw 0.9741041362364854 head.pitch 7.185007797061438e-16 body_yaw 0.05719999999999127 antenna_right 0.6839999999999973
-tick 3.56 0
-expect 4 head.yaw 0.9651041362364854 head.pitch 7.185007797061438e-16 body_yaw 0.052699999999991275 antenna_right 0.6659999999999973
-tick 3.57 0
-expect 4 head.yaw 0.9561041362364854 head.pitch 7.185007797061438e-16 body_yaw 0.04819999999999128 antenna_right 0.6479999999999972
-tick 3.58 0
-expect 4 head.yaw 0.9471041362364854 head.pitch 7.185007797061438e-16 body_yaw 0.04369999999999128 antenna_right 0.6299999999999972
-tick 3.59 0
-expect 4 head.yaw 0.9381041362364854 head.pitch 7.185007797061438e-16 body_yaw 0.039199999999991283 antenna_right 0.6119999999999972
-tick 3.6 0
-expect 4 head.yaw 0.9291041362364854 head.pitch 7.185007797061438e-16 body_yaw 0.034699999999991286 antenna_right 0.5939999999999972
-tick 3.61 0
-expect 4 head.yaw 0.9201041362364853 head.pitch 7.185007797061438e-16 body_yaw 0.030199999999991286 antenna_right 0.5759999999999972
-tick 3.62 0
-expect 4 head.yaw 0.9111041362364853 head.pitch 7.185007797061438e-16 body_yaw 0.025699999999991285 antenna_right 0.5579999999999972
-tick 3.63 0
-expect 4 head.yaw 0.9021041362364853 head.pitch 7.185007797061438e-16 body_yaw 0.021199999999991285 antenna_right 0.5399999999999971
-tick 3.64 0
-expect 4 head.yaw 0.8931041362364853 head.pitch 7.185007797061438e-16 body_yaw 0.016699999999991284 antenna_right 0.5219999999999971
-tick 3.65 0
-expect 4 head.yaw 0.8841041362364853 head.pitch 7.185007797061438e-16 body_yaw 0.012514285714279736 antenna_right 0.5039999999999971
-tick 3.66 0
-expect 4 head.yaw 0.8751041362364853 head.pitch 7.185007797061438e-16 body_yaw 0.008928571428568188 antenna_right 0.4859999999999971
-tick 3.67 0
-expect 4 head.yaw 0.8661041362364853 head.pitch 7.185007797061438e-16 body_yaw 0.005942857142856542 antenna_right 0.4679999999999971
-tick 3.68 0
-expect 4 head.yaw 0.8571041362364853 head.pitch 7.185007797061438e-16 body_yaw 0.0035571428571447112 antenna_right 0.44999999999999707
-tick 3.69 0
-expect 4 head.yaw 0.8481041362364853 head.pitch 7.185007797061438e-16 body_yaw 0.0017714285714301875 antenna_right 0.43199999999999705
-tick 3.7 0
-expect 4 head.yaw 0.8391041362364853 head.pitch 7.185007797061438e-16 body_yaw 0.0005857142857156638 antenna_right 0.41399999999999704
-tick 3.71 0
-expect 4 head.yaw 0.8301041362364853 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right 0.395999999999997
-tick 3.72 0
-expect 4 head.yaw 0.8211041362364853 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right 0.377999999999997
-tick 3.73 0
-expect 4 head.yaw 0.8121041362364853 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right 0.359999999999997
-tick 3.74 0
-expect 4 head.yaw 0.8031041362364852 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right 0.341999999999997
-tick 3.75 0
-expect 4 head.yaw 0.7941041362364852 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right 0.32399999999999696
-tick 3.76 0
-expect 4 head.yaw 0.7851041362364852 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right 0.30599999999999694
-tick 3.77 0
-expect 4 head.yaw 0.7761041362364852 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right 0.2879999999999969
-tick 3.78 0
-expect 4 head.yaw 0.7671041362364852 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right 0.2699999999999969
-tick 3.79 0
-expect 4 head.yaw 0.7581041362364852 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right 0.2519999999999969
-tick 3.8 0
-expect 4 head.yaw 0.7491041362364852 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right 0.2339999999999969
-tick 3.81 0
-expect 4 head.yaw 0.7401041362364852 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right 0.21599999999999692
-tick 3.82 0
-expect 4 head.yaw 0.7311041362364852 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right 0.19799999999999693
-tick 3.83 0
-expect 4 head.yaw 0.7221041362364852 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right 0.17999999999999694
-tick 3.84 0
-expect 4 head.yaw 0.7131041362364852 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right 0.16199999999999695
-tick 3.85 0
-expect 4 head.yaw 0.7041041362364852 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right 0.14399999999999696
-tick 3.86 0
-expect 4 head.yaw 0.6951041362364851 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right 0.12599999999999698
-tick 3.87 0
-expect 4 head.yaw 0.6861041362364851 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right 0.10799999999999697
-tick 3.88 0
-expect 4 head.yaw 0.6771041362364851 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right 0.08999999999999697
-tick 3.89 0
-expect 4 head.yaw 0.6681041362364851 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right 0.07199999999999697
-tick 3.9 0
-expect 4 head.yaw 0.6591041362364851 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right 0.05399999999999697
-tick 3.91 0
-expect 4 head.yaw 0.6501041362364851 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right 0.035999999999996965
-tick 3.92 0
-expect 4 head.yaw 0.6411041362364851 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right 0.017999999999996966
-tick 3.93 0
-expect 4 head.yaw 0.6321041362364851 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -3.0322966360074588e-15
-tick 3.94 0
-expect 4 head.yaw 0.6231041362364851 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.01800000000000303
-tick 3.95 0
-expect 4 head.yaw 0.6141041362364851 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.03600000000000303
-tick 3.96 0
-expect 4 head.yaw 0.6051041362364851 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.05400000000000303
-tick 3.97 0
-expect 4 head.yaw 0.5961041362364851 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.07200000000000303
-tick 3.98 0
-expect 4 head.yaw 0.587104136236485 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.09000000000000304
-tick 3.99 0
-expect 4 head.yaw 0.578104136236485 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.10800000000000304
+tick 3.0 1
+cmd hold 2 0 3.0 -1 1 head.pitch 0.7
+cmd bump 4 1 3.0 -1 1 head.pitch 0.2
+expect 4 head.yaw 1.2801041362364824 head.pitch 0.10302025424172691 body_yaw 0.19999999999999865 antenna_right 1.2959999999999978
+tick 3.01 1
+cmd hold 2 0 3.01 -1 1 head.pitch 0.7
+cmd bump 4 1 3.01 -1 1 head.pitch 0.2
+expect 4 head.yaw 1.2761041362364824 head.pitch 0.10386803809507181 body_yaw 0.19939999999999758 antenna_right 1.2879999999999978
+tick 3.02 1
+cmd hold 2 0 3.02 -1 1 head.pitch 0.7
+cmd bump 4 1 3.02 -1 1 head.pitch 0.2
+expect 4 head.yaw 1.2701041362364824 head.pitch 0.10621582194841671 body_yaw 0.19819999999999652 antenna_right 1.2759999999999978
+tick 3.03 1
+cmd hold 2 0 3.03 -1 1 head.pitch 0.7
+cmd bump 4 1 3.03 -1 1 head.pitch 0.2
+expect 4 head.yaw 1.2621041362364824 head.pitch 0.11006360580176161 body_yaw 0.19639999999999547 antenna_right 1.2599999999999978
+tick 3.04 1
+cmd hold 2 0 3.04 -1 1 head.pitch 0.7
+cmd bump 4 1 3.04 -1 1 head.pitch 0.2
+expect 4 head.yaw 1.2521041362364824 head.pitch 0.11541138965510651 body_yaw 0.19399999999999443 antenna_right 1.2399999999999978
+tick 3.05 1
+cmd hold 2 0 3.05 -1 1 head.pitch 0.7
+cmd bump 4 1 3.05 -1 1 head.pitch 0.2
+expect 4 head.yaw 1.2401041362364824 head.pitch 0.12225917350845142 body_yaw 0.1909999999999934 antenna_right 1.2159999999999977
+tick 3.06 1
+cmd hold 2 0 3.06 -1 1 head.pitch 0.7
+cmd bump 4 1 3.06 -1 1 head.pitch 0.2
+expect 4 head.yaw 1.2261041362364824 head.pitch 0.1306069573617963 body_yaw 0.18739999999999238 antenna_right 1.1879999999999977
+tick 3.07 1
+cmd hold 2 0 3.07 -1 1 head.pitch 0.7
+cmd bump 4 1 3.07 -1 1 head.pitch 0.2
+expect 4 head.yaw 1.2101041362364824 head.pitch 0.1404547412151412 body_yaw 0.18319999999999137 antenna_right 1.1559999999999977
+tick 3.08 1
+cmd hold 2 0 3.08 -1 1 head.pitch 0.7
+cmd bump 4 1 3.08 -1 1 head.pitch 0.2
+expect 4 head.yaw 1.1921041362364824 head.pitch 0.1518025250684861 body_yaw 0.17839999999999037 antenna_right 1.1199999999999977
+tick 3.09 1
+cmd hold 2 0 3.09 -1 1 head.pitch 0.7
+cmd bump 4 1 3.09 -1 1 head.pitch 0.2
+expect 4 head.yaw 1.1741041362364824 head.pitch 0.1638025250684861 body_yaw 0.17299999999998938 antenna_right 1.0839999999999976
+tick 3.1 1
+cmd hold 2 0 3.1 -1 1 head.pitch 0.7
+cmd bump 4 1 3.1 -1 1 head.pitch 0.2
+expect 4 head.yaw 1.1561041362364823 head.pitch 0.17580252506848612 body_yaw 0.1669999999999884 antenna_right 1.0479999999999976
+tick 3.11 1
+cmd hold 2 0 3.11 -1 1 head.pitch 0.7
+cmd bump 4 1 3.11 -1 1 head.pitch 0.2
+expect 4 head.yaw 1.1381041362364823 head.pitch 0.18780252506848613 body_yaw 0.16039999999998744 antenna_right 1.0119999999999976
+tick 3.12 1
+cmd hold 2 0 3.12 -1 1 head.pitch 0.7
+cmd bump 4 1 3.12 -1 1 head.pitch 0.2
+expect 4 head.yaw 1.1201041362364823 head.pitch 0.19980252506848614 body_yaw 0.15373333333332503 antenna_right 0.9759999999999975
+tick 3.13 1
+cmd hold 2 0 3.13 -1 1 head.pitch 0.7
+cmd bump 4 1 3.13 -1 1 head.pitch 0.2
+expect 4 head.yaw 1.1021041362364823 head.pitch 0.21180252506848615 body_yaw 0.14766666666666023 antenna_right 0.9399999999999975
+tick 3.14 1
+cmd hold 2 0 3.14 -1 1 head.pitch 0.7
+cmd bump 4 1 3.14 -1 1 head.pitch 0.2
+expect 4 head.yaw 1.0841041362364823 head.pitch 0.22380252506848616 body_yaw 0.14219999999999472 antenna_right 0.9039999999999975
+tick 3.15 1
+cmd hold 2 0 3.15 -1 1 head.pitch 0.7
+cmd bump 4 1 3.15 -1 1 head.pitch 0.2
+expect 4 head.yaw 1.0661041362364823 head.pitch 0.23580252506848617 body_yaw 0.1373333333333292 antenna_right 0.8679999999999974
+tick 3.16 1
+cmd hold 2 0 3.16 -1 1 head.pitch 0.7
+cmd bump 4 1 3.16 -1 1 head.pitch 0.2
+expect 4 head.yaw 1.0481041362364822 head.pitch 0.24780252506848618 body_yaw 0.13306666666666367 antenna_right 0.8344666666666658
+tick 3.17 1
+cmd hold 2 0 3.17 -1 1 head.pitch 0.7
+cmd bump 4 1 3.17 -1 1 head.pitch 0.2
+expect 4 head.yaw 1.0303147877657637 head.pitch 0.25980252506848617 body_yaw 0.12939999999999813 antenna_right 0.8049333333333342
+tick 3.18 1
+cmd hold 2 0 3.18 -1 1 head.pitch 0.7
+cmd bump 4 1 3.18 -1 1 head.pitch 0.2
+expect 4 head.yaw 1.0145254392950451 head.pitch 0.2718025250684862 body_yaw 0.12633333333333258 antenna_right 0.7794000000000019
+tick 3.19 1
+cmd hold 2 0 3.19 -1 1 head.pitch 0.7
+cmd bump 4 1 3.19 -1 1 head.pitch 0.2
+expect 4 head.yaw 1.0007360908243266 head.pitch 0.2838025250684862 body_yaw 0.12386666666666657 antenna_right 0.7578666666666696
+tick 3.2 1
+cmd hold 2 0 3.2 -1 1 head.pitch 0.7
+cmd bump 4 1 3.2 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.988946742353608 head.pitch 0.2958025250684862 body_yaw 0.12200000000000029 antenna_right 0.7403333333333373
+tick 3.21 1
+cmd hold 2 0 3.21 -1 1 head.pitch 0.7
+cmd bump 4 1 3.21 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9791573938828895 head.pitch 0.3078025250684862 body_yaw 0.12073333333333401 antenna_right 0.726800000000005
+tick 3.22 1
+cmd hold 2 0 3.22 -1 1 head.pitch 0.7
+cmd bump 4 1 3.22 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9713680454121709 head.pitch 0.3198025250684862 body_yaw 0.12006666666666774 antenna_right 0.7172666666666727
+tick 3.23 1
+cmd hold 2 0 3.23 -1 1 head.pitch 0.7
+cmd bump 4 1 3.23 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9655786969414524 head.pitch 0.33180252506848623 body_yaw 0.12000000000000002 antenna_right 0.7117333333333377
+tick 3.24 1
+cmd hold 2 0 3.24 -1 1 head.pitch 0.7
+cmd bump 4 1 3.24 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9617893484707306 head.pitch 0.34380252506848624 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.25 1
+cmd hold 2 0 3.25 -1 1 head.pitch 0.7
+cmd bump 4 1 3.25 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000019 head.pitch 0.35580252506848625 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.26 1
+cmd hold 2 0 3.26 -1 1 head.pitch 0.7
+cmd bump 4 1 3.26 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.36780252506848626 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.27 1
+cmd hold 2 0 3.27 -1 1 head.pitch 0.7
+cmd bump 4 1 3.27 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.3795772094349176 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.28 1
+cmd hold 2 0 3.28 -1 1 head.pitch 0.7
+cmd bump 4 1 3.28 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.389851893801353 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.29 1
+cmd hold 2 0 3.29 -1 1 head.pitch 0.7
+cmd bump 4 1 3.29 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.3986265781677884 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.3 1
+cmd hold 2 0 3.3 -1 1 head.pitch 0.7
+cmd bump 4 1 3.3 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.4059012625342246 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.31 1
+cmd hold 2 0 3.31 -1 1 head.pitch 0.7
+cmd bump 4 1 3.31 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.411675946900665 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.32 1
+cmd hold 2 0 3.32 -1 1 head.pitch 0.7
+cmd bump 4 1 3.32 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.4159506312671095 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.33 1
+cmd hold 2 0 3.33 -1 1 head.pitch 0.7
+cmd bump 4 1 3.33 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41872531563355403 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.34 1
+cmd hold 2 0 3.34 -1 1 head.pitch 0.7
+cmd bump 4 1 3.34 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999854 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.35 1
+cmd hold 2 0 3.35 -1 1 head.pitch 0.7
+cmd bump 4 1 3.35 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.36 1
+cmd hold 2 0 3.36 -1 1 head.pitch 0.7
+cmd bump 4 1 3.36 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.37 1
+cmd hold 2 0 3.37 -1 1 head.pitch 0.7
+cmd bump 4 1 3.37 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.38 1
+cmd hold 2 0 3.38 -1 1 head.pitch 0.7
+cmd bump 4 1 3.38 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.39 1
+cmd hold 2 0 3.39 -1 1 head.pitch 0.7
+cmd bump 4 1 3.39 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.4 1
+cmd hold 2 0 3.4 -1 1 head.pitch 0.7
+cmd bump 4 1 3.4 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.41 1
+cmd hold 2 0 3.41 -1 1 head.pitch 0.7
+cmd bump 4 1 3.41 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.42 1
+cmd hold 2 0 3.42 -1 1 head.pitch 0.7
+cmd bump 4 1 3.42 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.43 1
+cmd hold 2 0 3.43 -1 1 head.pitch 0.7
+cmd bump 4 1 3.43 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.44 1
+cmd hold 2 0 3.44 -1 1 head.pitch 0.7
+cmd bump 4 1 3.44 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.45 1
+cmd hold 2 0 3.45 -1 1 head.pitch 0.7
+cmd bump 4 1 3.45 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.46 1
+cmd hold 2 0 3.46 -1 1 head.pitch 0.7
+cmd bump 4 1 3.46 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.47 1
+cmd hold 2 0 3.47 -1 1 head.pitch 0.7
+cmd bump 4 1 3.47 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.48 1
+cmd hold 2 0 3.48 -1 1 head.pitch 0.7
+cmd bump 4 1 3.48 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.49 1
+cmd hold 2 0 3.49 -1 1 head.pitch 0.7
+cmd bump 4 1 3.49 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.5 1
+cmd hold 2 0 3.5 -1 1 head.pitch 0.7
+cmd bump 4 1 3.5 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.51 1
+cmd hold 2 0 3.51 -1 1 head.pitch 0.7
+cmd bump 4 1 3.51 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.52 1
+cmd hold 2 0 3.52 -1 1 head.pitch 0.7
+cmd bump 4 1 3.52 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.53 1
+cmd hold 2 0 3.53 -1 1 head.pitch 0.7
+cmd bump 4 1 3.53 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.54 1
+cmd hold 2 0 3.54 -1 1 head.pitch 0.7
+cmd bump 4 1 3.54 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.55 1
+cmd hold 2 0 3.55 -1 1 head.pitch 0.7
+cmd bump 4 1 3.55 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.56 1
+cmd hold 2 0 3.56 -1 1 head.pitch 0.7
+cmd bump 4 1 3.56 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.57 1
+cmd hold 2 0 3.57 -1 1 head.pitch 0.7
+cmd bump 4 1 3.57 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.58 1
+cmd hold 2 0 3.58 -1 1 head.pitch 0.7
+cmd bump 4 1 3.58 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.59 1
+cmd hold 2 0 3.59 -1 1 head.pitch 0.7
+cmd bump 4 1 3.59 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.6 1
+cmd hold 2 0 3.6 -1 1 head.pitch 0.7
+cmd bump 4 1 3.6 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.61 1
+cmd hold 2 0 3.61 -1 1 head.pitch 0.7
+cmd bump 4 1 3.61 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.62 1
+cmd hold 2 0 3.62 -1 1 head.pitch 0.7
+cmd bump 4 1 3.62 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.63 1
+cmd hold 2 0 3.63 -1 1 head.pitch 0.7
+cmd bump 4 1 3.63 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.64 1
+cmd hold 2 0 3.64 -1 1 head.pitch 0.7
+cmd bump 4 1 3.64 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.65 1
+cmd hold 2 0 3.65 -1 1 head.pitch 0.7
+cmd bump 4 1 3.65 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.66 1
+cmd hold 2 0 3.66 -1 1 head.pitch 0.7
+cmd bump 4 1 3.66 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.67 1
+cmd hold 2 0 3.67 -1 1 head.pitch 0.7
+cmd bump 4 1 3.67 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.68 1
+cmd hold 2 0 3.68 -1 1 head.pitch 0.7
+cmd bump 4 1 3.68 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.69 1
+cmd hold 2 0 3.69 -1 1 head.pitch 0.7
+cmd bump 4 1 3.69 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.7 1
+cmd hold 2 0 3.7 -1 1 head.pitch 0.7
+cmd bump 4 1 3.7 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.71 1
+cmd hold 2 0 3.71 -1 1 head.pitch 0.7
+cmd bump 4 1 3.71 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.72 1
+cmd hold 2 0 3.72 -1 1 head.pitch 0.7
+cmd bump 4 1 3.72 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.73 1
+cmd hold 2 0 3.73 -1 1 head.pitch 0.7
+cmd bump 4 1 3.73 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.74 1
+cmd hold 2 0 3.74 -1 1 head.pitch 0.7
+cmd bump 4 1 3.74 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.75 1
+cmd hold 2 0 3.75 -1 1 head.pitch 0.7
+cmd bump 4 1 3.75 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.76 1
+cmd hold 2 0 3.76 -1 1 head.pitch 0.7
+cmd bump 4 1 3.76 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.77 1
+cmd hold 2 0 3.77 -1 1 head.pitch 0.7
+cmd bump 4 1 3.77 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.78 1
+cmd hold 2 0 3.78 -1 1 head.pitch 0.7
+cmd bump 4 1 3.78 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.79 1
+cmd hold 2 0 3.79 -1 1 head.pitch 0.7
+cmd bump 4 1 3.79 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.8 1
+cmd hold 2 0 3.8 -1 1 head.pitch 0.7
+cmd bump 4 1 3.8 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.81 1
+cmd hold 2 0 3.81 -1 1 head.pitch 0.7
+cmd bump 4 1 3.81 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.82 1
+cmd hold 2 0 3.82 -1 1 head.pitch 0.7
+cmd bump 4 1 3.82 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.83 1
+cmd hold 2 0 3.83 -1 1 head.pitch 0.7
+cmd bump 4 1 3.83 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.84 1
+cmd hold 2 0 3.84 -1 1 head.pitch 0.7
+cmd bump 4 1 3.84 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.85 1
+cmd hold 2 0 3.85 -1 1 head.pitch 0.7
+cmd bump 4 1 3.85 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.86 1
+cmd hold 2 0 3.86 -1 1 head.pitch 0.7
+cmd bump 4 1 3.86 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.87 1
+cmd hold 2 0 3.87 -1 1 head.pitch 0.7
+cmd bump 4 1 3.87 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.88 1
+cmd hold 2 0 3.88 -1 1 head.pitch 0.7
+cmd bump 4 1 3.88 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.89 1
+cmd hold 2 0 3.89 -1 1 head.pitch 0.7
+cmd bump 4 1 3.89 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.9 1
+cmd hold 2 0 3.9 -1 1 head.pitch 0.7
+cmd bump 4 1 3.9 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.91 1
+cmd hold 2 0 3.91 -1 1 head.pitch 0.7
+cmd bump 4 1 3.91 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.92 1
+cmd hold 2 0 3.92 -1 1 head.pitch 0.7
+cmd bump 4 1 3.92 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.93 1
+cmd hold 2 0 3.93 -1 1 head.pitch 0.7
+cmd bump 4 1 3.93 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.94 1
+cmd hold 2 0 3.94 -1 1 head.pitch 0.7
+cmd bump 4 1 3.94 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.95 1
+cmd hold 2 0 3.95 -1 1 head.pitch 0.7
+cmd bump 4 1 3.95 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.96 1
+cmd hold 2 0 3.96 -1 1 head.pitch 0.7
+cmd bump 4 1 3.96 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.97 1
+cmd hold 2 0 3.97 -1 1 head.pitch 0.7
+cmd bump 4 1 3.97 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.98 1
+cmd hold 2 0 3.98 -1 1 head.pitch 0.7
+cmd bump 4 1 3.98 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
+tick 3.99 1
+cmd hold 2 0 3.99 -1 1 head.pitch 0.7
+cmd bump 4 1 3.99 -1 1 head.pitch 0.2
+expect 4 head.yaw 0.9600000000000001 head.pitch 0.41999999999999993 body_yaw 0.12000000000000002 antenna_right 0.7102000000000004
 tick 4.0 0
-expect 4 head.yaw 0.569104136236485 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.12600000000000303
+expect 4 head.yaw 0.9620000000000001 head.pitch 0.42149999999999993 body_yaw 0.12060000000000003 antenna_right 0.7142000000000004
 tick 4.01 0
-expect 4 head.yaw 0.560104136236485 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.14369999999998706
+expect 4 head.yaw 0.9660000000000001 head.pitch 0.42449999999999993 body_yaw 0.12180000000000003 antenna_right 0.7222000000000004
 tick 4.02 0
-expect 4 head.yaw 0.551104136236485 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.15739999999998758
+expect 4 head.yaw 0.9720000000000001 head.pitch 0.42899999999999994 body_yaw 0.12360000000000004 antenna_right 0.7342000000000004
 tick 4.03 0
-expect 4 head.yaw 0.542104136236485 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.16709999999999062
+expect 4 head.yaw 0.9800000000000001 head.pitch 0.43499999999999994 body_yaw 0.12600000000000006 antenna_right 0.7502000000000004
 tick 4.04 0
-expect 4 head.yaw 0.533104136236485 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.17279999999999365
+expect 4 head.yaw 0.9900000000000001 head.pitch 0.44249999999999995 body_yaw 0.12900000000000006 antenna_right 0.7702000000000004
 tick 4.05 0
-expect 4 head.yaw 0.524104136236485 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.002 head.pitch 0.45149999999999996 body_yaw 0.13260000000000005 antenna_right 0.7942000000000005
 tick 4.06 0
-expect 4 head.yaw 0.515104136236485 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.0159999999999998 head.pitch 0.46199999999999997 body_yaw 0.13680000000000003 antenna_right 0.8222000000000005
 tick 4.07 0
-expect 4 head.yaw 0.506104136236485 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.0319999999999996 head.pitch 0.474 body_yaw 0.1416 antenna_right 0.8542000000000005
 tick 4.08 0
-expect 4 head.yaw 0.497104136236485 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.0499999999999994 head.pitch 0.4875 body_yaw 0.14699999999999996 antenna_right 0.8902000000000005
 tick 4.09 0
-expect 4 head.yaw 0.48810413623648496 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.0699999999999992 head.pitch 0.5025 body_yaw 0.1529999999999999 antenna_right 0.9302000000000006
 tick 4.1 0
-expect 4 head.yaw 0.47910413623648496 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.091999999999999 head.pitch 0.5189999999999999 body_yaw 0.15959999999999985 antenna_right 0.9742000000000006
 tick 4.11 0
-expect 4 head.yaw 0.47010413623648495 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.11547534468636 head.pitch 0.5369999999999998 body_yaw 0.16626666666666326 antenna_right 1.0222000000000007
 tick 4.12 0
-expect 4 head.yaw 0.46110413623648494 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.1375499662044126 head.pitch 0.5564999999999997 body_yaw 0.1723333333333291 antenna_right 1.067349999999986
 tick 4.13 0
-expect 4 head.yaw 0.45210413623648493 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.1581761028739934 head.pitch 0.5764999999999955 body_yaw 0.1777999999999956 antenna_right 1.1084999999999714
 tick 4.14 0
-expect 4 head.yaw 0.4431041362364849 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.177348906210234 head.pitch 0.5949999999999913 body_yaw 0.18266666666666212 antenna_right 1.1456499999999568
 tick 4.15 0
-expect 4 head.yaw 0.4341041362364849 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.1950624502872071 head.pitch 0.6119999999999872 body_yaw 0.18693333333332865 antenna_right 1.1787999999999594
 tick 4.16 0
-expect 4 head.yaw 0.4251041362364849 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.2112818968741508 head.pitch 0.6274999999999832 body_yaw 0.1905999999999952 antenna_right 1.207949999999962
 tick 4.17 0
-expect 4 head.yaw 0.4161041362364849 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.2259596767944385 head.pitch 0.6414999999999839 body_yaw 0.19366666666666174 antenna_right 1.2330999999999648
 tick 4.18 0
-expect 4 head.yaw 0.4071041362364849 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.2390755519528236 head.pitch 0.6539999999999846 body_yaw 0.19613333333332875 antenna_right 1.2542499999999674
 tick 4.19 0
-expect 4 head.yaw 0.3981041362364849 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.2501914271112087 head.pitch 0.6649999999999854 body_yaw 0.19799999999999576 antenna_right 1.27139999999997
 tick 4.2 0
-expect 4 head.yaw 0.3891041362364849 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.2593073022695938 head.pitch 0.6744999999999862 body_yaw 0.1992666666666628 antenna_right 1.2845499999999728
 tick 4.21 0
-expect 4 head.yaw 0.38010413623648487 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.2664231774279788 head.pitch 0.6824999999999871 body_yaw 0.19993333333332983 antenna_right 1.2936999999999754
 tick 4.22 0
-expect 4 head.yaw 0.37110413623648486 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.271539052586364 head.pitch 0.6889999999999881 body_yaw 0.19999999999999687 antenna_right 1.298849999999978
 tick 4.23 0
-expect 4 head.yaw 0.36210413623648485 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.274654927744749 head.pitch 0.6939999999999891 body_yaw 0.19946666666666393 antenna_right 1.2999999999999807
 tick 4.24 0
-expect 4 head.yaw 0.35310413623648484 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.275770802903134 head.pitch 0.6974999999999901 body_yaw 0.198333333333331 antenna_right 1.2971499999999834
 tick 4.25 0
-expect 4 head.yaw 0.34410413623648484 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.2748866780615191 head.pitch 0.6994999999999912 body_yaw 0.19659999999999808 antenna_right 1.290299999999986
 tick 4.26 0
-expect 4 head.yaw 0.33510413623648483 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.2720025532199042 head.pitch 0.6999999999999924 body_yaw 0.19474563545625861 antenna_right 1.2794499999999887
 tick 4.27 0
-expect 4 head.yaw 0.3261041362364848 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.2671184283782893 head.pitch 0.6989999999999936 body_yaw 0.19263383083805016 antenna_right 1.2645999999999913
 tick 4.28 0
-expect 4 head.yaw 0.3171041362364848 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.2602343035366743 head.pitch 0.6964999999999949 body_yaw 0.18992202621984172 antenna_right 1.2465999999999913
 tick 4.29 0
-expect 4 head.yaw 0.3081041362364848 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.2513501786950594 head.pitch 0.6924999999999962 body_yaw 0.1866102216016333 antenna_right 1.2285999999999913
 tick 4.3 0
-expect 4 head.yaw 0.2991041362364848 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.2423501786950595 head.pitch 0.6869999999999976 body_yaw 0.18269841698342487 antenna_right 1.2105999999999912
 tick 4.31 0
-expect 4 head.yaw 0.2901041362364848 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.2333501786950596 head.pitch 0.6809999999999976 body_yaw 0.17819841698342487 antenna_right 1.1925999999999912
 tick 4.32 0
-expect 4 head.yaw 0.2811041362364848 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.2243501786950597 head.pitch 0.6749999999999976 body_yaw 0.17369841698342486 antenna_right 1.1745999999999912
 tick 4.33 0
-expect 4 head.yaw 0.2721041362364848 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.2153501786950598 head.pitch 0.6689999999999976 body_yaw 0.16919841698342486 antenna_right 1.1565999999999912
 tick 4.34 0
-expect 4 head.yaw 0.26310413623648476 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.20635017869506 head.pitch 0.6629999999999976 body_yaw 0.16469841698342486 antenna_right 1.1385999999999912
 tick 4.35 0
-expect 4 head.yaw 0.25410413623648476 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.19735017869506 head.pitch 0.6569999999999976 body_yaw 0.16019841698342485 antenna_right 1.1205999999999912
 tick 4.36 0
-expect 4 head.yaw 0.24510413623648475 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.18835017869506 head.pitch 0.6509999999999976 body_yaw 0.15569841698342485 antenna_right 1.1025999999999911
 tick 4.37 0
-expect 4 head.yaw 0.23610413623648474 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.1793501786950602 head.pitch 0.6449999999999976 body_yaw 0.15119841698342484 antenna_right 1.0845999999999911
 tick 4.38 0
-expect 4 head.yaw 0.22710413623648473 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.1703501786950603 head.pitch 0.6389999999999976 body_yaw 0.14669841698342484 antenna_right 1.066599999999991
 tick 4.39 0
-expect 4 head.yaw 0.21810413623648472 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.1613501786950604 head.pitch 0.6329999999999976 body_yaw 0.14219841698342484 antenna_right 1.048599999999991
 tick 4.4 0
-expect 4 head.yaw 0.20910413623648472 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.1523501786950605 head.pitch 0.6269999999999976 body_yaw 0.13769841698342483 antenna_right 1.030599999999991
 tick 4.41 0
-expect 4 head.yaw 0.2001041362364847 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.1433501786950606 head.pitch 0.6209999999999976 body_yaw 0.13319841698342483 antenna_right 1.012599999999991
 tick 4.42 0
-expect 4 head.yaw 0.1911041362364847 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.1343501786950607 head.pitch 0.6149999999999975 body_yaw 0.12869841698342482 antenna_right 0.994599999999991
 tick 4.43 0
-expect 4 head.yaw 0.1821041362364847 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.1253501786950608 head.pitch 0.6089999999999975 body_yaw 0.12419841698342482 antenna_right 0.976599999999991
 tick 4.44 0
-expect 4 head.yaw 0.17310413623648468 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.116350178695061 head.pitch 0.6029999999999975 body_yaw 0.11969841698342482 antenna_right 0.958599999999991
 tick 4.45 0
-expect 4 head.yaw 0.16410413623648468 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.107350178695061 head.pitch 0.5969999999999975 body_yaw 0.11519841698342481 antenna_right 0.940599999999991
 tick 4.46 0
-expect 4 head.yaw 0.15510413623648467 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.0983501786950611 head.pitch 0.5909999999999975 body_yaw 0.11069841698342481 antenna_right 0.922599999999991
 tick 4.47 0
-expect 4 head.yaw 0.14610413623648466 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.0893501786950612 head.pitch 0.5849999999999975 body_yaw 0.1061984169834248 antenna_right 0.904599999999991
 tick 4.48 0
-expect 4 head.yaw 0.13710413623648465 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.0803501786950613 head.pitch 0.5789999999999975 body_yaw 0.1016984169834248 antenna_right 0.886599999999991
 tick 4.49 0
-expect 4 head.yaw 0.12810413623648464 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.0713501786950614 head.pitch 0.5729999999999975 body_yaw 0.0971984169834248 antenna_right 0.8685999999999909
 tick 4.5 0
-expect 4 head.yaw 0.11910413623648465 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.0623501786950615 head.pitch 0.5669999999999975 body_yaw 0.09269841698342479 antenna_right 0.8505999999999909
 tick 4.51 0
-expect 4 head.yaw 0.11010413623648466 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.0533501786950616 head.pitch 0.5609999999999975 body_yaw 0.08819841698342479 antenna_right 0.8325999999999909
 tick 4.52 0
-expect 4 head.yaw 0.10110413623648466 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.0443501786950617 head.pitch 0.5549999999999975 body_yaw 0.08369841698342478 antenna_right 0.8145999999999909
 tick 4.53 0
-expect 4 head.yaw 0.09210413623648467 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.0353501786950619 head.pitch 0.5489999999999975 body_yaw 0.07919841698342478 antenna_right 0.7965999999999909
 tick 4.54 0
-expect 4 head.yaw 0.08310413623648467 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.026350178695062 head.pitch 0.5429999999999975 body_yaw 0.07469841698342478 antenna_right 0.7785999999999909
 tick 4.55 0
-expect 4 head.yaw 0.07410413623648468 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.017350178695062 head.pitch 0.5369999999999975 body_yaw 0.07019841698342477 antenna_right 0.7605999999999908
 tick 4.56 0
-expect 4 head.yaw 0.06510413623648469 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 1.0083501786950622 head.pitch 0.5309999999999975 body_yaw 0.06569841698342477 antenna_right 0.7425999999999908
 tick 4.57 0
-expect 4 head.yaw 0.056104136236484685 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.9993501786950622 head.pitch 0.5249999999999975 body_yaw 0.06119841698342477 antenna_right 0.7245999999999908
 tick 4.58 0
-expect 4 head.yaw 0.047104136236484684 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.9903501786950621 head.pitch 0.5189999999999975 body_yaw 0.056698416983424774 antenna_right 0.7065999999999908
 tick 4.59 0
-expect 4 head.yaw 0.03810413623648468 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.9813501786950621 head.pitch 0.5129999999999975 body_yaw 0.05219841698342478 antenna_right 0.6885999999999908
 tick 4.6 0
-expect 4 head.yaw 0.02910413623648468 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.9723501786950621 head.pitch 0.5069999999999975 body_yaw 0.04769841698342478 antenna_right 0.6705999999999908
 tick 4.61 0
-expect 4 head.yaw 0.02010413623648468 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.9633501786950621 head.pitch 0.5009999999999974 body_yaw 0.04319841698342478 antenna_right 0.6525999999999907
 tick 4.62 0
-expect 4 head.yaw 0.01208330898919168 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.9543501786950621 head.pitch 0.49499999999999744 body_yaw 0.038698416983424785 antenna_right 0.6345999999999907
 tick 4.63 0
-expect 4 head.yaw 0.006062481741897365 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.9453501786950621 head.pitch 0.48899999999999744 body_yaw 0.03419841698342479 antenna_right 0.6165999999999907
 tick 4.64 0
-expect 4 head.yaw 0.002041654494599719 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.9363501786950621 head.pitch 0.48299999999999743 body_yaw 0.029698416983424788 antenna_right 0.5985999999999907
 tick 4.65 0
-expect 4 head.yaw 2.0827247300502297e-05 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.9273501786950621 head.pitch 0.4769999999999974 body_yaw 0.025198416983424787 antenna_right 0.5805999999999907
 tick 4.66 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.9183501786950621 head.pitch 0.4709999999999974 body_yaw 0.020698416983424787 antenna_right 0.5625999999999907
 tick 4.67 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.9093501786950621 head.pitch 0.4649999999999974 body_yaw 0.016198416983424786 antenna_right 0.5445999999999906
 tick 4.68 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.9003501786950621 head.pitch 0.4589999999999974 body_yaw 0.012084357414364408 antenna_right 0.5265999999999906
 tick 4.69 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.8913501786950621 head.pitch 0.4529999999999974 body_yaw 0.00857029784530403 antenna_right 0.5085999999999906
 tick 4.7 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.882350178695062 head.pitch 0.4469999999999974 body_yaw 0.005656238276243242 antenna_right 0.4905999999999906
 tick 4.71 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.873350178695062 head.pitch 0.4409999999999974 body_yaw 0.0033421787071824544 antenna_right 0.4725999999999906
 tick 4.72 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.864350178695062 head.pitch 0.4349999999999974 body_yaw 0.001628119138121667 antenna_right 0.45459999999999057
 tick 4.73 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.855350178695062 head.pitch 0.4289999999999974 body_yaw 0.0005140595690608797 antenna_right 0.43659999999999055
 tick 4.74 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.846350178695062 head.pitch 0.4229999999999974 body_yaw 6.938893903907228e-18 antenna_right 0.41859999999999054
 tick 4.75 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.837350178695062 head.pitch 0.4169999999999974 body_yaw 6.938893903907228e-18 antenna_right 0.4005999999999905
 tick 4.76 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.828350178695062 head.pitch 0.41099999999999737 body_yaw 6.938893903907228e-18 antenna_right 0.3825999999999905
 tick 4.77 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.819350178695062 head.pitch 0.40499999999999736 body_yaw 6.938893903907228e-18 antenna_right 0.3645999999999905
 tick 4.78 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.810350178695062 head.pitch 0.39899999999999736 body_yaw 6.938893903907228e-18 antenna_right 0.34659999999999047
 tick 4.79 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.801350178695062 head.pitch 0.39299999999999735 body_yaw 6.938893903907228e-18 antenna_right 0.32859999999999046
 tick 4.8 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.792350178695062 head.pitch 0.38699999999999735 body_yaw 6.938893903907228e-18 antenna_right 0.31059999999999044
 tick 4.81 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.783350178695062 head.pitch 0.38099999999999734 body_yaw 6.938893903907228e-18 antenna_right 0.2925999999999904
 tick 4.82 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.774350178695062 head.pitch 0.37499999999999734 body_yaw 6.938893903907228e-18 antenna_right 0.2745999999999904
 tick 4.83 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.765350178695062 head.pitch 0.36899999999999733 body_yaw 6.938893903907228e-18 antenna_right 0.2565999999999904
 tick 4.84 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.7563501786950619 head.pitch 0.3629999999999973 body_yaw 6.938893903907228e-18 antenna_right 0.2385999999999904
 tick 4.85 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.7473501786950619 head.pitch 0.3569999999999973 body_yaw 6.938893903907228e-18 antenna_right 0.22059999999999041
 tick 4.86 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.7383501786950619 head.pitch 0.3509999999999973 body_yaw 6.938893903907228e-18 antenna_right 0.20259999999999043
 tick 4.87 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.7293501786950619 head.pitch 0.3449999999999973 body_yaw 6.938893903907228e-18 antenna_right 0.18459999999999044
 tick 4.88 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.7203501786950619 head.pitch 0.3389999999999973 body_yaw 6.938893903907228e-18 antenna_right 0.16659999999999045
 tick 4.89 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.7113501786950619 head.pitch 0.3329999999999973 body_yaw 6.938893903907228e-18 antenna_right 0.14859999999999046
 tick 4.9 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.7023501786950619 head.pitch 0.3269999999999973 body_yaw 6.938893903907228e-18 antenna_right 0.13059999999999047
 tick 4.91 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.6933501786950619 head.pitch 0.3209999999999973 body_yaw 6.938893903907228e-18 antenna_right 0.11259999999999047
 tick 4.92 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.6843501786950619 head.pitch 0.3149999999999973 body_yaw 6.938893903907228e-18 antenna_right 0.09459999999999047
 tick 4.93 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.6753501786950619 head.pitch 0.3089999999999973 body_yaw 6.938893903907228e-18 antenna_right 0.07659999999999047
 tick 4.94 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.6663501786950619 head.pitch 0.30299999999999727 body_yaw 6.938893903907228e-18 antenna_right 0.058599999999990465
 tick 4.95 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.6573501786950618 head.pitch 0.29699999999999727 body_yaw 6.938893903907228e-18 antenna_right 0.04059999999999046
 tick 4.96 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.6483501786950618 head.pitch 0.29099999999999726 body_yaw 6.938893903907228e-18 antenna_right 0.022599999999990465
 tick 4.97 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.6393501786950618 head.pitch 0.28499999999999726 body_yaw 6.938893903907228e-18 antenna_right 0.004599999999990466
 tick 4.98 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.6303501786950618 head.pitch 0.27899999999999725 body_yaw 6.938893903907228e-18 antenna_right -0.013400000000009533
 tick 4.99 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.6213501786950618 head.pitch 0.27299999999999724 body_yaw 6.938893903907228e-18 antenna_right -0.03140000000000953
 tick 5.0 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.6123501786950618 head.pitch 0.26699999999999724 body_yaw 6.938893903907228e-18 antenna_right -0.049400000000009534
 tick 5.01 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.6033501786950618 head.pitch 0.26099999999999723 body_yaw 6.938893903907228e-18 antenna_right -0.06740000000000954
 tick 5.02 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.5943501786950618 head.pitch 0.25499999999999723 body_yaw 6.938893903907228e-18 antenna_right -0.08540000000000954
 tick 5.03 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.5853501786950618 head.pitch 0.24899999999999722 body_yaw 6.938893903907228e-18 antenna_right -0.10340000000000954
 tick 5.04 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.5763501786950618 head.pitch 0.24299999999999722 body_yaw 6.938893903907228e-18 antenna_right -0.12140000000000954
 tick 5.05 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.5673501786950618 head.pitch 0.2369999999999972 body_yaw 6.938893903907228e-18 antenna_right -0.13940000000000954
 tick 5.06 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.5583501786950618 head.pitch 0.2309999999999972 body_yaw 6.938893903907228e-18 antenna_right -0.15417499999999001
 tick 5.07 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.5493501786950618 head.pitch 0.2249999999999972 body_yaw 6.938893903907228e-18 antenna_right -0.16494999999998614
 tick 5.08 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.5403501786950617 head.pitch 0.2189999999999972 body_yaw 6.938893903907228e-18 antenna_right -0.1717249999999897
 tick 5.09 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.5313501786950617 head.pitch 0.2129999999999972 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.1 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.5223501786950617 head.pitch 0.2069999999999972 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.11 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.5133501786950617 head.pitch 0.20099999999999718 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.12 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.5043501786950617 head.pitch 0.19499999999999718 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.13 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.4953501786950617 head.pitch 0.18899999999999717 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.14 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.4863501786950617 head.pitch 0.18299999999999716 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.15 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.4773501786950617 head.pitch 0.17699999999999716 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.16 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.4683501786950617 head.pitch 0.17099999999999715 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.17 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.4593501786950617 head.pitch 0.16499999999999715 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.18 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.45035017869506166 head.pitch 0.15899999999999714 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.19 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.44135017869506166 head.pitch 0.15299999999999714 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.2 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.43235017869506165 head.pitch 0.14699999999999713 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.21 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.42335017869506164 head.pitch 0.14099999999999713 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.22 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.41435017869506163 head.pitch 0.13499999999999712 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.23 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.4053501786950616 head.pitch 0.12899999999999712 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.24 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.3963501786950616 head.pitch 0.12299999999999711 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.25 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.3873501786950616 head.pitch 0.1169999999999971 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.26 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.3783501786950616 head.pitch 0.1109999999999971 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.27 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.3693501786950616 head.pitch 0.1049999999999971 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.28 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.3603501786950616 head.pitch 0.09899999999999709 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.29 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.3513501786950616 head.pitch 0.09299999999999708 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.3 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.34235017869506157 head.pitch 0.08699999999999708 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.31 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.33335017869506156 head.pitch 0.08099999999999707 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.32 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.32435017869506155 head.pitch 0.07499999999999707 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.33 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.31535017869506154 head.pitch 0.06899999999999706 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.34 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.30635017869506154 head.pitch 0.06299999999999706 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.35 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.29735017869506153 head.pitch 0.05699999999999706 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.36 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.2883501786950615 head.pitch 0.05099999999999706 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.37 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.2793501786950615 head.pitch 0.04499999999999706 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.38 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.2703501786950615 head.pitch 0.038999999999997065 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.39 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.2613501786950615 head.pitch 0.032999999999997066 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.4 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.2523501786950615 head.pitch 0.026999999999997068 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.41 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.24335017869506148 head.pitch 0.02099999999999707 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.42 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.23435017869506147 head.pitch 0.01499999999999707 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.43 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.22535017869506146 head.pitch 0.009000000000003047 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.44 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.21635017869506146 head.pitch 0.004500000000002394 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.45 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.20735017869506145 head.pitch 0.0015000000000017404 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.46 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.19835017869506144 head.pitch 1.0870210981339667e-15 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.47 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.18935017869506143 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.48 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.18035017869506142 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.49 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.17135017869506142 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.5 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.1623501786950614 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.51 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.1533501786950614 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.52 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.1443501786950614 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.53 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.13535017869506138 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.54 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.12635017869506138 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.55 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.11735017869506138 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.56 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.10835017869506139 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.57 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.0993501786950614 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.58 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.0903501786950614 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.59 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.0813501786950614 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.6 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.07235017869506141 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.61 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.06335017869506142 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.62 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.05435017869506142 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.63 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.045350178695061416 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.64 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.036350178695061415 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.65 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.027350178695061414 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.66 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.018350178695061413 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.67 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.010762634021298116 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.68 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.005175089347533501 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.69 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 0.001587544673768886 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.7 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 2.2529721144248782e-15 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.71 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 4.3387168857655905e-16 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.72 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 4.3387168857655905e-16 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.73 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 4.3387168857655905e-16 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.74 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 4.3387168857655905e-16 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.75 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 4.3387168857655905e-16 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.76 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 4.3387168857655905e-16 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.77 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 4.3387168857655905e-16 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.78 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 4.3387168857655905e-16 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.79 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 4.3387168857655905e-16 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.8 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 4.3387168857655905e-16 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.81 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 4.3387168857655905e-16 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.82 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 4.3387168857655905e-16 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.83 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 4.3387168857655905e-16 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.84 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 4.3387168857655905e-16 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.85 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 4.3387168857655905e-16 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.86 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 4.3387168857655905e-16 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.87 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 4.3387168857655905e-16 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.88 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 4.3387168857655905e-16 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.89 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 4.3387168857655905e-16 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.9 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 4.3387168857655905e-16 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.91 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 4.3387168857655905e-16 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.92 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 4.3387168857655905e-16 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.93 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 4.3387168857655905e-16 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.94 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 4.3387168857655905e-16 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.95 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 4.3387168857655905e-16 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.96 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 4.3387168857655905e-16 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.97 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 4.3387168857655905e-16 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.98 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 4.3387168857655905e-16 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966
 tick 5.99 0
-expect 4 head.yaw 8.710378609794872e-16 head.pitch 7.185007797061438e-16 body_yaw 5.41667405373758e-16 antenna_right -0.1744999999999969
+expect 4 head.yaw 4.3387168857655905e-16 head.pitch 4.3365484814206215e-16 body_yaw 6.938893903907228e-18 antenna_right -0.17449999999999966

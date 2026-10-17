@@ -40,7 +40,7 @@ def script(tick: int, now: float) -> tuple[list[Command], bool]:
     """Scenario: commanded move, expression on top, reflex pre-emption with cross-fade,
     yaw-delta conflict, minor present, expiry, then silence to trigger the watchdog."""
     cmds: list[Command] = []
-    minor = 150 <= tick < 250
+    minor = 150 <= tick < 250 or 300 <= tick < 400
     if tick < 300:
         cmds.append(Command("idle", Priority.IDLE, {"head.pitch": 0.02 * math.sin(now)}, now))
         cmds.append(
@@ -70,6 +70,9 @@ def script(tick: int, now: float) -> tuple[list[Command], bool]:
                 expires=now + 0.05,
             )
         )
+    if 300 <= tick < 400:  # winner near its limit plus an additive overflow, minor on (SPEC 12)
+        cmds.append(Command("hold", Priority.COMMANDED, {"head.pitch": 0.7}, now))
+        cmds.append(Command("bump", Priority.EXPRESSION, {"head.pitch": 0.2}, now, additive=True))
     if tick == 200:
         cmds.append(Command("prim", Priority.COMMANDED, {"body_yaw": -1.0}, now, expires=now + 0.4))
     return cmds, minor
