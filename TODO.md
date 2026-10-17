@@ -33,3 +33,7 @@ The persona pieces exist and are tested; these callers wait for the pillars they
 - [ ] Secret store for `${secret:name}` route keys (SPEC 8: stored encrypted on the robot). The
       app's `make_router` has no resolver, so such routes send an empty key; the app logs a
       warning at startup for each one.
+- [ ] Scan soon after a person leaves (SPEC 5A, Scanning): when the person target is lost, start a
+      sweep after a new `world.scan.target_lost_delay_s` (N s, jittered, scaled like the idle
+      interval) instead of waiting the full `world.scan.idle_interval_s` (120 s). Same rules as
+      the idle scan: a person target or speaker hint cancels it, not while resting.
