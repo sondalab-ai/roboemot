@@ -300,6 +300,116 @@ class RegisterConfig(Strict):
     )
 
 
+# --------------------------------------------------------------------------- expression (SPEC 7)
+
+EXPRESSION_CHANNELS = (
+    "antenna_right",
+    "antenna_left",
+    "head.pitch",
+    "head.roll",
+    "head.yaw",
+    "body_yaw",
+)
+
+
+class IntensityFactors(Strict):
+    low: float = param(0.6, "Amplitude factor of reaction_intensity low", ge=0, le=2)
+    medium: float = param(1.0, "Amplitude factor of reaction_intensity medium", ge=0, le=2)
+    high: float = param(1.3, "Amplitude factor of reaction_intensity high", ge=0, le=2)
+
+
+class ExpressionConfig(Strict):
+    intensity_factor: IntensityFactors = param(
+        {}, "Reaction intensity (register) as an amplitude factor: starting points to tune"
+    )
+    intensity_floor: float = param(
+        0.5,
+        "Share of the amplitude kept at affect intensity 0; the amplitude grows linearly to "
+        "the full value at intensity 1",
+        ge=0,
+        le=1,
+    )
+    max_amplitude: float = param(
+        2.0,
+        "Ceiling of the product register x reaction x persona x circadian x affect factors",
+        ge=0,
+        le=3,
+    )
+    min_interval_s: float = param(
+        1.0, "Minimum time between the starts of two expressions", unit="s", ge=0, le=60
+    )
+    retrigger_s: float = param(
+        30.0,
+        "A label that stays held replays its expression at most this often",
+        unit="s",
+        ge=1,
+        le=3600,
+    )
+    retrigger_min_intensity: float = param(
+        0.15, "A held label replays only while the affect intensity is at least this", ge=0, le=1
+    )
+    command_ttl_s: float = param(
+        0.25,
+        "Lifetime of each expression command in the arbiter: the offset drops to zero by itself "
+        "if the app stops feeding it",
+        unit="s",
+        ge=0.05,
+        le=2,
+    )
+    register_hold_s: float = param(
+        2.0,
+        "A face track not seen for this long leaves the active register set",
+        unit="s",
+        ge=0.1,
+        le=60,
+    )
+    register_hold_periods: float = param(
+        3.0,
+        "A face track also stays in the active register set for this many face-detection "
+        "periods at the rate the governor allows now (the larger of the two applies)",
+        ge=1,
+        le=100,
+    )
+
+
+class ExpressionEntry(Strict):
+    """One affect label rendered as keyframes per channel (SPEC 7, Expression map)."""
+
+    channels: dict[str, list[tuple[float, float]]] = param(
+        {},
+        "Channel name to [t_s, offset_deg] keyframes of one cycle; piecewise-linear in time. "
+        "Every channel starts at t=0 and ends at the same time with offset 0",
+    )
+    repeat: int = param(1, "How many times the cycle plays back to back (a wiggle)", ge=1, le=20)
+    curve: Literal["linear", "minjerk", "ease_in_out"] = param(
+        "linear", "Easing between two keyframes"
+    )
+    additive: Literal[True] = param(
+        True, "Layered on top of other motion; only additive expressions exist in M2"
+    )
+
+    @field_validator("channels")
+    @classmethod
+    def _channels(cls, channels: dict[str, list[tuple[float, float]]]) -> dict:
+        if not channels:
+            raise ValueError("an expression needs at least one channel")
+        ends = set()
+        for name, frames in channels.items():
+            if name not in EXPRESSION_CHANNELS:
+                raise ValueError(f"unknown channel {name!r}, expected one of {EXPRESSION_CHANNELS}")
+            if len(frames) < 2:
+                raise ValueError(f"channel {name}: needs at least two keyframes")
+            times = [t for t, _ in frames]
+            if times[0] != 0 or any(b <= a for a, b in zip(times, times[1:], strict=False)):
+                raise ValueError(f"channel {name}: times must start at 0 and increase")
+            if frames[0][1] != 0 or frames[-1][1] != 0:
+                raise ValueError(f"channel {name}: the first and last offsets must be 0")
+            ends.add(times[-1])
+        if len(ends) != 1:
+            raise ValueError("all channels must end at the same time")
+        return channels
+
+
 # --------------------------------------------------------------------------- circadian (SPEC 7A)
 
 
@@ -1651,6 +1761,10 @@ with warnings.catch_warnings():
         affect: AffectConfig = param({}, "SPEC 7")
         appraisal: AppraisalConfig = param({}, "SPEC 7")
         register: RegisterConfig = param({}, "SPEC 7")
+        expression: ExpressionConfig = param({}, "SPEC 7")
+        expression_map: dict[str, ExpressionEntry] = param(
+            {}, "SPEC 7, 11A: affect label to keyframes per channel; the robot manifest ships it"
+        )
         circadian: CircadianConfig = param({}, "SPEC 7A")
         light: LightConfig = param({}, "SPEC 7A")
         motion: MotionConfig = param({}, "SPEC 10")
@@ -1686,6 +1800,16 @@ with warnings.catch_warnings():
                         f"appraisal rule for {rule.event!r} uses label {rule.label!r}, "
                         f"not one of affect.labels {sorted(self.affect.labels)}"
                     )
+            return self
+
+        @model_validator(mode="after")
+        def _expression_labels_exist(self) -> RoboEmotConfig:
+            unknown = sorted(set(self.expression_map) - set(self.affect.labels))
+            if unknown:
+                raise ValueError(
+                    f"expression_map has labels {unknown} that are not in affect.labels "
+                    f"{sorted(self.affect.labels)}"
+                )
             return self
 
         @model_validator(mode="after")

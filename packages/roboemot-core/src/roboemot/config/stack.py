@@ -348,6 +348,15 @@ class ConfigStack:
         stack._remember_mtimes()
         return stack
 
+    def set_manifest_behaviour(self, behaviour: dict) -> None:
+        """Install the robot manifest's ``behaviour`` block (layer 2) once the manifest is loaded.
+
+        It becomes part of the installed configuration, so it also resets the approved baseline.
+        """
+        with self._lock:
+            self.manifest = behaviour
+            self._last = self._approved = self.effective()
+
     # ---- reading
 
     def merged_tree(self, person: dict | None = None, *, include_runtime: bool = True) -> dict:

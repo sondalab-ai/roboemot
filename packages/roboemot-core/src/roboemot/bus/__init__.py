@@ -27,6 +27,7 @@ TOPICS = (
     "world.snapshot",
     "person.recognized",
     "affect.state",
+    "register.active",
     "attention.target",
     "motion.request",
     "motion.state",

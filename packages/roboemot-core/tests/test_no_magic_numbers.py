@@ -13,6 +13,8 @@ BEHAVIOUR_MODULES = [
     "affect/__init__.py",
     "affect/appraisal.py",
     "affect/runner.py",
+    "affect/register.py",
+    "affect/expression.py",
     "circadian/model.py",
     "circadian/light.py",
     "voice/prosody.py",
