@@ -184,6 +184,11 @@ class Endpointer:
         self.reset()
 
     @property
+    def frame_s(self) -> float:
+        """Length of one VAD frame in seconds."""
+        return self._frame_s
+
+    @property
     def in_speech(self) -> bool:
         """True between ``SpeechStart`` and ``SpeechEnd``."""
         return self._speaking
