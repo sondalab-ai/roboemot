@@ -56,7 +56,7 @@ jobs:
       - run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends pkg-config libcairo2-dev \
-            libgirepository-2.0-dev gir1.2-gstreamer-1.0 gstreamer1.0-plugins-base \
+            libgirepository1.0-dev libgirepository-2.0-dev gir1.2-gstreamer-1.0 gstreamer1.0-plugins-base \
             gstreamer1.0-plugins-good libosmesa6
       - run: pip install -e "packages/roboemot-core[dev]" -e "packages/roboemot-reachymini[dev,sim]"
       - name: start the simulated daemon
@@ -71,4 +71,4 @@ jobs:
       - run: pytest -m sim -s -o faulthandler_timeout=120
         timeout-minutes: 20
       - if: failure()
-        run: cat sim-daemon.log
+        run: cat sim-daemon.log || true
