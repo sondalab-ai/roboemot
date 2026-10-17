@@ -100,6 +100,39 @@ class AffectConfig(Strict):
     )
 
 
+APPRAISAL_EVENTS = frozenset(
+    {
+        "person.known",
+        "person.known_child",
+        "person.known_teen",
+        "person.known_adult",
+        "person.known_senior",
+        "person.known_unknown",
+        "person.unknown_appears",
+        "animal.appears",
+        "idle.long",
+        "sound.loud",
+        "light.on",
+        "light.off",
+        "conversation.unavailable",
+    }
+)
+APPRAISAL_EVENT_PREFIXES = ("link.",)  # connectivity: link.<name>.lost / .restored (SPEC 12A)
+
+
+def rule_identity(event: str, when: Any) -> tuple[str, tuple[tuple[str, Any], ...]]:
+    """What makes two appraisal rules the same rule: the event and its normalised ``when``.
+
+    Numbers and booleans compare equal in a ``when`` match (1 == 1.0 == True), so they are
+    normalised to float here. Used by the keyed-list merge and by the engine's cooldowns.
+    """
+    items = (
+        (k, float(v) if isinstance(v, (bool, int, float)) else v)
+        for k, v in sorted((when or {}).items())
+    )
+    return event, tuple(items)
+
+
 class AppraisalRule(Strict):
     event: str = param("", "Bus event name that triggers the rule")
     valence: float = param(0.0, "Valence impulse", ge=-1, le=1)
@@ -134,6 +167,18 @@ class AppraisalConfig(Strict):
         ge=0.1,
         le=60,
     )
+    track_lost_periods: float = param(
+        3.0,
+        "A pending unknown face also survives this many face-detection periods at the rate the "
+        "governor allows now: the lifetime is the larger of this and track_lost_s, so the "
+        "resting vision rate does not drop it between two frames",
+        ge=1,
+        le=100,
+    )
+    extra_events: list[str] = param(
+        [],
+        "Event names emitted by plugins, accepted in rules besides the library's events",
+    )
     rules: list[AppraisalRule] = param(
         [
             # Starting points (SPEC 7): an enrolled person gives +0.4/+0.2; a child adds joy, an
@@ -146,7 +191,10 @@ class AppraisalConfig(Strict):
                 "label": "joy",
                 "cooldown_s": 60,
             },
+            # Teen and senior start with the adult values (SPEC 7).
+            {"event": "person.known_teen", "valence": 0.1, "label": "calm", "cooldown_s": 60},
             {"event": "person.known_adult", "valence": 0.1, "label": "calm", "cooldown_s": 60},
+            {"event": "person.known_senior", "valence": 0.1, "label": "calm", "cooldown_s": 60},
             {
                 "event": "person.unknown_appears",
                 "valence": 0.05,
@@ -184,6 +232,23 @@ class AppraisalConfig(Strict):
         ],
         "Event to impulse rules (SPEC 7, Affect state)",
     )
+
+    @model_validator(mode="after")
+    def _rules_are_known_and_unique(self) -> AppraisalConfig:
+        known = APPRAISAL_EVENTS | set(self.extra_events)
+        seen: set[Any] = set()
+        for rule in self.rules:
+            if rule.event not in known and not rule.event.startswith(APPRAISAL_EVENT_PREFIXES):
+                raise ValueError(
+                    f"appraisal rule for unknown event {rule.event!r}; the library emits "
+                    f"{sorted(APPRAISAL_EVENTS)} and link.*; plugin events go in "
+                    "appraisal.extra_events"
+                )
+            ident = rule_identity(rule.event, rule.when)
+            if ident in seen:
+                raise ValueError(f"two appraisal rules for {rule.event!r} with the same `when`")
+            seen.add(ident)
+        return self
 
 
 # --------------------------------------------------------------------------- register (SPEC 7)
@@ -1611,6 +1676,16 @@ with warnings.catch_warnings():
             dupes = sorted({n for n in names if names.count(n) > 1})
             if dupes:
                 raise ValueError(f"duplicate llm route names: {dupes}")
+            return self
+
+        @model_validator(mode="after")
+        def _appraisal_labels_exist(self) -> RoboEmotConfig:
+            for rule in self.appraisal.rules:
+                if rule.label is not None and rule.label not in self.affect.labels:
+                    raise ValueError(
+                        f"appraisal rule for {rule.event!r} uses label {rule.label!r}, "
+                        f"not one of affect.labels {sorted(self.affect.labels)}"
+                    )
             return self
 
         @model_validator(mode="after")

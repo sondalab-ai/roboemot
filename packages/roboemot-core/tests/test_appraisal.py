@@ -10,7 +10,7 @@ from roboemot.affect import AffectEngine
 from roboemot.affect.appraisal import AppraisalAdapter
 from roboemot.affect.runner import AffectRunner
 from roboemot.bus import Bus
-from roboemot.config import ConfigStack
+from roboemot.config import ConfigError, ConfigStack
 from roboemot.config.schema import AppraisalConfig, RoboEmotConfig
 from roboemot.vision.types import FacePercept, PersonRecognized
 from roboemot.world.types import Entry
@@ -53,8 +53,9 @@ def names(events) -> list[str]:
     [
         ("adult", "person.known_adult"),
         ("child", "person.known_child"),
-        ("unknown", "person.known_unknown_age"),
-        ("senior", "person.known_unknown_age"),
+        ("teen", "person.known_teen"),
+        ("senior", "person.known_senior"),
+        ("unknown", "person.known_unknown"),
     ],
 )
 def test_person_recognized_maps_by_age_group(rig, age, specific):
@@ -70,7 +71,7 @@ def test_animal_appearing_maps_and_other_kinds_do_not(rig):
     bus.publish("world.entity_appeared", entry("object", "cup"), 1.0)
     assert not events
     bus.publish("world.entity_appeared", entry("animal", "cat"), 2.0)
-    assert events == [("animal.appears", 2.0, {"category": "cat"})]
+    assert events == [("animal.appears", 2.0, {"entity_id": "e-1", "category": "cat"})]
 
 
 def test_unknown_face_fires_once_after_the_decision_window(rig):
@@ -144,6 +145,44 @@ def test_faces_and_recognition_count_as_interaction(rig, topic, payload):
     assert "idle.long" not in names(events)
 
 
+def test_attention_cleared_is_not_interaction(rig):
+    bus, adapter, events = rig
+    bus.publish("attention.target", None, AP.idle_after_s - 1)
+    adapter.tick(AP.idle_after_s + 1)
+    assert names(events) == ["idle.long"]
+
+
+def test_unknown_face_still_fires_at_the_resting_vision_rate():
+    bus, events = Bus(), []
+    period = 20.0  # night rate: one detection every 20 s
+    adapter = AppraisalAdapter(
+        bus, AP, lambda n, t, p: events.append(n), detection_period=lambda: period
+    )
+    bus.publish("percept.face", face(stamp=0.0), 0.0)
+    adapter.tick(AP.unknown_face_after_s + AP.track_lost_s + 1)  # past track_lost_s, one period
+    assert events == ["person.unknown_appears"]
+    bus.publish("percept.face", face(track=2, stamp=100.0), 100.0)
+    adapter.tick(100.0 + AP.track_lost_periods * period + 1)  # gone for good: no event
+    assert events == ["person.unknown_appears"]
+
+
+def test_announced_tracks_are_pruned_once_lost(rig):
+    bus, adapter, events = rig
+    bus.publish("percept.face", face(stamp=0.0), 0.0)
+    bus.publish("percept.face", face(stamp=AP.unknown_face_after_s, new=False), 3.0)
+    adapter.tick(AP.unknown_face_after_s)
+    assert adapter._announced
+    adapter.tick(AP.unknown_face_after_s + AP.track_lost_s + 1)
+    assert not adapter._announced
+
+
+def test_event_names_cover_every_age_group():
+    from roboemot.config.schema import APPRAISAL_EVENTS
+    from roboemot.registry.records import AGE_GROUPS
+
+    assert {f"person.known_{g}" for g in AGE_GROUPS} <= APPRAISAL_EVENTS
+
+
 def test_close_detaches_from_the_bus(rig):
     bus, adapter, events = rig
     adapter.close()
@@ -155,7 +194,8 @@ def test_close_detaches_from_the_bus(rig):
 
 
 def cfg_with(*rules: dict) -> AppraisalConfig:
-    return AppraisalConfig.model_validate({"rules": list(rules)})
+    plugin_events = ["x", "y"]
+    return AppraisalConfig.model_validate({"rules": list(rules), "extra_events": plugin_events})
 
 
 def test_when_requires_every_field_to_equal():
@@ -315,3 +355,71 @@ def test_the_engine_is_safe_under_concurrent_events_and_ticks():
     for t in threads:
         t.join()
     assert not errors
+
+
+# ----------------------------------------------------------------------------- fix round
+
+
+def test_a_stale_stamp_neither_decays_twice_nor_shortens_the_label_hold():
+    e = AffectEngine(CFG.affect, cfg_with({"event": "x", "valence": 0.4, "label": "joy"}))
+    e.impulse(100.0, valence=0.8)
+    e.update(110.0)
+    v = e.valence
+    e.update(105.0)  # an older capture stamp
+    assert e.valence == pytest.approx(v)
+    e.update(110.0)
+    assert e.valence == pytest.approx(v)  # no second decay of 105..110
+    e.on_event("x", 104.0)  # stale stamp: the hold still starts at the engine's time
+    assert e.state(110.0 + CFG.affect.event_label_hold_s - 0.1).label == "joy"
+
+
+def test_cooldowns_follow_the_rule_through_a_reordered_reload():
+    a = {"event": "x", "valence": 0.1, "cooldown_s": 100}
+    b = {"event": "y", "arousal": 0.1, "cooldown_s": 100}
+    e = AffectEngine(CFG.affect, cfg_with(a, b))
+    assert e.on_event("x", 0.0) and e.on_event("y", 0.0)
+    e.set_config(CFG.affect, cfg_with(b, a))
+    assert not e.on_event("x", 1.0) and not e.on_event("y", 1.0)
+    e.set_config(CFG.affect, cfg_with(b))  # x gone: its cooldown is dropped
+    e.set_config(CFG.affect, cfg_with(b, a))
+    assert e.on_event("x", 2.0) and not e.on_event("y", 2.0)
+
+
+def test_cooldown_is_per_subject():
+    e = AffectEngine(CFG.affect, AP)
+    assert e.on_event("person.known", 0.0, {"person_id": "p-1"})
+    assert e.on_event("person.known", 1.0, {"person_id": "p-2"})  # another person reacts
+    assert not e.on_event("person.known", 2.0, {"person_id": "p-1"})  # the same one does not
+    assert e.on_event("person.known", 61.0, {"person_id": "p-1"})
+
+
+def test_rule_identity_normalizes_numbers_for_cooldown_and_merge():
+    from roboemot.config.schema import rule_identity
+
+    one = rule_identity("x", {"k": 1})
+    assert one == rule_identity("x", {"k": 1.0}) == rule_identity("x", {"k": True})
+    assert rule_identity("x", {"a": 1, "b": "s"}) == rule_identity("x", {"b": "s", "a": 1.0})
+    assert rule_identity("x", {"k": "1"}) != one
+
+
+def test_unknown_event_names_and_labels_are_rejected_at_config_load(tmp_path):
+    head = "schema_version: 1\nappraisal:\n"
+    bad_event = tmp_path / "event.yaml"
+    bad_event.write_text(head + "  rules:\n    - {event: person.recognized, valence: 0.1}\n")
+    with pytest.raises(ConfigError, match=r"person\.recognized"):
+        ConfigStack.from_files(app=bad_event).effective()
+    bad_label = tmp_path / "label.yaml"
+    bad_label.write_text(head + "  rules:\n    - {event: idle.long, label: nostalgia}\n")
+    with pytest.raises(ConfigError, match="nostalgia"):
+        ConfigStack.from_files(app=bad_label).effective()
+    plugin = tmp_path / "plugin.yaml"
+    plugin.write_text(
+        head + "  extra_events: [door.knock]\n  rules:\n    - {event: door.knock, valence: 0.1}\n"
+        "    - {event: link.cloud.lost}\n"
+    )
+    assert ConfigStack.from_files(app=plugin).effective().appraisal.rules
+
+
+def test_duplicate_rules_are_rejected():
+    with pytest.raises(ValueError, match="same"):
+        cfg_with({"event": "x"}, {"event": "x"})

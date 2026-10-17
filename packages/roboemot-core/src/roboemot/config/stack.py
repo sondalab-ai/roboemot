@@ -31,7 +31,7 @@ from typing import Any, Literal, Union, get_args, get_origin
 import yaml
 from pydantic import BaseModel, ValidationError
 
-from .schema import SCHEMA_VERSION, RoboEmotConfig
+from .schema import SCHEMA_VERSION, RoboEmotConfig, rule_identity
 
 LAYER_ORDER = ("defaults", "manifest", "preset", "app", "derived", "person", "runtime")
 KEYED_LISTS = {"appraisal.rules": "event", "llm_routes": "name"}
@@ -85,12 +85,14 @@ def deep_merge(base: dict, over: dict, path: str = "") -> dict:
     return out
 
 
-def _merge_id(item: dict, key: str) -> tuple[Any, str] | None:
-    """Merge identity of a keyed-list entry: its key plus its ``when`` condition, so two rules
-    for one event with different conditions stay two rules."""
+def _merge_id(item: dict, key: str) -> Any:
+    """Merge identity of a keyed-list entry. Appraisal rules also carry their ``when``
+    condition, so two rules for one event with different conditions stay two rules."""
     if item.get(key) is None:
         return None
-    return item[key], repr(sorted((item.get("when") or {}).items()))
+    if key == "event":
+        return rule_identity(item[key], item.get("when"))
+    return item[key]
 
 
 def _merge_keyed(base: list, over: list, key: str) -> list:

@@ -449,14 +449,14 @@ An adapter in the affect module (`roboemot.affect.appraisal`) turns bus messages
 | Event | Emitted when | Payload fields | Default rule (valence, arousal, label, cooldown) |
 | --- | --- | --- | --- |
 | `person.known` | any `person.recognized` | `person_id`, `age_group`, `possible_minor` | +0.4, +0.2, none, 60 s (the enrolled-person example above) |
-| `person.known_child` | recognised person with age group `child` (in addition to `person.known`) | same | +0.3, +0.3, `joy`, 60 s (stronger joy than an adult) |
-| `person.known_adult` | recognised person with age group `adult` (in addition to `person.known`) | same | +0.1, 0, `calm`, 60 s |
-| `person.known_unknown_age` | recognised person of any other age group (in addition to `person.known`) | same | none |
-| `person.unknown_appears` | a new face track still without an owner `appraisal.unknown_face_after_s` (3 s) after it appeared; never for a face that is recognised; at most once per track | `track_id`, `age_group`, `possible_minor` | +0.05, +0.3, `curiosity`, 30 s (curiosity with almost no valence change) |
-| `animal.appears` | `world.entity_appeared` of kind `animal` | `category` | +0.2, +0.3, `curiosity`, 30 s |
+| `person.known_<age_group>` | recognised person, one event per registry age group (`child`, `teen`, `adult`, `senior`; `person.known_unknown` for `unknown`), in addition to `person.known` | same | `child`: +0.3, +0.3, `joy`, 60 s (stronger joy than an adult). `teen`, `adult`, `senior`: +0.1, 0, `calm`, 60 s (teen and senior take the adult values as a starting point). `unknown`: none |
+| `person.unknown_appears` | a new face track still without an owner `appraisal.unknown_face_after_s` (3 s) after it appeared; at most once per track. A face recognised inside that window never emits it; one recognised later has already emitted it and then emits `person.known` too | `track_id`, `age_group`, `possible_minor` | +0.05, +0.3, `curiosity`, 30 s (curiosity with almost no valence change) |
+| `animal.appears` | `world.entity_appeared` of kind `animal` | `entity_id`, `category` | +0.2, +0.3, `curiosity`, 30 s |
 | `idle.long` | no face, attention target or recognised person for `appraisal.idle_after_s` (600 s); once, until interaction resumes | none | 0, -0.6, `sleepy`, 600 s |
 | `sound.loud`, `light.on` | sound and light producers (M2, section 7A) | none | as in the example above |
 | `link.*`, `conversation.unavailable` | connectivity (section 12A) | none | section 12A |
+
+Rule events are validated when the configuration loads: an unknown name (for example the retired `person.recognized`) or a `label` outside `affect.labels` is rejected; `link.*` events and names listed in `appraisal.extra_events` (for plugins) are accepted. Cooldowns are kept per rule and, when the payload names a person, entity or track, per subject. In a loop-driven tick a long track gap is tolerated: an unnamed face is dropped after the larger of `appraisal.track_lost_s` and `appraisal.track_lost_periods` face-detection periods.
 
 The affect state is published on `affect.state` at `affect.update_hz`, capped by the rate of the app loop that ticks the engine (50 ms).
 

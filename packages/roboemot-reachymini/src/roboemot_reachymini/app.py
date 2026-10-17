@@ -302,7 +302,9 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         bus = self.bus = Bus()
         # The one affect engine: appraisal events from the bus and the responder feed it, the
         # app tick decays it and publishes affect.state (SPEC 7).
-        runner = self.affect_runner = AffectRunner(cfg.affect, cfg.appraisal, bus, time.monotonic())
+        runner = self.affect_runner = AffectRunner(
+            cfg.affect, cfg.appraisal, bus, time.monotonic(), self.detection_period
+        )
         responder.affect = runner.engine
         world = self.world = WorldModel(cfg.world, FRAME, bus)
         selector = self.selector = AttentionSelector(cfg.attention, bus)

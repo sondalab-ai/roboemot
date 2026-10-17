@@ -15,7 +15,9 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
-from ..config.schema import AffectConfig, AppraisalConfig
+from ..config.schema import AffectConfig, AppraisalConfig, rule_identity
+
+SUBJECT_KEYS = ("person_id", "entity_id", "track_id")  # payload fields that name who/what
 
 
 def _clamp(x: float) -> float:
@@ -60,7 +62,7 @@ class AffectEngine:
     baseline_arousal: float = 0.0
     _last: float | None = None
     _event_label: tuple[str, float] | None = None  # (label, until)
-    _cooldown: dict[str, float] = field(default_factory=dict)
+    _cooldown: dict[tuple, float] = field(default_factory=dict)  # (rule, subject) -> until
     _llm_budget: float = 0.0
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
@@ -77,8 +79,9 @@ class AffectEngine:
             k = math.pow(0.5, (now - self._last) / self.cfg.half_life_s)
             self.valence = self.baseline_valence + (self.valence - self.baseline_valence) * k
             self.arousal = self.baseline_arousal + (self.arousal - self.baseline_arousal) * k
-        self._last = now
-        return self.state(now)
+        # Time never goes back: bus handlers pass capture stamps older than the loop tick.
+        self._last = now if self._last is None else max(self._last, now)
+        return self.state(self._last)
 
     @_locked
     def set_baseline(self, valence: float | None = None, arousal: float | None = None) -> None:
@@ -95,12 +98,13 @@ class AffectEngine:
     ) -> None:
         if not all(math.isfinite(x) for x in (now, valence, arousal)):
             raise ValueError("affect impulse must be finite")
+        if label and label not in self.cfg.labels:
+            raise KeyError(f"unknown affect label {label}")
         self.update(now)
+        now = self._last  # a stale stamp counts as now
         self.valence = _clamp(self.valence + valence)
         self.arousal = _clamp(self.arousal + arousal)
         if label:
-            if label not in self.cfg.labels:
-                raise KeyError(f"unknown affect label {label}")
             self._event_label = (label, now + self.cfg.event_label_hold_s)
 
     @_locked
@@ -108,19 +112,36 @@ class AffectEngine:
         """Apply matching appraisal rules; returns True if any rule fired.
 
         A rule with ``when`` matches only if every listed field equals the same field of
-        ``payload`` (a missing field never matches).
+        ``payload`` (a missing field never matches). A cooldown is kept per rule and, when the
+        payload names a subject (``person_id``, ``entity_id`` or ``track_id``), per subject:
+        a second person reacts, the same one does not retrigger within the cooldown.
         """
+        if not math.isfinite(now):
+            raise ValueError("affect event time must be finite")
+        if self._last is not None:
+            now = max(now, self._last)  # a stale stamp must not shorten a label hold
+        self._cooldown = {k: until for k, until in self._cooldown.items() if until > now}
+        subject = next((payload[k] for k in SUBJECT_KEYS if payload and k in payload), None)
         fired = False
-        for i, rule in enumerate(self.appraisal.rules):
+        for rule in self.appraisal.rules:
             if rule.event != event or not _matches(rule.when, payload):
                 continue
-            key = f"{i}:{rule.event}"
+            key = (rule_identity(rule.event, rule.when), subject)
             if now < self._cooldown.get(key, -math.inf):
                 continue
-            self._cooldown[key] = now + rule.cooldown_s
             self.impulse(now, rule.valence, rule.arousal, rule.label)
+            if rule.cooldown_s > 0:
+                self._cooldown[key] = now + rule.cooldown_s
             fired = True
         return fired
+
+    @_locked
+    def set_config(self, cfg: AffectConfig, appraisal: AppraisalConfig) -> None:
+        """Hot reload: new parameters and rules; the state and the cooldowns of rules that
+        still exist are kept, those of removed rules are dropped."""
+        self.cfg, self.appraisal = cfg, appraisal
+        alive = {rule_identity(r.event, r.when) for r in appraisal.rules}
+        self._cooldown = {k: v for k, v in self._cooldown.items() if k[0] in alive}
 
     @_locked
     def new_turn(self) -> None:
