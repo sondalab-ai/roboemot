@@ -16,7 +16,11 @@ appraisal rules decide what it means. Events (payload fields usable in a rule's 
 - ``sound.loud``: a ``sound.loud`` message from the reflex engine's audio intake (a level scalar,
   never audio). Payload: empty.
 - ``idle.long``: no face, attention target or recognised person for ``appraisal.idle_after_s``;
-  once, until interaction resumes. Payload: empty.
+  once, until interaction resumes. Payload: empty. A ``percept.utterance`` counts as interaction.
+- ``speech.*`` (the voice fast path, ``roboemot.voice.fastpath``, emitted straight to the affect
+  runner rather than through this adapter): ``speech.heard``, ``speech.keyword.stop``,
+  ``speech.keyword.no``, ``speech.keyword.greeting``, ``speech.name_called``, ``speech.loud``,
+  ``speech.fast``. Payload: ``language``.
 
 Person ids travel in payloads for rules but are never logged at info level (SPEC 12).
 """
@@ -73,6 +77,7 @@ class AppraisalAdapter:
             ("world.entity_appeared", self._on_entity),
             ("attention.target", self._on_attention),
             ("sound.loud", self._on_loud),
+            ("percept.utterance", self._on_utterance),
         ):
             self._unsubscribe.append(self.bus.subscribe(topic, handler))
 
@@ -162,6 +167,11 @@ class AppraisalAdapter:
 
     def _on_loud(self, msg: Message) -> None:
         self.emit("sound.loud", msg.stamp, {})
+
+    def _on_utterance(self, msg: Message) -> None:
+        """Someone spoke (SPEC 8): that is interaction, so it re-arms ``idle.long``."""
+        with self._lock:
+            self._interaction(msg.stamp)
 
     def _on_attention(self, msg: Message) -> None:
         if msg.payload is None:  # the target was cleared: nobody to interact with

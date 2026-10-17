@@ -136,6 +136,7 @@ def test_idle_long_fires_once_and_rearms_on_interaction(rig):
     [
         ("percept.face", face(stamp=500.0, owner="p-1", new=False)),
         ("person.recognized", recognized()),
+        ("percept.utterance", object()),
     ],
 )
 def test_faces_and_recognition_count_as_interaction(rig, topic, payload):
