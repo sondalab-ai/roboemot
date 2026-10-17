@@ -324,7 +324,17 @@ class Scene:
     out of view or when ``plant`` is false); the embedder returns her enrolled embedding.
     """
 
-    def __init__(self, mini, tmp_path, monkeypatch, *, enroll: bool, plant: bool):
+    def __init__(
+        self,
+        mini,
+        tmp_path,
+        monkeypatch,
+        *,
+        enroll: bool,
+        plant: bool,
+        age_group: str = "adult",
+        extra_config: str = "",
+    ):
         import shutil
         from datetime import UTC, datetime
         from types import SimpleNamespace
@@ -341,7 +351,9 @@ class Scene:
         data = tmp_path / "app-data"
         shutil.copytree(DATA, data)
         shutil.copy2(root / "configs/dev-unmeasured.yaml", data / "app.yaml")
+        (data / "app.yaml").write_text((data / "app.yaml").read_text() + extra_config)
         monkeypatch.setattr(app_module, "DATA", data)
+        self.plant = plant  # a test may set it later: the person walks into view
         cfg = RoboEmotConfig()
         face_vec = np.eye(8, dtype=np.float32)[0]
         self.ada_id = None
@@ -354,8 +366,13 @@ class Scene:
                 "Ada",
                 [face_vec * (1 + 0.01 * i) for i in range(5)],
                 "sim-face",
-                consent=Consent("Ada", datetime(2026, 1, 1, tzinfo=UTC), ("face", "refresh")),
-                age_group="adult",
+                consent=Consent(
+                    "Ada",
+                    datetime(2026, 1, 1, tzinfo=UTC),
+                    ("face", "refresh"),
+                    guardian=None if age_group in ("adult", "senior") else "Mum",
+                ),
+                age_group=age_group,
             ).person_id
         width, height, box = 320, 240, 80
         camera = CameraModel(
@@ -363,6 +380,8 @@ class Scene:
         )
         half_h = math.radians(cfg.world.camera_fov_h_deg) / 2 * 0.9
         half_v = math.radians(cfg.world.camera_fov_v_deg) / 2 * 0.9
+
+        scene = self
 
         class PlantedCamera:
             def __init__(self, joint_state):
@@ -374,7 +393,7 @@ class Scene:
                 az, el = from_base_frame(PLANTED_AZ, 0.0, state, FRAME)
                 img = np.zeros((height, width, 3), np.uint8)
                 img[0, 0, 1], img[0, 0, 2] = self.n % 250, (self.n // 250) % 250  # never repeats
-                if plant and abs(az) <= half_h and abs(el) <= half_v:
+                if scene.plant and abs(az) <= half_h and abs(el) <= half_v:
                     y = -math.tan(az)
                     u = width / 2 - camera.focal_px * math.tan(az)
                     v = height / 2 - camera.focal_y_px * math.tan(el) * math.sqrt(1 + y * y)
@@ -530,3 +549,44 @@ def test_the_rest_posture_lowers_the_head_and_droops_the_antennas_on_the_simulat
     assert state["head.pitch"] - settled["head.pitch"] > 0.05
     assert state["antenna_right"] < settled["antenna_right"] - 0.05
     assert state["antenna_left"] > settled["antenna_left"] + 0.05
+
+
+def test_the_robot_reacts_distinctly_to_an_adult_a_child_and_a_stranger_without_an_llm(
+    mini, tmp_path, monkeypatch
+):
+    """SPEC 14 (M2 exit, first half), on the simulated robot: the same planted face is a known
+    adult, a known child (declared age) or nobody enrolled, and walks into view of a settled
+    robot. Only ONNX is faked (see ``Scene``); no LLM. See ``exit_support`` for what is
+    measured and ``docs/eval/m2.md`` for the numbers."""
+    from exit_support import BODY_MAP_YAML, check_exit, format_run, react
+    from roboemot.config.schema import RoboEmotConfig
+
+    manifest = load_manifest(DATA / "reachy-mini-wireless.yaml", allow_unmeasured_dynamics=True)
+    home = {n: d.home for n, d in manifest.dofs.items()}
+    runs = {}
+    for case, enroll, age in (("adult", True, "adult"), ("child", True, "child"),
+                              ("stranger", False, "adult")):  # fmt: skip
+        root = tmp_path / case
+        root.mkdir()
+        monkeypatch.setenv("ROBOEMOT_DATA_DIR", str(root / "roboemot-data"))
+        with Scene(
+            mini, root, monkeypatch, enroll=enroll, plant=False, age_group=age,
+            extra_config=BODY_MAP_YAML,
+        ) as scene:  # fmt: skip
+            runs[case] = react(
+                scene.app,
+                scene.reader.read_state,
+                lambda: setattr(scene, "plant", True),
+                case,
+                home,
+            )
+        print(format_run(runs[case]))
+    check_exit(runs["adult"], runs["child"], runs["stranger"])
+    yaw = {c: max(r.arrival.head_yaw_peak, r.provoked.head_yaw_peak) for c, r in runs.items()}
+    cap = RoboEmotConfig().safety.minor_motion_factor
+    # all three are looked at (attention is not gated by the register); the adult is followed all
+    # the way, while the minor caps scale the child's and the stranger's head to the cap's share
+    assert yaw["adult"] > 0.9 * PLANTED_AZ
+    for case in ("child", "stranger"):
+        assert 0.5 * cap * PLANTED_AZ < yaw[case] <= cap * PLANTED_AZ + math.radians(2), yaw
+        assert yaw[case] < yaw["adult"]

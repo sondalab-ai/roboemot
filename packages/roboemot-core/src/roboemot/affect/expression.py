@@ -111,6 +111,7 @@ class ExpressionRenderer:
         self._scale_start = 0.0  # the same when the playing expression started
         self.last_label: str | None = None  # the label of the latest expression started
         self.last_amplitude = 0.0  # its amplitude, for tests and the debug report
+        self.started = 0  # how many expressions have been started: a counter tests can wait on
 
     def apply_config(
         self,
@@ -187,6 +188,7 @@ class ExpressionRenderer:
         self._player = Player(prim, now, source=SOURCE, amplitude=amp, priority=Priority.EXPRESSION)
         self._scale_start = self._scale_now
         self._last_start, self.last_label, self.last_amplitude = now, state.label, amp
+        self.started += 1
         return True
 
     def commands(self, now: float) -> list[Command]:
