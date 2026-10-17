@@ -3,8 +3,9 @@
 Text and phrases are normalised the same way (lower case, accents removed, anything that is not
 a letter or digit becomes a space) and a phrase matches only as whole words, so ``stop`` does not
 match ``stopped`` and ``hi`` is not found inside ``history``. There is no stemming: list the
-inflections you want. Categories are ``stop``, ``no``, ``greeting`` and ``name`` (``voice.wake_word`` or one of
-the language's ``name_aliases``). It runs on every partial, so it is a few substring tests.
+inflections you want. Categories are ``stop``, ``no``, ``greeting`` and ``name``
+(``voice.wake_word`` or one of the language's ``name_aliases``). It runs on every partial,
+so it is a few substring tests.
 """
 
 from __future__ import annotations
