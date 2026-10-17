@@ -50,12 +50,15 @@ class Person:
     age_group: str
     age_source: str
     overrides: Mapping[str, Any]
+    lookup_failed: bool = False  # the record could not be read: treated as unknown (fail closed)
 
 
 @dataclass(frozen=True)
 class ActiveRegister:
     """The register in effect: the group it came from, the shaped parameters and how many
-    people it covers."""
+    people it covers. ``params`` includes the persona fragment: it is app configuration text
+    (not about a person) that the prompt builder needs with the rest of the register, and
+    nothing here carries a person id."""
 
     group: str
     params: RegisterParams
@@ -73,6 +76,20 @@ def _guarded(name: str) -> str | None:
     return extra.get("conservative") if isinstance(extra, dict) else None
 
 
+def _valid_guarded(base: RegisterParams, overrides: Mapping[str, Any]) -> dict[str, bool]:
+    """The guarded fields of an otherwise invalid override that still tighten ``base``: a
+    restriction is never lost because another field of the same override is wrong."""
+    out: dict[str, bool] = {}
+    for name, value in overrides.items():
+        if name in RegisterParams.model_fields and isinstance(value, bool):
+            match _guarded(name):
+                case "false":
+                    out[name] = bool(getattr(base, name) and value)
+                case "true":
+                    out[name] = bool(getattr(base, name) or value)
+    return out
+
+
 def apply_overrides(base: RegisterParams, overrides: Mapping[str, Any]) -> RegisterParams:
     """Lay a person's partial register over ``base``.
 
@@ -85,8 +102,8 @@ def apply_overrides(base: RegisterParams, overrides: Mapping[str, Any]) -> Regis
     try:
         patched = RegisterParams.model_validate({**base.model_dump(), **overrides})
     except ValidationError as exc:
-        log.warning("register override ignored: %d invalid field(s)", exc.error_count())
-        return base
+        log.warning("register override partly ignored: %d invalid field(s)", exc.error_count())
+        return base.model_copy(update=_valid_guarded(base, overrides))
     tightened: dict[str, bool] = {}
     for name in overrides:
         match _guarded(name):
@@ -100,6 +117,8 @@ def apply_overrides(base: RegisterParams, overrides: Mapping[str, Any]) -> Regis
 def resolve_person(person: Person, cfg: RegisterConfig) -> tuple[str, RegisterParams]:
     """Group and register of one person: declared age, else a confident estimate, else
     ``unknown``; then the person's overrides."""
+    if person.lookup_failed:
+        return UNKNOWN, cfg.unknown
     group = person.age_group
     if person.age_source not in ("declared", "estimated") or group not in GROUPS:
         group = UNKNOWN
@@ -159,8 +178,8 @@ def resolve_register(
     resolved = [resolve_person(p, cfg) for p in people] or [(UNKNOWN, cfg.unknown)]
     group, merged = most_restrictive(resolved)
     shaped = apply_to_register(merged, fx)
-    if minor_present and not shaped.minor_content_policy:
-        shaped = shaped.model_copy(update={"minor_content_policy": True})
+    if minor_present and (not shaped.minor_content_policy or shaped.approach_allowed):
+        shaped = shaped.model_copy(update={"minor_content_policy": True, "approach_allowed": False})
     return ActiveRegister(group, shaped, len(people))
 
 
@@ -220,17 +239,16 @@ class RegisterTracker:
         with self._lock:
             self._seen = {t: s for t, s in self._seen.items() if now - s.stamp < lifetime}
             seen = list(self._seen.values())
-        return [
-            Person(s.age_group, s.age_source, self._lookup(s.owner_id) if s.owner_id else {})
-            for s in seen
-        ]
+        return [self._person(s) for s in seen]
 
-    def _lookup(self, person_id: str) -> Mapping[str, Any]:
+    def _person(self, s: _Seen) -> Person:
+        if s.owner_id is None:
+            return Person(s.age_group, s.age_source, {})
         try:
-            return self._overrides_for(person_id)
-        except Exception as exc:  # a missing record or registry must not stop the app tick
+            return Person(s.age_group, s.age_source, self._overrides_for(s.owner_id))
+        except Exception as exc:  # a missing record or a registry error must not stop the tick
             log.warning("register overrides unavailable: %s", type(exc).__name__)
-            return {}
+            return Person(s.age_group, s.age_source, {}, lookup_failed=True)
 
     def tick(
         self,

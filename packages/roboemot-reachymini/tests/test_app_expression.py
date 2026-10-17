@@ -47,6 +47,8 @@ def scenario(data, fed, group, source, owner, minor):  # noqa: F811
         assert wait_for(lambda: app.bus is not None and app.diagnostics is not None)
         app.bus.subscribe("register.active", lambda m: published.append(m.payload))
         assert wait_for(lambda: app.register_tracker.active is not None)
+        if owner:  # a record the registry can read, so the register is not the fail-closed one
+            owner = app.perception.registry.create_pending_person("Kid").person_id
         app.bus.publish("percept.face", face(group, source, owner, minor), time.monotonic())
         assert wait_for(lambda: published and published[-1].group == group), published
         app.affect_runner.engine.impulse(time.monotonic(), 0.3, 0.3, "joy")
@@ -60,6 +62,7 @@ def scenario(data, fed, group, source, owner, minor):  # noqa: F811
         thread.join(15)
     assert not errors and not thread.is_alive()
     assert PERSON not in json.dumps(report) and PERSON not in repr(published)
+    assert not owner or (owner not in json.dumps(report) and owner not in repr(published))
     return published[-1], report, amplitude, commands
 
 

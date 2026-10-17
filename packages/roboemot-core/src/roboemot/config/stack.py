@@ -233,6 +233,7 @@ def resolve_preset(name: str, preset_dirs: Iterable[Path], _seen: tuple[str, ...
 
 # ----------------------------------------------------------------------------- guardrails
 
+MANIFEST_BEHAVIOUR_KEYS = frozenset({"expression_map"})  # what a robot manifest may set
 PERSON_SECTIONS = ("register", "voice", "conversation", "persona.traits")
 
 
@@ -353,9 +354,32 @@ class ConfigStack:
 
         It becomes part of the installed configuration, so it also resets the approved baseline.
         """
+        unknown = sorted(set(behaviour) - MANIFEST_BEHAVIOUR_KEYS)
+        if unknown:
+            raise ConfigError(
+                f"manifest behaviour may set {sorted(MANIFEST_BEHAVIOUR_KEYS)}, not {unknown}"
+            )
         with self._lock:
+            saved = self.manifest
             self.manifest = behaviour
-            self._last = self._approved = self.effective()
+            try:
+                defaults = RoboEmotConfig()
+                layer = RoboEmotConfig.model_validate(
+                    deep_merge(defaults.model_dump(mode="python"), behaviour)
+                )
+                found = violations(defaults, layer)  # the manifest layer alone, vs the defaults
+                if found:
+                    raise GuardrailError(
+                        "manifest behaviour would loosen: " + "; ".join(map(str, found))
+                    )
+                baseline = RoboEmotConfig.model_validate(self.merged_tree(include_runtime=False))
+            except (ValidationError, GuardrailError) as exc:
+                self.manifest = saved
+                if isinstance(exc, ValidationError):
+                    raise ConfigError(_explain(exc)) from exc
+                raise
+            self._last, self._approved = self.effective(), baseline
+            self._record("manifest", "behaviour", None, sorted(behaviour))
 
     # ---- reading
 

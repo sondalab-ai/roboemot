@@ -302,6 +302,7 @@ class RegisterConfig(Strict):
 
 # --------------------------------------------------------------------------- expression (SPEC 7)
 
+EXPRESSION_MAX_CYCLE_S = 30.0  # one cycle; with repeat <= 20 an expression ends within minutes
 EXPRESSION_CHANNELS = (
     "antenna_right",
     "antenna_left",
@@ -400,6 +401,8 @@ class ExpressionEntry(Strict):
             if len(frames) < 2:
                 raise ValueError(f"channel {name}: needs at least two keyframes")
             times = [t for t, _ in frames]
+            if times[-1] > EXPRESSION_MAX_CYCLE_S:
+                raise ValueError(f"channel {name}: longer than {EXPRESSION_MAX_CYCLE_S} s")
             if times[0] != 0 or any(b <= a for a, b in zip(times, times[1:], strict=False)):
                 raise ValueError(f"channel {name}: times must start at 0 and increase")
             if frames[0][1] != 0 or frames[-1][1] != 0:

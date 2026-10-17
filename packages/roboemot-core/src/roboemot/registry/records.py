@@ -12,6 +12,9 @@ from datetime import datetime
 from typing import Any, Literal
 
 import numpy as np
+from pydantic import ValidationError
+
+from ..config.schema import RegisterParams
 
 AGE_GROUPS: tuple[str, ...] = ("child", "teen", "adult", "senior", "unknown")
 ADULT_AGE_GROUPS = frozenset({"adult", "senior"})
@@ -40,6 +43,19 @@ def check_age_group(value: str) -> str:
     if value not in AGE_GROUPS:
         raise ValueError(f"age_group must be one of {AGE_GROUPS}")
     return value
+
+
+def check_register_overrides(value: dict[str, Any] | None) -> dict[str, Any]:
+    """Return a copy of a person's partial register, or raise ``ValueError`` if a key is not a
+    register parameter or a value is out of range (checked when the record is written)."""
+    overrides = dict(value or {})
+    try:
+        RegisterParams.model_validate(overrides)
+    except ValidationError as exc:
+        raise ValueError(
+            f"register_overrides is not a valid partial register: {exc.error_count()} error(s)"
+        ) from None
+    return overrides
 
 
 def check_gender(value: str) -> str:

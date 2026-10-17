@@ -105,6 +105,7 @@ class ExpressionRenderer:
         self._player: Player | None = None
         self._blend: tuple[float, dict[str, float]] | None = None
         self._last: dict[str, float] = {}
+        self._minor_factor = 1.0  # safety.minor_motion_factor while a minor is present, else 1
         self._approach = False  # the register's latest approach_allowed: checked every tick
         self._scale_now = 0.0  # the register's latest motion factor
         self._scale_start = 0.0  # the same when the playing expression started
@@ -129,6 +130,18 @@ class ExpressionRenderer:
         raw = register.params.motion_amplitude * reaction * affect * self.circadian_factor()
         return max(0.0, min(c.max_amplitude, raw))
 
+    def set_register(self, register: ActiveRegister, minor_factor: float = 1.0) -> None:
+        """Take the register in effect now; call it every app tick, whatever the affect rate.
+
+        A stricter register (no approach, lower amplitude) acts on the playing expression at
+        once. ``minor_factor`` is ``safety.minor_motion_factor`` while a minor is present (1.0
+        otherwise): offsets are then kept inside that share of the range, on top of the cap the
+        arbiter applies (defence in depth, SPEC 12).
+        """
+        self._approach = register.params.approach_allowed
+        self._scale_now = self._register_scale(register)
+        self._minor_factor = minor_factor
+
     def update(self, state: AffectState, register: ActiveRegister, now: float) -> bool:
         """Take a new affect state; starts an expression when one is due. Returns whether it did.
 
@@ -136,8 +149,7 @@ class ExpressionRenderer:
         ``expression.min_interval_s`` after the last start), or the label has been held for
         ``retrigger_s`` with the affect intensity still at ``retrigger_min_intensity``.
         """
-        self._approach = register.params.approach_allowed
-        self._scale_now = self._register_scale(register)
+        self.set_register(register, self._minor_factor)
         if self._label is not None:
             changed = state.label != self._label or state.impulse != self._serial
             held = (
@@ -197,6 +209,8 @@ class ExpressionRenderer:
         # The register can tighten while an expression plays (a child walks in): the body
         # channel goes at once and the amplitude follows the register down, never up.
         tighten = min(1.0, self._scale_now / self._scale_start) if self._scale_start > 0 else 1.0
+        if self.last_amplitude > self.cfg.max_amplitude:  # the ceiling was lowered by a reload
+            tighten = min(tighten, self.cfg.max_amplitude / self.last_amplitude)
         self._last = {
             n: self._clamp(n, v * tighten)
             for n, v in out.items()
@@ -219,7 +233,8 @@ class ExpressionRenderer:
 
     def _clamp(self, name: str, offset: float) -> float:
         dof = self.dofs[name]
-        return max(dof.min - dof.home, min(dof.max - dof.home, offset))
+        k = self._minor_factor
+        return max((dof.min - dof.home) * k, min((dof.max - dof.home) * k, offset))
 
     @property
     def playing(self) -> bool:

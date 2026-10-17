@@ -446,6 +446,65 @@ def test_the_manifest_behaviour_becomes_part_of_the_installed_config(manifest):
     assert set(joy.channels) == {"antenna_right", "antenna_left", "head.roll"}
 
 
+def test_set_register_acts_within_one_tick_even_when_the_affect_updates_are_rare(cfg, manifest):
+    """Regression: update_hz = 1 means no update() for a second; the register still lands."""
+    slow = cfg.model_copy(update={"affect": cfg.affect.model_copy(update={"update_hz": 1.0})})
+    r = renderer(slow, manifest, {"joy": BODY})
+    adult = active("adult")
+    r.update(state("calm", 0.5), adult, 0.0)
+    assert r.update(state("joy", 0.5), adult, 1.0)
+    assert "body_yaw" in r.commands(1.25)[0].targets
+    r.set_register(resolve_unknown(cfg))  # no update() call: the next state is a second away
+    assert "body_yaw" not in r.commands(1.27)[0].targets
+
+
+def test_a_lowered_ceiling_applies_to_the_expression_already_playing(cfg, manifest):
+    r = renderer(cfg, manifest)
+    r.update(state("calm", 0.5), active("child"), 0.0)
+    r.update(state("surprise", 1.0), active("child"), 1.0)
+    full = r.commands(1.3)[0].targets["antenna_right"]
+    assert r.last_amplitude > 1.0
+    r.apply_config(
+        cfg.expression.model_copy(update={"max_amplitude": 0.5}), cfg.expression_map, 0.15
+    )
+    capped = r.commands(1.3)[0].targets["antenna_right"]
+    assert capped == pytest.approx(full * 0.5 / r.last_amplitude)
+
+
+def test_the_renderer_keeps_its_offsets_inside_the_minor_share_of_the_range(cfg, manifest):
+    huge = entry(**{"antenna_right": [(0, 0), (0.5, 170), (1, 0)]})
+    r = renderer(cfg, manifest, {"joy": huge}, max_amplitude=3)
+    reg = active("child")
+    r.update(state("calm", 1.0), reg, 0.0)
+    r.update(state("joy", 1.0), reg, 1.0)
+    r.set_register(reg, 0.6)
+    d = manifest.dofs["antenna_right"]
+    assert r.commands(1.5)[0].targets["antenna_right"] <= 0.6 * (d.max - d.home) + 1e-9
+    r.set_register(reg, 1.0)
+    assert r.commands(1.5)[0].targets["antenna_right"] > 0.6 * (d.max - d.home)
+
+
+def test_keyframe_times_are_bounded():
+    with pytest.raises(ValidationError, match="longer than"):
+        ExpressionEntry(channels={"antenna_right": [(0, 0), (500, 0)]})
+    with pytest.raises(ValidationError):
+        ExpressionEntry(channels={"antenna_right": [(0, 0), (1, 0)]}, repeat=21)
+
+
+def test_manifest_behaviour_may_only_set_known_keys_and_is_audited(manifest):
+    from roboemot.config import ConfigError
+
+    stack = ConfigStack()
+    with pytest.raises(ConfigError, match="may set"):
+        stack.set_manifest_behaviour({"safety": {"minor_motion_factor": 1.0}})
+    assert stack.manifest == {} and stack.effective().safety.minor_motion_factor == 0.6
+    with pytest.raises(ConfigError):
+        stack.set_manifest_behaviour({"expression_map": {"rage": {"channels": {}}}})
+    assert stack.manifest == {}
+    stack.set_manifest_behaviour(manifest.model.behaviour)
+    assert stack.audit[-1].source == "manifest" and stack.audit[-1].new == ["expression_map"]
+
+
 def test_a_stricter_register_mid_expression_drops_the_body_and_the_amplitude_at_once(cfg, manifest):
     """Regression: the approach and amplitude decisions are re-checked every tick."""
     r = renderer(cfg, manifest, {"joy": BODY})

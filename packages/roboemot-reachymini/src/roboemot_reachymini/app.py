@@ -211,13 +211,11 @@ def register_report(tracker: RegisterTracker) -> dict[str, Any]:
 
 
 def _register_overrides(registry: Any, person_id: str) -> dict[str, Any]:
-    """A registered person's ``register_overrides`` ({} without a registry or record)."""
+    """A registered person's ``register_overrides`` ({} without a registry). A missing record or
+    a registry error raises: the tracker then resolves that person as ``unknown``."""
     if registry is None:
         return {}
-    try:
-        return dict(registry.get_person(person_id).register_overrides)
-    except KeyError:
-        return {}
+    return dict(registry.get_person(person_id).register_overrides)
 
 
 def apply_attention_config(
@@ -484,6 +482,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 if live.persona is not fx_for:  # recompute only after a reload
                     fx_for, fx = live.persona, persona_effects(live.persona)
                 register = tracker.tick(now, live.register, fx, minor_present=minor)
+                expression.set_register(register, live.safety.minor_motion_factor if minor else 1.0)
                 if state is not None:
                     expression.update(state, register, now)
                 perception.enrollment.expire()

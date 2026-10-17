@@ -33,6 +33,7 @@ from .records import (
     check_age_group,
     check_entity_kind,
     check_gender,
+    check_register_overrides,
     possible_minor,
 )
 from .store import RegistryStore
@@ -217,7 +218,7 @@ class Registry:
             display_name=display_name,
             age_group=None if declared_age is None else Attribute(declared_age, "declared"),
             gender=None if declared_gender is None else Attribute(declared_gender, "declared"),
-            register_overrides=dict(register_overrides or {}),
+            register_overrides=check_register_overrides(register_overrides),
             preferences=dict(preferences or {}),
         )
         record = self._with_biometrics(

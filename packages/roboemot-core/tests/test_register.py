@@ -175,14 +175,39 @@ def test_a_track_stays_for_the_hold_and_the_detection_periods_then_expires():
     assert tracker.tick(20.0 + periods * 5.0 + 0.1, REG, NEUTRAL).group == "unknown"
 
 
-def test_a_failing_registry_lookup_falls_back_to_no_overrides():
+def test_a_failing_registry_lookup_resolves_the_person_as_unknown():
     def broken(_pid):
         raise OSError("disk")
 
     bus = Bus()
     tracker = RegisterTracker(bus, CFG.expression, overrides_for=broken)
     bus.publish("percept.face", face(1, "adult", "declared", owner="p"), 0.0)
-    assert tracker.tick(0.1, REG, NEUTRAL).params == REG.adult
+    got = tracker.tick(0.1, REG, NEUTRAL)
+    assert got.group == "unknown" and got.params == REG.unknown and not got.params.approach_allowed
+
+
+def test_a_restriction_survives_an_invalid_field_in_the_same_override():
+    out = apply_overrides(REG.adult, {"approach_allowed": False, "motion_amplitude": 99})
+    assert not out.approach_allowed and out.motion_amplitude == REG.adult.motion_amplitude
+    out = apply_overrides(REG.adult, {"minor_content_policy": True, "bogus": 1})
+    assert out.minor_content_policy
+    out = apply_overrides(REG.child, {"approach_allowed": True, "motion_amplitude": 99})
+    assert not out.approach_allowed  # loosening is still refused
+
+
+def test_a_minor_hold_also_forbids_approach():
+    held = resolve(person("adult"), minor_present=True)
+    assert held.params.minor_content_policy and not held.params.approach_allowed
+
+
+def test_register_overrides_are_validated_when_a_record_is_written():
+    from roboemot.registry.records import check_register_overrides
+
+    assert check_register_overrides({"vocabulary": "simple"}) == {"vocabulary": "simple"}
+    assert check_register_overrides(None) == {}
+    for bad in ({"motion_amplitude": 99}, {"nope": 1}, {"approach_allowed": "maybe"}):
+        with pytest.raises(ValueError):
+            check_register_overrides(bad)
 
 
 def test_resolved_params_are_register_params():
