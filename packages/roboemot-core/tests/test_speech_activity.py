@@ -49,3 +49,22 @@ def test_concurrent_extends_keep_the_latest_end():
     [t.start() for t in threads]
     [t.join() for t in threads]
     assert act.until() == 49.0
+
+
+def test_voice_defaults_and_ranges():
+    import pytest
+    from pydantic import ValidationError
+    from roboemot.config.schema import VoiceConfig
+
+    cfg = VoiceConfig()
+    assert cfg.enabled is False and cfg.echo_tail_ms == 300.0 and cfg.sample_rate_hz == 16000
+    for field, bad in [
+        ("echo_tail_ms", -1),
+        ("echo_tail_ms", 2001),
+        ("sample_rate_hz", 4000),
+        ("capture_queue_s", 0.1),
+        ("playback_chunk_ms", 5),
+    ]:
+        with pytest.raises(ValidationError):
+            VoiceConfig(**{field: bad})
+    VoiceConfig(echo_tail_ms=0, playback_chunk_ms=10, capture_queue_s=120)
