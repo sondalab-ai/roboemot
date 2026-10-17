@@ -72,6 +72,13 @@ UNREACHABLE = (APIConnectionError, OSError)  # checked after SLOW (both contain 
 
 
 @dataclass
+class FirstToken:
+    """Seconds from the request to the first real content, filled in by ``stream_route``."""
+
+    seconds: float | None = None
+
+
+@dataclass
 class _Budget:
     day: dt.date
     used: int = 0
@@ -174,8 +181,23 @@ class Router:
         if self.monitor:
             self.monitor.report(route.name, ok)
 
+    def stream_route(
+        self,
+        route: LLMRoute,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        timing: FirstToken | None = None,
+    ) -> AsyncIterator[Event]:
+        """Stream ONE route, bypassing eligibility and fallback (the conformance test). Errors
+        propagate; the budget is charged as for any request."""
+        return self._stream_route(route, messages, tools, timing)
+
     async def _stream_route(
-        self, route: LLMRoute, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None
+        self,
+        route: LLMRoute,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        timing: FirstToken | None = None,
     ) -> AsyncIterator[Event]:
         """Stream one route. ``first_token_timeout_s`` bounds the time from the request to the
         first real content (text or tool call; role-only chunks do not count);
@@ -188,7 +210,8 @@ class Router:
             )
         loop = asyncio.get_running_loop()
         client = self._client(route)  # not timed: the first one pays openai's lazy imports
-        deadline = loop.time() + route.first_token_timeout_s
+        started = loop.time()
+        deadline = started + route.first_token_timeout_s
         kwargs: dict[str, Any] = {
             "model": route.model,
             "messages": messages,
@@ -220,6 +243,9 @@ class Router:
                     usage_tokens = chunk.usage.total_tokens
                 for choice in chunk.choices or []:
                     delta = choice.delta
+                    first = delta.content or delta.tool_calls
+                    if first and timing is not None and timing.seconds is None:
+                        timing.seconds = loop.time() - started
                     if delta.content:
                         got_content = True
                         out_chars += len(delta.content)
