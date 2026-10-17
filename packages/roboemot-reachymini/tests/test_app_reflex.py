@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import threading
+import time
 
 import numpy as np
+from roboemot.world import Observation
 from test_app_perception import data, fake_mini, new_app, wait_for  # noqa: F401  (data: fixture)
 
 QUIET, LOUD = 0.02, 0.5
@@ -80,3 +82,31 @@ def test_a_loud_sound_from_the_microphone_startles_through_the_motion_loop(data)
     assert not errors and not thread.is_alive()
     assert not [t for t in threading.enumerate() if t.name == "roboemot-audio"]
     assert scripted.mini.media.stop_recording.called
+
+
+def test_the_robot_does_not_turn_toward_a_voice_while_the_minor_flag_is_on(data):  # noqa: F811
+    app = new_app()
+    stop, thread, errors = run_app(app, fake_mini())
+    try:
+        assert wait_for(lambda: app.reflexes is not None and app.bus is not None)
+        assert app.minor_present  # starts on, fails safe (SPEC 12) ...
+        assert wait_for(lambda: app.diagnostics is not None)
+
+        def loop_flag() -> bool:
+            motion = app.diagnostics.report()["sections"]["roboemot.motion"]["data"]
+            return motion["minor_present"]
+
+        assert loop_flag()  # ... and so is the motion loop's, from its first tick
+        now = time.monotonic()
+        obs = Observation("unknown", now, "doa", 0.4, 0.0, confidence=0.5)
+        app.bus.publish("percept.entity", obs, now, joint_state={"head.yaw": 0.0})
+
+        def turn() -> dict:
+            return app.reflexes.snapshot()["rules"]["turn-to-voice"]
+
+        assert wait_for(lambda: turn()["suppressed_minor"])
+        assert turn()["fired"] == 0
+    finally:
+        stop.set()
+        thread.join(timeout=10)
+    assert not errors

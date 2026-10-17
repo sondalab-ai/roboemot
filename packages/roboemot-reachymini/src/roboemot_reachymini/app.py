@@ -422,6 +422,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         presence = self.minor_presence = MinorPresence(
             bus, cfg.safety, sink=loop.set_minor_present, period=lambda: self.detection_period()
         )
+        presence.apply(time.monotonic())  # the loop's caps are on from its first tick
         tracker = self.register_tracker = RegisterTracker(
             bus,
             cfg.expression,
