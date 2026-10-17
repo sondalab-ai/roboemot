@@ -22,6 +22,7 @@ BEHAVIOUR_MODULES = [
     "circadian/runner.py",
     "circadian/sampler.py",
     "voice/prosody.py",
+    "voice/activity.py",
     "llm/router.py",
     "llm/conformance.py",
     "llm/prompt.py",
