@@ -126,6 +126,9 @@ class Arbiter:
             if prio >= Priority.COMMANDED:
                 target += sum(c.targets[name] for c in cmds if c.additive and name in c.targets)
             if prio != Priority.SAFETY:
+                # Clamp the summed target before the minor scaling, so an additive offset on a
+                # winner near a limit cannot leave the band as factor x overflow (SPEC 12).
+                target = min(max(target, dof.min), dof.max)
                 target = dof.home + (target - dof.home) * amplitude
             if winner != self._winner[name]:
                 self._fade[name] = (

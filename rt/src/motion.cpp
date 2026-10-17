@@ -98,7 +98,10 @@ Values Arbiter::step(double now, double amplitude) {
       for (const auto& [_, c] : cmds_)
         if (c.additive && c.targets.count(dof.name)) target += c.targets.at(dof.name);
     }
-    if (prio != Priority::Safety) target = dof.home + (target - dof.home) * amplitude;
+    if (prio != Priority::Safety) {
+      target = std::min(std::max(target, dof.min), dof.max);
+      target = dof.home + (target - dof.home) * amplitude;
+    }
     if (winner != winner_[dof.name]) {
       fade_[dof.name] = prio == Priority::Safety ? std::nullopt
                                                  : std::optional<Fade>(Fade{now, last_[dof.name]});
