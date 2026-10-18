@@ -50,9 +50,12 @@ def data_dir(configured: str = "") -> Path:
     path = data_path(configured)
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.mkdir(mode=DIR_MODE)
-        path.chmod(DIR_MODE)  # mkdir's mode is masked by the umask
-        return path
+        try:
+            path.mkdir(mode=DIR_MODE)
+            path.chmod(DIR_MODE)  # mkdir's mode is masked by the umask
+            return path
+        except FileExistsError:  # another process created it first: check it below
+            pass
     info = path.stat()
     if info.st_uid != os.getuid():
         raise PermissionError(f"data folder {path} is not owned by this user")

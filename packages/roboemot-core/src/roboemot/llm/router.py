@@ -20,7 +20,6 @@ import contextlib
 import datetime as dt
 import json
 import logging
-import re
 import threading
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
@@ -31,7 +30,7 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpe
 
 from ..config.schema import LLMRoute, SafetyConfig
 from ..health.network import NetworkMonitor
-from ..secret_store import NAME_PATTERN, SecretUnavailable, no_secrets
+from ..secret_store import SECRET_REF, SecretUnavailable, no_secrets
 from .prompt import CHARS_PER_TOKEN, trim_history
 from .pseudonyms import Outgoing, Pseudonyms, replace_names, route_is_local
 
@@ -43,7 +42,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 # Longest tool-call argument text parsed. A model cannot send more than max_tokens tokens, so
 # this only bounds what a broken or hostile route can make json.loads chew on.
 TOOL_ARGS_MAX_CHARS = 50_000
-SECRET = re.compile(rf"^\$\{{secret:({NAME_PATTERN})\}}$")
+SECRET = SECRET_REF
 
 
 @dataclass
@@ -127,6 +126,10 @@ class Router:
             name = ref.group(1)
             try:
                 self._keys[name] = self._resolve(name)
+                if route.base_url.startswith("http://") and not route_is_local(route):
+                    log.warning(
+                        "llm route %s sends its key over plain http to a non-local host", route.name
+                    )
             except Exception as exc:
                 reason = exc.reason if isinstance(exc, SecretUnavailable) else type(exc).__name__
                 self._unavailable[route.name] = name

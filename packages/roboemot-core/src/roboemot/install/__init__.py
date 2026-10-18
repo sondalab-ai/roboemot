@@ -391,11 +391,12 @@ def set_operator_pin(ui: Ui, py: RemotePython, remote: Remote, dry_run: bool) ->
 
 def robot_cli(py: RemotePython, folder: str, *args: str) -> str:
     """The ``roboemot secrets`` command line on the robot, for the folder ``folder``."""
-    quoted = " ".join(shlex.quote(a) for a in args)
+    action, names = args[0], args[1:]
+    tail = " ".join(["--", *map(shlex.quote, names)]) if names else ""
     return (
-        f"{shlex.quote(py.python)} -m roboemot.cli secrets {quoted} "
-        f"--data-dir {shlex.quote(folder)}"
-    )
+        f"{shlex.quote(py.python)} -m roboemot.cli secrets {action} "
+        f"--data-dir {shlex.quote(folder)} {tail}"
+    ).rstrip()
 
 
 def ask_secret_value(ui: Ui, name: str) -> str | None:

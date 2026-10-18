@@ -86,8 +86,9 @@ class FakeRobot:
             return "\n__rc=0"
         if " -m roboemot.cli secrets " in command:
             words = shlex.split(command)
-            action, names = words[4], [w for w in words[5:-2]]
-            assert words[-2] == "--data-dir" and words[-1] == DATA, command
+            action, names = words[4], words[8:]
+            assert words[5:7] == ["--data-dir", DATA], command
+            assert not names or words[7] == "--", command  # names are never read as options
             if action == "list":
                 return "\n".join(sorted(self.secrets))
             if action == "set":
@@ -1010,8 +1011,9 @@ def test_install_without_a_terminal_sets_no_secret_unless_asked(offline, robot):
 
 def test_a_secret_that_was_not_typed_is_not_set_and_says_how(offline, robot, capsys):
     install(secrets=["cloud_key"])  # not interactive: nothing can be typed
+    out = capsys.readouterr().out
     assert robot.secrets == {} and json.loads(robot.files[RECORD])["secrets"] == []
-    assert "roboemot.cli secrets set cloud_key" in capsys.readouterr().out
+    assert "roboemot.cli secrets set --data-dir" in out and "-- cloud_key" in out
 
 
 @pytest.mark.parametrize("bad", ["a b", "x;rm -rf ~", "$(id)", ""])

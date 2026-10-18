@@ -117,13 +117,16 @@ class RouteChecker:
         self.thread.start()
 
     def _private_router(self, cfg: RoboEmotConfig) -> Router:
-        if self._private is None:
+        if self._private is None or self._private.secrets_changed():
+            previous = self._private
             self._private = Router(
                 cfg.llm_routes,
                 cfg.safety,
                 secrets=SecretStore.for_data_dir(cfg.data_dir).get,
                 http_client_factory=self._factory,
             )
+            if previous is not None:  # a secret changed: keep the day's token accounting
+                self._private.adopt_budgets(previous)
         return self._private
 
     def _run(self, route: LLMRoute, cfg: RoboEmotConfig, router: Router) -> None:

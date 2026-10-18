@@ -7,16 +7,19 @@ import json
 import logging
 import os
 import stat
+import threading
 
 import httpx
 import pytest
 import yaml
 from roboemot import cli, paths
-from roboemot.config.schema import RoboEmotConfig, SafetyConfig
+from roboemot.config import ConfigStack, GuardrailError
+from roboemot.config.schema import LLMRoute, RoboEmotConfig, SafetyConfig
 from roboemot.llm import NoRouteAvailable, Router, TextDelta
 from roboemot.llm.conformance import RouteKeyUnavailable, check_route
 from roboemot.llm.hub import RouterHub
-from roboemot.secret_store import SecretStore, SecretUnavailable
+from roboemot.secret_store import SECRET_REF, SecretStore, SecretUnavailable
+from roboemot.webui.routes import RouteChecker
 from test_llm_conformance import Fake
 from test_llm_router import Server, collect, route
 
@@ -241,6 +244,98 @@ def test_a_check_probe_does_not_hide_a_later_secret_from_the_reload(store):
     assert hub.router.key_problem(hub.router.routes[0]) is None
     assert hub.router.eligible(False) == []
     assert [r.name for r in hub.sync(cfg).eligible(False)] == ["cloud"]
+
+
+@pytest.mark.parametrize("bad", ["-h", "--x", "-"])
+def test_names_cannot_start_with_a_dash(store, bad):
+    with pytest.raises(ValueError):
+        store.set(bad, "v")
+    assert SECRET_REF.match("${secret:-h}") is None
+
+
+@pytest.mark.parametrize(
+    "ref", ["${secret: x}", "${SECRET:x}", "${secret:a/b}", "${secret:x", "${x}"]
+)
+def test_a_malformed_secret_reference_is_rejected_by_the_config(ref):
+    with pytest.raises(ValueError):
+        LLMRoute(name="r", base_url="http://x/v1", model="m", api_key=ref)
+    assert LLMRoute(name="r", base_url="http://x/v1", model="m", api_key="${secret:ok}")
+    assert LLMRoute(name="r", base_url="http://x/v1", model="m", api_key="sk-literal")
+
+
+def test_concurrent_writers_lose_no_update(store):
+    names = [f"k{i}" for i in range(16)]
+    threads = [threading.Thread(target=store.set, args=(n, f"v{n}")) for n in names]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert store.names() == sorted(names)
+    assert [p.name for p in store.path.parent.iterdir()] == ["secrets.json"]
+
+
+def test_a_plain_http_key_to_a_non_local_host_warns_once(store, caplog):
+    store.set("cloud_key", KEY)
+    with caplog.at_level(logging.WARNING):
+        Router([cloud()], SafetyConfig(), secrets=store.get)
+    warned = [r.getMessage() for r in caplog.records if "plain http" in r.getMessage()]
+    assert len(warned) == 1 and KEY not in warned[0]
+
+
+def test_the_web_ui_private_router_follows_the_secret(store, tmp_path):
+    cfg = RoboEmotConfig(data_dir=str(store.path.parent), llm_routes=[cloud().model_dump()])
+    checker = RouteChecker(lambda: cfg)
+    first = checker._private_router(cfg)
+    assert first.eligible(False) == []
+    store.set("cloud_key", KEY)
+    second = checker._private_router(cfg)
+    assert second is not first and [r.name for r in second.eligible(False)] == ["cloud"]
+    assert checker._private_router(cfg) is second
+
+
+SECRET_ROUTE = {
+    "name": "cloud",
+    "base_url": "https://api.example.com/v1",
+    "api_key": "${secret:cloud_key}",
+    "model": "m",
+}
+
+
+def secret_stack() -> ConfigStack:
+    return ConfigStack(app={"llm_routes": [SECRET_ROUTE]})
+
+
+@pytest.mark.parametrize(
+    "routes",
+    [
+        [{**SECRET_ROUTE, "base_url": "https://evil.example.net/v1"}],  # key sent elsewhere
+        [SECRET_ROUTE, {**SECRET_ROUTE, "name": "extra", "base_url": "https://evil.net/v1"}],
+        [SECRET_ROUTE, {**SECRET_ROUTE, "name": "extra"}],  # a new route reusing the secret
+        [{**SECRET_ROUTE, "api_key": "${secret:other}"}],
+    ],
+)
+def test_pointing_a_secret_somewhere_new_needs_admin(routes):
+    stack = secret_stack()
+    with pytest.raises(GuardrailError):
+        stack.set("llm_routes", routes)
+    assert stack.effective().llm_routes[0].base_url == SECRET_ROUTE["base_url"]
+    stack.set("llm_routes", routes, admin=True)
+
+
+def test_an_api_key_changing_to_a_reference_needs_admin():
+    plain = {**SECRET_ROUTE, "api_key": "none"}
+    stack = ConfigStack(app={"llm_routes": [plain]})
+    with pytest.raises(GuardrailError):
+        stack.set("llm_routes", [SECRET_ROUTE])
+    stack.set("llm_routes", [SECRET_ROUTE], admin=True)
+
+
+def test_unrelated_route_edits_keep_a_secret_route_free_of_admin():
+    stack = secret_stack()
+    stack.set(
+        "llm_routes",
+        [{**SECRET_ROUTE, "model": "m2"}, {**SECRET_ROUTE, "name": "p", "api_key": "none"}],
+    )
 
 
 def test_router_repr_has_no_key(store):

@@ -12,17 +12,21 @@ message, a log line or a ``repr``.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import json
 import os
 import re
 import stat
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
 from . import paths
 
-NAME_PATTERN = r"[A-Za-z0-9_.-]+"
+# Starts with a letter or digit so a name is never read as a command line option.
+NAME_PATTERN = r"[A-Za-z0-9][A-Za-z0-9_.-]*"
 NAME = re.compile(rf"^{NAME_PATTERN}$")
+SECRET_REF = re.compile(rf"^\$\{{secret:({NAME_PATTERN})\}}$")  # a route's api_key
 FILE_MODE = 0o600
 MAX_VALUE_CHARS = 4096  # a key is a short token; this only bounds what the file can hold
 
@@ -75,21 +79,45 @@ class SecretStore:
             raise ValueError(f"secret name must match {NAME_PATTERN}")
         if not value or len(value) > MAX_VALUE_CHARS or "\x00" in value:
             raise ValueError(f"secret value must be 1 to {MAX_VALUE_CHARS} characters")
-        data = self._load(name)
-        data[name] = value
-        self._write(data)
+        with self._locked():
+            data = self._load(name)
+            data[name] = value
+            self._write(data)
 
     def remove(self, name: str) -> bool:
         """Delete ``name``; True when it was there. The file goes with its last secret."""
-        data = self._load(name)
-        if name not in data:
+        if not self.path.exists():
             return False
-        del data[name]
-        if data:
-            self._write(data)
-        else:
-            self.path.unlink()
+        with self._locked():
+            data = self._load(name)
+            if name not in data:
+                return False
+            del data[name]
+            if data:
+                self._write(data)
+            else:
+                self.path.unlink()
+                self._sync_folder()
         return True
+
+    @contextlib.contextmanager
+    def _locked(self):
+        """Exclusive lock (flock on the data folder) around a load-modify-write, so two writers
+        cannot lose each other's update. The folder is created private when missing."""
+        folder = paths.data_dir(str(self.path.parent))
+        fd = os.open(folder, os.O_RDONLY | os.O_CLOEXEC)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)  # closing releases the lock
+
+    def _sync_folder(self) -> None:
+        fd = os.open(self.path.parent, os.O_RDONLY | os.O_CLOEXEC)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
     def _load(self, name: str) -> dict[str, str]:
         try:
@@ -121,12 +149,8 @@ class SecretStore:
         return data
 
     def _write(self, data: dict[str, str]) -> None:
-        paths.data_dir(str(self.path.parent))
-        tmp = self.path.with_name(self.path.name + ".tmp")
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
-        with contextlib.suppress(FileNotFoundError):
-            tmp.unlink()  # a leftover of an interrupted write
-        fd = os.open(tmp, flags, FILE_MODE)
+        fd, name = tempfile.mkstemp(dir=self.path.parent, prefix=self.path.name + ".")  # 0600
+        tmp = Path(name)
         try:
             with os.fdopen(fd, "w") as handle:
                 os.fchmod(handle.fileno(), FILE_MODE)
@@ -134,6 +158,7 @@ class SecretStore:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(tmp, self.path)
+            self._sync_folder()
         except BaseException:
             with contextlib.suppress(OSError):
                 tmp.unlink()
@@ -152,6 +177,7 @@ __all__ = [
     "NAME",
     "NAME_PATTERN",
     "Resolver",
+    "SECRET_REF",
     "SecretStore",
     "SecretUnavailable",
     "no_secrets",
