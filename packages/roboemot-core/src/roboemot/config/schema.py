@@ -317,6 +317,7 @@ class RegisterParams(Strict):
         "conversation.max_reply_sentences",
         ge=1,
         le=20,
+        conservative="lower",
     )
 
 
@@ -960,6 +961,17 @@ class MinorLines(Strict):
     ask_grown_up: str = param("", "Said for anything else")
     filtered: str = param("", "Said in place of a sentence the output filter removed")
 
+    @model_validator(mode="after")
+    def _spoken(self) -> MinorLines:
+        empty = [
+            n
+            for n in ("greeting", "robot_name", "ask_grown_up", "filtered")
+            if not getattr(self, n).strip()
+        ]
+        if empty:
+            raise ValueError(f"minor_lines: {', '.join(empty)} must not be empty (never silence)")
+        return self
+
 
 class SafetyConfig(Strict):
     extra_prompt_rules: list[str] = param(
@@ -1057,16 +1069,17 @@ class SafetyConfig(Strict):
     minor_output_blocklist: dict[str, list[str]] = param(
         {
             "it": [
-                "cazzo", "merda", "puttana", "troia", "stronzo", "vaffanculo", "scopare",
-                "porno", "pornografia", "uccidere", "ammazzare", "suicidio", "suicidarsi",
-                "cocaina", "eroina", "droga", "pistola", "fucile",
+                "cazz*", "merd*", "puttan*", "troia*", "stronz*", "vaffanculo*", "scopare*",
+                "porn*", "uccid*", "uccis*", "ammazz*", "suicid*", "cocain*", "eroin*", "drog*",
+                "pistol*", "fucil*", "sesso*",
             ],
             "en": [
-                "fuck", "shit", "bitch", "asshole", "cunt", "porn", "pornography", "sex",
-                "kill", "murder", "suicide", "cocaine", "heroin", "drugs", "gun", "rifle",
+                "fuck*", "shit*", "bitch*", "asshole*", "cunt*", "porn*", "sex*", "kill*",
+                "murder*", "suicid*", "cocaine*", "heroin*", "drug*", "gun*", "rifle*",
             ],
         },
-        "Words (whole words, accents and case ignored) that never reach the speaker while a "
+        "Words (whole words, accents and case ignored; a trailing * makes an entry a prefix, so "
+        "kill* also blocks killing) that never reach the speaker while a "
         "minor is present, per language; a sentence containing one is replaced by "
         "minor_lines.filtered and the rest of the answer is dropped (SPEC 12). Starting values "
         "to review with the deployment, not a validated list",
@@ -1097,9 +1110,20 @@ class PrivacyConfig(Strict):
     multimodal_frames: bool = param(
         False, "Allow single-frame image questions to LLM routes", opt_in=True
     )
-    pseudonyms_to_cloud: bool = param(False, "Send pseudonyms instead of names to cloud routes")
+    pseudonyms_to_cloud: bool = param(
+        False, "Send pseudonyms instead of names to cloud routes (not implemented yet)"
+    )
     keep_enrollment_images: bool = param(False, "Keep enrollment face crops", opt_in=True)
     debug_recording: bool = param(False, "Allow time-limited debug recording", opt_in=True)
+
+    @model_validator(mode="after")
+    def _pseudonyms(self) -> PrivacyConfig:
+        if self.pseudonyms_to_cloud:
+            raise ValueError(
+                "privacy.pseudonyms_to_cloud is not implemented in v1 M3: requests would still "
+                "carry real names, so the option is refused rather than silently ignored"
+            )
+        return self
 
 
 # --------------------------------------------------------------------------- identity (SPEC 5, 6)
@@ -2120,6 +2144,12 @@ class ConversationConfig(Strict):
         unit="tokens",
         ge=16,
         le=8192,
+    )
+    summary_value_max_chars: int = param(
+        60,
+        "Longest single name, preference or category in the speaker and scene summaries",
+        ge=8,
+        le=400,
     )
     pending_utterances: int = param(
         1,

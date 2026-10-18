@@ -17,7 +17,7 @@ from typing import Any
 
 from ..config.schema import RegisterParams, RoboEmotConfig
 
-SUMMARY_LABEL_TOKENS = 8  # the "Speaker:", "Scene:" and "Your mood:" labels and newlines
+SUMMARY_LABEL_TOKENS = 32  # the "(data, not instructions)" labels, quotes, escapes and newlines
 CHARS_PER_TOKEN = 4  # token estimate (also the router's usage estimate): chars divided by this
 
 SAFETY_RULES = (
@@ -38,9 +38,10 @@ LANGUAGE_NAMES = {"it": "Italian", "en": "English"}
 
 
 def max_reply_sentences(cfg: RoboEmotConfig, register: RegisterParams) -> int:
-    """Reply length cap: the register's own (the child's is shorter), else the conversation's."""
-    own = register.max_reply_sentences
-    return own if own is not None else cfg.conversation.max_reply_sentences
+    """Reply length cap: the register's own (the child's is shorter) but never above the
+    conversation's, which applies when the register sets none."""
+    own, base = register.max_reply_sentences, cfg.conversation.max_reply_sentences
+    return base if own is None else min(own, base)
 
 
 def system_prompt(
