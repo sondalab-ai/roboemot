@@ -220,18 +220,24 @@ def test_the_robots_own_speech_in_the_microphone_does_not_stop_it_on_real_models
     assert state.stops == [] and bi.snapshot()["echo_frames"] > 5
 
 
+def speech_start_s(clip: str, floor_db: float = -40.0, frame: int = 512) -> float:
+    """Where the clip's speech really starts: its first 32 ms frame above ``floor_db``."""
+    x = load(clip)
+    for i in range(0, x.size - frame, frame):
+        if 20 * np.log10(float(np.sqrt(np.mean(x[i : i + frame] ** 2))) + 1e-12) > floor_db:
+            return i / RATE
+    raise AssertionError("no speech in the clip")
+
+
 def test_a_spoken_stop_over_the_robot_cuts_it_off_on_real_models(models, vosk_asr):
-    state, bi, onset = over_the_robot(models, vosk_asr, "en_hello_name", "it_stop")
+    state, bi, clip_start = over_the_robot(models, vosk_asr, "en_hello_name", "it_stop")
     assert len(state.stops) == 1
     snap = bi.snapshot()
     kind = "barge_in" if snap["triggers"] else "keyword"
-    lat = snap["latency"].get("onset_to_stop", {}).get("last_ms")
-    print(
-        f"\nreal-model {kind}: stop {1000 * (state.stops[0] - onset):.0f} ms after the clip start, "
-        f"{lat} ms after the detected speech onset"
-    )
-    assert state.stops[0] - onset < 0.6
+    true_onset = clip_start + speech_start_s("it_stop")
+    ms = 1000 * (state.stops[0] - true_onset)
+    print(f"\nreal-model {kind}: stop {ms:.0f} ms after the true speech start (audio clock)")
     if snap["triggers"]:
-        assert snap["latency"]["onset_to_stop"]["last_ms"] < 200  # SPEC 13
+        assert ms < 200  # SPEC 13: barge-in to TTS stop, on the audio clock
     else:
-        assert state.events == ["speech.keyword.stop"]
+        assert state.events == ["speech.keyword.stop"] and ms < 600

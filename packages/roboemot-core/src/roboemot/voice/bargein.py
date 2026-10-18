@@ -185,9 +185,9 @@ class BargeIn:
         self._echo_frames = max(1, math.ceil(b.echo_window_ms / frame_ms))
         self._pre_frames = math.ceil(b.pre_roll_ms / frame_ms)
         ring = max(self._pre_frames + self._min_frames, self._echo_frames) + 1
-        self._ring: collections.deque[tuple[float, np.ndarray]] = collections.deque(
-            getattr(self, "_ring", ()), maxlen=ring
-        )
+        self._ring_len = ring  # applied on the listener thread, which owns the ring
+        if not hasattr(self, "_ring"):
+            self._ring: collections.deque[tuple[float, np.ndarray]] = collections.deque(maxlen=ring)
         if self._reference is not None:
             self._reference.set_keep_s(b.echo_reference_s)
 
@@ -235,6 +235,8 @@ class BargeIn:
         start = chunk.stamp - n / self._rate
         if chunk.gap:
             self.reset()
+        if self._ring.maxlen != self._ring_len:  # a hot reload changed the windows
+            self._ring = collections.deque(self._ring, maxlen=self._ring_len)
         if start < self._deaf_until:  # the cut-off just happened: this is its echo tail
             return
         if self._pending.size == 0:

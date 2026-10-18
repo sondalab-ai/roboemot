@@ -295,3 +295,15 @@ def test_the_snapshot_has_numbers_only():
     snap = w.bargein.snapshot()
     assert set(snap) >= {"enabled", "triggers", "keyword_triggers", "echo_frames", "latency"}
     assert T0 > 0
+
+
+def test_a_config_reload_between_chunks_keeps_working():
+    w = World()
+    w.speak(3.0)
+    w.feed(0.5)
+    cfg = RoboEmotConfig.model_validate(
+        {"voice": {"barge_in": {"echo_window_ms": 256, "min_speech_ms": 64}}}
+    )
+    w.bargein.apply_config(cfg)
+    w.feed(2.0, user_voice(1.0, 0.21), user_at=0.3)
+    assert len(w.stops) == 1

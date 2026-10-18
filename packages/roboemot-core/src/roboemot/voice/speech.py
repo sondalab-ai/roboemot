@@ -313,7 +313,7 @@ class SpeechOutput:
             return True
 
     async def _speak(self, job: _Job) -> None:
-        cfg, first = self.config, True
+        cfg, first, audible = self.config, True, None
         try:
             if self._stale(job):
                 return
@@ -330,7 +330,7 @@ class SpeechOutput:
                     first = False
                     if not self._pad(job, chunk.rate_hz):
                         return
-                    self._mark_audible(job)
+                    audible = self._audible_start()
                     with self._lock:
                         now = self.clock()
                         self._latencies.append((now - job.said_at) * MS_PER_S)
@@ -342,6 +342,9 @@ class SpeechOutput:
                 self._last_rate_hz = chunk.rate_hz
                 if not self._push(job, chunk.samples, chunk.rate_hz):
                     return
+                if audible is not None:  # only a sentence that really reached the sink
+                    self._mark_audible(job, audible)
+                    audible = None
             self.sentences_spoken += 1
         except asyncio.CancelledError:
             raise
@@ -354,12 +357,15 @@ class SpeechOutput:
         finally:
             self._last_utterance = job.utterance
 
-    def _mark_audible(self, job: _Job) -> None:
-        """Note when ``job``'s first sample will play: when the audio queued before it ends
-        (the sink's timeline, silence pad included), else now."""
+    def _audible_start(self) -> float:
+        """When a sample pushed now will play: when the audio queued before it ends (the
+        sink's timeline, silence pad included), else now."""
         now = self.clock()
         playing_until = getattr(self.sink, "playing_until", None)
-        start = max(now, playing_until()) if callable(playing_until) else now
+        return max(now, playing_until()) if callable(playing_until) else now
+
+    def _mark_audible(self, job: _Job, start: float) -> None:
+        """Note that ``job`` reached the sink and its first sample plays at ``start``."""
         with self._lock:
             self._audible[job.id] = start
             while len(self._audible) > PLAYED_WINDOW:
