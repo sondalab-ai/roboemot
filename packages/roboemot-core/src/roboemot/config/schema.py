@@ -1127,12 +1127,16 @@ class PrivacyConfig(Strict):
     pseudonyms_to_cloud: bool = param(
         False,
         "Send neutral aliases instead of registry names to routes that are not local, and "
-        "restore the names in the answer and in tool calls (SPEC 8, 12)",
+        "restore the names in the answer and in tool calls; a remote speech voice still hears the "
+        "names it speaks (SPEC 8, 12)",
+        conservative="true",
     )
     pseudonym_templates: dict[str, str] = param(
-        {"en": "Person {label}", "it": "Persona {label}"},
-        "Alias per language for pseudonyms_to_cloud; {label} becomes A, B, ... Z, AA, ... The "
-        "language is the one of the turn in which a name is first aliased (SPEC 12)",
+        {"en": "Person-{label}", "it": "Persona-{label}"},
+        "Alias per language for pseudonyms_to_cloud; {label} becomes A, B, ... Z, AA, ... and "
+        "comes last, after a prefix that ends in punctuation (so the alias is never an ordinary "
+        "word). The language is the one of the turn in which a name is first aliased (SPEC 12)",
+        admin_only=True,
     )
     keep_enrollment_images: bool = param(False, "Keep enrollment face crops", opt_in=True)
     debug_recording: bool = param(False, "Allow time-limited debug recording", opt_in=True)
@@ -1141,12 +1145,18 @@ class PrivacyConfig(Strict):
     @classmethod
     def _templates(cls, value: dict[str, str]) -> dict[str, str]:
         for lang, template in value.items():
-            if template.count(PSEUDONYM_LABEL) != 1 or not template.strip().endswith(
-                PSEUDONYM_LABEL
-            ):
+            prefix = template[: -len(PSEUDONYM_LABEL)]
+            ok = (
+                template.count(PSEUDONYM_LABEL) == 1
+                and template.endswith(PSEUDONYM_LABEL)
+                and prefix.strip() != ""
+                and not (prefix[-1].isalnum() or prefix[-1].isspace() or prefix[-1] == "_")
+            )
+            if not ok:
                 raise ValueError(
-                    f"privacy.pseudonym_templates[{lang!r}] must contain {PSEUDONYM_LABEL} "
-                    "exactly once, at the end"
+                    f"privacy.pseudonym_templates[{lang!r}] must be a non-blank prefix ending in "
+                    f"punctuation (for example 'Person-') followed by {PSEUDONYM_LABEL}, and "
+                    "nothing else, so an alias can never be an ordinary word"
                 )
         return value
 
@@ -2550,9 +2560,12 @@ class LLMRoute(Strict):
     supports_images: bool = param(False, "Route accepts image_url parts")
     locality: Literal["auto", "local", "cloud"] = param(
         "auto",
-        "Whether the route stays inside the household. auto: local when the host is localhost, "
-        "a private, loopback or link-local address, a *.local name or a name without a dot; "
-        "otherwise cloud. Only a cloud route gets pseudonyms (privacy.pseudonyms_to_cloud)",
+        "Whether the route may see real names. auto: local for this machine and the home "
+        "network (loopback, private addresses, *.local, names without a dot), cloud for "
+        "everything else. The address of a gateway says nothing about where it forwards the "
+        "data: a LAN proxy to a cloud provider (LiteLLM) gets real names unless this is set "
+        "to cloud. Only a cloud route gets pseudonyms (privacy.pseudonyms_to_cloud)",
+        admin_only=True,
     )
 
     @model_validator(mode="after")

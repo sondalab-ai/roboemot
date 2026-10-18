@@ -525,6 +525,10 @@ class ConversationWorker:
         cancel the answer without touching the worker's own shutdown."""
         cfg, conv, minor = turn.cfg, turn.cfg.conversation, turn.minor
         state = self.affect.state(self.clock())
+        try:
+            protect = self._learn_names(turn)  # the summary caps must not cut a name
+        except Exception:  # the same failure ends the turn in _rounds, before anything is sent
+            protect = None
         messages = build_messages(
             system=system_prompt(
                 cfg,
@@ -539,6 +543,7 @@ class ConversationWorker:
             user_text=turn.utterance.text,
             affect=f"{state.label}, intensity {state.intensity:.1f}",
             summary_max_chars=(conv.profile_summary_max_chars, conv.scene_summary_max_chars),
+            protect=protect,
         )
         splitter = SentenceSplitter(cfg.voice.sentence_max_chars, strip_tags=True)
         turn.stamps["request"] = self.clock()
@@ -639,15 +644,15 @@ class ConversationWorker:
             messages += turn.exchange[-(len(calls) + 1) :]
 
     def _learn_names(self, turn: _Turn) -> Pseudonyms | None:
-        """With ``privacy.pseudonyms_to_cloud``: give aliases to the registry names not seen yet
-        and return the map for the router, which applies it to routes that are not local. The
-        names are read before every request (a record may have been added, the ``look_at``
-        choices are of this moment). If they cannot be read the exception ends the turn: sending
-        without the map would put real names on the cloud route. None when the option is off."""
+        """With ``privacy.pseudonyms_to_cloud``: bring the map in line with the registry as it is
+        now (new names get aliases, forgotten ones are dropped) and return it for the router,
+        which applies it to routes that are not local. Read before every request. If the names
+        cannot be read the exception ends the turn: sending without the map would put real names
+        on the cloud route. None when the option is off."""
         cfg = turn.cfg
         if not cfg.privacy.pseudonyms_to_cloud:
             return None
-        self._pseudonyms.learn(
+        self._pseudonyms.sync(
             self._known_names(),
             cfg.privacy.pseudonym_templates,
             turn.language,
@@ -682,7 +687,7 @@ class ConversationWorker:
                     "function": {
                         "name": c.name,
                         "arguments": (
-                            json.dumps(c.arguments)
+                            json.dumps(c.arguments, ensure_ascii=False)
                             if isinstance(c.arguments, dict) and "_raw" not in c.arguments
                             else "{}"
                         ),

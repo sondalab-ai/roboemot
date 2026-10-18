@@ -106,8 +106,11 @@ EN: dict[str, str] = {
     "consent_cloud_pseudonyms": (
         "Names, preferences and conversation text may be sent to the cloud language-model "
         "provider the robot uses, which processes them as personal data. On such routes the "
-        "robot replaces the names in its registry with neutral aliases; a nickname, a "
-        "misspelt name or other personal details said aloud are not replaced."
+        "robot replaces the names in its registry with neutral aliases. Routes on this "
+        "machine or the home network receive real names, so a gateway on the network that "
+        "forwards to a cloud provider must be marked as cloud by the administrator. A cloud "
+        "speech voice still hears the names it speaks. A nickname, a misspelt name or other "
+        "personal details said aloud are not replaced."
     ),
     "registry_title": "Registry",
     "registry_empty": "Nothing registered yet.",
@@ -330,7 +333,10 @@ IT: dict[str, str] = {
     "consent_cloud_pseudonyms": (
         "Nomi, preferenze e testo delle conversazioni possono essere inviati al fornitore cloud "
         "del modello linguistico usato dal robot, che li tratta come dati personali. Su queste "
-        "rotte il robot sostituisce i nomi presenti nella sua anagrafica con alias neutri; un "
+        "rotte il robot sostituisce i nomi presenti nella sua anagrafica con alias neutri. Le "
+        "rotte su questa macchina o sulla rete di casa ricevono i nomi reali, quindi un gateway "
+        "in rete che inoltra a un fornitore cloud deve essere segnato come cloud "
+        "dall'amministratore. Una voce cloud ascolta comunque i nomi che pronuncia. Un "
         "soprannome, un nome storpiato o altri dati personali detti a voce non vengono "
         "sostituiti."
     ),

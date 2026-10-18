@@ -35,6 +35,7 @@ from .schema import (
     SCHEMA_VERSION,
     WITHDRAW_RULE_FIELDS,
     WITHDRAW_SHARED_FIELDS,
+    LLMRoute,
     RoboEmotConfig,
     rule_identity,
 )
@@ -284,6 +285,13 @@ def guarded_leaves(cfg: RoboEmotConfig) -> dict[str, tuple[Any, dict[str, Any]]]
 
 
 NEW_RULE_REFUSED = "reflexes.rules."
+ROUTE_PATH = "llm_routes."
+
+
+def _route_default(path: str) -> Any:
+    """The default of the ``LLMRoute`` field at the end of ``llm_routes.<name>.<field>``."""
+    info = LLMRoute.model_fields.get(path.rsplit(".", 1)[-1])
+    return info.default if info is not None else None
 
 
 def violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Violation]:
@@ -303,6 +311,8 @@ def violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Viol
             ref = {"false": False, "true": True}.get(direction, value)
             if meta.get("opt_in"):
                 ref = False
+            if meta.get("admin_only") and path.startswith(ROUTE_PATH):
+                ref = _route_default(path)  # a new route starts from the field's default
         ok = {
             "lower": lambda v, r: v <= r,
             "higher": lambda v, r: v >= r,

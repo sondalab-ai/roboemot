@@ -40,7 +40,7 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       interval) instead of waiting the full `world.scan.idle_interval_s` (120 s). Same rules as
       the idle scan: a person target or speaker hint cancels it, not while resting.
 - [x] Pseudonyms to cloud routes (SPEC 8, 12 Data): `privacy.pseudonyms_to_cloud` loads; the router
-      gives aliases to routes that are not local (`llm_routes[].locality`, `auto` from the host)
+      gives aliases to routes that are not local (`llm_routes[].locality`, admin-only; `auto` is this machine and the home network)
       and restores names in the reply text and in tool-call arguments. Open: the aliases are handed
       out afresh after an app restart; personal details that are not registry names are not replaced.
 

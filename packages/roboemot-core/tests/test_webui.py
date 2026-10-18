@@ -762,7 +762,7 @@ def test_consent_text_names_cloud_handling(tmp_path, service):
             assert "GDPR" in STRINGS["en"]["consent_biometric"]
         finally:
             srv.stop()
-    assert "neutral aliases" in texts[True] and "real" not in texts[True]
+    assert "neutral aliases" in texts[True] and "sends real" not in texts[True]
     assert "real" in texts[False]
 
 

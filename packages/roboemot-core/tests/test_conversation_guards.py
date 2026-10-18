@@ -85,9 +85,11 @@ def test_pseudonyms_to_cloud_loads_and_is_off_by_default():
     assert RoboEmotConfig(privacy={"pseudonyms_to_cloud": True}).privacy.pseudonyms_to_cloud
 
 
-@pytest.mark.parametrize("template", ["Person", "{label} person", "{label}{label}", ""])
+@pytest.mark.parametrize(
+    "template", ["Person", "{label} person", "{label}{label}", "", "Person {label}"]
+)
 def test_a_pseudonym_template_needs_one_label_at_its_end(template):
-    with pytest.raises(ValidationError, match="exactly once, at the end"):
+    with pytest.raises(ValidationError, match="non-blank prefix"):
         PrivacyConfig(pseudonym_templates={"en": template})
 
 

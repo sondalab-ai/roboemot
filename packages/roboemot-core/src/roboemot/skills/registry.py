@@ -203,7 +203,7 @@ def _error(code: str, skill_name: str, detail: str | None = None) -> ToolOutcome
     body: dict[str, Any] = {"error": code}
     if detail:
         body["detail"] = detail
-    return ToolOutcome(json.dumps(body), False, False, skill_name, code)
+    return ToolOutcome(json.dumps(body, ensure_ascii=False), False, False, skill_name, code)
 
 
 async def execute(
@@ -247,5 +247,9 @@ async def execute(
         log.warning("skill %s: %s", name, type(exc).__name__)
         return _error("failed", name)
     result = value if isinstance(value, SkillResult) else SkillResult(value)
-    content = result.content if isinstance(result.content, str) else json.dumps(result.content)
+    content = (
+        result.content
+        if isinstance(result.content, str)
+        else json.dumps(result.content, ensure_ascii=False)
+    )
     return ToolOutcome(content, True, result.end_turn, name)
