@@ -1965,6 +1965,96 @@ class OpenAISpeechConfig(Strict):
     )
 
 
+class BargeInConfig(Strict):
+    enabled: bool = param(
+        True,
+        "User speech while the robot talks stops its speech and cancels the answer in flight "
+        "(SPEC 8 stage 8). Off: the robot is deaf to speech while it speaks, except for the "
+        "stop keyword when keyword_enabled",
+    )
+    threshold: float = param(
+        0.8,
+        "Speech probability a frame needs to count towards a barge-in: stricter than "
+        "voice.vad.threshold, because the robot's own voice is speech to the VAD",
+        ge=0.05, le=0.99,
+    )  # fmt: skip
+    min_speech_ms: float = param(
+        96.0,
+        "Continuous user speech needed before the robot is cut off. The onset-to-stop latency "
+        "(SPEC 13: 200 ms) is this plus up to one microphone chunk, so keep it low; rounded up "
+        "to whole VAD frames",
+        unit="ms", ge=32, le=150,
+    )  # fmt: skip
+    echo_corr_max: float = param(
+        0.6,
+        "Residual-echo guard for robots without hardware AEC: a stretch of microphone audio "
+        "whose normalised cross-correlation with what the speaker played (best lag within "
+        "echo_max_lag_ms) is above this is the robot's own voice, not a barge-in. User speech "
+        "mixed with echo correlates less the louder it is: it must carry roughly "
+        "(1/corr^2 - 1) times the echo's power to get through. 1 turns the guard off",
+        ge=0.1, le=1.0,
+    )  # fmt: skip
+    echo_max_lag_ms: float = param(
+        300.0,
+        "How far back in what was played the echo check looks for a match (speaker to microphone "
+        "delay, room and device latency)",
+        unit="ms", ge=0, le=1000,
+    )  # fmt: skip
+    echo_window_ms: float = param(
+        128.0,
+        "Length of microphone audio each echo check compares with the played reference",
+        unit="ms", ge=32, le=1000,
+    )  # fmt: skip
+    echo_reference_s: float = param(
+        2.0,
+        "How much of the played audio the speaker keeps for the echo check (at least "
+        "echo_max_lag_ms plus echo_window_ms)",
+        unit="s", ge=0.5, le=10, restart=True,
+    )  # fmt: skip
+    pre_roll_ms: float = param(
+        64.0,
+        "Audio from before the detected onset handed to the listener with the barge-in, so the "
+        "first syllable is not lost. Kept short: before the onset the robot's own voice is "
+        "still in the microphone",
+        unit="ms", ge=0, le=500,
+    )  # fmt: skip
+    keyword_enabled: bool = param(
+        True,
+        "While the robot speaks, run the stop keywords (voice.keywords.<language>.stop) on a "
+        "recognizer fed with candidate speech frames, so stop is heard even when the barge-in "
+        "threshold is not met (SPEC 7A: the stop keyword is always active)",
+    )
+    keyword_threshold: float = param(
+        0.5, "Speech probability a frame needs to be fed to the keyword recognizer",
+        ge=0.05, le=0.99,
+    )  # fmt: skip
+    keyword_echo_corr_max: float = param(
+        0.8,
+        "Echo guard of the keyword path: looser than echo_corr_max so a quiet or mixed stop is "
+        "heard, strict enough that the robot saying a stop word does not stop itself",
+        ge=0.1, le=1.0,
+    )  # fmt: skip
+    keyword_window_s: float = param(
+        2.0,
+        "The keyword recognizer listens at most this long after the first candidate frame",
+        unit="s", ge=0.2, le=10,
+    )  # fmt: skip
+    keyword_hold_ms: float = param(
+        400.0,
+        "The keyword recognizer stops after this much audio without a candidate frame",
+        unit="ms", ge=64, le=2000,
+    )  # fmt: skip
+
+    @model_validator(mode="after")
+    def _reference_covers_the_check(self) -> BargeInConfig:
+        need = (self.echo_max_lag_ms + self.echo_window_ms) / 1000.0
+        if self.echo_reference_s < need:
+            raise ValueError(
+                "barge_in.echo_reference_s must cover echo_max_lag_ms + echo_window_ms"
+            )
+        return self
+
+
 class VoiceConfig(Strict):
     enabled: bool = param(
         False,
@@ -2103,6 +2193,7 @@ class VoiceConfig(Strict):
         "inflections you want)",
     )
     fastpath: FastpathConfig = param({}, "Speech fast path: keywords, wake word window, prosody")
+    barge_in: BargeInConfig = param({}, "Barge-in: user speech over the robot's voice (SPEC 8)")
 
     @field_validator("voices")
     @classmethod
@@ -2164,6 +2255,106 @@ class ConversationConfig(Strict):
             "en": "Sorry, I can't think right now.",
         },
         "Spoken per language when no route answers or the stream fails before any sentence",
+    )
+    llm_skills: list[str] = param(
+        ["play", "look_at", "express_emotion", "remember_preference", "stop_talking"],
+        "Skills offered to the model as tools (SPEC 11). A skill must also be marked "
+        "llm_visible in code; this list can only narrow the set. Empty: no tools",
+    )
+    max_tool_rounds: int = param(
+        3,
+        "Requests of one turn that may end in tool calls; after that many the model is asked "
+        "once more without tools, so the turn ends in text (0: no tools)",
+        ge=0, le=10,
+    )  # fmt: skip
+    tool_timeout_s: float = param(
+        5.0, "A skill that takes longer is abandoned and the model is told it failed",
+        unit="s", ge=0.1, le=60,
+    )  # fmt: skip
+    tool_arg_max_chars: int = param(
+        200, "Longest text argument a skill accepts; a longer one is refused", ge=1, le=2000
+    )
+    tool_enum_max_items: int = param(
+        20, "Most names offered to the model in a tool argument's list of choices", ge=1, le=200
+    )
+    look_away_deg: float = param(
+        40.0,
+        "look_at away: the bearing offset from the current target. It should exceed "
+        "attention.speaker_match_deg, or the gaze snaps back to the person",
+        unit="deg", ge=5, le=90,
+    )  # fmt: skip
+    confirm_timeout_s: float = param(
+        10.0,
+        "A spoken request to remember a preference expires after this long; only the very next "
+        "utterance from the same person, started after the question finished playing, can "
+        "confirm it",
+        unit="s", ge=1, le=300,
+    )  # fmt: skip
+    preference_key_max_chars: int = param(
+        40, "Longest preference name remember_preference accepts", ge=2, le=200
+    )
+    preference_value_max_chars: int = param(
+        120, "Longest preference value remember_preference accepts", ge=2, le=1000
+    )
+    max_preferences: int = param(
+        20, "Most preferences stored per person; a new one beyond that is refused", ge=1, le=200
+    )
+    confirm_yes: dict[str, list[str]] = param(
+        {
+            "it": ["sì", "certo", "va bene", "esatto", "ok", "sicuro", "volentieri"],
+            "en": ["yes", "yeah", "yep", "sure", "ok", "okay", "please do", "that is right"],
+        },
+        "Phrases that confirm a spoken request, per language (whole words, case ignored, "
+        "accents kept: Italian `sì` is yes, bare `si` is not, as in `si chiama Luca`). A reply "
+        "counts as a yes only when it is at most confirm_max_words long and made of yes phrases "
+        "and confirm_fillers, a yes phrase first; a reply that holds a `no` phrase declines",
+    )
+    confirm_fillers: dict[str, list[str]] = param(
+        {
+            "it": ["grazie", "pure", "per favore", "grazie mille"],
+            "en": ["please", "thanks", "thank you", "definitely"],
+        },
+        "Words allowed after the yes phrase in a confirming reply (`sì grazie`)",
+    )
+    confirm_max_words: int = param(
+        4, "A reply longer than this never confirms a spoken request", ge=1, le=20
+    )
+    max_tool_calls_per_round: int = param(
+        4,
+        "Tool calls run per request; further ones are answered with an error result unrun",
+        ge=1, le=20,
+    )  # fmt: skip
+    stop_drop_window_s: float = param(
+        5.0,
+        "After a barge-in, an utterance made only of a stop phrase that is heard this soon is "
+        "the command that already stopped the robot and is not answered",
+        unit="s", ge=0, le=60,
+    )  # fmt: skip
+    confirm_no: dict[str, list[str]] = param(
+        {
+            "it": ["no", "non", "mai", "lascia stare", "basta", "stop"],
+            "en": ["no", "not", "never", "forget it", "stop"],
+        },
+        "Phrases that decline a spoken request, per language",
+    )
+    confirm_ask_lines: dict[str, str] = param(
+        {
+            "it": "Vuoi che ricordi questo: {key}, {value}?",
+            "en": "Should I remember this: {key}, {value}?",
+        },
+        "The question remember_preference speaks; {key} and {value} are the sanitised texts",
+    )
+    confirm_saved_lines: dict[str, str] = param(
+        {"it": "Va bene, lo ricorderò.", "en": "Okay, I will remember."},
+        "Spoken after the person confirmed and the preference was stored",
+    )
+    confirm_failed_lines: dict[str, str] = param(
+        {"it": "Non sono riuscito a ricordarlo.", "en": "I could not remember that."},
+        "Spoken when the person confirmed but the preference could not be stored",
+    )
+    confirm_declined_lines: dict[str, str] = param(
+        {"it": "Va bene, non lo ricordo.", "en": "Okay, I will not remember it."},
+        "Spoken after the person declined",
     )
 
 

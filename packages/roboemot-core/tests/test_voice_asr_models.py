@@ -171,3 +171,73 @@ def test_asr_languages_are_separate_models(vosk_asr):
     vosk_asr.start("it")
     vosk_asr.accept(load("it_stop"))
     assert "fermati" in vosk_asr.finish()
+
+
+# ---------------------------------------------------------------- barge-in on real models
+
+
+def over_the_robot(models, vosk_asr, robot_clip: str, user_clip: str | None, **cfg):
+    """The robot plays ``robot_clip`` (heard back at gain 0.4, 80 ms late, by the microphone,
+    and kept as the echo reference); the user says ``user_clip`` 0.8 s in. Real Silero (a second
+    instance, as in the app) and real Vosk. Returns (stop stamps, the BargeIn, user onset)."""
+    from roboemot.voice.bargein import BargeIn, PlaybackReference
+
+    vad_path, _ = models
+    config = RoboEmotConfig.model_validate({"voice": {"barge_in": cfg}}) if cfg else CFG
+    robot = load(robot_clip)
+    seconds = robot.size / RATE
+    t0, user_at = 1000.0, 0.8
+    mic = np.zeros(round((seconds + 0.5) * RATE), np.float32)
+    lag = round(0.08 * RATE)
+    mic[lag : lag + robot.size] += 0.4 * robot
+    user = None if user_clip is None else load(user_clip)
+    if user is not None:
+        mic[round(user_at * RATE) : round(user_at * RATE) + user.size] += user[: mic.size]
+    ref = PlaybackReference(RATE, config.voice.barge_in.echo_reference_s)
+    ref.add(t0, robot)
+    state = SimpleNamespace(now=t0, stops=[], events=[])
+    bi = BargeIn(
+        config,
+        SileroVAD(vad_path, 1),
+        vosk_asr,
+        ref,
+        language=lambda: "it" if user_clip and user_clip.startswith("it_") else "en",
+        emit=lambda name, now, payload: state.events.append(name),
+        clock=lambda: state.now,
+    )
+    bi.bind(lambda: state.stops.append(state.now), lambda: None, None)
+    for i in range(0, mic.size, 1024):
+        part = mic[i : i + 1024]
+        state.now = t0 + (i + part.size) / RATE
+        bi.on_chunk(SimpleNamespace(samples=part, rate_hz=RATE, stamp=state.now, gap=False))
+        if state.stops:
+            break
+    return state, bi, t0 + user_at
+
+
+def test_the_robots_own_speech_in_the_microphone_does_not_stop_it_on_real_models(models, vosk_asr):
+    state, bi, _ = over_the_robot(models, vosk_asr, "en_hello_name", None)
+    assert state.stops == [] and bi.snapshot()["echo_frames"] > 5
+
+
+def speech_start_s(clip: str, floor_db: float = -40.0, frame: int = 512) -> float:
+    """Where the clip's speech really starts: its first 32 ms frame above ``floor_db``."""
+    x = load(clip)
+    for i in range(0, x.size - frame, frame):
+        if 20 * np.log10(float(np.sqrt(np.mean(x[i : i + frame] ** 2))) + 1e-12) > floor_db:
+            return i / RATE
+    raise AssertionError("no speech in the clip")
+
+
+def test_a_spoken_stop_over_the_robot_cuts_it_off_on_real_models(models, vosk_asr):
+    state, bi, clip_start = over_the_robot(models, vosk_asr, "en_hello_name", "it_stop")
+    assert len(state.stops) == 1
+    snap = bi.snapshot()
+    kind = "barge_in" if snap["triggers"] else "keyword"
+    true_onset = clip_start + speech_start_s("it_stop")
+    ms = 1000 * (state.stops[0] - true_onset)
+    print(f"\nreal-model {kind}: stop {ms:.0f} ms after the true speech start (audio clock)")
+    if snap["triggers"]:
+        assert ms < 200  # SPEC 13: barge-in to TTS stop, on the audio clock
+    else:
+        assert state.events == ["speech.keyword.stop"] and ms < 600

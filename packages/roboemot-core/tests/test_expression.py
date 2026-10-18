@@ -541,3 +541,28 @@ def test_started_counts_every_expression_the_renderer_starts(cfg, manifest):
     assert r.started == 1
     assert r.update(state("curiosity", 0.5, impulse=2), active(), 8.0)
     assert r.started == 2
+
+
+def test_a_requested_gesture_plays_through_the_same_path_as_an_affect_one(cfg, manifest):
+    """SPEC 11: the play skill picks the label; the interval, register and minor cap still rule."""
+    r = renderer(cfg, manifest)
+    reg = active("adult")
+    assert r.request("nonsense") is False and r.request("joy") is True
+    assert r.update(state("calm", 0.5), reg, 0.0) is True
+    assert r.last_label == "joy" and r.started == 1
+    r.request("curiosity")
+    assert r.update(state("calm", 0.5), reg, 0.2) is False  # min_interval_s not over
+    assert r.update(state("calm", 0.5), reg, 1.5) is True and r.last_label == "curiosity"
+    assert r.update(state("calm", 0.5), reg, 3.0) is False  # one request, one play
+
+
+def test_a_requested_gesture_respects_the_minor_cap_and_the_register(cfg, manifest):
+    factor = cfg.safety.minor_motion_factor
+    huge = entry(**{"antenna_right": [(0, 0), (0.5, 170), (1, 0)]})
+    r = renderer(cfg, manifest, {"joy": huge}, max_amplitude=3)
+    reg = active("child")
+    r.set_register(reg, factor)
+    r.request("joy")
+    assert r.update(state("calm", 1.0), reg, 0.0)
+    d = manifest.dofs["antenna_right"]
+    assert r.commands(0.5)[0].targets["antenna_right"] <= factor * (d.max - d.home) + 1e-9

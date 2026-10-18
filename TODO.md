@@ -43,3 +43,27 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       config validator ("not implemented in v1 M3") because requests still carry real names;
       build the name-to-alias map for `build_messages(names=...)`, send aliases to routes that
       are not local, and restore the web UI consent text for it.
+
+## Barge-in and skills (M3 slice 6, SPEC 8 stage 8, 11)
+
+- [ ] Tune `voice.barge_in.*` on the robot (SPEC 15 robot items): `echo_corr_max`, `echo_max_lag_ms`
+      (speaker-to-microphone delay of the Wireless), `threshold`, `min_speech_ms`. The unit tests use
+      synthetic echo; the real-model test (`pytest -m models -k spoken_stop`) uses `say` clips.
+      Measure the onset-to-stop latency from the voice debug section (`bargein.latency`).
+- [x] A stop phrase that stopped the robot is not answered afterwards: `conversation.stop_drop_window_s`
+      drops an utterance made only of stop phrases heard soon after a barge-in. A stop phrase said
+      later, with nobody speaking, is still an ordinary utterance.
+- [ ] Robot checks for barge-in (HIL, real playback): the Wireless's capture/playback lag against
+      `voice.barge_in.echo_max_lag_ms`; whether `echo_corr_max` separates the robot's voice from a
+      person talking over it on the real speaker and room (the unit tests use synthetic and smeared
+      echo; a user quieter than the echo is not heard by design); the cm4 CPU of the second Silero
+      instance, the FFT per speech frame and the keyword Vosk (`bargein.keyword_seconds` is the
+      proxy); the robot saying "stop" itself in its own answer; capture and `clear_player` latency,
+      which the audio-clock latency figure leaves out.
+- [ ] The pre-roll handed to the listener on a barge-in (`pre_roll_ms`, 64 ms) still holds a little of
+      the robot's own voice; with real AEC it could be raised.
+- [ ] `look_at` names come from the registry display names of what is in view and are sent to the
+      route as tool-schema choices, like the scene summary; route them through the pseudonym map when
+      `privacy.pseudonyms_to_cloud` exists.
+- [ ] `play` offers every label of the manifest's `expression_map` (affect expressions). Named
+      gestures that are not affect labels (nod, shake) need their own map and primitives.

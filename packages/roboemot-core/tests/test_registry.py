@@ -956,3 +956,21 @@ def test_stamp_is_required(tmp_path):
     m = matcher(make(tmp_path))
     with pytest.raises(TypeError):
         m.observe(1, axis(0), MODEL)
+
+
+def test_a_confirmed_preference_is_stored_for_an_active_person_only(tmp_path):
+    reg = make(tmp_path)
+    person = enroll(reg, 0)
+    updated = reg.set_preference(person.person_id, "colore", "blu", max_items=2)
+    assert updated.preferences == {"colore": "blu"}
+    assert reopen(tmp_path).get_person(person.person_id).preferences == {"colore": "blu"}
+    reg.set_preference(person.person_id, "colore", "rosso", max_items=2)  # same key: replaced
+    reg.set_preference(person.person_id, "cibo", "pasta", max_items=2)
+    with pytest.raises(ValueError):  # a third new key
+        reg.set_preference(person.person_id, "gioco", "palla", max_items=2)
+    reg.set_preference(person.person_id, "cibo", "riso", max_items=2)  # an existing one still goes
+    pending = reg.create_pending_person("Ospite")
+    with pytest.raises(ValueError):
+        reg.set_preference(pending.person_id, "colore", "blu", max_items=2)
+    with pytest.raises(KeyError):
+        reg.set_preference("nobody", "colore", "blu", max_items=2)

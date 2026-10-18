@@ -37,6 +37,7 @@ log = logging.getLogger(__name__)
 
 MS_PER_S = 1000.0
 LATENCY_WINDOW = 20
+PLAYED_WINDOW = 64  # sentences whose playback start is remembered, for ``played``
 READY_TIMEOUT_S = 5.0
 JOIN_TIMEOUT_S = 2.0
 
@@ -97,6 +98,11 @@ class SpeechOutput:
         self._last_rate_hz = 0
         self._latencies: collections.deque[float] = collections.deque(maxlen=LATENCY_WINDOW)
         self._first_audio: collections.OrderedDict[int, float] = collections.OrderedDict()
+        # job id -> clock stamp at which its first sample starts to play; ids a stop cut off
+        # before that are in ``_unplayed``
+        self._audible: collections.OrderedDict[int, float] = collections.OrderedDict()
+        self._unplayed: set[int] = set()
+        self._ended: collections.OrderedDict[int, float] = collections.OrderedDict()
         self.sentences_spoken = 0
         self.sentences_dropped = 0
         self.failures = 0
@@ -229,11 +235,33 @@ class SpeechOutput:
             epoch = self._epoch
             self.sentences_dropped += len(self._jobs)
             self._jobs.clear()
+            now = self.clock()
+            self._unplayed.update(i for i, at in self._audible.items() if at > now)
+            for job_id, end in self._ended.items():
+                self._ended[job_id] = min(end, now)
         self.sink.stop()
         loop = self._loop
         if loop is not None:
             with contextlib.suppress(RuntimeError):
                 loop.call_soon_threadsafe(self._cancel_before, epoch)
+
+    def played(self, job_id: int) -> bool:
+        """Whether sentence ``job_id`` began to play: its audio reached the sink and was not
+        cut before its first sample. A sentence a ``stop`` interrupted halfway counts (it was
+        heard in part); one still queued or in synthesis does not. Remembered for the last
+        ``PLAYED_WINDOW`` sentences, so the conversation keeps in its history only what the
+        person heard."""
+        with self._lock:
+            return job_id in self._audible and job_id not in self._unplayed
+
+    def ended_at(self, job_id: int) -> float | None:
+        """Clock stamp at which the audio pushed so far for sentence ``job_id`` has played
+        (the end of the sink's queue after its last push); None before its first push or
+        after the last ``PLAYED_WINDOW`` sentences. It moves while the sentence is still
+        being synthesized, so a caller needs the sentence to be over first. A stop moves it
+        to the stop."""
+        with self._lock:
+            return self._ended.get(job_id)
 
     def first_audio_at(self, utterance: int) -> float | None:
         """Clock stamp when the first audio of answer ``utterance`` was pushed, None until then
@@ -287,13 +315,24 @@ class SpeechOutput:
         self.stop()
         return True
 
-    def _push(self, job: _Job, samples: np.ndarray, rate_hz: int) -> bool:
-        """Push unless a stop happened since ``job`` was queued. The check and the push are one
-        step under the lock ``stop`` takes to move the epoch."""
+    def _push(self, job: _Job, samples: np.ndarray, rate_hz: int, *, speech: bool = False) -> bool:
+        """Push unless a stop happened since ``job`` was queued. The check, the push and the
+        notes about it (when the sentence starts to play, where its audio ends) are one step
+        under the lock ``stop`` takes to move the epoch, so a sentence never counts as played
+        when a stop beat its first push."""
         with self._lock:
             if job.epoch != self._epoch:
                 return False
+            start = self._queue_end()
             self.sink.push_audio_sample(samples, rate_hz)
+            if speech and job.id not in self._audible:
+                self._audible[job.id] = start
+                while len(self._audible) > PLAYED_WINDOW:
+                    self._unplayed.discard(self._audible.popitem(last=False)[0])
+            if speech:
+                self._ended[job.id] = self._queue_end()
+                while len(self._ended) > PLAYED_WINDOW:
+                    self._ended.popitem(last=False)
             return True
 
     async def _speak(self, job: _Job) -> None:
@@ -323,7 +362,7 @@ class SpeechOutput:
                                 self._first_audio.popitem(last=False)
                     log.debug("speech %d: first audio after %.0f ms", job.id, self._latencies[-1])
                 self._last_rate_hz = chunk.rate_hz
-                if not self._push(job, chunk.samples, chunk.rate_hz):
+                if not self._push(job, chunk.samples, chunk.rate_hz, speech=True):
                     return
             self.sentences_spoken += 1
         except asyncio.CancelledError:
@@ -336,6 +375,13 @@ class SpeechOutput:
             log.warning("speech %d crashed: %s", job.id, type(exc).__name__)
         finally:
             self._last_utterance = job.utterance
+
+    def _queue_end(self) -> float:
+        """Where the sink's queue ends: when a sample pushed now would play (the clock when it
+        has no timeline)."""
+        now = self.clock()
+        playing_until = getattr(self.sink, "playing_until", None)
+        return max(now, playing_until()) if callable(playing_until) else now
 
     def _pad(self, job: _Job, rate_hz: int) -> bool:
         """Silence between two sentences of one answer, less the idle gap already there.

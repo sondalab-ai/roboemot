@@ -39,6 +39,7 @@ from roboemot.circadian.motion import REST_SOURCE
 from roboemot.config import ConfigStack
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.conversation import ConversationWorker
+from roboemot.conversation.preferences import RegistryPreferences
 from roboemot.diagnostics import Diagnostics, FnSource, Target, platform_sources
 from roboemot.diagnostics.system import local_sources
 from roboemot.health.network import NetworkMonitor
@@ -51,10 +52,12 @@ from roboemot.motion import Command, MotionLoop, Priority
 from roboemot.persona import effects as persona_effects
 from roboemot.persona.llm_traits import TraitCache, TraitsWorker
 from roboemot.reflex import ReflexEngine
+from roboemot.skills.defaults import default_skills
 from roboemot.vision import CIRCADIAN, FrameSource, LockedSource
 from roboemot.vision.minor import MinorPresence
 from roboemot.vision.service import Perception, default_stages, open_perception, world_snapshot
 from roboemot.voice.activity import SpeechActivity
+from roboemot.voice.bargein import BargeIn, PlaybackReference
 from roboemot.voice.factory import build_speech
 from roboemot.voice.listener import Utterance, VoiceListener
 from roboemot.voice.speech import SpeechOutput
@@ -79,6 +82,7 @@ from .camera import ReachyCamera
 from .conversation import profile_source, scene_source, speaker_source
 from .driver import ReachyMiniDriver
 from .gaze import FRAME, GAZE, REFLEX
+from .skills import SkillBridge
 from .speaker import ReachySpeaker
 from .voice import build_listener
 
@@ -284,6 +288,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
     audio: ReachyAudio | None = None  # the one reader of the microphone (reflex level, voice)
     speaker: ReachySpeaker | None = None  # playback; only when voice.enabled
     speech: SpeechActivity | None = None  # "the robot is speaking" gate (reflex, DoA)
+    bargein: BargeIn | None = None  # user speech over the robot's voice (SPEC 8 stage 8)
     voice_listener: VoiceListener | None = None  # mic -> VAD -> ASR -> utterances; voice.enabled
     speech_output: SpeechOutput | None = None  # TTS queue onto the speaker; only when voice.enabled
     traits_worker: TraitsWorker | None = None  # rates persona traits when traits_source is llm
@@ -437,8 +442,13 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             voice_queue_s=cfg.voice.capture_queue_s,
         )
         reflexes.audio_status = audio.snapshot
+        reference = (
+            PlaybackReference(cfg.voice.sample_rate_hz, cfg.voice.barge_in.echo_reference_s)
+            if cfg.voice.enabled
+            else None
+        )
         speaker = self.speaker = (
-            ReachySpeaker(reachy_mini, cfg.voice.playback_chunk_ms, speech)
+            ReachySpeaker(reachy_mini, cfg.voice.playback_chunk_ms, speech, reference=reference)
             if cfg.voice.enabled
             else None
         )
@@ -580,12 +590,14 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 perception.registry,
                 FRAME,
                 lambda u: self.on_utterance(u),
+                reference,
             )
             if cfg.voice.enabled
             else None
         )
         listener = self.voice_listener = voice_pipeline[0] if voice_pipeline else None
         voice_close = voice_pipeline[1] if voice_pipeline else None
+        bargein = self.bargein = voice_pipeline[2] if voice_pipeline else None
         if cfg.voice.enabled and listener is None:
             audio.set_voice(False)  # no consumer: the hub must not queue audio for nobody
         affect = runner.engine
@@ -612,6 +624,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                     {
                         **listener.snapshot(),
                         **({"conversation": c.snapshot()} if (c := self.conversation) else {}),
+                        **({"bargein": bargein.snapshot()} if bargein is not None else {}),
                     }
                     if listener is not None
                     else {"state": "off"}
@@ -645,6 +658,8 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             speech.set_echo_tail_ms(change.config.voice.echo_tail_ms)
             if listener is not None:
                 listener.apply_config(change.config)
+            if bargein is not None:
+                bargein.apply_config(change.config)
             if self.speech_output is not None:
                 self.speech_output.config = change.config
             if self.conversation is not None:
@@ -722,10 +737,27 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                             value_cap,
                         ),
                         speaker=conv_speaker,
+                        skills=default_skills(
+                            SkillBridge(
+                                expression, selector, world, perception.registry, stack.effective
+                            ).env(runner.engine)
+                        ),
+                        preferences=(
+                            RegistryPreferences(
+                                perception.registry,
+                                lambda: stack.effective().conversation.max_preferences,
+                            )
+                            if perception.registry is not None
+                            else None
+                        ),
                         bus=bus,
                     )
                     cleanup.callback(conv.close)
                     conv.start()
+                    if bargein is not None:  # stop the speech first, then the stream, then listen
+                        bargein.bind(
+                            output.stop, conv.interrupt, listener.resume, conv.mark_interrupting
+                        )
             if listener is not None and voice_close is not None:
                 cleanup.callback(voice_close)
                 cleanup.callback(listener.stop)  # before the hub stops feeding its queue
