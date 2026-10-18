@@ -60,6 +60,8 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       gestures that are not affect labels (nod, shake) need their own map and primitives.
 - [ ] Edit wake phrases and the robot name from the web UI (needs an admin-confirmed settings editor,
       SPEC 11A).
+- [ ] Edit the children's built-in lines (`safety.minor_lines`) and the minor blocklist from the web UI
+      (same editor). Until then they keep their defaults (owner decision, 2026-10-18).
 
 ## M3 exit (SPEC 14, `docs/eval/m3.md`)
 
