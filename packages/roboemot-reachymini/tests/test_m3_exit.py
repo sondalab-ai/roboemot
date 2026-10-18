@@ -347,7 +347,10 @@ def test_conversation_inside_the_latency_budgets_then_a_barge_in(
         u0 = app.utterances[0][1]
         assert wait_for(lambda: mini.pushes, 20), (
             f"the robot never answered: language={u0.language} final={u0.final} "
-            f"addressed={u0.addressed} keywords={sorted(u0.keywords)}"
+            f"addressed={u0.addressed} keywords={sorted(u0.keywords)} "
+            f"requests={len(app.requests)} spoken={len(spoken)} "
+            f"conversation={app.conversation.snapshot()} "
+            f"network={app.diagnostics.report()['sections'].get('roboemot.network')}"
         )
         first_push = mini.pushes[0][0]
         assert wait_for(lambda: "latency_ms" in app.conversation.snapshot(), 5)
