@@ -40,9 +40,10 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       whose secret cannot be used is unavailable with one warning, and the CLI check and the web UI
       check refuse it. Keys are in no log, debug report or web UI response (`test_secret_leak.py`).
       Intended (owner decisions 2026-10-18): the web UI never sets or rotates a key (CLI and installer
-      only; no TLS until M5); no encryption at rest (file modes only). A key rotated on disk is picked
-      up live: `RouterHub.sync` runs each conversation turn and rebuilds the router (budgets kept) when
-      a secret changed, so the next request carries the new key (`test_secret_store.py`).
+      only; no TLS until M5); no encryption at rest (file modes only). Verified: a key rotated on disk
+      is picked up live, when the next utterance is answered or the traits worker syncs
+      (`secrets.json` is stat'ed each time): `RouterHub.sync` rebuilds the router, budgets kept, and
+      the next request carries the new key (`test_secret_store.py`).
 - [x] Scan soon after a person leaves (SPEC 5A, Scanning). Done: `world.scan.target_lost_delay_s`
       (8 s) with its own `target_lost_jitter_s` (3 s), scaled by `idle_period_x`; the policy uses
       it instead of the idle interval when the person target or speaker hint goes away. A person or
@@ -50,9 +51,9 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       (`ScanPolicy`, `test_scan.py`).
 - [x] Pseudonyms to cloud routes (SPEC 8, 12 Data): `privacy.pseudonyms_to_cloud` loads; the router
       gives aliases to routes that are not local (`llm_routes[].locality`, making a route local needs the admin; `auto` is this machine and the home network)
-      and restores names in the reply text and in tool-call arguments. Intended: aliases live in RAM
-      only and are new after an app restart (owner decision 2026-10-18). Open: personal details that are not registry names are not replaced;
-      registry names refused for aliasing (no letter or digit, a template prefix word, a structural
+      and restores names in the reply text and in tool-call arguments. Intended (owner decision
+      2026-10-18): aliases live in RAM only and are new after an app restart. Open: personal details
+      that are not registry names are not replaced; registry names refused for aliasing (no letter or digit, a template prefix word, a structural
       word such as "user") are sent unaliased.
 - [x] Pseudonyms residual: `persona/llm_traits.py` (`rate_traits`) streamed `persona.prompt`
       without `pseudonyms=`. `TraitsWorker` now takes a `NameSource` (registry names) and the

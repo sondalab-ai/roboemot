@@ -232,7 +232,7 @@ def test_the_hub_rebuilds_when_a_secret_changes_on_reload(store):
 
 
 async def test_a_rotated_secret_is_used_by_the_next_sync_without_a_config_change(store):
-    """Actual behaviour (SPEC 8 Secrets): the hub is synced each turn, so a key rotated on disk
+    """SPEC 8 Secrets: the hub is synced each turn, so a key rotated on disk
     goes out with the next request, with no reload event and no restart; budgets are kept."""
     cfg = RoboEmotConfig(llm_routes=[cloud().model_dump()])
     seen = []

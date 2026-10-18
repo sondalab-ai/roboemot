@@ -47,6 +47,8 @@ section number in commit messages that implement or change behaviour.
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
 pip install -e "packages/roboemot-core[dev]" -e "packages/roboemot-reachymini[dev]"
+# worktree agents need their own venv (editable installs point at the main checkout); check
+# `python -c "import roboemot; print(roboemot.__file__)"` is inside the worktree before trusting a test run
 pytest                                   # unit tests (no robot, no simulator)
 scripts/sim-daemon.sh &                  # MuJoCo Reachy Mini daemon, headless, port 8000
 roboemot models fetch --all              # vision weights (~0.8 GB) into the app data folder (~/.local/share/roboemot/models), sha256-verified
@@ -70,5 +72,3 @@ roboemot debug --host <robot> --json     # debug report (SPEC 12A); system/batte
 - Angles are radians inside the code; degrees only in YAML files for humans, converted at load.
 - Tests that need the simulator are marked `@pytest.mark.sim`; tests that need the real
   robot are marked `@pytest.mark.hil` and never run in CI.
-- Worktree agents need their own venv (editable installs point at the main checkout); check
-  `roboemot.__file__` is inside the worktree before trusting a test run.
