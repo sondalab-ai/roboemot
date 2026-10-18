@@ -78,7 +78,7 @@ def put(client, path, value, pin=PIN, **extra):
 def test_list_carries_the_whole_catalogue_with_the_allowlist_writable(served, stack):
     data = served.request("GET", "/api/settings").json
     fields = {f["path"]: f for f in data["fields"]}
-    assert set(data) == {"fields", "pin_required"}, "the legacy settings list is gone"
+    assert set(data) == {"fields", "robot", "pin_required"}, "the legacy settings list is gone"
     writable = {p for p, f in fields.items() if f["writable"]}
     assert writable == {
         p for p, f in fields.items() if f["kind"] not in CONTAINERS and not f["secret"]
