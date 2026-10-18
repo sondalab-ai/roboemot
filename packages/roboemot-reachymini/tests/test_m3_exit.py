@@ -34,7 +34,6 @@ from roboemot.vision.models import ModelError
 from roboemot.voice import factory
 from roboemot.voice import models as voice_models
 from roboemot.voice.tts import AudioChunk
-from roboemot.voice.vad import SileroVAD
 from test_app_perception import data, wait_for  # noqa: F401  (data: fixture)
 from test_app_reflex import ScriptedMini, enable, run_app
 
@@ -92,17 +91,6 @@ def speech_span_s(clip: np.ndarray) -> tuple[float, float]:
     ]
     assert loud, "no speech in the clip"
     return loud[0] / RATE, loud[-1] / RATE
-
-
-def voiced_onset_s(clip: np.ndarray, threshold: float) -> float:
-    """Start of the first 32 ms frame the Silero VAD scores at ``threshold`` or more (the barge-in
-    threshold): where the detector can first see the speech. A word that starts with a fricative
-    ("stop") is audible, above ``FLOOR_DB``, well before this."""
-    vad = SileroVAD(voice_models.model_file(MODELS_DIR, "silero-vad"), 1)
-    for i in range(0, clip.size - FRAME, FRAME):
-        if vad.speech_prob(clip[i : i + FRAME]) >= threshold:
-            return i / RATE
-    raise AssertionError("the VAD never fires on the clip")
 
 
 class LiveMic:
@@ -369,11 +357,7 @@ def test_conversation_inside_the_latency_budgets_then_a_barge_in(
         assert not mini.clears, "clear_player was called before the stop clip"
         onset_wall = mini.mic.play(stop_audio)
         acoustic_onset = onset_wall + speech_span_s(stop_audio)[0]
-        voiced_onset = onset_wall + voiced_onset_s(
-            stop_audio, RoboEmotConfig().voice.barge_in.threshold
-        )
         assert wait_for(lambda: bool(mini.clears), 5), "barge-in never stopped the speaker"
-        stop_ms = (mini.clears[0] - voiced_onset) * 1000
         stop_acoustic_ms = (mini.clears[0] - acoustic_onset) * 1000
         triggers = app.bargein.snapshot()["triggers"]
         assert stop_acoustic_ms >= 0, "the speaker was cleared before the user spoke"
@@ -397,7 +381,6 @@ def test_conversation_inside_the_latency_budgets_then_a_barge_in(
                 "max_first_token_s_inside_budget": round(
                     FIRST_TOKEN_S + (FIRST_AUDIO_BUDGET_MS - first_audio_ms) / 1000, 2
                 ),
-                "barge_in_stop_after_voiced_onset_ms": round(stop_ms),
                 "barge_in_stop_after_acoustic_onset_ms": round(stop_acoustic_ms),
                 "barge_in_trigger": "vad" if triggers else "keyword",
                 "answer_audio_queued_when_cut_s": round(queued_at_cut, 1),

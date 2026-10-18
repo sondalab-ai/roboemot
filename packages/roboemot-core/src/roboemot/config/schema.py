@@ -2023,9 +2023,9 @@ class BargeInConfig(Strict):
     )
     onset_threshold: float = param(
         0.4,
-        "Speech probability a frame needs to count towards the onset path. Measured on the "
-        "M3 clips: the /s/ of English \"stop\" scores 0.4 to 0.9; clicks, coughs, claps and white "
-        "noise score under 0.25",
+        "Speech probability a frame needs to count towards the onset path (at most threshold). "
+        "Measured on the M3 clips: the /s/ of English \"stop\" scores 0.35 to 0.9; clicks, "
+        "coughs, claps and white noise score under 0.25",
         ge=0.05, le=0.99,
     )  # fmt: skip
     onset_hf_cutoff_hz: float = param(
@@ -2041,16 +2041,28 @@ class BargeInConfig(Strict):
         "1.0, voiced speech 0 to 0.1. Keeps quiet voiced sounds on the stricter path",
         ge=0.0, le=1.0,
     )  # fmt: skip
+    onset_min_level_db: float = param(
+        -46.0,
+        "Level (RMS, dBFS) a frame scored between onset_threshold and threshold needs on the "
+        "onset path: the echo of the robot's own \"s\" at a low echo gain sits near the "
+        "microphone noise floor, where no correlation can tell it from a user. A user's /s/ "
+        "reads -40 to -29 dBFS",
+        unit="dB", ge=-80, le=-20,
+    )  # fmt: skip
     onset_min_speech_ms: float = param(
         96.0,
-        "Continuous frames at or above onset_threshold needed on the onset path; rounded up to "
-        "whole VAD frames. The stop follows within one microphone chunk of this",
+        "Continuous onset-path frames needed before the cut; rounded up to whole VAD frames. The "
+        "stop follows within one microphone chunk of this. Like min_speech_ms it adds directly to "
+        "the onset-to-stop latency: keep it at or below min_speech_ms, or the onset path is "
+        "never the faster one",
         unit="ms", ge=32, le=150,
     )  # fmt: skip
     onset_echo_corr_max: float = param(
         0.4,
-        "Echo guard of the onset path: stricter than echo_corr_max because a frame the VAD "
-        "scores under threshold is weaker evidence than one it scores over it",
+        "Echo guard of the onset path (at most echo_corr_max): stricter because a frame the VAD "
+        "scores under threshold is weaker evidence than one it scores over it. A fricative-like "
+        "frame must pass it in the full band and in the band above onset_hf_cutoff_hz, where "
+        "its evidence is and the robot's low-frequency voice does not hide a user's /s/",
         ge=0.1, le=1.0,
     )  # fmt: skip
     echo_corr_max: float = param(
@@ -2112,6 +2124,14 @@ class BargeInConfig(Strict):
         "The keyword recognizer stops after this much audio without a candidate frame",
         unit="ms", ge=64, le=2000,
     )  # fmt: skip
+
+    @model_validator(mode="after")
+    def _onset_is_not_stricter_than_the_main_path(self) -> BargeInConfig:
+        if self.onset_threshold > self.threshold:
+            raise ValueError("barge_in.onset_threshold must not exceed threshold")
+        if self.onset_echo_corr_max > self.echo_corr_max:
+            raise ValueError("barge_in.onset_echo_corr_max must not exceed echo_corr_max")
+        return self
 
     @model_validator(mode="after")
     def _reference_covers_the_check(self) -> BargeInConfig:

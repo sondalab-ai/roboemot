@@ -179,7 +179,13 @@ class BargeIn:
         self._resume: Callable[[np.ndarray, float], None] | None = None
         self._prepare: Callable[[], Any] = lambda: None
         self.stats = LatencyStats()
-        self._counts = {"triggers": 0, "keyword_triggers": 0, "echo_frames": 0, "errors": 0}
+        self._counts = {
+            "triggers": 0,
+            "keyword_triggers": 0,
+            "echo_frames": 0,
+            "onset_echo_frames": 0,
+            "errors": 0,
+        }
         self._keyword_s = 0.0  # audio fed to the keyword recognizer, a CPU proxy for the cm4
         self._last_corr: float | None = None
         self._lang = ""
@@ -284,13 +290,20 @@ class BargeIn:
         prob = self._vad.speech_prob(frame)
         self._ring.append((stamp, frame))
         speech = b.enabled and prob >= b.threshold
-        weak = b.enabled and b.onset_enabled and self._onset_frame(frame, prob)
+        fricative = b.enabled and b.onset_enabled and self._fricative(frame, prob)
         candidate = b.keyword_enabled and prob >= b.keyword_threshold
-        corr = self._echo(stamp + self._frame_s) if (speech or weak or candidate) else 0.0
+        corr = self._echo(stamp + self._frame_s) if (speech or fricative or candidate) else 0.0
         if speech and corr >= b.echo_corr_max:
             speech = False
             self._counts["echo_frames"] += 1
-        weak = weak and corr < b.onset_echo_corr_max
+        # The onset path counts a frame that passed the main path (and then under the stricter
+        # onset_echo_corr_max: a frame at threshold or more with corr in [onset_echo_corr_max,
+        # echo_corr_max) counts on the main path only), or a fricative-like one.
+        weak = b.enabled and b.onset_enabled and speech and corr < b.onset_echo_corr_max
+        if fricative:
+            weak = not self._fricative_is_echo(frame, corr, stamp + self._frame_s)
+        elif speech and b.onset_enabled and not weak:
+            self._counts["onset_echo_frames"] += 1
         candidate = candidate and corr < b.keyword_echo_corr_max
         if speech:
             if self._run == 0:
@@ -312,20 +325,56 @@ class BargeIn:
             self._weak_run = 0
         return b.keyword_enabled and self._keywords(frame, stamp, candidate)
 
-    def _onset_frame(self, frame: np.ndarray, prob: float) -> bool:
-        """Whether the frame counts on the onset path: scored at threshold, or scored at
-        ``onset_threshold`` and mostly high-frequency energy (a fricative such as /s/)."""
+    def _fricative(self, frame: np.ndarray, prob: float) -> bool:
+        """A frame the main path does not count but the onset path may: scored from
+        ``onset_threshold`` up to ``threshold`` and mostly high-frequency energy (an /s/)."""
         b = self._b
-        if prob >= b.threshold:
-            return True
         if prob < b.onset_threshold:
             return False
+        return self._hf_ratio(frame) >= b.onset_hf_min_ratio
+
+    def _fricative_is_echo(self, frame: np.ndarray, corr: float, end: float) -> bool:
+        """Whether a fricative-like frame is dropped: too quiet to tell from the echo of the
+        robot's own "s" at the noise floor, or correlated with the played audio in the high band
+        (the caller has checked the full band)."""
+        b = self._b
+        if (
+            self._level_db(frame) < b.onset_min_level_db
+            or self._echo_hf(end) >= b.onset_echo_corr_max
+        ):
+            self._counts["onset_echo_frames"] += 1
+            return True
+        return False
+
+    @staticmethod
+    def _level_db(frame: np.ndarray) -> float:
+        return 10.0 * math.log10(float(np.mean(frame * frame)) + 1e-12)
+
+    def _hf_ratio(self, frame: np.ndarray) -> float:
+        """Share of the frame's energy above ``onset_hf_cutoff_hz`` (0 for a silent frame)."""
         power = np.abs(np.fft.rfft(frame)) ** 2
         total = float(power.sum())
         if total <= 0.0:
-            return False
+            return 0.0
         freqs = np.fft.rfftfreq(frame.size, 1.0 / self._rate)
-        return float(power[freqs >= b.onset_hf_cutoff_hz].sum()) / total >= b.onset_hf_min_ratio
+        return float(power[freqs >= self._b.onset_hf_cutoff_hz].sum()) / total
+
+    def _echo_hf(self, end: float) -> float:
+        """Echo correlation in the band above ``onset_hf_cutoff_hz`` only: that is where a
+        fricative's evidence is, and a user's /s/ is not hidden by the robot's low-frequency
+        voice in it (the full-band value is ~1 while the robot speaks)."""
+        if self._reference is None:
+            return 0.0
+        frames = list(self._ring)[-self._echo_frames :]
+        mic = np.concatenate([f for _, f in frames])
+        lag_s = self._b.echo_max_lag_ms / MS_PER_S
+        ref = self._reference.window(end - mic.size / self._rate - lag_s, end)
+        return echo_correlation(self._high_pass(mic), self._high_pass(ref))
+
+    def _high_pass(self, x: np.ndarray) -> np.ndarray:
+        spec = np.fft.rfft(x)
+        spec[np.fft.rfftfreq(x.size, 1.0 / self._rate) < self._b.onset_hf_cutoff_hz] = 0
+        return np.fft.irfft(spec, x.size).astype(np.float32)
 
     def _echo(self, end: float) -> float:
         """Correlation of the latest microphone audio (ending at ``end``) with what played."""

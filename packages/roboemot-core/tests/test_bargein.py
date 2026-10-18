@@ -439,20 +439,110 @@ def test_the_onset_path_can_be_switched_off():
     assert stops == []
 
 
-def test_the_onset_path_keeps_the_echo_guard_stricter_than_the_main_one():
-    """The robot's own hiss coming back (correlation 1) is not a barge-in, and a correlation
-    between onset_echo_corr_max (0.4) and echo_corr_max (0.6) blocks only the onset path."""
+def high_band(x: np.ndarray, cutoff_hz: float = 2000.0) -> np.ndarray:
+    spec = np.fft.rfft(x)
+    spec[np.fft.rfftfreq(x.size, 1 / RATE) < cutoff_hz] = 0
+    return np.fft.irfft(spec, x.size).astype(np.float32)
+
+
+def test_the_robots_own_hiss_in_the_microphone_is_dropped_by_the_high_band_guard():
     audio = hiss(4)
     ref = PlaybackReference(RATE, 2.0)
     ref.add(0.0, audio)
+    # The premise, measured: the copy correlates in the high band, an independent hiss does not.
+    assert echo_correlation(high_band(audio), high_band(audio)) > 0.99
+    assert echo_correlation(high_band(hiss(4, seed=9)), high_band(audio)) < 0.4
     stops, bi = onset_run([0.5, 0.6, 0.55, 0.5], audio, ref, keyword_enabled=False)
-    assert stops == [] and bi.snapshot()["triggers"] == 0
-    mixed = audio + hiss(4, rms=0.02, seed=9)  # echo plus an independent hiss: corr about 0.7
-    stops, _ = onset_run([0.5, 0.6, 0.55, 0.5], mixed, ref, keyword_enabled=False)
+    assert stops == [] and bi.snapshot()["onset_echo_frames"] == 4
+    stops, bi = onset_run(
+        [0.5, 0.6, 0.55, 0.5], hiss(4, seed=9), ref, keyword_enabled=False
+    )  # a user's hiss while the robot plays something else
+    assert len(stops) == 1 and bi.snapshot()["onset_echo_frames"] == 0
+
+
+def test_a_confident_frame_with_a_middling_echo_correlation_cuts_on_the_main_path_only():
+    robot = colored(0.5, 3, 0.1)[: 6 * FRAME]
+    mic = 0.3 * robot + 0.5 * user_voice(6 * FRAME / RATE, 0.1)
+    ref = PlaybackReference(RATE, 2.0)
+    ref.add(0.0, robot)
+    corr = echo_correlation(mic, robot)
+    b = RoboEmotConfig().voice.barge_in
+    assert b.onset_echo_corr_max <= corr < b.echo_corr_max, corr  # measured, not assumed
+    # The main path needs five frames here (150 ms); the onset path would cut after three.
+    cfg = {"keyword_enabled": False, "min_speech_ms": 150}
+    stops, bi = onset_run([0.9] * 6, mic, ref, **cfg)
+    assert len(stops) == 1 and stops[0] > 4 * FRAME / RATE  # the main path, at the fifth frame
+    assert bi.snapshot()["onset_echo_frames"] >= 3  # the onset path's guard held
+    stops, _ = onset_run([0.9] * 6, mic, None, **cfg)  # no reference: nothing to be stricter on
+    assert len(stops) == 1 and stops[0] <= 4 * FRAME / RATE
+
+
+def tones(frames: int, hf_share: float, rms: float = 0.02) -> np.ndarray:
+    """A 500 Hz and a 4 kHz tone whose energy shares are ``1 - hf_share`` and ``hf_share``."""
+    t = np.arange(frames * FRAME) / RATE
+    x = np.sqrt(1 - hf_share) * np.sin(2 * np.pi * 500 * t) + np.sqrt(hf_share) * np.sin(
+        2 * np.pi * 4000 * t
+    )
+    return (x * rms / np.std(x)).astype(np.float32)
+
+
+def test_the_fricative_test_flips_around_the_high_frequency_share_of_0_7():
+    stops, _ = onset_run([0.5] * 4, tones(4, 0.74), keyword_enabled=False)
+    assert len(stops) == 1
+    stops, _ = onset_run([0.5] * 4, tones(4, 0.66), keyword_enabled=False)
     assert stops == []
-    cfg = {"keyword_enabled": False, "onset_echo_corr_max": 0.95, "echo_corr_max": 0.6}
-    stops, _ = onset_run([0.5, 0.6, 0.55, 0.5], audio * 0.3 + hiss(4, seed=11) * 4, ref, **cfg)
-    assert len(stops) == 1  # weakly correlated with the reference (below 0.6): let through
+
+
+def test_silent_and_constant_frames_are_never_fricatives():
+    for audio in (np.zeros(6 * FRAME, np.float32), np.full(6 * FRAME, 0.05, np.float32)):
+        stops, bi = onset_run([0.5] * 6, audio, keyword_enabled=False)
+        assert stops == [] and bi.snapshot()["errors"] == 0
+
+
+def test_a_fricative_under_the_level_floor_is_not_counted():
+    stops, _ = onset_run([0.5] * 4, hiss(4, rms=0.0005), keyword_enabled=False)  # -66 dBFS
+    assert stops == []
+    stops, _ = onset_run([0.5] * 4, hiss(4, rms=0.02), keyword_enabled=False)  # -34 dBFS
+    assert len(stops) == 1
+
+
+def test_a_run_does_not_survive_the_end_of_speech_and_nothing_fires_after_the_stop():
+    audio = hiss(12)
+    now = [0.0]
+    stops: list[float] = []
+    bi = BargeIn(
+        RoboEmotConfig.model_validate({"voice": {"barge_in": {"keyword_enabled": False}}}),
+        ScriptedVAD([0.5] * 12),
+        SimpleNamespace(start=lambda *a: None, accept=lambda a: None, reset=lambda: None),
+        None,
+        language=lambda: "en",
+        clock=lambda: now[0],
+    )
+    bi.bind(lambda: stops.append(now[0]), lambda: None, None)
+
+    def feed(lo, hi):
+        for i in range(lo * FRAME, hi * FRAME, CHUNK):
+            now[0] = (i + CHUNK) / RATE
+            bi.on_chunk(
+                SimpleNamespace(samples=audio[i : i + CHUNK], rate_hz=RATE, stamp=now[0], gap=False)
+            )
+
+    feed(0, 2)  # two frames of an /s/: the robot stops speaking here (the listener's reset)
+    bi.reset()
+    assert bi._weak_run == 0 and bi._run == 0
+    feed(2, 3)  # a third frame in the tail after the last sentence: not a run of three
+    assert stops == []
+    feed(3, 6)  # three fresh ones do cut
+    assert len(stops) == 1
+    feed(6, 12)  # the echo tail of the cut: the detector is deaf, nothing fires again
+    assert len(stops) == 1
+
+
+def test_the_onset_thresholds_may_not_be_stricter_than_the_main_path():
+    with pytest.raises(ValueError, match="onset_threshold"):
+        RoboEmotConfig.model_validate({"voice": {"barge_in": {"onset_threshold": 0.9}}})
+    with pytest.raises(ValueError, match="onset_echo_corr_max"):
+        RoboEmotConfig.model_validate({"voice": {"barge_in": {"onset_echo_corr_max": 0.7}}})
 
 
 def test_the_pre_roll_of_an_onset_cut_starts_before_the_fricative():
