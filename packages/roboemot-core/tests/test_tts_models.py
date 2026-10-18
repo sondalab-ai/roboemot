@@ -1,8 +1,9 @@
 """SPEC 8, stage 7: the real Piper worker (opt in with ``-m models``).
 
 Needs a Piper virtualenv (``ROBOEMOT_PIPER_PYTHON``, else the installer's default under the app
-data folder) and the verified voice models (``roboemot models fetch --voice``; or a plain folder
-in ``ROBOEMOT_PIPER_VOICES``). Skipped when either is missing.
+data folder) and the verified voice models (``roboemot models fetch --voice``, found through
+``ROBOEMOT_VOICE_MODELS_DIR``: the autouse fixture moves the data folder; or a plain folder in
+``ROBOEMOT_PIPER_VOICES``). Skipped when either is missing.
 """
 
 from __future__ import annotations
@@ -36,7 +37,9 @@ def piper_setup():
     if not python.exists():
         pytest.skip(f"no Piper interpreter at {python}")
     plain = os.environ.get("ROBOEMOT_PIPER_VOICES")
-    root = voice_models.models_dir(CFG.voice.models_dir, CFG.data_dir)
+    root = voice_models.models_dir(
+        os.environ.get("ROBOEMOT_VOICE_MODELS_DIR") or CFG.voice.models_dir, CFG.data_dir
+    )
 
     def resolve(name: str) -> tuple[Path, Path]:
         base = Path(plain) if plain else root / "piper"

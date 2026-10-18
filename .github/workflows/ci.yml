@@ -48,6 +48,7 @@ jobs:
     timeout-minutes: 30
     env:
       ROBOEMOT_DATA_DIR: ${{ github.workspace }}/.ci-data
+      ROBOEMOT_VOICE_MODELS_DIR: ${{ github.workspace }}/.ci-data/voice-models
       ROBOEMOT_EXIT_REPORT: ${{ github.workspace }}/m3-exit-report.json
     steps:
       - uses: actions/checkout@v4
@@ -67,7 +68,7 @@ jobs:
           "$RUNNER_TEMP/piper-venv/bin/pip" install --no-cache-dir piper-tts==1.8.0
           echo "ROBOEMOT_PIPER_PYTHON=$RUNNER_TEMP/piper-venv/bin/python" >> "$GITHUB_ENV"
       - run: >
-          pytest -m models -rs -s
+          pytest -m models -rs -s -o log_level=DEBUG
           packages/roboemot-core/tests/test_vad_silero.py
           packages/roboemot-core/tests/test_voice_asr_models.py
           packages/roboemot-core/tests/test_tts_models.py
