@@ -1,10 +1,10 @@
 {
   "package": "@sondalab/ui-kit",
-  "version": "0.37.0",
+  "version": "0.37.1",
   "license": "MIT",
-  "integrity": "sha512-Jx4zz27Wjf2KixfUZ69nXBtBOTb5+wt3KAfKjFZDMs+L2bMo3wT6727QhHFSjelg/TCPTUbaiMm8piGuvNwSWA==",
+  "integrity": "sha512-TtrjW23zBeGCKXemt9MLUx8+o+akv0tga2m2KrHcXD9cKehoO3Q5WTmExbmQE5QL/zDob/WymH8ANo0eP+PgIQ==",
   "files": {
-    "package.json": "4e0bb499ad419922e138cc35f3684e11eec28d69354e0a7ecb52d0d616b18653",
+    "package.json": "b9aa718c076dd4747b5b44e72bbf64ede13bd1a4eb3f294333b0738686f05866",
     "tokens.css": "28b58cadeaede82c2316c3d617432c7d86712b8d9dcd56f95d4b5407932dc254",
     "components.css": "289f5c3de8c40de9abe8cee4de437383067b384ef5b97ba8fc1aaad1437e4dba",
     "effects.css": "99bde4f051c91fa21303bf880b557b3b6d7a8a6341eb671cdf433ec1b1ea446f",
@@ -20,6 +20,11 @@
     "effects.js": "39a1ea53b73982529d298258fff13e925340e228af94878076be982096956a48",
     "geom.js": "2dc8661b5d3c0e2679eb6bccbb38516d8ac83601d6c29dcc5e1edb07ef8324eb",
     "colour.js": "bdeccbf024bf62d87c1058e8daa36b9d71523ce4233077bf5e922ae6181163e0",
-    "live-light.js": "27989063af2218384112cfb19a1e14eec92e55f0f28bc7ed7fde9fe6f03ae0b6"
+    "live-light.js": "27989063af2218384112cfb19a1e14eec92e55f0f28bc7ed7fde9fe6f03ae0b6",
+    "glass-lens.js": "b146cbcfea2fa08d75260ae5fec0f5a24f01ec1be6b147fd1ff43c5b65e2b756",
+    "glass-text.js": "e9d82a5dbfc62a6fdd8655338c5f1e605efffefea7f14d800940298415c1b4eb",
+    "goo-field.js": "5656f21c020a8ec964e3dc6c2c090280c49e64ba83eb2b9b213602e92c69dd13",
+    "halftone.js": "e6ca9eac864543603d0ce747f513bf0dbe648486d1c5797246f7b0ae5c2f03f6",
+    "halftone-core.js": "109cf96c790cf249f18588a305eb4d333f654b2ba952d4e9a53847fb310c1a2c"
   }
 }

@@ -95,9 +95,16 @@ def test_effects_are_wired_from_the_vendored_runtime():
     assert not re.search(r"glass", fx)
 
 
-def test_local_stylesheet_has_no_colour_literals_or_remote_urls():
+def test_local_stylesheet_has_only_the_registered_product_accent():
     css = (STATIC / "style.css").read_text()
-    assert not re.search(r"#[0-9a-fA-F]{3,8}\b|\brgba?\(|\bhsla?\(|\boklch\(", css)
+    assert not re.search(r"\brgba?\(|\bhsla?\(|\boklch\(", css)
+    # the roboemot accent per theme, from the kit's accent-registry.json
+    assert sorted(re.findall(r"#[0-9a-fA-F]{3,8}\b", css)) == [
+        "#f726b4",
+        "#f726b4",
+        "#ff48c4",
+        "#ff48c4",
+    ]
     assert "url(" not in css and "@import" not in css
 
 
@@ -183,3 +190,33 @@ def test_fonts_the_page_needs_are_served(client):
 
 def test_package_data_lists_the_static_tree():
     assert Path(server_module.__file__).parent.joinpath("static/vendor").is_dir()
+
+
+def test_effects_follow_the_agreed_families_only():
+    js = (STATIC / "app.js").read_text()
+    for banned in ("sl-fx-glass", "sl-fx-liquid", "sl-fx-goo", "data-sl-halftone", "sl-fx-glitch"):
+        assert banned not in js, banned
+    for used in (
+        "sl-fx-press",
+        "sl-fx-aurora--field",
+        "sl-fx-aurora--linear",
+        "sl-fx-aurora--wide",
+    ):
+        assert used in js, used
+
+
+def test_a_busy_aurora_always_carries_aria_busy():
+    js = (STATIC / "app.js").read_text()
+    body = js[js.index("function busy(") :].split("\n}\n", 1)[0]
+    assert 'data-sl-fx-live", "busy"' in body and 'aria-busy", "true"' in body
+
+
+def test_only_a_saved_change_fires_the_glitch_burst():
+    js = (STATIC / "app.js").read_text()
+    assert js.count("roboemotFx.burst") == 1
+    assert "result.changed ? s.path : null" in js
+
+
+def test_vendored_javascript_is_the_only_place_for_effect_internals():
+    server_text = Path(server_module.__file__).read_text()
+    assert "img-src 'self';" in server_text  # CSP unchanged: no data: images, so no glass lens

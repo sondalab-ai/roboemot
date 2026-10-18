@@ -6,6 +6,7 @@
   var KEY = "roboemot.theme";
   var MODES = ["auto", "light", "dark", "high-contrast"];
   var root = document.documentElement;
+  var applied = null; // the theme this page was loaded with; a later flip to or from contrast reloads
 
   function stored() {
     try {
@@ -23,12 +24,12 @@
   }
 
   function apply() {
-    var before = root.getAttribute("data-sl-theme");
     var next = resolve(stored());
     root.setAttribute("data-sl-theme", next);
-    if (before && before !== next && (before === "high-contrast" || next === "high-contrast")) {
-      window.location.reload();
-    }
+    var flipped = applied !== null && applied !== next;
+    var contrast = applied === "high-contrast" || next === "high-contrast";
+    applied = next;
+    if (flipped && contrast) window.location.reload();
   }
 
   window.roboemotTheme = {

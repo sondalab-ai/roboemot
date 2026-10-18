@@ -46,7 +46,7 @@ def client(tmp_path_factory):
 
 
 def test_pin_is_the_released_kit_version():
-    assert SYNC.UI_KIT_VERSION == "0.37.0"
+    assert SYNC.UI_KIT_VERSION == "0.37.1"
     assert MANIFEST["version"] == SYNC.UI_KIT_VERSION
     assert MANIFEST["integrity"] == SYNC.UI_KIT_INTEGRITY
     assert json.loads((VENDOR / "package.json").read_text())["version"] == SYNC.UI_KIT_VERSION

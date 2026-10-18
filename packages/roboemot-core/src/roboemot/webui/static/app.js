@@ -19,17 +19,30 @@ function el(tag, props, ...children) {
     else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
     else if (v !== false && v !== null && v !== undefined) node.setAttribute(k, v === true ? "" : v);
   }
-  for (const c of children.flat()) node.append(c instanceof Node ? c : document.createTextNode(c));
+  for (const c of children.flat(Infinity)) node.append(c instanceof Node ? c : document.createTextNode(c));
   return node;
 }
 
 // ---------------------------------------------------------------- kit building blocks
 
+const PRESS = " sl-fx-press";
 const BUTTONS = {
-  primary: "sl-btn sl-btn--primary",
-  danger: "sl-btn sl-btn--ghost sl-btn--danger",
-  plain: "sl-btn sl-btn--ghost",
+  primary: "sl-btn sl-btn--primary" + PRESS,
+  danger: "sl-btn sl-btn--ghost sl-btn--danger" + PRESS,
+  plain: "sl-btn sl-btn--ghost" + PRESS,
 };
+
+// Aurora means attention lives here: the focused field, the selected tab, work that is running.
+// The state itself stays in the markup (aria-busy, text); the light only renders it.
+const FIELD_FX = "sl-field__control sl-fx-aurora sl-fx-aurora--field";
+
+function busy(node, on) {
+  if (!on) return node;
+  node.classList.add("sl-fx-aurora", "sl-fx-aurora--wide");
+  node.setAttribute("data-sl-fx-live", "busy");
+  node.setAttribute("aria-busy", "true");
+  return node;
+}
 
 function button(label, kind, onclick, extra) {
   const small = extra && extra.small ? " sl-btn--sm" : "";
@@ -54,10 +67,10 @@ function textInput(id, props) {
 
 function field(id, label, control, hint) {
   if (hint) control.setAttribute("aria-describedby", id + "-hint");
-  const wrapper = control.tagName === "SELECT" ? "sl-field__control sl-select" : "sl-field__control";
+  const inner = control.tagName === "SELECT" ? el("span", { class: "sl-select" }, control) : control;
   return el("div", { class: "sl-field" },
     el("label", { class: "sl-field__label", for: id }, label),
-    el("span", { class: wrapper }, control),
+    el("span", { class: FIELD_FX }, inner),
     hint ? el("p", { class: "sl-field__hint", id: id + "-hint" }, hint) : []);
 }
 
@@ -272,7 +285,7 @@ async function renderEnrollment(box, s) {
   }
   parts.push(el("div", { class: "row" }, button(t("enroll_cancel"), "plain",
     () => guarded(async () => { await api("POST", "/api/enrollment/cancel", {}); await state.refresh(); }))));
-  const cards = [card(t("tab_enroll"), t("tab_enroll"), parts)];
+  const cards = [busy(card(t("tab_enroll"), t("tab_enroll"), parts), s.state === "collecting")];
   if (s.can_complete) {
     if (!state.form) {
       const reg = await api("GET", "/api/registry");
@@ -527,10 +540,10 @@ async function routesView() {
       await api("POST", "/api/routes/" + encodeURIComponent(r.name) + "/check", {});
       await routesView();
     }), { attrs: { disabled: r.running } });
-    return card(t("tab_routes"), r.name,
+    return busy(card(t("tab_routes"), r.name,
       el("p", { class: "hint" }, r.model + " @ " + r.endpoint + (r.allowed_for_minors ? ", " + t("route_minors") : "")),
       r.secret ? el("p", { class: "hint" }, t(r.secret.set ? "route_secret_set" : "route_secret_missing", { name: r.secret.name })) : [],
-      el("div", { class: "row" }, run), box);
+      el("div", { class: "row" }, run), box), r.running);
   });
   view.append(card(t("tab_routes"), t("tab_routes"), el("p", { class: "hint" }, t("routes_intro"))),
     ...(cards.length ? cards : [empty(t("tab_routes"), t("routes_none"))]));
@@ -587,7 +600,7 @@ function valueView(s) {
 // client-side pre-check using the server's own error codes; the server stays the authority.
 function settingEditor(s, index) {
   const schema = s.schema;
-  const controlled = (input) => el("span", { class: "sl-field__control" }, input);
+  const controlled = (input) => el("span", { class: FIELD_FX }, input);
   if ([].concat(schema.type).includes("array")) {
     const max = (schema.items || {}).maxLength;
     const list = el("div", { class: "stack" });
@@ -740,6 +753,8 @@ function showTab(name) {
     const on = b.dataset.tab === name;
     b.setAttribute("aria-selected", String(on));
     b.tabIndex = on ? 0 : -1;
+    b.classList.toggle("sl-fx-aurora", on);
+    b.classList.toggle("sl-fx-aurora--linear", on);
   }
   guarded(async () => { await TABS[name](); });
 }

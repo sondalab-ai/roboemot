@@ -7,7 +7,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 VERSION=$(python3 -c "import json,pathlib;print(json.loads(pathlib.Path('packages/roboemot-core/src/roboemot/webui/static/vendor/sondalab-ui-kit/VENDORED.json').read_text())['version'])")
 SURFACE="packages/roboemot-core/src/roboemot/webui/static/*.{html,css,js}"
-ARGS=(--surface "$SURFACE" --product roboemot --substrate App --tier A)
+ARGS=(--surface "$SURFACE" --product roboemot --substrate App)
 if [ -n "${SL_AUDIT:-}" ]; then
   node "$SL_AUDIT" "${ARGS[@]}"
 else

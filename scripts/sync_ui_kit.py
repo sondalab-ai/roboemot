@@ -25,10 +25,10 @@ import tarfile
 import urllib.request
 from pathlib import Path
 
-UI_KIT_VERSION = "0.37.0"
+UI_KIT_VERSION = "0.37.1"
 UI_KIT_INTEGRITY = (
-    "sha512-Jx4zz27Wjf2KixfUZ69nXBtBOTb5+wt3KAfKjFZDMs+L2bMo3wT6727QhHFSjelg/"
-    "TCPTUbaiMm8piGuvNwSWA=="
+    "sha512-TtrjW23zBeGCKXemt9MLUx8+o+akv0tga2m2KrHcXD9cKehoO3Q5WTmExbmQE5QL/"
+    "zDob/WymH8ANo0eP+PgIQ=="
 )
 TARBALL_URL = f"https://registry.npmjs.org/@sondalab/ui-kit/-/ui-kit-{UI_KIT_VERSION}.tgz"
 VENDOR_DIR = (
@@ -36,7 +36,9 @@ VENDOR_DIR = (
     / "packages/roboemot-core/src/roboemot/webui/static/vendor/sondalab-ui-kit"
 )
 MANIFEST = "VENDORED.json"
-# No glass, lens, goo or halftone: the page uses the aurora, press and glitch families only.
+# The page uses the aurora, press and glitch families only (no glass.css, no compositions.css).
+# effects.js still imports the glass, goo and halftone modules when it mounts, so they are vendored
+# (an unused module costs a request, a missing one a console error); no class here activates them.
 FILES = (
     "package.json",
     "tokens.css",
@@ -55,6 +57,11 @@ FILES = (
     "geom.js",
     "colour.js",
     "live-light.js",
+    "glass-lens.js",
+    "glass-text.js",
+    "goo-field.js",
+    "halftone.js",
+    "halftone-core.js",
 )
 
 
