@@ -59,9 +59,11 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       pseudonyms (synthetic messages, low risk).
 - [ ] Pseudonyms residual: registry names refused for aliasing are sent unaliased and the admin
       sees only their count in the log; consider showing which names in the web UI (admin only).
-- [ ] Pseudonyms residual: a JSON key in a tool call or result that equals a registry name
-      ("target" for a record "Target") is aliased in the history sent to a cloud route; nothing
-      leaks, but the model sees a renamed key.
+- [x] Pseudonyms residual: a JSON key in a tool call or result that equals a registry name
+      ("target" for a record "Target") was aliased in the history sent to a cloud route. Now only
+      string values are aliased. The leak check skips a key only when it is a property name of a
+      tool schema in the same request; any other key that holds a name (a tool result keyed by
+      names) blocks the route instead of being renamed.
 - [ ] Pseudonyms residual: a name written with `\uXXXX` escapes for ASCII letters in text that is
       not JSON is neither scrubbed nor caught by the leak check.
 

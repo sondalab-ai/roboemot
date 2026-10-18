@@ -237,6 +237,39 @@ class ConversationWorkerExchange:
         )
 
 
+LOOK_TOOLS = [{"type": "function", "function": {"name": "look_at", "description": "d",
+              "parameters": {"properties": {"target": {"type": "string"}}}}}]  # fmt: skip
+
+
+def test_json_keys_equal_to_a_name_are_kept_and_only_values_are_aliased():
+    p = pseudo("Target", "Marta")
+    history = ConversationWorkerExchange.build({"target": "Marta"}, '{"target": "Target", "n": 1}')
+    out = p.prepare(history, LOOK_TOOLS)
+    call = json.loads(out.messages[0]["tool_calls"][0]["function"]["arguments"])
+    assert call == {"target": alias_of(p, "Marta")}
+    result = json.loads(out.messages[1]["content"])
+    assert result == {"target": alias_of(p, "Target"), "n": 1}
+    assert not p.leaks({"messages": out.messages, "tools": LOOK_TOOLS})
+
+
+def test_a_name_as_a_json_key_that_is_not_a_tool_property_still_blocks_the_request():
+    p = pseudo("Marta")
+    body = {"messages": [{"role": "tool", "tool_call_id": "c", "content": '{"Marta": 1}'}],
+            "tools": LOOK_TOOLS}  # fmt: skip
+    assert p.leaks(body)
+    key_target = pseudo("Target")
+    msgs = [{"role": "tool", "tool_call_id": "c", "content": '{"target": 1}'}]
+    assert key_target.leaks(msgs)  # a bare list of messages has no tool schema to exempt keys
+    assert key_target.leaks({"messages": msgs, "tools": None})
+    assert not key_target.leaks({"messages": msgs, "tools": LOOK_TOOLS})
+
+
+def test_a_property_key_exemption_does_not_cover_values():
+    p = pseudo("Target")
+    msgs = [{"role": "tool", "tool_call_id": "c", "content": '{"target": "Target"}'}]
+    assert p.leaks({"messages": msgs, "tools": LOOK_TOOLS})
+
+
 def test_the_exchange_is_written_without_unicode_escapes():
     msgs = ConversationWorkerExchange.build({"target": "Ömer"}, '{"ok": true}')
     assert "Ömer" in msgs[0]["tool_calls"][0]["function"]["arguments"]

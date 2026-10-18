@@ -5,8 +5,8 @@ everything a cloud route receives, and swapped back in what it sends back:
 
 - out: the system prompt (profile and scene summaries), the history of past turns (the user's own
   words included), the tool schemas (the ``look_at`` enum) and the tool calls and results of
-  earlier rounds (their JSON is parsed, the strings aliased and the JSON written again without
-  ``\\u`` escapes);
+  earlier rounds (their JSON is parsed, the string values aliased, never the keys, and the
+  JSON written again without ``\\u`` escapes);
 - back: the streamed reply text, before the sentence splitter and the speech, and the arguments
   of every tool call, before the executor runs. The history kept in RAM holds the real names.
 
@@ -219,8 +219,47 @@ def _strings(value: Any) -> Iterator[str]:
             yield from _strings(v)
 
 
-def _decoded(text: str) -> Iterator[str]:
-    """The strings and keys of ``text`` when it is a JSON object or list, else nothing."""
+def _property_names(body: Any) -> frozenset[str]:
+    """The property names of the tool schemas in a request body (``properties`` keys, at any
+    depth). They are sent as typed, so a JSON key that equals one exposes nothing new."""
+    names: set[str] = set()
+    tools = body.get("tools") if isinstance(body, dict) else None
+    stack: list[Any] = list(tools) if isinstance(tools, list) else []
+    while stack:
+        node = stack.pop()
+        if isinstance(node, list):
+            stack.extend(node)
+        elif isinstance(node, dict):
+            for key, value in node.items():
+                if key == "properties" and isinstance(value, dict):
+                    names.update(k for k in value if isinstance(k, str))
+                stack.append(value)
+    return frozenset(names)
+
+
+def _without_keys(text: str, exempt: frozenset[str]) -> str:
+    """``text`` as it is, unless it is a JSON object or list holding an ``exempt`` key: then
+    the text is written again with those keys left out (their values stay)."""
+    if not exempt or not text.lstrip().startswith(("{", "[")):
+        return text
+    try:
+        data = json.loads(text)
+
+        def strip(node: Any) -> Any:
+            if isinstance(node, list):
+                return [strip(v) for v in node]
+            if isinstance(node, dict):
+                return {k: strip(v) for k, v in node.items() if k not in exempt}
+            return node
+
+        return json.dumps(strip(data), ensure_ascii=False)
+    except (ValueError, RecursionError):
+        return text
+
+
+def _decoded(text: str, exempt: frozenset[str] = frozenset()) -> Iterator[str]:
+    """The strings and keys of ``text`` when it is a JSON object or list, else nothing. A key
+    in ``exempt`` (a property name of a tool schema in the same request) is not yielded."""
     if not text.lstrip().startswith(("{", "[")):
         return
     try:
@@ -236,7 +275,8 @@ def _decoded(text: str) -> Iterator[str]:
             stack.extend(node)
         elif isinstance(node, dict):
             for key, value in node.items():
-                yield key
+                if key not in exempt:
+                    yield key
                 stack.append(value)
 
 
@@ -516,18 +556,27 @@ class Pseudonyms:
         its strings and keys decoded (``\\u`` escapes). The ``ensure_ascii`` spelling adds
         nothing (every escaped spelling of a name is also caught decoded) and would see word
         boundaries that are not in the text ("eß" as "e\\u00df"). The structure of the
-        request is not text and is not checked: keys, roles, ids, types, tool names, JSON schema
+        request is not text and is not checked: roles, ids, types, tool names, JSON schema
         ``type``, ``format`` and ``required``, image parts (a name there is not a leak, and
         checking it would let a registry name like "User" or "Target" disable every cloud
-        route)."""
+        route). The one JSON key that is not checked is a property name of a tool schema in the
+        same request (a record "Target" and the ``target`` argument of ``look_at``): the schema
+        already sends it as typed. Any other key, such as a name used as a key in a tool result,
+        is checked and blocks the request."""
         with self._lock:
             pattern = self._pattern
         if pattern is None:
             return False
+        exempt = _property_names(body)
         return any(
             _spans(pattern, form)
             for text in _request_text(body)
-            for form in (text, json.dumps(text, ensure_ascii=False)[1:-1], *_decoded(text))
+            for shown in (_without_keys(text, exempt),)
+            for form in (
+                shown,
+                json.dumps(shown, ensure_ascii=False)[1:-1],
+                *_decoded(text, exempt),
+            )
         )
 
     def _aliased(self, value: Any, used: set[str]) -> Any:
@@ -540,14 +589,15 @@ class Pseudonyms:
         return value
 
     def _aliased_json(self, text: str, used: set[str]) -> str:
-        """A JSON text with its strings aliased and written back without ``\\u`` escapes; text
-        that is not a JSON object or list is aliased as plain text."""
+        """A JSON text with its string values aliased (keys stay as they are) and written back
+        without ``\\u`` escapes; text that is not a JSON object or list is aliased as plain
+        text."""
         try:
             data = json.loads(text)
         except (ValueError, RecursionError):
             return self.to_alias(text, used)
         if isinstance(data, (dict, list)):
-            return self.to_alias(json.dumps(self._aliased(data, used), ensure_ascii=False), used)
+            return json.dumps(self._aliased(data, used), ensure_ascii=False)
         return self.to_alias(text, used)
 
     # ------------------------------------------------------------------ requests
