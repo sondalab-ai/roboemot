@@ -105,8 +105,14 @@ EN: dict[str, str] = {
     ),
     "consent_cloud_pseudonyms": (
         "Names, preferences and conversation text may be sent to the cloud language-model "
-        "provider the robot uses, which processes them as personal data. The robot sends "
-        "pseudonyms instead of names to such routes."
+        "provider the robot uses, which processes them as personal data. On such routes the "
+        "robot replaces the names in its registry with neutral aliases. Routes on this "
+        "machine or the home network receive real names, so a gateway on the network that "
+        "forwards to a cloud provider must be marked as cloud by the administrator. A cloud "
+        "speech voice still hears the names it speaks. A nickname, a misspelt name or other "
+        "personal details said aloud are not replaced, nor is a registry name the robot cannot "
+        "alias (one without letters, a word of the alias template or a structural word such "
+        'as "user"): it is sent as written.'
     ),
     "registry_title": "Registry",
     "registry_empty": "Nothing registered yet.",
@@ -329,7 +335,14 @@ IT: dict[str, str] = {
     "consent_cloud_pseudonyms": (
         "Nomi, preferenze e testo delle conversazioni possono essere inviati al fornitore cloud "
         "del modello linguistico usato dal robot, che li tratta come dati personali. Su queste "
-        "rotte il robot invia pseudonimi al posto dei nomi."
+        "rotte il robot sostituisce i nomi presenti nella sua anagrafica con alias neutri. Le "
+        "rotte su questa macchina o sulla rete di casa ricevono i nomi reali, quindi un gateway "
+        "in rete che inoltra a un fornitore cloud deve essere segnato come cloud "
+        "dall'amministratore. Una voce cloud ascolta comunque i nomi che pronuncia. Un "
+        "soprannome, un nome storpiato o altri dati personali detti a voce non vengono "
+        "sostituiti, né un nome dell'anagrafica che il robot non può sostituire (senza lettere, "
+        'una parola del modello di alias o una parola strutturale come "user"): viene '
+        "inviato così com'è."
     ),
     "registry_title": "Anagrafica",
     "registry_empty": "Ancora nulla di registrato.",

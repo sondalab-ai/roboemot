@@ -251,11 +251,12 @@ def test_a_reload_that_adds_a_route_gets_it_probed(data):  # noqa: F811
         cfg = yaml.safe_load(path.read_text())
         cfg["llm_routes"] = [
             ROUTE,
-            {"name": "extra", "base_url": "http://extra.local/v1", "model": "m2"},
+            # a cloud host: a reload that adds a local route needs the admin (SPEC 11A, 12)
+            {"name": "extra", "base_url": "http://extra.example.com/v1", "model": "m2"},
         ]
         path.write_text(yaml.safe_dump(cfg))  # the watcher reloads the file within a second
         assert wait_for(lambda: "extra" in app.monitor.links)
-        assert wait_for(lambda: "extra.local" in probed)
+        assert wait_for(lambda: "extra.example.com" in probed)
     finally:
         stop.set()
         thread.join(15)

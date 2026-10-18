@@ -1,5 +1,5 @@
 """SPEC 8, 11A, 12: guardrails on the child-safety settings, the shared router following the
-configuration, logging pins, pseudonym option refusal."""
+configuration, logging pins, the pseudonym option."""
 
 from __future__ import annotations
 
@@ -79,10 +79,18 @@ def test_a_register_cap_never_exceeds_the_conversation_cap_in_the_prompt():
     assert max_reply_sentences(cfg, cfg.register.teen) == cfg.conversation.max_reply_sentences
 
 
-def test_pseudonyms_to_cloud_is_refused_until_it_is_implemented():
+def test_pseudonyms_to_cloud_loads_and_is_off_by_default():
     assert PrivacyConfig().pseudonyms_to_cloud is False
-    with pytest.raises(ValidationError, match="not implemented in v1 M3"):
-        PrivacyConfig(pseudonyms_to_cloud=True)
+    assert PrivacyConfig(pseudonyms_to_cloud=True).pseudonyms_to_cloud is True
+    assert RoboEmotConfig(privacy={"pseudonyms_to_cloud": True}).privacy.pseudonyms_to_cloud
+
+
+@pytest.mark.parametrize(
+    "template", ["Person", "{label} person", "{label}{label}", "", "Person {label}"]
+)
+def test_a_pseudonym_template_needs_one_label_at_its_end(template):
+    with pytest.raises(ValidationError, match="non-blank prefix"):
+        PrivacyConfig(pseudonym_templates={"en": template})
 
 
 def test_the_hub_follows_a_configuration_change_for_every_consumer():

@@ -40,10 +40,24 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       it instead of the idle interval when the person target or speaker hint goes away. A person or
       speaker engaging again cancels it, and it never runs while resting or in quiet hours
       (`ScanPolicy`, `test_scan.py`).
-- [ ] Pseudonyms to cloud routes (SPEC 12, Data): `privacy.pseudonyms_to_cloud` is refused by the
-      config validator ("not implemented in v1 M3") because requests still carry real names;
-      build the name-to-alias map for `build_messages(names=...)`, send aliases to routes that
-      are not local, and restore the web UI consent text for it.
+- [x] Pseudonyms to cloud routes (SPEC 8, 12 Data): `privacy.pseudonyms_to_cloud` loads; the router
+      gives aliases to routes that are not local (`llm_routes[].locality`, making a route local needs the admin; `auto` is this machine and the home network)
+      and restores names in the reply text and in tool-call arguments. Open: the aliases are handed
+      out afresh after an app restart; personal details that are not registry names are not replaced;
+      registry names refused for aliasing (no letter or digit, a template prefix word, a structural
+      word such as "user") are sent unaliased.
+- [ ] Pseudonyms residual: `persona/llm_traits.py` (`rate_traits`) streams `persona.prompt`
+      without `pseudonyms=`, so a registry name written into the persona prompt reaches a cloud
+      route as typed.
+- [ ] Pseudonyms residual: `llm/conformance.py` sends through `stream_route`, which bypasses the
+      pseudonyms (synthetic messages, low risk).
+- [ ] Pseudonyms residual: registry names refused for aliasing are sent unaliased and the admin
+      sees only their count in the log; consider showing which names in the web UI (admin only).
+- [ ] Pseudonyms residual: a JSON key in a tool call or result that equals a registry name
+      ("target" for a record "Target") is aliased in the history sent to a cloud route; nothing
+      leaks, but the model sees a renamed key.
+- [ ] Pseudonyms residual: a name written with `\uXXXX` escapes for ASCII letters in text that is
+      not JSON is neither scrubbed nor caught by the leak check.
 
 ## Barge-in and skills (M3 slice 6, SPEC 8 stage 8, 11)
 
@@ -54,9 +68,9 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       second Silero and the FFT, `pre_roll_ms`): SPEC 15 "Barge-in on the robot". The real-model
       tests (`pytest -m models -k spoken_stop`, `test_m3_exit.py`) use `say` clips; the onset-to-stop
       latency on the robot is in the voice debug section (`bargein.latency`).
-- [ ] `look_at` names come from the registry display names of what is in view and are sent to the
-      route as tool-schema choices, like the scene summary; route them through the pseudonym map when
-      `privacy.pseudonyms_to_cloud` exists.
+- [x] `look_at` names come from the registry display names of what is in view and are sent to the
+      route as tool-schema choices, like the scene summary; with `privacy.pseudonyms_to_cloud` the
+      cloud route gets aliases in the enum and the executor gets the real name back.
 - [x] `play` offers every label of the manifest's `expression_map` plus the named gestures of its
       `gesture_map` (nod, shake): same renderer, register, persona, minor cap and limiter (SPEC 7, 11).
 - [ ] Fast path: a nod on a spoken "yes"/"sì" and a shake on "no" (the `speech.keyword.yes/no` events
@@ -74,3 +88,8 @@ The persona pieces exist and are tested; these callers wait for the pillars they
 - [ ] The robot, owner and licence items of the M3 report are in SPEC 15 (exit on the robot, barge-in,
       CM4 load, Piper on the robot and its voice licences, wake phrases, OpenAI speech in Italian,
       children's lines). Not repeated here.
+
+## CI and tests
+
+- [ ] `packages/roboemot-reachymini/tests/test_app_conversation.py::test_the_app_offers_the_default_skills_and_wires_barge_in`
+      is timing-flaky under load (failed once in a full run after the slice-2 fix, passes alone).

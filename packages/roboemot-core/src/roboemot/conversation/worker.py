@@ -32,7 +32,7 @@ import logging
 import math
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -41,6 +41,7 @@ from ..config.schema import RegisterParams, RoboEmotConfig, StateEffects
 from ..config.stack import ConfigStack
 from ..llm.hub import RouterHub
 from ..llm.prompt import max_reply_sentences, system_prompt
+from ..llm.pseudonyms import Pseudonyms
 from ..llm.router import (
     ActiveRoute,
     Done,
@@ -138,6 +139,8 @@ class ConversationWorker:
     ``profile(max_chars)`` and ``scene(max_chars)`` the summaries (None when empty).
     ``skills`` are the tools offered to the model (SPEC 11) and ``preferences`` where a
     confirmed preference is written (SPEC 6); without them the model gets no tools.
+    ``known_names()`` gives the registry display names (every record), which
+    ``privacy.pseudonyms_to_cloud`` swaps for aliases on routes that are not local (SPEC 12).
     """
 
     def __init__(
@@ -159,6 +162,7 @@ class ConversationWorker:
         bus: Bus | None = None,
         clock: Callable[[], float] = time.monotonic,
         names: RobotName | None = None,
+        known_names: Callable[[], Iterable[str]] = lambda: (),
     ) -> None:
         self.names = names if names is not None else RobotName()
         self.stack, self.hub, self.speech = stack, hub, speech
@@ -167,6 +171,9 @@ class ConversationWorker:
         self._profile, self._scene, self._speaker = profile, scene, speaker
         self.skills, self.preferences = skills, preferences
         self.bus, self.clock = bus, clock
+        self._known_names = known_names
+        self._pseudonyms = Pseudonyms()
+        self._refused_names = 0  # last count of registry names that cannot be aliased
         self._active_turn: _Turn | None = None
         self._inner: asyncio.Future | None = None
         self._confirm: Pending | None = None
@@ -519,6 +526,13 @@ class ConversationWorker:
         cancel the answer without touching the worker's own shutdown."""
         cfg, conv, minor = turn.cfg, turn.cfg.conversation, turn.minor
         state = self.affect.state(self.clock())
+        try:
+            protect = self._learn_names(turn)  # the summary caps must not cut a name
+        except Exception as exc:  # without the map a cap could cut inside a name: no request
+            turn.outcome = "error"
+            log.warning("conversation: registry names unavailable (%s)", type(exc).__name__)
+            self._say_fallback(turn)
+            return
         messages = build_messages(
             system=system_prompt(
                 cfg,
@@ -533,6 +547,7 @@ class ConversationWorker:
             user_text=turn.utterance.text,
             affect=f"{state.label}, intensity {state.intensity:.1f}",
             summary_max_chars=(conv.profile_summary_max_chars, conv.scene_summary_max_chars),
+            protect=protect,
         )
         splitter = SentenceSplitter(cfg.voice.sentence_max_chars, strip_tags=True)
         turn.stamps["request"] = self.clock()
@@ -583,10 +598,13 @@ class ConversationWorker:
                 or None
             )
             round_from = len(turn.spoken)
+            pseudonyms = self._learn_names(turn)
             if turn.rounds and self._minor_appeared(turn, turn.active):
                 return
             active = turn.active = ActiveRoute()
-            stream = router.stream(messages, tools, minor_present=turn.minor, active=active)
+            stream = router.stream(
+                messages, tools, minor_present=turn.minor, active=active, pseudonyms=pseudonyms
+            )
             calls: list[ToolCall] = []
             results: list[ToolOutcome] = []
             cut = False
@@ -629,6 +647,32 @@ class ConversationWorker:
             turn.exchange_spoken = len(turn.queued)
             messages += turn.exchange[-(len(calls) + 1) :]
 
+    def _learn_names(self, turn: _Turn) -> Pseudonyms | None:
+        """With ``privacy.pseudonyms_to_cloud``: bring the map in line with the registry as it is
+        now (new names get aliases, forgotten ones are dropped) and return it for the router,
+        which applies it to routes that are not local. Read before every request. If the names
+        cannot be read the exception ends the turn: sending without the map would put real names
+        on the cloud route. None when the option is off. A change in the number of registry names
+        that cannot be aliased (they reach a cloud route as typed) is logged for the admin, as a
+        count only."""
+        cfg = turn.cfg
+        if not cfg.privacy.pseudonyms_to_cloud:
+            return None
+        self._pseudonyms.sync(
+            self._known_names(),
+            cfg.privacy.pseudonym_templates,
+            turn.language,
+            cfg.conversation.language,
+        )
+        if self._pseudonyms.refused != self._refused_names:
+            self._refused_names = self._pseudonyms.refused
+            log.warning(
+                "conversation: %d registry names cannot be aliased for cloud routes (no letter, "
+                "a template word or a request keyword); rename them to keep them private",
+                self._refused_names,
+            )
+        return self._pseudonyms
+
     def _offer(self, turn: _Turn) -> list[Skill]:
         """The skills the model may call in this request (visible, listed, allowed with a minor
         present: asked again for every round)."""
@@ -656,7 +700,7 @@ class ConversationWorker:
                     "function": {
                         "name": c.name,
                         "arguments": (
-                            json.dumps(c.arguments)
+                            json.dumps(c.arguments, ensure_ascii=False)
                             if isinstance(c.arguments, dict) and "_raw" not in c.arguments
                             else "{}"
                         ),

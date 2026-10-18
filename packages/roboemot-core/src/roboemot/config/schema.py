@@ -1117,24 +1117,50 @@ class SafetyConfig(Strict):
     )  # fmt: skip
 
 
+PSEUDONYM_LABEL = "{label}"
+
+
 class PrivacyConfig(Strict):
     multimodal_frames: bool = param(
         False, "Allow single-frame image questions to LLM routes", opt_in=True
     )
     pseudonyms_to_cloud: bool = param(
-        False, "Send pseudonyms instead of names to cloud routes (not implemented yet)"
+        False,
+        "Send neutral aliases instead of registry names to routes that are not local, and "
+        "restore the names in the answer and in tool calls; a remote speech voice still hears the "
+        "names it speaks (SPEC 8, 12)",
+        conservative="true",
+    )
+    pseudonym_templates: dict[str, str] = param(
+        {"en": "Person-{label}", "it": "Persona-{label}"},
+        "Alias per language for pseudonyms_to_cloud; {label} becomes A, B, ... Z, AA, ... and "
+        "comes last, after a prefix that ends in punctuation (so the alias is never an ordinary "
+        "word). The language is the one of the turn in which a name is first aliased (SPEC 12)",
+        admin_only=True,
     )
     keep_enrollment_images: bool = param(False, "Keep enrollment face crops", opt_in=True)
     debug_recording: bool = param(False, "Allow time-limited debug recording", opt_in=True)
 
-    @model_validator(mode="after")
-    def _pseudonyms(self) -> PrivacyConfig:
-        if self.pseudonyms_to_cloud:
-            raise ValueError(
-                "privacy.pseudonyms_to_cloud is not implemented in v1 M3: requests would still "
-                "carry real names, so the option is refused rather than silently ignored"
+    @field_validator("pseudonym_templates")
+    @classmethod
+    def _templates(cls, value: dict[str, str]) -> dict[str, str]:
+        if not value:
+            raise ValueError("privacy.pseudonym_templates needs at least one template")
+        for lang, template in value.items():
+            prefix = template[: -len(PSEUDONYM_LABEL)]
+            ok = (
+                template.count(PSEUDONYM_LABEL) == 1
+                and template.endswith(PSEUDONYM_LABEL)
+                and prefix.strip() != ""
+                and not (prefix[-1].isalnum() or prefix[-1].isspace() or prefix[-1] == "_")
             )
-        return self
+            if not ok:
+                raise ValueError(
+                    f"privacy.pseudonym_templates[{lang!r}] must be a non-blank prefix ending in "
+                    f"punctuation (for example 'Person-') followed by {PSEUDONYM_LABEL}, and "
+                    "nothing else, so an alias can never be an ordinary word"
+                )
+        return value
 
 
 # --------------------------------------------------------------------------- identity (SPEC 5, 6)
@@ -2608,6 +2634,15 @@ class LLMRoute(Strict):
         le=2_000_000,
     )
     supports_images: bool = param(False, "Route accepts image_url parts")
+    locality: Literal["auto", "local", "cloud"] = param(
+        "auto",
+        "Whether the route may see real names. auto: local for this machine and the home "
+        "network (loopback, private addresses, *.local, names without a dot), cloud for "
+        "everything else. The address of a gateway says nothing about where it forwards the "
+        "data: a LAN proxy to a cloud provider (LiteLLM) gets real names unless this is set "
+        "to cloud. Only a cloud route gets pseudonyms (privacy.pseudonyms_to_cloud). A change "
+        "that makes a route local (this field, base_url or a new route) needs the admin",
+    )
 
     @model_validator(mode="after")
     def _check(self) -> LLMRoute:
