@@ -32,5 +32,9 @@ reachy-mini-wireless = "roboemot_reachymini.install:ReachyMiniWireless"
 [project.entry-points."roboemot.world"]
 reachy-mini-wireless = "roboemot_reachymini.world:plugin"
 
+# Web UI settings section (robot rows and claimed config paths), keyed by manifest robot.id (SPEC 12).
+[project.entry-points."roboemot.settings"]
+reachy-mini-wireless = "roboemot_reachymini.settings:plugin"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/roboemot_reachymini"]

@@ -38,6 +38,8 @@ section number in commit messages that implement or change behaviour.
 - **Secrets (SPEC 8, 12):** API keys come only from the secret store (`roboemot secrets set`, value never an argument). Never log, repr, report or return a key; a route whose `${secret:name}` cannot be resolved is unavailable, never sent with an empty key.
 - **Diagnostics (SPEC 12A):** robot-specific debug sources are registered in the
   `roboemot.diagnostics` entry-point group under the manifest `robot.id`; core stays robot-agnostic.
+- **Web UI robot section (SPEC 11A, 12):** entry-point group `roboemot.settings`, keyed by `robot.id`; the plugin's
+  `section(stack, manifest)` returns read-only `robot.<id>.*` rows and the config paths it claims. Core never writes a plugin row.
 - **Installer (SPEC 4A, Installer):** same pattern, entry-point group `roboemot.installers`. It
   must leave the robot clean: record only its own changes, pin existing versions, `--no-cache-dir`
   on every pip call, and the dry run never writes.

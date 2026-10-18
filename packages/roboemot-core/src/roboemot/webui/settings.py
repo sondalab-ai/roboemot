@@ -29,7 +29,7 @@ import tempfile
 import threading
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from roboemot import paths
 from roboemot.config.catalogue import (
@@ -53,6 +53,13 @@ from roboemot.config.stack import (
 )
 from roboemot.redact import secret_shaped
 
+from .robot_section import (
+    RobotBlock,
+    SettingsPlugin,
+    build_section,
+    claimed,
+    load_settings_plugin,
+)
 from .setting_clean import (
     WORDS_KIND,
     clean_hooked,
@@ -62,6 +69,9 @@ from .setting_clean import (
     hook_schema,
 )
 from .validation import ValidationError
+
+if TYPE_CHECKING:
+    from roboemot.manifest import Manifest
 
 log = logging.getLogger(__name__)
 SOURCE = "webui"
@@ -227,8 +237,14 @@ class SettingsEditor:
         stack: StackPort,
         *,
         store: Path | None = None,
+        manifest: Manifest | None = None,
+        plugin: SettingsPlugin | None = None,
     ):
         self.stack = stack
+        self.manifest = manifest
+        self._plugin = plugin
+        if plugin is None and manifest is not None:
+            self._plugin = load_settings_plugin(manifest.robot.id)
         self._file = OverridesFile(store) if store else None
         self._overrides: dict[str, Any] = {}
         self._lock = threading.Lock()
@@ -239,6 +255,26 @@ class SettingsEditor:
         """The full field catalogue, ``writable`` true for every non-secret leaf. Private values
         (minors, privacy, location) are hidden."""
         return build_catalogue(self.stack, _writable)
+
+    def robot_split(
+        self, fields: list[FieldDescriptor]
+    ) -> tuple[list[FieldDescriptor], RobotBlock | None]:
+        """Split a ``fields()`` result into the core rows and the robot block. The plugin's
+        read-only rows come first, then the rows of the config paths it claims (same descriptors
+        as before, still written by path); core rows lose the claimed ones. With no plugin, or a
+        failing one, the rows are returned whole and the block is ``None``."""
+        built = build_section(self._plugin, self.stack, self.manifest)
+        if built is None:
+            return fields, None
+        section, robot_id = built
+        mine = [f for f in fields if claimed(f["path"], section.claims)]
+        rest = [f for f in fields if not claimed(f["path"], section.claims)]
+        block: RobotBlock = {
+            "id": robot_id,
+            "title": section.title,
+            "fields": [*section.fields, *mine],
+        }
+        return rest, block
 
     def reveal(self) -> list[FieldDescriptor]:
         """Only the private fields, with their real values (secrets stay redacted). The caller

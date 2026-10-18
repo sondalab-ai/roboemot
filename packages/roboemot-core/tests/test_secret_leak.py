@@ -227,6 +227,38 @@ def test_settings_api_never_shows_a_reference_or_url_credentials(tmp_path):
         srv.stop()
 
 
+def test_robot_plugin_rows_never_leak_a_secret_shaped_value(tmp_path):
+    from roboemot.config.catalogue import descriptor
+    from roboemot.config.stack import ConfigStack
+    from roboemot.webui.settings import SettingsEditor
+    from test_webui_robot_section import BASE, FakePlugin, manifest
+
+    rows = [
+        descriptor(f"{BASE}.token", "text", KEY, default=KEY),
+        descriptor(f"{BASE}.url", "text", "https://u:pw-CANARY-8@host/v1"),
+        descriptor(f"{BASE}.ref", "text", REF),
+    ]
+    stack = ConfigStack(app={"webui": {"bind": "127.0.0.1", "port": 0}})
+    plugin = FakePlugin(rows=rows, claims=())
+    editor = SettingsEditor(stack, manifest=manifest(), plugin=plugin)
+    srv = make_server(FakeService(), Diagnostics(), stack.effective, tmp_path, settings=editor)
+    srv.set_pin(PIN)
+    srv.start()
+    client = Client(srv.port)
+    try:
+        assert client.login().status == 200
+        resp = client.request("GET", "/api/settings")
+        revealed = client.request("POST", "/api/settings/reveal", {"pin": PIN})
+        for blob in (resp.body, revealed.body):
+            for canary in (KEY, "pw-CANARY-8", "cloud_key"):
+                assert canary.encode() not in blob
+        robot = {f["path"]: f for f in resp.json["robot"]["fields"]}
+        assert all(robot[f"{BASE}.{n}"]["secret"] for n in ("token", "url", "ref"))
+        assert all(robot[f"{BASE}.{n}"]["value"] == "***" for n in ("token", "url", "ref"))
+    finally:
+        srv.stop()
+
+
 # ------------------------------------------------------------------ write path (SPEC 8, 11A, 12)
 
 CANARY_URL = "http://alice:pw-CANARY-55@nas.local:8080/v1"
