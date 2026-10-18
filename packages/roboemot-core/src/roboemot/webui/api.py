@@ -28,7 +28,7 @@ from http.cookies import CookieError, SimpleCookie
 from typing import Any, NoReturn, Protocol
 
 from roboemot.config.schema import ROUTE_NAME_MAX_CHARS, RoboEmotConfig, WebUIConfig
-from roboemot.llm.conformance import RouteBudgetExhausted
+from roboemot.llm.conformance import RouteBudgetExhausted, RouteKeyUnavailable
 from roboemot.registry.records import Consent, ConsentError
 
 from . import validation as v
@@ -614,6 +614,8 @@ class WebApi:
             raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "route_busy") from exc
         except RouteBudgetExhausted as exc:
             raise ApiError(HTTPStatus.CONFLICT, "route_budget") from exc
+        except RouteKeyUnavailable as exc:
+            raise ApiError(HTTPStatus.CONFLICT, "route_secret") from exc
         return Response(HTTPStatus.ACCEPTED, {"running": True})
 
     # ------------------------------------------------------------------ catalogue

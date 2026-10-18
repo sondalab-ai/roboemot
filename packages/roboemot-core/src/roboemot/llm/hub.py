@@ -31,11 +31,15 @@ class RouterHub:
         return self._router
 
     def sync(self, cfg: RoboEmotConfig) -> Router:
-        """The router for ``cfg``: rebuilt (budgets kept) when routes or safety changed, the old
-        one if building fails. Safe from any thread."""
+        """The router for ``cfg``: rebuilt (budgets kept) when routes, safety or a route's secret
+        changed, the old one if building fails. Safe from any thread."""
         with self._lock:
             current = self._router
-            if current.routes == cfg.llm_routes and current.safety == cfg.safety:
+            if (
+                current.routes == cfg.llm_routes
+                and current.safety == cfg.safety
+                and not current.secrets_changed()
+            ):
                 return current
             try:
                 fresh = self.make_router(cfg)

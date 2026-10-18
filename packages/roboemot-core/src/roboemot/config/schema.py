@@ -2636,6 +2636,17 @@ class PersonaConfig(Strict):
 
 
 class LLMRoute(Strict):
+    @field_validator("api_key")
+    @classmethod
+    def _no_malformed_secret_reference(cls, value: str) -> str:
+        """A value that starts with ``${`` must be a whole ``${secret:name}``: anything
+        else (``${secret: x}``, ``${SECRET:x}``) would go out as a literal bearer token."""
+        from ..secret_store import SECRET_REF  # lazy: keeps the config package light
+
+        if value.startswith("${") and not SECRET_REF.match(value):
+            raise ValueError("api_key starting with ${ must be ${secret:name}")
+        return value
+
     name: str = param("", "Route name")
     base_url: str = param("", "OpenAI-compatible base URL")
     api_key: str = param("none", "API key or ${secret:name}")

@@ -25,6 +25,7 @@ import httpx
 from openai import APIConnectionError, APIStatusError, APITimeoutError
 
 from ..config.schema import LLMCheckConfig, LLMRoute, SafetyConfig
+from ..secret_store import no_secrets
 from .router import Done, FirstToken, Router, TextDelta, ToolCall
 
 log = logging.getLogger(__name__)
@@ -57,6 +58,11 @@ class RouteBudgetExhausted(RuntimeError):
     """The route's daily token budget is spent: the check would exceed it, so it is refused."""
 
 
+class RouteKeyUnavailable(RuntimeError):
+    """The route's ``${secret:name}`` key cannot be read: nothing is sent. The message names
+    the secret and the reason, never a value."""
+
+
 @dataclass
 class CheckResult:
     name: str
@@ -73,7 +79,7 @@ class RouteReport:
     checks: list[CheckResult] = field(default_factory=list)
     first_token_s: float | None = None
     tokens: int = 0
-    error: str = ""  # "timeout", "budget" or "failed": the check did not complete
+    error: str = ""  # "timeout", "budget", "secret" or "failed": the check did not complete
 
     @property
     def ok(self) -> bool:
@@ -195,18 +201,22 @@ async def check_route(
     *,
     settings: LLMCheckConfig | None = None,
     router: Router | None = None,
-    secrets: Callable[[str], str] = lambda name: "",
+    secrets: Callable[[str], str] = no_secrets,
     http_client_factory: Callable[[], httpx.AsyncClient] | None = None,
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
 ) -> RouteReport:
     """Run the four checks against ``route`` only. Pass the app's ``router`` to share its daily
     budgets; otherwise a private one is built from ``safety``, ``secrets`` and the client
-    factory. Raises :class:`RouteBudgetExhausted` before sending anything when the budget is
-    spent. Failures of the route become ``fail`` results, never exceptions."""
+    factory. Raises :class:`RouteKeyUnavailable` when the route's secret cannot be read and
+    :class:`RouteBudgetExhausted` when the budget is spent, both before anything is sent.
+    Failures of the route become ``fail`` results, never exceptions."""
     settings = settings or LLMCheckConfig()
     router = router or Router(
         [route], safety, secrets=secrets, http_client_factory=http_client_factory
     )
+    problem = router.key_problem(route)
+    if problem is not None:
+        raise RouteKeyUnavailable(f"route {route.name}: {problem}")
     spent = router.used(route.name)
     if spent >= route.daily_token_budget:
         raise RouteBudgetExhausted(f"route {route.name}: daily token budget is spent")
