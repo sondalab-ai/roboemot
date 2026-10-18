@@ -1117,24 +1117,50 @@ class SafetyConfig(Strict):
     )  # fmt: skip
 
 
+PSEUDONYM_LABEL = "{label}"
+
+
 class PrivacyConfig(Strict):
     multimodal_frames: bool = param(
         False, "Allow single-frame image questions to LLM routes", opt_in=True
     )
     pseudonyms_to_cloud: bool = param(
-        False, "Send pseudonyms instead of names to cloud routes (not implemented yet)"
+        False,
+        "Send neutral aliases instead of registry names to routes that are not local, and "
+        "restore the names in the answer and in tool calls; a remote speech voice still hears the "
+        "names it speaks (SPEC 8, 12)",
+        conservative="true",
+    )
+    pseudonym_templates: dict[str, str] = param(
+        {"en": "Person-{label}", "it": "Persona-{label}"},
+        "Alias per language for pseudonyms_to_cloud; {label} becomes A, B, ... Z, AA, ... and "
+        "comes last, after a prefix that ends in punctuation (so the alias is never an ordinary "
+        "word). The language is the one of the turn in which a name is first aliased (SPEC 12)",
+        admin_only=True,
     )
     keep_enrollment_images: bool = param(False, "Keep enrollment face crops", opt_in=True)
     debug_recording: bool = param(False, "Allow time-limited debug recording", opt_in=True)
 
-    @model_validator(mode="after")
-    def _pseudonyms(self) -> PrivacyConfig:
-        if self.pseudonyms_to_cloud:
-            raise ValueError(
-                "privacy.pseudonyms_to_cloud is not implemented in v1 M3: requests would still "
-                "carry real names, so the option is refused rather than silently ignored"
+    @field_validator("pseudonym_templates")
+    @classmethod
+    def _templates(cls, value: dict[str, str]) -> dict[str, str]:
+        if not value:
+            raise ValueError("privacy.pseudonym_templates needs at least one template")
+        for lang, template in value.items():
+            prefix = template[: -len(PSEUDONYM_LABEL)]
+            ok = (
+                template.count(PSEUDONYM_LABEL) == 1
+                and template.endswith(PSEUDONYM_LABEL)
+                and prefix.strip() != ""
+                and not (prefix[-1].isalnum() or prefix[-1].isspace() or prefix[-1] == "_")
             )
-        return self
+            if not ok:
+                raise ValueError(
+                    f"privacy.pseudonym_templates[{lang!r}] must be a non-blank prefix ending in "
+                    f"punctuation (for example 'Person-') followed by {PSEUDONYM_LABEL}, and "
+                    "nothing else, so an alias can never be an ordinary word"
+                )
+        return value
 
 
 # --------------------------------------------------------------------------- identity (SPEC 5, 6)
@@ -1576,6 +1602,17 @@ class WorldScanConfig(Strict):
         le=3600,
     )
     jitter_s: float = param(30.0, "Random +- offset on the idle interval", unit="s", ge=0, le=1800)
+    target_lost_delay_s: float = param(
+        8.0,
+        "Time after the person target (or speaker hint) is lost before the robot looks around, "
+        "instead of the full idle interval (before the energy trait)",
+        unit="s",
+        ge=1,
+        le=600,
+    )
+    target_lost_jitter_s: float = param(
+        3.0, "Random +- offset on the target-lost delay", unit="s", ge=0, le=300
+    )
     dwell_s: float = param(1.0, "Pause at each sweep waypoint", unit="s", ge=0.1, le=30)
     overlap_deg: float = param(
         15.0, "Overlap between the views of neighbouring waypoints", unit="deg", ge=0, le=60
@@ -1623,6 +1660,8 @@ class WorldScanConfig(Strict):
     def _jitter_inside_interval(self) -> WorldScanConfig:
         if self.jitter_s >= self.idle_interval_s:
             raise ValueError("jitter_s must be smaller than idle_interval_s")
+        if self.target_lost_jitter_s > self.target_lost_delay_s:
+            raise ValueError("target_lost_jitter_s must not exceed target_lost_delay_s")
         return self
 
 
@@ -2012,6 +2051,59 @@ class BargeInConfig(Strict):
         "to whole VAD frames",
         unit="ms", ge=32, le=150,
     )  # fmt: skip
+    onset_enabled: bool = param(
+        True,
+        "Second, faster path to a barge-in for words that start with a fricative (English "
+        '"stop": a 130 ms /s/ that the VAD scores at 0.4 to 0.7 until the vowel): a run of '
+        "frames that are fricative-like (mostly high-frequency energy) and scored at or above "
+        "onset_threshold, or at or above threshold, lasting onset_min_speech_ms cuts the robot "
+        "off without waiting for threshold. Counted from the first sound, so SPEC 13 (200 ms) "
+        "holds for every language",
+    )
+    onset_threshold: float = param(
+        0.4,
+        "Speech probability a frame needs to count towards the onset path (at most threshold). "
+        "Measured on the M3 clips: the /s/ of English \"stop\" scores 0.35 to 0.9; clicks, "
+        "coughs, claps and white noise score under 0.25",
+        ge=0.05, le=0.99,
+    )  # fmt: skip
+    onset_hf_cutoff_hz: float = param(
+        2000.0,
+        "Frequency above which energy counts as high-frequency for the onset path's "
+        "fricative test",
+        unit="Hz", ge=500, le=7000,
+    )  # fmt: skip
+    onset_hf_min_ratio: float = param(
+        0.7,
+        "Share of a frame's energy above onset_hf_cutoff_hz that a frame scored between "
+        "onset_threshold and threshold needs to count on the onset path: /s/ reads 0.84 to "
+        "1.0, voiced speech 0 to 0.1. Keeps quiet voiced sounds on the stricter path",
+        ge=0.0, le=1.0,
+    )  # fmt: skip
+    onset_min_level_db: float = param(
+        -46.0,
+        "Level (RMS, dBFS) a frame scored between onset_threshold and threshold needs on the "
+        "onset path: the echo of the robot's own \"s\" at a low echo gain sits near the "
+        "microphone noise floor, where no correlation can tell it from a user. A user's /s/ "
+        "reads -40 to -29 dBFS",
+        unit="dB", ge=-80, le=-20,
+    )  # fmt: skip
+    onset_min_speech_ms: float = param(
+        64.0,
+        "Continuous onset-path frames needed before the cut; rounded up to whole VAD frames. The "
+        "stop follows within one microphone chunk of this. Like min_speech_ms it adds directly to "
+        "the onset-to-stop latency: keep it at or below min_speech_ms, or the onset path is "
+        "never the faster one",
+        unit="ms", ge=32, le=150,
+    )  # fmt: skip
+    onset_echo_corr_max: float = param(
+        0.4,
+        "Echo guard of the onset path (at most echo_corr_max): stricter because a frame the VAD "
+        "scores under threshold is weaker evidence than one it scores over it. A fricative-like "
+        "frame must pass it in the full band and in the band above onset_hf_cutoff_hz, where "
+        "its evidence is and the robot's low-frequency voice does not hide a user's /s/",
+        ge=0.1, le=1.0,
+    )  # fmt: skip
     echo_corr_max: float = param(
         0.6,
         "Residual-echo guard for robots without hardware AEC: a stretch of microphone audio "
@@ -2071,6 +2163,14 @@ class BargeInConfig(Strict):
         "The keyword recognizer stops after this much audio without a candidate frame",
         unit="ms", ge=64, le=2000,
     )  # fmt: skip
+
+    @model_validator(mode="after")
+    def _onset_is_not_stricter_than_the_main_path(self) -> BargeInConfig:
+        if self.onset_threshold > self.threshold:
+            raise ValueError("barge_in.onset_threshold must not exceed threshold")
+        if self.onset_echo_corr_max > self.echo_corr_max:
+            raise ValueError("barge_in.onset_echo_corr_max must not exceed echo_corr_max")
+        return self
 
     @model_validator(mode="after")
     def _reference_covers_the_check(self) -> BargeInConfig:
@@ -2534,6 +2634,15 @@ class LLMRoute(Strict):
         le=2_000_000,
     )
     supports_images: bool = param(False, "Route accepts image_url parts")
+    locality: Literal["auto", "local", "cloud"] = param(
+        "auto",
+        "Whether the route may see real names. auto: local for this machine and the home "
+        "network (loopback, private addresses, *.local, names without a dot), cloud for "
+        "everything else. The address of a gateway says nothing about where it forwards the "
+        "data: a LAN proxy to a cloud provider (LiteLLM) gets real names unless this is set "
+        "to cloud. Only a cloud route gets pseudonyms (privacy.pseudonyms_to_cloud). A change "
+        "that makes a route local (this field, base_url or a new route) needs the admin",
+    )
 
     @model_validator(mode="after")
     def _check(self) -> LLMRoute:
@@ -2907,6 +3016,11 @@ with warnings.catch_warnings():
         expression_map: dict[str, ExpressionEntry] = param(
             {}, "SPEC 7, 11A: affect label to keyframes per channel; the robot manifest ships it"
         )
+        gesture_map: dict[str, ExpressionEntry] = param(
+            {},
+            "SPEC 7, 11: named gesture (nod, shake) to keyframes per channel, for the play skill; "
+            "names are not affect labels; the robot manifest ships it",
+        )
         circadian: CircadianConfig = param({}, "SPEC 7A")
         circadian_motion: CircadianMotion = param(
             {}, "SPEC 7A: yawn, stretch and rest posture; the robot manifest ships them"
@@ -2956,6 +3070,16 @@ with warnings.catch_warnings():
                 raise ValueError(
                     f"expression_map has labels {unknown} that are not in affect.labels "
                     f"{sorted(self.affect.labels)}"
+                )
+            return self
+
+        @model_validator(mode="after")
+        def _gesture_names_are_not_labels(self) -> RoboEmotConfig:
+            clash = sorted(set(self.gesture_map) & set(self.affect.labels))
+            if clash:
+                raise ValueError(
+                    f"gesture_map names {clash} are affect labels; "
+                    "the play skill offers one flat list of names"
                 )
             return self
 

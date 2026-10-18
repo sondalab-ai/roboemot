@@ -247,7 +247,7 @@ def resolve_preset(name: str, preset_dirs: Iterable[Path], _seen: tuple[str, ...
 # ----------------------------------------------------------------------------- guardrails
 
 MANIFEST_BEHAVIOUR_KEYS = frozenset(
-    {"expression_map", "circadian_motion"}
+    {"expression_map", "gesture_map", "circadian_motion"}
 )  # what a robot manifest may set
 PERSON_SECTIONS = ("register", "voice", "conversation", "persona.traits")
 
@@ -320,7 +320,29 @@ def violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Viol
     for path, (ref, meta) in base.items():  # an admin-only entry (a language's list) removed
         if meta.get("admin_only") and path not in cand and not path.startswith(NEW_RULE_REFUSED):
             found.append(Violation("admin", path, ref, None))
-    return found + reflex_violations(approved, candidate)
+    return found + reflex_violations(approved, candidate) + locality_violations(approved, candidate)
+
+
+def locality_violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Violation]:
+    """Routes that would see real names without the approval having trusted them (SPEC 8, 11A,
+    12). A route is local by its effective locality (``route_is_local``: the ``locality``
+    field and the host together), so a new ``auto`` route on a LAN host, a ``base_url`` moved
+    to a ``*.local`` host and ``locality: local`` are all the same loosening. A local route
+    needs an approved route of the same name that was local with the same ``base_url``;
+    anything that makes a route cloud is stricter and passes."""
+    from ..llm.pseudonyms import route_is_local  # lazy: llm imports the config package
+
+    trusted = {r.name: r.base_url for r in approved.llm_routes if route_is_local(r)}
+    return [
+        Violation(
+            "privacy",
+            f"llm_routes.{r.name}.locality",
+            f"local {trusted[r.name]}" if r.name in trusted else "cloud or absent",
+            f"local {r.base_url} ({r.locality})",
+        )
+        for r in candidate.llm_routes
+        if route_is_local(r) and trusted.get(r.name) != r.base_url
+    ]
 
 
 def reflex_violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Violation]:
