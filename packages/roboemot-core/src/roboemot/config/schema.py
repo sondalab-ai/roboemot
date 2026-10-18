@@ -3021,6 +3021,13 @@ class WebUIConfig(Strict):
         le=500,
         conservative="lower",
     )
+    settings_text_max_chars: int = param(
+        4000,
+        "Longest free text (a prompt, a JSON value) the settings editor accepts (SPEC 11A)",
+        ge=1,
+        le=20000,
+        conservative="lower",
+    )
     settings_list_max_items: int = param(
         64,
         "Most wake phrases or blocklist entries per language the settings editor accepts "

@@ -103,6 +103,7 @@ BEHAVIOUR_MODULES = [
     "webui/auth.py",
     "webui/server.py",
     "webui/settings.py",
+    "webui/setting_clean.py",
     "config/catalogue.py",
     "webui/validation.py",
 ]

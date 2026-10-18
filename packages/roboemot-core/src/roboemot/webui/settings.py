@@ -1,16 +1,21 @@
-"""The web-editable settings: an allowlist, validation and the write path (SPEC 11A, 12).
+"""The web-editable settings: the generic write path over the field catalogue (SPEC 11A, 12).
 
-``SETTINGS`` is the one place that says what the web UI may change (the generic write path
-replaces it later). A path that no entry expands to is refused. What the UI may *see* is the
-whole field catalogue (``roboemot.config.catalogue``): ``fields()`` returns it, with ``writable``
-set from ``SETTINGS``, and secrets are never writable. The per-kind cleaners below are the
-per-path validator hooks of the write path. Values are cleaned here (length, count and
-character limits come from ``webui.settings_*`` and ``voice.name_max_chars``), then written
-through ``ConfigStack.set`` on the runtime layer with no expiry, so the stack's guardrails,
-audit (source ``webui:<ip>``) and hot reload apply unchanged. Each accepted edit is also kept
-in a 0600 overrides file in the data folder and replayed through the same checks at startup
-(``restore``); the app YAML is never touched. The PIN confirmation is the caller's job
-(``WebApi``); this module never sees a PIN or a secret.
+Every catalogue leaf that is not a secret can be written (``fields()`` marks it ``writable``);
+a path that is not such a leaf is refused. A value is cleaned from its descriptor (kind and
+limits, ``setting_clean.clean_value``) or by the per-path hook that owns it (wake word, child-safe
+lines, wake phrases, blocklist: ``setting_clean.HOOKS``), then written through
+``ConfigStack.set``, so pydantic validation, the guardrails, audit (source ``webui:<ip>``) and hot
+reload apply unchanged. A secret field and a secret-shaped value (also inside an added entry) are
+never accepted.
+
+Layers: runtime by default. When the stack refuses a change only because it loosens a safety
+value (a field's own direction; never the reflex, locality or secret rules, which stay refused
+on both layers), it is retried once on the app layer, which writes the app YAML and the audit.
+Entries of a merged list are addressed by identity; entries can be added, and removed when only the
+runtime layer holds them (a lower layer cannot be masked by a merge, so that is refused). Each
+accepted runtime edit is kept in a 0600 overrides file in the data folder and replayed as one batch
+at startup (``restore``). The PIN is the caller's job (``WebApi``); this module never sees a PIN
+or a secret.
 """
 
 from __future__ import annotations
@@ -19,29 +24,41 @@ import contextlib
 import json
 import logging
 import os
-import re
 import stat
 import tempfile
 import threading
-import unicodedata
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
 from roboemot import paths
-from roboemot.config.catalogue import FieldDescriptor, build_catalogue
-from roboemot.config.schema import MinorLines, RoboEmotConfig
+from roboemot.config.catalogue import (
+    CONTAINERS,
+    ENTRY_KINDS,
+    FieldDescriptor,
+    build_catalogue,
+)
+from roboemot.config.schema import RoboEmotConfig
 from roboemot.config.stack import (
+    KEYED_LISTS,
     ConfigError,
     GuardrailError,
-    field_meta,
+    deep_merge,
+    entry_identity,
     get_path,
+    ident_fields,
+    keyed_index,
+    keyed_ref,
+    set_path,
 )
-from roboemot.conversation.output_filter import OutputFilter
 from roboemot.redact import secret_shaped
-from roboemot.voice.keywords import normalise
-from roboemot.voice.robot_name import sanitise_name
 
+from .setting_clean import (
+    clean_hooked,
+    clean_key,
+    clean_value,
+    hook_for,
+    hook_schema,
+)
 from .validation import ValidationError
 
 log = logging.getLogger(__name__)
@@ -49,17 +66,18 @@ SOURCE = "webui"
 RESTORE_SOURCE = "webui:restore"
 FILE_VERSION = 1
 MAX_FILE_BYTES = 1_000_000  # bounds what a damaged or hostile file can make the app read
-NAME_PLACEHOLDER = "{name}"
-PHRASE_PATTERN = re.compile(r"[^\W_]+(?: [^\W_]+)*")
-WORD_PATTERN = re.compile(r"[^\W_]+(?: [^\W_]+)*\*?")
-LINE_BREAKS = "\u2028\u2029"  # categories Zl and Zp: line breaks the C* check does not cover
 FILE_MODE = 0o600
 GROUP_OTHER_BITS = 0o077
-LIST_KIND, NAME_KIND, LINE_KIND, WORDS_KIND = "phrases", "name", "line", "words"
+NOT_WRITABLE = frozenset({"schema_version"})
+LANGUAGE_MAPS = frozenset({"voice.keywords", "safety.minor_lines"})  # keyed by language
+REFUSED_CHECKS = frozenset({"reflex", "locality", "secret"})  # never granted, on any layer
+APP_FILE = "app"
 
 
 class StackPort(Protocol):
     """The part of ``roboemot.config.ConfigStack`` this module uses."""
+
+    files: dict[str, Path]
 
     def effective(self) -> RoboEmotConfig: ...
 
@@ -67,52 +85,35 @@ class StackPort(Protocol):
 
     def source_of(self, path: str, tree: dict[str, Any] | None = None) -> str: ...
 
-    def set(
-        self, key: str, value: Any, *, source: str, admin: bool, must_exist: bool
-    ) -> RoboEmotConfig: ...
+    def set(self, key: str, value: Any, **kwargs: Any) -> RoboEmotConfig: ...
+
+    def set_many(self, changes: dict[str, Any], **kwargs: Any) -> RoboEmotConfig: ...
+
+    def preview(self, changes: dict[str, Any]) -> RoboEmotConfig: ...
+
+    def clear(self, key: str, **kwargs: Any) -> bool: ...
 
 
 class SettingNotAllowed(LookupError):
-    """The path is not on the allowlist."""
+    """The path is not a writable catalogue field (or entry container)."""
 
 
-@dataclass(frozen=True)
-class Setting:
-    """An allowlist entry. ``template`` may hold ``{lang}``, expanded over the keys of the
-    dict at ``container`` in the effective config (a language is never created from the web)."""
-
-    template: str
-    kind: str
-    container: str | None = None
-    allow_empty: bool = False
+def _writable(path: str) -> bool:
+    return path not in NOT_WRITABLE
 
 
-SETTINGS: tuple[Setting, ...] = (
-    Setting("voice.keywords.{lang}.wake_phrases", LIST_KIND, "voice.keywords"),
-    Setting("voice.wake_word", NAME_KIND),
-    *(
-        Setting(
-            f"safety.minor_lines.{{lang}}.{name}",
-            LINE_KIND,
-            "safety.minor_lines",
-            allow_empty=name == "robot_unnamed",
-        )
-        for name in MinorLines.model_fields
-    ),
-    Setting("safety.minor_output_blocklist.{lang}", WORDS_KIND, "safety.minor_output_blocklist"),
-)
+def plain(value: Any) -> Any:
+    """``value`` as plain JSON types (models dumped, tuples as lists)."""
+    return json.loads(json.dumps(value, default=lambda o: o.model_dump(mode="json")))
 
 
-def expand(cfg: RoboEmotConfig) -> dict[str, Setting]:
-    """Every editable path of ``cfg`` mapped to its allowlist entry."""
-    out: dict[str, Setting] = {}
-    for entry in SETTINGS:
-        if entry.container is None:
-            out[entry.template] = entry
-            continue
-        for lang in get_path(cfg, entry.container):
-            out[entry.template.format(lang=lang)] = entry
-    return out
+def loosening_only(exc: GuardrailError) -> bool:
+    """Whether every refusal is a field's own safety direction: the only case that may be retried
+    on the app layer. Reflex, locality and secret findings, privacy and admin ones, and an error
+    without structured findings are not."""
+    return bool(exc.violations) and all(
+        v.kind == "safety" and v.check == "field" for v in exc.violations
+    )
 
 
 class OverridesFile:
@@ -182,27 +183,42 @@ class OverridesFile:
             raise
 
 
-def _text(value: object, field: str = "value") -> str:
-    if not isinstance(value, str):
-        raise ValidationError("value_type", field)
-    return unicodedata.normalize("NFC", value).strip()
+def okey(tree: dict[str, Any], path: str) -> str:
+    """The key an edit has in the overrides file: ``path``, except that an index into a merged
+    list becomes ``list[{identity}].rest``, so a replay finds the same entry wherever it sits."""
+    ref = keyed_ref(tree, path, named=True)
+    if ref is None:
+        return path
+    return entry_key(*ref)
 
 
-def _blocked_by_filter(cfg: RoboEmotConfig, text: str) -> bool:
-    """Whether the minors output filter (the effective blocklist) blocks ``text``."""
-    return OutputFilter(cfg.safety.minor_output_blocklist).blocked(text)
+def entry_key(list_path: str, ident: dict[str, Any], rest: str = "") -> str:
+    """``list[{identity}]`` plus ``.rest`` when given: the file key of a merged-list entry."""
+    text = json.dumps(ident, sort_keys=True, separators=(",", ":"))
+    return f"{list_path}[{text}]" + (f".{rest}" if rest else "")
 
 
-def _string_list(value: object) -> list[str]:
-    if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
-        raise ValidationError("value_type", "value")
-    if any(unicodedata.category(c).startswith("C") for x in value for c in x):
-        raise ValidationError("phrase_invalid", "value")
-    return [" ".join(unicodedata.normalize("NFC", x).split()) for x in value]
+def parse_okey(key: str) -> tuple[str, dict[str, Any], str] | None:
+    """Inverse of ``okey`` for a merged-list key: ``(list path, identity, rest)``, else ``None``."""
+    for list_path in KEYED_LISTS:
+        if not key.startswith(list_path + "["):
+            continue
+        try:
+            ident, end = json.JSONDecoder().raw_decode(key, len(list_path) + 1)
+        except ValueError:
+            return None
+        if not isinstance(ident, dict) or key[end : end + 1] != "]":
+            return None
+        rest = key[end + 1 :]
+        if rest and not rest.startswith("."):
+            return None
+        return list_path, ident, rest[1:]
+    return None
 
 
 class SettingsEditor:
-    """Lists the allowlisted settings and applies one validated change."""
+    """Lists the writable settings and applies validated changes: one value, an entry added or
+    removed, or a runtime value reset."""
 
     def __init__(
         self,
@@ -215,37 +231,38 @@ class SettingsEditor:
         self._overrides: dict[str, Any] = {}
         self._lock = threading.Lock()
 
+    # ------------------------------------------------------------------ reading
+
     def fields(self) -> list[FieldDescriptor]:
-        """The full field catalogue, ``writable`` true for the allowlisted, non-secret paths.
-        Private values (minors, privacy, location) are hidden."""
-        allowed = expand(self.stack.effective())
-        return build_catalogue(self.stack, lambda path: path in allowed)
+        """The full field catalogue, ``writable`` true for every non-secret leaf. Private values
+        (minors, privacy, location) are hidden."""
+        return build_catalogue(self.stack, _writable)
 
     def reveal(self) -> list[FieldDescriptor]:
         """Only the private fields, with their real values (secrets stay redacted). The caller
         has verified the PIN."""
-        allowed = expand(self.stack.effective())
-        every = build_catalogue(self.stack, lambda path: path in allowed, reveal_private=True)
+        every = build_catalogue(self.stack, _writable, reveal_private=True)
         return [f for f in every if f["private"]]
 
     def describe(self, fields: list[FieldDescriptor] | None = None) -> list[dict[str, Any]]:
-        """The writable fields in the shape the current page renders: catalogue value and
-        default, JSON-Schema-style limits and admin flag. Goes away with the new page. Pass the
-        ``fields()`` result to avoid building the catalogue twice."""
+        """The writable fields the current page can render (the hooked ones: wake word, phrases,
+        child-safe lines, blocklist) in its shape: catalogue value and default, JSON-Schema-style
+        limits and admin flag. Goes away with the new page. Pass the ``fields()`` result to avoid
+        building the catalogue twice."""
         cfg = self.stack.effective()
-        entries = expand(cfg)
         rows = []
         for field in sorted(
             fields if fields is not None else self.fields(), key=lambda f: f["path"]
         ):
-            if not field["writable"]:
+            hook = hook_for(field["path"])
+            if not field["writable"] or hook is None:
                 continue
             rows.append(
                 {
                     "path": field["path"],
                     "value": field["value"],
                     "default": field["default"],
-                    "schema": self._schema(entries[field["path"]], cfg),
+                    "schema": hook_schema(hook, field["path"], cfg),
                     "description": field["description"],
                     "needs_admin": field["admin_only"],
                     "private": field["private"],
@@ -253,28 +270,128 @@ class SettingsEditor:
             )
         return rows
 
+    # ------------------------------------------------------------------ writing
+
     def change(self, path: object, value: object, source: str = SOURCE) -> dict[str, Any]:
         """Validate ``value`` for ``path``, write it and keep it in the overrides file; the
         stack's guardrails have the last word.
 
         Raises ``SettingNotAllowed``, ``ValidationError`` (code, no value echoed) and the
-        stack's ``GuardrailError`` / ``ConfigError``. An unchanged value writes nothing.
-        ``persisted`` is False when the file could not be written (the edit is live until
-        restart).
+        stack's ``GuardrailError`` / ``ConfigError``. An unchanged value writes nothing. The result
+        names the ``layer`` written (``runtime``, or ``app`` for a safety loosening), whether
+        the field ``restart_required`` and ``persisted`` (False when the file could not be
+        written: the edit is live until restart).
         """
         with self._lock:
-            result = self._apply(path, value, source)
-            if result["changed"]:
-                self._overrides[result["path"]] = result["value"]
+            result = self._apply(path, value, source, self._rows(), self.stack.effective())
+            key = result.pop("okey", None)
+            if result["changed"] and result["layer"] == "runtime":
+                self._remember(key, result["value"])
                 result["persisted"] = self._persist()
+            elif result["changed"] and self._overrides.pop(key, None) is not None:
+                result["persisted"] = self._persist()  # the app value replaced a runtime edit
             return result
 
-    def restore(self) -> None:
-        """Replay the overrides file through the same checks as a live edit (at startup).
+    def add_entry(
+        self, path: object, key: object, value: object, source: str = SOURCE
+    ) -> dict[str, Any]:
+        """Add an entry to the collection at ``path`` (a dict of models by ``key``, a keyed list
+        by the identity inside ``value``) on the runtime layer. A language is never added.
 
-        An unsafe or malformed file is ignored. An entry that is off the allowlist, no longer
-        valid, refused by a guardrail or for a language that is gone is dropped; warnings name
-        the path only. The file is rewritten without dropped entries.
+        Raises like ``change``; ``entry_exists`` when the key or identity is taken,
+        ``entry_invalid`` for a field the entry type does not have or a secret field.
+        """
+        with self._lock:
+            rows, cfg = self._rows(), self.stack.effective()
+            box = rows.get(path) if isinstance(path, str) else None
+            if (
+                box is None
+                or box["kind"] not in ENTRY_KINDS
+                or box["secret"]
+                or box["path"] in LANGUAGE_MAPS
+            ):
+                raise SettingNotAllowed("path")
+            if secret_shaped([key, value]):
+                raise ValidationError("value_type", "value")
+            entry = self._clean_entry(box, value, cfg)
+            tree = self.stack.merged_tree()
+            if box["kind"] == "dict_of_model":
+                name = clean_key(key, cfg)
+                if name in get_path(tree, box["path"]):
+                    raise ValidationError("entry_exists", "key")
+                target, stored, written = f"{box['path']}.{name}", f"{box['path']}.{name}", entry
+            else:
+                target, stored, written = self._list_add(box, entry, tree, cfg)
+            self.stack.set(
+                target, written, source=source, admin=True, layer="runtime", refuse=REFUSED_CHECKS
+            )
+            self._overrides[stored] = entry
+            return {
+                "path": box["path"],
+                "changed": True,
+                "layer": "runtime",
+                "restart_required": self._restart(box, entry_rows=box["entry"]),
+                "persisted": self._persist(),
+            }
+
+    def remove_entry(self, path: object, source: str = SOURCE) -> dict[str, Any]:
+        """Remove the entry at ``path`` (``container.key`` or a list entry) if only the runtime
+        layer holds it. A lower layer's entry cannot be masked (the merge only adds and overrides),
+        so that raises ``entry_in_lower_layer``; an unknown entry raises ``SettingNotAllowed``."""
+        with self._lock:
+            rows, tree = self._rows(), self.stack.merged_tree()
+            box_path, _, name = path.rpartition(".") if isinstance(path, str) else ("", "", "")
+            box = rows.get(box_path)
+            if box is None or box["kind"] not in ENTRY_KINDS or name not in box["value"]:
+                raise SettingNotAllowed("path")
+            base = self.stack.merged_tree(include_runtime=False)
+            if self._in_tree(base, box, path, tree):
+                raise ValidationError("entry_in_lower_layer", "path")
+            key = okey(tree, path)
+            self.stack.clear(path, source=source, subtree=True)
+            for stored in [k for k in self._overrides if k == key or k.startswith(key + ".")]:
+                del self._overrides[stored]
+            return {
+                "path": path,
+                "changed": True,
+                "layer": "runtime",
+                "restart_required": self._restart(box, entry_rows=box["entry"]),
+                "persisted": self._persist(),
+            }
+
+    def reset(self, path: object, source: str = SOURCE) -> dict[str, Any]:
+        """Drop the runtime value of the leaf ``path`` so the lower layer shows again, and its
+        entry in the overrides file. A value of the app layer is not touched. ``changed`` is False
+        when there was no runtime value; a field inside an entry added at runtime cannot be reset
+        (``not_resettable``)."""
+        with self._lock:
+            rows = self._rows()
+            row = rows.get(path) if isinstance(path, str) else None
+            if row is None or row["kind"] in CONTAINERS or not row["writable"]:
+                raise SettingNotAllowed("path")
+            key = okey(self.stack.merged_tree(), path)
+            if self._added_parent(key) is not None:
+                raise ValidationError("not_resettable", "path")
+            changed = self.stack.clear(path, source=source)
+            self._overrides.pop(key, None)
+            return {
+                "path": path,
+                "changed": changed,
+                "value": plain(get_path(self.stack.effective(), path)),
+                "layer": "runtime",
+                "restart_required": self._restart(row),
+                "persisted": self._persist() if changed else True,
+            }
+
+    def restore(self) -> None:
+        """Replay the overrides file at startup as one batch: every entry is cleaned against the
+        configuration the whole file would give and the stack validates the final state once, so a
+        rule that spans fields does not depend on their order.
+
+        An unsafe or malformed file is ignored. An entry that is not writable, no longer valid,
+        refused by a guardrail or for a language that is gone is dropped; warnings name the path
+        only. If the batch is refused as a whole, the entries are tried one by one. The file is
+        rewritten without dropped entries.
         """
         if self._file is None:
             return
@@ -283,37 +400,127 @@ class SettingsEditor:
         except ValueError as exc:
             log.warning("web UI settings file ignored: %s", exc)
             return
-        order = sorted(stored, key=lambda p: not p.startswith("safety.minor_output_blocklist."))
         with self._lock:
-            for path in order:
-                try:
-                    result = self._apply(path, stored[path], RESTORE_SOURCE)
-                except (SettingNotAllowed, ValidationError, GuardrailError, ConfigError):
-                    log.warning("web UI setting %s dropped: no longer acceptable", path)
+            tree, rows = self.stack.merged_tree(), self._rows()
+            planned: dict[str, tuple[str, Any, bool]] = {}  # file key -> (stack path, value, add)
+            for key, value in stored.items():
+                found = self._plan(key, value, tree, rows)
+                if found is None:
+                    log.warning("web UI setting %s dropped: no longer acceptable", _shown(key))
                     continue
-                self._overrides[path] = result["value"]
+                planned[key] = found
+            try:
+                cfg = self.stack.preview({p: v for p, v, _ in planned.values()})
+            except (ConfigError, ValueError):
+                cfg = self.stack.effective()
+            cleaned: dict[str, tuple[str, Any]] = {}  # file key -> (stack path, stack value)
+            for key, (path, value, add) in planned.items():
+                try:
+                    cleaned[key] = self._clean_planned(key, path, value, add, rows, cfg, tree)
+                except (ValidationError, SettingNotAllowed, GuardrailError):
+                    log.warning("web UI setting %s dropped: no longer acceptable", _shown(key))
+            self._overrides = self._commit_batch(cleaned, stored)
             if set(self._overrides) != set(stored):
                 self._persist()
 
-    def _apply(self, path: object, value: object, source: str) -> dict[str, Any]:
-        cfg = self.stack.effective()
-        entry = expand(cfg).get(path) if isinstance(path, str) else None
-        if entry is None or not isinstance(path, str):
+    # ------------------------------------------------------------------ write internals
+
+    def _rows(self) -> dict[str, FieldDescriptor]:
+        every = build_catalogue(self.stack, _writable, reveal_private=True)
+        return {row["path"]: row for row in every}
+
+    def _apply(
+        self,
+        path: object,
+        value: object,
+        source: str,
+        rows: dict[str, FieldDescriptor],
+        cfg: RoboEmotConfig,
+    ) -> dict[str, Any]:
+        row = rows.get(path) if isinstance(path, str) else None
+        if row is None or not isinstance(path, str) or not self._leaf_writable(rows, row):
             raise SettingNotAllowed("path")
         if secret_shaped(value):
             raise ValidationError("value_type", "value")
-        clean = self._clean(entry, value, cfg)
-        old = get_path(cfg, path)
+        hook = hook_for(path)
+        clean = clean_hooked(hook, path, value, cfg) if hook else clean_value(row, value, cfg)
+        old = plain(get_path(cfg, path))
         if clean == old:
             return {"path": path, "changed": False, "value": old}
-        self.stack.set(
-            path,
-            clean,
-            source=source,
-            admin=bool(field_meta(path).get("admin_only")),
-            must_exist=True,  # a language removed since `expand` is not recreated
+        if isinstance(clean, dict) and deep_merge(old or {}, clean) != clean:
+            raise ValidationError(
+                "value_merged", "value"
+            )  # a runtime dict merges: no key is dropped
+        tree = self.stack.merged_tree()
+        layer = self._write(path, clean, source)
+        return {
+            "path": path,
+            "changed": True,
+            "value": clean,
+            "layer": layer,
+            "restart_required": self._restart(row),
+            "okey": okey(tree, path),
+        }
+
+    @staticmethod
+    def _leaf_writable(rows: dict[str, FieldDescriptor], row: FieldDescriptor) -> bool:
+        """A non-secret leaf that is not the identity of a keyed-list entry (renaming one would
+        move it to another entry)."""
+        if row["kind"] in CONTAINERS or not row["writable"] or row["secret"]:
+            return False
+        entry, _, name = row["path"].rpartition(".")
+        box = rows.get(entry.rpartition(".")[0])
+        return not (
+            box is not None
+            and box["kind"] == "keyed_list"
+            and name in (box["key"], "when" if box["key"] == "event" else box["key"])
         )
-        return {"path": path, "changed": True, "value": clean}
+
+    def _write(self, key: str, value: Any, source: str) -> str:
+        """Write on the runtime layer; if the stack refuses it only for a safety loosening, write
+        it on the app layer instead (app YAML and audit) and drop the runtime value that would
+        shadow it. Returns the layer. Every other refusal propagates."""
+        try:
+            self.stack.set(
+                key, value, source=source, admin=True, must_exist=True, refuse=REFUSED_CHECKS
+            )
+            return "runtime"
+        except GuardrailError as exc:
+            if not loosening_only(exc):
+                raise
+        self.stack.set(
+            key,
+            value,
+            source=source,
+            admin=True,
+            layer="app",
+            must_exist=True,
+            refuse=REFUSED_CHECKS,
+        )
+        self.stack.clear(key, source=source)
+        return "app"
+
+    def _remember(self, key: str, value: Any) -> None:
+        """Keep a runtime edit for the next start; inside an entry added at runtime it joins the
+        entry's own value."""
+        parent = self._added_parent(key)
+        if parent is None:
+            self._overrides[key] = value
+            return
+        entry = json.loads(json.dumps(self._overrides[parent]))
+        set_path(entry, key[len(parent) + 1 :], value)
+        self._overrides[parent] = entry
+
+    def _added_parent(self, key: str) -> str | None:
+        """The file key of an entry added at runtime that holds ``key``."""
+        return next(
+            (
+                k
+                for k, v in self._overrides.items()
+                if key.startswith(k + ".") and isinstance(v, dict)
+            ),
+            None,
+        )
 
     def _persist(self) -> bool:
         if self._file is None:
@@ -325,91 +532,160 @@ class SettingsEditor:
             return False
         return True
 
-    # ------------------------------------------------------------------ schema and cleaning
-
-    def _schema(self, entry: Setting, cfg: RoboEmotConfig) -> dict[str, Any]:
-        web = cfg.webui
-        phrase = {"type": "string", "maxLength": web.settings_phrase_max_chars}
-        if entry.kind in (LIST_KIND, WORDS_KIND):
-            return {
-                "type": "array",
-                "items": phrase,
-                "minItems": 1,
-                "maxItems": web.settings_list_max_items,
-            }
-        if entry.kind == NAME_KIND:
-            return {"type": ["string", "null"], "maxLength": cfg.voice.name_max_chars}
-        return {
-            "type": "string",
-            "minLength": 0 if entry.allow_empty else 1,
-            "maxLength": web.settings_line_max_chars,
-        }
-
-    def _clean(self, entry: Setting, value: object, cfg: RoboEmotConfig) -> Any:
-        return {
-            LIST_KIND: self._phrases,
-            WORDS_KIND: self._words,
-            NAME_KIND: self._name,
-            LINE_KIND: self._line,
-        }[entry.kind](entry, value, cfg)
-
     @staticmethod
-    def _items(value: object, cfg: RoboEmotConfig, pattern: re.Pattern[str]) -> list[str]:
-        """Distinct, whitespace-normalised items of a list within the count, length and
-        character limits."""
-        web = cfg.webui
-        items = list(dict.fromkeys(_string_list(value)))
-        if not items:
-            raise ValidationError("list_empty", "value")
-        if len(items) > web.settings_list_max_items:
-            raise ValidationError("list_too_long", "value")
-        for item in items:
-            if len(item) > web.settings_phrase_max_chars:
-                raise ValidationError("phrase_too_long", "value")
-            if pattern.fullmatch(item) is None or not normalise(item.rstrip("*")):
-                raise ValidationError("phrase_invalid", "value")
-        return items
+    def _restart(row: FieldDescriptor, entry_rows: list[FieldDescriptor] | None = None) -> bool:
+        """Whether the change needs a restart: the field's ``restart`` flag, for a collection any
+        field of its entries."""
+        return row["restart"] or any(r["restart"] for r in entry_rows or [])
 
-    def _phrases(self, entry: Setting, value: object, cfg: RoboEmotConfig) -> list[str]:
-        return self._items(value, cfg, PHRASE_PATTERN)
+    # ------------------------------------------------------------------ entries
 
-    def _words(self, entry: Setting, value: object, cfg: RoboEmotConfig) -> list[str]:
-        return self._items(value, cfg, WORD_PATTERN)
+    def _clean_entry(
+        self, box: FieldDescriptor, value: object, cfg: RoboEmotConfig
+    ) -> dict[str, Any]:
+        """An entry for ``box`` cleaned field by field from the blank entry's descriptors. A field
+        the entry type does not have, or a secret field with a value, is ``entry_invalid``."""
+        if not isinstance(value, dict):
+            raise ValidationError("value_type", "value")
+        rows = {r["path"]: r for r in box["entry"] or []}
+        out: dict[str, Any] = {}
 
-    @staticmethod
-    def _name(entry: Setting, value: object, cfg: RoboEmotConfig) -> str | None:
-        """The robot's name under the prompt-name rules (``sanitise_name``): a value the
-        sanitiser would alter is refused rather than silently changed; empty or null resets to
-        the platform's name."""
-        if value is None:
+        def walk(node: dict[str, Any], prefix: str, into: dict[str, Any]) -> None:
+            for name, item in node.items():
+                path = f"{prefix}{name}"
+                row = rows.get(path)
+                if row is not None and row["kind"] not in CONTAINERS:
+                    if row["secret"]:
+                        if item not in (None, "", row["default"]):
+                            raise ValidationError("entry_invalid", "value")
+                        continue
+                    into[name] = clean_value(row, item, cfg)
+                elif isinstance(item, dict) and any(r.startswith(path + ".") for r in rows):
+                    into[name] = {}
+                    walk(item, path + ".", into[name])
+                else:
+                    raise ValidationError("entry_invalid", "value")
+
+        walk(value, "", out)
+        return out
+
+    def _list_add(
+        self, box: FieldDescriptor, entry: dict[str, Any], tree: dict[str, Any], cfg: RoboEmotConfig
+    ) -> tuple[str, str, Any]:
+        """``(stack path, file key, stack value)`` for a new keyed-list entry. A merged list takes
+        just the entry; any other list is replaced by the old entries plus the new one."""
+        id_field = box["key"]
+        ident = entry.get(id_field)
+        clean_key(ident, cfg, dots=id_field == "event")
+        path = box["path"]
+        current = get_path(tree, path)
+        if any(entry_identity(path, e) == entry_identity(path, entry) for e in current):
+            raise ValidationError("entry_exists", "value")
+        if path in KEYED_LISTS:
+            return path, entry_key(path, ident_fields(path, entry)), [entry]
+        return path, path, [*current, entry]
+
+    def _in_tree(
+        self, base: dict[str, Any], box: FieldDescriptor, path: str, tree: dict[str, Any]
+    ) -> bool:
+        """Whether the entry at ``path`` of the effective tree exists in ``base`` (the layers
+        without runtime): by key for a dict, by identity for a list."""
+        if box["kind"] == "dict_of_model":
+            return path.rpartition(".")[2] in get_path(base, box["path"])
+        entry = get_path(tree, path)
+        return any(
+            entry_identity(box["path"], e) == entry_identity(box["path"], entry)
+            for e in get_path(base, box["path"])
+        )
+
+    # ------------------------------------------------------------------ restore internals
+
+    def _plan(
+        self, key: str, value: Any, tree: dict[str, Any], rows: dict[str, FieldDescriptor]
+    ) -> tuple[str, Any, bool] | None:
+        """Where a stored edit lands now: ``(stack path, stack value, is an added entry)``, or
+        ``None`` when its field, entry or language is gone."""
+        if secret_shaped(value):
             return None
-        text = " ".join(_text(value).split())
-        if not text:
+        parsed = parse_okey(key)
+        if parsed is not None:
+            list_path, ident, rest = parsed
+            if not rest:
+                return (list_path, [value], True) if isinstance(value, dict) else None
+            at = keyed_index(tree, list_path, ident)
+            if at is None:
+                return None
+            name = ident.get(KEYED_LISTS[list_path])
+            for segment in (name, str(at)):  # the catalogue names an entry by its name when it can
+                path = f"{list_path}.{segment}.{rest}"
+                if isinstance(segment, str) and path in rows:
+                    return path, value, False
             return None
-        if len(text) > cfg.voice.name_max_chars:
-            raise ValidationError("name_too_long", "value")
-        if sanitise_name(text, cfg.voice.name_max_chars) != text:
-            raise ValidationError("name_invalid", "value")
-        if _blocked_by_filter(cfg, text):
-            raise ValidationError("name_blocked", "value")
-        return text
+        parent = rows.get(key.rpartition(".")[0])
+        if parent is not None and parent["kind"] == "dict_of_model" and isinstance(value, dict):
+            return key, value, True
+        return (key, value, False) if key in rows else None
 
-    @staticmethod
-    def _line(entry: Setting, value: object, cfg: RoboEmotConfig) -> str:
-        """A spoken line: one line of printable text; ``{name}`` only where the field has it."""
-        text = _text(value)
-        if not text:
-            if entry.allow_empty:
-                return ""
-            raise ValidationError("line_empty", "value")
-        if len(text) > cfg.webui.settings_line_max_chars:
-            raise ValidationError("line_too_long", "value")
-        if any(unicodedata.category(c).startswith("C") or c in LINE_BREAKS for c in text):
-            raise ValidationError("line_invalid", "value")
-        allowed = NAME_PLACEHOLDER if entry.template.endswith(".robot_name") else ""
-        if "{" in text.replace(allowed, "") or "}" in text.replace(allowed, ""):
-            raise ValidationError("line_invalid", "value")
-        name = sanitise_name(cfg.voice.wake_word or "", cfg.voice.name_max_chars)
-        if _blocked_by_filter(cfg, text.replace(NAME_PLACEHOLDER, name)):
-            raise ValidationError("line_blocked", "value")
-        return text
+    def _clean_planned(
+        self,
+        key: str,
+        path: str,
+        value: Any,
+        add: bool,
+        rows: dict[str, FieldDescriptor],
+        cfg: RoboEmotConfig,
+        tree: dict[str, Any],
+    ) -> tuple[str, Any]:
+        """Clean one planned edit with the live-edit rules, against ``cfg`` (the whole file
+        applied). Returns the stack path and value."""
+        if add:
+            parsed = parse_okey(key)
+            box = rows.get(parsed[0] if parsed else key.rpartition(".")[0])
+            if box is None or box["kind"] not in ENTRY_KINDS or box["path"] in LANGUAGE_MAPS:
+                raise SettingNotAllowed("path")
+            entry = self._clean_entry(box, value[0] if parsed else value, cfg)
+            return path, ([entry] if parsed else entry)
+        row = rows.get(path)
+        if row is None or not self._leaf_writable(rows, row):
+            raise SettingNotAllowed("path")
+        hook = hook_for(path)
+        return path, clean_hooked(hook, path, value, cfg) if hook else clean_value(row, value, cfg)
+
+    def _commit_batch(
+        self, cleaned: dict[str, tuple[str, Any]], stored: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Apply the cleaned edits as one change; if the stack refuses the whole, one by one.
+        Returns the file entries that were applied."""
+        if not cleaned:
+            return {}
+
+        def file_value(key: str) -> Any:
+            value = cleaned[key][1]
+            return value[0] if parse_okey(key) and not parse_okey(key)[2] else value
+
+        try:
+            self.stack.set_many(
+                {p: v for p, v in cleaned.values()},
+                source=RESTORE_SOURCE,
+                admin=True,
+                refuse=REFUSED_CHECKS,
+            )
+            return {k: file_value(k) for k in cleaned}
+        except (GuardrailError, ConfigError):
+            pass
+        kept: dict[str, Any] = {}
+        for key, (path, value) in cleaned.items():
+            try:
+                self.stack.set_many(
+                    {path: value}, source=RESTORE_SOURCE, admin=True, refuse=REFUSED_CHECKS
+                )
+            except (GuardrailError, ConfigError):
+                log.warning("web UI setting %s dropped: no longer acceptable", _shown(key))
+                continue
+            kept[key] = file_value(key)
+        return kept
+
+
+def _shown(key: str) -> str:
+    """A file key for a log line: the path only (a merged-list entry shows its list)."""
+    return key.split("[", 1)[0]

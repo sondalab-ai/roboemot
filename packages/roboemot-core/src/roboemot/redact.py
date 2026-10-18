@@ -24,6 +24,7 @@ SECRET_WORDS = (
     "session",
 )
 SECRET_REF = re.compile(r"\$\{secret:")
+SECRET_REF_FULL = re.compile(r"\$\{secret:[^}]*\}?")
 URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'<>]+")
 URL_USER_INFO = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^/?#\s@]*@")
 
@@ -57,3 +58,44 @@ def secret_shaped(value: Any) -> bool:
     if isinstance(value, list | tuple | set | frozenset):
         return any(secret_shaped(v) for v in value)
     return False
+
+
+def endpoint(url: str) -> str:
+    """``host`` or ``host:port`` of a URL: no credentials, path or query ('' when unparsable)."""
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return ""
+    host = parts.hostname or ""
+    return f"{host}:{port}" if port else host
+
+
+def scrub(key: str, value: Any) -> Any:
+    """``value`` with whatever is secret replaced by ``REDACTED``, for an audit entry or a message:
+    a secret-shaped value, a string under a credential-named key (the last segment of ``key``, or
+    an inner dict key). Anything else comes back unchanged, so a normal value stays comparable."""
+    if secret_shaped(value):
+        return REDACTED
+    leaf = key.rsplit(".", 1)[-1]
+    if isinstance(value, str):
+        return REDACTED if value and is_secret_key(leaf) else value
+    if isinstance(value, dict):
+        return {k: scrub(str(k), v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [scrub(key, v) for v in value]
+    return value
+
+
+def shown(key: str, value: Any) -> str:
+    """Text for ``value`` in an error message or log line: ``repr`` of ``scrub``, and a
+    ``base_url`` shows its host only."""
+    if key.rsplit(".", 1)[-1] == "base_url" and isinstance(value, str):
+        return repr(endpoint(value))
+    return repr(scrub(key, value))
+
+
+def scrub_text(text: str) -> str:
+    """``text`` with secret references and credential-bearing URLs replaced by ``REDACTED``."""
+    text = SECRET_REF_FULL.sub(REDACTED, text)
+    return URL.sub(lambda m: REDACTED if _url_secret(m.group(0)) else m.group(0), text)
