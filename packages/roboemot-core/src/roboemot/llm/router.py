@@ -262,6 +262,7 @@ class Router:
             )
             it = stream.__aiter__()
             calls: dict[int, dict[str, Any]] = {}
+            sent: set[int] = set()
             got_content = False
             while True:
                 timeout = route.stall_timeout_s if got_content else deadline - loop.time()
@@ -284,6 +285,9 @@ class Router:
                         yield TextDelta(delta.content)
                     for tc in delta.tool_calls or []:
                         got_content = True
+                        if tc.index not in calls:  # a new call started: the earlier ones are whole
+                            for done in self._complete(calls, sent, before=tc.index):
+                                yield done
                         slot = calls.setdefault(tc.index, {"id": "", "name": "", "args": ""})
                         if tc.id:
                             slot["id"] = tc.id
@@ -292,12 +296,11 @@ class Router:
                         if tc.function and tc.function.arguments:
                             slot["args"] += tc.function.arguments
                             out_chars += len(tc.function.arguments)
-            for slot in calls.values():
-                try:
-                    args = json.loads(slot["args"] or "{}")
-                except json.JSONDecodeError:
-                    args = {"_raw": slot["args"]}
-                yield ToolCall(slot["id"], slot["name"], args)
+                    if choice.finish_reason:  # nothing more comes for this choice
+                        for done in self._complete(calls, sent):
+                            yield done
+            for done in self._complete(calls, sent):
+                yield done
             tokens = self._tokens(usage_tokens, prompt_chars, out_chars)
             yield Done(route.name, tokens, usage_tokens is None)
         finally:
@@ -308,6 +311,26 @@ class Router:
                     await stream.close()
             with contextlib.suppress(Exception):
                 await client.close()
+
+    @staticmethod
+    def _complete(
+        calls: dict[int, dict[str, Any]], sent: set[int], before: int | None = None
+    ) -> list[ToolCall]:
+        """The calls not yet handed out (index below ``before`` if given), in index order, so
+        the caller can run a call while the model is still writing the next (SPEC 8). Arguments
+        that are not JSON come back as ``{"_raw": ...}``, which no skill accepts."""
+        out = []
+        for index in sorted(calls):
+            if index in sent or (before is not None and index >= before):
+                continue
+            sent.add(index)
+            slot = calls[index]
+            try:
+                args = json.loads(slot["args"] or "{}")
+            except json.JSONDecodeError:
+                args = {"_raw": slot["args"]}
+            out.append(ToolCall(slot["id"], slot["name"], args))
+        return out
 
     @staticmethod
     def _tokens(usage: int | None, prompt_chars: int, out_chars: int) -> int:

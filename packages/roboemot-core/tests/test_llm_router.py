@@ -281,3 +281,81 @@ async def test_barge_in_still_charges_budget_and_closes():
             assert isinstance(ev, TextDelta)
             break  # user barges in after the first words
     assert r.used("lan") >= 100  # prompt (400 chars) + text estimate, charged on close
+
+
+def _tc(index, call_id=None, name=None, args=None):
+    fn = {k: v for k, v in (("name", name), ("arguments", args)) if v is not None}
+    item = {"index": index, "function": fn}
+    if call_id:
+        item.update(id=call_id, type="function")
+    return chunk(tool_calls=[item])
+
+
+def _finish(c):
+    c["choices"][0]["finish_reason"] = "tool_calls"
+    return c
+
+
+async def _held_stream(chunks):
+    """A router on a server that sends ``chunks``, then holds the stream open until released."""
+    release = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        async def body():
+            for c in chunks:
+                yield f"data: {json.dumps(c)}\n\n".encode()
+            await release.wait()
+            yield b"data: [DONE]\n\n"
+
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body())
+
+    r = Router(
+        [route("t", "tools.local", timeout=2.0)],
+        SafetyConfig(),
+        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    return r, release
+
+
+async def test_a_tool_call_is_yielded_when_the_next_one_starts_not_when_the_stream_ends():
+    r, release = await _held_stream(
+        [
+            _tc(0, "c1", "play", '{"gesture": "joy"}'),
+            _tc(1, "c2", "look_at", '{"target"'),  # still being written when we look
+        ]
+    )
+    stream = r.stream([{"role": "user", "content": "x"}], [{"type": "function"}])
+    first = await asyncio.wait_for(stream.__anext__(), 1.0)  # the stream is still open
+    assert isinstance(first, ToolCall) and first.id == "c1"
+    assert first.arguments == {"gesture": "joy"}
+    release.set()
+    rest = [ev async for ev in stream]
+    assert [type(e) for e in rest] == [ToolCall, Done]  # the second, completed at the end
+
+
+async def test_finish_reason_completes_the_last_call_and_events_keep_their_order():
+    r, release = await _held_stream(
+        [
+            chunk("Ecco."),
+            _tc(0, "c1", "play", '{"gesture": "joy"}'),
+            _tc(1, "c2", "look_at", '{"target": "speaker"}'),
+            _finish(chunk(content="")),  # finish_reason arrives, the HTTP stream stays open
+        ]
+    )
+    seen = []
+    stream = r.stream([{"role": "user", "content": "x"}], [{"type": "function"}])
+    while len([e for e in seen if isinstance(e, ToolCall)]) < 2:
+        seen.append(await asyncio.wait_for(stream.__anext__(), 1.0))
+    assert [type(e).__name__ for e in seen] == ["TextDelta", "ToolCall", "ToolCall"]
+    assert [e.id for e in seen[1:]] == ["c1", "c2"]
+    release.set()
+    tail = [ev async for ev in stream]
+    assert [type(e) for e in tail] == [Done]  # no call twice, Done last
+
+
+async def test_bad_json_arguments_come_back_raw_and_the_stream_goes_on():
+    r, release = await _held_stream([_tc(0, "c1", "play", '{"gesture": '), _finish(chunk(""))])
+    release.set()
+    evs = [ev async for ev in r.stream([{"role": "user", "content": "x"}], [{"type": "function"}])]
+    call = next(e for e in evs if isinstance(e, ToolCall))
+    assert call.arguments == {"_raw": '{"gesture": '}
