@@ -593,211 +593,19 @@ async function debugView() {
   const view = document.getElementById("view");
   view.replaceChildren();
   const report = await api("GET", "/api/debug");
+  const sections = report.sections || {};
+  const robotOnly = Object.fromEntries(Object.entries(sections).filter(([, s]) => s && s.scope === "robot"));
+  const coreOnly = Object.fromEntries(Object.entries(sections).filter(([, s]) => !(s && s.scope === "robot")));
+  const block = (cmd, data) => el("article", { class: "sl-term-block" },
+    el("header", { class: "sl-term-block__head" },
+      el("span", { class: "sl-term-block__cmd" }, el("span", { class: "sl-term-block__prompt" }, "$"), " " + cmd)),
+    el("pre", { class: "sl-term-block__out pre-scroll" }, JSON.stringify(data, null, 2)));
+  const hasRobot = Object.keys(robotOnly).length > 0;
   view.append(card(t("tab_debug"), t("debug_title"),
     el("div", { class: "row" }, button(t("debug_refresh"), "plain", () => guarded(debugView))),
-    el("article", { class: "sl-term-block" },
-      el("header", { class: "sl-term-block__head" },
-        el("span", { class: "sl-term-block__cmd" }, el("span", { class: "sl-term-block__prompt" }, "$"), " GET /api/debug")),
-      el("pre", { class: "sl-term-block__out pre-scroll" }, JSON.stringify(report, null, 2)))));
-}
-
-// ---------------------------------------------------------------- settings
-
-const SETTING_GROUPS = [
-  ["wake_phrases", "voice.keywords."],
-  ["wake_word", "voice.wake_word"],
-  ["minor_lines", "safety.minor_lines."],
-  ["blocklist", "safety.minor_output_blocklist."],
-];
-
-function settingGroup(path) {
-  const found = SETTING_GROUPS.find(([, prefix]) => path.startsWith(prefix));
-  return found ? found[0] : "other";
-}
-
-function isNullable(schema) {
-  return [].concat(schema.type).includes("null");
-}
-
-// A setting's value or default as text: lists joined, null as the platform's own value.
-function plainValue(value, schema) {
-  if (Array.isArray(value)) return value.join(", ") || "—";
-  if (value === null) return t("settings_platform_name");
-  return value === "" ? (isNullable(schema) ? t("settings_platform_name") : "—") : String(value);
-}
-
-function valueView(s) {
-  if (Array.isArray(s.value) && s.value.length) {
-    return el("ul", { class: "row setting-value" }, s.value.map((x) => el("li", { class: "sl-tag sl-tag--plain" }, x)));
-  }
-  return el("p", { class: "setting-value" }, plainValue(s.value, s.schema));
-}
-
-// Builds the edit controls from the JSON-Schema-style limits the server returned. `error()` is a
-// client-side pre-check using the server's own error codes; the server stays the authority.
-function settingEditor(s, index) {
-  const schema = s.schema;
-  const controlled = (input) => el("span", { class: FIELD_FX }, input);
-  const flag = (input, on, errorId) => {
-    if (on) { input.setAttribute("aria-invalid", "true"); input.setAttribute("aria-describedby", errorId); }
-    else { input.removeAttribute("aria-invalid"); input.removeAttribute("aria-describedby"); }
-  };
-  if ([].concat(schema.type).includes("array")) {
-    const max = (schema.items || {}).maxLength;
-    const list = el("div", { class: "stack" });
-    const entries = [];
-    const add = button(t("settings_add"), "plain", () => { addEntry(""); entries[entries.length - 1].input.focus(); }, { small: true });
-    const sync = () => {
-      add.disabled = entries.length >= schema.maxItems;
-      entries.forEach((e, n) => {
-        e.input.setAttribute("aria-label", t("settings_entry", { n: n + 1 }));
-        e.remove.disabled = entries.length <= schema.minItems;
-      });
-    };
-    let serial = 0;
-    const addEntry = (text) => {
-      const input = textInput("set-" + index + "-" + serial++, { value: text, maxlength: max });
-      const remove = button(t("settings_remove"), "plain", () => {
-        entries.splice(entries.findIndex((e) => e.input === input), 1);
-        row.remove();
-        sync();
-      }, { small: true });
-      const row = el("div", { class: "entry" }, controlled(input), remove);
-      entries.push({ input, remove });
-      list.append(row);
-      sync();
-    };
-    s.value.forEach(addEntry);
-    const clean = () => entries.map((e) => e.input.value.trim().replace(/\s+/g, " ")).filter(Boolean);
-    return {
-      node: el("div", { class: "stack" }, list, el("div", { class: "row" }, add),
-        el("p", { class: "hint" }, t("settings_limits", { max: schema.maxItems, len: max }))),
-      value: clean,
-      mark: (code, errorId) => entries.forEach((e, n) => flag(e.input, !!code && (code === "phrase_too_long" ? e.input.value.trim().length > max : n === 0), errorId)),
-      error: () => {
-        const v = clean();
-        if (v.length < (schema.minItems || 0) || v.length === 0) return "list_empty";
-        if (v.length > schema.maxItems) return "list_too_long";
-        return v.some((x) => x.length > max) ? "phrase_too_long" : null;
-      },
-    };
-  }
-  const nullable = isNullable(schema);
-  const input = textInput("set-" + index, { value: s.value === null ? "" : s.value, maxlength: schema.maxLength });
-  const parts = [controlled(input), el("p", { class: "hint" }, t("settings_line_limit", { len: schema.maxLength }))];
-  if (nullable) parts.push(el("div", { class: "row" }, button(t("settings_reset"), "plain", () => { input.value = ""; input.focus(); }, { small: true })));
-  const text = () => input.value.trim().replace(/\s+/g, " ");
-  return {
-    node: el("div", { class: "stack" }, parts),
-    value: () => (nullable && !text() ? null : text()),
-    mark: (code, errorId) => flag(input, !!code, errorId),
-    error: () => {
-      if (!text() && !nullable && (schema.minLength || 0) > 0) return "line_empty";
-      return text().length > schema.maxLength ? "line_too_long" : null;
-    },
-  };
-}
-
-// One setting: its value and default, and an edit form generated from the schema. Saving asks for
-// the operator PIN in the dialog (same PIN as the login; it doubles as the admin PIN).
-let revealedSettings = new Map(); // private fields shown after a PIN check, kept in memory only
-
-async function revealPrivate(reload) {
-  let result = null;
-  const done = await ask({
-    title: t("settings_pin_title"), message: t("settings_reveal"), pin: true, confirm: t("settings_reveal"),
-    run: async ({ pin }) => { result = await api("POST", "/api/settings/reveal", { pin: pin }); },
-  });
-  if (!done) return;
-  revealedSettings = new Map(result.fields.map((f) => [f.path, f]));
-  await reload(null);
-}
-
-function settingRow(s, index, reload) {
-  const box = el("div", { class: "stack", "data-path": s.path });
-  const head = () => el("div", { class: "row" },
-    el("code", { class: "sl-code" }, s.path),
-    s.needs_admin ? el("span", { class: "sl-tag", title: t("settings_admin_hint") }, t("settings_admin")) : []);
-  const blocklist = s.path.startsWith("safety.minor_output_blocklist.");
-  const hidden = s.private && !s.revealed;
-  const show = () => box.replaceChildren(
-    head(),
-    s.description ? el("p", { class: "hint" }, s.description) : [],
-    hidden ? el("p", { class: "hint setting-value" }, t("settings_hidden")) : valueView(s),
-    hidden ? [] : el("p", { class: "hint" }, t("settings_default") + ": " + plainValue(s.default, s.schema)),
-    el("div", { class: "row" }, hidden
-      ? button(t("settings_reveal"), "plain", () => revealPrivate(reload), { small: true })
-      : button(t("settings_edit"), "plain", () => edit(), { small: true })));
-  function edit() {
-    const editor = settingEditor(s, index);
-    const errorId = "set-error-" + index;
-    const failure = el("p", { class: "sl-field__error", id: errorId, role: "alert", hidden: true });
-    const form = el("form", {
-      class: "stack",
-      onsubmit: async (ev) => {
-        ev.preventDefault();
-        const code = editor.error();
-        failure.hidden = !code;
-        failure.textContent = code ? t("err_" + code) : "";
-        editor.mark(code, errorId);
-        if (code) return;
-        const value = editor.value();
-        if (JSON.stringify(value) === JSON.stringify(s.value)) { notice(t("settings_unchanged")); show(); return; }
-        let result = null;
-        const done = await ask({
-          title: t("settings_pin_title"), message: s.path, pin: true, confirm: t("settings_save"),
-          run: async ({ pin }) => { result = await api("POST", "/api/settings", { path: s.path, value: value, pin: pin }); },
-        });
-        if (!done) return;
-        if (s.revealed && revealedSettings.has(s.path)) revealedSettings.set(s.path, { ...revealedSettings.get(s.path), value: value });
-        notice(result.persisted === false ? t("saved") + " " + t("settings_not_persisted") : t("saved"), result.persisted === false);
-        await reload(result.changed ? s.path : null);
-      },
-    },
-    head(),
-    s.description ? el("p", { class: "hint" }, s.description) : [],
-    blocklist ? el("p", { class: "hint" }, t("settings_blocklist_hint")) : [],
-    editor.node,
-    failure,
-    el("div", { class: "row" }, submitButton(t("settings_save")), button(t("dialog_cancel"), "plain", show)));
-    box.replaceChildren(form);
-  }
-  show();
-  return box;
-}
-
-async function settingsView(changedPath) {
-  const view = document.getElementById("view");
-  const data = await api("GET", "/api/settings");
-  for (const s of data.settings) {
-    const shown = s.private ? revealedSettings.get(s.path) : null;
-    if (shown) { s.value = shown.value; s.default = shown.default; s.revealed = true; }
-  }
-  view.replaceChildren();
-  const reload = (path) => guarded(() => settingsView(path));
-  view.append(card(t("tab_settings"), t("tab_settings"), el("p", { class: "hint" }, t("settings_intro"))));
-  if (!data.settings.length) {
-    view.append(card(t("tab_settings"), t("settings_group_other"), empty(t("tab_settings"), t("settings_none"))));
-    return;
-  }
-  const names = SETTING_GROUPS.map(([name]) => name).concat("other");
-  let index = 0;
-  for (const name of names) {
-    const rows = data.settings.filter((s) => settingGroup(s.path) === name);
-    if (!rows.length) continue;
-    const children = [];
-    rows.forEach((s, n) => {
-      if (n) children.push(el("hr", { class: "sl-rule" }));
-      children.push(settingRow(s, index++, reload));
-    });
-    view.append(card(t("tab_settings"), t("settings_group_" + name), children));
-  }
-  if (changedPath) {
-    const shown = view.querySelector('[data-path="' + CSS.escape(changedPath) + '"] .setting-value');
-    if (shown && window.roboemotFx) {
-      try { window.roboemotFx.burst(shown); } catch (e) { /* effects are optional */ }
-    }
-  }
+    el("h3", { class: "sl-eyebrow" }, t("settings_core")),
+    block("GET /api/debug", hasRobot ? { ...report, sections: coreOnly } : report),
+    hasRobot ? [el("h3", { class: "sl-eyebrow" }, t("settings_robot")), block("GET /api/debug (robot)", robotOnly)] : []));
 }
 
 // ---------------------------------------------------------------- shell
@@ -859,7 +667,12 @@ function shell() {
   const out = document.getElementById("logout");
   out.hidden = false;
   out.textContent = t("logout");
-  out.onclick = () => guarded(async () => { await api("POST", "/api/logout", {}); state.csrf = null; await boot(); });
+  out.onclick = () => guarded(async () => {
+    resetSettingsState();
+    await api("POST", "/api/logout", {});
+    state.csrf = null;
+    await boot();
+  });
   showTab(state.tab);
 }
 
@@ -877,6 +690,7 @@ async function boot() {
     shell();
   } else {
     state.csrf = null;
+    resetSettingsState();
     document.getElementById("tabs").hidden = true;
     document.getElementById("logout").hidden = true;
     loginView();

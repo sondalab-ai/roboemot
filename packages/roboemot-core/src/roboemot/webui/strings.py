@@ -32,33 +32,78 @@ EN: dict[str, str] = {
     "tab_routes": "Routes",
     "tab_settings": "Settings",
     "settings_intro": (
-        "Settings that can be changed here. Each change asks for the operator PIN and applies at "
-        "once. The app config file is never edited."
+        "Every configuration field, with its current value and the layer that decides it. Each "
+        "change asks for the operator PIN and applies at once. A change that loosens a safety "
+        "rule is saved to the app configuration file instead and survives a restart."
     ),
-    "settings_group_wake_phrases": "Wake phrases",
-    "settings_group_wake_word": "Robot name",
-    "settings_group_minor_lines": "Lines spoken to minors",
-    "settings_group_blocklist": "Child-safety word list",
-    "settings_group_other": "Other",
+    "settings_core": "Core",
+    "settings_robot": "Robot",
+    "settings_nav": "Setting groups",
+    "settings_search": "Search",
+    "settings_search_hint": "By path or description.",
+    "settings_changed_only": "Changed only",
+    "settings_matches": "{n} settings shown",
+    "settings_source_runtime": "Runtime",
+    "settings_source_derived": "Derived",
+    "settings_source_app": "App file",
+    "settings_source_preset": "Preset",
+    "settings_source_manifest": "Robot manifest",
+    "settings_source_defaults": "Defaults",
+    "settings_source_schema": "Built-in",
+    "settings_restart": "Restart RoboEmot",
+    "settings_restart_hint": (
+        'Not available yet. Settings marked "Restart needed" apply after RoboEmot restarts.'
+    ),
+    "settings_restart_pending": (
+        "Saved changes are waiting for a restart, which is not available yet."
+    ),
+    "settings_restart_badge": "Restart needed",
+    "settings_restart_needed": "Restart RoboEmot for it to take effect.",
+    "settings_not_measured": "not measured",
+    "settings_show_all": "Show all {n}",
+    "settings_private": "Private",
+    "settings_secret": "Secret",
+    "settings_readonly": "Read-only",
+    "settings_json_readonly": "Structured value: edit it in the configuration file.",
+    "settings_superset_hint": "Words can only be added here. Removing one needs the config file.",
+    "settings_null": "No value (null)",
+    "settings_slider": "{path} slider",
+    "settings_tuple_item": "Value {n} of {total}",
+    "settings_new_item": "New entry",
+    "settings_remove_item": "Remove {item}",
+    "settings_remove_n": "Remove row {n}",
+    "settings_dict_key": "Key",
+    "settings_dict_value": "Value",
+    "settings_add_entry": "Add entry",
+    "settings_entry_name": "Name",
+    "settings_remove_entry": "Remove entry",
+    "settings_no_entries": "No entries.",
+    "settings_reveal_message": (
+        "Show the private settings (minors, privacy, location). They stay in this page until you "
+        "log out or reload."
+    ),
+    "settings_reset_layer": "Reset to lower layer",
+    "settings_reset_done": "Reset.",
+    "settings_entry_added": "Entry added.",
+    "settings_entry_removed": "Entry removed.",
+    "settings_layer_runtime": "Applied now.",
+    "settings_layer_app": (
+        "Saved permanently in the app configuration file: a safety setting was loosened, and it "
+        "survives a restart."
+    ),
+    "err_key_duplicate": "Two rows use the same key.",
     "settings_default": "Default",
-    "settings_edit": "Edit",
     "settings_save": "Save",
     "settings_add": "Add entry",
     "settings_remove": "Remove",
-    "settings_reset": "Use the platform name",
-    "settings_platform_name": "platform name",
     "settings_admin": "Admin",
     "settings_reveal": "Show with PIN",
     "settings_hidden": "Hidden: minors, privacy and location settings need the PIN to be shown.",
     "settings_admin_hint": "Safety-relevant. The operator PIN doubles as the admin PIN.",
-    "settings_blocklist_hint": "Words can only be added here. Removing one needs the config file.",
     "settings_pin_title": "Confirm the change",
     "settings_not_persisted": "It is live but was not saved to disk: it ends at the next restart.",
     "settings_unchanged": "Nothing changed.",
     "settings_none": "No setting can be changed from the web UI.",
-    "settings_entry": "Entry {n}",
-    "settings_limits": "Up to {max} entries of {len} characters each.",
-    "settings_line_limit": "Up to {len} characters.",
     "err_routes_unavailable": "Routes are not available.",
     "err_route_unknown": "No such route.",
     "err_route_busy": "Another check is running. Try again in a moment.",
@@ -338,38 +383,85 @@ IT: dict[str, str] = {
     "tab_routes": "Modelli",
     "tab_settings": "Impostazioni",
     "settings_intro": (
-        "Impostazioni modificabili da qui. Ogni modifica chiede il PIN operatore e vale subito. "
-        "Il file di configurazione dell'app non viene mai modificato."
+        "Ogni campo di configurazione, con il valore attuale e il livello che lo decide. Ogni "
+        "modifica chiede il PIN operatore e vale subito. Una modifica che allenta una regola di "
+        "sicurezza viene invece salvata nel file di configurazione dell'app e resta dopo un "
+        "riavvio."
     ),
-    "settings_group_wake_phrases": "Frasi di attivazione",
-    "settings_group_wake_word": "Nome del robot",
-    "settings_group_minor_lines": "Frasi dette ai minori",
-    "settings_group_blocklist": "Lista di parole per i bambini",
-    "settings_group_other": "Altre",
+    "settings_core": "Nucleo",
+    "settings_robot": "Robot",
+    "settings_nav": "Gruppi di impostazioni",
+    "settings_search": "Cerca",
+    "settings_search_hint": "Per percorso o descrizione.",
+    "settings_changed_only": "Solo modificate",
+    "settings_matches": "{n} impostazioni mostrate",
+    "settings_source_runtime": "Runtime",
+    "settings_source_derived": "Derivato",
+    "settings_source_app": "File dell'app",
+    "settings_source_preset": "Preset",
+    "settings_source_manifest": "Manifesto del robot",
+    "settings_source_defaults": "Predefiniti",
+    "settings_source_schema": "Integrato",
+    "settings_restart": "Riavvia RoboEmot",
+    "settings_restart_hint": (
+        "Non ancora disponibile. Le impostazioni con «Riavvio necessario» valgono dopo il "
+        "riavvio di RoboEmot."
+    ),
+    "settings_restart_pending": (
+        "Le modifiche salvate attendono un riavvio, non ancora disponibile da qui."
+    ),
+    "settings_restart_badge": "Riavvio necessario",
+    "settings_restart_needed": "Riavvia RoboEmot perché abbia effetto.",
+    "settings_not_measured": "non misurato",
+    "settings_show_all": "Mostra tutte e {n}",
+    "settings_private": "Privata",
+    "settings_secret": "Segreta",
+    "settings_readonly": "Sola lettura",
+    "settings_json_readonly": "Valore strutturato: si modifica nel file di configurazione.",
+    "settings_superset_hint": (
+        "Qui si possono solo aggiungere parole. Per toglierne una serve il file di "
+        "configurazione dell'app."
+    ),
+    "settings_null": "Nessun valore (null)",
+    "settings_slider": "Cursore di {path}",
+    "settings_tuple_item": "Valore {n} di {total}",
+    "settings_new_item": "Nuova voce",
+    "settings_remove_item": "Rimuovi {item}",
+    "settings_remove_n": "Rimuovi la riga {n}",
+    "settings_dict_key": "Chiave",
+    "settings_dict_value": "Valore",
+    "settings_add_entry": "Aggiungi voce",
+    "settings_entry_name": "Nome",
+    "settings_remove_entry": "Rimuovi voce",
+    "settings_no_entries": "Nessuna voce.",
+    "settings_reveal_message": (
+        "Mostra le impostazioni private (minori, privacy, posizione). Restano in questa pagina "
+        "finché non esci o ricarichi."
+    ),
+    "settings_reset_layer": "Torna al livello inferiore",
+    "settings_reset_done": "Ripristinato.",
+    "settings_entry_added": "Voce aggiunta.",
+    "settings_entry_removed": "Voce rimossa.",
+    "settings_layer_runtime": "Applicata subito.",
+    "settings_layer_app": (
+        "Salvata in modo permanente nel file di configurazione dell'app: una regola di sicurezza "
+        "è stata allentata e resta dopo un riavvio."
+    ),
+    "err_key_duplicate": "Due righe usano la stessa chiave.",
     "settings_default": "Predefinito",
-    "settings_edit": "Modifica",
     "settings_save": "Salva",
     "settings_add": "Aggiungi voce",
     "settings_remove": "Rimuovi",
-    "settings_reset": "Usa il nome della piattaforma",
-    "settings_platform_name": "nome della piattaforma",
     "settings_admin": "Admin",
     "settings_reveal": "Mostra con il PIN",
     "settings_hidden": (
         "Nascosto: le impostazioni su minori, privacy e posizione si mostrano con il PIN."
     ),
     "settings_admin_hint": "Rilevante per la sicurezza. Il PIN operatore vale come PIN admin.",
-    "settings_blocklist_hint": (
-        "Qui si possono solo aggiungere parole. Per toglierne una serve il file di "
-        "configurazione dell'app."
-    ),
     "settings_pin_title": "Conferma la modifica",
     "settings_not_persisted": "È attiva ma non salvata su disco: termina al prossimo riavvio.",
     "settings_unchanged": "Nessuna modifica.",
     "settings_none": "Nessuna impostazione si può modificare dalla web UI.",
-    "settings_entry": "Voce {n}",
-    "settings_limits": "Fino a {max} voci di {len} caratteri ciascuna.",
-    "settings_line_limit": "Fino a {len} caratteri.",
     "err_routes_unavailable": "I modelli non sono disponibili.",
     "err_route_unknown": "Modello sconosciuto.",
     "err_route_busy": "Un altro controllo è in corso. Riprova tra poco.",

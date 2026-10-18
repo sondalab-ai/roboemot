@@ -107,7 +107,6 @@ class RoutesPort(Protocol):
 class SettingsPort(Protocol):
     """``roboemot.webui.settings.SettingsEditor``: the allowlisted, guarded settings."""
 
-    def describe(self, fields: list[FieldDescriptor] | None = None) -> list[dict[str, Any]]: ...
     def fields(self) -> list[FieldDescriptor]: ...
     def robot_split(
         self, fields: list[FieldDescriptor]
@@ -640,21 +639,12 @@ class WebApi:
 
     def _settings_list(self, req: Request) -> Response:
         """``fields``: the whole field catalogue (``config.catalogue``, secrets redacted);
-        ``settings``: the writable subset in the shape of the current page; ``robot``: null or
-        the robot plugin's section (read-only hardware rows plus the config rows it claims, which
-        are then absent from ``fields``); all with the PIN note."""
+        ``robot``: null or the robot plugin's section (read-only hardware rows plus the config
+        rows it claims, which are then absent from ``fields``); ``pin_required``: the note that
+        every write re-enters the PIN."""
         port = self._settings_port()
-        every = port.fields()
-        fields, robot = port.robot_split(every)
-        return Response(
-            HTTPStatus.OK,
-            {
-                "settings": port.describe(every),
-                "fields": fields,
-                "robot": robot,
-                "pin_required": True,
-            },
-        )
+        fields, robot = port.robot_split(port.fields())
+        return Response(HTTPStatus.OK, {"fields": fields, "robot": robot, "pin_required": True})
 
     def _settings_reveal(self, req: Request) -> Response:
         """The private fields (minors, privacy, location) with their real values. Admin only: the

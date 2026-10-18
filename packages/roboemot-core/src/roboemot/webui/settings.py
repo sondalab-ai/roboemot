@@ -67,7 +67,6 @@ from .setting_clean import (
     clean_key,
     clean_value,
     hook_for,
-    hook_schema,
 )
 from .validation import ValidationError
 
@@ -284,32 +283,6 @@ class SettingsEditor:
         has verified the PIN."""
         every = build_catalogue(self.stack, _writable, reveal_private=True)
         return [f for f in every if f["private"]]
-
-    def describe(self, fields: list[FieldDescriptor] | None = None) -> list[dict[str, Any]]:
-        """The writable fields the current page can render (the hooked ones: wake word, phrases,
-        child-safe lines, blocklist) in its shape: catalogue value and default, JSON-Schema-style
-        limits and admin flag. Goes away with the new page. Pass the ``fields()`` result to avoid
-        building the catalogue twice."""
-        cfg = self.stack.effective()
-        rows = []
-        for field in sorted(
-            fields if fields is not None else self.fields(), key=lambda f: f["path"]
-        ):
-            hook = hook_for(field["path"])
-            if not field["writable"] or hook is None:
-                continue
-            rows.append(
-                {
-                    "path": field["path"],
-                    "value": field["value"],
-                    "default": field["default"],
-                    "schema": hook_schema(hook, field["path"], cfg),
-                    "description": field["description"],
-                    "needs_admin": field["admin_only"],
-                    "private": field["private"],
-                }
-            )
-        return rows
 
     # ------------------------------------------------------------------ writing
 
