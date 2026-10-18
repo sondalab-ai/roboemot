@@ -19,3 +19,4 @@ td.actions .row { justify-content: flex-start; }
 .entry .sl-field__control { flex: 1; }
 .dialog-form { display: grid; gap: var(--sl-space-3); }
 .hint { color: var(--slc-text-muted); margin: 0; }
+ul.row { list-style: none; padding: 0; margin: 0; }
