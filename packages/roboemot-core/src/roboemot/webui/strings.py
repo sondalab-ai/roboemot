@@ -258,6 +258,21 @@ EN: dict[str, str] = {
     "err_setting_invalid": "The value is not valid for this setting.",
     "err_settings_unavailable": "Settings are not available.",
     "err_value_type": "The value has the wrong type.",
+    "err_value_range": "The value is outside the allowed range.",
+    "err_value_choice": "The value is not one of the allowed choices.",
+    "err_text_invalid": "The text has characters that are not allowed.",
+    "err_persist_failed": "The configuration file could not be written; nothing was changed.",
+    "err_value_merged": "Entries can be added or changed here, not removed.",
+    "err_text_too_long": "The text is too long.",
+    "err_key_invalid": "The name can only use letters, digits, dash and underscore.",
+    "err_entry_exists": "An entry with this name already exists.",
+    "err_entry_invalid": "The entry has a field that cannot be set from the web UI.",
+    "err_entry_in_lower_layer": (
+        "This entry comes from the configuration file and cannot be removed here."
+    ),
+    "err_not_resettable": (
+        "This field belongs to an entry added here and cannot be reset on its own."
+    ),
     "err_list_empty": "The list needs at least one entry.",
     "err_list_too_long": "The list has too many entries.",
     "err_phrase_too_long": "An entry is too long.",
@@ -562,6 +577,21 @@ IT: dict[str, str] = {
     "err_setting_invalid": "Il valore non è valido per questa impostazione.",
     "err_settings_unavailable": "Le impostazioni non sono disponibili.",
     "err_value_type": "Il valore ha il tipo sbagliato.",
+    "err_value_range": "Il valore è fuori dall'intervallo ammesso.",
+    "err_value_choice": "Il valore non è tra quelli ammessi.",
+    "err_text_invalid": "Il testo contiene caratteri non ammessi.",
+    "err_persist_failed": "Impossibile scrivere il file di configurazione; non è cambiato nulla.",
+    "err_value_merged": "Qui le voci si possono aggiungere o modificare, non rimuovere.",
+    "err_text_too_long": "Il testo è troppo lungo.",
+    "err_key_invalid": "Il nome può usare solo lettere, cifre, trattino e trattino basso.",
+    "err_entry_exists": "Esiste già una voce con questo nome.",
+    "err_entry_invalid": ("La voce ha un campo che non si può impostare dalla web UI."),
+    "err_entry_in_lower_layer": (
+        "Questa voce viene dal file di configurazione e non si può rimuovere da qui."
+    ),
+    "err_not_resettable": (
+        "Questo campo appartiene a una voce aggiunta qui e non si può ripristinare da solo."
+    ),
     "err_list_empty": "La lista richiede almeno una voce.",
     "err_list_too_long": "La lista ha troppe voci.",
     "err_phrase_too_long": "Una voce è troppo lunga.",

@@ -221,7 +221,148 @@ def test_settings_api_never_shows_a_reference_or_url_credentials(tmp_path):
         leaked = client.request(
             "POST", "/api/settings", {"path": "voice.wake_word", "value": REF, "pin": PIN}
         )
-        assert leaked.status == 422 or leaked.status == 400
+        assert leaked.status in (400, 403, 422)
         assert b"cloud_key" not in leaked.body
     finally:
         srv.stop()
+
+
+# ------------------------------------------------------------------ write path (SPEC 8, 11A, 12)
+
+CANARY_URL = "http://alice:pw-CANARY-55@nas.local:8080/v1"
+CANARIES = ("pw-CANARY-55", "alice", "cloud_key")
+
+
+def route_stack(tmp_path, **extra):
+    from roboemot.config.stack import ConfigStack
+
+    route = {
+        "name": "cloud",
+        "base_url": "https://cloud.example/v1",
+        "api_key": REF,
+        "model": "m",
+        "first_token_timeout_s": 5,
+    }
+    return ConfigStack(
+        app={"webui": {"bind": "127.0.0.1", "port": 0}, "llm_routes": [route], **extra},
+        audit_path=tmp_path / "audit.jsonl",
+    )
+
+
+def test_guardrail_messages_hold_no_url_credentials_or_secret_references(tmp_path):
+    from roboemot.config.stack import GuardrailError, Violation
+
+    stack = route_stack(tmp_path)
+    for value in (CANARY_URL, "https://evil.example/v1?token=pw-CANARY-55"):
+        with pytest.raises(GuardrailError) as caught:
+            stack.set(
+                "llm_routes.cloud.base_url",
+                value,
+                source="t",
+                admin=True,
+                refuse=frozenset({"locality", "secret"}),
+            )
+        text = str(caught.value)
+        assert caught.value.violations and "***" not in text.replace("'***'", "")
+        for canary in (*CANARIES, "${secret"):
+            assert canary not in text
+    shown = str(Violation("safety", "llm_routes.x.base_url", CANARY_URL, "https://a:b@h/?k=1"))
+    assert "pw-CANARY-55" not in shown and "alice" not in shown and "a:b" not in shown
+    key = str(Violation("admin", "llm_routes.x.api_key", REF, "sk-LEAK-CANARY-7f3a9c41"))
+    assert "cloud_key" not in key and KEY not in key
+
+
+def test_audit_entries_are_redacted_but_normal_values_stay_readable(tmp_path):
+    stack = route_stack(tmp_path)
+    stack.set("llm_routes.cloud.base_url", CANARY_URL, source="t", admin=True, layer="app")
+    stack.set("llm_routes.cloud.model", "m2", source="t")
+    blob = json.dumps([a.__dict__ for a in stack.audit], default=str)
+    blob += (tmp_path / "audit.jsonl").read_text()
+    for canary in CANARIES:
+        assert canary not in blob
+    assert stack.audit[-1].new == "m2" and stack.audit[-1].old == "m"
+
+
+def test_last_error_and_the_refused_audit_entry_are_redacted(tmp_path):
+    import yaml
+    from roboemot.config.stack import ConfigStack
+
+    app = tmp_path / "app.yaml"
+    route = {"name": "cloud", "base_url": "https://cloud.example/v1", "model": "m"}
+    app.write_text(yaml.safe_dump({"llm_routes": [{**route, "first_token_timeout_s": 5}]}))
+    stack = ConfigStack.from_files(app=app, audit_path=tmp_path / "audit.jsonl")
+    bad = {**route, "base_url": CANARY_URL, "api_key": REF, "first_token_timeout_s": 5}
+    app.write_text(yaml.safe_dump({"llm_routes": [bad]}))
+    stack.poll()
+    assert stack.last_error is not None
+    blob = stack.last_error + json.dumps([a.__dict__ for a in stack.audit], default=str)
+    for canary in (*CANARIES, "${secret"):
+        assert canary not in blob
+
+
+def test_cli_does_not_print_credentials_from_a_guardrail_error(monkeypatch, capsys):
+    from roboemot import cli
+    from roboemot.config.stack import GuardrailError
+
+    def boom(args):
+        raise GuardrailError(f"refused {CANARY_URL} and {REF}")
+
+    monkeypatch.setattr(cli, "_discover", boom)
+    assert cli.main(["discover"]) == 1
+    err = capsys.readouterr().err
+    assert "error:" in err
+    for canary in (*CANARIES, "${secret"):
+        assert canary not in err
+
+
+def test_write_endpoints_never_echo_a_secret_in_a_response_or_an_error(tmp_path):
+    from roboemot.webui.settings import SettingsEditor
+
+    stack = route_stack(tmp_path)
+    editor = SettingsEditor(stack, store=tmp_path / "webui_settings.json")
+    srv = make_server(FakeService(), Diagnostics(), stack.effective, tmp_path, settings=editor)
+    srv.set_pin(PIN)
+    srv.start()
+    client = Client(srv.port)
+    assert client.login().status == 200
+    secretish = [CANARY_URL, REF, "https://h/v1?api_key=pw-CANARY-55"]
+    blobs: list[bytes] = []
+
+    def post(url, **body):
+        resp = client.request("POST", url, {**body, "pin": PIN})
+        blobs.append(resp.body)
+        return resp
+
+    try:
+        for value in secretish:
+            assert post("/api/settings", path="personality", value=value).status == 422
+            entry = {"name": "n2", "base_url": "https://ok.example/v1", "model": value}
+            assert post("/api/settings/entry", path="llm_routes", value=entry).status == 422
+            nested = {"name": "n3", "base_url": "https://ok.example/v1", "api_key": value}
+            assert post("/api/settings/entry", path="llm_routes", value=nested).status == 422
+            moods = post(
+                "/api/settings/entry", path="voice.moods", key="k", value={"instructions": value}
+            )
+            assert moods.status == 422
+            assert (
+                post("/api/settings/entry", path="voice.moods", key=value, value={}).status == 422
+            )
+        for path in ("llm_routes.cloud.api_key", "llm_routes.cloud"):
+            assert post("/api/settings", path=path, value="x").status == 403
+            assert post("/api/settings/reset", path=path).status == 403
+        assert post("/api/settings/entry/remove", path="llm_routes.cloud").status in (403, 422)
+        moved = post("/api/settings", path="llm_routes.cloud.base_url", value="http://nas.local/v1")
+        assert moved.status == 403 and moved.json["error"] == "setting_guardrail"
+        assert post("/api/settings", path="llm_routes.cloud.model", value="m2").status == 200
+        listing = client.request("GET", "/api/settings").body  # field texts mention ${secret:name}
+        assert not any(c.encode() in listing for c in CANARIES)
+        assert [r.name for r in stack.effective().llm_routes] == ["cloud"]
+        assert stack.effective().llm_routes[0].base_url == "https://cloud.example/v1"
+    finally:
+        srv.stop()
+    stored = (tmp_path / "webui_settings.json").read_bytes() + (
+        tmp_path / "audit.jsonl"
+    ).read_bytes()
+    for blob in (*blobs, stored):
+        for canary in (*CANARIES, "${secret"):
+            assert canary.encode() not in blob

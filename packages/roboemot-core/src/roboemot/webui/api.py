@@ -111,6 +111,11 @@ class SettingsPort(Protocol):
     def fields(self) -> list[FieldDescriptor]: ...
     def reveal(self) -> list[FieldDescriptor]: ...
     def change(self, path: object, value: object, source: str) -> dict[str, Any]: ...
+    def add_entry(
+        self, path: object, key: object, value: object, source: str
+    ) -> dict[str, Any]: ...
+    def remove_entry(self, path: object, source: str) -> dict[str, Any]: ...
+    def reset(self, path: object, source: str) -> dict[str, Any]: ...
 
 
 class CataloguePort(Protocol):
@@ -320,6 +325,9 @@ class WebApi:
             ("GET", "/api/settings"): self._settings_list,
             ("POST", "/api/settings"): self._settings_change,
             ("POST", "/api/settings/reveal"): self._settings_reveal,
+            ("POST", "/api/settings/reset"): self._settings_reset,
+            ("POST", "/api/settings/entry"): self._settings_entry_add,
+            ("POST", "/api/settings/entry/remove"): self._settings_entry_remove,
             ("POST", "/api/pseudonyms/refused"): self._pseudonyms_refused,
             ("GET", "/api/catalogue"): self._catalogue,
             ("POST", CATALOGUE_IMPORT): self._catalogue_import,
@@ -649,17 +657,62 @@ class WebApi:
         return Response(HTTPStatus.OK, {"fields": port.reveal()})
 
     def _settings_change(self, req: Request) -> Response:
-        """Change one allowlisted setting (SPEC 11A). The body holds exactly ``path``, ``value``
+        """Change one catalogue field (SPEC 11A). The body holds exactly ``path``, ``value``
         and the re-entered ``pin`` (checked under the login limits). The value is never echoed
-        in an error, and the stack's guardrails refuse what the runtime layer may not do."""
+        in an error, and the stack's guardrails refuse what the runtime layer may not do. The
+        server picks the layer; the response names it."""
         port = self._settings_port()
         body = self._json_body(req)
         v.only_keys(body, {"path", "value", "pin"})
         if "value" not in body or "path" not in body:
             raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
         self._check_pin(req, body.get("pin"))
+        return self._settings_call(lambda: port.change(body["path"], body["value"], self._who(req)))
+
+    def _settings_reset(self, req: Request) -> Response:
+        """Drop the runtime value of a field so the lower layer shows again. Body: ``path``,
+        ``pin``."""
+        port = self._settings_port()
+        body = self._json_body(req)
+        v.only_keys(body, {"path", "pin"})
+        if "path" not in body:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
+        self._check_pin(req, body.get("pin"))
+        return self._settings_call(lambda: port.reset(body["path"], self._who(req)))
+
+    def _settings_entry_add(self, req: Request) -> Response:
+        """Add an entry to a collection. Body: ``path`` (the collection), ``key`` (dict
+        collections; a list entry carries its identity in ``value``), ``value`` (the entry),
+        ``pin``."""
+        port = self._settings_port()
+        body = self._json_body(req)
+        v.only_keys(body, {"path", "key", "value", "pin"})
+        if "value" not in body or "path" not in body:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
+        self._check_pin(req, body.get("pin"))
+        return self._settings_call(
+            lambda: port.add_entry(body["path"], body.get("key"), body["value"], self._who(req))
+        )
+
+    def _settings_entry_remove(self, req: Request) -> Response:
+        """Remove an entry only the runtime layer holds. Body: ``path`` (the entry), ``pin``."""
+        port = self._settings_port()
+        body = self._json_body(req)
+        v.only_keys(body, {"path", "pin"})
+        if "path" not in body:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
+        self._check_pin(req, body.get("pin"))
+        return self._settings_call(lambda: port.remove_entry(body["path"], self._who(req)))
+
+    @staticmethod
+    def _who(req: Request) -> str:
+        return f"webui:{req.client_ip}"
+
+    @staticmethod
+    def _settings_call(call: Callable[[], dict[str, Any]]) -> Response:
+        """Run a settings write and map its refusals to bare codes (no value, no stack message)."""
         try:
-            result = port.change(body["path"], body["value"], f"webui:{req.client_ip}")
+            return Response(HTTPStatus.OK, call())
         except SettingNotAllowed as exc:
             raise ApiError(HTTPStatus.FORBIDDEN, "setting_not_allowed", field="path") from exc
         except GuardrailError as exc:
@@ -668,7 +721,8 @@ class WebApi:
             raise ApiError(
                 HTTPStatus.UNPROCESSABLE_ENTITY, "setting_invalid", field="value"
             ) from exc
-        return Response(HTTPStatus.OK, result)
+        except OSError as exc:  # the app file could not be written: nothing was changed
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "persist_failed") from exc
 
     # ------------------------------------------------------------------ pseudonyms
 
