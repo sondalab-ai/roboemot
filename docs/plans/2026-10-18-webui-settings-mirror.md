@@ -54,3 +54,15 @@ Per slice: `ruff check . && ruff format --check .`, full `pytest`, node tests, `
 each PR. End to end: sim daemon + app, open the web UI, edit a number, a bool, an enum, a map entry, a route model,
 a safety tighten (runtime) and a safety loosen (app YAML written, audit entry), restart a restart-field, confirm
 `roboemot config dump` matches the page.
+
+## Status (2026-10-19 01:40)
+Merged into the epic branch: slice 1 (PR 58), 2 (PR 59), 3 (PR 60), 4 (PR 61). Agent runs used: 21 of the ~21 cap
+(extra runs: slice 1–2 security fix rounds, an Opus re-verify, and a CI latency investigation that proved the
+`models` barge-in failure is runner noise, not this epic). Paused for owner OK before 4b and 5.
+- 4b: "Restart RoboEmot" via the daemon's `POST /api/apps/restart-current-app` (no privilege, no installer change).
+  "Reboot robot": no daemon route; `sudo -n systemctl reboot` likely works for `pollen` but is unverified (run
+  `sudo -n -l` on the robot); fallback is a recorded sudoers drop-in. Robot plugin gets the `Rebootable` protocol
+  (already in core, `actions: ["reboot"]`).
+- 5: SPEC 11A/12, TODO.md, exit check as above.
+Owner decisions taken during the run: private fields (location, `privacy.*`, minor paths) are readable only via a
+PIN-checked reveal; the minors blocklist only grows from the web (reset refused too).
