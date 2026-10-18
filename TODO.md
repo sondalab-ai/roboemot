@@ -85,10 +85,11 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       silent within `voice.fastpath.answer_window_s` of a question of its own (`SpeechOutput.question_end`). Italian `sì`
       is not a default yes phrase (accents are folded, `si` is a pronoun). Nod and shake signs and
       amplitudes are untested on the hardware.
-- [ ] Edit wake phrases and the robot name from the web UI (needs an admin-confirmed settings editor,
-      SPEC 11A).
-- [ ] Edit the children's built-in lines (`safety.minor_lines`) and the minor blocklist from the web UI
-      (same editor). Until then they keep their defaults (owner decision, 2026-10-18).
+- [x] Settings API (SPEC 11A, epic settings-secrets slice 4): `GET/POST /api/settings` over an allowlist
+      (`webui/settings.py`): wake phrases, `voice.wake_word`, `safety.minor_lines.*`, the minor blocklist.
+      Admin PIN re-entered per write, runtime layer through the config stack, audited with source `webui`.
+      Open: the pages (slice 5); edits live in the runtime layer, so they are lost at restart (the
+      app config is not written from the web UI); no language can be added from the web, only edited.
 
 ## M3 exit (SPEC 14, `docs/eval/m3.md`)
 

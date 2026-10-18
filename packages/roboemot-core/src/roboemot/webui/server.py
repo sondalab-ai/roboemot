@@ -28,6 +28,7 @@ from .api import (
     Request,
     Response,
     RoutesPort,
+    SettingsPort,
     WebApi,
 )
 from .auth import PinStore, check_pin_format
@@ -300,6 +301,7 @@ def make_server(
     robot_hosted: bool = False,
     catalogue: CataloguePort | None = None,
     routes: RoutesPort | None = None,
+    settings: SettingsPort | None = None,
 ) -> Server:
     """Build the web UI on ``cfg.webui.bind:port``; nothing is served until ``start()``.
 
@@ -311,7 +313,16 @@ def make_server(
     current = cfg() if callable(cfg) else cfg
     web = current.webui
     pins = PinStore(Path(data_dir))
-    api = WebApi(service, diagnostics, cfg, pins, clock=clock, catalogue=catalogue, routes=routes)
+    api = WebApi(
+        service,
+        diagnostics,
+        cfg,
+        pins,
+        clock=clock,
+        catalogue=catalogue,
+        routes=routes,
+        settings=settings,
+    )
     bind = web.bind or (ANY_INTERFACE if robot_hosted else LOOPBACK_INTERFACE)
     httpd = _Httpd((bind, web.port), _Handler)
     httpd.csp = CSP.format(ancestors=web.frame_ancestors)

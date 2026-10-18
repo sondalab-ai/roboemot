@@ -3002,6 +3002,28 @@ class WebUIConfig(Strict):
     name_max_chars: int = param(
         64, "Longest display name or consent name", ge=1, le=200, conservative="lower"
     )
+    settings_phrase_max_chars: int = param(
+        40,
+        "Longest wake phrase or blocklist entry the settings editor accepts (SPEC 11A)",
+        ge=1,
+        le=200,
+        conservative="lower",
+    )
+    settings_line_max_chars: int = param(
+        200,
+        "Longest child-safe spoken line the settings editor accepts (SPEC 11A)",
+        ge=1,
+        le=500,
+        conservative="lower",
+    )
+    settings_list_max_items: int = param(
+        64,
+        "Most wake phrases or blocklist entries per language the settings editor accepts "
+        "(SPEC 11A)",
+        ge=1,
+        le=500,
+        conservative="lower",
+    )
     request_timeout_s: float = param(
         10.0,
         "Socket timeout per request (slow clients are dropped)",

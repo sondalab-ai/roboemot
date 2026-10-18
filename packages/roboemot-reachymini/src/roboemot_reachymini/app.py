@@ -66,6 +66,7 @@ from roboemot.voice.yes_no import YesNoGestures
 from roboemot.webui import Server, make_server
 from roboemot.webui.catalogue import open_catalogue
 from roboemot.webui.routes import RouteChecker
+from roboemot.webui.settings import SettingsEditor
 from roboemot.world import (
     Observation,
     ObserveResult,
@@ -397,6 +398,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 paths.data_dir(cfg.data_dir),
                 robot_hosted=manifest.robot.profile is not None,
                 catalogue=self.catalogue,
+                settings=SettingsEditor(stack),
                 routes=RouteChecker(
                     stack.effective,
                     paths.route_checks_path(cfg.data_dir),
