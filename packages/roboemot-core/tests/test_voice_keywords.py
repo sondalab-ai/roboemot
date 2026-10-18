@@ -35,7 +35,7 @@ def test_normalise(text, expected):
         ("no grazie", "it", {"no"}),
         ("stop it now", "en", {"stop"}),
         ("good morning robot", "en", {"greeting"}),
-        ("hello reachy", "en", {"greeting", "name"}),
+        ("hello reachy", "en", {"greeting", "name", "wake"}),  # "hello {name}"
         ("hello riyadh she how are you", "en", {"greeting", "name"}),
         ("ciao reati", "it", {"greeting", "name"}),
     ],

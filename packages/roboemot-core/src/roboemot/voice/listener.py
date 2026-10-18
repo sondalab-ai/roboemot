@@ -188,11 +188,13 @@ class VoiceListener:
             log.warning("voice listener: models: %s", type(exc).__name__)
             self._discard()
             return
+        self._name_vocabulary()
         self._state = "running"
         for language in models:  # the others while already listening; utterances before that
             if language != primary and not self._stop.is_set():  # use the languages loaded so far
                 try:
                     self._asr.load([language])
+                    self._name_vocabulary()
                 except Exception as exc:
                     log.warning("voice listener: model %s: %s", language, type(exc).__name__)
         while not self._stop.is_set():
@@ -208,6 +210,11 @@ class VoiceListener:
                 if name != self._last_error:
                     self._last_error = name
                     log.warning("voice listener: %s", name)
+
+    def _name_vocabulary(self) -> None:
+        """A model loaded: check the robot's name against its vocabulary now (logs once)."""
+        self._fast.names.refresh()
+        self._fast.apply_config(self._cfg.voice)
 
     def _discard(self) -> None:
         """Without a working recognizer keep draining the hub's queue so it never backs up."""

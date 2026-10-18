@@ -60,6 +60,7 @@ from roboemot.voice.activity import SpeechActivity
 from roboemot.voice.bargein import BargeIn, PlaybackReference
 from roboemot.voice.factory import build_speech
 from roboemot.voice.listener import Utterance, VoiceListener
+from roboemot.voice.robot_name import RobotName
 from roboemot.voice.speech import SpeechOutput
 from roboemot.webui import Server, make_server
 from roboemot.webui.catalogue import open_catalogue
@@ -578,6 +579,8 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             stack, None, TraitCache(paths.traits_cache_path(cfg.data_dir)), None, hub=hub
         )
 
+        # The robot's name: voice.wake_word, else the owner's name in the daemon setup (SPEC 8).
+        names = self.names = RobotName(source=loop.driver.robot_name)
         voice_pipeline = (
             build_listener(
                 cfg,
@@ -591,6 +594,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 FRAME,
                 lambda u: self.on_utterance(u),
                 reference,
+                names,
             )
             if cfg.voice.enabled
             else None
@@ -737,6 +741,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                             value_cap,
                         ),
                         speaker=conv_speaker,
+                        names=names,
                         skills=default_skills(
                             SkillBridge(
                                 expression, selector, world, perception.registry, stack.effective

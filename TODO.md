@@ -58,6 +58,8 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       `privacy.pseudonyms_to_cloud` exists.
 - [ ] `play` offers every label of the manifest's `expression_map` (affect expressions). Named
       gestures that are not affect labels (nod, shake) need their own map and primitives.
+- [ ] Edit wake phrases and the robot name from the web UI (needs an admin-confirmed settings editor,
+      SPEC 11A).
 
 ## M3 exit (SPEC 14, `docs/eval/m3.md`)
 
