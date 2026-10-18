@@ -131,6 +131,11 @@ def skill(
     return wrap
 
 
+# Keys of the results the executor and the default skills write (``error``, ``detail``,
+# ``ok``, ``applied``, ``status``); a custom skill that returns other keys is checked as text.
+RESULT_KEYS = ("error", "detail", "ok", "applied", "status")
+
+
 class SkillRegistry:
     """The skills of an app, by name."""
 
@@ -153,6 +158,14 @@ class SkillRegistry:
 
     def names(self) -> list[str]:
         return list(self._skills)
+
+    def structural_keys(self) -> frozenset[str]:
+        """The JSON keys the app writes itself in tool calls and results: every parameter name
+        of every skill plus ``RESULT_KEYS``. For the pseudonym leak check (SPEC 8), so a
+        registry name equal to one of them ("Target") does not block a cloud request."""
+        return frozenset(
+            [p.name for s in self._skills.values() for p in s.params] + list(RESULT_KEYS)
+        )
 
     def offered(self, allow: Collection[str], *, minor: bool) -> list[Skill]:
         """The skills the model may call now: visible, listed in ``allow``, and allowed with a

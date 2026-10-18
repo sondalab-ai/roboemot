@@ -231,6 +231,33 @@ def test_the_hub_rebuilds_when_a_secret_changes_on_reload(store):
     assert hub.sync(cfg) is not second
 
 
+async def test_a_rotated_secret_is_used_by_the_next_sync_without_a_config_change(store):
+    """SPEC 8 Secrets: the hub is synced each turn, so a key rotated on disk
+    goes out with the next request, with no reload event and no restart; budgets are kept."""
+    cfg = RoboEmotConfig(llm_routes=[cloud().model_dump()])
+    seen = []
+    srv = Server()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers["authorization"])
+        return await srv.handler(request)
+
+    def make(c):
+        return Router(
+            c.llm_routes, c.safety, secrets=store.get, http_client_factory=mock_client(handler)
+        )
+
+    store.set("cloud_key", KEY)
+    hub = RouterHub(make(cfg), make)
+    await collect(hub.sync(cfg))
+    spent = hub.router.used("cloud")
+    assert spent > 0
+    store.set("cloud_key", KEY + "2")
+    await collect(hub.sync(cfg))
+    assert seen == [f"Bearer {KEY}", f"Bearer {KEY}2"]
+    assert hub.router.used("cloud") > spent
+
+
 def test_a_check_probe_does_not_hide_a_later_secret_from_the_reload(store):
     """The web UI check resolves the key on the shared router; the next reload must still
     rebuild it, or the route stays unavailable until a restart."""

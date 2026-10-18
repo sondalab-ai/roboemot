@@ -75,6 +75,16 @@ EN: dict[str, str] = {
         "the daily budget of the route."
     ),
     "routes_none": "No LLM route is configured.",
+    "err_pseudonyms_unavailable": "The list of names is not available.",
+    "refused_title": "Names not replaced by aliases",
+    "refused_hint": (
+        "Registry names that cannot be replaced by an alias (no letter or digit, a word of an "
+        "alias template, a word of the request format, a backslash) reach cloud routes as "
+        "typed. Rename them to keep them private. Enter the admin PIN to see the list."
+    ),
+    "refused_show": "Show names",
+    "refused_none": "No name is sent as typed.",
+    "refused_off": "Pseudonyms for cloud routes are off.",
     "route_minors": "cleared for minors",
     "route_check": "Check",
     "route_checking": "Checking...",
@@ -357,6 +367,17 @@ IT: dict[str, str] = {
         "token dal budget giornaliero del modello."
     ),
     "routes_none": "Nessun modello LLM configurato.",
+    "err_pseudonyms_unavailable": "L'elenco dei nomi non è disponibile.",
+    "refused_title": "Nomi non sostituiti da alias",
+    "refused_hint": (
+        "I nomi dell'anagrafica che non possono essere sostituiti da un alias (senza lettere o "
+        "cifre, una parola di un modello di alias, una parola del formato della richiesta, una "
+        "barra rovesciata) arrivano ai modelli cloud così come sono. Rinominali per tenerli "
+        "privati. Inserisci il PIN admin per vedere l'elenco."
+    ),
+    "refused_show": "Mostra i nomi",
+    "refused_none": "Nessun nome viene inviato così com'è.",
+    "refused_off": "Gli pseudonimi per i modelli cloud sono disattivati.",
     "route_minors": "adatto ai minori",
     "route_check": "Controlla",
     "route_checking": "Controllo in corso...",

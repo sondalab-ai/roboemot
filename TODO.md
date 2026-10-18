@@ -39,8 +39,11 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       build (startup and each config reload, `RouterHub.sync` rebuilds when a secret changed); a route
       whose secret cannot be used is unavailable with one warning, and the CLI check and the web UI
       check refuse it. Keys are in no log, debug report or web UI response (`test_secret_leak.py`).
-      Open: the web UI cannot set or rotate a key; no encryption at rest (file modes only, owner
-      decision 2026-10-18); a secret set on disk is picked up at the next reload or restart, not live.
+      Intended (owner decisions 2026-10-18): the web UI never sets or rotates a key (CLI and installer
+      only; no TLS until M5); no encryption at rest (file modes only). Verified: a key rotated on disk
+      is picked up live, when the next utterance is answered or the traits worker syncs
+      (`secrets.json` is stat'ed each time): `RouterHub.sync` rebuilds the router, budgets kept, and
+      the next request carries the new key (`test_secret_store.py`).
 - [x] Scan soon after a person leaves (SPEC 5A, Scanning). Done: `world.scan.target_lost_delay_s`
       (8 s) with its own `target_lost_jitter_s` (3 s), scaled by `idle_period_x`; the policy uses
       it instead of the idle interval when the person target or speaker hint goes away. A person or
@@ -48,22 +51,35 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       (`ScanPolicy`, `test_scan.py`).
 - [x] Pseudonyms to cloud routes (SPEC 8, 12 Data): `privacy.pseudonyms_to_cloud` loads; the router
       gives aliases to routes that are not local (`llm_routes[].locality`, making a route local needs the admin; `auto` is this machine and the home network)
-      and restores names in the reply text and in tool-call arguments. Open: the aliases are handed
-      out afresh after an app restart; personal details that are not registry names are not replaced;
-      registry names refused for aliasing (no letter or digit, a template prefix word, a structural
+      and restores names in the reply text and in tool-call arguments. Intended (owner decision
+      2026-10-18): aliases live in RAM only and are new after an app restart. Open: personal details
+      that are not registry names are not replaced; registry names refused for aliasing (no letter or digit, a template prefix word, a structural
       word such as "user") are sent unaliased.
-- [ ] Pseudonyms residual: `persona/llm_traits.py` (`rate_traits`) streams `persona.prompt`
-      without `pseudonyms=`, so a registry name written into the persona prompt reaches a cloud
-      route as typed.
-- [ ] Pseudonyms residual: `llm/conformance.py` sends through `stream_route`, which bypasses the
-      pseudonyms (synthetic messages, low risk).
-- [ ] Pseudonyms residual: registry names refused for aliasing are sent unaliased and the admin
-      sees only their count in the log; consider showing which names in the web UI (admin only).
-- [ ] Pseudonyms residual: a JSON key in a tool call or result that equals a registry name
-      ("target" for a record "Target") is aliased in the history sent to a cloud route; nothing
-      leaks, but the model sees a renamed key.
-- [ ] Pseudonyms residual: a name written with `\uXXXX` escapes for ASCII letters in text that is
-      not JSON is neither scrubbed nor caught by the leak check.
+- [x] Pseudonyms residual: `persona/llm_traits.py` (`rate_traits`) streamed `persona.prompt`
+      without `pseudonyms=`. `TraitsWorker` now takes a `NameSource` (registry names) and the
+      rating goes through the same aliasing, leak check and restore as the conversation; names
+      that cannot be read mean no request.
+- [x] Pseudonyms residual: `llm/conformance.py` sent through `stream_route`, which bypassed the
+      pseudonyms. `stream_route(..., pseudonyms=)` shares the router's guard (a leak raises
+      `PseudonymLeak` before sending) and the web UI route check passes the map. Open:
+      `roboemot llm check` (CLI) does not open the registry, so it still sends its synthetic
+      prompts without pseudonyms.
+- [x] Pseudonyms residual: registry names refused for aliasing are sent unaliased and the admin
+      saw only their count in the log. The Routes tab now lists them on request
+      (`POST /api/pseudonyms/refused`, session, CSRF and the operator PIN re-entered); the log
+      still gives only the count. Open: the list has names, not record ids, so renaming is done
+      from the Registry tab.
+- [x] Pseudonyms residual: a JSON key in a tool call or result that equals a registry name
+      ("target" for a record "Target") was aliased in the history sent to a cloud route. Now only
+      string values are aliased. The leak check skips only the keys the app writes itself (the
+      skills' parameter names and result keys, `SkillRegistry.structural_keys()`), in tool call
+      arguments and `tool` messages; any other key that holds a name (a tool result keyed by
+      names, the result key of a custom skill) blocks the route instead of being renamed.
+- [ ] Pseudonyms follow-up: `NameSource` (traits, route checks) and the conversation's own
+      `Pseudonyms` are two maps with different aliases; merge them into one source.
+- [x] Pseudonyms residual: a name written with `\uXXXX` escapes in text that is not JSON was
+      neither scrubbed nor caught by the leak check. Escapes now count as their character in
+      matching (surrogate escapes are not decoded).
 
 ## Barge-in and skills (M3 slice 6, SPEC 8 stage 8, 11)
 
@@ -90,8 +106,8 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       Admin PIN re-entered per write, runtime layer through the config stack, audited with source
       `webui:<ip>`, persisted in `webui_settings.json` (0600) and replayed through the guardrails at startup.
       Blocklist: additions only from the web (removing needs the app config and the admin PIN).
-      Open: the pages (slice 5); no language can be added from the web, only edited; a blocklist
-      entry cannot be removed from the web UI at all.
+      Intended (owner decisions 2026-10-18): no language is added from the web, only edited; a
+      blocklist entry is removed only through the app config with the admin PIN (SPEC 11A).
 
 ## M3 exit (SPEC 14, `docs/eval/m3.md`)
 
@@ -103,17 +119,23 @@ The persona pieces exist and are tested; these callers wait for the pillars they
 
 ## CI and tests
 
-- [ ] `packages/roboemot-reachymini/tests/test_app_conversation.py::test_the_app_offers_the_default_skills_and_wires_barge_in`
-      is timing-flaky under load (failed once in a full run after the slice-2 fix, passes alone).
-- [ ] `packages/roboemot-core/tests/test_llm_router.py::test_hostile_tool_arguments_do_not_fail_the_route_or_get_parsed`
-      fails on Python 3.15 only (deeply nested JSON assertion); it passes on 3.12 and in CI.
-- [ ] No JS behaviour test runner: the web UI dialog flows (`ask()`, the PIN dialog, the settings editor)
-      are covered only by JS-free tests on the served files and by a manual headless-Chrome check.
+- [x] `packages/roboemot-reachymini/tests/test_app_conversation.py::test_the_app_offers_the_default_skills_and_wires_barge_in`
+      was timing-flaky under load: the listener thread fed quiet chunks into `BargeIn.on_chunk` between the
+      test's loud ones. The test now stops the listener first, so one thread drives the hook.
+- [x] `packages/roboemot-core/tests/test_llm_router.py::test_hostile_tool_arguments_do_not_fail_the_route_or_get_parsed`
+      failed on Python 3.15 only: its JSON parser no longer raises `RecursionError` on deep input. Tool-call
+      arguments are now kept only as an object within `TOOL_ARGS_MAX_DEPTH` (SPEC 8). CI runs 3.11 and 3.12 only.
+- [x] JS behaviour tests for the web UI (`ask()`, the PIN dialog, the settings editor): `node:test` + jsdom in
+      `packages/roboemot-core/tests/webui_js/` (dev-only, lockfile), CI job `webui-js`.
+- [x] `Pseudonyms._aliased_json` / `_aliased` recursed on deep tool-message content: `_nesting` and
+      `TOOL_ARGS_MAX_DEPTH` now live in `pseudonyms.py` (the router imports them); JSON nested deeper than the
+      limit is aliased as plain text (SPEC 8, 12).
+- [ ] `conversation.tool_arg_max_chars` and the router's `TOOL_ARGS_MAX_CHARS` are two caps on the same thing:
+      decide one owner (SPEC 8, 11A).
 - [ ] Confirm the robot's Python version (`python scripts/robot_ssh.py -- python3 --version`). The Piper hash locks cover
       aarch64 py3.11 and py3.12 until then; drop the unused one (SPEC 4A Installer).
 - [ ] Confirm on the robot that the app runs as the same user the installer writes `secrets.json` as over SSH;
       otherwise the uid check makes secret routes unavailable (SPEC 8 Secrets, 12 Data).
-- [ ] Runtime test that a hostile `base_url` redirect (307 to another host) does not carry the `Authorization`
-      header (openai/httpx defaults; router and speech client) (SPEC 8).
-- [ ] Dev env only: a local `.venv` with an editable install of the main checkout lacks the `roboemot.world`
-      entry point, so `test_world_plugin.py` fails locally; reinstall the editable packages.
+- [x] Runtime test that a hostile `base_url` redirect (307 to another host) reaches nothing: `test_redirect_auth.py`.
+      The openai SDK client followed redirects (the prompt went to the target, without the key); LLM routes
+      now do not follow them, like the speech client (SPEC 8, 12).

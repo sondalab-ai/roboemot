@@ -26,6 +26,7 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError
 
 from ..config.schema import LLMCheckConfig, LLMRoute, SafetyConfig
 from ..secret_store import no_secrets
+from .pseudonyms import Pseudonyms
 from .router import Done, FirstToken, Router, TextDelta, ToolCall
 
 log = logging.getLogger(__name__)
@@ -138,11 +139,15 @@ def italian_ratio(text: str, stopwords: list[str]) -> tuple[int, float]:
 
 
 async def _ask(
-    router: Router, route: LLMRoute, messages: list[dict[str, Any]], tools: list | None
+    router: Router,
+    route: LLMRoute,
+    messages: list[dict[str, Any]],
+    tools: list | None,
+    pseudonyms: Pseudonyms | None = None,
 ) -> _Answer:
     ans = _Answer()
     try:
-        async for ev in router.stream_route(route, messages, tools, ans.timing):
+        async for ev in router.stream_route(route, messages, tools, ans.timing, pseudonyms):
             if isinstance(ev, TextDelta):
                 ans.text += ev.text
                 ans.chunks += 1
@@ -202,13 +207,15 @@ async def check_route(
     settings: LLMCheckConfig | None = None,
     router: Router | None = None,
     secrets: Callable[[str], str] = no_secrets,
+    pseudonyms: Pseudonyms | None = None,
     http_client_factory: Callable[[], httpx.AsyncClient] | None = None,
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
 ) -> RouteReport:
     """Run the four checks against ``route`` only. Pass the app's ``router`` to share its daily
     budgets; otherwise a private one is built from ``safety``, ``secrets`` and the client
     factory. Raises :class:`RouteKeyUnavailable` when the route's secret cannot be read and
-    :class:`RouteBudgetExhausted` when the budget is spent, both before anything is sent.
+    :class:`RouteBudgetExhausted` when the budget is spent, both before anything is sent. With
+    ``pseudonyms`` a route that is not local gets the requests aliased like any cloud request.
     Failures of the route become ``fail`` results, never exceptions."""
     settings = settings or LLMCheckConfig()
     router = router or Router(
@@ -224,9 +231,9 @@ async def check_route(
         route.name, route.model, route_endpoint(route), now().isoformat(timespec="seconds")
     )
 
-    ask = await _ask(router, route, [{"role": "user", "content": ITALIAN_PROMPT}], None)
+    ask = await _ask(router, route, [{"role": "user", "content": ITALIAN_PROMPT}], None, pseudonyms)
     report.first_token_s = ask.timing.seconds
-    tool = await _tool_round_trip(router, route, ask.unreachable)
+    tool = await _tool_round_trip(router, route, ask.unreachable, pseudonyms)
     report.checks += [_streaming(ask), tool, _latency(ask, route), _italian(ask, settings)]
     report.tokens = router.used(route.name) - spent
     log.info(
@@ -237,14 +244,16 @@ async def check_route(
     return report
 
 
-async def _tool_round_trip(router: Router, route: LLMRoute, unreachable: bool) -> CheckResult:
+async def _tool_round_trip(
+    router: Router, route: LLMRoute, unreachable: bool, pseudonyms: Pseudonyms | None = None
+) -> CheckResult:
     """One tool call with parsable arguments, then a text answer to its result."""
     if unreachable:
         return CheckResult(TOOL_ROUND_TRIP, SKIP, "route unreachable")
     if router.used(route.name) >= route.daily_token_budget:
         return CheckResult(TOOL_ROUND_TRIP, SKIP, "daily token budget spent by the earlier request")
     messages: list[dict[str, Any]] = [{"role": "user", "content": TOOL_PROMPT}]
-    first = await _ask(router, route, messages, TOOLS)
+    first = await _ask(router, route, messages, TOOLS, pseudonyms)
     if first.error is not None:
         return CheckResult(TOOL_ROUND_TRIP, FAIL, f"tool request failed: {_why(first.error)}")
     if not first.calls:
@@ -253,7 +262,9 @@ async def _tool_round_trip(router: Router, route: LLMRoute, unreachable: bool) -
     if call.name != TOOL_NAME:
         return CheckResult(TOOL_ROUND_TRIP, FAIL, "tool call names an unknown tool")
     if "_raw" in call.arguments:
-        return CheckResult(TOOL_ROUND_TRIP, FAIL, "tool call arguments are not valid JSON")
+        return CheckResult(
+            TOOL_ROUND_TRIP, FAIL, "tool call arguments are not a JSON object within limits"
+        )
     if not call.id:
         return CheckResult(TOOL_ROUND_TRIP, FAIL, "tool call has no id")
     if router.used(route.name) >= route.daily_token_budget:
@@ -272,7 +283,7 @@ async def _tool_round_trip(router: Router, route: LLMRoute, unreachable: bool) -
         },
         {"role": "tool", "tool_call_id": call.id, "content": TOOL_RESULT},
     ]
-    second = await _ask(router, route, messages, TOOLS)
+    second = await _ask(router, route, messages, TOOLS, pseudonyms)
     if second.error is not None:
         return CheckResult(TOOL_ROUND_TRIP, FAIL, f"tool result rejected: {_why(second.error)}")
     if not second.text.strip():

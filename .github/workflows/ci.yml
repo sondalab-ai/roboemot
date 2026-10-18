@@ -93,6 +93,20 @@ jobs:
           path: m3-exit-report.json
           if-no-files-found: ignore
 
+  # Web UI behaviour tests (node:test + jsdom, dev-only, versions pinned by the lockfile); they load
+  # the served page script unmodified. The vendored kit is not touched.
+  webui-js:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: packages/roboemot-core/tests/webui_js
+      - run: npm test
+        working-directory: packages/roboemot-core/tests/webui_js
+
   rt:
     runs-on: ubuntu-24.04
     steps:
