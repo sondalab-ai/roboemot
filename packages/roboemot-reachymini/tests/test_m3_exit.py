@@ -15,6 +15,7 @@ Set ``ROBOEMOT_EXIT_REPORT`` to a file path to also get the measured numbers as 
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import os
 import threading
@@ -34,7 +35,6 @@ from roboemot.vision.models import ModelError
 from roboemot.voice import factory
 from roboemot.voice import models as voice_models
 from roboemot.voice.tts import AudioChunk
-from roboemot.voice.vad import SileroVAD
 from test_app_perception import data, wait_for  # noqa: F401  (data: fixture)
 from test_app_reflex import ScriptedMini, enable, run_app
 
@@ -92,17 +92,6 @@ def speech_span_s(clip: np.ndarray) -> tuple[float, float]:
     ]
     assert loud, "no speech in the clip"
     return loud[0] / RATE, loud[-1] / RATE
-
-
-def voiced_onset_s(clip: np.ndarray, threshold: float) -> float:
-    """Start of the first 32 ms frame the Silero VAD scores at ``threshold`` or more (the barge-in
-    threshold): where the detector can first see the speech. A word that starts with a fricative
-    ("stop") is audible, above ``FLOOR_DB``, well before this."""
-    vad = SileroVAD(voice_models.model_file(MODELS_DIR, "silero-vad"), 1)
-    for i in range(0, clip.size - FRAME, FRAME):
-        if vad.speech_prob(clip[i : i + FRAME]) >= threshold:
-            return i / RATE
-    raise AssertionError("the VAD never fires on the clip")
 
 
 class LiveMic:
@@ -274,6 +263,14 @@ def yaml_for(language: str, piper: Path | None) -> str:
 
 def start_app(data, monkeypatch, language, piper, minor=False, minors_llm=False):  # noqa: F811
     spoken: list[tuple[str, str]] = []
+    # The route is an in-process mock, but the app's network monitor probes "lan.local" over TCP.
+    # Where that name fails fast (CI) the link goes offline after three probes and the robot
+    # replies nonverbally; where it hangs (macOS mDNS) it does not, which hid the dependency.
+    monkeypatch.setattr(
+        app_module,
+        "NetworkMonitor",
+        functools.partial(app_module.NetworkMonitor, probe=lambda host, port, timeout_s: True),
+    )
     if piper is None:
         monkeypatch.setattr(factory, "build_backend", lambda cfg, router: DelayedTTS(spoken))
     else:
@@ -347,7 +344,10 @@ def test_conversation_inside_the_latency_budgets_then_a_barge_in(
         u0 = app.utterances[0][1]
         assert wait_for(lambda: mini.pushes, 20), (
             f"the robot never answered: language={u0.language} final={u0.final} "
-            f"addressed={u0.addressed} keywords={sorted(u0.keywords)}"
+            f"addressed={u0.addressed} keywords={sorted(u0.keywords)} "
+            f"requests={len(app.requests)} spoken={len(spoken)} "
+            f"conversation={app.conversation.snapshot()} "
+            f"network={app.diagnostics.report()['sections'].get('roboemot.network')}"
         )
         first_push = mini.pushes[0][0]
         assert wait_for(lambda: "latency_ms" in app.conversation.snapshot(), 5)
@@ -369,11 +369,7 @@ def test_conversation_inside_the_latency_budgets_then_a_barge_in(
         assert not mini.clears, "clear_player was called before the stop clip"
         onset_wall = mini.mic.play(stop_audio)
         acoustic_onset = onset_wall + speech_span_s(stop_audio)[0]
-        voiced_onset = onset_wall + voiced_onset_s(
-            stop_audio, RoboEmotConfig().voice.barge_in.threshold
-        )
         assert wait_for(lambda: bool(mini.clears), 5), "barge-in never stopped the speaker"
-        stop_ms = (mini.clears[0] - voiced_onset) * 1000
         stop_acoustic_ms = (mini.clears[0] - acoustic_onset) * 1000
         triggers = app.bargein.snapshot()["triggers"]
         assert stop_acoustic_ms >= 0, "the speaker was cleared before the user spoke"
@@ -397,7 +393,6 @@ def test_conversation_inside_the_latency_budgets_then_a_barge_in(
                 "max_first_token_s_inside_budget": round(
                     FIRST_TOKEN_S + (FIRST_AUDIO_BUDGET_MS - first_audio_ms) / 1000, 2
                 ),
-                "barge_in_stop_after_voiced_onset_ms": round(stop_ms),
                 "barge_in_stop_after_acoustic_onset_ms": round(stop_acoustic_ms),
                 "barge_in_trigger": "vad" if triggers else "keyword",
                 "answer_audio_queued_when_cut_s": round(queued_at_cut, 1),
@@ -414,11 +409,10 @@ def test_conversation_inside_the_latency_budgets_then_a_barge_in(
         )
         assert spoken and {lang for lang, _ in spoken} == {language}, "answer in the wrong language"
 
-        if stop_acoustic_ms > BARGE_IN_BUDGET_MS:
-            msg = f"barge-in stop {stop_acoustic_ms:.0f} ms after the first sound"
-            if language == "en":  # a known miss, not hidden: docs/eval/m3.md, Barge-in
-                pytest.xfail(f"{msg}; fricative-initial 'stop' (not strict: some runs pass)")
-            pytest.fail(msg)
+        assert stop_acoustic_ms <= BARGE_IN_BUDGET_MS, (
+            f"barge-in stop {stop_acoustic_ms:.0f} ms after the first sound; "
+            f"barge-in state {app.bargein.snapshot()}"
+        )
     finally:
         finish(stop, thread, errors)
 

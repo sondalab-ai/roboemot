@@ -247,7 +247,7 @@ def resolve_preset(name: str, preset_dirs: Iterable[Path], _seen: tuple[str, ...
 # ----------------------------------------------------------------------------- guardrails
 
 MANIFEST_BEHAVIOUR_KEYS = frozenset(
-    {"expression_map", "circadian_motion"}
+    {"expression_map", "gesture_map", "circadian_motion"}
 )  # what a robot manifest may set
 PERSON_SECTIONS = ("register", "voice", "conversation", "persona.traits")
 

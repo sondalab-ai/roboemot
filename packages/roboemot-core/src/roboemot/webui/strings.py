@@ -110,7 +110,9 @@ EN: dict[str, str] = {
         "machine or the home network receive real names, so a gateway on the network that "
         "forwards to a cloud provider must be marked as cloud by the administrator. A cloud "
         "speech voice still hears the names it speaks. A nickname, a misspelt name or other "
-        "personal details said aloud are not replaced."
+        "personal details said aloud are not replaced, nor is a registry name the robot cannot "
+        "alias (one without letters, a word of the alias template or a structural word such "
+        'as "user"): it is sent as written.'
     ),
     "registry_title": "Registry",
     "registry_empty": "Nothing registered yet.",
@@ -338,7 +340,9 @@ IT: dict[str, str] = {
         "in rete che inoltra a un fornitore cloud deve essere segnato come cloud "
         "dall'amministratore. Una voce cloud ascolta comunque i nomi che pronuncia. Un "
         "soprannome, un nome storpiato o altri dati personali detti a voce non vengono "
-        "sostituiti."
+        "sostituiti, né un nome dell'anagrafica che il robot non può sostituire (senza lettere, "
+        'una parola del modello di alias o una parola strutturale come "user"): viene '
+        "inviato così com'è."
     ),
     "registry_title": "Anagrafica",
     "registry_empty": "Ancora nulla di registrato.",

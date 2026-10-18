@@ -248,13 +248,17 @@ def test_the_app_offers_the_default_skills_and_wires_barge_in(data, fakes, said,
     app.requests = []
     stop, thread, errors = run_app(app, ScriptedMini().mini)
     try:
-        assert wait_for(lambda: app.conversation is not None and app.bargein is not None)
+        # `app.bargein` is published before the app binds its actions (`BargeIn.bind`, after the
+        # conversation worker starts); a chunk fed earlier is silently ignored.
+        assert wait_for(
+            lambda: app.conversation is not None and app.bargein is not None and app.bargein.bound
+        )
         skills = app.conversation.skills
         assert skills.names() == [
             "play", "look_at", "express_emotion", "remember_preference", "stop_talking",
         ]  # fmt: skip
         gestures = skills.get("play").resolved_choices()["gesture"]
-        assert set(gestures) == set(app.expression.expression_map) and gestures
+        assert set(gestures) == set(app.expression.playable()) >= {"nod", "shake"}
         assert app.conversation.preferences is not None
         # the user speaks over the robot: loud frames, no reference to match them against
         app.speech.extend(time.monotonic() + 5.0)

@@ -26,8 +26,8 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       `NetworkMonitor` (`make_router` is overridable). The `TraitCache` is
       `<data folder>/llm_traits.json` (`paths.traits_cache_path`), removed by uninstall with the
       folder when the installer created it (SPEC 4A, Installer; `test_install_wizard.py`). Tests: `test_traits_worker.py`,
-      `test_app_llm_traits.py`. Open: the `NetworkMonitor` still watches the routes it was built
-      with, so a route added by hot reload is not probed until restart.
+      `test_app_llm_traits.py`. The `NetworkMonitor` follows hot-reloaded routes (`set_routes`, called from
+      the app's `config.changed` handler; `test_health.py`).
 - [x] Per-route history trimming (SPEC 8, Conversation state). Done: `llm_routes[].context_budget_tokens`
       (8192) and `conversation.turn_reserve_tokens` (256); `trim_history` drops whole turns,
       oldest first, and the router applies it per route; load-time rejection names the route
@@ -35,14 +35,24 @@ The persona pieces exist and are tested; these callers wait for the pillars they
 - [ ] Secret store for `${secret:name}` route keys (SPEC 8: stored encrypted on the robot). The
       app's `make_router` has no resolver, so such routes send an empty key; the app logs a
       warning at startup for each one.
-- [ ] Scan soon after a person leaves (SPEC 5A, Scanning): when the person target is lost, start a
-      sweep after a new `world.scan.target_lost_delay_s` (N s, jittered, scaled like the idle
-      interval) instead of waiting the full `world.scan.idle_interval_s` (120 s). Same rules as
-      the idle scan: a person target or speaker hint cancels it, not while resting.
+- [x] Scan soon after a person leaves (SPEC 5A, Scanning). Done: `world.scan.target_lost_delay_s`
+      (8 s) with its own `target_lost_jitter_s` (3 s), scaled by `idle_period_x`; the policy uses
+      it instead of the idle interval when the person target or speaker hint goes away. A person or
+      speaker engaging again cancels it, and it never runs while resting or in quiet hours
+      (`ScanPolicy`, `test_scan.py`).
 - [x] Pseudonyms to cloud routes (SPEC 8, 12 Data): `privacy.pseudonyms_to_cloud` loads; the router
       gives aliases to routes that are not local (`llm_routes[].locality`, making a route local needs the admin; `auto` is this machine and the home network)
       and restores names in the reply text and in tool-call arguments. Open: the aliases are handed
-      out afresh after an app restart; personal details that are not registry names are not replaced.
+      out afresh after an app restart; personal details that are not registry names are not replaced;
+      registry names refused for aliasing (no letter or digit, a template prefix word, a structural
+      word such as "user") are sent unaliased.
+- [ ] Pseudonyms for the persona trait rating (SPEC 8, 12 Data): `rate_traits`
+      (`persona/llm_traits.py`) streams `persona.prompt` without `pseudonyms=`, so a registry name
+      written into the persona prompt reaches a cloud route as typed.
+- [ ] Pseudonyms in tool payload keys (SPEC 8, 12 Data): a JSON key in a tool call or result that
+      equals a registry name ("target" for a record "Target") is aliased in the history sent to a
+      cloud route. Nothing leaks, but the model sees a renamed key; alias JSON values only and let
+      the leak check refuse a name in a key.
 
 ## Barge-in and skills (M3 slice 6, SPEC 8 stage 8, 11)
 
@@ -56,8 +66,11 @@ The persona pieces exist and are tested; these callers wait for the pillars they
 - [x] `look_at` names come from the registry display names of what is in view and are sent to the
       route as tool-schema choices, like the scene summary; with `privacy.pseudonyms_to_cloud` the
       cloud route gets aliases in the enum and the executor gets the real name back.
-- [ ] `play` offers every label of the manifest's `expression_map` (affect expressions). Named
-      gestures that are not affect labels (nod, shake) need their own map and primitives.
+- [x] `play` offers every label of the manifest's `expression_map` plus the named gestures of its
+      `gesture_map` (nod, shake): same renderer, register, persona, minor cap and limiter (SPEC 7, 11).
+- [ ] Fast path: a nod on a spoken "yes"/"sì" and a shake on "no" (the `speech.keyword.yes/no` events
+      exist; needs an app handler that calls `ExpressionRenderer.request`, and a rule for when the
+      robot is the one asking). Nod and shake signs and amplitudes are untested on the hardware.
 - [ ] Edit wake phrases and the robot name from the web UI (needs an admin-confirmed settings editor,
       SPEC 11A).
 - [ ] Edit the children's built-in lines (`safety.minor_lines`) and the minor blocklist from the web UI
@@ -67,8 +80,6 @@ The persona pieces exist and are tested; these callers wait for the pillars they
 
 - [x] Exit test `packages/roboemot-reachymini/tests/test_m3_exit.py` (`pytest -m models`): Italian and
       English through the real app on a scripted client, the three budgets, a barge-in and the child case.
-- [ ] A CI job for `-m models` tests: the runner needs a cached voice models folder (Silero, two Vosk
-      models, two Piper voices, about 0.3 GB) and a Piper interpreter; `ci.yml` has none today.
 - [ ] The robot, owner and licence items of the M3 report are in SPEC 15 (exit on the robot, barge-in,
       CM4 load, Piper on the robot and its voice licences, wake phrases, OpenAI speech in Italian,
       children's lines). Not repeated here.

@@ -461,8 +461,10 @@ def test_object_attention_holds_a_due_scan_then_the_sweep_hides_it():
     assert started_at >= cfg.attention.object_max_hold_s + cfg.world.scan.idle_interval_s - 5.0
 
 
-def test_an_interrupted_sweep_resumes_fresh_after_a_full_interval():
-    cfg, loop, driver, clock, world, selector, gaze, scan = rig()
+def test_an_interrupted_sweep_resumes_fresh_after_the_target_lost_delay():
+    cfg, loop, driver, clock, world, selector, gaze, scan = rig(
+        scan_cfg={"target_lost_delay_s": 10.0, "target_lost_jitter_s": 2.0}
+    )
     while not scan.active and clock[0] < 60:
         run_tick(cfg, loop, clock, world, selector, gaze, scan)
     for _ in range(50):
@@ -480,7 +482,10 @@ def test_an_interrupted_sweep_resumes_fresh_after_a_full_interval():
         if scanning:
             started = clock[0]
             break
-    assert started is not None and started - left_at >= 20.0 - 5.0 - 5.0  # interval - jitter
+    lost, jitter = cfg.world.scan.target_lost_delay_s, cfg.world.scan.target_lost_jitter_s
+    # the delay runs from the tick attention lets go, which is never before the person left
+    assert started is not None and started - left_at >= lost - jitter
+    assert started - left_at < cfg.world.scan.idle_interval_s - cfg.world.scan.jitter_s
     assert started > interrupted_at
 
 
