@@ -3,18 +3,21 @@
 ``build_catalogue`` walks the ``RoboEmotConfig`` schema together with the effective values and
 returns ``FieldDescriptor`` dicts. This shape is a frozen contract (the robot plugin and the
 settings page are built against it); ``DESCRIPTOR_KEYS`` and ``KINDS`` pin it in a test.
+``descriptor()`` builds one row with every key filled, for read-only rows a robot plugin adds.
 
 Keys of every descriptor (all always present, ``None`` when not applicable):
 
-- ``path``: dotted config path (a dict key or a keyed-list entry name/event is one segment).
+- ``path``: dotted config path. A dict key or a keyed-list entry (its name, else its index) is one
+  segment; dict keys containing "." or secret-shaped are not listed.
 - ``kind``: one of ``KINDS``. Scalars ``number`` (float), ``int``, ``bool``, ``text``, ``enum``
   (``choices``); ``tuple`` (fixed length ``length``, items ``item_kind`` number/int/text);
   collections ``string_list``, ``enum_list`` (``choices``), ``tuple_list``, ``string_dict``,
   ``number_dict``; ``json`` for any other shape (an absent optional section too).
   ``dict_of_model``, ``keyed_list`` and ``string_list_dict`` are containers: ``value`` is the list
   of entry keys and each entry follows as descriptors under ``<path>.<key>`` (its fields, or for
-  ``string_list_dict`` a ``string_list``). ``keyed_list`` names
-  its identity field in ``key``.
+  ``string_list_dict`` a ``string_list``). ``keyed_list`` names its identity field in ``key``.
+- ``entry``: for ``dict_of_model`` and ``keyed_list`` only: descriptors of a default-built entry
+  with paths relative to the entry, to build an "add entry" form (required fields are null).
 - ``nullable``: the field accepts null (any kind but the containers).
 - ``value`` / ``default``: effective value, and the value without the runtime layer (what a
   reset would give); plain JSON.
@@ -22,22 +25,29 @@ Keys of every descriptor (all always present, ``None`` when not applicable):
   ``app``, ``preset``, ``manifest``, ``defaults`` or ``schema``.
 - ``ge`` / ``le`` (numeric limits), ``unit``, ``restart``, ``admin_only``, ``opt_in``,
   ``conservative``, ``description``: from the schema (``field_meta`` for the flags).
-- ``secret``: the value is a secret or secret-shaped. ``value`` and ``default`` are then
-  ``"***"`` (or null when absent) and the field is never writable from the web.
+- ``secret``: the value is a secret or secret-shaped (a field is fully secret if any element of
+  its value or default is secret-shaped). ``value`` and ``default`` are then ``"***"`` (or null
+  when absent) and the field is never writable from the web.
+- ``private``: minors, privacy and location settings (``PRIVATE_PATHS``), admin only (the PIN).
+  Unless the catalogue is built with ``reveal_private``, ``value`` and ``default`` are ``"***"``
+  and a private container lists no entry keys and no ``entry``; the field itself stays writable.
+  ``admin_only`` is true on every private field. A secret stays redacted even when revealed.
 - ``writable``: the web UI may write it today.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from typing import Any, Literal, TypedDict, get_args, get_origin
 
 from pydantic import BaseModel
 
-from roboemot.diagnostics import REDACTED, is_secret_key, secret_shaped
+from roboemot.diagnostics import jsonable
+from roboemot.redact import REDACTED, is_secret_key, secret_shaped
 
 from .schema import RoboEmotConfig
-from .stack import KEYED_LISTS, _strip_optional, field_meta, get_path
+from .stack import KEYED_LISTS, field_meta, resolve_in_layer, strip_optional
 
 KINDS = (
     "number",
@@ -57,8 +67,29 @@ KINDS = (
     "keyed_list",
 )
 CONTAINERS = ("dict_of_model", "keyed_list", "string_list_dict")
+ENTRY_KINDS = ("dict_of_model", "keyed_list")
 TEXT_KINDS = ("text", "enum", "string_list", "string_dict", "json")
+STRUCTURED_KINDS = ("string_dict", "json")
+PRIVATE_PATHS = (
+    "circadian.location",
+    "privacy",
+    "safety.minor_motion_factor",
+    "safety.minor_hold_s",
+    "safety.minor_hold_periods",
+    "safety.minors_allowed_llm",
+    "safety.minor_output_blocklist",
+    "safety.minor_lines",
+    "register.child.minor_content_policy",
+    "register.teen.minor_content_policy",
+    "register.adult.minor_content_policy",
+    "register.senior.minor_content_policy",
+    "register.unknown.minor_content_policy",
+    "reflexes.rules.*.suppress_with_minor",
+)
+PATH_WILDCARD = "*"
 DEFAULT_LIST_KEY = "name"
+ENTRY_PLACEHOLDER = "_"
+BLANK_SOURCE = "schema"
 
 
 class FieldDescriptor(TypedDict):
@@ -82,23 +113,99 @@ class FieldDescriptor(TypedDict):
     item_kind: str | None
     length: int | None
     key: str | None
+    entry: list[FieldDescriptor] | None
     secret: bool
+    private: bool
     writable: bool
 
 
 DESCRIPTOR_KEYS = frozenset(FieldDescriptor.__annotations__)
 
 
+def _plain(value: Any) -> Any:
+    """``value`` as plain JSON (models dumped, tuples as lists)."""
+    return json.loads(json.dumps(value, default=lambda o: o.model_dump(mode="json")))
+
+
+def _is_secret(kind: str, name: str, value: Any, default: Any) -> bool:
+    """Secret by field name (text kinds only: ``max_tokens`` is not a token), by value shape, or,
+    for free-form maps, by a credential-named inner key (what ``jsonable`` would redact)."""
+    if kind in TEXT_KINDS and is_secret_key(name):
+        return True
+    if secret_shaped([value, default]):
+        return True
+    return kind in STRUCTURED_KINDS and jsonable([value, default]) != _plain([value, default])
+
+
+def descriptor(path: str, kind: str, value: Any = None, **fields: Any) -> FieldDescriptor:
+    """A descriptor with every key filled (``None``, ``False``, ``""`` or source ``schema``),
+    overridden by ``fields``; for read-only rows a robot plugin contributes. Secret and private
+    redaction apply as for the catalogue's own rows. Unknown keys or kinds raise ``ValueError``."""
+    if kind not in KINDS:
+        raise ValueError(f"unknown kind {kind!r}")
+    unknown = set(fields) - DESCRIPTOR_KEYS
+    if unknown:
+        raise ValueError(f"unknown descriptor keys {sorted(unknown)}")
+    row: FieldDescriptor = {
+        "path": path,
+        "kind": kind,
+        "nullable": False,
+        "value": value,
+        "default": None,
+        "source": BLANK_SOURCE,
+        "ge": None,
+        "le": None,
+        "unit": None,
+        "restart": False,
+        "admin_only": False,
+        "opt_in": False,
+        "conservative": None,
+        "description": "",
+        "choices": None,
+        "item_kind": None,
+        "length": None,
+        "key": None,
+        "entry": None,
+        "secret": False,
+        "private": False,
+        "writable": False,
+    }
+    row.update(fields)  # type: ignore[typeddict-item]
+    if kind not in CONTAINERS:
+        seal(row, path.rsplit(".", 1)[-1])
+    return row
+
+
+def is_private(path: str) -> bool:
+    """Whether ``path`` is one of ``PRIVATE_PATHS`` or inside one (a ``*`` matches one segment)."""
+    parts = path.split(".")
+    for pattern in PRIVATE_PATHS:
+        want = pattern.split(".")
+        if len(parts) >= len(want) and all(
+            w in (PATH_WILDCARD, p) for w, p in zip(want, parts, strict=False)
+        ):
+            return True
+    return False
+
+
+def seal(row: FieldDescriptor, name: str, reveal_private: bool = False) -> None:
+    """Set ``secret`` and ``private`` of a leaf row and redact its ``value`` and ``default``
+    (a private value stays visible with ``reveal_private``; a secret never does). A private field
+    is admin only; a secret field is never writable."""
+    row["secret"] = _is_secret(row["kind"], name, row["value"], row["default"])
+    row["private"] = is_private(row["path"])
+    row["admin_only"] = row["admin_only"] or row["private"]
+    hide = row["secret"] or (row["private"] and not reveal_private)
+    if hide:
+        row["value"] = REDACTED if row["value"] is not None else None
+        row["default"] = REDACTED if row["default"] is not None else None
+    if row["secret"]:
+        row["writable"] = False
+
+
 def _scalar_kind(annotation: Any) -> str:
-    if annotation is bool:
-        return "bool"
-    if annotation is float:
-        return "number"
-    if annotation is int:
-        return "int"
-    if annotation is str:
-        return "text"
-    return "json"
+    kinds = {bool: "bool", float: "number", int: "int", str: "text"}
+    return kinds.get(annotation, "json")
 
 
 def classify(annotation: Any) -> tuple[str, dict[str, Any]]:
@@ -110,20 +217,15 @@ def classify(annotation: Any) -> tuple[str, dict[str, Any]]:
     if origin is tuple:
         kinds = {_scalar_kind(a) for a in args}
         item = kinds.pop() if len(kinds) == 1 else "json"
-        return (
-            ("tuple", {"item_kind": item, "length": len(args)})
-            if item != "json"
-            else (
-                "json",
-                {},
-            )
-        )
+        if item == "json":
+            return "json", {}
+        return "tuple", {"item_kind": item, "length": len(args)}
     if origin is list and args:
-        inner, inner_args = args[0], get_args(args[0])
+        inner = args[0]
         if inner is str:
             return "string_list", {}
         if get_origin(inner) is Literal:
-            return "enum_list", {"choices": list(inner_args)}
+            return "enum_list", {"choices": list(get_args(inner))}
         if get_origin(inner) is tuple:
             kind, extra = classify(inner)
             return ("tuple_list", extra) if kind == "tuple" else ("json", {})
@@ -134,8 +236,7 @@ def classify(annotation: Any) -> tuple[str, dict[str, Any]]:
             return "number_dict", {}
         if get_origin(args[1]) is list and get_args(args[1]) == (str,):
             return "string_list_dict", {}
-    kind = _scalar_kind(annotation)
-    return kind, {}
+    return _scalar_kind(annotation), {}
 
 
 def _limits(info: Any) -> dict[str, float | None]:
@@ -153,15 +254,29 @@ def _model_of(annotation: Any) -> type[BaseModel] | None:
     )
 
 
+def _addressable(key: Any) -> bool:
+    """A dict key that survives as a path segment: no dot, not secret-shaped."""
+    return isinstance(key, str) and "." not in key and not secret_shaped(key)
+
+
 def _segment(item: Any, key: str, index: int, taken: set[str]) -> str:
-    """Path segment of a keyed-list entry: its identity value when unique and not numeric,
-    else its index (``get_path`` accepts both)."""
+    """Path segment of a keyed-list entry: its identity value when unique, plain and not numeric,
+    else its index (``get_path`` accepts both; layers are matched by identity, not by this)."""
     ident = item.get(key) if isinstance(item, dict) else None
-    usable = isinstance(ident, str) and ident and not ident.isdigit() and "." not in ident
+    usable = isinstance(ident, str) and ident and not ident.isdigit() and _addressable(ident)
     if usable and ident not in taken:
         taken.add(ident)
         return ident
     return str(index)
+
+
+def _blank(model: type[BaseModel]) -> dict[str, Any]:
+    """Plain defaults of a model; a required field is null."""
+    built = model.model_construct()
+    return {
+        name: None if info.is_required() else _plain(getattr(built, name))
+        for name, info in model.model_fields.items()
+    }
 
 
 class _Walker:
@@ -170,11 +285,13 @@ class _Walker:
     def __init__(
         self,
         values: dict[str, Any],
-        defaults: dict[str, Any],
+        base: dict[str, Any] | None,
         source_of: Callable[[str], str],
         writable: Callable[[str], bool],
+        reveal_private: bool = False,
     ) -> None:
-        self.values, self.defaults = values, defaults
+        self.reveal = reveal_private
+        self.values, self.base = values, base
         self.source_of, self.writable = source_of, writable
         self.out: list[FieldDescriptor] = []
 
@@ -184,62 +301,81 @@ class _Walker:
                 self.field(f"{prefix}{name}", name, info, values[name])
 
     def field(self, path: str, name: str, info: Any, value: Any) -> None:
-        annotation = _strip_optional(info.annotation)
+        annotation = strip_optional(info.annotation)
         nullable = annotation is not info.annotation
         origin, args = get_origin(annotation), get_args(annotation)
         sub = _model_of(annotation)
         if sub is not None and value is not None:
             self.model(sub, path + ".", value)
             return
-        if origin is dict and len(args) == 2 and _model_of(args[1]) is not None:
-            self.container(path, "dict_of_model", info, list(value), None)
-            for key, entry in value.items():
+        if value is not None and origin is dict and len(args) == 2 and _model_of(args[1]):
+            entries = {k: v for k, v in value.items() if _addressable(k)}
+            self.container(path, "dict_of_model", info, list(entries), None, _model_of(args[1]))
+            for key, entry in entries.items():
                 self.model(_model_of(args[1]), f"{path}.{key}.", entry)  # type: ignore[arg-type]
             return
-        if origin is list and args and _model_of(args[0]) is not None:
+        if value is not None and origin is list and args and _model_of(args[0]):
             key = KEYED_LISTS.get(path, DEFAULT_LIST_KEY)
             taken: set[str] = set()
             segments = [_segment(item, key, n, taken) for n, item in enumerate(value)]
-            self.container(path, "keyed_list", info, segments, key)
+            self.container(path, "keyed_list", info, segments, key, _model_of(args[0]))
             for segment, entry in zip(segments, value, strict=True):
                 self.model(_model_of(args[0]), f"{path}.{segment}.", entry)  # type: ignore[arg-type]
             return
         kind, extra = classify(annotation)
-        if kind == "string_list_dict":
-            self.container(path, kind, info, list(value), None)
-            for key, words in value.items():
+        if kind == "string_list_dict" and value is not None:
+            entries = {k: v for k, v in value.items() if _addressable(k)}
+            self.container(path, kind, info, list(entries), None, None)
+            for key, words in entries.items():
                 self.leaf(f"{path}.{key}", name, info, "string_list", {}, words, False)
             return
         self.leaf(path, name, info, kind, extra, value, nullable or sub is not None)
 
-    def base(self, path: str, info: Any, kind: str) -> FieldDescriptor:
+    def base_row(self, path: str, info: Any, kind: str) -> FieldDescriptor:
         meta = field_meta(path)
-        return {
-            "path": path,
-            "kind": kind,
-            "nullable": False,
-            "value": None,
-            "default": None,
-            "source": self.source_of(path),
-            **_limits(info),  # type: ignore[typeddict-item]
-            "unit": meta.get("unit"),
-            "restart": bool(meta.get("restart")),
-            "admin_only": bool(meta.get("admin_only")),
-            "opt_in": bool(meta.get("opt_in")),
-            "conservative": meta.get("conservative"),
-            "description": info.description or "",
-            "choices": None,
-            "item_kind": None,
-            "length": None,
-            "key": None,
-            "secret": False,
-            "writable": False,
-        }
+        return descriptor(
+            path,
+            kind,
+            source=self.source_of(path),
+            unit=meta.get("unit"),
+            restart=bool(meta.get("restart")),
+            admin_only=bool(meta.get("admin_only")),
+            opt_in=bool(meta.get("opt_in")),
+            conservative=meta.get("conservative"),
+            description=info.description or "",
+            **_limits(info),
+        )
 
-    def container(self, path: str, kind: str, info: Any, keys: list[str], key: str | None) -> None:
-        row = self.base(path, info, kind)
-        row["value"], row["key"] = list(keys), key
+    def container(
+        self,
+        path: str,
+        kind: str,
+        info: Any,
+        keys: list[str],
+        key: str | None,
+        model: type[BaseModel] | None,
+    ) -> None:
+        row = self.base_row(path, info, kind)
+        row["private"] = is_private(path)
+        row["admin_only"] = row["admin_only"] or row["private"]
+        row["key"] = key
+        if not row["private"] or self.reveal:
+            row["value"] = list(keys)
+            if kind in ENTRY_KINDS and model is not None:
+                row["entry"] = self.entry(path, model)
+        else:
+            row["value"] = []
         self.out.append(row)
+
+    def entry(self, path: str, model: type[BaseModel]) -> list[FieldDescriptor]:
+        """Descriptors of a default-built entry, paths relative to the entry."""
+        prefix = f"{path}.{ENTRY_PLACEHOLDER}."
+        walker = _Walker(_blank(model), None, lambda p: BLANK_SOURCE, lambda p: False, self.reveal)
+        walker.model(model, prefix, walker.values)
+        rows = walker.out
+        for row in rows:
+            row["path"] = row["path"][len(prefix) :]
+        return rows
 
     def leaf(
         self,
@@ -251,35 +387,51 @@ class _Walker:
         value: Any,
         nullable: bool,
     ) -> None:
-        row = self.base(path, info, kind)
-        try:
-            default = get_path(self.defaults, path)
-        except (KeyError, IndexError, ValueError, TypeError, AttributeError):
-            default = None
+        row = self.base_row(path, info, kind)
+        if self.base is None:  # a blank entry: its value is its default
+            default = value
+        else:
+            found, default = resolve_in_layer(self.base, self.values, path)
+            default = default if found else None
         row.update(extra)  # type: ignore[typeddict-item]
         row["nullable"] = nullable
-        row["secret"] = (kind in TEXT_KINDS and is_secret_key(name)) or secret_shaped(
-            [value, default]
-        )
-        if row["secret"]:
-            value = REDACTED if value is not None else None
-            default = REDACTED if default is not None else None
         row["value"], row["default"] = value, default
-        row["writable"] = not row["secret"] and self.writable(path)
+        row["writable"] = self.writable(path)
+        seal(row, name, self.reveal)
         self.out.append(row)
 
 
 def build_catalogue(
-    stack: Any, writable: Callable[[str], bool] = lambda path: False
+    stack: Any,
+    writable: Callable[[str], bool] = lambda path: False,
+    reveal_private: bool = False,
 ) -> list[FieldDescriptor]:
     """Descriptors for every field of the effective config of ``stack`` (a ``ConfigStack``),
     in schema order. ``writable(path)`` says which paths the web UI may write; secrets never are.
-    Needs ``effective()``, ``merged_tree(include_runtime=False)`` and ``source_of()``."""
+    ``reveal_private`` shows private values (the caller has checked the PIN). Needs ``effective()``,
+    ``merged_tree(include_runtime=False)`` and ``source_of(path, tree)``."""
     values = stack.effective().model_dump(mode="json")
     layered = RoboEmotConfig.model_validate(stack.merged_tree(include_runtime=False))
-    walker = _Walker(values, layered.model_dump(mode="json"), stack.source_of, writable)
+    walker = _Walker(
+        values,
+        layered.model_dump(mode="json"),
+        lambda path: stack.source_of(path, values),
+        writable,
+        reveal_private,
+    )
     walker.model(RoboEmotConfig, "", values)
     return walker.out
 
 
-__all__ = ["DESCRIPTOR_KEYS", "KINDS", "FieldDescriptor", "build_catalogue", "classify"]
+__all__ = [
+    "CONTAINERS",
+    "DESCRIPTOR_KEYS",
+    "KINDS",
+    "PRIVATE_PATHS",
+    "FieldDescriptor",
+    "build_catalogue",
+    "classify",
+    "descriptor",
+    "is_private",
+    "seal",
+]

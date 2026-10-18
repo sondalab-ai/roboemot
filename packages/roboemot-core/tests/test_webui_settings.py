@@ -137,8 +137,11 @@ def test_each_field_changes_with_the_pin_and_is_audited(served, stack, path, val
     line = json.loads((stack.audit_path).read_text().splitlines()[-1])
     assert line["source"] == "webui:127.0.0.1" and line["key"] == path and line["new"] == value
     assert path in stack.changes[-1].changed_keys  # hot reload (config.changed) fired
-    listed = {r["path"]: r for r in served.request("GET", "/api/settings").json["settings"]}
-    assert listed[path]["value"] == value
+    shown = served.request("GET", "/api/settings").json["settings"]
+    if "minor" in path:
+        assert {r["path"]: r for r in shown}[path]["value"] == "***"
+        shown = served.request("POST", "/api/settings/reveal", {"pin": PIN}).json["fields"]
+    assert {r["path"]: r for r in shown}[path]["value"] == value
 
 
 def get(stack, path):
@@ -528,3 +531,89 @@ def test_a_language_removed_between_expand_and_set_is_not_recreated():
     with pytest.raises(ConfigError):
         editor.change(path, ["hey zzz"])
     assert "zz" not in stack.effective().voice.keywords
+
+
+PRIVATE_SAMPLES = {
+    "circadian.location": {"lat": 45.4642, "lon": 9.19},
+    "privacy.multimodal_frames": True,
+    "privacy.pseudonym_templates": {"person": "Zed-{label}"},
+    "safety.minor_lines.en.greeting": "Hello CANARY little one",
+    "safety.minor_output_blocklist.en": [
+        *RoboEmotConfig().safety.minor_output_blocklist["en"],
+        "canaryword",
+    ],
+    "register.child.minor_content_policy": True,
+    "safety.minor_hold_s": 123.0,
+}
+
+
+@pytest.fixture
+def private_served(tmp_path, stack):
+    for path, value in PRIVATE_SAMPLES.items():
+        stack.set(path, value, source="t", admin=True)
+    srv, client = serve(tmp_path, SettingsEditor(stack, store=tmp_path / FILE), stack)
+    yield client
+    srv.stop()
+
+
+def test_private_values_are_hidden_without_the_pin(private_served):
+    data = private_served.request("GET", "/api/settings").json
+    fields = {f["path"]: f for f in data["fields"]}
+    for path in PRIVATE_SAMPLES:
+        row = fields[path]
+        assert row["private"] and row["admin_only"], path
+        assert row["value"] == "***" and row["default"] in ("***", None), path
+    for blob in (json.dumps(data), json.dumps(data["settings"])):
+        for canary in ("CANARY", "canaryword", "45.4642", "123.0"):
+            assert canary not in blob
+    for container in ("safety.minor_lines", "safety.minor_output_blocklist", "privacy"):
+        row = fields.get(container)
+        assert row is None or (row["value"] == [] and row["entry"] is None)
+    assert fields["reflexes.rules.startle-loud.suppress_with_minor"]["value"] == "***"
+    legacy = {s["path"]: s for s in data["settings"]}
+    assert legacy[LINE]["private"] and legacy[LINE]["value"] == "***"
+    assert not legacy[WAKE]["private"]
+
+
+def test_reveal_with_the_pin_returns_only_private_fields_with_real_values(private_served):
+    resp = private_served.request("POST", "/api/settings/reveal", {"pin": PIN})
+    assert resp.status == 200
+    fields = {f["path"]: f for f in resp.json["fields"]}
+    assert all(f["private"] for f in fields.values())
+    assert fields["circadian.location"]["value"] == {"lat": 45.4642, "lon": 9.19}
+    assert fields["safety.minor_lines.en.greeting"]["value"] == "Hello CANARY little one"
+    assert "canaryword" in fields["safety.minor_output_blocklist.en"]["value"]
+    assert fields["register.child.minor_content_policy"]["value"] is True
+    assert "safety.minor_lines" in fields and "en" in fields["safety.minor_lines"]["value"]
+    assert WAKE not in fields and "voice.wake_word" not in fields
+    assert "no-store" in resp.headers.get("Cache-Control", "no-store")
+
+
+def test_reveal_keeps_secrets_redacted(tmp_path, stack):
+    stack.set(LINE, "${secret:x}", source="t", admin=True)
+    srv, client = serve(tmp_path, SettingsEditor(stack, store=tmp_path / FILE), stack)
+    try:
+        fields = {
+            f["path"]: f
+            for f in client.request("POST", "/api/settings/reveal", {"pin": PIN}).json["fields"]
+        }
+        row = fields[LINE]
+        assert row["secret"] and row["value"] == "***"
+    finally:
+        srv.stop()
+
+
+def test_reveal_needs_the_pin_and_wrong_pins_count_toward_the_lockout(private_served):
+    assert private_served.request("POST", "/api/settings/reveal", {}).status == 400
+    assert private_served.request("POST", "/api/settings/reveal", {"pin": "111111"}).status == 401
+    locked = private_served.request("POST", "/api/settings/reveal", {"pin": PIN})
+    assert locked.status == 429 and locked.json["error"] == "locked"
+    assert "CANARY" not in json.dumps(locked.json)
+
+
+def test_writing_a_private_path_needs_the_pin(private_served, stack):
+    before = get(stack, LINE)
+    resp = private_served.request("POST", "/api/settings", {"path": LINE, "value": "Hi there"})
+    assert resp.status == 400 and get(stack, LINE) == before
+    wrong = put(private_served, LINE, "Hi there", pin="111111")
+    assert wrong.status == 401 and get(stack, LINE) == before

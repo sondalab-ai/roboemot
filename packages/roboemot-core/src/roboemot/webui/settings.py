@@ -38,6 +38,7 @@ from roboemot.config.stack import (
     get_path,
 )
 from roboemot.conversation.output_filter import OutputFilter
+from roboemot.redact import secret_shaped
 from roboemot.voice.keywords import normalise
 from roboemot.voice.robot_name import sanitise_name
 
@@ -64,7 +65,7 @@ class StackPort(Protocol):
 
     def merged_tree(self, *, include_runtime: bool = True) -> dict[str, Any]: ...
 
-    def source_of(self, path: str) -> str: ...
+    def source_of(self, path: str, tree: dict[str, Any] | None = None) -> str: ...
 
     def set(
         self, key: str, value: Any, *, source: str, admin: bool, must_exist: bool
@@ -215,18 +216,28 @@ class SettingsEditor:
         self._lock = threading.Lock()
 
     def fields(self) -> list[FieldDescriptor]:
-        """The full field catalogue, ``writable`` true for the allowlisted, non-secret paths."""
-        cfg = self.stack.effective()
-        allowed = expand(cfg)
+        """The full field catalogue, ``writable`` true for the allowlisted, non-secret paths.
+        Private values (minors, privacy, location) are hidden."""
+        allowed = expand(self.stack.effective())
         return build_catalogue(self.stack, lambda path: path in allowed)
 
-    def describe(self) -> list[dict[str, Any]]:
+    def reveal(self) -> list[FieldDescriptor]:
+        """Only the private fields, with their real values (secrets stay redacted). The caller
+        has verified the PIN."""
+        allowed = expand(self.stack.effective())
+        every = build_catalogue(self.stack, lambda path: path in allowed, reveal_private=True)
+        return [f for f in every if f["private"]]
+
+    def describe(self, fields: list[FieldDescriptor] | None = None) -> list[dict[str, Any]]:
         """The writable fields in the shape the current page renders: catalogue value and
-        default, JSON-Schema-style limits and admin flag. Goes away with the new page."""
+        default, JSON-Schema-style limits and admin flag. Goes away with the new page. Pass the
+        ``fields()`` result to avoid building the catalogue twice."""
         cfg = self.stack.effective()
         entries = expand(cfg)
         rows = []
-        for field in sorted(self.fields(), key=lambda f: f["path"]):
+        for field in sorted(
+            fields if fields is not None else self.fields(), key=lambda f: f["path"]
+        ):
             if not field["writable"]:
                 continue
             rows.append(
@@ -237,6 +248,7 @@ class SettingsEditor:
                     "schema": self._schema(entries[field["path"]], cfg),
                     "description": field["description"],
                     "needs_admin": field["admin_only"],
+                    "private": field["private"],
                 }
             )
         return rows
@@ -288,6 +300,8 @@ class SettingsEditor:
         entry = expand(cfg).get(path) if isinstance(path, str) else None
         if entry is None or not isinstance(path, str):
             raise SettingNotAllowed("path")
+        if secret_shaped(value):
+            raise ValidationError("value_type", "value")
         clean = self._clean(entry, value, cfg)
         old = get_path(cfg, path)
         if clean == old:

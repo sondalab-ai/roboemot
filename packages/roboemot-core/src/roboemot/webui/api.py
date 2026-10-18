@@ -29,6 +29,7 @@ from http import HTTPStatus
 from http.cookies import CookieError, SimpleCookie
 from typing import Any, NoReturn, Protocol
 
+from roboemot.config.catalogue import FieldDescriptor
 from roboemot.config.schema import ROUTE_NAME_MAX_CHARS, RoboEmotConfig, WebUIConfig
 from roboemot.config.stack import ConfigError, GuardrailError
 from roboemot.llm.conformance import RouteBudgetExhausted, RouteKeyUnavailable
@@ -106,8 +107,9 @@ class RoutesPort(Protocol):
 class SettingsPort(Protocol):
     """``roboemot.webui.settings.SettingsEditor``: the allowlisted, guarded settings."""
 
-    def describe(self) -> list[dict[str, Any]]: ...
-    def fields(self) -> list[Any]: ...
+    def describe(self, fields: list[FieldDescriptor] | None = None) -> list[dict[str, Any]]: ...
+    def fields(self) -> list[FieldDescriptor]: ...
+    def reveal(self) -> list[FieldDescriptor]: ...
     def change(self, path: object, value: object, source: str) -> dict[str, Any]: ...
 
 
@@ -317,6 +319,7 @@ class WebApi:
             ("GET", "/api/routes"): self._routes,
             ("GET", "/api/settings"): self._settings_list,
             ("POST", "/api/settings"): self._settings_change,
+            ("POST", "/api/settings/reveal"): self._settings_reveal,
             ("POST", "/api/pseudonyms/refused"): self._pseudonyms_refused,
             ("GET", "/api/catalogue"): self._catalogue,
             ("POST", CATALOGUE_IMPORT): self._catalogue_import,
@@ -629,10 +632,21 @@ class WebApi:
         ``settings``: the writable subset in the shape of the current page; both with the PIN
         note."""
         port = self._settings_port()
+        fields = port.fields()
         return Response(
             HTTPStatus.OK,
-            {"settings": port.describe(), "fields": port.fields(), "pin_required": True},
+            {"settings": port.describe(fields), "fields": fields, "pin_required": True},
         )
+
+    def _settings_reveal(self, req: Request) -> Response:
+        """The private fields (minors, privacy, location) with their real values. Admin only: the
+        PIN is re-entered under the login limits, so it is a POST (every response is no-store).
+        Secrets stay redacted."""
+        port = self._settings_port()
+        body = self._json_body(req)
+        v.only_keys(body, {"pin"})
+        self._check_pin(req, body.get("pin"))
+        return Response(HTTPStatus.OK, {"fields": port.reveal()})
 
     def _settings_change(self, req: Request) -> Response:
         """Change one allowlisted setting (SPEC 11A). The body holds exactly ``path``, ``value``

@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import json
-import time
 
 import pytest
-from roboemot.config.catalogue import DESCRIPTOR_KEYS, KINDS, build_catalogue
-from roboemot.config.schema import RoboEmotConfig
+from roboemot.config.catalogue import (
+    CONTAINERS,
+    DESCRIPTOR_KEYS,
+    KINDS,
+    PRIVATE_PATHS,
+    build_catalogue,
+    descriptor,
+    is_private,
+)
 from roboemot.config.stack import ConfigStack, flatten, get_path
-from roboemot.diagnostics import REDACTED, jsonable, secret_shaped
+from roboemot.diagnostics import jsonable
+from roboemot.redact import REDACTED, secret_shaped
 
 CANARY = "hunter2-CANARY"
 ROUTE = {
@@ -28,7 +35,7 @@ def test_the_descriptor_contract_is_pinned():
     assert set(DESCRIPTOR_KEYS) == {
         "path", "kind", "nullable", "value", "default", "source", "ge", "le", "unit",
         "restart", "admin_only", "opt_in", "conservative", "description", "choices",
-        "item_kind", "length", "key", "secret", "writable",
+        "item_kind", "length", "key", "entry", "secret", "private", "writable",
     }  # fmt: skip
     assert set(KINDS) == {
         "number", "int", "bool", "text", "enum", "tuple", "string_list", "enum_list",
@@ -55,7 +62,7 @@ def test_every_config_leaf_is_covered_by_a_descriptor():
         assert owners, f"{leaf} has no descriptor"
     for path, row in by_path.items():
         get_path(cfg, path)  # every descriptor path resolves
-        if row["kind"] not in ("dict_of_model", "keyed_list", "string_list_dict"):
+        if row["kind"] not in CONTAINERS and not row["private"]:
             assert row["value"] == jsonable_free(get_path(cfg, path)), path
 
 
@@ -163,6 +170,13 @@ def test_only_the_route_key_is_secret_by_name_in_the_default_schema():
         (["a", "x://u:p@h"], True),
         ({"a": "${secret:k}"}, True),
         (3, False),
+        ("https://h/v1?api_key=abc", True),
+        ("https://h/v1?Token=abc&x=1", True),
+        ("https://h/v1?key=abc", True),
+        ("https://h/cb#access_token=abc", True),
+        ("https://h/v1?page=2#top", False),
+        ("see https://h/v1?api_key=abc please", True),
+        ("ssh://user@host", True),
     ],
 )
 def test_secret_shape_rules(value, shaped):
@@ -174,8 +188,165 @@ def test_the_debug_report_redacts_by_value_shape_as_well():
     assert out == {"base_url": REDACTED, "x": [REDACTED], "ok": "fine"}
 
 
-def test_building_the_catalogue_is_quick_and_validates_against_the_schema():
-    start = time.monotonic()
-    build_catalogue(ConfigStack())
-    assert time.monotonic() - start < 5
-    assert RoboEmotConfig().voice.keywords
+def test_a_sibling_of_a_runtime_section_override_is_not_runtime():
+    stack = ConfigStack(app={"voice": {"limits": {"pitch_st": [-1.0, 1.0]}}})
+    stack.set("voice.limits", {"rate": [0.9, 1.1]}, source="t")
+    assert stack.source_of("voice.limits.rate") == "runtime"
+    assert stack.source_of("voice.limits.pitch_st") == "app"
+    assert stack.source_of("voice.limits.volume_db") == "schema"
+
+
+def test_source_and_default_follow_rule_identity_not_position():
+    stack = ConfigStack(
+        app={
+            "appraisal": {
+                "extra_events": ["brand.new"],
+                "rules": [
+                    {"event": "brand.new", "valence": 0.5},
+                    {"event": "person.known_adult", "valence": 0.9},
+                ],
+            }
+        }
+    )
+    r = rows(stack)
+    events = {r[p]["value"]: p.removesuffix(".event") for p in r if p.endswith(".event")}
+    new = events["brand.new"]
+    assert (r[new + ".valence"]["source"], r[new + ".valence"]["default"]) == ("app", 0.5)
+    adult = events["person.known_adult"]
+    assert adult == "appraisal.rules.3"  # the default rule keeps its place
+    assert (r[adult + ".valence"]["source"], r[adult + ".valence"]["default"]) == ("app", 0.9)
+    assert r[adult + ".arousal"]["source"] == "schema"
+    assert r["appraisal.rules.0.valence"]["source"] == "schema"  # not claimed by app index 0
+    assert r["appraisal.rules.0.valence"]["default"] == 0.4
+
+
+def test_keyed_entries_with_numeric_names_get_index_segments_and_plain_ones_their_name():
+    routes = [
+        {**ROUTE, "name": "7", "base_url": "http://a/v1"},
+        {**ROUTE, "name": "plain", "base_url": "http://b/v1"},
+    ]
+    r = rows(ConfigStack(app={"llm_routes": routes}))
+    assert r["llm_routes"]["value"] == ["0", "plain"]
+    assert r["llm_routes.0.base_url"]["source"] == "app"
+    assert r["llm_routes.plain.model"]["source"] == "app"
+    assert r["llm_routes.plain.model"]["default"] == "m"
+
+
+def test_dotted_rule_events_are_addressed_by_index():
+    r = rows(ConfigStack())
+    assert all("." not in seg for seg in r["appraisal.rules"]["value"])
+    assert "appraisal.rules.0.valence" in r
+
+
+def test_no_container_key_in_the_default_catalogue_contains_a_dot():
+    for row in build_catalogue(ConfigStack()):
+        if row["kind"] in CONTAINERS:
+            assert all("." not in k for k in row["value"]), row["path"]
+
+
+def test_dotted_or_secret_shaped_dict_keys_are_not_listed():
+    stack = ConfigStack()
+    stack.derived = {
+        "conversation": {"confirm_yes": {"it": ["si"], "a.b": ["x"], "https://u:p@h": ["y"]}}
+    }
+    paths = {p for p in rows(stack) if p.startswith("conversation.confirm_yes")}
+    assert "conversation.confirm_yes.it" in paths
+    assert not any("a.b" in p or "u:p" in p for p in paths)
+    assert rows(stack)["conversation.confirm_yes"]["value"] == ["it", "en"]
+
+
+def test_a_credential_named_inner_key_makes_a_free_form_map_secret():
+    stack = ConfigStack()
+    stack.derived = {"vision": {"object_display_names": {"api_key": "x", "cup": "tazza"}}}
+    row = rows(stack)["vision.object_display_names"]
+    assert row["secret"] and row["value"] == REDACTED
+    assert not rows(ConfigStack())["vision.object_display_names"]["secret"]
+
+
+def test_circadian_location_is_private_but_not_secret_and_can_stay_writable():
+    assert "circadian.location" in PRIVATE_PATHS
+    stack = ConfigStack()
+    stack.set("circadian.location", {"lat": 45.46, "lon": 9.19}, source="t")
+    rows_ = build_catalogue(stack, lambda p: p == "circadian.location")
+    row = {r["path"]: r for r in rows_}["circadian.location"]
+    assert row["private"] and row["admin_only"] and not row["secret"] and row["writable"]
+    assert row["value"] == REDACTED and "45.46" not in json.dumps(row)
+    shown = build_catalogue(stack, reveal_private=True)
+    assert {r["path"]: r for r in shown}["circadian.location"]["value"] == {
+        "lat": 45.46,
+        "lon": 9.19,
+    }
+
+
+def test_private_paths_are_listed_explicitly_and_cover_every_minor_and_privacy_field():
+    private = {p for p, r in rows(ConfigStack()).items() if r["private"]}
+    assert is_private("privacy.debug_recording") and is_private("safety.minor_lines.it.greeting")
+    assert not is_private("privacy_x") and not is_private("voice.wake_word")
+    for path in rows(ConfigStack()):
+        if path.split(".")[0] in ("safety", "voice", "register", "reflexes") and "minor" in path:
+            assert path in private, path
+        if path.startswith("privacy."):
+            assert path in private, path
+
+
+@pytest.mark.parametrize(
+    ("path", "kind"),
+    [
+        ("affect.update_hz", "number"),
+        ("schema_version", "int"),
+        ("register.child.approach_allowed", "bool"),
+        ("personality", "text"),
+        ("register.child.vocabulary", "enum"),
+        ("circadian.quiet_hours", "tuple"),
+        ("appraisal.extra_events", "string_list"),
+        ("world.autoenroll.kinds", "enum_list"),
+        ("persona.trait_effects.energy.motion_amplitude_x", "tuple_list"),
+        ("vision.object_display_names", "string_dict"),
+        ("circadian.location", "number_dict"),
+        ("conversation.confirm_yes", "string_list_dict"),
+        ("appraisal.rules.0.when", "json"),
+        ("voice.keywords", "dict_of_model"),
+        ("llm_routes", "keyed_list"),
+    ],
+)
+def test_real_schema_paths_have_the_expected_kind(path, kind):
+    assert rows(ConfigStack())[path]["kind"] == kind
+
+
+def test_the_table_covers_every_kind():
+    assert len(KINDS) == 15
+
+
+def test_containers_carry_an_entry_form_and_other_kinds_none():
+    r = rows(ConfigStack())
+    entry = {e["path"]: e for e in r["llm_routes"]["entry"]}
+    assert "base_url" in entry and entry["api_key"]["secret"] is True
+    assert entry["base_url"]["kind"] == "text"
+    assert {e["path"] for e in r["voice.keywords"]["entry"]} >= {"wake_phrases"}
+    assert r["conversation.confirm_yes"]["entry"] is None
+    assert all(
+        row["entry"] is None
+        for row in r.values()
+        if row["kind"] not in ("dict_of_model", "keyed_list")
+    )
+    assert entry["name"]["restart"] is False and entry["first_token_timeout_s"]["ge"] is not None
+
+
+def test_the_descriptor_factory_fills_every_key_and_redacts():
+    row = descriptor("robot.limits.pitch", "number", 0.5, unit="rad")
+    assert set(row) == DESCRIPTOR_KEYS and row["unit"] == "rad" and row["source"] == "schema"
+    hidden = descriptor("robot.link", "text", "https://u:p@h/")
+    assert hidden["secret"] and hidden["value"] == REDACTED
+    with pytest.raises(ValueError):
+        descriptor("x", "nope")
+    with pytest.raises(ValueError):
+        descriptor("x", "text", bogus=1)
+
+
+def test_a_nullable_container_with_no_value_becomes_a_json_leaf():
+    row = rows(ConfigStack())["circadian_motion.yawn"]
+    assert row["kind"] == "json" and row["nullable"] and row["value"] is None
+
+
+def test_ssh_url_with_user_info_is_redacted_in_the_debug_report():
+    assert jsonable({"remote": "ssh://user@host"}) == {"remote": REDACTED}

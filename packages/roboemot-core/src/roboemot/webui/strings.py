@@ -48,6 +48,8 @@ EN: dict[str, str] = {
     "settings_reset": "Use the platform name",
     "settings_platform_name": "platform name",
     "settings_admin": "Admin",
+    "settings_reveal": "Show with PIN",
+    "settings_hidden": "Hidden: minors, privacy and location settings need the PIN to be shown.",
     "settings_admin_hint": "Safety-relevant. The operator PIN doubles as the admin PIN.",
     "settings_blocklist_hint": "Words can only be added here. Removing one needs the config file.",
     "settings_pin_title": "Confirm the change",
@@ -337,6 +339,10 @@ IT: dict[str, str] = {
     "settings_reset": "Usa il nome della piattaforma",
     "settings_platform_name": "nome della piattaforma",
     "settings_admin": "Admin",
+    "settings_reveal": "Mostra con il PIN",
+    "settings_hidden": (
+        "Nascosto: le impostazioni su minori, privacy e posizione si mostrano con il PIN."
+    ),
     "settings_admin_hint": "Rilevante per la sicurezza. Il PIN operatore vale come PIN admin.",
     "settings_blocklist_hint": (
         "Qui si possono solo aggiungere parole. Per toglierne una serve il file di "

@@ -21,7 +21,6 @@ import dataclasses
 import datetime as dt
 import enum
 import math
-import re
 import socket
 import threading
 from collections.abc import Callable, Iterable
@@ -29,13 +28,11 @@ from dataclasses import dataclass
 from importlib.metadata import entry_points
 from typing import Any, Literal, Protocol
 
+from roboemot.redact import REDACTED, is_secret_key, secret_shaped
+
 SCHEMA_VERSION = 1
 SECTION_TIMEOUT_S = 5.0
 ENTRY_POINT_GROUP = "roboemot.diagnostics"
-REDACTED = "***"
-SECRET_WORDS = ("key", "token", "secret", "password", "credential")
-SECRET_REF = re.compile(r"\$\{secret:")
-URL_CREDENTIALS = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^/?#\s@]*@")
 LOOPBACK = {"localhost", "127.0.0.1", "::1"}
 
 Scope = Literal["local", "robot", "runtime"]
@@ -187,24 +184,6 @@ def jsonable(value: Any) -> Any:
     if isinstance(value, list | tuple | set | frozenset):
         return [jsonable(v) for v in value]
     return str(value)
-
-
-def is_secret_key(key: str) -> bool:
-    """Whether a field or dict key name marks its value as a secret (substring match)."""
-    k = key.lower()
-    return any(w in k for w in SECRET_WORDS)
-
-
-def secret_shaped(value: Any) -> bool:
-    """Whether a value looks like a secret whatever its key: a ``${secret:name}`` reference or a
-    URL with credentials (``scheme://user:pass@host``). Looks inside lists, tuples and dicts."""
-    if isinstance(value, str):
-        return bool(SECRET_REF.search(value) or URL_CREDENTIALS.search(value))
-    if isinstance(value, dict):
-        return any(secret_shaped(v) for v in value.values())
-    if isinstance(value, list | tuple | set | frozenset):
-        return any(secret_shaped(v) for v in value)
-    return False
 
 
 def _printable(text: str) -> str:
