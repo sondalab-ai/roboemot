@@ -46,22 +46,13 @@ The persona pieces exist and are tested; these callers wait for the pillars they
 
 ## Barge-in and skills (M3 slice 6, SPEC 8 stage 8, 11)
 
-- [ ] Tune `voice.barge_in.*` on the robot (SPEC 15 robot items): `echo_corr_max`, `echo_max_lag_ms`
-      (speaker-to-microphone delay of the Wireless), `threshold`, `min_speech_ms`. The unit tests use
-      synthetic echo; the real-model test (`pytest -m models -k spoken_stop`) uses `say` clips.
-      Measure the onset-to-stop latency from the voice debug section (`bargein.latency`).
 - [x] A stop phrase that stopped the robot is not answered afterwards: `conversation.stop_drop_window_s`
       drops an utterance made only of stop phrases heard soon after a barge-in. A stop phrase said
       later, with nobody speaking, is still an ordinary utterance.
-- [ ] Robot checks for barge-in (HIL, real playback): the Wireless's capture/playback lag against
-      `voice.barge_in.echo_max_lag_ms`; whether `echo_corr_max` separates the robot's voice from a
-      person talking over it on the real speaker and room (the unit tests use synthetic and smeared
-      echo; a user quieter than the echo is not heard by design); the cm4 CPU of the second Silero
-      instance, the FFT per speech frame and the keyword Vosk (`bargein.keyword_seconds` is the
-      proxy); the robot saying "stop" itself in its own answer; capture and `clear_player` latency,
-      which the audio-clock latency figure leaves out.
-- [ ] The pre-roll handed to the listener on a barge-in (`pre_roll_ms`, 64 ms) still holds a little of
-      the robot's own voice; with real AEC it could be raised.
+- [ ] Barge-in tuning and checks on the robot (real playback, XMOS AEC, `clear_player`, CPU of the
+      second Silero and the FFT, `pre_roll_ms`): SPEC 15 "Barge-in on the robot". The real-model
+      tests (`pytest -m models -k spoken_stop`, `test_m3_exit.py`) use `say` clips; the onset-to-stop
+      latency on the robot is in the voice debug section (`bargein.latency`).
 - [ ] `look_at` names come from the registry display names of what is in view and are sent to the
       route as tool-schema choices, like the scene summary; route them through the pseudonym map when
       `privacy.pseudonyms_to_cloud` exists.
@@ -69,3 +60,13 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       gestures that are not affect labels (nod, shake) need their own map and primitives.
 - [ ] Edit wake phrases and the robot name from the web UI (needs an admin-confirmed settings editor,
       SPEC 11A).
+
+## M3 exit (SPEC 14, `docs/eval/m3.md`)
+
+- [x] Exit test `packages/roboemot-reachymini/tests/test_m3_exit.py` (`pytest -m models`): Italian and
+      English through the real app on a scripted client, the three budgets, a barge-in and the child case.
+- [ ] A CI job for `-m models` tests: the runner needs a cached voice models folder (Silero, two Vosk
+      models, two Piper voices, about 0.3 GB) and a Piper interpreter; `ci.yml` has none today.
+- [ ] The robot, owner and licence items of the M3 report are in SPEC 15 (exit on the robot, barge-in,
+      CM4 load, Piper on the robot and its voice licences, wake phrases, OpenAI speech in Italian,
+      children's lines). Not repeated here.
