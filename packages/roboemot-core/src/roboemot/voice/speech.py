@@ -57,6 +57,7 @@ class _Job:
     delivery: Delivery
     epoch: int
     said_at: float
+    minor: bool = False  # a minor was present when the sentence was written (SPEC 12)
 
 
 class SpeechOutput:
@@ -169,10 +170,14 @@ class SpeechOutput:
         mood: str | None,
         intensity: float,
         utterance: int | None = None,
+        minor: bool = False,
     ) -> int | None:
         """Queue one sentence; returns its id, or ``None`` when it was dropped (queue full or
         closed). Safe from any thread. The caller resolves ``mood`` (affect label, or the LLM's
-        tag through ``resolve_tag``) and passes the register and circadian state of this moment."""
+        tag through ``resolve_tag``) and passes the register and circadian state of this moment.
+        ``minor`` says a minor was present when the sentence was written: a sentence written
+        without minor rules is dropped, and the speech stopped, if one is present by the time
+        it would play (SPEC 12)."""
         cfg = self.config
         delivery = compose_delivery(
             cfg.voice,
@@ -194,6 +199,7 @@ class SpeechOutput:
                 delivery,
                 self._epoch,
                 self.clock(),
+                minor,
             )
             self._jobs.append(job)
         if self.bus is not None:
@@ -273,6 +279,14 @@ class SpeechOutput:
             log.warning("speech: minor signal failed, assuming a minor: %s", type(exc).__name__)
             return True
 
+    def _stale(self, job: _Job) -> bool:
+        """Whether ``job`` was written for adults and a minor is present now. The speech is
+        stopped (queue dropped, audio cut) and the caller abandons the sentence."""
+        if job.minor or not self._minor():
+            return False
+        self.stop()
+        return True
+
     def _push(self, job: _Job, samples: np.ndarray, rate_hz: int) -> bool:
         """Push unless a stop happened since ``job`` was queued. The check and the push are one
         step under the lock ``stop`` takes to move the epoch."""
@@ -285,6 +299,8 @@ class SpeechOutput:
     async def _speak(self, job: _Job) -> None:
         cfg, first = self.config, True
         try:
+            if self._stale(job):
+                return
             async for chunk in self.backend.synthesize(
                 job.text,
                 job.delivery,
@@ -292,6 +308,8 @@ class SpeechOutput:
                 voice=cfg.voice,
                 minor_present=self._minor(),
             ):
+                if self._stale(job):
+                    return
                 if first:
                     first = False
                     if not self._pad(job, chunk.rate_hz):

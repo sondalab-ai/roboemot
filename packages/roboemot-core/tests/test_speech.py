@@ -215,9 +215,58 @@ def test_minor_appearing_after_enqueue_blocks_the_remote_route(make):
     say(out)  # queued while no minor is present
     minor["present"] = True
     gate.set()
+    assert wait_for(lambda: sink.stopped_at)
+    assert server.requests == [] and local.minors == []  # no route was contacted
+    assert out.sentences_spoken == 0 and sink.pushed == []
+
+
+def test_a_sentence_written_for_a_minor_uses_the_local_route(make):
+    server = SpeechServer()
+    remote, _ = openai_backend(server)
+    local = FakeBackend()
+    local.name = "piper"
+    out = make(FallbackTTS(remote, local), minor_present=lambda: True)
+    say(out, minor=True)
     assert wait_for(lambda: out.sentences_spoken == 1)
-    assert server.requests == []  # the remote route was never contacted
-    assert local.minors == [True]
+    assert server.requests == [] and local.minors == [True]
+
+
+def test_queued_sentences_are_dropped_when_a_minor_appears_after_the_stream_ended(make):
+    minor = {"present": False}
+    sink, backend = FakeSink(), FakeBackend(pieces=3, delay=0.05)
+    out = make(backend, sink=sink, minor_present=lambda: minor["present"])
+    u = out.new_utterance()
+    for text in ("Uno.", "Due.", "Tre."):
+        say(out, text, utterance=u)
+    assert wait_for(lambda: sink.pushed)  # the first sentence is playing, 2 and 3 are queued
+    minor["present"] = True
+    assert wait_for(lambda: sink.stopped_at)
+    time.sleep(0.4)
+    assert out.sentences_spoken == 0 and backend.texts == ["Uno."]
+    assert out.snapshot()["queued"] == 0
+
+
+def test_a_minor_appearing_during_a_stall_cuts_the_sentence_in_flight(make):
+    minor = {"present": False}
+    gate = threading.Event()
+    sink, backend = FakeSink(), FakeBackend(pieces=5, delay=0.02)
+    out = make(backend, sink=sink, minor_present=lambda: minor["present"])
+    original = backend.synthesize
+
+    async def stalled(*a, **k):
+        async for chunk in original(*a, **k):
+            yield chunk
+            while not gate.is_set() and len(sink.pushed) == 1:
+                await asyncio.sleep(0.01)  # the LLM side is stalled, the sentence is held
+
+    backend.synthesize = stalled
+    say(out, "Uno due tre.")
+    assert wait_for(lambda: len(sink.pushed) == 1)
+    minor["present"] = True
+    gate.set()
+    assert wait_for(lambda: sink.stopped_at)
+    time.sleep(0.2)
+    assert len(sink.pushed) == 1 and out.sentences_spoken == 0
 
 
 def test_adult_sentence_uses_the_remote_route(make):
@@ -324,8 +373,11 @@ def test_a_failing_minor_signal_fails_closed(make):
         raise RuntimeError("no signal")
 
     out = make(backend, minor_present=broken)
-    say(out)
+    say(out, minor=True)
     assert wait_for(lambda: backend.minors == [True])
+    say(out)  # written for adults, and the signal cannot be read: not spoken
+    time.sleep(0.2)
+    assert out.sentences_spoken == 1
 
 
 def test_a_failing_warm_up_does_not_kill_the_output(make):

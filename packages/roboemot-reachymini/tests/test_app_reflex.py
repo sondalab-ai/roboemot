@@ -278,6 +278,7 @@ def test_voice_builds_a_speech_output_that_plays_through_the_speaker(data):  # n
             circadian=StateEffects(),
             mood=None,
             intensity=0.0,
+            minor=True,  # no face frames: the minor signal is on, an adult sentence would drop
         )
         assert wait_for(lambda: pushed.called)
         assert wait_for(lambda: app.speech.speaking(time.monotonic()))
