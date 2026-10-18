@@ -670,3 +670,9 @@ def test_a_broken_world_plugin_is_logged_not_raised(caplog):
 def test_scan_config_rejects_jitter_beyond_the_interval():
     with pytest.raises(ValueError):
         WorldScanConfig(idle_interval_s=10.0, jitter_s=10.0)
+
+
+def test_target_lost_jitter_may_not_exceed_the_delay():
+    WorldScanConfig(target_lost_delay_s=3.0, target_lost_jitter_s=3.0)
+    with pytest.raises(ValueError, match="target_lost_jitter_s"):
+        WorldScanConfig(target_lost_delay_s=3.0, target_lost_jitter_s=3.5)

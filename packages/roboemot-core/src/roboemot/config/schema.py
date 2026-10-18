@@ -1634,6 +1634,8 @@ class WorldScanConfig(Strict):
     def _jitter_inside_interval(self) -> WorldScanConfig:
         if self.jitter_s >= self.idle_interval_s:
             raise ValueError("jitter_s must be smaller than idle_interval_s")
+        if self.target_lost_jitter_s > self.target_lost_delay_s:
+            raise ValueError("target_lost_jitter_s must not exceed target_lost_delay_s")
         return self
 
 

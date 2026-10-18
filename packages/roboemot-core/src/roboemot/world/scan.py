@@ -178,7 +178,8 @@ class ScanPolicy:
         return base + self._rng.uniform(-self.cfg.jitter_s, self.cfg.jitter_s)
 
     def _lost_delay(self, ctx: ScanContext) -> float:
-        """The short wait after a person target or speaker hint went away (SPEC 5A)."""
+        """The short wait after a person target or speaker hint went away (SPEC 5A). The base is
+        scaled by ``idle_period_x``; the jitter is not, so it stays a few seconds."""
         base = self.cfg.target_lost_delay_s * ctx.effects.idle_period_x
         jitter = self.cfg.target_lost_jitter_s
         return max(0.0, base + self._rng.uniform(-jitter, jitter))

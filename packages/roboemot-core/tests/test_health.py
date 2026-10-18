@@ -230,6 +230,111 @@ def test_background_thread_probes_route_added_to_empty_monitor():
         mon.stop()
 
 
+@pytest.mark.parametrize("with_routes", [False, True])
+def test_stop_returns_promptly_even_when_racing_the_loop(with_routes):
+    for _ in range(200):
+        mon = NetworkMonitor(
+            [route("a", "http://a.local/v1")] if with_routes else [],
+            POLICY,
+            probe=lambda host, port, t: True,
+        )
+        mon.start()
+        mon.stop()  # may land between the loop's stop check and its wake clear
+        assert mon._thread is not None and not mon._thread.is_alive()
+
+
+def test_stop_landing_between_the_stop_check_and_the_wake_clear_is_not_lost():
+    mon = NetworkMonitor([], POLICY)
+
+    class RacyEvent(threading.Event):
+        raced = False
+
+        def clear(self) -> None:
+            if not self.raced:  # stop() runs right after the loop saw _stop unset
+                self.raced = True
+                mon._stop.set()
+                self.set()
+            super().clear()
+
+    mon._wake = RacyEvent()
+    mon.start()
+    mon._thread.join(2.0)
+    assert not mon._thread.is_alive()
+
+
+def test_changed_endpoint_gets_a_fresh_link_probed_at_once():
+    ev, clock = Events(), Clock()
+    up = {"cloud": False, "lan": True}
+    mon = monitor(up, ev, clock)
+    run_checks(mon, clock, 20)
+    old = mon.links["cloud"]
+    assert not old.online
+    seen = []
+    mon.probe = lambda host, port, t: seen.append((host, port)) or True
+    mon.set_routes([route("cloud", "http://other.example.com:8443/v1"), mon.routes[1]])
+    assert mon.links["cloud"] is not old and mon.links["lan"] is not None
+    assert mon.is_online("cloud")  # starts unknown, not offline
+    mon.check_due(clock.t)
+    assert ("other.example.com", 8443) in seen
+
+
+def test_same_endpoint_with_other_fields_keeps_the_link():
+    mon = monitor({"cloud": True, "lan": True}, Events(), Clock())
+    link = mon.links["cloud"]
+    changed = mon.routes[0].model_copy(update={"model": "other"})
+    mon.set_routes([changed, mon.routes[1]])
+    assert mon.links["cloud"] is link and mon.routes[0].model == "other"
+
+
+def test_adding_a_route_while_all_are_down_does_not_restore_the_network():
+    ev, clock = Events(), Clock()
+    up = {"cloud": False, "lan": False, "new": False}
+    mon = monitor(up, ev, clock)
+    run_checks(mon, clock, 20)
+    assert not mon.online and ev[-1] == "link.network.lost"
+    hosts = {"api.example.com": "cloud", "lan.local": "lan", "new.local": "new"}
+    mon.probe = lambda host, port, t: up[hosts[host]]
+    n = len(ev)
+    mon.set_routes([*mon.routes, route("new", "http://new.local/v1")])
+    assert not mon.online and len(ev) == n  # no false restore
+    run_checks(mon, clock, 20)  # first probes fail
+    assert not mon.online and "link.network.restored" not in ev[n:]
+    up["new"] = True
+    run_checks(mon, clock, 40)
+    assert mon.online and ev[-1] == "link.network.restored"
+
+
+def test_removing_the_last_down_route_restores_the_network():
+    ev, clock = Events(), Clock()
+    up = {"cloud": True, "lan": False}
+    mon = monitor(up, ev, clock)
+    run_checks(mon, clock, 20)
+    mon.links["cloud"].set(False, clock.t)  # force both down
+    mon._sync_network(clock.t)
+    assert not mon.online
+    mon.set_routes([r for r in mon.routes if r.name == "cloud"])
+    assert not mon.online  # the one left is down
+    mon.links["cloud"].set(True, clock.t)
+    mon.set_routes([])
+    assert mon.online
+
+
+def test_probe_result_for_a_route_removed_meanwhile_is_dropped():
+    ev, clock = Events(), Clock()
+    mon = monitor({"cloud": True, "lan": True}, ev, clock)
+    gone = mon.links["lan"]
+
+    def probe(host, port, t):
+        mon.set_routes([r for r in mon.routes if r.name != "lan"])
+        return False
+
+    mon.probe = probe
+    gone.next_check = -math.inf
+    mon.links["cloud"].next_check = math.inf
+    mon.check_due(clock.t)
+    assert gone.snapshot(clock.t)["consecutive_failures"] == 0
+
+
 # ---------------------------------------------------------------- router
 
 
