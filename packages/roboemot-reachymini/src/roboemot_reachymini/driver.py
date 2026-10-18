@@ -93,6 +93,8 @@ class ReachyMiniDriver(PoseGroupDriver):
     def robot_name(self) -> str | None:
         """The daemon's ``robot_name`` (the owner's name for the robot) from its last status;
         None until one has arrived, or when it is not a non-empty string."""
+        # Verified against reachy-mini 1.12: get_status(wait=False) clears status_received and
+        # asserts _last_status, hence the guard before the call.
         try:
             client = self.mini.client
             if getattr(client, "_last_status", None) is None:

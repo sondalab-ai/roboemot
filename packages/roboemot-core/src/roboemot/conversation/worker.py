@@ -525,7 +525,7 @@ class ConversationWorker:
                 turn.register,
                 language=turn.language,
                 minor_present=minor,
-                robot_name=self.names.display(cfg.voice.wake_word),
+                robot_name=self._prompt_name(cfg),
             ),
             profile_summary=self._summary(self._profile, conv.profile_summary_max_chars),
             scene_summary=self._summary(self._scene, conv.scene_summary_max_chars),
@@ -884,6 +884,11 @@ class ConversationWorker:
             turn.spoken.append(text)
             turn.queued.append((job, text))
 
+    def _prompt_name(self, cfg: RoboEmotConfig) -> str:
+        """The robot's name as safe to say and to put in a prompt ('' without one)."""
+        self.names.configure(cfg.voice)
+        return self.names.prompt_name(cfg.voice.wake_word)
+
     def _say_minor_line(self, turn: _Turn, which: str) -> None:
         """A built-in child-safe line (``safety.minor_lines``), never asking a route."""
         if which == "filtered":
@@ -899,6 +904,7 @@ class ConversationWorker:
                 turn.language,
                 turn.cfg.conversation.language,
                 turn.utterance.keywords,
+                self._prompt_name(turn.cfg),
             )
         state = self.affect.state(self.clock())
         self._say(turn, text, state.label, state.intensity, minor=True)

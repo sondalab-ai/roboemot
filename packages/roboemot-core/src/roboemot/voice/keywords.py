@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from .robot_name import ResolvedName, RobotName
 
 NON_WORD = re.compile(r"[\W_]+")
+REACHY = "reachy"  # the name the default name_aliases are spellings of
 CATEGORIES = ("stop", "no", "greeting", "name", "wake")
 
 
@@ -51,10 +52,11 @@ class KeywordSpotter:
         """Phrase lists for the current name; rebuilt when the name or its checked languages
         change (a model finished loading, the platform name arrived)."""
         resolved = self._names.resolve(self._configured, tuple(self._sets))
-        if resolved is self._resolved:
+        if resolved == self._resolved:
             return
         self._resolved = resolved
         self._phrases = {}
+        aliases = not resolved.matching or resolved.matching.split()[0] == REACHY
         for language, ks in self._sets.items():
             wake = list(ks.wake_phrases)
             if resolved.usable(language):
@@ -63,7 +65,7 @@ class KeywordSpotter:
                 "stop": ks.stop,
                 "no": ks.no,
                 "greeting": ks.greeting,
-                "name": ks.name_aliases,
+                "name": ks.name_aliases if aliases else [],
                 "wake": wake,
             }
             self._phrases[language] = {

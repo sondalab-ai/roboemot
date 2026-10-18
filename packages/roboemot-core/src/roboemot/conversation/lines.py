@@ -39,15 +39,18 @@ def minor_line(
     language: str,
     default_language: str,
     keywords: Collection[str],
+    name: str = "",
 ) -> str:
     """The child-safe line for a turn no cleared route can answer: a greeting back for a
-    greeting, the robot's name when it was called, otherwise "ask a grown-up"."""
+    greeting, the robot's name when it was called (``name``, already sanitised, fills the line's
+    ``{name}``; without one the line's nameless variant), otherwise "ask a grown-up"."""
     if "greeting" in keywords:
         field = "greeting"
     elif "name" in keywords:
-        field = "robot_name"
+        field = "robot_name" if name else "robot_unnamed"
     else:
         field = "ask_grown_up"
-    return line_text(lines, language, default_language, field) or line_text(
+    text = line_text(lines, language, default_language, field) or line_text(
         lines, language, default_language, "ask_grown_up"
     )
+    return text.replace("{name}", name) if name else text

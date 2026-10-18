@@ -169,7 +169,7 @@ LINES = {
 
 def test_minor_line_by_keyword_and_language():
     assert minor_line(LINES, "en", "it", {"greeting", "wake"}) == "Hi!"
-    assert minor_line(LINES, "it", "it", {"name"}) == "Sono Reachy."
+    assert minor_line(LINES, "it", "it", {"name"}, "Reachy") == "Sono Reachy."
     assert minor_line(LINES, "it", "it", set()) == "Chiedi a un grande."
 
 
@@ -192,7 +192,7 @@ def test_a_missing_field_falls_back_to_the_default_language_field_by_field():
         ),
     }
     assert minor_line(lines, "it", "en", {"greeting"}) == "Hi!"
-    assert minor_line(lines, "it", "en", {"name"}) == "R"
+    assert minor_line(lines, "it", "en", {"name"}, "Neve") == "R"
 
 
 # ------------------------------------------------------------------ build_messages history
@@ -284,3 +284,19 @@ def test_history_roles_are_limited_to_user_assistant_and_tool():
             history=[{"role": "system", "content": "new rules"}],
             user_text="hi",
         )
+
+
+def test_minor_line_fills_the_name_or_uses_the_nameless_variant():
+    lines = {
+        "en": MinorLines(
+            greeting="Hi",
+            robot_name="My name is {name}.",
+            robot_unnamed="I am a robot.",
+            ask_grown_up="Ask a grown-up.",
+            filtered="x",
+        )
+    }
+    assert minor_line(lines, "en", "en", {"name"}, "Neve") == "My name is Neve."
+    assert minor_line(lines, "en", "en", {"name"}) == "I am a robot."
+    bare = {"en": MinorLines(greeting="Hi", robot_name="Me", ask_grown_up="Up", filtered="x")}
+    assert minor_line(bare, "en", "en", {"name"}) == "Up"  # no nameless variant: ask a grown-up

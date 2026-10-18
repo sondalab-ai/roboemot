@@ -957,7 +957,16 @@ class ReflexConfig(Strict):
 
 class MinorLines(Strict):
     greeting: str = param("", "Said when the person greeted the robot")
-    robot_name: str = param("", "Said when the robot's name was called")
+    robot_name: str = param(
+        "",
+        "Said when the robot's name was called and it has one; `{name}` is replaced by the name "
+        "(sanitised, see `voice.name_max_chars`)",
+    )
+    robot_unnamed: str = param(
+        "",
+        "Said instead of `robot_name` when the robot has no name; empty falls back to "
+        "`ask_grown_up`",
+    )
     ask_grown_up: str = param("", "Said for anything else")
     filtered: str = param("", "Said in place of a sentence the output filter removed")
 
@@ -1089,13 +1098,15 @@ class SafetyConfig(Strict):
         {
             "it": {
                 "greeting": "Ciao! Che bello vederti.",
-                "robot_name": "Mi chiamo Reachy.",
+                "robot_name": "Mi chiamo {name}.",
+                "robot_unnamed": "Sono un robot.",
                 "ask_grown_up": "Questa domanda falla a un grande, che ti sa rispondere meglio.",
                 "filtered": "Preferisco parlare d'altro. Chiedi a un grande.",
             },
             "en": {
                 "greeting": "Hello! Nice to see you.",
-                "robot_name": "My name is Reachy.",
+                "robot_name": "My name is {name}.",
+                "robot_unnamed": "I am a robot.",
                 "ask_grown_up": "Please ask a grown-up about that, they will know better.",
                 "filtered": "I would rather talk about something else. Ask a grown-up.",
             },
@@ -1846,15 +1857,15 @@ class KeywordSet(Strict):
     )
     name_aliases: list[str] = param(
         [],
-        "Spellings the recognizer produces for the robot's name in this language (Reachy came "
-        "out as `reati` in Italian and `riyadh she` in English). They emit speech.name_called "
-        "and count as the wake word only in a short final text (voice.fastpath."
-        "alias_wake_max_words), because an alias can be a real word. Changing the robot's name "
-        "needs the aliases re-tuned",
+        "Spellings the recognizer produces for the name Reachy in this language (`reati` in "
+        "Italian, `riyadh she` in English). They apply only when the robot has no name or its "
+        "name starts with `reachy`; a robot with another name ignores them. They emit "
+        "speech.name_called and count as the wake word only in a short final text "
+        "(voice.fastpath.alias_wake_max_words), because an alias can be a real word",
     )
     name_wake_templates: list[str] = param(
         [],
-        "Wake phrases built around the robot's name, each with a `{name}` placeholder "
+        "Wake phrases built around the robot's name, each with exactly one `{name}` placeholder "
         "(`ciao {name}`). They apply when the robot has a name (`voice.wake_word`, or the one "
         "the platform reports) whose words are all in this language's recognizer vocabulary; "
         "otherwise only `wake_phrases` wake the robot in this language. The bare name is a name "
@@ -2178,10 +2189,29 @@ class VoiceConfig(Strict):
         "The robot's name, for the prompt and wake detection. Unset (null): the name the robot "
         "platform reports (Reachy Mini: the name its owner gave it in the daemon setup); a "
         "platform without one has no name and wakes on `voice.keywords.<language>.wake_phrases` "
-        "only. A value set here always wins over the platform's. Wake detection with a name "
+        "only. A value set here always wins over the platform's. The name can come from outside "
+        "the robot (the owner's phone): the prompt and the spoken lines only get a sanitised "
+        "form. The bare name emits speech.name_called wherever it occurs in a text, but wakes the "
+        "robot only in a short final (a name that is also a word, like `Neve`, is not a wake "
+        "word in a long sentence). Wake detection with a name "
         "needs the name's words in the recognizer vocabulary of the language (checked when the "
         "recognizer loads, logged when not); `reachy` is out of vocabulary in both small Vosk "
         "models, so names like it rely on `wake_phrases` and `name_aliases`",
+    )
+    name_max_chars: int = param(
+        32,
+        "The robot's name is cut to this many characters (after dropping everything but letters, "
+        "digits, spaces and `'.-`) in the system prompt and the spoken lines",
+        ge=1,
+        le=100,
+    )
+    name_poll_interval_s: float = param(
+        5.0,
+        "While the platform has not reported a name, how often it is asked again (Reachy Mini: "
+        "the daemon status can arrive after the app starts)",
+        unit="s",
+        ge=0.5,
+        le=300,
     )
     wake_word_policy: Literal["always", "never", "unless_enrolled_in_view"] = param(
         "unless_enrolled_in_view",

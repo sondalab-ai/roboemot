@@ -54,11 +54,11 @@ def system_prompt(
 ) -> str:
     """Parts 1 to 4 of the system prompt. ``register`` is the active register as the persona
     shapes it (``roboemot.persona.apply_to_register``); ``language`` defaults to the
-    conversation language; ``robot_name`` (``voice.robot_name.RobotName.display``) is told to the
-    model when the robot has one."""
+    conversation language; ``robot_name`` (``RobotName.prompt_name``, already sanitised) is told to
+    the model when the robot has one."""
     lang = language or cfg.conversation.language
     rules = [
-        f"Your name is {robot_name}." if robot_name else "",
+        f'Your name is "{robot_name}".' if robot_name else "",
         VOCABULARY_RULES[register.vocabulary],
         f"Reply in at most {max_reply_sentences(cfg, register)} sentences.",
         f"Always reply in {LANGUAGE_NAMES.get(lang, lang)}.",

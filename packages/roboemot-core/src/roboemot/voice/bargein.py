@@ -185,7 +185,8 @@ class BargeIn:
         b = cfg.voice.barge_in
         self._b = b
         self._tail_s = cfg.voice.echo_tail_ms / MS_PER_S
-        self._spotter = KeywordSpotter(cfg.voice.keywords, cfg.voice.wake_word)
+        # Only the stop keyword is used here: no name, so no name phrases to build or check.
+        self._spotter = KeywordSpotter(cfg.voice.keywords, None)
         frame_ms = self._frame_s * MS_PER_S
         self._min_frames = max(1, math.ceil(b.min_speech_ms / frame_ms))
         self._echo_frames = max(1, math.ceil(b.echo_window_ms / frame_ms))

@@ -114,6 +114,7 @@ class FastPath:
     def apply_config(self, cfg: VoiceConfig) -> None:
         """Hot reload of keyword lists, wake word and prosody thresholds."""
         self.cfg = cfg
+        self.names.configure(cfg)
         self._spotter = KeywordSpotter(cfg.keywords, cfg.wake_word, self.names)
 
     def reset(self) -> None:
