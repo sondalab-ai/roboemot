@@ -26,7 +26,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
-from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    AsyncOpenAI,
+    DefaultAsyncHttpxClient,
+)
 
 from ..config.schema import LLMRoute, SafetyConfig
 from ..health.network import NetworkMonitor
@@ -234,7 +240,12 @@ class Router:
 
     def _client(self, route: LLMRoute) -> AsyncOpenAI:
         key = self._resolved_key(route)
-        http = self.http_client_factory() if self.http_client_factory else None
+        # The SDK's own client follows redirects, which would send the prompt to another host.
+        http = (
+            self.http_client_factory()
+            if self.http_client_factory
+            else DefaultAsyncHttpxClient(follow_redirects=False)
+        )
         return AsyncOpenAI(
             base_url=route.base_url, api_key=key or "none", http_client=http, max_retries=0
         )
