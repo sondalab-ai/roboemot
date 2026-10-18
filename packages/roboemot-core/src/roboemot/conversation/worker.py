@@ -51,7 +51,7 @@ from ..persona import apply_to_register, effects
 from ..voice.listener import Utterance
 from ..voice.prosody import resolve_tag
 from ..voice.tts import Sentence, SentenceSplitter
-from .lines import minor_line, pick
+from .lines import line_text, minor_line, pick
 from .output_filter import OutputFilter
 
 log = logging.getLogger(__name__)
@@ -76,6 +76,7 @@ class Speech(Protocol):
 class _Session:
     last_active: float
     speaker: str | None = None  # registry id of the person it belongs to; None: unknown
+    minor: bool = False  # a minor was present when it opened
 
 
 @dataclass
@@ -237,19 +238,22 @@ class ConversationWorker:
             log.warning("conversation: speaker unavailable (%s)", type(exc).__name__)
             return None
 
-    def _touch(self, now: float, speaker: str | None) -> None:
+    def _touch(self, now: float, speaker: str | None, minor: bool) -> None:
         """Start the session if none is open and stamp the activity. A session belongs to the
         person who opened it: another speaker (a different known person, or an unknown one
-        taking over a known person's session, or the reverse) ends it first, so nobody inherits
-        someone else's history."""
+        taking over a known person's session, or the reverse), or a minor appearing in a
+        session that opened without one, ends it first, so nobody inherits someone else's
+        history. Two unknown speakers cannot be told apart: they share a session unless the
+        minor signal changed."""
         with self._lock:
-            other = self._session is not None and self._session.speaker != speaker
+            s = self._session
+            other = s is not None and (s.speaker != speaker or (minor and not s.minor))
         if other:
             self._end_session("speaker changed")
             self._counts["speaker_changes"] += 1
         with self._lock:
             if self._session is None:
-                self._session = _Session(now, speaker)
+                self._session = _Session(now, speaker, minor)
                 self._counts["sessions"] += 1
             else:
                 self._session.last_active = now
@@ -347,9 +351,9 @@ class ConversationWorker:
         cfg = self.stack.effective()
         self.apply_config(cfg)
         router = self.hub.sync(cfg)
-        self.expire(now)
-        self._touch(now, self._who())
         minor = self._minor()
+        self.expire(now)
+        self._touch(now, self._who(), minor)
         register = self._register_for(cfg, minor)
         conv = cfg.conversation
         turn = _Turn(
@@ -397,6 +401,8 @@ class ConversationWorker:
         except Offline:
             turn.outcome = "offline"
             self.responder.speech_while_offline(self.clock())
+            if turn.minor or self._minor():  # never silence for a child
+                self._say_minor_line(turn, "no_route")
         except NoRouteAvailable:
             turn.outcome = "no_route"
             self._say_fallback(turn)
@@ -409,8 +415,13 @@ class ConversationWorker:
                 self._say_fallback(turn)
         self._finish(turn)
 
-    def _cleared(self, cfg: RoboEmotConfig, active: ActiveRoute) -> bool:
-        route = active.route
+    def _cleared(self, active: ActiveRoute) -> bool:
+        """Whether the route answering is cleared for minors in the configuration as it is now
+        (not the router's, which may be stale): looked up by name, a missing route is not."""
+        if active.route is None:
+            return False
+        cfg = self.stack.effective()
+        route = next((r for r in cfg.llm_routes if r.name == active.route.name), None)
         return route is not None and route.allowed_for_minors and cfg.safety.minors_allowed_llm
 
     def _minor_appeared(self, turn: _Turn, active: ActiveRoute) -> bool:
@@ -419,7 +430,7 @@ class ConversationWorker:
         written without the minor rules). The caller cancels the stream, which charges it."""
         if not self._minor():
             return False
-        if not turn.minor or not self._cleared(turn.cfg, active):
+        if not turn.minor or not self._cleared(active):
             self.speech.stop()
             turn.outcome = "minor_cut"
             return True
@@ -435,7 +446,9 @@ class ConversationWorker:
             return False
         if self._minor_appeared(turn, turn.active):
             return False
-        if self._minor() and self._filter.blocked(sentence.text, " ".join(turn.spoken)):
+        if (turn.minor or self._minor()) and self._filter.blocked(
+            sentence.text, " ".join(turn.spoken)
+        ):
             self._say_minor_line(turn, "filtered")
             turn.outcome = "filtered"
             return False
@@ -464,7 +477,9 @@ class ConversationWorker:
             )
         return label, state.intensity
 
-    def _say(self, turn: _Turn, text: str, mood: str | None, intensity: float) -> None:
+    def _say(
+        self, turn: _Turn, text: str, mood: str | None, intensity: float, *, minor: bool = False
+    ) -> None:
         if not text:
             return
         job = self.speech.say(
@@ -475,6 +490,7 @@ class ConversationWorker:
             mood=mood,
             intensity=intensity,
             utterance=turn.speech_id,
+            minor=turn.minor or minor,
         )
         if job is not None:
             turn.stamps.setdefault("say", self.clock())
@@ -482,9 +498,13 @@ class ConversationWorker:
 
     def _say_minor_line(self, turn: _Turn, which: str) -> None:
         """A built-in child-safe line (``safety.minor_lines``), never asking a route."""
-        lines = pick(turn.cfg.safety.minor_lines, turn.language, turn.cfg.conversation.language)
         if which == "filtered":
-            text = lines.filtered if lines else ""
+            text = line_text(
+                turn.cfg.safety.minor_lines,
+                turn.language,
+                turn.cfg.conversation.language,
+                "filtered",
+            )
         else:
             text = minor_line(
                 turn.cfg.safety.minor_lines,
@@ -493,7 +513,7 @@ class ConversationWorker:
                 turn.utterance.keywords,
             )
         state = self.affect.state(self.clock())
-        self._say(turn, text, state.label, state.intensity)
+        self._say(turn, text, state.label, state.intensity, minor=True)
         self._counts["minor_lines"] += 1
 
     def _say_fallback(self, turn: _Turn) -> None:
@@ -513,8 +533,8 @@ class ConversationWorker:
         """Keep the whole turn (the user's words and what was actually spoken) in the session's
         history, record the latency stamps and announce the turn without its text."""
         spoken = " ".join(turn.spoken)
-        if spoken and self._max_turns > 0:
-            with self._lock:
+        with self._lock:
+            if spoken and self._max_turns > 0:
                 self._turns.append(
                     [
                         {"role": "user", "content": turn.utterance.text},

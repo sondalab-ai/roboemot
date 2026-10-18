@@ -565,11 +565,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             self.make_router(cfg, network), lambda c: self.make_router(c, network)
         )
         worker = self.traits_worker = TraitsWorker(
-            stack,
-            hub.router,
-            TraitCache(paths.traits_cache_path(cfg.data_dir)),
-            hub.make_router,
-            hub=hub,
+            stack, None, TraitCache(paths.traits_cache_path(cfg.data_dir)), None, hub=hub
         )
 
         voice_pipeline = (
@@ -594,6 +590,10 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             audio.set_voice(False)  # no consumer: the hub must not queue audio for nobody
         affect = runner.engine
         conv_speaker = speaker_source(selector, world)
+
+        def value_cap() -> int:
+            return stack.effective().conversation.summary_value_max_chars
+
         self.diagnostics = Diagnostics().add(
             *local_sources(process_pid=os.getpid()),
             *platform_sources(manifest.robot.id, Target()),
@@ -628,6 +628,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         )
 
         def reload(change: Any) -> None:
+            hub.sync(change.config)  # the web UI check and the speech backend see it at once
             loop.apply_config(change.config)
             presence.configure(change.config.safety)
             apply_attention_config(change.config, world, selector, gaze)
@@ -712,12 +713,13 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                             else stack.effective().circadian.states["awake"]
                         ),
                         minor_present=lambda: self.minor_present,
-                        profile=profile_source(selector, world, perception.registry),
+                        profile=profile_source(selector, world, perception.registry, value_cap),
                         scene=scene_source(
                             selector,
                             world,
                             perception.registry,
                             lambda: stack.effective().attention.stale_s,
+                            value_cap,
                         ),
                         speaker=conv_speaker,
                         bus=bus,

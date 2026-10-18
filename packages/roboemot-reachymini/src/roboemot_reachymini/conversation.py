@@ -30,9 +30,13 @@ def attended_person(selector: AttentionSelector, world: WorldModel) -> Entry | N
 
 
 def profile_source(
-    selector: AttentionSelector, world: WorldModel, registry: Any
+    selector: AttentionSelector,
+    world: WorldModel,
+    registry: Any,
+    value_cap: Callable[[], int],
 ) -> Callable[[int], str | None]:
-    """``profile(max_chars)``: the attended, recognised person's name and preferences."""
+    """``profile(max_chars)``: the attended, recognised person's name and preferences. A
+    record still pending (not confirmed by the owner) is not described."""
 
     def profile(max_chars: int) -> str | None:
         entry = attended_person(selector, world)
@@ -43,7 +47,9 @@ def profile_source(
         except Exception as exc:
             log.debug("conversation: no profile (%s)", type(exc).__name__)
             return None
-        return profile_summary(record.display_name, record.preferences, max_chars)
+        if record.status != "active":
+            return None
+        return profile_summary(record.display_name, record.preferences, max_chars, value_cap())
 
     return profile
 
@@ -53,6 +59,7 @@ def scene_source(
     world: WorldModel,
     registry: Any,
     stale_s: Callable[[], float],
+    value_cap: Callable[[], int],
     clock: Callable[[], float] = time.monotonic,
 ) -> Callable[[int], str | None]:
     """``scene(max_chars)``: what is in view, the attention target first."""
@@ -76,6 +83,7 @@ def scene_source(
             target_id=target.entry_id if target is not None else None,
             name_of=name_of,
             max_chars=max_chars,
+            value_max_chars=value_cap(),
         )
 
     return scene

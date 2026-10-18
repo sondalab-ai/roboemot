@@ -39,3 +39,7 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       sweep after a new `world.scan.target_lost_delay_s` (N s, jittered, scaled like the idle
       interval) instead of waiting the full `world.scan.idle_interval_s` (120 s). Same rules as
       the idle scan: a person target or speaker hint cancels it, not while resting.
+- [ ] Pseudonyms to cloud routes (SPEC 12, Data): `privacy.pseudonyms_to_cloud` is refused by the
+      config validator ("not implemented in v1 M3") because requests still carry real names;
+      build the name-to-alias map for `build_messages(names=...)`, send aliases to routes that
+      are not local, and restore the web UI consent text for it.
