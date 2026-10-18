@@ -15,6 +15,7 @@ Set ``ROBOEMOT_EXIT_REPORT`` to a file path to also get the measured numbers as 
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import os
 import threading
@@ -274,6 +275,14 @@ def yaml_for(language: str, piper: Path | None) -> str:
 
 def start_app(data, monkeypatch, language, piper, minor=False, minors_llm=False):  # noqa: F811
     spoken: list[tuple[str, str]] = []
+    # The route is an in-process mock, but the app's network monitor probes "lan.local" over TCP.
+    # Where that name fails fast (CI) the link goes offline after three probes and the robot
+    # replies nonverbally; where it hangs (macOS mDNS) it does not, which hid the dependency.
+    monkeypatch.setattr(
+        app_module,
+        "NetworkMonitor",
+        functools.partial(app_module.NetworkMonitor, probe=lambda host, port, timeout_s: True),
+    )
     if piper is None:
         monkeypatch.setattr(factory, "build_backend", lambda cfg, router: DelayedTTS(spoken))
     else:
