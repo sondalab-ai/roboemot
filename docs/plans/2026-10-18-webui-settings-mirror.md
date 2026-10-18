@@ -64,5 +64,6 @@ Merged into the epic branch: slice 1 (PR 58), 2 (PR 59), 3 (PR 60), 4 (PR 61). A
   `sudo -n -l` on the robot); fallback is a recorded sudoers drop-in. Robot plugin gets the `Rebootable` protocol
   (already in core, `actions: ["reboot"]`).
 - 5: SPEC 11A/12, TODO.md, exit check as above.
-Owner decisions taken during the run: private fields (location, `privacy.*`, minor paths) are readable only via a
-PIN-checked reveal; the minors blocklist only grows from the web (reset refused too).
+Owner decision during the run: `privacy.*` and minor paths are admin-only (readable only via a PIN-checked reveal).
+Agent defaults, pending owner OK: `circadian.location` is private too; the minors blocklist only grows from the web
+(reset refused too); robot plugins cannot claim safety/webui/privacy/llm_routes or private/admin paths.
