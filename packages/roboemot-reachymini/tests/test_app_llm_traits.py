@@ -237,3 +237,26 @@ def test_web_route_check_is_charged_to_the_traits_workers_router(webui_data, dat
         stop.set()
         thread.join(15)
     assert not errors
+
+
+def test_a_reload_that_adds_a_route_gets_it_probed(data):  # noqa: F811
+    configure(data, None)
+    app = app_with(FakeRoute())
+    stop, thread, errors = start(app)
+    try:
+        assert wait_for(lambda: app.monitor is not None and app.diagnostics is not None)
+        probed: list[str] = []
+        app.monitor.probe = lambda host, port, timeout: probed.append(host) or True
+        path = data / "app.yaml"
+        cfg = yaml.safe_load(path.read_text())
+        cfg["llm_routes"] = [
+            ROUTE,
+            {"name": "extra", "base_url": "http://extra.local/v1", "model": "m2"},
+        ]
+        path.write_text(yaml.safe_dump(cfg))  # the watcher reloads the file within a second
+        assert wait_for(lambda: "extra" in app.monitor.links)
+        assert wait_for(lambda: "extra.local" in probed)
+    finally:
+        stop.set()
+        thread.join(15)
+    assert not errors

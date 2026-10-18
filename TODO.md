@@ -26,8 +26,8 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       `NetworkMonitor` (`make_router` is overridable). The `TraitCache` is
       `<data folder>/llm_traits.json` (`paths.traits_cache_path`), removed by uninstall with the
       folder when the installer created it (SPEC 4A, Installer; `test_install_wizard.py`). Tests: `test_traits_worker.py`,
-      `test_app_llm_traits.py`. Open: the `NetworkMonitor` still watches the routes it was built
-      with, so a route added by hot reload is not probed until restart.
+      `test_app_llm_traits.py`. The `NetworkMonitor` follows hot-reloaded routes (`set_routes`, called from
+      the app's `config.changed` handler; `test_health.py`).
 - [x] Per-route history trimming (SPEC 8, Conversation state). Done: `llm_routes[].context_budget_tokens`
       (8192) and `conversation.turn_reserve_tokens` (256); `trim_history` drops whole turns,
       oldest first, and the router applies it per route; load-time rejection names the route
@@ -35,10 +35,11 @@ The persona pieces exist and are tested; these callers wait for the pillars they
 - [ ] Secret store for `${secret:name}` route keys (SPEC 8: stored encrypted on the robot). The
       app's `make_router` has no resolver, so such routes send an empty key; the app logs a
       warning at startup for each one.
-- [ ] Scan soon after a person leaves (SPEC 5A, Scanning): when the person target is lost, start a
-      sweep after a new `world.scan.target_lost_delay_s` (N s, jittered, scaled like the idle
-      interval) instead of waiting the full `world.scan.idle_interval_s` (120 s). Same rules as
-      the idle scan: a person target or speaker hint cancels it, not while resting.
+- [x] Scan soon after a person leaves (SPEC 5A, Scanning). Done: `world.scan.target_lost_delay_s`
+      (8 s) with its own `target_lost_jitter_s` (3 s), scaled by `idle_period_x`; the policy uses
+      it instead of the idle interval when the person target or speaker hint goes away. A person or
+      speaker engaging again cancels it, and it never runs while resting or in quiet hours
+      (`ScanPolicy`, `test_scan.py`).
 - [ ] Pseudonyms to cloud routes (SPEC 12, Data): `privacy.pseudonyms_to_cloud` is refused by the
       config validator ("not implemented in v1 M3") because requests still carry real names;
       build the name-to-alias map for `build_messages(names=...)`, send aliases to routes that

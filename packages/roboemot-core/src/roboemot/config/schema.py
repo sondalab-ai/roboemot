@@ -1576,6 +1576,17 @@ class WorldScanConfig(Strict):
         le=3600,
     )
     jitter_s: float = param(30.0, "Random +- offset on the idle interval", unit="s", ge=0, le=1800)
+    target_lost_delay_s: float = param(
+        8.0,
+        "Time after the person target (or speaker hint) is lost before the robot looks around, "
+        "instead of the full idle interval (before the energy trait)",
+        unit="s",
+        ge=1,
+        le=600,
+    )
+    target_lost_jitter_s: float = param(
+        3.0, "Random +- offset on the target-lost delay", unit="s", ge=0, le=300
+    )
     dwell_s: float = param(1.0, "Pause at each sweep waypoint", unit="s", ge=0.1, le=30)
     overlap_deg: float = param(
         15.0, "Overlap between the views of neighbouring waypoints", unit="deg", ge=0, le=60
@@ -1623,6 +1634,8 @@ class WorldScanConfig(Strict):
     def _jitter_inside_interval(self) -> WorldScanConfig:
         if self.jitter_s >= self.idle_interval_s:
             raise ValueError("jitter_s must be smaller than idle_interval_s")
+        if self.target_lost_jitter_s > self.target_lost_delay_s:
+            raise ValueError("target_lost_jitter_s must not exceed target_lost_delay_s")
         return self
 
 
