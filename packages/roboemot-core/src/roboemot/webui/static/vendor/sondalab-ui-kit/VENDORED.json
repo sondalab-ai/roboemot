@@ -1,0 +1,25 @@
+{
+  "package": "@sondalab/ui-kit",
+  "version": "0.37.0",
+  "license": "MIT",
+  "integrity": "sha512-Jx4zz27Wjf2KixfUZ69nXBtBOTb5+wt3KAfKjFZDMs+L2bMo3wT6727QhHFSjelg/TCPTUbaiMm8piGuvNwSWA==",
+  "files": {
+    "package.json": "4e0bb499ad419922e138cc35f3684e11eec28d69354e0a7ecb52d0d616b18653",
+    "tokens.css": "28b58cadeaede82c2316c3d617432c7d86712b8d9dcd56f95d4b5407932dc254",
+    "components.css": "289f5c3de8c40de9abe8cee4de437383067b384ef5b97ba8fc1aaad1437e4dba",
+    "effects.css": "99bde4f051c91fa21303bf880b557b3b6d7a8a6341eb671cdf433ec1b1ea446f",
+    "fonts.css": "280dbb507a171e5898e050730f53f9c35cef166ac332c85fe35bb97be9c049d1",
+    "themes/light.css": "c89f66b9d9c88c1b55bd23bbbfd349608c91db508aa5bc88cc5ba1d312d72c45",
+    "themes/dark.css": "3fff0d7c0f21f25a23e3785e0dd924f101f9bfde404a2fa8ad994930f5bb5cba",
+    "themes/high-contrast.css": "6281afbaffdb97ee090d66401875a52569db395746ca3a9624bde2b20e4f7abf",
+    "themes/products.css": "0af4177b8c04940f868b52fc25494e1a60fdd95345d5b79d5dda882cfa8c51ee",
+    "assets/fonts/geist-latin.woff2": "9cb3a040ae312030eedf16c7ca46875a5b5f49009ca57f7a42ac01c96dda9a61",
+    "assets/fonts/geist-mono-latin.woff2": "3e7d61e5cfce65bdae083374d4b99880f5688937420a14ab374c79fd189b33ed",
+    "assets/fonts/OFL-Geist.txt": "1781d2806a07d91c4edf4740b88449fab7d0eadad53f7c351b94cd4d4eb8c00f",
+    "assets/fonts/OFL-GeistMono.txt": "1781d2806a07d91c4edf4740b88449fab7d0eadad53f7c351b94cd4d4eb8c00f",
+    "effects.js": "39a1ea53b73982529d298258fff13e925340e228af94878076be982096956a48",
+    "geom.js": "2dc8661b5d3c0e2679eb6bccbb38516d8ac83601d6c29dcc5e1edb07ef8324eb",
+    "colour.js": "bdeccbf024bf62d87c1058e8daa36b9d71523ce4233077bf5e922ae6181163e0",
+    "live-light.js": "27989063af2218384112cfb19a1e14eec92e55f0f28bc7ed7fde9fe6f03ae0b6"
+  }
+}

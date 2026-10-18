@@ -1,0 +1,2874 @@
+/* @sondalab/ui-kit — effects.css
+   Hand-authored (NOT generated). Opt-in effects layer above components.css.
+   Contract: docs/specs/2026-09-08-effects-layer-design.md
+
+   ── What this layer is ──────────────────────────────────────────────────────
+   Families, each carrying one meaning (spec §Decision 1; the re-scope in
+   docs/specs/2027-improve-aesthetics.md adds press):
+     glitch  — something re-resolved      liquid — you are recognised
+     aurora  — attention lives here       glass  — this is a physical surface
+     press   — you acted on this          goo    — these belong to one another
+   An effect that means nothing is switched off. Classes are ADDITIVE: they
+   compose onto components.css classes and never replace them.
+
+   ── Who draws what (spec §Decision 2) ───────────────────────────────────────
+   glass   the element's border, as chrome. Here: a static conic hairline on
+           ::after. Under the GPU tier (effects-gpu.js) a shader replaces it
+           with a hairline that reflects a moving environment. --pane: the
+           element is MADE of glass — a slab of light on ::before under the
+           label, a glint that follows the pointer, a hairline that turns to
+           face it with a fringe of colour either side (dispersion). Every
+           text button, whatever its variant.
+   aurora  light riding the border — the border-beam recipe: a thin arc on
+           ::after that rotates, and its bloom: a thicker copy of the arc,
+           Gaussian-blurred, on a child effects.js injects at mount()
+           (.sl-fx-aurora__glow). CSS-drawn at every tier; the bloom needs
+           Tier 1 only because the child has to exist. No GPU aurora.
+   liquid  the silhouette goes gooey: effects.js parents one shared <svg>
+           (.sl-fx-liquid__skin) into the host while the pointer shapes it —
+           the host's own box plus a drop at the pointer, welded by a goo
+           filter (blur + alpha contrast) and painted in the host's own fill
+           and border colours. Content is never filtered. No pseudo-element.
+           Gated behind a modifier in the markup: --drop (a round icon-only
+           button); a bare .sl-fx-liquid, and any container, is inert.
+   glitch  a child <span>, never the host, so the host's two paint layers stay
+           free for the edge.
+
+   ── Paint layers ────────────────────────────────────────────────────────────
+   ::after is the edge (glass at rest, the aurora's arc when lit). ::before is
+   the pane's body (glass --pane), the press's light and glitch's ghost; the
+   aurora leaves it free. A selected tile's seam is a layer of the host's
+   background (components.css, THE SEAM), so an effect keeps its own; a lit
+   pane, a toast and a terminal block draw a mark on ::before, so glass,
+   press and glitch are unsupported on those three. The aurora's
+   bloom is a CHILD, not a pseudo-element, because CSS
+   applies a filter before a mask: a ring masked on one box can only be
+   blurred by a box around it. effects.js injects the child at mount(); it
+   is the one layer that leaves the box, so a glow is truncated by any
+   ancestor that clips (overflow other than visible, contain: paint,
+   clip-path) and the consumer must give an effect element room — that
+   rule is in the spec, not only here. Replaced form controls render no
+   pseudo-element at all — wrap them in .sl-field__control.
+
+   ── Colour contract ─────────────────────────────────────────────────────────
+   No literal, ever. Every hue is a color-mix() over a role-var. Role-vars carry
+   a --sl-* fallback so this file also works imported without components.css.
+   Mask colours use the `black` keyword: `#000` would be extracted by sl-audit
+   as a design colour. */
+
+/* Replaced form controls render no pseudo-element at all, so a field's effects
+   bind to this wrapper instead. The control must FILL it: a wrapper that is a
+   block while its input keeps an intrinsic width leaves the ring marking a box
+   wider than the field. */
+.sl-field__control { display: block; position: relative; }
+.sl-field__control > :is(input, textarea, select) { box-sizing: border-box; width: 100%; }
+
+/* The live light's two bodies (live-light.js, run mode): the accent and its
+   depth companion, on every theme. On light they were two spectrum stops
+   until the spectrum stopped painting effects (owner, 2026-10-02). Declared
+   on the live host, not on :root, so a subtree that re-sets --slc-accent
+   gets its own. */
+[data-sl-fx-live] {
+  --slfx-light-a: var(--slc-accent, var(--sl-accent-default));
+  --slfx-light-b: var(--slfx-depth);
+}
+
+:root {
+  /* colour roles */
+  --slfx-depth: var(--sl-accent-depth, var(--slc-accent, var(--sl-accent-default)));
+  --slfx-sheen: var(--slc-text, var(--sl-text-primary));
+
+  /* edge geometry — the ring grows INWARD so it never meets the focus outline */
+  --slfx-ring-w: 1px;
+  /* 90deg, not 250: the reference's beam lights about 75px of one edge of a
+     320px card — a quarter of the ring — and never three edges at once.
+     Measured on lab/1x (2026-09-12) against border-beam's composer. */
+  --slfx-arc: 90deg;
+  /* the bloom: a band --slfx-bleed deep inside the ring (see the glow's
+     ::before), blurred by --slfx-soft; --slfx-glow is the headroom the glow
+     box takes around the ring — past three sigma plus the band, so the blur
+     is at zero long before any box edge. 6.5px is the reference's own
+     softness at the page's zoom: its glow is gone by 25 CSS px, and a 14px
+     Gaussian cannot fall to nothing in that distance. */
+  --slfx-bloom-w: 12px;
+  --slfx-soft: 6.5px;
+  --slfx-glow: calc(var(--slfx-soft) * 3 + var(--slfx-bloom-w));
+
+  /* translucency — how much of the component's own fill survives, and how
+     hard the page behind it is blurred. The saturate() is the reference's:
+     its light preset composites light with saturate(5.4), because a blur
+     alone washes the colour out of what it blurs.
+
+     Two passes got this wrong by being timid. At 76% the owner saw no
+     translucency at all; at 58% he still called it too little. The value is
+     30%, with the blur at 26px and saturation at 1.8 — the register is
+     Apple's glass, where the material is mostly what is behind it, heavily
+     blurred and pushed in saturation because a blur washes colour out of
+     what it blurs. A pane is a lens, not a tinted panel.
+
+     What bounds it is label contrast on a filled brand button. Until 0.21
+     white on the amber accent was below 4.5:1 with every effect off; the
+     token decision has since been taken twice: 0.21 deepened the light
+     accent until white read on it, and 0.24 made it a bright fill with the
+     dark label on it (the deep amber read brown). A translucent primary
+     takes the dark pole as its label either way (Ruling 8). */
+  --slfx-fill-a: 30%;
+  /* ── the glass parameters, and the backdrop it bends ─────────────────────
+     A surface names what lies behind a region and the pane refracts THAT;
+     nothing reads the document. Declare it on the glass element or any
+     ancestor:  --slfx-backdrop: url("hero.avif");
+     Without one the pane is blur and rim exactly as before — refraction is
+     additive and never a requirement, which is also why a browser with no
+     WebGPU loses nothing it had.
+
+     Thickness is a FRACTION of the pane's short side, not pixels: the
+     reference's own value is 20 on a 200x200 shape, so 0.10, and a ratio is
+     the only unit that survives a 34px button and a 400px card unretuned.
+     A component rebinds any of these per variant the way it rebinds
+     --slfx-fill, which is what keeps one shader serving every silhouette. */
+  --slfx-backdrop: none;
+  --slfx-glass-thickness: 0.1;
+  --slfx-glass-tint: 0;
+  --slfx-glass-fresnel: 20;
+  --slfx-back: 26px;
+  --slfx-back-sat: 1.8;
+  /* THE VEIL — the correction that took three passes to find. Glassmorphism
+     does not thin a component's colour toward transparency; it lays a light
+     film over the blurred backdrop. Every published recipe agrees on the
+     shape: about rgba(255,255,255,.05-.10) on a dark ground, about .45 on a
+     light one, and the guidance is explicit that on dark you want a light
+     tint rather than a dark one. Thinning the amber toward nothing was why a
+     filled button went to dark olive on ink.
+     The colour is the page's own light pole — the sheen where the sheen is
+     bright, its lightness mirrored where it is dark — so it is near-white on
+     both themes without a [data-sl-theme] branch. The alpha is linear in the
+     sheen's lightness through the two published anchors it was fitted to,
+     0.09 at L 0.91 and 0.85 at L 0.24. The shipped inks sit at L 0.94 (ink,
+     0.058) and, since 0.35, L 0.20 (paper, 0.894; 0.86 at the L 0.23 ink
+     before). The colour's mirror is the glint's (1.17 since 0.35, below). */
+  --slfx-veil: oklch(from var(--slfx-sheen) max(l, 1.17 - l) c h / clamp(0, 1.12 - 1.13 * l, 1));
+
+  /* glass stops — rebound per state; transparent means "no ring" */
+  --slfx-s0: transparent;
+  --slfx-s1: transparent;
+  --slfx-s2: transparent;
+  --slfx-s3: transparent;
+
+  /* goo — the largest gap between two MEMBERS, as laid out, that still grows a
+     neck between them; the rim the substance shows past a member with no
+     neighbour; and the most blur allowed to round a corner. The author binds
+     distances they can read off their own layout, never the filter's sigma.
+     14px welds a row laid out on --sl-space-3 and leaves --sl-space-5 apart.
+
+     --slfx-goo-soft is the shape budget, and it is the one that matters for
+     how the substance LOOKS. Dilation and blur both bring two silhouettes
+     together, but dilation preserves the outline (offsetting a rounded box
+     grows its radii by the offset) while blur melts it (the 0.5 iso-contour of
+     a blurred corner is rounded by roughly sigma). Spending the whole weld on
+     sigma put it at 10-16px against a 12px corner and the shapes read as
+     melted. So sigma is capped here and dilation absorbs the remainder; raise
+     it for a softer, more liquid neck, lower it for a crisper one. */
+  --slfx-goo-reach: 3px;
+  --slfx-goo-weld: 14px;
+  --slfx-goo-soft: 5px;
+  /* What a member with no fill of its own contributes — a bare wrapper, or
+     anything whose glass paints on a pseudo-element. The substance is the
+     surface the members sit on, one step in from the canvas, so an unfilled
+     member reads as part of the material rather than as a hole in it. */
+  --slfx-goo-fill: var(--sl-bg-surface-raised, var(--sl-bg-surface));
+  /* How far a drifting member wanders from where it was laid out (--drift,
+     below). Sized against --slfx-goo-weld, not against the member: what the
+     drift is for is carrying a pair ACROSS the weld distance, so a gap laid
+     out near 14px thins to a neck and parts again. Half the weld means the
+     gap between two members swings by a full weld over a cycle. Any larger and
+     members start reading as loose rather than as suspended. */
+  --slfx-goo-drift: 7px;
+}
+
+/* ══ KILL SWITCHES ═══════════════════════════════════════════════════════════
+   Three, all hard requirements (spec §Decision 4). Declared before the
+   families so a reader meets the exits before the entrances. */
+
+/* 1 & 2 — high contrast and the subtree opt-out neutralise the HOST as well as
+   its paint layers: the glitch animates its host and its shards, the liquid
+   hides its host's border under a transparent border-image while its skin
+   holds the edge, and the glass paints an inset highlight on the host.
+   `!important` is load-bearing: effects.js writes inline styles, which beat a
+   plain rule. The opt-out matches the element carrying the attribute AND its
+   subtree, compounded with the family classes so an unscoped
+   `box-shadow: none !important` never strips elevation or focus rings off
+   ordinary components.css elements inside the region. */
+:root[data-sl-theme="high-contrast"] :is(.sl-fx-glass, .sl-fx-glass__lit, .sl-fx-press, .sl-fx-aurora, .sl-fx-aurora__glow, .sl-fx-liquid, .sl-fx-liquid__skin, .sl-fx-goo, .sl-fx-goo__field, .sl-fx-glitch, .sl-fx-glitch__text, .sl-fx-glitch__shards, .sl-fx-glitch__shard),
+:is([data-sl-fx="off"], [data-sl-fx="off"] *):is(.sl-fx-glass, .sl-fx-glass__lit, .sl-fx-press, .sl-fx-aurora, .sl-fx-aurora__glow, .sl-fx-liquid, .sl-fx-liquid__skin, .sl-fx-goo, .sl-fx-goo__field, .sl-fx-glitch, .sl-fx-glitch__text, .sl-fx-glitch__shards, .sl-fx-glitch__shard) {
+  animation: none !important;
+  box-shadow: none !important;
+  text-shadow: none !important;
+  filter: none !important;
+  border-image: none !important;
+  backdrop-filter: none !important;
+  /* Not `background: revert` — the mix below IS the component's own fill, so
+     restoring it is a matter of keeping all of it. */
+  --slfx-fill-a: 100% !important;
+}
+
+/* ...but not the kit's own selection. A selected tile (components.css, 0.31)
+   is drawn in box-shadow, and the kill above takes a host's box-shadow: a
+   current page or a chosen segment that also wears an effect lost its only
+   marker -- in high contrast its accent ring. The tile is the component's,
+   not the effect's, so it comes back here (in high contrast as that ring),
+   outranking the kill on specificity, both !important. */
+:root[data-sl-theme="high-contrast"] :is(.sl-pagination__item[aria-current]:not([aria-current="false"]), .sl-segmented__item:is([aria-selected="true"], [aria-pressed="true"]), .sl-nav__item[aria-current]:not([aria-current="false"]), .sl-list__row:is([aria-selected="true"], [aria-current]:not([aria-current="false"]))):is(.sl-fx-glass, .sl-fx-press, .sl-fx-aurora, .sl-fx-liquid, .sl-fx-glitch),
+:is([data-sl-fx="off"], [data-sl-fx="off"] *):is(.sl-pagination__item[aria-current]:not([aria-current="false"]), .sl-segmented__item:is([aria-selected="true"], [aria-pressed="true"]), .sl-nav__item[aria-current]:not([aria-current="false"]), .sl-list__row:is([aria-selected="true"], [aria-current]:not([aria-current="false"]))):is(.sl-fx-glass, .sl-fx-press, .sl-fx-aurora, .sl-fx-liquid, .sl-fx-glitch) {
+  box-shadow: var(--slc-depth-tile) !important;
+}
+:root[data-sl-theme="high-contrast"] :is(.sl-tabs--tile .sl-tabs__tab[aria-selected="true"]):is(.sl-fx-glass, .sl-fx-press, .sl-fx-aurora, .sl-fx-liquid, .sl-fx-glitch),
+:is([data-sl-fx="off"], [data-sl-fx="off"] *):is(.sl-tabs--tile .sl-tabs__tab[aria-selected="true"]):is(.sl-fx-glass, .sl-fx-press, .sl-fx-aurora, .sl-fx-liquid, .sl-fx-glitch) {
+  box-shadow: var(--slc-depth-flat) !important;
+}
+/* ...nor a control's own depth and focus halo (components.css, 0.32): a
+   control writes its resting shadow into --_sl-depth and its focus rule adds
+   --_sl-halo, and the kill above took both off every control that wears an
+   effect -- the secondary key's lit line and cast, and the halo of every
+   glass button in an opt-out region (a product's power-save switch, say).
+   They are the control's, not the effect's, so they come back as the kit
+   paints them, outranking the kill, both !important. The halo is still off
+   in high contrast and under forced colours: it is drawn at --slc-glow's
+   strength, which is 0 there. */
+:root[data-sl-theme="high-contrast"] :is(.sl-btn, .sl-icon-btn, .sl-check__box, .sl-radio__box, .sl-switch__track, .sl-segmented__item, .sl-pagination__item, .sl-nav__item, .sl-list__row, .sl-tabs__tab, .sl-activitybar__item, .sl-tree__row, .sl-statusbar__item, .sl-titlebar__cmd):is(.sl-fx-glass, .sl-fx-press, .sl-fx-aurora, .sl-fx-liquid, .sl-fx-glitch),
+:is([data-sl-fx="off"], [data-sl-fx="off"] *):is(.sl-btn, .sl-icon-btn, .sl-check__box, .sl-radio__box, .sl-switch__track, .sl-segmented__item, .sl-pagination__item, .sl-nav__item, .sl-list__row, .sl-tabs__tab, .sl-activitybar__item, .sl-tree__row, .sl-statusbar__item, .sl-titlebar__cmd):is(.sl-fx-glass, .sl-fx-press, .sl-fx-aurora, .sl-fx-liquid, .sl-fx-glitch) {
+  box-shadow: var(--_sl-depth, 0 0 transparent) !important;
+}
+:root[data-sl-theme="high-contrast"] :is(.sl-btn, .sl-icon-btn, .sl-segmented__item, .sl-pagination__item, .sl-nav__item, .sl-list__row, .sl-tabs__tab, .sl-activitybar__item, .sl-tree__row, .sl-statusbar__item, .sl-titlebar__cmd):is(.sl-fx-glass, .sl-fx-press, .sl-fx-aurora, .sl-fx-liquid, .sl-fx-glitch):focus-visible,
+:is([data-sl-fx="off"], [data-sl-fx="off"] *):is(.sl-btn, .sl-icon-btn, .sl-segmented__item, .sl-pagination__item, .sl-nav__item, .sl-list__row, .sl-tabs__tab, .sl-activitybar__item, .sl-tree__row, .sl-statusbar__item, .sl-titlebar__cmd):is(.sl-fx-glass, .sl-fx-press, .sl-fx-aurora, .sl-fx-liquid, .sl-fx-glitch):focus-visible {
+  box-shadow: var(--_sl-depth, 0 0 transparent), var(--_sl-halo, 0 0 transparent) !important;
+}
+/* ...nor a surface's own recipe (0.33): an island (a workbench pane, a
+   terminal block) and an overlay that floats (a toast, a palette: the cast
+   since 0.34) draw their ring and cast in box-shadow, and keep ::after free
+   for the aurora. Under the kill they keep the recipe -- in high contrast
+   that is the island's drawn ring, the edge that finds the pane on black. A
+   lit pane's drop is the one thing that stays off in an opt-out region. Of
+   the families only the aurora is supported on these four hosts: each one's
+   mark (the lit pane's seam, the terminal block's exit mark, the toast's
+   tick, the palette's seam since 0.34) is its ::before, which glass, press
+   and glitch need. */
+:root[data-sl-theme="high-contrast"] :is(.sl-pane, .sl-term-block):is(.sl-fx-glass, .sl-fx-press, .sl-fx-aurora, .sl-fx-liquid, .sl-fx-glitch),
+:is([data-sl-fx="off"], [data-sl-fx="off"] *):is(.sl-pane, .sl-term-block):is(.sl-fx-glass, .sl-fx-press, .sl-fx-aurora, .sl-fx-liquid, .sl-fx-glitch) {
+  box-shadow: var(--slc-depth-island) !important;
+}
+/* A toast and a palette keep no border (0.34): their ring is their cast's. */
+:root[data-sl-theme="high-contrast"] :is(.sl-toast, .sl-palette):is(.sl-fx-glass, .sl-fx-press, .sl-fx-aurora, .sl-fx-liquid, .sl-fx-glitch),
+:is([data-sl-fx="off"], [data-sl-fx="off"] *):is(.sl-toast, .sl-palette):is(.sl-fx-glass, .sl-fx-press, .sl-fx-aurora, .sl-fx-liquid, .sl-fx-glitch) {
+  box-shadow: var(--slc-depth-cast) !important;
+}
+
+/* The goo's drift is the one thing this family animates, and it animates the
+   MEMBER — an ordinary card or wrapper that keeps its own chrome. So the
+   switches reach it with `animation` alone rather than by adding the member to
+   the list above, which would also strip the elevation and the fill the
+   component itself painted. Without this the members would go on wandering
+   over a field goo-field.js refused to build. */
+:root[data-sl-theme="high-contrast"] .sl-fx-goo__member,
+:is([data-sl-fx="off"], [data-sl-fx="off"] *).sl-fx-goo__member,
+:is([data-sl-fx="off"], [data-sl-fx="off"] *) .sl-fx-goo__member { animation: none !important; }
+
+/* The status bar's live dot (workbench.css, 0.34) breathes on its own, not
+   as an effect family, but an opt-out region is where a product asks for
+   stillness: the breath stops there. */
+[data-sl-fx="off"] .sl-statusbar__dot,
+.sl-statusbar__dot[data-sl-fx="off"] { animation: none !important; }
+
+/* The shatter variant replaces the label with jumping bands, so restoring the
+   text is part of switching it off, not a separate concern. */
+:root[data-sl-theme="high-contrast"] .sl-fx-glitch__text,
+:is([data-sl-fx="off"], [data-sl-fx="off"] *) .sl-fx-glitch__text,
+.sl-fx-glitch__text:is([data-sl-fx="off"], [data-sl-fx="off"] *) { opacity: 1 !important; }
+
+:root[data-sl-theme="high-contrast"] .sl-fx-glitch__shard,
+:is([data-sl-fx="off"], [data-sl-fx="off"] *) .sl-fx-glitch__shard { opacity: 0 !important; }
+
+/* GLASS TEXT (below) paints nothing of its own: the host is `color:
+   transparent` with an SVG mask standing in for the ink, and the glow seated
+   before it is a second, unmasked copy that exists only to carry light for
+   that mask. Neither switch above names `.sl-fx-glass--text` or
+   `.sl-fx-glass__glow`, so turning a glass-text host off used to leave the
+   mask in place — glass-text.js writes `mask-image`/`-webkit-mask-image` as
+   an INLINE style, which is why removing it here needs `!important` for the
+   same reason the block above does — while the colour stayed transparent:
+   the material was gone and the letters were still hidden for it. Restore
+   exactly what GLASS TEXT set and no more: colour back to ordinary painted
+   text (no `!important` needed — this selector already outranks the plain
+   `.sl-fx-glass--text` rule on specificity alone), mask gone. The glow
+   restores nothing of its own — it has no ink, only borrowed light for a
+   mask that no longer exists — so it just stops shining.
+   Wrapped in `:is()` rather than written as a bare descendant selector:
+   glass-text.test.mjs locates the real declension by the first occurrence of
+   the class name immediately followed by an opening brace (the "Paint
+   layers" rule below explains the same hazard) — a plain selector here would
+   produce that same substring earlier in the file and shadow it. */
+:root[data-sl-theme="high-contrast"] :is(.sl-fx-glass--text),
+:is([data-sl-fx="off"], [data-sl-fx="off"] *) :is(.sl-fx-glass--text) {
+  color: inherit;
+  -webkit-mask-image: none !important;
+  mask-image: none !important;
+}
+:root[data-sl-theme="high-contrast"] :is(.sl-fx-glass__glow),
+:is([data-sl-fx="off"], [data-sl-fx="off"] *) :is(.sl-fx-glass__glow) {
+  text-shadow: none !important;
+}
+
+/* Paint layers. Written as separate selectors rather than
+   :is(.sl-fx-glass, .sl-fx-aurora)::after so this text never collides with
+   the shared ring rule's own selector further down the file — a test locates
+   that rule by its first occurrence of that exact substring. In an opt-out
+   region the material's own layers go too (0.32.1), as under forced
+   colours: mount() builds them on every glass host, and they kept a
+   primary at 90% over a blurred page under its opaque label. High contrast
+   needs no entry: mount() builds nothing there. */
+:root[data-sl-theme="high-contrast"] .sl-fx-glass::before,
+:root[data-sl-theme="high-contrast"] .sl-fx-glass::after,
+:root[data-sl-theme="high-contrast"] .sl-fx-press::before,
+:root[data-sl-theme="high-contrast"] .sl-fx-press::after,
+:root[data-sl-theme="high-contrast"] .sl-fx-aurora::after,
+:root[data-sl-theme="high-contrast"] .sl-fx-aurora__glow,
+:root[data-sl-theme="high-contrast"] .sl-fx-live__canvas,
+:root[data-sl-theme="high-contrast"] .sl-fx-glass__lens,
+:root[data-sl-theme="high-contrast"] .sl-fx-glass__lit,
+:root[data-sl-theme="high-contrast"] .sl-fx-liquid__skin,
+:root[data-sl-theme="high-contrast"] .sl-fx-goo__field,
+:root[data-sl-theme="high-contrast"] .sl-fx-glitch::before,
+:root[data-sl-theme="high-contrast"] .sl-fx-glitch::after,
+:is([data-sl-fx="off"], [data-sl-fx="off"] *) .sl-fx-glass::before,
+:is([data-sl-fx="off"], [data-sl-fx="off"] *) .sl-fx-glass::after,
+:is([data-sl-fx="off"], [data-sl-fx="off"] *) .sl-fx-press::before,
+:is([data-sl-fx="off"], [data-sl-fx="off"] *) .sl-fx-press::after,
+.sl-fx-press:is([data-sl-fx="off"], [data-sl-fx="off"] *)::before,
+.sl-fx-press:is([data-sl-fx="off"], [data-sl-fx="off"] *)::after,
+:is([data-sl-fx="off"], [data-sl-fx="off"] *) .sl-fx-aurora::after,
+:is([data-sl-fx="off"], [data-sl-fx="off"] *) .sl-fx-aurora__glow,
+:is([data-sl-fx="off"], [data-sl-fx="off"] *) .sl-fx-live__canvas,
+:is([data-sl-fx="off"], [data-sl-fx="off"] *) .sl-fx-glass__lens,
+:is([data-sl-fx="off"], [data-sl-fx="off"] *) .sl-fx-glass__lit,
+:is([data-sl-fx="off"], [data-sl-fx="off"] *) .sl-fx-liquid__skin,
+:is([data-sl-fx="off"], [data-sl-fx="off"] *) .sl-fx-goo__field,
+:is([data-sl-fx="off"], [data-sl-fx="off"] *) .sl-fx-glitch::before,
+:is([data-sl-fx="off"], [data-sl-fx="off"] *) .sl-fx-glitch::after,
+:is([data-sl-fx="off"], [data-sl-fx="off"] *) :is(.sl-glass__backdrop, .sl-glass__tint, .sl-glass__specular, .sl-glass__shine),
+:is(.sl-fx-glass, .sl-fx-aurora):is([data-sl-fx="off"], [data-sl-fx="off"] *)::after,
+.sl-fx-glass:is([data-sl-fx="off"], [data-sl-fx="off"] *)::before,
+.sl-fx-glitch:is([data-sl-fx="off"], [data-sl-fx="off"] *)::before,
+.sl-fx-glitch:is([data-sl-fx="off"], [data-sl-fx="off"] *)::after {
+  display: none !important;
+}
+
+/* Forced colours (the user's own palette, components.css): every layer the
+   kill switches hide is hidden here too, plus the material's own layers and
+   ink. Each paints page colours -- a tint, a sheen, an arc, a shimmer -- and
+   on a pressed or checked control they sit over the Highlight that
+   components.css paints the state in, so the state read as the page's accent
+   or vanished. Same list as the paint layers above, without the theme prefix;
+   effects-guards.test.mjs keeps the two in step. */
+@media (forced-colors: active) {
+  .sl-fx-glass::before,
+  .sl-fx-glass::after,
+  .sl-fx-press::before,
+  .sl-fx-press::after,
+  .sl-fx-aurora::after,
+  .sl-fx-aurora__glow,
+  .sl-fx-live__canvas,
+  .sl-fx-glass__lens,
+  .sl-fx-glass__lit,
+  .sl-fx-liquid__skin,
+  .sl-fx-goo__field,
+  .sl-fx-glitch::before,
+  .sl-fx-glitch::after,
+  .sl-fx-ink,
+  .sl-glass__backdrop,
+  .sl-glass__tint,
+  .sl-glass__specular,
+  .sl-glass__shine {
+    display: none !important;
+  }
+  /* The shatter's bands are copies of the label in page colours; as in the
+     kill switches, the text comes back when they go. In :is() so no class
+     here is followed by its own brace ahead of its real rule below, which
+     some tests locate by first occurrence. */
+  :is(.sl-fx-glitch__text) { opacity: 1 !important; }
+  :is(.sl-fx-glitch__shard) { opacity: 0 !important; }
+}
+
+/* A halftone is a picture made of spacing and size: high contrast shows none. */
+:root[data-sl-theme="high-contrast"] [data-sl-halftone] { display: none; }
+
+/* 3 — reduced motion is not a rule here but a structural one: every `animation:`
+   declaration in this file sits inside a `prefers-reduced-motion: no-preference`
+   block, and effects.js never sets data-sl-fx="on" under `reduce`. Static
+   material (the glass edge, a resting arc) survives, because it is not motion.
+   scripts/effects-guards.test.mjs enforces the placement mechanically. */
+
+/* ══ EDGE — one ring shape, two readings ═════════════════════════════════════
+   Glass and aurora share ::after because a single pseudo-element is all the
+   medium gives an edge: at rest it is the glass hairline, and while attention
+   lives on the element it is the aurora's arc. The ring occupies exactly the
+   border band: for an absolutely positioned child `inset: 0` resolves against
+   the PADDING box, so `inset: -1px` lands on a 1px border — and 1px outside
+   the box when the element has none (a filled button, the only case where the
+   ring is external). Width is `padding`, so it grows INWARD: growing outward
+   would walk into the focus outline, which sits flush outside the border
+   (`outline-offset: 0` since 2026-10-01 -- no gap between lines) and which no
+   effect may ever occupy. Do not "correct" the negative inset to a positive one. */
+
+/* The glass primary's fill as a registered <color>, so a hover or press change
+   fades instead of snapping: an unregistered custom property swaps at once, and
+   the tint layer paints it as a gradient, which never interpolates. Its own
+   name, not --slg-accent: a registered property always has a value, and that
+   would shadow every var(--slg-accent, ...) fallback in glass.css. */
+@property --slfx-accent-t {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: transparent;
+}
+
+@property --slfx-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 210deg;
+}
+
+/* The glow's headroom is a calc() of two other lengths, and an unregistered
+   custom property computes to its calc() TEXT, not to a length — so
+   effects.js, which reads it to size the seated glow, parsed "calc(14px * 3
+   + 12px)" as nothing and seated every glow at its host's own box plus one
+   pixel. Measured on lab/1w: a 321px host, a 323px glow, and a bloom band
+   with no room to exist. Registered, it computes to pixels wherever it is
+   read. */
+@property --slfx-glow {
+  syntax: "<length>";
+  inherits: true;
+  initial-value: 0px;
+}
+
+/* The six fitted colours are registered, so each computes once where it is
+   declared and reaches its consumers as a colour, not as a token stream that
+   every gradient stop expands and parses again. Inherited: they are declared
+   on the parent of the edge (below) and painted by its pseudo-elements.
+   Transparent where nothing declares them, which is no element that paints
+   an effect. */
+@property --slfx-accent-vivid {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: transparent;
+}
+@property --slfx-depth-vivid {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: transparent;
+}
+@property --slfx-spot {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: transparent;
+}
+@property --slfx-accent-bloom {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: transparent;
+}
+@property --slfx-depth-bloom {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: transparent;
+}
+@property --slfx-rim-beam {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: transparent;
+}
+
+/* The fits are declared on the PARENT of the edge, not on :root and not on
+   the edge itself. A custom property's var() references resolve using the
+   declaring element's cascaded values, so a :root declaration could never
+   pick up an .invert ancestor's remap — the parent sees every ancestor's.
+   And a fit is nine nested relative colours, ~0.15 ms of style resolution
+   each in Chrome 152: on the edge itself the six would be paid again every
+   time the pointer writes --slfx-px on a pane (1.7 ms per move, against
+   0.13 before the fits); on the parent they are paid when the parent's own
+   style changes, which the pointer never causes. What the parent cannot
+   see is a remap on the edge element itself; remap at the band. */
+:has(> :is(.sl-fx-glass, .sl-fx-aurora)) {
+  /* ── The vivid tier ─────────────────────────────────────────────────────
+     Light on a light page cannot take its contrast from luminance. The beam
+     is the accent, and its tails, bloom and rim are the depth companion; on
+     paper those are a dark amber (L 0.60) and a dark teal (L 0.45, C 0.07),
+     and a dark line on cream reads as pigment, not as light — while lifting
+     it toward white only makes it pale. So every hue an effect emits is
+     first brought to the palette's own vivid tier, where --sl-status-*
+     already sit on both themes (paper: L 0.58–0.67, C 0.14–0.22; ink: L
+     0.71–0.84, C 0.14–0.18): a FLOOR on lightness, and the lift is paid for
+     in chroma, 0.45 per unit of lift — which is what keeps a lifted hue a
+     colour instead of a tint. Ink: both tokens already sit above the floor
+     and pass through (the depth companion moves by 0.003). One rule for
+     both themes, and a band's remapped --slc-accent follows it — which is
+     why this is a derivation, not a [data-sl-theme] branch. (--slfx-depth
+     and --slfx-sheen are substituted on :root, where they are declared, so
+     a band's remap of the depth companion or the text does not reach them;
+     recorded, not fixed here.)
+
+     ── The fit ──
+     The lift can ask for more chroma than sRGB holds at that lightness and
+     hue: teal at L 0.66 holds C 0.114 and the tier asks 0.166; amber holds
+     0.151 and the tier asks 0.162. Chrome does not gamut-map such a colour,
+     it clips it in sRGB, which moves the hue (the teal by +7°) and the
+     lightness, silently. So every colour that pushes chroma goes through
+     a fit — CSS Color 4 §13's own mapping, chroma reduced at constant
+     lightness and hue until the colour is inside, which no engine runs
+     yet — written as seven bisection steps over [0, 0.32] (no sRGB colour
+     above L 0.66 holds more than 0.31): each step converts the current
+     point to linear sRGB and writes "inside the cube" into its alpha (a
+     clamp with a 1/1000 ramp, --slfx-in-gamut, a bare expression over the
+     channel keywords that var() drops into each probe), and the next step
+     reads that alpha back and halves the stride. A last probe steps down
+     once if the point is still outside, so the result sits within 0.0025 of
+     the ceiling and never past it. A colour that fit to begin with passes
+     through untouched: the closing mix weights it by its own probe (1
+     inside, 0 outside) against the fitted one at 0.001, so the one is the
+     whole and the other the remainder. Tokens are opaque by contract; the
+     fit returns alpha 1. Paper: depth 0.45 / 0.07 → asks 0.66 / 0.17, gets
+     0.66 / 0.11; accent 0.60 / 0.13 → asks 0.66 / 0.16, gets 0.66 / 0.15.
+     scripts/effects-gamut.test.mjs evaluates these declarations over a hue
+     sweep on both themes. */
+  --slfx-vivid-l: 0.66;
+  --slfx-vivid-k: 0.45;
+  --slfx-in-gamut: clamp(0, 1 - 1000 * max(0, -1 * min(r, g, b), max(r, g, b) - 1), 1);
+  --slfx-accent-vivid-want: oklch(from var(--slc-accent, var(--sl-accent-default)) max(l, var(--slfx-vivid-l)) calc(c + max(0, var(--slfx-vivid-l) - l) * var(--slfx-vivid-k)) h);
+  --slfx-accent-vivid-b1: oklch(from color(from oklch(from var(--slfx-accent-vivid-want) l 0.16 h) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.08) h);
+  --slfx-accent-vivid-b2: oklch(from color(from var(--slfx-accent-vivid-b1) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.04) h);
+  --slfx-accent-vivid-b3: oklch(from color(from var(--slfx-accent-vivid-b2) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.02) h);
+  --slfx-accent-vivid-b4: oklch(from color(from var(--slfx-accent-vivid-b3) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.01) h);
+  --slfx-accent-vivid-b5: oklch(from color(from var(--slfx-accent-vivid-b4) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.005) h);
+  --slfx-accent-vivid-b6: oklch(from color(from var(--slfx-accent-vivid-b5) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.0025) h);
+  --slfx-accent-vivid-b7: oklch(from color(from var(--slfx-accent-vivid-b6) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.00125) h);
+  --slfx-accent-vivid-fit: oklch(from color(from var(--slfx-accent-vivid-b7) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c - (1 - alpha) * 0.00125) h / 0.001);
+  --slfx-accent-vivid: oklch(from color-mix(in oklch, color(from var(--slfx-accent-vivid-want) srgb-linear r g b / var(--slfx-in-gamut)), var(--slfx-accent-vivid-fit)) l c h / 1);
+  --slfx-depth-vivid-want: oklch(from var(--slfx-depth) max(l, var(--slfx-vivid-l)) calc(c + max(0, var(--slfx-vivid-l) - l) * var(--slfx-vivid-k)) h);
+  --slfx-depth-vivid-b1: oklch(from color(from oklch(from var(--slfx-depth-vivid-want) l 0.16 h) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.08) h);
+  --slfx-depth-vivid-b2: oklch(from color(from var(--slfx-depth-vivid-b1) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.04) h);
+  --slfx-depth-vivid-b3: oklch(from color(from var(--slfx-depth-vivid-b2) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.02) h);
+  --slfx-depth-vivid-b4: oklch(from color(from var(--slfx-depth-vivid-b3) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.01) h);
+  --slfx-depth-vivid-b5: oklch(from color(from var(--slfx-depth-vivid-b4) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.005) h);
+  --slfx-depth-vivid-b6: oklch(from color(from var(--slfx-depth-vivid-b5) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.0025) h);
+  --slfx-depth-vivid-b7: oklch(from color(from var(--slfx-depth-vivid-b6) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.00125) h);
+  --slfx-depth-vivid-fit: oklch(from color(from var(--slfx-depth-vivid-b7) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c - (1 - alpha) * 0.00125) h / 0.001);
+  --slfx-depth-vivid: oklch(from color-mix(in oklch, color(from var(--slfx-depth-vivid-want) srgb-linear r g b / var(--slfx-in-gamut)), var(--slfx-depth-vivid-fit)) l c h / 1);
+  /* The pane's warm spot: the vivid accent at the floor, fitted again — see
+     --slfx-spot-warm. */
+  --slfx-spot-want: oklch(from var(--slfx-accent-vivid) var(--slfx-vivid-l) c h);
+  --slfx-spot-b1: oklch(from color(from oklch(from var(--slfx-spot-want) l 0.16 h) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.08) h);
+  --slfx-spot-b2: oklch(from color(from var(--slfx-spot-b1) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.04) h);
+  --slfx-spot-b3: oklch(from color(from var(--slfx-spot-b2) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.02) h);
+  --slfx-spot-b4: oklch(from color(from var(--slfx-spot-b3) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.01) h);
+  --slfx-spot-b5: oklch(from color(from var(--slfx-spot-b4) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.005) h);
+  --slfx-spot-b6: oklch(from color(from var(--slfx-spot-b5) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.0025) h);
+  --slfx-spot-b7: oklch(from color(from var(--slfx-spot-b6) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.00125) h);
+  --slfx-spot-fit: oklch(from color(from var(--slfx-spot-b7) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c - (1 - alpha) * 0.00125) h / 0.001);
+  --slfx-spot: oklch(from color-mix(in oklch, color(from var(--slfx-spot-want) srgb-linear r g b / var(--slfx-in-gamut)), var(--slfx-spot-fit)) l c h / 1);
+  /* The aurora's blooms and the --rim's beam: the vivid pair lifted toward
+     white and pushed in chroma, fitted at the lifted lightness — see
+     --slfx-bloom-hi and --slfx-aurora--rim. */
+  /* A QUARTER of the way toward white, chroma kept: the reference's bloom
+     pixel is a saturated hue (rgb spread 30 for a lift of 48 luminance), and
+     the previous 0.55 lift with chroma pushed 1.25 came out as milk (spread
+     17 for the same lift). Measured on lab/1x, 2026-09-12. */
+  --slfx-accent-bloom-want: oklch(from var(--slfx-accent-vivid) calc(l + (1 - l) * 0.25) c h);
+  --slfx-accent-bloom-b1: oklch(from color(from oklch(from var(--slfx-accent-bloom-want) l 0.16 h) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.08) h);
+  --slfx-accent-bloom-b2: oklch(from color(from var(--slfx-accent-bloom-b1) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.04) h);
+  --slfx-accent-bloom-b3: oklch(from color(from var(--slfx-accent-bloom-b2) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.02) h);
+  --slfx-accent-bloom-b4: oklch(from color(from var(--slfx-accent-bloom-b3) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.01) h);
+  --slfx-accent-bloom-b5: oklch(from color(from var(--slfx-accent-bloom-b4) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.005) h);
+  --slfx-accent-bloom-b6: oklch(from color(from var(--slfx-accent-bloom-b5) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.0025) h);
+  --slfx-accent-bloom-b7: oklch(from color(from var(--slfx-accent-bloom-b6) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.00125) h);
+  --slfx-accent-bloom-fit: oklch(from color(from var(--slfx-accent-bloom-b7) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c - (1 - alpha) * 0.00125) h / 0.001);
+  --slfx-accent-bloom: oklch(from color-mix(in oklch, color(from var(--slfx-accent-bloom-want) srgb-linear r g b / var(--slfx-in-gamut)), var(--slfx-accent-bloom-fit)) l c h / 1);
+  /* The depth companion's bloom is --rim's, under --slfx-rim-beam, which
+     pushes chroma 1.15: a bloom must not be paler than the beam it blooms
+     from (effects-gamut.test.mjs), so it takes the same push. */
+  --slfx-depth-bloom-want: oklch(from var(--slfx-depth-vivid) calc(l + (1 - l) * 0.25) calc(c * 1.15) h);
+  --slfx-depth-bloom-b1: oklch(from color(from oklch(from var(--slfx-depth-bloom-want) l 0.16 h) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.08) h);
+  --slfx-depth-bloom-b2: oklch(from color(from var(--slfx-depth-bloom-b1) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.04) h);
+  --slfx-depth-bloom-b3: oklch(from color(from var(--slfx-depth-bloom-b2) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.02) h);
+  --slfx-depth-bloom-b4: oklch(from color(from var(--slfx-depth-bloom-b3) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.01) h);
+  --slfx-depth-bloom-b5: oklch(from color(from var(--slfx-depth-bloom-b4) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.005) h);
+  --slfx-depth-bloom-b6: oklch(from color(from var(--slfx-depth-bloom-b5) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.0025) h);
+  --slfx-depth-bloom-b7: oklch(from color(from var(--slfx-depth-bloom-b6) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.00125) h);
+  --slfx-depth-bloom-fit: oklch(from color(from var(--slfx-depth-bloom-b7) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c - (1 - alpha) * 0.00125) h / 0.001);
+  --slfx-depth-bloom: oklch(from color-mix(in oklch, color(from var(--slfx-depth-bloom-want) srgb-linear r g b / var(--slfx-in-gamut)), var(--slfx-depth-bloom-fit)) l c h / 1);
+  --slfx-rim-beam-want: oklch(from var(--slfx-depth-vivid) calc(l + (1 - l) * 0.25) calc(c * 1.15) h);
+  --slfx-rim-beam-b1: oklch(from color(from oklch(from var(--slfx-rim-beam-want) l 0.16 h) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.08) h);
+  --slfx-rim-beam-b2: oklch(from color(from var(--slfx-rim-beam-b1) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.04) h);
+  --slfx-rim-beam-b3: oklch(from color(from var(--slfx-rim-beam-b2) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.02) h);
+  --slfx-rim-beam-b4: oklch(from color(from var(--slfx-rim-beam-b3) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.01) h);
+  --slfx-rim-beam-b5: oklch(from color(from var(--slfx-rim-beam-b4) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.005) h);
+  --slfx-rim-beam-b6: oklch(from color(from var(--slfx-rim-beam-b5) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.0025) h);
+  --slfx-rim-beam-b7: oklch(from color(from var(--slfx-rim-beam-b6) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c + (alpha * 2 - 1) * 0.00125) h);
+  --slfx-rim-beam-fit: oklch(from color(from var(--slfx-rim-beam-b7) srgb-linear r g b / var(--slfx-in-gamut)) l calc(c - (1 - alpha) * 0.00125) h / 0.001);
+  --slfx-rim-beam: oklch(from color-mix(in oklch, color(from var(--slfx-rim-beam-want) srgb-linear r g b / var(--slfx-in-gamut)), var(--slfx-rim-beam-fit)) l c h / 1);
+}
+
+/* The edge's own derivations: the glint and the chrome's stops — one
+   relative colour and three mixes, cheap enough to be recomputed with the
+   pointer. */
+:is(.sl-fx-glass, .sl-fx-aurora) {
+  /* The glint: the light pole of the neutral pair, which the hairline's
+     bright stop and the arc's hot core are made of. On ink that is the sheen
+     itself (the text token, L 0.94). On paper the sheen is the DARK pole
+     (L 0.20), and a highlight made of it is a grey line — so the glint is
+     its lightness mirrored: 1.17 − l lands at 0.97, near the chrome's own
+     paper pole (effects-shader.js puts it at 0.985), and max() leaves a
+     bright sheen alone. The mirror was 1.2 until 0.35, with the ink at
+     L 0.23: the same 0.97. A higher glint at the ink's chroma leaves sRGB,
+     and the generator fails the build on it (scripts/lib/neutrals.mjs
+     GLINT_MIRROR, which this number and the three beside it must equal).
+     The same criterion the shader applies at runtime: whichever of the
+     neutral pair is the brighter is the pole. */
+  --slfx-glint: oklch(from var(--slfx-sheen) max(l, 1.17 - l) c h);
+  --slfx-edge-hi: color-mix(in srgb, var(--slfx-glint) 55%, var(--slc-border-strong, var(--sl-border-strong)));
+  --slfx-edge-lo: var(--slc-border-subtle, var(--sl-border-subtle));
+  --slfx-edge-mid: var(--slc-border-strong, var(--sl-border-strong));
+  /* The control edge's inner line. --slfx-edge-lo (the subtle border, 7% on
+     ink) did not read as a line at 1px; the default border does. */
+  --slfx-edge-soft: var(--slc-border, var(--sl-border-default));
+  --slfx-edge-tint: color-mix(in srgb, var(--slfx-accent-vivid) 40%, var(--slfx-edge-hi));
+  position: relative;
+  isolation: isolate;
+}
+
+:is(.sl-fx-glass, .sl-fx-aurora)::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  padding: var(--slfx-ring-w);
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0;
+  z-index: 1;
+  /* The glass reading: chrome alternates bright and dark around the ring, with
+     the product's hue as a fleck at one transition — never as a tint over the
+     whole band. Static; the GPU tier is what makes it move. */
+  background: conic-gradient(from var(--slfx-angle),
+    var(--slfx-s0) 0deg,
+    var(--slfx-s1) 48deg,
+    var(--slfx-s2) 92deg,
+    var(--slfx-s0) 130deg,
+    var(--slfx-s1) 196deg,
+    var(--slfx-s3) 244deg,
+    var(--slfx-s1) 300deg,
+    var(--slfx-s0) 360deg);
+  /* `black` not `#000`: sl-audit extracts 3-digit hex as a design colour. */
+  mask: linear-gradient(black 0 0) content-box, linear-gradient(black 0 0);
+  -webkit-mask-composite: xor;   /* Safari below 15.4 */
+  mask-composite: exclude;
+  /* Light never snaps on: the swap from chrome to arc is a background
+     transition (both conics carry eight stops, so Chrome interpolates them),
+     and the lit state fades over the slow beat, as the reference's beam does
+     (600ms in, 500ms out). */
+  transition:
+    opacity var(--sl-motion-slow, 360ms) var(--sl-motion-ease, ease),
+    background var(--sl-motion-slow, 360ms) var(--sl-motion-ease, ease);
+}
+
+/* ══ GLASS — this is a physical surface ══════════════════════════════════════
+   The specular edge (docs/specs/2027-improve-aesthetics.md, re-scope R1,
+   owner's pick 2026-09-24; card `proximity-glow`). The pointer is a light
+   source above the surface: a narrow arc of warm white wakes on the border
+   facing it, up to SPEC_REACH (effects.js) before the pointer arrives, and on
+   paper a soft shade answers it on the far side. Nothing at rest — an element
+   the pointer is nowhere near carries no light (AC-33).
+
+   effects.js writes two numbers and nothing else: --slfx-spec-a, the light's
+   bearing as a conic angle, and --slfx-spec-i, how lit the edge is (0–1).
+   Both are sprung there — the DIRECTION is sprung as a vector, so a pointer
+   crossing the element dims the arc, turns it and brightens it again rather
+   than snapping it 180° in a frame. No transition on the background: the
+   driver already eases, and a second easing on top of it lags the light
+   behind its own spring.
+
+   Tier 0 (no JavaScript) has no light at all: a pointer light needs the
+   pointer. Focus and live states belong to the aurora, which still owns this
+   ::after when it is lit — its rules come later at equal specificity. */
+.sl-fx-glass {
+  --slfx-spec-a: 0deg;
+  --slfx-spec-i: 0;
+  /* The light: the page's own light pole — near-white on both themes. */
+  --slfx-spec-light: var(--slfx-glint);
+  /* The shade: the sheen where it is the dark pole (paper), gone on ink,
+     where a darker line on near-black reads as nothing. */
+  --slfx-spec-shade: oklch(from var(--slfx-sheen) l c h / clamp(0, (0.6 - l) * 5, 1));
+}
+.sl-fx-glass.is-spec-lit::after {
+  opacity: 1;
+  background:
+    conic-gradient(from calc(var(--slfx-spec-a) - 38deg),
+      transparent 0deg,
+      color-mix(in srgb, var(--slfx-spec-light) calc(var(--slfx-spec-i) * 55%), transparent) 30deg,
+      color-mix(in srgb, var(--slfx-spec-light) calc(var(--slfx-spec-i) * 95%), transparent) 38deg,
+      color-mix(in srgb, var(--slfx-spec-light) calc(var(--slfx-spec-i) * 55%), transparent) 46deg,
+      transparent 76deg),
+    conic-gradient(from calc(var(--slfx-spec-a) + 142deg),
+      transparent 0deg,
+      color-mix(in srgb, var(--slfx-spec-shade) calc(var(--slfx-spec-i) * 22%), transparent) 38deg,
+      transparent 76deg);
+  transition: opacity var(--sl-motion-fast, 120ms) var(--sl-motion-ease, ease);
+}
+/* The arc sits ON the element's own border band, whatever the ring's geometry
+   says. A --rim host steps the shared ::after outside its fill for the rim
+   aurora, and the arc inherited that: a gap the width of the (transparent)
+   border opened between the fill and the light — the owner saw it on a filled
+   button. Geometry only, and only while the aurora is not lit: this selector
+   outranks the aurora's, so the aurora's background and its rim placement
+   must stay out of it. */
+.sl-fx-glass.is-spec-lit:not(:focus-visible, :focus-within, [data-sl-fx-live])::after {
+  inset: -1px;
+  padding: 1px;
+}
+/* A field's host is the wrapper, which has no border: the input's own border
+   is the wrapper's outermost pixel. At -1px the arc landed one pixel OUTSIDE
+   it and the two read as one bold 2px line — the owner saw it in Spexr's
+   launcher. At 0 the light sits on the input's border, the sharp line, and
+   nowhere else. Placed after the rule above: same specificity, later wins. */
+.sl-field__control:is(.sl-fx-glass, .sl-fx-aurora):is(.sl-fx-glass--field, .sl-fx-aurora--field)::after {
+  inset: 0;
+}
+/* An invalid field's edge is the danger ink, alone. The glass chrome and the
+   aurora's arc both ride that same 1px line, and an accent arc lit on a red
+   edge is two colours on one line (owner, 2026-10-01: no gap between lines)
+   that reads as "attention, all fine". They stand down while aria-invalid
+   holds; the material under the label stays. No `>`: a select sits one level
+   deeper, inside .sl-select. */
+.sl-field__control:is(.sl-fx-glass, .sl-fx-aurora):has(.sl-field__input[aria-invalid="true"])::after {
+  display: none;
+}
+
+
+/* ── Translucency ───────────────────────────────────────────────────────────
+   The owner: the elements have a transparent background and blur what is
+   behind them. The fill becomes a mix of the component's own role colour with
+   nothing, and the host carries a backdrop-filter — which is the one thing the
+   GPU tier cannot do for it, a canvas having no way to read the DOM beneath.
+
+   The fill has to be NAMED. CSS has no way to say "my own background, at a
+   lower alpha", so --slfx-fill binds the role-var the shipped component used,
+   and a consumer whose component fills itself some other way rebinds it.
+   `transparent` is a legitimate binding: a ghost button has no fill, and the
+   blur alone is what makes it glass.
+
+   The only shipped component whose fill changes with state is the primary
+   button, so its two states are matched again below — a plain
+   `background-color` here would lose to their 0-3-0 shorthand. A consumer
+   component that changes its own fill on a state must do the same.
+
+   @supports: with no backdrop-filter there is nothing behind the element to
+   see, and a translucent fill over an unblurred page reads as a weakened
+   colour rather than as glass. So the whole thing stands down together and
+   the component keeps the fill it shipped with. */
+/* Base classes first, then their variants: a variant binding is 0-2-0 like the
+   base's, so only source order separates them. */
+/* --slfx-fill names the colour the component fills itself with; glass.css
+   tints toward it, so a tag stays ITS OWN colour lifted rather than the page's
+   ground laid over it. The name is the contract: a consumer whose component
+   fills itself some other way rebinds this one property. */
+.sl-fx-glass {
+  --slfx-fill: var(--slc-surface);
+  --slg-tint-color: var(--slc-surface);
+  /* glass.css derives the same pole on its own so it can be imported alone;
+     binding it here keeps ONE source wherever both are loaded, and carries an
+     inversion band's remapped sheen into the material with it. */
+  --slg-spec: var(--slfx-glint);
+}
+/* A transparent fill is not a tint colour: color-mix would give transparent
+   and the pane would have no tint at all. These carry the page's own ground
+   instead, which is what glass over nothing should look like.
+   AND A LITTLE MORE OF IT than the material's own 18%, which is a LEGIBILITY
+   figure. These three have no fill of their own, so their label sits on
+   whatever the page put behind them, and over a dark region the theme's own
+   ink ran out of ground: measured on the showcase's light theme over its
+   telemetry substrate, 4.24:1 where WCAG AA asks 4.5. At 25% the same
+   measurement reads 4.74 and the pane is all but indistinguishable; 32% reads
+   5.19. The material's fitted 18% is untouched for every surface that has a
+   fill to carry its own label. (Measured on the 0.20 cream ground. The 0.21
+   ground is lighter, and a lighter veil under the dark ink can only raise
+   these figures.) */
+.sl-btn.sl-fx-glass,
+.sl-badge.sl-fx-glass,
+.sl-field__control.sl-fx-glass,
+/* .sl-icon-btn carries no ground of its own, like .sl-btn — its 6% ink wash is
+   not one — which is why it joins this group and not the .sl-tag one. */
+.sl-icon-btn.sl-fx-glass {
+  --slfx-fill: transparent;
+  /* The theme's canvas, or a Tier B page's own (it maps --slc-canvas and
+     has no --sl-bg-canvas: without the fallback the tint was invalid there,
+     painted nothing, and a glass primary's label sat on the bare page). */
+  --slg-tint-color: var(--sl-bg-canvas, var(--slc-canvas));
+  --slg-tint-a: 25%;
+  --slg-tint-deep-a: 22%;
+}
+.sl-tag.sl-fx-glass { --slfx-fill: var(--slc-accent-subtle); --slg-tint-color: var(--slc-accent-subtle); }
+.sl-dialog.sl-fx-glass { --slfx-fill: var(--slc-raised); --slg-tint-color: var(--slc-raised); }
+/* The primary's fill is its private fill set (components.css, 0.32): the
+   accent, a product's --slc-accent-fill, or the danger on a danger primary. */
+.sl-btn--primary.sl-fx-glass { --slfx-fill: var(--_sl-fill); }
+.sl-btn--primary.sl-fx-glass:hover:not(:disabled)  { --slfx-fill: var(--_sl-fill-hover); }
+.sl-btn--primary.sl-fx-glass:active:not(:disabled) { --slfx-fill: var(--_sl-fill-active); }
+/* THE CONTROL EDGE — two lines, one recipe for every glass control: a sharp
+   1px line on the border and a softer 1px line just inside it (the owner,
+   2026-09-29: "1px sharp and 1px softer, not a single bold border"). The
+   sharp line is the border, so the pointer's arc and the aurora's lit arc
+   land on it and only on it; the soft one is the pane's inner thickness.
+   It replaces the primary's ink edge and lit top line (components.css, 0.11),
+   which drew a second, different outline around the glass, and the pane's
+   transparent border, which left a button with no line at all while a field
+   beside it had one. Both lines are on the control itself, never on the
+   layers mount() injects, so the edge is the same with or without JavaScript;
+   on a field that is the input, which paints over its wrapper. Gated like the
+   pane's label: high contrast and an opt-out region keep the shipped borders.
+   EDGES IN SHADE (owner, 2026-09-30): both lines are the control's own fill,
+   less bright — the sharp one a full shade step (--slfx-control-edge, bound
+   per fill below), the soft one the same colour at half strength — instead
+   of the neutral strong/default pair, which read as a grey line on colour. */
+/* GLASS OWNS A CONTROL'S DEPTH (0.32). The box-shadow below replaces the
+   control's own (components.css writes it into --_sl-depth: the secondary
+   key's lit line and cast): the material is the depth here, one edge and
+   one soft line, the same on every glass control. Under keyboard focus the
+   halo is appended (below). The primary's foot stands down only where the
+   pane is actually built (the @supports block further down). High contrast
+   and an opt-out region keep the shipped control: its foot, its depth and
+   its halo (the kill switches' restore, at the top of this file). */
+:is(.sl-btn, .sl-icon-btn).sl-fx-glass:where(:root:not([data-sl-theme="high-contrast"]) *):where(:not([data-sl-fx="off"], [data-sl-fx="off"] *)) {
+  border-color: var(--slfx-control-edge, var(--slfx-edge-mid));
+  box-shadow: inset 0 0 0 1px var(--slfx-control-edge-soft, var(--slfx-edge-soft));
+  /* Flat, like the field beside it (the owner, 2026-09-29: "make the buttons
+     be like the select"). __shine's resting rim — a bright line along the top
+     and down the left — was a third line only buttons showed: a field's input
+     paints over its wrapper's __shine. Overrides the AC-33 exception of
+     2026-09-11 for controls only; cards and panes keep their rim. */
+  --slg-rim-hi: transparent;
+  --slg-rim-lo: transparent;
+}
+/* The soft line composes with the field's well (--_sl-depth): an aurora
+   field keeps it, a glass field gives it up (the next rule), since glass
+   owns the depth of what it is on (0.32). */
+.sl-field__control:is(.sl-fx-glass--field, .sl-fx-aurora--field):where(:root:not([data-sl-theme="high-contrast"]) *):where(:not([data-sl-fx="off"], [data-sl-fx="off"] *)) .sl-field__input {
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--slc-edge-control, var(--slfx-edge-soft)) 50%, transparent), var(--_sl-depth, 0 0 transparent);
+}
+.sl-field__control.sl-fx-glass--field:where(:root:not([data-sl-theme="high-contrast"]) *):where(:not([data-sl-fx="off"], [data-sl-fx="off"] *)) .sl-field__input {
+  --_sl-depth: 0 0 transparent;
+}
+.sl-field__control:is(.sl-fx-glass--field, .sl-fx-aurora--field):where(:root:not([data-sl-theme="high-contrast"]) *):where(:not([data-sl-fx="off"], [data-sl-fx="off"] *)) .sl-field__input:not(:focus) {
+  border-color: var(--slc-edge-control, var(--slfx-edge-mid));
+}
+/* The rest line is already the strong border the shipped hover used, so hover
+   brightens it toward the glint instead — the same light the arc is made of. */
+.sl-field__control:is(.sl-fx-glass--field, .sl-fx-aurora--field):where(:root:not([data-sl-theme="high-contrast"]) *):where(:not([data-sl-fx="off"], [data-sl-fx="off"] *)) .sl-field__input:hover:not(:disabled, :focus) {
+  border-color: var(--slfx-edge-hi);
+}
+.sl-field__control:is(.sl-fx-glass--field, .sl-fx-aurora--field):where(:root:not([data-sl-theme="high-contrast"]) *):where(:not([data-sl-fx="off"], [data-sl-fx="off"] *)) .sl-field__input:focus {
+  /* The soft line follows the focus border; the resting edge's half-strength
+     line on ink is darker than the fill, a band inside the ring. Outside it,
+     the kit's halo (components.css, 0.32), which this rule outranks. */
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--slc-focus) 50%, transparent), var(--_sl-depth, 0 0 transparent), var(--_sl-halo, 0 0 transparent);
+}
+/* Invalid (components.css): the glass edge yields to the danger ink at rest,
+   on hover and on focus, and the soft inner line follows it at half strength
+   so no other colour sits between edge and fill. The attribute plus the
+   :is() match the hover rule's specificity, and source order settles it. */
+.sl-field__control:is(.sl-fx-glass--field, .sl-fx-aurora--field):where(:root:not([data-sl-theme="high-contrast"]) *):where(:not([data-sl-fx="off"], [data-sl-fx="off"] *)) .sl-field__input[aria-invalid="true"]:is(:hover, :focus, :not(:focus)) {
+  border-color: var(--slc-danger-text, var(--slc-danger));
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--slc-danger-text, var(--slc-danger)) 50%, transparent), var(--_sl-depth, 0 0 transparent);
+}
+/* The halo is the danger's: the invalid field re-binds --slc-focus. */
+.sl-field__control:is(.sl-fx-glass--field, .sl-fx-aurora--field):where(:root:not([data-sl-theme="high-contrast"]) *):where(:not([data-sl-fx="off"], [data-sl-fx="off"] *)) .sl-field__input[aria-invalid="true"]:focus {
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--slc-danger-text, var(--slc-danger)) 50%, transparent), var(--_sl-depth, 0 0 transparent), var(--_sl-halo, 0 0 transparent);
+}
+/* The fill is named for what ships; the tint stays the page's ground from
+   the group above. Since 0.32 the secondary key is the raised rung (it was a
+   6% wash of the ink, as the icon button was; the icon button is clear at
+   rest now, the group's transparent). */
+.sl-btn--ghost.sl-fx-glass { --slfx-fill: var(--slc-raised); }
+/* The edge in shade each glass control's fill casts (see the control edge above). */
+.sl-btn.sl-fx-glass,
+.sl-icon-btn.sl-fx-glass {
+  --slfx-control-edge: var(--slc-edge-control);
+  /* The soft inner line: the edge at half strength over whatever fill is
+     painted, so it always lands between the edge and the fill. A solid
+     half-step lighter line read as a pale gap once the hover fill darkened
+     past it (owner, 2026-10-01: "no gaps between borders in any case"). */
+  --slfx-control-edge-soft: color-mix(in oklab, var(--slfx-control-edge) 50%, transparent);
+}
+.sl-btn--primary.sl-fx-glass { --slfx-control-edge: var(--_sl-fill-edge, var(--slc-edge-accent)); }
+/* A danger tone keeps its danger edge on glass (components.css, 0.32);
+   hovered, the host fills with the danger, so the edge is that fill in
+   shade and the tint is the danger too, or the page's ground at 25% would
+   veil the fill and its label. Not under focus: there the edge is the
+   ring's (below). */
+.sl-btn--danger:not(.sl-btn--primary).sl-fx-glass,
+.sl-icon-btn--danger.sl-fx-glass { --slfx-control-edge: var(--slc-danger-text, var(--slc-danger)); }
+.sl-btn--danger:not(.sl-btn--primary).sl-fx-glass:hover:not(:disabled, :focus-visible),
+.sl-icon-btn--danger.sl-fx-glass:hover:not(:disabled, :focus-visible) { --slfx-control-edge: oklch(from var(--slc-danger) calc(l - var(--slc-shade-step, 0.075)) c h); }
+.sl-btn--danger:not(.sl-btn--primary).sl-fx-glass:hover:not(:disabled),
+.sl-icon-btn--danger.sl-fx-glass:hover:not(:disabled) { --slg-tint-color: var(--slc-danger); }
+.sl-btn.sl-fx-glass[aria-pressed="true"]:not(.sl-btn--primary),
+.sl-icon-btn.sl-fx-glass[aria-pressed="true"] { --slfx-control-edge: var(--slc-edge-pressed); }
+/* Under keyboard focus the edge IS the ring's colour: the outline sits flush on
+   the border, and an edge in shade left between the two read as a dark band
+   inside the ring on ink -- a gap (owner, 2026-10-01). */
+/* .sl-fx-glass twice: 0-4-0, so it also outranks the pressed toggle's edge
+   (.sl-btn.sl-fx-glass[aria-pressed="true"]:not(.sl-btn--primary)). */
+/* The halo (components.css, 0.32) is appended to the glass edge's soft
+   line here, since the edge rule above outranks the kit's focus rule. In
+   high contrast and an opt-out region the kill switches take this
+   box-shadow away and their restore (top of this file) paints the shipped
+   control's own depth and halo instead (no halo in high contrast, where
+   --slc-glow is 0). */
+:is(.sl-btn, .sl-icon-btn).sl-fx-glass.sl-fx-glass:focus-visible {
+  --slfx-control-edge: var(--slc-focus);
+  box-shadow: inset 0 0 0 1px var(--slfx-control-edge-soft, var(--slfx-edge-soft)), var(--_sl-halo, 0 0 transparent);
+}
+/* A pressed toggle keeps its "on" fill on glass: the pane clears the host's
+   background, so the pressed wash is rebound as the pane's fill instead. */
+.sl-btn.sl-fx-glass[aria-pressed="true"]:not(.sl-btn--primary),
+.sl-icon-btn.sl-fx-glass[aria-pressed="true"] { --slfx-fill: var(--slc-accent-subtle); }
+/* ...and its seam (components.css, 0.36.2). The pane's layers paint over the
+   host's own background, where the seam is, and the tint veiled it to
+   2.4-2.9:1 on paper and on the light theme's dark band. The specular layer
+   paints nothing of its own and sits above the tint and below the label, so
+   on a built pane it draws the seam again, at the host's own size and place.
+   Where the layers are hidden (an opt-out region, forced colours) the host's
+   own seam is the one that shows. Not in an inversion band: there the tint is
+   the page's canvas over the band, a mid-grey on which neither the seam
+   nor the pressed label (1.4-2.7, as on 0.36.1) reaches its floor on the
+   light theme's band: the seam reads 2.3-2.6 under the tint there (3.2-3.5
+   on the dark theme's), and 1.7-3.1 drawn here. A known gap of glass in a
+   band, so keep a band's toggles bare. */
+.sl-btn.sl-fx-glass[aria-pressed="true"]:not(.sl-btn--primary):not(.sl-invert *) > .sl-glass__specular,
+.sl-icon-btn.sl-fx-glass[aria-pressed="true"]:not(.sl-invert *) > .sl-glass__specular {
+  background: linear-gradient(var(--slc-seam), var(--slc-seam)) no-repeat var(--_sl-toggle-seam-position, 50% calc(100% - 3px)) / var(--_sl-toggle-seam-size, 40% 2px);
+}
+.sl-badge.sl-fx-glass { --slfx-fill: color-mix(in srgb, var(--slc-text) 7%, transparent); }
+.sl-badge--success.sl-fx-glass,
+.sl-badge--warning.sl-fx-glass,
+.sl-badge--danger.sl-fx-glass,
+.sl-badge--info.sl-fx-glass { --slfx-fill: color-mix(in srgb, currentColor 12%, transparent); }
+.sl-callout.sl-fx-glass { --slfx-fill: color-mix(in srgb, var(--slc-accent) 7%, var(--slc-surface)); }
+.sl-callout--success.sl-fx-glass { --slfx-fill: color-mix(in srgb, var(--slc-success) 8%, var(--slc-surface)); }
+.sl-callout--warning.sl-fx-glass { --slfx-fill: color-mix(in srgb, var(--slc-warning) 8%, var(--slc-surface)); }
+.sl-callout--danger.sl-fx-glass  { --slfx-fill: color-mix(in srgb, var(--slc-danger)  8%, var(--slc-surface)); }
+.sl-callout--info.sl-fx-glass    { --slfx-fill: color-mix(in srgb, var(--slc-info)    8%, var(--slc-surface)); }
+.sl-kbd.sl-fx-glass { --slfx-fill: var(--slc-raised); }
+.sl-tag--plain.sl-fx-glass { --slfx-fill: transparent; }
+/* A rule of their own, not a join to the .sl-btn/.sl-badge/.sl-field__control/
+   .sl-icon-btn group above, though that group also binds transparent:
+   1. transparent is what components.css ships these two — neither .sl-anchor
+      nor .sl-stat__value declares a background. A heading and a numeral have
+      no ground of their own.
+   2. No --slg-tint-color/--slg-tint-a rebind: the group's 25%/22% tint alphas
+      were fitted by contrast measurement on a FILLED CONTROL over a telemetry
+      substrate (see the comment above, 4.24:1 → 4.74 → 5.19). A display-scale
+      letterform is not that case; inheriting those numbers would be borrowing
+      a measurement taken for something else. Tint stays at the family default.
+   3. Bound on the two host classes, not on .sl-fx-glass--text, though that is
+      where it conceptually belongs — one declension, every glass-text host.
+      The guard at scripts/effects-guards.test.mjs:310 keys each binding by
+      stripping the selector from .sl-fx-glass onward; a selector of
+      .sl-fx-glass--text strips to "", which the guard reads as the FAMILY
+      DEFAULT and would silently rebind the fill for every glass host on every
+      page. That is a limitation of the guard, not a preference — do not move
+      this binding onto --text without fixing the guard first. */
+.sl-anchor.sl-fx-glass,
+.sl-stat__value.sl-fx-glass { --slfx-fill: transparent; }
+
+/* THE TEXT HALO. The owner's pick (2026-09-25, lab/r5-read.html): the copy on a
+   glass surface gets a soft glow of the pane's own tint behind each line, so it
+   reads over a lens without the glass being blurred further. A text-shadow on
+   the host inherits to every line inside it. Surfaces only: on a button the
+   label already sits on its own fill, and on a filled one a glow of the surface
+   colour muddies it; a letterform (--text) is the glass itself. */
+.sl-fx-glass:not(.sl-btn, .sl-icon-btn, .sl-fx-glass--text) {
+  text-shadow:
+    0 0 6px color-mix(in srgb, var(--slg-tint-color, var(--slc-surface, var(--sl-bg-surface))) 85%, transparent),
+    0 0 16px color-mix(in srgb, var(--slg-tint-color, var(--slc-surface, var(--sl-bg-surface))) 55%, transparent);
+}
+/* injectGlass() stamps .sl-glass on the host so glass.css's anatomy applies,
+   and glass.css:76 declares border-radius: var(--slg-radius, var(--sl-radius-md))
+   there — which overwrites a component's own radius unless this knob is bound.
+   .sl-icon-btn--round is 50%, not --sl-radius-md, so it needs the rebind,
+   and so does the small button, r7 since 0.36 (Lumen's). */
+.sl-icon-btn--round.sl-fx-glass { --slg-radius: 50%; }
+.sl-btn--sm.sl-fx-glass { --slg-radius: 7px; }
+
+/* A filled brand button is the one surface whose own content constrains how
+   translucent it may be: thinning the fill on paper moves the accent toward
+   the ground and the label goes with it. What carries the label is Ruling 8
+   below — the label is the DARK pole (--slfx-shade), because --slc-on-accent's
+   white is built for an opaque accent and goes the wrong way under a
+   translucent one. On the 72% pane it clears 4.5:1 on every light ground for
+   every registered accent (lowest: the default amber, 4.89:1 on canvas).
+
+   NO LABEL SHADOW (owner, 2026-09-30). This rule used to add a 0 1px 2px
+   shadow in the accent/sheen mix as a "legibility aid". On the 0.21 paper it
+   landed at L≈0.44, α≈0.8 — a dark smudge under a dark label — and a shadow
+   changes neither side of the contrast ratio. Removed, with a guard. */
+.sl-btn--primary.sl-fx-glass {
+  /* A saturated brand fill cannot be thinned far on a dark page: at 48% over
+     near-black the amber read as dark olive, and no veil recovers a hue that
+     has been mixed away. This is not a compromise but the way the register
+     actually works — a prominent filled control in Apple's own glass is very
+     nearly solid, and the strong translucency lives on the neutral surfaces
+     (ghost buttons, cards, keycaps) where there is no hue to lose. */
+  --slfx-fill-a: 80%;
+}
+
+/* The frost and the fill used to be painted HERE, on the host: a
+   background-color mixing the component's colour with a veil, and a
+   backdrop-filter beside it. Both moved into glass.css's layers on
+   2026-09-11, and the move is the whole point of adopting that file — one
+   material, in one place, in the shape the reference measured. What the host
+   keeps is the naming: --slfx-fill says what colour the component fills itself
+   with and --slg-tint-color carries it into the anatomy, so a consumer still
+   rebinds one property and a tag is still its own colour lifted rather than
+   the page's ground laid over it.
+
+   The rim the old block lifted into the material (border-color mixed with the
+   veil) is now __shine's inset triple, which cannot fatten the box the way a
+   border can — the reference's own reason for using an inset shadow. */
+@supports (backdrop-filter: blur(1px)) {
+  /* The host stops painting its own fill: the anatomy carries it, and a solid
+     background under the layers would leave a filled control opaque with glass
+     drawn on top of nothing. The fill is not lost — --slg-tint-color and
+     --slg-accent-a put the component's own colour into the tint at the share
+     the contrast gate measured. */
+  /* Only once mount() has built the layers (.sl-glass): without them — no
+     script, or high contrast, where mount() refuses — nothing would paint the
+     fill back, and a primary went transparent on black. :where() keeps the
+     rule at 0-1-0, where the primary's own states have always met it. Not
+     in an opt-out region (0.32.1): there the layers are hidden (the kill
+     switches, top of this file) and the host is its own opaque control. */
+  .sl-fx-glass:where(.sl-glass):where(:not([data-sl-fx="off"], [data-sl-fx="off"] *)) { background-color: transparent; }
+  /* The primary's states paint an opaque fill (components.css, 0-3-0),
+     which outranked the rule above: hovered or pressed, a glass primary
+     was its opaque key under a 90% tint, so on ink its white label's
+     hover moved the pane by ΔE 2.1 (the resting pane is already a step
+     deep there, its tenth of page being dark). Since 0.32.1 the pane stays
+     a pane in every state: the step is carried by the tint, which fades to
+     the state's fill (--slfx-fill, below), at the same 90% share. */
+  .sl-btn--primary.sl-fx-glass:where(.sl-glass):where(:not([data-sl-fx="off"], [data-sl-fx="off"] *)):is(:hover, :active):not(:disabled) { background-color: transparent; }
+  /* The secondary key and the icon button lift to an opaque rung on hover
+     (components.css, 0.32), which outranks the rule above: on a built pane
+     the rung goes too, and the pane's own light is the hover. (A danger
+     tone's hover fill stays: it is the state, and it carries the label; so
+     does a pressed toggle's wash, which it keeps at rest too.) */
+  :is(.sl-btn--ghost, .sl-icon-btn):not(.sl-btn--danger, .sl-icon-btn--danger, [aria-pressed="true"]).sl-fx-glass:where(.sl-glass):where(:not([data-sl-fx="off"], [data-sl-fx="off"] *)):hover:not(:disabled) { background-color: transparent; }
+  /* The primary's foot (components.css, 0.32) stands down where the pane is
+     built: the material is its depth. Without the layers -- no script, no
+     backdrop-filter, high contrast, an opt-out region -- the primary is its
+     own opaque key again, so it keeps its foot. */
+  .sl-btn--primary.sl-fx-glass:where(.sl-glass):where(:root:not([data-sl-theme="high-contrast"]) *):where(:not([data-sl-fx="off"], [data-sl-fx="off"] *)) { --_sl-foot: 0px; }
+  /* The keycap (0.31) shades its fill with a gradient, which would stay
+     opaque under the layers: it goes with the colour, on the same terms. */
+  .sl-kbd.sl-fx-glass:where(.sl-glass):where(:not([data-sl-fx="off"], [data-sl-fx="off"] *)) { background-color: transparent; background-image: none; }
+}
+
+@supports not (backdrop-filter: blur(1px)) {
+  /* No frost means no glass: a translucent fill over an unblurred page reads
+     as a weakened colour, so the whole thing stands down together and the
+     component keeps the fill it shipped with. The anatomy's layers paint
+     nothing on their own — the tint is the only one with a colour, and it is
+     held off here rather than left to tint a page it cannot blur. */
+  .sl-glass__tint { background-image: none; }
+}
+
+/* ══ GLASS PANE — the element is made of glass ═══════════════════════════════
+   The glass family's pointer-reactive mode, for every text button whatever
+   its variant — the owner: buttons are made of glass, and the interaction is
+   light, translucency, refraction. Three layers, none of them a filter, and
+   the label sits on top of all of them untouched.
+
+   BODY  ::before, z-index -1 — above the host's own fill (the host is a
+         stacking context), below its label. A slab: the glint along the top
+         inside edge and the shade along the bottom (the reference's
+         innerShadow — white 90%, offset 1px, blur 0.5 — is the same light
+         from above), a 1px inner rim of the glint just inside the border,
+         which is the thickness of the pane, and a wash that lightens toward
+         the top. Every one of those is multiplied by --slfx-lit, so at rest
+         the slab is not there at all: the pane's thickness is something the
+         pointer reveals, not a permanent bevel. Over a filled control the
+         fill shows through all of it: translucency over an opaque brand fill
+         is light that sits ON the fill, not a fill that lets the page
+         through.
+   SPOT  RETIRED 2026-09-24 (re-scope R1): the pointer glint was a disc of
+         light under the cursor, which ruling 4 bans; the specular edge above
+         is the pointer's light now. The record: the
+         reference's cursor "spill" (48px radius, 1 → 0.35 at 45% → 0, peak
+         0.55), placed by effects.js through --slfx-px/--slfx-py and eased in
+         and out through --slfx-lit. On paper it is not white: the
+         reference's light preset composites its light with multiply and
+         saturate(5.4), and a near-white glint on cream is invisible — so the
+         spot is two colours whose ALPHA carries the theme, and only one of
+         them is ever visible (--slfx-spot-cool / --slfx-spot-warm).
+   EDGE  RETIRED 2026-09-24 with the spot, for the specular edge above. The
+         record: while lit, the conic's hot
+         stop sits at the pointer's bearing with a fringe of the accent on
+         one side and of the depth companion on the other — dispersion,
+         which is what refraction looks like on an edge (the reference's
+         material has one colour-separation knob, its R/B channel shift).
+         Under Tier 2 the chrome does the same in the cursor's reflection
+         (effects-shader.js, DISPERSE). Refraction lives on the edge band and
+         nowhere else: the content is never filtered, and nothing here is a
+         backdrop-filter — a lens over the label is the effect the owner
+         refused, and a blur on a 1px band would show nothing anyway.
+
+   Requires .sl-fx-glass on the same element (the vivid tier and the glint
+   are declared there). A filled element carries --rim, the marker the
+   aurora already needs on a fill: its ::after is the rim's, so its resting
+   edge is the body's inner rim, its spot is always the white glint (a warm
+   spot on an accent fill is accent on accent), and under Tier 2 the chrome
+   takes the fill's outer pixel. */
+.sl-fx-glass--pane {
+  /* Read by glass.css's __shine, which scales its rim by it. */
+  --slfx-lit: 0;
+  /* The dark pole of the neutral pair, the way --slfx-glint is the light
+     one: the sheen where it is dark (paper, L 0.20 since 0.35), its
+     lightness mirrored below where it is bright (ink: 1 − 0.94 = 0.06,
+     under the surface). */
+  --slfx-shade: oklch(from var(--slfx-sheen) min(l, 1 - l) c h);
+}
+/* ══ SLICE 1 — BUTTONS ════════════════════════════════════════════════════════
+   The material settled on lab/1-1i and recorded in
+   docs/specs/2027-improve-aesthetics.md §"Slice 1 rulings (AC-6)". Every rule
+   here is scoped to .sl-btn on purpose: AC-7 puts ONE element in a slice, so
+   cards, dialogs, tags, keycaps and the field wrapper keep the material they
+   ship with until their own slice reaches them. Nothing above this block is
+   edited; this block only narrows it for buttons.
+
+   Ruling 10 — the remainder is the PAGE, not the veil. The shared rule mixes the
+   fill with --slfx-veil so a filled control is lifted rather than darkened, and
+   that reasoning holds on ink. It does not hold on paper: the veil's alpha was
+   0.854 there by construction (the L 0.24 ink of the time; 0.894 with the
+   L 0.20 ink of 0.35) and the pane resolved to 0.915 — effectively
+   solid, which is the opposite of what a glass button is for. Measured on
+   lab/1g. So on a button the remainder is transparency and the page shows
+   through, which is the owner's ruling of 2026-09-11 overruling §Translucency
+   on mechanism, for buttons only. */
+.sl-btn.sl-fx-glass {
+  /* Ruling: blur 2px, saturate 1.7. The shared 26px erases what is behind the
+     control entirely, and a blur you cannot see past is a tint with extra cost.
+     2px still smears a hairline and a line of text — verified by toggling it and
+     diffing the crop: 3918 px of 28676 change, max delta 29/255. */
+  --slfx-back: 2px;
+  --slfx-back-sat: 1.7;
+}
+/* Ruling 8 — the filled share is 72%, not the shared 80%. The dark theme has two
+   viable regions and one dead band: --slc-text clears 4.5:1 up to share 0.42,
+   the dark pole clears it from 0.65 up, and between 0.50 and 0.58 neither does.
+   0.72 sits inside the high region on BOTH themes — 5.48:1 on ink, 4.89:1 on
+   paper (the 0.21 cool ground, for the retired deep amber; 5.67 on the 0.20
+   cream). Since 0.24 a light fill rests at 90% instead (see RESTING SHARE
+   below); 72% stays the floor for a fill dark enough to take the white pole. */
+/* 0.72 is a CONTRAST result, so it is the share the accent layer carries too —
+   the pane it measured is the one the anatomy now composites. It supersedes the
+   0.80 the general rule above still names for non-button surfaces. */
+/* RESTING SHARE, owner 2026-09-30 ("glass buttons are too pale when not
+   hovered"): 72% of the fill with the page under the rest read as the brand
+   colour muddied, not as the brand colour in glass. Where the label is the
+   dark pole — the fill is light, oklch L > 0.59 (--_sl-pole-l, tokens.css;
+   0.61 until 0.32.1): every dark-theme accent and
+   the light theme's orange — the share is 90%, which only RAISES the dark
+   label's contrast (amber on ink 5.2 -> 7.7:1, spexr 4.0 -> 5.8:1). A darker
+   fill (spexr's and local-agents' light accents) keeps 72%, where Ruling 8
+   measured it. The branch is on the fill's own lightness, read through the
+   alpha of a relative colour, so it follows the accent in effect — hover
+   included — and names no theme. It also binds --slg-accent to the fill,
+   which until now fell back to --sl-accent-default: a Tier B product's glass
+   primary was tinted with the default accent. */
+/* ONE SHARE, owner 2026-10-01: a dark fill at 72% read pale on paper and
+   could not carry a white label; at 90% spexr's indigo carries it (~4.5:1).
+   The fill reaches the tint through --slfx-accent-t so hover and press fade.
+   THE PANE AS IT COMPOSITES (--_slfx-pane) is the resting fill at 90% over
+   the canvas: the label's pole is picked from it (below), and so is the
+   shade under a white label. Where the two poles meet on it is the kit's
+   one threshold, --_sl-pole-l (components.css :root, 0.59), which the
+   label, its keycap and the shade read: this file needs components.css
+   loaded first, as it already does for the fill set. The label rule matches
+   .sl-fx-glass--pane, which the catalog always pairs with .sl-fx-glass, the
+   class that declares --_slfx-pane.
+   THE SHADE UNDER A WHITE LABEL (0.32.1). "90%" measured ~4.5:1 for white on
+   spexr's indigo; over a real page it is 4.32 on paper (sondalab-site's
+   sweep read 4.34, local-agents' blue 4.45), because the tenth of the page
+   that shows through is lighter than the fill. So the composite is clamped:
+   under a white label the page behind the fill is put in shade, from none
+   while the pane composites at L 0.54 or darker to half at the pole's
+   threshold, so it reads >= 4.84:1 over the canvas, a surface and a raised
+   surface. It is the fill at 90% laid OVER that shade (a colour mixed with
+   a translucent black is that black composited under it), so the share,
+   the white label and the look stay "glass, white, 90%". On ink and on any
+   white-label fill already dark enough (the light danger) the pane lands
+   under L 0.54 and the shade is zero: those panes are unchanged. Never under
+   a dark label, which the shade would only darken toward. The shade is the
+   pane's, so it is declared where the pane is (below): not in high
+   contrast and not in an opt-out region, where --_slfx-shade is unset and
+   the fill sits at 90% over nothing. */
+.sl-btn--primary.sl-fx-glass {
+  --slfx-fill-a: 72%;
+  --_slfx-pane: color-mix(in oklab, var(--_sl-fill, var(--slc-accent)) 90%, var(--slc-canvas));
+  --slfx-accent-t: color-mix(in srgb, var(--slfx-fill) 90%, var(--_slfx-shade, transparent));
+  --slg-accent: var(--slfx-accent-t);
+  --slg-accent-a: 100%;
+}
+.sl-btn--primary.sl-fx-glass:where(:root:not([data-sl-theme="high-contrast"]) *):where(:not([data-sl-fx="off"], [data-sl-fx="off"] *)) {
+  --_slfx-shade: oklch(from var(--_slfx-pane) 0 0 0 / calc(clamp(0, (l - 0.54) * 10, 1) * clamp(0, (var(--_sl-pole-l) - l) * 1000, 1)));
+}
+
+/* Ruling 8 — the label is the pole that contrasts with the composited pane, and
+   at 0.72 that is the DARK pole on both themes, because the composited pane
+   lands mid-light either way. --slfx-shade is already exactly that
+   derivation — oklch(from sheen min(l, 1 - l) c h) — so this needs no new token
+   (AC-11), no literal (AC-18) and no [data-sl-theme] branch. Measured against
+   the pane over canvas, surface and raised: 5.72:1 on ink, 4.89:1 on paper
+   (0.21 cool ground, worst of the three; 5.67 on the 0.20 cream).
+
+   It replaces --slc-on-accent, which is built for an OPAQUE accent and goes the
+   wrong way under a translucent one: #FFFFFF on paper measures 3.44:1 (0.21;
+   1.92 on the 0.20 cream). */
+/* Only on a translucent pane: without the layers, under high contrast and in an
+   opt-out region the primary is its own opaque fill again, and its label goes
+   back to --slc-on-accent. */
+/* RULING 8, AMENDED (owner, 2026-10-01): the label is the pole that contrasts
+   with the pane AS IT COMPOSITES -- the resting accent at 90% over the canvas.
+   Every shipped accent but a deep one lands light, so the dark pole holds for
+   them; a deep fill (spexr's indigo, local-agents' light blue) takes white.
+   0.59 (--_sl-pole-l, the kit's one threshold since 0.32.1) is where the
+   two poles measure about equal on that composite. The resting
+   fill, not the live one, so the label does not flip on hover or press.
+   Since 0.32 the resting fill is the primary's own (--_sl-fill): the accent,
+   a product's accent fill, or the danger, so a danger pane re-picks its
+   label from the danger. */
+.sl-btn--primary.sl-fx-glass--pane:where(.sl-glass):where(:root:not([data-sl-theme="high-contrast"]) *):where(:not([data-sl-fx="off"], [data-sl-fx="off"] *)) {
+  color: oklch(from var(--_slfx-pane) clamp(var(--_sl-pole-dark), (var(--_sl-pole-l) - l) * 1000, 0.985) 0 h);
+}
+/* The keycap a glass primary carries (0.31) follows the same pole. The
+   kit's cap steps away from the OPAQUE accent's label (components.css), and
+   on the pane the label is re-picked from the composite instead: on the
+   light theme's indigo the label turned to the dark pole while the cap
+   darkened under it, dark on dark at 3.2:1. So the cap is the same
+   composite stepped 0.085 away from THIS label -- lighter under the dark
+   pole, darker under the light one, around the same 0.59 -- and stands on
+   that fill in shade. Its text is the label (it inherits the colour above). */
+.sl-btn--primary.sl-fx-glass--pane:where(.sl-glass):where(:root:not([data-sl-theme="high-contrast"]) *):where(:not([data-sl-fx="off"], [data-sl-fx="off"] *)) > .sl-kbd {
+  --slfx-cap: oklch(from var(--_slfx-pane) calc(l + 0.085 * clamp(-1, (l - var(--_sl-pole-l)) * 1000, 1)) c h);
+  background: var(--slfx-cap);
+  box-shadow: inset 0 -1px 0 oklch(from var(--slfx-cap) calc(l - var(--slc-shade-step, 0.075)) c h);
+}
+
+/* Ruling 9 — the lit rim is one continuous hairline, never a bevel. The pane's
+   body shipped three inset shadows: a top band, a bottom shade and a full ring.
+   The two bands are the 3D bevel of twenty years ago — straight runs that stop
+   at the corners instead of passing through them — and they are what the owner
+   read as "old-school, not much like real glass". They go; the ring stays and
+   takes their weight, so the pane keeps its thickness without the bevel.
+
+   The travelling part of the edge is not added here: ::after already carries the
+   conic that faces the pointer, which is border-beam's recipe and is what the
+   ruling asks for. This only stops ::before from fighting it. */
+/* Ruling 4's rounder inner rim is __shine's now: an inset shadow on the top
+   edge with a softer side pair, which is the reference's own asymmetry and the
+   thing a single even ring could not give. */
+
+/* Container-scale edges. Width is emphasis, not separation — HANDOFF check 4
+   classes an emphasis edge as a blessed category, so this is not an L2 breach. */
+.sl-fx-glass--wide,
+.sl-fx-aurora--wide { --slfx-ring-w: 2px; }
+/* A field has no --slfx-ring-w of its own since 0.20: it was 2px, a solid band
+   over the input's border and the pixel outside it, and that band was the
+   bold edge. Its edge is the control edge above; its lit arc is 1px, on the
+   sharp line. */
+
+/* There is no --thick. It existed for one afternoon on 2026-09-15, to scope
+   the 21.6px prism to large panels while small hosts kept a fitted 4.32; the
+   ruling that followed is that the lens must be VISIBLE on every surface, so
+   90 is the default in glass-lens.js and a class that re-declared it would
+   name nothing. What makes that default safe on a small box is the bound in
+   channelScales(), not a class an author has to remember. */
+
+/* ══ GLASS TEXT — the letterform IS the pane ═════════════════════════════════
+   A mask clips a backdrop-filter's output, so masking a pane to its own glyphs
+   leaves glass in the shape of the words rather than a box containing them.
+   glass-text.js writes the mask, measured off this element; everything here is
+   what has to be true for that mask to land on the ink.
+
+   PLACEMENT IS THE SURFACE'S. Nothing here positions the host, sizes it or
+   picks its face: a folio on a card, a section index and an oversized word are
+   the same material at three different places on three different scales, and
+   only the surface knows which. `width: max-content` is the one exception,
+   because it is load-bearing — the mask centres the run in this box, so the
+   box has to BE the run.
+
+   ONE LINE. SVG text does not wrap; a host that reaches a second line gets its
+   first cut and the rest invisible. */
+.sl-fx-glass--text {
+  width: max-content;
+  /* The glyphs are the mask, not the paint. The host's own text is laid out —
+     it is what the mask is measured from, and what a screen reader reads — and
+     never painted. */
+  color: transparent;
+  /* ROOM FOR THE INK. A mask clips to its own rect and a backdrop-filter to the
+     border box, while a display figure usually runs a line-height well under 1:
+     measured on a 7rem numeral, 92.6px of ink in an 89.6px box, and the top of
+     every glyph shaved off. Ems, so it follows the size, and on the glow too so
+     the two copies grow together and stay registered. */
+  padding: 0.09em 0.07em;
+  /* The mask is the shape, so a rounded rect under it rounds corners nobody can
+     see — and glass.css's __shine gives a pane its thickness with an inset line
+     along the top of its BOX, which masked to a letterform survives as a white
+     bar across the text. A box rim is meaningless on a letter. */
+  --slg-radius: 0;
+  --slg-rim-hi: transparent;
+  --slg-rim-lo: transparent;
+  /* AND IT TAKES NO POINTER. The host's box is the whole run, not the glyphs —
+     a mask changes what is painted, never what is hit — so an oversized word
+     laid over a card would swallow every click inside its rectangle. Measured
+     on the showcase before this line existed: elementFromPoint at the centre of
+     the figure returned the figure. It also settles the --pane question: --text
+     wants --pane, whose ::before slab is what gives the letterforms their body
+     once it is cut to them, but the pointer layers on that slab stay dark
+     because nothing ever lights an element that cannot be pointed at. */
+  pointer-events: none;
+}
+
+/* The unmasked copy that carries the light, seated before the host by
+   glass-text.js. A sibling, not a child: the host is masked to its glyphs, so a
+   glow inside it would be masked away with everything else.
+
+   ITS TYPE IS BORROWED, its PLACE is not. glass-text.js copies the host's face,
+   size, weight, tracking and padding onto this element inline — a bare span
+   inherits the surface's body type, and a 14px halo under an 88px figure is the
+   light in one place and the glass in another. Where the pair goes is still the
+   surface's: only it knows whether coinciding means absolute placement in a
+   slot, a grid cell or a stack. */
+.sl-fx-glass__glow {
+  width: max-content;
+  color: transparent;
+  pointer-events: none;
+  /* Two shadows: a tight bright core that gives the strokes an edge to read
+     against, and a wide soft halo that lifts the text off what it sits on.
+
+     EVERY default is a var() fallback AT THE POINT OF USE, never a declaration
+     here. A custom property declared on this element beats the same property
+     inherited from an ancestor, so writing --slfx-text-light on .sl-fx-glass__glow
+     would put an inversion band's rebinding out of reach — and inside a band
+     --slc-text is the band's own GROUND, which makes a glow built from it
+     invisible. glass.css states the same rule about its own defaults. */
+  text-shadow:
+    0 0 0.09em color-mix(in srgb,
+      var(--slfx-text-light, var(--slc-text, var(--sl-text-primary)))
+      var(--slfx-text-core-a, 46%), transparent),
+    0 0 0.43em color-mix(in srgb,
+      var(--slfx-text-light, var(--slc-text, var(--sl-text-primary)))
+      var(--slfx-text-halo-a, 26%), transparent);
+}
+
+/* The lens is gone (2026-09-11): the declared-backdrop route replaces it, and
+   effects.js carries the full record of why. Nothing selects .sl-fx-glass__lens
+   any more; the two kill-switch rules below are left because they are harmless
+   and a consumer may still have one in an old build. */
+
+/* While a glass element is liquid under Tier 1, its edge is the liquid's own
+   outline (the skin's band, in the host's border colour): the static conic
+   hairline would stay rigid on the box while the silhouette swells past it,
+   and a crisp ring around a deforming shape reads as broken. It fades over
+   the slow beat and returns when the surface re-solidifies. Under Tier 2 the
+   chrome follows the silhouette instead (effects-shader.js, edgeAt). Same
+   placement rule as the stand-down above: a lit aurora still wins. */
+[data-sl-fx="on"] .sl-fx-glass.sl-fx-liquid.is-liquid-live::after { opacity: 0; }
+
+/* ══ PRESS — you acted on this ═══════════════════════════════════════════════
+   Re-scope R2 (docs/specs/2027-improve-aesthetics.md), owner's pick A,
+   2026-09-25; cards press-light and spring-tokens. Pressing a control lights
+   it from within — the light rises from its own lower body — and the
+   controls beside it catch that light on the edge that faces it, the way a
+   lit key lights the keys around it. Release lets both fall away on their
+   own clocks; the control's sink and return run on --sl-motion-spring.
+
+   effects.js writes three numbers per lit host and nothing else:
+   --slfx-press (how lit the pressed control is), --slfx-spill (how much a
+   neighbour catches) and --slfx-spill-a (the bearing of the edge that faces
+   the pressed control), plus the classes is-press-lit / is-spill-lit while
+   either is above zero. Ruling 4 holds: no light sits at the pointer. The
+   press light is the control's own body; the spill is an arc on a
+   neighbour's edge.
+
+   Tier 1 only. Without mount() a press is the component's own :active state
+   and the spring sink below, which is correct on its own. */
+.sl-fx-press {
+  --slfx-press: 0;
+  --slfx-spill: 0;
+  --slfx-spill-a: 0deg;
+  /* The light: the page's light pole, warmed a little toward the accent, so
+     a pressed control glows in its own register rather than in a neutral
+     white. Near-white on both themes; the sheen decides, as for the glint. */
+  --slfx-press-light: color-mix(in oklab, oklch(from var(--slfx-sheen) max(l, 1.17 - l) c h) 82%, var(--slc-accent, var(--sl-accent-default)));
+  position: relative;
+  isolation: isolate;
+  /* The sink and the return, on the spring. The duration is a motion token,
+     so reduced motion zeroes it with the rest; the spring's shape is
+     time-normalised and plays at whatever duration it is given. */
+  transition:
+    transform var(--sl-motion-slow, 360ms) var(--sl-motion-spring, var(--sl-motion-ease, ease)),
+    color var(--sl-motion-fast, 120ms) var(--sl-motion-ease, ease),
+    background-color var(--sl-motion-fast, 120ms) var(--sl-motion-ease, ease),
+    border-color var(--sl-motion-fast, 120ms) var(--sl-motion-ease, ease),
+    box-shadow var(--sl-motion-fast, 120ms) var(--sl-motion-ease, ease),
+    --slfx-accent-t var(--sl-motion-fast, 120ms) var(--sl-motion-ease, ease);
+}
+.sl-fx-press:active:not(:disabled, [aria-disabled="true"]) {
+  /* The same squash as components.css's TACTILE block: a control moves the
+     same way with or without the effects layer; the light is this file's job. */
+  transform: scale(1.02, 0.968);
+  /* Going down is quick and plain; the spring is for the way back. */
+  transition-duration: var(--sl-motion-fast, 120ms);
+  transition-timing-function: var(--sl-motion-ease, ease);
+}
+/* A text button sinks to 97% instead (0.36, components.css's TACTILE block),
+   reading the same knob, so a button group's --slfx-pane-swell: 1 holds a
+   pressed member still here too. */
+.sl-btn.sl-fx-press:active:not(:disabled, [aria-disabled="true"]) {
+  transform: scale(calc(1 - (var(--slfx-pane-swell, 1.03) - 1)));
+}
+
+/* The press light, on ::before at z-index -1: above the host's own fill (the
+   host is a stacking context), below its label. It exists only while lit, so
+   an element at rest carries no layer at all. */
+.sl-fx-press.is-press-lit::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  z-index: -1;
+  background: linear-gradient(to top,
+    color-mix(in srgb, var(--slfx-press-light) calc(var(--slfx-press) * 34%), transparent),
+    color-mix(in srgb, var(--slfx-press-light) calc(var(--slfx-press) * 10%), transparent) 60%,
+    transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--slfx-press-light) calc(var(--slfx-press) * 30%), transparent);
+}
+
+/* The spill, on a neighbour with no edge family of its own: an arc on its
+   ::after, on the border band, facing the pressed control. */
+.sl-fx-press.is-spill-lit:not(.sl-fx-glass, .sl-fx-aurora)::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  padding: 1px;
+  border-radius: inherit;
+  pointer-events: none;
+  background: conic-gradient(from calc(var(--slfx-spill-a) - 40deg),
+    transparent 0deg,
+    color-mix(in srgb, var(--slfx-press-light) calc(var(--slfx-spill) * 85%), transparent) 40deg,
+    transparent 80deg);
+  mask: linear-gradient(black 0 0) content-box, linear-gradient(black 0 0);
+  -webkit-mask-composite: xor;   /* Safari below 15.4 */
+  mask-composite: exclude;
+}
+/* …and on a glass or aurora neighbour, whose ::after is already the edge: the
+   spill joins the specular arc as one more layer of the same ring. The
+   specular layers read their properties with a fallback, because an aurora
+   host that is not glass never declares them. Geometry and background only
+   while the aurora is not lit — a lit aurora keeps the edge. */
+.sl-fx-press.is-spill-lit:is(.sl-fx-glass, .sl-fx-aurora):not(:focus-visible, :focus-within, [data-sl-fx-live])::after {
+  opacity: 1;
+  inset: -1px;
+  padding: 1px;
+  background:
+    conic-gradient(from calc(var(--slfx-spill-a) - 40deg),
+      transparent 0deg,
+      color-mix(in srgb, var(--slfx-press-light) calc(var(--slfx-spill) * 85%), transparent) 40deg,
+      transparent 80deg),
+    conic-gradient(from calc(var(--slfx-spec-a, 0deg) - 38deg),
+      transparent 0deg,
+      color-mix(in srgb, var(--slfx-spec-light, transparent) calc(var(--slfx-spec-i, 0) * 95%), transparent) 38deg,
+      transparent 76deg);
+  transition: opacity var(--sl-motion-fast, 120ms) var(--sl-motion-ease, ease);
+}
+
+/* ══ AURORA — attention lives here ═══════════════════════════════════════════
+   The border-beam recipe (libraries.dev/beam): a thin arc of light riding the
+   border, its bloom, and a wash of the same light on the surface just inside
+   the edge. Four readings, separated by the FRACTION OF THE PERIMETER lit —
+   not by colour and not by speed, which is why they stay legible side by side.
+     static (~70%)  :focus-visible / :focus-within — this element has focus
+     sweep  (~70%)  [data-sl-fx-live="on"]         — ambient liveness, capped
+                                                     at one per document
+     busy   (~18%)  [data-sl-fx-live="busy"]       — a real operation runs here
+     determinate    busy + --slfx-progress          — the arc LENGTH is the value
+
+   The aurora renders state; it never IS the state. A busy element carries
+   aria-busy="true"; a determinate one role="progressbar" + aria-valuenow. That
+   is what keeps reduced-motion and high-contrast visitors fully informed. */
+
+/* The arc: depth at the tails, the accent along it, a hot core at the
+   centre — light, not a stroke. No filter here: this layer is masked to the
+   ring band, and CSS applies a filter BEFORE the mask, so a drop-shadow on
+   it can never leave the band — that is where four rounds of "the glow is
+   truncated" came from. The bloom is the injected child, below. */
+.sl-fx-aurora:is(:focus-visible, :focus-within, [data-sl-fx-live="on"], [data-sl-fx-live="busy"], [data-sl-fx-live="run"])::after {
+  /* Faint: the light is the glow's job, and a focus ring is still a ring.
+     Measured on lab/1w against the reference's border pixel, both read as
+     the median across the card's middle rows: the composer's 1px border
+     carries +83 to +88 over its interior where the beam passes, ours +85 at
+     this opacity (+60 of it is the glass rim, the ring adds the rest). On
+     the beam's brightest rows the reference reads +93 to +98, which would
+     ask for about 0.37; the band reading is the one this file's other
+     numbers use, so this stays. */
+  opacity: var(--slfx-ring-lit, 0.28);
+  /* BORDER-BEAM'S PROFILE, not a peak. Read off its md variant: soft ramps in
+     and out and a long PLATEAU between (mask 30→52 up, 52→80 full, 80→95
+     down), and a body that changes colour along the arc instead of one hue
+     with a white core — which is what made ours read as a lighthouse: a hard
+     bright point sweeping a ring. The white core is gone; the colours are
+     the accent, its complement and a split, all derived (see .sl-fx-aurora). */
+  background: conic-gradient(from var(--slfx-angle),
+    transparent 0deg,
+    var(--slfx-beam-tail) calc(var(--slfx-arc) * 0.09),
+    var(--slfx-beam) calc(var(--slfx-arc) * 0.22),
+    var(--slfx-beam-b) calc(var(--slfx-arc) * 0.50),
+    var(--slfx-beam-c) calc(var(--slfx-arc) * 0.72),
+    var(--slfx-beam) calc(var(--slfx-arc) * 0.80),
+    var(--slfx-beam-tail) calc(var(--slfx-arc) * 0.91),
+    transparent var(--slfx-arc),
+    transparent 360deg);
+}
+.sl-fx-aurora {
+  /* HOW HARD THE GLASS BENDS, where the thing behind it is the aurora's own
+     light. glass-lens.js caps the displacement at this many pixels and reads
+     the property off the element; 6px is the material's own figure, fitted so
+     a wide card does not bend the page behind it into a wave. But a bend of 6
+     is invisible ON LIGHT: measured on lab/1y, the lens moved 4.53% of the
+     pixels of a card lit by curtains at 6px and 7.27% at 12, and only from
+     about 18 does the light visibly gather and part into its colours at the
+     faces. What that costs the page behind is measured too, on the showcase's
+     494px card over the wordmark: 2.44% of pixels, confined to the rim band,
+     against a 0-pixel control. The owner's ruling when the two pull against
+     each other is that the refraction wins. */
+  --slg-lens-reach: 18px;
+  /* THE PRISM IS NOT DECLARED HERE EITHER. An earlier version of this block
+     raised --slg-lens-disperse to 90 on every aurora host, which was right
+     about the look and wrong about the arithmetic: the split is symmetric
+     about the bend, the bend is capped at a sixth of the shorter side, and 90
+     is 21.6px of separation -- so on any host under about 65px the red channel
+     came out NEGATIVE and displaced backwards. Ten of sixteen aurora hosts on
+     the showcase shipped that way, a 32px icon button worst at -5.61 against a
+     green of 5.19.
+     90 is now the DEFAULT for every lensed surface, in glass-lens.js, because
+     the owner's ruling is that the lens must be visible everywhere and not
+     only on the panels with room for it. What makes that safe is the bound in
+     channelScales(), which gives a small box the widest prism it can hold
+     rather than a broken one -- so nothing needs to declare the prism, here or
+     on a thickness class, and this block declares only the bend. */
+  /* The beam's own hue, its tails, how white its core goes, and the two
+     colours of its bloom. Rebound by --rim below, where the accent would
+     vanish against an accent fill. */
+  --slfx-beam: var(--slfx-accent-vivid);
+  /* The beam's companions, border-beam's "colorful" read in our own terms:
+     the complement (180°) and a split (150°) of the vivid accent, turned in
+     oklch so lightness and chroma are the accent's own — a product that
+     re-registers its accent gets its own trio (AC-18). The same on every
+     theme: on light the spectrum replaced the trio from 2026-09-30 until the
+     owner dropped it (2026-10-02: the aurora on light follows the accent, as
+     on dark). */
+  --slfx-beam-b: oklch(from var(--slfx-accent-vivid) l c calc(h + 180));
+  --slfx-beam-c: oklch(from var(--slfx-accent-vivid) l c calc(h + 150));
+  --slfx-beam-tail: color-mix(in srgb, var(--slfx-depth-vivid) 75%, transparent);
+  /* was 86%: the white core is the lighthouse's lamp, and it is gone */
+  --slfx-core: 0%;
+  /* The bloom's two colours are the vivid beam and the vivid depth companion
+     LIFTED toward white and pushed a little in chroma, then made translucent:
+     light is lighter than what it falls on. Lifted from the raw tokens, on
+     paper the depth companion (a dark teal) came out as a grey-teal haze
+     around the element — dirt, not light; lifted from the vivid tier it is a
+     saturated haze, and on ink the lift only turns the glow pastel, which is
+     what the reference's bloom is. The push is a request, fitted to the
+     gamut at the lifted lightness like the tier itself (see the fit above):
+     at L 0.85 sRGB holds less amber than at 0.66 (C 0.11 against 0.15) and
+     more teal (0.14 against 0.11), and unfitted, Chrome clipped the amber
+     bloom to a darker, yellower colour (L 0.80, +10°) than the one asked
+     for. Relative colour syntax is already the kit's own vocabulary
+     (themes/*.css derive the accent steps with it); l and c are channels,
+     not a literal. --rim's own blooms are the depth's. */
+  /* SOLVED FROM THE REFERENCE'S CURVE AT ITS OWN ZOOM on lab/1x (2026-09-12):
+     one card on a flat ground, the plateau pinned on its left edge, profiled
+     inward as the median across the card's middle rows, against border-beam's
+     composer (docs/references/assets/border-beam-composer-search-dark.png,
+     a DPR-2 capture, read at 2 px per CSS px). Target over an interior of
+     L 29, on the beam's brightest rows: +43 at 4px, +34 at 8, +27 at 10, +20
+     at 12, +13 at 15, +4 at 20, +1 at 25, 0 at 30; measured +43.2, +34.5,
+     +26.5, +19.9, +11.8, +4.0, +0.4, 0. The tail's alpha keeps the 0.75
+     ratio (the reference's rose against its green at the edge); only the
+     plateau's colour lies on the profiled edge. */
+  --slfx-bloom-hi: color-mix(in srgb, var(--slfx-accent-bloom) 44%, transparent);
+  --slfx-bloom-lo: color-mix(in srgb, var(--slfx-depth-bloom) 33%, transparent);
+  /* How far the bloom's band reaches INWARD from the host's border, before
+     the blur. Declared here, on the host, so a component can rebind it and
+     the seated glow follows (effects.js copies it across). */
+  --slfx-bleed: 10px;
+  /* Where the ring's outer edge sits, measured from the padding box
+     outward: 0 on a bordered element (the ring is on the border), the
+     ring's own width on --rim, which steps the ring out past the fill. */
+  --slfx-rim-out: 0px;
+  /* How much of the bloom's band lies OUTSIDE the ring's outer edge: half
+     of it, so the band straddles the ring — light on both sides of the
+     edge. --rim puts the whole band outside: the inside is the fill. */
+  --slfx-bloom-out: calc(var(--slfx-bloom-w) / 2);
+}
+
+/* ── Filled elements: the rim ──────────────────────────────────────────────
+   A filled control (sl-btn--primary) has a 1px TRANSPARENT border that its
+   fill paints under, so the shared ring — pinned to that border band — sits
+   on the fill, accent on accent, and vanishes. The declension says a filled
+   element's ring sits OUTSIDE the box, and this is what makes it true: the
+   ring steps one border-width further out, hugging the fill, 2px wide and
+   never past that -- the band the focus outline takes (flush, outline-offset:
+   0), so under keyboard focus the outline covers the rim and is the signal. Its
+   hue is the depth companion, because the accent is what the fill is made
+   of — contrast against the page, not against the button — and it has to
+   read as ITS OWN colour beside the fill, so the core stays coloured rather
+   than going white, and the bloom is the depth companion at its strongest.
+   No inner wash: the inside is the fill, so the bloom's band sits wholly
+   outside the ring and only the blur's tail crosses the edge.
+   A busy filled control is working, not unavailable: components.css dims a
+   :disabled control to half opacity, which would dim the very ring that
+   says work is in progress, so while busy the host keeps full opacity. The
+   override is scoped out of both kill switches, which restore the plain
+   disabled look. */
+.sl-fx-aurora--rim {
+  /* 2px: the outline's own width, so the rim never reaches past it. A 1px line of the
+     depth companion against the page is below the threshold of notice; the
+     ring has to carry its own weight out here, with nothing behind it. */
+  --slfx-ring-w: 2px;
+  /* The vivid depth companion, lifted a quarter of the way toward white: a
+     line at the same lightness as the amber fill it hugs reads as a shadow
+     rather than as light, on paper especially, where the two tokens sit
+     within 0.06 of each other. Fitted to the gamut at the lifted lightness
+     like every pushed colour (the fit, above). */
+  --slfx-beam: var(--slfx-rim-beam);
+  --slfx-beam-tail: color-mix(in srgb, var(--slfx-beam) 85%, transparent);
+  --slfx-core: 40%;
+  /* The HUE stays the depth companion, and the declension's reason for it
+     stands: the accent is what the fill is made of, so a ring in the accent
+     would vanish into the button it is meant to outline. What was wrong was
+     the STRENGTH. 90/78% is paint, not light, and on a light dialog it read as
+     a blue blob sitting beside the button rather than as the button's own
+     glow — the owner reported it as a defect on a busy control. 44/33% is the
+     register every other bloom in this file uses since the 2026-09-12 fit, and
+     it is a halo at that strength. */
+  --slfx-bloom-hi: color-mix(in srgb, var(--slfx-depth-bloom) 44%, transparent);
+  --slfx-bloom-lo: color-mix(in srgb, var(--slfx-depth-bloom) 33%, transparent);
+  --slfx-rim-out: var(--slfx-ring-w);
+  --slfx-bloom-out: var(--slfx-bloom-w);
+}
+.sl-fx-aurora--rim::after {
+  inset: calc(-1px - var(--slfx-ring-w));
+}
+:root:not([data-sl-theme="high-contrast"]) .sl-fx-aurora--rim[data-sl-fx-live="busy"]:disabled:not(:is([data-sl-fx="off"], [data-sl-fx="off"] *)) {
+  opacity: 1;
+}
+
+/* The bloom: a thicker copy of the arc, Gaussian-blurred. Two boxes, because
+   CSS applies a filter BEFORE a mask and the ring is a mask: the child's
+   ::before carries the conic and the ring mask (a band --slfx-bloom-w wide,
+   straddling the edge), the child itself carries the blur, so the crisp
+   band is blurred after it has been cut. A real Gaussian decays the same
+   way in every direction and reaches zero on its own — no corner seam
+   where two ramps meet, no box edge to see; the authored-ramp mask that
+   preceded this had both, and the owner saw both. The child is injected
+   by effects.js at mount() (aria-hidden, no pointer events, no selection);
+   without mount() there is no bloom, and the CSS-only ring stands alone.
+   z-index: -1 lands above the host's own background because the host is a
+   stacking context (isolation: isolate, above), and below its content.
+   Composited normally, not screened: on ink a translucent light over near-
+   black is the same either way, on paper screen would vanish into the white
+   and a normal tint is what a coloured glow on paper looks like. The
+   filter's output is not clipped to the child's box, but the box is given
+   --slfx-glow of headroom anyway so nothing ever depends on that. */
+.sl-fx-aurora__glow {
+  position: absolute;
+  inset: calc(-1px - var(--slfx-rim-out) - var(--slfx-glow));
+  z-index: -1;
+  /* The glow also inherits the host's radius, and as a sibling it no longer
+     can: --slfx-seat-radius carries it across. */
+  --slfx-seat-radius: inherit;
+  border-radius: inherit;
+  pointer-events: none;
+  user-select: none;
+  opacity: 0;
+  filter: blur(var(--slfx-soft));
+  transition: opacity var(--sl-motion-slow, 360ms) var(--sl-motion-ease, ease);
+}
+/* ── THE GLOW BEHIND THE GLASS ──────────────────────────────────────────────
+   A glow that is a CHILD of its host is painted as part of that host, after
+   backdrop-filter has already sampled what is behind it — so a lensed pane
+   cannot see its own aurora, and the light reads as a flat wash laid ON the
+   glass instead of caught IN it. Measured on lab/1r: the same glow moved to a
+   sibling painted BEFORE the pane pools along the inner edges and squeezes
+   into a bright band at the bottom, which is what light does in a glass edge.
+
+   So effects.js moves it out of the host and puts it in the host's parent,
+   just before it. That costs the inset shorthand, which resolved against the
+   host's own box: as a sibling the box is written from script instead, and
+   `inset` must not fight it. Everything else about the glow is unchanged. */
+.sl-fx-aurora__glow[data-sl-fx-seated] {
+  inset: auto;
+  border-radius: var(--slfx-seat-radius);
+  /* AUTO, not -1. As a child of the host that -1 meant "behind the content,
+     above the host's own background", because the host is a stacking context
+     (isolation: isolate). As a child of the PARENT, which is not one, -1 sends
+     it behind the nearest stacking context's background — off the page
+     entirely. It was lit, sized and adjacent, and invisible. In DOM order it
+     already comes before the host, which is all the ordering it needs. */
+  z-index: auto;
+}
+/* NOTHING OUTSIDE THE BOX. The reference reads -5 outside the composer where
+   an unclipped blur read +33 (lab/1w). clip-path is applied after filter, so
+   the blur is cut at the host's border box, in the host's own radius, and the
+   band inside it is untouched.
+   The inset is the spread effects.js gave the glow, so it names the SAME
+   geometry seatGlow() used — and three modes are excluded because that
+   geometry is not theirs:
+     --beam    a line that enters one face and leaves the other;
+     --rim     light outside a filled control, by the declension;
+     --pillars seated with NO spread at all (the box IS the host's box), so
+               this inset would eat it from every side — measured on a 40px
+               button, 32.5px of inset on a 40px box left nothing: 11 297
+               pixels of curtain, max delta 149, simply gone. It carries its
+               own clip at inset 0 instead, below. */
+.sl-fx-aurora__glow[data-sl-fx-seated]:not([data-sl-fx-beam], [data-sl-fx-pillars]):not(:has(+ .sl-fx-aurora--rim)) {
+  clip-path: inset(calc(1px + var(--slfx-rim-out) + var(--slfx-glow)) round var(--slfx-seat-radius));
+}
+
+.sl-fx-aurora__glow::before {
+  content: "";
+  position: absolute;
+  /* INWARD, from the reference (docs/references/assets/border-beam-composer-
+     search-dark.png): the glow is +48 L at the card's edge and gone by 30
+     CSS px in. So the band starts ON the host's border and reaches
+     --slfx-bleed inward, instead of straddling the edge as a 12px ring; the
+     seated glow is clipped to the box (below), so the blur cannot spill out
+     where the reference has nothing. */
+  /* The spread the glow was seated with, and a rebindable name for it: a glow
+     seated WITHOUT spread (the curtains' shape) still has to be able to carry
+     this band, on its own border, when the element is loading. */
+  inset: var(--slfx-bloom-inset, calc(1px + var(--slfx-rim-out) + var(--slfx-glow)));
+  padding: 0;
+  border-radius: inherit;
+  /* the bloom follows the same plateau, so the glow is a long soft band under
+     the arc and not a halo round one bright point */
+  background: conic-gradient(from var(--slfx-angle),
+    transparent 0deg,
+    var(--slfx-bloom-lo) calc(var(--slfx-arc) * 0.10),
+    var(--slfx-bloom-hi) calc(var(--slfx-arc) * 0.24),
+    var(--slfx-bloom-hi) calc(var(--slfx-arc) * 0.78),
+    var(--slfx-bloom-lo) calc(var(--slfx-arc) * 0.90),
+    transparent var(--slfx-arc),
+    transparent 360deg);
+  /* The band is FOUR STRIPS, one per edge, each --slfx-bleed deep, rather
+     than the padding-ring the arc uses (content-box cut out of the box).
+     A padding cannot be less than itself: on a host shorter than twice the
+     bleed the content box collapses to nothing and the padding pushes the
+     box out past the host's bottom — measured on lab/1w, a 111px card got a
+     213 x 88 rectangle starting at its own midline and reaching 29px below
+     it, and every button is shorter still. Strips overlap harmlessly when the
+     host is small: the union is the whole box, which is the right answer.
+     `black` not `#000`: sl-audit extracts 3-digit hex as a design colour. */
+  mask:
+    linear-gradient(black 0 0) top / 100% var(--slfx-bleed) no-repeat,
+    linear-gradient(black 0 0) bottom / 100% var(--slfx-bleed) no-repeat,
+    linear-gradient(black 0 0) left / var(--slfx-bleed) 100% no-repeat,
+    linear-gradient(black 0 0) right / var(--slfx-bleed) 100% no-repeat;
+}
+/* Lit — in both shapes the glow can take. It used to be a CHILD and the
+   descendant selector was enough; a seated glow is the host's PREVIOUS SIBLING,
+   so the same state has to be read forwards with :has(). Losing this is what
+   made the aurora read as a bare coloured border with no light at all: the ring
+   still painted, and the thing that turns it on no longer matched it. */
+.sl-fx-aurora:is(:focus-visible, :focus-within, [data-sl-fx-live="on"], [data-sl-fx-live="busy"], [data-sl-fx-live="run"]) > .sl-fx-aurora__glow,
+.sl-fx-aurora__glow[data-sl-fx-seated]:has(+ .sl-fx-aurora:is(:focus-visible, :focus-within, [data-sl-fx-live="on"], [data-sl-fx-live="busy"], [data-sl-fx-live="run"])) {
+  opacity: 1;
+}
+
+/* ══ AURORA --beam — a beam through the glass, not a ring around it ═════════
+   The conic sweep is a lighthouse by construction: an arc travelling AROUND a
+   border stays a beam on a rim whatever its width, blur or speed. This is the
+   other model, proven on lab/1u and lab/1v: a thin white line, angled off the
+   axis, sitting BEHIND the pane and drifting ACROSS it. The pane's lens bends
+   it where it crosses an edge and dispersion parts it into its colours there —
+   a prism — and none of that is drawn here: it is what the glass does to a
+   light that passes behind it. Additive: --beam swaps the seated glow's
+   painting, the sweep stays for every host that does not ask for this. */
+.sl-fx-aurora__glow[data-sl-fx-seated][data-sl-fx-beam] {
+  filter: none;
+  overflow: visible;
+}
+.sl-fx-aurora__glow[data-sl-fx-seated][data-sl-fx-beam]::before {
+  /* the line: a soft white core with a halo, long enough to enter one face
+     and leave the other whatever the host's width */
+  inset: auto;
+  padding: 0;
+  -webkit-mask: none;
+  mask: none;
+  left: -40%;
+  top: 50%;
+  width: 180%;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--slfx-glint);
+  box-shadow:
+    0 0 6px 2px color-mix(in srgb, var(--slfx-glint) 75%, transparent),
+    0 0 24px 8px color-mix(in srgb, var(--slfx-glint) 28%, transparent);
+  transform-origin: 50% 50%;
+  rotate: -18deg;
+  translate: 0 var(--slfx-beam-dy, 0px);
+}
+
+/* ══ AURORA --pillars — curtains of light INSIDE the glass ═══════════════════
+   Aurora borealis, not a lighthouse: vertical pillars of light that hang
+   inside the pane, brighter at the foot and fading upward, drifting sideways
+   and shimmering against each other. They never leave the element: the seated
+   glow is clipped to the host's own box and radius. They sit BEHIND the pane,
+   so the lens bends them at the faces and dispersion parts them into their
+   colours there — the same prism as --beam, on a softer light. Additive. */
+/* The box is the curtains' whatever the element is doing — it is what the seat
+   gave them, and the clip is what actually holds the blur inside it. Only the
+   PAINTING changes while loading, below. */
+.sl-fx-aurora__glow[data-sl-fx-seated][data-sl-fx-pillars] {
+  /* HOW WIDE A CURTAIN IS. Everything below — both combs' stops, both tiles,
+     and the sway — is a fraction of this one length, in the ratios the two
+     were fitted at, so changing it scales the whole pattern and never its
+     proportions.
+
+     104px is what it was fitted to on a 320px showcase card: three curtains
+     across the pane. That is the Tier 0 value and the fallback, and it is
+     also why the number a consumer binds is a COUNT, not a length —
+     --slfx-pillar-count, read off the host by seatGlow(), which divides the
+     host's own width by it. Fewer curtains are wider, more are narrower, and
+     a 1104px row no longer shows nine ribs where the card it was measured on
+     showed three. Without the JS the fallback holds and nothing changes. */
+  --slfx-pillar-pitch: 104px;
+  overflow: hidden;
+  border-radius: var(--slfx-seat-radius);
+  /* Fixed, the middle of the old 7–10px breath: the curtains now move by
+     their own shape (below), and a blur that pulsed over all of them at once
+     was the one clock every curtain shared. */
+  filter: blur(8.5px);
+  /* overflow:hidden clips the PATTERN; the blur is applied to the result and
+     spills past the box anyway — measured on the showcase's 43px field, where
+     the curtains smudged above and below the control. clip-path runs after
+     the filter, so it is the one that holds. Inset 0, not the seated glow's
+     spread: a pillars glow is seated with no spread at all, its box IS the
+     host's. The two are one decision — see seatGlow() in effects.js. */
+  clip-path: inset(0 round var(--slfx-seat-radius));
+}
+/* ══ LOADING IS AN AURORA THAT RUNS THE BORDER ══════════════════════════════
+   Owner, 2026-09-12: "deve essere un effetto aurora ma che percorre tutto il
+   bordo, da usare per il loading" — and the same for busy, which is the one
+   state the kit has for it (`data-sl-fx-live="busy"`).
+
+   So while an element is working, the curtains stand down and the glow paints
+   the BAND — the conic bloom, masked to four strips on the element's own
+   border — and the orbit already in this file turns it once every 1.1s. The
+   light runs the whole perimeter, which is the thing a loading indicator has
+   to do and a curtain hanging inside a pane cannot.
+
+   Two lights in one pane are two claims about what the element is doing, so
+   this and the curtains' stand-down are one condition, written the same way in
+   both places. Nothing here re-declares the band: it is the base ::before, and
+   the only thing that changes is WHERE it sits. A curtains glow is seated with
+   no spread, so the band's usual inset — written for a box 32.5px larger than
+   the host on every side — would push it a third of the way into a card.
+   --slfx-bloom-inset puts it back on the border.
+
+   DETERMINATE is excluded throughout: there the arc's LENGTH is the value, and
+   a light running the border says nothing about how far along the work is. The
+   ring on ::after is untouched either way, being what a reduced-motion or
+   high-contrast visitor reads the state from. */
+.sl-fx-aurora__glow[data-sl-fx-seated][data-sl-fx-pillars]:has(+ .sl-fx-aurora[data-sl-fx-live="busy"]:not([style*="--slfx-progress"])) {
+  --slfx-bloom-inset: 1px;
+  filter: blur(var(--slfx-soft));
+  /* MUCH slower than the 1.1s the busy ring used to spin at (owner: "il
+     movimento adesso e' troppo veloce, rendiamo parecchio piu' lento, molto
+     smooth e soft"). A turn of about five and a half seconds reads as a light
+     moving rather than as a spinner, and linear is what keeps it smooth: an
+     eased turn on a closed loop slows and speeds at the same two points every
+     pass, which is a stutter you cannot unsee. */
+  /* The fallback in the two `var()`s that read it is not decoration: the first
+     selector of that rule is the CHILD glow, the shape a host with no parent
+     still gets, and it never sees a property declared here. An undefined
+     var() in an animation shorthand makes the whole declaration invalid, and
+     the light would simply stop. */
+  --slfx-load-turn: 5.5s;
+}
+/* NOT SHIPPED: the filaments. Five rounds went into a fringe hanging off this
+   band so that the LENS would have something to bend — the band itself cannot
+   be seen to bend (1.63% of pixels move under the displacement, against the
+   curtains' 5.00%), because the pull is radial and light hugging a border maps
+   onto very nearly itself. Every version failed on looks, never on the
+   measurement: radial spokes read as a radar and bent nothing (1.83%);
+   vertical ones on all four runs bent best (2.76%) and read as a radar too; on
+   the side runs only they were out of step with the light (1.93%); rotating
+   the whole layer put them outside a wide card (1.60%); tangent and long read
+   as a flamethrower; tangent and short (2.64%) still did not convince.
+   Owner, 2026-09-12: removed. The band alone is the loading light. What it
+   costs is only the refraction, which was never visible enough to be the
+   point; what it buys back is a light that plainly runs the border. The record
+   is in docs/specs/2027-improve-aesthetics.md if anyone retries this, and the
+   thing to know first is that the GEOMETRY decides it, not the parameters. */
+/* ROUND, not a strip. The band's mask is four hard-edged strips — the shape
+   that survives a host shorter than twice the band, which a padding ring does
+   not — and a hard inner edge under a 6.5px blur still reads as a bar of light
+   with a cut side. Here each strip FADES inward instead, over twice the depth,
+   so the light has no edge of its own at all and only the element's own corner
+   radius shapes it. The four still overlap at the corners, and now they do it
+   in a falloff, which is what makes a corner read as round rather than as two
+   bars meeting. Scoped to loading: --sweep's band keeps the profile fitted
+   against the reference on lab/1x. */
+.sl-fx-aurora__glow[data-sl-fx-seated][data-sl-fx-pillars]:has(+ .sl-fx-aurora[data-sl-fx-live="busy"]:not([style*="--slfx-progress"]))::before {
+  /* THE ACCENT, and not the bloom pair. The ambient light is white, so the one
+     colour a surface shows while it is working should be the product's own,
+     which is what tells a loading card from a resting one at a glance. Both
+     stops are the same hue at two strengths: a band that changes colour along
+     its length reads as decoration, where loading is one thing happening.
+     Derived, never declared (AC-18).
+     Declared HERE, on the pseudo-element that paints from them, and not on the
+     glow: seatGlow() copies the host's values onto the glow as INLINE style,
+     and no rule beats an inline declaration. A pseudo-element's own
+     declaration does, because it is not the element that carries the inline
+     one. The same trap as the sibling's missing variables, one level down. */
+  --slfx-bloom-hi: color-mix(in srgb, var(--slfx-accent-vivid) 52%, transparent);
+  --slfx-bloom-lo: color-mix(in srgb, var(--slfx-accent-vivid) 30%, transparent);
+  mask:
+    linear-gradient(to bottom, black, transparent) top / 100% calc(var(--slfx-bleed) * 2) no-repeat,
+    linear-gradient(to top, black, transparent) bottom / 100% calc(var(--slfx-bleed) * 2) no-repeat,
+    linear-gradient(to right, black, transparent) left / calc(var(--slfx-bleed) * 2) 100% no-repeat,
+    linear-gradient(to left, black, transparent) right / calc(var(--slfx-bleed) * 2) 100% no-repeat;
+}
+
+/* TWO SHEETS, EACH ITS OWN LAYER (owner's pick DEEP, lab/pillars-organic,
+   2026-09-25: "their movement is not organic but rather mechanical"). The
+   two combs used to share ::before and one registered offset on one clock,
+   so the whole pattern slid as a rigid sheet. Now comb A is ::before and
+   comb B is ::after, and each sways, leans, widens and lets its light climb
+   on clocks of its own (the motion block below). The stops are the probe's.
+   The mask is two layers intersected: the fade to the top, and a softer band
+   repeating on twice the height, whose position climbs. */
+.sl-fx-aurora__glow[data-sl-fx-seated][data-sl-fx-pillars]:not(:has(+ .sl-fx-aurora[data-sl-fx-live="busy"]:not([style*="--slfx-progress"])))::before,
+.sl-fx-aurora__glow[data-sl-fx-seated][data-sl-fx-pillars]:not(:has(+ .sl-fx-aurora[data-sl-fx-live="busy"]:not([style*="--slfx-progress"])))::after {
+  content: "";
+  position: absolute;
+  inset: -20% -40%;
+  padding: 0;
+  border-radius: 0;
+  pointer-events: none;
+  transform-origin: 50% 100%;
+  -webkit-mask:
+    linear-gradient(to top, black 0%, black 35%, transparent 100%) 0 0 / 100% 100% no-repeat,
+    linear-gradient(to top, rgb(0 0 0 / 0.55) 0%, black 22%, rgb(0 0 0 / 0.55) 50%, black 72%, rgb(0 0 0 / 0.55) 100%) 0 0 / 100% 200% repeat-y;
+  -webkit-mask-composite: source-in;
+  mask:
+    linear-gradient(to top, black 0%, black 35%, transparent 100%) 0 0 / 100% 100% no-repeat,
+    linear-gradient(to top, rgb(0 0 0 / 0.55) 0%, black 22%, rgb(0 0 0 / 0.55) 50%, black 72%, rgb(0 0 0 / 0.55) 100%) 0 0 / 100% 200% repeat-y;
+  mask-composite: intersect;
+  /* WHITE ON INK (2026-09-12, owner: "userei luce bianca che si scompone"):
+     the page's own light pole, so the only colour in the pane is what the
+     glass makes of it. The two names stay separate because the pair is what
+     beats — a product that wants coloured curtains rebinds one of them. */
+  --slfx-pillar-a: var(--slfx-glint);
+  --slfx-pillar-b: var(--slfx-glint);
+}
+/* INK ON PAPER (owner, 2026-09-25, lab/pillars-organic L1 "a tad more
+   prominent"). The light pole on paper is near-white on a near-white pane,
+   and the curtains vanished. On paper they are folds of shadow instead: the
+   text ink at a fraction of the strength white carries on ink. */
+[data-sl-theme="light"] .sl-fx-aurora__glow[data-sl-fx-seated][data-sl-fx-pillars]:not(:has(+ .sl-fx-aurora[data-sl-fx-live="busy"]:not([style*="--slfx-progress"])))::before,
+[data-sl-theme="light"] .sl-fx-aurora__glow[data-sl-fx-seated][data-sl-fx-pillars]:not(:has(+ .sl-fx-aurora[data-sl-fx-live="busy"]:not([style*="--slfx-progress"])))::after {
+  --slfx-pillar-a: var(--slc-text, var(--sl-text-primary));
+  --slfx-pillar-b: var(--slc-text, var(--sl-text-primary));
+  --slfx-pillar-a1: 22%;
+  --slfx-pillar-a2: 19%;
+  --slfx-pillar-b1: 18%;
+  --slfx-pillar-b2: 15%;
+}
+.sl-fx-aurora__glow[data-sl-fx-seated][data-sl-fx-pillars]:not(:has(+ .sl-fx-aurora[data-sl-fx-live="busy"]:not([style*="--slfx-progress"])))::before {
+  background: repeating-linear-gradient(90deg,
+    color-mix(in srgb, var(--slfx-pillar-a) var(--slfx-pillar-a1, 45%), transparent) 0 calc(var(--slfx-pillar-pitch) * 0.1154),
+    transparent calc(var(--slfx-pillar-pitch) * 0.25) calc(var(--slfx-pillar-pitch) * 0.5192),
+    color-mix(in srgb, var(--slfx-pillar-a) var(--slfx-pillar-a2, 42%), transparent) calc(var(--slfx-pillar-pitch) * 0.6346),
+    transparent calc(var(--slfx-pillar-pitch) * 0.7885) var(--slfx-pillar-pitch));
+  background-size: calc(var(--slfx-pillar-pitch) * 3.0769) 100%;
+}
+.sl-fx-aurora__glow[data-sl-fx-seated][data-sl-fx-pillars]:not(:has(+ .sl-fx-aurora[data-sl-fx-live="busy"]:not([style*="--slfx-progress"])))::after {
+  background: repeating-linear-gradient(90deg,
+    color-mix(in srgb, var(--slfx-pillar-b) var(--slfx-pillar-b1, 40%), transparent) 0 calc(var(--slfx-pillar-pitch) * 0.14),
+    transparent calc(var(--slfx-pillar-pitch) * 0.30) calc(var(--slfx-pillar-pitch) * 0.62),
+    color-mix(in srgb, var(--slfx-pillar-b) var(--slfx-pillar-b2, 36%), transparent) calc(var(--slfx-pillar-pitch) * 0.74),
+    transparent calc(var(--slfx-pillar-pitch) * 0.90) calc(var(--slfx-pillar-pitch) * 1.1));
+  background-size: calc(var(--slfx-pillar-pitch) * 4.6154) 100%;
+}
+/* THE BULGE, HALVED ON A CURTAINED PANE (owner's pick D). The lens's convex
+   stage displaces by a fraction of the box, so it bends straight curtains
+   into arcs — on a small card the arcs are most of what is left. 0.2 keeps
+   the pane reading as a lens and the curtains reading as curtains. Only the
+   hosts whose light is the curtains: --sweep, --beam and --rim keep 0.4. */
+.sl-fx-aurora:is(.sl-fx-aurora--pillars, :not(.sl-fx-aurora--sweep, .sl-fx-aurora--beam, .sl-fx-aurora--rim, .sl-fx-aurora--linear)) {
+  --slg-lens-bulge: 0.2;
+}
+
+/* Busy — a short travelling marker: the same arc, a fraction of the length.
+   --linear is excluded from busy below: a conic arc painted into a 2px strip
+   renders as a smear. A linear aurora has no busy mode — report work on a
+   ring aurora, not on an underline. */
+.sl-fx-aurora[data-sl-fx-live="busy"] { --slfx-arc: 65deg; }
+/* Busy is a state, and state is the accent's (design-language Decision 2).
+   Since 0.28 every reading is the accent's, so these restate the defaults;
+   they stay so a variant that rebinds the beam cannot recolour a busy ring.
+   The rim variant's own colours come after, at the same weight, so they win
+   on it. */
+.sl-fx-aurora[data-sl-fx-live="busy"] {
+  --slfx-beam: var(--slfx-accent-vivid);
+  --slfx-beam-b: oklch(from var(--slfx-accent-vivid) l c calc(h + 180));
+  --slfx-beam-c: oklch(from var(--slfx-accent-vivid) l c calc(h + 150));
+  --slfx-beam-tail: color-mix(in srgb, var(--slfx-depth-vivid) 75%, transparent);
+  --slfx-bloom-hi: color-mix(in srgb, var(--slfx-accent-bloom) 44%, transparent);
+  --slfx-bloom-lo: color-mix(in srgb, var(--slfx-depth-bloom) 33%, transparent);
+}
+.sl-fx-aurora--rim[data-sl-fx-live="busy"] {
+  --slfx-beam: var(--slfx-rim-beam);
+  --slfx-beam-tail: color-mix(in srgb, var(--slfx-beam) 85%, transparent);
+  --slfx-bloom-hi: color-mix(in srgb, var(--slfx-depth-bloom) 44%, transparent);
+  --slfx-bloom-lo: color-mix(in srgb, var(--slfx-depth-bloom) 33%, transparent);
+}
+
+/* Determinate — the arc length is the value; nothing rotates. The edge of a
+   card IS its progress bar: no extra widget, no layout.
+   CONSUMER CONTRACT: --slfx-progress must be set INLINE on the element (an
+   inline style is what [style*="--slfx-progress"] detects). Setting it from a
+   stylesheet rule leaves the element in indeterminate mode. */
+.sl-fx-aurora[data-sl-fx-live="busy"][style*="--slfx-progress"] {
+  --slfx-arc: calc(var(--slfx-progress) * 360deg);
+}
+
+/* Linear aurora — where the edge is not a ring. The active tab's 2px underline,
+   a link's underline, an inversion band's top rule: the same light swept
+   along a segment instead of a perimeter. */
+.sl-fx-aurora--linear::after {
+  inset: auto 0 0 0;
+  height: var(--slfx-ring-w);
+  padding: 0;
+  mask: none;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--slfx-depth) 80%, transparent) 30%,
+    color-mix(in srgb, var(--slfx-sheen) 70%, var(--slc-accent, var(--sl-accent-default))) 50%,
+    color-mix(in srgb, var(--slfx-depth) 80%, transparent) 70%,
+    transparent 100%);
+}
+
+/* The band's structural rule is its top edge; a tab's and a link's are their
+   bottom. The default stays bottom because two of the three want it. */
+.sl-fx-aurora--linear.sl-fx-aurora--top::after { inset: 0 0 auto 0; }
+
+/* ══ LIVE LIGHT — work is happening here ═══════════════════════════════════
+   Re-scope R3 (docs/specs/2027-improve-aesthetics.md), owner's pick A,
+   2026-09-25. live-light.js gives a ring aurora that is working a canvas of
+   its own: data-sl-fx-live="run" (an agent working HERE) is two bodies of
+   light travelling the edge; "busy" (something loading) is the edge
+   breathing light inward. While the canvas holds the light, the CSS arc and
+   the seated glow stand down; without it (no WebGL, too many hosts, a
+   --linear or --rim aurora, a determinate one) they are the reading. "run"
+   takes the busy arc's CSS as its own fallback. */
+.sl-fx-live__canvas {
+  position: absolute;
+  /* PAD in live-light.js; an ancestor with overflow other than visible within
+     this distance of the host clips the light. */
+  inset: -16px;
+  width: calc(100% + 32px);
+  height: calc(100% + 32px);
+  z-index: -1;
+  display: block;
+  pointer-events: none;
+  user-select: none;
+}
+.sl-fx-aurora.is-live-lit[data-sl-fx-live]::after { opacity: 0; }
+.sl-fx-aurora__glow[data-sl-fx-seated]:has(+ .sl-fx-aurora.is-live-lit) { display: none; }
+/* Without the canvas, "run" reads exactly as "busy" does in CSS. */
+.sl-fx-aurora[data-sl-fx-live="run"] { --slfx-arc: 65deg; }
+
+/* A tab or a link that is working: a short segment of light travels its
+   underline. The busy conic was never allowed on a 2px strip (it smears);
+   a linear gradient sliding along it does not. */
+.sl-fx-aurora--linear:is([data-sl-fx-live="busy"], [data-sl-fx-live="run"])::after {
+  opacity: 1;
+  background: linear-gradient(90deg,
+    transparent,
+    color-mix(in srgb, var(--slc-accent, var(--sl-accent-default)) 80%, transparent) 45%,
+    color-mix(in srgb, var(--slfx-sheen) 55%, var(--slc-accent, var(--sl-accent-default))) 50%,
+    color-mix(in srgb, var(--slc-accent, var(--sl-accent-default)) 80%, transparent) 55%,
+    transparent) no-repeat;
+  background-size: 38% 100%;
+  background-position: -60% 0;
+}
+
+/* ══ LIQUID — you are recognised ═════════════════════════════════════════════
+   The SILHOUETTE deforms; the content never does. While the pointer shapes an
+   element, effects.js parents one shared <svg class="sl-fx-liquid__skin">
+   into it: the host's own rounded box plus a drop at the pointer, welded by a
+   goo filter (blur, then alpha contrast — libraries.dev/gooey's own chain)
+   and painted in the host's computed background and border colours, with the
+   band following the merged outline. It sits at z-index -2: above the host's
+   own background and border (a negative z-index child paints over both), and
+   below its content, which is never filtered. Nothing is written to the host
+   but a transparent border-image, which hides the host's own border under the
+   skin's band WITHOUT touching border-color — the skin reads the computed
+   border colour every frame, so hover and active states stay the host's.
+   The radius is never rewritten: the skin traces the radii the component
+   declared, so a component stays free to re-parametrise its own --sl-radius-*.
+   One element deforms at a time; the skin leaves when the spring settles.
+   The GPU chrome welds the same drop onto the same box (effects-shader.js). */
+.sl-fx-liquid { position: relative; isolation: isolate; }
+.sl-fx-liquid__skin {
+  position: absolute;
+  /* The host's BORDER box: an absolutely positioned child resolves inset: 0
+     against the padding box, and the skin has to cover the border it hides.
+     effects.js sets --slfx-bw to the host's border width. */
+  inset: calc(-1 * var(--slfx-bw, 0px));
+  width: calc(100% + 2 * var(--slfx-bw, 0px));
+  height: calc(100% + 2 * var(--slfx-bw, 0px));
+  z-index: -2;
+  overflow: visible;   /* the UA hides an inline svg's overflow; the swell is outside the box */
+  pointer-events: none;
+  user-select: none;
+}
+[data-sl-fx="on"] .sl-fx-liquid.is-liquid-live {
+  border-image: linear-gradient(transparent 0 0) 1;
+}
+
+/* ══ OFF-SCREEN — what nobody can see costs nothing ══════════════════════════
+   An effect on an element outside the viewport is work nobody asked for, and
+   on a long page most elements are outside it. Two things cost real money:
+   the glass's backdrop-filter, which blurs whatever is behind it and is
+   recomputed as the page moves, and a running animation, which keeps ticking
+   off-screen for no one.
+
+   effects.js marks what is near enough to matter (an IntersectionObserver with
+   a 200px margin, so a pane is already blurred when it arrives rather than
+   blurring in at the fold). These rules stand down the rest.
+
+   SUBTRACTIVE, and that is the whole design: they key on [data-sl-fx="on"] as
+   well, so a page that never mounts keeps its full material. Requiring the
+   attribute to PAINT would have turned the glass off wherever this module is
+   absent, which is Tier 0 — the state the layer promises is correct on its
+   own. */
+[data-sl-fx="on"] .sl-fx-glass:not([data-sl-fx-near]) .sl-glass__backdrop {
+  /* Prefixed FIRST, standard last. Written the other way round, Lightning CSS
+     (Astro's minifier) dropped the unprefixed declaration as redundant and
+     kept only -webkit-backdrop-filter — which Chrome does not let override the
+     standard property, so the gate matched 12 elements and blurred all 12
+     anyway. Found in the built bundle, not in source. */
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+/* PAUSED, and !important. Written as `animation: none` this lost to every
+   rule that starts an aurora animation: the sweep and the linear travel tie
+   it and come later, the busy/run orbit outranks it, and a seated glow is the
+   host's previous sibling, which the child form never reached. Measured on
+   the showcase, 11 of 12 running animations sat more than 200px off-screen,
+   each re-resolving a registered property and repainting every frame. Paused
+   rather than removed, so a light scrolling back in resumes where it was
+   instead of jumping. */
+/* A lens far off-screen: its displacement chain (three channel matrices, four
+   displacement maps, a blur) is written inline by glass-lens.js, so only
+   !important stands it down. Past the 200px margin nobody sees it go. */
+[data-sl-fx="on"] .sl-fx-glass.is-lensed:not([data-sl-fx-near]) {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+[data-sl-fx="on"] .sl-fx-aurora:not([data-sl-fx-near])::after,
+[data-sl-fx="on"] .sl-fx-aurora:not([data-sl-fx-near]) > .sl-fx-aurora__glow,
+[data-sl-fx="on"] .sl-fx-aurora:not([data-sl-fx-near]) > .sl-fx-aurora__glow::before,
+[data-sl-fx="on"] .sl-fx-aurora__glow[data-sl-fx-seated]:has(+ .sl-fx-aurora:not([data-sl-fx-near])),
+[data-sl-fx="on"] .sl-fx-aurora__glow[data-sl-fx-seated]:has(+ .sl-fx-aurora:not([data-sl-fx-near]))::before,
+[data-sl-fx="on"] .sl-fx-aurora__glow[data-sl-fx-seated]:has(+ .sl-fx-aurora:not([data-sl-fx-near]))::after,
+[data-sl-fx="on"] .sl-fx-glass:not([data-sl-fx-near])::before,
+[data-sl-fx="on"] .sl-fx-glass:not([data-sl-fx-near])::after {
+  animation-play-state: paused !important;
+}
+
+/* ══ STILL — the app holds the motion where it is ═══════════════════════════
+   data-sl-fx-still on <html> is the consumer's pause: set it while the window
+   is unfocused or the app is idle, and every animation the kit runs freezes
+   in place and resumes where it stopped when the flag goes. live-light.js reads
+   the same flag and stops asking for frames. PAUSED, and !important, for the
+   reason the off-screen gate above gives: every rule that starts one of these
+   is an `animation` shorthand, which resets the play state, and most of them
+   outrank this selector.
+
+   The busy and run orbits pause too. aria-busy carries that state (see the
+   reduced-motion block at the end of this file), not the orbit, and the
+   WebGL light that replaces the arc freezes under the same flag; a fallback
+   arc that kept turning would keep the compositor awake, which is what the
+   flag exists to stop.
+
+   Not the glitch: a burst frozen mid-flight is a ghost stuck beside the label,
+   or with the shatter a stack of shards over a hidden one, which is a missing
+   word. Held, it stands down to its label as it does under reduced motion.
+
+   The live badge's breath is components.css's, but that file may not name an
+   effect attribute (effects-showcase.test.mjs), so it is paused here: a
+   product that loads components.css alone keeps the badge breathing. The
+   status bar's live dot (workbench.css, 0.34) is paused here for the same
+   reason.
+
+   The kit's loops run on paint layers, not on the hosts (a drifting goo
+   member and a glitch aside), so the hosts themselves are not named here:
+   an animation the PRODUCT puts on a glass or aurora host is its own, and a
+   pause with !important would take it away with no way back. */
+:root[data-sl-fx-still] .sl-fx-goo--drift .sl-fx-goo__member,
+:root[data-sl-fx-still] .sl-badge--live::before,
+:root[data-sl-fx-still] .sl-statusbar__dot,
+:root[data-sl-fx-still] :is(.sl-fx-aurora, .sl-fx-aurora__glow, .sl-fx-glass)::before,
+:root[data-sl-fx-still] :is(.sl-fx-aurora, .sl-fx-aurora__glow, .sl-fx-glass)::after {
+  animation-play-state: paused !important;
+}
+/* The ghosts are written out, not grouped: a pseudo-element is not valid
+   inside :is(), whose forgiving list drops it without a word. */
+:root[data-sl-fx-still] .sl-fx-glitch.is-glitching,
+:root[data-sl-fx-still] .sl-fx-glitch.is-glitching::before,
+:root[data-sl-fx-still] .sl-fx-glitch.is-glitching::after,
+:root[data-sl-fx-still] .sl-fx-glitch--shatter.is-glitching .sl-fx-glitch__shard {
+  animation: none !important;
+}
+:root[data-sl-fx-still] .sl-fx-glitch--shatter.is-glitching .sl-fx-glitch__text { opacity: 1 !important; }
+:root[data-sl-fx-still] .sl-fx-glitch--shatter.is-glitching .sl-fx-glitch__shard { opacity: 0 !important; }
+
+/* ══ GOO — these are one substance ═══════════════════════════════════════════
+   Where the liquid answers the pointer on ONE element, the goo answers the
+   LAYOUT across several: members of a declared container stop reading as
+   separate boxes and start reading as one material, welding where they come
+   within --slfx-goo-weld of each other. That is a statement about belonging,
+   not about attention or recognition, and it is the reason this is a family
+   of its own rather than a looser gate on .sl-fx-liquid.
+
+   --slfx-goo-weld is measured EDGE TO EDGE between two facing sides. Diagonal
+   neighbours in a grid stand further apart than the grid's own `gap`, so a
+   field bound from a gap welds its rows and columns and leaves the diagonals
+   open — which is usually what a grid wants, and is worth knowing before it
+   reads as a bug.
+
+   A member is whichever element PAINTS THE FILL, which for a replaced control
+   is the control itself: .sl-field__input carries the background, and
+   .sl-field__control is a transparent wrapper. The wrapper rule of §Decision
+   3b does not apply here — it exists because an <input> renders no
+   pseudo-element, and this family uses none.
+
+   Two silhouettes can only weld if they share a filter coordinate space, so
+   the container owns ONE <svg class="sl-fx-goo__field"> (goo-field.js) and
+   every .sl-fx-goo__member contributes its rounded box to it, mapped into the
+   container's coordinates and dilated by --slfx-goo-reach so the substance
+   peeks out as a rim. One goo filter runs over the group: a premultiplied
+   Gaussian blur, then an alpha slope. The slope steepens ONLY alpha — RGB
+   passes through as identity — so where two members weld, their own colours
+   blend across the neck by themselves. No GPU tier: the neck is a filter
+   result, not a per-pixel lighting calculation.
+
+   The content is never filtered. The field is a silhouette layer BELOW the
+   members, the way libraries.dev/gooey does it and the way this layer has
+   promised twice; the real DOM rides crisp on top. Two things only are written
+   to a member: the stacking order that keeps it there, and — once it has
+   welded to a neighbour — a transparent border-image, so its own outline stops
+   drawing a line across the merged mass.
+
+   Tier 0 is the members laid out and unmerged — correct, not beautiful. The
+   substance needs goo-field.js to exist at all, so it arrives with Tier 1.
+
+   NEVER A FORM CONTROL. goo-field.js refuses button, input, select, textarea
+   and a[href] outright, marked or not: they paint their own chrome through
+   layers this family does not own — a glass pane's hairline lives on ::after
+   and in the children glass.css injects — so a welded control kept an outline
+   the substance was meant to replace while a welded div beside it lost its
+   edge entirely. Standard elements only; where a member must be operable, an
+   element that paints nothing of its own and carries the semantics through
+   role and a tab stop.
+
+   CLIPPING, at container scale (spec §Decision 3b): the goo reaches
+   --slfx-goo-reach plus three blur sigmas past the outermost member, so the
+   container gives its members that much padding. A substance cut off along a
+   straight line is the defect the rule exists to prevent. */
+.sl-fx-goo { position: relative; isolation: isolate; }
+.sl-fx-goo__field {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 0;
+  /* The UA hides an inline svg's overflow, and the goo's whole point is that
+     it leaves each member's box. The filter region is set in user space by
+     goo-field.js, so nothing here bounds it. */
+  overflow: visible;
+  pointer-events: none;
+  user-select: none;
+}
+/* The members ride on top of their own silhouettes. `position: relative` with
+   no offsets moves nothing; it only buys the z-index. */
+.sl-fx-goo__member { position: relative; z-index: 1; }
+
+/* A member that has WELDED to a neighbour gives up its own BORDER and its own
+   BACKGROUND, and the substance paints it instead.
+
+   The border first: without this a merged shape is crossed by the outlines of
+   the elements inside it, and three chips dragged together read as three cards
+   stacked on a blob. A transparent border-image, never border-color — the same
+   instrument the liquid uses on its live host, and for the same reason: the
+   computed border colour stays readable, and border-image occupies the
+   border's own box, so nothing moves.
+
+   The background is the second half, and without it the first is not enough.
+   A member's box is opaque and RECTANGULAR: where two members overlap, the one
+   on top covers its neighbour's substance with a hard-cornered rectangle, and
+   the mass reads as boxes stepped over one another rather than as drops
+   merging. Handing the paint to the substance moves that colour boundary
+   INSIDE the filter, where the blur softens it — the goo's colour matrix is
+   identity on RGB, so a hard edge between two faces comes out as a gradient
+   the width of the blur. The member keeps its text, which rides crisp on top
+   of its own colour, because the substance under a member is that member's
+   own fill.
+
+   Scoped through the container so this is 0-3-0 and lands after
+   components.css: a component's own `:hover:not(:disabled)` fill rule is
+   0-3-0 too, and the substance — not the box — is what carries the state. */
+.sl-fx-goo .sl-fx-goo__member.is-goo-welded {
+  border-image: linear-gradient(transparent 0 0) 1;
+  background-color: transparent;
+}
+
+/* A welded member that is ALSO glass gives up its hairline. border-image
+   reaches the element's own border and nothing else, so the pane's ring —
+   which lives on ::after and lights on :hover — went on drawing the outline
+   the rule above exists to remove, and a hovered button in a welded toolbar
+   kept a visible edge. Same instrument and same reason as the liquid's, three
+   rules down: where a silhouette holds the edge, a rigid ring around it reads
+   as broken. */
+.sl-fx-goo .sl-fx-glass.sl-fx-goo__member.is-goo-welded::after { opacity: 0; }
+
+/* ── The drift — a field that will not hold still ────────────────────────────
+   Members wander slowly around where they were laid out, so a pair that sits a
+   weld apart grows a neck, thins it, and parts again. It is the one thing this
+   family does that a static page does not already imply: everything else here
+   is a statement about a layout, and this is a statement about a substance.
+
+   `translate`, not `transform`: a member may be a liquid host or a pane, and
+   both put a scale on `transform` under the pointer. The two properties
+   compose, so the drift never has to know.
+
+   Each member gets its own PERIOD as well as its own phase — a shared period
+   with staggered delays walks the same ellipse in formation, which reads as a
+   carousel rather than as suspension. The index comes from goo-field.js, in
+   collection order; see stampIndex() for why CSS cannot work it out itself.
+
+   goo-field.js re-derives every silhouette per frame while a drifting field is
+   on screen. Nothing else here changes: the filter region is recomputed from
+   the live boxes, so it follows the members out and needs no headroom of its
+   own — but the CONTAINER still owes its members the padding §Decision 3b
+   asks for, now plus the drift.
+
+   This sits under a plain no-preference query, and NOT under the glitch's
+   pattern three blocks down, which lets [data-sl-fx-motion="always"] override
+   a reduce preference. That derogation exists for a consumer whose glitch is
+   brand — Windows reports `reduce` by default under "adjust for best
+   performance" — and a drifting decoration is not brand. A visitor who asked
+   for less movement gets a field laid out and welded, which is this family's
+   Tier 0 and is correct on its own. goo-field.js reads the same preference for
+   the loop; see `drifts` there. */
+@media (prefers-reduced-motion: no-preference) {
+  .sl-fx-goo--drift .sl-fx-goo__member {
+    animation: slfx-goo-drift calc(7s + var(--slfx-i, 0) * 1.7s) ease-in-out infinite;
+    animation-delay: calc(var(--slfx-i, 0) * -2.9s);
+  }
+  /* Neighbours swing against each other, so the neck between a pair pulses
+     (thins, parts, re-forms) instead of the pair sliding together. goo-field.js
+     stamps --slfx-dir from the member's index in the field. */
+  .sl-fx-goo--drift .sl-fx-goo__member { animation-direction: var(--slfx-dir, normal); }
+}
+
+@keyframes slfx-goo-drift {
+  0%   { translate: 0 0; }
+  20%  { translate: var(--slfx-goo-drift) calc(var(--slfx-goo-drift) * -0.6); }
+  45%  { translate: calc(var(--slfx-goo-drift) * 0.3) calc(var(--slfx-goo-drift) * -1); }
+  70%  { translate: calc(var(--slfx-goo-drift) * -1) calc(var(--slfx-goo-drift) * -0.3); }
+  100% { translate: 0 0; }
+}
+
+/* ══ GLITCH — something re-resolved ══════════════════════════════════════════
+   Short staccato RGB pulses in a finite burst. Two ghost channels off the brand
+   pair (accent + its depth companion), blended with mix-blend-mode: screen so
+   they mix where they overlap. JS owns TIMING (finite, randomised, capped); CSS
+   owns the look and loops while `is-glitching` is present.
+
+   The element needs data-text set to its own text, for the ghost copies. It is
+   a CHILD of the component, never the component itself — that keeps
+   ::before/::after free for the edge on the host. */
+
+.sl-fx-glitch {
+  position: relative;
+  display: inline-block;
+  --slfx-gx: 2px;
+}
+.sl-fx-glitch::before,
+.sl-fx-glitch::after {
+  content: attr(data-text);
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  white-space: inherit;
+  mix-blend-mode: screen;
+}
+.sl-fx-glitch.is-glitching::before { color: var(--slc-accent, var(--sl-accent-default)); }
+.sl-fx-glitch.is-glitching::after  { color: var(--slfx-depth); }
+
+/* Shatter variant — during a burst the text breaks into horizontal bands that
+   jump sideways. Bands are stacked copies clipped to one strip each; JS sets a
+   random --slfx-sx per band per burst. The intact copy hides while they show. */
+.sl-fx-glitch__text { position: relative; z-index: 1; }
+.sl-fx-glitch__shards { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
+/* MARKUP CONTRACT: each shard carries --slfx-i (this band's index, 0-based) and
+   --slfx-n (how many bands) as inline styles, authored by the consumer — the
+   clip-path below divides by them. effects.js sets only --slfx-sx, the per-burst
+   sideways offset. A shard without them has an invalid clip-path and does not
+   render, which is a silent failure, so emit them on every shard:
+     <span class="sl-fx-glitch__shard" style="--slfx-i:0; --slfx-n:5">…</span> */
+.sl-fx-glitch__shard {
+  position: absolute;
+  inset: 0;
+  white-space: nowrap;
+  opacity: 0;
+  clip-path: inset(
+    calc(var(--slfx-i) / var(--slfx-n) * 100%) 0
+    calc((var(--slfx-n) - 1 - var(--slfx-i)) / var(--slfx-n) * 100%) 0);
+}
+.sl-fx-glitch--shatter.is-glitching .sl-fx-glitch__text { opacity: 0; }
+.sl-fx-glitch--shatter.is-glitching .sl-fx-glitch__shard { opacity: 1; }
+
+/* ══ LIQUID HOVER — the pane has mass ══════════════════════════════════════
+   The owner: a button should swell slightly under the pointer, with a very
+   light bounce, and settle back the same way on the way out.
+
+   SCALE, not size. A transform costs no layout and no repaint of anything
+   around it, and — the part that matters here — it does not change the
+   element's border box, so the lens's displacement map stays valid. Animating
+   width or padding would invalidate it on every frame and rebuild a canvas
+   each time.
+
+   3% is the movement, and the walk to it is worth recording because the first
+   reading was of a broken effect: 0.5% read as nothing, 10% broke a row's
+   alignment, 5% was still too much once the animation actually ran, 0.25% was
+   below a device pixel. On a 96px button 3% is about 1.5px at each edge — a
+   lift that is seen without the row around it moving.
+
+   GUMMY PRESS (owner 2026-09-30). A control pane squashes like every control
+   (2% wider, 3.2% shorter) and springs back on --sl-motion-spring, a text
+   button sinks to 97% (Lumen, 0.36), and any other pane sinks uniformly by a
+   third of the swell. The stand-down knob reaches all three. These rules sit
+   outside the no-preference block on purpose: their durations are motion
+   tokens, so reduced motion zeroes them, and the kit's always-on squash is
+   stood down with the rest. */
+.sl-fx-glass--pane {
+  /* Kit-wide press and spring return: the pane moves exactly like a plain
+     control. The stand-down knob still works — a wrapper that sets
+     --slfx-pane-swell: 1 yields k = 0 and no press. */
+  transition:
+    transform var(--sl-motion-slow, 360ms) var(--sl-motion-spring, var(--sl-motion-ease, ease)),
+    color var(--sl-motion-fast, 120ms) var(--sl-motion-ease, ease),
+    background-color var(--sl-motion-fast, 120ms) var(--sl-motion-ease, ease),
+    border-color var(--sl-motion-fast, 120ms) var(--sl-motion-ease, ease),
+    box-shadow var(--sl-motion-fast, 120ms) var(--sl-motion-ease, ease),
+    --slfx-accent-t var(--sl-motion-fast, 120ms) var(--sl-motion-ease, ease);
+}
+/* THE AMOUNT IS A KNOB, AND IT IS READ WITH A FALLBACK, NOT DECLARED. A
+   surface that wraps the pane and its seated glow in a box of its own and
+   scales THAT has already moved both; the pane's own scale then composes
+   with the wrapper's rather than agreeing with it — 1.03 x 1.03 put a card's
+   curtains 34 px wider than the card they are clipped to, which reads as the
+   light spilling past the glass. Such a wrapper sets --slfx-pane-swell: 1
+   and the pane and its glow both stand down, because the property inherits
+   to both from the wrapper they share. That only works while nothing
+   declares a default ON the pane or the glow: a declaration there would
+   shadow the wrapper's value and be unreachable. The default lives at the
+   point of use. */
+/* The hover lift (scale 1.03 under the pointer) retired on 2026-09-25 with
+   re-scope R2: a control answers the press, not the hover — the press
+   lights it (sl-fx-press) and it sinks below. The knob keeps its name and
+   its default because the uniform sink still reads it. */
+.sl-fx-glass--pane:active:not(:disabled, [aria-disabled="true"]) {
+  /* Any pane that is not a control (a card, a text pane) sinks uniformly: a third
+     of the swell, the other way. :active also matches the ancestors of a pressed
+     child, so a squash here would wobble a whole card under a click on its button.
+     --slfx-pane-swell: 1 yields no sink at all. */
+  transform: scale(calc(1 - (var(--slfx-pane-swell, 1.03) - 1) / 3));
+  transition-duration: var(--sl-motion-fast, 120ms);
+  transition-timing-function: var(--sl-motion-ease, ease);
+}
+/* A control pane (glass icon button, chip, segmented or pagination item)
+   squashes like every control (owner 2026-09-30,
+   docs/specs/2026-09-30-gummy-controls-design.md): 2% wider, 3.2% shorter,
+   springing back on --sl-motion-spring. --slfx-pane-swell scales it (k = 0 at 1,
+   no press). Outranks the uniform sink above by specificity. */
+:is(.sl-icon-btn, .sl-chip, .sl-segmented__item, .sl-pagination__item).sl-fx-glass--pane:active:not(:disabled, [aria-disabled="true"]) {
+  --slfx-pane-k: calc((var(--slfx-pane-swell, 1.03) - 1) / 0.03);
+  transform: scale(calc(1 + 0.02 * var(--slfx-pane-k)), calc(1 - 0.032 * var(--slfx-pane-k)));
+  transition-duration: var(--sl-motion-fast, 120ms);
+  transition-timing-function: var(--sl-motion-ease, ease);
+}
+/* A glass text button sinks to 97% like a bare one (Lumen, 0.36), with the
+   same knob: k = 1 at the default swell, 0 at --slfx-pane-swell: 1. */
+.sl-btn.sl-fx-glass--pane:active:not(:disabled, [aria-disabled="true"]) {
+  --slfx-pane-k: calc((var(--slfx-pane-swell, 1.03) - 1) / 0.03);
+  transform: scale(calc(1 - 0.03 * var(--slfx-pane-k)));
+  transition-duration: var(--sl-motion-fast, 120ms);
+  transition-timing-function: var(--sl-motion-ease, ease);
+}
+
+/* AND THE LIGHT INSIDE IT SWELLS TOO. A seated glow is the host's previous
+   SIBLING, not its child, so a transform on the host reaches it not at all:
+   the pane grew under the pointer and its curtains stayed exactly the size
+   they were, which reads as the light sliding out from under the glass. The
+   owner saw it as the effect not following the container.
+
+   So the glow mirrors the host's scale, on the host's own curves. Mirrored
+   rather than inherited because there is nothing to inherit from — and it is
+   three rules rather than one because each of the pane's three states has a
+   curve of its own, and a glow easing differently from the pane it hangs in
+   is the same defect one step smaller.
+
+   Both boxes scale about their centres and the glow's box IS the host's, so
+   they stay registered; the curtains' own drift is a background-position and
+   is untouched by a transform.
+
+   The mirror reads the same --slfx-pane-swell the pane does, so a wrapper
+   that owns the scale cancels both with one declaration. */
+.sl-fx-aurora__glow[data-sl-fx-seated] {
+  transition:
+    opacity var(--sl-motion-slow, 360ms) var(--sl-motion-ease, ease),
+    transform var(--sl-motion-slow, 360ms) var(--sl-motion-spring, var(--sl-motion-ease, ease));
+}
+.sl-fx-aurora__glow[data-sl-fx-seated]:has(+ .sl-fx-glass--pane:active:not(:disabled, [aria-disabled="true"])) {
+  /* Mirror the pane's uniform sink. */
+  transform: scale(calc(1 - (var(--slfx-pane-swell, 1.03) - 1) / 3));
+  transition-duration: var(--sl-motion-fast, 120ms);
+  transition-timing-function: var(--sl-motion-ease, ease);
+}
+/* Mirror the control pane's squash, with the same stand-down knob. */
+.sl-fx-aurora__glow[data-sl-fx-seated]:has(+ :is(.sl-icon-btn, .sl-chip, .sl-segmented__item, .sl-pagination__item).sl-fx-glass--pane:active:not(:disabled, [aria-disabled="true"])) {
+  --slfx-pane-k: calc((var(--slfx-pane-swell, 1.03) - 1) / 0.03);
+  transform: scale(calc(1 + 0.02 * var(--slfx-pane-k)), calc(1 - 0.032 * var(--slfx-pane-k)));
+  transition-duration: var(--sl-motion-fast, 120ms);
+  transition-timing-function: var(--sl-motion-ease, ease);
+}
+/* ...and the text button's sink. */
+.sl-fx-aurora__glow[data-sl-fx-seated]:has(+ .sl-btn.sl-fx-glass--pane:active:not(:disabled, [aria-disabled="true"])) {
+  --slfx-pane-k: calc((var(--slfx-pane-swell, 1.03) - 1) / 0.03);
+  transform: scale(calc(1 - 0.03 * var(--slfx-pane-k)));
+  transition-duration: var(--sl-motion-fast, 120ms);
+  transition-timing-function: var(--sl-motion-ease, ease);
+}
+
+
+@media (prefers-reduced-motion: no-preference) {
+  /* The working tab's segment travels; under reduced motion it rests at its
+     start, off the strip. */
+  [data-sl-fx="on"] .sl-fx-aurora--linear:is([data-sl-fx-live="busy"], [data-sl-fx-live="run"])::after {
+    animation: slfx-travel calc(var(--sl-motion-slow, 360ms) * 5) cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite;
+  }
+  @keyframes slfx-travel { from { background-position: -60% 0; } to { background-position: 160% 0; } }
+
+  /* Sweep: 210deg → 570deg rather than 0 → 360, so the rotation is continuous
+     instead of snapping back through the resting angle. */
+  @keyframes slfx-sweep { to { --slfx-angle: 570deg; } }
+  @keyframes slfx-orbit { to { --slfx-angle: 570deg; } }
+  /* The light's hue drifts either side of the accent, as an aurora's does. A
+     narrow range on purpose: the product's hue must stay recognisable. */
+  @keyframes slfx-drift {
+    0%, 100% { filter: hue-rotate(-16deg); }
+    50%      { filter: hue-rotate(16deg); }
+  }
+
+  /* OPT-IN AGAIN (2026-09-12). The sweep was made the default a second time
+     once its profile stopped reading as a lighthouse, and that was right about
+     the profile and wrong about the model: a wash that follows the edge it
+     hugs is the one shape a lens cannot show itself bending — measured, the
+     displacement moves 0.93% of its pixels against 5.00% of the curtains'.
+     The aurora's light is the curtains; --sweep brings the rotation back. */
+  [data-sl-fx="on"] .sl-fx-aurora--sweep[data-sl-fx-live="on"]::after {
+    animation: slfx-sweep 3.2s linear infinite, slfx-drift 9s ease-in-out infinite;
+  }
+  [data-sl-fx="on"] .sl-fx-aurora--sweep[data-sl-fx-live="on"] > .sl-fx-aurora__glow::before,
+  [data-sl-fx="on"] .sl-fx-aurora__glow[data-sl-fx-seated]:has(+ .sl-fx-aurora--sweep[data-sl-fx-live="on"])::before {
+    animation: slfx-sweep 3.2s linear infinite, slfx-drift 9s ease-in-out infinite;
+  }
+  /* A beam drifts ACROSS the pane, slowly, and never rotates: the prism is in
+     the glass, not in the light. Registered so it interpolates. */
+  @property --slfx-beam-dy { syntax: "<length>"; inherits: false; initial-value: 0px; }
+  /* Each sheet sways, leans, widens and lets its light climb, every one of
+     those on its own clock, and the two sheets on different ones (15–53s,
+     co-prime), so the formation never repeats and nothing moves as a unit.
+     transform, translate, scale and opacity only, except the climb, which
+     moves the mask. Owner's pick DEEP on lab/pillars-organic (2026-09-25),
+     over FOLD and RISE at twice the pace: an aurora moves slowly.
+
+     The NEGATIVE DELAY keeps a row of panes from marching: --slfx-pillar-phase,
+     written per host by seatGlow(), drops each glow somewhere inside every
+     one of its cycles. The multipliers differ per clock, so the phase moves
+     the formation apart rather than shifting it whole. */
+  @keyframes slfx-pillar-sway-a { 0%, 100% { translate: -11% 0; } 50% { translate: 9% 0; } }
+  @keyframes slfx-pillar-sway-b { 0%, 100% { translate: 10% 0; } 50% { translate: -12% 0; } }
+  @keyframes slfx-pillar-lean-a { 0%, 100% { transform: skewX(-9deg); } 50% { transform: skewX(7deg); } }
+  @keyframes slfx-pillar-lean-b { 0%, 100% { transform: skewX(8deg); } 50% { transform: skewX(-10deg); } }
+  @keyframes slfx-pillar-width { 0%, 100% { scale: 1 1; } 50% { scale: 1.12 1; } }
+  @keyframes slfx-pillar-rise {
+    from { -webkit-mask-position: 0 0, 0 100%; mask-position: 0 0, 0 100%; }
+    to   { -webkit-mask-position: 0 0, 0 -100%; mask-position: 0 0, 0 -100%; }
+  }
+  [data-sl-fx="on"] .sl-fx-aurora__glow[data-sl-fx-seated][data-sl-fx-pillars]:has(+ .sl-fx-aurora[data-sl-fx-live="on"])::before {
+    animation:
+      slfx-pillar-sway-a 41s ease-in-out calc(var(--slfx-pillar-phase, 0) * -41s) infinite,
+      slfx-pillar-lean-a 23s ease-in-out calc(var(--slfx-pillar-phase, 0) * -23s) infinite,
+      slfx-pillar-width 29s ease-in-out calc(var(--slfx-pillar-phase, 0) * -29s) infinite,
+      slfx-pillar-rise 15s linear calc(var(--slfx-pillar-phase, 0) * -15s) infinite;
+  }
+  [data-sl-fx="on"] .sl-fx-aurora__glow[data-sl-fx-seated][data-sl-fx-pillars]:has(+ .sl-fx-aurora[data-sl-fx-live="on"])::after {
+    animation:
+      slfx-pillar-sway-b 53s ease-in-out calc(-9s - var(--slfx-pillar-phase, 0) * 53s) infinite,
+      slfx-pillar-lean-b 31s ease-in-out calc(-5s - var(--slfx-pillar-phase, 0) * 31s) infinite,
+      slfx-pillar-width 37s ease-in-out calc(-13s - var(--slfx-pillar-phase, 0) * 37s) infinite,
+      slfx-pillar-rise 22s linear calc(-8s - var(--slfx-pillar-phase, 0) * 22s) infinite;
+  }
+  @keyframes slfx-beam-drift { from { --slfx-beam-dy: -60%; } to { --slfx-beam-dy: 60%; } }
+  [data-sl-fx="on"] .sl-fx-aurora__glow[data-sl-fx-seated][data-sl-fx-beam]:has(+ .sl-fx-aurora[data-sl-fx-live="on"])::before {
+    animation: slfx-beam-drift 11s ease-in-out infinite alternate;
+  }
+  /* Determinate never orbits — its arc length carries the value. */
+  [data-sl-fx="on"] .sl-fx-aurora:is([data-sl-fx-live="busy"], [data-sl-fx-live="run"]):not([style*="--slfx-progress"]):not(.sl-fx-aurora--linear)::after {
+    animation: slfx-orbit 1.1s linear infinite;
+  }
+  /* …unless live-light.js holds the light: the arc is hidden then, and an
+     orbit nobody can see is work nobody asked for. Same specificity plus the
+     class, later in the file. */
+  [data-sl-fx="on"] .sl-fx-aurora.is-live-lit:is([data-sl-fx-live="busy"], [data-sl-fx-live="run"]):not([style*="--slfx-progress"]):not(.sl-fx-aurora--linear)::after {
+    animation: none;
+  }
+  /* Whatever is cut from --slfx-angle belongs in this selector: a light cut
+     from an angle nothing turns sits wherever that angle's initial value
+     points, which is 210deg — the bottom-left corner. That was seen once, on
+     the filaments, before they were removed. */
+  [data-sl-fx="on"] .sl-fx-aurora[data-sl-fx-live="busy"]:not([style*="--slfx-progress"]) > .sl-fx-aurora__glow::before,
+  [data-sl-fx="on"] .sl-fx-aurora__glow[data-sl-fx-seated]:has(+ .sl-fx-aurora[data-sl-fx-live="busy"]:not([style*="--slfx-progress"]))::before {
+    animation: slfx-orbit var(--slfx-load-turn, 5.5s) linear infinite;
+  }
+
+  /* Base jitter on the real text plus a third colour halo via text-shadow. */
+  @keyframes slfx-glitch-jit {
+    0%   { transform: translate(0, 0); text-shadow: none; }
+    50%  {
+      transform: translate(calc(-0.4 * var(--slfx-gx) * var(--slfx-gmul, 1)), 0);
+      text-shadow:
+        calc(0.8 * var(--slfx-gx) * var(--slfx-gmul, 1)) 0 color-mix(in srgb, var(--slc-accent-hover, var(--sl-accent-hover)) 55%, transparent),
+        calc(-0.8 * var(--slfx-gx) * var(--slfx-gmul, 1)) 0 color-mix(in srgb, var(--slfx-depth) 40%, transparent);
+    }
+    100% { transform: translate(calc(0.4 * var(--slfx-gx) * var(--slfx-gmul, 1)), 0); text-shadow: none; }
+  }
+  /* Accent ghost — slices flicker, opacity pulses so it strobes. */
+  @keyframes slfx-glitch-a {
+    0%   { opacity: 0.22; transform: translate(calc(-1 * var(--slfx-gx) * var(--slfx-gmul, 1)), 0);      clip-path: inset(0 0 68% 0); }
+    50%  { opacity: 0.4;  transform: translate(calc(-1.7 * var(--slfx-gx) * var(--slfx-gmul, 1)), 1px);  clip-path: inset(55% 0 12% 0); }
+    100% { opacity: 0.28; transform: translate(calc(-0.6 * var(--slfx-gx) * var(--slfx-gmul, 1)), 0);    clip-path: inset(28% 0 42% 0); }
+  }
+  /* Depth ghost — offset phase so the two channels cross and blend. */
+  @keyframes slfx-glitch-b {
+    0%   { opacity: 0.38; transform: translate(calc(var(--slfx-gx) * var(--slfx-gmul, 1)), 0);           clip-path: inset(52% 0 18% 0); }
+    50%  { opacity: 0.2;  transform: translate(calc(1.7 * var(--slfx-gx) * var(--slfx-gmul, 1)), -1px);  clip-path: inset(8% 0 60% 0); }
+    100% { opacity: 0.34; transform: translate(calc(0.6 * var(--slfx-gx) * var(--slfx-gmul, 1)), 0);     clip-path: inset(30% 0 40% 0); }
+  }
+  @keyframes slfx-shatter {
+    0%   { transform: translateX(0); }
+    50%  { transform: translateX(calc(var(--slfx-sx, 0px) * var(--slfx-gmul, 1))); }
+    100% { transform: translateX(0); }
+  }
+
+
+}
+
+/* Under `reduce` the busy arc does not orbit: it renders as a static full
+   ring at reduced opacity — present, honest that something is happening, not
+   moving, and dimmed so a full static ring is not mistaken for focus.
+   aria-busy carries the state, which is why that attribute is a requirement.
+   A DETERMINATE arc is exempt from both: it never moved, its length is the
+   value, and looked at on the page at 0.55 the end of the arc — the thing
+   that carries the value — loses the crispness it needs. It stays at full
+   opacity, static as it always was. */
+/* ══ GLITCH MOTION — outside the reduced-motion guard, killed by it ══════════
+   The other families' animations live inside `prefers-reduced-motion:
+   no-preference`, so the query decides and nothing can overrule it. The
+   glitch's four are here instead, unguarded, and the block below takes them
+   away under `reduce` — which is the same reading, with one difference: a
+   surface can decline the removal.
+
+   Why only the glitch has the escape. A product may have a documented reason
+   to animate for a visitor reporting `reduce` — sondalab.eu is one: Windows
+   reports the preference by default under "adjust for best performance", and
+   that site's owner ruled its glitch is brand rather than decoration. The
+   escape is deliberately NARROW: it is opt-in per document, it is written as
+   a word a reader cannot mistake, and it reaches the glitch alone. It does not
+   touch high contrast, which is a different requirement with a different
+   reason, and it is not a general "ignore accessibility preferences" switch.
+
+   effects.js writes the attribute; mount() takes ignoreReducedMotion, and a
+   consumer who has not asked for it gets the preference honoured. */
+[data-sl-fx="on"] .sl-fx-glitch.is-glitching {
+  animation: slfx-glitch-jit var(--slfx-gdj, 0.16s) steps(2) infinite;
+}
+[data-sl-fx="on"] .sl-fx-glitch.is-glitching::before {
+  animation: slfx-glitch-a var(--slfx-gda, 0.16s) steps(2) infinite;
+  animation-delay: var(--slfx-gpha, 0s);
+}
+[data-sl-fx="on"] .sl-fx-glitch.is-glitching::after {
+  animation: slfx-glitch-b var(--slfx-gdb, 0.16s) steps(2) infinite;
+  animation-delay: var(--slfx-gphb, 0s);
+}
+[data-sl-fx="on"] .sl-fx-glitch--shatter.is-glitching .sl-fx-glitch__shard {
+  animation: slfx-shatter var(--slfx-gda, 0.16s) steps(2) infinite;
+  animation-delay: calc(var(--slfx-i) * -0.028s);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-sl-fx-motion="always"]) :is(
+    .sl-fx-glitch.is-glitching,
+    .sl-fx-glitch.is-glitching::before,
+    .sl-fx-glitch.is-glitching::after,
+    .sl-fx-glitch--shatter.is-glitching .sl-fx-glitch__shard) {
+    animation: none !important;
+  }
+  /* And the shatter gives the label back: its bands are the animation, so a
+     static shard stack over a hidden label is not a quieter glitch, it is a
+     missing word. */
+  :root:not([data-sl-fx-motion="always"]) .sl-fx-glitch--shatter.is-glitching .sl-fx-glitch__text { opacity: 1 !important; }
+  :root:not([data-sl-fx-motion="always"]) .sl-fx-glitch--shatter.is-glitching .sl-fx-glitch__shard { opacity: 0 !important; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sl-fx-aurora:is([data-sl-fx-live="busy"], [data-sl-fx-live="run"]):not(.sl-fx-aurora--linear):not([style*="--slfx-progress"]) { --slfx-arc: 360deg; }
+  .sl-fx-aurora:is([data-sl-fx-live="busy"], [data-sl-fx-live="run"]):not(.sl-fx-aurora--linear):not([style*="--slfx-progress"])::after { opacity: 0.55; }
+}
+
+/* A halftone canvas with no CSS width would take its own pixel width as its
+   layout width and grow with every redraw at a device pixel ratio above 1; it
+   takes its container's width, square. Zero specificity: any author width wins. */
+:where([data-sl-halftone]) { display: block; width: 100%; aspect-ratio: 1; }
+
+/* ══ INK — light pools under the pointer ════════════════════════════════════
+   Owner, 2026-10-13: the ink of 0.26–0.36.5 (a bright ring with an iridescent
+   band, sweeping in on enter and back out on leave) read as flashy, worst
+   along a toolbar, where every crossing fired a sweep out of one control and
+   into the next. Chosen from a lab of six (option E, "viscous light"): a pool
+   of light sits under the pointer and trails it with a lag, like a viscous
+   liquid; its rim wobbles on a slowly moving noise; it fills on enter and
+   drains where the pointer left. Not a family with a meaning of its own (L6):
+   it is how the kit's buttons answer the pointer, like the gummy press is how
+   presses move (L4).
+
+   INK OWNS NO COLOUR (owner, 2026-10-01, after 0.26.0 painted its own accent
+   tint over spexr's red danger hover). The control's own hover colour applies
+   exactly as declared; the pool is light over it, in the control's own hue,
+   and never sets the host's paint. Once the pointer has left and the pool has
+   drained, nothing of ink is left on screen.
+
+   Two readings, picked by effects.js from what the pool lies on, never by
+   theme: on a fill or a dark ground, a lighter pool of the same hue, screened
+   (a pool in the fill's own colour vanished on the light theme's primary); on
+   a light neutral ground (data-sl-ink-ground="light"), the hue itself with
+   more chroma, painted -- light on light takes its contrast from saturation.
+
+   Tier 1 only. mount() injects one <span class="sl-fx-ink"> into each button
+   and icon button; ::before is the pool. effects.js writes --slfx-ink-x/-y
+   (the trailing pointer, in px), --slfx-ink-size (the pool's radius),
+   --slfx-ink-tint (the control's colour, when it has a hue) and
+   --slfx-ink-noise (one of four noise fields, so neighbours wobble apart), and
+   sets data-sl-ink-live while a pool is up: the noise moves, so its filter is
+   applied only then. */
+@property --slfx-ink-r { syntax: "<length>"; inherits: false; initial-value: 0px; }
+
+:is(.sl-btn, .sl-icon-btn):has(> .sl-fx-ink) {
+  position: relative;
+  isolation: isolate;
+}
+
+.sl-fx-ink {
+  position: absolute;
+  inset: 0;
+  /* Above the glass tint (-2), below its shine and specular (-1, later in DOM
+     order) and below the label, which is inline content. */
+  z-index: -1;
+  overflow: hidden;
+  border-radius: inherit;
+  pointer-events: none;
+  /* The control's own colour, as effects.js read it at the crossing. A neutral
+     control (grey fill, ink text) has no hue to give, and its pool came out
+     grey (owner, 2026-10-01: "it should be vibrant"): effects.js passes only a
+     chromatic colour; with none, the pool is the accent's. */
+  --slfx-ink-c: var(--slfx-ink-tint, var(--slc-accent));
+}
+/* The pool: full at the centre, thinner through the body, a brighter rim just
+   inside its edge -- a drop of light rather than a glow. At rest its radius is
+   0 and it paints nothing. */
+.sl-fx-ink::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(circle max(var(--slfx-ink-r), 1px) at var(--slfx-ink-x, 50%) var(--slfx-ink-y, 50%),
+    oklch(from var(--slfx-ink-c) min(calc(l + .22), .9) max(c, .1) h / .6) 0,
+    oklch(from var(--slfx-ink-c) min(calc(l + .16), .86) max(c, .1) h / .36) 55%,
+    oklch(from var(--slfx-ink-c) min(calc(l + .26), .94) max(c, .12) h / .7) 86%,
+    transparent 100%);
+  opacity: 0;
+  mix-blend-mode: screen;
+}
+.sl-fx-ink[data-sl-ink-ground="light"]::before {
+  background: radial-gradient(circle max(var(--slfx-ink-r), 1px) at var(--slfx-ink-x, 50%) var(--slfx-ink-y, 50%),
+    oklch(from var(--slfx-ink-c) min(l, .7) calc(c * 1.25 + .04) h / .28) 0,
+    oklch(from var(--slfx-ink-c) min(l, .7) calc(c * 1.25 + .04) h / .17) 55%,
+    oklch(from var(--slfx-ink-c) min(l, .66) calc(c * 1.4 + .06) h / .45) 86%,
+    transparent 100%);
+  mix-blend-mode: normal;
+}
+/* Live: painted, and torn by its noise field. */
+.sl-fx-ink[data-sl-ink-live]::before {
+  opacity: 1;
+  filter: var(--slfx-ink-noise, url(#sl-fx-ink-noise-0)) blur(1.5px);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .sl-fx-ink::before {
+    transition: --slfx-ink-r var(--sl-motion-ink-out, 520ms) cubic-bezier(.4, 0, .6, 1);
+  }
+  :is(.sl-btn, .sl-icon-btn):hover:not(:disabled, [aria-disabled="true"]) > .sl-fx-ink::before {
+    --slfx-ink-r: var(--slfx-ink-size, 60px);
+    transition: --slfx-ink-r var(--sl-motion-ink-in, 480ms) cubic-bezier(.25, .8, .3, 1);
+  }
+}
+
+/* Never where the effects layer is refused. */
+:root[data-sl-theme="high-contrast"] .sl-fx-ink,
+:is([data-sl-fx="off"], [data-sl-fx="off"] *) > .sl-fx-ink { display: none; }
