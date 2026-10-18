@@ -57,6 +57,7 @@ class _Job:
     delivery: Delivery
     epoch: int
     said_at: float
+    minor: bool = False  # a minor was present when the sentence was written (SPEC 12)
 
 
 class SpeechOutput:
@@ -95,6 +96,7 @@ class SpeechOutput:
         self._last_utterance = 0
         self._last_rate_hz = 0
         self._latencies: collections.deque[float] = collections.deque(maxlen=LATENCY_WINDOW)
+        self._first_audio: collections.OrderedDict[int, float] = collections.OrderedDict()
         self.sentences_spoken = 0
         self.sentences_dropped = 0
         self.failures = 0
@@ -168,10 +170,14 @@ class SpeechOutput:
         mood: str | None,
         intensity: float,
         utterance: int | None = None,
+        minor: bool = False,
     ) -> int | None:
         """Queue one sentence; returns its id, or ``None`` when it was dropped (queue full or
         closed). Safe from any thread. The caller resolves ``mood`` (affect label, or the LLM's
-        tag through ``resolve_tag``) and passes the register and circadian state of this moment."""
+        tag through ``resolve_tag``) and passes the register and circadian state of this moment.
+        ``minor`` says a minor was present when the sentence was written: a sentence written
+        without minor rules is dropped, and the speech stopped, if one is present by the time
+        it would play (SPEC 12)."""
         cfg = self.config
         delivery = compose_delivery(
             cfg.voice,
@@ -193,6 +199,7 @@ class SpeechOutput:
                 delivery,
                 self._epoch,
                 self.clock(),
+                minor,
             )
             self._jobs.append(job)
         if self.bus is not None:
@@ -227,6 +234,12 @@ class SpeechOutput:
         if loop is not None:
             with contextlib.suppress(RuntimeError):
                 loop.call_soon_threadsafe(self._cancel_before, epoch)
+
+    def first_audio_at(self, utterance: int) -> float | None:
+        """Clock stamp when the first audio of answer ``utterance`` was pushed, None until then
+        (or after the last ``LATENCY_WINDOW`` answers): end-to-end latency counts from it."""
+        with self._lock:
+            return self._first_audio.get(utterance)
 
     def snapshot(self) -> dict[str, Any]:
         """Counts and timings for the debug report; never text."""
@@ -266,6 +279,14 @@ class SpeechOutput:
             log.warning("speech: minor signal failed, assuming a minor: %s", type(exc).__name__)
             return True
 
+    def _stale(self, job: _Job) -> bool:
+        """Whether ``job`` was written for adults and a minor is present now. The speech is
+        stopped (queue dropped, audio cut) and the caller abandons the sentence."""
+        if job.minor or not self._minor():
+            return False
+        self.stop()
+        return True
+
     def _push(self, job: _Job, samples: np.ndarray, rate_hz: int) -> bool:
         """Push unless a stop happened since ``job`` was queued. The check and the push are one
         step under the lock ``stop`` takes to move the epoch."""
@@ -278,6 +299,8 @@ class SpeechOutput:
     async def _speak(self, job: _Job) -> None:
         cfg, first = self.config, True
         try:
+            if self._stale(job):
+                return
             async for chunk in self.backend.synthesize(
                 job.text,
                 job.delivery,
@@ -285,12 +308,19 @@ class SpeechOutput:
                 voice=cfg.voice,
                 minor_present=self._minor(),
             ):
+                if self._stale(job):
+                    return
                 if first:
                     first = False
                     if not self._pad(job, chunk.rate_hz):
                         return
                     with self._lock:
-                        self._latencies.append((self.clock() - job.said_at) * MS_PER_S)
+                        now = self.clock()
+                        self._latencies.append((now - job.said_at) * MS_PER_S)
+                        if job.utterance not in self._first_audio:
+                            self._first_audio[job.utterance] = now
+                            while len(self._first_audio) > LATENCY_WINDOW:
+                                self._first_audio.popitem(last=False)
                     log.debug("speech %d: first audio after %.0f ms", job.id, self._latencies[-1])
                 self._last_rate_hz = chunk.rate_hz
                 if not self._push(job, chunk.samples, chunk.rate_hz):

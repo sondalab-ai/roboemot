@@ -25,6 +25,7 @@ from pydantic import ValidationError
 from .. import paths
 from ..config.schema import TRAITS, PersonaConfig, PersonaTraits, RoboEmotConfig
 from ..config.stack import ConfigChange, ConfigStack
+from ..llm.hub import RouterHub
 from ..llm.router import Done, NoRouteAvailable, Router, TextDelta
 
 log = logging.getLogger(__name__)
@@ -172,12 +173,14 @@ class TraitsWorker:
     def __init__(
         self,
         stack: ConfigStack,
-        router: Router,
+        router: Router | None,
         cache: TraitCache,
-        make_router: Callable[[RoboEmotConfig], Router],
+        make_router: Callable[[RoboEmotConfig], Router] | None,
         clock: Callable[[], float] = time.monotonic,
+        hub: RouterHub | None = None,
     ) -> None:
-        self.stack, self.router, self.cache, self.make_router = stack, router, cache, make_router
+        self.stack, self.cache = stack, cache
+        self.hub = hub if hub is not None else RouterHub(router, make_router)  # type: ignore[arg-type]
         self.clock = clock
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -186,6 +189,19 @@ class TraitsWorker:
         self._ready = threading.Event()
         self._closed = False
         self._failed: tuple[Any, float] | None = None  # (prompt and routes, when it failed)
+
+    @property
+    def router(self) -> Router:
+        """The current router: the hub's, shared with the other consumers (SPEC 8)."""
+        return self.hub.router
+
+    @property
+    def make_router(self) -> Callable[[RoboEmotConfig], Router]:
+        return self.hub.make_router
+
+    @make_router.setter
+    def make_router(self, value: Callable[[RoboEmotConfig], Router]) -> None:
+        self.hub.make_router = value
 
     def start(self) -> None:
         """Start the worker thread and request the first run (the startup rating)."""
@@ -255,13 +271,6 @@ class TraitsWorker:
         self._failed = (key, self.clock()) if persona.traits_source == "llm" and not rated else None
 
     def _sync_router(self, cfg: RoboEmotConfig) -> None:
-        """Rebuild the router when routes or safety changed; keep the old one if that fails."""
-        if self.router.routes == cfg.llm_routes and self.router.safety == cfg.safety:
-            return
-        try:
-            fresh = self.make_router(cfg)
-        except Exception as exc:
-            log.warning("persona traits: router not rebuilt (%s)", type(exc).__name__)
-            return
-        fresh.adopt_budgets(self.router)
-        self.router = fresh
+        """Rebuild the shared router when routes or safety changed (the hub keeps the old one if
+        that fails)."""
+        self.hub.sync(cfg)

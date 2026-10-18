@@ -311,6 +311,14 @@ class RegisterParams(Strict):
     )
     reaction_intensity: Literal["low", "medium", "high"] = param("medium", "Reaction intensity")
     minor_content_policy: bool = param(False, "Apply the minor content policy", conservative="true")
+    max_reply_sentences: int | None = param(
+        None,
+        "Reply length cap in sentences for this register; unset uses "
+        "conversation.max_reply_sentences",
+        ge=1,
+        le=20,
+        conservative="lower",
+    )
 
 
 class RegisterConfig(Strict):
@@ -324,6 +332,7 @@ class RegisterConfig(Strict):
             "approach_allowed": False,
             "reaction_intensity": "high",
             "minor_content_policy": True,
+            "max_reply_sentences": 2,
         },
         "Register for children",
     )
@@ -946,6 +955,24 @@ class ReflexConfig(Strict):
 # --------------------------------------------------------------------------- safety (SPEC 12)
 
 
+class MinorLines(Strict):
+    greeting: str = param("", "Said when the person greeted the robot")
+    robot_name: str = param("", "Said when the robot's name was called")
+    ask_grown_up: str = param("", "Said for anything else")
+    filtered: str = param("", "Said in place of a sentence the output filter removed")
+
+    @model_validator(mode="after")
+    def _spoken(self) -> MinorLines:
+        empty = [
+            n
+            for n in ("greeting", "robot_name", "ask_grown_up", "filtered")
+            if not getattr(self, n).strip()
+        ]
+        if empty:
+            raise ValueError(f"minor_lines: {', '.join(empty)} must not be empty (never silence)")
+        return self
+
+
 class SafetyConfig(Strict):
     extra_prompt_rules: list[str] = param(
         [],
@@ -1039,15 +1066,64 @@ class SafetyConfig(Strict):
         "Allow conversation while a minor is present on routes cleared for minors",
         conservative="false",
     )
+    minor_output_blocklist: dict[str, list[str]] = param(
+        {
+            "it": [
+                "cazz*", "merd*", "puttan*", "troia*", "stronz*", "vaffanculo*", "scopare*",
+                "porn*", "uccid*", "uccis*", "ammazz*", "suicid*", "cocain*", "eroin*", "drog*",
+                "pistol*", "fucil*", "sesso*",
+            ],
+            "en": [
+                "fuck*", "shit*", "bitch*", "asshole*", "cunt*", "porn*", "sex*", "kill*",
+                "murder*", "suicid*", "cocaine*", "heroin*", "drug*", "gun*", "rifle*",
+            ],
+        },
+        "Words (whole words, accents and case ignored; a trailing * makes an entry a prefix, so "
+        "kill* also blocks killing) that never reach the speaker while a "
+        "minor is present, per language; a sentence containing one is replaced by "
+        "minor_lines.filtered and the rest of the answer is dropped (SPEC 12). Starting values "
+        "to review with the deployment, not a validated list",
+        admin_only=True,
+    )  # fmt: skip
+    minor_lines: dict[str, MinorLines] = param(
+        {
+            "it": {
+                "greeting": "Ciao! Che bello vederti.",
+                "robot_name": "Mi chiamo Reachy.",
+                "ask_grown_up": "Questa domanda falla a un grande, che ti sa rispondere meglio.",
+                "filtered": "Preferisco parlare d'altro. Chiedi a un grande.",
+            },
+            "en": {
+                "greeting": "Hello! Nice to see you.",
+                "robot_name": "My name is Reachy.",
+                "ask_grown_up": "Please ask a grown-up about that, they will know better.",
+                "filtered": "I would rather talk about something else. Ask a grown-up.",
+            },
+        },
+        "Short child-safe lines per language, spoken when no route cleared for minors can answer "
+        "and when the output filter replaces a sentence (SPEC 8, 12)",
+        admin_only=True,
+    )  # fmt: skip
 
 
 class PrivacyConfig(Strict):
     multimodal_frames: bool = param(
         False, "Allow single-frame image questions to LLM routes", opt_in=True
     )
-    pseudonyms_to_cloud: bool = param(False, "Send pseudonyms instead of names to cloud routes")
+    pseudonyms_to_cloud: bool = param(
+        False, "Send pseudonyms instead of names to cloud routes (not implemented yet)"
+    )
     keep_enrollment_images: bool = param(False, "Keep enrollment face crops", opt_in=True)
     debug_recording: bool = param(False, "Allow time-limited debug recording", opt_in=True)
+
+    @model_validator(mode="after")
+    def _pseudonyms(self) -> PrivacyConfig:
+        if self.pseudonyms_to_cloud:
+            raise ValueError(
+                "privacy.pseudonyms_to_cloud is not implemented in v1 M3: requests would still "
+                "carry real names, so the option is refused rather than silently ignored"
+            )
+        return self
 
 
 # --------------------------------------------------------------------------- identity (SPEC 5, 6)
@@ -2068,6 +2144,26 @@ class ConversationConfig(Strict):
         unit="tokens",
         ge=16,
         le=8192,
+    )
+    summary_value_max_chars: int = param(
+        60,
+        "Longest single name, preference or category in the speaker and scene summaries",
+        ge=8,
+        le=400,
+    )
+    pending_utterances: int = param(
+        1,
+        "Addressed utterances that wait while an answer is being prepared; a newer one replaces "
+        "the oldest waiting",
+        ge=1,
+        le=10,
+    )
+    fallback_lines: dict[str, str] = param(
+        {
+            "it": "Scusa, adesso non riesco a pensare.",
+            "en": "Sorry, I can't think right now.",
+        },
+        "Spoken per language when no route answers or the stream fails before any sentence",
     )
 
 

@@ -165,8 +165,13 @@ def flatten(tree: Any, prefix: str = "") -> dict[str, Any]:
     return {prefix: tree}
 
 
+INHERITED_META = ("admin_only", "opt_in")  # a guard on a container covers everything inside it
+
+
 def field_meta(dotted: str) -> dict[str, Any]:
     """Metadata (unit, restart, conservative, opt_in, admin_only) of a path, {} if unknown.
+    ``admin_only`` and ``opt_in`` set on a container (a dict or model field) apply to every
+    leaf inside it.
 
     Dict-valued fields (``voice.moods``) and list fields (``llm_routes``) consume one extra
     path element (the key or the index).
@@ -174,6 +179,7 @@ def field_meta(dotted: str) -> dict[str, Any]:
     parts = dotted.split(".")
     model: Any = RoboEmotConfig
     meta: dict[str, Any] = {}
+    inherited: dict[str, Any] = {}
     i = 0
     while i < len(parts):
         fields = getattr(model, "model_fields", None)
@@ -181,7 +187,8 @@ def field_meta(dotted: str) -> dict[str, Any]:
             return {}
         info = fields[parts[i]]
         extra = info.json_schema_extra
-        meta = dict(extra) if isinstance(extra, dict) else {}
+        meta = {**inherited, **(extra if isinstance(extra, dict) else {})}
+        inherited = {k: v for k, v in meta.items() if k in INHERITED_META and v}
         annotation = _strip_optional(info.annotation)
         i += 1
         if get_origin(annotation) in (dict, list):
@@ -269,6 +276,8 @@ def guarded_leaves(cfg: RoboEmotConfig) -> dict[str, tuple[Any, dict[str, Any]]]
     out = {}
     for path, value in flatten(tree).items():
         meta = field_meta(path)
+        if path.endswith(".max_reply_sentences") and path.startswith("register.") and value is None:
+            value = cfg.conversation.max_reply_sentences  # unset means the conversation default
         if _guarded(meta):
             out[path] = (value, meta)
     return out
@@ -307,6 +316,10 @@ def violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Viol
             found.append(Violation("privacy", path, ref, value))
         elif not ok:
             found.append(Violation("safety", path, ref, value))
+    cand = guarded_leaves(candidate)
+    for path, (ref, meta) in base.items():  # an admin-only entry (a language's list) removed
+        if meta.get("admin_only") and path not in cand and not path.startswith(NEW_RULE_REFUSED):
+            found.append(Violation("admin", path, ref, None))
     return found + reflex_violations(approved, candidate)
 
 

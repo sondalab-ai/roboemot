@@ -208,11 +208,11 @@ def test_the_data_folder_is_private_when_the_app_creates_it(data):  # noqa: F811
     assert not errors
 
 
-def test_route_check_router_is_the_traits_workers_or_none():
+def test_route_check_router_is_the_shared_hubs_or_none():
     app = app_with(FakeRoute())
     assert app.route_check_router() is None
     router = Router([], SafetyConfig())
-    app.traits_worker = SimpleNamespace(router=router)
+    app.router_hub = SimpleNamespace(router=router)
     assert app.route_check_router() is router
 
 
