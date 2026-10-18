@@ -46,12 +46,12 @@ from roboemot.health.network import NetworkMonitor
 from roboemot.health.responder import OfflineResponder
 from roboemot.llm import Router
 from roboemot.llm.hub import RouterHub
-from roboemot.llm.router import SECRET
 from roboemot.manifest import load_manifest
 from roboemot.motion import Command, MotionLoop, Priority
 from roboemot.persona import effects as persona_effects
 from roboemot.persona.llm_traits import TraitCache, TraitsWorker
 from roboemot.reflex import ReflexEngine
+from roboemot.secret_store import SecretStore
 from roboemot.skills.defaults import default_skills
 from roboemot.vision import CIRCADIAN, FrameSource, LockedSource
 from roboemot.vision.minor import MinorPresence
@@ -298,7 +298,12 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
 
     def make_router(self, cfg: Any, monitor: NetworkMonitor) -> Router:
         """The app's LLM router over the configured routes (overridable: tests inject fakes)."""
-        return Router(cfg.llm_routes, cfg.safety, monitor=monitor)
+        return Router(
+            cfg.llm_routes,
+            cfg.safety,
+            secrets=SecretStore.for_data_dir(cfg.data_dir).get,
+            monitor=monitor,
+        )
 
     def on_utterance(self, utterance: Utterance) -> None:
         """Where finished utterances go (SPEC 8): the conversation worker, which answers the
@@ -562,13 +567,6 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         )
 
         # Trait rating (SPEC 11A, Persona) runs on its own thread; its cache is in the data folder.
-        for route in cfg.llm_routes:  # the app has no secret store yet (TODO.md)
-            if SECRET.match(route.api_key):
-                log.warning(
-                    "llm route %s: api_key is a secret reference and no secret store is wired: "
-                    "requests go out with an empty key",
-                    route.name,
-                )
         try:
             paths.data_dir(cfg.data_dir)  # created private (0700) when missing, SPEC 12
         except OSError as exc:  # the cache then fails to write and the rating is just not kept

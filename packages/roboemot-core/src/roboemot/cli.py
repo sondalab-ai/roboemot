@@ -1,11 +1,12 @@
 """Command line: ``roboemot config {validate,schema,dump}``, ``roboemot manifest check``,
 ``roboemot discover``, ``roboemot debug``, ``roboemot models {list,fetch}`` and
-``roboemot llm check``."""
+``roboemot llm check`` and ``roboemot secrets {set,remove,list}``."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import getpass
 import json
 import sys
 from collections.abc import Callable
@@ -155,7 +156,7 @@ def _models(args: argparse.Namespace) -> int:
 def _llm(args: argparse.Namespace) -> int:
     """Run the conformance test (SPEC 8) against one configured route; exit 1 on any failure."""
     from .llm.conformance import check_route
-    from .llm.router import SECRET
+    from .secret_store import SecretStore
 
     cfg = _stack(args).effective()
     route = next((r for r in cfg.llm_routes if r.name == args.route), None)
@@ -163,19 +164,13 @@ def _llm(args: argparse.Namespace) -> int:
         known = ", ".join(r.name for r in cfg.llm_routes) or "none configured"
         raise ValueError(f"no route named {args.route!r} (llm_routes: {known})")
 
-    if SECRET.match(route.api_key):
-        print(
-            f"warning: route {route.name}: api_key is a secret reference and no secret store is "
-            "wired: the request goes out with an empty key",
-            file=sys.stderr,
-        )
-
     async def run():
         return await asyncio.wait_for(
             check_route(
                 route,
                 cfg.safety,
                 settings=cfg.llm_check,
+                secrets=SecretStore.for_data_dir(cfg.data_dir).get,
                 http_client_factory=HTTP_CLIENT_FACTORY,
             ),
             cfg.llm_check.deadline_s,
@@ -192,6 +187,45 @@ def _llm(args: argparse.Namespace) -> int:
             print(f"{c.status:5} {c.name:20} {c.reason}")
         print(f"route {report.route} ({report.model}): {'ok' if report.ok else 'FAILED'}")
     return 0 if report.ok else 1
+
+
+def read_secret_value(stdin=None) -> str | None:
+    """The value to store: asked twice without echo on a terminal, else the first line of stdin
+    (the installer pipes it over SSH). Never an argument. None when the two entries differ."""
+    stdin = stdin or sys.stdin
+    if stdin.isatty():
+        value = getpass.getpass("Secret value: ")
+        return value if value == getpass.getpass("Repeat: ") else None
+    return stdin.readline().rstrip("\r\n")
+
+
+def _secrets(args: argparse.Namespace, stdin=None) -> int:
+    """Set, remove or list (names only) the secrets of the store (SPEC 8, 12 Data)."""
+    from .secret_store import SecretStore, SecretUnavailable
+
+    configured = args.data_dir or _stack(args).effective().data_dir
+    store = SecretStore.for_data_dir(configured)
+    try:
+        if args.action == "list":
+            for name in store.names():
+                print(name)
+            return 0
+        if not args.names:
+            raise ValueError(f"secrets {args.action} needs a name")
+        if args.action == "remove":
+            for name in args.names:
+                print(f"{'removed' if store.remove(name) else 'not set'}: {name}")
+            return 0
+        if len(args.names) != 1:
+            raise ValueError("secrets set takes exactly one name")
+        value = read_secret_value(stdin)
+        if value is None:
+            raise ValueError("the two entries differ")
+        store.set(args.names[0], value)
+        print(f"secret {args.names[0]} set")
+        return 0
+    except SecretUnavailable as exc:
+        raise RuntimeError(str(exc)) from exc
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -267,8 +301,23 @@ def main(argv: list[str] | None = None) -> int:
     llm.add_argument("--preset")
     llm.add_argument("--preset-dir", action="append", default=["configs/presets"])
 
+    sec = sub.add_parser(
+        "secrets",
+        help="API keys for ${secret:name} routes: set (value read from the terminal or stdin, "
+        "never an argument), remove, list names (SPEC 8, 12)",
+    )
+    sec.add_argument("action", choices=["set", "remove", "list"])
+    sec.add_argument("names", nargs="*", help="secret name (A-Z a-z 0-9 _ . -)")
+    sec.add_argument("--data-dir", help="app data folder (default: data_dir config, env, default)")
+    sec.add_argument("--app")
+    sec.add_argument("--defaults")
+    sec.add_argument("--preset")
+    sec.add_argument("--preset-dir", action="append", default=["configs/presets"])
+
     args = parser.parse_args(argv)
     try:
+        if args.cmd == "secrets":
+            return _secrets(args)
         if args.cmd == "config":
             if args.action == "schema":
                 print(json.dumps(RoboEmotConfig.model_json_schema(), indent=2))

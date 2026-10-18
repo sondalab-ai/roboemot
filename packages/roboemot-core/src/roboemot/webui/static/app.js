@@ -409,6 +409,7 @@ async function routesView() {
     return el("section", {},
       el("h3", {}, r.name),
       el("p", { class: "muted" }, r.model + " @ " + r.endpoint + (r.allowed_for_minors ? ", " + t("route_minors") : "")),
+      r.secret ? el("p", { class: "muted" }, t(r.secret.set ? "route_secret_set" : "route_secret_missing", { name: r.secret.name })) : [],
       button, box);
   });
   view.append(el("section", {}, el("h2", {}, t("tab_routes")), el("p", { class: "muted" }, t("routes_intro"))),

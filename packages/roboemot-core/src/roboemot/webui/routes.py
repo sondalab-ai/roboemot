@@ -25,8 +25,15 @@ import httpx
 
 from .. import paths
 from ..config.schema import LLMRoute, RoboEmotConfig
-from ..llm.conformance import RouteBudgetExhausted, RouteReport, check_route, route_endpoint
-from ..llm.router import Router
+from ..llm.conformance import (
+    RouteBudgetExhausted,
+    RouteKeyUnavailable,
+    RouteReport,
+    check_route,
+    route_endpoint,
+)
+from ..llm.router import SECRET, Router
+from ..secret_store import SecretStore
 
 log = logging.getLogger(__name__)
 FILE_MODE = 0o600
@@ -63,10 +70,13 @@ class RouteChecker:
 
     def list_routes(self) -> list[dict[str, Any]]:
         """Routes with their running flag and last report; a report made for another model or
-        endpoint than the route has now is not shown. ``api_key``, credentials, path and query
-        of the URL are never included."""
+        endpoint than the route has now is not shown. A route whose key is a ``${secret:name}``
+        reference shows ``secret`` (the name and whether it is set), never the value. ``api_key``,
+        credentials, path and query of the URL are never included."""
         with self._lock:
             running = self._running
+            cfg = self.cfg()
+            store = SecretStore.for_data_dir(cfg.data_dir)
             return [
                 {
                     "name": r.name,
@@ -74,16 +84,18 @@ class RouteChecker:
                     "endpoint": route_endpoint(r),
                     "allowed_for_minors": r.allowed_for_minors,
                     "running": r.name == running,
+                    "secret": _secret_state(r, store),
                     "last_check": self._current_report(r),
                 }
-                for r in self.cfg().llm_routes
+                for r in cfg.llm_routes
             ]
 
     def start(self, name: str) -> None:
         """Start the test of route ``name`` on a thread and return at once.
 
-        Raises ``KeyError`` (unknown route), ``RouteBudgetExhausted`` (nothing is sent) and
-        ``RouteBusy`` (a check is running).
+        Raises ``KeyError`` (unknown route), ``RouteKeyUnavailable`` (its secret cannot be read)
+        and ``RouteBudgetExhausted`` (nothing is sent in either case) and ``RouteBusy`` (a check
+        is running).
         """
         cfg = self.cfg()
         route = next((r for r in cfg.llm_routes if r.name == name), None)
@@ -93,6 +105,9 @@ class RouteChecker:
             if self._running is not None:
                 raise RouteBusy(name)
             router = self._router() or self._private_router(cfg)
+            problem = router.key_problem(route)
+            if problem is not None:
+                raise RouteKeyUnavailable(f"route {name}: {problem}")
             if router.used(name) >= route.daily_token_budget:
                 raise RouteBudgetExhausted(f"route {name}: daily token budget is spent")
             self._running = name
@@ -103,7 +118,12 @@ class RouteChecker:
 
     def _private_router(self, cfg: RoboEmotConfig) -> Router:
         if self._private is None:
-            self._private = Router(cfg.llm_routes, cfg.safety, http_client_factory=self._factory)
+            self._private = Router(
+                cfg.llm_routes,
+                cfg.safety,
+                secrets=SecretStore.for_data_dir(cfg.data_dir).get,
+                http_client_factory=self._factory,
+            )
         return self._private
 
     def _run(self, route: LLMRoute, cfg: RoboEmotConfig, router: Router) -> None:
@@ -126,6 +146,8 @@ class RouteChecker:
             error = "timeout"
         except RouteBudgetExhausted:
             error = "budget"
+        except RouteKeyUnavailable:
+            error = "secret"
         except Exception as exc:
             log.error("route check %s failed: %s", route.name, type(exc).__name__)
             error = "failed"
@@ -179,6 +201,12 @@ class RouteChecker:
             log.warning("route checks: not written (%s)", type(exc).__name__)
             with contextlib.suppress(OSError):
                 tmp.unlink()
+
+
+def _secret_state(route: LLMRoute, store: SecretStore) -> dict[str, Any] | None:
+    """``{"name", "set"}`` for a ``${secret:name}`` key, else None. The value is never read out."""
+    ref = SECRET.match(route.api_key)
+    return {"name": ref.group(1), "set": store.has(ref.group(1))} if ref else None
 
 
 def _now_iso() -> str:
