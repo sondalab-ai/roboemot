@@ -381,7 +381,7 @@ def test_clear_subtree_rolls_back_when_the_result_is_invalid():
 
     def flaky(person=None):
         calls["n"] += 1
-        if calls["n"] == 2:  # the first call is the validity probe
+        if calls["n"] == 1:  # the commit's validation
             raise ConfigError("boom")
         return real(person)
 
@@ -430,3 +430,24 @@ def test_reset_with_a_stale_file_key_cleans_the_file(tmp_path):
     stack.clear("affect.update_hz")  # the live value goes, the file key is stale
     assert editor.reset("affect.update_hz")["changed"] is False
     assert json.loads(store.read_text())["overrides"] == {}
+
+
+def test_clear_and_set_validate_the_configuration_no_more_than_before(monkeypatch):
+    """Barge-in latency: the persona traits worker clears and sets a derived value on every run
+    and holds the GIL meanwhile. The old clear validated twice (check and notify), the old set
+    three times; guarded commits must not add validations."""
+    stack = ConfigStack()
+    traits = stack.effective().persona.traits.model_dump()
+    stack.set("persona.traits", traits, source="t", layer="derived")
+    real, calls = RoboEmotConfig.model_validate.__func__, {"n": 0}
+
+    def counting(cls, *args, **kwargs):
+        calls["n"] += 1
+        return real(cls, *args, **kwargs)
+
+    monkeypatch.setattr(RoboEmotConfig, "model_validate", classmethod(counting))
+    assert stack.clear("persona.traits", source="t", layer="derived")
+    assert calls["n"] <= 2
+    calls["n"] = 0
+    stack.set("persona.traits", traits, source="t", layer="derived")
+    assert calls["n"] <= 3

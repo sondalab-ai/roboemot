@@ -519,7 +519,7 @@ def test_clear_that_would_invalidate_the_config_is_rolled_back(tmp_path):
 
     def flaky(person=None):
         calls["n"] += 1
-        if calls["n"] == 2:  # the first call is the validity probe
+        if calls["n"] == 1:  # the commit's validation
             raise ConfigError("boom")
         return real(person)
 

@@ -927,7 +927,7 @@ class ConfigStack:
                 raise ConfigError(f"layer {layer!r} is not writable")
             cfg = self._commit(undo, allow, source, runtime_keys, refuse, persist)
             self._record(source, key, old, value)
-            self._notify()
+            self._notify(cfg)
             return cfg
 
     def set_many(
@@ -965,7 +965,7 @@ class ConfigStack:
             cfg = self._commit(undo_all, allow, source, slots, refuse)
             for key, value in changes.items():
                 self._record(source, key, before[key], value)
-            self._notify()
+            self._notify(cfg)
             return cfg
 
     def preview(self, changes: dict[str, Any]) -> RoboEmotConfig:
@@ -997,36 +997,53 @@ class ConfigStack:
         through the same guardrails as ``set`` (``admin``, ``refuse``) and must validate, else
         nothing is removed. A state that was already invalid may be cleared."""
         with self._lock:
-            valid = self._valid()
-            if layer == "runtime":
-                saved = copy.deepcopy(self._runtime)
-                found, old = self._take_runtime(key, subtree)
-                if not found:
-                    return False
-
-                def undo() -> None:
-                    self._runtime = saved
-
-            elif layer == "derived":
-                try:
-                    old = get_path(self.derived, key)
-                except (KeyError, AttributeError, IndexError):
-                    return False
-                parent, _, leaf = key.rpartition(".")
-                saved_derived = copy.deepcopy(self.derived)
-                (get_path(self.derived, parent) if parent else self.derived).pop(leaf)
-
-                def undo() -> None:
-                    self.derived = saved_derived
-
-            else:
+            removal = self._removal(key, layer, subtree)
+            if removal is None:
                 return False
+            old, undo = removal
             allow = {"privacy", "admin"} if admin else set()
-            self._commit(undo, allow, source, (), refuse, lenient=not valid)
+            try:
+                cfg = self._commit(undo, allow, source, (), refuse)
+            except ConfigError:
+                if self._valid():  # the clear itself broke a valid state: refused, undone
+                    raise
+                removal = self._removal(key, layer, subtree)  # it was invalid already
+                assert removal is not None
+                cfg = self._commit(removal[1], allow, source, (), refuse, lenient=True)
             self._record(source, key, old, None)
-            if self._valid():
-                self._notify()
+            if cfg is not None:
+                self._notify(cfg)
             return True
+
+    def _removal(
+        self, key: str, layer: str, subtree: bool
+    ) -> tuple[Any, Callable[[], None]] | None:
+        """Take ``key`` out of the runtime or derived layer: ``(old value, undo)``, or ``None``
+        when there was nothing to remove."""
+        if layer == "runtime":
+            saved = copy.deepcopy(self._runtime)
+            found, old = self._take_runtime(key, subtree)
+            if not found:
+                return None
+
+            def undo_runtime() -> None:
+                self._runtime = saved
+
+            return old, undo_runtime
+        if layer == "derived":
+            try:
+                old = get_path(self.derived, key)
+            except (KeyError, AttributeError, IndexError):
+                return None
+            parent, _, leaf = key.rpartition(".")
+            saved_derived = copy.deepcopy(self.derived)
+            (get_path(self.derived, parent) if parent else self.derived).pop(leaf)
+
+            def undo_derived() -> None:
+                self.derived = saved_derived
+
+            return old, undo_derived
+        return None
 
     def apply_preset(self, name: str, *, source: str = "api", admin: bool = False) -> None:
         """Switch personality. A preset that loosens safety or privacy needs ``admin=True``."""
@@ -1067,8 +1084,10 @@ class ConfigStack:
         keys = list(runtime_keys)
         try:
             cfg: RoboEmotConfig | None = self.effective()
-            base: RoboEmotConfig | None = RoboEmotConfig.model_validate(
-                self.merged_tree(include_runtime=False)
+            base: RoboEmotConfig | None = (
+                cfg  # no runtime override: both are the same configuration
+                if not self._runtime
+                else RoboEmotConfig.model_validate(self.merged_tree(include_runtime=False))
             )
             self._check_route_budgets(cfg)
         except (ConfigError, ValidationError) as exc:
@@ -1089,7 +1108,9 @@ class ConfigStack:
         base_paths = {v.path for v in base_found}
         rt_found = [
             v
-            for v in (violations(self._approved, cfg) if cfg is not None else [])
+            for v in (
+                violations(self._approved, cfg) if cfg is not None and cfg is not base else []
+            )
             if v.path not in base_paths and (v.path, v.candidate) not in live_approved
         ]
         blocked = [v for v in base_found + rt_found if v.kind not in allow or v.check in refuse]
@@ -1368,8 +1389,9 @@ class ConfigStack:
             with os.fdopen(fd, "a") as fh:
                 fh.write(json.dumps(entry.__dict__, default=str) + "\n")
 
-    def _notify(self) -> ConfigChange | None:
-        new = self.effective()
+    def _notify(self, new: RoboEmotConfig | None = None) -> ConfigChange | None:
+        """Tell the listeners what changed; ``new`` is the effective config if the caller has it."""
+        new = new if new is not None else self.effective()
         before, after = flatten(self._last.model_dump()), flatten(new.model_dump())
         keys = sorted(k for k in before.keys() | after.keys() if before.get(k) != after.get(k))
         self._last = new
