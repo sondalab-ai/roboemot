@@ -153,6 +153,33 @@ async def test_first_token_timeout_excludes_openai_lazy_imports(monkeypatch):
     assert isinstance(evs[-1], Done) and r.failures == []
 
 
+async def test_a_failing_client_setup_closes_the_client_and_falls_back(monkeypatch):
+    """The lazy ``client.chat`` access sits inside the stream's ``try``: when it raises, the
+    client is still closed and the router goes on to the next route."""
+    import openai
+
+    real = openai.AsyncOpenAI.chat
+    closed = []
+    real_close = openai.AsyncOpenAI.close
+
+    def chat(self):
+        if self.base_url.host == "broken.local":
+            raise RuntimeError("lazy import failed")
+        return real.__get__(self)
+
+    async def close(self):
+        closed.append(str(self.base_url.host))
+        await real_close(self)
+
+    monkeypatch.setattr(openai.AsyncOpenAI, "chat", property(chat))
+    monkeypatch.setattr(openai.AsyncOpenAI, "close", close)
+    srv = Server()
+    r = router(srv, [route("broken", "broken.local"), route("lan", "lan.local")])
+    evs = await collect(r)
+    assert evs[-1].route == "lan" and "broken.local" in closed
+    assert [h for h, _ in srv.requests] == ["lan.local"]
+
+
 async def test_fallback_on_timeout_and_error():
     srv = Server()
     r = router(

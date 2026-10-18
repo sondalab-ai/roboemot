@@ -245,9 +245,6 @@ class Router:
             )
         loop = asyncio.get_running_loop()
         client = self._client(route)
-        create = client.chat.completions.create  # untimed: the first access imports lazily
-        started = loop.time()
-        deadline = started + route.first_token_timeout_s
         kwargs: dict[str, Any] = {
             "model": route.model,
             "messages": messages,
@@ -261,6 +258,9 @@ class Router:
         out_chars, usage_tokens = 0, None
         prompt_chars = sum(len(str(m.get("content", ""))) for m in messages)
         try:
+            create = client.chat.completions.create  # untimed: the first access imports lazily
+            started = loop.time()
+            deadline = started + route.first_token_timeout_s
             stream = await asyncio.wait_for(create(**kwargs), max(0.0, deadline - loop.time()))
             it = stream.__aiter__()
             calls: dict[int, dict[str, Any]] = {}

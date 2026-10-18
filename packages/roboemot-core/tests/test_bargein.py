@@ -183,6 +183,13 @@ def test_a_quiet_user_below_the_threshold_does_not_cut_the_robot():
     assert w.stops == []
 
 
+def test_bound_reports_whether_the_actions_are_connected():
+    w = World()
+    assert w.bargein.bound and w.bargein.snapshot()["bound"] is True
+    w.bargein._stop = None  # as before ``bind``
+    assert not w.bargein.bound and w.bargein.snapshot()["bound"] is False
+
+
 def test_barge_in_can_be_disabled():
     cfg = RoboEmotConfig.model_validate(
         {"voice": {"barge_in": {"enabled": False, "keyword_enabled": False}}}
