@@ -3,8 +3,10 @@
 SPEC 6 (Enrollment, registry management), 11A (admin confirmation), 12 (Data, Behaviour,
 privacy) and 12A (the debug report as JSON).
 
-The web UI never edits configuration, so it never passes ``admin=True`` to the config stack;
-the operator PIN gates the registry and enrollment only. Responses carry summaries and
+The operator PIN gates the registry and enrollment. Configuration is edited only through the
+settings allowlist (``settings.py``): each write re-enters the PIN and goes through the config
+stack's guardrails (runtime layer: safety only tightens, e.g. blocklist entries can be added but
+never removed; loosening needs the app config and the admin PIN). Responses carry summaries and
 whitelisted status fields, never images, crops or embeddings; a last-line guard refuses any
 response that holds a long list of numbers.
 """
@@ -28,6 +30,7 @@ from http.cookies import CookieError, SimpleCookie
 from typing import Any, NoReturn, Protocol
 
 from roboemot.config.schema import ROUTE_NAME_MAX_CHARS, RoboEmotConfig, WebUIConfig
+from roboemot.config.stack import ConfigError, GuardrailError
 from roboemot.llm.conformance import RouteBudgetExhausted, RouteKeyUnavailable
 from roboemot.registry.records import Consent, ConsentError
 
@@ -35,6 +38,7 @@ from . import validation as v
 from .auth import LoginLimiter, PinStore, Sessions
 from .guard import same_origin
 from .routes import RouteBusy
+from .settings import SettingNotAllowed
 from .strings import STRINGS, language_for
 
 log = logging.getLogger(__name__)
@@ -97,6 +101,13 @@ class RoutesPort(Protocol):
 
     def list_routes(self) -> list[dict[str, Any]]: ...
     def start(self, name: str) -> None: ...
+
+
+class SettingsPort(Protocol):
+    """``roboemot.webui.settings.SettingsEditor``: the allowlisted, guarded settings."""
+
+    def describe(self) -> list[dict[str, Any]]: ...
+    def change(self, path: object, value: object, source: str) -> dict[str, Any]: ...
 
 
 class CataloguePort(Protocol):
@@ -190,8 +201,10 @@ class WebApi:
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         catalogue: CataloguePort | None = None,
         routes: RoutesPort | None = None,
+        settings: SettingsPort | None = None,
     ) -> None:
         self.service = service
+        self.settings = settings
         self.catalogue = catalogue
         self.routes = routes
         self.diagnostics = diagnostics
@@ -292,6 +305,8 @@ class WebApi:
             ("POST", "/api/registry/quarantined/purge"): self._purge,
             ("GET", "/api/debug"): self._debug,
             ("GET", "/api/routes"): self._routes,
+            ("GET", "/api/settings"): self._settings_list,
+            ("POST", "/api/settings"): self._settings_change,
             ("GET", "/api/catalogue"): self._catalogue,
             ("POST", CATALOGUE_IMPORT): self._catalogue_import,
             ("POST", "/api/catalogue/candidates/clear"): self._catalogue_clear,
@@ -590,6 +605,41 @@ class WebApi:
                         "error": "withheld",
                     }
         return Response(HTTPStatus.OK, report)
+
+    # ------------------------------------------------------------------ settings
+
+    def _settings_port(self) -> SettingsPort:
+        if self.settings is None:
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "settings_unavailable")
+        return self.settings
+
+    def _settings_list(self, req: Request) -> Response:
+        """The editable fields with value, default, schema limits and the admin flag."""
+        return Response(
+            HTTPStatus.OK, {"settings": self._settings_port().describe(), "pin_required": True}
+        )
+
+    def _settings_change(self, req: Request) -> Response:
+        """Change one allowlisted setting (SPEC 11A). The body holds exactly ``path``, ``value``
+        and the re-entered ``pin`` (checked under the login limits). The value is never echoed
+        in an error, and the stack's guardrails refuse what the runtime layer may not do."""
+        port = self._settings_port()
+        body = self._json_body(req)
+        v.only_keys(body, {"path", "value", "pin"})
+        if "value" not in body or "path" not in body:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
+        self._check_pin(req, body.get("pin"))
+        try:
+            result = port.change(body["path"], body["value"], f"webui:{req.client_ip}")
+        except SettingNotAllowed as exc:
+            raise ApiError(HTTPStatus.FORBIDDEN, "setting_not_allowed", field="path") from exc
+        except GuardrailError as exc:
+            raise ApiError(HTTPStatus.FORBIDDEN, "setting_guardrail", field="value") from exc
+        except ConfigError as exc:
+            raise ApiError(
+                HTTPStatus.UNPROCESSABLE_ENTITY, "setting_invalid", field="value"
+            ) from exc
+        return Response(HTTPStatus.OK, result)
 
     # ------------------------------------------------------------------ llm routes
 

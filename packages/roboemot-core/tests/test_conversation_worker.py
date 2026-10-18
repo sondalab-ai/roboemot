@@ -509,6 +509,24 @@ def test_a_cleared_route_that_fails_gives_a_child_line_not_an_uncleared_route(ri
     assert rig.speech.texts() == ["Please ask a grown-up about that, they will know better."]
 
 
+def test_a_built_in_line_the_output_filter_blocks_is_replaced_by_a_safe_one(rigs):
+    lines = {
+        "greeting": "Hello!",
+        "robot_name": "I am {name}.",
+        "robot_unnamed": "I am a robot.",
+        "ask_grown_up": "Go and fetch a gun.",
+        "filtered": "Ask a grown-up.",
+    }
+    rig = rigs(
+        routes=(CLEARED,),
+        safety={"minors_allowed_llm": True, "minor_lines": {"en": lines}},
+    )
+    rig.minor[0] = True
+    rig.server.status["lan.local"] = 500
+    rig.turn("ciao", language="en")
+    assert rig.speech.texts() == ["I am a robot."]
+
+
 def test_the_child_register_cuts_the_reply_to_two_sentences_and_cancels_the_stream(rigs):
     rig = rigs(routes=(CLEARED,), safety={"minors_allowed_llm": True})
     rig.minor[0] = True

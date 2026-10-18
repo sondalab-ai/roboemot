@@ -286,6 +286,24 @@ def guarded_leaves(cfg: RoboEmotConfig) -> dict[str, tuple[Any, dict[str, Any]]]
 NEW_RULE_REFUSED = "reflexes.rules."
 
 
+def _filter_keys(entries: Any) -> set[tuple[str, bool]]:
+    """Entries of an output-filter list as (normalised text, is prefix), the forms the matcher
+    compares, so an accent, case or invisible-character swap is a different entry."""
+    from ..conversation.output_filter import PREFIX, clean  # lazy: conversation imports config
+    from ..voice.keywords import normalise
+
+    keys = set()
+    for entry in entries if isinstance(entries, list) else []:
+        text = clean(str(entry)).strip()
+        keys.add((normalise(text.rstrip(PREFIX + " ")), text.endswith(PREFIX)))
+    return keys
+
+
+def _keeps_every_entry(candidate: Any, approved: Any) -> bool:
+    """``superset`` direction: the candidate list has every approved entry (normalised)."""
+    return _filter_keys(approved) <= _filter_keys(candidate)
+
+
 def violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Violation]:
     """Leaves where ``candidate`` is less safe than ``approved`` (SPEC 11A, Guardrails)."""
     base = guarded_leaves(approved)
@@ -308,10 +326,13 @@ def violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Viol
             "higher": lambda v, r: v >= r,
             "false": lambda v, r: (not v) or v == r,
             "true": lambda v, r: bool(v) or v == r,
+            "superset": _keeps_every_entry,
             None: lambda v, r: True,
         }[direction](value, ref)
         if meta.get("admin_only") and value != ref:
             found.append(Violation("admin", path, ref, value))
+            if not ok:  # an admin may approve the change, never a loosening of the direction
+                found.append(Violation("safety", path, ref, value))
         elif meta.get("opt_in") and value and not ref:
             found.append(Violation("privacy", path, ref, value))
         elif not ok:
@@ -320,6 +341,8 @@ def violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Viol
     for path, (ref, meta) in base.items():  # an admin-only entry (a language's list) removed
         if meta.get("admin_only") and path not in cand and not path.startswith(NEW_RULE_REFUSED):
             found.append(Violation("admin", path, ref, None))
+        if meta.get("conservative") == "superset" and path not in cand:
+            found.append(Violation("safety", path, ref, None))  # a whole list removed
     return (
         found
         + reflex_violations(approved, candidate)
@@ -579,8 +602,10 @@ class ConfigStack:
         source: str = "api",
         admin: bool = False,
         layer: str = "runtime",
+        must_exist: bool = False,
     ) -> RoboEmotConfig:
-        """Set a parameter or a whole section.
+        """Set a parameter or a whole section. ``must_exist`` refuses (``ConfigError``) a key the
+        effective configuration does not have yet, e.g. a language that was removed meanwhile.
 
         ``layer="runtime"`` (default): may only make safety more conservative; a privacy
         opt-in or an ``admin_only`` prompt change needs ``admin=True``.
@@ -591,6 +616,8 @@ class ConfigStack:
         with self._lock:
             if not field_meta(key) and not self._known_path(key):
                 raise ConfigError(f"unknown parameter: {key}")
+            if must_exist and not self._known_path(key):
+                raise ConfigError(f"parameter does not exist: {key}")
             try:
                 old = self.get(key)
             except (KeyError, AttributeError, IndexError):

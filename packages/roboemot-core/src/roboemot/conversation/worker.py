@@ -950,9 +950,25 @@ class ConversationWorker:
                 turn.utterance.keywords,
                 self._prompt_name(turn.cfg),
             )
+        text = self._unblocked_line(turn, text)
         state = self.affect.state(self.clock())
         self._say(turn, text, state.label, state.intensity, minor=True)
         self._counts["minor_lines"] += 1
+
+    def _unblocked_line(self, turn: _Turn, text: str) -> str:
+        """``text`` unless the output filter blocks it (an edited line may name a blocked word,
+        or the robot's name may): then the nameless and general lines, then the library's own."""
+        if not self._filter.blocked(text):
+            return text
+        lines, language = turn.cfg.safety.minor_lines, turn.language
+        default = turn.cfg.conversation.language
+        shipped = RoboEmotConfig().safety.minor_lines
+        for table in (lines, shipped):
+            for which in ("robot_unnamed", "ask_grown_up"):
+                candidate = line_text(table, language, default, which)
+                if candidate and not self._filter.blocked(candidate):
+                    return candidate
+        return ""
 
     def _say_fallback(self, turn: _Turn) -> None:
         """No route answered: while a minor is present a child-safe line (an uncleared route is
