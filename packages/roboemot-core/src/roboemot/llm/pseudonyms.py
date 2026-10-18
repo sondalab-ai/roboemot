@@ -375,6 +375,36 @@ def _request_text(body: Any) -> Iterator[str]:
             yield from _strings(value)
 
 
+def split_names(
+    names: Iterable[str], templates: Mapping[str, str]
+) -> tuple[dict[str, str], dict[str, str]]:
+    """``(accepted, refused)``: registry names by comparison key, in the form they are matched
+    (NFC, spaces collapsed, no surrounding double quotes). A name is refused when it cannot be
+    aliased: no letter or digit, a backslash (JSON's escape character), a word inside a
+    template's prefix ("Person", "Persona-") or a value of the request format
+    (``STRUCTURAL_WORDS``). Depends on names and templates only."""
+    prefixes = [t.replace(PSEUDONYM_LABEL, "") for t in templates.values()]
+    accepted: dict[str, str] = {}
+    refused: dict[str, str] = {}
+    for raw in names:
+        # Double quotes around a name ('"Nonna"') are JSON's string delimiters: matched
+        # without them, so a quote next to an alias in a JSON text never reads as a name.
+        name = " ".join(_nfc(raw).split()).strip('" ')
+        if not name or not (key := _key(name)):
+            continue
+        own = _compile(_key(v) for v in _variants(name))
+        if (
+            not re.search(r"\w", key)
+            or "\\" in name  # the JSON escape character: no name has one
+            or key in STRUCTURAL_WORDS
+            or any(_spans(own, prefix) for prefix in prefixes)
+        ):
+            refused.setdefault(key, name)
+        else:
+            accepted.setdefault(key, name)
+    return accepted, refused
+
+
 class Restoration:
     """The aliases one request really carried and what they stand for. Case-sensitive, whole
     token; a held-back tail in a stream is kept by :class:`Restorer`."""
@@ -459,25 +489,7 @@ class Pseudonyms:
         (``STRUCTURAL_WORDS``). It reaches the cloud as typed."""
         if not templates:
             raise ValueError("privacy.pseudonym_templates is empty")
-        prefixes = [t.replace(PSEUDONYM_LABEL, "") for t in templates.values()]
-        current: dict[str, str] = {}
-        refused: set[str] = set()
-        for raw in names:
-            # Double quotes around a name ('"Nonna"') are JSON's string delimiters: matched
-            # without them, so a quote next to an alias in a JSON text never reads as a name.
-            name = " ".join(_nfc(raw).split()).strip('" ')
-            if not name or not (key := _key(name)):
-                continue
-            own = _compile(_key(v) for v in _variants(name))
-            if (
-                not re.search(r"\w", key)
-                or "\\" in name  # the JSON escape character: no name has one
-                or key in STRUCTURAL_WORDS
-                or any(_spans(own, prefix) for prefix in prefixes)
-            ):
-                refused.add(key)
-            else:
-                current.setdefault(key, name)
+        current, refused = split_names(names, templates)
         template = (
             templates.get(language)
             or templates.get(default_language)
@@ -745,3 +757,11 @@ class NameSource:
         language = cfg.conversation.language
         self._map.sync(self._names(), cfg.privacy.pseudonym_templates, language, language)
         return self._map
+
+    def refused_names(self, cfg: RoboEmotConfig) -> list[str]:
+        """The registry names that cannot be aliased under ``cfg``'s templates, sorted, for the
+        admin's web UI; empty when ``privacy.pseudonyms_to_cloud`` is off. It reads the registry
+        itself, so it needs no access to the map of another thread. Names are never logged."""
+        if not cfg.privacy.pseudonyms_to_cloud:
+            return []
+        return sorted(split_names(self._names(), cfg.privacy.pseudonym_templates)[1].values())

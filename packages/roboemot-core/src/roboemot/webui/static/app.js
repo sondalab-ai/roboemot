@@ -568,8 +568,22 @@ async function routesView() {
       r.secret ? el("p", { class: "hint" }, t(r.secret.set ? "route_secret_set" : "route_secret_missing", { name: r.secret.name })) : [],
       el("div", { class: "row" }, run), box), r.running);
   });
+  // Names kept as typed (admin PIN, one request): shown here only until the view is redrawn.
+  const refusedBox = el("div", { role: "status" });
+  const showRefused = async () => {
+    let out = null;
+    const done = await ask({
+      title: t("refused_title"), message: t("refused_hint"), pin: true, confirm: t("refused_show"),
+      run: async ({ pin }) => { out = await api("POST", "/api/pseudonyms/refused", { pin: pin }); },
+    });
+    if (!done || !out) return;
+    refusedBox.replaceChildren(!out.enabled ? el("p", { class: "hint" }, t("refused_off")) :
+      (out.names.length ? el("ul", {}, out.names.map((n) => el("li", {}, n))) : el("p", { class: "hint" }, t("refused_none"))));
+  };
   view.append(card(t("tab_routes"), t("tab_routes"), el("p", { class: "hint" }, t("routes_intro"))),
-    ...(cards.length ? cards : [empty(t("tab_routes"), t("routes_none"))]));
+    ...(cards.length ? cards : [empty(t("tab_routes"), t("routes_none"))]),
+    card(t("tab_routes"), t("refused_title"), el("p", { class: "hint" }, t("refused_hint")),
+      el("div", { class: "row" }, button(t("refused_show"), "plain", () => guarded(showRefused))), refusedBox));
   if (state.tab === "routes" && data.routes.some((r) => r.running)) {
     state.timer = setTimeout(() => guarded(routesView), ROUTES_POLL_MS);
   }

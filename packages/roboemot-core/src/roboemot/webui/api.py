@@ -127,6 +127,13 @@ class CataloguePort(Protocol):
     def clear_tombstones(self) -> int: ...
 
 
+class PseudonymsPort(Protocol):
+    """``roboemot.llm.pseudonyms.NameSource``: ``refused_names`` lists the registry names that
+    cannot be aliased for cloud routes (empty when the option is off). Admin only."""
+
+    def refused_names(self, cfg: RoboEmotConfig) -> list[str]: ...
+
+
 class DebugReport(Protocol):
     """``roboemot.diagnostics.Diagnostics``: ``report()`` is the SPEC 12A JSON."""
 
@@ -202,9 +209,11 @@ class WebApi:
         catalogue: CataloguePort | None = None,
         routes: RoutesPort | None = None,
         settings: SettingsPort | None = None,
+        pseudonyms: PseudonymsPort | None = None,
     ) -> None:
         self.service = service
         self.settings = settings
+        self.pseudonyms = pseudonyms
         self.catalogue = catalogue
         self.routes = routes
         self.diagnostics = diagnostics
@@ -307,6 +316,7 @@ class WebApi:
             ("GET", "/api/routes"): self._routes,
             ("GET", "/api/settings"): self._settings_list,
             ("POST", "/api/settings"): self._settings_change,
+            ("POST", "/api/pseudonyms/refused"): self._pseudonyms_refused,
             ("GET", "/api/catalogue"): self._catalogue,
             ("POST", CATALOGUE_IMPORT): self._catalogue_import,
             ("POST", "/api/catalogue/candidates/clear"): self._catalogue_clear,
@@ -640,6 +650,25 @@ class WebApi:
                 HTTPStatus.UNPROCESSABLE_ENTITY, "setting_invalid", field="value"
             ) from exc
         return Response(HTTPStatus.OK, result)
+
+    # ------------------------------------------------------------------ pseudonyms
+
+    def _pseudonyms_refused(self, req: Request) -> Response:
+        """The registry names that cannot be aliased for cloud routes (SPEC 8, Pseudonyms).
+        Admin only: the operator PIN is re-entered on top of the session (the names are the
+        sensitive part), so it is a POST and the PIN never travels in a URL. Nothing is logged."""
+        body = self._json_body(req)
+        v.only_keys(body, {"pin"})
+        self._check_pin(req, body.get("pin"))
+        if self.pseudonyms is None:
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "pseudonyms_unavailable")
+        cfg = self.config
+        try:
+            names = self.pseudonyms.refused_names(cfg)
+        except Exception as exc:  # the registry could not be read: say so, never the cause
+            log.error("pseudonyms: refused names unavailable (%s)", type(exc).__name__)
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "pseudonyms_unavailable") from exc
+        return Response(HTTPStatus.OK, {"enabled": cfg.privacy.pseudonyms_to_cloud, "names": names})
 
     # ------------------------------------------------------------------ llm routes
 

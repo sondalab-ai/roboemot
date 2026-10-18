@@ -61,8 +61,11 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       `PseudonymLeak` before sending) and the web UI route check passes the map. Open:
       `roboemot llm check` (CLI) does not open the registry, so it still sends its synthetic
       prompts without pseudonyms.
-- [ ] Pseudonyms residual: registry names refused for aliasing are sent unaliased and the admin
-      sees only their count in the log; consider showing which names in the web UI (admin only).
+- [x] Pseudonyms residual: registry names refused for aliasing are sent unaliased and the admin
+      saw only their count in the log. The Routes tab now lists them on request
+      (`POST /api/pseudonyms/refused`, session, CSRF and the operator PIN re-entered); the log
+      still gives only the count. Open: the list has names, not record ids, so renaming is done
+      from the Registry tab.
 - [x] Pseudonyms residual: a JSON key in a tool call or result that equals a registry name
       ("target" for a record "Target") was aliased in the history sent to a cloud route. Now only
       string values are aliased. The leak check skips a key only when it is a property name of a

@@ -403,6 +403,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 robot_hosted=manifest.robot.profile is not None,
                 catalogue=self.catalogue,
                 settings=settings,
+                pseudonyms=self.name_source,
                 routes=RouteChecker(
                     stack.effective,
                     paths.route_checks_path(cfg.data_dir),
