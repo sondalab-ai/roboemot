@@ -67,8 +67,6 @@ The persona pieces exist and are tested; these callers wait for the pillars they
 
 - [x] Exit test `packages/roboemot-reachymini/tests/test_m3_exit.py` (`pytest -m models`): Italian and
       English through the real app on a scripted client, the three budgets, a barge-in and the child case.
-- [ ] A CI job for `-m models` tests: the runner needs a cached voice models folder (Silero, two Vosk
-      models, two Piper voices, about 0.3 GB) and a Piper interpreter; `ci.yml` has none today.
 - [ ] The robot, owner and licence items of the M3 report are in SPEC 15 (exit on the robot, barge-in,
       CM4 load, Piper on the robot and its voice licences, wake phrases, OpenAI speech in Italian,
       children's lines). Not repeated here.

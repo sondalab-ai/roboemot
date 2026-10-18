@@ -1,4 +1,5 @@
-# SPEC 14: unit tests, lint and the MuJoCo simulation layer on every PR and push to main; the sim also runs nightly.
+# SPEC 14: lint, unit tests, the MuJoCo simulation layer and the real voice-model tests on every PR and push
+# to main; the whole workflow also runs nightly.
 name: ci
 
 on:
@@ -38,6 +39,61 @@ jobs:
           python-version: "3.12"
       - run: pip install -e "packages/roboemot-core[dev,vision]" -e "packages/roboemot-reachymini[dev]"
       - run: pytest packages/roboemot-core/tests/test_catalogue_photos.py packages/roboemot-core/tests/test_vision_models.py packages/roboemot-core/tests/test_vision_objects.py packages/roboemot-core/tests/test_vision.py -rs
+
+  # SPEC 14, M3 exit: the tests that load the real Silero VAD, Vosk and Piper models (`-m models`,
+  # deselected by default), including `test_m3_exit.py` with its latency budgets. The vision models
+  # are not fetched (0.8 GB); their `-m models` tests skip here. Runs on PRs too: about 1.5 min with a
+  # warm cache, under 2 min cold. The nightly run keeps the cache warm.
+  models:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      ROBOEMOT_DATA_DIR: ${{ github.workspace }}/.ci-data
+      # Same folder `roboemot models fetch` fills (<data folder>/voice-models); the tests move the
+      # data folder to a temporary one, so they need it spelled out.
+      ROBOEMOT_VOICE_MODELS_DIR: ${{ github.workspace }}/.ci-data/voice-models
+      # SPEC 13 says 200 ms; shared runners jitter by more (see test_m3_exit.py). Other budgets stay hard.
+      ROBOEMOT_BARGE_IN_BUDGET_MS: "300"
+      ROBOEMOT_EXIT_REPORT: ${{ github.workspace }}/m3-exit-report.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e "packages/roboemot-core[dev,voice]" -e "packages/roboemot-reachymini[dev]"
+      # The voice models folder (about 0.3 GB), keyed on the OS, onnxruntime (the INT8 files depend
+      # on it) and the voice registry that pins the hashes. Saved even when a later step fails.
+      - id: key
+        run: echo "ort=$(python -c 'import onnxruntime as o; print(o.__version__)')" >> "$GITHUB_OUTPUT"
+      - id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .ci-data/voice-models
+          key: voice-models-${{ runner.os }}-ort${{ steps.key.outputs.ort }}-${{ hashFiles('packages/roboemot-core/src/roboemot/voice/models.yaml') }}
+      - run: roboemot models fetch --voice
+      - if: always() && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .ci-data/voice-models
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+      # Piper is GPL-3.0 and runs as a separate process in its own venv, at the installer's pin.
+      - run: |
+          version=$(python -c 'from roboemot.install import PIPER_TTS_VERSION as v; print(v)')
+          python -m venv "$RUNNER_TEMP/piper-venv"
+          "$RUNNER_TEMP/piper-venv/bin/pip" install --no-cache-dir "piper-tts==$version"
+          echo "ROBOEMOT_PIPER_PYTHON=$RUNNER_TEMP/piper-venv/bin/python" >> "$GITHUB_ENV"
+      - run: >
+          pytest -m models -rs -s -o log_level=DEBUG
+          packages/roboemot-core/tests/test_vad_silero.py
+          packages/roboemot-core/tests/test_voice_asr_models.py
+          packages/roboemot-core/tests/test_tts_models.py
+          packages/roboemot-reachymini/tests/test_m3_exit.py
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m3-exit-report
+          path: m3-exit-report.json
+          if-no-files-found: ignore
 
   rt:
     runs-on: ubuntu-24.04
