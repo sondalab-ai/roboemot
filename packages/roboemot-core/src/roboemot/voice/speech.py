@@ -37,6 +37,7 @@ log = logging.getLogger(__name__)
 
 MS_PER_S = 1000.0
 LATENCY_WINDOW = 20
+PLAYED_WINDOW = 64  # sentences whose playback start is remembered, for ``played``
 READY_TIMEOUT_S = 5.0
 JOIN_TIMEOUT_S = 2.0
 
@@ -97,6 +98,10 @@ class SpeechOutput:
         self._last_rate_hz = 0
         self._latencies: collections.deque[float] = collections.deque(maxlen=LATENCY_WINDOW)
         self._first_audio: collections.OrderedDict[int, float] = collections.OrderedDict()
+        # job id -> clock stamp at which its first sample starts to play; ids a stop cut off
+        # before that are in ``_unplayed``
+        self._audible: collections.OrderedDict[int, float] = collections.OrderedDict()
+        self._unplayed: set[int] = set()
         self.sentences_spoken = 0
         self.sentences_dropped = 0
         self.failures = 0
@@ -229,11 +234,22 @@ class SpeechOutput:
             epoch = self._epoch
             self.sentences_dropped += len(self._jobs)
             self._jobs.clear()
+            now = self.clock()
+            self._unplayed.update(i for i, at in self._audible.items() if at > now)
         self.sink.stop()
         loop = self._loop
         if loop is not None:
             with contextlib.suppress(RuntimeError):
                 loop.call_soon_threadsafe(self._cancel_before, epoch)
+
+    def played(self, job_id: int) -> bool:
+        """Whether sentence ``job_id`` began to play: its audio reached the sink and was not
+        cut before its first sample. A sentence a ``stop`` interrupted halfway counts (it was
+        heard in part); one still queued or in synthesis does not. Remembered for the last
+        ``PLAYED_WINDOW`` sentences, so the conversation keeps in its history only what the
+        person heard."""
+        with self._lock:
+            return job_id in self._audible and job_id not in self._unplayed
 
     def first_audio_at(self, utterance: int) -> float | None:
         """Clock stamp when the first audio of answer ``utterance`` was pushed, None until then
@@ -314,6 +330,7 @@ class SpeechOutput:
                     first = False
                     if not self._pad(job, chunk.rate_hz):
                         return
+                    self._mark_audible(job)
                     with self._lock:
                         now = self.clock()
                         self._latencies.append((now - job.said_at) * MS_PER_S)
@@ -336,6 +353,17 @@ class SpeechOutput:
             log.warning("speech %d crashed: %s", job.id, type(exc).__name__)
         finally:
             self._last_utterance = job.utterance
+
+    def _mark_audible(self, job: _Job) -> None:
+        """Note when ``job``'s first sample will play: when the audio queued before it ends
+        (the sink's timeline, silence pad included), else now."""
+        now = self.clock()
+        playing_until = getattr(self.sink, "playing_until", None)
+        start = max(now, playing_until()) if callable(playing_until) else now
+        with self._lock:
+            self._audible[job.id] = start
+            while len(self._audible) > PLAYED_WINDOW:
+                self._unplayed.discard(self._audible.popitem(last=False)[0])
 
     def _pad(self, job: _Job, rate_hz: int) -> bool:
         """Silence between two sentences of one answer, less the idle gap already there.

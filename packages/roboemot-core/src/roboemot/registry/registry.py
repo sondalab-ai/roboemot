@@ -390,6 +390,23 @@ class Registry:
             self._commit_person(record)
             return record
 
+    def set_preference(
+        self, person_id: str, key: str, value: str, *, max_items: int
+    ) -> PersonRecord:
+        """Store one confirmed preference (SPEC 6, 8: only what the person confirmed out loud).
+        ``KeyError`` when the id is unknown (forgotten meanwhile), ``ValueError`` when the
+        record is not active (a pending one has no consent yet) or already holds ``max_items``
+        preferences and ``key`` is a new one."""
+        with self.lock:
+            record = self._people[person_id]
+            if record.status != "active":
+                raise ValueError("only an active record keeps preferences")
+            if key not in record.preferences and len(record.preferences) >= max_items:
+                raise ValueError("preference limit reached")
+            updated = replace(record, preferences={**record.preferences, key: value})
+            self._commit_person(updated)
+            return updated
+
     def forget(self, person_id: str) -> bool:
         """Remove every embedding, field and file of a person, and everything attached to them.
 

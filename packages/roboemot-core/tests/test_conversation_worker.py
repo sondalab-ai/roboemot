@@ -97,6 +97,7 @@ class FakeSpeech:
         self.stops = 0
         self._ids = 0
         self.first_audio: dict[int, float] = {}
+        self.unplayed: set[int] = set()
 
     def new_utterance(self) -> int:
         self._ids += 1
@@ -111,6 +112,9 @@ class FakeSpeech:
 
     def first_audio_at(self, utterance):
         return self.first_audio.get(utterance)
+
+    def played(self, job_id):
+        return job_id not in self.unplayed
 
     def texts(self) -> list[str]:
         return [s["text"] for s in self.said]
@@ -740,7 +744,7 @@ def test_the_turn_event_has_ids_and_lengths_only(rigs):
     event = rig.events[0]
     assert set(event) == {
         "turn", "language", "chars_in", "chars_out", "sentences", "route", "tokens", "minor",
-        "outcome",
+        "tool_calls", "rounds", "outcome",
     }  # fmt: skip
     assert event["route"] == "lan" and event["sentences"] == 1 and event["minor"] is False
 

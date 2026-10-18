@@ -388,3 +388,46 @@ def test_a_failing_warm_up_does_not_kill_the_output(make):
     out = make(Cold())
     say(out)
     assert wait_for(lambda: out.sentences_spoken == 1)
+
+
+class TimelineSink(FakeSink):
+    """Pushes are faster than real time; ``playing_until`` is where the queue ends, as in the
+    Reachy speaker."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.until = 0.0
+
+    def push_audio_sample(self, samples, rate_hz):
+        self.until = max(self.until, time.monotonic()) + samples.size / rate_hz
+        return super().push_audio_sample(samples, rate_hz)
+
+    def playing_until(self):
+        return self.until
+
+    def stop(self):
+        self.until = time.monotonic()
+        super().stop()
+
+
+def test_played_is_true_only_for_sentences_that_began_to_play_before_the_stop(make):
+    sink = TimelineSink()
+    out = make(FakeBackend(pieces=10), sink=sink)  # 1 s of audio per sentence
+    u = out.new_utterance()
+    first, second = say(out, "Uno.", utterance=u), say(out, "Due.", utterance=u)
+    third = say(out, "Tre.", utterance=u)
+    # all of it is pushed within a few ms of the clock, but only the first second is audible
+    assert wait_for(lambda: out.sentences_spoken >= 2 and len(sink.pushed) >= 20)
+    out.stop()
+    assert out.played(first) is True  # playing when the stop came
+    assert out.played(second) is False  # queued in the sink behind it, never heard
+    assert out.played(third) is False
+    assert out.played(9999) is False
+
+
+def test_without_a_timeline_every_pushed_sentence_counts_as_played(make):
+    out = make(FakeBackend(pieces=1))
+    a = say(out, "Uno.")
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    out.stop()
+    assert out.played(a) is True

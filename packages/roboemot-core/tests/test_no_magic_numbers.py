@@ -48,6 +48,8 @@ BEHAVIOUR_MODULES = [
     "conversation/summaries.py",
     "conversation/output_filter.py",
     "conversation/lines.py",
+    "conversation/confirm.py",
+    "conversation/preferences.py",
     "persona/__init__.py",
     "persona/llm_traits.py",
     "motion/loop.py",
