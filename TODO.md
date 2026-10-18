@@ -57,8 +57,11 @@ The persona pieces exist and are tested; these callers wait for the pillars they
 - [ ] `look_at` names come from the registry display names of what is in view and are sent to the
       route as tool-schema choices, like the scene summary; route them through the pseudonym map when
       `privacy.pseudonyms_to_cloud` exists.
-- [ ] `play` offers every label of the manifest's `expression_map` (affect expressions). Named
-      gestures that are not affect labels (nod, shake) need their own map and primitives.
+- [x] `play` offers every label of the manifest's `expression_map` plus the named gestures of its
+      `gesture_map` (nod, shake): same renderer, register, persona, minor cap and limiter (SPEC 7, 11).
+- [ ] Fast path: a nod on a spoken "yes"/"sì" and a shake on "no" (the `speech.keyword.yes/no` events
+      exist; needs an app handler that calls `ExpressionRenderer.request`, and a rule for when the
+      robot is the one asking). Nod and shake signs and amplitudes are untested on the hardware.
 - [ ] Edit wake phrases and the robot name from the web UI (needs an admin-confirmed settings editor,
       SPEC 11A).
 - [ ] Edit the children's built-in lines (`safety.minor_lines`) and the minor blocklist from the web UI

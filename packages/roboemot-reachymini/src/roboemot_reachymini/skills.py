@@ -54,7 +54,7 @@ class SkillBridge:
     def env(self, affect: Any) -> SkillEnv:
         """The environment for ``default_skills``."""
         return SkillEnv(
-            gestures=lambda: list(self._expression.expression_map),
+            gestures=self._expression.playable,
             play=self._expression.request,
             look_names=self._names,
             look_at=self.look_at,
