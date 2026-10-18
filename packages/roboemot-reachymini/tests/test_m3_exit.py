@@ -414,11 +414,9 @@ def test_conversation_inside_the_latency_budgets_then_a_barge_in(
         )
         assert spoken and {lang for lang, _ in spoken} == {language}, "answer in the wrong language"
 
-        if stop_acoustic_ms > BARGE_IN_BUDGET_MS:
-            msg = f"barge-in stop {stop_acoustic_ms:.0f} ms after the first sound"
-            if language == "en":  # a known miss, not hidden: docs/eval/m3.md, Barge-in
-                pytest.xfail(f"{msg}; fricative-initial 'stop' (not strict: some runs pass)")
-            pytest.fail(msg)
+        assert stop_acoustic_ms <= BARGE_IN_BUDGET_MS, (
+            f"barge-in stop {stop_acoustic_ms:.0f} ms after the first sound"
+        )
     finally:
         finish(stop, thread, errors)
 

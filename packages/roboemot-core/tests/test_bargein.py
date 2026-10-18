@@ -352,3 +352,127 @@ def test_the_snapshot_counts_the_audio_fed_to_the_keyword_recognizer():
     w.feed(2.0, user_voice(1.0, 0.065), user_at=0.3)
     snap = w.bargein.snapshot()
     assert 0.5 < snap["keyword_seconds"] < 3.0
+
+
+# ------------------------------------------------------------------ the onset path (fricatives)
+
+
+class ScriptedVAD:
+    """Scores frame ``i`` as ``probs[i]`` (0 after the script)."""
+
+    rate_hz = RATE
+    frame_samples = FRAME
+
+    def __init__(self, probs):
+        self.probs, self.i = list(probs), 0
+
+    def speech_prob(self, frame):
+        p = self.probs[self.i] if self.i < len(self.probs) else 0.0
+        self.i += 1
+        return p
+
+    def reset(self):
+        pass
+
+
+def hiss(frames, rms=0.02, seed=5):
+    """High-pass noise (an /s/): nearly all its energy is above 2 kHz."""
+    x = np.random.default_rng(seed).standard_normal(frames * FRAME)
+    spec = np.fft.rfft(x)
+    spec[np.fft.rfftfreq(x.size, 1 / RATE) < 3000] = 0
+    x = np.fft.irfft(spec, x.size)
+    return (x * rms / np.std(x)).astype(np.float32)
+
+
+def onset_run(probs, audio, reference=None, **cfg):
+    """Feed ``audio`` in microphone chunks through a scripted VAD; return (stops, BargeIn)."""
+    config = (
+        RoboEmotConfig.model_validate({"voice": {"barge_in": cfg}}) if cfg else RoboEmotConfig()
+    )
+    now = [0.0]
+    stops: list[float] = []
+    bi = BargeIn(
+        config,
+        ScriptedVAD(probs),
+        SimpleNamespace(
+            start=lambda *a: None, accept=lambda a: None, reset=lambda: None, finish=lambda: ""
+        ),
+        reference,
+        language=lambda: "en",
+        clock=lambda: now[0],
+    )
+    bi.bind(lambda: stops.append(now[0]), lambda: None, None)
+    for i in range(0, audio.size, CHUNK):
+        part = audio[i : i + CHUNK]
+        now[0] = (i + part.size) / RATE
+        bi.on_chunk(SimpleNamespace(samples=part, rate_hz=RATE, stamp=now[0], gap=False))
+    return stops, bi
+
+
+def test_a_fricative_onset_scored_between_the_thresholds_cuts_in_three_frames():
+    stops, bi = onset_run([0.5, 0.6, 0.55, 0.3], hiss(4), keyword_enabled=False)
+    assert len(stops) == 1 and bi.snapshot()["triggers"] == 1
+    assert stops[0] <= 3 * FRAME / RATE + CHUNK / RATE  # three frames, one chunk of slack
+
+
+def test_the_same_scores_on_a_voiced_low_frequency_sound_do_not_cut():
+    stops, _ = onset_run([0.5] * 8, user_voice(8 * FRAME / RATE, 0.1), keyword_enabled=False)
+    assert stops == []
+
+
+def test_a_fricative_that_ends_before_three_frames_or_scores_too_low_does_not_cut():
+    stops, _ = onset_run([0.5, 0.6, 0.1, 0.5, 0.6, 0.1], hiss(6), keyword_enabled=False)
+    assert stops == []
+    stops, _ = onset_run([0.3] * 6, hiss(6), keyword_enabled=False)
+    assert stops == []
+
+
+def test_a_click_is_one_frame_even_at_a_high_score():
+    audio = np.zeros(8 * FRAME, np.float32)
+    audio[FRAME * 2 : FRAME * 2 + 4] = 0.9
+    stops, _ = onset_run([0.0, 0.0, 0.95, 0.0], audio, keyword_enabled=False)
+    assert stops == []
+
+
+def test_the_onset_path_can_be_switched_off():
+    stops, _ = onset_run([0.5, 0.6, 0.55, 0.5], hiss(4), onset_enabled=False, keyword_enabled=False)
+    assert stops == []
+
+
+def test_the_onset_path_keeps_the_echo_guard_stricter_than_the_main_one():
+    """The robot's own hiss coming back (correlation 1) is not a barge-in, and a correlation
+    between onset_echo_corr_max (0.4) and echo_corr_max (0.6) blocks only the onset path."""
+    audio = hiss(4)
+    ref = PlaybackReference(RATE, 2.0)
+    ref.add(0.0, audio)
+    stops, bi = onset_run([0.5, 0.6, 0.55, 0.5], audio, ref, keyword_enabled=False)
+    assert stops == [] and bi.snapshot()["triggers"] == 0
+    mixed = audio + hiss(4, rms=0.02, seed=9)  # echo plus an independent hiss: corr about 0.7
+    stops, _ = onset_run([0.5, 0.6, 0.55, 0.5], mixed, ref, keyword_enabled=False)
+    assert stops == []
+    cfg = {"keyword_enabled": False, "onset_echo_corr_max": 0.95, "echo_corr_max": 0.6}
+    stops, _ = onset_run([0.5, 0.6, 0.55, 0.5], audio * 0.3 + hiss(4, seed=11) * 4, ref, **cfg)
+    assert len(stops) == 1  # weakly correlated with the reference (below 0.6): let through
+
+
+def test_the_pre_roll_of_an_onset_cut_starts_before_the_fricative():
+    audio = np.concatenate([np.zeros(2 * FRAME, np.float32), hiss(4)])
+    handed = []
+    now = [0.0]
+    bi = BargeIn(
+        RoboEmotConfig.model_validate({"voice": {"barge_in": {"keyword_enabled": False}}}),
+        ScriptedVAD([0.0, 0.0, 0.5, 0.6, 0.55, 0.5]),
+        SimpleNamespace(start=lambda *a: None, accept=lambda a: None, reset=lambda: None),
+        None,
+        language=lambda: "en",
+        clock=lambda: now[0],
+    )
+    bi.bind(lambda: None, lambda: None, lambda samples, stamp: handed.append((samples, stamp)))
+    for i in range(0, audio.size, CHUNK):
+        now[0] = (i + CHUNK) / RATE
+        bi.on_chunk(
+            SimpleNamespace(samples=audio[i : i + CHUNK], rate_hz=RATE, stamp=now[0], gap=False)
+        )
+    assert len(handed) == 1
+    onset_s = 2 * FRAME / RATE
+    assert handed[0][1] == pytest.approx(onset_s - 0.064)  # pre_roll_ms before the /s/

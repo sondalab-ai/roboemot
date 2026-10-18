@@ -178,7 +178,15 @@ def test_asr_languages_are_separate_models(vosk_asr):
 # ---------------------------------------------------------------- barge-in on real models
 
 
-def over_the_robot(models, vosk_asr, robot_clip: str, user_clip: str | None, **cfg):
+def over_the_robot(
+    models,
+    vosk_asr,
+    robot_clip: str,
+    user_clip: str | np.ndarray | None,
+    user_at=0.8,
+    echo_gain=0.4,
+    **cfg,
+):
     """The robot plays ``robot_clip`` (heard back at gain 0.4, 80 ms late, by the microphone,
     and kept as the echo reference); the user says ``user_clip`` 0.8 s in. Real Silero (a second
     instance, as in the app) and real Vosk. Returns (stop stamps, the BargeIn, user onset)."""
@@ -188,13 +196,14 @@ def over_the_robot(models, vosk_asr, robot_clip: str, user_clip: str | None, **c
     config = RoboEmotConfig.model_validate({"voice": {"barge_in": cfg}}) if cfg else CFG
     robot = load(robot_clip)
     seconds = robot.size / RATE
-    t0, user_at = 1000.0, 0.8
+    t0 = 1000.0
     mic = np.zeros(round((seconds + 0.5) * RATE), np.float32)
     lag = round(0.08 * RATE)
-    mic[lag : lag + robot.size] += 0.4 * robot
-    user = None if user_clip is None else load(user_clip)
+    mic[lag : lag + robot.size] += echo_gain * robot
+    user = load(user_clip) if isinstance(user_clip, str) else user_clip
     if user is not None:
-        mic[round(user_at * RATE) : round(user_at * RATE) + user.size] += user[: mic.size]
+        lo = round(user_at * RATE)
+        mic[lo : lo + user.size] += user[: mic.size - lo]
     ref = PlaybackReference(RATE, config.voice.barge_in.echo_reference_s)
     ref.add(t0, robot)
     state = SimpleNamespace(now=t0, stops=[], events=[])
@@ -203,7 +212,9 @@ def over_the_robot(models, vosk_asr, robot_clip: str, user_clip: str | None, **c
         SileroVAD(vad_path, 1),
         vosk_asr,
         ref,
-        language=lambda: "it" if user_clip and user_clip.startswith("it_") else "en",
+        language=lambda: (
+            "it" if isinstance(user_clip, str) and user_clip.startswith("it_") else "en"
+        ),
         emit=lambda name, now, payload: state.events.append(name),
         clock=lambda: state.now,
     )
@@ -243,3 +254,84 @@ def test_a_spoken_stop_over_the_robot_cuts_it_off_on_real_models(models, vosk_as
         assert ms < 200  # SPEC 13: barge-in to TTS stop, on the audio clock
     else:
         assert state.events == ["speech.keyword.stop"] and ms < 600
+
+
+# The /s/ of "stop" is at -40 to -29 dBFS: an echo much louder than that hides it from the guard
+# (the documented limit), so the onset tests use the residual echo of a robot with hardware AEC.
+QUIET_ECHO = 0.02
+
+
+def test_the_robots_own_speech_at_low_echo_does_not_trigger_the_onset_path(models, vosk_asr):
+    state, bi, _ = over_the_robot(models, vosk_asr, "en_hello_name", None, echo_gain=QUIET_ECHO)
+    assert state.stops == [] and bi.snapshot()["triggers"] == 0
+
+
+def test_an_english_stop_cuts_the_robot_off_from_its_first_sound_on_real_models(models, vosk_asr):
+    """SPEC 13 counts the 200 ms from the first sound. English "stop" starts with a ~130 ms /s/ that
+    Silero scores under the barge-in threshold, so the onset path (fricative-like frames) has to
+    catch it. Chunks here are 64 ms and the user's phase against the frames is varied."""
+    first = speech_start_s("en_stop")
+    worst = 0.0
+    for shift_ms in (0, 9, 17, 25, 33, 41, 50, 58):
+        state, bi, clip_start = over_the_robot(
+            models,
+            vosk_asr,
+            "en_hello_name",
+            "en_stop",
+            user_at=0.8 + shift_ms / 1000,
+            echo_gain=QUIET_ECHO,
+        )
+        assert len(state.stops) == 1 and bi.snapshot()["triggers"] == 1, shift_ms
+        ms = 1000 * (state.stops[0] - (clip_start + first))
+        assert 0 <= ms < 200, (shift_ms, ms)
+        worst = max(worst, ms)
+    print(f"\nreal-model english stop: worst {worst:.0f} ms after the first sound (64 ms chunks)")
+
+
+def _band(x: np.ndarray, lo_hz: float, hi_hz: float) -> np.ndarray:
+    spec = np.fft.rfft(x)
+    freq = np.fft.rfftfreq(x.size, 1 / RATE)
+    spec[(freq < lo_hz) | (freq > hi_hz)] = 0
+    return np.fft.irfft(spec, x.size).astype(np.float32)
+
+
+def _envelope(n: int, attack_s: float, decay_s: float) -> np.ndarray:
+    t = np.arange(n) / RATE
+    return np.minimum(t / attack_s, 1.0) * np.exp(-np.maximum(t - attack_s, 0.0) / decay_s)
+
+
+def short_noises() -> dict[str, np.ndarray]:
+    """Synthetic non-speech sounds, each about 0.6 s: a click, a cough (band-limited noise with a
+    fast tremolo), a clap, a door slam (low-passed noise burst) and a steady white noise."""
+    rng = np.random.default_rng(3)
+    n = round(0.6 * RATE)
+    white = lambda: rng.standard_normal(n).astype(np.float32)  # noqa: E731
+    click = np.zeros(n, np.float32)
+    click[3200:3203] = 0.8
+    tremolo = 1 + 0.5 * np.sin(2 * np.pi * 14 * np.arange(n) / RATE)
+    return {
+        "click": click,
+        "cough": (_band(white(), 300, 6000) * 0.1 * _envelope(n, 0.02, 0.12) * tremolo).astype(
+            np.float32
+        ),
+        "clap": (white() * 0.2 * _envelope(n, 0.001, 0.03)).astype(np.float32),
+        "door": (_band(white(), 20, 300) * 0.25 * _envelope(n, 0.005, 0.08)).astype(np.float32),
+        "white_noise": (white() * 0.05).astype(np.float32),
+    }
+
+
+@pytest.mark.parametrize("echo_gain", [0.0, 0.4], ids=["no_echo", "loud_echo"])
+@pytest.mark.parametrize("name", list(short_noises()))
+def test_short_noises_over_the_robot_do_not_cut_it_off_on_real_models(
+    models, vosk_asr, name, echo_gain
+):
+    state, bi, _ = over_the_robot(
+        models,
+        vosk_asr,
+        "en_hello_name",
+        short_noises()[name],
+        echo_gain=echo_gain,
+        keyword_enabled=False,
+    )
+    assert state.stops == [], f"{name} stopped the robot"
+    assert bi.snapshot()["triggers"] == 0
