@@ -185,3 +185,63 @@ def test_without_a_listener_the_hub_queues_no_voice_audio(data):  # noqa: F811
         stop.set()
         thread.join(timeout=10)
     assert not errors
+
+
+def test_yes_no_handler_is_wired_to_the_fast_path(data, fakes):  # noqa: F811
+    enable(data, VOICE_YAML)
+    app = app_module.RoboEmotApp.__new__(app_module.RoboEmotApp)
+    stop, thread, errors = run_app(app, ScriptedMini().mini)
+    try:
+        assert wait_for(lambda: app.voice_listener is not None)
+        assert app.voice_listener._fast._on_answer is app.yes_no
+    finally:
+        stop.set()
+        thread.join(timeout=10)
+    assert not errors
+
+
+def yes_no(speech_output):
+    asked = []
+    app = SimpleNamespace(speech_output=speech_output)
+    speech = SpeechActivity(0.0)
+    expression = SimpleNamespace(request=lambda label, now=None: asked.append(label) or True)
+    handler = app_module.make_yes_no(app, expression, speech, RoboEmotConfig().voice.fastpath)
+    return app, handler, asked, speech
+
+
+def test_yes_no_handler_works_before_the_speech_output_exists():
+    _, handler, asked, _ = yes_no(None)
+    handler("yes", 10.0)
+    handler("no", 11.0)
+    assert asked == ["nod", "shake"]
+
+
+def test_yes_no_handler_reads_the_question_from_the_speech_output_once_it_exists():
+    app, handler, asked, speech = yes_no(None)
+    app.speech_output = SimpleNamespace(question_end=lambda: 100.0)
+    handler("yes", 101.0)
+    assert asked == []
+    handler("yes", 101.0 + RoboEmotConfig().voice.fastpath.answer_window_s)
+    assert asked == ["nod"]
+    speech.extend(500.0)
+    handler("no", 400.0)  # the robot is speaking
+    assert asked == ["nod"]
+
+
+def test_yes_no_handler_follows_a_reloaded_window():
+    _, handler, asked, _ = yes_no(SimpleNamespace(question_end=lambda: 100.0))
+    handler("yes", 103.0)
+    assert asked == []
+    cfg = RoboEmotConfig().voice.fastpath
+    handler.apply_config(cfg.model_copy(update={"answer_window_s": 1.0}))
+    handler("yes", 103.0)
+    assert asked == ["nod"]
+
+
+def test_yes_no_handler_survives_a_broken_speech_output():
+    def boom():
+        raise RuntimeError("x")
+
+    _, handler, asked, _ = yes_no(SimpleNamespace(question_end=boom))
+    handler("yes", 1.0)
+    assert asked == []

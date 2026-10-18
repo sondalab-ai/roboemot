@@ -88,6 +88,7 @@ def build_listener(
     on_utterance: Callable[[Utterance], None],
     reference: PlaybackReference | None = None,
     names: RobotName | None = None,
+    on_answer: Callable[[str, float], None] | None = None,
 ) -> tuple[VoiceListener, Callable[[], None], BargeIn] | None:
     """The listener, a ``close`` for its bus subscription and the barge-in detector (not yet
     bound to its actions), or None when voice can't run."""
@@ -154,6 +155,7 @@ def build_listener(
         bearing=lambda now: bearing.get(now, max_age_s),
         target_entry=lambda: getattr(attended_person(), "entry_id", None),
         names=names,
+        on_answer=on_answer,
     )
     bargein = BargeIn(
         cfg,

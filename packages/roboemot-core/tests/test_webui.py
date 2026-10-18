@@ -113,7 +113,9 @@ class Client:
         resp = conn.getresponse()
         data = resp.read()
         out = SimpleNamespace(status=resp.status, headers=resp.headers, body=data)
-        out.json = json.loads(data) if "json" in resp.getheader("Content-Type", "") else None
+        out.json = (
+            json.loads(data) if data and "json" in resp.getheader("Content-Type", "") else None
+        )
         conn.close()
         return out
 

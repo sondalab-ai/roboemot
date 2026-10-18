@@ -168,13 +168,17 @@ class ExpressionRenderer:
             *(g for g in self.gesture_map if g not in self.expression_map),
         ]
 
-    def request(self, label: str) -> bool:
+    def request(self, label: str, now: float | None = None) -> bool:
         """The ``play`` skill (SPEC 11, LLM tools): play the expression or gesture ``label`` at
         the next :meth:`update`, from any thread. It takes the same path as an affect-driven
         one (the minimum interval, the register, circadian and persona scaling, the minor cap,
         the body channel rule); only the label differs. False, and nothing queued, when neither
-        map has the name or the circadian factor is 0 (resting: the robot does not move)."""
+        map has the name or the circadian factor is 0 (resting: the robot does not move).
+        Given ``now`` (the clock ``update`` runs on), a request inside ``min_interval_s`` of
+        the last start is refused instead of queued, for reactions that are worthless late."""
         if label not in self.expression_map and label not in self.gesture_map:
+            return False
+        if now is not None and now - self._last_start < self.cfg.min_interval_s:
             return False
         if self.circadian_factor() <= 0:
             return False

@@ -20,7 +20,6 @@ import contextlib
 import datetime as dt
 import json
 import logging
-import re
 import threading
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
@@ -31,6 +30,7 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpe
 
 from ..config.schema import LLMRoute, SafetyConfig
 from ..health.network import NetworkMonitor
+from ..secret_store import SECRET_REF, SecretUnavailable, no_secrets
 from .prompt import CHARS_PER_TOKEN, trim_history
 from .pseudonyms import Outgoing, Pseudonyms, replace_names, route_is_local
 
@@ -42,7 +42,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 # Longest tool-call argument text parsed. A model cannot send more than max_tokens tokens, so
 # this only bounds what a broken or hostile route can make json.loads chew on.
 TOOL_ARGS_MAX_CHARS = 50_000
-SECRET = re.compile(r"^\$\{secret:([A-Za-z0-9_.-]+)\}$")
+SECRET = SECRET_REF
 
 
 @dataclass
@@ -105,13 +105,76 @@ class _Budget:
 class Router:
     routes: list[LLMRoute]
     safety: SafetyConfig
-    secrets: Callable[[str], str] = lambda name: ""
+    secrets: Callable[[str], str] = no_secrets
     http_client_factory: Callable[[], httpx.AsyncClient] | None = None
     today: Callable[[], dt.date] = dt.date.today
     monitor: NetworkMonitor | None = None
     _budgets: dict[str, _Budget] = field(default_factory=dict)
+    _keys: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
+    _unavailable: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
     failures: list[tuple[str, str]] = field(default_factory=list)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Resolve every ``${secret:name}`` route key now (startup and each rebuild after a
+        config reload). A route whose secret cannot be read is unavailable, with one warning
+        naming the route and the secret, never a value."""
+        for route in self.routes:
+            ref = SECRET.match(route.api_key)
+            if ref is None:
+                continue
+            name = ref.group(1)
+            try:
+                self._keys[name] = self._resolve(name)
+                if route.base_url.startswith("http://") and not route_is_local(route):
+                    log.warning(
+                        "llm route %s sends its key over plain http to a non-local host", route.name
+                    )
+            except Exception as exc:
+                reason = exc.reason if isinstance(exc, SecretUnavailable) else type(exc).__name__
+                self._unavailable[route.name] = name
+                log.warning(
+                    "llm route %s is unavailable: secret %r (api_key) cannot be used: %s",
+                    route.name,
+                    name,
+                    reason,
+                )
+
+    def _resolve(self, name: str) -> str:
+        """The secret's value; an empty one counts as missing (it would go out as no key)."""
+        value = self.secrets(name)
+        if not value:
+            raise SecretUnavailable(name, "the value is empty")
+        return value
+
+    def secrets_changed(self) -> bool:
+        """Whether resolving the route keys again would give another outcome (a secret set,
+        removed or replaced since this router was built). Used to rebuild on a config reload."""
+        for route in self.routes:
+            ref = SECRET.match(route.api_key)
+            if ref is None:
+                continue
+            name = ref.group(1)
+            try:
+                now: str | None = self._resolve(name)
+            except Exception:
+                now = None
+            if now != self._keys.get(name):
+                return True
+        return False
+
+    def key_problem(self, route: LLMRoute) -> str | None:
+        """Why ``route``'s key cannot be used (the secret's name, no value), else ``None``."""
+        ref = SECRET.match(route.api_key)
+        if ref is None:
+            return None
+        try:  # a probe only: caching it would hide the change from ``secrets_changed``
+            self._resolve(ref.group(1))
+        except SecretUnavailable as exc:
+            return str(exc)
+        except Exception as exc:
+            return f"secret {ref.group(1)!r} is not available: {type(exc).__name__}"
+        return None
 
     def adopt_budgets(self, other: Router) -> None:
         """Keep ``other``'s daily token accounting (a rebuilt router after a config reload must
@@ -127,6 +190,8 @@ class Router:
     def eligible(self, minor_present: bool) -> list[LLMRoute]:
         out = []
         for r in self.routes:
+            if r.name in self._unavailable:
+                continue
             if self.monitor and not self.monitor.is_online(r.name):
                 continue
             if minor_present and not (r.allowed_for_minors and self.safety.minors_allowed_llm):
@@ -160,7 +225,9 @@ class Router:
 
     def _resolved_key(self, route: LLMRoute) -> str:
         m = SECRET.match(route.api_key)
-        return self.secrets(m.group(1)) if m else route.api_key
+        if m is None:
+            return route.api_key
+        return self._keys[m.group(1)] if m.group(1) in self._keys else self._resolve(m.group(1))
 
     def _client(self, route: LLMRoute) -> AsyncOpenAI:
         key = self._resolved_key(route)

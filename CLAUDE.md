@@ -10,8 +10,9 @@ section number in commit messages that implement or change behaviour.
 | Path | What |
 | --- | --- |
 | `docs/specs/kickoff.md` | Engineering spec (SPEC), the source of truth |
-| `packages/roboemot-core/` | Python package `roboemot`: config, manifest, discovery, health (connectivity), diagnostics (debug report), vision (detect, track, embed, replay, model fetcher; ONNX backends need the `vision` extra), motion reference, affect (engine, appraisal, runner, register resolver, expression renderer), circadian, persona (traits), LLM router and system prompt, bus |
+| `packages/roboemot-core/` | Python package `roboemot`: config, manifest, discovery, health (connectivity), diagnostics (debug report), vision (detect, track, embed, replay, model fetcher; ONNX backends need the `vision` extra), motion reference, affect (engine, appraisal, runner, register resolver, expression renderer), circadian, persona (traits), LLM router and system prompt, secret store (`secret_store.py`: `${secret:name}` route keys, 0600 file), bus |
 | `packages/roboemot-reachymini/` | Python package `roboemot_reachymini`: Reachy Mini driver and SDK bridge |
+| `packages/roboemot-core/src/roboemot/webui/static/vendor/sondalab-ui-kit/` | Vendored, pinned `@sondalab/ui-kit` (offline web UI). Never edit by hand: change the pin in `scripts/sync_ui_kit.py` and run it; `scripts/audit_webui.sh` runs `sl-audit` on the page (SPEC 12) |
 | `rt/` | C++ real-time core (`roboemot-rt`): arbiter and safety limiter, CMake + ctest |
 | `configs/` | Library defaults, robot manifests, personality presets |
 | `scripts/` | Dev helpers (simulation daemon, `install_on_robot.py`: wrapper over the robot-agnostic installer `roboemot.install`; `robot_ssh.py`: wrapper over `roboemot.install.ssh`) |
@@ -34,6 +35,7 @@ section number in commit messages that implement or change behaviour.
   `tools` with `tool_choice="auto"`, `max_tokens`. Do not rely on `response_format`,
   forced tool choice, `seed` or non-default sampling.
 - **Privacy (SPEC 12):** never write frames, audio or embeddings to logs.
+- **Secrets (SPEC 8, 12):** API keys come only from the secret store (`roboemot secrets set`, value never an argument). Never log, repr, report or return a key; a route whose `${secret:name}` cannot be resolved is unavailable, never sent with an empty key.
 - **Diagnostics (SPEC 12A):** robot-specific debug sources are registered in the
   `roboemot.diagnostics` entry-point group under the manifest `robot.id`; core stays robot-agnostic.
 - **Installer (SPEC 4A, Installer):** same pattern, entry-point group `roboemot.installers`. It
@@ -56,6 +58,7 @@ ruff check . && ruff format --check .
 python scripts/install_on_robot.py --dry-run   # read-only checks against the real robot
 python scripts/install_on_robot.py --uninstall --dry-run   # what uninstall would undo
 python scripts/robot_ssh.py [--host H] [--user U]   # shell on the robot (mDNS pick); `-- cmd` runs one command
+roboemot secrets set cloud_key           # API key for ${secret:cloud_key} (read from the prompt/stdin); list/remove too
 python scripts/robot_ssh.py --copy-id    # install your SSH key; --debug: roboemot debug --json built on the robot; --dry-run prints the ssh line (discovery still runs, no exec)
 roboemot debug --host <robot> --json     # debug report (SPEC 12A); system/battery need it run on the robot
 ```

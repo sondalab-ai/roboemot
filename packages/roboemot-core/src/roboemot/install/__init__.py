@@ -12,6 +12,8 @@ start the app and make it the autostart app. It also creates the private app dat
 (``~/.local/share/roboemot``: registry, models, trait cache) when it is not there yet and
 records it. Unless declined (`--no-piper`) it also creates a Piper virtualenv in the data folder
 (`piper-tts` is GPL-3.0 and runs as its own process, SPEC 8), recorded for uninstall.
+Optionally (``--secret NAME``, or asked on a terminal) it stores an API key in the robot's secret
+store (SPEC 8, 12 Data), recorded by name; uninstall removes only the names it added.
 
 Uninstall: stop the app, give back the previous autostart app (only if the setting still names
 this app), uninstall what the record says this installer added, reinstall the original versions
@@ -38,7 +40,9 @@ from typing import Protocol
 import yaml
 
 from .. import paths
+from ..secret_store import NAME as SECRET_NAME
 from .build import build_wheels, distribution_names, min_python, third_party_requirements
+from .piper_lock import lock_path
 from .pyenv import RemotePython, report_changes
 from .record import InstallRecord, canonical, plan_uninstall
 from .remote import Remote
@@ -50,7 +54,12 @@ REMOTE_TMP_PREFIX = "/tmp/roboemot-install"
 TMP_DIR_PATTERN = re.compile(re.escape(REMOTE_TMP_PREFIX) + r"\.[A-Za-z0-9]+")
 PIN_FILE = "webui_pin.json"  # roboemot.webui.auth.PIN_FILE, inside the app data folder
 PIN_RETRIES = 3
+DEFAULT_SECRET_NAME = "cloud_key"  # the name configs/companion.yaml gives the cloud route key
 PIPER_TTS_VERSION = "1.8.0"  # exact pin: the worker protocol is tested against this API
+PLATFORM_PROBE = (
+    "import sys, platform; print(platform.machine()); print('%d.%d' % sys.version_info[:2])"
+)
+PROBE_PATTERN = re.compile(r"[A-Za-z0-9_]+\n\d+\.\d+")
 INSTALL_STEPS = 6
 UNINSTALL_STEPS = 6
 
@@ -95,6 +104,7 @@ class Options:
     yes: bool = False
     uninstall: bool = False
     piper: bool | None = None
+    secrets: list[str] | None = None
 
 
 # ---------------------------------------------------------------- platforms
@@ -164,6 +174,17 @@ def select_robot(ui: Ui, opts: Options, root: Path) -> tuple[str, Platform]:
 # ---------------------------------------------------------------- shared steps
 
 
+def probe_platform(remote: Remote, python: str) -> tuple[str, str]:
+    """The interpreter's CPU architecture and ``"major.minor"``; anything else is an error."""
+    out = RemotePython(remote, python).py(PLATFORM_PROBE).strip()
+    if not PROBE_PATTERN.fullmatch(out):
+        raise WizardError(
+            f"unexpected answer probing {python} for architecture and version: {out!r}"
+        )
+    arch, version = out.split("\n")
+    return arch, version
+
+
 def check_ssh(
     ui: Ui, platform: Platform, remote: Remote, need: tuple[int, int] | None
 ) -> RemotePython:
@@ -174,9 +195,7 @@ def check_ssh(
     py = RemotePython(remote, platform.python)
     if not py.exists():
         raise WizardError(f"{platform.python} not found: is this a {platform.display_name}?")
-    arch, version = py.py(
-        "import sys, platform; print(platform.machine()); print('%d.%d' % sys.version_info[:2])"
-    ).splitlines()
+    arch, version = probe_platform(remote, platform.python)
     if arch != platform.arch:
         raise WizardError(f"robot architecture is {arch}, expected {platform.arch}")
     if need and tuple(map(int, version.split("."))) < need:
@@ -283,7 +302,8 @@ def install_piper(
     piper-tts is GPL-3.0, so it lives in its own environment and runs as its own process (SPEC
     8). The venv is recorded before it is created, so an interrupted install can be undone; a
     folder that exists but is not in the record is not ours and is left alone. Every pip call
-    passes ``--no-cache-dir``; the dry run only reports.
+    passes ``--no-cache-dir``; the install reads the hash-pinned lock for the robot's architecture
+    and Python (``piper_lock``) with ``--require-hashes``; the dry run only reports.
     """
     venv, python = piper_paths(remote)
     recreate = True
@@ -297,19 +317,25 @@ def install_piper(
     if record.piper_venv != venv and _exists(remote, venv):
         ui.warn(f"{venv} exists but is not in the install record: left alone")
         return
+    lock = lock_path(*probe_platform(remote, platform.python))
     if dry_run:
         ui.info(
             f"would create the Piper virtualenv {venv} and install piper-tts=={PIPER_TTS_VERSION} "
-            "(recorded for uninstall)"
+            f"with hashes from {lock.name} (recorded for uninstall)"
         )
         return
     record.piper_venv = venv
     write_record(remote, platform.record_path, record)
-    if recreate:
-        remote.run(f"mkdir -p -m 700 {shlex.quote(posixpath.dirname(venv))}")
-        remote.run(f"{shlex.quote(platform.python)} -m venv {shlex.quote(venv)}")
-        ui.ok(f"created the Piper virtualenv {venv}")
-    result = RemotePython(remote, python).install_requirement(f"piper-tts=={PIPER_TTS_VERSION}")
+    tmp = remote.run(f"mktemp -d {REMOTE_TMP_PREFIX}.XXXXXX")
+    try:
+        remote.copy([lock], tmp)
+        if recreate:
+            remote.run(f"mkdir -p -m 700 {shlex.quote(posixpath.dirname(venv))}")
+            remote.run(f"{shlex.quote(platform.python)} -m venv {shlex.quote(venv)}")
+            ui.ok(f"created the Piper virtualenv {venv}")
+        result = RemotePython(remote, python).install_locked(f"{tmp}/{lock.name}")
+    finally:
+        remote.run(f"rm -rf {shlex.quote(tmp)}", check=False)
     if not result.ok:
         raise WizardError(f"pip install piper-tts failed on the robot:\n{result.output}")
     ui.ok(f"installed piper-tts {PIPER_TTS_VERSION} (voice files: roboemot models fetch --voice)")
@@ -382,6 +408,110 @@ def set_operator_pin(ui: Ui, py: RemotePython, remote: Remote, dry_run: bool) ->
         return
     remote.run(command, stdin=pin + "\n")
     ui.ok("operator PIN set")
+
+
+def robot_cli(py: RemotePython, folder: str, *args: str) -> str:
+    """The ``roboemot secrets`` command line on the robot, for the folder ``folder``."""
+    action, names = args[0], args[1:]
+    tail = " ".join(["--", *map(shlex.quote, names)]) if names else ""
+    return (
+        f"{shlex.quote(py.python)} -m roboemot.cli secrets {action} "
+        f"--data-dir {shlex.quote(folder)} {tail}"
+    ).rstrip()
+
+
+def ask_secret_value(ui: Ui, name: str) -> str | None:
+    """Ask twice for the value of secret ``name`` on this PC (hidden); None when skipped, not
+    interactive or the entries differ."""
+    value = ui.ask_secret(f"Value of the secret {name!r}")
+    if not value:
+        return None
+    if ui.ask_secret("Repeat the value") == value:
+        return value
+    ui.warn("the two entries differ")
+    return None
+
+
+def check_secret_names(names: list[str]) -> None:
+    """Reject a name that is not a valid secret name, before anything runs on the robot."""
+    for name in names:
+        if not SECRET_NAME.match(name):
+            raise WizardError(f"secret name {name!r} must use letters, numbers, '_', '.' or '-'")
+
+
+def wanted_secrets(ui: Ui, opts: Options) -> list[str]:
+    """Names to store: from ``--secret``, else (interactive, not ``-y``) ask once for a cloud
+    route key. Names that are not valid are rejected before anything runs."""
+    names = opts.secrets
+    if names is None and ui.interactive and not ui.assume_yes:
+        if not ui.confirm("Store an API key for a cloud LLM route on the robot?", False):
+            return []
+        names = [ui.ask("Secret name (the ${secret:name} in the route)", DEFAULT_SECRET_NAME)]
+    check_secret_names(names or [])
+    return names or []
+
+
+def set_secrets(
+    ui: Ui,
+    platform: Platform,
+    py: RemotePython,
+    remote: Remote,
+    record: InstallRecord,
+    names: list[str],
+    dry_run: bool,
+) -> None:
+    """Store the secrets ``names`` in the robot's secret store (SPEC 8, 12 Data).
+
+    Each value is typed on this PC and travels only on the SSH channel's standard input, so it
+    is in no command line, log or message. A name that the store did not have is recorded (by
+    name) before it is written, so uninstall removes exactly it; one that already existed is
+    replaced only on request and stays the robot owner's. The dry run only says what it would do
+    and runs nothing on the robot.
+    """
+    _, folder = remote_data_dir(remote)
+    for name in names:
+        if dry_run:
+            ui.info(f"would ask for the secret {name!r} and store it in {folder}/secrets.json")
+            continue
+        have = remote.run(robot_cli(py, folder, "list")).split()
+        if name in have and not ui.confirm(f"Secret {name!r} is already set. Replace it?", False):
+            ui.ok(f"secret {name} kept")
+            continue
+        value = ask_secret_value(ui, name)
+        if value is None:
+            ui.warn(
+                f"secret {name} not set; set it later on the robot with: "
+                f"{robot_cli(py, folder, 'set', name)}"
+            )
+            continue
+        if name not in have and name not in record.secrets:
+            record.secrets.append(name)
+            write_record(remote, platform.record_path, record)
+        remote.run(robot_cli(py, folder, "set", name), stdin=value + "\n")
+        ui.ok(f"secret {name} stored")
+
+
+def remove_secrets(
+    ui: Ui,
+    platform: Platform,
+    py: RemotePython,
+    remote: Remote,
+    record: InstallRecord,
+    dry_run: bool,
+) -> None:
+    """Remove the secrets this installer added, by recorded name; others stay. Runs while the
+    app's Python is still installed. A name that is gone already is fine."""
+    if not record.secrets:
+        return
+    _, folder = remote_data_dir(remote)
+    names = [n for n in record.secrets if SECRET_NAME.match(n)]  # the record came from the robot
+    if dry_run:
+        ui.ok(f"would remove the secrets {', '.join(names)}")
+        return
+    remote.run(robot_cli(py, folder, "remove", *names))
+    record.secrets = []
+    write_record(remote, platform.record_path, record)
+    ui.ok(f"removed the secrets {', '.join(names)}")
 
 
 def checked_data_dir(remote: Remote, record: InstallRecord) -> tuple[str | None, str | None]:
@@ -550,6 +680,7 @@ def install_packages(
 
 def run_install(opts: Options, ui: Ui, root: Path) -> None:
     ui.steps = INSTALL_STEPS
+    check_secret_names(opts.secrets or [])
     ui.title("installer", "dry run: the robot is not modified" if opts.dry_run else "")
     ui.step("Robot")
     host, platform = select_robot(ui, opts, root)
@@ -585,6 +716,8 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
             if opts.piper:
                 install_piper(ui, platform, remote, record, opts.dry_run)
             set_operator_pin(ui, py, remote, opts.dry_run)
+            names = wanted_secrets(ui, opts)
+            set_secrets(ui, platform, py, remote, record, names, opts.dry_run)
 
             ui.step("Start")
             if opts.dry_run:
@@ -669,6 +802,8 @@ def run_uninstall(opts: Options, ui: Ui, root: Path) -> None:
             ui.ok(f"{would}set the autostart app back to {record.autostart_before or 'none'}")
         else:
             ui.ok(f"autostart app is {current or 'none'}: left as it is")
+
+        remove_secrets(ui, platform, py, remote, record, opts.dry_run)
 
         ui.step("Packages")
         plan = plan_uninstall(record, installed, py.requires())
@@ -796,10 +931,27 @@ def parse_args(argv: list[str] | None = None) -> Options:
         action=argparse.BooleanOptionalAction,
         help="install Piper (on-board speech) in its own virtualenv in the data folder",
     )
+    p.add_argument(
+        "--secret",
+        action="append",
+        metavar="NAME",
+        help="store the secret NAME (an API key for ${secret:NAME}) on the robot; the value is "
+        "asked on this PC without echo and never appears on a command line",
+    )
     p.add_argument("-y", "--yes", action="store_true", help="answer yes to every confirmation")
     a = p.parse_args(argv)
     return Options(
-        a.host, a.user, a.robot, a.dev, a.start, a.startup, a.dry_run, a.yes, a.uninstall, a.piper
+        a.host,
+        a.user,
+        a.robot,
+        a.dev,
+        a.start,
+        a.startup,
+        a.dry_run,
+        a.yes,
+        a.uninstall,
+        a.piper,
+        a.secret,
     )
 
 
