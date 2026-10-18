@@ -90,11 +90,17 @@ def load_vendor() -> dict[str, Static]:
     """
     manifest = json.loads((VENDOR_DIR / "VENDORED.json").read_text())
     out: dict[str, Static] = {}
+    root = VENDOR_DIR.resolve()
     for name, digest in manifest["files"].items():
-        body = (VENDOR_DIR / name).read_bytes()
+        path = (VENDOR_DIR / name).resolve()
+        if not path.is_relative_to(root):
+            raise RuntimeError(f"vendored file {name} is outside the vendor folder")
+        ctype = VENDOR_TYPES.get(path.suffix)
+        if ctype is None:
+            raise RuntimeError(f"vendored file {name} has no known content type")
+        body = path.read_bytes()
         if hashlib.sha256(body).hexdigest() != digest:
             raise RuntimeError(f"vendored file {name} does not match VENDORED.json")
-        ctype = VENDOR_TYPES[Path(name).suffix]
         out[VENDOR_ROUTE + name] = (body, ctype, f'"{digest}"')
     return out
 
@@ -103,8 +109,8 @@ def etag_matches(header: str | None, etag: str) -> bool:
     """Whether an ``If-None-Match`` value names ``etag`` (weak prefix ignored, ``*`` matches)."""
     if not header:
         return False
-    tags = [t.strip().removeprefix("W/") for t in header.split(",")]
-    return "*" in tags or etag in tags
+    tags = [t.strip() for t in header.split(",")]
+    return "*" in tags or etag in [t.removeprefix("W/") for t in tags]
 
 
 class _DeadlineRaw(io.RawIOBase):
@@ -229,14 +235,14 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "bad_host"})
             return
         path = urlsplit(self.path).path
-        if self.command == "GET" and path in self.server.statics:
+        if self.command in ("GET", "HEAD") and path in self.server.statics:
             body, ctype, etag = self.server.statics[path]
             if etag is not None and etag_matches(self.headers.get("If-None-Match"), etag):
                 self._send(HTTPStatus.NOT_MODIFIED, b"", ctype, etag=etag)
             else:
                 self._send(HTTPStatus.OK, body, ctype, etag=etag)
             return
-        if self.command == "GET" and not path.startswith("/api/"):
+        if self.command in ("GET", "HEAD") and not path.startswith("/api/"):
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
             return
         headers = {k.lower(): v for k, v in self.headers.items()}

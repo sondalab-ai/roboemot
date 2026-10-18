@@ -105,3 +105,7 @@ The persona pieces exist and are tested; these callers wait for the pillars they
 
 - [ ] `packages/roboemot-reachymini/tests/test_app_conversation.py::test_the_app_offers_the_default_skills_and_wires_barge_in`
       is timing-flaky under load (failed once in a full run after the slice-2 fix, passes alone).
+- [ ] `packages/roboemot-core/tests/test_llm_router.py::test_hostile_tool_arguments_do_not_fail_the_route_or_get_parsed`
+      fails on Python 3.15 only (deeply nested JSON assertion); it passes on 3.12 and in CI.
+- [ ] No JS behaviour test runner: the web UI dialog flows (`ask()`, the PIN dialog, the settings editor)
+      are covered only by JS-free tests on the served files and by a manual headless-Chrome check.

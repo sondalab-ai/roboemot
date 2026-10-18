@@ -7,7 +7,7 @@ const state = { strings: {}, csrf: null, session: {}, tab: "enroll", timer: null
 
 const t = (key, vars) => {
   let text = state.strings[key] || key;
-  for (const [k, v] of Object.entries(vars || {})) text = text.replace("{" + k + "}", v);
+  for (const [k, v] of Object.entries(vars || {})) text = text.replace("{" + k + "}", () => String(v));
   return text;
 };
 
@@ -130,6 +130,7 @@ async function api(method, path, body) {
     const err = new Error(data.error || "generic");
     err.status = resp.status;
     err.detail = data.detail;
+    err.retryAfter = Number(resp.headers.get("Retry-After"));
     throw err;
   }
   return data;
@@ -139,6 +140,8 @@ function explain(err) {
   const known = state.strings["err_" + err.message];
   let text = known || t("err_generic");
   if (err.message === "consent_refused" && err.detail) text += " " + err.detail;
+  const wait = err.retryAfter;
+  if (err.status === 429 && wait > 0 && wait <= 60) text += " " + t("dialog_retry_in", { n: wait });
   return text;
 }
 
@@ -170,10 +173,15 @@ function ask(opts) {
     const value = opts.input
       ? textInput("dialog-value", { value: opts.input.value || "", maxlength: opts.input.max, required: true })
       : null;
-    const failure = el("p", { class: "sl-field__error", role: "alert", hidden: true });
+    const failure = el("p", { class: "sl-field__error", id: "dialog-error", role: "alert", hidden: true });
     const cancel = button(t("dialog_cancel"), "plain", () => dialog.close());
-    const confirm = el("button", { type: "submit", class: BUTTONS[opts.danger ? "danger" : "primary"] }, opts.confirm || t("dialog_confirm"));
+    const submit = el("button", { type: "submit", class: BUTTONS[opts.danger ? "danger" : "primary"] }, opts.confirm || t("dialog_confirm"));
     let done = null;
+    let inflight = null;
+    const mark = (input) => {
+      for (const i of [pin, value]) if (i) { i.removeAttribute("aria-invalid"); i.removeAttribute("aria-describedby"); }
+      if (input) { input.setAttribute("aria-invalid", "true"); input.setAttribute("aria-describedby", "dialog-error"); }
+    };
     const form = el("form", {
       class: "dialog-form",
       onsubmit: async (ev) => {
@@ -181,18 +189,25 @@ function ask(opts) {
         const args = { pin: pin ? pin.value : null, value: value ? value.value : null };
         if (pin) pin.value = "";
         failure.hidden = true;
-        confirm.disabled = true;
+        mark(null);
+        submit.disabled = true;
+        cancel.disabled = true;
+        inflight = Promise.resolve(opts.run(args)).then(() => { done = true; });
         try {
-          await opts.run(args);
-          done = true;
+          await inflight;
           dialog.close();
         } catch (err) {
           if (err.status === 401 && err.message === "unauthorized") { dialog.close(); await boot(); return; }
           failure.textContent = explain(err);
           failure.hidden = false;
-          if (pin) pin.focus();
+          const pinProblem = ["bad_pin", "locked", "busy", "pin_not_set"].includes(err.message);
+          const target = (pinProblem || !value) ? pin : value;
+          mark(target);
+          if (target) target.focus();
         } finally {
-          confirm.disabled = false;
+          inflight = null;
+          submit.disabled = false;
+          cancel.disabled = false;
         }
       },
     },
@@ -200,12 +215,16 @@ function ask(opts) {
     value ? field("dialog-value", opts.input.label, value) : [],
     pin ? field("dialog-pin", t("pin"), pin) : [],
     failure,
-    el("div", { class: "sl-dialog__actions" }, cancel, confirm));
+    el("div", { class: "sl-dialog__actions" }, cancel, submit));
     dialog.append(el("h2", { class: "sl-dialog__title", id: "dialog-title" }, opts.title), el("div", { class: "sl-dialog__body" }, form));
+    // Esc and the Cancel button are refused while the request is pending: the outcome would be
+    // lost. If the dialog closes anyway, the result still waits for the request to settle, so the
+    // caller refreshes its view.
+    dialog.addEventListener("cancel", (ev) => { if (inflight) ev.preventDefault(); });
     dialog.addEventListener("close", () => {
       if (pin) pin.value = "";
       dialog.remove();
-      resolve(done);
+      (inflight || Promise.resolve()).catch(() => {}).then(() => resolve(done));
     });
     document.body.append(dialog);
     dialog.showModal();
@@ -404,10 +423,14 @@ function rowActions(r, entities) {
     }, { small: true }));
   } else {
     for (const other of entities.filter((o) => o.id !== r.id)) {
-      buttons.push(button(t("merge") + " " + other.display_name, "plain", () => guarded(async () => {
-        await api("POST", "/api/registry/merge", { keep_id: other.id, drop_id: r.id });
-        await registryView();
-      }), { small: true }));
+      buttons.push(button(t("merge") + " " + other.display_name, "plain", async () => {
+        const done = await ask({
+          title: t("merge"), message: t("confirm_merge", { drop: r.display_name, keep: other.display_name }),
+          danger: true, confirm: t("merge"),
+          run: () => api("POST", "/api/registry/merge", { keep_id: other.id, drop_id: r.id }),
+        });
+        if (done) await reload();
+      }, { small: true }));
     }
     buttons.push(button(t("delete"), "danger", async () => {
       const done = await ask({
@@ -601,6 +624,10 @@ function valueView(s) {
 function settingEditor(s, index) {
   const schema = s.schema;
   const controlled = (input) => el("span", { class: FIELD_FX }, input);
+  const flag = (input, on, errorId) => {
+    if (on) { input.setAttribute("aria-invalid", "true"); input.setAttribute("aria-describedby", errorId); }
+    else { input.removeAttribute("aria-invalid"); input.removeAttribute("aria-describedby"); }
+  };
   if ([].concat(schema.type).includes("array")) {
     const max = (schema.items || {}).maxLength;
     const list = el("div", { class: "stack" });
@@ -632,6 +659,7 @@ function settingEditor(s, index) {
       node: el("div", { class: "stack" }, list, el("div", { class: "row" }, add),
         el("p", { class: "hint" }, t("settings_limits", { max: schema.maxItems, len: max }))),
       value: clean,
+      mark: (code, errorId) => entries.forEach((e, n) => flag(e.input, !!code && (code === "phrase_too_long" ? e.input.value.trim().length > max : n === 0), errorId)),
       error: () => {
         const v = clean();
         if (v.length < (schema.minItems || 0) || v.length === 0) return "list_empty";
@@ -648,6 +676,7 @@ function settingEditor(s, index) {
   return {
     node: el("div", { class: "stack" }, parts),
     value: () => (nullable && !text() ? null : text()),
+    mark: (code, errorId) => flag(input, !!code, errorId),
     error: () => {
       if (!text() && !nullable && (schema.minLength || 0) > 0) return "line_empty";
       return text().length > schema.maxLength ? "line_too_long" : null;
@@ -671,7 +700,8 @@ function settingRow(s, index, reload) {
     el("div", { class: "row" }, button(t("settings_edit"), "plain", () => edit(), { small: true })));
   function edit() {
     const editor = settingEditor(s, index);
-    const failure = el("p", { class: "sl-field__error", role: "alert", hidden: true });
+    const errorId = "set-error-" + index;
+    const failure = el("p", { class: "sl-field__error", id: errorId, role: "alert", hidden: true });
     const form = el("form", {
       class: "stack",
       onsubmit: async (ev) => {
@@ -679,6 +709,7 @@ function settingRow(s, index, reload) {
         const code = editor.error();
         failure.hidden = !code;
         failure.textContent = code ? t("err_" + code) : "";
+        editor.mark(code, errorId);
         if (code) return;
         const value = editor.value();
         if (JSON.stringify(value) === JSON.stringify(s.value)) { notice(t("settings_unchanged")); show(); return; }
@@ -748,6 +779,7 @@ const TABS = {
 function showTab(name) {
   stopPolling();
   state.tab = name;
+  document.getElementById("view").setAttribute("aria-labelledby", "tab-" + name);
   notice("");
   for (const b of document.querySelectorAll("#tabs button")) {
     const on = b.dataset.tab === name;
@@ -788,7 +820,7 @@ function shell() {
   tabs.hidden = false;
   tabs.onkeydown = tabKeys;
   tabs.replaceChildren(...Object.keys(TABS).map((name) =>
-    el("button", { type: "button", role: "tab", class: "sl-tabs__tab", "data-tab": name, onclick: () => showTab(name) }, t("tab_" + name))));
+    el("button", { type: "button", role: "tab", id: "tab-" + name, "aria-controls": "view", class: "sl-tabs__tab", "data-tab": name, onclick: () => showTab(name) }, t("tab_" + name))));
   const out = document.getElementById("logout");
   out.hidden = false;
   out.textContent = t("logout");

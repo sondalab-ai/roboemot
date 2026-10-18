@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
 import json
 import re
 import shutil
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -158,3 +160,80 @@ def test_everything_else_stays_no_store_without_an_etag(client):
 )
 def test_only_manifest_files_are_served(client, path):
     assert client.request("GET", path).status == 404
+
+
+# ------------------------------------------------------------------ HEAD, ETag parsing, guards
+
+
+def test_head_on_a_vendored_file_is_200_with_headers_and_no_body(client):
+    path = ROUTE + "tokens.css"
+    resp = client.request("HEAD", path)
+    assert resp.status == 200
+    assert resp.body == b""
+    assert resp.headers["ETag"] == f'"{MANIFEST["files"]["tokens.css"]}"'
+    assert resp.headers["Cache-Control"] == "no-cache"
+    assert int(resp.headers["Content-Length"]) == (VENDOR / "tokens.css").stat().st_size
+
+
+def test_head_on_a_first_party_file_is_no_store_and_a_missing_one_404(client):
+    resp = client.request("HEAD", "/static/app.js")
+    assert resp.status == 200 and resp.body == b""
+    assert resp.headers["Cache-Control"] == "no-store"
+    assert client.request("HEAD", ROUTE + "nope.css").status == 404
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        (None, False),
+        ("", False),
+        ('"a"', True),
+        ('W/"a"', True),
+        ("*", True),
+        ("W/*", False),
+        ('"b", "a"', True),
+        ('"b" , W/"a" ,', True),
+        ('"b", garbage, "c"', False),
+        ('garbage, "a"', True),
+        ("a", False),
+        (",,", False),
+    ],
+)
+def test_etag_matches(header, expected):
+    assert server_module.etag_matches(header, '"a"') is expected
+
+
+def test_load_vendor_refuses_a_path_outside_the_folder_and_an_unknown_suffix(tmp_path, monkeypatch):
+    copy = tmp_path / "kit"
+    copy.mkdir()
+    (copy / "x.bin").write_bytes(b"x")
+    digest = hashlib.sha256(b"x").hexdigest()
+    monkeypatch.setattr(server_module, "VENDOR_DIR", copy)
+    (copy / "VENDORED.json").write_text(json.dumps({"files": {"x.bin": digest}}))
+    with pytest.raises(RuntimeError, match="content type"):
+        server_module.load_vendor()
+    (tmp_path / "outside.css").write_text("a")
+    (copy / "VENDORED.json").write_text(json.dumps({"files": {"../outside.css": digest}}))
+    with pytest.raises(RuntimeError, match="outside"):
+        server_module.load_vendor()
+
+
+def test_an_unverified_copy_fails_the_check(tmp_path, monkeypatch, capsys):
+    copy = tmp_path / "kit"
+    shutil.copytree(VENDOR, copy)
+    manifest = json.loads((copy / "VENDORED.json").read_text())
+    manifest["integrity"] = None
+    (copy / "VENDORED.json").write_text(json.dumps(manifest))
+    monkeypatch.setattr(SYNC, "VENDOR_DIR", copy)
+    assert SYNC.check() == 1
+    assert "unverified" in capsys.readouterr().out
+
+
+def test_a_file_missing_from_the_tarball_is_a_clear_exit():
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        info = tarfile.TarInfo("package/package.json")
+        info.size = 2
+        tar.addfile(info, io.BytesIO(b"{}"))
+    with pytest.raises(SystemExit, match="missing in tarball"):
+        SYNC.read_from_tarball(buf.getvalue())

@@ -82,7 +82,10 @@ def read_from_tarball(data: bytes) -> dict[str, bytes]:
     out: dict[str, bytes] = {}
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
         for name in FILES:
-            member = tar.extractfile(f"package/{name}")
+            try:
+                member = tar.extractfile(f"package/{name}")
+            except KeyError:
+                member = None
             if member is None:
                 sys.exit(f"missing in tarball: {name}")
             out[name] = member.read()
@@ -94,6 +97,7 @@ def read_from_dir(root: Path) -> dict[str, bytes]:
 
 
 def write(files: dict[str, bytes], integrity: str | None) -> None:
+    """Copy ``files`` and write the manifest; ``integrity`` is None for an unverified source."""
     pkg = json.loads(files["package.json"])
     if pkg.get("version") != UI_KIT_VERSION:
         sys.exit(f"package is {pkg.get('version')}, pinned {UI_KIT_VERSION}")
@@ -105,7 +109,7 @@ def write(files: dict[str, bytes], integrity: str | None) -> None:
         "package": "@sondalab/ui-kit",
         "version": UI_KIT_VERSION,
         "license": pkg.get("license"),
-        "integrity": integrity or UI_KIT_INTEGRITY,
+        "integrity": integrity,
         "files": {name: sha256(files[name]) for name in FILES},
     }
     (VENDOR_DIR / MANIFEST).write_text(json.dumps(manifest, indent=2) + "\n")
@@ -114,7 +118,9 @@ def write(files: dict[str, bytes], integrity: str | None) -> None:
 def check() -> int:
     manifest = json.loads((VENDOR_DIR / MANIFEST).read_text())
     problems = []
-    if manifest["version"] != UI_KIT_VERSION or manifest["integrity"] != UI_KIT_INTEGRITY:
+    if manifest["integrity"] is None:
+        problems.append("integrity is null: the copy came from --from and is unverified")
+    elif manifest["version"] != UI_KIT_VERSION or manifest["integrity"] != UI_KIT_INTEGRITY:
         problems.append("manifest does not match the pinned version")
     if set(manifest["files"]) != set(FILES):
         problems.append("manifest file list differs from FILES")

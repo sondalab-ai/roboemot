@@ -220,3 +220,26 @@ def test_only_a_saved_change_fires_the_glitch_burst():
 def test_vendored_javascript_is_the_only_place_for_effect_internals():
     server_text = Path(server_module.__file__).read_text()
     assert "img-src 'self';" in server_text  # CSP unchanged: no data: images, so no glass lens
+
+
+def test_dialogs_cover_merge_and_guard_the_pending_request():
+    js = (STATIC / "app.js").read_text()
+    assert "confirm_merge" in js and EN["confirm_merge"] and IT["confirm_merge"]
+    assert 'addEventListener("cancel"' in js and "if (inflight) ev.preventDefault()" in js
+    assert not re.search(r"const confirm\b", js)
+
+
+def test_error_states_are_programmatic_and_tabs_are_linked_to_the_panel():
+    js = (STATIC / "app.js").read_text()
+    assert js.count('"aria-invalid"') >= 2 and js.count("aria-describedby") >= 3
+    assert '"aria-controls": "view"' in js and '"aria-labelledby", "tab-"' in js
+
+
+def test_string_templates_use_a_replacer_function():
+    js = (STATIC / "app.js").read_text()
+    assert 'text.replace("{" + k + "}", () => String(v))' in js
+
+
+def test_retry_hint_strings_exist():
+    for lang in (EN, IT):
+        assert "{n}" in lang["dialog_retry_in"]
