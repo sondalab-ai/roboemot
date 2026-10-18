@@ -22,6 +22,7 @@ Reply = Literal["yes", "no", "other"]
 KEY_FORBIDDEN = re.compile(r"[^a-z0-9 _-]")
 VALUE_FORBIDDEN = re.compile(r"[\"'`<>{}\[\]\\|=;]")
 SPACES = re.compile(r"\s+")
+WORD = re.compile(r"\w+")
 
 
 class PreferenceStore(Protocol):
@@ -41,6 +42,7 @@ class Pending:
     key: str = field(repr=False)
     value: str = field(repr=False)
     expires: float
+    job: int  # the speech job of the question
 
 
 def _clean(text: str) -> str:
@@ -65,19 +67,50 @@ def sanitise_preference(
     return k, v
 
 
+def _words(text: str) -> list[str]:
+    """Lower-cased words, accents kept (``sì`` is not ``si``)."""
+    return WORD.findall(unicodedata.normalize("NFC", text).casefold())
+
+
+def _consume(words: list[str], phrases: Collection[list[str]]) -> int:
+    """How many leading words ``phrases`` (token lists, longest first) cover at position 0."""
+    for phrase in phrases:
+        if words[: len(phrase)] == phrase:
+            return len(phrase)
+    return 0
+
+
 def reply_kind(
     text: str,
     language: str,
     yes: Mapping[str, Collection[str]],
     no: Mapping[str, Collection[str]],
+    fillers: Mapping[str, Collection[str]],
+    max_words: int,
 ) -> Reply:
-    """``yes`` if the text holds a yes phrase and no no phrase (whole words), ``no`` if it
-    holds a no phrase, else ``other``. Phrases are those of ``language``."""
+    """``no`` if the reply holds a no phrase (whole words, accents ignored); ``yes`` only if it
+    is at most ``max_words`` long, starts with a yes phrase, and every other word belongs to a
+    yes phrase or a filler (``sì grazie``): "Come si dice cane?", "si chiama Luca" and "Ok
+    Google" are not confirmations. Else ``other``. Phrases are those of ``language``."""
     padded = f" {normalise(text)} "
-
-    def has(table: Mapping[str, Collection[str]]) -> bool:
-        return any(f" {p} " in padded for p in (normalise(x) for x in table.get(language, ())) if p)
-
-    if has(no):
+    if any(f" {p} " in padded for p in (normalise(x) for x in no.get(language, ())) if p):
         return "no"
-    return "yes" if has(yes) else "other"
+    words = _words(text)
+    if not 0 < len(words) <= max_words:
+        return "other"
+    yes_phrases = sorted(
+        (w for w in (_words(x) for x in yes.get(language, ())) if w), key=len, reverse=True
+    )
+    filler_phrases = sorted(
+        (w for w in (_words(x) for x in fillers.get(language, ())) if w), key=len, reverse=True
+    )
+    first = _consume(words, yes_phrases)
+    if not first:
+        return "other"
+    rest = words[first:]
+    while rest:
+        n = _consume(rest, [*yes_phrases, *filler_phrases])
+        if not n:
+            return "other"
+        rest = rest[n:]
+    return "yes"

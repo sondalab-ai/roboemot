@@ -12,7 +12,7 @@ import pytest
 from roboemot.affect import AffectEngine
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.llm.prompt import MINOR_RULE
-from roboemot.skills import SkillRegistry, skill
+from roboemot.skills import SkillContext, SkillRegistry, skill
 from roboemot.skills.defaults import SkillEnv, default_skills
 from test_conversation_worker import (
     CLEARED,
@@ -20,6 +20,7 @@ from test_conversation_worker import (
     LAN,
     rigs,  # noqa: F401  (fixture)
     sse_piece,
+    utt,
     wait_for,
 )
 from test_llm_router import chunk
@@ -286,7 +287,7 @@ def test_a_minor_appearing_between_rounds_ends_the_turn(tooled):
     )
     rig.turn("ciao")
     assert len(srv.bodies) == 1  # no second request
-    assert rig.speech.texts() == []  # "Guardo." was written without the minor rules: dropped
+    assert rig.speech.texts() == ["Guardo."]  # said before the skill ran; the next round never came
     assert rig.worker.snapshot()["minor_cut"] == 1
 
 
@@ -316,7 +317,7 @@ def test_skills_not_allowed_with_a_minor_are_not_offered_to_a_child(tooled):
 
 
 def test_stop_talking_stops_the_speech_ends_the_turn_and_keeps_what_was_heard(tooled):
-    rig, srv, _ = tooled(["Prima. ", "Seconda. ", C(0, "c1", "stop_talking", {}), "Mai."])
+    rig, srv, _ = tooled(["Prima. ", "Seconda. ", C(0, "c1", "stop_talking", {})])
     rig.speech.unplayed = {2}  # the second sentence was queued behind the first, not heard
     rig.turn("parla")
     assert rig.speech.stops == 1 and len(srv.bodies) == 1
@@ -505,13 +506,201 @@ def test_reply_kind_and_sanitising_edges():
     from roboemot.conversation.confirm import reply_kind, sanitise_preference
 
     conv = RoboEmotConfig().conversation
-    kinds = lambda text, lang="it": reply_kind(text, lang, conv.confirm_yes, conv.confirm_no)  # noqa: E731
+
+    def kinds(text, lang="it"):
+        return reply_kind(
+            text,
+            lang,
+            conv.confirm_yes,
+            conv.confirm_no,
+            conv.confirm_fillers,
+            conv.confirm_max_words,
+        )
+
     assert kinds("Sì!") == "yes" and kinds("sì, va bene") == "yes" and kinds("OK") == "yes"
+    assert kinds("sì grazie") == "yes" and kinds("certo, volentieri") == "yes"
     assert kinds("no") == "no" and kinds("sì però no") == "no" and kinds("non ora") == "no"
     assert kinds("forse domani") == "other" and kinds("") == "other"
     assert kinds("yes please", "en") == "yes" and kinds("yes", "it") == "other"  # language lists
     assert kinds("siamo qui") == "other"  # whole words only
+    # a yes word inside another sentence is not a confirmation
+    assert kinds("Come si dice cane in inglese?") == "other"
+    assert kinds("si chiama Luca") == "other" and kinds("si si") == "other"  # bare si: no accent
+    assert kinds("Ok Google") == "other"
+    assert kinds("Sure, what is the weather like", "en") == "other"
+    assert kinds("sì sì sì sì sì") == "other"  # longer than confirm_max_words
+    assert kinds("What time is it? yes", "en") == "other"  # the yes phrase comes first
     assert sanitise_preference("A b", "x" * 120, 40, 120) is not None
     assert sanitise_preference("A b", "x" * 121, 40, 120) is None
     assert sanitise_preference(1, "x", 40, 120) is None
     assert sanitise_preference("a​b", "c‍d", 40, 120) == ("ab", "cd")
+
+
+# ------------------------------------------------------------------ review round: confirmation
+
+
+def test_a_reply_that_started_before_the_question_ended_is_not_the_answer(tooled):
+    rig, srv, store = ask(tooled)
+    rig.speech.ends[1] = 2000.0  # the question plays until t=2000
+    rig.turn("sì", stamp=1500.0)  # queued behind it, or a voice over it
+    assert store.saved == [] and len(srv.bodies) == 2  # an ordinary turn
+    rig.turn("sì", stamp=2002.0)  # after the question: this is the answer
+    assert store.saved == [("p1", "colore preferito", "blu")]
+
+
+def test_a_question_that_never_played_cannot_be_answered(tooled):
+    rig, srv, store = ask(tooled)
+    rig.speech.unplayed = {1}
+    rig.turn("sì", stamp=5000.0)
+    assert store.saved == [] and len(srv.bodies) == 2
+
+
+def test_the_confirmation_timeout_defaults_to_ten_seconds():
+    assert RoboEmotConfig().conversation.confirm_timeout_s == 10.0
+
+
+def test_a_barge_in_before_the_question_finished_drops_it(tooled):
+    rig, srv, store = ask(tooled)
+    rig.speech.ends[1] = 2000.0  # still playing at clock 1000
+    rig.worker.interrupt()
+    rig.turn("sì", stamp=5000.0)
+    assert store.saved == [] and rig.worker.snapshot()["confirm_cut"] == 1
+
+
+def test_a_barge_in_after_the_question_was_heard_keeps_it(tooled):
+    rig, srv, store = ask(tooled)
+    rig.worker.interrupt()  # the question ended long ago (default): it was heard
+    rig.turn("sì", stamp=5000.0)
+    assert store.saved == [("p1", "colore preferito", "blu")]
+
+
+def test_a_skill_thread_that_outlives_its_turn_changes_nothing(tooled):
+    import threading
+
+    rig, srv, _ = tooled(
+        [C(0, "c1", "late", {})],
+        ["Ok."],
+        conversation={"llm_skills": ["late"], "tool_timeout_s": 0.1},
+    )
+    done = threading.Event()
+    seen = []
+
+    @skill(llm_visible=True)
+    def late(ctx: SkillContext) -> str:
+        time.sleep(0.4)
+        seen.append(ctx.ask_confirmation("colore", "blu"))
+        done.set()
+        return "x"
+
+    rig.worker.skills = SkillRegistry([late])
+    rig.worker.preferences = Store()
+    rig.turn("ricordati")
+    assert done.wait(3)
+    assert seen == ["cancelled"] and rig.worker._confirm is None
+    assert "Vuoi che ricordi" not in " ".join(rig.speech.texts())
+
+
+# ------------------------------------------------------------------ review round: loop details
+
+
+def test_two_questions_in_one_round_ask_only_the_first(tooled):
+    store = Store()
+    rig, srv, _ = tooled(
+        [C(0, "c1", "remember_preference", {"key": "a", "value": "uno"}),
+         C(1, "c2", "remember_preference", {"key": "b", "value": "due"})],
+        store=store,
+    )  # fmt: skip
+    rig.turn("ricordati")
+    assert rig.speech.texts() == ["Vuoi che ricordi questo: a, uno?"]
+    assert rig.worker.snapshot()["confirm_asked"] == 1 and len(srv.bodies) == 1
+
+
+def test_calls_beyond_the_per_round_cap_are_answered_with_an_error_unrun(tooled):
+    calls = [C(i, f"c{i}", "play", {"gesture": "joy"}) for i in range(6)]
+    rig, srv, env = tooled(calls, ["Fatto."])
+    rig.turn("ciao")
+    assert len(env.played) == 4
+    tool = [json.loads(m["content"]) for m in srv.bodies[1]["messages"] if m["role"] == "tool"]
+    assert len(tool) == 6 and [t.get("error") for t in tool[4:]] == ["too_many_calls"] * 2
+
+
+def test_the_sentences_of_a_tool_round_are_the_content_of_its_assistant_message(tooled):
+    rig, srv, _ = tooled(
+        ["Guardo. ", C(0, "c1", "play", {"gesture": "joy"})], ["Fatto."], ["Certo."]
+    )
+    rig.turn("uno")
+    assert srv.bodies[1]["messages"][-2]["content"] == "Guardo."
+    rig.turn("due")
+    roles = [(m["role"], m.get("content")) for m in srv.bodies[2]["messages"][1:]]
+    assert roles == [
+        ("user", "uno"), ("assistant", "Guardo."), ("tool", '{"ok": true}'),
+        ("assistant", "Fatto."), ("user", "due"),
+    ]  # fmt: skip
+
+
+def test_the_text_before_a_call_is_spoken_before_the_skill_acts(tooled):
+    order = []
+    rig, srv, _ = tooled(
+        ["Ecco la domanda. ", C(0, "c1", "remember_preference", {"key": "a", "value": "b"})],
+        store=Store(),
+    )
+    real_say = rig.speech.say
+    rig.speech.say = lambda text, **kw: (order.append(text), real_say(text, **kw))[1]
+    rig.turn("ricordati")
+    assert order[0] == "Ecco la domanda." and order[1].startswith("Vuoi che")
+
+
+def test_nothing_is_said_after_a_barge_in_began_even_before_the_stop_lands(tooled):
+    rig, srv, _ = tooled(["Uno. ", "Due. ", "Tre", GATE, "..."])
+    n = rig.say("racconta")
+    assert wait_for(lambda: rig.speech.texts() == ["Uno.", "Due."])
+    rig.worker.mark_interrupting()  # the barge-in thread: first step
+    rig.server.gate.set()  # the model goes on talking, the stop has not landed yet
+    time.sleep(0.15)
+    assert rig.speech.texts() == ["Uno.", "Due."]
+    rig.worker.interrupt()
+    assert rig.done(n)
+
+
+def test_the_choices_the_model_was_shown_are_what_the_executor_checks(tooled):
+    names = ["a"]
+
+    @skill(llm_visible=True, inline=True)
+    def grow() -> dict:
+        names.append("b")  # the world changes while the model is answering
+        return {"ok": True}
+
+    @skill(llm_visible=True, choices={"who": lambda: list(names)})
+    def pick(who: str) -> dict:
+        return {"who": who}
+
+    rig, srv, _ = tooled(
+        [C(0, "c1", "grow", {}), C(1, "c2", "pick", {"who": "b"})],
+        ["Ok."],
+        conversation={"llm_skills": ["grow", "pick"]},
+    )
+    rig.worker.skills = SkillRegistry([grow, pick])
+    rig.turn("ciao")
+    assert srv.bodies[0]["tools"][1]["function"]["parameters"]["properties"]["who"]["enum"] == ["a"]
+    tool = [json.loads(m["content"]) for m in srv.bodies[1]["messages"] if m["role"] == "tool"]
+    assert tool[1]["error"] == "invalid_arguments"  # "b" was never offered
+
+
+# ------------------------------------------------------------------ review round: stop phrase
+
+
+def test_a_stop_phrase_right_after_a_barge_in_is_not_answered(tooled):
+    rig, srv, _ = tooled()
+    rig.worker.interrupt()
+    assert rig.worker.submit(utt("stop")) is False
+    assert rig.worker.submit(utt("basta basta")) is False
+    assert rig.worker.submit(utt("stop", language="en")) is False
+    assert rig.worker.submit(utt("fermati e dimmi l'ora")) is True  # more than the command
+    assert rig.worker.snapshot()["stop_consumed"] == 3
+    rig.clock[0] += 30  # long after: an ordinary word
+    assert rig.worker.submit(utt("stop")) is True
+
+
+def test_a_stop_phrase_without_a_barge_in_is_an_ordinary_utterance(tooled):
+    rig, srv, _ = tooled()
+    assert rig.worker.submit(utt("stop")) is True

@@ -2,7 +2,9 @@
 remember_preference, stop_talking.
 
 They take their effects from a :class:`SkillEnv` of callables the app provides, so this module
-knows no robot. None of them can address a joint: ``play`` names an expression of the manifest's
+knows no robot. All five run inline on the conversation's event loop (they only post a request),
+so none can outlive its turn. None of them can address a joint: ``play`` names an
+expression of the manifest's
 map (rendered by the expression renderer under the register, persona, circadian and minor
 caps), ``look_at`` a category or a name in view (a hint to the attention selector, so the gaze
 controller and the limiter still decide), ``express_emotion`` a label and a strength (an affect
@@ -30,8 +32,8 @@ OK = {"ok": True}
 
 @dataclass
 class SkillEnv:
-    """What the default skills act through. Every callable may be called from the
-    conversation's thread: they post a request or touch thread-safe state, never a joint."""
+    """What the default skills act through. Every callable runs on the conversation's event
+    loop and must not block: it posts a request or touches thread-safe state, never a joint."""
 
     gestures: Callable[[], Sequence[str]]  # expression labels the robot can play
     play: Callable[[str], bool]
@@ -45,6 +47,7 @@ def default_skills(env: SkillEnv) -> SkillRegistry:
 
     @skill(
         llm_visible=True,
+        inline=True,
         description="Play one of the robot's named gestures (a short body expression).",
         choices={"gesture": env.gestures},
     )
@@ -53,6 +56,7 @@ def default_skills(env: SkillEnv) -> SkillRegistry:
 
     @skill(
         llm_visible=True,
+        inline=True,
         description=(
             "Turn the head to look at someone or something: 'speaker' or 'person' for the "
             "people, 'animal', 'object', 'away' to look aside, or a name of what is in view."
@@ -64,6 +68,7 @@ def default_skills(env: SkillEnv) -> SkillRegistry:
 
     @skill(
         llm_visible=True,
+        inline=True,
         description=(
             "Show a feeling in the robot's own mood: it nudges the mood a little towards the "
             "emotion, never beyond a small amount per turn."
@@ -86,6 +91,7 @@ def default_skills(env: SkillEnv) -> SkillRegistry:
 
     @skill(
         llm_visible=True,
+        inline=True,
         confirm=True,
         description=(
             "Remember a fact about the person who is talking (a preference such as a favourite "
@@ -103,6 +109,7 @@ def default_skills(env: SkillEnv) -> SkillRegistry:
 
     @skill(
         llm_visible=True,
+        inline=True,
         description="Stop talking now and end this turn, for example when asked to be quiet.",
     )
     def stop_talking(ctx: SkillContext) -> SkillResult:

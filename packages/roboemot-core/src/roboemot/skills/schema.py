@@ -162,6 +162,8 @@ def validate(
     """The arguments as the skill takes them, or ``ArgError``: a mapping with exactly the
     declared names, each of its type (a bool is not an integer), strings within their cap and
     among the choices, numbers finite and clamped to their ``Range``."""
+    if args is None:  # a call without arguments: some models send null
+        args = {}
     if not isinstance(args, dict):
         raise ArgError(None, "arguments must be an object")
     known = {p.name for p in params}
@@ -190,7 +192,7 @@ def _value(p: Param, v: Any, options: Sequence[Any] | None, max_chars: int | Non
         ok = isinstance(v, str)
     if not ok:
         raise ArgError(p.name, "wrong type")
-    if p.kind is str:
+    if p.kind is str and options is None:  # a choice is checked against its list, not a length
         caps = [x for x in (p.max_len, max_chars) if x is not None]
         if caps and len(v) > min(caps):
             raise ArgError(p.name, "too long")

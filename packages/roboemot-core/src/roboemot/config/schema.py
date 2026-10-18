@@ -2284,9 +2284,10 @@ class ConversationConfig(Strict):
         unit="deg", ge=5, le=90,
     )  # fmt: skip
     confirm_timeout_s: float = param(
-        20.0,
+        10.0,
         "A spoken request to remember a preference expires after this long; only the very next "
-        "utterance from the same person can confirm it",
+        "utterance from the same person, started after the question finished playing, can "
+        "confirm it",
         unit="s", ge=1, le=300,
     )  # fmt: skip
     preference_key_max_chars: int = param(
@@ -2300,12 +2301,35 @@ class ConversationConfig(Strict):
     )
     confirm_yes: dict[str, list[str]] = param(
         {
-            "it": ["si", "certo", "va bene", "esatto", "ok", "sicuro", "volentieri"],
+            "it": ["sì", "certo", "va bene", "esatto", "ok", "sicuro", "volentieri"],
             "en": ["yes", "yeah", "yep", "sure", "ok", "okay", "please do", "that is right"],
         },
-        "Phrases that confirm a spoken request, per language (whole words, accents and case "
-        "ignored). A reply that also holds a `no` or `stop` phrase confirms nothing",
+        "Phrases that confirm a spoken request, per language (whole words, case ignored, "
+        "accents kept: Italian `sì` is yes, bare `si` is not, as in `si chiama Luca`). A reply "
+        "counts as a yes only when it is at most confirm_max_words long and made of yes phrases "
+        "and confirm_fillers, a yes phrase first; a reply that holds a `no` phrase declines",
     )
+    confirm_fillers: dict[str, list[str]] = param(
+        {
+            "it": ["grazie", "pure", "per favore", "grazie mille"],
+            "en": ["please", "thanks", "thank you", "definitely"],
+        },
+        "Words allowed after the yes phrase in a confirming reply (`sì grazie`)",
+    )
+    confirm_max_words: int = param(
+        4, "A reply longer than this never confirms a spoken request", ge=1, le=20
+    )
+    max_tool_calls_per_round: int = param(
+        4,
+        "Tool calls run per request; further ones are answered with an error result unrun",
+        ge=1, le=20,
+    )  # fmt: skip
+    stop_drop_window_s: float = param(
+        5.0,
+        "After a barge-in, an utterance made only of a stop phrase that is heard this soon is "
+        "the command that already stopped the robot and is not answered",
+        unit="s", ge=0, le=60,
+    )  # fmt: skip
     confirm_no: dict[str, list[str]] = param(
         {
             "it": ["no", "non", "mai", "lascia stare", "basta", "stop"],
@@ -2323,6 +2347,10 @@ class ConversationConfig(Strict):
     confirm_saved_lines: dict[str, str] = param(
         {"it": "Va bene, lo ricorderò.", "en": "Okay, I will remember."},
         "Spoken after the person confirmed and the preference was stored",
+    )
+    confirm_failed_lines: dict[str, str] = param(
+        {"it": "Non sono riuscito a ricordarlo.", "en": "I could not remember that."},
+        "Spoken when the person confirmed but the preference could not be stored",
     )
     confirm_declined_lines: dict[str, str] = param(
         {"it": "Va bene, non lo ricordo.", "en": "Okay, I will not remember it."},

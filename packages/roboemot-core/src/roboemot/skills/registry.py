@@ -62,6 +62,7 @@ class Skill:
     allowed_with_minor: bool
     signature: Signature
     choices: Choices = field(default_factory=dict)
+    inline: bool = False
 
     @property
     def params(self) -> tuple[Param, ...]:
@@ -84,11 +85,15 @@ def skill(
     confirm: bool = False,
     allowed_with_minor: bool = True,
     choices: Choices | None = None,
+    inline: bool = False,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Mark ``fn`` as a skill (``fn.skill`` is its :class:`Skill`). ``name`` defaults to the
     function's; ``description`` to the first line of its docstring. ``confirm`` says the skill
     asks the person before it acts (informational: the skill does the asking). ``choices`` maps a
-    parameter to a function giving its allowed values at run time (labels, names in view)."""
+    parameter to a function giving its allowed values at run time (labels, names in view).
+    ``inline`` runs a plain function on the event loop instead of a worker thread: for skills
+    that only post a request and return, so nothing of theirs can still be running (and
+    touching a finished turn) after a timeout or a cancel. They must not block."""
 
     def wrap(fn: Callable[..., Any]) -> Callable[..., Any]:
         text = description or (inspect.getdoc(fn) or "").split("\n")[0]
@@ -105,6 +110,7 @@ def skill(
             allowed_with_minor,
             sig,
             dict(choices or {}),
+            inline,
         )
         return fn
 
@@ -147,17 +153,34 @@ class SkillRegistry:
         ]
 
     @staticmethod
+    def snapshot_choices(
+        offered: Sequence[Skill], enum_max: int | None = None
+    ) -> dict[str, dict[str, list[Any]]]:
+        """The run-time choices of ``offered`` skills, resolved once: what the model is shown
+        is what the executor checks, even if the world changes while it answers."""
+        return {s.name: s.resolved_choices(enum_max) for s in offered}
+
+    @staticmethod
     def tools(
-        offered: Sequence[Skill], *, enum_max: int | None = None, max_chars: int | None = None
+        offered: Sequence[Skill],
+        *,
+        enum_max: int | None = None,
+        max_chars: int | None = None,
+        choices: Mapping[str, Mapping[str, Sequence[Any]]] | None = None,
     ) -> list[dict[str, Any]]:
-        """OpenAI ``tools`` entries for ``offered``, choices resolved now."""
+        """OpenAI ``tools`` entries for ``offered``; choices from ``choices`` (a snapshot) or
+        resolved now."""
         return [
             {
                 "type": "function",
                 "function": {
                     "name": s.name,
                     "description": s.description,
-                    "parameters": json_schema(s.params, s.resolved_choices(enum_max), max_chars),
+                    "parameters": json_schema(
+                        s.params,
+                        choices[s.name] if choices is not None else s.resolved_choices(enum_max),
+                        max_chars,
+                    ),
                 },
             }
             for s in offered
@@ -193,14 +216,17 @@ async def execute(
     timeout_s: float,
     max_chars: int,
     enum_max: int,
+    choices: Mapping[str, Mapping[str, Sequence[Any]]] | None = None,
 ) -> ToolOutcome:
     """Run the call ``name(args)``. Only a skill in ``offered`` runs (a model may name one it
-    was not given). Validation, timeout and exceptions become error results."""
+    was not given). Validation, timeout and exceptions become error results. ``choices`` is the
+    snapshot the model was shown (else the choices are resolved now)."""
     s = registry.get(name)
     if s is None or name not in offered:
         return _error("unknown_skill", "")
     try:
-        kwargs = validate(s.params, args, s.resolved_choices(enum_max), max_chars)
+        options = choices[name] if choices is not None else s.resolved_choices(enum_max)
+        kwargs = validate(s.params, args, options, max_chars)
     except ArgError as exc:
         return _error("invalid_arguments", name, f"{exc.param or 'call'}: {exc.reason}")
     if s.signature.context is not None:
@@ -208,6 +234,8 @@ async def execute(
     try:
         if inspect.iscoroutinefunction(s.fn):
             value = await asyncio.wait_for(s.fn(**kwargs), timeout_s)
+        elif s.inline:
+            value = s.fn(**kwargs)
         else:
             value = await asyncio.wait_for(asyncio.to_thread(s.fn, **kwargs), timeout_s)
     except TimeoutError:

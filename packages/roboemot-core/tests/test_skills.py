@@ -338,3 +338,46 @@ async def test_remember_preference_asks_and_ends_the_turn_and_stop_talking_stops
     out = await run(e.reg, "stop_talking", {}, ctx)
     assert out.end_turn and stopped == [1]
     assert asyncio.get_running_loop()  # (keeps the module async-aware)
+
+
+async def test_null_arguments_mean_no_arguments_and_other_non_objects_are_refused():
+    @skill(llm_visible=True)
+    def quiet() -> str:
+        return "done"
+
+    reg = SkillRegistry([quiet])
+    assert (await run(reg, "quiet", None)).ok  # "null"
+    for bad in (5, True, "x", [1]):
+        out = await run(reg, "quiet", bad)
+        assert not out.ok and json.loads(out.content)["error"] == "invalid_arguments"
+
+
+async def test_a_choice_is_checked_against_its_list_not_against_the_text_cap():
+    @skill(llm_visible=True, choices={"who": lambda: ["a" * 80]})
+    def pick(who: str) -> str:
+        return "ok"
+
+    reg = SkillRegistry([pick])
+    out = await execute(
+        reg, ["pick"], "pick", {"who": "a" * 80}, CTX, timeout_s=1, max_chars=10, enum_max=5
+    )
+    assert out.ok  # an offered name longer than tool_arg_max_chars still works
+
+
+def test_the_default_skills_run_inline_on_the_loop():
+    assert all(reg_skill.inline for reg_skill in Env().reg._skills.values())
+
+
+async def test_inline_skills_run_on_the_calling_thread():
+    import threading
+
+    seen = []
+
+    @skill(llm_visible=True, inline=True)
+    def here() -> str:
+        seen.append(threading.current_thread())
+        return "x"
+
+    reg = SkillRegistry([here])
+    await run(reg, "here", {})
+    assert seen == [threading.current_thread()]

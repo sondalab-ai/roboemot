@@ -29,6 +29,7 @@ import collections
 import contextlib
 import json
 import logging
+import math
 import threading
 import time
 from collections.abc import Callable
@@ -51,6 +52,7 @@ from ..llm.router import (
 )
 from ..persona import apply_to_register, effects
 from ..skills import Skill, SkillContext, SkillRegistry, ToolOutcome, execute
+from ..voice.keywords import normalise
 from ..voice.listener import Utterance
 from ..voice.prosody import resolve_tag
 from ..voice.tts import Sentence, SentenceSplitter
@@ -76,6 +78,7 @@ class Speech(Protocol):
     def stop(self) -> None: ...
     def first_audio_at(self, utterance: int) -> float | None: ...
     def played(self, job_id: int) -> bool: ...
+    def ended_at(self, job_id: int) -> float | None: ...
 
 
 @dataclass
@@ -100,7 +103,10 @@ class _Turn:
     queued: list[tuple[int, str]] = field(default_factory=list)  # (speech job id, text)
     exchange: list[dict[str, Any]] = field(default_factory=list)  # tool calls and results
     speaker: str | None = None
-    interrupted: bool = False  # barge-in or the stop keyword cut the answer
+    interrupted: bool = False  # a barge-in is under way: nothing more is said (set first)
+    stopped: bool = False  # ... and the speech was stopped: history keeps what was heard
+    done: bool = False  # the turn is over: a late skill callback does nothing
+    exchange_spoken: int = 0  # queued sentences already in the exchange messages
     cut: bool = False  # stop_talking cut it
     tool_calls: int = 0
     rounds: int = 0
@@ -162,6 +168,7 @@ class ConversationWorker:
         self._inner: asyncio.Future | None = None
         self._confirm: Pending | None = None
         self._tail: _Tail | None = None
+        self._barge_at = -math.inf  # when the last barge-in or stop keyword cut the robot off
         self._lock = threading.Lock()
         self._pending: collections.deque[Utterance] = collections.deque()
         self._turns: collections.deque[list[dict[str, Any]]] = collections.deque()
@@ -220,7 +227,13 @@ class ConversationWorker:
         oldest. Safe from any thread (the listener's). Returns whether it was taken."""
         if self._closed or not (utterance.final and utterance.addressed and utterance.text.strip()):
             return False
-        limit = self.stack.effective().conversation.pending_utterances
+        cfg = self.stack.effective()
+        if self.clock() - self._barge_at <= cfg.conversation.stop_drop_window_s and (
+            self._only_stop(utterance, cfg)
+        ):
+            self._counts["stop_consumed"] += 1  # the command that already stopped the robot
+            return False
+        limit = cfg.conversation.pending_utterances
         with self._lock:
             while len(self._pending) >= limit:
                 self._pending.popleft()
@@ -230,6 +243,24 @@ class ConversationWorker:
         if loop is not None and wake is not None:
             with contextlib.suppress(RuntimeError):
                 loop.call_soon_threadsafe(wake.set)
+        return True
+
+    @staticmethod
+    def _only_stop(utterance: Utterance, cfg: RoboEmotConfig) -> bool:
+        """Whether the text is nothing but stop phrases of its language ("stop", "basta
+        basta")."""
+        keywords = cfg.voice.keywords.get(utterance.language)
+        phrases = sorted(
+            (p.split() for p in (normalise(x) for x in (keywords.stop if keywords else [])) if p),
+            key=len,
+            reverse=True,
+        )
+        words = normalise(utterance.text).split()
+        while words:
+            hit = next((p for p in phrases if words[: len(p)] == p), None)
+            if hit is None:
+                return False
+            words = words[len(hit) :]
         return True
 
     def note_presence(self, now: float, speaker: str | None = None) -> None:
@@ -387,15 +418,26 @@ class ConversationWorker:
 
     # ----------------------------------------------------------------- barge-in
 
+    def mark_interrupting(self) -> None:
+        """First step of a barge-in, before the speech is stopped: from now on the turn in
+        flight says nothing more, so a sentence it queues between the stop and ``interrupt``
+        cannot play. Any thread."""
+        with self._lock:
+            if self._active_turn is not None:
+                self._active_turn.interrupted = True
+
     def interrupt(self) -> bool:
         """Barge-in or the stop keyword (SPEC 8 stage 8), from any thread, after the speech was
         stopped: cancel the answer in flight (its stream is closed and charged), or, when the
         stream already ended and only the speech was running, cut the turn's history entry back
-        to the sentences that were heard. Returns whether there was anything to cut."""
+        to the sentences that were heard. A question cut off before it finished is no longer
+        pending. Returns whether there was anything to cut."""
         with self._lock:
+            self._barge_at = self.clock()
             turn = self._active_turn
             if turn is not None:
-                turn.interrupted = True
+                turn.interrupted = turn.stopped = True
+            self._drop_unheard_question()
         if turn is None:
             return self._trim_tail()
         self._counts["interrupts"] += 1
@@ -404,6 +446,17 @@ class ConversationWorker:
             with contextlib.suppress(RuntimeError):
                 loop.call_soon_threadsafe(self._cancel_inner)
         return True
+
+    def _drop_unheard_question(self) -> None:
+        """Forget a pending confirmation unless its question finished playing before now
+        (called with the lock held). A cut-off question was not heard to the end."""
+        pending = self._confirm
+        if pending is None:
+            return
+        ended = self.speech.ended_at(pending.job)
+        if not self.speech.played(pending.job) or ended is None or ended > self.clock():
+            self._confirm = None
+            self._counts["confirm_cut"] += 1
 
     def _cancel_inner(self) -> None:
         inner = self._inner
@@ -488,7 +541,7 @@ class ConversationWorker:
             turn.outcome = "no_route"
             self._say_fallback(turn)
         except asyncio.CancelledError:
-            if not (turn.interrupted and inner.cancelled()):
+            if not ((turn.interrupted or turn.stopped) and inner.cancelled()):
                 inner.cancel()
                 raise
             turn.outcome = "interrupted"
@@ -507,16 +560,20 @@ class ConversationWorker:
         ``conversation.max_tool_rounds`` rounds ran (the next request then has no tools). The
         minor rules apply to every round: routes, the filter, the mid-answer switch."""
         conv = turn.cfg.conversation
+        cap = conv.max_tool_calls_per_round
         while True:
             offered = self._offer(turn) if turn.rounds < conv.max_tool_rounds else []
+            choices = SkillRegistry.snapshot_choices(offered, conv.tool_enum_max_items)
             tools = (
                 SkillRegistry.tools(
                     offered,
                     enum_max=conv.tool_enum_max_items,
                     max_chars=conv.tool_arg_max_chars,
+                    choices=choices,
                 )
                 or None
             )
+            round_from = len(turn.spoken)
             if turn.rounds and self._minor_appeared(turn, turn.active):
                 return
             active = turn.active = ActiveRoute()
@@ -537,9 +594,14 @@ class ConversationWorker:
                         if self._minor_appeared(turn, active):
                             cut = True
                         else:
-                            calls.append(ev)
-                            results.append(await self._call(turn, ev, {s.name for s in offered}))
-                            cut = turn.cut
+                            # what the model said before the call is said before the skill acts
+                            cut = not self._speak_all(turn, splitter.flush())
+                            if not cut:
+                                calls.append(ev)
+                                results.append(
+                                    await self._call(turn, ev, choices, len(calls) > cap)
+                                )
+                                cut = turn.cut or results[-1].end_turn
                     elif isinstance(ev, Done):
                         turn.route, turn.tokens = ev.route, turn.tokens + ev.tokens
                     if cut:
@@ -553,7 +615,9 @@ class ConversationWorker:
                     self._say_fallback(turn)
                 return
             turn.rounds += 1
-            turn.exchange += self._exchange(calls, results, turn.rounds)
+            said = " ".join(turn.spoken[round_from:]) or None
+            turn.exchange += self._exchange(calls, results, turn.rounds, said)
+            turn.exchange_spoken = len(turn.queued)
             messages += turn.exchange[-(len(calls) + 1) :]
 
     def _offer(self, turn: _Turn) -> list[Skill]:
@@ -567,21 +631,26 @@ class ConversationWorker:
 
     @staticmethod
     def _exchange(
-        calls: list[ToolCall], results: list[ToolOutcome], round_no: int
+        calls: list[ToolCall], results: list[ToolOutcome], round_no: int, said: str | None
     ) -> list[dict[str, Any]]:
-        """The assistant message carrying the calls and one ``tool`` message per result. Broken
-        arguments are not sent back (they are the model's raw text)."""
+        """The assistant message carrying the calls (and what was spoken in the round, as
+        ``content``) and one ``tool`` message per result. Arguments that are not an object, or
+        broken, are not sent back (they are the model's raw text)."""
         ids = [c.id or f"call_{round_no}_{i}" for i, c in enumerate(calls)]
         assistant = {
             "role": "assistant",
-            "content": None,
+            "content": said,
             "tool_calls": [
                 {
                     "id": call_id,
                     "type": "function",
                     "function": {
                         "name": c.name,
-                        "arguments": "{}" if "_raw" in c.arguments else json.dumps(c.arguments),
+                        "arguments": (
+                            json.dumps(c.arguments)
+                            if isinstance(c.arguments, dict) and "_raw" not in c.arguments
+                            else "{}"
+                        ),
                     },
                 }
                 for call_id, c in zip(ids, calls, strict=True)
@@ -593,8 +662,13 @@ class ConversationWorker:
         ]
         return [assistant, *tool]
 
-    async def _call(self, turn: _Turn, call: ToolCall, offered: set[str]) -> ToolOutcome:
+    async def _call(
+        self, turn: _Turn, call: ToolCall, choices: dict[str, Any], over_cap: bool
+    ) -> ToolOutcome:
         conv = turn.cfg.conversation
+        if over_cap:
+            self._counts["tool_errors"] += 1
+            return ToolOutcome('{"error": "too_many_calls"}', False, False, call.name, "too_many")
         ctx = SkillContext(
             turn.speaker,
             turn.language,
@@ -605,13 +679,14 @@ class ConversationWorker:
         )
         outcome = await execute(
             self.skills or SkillRegistry(),
-            offered,
+            set(choices),
             call.name,
             call.arguments,
             ctx,
             timeout_s=conv.tool_timeout_s,
             max_chars=conv.tool_arg_max_chars,
             enum_max=conv.tool_enum_max_items,
+            choices=choices,
         )
         turn.tool_calls += 1
         self._counts["tool_calls" if outcome.ok else "tool_errors"] += 1
@@ -619,6 +694,8 @@ class ConversationWorker:
 
     def _stop_talking(self, turn: _Turn) -> None:
         """``stop_talking``: stop the speech, drop the rest of the answer."""
+        if turn.done or turn.interrupted:
+            return
         self.speech.stop()
         turn.cut = True
         turn.outcome = "stopped"
@@ -631,6 +708,8 @@ class ConversationWorker:
         says yes."""
         conv = turn.cfg.conversation
         person, store = turn.speaker, self.preferences
+        if turn.done or turn.interrupted:
+            return "cancelled"
         if person is None or store is None:
             return "not_allowed"
         pair = sanitise_preference(
@@ -651,26 +730,49 @@ class ConversationWorker:
         if len(turn.queued) == before:
             return "unavailable"
         with self._lock:
-            self._confirm = Pending(person, key, value, self.clock() + conv.confirm_timeout_s)
+            if turn.done or turn.interrupted:
+                return "cancelled"
+            self._confirm = Pending(
+                person, key, value, self.clock() + conv.confirm_timeout_s, turn.queued[-1][0]
+            )
         self._counts["confirm_asked"] += 1
         return "asked"
 
     def _confirmation_reply(self, turn: _Turn, now: float) -> bool:
-        """If a question is pending, this utterance is its answer, whatever it says: it counts
-        only from the same person, in time, with a yes (stored) or a no (declined); anything
-        else drops the question and the turn goes on as usual. True when the turn is done."""
-        with self._lock:
-            pending, self._confirm = self._confirm, None
-        if pending is None:
-            return False
+        """If a question is pending, the next utterance is its answer, whatever it says: it
+        counts only from the same person (the attended face, until speaker ID exists), in time,
+        spoken after the question finished playing, as a short yes (stored) or a no
+        (declined); anything else drops the question and the turn goes on as usual. An
+        utterance that started before the question ended (queued behind it, or a voice over
+        it) is not the answer and leaves the question pending. True when the turn is done."""
         conv = turn.cfg.conversation
+        with self._lock:
+            pending = self._confirm
+            if pending is None:
+                return False
+            ended = self.speech.ended_at(pending.job)
+            if not self.speech.played(pending.job):
+                self._confirm = None
+                self._counts["confirm_cut"] += 1
+                return False
+            if ended is None or turn.utterance.start_stamp <= ended:
+                self._counts["confirm_early"] += 1
+                return False
+            self._confirm = None
         if now > pending.expires:
             self._counts["confirm_expired"] += 1
             return False
         if turn.speaker is None or turn.speaker != pending.person_id:
             self._counts["confirm_other"] += 1
             return False
-        kind = reply_kind(turn.utterance.text, turn.language, conv.confirm_yes, conv.confirm_no)
+        kind = reply_kind(
+            turn.utterance.text,
+            turn.language,
+            conv.confirm_yes,
+            conv.confirm_no,
+            conv.confirm_fillers,
+            conv.confirm_max_words,
+        )
         if kind == "other":
             self._counts["confirm_ignored"] += 1
             return False
@@ -679,7 +781,12 @@ class ConversationWorker:
             and self.preferences is not None
             and self.preferences.store(pending.person_id, pending.key, pending.value)
         )
-        lines = conv.confirm_saved_lines if stored else conv.confirm_declined_lines
+        if stored:
+            lines = conv.confirm_saved_lines
+        elif kind == "yes":
+            lines = conv.confirm_failed_lines  # said yes, but it could not be kept: say so
+        else:
+            lines = conv.confirm_declined_lines
         mood, intensity = self._mood(turn.cfg, None)
         self._say(turn, pick(lines, turn.language, conv.language) or "", mood, intensity)
         turn.outcome = "confirmed" if stored else "declined"
@@ -751,7 +858,7 @@ class ConversationWorker:
     def _say(
         self, turn: _Turn, text: str, mood: str | None, intensity: float, *, minor: bool = False
     ) -> None:
-        if not text:
+        if not text or turn.interrupted:  # a barge-in is under way: nothing more is said
             return
         job = self.speech.say(
             text,
@@ -805,10 +912,14 @@ class ConversationWorker:
         """Keep the whole turn (the user's words, the tool exchange and what was actually
         spoken) in the session's history, record the latency stamps and announce the turn
         without its text. After a barge-in or stop_talking only the sentences that began to play
-        are kept, and the message says it was cut."""
+        are kept, and the message says it was cut. Sentences already in the exchange messages
+        are not repeated in the closing one."""
         with self._lock:
-            cut = turn.interrupted or turn.cut
-            kept = [t for job, t in turn.queued if self.speech.played(job)] if cut else turn.spoken
+            turn.done = True
+            cut = turn.stopped or turn.cut
+            items = turn.queued[turn.exchange_spoken :]
+            texts = turn.spoken[turn.exchange_spoken :]
+            kept = [t for job, t in items if self.speech.played(job)] if cut else texts
             spoken = " ".join(kept)
             if (spoken or turn.exchange) and self._max_turns > 0:
                 messages: list[dict[str, Any]] = [
@@ -817,12 +928,12 @@ class ConversationWorker:
                 ]
                 if spoken:
                     messages.append({"role": "assistant", "content": spoken})
-                    if len(kept) < len(turn.spoken):
+                    if len(kept) < len(texts):
                         messages[-1]["interrupted"] = True
                 self._turns.append(messages)
                 while len(self._turns) > self._max_turns:
                     self._turns.popleft()
-                self._tail = _Tail(messages, list(turn.queued), cut=cut) if spoken else None
+                self._tail = _Tail(messages, list(items), cut=cut) if spoken else None
             else:
                 self._tail = None
             self._active_turn = None
