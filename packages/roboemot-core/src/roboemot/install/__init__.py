@@ -55,6 +55,7 @@ PIPER_TTS_VERSION = "1.8.0"  # exact pin: the worker protocol is tested against 
 PLATFORM_PROBE = (
     "import sys, platform; print(platform.machine()); print('%d.%d' % sys.version_info[:2])"
 )
+PROBE_PATTERN = re.compile(r"[A-Za-z0-9_]+\n\d+\.\d+")
 INSTALL_STEPS = 6
 UNINSTALL_STEPS = 6
 
@@ -168,6 +169,17 @@ def select_robot(ui: Ui, opts: Options, root: Path) -> tuple[str, Platform]:
 # ---------------------------------------------------------------- shared steps
 
 
+def probe_platform(remote: Remote, python: str) -> tuple[str, str]:
+    """The interpreter's CPU architecture and ``"major.minor"``; anything else is an error."""
+    out = RemotePython(remote, python).py(PLATFORM_PROBE).strip()
+    if not PROBE_PATTERN.fullmatch(out):
+        raise WizardError(
+            f"unexpected answer probing {python} for architecture and version: {out!r}"
+        )
+    arch, version = out.split("\n")
+    return arch, version
+
+
 def check_ssh(
     ui: Ui, platform: Platform, remote: Remote, need: tuple[int, int] | None
 ) -> RemotePython:
@@ -178,7 +190,7 @@ def check_ssh(
     py = RemotePython(remote, platform.python)
     if not py.exists():
         raise WizardError(f"{platform.python} not found: is this a {platform.display_name}?")
-    arch, version = py.py(PLATFORM_PROBE).splitlines()
+    arch, version = probe_platform(remote, platform.python)
     if arch != platform.arch:
         raise WizardError(f"robot architecture is {arch}, expected {platform.arch}")
     if need and tuple(map(int, version.split("."))) < need:
@@ -300,8 +312,7 @@ def install_piper(
     if record.piper_venv != venv and _exists(remote, venv):
         ui.warn(f"{venv} exists but is not in the install record: left alone")
         return
-    arch, version = RemotePython(remote, platform.python).py(PLATFORM_PROBE).splitlines()
-    lock = lock_path(arch, version)
+    lock = lock_path(*probe_platform(remote, platform.python))
     if dry_run:
         ui.info(
             f"would create the Piper virtualenv {venv} and install piper-tts=={PIPER_TTS_VERSION} "
@@ -310,13 +321,13 @@ def install_piper(
         return
     record.piper_venv = venv
     write_record(remote, platform.record_path, record)
-    if recreate:
-        remote.run(f"mkdir -p -m 700 {shlex.quote(posixpath.dirname(venv))}")
-        remote.run(f"{shlex.quote(platform.python)} -m venv {shlex.quote(venv)}")
-        ui.ok(f"created the Piper virtualenv {venv}")
     tmp = remote.run(f"mktemp -d {REMOTE_TMP_PREFIX}.XXXXXX")
     try:
         remote.copy([lock], tmp)
+        if recreate:
+            remote.run(f"mkdir -p -m 700 {shlex.quote(posixpath.dirname(venv))}")
+            remote.run(f"{shlex.quote(platform.python)} -m venv {shlex.quote(venv)}")
+            ui.ok(f"created the Piper virtualenv {venv}")
         result = RemotePython(remote, python).install_locked(f"{tmp}/{lock.name}")
     finally:
         remote.run(f"rm -rf {shlex.quote(tmp)}", check=False)

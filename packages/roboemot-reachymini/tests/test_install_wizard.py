@@ -990,6 +990,51 @@ def test_install_dry_run_only_says_it_would_create_the_piper_venv(offline, robot
     assert f"would create the Piper virtualenv {PIPER_VENV}" in capsys.readouterr().out
 
 
+def piper_args(robot, dry_run):
+    return Ui(False, True), ReachyMiniWireless(), robot, inst.InstallRecord("r", "p", []), dry_run
+
+
+def test_piper_dry_run_runs_no_mktemp_copy_or_venv_and_still_rejects_an_unlocked_target(
+    offline, robot, daemon
+):
+    inst.install_piper(*piper_args(robot, True))
+    assert not any(c.startswith("mktemp") or " -m venv " in c for c in robot.commands)
+    assert robot.copies == [] and robot.piper_pips == []
+    robot.machine = "aarch64\n3.9"
+    with pytest.raises(WizardError, match="no hash-pinned Piper lock"):
+        inst.install_piper(*piper_args(robot, True))
+
+
+def test_failed_piper_pip_removes_the_remote_tmp_dir(offline, robot, daemon):
+    robot.piper_pip_fails = True
+    with pytest.raises(WizardError, match="piper-tts failed"):
+        inst.install_piper(*piper_args(robot, False))
+    assert robot.tmp_dirs == set() and len(robot.copies) == 1
+
+
+def test_failed_lock_copy_removes_the_tmp_dir_and_creates_no_venv(offline, robot, daemon):
+    def boom(files, dest):
+        raise WizardError("scp failed")
+
+    robot.copy = boom
+    with pytest.raises(WizardError, match="scp failed"):
+        inst.install_piper(*piper_args(robot, False))
+    assert robot.tmp_dirs == set() and not any(" -m venv " in c for c in robot.commands)
+
+
+@pytest.mark.parametrize(
+    "answer", ["", "aarch64", "aarch64\n3", "aarch64 extra\n3.12", "x\n3.12\ny"]
+)
+def test_malformed_platform_probe_is_a_wizard_error(robot, answer):
+    robot.machine = answer
+    with pytest.raises(WizardError, match="unexpected answer"):
+        inst.probe_platform(robot, "/venvs/apps_venv/bin/python")
+
+
+def test_platform_probe_returns_arch_and_python_minor(robot):
+    assert inst.probe_platform(robot, "/venvs/apps_venv/bin/python") == ("aarch64", "3.12")
+
+
 def test_install_without_piper_installs_no_venv(offline, robot, daemon):
     install(piper=False)
     assert PIPER_VENV not in robot.dirs and robot.piper_pips == []

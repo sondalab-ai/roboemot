@@ -13,8 +13,12 @@ from .ui import WizardError
 
 LOCK_DIR = Path(__file__).parent / "locks"
 
+# Only releases uploaded before this instant are considered, so a re-lock without a Piper bump
+# does not drift the dependencies. Move it deliberately when updating them.
+EXCLUDE_NEWER = "2026-10-18T00:00:00Z"
+
 # (platform.machine(), Python "major.minor") -> uv --python-platform. The robot is aarch64; the CI
-# `models` job is x86_64. 3.11 is kept on the robot side in case its image ships that Python.
+# `models` job is x86_64. The robot's Python version is not yet confirmed, so both are locked.
 TARGETS: dict[tuple[str, str], str] = {
     ("aarch64", "3.12"): "aarch64-unknown-linux-gnu",
     ("aarch64", "3.11"): "aarch64-unknown-linux-gnu",
