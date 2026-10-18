@@ -1117,24 +1117,38 @@ class SafetyConfig(Strict):
     )  # fmt: skip
 
 
+PSEUDONYM_LABEL = "{label}"
+
+
 class PrivacyConfig(Strict):
     multimodal_frames: bool = param(
         False, "Allow single-frame image questions to LLM routes", opt_in=True
     )
     pseudonyms_to_cloud: bool = param(
-        False, "Send pseudonyms instead of names to cloud routes (not implemented yet)"
+        False,
+        "Send neutral aliases instead of registry names to routes that are not local, and "
+        "restore the names in the answer and in tool calls (SPEC 8, 12)",
+    )
+    pseudonym_templates: dict[str, str] = param(
+        {"en": "Person {label}", "it": "Persona {label}"},
+        "Alias per language for pseudonyms_to_cloud; {label} becomes A, B, ... Z, AA, ... The "
+        "language is the one of the turn in which a name is first aliased (SPEC 12)",
     )
     keep_enrollment_images: bool = param(False, "Keep enrollment face crops", opt_in=True)
     debug_recording: bool = param(False, "Allow time-limited debug recording", opt_in=True)
 
-    @model_validator(mode="after")
-    def _pseudonyms(self) -> PrivacyConfig:
-        if self.pseudonyms_to_cloud:
-            raise ValueError(
-                "privacy.pseudonyms_to_cloud is not implemented in v1 M3: requests would still "
-                "carry real names, so the option is refused rather than silently ignored"
-            )
-        return self
+    @field_validator("pseudonym_templates")
+    @classmethod
+    def _templates(cls, value: dict[str, str]) -> dict[str, str]:
+        for lang, template in value.items():
+            if template.count(PSEUDONYM_LABEL) != 1 or not template.strip().endswith(
+                PSEUDONYM_LABEL
+            ):
+                raise ValueError(
+                    f"privacy.pseudonym_templates[{lang!r}] must contain {PSEUDONYM_LABEL} "
+                    "exactly once, at the end"
+                )
+        return value
 
 
 # --------------------------------------------------------------------------- identity (SPEC 5, 6)
@@ -2534,6 +2548,12 @@ class LLMRoute(Strict):
         le=2_000_000,
     )
     supports_images: bool = param(False, "Route accepts image_url parts")
+    locality: Literal["auto", "local", "cloud"] = param(
+        "auto",
+        "Whether the route stays inside the household. auto: local when the host is localhost, "
+        "a private, loopback or link-local address, a *.local name or a name without a dot; "
+        "otherwise cloud. Only a cloud route gets pseudonyms (privacy.pseudonyms_to_cloud)",
+    )
 
     @model_validator(mode="after")
     def _check(self) -> LLMRoute:

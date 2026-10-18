@@ -16,6 +16,7 @@ from typing import Any
 
 from roboemot.attention import AttentionSelector
 from roboemot.conversation import profile_summary, scene_summary
+from roboemot.conversation.summaries import one_line
 from roboemot.world import Entry, WorldModel
 from roboemot.world.types import UNKNOWN_IDENTITY
 
@@ -98,6 +99,25 @@ def scene_source(
         )
 
     return scene
+
+
+def registry_names(registry: Any, value_cap: Callable[[], int]) -> Callable[[], list[str]]:
+    """``known_names()``: every display name in the registry (people, animals, objects, any
+    status), plus its one-line form cut to the summary cap, which is how it reads in the
+    summaries. For ``privacy.pseudonyms_to_cloud``; an error propagates, so the worker never
+    sends without the names it should have replaced."""
+
+    def names() -> list[str]:
+        if registry is None:
+            return []
+        cap = value_cap()
+        out: dict[str, None] = {}
+        for row in registry.list():
+            out.setdefault(row.display_name)
+            out.setdefault(one_line(row.display_name, cap))
+        return [n for n in out if n]
+
+    return names
 
 
 def speaker_source(selector: AttentionSelector, world: WorldModel) -> Callable[[], str | None]:

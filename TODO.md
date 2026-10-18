@@ -39,10 +39,10 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       sweep after a new `world.scan.target_lost_delay_s` (N s, jittered, scaled like the idle
       interval) instead of waiting the full `world.scan.idle_interval_s` (120 s). Same rules as
       the idle scan: a person target or speaker hint cancels it, not while resting.
-- [ ] Pseudonyms to cloud routes (SPEC 12, Data): `privacy.pseudonyms_to_cloud` is refused by the
-      config validator ("not implemented in v1 M3") because requests still carry real names;
-      build the name-to-alias map for `build_messages(names=...)`, send aliases to routes that
-      are not local, and restore the web UI consent text for it.
+- [x] Pseudonyms to cloud routes (SPEC 8, 12 Data): `privacy.pseudonyms_to_cloud` loads; the router
+      gives aliases to routes that are not local (`llm_routes[].locality`, `auto` from the host)
+      and restores names in the reply text and in tool-call arguments. Open: the aliases are handed
+      out afresh after an app restart; personal details that are not registry names are not replaced.
 
 ## Barge-in and skills (M3 slice 6, SPEC 8 stage 8, 11)
 
@@ -53,9 +53,9 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       second Silero and the FFT, `pre_roll_ms`): SPEC 15 "Barge-in on the robot". The real-model
       tests (`pytest -m models -k spoken_stop`, `test_m3_exit.py`) use `say` clips; the onset-to-stop
       latency on the robot is in the voice debug section (`bargein.latency`).
-- [ ] `look_at` names come from the registry display names of what is in view and are sent to the
-      route as tool-schema choices, like the scene summary; route them through the pseudonym map when
-      `privacy.pseudonyms_to_cloud` exists.
+- [x] `look_at` names come from the registry display names of what is in view and are sent to the
+      route as tool-schema choices, like the scene summary; with `privacy.pseudonyms_to_cloud` the
+      cloud route gets aliases in the enum and the executor gets the real name back.
 - [ ] `play` offers every label of the manifest's `expression_map` (affect expressions). Named
       gestures that are not affect labels (nod, shake) need their own map and primitives.
 - [ ] Edit wake phrases and the robot name from the web UI (needs an admin-confirmed settings editor,

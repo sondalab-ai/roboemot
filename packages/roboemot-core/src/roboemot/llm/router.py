@@ -32,6 +32,7 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpe
 from ..config.schema import LLMRoute, SafetyConfig
 from ..health.network import NetworkMonitor
 from .prompt import CHARS_PER_TOKEN, trim_history
+from .pseudonyms import Pseudonyms, replace_names, route_is_local
 
 log = logging.getLogger(__name__)
 # The openai and httpx libraries log request details at DEBUG; keep that off whatever the root
@@ -175,7 +176,13 @@ class Router:
         *,
         minor_present: bool = False,
         active: ActiveRoute | None = None,
+        pseudonyms: Pseudonyms | None = None,
     ) -> AsyncIterator[Event]:
+        """Stream the answer from the first route that works. With ``pseudonyms``, a route that
+        is not local (``route_is_local``) gets aliases for names in the messages and the tools,
+        and the text and tool calls it sends back are restored to names before they are yielded;
+        a local route gets the messages as they are. This is decided per route, so a fallback
+        from a local to a cloud route never carries the real names."""
         if self.offline:
             raise Offline("no route reachable")
         routes = self.eligible(minor_present)
@@ -187,9 +194,15 @@ class Router:
             yielded = False
             if active is not None:
                 active.route = route
-            gen = self._stream_route(route, messages, tools)
+            alias = pseudonyms if pseudonyms and not route_is_local(route) else None
+            gen = self._stream_route(
+                route,
+                alias.scrub_messages(messages) if alias else messages,
+                alias.scrub_tools(tools) if alias else tools,
+            )
+            events = _restored(gen, alias) if alias else gen
             try:
-                async for ev in gen:
+                async for ev in events:
                     yielded = True
                     yield ev
                 self._reachable(route, True)
@@ -206,6 +219,7 @@ class Router:
                 if yielded:
                     raise  # mid-answer failure: no silent switch to another model
             finally:
+                await events.aclose()
                 await gen.aclose()  # barge-in: closes the HTTP stream and charges the budget
         failed = self.failures[-len(routes) :]
         if self.offline:
@@ -355,6 +369,26 @@ class Router:
         return usage if usage is not None else (prompt_chars + out_chars) // CHARS_PER_TOKEN
 
 
+async def _restored(events: AsyncIterator[Event], pseudonyms: Pseudonyms) -> AsyncIterator[Event]:
+    """``events`` with aliases turned back into names in the text and in tool-call arguments.
+    Text an alias could still be hiding in is held until it is settled, and let go before a
+    tool call and at the end."""
+    restorer = pseudonyms.restorer()
+    try:
+        async for ev in events:
+            if isinstance(ev, TextDelta):
+                if text := restorer.feed(ev.text):
+                    yield TextDelta(text)
+                continue
+            if tail := restorer.flush():
+                yield TextDelta(tail)
+            if isinstance(ev, ToolCall):
+                ev = ToolCall(ev.id, ev.name, pseudonyms.real_arguments(ev.arguments))
+            yield ev
+    finally:
+        await events.aclose()  # type: ignore[attr-defined]
+
+
 HISTORY_ROLES = ("user", "assistant", "tool")  # never a second "system" message from history
 
 
@@ -396,14 +430,13 @@ def build_messages(
     """Text-only request (SPEC 8, 12). ``system`` is parts 1 to 4 from
     ``roboemot.llm.prompt.system_prompt``; the speaker, scene and affect parts follow, the
     summaries cut to ``summary_max_chars`` (profile, scene). ``names`` maps real names to
-    pseudonyms when the route option is on; embeddings, audio and images never enter here."""
+    aliases for a caller that already knows the route (the worker lets ``Router.stream`` do it
+    per route, with ``pseudonyms=``); embeddings, audio and images never enter here."""
 
     def scrub(text: str | None) -> str | None:
         if text is None or not names:
             return text
-        for real, alias in names.items():
-            text = text.replace(real, alias)
-        return text
+        return replace_names(text, names)
 
     profile_cap, scene_cap = summary_max_chars or (None, None)
     sys_parts = [system]

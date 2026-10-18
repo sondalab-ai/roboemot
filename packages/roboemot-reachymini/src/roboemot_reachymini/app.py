@@ -80,7 +80,7 @@ from roboemot.world.scan import SOURCE as SCAN_SOURCE
 
 from .audio import ReachyAudio
 from .camera import ReachyCamera
-from .conversation import profile_source, scene_source, speaker_source
+from .conversation import profile_source, registry_names, scene_source, speaker_source
 from .driver import ReachyMiniDriver
 from .gaze import FRAME, GAZE, REFLEX
 from .skills import SkillBridge
@@ -742,6 +742,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                         ),
                         speaker=conv_speaker,
                         names=names,
+                        known_names=registry_names(perception.registry, value_cap),
                         skills=default_skills(
                             SkillBridge(
                                 expression, selector, world, perception.registry, stack.effective

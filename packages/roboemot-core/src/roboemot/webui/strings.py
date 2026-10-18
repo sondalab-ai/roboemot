@@ -105,8 +105,9 @@ EN: dict[str, str] = {
     ),
     "consent_cloud_pseudonyms": (
         "Names, preferences and conversation text may be sent to the cloud language-model "
-        "provider the robot uses, which processes them as personal data. The robot sends "
-        "pseudonyms instead of names to such routes."
+        "provider the robot uses, which processes them as personal data. On such routes the "
+        "robot replaces the names in its registry with neutral aliases; a nickname, a "
+        "misspelt name or other personal details said aloud are not replaced."
     ),
     "registry_title": "Registry",
     "registry_empty": "Nothing registered yet.",
@@ -329,7 +330,9 @@ IT: dict[str, str] = {
     "consent_cloud_pseudonyms": (
         "Nomi, preferenze e testo delle conversazioni possono essere inviati al fornitore cloud "
         "del modello linguistico usato dal robot, che li tratta come dati personali. Su queste "
-        "rotte il robot invia pseudonimi al posto dei nomi."
+        "rotte il robot sostituisce i nomi presenti nella sua anagrafica con alias neutri; un "
+        "soprannome, un nome storpiato o altri dati personali detti a voce non vengono "
+        "sostituiti."
     ),
     "registry_title": "Anagrafica",
     "registry_empty": "Ancora nulla di registrato.",

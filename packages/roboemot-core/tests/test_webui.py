@@ -751,12 +751,9 @@ def test_consent_text_names_cloud_handling(tmp_path, service):
     texts = {}
     for pseudo in (False, True):
         cfg = RoboEmotConfig(
-            webui={"bind": "127.0.0.1", "port": 0}, conversation={"language": "en"}
-        )
-        # the option is refused by validation until implemented (privacy.pseudonyms_to_cloud):
-        # only the string choice is exercised here
-        cfg = cfg.model_copy(
-            update={"privacy": cfg.privacy.model_copy(update={"pseudonyms_to_cloud": pseudo})}
+            webui={"bind": "127.0.0.1", "port": 0},
+            privacy={"pseudonyms_to_cloud": pseudo},
+            conversation={"language": "en"},
         )
         srv = make_server(service, Diagnostics(), cfg, tmp_path).start()
         try:
@@ -765,7 +762,7 @@ def test_consent_text_names_cloud_handling(tmp_path, service):
             assert "GDPR" in STRINGS["en"]["consent_biometric"]
         finally:
             srv.stop()
-    assert "pseudonyms instead" in texts[True]
+    assert "neutral aliases" in texts[True] and "real" not in texts[True]
     assert "real" in texts[False]
 
 
