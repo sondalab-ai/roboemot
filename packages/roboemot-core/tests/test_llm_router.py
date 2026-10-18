@@ -411,6 +411,8 @@ async def test_hostile_tool_arguments_do_not_fail_the_route_or_get_parsed():
     for text, expect in (
         ('{"n": ' + huge_int + "}", "raw"),
         (deep, "raw"),
+        ('{"a":' * 5_000 + "1" + "}" * 5_000, "raw"),  # parses on Python 3.15, no RecursionError
+        ("[1, 2]", "raw"),  # valid JSON that is not an object
         ('{"a": "' + "x" * 60_000 + '"}', "dropped"),
     ):
         r, release = await _held_stream([_tc(0, "c1", "play", text), _finish(chunk(""))])
