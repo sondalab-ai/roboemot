@@ -1144,6 +1144,8 @@ class PrivacyConfig(Strict):
     @field_validator("pseudonym_templates")
     @classmethod
     def _templates(cls, value: dict[str, str]) -> dict[str, str]:
+        if not value:
+            raise ValueError("privacy.pseudonym_templates needs at least one template")
         for lang, template in value.items():
             prefix = template[: -len(PSEUDONYM_LABEL)]
             ok = (
@@ -2564,8 +2566,8 @@ class LLMRoute(Strict):
         "network (loopback, private addresses, *.local, names without a dot), cloud for "
         "everything else. The address of a gateway says nothing about where it forwards the "
         "data: a LAN proxy to a cloud provider (LiteLLM) gets real names unless this is set "
-        "to cloud. Only a cloud route gets pseudonyms (privacy.pseudonyms_to_cloud)",
-        admin_only=True,
+        "to cloud. Only a cloud route gets pseudonyms (privacy.pseudonyms_to_cloud). A change "
+        "that makes a route local (this field, base_url or a new route) needs the admin",
     )
 
     @model_validator(mode="after")

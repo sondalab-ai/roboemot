@@ -173,6 +173,7 @@ class ConversationWorker:
         self.bus, self.clock = bus, clock
         self._known_names = known_names
         self._pseudonyms = Pseudonyms()
+        self._refused_names = 0  # last count of registry names that cannot be aliased
         self._active_turn: _Turn | None = None
         self._inner: asyncio.Future | None = None
         self._confirm: Pending | None = None
@@ -527,8 +528,11 @@ class ConversationWorker:
         state = self.affect.state(self.clock())
         try:
             protect = self._learn_names(turn)  # the summary caps must not cut a name
-        except Exception:  # the same failure ends the turn in _rounds, before anything is sent
-            protect = None
+        except Exception as exc:  # without the map a cap could cut inside a name: no request
+            turn.outcome = "error"
+            log.warning("conversation: registry names unavailable (%s)", type(exc).__name__)
+            self._say_fallback(turn)
+            return
         messages = build_messages(
             system=system_prompt(
                 cfg,
@@ -648,7 +652,9 @@ class ConversationWorker:
         now (new names get aliases, forgotten ones are dropped) and return it for the router,
         which applies it to routes that are not local. Read before every request. If the names
         cannot be read the exception ends the turn: sending without the map would put real names
-        on the cloud route. None when the option is off."""
+        on the cloud route. None when the option is off. A change in the number of registry names
+        that cannot be aliased (they reach a cloud route as typed) is logged for the admin, as a
+        count only."""
         cfg = turn.cfg
         if not cfg.privacy.pseudonyms_to_cloud:
             return None
@@ -658,6 +664,13 @@ class ConversationWorker:
             turn.language,
             cfg.conversation.language,
         )
+        if self._pseudonyms.refused != self._refused_names:
+            self._refused_names = self._pseudonyms.refused
+            log.warning(
+                "conversation: %d registry names cannot be aliased for cloud routes (no letter, "
+                "a template word or a request keyword); rename them to keep them private",
+                self._refused_names,
+            )
         return self._pseudonyms
 
     def _offer(self, turn: _Turn) -> list[Skill]:

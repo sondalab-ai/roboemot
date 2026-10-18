@@ -196,7 +196,7 @@ class Router:
                 active.route = route
             out = (
                 pseudonyms.prepare(messages, tools)
-                if pseudonyms and not route_is_local(route)
+                if pseudonyms is not None and not route_is_local(route)
                 else None
             )
             if out is not None and pseudonyms.leaks({"messages": out.messages, "tools": out.tools}):

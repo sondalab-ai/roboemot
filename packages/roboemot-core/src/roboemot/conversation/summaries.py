@@ -30,18 +30,26 @@ def one_line(text: str, max_chars: int) -> str:
 def profile_summary(
     name: str | None, preferences: Mapping[str, Any], max_chars: int, value_max_chars: int
 ) -> str | None:
-    """The speaker's display name and confirmed preferences, cut to ``max_chars``; None when
-    there is nothing to say. Only plain values are listed (strings, numbers, booleans)."""
-    parts = [one_line(name, value_max_chars)] if name else []
-    prefs = [
-        f"{one_line(str(k), value_max_chars)}={one_line(str(v), value_max_chars)}"
-        for k, v in sorted(preferences.items())
-        if isinstance(v, SCALARS)
-    ]
-    if prefs:
-        parts.append("preferences " + SEPARATOR.join(prefs))
-    text = "; ".join(p for p in parts if p)[:max_chars]
-    return text or None
+    """The speaker's display name and confirmed preferences, at most ``max_chars``; None when
+    there is nothing to say. Only plain values are listed (strings, numbers, booleans). Cuts
+    fall on entry boundaries, never inside a value (a value can hold a name, SPEC 12): a
+    preference whose key or value is longer than ``value_max_chars``, or that would cross
+    ``max_chars``, is left out whole. The display name is cut to ``value_max_chars`` like in
+    the scene summary (the registry lists that cut form too)."""
+    out = one_line(name, value_max_chars) if name else ""
+    if len(out) > max_chars:
+        return None
+    head = (out + "; " if out else "") + "preferences "
+    listed = 0
+    for k, v in sorted(preferences.items()):
+        key, value = " ".join(str(k).split()), " ".join(str(v).split())
+        if not isinstance(v, SCALARS) or max(len(key), len(value)) > value_max_chars:
+            continue
+        joined = (head if not listed else out + SEPARATOR) + f"{key}={value}"
+        if len(joined) > max_chars:
+            break
+        out, listed = joined, listed + 1
+    return out or None
 
 
 def _article(noun: str) -> str:

@@ -13,9 +13,12 @@ everything a cloud route receives, and swapped back in what it sends back:
 Matching. Text is NFC-normalised, then compared with case folding, accents and other combining
 marks removed (``Ömer``, ``omer`` and an NFD ``Ömer`` are one name; ``Strauß`` matches
 ``STRAUSS``; ``İlker`` matches ``ilker``), as whole words, with any run of spaces between the
-words of a name. The JSON-escaped spellings of a name are matched too. A check over the finished
-request, in both JSON spellings (``ensure_ascii`` on and off), refuses to send a body that still
-holds a name (``Pseudonyms.leaks``).
+words of a name. The JSON-escaped spellings of a name are matched too. A check over the text of
+the finished request (as it is, as JSON strings, and decoded where it is JSON) refuses to send a
+body that still holds a name (``Pseudonyms.leaks``); the request's structure (roles, types, keys,
+tool names, schema keywords) is not text and is never aliased or checked. A registry name that
+cannot be aliased (no letter or digit, a word of an alias template, a value of the request
+format such as "user") is refused and counted, and reaches a cloud route as typed.
 
 Restoring. Only the aliases that the outgoing request really contained are restored, in their
 exact spelling (case-sensitive, whole token), and never an alias that already appeared literally
@@ -42,7 +45,7 @@ import random
 import re
 import threading
 import unicodedata
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from typing import Any
 
 import httpx
@@ -52,8 +55,19 @@ from ..config.schema import PSEUDONYM_LABEL, LLMRoute
 LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 LOOPBACK_NAMES = ("localhost",)
 MDNS_SUFFIX = ".local"
-NUMERIC_HOST = re.compile(r"^(?:0x[0-9a-f]+|\d+)(?:\.(?:0x[0-9a-f]+|\d+))*$", re.IGNORECASE)
+NUMERIC_HOST = re.compile(r"^(?:0x[0-9a-f]+|\d+)(?:\.(?:0x[0-9a-f]+|\d+))*$")  # host is lowercased
 DOTTED_QUAD = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+# Names that are values of the request format itself (roles, part and call types): a registry
+# entry with one of these names is not aliased (SPEC 12), it would rewrite the wire format.
+STRUCTURAL_WORDS = frozenset(
+    {"user", "assistant", "system", "tool", "function", "developer", "text", "image_url"}
+)
+# Request fields whose values are structure, not text: never scrubbed, never leak-checked.
+ENVELOPE_KEYS = frozenset({"model", "stream", "max_tokens", "tool_choice"})
+MESSAGE_FIXED = frozenset({"role", "tool_call_id"})
+CALL_FIXED = frozenset({"id", "type"})
+SCHEMA_FIXED = frozenset({"type", "format", "required"})
+SCHEMA_TEXT = ("description", "const")
 
 
 LAN_NETWORKS = tuple(
@@ -80,12 +94,14 @@ def route_is_local(route: LLMRoute) -> bool:
     cloud. The host says nothing about where a gateway forwards the data: a LAN proxy to a cloud
     provider (LiteLLM) needs ``locality: cloud``. A host written as a number (``134744072``,
     ``0x7f.1``) or a URL whose parts parsers read differently (backslash, user info) is cloud
-    whatever ``locality`` says. The host is parsed by httpx, the library that connects."""
+    whatever ``locality`` says. A fully qualified name with a trailing dot (``ai.``) does not
+    count as a name without a dot. The host is parsed by httpx, the library that connects."""
     url = route.base_url
     if "\\" in url or any(c.isspace() or ord(c) < ord(" ") for c in url):
         return False
     try:
         parsed = httpx.URL(url)
+        qualified = parsed.host.endswith(".")
         host = parsed.host.lower().rstrip(".")
         userinfo = parsed.userinfo
     except (httpx.InvalidURL, ValueError):
@@ -99,7 +115,8 @@ def route_is_local(route: LLMRoute) -> bool:
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
-        return host in LOOPBACK_NAMES or host.endswith(MDNS_SUFFIX) or "." not in host
+        dotless = "." not in host and not qualified
+        return host in LOOPBACK_NAMES or host.endswith(MDNS_SUFFIX) or dotless
     return any(ip in net for net in LAN_NETWORKS if net.version == ip.version)
 
 
@@ -116,8 +133,9 @@ def _label(index: int) -> str:
 @functools.lru_cache(maxsize=8192)
 def _fold_char(c: str) -> str:
     """Case-folded character without accents or other combining marks (may be several
-    characters: ß gives ss, İ gives i)."""
-    decomposed = unicodedata.normalize("NFKD", c.casefold())
+    characters: ß gives ss, İ gives i). Compatibility forms are decomposed before the case is
+    folded (ℌ gives h) and again after, as case folding can compose."""
+    decomposed = unicodedata.normalize("NFKD", unicodedata.normalize("NFKD", c).casefold())
     return "".join(x for x in decomposed if unicodedata.category(x) != "Mn")
 
 
@@ -189,6 +207,123 @@ def replace_names(text: str, names: Mapping[str, str]) -> str:
     return "".join(out) + nfc[pos:]
 
 
+def _strings(value: Any) -> Iterator[str]:
+    """Every string value in ``value`` (keys are not values)."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, list):
+        for v in value:
+            yield from _strings(v)
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from _strings(v)
+
+
+def _decoded(text: str) -> Iterator[str]:
+    """The strings and keys of ``text`` when it is a JSON object or list, else nothing."""
+    if not text.lstrip().startswith(("{", "[")):
+        return
+    try:
+        data = json.loads(text)
+    except (ValueError, RecursionError):
+        return
+    stack = [data]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, str):
+            yield node
+        elif isinstance(node, list):
+            stack.extend(node)
+        elif isinstance(node, dict):
+            for key, value in node.items():
+                yield key
+                stack.append(value)
+
+
+def _schema_text(node: Any) -> Iterator[str]:
+    """The string values of a JSON schema, less its keywords and property names."""
+    if isinstance(node, list):
+        for v in node:
+            yield from _schema_text(v)
+    elif isinstance(node, dict):
+        for key, value in node.items():
+            if key not in SCHEMA_FIXED:
+                yield from _schema_text(value)
+    elif isinstance(node, str):
+        yield node
+
+
+def _message_text(m: Any) -> Iterator[str]:
+    if not isinstance(m, dict):
+        yield from _strings(m)
+        return
+    for key, value in m.items():
+        if key in MESSAGE_FIXED:
+            continue
+        if key == "content" and isinstance(value, list):
+            for part in value:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    continue
+                yield from (
+                    _strings({k: v for k, v in part.items() if k != "type"})
+                    if isinstance(part, dict)
+                    else _strings(part)
+                )
+        elif key == "tool_calls" and isinstance(value, list):
+            for call in value:
+                if not isinstance(call, dict):
+                    yield from _strings(call)
+                    continue
+                for ck, cv in call.items():
+                    if ck in CALL_FIXED:
+                        continue
+                    if ck == "function" and isinstance(cv, dict):
+                        yield from _strings({k: v for k, v in cv.items() if k != "name"})
+                    else:
+                        yield from _strings(cv)
+        else:
+            yield from _strings(value)
+
+
+def _tool_text(tool: Any) -> Iterator[str]:
+    if not isinstance(tool, dict):
+        yield from _strings(tool)
+        return
+    for key, value in tool.items():
+        if key == "type":
+            continue
+        if key == "function" and isinstance(value, dict):
+            for fk, fv in value.items():
+                if fk == "name":
+                    continue
+                yield from _schema_text(fv) if fk == "parameters" else _strings(fv)
+        else:
+            yield from _strings(value)
+
+
+def _request_text(body: Any) -> Iterator[str]:
+    """The text of a request (``{"messages", "tools", ...}``) or of a list of messages: what a
+    name could be hidden in, without the request's structure."""
+    if isinstance(body, list):
+        for m in body:
+            yield from _message_text(m)
+        return
+    if not isinstance(body, dict):
+        yield from _strings(body)
+        return
+    for key, value in body.items():
+        if key in ENVELOPE_KEYS:
+            continue
+        if key == "messages" and isinstance(value, list):
+            for m in value:
+                yield from _message_text(m)
+        elif key == "tools" and isinstance(value, list):
+            for t in value:
+                yield from _tool_text(t)
+        else:
+            yield from _strings(value)
+
+
 class Restoration:
     """The aliases one request really carried and what they stand for. Case-sensitive, whole
     token; a held-back tail in a stream is kept by :class:`Restorer`."""
@@ -245,6 +380,7 @@ class Pseudonyms:
         self._pattern: re.Pattern[str] | None = None
         self._used = 0
         self._rng = random.SystemRandom()
+        self.refused = 0  # registry names that cannot be aliased (a count, never the names)
 
     def __repr__(self) -> str:
         return "Pseudonyms(<map not shown>)"
@@ -263,43 +399,73 @@ class Pseudonyms:
         """Make the map match the registry as it is now. Names no longer there are dropped (they
         can no longer be restored); a name with an alias keeps it; a new one gets the next label,
         new names in random order. The template is the one for ``language``, else for
-        ``default_language``, else the first. An alias that equals a real name (a record
-        registered after the alias was given) is replaced."""
-        current: dict[str, str] = {}
-        for raw in names:
-            name = " ".join(_nfc(raw).split())
-            if name and (key := _key(name)):
-                current.setdefault(key, name)
+        ``default_language``, else the first. An alias that equals a real name, or holds one
+        (a record "A" inside "Person-A", registered after the alias was given), is replaced.
+
+        A name that cannot be aliased is refused and only counted (``refused``): one without a
+        letter or digit, one with a backslash (JSON's escape character), one found inside a
+        template's prefix ("Person", "Persona-") and a value of the request format
+        (``STRUCTURAL_WORDS``). It reaches the cloud as typed."""
         if not templates:
-            return
+            raise ValueError("privacy.pseudonym_templates is empty")
+        prefixes = [t.replace(PSEUDONYM_LABEL, "") for t in templates.values()]
+        current: dict[str, str] = {}
+        refused: set[str] = set()
+        for raw in names:
+            # Double quotes around a name ('"Nonna"') are JSON's string delimiters: matched
+            # without them, so a quote next to an alias in a JSON text never reads as a name.
+            name = " ".join(_nfc(raw).split()).strip('" ')
+            if not name or not (key := _key(name)):
+                continue
+            own = _compile(_key(v) for v in _variants(name))
+            if (
+                not re.search(r"\w", key)
+                or "\\" in key  # the JSON escape character: no name has one
+                or key in STRUCTURAL_WORDS
+                or any(_spans(own, prefix) for prefix in prefixes)
+            ):
+                refused.add(key)
+            else:
+                current.setdefault(key, name)
         template = (
             templates.get(language)
             or templates.get(default_language)
             or next(iter(templates.values()))
         )
+        pattern = _compile(_key(v) for n in current.values() for v in _variants(n))
+        # A name's core without its edge punctuation ("A'" gives "a"): an alias followed by
+        # that punctuation in a text ("Person-A'") would read as the name.
+        cores = _compile(re.sub(r"^\W+|\W+$", "", k) for k in current)
+
+        def clashes(alias: str) -> bool:
+            return _key(alias) in taken or bool(_spans(pattern, alias) or _spans(cores, alias))
+
         with self._lock:
             kept = {k: a for k, a in self._alias.items() if k in current}
-            reserved = {_key(v) for n in current.values() for v in _variants(n)}
-            taken = set(reserved)
+            taken = {_key(v) for n in current.values() for v in _variants(n)}
             for key in list(kept):
-                alias_key = _key(kept[key])
-                if alias_key in taken:
+                if clashes(kept[key]):
                     del kept[key]  # collides with a real name: hand out another one
                 else:
-                    taken.add(alias_key)
+                    taken.add(_key(kept[key]))
             fresh = [k for k in current if k not in kept]
             self._rng.shuffle(fresh)
             for key in fresh:
-                while True:
+                # Each name can block at most one label (it is not inside the prefix), so this
+                # ends; the bound only turns a broken invariant into an error, not a hang.
+                for _ in range(len(current) + len(taken) + 1):
                     alias = template.replace(PSEUDONYM_LABEL, _label(self._used))
                     self._used += 1
-                    if _key(alias) not in taken:
+                    if not clashes(alias):
                         break
+                else:
+                    raise RuntimeError("pseudonyms: no free alias")
                 taken.add(_key(alias))
                 kept[key] = alias
             self._alias, self._real = kept, {k: current[k] for k in kept}
             self._variants = {_key(v): kept[k] for k, n in self._real.items() for v in _variants(n)}
             self._pattern = _compile(self._variants)
+            self.refused = len(refused)
 
     # ------------------------------------------------------------------ text
 
@@ -344,15 +510,24 @@ class Pseudonyms:
         return bool(_spans(pattern, text))
 
     def leaks(self, body: Any) -> bool:
-        """Whether a name survives in ``body`` (messages, tools, the request) once written as
-        JSON, with ``ensure_ascii`` on or off, which is how it would go on the wire."""
+        """Whether a name survives in the text of ``body`` (a request with ``messages`` and
+        ``tools``, or a list of messages). Each string is checked as it is, written as a JSON
+        string (escaped quotes) and, when it is JSON itself (tool arguments and results), with
+        its strings and keys decoded (``\\u`` escapes). The ``ensure_ascii`` spelling adds
+        nothing (every escaped spelling of a name is also caught decoded) and would see word
+        boundaries that are not in the text ("eß" as "e\\u00df"). The structure of the
+        request is not text and is not checked: keys, roles, ids, types, tool names, JSON schema
+        ``type``, ``format`` and ``required``, image parts (a name there is not a leak, and
+        checking it would let a registry name like "User" or "Target" disable every cloud
+        route)."""
         with self._lock:
             pattern = self._pattern
         if pattern is None:
             return False
         return any(
-            _spans(pattern, json.dumps(body, ensure_ascii=ascii_only))
-            for ascii_only in (False, True)
+            _spans(pattern, form)
+            for text in _request_text(body)
+            for form in (text, json.dumps(text, ensure_ascii=False)[1:-1], *_decoded(text))
         )
 
     def _aliased(self, value: Any, used: set[str]) -> Any:
@@ -393,8 +568,9 @@ class Pseudonyms:
         return Outgoing(out, scrubbed_tools, Restoration(mapping))
 
     def _literal_aliases(self, messages: Any, tools: Any) -> set[str]:
+        """The aliases already in the request as whole tokens (said or written literally)."""
         blob = json.dumps([messages, tools], ensure_ascii=False, default=str)
-        return {a for a in self.aliases() if a in blob}
+        return {a for a in self.aliases() if re.search(rf"(?<!\w){re.escape(a)}(?!\w)", blob)}
 
     def _scrub_message(self, m: dict[str, Any], used: set[str]) -> dict[str, Any]:
         m = dict(m)
@@ -424,17 +600,39 @@ class Pseudonyms:
     def _scrub_tools(
         self, tools: list[dict[str, Any]] | None, used: set[str]
     ) -> list[dict[str, Any]] | None:
-        """Tool schemas with names replaced in the descriptions and parameters (the ``look_at``
-        enum); a tool's own name stays."""
+        """Tool schemas with names replaced in the descriptions and in the parameters' text
+        (``description``, ``const``, the ``look_at`` enum); a tool's own name, property names
+        and keywords (``type``, ``format``, ``required``) stay."""
         if not tools:
             return tools
         out = []
         for tool in tools:
             fn = dict(tool.get("function", {}))
-            for key in ("description", "parameters"):
-                if key in fn:
-                    fn[key] = self._aliased(fn[key], used)
+            if isinstance(fn.get("description"), str):
+                fn["description"] = self.to_alias(fn["description"], used)
+            if "parameters" in fn:
+                fn["parameters"] = self._aliased_schema(fn["parameters"], used)
             out.append({**tool, "function": fn})
+        return out
+
+    def _aliased_schema(self, node: Any, used: set[str]) -> Any:
+        """A JSON schema with names replaced in its text values only."""
+        if isinstance(node, list):
+            return [self._aliased_schema(v, used) for v in node]
+        if not isinstance(node, dict):
+            return node
+        out: dict[str, Any] = {}
+        for key, value in node.items():
+            if key in SCHEMA_TEXT and isinstance(value, str):
+                out[key] = self.to_alias(value, used)
+            elif key == "enum" and isinstance(value, list):
+                out[key] = [self.to_alias(v, used) if isinstance(v, str) else v for v in value]
+            elif key == "properties" and isinstance(value, dict):
+                out[key] = {k: self._aliased_schema(v, used) for k, v in value.items()}
+            elif key in SCHEMA_FIXED:
+                out[key] = value
+            else:
+                out[key] = self._aliased_schema(value, used)
         return out
 
 

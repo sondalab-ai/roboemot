@@ -675,13 +675,289 @@ def test_templates_and_locality_need_admin():
         stack.set("llm_routes", [{**CLOUD, "locality": "local"}])
     with pytest.raises(GuardrailError):
         stack.set("llm_routes", [CLOUD, {**LAN, "name": "extra", "locality": "local"}])
-    stack.set("llm_routes", [CLOUD, {**LAN, "name": "plain"}])  # a new route stays "auto"
+    with pytest.raises(GuardrailError):  # "auto" on a loopback host is local too
+        stack.set("llm_routes", [CLOUD, {**LAN, "name": "plain"}])
+
+
+def local_flags(found) -> list[str]:
+    return [v.path for v in found if v.kind == "privacy" and v.path.endswith(".locality")]
 
 
 def test_violations_flag_a_new_local_route_and_a_changed_one():
     approved = RoboEmotConfig(llm_routes=[CLOUD])
     new_local = RoboEmotConfig(llm_routes=[CLOUD, {**LAN, "name": "x", "locality": "local"}])
     changed = RoboEmotConfig(llm_routes=[{**CLOUD, "locality": "local"}])
-    assert any(v.kind == "admin" and "locality" in v.path for v in violations(approved, new_local))
-    assert any(v.kind == "admin" and "locality" in v.path for v in violations(approved, changed))
-    assert not violations(approved, RoboEmotConfig(llm_routes=[CLOUD, {**LAN, "name": "y"}]))
+    assert local_flags(violations(approved, new_local)) == ["llm_routes.x.locality"]
+    assert local_flags(violations(approved, changed)) == ["llm_routes.cloud.locality"]
+    auto_lan = RoboEmotConfig(llm_routes=[CLOUD, {**LAN, "name": "y"}])
+    assert local_flags(violations(approved, auto_lan)) == ["llm_routes.y.locality"]
+
+
+# ------------------------------------------------------------------ locality guard (SPEC 11A, 12)
+
+GW_LOCAL = {**CLOUD, "base_url": "http://gw.local/v1"}
+LAN_AUTO = {"name": "lan", "base_url": "http://192.168.1.9/v1", "model": "m"}
+
+
+@pytest.mark.parametrize(
+    "routes",
+    [
+        [CLOUD, LAN_AUTO],  # a new auto route on a LAN host
+        [CLOUD, {**LAN_AUTO, "base_url": "http://nas.local/v1"}],
+        [CLOUD, {**LAN_AUTO, "base_url": "http://ollama:11434/v1"}],  # a dotless name
+        [GW_LOCAL],  # a cloud route's base_url moved to a *.local host
+        [{**CLOUD, "base_url": "http://10.0.0.7/v1"}],
+        [{**CLOUD, "base_url": "http://gpu/v1"}],
+    ],
+)
+def test_a_route_that_becomes_local_needs_admin(routes):
+    stack = ConfigStack(app={"llm_routes": [CLOUD], **PRIVACY})
+    with pytest.raises(GuardrailError):
+        stack.set("llm_routes", routes)
+    assert [route_is_local(r) for r in stack.effective().llm_routes] == [False]
+    stack.set("llm_routes", routes, admin=True)
+    assert any(route_is_local(r) for r in stack.effective().llm_routes)
+
+
+def test_a_local_route_cannot_be_pointed_at_another_host_without_admin():
+    trusted = {**CLOUD, "base_url": "https://llm.example.com/v1", "locality": "local"}
+    stack = ConfigStack(app={"llm_routes": [trusted]})
+    with pytest.raises(GuardrailError):
+        stack.set("llm_routes", [{**trusted, "base_url": "https://evil.example.com/v1"}])
+    stack.set("llm_routes", [{**trusted, "locality": "auto"}])  # stricter: becomes cloud
+
+
+def test_making_a_route_cloud_needs_no_admin():
+    stack = ConfigStack(app={"llm_routes": [LAN_AUTO, CLOUD]})
+    stack.set("llm_routes", [{**LAN_AUTO, "locality": "cloud"}, CLOUD])
+    assert not route_is_local(stack.effective().llm_routes[0])
+    stack = ConfigStack(app={"llm_routes": [LAN_AUTO]})
+    stack.set("llm_routes", [{**LAN_AUTO, "base_url": "https://api.example.com/v1"}])
+    assert not route_is_local(stack.effective().llm_routes[0])
+
+
+def test_an_unchanged_local_route_and_a_new_cloud_route_need_no_admin():
+    stack = ConfigStack(app={"llm_routes": [LAN_AUTO]})
+    stack.set("llm_routes", [{**LAN_AUTO, "max_tokens": 200}, CLOUD])
+    stack.set("llm_routes", [{**LAN_AUTO, "locality": "local"}, CLOUD])  # still local, same host
+
+
+def test_a_preset_cannot_add_a_local_route(tmp_path):
+    (tmp_path / "lan.yaml").write_text(
+        "llm_routes:\n  - {name: lan, base_url: 'http://192.168.1.9/v1', model: m}\n"
+    )
+    stack = ConfigStack(app={"llm_routes": [CLOUD]}, preset_dirs=[tmp_path])
+    with pytest.raises(GuardrailError):
+        stack.apply_preset("lan")
+
+
+def test_a_trailing_dot_name_is_a_fully_qualified_cloud_host():
+    for host in ("ai.", "ollama.", "AI.."):
+        assert not route_is_local(route(host)), host
+    assert route_is_local(route("ollama"))
+
+
+# ------------------------------------------------------------------ profile summary cuts (SPEC 12)
+
+
+def test_the_profile_summary_never_cuts_a_preference_mid_name():
+    from roboemot.conversation import profile_summary
+
+    cap = len("Marta; preferences amico=Luca Bia")
+    out = profile_summary("Marta", {"amico": "Luca Bianchi"}, cap, 40)
+    assert out == "Marta"
+    out = profile_summary("Marta", {"amico": "Luca Bianchi", "b": "x"}, 400, 8)
+    assert out == "Marta; preferences b=x"  # a value over the value cap is left out whole
+    full = profile_summary("Marta", {"a": "x", "b": "y"}, len("Marta; preferences a=x, b=y"), 40)
+    assert full == "Marta; preferences a=x, b=y"
+
+
+def test_the_profile_summary_goes_out_without_a_partial_name():
+    from roboemot.conversation import profile_summary
+
+    p = pseudo("Marta", "Luca Bianchi")
+    cap = len("Marta; preferences amico=Luca Bia")
+    prof = profile_summary("Marta", {"amico": "Luca Bianchi"}, cap, 40)
+    msgs = build_messages(
+        system="s", profile_summary=prof, scene_summary=None, history=[], user_text="hi",
+        summary_max_chars=(400, 400), protect=p,
+    )  # fmt: skip
+    body = json.dumps(p.prepare(msgs, None).messages)
+    assert "Bia" not in body and "Luca" not in body
+
+
+def test_a_name_list_that_fails_once_ends_the_turn_before_the_caps_are_applied(tooled, caplog):
+    rig, srv, env = tooled(
+        lambda al: [["Ciao."]],
+        routes=(CLOUD,),
+        conversation={"profile_summary_max_chars": len("Marta; preferences amico=Luca Bia")},
+        **PRIVACY,
+    )
+    rig.profile[0] = "Marta; preferences amico=Luca Bianchi"
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("registry busy Marta")
+        return KNOWN
+
+    rig.worker._known_names = flaky
+    assert rig.done(rig.say("ciao"))
+    assert "Bia" not in json.dumps(srv.bodies)  # never a partial name
+    assert srv.bodies == [] and "Marta" not in caplog.text
+    assert rig.events[-1]["outcome"] == "error"
+
+
+# ------------------------------------------------------------------ alias collisions (SPEC 12)
+
+LOOK_AT = [{"type": "function", "function": {"name": "look_at", "description": "look at a string",
+            "parameters": {"type": "object", "required": ["target"], "properties": {
+                "target": {"type": "string", "format": "name", "enum": ["away", "Marta"],
+                           "description": "who"}}}}}]  # fmt: skip
+COLLIDERS = ["Person", "Persona", "-", "user", "A", "Person-", "'", "Content", "Role", "Target"]
+COLLIDERS += ["Function", "Name", "Type", "Object", "Required", "Tool", "System", "Look_at"]
+
+
+@pytest.mark.parametrize("other", COLLIDERS)
+@pytest.mark.parametrize("language", ["en", "it"])
+async def test_a_name_that_collides_with_an_alias_or_the_wire_format_does_not_disable_the_cloud(
+    other, language
+):
+    for _ in range(12):  # labels are drawn at random: cover the draws
+        p = pseudo(other, "Marta", "Luca", language=language)
+        assert not any(p.mentions(a) for a in p.aliases())
+        out = p.prepare(MESSAGES, LOOK_AT)
+        assert not p.leaks({"messages": out.messages, "tools": out.tools})
+        rec = Recorder()
+        events = await run(rec.router(route()), p, tools=LOOK_AT)
+        assert isinstance(events[-1], Done) and len(rec.bodies) == 1
+        sent = json.dumps(rec.bodies[0][1])
+        assert "Marta" not in sent and '"required": ["target"]' in sent
+        assert '"role": "user"' in sent and '"type": "function"' in sent
+
+
+@pytest.mark.parametrize(
+    "name", ["Person", "Persona", "-", "user", "'", "Person-", "assistant", "a\\"]
+)
+def test_a_name_that_cannot_be_aliased_is_refused_and_counted(name):
+    p = pseudo(name, "Marta")
+    assert p.refused == 1 and len(p.aliases()) == 1
+    assert p.to_alias(f"{name} e Marta").endswith(alias_of(p, "Marta"))
+
+
+def test_a_registered_a_moves_an_alias_it_would_sit_inside():
+    for _ in range(12):
+        p = pseudo("Marta", "Luca")
+        p.sync(["Marta", "Luca", "A"], TEMPLATES, "en", "en")
+        assert not any(p.mentions(a) for a in p.aliases())
+        assert "Person-A" not in p.aliases()
+
+
+def test_tool_schemas_keep_their_keywords():
+    p = pseudo("String", "Marta", "Name")
+    out = p.prepare(MESSAGES, LOOK_AT)
+    target = out.tools[0]["function"]["parameters"]["properties"]["target"]
+    assert target["type"] == "string" and target["format"] == "name"
+    assert target["enum"] == ["away", alias_of(p, "Marta")]
+    assert out.tools[0]["function"]["description"] == f"look at a {alias_of(p, 'String')}"
+    assert out.tools[0]["function"]["parameters"]["required"] == ["target"]
+    assert not p.leaks({"messages": out.messages, "tools": out.tools})
+
+
+def test_the_leak_check_still_sees_names_in_free_text():
+    p = pseudo("Marta", "Target")
+    assert p.leaks({"messages": [{"role": "user", "content": "Marta"}], "tools": None})
+    assert p.leaks({"messages": [{"role": "user", "name": "Marta", "content": "x"}]})
+    tools = [{"type": "function", "function": {"name": "t", "parameters": {"properties": {
+        "x": {"type": "string", "default": "Marta"}}}}}]  # fmt: skip
+    assert p.leaks({"messages": [], "tools": tools})
+    call = {"id": "c", "type": "function",
+            "function": {"name": "look_at", "arguments": '{"q": "\\u004darta"}'}}  # fmt: skip
+    assert p.leaks([{"role": "assistant", "content": None, "tool_calls": [call]}])
+    assert p.leaks([{"role": "tool", "tool_call_id": "c", "content": '["\\u004darta"]'}])
+    for text in ("ciao\nMarta", "ciao\tMarta", "a\rMarta\n"):  # escapes end in a letter
+        assert p.leaks([{"role": "user", "content": text}]), repr(text)
+    assert not p.leaks([{"role": "user", "content": "x"}])
+
+
+def test_the_leak_check_has_no_false_alarm_next_to_a_non_ascii_letter():
+    p = pseudo("E", "Ann", "Marta")
+    for text in ("eßx", "Annè", "èAnn", "çE"):
+        assert p.to_alias(text) == text  # not a whole word: nothing to replace
+        assert not p.leaks([{"role": "user", "content": text}]), text
+
+
+def test_an_empty_template_set_is_refused():
+    with pytest.raises(ValueError):
+        PrivacyConfig(pseudonym_templates={})
+
+
+async def test_a_leak_on_one_cloud_route_does_not_open_an_unscrubbed_path_to_the_next(monkeypatch):
+    p = pseudo("Marta")
+    real_prepare = p.prepare
+    calls = []
+
+    def first_fails(messages, tools):
+        out = real_prepare(messages, tools)
+        calls.append(1)
+        if len(calls) == 1:
+            out.messages = messages  # a scrub that failed on the first route only
+        return out
+
+    monkeypatch.setattr(p, "prepare", first_fails)
+    rec = Recorder()
+    router = rec.router(route(name="one"), route("backup.example.com", name="two"))
+    events = await run(router, p)
+    assert [h for h, _ in rec.bodies] == ["backup.example.com"]
+    assert "Marta" not in json.dumps(rec.bodies[0][1]) and isinstance(events[-1], Done)
+    assert router.failures[-1] == ("one", "PseudonymLeak")
+
+
+# ------------------------------------------------------------------ matching details
+
+
+def test_compatibility_characters_fold_before_case():
+    p = pseudo("Hans")
+    assert p.to_alias("ℌans") == alias_of(p, "Hans")  # BLACK-LETTER CAPITAL H
+    assert p.to_alias("Ｈans") == alias_of(p, "Hans")  # FULLWIDTH H
+
+
+def test_an_alias_is_literal_only_as_a_whole_token():
+    p = pseudo("Marta")
+    a = alias_of(p, "Marta")
+    out = p.prepare([{"role": "user", "content": f"sono Marta, codice {a}X"}], None)
+    assert out.restoration.text(f"Ciao {a}") == "Ciao Marta"
+
+
+def test_refused_registry_names_are_reported_as_a_count_only(tooled, caplog):
+    rig, srv, env = tooled(lambda al: [["Ciao."]], routes=(CLOUD,), **PRIVACY)
+    rig.worker._known_names = lambda: [*KNOWN, "Persona", "user"]
+    rig.turn("sono Marta")
+    assert "2 registry names cannot be aliased" in caplog.text
+    assert "Persona" not in caplog.text and "Marta" not in caplog.text
+    assert "Marta" not in json.dumps(srv.bodies[0])
+
+
+def test_double_quotes_around_a_name_are_not_part_of_it():
+    for _ in range(12):
+        p = pseudo('A"', '"Nonna"', "Marta")
+        assert p.to_alias('"Nonna" e Nonna') == f'"{alias_of(p, "Nonna")}" e {alias_of(p, "Nonna")}'
+        tool = {"role": "tool", "tool_call_id": "c", "content": json.dumps({"x": "Marta A"})}
+        out = p.prepare([tool], None)
+        assert not p.leaks(out.messages) and "Marta" not in out.messages[0]["content"]
+
+
+def test_punctuation_after_a_name_does_not_let_an_alias_read_as_it():
+    for _ in range(12):
+        p = pseudo("A'", "B-", "Marta")
+        assert not {"Person-A", "Person-B"} & set(p.aliases())
+        out = p.prepare([{"role": "user", "content": "A' A'' B- Marta'"}], None)
+        assert not p.leaks(out.messages)
+
+
+def test_image_parts_are_not_read_as_text_but_text_parts_are():
+    p = pseudo("A", "Marta")
+    image = {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,/9j/A/a+A=="}}
+    assert not p.leaks([{"role": "user", "content": [image, {"type": "text", "text": "x"}]}])
+    assert p.leaks([{"role": "user", "content": [image, {"type": "text", "text": "Marta"}]}])
