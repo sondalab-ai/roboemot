@@ -1,0 +1,12 @@
+{
+  "name": "roboemot-webui-tests",
+  "private": true,
+  "description": "Dev-only: node:test + jsdom behaviour tests for the web UI page script (SPEC 14). Not shipped.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "jsdom": "26.1.0"
+  }
+}

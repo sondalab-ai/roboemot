@@ -103,17 +103,20 @@ The persona pieces exist and are tested; these callers wait for the pillars they
 
 ## CI and tests
 
-- [ ] `packages/roboemot-reachymini/tests/test_app_conversation.py::test_the_app_offers_the_default_skills_and_wires_barge_in`
-      is timing-flaky under load (failed once in a full run after the slice-2 fix, passes alone).
-- [ ] `packages/roboemot-core/tests/test_llm_router.py::test_hostile_tool_arguments_do_not_fail_the_route_or_get_parsed`
-      fails on Python 3.15 only (deeply nested JSON assertion); it passes on 3.12 and in CI.
-- [ ] No JS behaviour test runner: the web UI dialog flows (`ask()`, the PIN dialog, the settings editor)
-      are covered only by JS-free tests on the served files and by a manual headless-Chrome check.
+- [x] `packages/roboemot-reachymini/tests/test_app_conversation.py::test_the_app_offers_the_default_skills_and_wires_barge_in`
+      was timing-flaky under load: the listener thread fed quiet chunks into `BargeIn.on_chunk` between the
+      test's loud ones. The test now stops the listener first, so one thread drives the hook.
+- [x] `packages/roboemot-core/tests/test_llm_router.py::test_hostile_tool_arguments_do_not_fail_the_route_or_get_parsed`
+      failed on Python 3.15 only: its JSON parser no longer raises `RecursionError` on deep input. Tool-call
+      arguments are now kept only as an object within `TOOL_ARGS_MAX_DEPTH` (SPEC 8). CI runs 3.11 and 3.12 only.
+- [x] JS behaviour tests for the web UI (`ask()`, the PIN dialog, the settings editor): `node:test` + jsdom in
+      `packages/roboemot-core/tests/webui_js/` (dev-only, lockfile), CI job `webui-js`.
 - [ ] Confirm the robot's Python version (`python scripts/robot_ssh.py -- python3 --version`). The Piper hash locks cover
       aarch64 py3.11 and py3.12 until then; drop the unused one (SPEC 4A Installer).
 - [ ] Confirm on the robot that the app runs as the same user the installer writes `secrets.json` as over SSH;
       otherwise the uid check makes secret routes unavailable (SPEC 8 Secrets, 12 Data).
-- [ ] Runtime test that a hostile `base_url` redirect (307 to another host) does not carry the `Authorization`
-      header (openai/httpx defaults; router and speech client) (SPEC 8).
+- [x] Runtime test that a hostile `base_url` redirect (307 to another host) reaches nothing: `test_redirect_auth.py`.
+      The openai SDK client followed redirects (the prompt went to the target, without the key); LLM routes
+      now do not follow them, like the speech client (SPEC 8, 12).
 - [ ] Dev env only: a local `.venv` with an editable install of the main checkout lacks the `roboemot.world`
       entry point, so `test_world_plugin.py` fails locally; reinstall the editable packages.
