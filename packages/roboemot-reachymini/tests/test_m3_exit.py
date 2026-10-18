@@ -398,7 +398,8 @@ def test_conversation_inside_the_latency_budgets_then_a_barge_in(
         assert spoken and {lang for lang, _ in spoken} == {language}, "answer in the wrong language"
 
         assert stop_acoustic_ms <= BARGE_IN_BUDGET_MS, (
-            f"barge-in stop {stop_acoustic_ms:.0f} ms after the first sound"
+            f"barge-in stop {stop_acoustic_ms:.0f} ms after the first sound; "
+            f"barge-in state {app.bargein.snapshot()}"
         )
     finally:
         finish(stop, thread, errors)

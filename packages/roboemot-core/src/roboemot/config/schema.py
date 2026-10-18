@@ -2050,7 +2050,7 @@ class BargeInConfig(Strict):
         unit="dB", ge=-80, le=-20,
     )  # fmt: skip
     onset_min_speech_ms: float = param(
-        96.0,
+        64.0,
         "Continuous onset-path frames needed before the cut; rounded up to whole VAD frames. The "
         "stop follows within one microphone chunk of this. Like min_speech_ms it adds directly to "
         "the onset-to-stop latency: keep it at or below min_speech_ms, or the onset path is "

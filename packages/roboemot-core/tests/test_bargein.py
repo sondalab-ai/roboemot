@@ -409,10 +409,10 @@ def onset_run(probs, audio, reference=None, **cfg):
     return stops, bi
 
 
-def test_a_fricative_onset_scored_between_the_thresholds_cuts_in_three_frames():
+def test_a_fricative_onset_scored_between_the_thresholds_cuts_in_two_frames():
     stops, bi = onset_run([0.5, 0.6, 0.55, 0.3], hiss(4), keyword_enabled=False)
     assert len(stops) == 1 and bi.snapshot()["triggers"] == 1
-    assert stops[0] <= 3 * FRAME / RATE + CHUNK / RATE  # three frames, one chunk of slack
+    assert stops[0] <= 2 * FRAME / RATE + CHUNK / RATE  # two frames, one chunk of slack
 
 
 def test_the_same_scores_on_a_voiced_low_frequency_sound_do_not_cut():
@@ -420,8 +420,8 @@ def test_the_same_scores_on_a_voiced_low_frequency_sound_do_not_cut():
     assert stops == []
 
 
-def test_a_fricative_that_ends_before_three_frames_or_scores_too_low_does_not_cut():
-    stops, _ = onset_run([0.5, 0.6, 0.1, 0.5, 0.6, 0.1], hiss(6), keyword_enabled=False)
+def test_a_fricative_that_ends_before_two_frames_or_scores_too_low_does_not_cut():
+    stops, _ = onset_run([0.5, 0.1, 0.6, 0.1, 0.5, 0.1], hiss(6), keyword_enabled=False)
     assert stops == []
     stops, _ = onset_run([0.3] * 6, hiss(6), keyword_enabled=False)
     assert stops == []
@@ -468,7 +468,7 @@ def test_a_confident_frame_with_a_middling_echo_correlation_cuts_on_the_main_pat
     corr = echo_correlation(mic, robot)
     b = RoboEmotConfig().voice.barge_in
     assert b.onset_echo_corr_max <= corr < b.echo_corr_max, corr  # measured, not assumed
-    # The main path needs five frames here (150 ms); the onset path would cut after three.
+    # The main path needs five frames here (150 ms); the onset path would cut after two.
     cfg = {"keyword_enabled": False, "min_speech_ms": 150}
     stops, bi = onset_run([0.9] * 6, mic, ref, **cfg)
     assert len(stops) == 1 and stops[0] > 4 * FRAME / RATE  # the main path, at the fifth frame
@@ -521,20 +521,20 @@ def test_a_run_does_not_survive_the_end_of_speech_and_nothing_fires_after_the_st
     bi.bind(lambda: stops.append(now[0]), lambda: None, None)
 
     def feed(lo, hi):
-        for i in range(lo * FRAME, hi * FRAME, CHUNK):
-            now[0] = (i + CHUNK) / RATE
+        for i in range(lo * FRAME, hi * FRAME, FRAME):
+            now[0] = (i + FRAME) / RATE
             bi.on_chunk(
-                SimpleNamespace(samples=audio[i : i + CHUNK], rate_hz=RATE, stamp=now[0], gap=False)
+                SimpleNamespace(samples=audio[i : i + FRAME], rate_hz=RATE, stamp=now[0], gap=False)
             )
 
-    feed(0, 2)  # two frames of an /s/: the robot stops speaking here (the listener's reset)
+    feed(0, 1)  # one frame of an /s/: the robot stops speaking here (the listener's reset)
     bi.reset()
     assert bi._weak_run == 0 and bi._run == 0
-    feed(2, 3)  # a third frame in the tail after the last sentence: not a run of three
+    feed(1, 2)  # a second frame in the tail after the last sentence: not a run of two
     assert stops == []
-    feed(3, 6)  # three fresh ones do cut
+    feed(2, 4)  # two fresh ones do cut
     assert len(stops) == 1
-    feed(6, 12)  # the echo tail of the cut: the detector is deaf, nothing fires again
+    feed(4, 12)  # the echo tail of the cut: the detector is deaf, nothing fires again
     assert len(stops) == 1
 
 

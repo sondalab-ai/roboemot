@@ -14,7 +14,7 @@ section number in commit messages that implement or change behaviour.
 | `packages/roboemot-reachymini/` | Python package `roboemot_reachymini`: Reachy Mini driver and SDK bridge |
 | `rt/` | C++ real-time core (`roboemot-rt`): arbiter and safety limiter, CMake + ctest |
 | `configs/` | Library defaults, robot manifests, personality presets |
-| `scripts/` | Dev helpers (simulation daemon, `install_on_robot.py`: wrapper over the robot-agnostic installer `roboemot.install`) |
+| `scripts/` | Dev helpers (simulation daemon, `install_on_robot.py`: wrapper over the robot-agnostic installer `roboemot.install`; `robot_ssh.py`: wrapper over `roboemot.install.ssh`) |
 
 ## Rules that come from the spec
 
@@ -55,6 +55,8 @@ cmake -S rt -B rt/build && cmake --build rt/build && ctest --test-dir rt/build
 ruff check . && ruff format --check .
 python scripts/install_on_robot.py --dry-run   # read-only checks against the real robot
 python scripts/install_on_robot.py --uninstall --dry-run   # what uninstall would undo
+python scripts/robot_ssh.py [--host H] [--user U]   # shell on the robot (mDNS pick); `-- cmd` runs one command
+python scripts/robot_ssh.py --copy-id    # install your SSH key; --debug: roboemot debug --json built on the robot; --dry-run prints the ssh line (discovery still runs, no exec)
 roboemot debug --host <robot> --json     # debug report (SPEC 12A); system/battery need it run on the robot
 ```
 

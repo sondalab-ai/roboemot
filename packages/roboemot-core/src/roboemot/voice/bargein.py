@@ -12,11 +12,14 @@ cross-correlation (FFT). Above ``echo_corr_max`` it is echo. User speech mixed w
 correlates less the louder it is, so a user quieter than the echo is not heard (documented limit).
 
 A second, faster path covers words that start with a fricative (English "stop": a ~130 ms /s/ that
-Silero scores at 0.4 to 0.7 until the vowel): ``onset_min_speech_ms`` of frames that are
-fricative-like (``onset_hf_min_ratio`` of the energy above ``onset_hf_cutoff_hz``) and scored at
-or above ``onset_threshold`` (or at or above ``threshold``), under the stricter
-``onset_echo_corr_max``, cut the robot off too. The onset is the first of those frames, so the
-200 ms of SPEC 13 count from the first sound.
+Silero scores at 0.35 to 0.9 until the vowel). ``onset_min_speech_ms`` of frames that are
+fricative-like (``onset_hf_min_ratio`` of the energy above ``onset_hf_cutoff_hz``), scored at or
+above ``onset_threshold``, louder than ``onset_min_level_db`` and correlated under
+``onset_echo_corr_max`` with the played audio, both in the full band and in the band above the
+cutoff (where a user's /s/ is not hidden by the robot's low-frequency voice), cut the robot off
+too; frames the main path accepts count as well, under the same stricter guard. The onset is
+the first of those frames, so the 200 ms of SPEC 13 count from the first sound.
+``onset_echo_frames`` counts the frames this guard dropped.
 
 After ``min_speech_ms`` of such frames the robot is cut off: ``stop`` (the speech output: sink
 flushed, the speaking gate reset), ``interrupt`` (the conversation cancels the LLM stream and
@@ -59,6 +62,9 @@ log = logging.getLogger(__name__)
 MS_PER_S = 1000.0
 # Mean-square level below which audio counts as silence for the echo check (about -80 dBFS).
 SILENT_POWER = 1e-8
+# Decibels per decade of power, and the floor that keeps log10 finite on a silent frame.
+DB_PER_DECADE = 10.0
+LOG_FLOOR = 1e-12
 # Float slack when comparing frame stamps with the pre-roll boundary.
 EDGE_S = 1e-9
 
@@ -348,7 +354,7 @@ class BargeIn:
 
     @staticmethod
     def _level_db(frame: np.ndarray) -> float:
-        return 10.0 * math.log10(float(np.mean(frame * frame)) + 1e-12)
+        return DB_PER_DECADE * math.log10(float(np.mean(frame * frame)) + LOG_FLOOR)
 
     def _hf_ratio(self, frame: np.ndarray) -> float:
         """Share of the frame's energy above ``onset_hf_cutoff_hz`` (0 for a silent frame)."""
