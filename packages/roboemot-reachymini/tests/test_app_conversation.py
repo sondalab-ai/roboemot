@@ -240,7 +240,6 @@ def test_a_config_change_rebuilds_the_router_everyone_reads(data, fakes, said): 
 
 def test_the_app_offers_the_default_skills_and_wires_barge_in(data, fakes, said, monkeypatch):  # noqa: F811
 
-
     stops = []
     real_stop = SpeechOutput.stop
     monkeypatch.setattr(SpeechOutput, "stop", lambda self: (stops.append(1), real_stop(self))[1])
