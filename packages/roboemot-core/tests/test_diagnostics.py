@@ -249,3 +249,102 @@ def test_broken_platform_plugin_becomes_an_error_section(monkeypatch):
     (src,) = platform_sources("bot-v1", Target())
     sec = diagnostics.collect_section(src)
     assert not sec["ok"] and sec["error"] == "ImportError: missing dependency"
+
+
+PROC_WIRELESS = """\
+Inter-| sta-|   Quality        |   Discarded packets               | Missed | WE
+ face | tstat| link level noise |  nwid  crypt   frag  retry   misc | beacon | 22
+wlan0: 0000   58.  -52.  -256        0      0      0      3     12        0
+"""
+IW_LINK = """\
+Connected to 04:d4:c4:11:22:33 (on wlan0)
+\tSSID: Casa Barile
+\tfreq: 5180
+\tRX: 1234567 bytes (9000 packets)
+\tTX: 7654321 bytes (8000 packets)
+\tsignal: -53 dBm
+\trx bitrate: 433.3 MBit/s
+\ttx bitrate: 390.0 MBit/s VHT-MCS 8 80MHz short GI VHT-NSS 2
+"""
+NMCLI = "no:Vicini:35:2412 MHz\nyes:Casa\\:Barile:72:5180 MHz\n"
+
+
+def _wifi(tmp_path, monkeypatch, tools, outputs, proc=PROC_WIRELESS):
+    monkeypatch.setattr(system.sys, "platform", "linux")
+    p = tmp_path / "wireless"
+    if proc is not None:
+        p.write_text(proc)
+    ran = []
+
+    def run(argv, **kw):
+        ran.append((argv, kw))
+        out = outputs.get(argv[0])
+        if isinstance(out, Exception):
+            raise out
+        return SimpleNamespace(stdout=out or "")
+
+    data = system.wifi(p, tmp_path / "nonet", run, lambda n: n if n in tools else None)
+    return data, ran
+
+
+def test_wifi_parsers_read_captured_output():
+    assert system.parse_proc_wireless(PROC_WIRELESS) == {
+        "wlan0": {"link_quality": 58.0, "signal_dbm": -52.0, "noise_dbm": None}
+    }
+    assert system.parse_iw_link(IW_LINK) == {
+        "ssid": "Casa Barile",
+        "freq_mhz": 5180.0,
+        "signal_dbm": -53.0,
+        "tx_bitrate_mbps": 390.0,
+    }
+    assert system.parse_iw_link("Not connected.\n") == {}
+    assert system.parse_nmcli_active(NMCLI) == {
+        "ssid": "Casa:Barile",
+        "signal_pct": 72.0,
+        "freq_mhz": 5180.0,
+    }
+    assert system.parse_nmcli_active("no:x:1:2 MHz") == {}
+    assert system.parse_proc_wireless("garbage\nwlan1: 0000 x y z") == {}
+
+
+def test_wifi_prefers_iw_and_never_reports_the_bssid(tmp_path, monkeypatch):
+    data, ran = _wifi(tmp_path, monkeypatch, {"iw", "nmcli"}, {"iw": IW_LINK})
+    assert data["source"] == "iw"
+    wlan = data["interfaces"]["wlan0"]
+    assert wlan["ssid"] == "Casa Barile" and wlan["signal_dbm"] == -53.0
+    assert wlan["link_quality"] == 58.0
+    assert "04:d4" not in str(data)
+    assert ran[0][0] == ["iw", "dev", "wlan0", "link"] and ran[0][1]["timeout"] > 0
+
+
+def test_wifi_falls_back_to_nmcli_then_proc_only(tmp_path, monkeypatch):
+    data, _ = _wifi(tmp_path, monkeypatch, {"nmcli"}, {"nmcli": NMCLI})
+    assert data["source"] == "nmcli" and data["active_network"]["ssid"] == "Casa:Barile"
+    data, ran = _wifi(tmp_path, monkeypatch, set(), {})
+    assert data["source"] == "proc" and not ran
+    assert data["interfaces"]["wlan0"]["signal_dbm"] == -52.0
+
+
+def test_wifi_survives_a_failing_or_hanging_tool(tmp_path, monkeypatch):
+    data, _ = _wifi(tmp_path, monkeypatch, {"iw"}, {"iw": subprocess.TimeoutExpired("iw", 2.0)})
+    assert data["available"] and data["interfaces"]["wlan0"]["signal_dbm"] == -52.0
+
+
+def test_wifi_says_why_it_is_not_available(tmp_path, monkeypatch):
+    data, _ = _wifi(tmp_path, monkeypatch, set(), {}, proc=None)
+    assert data == {"available": False, "reason": "no wireless interface"}
+    monkeypatch.setattr(system.sys, "platform", "darwin")
+    off = system.wifi(tmp_path / "x", tmp_path, lambda *a, **k: None, lambda n: None)
+    assert off["available"] is False and "not Linux" in off["reason"]
+
+
+def test_wifi_finds_cards_that_only_sysfs_lists(tmp_path, monkeypatch):
+    (tmp_path / "net" / "wlan9" / "wireless").mkdir(parents=True)
+    monkeypatch.setattr(system.sys, "platform", "linux")
+    data = system.wifi(tmp_path / "none", tmp_path / "net", lambda *a, **k: None, lambda n: None)
+    assert data["interfaces"] == {"wlan9": {}}
+
+
+def test_wifi_is_a_local_source():
+    names = {s.name: s.scope for s in system.local_sources()}
+    assert names["network.wifi"] == "local"

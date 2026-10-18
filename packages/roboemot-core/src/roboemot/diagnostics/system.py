@@ -1,17 +1,23 @@
 """Generic sources for the machine that builds the report (scope ``local``).
 
 Nothing here knows a robot model: system and OS, CPU, memory, disks, network, temperatures,
-battery and power supply, and the RoboEmot process. Values the platform does not report are
-left out or ``None``, never guessed: ``psutil.sensors_temperatures`` does not exist on macOS,
-and ``psutil.sensors_battery`` is ``None`` on most Linux boards, whose supplies (if any) appear
-under ``/sys/class/power_supply``. On a Raspberry Pi, ``vcgencmd get_throttled`` tells whether
-the supply voltage dropped too low, the usual sign of a weak battery or charger.
+battery and power supply, Wi-Fi link quality, and the RoboEmot process. Values the platform
+does not report are left out or ``None``, never guessed: ``psutil.sensors_temperatures`` does
+not exist on macOS, and ``psutil.sensors_battery`` is ``None`` on most Linux boards, whose
+supplies (if any) appear under ``/sys/class/power_supply``. On a Raspberry Pi,
+``vcgencmd get_throttled`` tells whether the supply voltage dropped too low, the usual sign of
+a weak battery or charger.
+
+``network.wifi`` is Linux only: link quality, signal and noise from ``/proc/net/wireless``, and
+SSID, frequency and bit rate from ``iw`` or, failing that, ``nmcli``. The BSSID (the access
+point's hardware address) is never reported.
 """
 
 from __future__ import annotations
 
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -28,6 +34,10 @@ CPU_SAMPLE_S = 0.2
 COMMAND_TIMEOUT_S = 2.0
 POWER_SUPPLY_ROOT = Path("/sys/class/power_supply")
 DEVICE_MODEL = Path("/proc/device-tree/model")
+PROC_WIRELESS = Path("/proc/net/wireless")
+SYS_NET = Path("/sys/class/net")
+# /proc/net/wireless reports 256 below the real figure when the driver has no noise value.
+NOISE_UNKNOWN_DBM = -256
 # sysfs power_supply units: micro-volts, micro-amps, micro-watts, micro-watt/amp-hours, 0.1 °C.
 MICRO = 1e-6
 DECI = 0.1
@@ -209,12 +219,131 @@ def process_info(pid: int | None = None, match: str | None = None) -> dict[str, 
     return {"running": True, "processes": [_proc(p) for p in procs]}
 
 
+def wifi(
+    proc: Path = PROC_WIRELESS,
+    sys_net: Path = SYS_NET,
+    run: Any = subprocess.run,
+    which: Any = shutil.which,
+) -> dict[str, Any]:
+    """Per wireless interface: link quality, signal and noise, SSID, frequency, bit rate.
+
+    Linux only. Reads ``/proc/net/wireless``, then asks ``iw dev <if> link`` for each interface,
+    or ``nmcli`` for the active network when ``iw`` is missing. The BSSID is left out.
+    """
+    if not sys.platform.startswith("linux"):
+        return {"available": False, "reason": f"not Linux ({sys.platform})"}
+    interfaces = parse_proc_wireless(_read(proc) or "")
+    if sys_net.is_dir():
+        for card in sorted(sys_net.iterdir()):
+            if (card / "wireless").is_dir():
+                interfaces.setdefault(card.name, {})
+    if not interfaces:
+        return {"available": False, "reason": "no wireless interface"}
+    if which("iw"):
+        source = "iw"
+        for name, info in interfaces.items():
+            out = _run_text(run, ["iw", "dev", name, "link"])
+            info.update(parse_iw_link(out or ""))
+    elif which("nmcli"):
+        source = "nmcli"
+        out = _run_text(
+            run,
+            [
+                "nmcli",
+                "-t",
+                "-f",
+                "ACTIVE,SSID,SIGNAL,FREQ",
+                "dev",
+                "wifi",
+                "list",
+                "--rescan",
+                "no",
+            ],
+        )
+        active = parse_nmcli_active(out or "")
+        # nmcli lists networks, not interfaces, so the active one is not tied to a card.
+        return {
+            "available": True,
+            "source": source,
+            "interfaces": interfaces,
+            "active_network": active or None,
+        }
+    else:
+        source = "proc"
+    return {"available": True, "source": source, "interfaces": interfaces}
+
+
+def parse_proc_wireless(text: str) -> dict[str, dict[str, Any]]:
+    """``/proc/net/wireless`` rows as ``{interface: {link_quality, signal_dbm, noise_dbm}}``."""
+    out: dict[str, dict[str, Any]] = {}
+    for line in text.splitlines():
+        name, sep, rest = line.partition(":")
+        fields = rest.split()
+        if not sep or len(fields) < 4 or "|" in line:
+            continue
+        try:
+            quality, level, noise = (float(f.rstrip(".")) for f in fields[1:4])
+        except ValueError:
+            continue
+        out[name.strip()] = {
+            "link_quality": quality,
+            "signal_dbm": level,
+            "noise_dbm": None if noise <= NOISE_UNKNOWN_DBM else noise,
+        }
+    return out
+
+
+def parse_iw_link(text: str) -> dict[str, Any]:
+    """SSID, frequency, signal and tx bit rate from ``iw dev <if> link``; empty if not connected."""
+    out: dict[str, Any] = {}
+    for line in text.splitlines():
+        key, _, value = line.strip().partition(": ")
+        if key == "SSID":
+            out["ssid"] = value
+        elif key == "freq" and _number(value):
+            out["freq_mhz"] = _number(value)
+        elif key == "signal" and _number(value) is not None:
+            out["signal_dbm"] = _number(value)
+        elif key == "tx bitrate" and _number(value) is not None:
+            out["tx_bitrate_mbps"] = _number(value)
+    return out
+
+
+def parse_nmcli_active(text: str) -> dict[str, Any]:
+    """The active line of ``nmcli -t -f ACTIVE,SSID,SIGNAL,FREQ dev wifi`` (``\\:`` escapes)."""
+    for line in text.splitlines():
+        parts = re.split(r"(?<!\\):", line)
+        if len(parts) == 4 and parts[0] == "yes":
+            out: dict[str, Any] = {"ssid": parts[1].replace("\\:", ":")}
+            if _number(parts[2]) is not None:
+                out["signal_pct"] = _number(parts[2])
+            if _number(parts[3]) is not None:
+                out["freq_mhz"] = _number(parts[3])
+            return out
+    return {}
+
+
+def _number(text: str) -> float | None:
+    match = re.match(r"-?\d+(?:\.\d+)?", text.strip())
+    return float(match.group()) if match else None
+
+
+def _run_text(run: Any, argv: list[str]) -> str | None:
+    """Stdout of a short command, ``None`` on any failure or timeout."""
+    try:
+        res = run(argv, capture_output=True, text=True, timeout=COMMAND_TIMEOUT_S, check=True)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return res.stdout
+
+
 def local_sources(process_pid: int | None = None, process_match: str | None = None) -> list[Source]:
     """The generic sources; the process one only when told which process to look at."""
     sources: list[Source] = [
         FnSource("system", system_info, "local"),
         FnSource("temperatures", temperatures, "local"),
         FnSource("battery", battery, "local"),
+        FnSource("network.wifi", wifi, "local"),
     ]
     if process_pid is not None or process_match:
         sources.append(
@@ -309,4 +438,5 @@ __all__ = [
     "system_info",
     "temperatures",
     "throttling",
+    "wifi",
 ]

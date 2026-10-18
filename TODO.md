@@ -60,6 +60,8 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       gestures that are not affect labels (nod, shake) need their own map and primitives.
 - [ ] Edit wake phrases and the robot name from the web UI (needs an admin-confirmed settings editor,
       SPEC 11A).
+- [ ] Edit the children's built-in lines (`safety.minor_lines`) and the minor blocklist from the web UI
+      (same editor). Until then they keep their defaults (owner decision, 2026-10-18).
 
 ## M3 exit (SPEC 14, `docs/eval/m3.md`)
 
@@ -68,5 +70,4 @@ The persona pieces exist and are tested; these callers wait for the pillars they
 - [ ] A CI job for `-m models` tests: the runner needs a cached voice models folder (Silero, two Vosk
       models, two Piper voices, about 0.3 GB) and a Piper interpreter; `ci.yml` has none today.
 - [ ] The robot, owner and licence items of the M3 report are in SPEC 15 (exit on the robot, barge-in,
-      CM4 load, Piper on the robot and its voice licences, wake phrases, OpenAI speech in Italian,
-      children's lines). Not repeated here.
+      CM4 load, Piper on the robot and its voice licences, wake phrases, OpenAI speech in Italian, children's lines). Not repeated here.

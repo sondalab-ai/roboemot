@@ -64,6 +64,7 @@ Scripts (run from the repository root):
 | Script | What it does |
 | --- | --- |
 | `scripts/install_on_robot.py [--dry-run] [--uninstall]` | Install, start, or cleanly uninstall the app on a robot over SSH (see below; SPEC 4A) |
+| `scripts/robot_ssh.py [--copy-id] [--debug] [-- cmd]` | SSH into the robot (found by mDNS), install your key, or fetch its debug report built on the robot (SPEC 4A, 12A) |
 | `scripts/sim-daemon.sh` | Headless MuJoCo Reachy Mini daemon on `localhost:8000` for `pytest -m sim` |
 | `scripts/sync-package-data.sh` | Copy manifest and presets into the Reachy app's package data |
 | `scripts/gen_golden.py` | Regenerate the golden vectors the C++ core is tested against |
@@ -86,6 +87,10 @@ python scripts/install_on_robot.py             # install, verify, optionally sta
 python scripts/install_on_robot.py --uninstall --dry-run   # what uninstall would undo
 python scripts/install_on_robot.py --uninstall # put the robot back as it was
 ```
+
+To log in afterwards, `python scripts/robot_ssh.py` finds the robot the same way and opens a shell;
+`--copy-id` installs your SSH key, `-- <command>` runs one command, `--debug` prints the debug
+report built on the robot (with Wi-Fi signal strength), `--dry-run` shows the `ssh` line.
 
 It lists the robots it finds on the network by mDNS (or asks for a host, default
 `reachy-mini.local`) and asks for the SSH user (default `pollen`);
