@@ -4,9 +4,11 @@ out, one shared router, shutdown order, summaries from the world and the registr
 from __future__ import annotations
 
 import json
+import time
 from types import SimpleNamespace
 
 import httpx
+import numpy as np
 import pytest
 import roboemot_reachymini.app as app_module
 from roboemot.attention import AttentionSelector
@@ -234,3 +236,84 @@ def test_a_config_change_rebuilds_the_router_everyone_reads(data, fakes, said): 
         stop.set()
         thread.join(timeout=10)
     assert not errors
+
+
+def test_the_app_offers_the_default_skills_and_wires_barge_in(data, fakes, said, monkeypatch):  # noqa: F811
+
+
+    stops = []
+    real_stop = SpeechOutput.stop
+    monkeypatch.setattr(SpeechOutput, "stop", lambda self: (stops.append(1), real_stop(self))[1])
+    enable(data, VOICE_YAML + ROUTES)
+    app = ConvApp.__new__(ConvApp)
+    app.requests = []
+    stop, thread, errors = run_app(app, ScriptedMini().mini)
+    try:
+        assert wait_for(lambda: app.conversation is not None and app.bargein is not None)
+        skills = app.conversation.skills
+        assert skills.names() == [
+            "play", "look_at", "express_emotion", "remember_preference", "stop_talking",
+        ]  # fmt: skip
+        gestures = skills.get("play").resolved_choices()["gesture"]
+        assert set(gestures) == set(app.expression.expression_map) and gestures
+        assert app.conversation.preferences is not None
+        # the user speaks over the robot: loud frames, no reference to match them against
+        app.speech.extend(time.monotonic() + 5.0)
+        now = time.monotonic()
+        loud = (0.3 * np.sin(np.arange(1024) * 0.2)).astype(np.float32)
+        for i in range(4):
+            app.bargein.on_chunk(
+                SimpleNamespace(samples=loud, rate_hz=16000, stamp=now + (i + 1) * 0.064, gap=False)
+            )
+        assert stops == [1]
+        report = app.diagnostics.report()["sections"]["roboemot.voice"]["data"]
+        assert (
+            report["bargein"]["triggers"] == 1 and "onset_to_stop" in report["bargein"]["latency"]
+        )
+        assert report["barge_ins"] == 1 and "ciao" not in json.dumps(report)
+    finally:
+        stop.set()
+        thread.join(timeout=10)
+    assert not errors and not thread.is_alive()
+
+
+def test_look_at_and_play_go_through_the_selector_and_the_renderer():
+    from roboemot.affect.expression import ExpressionRenderer
+    from roboemot.config.schema import ExpressionEntry
+    from roboemot_reachymini.skills import SkillBridge
+
+    cfg = RoboEmotConfig()
+    bus = Bus()
+    world = WorldModel(cfg.world, FRAME, bus)
+    selector = AttentionSelector(cfg.attention, bus)
+    entry = ExpressionEntry(channels={"antenna_right": [(0, 0), (1, 10), (2, 0)]})
+    renderer = ExpressionRenderer(cfg.expression, {"joy": entry}, {}, 0.15)
+
+    class Reg:
+        def get_person(self, pid):
+            return SimpleNamespace(display_name="Marta")
+
+        def get_entity(self, eid):
+            return SimpleNamespace(display_name="Rex")
+
+    now = [10.0]
+    bridge = SkillBridge(renderer, selector, world, Reg(), lambda: cfg, clock=lambda: now[0])
+    env = bridge.env(None)
+    assert env.gestures() == ["joy"] and env.play("joy") and not env.play("wave")
+    assert env.look_names() == [] and env.look_at("person") is False
+    world.observe(
+        Observation("person", 10.0, "vision", 0.3, 0.0, identity="p1", distance_m=2.0), {}
+    )
+    world.observe(
+        Observation("animal", 10.0, "vision", -0.5, 0.0, identity="e1", distance_m=1.0), {}
+    )
+    assert env.look_names() == ["Marta", "Rex"]
+    assert env.look_at("Rex") and selector._hint.entry_id is not None
+    animal = selector._hint.entry_id
+    assert env.look_at("person") and selector._hint.entry_id != animal
+    assert env.look_at("marta") and env.look_at("animal") and selector._hint.entry_id == animal
+    assert not env.look_at("object") and not env.look_at("Mallory")
+    assert env.look_at("away") and selector._hint.entry_id is None
+    assert abs(selector._hint.azimuth_rad) >= cfg.attention.speaker_match_deg * 3.14159 / 180
+    now[0] = 10.0 + cfg.attention.stale_s + 1  # everything went stale
+    assert env.look_names() == [] and not env.look_at("person")

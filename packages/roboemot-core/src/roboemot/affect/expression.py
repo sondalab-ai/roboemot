@@ -28,6 +28,7 @@ Not scaled by speed: expressions play at the keyframe times.
 from __future__ import annotations
 
 import math
+import threading
 from collections.abc import Callable, Mapping
 
 from ..config.schema import ExpressionConfig, ExpressionEntry
@@ -101,6 +102,9 @@ class ExpressionRenderer:
         self._label: str | None = None
         self._serial = 0
         self._pending = False
+        self._request_lock = threading.Lock()
+        self._requested: str | None = None  # a skill's label, from another thread (SPEC 11)
+        self._forced: str | None = None  # the requested label waiting for its turn
         self._last_start = -math.inf
         self._player: Player | None = None
         self._blend: tuple[float, dict[str, float]] | None = None
@@ -143,6 +147,17 @@ class ExpressionRenderer:
         self._scale_now = self._register_scale(register)
         self._minor_factor = minor_factor
 
+    def request(self, label: str) -> bool:
+        """The ``play`` skill (SPEC 11, LLM tools): play the expression ``label`` at the next
+        :meth:`update`, from any thread. It takes the same path as an affect-driven one (the
+        minimum interval, the register, circadian and persona scaling, the minor cap, the body
+        channel rule); only the label differs. False when the map has no such label."""
+        if label not in self.expression_map:
+            return False
+        with self._request_lock:
+            self._requested = label
+        return True
+
     def update(self, state: AffectState, register: ActiveRegister, now: float) -> bool:
         """Take a new affect state; starts an expression when one is due. Returns whether it did.
 
@@ -159,10 +174,15 @@ class ExpressionRenderer:
             )
             self._pending = self._pending or changed or held
         self._label, self._serial = state.label, state.impulse
+        with self._request_lock:
+            requested, self._requested = self._requested, None
+        if requested is not None:
+            self._forced, self._pending = requested, True
         if not self._pending or now - self._last_start < self.cfg.min_interval_s:
             return False
         self._pending = False
-        return self._start(state, register, now)
+        forced, self._forced = self._forced, None
+        return self._start(forced or state.label, state, register, now)
 
     def _primitive(self, label: str, body: bool) -> Primitive | None:
         key = (label, body)
@@ -178,8 +198,8 @@ class ExpressionRenderer:
         p = register.params
         return p.motion_amplitude * getattr(self.cfg.intensity_factor, p.reaction_intensity)
 
-    def _start(self, state: AffectState, register: ActiveRegister, now: float) -> bool:
-        prim = self._primitive(state.label, register.params.approach_allowed)
+    def _start(self, label: str, state: AffectState, register: ActiveRegister, now: float) -> bool:
+        prim = self._primitive(label, register.params.approach_allowed)
         amp = self.amplitude(register, state)
         if prim is None or amp <= 0:
             return False
@@ -187,7 +207,7 @@ class ExpressionRenderer:
             self._blend = (now, dict(self._last))
         self._player = Player(prim, now, source=SOURCE, amplitude=amp, priority=Priority.EXPRESSION)
         self._scale_start = self._scale_now
-        self._last_start, self.last_label, self.last_amplitude = now, state.label, amp
+        self._last_start, self.last_label, self.last_amplitude = now, label, amp
         self.started += 1
         return True
 

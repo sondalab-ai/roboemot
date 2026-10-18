@@ -198,3 +198,22 @@ def test_the_return_value_is_zero_when_nothing_was_queued_and_bad_rates_are_refu
     assert sp.push_audio_sample(np.zeros(100, np.float32), -5) == 0.0
     assert log.pushed == []
     assert sp.push_audio_sample(np.zeros(100, np.float32), 16000) > 0.0
+
+
+def test_the_speaker_keeps_a_timestamped_reference_for_the_echo_check_and_cuts_it_on_stop():
+    from roboemot.voice.bargein import PlaybackReference
+
+    mini, log = fake(out_rate=48000)
+    clock = Clock()
+    ref = PlaybackReference(16000, keep_s=5.0)
+    sp = ReachySpeaker(mini, 100, clock=clock, reference=ref)
+    sp.start_playing()
+    tone = np.sin(np.arange(22050) * 0.05).astype(np.float32)
+    sp.push_audio_sample(tone, 22050)  # one second at Piper's rate, resampled twice on the way
+    start = clock.t
+    w = ref.window(start, start + 1.0)
+    assert w.size == 16000 and float(np.abs(w).max()) > 0.5  # at the reference rate
+    clock.t += 0.5
+    sp.stop()
+    assert float(np.abs(ref.window(start + 0.6, start + 1.0)).max()) == 0.0  # never played
+    assert float(np.abs(ref.window(start + 0.1, start + 0.4)).max()) > 0.5

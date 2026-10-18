@@ -8,7 +8,12 @@ fallback). The SDK does not report how much is queued, so the speaker counts: ev
 sample extends ``playing_until()``, a monotonic stamp, and ``stop`` resets it. The stamp feeds
 ``SpeechActivity`` (the echo gate) and tells barge-in what is still to be cut.
 
-Privacy (SPEC 12): audio passes through; nothing is kept, logged or published.
+With a ``reference`` (:class:`~roboemot.voice.bargein.PlaybackReference`) the speaker also keeps
+the last seconds of what it played, resampled to the reference rate and stamped with the time each
+piece starts to play, for the barge-in echo check (SPEC 8 stage 8); ``stop`` cuts it at the stop.
+
+Privacy (SPEC 12): audio passes through; the reference is a RAM ring of a few seconds that is
+never logged or published.
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ from typing import Any
 
 import numpy as np
 from roboemot.voice.activity import SpeechActivity
+from roboemot.voice.bargein import PlaybackReference
 
 from .resample import resample
 
@@ -38,6 +44,7 @@ class ReachySpeaker:
         chunk_ms: float,
         activity: SpeechActivity | None = None,
         clock: Callable[[], float] = time.monotonic,
+        reference: PlaybackReference | None = None,
     ) -> None:
         self._mini, self._chunk_s, self._activity, self._clock = (
             mini,
@@ -45,6 +52,7 @@ class ReachySpeaker:
             activity,
             clock,
         )
+        self._reference = reference
         self._lock = threading.RLock()  # stop may run from inside a push hook
         self._until = -math.inf  # monotonic stamp at which the queued audio has played
         self._generation = 0  # bumped by stop: a push in flight abandons its remaining chunks
@@ -108,7 +116,12 @@ class ReachySpeaker:
                     break
                 if generation != self._generation:  # stopped from inside the push
                     break
-                self._until = max(self._until, self._clock()) + piece.size / self._out_hz
+                begins = max(self._until, self._clock())
+                if self._reference is not None:
+                    self._reference.add(
+                        begins, resample(piece, self._out_hz, self._reference.rate_hz)
+                    )
+                self._until = begins + piece.size / self._out_hz
                 self._pushed += piece.size
                 queued = True
                 if self._activity is not None:  # under the lock: a stop cannot interleave
@@ -130,6 +143,8 @@ class ReachySpeaker:
         with self._lock:  # held throughout: no push lands between the flush and the reset
             self._generation += 1
             self._until = now = self._clock()
+            if self._reference is not None:
+                self._reference.truncate(now)
             if self._playing:
                 audio = getattr(self._media(), "audio", None)
                 clear = getattr(audio, "clear_player", None)

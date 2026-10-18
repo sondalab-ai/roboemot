@@ -3,8 +3,11 @@
 ``build_listener`` assembles Silero VAD, Vosk, the fast path and the listener over the audio
 hub's voice queue, with the app-side lookups they need: the sound bearing in the base frame, the
 attended person, whether an enrolled person is in view, and the speaker's language preference.
-It returns None, with a warning, when the ``voice`` extra or the models are missing: the robot
-then runs without voice.
+The barge-in detector (SPEC 8 stage 8) is built with the listener, on its own Silero instance, and
+hooked to the listener's speaking chunks; the app binds its actions (stop the speech, interrupt the
+conversation, resume the listener) once the speech output and the conversation exist. It returns
+None, with a warning, when the ``voice`` extra or the models are missing: the robot then runs
+without voice.
 """
 
 from __future__ import annotations
@@ -21,7 +24,8 @@ from roboemot.config.schema import RoboEmotConfig
 from roboemot.vision.models import ModelError
 from roboemot.voice import models as voice_models
 from roboemot.voice.activity import SpeechActivity
-from roboemot.voice.asr import VoskASR
+from roboemot.voice.asr import VoskASR, resolve_language
+from roboemot.voice.bargein import BargeIn, PlaybackReference
 from roboemot.voice.fastpath import Emit, FastPath
 from roboemot.voice.listener import Utterance, VoiceListener
 from roboemot.voice.vad import Endpointer, SileroVAD
@@ -81,8 +85,10 @@ def build_listener(
     registry: Any,
     frame: FrameSpec,
     on_utterance: Callable[[Utterance], None],
-) -> tuple[VoiceListener, Callable[[], None]] | None:
-    """The listener and a ``close`` for its bus subscription, or None when voice can't run."""
+    reference: PlaybackReference | None = None,
+) -> tuple[VoiceListener, Callable[[], None], BargeIn] | None:
+    """The listener, a ``close`` for its bus subscription and the barge-in detector (not yet
+    bound to its actions), or None when voice can't run."""
     root = voice_models.models_dir(cfg.voice.models_dir, cfg.data_dir)
     try:
         vad_path = voice_models.model_file(root, "silero-vad")
@@ -90,6 +96,7 @@ def build_listener(
             lang: voice_models.model_file(root, name) for lang, name in cfg.voice.asr.models.items()
         }
         vad = SileroVAD(vad_path, cfg.voice.vad.threads)
+        barge_vad = SileroVAD(vad_path, cfg.voice.vad.threads)  # its own recurrent state
         asr = VoskASR(asr_paths, cfg.voice.sample_rate_hz)
     except (ModelError, RuntimeError, OSError) as exc:
         log.warning(
@@ -142,6 +149,16 @@ def build_listener(
         bearing=lambda now: bearing.get(now, max_age_s),
         target_entry=lambda: getattr(attended_person(), "entry_id", None),
     )
+    bargein = BargeIn(
+        cfg,
+        barge_vad,
+        asr,
+        reference,
+        language=lambda: resolve_language(
+            asr.languages, speaker_language(), cfg.conversation.language
+        ),
+        emit=emit,
+    )
     listener = VoiceListener(
         cfg,
         audio.read,
@@ -153,6 +170,8 @@ def build_listener(
         bus,
         speaker_language=speaker_language,
         speaker_id=speaker_id,
+        on_speaking_chunk=bargein.on_chunk,
+        on_speaking_end=bargein.reset,
         enrolled_in_view=enrolled_in_view,
     )
-    return listener, bearing.close
+    return listener, bearing.close, bargein
