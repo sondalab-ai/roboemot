@@ -1155,3 +1155,49 @@ def test_deeply_nested_tool_content_is_aliased_without_recursion(depth):
     assert "Marta" not in sent and alias_of(p, "Marta") in sent
     assert not p.leaks(out.messages)
     assert p.leaks([tool_msg(content)])
+
+
+# ------------------------------------------------------------------ short JSON escapes
+
+
+@pytest.mark.parametrize(
+    "written", ["Anna\\nMaria", "Anna\\tMaria", "Anna\\r\\nMaria", "Anna \\fMaria"]
+)
+def test_a_name_split_by_a_short_json_escape_is_scrubbed_in_plain_text(written):
+    p = pseudo("Anna Maria")
+    assert p.to_alias(f"ciao {written}!") == f"ciao {alias_of(p, 'Anna Maria')}!"
+    assert p.leaks([{"role": "user", "content": written}])
+
+
+def test_short_escapes_in_json_that_is_never_decoded_do_not_hide_a_name():
+    p = pseudo("Anna Maria")
+    scalar = '"Anna\\nMaria"'  # a JSON scalar string: not an object or list
+    double = json.dumps({"r": json.dumps({"x": "Anna\nMaria"})})  # JSON inside a JSON value
+    depth = 200_000
+    deep = "[" * depth + '"Anna\\nMaria"' + "]" * depth  # too deep for the parser
+    for content in (scalar, double, deep):
+        assert p.leaks([tool_msg(content)]), content[:40]
+        out = p.prepare([tool_msg(content)], None)
+        assert "Anna" not in out.messages[0]["content"], content[:40]
+        assert not p.leaks(out.messages), content[:40]
+
+
+def test_escaped_quotes_and_slashes_are_read_as_their_characters():
+    p = pseudo('Ann "Nan" Lee', "A/B")
+    assert p.mentions('Ann \\"Nan\\" Lee')
+    assert p.mentions("A\\/B")
+
+
+async def test_a_lone_surrogate_in_the_history_is_a_clean_route_error():
+    p = pseudo("Marta")
+    fn = {"name": "look_at", "arguments": json.dumps({"x": "\ud800Bob"}, ensure_ascii=False)}
+    messages = [
+        {"role": "user", "content": "ciao"},
+        {"role": "assistant", "content": None,
+         "tool_calls": [{"id": "c", "type": "function", "function": fn}]},
+        tool_msg("{}"),
+    ]  # fmt: skip
+    rec = Recorder()
+    with pytest.raises(Exception, match="all routes failed"):
+        await run(rec.router(route()), p, messages)
+    assert rec.bodies == []

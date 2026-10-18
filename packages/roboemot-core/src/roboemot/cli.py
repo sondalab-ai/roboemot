@@ -167,7 +167,7 @@ def _llm(args: argparse.Namespace) -> int:
     if cfg.privacy.pseudonyms_to_cloud:
         print(
             "warning: pseudonyms are on, but the CLI does not read the registry; the synthetic "
-            "prompts are sent as they are",
+            "prompts are sent as they are (no registry names are in them)",
             file=sys.stderr,
         )
 

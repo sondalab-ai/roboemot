@@ -55,6 +55,8 @@ import httpx
 from ..config.schema import PSEUDONYM_LABEL, LLMRoute, RoboEmotConfig
 
 UNICODE_ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})")
+SHORT_ESCAPE = re.compile(r'\\([ntrfb/"])')
+SHORT_ESCAPES = {"n": " ", "t": " ", "r": " ", "f": " ", "b": " ", "/": "/", '"': '"'}
 # Deepest JSON nesting kept in tool-call arguments. The alias restoration recurses, and a
 # 5000-deep object parses on every Python version, so depth is bounded here.
 TOOL_ARGS_MAX_DEPTH = 64
@@ -165,9 +167,13 @@ def _nfc(text: str) -> str:
 
 
 def _escape_at(nfc: str, i: int) -> tuple[str, int] | None:
-    """The character written by a ``\\uXXXX`` escape at ``nfc[i]`` (a high and a low surrogate
-    escape together write one character) and the length of the escape(s), else None. A lone
-    surrogate is not decoded. ``\\UXXXXXXXX`` is not a JSON escape and is not handled."""
+    """The character written by a JSON escape at ``nfc[i]`` and the length of the escape(s),
+    else None: ``\\uXXXX`` (a high and a low surrogate escape together write one character, a
+    lone surrogate is not decoded), ``\\n \\t \\r \\f \\b`` (read as a space, so a name split
+    over two words matches) and ``\\/ \\"``. ``\\UXXXXXXXX`` is not a JSON escape and is not
+    handled."""
+    if short := SHORT_ESCAPE.match(nfc, i):
+        return SHORT_ESCAPES[short[1]], 2
     m = UNICODE_ESCAPE.match(nfc, i)
     if not m:
         return None
@@ -184,11 +190,11 @@ def _escape_at(nfc: str, i: int) -> tuple[str, int] | None:
 
 def _fold(text: str) -> tuple[str, list[int], list[int], str]:
     """``(folded, start, end, nfc)``: the folded text and, for each of its characters, the
-    span of the NFC text it came from. A ``\\uXXXX`` escape (any hex case; a surrogate pair
-    counts as one character, a lone surrogate is left as written) is the character it writes,
-    so a name spelled with escapes in plain text is matched and replaced over the escape's
-    span. A backslash before an escape (``\\\\u0041``) does not cancel it: this errs towards
-    matching."""
+    span of the NFC text it came from. A JSON escape (see :func:`_escape_at`) is the character
+    it writes, so a name spelled with escapes, or split by ``\\n``, in text that is never
+    JSON-decoded (a scalar string, double-encoded JSON, JSON too deep to parse) is matched and
+    replaced over the escape's span. A backslash before an escape (``\\\\u0041``) does not
+    cancel it: this errs towards matching."""
     nfc = _nfc(text)
     chars: list[str] = []
     starts: list[int] = []
@@ -801,10 +807,12 @@ class Restorer:
 
 class NameSource:
     """The pseudonym map for callers of the router outside the conversation (persona traits,
-    route checks). ``names`` lists the registry's display names; ``for_config`` builds a map
-    from them and returns it, or None when ``privacy.pseudonyms_to_cloud`` is off. Each call
-    gets its own map (callers run on different threads and need no stable aliases). An error
-    from ``names`` propagates, so nothing is sent without the names it should replace."""
+    route checks). They run strict: they send no tool history, so no structural keys are
+    declared and a name used as a JSON key blocks the request (fail closed). ``names`` lists
+    the registry's display names; ``for_config`` builds a map from them and returns it, or None
+    when ``privacy.pseudonyms_to_cloud`` is off. Each call gets its own map (callers run on
+    different threads and need no stable aliases). An error from ``names`` propagates, so
+    nothing is sent without the names it should replace."""
 
     def __init__(self, names: Callable[[], Iterable[str]]) -> None:
         self._names = names
