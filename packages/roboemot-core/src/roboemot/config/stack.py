@@ -1237,9 +1237,9 @@ class ConfigStack:
         An entry of a merged list (``KEYED_LISTS``), addressed by index or by name, is stored as
         a partial entry (identity fields plus the change) in the list's patch slot, or, for an entry
         added at runtime, in the added-entries slot itself (write order cannot then drop the
-        edit), so one edit has one representation and a patch whose entry vanishes does nothing. A list of entries
-        written to the list itself is merged into the list's own slot (added entries). Neither
-        can expire (``ttl_s`` is refused)."""
+        edit), so one edit has one representation and a patch whose entry vanishes does nothing.
+        A list of entries written to the list itself is merged into the list's own slot (added
+        entries). Neither can expire (``ttl_s`` is refused)."""
         expires = self.clock() + ttl_s if ttl_s else None
         ref = keyed_ref(self.merged_tree(), key, named=True)
         if ref is not None or (key in KEYED_LISTS and isinstance(value, list)):
