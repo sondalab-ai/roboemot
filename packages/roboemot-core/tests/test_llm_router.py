@@ -359,3 +359,43 @@ async def test_bad_json_arguments_come_back_raw_and_the_stream_goes_on():
     evs = [ev async for ev in r.stream([{"role": "user", "content": "x"}], [{"type": "function"}])]
     call = next(e for e in evs if isinstance(e, ToolCall))
     assert call.arguments == {"_raw": '{"gesture": '}
+
+
+async def test_hostile_tool_arguments_do_not_fail_the_route_or_get_parsed():
+    huge_int = "9" * 6000  # json.loads raises ValueError past the interpreter's digit limit
+    deep = "[" * 20_000 + "]" * 20_000  # RecursionError in the parser
+    for text, expect in (
+        ('{"n": ' + huge_int + "}", "raw"),
+        (deep, "raw"),
+        ('{"a": "' + "x" * 60_000 + '"}', "dropped"),
+    ):
+        r, release = await _held_stream([_tc(0, "c1", "play", text), _finish(chunk(""))])
+        release.set()
+        evs = [
+            ev async for ev in r.stream([{"role": "user", "content": "x"}], [{"type": "function"}])
+        ]
+        call = next(e for e in evs if isinstance(e, ToolCall))
+        assert list(call.arguments) == ["_raw"]
+        assert (call.arguments["_raw"] == "") == (expect == "dropped")
+        assert isinstance(evs[-1], Done) and r.failures == []  # no failover, charged once
+
+
+async def test_deltas_without_an_index_are_grouped_by_their_id():
+    def noindex(call_id, name, args):
+        fn = {k: v for k, v in (("name", name), ("arguments", args)) if v is not None}
+        item = {"function": fn}
+        if call_id:
+            item.update(id=call_id, type="function")
+        return chunk(tool_calls=[item])
+
+    r, release = await _held_stream(
+        [noindex("c1", "play", '{"gesture"'), noindex(None, None, ': "joy"}'),
+         noindex("c2", "look_at", '{"target": "away"}'), _finish(chunk(""))]
+    )  # fmt: skip
+    release.set()
+    evs = [ev async for ev in r.stream([{"role": "user", "content": "x"}], [{"type": "function"}])]
+    calls = [e for e in evs if isinstance(e, ToolCall)]
+    assert [(c.id, c.arguments) for c in calls] == [
+        ("c1", {"gesture": "joy"}),
+        ("c2", {"target": "away"}),
+    ]

@@ -38,6 +38,9 @@ log = logging.getLogger(__name__)
 # level is, so no prompt or reply text can reach a log (SPEC 12).
 logging.getLogger("openai").setLevel(logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
+# Longest tool-call argument text parsed. A model cannot send more than max_tokens tokens, so
+# this only bounds what a broken or hostile route can make json.loads chew on.
+TOOL_ARGS_MAX_CHARS = 50_000
 SECRET = re.compile(r"^\$\{secret:([A-Za-z0-9_.-]+)\}$")
 
 
@@ -285,10 +288,11 @@ class Router:
                         yield TextDelta(delta.content)
                     for tc in delta.tool_calls or []:
                         got_content = True
-                        if tc.index not in calls:  # a new call started: the earlier ones are whole
-                            for done in self._complete(calls, sent, before=tc.index):
+                        index = self._index(tc, calls)
+                        if index not in calls:  # a new call started: the earlier ones are whole
+                            for done in self._complete(calls, sent, before=index):
                                 yield done
-                        slot = calls.setdefault(tc.index, {"id": "", "name": "", "args": ""})
+                        slot = calls.setdefault(index, {"id": "", "name": "", "args": ""})
                         if tc.id:
                             slot["id"] = tc.id
                         if tc.function and tc.function.name:
@@ -313,6 +317,16 @@ class Router:
                 await client.close()
 
     @staticmethod
+    def _index(tc: Any, calls: dict[int, dict[str, Any]]) -> int:
+        """The call a delta belongs to. Some servers leave ``index`` out: a delta with an id
+        starts a new call, one without continues the latest."""
+        if tc.index is not None:
+            return int(tc.index)
+        if not calls:
+            return 0
+        return max(calls) + 1 if tc.id else max(calls)
+
+    @staticmethod
     def _complete(
         calls: dict[int, dict[str, Any]], sent: set[int], before: int | None = None
     ) -> list[ToolCall]:
@@ -325,10 +339,14 @@ class Router:
                 continue
             sent.add(index)
             slot = calls[index]
-            try:
-                args = json.loads(slot["args"] or "{}")
-            except json.JSONDecodeError:
-                args = {"_raw": slot["args"]}
+            text = slot["args"] or "{}"
+            if len(text) > TOOL_ARGS_MAX_CHARS:
+                args: Any = {"_raw": ""}  # not parsed, not kept
+            else:
+                try:
+                    args = json.loads(text)
+                except (ValueError, RecursionError):  # bad JSON, a huge integer, nesting too deep
+                    args = {"_raw": text}
             out.append(ToolCall(slot["id"], slot["name"], args))
         return out
 
