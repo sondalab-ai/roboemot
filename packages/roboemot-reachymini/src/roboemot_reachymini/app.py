@@ -38,22 +38,33 @@ from roboemot.circadian import (
 from roboemot.circadian.motion import REST_SOURCE
 from roboemot.config import ConfigStack
 from roboemot.config.schema import RoboEmotConfig
+from roboemot.conversation import ConversationWorker
+from roboemot.conversation.preferences import RegistryPreferences
 from roboemot.diagnostics import Diagnostics, FnSource, Target, platform_sources
 from roboemot.diagnostics.system import local_sources
 from roboemot.health.network import NetworkMonitor
 from roboemot.health.responder import OfflineResponder
 from roboemot.llm import Router
+from roboemot.llm.hub import RouterHub
 from roboemot.llm.router import SECRET
 from roboemot.manifest import load_manifest
 from roboemot.motion import Command, MotionLoop, Priority
 from roboemot.persona import effects as persona_effects
 from roboemot.persona.llm_traits import TraitCache, TraitsWorker
 from roboemot.reflex import ReflexEngine
+from roboemot.skills.defaults import default_skills
 from roboemot.vision import CIRCADIAN, FrameSource, LockedSource
 from roboemot.vision.minor import MinorPresence
 from roboemot.vision.service import Perception, default_stages, open_perception, world_snapshot
+from roboemot.voice.activity import SpeechActivity
+from roboemot.voice.bargein import BargeIn, PlaybackReference
+from roboemot.voice.factory import build_speech
+from roboemot.voice.listener import Utterance, VoiceListener
+from roboemot.voice.robot_name import RobotName
+from roboemot.voice.speech import SpeechOutput
 from roboemot.webui import Server, make_server
 from roboemot.webui.catalogue import open_catalogue
+from roboemot.webui.routes import RouteChecker
 from roboemot.world import (
     Observation,
     ObserveResult,
@@ -69,8 +80,12 @@ from roboemot.world.scan import SOURCE as SCAN_SOURCE
 
 from .audio import ReachyAudio
 from .camera import ReachyCamera
+from .conversation import profile_source, scene_source, speaker_source
 from .driver import ReachyMiniDriver
 from .gaze import FRAME, GAZE, REFLEX
+from .skills import SkillBridge
+from .speaker import ReachySpeaker
+from .voice import build_listener
 
 try:  # the SDK is optional so unit tests run without GStreamer
     from reachy_mini import ReachyMiniApp
@@ -271,12 +286,25 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
     register_tracker: RegisterTracker | None = None  # people in view -> register.active
     expression: ExpressionRenderer | None = None  # affect label -> additive antenna/head motion
     reflexes: ReflexEngine | None = None  # runs on the motion loop's tick (SPEC 10)
-    audio: ReachyAudio | None = None  # microphone level for the loud-onset reflex
+    audio: ReachyAudio | None = None  # the one reader of the microphone (reflex level, voice)
+    speaker: ReachySpeaker | None = None  # playback; only when voice.enabled
+    speech: SpeechActivity | None = None  # "the robot is speaking" gate (reflex, DoA)
+    bargein: BargeIn | None = None  # user speech over the robot's voice (SPEC 8 stage 8)
+    voice_listener: VoiceListener | None = None  # mic -> VAD -> ASR -> utterances; voice.enabled
+    speech_output: SpeechOutput | None = None  # TTS queue onto the speaker; only when voice.enabled
     traits_worker: TraitsWorker | None = None  # rates persona traits when traits_source is llm
+    router_hub: RouterHub | None = None  # the one router: traits, conversation, speech, checks
+    conversation: ConversationWorker | None = None  # answers addressed utterances (voice.enabled)
 
     def make_router(self, cfg: Any, monitor: NetworkMonitor) -> Router:
         """The app's LLM router over the configured routes (overridable: tests inject fakes)."""
         return Router(cfg.llm_routes, cfg.safety, monitor=monitor)
+
+    def on_utterance(self, utterance: Utterance) -> None:
+        """Where finished utterances go (SPEC 8): the conversation worker, which answers the
+        addressed ones; overridable, tests inject a collector."""
+        if self.conversation is not None:
+            self.conversation.submit(utterance)
 
     def make_circadian_clock(self) -> Any:
         """The clock the circadian rhythm runs on: monotonic seconds and the local hour of day
@@ -325,6 +353,12 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         """The vision backends (overridable: tests inject fakes)."""
         return default_stages(cfg, profile)
 
+    def route_check_router(self) -> Router | None:
+        """The router a web UI route check is charged to: the app-wide one shared with the
+        traits and the conversation (SPEC 8), None before it exists, which gives the checker a
+        private one."""
+        return self.router_hub.router if self.router_hub else None
+
     def start_webui(
         self, stack: ConfigStack, cfg: Any, manifest: Any, cleanup: ExitStack
     ) -> Server | None:
@@ -342,6 +376,11 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 paths.data_dir(cfg.data_dir),
                 robot_hosted=manifest.robot.profile is not None,
                 catalogue=self.catalogue,
+                routes=RouteChecker(
+                    stack.effective,
+                    paths.route_checks_path(cfg.data_dir),
+                    router=self.route_check_router,
+                ),
             )
         except Exception as exc:
             log.error("web UI not started: %s", type(exc).__name__)
@@ -389,13 +428,31 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             bus=bus,
         )
         loop.tick_hooks.append(reflexes.on_tick)
+        # The robot's own voice must not startle it or draw its gaze: the speaker feeds this
+        # window (playback end + echo tail) and the reflex engine and the DoA source read it.
+        speech = self.speech = SpeechActivity(cfg.voice.echo_tail_ms)
+        reflexes.speaking = speech.speaking
+        reflex_audio = cfg.reflexes.enabled and cfg.reflexes.audio.enabled
         audio = self.audio = ReachyAudio(
             reachy_mini,
-            reflexes.offer_audio_level,
+            reflexes.offer_audio_level if reflex_audio else None,
             cfg.reflexes.audio.poll_hz,
             max_gap_s=cfg.reflexes.max_age_ms / MS_PER_S,
+            voice=cfg.voice.enabled,
+            voice_rate_hz=cfg.voice.sample_rate_hz,
+            voice_queue_s=cfg.voice.capture_queue_s,
         )
         reflexes.audio_status = audio.snapshot
+        reference = (
+            PlaybackReference(cfg.voice.sample_rate_hz, cfg.voice.barge_in.echo_reference_s)
+            if cfg.voice.enabled
+            else None
+        )
+        speaker = self.speaker = (
+            ReachySpeaker(reachy_mini, cfg.voice.playback_chunk_ms, speech, reference=reference)
+            if cfg.voice.enabled
+            else None
+        )
         # The one affect engine: appraisal events from the bus and the responder feed it, the
         # app tick decays it and publishes affect.state (SPEC 7).
         runner = self.affect_runner = AffectRunner(
@@ -498,7 +555,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         def publish(obs: Observation, joint_state: Any) -> None:
             bus.publish("percept.entity", obs, obs.stamp, joint_state=joint_state)
 
-        # The conversation pipeline (M3) will share this monitor with its Router.
+        # The one router (traits, conversation, speech, route checks) reports to this monitor.
         network = NetworkMonitor(
             cfg.llm_routes, cfg.connectivity.network, on_change=responder.on_event
         )
@@ -515,14 +572,44 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             paths.data_dir(cfg.data_dir)  # created private (0700) when missing, SPEC 12
         except OSError as exc:  # the cache then fails to write and the rating is just not kept
             log.warning("data folder: %s", type(exc).__name__)
+        hub = self.router_hub = RouterHub(
+            self.make_router(cfg, network), lambda c: self.make_router(c, network)
+        )
         worker = self.traits_worker = TraitsWorker(
-            stack,
-            self.make_router(cfg, network),
-            TraitCache(paths.traits_cache_path(cfg.data_dir)),
-            lambda c: self.make_router(c, network),
+            stack, None, TraitCache(paths.traits_cache_path(cfg.data_dir)), None, hub=hub
         )
 
+        # The robot's name: voice.wake_word, else the owner's name in the daemon setup (SPEC 8).
+        names = self.names = RobotName(source=loop.driver.robot_name)
+        voice_pipeline = (
+            build_listener(
+                cfg,
+                audio,
+                speech,
+                bus,
+                runner.on_event,
+                selector,
+                world,
+                perception.registry,
+                FRAME,
+                lambda u: self.on_utterance(u),
+                reference,
+                names,
+            )
+            if cfg.voice.enabled
+            else None
+        )
+        listener = self.voice_listener = voice_pipeline[0] if voice_pipeline else None
+        voice_close = voice_pipeline[1] if voice_pipeline else None
+        bargein = self.bargein = voice_pipeline[2] if voice_pipeline else None
+        if cfg.voice.enabled and listener is None:
+            audio.set_voice(False)  # no consumer: the hub must not queue audio for nobody
         affect = runner.engine
+        conv_speaker = speaker_source(selector, world)
+
+        def value_cap() -> int:
+            return stack.effective().conversation.summary_value_max_chars
+
         self.diagnostics = Diagnostics().add(
             *local_sources(process_pid=os.getpid()),
             *platform_sources(manifest.robot.id, Target()),
@@ -536,6 +623,18 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             FnSource("roboemot.circadian", circ.snapshot),
             FnSource("roboemot.reflexes", reflexes.snapshot),
             FnSource(
+                "roboemot.voice",
+                lambda: (
+                    {
+                        **listener.snapshot(),
+                        **({"conversation": c.snapshot()} if (c := self.conversation) else {}),
+                        **({"bargein": bargein.snapshot()} if bargein is not None else {}),
+                    }
+                    if listener is not None
+                    else {"state": "off"}
+                ),
+            ),
+            FnSource(
                 "roboemot.app",
                 lambda: {
                     "manifest": manifest.robot.id,
@@ -546,6 +645,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         )
 
         def reload(change: Any) -> None:
+            hub.sync(change.config)  # the web UI check and the speech backend see it at once
             loop.apply_config(change.config)
             presence.configure(change.config.safety)
             apply_attention_config(change.config, world, selector, gaze)
@@ -559,6 +659,15 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 self.catalogue.cfg = change.config.catalogue
             runner.apply_config(change.config.affect, change.config.appraisal)
             circ.apply_config(change.config)
+            speech.set_echo_tail_ms(change.config.voice.echo_tail_ms)
+            if listener is not None:
+                listener.apply_config(change.config)
+            if bargein is not None:
+                bargein.apply_config(change.config)
+            if self.speech_output is not None:
+                self.speech_output.config = change.config
+            if self.conversation is not None:
+                self.conversation.apply_config(change.config)
             reflexes.apply_config(
                 change.config.reflexes, math.radians(change.config.safety.constraint_margin_deg)
             )
@@ -595,13 +704,75 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 cleanup.callback(self.autoenroll.flush)
             cleanup.callback(perception.stop)
             perception.start()
-            if cfg.reflexes.enabled and cfg.reflexes.audio.enabled:
+            if reflex_audio or listener is not None:
                 cleanup.callback(audio.stop)  # before the SDK client goes away
                 audio.start()  # degrades to "unavailable" in the debug report without a mic
+            if speaker is not None:
+                cleanup.callback(speaker.close)  # flushes the player before the SDK goes away
+                speaker.start_playing()
+                # Closed before the speaker (callbacks run last in, first out).
+                output = self.speech_output = build_speech(
+                    cfg, speaker, lambda: hub.router, bus, lambda: self.minor_present
+                )
+                cleanup.callback(output.close)
+                output.start()
+                if listener is not None:
+                    # Shutdown order: listener (no new utterances), conversation (cancels the
+                    # stream in flight), speech output, speaker.
+                    conv = self.conversation = ConversationWorker(
+                        stack,
+                        hub,
+                        output,
+                        affect=runner.engine,
+                        responder=responder,
+                        register=lambda: tracker.active.params if tracker.active else None,
+                        circadian=lambda: (
+                            circ.model.effects()
+                            if self.circadian
+                            else stack.effective().circadian.states["awake"]
+                        ),
+                        minor_present=lambda: self.minor_present,
+                        profile=profile_source(selector, world, perception.registry, value_cap),
+                        scene=scene_source(
+                            selector,
+                            world,
+                            perception.registry,
+                            lambda: stack.effective().attention.stale_s,
+                            value_cap,
+                        ),
+                        speaker=conv_speaker,
+                        names=names,
+                        skills=default_skills(
+                            SkillBridge(
+                                expression, selector, world, perception.registry, stack.effective
+                            ).env(runner.engine)
+                        ),
+                        preferences=(
+                            RegistryPreferences(
+                                perception.registry,
+                                lambda: stack.effective().conversation.max_preferences,
+                            )
+                            if perception.registry is not None
+                            else None
+                        ),
+                        bus=bus,
+                    )
+                    cleanup.callback(conv.close)
+                    conv.start()
+                    if bargein is not None:  # stop the speech first, then the stream, then listen
+                        bargein.bind(
+                            output.stop, conv.interrupt, listener.resume, conv.mark_interrupting
+                        )
+            if listener is not None and voice_close is not None:
+                cleanup.callback(voice_close)
+                cleanup.callback(listener.stop)  # before the hub stops feeding its queue
+                listener.start()
             cleanup.callback(light_reader.stop)  # stopped before the camera thread
             cleanup.callback(self._forget_circadian)
             self.start_webui(stack, cfg, manifest, cleanup)
             for world_source in plugin.sources:
+                if hasattr(world_source, "speaking"):  # no turning towards its own voice
+                    world_source.speaking = speech.speaking
                 cleanup.callback(world_source.stop)
                 world_source.start(publish)
             while not stop_event.is_set():
@@ -610,6 +781,10 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 state = runner.tick(now)
                 minor = presence.apply(now)
                 attending = attention_tick(now, world, selector, gaze, loop)
+                if self.conversation is not None and selector.engaged:
+                    self.conversation.note_presence(
+                        now, conv_speaker()
+                    )  # keeps the session alive (SPEC 8)
                 live = stack.effective()
                 self.circadian = circ.model if live.circadian.enabled else None
                 if (

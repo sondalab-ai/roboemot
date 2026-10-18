@@ -972,3 +972,67 @@ def test_a_failing_tick_hook_is_logged_once_per_distinct_message(caplog):
         rig.tick(30)
     assert rig.loop.errors == 30
     assert len([r for r in caplog.records if "same" in r.getMessage()]) == 1
+
+
+# ------------------------------------------------------------------------- own voice (SPEC 4A, 10)
+
+
+def speaking_rig(until: float, tail_ms: float = 300.0):
+    from roboemot.voice.activity import SpeechActivity
+
+    rig = Rig(cfg_with(rule()))
+    rig.settle_audio()  # the floor is learned before the robot speaks
+    act = SpeechActivity(tail_ms)
+    act.extend(until)
+    rig.engine.speaking = act.speaking
+    return rig, act
+
+
+def test_no_startle_and_no_sound_loud_while_the_robot_speaks_and_during_the_echo_tail():
+    rig, _ = speaking_rig(until=1.5)
+    published: list = []
+    rig.bus.subscribe("sound.loud", lambda m: published.append(m.payload))
+    rig.engine.offer_audio_level(LOUD, 1.2)  # its own voice, loud over the room floor
+    rig.engine.offer_audio_level(LOUD, 1.7)  # still inside the 300 ms tail
+    rig.tick(5)
+    assert rig.stats()["fired"] == 0 and published == []
+
+
+def test_a_startle_fires_again_after_the_tail():
+    rig, _ = speaking_rig(until=1.5)
+    rig.engine.offer_audio_level(LOUD, 1.2)
+    for t in (1.81, 1.83, 1.85):  # tail over: the room is quiet again
+        rig.engine.offer_audio_level(QUIET, t)
+    rig.t = 1.9
+    rig.engine.offer_audio_level(LOUD, rig.t)
+    rig.tick(2)
+    assert rig.stats()["fired"] == 1
+
+
+def test_the_robots_voice_does_not_raise_the_floor():
+    rig, _ = speaking_rig(until=60.0)
+    for i in range(200):  # ten seconds of a steady loud voice
+        rig.engine.offer_audio_level(LOUD, 1.0 + i * 0.05)
+    assert rig.engine._floor == pytest.approx(QUIET, rel=0.2)
+
+
+def test_a_reset_lets_a_startle_through_once_the_tail_has_passed():
+    rig, act = speaking_rig(until=60.0)
+    act.reset(2.0)
+    rig.engine.offer_audio_level(QUIET, 2.4)
+    rig.t = 2.5
+    rig.engine.offer_audio_level(LOUD, rig.t)
+    rig.tick(2)
+    assert rig.stats()["fired"] == 1
+
+
+def test_loud_then_speaking_then_one_quiet_chunk_then_loud_fires():
+    rig, _ = speaking_rig(until=1.5)
+    rig.engine.offer_audio_level(LOUD, 1.2)  # speaking: ignored
+    rig.engine.offer_audio_level(LOUD, 1.85)  # first chunk after the tail: never an edge
+    rig.engine.offer_audio_level(QUIET, 1.87)
+    assert rig.stats()["fired"] == 0
+    rig.t = 1.9
+    rig.engine.offer_audio_level(LOUD, rig.t)
+    rig.tick(2)
+    assert rig.stats()["fired"] == 1

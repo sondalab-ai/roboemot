@@ -115,12 +115,23 @@ class CircadianRunner:
             bus.subscribe("percept.face", self._on_presence),
             bus.subscribe("person.recognized", self._on_presence),
             bus.subscribe("attention.target", self._on_target),
+            bus.subscribe("percept.utterance", self._on_utterance),
         ]
 
     # ---- inputs
 
     def _on_presence(self, msg: Message) -> None:
         self._seen = self.clock.monotonic()
+
+    def _on_utterance(self, msg: Message) -> None:
+        """Speech addressed to the robot is a sign of people, and the wake word (``wake_word``
+        in the payload) wakes it (SPEC 7A, Waking). Unaddressed speech (a television at night)
+        does neither."""
+        if not getattr(msg.payload, "addressed", False):
+            return
+        self._seen = self.clock.monotonic()
+        if getattr(msg.payload, "wake_word", False):
+            self.wake()
 
     def _on_target(self, msg: Message) -> None:
         if msg.payload is not None:

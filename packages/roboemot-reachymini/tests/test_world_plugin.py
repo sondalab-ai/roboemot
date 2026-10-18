@@ -486,3 +486,13 @@ def test_an_interrupted_sweep_resumes_fresh_after_a_full_interval():
 
 def test_angular_helper_sanity():
     assert angular_distance(0.0, 0.0, math.pi, 0.0) == pytest.approx(math.pi)
+
+
+def test_doa_source_is_gated_on_every_poll_by_the_speaking_query():
+    speaking = [True]
+    src, got, sink = doa_source([(1.0, True), (1.0, True)])
+    src.speaking = lambda now: speaking[0]
+    assert not src.poll_once(sink) and got == []
+    assert len(src._mini.readings) == 2  # the microphones were not even read
+    speaking[0] = False
+    assert src.poll_once(sink) and len(got) == 1

@@ -4,10 +4,13 @@
 
 The persona pieces exist and are tested; these callers wait for the pillars they plug into.
 
-- [ ] Build each LLM request with `roboemot.llm.system_prompt` + `build_messages`, using the
+- [x] Build each LLM request with `roboemot.llm.system_prompt` + `build_messages`, using the
       register shaped by `roboemot.persona.apply_to_register` and the summary caps from
       `conversation.*_summary_max_chars`.
-- [ ] Pass `roboemot.persona.effects(cfg.persona)` to `compose_delivery` in the TTS path.
+- [x] One app-wide `Router` (and daily token budget) shared by the traits worker, the conversation
+      pipeline and the web UI route check (SPEC 8): today `start_webui` borrows the traits
+      worker's router (`RoboEmotApp.start_webui`), done in M3 slice 5: `RouterHub`, shared by traits, conversation, speech and checks.
+- [x] Pass `roboemot.persona.effects(cfg.persona)` to `compose_delivery` in the TTS path (`SpeechOutput.say`, M3 slice 4).
 - [x] Apply `motion_amplitude` / `reaction_intensity` from the persona-shaped register in the
       expression path. Done in M2: `RegisterTracker.tick` shapes the register with
       `apply_to_register`, `ExpressionRenderer` scales by it every tick (SPEC 7, Expression map;
@@ -28,8 +31,7 @@ The persona pieces exist and are tested; these callers wait for the pillars they
 - [x] Per-route history trimming (SPEC 8, Conversation state). Done: `llm_routes[].context_budget_tokens`
       (8192) and `conversation.turn_reserve_tokens` (256); `trim_history` drops whole turns,
       oldest first, and the router applies it per route; load-time rejection names the route
-      (`roboemot.llm.prompt`, `test_llm_history.py`). Not done: a caller that builds the history
-      (the conversation pipeline, M3) and the `conversation.history_turns` cap.
+      (`roboemot.llm.prompt`, `test_llm_history.py`). The conversation worker (M3 slice 5) builds the history and applies the `conversation.history_turns` cap.
 - [ ] Secret store for `${secret:name}` route keys (SPEC 8: stored encrypted on the robot). The
       app's `make_router` has no resolver, so such routes send an empty key; the app logs a
       warning at startup for each one.
@@ -37,3 +39,34 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       sweep after a new `world.scan.target_lost_delay_s` (N s, jittered, scaled like the idle
       interval) instead of waiting the full `world.scan.idle_interval_s` (120 s). Same rules as
       the idle scan: a person target or speaker hint cancels it, not while resting.
+- [ ] Pseudonyms to cloud routes (SPEC 12, Data): `privacy.pseudonyms_to_cloud` is refused by the
+      config validator ("not implemented in v1 M3") because requests still carry real names;
+      build the name-to-alias map for `build_messages(names=...)`, send aliases to routes that
+      are not local, and restore the web UI consent text for it.
+
+## Barge-in and skills (M3 slice 6, SPEC 8 stage 8, 11)
+
+- [x] A stop phrase that stopped the robot is not answered afterwards: `conversation.stop_drop_window_s`
+      drops an utterance made only of stop phrases heard soon after a barge-in. A stop phrase said
+      later, with nobody speaking, is still an ordinary utterance.
+- [ ] Barge-in tuning and checks on the robot (real playback, XMOS AEC, `clear_player`, CPU of the
+      second Silero and the FFT, `pre_roll_ms`): SPEC 15 "Barge-in on the robot". The real-model
+      tests (`pytest -m models -k spoken_stop`, `test_m3_exit.py`) use `say` clips; the onset-to-stop
+      latency on the robot is in the voice debug section (`bargein.latency`).
+- [ ] `look_at` names come from the registry display names of what is in view and are sent to the
+      route as tool-schema choices, like the scene summary; route them through the pseudonym map when
+      `privacy.pseudonyms_to_cloud` exists.
+- [ ] `play` offers every label of the manifest's `expression_map` (affect expressions). Named
+      gestures that are not affect labels (nod, shake) need their own map and primitives.
+- [ ] Edit wake phrases and the robot name from the web UI (needs an admin-confirmed settings editor,
+      SPEC 11A).
+
+## M3 exit (SPEC 14, `docs/eval/m3.md`)
+
+- [x] Exit test `packages/roboemot-reachymini/tests/test_m3_exit.py` (`pytest -m models`): Italian and
+      English through the real app on a scripted client, the three budgets, a barge-in and the child case.
+- [ ] A CI job for `-m models` tests: the runner needs a cached voice models folder (Silero, two Vosk
+      models, two Piper voices, about 0.3 GB) and a Piper interpreter; `ci.yml` has none today.
+- [ ] The robot, owner and licence items of the M3 report are in SPEC 15 (exit on the robot, barge-in,
+      CM4 load, Piper on the robot and its voice licences, wake phrases, OpenAI speech in Italian,
+      children's lines). Not repeated here.

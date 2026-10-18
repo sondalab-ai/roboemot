@@ -1,6 +1,7 @@
 "use strict";
 // RoboEmot web UI. All text goes through textContent: names from the registry are never HTML.
 
+const ROUTES_POLL_MS = 2000;
 const state = { strings: {}, csrf: null, session: {}, tab: "enroll", timer: null, form: null };
 
 const t = (key, vars) => {
@@ -381,6 +382,42 @@ async function catalogueView() {
       }, t("tombstones_clear", { n: data.tombstones })) : []));
 }
 
+async function routesView() {
+  const view = document.getElementById("view");
+  const data = await api("GET", "/api/routes");
+  view.replaceChildren();
+  const verdict = (c) => el("li", {}, t("check_" + c.name) + ": " + t("status_" + c.status) + " (" + c.reason + ")");
+  const show = (box, report) => {
+    const head = report.error ? t("route_error_" + report.error) : t(report.ok ? "route_ok" : "route_failed");
+    box.replaceChildren(
+      el("p", {}, head + " " + t("route_at", { at: report.checked_at })),
+      el("ul", {}, report.checks.map(verdict)));
+  };
+  const rows = data.routes.map((r) => {
+    const box = el("div", { role: "status" });
+    if (r.running) box.append(el("p", { class: "muted" }, t("route_running")));
+    else if (r.last_check) show(box, r.last_check);
+    else box.append(el("p", { class: "muted" }, t("route_never")));
+    const button = el("button", {
+      type: "button",
+      disabled: r.running,
+      onclick: () => guarded(async () => {
+        await api("POST", "/api/routes/" + encodeURIComponent(r.name) + "/check", {});
+        await routesView();
+      }),
+    }, t("route_check"));
+    return el("section", {},
+      el("h3", {}, r.name),
+      el("p", { class: "muted" }, r.model + " @ " + r.endpoint + (r.allowed_for_minors ? ", " + t("route_minors") : "")),
+      button, box);
+  });
+  view.append(el("section", {}, el("h2", {}, t("tab_routes")), el("p", { class: "muted" }, t("routes_intro"))),
+    ...(rows.length ? rows : [el("p", { class: "muted" }, t("routes_none"))]));
+  if (state.tab === "routes" && data.routes.some((r) => r.running)) {
+    state.timer = setTimeout(() => guarded(routesView), ROUTES_POLL_MS);
+  }
+}
+
 async function debugView() {
   const view = document.getElementById("view");
   view.replaceChildren();
@@ -397,6 +434,7 @@ const TABS = {
   enroll: enrollmentView,
   registry: registryView,
   catalogue: catalogueView,
+  routes: routesView,
   debug: debugView,
 };
 

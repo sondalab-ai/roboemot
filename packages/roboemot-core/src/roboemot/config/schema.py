@@ -21,6 +21,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ROUTE_NAME = re.compile(r"[A-Za-z0-9_-]+")
+ROUTE_NAME_MAX_CHARS = 64
 
 
 def param(
@@ -116,6 +117,13 @@ APPRAISAL_EVENTS = frozenset(
         "light.off",
         "circadian.woken_at_night",
         "conversation.unavailable",
+        "speech.heard",
+        "speech.keyword.stop",
+        "speech.keyword.no",
+        "speech.keyword.greeting",
+        "speech.name_called",
+        "speech.loud",
+        "speech.fast",
     }
 )
 APPRAISAL_EVENT_PREFIXES = ("link.",)  # connectivity: link.<name>.lost / .restored (SPEC 12A)
@@ -239,6 +247,34 @@ class AppraisalConfig(Strict):
                 "label": "curiosity",
                 "cooldown_s": 10,
             },
+            # Speech fast path (SPEC 8 stage 3): keywords spotted on ASR partials and prosody of
+            # the finished utterance. Starting points: a greeting or the robot's name is welcome,
+            # "stop" and "no" are a mild jolt, a raised or rushed voice raises arousal.
+            {"event": "speech.heard", "arousal": 0.05, "cooldown_s": 20},
+            {
+                "event": "speech.keyword.greeting",
+                "valence": 0.3,
+                "arousal": 0.3,
+                "label": "joy",
+                "cooldown_s": 30,
+            },
+            {
+                "event": "speech.name_called",
+                "valence": 0.1,
+                "arousal": 0.4,
+                "label": "curiosity",
+                "cooldown_s": 5,
+            },
+            {
+                "event": "speech.keyword.stop",
+                "valence": -0.1,
+                "arousal": 0.3,
+                "label": "surprise",
+                "cooldown_s": 3,
+            },
+            {"event": "speech.keyword.no", "valence": -0.2, "arousal": 0.1, "cooldown_s": 3},
+            {"event": "speech.loud", "arousal": 0.15, "cooldown_s": 10},
+            {"event": "speech.fast", "arousal": 0.2, "cooldown_s": 10},
         ],
         "Event to impulse rules (SPEC 7, Affect state)",
     )
@@ -275,6 +311,14 @@ class RegisterParams(Strict):
     )
     reaction_intensity: Literal["low", "medium", "high"] = param("medium", "Reaction intensity")
     minor_content_policy: bool = param(False, "Apply the minor content policy", conservative="true")
+    max_reply_sentences: int | None = param(
+        None,
+        "Reply length cap in sentences for this register; unset uses "
+        "conversation.max_reply_sentences",
+        ge=1,
+        le=20,
+        conservative="lower",
+    )
 
 
 class RegisterConfig(Strict):
@@ -288,6 +332,7 @@ class RegisterConfig(Strict):
             "approach_allowed": False,
             "reaction_intensity": "high",
             "minor_content_policy": True,
+            "max_reply_sentences": 2,
         },
         "Register for children",
     )
@@ -910,6 +955,33 @@ class ReflexConfig(Strict):
 # --------------------------------------------------------------------------- safety (SPEC 12)
 
 
+class MinorLines(Strict):
+    greeting: str = param("", "Said when the person greeted the robot")
+    robot_name: str = param(
+        "",
+        "Said when the robot's name was called and it has one; `{name}` is replaced by the name "
+        "(sanitised, see `voice.name_max_chars`)",
+    )
+    robot_unnamed: str = param(
+        "",
+        "Said instead of `robot_name` when the robot has no name; empty falls back to "
+        "`ask_grown_up`",
+    )
+    ask_grown_up: str = param("", "Said for anything else")
+    filtered: str = param("", "Said in place of a sentence the output filter removed")
+
+    @model_validator(mode="after")
+    def _spoken(self) -> MinorLines:
+        empty = [
+            n
+            for n in ("greeting", "robot_name", "ask_grown_up", "filtered")
+            if not getattr(self, n).strip()
+        ]
+        if empty:
+            raise ValueError(f"minor_lines: {', '.join(empty)} must not be empty (never silence)")
+        return self
+
+
 class SafetyConfig(Strict):
     extra_prompt_rules: list[str] = param(
         [],
@@ -1003,15 +1075,66 @@ class SafetyConfig(Strict):
         "Allow conversation while a minor is present on routes cleared for minors",
         conservative="false",
     )
+    minor_output_blocklist: dict[str, list[str]] = param(
+        {
+            "it": [
+                "cazz*", "merd*", "puttan*", "troia*", "stronz*", "vaffanculo*", "scopare*",
+                "porn*", "uccid*", "uccis*", "ammazz*", "suicid*", "cocain*", "eroin*", "drog*",
+                "pistol*", "fucil*", "sesso*",
+            ],
+            "en": [
+                "fuck*", "shit*", "bitch*", "asshole*", "cunt*", "porn*", "sex*", "kill*",
+                "murder*", "suicid*", "cocaine*", "heroin*", "drug*", "gun*", "rifle*",
+            ],
+        },
+        "Words (whole words, accents and case ignored; a trailing * makes an entry a prefix, so "
+        "kill* also blocks killing) that never reach the speaker while a "
+        "minor is present, per language; a sentence containing one is replaced by "
+        "minor_lines.filtered and the rest of the answer is dropped (SPEC 12). Starting values "
+        "to review with the deployment, not a validated list",
+        admin_only=True,
+    )  # fmt: skip
+    minor_lines: dict[str, MinorLines] = param(
+        {
+            "it": {
+                "greeting": "Ciao! Che bello vederti.",
+                "robot_name": "Mi chiamo {name}.",
+                "robot_unnamed": "Sono un robot.",
+                "ask_grown_up": "Questa domanda falla a un grande, che ti sa rispondere meglio.",
+                "filtered": "Preferisco parlare d'altro. Chiedi a un grande.",
+            },
+            "en": {
+                "greeting": "Hello! Nice to see you.",
+                "robot_name": "My name is {name}.",
+                "robot_unnamed": "I am a robot.",
+                "ask_grown_up": "Please ask a grown-up about that, they will know better.",
+                "filtered": "I would rather talk about something else. Ask a grown-up.",
+            },
+        },
+        "Short child-safe lines per language, spoken when no route cleared for minors can answer "
+        "and when the output filter replaces a sentence (SPEC 8, 12)",
+        admin_only=True,
+    )  # fmt: skip
 
 
 class PrivacyConfig(Strict):
     multimodal_frames: bool = param(
         False, "Allow single-frame image questions to LLM routes", opt_in=True
     )
-    pseudonyms_to_cloud: bool = param(False, "Send pseudonyms instead of names to cloud routes")
+    pseudonyms_to_cloud: bool = param(
+        False, "Send pseudonyms instead of names to cloud routes (not implemented yet)"
+    )
     keep_enrollment_images: bool = param(False, "Keep enrollment face crops", opt_in=True)
     debug_recording: bool = param(False, "Allow time-limited debug recording", opt_in=True)
+
+    @model_validator(mode="after")
+    def _pseudonyms(self) -> PrivacyConfig:
+        if self.pseudonyms_to_cloud:
+            raise ValueError(
+                "privacy.pseudonyms_to_cloud is not implemented in v1 M3: requests would still "
+                "carry real names, so the option is refused rather than silently ignored"
+            )
+        return self
 
 
 # --------------------------------------------------------------------------- identity (SPEC 5, 6)
@@ -1661,7 +1784,332 @@ class VoiceLimits(Strict):
     variability: tuple[float, float] = param((0.0, 1.0), "Allowed variability range")
 
 
+class VadConfig(Strict):
+    threshold: float = param(
+        0.5, "Speech probability at or above which a frame counts as speech", ge=0.05, le=0.95
+    )
+    off_margin: float = param(
+        0.15,
+        "Hysteresis: once speaking, a frame still counts as speech down to threshold minus this "
+        "(at least 0.01), so a dip inside a word does not start the end-silence timer",
+        ge=0,
+        le=0.5,
+    )
+    min_speech_ms: float = param(
+        200.0,
+        "Continuous speech needed before speech_start fires; shorter bursts (clicks, coughs) "
+        "are ignored. Rounded up to whole VAD frames",
+        unit="ms",
+        ge=32,
+        le=1000,
+    )
+    end_silence_ms: float = param(
+        500.0,
+        "Silence after the last speech frame that ends the utterance. It is the first term of "
+        "the end-of-speech to first-audio budget (SPEC 13: 1.5 s typical, 2.0 s limit, measured "
+        "from the last speech frame): 500 ms leaves about 1.0 s for ASR final, LLM first "
+        "sentence and TTS first chunk, and 2.0 s at the limit. Higher values wait for slower "
+        "speakers, such as children, at the cost of latency. Rounded up to whole VAD frames",
+        unit="ms",
+        ge=100,
+        le=3000,
+    )
+    pre_roll_ms: float = param(
+        300.0,
+        "Audio kept from before the detected start and handed to the consumer, so the first "
+        "syllable is not cut. Rounded up to whole VAD frames",
+        unit="ms",
+        ge=0,
+        le=2000,
+    )
+    max_utterance_s: float = param(
+        20.0,
+        "An utterance is cut after this long even if speech continues (bounds RAM and ASR "
+        "work); speech that continues starts a new utterance",
+        unit="s",
+        ge=1,
+        le=120,
+    )
+    threads: int = param(1, "ONNX Runtime threads for the Silero model", ge=1, le=4, restart=True)
+
+
+class AsrConfig(Strict):
+    models: dict[str, str] = param(
+        {"it": "vosk-small-it", "en": "vosk-small-en"},
+        "Vosk model per ASR language, by name in the voice model manifest. The language of an "
+        "utterance is the speaker's registry preference (`preferences.language` of the person "
+        "record the robot is attending to) when a model exists for it, else "
+        "`conversation.language`, else the first language listed here. All models are loaded "
+        "when the voice pipeline starts",
+        restart=True,
+    )
+
+
+class KeywordSet(Strict):
+    stop: list[str] = param([], "Phrases that mean stop (what you are doing)")
+    no: list[str] = param([], "Phrases that mean no")
+    greeting: list[str] = param([], "Greeting phrases")
+    wake_phrases: list[str] = param(
+        [],
+        "Phrases that wake the robot when they occur anywhere in the final text. Use words the "
+        "recognizer's vocabulary has: `reachy` is out of vocabulary in both small Vosk models, "
+        "so the default phrases are built from common words (`ehi robot`, `hey robot`)",
+    )
+    name_aliases: list[str] = param(
+        [],
+        "Spellings the recognizer produces for the name Reachy in this language (`reati` in "
+        "Italian, `riyadh she` in English). They apply only when the robot has no name or its "
+        "name starts with `reachy`; a robot with another name ignores them. They emit "
+        "speech.name_called and count as the wake word only in a short final text "
+        "(voice.fastpath.alias_wake_max_words), because an alias can be a real word",
+    )
+    name_wake_templates: list[str] = param(
+        [],
+        "Wake phrases built around the robot's name, each with exactly one `{name}` placeholder "
+        "(`ciao {name}`). They apply when the robot has a name (`voice.wake_word`, or the one "
+        "the platform reports) whose words are all in this language's recognizer vocabulary; "
+        "otherwise only `wake_phrases` wake the robot in this language. The bare name is a name "
+        "alias too: it wakes only in a short final text",
+    )
+
+    @field_validator("name_wake_templates")
+    @classmethod
+    def _templates_have_the_name(cls, v: list[str]) -> list[str]:
+        for t in v:
+            if t.count("{name}") != 1:
+                raise ValueError(f"name_wake_templates: {t!r} needs exactly one {{name}}")
+        return v
+
+
+class FastpathConfig(Strict):
+    addressed_window_s: float = param(
+        15.0,
+        "After an utterance that needed the wake word and was addressed, the next utterance that "
+        "starts within this long after its last speech is addressed too, without the wake word "
+        "(when both speakers are known people they must be the same person)",
+        unit="s", ge=1, le=600,
+    )  # fmt: skip
+    window_max_s: float = param(
+        120.0,
+        "The addressed window never reaches further than this from the wake word that opened "
+        "it, however many follow-ups extend it",
+        unit="s", ge=1, le=3600,
+    )  # fmt: skip
+    alias_wake_max_words: int = param(
+        4,
+        "A name alias counts as the wake word only in a final text of at most this many words",
+        ge=1,
+        le=20,
+    )
+    doa_max_age_ms: float = param(
+        1500.0,
+        "A sound direction reading older than this does not point the head at the speaker",
+        unit="ms", ge=0, le=10000,
+    )  # fmt: skip
+    loud_db: float = param(
+        -18.0,
+        "Speech louder than this RMS level (dBFS, over the speech frames of the utterance) emits "
+        "speech.loud",
+        unit="dB", ge=-60, le=0,
+    )  # fmt: skip
+    fast_words_per_s: float = param(
+        4.5,
+        "Speech faster than this emits speech.fast (needs min_words_for_rate words)",
+        unit="Hz", ge=1, le=10,
+    )  # fmt: skip
+    min_words_for_rate: int = param(
+        4, "Fewer words than this give no speaking rate (too short to measure)", ge=2, le=50
+    )
+    frame_ms: float = param(40.0, "Frame length of the prosody analysis", unit="ms", ge=10, le=100)
+    active_floor_db: float = param(
+        -55.0,
+        "Frames quieter than this RMS level (dBFS) are not analysed for pitch",
+        unit="dB", ge=-90, le=-20,
+    )  # fmt: skip
+    pitch_min_hz: float = param(70.0, "Lowest pitch looked for", unit="Hz", ge=40, le=200)
+    pitch_max_hz: float = param(400.0, "Highest pitch looked for", unit="Hz", ge=150, le=800)
+    voiced_threshold: float = param(
+        0.45,
+        "Normalised autocorrelation peak needed to call a frame voiced and take its pitch",
+        ge=0.1, le=0.95,
+    )  # fmt: skip
+
+
+VOICE_NAME = re.compile(r"[A-Za-z0-9._-]+")
+
+
+class PiperConfig(Strict):
+    """The Piper backend runs as one persistent subprocess per voice (SPEC 8, TTS backends)."""
+
+    python: str = param(
+        "",
+        "Absolute path of the Piper virtualenv's interpreter (piper-tts is GPL-3.0 and runs in "
+        "its own process); empty means piper-venv/bin/python in the app data folder, where the "
+        "installer puts it. It is executed, so a change needs the admin PIN",
+        restart=True, admin_only=True,
+    )  # fmt: skip
+    chunk_ms: float = param(
+        200.0,
+        "Audio the worker sends per message; a cancel abandons what is still unsent",
+        unit="ms", ge=20, le=2000, restart=True,
+    )  # fmt: skip
+    startup_timeout_s: float = param(
+        60.0,
+        "Time a worker gets to load its voice and report its sample rate",
+        unit="s", ge=1, le=600,
+    )  # fmt: skip
+    request_timeout_s: float = param(
+        20.0,
+        "Longest wait for the worker's next message while a sentence is synthesised",
+        unit="s", ge=0.5, le=120,
+    )  # fmt: skip
+    restart_backoff_s: tuple[float, float] = param(
+        (0.5, 30.0),
+        "First and longest wait before a crashed worker is started again (doubles each time)",
+    )
+
+    @field_validator("python")
+    @classmethod
+    def _absolute_interpreter(cls, v: str) -> str:
+        if v and not v.startswith("/"):
+            raise ValueError("voice.piper.python must be an absolute path (or empty)")
+        return v
+
+
+class OpenAISpeechConfig(Strict):
+    """The remote speech backend follows the LLM routes' rules (SPEC 8, TTS backends)."""
+
+    route: str = param(
+        "",
+        "Name of the llm_routes entry whose base_url, key, timeouts and minors flag the speech "
+        "requests use; empty disables the backend",
+        restart=True,
+    )
+    model: str = param("gpt-4o-mini-tts", "Speech model sent to /audio/speech", restart=True)
+    voice: str = param("marin", "Provider voice name", restart=True)
+    instructable: bool = param(
+        True, "The model takes `instructions` (mood as natural language)", restart=True
+    )
+
+
+class BargeInConfig(Strict):
+    enabled: bool = param(
+        True,
+        "User speech while the robot talks stops its speech and cancels the answer in flight "
+        "(SPEC 8 stage 8). Off: the robot is deaf to speech while it speaks, except for the "
+        "stop keyword when keyword_enabled",
+    )
+    threshold: float = param(
+        0.8,
+        "Speech probability a frame needs to count towards a barge-in: stricter than "
+        "voice.vad.threshold, because the robot's own voice is speech to the VAD",
+        ge=0.05, le=0.99,
+    )  # fmt: skip
+    min_speech_ms: float = param(
+        96.0,
+        "Continuous user speech needed before the robot is cut off. The onset-to-stop latency "
+        "(SPEC 13: 200 ms) is this plus up to one microphone chunk, so keep it low; rounded up "
+        "to whole VAD frames",
+        unit="ms", ge=32, le=150,
+    )  # fmt: skip
+    echo_corr_max: float = param(
+        0.6,
+        "Residual-echo guard for robots without hardware AEC: a stretch of microphone audio "
+        "whose normalised cross-correlation with what the speaker played (best lag within "
+        "echo_max_lag_ms) is above this is the robot's own voice, not a barge-in. User speech "
+        "mixed with echo correlates less the louder it is: it must carry roughly "
+        "(1/corr^2 - 1) times the echo's power to get through. 1 turns the guard off",
+        ge=0.1, le=1.0,
+    )  # fmt: skip
+    echo_max_lag_ms: float = param(
+        300.0,
+        "How far back in what was played the echo check looks for a match (speaker to microphone "
+        "delay, room and device latency)",
+        unit="ms", ge=0, le=1000,
+    )  # fmt: skip
+    echo_window_ms: float = param(
+        128.0,
+        "Length of microphone audio each echo check compares with the played reference",
+        unit="ms", ge=32, le=1000,
+    )  # fmt: skip
+    echo_reference_s: float = param(
+        2.0,
+        "How much of the played audio the speaker keeps for the echo check (at least "
+        "echo_max_lag_ms plus echo_window_ms)",
+        unit="s", ge=0.5, le=10, restart=True,
+    )  # fmt: skip
+    pre_roll_ms: float = param(
+        64.0,
+        "Audio from before the detected onset handed to the listener with the barge-in, so the "
+        "first syllable is not lost. Kept short: before the onset the robot's own voice is "
+        "still in the microphone",
+        unit="ms", ge=0, le=500,
+    )  # fmt: skip
+    keyword_enabled: bool = param(
+        True,
+        "While the robot speaks, run the stop keywords (voice.keywords.<language>.stop) on a "
+        "recognizer fed with candidate speech frames, so stop is heard even when the barge-in "
+        "threshold is not met (SPEC 7A: the stop keyword is always active)",
+    )
+    keyword_threshold: float = param(
+        0.5, "Speech probability a frame needs to be fed to the keyword recognizer",
+        ge=0.05, le=0.99,
+    )  # fmt: skip
+    keyword_echo_corr_max: float = param(
+        0.8,
+        "Echo guard of the keyword path: looser than echo_corr_max so a quiet or mixed stop is "
+        "heard, strict enough that the robot saying a stop word does not stop itself",
+        ge=0.1, le=1.0,
+    )  # fmt: skip
+    keyword_window_s: float = param(
+        2.0,
+        "The keyword recognizer listens at most this long after the first candidate frame",
+        unit="s", ge=0.2, le=10,
+    )  # fmt: skip
+    keyword_hold_ms: float = param(
+        400.0,
+        "The keyword recognizer stops after this much audio without a candidate frame",
+        unit="ms", ge=64, le=2000,
+    )  # fmt: skip
+
+    @model_validator(mode="after")
+    def _reference_covers_the_check(self) -> BargeInConfig:
+        need = (self.echo_max_lag_ms + self.echo_window_ms) / 1000.0
+        if self.echo_reference_s < need:
+            raise ValueError(
+                "barge_in.echo_reference_s must cover echo_max_lag_ms + echo_window_ms"
+            )
+        return self
+
+
 class VoiceConfig(Strict):
+    enabled: bool = param(
+        False,
+        "Run the voice pipeline: the microphone hub keeps every audio chunk for it and the "
+        "speaker is created (SPEC 8)",
+        restart=True,
+    )
+    echo_tail_ms: float = param(
+        300.0,
+        "The robot counts as speaking this long after its playback ends: the startle reflex and "
+        "the sound-direction source ignore the microphones meanwhile (room echo, mic latency)",
+        unit="ms", ge=0, le=2000, conservative="higher",
+    )  # fmt: skip
+    sample_rate_hz: int = param(
+        16000, "Rate of the audio frames the microphone hub hands to the voice pipeline",
+        unit="Hz", ge=8000, le=48000, restart=True,
+    )  # fmt: skip
+    capture_queue_s: float = param(
+        10.0,
+        "Audio the hub keeps for a slow voice consumer; beyond it the oldest chunks are dropped "
+        "and counted",
+        unit="s", ge=0.5, le=120, restart=True,
+    )  # fmt: skip
+    playback_chunk_ms: float = param(
+        100.0,
+        "Size of each piece pushed to the speaker; a barge-in abandons the pieces not yet pushed",
+        unit="ms", ge=10, le=1000, restart=True,
+    )  # fmt: skip
     backend: Literal["piper", "openai_speech", "kokoro"] = param(
         "piper", "TTS backend", restart=True
     )
@@ -1712,6 +2160,21 @@ class VoiceConfig(Strict):
         "Per-mood prosody deltas",
     )
     limits: VoiceLimits = param({}, "Clamp for the final delivery")
+    sentence_max_chars: int = param(
+        220,
+        "Longest text one TTS request carries; a longer sentence is cut at a comma or a space",
+        unit="chars", ge=40, le=2000,
+    )  # fmt: skip
+    sentence_pause_ms: float = param(
+        150.0,
+        "Silence between two sentences of one answer, before the mood's pause_scale",
+        unit="ms", ge=0, le=2000,
+    )  # fmt: skip
+    queue_max_sentences: int = param(
+        16, "Sentences waiting for synthesis; a further one is dropped", ge=1, le=256
+    )
+    piper: PiperConfig = param({}, "Piper subprocess backend", restart=True)
+    openai_speech: OpenAISpeechConfig = param({}, "Remote speech backend")
     piper_noise_scale: tuple[float, float] = param(
         (0.33, 1.0), "Piper noise_scale mapped from variability 0..1"
     )
@@ -1721,11 +2184,84 @@ class VoiceConfig(Strict):
     pitch_shift_backend: Literal["none", "dsp"] = param(
         "dsp", "How pitch is applied on backends without native pitch (Piper)"
     )
-    wake_word: str = param("reachy", "Wake word")
-    wake_word_policy: Literal["always", "never", "unless_enrolled_in_view"] = param(
-        "unless_enrolled_in_view", "When the wake word is required"
+    wake_word: str | None = param(
+        None,
+        "The robot's name, for the prompt and wake detection. Unset (null): the name the robot "
+        "platform reports (Reachy Mini: the name its owner gave it in the daemon setup); a "
+        "platform without one has no name and wakes on `voice.keywords.<language>.wake_phrases` "
+        "only. A value set here always wins over the platform's. The name can come from outside "
+        "the robot (the owner's phone): the prompt and the spoken lines only get a sanitised "
+        "form. The bare name emits speech.name_called wherever it occurs in a text, but wakes the "
+        "robot only in a short final (a name that is also a word, like `Neve`, is not a wake "
+        "word in a long sentence). Wake detection with a name "
+        "needs the name's words in the recognizer vocabulary of the language (checked when the "
+        "recognizer loads, logged when not); `reachy` is out of vocabulary in both small Vosk "
+        "models, so names like it rely on `wake_phrases` and `name_aliases`",
     )
-    active_asr_language: str = param("it", "ASR language when the speaker has no preference")
+    name_max_chars: int = param(
+        32,
+        "The robot's name is cut to this many characters (after dropping everything but letters, "
+        "digits, spaces and `'.-`) in the system prompt and the spoken lines",
+        ge=1,
+        le=100,
+    )
+    name_poll_interval_s: float = param(
+        5.0,
+        "While the platform has not reported a name, how often it is asked again (Reachy Mini: "
+        "the daemon status can arrive after the app starts)",
+        unit="s",
+        ge=0.5,
+        le=300,
+    )
+    wake_word_policy: Literal["always", "never", "unless_enrolled_in_view"] = param(
+        "unless_enrolled_in_view",
+        "When the wake word is required: always; never; or unless an enrolled person is in view. "
+        "With unless_enrolled_in_view, anyone speaking while an enrolled person is in view "
+        "(a stranger, a television) is addressed without the wake word, and a stranger alone "
+        "must say it",
+    )
+    asr: AsrConfig = param({}, "Speech recognition (SPEC 8 stage 3)")
+    keywords: dict[str, KeywordSet] = param(
+        {
+            "it": {
+                "stop": ["stop", "fermati", "ferma", "basta", "fermo"],
+                "no": ["no"],
+                "greeting": ["ciao", "buongiorno", "buonasera", "salve"],
+                "wake_phrases": ["ehi robot", "ciao robot"],
+                "name_aliases": ["reati"],
+                "name_wake_templates": ["ciao {name}", "ehi {name}"],
+            },
+            "en": {
+                "stop": ["stop", "halt", "enough"],
+                "no": ["no"],
+                "greeting": ["hello", "hi", "hey", "good morning", "good evening"],
+                "wake_phrases": ["hey robot", "hello robot"],
+                "name_aliases": ["riyadh she"],
+                "name_wake_templates": ["hey {name}", "hello {name}"],
+            },
+        },
+        "Fast-path keyword lists per language, matched on whole words in the ASR partials "
+        "(case and accents ignored; a phrase may have several words; no stemming, so list "
+        "inflections you want)",
+    )
+    fastpath: FastpathConfig = param({}, "Speech fast path: keywords, wake word window, prosody")
+    barge_in: BargeInConfig = param({}, "Barge-in: user speech over the robot's voice (SPEC 8)")
+
+    @field_validator("voices")
+    @classmethod
+    def _voice_names(cls, v: dict[str, str]) -> dict[str, str]:
+        bad = [n for n in v.values() if not VOICE_NAME.fullmatch(n) or ".." in n]
+        if bad:
+            raise ValueError(f"voice names may use letters, digits, '.', '_' and '-' only: {bad}")
+        return v
+
+    vad: VadConfig = param({}, "Voice activity detection and endpointing (SPEC 8 stage 2)")
+    models_dir: str = param(
+        "",
+        "Folder with the voice models (Silero VAD, Vosk, Piper); empty means voice-models/ in "
+        "the app data folder (data_dir)",
+        restart=True,
+    )
 
 
 # --------------------------------------------------------------------------- conversation, LLM
@@ -1751,6 +2287,126 @@ class ConversationConfig(Strict):
         unit="tokens",
         ge=16,
         le=8192,
+    )
+    summary_value_max_chars: int = param(
+        60,
+        "Longest single name, preference or category in the speaker and scene summaries",
+        ge=8,
+        le=400,
+    )
+    pending_utterances: int = param(
+        1,
+        "Addressed utterances that wait while an answer is being prepared; a newer one replaces "
+        "the oldest waiting",
+        ge=1,
+        le=10,
+    )
+    fallback_lines: dict[str, str] = param(
+        {
+            "it": "Scusa, adesso non riesco a pensare.",
+            "en": "Sorry, I can't think right now.",
+        },
+        "Spoken per language when no route answers or the stream fails before any sentence",
+    )
+    llm_skills: list[str] = param(
+        ["play", "look_at", "express_emotion", "remember_preference", "stop_talking"],
+        "Skills offered to the model as tools (SPEC 11). A skill must also be marked "
+        "llm_visible in code; this list can only narrow the set. Empty: no tools",
+    )
+    max_tool_rounds: int = param(
+        3,
+        "Requests of one turn that may end in tool calls; after that many the model is asked "
+        "once more without tools, so the turn ends in text (0: no tools)",
+        ge=0, le=10,
+    )  # fmt: skip
+    tool_timeout_s: float = param(
+        5.0, "A skill that takes longer is abandoned and the model is told it failed",
+        unit="s", ge=0.1, le=60,
+    )  # fmt: skip
+    tool_arg_max_chars: int = param(
+        200, "Longest text argument a skill accepts; a longer one is refused", ge=1, le=2000
+    )
+    tool_enum_max_items: int = param(
+        20, "Most names offered to the model in a tool argument's list of choices", ge=1, le=200
+    )
+    look_away_deg: float = param(
+        40.0,
+        "look_at away: the bearing offset from the current target. It should exceed "
+        "attention.speaker_match_deg, or the gaze snaps back to the person",
+        unit="deg", ge=5, le=90,
+    )  # fmt: skip
+    confirm_timeout_s: float = param(
+        10.0,
+        "A spoken request to remember a preference expires after this long; only the very next "
+        "utterance from the same person, started after the question finished playing, can "
+        "confirm it",
+        unit="s", ge=1, le=300,
+    )  # fmt: skip
+    preference_key_max_chars: int = param(
+        40, "Longest preference name remember_preference accepts", ge=2, le=200
+    )
+    preference_value_max_chars: int = param(
+        120, "Longest preference value remember_preference accepts", ge=2, le=1000
+    )
+    max_preferences: int = param(
+        20, "Most preferences stored per person; a new one beyond that is refused", ge=1, le=200
+    )
+    confirm_yes: dict[str, list[str]] = param(
+        {
+            "it": ["sì", "certo", "va bene", "esatto", "ok", "sicuro", "volentieri"],
+            "en": ["yes", "yeah", "yep", "sure", "ok", "okay", "please do", "that is right"],
+        },
+        "Phrases that confirm a spoken request, per language (whole words, case ignored, "
+        "accents kept: Italian `sì` is yes, bare `si` is not, as in `si chiama Luca`). A reply "
+        "counts as a yes only when it is at most confirm_max_words long and made of yes phrases "
+        "and confirm_fillers, a yes phrase first; a reply that holds a `no` phrase declines",
+    )
+    confirm_fillers: dict[str, list[str]] = param(
+        {
+            "it": ["grazie", "pure", "per favore", "grazie mille"],
+            "en": ["please", "thanks", "thank you", "definitely"],
+        },
+        "Words allowed after the yes phrase in a confirming reply (`sì grazie`)",
+    )
+    confirm_max_words: int = param(
+        4, "A reply longer than this never confirms a spoken request", ge=1, le=20
+    )
+    max_tool_calls_per_round: int = param(
+        4,
+        "Tool calls run per request; further ones are answered with an error result unrun",
+        ge=1, le=20,
+    )  # fmt: skip
+    stop_drop_window_s: float = param(
+        5.0,
+        "After a barge-in, an utterance made only of a stop phrase that is heard this soon is "
+        "the command that already stopped the robot and is not answered",
+        unit="s", ge=0, le=60,
+    )  # fmt: skip
+    confirm_no: dict[str, list[str]] = param(
+        {
+            "it": ["no", "non", "mai", "lascia stare", "basta", "stop"],
+            "en": ["no", "not", "never", "forget it", "stop"],
+        },
+        "Phrases that decline a spoken request, per language",
+    )
+    confirm_ask_lines: dict[str, str] = param(
+        {
+            "it": "Vuoi che ricordi questo: {key}, {value}?",
+            "en": "Should I remember this: {key}, {value}?",
+        },
+        "The question remember_preference speaks; {key} and {value} are the sanitised texts",
+    )
+    confirm_saved_lines: dict[str, str] = param(
+        {"it": "Va bene, lo ricorderò.", "en": "Okay, I will remember."},
+        "Spoken after the person confirmed and the preference was stored",
+    )
+    confirm_failed_lines: dict[str, str] = param(
+        {"it": "Non sono riuscito a ricordarlo.", "en": "I could not remember that."},
+        "Spoken when the person confirmed but the preference could not be stored",
+    )
+    confirm_declined_lines: dict[str, str] = param(
+        {"it": "Va bene, non lo ricordo.", "en": "Okay, I will not remember it."},
+        "Spoken after the person declined",
     )
 
 
@@ -1881,11 +2537,95 @@ class LLMRoute(Strict):
 
     @model_validator(mode="after")
     def _check(self) -> LLMRoute:
-        if not ROUTE_NAME.fullmatch(self.name):
-            raise ValueError(f"route name {self.name!r}: use letters, digits, '_' or '-'")
+        if not ROUTE_NAME.fullmatch(self.name) or len(self.name) > ROUTE_NAME_MAX_CHARS:
+            raise ValueError(
+                f"route name {self.name!r}: use letters, digits, '_' or '-' "
+                f"(at most {ROUTE_NAME_MAX_CHARS})"
+            )
         if not self.base_url or not self.model:
             raise ValueError(f"route {self.name}: base_url and model are required")
         return self
+
+
+class LLMCheckConfig(Strict):
+    """Route conformance test (SPEC 8): advisory in v1, run from the CLI and the web UI."""
+
+    deadline_s: float = param(
+        45.0,
+        "Longest the whole check of one route may take (three requests)",
+        unit="s",
+        ge=5,
+        le=300,
+    )
+    italian_min_words: int = param(
+        3, "Fewest words the Italian reply needs for the heuristic to judge it", ge=1, le=50
+    )
+    italian_min_stopword_ratio: float = param(
+        0.2,
+        "Share of the reply's words that must be Italian stopwords to count as Italian",
+        ge=0,
+        le=1,
+    )
+    italian_stopwords: list[str] = param(
+        [
+            "il",
+            "lo",
+            "la",
+            "gli",
+            "le",
+            "un",
+            "una",
+            "uno",
+            "di",
+            "del",
+            "della",
+            "dei",
+            "delle",
+            "da",
+            "dal",
+            "dalla",
+            "che",
+            "chi",
+            "non",
+            "per",
+            "con",
+            "sono",
+            "sei",
+            "siamo",
+            "ho",
+            "hai",
+            "ha",
+            "abbiamo",
+            "è",
+            "e",
+            "ma",
+            "se",
+            "più",
+            "molto",
+            "anche",
+            "questo",
+            "questa",
+            "quello",
+            "nel",
+            "nella",
+            "sul",
+            "sulla",
+            "ciao",
+            "oggi",
+            "buongiorno",
+            "sì",
+            "perché",
+            "mi",
+            "ti",
+            "ci",
+            "si",
+            "al",
+            "alla",
+            "c",
+            "l",
+        ],
+        "Words that mark a text as Italian (lower case, no English homographs)",
+    )
 
 
 class MirrorConfig(Strict):
@@ -2184,6 +2924,7 @@ with warnings.catch_warnings():
         persona: PersonaConfig = param({}, "SPEC 11A")
         conversation: ConversationConfig = param({}, "SPEC 8")
         llm_routes: list[LLMRoute] = param([], "SPEC 8")
+        llm_check: LLMCheckConfig = param({}, "SPEC 8: route conformance test")
         safety: SafetyConfig = param({}, "SPEC 12")
         privacy: PrivacyConfig = param({}, "SPEC 12")
         connectivity: ConnectivityConfig = param({}, "SPEC 12A")
