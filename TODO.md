@@ -52,18 +52,31 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       out afresh after an app restart; personal details that are not registry names are not replaced;
       registry names refused for aliasing (no letter or digit, a template prefix word, a structural
       word such as "user") are sent unaliased.
-- [ ] Pseudonyms residual: `persona/llm_traits.py` (`rate_traits`) streams `persona.prompt`
-      without `pseudonyms=`, so a registry name written into the persona prompt reaches a cloud
-      route as typed.
-- [ ] Pseudonyms residual: `llm/conformance.py` sends through `stream_route`, which bypasses the
-      pseudonyms (synthetic messages, low risk).
-- [ ] Pseudonyms residual: registry names refused for aliasing are sent unaliased and the admin
-      sees only their count in the log; consider showing which names in the web UI (admin only).
-- [ ] Pseudonyms residual: a JSON key in a tool call or result that equals a registry name
-      ("target" for a record "Target") is aliased in the history sent to a cloud route; nothing
-      leaks, but the model sees a renamed key.
-- [ ] Pseudonyms residual: a name written with `\uXXXX` escapes for ASCII letters in text that is
-      not JSON is neither scrubbed nor caught by the leak check.
+- [x] Pseudonyms residual: `persona/llm_traits.py` (`rate_traits`) streamed `persona.prompt`
+      without `pseudonyms=`. `TraitsWorker` now takes a `NameSource` (registry names) and the
+      rating goes through the same aliasing, leak check and restore as the conversation; names
+      that cannot be read mean no request.
+- [x] Pseudonyms residual: `llm/conformance.py` sent through `stream_route`, which bypassed the
+      pseudonyms. `stream_route(..., pseudonyms=)` shares the router's guard (a leak raises
+      `PseudonymLeak` before sending) and the web UI route check passes the map. Open:
+      `roboemot llm check` (CLI) does not open the registry, so it still sends its synthetic
+      prompts without pseudonyms.
+- [x] Pseudonyms residual: registry names refused for aliasing are sent unaliased and the admin
+      saw only their count in the log. The Routes tab now lists them on request
+      (`POST /api/pseudonyms/refused`, session, CSRF and the operator PIN re-entered); the log
+      still gives only the count. Open: the list has names, not record ids, so renaming is done
+      from the Registry tab.
+- [x] Pseudonyms residual: a JSON key in a tool call or result that equals a registry name
+      ("target" for a record "Target") was aliased in the history sent to a cloud route. Now only
+      string values are aliased. The leak check skips only the keys the app writes itself (the
+      skills' parameter names and result keys, `SkillRegistry.structural_keys()`), in tool call
+      arguments and `tool` messages; any other key that holds a name (a tool result keyed by
+      names, the result key of a custom skill) blocks the route instead of being renamed.
+- [ ] Pseudonyms follow-up: `NameSource` (traits, route checks) and the conversation's own
+      `Pseudonyms` are two maps with different aliases; merge them into one source.
+- [x] Pseudonyms residual: a name written with `\uXXXX` escapes in text that is not JSON was
+      neither scrubbed nor caught by the leak check. Escapes now count as their character in
+      matching (surrogate escapes are not decoded).
 
 ## Barge-in and skills (M3 slice 6, SPEC 8 stage 8, 11)
 
@@ -111,8 +124,9 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       arguments are now kept only as an object within `TOOL_ARGS_MAX_DEPTH` (SPEC 8). CI runs 3.11 and 3.12 only.
 - [x] JS behaviour tests for the web UI (`ask()`, the PIN dialog, the settings editor): `node:test` + jsdom in
       `packages/roboemot-core/tests/webui_js/` (dev-only, lockfile), CI job `webui-js`.
-- [ ] `Pseudonyms._aliased_json` / `_aliased` (pseudonyms.py ~:550) recurse on deep tool-message content: apply
-      the router's `_nesting` limit there too (SPEC 8, 12).
+- [x] `Pseudonyms._aliased_json` / `_aliased` recursed on deep tool-message content: `_nesting` and
+      `TOOL_ARGS_MAX_DEPTH` now live in `pseudonyms.py` (the router imports them); JSON nested deeper than the
+      limit is aliased as plain text (SPEC 8, 12).
 - [ ] `conversation.tool_arg_max_chars` and the router's `TOOL_ARGS_MAX_CHARS` are two caps on the same thing:
       decide one owner (SPEC 8, 11A).
 - [ ] Confirm the robot's Python version (`python scripts/robot_ssh.py -- python3 --version`). The Piper hash locks cover

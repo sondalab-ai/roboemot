@@ -14,6 +14,7 @@ from roboemot.config import ConfigStack
 from roboemot.config.schema import SafetyConfig
 from roboemot.config.stack import ConfigChange
 from roboemot.llm import Router
+from roboemot.llm.pseudonyms import NameSource
 from roboemot.persona import llm_traits
 from roboemot.persona.llm_traits import TraitCache, TraitsWorker
 
@@ -430,3 +431,67 @@ def test_a_corrupt_or_wrong_shaped_cache_reads_as_empty_and_is_replaced(tmp_path
     assert cache.get("k") is None
     cache.put("k", traits)
     assert cache.get("k") == traits
+
+
+CLOUD = {"name": "cloud", "base_url": "http://api.example.com/v1", "model": "m1"}
+
+
+def make_cloud(tmp_path, server: Server, names, pseudonyms: bool = True):
+    app = {
+        "persona": {"traits_source": "llm", "prompt": "Be as kind as Marta.", "traits_retry_s": 0},
+        "llm_routes": [CLOUD],
+        "privacy": {"pseudonyms_to_cloud": pseudonyms},
+    }
+    stack = ConfigStack(app=app)
+    worker = TraitsWorker(
+        stack,
+        server.router(stack.effective()),
+        TraitCache(tmp_path / "t.json"),
+        server.router,
+        names=NameSource(names),
+    )
+    return stack, worker
+
+
+def test_a_registry_name_in_the_persona_prompt_is_aliased_for_a_cloud_route(tmp_path, started):
+    server = Server()
+    stack, worker = make_cloud(tmp_path, server, lambda: ["Marta"])
+    started.append(worker)
+    worker.start()
+    assert wait_for(lambda: energy(stack) == 0.8)
+    sent = json.dumps(server.requests)
+    assert "Marta" not in sent and "Persona-" in sent
+
+
+def test_the_persona_prompt_is_sent_as_typed_when_pseudonyms_are_off(tmp_path, started):
+    server = Server()
+    stack, worker = make_cloud(tmp_path, server, lambda: ["Marta"], pseudonyms=False)
+    started.append(worker)
+    worker.start()
+    assert wait_for(lambda: energy(stack) == 0.8)
+    assert "Marta" in json.dumps(server.requests)
+
+
+def test_no_request_is_sent_when_the_names_cannot_be_read(tmp_path, started, runs):
+    def broken():
+        raise OSError("registry down")
+
+    server = Server()
+    stack, worker = make_cloud(tmp_path, server, broken)
+    stack.set("persona.traits", {"energy": 0.9}, source=llm_traits.SOURCE, layer="derived")
+    started.append(worker)
+    worker.start()
+    assert wait_for(lambda: runs[0] >= 1 and worker._failed is not None)
+    assert server.requests == []
+    assert stack.derived.get("persona", {}).get("traits") is None  # earlier rating is dropped
+
+
+def test_a_missing_name_source_with_pseudonyms_on_is_logged(tmp_path, started, caplog):
+    server = Server()
+    stack, worker = make_cloud(tmp_path, server, lambda: ["Marta"])
+    worker.names = None
+    started.append(worker)
+    with caplog.at_level("WARNING"):
+        worker.start()
+        assert wait_for(lambda: energy(stack) == 0.8)
+    assert "no name source is wired" in caplog.text and "Marta" not in caplog.text

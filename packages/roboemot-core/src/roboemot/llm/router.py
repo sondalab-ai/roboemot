@@ -38,7 +38,15 @@ from ..config.schema import LLMRoute, SafetyConfig
 from ..health.network import NetworkMonitor
 from ..secret_store import SECRET_REF, SecretUnavailable, no_secrets
 from .prompt import CHARS_PER_TOKEN, trim_history
-from .pseudonyms import Outgoing, Pseudonyms, replace_names, route_is_local
+from .pseudonyms import (
+    TOOL_ARGS_MAX_DEPTH,
+    Outgoing,
+    PseudonymLeak,
+    Pseudonyms,
+    _nesting,
+    replace_names,
+    route_is_local,
+)
 
 log = logging.getLogger(__name__)
 # The openai and httpx libraries log request details at DEBUG; keep that off whatever the root
@@ -48,9 +56,6 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 # Longest tool-call argument text parsed. A model cannot send more than max_tokens tokens, so
 # this only bounds what a broken or hostile route can make json.loads chew on.
 TOOL_ARGS_MAX_CHARS = 50_000
-# Deepest JSON nesting kept in tool-call arguments. The alias restoration recurses, and a
-# 5000-deep object parses on every Python version, so depth is bounded here.
-TOOL_ARGS_MAX_DEPTH = 64
 SECRET = SECRET_REF
 
 
@@ -275,12 +280,9 @@ class Router:
             yielded = False
             if active is not None:
                 active.route = route
-            out = (
-                pseudonyms.prepare(messages, tools)
-                if pseudonyms is not None and not route_is_local(route)
-                else None
-            )
-            if out is not None and pseudonyms.leaks({"messages": out.messages, "tools": out.tools}):
+            try:
+                out = _outgoing(route, messages, tools, pseudonyms)
+            except PseudonymLeak:
                 self.failures.append((route.name, "PseudonymLeak"))  # fail closed: not sent
                 continue
             gen = self._stream_route(
@@ -317,16 +319,28 @@ class Router:
         if self.monitor:
             self.monitor.report(route.name, ok)
 
-    def stream_route(
+    async def stream_route(
         self,
         route: LLMRoute,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         timing: FirstToken | None = None,
+        pseudonyms: Pseudonyms | None = None,
     ) -> AsyncIterator[Event]:
         """Stream ONE route, bypassing eligibility and fallback (the conformance test). Errors
-        propagate; the budget is charged as for any request."""
-        return self._stream_route(route, messages, tools, timing)
+        propagate; the budget is charged as for any request. With ``pseudonyms`` a route that is
+        not local gets the same aliasing, leak check and restoring as ``stream``; a request that
+        still holds a name raises :class:`PseudonymLeak` before anything is sent."""
+        out = _outgoing(route, messages, tools, pseudonyms)
+        gen = self._stream_route(
+            route, out.messages if out else messages, out.tools if out else tools, timing
+        )
+        events = _restored(gen, out) if out else gen
+        try:
+            async for ev in events:
+                yield ev
+        finally:
+            await events.aclose()
 
     async def _stream_route(
         self,
@@ -458,19 +472,21 @@ class Router:
         return usage if usage is not None else (prompt_chars + out_chars) // CHARS_PER_TOKEN
 
 
-def _nesting(value: Any) -> int:
-    """How deeply lists and dicts are nested in ``value`` (a scalar is 0), without recursion,
-    so a hostile reply cannot overflow the stack however deep it is."""
-    deepest, stack = 0, [(value, 0)]
-    while stack:
-        node, depth = stack.pop()
-        if isinstance(node, (list, dict)):
-            depth += 1
-            deepest = max(deepest, depth)
-            if depth > TOOL_ARGS_MAX_DEPTH:
-                return depth
-            stack.extend((v, depth) for v in (node.values() if isinstance(node, dict) else node))
-    return deepest
+def _outgoing(
+    route: LLMRoute,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None,
+    pseudonyms: Pseudonyms | None,
+) -> Outgoing | None:
+    """The aliased request for a route that is not local, None when ``pseudonyms`` is off or
+    the route is local. Raises :class:`PseudonymLeak` when the aliased request still holds a
+    name (fail closed: nothing is sent). The message never carries a name."""
+    if pseudonyms is None or route_is_local(route):
+        return None
+    out = pseudonyms.prepare(messages, tools)
+    if pseudonyms.leaks({"messages": out.messages, "tools": out.tools}):
+        raise PseudonymLeak("the request still holds a registry name")
+    return out
 
 
 async def _restored(events: AsyncIterator[Event], out: Outgoing) -> AsyncIterator[Event]:

@@ -29,6 +29,7 @@ from .api import (
     CataloguePort,
     DebugReport,
     EnrollmentPort,
+    PseudonymsPort,
     Request,
     Response,
     RoutesPort,
@@ -366,6 +367,7 @@ def make_server(
     catalogue: CataloguePort | None = None,
     routes: RoutesPort | None = None,
     settings: SettingsPort | None = None,
+    pseudonyms: PseudonymsPort | None = None,
 ) -> Server:
     """Build the web UI on ``cfg.webui.bind:port``; nothing is served until ``start()``.
 
@@ -386,6 +388,7 @@ def make_server(
         catalogue=catalogue,
         routes=routes,
         settings=settings,
+        pseudonyms=pseudonyms,
     )
     bind = web.bind or (ANY_INTERFACE if robot_hosted else LOOPBACK_INTERFACE)
     httpd = _Httpd((bind, web.port), _Handler)

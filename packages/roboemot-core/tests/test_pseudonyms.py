@@ -237,6 +237,70 @@ class ConversationWorkerExchange:
         )
 
 
+KEYS = ["target", "ok", "error"]  # what SkillRegistry.structural_keys() gives for look_at
+
+
+def keyed(*names) -> Pseudonyms:
+    p = pseudo(*names)
+    p.set_structural_keys(KEYS)
+    return p
+
+
+def tool_msg(content: str) -> dict:
+    return {"role": "tool", "tool_call_id": "c", "content": content}
+
+
+def test_json_keys_equal_to_a_name_are_kept_and_only_values_are_aliased():
+    p = keyed("Target", "Marta")
+    history = ConversationWorkerExchange.build({"target": "Marta"}, '{"target": "Target", "n": 1}')
+    out = p.prepare(history, None)
+    call = json.loads(out.messages[0]["tool_calls"][0]["function"]["arguments"])
+    assert call == {"target": alias_of(p, "Marta")}
+    result = json.loads(out.messages[1]["content"])
+    assert result == {"target": alias_of(p, "Target"), "n": 1}
+    assert not p.leaks({"messages": out.messages, "tools": None})  # no tools in this round
+
+
+def test_a_name_as_a_json_key_that_is_not_structural_still_blocks_the_request():
+    assert keyed("Marta").leaks([tool_msg('{"Marta": 1}')])
+    assert pseudo("Target").leaks([tool_msg('{"target": 1}')])  # nothing declared structural
+    assert not keyed("Target").leaks([tool_msg('{"target": 1}')])
+
+
+def test_the_key_exemption_does_not_cover_values_or_other_texts():
+    p = keyed("Target")
+    assert p.leaks([tool_msg('{"target": "Target"}')])
+    assert p.leaks([{"role": "user", "content": '{"target": 1}'}])  # user text is not structural
+    assert p.leaks([{"role": "assistant", "content": '{"target": 1}'}])
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        '{"target": "Anna", "target": "x"}',
+        '{"a": "Anna", "a": "x"}',
+        '{"target": "x", "target": {"target": "Anna"}}',
+        '[{"ok": 1, "ok": "Anna"}]',
+    ],
+)
+def test_duplicate_json_keys_cannot_hide_a_name(content):
+    p = keyed("Anna")
+    assert p.leaks([tool_msg(content)])
+    fn = {"name": "look_at", "arguments": content}
+    call = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [{"id": "c", "type": "function", "function": fn}],
+    }
+    assert p.leaks([call])
+
+
+def test_an_exempt_key_in_nested_tool_json_is_ignored_but_a_name_deeper_is_not():
+    p = keyed("Target", "Anna")
+    assert not p.leaks([tool_msg('{"target": {"error": [1, 2]}}')])
+    assert p.leaks([tool_msg('{"target": {"error": ["Anna"]}}')])
+
+
 def test_the_exchange_is_written_without_unicode_escapes():
     msgs = ConversationWorkerExchange.build({"target": "Ömer"}, '{"ok": true}')
     assert "Ömer" in msgs[0]["tool_calls"][0]["function"]["arguments"]
@@ -591,6 +655,22 @@ def test_an_unreadable_name_list_ends_the_turn_without_sending(tooled, caplog):
     assert rig.done(rig.say("sono Marta"))
     assert srv.bodies == [] and "Marta" not in caplog.text
     assert rig.events[-1]["outcome"] == "error"
+
+
+def test_a_record_named_like_an_argument_does_not_block_the_round_without_tools(tooled):
+    call = lambda al: [C(0, "c1", "look_at", {"target": al("Marta")})]  # noqa: E731
+    rig, srv, env = tooled(
+        lambda al: [call(al), ["Fatto."]],
+        routes=(CLOUD,),
+        conversation={"max_tool_rounds": 1},
+        **PRIVACY,
+    )
+    rig.worker._known_names = lambda: [*KNOWN, "Target"]
+    rig.turn("guarda Marta", language="en")
+    assert [bool(b.get("tools")) for b in srv.bodies] == [True, False]  # second round: no tools
+    assert env.looked == ["Marta"]
+    assert rig.speech.texts() == ["Fatto."]
+    assert '"target"' in json.dumps(srv.bodies[1]["messages"]).replace("\\", "")
 
 
 def test_a_forgotten_name_is_gone_from_the_next_request(tooled):
@@ -961,3 +1041,214 @@ def test_image_parts_are_not_read_as_text_but_text_parts_are():
     image = {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,/9j/A/a+A=="}}
     assert not p.leaks([{"role": "user", "content": [image, {"type": "text", "text": "x"}]}])
     assert p.leaks([{"role": "user", "content": [image, {"type": "text", "text": "Marta"}]}])
+
+
+# ------------------------------------------------------------------ \uXXXX in plain text
+
+
+@pytest.mark.parametrize(
+    "written", ["Mar\\u0074a", "\\u004DARTA", "mar\\u0054a", "\\u004d\\u0061rta"]
+)
+def test_a_name_written_with_unicode_escapes_in_plain_text_is_scrubbed(written):
+    p = pseudo("Marta")
+    out = p.to_alias(f"ciao {written}!")
+    assert out == f"ciao {alias_of(p, 'Marta')}!"
+    assert p.mentions(written)
+
+
+def test_a_name_written_with_unicode_escapes_is_caught_by_the_leak_check():
+    p = pseudo("Marta", "Ömer")
+    for text in ("saluta Mar\\u0074a", "x \\u00d6mer", "x \\u00D6MER"):
+        assert p.leaks([{"role": "user", "content": text}]), text
+        assert p.leaks({"messages": [{"role": "user", "content": text}], "tools": None})
+    assert not p.leaks([{"role": "user", "content": "saluta Mar\\u0074"}])
+
+
+def test_escapes_that_do_not_decode_to_a_name_are_left_alone():
+    p = pseudo("Marta")
+    text = "a \\u00zz and \\ud83d and \\u0041"
+    assert p.to_alias(text) == text
+
+
+def test_a_registry_name_holding_an_escape_is_still_refused():
+    p = pseudo("Mar\\u0074a", "Luca")
+    assert p.refused == 1
+
+
+# ------------------------------------------------------------------ stream_route (conformance)
+
+
+async def run_route(router, r, p, messages=None):
+    return [ev async for ev in router.stream_route(r, messages or MESSAGES, None, pseudonyms=p)]
+
+
+async def test_stream_route_gives_a_cloud_route_aliases_and_restores_the_reply():
+    p = pseudo("Marta")
+    a = alias_of(p, "Marta")
+    rec = Recorder(script=[f"Ciao {a}."])
+    r = route()
+    events = await run_route(rec.router(r), r, p)
+    assert "Marta" not in json.dumps(rec.bodies[0][1])
+    assert a in json.dumps(rec.bodies[0][1])
+    assert text_of(events) == "Ciao Marta."
+
+
+async def test_stream_route_keeps_real_names_on_a_local_route():
+    p = pseudo("Marta")
+    rec = Recorder()
+    r = route("127.0.0.1")
+    await run_route(rec.router(r), r, p)
+    assert "Marta" in json.dumps(rec.bodies[0][1])
+
+
+async def test_stream_route_without_pseudonyms_is_unchanged():
+    rec = Recorder()
+    r = route()
+    await run_route(rec.router(r), r, None)
+    assert "Marta" in json.dumps(rec.bodies[0][1])
+
+
+async def test_stream_route_refuses_a_request_that_still_holds_a_name_before_sending(monkeypatch):
+    from roboemot.llm.router import PseudonymLeak
+
+    p = pseudo("Marta")
+    real_prepare = p.prepare
+
+    def unscrubbed(messages, tools):
+        out = real_prepare(messages, tools)
+        out.messages, out.tools = messages, tools
+        return out
+
+    monkeypatch.setattr(p, "prepare", unscrubbed)
+    rec = Recorder()
+    r = route()
+    with pytest.raises(PseudonymLeak) as exc:
+        await run_route(rec.router(r), r, p)
+    assert rec.bodies == [] and "Marta" not in str(exc.value)
+
+
+def test_a_surrogate_pair_written_with_escapes_is_one_character():
+    bold = chr(0x1D400) + "nna"  # mathematical bold capital A
+    p = pseudo(bold)
+    assert p.mentions("saluta \\ud835\\udc00nna")
+    assert p.to_alias("ciao \\ud835\\udc00nna") == f"ciao {alias_of(p, bold)}"
+    assert p.leaks([{"role": "user", "content": "x \\uD835\\uDC00nna"}])
+    assert not p.mentions("x \\ud835nna and \\udc00nna")  # a lone surrogate is left alone
+
+
+def test_a_backslash_before_an_escape_does_not_cancel_it():
+    p = pseudo("Anna")
+    assert p.mentions("\\\\u0041nna")  # errs towards matching: fail closed
+
+
+def test_the_skill_registry_declares_its_parameter_and_result_keys():
+    keys = Env().registry.structural_keys()
+    assert {"target", "gesture", "error", "detail", "ok", "applied", "status"} <= keys
+
+
+@pytest.mark.parametrize("depth", [64, 65, 5000])
+def test_deeply_nested_tool_content_is_aliased_without_recursion(depth):
+    p = pseudo("Marta")
+    content = "[" * depth + '"Marta"' + "]" * depth
+    out = p.prepare([tool_msg(content)], None)
+    sent = out.messages[0]["content"]
+    assert "Marta" not in sent and alias_of(p, "Marta") in sent
+    assert not p.leaks(out.messages)
+    assert p.leaks([tool_msg(content)])
+
+
+# ------------------------------------------------------------------ short JSON escapes
+
+
+@pytest.mark.parametrize(
+    "written", ["Anna\\nMaria", "Anna\\tMaria", "Anna\\r\\nMaria", "Anna \\fMaria"]
+)
+def test_a_name_split_by_a_short_json_escape_is_scrubbed_in_plain_text(written):
+    p = pseudo("Anna Maria")
+    assert p.to_alias(f"ciao {written}!") == f"ciao {alias_of(p, 'Anna Maria')}!"
+    assert p.leaks([{"role": "user", "content": written}])
+
+
+def test_short_escapes_in_json_that_is_never_decoded_do_not_hide_a_name():
+    p = pseudo("Anna Maria")
+    scalar = '"Anna\\nMaria"'  # a JSON scalar string: not an object or list
+    double = json.dumps({"r": json.dumps({"x": "Anna\nMaria"})})  # JSON inside a JSON value
+    depth = 200_000
+    deep = "[" * depth + '"Anna\\nMaria"' + "]" * depth  # too deep for the parser
+    for content in (scalar, double, deep):
+        assert p.leaks([tool_msg(content)]), content[:40]
+        out = p.prepare([tool_msg(content)], None)
+        assert "Anna" not in out.messages[0]["content"], content[:40]
+        assert not p.leaks(out.messages), content[:40]
+
+
+def test_escaped_quotes_and_slashes_are_read_as_their_characters():
+    p = pseudo('Ann "Nan" Lee', "A/B")
+    assert p.mentions('Ann \\"Nan\\" Lee')
+    assert p.mentions("A\\/B")
+
+
+async def test_a_lone_surrogate_in_the_history_is_a_clean_route_error():
+    p = pseudo("Marta")
+    fn = {"name": "look_at", "arguments": json.dumps({"x": "\ud800Bob"}, ensure_ascii=False)}
+    messages = [
+        {"role": "user", "content": "ciao"},
+        {"role": "assistant", "content": None,
+         "tool_calls": [{"id": "c", "type": "function", "function": fn}]},
+        tool_msg("{}"),
+    ]  # fmt: skip
+    rec = Recorder()
+    with pytest.raises(Exception, match="all routes failed"):
+        await run(rec.router(route()), p, messages)
+    assert rec.bodies == []
+
+
+@pytest.mark.parametrize(
+    ("name", "text"),
+    [
+        ("Bob", "C:\\Users\\bob"),
+        ("Bob", "open \\bob now"),
+        ("Nora", "\\nora"),
+        ("Nora", "say \\nora"),
+        ("Anna Maria", "Anna\\nMaria"),
+        ("Anna", "\\nAnna"),
+        ("Anna", "\\\\nAnna"),
+        ("Anna", "\\tAnna and \\rAnna"),
+    ],
+)
+def test_neither_reading_of_a_backslash_can_hide_a_name(name, text):
+    p = pseudo(name)
+    assert p.mentions(text)
+    assert p.leaks([{"role": "user", "content": text}])
+    out = p.to_alias(text)
+    assert not p.mentions(out) and not p.leaks([{"role": "user", "content": out}])
+    assert alias_of(p, name) in out
+
+
+def test_overlapping_names_of_the_two_readings_are_all_replaced():
+    p = pseudo("Anna", "Anna Maria")
+    out = p.to_alias("Anna\\nMaria and Anna")
+    assert "Anna" not in out and "Maria" not in out
+    assert not p.mentions(out)
+
+
+def test_aliasing_that_never_settles_terminates_and_fails_closed(monkeypatch):
+    from roboemot.llm.pseudonyms import PseudonymLeak
+
+    p = pseudo("Marta")
+    monkeypatch.setattr(p, "_variants", {k: "Marta" for k in p._variants})  # an alias with a name
+    with pytest.raises(PseudonymLeak) as exc:
+        p.to_alias("ciao Marta")
+    assert "Marta" not in str(exc.value)
+    with pytest.raises(PseudonymLeak):
+        p.prepare([{"role": "user", "content": "ciao Marta"}], None)
+
+
+async def test_a_request_whose_aliasing_never_settles_is_not_sent(monkeypatch):
+    p = pseudo("Marta")
+    monkeypatch.setattr(p, "_variants", {k: "Marta" for k in p._variants})
+    rec = Recorder()
+    router = rec.router(route())
+    with pytest.raises(Exception, match="all routes failed"):
+        await run(router, p)
+    assert rec.bodies == [] and router.failures[-1][1] == "PseudonymLeak"
