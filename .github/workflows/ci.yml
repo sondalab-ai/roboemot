@@ -43,6 +43,8 @@ jobs:
   # SPEC 14, M3 exit: the tests that load the real Silero VAD, Vosk and Piper models (`-m models`,
   # deselected by default), including `test_m3_exit.py` with its three latency budgets. The vision
   # models are not fetched (0.8 GB); their `-m models` tests skip and have their own job above.
+  # Runs on PRs too: about 1.5 min with a warm cache (under 2 min cold), well under the 10 min limit
+  # we set for a PR job. The cache is keyed on the registries, so the nightly run keeps it warm.
   models:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
