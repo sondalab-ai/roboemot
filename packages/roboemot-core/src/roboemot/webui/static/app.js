@@ -700,18 +700,34 @@ function settingEditor(s, index) {
 
 // One setting: its value and default, and an edit form generated from the schema. Saving asks for
 // the operator PIN in the dialog (same PIN as the login; it doubles as the admin PIN).
+let revealedSettings = new Map(); // private fields shown after a PIN check, kept in memory only
+
+async function revealPrivate(reload) {
+  let result = null;
+  const done = await ask({
+    title: t("settings_pin_title"), message: t("settings_reveal"), pin: true, confirm: t("settings_reveal"),
+    run: async ({ pin }) => { result = await api("POST", "/api/settings/reveal", { pin: pin }); },
+  });
+  if (!done) return;
+  revealedSettings = new Map(result.fields.map((f) => [f.path, f]));
+  await reload(null);
+}
+
 function settingRow(s, index, reload) {
   const box = el("div", { class: "stack", "data-path": s.path });
   const head = () => el("div", { class: "row" },
     el("code", { class: "sl-code" }, s.path),
     s.needs_admin ? el("span", { class: "sl-tag", title: t("settings_admin_hint") }, t("settings_admin")) : []);
   const blocklist = s.path.startsWith("safety.minor_output_blocklist.");
+  const hidden = s.private && !s.revealed;
   const show = () => box.replaceChildren(
     head(),
     s.description ? el("p", { class: "hint" }, s.description) : [],
-    valueView(s),
-    el("p", { class: "hint" }, t("settings_default") + ": " + plainValue(s.default, s.schema)),
-    el("div", { class: "row" }, button(t("settings_edit"), "plain", () => edit(), { small: true })));
+    hidden ? el("p", { class: "hint setting-value" }, t("settings_hidden")) : valueView(s),
+    hidden ? [] : el("p", { class: "hint" }, t("settings_default") + ": " + plainValue(s.default, s.schema)),
+    el("div", { class: "row" }, hidden
+      ? button(t("settings_reveal"), "plain", () => revealPrivate(reload), { small: true })
+      : button(t("settings_edit"), "plain", () => edit(), { small: true })));
   function edit() {
     const editor = settingEditor(s, index);
     const errorId = "set-error-" + index;
@@ -733,6 +749,7 @@ function settingRow(s, index, reload) {
           run: async ({ pin }) => { result = await api("POST", "/api/settings", { path: s.path, value: value, pin: pin }); },
         });
         if (!done) return;
+        if (s.revealed && revealedSettings.has(s.path)) revealedSettings.set(s.path, { ...revealedSettings.get(s.path), value: value });
         notice(result.persisted === false ? t("saved") + " " + t("settings_not_persisted") : t("saved"), result.persisted === false);
         await reload(result.changed ? s.path : null);
       },
@@ -752,6 +769,10 @@ function settingRow(s, index, reload) {
 async function settingsView(changedPath) {
   const view = document.getElementById("view");
   const data = await api("GET", "/api/settings");
+  for (const s of data.settings) {
+    const shown = s.private ? revealedSettings.get(s.path) : null;
+    if (shown) { s.value = shown.value; s.default = shown.default; s.revealed = true; }
+  }
   view.replaceChildren();
   const reload = (path) => guarded(() => settingsView(path));
   view.append(card(t("tab_settings"), t("tab_settings"), el("p", { class: "hint" }, t("settings_intro"))));

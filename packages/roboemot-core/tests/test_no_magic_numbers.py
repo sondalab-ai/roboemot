@@ -102,6 +102,8 @@ BEHAVIOUR_MODULES = [
     "webui/api.py",
     "webui/auth.py",
     "webui/server.py",
+    "webui/settings.py",
+    "config/catalogue.py",
     "webui/validation.py",
 ]
 ALLOWED = {0, 1, -1, 2, 0.5, -1.0}

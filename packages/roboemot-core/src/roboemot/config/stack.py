@@ -124,6 +124,47 @@ def _list_item(items: list, part: str, dotted: str) -> Any:
     raise KeyError(f"{dotted}: no list entry named {part!r}")
 
 
+def entry_identity(list_path: str, entry: Any) -> Any:
+    """Stable identity of a keyed-list entry (``None`` when it has none): its ``name`` or, for
+    appraisal rules, the event plus its normalised ``when`` (``rule_identity``). Index and natural
+    key in a path are only addresses; this is what stays the same across layers."""
+    key = KEYED_LISTS.get(list_path, "name")
+    return _merge_id(entry, key) if isinstance(entry, dict) else None
+
+
+def resolve_in_layer(layer: Any, effective: Any, path: str) -> tuple[bool, Any]:
+    """Find ``path`` of the effective tree inside one layer's tree: ``(found, value)``.
+
+    Dict steps are plain keys. A list step (index or natural key, as ``get_path`` takes) picks the
+    entry of the *effective* tree, takes its ``entry_identity`` and then looks for the entry with
+    the same identity in the layer's list, wherever it sits there. So an app rule appended at
+    index 0 does not stand for the default rule at index 0. ``found`` is False when the layer does
+    not hold the path, or an entry has no identity.
+    """
+    eff, lay, walked = effective, layer, ""
+    for part in path.split("."):
+        if isinstance(eff, list):
+            try:
+                item = _list_item(eff, part, path)
+            except (KeyError, IndexError):
+                return False, None
+            ident = entry_identity(walked, item)
+            if ident is None or not isinstance(lay, list):
+                return False, None
+            match = [x for x in lay if entry_identity(walked, x) == ident]
+            if not match:
+                return False, None
+            eff, lay = item, match[0]
+        elif isinstance(eff, dict) and isinstance(lay, dict):
+            if part not in eff or part not in lay:
+                return False, None
+            eff, lay = eff[part], lay[part]
+        else:
+            return False, None
+        walked = f"{walked}.{part}" if walked else part
+    return True, lay
+
+
 def set_path(tree: dict, dotted: str, value: Any) -> None:
     parts = dotted.split(".")
     node: Any = tree
@@ -189,7 +230,7 @@ def field_meta(dotted: str) -> dict[str, Any]:
         extra = info.json_schema_extra
         meta = {**inherited, **(extra if isinstance(extra, dict) else {})}
         inherited = {k: v for k, v in meta.items() if k in INHERITED_META and v}
-        annotation = _strip_optional(info.annotation)
+        annotation = strip_optional(info.annotation)
         i += 1
         if get_origin(annotation) in (dict, list):
             i += 1  # skip the key or index
@@ -199,7 +240,7 @@ def field_meta(dotted: str) -> dict[str, Any]:
     return meta
 
 
-def _strip_optional(annotation: Any) -> Any:
+def strip_optional(annotation: Any) -> Any:
     args = [a for a in (get_args(annotation) or ()) if a is not type(None)]
     if get_origin(annotation) in (Union, UnionType) and len(args) == 1:
         return args[0]
@@ -590,6 +631,34 @@ class ConfigStack:
 
     def get(self, key: str, person: dict | None = None) -> Any:
         return get_path(self.effective(person), key)
+
+    def source_of(self, path: str, tree: dict | None = None) -> str:
+        """The layer that decides ``path``: ``runtime`` (a live override that holds the path: on
+        it, in a section above it that contains it, or below it), else the highest of
+        ``derived``, ``app``, ``preset``, ``manifest``, ``defaults`` that holds it, else
+        ``schema`` (the built-in default). Keyed-list entries are matched by identity
+        (``resolve_in_layer``), not by position. ``tree`` is the effective tree, ``merged_tree()``
+        when omitted (pass it when asking for many paths). The per-call ``person`` layer is not
+        stored and never reported."""
+        with self._lock:
+            now = self.clock()
+            for key, rv in self._runtime.items():
+                if rv.expires_at is not None and rv.expires_at <= now:
+                    continue
+                if path == key or key.startswith(path + "."):
+                    return "runtime"
+                if path.startswith(key + "."):
+                    try:
+                        get_path(rv.value, path[len(key) + 1 :])
+                    except (KeyError, IndexError, ValueError, TypeError, AttributeError):
+                        continue
+                    return "runtime"
+            effective = tree if tree is not None else self.merged_tree()
+            for name in reversed(LAYER_ORDER[:-1]):
+                layer = getattr(self, name, None)
+                if layer and resolve_in_layer(layer, effective, path)[0]:
+                    return name
+        return "schema"
 
     # ---- writing
 

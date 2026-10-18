@@ -234,3 +234,26 @@ test("settings: an unchanged value is not sent and asks for no PIN", async () =>
   assert.equal(page.document.querySelector("dialog"), null);
   assert.equal(page.document.querySelector("#notice").textContent, "settings_unchanged");
 });
+
+test("settings: a private row is hidden until the PIN reveals it, then it can be edited", async () => {
+  const hidden = { ...LINE, path: "safety.minor_lines.en.greeting", value: "***", default: "***", private: true };
+  const page = await loadPage({
+    "GET /api/settings": { settings: [hidden] },
+    "POST /api/settings/reveal": { fields: [{ path: hidden.path, value: "Hello", default: "Hi", private: true }] },
+  });
+  await page.run("settingsView()");
+  const box = () => page.document.querySelector(`[data-path="${hidden.path}"]`);
+  assert.ok(!box().textContent.includes("***"));
+  assert.ok(box().textContent.includes("settings_hidden"));
+  box().querySelector("button").click();
+  await settle();
+  const dialog = page.document.querySelector("dialog");
+  dialog.querySelector("#dialog-pin").value = SECRET_PIN;
+  submit(page.window, dialog.querySelector("form"));
+  await settle();
+  const reveal = page.calls.find((c) => c.path === "/api/settings/reveal");
+  assert.deepEqual(reveal.body, { pin: SECRET_PIN });
+  assert.ok(box().textContent.includes("Hello"));
+  assert.ok(![...box().querySelectorAll("button")].some((b) => b.textContent === "settings_reveal"));
+  assert.ok(!storageDump(page.window).includes(SECRET_PIN));
+});

@@ -28,11 +28,11 @@ from dataclasses import dataclass
 from importlib.metadata import entry_points
 from typing import Any, Literal, Protocol
 
+from roboemot.redact import REDACTED, is_secret_key, secret_shaped
+
 SCHEMA_VERSION = 1
 SECTION_TIMEOUT_S = 5.0
 ENTRY_POINT_GROUP = "roboemot.diagnostics"
-REDACTED = "***"
-SECRET_WORDS = ("key", "token", "secret", "password", "credential")
 LOOPBACK = {"localhost", "127.0.0.1", "::1"}
 
 Scope = Literal["local", "robot", "runtime"]
@@ -157,7 +157,9 @@ class Diagnostics:
 
 def jsonable(value: Any) -> Any:
     """Plain JSON types only: no numpy scalars, enums, datetimes, NaN; secrets redacted."""
-    if isinstance(value, bool | str | int) or value is None:
+    if isinstance(value, str):
+        return REDACTED if secret_shaped(value) else value
+    if isinstance(value, bool | int) or value is None:
         return value
     if isinstance(value, float):
         return value if math.isfinite(value) else None
@@ -176,15 +178,12 @@ def jsonable(value: Any) -> Any:
     elif hasattr(value, "tolist"):  # numpy scalar or array
         return jsonable(value.tolist())
     if isinstance(value, dict):
-        return {str(k): REDACTED if _secret(str(k)) else jsonable(v) for k, v in value.items()}
+        return {
+            str(k): REDACTED if is_secret_key(str(k)) else jsonable(v) for k, v in value.items()
+        }
     if isinstance(value, list | tuple | set | frozenset):
         return [jsonable(v) for v in value]
     return str(value)
-
-
-def _secret(key: str) -> bool:
-    k = key.lower()
-    return any(w in k for w in SECRET_WORDS)
 
 
 def _printable(text: str) -> str:
@@ -253,7 +252,10 @@ __all__ = [
     "collect",
     "collect_section",
     "installed_platforms",
+    "REDACTED",
+    "is_secret_key",
     "jsonable",
+    "secret_shaped",
     "platform_sources",
     "render_text",
 ]
