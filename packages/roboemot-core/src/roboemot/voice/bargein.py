@@ -234,6 +234,11 @@ class BargeIn:
         self._stop, self._interrupt, self._resume = stop, interrupt, resume
         self._prepare = prepare or (lambda: None)
 
+    @property
+    def bound(self) -> bool:
+        """Whether ``bind`` has connected the actions; chunks are ignored until then."""
+        return self._stop is not None
+
     def reset(self) -> None:
         """Forget the stretch in progress (the robot stopped speaking, or the audio has a gap)."""
         self._end_session()
@@ -250,6 +255,7 @@ class BargeIn:
         """Counters and latencies (ms) for the debug report; no audio, no text."""
         return {
             "enabled": self._b.enabled,
+            "bound": self.bound,
             "keyword_enabled": self._b.keyword_enabled,
             **self._counts,
             "keyword_seconds": self._keyword_s,
