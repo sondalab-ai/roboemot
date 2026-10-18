@@ -879,11 +879,13 @@ class ConfigStack:
         layer: str = "runtime",
         must_exist: bool = False,
         refuse: frozenset[str] = frozenset(),
+        drop_runtime: bool = False,
     ) -> RoboEmotConfig:
         """Set a parameter or a whole section. ``must_exist`` refuses (``ConfigError``) a key the
         effective configuration does not have yet, e.g. a language that was removed meanwhile.
         ``refuse`` names cross-field checks (``Violation.check``) that stay refused whatever
-        ``admin`` says.
+        ``admin`` says. ``drop_runtime`` (app layer) removes the runtime override of the same key
+        in the same transaction, so it cannot shadow the new value and a refusal undoes both.
 
         ``layer="runtime"`` (default): may only make safety more conservative; a privacy
         opt-in or an ``admin_only`` prompt change needs ``admin=True``. An entry of a merged list
@@ -902,12 +904,15 @@ class ConfigStack:
                 runtime_keys.append(slot)
                 allow = {"privacy", "admin"} if admin else set()
             elif layer == "app":
-                saved_app = copy.deepcopy(self.app)
+                saved_app, saved_rt = copy.deepcopy(self.app), copy.deepcopy(self._runtime)
                 set_in_layer(self.app, self.merged_tree(), key, copy.deepcopy(value))
+                if drop_runtime:
+                    self._take_runtime(key, False)
                 persist = self._persist_app
 
                 def undo() -> None:
                     self.app = saved_app
+                    self._runtime = saved_rt
 
                 allow = {"privacy", "safety", "admin"} if admin else set()
             elif layer == "derived":
@@ -1016,10 +1021,10 @@ class ConfigStack:
 
             else:
                 return False
-            if valid:
-                self._commit(undo, {"privacy", "admin"} if admin else set(), source, (), refuse)
+            allow = {"privacy", "admin"} if admin else set()
+            self._commit(undo, allow, source, (), refuse, lenient=not valid)
             self._record(source, key, old, None)
-            if valid:
+            if self._valid():
                 self._notify()
             return True
 
@@ -1045,9 +1050,12 @@ class ConfigStack:
         runtime_keys: Iterable[str] = (),
         refuse: frozenset[str] = frozenset(),
         persist: Callable[[], None] | None = None,
-    ) -> RoboEmotConfig:
+        lenient: bool = False,
+    ) -> RoboEmotConfig | None:
         """Validate the tentative state and check guardrails; roll back with ``undo`` on
-        failure.
+        failure. ``lenient`` (a clear from a state that was already invalid) skips only the
+        validation: the guardrails still run on what can be built (``_buildable``), and the result
+        is ``None`` when nothing could.
 
         Two configurations are checked against the approved baseline: the layers without
         runtime overrides (``base``) and the effective one. An admin-approved loosening of a
@@ -1058,14 +1066,18 @@ class ConfigStack:
         """
         keys = list(runtime_keys)
         try:
-            cfg = self.effective()
-            base = RoboEmotConfig.model_validate(self.merged_tree(include_runtime=False))
+            cfg: RoboEmotConfig | None = self.effective()
+            base: RoboEmotConfig | None = RoboEmotConfig.model_validate(
+                self.merged_tree(include_runtime=False)
+            )
             self._check_route_budgets(cfg)
         except (ConfigError, ValidationError) as exc:
-            undo()
-            if isinstance(exc, ValidationError):
-                raise ConfigError(_explain(exc)) from exc
-            raise
+            if not lenient:
+                undo()
+                if isinstance(exc, ValidationError):
+                    raise ConfigError(_explain(exc)) from exc
+                raise
+            cfg, base = self._buildable()
         now = self.clock()
         live_approved = [
             (path, value)
@@ -1073,11 +1085,11 @@ class ConfigStack:
             if rv.expires_at is None or rv.expires_at > now
             for path, value in rv.approved.items()
         ]
-        base_found = violations(self._approved, base)
+        base_found = violations(self._approved, base) if base is not None else []
         base_paths = {v.path for v in base_found}
         rt_found = [
             v
-            for v in violations(self._approved, cfg)
+            for v in (violations(self._approved, cfg) if cfg is not None else [])
             if v.path not in base_paths and (v.path, v.candidate) not in live_approved
         ]
         blocked = [v for v in base_found + rt_found if v.kind not in allow or v.check in refuse]
@@ -1176,6 +1188,26 @@ class ConfigStack:
 
     # ---- internals
 
+    def _buildable(self) -> tuple[RoboEmotConfig | None, RoboEmotConfig | None]:
+        """The effective and the persistent-layers configuration as far as they can be built when
+        the state is invalid: the effective one without the first runtime override whose removal
+        makes it valid (an override that cannot be in effect anyway), else ``None``."""
+        try:
+            base = RoboEmotConfig.model_validate(self.merged_tree(include_runtime=False))
+        except ValidationError:
+            base = None
+        saved = dict(self._runtime)
+        try:
+            for slot in saved:
+                self._runtime = {k: v for k, v in saved.items() if k != slot}
+                try:
+                    return self.effective(), base
+                except ConfigError:
+                    continue
+        finally:
+            self._runtime = saved
+        return None, base
+
     def _check_key(self, key: str, must_exist: bool) -> None:
         """``ConfigError`` for a parameter that is unknown, or (``must_exist``) not there now."""
         if not field_meta(key) and not self._known_path(key):
@@ -1203,8 +1235,9 @@ class ConfigStack:
         and the undo.
 
         An entry of a merged list (``KEYED_LISTS``), addressed by index or by name, is stored as
-        a partial entry (identity fields plus the change) in the list's patch slot, so one edit
-        has one representation and a patch whose entry vanishes does nothing. A list of entries
+        a partial entry (identity fields plus the change) in the list's patch slot, or, for an entry
+        added at runtime, in the added-entries slot itself (write order cannot then drop the
+        edit), so one edit has one representation and a patch whose entry vanishes does nothing. A list of entries
         written to the list itself is merged into the list's own slot (added entries). Neither
         can expire (``ttl_s`` is refused)."""
         expires = self.clock() + ttl_s if ttl_s else None
@@ -1215,6 +1248,14 @@ class ConfigStack:
             if ref is not None:
                 list_path, ident, rest = ref
                 slot, partial = list_path + PATCH, copy.deepcopy(ident)
+                added = self._runtime.get(list_path)
+                if (
+                    added is not None
+                    and keyed_index(nest(list_path, added.value), list_path, ident) is not None
+                    and keyed_index(self.merged_tree(include_runtime=False), list_path, ident)
+                    is None
+                ):
+                    slot = list_path  # an entry added at runtime: its edits join it
                 if rest:
                     set_path(partial, rest, copy.deepcopy(value))
                 else:
@@ -1323,6 +1364,7 @@ class ConfigStack:
         self.audit.append(entry)
         if self.audit_path:
             fd = os.open(self.audit_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, AUDIT_FILE_MODE)
+            os.fchmod(fd, AUDIT_FILE_MODE)  # the mode of O_CREAT applies to a new file only
             with os.fdopen(fd, "a") as fh:
                 fh.write(json.dumps(entry.__dict__, default=str) + "\n")
 

@@ -998,3 +998,83 @@ def test_duplicate_identities_resolve_to_the_first_entry():
         )
         == 0
     )
+
+
+# ------------------------------------------------------------------ fix round 2
+
+
+def test_an_existing_loose_audit_file_becomes_private(tmp_path):
+    import stat
+
+    audit = tmp_path / "audit.jsonl"
+    audit.write_text("")
+    audit.chmod(0o644)
+    make_stack(tmp_path).set("affect.update_hz", 30.0)
+    assert stat.S_IMODE(audit.stat().st_mode) == 0o600
+    assert audit.read_text()
+
+
+def test_a_clear_from_an_invalid_state_still_runs_the_guardrails(tmp_path):
+    from roboemot.config.stack import _RuntimeValue
+
+    stack = lan_stack(tmp_path)
+    editor = SettingsEditor(stack, store=tmp_path / FILE)
+    editor.change("llm_routes.lan.locality", "cloud")
+    editor.change("llm_routes.lan.base_url", "http://nas.local:8080/v1")
+    stack._runtime["affect.update_hz"] = _RuntimeValue(9999.0, None)  # e.g. a bad reload
+    with pytest.raises(ConfigError):
+        stack.effective()
+    before = json.dumps({k: v.value for k, v in stack._runtime.items()}, sort_keys=True)
+    with pytest.raises(GuardrailError) as caught:
+        stack.clear("llm_routes.lan.locality", admin=True, refuse=frozenset({"locality"}))
+    assert {v.check for v in caught.value.violations} == {"locality"}
+    with pytest.raises(GuardrailError):  # without refuse the unapproved loosening is still blocked
+        stack.clear("llm_routes.lan.locality")
+    assert json.dumps({k: v.value for k, v in stack._runtime.items()}, sort_keys=True) == before
+    assert stack.clear("affect.update_hz") is True  # an invalid override can still go
+    assert stack.effective().llm_routes[0].locality == "cloud"
+
+
+def test_a_refused_app_retry_leaves_the_yaml_and_the_runtime_shadow_alone(tmp_path, monkeypatch):
+    import roboemot.config.stack as stack_mod
+
+    app = tmp_path / "app.yaml"
+    app.write_text(yaml.safe_dump({"webui": {"bind": "127.0.0.1", "port": 0}}))
+    stack = ConfigStack.from_files(app=app, audit_path=tmp_path / "audit.jsonl")
+    editor = SettingsEditor(stack, store=tmp_path / FILE)
+    editor.change("webui.name_max_chars", 32)
+    yaml_before, runtime_before = app.read_text(), json.dumps(stack.app)
+    real = stack_mod.reflex_violations
+
+    def refuse_when_loosened(approved, candidate):
+        found = real(approved, candidate)
+        if candidate.webui.name_max_chars == 100:
+            found.append(Violation("safety", "reflexes.x", 1, 2, "reflex"))
+        return found
+
+    monkeypatch.setattr(stack_mod, "reflex_violations", refuse_when_loosened)
+    with pytest.raises(GuardrailError):
+        editor.change("webui.name_max_chars", 100)
+    assert app.read_text() == yaml_before and json.dumps(stack.app) == runtime_before
+    assert stack.effective().webui.name_max_chars == 32  # the runtime value is still there
+    assert json.loads((tmp_path / FILE).read_text())["overrides"] == {"webui.name_max_chars": 32}
+
+
+def test_an_edit_of_an_added_entry_survives_a_later_add(editor, stack, tmp_path):
+    editor.add_entry("llm_routes", None, {**ROUTE, "name": "a", "max_tokens": 300})
+    editor.change("llm_routes.a.max_tokens", 50)
+    editor.add_entry("llm_routes", None, {**ROUTE, "name": "b"})
+    editor.add_entry("appraisal.rules", None, {"event": "custom.thing", "valence": 0.4})
+    editor.change(f"appraisal.rules.{rule_index(stack, 'custom.thing')}.valence", 0.1)
+    editor.add_entry("appraisal.rules", None, {"event": "zz.third", "valence": 0.5})
+
+    def check(s):
+        routes = {r.name: r for r in s.effective().llm_routes}
+        assert routes["a"].max_tokens == 50 and set(routes) == {"lan", "a", "b"}
+        assert rule(s, "custom.thing").valence == 0.1 and rule(s, "zz.third").valence == 0.5
+
+    check(stack)
+    fresh = make_stack(tmp_path, llm_routes=[ROUTE], appraisal=appraisal([RULE_B, RULE_A]))
+    SettingsEditor(fresh, store=tmp_path / FILE).restore()
+    check(fresh)
+    assert "llm_routes#patch" not in stack._runtime  # the patch slot holds lower-layer edits only

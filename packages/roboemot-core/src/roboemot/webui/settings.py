@@ -505,8 +505,8 @@ class SettingsEditor:
             layer="app",
             must_exist=True,
             refuse=REFUSED_CHECKS,
+            drop_runtime=True,  # one transaction: a refusal leaves the YAML and the runtime as were
         )
-        self.stack.clear(key, source=source, admin=True, refuse=REFUSED_CHECKS)
         return "app"
 
     def _remember(self, key: str, value: Any) -> None:
