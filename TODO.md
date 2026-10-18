@@ -111,6 +111,10 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       arguments are now kept only as an object within `TOOL_ARGS_MAX_DEPTH` (SPEC 8). CI runs 3.11 and 3.12 only.
 - [x] JS behaviour tests for the web UI (`ask()`, the PIN dialog, the settings editor): `node:test` + jsdom in
       `packages/roboemot-core/tests/webui_js/` (dev-only, lockfile), CI job `webui-js`.
+- [ ] `Pseudonyms._aliased_json` / `_aliased` (pseudonyms.py ~:550) recurse on deep tool-message content: apply
+      the router's `_nesting` limit there too (SPEC 8, 12).
+- [ ] `conversation.tool_arg_max_chars` and the router's `TOOL_ARGS_MAX_CHARS` are two caps on the same thing:
+      decide one owner (SPEC 8, 11A).
 - [ ] Confirm the robot's Python version (`python scripts/robot_ssh.py -- python3 --version`). The Piper hash locks cover
       aarch64 py3.11 and py3.12 until then; drop the unused one (SPEC 4A Installer).
 - [ ] Confirm on the robot that the app runs as the same user the installer writes `secrets.json` as over SSH;

@@ -253,7 +253,9 @@ async def _tool_round_trip(router: Router, route: LLMRoute, unreachable: bool) -
     if call.name != TOOL_NAME:
         return CheckResult(TOOL_ROUND_TRIP, FAIL, "tool call names an unknown tool")
     if "_raw" in call.arguments:
-        return CheckResult(TOOL_ROUND_TRIP, FAIL, "tool call arguments are not valid JSON")
+        return CheckResult(
+            TOOL_ROUND_TRIP, FAIL, "tool call arguments are not a JSON object within limits"
+        )
     if not call.id:
         return CheckResult(TOOL_ROUND_TRIP, FAIL, "tool call has no id")
     if router.used(route.name) >= route.daily_token_budget:

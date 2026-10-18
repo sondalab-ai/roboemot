@@ -263,7 +263,9 @@ def test_the_app_offers_the_default_skills_and_wires_barge_in(data, fakes, said,
         # BargeIn is fed by the listener thread only. The scripted mic never blocks, so that thread
         # would push its quiet chunks into `on_chunk` between the loud ones below and reset the run;
         # stop it, so this thread is the only one driving the hook.
+        listener_thread = app.voice_listener._thread
         app.voice_listener.stop()
+        assert not listener_thread.is_alive()  # the join did not time out
         # the user speaks over the robot: loud frames, no reference to match them against
         app.speech.extend(time.monotonic() + 5.0)
         now = time.monotonic()

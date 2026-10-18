@@ -102,7 +102,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - run: npm ci --no-audit --no-fund
+      - run: npm ci --ignore-scripts --no-audit --no-fund
         working-directory: packages/roboemot-core/tests/webui_js
       - run: npm test
         working-directory: packages/roboemot-core/tests/webui_js

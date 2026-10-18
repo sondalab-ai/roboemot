@@ -48,8 +48,8 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 # Longest tool-call argument text parsed. A model cannot send more than max_tokens tokens, so
 # this only bounds what a broken or hostile route can make json.loads chew on.
 TOOL_ARGS_MAX_CHARS = 50_000
-# Deepest JSON nesting kept in tool-call arguments. Python 3.15's parser no longer raises
-# RecursionError on deep input, and the alias restoration recurses, so depth is bounded here.
+# Deepest JSON nesting kept in tool-call arguments. The alias restoration recurses, and a
+# 5000-deep object parses on every Python version, so depth is bounded here.
 TOOL_ARGS_MAX_DEPTH = 64
 SECRET = SECRET_REF
 

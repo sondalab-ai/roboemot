@@ -6,6 +6,7 @@ openai SDK's own client follows redirects, so the router builds its client with 
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -13,11 +14,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import numpy as np
 import pytest
 from roboemot.config.schema import LLMRoute, OpenAISpeechConfig, SafetyConfig
-from roboemot.llm import Router
+from roboemot.llm import NoRouteAvailable, Router
 from roboemot.voice.openai_speech import OpenAISpeechBackend
-from test_tts import collect, delivery
+from roboemot.voice.tts import TTSError
+from test_tts import delivery, voice_cfg
 
 KEY = "sk-redirect-test-key"
+REDIRECT_BODY = np.full(480, 1000, dtype="<i2").tobytes() + b"SENTINEL-307-BODY"
 CHAT_OK = (
     b'data: {"id":"x","object":"chat.completion.chunk","created":0,"model":"m","choices":'
     b'[{"index":0,"delta":{"content":"ciao"},"finish_reason":null}]}\n\ndata: [DONE]\n\n'
@@ -66,8 +69,9 @@ def servers() -> Iterator[tuple[Recorder, Recorder]]:
             self.server.seen.append({k.lower(): v for k, v in self.headers.items()})  # type: ignore[attr-defined]
             self.send_response(307)
             self.send_header("location", f"http://localhost:{target.port}{self.path}")
-            self.send_header("content-length", "0")
+            self.send_header("content-length", str(len(REDIRECT_BODY)))
             self.end_headers()
+            self.wfile.write(REDIRECT_BODY)
 
         def log_message(self, *args) -> None:
             pass
@@ -90,14 +94,15 @@ def _router(origin: Recorder) -> Router:
     return Router([route], SafetyConfig())
 
 
-async def test_the_llm_router_does_not_follow_a_redirect(servers):
+async def test_the_llm_router_does_not_follow_a_redirect(servers, caplog):
     origin, target = servers
     router = _router(origin)
-    try:
+    caplog.set_level(logging.DEBUG)
+    with pytest.raises(NoRouteAvailable):
         async for _ in router.stream([{"role": "user", "content": "ciao"}]):
             pass
-    except Exception:  # the route refuses the redirect; only what the target saw matters
-        pass
+    assert router.failures == [("cloud", "APIStatusError")]
+    assert KEY not in caplog.text and "SENTINEL-307-BODY" not in caplog.text
     assert origin.seen[0]["authorization"] == f"Bearer {KEY}"
     assert target.seen == []  # neither the key nor the prompt body follows a redirect
 
@@ -106,7 +111,10 @@ async def test_the_speech_client_does_not_follow_a_redirect(servers):
     origin, target = servers
     router = _router(origin)
     backend = OpenAISpeechBackend(OpenAISpeechConfig(route="cloud"), lambda: router)
-    with pytest.raises(Exception):  # noqa: B017  # a 307 is not audio; refusing it is fine
-        await collect(backend, "Ciao!", delivery())
+    chunks: list = []
+    with pytest.raises(TTSError):  # a 307 with a body is not audio
+        async for c in backend.synthesize("Ciao!", delivery(), language="it", voice=voice_cfg()):
+            chunks.append(c)
+    assert chunks == []
     assert origin.seen[0]["authorization"] == f"Bearer {KEY}"
     assert target.seen == []

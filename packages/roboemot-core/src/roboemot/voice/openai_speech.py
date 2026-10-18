@@ -89,7 +89,11 @@ class OpenAISpeechBackend:
             raise TTSUnavailable(f"speech route key unavailable: {type(exc).__name__}") from exc
         loop = asyncio.get_running_loop()
         deadline = loop.time() + route.first_token_timeout_s
-        client = router.http_client_factory() if router.http_client_factory else httpx.AsyncClient()
+        client = (
+            router.http_client_factory()
+            if router.http_client_factory
+            else httpx.AsyncClient(follow_redirects=False)
+        )
         url = route.base_url.rstrip("/") + SPEECH_PATH
         response_cm = client.stream("POST", url, json=body, headers=headers)
         entered = False
@@ -100,7 +104,7 @@ class OpenAISpeechBackend:
                     response_cm.__aenter__(), max(0.0, deadline - loop.time())
                 )
                 entered = True
-                if response.status_code >= httpx.codes.BAD_REQUEST:
+                if not response.is_success:  # an error, or a redirect (never followed)
                     self._report(router, route, True)
                     raise TTSError(f"speech route answered HTTP {response.status_code}")
                 chunks = response.aiter_bytes().__aiter__()

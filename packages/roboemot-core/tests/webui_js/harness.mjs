@@ -65,5 +65,6 @@ export function storageDump(window) {
   for (const store of [window.localStorage, window.sessionStorage]) {
     for (let i = 0; i < store.length; i++) out.push(store.key(i), store.getItem(store.key(i)));
   }
+  out.push(window.document.cookie);
   return out.join("\n");
 }

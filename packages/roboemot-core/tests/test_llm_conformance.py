@@ -136,7 +136,7 @@ async def test_malformed_tool_arguments_fail():
     ]
     report = await run(Fake(tool=reply(bad)))
     result = next(c for c in report.checks if c.name == "tool_round_trip")
-    assert result.status == FAIL and "not valid JSON" in result.reason
+    assert result.status == FAIL and "not a JSON object" in result.reason
 
 
 async def test_no_answer_after_tool_result_fails():
