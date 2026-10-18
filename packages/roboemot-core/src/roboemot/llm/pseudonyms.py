@@ -55,6 +55,9 @@ import httpx
 from ..config.schema import PSEUDONYM_LABEL, LLMRoute, RoboEmotConfig
 
 UNICODE_ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})")
+# Deepest JSON nesting kept in tool-call arguments. The alias restoration recurses, and a
+# 5000-deep object parses on every Python version, so depth is bounded here.
+TOOL_ARGS_MAX_DEPTH = 64
 LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 LOOPBACK_NAMES = ("localhost",)
 MDNS_SUFFIX = ".local"
@@ -121,6 +124,21 @@ def route_is_local(route: LLMRoute) -> bool:
         dotless = "." not in host and not qualified
         return host in LOOPBACK_NAMES or host.endswith(MDNS_SUFFIX) or dotless
     return any(ip in net for net in LAN_NETWORKS if net.version == ip.version)
+
+
+def _nesting(value: Any) -> int:
+    """How deeply lists and dicts are nested in ``value`` (a scalar is 0), without recursion,
+    so a hostile reply cannot overflow the stack however deep it is."""
+    deepest, stack = 0, [(value, 0)]
+    while stack:
+        node, depth = stack.pop()
+        if isinstance(node, (list, dict)):
+            depth += 1
+            deepest = max(deepest, depth)
+            if depth > TOOL_ARGS_MAX_DEPTH:
+                return depth
+            stack.extend((v, depth) for v in (node.values() if isinstance(node, dict) else node))
+    return deepest
 
 
 def _label(index: int) -> str:
@@ -654,15 +672,15 @@ class Pseudonyms:
 
     def _aliased_json(self, text: str, used: set[str]) -> str:
         """A JSON text with its string values aliased (keys stay as they are) and written back
-        without ``\\u`` escapes; text that is not a JSON object or list is aliased as plain
-        text."""
+        without ``\\u`` escapes; text that is not a JSON object or list, or is nested deeper than
+        ``TOOL_ARGS_MAX_DEPTH``, is aliased as plain text."""
         try:
             data = json.loads(text)
         except (ValueError, RecursionError):
             return self.to_alias(text, used)
-        if isinstance(data, (dict, list)):
+        if isinstance(data, (dict, list)) and _nesting(data) <= TOOL_ARGS_MAX_DEPTH:
             return json.dumps(self._aliased(data, used), ensure_ascii=False)
-        return self.to_alias(text, used)
+        return self.to_alias(text, used)  # a scalar, or too deep to walk: aliased as text
 
     # ------------------------------------------------------------------ requests
 

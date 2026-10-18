@@ -38,7 +38,14 @@ from ..config.schema import LLMRoute, SafetyConfig
 from ..health.network import NetworkMonitor
 from ..secret_store import SECRET_REF, SecretUnavailable, no_secrets
 from .prompt import CHARS_PER_TOKEN, trim_history
-from .pseudonyms import Outgoing, Pseudonyms, replace_names, route_is_local
+from .pseudonyms import (
+    TOOL_ARGS_MAX_DEPTH,
+    Outgoing,
+    Pseudonyms,
+    _nesting,
+    replace_names,
+    route_is_local,
+)
 
 log = logging.getLogger(__name__)
 # The openai and httpx libraries log request details at DEBUG; keep that off whatever the root
@@ -48,9 +55,6 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 # Longest tool-call argument text parsed. A model cannot send more than max_tokens tokens, so
 # this only bounds what a broken or hostile route can make json.loads chew on.
 TOOL_ARGS_MAX_CHARS = 50_000
-# Deepest JSON nesting kept in tool-call arguments. The alias restoration recurses, and a
-# 5000-deep object parses on every Python version, so depth is bounded here.
-TOOL_ARGS_MAX_DEPTH = 64
 SECRET = SECRET_REF
 
 
@@ -470,21 +474,6 @@ class Router:
     @staticmethod
     def _tokens(usage: int | None, prompt_chars: int, out_chars: int) -> int:
         return usage if usage is not None else (prompt_chars + out_chars) // CHARS_PER_TOKEN
-
-
-def _nesting(value: Any) -> int:
-    """How deeply lists and dicts are nested in ``value`` (a scalar is 0), without recursion,
-    so a hostile reply cannot overflow the stack however deep it is."""
-    deepest, stack = 0, [(value, 0)]
-    while stack:
-        node, depth = stack.pop()
-        if isinstance(node, (list, dict)):
-            depth += 1
-            deepest = max(deepest, depth)
-            if depth > TOOL_ARGS_MAX_DEPTH:
-                return depth
-            stack.extend((v, depth) for v in (node.values() if isinstance(node, dict) else node))
-    return deepest
 
 
 def _outgoing(

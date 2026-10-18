@@ -1144,3 +1144,14 @@ def test_a_backslash_before_an_escape_does_not_cancel_it():
 def test_the_skill_registry_declares_its_parameter_and_result_keys():
     keys = Env().registry.structural_keys()
     assert {"target", "gesture", "error", "detail", "ok", "applied", "status"} <= keys
+
+
+@pytest.mark.parametrize("depth", [64, 65, 5000])
+def test_deeply_nested_tool_content_is_aliased_without_recursion(depth):
+    p = pseudo("Marta")
+    content = "[" * depth + '"Marta"' + "]" * depth
+    out = p.prepare([tool_msg(content)], None)
+    sent = out.messages[0]["content"]
+    assert "Marta" not in sent and alias_of(p, "Marta") in sent
+    assert not p.leaks(out.messages)
+    assert p.leaks([tool_msg(content)])
