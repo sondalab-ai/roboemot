@@ -248,7 +248,15 @@ def test_the_app_offers_the_default_skills_and_wires_barge_in(data, fakes, said,
     app.requests = []
     stop, thread, errors = run_app(app, ScriptedMini().mini)
     try:
-        assert wait_for(lambda: app.conversation is not None and app.bargein is not None)
+        # `app.bargein` is published before the app binds its actions (`BargeIn.bind`, after the
+        # conversation worker starts); a chunk fed earlier is silently ignored.
+        assert wait_for(
+            lambda: (
+                app.conversation is not None
+                and app.bargein is not None
+                and app.bargein._stop is not None
+            )
+        )
         skills = app.conversation.skills
         assert skills.names() == [
             "play", "look_at", "express_emotion", "remember_preference", "stop_talking",

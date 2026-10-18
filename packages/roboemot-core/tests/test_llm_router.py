@@ -136,6 +136,23 @@ async def test_first_token_timeout_excludes_client_setup():
     assert isinstance(evs[-1], Done) and r.failures == []
 
 
+async def test_first_token_timeout_excludes_openai_lazy_imports(monkeypatch):
+    """Regression: the first ``client.chat`` access imports the resources lazily (tens of ms warm,
+    far more on a loaded machine); it is not a slow first token."""
+    import openai
+
+    real = openai.AsyncOpenAI.chat
+
+    def slow_chat(self):
+        time.sleep(0.4)  # longer than the route's 0.3 s first-token timeout
+        return real.__get__(self)
+
+    monkeypatch.setattr(openai.AsyncOpenAI, "chat", property(slow_chat))
+    r = router(Server(), [route("lan", "lan.local")])
+    evs = await collect(r)
+    assert isinstance(evs[-1], Done) and r.failures == []
+
+
 async def test_fallback_on_timeout_and_error():
     srv = Server()
     r = router(
