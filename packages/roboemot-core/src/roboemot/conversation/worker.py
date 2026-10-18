@@ -55,6 +55,7 @@ from ..skills import Skill, SkillContext, SkillRegistry, ToolOutcome, execute
 from ..voice.keywords import normalise
 from ..voice.listener import Utterance
 from ..voice.prosody import resolve_tag
+from ..voice.robot_name import RobotName
 from ..voice.tts import Sentence, SentenceSplitter
 from .confirm import Pending, PreferenceStore, reply_kind, sanitise_preference
 from .lines import line_text, minor_line, pick
@@ -157,7 +158,9 @@ class ConversationWorker:
         preferences: PreferenceStore | None = None,
         bus: Bus | None = None,
         clock: Callable[[], float] = time.monotonic,
+        names: RobotName | None = None,
     ) -> None:
+        self.names = names if names is not None else RobotName()
         self.stack, self.hub, self.speech = stack, hub, speech
         self.affect, self.responder = affect, responder
         self._register, self._circadian, self._minor_present = register, circadian, minor_present
@@ -517,7 +520,13 @@ class ConversationWorker:
         cfg, conv, minor = turn.cfg, turn.cfg.conversation, turn.minor
         state = self.affect.state(self.clock())
         messages = build_messages(
-            system=system_prompt(cfg, turn.register, language=turn.language, minor_present=minor),
+            system=system_prompt(
+                cfg,
+                turn.register,
+                language=turn.language,
+                minor_present=minor,
+                robot_name=self.names.display(cfg.voice.wake_word),
+            ),
             profile_summary=self._summary(self._profile, conv.profile_summary_max_chars),
             scene_summary=self._summary(self._scene, conv.scene_summary_max_chars),
             history=self._history(),

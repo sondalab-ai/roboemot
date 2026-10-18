@@ -90,6 +90,18 @@ class ReachyMiniDriver(PoseGroupDriver):
         backend = client.get_status(wait=False).backend_status
         return None if backend is None else backend.motor_control_mode == "enabled"
 
+    def robot_name(self) -> str | None:
+        """The daemon's ``robot_name`` (the owner's name for the robot) from its last status;
+        None until one has arrived, or when it is not a non-empty string."""
+        try:
+            client = self.mini.client
+            if getattr(client, "_last_status", None) is None:
+                return None
+            name = client.get_status(wait=False).robot_name
+        except Exception:
+            return None
+        return name.strip() or None if isinstance(name, str) else None
+
     def reconnect(self, timeout_s: float) -> None:
         """New SDK websocket to the same daemon; body yaw is the arbiter's again afterwards."""
         from reachy_mini.io.ws_client import WSClient

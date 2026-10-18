@@ -22,6 +22,7 @@ import numpy as np
 
 INT16_MAX = 32767
 VOSK_QUIET = -1
+VOSK_NO_WORD = -1  # vosk_model_find_word: the word is not in the vocabulary
 
 
 @dataclass(frozen=True)
@@ -110,6 +111,14 @@ class VoskASR:
         for language in languages:
             if language not in self._models:
                 self._models[language] = self._vosk.Model(str(self._paths[language]))
+
+    def missing_words(self, language: str, words: list[str]) -> list[str] | None:
+        """The ``words`` the ``language`` model's vocabulary lacks (it can never output them);
+        None while that model is not loaded."""
+        model = self._models.get(language)
+        if model is None:
+            return None
+        return [w for w in words if model.vosk_model_find_word(w) == VOSK_NO_WORD]
 
     def start(self, language: str) -> None:
         self.load([language])

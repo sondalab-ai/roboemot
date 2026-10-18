@@ -258,3 +258,35 @@ def test_diagnostics_sources_read_the_daemon_api():
     # registered under the manifest id (entry point installed with the package)
     names = [src.name for src in platform_sources("reachy-mini-wireless", Target())]
     assert names == ["robot.daemon", "robot.motors", "robot.state", "robot.app"]
+
+
+class StatusClient(FakeClient):
+    """A client whose daemon status carries the owner's name for the robot."""
+
+    def __init__(self, robot_name, status_arrived=True, error=None) -> None:
+        super().__init__()
+        self._last_status = object() if status_arrived else None
+        self._name, self._error = robot_name, error
+
+    def get_status(self, wait: bool = True):
+        if self._error:
+            raise self._error
+        return type("Status", (), {"robot_name": self._name})()
+
+
+@pytest.mark.parametrize(
+    "client,expected",
+    [
+        (StatusClient("Neve"), "Neve"),
+        (StatusClient("  reachy_mini "), "reachy_mini"),
+        (StatusClient("", True), None),
+        (StatusClient(None), None),
+        (StatusClient(42), None),
+        (StatusClient("Neve", status_arrived=False), None),
+        (StatusClient("Neve", error=ConnectionError("lost")), None),
+    ],
+)
+def test_robot_name_is_the_daemon_status_name_and_never_raises(client, expected):
+    mini = FakeMini()
+    mini.client = client
+    assert ReachyMiniDriver(mini).robot_name() == expected

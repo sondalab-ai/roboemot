@@ -26,6 +26,11 @@ class PoseGroupDriver(ABC):
         """Whether the motors hold position commands; None when the driver cannot tell."""
         return None
 
+    def robot_name(self) -> str | None:
+        """The name the robot's owner gave it, when the platform keeps one (SPEC 8, Wake word);
+        None when it has none or cannot tell. Never raises."""
+        return None
+
     def reconnect(self, timeout_s: float) -> None:  # noqa: B027 - optional hook, not abstract
         """Re-open the link after a loss (SPEC 12A); raise if the robot is still unreachable.
         Drivers whose transport recovers by itself keep this no-op."""

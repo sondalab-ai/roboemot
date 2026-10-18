@@ -136,7 +136,9 @@ def test_asr_wake_phrases_are_in_the_vocabulary(vosk_asr, models):
         for phrase in ks.wake_phrases:
             for word in phrase.split():
                 assert model.vosk_model_find_word(word) >= 0, f"{language}: {word!r} not in vocab"
-        assert model.vosk_model_find_word(CFG.voice.wake_word) == -1
+        assert model.vosk_model_find_word("reachy") == -1
+        assert vosk_asr.missing_words(language, ["reachy", "mini"]) == ["reachy"]
+        assert vosk_asr.missing_words(language, ["neve"]) == []
 
 
 def test_asr_wake_word_alias_addresses_a_stranger(models, vosk_asr):

@@ -889,3 +889,16 @@ def test_history_written_without_minor_rules_is_never_sent_for_a_child_later(rig
     rig.turn("tre")  # and the adult turn is not kept for the child
     sent = json.dumps(rig.server.requests[2][1]["messages"])
     assert "ADULT-ONLY-MARK" not in sent and len(rig.server.requests[2][1]["messages"]) == 2
+
+
+def test_the_prompt_names_the_robot_by_config_or_platform_and_omits_it_without(rigs):
+    rig = rigs()
+    rig.turn("hello", language="en")
+    assert "Your name is" not in rig.system()
+    rig.worker.names.set_platform("reachy_mini")
+    rig.turn("hello again", language="en")
+    assert "Your name is reachy mini." in rig.system()
+    rig = rigs(voice={"wake_word": "Neve"})
+    rig.worker.names.set_platform("reachy_mini")
+    rig.turn("hello", language="en")
+    assert "Your name is Neve." in rig.system()

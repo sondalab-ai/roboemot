@@ -1846,12 +1846,28 @@ class KeywordSet(Strict):
     )
     name_aliases: list[str] = param(
         [],
-        "Spellings the recognizer produces for `voice.wake_word` in this language (Reachy came "
+        "Spellings the recognizer produces for the robot's name in this language (Reachy came "
         "out as `reati` in Italian and `riyadh she` in English). They emit speech.name_called "
         "and count as the wake word only in a short final text (voice.fastpath."
-        "alias_wake_max_words), because an alias can be a real word. Changing `voice.wake_word` "
+        "alias_wake_max_words), because an alias can be a real word. Changing the robot's name "
         "needs the aliases re-tuned",
     )
+    name_wake_templates: list[str] = param(
+        [],
+        "Wake phrases built around the robot's name, each with a `{name}` placeholder "
+        "(`ciao {name}`). They apply when the robot has a name (`voice.wake_word`, or the one "
+        "the platform reports) whose words are all in this language's recognizer vocabulary; "
+        "otherwise only `wake_phrases` wake the robot in this language. The bare name is a name "
+        "alias too: it wakes only in a short final text",
+    )
+
+    @field_validator("name_wake_templates")
+    @classmethod
+    def _templates_have_the_name(cls, v: list[str]) -> list[str]:
+        for t in v:
+            if t.count("{name}") != 1:
+                raise ValueError(f"name_wake_templates: {t!r} needs exactly one {{name}}")
+        return v
 
 
 class FastpathConfig(Strict):
@@ -2157,11 +2173,15 @@ class VoiceConfig(Strict):
     pitch_shift_backend: Literal["none", "dsp"] = param(
         "dsp", "How pitch is applied on backends without native pitch (Piper)"
     )
-    wake_word: str = param(
-        "reachy",
-        "The robot's name, for display and the prompt. It is not relied upon for spotting (out "
-        "of vocabulary in the small Vosk models): wake detection uses voice.keywords.<language>."
-        "wake_phrases and name_aliases",
+    wake_word: str | None = param(
+        None,
+        "The robot's name, for the prompt and wake detection. Unset (null): the name the robot "
+        "platform reports (Reachy Mini: the name its owner gave it in the daemon setup); a "
+        "platform without one has no name and wakes on `voice.keywords.<language>.wake_phrases` "
+        "only. A value set here always wins over the platform's. Wake detection with a name "
+        "needs the name's words in the recognizer vocabulary of the language (checked when the "
+        "recognizer loads, logged when not); `reachy` is out of vocabulary in both small Vosk "
+        "models, so names like it rely on `wake_phrases` and `name_aliases`",
     )
     wake_word_policy: Literal["always", "never", "unless_enrolled_in_view"] = param(
         "unless_enrolled_in_view",
@@ -2179,6 +2199,7 @@ class VoiceConfig(Strict):
                 "greeting": ["ciao", "buongiorno", "buonasera", "salve"],
                 "wake_phrases": ["ehi robot", "ciao robot"],
                 "name_aliases": ["reati"],
+                "name_wake_templates": ["ciao {name}", "ehi {name}"],
             },
             "en": {
                 "stop": ["stop", "halt", "enough"],
@@ -2186,6 +2207,7 @@ class VoiceConfig(Strict):
                 "greeting": ["hello", "hi", "hey", "good morning", "good evening"],
                 "wake_phrases": ["hey robot", "hello robot"],
                 "name_aliases": ["riyadh she"],
+                "name_wake_templates": ["hey {name}", "hello {name}"],
             },
         },
         "Fast-path keyword lists per language, matched on whole words in the ASR partials "

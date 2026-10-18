@@ -30,6 +30,7 @@ import numpy as np
 from ..attention import SpeakerHint
 from ..config.schema import VoiceConfig
 from .keywords import KeywordSpotter
+from .robot_name import RobotName
 from .speech_features import Prosody, analyse
 
 MS_PER_S = 1000.0
@@ -98,7 +99,9 @@ class FastPath:
         bearing: Callable[[float], float | None] = lambda now: None,
         target_entry: Callable[[], str | None] = lambda: None,
         clock: Callable[[], float] = time.monotonic,
+        names: RobotName | None = None,
     ) -> None:
+        self.names = names if names is not None else RobotName()
         self._emit = emit
         self._selector = selector
         self._bearing = bearing
@@ -111,7 +114,7 @@ class FastPath:
     def apply_config(self, cfg: VoiceConfig) -> None:
         """Hot reload of keyword lists, wake word and prosody thresholds."""
         self.cfg = cfg
-        self._spotter = KeywordSpotter(cfg.keywords, cfg.wake_word)
+        self._spotter = KeywordSpotter(cfg.keywords, cfg.wake_word, self.names)
 
     def reset(self) -> None:
         """Forget the utterance in progress."""
