@@ -21,17 +21,20 @@ SEPARATOR = ", "
 VOWELS = "aeiou"
 
 
-def one_line(text: str) -> str:
-    """``text`` on one line, so a stored value cannot add lines (rules) to the system prompt."""
-    return " ".join(text.split())
+def one_line(text: str, max_chars: int) -> str:
+    """``text`` on one line and at most ``max_chars`` long: a stored name or preference cannot
+    add lines (rules) to the system prompt or flood it."""
+    return " ".join(text.split())[:max_chars]
 
 
-def profile_summary(name: str | None, preferences: Mapping[str, Any], max_chars: int) -> str | None:
+def profile_summary(
+    name: str | None, preferences: Mapping[str, Any], max_chars: int, value_max_chars: int
+) -> str | None:
     """The speaker's display name and confirmed preferences, cut to ``max_chars``; None when
     there is nothing to say. Only plain values are listed (strings, numbers, booleans)."""
-    parts = [one_line(name)] if name else []
+    parts = [one_line(name, value_max_chars)] if name else []
     prefs = [
-        f"{one_line(str(k))}={one_line(str(v))}"
+        f"{one_line(str(k), value_max_chars)}={one_line(str(v), value_max_chars)}"
         for k, v in sorted(preferences.items())
         if isinstance(v, SCALARS)
     ]
@@ -45,15 +48,15 @@ def _article(noun: str) -> str:
     return "an" if noun[:1].lower() in VOWELS else "a"
 
 
-def label(entry: Entry, name_of: Callable[[Entry], str | None]) -> str:
+def label(entry: Entry, name_of: Callable[[Entry], str | None], value_max_chars: int) -> str:
     """How the LLM hears about ``entry``: its registry name when known, else its kind."""
     known = entry.identity not in ("", UNKNOWN_IDENTITY)
     name = name_of(entry) if known else None
     if entry.kind == "person":
-        return one_line(name) if name else "a person"
-    noun = one_line(entry.category) or entry.kind
+        return one_line(name, value_max_chars) if name else "a person"
+    noun = one_line(entry.category, value_max_chars) or entry.kind
     if name:
-        return f"{one_line(name)} ({_article(noun)} {noun})"
+        return f"{one_line(name, value_max_chars)} ({_article(noun)} {noun})"
     return f"{_article(noun)} {noun}"
 
 
@@ -65,6 +68,7 @@ def scene_summary(
     target_id: str | None,
     name_of: Callable[[Entry], str | None],
     max_chars: int,
+    value_max_chars: int,
 ) -> str | None:
     """Entities in view by attention priority until ``max_chars``: the attention target first,
     then people, animals and objects, the more confident first. An entity that would cross the
@@ -76,7 +80,7 @@ def scene_summary(
 
     out = ""
     for entry in sorted(fresh, key=rank):
-        piece = label(entry, name_of)
+        piece = label(entry, name_of, value_max_chars)
         joined = piece if not out else out + SEPARATOR + piece
         if len(joined) > max_chars:
             break

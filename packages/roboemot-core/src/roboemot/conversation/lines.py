@@ -20,6 +20,20 @@ def pick(table: Mapping[str, T], language: str, default_language: str) -> T | No
     return table.get(language) or table.get(default_language)
 
 
+def line_text(
+    lines: Mapping[str, MinorLines], language: str, default_language: str, field: str
+) -> str:
+    """One field of the language's lines; an empty or missing one falls back, field by field,
+    to the default language's, then to any language's, so a child never gets silence."""
+    order = [language, default_language, *lines]
+    for name in order:
+        entry = lines.get(name)
+        text = getattr(entry, field, "") if entry is not None else ""
+        if text.strip():
+            return text
+    return ""
+
+
 def minor_line(
     lines: Mapping[str, MinorLines],
     language: str,
@@ -27,13 +41,13 @@ def minor_line(
     keywords: Collection[str],
 ) -> str:
     """The child-safe line for a turn no cleared route can answer: a greeting back for a
-    greeting, the robot's name when it was called, otherwise "ask a grown-up". Empty when the
-    configuration has no lines."""
-    chosen = pick(lines, language, default_language)
-    if chosen is None:
-        return ""
+    greeting, the robot's name when it was called, otherwise "ask a grown-up"."""
     if "greeting" in keywords:
-        return chosen.greeting or chosen.ask_grown_up
-    if "name" in keywords:
-        return chosen.robot_name or chosen.ask_grown_up
-    return chosen.ask_grown_up
+        field = "greeting"
+    elif "name" in keywords:
+        field = "robot_name"
+    else:
+        field = "ask_grown_up"
+    return line_text(lines, language, default_language, field) or line_text(
+        lines, language, default_language, "ask_grown_up"
+    )

@@ -173,14 +173,14 @@ class TraitsWorker:
     def __init__(
         self,
         stack: ConfigStack,
-        router: Router,
+        router: Router | None,
         cache: TraitCache,
-        make_router: Callable[[RoboEmotConfig], Router],
+        make_router: Callable[[RoboEmotConfig], Router] | None,
         clock: Callable[[], float] = time.monotonic,
         hub: RouterHub | None = None,
     ) -> None:
         self.stack, self.cache = stack, cache
-        self.hub = hub if hub is not None else RouterHub(router, make_router)
+        self.hub = hub if hub is not None else RouterHub(router, make_router)  # type: ignore[arg-type]
         self.clock = clock
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None

@@ -1,16 +1,29 @@
 """Output filter before TTS while a minor is present (SPEC 12, Behaviour and content).
 
-A per-language blocklist (``safety.minor_output_blocklist``) matched as whole words after the
-same normalisation the keyword spotter uses (case, accents and punctuation ignored). Every
-language's list applies to every sentence: a model that answers in another language than asked
-does not slip past. Multi-word entries match as a phrase.
+A per-language blocklist (``safety.minor_output_blocklist``) matched on the same normalisation
+the keyword spotter uses (case, accents and punctuation ignored) after removing invisible
+format characters (zero-width spaces and joiners). An entry matches whole words; a trailing
+``*`` makes it a prefix (``kill*`` also blocks killing, killed), and multi-word entries match as
+a phrase. Every language's list applies to every sentence, so a model that answers in another
+language than asked does not slip past. A phrase the splitter cut between two sentences is
+caught by checking the tail of the previous sentences with the new one.
 """
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from collections.abc import Mapping, Sequence
 
 from ..voice.keywords import normalise
+
+PREFIX = "*"
+
+
+def clean(text: str) -> str:
+    """``text`` without Unicode format characters (category Cf: zero-width space, joiners,
+    bidi marks, soft hyphen), which would otherwise split a word for the matcher only."""
+    return "".join(c for c in text if unicodedata.category(c) != "Cf")
 
 
 class OutputFilter:
@@ -18,15 +31,24 @@ class OutputFilter:
 
     def __init__(self, blocklist: Mapping[str, Sequence[str]]) -> None:
         self.source = {k: list(v) for k, v in blocklist.items()}
-        entries = {normalise(w) for words in blocklist.values() for w in words}
-        self._entries = tuple(f" {w} " for w in sorted(entries) if w)
-        self._window = max((w.count(" ") for w in self._entries), default=0) - 1
+        patterns, words = [], 0
+        for entry in sorted({e for entries in blocklist.values() for e in entries}):
+            prefix = clean(entry).strip().endswith(PREFIX)
+            norm = normalise(clean(entry).rstrip(PREFIX + " "))
+            if not norm:
+                continue
+            words = max(words, norm.count(" ") + 1)
+            tail = "" if prefix else r"(?=\s)"
+            patterns.append(r"(?<=\s)" + re.escape(norm) + tail)
+        self._regex = re.compile("|".join(patterns)) if patterns else None
+        self._window = words - 1
 
     def blocked(self, text: str, previous: str = "") -> bool:
         """Whether ``text`` is blocked. ``previous`` is what the same answer already said: the
-        splitter can cut a phrase between two sentences, so the tail of ``previous`` (as many
-        words as the longest phrase needs, less one) is checked together with ``text``."""
-        words = normalise(previous).split()
+        tail of it (the longest phrase's words, less one) is checked together with ``text``."""
+        if self._regex is None:
+            return False
+        words = normalise(clean(previous)).split()
         tail = words[-self._window :] if self._window > 0 else []
-        padded = f" {' '.join([*tail, normalise(text)])} "
-        return any(w in padded for w in self._entries)
+        padded = f" {' '.join([*tail, normalise(clean(text))])} "
+        return self._regex.search(padded) is not None
