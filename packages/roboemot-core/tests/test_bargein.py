@@ -307,3 +307,48 @@ def test_a_config_reload_between_chunks_keeps_working():
     w.bargein.apply_config(cfg)
     w.feed(2.0, user_voice(1.0, 0.21), user_at=0.3)
     assert len(w.stops) == 1
+
+
+def test_the_conversation_is_told_before_the_speech_is_stopped():
+    w = World()
+    order = []
+    w.bargein.bind(
+        lambda: (order.append("stop"), w.stop()),
+        lambda: (order.append("interrupt"), w.interrupt()),
+        w.rig.listener.resume,
+        lambda: order.append("prepare"),
+    )
+    w.speak(4.0)
+    w.feed(0.5)
+    w.feed(1.5, user_voice(1.0, 0.3), user_at=0.2)
+    assert order == ["prepare", "stop", "interrupt"]
+
+
+class ReverbWorld(World):
+    """The room smears the echo: two later reflections and a low-pass, as a small room does."""
+
+    def _echo(self, t0, n):
+        dry = super()._echo(t0, n)
+        wet = dry + 0.5 * super()._echo(t0 - 0.03, n) + 0.25 * super()._echo(t0 - 0.07, n)
+        return np.convolve(wet, np.ones(8) / 8, "same").astype(np.float32)
+
+
+def test_the_documented_limit_a_user_quieter_than_the_echo_is_not_heard():
+    """Pins the echo guard's known limit (SPEC 8 stage 8): with a smeared echo, a user whose
+    power is far below the echo's is taken for echo; a loud one still gets through."""
+    quiet = ReverbWorld()
+    quiet.speak(4.0)
+    quiet.feed(3.0, user_voice(2.5, 0.04), user_at=0.3)  # power 1/9 of the echo's
+    assert quiet.stops == []
+    loud = ReverbWorld()
+    loud.speak(4.0)
+    loud.feed(3.0, user_voice(2.5, 0.4), user_at=0.3)  # about ten times the echo's power
+    assert len(loud.stops) == 1
+
+
+def test_the_snapshot_counts_the_audio_fed_to_the_keyword_recognizer():
+    w = World(["ciao"], hear_echo=False)
+    w.speak(4.0)
+    w.feed(2.0, user_voice(1.0, 0.065), user_at=0.3)
+    snap = w.bargein.snapshot()
+    assert 0.5 < snap["keyword_seconds"] < 3.0

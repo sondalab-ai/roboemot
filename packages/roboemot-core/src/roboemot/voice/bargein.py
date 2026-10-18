@@ -14,8 +14,12 @@ correlates less the louder it is, so a user quieter than the echo is not heard (
 After ``min_speech_ms`` of such frames the robot is cut off: ``stop`` (the speech output: sink
 flushed, the speaking gate reset), ``interrupt`` (the conversation cancels the LLM stream and
 trims its history to what was heard) and ``resume`` (the listener restarts on the audio from
-shortly before the onset, so the first words are kept). The onset-to-stop latency is measured
-(SPEC 13: 200 ms) and shows in :meth:`BargeIn.snapshot`.
+shortly before the onset, so the first words are kept). Before the stop, ``prepare`` tells the
+conversation to say nothing more. The onset-to-stop latency is measured (SPEC 13: 200 ms) from
+the first speech frame to the moment ``stop()`` returned, on the audio clock; it does not include
+the microphone's capture latency or the SDK's ``clear_player`` latency, which only the robot can
+tell. It shows in :meth:`BargeIn.snapshot` with ``keyword_seconds``, the audio fed to the keyword
+recognizer (a CPU proxy).
 
 The stop keyword path (SPEC 7A: always active): frames the VAD scores at the looser
 ``keyword_threshold`` and that pass the looser ``keyword_echo_corr_max`` are fed to the listener's
@@ -166,8 +170,10 @@ class BargeIn:
         self._stop: Callable[[], None] | None = None
         self._interrupt: Callable[[], Any] = lambda: None
         self._resume: Callable[[np.ndarray, float], None] | None = None
+        self._prepare: Callable[[], Any] = lambda: None
         self.stats = LatencyStats()
         self._counts = {"triggers": 0, "keyword_triggers": 0, "echo_frames": 0, "errors": 0}
+        self._keyword_s = 0.0  # audio fed to the keyword recognizer, a CPU proxy for the cm4
         self._last_corr: float | None = None
         self._lang = ""
         self._deaf_until = -math.inf
@@ -196,10 +202,14 @@ class BargeIn:
         stop: Callable[[], None],
         interrupt: Callable[[], Any],
         resume: Callable[[np.ndarray, float], None] | None = None,
+        prepare: Callable[[], Any] | None = None,
     ) -> None:
         """Connect the actions: ``stop`` the speech output, ``interrupt`` the conversation,
-        ``resume`` the listener on the barge-in audio."""
+        ``resume`` the listener on the barge-in audio. ``prepare`` runs before ``stop``: it
+        tells the conversation to say nothing more, so a sentence queued between the stop and
+        ``interrupt`` cannot play."""
         self._stop, self._interrupt, self._resume = stop, interrupt, resume
+        self._prepare = prepare or (lambda: None)
 
     def reset(self) -> None:
         """Forget the stretch in progress (the robot stopped speaking, or the audio has a gap)."""
@@ -217,6 +227,7 @@ class BargeIn:
             "enabled": self._b.enabled,
             "keyword_enabled": self._b.keyword_enabled,
             **self._counts,
+            "keyword_seconds": self._keyword_s,
             "last_echo_corr": self._last_corr,
             "latency": self.stats.snapshot(),
         }
@@ -307,6 +318,7 @@ class BargeIn:
                 audio = frame
             if candidate:
                 session.last_candidate = stamp
+            self._keyword_s += audio.size / self._rate
             event = self._asr.accept(audio)
         except Exception as exc:
             self._counts["errors"] += 1
@@ -347,12 +359,18 @@ class BargeIn:
         samples = np.concatenate(audio)
         self._end_session()
         t0 = time.perf_counter()
-        assert self._stop is not None
-        self._stop()
+        stop = self._stop
+        if stop is None:  # unbound: on_chunk never gets here, but a caller may
+            return
+        try:
+            self._prepare()
+        except Exception as exc:
+            log.warning("barge-in: prepare: %s", type(exc).__name__)
+        stop()
         stopped = self._clock()
         self._deaf_until = stopped + self._tail_s  # the speaking window the stop leaves behind
         self.stats.record("stop_call", time.perf_counter() - t0)
-        self.stats.record("onset_to_stop", stopped - onset)
+        self.stats.record("onset_to_stop", stopped - onset)  # until ``stop()`` returned
         self.stats.record("detect_to_stop", stopped - detected)
         self._counts["keyword_triggers" if kind == "keyword" else "triggers"] += 1
         if kind == "keyword" and self._emit is not None:

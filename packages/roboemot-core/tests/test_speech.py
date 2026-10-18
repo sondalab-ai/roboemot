@@ -431,3 +431,34 @@ def test_without_a_timeline_every_pushed_sentence_counts_as_played(make):
     assert wait_for(lambda: out.sentences_spoken == 1)
     out.stop()
     assert out.played(a) is True
+
+
+def test_a_sentence_whose_first_push_lost_the_race_with_a_stop_never_counts_as_played(make):
+    holder = {}
+
+    class Racing(FakeBackend):
+        async def synthesize(self, text, delivery, *, language, voice, minor_present=False):
+            holder["out"].stop()  # a barge-in lands after the sentence started, before its push
+            async for chunk in super().synthesize(
+                text, delivery, language=language, voice=voice, minor_present=minor_present
+            ):
+                yield chunk
+
+    sink = TimelineSink()
+    out = holder["out"] = make(Racing(), sink=sink)
+    job = say(out, "Uno.")
+    assert wait_for(lambda: out.sentences_dropped >= 0 and not out._jobs)
+    time.sleep(0.2)
+    assert sink.pushed == [] and out.played(job) is False and out.ended_at(job) is None
+
+
+def test_ended_at_follows_the_sinks_timeline_and_a_stop_cuts_it(make):
+    sink = TimelineSink()
+    out = make(FakeBackend(pieces=10), sink=sink)  # 1 s of audio
+    job = say(out, "Uno.")
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    assert out.ended_at(job) == pytest.approx(sink.until, abs=0.01)
+    assert out.ended_at(job) > time.monotonic() + 0.5  # still playing
+    out.stop()
+    assert out.ended_at(job) <= time.monotonic()
+    assert out.ended_at(9999) is None

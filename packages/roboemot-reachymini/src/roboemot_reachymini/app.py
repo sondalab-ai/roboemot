@@ -755,7 +755,9 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                     cleanup.callback(conv.close)
                     conv.start()
                     if bargein is not None:  # stop the speech first, then the stream, then listen
-                        bargein.bind(output.stop, conv.interrupt, listener.resume)
+                        bargein.bind(
+                            output.stop, conv.interrupt, listener.resume, conv.mark_interrupting
+                        )
             if listener is not None and voice_close is not None:
                 cleanup.callback(voice_close)
                 cleanup.callback(listener.stop)  # before the hub stops feeding its queue
