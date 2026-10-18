@@ -3,7 +3,7 @@
 Text and phrases are normalised the same way (lower case, accents removed, anything that is not
 a Unicode letter or digit becomes a space) and a phrase matches only as whole words, so ``stop``
 does not match ``stopped`` and ``hi`` is not found inside ``history``. There is no stemming: list
-the inflections you want. Categories are ``stop``, ``no``, ``greeting``, ``name``
+the inflections you want. Categories are ``stop``, ``yes``, ``no``, ``greeting``, ``name``
 (the robot's name, see ``robot_name``, or one of the language's ``name_aliases``) and ``wake``
 (one of its ``wake_phrases``, or a ``name_wake_templates`` phrase rendered with the name). It
 runs on every partial, so it is a few substring tests.
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 NON_WORD = re.compile(r"[\W_]+")
 REACHY = "reachy"  # the name the default name_aliases are spellings of
-CATEGORIES = ("stop", "no", "greeting", "name", "wake")
+CATEGORIES = ("stop", "yes", "no", "greeting", "name", "wake")
 
 
 def normalise(text: str) -> str:
@@ -63,6 +63,7 @@ class KeywordSpotter:
                 wake += [t.replace("{name}", resolved.matching) for t in ks.name_wake_templates]
             lists = {
                 "stop": ks.stop,
+                "yes": ks.yes,
                 "no": ks.no,
                 "greeting": ks.greeting,
                 "name": ks.name_aliases if aliases else [],

@@ -33,6 +33,9 @@ def test_normalise(text, expected):
         ("ciao come stai", "it", {"greeting"}),
         ("Buongiorno!", "it", {"greeting"}),
         ("no grazie", "it", {"no"}),
+        ("yes please", "en", {"yes"}),
+        ("certo, volentieri", "it", {"yes"}),
+        ("si chiama Luca", "it", set()),  # the pronoun is not a yes (accents are folded)
         ("stop it now", "en", {"stop"}),
         ("good morning robot", "en", {"greeting"}),
         ("hello reachy", "en", {"greeting", "name", "wake"}),  # "hello {name}"

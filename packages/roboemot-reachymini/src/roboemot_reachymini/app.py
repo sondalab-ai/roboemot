@@ -62,6 +62,7 @@ from roboemot.voice.factory import build_speech
 from roboemot.voice.listener import Utterance, VoiceListener
 from roboemot.voice.robot_name import RobotName
 from roboemot.voice.speech import SpeechOutput
+from roboemot.voice.yes_no import YesNoGestures
 from roboemot.webui import Server, make_server
 from roboemot.webui.catalogue import open_catalogue
 from roboemot.webui.routes import RouteChecker
@@ -580,6 +581,15 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             stack, None, TraitCache(paths.traits_cache_path(cfg.data_dir)), None, hub=hub
         )
 
+        # Spoken yes / no: the fast path's events go to the affect runner and, as a nod or a
+        # shake, to the expression renderer, unless the robot just asked a question (SPEC 8).
+        voice_events = YesNoGestures(
+            runner.on_event,
+            expression.request,
+            lambda: out.question_end() if (out := self.speech_output) is not None else None,
+            lambda: stack.effective().voice.fastpath.answer_window_s,
+        )
+
         # The robot's name: voice.wake_word, else the owner's name in the daemon setup (SPEC 8).
         names = self.names = RobotName(source=loop.driver.robot_name)
         voice_pipeline = (
@@ -588,7 +598,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 audio,
                 speech,
                 bus,
-                runner.on_event,
+                voice_events,
                 selector,
                 world,
                 perception.registry,

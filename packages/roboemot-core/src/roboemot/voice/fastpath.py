@@ -3,7 +3,7 @@
 Everything here is cheap and runs on the listener thread, ahead of the conversation:
 
 - when speech starts: point the head at the speaker (``SpeakerHint``) and emit ``speech.heard``;
-- on every ASR partial: spot keywords (``stop``, ``no``, greetings, the robot's name) and emit
+- on every ASR partial: spot keywords (``stop``, ``yes``, ``no``, greetings, the name) and emit
   one appraisal event per category per utterance (``speech.keyword.<category>``,
   ``speech.name_called``), so the reaction starts while the person is still talking, well before
   ``voice.vad.end_silence_ms`` runs out;
@@ -37,6 +37,7 @@ MS_PER_S = 1000.0
 Emit = Callable[[str, float, dict[str, Any]], None]
 EVENT_FOR = {
     "stop": "speech.keyword.stop",
+    "yes": "speech.keyword.yes",
     "no": "speech.keyword.no",
     "greeting": "speech.keyword.greeting",
     "name": "speech.name_called",

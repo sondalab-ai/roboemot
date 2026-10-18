@@ -20,8 +20,8 @@ appraisal rules decide what it means. Events (payload fields usable in a rule's 
   as interaction.
 - ``speech.*`` (the voice fast path, ``roboemot.voice.fastpath``, emitted straight to the affect
   runner rather than through this adapter): ``speech.heard``, ``speech.keyword.stop``,
-  ``speech.keyword.no``, ``speech.keyword.greeting``, ``speech.name_called``, ``speech.loud``,
-  ``speech.fast``. Payload: ``language``.
+  ``speech.keyword.yes`` (no default rule), ``speech.keyword.no``, ``speech.keyword.greeting``,
+  ``speech.name_called``, ``speech.loud``, ``speech.fast``. Payload: ``language``.
 
 Person ids travel in payloads for rules but are never logged at info level (SPEC 12).
 """

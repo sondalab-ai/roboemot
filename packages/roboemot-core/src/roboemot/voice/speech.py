@@ -42,6 +42,16 @@ READY_TIMEOUT_S = 5.0
 JOIN_TIMEOUT_S = 2.0
 
 
+QUESTION_MARKS = "?？"
+CLOSERS = "\"')]}»”’›"
+
+
+def ends_with_question(text: str) -> bool:
+    """Whether a sentence ends in a question mark (closing quotes and brackets and spaces after
+    it are ignored). This is how the robot knows it just asked something."""
+    return text.rstrip().rstrip(CLOSERS).rstrip().endswith(tuple(QUESTION_MARKS))
+
+
 class AudioSink(Protocol):
     """What plays the audio: ``ReachySpeaker`` (it resamples to the output rate itself)."""
 
@@ -103,6 +113,7 @@ class SpeechOutput:
         self._audible: collections.OrderedDict[int, float] = collections.OrderedDict()
         self._unplayed: set[int] = set()
         self._ended: collections.OrderedDict[int, float] = collections.OrderedDict()
+        self._question_end: float | None = None  # end of the last spoken sentence, if a question
         self.sentences_spoken = 0
         self.sentences_dropped = 0
         self.failures = 0
@@ -239,6 +250,8 @@ class SpeechOutput:
             self._unplayed.update(i for i, at in self._audible.items() if at > now)
             for job_id, end in self._ended.items():
                 self._ended[job_id] = min(end, now)
+            if self._question_end is not None:
+                self._question_end = min(self._question_end, now)
         self.sink.stop()
         loop = self._loop
         if loop is not None:
@@ -262,6 +275,14 @@ class SpeechOutput:
         to the stop."""
         with self._lock:
             return self._ended.get(job_id)
+
+    def question_end(self) -> float | None:
+        """Clock stamp at which the last sentence that began to play ends (or ended, or was cut
+        by a stop) when it ended in a question mark; None when that sentence was not a question
+        or nothing has been said. The next sentence replaces it, so a question followed by a
+        statement is no longer pending."""
+        with self._lock:
+            return self._question_end
 
     def first_audio_at(self, utterance: int) -> float | None:
         """Clock stamp when the first audio of answer ``utterance`` was pushed, None until then
@@ -331,6 +352,7 @@ class SpeechOutput:
                     self._unplayed.discard(self._audible.popitem(last=False)[0])
             if speech:
                 self._ended[job.id] = self._queue_end()
+                self._question_end = self._ended[job.id] if ends_with_question(job.text) else None
                 while len(self._ended) > PLAYED_WINDOW:
                     self._ended.popitem(last=False)
             return True
