@@ -26,6 +26,7 @@ from .. import paths
 from ..config.schema import TRAITS, PersonaConfig, PersonaTraits, RoboEmotConfig
 from ..config.stack import ConfigChange, ConfigStack
 from ..llm.hub import RouterHub
+from ..llm.pseudonyms import NameSource, Pseudonyms
 from ..llm.router import Done, NoRouteAvailable, Router, TextDelta
 
 log = logging.getLogger(__name__)
@@ -92,10 +93,14 @@ class TraitCache:
 
 
 async def rate_traits(
-    router: Router, persona: PersonaConfig, cache: TraitCache
+    router: Router,
+    persona: PersonaConfig,
+    cache: TraitCache,
+    pseudonyms: Pseudonyms | None = None,
 ) -> PersonaTraits | None:
     """Traits for ``persona.prompt`` from the cache or the first route that answers; None when
-    no route is configured, eligible or reachable, or the reply does not validate."""
+    no route is configured, eligible or reachable, or the reply does not validate. With
+    ``pseudonyms`` a registry name in the prompt is aliased on routes that are not local."""
     routes = router.eligible(minor_present=False)
     if not routes:
         return None
@@ -109,7 +114,7 @@ async def rate_traits(
     ]
     text, route_name = "", None
     try:
-        async for ev in router.stream(messages):
+        async for ev in router.stream(messages, pseudonyms=pseudonyms):
             if isinstance(ev, TextDelta):
                 text += ev.text
             elif isinstance(ev, Done):
@@ -126,14 +131,22 @@ async def rate_traits(
     return traits
 
 
-async def apply_llm_traits(stack: ConfigStack, router: Router, cache: TraitCache) -> bool:
+async def apply_llm_traits(
+    stack: ConfigStack,
+    router: Router,
+    cache: TraitCache,
+    names: NameSource | None = None,
+) -> bool:
     """With ``persona.traits_source: llm``, replace the manual traits with the rated ones in
     the stack's derived layer (audited as ``persona.llm``, published as ``config.changed``).
     Run it at startup and again on every ``config.changed``: when the source is manual or the
     current prompt gets no valid rating, earlier rated traits are dropped and the manual
     traits apply. Returns True only when rated traits are in effect."""
     persona = stack.effective().persona
-    traits = await rate_traits(router, persona, cache) if persona.traits_source == "llm" else None
+    traits = None
+    if persona.traits_source == "llm":
+        pseudonyms = names.for_config(stack.effective()) if names else None
+        traits = await rate_traits(router, persona, cache, pseudonyms)
     if traits is None:
         if persona.traits_source == "llm":
             log.warning("persona traits: no valid LLM rating, keeping the manual traits")
@@ -178,8 +191,9 @@ class TraitsWorker:
         make_router: Callable[[RoboEmotConfig], Router] | None,
         clock: Callable[[], float] = time.monotonic,
         hub: RouterHub | None = None,
+        names: NameSource | None = None,
     ) -> None:
-        self.stack, self.cache = stack, cache
+        self.stack, self.cache, self.names = stack, cache, names
         self.hub = hub if hub is not None else RouterHub(router, make_router)  # type: ignore[arg-type]
         self.clock = clock
         self._thread: threading.Thread | None = None
@@ -267,7 +281,7 @@ class TraitsWorker:
             if left > 0:
                 self._loop.call_later(left, self._wake.set)
                 return
-        rated = await apply_llm_traits(self.stack, self.router, self.cache)
+        rated = await apply_llm_traits(self.stack, self.router, self.cache, self.names)
         self._failed = (key, self.clock()) if persona.traits_source == "llm" and not rated else None
 
     def _sync_router(self, cfg: RoboEmotConfig) -> None:

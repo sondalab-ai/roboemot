@@ -80,6 +80,11 @@ class NoRouteAvailable(RuntimeError):
     """Every route was skipped or failed; the caller plays the register fallback (SPEC 8)."""
 
 
+class PseudonymLeak(RuntimeError):
+    """A request for a route that is not local still held a registry name after aliasing; it
+    was not sent. The message never names anyone."""
+
+
 class Offline(NoRouteAvailable):
     """No route is reachable (SPEC 12A): reply nonverbally, do not wait for timeouts."""
 
@@ -275,12 +280,9 @@ class Router:
             yielded = False
             if active is not None:
                 active.route = route
-            out = (
-                pseudonyms.prepare(messages, tools)
-                if pseudonyms is not None and not route_is_local(route)
-                else None
-            )
-            if out is not None and pseudonyms.leaks({"messages": out.messages, "tools": out.tools}):
+            try:
+                out = _outgoing(route, messages, tools, pseudonyms)
+            except PseudonymLeak:
                 self.failures.append((route.name, "PseudonymLeak"))  # fail closed: not sent
                 continue
             gen = self._stream_route(
@@ -317,16 +319,28 @@ class Router:
         if self.monitor:
             self.monitor.report(route.name, ok)
 
-    def stream_route(
+    async def stream_route(
         self,
         route: LLMRoute,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         timing: FirstToken | None = None,
+        pseudonyms: Pseudonyms | None = None,
     ) -> AsyncIterator[Event]:
         """Stream ONE route, bypassing eligibility and fallback (the conformance test). Errors
-        propagate; the budget is charged as for any request."""
-        return self._stream_route(route, messages, tools, timing)
+        propagate; the budget is charged as for any request. With ``pseudonyms`` a route that is
+        not local gets the same aliasing, leak check and restoring as ``stream``; a request that
+        still holds a name raises :class:`PseudonymLeak` before anything is sent."""
+        out = _outgoing(route, messages, tools, pseudonyms)
+        gen = self._stream_route(
+            route, out.messages if out else messages, out.tools if out else tools, timing
+        )
+        events = _restored(gen, out) if out else gen
+        try:
+            async for ev in events:
+                yield ev
+        finally:
+            await events.aclose()
 
     async def _stream_route(
         self,
@@ -471,6 +485,23 @@ def _nesting(value: Any) -> int:
                 return depth
             stack.extend((v, depth) for v in (node.values() if isinstance(node, dict) else node))
     return deepest
+
+
+def _outgoing(
+    route: LLMRoute,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None,
+    pseudonyms: Pseudonyms | None,
+) -> Outgoing | None:
+    """The aliased request for a route that is not local, None when ``pseudonyms`` is off or
+    the route is local. Raises :class:`PseudonymLeak` when the aliased request still holds a
+    name (fail closed: nothing is sent). The message never carries a name."""
+    if pseudonyms is None or route_is_local(route):
+        return None
+    out = pseudonyms.prepare(messages, tools)
+    if pseudonyms.leaks({"messages": out.messages, "tools": out.tools}):
+        raise PseudonymLeak("the request still holds a registry name")
+    return out
 
 
 async def _restored(events: AsyncIterator[Event], out: Outgoing) -> AsyncIterator[Event]:

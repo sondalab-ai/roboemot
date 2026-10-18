@@ -252,3 +252,28 @@ async def test_report_carries_model_and_endpoint_without_credentials():
     )
     report = await run(Fake(), r)
     assert (report.model, report.endpoint) == ("m", "lan.local:8443")
+
+
+def _named(name: str):
+    from roboemot.llm.pseudonyms import Pseudonyms
+
+    p = Pseudonyms()
+    p.sync([name], {"en": "Person-{label}"}, "en", "en")
+    return p
+
+
+async def test_a_cloud_route_check_goes_through_the_pseudonyms():
+    fake = Fake()
+    cloud = LLMRoute(
+        name="c", base_url="http://api.example.com/v1", model="m", first_token_timeout_s=0.5
+    )
+    report = await run(fake, cloud, pseudonyms=_named("Italian"))
+    assert report.ok
+    assert fake.bodies and all("Italian" not in json.dumps(b) for b in fake.bodies)
+    assert "Person-" in json.dumps(fake.bodies[0])
+
+
+async def test_a_local_route_check_keeps_the_prompt_as_it_is():
+    fake = Fake()
+    await run(fake, pseudonyms=_named("Italian"))
+    assert "Italian" in json.dumps(fake.bodies[0])

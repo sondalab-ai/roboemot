@@ -52,11 +52,15 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       out afresh after an app restart; personal details that are not registry names are not replaced;
       registry names refused for aliasing (no letter or digit, a template prefix word, a structural
       word such as "user") are sent unaliased.
-- [ ] Pseudonyms residual: `persona/llm_traits.py` (`rate_traits`) streams `persona.prompt`
-      without `pseudonyms=`, so a registry name written into the persona prompt reaches a cloud
-      route as typed.
-- [ ] Pseudonyms residual: `llm/conformance.py` sends through `stream_route`, which bypasses the
-      pseudonyms (synthetic messages, low risk).
+- [x] Pseudonyms residual: `persona/llm_traits.py` (`rate_traits`) streamed `persona.prompt`
+      without `pseudonyms=`. `TraitsWorker` now takes a `NameSource` (registry names) and the
+      rating goes through the same aliasing, leak check and restore as the conversation; names
+      that cannot be read mean no request.
+- [x] Pseudonyms residual: `llm/conformance.py` sent through `stream_route`, which bypassed the
+      pseudonyms. `stream_route(..., pseudonyms=)` shares the router's guard (a leak raises
+      `PseudonymLeak` before sending) and the web UI route check passes the map. Open:
+      `roboemot llm check` (CLI) does not open the registry, so it still sends its synthetic
+      prompts without pseudonyms.
 - [ ] Pseudonyms residual: registry names refused for aliasing are sent unaliased and the admin
       sees only their count in the log; consider showing which names in the web UI (admin only).
 - [x] Pseudonyms residual: a JSON key in a tool call or result that equals a registry name

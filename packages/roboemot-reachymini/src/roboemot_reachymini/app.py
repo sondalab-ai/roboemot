@@ -46,6 +46,7 @@ from roboemot.health.network import NetworkMonitor
 from roboemot.health.responder import OfflineResponder
 from roboemot.llm import Router
 from roboemot.llm.hub import RouterHub
+from roboemot.llm.pseudonyms import NameSource
 from roboemot.manifest import load_manifest
 from roboemot.motion import Command, MotionLoop, Priority
 from roboemot.persona import effects as persona_effects
@@ -310,6 +311,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
     voice_listener: VoiceListener | None = None  # mic -> VAD -> ASR -> utterances; voice.enabled
     speech_output: SpeechOutput | None = None  # TTS queue onto the speaker; only when voice.enabled
     traits_worker: TraitsWorker | None = None  # rates persona traits when traits_source is llm
+    name_source: NameSource | None = None  # registry names for pseudonyms outside the conversation
     router_hub: RouterHub | None = None  # the one router: traits, conversation, speech, checks
     conversation: ConversationWorker | None = None  # answers addressed utterances (voice.enabled)
 
@@ -405,6 +407,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                     stack.effective,
                     paths.route_checks_path(cfg.data_dir),
                     router=self.route_check_router,
+                    names=self.name_source,
                 ),
             )
         except Exception as exc:
@@ -594,8 +597,20 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         hub = self.router_hub = RouterHub(
             self.make_router(cfg, network), lambda c: self.make_router(c, network)
         )
+        # The same registry names the conversation hides from cloud routes (SPEC 8, Pseudonyms)
+        # are hidden in the persona prompt of the rating and in the route checks.
+        self.name_source = NameSource(
+            registry_names(
+                perception.registry, lambda: stack.effective().conversation.summary_value_max_chars
+            )
+        )
         worker = self.traits_worker = TraitsWorker(
-            stack, None, TraitCache(paths.traits_cache_path(cfg.data_dir)), None, hub=hub
+            stack,
+            None,
+            TraitCache(paths.traits_cache_path(cfg.data_dir)),
+            None,
+            hub=hub,
+            names=self.name_source,
         )
 
         # Spoken yes / no (SPEC 8): a short addressed answer nods or shakes through the renderer,

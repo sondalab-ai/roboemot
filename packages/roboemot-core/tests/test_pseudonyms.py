@@ -1026,3 +1026,55 @@ def test_escapes_that_do_not_decode_to_a_name_are_left_alone():
 def test_a_registry_name_holding_an_escape_is_still_refused():
     p = pseudo("Mar\\u0074a", "Luca")
     assert p.refused == 1
+
+
+# ------------------------------------------------------------------ stream_route (conformance)
+
+
+async def run_route(router, r, p, messages=None):
+    return [ev async for ev in router.stream_route(r, messages or MESSAGES, None, pseudonyms=p)]
+
+
+async def test_stream_route_gives_a_cloud_route_aliases_and_restores_the_reply():
+    p = pseudo("Marta")
+    a = alias_of(p, "Marta")
+    rec = Recorder(script=[f"Ciao {a}."])
+    r = route()
+    events = await run_route(rec.router(r), r, p)
+    assert "Marta" not in json.dumps(rec.bodies[0][1])
+    assert a in json.dumps(rec.bodies[0][1])
+    assert text_of(events) == "Ciao Marta."
+
+
+async def test_stream_route_keeps_real_names_on_a_local_route():
+    p = pseudo("Marta")
+    rec = Recorder()
+    r = route("127.0.0.1")
+    await run_route(rec.router(r), r, p)
+    assert "Marta" in json.dumps(rec.bodies[0][1])
+
+
+async def test_stream_route_without_pseudonyms_is_unchanged():
+    rec = Recorder()
+    r = route()
+    await run_route(rec.router(r), r, None)
+    assert "Marta" in json.dumps(rec.bodies[0][1])
+
+
+async def test_stream_route_refuses_a_request_that_still_holds_a_name_before_sending(monkeypatch):
+    from roboemot.llm.router import PseudonymLeak
+
+    p = pseudo("Marta")
+    real_prepare = p.prepare
+
+    def unscrubbed(messages, tools):
+        out = real_prepare(messages, tools)
+        out.messages, out.tools = messages, tools
+        return out
+
+    monkeypatch.setattr(p, "prepare", unscrubbed)
+    rec = Recorder()
+    r = route()
+    with pytest.raises(PseudonymLeak) as exc:
+        await run_route(rec.router(r), r, p)
+    assert rec.bodies == [] and "Marta" not in str(exc.value)

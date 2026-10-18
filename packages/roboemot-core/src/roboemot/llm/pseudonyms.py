@@ -47,12 +47,12 @@ import random
 import re
 import threading
 import unicodedata
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import Any
 
 import httpx
 
-from ..config.schema import PSEUDONYM_LABEL, LLMRoute
+from ..config.schema import PSEUDONYM_LABEL, LLMRoute, RoboEmotConfig
 
 UNICODE_ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})")
 UNICODE_ESCAPE_LEN = 6  # characters of "\\uXXXX"
@@ -726,3 +726,22 @@ class Restorer:
         """Whatever is held, at the end of the text."""
         buf, self._held = self._held, ""
         return self._r.text(buf)
+
+
+class NameSource:
+    """The pseudonym map for callers of the router outside the conversation (persona traits,
+    route checks). ``names`` lists the registry's display names; ``for_config`` brings the map
+    in line with them and returns it, or None when ``privacy.pseudonyms_to_cloud`` is off. An
+    error from ``names`` propagates, so nothing is sent without the names it should replace."""
+
+    def __init__(self, names: Callable[[], Iterable[str]]) -> None:
+        self._names = names
+        self._map = Pseudonyms()
+
+    def for_config(self, cfg: RoboEmotConfig) -> Pseudonyms | None:
+        """The synced map for ``cfg``, in the configured conversation language."""
+        if not cfg.privacy.pseudonyms_to_cloud:
+            return None
+        language = cfg.conversation.language
+        self._map.sync(self._names(), cfg.privacy.pseudonym_templates, language, language)
+        return self._map

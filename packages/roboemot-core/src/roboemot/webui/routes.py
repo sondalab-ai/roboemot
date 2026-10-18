@@ -32,6 +32,7 @@ from ..llm.conformance import (
     check_route,
     route_endpoint,
 )
+from ..llm.pseudonyms import NameSource
 from ..llm.router import SECRET, Router
 from ..secret_store import SecretStore
 
@@ -49,7 +50,9 @@ class RouteChecker:
     ``cfg`` returns the effective config (routes and ``llm_check`` follow a hot reload).
     ``router`` returns the app's router so the check is charged to the shared daily budget;
     without one, a private router is kept for the life of this object, so budgets still add up
-    across checks.
+    across checks. ``names`` (a :class:`NameSource`) gives a route that is not local the same
+    aliases as the conversation does (SPEC 8, Pseudonyms) when ``privacy.pseudonyms_to_cloud``
+    is on.
     """
 
     def __init__(
@@ -59,8 +62,10 @@ class RouteChecker:
         *,
         router: Callable[[], Router | None] = lambda: None,
         http_client_factory: Callable[[], httpx.AsyncClient] | None = None,
+        names: NameSource | None = None,
     ) -> None:
         self.cfg, self.store, self._router = cfg, store, router
+        self._names = names
         self._factory = http_client_factory
         self._private: Router | None = None
         self._lock = threading.Lock()
@@ -133,6 +138,7 @@ class RouteChecker:
         """Thread body: run the check under the deadline and keep the outcome, whatever it is."""
         error = ""
         try:
+            pseudonyms = self._names.for_config(cfg) if self._names else None
             report = asyncio.run(
                 asyncio.wait_for(
                     check_route(
@@ -140,6 +146,7 @@ class RouteChecker:
                         cfg.safety,
                         settings=cfg.llm_check,
                         router=router,
+                        pseudonyms=pseudonyms,
                         http_client_factory=self._factory,
                     ),
                     cfg.llm_check.deadline_s,
