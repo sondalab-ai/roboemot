@@ -74,11 +74,11 @@ jobs:
         with:
           path: .ci-data/voice-models
           key: ${{ steps.cache.outputs.cache-primary-key }}
-      # Piper is GPL-3.0 and runs as a separate process in its own venv, at the installer's pin.
+      # Piper is GPL-3.0 and runs as a separate process in its own venv, from the installer's hash-pinned lock.
       - run: |
-          version=$(python -c 'from roboemot.install import PIPER_TTS_VERSION as v; print(v)')
+          lock=packages/roboemot-core/src/roboemot/install/locks/piper-x86_64-py312.txt
           python -m venv "$RUNNER_TEMP/piper-venv"
-          "$RUNNER_TEMP/piper-venv/bin/pip" install --no-cache-dir "piper-tts==$version"
+          "$RUNNER_TEMP/piper-venv/bin/pip" install --no-cache-dir --require-hashes --only-binary=:all: -r "$lock"
           echo "ROBOEMOT_PIPER_PYTHON=$RUNNER_TEMP/piper-venv/bin/python" >> "$GITHUB_ENV"
       - run: >
           pytest -m models -rs -s -o log_level=DEBUG

@@ -103,9 +103,10 @@ class RemotePython:
             f"install --quiet {PIP_FLAGS} {c}{_join(targets)}", stdin=constraints, check=False
         )
 
-    def install_requirement(self, requirement: str) -> PipResult:
-        """One pinned requirement into this interpreter's environment (no cache, no constraints)."""
-        return self._pip(f"install --quiet {PIP_FLAGS} {_join([requirement])}", check=False)
+    def install_locked(self, lock_file: str) -> PipResult:
+        """Install a hash-pinned lock file: every artifact must match, wheels only, no cache."""
+        args = f"install --quiet {PIP_FLAGS} --require-hashes --only-binary=:all: -r"
+        return self._pip(f"{args} {shlex.quote(lock_file)}", check=False)
 
     def reinstall_own(self, files: list[str]) -> None:
         """Same version numbers on a reinstall: force our wheels in, dependencies untouched."""
