@@ -721,6 +721,8 @@ class WebApi:
             raise ApiError(
                 HTTPStatus.UNPROCESSABLE_ENTITY, "setting_invalid", field="value"
             ) from exc
+        except OSError as exc:  # the app file could not be written: nothing was changed
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "persist_failed") from exc
 
     # ------------------------------------------------------------------ pseudonyms
 

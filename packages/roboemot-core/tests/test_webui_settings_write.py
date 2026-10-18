@@ -31,7 +31,7 @@ RULE_B = {"event": "zz.second", "valence": 0.2}
 
 
 def appraisal(rules):
-    return {"rules": rules, "extra_events": ["zz.first", "zz.second", "custom.thing"]}
+    return {"rules": rules, "extra_events": ["zz.first", "zz.second", "zz.third", "custom.thing"]}
 
 
 def make_stack(tmp_path, **app):
@@ -519,7 +519,7 @@ def test_clear_that_would_invalidate_the_config_is_rolled_back(tmp_path):
 
     def flaky(person=None):
         calls["n"] += 1
-        if calls["n"] == 1:
+        if calls["n"] == 2:  # the first call is the validity probe
             raise ConfigError("boom")
         return real(person)
 
@@ -711,3 +711,290 @@ def test_a_loosen_over_http_names_the_app_layer(tmp_path):
         assert yaml.safe_load(app.read_text())["webui"]["name_max_chars"] == 100
     finally:
         srv.stop()
+
+
+# ------------------------------------------------------------------ fix round: security
+
+
+def lan_stack(tmp_path, **route):
+    """One cloud route with locality auto, so a LAN host would turn it local."""
+    return make_stack(tmp_path, llm_routes=[{**ROUTE, **route}])
+
+
+def test_reset_cannot_reopen_the_locality_hole(tmp_path):
+    """cloud, then LAN host, then reset locality: the reset would make the route local with a
+    LAN base_url nobody approved. It is refused like the write would be."""
+    stack = lan_stack(tmp_path)
+    editor = SettingsEditor(stack, store=tmp_path / FILE)
+    editor.change("llm_routes.lan.locality", "cloud")
+    editor.change("llm_routes.lan.base_url", "http://nas.local:8080/v1")
+    with pytest.raises(GuardrailError) as caught:
+        editor.reset("llm_routes.lan.locality")
+    assert {v.check for v in caught.value.violations} == {"locality"}
+    assert stack.effective().llm_routes[0].locality == "cloud"
+    with pytest.raises(GuardrailError):
+        stack.clear("llm_routes.lan.locality")
+    assert stack.effective().llm_routes[0].locality == "cloud"
+    fresh = lan_stack(tmp_path)
+    SettingsEditor(fresh, store=tmp_path / FILE).restore()
+    assert fresh.effective().llm_routes[0].locality == "cloud"
+
+
+def test_a_guarded_clear_still_removes_a_harmless_override(editor, stack):
+    editor.change("webui.name_max_chars", 32)
+    assert editor.reset("webui.name_max_chars")["changed"]
+    assert stack.effective().webui.name_max_chars == 64
+
+
+def test_audit_never_holds_a_key_or_a_reference_from_a_whole_list_write(tmp_path):
+    plain_key, ref = "sk-PLAIN-CANARY-1", "${secret:ref-canary}"
+    routes = [
+        {**ROUTE, "name": "a", "api_key": plain_key},
+        {**ROUTE, "name": "b", "api_key": ref},
+    ]
+    stack = make_stack(tmp_path, llm_routes=routes)
+    stack.set(
+        "llm_routes", [{**routes[0], "model": "m2"}, {**routes[1], "model": "m3"}], admin=True
+    )
+    stack.set_many({"llm_routes": [{**routes[0], "model": "m4"}]}, admin=True)
+    stack.set("llm_routes", [{**routes[0], "model": "m5"}], admin=True, layer="app")
+    blob = json.dumps([a.__dict__ for a in stack.audit], default=str)
+    blob += (tmp_path / "audit.jsonl").read_text()
+    for canary in ("sk-PLAIN-CANARY-1", "ref-canary", "${secret"):
+        assert canary not in blob
+
+
+def test_restore_audit_holds_no_key(tmp_path):
+    stack = make_stack(tmp_path, llm_routes=[{**ROUTE, "api_key": "sk-PLAIN-CANARY-2"}])
+    path = tmp_path / FILE
+    path.write_text(json.dumps({"v": 1, "overrides": {"llm_routes.lan.model": "m9"}}))
+    path.chmod(0o600)
+    SettingsEditor(stack, store=path).restore()
+    assert stack.effective().llm_routes[0].model == "m9"
+    assert "sk-PLAIN-CANARY-2" not in (tmp_path / "audit.jsonl").read_text()
+    assert "sk-PLAIN-CANARY-2" not in json.dumps([a.__dict__ for a in stack.audit], default=str)
+
+
+def test_the_audit_file_is_private(tmp_path):
+    import stat
+
+    stack = make_stack(tmp_path)
+    stack.set("affect.update_hz", 30.0)
+    assert stat.S_IMODE((tmp_path / "audit.jsonl").stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize("api_key", ["sk-literal-key", "${secret:k}"])
+@pytest.mark.parametrize("url", ["https://evil.example.com/v1", "http://api.example.com/v1"])
+def test_a_keyed_route_cannot_change_endpoint_from_the_web(tmp_path, api_key, url):
+    stack = make_stack(tmp_path, llm_routes=[{**ROUTE, "api_key": api_key}])
+    editor = SettingsEditor(stack, store=tmp_path / FILE)
+    with pytest.raises(GuardrailError) as caught:  # a different host, or an http downgrade
+        editor.change("llm_routes.lan.base_url", url)
+    assert {v.check for v in caught.value.violations} == {"secret"}
+    assert stack.effective().llm_routes[0].base_url == ROUTE["base_url"]
+    assert api_key not in str(caught.value)
+    editor.change("llm_routes.lan.base_url", "https://api.example.com/v2")  # same endpoint
+    assert stack.effective().llm_routes[0].base_url.endswith("/v2")
+
+
+def test_a_route_without_a_key_may_move(tmp_path):
+    stack = make_stack(tmp_path, llm_routes=[{**ROUTE, "api_key": "none"}])
+    SettingsEditor(stack).change("llm_routes.lan.base_url", "https://other.example.com/v1")
+    assert stack.effective().llm_routes[0].base_url.startswith("https://other")
+
+
+def test_violation_values_stay_exact_and_only_the_text_is_redacted():
+    from roboemot.config.stack import locality_violations, secret_violations
+
+    def cfg(**route):
+        return ConfigStack(app={"llm_routes": [{**ROUTE, **route}]}).effective()
+
+    loc = locality_violations(cfg(), cfg(base_url="http://nas.local:1/v1"))[0]
+    other_path = locality_violations(cfg(), cfg(base_url="http://nas.local:1/v2"))[0]
+    other_scheme = locality_violations(cfg(), cfg(base_url="https://nas.local:1/v1"))[0]
+    assert loc.candidate == "local http://nas.local:1/v1 (auto)"
+    assert len({loc.candidate, other_path.candidate, other_scheme.candidate}) == 3
+    one = secret_violations(cfg(api_key="${secret:k1}"), cfg(api_key="${secret:k2}"))[0]
+    two = secret_violations(cfg(api_key="${secret:k1}"), cfg(api_key="${secret:k3}"))[0]
+    assert "${secret:k2}" in one.candidate and one.candidate != two.candidate
+    assert "k2" not in str(one) and "k1" not in str(one)
+
+
+def test_an_admin_approval_matches_the_exact_value(tmp_path):
+    stack = lan_stack(tmp_path)
+    stack.set("llm_routes.lan.base_url", "http://nas.local:1/v1", admin=True)
+    with pytest.raises(GuardrailError):  # another path under the same host is not approved
+        stack.set("llm_routes.lan.base_url", "http://nas.local:1/v2")
+    stack.set("llm_routes.lan.base_url", "http://nas.local:1/v1")  # the approved value again
+
+
+def test_two_added_entries_both_stay(editor, stack, tmp_path):
+    editor.add_entry("llm_routes", None, {**ROUTE, "name": "n2"})
+    editor.add_entry("llm_routes", None, {**ROUTE, "name": "n3"})
+    names = [r.name for r in stack.effective().llm_routes]
+    assert names == ["lan", "n2", "n3"]
+    editor.add_entry("appraisal.rules", None, {"event": "custom.thing", "valence": 0.4})
+    editor.add_entry("appraisal.rules", None, {"event": "zz.third", "valence": 0.5})
+    fresh = make_stack(tmp_path, llm_routes=[ROUTE], appraisal=appraisal([RULE_B, RULE_A]))
+    SettingsEditor(fresh, store=tmp_path / FILE).restore()
+    assert [r.name for r in fresh.effective().llm_routes] == ["lan", "n2", "n3"]
+    assert rule(fresh, "custom.thing").valence == 0.4 and rule(fresh, "zz.third").valence == 0.5
+
+
+def test_reset_of_the_blocklist_is_refused_other_tightenings_reset(editor, stack):
+    path = "safety.minor_output_blocklist.en"
+    editor.change(path, [*get_path(stack.effective(), path), "extra*"])
+    with pytest.raises(ValidationError) as caught:
+        editor.reset(path)
+    assert caught.value.code == "not_resettable"
+    assert "extra*" in get_path(stack.effective(), path)
+    editor.change("webui.name_max_chars", 32)
+    assert editor.reset("webui.name_max_chars")["changed"]
+    assert stack.effective().webui.name_max_chars == 64
+
+
+def test_restore_drops_an_added_entry_that_does_not_fit(tmp_path):
+    path = tmp_path / FILE
+    good = {**ROUTE, "name": "ok"}
+    path.write_text(
+        json.dumps(
+            {
+                "v": 1,
+                "overrides": {
+                    'llm_routes[{"name":"ok"}]': good,
+                    'llm_routes[{"name":"liar"}]': {**ROUTE, "name": "other"},
+                    'llm_routes[{"name":"lan"}]': {**ROUTE, "model": "x"},  # a lower layer has it
+                    "voice.moods.joy": {"rate": 0.9},  # a lower layer has it
+                },
+            }
+        )
+    )
+    path.chmod(0o600)
+    stack = make_stack(tmp_path, llm_routes=[ROUTE])
+    SettingsEditor(stack, store=path).restore()
+    assert [r.name for r in stack.effective().llm_routes] == ["lan", "ok"]
+    assert stack.effective().voice.moods["joy"].rate != 0.9
+    assert list(json.loads(path.read_text())["overrides"]) == ['llm_routes[{"name":"ok"}]']
+
+
+# ------------------------------------------------------------------ fix round: correctness
+
+
+def test_a_patch_whose_entry_vanishes_does_not_become_an_entry(editor, stack, tmp_path):
+    at = rule_index(stack, "zz.first")
+    editor.change(f"appraisal.rules.{at}.valence", 0.9)
+    editor.change("llm_routes.lan.model", "m2")
+    stack.app["appraisal"]["rules"] = [RULE_B]  # a reload that drops zz.first (still declared)
+    stack.app["llm_routes"] = []
+    assert all(r.event != "zz.first" for r in stack.effective().appraisal.rules)
+    assert stack.effective().llm_routes == []
+    assert stack.effective() is not None  # the stack is still valid
+    fresh = make_stack(tmp_path, appraisal=appraisal([RULE_B]), llm_routes=[])
+    SettingsEditor(fresh, store=tmp_path / FILE).restore()  # live equals after a restart
+    live = stack.effective().model_dump(mode="json")
+    assert (
+        live["appraisal"]["rules"]
+        == fresh.effective().model_dump(mode="json")["appraisal"]["rules"]
+    )
+    assert live["llm_routes"] == fresh.effective().model_dump(mode="json")["llm_routes"]
+    assert not fresh._runtime
+
+
+def test_a_persist_failure_changes_nothing(tmp_path):
+    app = tmp_path / "app.yaml"
+    app.write_text(yaml.safe_dump({"webui": {"bind": "127.0.0.1", "port": 0}}))
+    stack = ConfigStack.from_files(app=app, audit_path=tmp_path / "audit.jsonl")
+    editor = SettingsEditor(stack, store=tmp_path / FILE)
+    editor.change("webui.name_max_chars", 32)
+    stack.files["app"] = tmp_path  # a directory: writing it raises OSError
+    events, audit, approved = [], len(stack.audit), stack._approved
+    stack.subscribe(events.append)
+    saved_app = json.dumps(stack.app)
+    with pytest.raises(OSError):
+        editor.change("webui.name_max_chars", 100)
+    assert json.dumps(stack.app) == saved_app and stack._approved is approved
+    assert events == [] and len(stack.audit) == audit
+    assert stack.effective().webui.name_max_chars == 32  # the runtime value is untouched
+
+
+def test_persist_failure_is_a_bare_code_over_http(tmp_path):
+    app = tmp_path / "app.yaml"
+    app.write_text(yaml.safe_dump({"webui": {"bind": "127.0.0.1", "port": 0}}))
+    stack = ConfigStack.from_files(app=app)
+    stack.files["app"] = tmp_path
+    srv, client = serve(tmp_path, SettingsEditor(stack, store=tmp_path / FILE), stack)
+    try:
+        out = post(client, "/api/settings", path="webui.name_max_chars", value=100)
+        assert out.status == 503 and out.json == {"error": "persist_failed"}
+    finally:
+        srv.stop()
+
+
+def test_no_app_retry_for_a_field_inside_an_entry_added_here(editor, stack):
+    editor.add_entry("llm_routes", None, {**ROUTE, "name": "n2"})
+    with pytest.raises(GuardrailError):
+        editor.change("llm_routes.n2.allowed_for_minors", True)
+    assert "llm_routes" in stack.app and [r["name"] for r in stack.app["llm_routes"]] == ["lan"]
+    assert editor.change("llm_routes.lan.allowed_for_minors", True)["layer"] == "app"
+
+
+def test_reset_with_nothing_to_clear_keeps_file_and_memory_consistent(editor, stack, tmp_path):
+    editor.change("affect.update_hz", 33.0)
+    stack.clear("affect.update_hz")  # the runtime value goes, the file entry stays: stale
+    assert json.loads((tmp_path / FILE).read_text())["overrides"] == {"affect.update_hz": 33.0}
+    out = editor.reset("affect.update_hz")
+    assert out["changed"] is False and out["persisted"] is True
+    assert json.loads((tmp_path / FILE).read_text())["overrides"] == {}
+    assert editor._overrides == {}
+
+
+def test_a_keyed_entry_cannot_expire_and_natural_keys_use_the_patch_form(stack):
+    with pytest.raises(ConfigError):
+        stack.set("llm_routes.lan.model", "m2", ttl_s=5)
+    with pytest.raises(ConfigError):
+        stack.set(f"appraisal.rules.{rule_index(stack, 'zz.first')}.valence", 0.5, ttl_s=5)
+    stack.set("llm_routes.lan.model", "m2")
+    stack.set(f"appraisal.rules.{rule_index(stack, 'zz.first')}.valence", 0.5)
+    assert set(stack._runtime) == {"llm_routes#patch", "appraisal.rules#patch"}
+    assert stack.clear("llm_routes.lan.model") and stack.clear(
+        f"appraisal.rules.{rule_index(stack, 'zz.first')}.valence"
+    )
+    assert stack._runtime == {}  # dead partials are dropped
+
+
+def test_pop_leaf_prunes_empty_parents():
+    from roboemot.config.stack import _pop_leaf
+
+    entry = {"event": "e", "when": {"a": {"b": 1}}}
+    assert _pop_leaf(entry, "when.a.b") == (True, 1)
+    assert entry == {"event": "e"}
+    assert _pop_leaf(entry, "when.a.b")[0] is False
+
+
+def test_a_clear_that_does_not_make_an_invalid_state_worse_is_allowed(tmp_path):
+    from roboemot.config.stack import _RuntimeValue
+
+    stack = make_stack(tmp_path)
+    stack._runtime["affect.update_hz"] = _RuntimeValue(9999.0, None)  # out of range
+    with pytest.raises(ConfigError):
+        stack.effective()
+    assert stack.clear("affect.update_hz") is True
+    assert stack.effective().affect.update_hz == 20.0
+
+
+def test_duplicate_identities_resolve_to_the_first_entry():
+    from roboemot.config.stack import _merge_keyed, keyed_index
+
+    base = [{"name": "a", "x": 1}, {"name": "a", "x": 2}]
+    assert _merge_keyed(base, [{"name": "a", "y": 9}], "name") == [
+        {"name": "a", "x": 1, "y": 9},
+        {"name": "a", "x": 2},
+    ]
+    assert (
+        keyed_index(
+            {"appraisal": {"rules": [{"event": "e"}, {"event": "e"}]}},
+            "appraisal.rules",
+            {"event": "e"},
+        )
+        == 0
+    )

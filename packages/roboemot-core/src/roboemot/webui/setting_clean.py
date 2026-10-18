@@ -15,7 +15,7 @@ import re
 import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from roboemot.config.catalogue import PATH_WILDCARD, FieldDescriptor
 from roboemot.config.schema import RoboEmotConfig
@@ -34,6 +34,11 @@ EVENT_PATTERN = re.compile(r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*")
 LINE_BREAKS = "  "  # categories Zl and Zp: line breaks the C* check does not cover
 TEXT_CONTROLS = "\n\t"  # the only control characters a free text may hold
 LIST_KIND, NAME_KIND, LINE_KIND, WORDS_KIND = "phrases", "name", "line", "words"
+
+
+def replace(row: FieldDescriptor, **fields: Any) -> FieldDescriptor:
+    """A copy of the descriptor ``row`` with ``fields`` changed."""
+    return cast(FieldDescriptor, {**row, **fields})
 
 
 def _fail(code: str) -> ValidationError:
@@ -245,7 +250,7 @@ def _enum(row: FieldDescriptor, value: Any, cfg: RoboEmotConfig) -> Any:
 
 
 def _item_row(row: FieldDescriptor) -> FieldDescriptor:
-    return {**row, "kind": row["item_kind"] or "json", "nullable": False}  # type: ignore[typeddict-item]
+    return replace(row, kind=row["item_kind"] or "json", nullable=False)
 
 
 def _tuple(row: FieldDescriptor, value: Any, cfg: RoboEmotConfig) -> list[Any]:
@@ -301,7 +306,7 @@ def _string_dict(row: FieldDescriptor, value: Any, cfg: RoboEmotConfig) -> dict[
 
 
 def _number_dict(row: FieldDescriptor, value: Any, cfg: RoboEmotConfig) -> dict[str, float]:
-    plain: FieldDescriptor = {**row, "ge": None, "le": None}  # type: ignore[typeddict-item]
+    plain = replace(row, ge=None, le=None)
     return {k: _number(plain, v, cfg) for k, v in _mapping(value, cfg).items()}
 
 

@@ -27,11 +27,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import UnionType
 from typing import Any, Literal, Union, get_args, get_origin
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import BaseModel, ValidationError
 
-from ..redact import endpoint, scrub, scrub_text, shown
+from ..redact import scrub, scrub_text, shown
 from .schema import (
     SCHEMA_VERSION,
     WITHDRAW_RULE_FIELDS,
@@ -42,6 +43,23 @@ from .schema import (
 
 LAYER_ORDER = ("defaults", "manifest", "preset", "app", "derived", "person", "runtime")
 KEYED_LISTS = {"appraisal.rules": "event", "llm_routes": "name"}
+AUDIT_FILE_MODE = 0o600
+NO_KEY = ("", "none")  # api_key values that carry no key
+PATCH = "#patch"  # runtime slot suffix: edits of existing entries of a merged list, by identity
+
+
+def slot_base(slot: str) -> str:
+    """The config path a runtime slot belongs to (a patch slot shares its list's path)."""
+    return slot.removesuffix(PATCH)
+
+
+def _plain(value: Any) -> Any:
+    """``value`` as plain JSON (models dumped, tuples as lists); ``str`` for anything else."""
+
+    def dump(obj: Any) -> Any:
+        return obj.model_dump(mode="json") if isinstance(obj, BaseModel) else str(obj)
+
+    return json.loads(json.dumps(value, default=dump))
 
 
 class ConfigError(ValueError):
@@ -112,13 +130,31 @@ def _merge_id(item: dict, key: str) -> Any:
 
 def _merge_keyed(base: list, over: list, key: str) -> list:
     result = [copy.deepcopy(x) for x in base]
-    index = {_merge_id(x, key): i for i, x in enumerate(result) if isinstance(x, dict)}
+    index: dict[Any, int] = {}
+    for i, x in enumerate(result):
+        if isinstance(x, dict):
+            index.setdefault(_merge_id(x, key), i)  # duplicates: the first entry is the one
     for item in over:
         k = _merge_id(item, key) if isinstance(item, dict) else None
         if k is not None and k in index:
             result[index[k]] = deep_merge(result[index[k]], item)
         else:
             result.append(copy.deepcopy(item))
+    return result
+
+
+def _patch_keyed(base: list, patches: list, key: str) -> list:
+    """``base`` with each patch merged into the entry of the same identity; a patch whose entry is
+    gone is dropped (it must not turn into an entry of its own)."""
+    result = [copy.deepcopy(x) for x in base]
+    index: dict[Any, int] = {}
+    for i, x in enumerate(result):
+        if isinstance(x, dict):
+            index.setdefault(_merge_id(x, key), i)
+    for item in patches:
+        at = index.get(_merge_id(item, key)) if isinstance(item, dict) else None
+        if at is not None:
+            result[at] = deep_merge(result[at], item)
     return result
 
 
@@ -229,6 +265,23 @@ def nest(dotted: str, value: Any) -> dict:
     for part in reversed(dotted.split(".")):
         value = {part: value}
     return value
+
+
+def _pop_leaf(entry: dict, rest: str) -> tuple[bool, Any]:
+    """Remove ``rest`` (a dotted path) from ``entry`` and the parents it leaves empty."""
+    parts = rest.split(".")
+    chain = [entry]
+    try:
+        for part in parts[:-1]:
+            chain.append(chain[-1][part])
+        old = chain[-1].pop(parts[-1])
+    except (KeyError, AttributeError, TypeError):
+        return False, None
+    for n in range(len(parts) - 2, -1, -1):
+        if chain[n + 1]:
+            break
+        chain[n].pop(parts[n])
+    return True, old
 
 
 def set_in_layer(layer: dict, effective: Any, dotted: str, value: Any) -> None:
@@ -441,7 +494,6 @@ def guarded_leaves(cfg: RoboEmotConfig) -> dict[str, tuple[Any, dict[str, Any]]]
 
 
 NEW_RULE_REFUSED = "reflexes.rules."
-REF_SHOWN = "${secret:***}"
 
 
 def _filter_keys(entries: Any) -> set[tuple[str, bool]]:
@@ -515,7 +567,8 @@ def locality_violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> 
     field and the host together), so a new ``auto`` route on a LAN host, a ``base_url`` moved
     to a ``*.local`` host and ``locality: local`` are all the same loosening. A local route
     needs an approved route of the same name that was local with the same ``base_url``;
-    anything that makes a route cloud is stricter and passes."""
+    anything that makes a route cloud is stricter and passes. The values are exact (approval
+    matches on them); ``Violation.__str__`` redacts."""
     from ..llm.pseudonyms import route_is_local  # lazy: llm imports the config package
 
     trusted = {r.name: r.base_url for r in approved.llm_routes if route_is_local(r)}
@@ -523,8 +576,8 @@ def locality_violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> 
         Violation(
             "privacy",
             f"llm_routes.{r.name}.locality",
-            f"local {endpoint(trusted[r.name])}" if r.name in trusted else "cloud or absent",
-            f"local {endpoint(r.base_url)} ({r.locality})",
+            f"local {trusted[r.name]}" if r.name in trusted else "cloud or absent",
+            f"local {r.base_url} ({r.locality})",
             "locality",
         )
         for r in candidate.llm_routes
@@ -532,27 +585,44 @@ def locality_violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> 
     ]
 
 
-def secret_violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Violation]:
-    """Routes that would send a stored key somewhere the approval did not trust (SPEC 8, 11A,
-    12). A route whose ``api_key`` is a ``${secret:name}`` reference is trusted with exactly its
-    approved ``base_url`` and ``api_key``. A candidate route with a reference that is new, has
-    another ``base_url`` or another ``api_key`` (including one that changes to a reference)
-    needs the admin: otherwise a runtime change could point a key at a host of its choosing."""
-    from ..secret_store import SECRET_REF  # lazy: keeps the config package light
+def _endpoint_key(url: str) -> tuple[Any, ...]:
+    """Scheme, host and port of a URL: where a key would be sent."""
+    try:
+        parts = urlsplit(url)
+        return parts.scheme.lower(), (parts.hostname or "").lower(), parts.port
+    except ValueError:
+        return (url,)
 
-    trusted = {
-        r.name: (r.base_url, r.api_key) for r in approved.llm_routes if SECRET_REF.match(r.api_key)
-    }
+
+def secret_violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Violation]:
+    """Routes that would send a key somewhere the approval did not trust (SPEC 8, 11A, 12). A
+    route with a key (a ``${secret:name}`` reference or a literal; not empty or ``none``) is
+    trusted with exactly its approved endpoint (scheme, host, port) and ``api_key``. A candidate
+    route with a key that is new, has another endpoint (an ``http`` downgrade included) or
+    another ``api_key`` needs the admin: otherwise a runtime change could point a key at a host
+    of its choosing. The values are exact; ``Violation.__str__`` redacts them."""
+    trusted = {r.name: r for r in approved.llm_routes if r.api_key not in NO_KEY}
+
+    def same(r: Any) -> bool:
+        ref = trusted.get(r.name)
+        return (
+            ref is not None
+            and _endpoint_key(ref.base_url) == _endpoint_key(r.base_url)
+            and ref.api_key == r.api_key
+        )
+
     return [
         Violation(
             "admin",
             f"llm_routes.{r.name}.api_key",
-            f"{endpoint(trusted[r.name][0])} {REF_SHOWN}" if r.name in trusted else "absent",
-            f"{endpoint(r.base_url)} {REF_SHOWN}",
+            f"{trusted[r.name].base_url} {trusted[r.name].api_key}"
+            if r.name in trusted
+            else "absent",
+            f"{r.base_url} {r.api_key}",
             "secret",
         )
         for r in candidate.llm_routes
-        if SECRET_REF.match(r.api_key) and trusted.get(r.name) != (r.base_url, r.api_key)
+        if r.api_key not in NO_KEY and not same(r)
     ]
 
 
@@ -718,10 +788,19 @@ class ConfigStack:
                 tree = deep_merge(tree, layer)
             if include_runtime:
                 now = self.clock()
-                for key, rv in self._runtime.items():
+                for key, rv in self._runtime.items():  # in write order: the latest write wins
                     if rv.expires_at is not None and rv.expires_at <= now:
                         continue  # expired; removed (with a change event) by poll()
                     value = copy.deepcopy(rv.value)
+                    if key.endswith(PATCH):
+                        try:
+                            current = get_path(tree, slot_base(key))
+                        except (KeyError, IndexError, ValueError, TypeError):
+                            continue
+                        if isinstance(current, list):
+                            patched = _patch_keyed(current, value, KEYED_LISTS[slot_base(key)])
+                            set_path(tree, slot_base(key), patched)
+                        continue
                     try:
                         current = get_path(tree, key)
                     except (KeyError, IndexError, ValueError, TypeError):
@@ -765,10 +844,14 @@ class ConfigStack:
             for key, rv in self._runtime.items():
                 if rv.expires_at is not None and rv.expires_at <= now:
                     continue
-                if path == key or key.startswith(path + "."):
+                base = slot_base(key)
+                if path == base or base.startswith(path + "."):
                     return "runtime"
-                if key in KEYED_LISTS and isinstance(rv.value, list) and path.startswith(key + "."):
-                    if resolve_in_layer(nest(key, rv.value), effective, path)[0]:
+                if base in KEYED_LISTS and isinstance(rv.value, list):
+                    if (
+                        path.startswith(base + ".")
+                        and resolve_in_layer(nest(base, rv.value), effective, path)[0]
+                    ):
                         return "runtime"
                     continue
                 if path.startswith(key + "."):
@@ -810,14 +893,9 @@ class ConfigStack:
         ``layer="derived"``: a computed value just above the app config, in memory only.
         """
         with self._lock:
-            if not field_meta(key) and not self._known_path(key):
-                raise ConfigError(f"unknown parameter: {key}")
-            if must_exist and not self._known_path(key):
-                raise ConfigError(f"parameter does not exist: {key}")
-            try:
-                old = self.get(key)
-            except (KeyError, AttributeError, IndexError):
-                old = None
+            self._check_key(key, must_exist)
+            old = self._safe_get(key)
+            persist = None
             runtime_keys: list[str] = []
             if layer == "runtime":
                 slot, undo = self._stage_runtime(key, value, ttl_s)
@@ -826,6 +904,7 @@ class ConfigStack:
             elif layer == "app":
                 saved_app = copy.deepcopy(self.app)
                 set_in_layer(self.app, self.merged_tree(), key, copy.deepcopy(value))
+                persist = self._persist_app
 
                 def undo() -> None:
                     self.app = saved_app
@@ -841,9 +920,7 @@ class ConfigStack:
                 allow = set()
             else:
                 raise ConfigError(f"layer {layer!r} is not writable")
-            cfg = self._commit(undo, allow, source, runtime_keys, refuse)
-            if layer == "app":
-                self._persist_app()
+            cfg = self._commit(undo, allow, source, runtime_keys, refuse, persist)
             self._record(source, key, old, value)
             self._notify()
             return cfg
@@ -861,10 +938,7 @@ class ConfigStack:
         state, so a rule that spans fields does not depend on their order. All or nothing."""
         with self._lock:
             for key in changes:
-                if not field_meta(key) and not self._known_path(key):
-                    raise ConfigError(f"unknown parameter: {key}")
-                if must_exist and not self._known_path(key):
-                    raise ConfigError(f"parameter does not exist: {key}")
+                self._check_key(key, must_exist)
             before = {k: self._safe_get(k) for k in changes}
             slots: list[str] = []
             undos: list[Callable[[], None]] = []
@@ -908,12 +982,17 @@ class ConfigStack:
         source: str = "api",
         layer: str = "runtime",
         subtree: bool = False,
+        admin: bool = False,
+        refuse: frozenset[str] = frozenset(),
     ) -> bool:
         """Remove an override from the runtime layer, or a value from the derived layer; True when
         something was removed. ``subtree`` also removes the overrides under ``key`` (a whole added
-        entry). An override of a merged-list entry addressed by index is found by identity. The
-        result must still validate, else nothing is removed (``ConfigError``)."""
+        entry). An override of a merged-list entry addressed by index or name is found by
+        identity. Removing an override can loosen things (a locality reset), so the result goes
+        through the same guardrails as ``set`` (``admin``, ``refuse``) and must validate, else
+        nothing is removed. A state that was already invalid may be cleared."""
         with self._lock:
+            valid = self._valid()
             if layer == "runtime":
                 saved = copy.deepcopy(self._runtime)
                 found, old = self._take_runtime(key, subtree)
@@ -937,13 +1016,11 @@ class ConfigStack:
 
             else:
                 return False
-            try:
-                self.effective()
-            except ConfigError:
-                undo()
-                raise
+            if valid:
+                self._commit(undo, {"privacy", "admin"} if admin else set(), source, (), refuse)
             self._record(source, key, old, None)
-            self._notify()
+            if valid:
+                self._notify()
             return True
 
     def apply_preset(self, name: str, *, source: str = "api", admin: bool = False) -> None:
@@ -967,6 +1044,7 @@ class ConfigStack:
         source: str,
         runtime_keys: Iterable[str] = (),
         refuse: frozenset[str] = frozenset(),
+        persist: Callable[[], None] | None = None,
     ) -> RoboEmotConfig:
         """Validate the tentative state and check guardrails; roll back with ``undo`` on
         failure.
@@ -1012,12 +1090,23 @@ class ConfigStack:
                 + " Prompt text: admin confirmation.",
                 blocked,
             )
+        if persist is not None:
+            try:  # the file is the truth: unwritable means nothing changes and nothing is logged
+                persist()
+            except OSError:
+                undo()
+                raise
         if base_found:
             self._approved = base
         if rt_found and keys:
             for v in rt_found:  # each approved value lapses with the override that covers it
                 owner = next(
-                    (k for k in keys if v.path == k or v.path.startswith(k + ".")), keys[0]
+                    (
+                        k
+                        for k in keys
+                        if v.path == slot_base(k) or v.path.startswith(slot_base(k) + ".")
+                    ),
+                    keys[0],
                 )
                 rv = self._runtime[owner]
                 rv.approved = rv.approved | {v.path: copy.deepcopy(v.candidate)}
@@ -1087,6 +1176,20 @@ class ConfigStack:
 
     # ---- internals
 
+    def _check_key(self, key: str, must_exist: bool) -> None:
+        """``ConfigError`` for a parameter that is unknown, or (``must_exist``) not there now."""
+        if not field_meta(key) and not self._known_path(key):
+            raise ConfigError(f"unknown parameter: {key}")
+        if must_exist and not self._known_path(key):
+            raise ConfigError(f"parameter does not exist: {key}")
+
+    def _valid(self) -> bool:
+        try:
+            self.effective()
+        except ConfigError:
+            return False
+        return True
+
     def _safe_get(self, key: str) -> Any:
         try:
             return self.get(key)
@@ -1097,58 +1200,67 @@ class ConfigStack:
         self, key: str, value: Any, ttl_s: float | None
     ) -> tuple[str, Callable[[], None]]:
         """Put ``value`` for ``key`` in the runtime layer; returns the runtime slot it landed in
-        and the undo. An index into a merged list is turned into a partial entry (identity fields
-        plus the change) merged into that list's slot, which ``merged_tree`` merges by identity."""
+        and the undo.
+
+        An entry of a merged list (``KEYED_LISTS``), addressed by index or by name, is stored as
+        a partial entry (identity fields plus the change) in the list's patch slot, so one edit
+        has one representation and a patch whose entry vanishes does nothing. A list of entries
+        written to the list itself is merged into the list's own slot (added entries). Neither
+        can expire (``ttl_s`` is refused)."""
         expires = self.clock() + ttl_s if ttl_s else None
-        ref = keyed_ref(self.merged_tree(), key)
-        if ref is None:
-            slot, new = key, _RuntimeValue(copy.deepcopy(value), expires)
-        else:
-            slot, ident, rest = ref
-            partial = copy.deepcopy(ident)
-            if rest:
-                set_path(partial, rest, copy.deepcopy(value))
+        ref = keyed_ref(self.merged_tree(), key, named=True)
+        if ref is not None or (key in KEYED_LISTS and isinstance(value, list)):
+            if ttl_s:
+                raise ConfigError(f"{key}: a list entry cannot expire")
+            if ref is not None:
+                list_path, ident, rest = ref
+                slot, partial = list_path + PATCH, copy.deepcopy(ident)
+                if rest:
+                    set_path(partial, rest, copy.deepcopy(value))
+                else:
+                    partial = copy.deepcopy(value)
+                items = [partial]
             else:
-                partial = copy.deepcopy(value)
+                list_path, slot, items = key, key, copy.deepcopy(value)
             held = self._runtime.get(slot)
-            merged = _merge_keyed(held.value if held else [], [partial], KEYED_LISTS[slot])
-            new = _RuntimeValue(merged, expires, dict(held.approved) if held else {})
-        prev = self._runtime.get(slot)
-        self._runtime[slot] = new
+            merged = _merge_keyed(held.value if held else [], items, KEYED_LISTS[list_path])
+            new = _RuntimeValue(merged, None, dict(held.approved) if held else {})
+        else:
+            slot, new = key, _RuntimeValue(copy.deepcopy(value), expires)
+        before = dict(self._runtime)
+        self._runtime.pop(slot, None)
+        self._runtime[slot] = new  # last in order: the latest write wins
 
         def undo() -> None:
-            if prev is None:
-                self._runtime.pop(slot, None)
-            else:
-                self._runtime[slot] = prev
+            self._runtime.clear()
+            self._runtime.update(before)
 
         return slot, undo
 
     def _take_runtime(self, key: str, subtree: bool) -> tuple[bool, Any]:
         """Remove the runtime override of ``key`` (and those under it with ``subtree``).
 
-        Returns ``(found, old)``. An entry of a merged list is first looked up by identity in its
-        partial-entry slot; override keys spelled with the path are swept as well."""
+        Returns ``(found, old)``. An entry of a merged list is looked up by identity in the patch
+        slot and in the added-entries slot; emptied parents and slots are dropped. Override keys
+        spelled with the path are swept as well."""
         found, old = False, None
         ref = keyed_ref(self.merged_tree(), key, named=True)
-        held = self._runtime.get(ref[0]) if ref else None
-        if ref is not None and held is not None:
-            slot, ident, rest = ref
-            at = keyed_index(nest(slot, held.value), slot, ident)
-            if at is not None:
+        if ref is not None:
+            list_path, ident, rest = ref
+            for slot in (list_path + PATCH, list_path):
+                held = self._runtime.get(slot)
+                at = keyed_index(nest(list_path, held.value), list_path, ident) if held else None
+                if held is None or at is None:
+                    continue
                 entry = held.value[at]
                 if rest:
-                    try:
-                        old = get_path(entry, rest)
-                        parent, _, leaf = rest.rpartition(".")
-                        (get_path(entry, parent) if parent else entry).pop(leaf)
-                        found = True
-                    except (KeyError, IndexError, AttributeError, TypeError):
-                        pass
-                    if found and set(entry) <= set(ident):
+                    hit, was = _pop_leaf(entry, rest)
+                    if hit:
+                        found, old = True, was
+                    if hit and slot.endswith(PATCH) and set(entry) <= set(ident):
                         held.value.pop(at)
                 else:
-                    old, found = held.value.pop(at), True
+                    found, old = True, held.value.pop(at)
                 if not held.value:
                     self._runtime.pop(slot)
         gone = [k for k in self._runtime if k == key or (subtree and k.startswith(key + "."))]
@@ -1201,14 +1313,17 @@ class ConfigStack:
         expired = [k for k, v in self._runtime.items() if v.expires_at and v.expires_at <= now]
         for key in expired:
             old = self._runtime.pop(key).value
-            self.audit.append(AuditEntry(now, "ttl", key, old, None))
+            self.audit.append(AuditEntry(now, "ttl", key, scrub(key, _plain(old)), None))
         return bool(expired)
 
     def _record(self, source: str, key: str, old: Any, new: Any) -> None:
-        entry = AuditEntry(self.clock(), source, key, scrub(key, old), scrub(key, new))
+        entry = AuditEntry(
+            self.clock(), source, key, scrub(key, _plain(old)), scrub(key, _plain(new))
+        )
         self.audit.append(entry)
         if self.audit_path:
-            with open(self.audit_path, "a") as fh:
+            fd = os.open(self.audit_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, AUDIT_FILE_MODE)
+            with os.fdopen(fd, "a") as fh:
                 fh.write(json.dumps(entry.__dict__, default=str) + "\n")
 
     def _notify(self) -> ConfigChange | None:

@@ -92,7 +92,8 @@ def shown(key: str, value: Any) -> str:
     ``base_url`` shows its host only."""
     if key.rsplit(".", 1)[-1] == "base_url" and isinstance(value, str):
         return repr(endpoint(value))
-    return repr(scrub(key, value))
+    clean = scrub(key, value)
+    return repr(scrub_text(clean) if isinstance(clean, str) else clean)
 
 
 def scrub_text(text: str) -> str:

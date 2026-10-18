@@ -27,6 +27,7 @@ import os
 import stat
 import tempfile
 import threading
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -53,6 +54,7 @@ from roboemot.config.stack import (
 from roboemot.redact import secret_shaped
 
 from .setting_clean import (
+    WORDS_KIND,
     clean_hooked,
     clean_key,
     clean_value,
@@ -348,7 +350,7 @@ class SettingsEditor:
             if self._in_tree(base, box, path, tree):
                 raise ValidationError("entry_in_lower_layer", "path")
             key = okey(tree, path)
-            self.stack.clear(path, source=source, subtree=True)
+            self.stack.clear(path, source=source, subtree=True, admin=True, refuse=REFUSED_CHECKS)
             for stored in [k for k in self._overrides if k == key or k.startswith(key + ".")]:
                 del self._overrides[stored]
             return {
@@ -370,17 +372,22 @@ class SettingsEditor:
             if row is None or row["kind"] in CONTAINERS or not row["writable"]:
                 raise SettingNotAllowed("path")
             key = okey(self.stack.merged_tree(), path)
-            if self._added_parent(key) is not None:
+            hook = hook_for(path)
+            if (
+                self._added_parent(key) is not None
+                or row["conservative"] == "superset"
+                or (hook is not None and hook.kind == WORDS_KIND)
+            ):  # the blocklist only grows from the web; an added entry's field has no lower value
                 raise ValidationError("not_resettable", "path")
-            changed = self.stack.clear(path, source=source)
-            self._overrides.pop(key, None)
+            changed = self.stack.clear(path, source=source, admin=True, refuse=REFUSED_CHECKS)
+            stale = self._overrides.pop(key, None) is not None
             return {
                 "path": path,
                 "changed": changed,
                 "value": plain(get_path(self.stack.effective(), path)),
                 "layer": "runtime",
                 "restart_required": self._restart(row),
-                "persisted": self._persist() if changed else True,
+                "persisted": self._persist() if changed or stale else True,
             }
 
     def restore(self) -> None:
@@ -410,7 +417,7 @@ class SettingsEditor:
                     continue
                 planned[key] = found
             try:
-                cfg = self.stack.preview({p: v for p, v, _ in planned.values()})
+                cfg = self.stack.preview(combine((p, v) for p, v, _ in planned.values()))
             except (ConfigError, ValueError):
                 cfg = self.stack.effective()
             cleaned: dict[str, tuple[str, Any]] = {}  # file key -> (stack path, stack value)
@@ -447,19 +454,19 @@ class SettingsEditor:
         old = plain(get_path(cfg, path))
         if clean == old:
             return {"path": path, "changed": False, "value": old}
+        # a runtime dict merges, so a value that would drop a key cannot be expressed there
         if isinstance(clean, dict) and deep_merge(old or {}, clean) != clean:
-            raise ValidationError(
-                "value_merged", "value"
-            )  # a runtime dict merges: no key is dropped
+            raise ValidationError("value_merged", "value")
         tree = self.stack.merged_tree()
-        layer = self._write(path, clean, source)
+        stored = okey(tree, path)
+        layer = self._write(path, clean, source, retry_app=self._added_parent(stored) is None)
         return {
             "path": path,
             "changed": True,
             "value": clean,
             "layer": layer,
             "restart_required": self._restart(row),
-            "okey": okey(tree, path),
+            "okey": stored,
         }
 
     @staticmethod
@@ -476,17 +483,19 @@ class SettingsEditor:
             and name in (box["key"], "when" if box["key"] == "event" else box["key"])
         )
 
-    def _write(self, key: str, value: Any, source: str) -> str:
+    def _write(self, key: str, value: Any, source: str, *, retry_app: bool = True) -> str:
         """Write on the runtime layer; if the stack refuses it only for a safety loosening, write
         it on the app layer instead (app YAML and audit) and drop the runtime value that would
-        shadow it. Returns the layer. Every other refusal propagates."""
+        shadow it. Returns the layer. Every other refusal propagates, and so does that one for a
+        field of an entry added at runtime (``retry_app`` False): the app file has no such entry.
+        """
         try:
             self.stack.set(
                 key, value, source=source, admin=True, must_exist=True, refuse=REFUSED_CHECKS
             )
             return "runtime"
         except GuardrailError as exc:
-            if not loosening_only(exc):
+            if not retry_app or not loosening_only(exc):
                 raise
         self.stack.set(
             key,
@@ -497,7 +506,7 @@ class SettingsEditor:
             must_exist=True,
             refuse=REFUSED_CHECKS,
         )
-        self.stack.clear(key, source=source)
+        self.stack.clear(key, source=source, admin=True, refuse=REFUSED_CHECKS)
         return "app"
 
     def _remember(self, key: str, value: Any) -> None:
@@ -608,10 +617,18 @@ class SettingsEditor:
         if secret_shaped(value):
             return None
         parsed = parse_okey(key)
+        base = self.stack.merged_tree(include_runtime=False)
         if parsed is not None:
             list_path, ident, rest = parsed
-            if not rest:
-                return (list_path, [value], True) if isinstance(value, dict) else None
+            if not rest:  # an added entry: its identity is its own, and no lower layer has it
+                if not isinstance(value, dict) or value.get(KEYED_LISTS[list_path]) is None:
+                    return None
+                if (
+                    ident != ident_fields(list_path, value)
+                    or keyed_index(base, list_path, ident) is not None
+                ):
+                    return None
+                return (list_path, [value], True)
             at = keyed_index(tree, list_path, ident)
             if at is None:
                 return None
@@ -623,7 +640,8 @@ class SettingsEditor:
             return None
         parent = rows.get(key.rpartition(".")[0])
         if parent is not None and parent["kind"] == "dict_of_model" and isinstance(value, dict):
-            return key, value, True
+            absent = key.rpartition(".")[2] not in get_path(base, parent["path"])
+            return (key, value, True) if absent else None
         return (key, value, False) if key in rows else None
 
     def _clean_planned(
@@ -660,12 +678,13 @@ class SettingsEditor:
             return {}
 
         def file_value(key: str) -> Any:
+            parsed = parse_okey(key)
             value = cleaned[key][1]
-            return value[0] if parse_okey(key) and not parse_okey(key)[2] else value
+            return value[0] if parsed and not parsed[2] else value
 
         try:
             self.stack.set_many(
-                {p: v for p, v in cleaned.values()},
+                combine(cleaned.values()),
                 source=RESTORE_SOURCE,
                 admin=True,
                 refuse=REFUSED_CHECKS,
@@ -684,6 +703,18 @@ class SettingsEditor:
                 continue
             kept[key] = file_value(key)
         return kept
+
+
+def combine(edits: Iterable[tuple[str, Any]]) -> dict[str, Any]:
+    """``{stack path: value}`` of a batch; entries added to one merged list share its path, so
+    their lists are joined rather than the last one winning."""
+    out: dict[str, Any] = {}
+    for path, value in edits:
+        if path in KEYED_LISTS and isinstance(value, list):
+            out.setdefault(path, []).extend(value)
+        else:
+            out[path] = value
+    return out
 
 
 def _shown(key: str) -> str:
