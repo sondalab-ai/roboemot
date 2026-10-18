@@ -99,26 +99,6 @@ def hook_for(path: str) -> Hook | None:
     return None
 
 
-def hook_schema(hook: Hook, path: str, cfg: RoboEmotConfig) -> dict[str, Any]:
-    """JSON-Schema-style limits of a hooked field, for the legacy settings page."""
-    web = cfg.webui
-    phrase = {"type": "string", "maxLength": web.settings_phrase_max_chars}
-    if hook.kind in (LIST_KIND, WORDS_KIND):
-        return {
-            "type": "array",
-            "items": phrase,
-            "minItems": 1,
-            "maxItems": web.settings_list_max_items,
-        }
-    if hook.kind == NAME_KIND:
-        return {"type": ["string", "null"], "maxLength": cfg.voice.name_max_chars}
-    return {
-        "type": "string",
-        "minLength": 0 if path.endswith(".robot_unnamed") else 1,
-        "maxLength": web.settings_line_max_chars,
-    }
-
-
 def _items(value: object, cfg: RoboEmotConfig, pattern: re.Pattern[str]) -> list[str]:
     """Distinct, whitespace-normalised items of a list within the count, length and character
     limits."""

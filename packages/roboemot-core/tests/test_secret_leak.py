@@ -204,12 +204,10 @@ def test_settings_api_never_shows_a_reference_or_url_credentials(tmp_path):
                 for f in resp.json["fields"]
             ]
         )
-        legacy = json.dumps(resp.json["settings"])
         for blob in (
             resp.body,
             json.dumps(editor.fields()).encode(),
             paths_and_keys.encode(),
-            legacy.encode(),
         ):
             for canary in canaries:
                 assert canary.encode() not in blob

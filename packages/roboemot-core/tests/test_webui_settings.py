@@ -75,10 +75,10 @@ def put(client, path, value, pin=PIN, **extra):
     )
 
 
-def test_list_also_carries_the_whole_catalogue_with_the_allowlist_writable(served, stack):
+def test_list_carries_the_whole_catalogue_with_the_allowlist_writable(served, stack):
     data = served.request("GET", "/api/settings").json
     fields = {f["path"]: f for f in data["fields"]}
-    assert len(fields) > len(data["settings"])
+    assert set(data) == {"fields", "pin_required"}, "the legacy settings list is gone"
     writable = {p for p, f in fields.items() if f["writable"]}
     assert writable == {
         p for p, f in fields.items() if f["kind"] not in CONTAINERS and not f["secret"]
@@ -88,25 +88,14 @@ def test_list_also_carries_the_whole_catalogue_with_the_allowlist_writable(serve
     assert fields[NAME]["nullable"] and fields[LINE]["admin_only"]
 
 
-def test_list_has_value_default_schema_and_admin_flag(served, stack):
-    rows = {r["path"]: r for r in served.request("GET", "/api/settings").json["settings"]}
-    assert set(rows) == {
-        f["path"] for f in SettingsEditor(stack).fields() if hook_for(f["path"]) and f["writable"]
-    }
-    assert WAKE in rows and "persona.prompt" not in rows  # the legacy page lists the hooked ones
+def test_list_has_value_default_source_and_admin_flag(served, stack):
+    rows = {r["path"]: r for r in served.request("GET", "/api/settings").json["fields"]}
     wake = rows[WAKE]
     assert wake["value"] == ["hey robot", "hello robot"] == wake["default"]
-    assert wake["schema"] == {
-        "type": "array",
-        "items": {"type": "string", "maxLength": 40},
-        "minItems": 1,
-        "maxItems": 64,
-    }
-    assert wake["needs_admin"] is False
+    assert wake["kind"] == "string_list" and wake["admin_only"] is False
     assert "Phrases that wake" in wake["description"]
-    assert rows[LINE]["needs_admin"] and rows[BLOCK]["needs_admin"]
-    assert rows[NAME]["schema"]["type"] == ["string", "null"]
-    assert rows["safety.minor_lines.it.robot_unnamed"]["schema"]["minLength"] == 0
+    assert rows[LINE]["admin_only"] and rows[BLOCK]["admin_only"]
+    assert rows[NAME]["nullable"] and rows[NAME]["kind"] == "text"
     assert served.request("GET", "/api/settings").json["pin_required"] is True
 
 
@@ -149,7 +138,7 @@ def test_each_field_changes_with_the_pin_and_is_audited(served, stack, path, val
     line = json.loads((stack.audit_path).read_text().splitlines()[-1])
     assert line["source"] == "webui:127.0.0.1" and line["key"] == path and line["new"] == value
     assert path in stack.changes[-1].changed_keys  # hot reload (config.changed) fired
-    shown = served.request("GET", "/api/settings").json["settings"]
+    shown = served.request("GET", "/api/settings").json["fields"]
     if "minor" in path:
         assert {r["path"]: r for r in shown}[path]["value"] == "***"
         shown = served.request("POST", "/api/settings/reveal", {"pin": PIN}).json["fields"]
@@ -582,16 +571,15 @@ def test_private_values_are_hidden_without_the_pin(private_served):
         row = fields[path]
         assert row["private"] and row["admin_only"], path
         assert row["value"] == "***" and row["default"] in ("***", None), path
-    for blob in (json.dumps(data), json.dumps(data["settings"])):
+    for blob in (json.dumps(data),):
         for canary in ("CANARY", "canaryword", "45.4642", "123.0"):
             assert canary not in blob
     for container in ("safety.minor_lines", "safety.minor_output_blocklist", "privacy"):
         row = fields.get(container)
         assert row is None or (row["value"] == [] and row["entry"] is None)
     assert fields["reflexes.rules.startle-loud.suppress_with_minor"]["value"] == "***"
-    legacy = {s["path"]: s for s in data["settings"]}
-    assert legacy[LINE]["private"] and legacy[LINE]["value"] == "***"
-    assert not legacy[WAKE]["private"]
+    assert fields[LINE]["private"] and fields[LINE]["value"] == "***"
+    assert not fields[WAKE]["private"]
 
 
 def test_reveal_with_the_pin_returns_only_private_fields_with_real_values(private_served):
