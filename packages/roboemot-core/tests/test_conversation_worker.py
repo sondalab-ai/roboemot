@@ -866,3 +866,18 @@ def test_a_minor_after_an_adult_session_ends_it_and_unknown_speakers_share_other
     rig.turn("tre")
     assert len(rig.server.requests[2][1]["messages"]) == 2
     assert rig.worker.snapshot()["speaker_changes"] == 1
+
+
+def test_history_written_without_minor_rules_is_never_sent_for_a_child_later(rigs):
+    rig = rigs(routes=(CLEARED,), safety={"minors_allowed_llm": True})
+    rig.minor[0] = True
+    rig.server.scripts["lan.local"] = ["Risposta per bambini."]
+    rig.turn("uno")
+    rig.minor[0] = False
+    rig.server.scripts["lan.local"] = ["ADULT-ONLY-MARK."]
+    rig.turn("due")  # a child session ends when the minor leaves: history is not carried over
+    assert len(rig.server.requests[1][1]["messages"]) == 2
+    rig.minor[0] = True
+    rig.turn("tre")  # and the adult turn is not kept for the child
+    sent = json.dumps(rig.server.requests[2][1]["messages"])
+    assert "ADULT-ONLY-MARK" not in sent and len(rig.server.requests[2][1]["messages"]) == 2

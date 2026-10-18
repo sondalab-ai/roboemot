@@ -76,7 +76,7 @@ class Speech(Protocol):
 class _Session:
     last_active: float
     speaker: str | None = None  # registry id of the person it belongs to; None: unknown
-    minor: bool = False  # a minor was present when it opened
+    minor: bool = False  # the minor state of the latest turn (history is written under it)
 
 
 @dataclass
@@ -240,14 +240,15 @@ class ConversationWorker:
 
     def _touch(self, now: float, speaker: str | None, minor: bool) -> None:
         """Start the session if none is open and stamp the activity. A session belongs to the
-        person who opened it: another speaker (a different known person, or an unknown one
-        taking over a known person's session, or the reverse), or a minor appearing in a
-        session that opened without one, ends it first, so nobody inherits someone else's
-        history. Two unknown speakers cannot be told apart: they share a session unless the
-        minor signal changed."""
+        person who opened it and to one minor state: another speaker (a different known
+        person, or an unknown one taking over a known person's session, or the reverse), or a
+        turn whose minor state differs from the session's latest turn (either way), ends it
+        first, so nobody inherits someone else's history and a turn written without the minor
+        rules is never sent for a child. Two unknown speakers cannot be told apart and share a
+        session while the minor state stays the same."""
         with self._lock:
             s = self._session
-            other = s is not None and (s.speaker != speaker or (minor and not s.minor))
+            other = s is not None and (s.speaker != speaker or s.minor != minor)
         if other:
             self._end_session("speaker changed")
             self._counts["speaker_changes"] += 1
