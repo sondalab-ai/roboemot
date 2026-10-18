@@ -84,6 +84,7 @@ BEHAVIOUR_MODULES = [
     "world/feed.py",
     "world/scan.py",
     "world/sources.py",
+    "webui/robot_section.py",
     "paths.py",
     "vision/__init__.py",
     "vision/attributes.py",

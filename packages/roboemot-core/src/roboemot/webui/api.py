@@ -109,6 +109,9 @@ class SettingsPort(Protocol):
 
     def describe(self, fields: list[FieldDescriptor] | None = None) -> list[dict[str, Any]]: ...
     def fields(self) -> list[FieldDescriptor]: ...
+    def robot_split(
+        self, fields: list[FieldDescriptor]
+    ) -> tuple[list[FieldDescriptor], dict[str, Any] | None]: ...
     def reveal(self) -> list[FieldDescriptor]: ...
     def change(self, path: object, value: object, source: str) -> dict[str, Any]: ...
     def add_entry(
@@ -637,13 +640,20 @@ class WebApi:
 
     def _settings_list(self, req: Request) -> Response:
         """``fields``: the whole field catalogue (``config.catalogue``, secrets redacted);
-        ``settings``: the writable subset in the shape of the current page; both with the PIN
-        note."""
+        ``settings``: the writable subset in the shape of the current page; ``robot``: null or
+        the robot plugin's section (read-only hardware rows plus the config rows it claims, which
+        are then absent from ``fields``); all with the PIN note."""
         port = self._settings_port()
-        fields = port.fields()
+        every = port.fields()
+        fields, robot = port.robot_split(every)
         return Response(
             HTTPStatus.OK,
-            {"settings": port.describe(fields), "fields": fields, "pin_required": True},
+            {
+                "settings": port.describe(every),
+                "fields": fields,
+                "robot": robot,
+                "pin_required": True,
+            },
         )
 
     def _settings_reveal(self, req: Request) -> Response:
