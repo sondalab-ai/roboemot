@@ -276,4 +276,6 @@ def test_settings_page_strings_are_chrome_only_and_the_legacy_ones_are_gone():
 def test_settings_page_marks_the_restart_hook_and_never_stores_values_in_the_browser():
     js = (STATIC / "settings.js").read_text()
     assert 'id: "settings-restart"' in js and "disabled: true" in js
-    assert 'href: "#settings-restart"' in js
+    assert "href" not in js.split("settings_restart_badge")[0][-120:], (
+        "no link until the action exists"
+    )

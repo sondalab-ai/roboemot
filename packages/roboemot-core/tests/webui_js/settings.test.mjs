@@ -91,6 +91,14 @@ async function answerPin(page, pin = PIN) {
   return dialog;
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const typeQuery = async (page, text) => {
+  const search = page.document.querySelector("#settings-search");
+  search.value = text;
+  search.dispatchEvent(new page.window.Event("input"));
+  await sleep(200);
+};
+
 const posts = (page, path) => page.calls.filter((c) => c.method === "POST" && c.path === path);
 
 test("groups are collapsed and render nothing until opened", async () => {
@@ -191,21 +199,17 @@ test("a robot section appears as its own group, and is absent without one", asyn
 
 test("search matches the path or the description and opens the matching groups", async () => {
   const page = await settingsPage({ "GET /api/strings": { language: "en", strings: { settings_matches: "{n} shown" } } });
-  const search = page.document.querySelector("#settings-search");
-  search.value = "speech volume";
-  search.dispatchEvent(new page.window.Event("input"));
+  await typeQuery(page, "speech volume");
   assert.equal(group(page, "core-voice").getAttribute("aria-expanded"), "true");
   assert.deepEqual([...body(page, "core-voice").querySelectorAll(".setting")].map((r) => r.dataset.path), ["voice.volume_db"]);
   assert.equal(page.document.querySelector("#grp-core-privacy").closest("section").hidden, true);
   assert.equal(page.document.querySelector('.sl-nav__item[data-group="core-privacy"]').hidden, true);
   assert.equal(page.document.querySelector("#settings-count").textContent, "1 shown");
 
-  search.value = "valence";
-  search.dispatchEvent(new page.window.Event("input"));
+  await typeQuery(page, "valence");
   assert.equal(group(page, "core-appraisal").closest("section").hidden, false, "found through a child of a container");
 
-  search.value = "";
-  search.dispatchEvent(new page.window.Event("input"));
+  await typeQuery(page, "");
   assert.equal(group(page, "core-voice").getAttribute("aria-expanded"), "false", "back to what was opened by hand");
 });
 
@@ -228,8 +232,9 @@ test("badges show the source layer, restart, admin and private", async () => {
   const page = await settingsPage();
   await open(page, "core-voice");
   assert.ok(row(page, "voice.volume_db").querySelector(".sl-tag:not(.sl-tag--plain)").textContent.length > 0);
-  const restart = row(page, "voice.flag").querySelector('a[href="#settings-restart"]');
-  assert.ok(restart, "restart badge links to the hook");
+  const restart = row(page, "voice.flag").querySelector(".sl-badge--warning");
+  assert.ok(restart, "restart badge shown");
+  assert.equal(restart.closest("a"), null, "no link until the restart action exists");
   const hook = page.document.querySelector("#settings-restart");
   assert.equal(hook.disabled, true, "placeholder until the restart action exists");
   await open(page, "core-privacy");
@@ -298,7 +303,7 @@ test("save: a client pre-check flags the field and sends nothing", async () => {
   assert.equal(err.hidden, false);
   assert.equal(err.textContent, "err_value_range");
   assert.equal(input.getAttribute("aria-invalid"), "true");
-  assert.equal(input.getAttribute("aria-describedby"), err.id);
+  assert.ok(input.getAttribute("aria-describedby").split(" ").includes(err.id));
   assert.equal(page.document.querySelector("dialog"), null);
 });
 
@@ -391,18 +396,6 @@ test("private rows are masked until the PIN reveals them, and the values stay in
   assert.equal(buttons(box(), "settings_reveal").length, 0);
   assert.ok(!storageDump(page.window).includes("secret note"));
   assert.ok(!storageDump(page.window).includes(PIN));
-});
-
-test("logging out forgets the revealed values", async () => {
-  const revealed = d("privacy.note", "text", { value: "secret note", private: true });
-  const page = await settingsPage({ "POST /api/settings/reveal": { fields: [revealed] } });
-  await open(page, "core-privacy");
-  button(row(page, "privacy.note"), "settings_reveal").click();
-  await settle();
-  await answerPin(page);
-  assert.equal(page.run("revealedSettings.size"), 1);
-  page.run("forgetRevealedSettings()");
-  assert.equal(page.run("revealedSettings.size"), 0);
 });
 
 test("entries: they open lazily, are removed only when the runtime holds them, and go through the PIN", async () => {
@@ -526,4 +519,213 @@ test("the debug tab splits robot sections from the core ones", async () => {
   assert.equal(blocks.length, 2);
   assert.deepEqual(Object.keys(blocks[0].sections), ["system"]);
   assert.deepEqual(Object.keys(blocks[1]), ["platform"]);
+});
+
+const authed = {
+  "GET /api/session": { authenticated: true, pin_set: true, csrf: "tok" },
+  "GET /api/enrollment/status": { state: "idle" },
+};
+
+test("logout clears the revealed values, the catalogue and the DOM before the API call, even if it fails", async () => {
+  const revealed = d("privacy.note", "text", { value: "TOPSECRET", private: true });
+  const page = await loadPage({
+    ...authed,
+    "GET /api/settings": { fields: fields(), pin_required: true },
+    "POST /api/settings/reveal": { fields: [revealed] },
+    "POST /api/logout": reply(500, { error: "generic" }),
+  });
+  await page.run("showTab('settings')");
+  await settle();
+  await open(page, "core-privacy");
+  button(row(page, "privacy.note"), "settings_reveal").click();
+  await settle();
+  await answerPin(page);
+  assert.ok(page.document.body.textContent.includes("TOPSECRET") || row(page, "privacy.note").querySelector("input").value === "TOPSECRET");
+  page.document.querySelector("#logout").click();
+  await settle();
+  assert.ok(posts(page, "/api/logout").length === 1);
+  assert.equal(page.run("revealedSettings.size"), 0);
+  assert.equal(page.run("settingsState.groups.length"), 0);
+  assert.equal(page.run("settingsState.data"), null);
+  assert.equal(page.run("settingsState.query"), "");
+  assert.equal(page.run("settingsState.open.size + settingsState.collapsed.size"), 0);
+  const dump = page.run("JSON.stringify([...revealedSettings], null, 0) + JSON.stringify(settingsState.data)");
+  assert.ok(!dump.includes("TOPSECRET"));
+  assert.ok(!page.document.documentElement.outerHTML.includes("TOPSECRET"));
+  for (const i of page.document.querySelectorAll("input")) assert.notEqual(i.value, "TOPSECRET");
+});
+
+test("entry keys that are prefixes of each other keep their own fields", async () => {
+  const flat = [
+    d("voice.moods", "dict_of_model", { value: ["a", "a.b"], entry: ENTRY, writable: false }),
+    d("voice.moods.a.rate", "number", { value: 1, ge: 0, le: 2 }),
+    d("voice.moods.a.b.rate", "number", { value: 2, ge: 0, le: 2 }),
+  ];
+  const page = await settingsPage({}, { fields: flat, pin_required: true });
+  await open(page, "core-voice");
+  for (const entry of page.document.querySelectorAll("[data-entry] .sl-disclosure")) entry.click();
+  const inside = (key) => [...page.document.querySelector(`[data-entry="voice.moods.${key}"]`).querySelectorAll(".setting")].map((r) => r.dataset.path);
+  assert.deepEqual(inside("a"), ["voice.moods.a.rate"]);
+  assert.deepEqual(inside("a.b"), ["voice.moods.a.b.rate"]);
+});
+
+test("search is debounced, needs two characters to open groups, and caps what it opens", async () => {
+  const bulk = Array.from({ length: 60 }, (_, n) => d("bulk.f" + n, "bool", { value: false, description: "needle " + n }));
+  const page = await settingsPage({ "GET /api/strings": { language: "en", strings: { settings_show_all: "All {n}" } } }, { fields: fields().concat(bulk), pin_required: true });
+  const search = page.document.querySelector("#settings-search");
+  search.value = "needle";
+  search.dispatchEvent(new page.window.Event("input"));
+  assert.equal(group(page, "core-bulk").getAttribute("aria-expanded"), "false", "nothing before the delay");
+  await sleep(200);
+  assert.equal(group(page, "core-bulk").getAttribute("aria-expanded"), "true");
+  assert.equal(body(page, "core-bulk").querySelectorAll(".setting").length, 50);
+  const all = button(body(page, "core-bulk"), "All 60");
+  assert.ok(all);
+  all.click();
+  assert.equal(body(page, "core-bulk").querySelectorAll(".setting").length, 60);
+
+  await typeQuery(page, "n");
+  assert.equal(group(page, "core-bulk").getAttribute("aria-expanded"), "false", "one character does not auto-open");
+});
+
+test("unsaved edits survive a collapse and a filter change", async () => {
+  const page = await settingsPage();
+  await open(page, "core-voice");
+  row(page, "voice.label").querySelector("input").value = "draft";
+  group(page, "core-voice").click();
+  group(page, "core-voice").click();
+  assert.equal(row(page, "voice.label").querySelector("input").value, "draft");
+  await typeQuery(page, "voice.label");
+  await typeQuery(page, "");
+  assert.equal(row(page, "voice.label").querySelector("input").value, "draft");
+});
+
+test("secret json is never printed", async () => {
+  const flat = [d("voice.cfg", "json", { value: { token: "LEAK" }, secret: true, writable: false })];
+  const page = await settingsPage({}, { fields: flat, pin_required: true });
+  await open(page, "core-voice");
+  assert.ok(!page.document.body.textContent.includes("LEAK"));
+  assert.equal(row(page, "voice.cfg").querySelector("pre"), null);
+});
+
+test("the add form skips json fields and sends their default", async () => {
+  const entry = [d("rate", "number", { value: null, ge: 0, le: 2 }), d("channels", "json", { value: { a: 1 } })];
+  const flat = [d("voice.moods", "dict_of_model", { value: [], entry, writable: false })];
+  const page = await settingsPage({ "POST /api/settings/entry": { changed: true, layer: "runtime", persisted: true } }, { fields: flat, pin_required: true });
+  await open(page, "core-voice");
+  const box = row(page, "voice.moods");
+  [...box.querySelectorAll(".sl-disclosure")].find((b) => b.textContent === "settings_add_entry").click();
+  const form = [...box.querySelectorAll(".nested")].pop();
+  assert.equal(form.querySelectorAll("textarea").length, 0);
+  form.querySelector('input[type="text"]').value = "k";
+  form.querySelector('input[type="number"]').value = "1";
+  button(form, "settings_add_entry").click();
+  await settle();
+  await answerPin(page);
+  assert.deepEqual(posts(page, "/api/settings/entry")[0].body.value, { channels: { a: 1 }, rate: 1 });
+});
+
+test("dict rows reject prototype keys, blank keys and duplicates", async () => {
+  const page = await settingsPage();
+  await open(page, "core-voice");
+  const box = row(page, "voice.names");
+  const save = async (keys) => {
+    const rows = box.querySelectorAll(".entry .entry");
+    const have = rows.length;
+    for (let n = have; n < keys.length; n++) button(box, "settings_add").click();
+    const ins = [...box.querySelectorAll('input[type="text"]')];
+    keys.forEach((k, n) => { ins[n * 2].value = k; ins[n * 2 + 1].value = "v"; });
+    button(box, "settings_save").click();
+    await settle();
+    return box.querySelector(".sl-field__error").textContent;
+  };
+  assert.equal(await save(["__proto__"]), "err_key_invalid");
+  assert.equal(await save(["constructor"]), "err_key_invalid");
+  assert.equal(await save(["x", "x"]), "err_key_duplicate");
+  assert.equal(page.document.querySelector("dialog"), null);
+});
+
+test("an enum outside its choices shows a blank and never sends choice 0", async () => {
+  const flat = [d("voice.mode", "enum", { value: "zzz", choices: ["a", "b"] })];
+  const page = await settingsPage({}, { fields: flat, pin_required: true });
+  await open(page, "core-voice");
+  const box = row(page, "voice.mode");
+  const select = box.querySelector("select");
+  assert.equal(select.value, "");
+  button(box, "settings_save").click();
+  await settle();
+  assert.equal(box.querySelector(".sl-field__error").textContent, "err_value_choice");
+  assert.equal(page.document.querySelector("dialog"), null);
+});
+
+test("no slider when the limits are equal; chips are not toggles; the description is linked", async () => {
+  const flat = [
+    d("voice.fixed", "number", { value: 1, ge: 1, le: 1 }),
+    d("voice.tags", "string_list", { value: ["x"], description: "Tags" }),
+    d("voice.label", "text", { value: "a", description: "A label" }),
+  ];
+  const page = await settingsPage({}, { fields: flat, pin_required: true });
+  await open(page, "core-voice");
+  assert.equal(row(page, "voice.fixed").querySelector('input[type="range"]'), null);
+  assert.equal(row(page, "voice.tags").querySelector(".sl-chip").hasAttribute("aria-pressed"), false);
+  const input = row(page, "voice.label").querySelector("input");
+  const desc = row(page, "voice.label").querySelector(".hint");
+  assert.equal(input.getAttribute("aria-describedby"), desc.id);
+});
+
+test("hostile text in descriptions, keys and the robot title stays text", async () => {
+  const evil = '<img src=x onerror="window.pwned=1">';
+  const flat = [
+    d("voice.moods", "dict_of_model", { value: [evil], entry: ENTRY, writable: false, description: evil }),
+    d("voice.moods." + evil + ".rate", "number", { value: 1, ge: 0, le: 2 }),
+    d("voice.names", "string_dict", { value: { [evil]: evil } }),
+  ];
+  const robot = { id: "r", title: evil, fields: [d("robot.r.limits.a", "number", { value: 1, writable: false })], actions: [] };
+  const page = await settingsPage({}, { fields: flat, robot, pin_required: true });
+  await open(page, "core-voice");
+  await open(page, "robot-limits");
+  assert.equal(page.document.querySelectorAll("img").length, 0);
+  assert.equal(page.window.pwned, undefined);
+  assert.ok(page.document.body.textContent.includes(evil));
+});
+
+test("the null toggle disables the control, restores it, and sends null or the value", async () => {
+  const page = await settingsPage({ "POST /api/settings": { changed: true, layer: "runtime", persisted: true } });
+  await open(page, "core-voice");
+  const box = row(page, "voice.opt2");
+  const toggle = box.querySelector('input[type="checkbox"]');
+  const num = box.querySelector('input[type="number"]');
+  assert.equal(toggle.checked, false);
+  assert.equal(num.disabled, false);
+  toggle.click();
+  assert.equal(num.disabled, true);
+  assert.equal(box.querySelector('input[type="range"]').disabled, true);
+  toggle.click();
+  assert.equal(num.disabled, false);
+  num.value = "4";
+  button(box, "settings_save").click();
+  await settle();
+  await answerPin(page);
+  assert.equal(posts(page, "/api/settings")[0].body.value, 4);
+});
+
+test("a tuple with null items renders blanks and refuses to save until filled", async () => {
+  const flat = [d("voice.pair", "tuple", { value: [null, 2], item_kind: "number", length: 2 })];
+  const page = await settingsPage({}, { fields: flat, pin_required: true });
+  await open(page, "core-voice");
+  const box = row(page, "voice.pair");
+  const ins = box.querySelectorAll('input[type="number"]');
+  assert.equal(ins[0].value, "");
+  button(box, "settings_save").click();
+  await settle();
+  assert.equal(box.querySelector(".sl-field__error").textContent, "err_value_type");
+});
+
+test("the debug tab works without a robot section", async () => {
+  const page = await loadPage({ "GET /api/debug": { sections: { system: { scope: "local" } } } });
+  await page.run("debugView()");
+  const blocks = page.document.querySelectorAll(".sl-term-block__out");
+  assert.equal(blocks.length, 1);
+  assert.deepEqual(Object.keys(JSON.parse(blocks[0].textContent).sections), ["system"]);
+  assert.ok(![...page.document.querySelectorAll("h3")].some((h) => h.textContent === "settings_robot"));
 });

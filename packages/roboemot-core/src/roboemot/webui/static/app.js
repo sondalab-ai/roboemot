@@ -667,7 +667,12 @@ function shell() {
   const out = document.getElementById("logout");
   out.hidden = false;
   out.textContent = t("logout");
-  out.onclick = () => guarded(async () => { await api("POST", "/api/logout", {}); state.csrf = null; await boot(); });
+  out.onclick = () => guarded(async () => {
+    resetSettingsState();
+    await api("POST", "/api/logout", {});
+    state.csrf = null;
+    await boot();
+  });
   showTab(state.tab);
 }
 
@@ -685,7 +690,7 @@ async function boot() {
     shell();
   } else {
     state.csrf = null;
-    forgetRevealedSettings();
+    resetSettingsState();
     document.getElementById("tabs").hidden = true;
     document.getElementById("logout").hidden = true;
     loginView();

@@ -10,7 +10,10 @@ const SETTING_SLIDER_STEPS = 100;
 const SETTING_DEFAULT_MAX_CHARS = 120;
 // Mirrors LANGUAGE_MAPS in webui/settings.py: a language is never added from the web. The server refuses it anyway.
 const SETTING_LANGUAGE_MAPS = ["voice.keywords", "safety.minor_lines"];
-const SETTING_SOURCES = ["runtime", "derived", "app", "preset", "manifest", "defaults", "schema"];
+const SETTING_SEARCH_DEBOUNCE_MS = 150;
+const SETTING_SEARCH_MIN_CHARS = 2;
+const SETTING_AUTO_OPEN_MAX = 50;
+const SETTING_UNSAFE_KEYS = ["__proto__", "constructor", "prototype"];
 
 const settingsState = {
   query: "", changedOnly: false, open: new Set(), collapsed: new Set(),
@@ -18,8 +21,17 @@ const settingsState = {
 };
 let revealedSettings = new Map(); // private fields shown after a PIN check, kept in memory only
 
-function forgetRevealedSettings() {
+// Drops everything the page learned: revealed private values, the catalogue and the view state.
+// Called on logout before the API call, so nothing survives a failed logout request.
+function resetSettingsState() {
   revealedSettings = new Map();
+  Object.assign(settingsState, {
+    query: "", changedOnly: false, open: new Set(), collapsed: new Set(), groups: [], restartPending: false, data: null,
+  });
+  clearTimeout(settingsState.timer);
+  settingsState.timer = null;
+  const view = document.getElementById("view");
+  if (view) view.replaceChildren();
 }
 
 // ---------------------------------------------------------------- model
@@ -140,7 +152,7 @@ function readNumber(desc, input) {
 function numberControl(desc, id, opts) {
   const input = numberInput(desc, id, opts.label);
   const parts = [fieldControl(input)];
-  const bounded = desc.ge !== null && desc.ge !== undefined && desc.le !== null && desc.le !== undefined;
+  const bounded = desc.ge !== null && desc.ge !== undefined && desc.le !== null && desc.le !== undefined && desc.ge < desc.le;
   if (bounded && !opts.plain) {
     const step = desc.kind === "int" ? 1 : 10 ** Math.floor(Math.log10((desc.le - desc.ge) / SETTING_SLIDER_STEPS));
     const slider = el("input", {
@@ -169,12 +181,14 @@ function boolControl(desc, id, opts) {
 
 function enumControl(desc, id) {
   const choices = desc.choices || [];
+  const known = choices.some((c) => c === desc.value);
   const select = el("select", { id, class: "sl-field__input" },
+    known ? [] : el("option", { value: "", selected: true }, "—"),
     choices.map((c, n) => el("option", { value: String(n), selected: c === desc.value }, String(c))));
   return {
     node: el("span", { class: FIELD_FX }, el("span", { class: "sl-select" }, select)),
     labelFor: id, main: select,
-    read: () => ({ value: choices[Number(select.value)] }),
+    read: () => (select.value === "" ? { code: "value_choice" } : { value: choices[Number(select.value)] }),
   };
 }
 
@@ -184,14 +198,6 @@ function textControl(desc, id) {
     ? el("textarea", { id, class: "sl-field__input", rows: "3" }, desc.value)
     : el("input", { type: "text", id, class: "sl-field__input", value: desc.value === null || desc.value === undefined ? "" : String(desc.value) });
   return { node: fieldControl(input), labelFor: id, main: input, read: () => ({ value: input.value }) };
-}
-
-function jsonControl(desc, id, opts) {
-  const area = el("textarea", { id, class: "sl-field__input", rows: "3" }, desc.value === null ? "" : JSON.stringify(desc.value));
-  return {
-    node: fieldControl(area), labelFor: id, main: area,
-    read: () => { try { return { value: JSON.parse(area.value) }; } catch (e) { return { code: "value_type" }; } },
-  };
 }
 
 // A list of removable rows plus an Add button. `make(value, n)` builds one row's control.
@@ -264,7 +270,7 @@ function chipsControl(desc, id, opts) {
   const paint = () => {
     chips.replaceChildren(...items.map((item) => {
       const chip = el("button", {
-        type: "button", class: "sl-chip" + PRESS, "aria-pressed": "true",
+        type: "button", class: "sl-chip" + PRESS,
         "aria-label": t("settings_remove_item", { item: String(item) }),
         onclick: () => { items.splice(items.indexOf(item), 1); paint(); },
       }, String(item));
@@ -318,17 +324,17 @@ function dictControl(desc, id, opts) {
   return {
     node: made.node,
     read: () => {
-      const out = {};
+      const out = Object.create(null);
       for (const { control } of made.rows) {
         const key = control.key();
         const got = control.read();
         if (key === "" && (got.code || got.value === "")) continue;
-        if (key === "") return { code: "key_invalid" };
+        if (key === "" || SETTING_UNSAFE_KEYS.includes(key)) return { code: "key_invalid" };
         if (got.code) return got;
         if (Object.hasOwn(out, key)) return { code: "key_duplicate" };
         out[key] = got.value;
       }
-      return { value: out };
+      return { value: { ...out } };
     },
   };
 }
@@ -347,7 +353,7 @@ function nullable(desc, ctl, id) {
 function buildControl(desc, id, opts) {
   const kinds = {
     number: numberControl, int: numberControl, bool: boolControl, enum: enumControl, text: textControl,
-    json: jsonControl, string_list: chipsControl, enum_list: chipsControl, tuple_list: tupleListControl,
+    string_list: chipsControl, enum_list: chipsControl, tuple_list: tupleListControl,
     string_dict: dictControl, number_dict: dictControl,
     tuple: (d, i, o) => tupleControl(d, i, o, d.value),
   };
@@ -360,7 +366,7 @@ function buildControl(desc, id, opts) {
 function settingTags(row, editable) {
   const source = state.strings["settings_source_" + row.source] || row.source;
   const tags = [el("span", { class: row.source === "runtime" ? "sl-tag" : "sl-tag sl-tag--plain" }, source)];
-  if (row.restart) tags.push(el("a", { class: "sl-badge sl-badge--warning", href: "#settings-restart" }, t("settings_restart_badge")));
+  if (row.restart) tags.push(el("span", { class: "sl-badge sl-badge--warning" }, t("settings_restart_badge")));
   if (row.admin_only) tags.push(el("span", { class: "sl-tag", title: t("settings_admin_hint") }, t("settings_admin")));
   if (row.private) tags.push(el("span", { class: "sl-tag sl-tag--plain" }, t("settings_private")));
   if (row.secret) tags.push(el("span", { class: "sl-tag sl-tag--plain" }, t("settings_secret")));
@@ -420,12 +426,15 @@ function settingLeaf(node) {
     parts.push(el("p", { class: "hint setting-value" }, t("settings_hidden")),
       el("div", { class: "row" }, button(t("settings_reveal"), "plain", () => guarded(revealSettings), { small: true })));
   } else if (!ctl) {
-    parts.push(row.kind === "json"
+    const shown = row.secret ? "***" : row.value === null && !row.writable ? t("settings_not_measured") : null;
+    parts.push(row.kind === "json" && !row.secret
       ? el("pre", { class: "pre-scroll setting-json setting-value" }, JSON.stringify(row.value, null, 2))
-      : el("p", { class: "setting-value" }, row.secret ? "***" : row.value === null && !row.writable ? t("settings_not_measured") : formatValue(row.value)));
-    if (row.kind === "json" && row.writable) parts.push(el("p", { class: "hint" }, t("settings_json_readonly")));
+      : el("p", { class: "setting-value" }, shown === null ? formatValue(row.value) : shown));
+    if (row.kind === "json" && !row.secret && row.writable) parts.push(el("p", { class: "hint" }, t("settings_json_readonly")));
   } else {
     parts.push(ctl.node);
+    const first = ctl.main || firstControl(ctl.node);
+    if (first && row.description) first.setAttribute("aria-describedby", id + "-d");
     if (JSON.stringify(row.default) !== JSON.stringify(row.value) && row.default !== null) {
       parts.push(el("p", { class: "hint" }, t("settings_default") + ": " + clip(formatValue(row.default))));
     }
@@ -436,13 +445,17 @@ function settingLeaf(node) {
 
 function settingActions(node, ctl, failure) {
   const row = node.row;
+  const descId = row.description ? failure.id.replace(/-err$/, "-d") : null;
   const mark = (code) => {
     failure.hidden = !code;
     failure.textContent = code ? t("err_" + code) : "";
     const target = ctl.main || firstControl(ctl.node);
     if (!target) return;
-    if (code) { target.setAttribute("aria-invalid", "true"); target.setAttribute("aria-describedby", failure.id); }
-    else { target.removeAttribute("aria-invalid"); target.removeAttribute("aria-describedby"); }
+    if (code) { target.setAttribute("aria-invalid", "true"); target.setAttribute("aria-describedby", [descId, failure.id].filter(Boolean).join(" ")); }
+    else {
+      target.removeAttribute("aria-invalid");
+      if (descId) target.setAttribute("aria-describedby", descId); else target.removeAttribute("aria-describedby");
+    }
   };
   const save = async () => {
     const out = ctl.read();
@@ -481,9 +494,16 @@ function entryKeys(node) {
   return Array.isArray(node.row.value) ? node.row.value.map(String) : [];
 }
 
+// The entry a kid belongs to: the longest entry key that is a path prefix (keys `a` and `a.b` can both exist).
+function entryOf(node, path) {
+  const base = node.row.path + ".";
+  return entryKeys(node)
+    .filter((key) => path === base + key || path.startsWith(base + key + "."))
+    .sort((a, b) => b.length - a.length)[0];
+}
+
 function entryKids(node, key) {
-  const prefix = node.row.path + "." + key;
-  return node.kids.filter((k) => k.row.path === prefix || k.row.path.startsWith(prefix + "."));
+  return node.kids.filter((k) => entryOf(node, k.row.path) === key);
 }
 
 // A nested, lazily filled disclosure: `fill()` builds the body the first time it is opened.
@@ -530,11 +550,13 @@ function addEntryForm(node) {
   const failure = el("p", { class: "sl-field__error", role: "alert", hidden: true, id: nextSettingId() + "-err" });
   const id = nextSettingId();
   const name = keyed ? null : el("input", { type: "text", class: "sl-field__input", id: id + "-name", required: true });
-  const fields = (row.entry || []).filter((e) => !e.secret && !SETTING_CONTAINERS.includes(e.kind))
-    .map((e) => ({ desc: e, ctl: buildControl(e, id + "-" + settingsState.serial++, { label: e.path, jsonEditable: true }) }));
+  const fixed = (row.entry || []).filter((e) => e.kind === "json" && !e.secret);
+  const fields = (row.entry || []).filter((e) => !e.secret && e.kind !== "json" && !SETTING_CONTAINERS.includes(e.kind))
+    .map((e) => ({ desc: e, ctl: buildControl(e, id + "-" + settingsState.serial++, { label: e.path }) }));
   const show = (code) => { failure.hidden = !code; failure.textContent = code ? t("err_" + code) : ""; };
   const submit = () => guarded(async () => {
     const value = {};
+    for (const e of fixed) setNested(value, e.path, e.value);
     for (const { desc, ctl } of fields) {
       const out = ctl.read();
       if (out.code) { show(out.code); return; }
@@ -614,10 +636,17 @@ function settingsApplyModel(data) {
     const section = by.get(g.id);
     g.nodes = section ? section.nodes : [];
     g.shown = null;
+    g.cache = new Map();
   }
 }
 
 // ---------------------------------------------------------------- groups, search, nav
+
+// Rows are built once per catalogue load and kept by path, so unsaved edits survive a collapse or a filter change.
+function cachedRow(g, node) {
+  if (!g.cache.has(node.row.path)) g.cache.set(node.row.path, settingNode(node));
+  return g.cache.get(node.row.path);
+}
 
 function refreshGroup(g) {
   const words = settingsState.query.toLowerCase().split(/\s+/).filter(Boolean);
@@ -628,14 +657,21 @@ function refreshGroup(g) {
   const gone = filtering && hits.length === 0;
   g.section.hidden = gone;
   g.navItem.hidden = gone;
-  const open = !gone && !settingsState.collapsed.has(g.id) && (settingsState.open.has(g.id) || (filtering && hits.length > 0));
+  const auto = filtering && hits.length > 0 && (settingsState.changedOnly || settingsState.query.trim().length >= SETTING_SEARCH_MIN_CHARS);
+  const manual = settingsState.open.has(g.id);
+  const open = !gone && !settingsState.collapsed.has(g.id) && (manual || auto);
   g.toggle.setAttribute("aria-expanded", String(open));
   g.body.hidden = !open;
-  if (!open) { g.body.replaceChildren(); g.shown = null; return hits.length; }
-  const key = hits.map((n) => n.row.path).join("|");
+  if (!open) return hits.length;
+  const capped = !manual && !g.showAll && hits.length > SETTING_AUTO_OPEN_MAX;
+  const shown = capped ? hits.slice(0, SETTING_AUTO_OPEN_MAX) : hits;
+  const key = shown.map((n) => n.row.path).join("|") + (capped ? "+" : "");
   if (g.shown !== key) {
     g.shown = key;
-    g.body.replaceChildren(...hits.map((n, i) => [i ? el("hr", { class: "sl-rule" }) : [], settingNode(n)]).flat());
+    const more = capped
+      ? [el("div", { class: "row" }, button(t("settings_show_all", { n: hits.length }), "plain", () => { g.showAll = true; refreshGroup(g); }, { small: true }))]
+      : [];
+    g.body.replaceChildren(...shown.map((n, i) => [i ? el("hr", { class: "sl-rule" }) : [], cachedRow(g, n)]).flat(), ...more);
   }
   return hits.length;
 }
@@ -656,7 +692,7 @@ function settingsGroup(section) {
   const toggle = el("button", { type: "button", class: "sl-disclosure", id, "aria-expanded": "false", "aria-controls": id + "-body" },
     el("code", { class: "sl-code" }, section.title), count);
   const navItem = el("button", { type: "button", class: "sl-nav__item", "data-group": section.id }, section.title, navCount);
-  const g = { id: section.id, scope: section.scope, nodes: section.nodes, count, navCount, body, toggle, navItem, shown: null,
+  const g = { id: section.id, scope: section.scope, nodes: section.nodes, count, navCount, body, toggle, navItem, shown: null, cache: new Map(), showAll: false,
     section: el("section", { class: "sl-card settings-group" }, el("h3", { class: "setting-group" }, toggle), body) };
   toggle.addEventListener("click", () => {
     const on = toggle.getAttribute("aria-expanded") !== "true";
@@ -679,9 +715,13 @@ function settingsGroup(section) {
 function settingsToolbar() {
   const query = el("input", { type: "search", id: "settings-search", class: "sl-field__input", value: settingsState.query, autocomplete: "off" });
   query.addEventListener("input", () => {
-    settingsState.query = query.value;
-    settingsState.collapsed.clear();
-    refreshSettings();
+    clearTimeout(settingsState.timer);
+    settingsState.timer = setTimeout(() => {
+      settingsState.query = query.value;
+      settingsState.collapsed.clear();
+      for (const g of settingsState.groups) g.showAll = false;
+      refreshSettings();
+    }, SETTING_SEARCH_DEBOUNCE_MS);
   });
   const only = el("input", { type: "checkbox", id: "settings-changed", checked: settingsState.changedOnly });
   only.addEventListener("change", () => {

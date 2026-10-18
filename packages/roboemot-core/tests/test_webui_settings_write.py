@@ -149,6 +149,19 @@ def test_identity_leaves_of_a_keyed_list_cannot_be_renamed(editor):
             editor.change(path, "other")
 
 
+def test_the_identity_of_an_entry_with_a_dotted_event_cannot_be_renamed(editor, stack):
+    editor.add_entry(
+        "appraisal.rules",
+        None,
+        {"event": "link.up", "valence": 0.1, "arousal": 0.1, "label": "joy"},
+    )
+    index = rule_index(stack, "link.up")
+    for leaf in ("event", "when"):
+        with pytest.raises(SettingNotAllowed):
+            editor.change(f"appraisal.rules.{index}.{leaf}", "link.down" if leaf == "event" else {})
+    assert rule(stack, "link.up").event == "link.up"
+
+
 # ------------------------------------------------------------------ private fields
 
 

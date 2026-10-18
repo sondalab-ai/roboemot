@@ -644,9 +644,7 @@ class WebApi:
         every write re-enters the PIN."""
         port = self._settings_port()
         fields, robot = port.robot_split(port.fields())
-        return Response(
-            HTTPStatus.OK, {"fields": fields, "robot": robot, "pin_required": True}
-        )
+        return Response(HTTPStatus.OK, {"fields": fields, "robot": robot, "pin_required": True})
 
     def _settings_reveal(self, req: Request) -> Response:
         """The private fields (minors, privacy, location) with their real values. Admin only: the
