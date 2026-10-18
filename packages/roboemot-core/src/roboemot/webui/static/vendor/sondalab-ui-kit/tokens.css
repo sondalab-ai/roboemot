@@ -1,0 +1,74 @@
+/* GENERATED from sondalab.tokens.json — do not edit. Run `npm run gen:tokens`. */
+:root {
+  --sl-font-display: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --sl-font-sans: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --sl-font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --sl-font-brand: "Fraunces", Georgia, serif;
+  --sl-space-0: 0;
+  --sl-space-1: 0.25rem;
+  --sl-space-2: 0.5rem;
+  --sl-space-3: 0.75rem;
+  --sl-space-4: 1rem;
+  --sl-space-5: 1.5rem;
+  --sl-space-6: 2rem;
+  --sl-space-8: 3rem;
+  --sl-radius-sm: 6px;
+  --sl-radius-md: 8px;
+  --sl-radius-lg: 14px;
+  --sl-radius-pane: 10px;
+  --sl-radius-pill: 9999px;
+  --sl-text-micro: 0.65625rem;
+  --sl-text-xs: 0.75rem;
+  --sl-text-sm: 0.875rem;
+  --sl-text-md: 1rem;
+  --sl-text-lg: 1.125rem;
+  --sl-text-xl: 1.5rem;
+  --sl-text-2xl: 2rem;
+  --sl-text-3xl: 2.75rem;
+  --sl-text-display: clamp(3.5rem, 2rem + 5vw, 6rem);
+  --sl-line-tight: 1.2;
+  --sl-line-normal: 1.5;
+  --sl-line-relaxed: 1.6;
+  --sl-line-loose: 1.7;
+  --sl-z-base: 1;
+  --sl-z-overlay: 50;
+  --sl-z-modal: 100;
+  --sl-z-toast: 200;
+  --sl-motion-fast: 120ms;
+  --sl-motion-mid: 220ms;
+  --sl-motion-slow: 360ms;
+  --sl-motion-ease: cubic-bezier(0.25, 1, 0.5, 1);
+  --sl-motion-enter: cubic-bezier(0.22, 1, 0.36, 1);
+  --sl-motion-spring: linear(0, 0.024, 0.087, 0.174, 0.275, 0.382, 0.488, 0.588, 0.68, 0.761, 0.831, 0.89, 0.937, 0.975, 1.003, 1.023, 1.037, 1.045, 1.049, 1.05, 1.048, 1.044, 1.04, 1.035, 1.029, 1.024, 1.019, 1.015, 1.011, 1.007, 1.005, 1.003, 1);
+  --sl-shadow-sm: 0 1px 2px rgba(0,0,0,0.09), 0 4px 10px -4px rgba(0,0,0,0.15);
+  --sl-shadow-md: 0 1px 2px rgba(0,0,0,0.06), 0 8px 20px -8px rgba(0,0,0,0.18);
+  --sl-shadow-lg: 0 1px 2px rgba(0,0,0,0.06), 0 12px 28px -10px rgba(0,0,0,0.21), 0 32px 64px -28px rgba(0,0,0,0.27);
+  --sl-shadow-inset: inset 0 1px 2px rgba(0,0,0,0.06);
+  --sl-focus-ring-width: 2px;
+  --sl-focus-ring-offset: 0px;
+  --sl-focus-glow-width: 5px;
+  --sl-viz-0: #ef806f;
+  --sl-viz-1: #65a7fa;
+  --sl-viz-2: #9ab140;
+  --sl-viz-3: #d79628;
+  --sl-viz-4: #e17eb9;
+  --sl-viz-5: #14bcbc;
+  --sl-viz-6: #68eeba;
+  --sl-viz-7: #b28fef;
+  --_sl-pole-l: 0.59;
+  --_sl-pole-dark: 0.16;
+  --_sl-hold: 5.4;
+  --_sl-on: clamp(var(--_sl-pole-dark), (var(--_sl-pole-l) - l) * 1000, 1) 0 h;
+  --_sl-lum: calc(-0.04077454096 * pow(l + 0.3963377774 * c * cos(h * 0.017453292519943295) + 0.2158037573 * c * sin(h * 0.017453292519943295), 3) + 1.112492185 * pow(l - 0.1055613458 * c * cos(h * 0.017453292519943295) - 0.0638541728 * c * sin(h * 0.017453292519943295), 3) - 0.07171764402 * pow(l - 0.0894841775 * c * cos(h * 0.017453292519943295) - 1.291485548 * c * sin(h * 0.017453292519943295), 3));
+  --_sl-lighter: calc(clamp(0, (l - var(--_sl-pole-l)) * 1000, 1) * clamp(0, (var(--_sl-hold) - (var(--_sl-lum) * pow((l - 0.1) / l, 3) + 0.05) / (pow(var(--_sl-pole-dark), 3) + 0.05)) * 1000, 1));
+  --_sl-step-hover: clamp(0, l + 0.05 * (2 * var(--_sl-lighter) - 1), 1) calc(c * (var(--_sl-lighter) * pow(max(0, 1 - 0.05 / max(1 - l, 0.001)), 1.5) + (1 - var(--_sl-lighter)) * max(0, 1 - 0.05 / max(l, 0.001)))) h;
+  --_sl-step-press: clamp(0, l + 0.1 * (2 * var(--_sl-lighter) - 1), 1) calc(c * (var(--_sl-lighter) * pow(max(0, 1 - 0.1 / max(1 - l, 0.001)), 1.5) + (1 - var(--_sl-lighter)) * max(0, 1 - 0.1 / max(l, 0.001)))) h;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --sl-motion-fast: 0ms;
+    --sl-motion-mid: 0ms;
+    --sl-motion-slow: 0ms;
+  }
+}

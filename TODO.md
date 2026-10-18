@@ -105,3 +105,15 @@ The persona pieces exist and are tested; these callers wait for the pillars they
 
 - [ ] `packages/roboemot-reachymini/tests/test_app_conversation.py::test_the_app_offers_the_default_skills_and_wires_barge_in`
       is timing-flaky under load (failed once in a full run after the slice-2 fix, passes alone).
+- [ ] `packages/roboemot-core/tests/test_llm_router.py::test_hostile_tool_arguments_do_not_fail_the_route_or_get_parsed`
+      fails on Python 3.15 only (deeply nested JSON assertion); it passes on 3.12 and in CI.
+- [ ] No JS behaviour test runner: the web UI dialog flows (`ask()`, the PIN dialog, the settings editor)
+      are covered only by JS-free tests on the served files and by a manual headless-Chrome check.
+- [ ] Confirm the robot's Python version (`python scripts/robot_ssh.py -- python3 --version`). The Piper hash locks cover
+      aarch64 py3.11 and py3.12 until then; drop the unused one (SPEC 4A Installer).
+- [ ] Confirm on the robot that the app runs as the same user the installer writes `secrets.json` as over SSH;
+      otherwise the uid check makes secret routes unavailable (SPEC 8 Secrets, 12 Data).
+- [ ] Runtime test that a hostile `base_url` redirect (307 to another host) does not carry the `Authorization`
+      header (openai/httpx defaults; router and speech client) (SPEC 8).
+- [ ] Dev env only: a local `.venv` with an editable install of the main checkout lacks the `roboemot.world`
+      entry point, so `test_world_plugin.py` fails locally; reinstall the editable packages.

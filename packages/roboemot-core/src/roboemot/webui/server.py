@@ -1,11 +1,15 @@
 """HTTP transport of the web UI: static files, size limits, security headers (SPEC 12).
 
 Standard library only. Static files come from a fixed allow-list read at start-up, so no
-request path ever reaches the file system.
+request path ever reaches the file system. The allow-list is the first-party files plus the
+files listed in the vendored kit's ``VENDORED.json``; those are checked against their sha256 at
+start-up and served with ``Cache-Control: no-cache`` and a strong ETag (304 on a match), while
+every other response stays ``no-store``.
 """
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import logging
@@ -42,7 +46,19 @@ STATIC_FILES: dict[str, tuple[str, str]] = {
     "/index.html": ("index.html", "text/html; charset=utf-8"),
     "/static/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/static/style.css": ("style.css", "text/css; charset=utf-8"),
+    "/static/theme.js": ("theme.js", "text/javascript; charset=utf-8"),
+    "/static/fx.js": ("fx.js", "text/javascript; charset=utf-8"),
 }
+VENDOR_ROUTE = "/static/vendor/sondalab-ui-kit/"
+VENDOR_DIR = STATIC_DIR / "vendor" / "sondalab-ui-kit"
+VENDOR_TYPES = {
+    ".css": "text/css; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".woff2": "font/woff2",
+    ".txt": "text/plain; charset=utf-8",
+}
+VENDOR_CACHE_CONTROL = "no-cache"
 SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
@@ -61,6 +77,40 @@ SERVE_POLL_S = 0.5  # how often serve_forever checks for a stop; tests shorten i
 ANY_INTERFACE = "0.0.0.0"
 LOOPBACK_INTERFACE = "127.0.0.1"
 BUSY_REPLY = b"HTTP/1.0 503 Service Unavailable\r\nContent-Length: 0\r\nRetry-After: 1\r\n\r\n"
+
+
+Static = tuple[bytes, str, str | None]  # body, content type, strong ETag (vendored files only)
+
+
+def load_vendor() -> dict[str, Static]:
+    """The vendored kit files named in ``VENDORED.json``, keyed by URL path.
+
+    Each file must match the sha256 in the manifest (a changed or missing file stops the
+    start-up); the hash is the ETag. Files not in the manifest are never served.
+    """
+    manifest = json.loads((VENDOR_DIR / "VENDORED.json").read_text())
+    out: dict[str, Static] = {}
+    root = VENDOR_DIR.resolve()
+    for name, digest in manifest["files"].items():
+        path = (VENDOR_DIR / name).resolve()
+        if not path.is_relative_to(root):
+            raise RuntimeError(f"vendored file {name} is outside the vendor folder")
+        ctype = VENDOR_TYPES.get(path.suffix)
+        if ctype is None:
+            raise RuntimeError(f"vendored file {name} has no known content type")
+        body = path.read_bytes()
+        if hashlib.sha256(body).hexdigest() != digest:
+            raise RuntimeError(f"vendored file {name} does not match VENDORED.json")
+        out[VENDOR_ROUTE + name] = (body, ctype, f'"{digest}"')
+    return out
+
+
+def etag_matches(header: str | None, etag: str) -> bool:
+    """Whether an ``If-None-Match`` value names ``etag`` (weak prefix ignored, ``*`` matches)."""
+    if not header:
+        return False
+    tags = [t.strip() for t in header.split(",")]
+    return "*" in tags or etag in [t.removeprefix("W/") for t in tags]
 
 
 class _DeadlineRaw(io.RawIOBase):
@@ -96,7 +146,7 @@ class _Httpd(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
     api: WebApi
-    statics: dict[str, tuple[bytes, str]]
+    statics: dict[str, Static]
     max_body: int
     request_timeout_s: float
     request_deadline_s: float
@@ -185,11 +235,14 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "bad_host"})
             return
         path = urlsplit(self.path).path
-        if self.command == "GET" and path in self.server.statics:
-            body, ctype = self.server.statics[path]
-            self._send(HTTPStatus.OK, body, ctype)
+        if self.command in ("GET", "HEAD") and path in self.server.statics:
+            body, ctype, etag = self.server.statics[path]
+            if etag is not None and etag_matches(self.headers.get("If-None-Match"), etag):
+                self._send(HTTPStatus.NOT_MODIFIED, b"", ctype, etag=etag)
+            else:
+                self._send(HTTPStatus.OK, body, ctype, etag=etag)
             return
-        if self.command == "GET" and not path.startswith("/api/"):
+        if self.command in ("GET", "HEAD") and not path.startswith("/api/"):
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
             return
         headers = {k.lower(): v for k, v in self.headers.items()}
@@ -231,22 +284,33 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(status, json.dumps(data).encode(), "application/json; charset=utf-8")
 
     def _send(
-        self, status: HTTPStatus, body: bytes, ctype: str, resp: Response | None = None
+        self,
+        status: HTTPStatus,
+        body: bytes,
+        ctype: str,
+        resp: Response | None = None,
+        etag: str | None = None,
     ) -> None:
         self.deadline.arm()
         self.send_response(status)
         self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
+        if status != HTTPStatus.NOT_MODIFIED:
+            self.send_header("Content-Length", str(len(body)))
         self.send_header("Content-Security-Policy", self.server.csp)
         for name, value in SECURITY_HEADERS.items():
+            if etag is not None and name == "Cache-Control":
+                continue
             self.send_header(name, value)
+        if etag is not None:
+            self.send_header("Cache-Control", VENDOR_CACHE_CONTROL)
+            self.send_header("ETag", etag)
         if resp is not None:
             for name, value in resp.headers.items():
                 self.send_header(name, value)
             for cookie in resp.cookies:
                 self.send_header("Set-Cookie", cookie)
         self.end_headers()
-        if self.command != "HEAD":
+        if self.command != "HEAD" and status != HTTPStatus.NOT_MODIFIED:
             self.wfile.write(body)
 
 
@@ -332,7 +396,8 @@ def make_server(
     httpd.max_body = web.max_body_bytes
     httpd.request_timeout_s = web.request_timeout_s
     httpd.statics = {
-        route: ((STATIC_DIR / name).read_bytes(), ctype)
+        route: ((STATIC_DIR / name).read_bytes(), ctype, None)
         for route, (name, ctype) in STATIC_FILES.items()
     }
+    httpd.statics.update(load_vendor())
     return Server(httpd, pins, current)
