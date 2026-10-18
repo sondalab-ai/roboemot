@@ -10,7 +10,7 @@ section number in commit messages that implement or change behaviour.
 | Path | What |
 | --- | --- |
 | `docs/specs/kickoff.md` | Engineering spec (SPEC), the source of truth |
-| `packages/roboemot-core/` | Python package `roboemot`: config, manifest, discovery, health (connectivity), diagnostics (debug report), vision (detect, track, embed, replay, model fetcher; ONNX backends need the `vision` extra), motion reference, affect (engine, appraisal, runner, register resolver, expression renderer), circadian, persona (traits), LLM router and system prompt, secret store (`secret_store.py`: `${secret:name}` route keys, 0600 file), bus |
+| `packages/roboemot-core/` | Python package `roboemot`: config, manifest, discovery, health (connectivity), diagnostics (debug report), vision (detect, track, embed, replay, model fetcher; ONNX backends need the `vision` extra), motion reference, affect (engine, appraisal, runner, register resolver, expression renderer), circadian, persona (traits), LLM router and system prompt, web UI robot section (`webui/robot_section.py`, `roboemot.settings` plugins), secret store (`secret_store.py`: `${secret:name}` route keys, 0600 file), bus |
 | `packages/roboemot-reachymini/` | Python package `roboemot_reachymini`: Reachy Mini driver and SDK bridge |
 | `packages/roboemot-core/src/roboemot/webui/static/vendor/sondalab-ui-kit/` | Vendored, pinned `@sondalab/ui-kit` (offline web UI). Never edit by hand: change the pin in `scripts/sync_ui_kit.py` and run it; `scripts/audit_webui.sh` runs `sl-audit` on the page (SPEC 12) |
 | `rt/` | C++ real-time core (`roboemot-rt`): arbiter and safety limiter, CMake + ctest |

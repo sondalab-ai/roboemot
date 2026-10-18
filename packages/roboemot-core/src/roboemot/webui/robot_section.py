@@ -12,17 +12,22 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from importlib.metadata import entry_points
-from typing import TYPE_CHECKING, Any, Protocol, TypedDict
+from typing import TYPE_CHECKING, Protocol, TypedDict, cast, runtime_checkable
 
-from roboemot.config.catalogue import FieldDescriptor
+from roboemot.config.catalogue import CONTAINERS, DESCRIPTOR_KEYS, FieldDescriptor, seal
+from roboemot.redact import REDACTED
 
 if TYPE_CHECKING:
     from roboemot.manifest import Manifest
+
+    from .settings import StackPort
 
 log = logging.getLogger(__name__)
 
 ENTRY_POINT_GROUP = "roboemot.settings"
 PATH_ROOT = "robot"
+REBOOT = "reboot"
+PROTECTED_CLAIMS = ("safety", "webui", "privacy", "llm_routes")
 
 
 class RobotBlock(TypedDict):
@@ -30,6 +35,7 @@ class RobotBlock(TypedDict):
 
     id: str
     title: str
+    actions: list[str]
     fields: list[FieldDescriptor]
 
 
@@ -37,18 +43,29 @@ class RobotBlock(TypedDict):
 class RobotSection:
     """What a plugin contributes. ``fields`` are read-only rows under ``robot.<id>.``; ``claims``
     are config paths (a path and everything below it) that move from the core list into the
-    robot's, still written by path through the normal settings endpoints."""
+    robot's, still written by path through the normal settings endpoints. ``actions`` is set by
+    core from the plugin's capabilities; a value a plugin sets is ignored."""
 
     title: str
     fields: list[FieldDescriptor] = field(default_factory=list)
     claims: tuple[str, ...] = ()
+    actions: tuple[str, ...] = ()
 
 
 class SettingsPlugin(Protocol):
     """The object behind a ``roboemot.settings`` entry point."""
 
-    def section(self, stack: Any, manifest: Manifest) -> RobotSection:
+    def section(self, stack: StackPort, manifest: Manifest) -> RobotSection:
         """The robot's section for the current configuration; called on every listing."""
+        ...
+
+
+@runtime_checkable
+class Rebootable(Protocol):
+    """Optional: a plugin that can reboot its robot; core then offers the ``reboot`` action."""
+
+    def reboot(self) -> None:
+        """Reboot the robot."""
         ...
 
 
@@ -58,7 +75,7 @@ def load_settings_plugin(robot_id: str) -> SettingsPlugin | None:
     for ep in entry_points(group=ENTRY_POINT_GROUP):
         if ep.name == robot_id:
             try:
-                return ep.load()  # type: ignore[no-any-return]
+                return cast(SettingsPlugin, ep.load())
             except Exception as exc:
                 log.warning("settings plugin %s: %s", robot_id, type(exc).__name__)
                 return None
@@ -71,24 +88,62 @@ def claimed(path: str, claims: tuple[str, ...]) -> bool:
     return any(path == c or path.startswith(c + ".") for c in claims)
 
 
+def _vet_row(row: object, prefix: str) -> FieldDescriptor | None:
+    """A copy of a plugin row, read-only and sealed again, or ``None`` when it is not a full
+    descriptor under ``prefix`` (logged by path only). The plugin's own dict is never changed."""
+    if not isinstance(row, dict) or set(row) != DESCRIPTOR_KEYS:
+        path = row.get("path") if isinstance(row, dict) else None
+        log.warning("settings plugin row dropped: not a full descriptor (%s)", path)
+        return None
+    if not isinstance(row["path"], str) or not row["path"].startswith(prefix):
+        # also covers a row that repeats a core path, claimed or not: it would show twice
+        log.warning("settings plugin row dropped: outside %s (%s)", prefix, row["path"])
+        return None
+    out = cast(FieldDescriptor, {**row, "writable": False})
+    if out["kind"] not in CONTAINERS:
+        seal(out, out["path"].rsplit(".", 1)[-1])
+        if row["secret"]:  # a plugin's own secret flag only ever adds redaction
+            out["secret"] = True
+            out["value"] = REDACTED if out["value"] is not None else None
+            out["default"] = REDACTED if out["default"] is not None else None
+    return out
+
+
 def build_section(
-    plugin: SettingsPlugin | None, stack: Any, manifest: Manifest | None
+    plugin: SettingsPlugin | None, stack: StackPort, manifest: Manifest | None
 ) -> tuple[RobotSection, str] | None:
     """The plugin's section and the robot id, or ``None`` (no plugin, no manifest, or a section
-    that raised: logged by type only). Rows outside ``robot.<id>.`` are dropped and every kept
-    row is forced read-only, so a plugin cannot offer a write core would not route."""
+    that raised: logged by type only). Rows that are not full descriptors under ``robot.<id>.``
+    are dropped; kept rows are copies, read-only and redacted again by core. ``actions`` comes
+    from the plugin's capabilities, not from what it returns."""
     if plugin is None or manifest is None:
         return None
     robot_id = manifest.robot.id
     try:
         section = plugin.section(stack, manifest)
         prefix = f"{PATH_ROOT}.{robot_id}."
-        rows = [r for r in section.fields if r["path"].startswith(prefix)]
-        if len(rows) != len(section.fields):
-            log.warning("settings plugin %s: rows outside %s dropped", robot_id, prefix)
-        for row in rows:
-            row["writable"] = False
-        return RobotSection(section.title, rows, section.claims), robot_id
+        rows = [r for r in (_vet_row(row, prefix) for row in section.fields) if r is not None]
+        actions = (REBOOT,) if isinstance(plugin, Rebootable) else ()
+        return RobotSection(section.title, rows, tuple(section.claims), actions), robot_id
     except Exception as exc:
         log.warning("settings plugin %s section: %s", robot_id, type(exc).__name__)
         return None
+
+
+def vet_claims(claims: tuple[str, ...], fields: list[FieldDescriptor]) -> tuple[str, ...]:
+    """The claims core honours. A claim is refused when it is empty, at or under a protected
+    section, or matches a private or admin-only row, so a plugin cannot move those out of core.
+    A claim that matches nothing is dropped. Warnings carry the claim only."""
+    kept = []
+    for claim in claims:
+        if not isinstance(claim, str) or not claim or claimed(claim, PROTECTED_CLAIMS):
+            log.warning("settings claim refused: %r", claim)
+            continue
+        hits = [f for f in fields if claimed(f["path"], (claim,))]
+        if any(f["private"] or f["admin_only"] for f in hits):
+            log.warning("settings claim refused: %s holds admin or private rows", claim)
+        elif not hits:
+            log.warning("settings claim matches nothing: %s", claim)
+        else:
+            kept.append(claim)
+    return tuple(kept)

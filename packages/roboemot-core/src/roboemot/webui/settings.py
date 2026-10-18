@@ -59,6 +59,7 @@ from .robot_section import (
     build_section,
     claimed,
     load_settings_plugin,
+    vet_claims,
 )
 from .setting_clean import (
     WORDS_KIND,
@@ -267,11 +268,13 @@ class SettingsEditor:
         if built is None:
             return fields, None
         section, robot_id = built
-        mine = [f for f in fields if claimed(f["path"], section.claims)]
-        rest = [f for f in fields if not claimed(f["path"], section.claims)]
+        claims = vet_claims(section.claims, fields)
+        mine = [f for f in fields if claimed(f["path"], claims)]
+        rest = [f for f in fields if not claimed(f["path"], claims)]
         block: RobotBlock = {
             "id": robot_id,
             "title": section.title,
+            "actions": list(section.actions),
             "fields": [*section.fields, *mine],
         }
         return rest, block

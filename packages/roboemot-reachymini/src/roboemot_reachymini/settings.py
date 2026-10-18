@@ -15,6 +15,7 @@ from typing import Any
 from roboemot.config.catalogue import FieldDescriptor, descriptor
 from roboemot.manifest import Manifest
 from roboemot.webui.robot_section import PATH_ROOT, RobotSection
+from roboemot.webui.settings import StackPort
 
 TITLE = "Reachy Mini"
 CLAIMS = ("expression_map", "gesture_map", "circadian_motion")
@@ -30,10 +31,15 @@ def _row(path: str, kind: str, value: Any, description: str, **fields: Any) -> F
     )
 
 
+def _to_mm(metres: float) -> float:
+    """Metres to millimetres, for the translation limits."""
+    return metres * MM_PER_M
+
+
 class ReachySettings:
     """The ``roboemot.settings`` plugin of the Reachy Mini."""
 
-    def section(self, stack: Any, manifest: Manifest) -> RobotSection:
+    def section(self, stack: StackPort, manifest: Manifest) -> RobotSection:
         """The title, the claimed behaviour paths and the read-only hardware rows of
         ``manifest``; ``stack`` is unused (the hardware does not change at runtime)."""
         base = f"{PATH_ROOT}.{manifest.robot.id}"
@@ -51,16 +57,19 @@ class ReachySettings:
         rows = []
         for name, dof in manifest.dofs.items():
             if dof.kind == "angle":
-                unit, scale, suffix = "deg", math.degrees, "deg"
+                unit, scale = "deg", math.degrees
             else:
-                unit, scale, suffix = "mm", (lambda m: m * MM_PER_M), "mm"
-            for edge, value in (("min", dof.min), ("max", dof.max)):
+                unit, scale = "mm", _to_mm
+            for edge, text, value in (
+                ("min", "Hardware minimum", dof.min),
+                ("max", "Hardware maximum", dof.max),
+            ):
                 rows.append(
                     _row(
-                        f"{base}.limits.{name}.{edge}_{suffix}",
+                        f"{base}.limits.{name}.{edge}_{unit}",
                         "number",
                         round(scale(value), 6),
-                        f"Hardware {edge}imum of {name}; a ceiling no setting can exceed.",
+                        f"{text} of {name}; a ceiling no setting can exceed.",
                         unit=unit,
                     )
                 )
@@ -78,9 +87,11 @@ class ReachySettings:
         }
         rows = []
         for group, dyn in manifest.model.dynamics.items():
+            pose = manifest.model.pose_groups.get(group)
+            pose_type = pose.type if pose else None
             for key, unit in units.items():
                 value = getattr(dyn, key)
-                if value is None and key.startswith("max_lin") and group != "head":
+                if key.startswith("max_lin") and pose_type != "pose6d":
                     continue
                 rows.append(
                     _row(

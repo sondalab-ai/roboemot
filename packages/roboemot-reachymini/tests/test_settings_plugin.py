@@ -6,6 +6,7 @@ import math
 from importlib.metadata import entry_points
 
 import pytest
+import yaml
 from roboemot.config.catalogue import DESCRIPTOR_KEYS
 from roboemot.config.stack import ConfigStack
 from roboemot.manifest import load_manifest
@@ -108,3 +109,52 @@ def test_hardware_rows_cannot_be_written(split):
 def test_section_needs_no_stack():
     section = ReachySettings().section(None, MANIFEST)
     assert section.title == "Reachy Mini" and section.claims == CLAIMS
+
+
+def variant(edit):
+    """The real manifest dict, changed by ``edit``, loaded and sectioned."""
+    raw = yaml.safe_load((app_module.DATA / "reachy-mini-wireless.yaml").read_text())
+    edit(raw)
+    manifest = load_manifest(raw, allow_unmeasured_dynamics=True)
+    return {f["path"]: f for f in plugin.section(None, manifest).fields}
+
+
+def test_measured_dynamics_show_their_values():
+    def edit(raw):
+        raw["dynamics"]["head"] = {
+            "max_vel_dps": 120,
+            "max_acc_dps2": 900,
+            "max_lin_vel_mps": 0.2,
+            "max_lin_acc_mps2": 1.5,
+        }
+        raw["dynamics"]["body_yaw"] = {"max_vel_dps": 90, "max_acc_dps2": 400}
+        raw["dynamics"]["antennas"] = {"max_vel_dps": 200, "max_acc_dps2": 800}
+
+    rows = variant(edit)
+    assert rows[f"{BASE}.dynamics.head.max_vel_dps"]["value"] == 120
+    assert rows[f"{BASE}.dynamics.head.max_lin_acc_mps2"]["value"] == 1.5
+    assert rows[f"{BASE}.dynamics.body_yaw.max_acc_dps2"]["value"] == 400
+
+
+def test_linear_dynamics_follow_the_pose_type_not_the_group_name():
+    def edit(raw):
+        raw["pose_groups"]["neck"] = dict(raw["pose_groups"]["head"])
+        raw["dynamics"]["neck"] = {"max_vel_dps": 10, "max_acc_dps2": 20}
+        raw["dynamics"]["neck"] |= {"max_lin_vel_mps": 0.1, "max_lin_acc_mps2": 0.5}
+        del raw["dynamics"]["head"]
+        del raw["pose_groups"]["head"]
+        raw.pop("constraints")
+        raw.pop("retargeting")
+        raw["behaviour"] = {}
+
+    rows = variant(edit)
+    assert rows[f"{BASE}.dynamics.neck.max_lin_vel_mps"]["value"] == 0.1
+    assert f"{BASE}.dynamics.head.max_lin_vel_mps" not in rows
+    assert f"{BASE}.dynamics.antennas.max_lin_vel_mps" not in rows
+    assert f"{BASE}.limits.neck.pitch.max_deg" in rows
+
+
+def test_a_dict_valued_estop_is_summarised_not_dumped():
+    rows = variant(lambda raw: raw["safety"].update(estop={"pin": 17, "secret": "x"}))
+    row = rows[f"{BASE}.safety.estop"]
+    assert row["value"] == "configured" and row["writable"] is False
