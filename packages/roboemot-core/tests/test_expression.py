@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 import yaml
 from pydantic import ValidationError
-from roboemot.affect import AffectState
+from roboemot.affect import AffectEngine, AffectState
 from roboemot.affect.expression import SOURCE, ExpressionRenderer, build_primitive
 from roboemot.affect.register import Person, resolve_register
 from roboemot.config import ConfigStack
@@ -505,6 +505,7 @@ def test_manifest_behaviour_may_only_set_known_keys_and_is_audited(manifest):
     assert stack.audit[-1].source == "manifest" and stack.audit[-1].new == [
         "circadian_motion",
         "expression_map",
+        "gesture_map",
     ]
 
 
@@ -566,3 +567,169 @@ def test_a_requested_gesture_respects_the_minor_cap_and_the_register(cfg, manife
     assert r.update(state("calm", 1.0), reg, 0.0)
     d = manifest.dofs["antenna_right"]
     assert r.commands(0.5)[0].targets["antenna_right"] <= factor * (d.max - d.home) + 1e-9
+
+
+# ------------------------------------------------------------------ named gestures (SPEC 7, 11)
+
+
+def test_the_manifest_ships_nod_and_shake_apart_from_the_affect_labels(cfg, manifest):
+    assert {"nod", "shake"} <= set(cfg.gesture_map)
+    assert not set(cfg.gesture_map) & set(cfg.affect.labels)
+    nod, shake = cfg.gesture_map["nod"], cfg.gesture_map["shake"]
+    assert set(nod.channels) == {"head.pitch"} and nod.repeat >= 2
+    assert set(shake.channels) == {"head.yaw"} and shake.repeat >= 2
+    for e in (nod, shake):  # data within the manifest range, in degrees
+        (frames,) = e.channels.values()
+        d = manifest.dofs["head.pitch" if e is nod else "head.yaw"]
+        peak = math.radians(max(abs(v) for _, v in frames))
+        assert 0 < peak <= min(d.max - d.home, d.home - d.min)
+
+
+def test_the_schema_rejects_bad_gestures():
+    ok = [(0, 0), (1, 10), (2, 0)]
+    with pytest.raises(ValidationError, match="affect labels"):
+        RoboEmotConfig.model_validate({"gesture_map": {"joy": {"channels": {"head.yaw": ok}}}})
+    with pytest.raises(ValidationError):
+        RoboEmotConfig.model_validate({"gesture_map": {"nod": {"channels": {"head.x": ok}}}})
+    with pytest.raises(ValidationError):
+        RoboEmotConfig.model_validate(
+            {"gesture_map": {"nod": {"channels": {"head.yaw": [(0, 0), (1, 10)]}}}}
+        )
+
+
+def test_the_manifest_may_set_gesture_map_and_it_is_audited(manifest):
+    stack = ConfigStack()
+    stack.set_manifest_behaviour(manifest.model.behaviour)
+    assert "gesture_map" in stack.audit[-1].new
+    assert set(stack.effective().gesture_map) >= {"nod", "shake"}
+
+
+def gesture_renderer(cfg, manifest, **expr):
+    ecfg = cfg.expression.model_copy(update=expr)
+    return ExpressionRenderer(ecfg, cfg.expression_map, manifest.dofs, 0.15, cfg.gesture_map)
+
+
+def test_play_offers_affect_labels_and_gestures_and_refuses_unknown_names(cfg, manifest):
+    r = gesture_renderer(cfg, manifest)
+    assert r.playable() == [*cfg.expression_map, "nod", "shake"]
+    assert r.request("nod") and not r.request("wave")
+    assert (
+        ExpressionRenderer(cfg.expression, cfg.expression_map, manifest.dofs, 0.15).request("nod")
+        is False
+    )  # a robot without a gesture_map offers none
+
+
+def test_a_nod_oscillates_head_pitch_within_limits_and_returns_to_zero(cfg, manifest):
+    r = gesture_renderer(cfg, manifest)
+    reg = active("adult")
+    r.request("nod")
+    assert r.update(state("calm", 0.5), reg, 0.0) and r.last_label == "nod"
+    d = manifest.dofs["head.pitch"]
+    values = []
+    for _, cmds in drain(r, 0.0, 3.0):
+        for c in cmds:
+            assert set(c.targets) == {"head.pitch"} and c.priority == Priority.EXPRESSION
+            values.append(c.targets["head.pitch"])
+            assert d.min - d.home <= values[-1] <= d.max - d.home
+    signs = [v > 1e-4 for v in values if abs(v) > 1e-4]
+    flips = sum(a != b for a, b in zip(signs, signs[1:], strict=False))
+    assert max(values) > 0.05 and flips >= 3  # dips and lifts, twice
+    assert not r.playing
+
+
+def test_a_shake_oscillates_head_yaw_and_a_stricter_register_scales_it(cfg, manifest):
+    peaks = {}
+    for group in ("adult", "child"):
+        r = gesture_renderer(cfg, manifest, max_amplitude=3)
+        r.request("shake")
+        reg = active(group)
+        assert r.update(state("calm", 1.0), reg, 0.0)
+        ys = [c.targets["head.yaw"] for _, cmds in drain(r, 0.0, 3.0) for c in cmds]
+        assert min(ys) < -0.05 and max(ys) > 0.05  # both sides
+        peaks[group] = max(ys)
+    assert peaks["child"] > peaks["adult"]  # the register's 1.2x applies, as for expressions
+
+
+def test_gestures_respect_the_interval_and_the_cap_on_amplitude(cfg, manifest):
+    r = gesture_renderer(cfg, manifest)
+    reg = active("adult")
+    assert r.update(state("joy", 0.5), reg, 0.0) is False  # first state sets the label
+    r.request("nod")
+    assert r.update(state("joy", 0.5), reg, 0.1) is True
+    r.request("shake")
+    assert r.update(state("joy", 0.5), reg, 0.2) is False  # min_interval_s not over
+    assert r.update(state("joy", 0.5), reg, 2.0) is True and r.last_label == "shake"
+    assert r.last_amplitude <= cfg.expression.max_amplitude
+
+
+def test_an_oversized_gesture_is_clamped_to_the_range_and_the_minor_cap(cfg, manifest):
+    factor = cfg.safety.minor_motion_factor
+    huge = entry(**{"head.pitch": [(0, 0), (0.5, 90), (1, 0)]})
+    gestures = {"nod": huge}
+    d = manifest.dofs["head.pitch"]
+    # renderer alone: clamped to the range about home
+    r = ExpressionRenderer(
+        cfg.expression.model_copy(update={"max_amplitude": 3}),
+        cfg.expression_map,
+        manifest.dofs,
+        0.15,
+        gestures,
+    )
+    r.request("nod")
+    assert r.update(state("calm", 1.0), active("child"), 0.0)
+    assert r.commands(0.5)[0].targets["head.pitch"] <= d.max - d.home + 1e-9
+    # through the arbiter and limiter, with a minor present
+    core = MotionCore(
+        manifest.dofs,
+        manifest.constraints,
+        crossfade_s=cfg.motion.arbiter.crossfade_ms / 1000,
+        watchdog_s=10.0,
+        minor_factor=factor,
+        watchdog_return_factor=cfg.safety.watchdog_return_factor,
+    )
+    core.minor_present = True
+    r = ExpressionRenderer(
+        cfg.expression.model_copy(update={"max_amplitude": 3}),
+        cfg.expression_map,
+        manifest.dofs,
+        0.15,
+        gestures,
+    )
+    r.set_register(active("child"), factor)
+    r.request("nod")
+    r.update(state("calm", 1.0), active("child"), 1.0)
+    up, t = 0.0, 1.0
+    while t < 3.0:
+        for cmd in r.commands(t):
+            core.feed(cmd)
+        up = max(up, core.tick(t, DT)["head.pitch"] - d.home)
+        t += DT
+    assert 0 < up <= factor * (d.max - d.home) + 1e-9
+
+
+async def test_play_nod_through_the_skill_executor_reaches_the_renderer(cfg, manifest):
+    from roboemot.skills import SkillContext, execute
+    from roboemot.skills.defaults import SkillEnv, default_skills
+
+    r = gesture_renderer(cfg, manifest)
+    reg = default_skills(
+        SkillEnv(
+            gestures=r.playable,
+            play=r.request,
+            look_names=list,
+            look_at=lambda t: True,
+            affect=AffectEngine(cfg.affect, cfg.appraisal),
+        )
+    )
+    enum = reg.tools(reg.offered(RoboEmotConfig().conversation.llm_skills, minor=True))[0]
+    assert {"nod", "shake", "joy"} <= set(
+        enum["function"]["parameters"]["properties"]["gesture"]["enum"]
+    )
+    assert "nod" in enum["function"]["description"]
+    ctx = SkillContext(speaker="p1", language="en", minor=False, now=0.0)
+    exec_kw = {"timeout_s": 1.0, "max_chars": 200, "enum_max": 100}
+    out = await execute(reg, reg.names(), "play", {"gesture": "nod"}, ctx, **exec_kw)
+    assert out.ok
+    assert r.update(state("calm", 0.5), active(), 0.0) and r.last_label == "nod"
+    bad = await execute(reg, reg.names(), "play", {"gesture": "wave"}, ctx, **exec_kw)
+    assert not bad.ok

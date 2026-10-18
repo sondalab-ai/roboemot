@@ -35,7 +35,7 @@ class SkillEnv:
     """What the default skills act through. Every callable runs on the conversation's event
     loop and must not block: it posts a request or touches thread-safe state, never a joint."""
 
-    gestures: Callable[[], Sequence[str]]  # expression labels the robot can play
+    gestures: Callable[[], Sequence[str]]  # affect labels and named gestures the robot can play
     play: Callable[[str], bool]
     look_names: Callable[[], Sequence[str]]  # names of what is in view, besides the categories
     look_at: Callable[[str], bool]
@@ -48,10 +48,14 @@ def default_skills(env: SkillEnv) -> SkillRegistry:
     @skill(
         llm_visible=True,
         inline=True,
-        description="Play one of the robot's named gestures (a short body expression).",
+        description=(
+            "Play one of the robot's named motions. An emotion name (joy, sadness, ...) shows "
+            "that feeling with antennas and head; 'nod' means yes and 'shake' means no. Pick "
+            "an emotion to show a feeling and a gesture to answer or agree by motion."
+        ),
         choices={"gesture": env.gestures},
     )
-    def play(gesture: Annotated[str, Desc("Name of the gesture")]) -> Any:
+    def play(gesture: Annotated[str, Desc("Name of the emotion or gesture")]) -> Any:
         return OK if env.play(gesture) else {"error": "not_now"}
 
     @skill(

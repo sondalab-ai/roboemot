@@ -22,6 +22,10 @@ What stays true whatever the amplitude (SPEC 12):
 - Each command lives ``expression.command_ttl_s``: when the renderer stops feeding it the offset
   is gone, and a new expression blends in from the current offset over the arbiter's crossfade.
 
+Named gestures (``gesture_map``: nod, shake) use the same entry format and are played by the
+same code, only on request of the ``play`` skill: the same interval, register, persona,
+circadian, minor and clamping rules apply.
+
 Not scaled by speed: expressions play at the keyframe times.
 """
 
@@ -95,10 +99,11 @@ class ExpressionRenderer:
         expression_map: Mapping[str, ExpressionEntry],
         dofs: Mapping[str, Dof],
         crossfade_s: float,
+        gesture_map: Mapping[str, ExpressionEntry] | None = None,
     ) -> None:
         self.dofs = dofs
         self.circadian_factor: Callable[[], float] = lambda: 1.0
-        self.apply_config(cfg, expression_map, crossfade_s)
+        self.apply_config(cfg, expression_map, crossfade_s, gesture_map)
         self._label: str | None = None
         self._serial = 0
         self._pending = False
@@ -122,9 +127,11 @@ class ExpressionRenderer:
         cfg: ExpressionConfig,
         expression_map: Mapping[str, ExpressionEntry],
         crossfade_s: float,
+        gesture_map: Mapping[str, ExpressionEntry] | None = None,
     ) -> None:
-        """Hot reload: new parameters and map. An expression already playing finishes."""
+        """Hot reload: new parameters and maps. An expression already playing finishes."""
         self.cfg, self.expression_map, self.crossfade_s = cfg, dict(expression_map), crossfade_s
+        self.gesture_map = dict(gesture_map or {})
         self._cache: dict[tuple[str, bool], Primitive | None] = {}
 
     def amplitude(self, register: ActiveRegister, state: AffectState) -> float:
@@ -147,12 +154,19 @@ class ExpressionRenderer:
         self._scale_now = self._register_scale(register)
         self._minor_factor = minor_factor
 
+    def playable(self) -> list[str]:
+        """Every name ``request`` accepts: the affect labels, then the named gestures."""
+        return [
+            *self.expression_map,
+            *(g for g in self.gesture_map if g not in self.expression_map),
+        ]
+
     def request(self, label: str) -> bool:
-        """The ``play`` skill (SPEC 11, LLM tools): play the expression ``label`` at the next
-        :meth:`update`, from any thread. It takes the same path as an affect-driven one (the
-        minimum interval, the register, circadian and persona scaling, the minor cap, the body
-        channel rule); only the label differs. False when the map has no such label."""
-        if label not in self.expression_map:
+        """The ``play`` skill (SPEC 11, LLM tools): play the expression or gesture ``label`` at
+        the next :meth:`update`, from any thread. It takes the same path as an affect-driven
+        one (the minimum interval, the register, circadian and persona scaling, the minor cap,
+        the body channel rule); only the label differs. False when neither map has the name."""
+        if label not in self.expression_map and label not in self.gesture_map:
             return False
         with self._request_lock:
             self._requested = label
@@ -187,7 +201,7 @@ class ExpressionRenderer:
     def _primitive(self, label: str, body: bool) -> Primitive | None:
         key = (label, body)
         if key not in self._cache:
-            entry = self.expression_map.get(label)
+            entry = self.expression_map.get(label) or self.gesture_map.get(label)
             self._cache[key] = (
                 build_primitive(label, entry, self.dofs, body=body) if entry else None
             )

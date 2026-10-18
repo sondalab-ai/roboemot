@@ -241,6 +241,38 @@ def test_a_joy_expression_moves_the_antennas_on_the_simulated_robot(loop):
         assert values[-1] == pytest.approx(settled[n], abs=0.1), n
 
 
+def test_a_nod_gesture_moves_the_head_pitch_on_the_simulated_robot(loop):
+    """SPEC 7, 11: the shipped nod, requested as the play skill does, dips the head and returns."""
+    from roboemot.affect import AffectState
+    from roboemot.affect.expression import ExpressionRenderer
+    from roboemot.affect.register import Person, resolve_register
+
+    manifest = loop.manifest
+    stack = ConfigStack()
+    stack.set_manifest_behaviour(manifest.model.behaviour)
+    cfg = stack.effective()
+    home = {"head.pitch": manifest.dofs["head.pitch"].home}
+    _hold(loop, home, 8.0)
+    settled = loop.driver.read_state()
+    reg = resolve_register([Person("adult", "declared", {})], cfg.register, cfg.persona)
+    renderer = ExpressionRenderer(
+        cfg.expression, cfg.expression_map, manifest.dofs, 0.15, cfg.gesture_map
+    )
+    assert renderer.request("nod")
+    assert renderer.update(AffectState(0.0, 0.0, "calm", 0.5), reg, time.monotonic())
+    assert renderer.last_label == "nod"
+    seen: list[float] = []
+    end = time.monotonic() + 3.0
+    while time.monotonic() < end:
+        now = time.monotonic()
+        for cmd in renderer.commands(now):
+            loop.feed(cmd)
+        seen.append(loop.driver.read_state()["head.pitch"])
+        time.sleep(0.02)
+    assert max(seen) - min(seen) > 0.02, max(seen) - min(seen)
+    assert seen[-1] == pytest.approx(settled["head.pitch"], abs=0.1)
+
+
 def test_full_sweep_keeps_the_world_map_correct(loop):
     """SPEC 5A (M1 exit): two objects planted aside and behind the robot are found by one full
     sweep, at the right base-frame bearings, with no duplicate entries.

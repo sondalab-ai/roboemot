@@ -502,6 +502,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             cfg.expression_map,
             manifest.dofs,
             cfg.motion.arbiter.crossfade_ms / MS_PER_S,
+            cfg.gesture_map,
         )
         clock = self.make_circadian_clock()
         circ = self.circadian_runner = CircadianRunner(
@@ -676,6 +677,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 change.config.expression,
                 change.config.expression_map,
                 change.config.motion.arbiter.crossfade_ms / MS_PER_S,
+                change.config.gesture_map,
             )
             responder.cfg = change.config.connectivity
             network.set_policy(change.config.connectivity.network)

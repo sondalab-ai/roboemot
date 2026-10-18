@@ -254,7 +254,7 @@ def test_the_app_offers_the_default_skills_and_wires_barge_in(data, fakes, said,
             "play", "look_at", "express_emotion", "remember_preference", "stop_talking",
         ]  # fmt: skip
         gestures = skills.get("play").resolved_choices()["gesture"]
-        assert set(gestures) == set(app.expression.expression_map) and gestures
+        assert set(gestures) == set(app.expression.playable()) >= {"nod", "shake"}
         assert app.conversation.preferences is not None
         # the user speaks over the robot: loud frames, no reference to match them against
         app.speech.extend(time.monotonic() + 5.0)

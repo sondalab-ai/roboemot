@@ -103,6 +103,20 @@ behaviour:                      # config layer 2 (SPEC 11A): this robot's defaul
     annoyance:                  # short flick of the right antenna, 0.5 s
       channels:
         antenna_right: [[0.0, 0], [0.1, 20], [0.3, -6], [0.5, 0]]
+  # Named gestures for the play skill (SPEC 7, 11): same format as above, not affect labels.
+  # head.pitch positive is down, so a nod dips then lifts a little; yaw is symmetric. Degrees
+  # are well inside the +-40 / +-180 limits; the renderer scales and clamps them at runtime.
+  gesture_map:
+    nod:                        # head pitch oscillation ("yes"), 2 cycles in 1.2 s
+      repeat: 2
+      curve: minjerk
+      channels:
+        head.pitch: [[0.0, 0], [0.2, 12], [0.4, -3], [0.6, 0]]
+    shake:                      # head yaw oscillation ("no"), 2 cycles in 1.6 s
+      repeat: 2
+      curve: minjerk
+      channels:
+        head.yaw: [[0.0, 0], [0.2, 15], [0.6, -15], [0.8, 0]]
   # Circadian motion (SPEC 7A, Effects by state): same keyframe format and signs as above.
   # `yawn` plays now and then while drowsy, `stretch` for 3 s when the robot wakes from resting,
   # `rest_pose_deg` is the absolute rest posture (head.pitch positive is down; antennas droop

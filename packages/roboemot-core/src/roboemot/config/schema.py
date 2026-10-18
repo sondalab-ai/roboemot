@@ -2907,6 +2907,11 @@ with warnings.catch_warnings():
         expression_map: dict[str, ExpressionEntry] = param(
             {}, "SPEC 7, 11A: affect label to keyframes per channel; the robot manifest ships it"
         )
+        gesture_map: dict[str, ExpressionEntry] = param(
+            {},
+            "SPEC 7, 11: named gesture (nod, shake) to keyframes per channel, for the play skill; "
+            "names are not affect labels; the robot manifest ships it",
+        )
         circadian: CircadianConfig = param({}, "SPEC 7A")
         circadian_motion: CircadianMotion = param(
             {}, "SPEC 7A: yawn, stretch and rest posture; the robot manifest ships them"
@@ -2956,6 +2961,16 @@ with warnings.catch_warnings():
                 raise ValueError(
                     f"expression_map has labels {unknown} that are not in affect.labels "
                     f"{sorted(self.affect.labels)}"
+                )
+            return self
+
+        @model_validator(mode="after")
+        def _gesture_names_are_not_labels(self) -> RoboEmotConfig:
+            clash = sorted(set(self.gesture_map) & set(self.affect.labels))
+            if clash:
+                raise ValueError(
+                    f"gesture_map names {clash} are affect labels; "
+                    "the play skill offers one flat list of names"
                 )
             return self
 
