@@ -39,8 +39,11 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       build (startup and each config reload, `RouterHub.sync` rebuilds when a secret changed); a route
       whose secret cannot be used is unavailable with one warning, and the CLI check and the web UI
       check refuse it. Keys are in no log, debug report or web UI response (`test_secret_leak.py`).
-      Open: the web UI cannot set or rotate a key; no encryption at rest (file modes only, owner
-      decision 2026-10-18); a secret set on disk is picked up at the next reload or restart, not live.
+      Intended (owner decisions 2026-10-18): the web UI never sets or rotates a key (CLI and installer
+      only; no TLS until M5); no encryption at rest (file modes only). Verified: a key rotated on disk
+      is picked up live, when the next utterance is answered or the traits worker syncs
+      (`secrets.json` is stat'ed each time): `RouterHub.sync` rebuilds the router, budgets kept, and
+      the next request carries the new key (`test_secret_store.py`).
 - [x] Scan soon after a person leaves (SPEC 5A, Scanning). Done: `world.scan.target_lost_delay_s`
       (8 s) with its own `target_lost_jitter_s` (3 s), scaled by `idle_period_x`; the policy uses
       it instead of the idle interval when the person target or speaker hint goes away. A person or
@@ -48,9 +51,9 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       (`ScanPolicy`, `test_scan.py`).
 - [x] Pseudonyms to cloud routes (SPEC 8, 12 Data): `privacy.pseudonyms_to_cloud` loads; the router
       gives aliases to routes that are not local (`llm_routes[].locality`, making a route local needs the admin; `auto` is this machine and the home network)
-      and restores names in the reply text and in tool-call arguments. Open: the aliases are handed
-      out afresh after an app restart; personal details that are not registry names are not replaced;
-      registry names refused for aliasing (no letter or digit, a template prefix word, a structural
+      and restores names in the reply text and in tool-call arguments. Intended (owner decision
+      2026-10-18): aliases live in RAM only and are new after an app restart. Open: personal details
+      that are not registry names are not replaced; registry names refused for aliasing (no letter or digit, a template prefix word, a structural
       word such as "user") are sent unaliased.
 - [x] Pseudonyms residual: `persona/llm_traits.py` (`rate_traits`) streamed `persona.prompt`
       without `pseudonyms=`. `TraitsWorker` now takes a `NameSource` (registry names) and the
@@ -103,8 +106,8 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       Admin PIN re-entered per write, runtime layer through the config stack, audited with source
       `webui:<ip>`, persisted in `webui_settings.json` (0600) and replayed through the guardrails at startup.
       Blocklist: additions only from the web (removing needs the app config and the admin PIN).
-      Open: the pages (slice 5); no language can be added from the web, only edited; a blocklist
-      entry cannot be removed from the web UI at all.
+      Intended (owner decisions 2026-10-18): no language is added from the web, only edited; a
+      blocklist entry is removed only through the app config with the admin PIN (SPEC 11A).
 
 ## M3 exit (SPEC 14, `docs/eval/m3.md`)
 
@@ -136,5 +139,3 @@ The persona pieces exist and are tested; these callers wait for the pillars they
 - [x] Runtime test that a hostile `base_url` redirect (307 to another host) reaches nothing: `test_redirect_auth.py`.
       The openai SDK client followed redirects (the prompt went to the target, without the key); LLM routes
       now do not follow them, like the speech client (SPEC 8, 12).
-- [ ] Dev env only: a local `.venv` with an editable install of the main checkout lacks the `roboemot.world`
-      entry point, so `test_world_plugin.py` fails locally; reinstall the editable packages.
