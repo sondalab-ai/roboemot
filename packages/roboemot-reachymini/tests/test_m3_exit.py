@@ -35,7 +35,6 @@ from roboemot.vision.models import ModelError
 from roboemot.voice import factory
 from roboemot.voice import models as voice_models
 from roboemot.voice.tts import AudioChunk
-from roboemot.voice.vad import SileroVAD
 from test_app_perception import data, wait_for  # noqa: F401  (data: fixture)
 from test_app_reflex import ScriptedMini, enable, run_app
 
@@ -55,9 +54,7 @@ PIPER_PYTHON = Path(os.environ.get("ROBOEMOT_PIPER_PYTHON") or paths.piper_pytho
 # SPEC 13 budgets (cm4 column for first audio; the npu one is 1.5 s).
 FAST_PATH_BUDGET_MS = 300.0
 FIRST_AUDIO_BUDGET_MS = 2000.0
-# CI sets ROBOEMOT_BARGE_IN_BUDGET_MS higher: the stop took 144 to 263 ms on a shared runner against
-# about 120 to 150 ms locally (the others keep 600 ms of margin there). Only this budget is relaxed.
-BARGE_IN_BUDGET_MS = float(os.environ.get("ROBOEMOT_BARGE_IN_BUDGET_MS", "200"))
+BARGE_IN_BUDGET_MS = 200.0
 # A LAN model server: time to first token 400 to 700 ms. The middle of that range.
 FIRST_TOKEN_S = 0.55
 TOKEN_GAP_S = 0.03  # about 30 tokens per second after the first
@@ -95,17 +92,6 @@ def speech_span_s(clip: np.ndarray) -> tuple[float, float]:
     ]
     assert loud, "no speech in the clip"
     return loud[0] / RATE, loud[-1] / RATE
-
-
-def voiced_onset_s(clip: np.ndarray, threshold: float) -> float:
-    """Start of the first 32 ms frame the Silero VAD scores at ``threshold`` or more (the barge-in
-    threshold): where the detector can first see the speech. A word that starts with a fricative
-    ("stop") is audible, above ``FLOOR_DB``, well before this."""
-    vad = SileroVAD(voice_models.model_file(MODELS_DIR, "silero-vad"), 1)
-    for i in range(0, clip.size - FRAME, FRAME):
-        if vad.speech_prob(clip[i : i + FRAME]) >= threshold:
-            return i / RATE
-    raise AssertionError("the VAD never fires on the clip")
 
 
 class LiveMic:
@@ -383,11 +369,7 @@ def test_conversation_inside_the_latency_budgets_then_a_barge_in(
         assert not mini.clears, "clear_player was called before the stop clip"
         onset_wall = mini.mic.play(stop_audio)
         acoustic_onset = onset_wall + speech_span_s(stop_audio)[0]
-        voiced_onset = onset_wall + voiced_onset_s(
-            stop_audio, RoboEmotConfig().voice.barge_in.threshold
-        )
         assert wait_for(lambda: bool(mini.clears), 5), "barge-in never stopped the speaker"
-        stop_ms = (mini.clears[0] - voiced_onset) * 1000
         stop_acoustic_ms = (mini.clears[0] - acoustic_onset) * 1000
         triggers = app.bargein.snapshot()["triggers"]
         assert stop_acoustic_ms >= 0, "the speaker was cleared before the user spoke"
@@ -411,7 +393,6 @@ def test_conversation_inside_the_latency_budgets_then_a_barge_in(
                 "max_first_token_s_inside_budget": round(
                     FIRST_TOKEN_S + (FIRST_AUDIO_BUDGET_MS - first_audio_ms) / 1000, 2
                 ),
-                "barge_in_stop_after_voiced_onset_ms": round(stop_ms),
                 "barge_in_stop_after_acoustic_onset_ms": round(stop_acoustic_ms),
                 "barge_in_trigger": "vad" if triggers else "keyword",
                 "answer_audio_queued_when_cut_s": round(queued_at_cut, 1),
@@ -428,11 +409,10 @@ def test_conversation_inside_the_latency_budgets_then_a_barge_in(
         )
         assert spoken and {lang for lang, _ in spoken} == {language}, "answer in the wrong language"
 
-        if stop_acoustic_ms > BARGE_IN_BUDGET_MS:
-            msg = f"barge-in stop {stop_acoustic_ms:.0f} ms after the first sound"
-            if language == "en":  # a known miss, not hidden: docs/eval/m3.md, Barge-in
-                pytest.xfail(f"{msg}; fricative-initial 'stop' (not strict: some runs pass)")
-            pytest.fail(msg)
+        assert stop_acoustic_ms <= BARGE_IN_BUDGET_MS, (
+            f"barge-in stop {stop_acoustic_ms:.0f} ms after the first sound; "
+            f"barge-in state {app.bargein.snapshot()}"
+        )
     finally:
         finish(stop, thread, errors)
 
