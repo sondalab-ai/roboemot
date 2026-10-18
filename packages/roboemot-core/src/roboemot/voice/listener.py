@@ -2,8 +2,11 @@
 
 One thread reads ``source(timeout)`` (the audio hub's voice queue), and for each chunk:
 
-1. drops it while the robot speaks (``SpeechActivity``; barge-in is slice 6) and resets the
-   pipeline on that transition and on a gap, since the audio is no longer contiguous;
+1. drops it while the robot speaks (``SpeechActivity``) after handing it to
+   ``on_speaking_chunk`` (the barge-in detector, SPEC 8 stage 8), and resets the pipeline on that
+   transition and on a gap, since the audio is no longer contiguous. ``resume`` is the detector's
+   way back: it feeds the audio from the barge-in onset and keeps the gate open until the echo
+   tail is over, so the user's first words are not lost;
 2. runs the VAD endpointer; the ASR only ever sees speech (pre-roll included);
 3. on speech start picks the language, runs the fast path (head turn, ``speech.heard``) and
    starts the recognizer; on each partial runs the keyword spotter;
@@ -17,6 +20,7 @@ per utterance is bounded by ``voice.vad.max_utterance_s``. Audio and text are ne
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from collections.abc import Callable
@@ -101,6 +105,7 @@ class VoiceListener:
         speaker_language: Callable[[], str | None] = lambda: None,
         speaker_id: Callable[[], str | None] = lambda: None,
         on_speaking_chunk: Callable[[VoiceChunkLike], None] | None = None,
+        on_speaking_end: Callable[[], None] | None = None,
         enrolled_in_view: Callable[[float], bool] = lambda now: False,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -114,6 +119,7 @@ class VoiceListener:
         self._speaker_language = speaker_language
         self._speaker_id = speaker_id
         self._on_speaking_chunk = on_speaking_chunk
+        self._on_speaking_end = on_speaking_end
         self._enrolled_in_view = enrolled_in_view
         self._clock = clock
         self._gate = WakeGate("always", 0.0)  # configured by apply_config
@@ -121,11 +127,19 @@ class VoiceListener:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
-        self._counts = {"utterances": 0, "empty": 0, "gaps": 0, "dropped_speaking": 0, "errors": 0}
+        self._counts = {
+            "utterances": 0,
+            "empty": 0,
+            "gaps": 0,
+            "dropped_speaking": 0,
+            "barge_ins": 0,
+            "errors": 0,
+        }
         # Written by the listener thread, read by snapshot(): single-word stores, atomic in
         # CPython, so no lock; the counters have their own.
         self._active = False
         self._muted = False
+        self._open_until = -math.inf  # barge-in handoff: chunks starting before this pass the gate
         self._state = "off"
         self._language = ""
         self._last_error = ""
@@ -219,7 +233,8 @@ class VoiceListener:
         if chunk.gap:
             self._count("gaps")
             self._abort()
-        if self._speech.speaking(start) or self._speech.speaking(chunk.stamp):
+        speaking = self._speech.speaking(start) or self._speech.speaking(chunk.stamp)
+        if speaking and start >= self._open_until:
             if not self._muted:
                 self._muted = True
                 self._abort()
@@ -230,19 +245,43 @@ class VoiceListener:
                 except Exception as exc:
                     log.warning("voice listener: speaking-chunk hook: %s", type(exc).__name__)
             return
+        if self._muted and not speaking:
+            self._muted = False
+            self._speaking_ended()
+        self._ingest(chunk.samples, start, chunk.stamp)
+
+    def resume(self, audio: np.ndarray, start: float) -> None:
+        """Barge-in handoff (SPEC 8 stage 8), called from the speaking-chunk hook after the
+        speech was stopped: ``audio`` runs from the user's speech onset (pre-roll included)
+        and starts at monotonic ``start``. The pipeline restarts on it, and the gate stays open
+        until the speaking window the stop left behind (the echo tail) is over."""
+        self._abort()
         self._muted = False
+        self._open_until = self._speech.until()
+        self._ingest(audio, start, start + audio.size / self._cfg.voice.sample_rate_hz)
+        self._count("barge_ins")
+
+    def _speaking_ended(self) -> None:
+        if self._on_speaking_end is not None:
+            try:
+                self._on_speaking_end()
+            except Exception as exc:
+                log.warning("voice listener: speaking-end hook: %s", type(exc).__name__)
+
+    def _ingest(self, samples: np.ndarray, start: float, audio_end: float) -> None:
+        """Run ``samples`` (starting at ``start``) through the endpointer and the recognizer."""
         buffered: list[np.ndarray] = []
-        for ev in self._endpointer.feed(chunk.samples, start):
+        for ev in self._endpointer.feed(samples, start):
             if isinstance(ev, SpeechAudio):
                 buffered.append(ev.samples)
                 continue
-            self._feed(buffered, chunk.stamp)
+            self._feed(buffered, audio_end)
             buffered = []
             if isinstance(ev, SpeechStart):
-                self._begin(ev, chunk.stamp)
+                self._begin(ev, audio_end)
             elif isinstance(ev, SpeechEnd):
                 self._end(ev)
-        self._feed(buffered, chunk.stamp)
+        self._feed(buffered, audio_end)
 
     def _feed(self, parts: list[np.ndarray], audio_end: float) -> None:
         if parts and self._active:

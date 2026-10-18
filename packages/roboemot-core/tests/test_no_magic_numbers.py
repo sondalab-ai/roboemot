@@ -31,6 +31,7 @@ BEHAVIOUR_MODULES = [
     "voice/vad.py",
     "voice/models.py",
     "voice/activity.py",
+    "voice/bargein.py",
     "voice/tts.py",
     "voice/piper_backend.py",
     "voice/piper_worker.py",
