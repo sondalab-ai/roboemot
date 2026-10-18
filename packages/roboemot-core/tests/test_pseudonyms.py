@@ -994,3 +994,35 @@ def test_image_parts_are_not_read_as_text_but_text_parts_are():
     image = {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,/9j/A/a+A=="}}
     assert not p.leaks([{"role": "user", "content": [image, {"type": "text", "text": "x"}]}])
     assert p.leaks([{"role": "user", "content": [image, {"type": "text", "text": "Marta"}]}])
+
+
+# ------------------------------------------------------------------ \uXXXX in plain text
+
+
+@pytest.mark.parametrize(
+    "written", ["Mar\\u0074a", "\\u004DARTA", "mar\\u0054a", "\\u004d\\u0061rta"]
+)
+def test_a_name_written_with_unicode_escapes_in_plain_text_is_scrubbed(written):
+    p = pseudo("Marta")
+    out = p.to_alias(f"ciao {written}!")
+    assert out == f"ciao {alias_of(p, 'Marta')}!"
+    assert p.mentions(written)
+
+
+def test_a_name_written_with_unicode_escapes_is_caught_by_the_leak_check():
+    p = pseudo("Marta", "Ömer")
+    for text in ("saluta Mar\\u0074a", "x \\u00d6mer", "x \\u00D6MER"):
+        assert p.leaks([{"role": "user", "content": text}]), text
+        assert p.leaks({"messages": [{"role": "user", "content": text}], "tools": None})
+    assert not p.leaks([{"role": "user", "content": "saluta Mar\\u0074"}])
+
+
+def test_escapes_that_do_not_decode_to_a_name_are_left_alone():
+    p = pseudo("Marta")
+    text = "a \\u00zz and \\ud83d and \\u0041"
+    assert p.to_alias(text) == text
+
+
+def test_a_registry_name_holding_an_escape_is_still_refused():
+    p = pseudo("Mar\\u0074a", "Luca")
+    assert p.refused == 1

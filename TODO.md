@@ -64,8 +64,9 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       string values are aliased. The leak check skips a key only when it is a property name of a
       tool schema in the same request; any other key that holds a name (a tool result keyed by
       names) blocks the route instead of being renamed.
-- [ ] Pseudonyms residual: a name written with `\uXXXX` escapes for ASCII letters in text that is
-      not JSON is neither scrubbed nor caught by the leak check.
+- [x] Pseudonyms residual: a name written with `\uXXXX` escapes in text that is not JSON was
+      neither scrubbed nor caught by the leak check. Escapes now count as their character in
+      matching (surrogate escapes are not decoded).
 
 ## Barge-in and skills (M3 slice 6, SPEC 8 stage 8, 11)
 

@@ -13,10 +13,12 @@ everything a cloud route receives, and swapped back in what it sends back:
 Matching. Text is NFC-normalised, then compared with case folding, accents and other combining
 marks removed (``Ömer``, ``omer`` and an NFD ``Ömer`` are one name; ``Strauß`` matches
 ``STRAUSS``; ``İlker`` matches ``ilker``), as whole words, with any run of spaces between the
-words of a name. The JSON-escaped spellings of a name are matched too. A check over the text of
-the finished request (as it is, as JSON strings, and decoded where it is JSON) refuses to send a
-body that still holds a name (``Pseudonyms.leaks``); the request's structure (roles, types, keys,
-tool names, schema keywords) is not text and is never aliased or checked. A registry name that
+words of a name. The JSON-escaped spellings of a name are matched too, and so is a name
+written with ``\\uXXXX`` escapes in text that is not JSON (an escape counts as its character).
+A check over the text of the finished request (as it is, as JSON strings, and decoded where it
+is JSON) refuses to send a body that still holds a name (``Pseudonyms.leaks``); the request's
+structure (roles, types, tool names, schema keywords) is not text and is never aliased or
+checked, except that a JSON key other than a tool property name is checked. A registry name that
 cannot be aliased (no letter or digit, a word of an alias template, a value of the request
 format such as "user") is refused and counted, and reaches a cloud route as typed.
 
@@ -52,6 +54,8 @@ import httpx
 
 from ..config.schema import PSEUDONYM_LABEL, LLMRoute
 
+UNICODE_ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})")
+UNICODE_ESCAPE_LEN = 6  # characters of "\\uXXXX"
 LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 LOOPBACK_NAMES = ("localhost",)
 MDNS_SUFFIX = ".local"
@@ -145,16 +149,23 @@ def _nfc(text: str) -> str:
 
 def _fold(text: str) -> tuple[str, list[int], list[int], str]:
     """``(folded, start, end, nfc)``: the folded text and, for each of its characters, the
-    span of the NFC character it came from."""
+    span of the NFC text it came from. A ``\\uXXXX`` escape (any hex case, not a surrogate)
+    counts as the character it writes, so a name spelled with escapes in plain text is matched
+    and replaced over its six-character spans."""
     nfc = _nfc(text)
     chars: list[str] = []
     starts: list[int] = []
     ends: list[int] = []
-    for i, c in enumerate(nfc):
+    i = 0
+    while i < len(nfc):
+        c, width = nfc[i], 1
+        if (m := UNICODE_ESCAPE.match(nfc, i)) and not 0xD800 <= (code := int(m[1], 16)) <= 0xDFFF:
+            c, width = chr(code), UNICODE_ESCAPE_LEN
         for x in _fold_char(c):
             chars.append(x)
             starts.append(i)
-            ends.append(i + 1)
+            ends.append(i + width)
+        i += width
     return "".join(chars), starts, ends, nfc
 
 
@@ -460,7 +471,7 @@ class Pseudonyms:
             own = _compile(_key(v) for v in _variants(name))
             if (
                 not re.search(r"\w", key)
-                or "\\" in key  # the JSON escape character: no name has one
+                or "\\" in name  # the JSON escape character: no name has one
                 or key in STRUCTURAL_WORDS
                 or any(_spans(own, prefix) for prefix in prefixes)
             ):
