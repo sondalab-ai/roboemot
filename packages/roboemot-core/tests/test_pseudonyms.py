@@ -1201,3 +1201,32 @@ async def test_a_lone_surrogate_in_the_history_is_a_clean_route_error():
     with pytest.raises(Exception, match="all routes failed"):
         await run(rec.router(route()), p, messages)
     assert rec.bodies == []
+
+
+@pytest.mark.parametrize(
+    ("name", "text"),
+    [
+        ("Bob", "C:\\Users\\bob"),
+        ("Bob", "open \\bob now"),
+        ("Nora", "\\nora"),
+        ("Nora", "say \\nora"),
+        ("Anna Maria", "Anna\\nMaria"),
+        ("Anna", "\\nAnna"),
+        ("Anna", "\\\\nAnna"),
+        ("Anna", "\\tAnna and \\rAnna"),
+    ],
+)
+def test_neither_reading_of_a_backslash_can_hide_a_name(name, text):
+    p = pseudo(name)
+    assert p.mentions(text)
+    assert p.leaks([{"role": "user", "content": text}])
+    out = p.to_alias(text)
+    assert not p.mentions(out) and not p.leaks([{"role": "user", "content": out}])
+    assert alias_of(p, name) in out
+
+
+def test_overlapping_names_of_the_two_readings_are_all_replaced():
+    p = pseudo("Anna", "Anna Maria")
+    out = p.to_alias("Anna\\nMaria and Anna")
+    assert "Anna" not in out and "Maria" not in out
+    assert not p.mentions(out)

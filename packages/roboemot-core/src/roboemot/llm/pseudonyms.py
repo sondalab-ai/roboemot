@@ -188,20 +188,21 @@ def _escape_at(nfc: str, i: int) -> tuple[str, int] | None:
     return chr(code), m.end() - i
 
 
-def _fold(text: str) -> tuple[str, list[int], list[int], str]:
+def _fold(text: str, decode: bool = True) -> tuple[str, list[int], list[int], str]:
     """``(folded, start, end, nfc)``: the folded text and, for each of its characters, the
-    span of the NFC text it came from. A JSON escape (see :func:`_escape_at`) is the character
-    it writes, so a name spelled with escapes, or split by ``\\n``, in text that is never
-    JSON-decoded (a scalar string, double-encoded JSON, JSON too deep to parse) is matched and
-    replaced over the escape's span. A backslash before an escape (``\\\\u0041``) does not
-    cancel it: this errs towards matching."""
+    span of the NFC text it came from. With ``decode`` a JSON escape (see :func:`_escape_at`)
+    is the character it writes, so a name spelled with escapes, or split by ``\\n``, in text
+    that is never JSON-decoded (a scalar string, double-encoded JSON, JSON too deep to parse)
+    is matched and replaced over the escape's span. A backslash before an escape
+    (``\\\\u0041``) does not cancel it: this errs towards matching. Without ``decode`` the
+    text is read literally (``C:\\bob`` holds the word ``bob``)."""
     nfc = _nfc(text)
     chars: list[str] = []
     starts: list[int] = []
     ends: list[int] = []
     i = 0
     while i < len(nfc):
-        c, width = _escape_at(nfc, i) or (nfc[i], 1)
+        c, width = (_escape_at(nfc, i) if decode else None) or (nfc[i], 1)
         for x in _fold_char(c):
             chars.append(x)
             starts.append(i)
@@ -235,15 +236,32 @@ def _compile(keys: Iterable[str]) -> re.Pattern[str] | None:
 
 
 def _spans(pattern: re.Pattern[str] | None, text: str) -> list[tuple[int, int, str]]:
-    """``(start, end, key)`` of each name in ``text`` (the NFC text's indices)."""
+    """``(start, end, key)`` of each name in ``text`` (the NFC text's indices), read both
+    literally and with JSON escapes decoded: neither reading may hide a name the other shows
+    (``\\nora`` holds ``nora`` literally and a line break plus ``ora`` decoded). Spans of the
+    two readings may overlap; :func:`_disjoint` picks what to replace."""
     if pattern is None or not text:
         return []
-    folded, starts, ends, _ = _fold(text)
-    return [
-        (starts[m.start()], ends[m.end() - 1], " ".join(m.group(0).split()))
-        for m in pattern.finditer(folded)
-        if m.end() > m.start()
-    ]
+    found: set[tuple[int, int, str]] = set()
+    nfc = _nfc(text)
+    for decode in (False, True) if "\\" in nfc else (False,):
+        folded, starts, ends, _ = _fold(nfc, decode)
+        found.update(
+            (starts[m.start()], ends[m.end() - 1], " ".join(m.group(0).split()))
+            for m in pattern.finditer(folded)
+            if m.end() > m.start()
+        )
+    return sorted(found)
+
+
+def _disjoint(spans: list[tuple[int, int, str]]) -> list[tuple[int, int, str]]:
+    """The spans to replace: from the left, the longest at each start, none overlapping an
+    earlier one."""
+    out: list[tuple[int, int, str]] = []
+    for span in sorted(spans, key=lambda t: (t[0], t[0] - t[1])):
+        if not out or span[0] >= out[-1][1]:
+            out.append(span)
+    return out
 
 
 def replace_names(text: str, names: Mapping[str, str]) -> str:
@@ -253,7 +271,7 @@ def replace_names(text: str, names: Mapping[str, str]) -> str:
     pattern = _compile(table)
     nfc = _nfc(text)
     out, pos = [], 0
-    for start, end, key in _spans(pattern, nfc):
+    for start, end, key in _disjoint(_spans(pattern, nfc)):
         out += [nfc[pos:start], table[key]]
         pos = end
     return "".join(out) + nfc[pos:]
@@ -594,18 +612,21 @@ class Pseudonyms:
 
     def to_alias(self, text: str, used: set[str] | None = None) -> str:
         """``text`` (NFC) with every known name replaced by its alias; the aliases put in are
-        added to ``used``."""
+        added to ``used``. A name overlapped by a replaced one (the two readings of an escape,
+        see ``_spans``) is replaced in a further pass; aliases hold no name, so it ends."""
         with self._lock:
             pattern, variants = self._pattern, dict(self._variants)
-        nfc = _nfc(text)
-        out, pos = [], 0
-        for start, end, key in _spans(pattern, nfc):
-            alias = variants[key]
-            out += [nfc[pos:start], alias]
-            pos = end
-            if used is not None:
-                used.add(alias)
-        return "".join(out) + nfc[pos:]
+        current = _nfc(text)
+        while spans := _disjoint(_spans(pattern, current)):
+            out, pos = [], 0
+            for start, end, key in spans:
+                alias = variants[key]
+                out += [current[pos:start], alias]
+                pos = end
+                if used is not None:
+                    used.add(alias)
+            current = "".join(out) + current[pos:]
+        return current
 
     def safe_cut(self, text: str, cap: int) -> str:
         """``text`` cut to at most ``cap`` characters, but never inside a name: a cut that falls
