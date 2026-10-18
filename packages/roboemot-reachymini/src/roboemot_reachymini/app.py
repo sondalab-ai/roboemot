@@ -679,6 +679,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             )
             responder.cfg = change.config.connectivity
             network.set_policy(change.config.connectivity.network)
+            network.set_routes(change.config.llm_routes)  # new routes are probed, removed dropped
 
         stack.subscribe(reload)
         stack.subscribe(worker.on_change)

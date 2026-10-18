@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+import threading
+import time
 
 import httpx
 import pytest
@@ -176,6 +178,56 @@ def test_monitor_without_routes_starts_and_stops():
     mon.start()
     mon.stop()
     assert mon.online
+
+
+def test_set_routes_adds_probed_link_and_keeps_existing_state():
+    ev, clock = Events(), Clock()
+    up = {"cloud": False, "lan": True, "new": False}
+    mon = monitor(up, ev, clock)
+    run_checks(mon, clock, 20)
+    assert not mon.is_online("cloud")
+    hosts = {"api.example.com": "cloud", "lan.local": "lan", "new.local": "new"}
+    mon.probe = lambda host, port, t: up[hosts[host]]
+    mon.set_routes([*mon.routes, route("new", "http://new.local/v1")])
+    assert set(mon.links) == {"cloud", "lan", "new"}
+    assert not mon.is_online("cloud")  # unchanged name: link state kept
+    assert mon.is_online("new")  # online until a check says otherwise
+    run_checks(mon, clock, 20)
+    assert not mon.is_online("new") and "link.route.new.lost" in ev
+    assert "new.local:80" in str(mon.snapshot()["routes"])
+
+
+def test_set_routes_drops_removed_and_recomputes_network():
+    ev, clock = Events(), Clock()
+    up = {"cloud": False, "lan": True}
+    mon = monitor(up, ev, clock)
+    run_checks(mon, clock, 20)
+    lan = mon.links["lan"]
+    mon.set_routes([r for r in mon.routes if r.name == "cloud"])
+    assert set(mon.links) == {"cloud"} and mon.links["cloud"] is not lan
+    assert not mon.online  # the only route left is down
+    mon.set_routes([])
+    assert mon.online and mon.is_online("cloud") and mon.snapshot()["routes"] == {}
+
+
+def test_set_routes_same_list_is_a_no_op():
+    mon = monitor({"cloud": True, "lan": True}, Events(), Clock())
+    links = dict(mon.links)
+    mon.set_routes(list(mon.routes))
+    assert mon.links == links and all(mon.links[n] is links[n] for n in links)
+
+
+def test_background_thread_probes_route_added_to_empty_monitor():
+    seen = threading.Event()
+    mon = NetworkMonitor(
+        [], POLICY, probe=lambda host, port, t: seen.set() or True, clock=time.monotonic
+    )
+    mon.start()
+    try:
+        mon.set_routes([route("late", "http://late.local/v1")])
+        assert seen.wait(2.0)
+    finally:
+        mon.stop()
 
 
 # ---------------------------------------------------------------- router
