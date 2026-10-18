@@ -9,7 +9,7 @@ default host and SSH user come from the installer its platform package registers
     python scripts/robot_ssh.py --host 192.168.1.20 --user pollen
     python scripts/robot_ssh.py --copy-id                # install your SSH key (ssh-copy-id)
     python scripts/robot_ssh.py --debug > report.json    # report built on the robot
-    python scripts/robot_ssh.py --dry-run                # print the ssh command only
+    python scripts/robot_ssh.py --dry-run                # print the ssh line (still discovers)
 """
 
 import sys

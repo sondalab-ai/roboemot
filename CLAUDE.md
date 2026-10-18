@@ -56,7 +56,7 @@ ruff check . && ruff format --check .
 python scripts/install_on_robot.py --dry-run   # read-only checks against the real robot
 python scripts/install_on_robot.py --uninstall --dry-run   # what uninstall would undo
 python scripts/robot_ssh.py [--host H] [--user U]   # shell on the robot (mDNS pick); `-- cmd` runs one command
-python scripts/robot_ssh.py --copy-id    # install your SSH key; --debug: roboemot debug --json built on the robot; --dry-run prints the ssh line
+python scripts/robot_ssh.py --copy-id    # install your SSH key; --debug: roboemot debug --json built on the robot; --dry-run prints the ssh line (discovery still runs, no exec)
 roboemot debug --host <robot> --json     # debug report (SPEC 12A); system/battery need it run on the robot
 ```
 

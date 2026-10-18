@@ -307,6 +307,44 @@ def test_wifi_parsers_read_captured_output():
     assert system.parse_proc_wireless("garbage\nwlan1: 0000 x y z") == {}
 
 
+@pytest.mark.parametrize(
+    ("ssid_field", "ssid"),
+    [
+        ("Casa\\: Barile", "Casa: Barile"),
+        ("back\\\\slash", "back\\slash"),
+        ("ends\\:", "ends:"),
+        ("trail\\\\", "trail\\"),
+    ],
+)
+def test_nmcli_escapes(ssid_field, ssid):
+    assert system.parse_nmcli_active(f"yes:{ssid_field}:50:2412 MHz")["ssid"] == ssid
+
+
+def test_a_lone_trailing_backslash_is_kept():
+    assert system.split_nmcli("a:b\\") == ["a", "b\\"]
+
+
+def test_nmcli_fields_split_only_on_unescaped_colons():
+    assert system.split_nmcli("a\\\\:b\\:c:d") == ["a\\", "b:c", "d"]
+
+
+def test_wifi_skips_interface_names_that_could_be_options(tmp_path, monkeypatch):
+    proc = PROC_WIRELESS + "-oProxyCommand=x: 0000 1. -1. -256 0 0 0 0 0 0\n"
+    data, ran = _wifi(tmp_path, monkeypatch, {"iw"}, {"iw": IW_LINK}, proc=proc)
+    assert list(data["interfaces"]) == ["wlan0"]
+    assert all(not a[0][2].startswith("-") for a in ran)
+    assert not system.safe_interface("a" * 16) and not system.safe_interface("-x")
+    assert system.safe_interface("wlan0") and system.safe_interface("wlp2s0.10")
+
+
+def test_wifi_falls_back_to_nmcli_when_every_iw_call_fails(tmp_path, monkeypatch):
+    err = subprocess.CalledProcessError(1, "iw")
+    data, _ = _wifi(tmp_path, monkeypatch, {"iw", "nmcli"}, {"iw": err, "nmcli": NMCLI})
+    assert data["source"] == "nmcli" and data["active_network"]["ssid"] == "Casa:Barile"
+    data, _ = _wifi(tmp_path, monkeypatch, {"iw"}, {"iw": err})
+    assert data["source"] == "proc"
+
+
 def test_wifi_prefers_iw_and_never_reports_the_bssid(tmp_path, monkeypatch):
     data, ran = _wifi(tmp_path, monkeypatch, {"iw", "nmcli"}, {"iw": IW_LINK})
     assert data["source"] == "iw"

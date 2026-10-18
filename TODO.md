@@ -70,4 +70,5 @@ The persona pieces exist and are tested; these callers wait for the pillars they
 - [ ] A CI job for `-m models` tests: the runner needs a cached voice models folder (Silero, two Vosk
       models, two Piper voices, about 0.3 GB) and a Piper interpreter; `ci.yml` has none today.
 - [ ] The robot, owner and licence items of the M3 report are in SPEC 15 (exit on the robot, barge-in,
-      CM4 load, Piper on the robot and its voice licences, wake phrases, OpenAI speech in Italian, children's lines). Not repeated here.
+      CM4 load, Piper on the robot and its voice licences, wake phrases, OpenAI speech in Italian,
+      children's lines). Not repeated here.

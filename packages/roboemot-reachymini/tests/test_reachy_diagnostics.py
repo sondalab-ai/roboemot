@@ -53,3 +53,22 @@ def test_wifi_failure_is_one_error_section_not_a_broken_report():
     )
     assert sections["robot.wifi"]["ok"] is False
     assert sections["robot.daemon"]["ok"] is True
+
+
+def test_wifi_summary_tolerates_unexpected_shapes():
+    odd = diagnostics.wifi_summary(
+        {"mode": 3, "connected_network": 7, "known_networks": "Casa,Ufficio"}
+    )
+    assert odd == {
+        "available": True,
+        "mode": None,
+        "connected_network": None,
+        "known_networks": None,
+    }
+    assert diagnostics.wifi_summary(["x"])["known_networks"] is None
+    assert diagnostics.wifi_summary({"known_networks": [], "connected_network": None}) == {
+        "available": True,
+        "mode": None,
+        "connected_network": None,
+        "known_networks": 0,
+    }

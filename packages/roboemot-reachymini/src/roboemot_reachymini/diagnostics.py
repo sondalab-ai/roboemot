@@ -63,13 +63,18 @@ def sources(target: Target, client: httpx.Client | None = None) -> list[Source]:
     ]
 
 
-def wifi_summary(status: dict[str, Any]) -> dict[str, Any]:
+def wifi_summary(status: Any) -> dict[str, Any]:
     """Mode and connected network of ``GET /wifi/status``; saved networks only as a count."""
+    if not isinstance(status, dict):
+        status = {}
+    mode = status.get("mode")
+    connected = status.get("connected_network")
+    known = status.get("known_networks")
     return {
         "available": True,
-        "mode": status.get("mode"),
-        "connected_network": status.get("connected_network"),
-        "known_networks": len(status.get("known_networks") or []),
+        "mode": mode if isinstance(mode, str) else None,
+        "connected_network": connected if isinstance(connected, str) else None,
+        "known_networks": len(known) if isinstance(known, list) else None,
     }
 
 

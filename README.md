@@ -90,7 +90,7 @@ python scripts/install_on_robot.py --uninstall # put the robot back as it was
 
 To log in afterwards, `python scripts/robot_ssh.py` finds the robot the same way and opens a shell;
 `--copy-id` installs your SSH key, `-- <command>` runs one command, `--debug` prints the debug
-report built on the robot (with Wi-Fi signal strength), `--dry-run` shows the `ssh` line.
+report built on the robot (with Wi-Fi signal strength), `--dry-run` shows the `ssh` line (it still runs discovery and only skips the exec).
 
 It lists the robots it finds on the network by mDNS (or asks for a host, default
 `reachy-mini.local`) and asks for the SSH user (default `pollen`);

@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ipaddress
 import os
 import posixpath
+import re
 import shlex
 import sys
 from collections.abc import Callable, Sequence
@@ -26,12 +28,41 @@ from .ui import Ui, WizardError
 NOT_INSTALLED_EXIT = 127
 CLI_NAME = "roboemot"
 
+USER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9._-]*")
+HOST_LABEL = re.compile(r"(?!-)[A-Za-z0-9-]{1,63}(?<!-)")
+HOST_MAX_CHARS = 253
+
 Exec = Callable[[str, list[str]], None]
 
 
 def robot_cli(platform: Platform) -> str:
     """Path of the ``roboemot`` script on the robot: next to the target environment's Python."""
     return posixpath.join(posixpath.dirname(platform.python), CLI_NAME)
+
+
+def valid_user(user: str) -> str:
+    """``user`` if it is a plain login name; it ends up in an ssh argument."""
+    if not USER_PATTERN.fullmatch(user):
+        raise WizardError(f"not a valid SSH user name: {user!r}")
+    return user
+
+
+def valid_host(host: str) -> str:
+    """``host`` if it is an IP address or an RFC 1123 hostname (no ``-`` first, no ``@``/``%``)."""
+    if host and not any(c in host for c in "@%"):
+        try:
+            ipaddress.ip_address(host)
+            return host
+        except ValueError:
+            pass
+        name = host.rstrip(".")
+        if (
+            name
+            and len(name) <= HOST_MAX_CHARS
+            and all(HOST_LABEL.fullmatch(label) for label in name.split("."))
+        ):
+            return host
+    raise WizardError(f"not a valid robot host name or IP address: {host!r}")
 
 
 def debug_command(platform: Platform) -> str:
@@ -56,15 +87,18 @@ def build_argv(
     The robot comes from ``--host``/``--robot`` or mDNS, the user from ``--user`` or the
     platform's usual one.
     """
+    if opts.host:
+        valid_host(opts.host)
+    if opts.user:
+        valid_user(opts.user)
     host, platform = select_robot(ui, opts, root)
-    user = opts.user or platform.default_user
-    target = f"{user}@{host}"
+    target = f"{valid_user(opts.user or platform.default_user)}@{valid_host(host)}"
     if copy_id:
-        return ["ssh-copy-id", target]
-    argv = ["ssh", "-o", f"ConnectTimeout={CONNECT_TIMEOUT_S}", target]
+        return ["ssh-copy-id", "--", target]
+    argv = ["ssh", "-o", f"ConnectTimeout={CONNECT_TIMEOUT_S}", "--", target]
     if debug:
         return [*argv, debug_command(platform)]
-    return [*argv, *command]
+    return [*argv, shlex.join(command)] if command else argv
 
 
 def parse_args(argv: list[str] | None = None) -> tuple[Options, list[str], bool, bool]:
@@ -88,7 +122,11 @@ def parse_args(argv: list[str] | None = None) -> tuple[Options, list[str], bool,
     p.add_argument(
         "--debug", action="store_true", help="run `roboemot debug --json` on the robot (SPEC 12A)"
     )
-    p.add_argument("--dry-run", action="store_true", help="print the command, do not run it")
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the command, do not run it (discovery still runs)",
+    )
     a = p.parse_args(args)
     if a.debug and a.copy_id:
         p.error("--debug and --copy-id exclude each other")
@@ -128,7 +166,7 @@ def main(
     except OSError as e:
         ui.fail(f"cannot run {cmd[0]}: {e}")
         return 1
-    return 0
+    return 0  # only reached when execvp is replaced (tests); a real exec never returns
 
 
 __all__ = ["build_argv", "debug_command", "main", "parse_args", "robot_cli"]

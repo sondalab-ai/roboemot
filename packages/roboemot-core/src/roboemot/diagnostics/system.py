@@ -35,6 +35,11 @@ COMMAND_TIMEOUT_S = 2.0
 POWER_SUPPLY_ROOT = Path("/sys/class/power_supply")
 DEVICE_MODEL = Path("/proc/device-tree/model")
 PROC_WIRELESS = Path("/proc/net/wireless")
+NMCLI_ACTIVE_COMMAND = [
+    "nmcli", "-t", "-f", "ACTIVE,SSID,SIGNAL,FREQ", "dev", "wifi", "list", "--rescan", "no",
+]  # fmt: skip
+# Interface names reach `iw` as arguments: kernel names are at most 15 characters.
+INTERFACE_NAME = re.compile(r"[\w.@:-]{1,15}")
 SYS_NET = Path("/sys/class/net")
 # /proc/net/wireless reports 256 below the real figure when the driver has no noise value.
 NOISE_UNKNOWN_DBM = -256
@@ -235,42 +240,34 @@ def wifi(
     interfaces = parse_proc_wireless(_read(proc) or "")
     if sys_net.is_dir():
         for card in sorted(sys_net.iterdir()):
-            if (card / "wireless").is_dir():
+            if safe_interface(card.name) and (card / "wireless").is_dir():
                 interfaces.setdefault(card.name, {})
     if not interfaces:
         return {"available": False, "reason": "no wireless interface"}
     if which("iw"):
-        source = "iw"
+        answered = False
         for name, info in interfaces.items():
             out = _run_text(run, ["iw", "dev", name, "link"])
-            info.update(parse_iw_link(out or ""))
-    elif which("nmcli"):
-        source = "nmcli"
-        out = _run_text(
-            run,
-            [
-                "nmcli",
-                "-t",
-                "-f",
-                "ACTIVE,SSID,SIGNAL,FREQ",
-                "dev",
-                "wifi",
-                "list",
-                "--rescan",
-                "no",
-            ],
-        )
-        active = parse_nmcli_active(out or "")
+            if out is not None:
+                answered = True
+                info.update(parse_iw_link(out))
+        if answered:
+            return {"available": True, "source": "iw", "interfaces": interfaces}
+    if which("nmcli"):
+        out = _run_text(run, NMCLI_ACTIVE_COMMAND)
         # nmcli lists networks, not interfaces, so the active one is not tied to a card.
         return {
             "available": True,
-            "source": source,
+            "source": "nmcli",
             "interfaces": interfaces,
-            "active_network": active or None,
+            "active_network": parse_nmcli_active(out or "") or None,
         }
-    else:
-        source = "proc"
-    return {"available": True, "source": source, "interfaces": interfaces}
+    return {"available": True, "source": "proc", "interfaces": interfaces}
+
+
+def safe_interface(name: str) -> bool:
+    """A plausible kernel interface name that cannot be read as an option."""
+    return not name.startswith("-") and INTERFACE_NAME.fullmatch(name) is not None
 
 
 def parse_proc_wireless(text: str) -> dict[str, dict[str, Any]]:
@@ -284,6 +281,8 @@ def parse_proc_wireless(text: str) -> dict[str, dict[str, Any]]:
         try:
             quality, level, noise = (float(f.rstrip(".")) for f in fields[1:4])
         except ValueError:
+            continue
+        if not safe_interface(name.strip()):
             continue
         out[name.strip()] = {
             "link_quality": quality,
@@ -309,12 +308,31 @@ def parse_iw_link(text: str) -> dict[str, Any]:
     return out
 
 
+def split_nmcli(line: str) -> list[str]:
+    """Fields of one ``nmcli -t`` line: ``:`` separates, ``\\:`` and ``\\\\`` are literal."""
+    fields, cur, i = [], [], 0
+    while i < len(line):
+        c = line[i]
+        if c == "\\" and i + 1 < len(line):
+            cur.append(line[i + 1])
+            i += 2
+            continue
+        if c == ":":
+            fields.append("".join(cur))
+            cur = []
+        else:
+            cur.append(c)
+        i += 1
+    fields.append("".join(cur))
+    return fields
+
+
 def parse_nmcli_active(text: str) -> dict[str, Any]:
-    """The active line of ``nmcli -t -f ACTIVE,SSID,SIGNAL,FREQ dev wifi`` (``\\:`` escapes)."""
+    """The active line of ``nmcli -t -f ACTIVE,SSID,SIGNAL,FREQ dev wifi``; SSID unescaped."""
     for line in text.splitlines():
-        parts = re.split(r"(?<!\\):", line)
+        parts = split_nmcli(line)
         if len(parts) == 4 and parts[0] == "yes":
-            out: dict[str, Any] = {"ssid": parts[1].replace("\\:", ":")}
+            out: dict[str, Any] = {"ssid": parts[1]}
             if _number(parts[2]) is not None:
                 out["signal_pct"] = _number(parts[2])
             if _number(parts[3]) is not None:
