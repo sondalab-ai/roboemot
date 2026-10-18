@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 from roboemot.bus import Bus
 from roboemot.config.schema import RegisterParams, RoboEmotConfig, StateEffects
-from roboemot.voice.speech import SpeechOutput
+from roboemot.voice.speech import SpeechOutput, ends_with_question
 from roboemot.voice.tts import AudioChunk, FallbackTTS, TTSError
 from test_tts import SpeechServer, openai_backend
 
@@ -462,3 +462,55 @@ def test_ended_at_follows_the_sinks_timeline_and_a_stop_cuts_it(make):
     out.stop()
     assert out.ended_at(job) <= time.monotonic()
     assert out.ended_at(9999) is None
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("Vuoi un caffe?", True),
+        ("Vuoi un caffe? ", True),
+        ('Did he say "yes?"', True),
+        ("(Are you sure?)", True),
+        ("¿Qué tal?", True),
+        ("Vuoi un caffe? Ti serve.", False),
+        ("Ciao.", False),
+        ("Che bello!", False),
+        ("", False),
+    ],
+)
+def test_ends_with_question(text, expected):
+    assert ends_with_question(text) is expected
+
+
+def test_question_end_tracks_the_last_spoken_sentence_only(make):
+    sink = TimelineSink()
+    out = make(FakeBackend(pieces=10), sink=sink)
+    assert out.question_end() is None
+    say(out, "Vuoi un caffe?")
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    assert out.question_end() == pytest.approx(sink.until, abs=0.01)
+    say(out, "Ok, lo preparo.")
+    assert wait_for(lambda: out.sentences_spoken == 2)
+    assert out.question_end() is None  # a statement after the question ends the window
+
+
+def test_a_stop_moves_the_question_end_to_the_stop(make):
+    out = make(FakeBackend(pieces=10), sink=TimelineSink())
+    say(out, "Vuoi un caffe?")
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    assert out.question_end() > time.monotonic() + 0.5
+    out.stop()
+    assert out.question_end() <= time.monotonic()
+
+
+def test_dropped_sentences_neither_replace_nor_extend_the_question_end(make):
+    out = make(FakeBackend(pieces=1), sink=TimelineSink())
+    say(out, "Vuoi un caffe?")
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    before = out.question_end()
+    assert before is not None
+    for _ in range(3):
+        say(out, "Una frase che non verra detta.")
+    out.stop()  # drops the queue (barge-in, the stop keyword)
+    after = out.question_end()
+    assert after is not None and after <= before and after <= time.monotonic()
