@@ -1,70 +1,21 @@
-:root {
-  --bg: #f6f5f1;
-  --fg: #1d1d1b;
-  --muted: #6b6a64;
-  --line: #d9d7cf;
-  --card: #ffffff;
-  --accent: #1f5f8b;
-  --danger: #a3261f;
-  --ok: #2b7a3d;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #161614;
-    --fg: #ecebe5;
-    --muted: #a09f97;
-    --line: #34332f;
-    --card: #1f1f1c;
-    --accent: #6fb1dc;
-    --danger: #ef8279;
-    --ok: #7fc98f;
-  }
-}
-* { box-sizing: border-box; }
-body {
-  margin: 0 auto;
-  max-width: 52rem;
-  padding: 1rem;
-  background: var(--bg);
-  color: var(--fg);
-  font: 16px/1.5 system-ui, sans-serif;
-}
-header { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
-h1 { font-size: 1.25rem; margin: 0; flex: 1; }
-h2 { font-size: 1.1rem; margin-top: 0; }
-nav { display: flex; gap: 0.25rem; flex-wrap: wrap; }
-nav button[aria-current="true"] { background: var(--accent); color: var(--bg); }
-button {
-  font: inherit;
-  padding: 0.4rem 0.8rem;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--card);
-  color: var(--fg);
-  cursor: pointer;
-}
-button.danger { color: var(--danger); border-color: var(--danger); }
-button.primary { background: var(--accent); color: var(--bg); border-color: var(--accent); }
-button:disabled { opacity: 0.5; cursor: default; }
-section, form { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 1rem; margin: 1rem 0; }
-label { display: block; margin: 0.75rem 0 0.25rem; }
-input[type="text"], input[type="password"], select {
-  font: inherit;
-  width: 100%;
-  max-width: 24rem;
-  padding: 0.4rem;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--bg);
-  color: var(--fg);
-}
-label.check { display: flex; gap: 0.5rem; align-items: center; margin: 0.25rem 0; }
-.muted { color: var(--muted); font-size: 0.9rem; }
-#notice { min-height: 1.5rem; color: var(--ok); }
-#notice.error { color: var(--danger); }
-progress { width: 100%; max-width: 24rem; }
-table { border-collapse: collapse; width: 100%; }
-th, td { text-align: left; padding: 0.4rem; border-bottom: 1px solid var(--line); vertical-align: top; }
-td.actions { display: flex; gap: 0.25rem; flex-wrap: wrap; }
-pre { overflow: auto; max-height: 28rem; background: var(--bg); padding: 0.75rem; border-radius: 6px; font-size: 0.8rem; }
-.consent { border-left: 3px solid var(--accent); padding-left: 0.75rem; }
+/* Layout only. Colour, type and controls come from the vendored Sondalab kit (data-sl-product="roboemot"). */
+.top { display: flex; align-items: center; gap: var(--sl-space-4); flex-wrap: wrap; padding-block: var(--sl-space-3); }
+.top h1 { flex: 1; margin: 0; font-size: var(--sl-text-lg, 1.125rem); }
+#tabs { overflow-x: auto; white-space: nowrap; }
+main { padding-block: var(--sl-space-4); display: grid; gap: var(--sl-space-4); }
+#view { display: grid; gap: var(--sl-space-4); }
+#notice { margin: 0; }
+.stack { display: grid; gap: var(--sl-space-3); }
+.row { display: flex; gap: var(--sl-space-2); flex-wrap: wrap; align-items: center; }
+.table-scroll { overflow-x: auto; }
+td.actions .row { justify-content: flex-start; }
+.sl-field__input, .sl-field__control { max-width: 100%; }
+.sl-field__control { display: block; max-width: 28rem; }
+.sl-card__title { margin: 0 0 var(--sl-space-2); }
+.sl-card + .sl-card { margin-top: 0; }
+.pre-scroll { max-height: 28rem; overflow: auto; }
+.check-list { display: grid; gap: var(--sl-space-2); }
+.entry { display: flex; gap: var(--sl-space-2); align-items: center; }
+.entry .sl-field__control { flex: 1; }
+.dialog-form { display: grid; gap: var(--sl-space-3); }
+.hint { color: var(--slc-text-muted); margin: 0; }

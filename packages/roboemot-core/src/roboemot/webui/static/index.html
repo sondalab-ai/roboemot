@@ -1,19 +1,36 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-sl-product="roboemot" data-sl-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>RoboEmot</title>
+<link rel="stylesheet" href="/static/vendor/sondalab-ui-kit/tokens.css">
+<link rel="stylesheet" href="/static/vendor/sondalab-ui-kit/components.css">
+<link rel="stylesheet" href="/static/vendor/sondalab-ui-kit/themes/light.css">
+<link rel="stylesheet" href="/static/vendor/sondalab-ui-kit/themes/dark.css">
+<link rel="stylesheet" href="/static/vendor/sondalab-ui-kit/themes/high-contrast.css">
+<link rel="stylesheet" href="/static/vendor/sondalab-ui-kit/themes/products.css">
+<link rel="stylesheet" href="/static/vendor/sondalab-ui-kit/fonts.css">
+<link rel="stylesheet" href="/static/vendor/sondalab-ui-kit/effects.css">
 <link rel="stylesheet" href="/static/style.css">
+<script src="/static/theme.js"></script>
 </head>
 <body>
-<header>
-  <h1 id="title">RoboEmot</h1>
-  <nav id="tabs" hidden></nav>
-  <button id="logout" type="button" hidden></button>
+<header class="sl-header">
+  <div class="sl-wrap top">
+    <h1 id="title">RoboEmot</h1>
+    <div id="theme" class="sl-segmented" role="group"></div>
+    <button id="logout" class="sl-btn sl-btn--ghost sl-btn--sm" type="button" hidden></button>
+  </div>
+  <div class="sl-wrap sl-tabs">
+    <div id="tabs" class="sl-tabs__list" role="tablist" hidden></div>
+  </div>
 </header>
-<p id="notice" role="status"></p>
-<main id="view"></main>
+<main class="sl-wrap">
+  <div id="notice" role="status" hidden></div>
+  <div id="view" role="tabpanel"></div>
+</main>
 <script src="/static/app.js"></script>
+<script type="module" src="/static/fx.js"></script>
 </body>
 </html>
