@@ -106,17 +106,18 @@ behaviour:                      # config layer 2 (SPEC 11A): this robot's defaul
   # Named gestures for the play skill (SPEC 7, 11): same format as above, not affect labels.
   # head.pitch positive is down, so a nod dips then lifts a little; yaw is symmetric. Degrees
   # are well inside the +-40 / +-180 limits; the renderer scales and clamps them at runtime.
+  # Segments last about 0.3 s so the motion still reads under the dev fallback caps (0.5 rad/s).
   gesture_map:
-    nod:                        # head pitch oscillation ("yes"), 2 cycles in 1.2 s
+    nod:                        # head pitch oscillation ("yes"), 2 cycles in 1.8 s, 0.3 s per dip
       repeat: 2
       curve: minjerk
       channels:
-        head.pitch: [[0.0, 0], [0.2, 12], [0.4, -3], [0.6, 0]]
-    shake:                      # head yaw oscillation ("no"), 2 cycles in 1.6 s
+        head.pitch: [[0.0, 0], [0.3, 12], [0.6, -3], [0.9, 0]]
+    shake:                      # head yaw oscillation ("no"), 2 cycles in 2.6 s, 0.7 s across
       repeat: 2
       curve: minjerk
       channels:
-        head.yaw: [[0.0, 0], [0.2, 15], [0.6, -15], [0.8, 0]]
+        head.yaw: [[0.0, 0], [0.3, 12], [1.0, -12], [1.3, 0]]
   # Circadian motion (SPEC 7A, Effects by state): same keyframe format and signs as above.
   # `yawn` plays now and then while drowsy, `stretch` for 3 s when the robot wakes from resting,
   # `rest_pose_deg` is the absolute rest posture (head.pitch positive is down; antennas droop

@@ -63,6 +63,11 @@ class Skill:
     signature: Signature
     choices: Choices = field(default_factory=dict)
     inline: bool = False
+    describe: Callable[[], str] | None = None  # builds the description at run time
+
+    def text(self) -> str:
+        """The description shown to the model: ``describe()`` when set, else the static one."""
+        return self.describe() if self.describe is not None else self.description
 
     @property
     def params(self) -> tuple[Param, ...]:
@@ -73,6 +78,12 @@ class Skill:
         out = {}
         for name, source in self.choices.items():
             items = list(source())
+            if enum_max is not None and len(items) > enum_max:
+                log.warning(
+                    "skill %s: %d choices for %s, only the first %d are offered "
+                    "(conversation.tool_enum_max_items)",
+                    self.name, len(items), name, enum_max,
+                )  # fmt: skip
             out[name] = items if enum_max is None else items[:enum_max]
         return out
 
@@ -86,6 +97,7 @@ def skill(
     allowed_with_minor: bool = True,
     choices: Choices | None = None,
     inline: bool = False,
+    describe: Callable[[], str] | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Mark ``fn`` as a skill (``fn.skill`` is its :class:`Skill`). ``name`` defaults to the
     function's; ``description`` to the first line of its docstring. ``confirm`` says the skill
@@ -93,7 +105,8 @@ def skill(
     parameter to a function giving its allowed values at run time (labels, names in view).
     ``inline`` runs a plain function on the event loop instead of a worker thread: for skills
     that only post a request and return, so nothing of theirs can still be running (and
-    touching a finished turn) after a timeout or a cancel. They must not block."""
+    touching a finished turn) after a timeout or a cancel. They must not block. ``describe``
+    builds the description at run time (it replaces ``description``)."""
 
     def wrap(fn: Callable[..., Any]) -> Callable[..., Any]:
         text = description or (inspect.getdoc(fn) or "").split("\n")[0]
@@ -111,6 +124,7 @@ def skill(
             sig,
             dict(choices or {}),
             inline,
+            describe,
         )
         return fn
 
@@ -175,7 +189,7 @@ class SkillRegistry:
                 "type": "function",
                 "function": {
                     "name": s.name,
-                    "description": s.description,
+                    "description": s.text(),
                     "parameters": json_schema(
                         s.params,
                         choices[s.name] if choices is not None else s.resolved_choices(enum_max),

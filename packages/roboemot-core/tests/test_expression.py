@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from pathlib import Path
 
@@ -733,3 +734,107 @@ async def test_play_nod_through_the_skill_executor_reaches_the_renderer(cfg, man
     assert r.update(state("calm", 0.5), active(), 0.0) and r.last_label == "nod"
     bad = await execute(reg, reg.names(), "play", {"gesture": "wave"}, ctx, **exec_kw)
     assert not bad.ok
+
+
+def through_core(cfg, manifest, name, dof, reflex=None):
+    """Play gesture ``name`` through the arbiter and the limiter with the dev fallback caps
+    (0.5 rad/s, 2 rad/s^2); return the positions of ``dof`` about home, 6 s at 50 Hz."""
+    core = MotionCore(
+        manifest.dofs,
+        manifest.constraints,
+        crossfade_s=cfg.motion.arbiter.crossfade_ms / 1000,
+        watchdog_s=10.0,
+        minor_factor=cfg.safety.minor_motion_factor,
+        watchdog_return_factor=cfg.safety.watchdog_return_factor,
+    )
+    r = gesture_renderer(cfg, manifest)
+    r.request(name)
+    assert r.update(state("calm", 0.5), active("adult"), 0.0)
+    home, out, t = manifest.dofs[dof].home, [], 0.0
+    while t < 6.0:
+        for cmd in r.commands(t):
+            core.feed(cmd)
+        if reflex is not None:
+            core.feed(reflex(t))
+        out.append(core.tick(t, DT)[dof] - home)
+        t += DT
+    return out, r.last_amplitude
+
+
+def commanded_peak(cfg, name, dof, amplitude):
+    return amplitude * math.radians(max(abs(v) for _, v in cfg.gesture_map[name].channels[dof]))
+
+
+def test_a_nod_still_reads_as_a_nod_under_the_dev_fallback_caps(cfg, manifest):
+    assert manifest.dofs["head.pitch"].max_vel == pytest.approx(0.5)
+    assert manifest.dofs["head.pitch"].max_acc == pytest.approx(2.0)
+    out, amp = through_core(cfg, manifest, "nod", "head.pitch")
+    want = commanded_peak(cfg, "nod", "head.pitch", amp)
+    assert max(out) >= 0.5 * want and max(out) > 0.05  # the dip is not smeared away
+    assert out[-1] == pytest.approx(0.0, abs=1e-6)  # and the head comes home
+
+
+def test_a_shake_swings_both_ways_under_the_dev_fallback_caps(cfg, manifest):
+    out, amp = through_core(cfg, manifest, "shake", "head.yaw")
+    want = commanded_peak(cfg, "shake", "head.yaw", amp)
+    assert max(out) >= 0.5 * want and -min(out) >= 0.5 * want
+    assert out[-1] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_a_gesture_is_refused_while_the_circadian_factor_is_zero(cfg, manifest):
+    r = gesture_renderer(cfg, manifest)
+    r.circadian_factor = lambda: 0.0
+    assert r.request("nod") is False and r.request("joy") is False
+    assert r.update(state("calm", 0.5), active(), 0.0) is False and r.started == 0
+    r.circadian_factor = lambda: 1.0
+    assert r.request("nod") is True
+
+
+async def test_play_tells_the_model_when_nothing_was_played(cfg, manifest):
+    from roboemot.skills import SkillContext, execute
+    from roboemot.skills.defaults import SkillEnv, default_skills
+
+    r = gesture_renderer(cfg, manifest)
+    r.circadian_factor = lambda: 0.0
+    reg = default_skills(
+        SkillEnv(
+            gestures=r.playable,
+            play=r.request,
+            look_names=list,
+            look_at=lambda t: True,
+            affect=AffectEngine(cfg.affect, cfg.appraisal),
+        )
+    )
+    ctx = SkillContext(speaker="p1", language="en", minor=False, now=0.0)
+    kw = {"timeout_s": 1.0, "max_chars": 200, "enum_max": 100}
+    out = await execute(reg, reg.names(), "play", {"gesture": "nod"}, ctx, **kw)
+    body = json.loads(out.content)
+    assert body["error"] == "not_now" and "not played" in body["detail"]
+
+
+def test_a_reload_resets_the_primitive_cache_and_drops_a_removed_pending_gesture(cfg, manifest):
+    r = gesture_renderer(cfg, manifest)
+    first = r._primitive("nod", True)
+    assert first is not None and r._primitive("nod", True) is first
+    wide = entry(**{"head.pitch": [(0, 0), (0.5, 20), (1, 0)]})
+    r.apply_config(r.cfg, cfg.expression_map, 0.15, {"nod": wide})
+    assert r._primitive("nod", True) is not first
+    assert r.playable() == [*cfg.expression_map, "nod"]
+    assert r.request("nod")
+    r.apply_config(r.cfg, cfg.expression_map, 0.15, {})  # reload removes it while pending
+    assert not r.request("nod") and "nod" not in r.playable()
+    assert r.update(state("calm", 0.5), active(), 0.0) is False and r.started == 0
+    assert r.request("shake") is False
+
+
+def test_a_reflex_keeps_the_head_while_a_gesture_plays(cfg, manifest):
+    from roboemot.motion import Command
+
+    target = -0.2
+
+    def reflex(t):
+        return Command("reflex", Priority.REFLEX, {"head.pitch": target}, t, expires=t + 0.1)
+
+    out, _ = through_core(cfg, manifest, "nod", "head.pitch", reflex)
+    assert out[len(out) // 2] == pytest.approx(target, abs=1e-6)
+    assert all(v == pytest.approx(target, abs=0.02) for v in out[len(out) // 3 :])

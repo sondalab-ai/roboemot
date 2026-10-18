@@ -28,6 +28,7 @@ from .schema import Desc, Range
 
 LOOK_CATEGORIES = ("speaker", "person", "animal", "object", "away")
 OK = {"ok": True}
+GESTURE_MEANING = {"nod": "yes", "shake": "no"}  # what the model is told a gesture means
 
 
 @dataclass
@@ -45,18 +46,39 @@ class SkillEnv:
 def default_skills(env: SkillEnv) -> SkillRegistry:
     """A registry with the five default skills, all ``llm_visible``."""
 
+    def play_description() -> str:
+        labels = list(env.affect.cfg.labels) if env.affect is not None else []
+        names = list(env.gestures())
+        emotions = [n for n in names if n in labels]
+        gestures = [n for n in names if n not in labels]
+        text = "Play one of the robot's named motions."
+        if emotions:
+            text += (
+                f" An emotion name ({', '.join(emotions)}) shows that feeling with antennas "
+                "and head."
+            )
+        if gestures:
+            listed = ", ".join(
+                f"'{g}' means {GESTURE_MEANING[g]}" if g in GESTURE_MEANING else f"'{g}'"
+                for g in gestures
+            )
+            text += f" A gesture answers by motion: {listed}."
+        return text
+
     @skill(
         llm_visible=True,
         inline=True,
-        description=(
-            "Play one of the robot's named motions. An emotion name (joy, sadness, ...) shows "
-            "that feeling with antennas and head; 'nod' means yes and 'shake' means no. Pick "
-            "an emotion to show a feeling and a gesture to answer or agree by motion."
-        ),
+        description="Play one of the robot's named motions.",
+        describe=play_description,
         choices={"gesture": env.gestures},
     )
     def play(gesture: Annotated[str, Desc("Name of the emotion or gesture")]) -> Any:
-        return OK if env.play(gesture) else {"error": "not_now"}
+        if env.play(gesture):
+            return OK
+        return {
+            "error": "not_now",
+            "detail": "not played: the robot is resting or does not know that name",
+        }
 
     @skill(
         llm_visible=True,

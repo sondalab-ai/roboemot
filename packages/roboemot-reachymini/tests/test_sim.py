@@ -269,7 +269,14 @@ def test_a_nod_gesture_moves_the_head_pitch_on_the_simulated_robot(loop):
             loop.feed(cmd)
         seen.append(loop.driver.read_state()["head.pitch"])
         time.sleep(0.02)
-    assert max(seen) - min(seen) > 0.02, max(seen) - min(seen)
+    # the dev fallback caps (0.5 rad/s, 2 rad/s^2) still let the 12 degree dip reach most of its
+    # commanded size; the -3 degree lift is below what they allow within a segment, so only the
+    # dip is asserted: at least half of it, or 0.05 rad if that is smaller
+    peak = renderer.last_amplitude * math.radians(
+        max(v for _, v in cfg.gesture_map["nod"].channels["head.pitch"])
+    )
+    swing = max(seen) - settled["head.pitch"]
+    assert swing >= min(0.5 * peak, 0.05), (swing, peak)
     assert seen[-1] == pytest.approx(settled["head.pitch"], abs=0.1)
 
 

@@ -296,7 +296,8 @@ async def test_play_and_look_at_only_take_known_names():
     assert not (await run(e.reg, "look_at", {"target": "Mallory"})).ok
     e.can_play = False
     assert json.loads((await run(e.reg, "play", {"gesture": "joy"})).content) == {
-        "error": "not_now"
+        "error": "not_now",
+        "detail": "not played: the robot is resting or does not know that name",
     }
 
 
@@ -381,3 +382,28 @@ async def test_inline_skills_run_on_the_calling_thread():
     reg = SkillRegistry([here])
     await run(reg, "here", {})
     assert seen == [threading.current_thread()]
+
+
+def test_the_play_description_follows_the_gestures_on_offer():
+    e = Env()
+    desc = lambda: e.reg.get("play").text()  # noqa: E731
+    assert "nod" not in desc() and "shake" not in desc() and "joy" in desc()
+    e.env.gestures = lambda: ["joy", "nod", "shake"]
+    assert "'nod' means yes" in desc() and "'shake' means no" in desc()
+    e.env.gestures = lambda: ["joy", "wave"]
+    assert "'wave'" in desc() and "means" not in desc()
+    e.env.gestures = lambda: ["nod"]
+    assert "emotion name" not in desc()
+
+
+def test_a_truncated_list_of_choices_is_logged(caplog):
+    e = Env()
+    names = [f"g{i}" for i in range(5)]
+    play = default_skills(SkillEnv(**{**e.env.__dict__, "gestures": lambda: names})).get("play")
+    with caplog.at_level(logging.WARNING):
+        assert play.resolved_choices(3) == {"gesture": ["g0", "g1", "g2"]}
+    assert "only the first 3" in caplog.text
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        play.resolved_choices(5)
+    assert not caplog.text
