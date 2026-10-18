@@ -29,6 +29,7 @@ VOICE_MODELS_SUBDIR = "voice-models"
 TRAITS_CACHE_FILE = "llm_traits.json"
 ROUTE_CHECKS_FILE = "route_checks.json"
 SECRETS_FILE = "secrets.json"
+SETTINGS_OVERRIDES_FILE = "webui_settings.json"
 
 
 def data_path(configured: str = "") -> Path:
@@ -98,6 +99,12 @@ def secrets_path(configured: str = "") -> Path:
     return data_path(configured) / SECRETS_FILE
 
 
+def settings_overrides_path(configured: str = "") -> Path:
+    """``<data folder>/webui_settings.json``, the web UI's persisted settings edits (SPEC 11A,
+    12 Data; not created here). Mode 0o600; inside the data folder, so uninstall removes it."""
+    return data_path(configured) / SETTINGS_OVERRIDES_FILE
+
+
 PIPER_VENV_SUBDIR = "piper-venv"
 
 
@@ -119,6 +126,7 @@ __all__ = [
     "REGISTRY_SUBDIR",
     "ROUTE_CHECKS_FILE",
     "SECRETS_FILE",
+    "SETTINGS_OVERRIDES_FILE",
     "TRAITS_CACHE_FILE",
     "VOICE_MODELS_SUBDIR",
     "data_dir",
@@ -129,6 +137,7 @@ __all__ = [
     "registry_dir",
     "route_checks_path",
     "secrets_path",
+    "settings_overrides_path",
     "traits_cache_path",
     "voice_models_subdir",
 ]

@@ -87,9 +87,11 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       amplitudes are untested on the hardware.
 - [x] Settings API (SPEC 11A, epic settings-secrets slice 4): `GET/POST /api/settings` over an allowlist
       (`webui/settings.py`): wake phrases, `voice.wake_word`, `safety.minor_lines.*`, the minor blocklist.
-      Admin PIN re-entered per write, runtime layer through the config stack, audited with source `webui`.
-      Open: the pages (slice 5); edits live in the runtime layer, so they are lost at restart (the
-      app config is not written from the web UI); no language can be added from the web, only edited.
+      Admin PIN re-entered per write, runtime layer through the config stack, audited with source
+      `webui:<ip>`, persisted in `webui_settings.json` (0600) and replayed through the guardrails at startup.
+      Blocklist: additions only from the web (removing needs the app config and the admin PIN).
+      Open: the pages (slice 5); no language can be added from the web, only edited; a blocklist
+      entry cannot be removed from the web UI at all.
 
 ## M3 exit (SPEC 14, `docs/eval/m3.md`)
 

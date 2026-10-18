@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import stat
 
 import pytest
+from roboemot.config.schema import RoboEmotConfig
 from roboemot.config.stack import ConfigError, ConfigStack, GuardrailError
 from roboemot.diagnostics import Diagnostics
 from roboemot.webui import make_server
@@ -16,6 +18,7 @@ WAKE = "voice.keywords.en.wake_phrases"
 LINE = "safety.minor_lines.en.greeting"
 BLOCK = "safety.minor_output_blocklist.en"
 NAME = "voice.wake_word"
+FILE = "webui_settings.json"
 
 
 class Probe:
@@ -59,7 +62,7 @@ def stack(tmp_path):
 
 @pytest.fixture
 def served(tmp_path, stack):
-    srv, client = serve(tmp_path, SettingsEditor(stack), stack)
+    srv, client = serve(tmp_path, SettingsEditor(stack, store=tmp_path / FILE), stack)
     yield client
     srv.stop()
 
@@ -111,19 +114,19 @@ def test_allowlist_is_one_data_table():
         (LINE, "Hi there!"),
         ("safety.minor_lines.en.robot_name", "I am called {name}."),
         ("safety.minor_lines.en.robot_unnamed", ""),
-        (BLOCK, ["kill*", "bad word", "gun*"]),
+        (BLOCK, [*RoboEmotConfig().safety.minor_output_blocklist["en"], "bad word"]),
     ],
 )
 def test_each_field_changes_with_the_pin_and_is_audited(served, stack, path, value):
     resp = put(served, path, value)
     assert resp.status == 200, resp.body
-    assert resp.json == {"path": path, "changed": True, "value": value}
+    assert resp.json == {"path": path, "changed": True, "value": value, "persisted": True}
     assert get(stack, path) == value
     entry = stack.audit[-1]
-    assert (entry.source, entry.key, entry.new) == ("webui", path, value)
+    assert (entry.source, entry.key, entry.new) == ("webui:127.0.0.1", path, value)
     assert entry.old != value
     line = json.loads((stack.audit_path).read_text().splitlines()[-1])
-    assert line["source"] == "webui" and line["key"] == path and line["new"] == value
+    assert line["source"] == "webui:127.0.0.1" and line["key"] == path and line["new"] == value
     assert path in stack.changes[-1].changed_keys  # hot reload (config.changed) fired
     listed = {r["path"]: r for r in served.request("GET", "/api/settings").json["settings"]}
     assert listed[path]["value"] == value
@@ -241,6 +244,12 @@ def test_missing_value_is_a_bad_request(served):
         (WAKE, ["hey {name}"], "phrase_invalid"),
         (WAKE, ["ok\nrobot"], "phrase_invalid"),
         (WAKE, ["  "], "phrase_invalid"),
+        (WAKE, ["hey, robot"], "phrase_invalid"),
+        (WAKE, ["it's robot"], "phrase_invalid"),
+        (LINE, "one\u2028two", "line_invalid"),
+        (LINE, "one\u2029two", "line_invalid"),
+        (LINE, "what a fuck", "line_blocked"),
+        (NAME, "Cazzo", "name_blocked"),
         (
             BLOCK,
             ["a b c d e f g h i j k l m n o p q r s t u v w x y z a b c d e f g h i j"],
@@ -324,8 +333,8 @@ def test_admin_only_fields_pass_admin_to_the_stack(stack):
     editor = SettingsEditor(stack)
     editor.change(LINE, "Hi!")
     editor.change(WAKE, ["hey bot"])
-    assert calls[0][1] == {"source": "webui", "admin": True}
-    assert calls[1][1] == {"source": "webui", "admin": False}
+    assert calls[0][1] == {"source": "webui", "admin": True, "must_exist": True}
+    assert calls[1][1] == {"source": "webui", "admin": False, "must_exist": True}
 
 
 def test_unavailable_without_an_editor(tmp_path):
@@ -348,3 +357,165 @@ def test_error_strings_exist_in_both_languages():
     ]  # fmt: skip
     for code in codes:
         assert EN[f"err_{code}"] and IT[f"err_{code}"]
+
+
+# ------------------------------------------------------------------ fix round: guardrails
+
+
+def test_blocklist_additions_pass_and_removals_are_refused_even_with_the_pin(served, stack):
+    current = get(stack, BLOCK)
+    assert put(served, BLOCK, [*current, "newword*"]).status == 200
+    for smaller in (current[:-1], [*current[1:], "newword*"], ["gun*"]):
+        resp = put(served, BLOCK, smaller)
+        assert resp.status == 403 and resp.json["error"] == "setting_guardrail"
+    assert get(stack, BLOCK) == [*current, "newword*"]
+
+
+def test_blocklist_swap_for_a_lookalike_counts_as_a_removal(served, stack):
+    current = get(stack, BLOCK)
+    swapped = ["kіll*" if e == "kill*" else e for e in current]  # Cyrillic i
+    assert put(served, BLOCK, swapped).status == 403
+
+
+def test_blocklist_case_variants_are_not_removals(served, stack):
+    current = get(stack, BLOCK)
+    assert put(served, BLOCK, [*[e.upper() for e in current], "extra"]).status == 200
+
+
+def test_stack_refuses_runtime_blocklist_removal_with_admin_true(stack):
+    current = get(stack, BLOCK)
+    with pytest.raises(GuardrailError):
+        stack.set(BLOCK, current[1:], source="t", admin=True)
+    with pytest.raises(GuardrailError):
+        stack.set(BLOCK, ["only*"], source="t", admin=True)
+    stack.set(BLOCK, [*current, "extra*"], source="t", admin=True)
+
+
+def test_blocklist_removal_in_the_app_layer_with_admin_still_works(stack):
+    current = get(stack, BLOCK)
+    stack.set(BLOCK, current[1:], source="t", admin=True, layer="app")
+    assert get(stack, BLOCK) == current[1:]
+
+
+def test_a_line_may_not_name_a_blocked_word_through_the_name_placeholder(served, stack):
+    stack.set("voice.wake_word", "Neve", source="t", admin=True)
+    stack.set(BLOCK, [*get(stack, BLOCK), "neve"], source="t", admin=True)
+    resp = put(served, "safety.minor_lines.en.robot_name", "My name is {name}!")
+    assert resp.status == 422 and resp.json["error"] == "line_blocked"
+
+
+def test_wake_word_is_admin_only():
+    from roboemot.config.stack import field_meta
+
+    assert field_meta(NAME).get("admin_only") is True
+    assert not field_meta(WAKE).get("admin_only")
+
+
+# ------------------------------------------------------------------ fix round: persistence
+
+
+def test_edits_are_persisted_private_and_replayed_at_startup(served, tmp_path):
+    put(served, WAKE, ["hey bot"])
+    put(served, LINE, "Hi!")
+    path = tmp_path / FILE
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert json.loads(path.read_text())["overrides"] == {WAKE: ["hey bot"], LINE: "Hi!"}
+    other = ConfigStack()
+    SettingsEditor(other, store=path).restore()
+    assert get(other, WAKE) == ["hey bot"] and get(other, LINE) == "Hi!"
+    assert other.audit[-1].source == "webui:restore"
+
+
+def test_an_unchanged_value_is_not_persisted(served, tmp_path):
+    put(served, WAKE, ["hey robot", "hello robot"])
+    assert not (tmp_path / FILE).exists()
+
+
+def test_the_app_yaml_is_never_written(tmp_path):
+    app = tmp_path / "app.yaml"
+    app.write_text("schema_version: 1\n")
+    stack = ConfigStack.from_files(app=app)
+    SettingsEditor(stack, store=tmp_path / FILE).change(WAKE, ["hey bot"])
+    assert app.read_text() == "schema_version: 1\n" and stack.app == {"schema_version": 1}
+
+
+def write_overrides(path, overrides, mode=0o600):
+    path.write_text(json.dumps({"v": 1, "overrides": overrides}))
+    path.chmod(mode)
+
+
+def test_restore_drops_entries_that_no_longer_pass_and_names_only_the_path(tmp_path, caplog):
+    path = tmp_path / FILE
+    write_overrides(
+        path,
+        {
+            WAKE: ["good bot"],
+            "voice.keywords.fr.wake_phrases": ["salut robot"],
+            "safety.minor_lines.fr.greeting": "Salut",
+            "persona.prompt": "sk-leak-me",
+            "webui.name_max_chars": 200,
+            BLOCK: ["only*"],
+            LINE: "x" * 500,
+        },
+    )
+    stack = ConfigStack()
+    with caplog.at_level("WARNING"):
+        SettingsEditor(stack, store=path).restore()
+    assert get(stack, WAKE) == ["good bot"]
+    assert "fr" not in stack.effective().voice.keywords
+    assert "fr" not in stack.effective().safety.minor_lines
+    assert get(stack, BLOCK) != ["only*"]  # a removal is a guardrail refusal
+    assert get(stack, LINE) == "Hello! Nice to see you."
+    assert "sk-leak-me" not in caplog.text and "only*" not in caplog.text
+    assert "persona.prompt" in caplog.text
+    assert set(json.loads(path.read_text())["overrides"]) == {WAKE}
+
+
+@pytest.mark.parametrize(
+    "content",
+    ["not json", "[]", '{"v": 2, "overrides": {}}', '{"v": 1, "overrides": []}', "x" * 2_000_000],
+)
+def test_malformed_file_is_ignored_with_a_warning(tmp_path, caplog, content):
+    path = tmp_path / FILE
+    path.write_text(content)
+    path.chmod(0o600)
+    stack = ConfigStack()
+    with caplog.at_level("WARNING"):
+        SettingsEditor(stack, store=path).restore()
+    assert get(stack, WAKE) == ["hey robot", "hello robot"]
+    assert "ignored" in caplog.text
+
+
+def test_unsafe_modes_and_links_are_ignored(tmp_path):
+    path = tmp_path / FILE
+    write_overrides(path, {WAKE: ["hey bot"]}, mode=0o644)
+    stack = ConfigStack()
+    SettingsEditor(stack, store=path).restore()
+    assert get(stack, WAKE) == ["hey robot", "hello robot"]
+    real = tmp_path / "real.json"
+    write_overrides(real, {WAKE: ["hey bot"]})
+    link = tmp_path / "link.json"
+    link.symlink_to(real)
+    SettingsEditor(stack, store=link).restore()
+    assert get(stack, WAKE) == ["hey robot", "hello robot"]
+
+
+def test_no_file_is_fine(tmp_path):
+    SettingsEditor(ConfigStack(), store=tmp_path / FILE).restore()
+
+
+def test_a_language_removed_between_expand_and_set_is_not_recreated():
+    stack = ConfigStack(app={"voice": {"keywords": {"zz": {"wake_phrases": ["hey zz"]}}}})
+    editor = SettingsEditor(stack)
+    path = "voice.keywords.zz.wake_phrases"
+    assert path in expand(stack.effective())
+    original = stack.set
+
+    def set_after_removal(key, value, **kw):
+        stack.app = {}  # the language disappears after the allowlist was expanded
+        return original(key, value, **kw)
+
+    stack.set = set_after_removal
+    with pytest.raises(ConfigError):
+        editor.change(path, ["hey zzz"])
+    assert "zz" not in stack.effective().voice.keywords

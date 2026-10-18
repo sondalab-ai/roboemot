@@ -218,6 +218,8 @@ EN: dict[str, str] = {
     "err_line_empty": "This line cannot be empty.",
     "err_line_too_long": "The line is too long.",
     "err_line_invalid": "The line has characters or placeholders that are not allowed.",
+    "err_line_blocked": "The line contains a word the child-safety word list blocks.",
+    "err_name_blocked": "The name is blocked by the child-safety word list.",
     "err_locked": (
         "Too many attempts. Try again later, or restart the app or run set-pin on the robot."
     ),
@@ -467,6 +469,8 @@ IT: dict[str, str] = {
     "err_line_empty": "Questa frase non può essere vuota.",
     "err_line_too_long": "La frase è troppo lunga.",
     "err_line_invalid": "La frase contiene caratteri o segnaposto non ammessi.",
+    "err_line_blocked": "La frase contiene una parola bloccata dalla lista per i bambini.",
+    "err_name_blocked": "Il nome è bloccato dalla lista di parole per i bambini.",
     "err_locked": (
         "Troppi tentativi. Riprova più tardi, oppure riavvia l'app o esegui set-pin sul robot."
     ),

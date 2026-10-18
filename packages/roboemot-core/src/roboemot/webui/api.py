@@ -5,7 +5,8 @@ privacy) and 12A (the debug report as JSON).
 
 The operator PIN gates the registry and enrollment. Configuration is edited only through the
 settings allowlist (``settings.py``): each write re-enters the PIN and goes through the config
-stack's guardrails, which decide whether the change needs the admin. Responses carry summaries and
+stack's guardrails (runtime layer: safety only tightens, e.g. blocklist entries can be added but
+never removed; loosening needs the app config and the admin PIN). Responses carry summaries and
 whitelisted status fields, never images, crops or embeddings; a last-line guard refuses any
 response that holds a long list of numbers.
 """
@@ -106,7 +107,7 @@ class SettingsPort(Protocol):
     """``roboemot.webui.settings.SettingsEditor``: the allowlisted, guarded settings."""
 
     def describe(self) -> list[dict[str, Any]]: ...
-    def change(self, path: object, value: object) -> dict[str, Any]: ...
+    def change(self, path: object, value: object, source: str) -> dict[str, Any]: ...
 
 
 class CataloguePort(Protocol):
@@ -629,7 +630,7 @@ class WebApi:
             raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
         self._check_pin(req, body.get("pin"))
         try:
-            result = port.change(body["path"], body["value"])
+            result = port.change(body["path"], body["value"], f"webui:{req.client_ip}")
         except SettingNotAllowed as exc:
             raise ApiError(HTTPStatus.FORBIDDEN, "setting_not_allowed", field="path") from exc
         except GuardrailError as exc:

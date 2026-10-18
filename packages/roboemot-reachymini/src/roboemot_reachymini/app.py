@@ -391,6 +391,8 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         page: enrollment is a side channel, not a reason to stop the robot.
         """
         try:
+            settings = SettingsEditor(stack, store=paths.settings_overrides_path(cfg.data_dir))
+            settings.restore()
             server = make_server(
                 self.perception.enrollment,
                 self.diagnostics,
@@ -398,7 +400,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 paths.data_dir(cfg.data_dir),
                 robot_hosted=manifest.robot.profile is not None,
                 catalogue=self.catalogue,
-                settings=SettingsEditor(stack),
+                settings=settings,
                 routes=RouteChecker(
                     stack.effective,
                     paths.route_checks_path(cfg.data_dir),

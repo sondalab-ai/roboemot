@@ -6,7 +6,9 @@ Every field carries a default, a unit and a range. Field metadata (``json_schema
 - ``restart``: True when a change needs a process restart instead of hot reload.
 - ``conservative``: for safety parameters, which direction is safer at runtime:
   ``"lower"`` (smaller values are safer), ``"higher"``, ``"false"`` / ``"true"`` for booleans
-  that are safer off / on. Changes in the other direction need admin approval (stack.py).
+  that are safer off / on, ``"superset"`` for lists where only adding entries is safer (compared
+  on the output filter's normalised forms). Changes in the other direction need admin approval
+  (stack.py).
 - ``opt_in``: privacy options; turning them on needs the admin confirmation.
 - ``admin_only``: prompt text, where no direction is safe; any change needs the admin
   confirmation.
@@ -32,7 +34,7 @@ def param(
     ge: float | None = None,
     le: float | None = None,
     restart: bool = False,
-    conservative: Literal["lower", "higher", "false", "true"] | None = None,
+    conservative: Literal["lower", "higher", "false", "true", "superset"] | None = None,
     opt_in: bool = False,
     admin_only: bool = False,
 ) -> Any:
@@ -1092,8 +1094,10 @@ class SafetyConfig(Strict):
         "kill* also blocks killing) that never reach the speaker while a "
         "minor is present, per language; a sentence containing one is replaced by "
         "minor_lines.filtered and the rest of the answer is dropped (SPEC 12). Starting values "
-        "to review with the deployment, not a validated list",
+        "to review with the deployment, not a validated list. Entries can be added at runtime, "
+        "never removed (only the app config with the admin PIN removes)",
         admin_only=True,
+        conservative="superset",
     )  # fmt: skip
     minor_lines: dict[str, MinorLines] = param(
         {
@@ -2321,6 +2325,7 @@ class VoiceConfig(Strict):
         "needs the name's words in the recognizer vocabulary of the language (checked when the "
         "recognizer loads, logged when not); `reachy` is out of vocabulary in both small Vosk "
         "models, so names like it rely on `wake_phrases` and `name_aliases`",
+        admin_only=True,
     )
     name_max_chars: int = param(
         32,
