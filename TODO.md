@@ -68,9 +68,12 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       from the Registry tab.
 - [x] Pseudonyms residual: a JSON key in a tool call or result that equals a registry name
       ("target" for a record "Target") was aliased in the history sent to a cloud route. Now only
-      string values are aliased. The leak check skips a key only when it is a property name of a
-      tool schema in the same request; any other key that holds a name (a tool result keyed by
-      names) blocks the route instead of being renamed.
+      string values are aliased. The leak check skips only the keys the app writes itself (the
+      skills' parameter names and result keys, `SkillRegistry.structural_keys()`), in tool call
+      arguments and `tool` messages; any other key that holds a name (a tool result keyed by
+      names, the result key of a custom skill) blocks the route instead of being renamed.
+- [ ] Pseudonyms follow-up: `NameSource` (traits, route checks) and the conversation's own
+      `Pseudonyms` are two maps with different aliases; merge them into one source.
 - [x] Pseudonyms residual: a name written with `\uXXXX` escapes in text that is not JSON was
       neither scrubbed nor caught by the leak check. Escapes now count as their character in
       matching (surrogate escapes are not decoded).

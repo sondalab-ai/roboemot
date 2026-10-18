@@ -21,9 +21,9 @@ def test_split_names_separates_accepted_and_refused_without_duplicates():
     assert sorted(refused.values()) == ["!!!", "Person", "a\\b", "user"]
 
 
-def make_cfg(on: bool = True) -> RoboEmotConfig:
+def make_cfg(on: bool = True, **web) -> RoboEmotConfig:
     return RoboEmotConfig(
-        webui={"bind": "127.0.0.1", "port": 0}, privacy={"pseudonyms_to_cloud": on}
+        webui={"bind": "127.0.0.1", "port": 0, **web}, privacy={"pseudonyms_to_cloud": on}
     )
 
 
@@ -115,3 +115,55 @@ def test_strings_exist_in_both_languages():
         "refused_show",
     ):
         assert EN[key] and IT[key], key
+
+
+def test_wrong_pins_use_the_shared_budget_and_a_right_pin_refunds(tmp_path):
+    srv = make_server(
+        FakeService(),
+        Diagnostics(),
+        make_cfg(pin_max_attempts=3),
+        tmp_path,
+        pseudonyms=NameSource(lambda: NAMES),
+    )
+    srv.set_pin(PIN)
+    srv.start()
+    try:
+        client = Client(srv.port)
+        client.login()
+        for _ in range(6):  # a right PIN refunds its attempt: never locked out
+            assert client.request("POST", PATH, {"pin": PIN}).status == 200
+        assert client.request("POST", PATH, {"pin": "111111"}).status == 401
+        locked = client.request("POST", PATH, {"pin": PIN})
+        assert locked.status == 429 and locked.json["error"] == "locked"
+        assert "names" not in locked.json
+    finally:
+        srv.stop()
+
+
+def test_a_cross_origin_post_is_refused_without_names(served):
+    resp = served.request("POST", PATH, {"pin": PIN}, headers={"Origin": "http://evil.x"})
+    assert resp.status == 403 and resp.json == {"error": "origin"}
+
+
+def test_the_response_is_never_cached(served):
+    resp = served.request("POST", PATH, {"pin": PIN})
+    assert resp.status == 200 and resp.headers["Cache-Control"] == "no-store"
+
+
+def test_no_name_reaches_the_log_on_success_or_on_failure(tmp_path, caplog):
+    def broken():
+        raise OSError("registry down Marta Luca Bianchi")
+
+    with caplog.at_level("DEBUG"):
+        for source in (NameSource(lambda: NAMES), NameSource(broken)):
+            srv = make_server(FakeService(), Diagnostics(), make_cfg(), tmp_path, pseudonyms=source)
+            srv.set_pin(PIN)
+            srv.start()
+            try:
+                client = Client(srv.port)
+                client.login()
+                client.request("POST", PATH, {"pin": PIN})
+            finally:
+                srv.stop()
+    for name in ("Marta", "Luca", "Bianchi", "Person", "user", "!!!"):
+        assert name not in caplog.text, name

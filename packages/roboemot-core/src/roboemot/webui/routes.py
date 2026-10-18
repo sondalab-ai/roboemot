@@ -138,6 +138,8 @@ class RouteChecker:
         """Thread body: run the check under the deadline and keep the outcome, whatever it is."""
         error = ""
         try:
+            if self._names is None and cfg.privacy.pseudonyms_to_cloud:
+                log.warning("route check: pseudonyms are on but no name source is wired")
             pseudonyms = self._names.for_config(cfg) if self._names else None
             report = asyncio.run(
                 asyncio.wait_for(

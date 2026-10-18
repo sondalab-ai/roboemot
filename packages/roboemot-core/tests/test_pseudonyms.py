@@ -237,37 +237,68 @@ class ConversationWorkerExchange:
         )
 
 
-LOOK_TOOLS = [{"type": "function", "function": {"name": "look_at", "description": "d",
-              "parameters": {"properties": {"target": {"type": "string"}}}}}]  # fmt: skip
+KEYS = ["target", "ok", "error"]  # what SkillRegistry.structural_keys() gives for look_at
+
+
+def keyed(*names) -> Pseudonyms:
+    p = pseudo(*names)
+    p.set_structural_keys(KEYS)
+    return p
+
+
+def tool_msg(content: str) -> dict:
+    return {"role": "tool", "tool_call_id": "c", "content": content}
 
 
 def test_json_keys_equal_to_a_name_are_kept_and_only_values_are_aliased():
-    p = pseudo("Target", "Marta")
+    p = keyed("Target", "Marta")
     history = ConversationWorkerExchange.build({"target": "Marta"}, '{"target": "Target", "n": 1}')
-    out = p.prepare(history, LOOK_TOOLS)
+    out = p.prepare(history, None)
     call = json.loads(out.messages[0]["tool_calls"][0]["function"]["arguments"])
     assert call == {"target": alias_of(p, "Marta")}
     result = json.loads(out.messages[1]["content"])
     assert result == {"target": alias_of(p, "Target"), "n": 1}
-    assert not p.leaks({"messages": out.messages, "tools": LOOK_TOOLS})
+    assert not p.leaks({"messages": out.messages, "tools": None})  # no tools in this round
 
 
-def test_a_name_as_a_json_key_that_is_not_a_tool_property_still_blocks_the_request():
-    p = pseudo("Marta")
-    body = {"messages": [{"role": "tool", "tool_call_id": "c", "content": '{"Marta": 1}'}],
-            "tools": LOOK_TOOLS}  # fmt: skip
-    assert p.leaks(body)
-    key_target = pseudo("Target")
-    msgs = [{"role": "tool", "tool_call_id": "c", "content": '{"target": 1}'}]
-    assert key_target.leaks(msgs)  # a bare list of messages has no tool schema to exempt keys
-    assert key_target.leaks({"messages": msgs, "tools": None})
-    assert not key_target.leaks({"messages": msgs, "tools": LOOK_TOOLS})
+def test_a_name_as_a_json_key_that_is_not_structural_still_blocks_the_request():
+    assert keyed("Marta").leaks([tool_msg('{"Marta": 1}')])
+    assert pseudo("Target").leaks([tool_msg('{"target": 1}')])  # nothing declared structural
+    assert not keyed("Target").leaks([tool_msg('{"target": 1}')])
 
 
-def test_a_property_key_exemption_does_not_cover_values():
-    p = pseudo("Target")
-    msgs = [{"role": "tool", "tool_call_id": "c", "content": '{"target": "Target"}'}]
-    assert p.leaks({"messages": msgs, "tools": LOOK_TOOLS})
+def test_the_key_exemption_does_not_cover_values_or_other_texts():
+    p = keyed("Target")
+    assert p.leaks([tool_msg('{"target": "Target"}')])
+    assert p.leaks([{"role": "user", "content": '{"target": 1}'}])  # user text is not structural
+    assert p.leaks([{"role": "assistant", "content": '{"target": 1}'}])
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        '{"target": "Anna", "target": "x"}',
+        '{"a": "Anna", "a": "x"}',
+        '{"target": "x", "target": {"target": "Anna"}}',
+        '[{"ok": 1, "ok": "Anna"}]',
+    ],
+)
+def test_duplicate_json_keys_cannot_hide_a_name(content):
+    p = keyed("Anna")
+    assert p.leaks([tool_msg(content)])
+    fn = {"name": "look_at", "arguments": content}
+    call = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [{"id": "c", "type": "function", "function": fn}],
+    }
+    assert p.leaks([call])
+
+
+def test_an_exempt_key_in_nested_tool_json_is_ignored_but_a_name_deeper_is_not():
+    p = keyed("Target", "Anna")
+    assert not p.leaks([tool_msg('{"target": {"error": [1, 2]}}')])
+    assert p.leaks([tool_msg('{"target": {"error": ["Anna"]}}')])
 
 
 def test_the_exchange_is_written_without_unicode_escapes():
@@ -624,6 +655,22 @@ def test_an_unreadable_name_list_ends_the_turn_without_sending(tooled, caplog):
     assert rig.done(rig.say("sono Marta"))
     assert srv.bodies == [] and "Marta" not in caplog.text
     assert rig.events[-1]["outcome"] == "error"
+
+
+def test_a_record_named_like_an_argument_does_not_block_the_round_without_tools(tooled):
+    call = lambda al: [C(0, "c1", "look_at", {"target": al("Marta")})]  # noqa: E731
+    rig, srv, env = tooled(
+        lambda al: [call(al), ["Fatto."]],
+        routes=(CLOUD,),
+        conversation={"max_tool_rounds": 1},
+        **PRIVACY,
+    )
+    rig.worker._known_names = lambda: [*KNOWN, "Target"]
+    rig.turn("guarda Marta", language="en")
+    assert [bool(b.get("tools")) for b in srv.bodies] == [True, False]  # second round: no tools
+    assert env.looked == ["Marta"]
+    assert rig.speech.texts() == ["Fatto."]
+    assert '"target"' in json.dumps(srv.bodies[1]["messages"]).replace("\\", "")
 
 
 def test_a_forgotten_name_is_gone_from_the_next_request(tooled):
@@ -1078,3 +1125,22 @@ async def test_stream_route_refuses_a_request_that_still_holds_a_name_before_sen
     with pytest.raises(PseudonymLeak) as exc:
         await run_route(rec.router(r), r, p)
     assert rec.bodies == [] and "Marta" not in str(exc.value)
+
+
+def test_a_surrogate_pair_written_with_escapes_is_one_character():
+    bold = chr(0x1D400) + "nna"  # mathematical bold capital A
+    p = pseudo(bold)
+    assert p.mentions("saluta \\ud835\\udc00nna")
+    assert p.to_alias("ciao \\ud835\\udc00nna") == f"ciao {alias_of(p, bold)}"
+    assert p.leaks([{"role": "user", "content": "x \\uD835\\uDC00nna"}])
+    assert not p.mentions("x \\ud835nna and \\udc00nna")  # a lone surrogate is left alone
+
+
+def test_a_backslash_before_an_escape_does_not_cancel_it():
+    p = pseudo("Anna")
+    assert p.mentions("\\\\u0041nna")  # errs towards matching: fail closed
+
+
+def test_the_skill_registry_declares_its_parameter_and_result_keys():
+    keys = Env().registry.structural_keys()
+    assert {"target", "gesture", "error", "detail", "ok", "applied", "status"} <= keys

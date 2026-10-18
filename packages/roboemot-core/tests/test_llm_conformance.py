@@ -277,3 +277,24 @@ async def test_a_local_route_check_keeps_the_prompt_as_it_is():
     fake = Fake()
     await run(fake, pseudonyms=_named("Italian"))
     assert "Italian" in json.dumps(fake.bodies[0])
+
+
+async def test_a_leaking_request_fails_the_check_and_is_not_sent(monkeypatch):
+    p = _named("Italian")
+    real_prepare = p.prepare
+
+    def unscrubbed(messages, tools):
+        out = real_prepare(messages, tools)
+        out.messages, out.tools = messages, tools
+        return out
+
+    monkeypatch.setattr(p, "prepare", unscrubbed)
+    fake = Fake()
+    cloud = LLMRoute(
+        name="c", base_url="http://api.example.com/v1", model="m", first_token_timeout_s=0.5
+    )
+    report = await run(fake, cloud, pseudonyms=p)
+    assert all("Italian" not in json.dumps(b) for b in fake.bodies)  # the leaking request: not sent
+    assert not report.ok
+    streaming = next(c for c in report.checks if c.name == "streaming")
+    assert streaming.status == FAIL and "PseudonymLeak" in streaming.reason

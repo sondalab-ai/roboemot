@@ -55,7 +55,6 @@ import httpx
 from ..config.schema import PSEUDONYM_LABEL, LLMRoute, RoboEmotConfig
 
 UNICODE_ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})")
-UNICODE_ESCAPE_LEN = 6  # characters of "\\uXXXX"
 LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 LOOPBACK_NAMES = ("localhost",)
 MDNS_SUFFIX = ".local"
@@ -147,20 +146,38 @@ def _nfc(text: str) -> str:
     return unicodedata.normalize("NFC", text)
 
 
+def _escape_at(nfc: str, i: int) -> tuple[str, int] | None:
+    """The character written by a ``\\uXXXX`` escape at ``nfc[i]`` (a high and a low surrogate
+    escape together write one character) and the length of the escape(s), else None. A lone
+    surrogate is not decoded. ``\\UXXXXXXXX`` is not a JSON escape and is not handled."""
+    m = UNICODE_ESCAPE.match(nfc, i)
+    if not m:
+        return None
+    code = int(m[1], 16)
+    if 0xD800 <= code <= 0xDBFF:
+        low = UNICODE_ESCAPE.match(nfc, m.end())
+        if low and 0xDC00 <= (lo := int(low[1], 16)) <= 0xDFFF:
+            return chr(0x10000 + ((code - 0xD800) << 10) + (lo - 0xDC00)), low.end() - i
+        return None
+    if 0xDC00 <= code <= 0xDFFF:
+        return None
+    return chr(code), m.end() - i
+
+
 def _fold(text: str) -> tuple[str, list[int], list[int], str]:
     """``(folded, start, end, nfc)``: the folded text and, for each of its characters, the
-    span of the NFC text it came from. A ``\\uXXXX`` escape (any hex case, not a surrogate)
-    counts as the character it writes, so a name spelled with escapes in plain text is matched
-    and replaced over its six-character spans."""
+    span of the NFC text it came from. A ``\\uXXXX`` escape (any hex case; a surrogate pair
+    counts as one character, a lone surrogate is left as written) is the character it writes,
+    so a name spelled with escapes in plain text is matched and replaced over the escape's
+    span. A backslash before an escape (``\\\\u0041``) does not cancel it: this errs towards
+    matching."""
     nfc = _nfc(text)
     chars: list[str] = []
     starts: list[int] = []
     ends: list[int] = []
     i = 0
     while i < len(nfc):
-        c, width = nfc[i], 1
-        if (m := UNICODE_ESCAPE.match(nfc, i)) and not 0xD800 <= (code := int(m[1], 16)) <= 0xDFFF:
-            c, width = chr(code), UNICODE_ESCAPE_LEN
+        c, width = _escape_at(nfc, i) or (nfc[i], 1)
         for x in _fold_char(c):
             chars.append(x)
             starts.append(i)
@@ -230,65 +247,66 @@ def _strings(value: Any) -> Iterator[str]:
             yield from _strings(v)
 
 
-def _property_names(body: Any) -> frozenset[str]:
-    """The property names of the tool schemas in a request body (``properties`` keys, at any
-    depth). They are sent as typed, so a JSON key that equals one exposes nothing new."""
-    names: set[str] = set()
-    tools = body.get("tools") if isinstance(body, dict) else None
-    stack: list[Any] = list(tools) if isinstance(tools, list) else []
-    while stack:
-        node = stack.pop()
-        if isinstance(node, list):
-            stack.extend(node)
-        elif isinstance(node, dict):
-            for key, value in node.items():
-                if key == "properties" and isinstance(value, dict):
-                    names.update(k for k in value if isinstance(k, str))
-                stack.append(value)
-    return frozenset(names)
+class _Pairs(list):
+    """A parsed JSON object as its ``(key, value)`` pairs, so duplicate keys survive."""
+
+
+def _parse(text: str) -> Any:
+    """``text`` parsed when it is a JSON object or list (objects as :class:`_Pairs`), else None."""
+    if not text.lstrip().startswith(("{", "[")):
+        return None
+    try:
+        return json.loads(text, object_pairs_hook=_Pairs)
+    except (ValueError, RecursionError):
+        return None
 
 
 def _without_keys(text: str, exempt: frozenset[str]) -> str:
-    """``text`` as it is, unless it is a JSON object or list holding an ``exempt`` key: then
-    the text is written again with those keys left out (their values stay)."""
-    if not exempt or not text.lstrip().startswith(("{", "[")):
+    """``text`` as it is, unless it is a JSON object or list: then it is written again with
+    the pairs whose key is in ``exempt`` left out, values and all (a duplicate key keeps its
+    other pairs). Text that does not parse is returned as it is."""
+    if not exempt:
         return text
+    data = _parse(text)
+    if data is None:
+        return text
+
+    def dump(node: Any) -> str:
+        if isinstance(node, _Pairs):
+            body = ",".join(
+                json.dumps(k, ensure_ascii=False) + ":" + dump(v)
+                for k, v in node
+                if k not in exempt
+            )
+            return "{" + body + "}"
+        if isinstance(node, list):
+            return "[" + ",".join(dump(v) for v in node) + "]"
+        return json.dumps(node, ensure_ascii=False)
+
     try:
-        data = json.loads(text)
-
-        def strip(node: Any) -> Any:
-            if isinstance(node, list):
-                return [strip(v) for v in node]
-            if isinstance(node, dict):
-                return {k: strip(v) for k, v in node.items() if k not in exempt}
-            return node
-
-        return json.dumps(strip(data), ensure_ascii=False)
-    except (ValueError, RecursionError):
+        return dump(data)
+    except RecursionError:
         return text
 
 
 def _decoded(text: str, exempt: frozenset[str] = frozenset()) -> Iterator[str]:
     """The strings and keys of ``text`` when it is a JSON object or list, else nothing. A key
-    in ``exempt`` (a property name of a tool schema in the same request) is not yielded."""
-    if not text.lstrip().startswith(("{", "[")):
-        return
-    try:
-        data = json.loads(text)
-    except (ValueError, RecursionError):
+    in ``exempt`` is not yielded (its value is), however often it repeats."""
+    data = _parse(text)
+    if data is None:
         return
     stack = [data]
     while stack:
         node = stack.pop()
         if isinstance(node, str):
             yield node
-        elif isinstance(node, list):
-            stack.extend(node)
-        elif isinstance(node, dict):
-            for key, value in node.items():
+        elif isinstance(node, _Pairs):
+            for key, value in node:
                 if key not in exempt:
                     yield key
                 stack.append(value)
+        elif isinstance(node, list):
+            stack.extend(node)
 
 
 def _schema_text(node: Any) -> Iterator[str]:
@@ -304,9 +322,15 @@ def _schema_text(node: Any) -> Iterator[str]:
         yield node
 
 
-def _message_text(m: Any) -> Iterator[str]:
+def _plain(texts: Iterator[str]) -> Iterator[tuple[str, bool]]:
+    return ((t, False) for t in texts)
+
+
+def _message_text(m: Any) -> Iterator[tuple[str, bool]]:
+    """``(text, structured)`` of a message; ``structured`` marks tool call arguments and the
+    content of a ``tool`` message, the only texts whose JSON keys may be exempt."""
     if not isinstance(m, dict):
-        yield from _strings(m)
+        yield from _plain(_strings(m))
         return
     for key, value in m.items():
         if key in MESSAGE_FIXED:
@@ -315,7 +339,7 @@ def _message_text(m: Any) -> Iterator[str]:
             for part in value:
                 if isinstance(part, dict) and part.get("type") == "image_url":
                     continue
-                yield from (
+                yield from _plain(
                     _strings({k: v for k, v in part.items() if k != "type"})
                     if isinstance(part, dict)
                     else _strings(part)
@@ -323,17 +347,23 @@ def _message_text(m: Any) -> Iterator[str]:
         elif key == "tool_calls" and isinstance(value, list):
             for call in value:
                 if not isinstance(call, dict):
-                    yield from _strings(call)
+                    yield from _plain(_strings(call))
                     continue
                 for ck, cv in call.items():
                     if ck in CALL_FIXED:
                         continue
                     if ck == "function" and isinstance(cv, dict):
-                        yield from _strings({k: v for k, v in cv.items() if k != "name"})
+                        for fk, fv in cv.items():
+                            if fk == "arguments" and isinstance(fv, str):
+                                yield fv, True
+                            elif fk != "name":
+                                yield from _plain(_strings(fv))
                     else:
-                        yield from _strings(cv)
+                        yield from _plain(_strings(cv))
+        elif key == "content" and isinstance(value, str) and m.get("role") == "tool":
+            yield value, True
         else:
-            yield from _strings(value)
+            yield from _plain(_strings(value))
 
 
 def _tool_text(tool: Any) -> Iterator[str]:
@@ -352,15 +382,15 @@ def _tool_text(tool: Any) -> Iterator[str]:
             yield from _strings(value)
 
 
-def _request_text(body: Any) -> Iterator[str]:
-    """The text of a request (``{"messages", "tools", ...}``) or of a list of messages: what a
-    name could be hidden in, without the request's structure."""
+def _request_text(body: Any) -> Iterator[tuple[str, bool]]:
+    """``(text, structured)`` of a request (``{"messages", "tools", ...}``) or of a list of
+    messages: what a name could be hidden in, without the request's structure."""
     if isinstance(body, list):
         for m in body:
             yield from _message_text(m)
         return
     if not isinstance(body, dict):
-        yield from _strings(body)
+        yield from _plain(_strings(body))
         return
     for key, value in body.items():
         if key in ENVELOPE_KEYS:
@@ -370,9 +400,9 @@ def _request_text(body: Any) -> Iterator[str]:
                 yield from _message_text(m)
         elif key == "tools" and isinstance(value, list):
             for t in value:
-                yield from _tool_text(t)
+                yield from _plain(_tool_text(t))
         else:
-            yield from _strings(value)
+            yield from _plain(_strings(value))
 
 
 def split_names(
@@ -459,6 +489,7 @@ class Pseudonyms:
         self._real: dict[str, str] = {}  # comparison key -> the name as registered
         self._variants: dict[str, str] = {}  # folded spelling (also JSON-escaped) -> alias
         self._pattern: re.Pattern[str] | None = None
+        self._structural: frozenset[str] = frozenset()
         self._used = 0
         self._rng = random.SystemRandom()
         self.refused = 0  # registry names that cannot be aliased (a count, never the names)
@@ -582,25 +613,35 @@ class Pseudonyms:
         request is not text and is not checked: roles, ids, types, tool names, JSON schema
         ``type``, ``format`` and ``required``, image parts (a name there is not a leak, and
         checking it would let a registry name like "User" or "Target" disable every cloud
-        route). The one JSON key that is not checked is a property name of a tool schema in the
-        same request (a record "Target" and the ``target`` argument of ``look_at``): the schema
-        already sends it as typed. Any other key, such as a name used as a key in a tool result,
-        is checked and blocks the request."""
+        route). The same holds for the JSON keys the app itself writes in tool calls and
+        results (``set_structural_keys``: the parameter names of its skills and the keys of
+        their results, so a record "Target" and the ``target`` argument of ``look_at`` do not
+        block a request that carries no tools). Only the JSON of tool call arguments and of
+        ``tool`` messages gets that exemption, and only for those exact keys (their values and
+        duplicate keys are checked). Any other key, such as a name used as a key in a tool
+        result, is checked and blocks the request."""
         with self._lock:
-            pattern = self._pattern
+            pattern, exempt = self._pattern, self._structural
         if pattern is None:
             return False
-        exempt = _property_names(body)
         return any(
             _spans(pattern, form)
-            for text in _request_text(body)
-            for shown in (_without_keys(text, exempt),)
-            for form in (
-                shown,
-                json.dumps(shown, ensure_ascii=False)[1:-1],
-                *_decoded(text, exempt),
-            )
+            for text, structured in _request_text(body)
+            for form in self._forms(text, exempt if structured else frozenset())
         )
+
+    @staticmethod
+    def _forms(text: str, exempt: frozenset[str]) -> Iterator[str]:
+        """The spellings of ``text`` the leak check looks at (see :meth:`leaks`)."""
+        shown = _without_keys(text, exempt)
+        yield shown
+        yield json.dumps(shown, ensure_ascii=False)[1:-1]
+        yield from _decoded(text, exempt)
+
+    def set_structural_keys(self, keys: Iterable[str]) -> None:
+        """The JSON keys the app writes itself in tool calls and results (see :meth:`leaks`)."""
+        with self._lock:
+            self._structural = frozenset(keys)
 
     def _aliased(self, value: Any, used: set[str]) -> Any:
         if isinstance(value, str):
@@ -742,21 +783,22 @@ class Restorer:
 
 class NameSource:
     """The pseudonym map for callers of the router outside the conversation (persona traits,
-    route checks). ``names`` lists the registry's display names; ``for_config`` brings the map
-    in line with them and returns it, or None when ``privacy.pseudonyms_to_cloud`` is off. An
-    error from ``names`` propagates, so nothing is sent without the names it should replace."""
+    route checks). ``names`` lists the registry's display names; ``for_config`` builds a map
+    from them and returns it, or None when ``privacy.pseudonyms_to_cloud`` is off. Each call
+    gets its own map (callers run on different threads and need no stable aliases). An error
+    from ``names`` propagates, so nothing is sent without the names it should replace."""
 
     def __init__(self, names: Callable[[], Iterable[str]]) -> None:
         self._names = names
-        self._map = Pseudonyms()
 
     def for_config(self, cfg: RoboEmotConfig) -> Pseudonyms | None:
-        """The synced map for ``cfg``, in the configured conversation language."""
+        """A synced map for ``cfg``, in the configured conversation language."""
         if not cfg.privacy.pseudonyms_to_cloud:
             return None
         language = cfg.conversation.language
-        self._map.sync(self._names(), cfg.privacy.pseudonym_templates, language, language)
-        return self._map
+        mapping = Pseudonyms()
+        mapping.sync(self._names(), cfg.privacy.pseudonym_templates, language, language)
+        return mapping
 
     def refused_names(self, cfg: RoboEmotConfig) -> list[str]:
         """The registry names that cannot be aliased under ``cfg``'s templates, sorted, for the

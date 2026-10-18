@@ -140,13 +140,21 @@ async def apply_llm_traits(
     """With ``persona.traits_source: llm``, replace the manual traits with the rated ones in
     the stack's derived layer (audited as ``persona.llm``, published as ``config.changed``).
     Run it at startup and again on every ``config.changed``: when the source is manual or the
-    current prompt gets no valid rating, earlier rated traits are dropped and the manual
-    traits apply. Returns True only when rated traits are in effect."""
+    current prompt gets no valid rating (also when the registry names for the pseudonyms
+    cannot be read, in which case nothing is sent), earlier rated traits are dropped and the
+    manual traits apply. Returns True only when rated traits are in effect."""
     persona = stack.effective().persona
     traits = None
     if persona.traits_source == "llm":
-        pseudonyms = names.for_config(stack.effective()) if names else None
-        traits = await rate_traits(router, persona, cache, pseudonyms)
+        cfg = stack.effective()
+        if names is None and cfg.privacy.pseudonyms_to_cloud:
+            log.warning("persona traits: pseudonyms are on but no name source is wired")
+        try:
+            pseudonyms = names.for_config(cfg) if names else None
+        except Exception as exc:  # names unknown: nothing is sent, the rating counts as failed
+            log.warning("persona traits: registry names unavailable (%s)", type(exc).__name__)
+        else:
+            traits = await rate_traits(router, persona, cache, pseudonyms)
     if traits is None:
         if persona.traits_source == "llm":
             log.warning("persona traits: no valid LLM rating, keeping the manual traits")

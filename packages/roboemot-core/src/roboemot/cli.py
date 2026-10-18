@@ -164,6 +164,13 @@ def _llm(args: argparse.Namespace) -> int:
         known = ", ".join(r.name for r in cfg.llm_routes) or "none configured"
         raise ValueError(f"no route named {args.route!r} (llm_routes: {known})")
 
+    if cfg.privacy.pseudonyms_to_cloud:
+        print(
+            "warning: pseudonyms are on, but the CLI does not read the registry; the synthetic "
+            "prompts are sent as they are",
+            file=sys.stderr,
+        )
+
     async def run():
         return await asyncio.wait_for(
             check_route(

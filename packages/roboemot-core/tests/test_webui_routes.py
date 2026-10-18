@@ -282,3 +282,25 @@ def test_a_route_check_uses_the_pseudonyms_on_a_cloud_route(tmp_path):
     finally:
         srv.stop()
     assert fake.bodies and all("Italian" not in json.dumps(b) for b in fake.bodies)
+
+
+def test_a_route_check_whose_names_cannot_be_read_sends_nothing_and_reports_failure(tmp_path):
+    from roboemot.llm.pseudonyms import NameSource
+
+    def broken():
+        raise OSError("registry down")
+
+    cloud = {**ROUTE, "base_url": "https://api.example.com/v1"}
+    cfg = RoboEmotConfig(
+        webui={"bind": "127.0.0.1", "port": 0},
+        llm_routes=[cloud],
+        privacy={"pseudonyms_to_cloud": True},
+    )
+    fake = Fake()
+    srv, client = serve(tmp_path, cfg, checker_for(cfg, fake, names=NameSource(broken)))
+    try:
+        assert client.request("POST", "/api/routes/lan/check", {}).status == 202
+        assert finish(client)["last_check"]["error"] == "failed"
+    finally:
+        srv.stop()
+    assert fake.bodies == []

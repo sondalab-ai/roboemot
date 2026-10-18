@@ -658,6 +658,9 @@ class ConversationWorker:
         cfg = turn.cfg
         if not cfg.privacy.pseudonyms_to_cloud:
             return None
+        self._pseudonyms.set_structural_keys(
+            self.skills.structural_keys() if self.skills is not None else ()
+        )
         self._pseudonyms.sync(
             self._known_names(),
             cfg.privacy.pseudonym_templates,

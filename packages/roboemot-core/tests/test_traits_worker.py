@@ -472,13 +472,26 @@ def test_the_persona_prompt_is_sent_as_typed_when_pseudonyms_are_off(tmp_path, s
     assert "Marta" in json.dumps(server.requests)
 
 
-def test_no_request_is_sent_when_the_names_cannot_be_read(tmp_path, started):
+def test_no_request_is_sent_when_the_names_cannot_be_read(tmp_path, started, runs):
     def broken():
         raise OSError("registry down")
 
     server = Server()
-    _, worker = make_cloud(tmp_path, server, broken)
+    stack, worker = make_cloud(tmp_path, server, broken)
+    stack.set("persona.traits", {"energy": 0.9}, source=llm_traits.SOURCE, layer="derived")
     started.append(worker)
     worker.start()
-    time.sleep(0.3)
+    assert wait_for(lambda: runs[0] >= 1 and worker._failed is not None)
     assert server.requests == []
+    assert stack.derived.get("persona", {}).get("traits") is None  # earlier rating is dropped
+
+
+def test_a_missing_name_source_with_pseudonyms_on_is_logged(tmp_path, started, caplog):
+    server = Server()
+    stack, worker = make_cloud(tmp_path, server, lambda: ["Marta"])
+    worker.names = None
+    started.append(worker)
+    with caplog.at_level("WARNING"):
+        worker.start()
+        assert wait_for(lambda: energy(stack) == 0.8)
+    assert "no name source is wired" in caplog.text and "Marta" not in caplog.text
