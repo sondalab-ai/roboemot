@@ -29,6 +29,24 @@ def attended_person(selector: AttentionSelector, world: WorldModel) -> Entry | N
     return entry if entry is not None and entry.kind == "person" else None
 
 
+def entry_name(registry: Any, entry: Entry) -> str | None:
+    """The registry display name of a world entry, only for a record the owner confirmed
+    (``status == "active"``): a pending record's name was typed or imported and nobody vouched
+    for it. None for an unknown, missing or pending record, or without a registry. The one
+    lookup behind the scene summary and the ``look_at`` choices."""
+    if registry is None or entry.identity in ("", UNKNOWN_IDENTITY):
+        return None
+    try:
+        record = (
+            registry.get_person(entry.identity)
+            if entry.kind == "person"
+            else registry.get_entity(entry.identity)
+        )
+    except Exception:  # a record that is gone: describe the entry by its kind
+        return None
+    return record.display_name if getattr(record, "status", "active") == "active" else None
+
+
 def profile_source(
     selector: AttentionSelector,
     world: WorldModel,
@@ -65,14 +83,7 @@ def scene_source(
     """``scene(max_chars)``: what is in view, the attention target first."""
 
     def name_of(entry: Entry) -> str | None:
-        if registry is None:
-            return None
-        try:
-            if entry.kind == "person":
-                return registry.get_person(entry.identity).display_name
-            return registry.get_entity(entry.identity).display_name
-        except Exception:  # a record that is gone: describe the entry by its kind
-            return None
+        return entry_name(registry, entry)
 
     def scene(max_chars: int) -> str | None:
         target = selector.target

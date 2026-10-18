@@ -9,8 +9,11 @@ this module builds it from the app's pieces. Nothing here names a joint:
   controller and the limiter still decide what the head does;
 - ``express_emotion`` is the affect engine's budgeted LLM impulse (in core).
 
-The callables run on the conversation thread. The world model and the registry are lock-guarded
-and the selector's hint is one attribute write, so no queue is needed.
+The callables run inline on the conversation's event loop (they must not block). The world model
+and the registry are lock-guarded and the selector's hint is one attribute write, so no queue is
+needed. Names offered for ``look_at`` are the confirmed registry names of what is in view, cut to
+one line of ``conversation.summary_value_max_chars`` like the scene summary: they are data from the
+registry and land in the tool schema sent to the route.
 """
 
 from __future__ import annotations
@@ -23,9 +26,11 @@ from typing import Any
 from roboemot.affect.expression import ExpressionRenderer
 from roboemot.attention import AttentionSelector, SpeakerHint
 from roboemot.config.schema import RoboEmotConfig
+from roboemot.conversation.summaries import one_line
 from roboemot.skills.defaults import SkillEnv
 from roboemot.world import Entry, WorldModel
-from roboemot.world.types import UNKNOWN_IDENTITY
+
+from .conversation import entry_name
 
 log = logging.getLogger(__name__)
 CATEGORY_KINDS = {"animal": "animal", "object": "object"}
@@ -61,14 +66,9 @@ class SkillBridge:
         return [e for e in self._world.entries if now - e.last_seen <= stale]
 
     def _name(self, entry: Entry) -> str | None:
-        if self._registry is None or entry.identity in ("", UNKNOWN_IDENTITY):
-            return None
-        try:
-            if entry.kind == "person":
-                return self._registry.get_person(entry.identity).display_name
-            return self._registry.get_entity(entry.identity).display_name
-        except Exception:  # a record that is gone
-            return None
+        name = entry_name(self._registry, entry)
+        cap = self._cfg().conversation.summary_value_max_chars
+        return (one_line(name, cap) or None) if name else None
 
     def _names(self) -> list[str]:
         seen: dict[str, None] = {}
