@@ -42,14 +42,14 @@ READY_TIMEOUT_S = 5.0
 JOIN_TIMEOUT_S = 2.0
 
 
-QUESTION_MARKS = "?？"
+QUESTION_MARKS = ("?", "？")
 CLOSERS = "\"')]}»”’›"
 
 
 def ends_with_question(text: str) -> bool:
     """Whether a sentence ends in a question mark (closing quotes and brackets and spaces after
     it are ignored). This is how the robot knows it just asked something."""
-    return text.rstrip().rstrip(CLOSERS).rstrip().endswith(tuple(QUESTION_MARKS))
+    return text.rstrip().rstrip(CLOSERS).rstrip().endswith(QUESTION_MARKS)
 
 
 class AudioSink(Protocol):
@@ -279,8 +279,9 @@ class SpeechOutput:
     def question_end(self) -> float | None:
         """Clock stamp at which the last sentence that began to play ends (or ended, or was cut
         by a stop) when it ended in a question mark; None when that sentence was not a question
-        or nothing has been said. The next sentence replaces it, so a question followed by a
-        statement is no longer pending."""
+        or nothing has been said. The next sentence that plays replaces it, so a question
+        followed by a statement is no longer pending. Sentences a stop dropped before they
+        played never replace or revive it, and a stop only ever moves the stamp earlier."""
         with self._lock:
             return self._question_end
 

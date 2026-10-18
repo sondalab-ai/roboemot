@@ -74,8 +74,9 @@ The persona pieces exist and are tested; these callers wait for the pillars they
 - [x] `play` offers every label of the manifest's `expression_map` plus the named gestures of its
       `gesture_map` (nod, shake): same renderer, register, persona, minor cap and limiter (SPEC 7, 11).
 - [x] Fast path: a nod on a spoken "yes" and a shake on "no" (`speech.keyword.yes/no` through
-      `ExpressionRenderer.request`, SPEC 7, 8), silent while the robot's last sentence was a question
-      and within `voice.fastpath.answer_window_s` of it (`SpeechOutput.question_end`). Italian `sì`
+      `ExpressionRenderer.request`, SPEC 7, 8): final text only, at most
+      `voice.fastpath.gesture_max_words` words, exactly one of yes / no, never while the robot speaks,
+      silent within `voice.fastpath.answer_window_s` of a question of its own (`SpeechOutput.question_end`). Italian `sì`
       is not a default yes phrase (accents are folded, `si` is a pronoun). Nod and shake signs and
       amplitudes are untested on the hardware.
 - [ ] Edit wake phrases and the robot name from the web UI (needs an admin-confirmed settings editor,

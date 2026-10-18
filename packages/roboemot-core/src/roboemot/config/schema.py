@@ -1951,10 +1951,19 @@ class FastpathConfig(Strict):
         6.0,
         "A yes or no heard within this long after the robot finished a sentence that ended in a "
         "question mark is the answer to it: no nod or shake (the reply goes to the conversation "
-        "as usual). A later sentence that is not a question ends the window. 0 = only while the "
+        "as usual; also none while the robot speaks). A later sentence that is not a question ends "
+        "the window. 0 = only while the "
         "question is still playing",
         unit="s", ge=0, le=60,
     )  # fmt: skip
+    gesture_max_words: int = param(
+        3,
+        "A yes or no nods or shakes the head only when the final text of an addressed utterance "
+        "has at most this many words and holds exactly one of the two (`yes, but...` or "
+        "`non è certo` are sentences, not answers); the speech.keyword events are not affected",
+        ge=1,
+        le=20,
+    )
     doa_max_age_ms: float = param(
         1500.0,
         "A sound direction reading older than this does not point the head at the speaker",

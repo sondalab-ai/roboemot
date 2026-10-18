@@ -501,3 +501,16 @@ def test_a_stop_moves_the_question_end_to_the_stop(make):
     assert out.question_end() > time.monotonic() + 0.5
     out.stop()
     assert out.question_end() <= time.monotonic()
+
+
+def test_dropped_sentences_neither_replace_nor_extend_the_question_end(make):
+    out = make(FakeBackend(pieces=1), sink=TimelineSink())
+    say(out, "Vuoi un caffe?")
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    before = out.question_end()
+    assert before is not None
+    for _ in range(3):
+        say(out, "Una frase che non verra detta.")
+    out.stop()  # drops the queue (barge-in, the stop keyword)
+    after = out.question_end()
+    assert after is not None and after <= before and after <= time.monotonic()

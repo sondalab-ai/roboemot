@@ -12,6 +12,9 @@ Everything here is cheap and runs on the listener thread, ahead of the conversat
   revises away does not count), and, for addressed utterances only, the ``speech.loud`` /
   ``speech.fast`` impulses (a television is not shouting at the robot).
 
+A short final text with exactly one yes or no keyword, in an addressed utterance, also goes to
+``on_answer(category, now)`` (the nod / shake handler, ``roboemot.voice.yes_no``); partials do not.
+
 Events go to ``emit(event, now, payload)`` (the affect runner). Payloads carry the language only:
 never audio or text. Latencies (SPEC 13) are counted from the start of the last speech frame:
 negative means the reaction came before the person had finished speaking.
@@ -86,6 +89,7 @@ class FastResult:
     keywords: frozenset[str]
     wake_word: bool
     prosody: Prosody
+    answer: str | None = None  # "yes" or "no": the one such keyword of a short final text
 
 
 class FastPath:
@@ -101,7 +105,9 @@ class FastPath:
         target_entry: Callable[[], str | None] = lambda: None,
         clock: Callable[[], float] = time.monotonic,
         names: RobotName | None = None,
+        on_answer: Callable[[str, float], None] | None = None,
     ) -> None:
+        self._on_answer = on_answer
         self.names = names if names is not None else RobotName()
         self._emit = emit
         self._selector = selector
@@ -201,7 +207,9 @@ class FastPath:
         if self._keyword_at is not None:
             self.stats.record("keyword_vs_last_speech", self._keyword_at - last_speech_stamp)
         wake = "wake" in cats or ("name" in cats and words <= fp.alias_wake_max_words)
-        return FastResult(frozenset(cats), wake, prosody)
+        said = cats & {"yes", "no"}
+        answer = next(iter(said)) if len(said) == 1 and words <= fp.gesture_max_words else None
+        return FastResult(frozenset(cats), wake, prosody, answer)
 
     def impulses(self, result: FastResult, addressed: bool) -> None:
         """Emit ``speech.loud`` / ``speech.fast`` for an addressed utterance; ends the utterance."""
@@ -209,6 +217,8 @@ class FastPath:
         p = result.prosody
         if addressed:
             now = self._clock()
+            if result.answer is not None and self._on_answer is not None:
+                self._on_answer(result.answer, now)
             payload = {"language": self._language}
             if p.rms_db >= fp.loud_db:
                 self._emit("speech.loud", now, payload)

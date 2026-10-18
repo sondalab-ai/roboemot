@@ -1,44 +1,64 @@
 """Nod on a spoken yes, shake on a spoken no (SPEC 7, 8 stage 3).
 
-:class:`YesNoGestures` sits between the voice fast path and the affect runner. Every event goes
-on to ``emit`` unchanged; ``speech.keyword.yes`` and ``speech.keyword.no`` also ask the
-expression renderer for the ``nod`` / ``shake`` gesture. The renderer owns every rule about
-whether and how it plays (minimum interval, register, minor cap, limiter), so a refused request
-is just dropped.
+The fast path hands :class:`YesNoGestures` the answer of an addressed utterance: a short final
+text (``voice.fastpath.gesture_max_words``) holding exactly one yes or no keyword. Partials never
+trigger a gesture, and the affect events (``speech.keyword.yes`` / ``.no``) are emitted by the
+fast path as before, independent of this module.
 
-The exception: when the robot's last spoken sentence was a question and it ended no more than
-``voice.fastpath.answer_window_s`` ago (or is still playing), the yes or no is the person's
-answer, not something to mirror, so no gesture is requested. The affect event is still emitted.
+The handler asks the expression renderer for ``nod`` / ``shake`` with the current time, so the
+renderer's rules decide: a request inside ``expression.min_interval_s`` of the last expression is
+refused rather than played late, and a resting robot (circadian) does not move; reflex priority,
+register, minor cap and limiter apply to what does play.
+
+No gesture when the yes or no is not for the robot to mirror:
+
+- the robot is speaking (``SpeechActivity``, echo tail included): its own "Certo!" coming back
+  through the microphone, or the person talking over it;
+- the robot's last spoken sentence was a question and it ended no more than
+  ``voice.fastpath.answer_window_s`` ago (or is still playing): the person is answering it.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
-from typing import Any
 
-GESTURE_FOR = {"speech.keyword.yes": "nod", "speech.keyword.no": "shake"}
+from ..config.schema import FastpathConfig
+
+log = logging.getLogger(__name__)
+
+GESTURE_FOR = {"yes": "nod", "no": "shake"}
 
 
 class YesNoGestures:
-    """An ``Emit`` that forwards to ``emit`` and requests a gesture on yes / no."""
+    """Callable ``(category, now)`` for ``FastPath(on_answer=...)``; hot-reloadable config."""
 
     def __init__(
         self,
-        emit: Callable[[str, float, dict[str, Any]], None],
-        request: Callable[[str], bool],
+        request: Callable[[str, float], bool],
         question_end: Callable[[], float | None],
-        answer_window_s: Callable[[], float],
+        speaking: Callable[[float], bool],
+        cfg: FastpathConfig,
     ) -> None:
-        self._emit, self._request = emit, request
-        self._question_end, self._window = question_end, answer_window_s
+        self._request, self._question_end, self._speaking = request, question_end, speaking
+        self._cfg = cfg
 
-    def answering(self, now: float) -> bool:
+    def apply_config(self, cfg: FastpathConfig) -> None:
+        """Hot reload of ``voice.fastpath`` (the answer window)."""
+        self._cfg = cfg
+
+    def _answering(self, now: float) -> bool:
         """Whether ``now`` is inside the window after the robot's last question."""
         end = self._question_end()
-        return end is not None and now - end <= self._window()
+        return end is not None and now - end <= self._cfg.answer_window_s
 
-    def __call__(self, event: str, now: float, payload: dict[str, Any]) -> None:
-        self._emit(event, now, payload)
-        gesture = GESTURE_FOR.get(event)
-        if gesture is not None and not self.answering(now):
-            self._request(gesture)
+    def __call__(self, category: str, now: float) -> None:
+        gesture = GESTURE_FOR.get(category)
+        if gesture is None:
+            return
+        try:  # runs on the listener thread: any failure means no gesture, never a dead listener
+            if self._speaking(now) or self._answering(now):
+                return
+            self._request(gesture, now)
+        except Exception as exc:
+            log.warning("yes/no gesture: %s", type(exc).__name__)
