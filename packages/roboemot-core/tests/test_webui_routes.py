@@ -96,6 +96,7 @@ def test_list_shows_endpoint_only_and_no_key(served):
             "endpoint": "lan.local:8443",
             "allowed_for_minors": False,
             "running": False,
+            "secret": None,
             "last_check": None,
         }
     ]

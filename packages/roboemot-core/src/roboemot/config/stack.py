@@ -320,7 +320,12 @@ def violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Viol
     for path, (ref, meta) in base.items():  # an admin-only entry (a language's list) removed
         if meta.get("admin_only") and path not in cand and not path.startswith(NEW_RULE_REFUSED):
             found.append(Violation("admin", path, ref, None))
-    return found + reflex_violations(approved, candidate) + locality_violations(approved, candidate)
+    return (
+        found
+        + reflex_violations(approved, candidate)
+        + locality_violations(approved, candidate)
+        + secret_violations(approved, candidate)
+    )
 
 
 def locality_violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Violation]:
@@ -342,6 +347,29 @@ def locality_violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> 
         )
         for r in candidate.llm_routes
         if route_is_local(r) and trusted.get(r.name) != r.base_url
+    ]
+
+
+def secret_violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Violation]:
+    """Routes that would send a stored key somewhere the approval did not trust (SPEC 8, 11A,
+    12). A route whose ``api_key`` is a ``${secret:name}`` reference is trusted with exactly its
+    approved ``base_url`` and ``api_key``. A candidate route with a reference that is new, has
+    another ``base_url`` or another ``api_key`` (including one that changes to a reference)
+    needs the admin: otherwise a runtime change could point a key at a host of its choosing."""
+    from ..secret_store import SECRET_REF  # lazy: keeps the config package light
+
+    trusted = {
+        r.name: (r.base_url, r.api_key) for r in approved.llm_routes if SECRET_REF.match(r.api_key)
+    }
+    return [
+        Violation(
+            "admin",
+            f"llm_routes.{r.name}.api_key",
+            f"{trusted[r.name][0]} {trusted[r.name][1]}" if r.name in trusted else "absent",
+            f"{r.base_url} {r.api_key}",
+        )
+        for r in candidate.llm_routes
+        if SECRET_REF.match(r.api_key) and trusted.get(r.name) != (r.base_url, r.api_key)
     ]
 
 

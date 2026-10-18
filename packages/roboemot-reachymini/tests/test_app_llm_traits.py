@@ -13,6 +13,7 @@ import yaml
 from roboemot import paths
 from roboemot.config.schema import SafetyConfig
 from roboemot.llm import Router
+from roboemot.secret_store import SecretStore
 from roboemot_reachymini import app as app_module
 from test_app_perception import data, new_app, start, wait_for  # noqa: F401  (data is a fixture)
 from test_app_webui import Browser, webui_data  # noqa: F401  (webui_data is a fixture)
@@ -26,9 +27,13 @@ class FakeRoute:
     def __init__(self, status: int = 200, hang: bool = False) -> None:
         self.status, self.hang = status, hang
         self.requests: list[dict] = []
+        self.auth: list[str] = []
+        self.hosts: list[str] = []
 
     async def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(json.loads(request.content))
+        self.auth.append(request.headers.get("authorization", ""))
+        self.hosts.append(request.url.host)
         if self.hang:
             await asyncio.sleep(3600)
         if self.status != 200:
@@ -50,14 +55,11 @@ class LLMApp(app_module.RoboEmotApp):
 
     def make_router(self, cfg, monitor):
         self.monitor = monitor
-        return Router(
-            cfg.llm_routes,
-            cfg.safety,
-            monitor=monitor,
-            http_client_factory=lambda: httpx.AsyncClient(
-                transport=httpx.MockTransport(self.route.handler)
-            ),
+        router = super().make_router(cfg, monitor)  # the real one: it reads the secret store
+        router.http_client_factory = lambda: httpx.AsyncClient(
+            transport=httpx.MockTransport(self.route.handler)
         )
+        return router
 
 
 def app_with(route: FakeRoute) -> LLMApp:
@@ -175,22 +177,52 @@ def test_the_router_shares_the_apps_network_monitor(data):  # noqa: F811
     assert not errors
 
 
-def test_a_secret_reference_without_a_secret_store_warns_once_at_startup(data, caplog):  # noqa: F811
-    configure(data, None)
+def secret_route(data) -> None:  # noqa: F811
+    configure(data, "llm", routes=False)
     path = data / "app.yaml"
     cfg = yaml.safe_load(path.read_text())
-    cfg["llm_routes"] = [{**ROUTE, "api_key": "${secret:cloud_key}"}, {**ROUTE, "name": "b"}]
+    cfg["llm_routes"] = [
+        {**ROUTE, "api_key": "${secret:cloud_key}"},
+        {**ROUTE, "name": "b", "base_url": "http://b.local/v1"},
+    ]
     path.write_text(yaml.safe_dump(cfg))
-    app = app_with(FakeRoute())
-    with caplog.at_level(logging.WARNING, logger=app_module.log.name):
+
+
+def test_a_missing_secret_makes_its_route_unavailable_with_one_warning(data, caplog):  # noqa: F811
+    """Regression: such a route used to go out with an empty key (``Bearer none``)."""
+    secret_route(data)
+    route = FakeRoute()
+    app = app_with(route)
+    with caplog.at_level(logging.WARNING, logger="roboemot.llm.router"):
         stop, thread, errors = start(app)
         try:
-            assert wait_for(lambda: app.diagnostics is not None)
+            assert wait_for(lambda: rated(app))  # route "b" has no secret and answers
+            assert [r.name for r in app.router_hub.router.eligible(False)] == ["b"]
         finally:
             stop.set()
             thread.join(15)
-    warned = [r.getMessage() for r in caplog.records if "secret reference" in r.getMessage()]
-    assert len(warned) == 1 and "lan" in warned[0] and "cloud_key" not in warned[0]
+    warned = [r.getMessage() for r in caplog.records if r.name == "roboemot.llm.router"]
+    assert len(warned) == 1 and "lan" in warned[0] and "cloud_key" in warned[0]
+    assert set(route.hosts) == {"b.local"}  # nothing was sent to the route without its key
+    assert not errors
+
+
+def test_a_stored_secret_is_the_route_key_at_startup(data, caplog):  # noqa: F811
+    secret_route(data)
+    SecretStore.for_data_dir().set("cloud_key", "sk-app-1")
+    route = FakeRoute()
+    app = app_with(route)
+    with caplog.at_level(logging.DEBUG):
+        stop, thread, errors = start(app)
+        try:
+            assert wait_for(lambda: rated(app))
+            assert [r.name for r in app.router_hub.router.eligible(False)] == ["lan", "b"]
+            report = json.dumps(app.diagnostics.report())
+        finally:
+            stop.set()
+            thread.join(15)
+    assert route.auth and route.auth[0] == "Bearer sk-app-1"
+    assert "sk-app-1" not in report and "sk-app-1" not in caplog.text
     assert not errors
 
 

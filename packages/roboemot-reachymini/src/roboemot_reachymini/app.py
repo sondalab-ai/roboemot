@@ -46,12 +46,12 @@ from roboemot.health.network import NetworkMonitor
 from roboemot.health.responder import OfflineResponder
 from roboemot.llm import Router
 from roboemot.llm.hub import RouterHub
-from roboemot.llm.router import SECRET
 from roboemot.manifest import load_manifest
 from roboemot.motion import Command, MotionLoop, Priority
 from roboemot.persona import effects as persona_effects
 from roboemot.persona.llm_traits import TraitCache, TraitsWorker
 from roboemot.reflex import ReflexEngine
+from roboemot.secret_store import SecretStore
 from roboemot.skills.defaults import default_skills
 from roboemot.vision import CIRCADIAN, FrameSource, LockedSource
 from roboemot.vision.minor import MinorPresence
@@ -62,6 +62,7 @@ from roboemot.voice.factory import build_speech
 from roboemot.voice.listener import Utterance, VoiceListener
 from roboemot.voice.robot_name import RobotName
 from roboemot.voice.speech import SpeechOutput
+from roboemot.voice.yes_no import YesNoGestures
 from roboemot.webui import Server, make_server
 from roboemot.webui.catalogue import open_catalogue
 from roboemot.webui.routes import RouteChecker
@@ -235,6 +236,20 @@ def circadian_vision_scale(cfg: Any, circadian: CircadianModel | None) -> float:
     return effects.vision_rate_scale
 
 
+def make_yes_no(
+    app: Any, expression: ExpressionRenderer, speech: SpeechActivity, fastpath: Any
+) -> YesNoGestures:
+    """The nod / shake handler. The robot's last question is read from ``app.speech_output``
+    when it exists (it is built after the listener), and the window comes from the config the
+    reload keeps pushing in, never from a per-event config validation."""
+    return YesNoGestures(
+        expression.request,
+        lambda: out.question_end() if (out := app.speech_output) is not None else None,
+        speech.speaking,
+        fastpath,
+    )
+
+
 def affect_report(engine: Any, now: float) -> dict[str, Any]:
     """Affect fields of the debug report: the numbers and the label, nothing about who or why."""
     state = engine.state(now)
@@ -284,6 +299,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
     affect_runner: AffectRunner | None = None  # owns the one affect engine
     minor_presence: MinorPresence | None = None  # the one source of the minor-present signal
     register_tracker: RegisterTracker | None = None  # people in view -> register.active
+    yes_no: YesNoGestures | None = None  # spoken yes / no -> nod / shake
     expression: ExpressionRenderer | None = None  # affect label -> additive antenna/head motion
     reflexes: ReflexEngine | None = None  # runs on the motion loop's tick (SPEC 10)
     audio: ReachyAudio | None = None  # the one reader of the microphone (reflex level, voice)
@@ -298,7 +314,12 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
 
     def make_router(self, cfg: Any, monitor: NetworkMonitor) -> Router:
         """The app's LLM router over the configured routes (overridable: tests inject fakes)."""
-        return Router(cfg.llm_routes, cfg.safety, monitor=monitor)
+        return Router(
+            cfg.llm_routes,
+            cfg.safety,
+            secrets=SecretStore.for_data_dir(cfg.data_dir).get,
+            monitor=monitor,
+        )
 
     def on_utterance(self, utterance: Utterance) -> None:
         """Where finished utterances go (SPEC 8): the conversation worker, which answers the
@@ -562,13 +583,6 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         )
 
         # Trait rating (SPEC 11A, Persona) runs on its own thread; its cache is in the data folder.
-        for route in cfg.llm_routes:  # the app has no secret store yet (TODO.md)
-            if SECRET.match(route.api_key):
-                log.warning(
-                    "llm route %s: api_key is a secret reference and no secret store is wired: "
-                    "requests go out with an empty key",
-                    route.name,
-                )
         try:
             paths.data_dir(cfg.data_dir)  # created private (0700) when missing, SPEC 12
         except OSError as exc:  # the cache then fails to write and the rating is just not kept
@@ -579,6 +593,10 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         worker = self.traits_worker = TraitsWorker(
             stack, None, TraitCache(paths.traits_cache_path(cfg.data_dir)), None, hub=hub
         )
+
+        # Spoken yes / no (SPEC 8): a short addressed answer nods or shakes through the renderer,
+        # unless the robot is speaking or just asked a question.
+        yes_no = self.yes_no = make_yes_no(self, expression, speech, cfg.voice.fastpath)
 
         # The robot's name: voice.wake_word, else the owner's name in the daemon setup (SPEC 8).
         names = self.names = RobotName(source=loop.driver.robot_name)
@@ -596,6 +614,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 lambda u: self.on_utterance(u),
                 reference,
                 names,
+                yes_no,
             )
             if cfg.voice.enabled
             else None
@@ -661,6 +680,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             runner.apply_config(change.config.affect, change.config.appraisal)
             circ.apply_config(change.config)
             speech.set_echo_tail_ms(change.config.voice.echo_tail_ms)
+            yes_no.apply_config(change.config.voice.fastpath)
             if listener is not None:
                 listener.apply_config(change.config)
             if bargein is not None:

@@ -32,9 +32,15 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       (8192) and `conversation.turn_reserve_tokens` (256); `trim_history` drops whole turns,
       oldest first, and the router applies it per route; load-time rejection names the route
       (`roboemot.llm.prompt`, `test_llm_history.py`). The conversation worker (M3 slice 5) builds the history and applies the `conversation.history_turns` cap.
-- [ ] Secret store for `${secret:name}` route keys (SPEC 8: stored encrypted on the robot). The
-      app's `make_router` has no resolver, so such routes send an empty key; the app logs a
-      warning at startup for each one.
+- [x] Secret store for `${secret:name}` route keys (SPEC 8 Secrets, 12 Data). Done: `secrets.json` in the
+      data folder (0600, atomic writes, refused when group/other accessible or not owned by the user;
+      `roboemot.secret_store`), `roboemot secrets {set,remove,list}` (value from stdin or a no-echo
+      prompt), installer `--secret NAME` (recorded by name for uninstall). The router resolves keys at
+      build (startup and each config reload, `RouterHub.sync` rebuilds when a secret changed); a route
+      whose secret cannot be used is unavailable with one warning, and the CLI check and the web UI
+      check refuse it. Keys are in no log, debug report or web UI response (`test_secret_leak.py`).
+      Open: the web UI cannot set or rotate a key; no encryption at rest (file modes only, owner
+      decision 2026-10-18); a secret set on disk is picked up at the next reload or restart, not live.
 - [x] Scan soon after a person leaves (SPEC 5A, Scanning). Done: `world.scan.target_lost_delay_s`
       (8 s) with its own `target_lost_jitter_s` (3 s), scaled by `idle_period_x`; the policy uses
       it instead of the idle interval when the person target or speaker hint goes away. A person or
@@ -73,9 +79,12 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       cloud route gets aliases in the enum and the executor gets the real name back.
 - [x] `play` offers every label of the manifest's `expression_map` plus the named gestures of its
       `gesture_map` (nod, shake): same renderer, register, persona, minor cap and limiter (SPEC 7, 11).
-- [ ] Fast path: a nod on a spoken "yes"/"sì" and a shake on "no" (the `speech.keyword.yes/no` events
-      exist; needs an app handler that calls `ExpressionRenderer.request`, and a rule for when the
-      robot is the one asking). Nod and shake signs and amplitudes are untested on the hardware.
+- [x] Fast path: a nod on a spoken "yes" and a shake on "no" (`speech.keyword.yes/no` through
+      `ExpressionRenderer.request`, SPEC 7, 8): final text only, at most
+      `voice.fastpath.gesture_max_words` words, exactly one of yes / no, never while the robot speaks,
+      silent within `voice.fastpath.answer_window_s` of a question of its own (`SpeechOutput.question_end`). Italian `sì`
+      is not a default yes phrase (accents are folded, `si` is a pronoun). Nod and shake signs and
+      amplitudes are untested on the hardware.
 - [ ] Edit wake phrases and the robot name from the web UI (needs an admin-confirmed settings editor,
       SPEC 11A).
 - [ ] Edit the children's built-in lines (`safety.minor_lines`) and the minor blocklist from the web UI

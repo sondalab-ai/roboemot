@@ -57,6 +57,7 @@ class FakeRobot:
         self.dirs: set[str] = {HOME}  # folders that exist (data folder emulation)
         self.symlinks: dict[str, str] = {}  # path -> where realpath says it really is
         self.env_data_dir = ""  # ROBOEMOT_DATA_DIR in the SSH user's environment
+        self.secrets: dict[str, str] = {}  # the robot's secret store (name -> value)
 
     # Remote interface
     target = "pollen@robot"
@@ -85,6 +86,21 @@ class FakeRobot:
                 return "ERROR: no network\n__rc=1"
             self.piper_importable = True
             return "\n__rc=0"
+        if " -m roboemot.cli secrets " in command:
+            words = shlex.split(command)
+            action, names = words[4], words[8:]
+            assert words[5:7] == ["--data-dir", DATA], command
+            assert not names or words[7] == "--", command  # names are never read as options
+            if action == "list":
+                return "\n".join(sorted(self.secrets))
+            if action == "set":
+                self.stdins.append(stdin)
+                self.secrets[names[0]] = (stdin or "").rstrip("\n")
+                self.dirs.add(f"{DATA}/secrets.json")
+            else:
+                for n in names:
+                    self.secrets.pop(n, None)
+            return ""
         if "-m roboemot.webui set-pin" in command:
             self.stdins.append(stdin)
             self.dirs.add(PIN_PATH)
@@ -509,6 +525,7 @@ def snapshot(robot, daemon) -> tuple:
         set(robot.dirs),
         daemon.startup,
         daemon.installed,
+        dict(robot.secrets),
     )
 
 
@@ -941,6 +958,141 @@ def test_uninstall_leaves_no_pin_file_with_the_data_folder_gone(
     uninstall()
     assert PIN_PATH not in robot.dirs and DATA not in robot.dirs
     assert snapshot(robot, daemon) == before
+
+
+# ---------------------------------------------------------------- secrets (SPEC 8, 12 Data)
+
+API_KEY = "sk-installer-5d2e"
+
+
+def key_prompts(monkeypatch, value=API_KEY) -> None:
+    def answer(self, question):
+        return value if "secret" in question or question == "Repeat the value" else PIN
+
+    monkeypatch.setattr(Ui, "ask_secret", answer)
+
+
+def test_install_stores_a_secret_over_stdin_and_records_its_name(offline, robot, monkeypatch):
+    key_prompts(monkeypatch)
+    install(secrets=["cloud_key"])
+    assert robot.secrets == {"cloud_key": API_KEY}
+    assert API_KEY + "\n" in robot.stdins
+    assert not any(API_KEY in c for c in robot.commands)
+    record = json.loads(robot.files[RECORD])
+    assert record["secrets"] == ["cloud_key"] and API_KEY not in json.dumps(record)
+
+
+def test_the_secret_is_stored_after_the_data_folder_exists(offline, robot, monkeypatch):
+    key_prompts(monkeypatch)
+    seen = []
+    real = robot.run
+
+    def spy(command, check=True, stdin=None):
+        if "secrets set" in command:
+            seen.append(DATA in robot.dirs)
+        return real(command, check, stdin)
+
+    monkeypatch.setattr(robot, "run", spy)
+    install(secrets=["cloud_key"])
+    assert seen == [True]
+
+
+def test_install_dry_run_never_touches_the_secret_store(offline, robot, monkeypatch, capsys):
+    key_prompts(monkeypatch)
+    inst.run_install(options(dry_run=True, secrets=["cloud_key"]), quiet_ui(yes=True), ROOT)
+    assert not any("roboemot.cli secrets" in c for c in robot.commands)
+    assert robot.secrets == {} and robot.stdins == []
+    assert f"{DATA}/secrets.json" not in robot.dirs
+    assert "would ask for the secret 'cloud_key'" in capsys.readouterr().out
+
+
+def test_install_without_a_terminal_sets_no_secret_unless_asked(offline, robot):
+    install()
+    assert not any("roboemot.cli secrets" in c for c in robot.commands)
+
+
+def test_a_secret_that_was_not_typed_is_not_set_and_says_how(offline, robot, capsys):
+    install(secrets=["cloud_key"])  # not interactive: nothing can be typed
+    out = capsys.readouterr().out
+    assert robot.secrets == {} and json.loads(robot.files[RECORD])["secrets"] == []
+    assert "roboemot.cli secrets set --data-dir" in out and "-- cloud_key" in out
+
+
+@pytest.mark.parametrize("bad", ["a b", "x;rm -rf ~", "$(id)", ""])
+def test_a_bad_secret_name_is_rejected_before_anything_runs(offline, robot, bad):
+    with pytest.raises(WizardError, match="secret name"):
+        install(secrets=[bad])
+    assert robot.commands == []
+
+
+def test_uninstall_removes_only_the_secrets_the_installer_added(
+    offline, robot, daemon, monkeypatch
+):
+    robot.dirs.add(DATA)  # a data folder that was there before: the installer leaves it
+    robot.secrets = {"mine": "keep-me", "cloud_key": "theirs"}
+    key_prompts(monkeypatch)
+    monkeypatch.setattr(Ui, "confirm", lambda self, question, default: False)
+    install(secrets=["cloud_key", "extra"])
+    assert robot.secrets == {"mine": "keep-me", "cloud_key": "theirs", "extra": API_KEY}
+    assert json.loads(robot.files[RECORD])["secrets"] == ["extra"]  # cloud_key was not ours
+    uninstall()
+    assert robot.secrets == {"mine": "keep-me", "cloud_key": "theirs"}
+    assert RECORD not in robot.files
+
+
+def test_a_failing_secret_list_stops_before_anything_is_recorded(offline, robot, monkeypatch):
+    key_prompts(monkeypatch)
+    real = robot.run
+
+    def run(command, check=True, stdin=None):
+        if "roboemot.cli secrets list" in command:
+            raise WizardError("on robot: store is readable by group or others")
+        return real(command, check, stdin)
+
+    monkeypatch.setattr(robot, "run", run)
+    with pytest.raises(WizardError, match="group or others"):
+        install(secrets=["cloud_key"])
+    assert json.loads(robot.files[RECORD])["secrets"] == [] and robot.secrets == {}
+
+
+def test_a_failing_secret_removal_keeps_the_record_so_a_rerun_finishes(offline, robot, monkeypatch):
+    key_prompts(monkeypatch)
+    install(secrets=["cloud_key"])
+    real = robot.run
+    failing = {"on": True}
+
+    def run(command, check=True, stdin=None):
+        if "roboemot.cli secrets remove" in command and failing["on"]:
+            raise WizardError("on robot: boom")
+        return real(command, check, stdin)
+
+    monkeypatch.setattr(robot, "run", run)
+    with pytest.raises(WizardError, match="boom"):
+        uninstall()
+    assert json.loads(robot.files[RECORD])["secrets"] == ["cloud_key"]
+    failing["on"] = False
+    uninstall()
+    assert robot.secrets == {} and RECORD not in robot.files
+
+
+def test_uninstall_dry_run_keeps_the_secrets_and_the_record(offline, robot, monkeypatch, capsys):
+    key_prompts(monkeypatch)
+    install(secrets=["cloud_key"])
+    capsys.readouterr()
+    uninstall(dry_run=True)
+    assert robot.secrets == {"cloud_key": API_KEY}
+    assert json.loads(robot.files[RECORD])["secrets"] == ["cloud_key"]
+    assert "would remove the secrets cloud_key" in capsys.readouterr().out
+
+
+def test_uninstall_ignores_a_tampered_secret_name_in_the_record(offline, robot, monkeypatch):
+    key_prompts(monkeypatch)
+    install(secrets=["cloud_key"])
+    record = json.loads(robot.files[RECORD])
+    record["secrets"] = ["cloud_key", "x; rm -rf ~"]
+    robot.files[RECORD] = json.dumps(record)
+    uninstall()
+    assert not any("rm -rf ~" in c for c in robot.commands)
 
 
 # ---------------------------------------------------------------- Piper virtualenv (SPEC 8)

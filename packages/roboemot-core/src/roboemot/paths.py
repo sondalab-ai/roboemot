@@ -28,6 +28,7 @@ MODELS_SUBDIR = "models"
 VOICE_MODELS_SUBDIR = "voice-models"
 TRAITS_CACHE_FILE = "llm_traits.json"
 ROUTE_CHECKS_FILE = "route_checks.json"
+SECRETS_FILE = "secrets.json"
 
 
 def data_path(configured: str = "") -> Path:
@@ -49,9 +50,12 @@ def data_dir(configured: str = "") -> Path:
     path = data_path(configured)
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.mkdir(mode=DIR_MODE)
-        path.chmod(DIR_MODE)  # mkdir's mode is masked by the umask
-        return path
+        try:
+            path.mkdir(mode=DIR_MODE)
+            path.chmod(DIR_MODE)  # mkdir's mode is masked by the umask
+            return path
+        except FileExistsError:  # another process created it first: check it below
+            pass
     info = path.stat()
     if info.st_uid != os.getuid():
         raise PermissionError(f"data folder {path} is not owned by this user")
@@ -88,6 +92,12 @@ def route_checks_path(configured: str = "") -> Path:
     return data_path(configured) / ROUTE_CHECKS_FILE
 
 
+def secrets_path(configured: str = "") -> Path:
+    """``<data folder>/secrets.json``, the secret store (SPEC 8, 12 Data; not created here). Mode
+    0o600; inside the data folder, so uninstall removes it with the folder."""
+    return data_path(configured) / SECRETS_FILE
+
+
 PIPER_VENV_SUBDIR = "piper-venv"
 
 
@@ -108,6 +118,7 @@ __all__ = [
     "PIPER_VENV_SUBDIR",
     "REGISTRY_SUBDIR",
     "ROUTE_CHECKS_FILE",
+    "SECRETS_FILE",
     "TRAITS_CACHE_FILE",
     "VOICE_MODELS_SUBDIR",
     "data_dir",
@@ -117,6 +128,7 @@ __all__ = [
     "piper_venv",
     "registry_dir",
     "route_checks_path",
+    "secrets_path",
     "traits_cache_path",
     "voice_models_subdir",
 ]
