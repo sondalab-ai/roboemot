@@ -70,3 +70,5 @@ roboemot debug --host <robot> --json     # debug report (SPEC 12A); system/batte
 - Angles are radians inside the code; degrees only in YAML files for humans, converted at load.
 - Tests that need the simulator are marked `@pytest.mark.sim`; tests that need the real
   robot are marked `@pytest.mark.hil` and never run in CI.
+- Worktree agents need their own venv (editable installs point at the main checkout); check
+  `roboemot.__file__` is inside the worktree before trusting a test run.
