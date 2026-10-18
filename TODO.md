@@ -46,13 +46,18 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       out afresh after an app restart; personal details that are not registry names are not replaced;
       registry names refused for aliasing (no letter or digit, a template prefix word, a structural
       word such as "user") are sent unaliased.
-- [ ] Pseudonyms for the persona trait rating (SPEC 8, 12 Data): `rate_traits`
-      (`persona/llm_traits.py`) streams `persona.prompt` without `pseudonyms=`, so a registry name
-      written into the persona prompt reaches a cloud route as typed.
-- [ ] Pseudonyms in tool payload keys (SPEC 8, 12 Data): a JSON key in a tool call or result that
-      equals a registry name ("target" for a record "Target") is aliased in the history sent to a
-      cloud route. Nothing leaks, but the model sees a renamed key; alias JSON values only and let
-      the leak check refuse a name in a key.
+- [ ] Pseudonyms residual: `persona/llm_traits.py` (`rate_traits`) streams `persona.prompt`
+      without `pseudonyms=`, so a registry name written into the persona prompt reaches a cloud
+      route as typed.
+- [ ] Pseudonyms residual: `llm/conformance.py` sends through `stream_route`, which bypasses the
+      pseudonyms (synthetic messages, low risk).
+- [ ] Pseudonyms residual: registry names refused for aliasing are sent unaliased and the admin
+      sees only their count in the log; consider showing which names in the web UI (admin only).
+- [ ] Pseudonyms residual: a JSON key in a tool call or result that equals a registry name
+      ("target" for a record "Target") is aliased in the history sent to a cloud route; nothing
+      leaks, but the model sees a renamed key.
+- [ ] Pseudonyms residual: a name written with `\uXXXX` escapes for ASCII letters in text that is
+      not JSON is neither scrubbed nor caught by the leak check.
 
 ## Barge-in and skills (M3 slice 6, SPEC 8 stage 8, 11)
 
@@ -83,3 +88,8 @@ The persona pieces exist and are tested; these callers wait for the pillars they
 - [ ] The robot, owner and licence items of the M3 report are in SPEC 15 (exit on the robot, barge-in,
       CM4 load, Piper on the robot and its voice licences, wake phrases, OpenAI speech in Italian,
       children's lines). Not repeated here.
+
+## CI and tests
+
+- [ ] `packages/roboemot-reachymini/tests/test_app_conversation.py::test_the_app_offers_the_default_skills_and_wires_barge_in`
+      is timing-flaky under load (failed once in a full run after the slice-2 fix, passes alone).
