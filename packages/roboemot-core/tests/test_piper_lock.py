@@ -1,0 +1,42 @@
+"""The Piper locks are complete and hash-pinned (SPEC 4A, Installer)."""
+
+from __future__ import annotations
+
+import re
+
+import pytest
+from roboemot.install import PIPER_TTS_VERSION
+from roboemot.install.piper_lock import LOCK_DIR, TARGETS, lock_name, lock_path
+from roboemot.install.ui import WizardError
+
+TARGET_IDS = [f"{a}-py{p}" for a, p in sorted(TARGETS)]
+
+
+def requirements(text: str) -> list[str]:
+    """Each requirement with its continuation lines joined; comments and blanks dropped."""
+    lines = [ln for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+    return re.sub(r"\\\n", " ", "\n".join(lines)).splitlines()
+
+
+@pytest.mark.parametrize("target", sorted(TARGETS), ids=TARGET_IDS)
+def test_lock_pins_the_installer_version_and_hashes_every_requirement(target):
+    text = (LOCK_DIR / lock_name(*target)).read_text()
+    reqs = requirements(text)
+    assert any(r.startswith(f"piper-tts=={PIPER_TTS_VERSION} ") for r in reqs)
+    for req in reqs:
+        assert re.match(r"^[A-Za-z0-9._-]+==\S+ ", req), req
+        assert re.findall(r"--hash=sha256:[0-9a-f]{64}", req), req
+    assert not re.search(r"^\s*(-e|git\+|https?://)", text, re.M)
+
+
+def test_every_lock_file_belongs_to_a_target():
+    assert {p.name for p in LOCK_DIR.glob("piper-*.txt")} == {lock_name(*t) for t in TARGETS}
+
+
+def test_robot_and_ci_targets_exist():
+    assert ("aarch64", "3.12") in TARGETS and ("x86_64", "3.12") in TARGETS
+
+
+def test_a_target_without_a_lock_is_refused():
+    with pytest.raises(WizardError, match="no hash-pinned Piper lock"):
+        lock_path("armv7l", "3.12")

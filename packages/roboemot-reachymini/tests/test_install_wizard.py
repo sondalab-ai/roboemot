@@ -14,6 +14,7 @@ import pytest
 import roboemot.install as inst
 from roboemot import paths
 from roboemot.install import Options, Ui, WizardError
+from roboemot.install.piper_lock import lock_name
 from roboemot_reachymini import install as reachy
 from roboemot_reachymini.install import DaemonApi, ReachyMiniWireless
 
@@ -51,6 +52,7 @@ class FakeRobot:
         self.stdins: list[str | None] = []
         self.piper_pips: list[str] = []
         self.piper_importable = False
+        self.machine = "aarch64\n3.12"  # architecture and Python minor the probe reports
         self.piper_pip_fails = False
         self.dirs: set[str] = {HOME}  # folders that exist (data folder emulation)
         self.symlinks: dict[str, str] = {}  # path -> where realpath says it really is
@@ -114,7 +116,7 @@ class FakeRobot:
                 self.dirs.discard(path)
             return ""
         if "platform.machine" in plain:
-            return "aarch64\n3.12"
+            return self.machine
         if "version('reachy_mini')" in plain:
             return "1.11.0"
         if "reachy_mini_apps" in plain:
@@ -439,7 +441,7 @@ def test_install_dry_run_touches_nothing(offline, robot, daemon, capsys):
 
 def test_install_records_changes_and_cleans_tmp(offline, robot, daemon):
     install()
-    assert len(robot.copies) == 1 and robot.tmp_dirs == set()
+    assert len(robot.copies) == 2 and robot.tmp_dirs == set()  # the wheels, then the Piper lock
     record = json.loads(robot.files[RECORD])
     assert record["added"] == ["scipy"] and record["replaced"] == {}
     assert record["pending_before"] is None
@@ -949,10 +951,29 @@ def test_install_creates_a_recorded_piper_venv_with_a_pinned_no_cache_pip(offlin
     assert PIPER_PYTHON in robot.dirs
     assert json.loads(robot.files[RECORD])["piper_venv"] == PIPER_VENV
     assert len(robot.piper_pips) == 1
-    assert f"piper-tts=={inst.PIPER_TTS_VERSION}" in robot.piper_pips[0]
+    pip = robot.piper_pips[0]
+    assert "--require-hashes" in pip and "--only-binary=:all:" in pip
+    assert f"-r /tmp/roboemot-install.0/{lock_name('aarch64', '3.12')}" in pip
+    assert [c[0].name for c in robot.copies[1:]] == [lock_name("aarch64", "3.12")]
+    assert robot.tmp_dirs == set()
     assert any(
         c == f"{reachy.ReachyMiniWireless.python} -m venv {PIPER_VENV}" for c in robot.commands
     )
+
+
+def test_install_without_a_lock_for_the_robot_python_fails_before_touching_it(
+    offline, robot, daemon
+):
+    robot.machine = "aarch64\n3.9"
+    with pytest.raises(WizardError, match="no hash-pinned Piper lock"):
+        inst.install_piper(
+            Ui(False, True),
+            ReachyMiniWireless(),
+            robot,
+            inst.InstallRecord("roboemot", "reachy", []),
+            dry_run=False,
+        )
+    assert robot.piper_pips == [] and not any(" -m venv " in c for c in robot.commands)
 
 
 def test_piper_venv_default_matches_the_core_config_default():

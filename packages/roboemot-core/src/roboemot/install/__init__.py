@@ -39,6 +39,7 @@ import yaml
 
 from .. import paths
 from .build import build_wheels, distribution_names, min_python, third_party_requirements
+from .piper_lock import lock_path
 from .pyenv import RemotePython, report_changes
 from .record import InstallRecord, canonical, plan_uninstall
 from .remote import Remote
@@ -51,6 +52,9 @@ TMP_DIR_PATTERN = re.compile(re.escape(REMOTE_TMP_PREFIX) + r"\.[A-Za-z0-9]+")
 PIN_FILE = "webui_pin.json"  # roboemot.webui.auth.PIN_FILE, inside the app data folder
 PIN_RETRIES = 3
 PIPER_TTS_VERSION = "1.8.0"  # exact pin: the worker protocol is tested against this API
+PLATFORM_PROBE = (
+    "import sys, platform; print(platform.machine()); print('%d.%d' % sys.version_info[:2])"
+)
 INSTALL_STEPS = 6
 UNINSTALL_STEPS = 6
 
@@ -174,9 +178,7 @@ def check_ssh(
     py = RemotePython(remote, platform.python)
     if not py.exists():
         raise WizardError(f"{platform.python} not found: is this a {platform.display_name}?")
-    arch, version = py.py(
-        "import sys, platform; print(platform.machine()); print('%d.%d' % sys.version_info[:2])"
-    ).splitlines()
+    arch, version = py.py(PLATFORM_PROBE).splitlines()
     if arch != platform.arch:
         raise WizardError(f"robot architecture is {arch}, expected {platform.arch}")
     if need and tuple(map(int, version.split("."))) < need:
@@ -283,7 +285,8 @@ def install_piper(
     piper-tts is GPL-3.0, so it lives in its own environment and runs as its own process (SPEC
     8). The venv is recorded before it is created, so an interrupted install can be undone; a
     folder that exists but is not in the record is not ours and is left alone. Every pip call
-    passes ``--no-cache-dir``; the dry run only reports.
+    passes ``--no-cache-dir``; the install reads the hash-pinned lock for the robot's architecture
+    and Python (``piper_lock``) with ``--require-hashes``; the dry run only reports.
     """
     venv, python = piper_paths(remote)
     recreate = True
@@ -297,10 +300,12 @@ def install_piper(
     if record.piper_venv != venv and _exists(remote, venv):
         ui.warn(f"{venv} exists but is not in the install record: left alone")
         return
+    arch, version = RemotePython(remote, platform.python).py(PLATFORM_PROBE).splitlines()
+    lock = lock_path(arch, version)
     if dry_run:
         ui.info(
             f"would create the Piper virtualenv {venv} and install piper-tts=={PIPER_TTS_VERSION} "
-            "(recorded for uninstall)"
+            f"with hashes from {lock.name} (recorded for uninstall)"
         )
         return
     record.piper_venv = venv
@@ -309,7 +314,12 @@ def install_piper(
         remote.run(f"mkdir -p -m 700 {shlex.quote(posixpath.dirname(venv))}")
         remote.run(f"{shlex.quote(platform.python)} -m venv {shlex.quote(venv)}")
         ui.ok(f"created the Piper virtualenv {venv}")
-    result = RemotePython(remote, python).install_requirement(f"piper-tts=={PIPER_TTS_VERSION}")
+    tmp = remote.run(f"mktemp -d {REMOTE_TMP_PREFIX}.XXXXXX")
+    try:
+        remote.copy([lock], tmp)
+        result = RemotePython(remote, python).install_locked(f"{tmp}/{lock.name}")
+    finally:
+        remote.run(f"rm -rf {shlex.quote(tmp)}", check=False)
     if not result.ok:
         raise WizardError(f"pip install piper-tts failed on the robot:\n{result.output}")
     ui.ok(f"installed piper-tts {PIPER_TTS_VERSION} (voice files: roboemot models fetch --voice)")
