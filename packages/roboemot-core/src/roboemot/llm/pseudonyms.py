@@ -60,6 +60,7 @@ SHORT_ESCAPES = {"n": " ", "t": " ", "r": " ", "f": " ", "b": " ", "/": "/", '"'
 # Deepest JSON nesting kept in tool-call arguments. The alias restoration recurses, and a
 # 5000-deep object parses on every Python version, so depth is bounded here.
 TOOL_ARGS_MAX_DEPTH = 64
+ALIAS_PASSES_MAX = 4  # passes of to_alias over one text; aliases hold no name, so 2 suffice
 LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 LOOPBACK_NAMES = ("localhost",)
 MDNS_SUFFIX = ".local"
@@ -91,6 +92,11 @@ LAN_NETWORKS = tuple(
         "fc00::/7",  # unique local
     )
 )
+
+
+class PseudonymLeak(RuntimeError):
+    """A request for a route that is not local still held a registry name after aliasing (or
+    aliasing did not settle); it was not sent. The message never names anyone."""
 
 
 def route_is_local(route: LLMRoute) -> bool:
@@ -613,11 +619,15 @@ class Pseudonyms:
     def to_alias(self, text: str, used: set[str] | None = None) -> str:
         """``text`` (NFC) with every known name replaced by its alias; the aliases put in are
         added to ``used``. A name overlapped by a replaced one (the two readings of an escape,
-        see ``_spans``) is replaced in a further pass; aliases hold no name, so it ends."""
+        see ``_spans``) is replaced in a further pass, at most ``ALIAS_PASSES_MAX``; if names
+        remain after that, :class:`PseudonymLeak` is raised (no name in the message)."""
         with self._lock:
             pattern, variants = self._pattern, dict(self._variants)
         current = _nfc(text)
-        while spans := _disjoint(_spans(pattern, current)):
+        for _ in range(ALIAS_PASSES_MAX):
+            spans = _disjoint(_spans(pattern, current))
+            if not spans:
+                return current
             out, pos = [], 0
             for start, end, key in spans:
                 alias = variants[key]
@@ -626,6 +636,8 @@ class Pseudonyms:
                 if used is not None:
                     used.add(alias)
             current = "".join(out) + current[pos:]
+        if _spans(pattern, current):
+            raise PseudonymLeak("aliasing did not settle")  # fail closed: the route is skipped
         return current
 
     def safe_cut(self, text: str, cap: int) -> str:

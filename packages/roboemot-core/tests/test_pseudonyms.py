@@ -1230,3 +1230,25 @@ def test_overlapping_names_of_the_two_readings_are_all_replaced():
     out = p.to_alias("Anna\\nMaria and Anna")
     assert "Anna" not in out and "Maria" not in out
     assert not p.mentions(out)
+
+
+def test_aliasing_that_never_settles_terminates_and_fails_closed(monkeypatch):
+    from roboemot.llm.pseudonyms import PseudonymLeak
+
+    p = pseudo("Marta")
+    monkeypatch.setattr(p, "_variants", {k: "Marta" for k in p._variants})  # an alias with a name
+    with pytest.raises(PseudonymLeak) as exc:
+        p.to_alias("ciao Marta")
+    assert "Marta" not in str(exc.value)
+    with pytest.raises(PseudonymLeak):
+        p.prepare([{"role": "user", "content": "ciao Marta"}], None)
+
+
+async def test_a_request_whose_aliasing_never_settles_is_not_sent(monkeypatch):
+    p = pseudo("Marta")
+    monkeypatch.setattr(p, "_variants", {k: "Marta" for k in p._variants})
+    rec = Recorder()
+    router = rec.router(route())
+    with pytest.raises(Exception, match="all routes failed"):
+        await run(router, p)
+    assert rec.bodies == [] and router.failures[-1][1] == "PseudonymLeak"

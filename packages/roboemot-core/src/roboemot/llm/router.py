@@ -41,6 +41,7 @@ from .prompt import CHARS_PER_TOKEN, trim_history
 from .pseudonyms import (
     TOOL_ARGS_MAX_DEPTH,
     Outgoing,
+    PseudonymLeak,
     Pseudonyms,
     _nesting,
     replace_names,
@@ -82,11 +83,6 @@ Event = TextDelta | ToolCall | Done
 
 class NoRouteAvailable(RuntimeError):
     """Every route was skipped or failed; the caller plays the register fallback (SPEC 8)."""
-
-
-class PseudonymLeak(RuntimeError):
-    """A request for a route that is not local still held a registry name after aliasing; it
-    was not sent. The message never names anyone."""
 
 
 class Offline(NoRouteAvailable):
