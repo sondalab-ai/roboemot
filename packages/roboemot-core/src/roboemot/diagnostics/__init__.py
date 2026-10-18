@@ -21,6 +21,7 @@ import dataclasses
 import datetime as dt
 import enum
 import math
+import re
 import socket
 import threading
 from collections.abc import Callable, Iterable
@@ -33,6 +34,8 @@ SECTION_TIMEOUT_S = 5.0
 ENTRY_POINT_GROUP = "roboemot.diagnostics"
 REDACTED = "***"
 SECRET_WORDS = ("key", "token", "secret", "password", "credential")
+SECRET_REF = re.compile(r"\$\{secret:")
+URL_CREDENTIALS = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^/?#\s@]*@")
 LOOPBACK = {"localhost", "127.0.0.1", "::1"}
 
 Scope = Literal["local", "robot", "runtime"]
@@ -157,7 +160,9 @@ class Diagnostics:
 
 def jsonable(value: Any) -> Any:
     """Plain JSON types only: no numpy scalars, enums, datetimes, NaN; secrets redacted."""
-    if isinstance(value, bool | str | int) or value is None:
+    if isinstance(value, str):
+        return REDACTED if secret_shaped(value) else value
+    if isinstance(value, bool | int) or value is None:
         return value
     if isinstance(value, float):
         return value if math.isfinite(value) else None
@@ -176,15 +181,30 @@ def jsonable(value: Any) -> Any:
     elif hasattr(value, "tolist"):  # numpy scalar or array
         return jsonable(value.tolist())
     if isinstance(value, dict):
-        return {str(k): REDACTED if _secret(str(k)) else jsonable(v) for k, v in value.items()}
+        return {
+            str(k): REDACTED if is_secret_key(str(k)) else jsonable(v) for k, v in value.items()
+        }
     if isinstance(value, list | tuple | set | frozenset):
         return [jsonable(v) for v in value]
     return str(value)
 
 
-def _secret(key: str) -> bool:
+def is_secret_key(key: str) -> bool:
+    """Whether a field or dict key name marks its value as a secret (substring match)."""
     k = key.lower()
     return any(w in k for w in SECRET_WORDS)
+
+
+def secret_shaped(value: Any) -> bool:
+    """Whether a value looks like a secret whatever its key: a ``${secret:name}`` reference or a
+    URL with credentials (``scheme://user:pass@host``). Looks inside lists, tuples and dicts."""
+    if isinstance(value, str):
+        return bool(SECRET_REF.search(value) or URL_CREDENTIALS.search(value))
+    if isinstance(value, dict):
+        return any(secret_shaped(v) for v in value.values())
+    if isinstance(value, list | tuple | set | frozenset):
+        return any(secret_shaped(v) for v in value)
+    return False
 
 
 def _printable(text: str) -> str:
@@ -253,7 +273,10 @@ __all__ = [
     "collect",
     "collect_section",
     "installed_platforms",
+    "REDACTED",
+    "is_secret_key",
     "jsonable",
+    "secret_shaped",
     "platform_sources",
     "render_text",
 ]

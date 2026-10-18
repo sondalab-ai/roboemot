@@ -1,13 +1,16 @@
 """The web-editable settings: an allowlist, validation and the write path (SPEC 11A, 12).
 
-``SETTINGS`` is the one place that says what the web UI may change. A path that no entry
-expands to is refused. Values are cleaned here (length, count and character limits come from
-``webui.settings_*`` and ``voice.name_max_chars``), then written through ``ConfigStack.set`` on
-the runtime layer with no expiry, so the stack's guardrails, audit (source ``webui:<ip>``) and
-hot reload apply unchanged. Each accepted edit is also kept in a 0600 overrides file in the data
-folder and replayed through the same checks at startup (``restore``); the app YAML is never
-touched. The PIN confirmation is the caller's job (``WebApi``); this module
-never sees a PIN or a secret.
+``SETTINGS`` is the one place that says what the web UI may change (the generic write path
+replaces it later). A path that no entry expands to is refused. What the UI may *see* is the
+whole field catalogue (``roboemot.config.catalogue``): ``fields()`` returns it, with ``writable``
+set from ``SETTINGS``, and secrets are never writable. The per-kind cleaners below are the
+per-path validator hooks of the write path. Values are cleaned here (length, count and
+character limits come from ``webui.settings_*`` and ``voice.name_max_chars``), then written
+through ``ConfigStack.set`` on the runtime layer with no expiry, so the stack's guardrails,
+audit (source ``webui:<ip>``) and hot reload apply unchanged. Each accepted edit is also kept
+in a 0600 overrides file in the data folder and replayed through the same checks at startup
+(``restore``); the app YAML is never touched. The PIN confirmation is the caller's job
+(``WebApi``); this module never sees a PIN or a secret.
 """
 
 from __future__ import annotations
@@ -21,18 +24,16 @@ import stat
 import tempfile
 import threading
 import unicodedata
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
 from roboemot import paths
+from roboemot.config.catalogue import FieldDescriptor, build_catalogue
 from roboemot.config.schema import MinorLines, RoboEmotConfig
 from roboemot.config.stack import (
     ConfigError,
     GuardrailError,
-    _inner_model,
-    _strip_optional,
     field_meta,
     get_path,
 )
@@ -60,6 +61,10 @@ class StackPort(Protocol):
     """The part of ``roboemot.config.ConfigStack`` this module uses."""
 
     def effective(self) -> RoboEmotConfig: ...
+
+    def merged_tree(self, *, include_runtime: bool = True) -> dict[str, Any]: ...
+
+    def source_of(self, path: str) -> str: ...
 
     def set(
         self, key: str, value: Any, *, source: str, admin: bool, must_exist: bool
@@ -176,23 +181,6 @@ class OverridesFile:
             raise
 
 
-def _field_description(path: str) -> str:
-    """Schema description of the field a dotted path ends in ('' when unknown)."""
-    model: Any = RoboEmotConfig
-    parts, i, desc = path.split("."), 0, ""
-    while i < len(parts) and model is not None:
-        info = getattr(model, "model_fields", {}).get(parts[i])
-        if info is None:
-            return ""
-        desc = info.description or ""
-        annotation = _strip_optional(info.annotation)
-        i += 1
-        if getattr(annotation, "__origin__", None) in (dict, list):
-            i += 1
-        model = _inner_model(annotation)
-    return desc
-
-
 def _text(value: object, field: str = "value") -> str:
     if not isinstance(value, str):
         raise ValidationError("value_type", field)
@@ -220,31 +208,35 @@ class SettingsEditor:
         stack: StackPort,
         *,
         store: Path | None = None,
-        defaults: Callable[[], RoboEmotConfig] = RoboEmotConfig,
     ):
         self.stack = stack
         self._file = OverridesFile(store) if store else None
-        self._defaults = defaults
         self._overrides: dict[str, Any] = {}
         self._lock = threading.Lock()
 
+    def fields(self) -> list[FieldDescriptor]:
+        """The full field catalogue, ``writable`` true for the allowlisted, non-secret paths."""
+        cfg = self.stack.effective()
+        allowed = expand(cfg)
+        return build_catalogue(self.stack, lambda path: path in allowed)
+
     def describe(self) -> list[dict[str, Any]]:
-        """Each editable field with value, default, JSON-Schema-style limits and admin flag."""
-        cfg, defaults = self.stack.effective(), self._defaults()
+        """The writable fields in the shape the current page renders: catalogue value and
+        default, JSON-Schema-style limits and admin flag. Goes away with the new page."""
+        cfg = self.stack.effective()
+        entries = expand(cfg)
         rows = []
-        for path, entry in sorted(expand(cfg).items()):
-            try:
-                default = get_path(defaults, path)
-            except (KeyError, AttributeError, IndexError, ValueError):
-                default = None
+        for field in sorted(self.fields(), key=lambda f: f["path"]):
+            if not field["writable"]:
+                continue
             rows.append(
                 {
-                    "path": path,
-                    "value": get_path(cfg, path),
-                    "default": default,
-                    "schema": self._schema(entry, cfg),
-                    "description": _field_description(path),
-                    "needs_admin": bool(field_meta(path).get("admin_only")),
+                    "path": field["path"],
+                    "value": field["value"],
+                    "default": field["default"],
+                    "schema": self._schema(entries[field["path"]], cfg),
+                    "description": field["description"],
+                    "needs_admin": field["admin_only"],
                 }
             )
         return rows

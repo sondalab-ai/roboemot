@@ -591,6 +591,29 @@ class ConfigStack:
     def get(self, key: str, person: dict | None = None) -> Any:
         return get_path(self.effective(person), key)
 
+    def source_of(self, path: str) -> str:
+        """The layer that decides ``path``: ``runtime`` (a live override on the path, above it or
+        below it), else the highest of ``derived``, ``app``, ``preset``, ``manifest``,
+        ``defaults`` whose dict holds the path, else ``schema`` (the built-in default). The
+        per-call ``person`` layer is not stored and never reported."""
+        with self._lock:
+            now = self.clock()
+            for key, rv in self._runtime.items():
+                if rv.expires_at is not None and rv.expires_at <= now:
+                    continue
+                if path == key or path.startswith(key + ".") or key.startswith(path + "."):
+                    return "runtime"
+            for name in reversed(LAYER_ORDER[:-1]):
+                layer = getattr(self, name, None)
+                if not layer:
+                    continue
+                try:
+                    get_path(layer, path)
+                except (KeyError, IndexError, ValueError, TypeError, AttributeError):
+                    continue
+                return name
+        return "schema"
+
     # ---- writing
 
     def set(

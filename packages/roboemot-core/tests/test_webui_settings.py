@@ -73,6 +73,15 @@ def put(client, path, value, pin=PIN, **extra):
     )
 
 
+def test_list_also_carries_the_whole_catalogue_with_the_allowlist_writable(served, stack):
+    data = served.request("GET", "/api/settings").json
+    fields = {f["path"]: f for f in data["fields"]}
+    assert len(fields) > len(data["settings"])
+    assert {p for p, f in fields.items() if f["writable"]} == set(expand(stack.effective()))
+    assert fields[WAKE]["kind"] == "string_list" and fields[WAKE]["source"] == "schema"
+    assert fields[NAME]["nullable"] and fields[LINE]["admin_only"]
+
+
 def test_list_has_value_default_schema_and_admin_flag(served, stack):
     rows = {r["path"]: r for r in served.request("GET", "/api/settings").json["settings"]}
     assert set(rows) == set(expand(stack.effective()))

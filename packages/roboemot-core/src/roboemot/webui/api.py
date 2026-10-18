@@ -107,6 +107,7 @@ class SettingsPort(Protocol):
     """``roboemot.webui.settings.SettingsEditor``: the allowlisted, guarded settings."""
 
     def describe(self) -> list[dict[str, Any]]: ...
+    def fields(self) -> list[Any]: ...
     def change(self, path: object, value: object, source: str) -> dict[str, Any]: ...
 
 
@@ -624,9 +625,13 @@ class WebApi:
         return self.settings
 
     def _settings_list(self, req: Request) -> Response:
-        """The editable fields with value, default, schema limits and the admin flag."""
+        """``fields``: the whole field catalogue (``config.catalogue``, secrets redacted);
+        ``settings``: the writable subset in the shape of the current page; both with the PIN
+        note."""
+        port = self._settings_port()
         return Response(
-            HTTPStatus.OK, {"settings": self._settings_port().describe(), "pin_required": True}
+            HTTPStatus.OK,
+            {"settings": port.describe(), "fields": port.fields(), "pin_required": True},
         )
 
     def _settings_change(self, req: Request) -> Response:

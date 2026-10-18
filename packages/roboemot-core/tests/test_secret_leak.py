@@ -133,3 +133,47 @@ async def test_the_key_is_in_no_log_report_or_response(tmp_path, caplog):
     seen += [caplog.text.encode(), (tmp_path / "data" / "route_checks.json").read_bytes()]
     for blob in seen:
         assert KEY.encode() not in blob
+
+
+def test_settings_api_never_shows_a_reference_or_url_credentials(tmp_path):
+    from roboemot.config.stack import ConfigStack
+    from roboemot.webui.settings import SettingsEditor
+
+    password = "p4ss-CANARY-91"
+    route = {
+        "name": "cloud",
+        "base_url": f"https://alice:{password}@cloud.example/v1",
+        "api_key": REF,
+        "model": "m",
+        "first_token_timeout_s": 5,
+    }
+    stack = ConfigStack(
+        app={"webui": {"bind": "127.0.0.1", "port": 0}, "llm_routes": [route]},
+        audit_path=tmp_path / "audit.jsonl",
+    )
+    stack.set("llm_routes.cloud.model", "m2", source="t")
+    editor = SettingsEditor(stack, store=tmp_path / "webui_settings.json")
+    srv = make_server(FakeService(), Diagnostics(), stack.effective, tmp_path, settings=editor)
+    srv.set_pin(PIN)
+    srv.start()
+    client = Client(srv.port)
+    try:
+        assert client.login().status == 200
+        resp = client.request("GET", "/api/settings")
+        assert resp.status == 200
+        by_path = {f["path"]: f for f in resp.json["fields"]}
+        for leaf in ("api_key", "base_url"):
+            row = by_path[f"llm_routes.cloud.{leaf}"]
+            assert row["secret"] is True and row["writable"] is False
+            assert row["value"] == "***" and row["default"] == "***"
+        assert by_path["llm_routes.cloud.model"]["value"] == "m2"
+        for blob in (resp.body, json.dumps(editor.fields()).encode()):
+            for canary in (password.encode(), b"alice", b"cloud_key", KEY.encode()):
+                assert canary not in blob
+        for path in ("llm_routes.cloud.api_key", "llm_routes.cloud.base_url"):
+            posted = client.request(
+                "POST", "/api/settings", {"path": path, "value": "x", "pin": PIN}
+            )
+            assert posted.status == 403 and password.encode() not in posted.body
+    finally:
+        srv.stop()
