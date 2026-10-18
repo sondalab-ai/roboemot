@@ -26,7 +26,14 @@ from roboemot.world import (
     load_world_plugin,
 )
 
-CFG = WorldScanConfig(idle_interval_s=60.0, jitter_s=10.0, dwell_s=1.0, glance_cooldown_s=8.0)
+CFG = WorldScanConfig(
+    idle_interval_s=60.0,
+    jitter_s=10.0,
+    target_lost_delay_s=10.0,
+    target_lost_jitter_s=2.0,
+    dwell_s=1.0,
+    glance_cooldown_s=8.0,
+)
 DEG = math.radians(1)
 DOFS = {
     "head.yaw": Dof("head.yaw", "head", -math.pi, math.pi, 10.0, 100.0),
@@ -138,12 +145,81 @@ def test_never_a_sweep_while_engaged():
     assert all(p.update(ctx(float(i), engaged=True)) is None for i in range(500))
 
 
-def test_idle_clock_restarts_after_engagement():
+def engage(p: ScanPolicy, until: int) -> None:
+    for i in range(until):
+        assert p.update(ctx(float(i), engaged=True)) is None
+
+
+def test_sweep_starts_soon_after_the_person_target_is_lost():
+    times = []
+    for seed in range(8):
+        p = ScanPolicy(CFG, random.Random(seed))
+        engage(p, 100)
+        t, d = first_decision(p, 100.0)
+        assert d.kind == "sweep" and d.reason == "idle"
+        assert 8.0 <= t - 100.0 <= 12.0  # target_lost_delay_s +- target_lost_jitter_s
+        times.append(t)
+    assert len(set(times)) > 1
+
+
+def test_lost_delay_scales_with_idle_period_and_is_not_the_idle_interval():
+    slow = PersonaEffects(idle_period_x=2.0)
+    p = ScanPolicy(CFG, random.Random(3))
+    engage(p, 10)
+    t, _ = first_decision(p, 10.0, effects=slow)
+    assert 16.0 <= t - 10.0 <= 24.0
+
+
+def test_lost_delay_applies_once_then_the_idle_interval_returns():
     p = ScanPolicy(CFG, random.Random(1))
-    for i in range(100):
-        p.update(ctx(float(i), engaged=True))
-    t, d = first_decision(p, 100.0)
-    assert d.reason == "idle" and t - 100.0 >= 50.0
+    engage(p, 10)
+    t, _ = first_decision(p, 10.0)
+    p.finished()
+    t2, _ = first_decision(p, t + 1)
+    assert t2 - (t + 1) >= 50.0
+
+
+def test_person_returning_cancels_the_pending_lost_sweep():
+    p = ScanPolicy(CFG, random.Random(1))
+    engage(p, 10)
+    assert all(p.update(ctx(10.0 + i)) is None for i in range(5))  # waiting, not yet due
+    assert p.update(ctx(15.0, engaged=True)) is None
+    assert p.update(ctx(30.0, engaged=True)) is None  # would have been due by now
+    t, _ = first_decision(p, 31.0)  # the delay restarts from the next loss
+    assert 8.0 <= t - 31.0 <= 12.0
+
+
+def test_speaker_hint_cancels_a_running_lost_sweep():
+    ctrl = ScanController(CFG, FakePlanner(), DOFS, random.Random(2))
+    pose = {"head.yaw": 0.0, "body_yaw": 0.0}
+    for i in range(10):
+        ctrl.tick(ctx(float(i), engaged=True), pose, 1.0)
+    out = run_controller(ctrl, 10.0, 14.0, pose)
+    first = next(t for t, c in out if c is not None)
+    assert first < 25.0  # sweeping well before idle_interval_s
+    assert ctrl.active
+    assert ctrl.tick(ctx(24.0, engaged=True), pose, 1.0) is None and not ctrl.active
+
+
+@pytest.mark.parametrize("kw", [{"circadian": "resting"}, {"quiet_hours": True}])
+def test_lost_sweep_does_not_run_while_resting_or_in_quiet_hours(kw):
+    p = ScanPolicy(CFG, random.Random(1))
+    engage(p, 10)
+    assert all(p.update(ctx(10.0 + i, **kw)) is None for i in range(300))
+    # waking later is a wake-up sweep, and the lost-target delay is not carried over
+    t, d = first_decision(p, 400.0)
+    assert d.reason == "wakeup" and t == 400.0
+    p.finished()
+    t2, d2 = first_decision(p, 401.0)
+    assert t2 - 401.0 >= 50.0
+
+
+def test_lost_delay_stays_within_jitter_bounds():
+    for seed in range(50):
+        p = ScanPolicy(CFG, random.Random(seed))
+        engage(p, 5)
+        t, _ = first_decision(p, 5.0)
+        assert 8.0 <= t - 5.0 <= 12.0
 
 
 @pytest.mark.parametrize("kw", [{"circadian": "resting"}, {"quiet_hours": True}])
@@ -439,7 +515,7 @@ def test_sweep_ends_with_a_glide_home_at_scan_pace():
     assert step <= math.radians(CFG.speed_dps) * 0.25 + 1e-9  # never a snap
 
 
-def test_interrupted_sweep_waits_a_full_interval_and_restarts_from_the_pose():
+def test_interrupted_sweep_waits_the_lost_delay_and_restarts_from_the_pose():
     planner = FakePlanner()
     ctrl = ScanController(CFG, planner, DOFS, random.Random(2))
     pose = {"head.yaw": 0.0, "body_yaw": 0.0}
@@ -449,9 +525,9 @@ def test_interrupted_sweep_waits_a_full_interval_and_restarts_from_the_pose():
     assert ctrl.tick(ctx(70.0, engaged=True), pose, 1.0) is None and not ctrl.active
     out = run_controller(ctrl, 70.05, 40.0, pose, engaged=True)
     assert all(c is None for _, c in out)
-    out = run_controller(ctrl, 110.0, 80.0, dict(pose))
+    out = run_controller(ctrl, 110.0, 20.0, dict(pose))
     first = next(t for t, c in out if c is not None)
-    assert first - 110.0 >= CFG.idle_interval_s - CFG.jitter_s  # a whole interval again
+    assert CFG.target_lost_delay_s - CFG.target_lost_jitter_s <= first - 110.0 <= 12.0  # lost delay
     assert len(planner.plans) == 2
 
 

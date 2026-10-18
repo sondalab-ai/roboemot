@@ -1,8 +1,9 @@
 """Scanning: when to look around, and how a sweep is run (SPEC 5A, Scanning; 10).
 
 - ``ScanPolicy`` decides *when*: idle for ``idle_interval_s`` (jittered, stretched by the
-  persona's energy), wake-up from rest, and a glance toward an unexplained bearing. Never while
-  resting or in quiet hours; never a sweep while engaged with a person (one glance per
+  persona's energy), or only ``target_lost_delay_s`` (same scaling, own jitter) after a person
+  target or speaker hint is lost, wake-up from rest, and a glance toward an unexplained bearing.
+  Never while resting or in quiet hours; never a sweep while engaged with a person (one glance per
   engagement is allowed). It reads no clock and no global RNG: stamps and the RNG are passed
   in, so a replay with the same seed gives the same decisions.
 - ``SweepRunner`` walks the planner's waypoints with a rate-limited target, waits for the
@@ -84,6 +85,7 @@ class ScanPolicy:
         self._next_at: float | None = None
         self._running = False
         self._was_asleep = False
+        self._was_engaged = False
         self._wake_pending = False
         self._pending: tuple[float, float, float] | None = None  # azimuth, elevation, stamp
         self._glanced_while_engaged = False
@@ -115,8 +117,10 @@ class ScanPolicy:
             self._drop_pending()
             self._wake_pending = False
             self._next_at = None
+            self._was_engaged = False
             return None
         if ctx.engaged:
+            self._was_engaged = True
             self._wake_pending = False
             self._next_at = None  # the idle clock only runs while attention is idle
             return None if self._running else self._engaged_glance(ctx)
@@ -124,7 +128,10 @@ class ScanPolicy:
         if self._running:
             return None
         if self._next_at is None:
-            self._next_at = ctx.now + self._interval(ctx)
+            self._next_at = ctx.now + (
+                self._lost_delay(ctx) if self._was_engaged else self._interval(ctx)
+            )
+            self._was_engaged = False
         if self._held_by_object(ctx):
             return None
         if self._wake_pending:
@@ -169,6 +176,12 @@ class ScanPolicy:
     def _interval(self, ctx: ScanContext) -> float:
         base = self.cfg.idle_interval_s * ctx.effects.idle_period_x
         return base + self._rng.uniform(-self.cfg.jitter_s, self.cfg.jitter_s)
+
+    def _lost_delay(self, ctx: ScanContext) -> float:
+        """The short wait after a person target or speaker hint went away (SPEC 5A)."""
+        base = self.cfg.target_lost_delay_s * ctx.effects.idle_period_x
+        jitter = self.cfg.target_lost_jitter_s
+        return max(0.0, base + self._rng.uniform(-jitter, jitter))
 
     def _pace(self, ctx: ScanContext) -> float:
         return ctx.minor_factor / ctx.effects.idle_period_x
