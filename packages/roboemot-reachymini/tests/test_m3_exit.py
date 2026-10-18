@@ -246,6 +246,8 @@ def models_ready():
     pytest.importorskip("vosk")
     try:
         voice_models.model_file(MODELS_DIR, "silero-vad")
+        for name in RoboEmotConfig().voice.asr.models.values():
+            voice_models.model_file(MODELS_DIR, name)
     except ModelError:
         pytest.skip("voice models not fetched: run `roboemot models fetch --voice`")
 
@@ -270,7 +272,7 @@ def yaml_for(language: str, piper: Path | None) -> str:
     return "\n".join(lines) + "\n"
 
 
-def start_app(data, monkeypatch, language, piper, minor=False):  # noqa: F811
+def start_app(data, monkeypatch, language, piper, minor=False, minors_llm=False):  # noqa: F811
     spoken: list[tuple[str, str]] = []
     if piper is None:
         monkeypatch.setattr(factory, "build_backend", lambda cfg, router: DelayedTTS(spoken))
@@ -284,16 +286,26 @@ def start_app(data, monkeypatch, language, piper, minor=False):  # noqa: F811
             return real(self, text, delivery, language=language, **kw)
 
         monkeypatch.setattr(piper_backend.PiperBackend, "synthesize", spy)
+    if minors_llm:  # the master switch on, the route still not cleared for minors
+        text = (data / "app.yaml").read_text()
+        (data / "app.yaml").write_text(
+            text.replace("safety:\n", "safety:\n  minors_allowed_llm: true\n")
+        )
     enable(data, yaml_for(language, piper))
     app = ExitApp.__new__(ExitApp)
     app.requests, app.utterances, app.minor_flag = [], [], minor
     mini = ExitMini()
     stop, thread, errors = run_app(app, mini.mini)
-    assert wait_for(lambda: app.conversation is not None and app.voice_listener is not None, 30)
-    assert wait_for(lambda: app.voice_listener.snapshot()["state"] == "running", 60)
-    if piper is not None:  # the worker of the default language is started by the warm-up
-        backend = app.speech_output.backend
-        assert wait_for(lambda: language in backend.snapshot()["languages"], 60)
+    try:
+        assert wait_for(lambda: app.conversation is not None and app.voice_listener is not None, 30)
+        assert wait_for(lambda: app.voice_listener.snapshot()["state"] == "running", 60)
+        if piper is not None:  # the worker of the default language is started by the warm-up
+            backend = app.speech_output.backend
+            assert wait_for(lambda: language in backend.snapshot()["languages"], 60)
+    except BaseException:
+        stop.set()
+        thread.join(timeout=20)
+        raise
     mini.mic.start()
     return app, mini, spoken, stop, thread, errors
 
@@ -332,8 +344,10 @@ def test_conversation_inside_the_latency_budgets_then_a_barge_in(
         t_clip = mini.mic.play(np.concatenate([np.zeros(round(LEAD_S * RATE), np.float32), clip]))
         speech_end_wall = t_clip + LEAD_S + last  # start of the last loud frame, mic clock
         assert wait_for(lambda: bool(app.utterances), 20), "no utterance"
+        u0 = app.utterances[0][1]
         assert wait_for(lambda: mini.pushes, 20), (
-            f"the robot never answered: {u0.text!r} {u0}" if (u0 := app.utterances[0][1]) else ""
+            f"the robot never answered: language={u0.language} final={u0.final} "
+            f"addressed={u0.addressed} keywords={sorted(u0.keywords)}"
         )
         first_push = mini.pushes[0][0]
         assert wait_for(lambda: "latency_ms" in app.conversation.snapshot(), 5)
@@ -351,8 +365,9 @@ def test_conversation_inside_the_latency_budgets_then_a_barge_in(
         first_audio_ms = conv["first_audio"]
         independent_ms = (first_push - speech_end_wall) * 1000
         pushes_before, queued_at_cut = len(mini.pushes), app.speaker.queued_s()
-        onset_wall = mini.mic.play(load(stop_clip))
         stop_audio = load(stop_clip)
+        assert not mini.clears, "clear_player was called before the stop clip"
+        onset_wall = mini.mic.play(stop_audio)
         acoustic_onset = onset_wall + speech_span_s(stop_audio)[0]
         voiced_onset = onset_wall + voiced_onset_s(
             stop_audio, RoboEmotConfig().voice.barge_in.threshold
@@ -361,6 +376,7 @@ def test_conversation_inside_the_latency_budgets_then_a_barge_in(
         stop_ms = (mini.clears[0] - voiced_onset) * 1000
         stop_acoustic_ms = (mini.clears[0] - acoustic_onset) * 1000
         triggers = app.bargein.snapshot()["triggers"]
+        assert stop_acoustic_ms >= 0, "the speaker was cleared before the user spoke"
         time.sleep(0.3)
         assert app.speaker.queued_s() == 0.0
         late = [t for t, _ in mini.pushes[pushes_before:] if t > mini.clears[0]]
@@ -407,14 +423,21 @@ def test_conversation_inside_the_latency_budgets_then_a_barge_in(
         finish(stop, thread, errors)
 
 
+@pytest.mark.parametrize("minors_llm", [False, True], ids=["master_switch_off", "master_switch_on"])
 def test_a_minor_without_a_cleared_route_gets_a_built_in_line_and_no_request(
     models_ready,
     data,  # noqa: F811
     monkeypatch,
     capsys,
+    minors_llm,
 ):
-    app, mini, spoken, stop, thread, errors = start_app(data, monkeypatch, "it", None, minor=True)
+    """No route has ``allowed_for_minors``: with ``safety.minors_allowed_llm`` off (the default) or
+    on, a minor hears the built-in line and no request goes out (SPEC 8, 12)."""
+    app, mini, spoken, stop, thread, errors = start_app(
+        data, monkeypatch, "it", None, minor=True, minors_llm=minors_llm
+    )
     try:
+        assert app.conversation is not None
         clip = load("it_greeting_name")
         _, last = speech_span_s(clip)
         t_clip = mini.mic.play(np.concatenate([np.zeros(round(LEAD_S * RATE), np.float32), clip]))
@@ -425,10 +448,43 @@ def test_a_minor_without_a_cleared_route_gets_a_built_in_line_and_no_request(
         assert spoken == [("it", RoboEmotConfig().safety.minor_lines["it"].greeting)]
         assert ms <= FIRST_AUDIO_BUDGET_MS
         report(
-            "child_it",
+            f"child_it_minors_llm_{minors_llm}",
             {"tts": f"fake, {FAKE_TTS_FIRST_CHUNK_S} s first chunk", "requests": 0,
              "first_audio_push_vs_mic_last_speech_ms": round(ms)},
             capsys,
         )  # fmt: skip
+    finally:
+        finish(stop, thread, errors)
+
+
+@pytest.mark.parametrize("language,stop_clip", [("it", "it_stop"), ("en", "en_stop")])
+def test_a_keyword_final_utterance_reacts_inside_300_ms_of_the_last_speech_frame(
+    models_ready,
+    data,  # noqa: F811
+    monkeypatch,
+    capsys,
+    language,
+    stop_clip,
+):
+    """The whole utterance is the keyword, so the reaction cannot come mid-sentence: it is measured
+    from the last speech frame and must be at most the SPEC 13 budget (negative = before it)."""
+    app, mini, spoken, stop, thread, errors = start_app(data, monkeypatch, language, None)
+    try:
+        clip = load(stop_clip)
+        mini.mic.play(np.concatenate([np.zeros(round(LEAD_S * RATE), np.float32), clip]))
+        assert wait_for(lambda: bool(app.utterances), 20), "no utterance"
+        u = app.utterances[0][1]
+        assert "stop" in u.keywords and u.language == language and u.final
+        latency = app.voice_listener.snapshot()["latency"]
+        reaction_ms = latency["reaction_vs_last_speech"]["last_ms"]
+        keyword_ms = latency["keyword_vs_last_speech"]["last_ms"]
+        report(
+            f"keyword_final_{language}",
+            {"reaction_vs_last_speech_ms": round(reaction_ms),
+             "keyword_vs_last_speech_ms": round(keyword_ms)},
+            capsys,
+        )  # fmt: skip
+        assert reaction_ms <= FAST_PATH_BUDGET_MS, "fast-path reaction over budget"
+        assert not app.requests, "a bare stop phrase must not be sent to the route"
     finally:
         finish(stop, thread, errors)
