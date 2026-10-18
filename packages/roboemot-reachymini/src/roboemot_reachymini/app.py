@@ -62,6 +62,7 @@ from roboemot.voice.factory import build_speech
 from roboemot.voice.listener import Utterance, VoiceListener
 from roboemot.voice.robot_name import RobotName
 from roboemot.voice.speech import SpeechOutput
+from roboemot.voice.yes_no import YesNoGestures
 from roboemot.webui import Server, make_server
 from roboemot.webui.catalogue import open_catalogue
 from roboemot.webui.routes import RouteChecker
@@ -235,6 +236,20 @@ def circadian_vision_scale(cfg: Any, circadian: CircadianModel | None) -> float:
     return effects.vision_rate_scale
 
 
+def make_yes_no(
+    app: Any, expression: ExpressionRenderer, speech: SpeechActivity, fastpath: Any
+) -> YesNoGestures:
+    """The nod / shake handler. The robot's last question is read from ``app.speech_output``
+    when it exists (it is built after the listener), and the window comes from the config the
+    reload keeps pushing in, never from a per-event config validation."""
+    return YesNoGestures(
+        expression.request,
+        lambda: out.question_end() if (out := app.speech_output) is not None else None,
+        speech.speaking,
+        fastpath,
+    )
+
+
 def affect_report(engine: Any, now: float) -> dict[str, Any]:
     """Affect fields of the debug report: the numbers and the label, nothing about who or why."""
     state = engine.state(now)
@@ -284,6 +299,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
     affect_runner: AffectRunner | None = None  # owns the one affect engine
     minor_presence: MinorPresence | None = None  # the one source of the minor-present signal
     register_tracker: RegisterTracker | None = None  # people in view -> register.active
+    yes_no: YesNoGestures | None = None  # spoken yes / no -> nod / shake
     expression: ExpressionRenderer | None = None  # affect label -> additive antenna/head motion
     reflexes: ReflexEngine | None = None  # runs on the motion loop's tick (SPEC 10)
     audio: ReachyAudio | None = None  # the one reader of the microphone (reflex level, voice)
@@ -580,6 +596,10 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             stack, None, TraitCache(paths.traits_cache_path(cfg.data_dir)), None, hub=hub
         )
 
+        # Spoken yes / no (SPEC 8): a short addressed answer nods or shakes through the renderer,
+        # unless the robot is speaking or just asked a question.
+        yes_no = self.yes_no = make_yes_no(self, expression, speech, cfg.voice.fastpath)
+
         # The robot's name: voice.wake_word, else the owner's name in the daemon setup (SPEC 8).
         names = self.names = RobotName(source=loop.driver.robot_name)
         voice_pipeline = (
@@ -596,6 +616,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 lambda u: self.on_utterance(u),
                 reference,
                 names,
+                yes_no,
             )
             if cfg.voice.enabled
             else None
@@ -661,6 +682,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             runner.apply_config(change.config.affect, change.config.appraisal)
             circ.apply_config(change.config)
             speech.set_echo_tail_ms(change.config.voice.echo_tail_ms)
+            yes_no.apply_config(change.config.voice.fastpath)
             if listener is not None:
                 listener.apply_config(change.config)
             if bargein is not None:

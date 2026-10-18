@@ -119,6 +119,7 @@ APPRAISAL_EVENTS = frozenset(
         "conversation.unavailable",
         "speech.heard",
         "speech.keyword.stop",
+        "speech.keyword.yes",
         "speech.keyword.no",
         "speech.keyword.greeting",
         "speech.name_called",
@@ -1886,7 +1887,13 @@ class AsrConfig(Strict):
 
 class KeywordSet(Strict):
     stop: list[str] = param([], "Phrases that mean stop (what you are doing)")
-    no: list[str] = param([], "Phrases that mean no")
+    yes: list[str] = param(
+        [],
+        "Phrases that mean yes: the robot nods (voice.fastpath.answer_window_s says when it does "
+        "not). Accents are ignored, so Italian `sì` would also match the pronoun `si` "
+        "(`si chiama Luca`) and is not in the defaults",
+    )
+    no: list[str] = param([], "Phrases that mean no: the robot shakes its head")
     greeting: list[str] = param([], "Greeting phrases")
     wake_phrases: list[str] = param(
         [],
@@ -1937,6 +1944,23 @@ class FastpathConfig(Strict):
     alias_wake_max_words: int = param(
         4,
         "A name alias counts as the wake word only in a final text of at most this many words",
+        ge=1,
+        le=20,
+    )
+    answer_window_s: float = param(
+        6.0,
+        "A yes or no heard within this long after the robot finished a sentence that ended in a "
+        "question mark is the answer to it: no nod or shake (the reply goes to the conversation "
+        "as usual; also none while the robot speaks). A later sentence that is not a question ends "
+        "the window. 0 = only while the "
+        "question is still playing",
+        unit="s", ge=0, le=60,
+    )  # fmt: skip
+    gesture_max_words: int = param(
+        3,
+        "A yes or no nods or shakes the head only when the final text of an addressed utterance "
+        "has at most this many words and holds exactly one of the two (`yes, but...` or "
+        "`non è certo` are sentences, not answers); the speech.keyword events are not affected",
         ge=1,
         le=20,
     )
@@ -2325,6 +2349,7 @@ class VoiceConfig(Strict):
         {
             "it": {
                 "stop": ["stop", "fermati", "ferma", "basta", "fermo"],
+                "yes": ["certo", "esatto"],
                 "no": ["no"],
                 "greeting": ["ciao", "buongiorno", "buonasera", "salve"],
                 "wake_phrases": ["ehi robot", "ciao robot"],
@@ -2333,6 +2358,7 @@ class VoiceConfig(Strict):
             },
             "en": {
                 "stop": ["stop", "halt", "enough"],
+                "yes": ["yes", "yeah", "yep"],
                 "no": ["no"],
                 "greeting": ["hello", "hi", "hey", "good morning", "good evening"],
                 "wake_phrases": ["hey robot", "hello robot"],
