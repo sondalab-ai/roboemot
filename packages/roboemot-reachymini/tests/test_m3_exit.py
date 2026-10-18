@@ -54,9 +54,7 @@ PIPER_PYTHON = Path(os.environ.get("ROBOEMOT_PIPER_PYTHON") or paths.piper_pytho
 # SPEC 13 budgets (cm4 column for first audio; the npu one is 1.5 s).
 FAST_PATH_BUDGET_MS = 300.0
 FIRST_AUDIO_BUDGET_MS = 2000.0
-# CI sets ROBOEMOT_BARGE_IN_BUDGET_MS higher: the stop took 144 to 263 ms on a shared runner against
-# about 120 to 150 ms locally (the others keep 600 ms of margin there). Only this budget is relaxed.
-BARGE_IN_BUDGET_MS = float(os.environ.get("ROBOEMOT_BARGE_IN_BUDGET_MS", "200"))
+BARGE_IN_BUDGET_MS = 200.0
 # A LAN model server: time to first token 400 to 700 ms. The middle of that range.
 FIRST_TOKEN_S = 0.55
 TOKEN_GAP_S = 0.03  # about 30 tokens per second after the first
