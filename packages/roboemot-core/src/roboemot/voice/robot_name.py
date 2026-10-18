@@ -2,9 +2,9 @@
 
 The name is ``voice.wake_word`` when set, else the one the robot platform reports (``source``,
 the driver's ``robot_name()``; Reachy Mini: the name its owner gave it in the daemon setup),
-else none. It is shown in the prompt and, per language, turned into wake phrases through the language's
-``name_wake_templates``, but only when every word of the name is in that language's recognizer
-vocabulary: a word the recognizer cannot produce can never be heard, so the language then keeps
+else none. It is shown in the prompt and, per language, turned into wake phrases through the
+language's ``name_wake_templates``, but only when every word of the name is in that
+language's recognizer vocabulary: a word the recognizer cannot produce can never be heard, so the language then keeps
 its generic ``wake_phrases`` alone and the gap is logged once. The name is configuration or a
 device label, not speech: it may be logged.
 """

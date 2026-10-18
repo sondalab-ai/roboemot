@@ -109,7 +109,8 @@ def build_listener(
         )
         return None
     names = names if names is not None else RobotName()
-    names.attach_vocabulary(asr.missing_words)
+    if hasattr(asr, "missing_words"):  # a recogniser that can tell its vocabulary
+        names.attach_vocabulary(asr.missing_words)
     bearing = LatestBearing(bus, frame)
     max_age_s = cfg.voice.fastpath.doa_max_age_ms / 1000.0
 
