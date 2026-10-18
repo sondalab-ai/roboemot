@@ -26,7 +26,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
-from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    AsyncOpenAI,
+    DefaultAsyncHttpxClient,
+)
 
 from ..config.schema import LLMRoute, SafetyConfig
 from ..health.network import NetworkMonitor
@@ -42,6 +48,9 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 # Longest tool-call argument text parsed. A model cannot send more than max_tokens tokens, so
 # this only bounds what a broken or hostile route can make json.loads chew on.
 TOOL_ARGS_MAX_CHARS = 50_000
+# Deepest JSON nesting kept in tool-call arguments. The alias restoration recurses, and a
+# 5000-deep object parses on every Python version, so depth is bounded here.
+TOOL_ARGS_MAX_DEPTH = 64
 SECRET = SECRET_REF
 
 
@@ -231,7 +240,12 @@ class Router:
 
     def _client(self, route: LLMRoute) -> AsyncOpenAI:
         key = self._resolved_key(route)
-        http = self.http_client_factory() if self.http_client_factory else None
+        # The SDK's own client follows redirects, which would send the prompt to another host.
+        http = (
+            self.http_client_factory()
+            if self.http_client_factory
+            else DefaultAsyncHttpxClient(follow_redirects=False)
+        )
         return AsyncOpenAI(
             base_url=route.base_url, api_key=key or "none", http_client=http, max_retries=0
         )
@@ -433,12 +447,30 @@ class Router:
                     args = json.loads(text)
                 except (ValueError, RecursionError):  # bad JSON, a huge integer, nesting too deep
                     args = {"_raw": text}
+                else:
+                    if not isinstance(args, dict) or _nesting(args) > TOOL_ARGS_MAX_DEPTH:
+                        args = {"_raw": text}
             out.append(ToolCall(slot["id"], slot["name"], args))
         return out
 
     @staticmethod
     def _tokens(usage: int | None, prompt_chars: int, out_chars: int) -> int:
         return usage if usage is not None else (prompt_chars + out_chars) // CHARS_PER_TOKEN
+
+
+def _nesting(value: Any) -> int:
+    """How deeply lists and dicts are nested in ``value`` (a scalar is 0), without recursion,
+    so a hostile reply cannot overflow the stack however deep it is."""
+    deepest, stack = 0, [(value, 0)]
+    while stack:
+        node, depth = stack.pop()
+        if isinstance(node, (list, dict)):
+            depth += 1
+            deepest = max(deepest, depth)
+            if depth > TOOL_ARGS_MAX_DEPTH:
+                return depth
+            stack.extend((v, depth) for v in (node.values() if isinstance(node, dict) else node))
+    return deepest
 
 
 async def _restored(events: AsyncIterator[Event], out: Outgoing) -> AsyncIterator[Event]:

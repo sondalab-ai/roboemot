@@ -411,6 +411,11 @@ async def test_hostile_tool_arguments_do_not_fail_the_route_or_get_parsed():
     for text, expect in (
         ('{"n": ' + huge_int + "}", "raw"),
         (deep, "raw"),
+        (
+            '{"a":' * 5_000 + "1" + "}" * 5_000,
+            "raw",
+        ),  # parses everywhere; restoration would recurse
+        ("[1, 2]", "raw"),  # valid JSON that is not an object
         ('{"a": "' + "x" * 60_000 + '"}', "dropped"),
     ):
         r, release = await _held_stream([_tc(0, "c1", "play", text), _finish(chunk(""))])
@@ -443,3 +448,71 @@ async def test_deltas_without_an_index_are_grouped_by_their_id():
         ("c1", {"gesture": "joy"}),
         ("c2", {"target": "away"}),
     ]
+
+
+def _nested(depth: int, kind: str) -> object:
+    """A JSON value ``depth`` containers deep: lists, dicts, or alternating dict/list."""
+    value: object = 1
+    for level in range(depth):
+        value = [value] if kind == "list" or (kind == "mixed" and level % 2) else {"a": value}
+    return value
+
+
+@pytest.mark.parametrize("kind", ["list", "dict", "mixed"])
+def test_nesting_depth_boundaries(kind):
+    from roboemot.llm.router import TOOL_ARGS_MAX_DEPTH, _nesting
+
+    assert _nesting(1) == 0 and _nesting({}) == 1
+    assert _nesting(_nested(TOOL_ARGS_MAX_DEPTH, kind)) == TOOL_ARGS_MAX_DEPTH
+    assert _nesting(_nested(TOOL_ARGS_MAX_DEPTH + 1, kind)) > TOOL_ARGS_MAX_DEPTH
+
+
+async def test_arguments_at_the_depth_limit_are_kept_and_one_deeper_is_raw():
+    from roboemot.llm.router import TOOL_ARGS_MAX_DEPTH
+
+    for depth, kept in ((TOOL_ARGS_MAX_DEPTH, True), (TOOL_ARGS_MAX_DEPTH + 1, False)):
+        text = json.dumps({"a": _nested(depth - 1, "mixed")})
+        r, release = await _held_stream([_tc(0, "c1", "play", text), _finish(chunk(""))])
+        release.set()
+        evs = [
+            ev async for ev in r.stream([{"role": "user", "content": "x"}], [{"type": "function"}])
+        ]
+        call = next(e for e in evs if isinstance(e, ToolCall))
+        assert ("_raw" not in call.arguments) is kept
+
+
+async def test_a_wide_flat_list_under_the_char_cap_is_kept():
+    from roboemot.llm.router import TOOL_ARGS_MAX_CHARS
+
+    items = TOOL_ARGS_MAX_CHARS // 2 - 10
+    text = json.dumps({"xs": [1] * items}, separators=(",", ":"))
+    assert len(text) <= TOOL_ARGS_MAX_CHARS
+    r, release = await _held_stream([_tc(0, "c1", "play", text), _finish(chunk(""))])
+    release.set()
+    evs = [ev async for ev in r.stream([{"role": "user", "content": "x"}], [{"type": "function"}])]
+    call = next(e for e in evs if isinstance(e, ToolCall))
+    assert len(call.arguments["xs"]) == items
+
+
+async def test_deep_arguments_from_a_cloud_route_with_pseudonyms_come_back_raw():
+    """End to end: the restoration recurses, so too-deep arguments must never reach it."""
+    from roboemot.llm.pseudonyms import Pseudonyms
+    from roboemot.llm.router import TOOL_ARGS_MAX_DEPTH
+
+    text = json.dumps(_nested(TOOL_ARGS_MAX_DEPTH + 1, "dict"))
+    body = sse([_tc(0, "c1", "play", text), _finish(chunk(""))])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body)
+
+    names = Pseudonyms()
+    names.sync(["Marta"], {"en": "Person-{label}"}, "en", "en")
+    r = Router(
+        [route("cloud", "api.example.com", timeout=2.0)],
+        SafetyConfig(),
+        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    messages = [{"role": "user", "content": "ciao Marta"}]
+    evs = [ev async for ev in r.stream(messages, [{"type": "function"}], pseudonyms=names)]
+    call = next(e for e in evs if isinstance(e, ToolCall))
+    assert call.arguments == {"_raw": text} and r.failures == []
