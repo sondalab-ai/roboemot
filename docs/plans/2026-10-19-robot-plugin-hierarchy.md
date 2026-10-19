@@ -33,6 +33,41 @@ Audit on `main` @ 6e67f76 (paths: `core/` = `packages/roboemot-core/src/roboemot
   - `core/skills/defaults.py:57` tells the LLM about "antennas and head".
 
 ## Slices (integration branch `epic/robot-plugin-hierarchy`, one PR each)
+0. **Hierarchy gate (first, before any other slice).** Deterministic checks in the normal `pytest` run (so every CI
+   job and every PR runs them). New `packages/roboemot-core/tests/test_robot_hierarchy.py`, AST-based, no regex on
+   source text, comments and docstrings excluded:
+   - **Import boundary.** No module under `core/` imports a robot package or a robot SDK: any distribution that
+     registers a `roboemot.*` entry point other than `roboemot-core`, plus a list of known SDKs (`reachy_mini`).
+     Derived from installed entry points, so a new robot package is covered without editing the test.
+   - **Robot vocabulary in core.** String literals and identifiers in `core/` behaviour code must not contain robot
+     terms. The term list is built from every manifest in `configs/manifests/` (robot ids, product names, DOF and
+     joint names, mDNS service names, daemon ports and URL paths), plus a short static list (`reachy`, `pollen`,
+     `antenna`, `/api/apps`). A new manifest therefore extends the gate by itself.
+   - **Entry-point contract.** A core registry `roboemot.plugins.GROUPS` maps every `roboemot.*` entry-point group
+     to its core protocol. Each `roboemot.*` group declared in any installed distribution must be in the registry,
+     and each implementation must load and satisfy its protocol (runtime_checkable `isinstance` or a signature
+     check). A robot capability without a core abstraction cannot be registered.
+   - **No duck typing on core objects in robot packages.** No `hasattr`/`getattr` with a literal attribute name on
+     objects typed with a core protocol; optional capabilities must be declared on the protocol.
+   - **Robot-agnostic smoke.** Core builds its config, behaviour and renderer with a non-Reachy manifest
+     (`desk-head-v1`) without errors.
+   - **Ratchet baseline.** Today's known violations (the audit list above) go in
+     `packages/roboemot-core/tests/robot_hierarchy_baseline.yaml`, one entry per finding (file, symbol, term,
+     audit id). The test fails on any finding not in the baseline and on any baseline entry that no longer occurs,
+     so the baseline only shrinks. Slices A–E2 each remove their entries; the epic ends with an empty baseline.
+   - **Rule in `CLAUDE.md`** under "Rules that come from the spec": robot-specific behaviour only through a core
+     protocol plus a `roboemot.*` entry point keyed by `robot.id`; `test_robot_hierarchy.py` enforces it; the
+     baseline may never grow.
+   - **SPEC 4A/12A** note on the gate and the registry.
+0b. **Sweep (same PR as 0, before it merges).** Anything that landed on `main` or this epic branch after the audit
+   commit (`6e67f76`) and before the gate merges is checked by hand and by the gate:
+   - `git log --stat 6e67f76..origin/main` and `..origin/epic/robot-plugin-hierarchy`: list every feature commit
+     touching `packages/`.
+   - Run the gate with the baseline built from `6e67f76` only: any finding not present at `6e67f76` is a new
+     violation. It is fixed in this PR, never added to the baseline.
+   - Report the swept range and the result in the PR body. Re-run the same sweep at every slice merge until the
+     epic lands (the gate itself covers the rest).
+
 A. **One daemon client.** `rm/daemon.py`: base URL from `Target`, port, timeouts, `status()`, `current_app()`,
    `restart_current_app()`, install/start calls. Diagnostics, settings (Restart) and installer use it; `APP_NAME`
    and the stop timeout live there. The plugin declares its supervisor kill timeout through `Restartable` and core
@@ -57,15 +92,13 @@ E2. **Core Runtime.** Move the robot-agnostic runtime out of `rm/app.py` (pipeli
    into `core/runtime/`. `RoboEmotApp(ReachyMiniApp).run` becomes a thin adapter: manifest → platform via entry
    point → `Runtime.run(stop_event)`. Keep the SPEC 4A rules inside the Reachy driver.
 
-Order: A → B → C → D → E1 → E2 (B–D may run in parallel if files don't overlap; E2 last). Estimate: 6 slices,
-~14–16 agent runs (Sonnet authors, one Sonnet review each; no security review unless a slice touches secrets/web
-auth). Re-confirm past ~24.
+Order: 0 (+0b) → A → B → C → D → E1 → E2 (B–D may run in parallel if files don't overlap; E2 last). Each slice
+removes its baseline entries. Estimate: 7 slices, ~16–18 agent runs (Sonnet authors, one Sonnet review each; no security review unless a slice touches secrets/web
+auth). Re-confirm past ~27.
 
 ## Rules for authors
 - Worktree per slice from `origin/epic/robot-plugin-hierarchy`, own `.venv`, check `roboemot.__file__`.
-- Each slice adds a guard test: core must not name Reachy DOFs/products in behaviour code (extend
-  `test_no_magic_numbers.py` or a new `test_robot_agnostic.py` with the sweep list: `reachy`, `antenna`,
-  `body_yaw`, `head.pitch`, `pollen`, `:8000`, `/api/apps`), comments/docstrings excluded.
+- Each slice deletes the baseline entries it fixes in `robot_hierarchy_baseline.yaml`; never adds one.
 - Cite SPEC sections (4A, 8, 11A, 12A) in commits.
 
 ## Verification
