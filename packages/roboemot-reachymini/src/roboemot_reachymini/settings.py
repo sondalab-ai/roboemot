@@ -94,7 +94,7 @@ class ReachySettings:
         try:
             self._daemon.restart_current_app()
         except DaemonError as exc:
-            log.info("restart request ended: %s", exc)
+            log.info("restart request ended (%s, HTTP %s)", type(exc).__name__, exc.status)
 
     def section(self, stack: StackPort, manifest: Manifest) -> RobotSection:
         """The title, the claimed behaviour paths and the read-only hardware rows of

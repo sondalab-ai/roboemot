@@ -260,3 +260,10 @@ def test_core_offers_the_action_through_the_entry_point_only_while_running(tmp_p
         assert [e["id"] for e in block["restart_effects"]] == (
             [i for i, _ in plugin.restart_effects()] if expected else []
         )
+
+
+def test_restart_logs_the_error_type_not_the_daemon_body(caplog):
+    with caplog.at_level("INFO", logger="roboemot_reachymini.settings"):
+        daemon(RUNNING, restart_reply=500).restart()
+    assert "DaemonError" in caplog.text
+    assert "No app is currently running" not in caplog.text
