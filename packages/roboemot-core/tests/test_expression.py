@@ -621,7 +621,7 @@ def gesture_renderer(cfg, manifest, **expr):
 
 def test_play_offers_affect_labels_and_gestures_and_refuses_unknown_names(cfg, manifest):
     r = gesture_renderer(cfg, manifest)
-    assert r.playable() == [*cfg.expression_map, "nod", "shake"]
+    assert r.playable() == [*cfg.expression_map, "nod", "shake", "puzzled", "perk_up"]
     assert r.request("nod") and not r.request("wave")
     assert (
         ExpressionRenderer(

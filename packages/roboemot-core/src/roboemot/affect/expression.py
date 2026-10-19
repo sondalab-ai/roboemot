@@ -220,6 +220,15 @@ class ExpressionRenderer:
         forced, self._forced = self._forced, None
         return self._start(forced or state.label, state, register, now)
 
+    def gesture(self, name: str) -> Primitive | None:
+        """The additive primitive of the ``gesture_map`` entry ``name`` over this robot's dofs.
+
+        None when the manifest has no such gesture or the robot has none of its channels. For
+        callers that play a gesture on their own (the offline responder, SPEC 12A) at the
+        entry's own amplitude, outside the affect-driven path of :meth:`request`.
+        """
+        return self._primitive(name, True) if name in self.gesture_map else None
+
     def _primitive(self, label: str, body: bool) -> Primitive | None:
         key = (label, body)
         if key not in self._cache:

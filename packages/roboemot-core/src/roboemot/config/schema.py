@@ -2791,17 +2791,6 @@ class LinkPolicy(Strict):
     probe_timeout_s: float = param(1.5, "Timeout of one check", unit="s", ge=0.05, le=30)
 
 
-class GestureConfig(Strict):
-    duration_s: float = param(1.2, "Length of a connectivity gesture", unit="s", ge=0.2, le=5)
-    head_roll_rad: float = param(0.15, "Puzzled head tilt (roll)", unit="rad", ge=0, le=0.5)
-    head_pitch_rad: float = param(
-        0.08, "Perk-up head lift (pitch, negative is up)", unit="rad", ge=0, le=0.3
-    )
-    antenna_rad: float = param(
-        0.4, "Antenna droop (puzzled) or lift (perk up)", unit="rad", ge=0, le=1.5
-    )
-
-
 class ConnectivityConfig(Strict):
     network: LinkPolicy = param({}, "Model routes: reachability checks and backoff")
     robot: LinkPolicy = param(
@@ -2814,7 +2803,6 @@ class ConnectivityConfig(Strict):
         },
         "Robot driver link: failed motion ticks, then read_state retries",
     )
-    gestures: GestureConfig = param({}, "Nonverbal replies while offline and on recovery")
     offline_phrases: dict[str, str] = param(
         {
             "it": "Scusa, ora non riesco a pensare bene: sono senza rete.",

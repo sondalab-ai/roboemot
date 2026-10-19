@@ -939,7 +939,7 @@ The effective configuration is the merge of six layers; a later layer overrides 
 | `llm_routes` | endpoints, timeouts, token budgets, minors flag | Section 8 |
 | `safety` (conservative only at runtime) | minor-present motion factor, watchdog, stop behaviour, extra rules appended to the prompt's safety block | Sections 8, 12 |
 | `privacy` (opt-in) | multimodal frames, pseudonyms to cloud, keeping enrollment images, debug recording, world history | Sections 5A, 12 |
-| `connectivity` | per link (network, robot): failure and success thresholds, check backoff and jitter, check timeout; offline gestures, spoken offline phrase per language, cue cooldown | Section 12A |
+| `connectivity` | per link (network, robot): failure and success thresholds, check backoff and jitter, check timeout; spoken offline phrase per language, cue cooldown (the offline gestures are manifest `gesture_map` entries, section 12A) | Section 12A |
 | `runtime` | `gc_freeze` (the collector skips the objects loaded at start), `shutdown_budget_s` (one budget for every thread wait of the stop sequence), `shutdown_margin_s` (kept free below the supervisor's kill timeout); all need a restart | Sections 8 (stage 8), 11A |
 
 ### Personality preset example
@@ -1052,10 +1052,10 @@ Every outside dependency is a link with an online or offline state. A link goes 
 ### Behaviour while offline
 
 - Appraisal rules (section 7) colour the affect state: `link.network.lost` lowers valence and arousal (subdued), `link.network.restored` and `link.robot.restored` raise them (perking up).
-- On recovery the robot plays a short perk-up gesture (head up, antennas toward vertical).
-- When someone speaks while the network is down, the robot does not wait for a model that cannot answer: it attends to the speaker and plays a puzzled, slightly apologetic gesture (head tilt, antennas spreading), and no request is sent.
+- On recovery the robot plays the gesture `perk_up` of the manifest's `gesture_map` (section 7; Reachy Mini: head up, antennas toward vertical, 1.2 s).
+- When someone speaks while the network is down, the robot does not wait for a model that cannot answer: it attends to the speaker and plays the gesture `puzzled` of the `gesture_map` (Reachy Mini: head tilt, antennas spreading, a slightly apologetic look), and no request is sent.
 - A spoken cue, `connectivity.offline_phrases[language]`, is said once per outage and on speech while offline, at most every `cue_cooldown_s`. It goes through the voice pipeline once TTS is wired (section 8); until then it is silent.
-- Gestures are additive primitives (section 10) over whichever of their dofs the manifest declares, so robots without antennas or head roll show the part they can.
+- Gestures are additive primitives (section 10) built by `ExpressionRenderer.gesture(name)` from the manifest's `gesture_map` over whichever of their channels the robot has, played at the entry's own amplitude on the `connectivity:<name>` source (not scaled by the register or the affect state, as before). Core names no joint: the amplitudes and durations that were `connectivity.gestures.*` are keyframes in the manifest. A manifest without `perk_up` or `puzzled` shows no motion for it; the affect reaction and the spoken cue stay. Both names are also playable by the `play` skill, like every `gesture_map` entry.
 
 ### Diagnostics
 

@@ -34,7 +34,15 @@ def cfg(manifest):
 
 
 def make_responder(cfg, manifest) -> OfflineResponder:
-    return OfflineResponder(cfg.connectivity, set(manifest.dofs), "it")
+    renderer = ExpressionRenderer(
+        cfg.expression,
+        cfg.expression_map,
+        manifest.dofs,
+        0.15,
+        cfg.gesture_map,
+        body_yaw="body_yaw",
+    )
+    return OfflineResponder(cfg.connectivity, renderer, "it")
 
 
 # ------------------------------------------------------------------ characterization (Reachy)
