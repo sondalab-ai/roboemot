@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -132,7 +134,7 @@ def test_api_lists_robot_block_and_refuses_writes_to_robot_rows(tmp_path):
         top = {f["path"] for f in data["fields"]}
         assert HALF_LIFE not in top
         assert HALF_LIFE in [f["path"] for f in data["robot"]["fields"]]
-        assert data["robot"]["actions"] == []
+        assert data["robot"]["actions"] == [] and data["robot"]["restart_effects"] == []
         refused = put(client, f"{BASE}.arm.max_deg", 10)
         assert refused.status == 403 and refused.json["error"] == "setting_not_allowed"
         reset = client.request(
@@ -191,23 +193,147 @@ def test_plugin_rows_with_secret_shaped_values_are_redacted(tmp_path):
         srv.stop()
 
 
-def test_rebootable_plugin_gets_the_reboot_action(tmp_path):
-    class Rebooting(FakePlugin):
-        def reboot(self) -> None:
-            pass
+class Restarting(FakePlugin):
+    """A plugin with the restart hook; ``up`` is whether the supervisor can restart now."""
 
-    ed, _ = editor(tmp_path, [ep(Rebooting())])
-    assert ed.robot_split(ed.fields())[1]["actions"] == ["reboot"]
+    def __init__(self, up=True, effects=("zero_pose", "webrtc_drop"), on_restart=None):
+        super().__init__()
+        self.up, self.effects, self.on_restart = up, effects, on_restart
+
+    def restart_available(self):
+        return self.up
+
+    def restart_effects(self):
+        return self.effects
+
+    def restart(self):
+        if self.on_restart:
+            self.on_restart()
+
+
+def test_restartable_plugin_gets_the_restart_action_and_known_effects_only(tmp_path):
+    plugin = Restarting(effects=("zero_pose", "<b>x</b>", "kill_on_timeout"))
+    ed, _ = editor(tmp_path, [ep(plugin)])
+    robot = ed.robot_split(ed.fields())[1]
+    assert robot["actions"] == ["restart"]
+    assert robot["restart_effects"] == ["zero_pose", "kill_on_timeout"]
+
+
+def test_no_restart_action_without_the_hook_or_when_unavailable(tmp_path, caplog):
+    for plugin in (FakePlugin(), Restarting(up=False)):
+        ed, _ = editor(tmp_path, [ep(plugin)])
+        robot = ed.robot_split(ed.fields())[1]
+        assert robot["actions"] == [] and robot["restart_effects"] == []
+        assert ed.restart_hook() is None
+
+    class Raising(Restarting):
+        def restart_available(self):
+            raise RuntimeError(SECRET)
+
+    ed, _ = editor(tmp_path, [ep(Raising())])
+    with caplog.at_level(logging.INFO):
+        assert ed.robot_split(ed.fields())[1]["actions"] == []
+    assert "RuntimeError" in caplog.text and SECRET not in caplog.text
 
 
 def test_actions_a_plugin_sets_itself_are_ignored(tmp_path):
     class Pushy(FakePlugin):
         def section(self, stack, manifest):
             base = super().section(stack, manifest)
-            return RobotSection(base.title, base.fields, base.claims, ("reboot",))
+            return RobotSection(base.title, base.fields, base.claims, ("restart",), ("zero_pose",))
 
     ed, _ = editor(tmp_path, [ep(Pushy())])
-    assert ed.robot_split(ed.fields())[1]["actions"] == []
+    robot = ed.robot_split(ed.fields())[1]
+    assert robot["actions"] == [] and robot["restart_effects"] == []
+
+
+def restart(client, pin=PIN, **extra):
+    return client.request("POST", "/api/robot/restart", {"pin": pin, **extra})
+
+
+def test_restart_endpoint_needs_the_pin_and_does_not_run_the_hook_without_it(tmp_path):
+    calls = []
+    ed, stack = editor(tmp_path, [ep(Restarting(on_restart=lambda: calls.append(1)))])
+    srv, client = serve(tmp_path, ed, stack)
+    try:
+        assert restart(client, pin="000000").status == 401
+        assert client.request("POST", "/api/robot/restart", {}).status == 400
+        assert restart(client, extra=1).status == 422
+        time.sleep(0.2)
+        assert calls == []
+    finally:
+        srv.stop()
+
+
+@pytest.mark.parametrize("plugin", [FakePlugin(), Restarting(up=False)])
+def test_restart_endpoint_is_404_without_a_usable_hook(tmp_path, plugin):
+    ed, stack = editor(tmp_path, [ep(plugin)])
+    srv, client = serve(tmp_path, ed, stack)
+    try:
+        resp = restart(client)
+        assert resp.status == 404 and resp.json == {"error": "restart_unavailable"}
+    finally:
+        srv.stop()
+
+
+def test_restart_endpoint_without_a_settings_editor_is_unavailable(tmp_path):
+    stack = ConfigStack(app={"webui": {"bind": "127.0.0.1", "port": 0}})
+    srv, client = serve(tmp_path, None, stack)
+    try:
+        assert restart(client).status == 503
+    finally:
+        srv.stop()
+
+
+def test_the_response_is_sent_before_the_hook_runs_and_does_not_wait_for_it(tmp_path):
+    release, ran = threading.Event(), threading.Event()
+
+    def hook():
+        release.wait(5)
+        ran.set()
+
+    ed, stack = editor(tmp_path, [ep(Restarting(on_restart=hook))])
+    srv, client = serve(tmp_path, ed, stack)
+    try:
+        resp = restart(client)
+        assert resp.status == 200 and resp.json == {"ok": True}
+        assert not ran.is_set(), "the client was answered while the hook is still running"
+        release.set()
+        assert ran.wait(5)
+    finally:
+        release.set()
+        srv.stop()
+
+
+def test_a_hook_that_raises_does_not_break_the_server_and_logs_only_the_type(tmp_path, caplog):
+    done = threading.Event()
+
+    def hook():
+        done.set()
+        raise RuntimeError(SECRET)
+
+    ed, stack = editor(tmp_path, [ep(Restarting(on_restart=hook))])
+    srv, client = serve(tmp_path, ed, stack)
+    try:
+        with caplog.at_level(logging.INFO):
+            assert restart(client).status == 200
+            assert done.wait(5)
+            time.sleep(0.2)
+        assert "RuntimeError" in caplog.text and SECRET not in caplog.text
+        assert client.request("GET", "/api/settings").status == 200
+    finally:
+        srv.stop()
+
+
+def test_a_restart_field_edited_at_runtime_is_active_after_a_restart(tmp_path):
+    path = "reflexes.audio.poll_hz"
+    ed, stack = editor(tmp_path, [ep(Restarting())])
+    assert ed.change(path, 40.0)["restart_required"] is True
+    assert stack.effective().reflexes.audio.poll_hz == 40.0
+    rebuilt = ConfigStack(app={"webui": {"bind": "127.0.0.1", "port": 0}})
+    assert rebuilt.effective().reflexes.audio.poll_hz != 40.0
+    SettingsEditor(rebuilt, store=tmp_path / "s.json", manifest=manifest()).restore()
+    assert rebuilt.effective().reflexes.audio.poll_hz == 40.0
 
 
 def raw_row(path, **over):

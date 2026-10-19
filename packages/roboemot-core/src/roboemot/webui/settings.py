@@ -27,7 +27,7 @@ import os
 import stat
 import tempfile
 import threading
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -59,6 +59,7 @@ from .robot_section import (
     build_section,
     claimed,
     load_settings_plugin,
+    restart_hook,
     vet_claims,
 )
 from .setting_clean import (
@@ -274,9 +275,14 @@ class SettingsEditor:
             "id": robot_id,
             "title": section.title,
             "actions": list(section.actions),
+            "restart_effects": list(section.restart_effects),
             "fields": [*section.fields, *mine],
         }
         return rest, block
+
+    def restart_hook(self) -> Callable[[], None] | None:
+        """The robot plugin's restart, or ``None`` when it has none or cannot restart now."""
+        return restart_hook(self._plugin)
 
     def reveal(self) -> list[FieldDescriptor]:
         """Only the private fields, with their real values (secrets stay redacted). The caller

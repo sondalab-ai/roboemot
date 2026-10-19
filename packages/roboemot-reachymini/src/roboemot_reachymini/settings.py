@@ -5,23 +5,40 @@ claims the config paths the manifest ``behaviour`` block fills (expression map, 
 circadian motion), so they are edited as ordinary settings but listed under the robot, and adds
 the manifest's hardware limits as read-only rows: pose limits, dynamics, yaw-delta constraints and
 safety. Angles are radians inside ``Manifest.dofs`` and shown in degrees; translations in mm.
+
+It also implements ``Restartable``: RoboEmot is restarted by the daemon
+(``POST /api/apps/restart-current-app``: SIGINT to the app, kill after 20 s, then start again),
+and the action is offered only while ``GET /api/apps/current-app-status`` shows RoboEmot running.
 """
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any
 
+import httpx
 from roboemot.config.catalogue import FieldDescriptor, descriptor
 from roboemot.manifest import Manifest
 from roboemot.webui.robot_section import PATH_ROOT, RobotSection
 from roboemot.webui.settings import StackPort
+
+from .diagnostics import DEFAULT_PORT, REQUEST_TIMEOUT_S
+from .install import APP_NAME
+
+log = logging.getLogger(__name__)
 
 TITLE = "Reachy Mini"
 CLAIMS = ("expression_map", "gesture_map", "circadian_motion")
 MM_PER_M = 1000.0
 SOURCE = "manifest"
 WATCHDOG_CEILING = "safety.watchdog_ms"
+DAEMON_URL = f"http://localhost:{DEFAULT_PORT}"
+STATUS_PATH = "/api/apps/current-app-status"
+RESTART_PATH = "/api/apps/restart-current-app"
+RUNNING = "running"
+RESTART_TIMEOUT_S = 30.0  # the daemon waits up to 20 s for the app to stop, then starts it
+RESTART_EFFECTS = ("zero_pose", "webrtc_drop", "kill_on_timeout")
 
 
 def _row(path: str, kind: str, value: Any, description: str, **fields: Any) -> FieldDescriptor:
@@ -37,7 +54,44 @@ def _to_mm(metres: float) -> float:
 
 
 class ReachySettings:
-    """The ``roboemot.settings`` plugin of the Reachy Mini."""
+    """The ``roboemot.settings`` plugin of the Reachy Mini. ``transport`` replaces the HTTP
+    transport towards the daemon (tests)."""
+
+    def __init__(self, transport: httpx.BaseTransport | None = None) -> None:
+        self._transport = transport
+
+    def _client(self, timeout_s: float) -> httpx.Client:
+        """A client for the daemon on this machine (the app runs on the robot)."""
+        return httpx.Client(base_url=DAEMON_URL, timeout=timeout_s, transport=self._transport)
+
+    def restart_available(self) -> bool:
+        """Whether the daemon reports RoboEmot as the running app. In the simulator or a dev run
+        the daemon did not start it, so the daemon could not restart it either. A daemon that
+        does not answer counts as not available."""
+        try:
+            with self._client(REQUEST_TIMEOUT_S) as http:
+                resp = http.get(STATUS_PATH)
+                resp.raise_for_status()
+                status = resp.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            log.info("restart check: daemon not reachable (%s)", type(exc).__name__)
+            return False
+        info = status.get("info") if isinstance(status, dict) else None
+        name = info.get("name") if isinstance(info, dict) else None
+        return name == APP_NAME and status.get("state") == RUNNING
+
+    def restart_effects(self) -> tuple[str, ...]:
+        """What the daemon's restart does to the robot and the session."""
+        return RESTART_EFFECTS
+
+    def restart(self) -> None:
+        """Ask the daemon to restart the app. The daemon stops this very process (SIGINT) before
+        it answers, so a dropped connection is the normal outcome and nothing is read from it."""
+        try:
+            with self._client(RESTART_TIMEOUT_S) as http:
+                http.post(RESTART_PATH)
+        except httpx.HTTPError as exc:
+            log.info("restart request ended: %s", type(exc).__name__)
 
     def section(self, stack: StackPort, manifest: Manifest) -> RobotSection:
         """The title, the claimed behaviour paths and the read-only hardware rows of

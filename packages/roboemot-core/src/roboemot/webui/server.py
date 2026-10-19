@@ -256,6 +256,9 @@ class _Handler(BaseHTTPRequestHandler):
             Request(self.command, path, headers, body, self.client_address[0])
         )
         self._send_response(resp)
+        if resp.after is not None:
+            self.wfile.flush()
+            resp.after()
 
     def _read_body(self, limit: int) -> bytes | None:
         """The body, or None after an error response; the size is checked before reading."""

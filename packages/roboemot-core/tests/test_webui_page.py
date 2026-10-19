@@ -160,6 +160,16 @@ def test_dynamic_string_families_are_complete(prefix):
     assert en and en == {k for k in IT if k.startswith(prefix)}
 
 
+def test_every_restart_effect_core_accepts_has_text_in_both_languages():
+    from roboemot.webui.robot_section import RESTART_EFFECTS
+
+    for lang in (EN, IT):
+        assert [e for e in RESTART_EFFECTS if not lang.get("settings_restart_effect_" + e)] == []
+    assert {k for k in EN if k.startswith("settings_restart_effect_")} == {
+        "settings_restart_effect_" + e for e in RESTART_EFFECTS
+    }
+
+
 def test_tabs_are_the_strings_that_exist():
     js = (STATIC / "app.js").read_text()
     block = js[js.index("const TABS = {") :]
@@ -273,9 +283,8 @@ def test_settings_page_strings_are_chrome_only_and_the_legacy_ones_are_gone():
     assert "SETTING_GROUPS" not in js and "settingEditor" not in js
 
 
-def test_settings_page_marks_the_restart_hook_and_never_stores_values_in_the_browser():
+def test_settings_page_posts_the_restart_with_a_pin_and_links_the_badge_only_for_the_action():
     js = (STATIC / "settings.js").read_text()
-    assert 'id: "settings-restart"' in js and "disabled: true" in js
-    assert "href" not in js.split("settings_restart_badge")[0][-120:], (
-        "no link until the action exists"
-    )
+    assert '"/api/robot/restart", { pin }' in js and 'id: "settings-restart"' in js
+    assert "disabled: true" not in js
+    assert 'canRestart() ? el("a"' in js, "the badge links only when the action exists"

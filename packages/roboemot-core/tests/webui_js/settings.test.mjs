@@ -185,7 +185,8 @@ test("a robot section appears as its own group, and is absent without one", asyn
   const page = await settingsPage({}, { fields: fields(), robot: ROBOT, pin_required: true });
   const groups = [...page.document.querySelectorAll(".sl-nav__group")].map((g) => g.textContent);
   assert.deepEqual(groups, ["settings_core", "Reachy Mini"]);
-  assert.equal(page.document.querySelector("#settings-robot-actions").children.length, 0, "no actions rendered yet");
+  assert.equal(page.document.querySelector("#settings-robot-actions").children.length, 0, "no action without robot.actions");
+  assert.equal(page.document.querySelector("#settings-restart"), null, "no restart button without the action");
   assert.equal(without.document.querySelector("#settings-robot-actions"), null);
   await open(page, "robot-limits");
   await open(page, "robot-dynamics");
@@ -234,9 +235,8 @@ test("badges show the source layer, restart, admin and private", async () => {
   assert.ok(row(page, "voice.volume_db").querySelector(".sl-tag:not(.sl-tag--plain)").textContent.length > 0);
   const restart = row(page, "voice.flag").querySelector(".sl-badge--warning");
   assert.ok(restart, "restart badge shown");
-  assert.equal(restart.closest("a"), null, "no link until the restart action exists");
-  const hook = page.document.querySelector("#settings-restart");
-  assert.equal(hook.disabled, true, "placeholder until the restart action exists");
+  assert.equal(restart.closest("a"), null, "no link without the restart action");
+  assert.equal(page.document.querySelector("#settings-restart"), null);
   await open(page, "core-privacy");
   const text = row(page, "privacy.note").textContent;
   assert.ok(text.includes("settings_admin") && text.includes("settings_private"));
@@ -728,4 +728,78 @@ test("the debug tab works without a robot section", async () => {
   assert.equal(blocks.length, 1);
   assert.deepEqual(Object.keys(JSON.parse(blocks[0].textContent).sections), ["system"]);
   assert.ok(![...page.document.querySelectorAll("h3")].some((h) => h.textContent === "settings_robot"));
+});
+
+const RESTARTABLE = { ...ROBOT, actions: ["restart"], restart_effects: ["zero_pose", "webrtc_drop", "kill_on_timeout"] };
+const restartPage = (extra = {}) =>
+  settingsPage({ "POST /api/robot/restart": { ok: true }, ...extra }, { fields: fields(), robot: RESTARTABLE, pin_required: true });
+
+test("restart: the button exists only with the action, the dialog lists the side effects, the PIN is posted", async () => {
+  const page = await restartPage();
+  const btn = page.document.querySelector("#settings-robot-actions #settings-restart");
+  assert.equal(btn.textContent, "settings_restart");
+  btn.click();
+  await settle();
+  const dialog = page.document.querySelector("dialog");
+  assert.ok(dialog, "confirm dialog");
+  assert.equal(dialog.querySelector("#dialog-title").textContent, "settings_restart_title");
+  assert.deepEqual([...dialog.querySelectorAll("li")].map((li) => li.textContent), [
+    "settings_restart_effect_zero_pose", "settings_restart_effect_webrtc_drop", "settings_restart_effect_kill_on_timeout",
+  ]);
+  assert.equal(posts(page, "/api/robot/restart").length, 0, "nothing is sent before the PIN");
+  await answerPin(page);
+  assert.deepEqual(posts(page, "/api/robot/restart").map((c) => c.body), [{ pin: PIN }]);
+  assert.equal(page.document.querySelector("dialog"), null);
+  assert.equal(page.document.querySelector("#notice").textContent, "settings_restart_started");
+  assert.ok(!storageDump(page.window).includes(PIN));
+  assert.ok(!page.document.documentElement.outerHTML.includes(PIN));
+});
+
+test("restart: cancelling sends nothing, and a wrong PIN or an unavailable restart is explained in the dialog", async () => {
+  let reply404 = false;
+  const page = await restartPage({
+    "GET /api/strings": { language: "en", strings: { err_bad_pin: "Wrong PIN.", err_restart_unavailable: "Not now." } },
+    "POST /api/robot/restart": () => (reply404 ? reply(404, { error: "restart_unavailable" }) : reply(401, { error: "bad_pin" })),
+  });
+  const start = async () => { page.document.querySelector("#settings-restart").click(); await settle(); };
+  await start();
+  buttons(page.document.querySelector("dialog"), "dialog_cancel")[0].click();
+  await settle();
+  assert.equal(page.document.querySelector("dialog"), null);
+  assert.equal(posts(page, "/api/robot/restart").length, 0);
+  await start();
+  let dialog = await answerPin(page);
+  assert.equal(dialog.querySelector("#dialog-error").textContent, "Wrong PIN.");
+  reply404 = true;
+  await answerPin(page);
+  assert.equal(dialog.querySelector("#dialog-error").textContent, "Not now.");
+  assert.notEqual(page.document.querySelector("#notice").textContent, "settings_restart_started");
+});
+
+test("restart: the badge of a restart field links to the button; without the action it is plain", async () => {
+  const page = await restartPage();
+  await open(page, "core-voice");
+  const link = row(page, "voice.flag").querySelector(".sl-badge--warning").closest("a");
+  assert.ok(link, "badge is a link");
+  assert.equal(link.getAttribute("href"), "#settings-restart");
+  let focused = null;
+  const btn = page.document.querySelector("#settings-restart");
+  btn.focus = () => { focused = btn; };
+  const click = new page.window.MouseEvent("click", { bubbles: true, cancelable: true });
+  link.dispatchEvent(click);
+  assert.equal(click.defaultPrevented, true);
+  assert.equal(focused, btn, "the link moves focus to the button");
+  assert.equal(page.document.querySelector("dialog"), null, "the link does not start a restart by itself");
+});
+
+test("restart: effect text and the robot title stay text, never markup", async () => {
+  const page = await settingsPage({}, {
+    fields: fields(), pin_required: true,
+    robot: { ...RESTARTABLE, restart_effects: ["<img src=x onerror=alert(1)>"] },
+  });
+  page.document.querySelector("#settings-restart").click();
+  await settle();
+  const dialog = page.document.querySelector("dialog");
+  assert.equal(dialog.querySelectorAll("img").length, 0);
+  assert.equal(dialog.querySelectorAll("li").length, 1);
 });

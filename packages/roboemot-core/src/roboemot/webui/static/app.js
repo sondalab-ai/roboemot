@@ -212,6 +212,7 @@ function ask(opts) {
       },
     },
     opts.message ? el("p", {}, opts.message) : [],
+    opts.items ? el("ul", {}, opts.items.map((item) => el("li", {}, item))) : [],
     value ? field("dialog-value", opts.input.label, value) : [],
     pin ? field("dialog-pin", t("pin"), pin) : [],
     failure,
