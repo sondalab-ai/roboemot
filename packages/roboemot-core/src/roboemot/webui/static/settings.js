@@ -18,6 +18,7 @@ const SETTING_UNSAFE_KEYS = ["__proto__", "constructor", "prototype"];
 const settingsState = {
   query: "", changedOnly: false, open: new Set(), collapsed: new Set(),
   groups: [], restartPending: false, restarting: false, serial: 0, data: null,
+  leaves: new Map(), // built leaf rows by path, kept across reloads so unsaved edits elsewhere survive a save
 };
 let revealedSettings = new Map(); // private fields shown after a PIN check, kept in memory only
 
@@ -26,7 +27,7 @@ let revealedSettings = new Map(); // private fields shown after a PIN check, kep
 function resetSettingsState() {
   revealedSettings = new Map();
   Object.assign(settingsState, {
-    query: "", changedOnly: false, open: new Set(), collapsed: new Set(), groups: [], restartPending: false, restarting: false, data: null,
+    query: "", changedOnly: false, open: new Set(), collapsed: new Set(), groups: [], restartPending: false, restarting: false, data: null, leaves: new Map(),
   });
   clearTimeout(settingsState.timer);
   settingsState.timer = null;
@@ -638,7 +639,18 @@ function settingContainer(node) {
   return el("div", { class: "setting stack", "data-path": row.path, "data-source": row.source }, parts);
 }
 
-const settingNode = (node) => (SETTING_CONTAINERS.includes(node.row.kind) ? settingContainer(node) : settingLeaf(node));
+// A leaf is rebuilt only when what it renders from changed (its descriptor, its place, reveal and restart state),
+// so a reload after a save leaves the other rows' unsaved edits in place.
+function cachedLeaf(node) {
+  const sig = JSON.stringify([node.row, settingHidden(node.row), canRestart(), node.parent && [node.parent.row.path, node.parent.row.key]]);
+  const kept = settingsState.leaves.get(node.row.path);
+  if (kept && kept.sig === sig) return kept.node;
+  const built = settingLeaf(node);
+  settingsState.leaves.set(node.row.path, { sig, node: built });
+  return built;
+}
+
+const settingNode = (node) => (SETTING_CONTAINERS.includes(node.row.kind) ? settingContainer(node) : cachedLeaf(node));
 
 // ---------------------------------------------------------------- reveal and reload
 
@@ -652,6 +664,7 @@ async function revealSettings() {
 }
 
 async function settingsReload(changedPath) {
+  if (changedPath) settingsState.leaves.delete(changedPath);
   settingsState.data = await api("GET", "/api/settings");
   settingsApplyModel(settingsState.data);
   refreshSettings();
@@ -666,6 +679,8 @@ async function settingsReload(changedPath) {
 }
 
 function settingsApplyModel(data) {
+  const live = new Set([...data.fields, ...(data.robot ? data.robot.fields : [])].map((f) => f.path));
+  for (const path of settingsState.leaves.keys()) if (!live.has(path) && !revealedSettings.has(path)) settingsState.leaves.delete(path);
   const core = settingsSections(settingsTree(data.fields), "core", null);
   const robot = data.robot ? settingsSections(settingsTree(data.robot.fields), "robot", data.robot) : [];
   const by = new Map([...core, ...robot].map((s) => [s.id, s]));
