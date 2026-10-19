@@ -272,14 +272,15 @@ class ReachyAudio:
             self._voice_cond.notify_all()
         thread = self._thread
         if thread is not None:
-            shutdown.join(thread, JOIN_TIMEOUT_S)
-            if thread.is_alive():
-                return
-            self._thread = None
-            try:
+            ended = shutdown.join(thread, JOIN_TIMEOUT_S)
+            if ended:
+                self._thread = None
+            try:  # best effort even when the thread did not end: the capture must not stay open
                 self._mini.media.stop_recording()
             except Exception as exc:
                 log.warning("audio: stop_recording: %s", type(exc).__name__)
+            if not ended:
+                return
         self._set("off")
 
     def poll_once(self, drain: bool = False) -> bool:

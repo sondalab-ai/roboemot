@@ -2903,8 +2903,10 @@ class RuntimeConfig(Strict):
     shutdown_budget_s: float = param(
         14.0,
         "Total time the stop sequence may spend waiting for component threads to end; once "
-        "spent, the remaining threads are left to the process exit. Keep it under the 20 s the "
-        "Reachy daemon allows between SIGINT and kill, minus the non-waiting steps",
+        "spent, the remaining threads get a 50 ms grace each and are then left to the process "
+        "exit. Keep it under the 20 s the Reachy daemon allows between SIGINT and kill, minus "
+        "the steps that do not wait for a thread: a larger value cannot help, the daemon kills "
+        "the app at 20 s",
         unit="s", ge=2, le=60, restart=True,
     )  # fmt: skip
 
