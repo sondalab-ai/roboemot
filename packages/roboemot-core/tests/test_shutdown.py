@@ -117,3 +117,29 @@ def test_the_budget_is_a_restart_field_with_a_range_under_the_daemons_kill_windo
         RoboEmotConfig.model_validate({"runtime": {"shutdown_budget_s": 1.0}})
     with pytest.raises(ValueError):
         RoboEmotConfig.model_validate({"runtime": {"shutdown_budget_s": 61.0}})
+
+
+def test_the_margin_is_a_restart_field_with_a_default_unit_and_range():
+    cfg = RoboEmotConfig()
+    assert cfg.runtime.shutdown_margin_s == 6.0
+    for bad in (-1.0, 31.0):
+        with pytest.raises(ValueError):
+            RoboEmotConfig.model_validate({"runtime": {"shutdown_margin_s": bad}})
+    field = type(cfg.runtime).model_fields["shutdown_budget_s"]
+    assert "reachy" not in (field.description or "").lower()
+
+
+@pytest.mark.parametrize(
+    ("configured", "stop_timeout", "margin", "expected"),
+    [
+        (14.0, None, 6.0, 14.0),
+        (14.0, 20.0, 6.0, 14.0),
+        (30.0, 20.0, 6.0, 14.0),
+        (10.0, 20.0, 6.0, 10.0),
+        (14.0, 5.0, 6.0, 0.0),
+    ],
+)
+def test_the_budget_is_capped_below_the_supervisors_kill_timeout(
+    configured, stop_timeout, margin, expected
+):
+    assert shutdown.capped_budget_s(configured, stop_timeout, margin) == expected

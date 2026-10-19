@@ -5,6 +5,7 @@ from __future__ import annotations
 import httpx
 from roboemot.diagnostics import Target, collect
 from roboemot_reachymini import diagnostics
+from roboemot_reachymini.daemon import DaemonClient
 
 STATUS = {
     "mode": "wlan",
@@ -14,7 +15,7 @@ STATUS = {
 
 
 def _sections(handler):
-    client = httpx.Client(base_url="http://robot:8000", transport=httpx.MockTransport(handler))
+    client = DaemonClient(Target("robot"), transport=httpx.MockTransport(handler))
     return collect(diagnostics.sources(Target("robot"), client))["sections"]
 
 

@@ -16,8 +16,9 @@ from roboemot.manifest import load_manifest
 from roboemot.webui.robot_section import claimed
 from roboemot.webui.settings import SettingsEditor
 from roboemot_reachymini import app as app_module
+from roboemot_reachymini import daemon as daemon_module
 from roboemot_reachymini import settings as settings_module
-from roboemot_reachymini.install import APP_NAME
+from roboemot_reachymini.daemon import APP_NAME, DaemonClient
 from roboemot_reachymini.settings import CLAIMS, ReachySettings, plugin
 
 MANIFEST = load_manifest(
@@ -183,7 +184,9 @@ def daemon(app_status, calls=None, restart_reply=None, **kw):
             return httpx.Response(200, json=restart_reply or {})
         return httpx.Response(404)
 
-    return ReachySettings(httpx.MockTransport(handle), **kw)
+    target = kw.pop("target", None)
+    client = DaemonClient(target, transport=httpx.MockTransport(handle))
+    return ReachySettings(client, **kw)
 
 
 RUNNING = {"info": {"name": APP_NAME}, "state": "running", "error": None}
@@ -219,8 +222,15 @@ def test_restart_effects_are_ids_with_numeric_params_and_the_timeout_is_the_stop
 
     effects = dict(plugin.restart_effects())
     assert set(effects) == set(RESTART_EFFECTS)
-    assert effects["kill_on_timeout"] == {"timeout_s": settings_module.STOP_TIMEOUT_S}
-    assert settings_module.RESTART_TIMEOUT_S > settings_module.STOP_TIMEOUT_S
+    assert effects["kill_on_timeout"] == {"timeout_s": daemon_module.STOP_TIMEOUT_S}
+
+
+def test_the_plugin_declares_the_daemons_kill_timeout_through_restartable():
+    from roboemot.webui.robot_section import Restartable, supervisor_stop_timeout_s
+
+    assert isinstance(plugin, Restartable)
+    assert plugin.stop_timeout_s() == daemon_module.STOP_TIMEOUT_S
+    assert supervisor_stop_timeout_s(plugin) == daemon_module.STOP_TIMEOUT_S
 
 
 def test_the_status_answer_is_cached_briefly_and_the_port_follows_the_target():
@@ -234,8 +244,8 @@ def test_the_status_answer_is_cached_briefly_and_the_port_follows_the_target():
     now[0] += settings_module.AVAILABLE_TTL_S + 0.1
     assert status.restart_available()
     assert len(calls) == 2
-    assert status._base == "http://robot.local:9000"
-    assert ReachySettings()._base == "http://localhost:8000"
+    assert status._daemon.base_url == "http://robot.local:9000"
+    assert ReachySettings()._daemon.base_url == "http://localhost:8000"
 
 
 def test_core_offers_the_action_through_the_entry_point_only_while_running(tmp_path):

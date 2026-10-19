@@ -1,9 +1,11 @@
 """One time budget for the whole stop sequence (SPEC 11A ``runtime.shutdown_budget_s``).
 
-The Reachy daemon kills the app 20 s after SIGINT. The components stop one after another
-(order matters: the SDK client goes last) and each waits for its thread with its own timeout;
-those timeouts add up to more. Inside :func:`budget` (or a :class:`BudgetedExitStack`, whose
-unwinding is the budget) :func:`join` waits for ``min(own timeout, max(time left, MIN_WAIT_S))``.
+The robot's supervisor kills the app some seconds after SIGINT (the robot plugin declares it
+through ``Restartable.stop_timeout_s``; see :func:`capped_budget_s`). The components stop one
+after another (order matters: the SDK client goes last) and each waits for its thread with its
+own timeout; those timeouts add up to more. Inside :func:`budget` (or a
+:class:`BudgetedExitStack`, whose unwinding is the budget) :func:`join` waits for
+``min(own timeout, max(time left, MIN_WAIT_S))``.
 Once the budget is spent every wait is still ``MIN_WAIT_S`` long, so a thread that was signalled
 and exits in milliseconds is joined; a stuck one is left to the process exit (daemon threads).
 Outside a budget :func:`join` is a plain ``Thread.join``.
@@ -23,6 +25,14 @@ MIN_WAIT_S = 0.05
 _lock = threading.Lock()
 _deadline: float | None = None
 _clock: Callable[[], float] = time.monotonic
+
+
+def capped_budget_s(budget_s: float, stop_timeout_s: float | None, margin_s: float) -> float:
+    """``budget_s`` limited to ``stop_timeout_s - margin_s`` (never below 0) when the robot's
+    supervisor declares a kill timeout; unchanged when it declares none (``None``)."""
+    if stop_timeout_s is None:
+        return budget_s
+    return max(0.0, min(budget_s, stop_timeout_s - margin_s))
 
 
 @contextmanager

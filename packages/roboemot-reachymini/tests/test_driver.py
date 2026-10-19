@@ -237,6 +237,7 @@ def test_diagnostics_sources_read_the_daemon_api():
     import httpx
     from roboemot.diagnostics import Target, collect, platform_sources
     from roboemot_reachymini import diagnostics
+    from roboemot_reachymini.daemon import DaemonClient
 
     seen = []
 
@@ -246,7 +247,7 @@ def test_diagnostics_sources_read_the_daemon_api():
             return httpx.Response(500, json={"detail": "boom"})
         return httpx.Response(200, json={"path": request.url.path})
 
-    client = httpx.Client(base_url="http://robot:8000", transport=httpx.MockTransport(handler))
+    client = DaemonClient(Target("robot"), transport=httpx.MockTransport(handler))
     report = collect(diagnostics.sources(Target("robot"), client))
     s = report["sections"]
     assert s["robot.daemon"]["data"] == {"path": "/api/daemon/status"}

@@ -207,6 +207,9 @@ class Restarting(FakePlugin):
     def restart_effects(self):
         return self.effects
 
+    def stop_timeout_s(self):
+        return 20.0
+
     def restart(self):
         if self.on_restart:
             self.on_restart()
@@ -464,3 +467,16 @@ def test_a_plugin_without_section_is_fail_soft(tmp_path):
     ed, _ = editor(tmp_path, [ep(object())])
     fields = ed.fields()
     assert ed.robot_split(fields) == (fields, None)
+
+
+def test_supervisor_stop_timeout_is_read_from_a_restartable_plugin_only():
+    from roboemot.webui.robot_section import supervisor_stop_timeout_s
+
+    class Broken(Restarting):
+        def stop_timeout_s(self):
+            raise RuntimeError("x")
+
+    assert supervisor_stop_timeout_s(Restarting()) == 20.0
+    assert supervisor_stop_timeout_s(FakePlugin()) is None
+    assert supervisor_stop_timeout_s(None) is None
+    assert supervisor_stop_timeout_s(Broken()) is None

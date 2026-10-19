@@ -13,10 +13,12 @@ from pathlib import Path
 import pytest
 import roboemot.install as inst
 from roboemot import paths
+from roboemot.diagnostics import Target
 from roboemot.install import Options, Ui, WizardError
 from roboemot.install.piper_lock import lock_name
 from roboemot_reachymini import install as reachy
-from roboemot_reachymini.install import DaemonApi, ReachyMiniWireless
+from roboemot_reachymini.daemon import INSTALL_TIMEOUT_S, DaemonClient, DaemonError
+from roboemot_reachymini.install import ReachyMiniWireless
 
 ROOT = Path(__file__).resolve().parents[3]
 RECORD = ReachyMiniWireless.record_path
@@ -301,7 +303,7 @@ def daemon(robot):
 
 @pytest.fixture()
 def api(daemon):
-    return DaemonApi(daemon.url)
+    return DaemonClient(Target("127.0.0.1", daemon.port))
 
 
 @pytest.fixture(autouse=True)
@@ -341,7 +343,7 @@ def uninstall(**kw) -> None:
 
 
 def test_api_reads(api):
-    assert api.daemon_status()["state"] == "running"
+    assert api.status()["state"] == "running"
     assert api.installed_apps() == ["conversation"]
     assert api.current_app() is None
     assert api.startup_app() is None
@@ -349,13 +351,17 @@ def test_api_reads(api):
 
 def test_api_error_carries_daemon_detail(api, daemon):
     daemon.current = {"info": {"name": "conversation"}, "state": "running"}
-    with pytest.raises(WizardError, match="HTTP 400: An app is already running"):
+    with pytest.raises(DaemonError, match="HTTP 400: An app is already running"):
         api.start_app("roboemot")
 
 
-def test_api_unreachable_is_a_wizard_error():
-    with pytest.raises(WizardError, match="daemon/status"):
-        DaemonApi("http://127.0.0.1:9", timeout_s=0.5).daemon_status()
+def test_api_unreachable_is_a_wizard_error_at_the_platform_boundary():
+    wireless = ReachyMiniWireless(port=9)
+    wireless.api = DaemonClient(Target("127.0.0.1", 9), timeout_s=0.5)
+    with pytest.raises(WizardError, match="apps/startup-app"):
+        wireless.autostart()
+    with pytest.raises(WizardError, match="apps/list-available/installed"):
+        wireless.verify_removed(quiet_ui())
 
 
 def test_set_startup_app_sends_put_body(api, daemon):
@@ -890,14 +896,14 @@ def test_choose_reprompts_until_valid(monkeypatch):
 @pytest.mark.sim
 def test_daemon_api_against_simulator():
     """The REST calls the installer relies on exist and answer as modelled in FakeDaemon."""
-    real = DaemonApi("http://localhost:8000")
-    status = real.daemon_status()
+    real = DaemonClient(Target("localhost", 8000), timeout_s=INSTALL_TIMEOUT_S)
+    status = real.status()
     assert status["state"] == "running" and status["simulation_enabled"]
     assert isinstance(real.installed_apps(), list)
     assert real.current_app() is None
     real.wake_up()
     assert real.startup_app() is None
-    with pytest.raises(WizardError, match="HTTP 400"):
+    with pytest.raises(DaemonError, match="HTTP 400"):
         real.set_startup_app("roboemot-not-installed")
 
 

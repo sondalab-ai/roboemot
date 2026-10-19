@@ -6,6 +6,7 @@ from __future__ import annotations
 import gc
 
 from roboemot import shutdown
+from roboemot_reachymini import daemon
 from test_app_perception import data, wait_for  # noqa: F401  (data: fixture)
 from test_app_reflex import enable, fake_mini, new_app, run_app
 
@@ -37,3 +38,24 @@ def test_gc_freeze_can_be_switched_off(data):  # noqa: F811
         stop.set()
         thread.join(timeout=20)
     assert not errors
+
+
+def test_the_stop_budget_is_capped_below_the_daemons_kill_timeout(data, monkeypatch):  # noqa: F811
+    enable(data, "\nruntime:\n  shutdown_budget_s: 30.0\n")
+    seen = []
+
+    class Recording(shutdown.BudgetedExitStack):
+        def __init__(self, total_s):
+            seen.append(total_s)
+            super().__init__(total_s)
+
+    monkeypatch.setattr(shutdown, "BudgetedExitStack", Recording)
+    app = new_app()
+    stop, thread, errors = run_app(app, fake_mini())
+    try:
+        assert wait_for(lambda: bool(seen))
+    finally:
+        stop.set()
+        thread.join(timeout=20)
+    assert not errors
+    assert seen == [daemon.STOP_TIMEOUT_S - 6.0]

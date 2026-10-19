@@ -67,6 +67,7 @@ from roboemot.voice.speech import SpeechOutput
 from roboemot.voice.yes_no import YesNoGestures
 from roboemot.webui import Server, make_server
 from roboemot.webui.catalogue import open_catalogue
+from roboemot.webui.robot_section import load_settings_plugin, supervisor_stop_timeout_s
 from roboemot.webui.routes import RouteChecker
 from roboemot.webui.settings import SettingsEditor
 from roboemot.world import (
@@ -733,7 +734,13 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         # Everything started below is stopped in reverse order whatever fails: the stack runs
         # every callback even when one raises, so the motion loop always stops and the camera
         # thread is quiet before the SDK client goes away.
-        with shutdown.BudgetedExitStack(stack.effective().runtime.shutdown_budget_s) as cleanup:
+        runtime_cfg = stack.effective().runtime
+        stop_budget_s = shutdown.capped_budget_s(
+            runtime_cfg.shutdown_budget_s,
+            supervisor_stop_timeout_s(load_settings_plugin(manifest.robot.id)),
+            runtime_cfg.shutdown_margin_s,
+        )
+        with shutdown.BudgetedExitStack(stop_budget_s) as cleanup:
             cleanup.callback(presence.close)
             cleanup.callback(tracker.close)
             cleanup.callback(runner.close)
