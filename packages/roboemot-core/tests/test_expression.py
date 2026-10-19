@@ -516,6 +516,7 @@ def test_manifest_behaviour_may_only_set_known_keys_and_is_audited(manifest):
         "circadian_motion",
         "expression_map",
         "gesture_map",
+        "voice",
     ]
 
 

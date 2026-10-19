@@ -1882,14 +1882,16 @@ class KeywordSet(Strict):
     wake_phrases: list[str] = param(
         [],
         "Phrases that wake the robot when they occur anywhere in the final text. Use words the "
-        "recognizer's vocabulary has: `reachy` is out of vocabulary in both small Vosk models, "
-        "so the default phrases are built from common words (`ehi robot`, `hey robot`)",
+        "recognizer's vocabulary has: a robot's own name can be out of vocabulary in the small "
+        "Vosk models, so the default phrases are built from common words (`ehi robot`, "
+        "`hey robot`)",
     )
     name_aliases: list[str] = param(
         [],
-        "Spellings the recognizer produces for the name Reachy in this language (`reati` in "
-        "Italian, `riyadh she` in English). They apply only when the robot has no name or its "
-        "name starts with `reachy`; a robot with another name ignores them. They emit "
+        "Spellings the recognizer produces for the robot's own name (`voice.default_name`) in this "
+        "language, supplied by the robot manifest (SPEC 4A); none in the core defaults. They "
+        "apply only when the robot has no name or its name starts with the first word of "
+        "`voice.default_name`; a robot renamed to something else ignores them. They emit "
         "speech.name_called and count as the wake word only in a short final text "
         "(voice.fastpath.alias_wake_max_words), because an alias can be a real word",
     )
@@ -2295,17 +2297,23 @@ class VoiceConfig(Strict):
     wake_word: str | None = param(
         None,
         "The robot's name, for the prompt and wake detection. Unset (null): the name the robot "
-        "platform reports (Reachy Mini: the name its owner gave it in the daemon setup); a "
-        "platform without one has no name and wakes on `voice.keywords.<language>.wake_phrases` "
-        "only. A value set here always wins over the platform's. The name can come from outside "
-        "the robot (the owner's phone): the prompt and the spoken lines only get a sanitised "
-        "form. The bare name emits speech.name_called wherever it occurs in a text, but wakes the "
-        "robot only in a short final (a name that is also a word, like `Neve`, is not a wake "
-        "word in a long sentence). Wake detection with a name "
+        "platform reports (the name its owner gave it, when the platform has one); failing that "
+        "`voice.default_name` (the robot manifest's name); a robot with none wakes on "
+        "`voice.keywords.<language>.wake_phrases` only. A value set here always wins. The name "
+        "can come from outside the robot (the owner's phone): the prompt and the spoken lines "
+        "only get a sanitised form. The bare name emits speech.name_called wherever it occurs in "
+        "a text, but wakes the robot only in a short final (a name that is also a word, like "
+        "`Neve`, is not a wake word in a long sentence). Wake detection with a name "
         "needs the name's words in the recognizer vocabulary of the language (checked when the "
-        "recognizer loads, logged when not); `reachy` is out of vocabulary in both small Vosk "
-        "models, so names like it rely on `wake_phrases` and `name_aliases`",
+        "recognizer loads, logged when not); a name that is out of vocabulary in the small Vosk "
+        "models relies on `wake_phrases` and `name_aliases`",
         admin_only=True,
+    )
+    default_name: str = param(
+        "",
+        "The robot's name when neither `voice.wake_word` nor the platform gives one; set by the "
+        "robot manifest (SPEC 4A), empty in the core defaults. Sanitised and capped like the "
+        "other names (`voice.name_max_chars`)",
     )
     name_max_chars: int = param(
         32,
@@ -2316,8 +2324,8 @@ class VoiceConfig(Strict):
     )
     name_poll_interval_s: float = param(
         5.0,
-        "While the platform has not reported a name, how often it is asked again (Reachy Mini: "
-        "the daemon status can arrive after the app starts)",
+        "While the platform has not reported a name, how often it is asked again (the platform's "
+        "status can arrive after the app starts)",
         unit="s",
         ge=0.5,
         le=300,
@@ -2338,7 +2346,6 @@ class VoiceConfig(Strict):
                 "no": ["no"],
                 "greeting": ["ciao", "buongiorno", "buonasera", "salve"],
                 "wake_phrases": ["ehi robot", "ciao robot"],
-                "name_aliases": ["reati"],
                 "name_wake_templates": ["ciao {name}", "ehi {name}"],
             },
             "en": {
@@ -2347,7 +2354,6 @@ class VoiceConfig(Strict):
                 "no": ["no"],
                 "greeting": ["hello", "hi", "hey", "good morning", "good evening"],
                 "wake_phrases": ["hey robot", "hello robot"],
-                "name_aliases": ["riyadh she"],
                 "name_wake_templates": ["hey {name}", "hello {name}"],
             },
         },

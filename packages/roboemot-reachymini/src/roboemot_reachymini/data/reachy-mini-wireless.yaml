@@ -55,6 +55,14 @@ safety:
   hard_stop: disable_motors
   watchdog_ms: 200
 behaviour:                      # config layer 2 (SPEC 11A): this robot's defaults
+  # Name (SPEC 4A, 8 stage 3): the default name when the owner and the daemon give none, and the
+  # spellings the small Vosk models produce for it (`reachy` itself is out of their vocabulary).
+  # Only these name fields may sit under `voice` in a manifest.
+  voice:
+    default_name: Reachy
+    keywords:
+      it: {name_aliases: [reati]}
+      en: {name_aliases: [riyadh she]}
   # Expression map (SPEC 7): per affect label, keyframes per channel as [t_s, offset_deg],
   # piecewise-linear, added on top of the current pose. Every channel starts and ends at 0 and
   # all channels of a label end together; `repeat` plays the cycle back to back.

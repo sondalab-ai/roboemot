@@ -450,8 +450,10 @@ def resolve_preset(name: str, preset_dirs: Iterable[Path], _seen: tuple[str, ...
 # ----------------------------------------------------------------------------- guardrails
 
 MANIFEST_BEHAVIOUR_KEYS = frozenset(
-    {"expression_map", "gesture_map", "circadian_motion"}
+    {"expression_map", "gesture_map", "circadian_motion", "voice"}
 )  # what a robot manifest may set
+MANIFEST_VOICE_KEYS = frozenset({"default_name", "keywords"})  # the name fields of ``voice``
+MANIFEST_KEYWORD_KEYS = frozenset({"name_aliases"})  # per language under ``voice.keywords``
 PERSON_SECTIONS = ("register", "voice", "conversation", "persona.traits")
 
 
@@ -512,6 +514,50 @@ def _filter_keys(entries: Any) -> set[tuple[str, bool]]:
 def keeps_every_entry(candidate: Any, approved: Any) -> bool:
     """``superset`` direction: the candidate list has every approved entry (normalised)."""
     return _filter_keys(approved) <= _filter_keys(candidate)
+
+
+def check_manifest_voice(voice: Any) -> None:
+    """A manifest may name the robot (``voice.default_name``, per-language
+    ``voice.keywords.<lang>.name_aliases``) and nothing else under ``voice``. Each name must
+    survive ``sanitise_name`` unchanged and fit ``voice.name_max_chars`` (the default), like a
+    name from the platform or the owner."""
+    from ..voice.keywords import normalise
+    from ..voice.robot_name import sanitise_name
+
+    if voice is None:
+        return
+    cap = RoboEmotConfig().voice.name_max_chars
+
+    def check_name(where: str, value: Any) -> None:
+        if not isinstance(value, str) or sanitise_name(value, cap) != value:
+            raise ConfigError(
+                f"manifest behaviour voice.{where}: {value!r} must be letters, digits, spaces "
+                f"and '.- only, at most {cap} characters"
+            )
+
+    if not isinstance(voice, dict) or set(voice) - MANIFEST_VOICE_KEYS:
+        extra = sorted(set(voice) - MANIFEST_VOICE_KEYS) if isinstance(voice, dict) else voice
+        raise ConfigError(
+            f"manifest behaviour voice may set {sorted(MANIFEST_VOICE_KEYS)}, not {extra}"
+        )
+    if "default_name" in voice:
+        check_name("default_name", voice["default_name"])
+    keywords = voice.get("keywords", {})
+    if not isinstance(keywords, dict):
+        raise ConfigError("manifest behaviour voice.keywords must map languages to name_aliases")
+    for language, entry in keywords.items():
+        where = f"keywords.{language}"
+        if not isinstance(entry, dict) or set(entry) - MANIFEST_KEYWORD_KEYS:
+            raise ConfigError(
+                f"manifest behaviour voice.{where} may set {sorted(MANIFEST_KEYWORD_KEYS)} only"
+            )
+        aliases = entry.get("name_aliases", [])
+        if not isinstance(aliases, list):
+            raise ConfigError(f"manifest behaviour voice.{where}.name_aliases must be a list")
+        for alias in aliases:
+            check_name(f"{where}.name_aliases", alias)
+            if not normalise(alias):
+                raise ConfigError(f"manifest behaviour voice.{where}.name_aliases: empty alias")
 
 
 def violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Violation]:
@@ -751,6 +797,7 @@ class ConfigStack:
             raise ConfigError(
                 f"manifest behaviour may set {sorted(MANIFEST_BEHAVIOUR_KEYS)}, not {unknown}"
             )
+        check_manifest_voice(behaviour.get("voice"))
         with self._lock:
             saved, saved_channels = self.manifest, self.channels
             self.manifest, self.channels = behaviour, frozenset(channels)

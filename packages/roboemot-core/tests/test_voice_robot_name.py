@@ -5,6 +5,7 @@ import logging
 import numpy as np
 import pytest
 from pydantic import ValidationError
+from reachy_config import reachy_config
 from roboemot.config.schema import KeywordSet, RoboEmotConfig
 from roboemot.drivers import MockPoseDriver
 from roboemot.voice.fastpath import FastPath
@@ -13,6 +14,7 @@ from roboemot.voice.robot_name import RobotName, display_name
 
 VOICE = RoboEmotConfig().voice
 SETS = VOICE.keywords
+REACHY_VOICE = reachy_config().voice
 GENERIC = ("ehi robot", "hey robot")
 
 
@@ -28,7 +30,8 @@ def vocab(**absent):
 
 
 def spot(names, text, language="en", configured=None):
-    return KeywordSpotter(SETS, configured, names).spot(text, language)
+    names.configure(REACHY_VOICE)
+    return KeywordSpotter(REACHY_VOICE.keywords, configured, names).spot(text, language)
 
 
 def test_display_name_turns_separators_into_spaces():

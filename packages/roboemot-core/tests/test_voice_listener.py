@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from reachy_config import reachy_config
 from roboemot.affect.runner import AffectRunner
 from roboemot.bus import Bus
 from roboemot.config.schema import APPRAISAL_EVENTS, RoboEmotConfig
@@ -90,7 +91,7 @@ def silence(seconds):
 
 class Rig:
     def __init__(self, script=("ciao",), final=None, cfg=None, **kw):
-        self.cfg = cfg or RoboEmotConfig()
+        self.cfg = cfg or reachy_config()
         self.bus = Bus()
         self.events: list[tuple[str, dict]] = []
         self.order: list[str] = []
