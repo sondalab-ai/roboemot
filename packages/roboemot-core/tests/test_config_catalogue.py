@@ -348,5 +348,37 @@ def test_a_nullable_container_with_no_value_becomes_a_json_leaf():
     assert row["kind"] == "json" and row["nullable"] and row["value"] is None
 
 
-def test_ssh_url_with_user_info_is_redacted_in_the_debug_report():
+def test_the_debug_report_shows_a_user_name_without_a_password():
+    assert jsonable({"remote": "ssh://user@host"}, bare_user=False) == {"remote": "ssh://user@host"}
+    assert jsonable({"r": "see ssh://pollen@reachy.local now"}, bare_user=False) == {
+        "r": "see ssh://pollen@reachy.local now"
+    }
+
+
+def test_the_debug_report_still_hides_a_password_and_other_secret_shapes():
+    for value in (
+        "https://u:p@host/",
+        "ssh://user:pw@host",
+        "${secret:k}",
+        "https://h/v1?api_key=x",
+    ):
+        assert jsonable({"remote": value}, bare_user=False) == {"remote": REDACTED}
+
+
+def test_the_catalogue_still_redacts_a_user_name_without_a_password():
     assert jsonable({"remote": "ssh://user@host"}) == {"remote": REDACTED}
+    stack = ConfigStack(
+        app={"llm_routes": [{**ROUTE, "base_url": "https://alice@cloud.example/v1"}]}
+    )
+    row = rows(stack)["llm_routes.cloud.base_url"]
+    assert row["secret"] is True and row["value"] == REDACTED
+
+
+def test_the_debug_collector_shows_a_bare_user_and_hides_a_password():
+    from roboemot.diagnostics import FnSource, collect_section
+
+    def data():
+        return {"a": "ssh://pollen@reachy.local", "b": "ssh://pollen:pw@reachy.local"}
+
+    section = collect_section(FnSource("t", data, "robot"), 5)
+    assert section["data"] == {"a": "ssh://pollen@reachy.local", "b": REDACTED}

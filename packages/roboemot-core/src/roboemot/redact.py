@@ -35,9 +35,11 @@ def is_secret_key(key: str) -> bool:
     return any(w in k for w in SECRET_WORDS)
 
 
-def _url_secret(url: str) -> bool:
-    """A URL with user info, or a query or fragment parameter named like a credential."""
-    if URL_USER_INFO.match(url):
+def _url_secret(url: str, bare_user: bool = True) -> bool:
+    """A URL with user info, or a query or fragment parameter named like a credential.
+    ``bare_user`` False lets a user name without a password through (``ssh://user@host``)."""
+    info = URL_USER_INFO.match(url)
+    if info and (bare_user or ":" in info.group(0).split("://", 1)[1]):
         return True
     try:
         parts = urlsplit(url)
@@ -48,15 +50,21 @@ def _url_secret(url: str) -> bool:
     return any(is_secret_key(name) for name, _ in params)
 
 
-def secret_shaped(value: Any) -> bool:
+def secret_shaped(value: Any, *, bare_user: bool = True) -> bool:
     """Whether a value looks like a secret whatever its key. Looks inside lists, tuples and dicts
-    (values and keys): one secret-shaped element makes the whole value secret."""
+    (values and keys): one secret-shaped element makes the whole value secret. The debug report
+    passes ``bare_user=False``: a user name without a password is not hidden there."""
     if isinstance(value, str):
-        return bool(SECRET_REF.search(value)) or any(_url_secret(m) for m in URL.findall(value))
+        return bool(SECRET_REF.search(value)) or any(
+            _url_secret(m, bare_user) for m in URL.findall(value)
+        )
     if isinstance(value, dict):
-        return any(secret_shaped(k) or secret_shaped(v) for k, v in value.items())
+        return any(
+            secret_shaped(k, bare_user=bare_user) or secret_shaped(v, bare_user=bare_user)
+            for k, v in value.items()
+        )
     if isinstance(value, list | tuple | set | frozenset):
-        return any(secret_shaped(v) for v in value)
+        return any(secret_shaped(v, bare_user=bare_user) for v in value)
     return False
 
 
