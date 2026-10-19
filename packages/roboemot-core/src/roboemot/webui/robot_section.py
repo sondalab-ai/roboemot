@@ -67,6 +67,7 @@ class RobotSection:
     restart_effects: tuple[RestartEffect, ...] = ()
 
 
+@runtime_checkable
 class SettingsPlugin(Protocol):
     """The object behind a ``roboemot.settings`` entry point."""
 
