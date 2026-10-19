@@ -25,6 +25,7 @@ from typing import Any
 
 import numpy as np
 
+from .. import shutdown
 from .asr import ASRBackend
 
 log = logging.getLogger(__name__)
@@ -93,11 +94,14 @@ class KeywordWorker:
             self._submit("reset", None)
 
     def close(self) -> None:
-        """Stop the thread (waits briefly for the frame in hand) and release the ASR."""
+        """Stop the thread and release the ASR. The wait for the thread is bounded (``JOIN_S``,
+        inside the shutdown budget); if it is stuck in an ASR call it is left to the process
+        exit and the state is not touched, since the recognizer is still in its hands."""
         self._closed = True
         thread, self._thread = self._thread, None
-        if thread is not None:
-            thread.join(JOIN_S)
+        if thread is not None and not shutdown.join(thread, JOIN_S):
+            log.warning("barge-in: keyword worker did not stop, left running")
+            return
         self.end(block=True)
 
     # ---- work

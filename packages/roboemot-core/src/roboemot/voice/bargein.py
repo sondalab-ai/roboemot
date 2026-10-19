@@ -204,6 +204,7 @@ class BargeIn:
         self._lang = ""
         self._deaf_until = -math.inf
         self._session: _Session | None = None
+        self._errors_seen = 0
         self._worker = KeywordWorker(
             asr,
             lambda text, lang: "stop" in self._spotter.spot(text, lang),
@@ -214,8 +215,16 @@ class BargeIn:
         self.reset()
 
     def close(self) -> None:
-        """Stop the keyword worker thread and hand the recognizer back."""
+        """Stop the keyword worker thread and hand the recognizer back. Call it once the
+        listener thread has stopped (``voice_close`` runs after ``listener.stop``): it writes the
+        barge-in state from the caller's thread."""
         self._worker.close()
+
+    def handback_asr(self) -> None:
+        """Take the recognizer back from the keyword worker: drop the session and wait for the
+        frame the worker has in hand. The listener calls it before it resets or restarts the
+        shared ASR (a gap, an error, a new utterance), so the two threads never use it at once."""
+        self._end_session(block=True)
 
     def apply_config(self, cfg: RoboEmotConfig) -> None:
         """Hot reload: thresholds, windows and the keyword lists."""
@@ -259,7 +268,7 @@ class BargeIn:
 
     def reset(self) -> None:
         """Forget the stretch in progress (the robot stopped speaking, or the audio has a gap)."""
-        self._end_session(block=True)
+        self.handback_asr()
         self._vad.reset()
         self._ring.clear()
         self._pending = np.empty(0, dtype=np.float32)
@@ -297,11 +306,8 @@ class BargeIn:
             self.reset()
         if self._ring.maxlen != self._ring_len:  # a hot reload changed the windows
             self._ring = collections.deque(self._ring, maxlen=self._ring_len)
-        if self._session is not None:  # the worker heard "stop" since the last chunk
-            detected = self._worker.take_hit()
-            if detected is not None:
-                self._trigger("keyword", detected, detected, np.empty(0, np.float32))
-                return
+        if self._session is not None and b.keyword_enabled and self._poll_keyword():
+            return
         if start < self._deaf_until:  # the cut-off just happened: this is its echo tail
             return
         if self._pending.size == 0:
@@ -425,6 +431,20 @@ class BargeIn:
 
     # ----------------------------------------------------------------- keywords
 
+    def _poll_keyword(self) -> bool:
+        """The worker's news: a failed session is dropped (the next candidate restarts it, as
+        when the recognizer was called inline); True when "stop" was heard and the robot was cut
+        off."""
+        if self._worker.errors != self._errors_seen:
+            self._errors_seen = self._worker.errors
+            self._end_session()
+            return False
+        detected = self._worker.take_hit()
+        if detected is None:
+            return False
+        self._trigger("keyword", detected, detected, np.empty(0, np.float32))
+        return True
+
     def _keywords(self, frame: np.ndarray, stamp: float, candidate: bool) -> bool:
         """Hand the frame to the keyword worker; True when it has heard "stop" (inline mode: at
         once; background: on a later frame or chunk) and the robot was cut off."""
@@ -435,6 +455,8 @@ class BargeIn:
                 if not candidate:
                     return False
                 lang = self._language()
+                if lang not in self._asr.languages:
+                    self._asr.load([lang])  # on this thread: the worker never mutates the models
                 self._lang = lang
                 session = self._session = _Session(stamp)
                 frames = list(self._ring)
@@ -450,10 +472,10 @@ class BargeIn:
             log.warning("barge-in: keyword recognizer: %s", type(exc).__name__)
             self._end_session()
             return False
-        detected = self._worker.take_hit()
-        if detected is not None:
-            self._trigger("keyword", detected, detected, np.empty(0, np.float32))
+        if self._poll_keyword():  # before the window check: a hit counts on its own frame
             return True
+        if self._session is None:  # the worker failed on this very frame
+            return False
         over = stamp - session.started >= b.keyword_window_s
         idle = stamp - session.last_candidate >= b.keyword_hold_ms / MS_PER_S
         if over or idle:
