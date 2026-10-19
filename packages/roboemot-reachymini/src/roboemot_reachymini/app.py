@@ -22,7 +22,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from roboemot import paths
+from roboemot import paths, shutdown
 from roboemot.affect.expression import ExpressionRenderer
 from roboemot.affect.register import RegisterTracker
 from roboemot.affect.runner import AffectRunner
@@ -734,6 +734,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         # every callback even when one raises, so the motion loop always stops and the camera
         # thread is quiet before the SDK client goes away.
         with ExitStack() as cleanup:
+            cleanup.callback(shutdown.end)  # last: the budget covers the whole sequence
             cleanup.callback(presence.close)
             cleanup.callback(tracker.close)
             cleanup.callback(runner.close)
@@ -827,6 +828,8 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 gc.collect()
                 gc.freeze()
                 cleanup.callback(gc.unfreeze)
+            # Registered last, so it runs first: from here on every thread wait shares the budget.
+            cleanup.callback(shutdown.begin, runtime.shutdown_budget_s)
             while not stop_event.is_set():
                 now = time.monotonic()
                 circ.tick(now)  # before the affect tick: its events and baseline apply to it

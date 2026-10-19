@@ -19,6 +19,7 @@ import time
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from roboemot import shutdown
 from roboemot.attention.gaze import look_at
 from roboemot.config.schema import RoboEmotConfig, WorldScanConfig
 from roboemot.manifest import Constraint, Dof, Manifest
@@ -222,7 +223,7 @@ class DoASource:
         self._stop.set()
         thread = self._thread
         if thread is not None:
-            thread.join(timeout=JOIN_TIMEOUT_S)
+            shutdown.join(thread, JOIN_TIMEOUT_S)
             if not thread.is_alive():
                 self._thread = None
 

@@ -29,6 +29,7 @@ from typing import Any, Protocol
 
 import numpy as np
 
+from .. import shutdown
 from ..bus import Bus
 from ..config.schema import RoboEmotConfig
 from .activity import SpeechActivity
@@ -167,7 +168,7 @@ class VoiceListener:
         """Stop the thread (waits briefly for the chunk in hand)."""
         self._stop.set()
         if self._thread is not None:
-            self._thread.join(JOIN_S)
+            shutdown.join(self._thread, JOIN_S)
             self._thread = None
 
     def snapshot(self) -> dict[str, Any]:

@@ -43,6 +43,7 @@ from collections.abc import Callable
 from typing import Any, NamedTuple
 
 import numpy as np
+from roboemot import shutdown
 
 from .resample import StreamResampler
 
@@ -271,7 +272,7 @@ class ReachyAudio:
             self._voice_cond.notify_all()
         thread = self._thread
         if thread is not None:
-            thread.join(timeout=JOIN_TIMEOUT_S)
+            shutdown.join(thread, JOIN_TIMEOUT_S)
             if thread.is_alive():
                 return
             self._thread = None
