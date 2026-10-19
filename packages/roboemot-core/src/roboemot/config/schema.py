@@ -2887,7 +2887,7 @@ class RuntimeConfig(Strict):
         6.0,
         "Time kept free for the steps of the stop sequence that do not wait for a thread: "
         "the effective shutdown budget is at most the supervisor's kill timeout minus this",
-        unit="s", ge=0, le=30, restart=True,
+        unit="s", ge=3, le=30, restart=True, conservative="higher",
     )  # fmt: skip
 
 

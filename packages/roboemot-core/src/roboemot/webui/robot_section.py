@@ -135,14 +135,19 @@ def restart_hook(plugin: SettingsPlugin | None) -> Callable[[], None] | None:
 
 def supervisor_stop_timeout_s(plugin: SettingsPlugin | None) -> float | None:
     """The plugin's ``stop_timeout_s`` when it is ``Restartable``, else ``None`` (no known kill
-    deadline). A plugin that raises counts as having none (logged by type only)."""
+    deadline). A plugin that raises, or gives a value that is not a positive finite number, counts
+    as having none (logged, never the value)."""
     if not isinstance(plugin, Restartable):
         return None
     try:
-        return float(plugin.stop_timeout_s())
+        timeout_s = float(plugin.stop_timeout_s())
     except Exception as exc:
         log.warning("settings plugin stop timeout: %s", type(exc).__name__)
         return None
+    if not math.isfinite(timeout_s) or timeout_s <= 0:
+        log.warning("settings plugin stop timeout: not a positive finite number, ignored")
+        return None
+    return timeout_s
 
 
 def _restart_effects(plugin: Restartable) -> tuple[RestartEffect, ...]:

@@ -46,6 +46,8 @@ from roboemot.config.schema import RoboEmotConfig
 from roboemot.config.stack import (
     KEYED_LISTS,
     NO_KEY,
+    REMOVED_SETTINGS,
+    RENAMED_SETTINGS,
     ConfigError,
     GuardrailError,
     deep_merge,
@@ -495,10 +497,11 @@ class SettingsEditor:
         except ValueError as exc:
             log.warning("web UI settings file ignored: %s", exc)
             return
+        migrated = _migrated(stored)
         with self._lock:
             tree, rows = self.stack.merged_tree(), self._rows()
             planned: dict[str, tuple[str, Any, bool]] = {}  # file key -> (stack path, value, add)
-            for key, value in stored.items():
+            for key, value in migrated.items():
                 found = self._plan(key, value, tree, rows)
                 if found is None:
                     log.warning("web UI setting %s dropped: no longer acceptable", _shown(key))
@@ -908,6 +911,21 @@ def combine(edits: Iterable[tuple[str, Any]]) -> dict[str, Any]:
             out.setdefault(path, []).extend(value)
         else:
             out[path] = value
+    return out
+
+
+def _migrated(stored: dict[str, Any]) -> dict[str, Any]:
+    """The stored overrides with renamed settings under their new path (a value already stored
+    under the new path wins) and removed ones dropped with a log line naming the key only."""
+    out: dict[str, Any] = {}
+    for key, value in stored.items():
+        if any(key == old or key.startswith(old + ".") for old in REMOVED_SETTINGS):
+            log.warning("web UI setting %s dropped: removed from the configuration", _shown(key))
+            continue
+        new = RENAMED_SETTINGS.get(key, key)
+        if new != key and new in stored:
+            continue
+        out[new] = value
     return out
 
 
