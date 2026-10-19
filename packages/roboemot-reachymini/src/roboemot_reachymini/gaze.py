@@ -19,7 +19,7 @@ REFLEX = ReflexMap(
     head_yaw="head.yaw",
     head_pitch="head.pitch",
     body_yaw="body_yaw",
-    antennas={"antenna_right": 1.0, "antenna_left": -1.0},
+    startle_lift={"antenna_right": 1.0, "antenna_left": -1.0},
     pitch_away_sign=-1.0,
     voice_sources=("doa",),
 )

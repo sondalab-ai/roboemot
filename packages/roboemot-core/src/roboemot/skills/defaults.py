@@ -53,10 +53,7 @@ def default_skills(env: SkillEnv) -> SkillRegistry:
         gestures = [n for n in names if n not in labels]
         text = "Play one of the robot's named motions."
         if emotions:
-            text += (
-                f" An emotion name ({', '.join(emotions)}) shows that feeling with antennas "
-                "and head."
-            )
+            text += f" An emotion name ({', '.join(emotions)}) shows that feeling with its body."
         if gestures:
             listed = ", ".join(
                 f"'{g}' means {GESTURE_MEANING[g]}" if g in GESTURE_MEANING else f"'{g}'"

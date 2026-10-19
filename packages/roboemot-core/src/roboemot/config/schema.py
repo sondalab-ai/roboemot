@@ -505,7 +505,7 @@ class CircadianMotion(Strict):
     yawn: ExpressionEntry | None = param(None, "Drowsy yawn primitive; none: no yawn")
     stretch: ExpressionEntry | None = param(None, "Waking stretch primitive; none: no stretch")
     rest_pose_deg: dict[str, float] = param(
-        {}, "Absolute rest posture by channel in degrees (head lowered, antennas down)"
+        {}, "Absolute rest posture by channel in degrees (the robot's own resting pose)"
     )
 
 
@@ -685,9 +685,7 @@ class LightConfig(Strict):
 
 
 class ArbiterConfig(Strict):
-    loop_hz: float = param(
-        100.0, "Arbiter rate (50 towards the Reachy Mini daemon)", unit="Hz", ge=10, le=500
-    )
+    loop_hz: float = param(100.0, "Arbiter rate", unit="Hz", ge=10, le=500)
     crossfade_ms: float = param(
         150.0, "Cross-fade when the winning source changes", unit="ms", ge=0, le=2000
     )
@@ -759,8 +757,8 @@ class ReflexRule(Strict):
     )
     primitive: Literal["startle", "withdraw", "turn_toward"] = param(
         "startle",
-        "Motion played: startle (head back, antennas up), withdraw (head back) or "
-        "turn_toward (head yaw towards a voice)",
+        "Motion played: startle (head back, the robot's startle dofs lifted), withdraw (head back) "
+        "or turn_toward (head yaw towards a voice)",
     )
     threshold: float = param(
         3.0,
@@ -877,8 +875,8 @@ class ReflexConfig(Strict):
     release_fraction: float = param(
         0.4, "Share of the duration spent returning (startle and withdraw)", ge=0.05, le=0.9
     )
-    antenna_ratio: float = param(
-        2.0, "Startle antenna lift per unit of head deflection", ge=0, le=10,
+    startle_lift_ratio: float = param(
+        2.0, "Startle lift of the robot's startle dofs per unit of head deflection", ge=0, le=10,
         conservative="lower",
     )  # fmt: skip
     proximity_rearm_ratio: float = param(
