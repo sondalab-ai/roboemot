@@ -255,13 +255,13 @@ def test_the_client_ignores_proxy_environment(monkeypatch, proxy):
         DaemonClient(Target("127.0.0.1", 9), timeout_s=0.5).status()
 
 
-def test_app_running_logs_the_failure_type_only(caplog):
+def test_app_running_logs_the_underlying_failure_type_only(caplog):
     def handler(req):
         raise httpx.ConnectError("secret-detail")
 
     with caplog.at_level("INFO", logger="roboemot_reachymini.daemon"):
         assert client(handler).app_running() is False
-    assert "daemon not reachable (DaemonError)" in caplog.text
+    assert "daemon not reachable (ConnectError)" in caplog.text
     assert "secret-detail" not in caplog.text
 
 

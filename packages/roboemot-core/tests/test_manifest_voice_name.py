@@ -116,3 +116,16 @@ def test_the_reachy_manifest_starts_with_a_tiny_user_cap():
     manifest = load_manifest(REACHY, allow_unmeasured_dynamics=True)
     stack = ConfigStack(app={"voice": {"name_max_chars": 1}})
     stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
+
+
+@pytest.mark.parametrize("cap", [1, 5, 32])
+def test_a_tight_user_cap_does_not_change_which_platform_names_get_the_aliases(cap):
+    manifest = load_manifest(REACHY, allow_unmeasured_dynamics=True)
+    stack = ConfigStack(app={"voice": {"name_max_chars": cap}})
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
+    names = RobotName()
+    names.configure(stack.effective().voice)
+    names.set_platform("reachy_mini")
+    assert names.resolve(None, ("en",)).aliases_apply()
+    names.set_platform("Bolt")
+    assert not names.resolve(None, ("en",)).aliases_apply()

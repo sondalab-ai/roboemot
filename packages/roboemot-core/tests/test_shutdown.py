@@ -146,9 +146,15 @@ def test_the_budget_is_capped_below_the_supervisors_kill_timeout(
 
 
 def test_the_margin_may_only_be_raised_at_runtime():
-    field = type(RoboEmotConfig().runtime).model_fields["shutdown_margin_s"]
-    assert field.json_schema_extra["conservative"] == "higher"
-    assert RoboEmotConfig.model_validate({"runtime": {"shutdown_margin_s": 3.0}})
+    from roboemot.config import ConfigStack
+    from roboemot.config.stack import GuardrailError
+
+    stack = ConfigStack()
+    stack.set("runtime.shutdown_margin_s", 9.0)
+    assert stack.effective().runtime.shutdown_margin_s == 9.0
+    with pytest.raises(GuardrailError):
+        stack.set("runtime.shutdown_margin_s", 4.0)
+    assert stack.effective().runtime.shutdown_margin_s == 9.0
 
 
 def test_a_cap_that_bites_is_warned(caplog):

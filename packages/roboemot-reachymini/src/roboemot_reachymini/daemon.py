@@ -129,7 +129,7 @@ class DaemonClient:
         try:
             status = self.current_app()
         except DaemonError as exc:
-            log.info("daemon not reachable (%s)", type(exc).__name__)
+            log.info("daemon not reachable (%s)", type(exc.__cause__ or exc).__name__)
             return False
         info = status.get("info") if isinstance(status, dict) else None
         current = info.get("name") if isinstance(info, dict) else None
