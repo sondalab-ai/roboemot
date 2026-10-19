@@ -432,3 +432,49 @@ def test_a_private_container_lists_nothing_removable_until_revealed():
     assert rows(stack)["safety.minor_lines"]["removable"] == []
     shown = {r["path"]: r for r in build_catalogue(stack, reveal_private=True)}
     assert shown["safety.minor_lines"]["removable"] == ["xx"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "https://a@b,https://c:d@e",
+        "https://host,https://u:p@h2",
+        "https://h/x?next=https://u:p@h2",
+        "see //u:p@h now",
+        "//user@h",
+    ],
+)
+def test_glued_nested_and_scheme_relative_credentials_are_secret_everywhere(text):
+    from roboemot.redact import scrub_text
+
+    assert secret_shaped(text) is True
+    assert jsonable({"u": text}, bare_user=False) == {"u": REDACTED}
+    assert "u:p" not in scrub_text(text) and "c:d" not in scrub_text(text)
+
+
+def test_scheme_relative_is_not_confused_with_a_path_or_a_full_url():
+    assert not secret_shaped("https://h/a//b@c") and not secret_shaped("see https://h/x")
+
+
+@pytest.mark.parametrize(
+    "user",
+    [
+        "hf_abcdef", "npm_abc", "pypi-AgEI", "sk_live_x", "sk_test_x", "AKIAIOSFODNN7EXAMPLE",
+        "ya29.a0Af", "0123456789abcdef0123456789abcdef", "abc123def456ghi789jk", "u" * 21,
+    ],
+)  # fmt: skip
+def test_token_like_users_are_masked_in_the_debug_report(user):
+    out = jsonable({"u": f"https://{user}@git.example/x"}, bare_user=False)
+    assert out == {"u": "https://***@git.example/x"}
+
+
+def test_ordinary_user_names_stay_visible_in_the_debug_report():
+    for user in ("pollen", "Alice", "deploy.bot", "svc_account-1"):
+        assert jsonable({"u": f"ssh://{user}@h"}, bare_user=False) == {"u": f"ssh://{user}@h"}
+
+
+def test_ipv6_origins_keep_their_brackets_so_port_and_address_differ():
+    from roboemot.redact import origin
+
+    assert origin("https://[2001:db8::1]:443/x") != origin("https://[2001:db8::1:443]/x")
+    assert origin("https://[2001:db8::1]:8443/x") == "https://[2001:db8::1]:8443"

@@ -1228,7 +1228,8 @@ def test_restore_replays_only_the_acknowledged_route_move(tmp_path):
         "llm_routes.a.base_url", "https://new-a.example.com/v1", ack="https://new-a.example.com"
     )
     data = json.loads((tmp_path / FILE).read_text())
-    assert list(data["acks"].values()) == ["https://new-a.example.com"]
+    assert [a["origin"] for a in data["acks"].values()] == ["https://new-a.example.com"]
+    assert "secret:k" not in json.dumps(data["acks"])  # a fingerprint, never the key or its name
     key_b = next(iter(data["acks"])).replace('"a"', '"b"')
     data["overrides"][key_b] = "https://new-b.example.com/v1"  # edited into the file: never acked
     (tmp_path / FILE).write_text(json.dumps(data))
@@ -1282,3 +1283,69 @@ def test_a_correct_ack_without_the_right_pin_changes_nothing(tmp_path):
         assert not any(a.key.endswith(".endpoint") for a in stack.audit)
     finally:
         srv.stop()
+
+
+URL_A, ACK_A = "https://new-a.example.com/v1", "https://new-a.example.com"
+
+
+def test_an_ack_does_not_survive_a_change_of_the_routes_key(tmp_path):
+    s = make_stack(tmp_path, llm_routes=[{**ROUTE, "name": "a", "api_key": "${secret:k1}"}])
+    SettingsEditor(s, store=tmp_path / FILE).change("llm_routes.a.base_url", URL_A, ack=ACK_A)
+    for other in ("${secret:k2}", "sk-literal-key"):
+        fresh = make_stack(tmp_path, llm_routes=[{**ROUTE, "name": "a", "api_key": other}])
+        SettingsEditor(fresh, store=tmp_path / FILE).restore()
+        assert fresh.effective().llm_routes[0].base_url == ROUTE["base_url"]
+        data = json.loads((tmp_path / FILE).read_text())
+        assert "acks" not in data and not data["overrides"]
+        s = make_stack(tmp_path, llm_routes=[{**ROUTE, "name": "a", "api_key": "${secret:k1}"}])
+        SettingsEditor(s, store=tmp_path / FILE).change("llm_routes.a.base_url", URL_A, ack=ACK_A)
+
+
+def test_an_ack_does_not_survive_a_route_replaced_under_the_same_name(tmp_path):
+    s = make_stack(tmp_path, llm_routes=[{**ROUTE, "name": "a", "api_key": "${secret:k1}"}])
+    SettingsEditor(s, store=tmp_path / FILE).change("llm_routes.a.base_url", URL_A, ack=ACK_A)
+    other = {**ROUTE, "name": "a", "base_url": "https://api.other-vendor.com/v1"}
+    fresh = make_stack(tmp_path, llm_routes=[{**other, "api_key": "${secret:vendor2}"}])
+    SettingsEditor(fresh, store=tmp_path / FILE).restore()
+    assert fresh.effective().llm_routes[0].base_url == other["base_url"]
+
+
+def test_a_literal_key_ack_holds_for_the_same_key_and_stores_no_literal(tmp_path):
+    route = {**ROUTE, "name": "a", "api_key": "sk-literal-CANARY"}
+    s = make_stack(tmp_path, llm_routes=[route])
+    SettingsEditor(s, store=tmp_path / FILE).change("llm_routes.a.base_url", URL_A, ack=ACK_A)
+    assert "CANARY" not in (tmp_path / FILE).read_text()
+    fresh = make_stack(tmp_path, llm_routes=[route])
+    SettingsEditor(fresh, store=tmp_path / FILE).restore()
+    assert fresh.effective().llm_routes[0].base_url == URL_A
+
+
+def test_a_live_path_edit_after_the_key_changed_is_not_covered_by_the_old_ack(tmp_path):
+    s = make_stack(tmp_path, llm_routes=[{**ROUTE, "name": "a", "api_key": "${secret:k1}"}])
+    editor = SettingsEditor(s, store=tmp_path / FILE)
+    editor.change("llm_routes.a.base_url", URL_A, ack=ACK_A)
+    s.app["llm_routes"][0]["api_key"] = "${secret:k2}"  # the owner re-keyed the route in the YAML
+    with pytest.raises(GuardrailError):
+        editor.change("llm_routes.a.base_url", ACK_A + "/v9")
+
+
+def test_exempting_one_routes_secret_finding_leaves_the_others_refused(tmp_path):
+    stack = two_routes(tmp_path)
+    changes = {
+        "llm_routes.a.base_url": "https://new-a.example.com/v1",
+        "llm_routes.b.base_url": "https://new-b.example.com/v1",
+    }
+    with pytest.raises(GuardrailError) as caught:
+        stack.set_many(
+            changes,
+            admin=True,
+            refuse=frozenset({"secret"}),
+            exempt=frozenset({"llm_routes.a.api_key"}),
+        )
+    assert {v.path for v in caught.value.violations} == {"llm_routes.b.api_key"}
+    stack.set_many(
+        changes,
+        admin=True,
+        refuse=frozenset({"secret"}),
+        exempt=frozenset({"llm_routes.a.api_key", "llm_routes.b.api_key"}),
+    )

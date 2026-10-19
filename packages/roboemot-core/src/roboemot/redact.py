@@ -27,8 +27,13 @@ SECRET_REF = re.compile(r"\$\{secret:")
 SECRET_REF_FULL = re.compile(r"\$\{secret:[^}]*\}?")
 URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'<>]+")
 URL_USER_INFO = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^/?#\s@]*@")
-USERNAME = re.compile(r"[a-z_][a-z0-9_.-]{0,31}", re.IGNORECASE)
-TOKEN_PREFIXES = ("ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "glpat-", "xox", "sk-")
+SCHEME_RELATIVE_INFO = re.compile(r"(?<![:\w/])//[^/?#\s@]*@")
+USERNAME = re.compile(r"[a-z_][a-z0-9_.-]{0,19}", re.IGNORECASE)
+USERNAME_MIXED_MAX = 16  # a longer name of letters and digits looks like a generated token
+TOKEN_PREFIXES = (
+    "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "glpat-", "xox", "sk-", "sk_live_",
+    "sk_test_", "hf_", "npm_", "pypi-", "akia", "ya29.",
+)  # fmt: skip
 
 
 PRIVATE_PATHS = (
@@ -84,11 +89,14 @@ def _bare_user_only(url: str) -> bool:
 
 
 def _url_secret(url: str, bare_user: bool = True) -> bool:
-    """A URL with user info, or a query or fragment parameter named like a credential.
-    ``bare_user`` False lets a user name without a password through (``ssh://user@host``); any
-    other user info, and any that is hard to parse, stays secret."""
-    has_info = "@" in urlsplit_netloc(url) or URL_USER_INFO.match(url)
-    if has_info and (bare_user or not _bare_user_only(url)):
+    """A URL with user info anywhere in it (also one nested after a comma or in a query value), or
+    a query or fragment parameter named like a credential. ``bare_user`` False lets one plain user
+    name without a password through (``ssh://user@host``) when the text holds exactly one URL and
+    one ``@``; any other user info, and any that is hard to parse, stays secret."""
+    has_info = "@" in urlsplit_netloc(url) or URL_USER_INFO.search(url)
+    if has_info and (
+        bare_user or url.count("://") != 1 or url.count("@") != 1 or not _bare_user_only(url)
+    ):
         return True
     try:
         parts = urlsplit(url)
@@ -107,18 +115,28 @@ def urlsplit_netloc(url: str) -> str:
         return ""
 
 
+def _plain_user(name: str) -> bool:
+    """A short user name that is no known token prefix and no long mix of letters and digits."""
+    mixed = len(name) > USERNAME_MIXED_MAX and any(c.isdigit() for c in name)
+    return (
+        bool(USERNAME.fullmatch(name)) and not mixed and not name.lower().startswith(TOKEN_PREFIXES)
+    )
+
+
 def mask_bare_users(text: str) -> str:
-    """``text`` with the single user name of a URL replaced by ``***`` unless it is a short plain
-    name that is no known token prefix (``https://ghp_...@github.com`` -> ``https://***@github.com``),
-    so the host stays visible. Other user info is left for ``secret_shaped`` to reject."""
+    """``text`` with the single user name of a URL replaced by ``***`` unless it is a plain name
+    (``_plain_user``): ``https://ghp_...@github.com`` -> ``https://***@github.com``, so the host
+    stays visible. Other user info (several URLs or ``@``, a password) is left for
+    ``secret_shaped`` to reject."""
 
     def one(m: re.Match[str]) -> str:
         url = m.group(0)
-        if not _bare_user_only(url) or "@" not in urlsplit_netloc(url):
+        if url.count("://") != 1 or url.count("@") != 1 or not _bare_user_only(url):
             return url
         info = urlsplit_netloc(url).rpartition("@")[0]
-        plain = USERNAME.fullmatch(info) and not info.lower().startswith(TOKEN_PREFIXES)
-        return url if plain else url.replace("://" + info + "@", "://***@", 1)
+        if not info:
+            return url
+        return url if _plain_user(info) else url.replace("://" + info + "@", "://***@", 1)
 
     return URL.sub(one, text)
 
@@ -128,8 +146,10 @@ def secret_shaped(value: Any, *, bare_user: bool = True) -> bool:
     (values and keys): one secret-shaped element makes the whole value secret. The debug report
     passes ``bare_user=False``: a user name without a password is not hidden there."""
     if isinstance(value, str):
-        return bool(SECRET_REF.search(value)) or any(
-            _url_secret(m, bare_user) for m in URL.findall(value)
+        return (
+            bool(SECRET_REF.search(value))
+            or bool(SCHEME_RELATIVE_INFO.search(value))
+            or any(_url_secret(m, bare_user) for m in URL.findall(value))
         )
     if isinstance(value, dict):
         return any(
@@ -149,6 +169,8 @@ def endpoint(url: str) -> str:
     except ValueError:
         return ""
     host = parts.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"  # an IPv6 literal keeps its brackets, so the port stays unambiguous
     return f"{host}:{port}" if port else host
 
 
@@ -193,4 +215,5 @@ def shown(key: str, value: Any) -> str:
 def scrub_text(text: str) -> str:
     """``text`` with secret references and credential-bearing URLs replaced by ``REDACTED``."""
     text = SECRET_REF_FULL.sub(REDACTED, text)
+    text = SCHEME_RELATIVE_INFO.sub(REDACTED + "@", text)
     return URL.sub(lambda m: REDACTED if _url_secret(m.group(0)) else m.group(0), text)

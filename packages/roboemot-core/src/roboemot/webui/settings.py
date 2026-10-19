@@ -21,13 +21,16 @@ or a secret.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
 import os
+import secrets
 import stat
 import tempfile
 import threading
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -90,6 +93,29 @@ REFUSED_CHECKS = frozenset({"reflex", "locality", "secret"})  # never granted, o
 APP_FILE = "app"
 
 
+@dataclass(frozen=True)
+class Move:
+    """An accepted endpoint change of a route with an API key: origins, route name and its key."""
+
+    old: str
+    new: str
+    route: str
+    api_key: str
+
+
+def fingerprint(api_key: str) -> str:
+    """``salt:digest`` of an ``api_key`` (reference text or literal), stored with an acknowledged
+    endpoint so the ack holds only for the key it was given for. The key itself is never stored."""
+    salt = secrets.token_hex()
+    return f"{salt}:{hashlib.sha256((salt + api_key).encode()).hexdigest()}"
+
+
+def key_matches(stored: str, api_key: str) -> bool:
+    """Whether ``api_key`` is the one ``fingerprint`` was made from."""
+    salt, _, digest = stored.partition(":")
+    return secrets.compare_digest(digest, hashlib.sha256((salt + api_key).encode()).hexdigest())
+
+
 class StackPort(Protocol):
     """The part of ``roboemot.config.ConfigStack`` this module uses."""
 
@@ -143,9 +169,9 @@ class OverridesFile:
     def __init__(self, path: Path) -> None:
         self.path = path
 
-    def load(self) -> tuple[dict[str, Any], dict[str, str]]:
-        """The stored edits and the acknowledged route origins (``{file key: origin}``, see
-        ``SettingsEditor.change``); both {} when there is no file. Raises ``ValueError`` (reason
+    def load(self) -> tuple[dict[str, Any], dict[str, dict[str, str]]]:
+        """The stored edits and the acknowledged route moves (``{file key: {"origin", "key"}}``,
+        see ``SettingsEditor.change``); both {} when there is no file. Raises ``ValueError`` (reason
         only, no content) when the file is unsafe or malformed."""
         try:
             fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
@@ -172,9 +198,14 @@ class OverridesFile:
         acks = data.get("acks", {})
         if not isinstance(found, dict) or not isinstance(acks, dict):
             raise ValueError("unexpected shape")
-        return found, {k: v for k, v in acks.items() if isinstance(v, str)}
+        good = {
+            k: v
+            for k, v in acks.items()
+            if isinstance(v, dict) and all(isinstance(v.get(f), str) for f in ("origin", "key"))
+        }
+        return found, good
 
-    def save(self, overrides: dict[str, Any], acks: dict[str, str]) -> None:
+    def save(self, overrides: dict[str, Any], acks: dict[str, dict[str, str]]) -> None:
         """Replace the file atomically; the data folder is created private when missing."""
         folder = paths.data_dir(str(self.path.parent))
         fd, name = tempfile.mkstemp(dir=folder, prefix=self.path.name + ".")  # 0600
@@ -259,7 +290,8 @@ class SettingsEditor:
             self._plugin = load_settings_plugin(manifest.robot.id)
         self._file = OverridesFile(store) if store else None
         self._overrides: dict[str, Any] = {}
-        self._acks: dict[str, str] = {}  # file key of a moved route base_url -> acknowledged origin
+        # file key of a moved route base_url -> acknowledged origin and key fingerprint
+        self._acks: dict[str, dict[str, str]] = {}
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------ reading
@@ -466,8 +498,7 @@ class SettingsEditor:
                     cleaned[key] = self._clean_planned(key, path, value, add, rows, cfg, tree)
                 except (ValidationError, SettingNotAllowed, GuardrailError):
                     log.warning("web UI setting %s dropped: no longer acceptable", _shown(key))
-            self._overrides = self._commit_batch(cleaned, acks)
-            self._acks = {k: v for k, v in acks.items() if k in self._overrides}
+            self._overrides, self._acks = self._commit_batch(cleaned, acks)
             if set(self._overrides) != set(stored):
                 self._persist()
 
@@ -507,10 +538,10 @@ class SettingsEditor:
             clean,
             source,
             retry_app=self._added_parent(stored) is None,
-            refuse=REFUSED_CHECKS - {"secret"} if moved else REFUSED_CHECKS,
+            exempt=frozenset({f"llm_routes.{moved.route}.api_key"}) if moved else frozenset(),
         )
-        if moved and moved[0] != moved[1]:
-            self.stack.note(source, f"{path.rpartition('.')[0]}.endpoint", *moved)
+        if moved and moved.old != moved.new:
+            self.stack.note(source, f"{path.rpartition('.')[0]}.endpoint", moved.old, moved.new)
         return {
             "path": path,
             "changed": True,
@@ -518,29 +549,39 @@ class SettingsEditor:
             "layer": layer,
             "restart_required": self._restart(row),
             "okey": stored,
-            "acked": moved[1] if moved else None,
+            "acked": {"origin": moved.new, "key": fingerprint(moved.api_key)} if moved else None,
         }
 
     @staticmethod
     def _moved_endpoint(
-        path: str, old: Any, new: Any, cfg: RoboEmotConfig, ack: object, acked: str | None
-    ) -> tuple[str, str] | None:
-        """``(old, new)`` origin when ``path`` is the ``base_url`` of a route with an API key and
-        the endpoint changes, or stays at the origin acknowledged earlier (``acked``, so a later
-        path edit there is not refused again); else ``None``. Raises ``endpoint_ack_required``
-        (carrying the new origin) unless ``ack`` is that origin."""
+        path: str,
+        old: Any,
+        new: Any,
+        cfg: RoboEmotConfig,
+        ack: object,
+        record: dict[str, str] | None,
+    ) -> Move | None:
+        """The ``Move`` when ``path`` is the ``base_url`` of a route with an API key and the
+        endpoint changes, or stays at the origin acknowledged earlier for this very key
+        (``record``, so a later path edit there is not refused again); else ``None``. Raises
+        ``endpoint_ack_required`` (carrying the new origin) unless ``ack`` is that origin."""
         if not write_only(path) or not isinstance(old, str) or not isinstance(new, str):
             return None
         route = plain(get_path(cfg, path.rpartition(".")[0]))
         target = origin(new)
+        acked = (
+            record["origin"] if record and key_matches(record["key"], route["api_key"]) else None
+        )
         same = endpoint_key(old) == endpoint_key(new)
+        # a path-only edit at the origin acknowledged for this key still needs the secret exemption:
+        # the approved baseline holds the old origin
         if route["api_key"] in NO_KEY or (same and acked != target):
             return None
         if not target:
             raise ValidationError("value_type", "value")
         if ack != target and acked != target:
             raise ValidationError("endpoint_ack_required", "value", {"endpoint": target})
-        return origin(old), target
+        return Move(origin(old), target, route["name"], route["api_key"])
 
     @staticmethod
     def _leaf_writable(rows: dict[str, FieldDescriptor], row: FieldDescriptor) -> bool:
@@ -565,7 +606,7 @@ class SettingsEditor:
         source: str,
         *,
         retry_app: bool = True,
-        refuse: frozenset[str] = REFUSED_CHECKS,
+        exempt: frozenset[str] = frozenset(),
     ) -> str:
         """Write on the runtime layer; if the stack refuses it only for a safety loosening, write
         it on the app layer instead (app YAML and audit) and drop the runtime value that would
@@ -573,7 +614,15 @@ class SettingsEditor:
         field of an entry added at runtime (``retry_app`` False): the app file has no such entry.
         """
         try:
-            self.stack.set(key, value, source=source, admin=True, must_exist=True, refuse=refuse)
+            self.stack.set(
+                key,
+                value,
+                source=source,
+                admin=True,
+                must_exist=True,
+                refuse=REFUSED_CHECKS,
+                exempt=exempt,
+            )
             return "runtime"
         except GuardrailError as exc:
             if not retry_app or not loosening_only(exc):
@@ -585,7 +634,8 @@ class SettingsEditor:
             admin=True,
             layer="app",
             must_exist=True,
-            refuse=refuse,
+            refuse=REFUSED_CHECKS,
+            exempt=exempt,
             drop_runtime=True,  # one transaction: a refusal leaves the YAML and the runtime as were
         )
         return "app"
@@ -612,12 +662,13 @@ class SettingsEditor:
             None,
         )
 
-    def _keep_ack(self, key: str, value: Any, acked: str | None) -> None:
-        """Record the origin the owner acknowledged for a moved route ``base_url``; a later value at
-        another origin (or none) forgets it, so a replay never trusts more than was confirmed."""
+    def _keep_ack(self, key: str, value: Any, acked: dict[str, str] | None) -> None:
+        """Record the origin (and key fingerprint) the owner acknowledged for a moved route
+        ``base_url``; a later value at another origin forgets it, so a replay never trusts more
+        than was confirmed."""
         if acked:
             self._acks[key] = acked
-        elif key in self._acks and origin(str(value)) != self._acks[key]:
+        elif key in self._acks and origin(str(value)) != self._acks[key]["origin"]:
             del self._acks[key]
 
     def _persist(self) -> bool:
@@ -767,19 +818,38 @@ class SettingsEditor:
         return path, clean_hooked(hook, path, value, cfg) if hook else clean_value(row, value, cfg)
 
     def _commit_batch(
-        self, cleaned: dict[str, tuple[str, Any]], acks: dict[str, str]
-    ) -> dict[str, Any]:
+        self, cleaned: dict[str, tuple[str, Any]], acks: dict[str, dict[str, str]]
+    ) -> tuple[dict[str, Any], dict[str, dict[str, str]]]:
         """Apply the cleaned edits as one change; if the stack refuses the whole, one by one.
-        Only a route ``base_url`` whose origin equals the one acknowledged when it was saved
-        (``acks``) is replayed past the secret check, and only on its own. Returns the file
-        entries that were applied."""
+        A route ``base_url`` whose origin and key still equal the ones acknowledged when it was
+        saved (``acks``) is replayed past the secret check of that route alone. Returns the file
+        entries that were applied and the acks that still hold."""
         if not cleaned:
-            return {}
+            return {}, {}
 
         def file_value(key: str) -> Any:
             parsed = parse_okey(key)
             value = cleaned[key][1]
             return value[0] if parsed and not parsed[2] else value
+
+        def route_of(path: str) -> dict[str, Any] | None:
+            if not write_only(path):
+                return None
+            try:
+                return plain(get_path(self.stack.effective(), path.rpartition(".")[0]))
+            except (KeyError, IndexError, ValueError, TypeError):
+                return None
+
+        def holds(key: str) -> dict[str, Any] | None:
+            """The route of ``key`` when its ack matches the replayed origin and the current key."""
+            path, value = cleaned[key]
+            route, record = route_of(path), acks.get(key)
+            if route and record and record["origin"] == origin(str(value)):
+                return route if key_matches(record["key"], route["api_key"]) else None
+            return None
+
+        def standing(kept: dict[str, Any]) -> dict[str, dict[str, str]]:
+            return {k: acks[k] for k in kept if k in acks and holds(k)}
 
         try:
             self.stack.set_many(
@@ -788,24 +858,28 @@ class SettingsEditor:
                 admin=True,
                 refuse=REFUSED_CHECKS,
             )
-            return {k: file_value(k) for k in cleaned}
+            done = {k: file_value(k) for k in cleaned}
+            return done, standing(done)
         except (GuardrailError, ConfigError):
             pass
         kept: dict[str, Any] = {}
         for key, (path, value) in cleaned.items():
+            route = holds(key)
             try:
-                acked = write_only(path) and acks.get(key) == origin(str(value))
                 self.stack.set_many(
                     {path: value},
                     source=RESTORE_SOURCE,
                     admin=True,
-                    refuse=REFUSED_CHECKS - {"secret"} if acked else REFUSED_CHECKS,
+                    refuse=REFUSED_CHECKS,
+                    exempt=frozenset({f"llm_routes.{route['name']}.api_key"})
+                    if route
+                    else frozenset(),
                 )
             except (GuardrailError, ConfigError):
                 log.warning("web UI setting %s dropped: no longer acceptable", _shown(key))
                 continue
             kept[key] = file_value(key)
-        return kept
+        return kept, standing(kept)
 
 
 def combine(edits: Iterable[tuple[str, Any]]) -> dict[str, Any]:
