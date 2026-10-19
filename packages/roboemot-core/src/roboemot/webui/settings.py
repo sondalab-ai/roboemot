@@ -58,7 +58,7 @@ from roboemot.config.stack import (
     set_path,
 )
 from roboemot.redact import REDACTED, origin, secret_shaped
-from roboemot.voice.models import supported_languages
+from roboemot.voice.models import ModelError, supported_languages
 
 from .robot_section import (
     RobotBlock,
@@ -88,7 +88,8 @@ MAX_FILE_BYTES = 1_000_000  # bounds what a damaged or hostile file can make the
 FILE_MODE = 0o600
 GROUP_OTHER_BITS = 0o077
 NOT_WRITABLE = frozenset({"schema_version"})
-LANGUAGE_MAPS = frozenset({"voice.keywords", "safety.minor_lines"})  # keyed by language
+# keyed by language: a new key must be one the voice stack supports
+LANGUAGE_MAPS = frozenset({"voice.keywords", "safety.minor_lines", "safety.minor_output_blocklist"})
 REFUSED_CHECKS = frozenset({"reflex", "locality", "secret"})  # never granted, on any layer
 APP_FILE = "app"
 
@@ -134,6 +135,19 @@ class StackPort(Protocol):
     def preview(self, changes: dict[str, Any]) -> RoboEmotConfig: ...
 
     def clear(self, key: str, **kwargs: Any) -> bool: ...
+
+
+def _is_word_map(box: FieldDescriptor) -> bool:
+    """A language-keyed map of word lists a new language may be added to (the blocklist)."""
+    return box["kind"] == "string_list_dict" and box["path"] in LANGUAGE_MAPS
+
+
+def languages() -> frozenset[str]:
+    """The languages a new language key may name; none when the voice manifest cannot be read."""
+    try:
+        return frozenset(supported_languages())
+    except ModelError:
+        return frozenset()
 
 
 class SettingNotAllowed(LookupError):
@@ -368,7 +382,8 @@ class SettingsEditor:
     ) -> dict[str, Any]:
         """Add an entry to the collection at ``path`` (a dict of models by ``key``, a keyed list
         by the identity inside ``value``) on the runtime layer. A new language key of a language
-        map must be one the voice stack supports (``supported_languages``).
+        map (``LANGUAGE_MAPS``; for the blocklist ``value`` is its word list) must be one the voice
+        stack supports (``supported_languages``).
 
         Raises like ``change``; ``entry_exists`` when the key or identity is taken,
         ``entry_invalid`` for a field the entry type does not have or a secret field.
@@ -376,7 +391,8 @@ class SettingsEditor:
         with self._lock:
             rows, cfg = self._rows(), self.stack.effective()
             box = rows.get(path) if isinstance(path, str) else None
-            if box is None or box["kind"] not in ENTRY_KINDS or box["secret"]:
+            words = box is not None and _is_word_map(box)
+            if box is None or box["secret"] or (box["kind"] not in ENTRY_KINDS and not words):
                 raise SettingNotAllowed("path")
             if box["path"] == "llm_routes" and secret_shaped(
                 value.get("base_url") if isinstance(value, dict) else None
@@ -384,14 +400,14 @@ class SettingsEditor:
                 raise ValidationError("url_credentials", "value")
             if secret_shaped([key, value]):
                 raise ValidationError("value_type", "value")
-            name = clean_key(key, cfg) if box["kind"] == "dict_of_model" else None
-            if (
-                name is not None
-                and box["path"] in LANGUAGE_MAPS
-                and name not in supported_languages()
-            ):
+            name = clean_key(key, cfg) if box["kind"] != "keyed_list" else None
+            if name is not None and box["path"] in LANGUAGE_MAPS and name not in languages():
                 raise ValidationError("language_unsupported", "key")
-            entry = self._clean_entry(box, value, cfg, name)
+            if words:
+                target = f"{box['path']}.{name}"
+                entry = clean_hooked(hook_for(target), target, value, cfg)
+            else:
+                entry = self._clean_entry(box, value, cfg, name)
             tree = self.stack.merged_tree()
             if name is not None:
                 if name in get_path(tree, box["path"]):
@@ -781,6 +797,9 @@ class SettingsEditor:
         if parent is not None and parent["kind"] == "dict_of_model" and isinstance(value, dict):
             absent = key.rpartition(".")[2] not in get_path(base, parent["path"])
             return (key, value, True) if absent else None
+        added = parent is not None and _is_word_map(parent) and isinstance(value, list)
+        if added and key.rpartition(".")[2] not in get_path(base, parent["path"]):
+            return key, value, True  # a language added from the web
         return (key, value, False) if key in rows else None
 
     def _clean_planned(
@@ -798,15 +817,13 @@ class SettingsEditor:
         if add:
             parsed = parse_okey(key)
             box = rows.get(parsed[0] if parsed else key.rpartition(".")[0])
-            if box is None or box["kind"] not in ENTRY_KINDS:
+            if box is None or not (box["kind"] in ENTRY_KINDS or _is_word_map(box)):
                 raise SettingNotAllowed("path")
             language = key.rpartition(".")[2]
-            if (
-                not parsed
-                and box["path"] in LANGUAGE_MAPS
-                and language not in supported_languages()
-            ):
+            if not parsed and box["path"] in LANGUAGE_MAPS and language not in languages():
                 raise SettingNotAllowed("path")
+            if _is_word_map(box):
+                return path, clean_hooked(hook_for(path), path, value, cfg)
             entry = self._clean_entry(
                 box, value[0] if parsed else value, cfg, None if parsed else language
             )

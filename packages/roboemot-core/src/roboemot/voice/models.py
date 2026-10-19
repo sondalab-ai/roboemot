@@ -8,6 +8,7 @@ folder, so uninstalling the app removes the models with it.
 
 from __future__ import annotations
 
+import functools
 from pathlib import Path
 
 import httpx
@@ -25,9 +26,10 @@ def load_manifest() -> dict[str, ModelSpec]:
     return _models.load_manifest(MANIFEST)
 
 
+@functools.cache
 def supported_languages() -> frozenset[str]:
     """Languages the voice stack can listen to and speak: those with both an ``asr_<lang>`` and a
-    ``tts_<lang>`` model in the manifest."""
+    ``tts_<lang>`` model in the manifest (cached: the manifest ships with the package)."""
     roles = {spec.role for spec in load_manifest().values()}
     heard = {r.removeprefix(ASR_ROLE) for r in roles if r.startswith(ASR_ROLE)}
     spoken = {r.removeprefix(TTS_ROLE) for r in roles if r.startswith(TTS_ROLE)}

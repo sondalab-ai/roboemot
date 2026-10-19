@@ -115,8 +115,6 @@ The persona pieces exist and are tested; these callers wait for the pillars they
 - [ ] Restart RoboEmot verified on the real daemon: `POST /api/apps/restart-current-app` and
       `GET /api/apps/current-app-status` are taken from the Pollen sources (1.11.0, 1.12.0), not yet run
       on a robot; check the zero pose, the WebRTC drop and the kill after 20 s.
-- [ ] Blocklist: a new language key for `safety.minor_output_blocklist` cannot be added from the web (only
-      `voice.keywords` and `safety.minor_lines`); decide if it should.
 
 ## M3 exit (SPEC 14, `docs/eval/m3.md`)
 

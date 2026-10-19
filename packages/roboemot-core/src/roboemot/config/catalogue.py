@@ -50,8 +50,6 @@ from pydantic import BaseModel
 
 from roboemot.diagnostics import jsonable
 from roboemot.redact import (
-    PATH_WILDCARD,
-    PRIVATE_PATHS,
     REDACTED,
     is_private,
     is_secret_key,
@@ -451,15 +449,12 @@ def build_catalogue(
 
 __all__ = [
     "CONTAINERS",
-    "PATH_WILDCARD",
     "DESCRIPTOR_KEYS",
     "KINDS",
-    "PRIVATE_PATHS",
     "FieldDescriptor",
     "build_catalogue",
     "classify",
     "write_only",
     "descriptor",
-    "is_private",
     "seal",
 ]

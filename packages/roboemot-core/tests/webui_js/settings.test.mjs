@@ -887,29 +887,102 @@ test("a write-only URL shows an empty box, sends nothing when left empty and pos
   button(box, "settings_save").click();
   await settle();
   await answerPin(page);
-  assert.deepEqual(posts(page, "/api/settings")[0].body, { path: URL_ROW.path, value: "https://cloud.example/v2", pin: PIN });
+  assert.deepEqual(posts(page, "/api/settings")[0].body, { path: URL_ROW.path, value: "https://cloud.example/v2", pin: PIN, ack_endpoint: "https://cloud.example" });
 });
 
-test("a keyed route moving to another host: the dialog names the host the server gave and the retry carries the acknowledgement", async () => {
+test("a route moving to another host: the dialog names the host before the first submit, which carries the acknowledgement", async () => {
+  const page = await settingsPage({ "POST /api/settings": { path: URL_ROW.path, changed: true, layer: "runtime", persisted: true } },
+    { fields: [URL_ROW], pin_required: true });
+  await open(page, "core-llm_routes");
+  const box = row(page, URL_ROW.path);
+  box.querySelector("input").value = "https://Evil.example:8443/v1";
+  button(box, "settings_save").click();
+  await settle();
+  const dialog = page.document.querySelector("dialog");
+  assert.ok(dialog.textContent.includes("settings_route_move_message"), "the warning is shown first");
+  assert.equal(posts(page, "/api/settings").length, 0, "nothing is sent before the PIN");
+  await answerPin(page);
+  assert.equal(posts(page, "/api/settings")[0].body.ack_endpoint, "https://evil.example:8443");
+});
+
+test("a route move: the 422 reply is the fallback and its endpoint is acknowledged on the retry", async () => {
   const sent = [];
   const page = await settingsPage({
     "GET /api/strings": { language: "en", strings: { err_endpoint_ack_required: "Key goes to {host}." } },
     "POST /api/settings": (body) => {
       sent.push(body);
-      return body.ack_endpoint
+      return body.ack_endpoint === "https://evil.example"
         ? { path: URL_ROW.path, changed: true, layer: "runtime", persisted: true }
         : reply(422, { error: "endpoint_ack_required", field: "value", endpoint: "https://evil.example" });
     },
   }, { fields: [URL_ROW], pin_required: true });
   await open(page, "core-llm_routes");
   const box = row(page, URL_ROW.path);
-  box.querySelector("input").value = "https://evil.example/v1";
+  box.querySelector("input").value = "https://evil.example:443/v1";
   button(box, "settings_save").click();
   await settle();
   const dialog = await answerPin(page);
   assert.equal(dialog.querySelector("#dialog-error").textContent, "Key goes to https://evil.example.");
   await answerPin(page);
   assert.equal(page.document.querySelector("dialog"), null);
-  assert.equal(sent[0].ack_endpoint, undefined);
+  assert.equal(sent[0].ack_endpoint, "https://evil.example:443");
   assert.equal(sent[1].ack_endpoint, "https://evil.example");
 });
+
+test("a route whose host does not change opens no warning when the old value is shown", async () => {
+  const plain = { ...URL_ROW, secret: false, value: "https://cloud.example/v1", default: "https://cloud.example/v1" };
+  const page = await settingsPage({ "POST /api/settings": { path: plain.path, changed: true, layer: "runtime", persisted: true } },
+    { fields: [plain], pin_required: true });
+  await open(page, "core-llm_routes");
+  const box = row(page, plain.path);
+  box.querySelector("input").value = "https://cloud.example/v2";
+  button(box, "settings_save").click();
+  await settle();
+  assert.ok(!page.document.querySelector("dialog").textContent.includes("settings_route_move_message"));
+});
+
+test("the restart availability flipping updates the badge in place and keeps unsaved edits", async () => {
+  const page = await restartPage();
+  await open(page, "core-voice");
+  const label = () => row(page, "voice.label").querySelector("input");
+  label().value = "draft";
+  const flag = row(page, "voice.flag");
+  assert.ok(flag.querySelector("a"), "linked while the action exists");
+  page.run("settingsState.data.robot.actions = []; refreshSettings()");
+  assert.equal(row(page, "voice.flag").querySelector("a"), null, "plain badge without the action");
+  assert.ok(row(page, "voice.flag").querySelector(".sl-badge--warning"));
+  assert.equal(label().value, "draft");
+  page.run("settingsState.data.robot.actions = ['restart']; refreshSettings()");
+  assert.ok(row(page, "voice.flag").querySelector("a"));
+  assert.equal(label().value, "draft");
+});
+
+test("a language can be added to the blocklist: key and words are posted with the PIN", async () => {
+  const lists = [
+    d("safety.minor_output_blocklist", "string_list_dict", { value: ["en"], private: true, admin_only: true, writable: false }),
+    d("safety.minor_output_blocklist.en", "string_list", { value: ["bad"], private: true, admin_only: true }),
+  ];
+  const revealed = lists.map((f) => ({ ...f }));
+  const page = await settingsPage({
+    "POST /api/settings/reveal": { fields: revealed },
+    "POST /api/settings/entry": { path: lists[0].path, changed: true, layer: "runtime", persisted: true },
+  }, { fields: lists, pin_required: true });
+  await open(page, "core-safety");
+  button(row(page, lists[0].path), "settings_reveal").click();
+  await settle();
+  await answerPin(page);
+  const container = row(page, lists[0].path);
+  const toggles = container.querySelectorAll(".sl-disclosure");
+  toggles[toggles.length - 1].click();
+  const forms = container.querySelectorAll(".nested");
+  const form = forms[forms.length - 1];
+  form.querySelector('input[type="text"]').value = "de";
+  const words = form.querySelectorAll('input[type="text"]')[1];
+  words.value = "mist";
+  button(form, "settings_add").click();
+  button(form, "settings_add_entry").click();
+  await settle();
+  await answerPin(page);
+  assert.deepEqual(posts(page, "/api/settings/entry")[0].body, { path: lists[0].path, key: "de", value: ["mist"], pin: PIN });
+});
+

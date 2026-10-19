@@ -19,9 +19,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, cast
 
-from roboemot.config.catalogue import PATH_WILDCARD, FieldDescriptor
+from roboemot.config.catalogue import FieldDescriptor
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.conversation.output_filter import OutputFilter
+from roboemot.redact import PATH_WILDCARD
 from roboemot.voice.keywords import normalise
 from roboemot.voice.robot_name import sanitise_name
 

@@ -1349,3 +1349,49 @@ def test_exempting_one_routes_secret_finding_leaves_the_others_refused(tmp_path)
         refuse=frozenset({"secret"}),
         exempt=frozenset({"llm_routes.a.api_key", "llm_routes.b.api_key"}),
     )
+
+
+def test_a_new_blocklist_language_is_added_cleaned_and_restored(german, editor, stack, tmp_path):
+    path = "safety.minor_output_blocklist"
+    with pytest.raises(ValidationError) as caught:
+        editor.add_entry(path, "fr", ["mot"])
+    assert caught.value.code == "language_unsupported"
+    with pytest.raises(ValidationError) as caught:
+        editor.add_entry(path, "de", ["bad!!"])
+    assert caught.value.code == "phrase_invalid"
+    with pytest.raises(ValidationError) as caught:
+        editor.add_entry(path, "en", ["mot"])
+    assert caught.value.code == "entry_exists"
+    editor.add_entry(path, "de", ["scheisse*", "mist"])
+    assert stack.effective().safety.minor_output_blocklist["de"] == ["scheisse*", "mist"]
+    fresh = make_stack(tmp_path, llm_routes=[ROUTE], appraisal=appraisal([RULE_B, RULE_A]))
+    SettingsEditor(fresh, store=tmp_path / FILE).restore()
+    assert fresh.effective().safety.minor_output_blocklist["de"] == ["scheisse*", "mist"]
+    assert "en" in fresh.effective().safety.minor_output_blocklist  # existing edits still replay
+
+
+def test_a_new_minor_lines_language_is_still_filtered_by_every_blocklist(german, editor, stack):
+    from roboemot.conversation.output_filter import OutputFilter
+
+    editor.add_entry("safety.minor_lines", "de", LINES)
+    lists = stack.effective().safety.minor_output_blocklist
+    assert "de" not in lists  # no list of its own
+    assert OutputFilter(lists).blocked("I will kill you")  # every language's list applies
+
+
+def test_an_unreadable_voice_manifest_is_a_clean_refusal(editor, monkeypatch):
+    from roboemot.voice.models import ModelError
+
+    def broken():
+        raise ModelError("manifest")
+
+    monkeypatch.setattr("roboemot.webui.settings.supported_languages", broken)
+    with pytest.raises(ValidationError) as caught:
+        editor.add_entry("voice.keywords", "de", {})
+    assert caught.value.code == "language_unsupported"
+
+
+def test_the_supported_languages_are_cached():
+    from roboemot.voice.models import supported_languages
+
+    assert supported_languages() is supported_languages()

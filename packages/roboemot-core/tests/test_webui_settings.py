@@ -1,4 +1,4 @@
-"""Settings API of the web UI: allowlist, PIN confirmation, guardrails, audit (SPEC 11A, 12)."""
+"""Settings API of the web UI: field catalogue, PIN, guardrails, audit (SPEC 11A, 12)."""
 
 from __future__ import annotations
 
@@ -75,7 +75,7 @@ def put(client, path, value, pin=PIN, **extra):
     )
 
 
-def test_list_carries_the_whole_catalogue_with_the_allowlist_writable(served, stack):
+def test_list_carries_the_whole_catalogue_with_every_plain_leaf_writable(served, stack):
     data = served.request("GET", "/api/settings").json
     fields = {f["path"]: f for f in data["fields"]}
     assert set(data) == {"fields", "robot", "pin_required"}, "the legacy settings list is gone"
@@ -334,8 +334,8 @@ def test_stack_validation_error_does_not_echo(tmp_path, stack):
 
 
 def test_a_real_loosening_through_the_stack_is_refused(stack):
-    """The editor leaves the stack's guard in force: an allowlisted path that is not admin-only
-    would still be refused if it loosened a safety rule (here simulated by an unlisted one)."""
+    """The editor leaves the stack's guard in force: a writable path that is not admin-only
+    would still be refused if it loosened a safety rule (here simulated by one the stack knows)."""
     with pytest.raises(GuardrailError):
         stack.set("safety.minor_motion_factor", 1.0, source="webui", admin=True)
 
@@ -352,6 +352,7 @@ def test_admin_only_fields_pass_admin_to_the_stack(stack):
         "admin": True,  # one PIN covers operator and admin
         "must_exist": True,
         "refuse": frozenset({"reflex", "locality", "secret"}),
+        "exempt": frozenset(),
     }
     assert [c[1] for c in calls] == [expected, expected]
 
@@ -545,7 +546,7 @@ def test_a_language_removed_between_expand_and_set_is_not_recreated():
     original = stack.set
 
     def set_after_removal(key, value, **kw):
-        stack.app = {}  # the language disappears after the allowlist was expanded
+        stack.app = {}  # the language disappears after the catalogue was built
         return original(key, value, **kw)
 
     stack.set = set_after_removal

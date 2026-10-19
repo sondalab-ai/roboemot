@@ -84,6 +84,9 @@ EN: dict[str, str] = {
         "the PIN."
     ),
     "settings_null": "No value (null)",
+    "settings_route_move_message": (
+        "If this route has an API key, saving sends that key to {host}. Enter the PIN to allow it."
+    ),
     "settings_write_only_hint": (
         "The current address holds credentials and is not shown. Type a whole new address to "
         "replace it; it may not hold credentials."
@@ -466,6 +469,10 @@ IT: dict[str, str] = {
         "configurazione dell'app e richiede il PIN."
     ),
     "settings_null": "Nessun valore (null)",
+    "settings_route_move_message": (
+        "Se questa route ha una chiave API, salvando la chiave viene inviata a {host}. "
+        "Inserisci il PIN per consentirlo."
+    ),
     "settings_write_only_hint": (
         "L'indirizzo attuale contiene credenziali e non viene mostrato. Scrivi un nuovo indirizzo "
         "completo per sostituirlo; non può contenere credenziali."

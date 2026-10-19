@@ -9,14 +9,12 @@ from roboemot.config.catalogue import (
     CONTAINERS,
     DESCRIPTOR_KEYS,
     KINDS,
-    PRIVATE_PATHS,
     build_catalogue,
     descriptor,
-    is_private,
 )
 from roboemot.config.stack import ConfigStack, flatten, get_path
 from roboemot.diagnostics import jsonable
-from roboemot.redact import REDACTED, secret_shaped
+from roboemot.redact import PRIVATE_PATHS, REDACTED, is_private, secret_shaped
 
 CANARY = "hunter2-CANARY"
 ROUTE = {

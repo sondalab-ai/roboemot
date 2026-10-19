@@ -3,12 +3,12 @@
 SPEC 6 (Enrollment, registry management), 11A (admin confirmation), 12 (Data, Behaviour,
 privacy) and 12A (the debug report as JSON).
 
-The operator PIN gates the registry and enrollment. Configuration is edited only through the
-settings allowlist (``settings.py``): each write re-enters the PIN and goes through the config
-stack's guardrails (runtime layer: safety only tightens, e.g. blocklist entries can be added but
-never removed; loosening needs the app config and the admin PIN). Responses carry summaries and
-whitelisted status fields, never images, crops or embeddings; a last-line guard refuses any
-response that holds a long list of numbers.
+The operator PIN gates the registry and enrollment. Configuration is edited through the field
+catalogue (``settings.py``, SPEC 11A): each write re-enters the PIN and goes through the config
+stack's guardrails (the runtime layer only tightens safety; a loosening, such as removing a
+blocklist word, is retried once on the app layer under the same PIN and audited). Responses
+carry summaries and whitelisted status fields, never images, crops or embeddings; a last-line
+guard refuses any response that holds a long list of numbers.
 """
 
 from __future__ import annotations
@@ -105,7 +105,7 @@ class RoutesPort(Protocol):
 
 
 class SettingsPort(Protocol):
-    """``roboemot.webui.settings.SettingsEditor``: the allowlisted, guarded settings."""
+    """``roboemot.webui.settings.SettingsEditor``: the guarded settings over the field catalogue."""
 
     def fields(self) -> list[FieldDescriptor]: ...
     def robot_split(
