@@ -29,6 +29,7 @@ from typing import Any, Protocol
 
 import numpy as np
 
+from .. import shutdown
 from ..bus import Bus
 from ..config.schema import RoboEmotConfig
 from .activity import SpeechActivity
@@ -106,6 +107,7 @@ class VoiceListener:
         speaker_id: Callable[[], str | None] = lambda: None,
         on_speaking_chunk: Callable[[VoiceChunkLike], None] | None = None,
         on_speaking_end: Callable[[], None] | None = None,
+        before_asr_reset: Callable[[], None] | None = None,
         enrolled_in_view: Callable[[float], bool] = lambda now: False,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -120,6 +122,7 @@ class VoiceListener:
         self._speaker_id = speaker_id
         self._on_speaking_chunk = on_speaking_chunk
         self._on_speaking_end = on_speaking_end
+        self._before_asr_reset = before_asr_reset
         self._enrolled_in_view = enrolled_in_view
         self._clock = clock
         self._gate = WakeGate("always", 0.0)  # configured by apply_config
@@ -167,7 +170,7 @@ class VoiceListener:
         """Stop the thread (waits briefly for the chunk in hand)."""
         self._stop.set()
         if self._thread is not None:
-            self._thread.join(JOIN_S)
+            shutdown.join(self._thread, JOIN_S)
             self._thread = None
 
     def snapshot(self) -> dict[str, Any]:
@@ -228,7 +231,13 @@ class VoiceListener:
     # ---- one chunk
 
     def _abort(self) -> None:
-        """Drop the utterance in progress and every buffered sample."""
+        """Drop the utterance in progress and every buffered sample. The barge-in gives the
+        recognizer back first (``before_asr_reset``): its keyword worker may be using it."""
+        if self._before_asr_reset is not None:
+            try:
+                self._before_asr_reset()
+            except Exception as exc:
+                log.warning("voice listener: asr hand-back: %s", type(exc).__name__)
         self._endpointer.reset()
         self._asr.reset()
         self._fast.reset()

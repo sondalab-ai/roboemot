@@ -146,3 +146,4 @@ The persona pieces exist and are tested; these callers wait for the pillars they
 - [x] Runtime test that a hostile `base_url` redirect (307 to another host) reaches nothing: `test_redirect_auth.py`.
       The openai SDK client followed redirects (the prompt went to the target, without the key); LLM routes
       now do not follow them, like the speech client (SPEC 8, 12).
+- [ ] Barge-in keyword worker on the CM4 (SPEC 8 stage 8): the ring is now fed to Vosk one VAD frame at a time (more partials and JSON calls than the old single `accept`), on a second thread; measure the CPU (`keyword_seconds`, load) and the keyword-stop latency on the robot, and the grace of `runtime.shutdown_budget_s` against a real SIGINT.

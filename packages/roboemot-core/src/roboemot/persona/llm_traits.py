@@ -22,7 +22,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from .. import paths
+from .. import paths, shutdown
 from ..config.schema import TRAITS, PersonaConfig, PersonaTraits, RoboEmotConfig
 from ..config.stack import ConfigChange, ConfigStack
 from ..llm.hub import RouterHub
@@ -257,7 +257,7 @@ class TraitsWorker:
             with contextlib.suppress(RuntimeError):  # the loop is already closed
                 loop.call_soon_threadsafe(task.cancel)
         if self._thread is not None:
-            self._thread.join(JOIN_TIMEOUT_S)
+            shutdown.join(self._thread, JOIN_TIMEOUT_S)
 
     def _run(self) -> None:
         try:

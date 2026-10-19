@@ -166,6 +166,7 @@ def build_listener(
             asr.languages, speaker_language(), cfg.conversation.language
         ),
         emit=emit,
+        keyword_background=True,
     )
     listener = VoiceListener(
         cfg,
@@ -180,6 +181,12 @@ def build_listener(
         speaker_id=speaker_id,
         on_speaking_chunk=bargein.on_chunk,
         on_speaking_end=bargein.reset,
+        before_asr_reset=bargein.handback_asr,
         enrolled_in_view=enrolled_in_view,
     )
-    return listener, bearing.close, bargein
+
+    def close() -> None:
+        bargein.close()
+        bearing.close()
+
+    return listener, close, bargein

@@ -365,3 +365,22 @@ def test_start_clears_the_old_queue_and_stop_wakes_a_waiting_reader():
     audio.start()  # start/stop/start works and reads again
     assert audio.snapshot()["state"] in ("no_data", "running")
     audio.stop()
+
+
+def test_stop_closes_the_capture_even_when_the_thread_did_not_end_in_time(monkeypatch):
+    from roboemot import shutdown
+    from roboemot_reachymini import audio as audio_module
+
+    monkeypatch.setattr(audio_module, "JOIN_TIMEOUT_S", 0.05)
+    mini, calls = media([])
+    release = threading.Event()
+    audio = ReachyAudio(mini, None, 50)
+    audio._thread = threading.Thread(target=release.wait, args=(5.0,), daemon=True)
+    audio._thread.start()
+    try:
+        with shutdown.budget(0.0):  # the budget is spent: a short wait, then give up
+            audio.stop()
+        assert calls.stopped == 1
+        assert audio._thread is not None  # a stuck thread keeps its handle
+    finally:
+        release.set()
