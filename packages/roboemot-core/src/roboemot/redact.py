@@ -31,6 +31,37 @@ USERNAME = re.compile(r"[a-z_][a-z0-9_.-]{0,31}", re.IGNORECASE)
 TOKEN_PREFIXES = ("ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "glpat-", "xox", "sk-")
 
 
+PRIVATE_PATHS = (
+    "circadian.location",
+    "privacy",
+    "safety.minor_motion_factor",
+    "safety.minor_hold_s",
+    "safety.minor_hold_periods",
+    "safety.minors_allowed_llm",
+    "safety.minor_output_blocklist",
+    "safety.minor_lines",
+    "register.child.minor_content_policy",
+    "register.teen.minor_content_policy",
+    "register.adult.minor_content_policy",
+    "register.senior.minor_content_policy",
+    "register.unknown.minor_content_policy",
+    "reflexes.rules.*.suppress_with_minor",
+)
+PATH_WILDCARD = "*"
+
+
+def is_private(path: str) -> bool:
+    """Whether ``path`` is one of ``PRIVATE_PATHS`` or inside one (a ``*`` matches one segment)."""
+    parts = path.split(".")
+    for pattern in PRIVATE_PATHS:
+        want = pattern.split(".")
+        if len(parts) >= len(want) and all(
+            w in (PATH_WILDCARD, p) for w, p in zip(want, parts, strict=False)
+        ):
+            return True
+    return False
+
+
 def is_secret_key(key: str) -> bool:
     """Whether a field or dict key name marks its value as a secret (substring match)."""
     k = key.lower()
@@ -121,17 +152,30 @@ def endpoint(url: str) -> str:
     return f"{host}:{port}" if port else host
 
 
+def origin(url: str) -> str:
+    """``scheme://host[:port]`` of a URL, lower case, no credentials, path or query ('' when
+    unparsable): where a request would go."""
+    try:
+        scheme = urlsplit(url).scheme.lower()
+    except ValueError:
+        return ""
+    where = endpoint(url)
+    return f"{scheme}://{where}" if scheme and where else ""
+
+
 def scrub(key: str, value: Any) -> Any:
     """``value`` with whatever is secret replaced by ``REDACTED``, for an audit entry or a message:
-    a secret-shaped value, a string under a credential-named key (the last segment of ``key``, or
-    an inner dict key). Anything else comes back unchanged, so a normal value stays comparable."""
-    if secret_shaped(value):
+    a secret-shaped value, any value at a private path (``is_private``: minors, privacy, location;
+    the audit file still says that the path changed), a string under a credential-named key (the
+    last segment of ``key``, or an inner dict key). Anything else comes back unchanged, so a
+    normal value stays comparable."""
+    if secret_shaped(value) or (value is not None and is_private(key)):
         return REDACTED
     leaf = key.rsplit(".", 1)[-1]
     if isinstance(value, str):
         return REDACTED if value and is_secret_key(leaf) else value
     if isinstance(value, dict):
-        return {k: scrub(str(k), v) for k, v in value.items()}
+        return {k: scrub(f"{key}.{k}" if key else str(k), v) for k, v in value.items()}
     if isinstance(value, list | tuple):
         return [scrub(key, v) for v in value]
     return value

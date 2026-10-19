@@ -188,7 +188,7 @@ def test_settings_api_never_shows_a_reference_or_url_credentials(tmp_path):
         by_path = {f["path"]: f for f in resp.json["fields"]}
         for leaf in ("api_key", "base_url"):
             row = by_path[f"llm_routes.cloud.{leaf}"]
-            assert row["secret"] is True and row["writable"] is False
+            assert row["secret"] is True and row["writable"] is (leaf == "base_url")  # write-only
             assert row["value"] == "***" and row["default"] == "***"
         for name in ("tokenised", "fragment"):
             assert by_path[f"llm_routes.{name}.base_url"]["value"] == "***"
@@ -211,11 +211,51 @@ def test_settings_api_never_shows_a_reference_or_url_credentials(tmp_path):
         ):
             for canary in canaries:
                 assert canary.encode() not in blob
-        for path in ("llm_routes.cloud.api_key", "llm_routes.cloud.base_url"):
+        posted = client.request(
+            "POST", "/api/settings", {"path": "llm_routes.cloud.api_key", "value": "x", "pin": PIN}
+        )
+        assert posted.status == 403 and password.encode() not in posted.body
+        for bad in (
+            f"https://alice:{password}@cloud.example/v2",
+            "https://alice@cloud.example/v2",
+            "https://cloud.example/v2?api_key=q-CANARY-9",
+            REF,
+        ):
             posted = client.request(
-                "POST", "/api/settings", {"path": path, "value": "x", "pin": PIN}
+                "POST",
+                "/api/settings",
+                {"path": "llm_routes.cloud.base_url", "value": bad, "pin": PIN},
             )
-            assert posted.status == 403 and password.encode() not in posted.body
+            assert posted.status == 422 and posted.json["error"] == "url_credentials"
+            assert b"CANARY" not in posted.body and b"alice" not in posted.body
+        entry = {"name": "n2", "base_url": f"https://u:{password}@h.example/v1", "model": "m"}
+        added = client.request(
+            "POST", "/api/settings/entry", {"path": "llm_routes", "value": entry, "pin": PIN}
+        )
+        assert added.status == 422 and added.json["error"] == "url_credentials"
+        assert password.encode() not in added.body
+        replaced = client.request(
+            "POST",
+            "/api/settings",
+            {"path": "llm_routes.cloud.base_url", "value": "https://cloud.example/v2", "pin": PIN},
+        )
+        assert replaced.status == 200 and replaced.json["changed"] is True
+        assert password.encode() not in replaced.body
+        again = client.request("GET", "/api/settings")
+        row = {f["path"]: f for f in again.json["fields"]}["llm_routes.cloud.base_url"]
+        assert (
+            row["secret"] is True and row["value"] == "***"
+        )  # the lower layer still holds credentials
+        for canary in canaries:
+            assert canary.encode() not in again.body
+        reset = client.request(
+            "POST", "/api/settings/reset", {"path": "llm_routes.cloud.base_url", "pin": PIN}
+        )
+        assert (
+            reset.status == 200 and reset.json["value"] == "***"
+        )  # the lower layer has credentials
+        for canary in canaries:
+            assert canary.encode() not in reset.body
         leaked = client.request(
             "POST", "/api/settings", {"path": "voice.wake_word", "value": REF, "pin": PIN}
         )
@@ -381,8 +421,16 @@ def test_write_endpoints_never_echo_a_secret_in_a_response_or_an_error(tmp_path)
             assert post("/api/settings", path=path, value="x").status == 403
             assert post("/api/settings/reset", path=path).status == 403
         assert post("/api/settings/entry/remove", path="llm_routes.cloud").status in (403, 422)
-        moved = post("/api/settings", path="llm_routes.cloud.base_url", value="http://nas.local/v1")
-        assert moved.status == 403 and moved.json["error"] == "setting_guardrail"
+        url = "http://nas.local/v1"
+        asked = post("/api/settings", path="llm_routes.cloud.base_url", value=url)
+        assert asked.status == 422 and asked.json["error"] == "endpoint_ack_required"
+        moved = post(
+            "/api/settings",
+            path="llm_routes.cloud.base_url",
+            value=url,
+            ack_endpoint=asked.json["endpoint"],
+        )
+        assert moved.status == 403 and moved.json["error"] == "setting_guardrail"  # locality
         assert post("/api/settings", path="llm_routes.cloud.model", value="m2").status == 200
         listing = client.request("GET", "/api/settings").body  # field texts mention ${secret:name}
         assert not any(c.encode() in listing for c in CANARIES)

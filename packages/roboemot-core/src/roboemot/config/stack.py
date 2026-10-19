@@ -585,7 +585,7 @@ def locality_violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> 
     ]
 
 
-def _endpoint_key(url: str) -> tuple[Any, ...]:
+def endpoint_key(url: str) -> tuple[Any, ...]:
     """Scheme, host and port of a URL: where a key would be sent."""
     try:
         parts = urlsplit(url)
@@ -607,7 +607,7 @@ def secret_violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> li
         ref = trusted.get(r.name)
         return (
             ref is not None
-            and _endpoint_key(ref.base_url) == _endpoint_key(r.base_url)
+            and endpoint_key(ref.base_url) == endpoint_key(r.base_url)
             and ref.api_key == r.api_key
         )
 
@@ -1044,6 +1044,11 @@ class ConfigStack:
 
             return old, undo_derived
         return None
+
+    def note(self, source: str, key: str, old: Any, new: Any) -> None:
+        """Add an audit entry for something the stack did not write itself (values are scrubbed)."""
+        with self._lock:
+            self._record(source, key, old, new)
 
     def apply_preset(self, name: str, *, source: str = "api", admin: bool = False) -> None:
         """Switch personality. A preset that loosens safety or privacy needs ``admin=True``."""

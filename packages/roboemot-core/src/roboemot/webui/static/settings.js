@@ -8,8 +8,6 @@ const SETTING_CONTAINERS = ["dict_of_model", "keyed_list", "string_list_dict"];
 const SETTING_ENTRY_KINDS = ["dict_of_model", "keyed_list"];
 const SETTING_SLIDER_STEPS = 100;
 const SETTING_DEFAULT_MAX_CHARS = 120;
-// Mirrors LANGUAGE_MAPS in webui/settings.py: a language is never added from the web. The server refuses it anyway.
-const SETTING_LANGUAGE_MAPS = ["voice.keywords", "safety.minor_lines"];
 const SETTING_SEARCH_DEBOUNCE_MS = 150;
 const SETTING_SEARCH_MIN_CHARS = 2;
 const SETTING_AUTO_OPEN_MAX = 50;
@@ -263,19 +261,13 @@ function tupleListControl(desc, id, opts) {
 
 function chipsControl(desc, id, opts) {
   const items = [...(desc.value || [])];
-  const original = new Set(items);
-  const append = desc.conservative === "superset";
   const chips = el("div", { class: "sl-chips", role: "group", "aria-label": opts.label });
   const paint = () => {
-    chips.replaceChildren(...items.map((item) => {
-      const chip = el("button", {
-        type: "button", class: "sl-chip" + PRESS,
-        "aria-label": t("settings_remove_item", { item: String(item) }),
-        onclick: () => { items.splice(items.indexOf(item), 1); paint(); },
-      }, String(item));
-      chip.disabled = append && original.has(item);
-      return chip;
-    }));
+    chips.replaceChildren(...items.map((item) => el("button", {
+      type: "button", class: "sl-chip" + PRESS,
+      "aria-label": t("settings_remove_item", { item: String(item) }),
+      onclick: () => { items.splice(items.indexOf(item), 1); paint(); },
+    }, String(item))));
   };
   let entry;
   let adder;
@@ -421,7 +413,7 @@ function isIdentity(node) {
 
 const canEdit = (node) => {
   const row = node.row;
-  return row.writable && !row.secret && !SETTING_CONTAINERS.includes(row.kind) && row.kind !== "json" && !isIdentity(node);
+  return row.writable && !SETTING_CONTAINERS.includes(row.kind) && row.kind !== "json" && !isIdentity(node);
 };
 
 const labelOf = (node) => (node.parent ? node.row.path.slice(node.parent.row.path.length + 1) : node.row.path);
@@ -451,7 +443,8 @@ function settingLeaf(node) {
   const hidden = settingHidden(row);
   const editable = canEdit(node) && !hidden;
   const id = nextSettingId();
-  const ctl = editable ? buildControl(row, id, { label: labelOf(node) }) : null;
+  const ctl = editable ? buildControl(row.secret ? { ...row, value: "" } : row, id, { label: labelOf(node) }) : null;
+  if (ctl && row.secret && ctl.main) ctl.main.setAttribute("placeholder", "***");
   const failure = el("p", { class: "sl-field__error", id: id + "-err", role: "alert", hidden: true });
   const name = el("code", { class: "sl-code" }, labelOf(node));
   const title = ctl && ctl.labelFor
@@ -460,6 +453,7 @@ function settingLeaf(node) {
   const parts = [el("div", { class: "row" }, title, settingTags(row, editable))];
   if (row.description) parts.push(el("p", { class: "hint", id: id + "-d" }, row.description));
   if (row.conservative === "superset") parts.push(el("p", { class: "hint" }, t("settings_superset_hint")));
+  if (ctl && row.secret) parts.push(el("p", { class: "hint" }, t("settings_write_only_hint")));
   if (hidden) {
     parts.push(el("p", { class: "hint setting-value" }, t("settings_hidden")),
       el("div", { class: "row" }, button(t("settings_reveal"), "plain", () => guarded(revealSettings), { small: true })));
@@ -473,7 +467,7 @@ function settingLeaf(node) {
     parts.push(ctl.node);
     const first = ctl.main || firstControl(ctl.node);
     if (first && row.description) first.setAttribute("aria-describedby", id + "-d");
-    if (JSON.stringify(row.default) !== JSON.stringify(row.value) && row.default !== null) {
+    if (!row.secret && JSON.stringify(row.default) !== JSON.stringify(row.value) && row.default !== null) {
       parts.push(el("p", { class: "hint" }, t("settings_default") + ": " + clip(formatValue(row.default))));
     }
     parts.push(failure, settingActions(node, ctl, failure));
@@ -499,9 +493,16 @@ function settingActions(node, ctl, failure) {
     const out = ctl.read();
     mark(out.code || null);
     if (out.code) return;
-    if (JSON.stringify(out.value) === JSON.stringify(row.value)) { notice(t("settings_unchanged")); return; }
-    const result = await pinnedCall(row.path, t("settings_save"),
-      (pin) => api("POST", "/api/settings", { path: row.path, value: out.value, pin }));
+    if (row.secret ? out.value === "" : JSON.stringify(out.value) === JSON.stringify(row.value)) { notice(t("settings_unchanged")); return; }
+    let ack = null;
+    const result = await pinnedCall(row.path, t("settings_save"), async (pin) => {
+      try {
+        return await api("POST", "/api/settings", { path: row.path, value: out.value, pin, ...(ack ? { ack_endpoint: ack } : {}) });
+      } catch (err) {
+        if (err.message === "endpoint_ack_required" && err.endpoint) ack = err.endpoint;
+        throw err;
+      }
+    });
     if (!result) return;
     if (revealedSettings.has(row.path) && result.changed) {
       revealedSettings.set(row.path, { ...revealedSettings.get(row.path), value: out.value });
@@ -520,7 +521,7 @@ function settingActions(node, ctl, failure) {
     await settingsReload(row.path);
   };
   const actions = [button(t("settings_save"), "primary", () => guarded(save), { small: true })];
-  if (row.source === "runtime" && row.conservative !== "superset") {
+  if (row.source === "runtime") {
     actions.push(button(t("settings_reset_layer"), "plain", () => guarded(reset), { small: true }));
   }
   return el("div", { class: "row" }, actions);
@@ -622,7 +623,7 @@ function addEntryForm(node) {
 function settingContainer(node) {
   const row = node.row;
   const hidden = settingHidden(row);
-  const addable = SETTING_ENTRY_KINDS.includes(row.kind) && !row.secret && row.entry && !SETTING_LANGUAGE_MAPS.includes(row.path) && !hidden;
+  const addable = SETTING_ENTRY_KINDS.includes(row.kind) && !row.secret && row.entry && !hidden;
   const parts = [el("div", { class: "row" }, el("code", { class: "sl-code" }, labelOf(node)), settingTags(row, true))];
   if (row.description) parts.push(el("p", { class: "hint" }, row.description));
   if (hidden) {

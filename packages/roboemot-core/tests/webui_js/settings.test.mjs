@@ -359,12 +359,18 @@ test("the slider and the number input stay in step", async () => {
   assert.match(slider.style.getPropertyValue("--sl-slider-value"), /^75%$/);
 });
 
-test("a superset list cannot lose the words it already has", async () => {
-  const page = await settingsPage();
+test("a superset list can lose words (the server asks for the PIN) and is resettable from the runtime layer", async () => {
+  const flat = fields().map((f) => (f.path === "safety.blocklist_word" ? { ...f, source: "runtime" } : f));
+  const page = await settingsPage({ "POST /api/settings": { changed: true, layer: "app", persisted: true } }, { fields: flat, pin_required: true });
   await open(page, "core-safety");
   const box = row(page, "safety.blocklist_word");
-  assert.equal(box.querySelector(".sl-chip").disabled, true);
-  assert.equal(buttons(box, "settings_reset_layer").length, 0);
+  assert.equal(box.querySelector(".sl-chip").disabled, false);
+  assert.equal(buttons(box, "settings_reset_layer").length, 1);
+  box.querySelector(".sl-chip").click();
+  button(box, "settings_save").click();
+  await settle();
+  await answerPin(page);
+  assert.deepEqual(posts(page, "/api/settings")[0].body, { path: "safety.blocklist_word", value: [], pin: PIN });
 });
 
 test("reset to the lower layer is offered for runtime values and goes through the PIN", async () => {
@@ -466,11 +472,11 @@ test("a keyed list's add form carries the identity in the value, not as a key", 
   assert.deepEqual(posts(page, "/api/settings/entry")[0].body, { path: "appraisal.rules", value: { event: "user.left", valence: -0.5 }, pin: PIN });
 });
 
-test("no add form for the language maps or for string_list_dict", async () => {
-  const flat = fields().concat([d("voice.keywords", "dict_of_model", { value: ["en"], entry: ENTRY, writable: false })]);
+test("a language map has an add form; string_list_dict has none", async () => {
+  const flat = fields().concat([d("voice.keywords", "dict_of_model", { value: ["en"], entry: ENTRY, writable: true })]);
   const page = await settingsPage({}, { fields: flat, pin_required: true });
   await open(page, "core-voice");
-  assert.equal(buttons(row(page, "voice.keywords"), "settings_add_entry").length, 0);
+  assert.equal(buttons(row(page, "voice.keywords"), "settings_add_entry").length, 1);
   await open(page, "core-conversation");
   assert.equal(buttons(row(page, "conversation.confirm_yes"), "settings_add_entry").length, 0);
 });
@@ -859,4 +865,51 @@ test("saving one row keeps the unsaved edits of the other rows", async () => {
   assert.equal(row(page, "voice.count").querySelector('input[type="number"]').value, "5");
   assert.equal(row(page, "voice.count").dataset.source, "runtime", "the saved row shows the new descriptor");
   assert.equal(row(page, "voice.label").querySelector("input").value, "draft", "the other row keeps its edit");
+});
+
+const URL_ROW = d("llm_routes.cloud.base_url", "text", { secret: true, writable: true, value: "***", default: "***" });
+
+test("a write-only URL shows an empty box, sends nothing when left empty and posts a whole new value", async () => {
+  const page = await settingsPage({ "POST /api/settings": { path: URL_ROW.path, changed: true, layer: "runtime", persisted: true } },
+    { fields: [URL_ROW], pin_required: true });
+  await open(page, "core-llm_routes");
+  const box = row(page, URL_ROW.path);
+  const input = box.querySelector("input");
+  assert.equal(input.value, "");
+  assert.equal(input.getAttribute("placeholder"), "***");
+  assert.ok(box.textContent.includes("settings_write_only_hint"));
+  assert.ok(!box.textContent.includes("settings_default"), "no masked default is printed");
+  button(box, "settings_save").click();
+  await settle();
+  assert.equal(page.document.querySelector("dialog"), null);
+  assert.ok(page.document.querySelector("#notice").textContent.includes("settings_unchanged"));
+  input.value = "https://cloud.example/v2";
+  button(box, "settings_save").click();
+  await settle();
+  await answerPin(page);
+  assert.deepEqual(posts(page, "/api/settings")[0].body, { path: URL_ROW.path, value: "https://cloud.example/v2", pin: PIN });
+});
+
+test("a keyed route moving to another host: the dialog names the host the server gave and the retry carries the acknowledgement", async () => {
+  const sent = [];
+  const page = await settingsPage({
+    "GET /api/strings": { language: "en", strings: { err_endpoint_ack_required: "Key goes to {host}." } },
+    "POST /api/settings": (body) => {
+      sent.push(body);
+      return body.ack_endpoint
+        ? { path: URL_ROW.path, changed: true, layer: "runtime", persisted: true }
+        : reply(422, { error: "endpoint_ack_required", field: "value", endpoint: "https://evil.example" });
+    },
+  }, { fields: [URL_ROW], pin_required: true });
+  await open(page, "core-llm_routes");
+  const box = row(page, URL_ROW.path);
+  box.querySelector("input").value = "https://evil.example/v1";
+  button(box, "settings_save").click();
+  await settle();
+  const dialog = await answerPin(page);
+  assert.equal(dialog.querySelector("#dialog-error").textContent, "Key goes to https://evil.example.");
+  await answerPin(page);
+  assert.equal(page.document.querySelector("dialog"), null);
+  assert.equal(sent[0].ack_endpoint, undefined);
+  assert.equal(sent[1].ack_endpoint, "https://evil.example");
 });

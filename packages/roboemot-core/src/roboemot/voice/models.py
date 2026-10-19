@@ -24,6 +24,13 @@ def load_manifest() -> dict[str, ModelSpec]:
     return _models.load_manifest(MANIFEST)
 
 
+def supported_languages() -> frozenset[str]:
+    """Languages the voice stack can listen to and speak: those with both an ``asr_<lang>`` and a
+    ``tts_<lang>`` model in the manifest."""
+    roles = {spec.role for spec in load_manifest().values()}
+    return frozenset(r[4:] for r in roles if r.startswith("asr_") and f"tts_{r[4:]}" in roles)
+
+
 def models_dir(configured: str = "", data_dir: str = "") -> Path:
     """The voice models folder (``~`` expanded; empty: ``voice-models/`` in the data folder)."""
     return Path(configured).expanduser() if configured else paths.voice_models_subdir(data_dir)
@@ -68,4 +75,5 @@ __all__ = [
     "load_manifest",
     "model_file",
     "models_dir",
+    "supported_languages",
 ]

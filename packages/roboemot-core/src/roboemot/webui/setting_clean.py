@@ -4,7 +4,9 @@ Two layers. ``clean_value`` validates any catalogue leaf from its descriptor (ki
 ``ge``/``le``, choices, tuple length) and the ``webui.settings_*`` caps; the stack's pydantic
 validation stays the final check. ``HOOKS`` attach the per-path rules that need more than the
 kind: the wake word sanitiser, the child-safe lines, the wake phrases and the output blocklist.
-Every refusal is a ``ValidationError`` with a stable code and never echoes the value.
+Blocklist words can be removed: the stack refuses it on the runtime layer and the settings editor
+retries it on the app layer (admin PIN). Every refusal is a ``ValidationError`` with a stable code
+and never echoes the value.
 """
 
 from __future__ import annotations
@@ -19,7 +21,6 @@ from typing import Any, cast
 
 from roboemot.config.catalogue import PATH_WILDCARD, FieldDescriptor
 from roboemot.config.schema import RoboEmotConfig
-from roboemot.config.stack import GuardrailError, get_path, keeps_every_entry
 from roboemot.conversation.output_filter import OutputFilter
 from roboemot.voice.keywords import normalise
 from roboemot.voice.robot_name import sanitise_name
@@ -116,14 +117,6 @@ def _items(value: object, cfg: RoboEmotConfig, pattern: re.Pattern[str]) -> list
     return items
 
 
-def _additions(path: str, words: list[str], cfg: RoboEmotConfig) -> list[str]:
-    """The output blocklist only grows from the web UI: a list that drops (or swaps for a
-    look-alike) an entry is a ``GuardrailError``, so it is never retried on the app layer."""
-    if not keeps_every_entry(words, get_path(cfg, path)):
-        raise GuardrailError("the output blocklist cannot lose entries from the web UI")
-    return words
-
-
 def _name(value: object, cfg: RoboEmotConfig) -> str | None:
     """The robot's name under the prompt-name rules (``sanitise_name``): a value the sanitiser
     would alter is refused rather than silently changed; empty or null resets to the platform's
@@ -167,7 +160,7 @@ def clean_hooked(hook: Hook, path: str, value: object, cfg: RoboEmotConfig) -> A
     if hook.kind == LIST_KIND:
         return _items(value, cfg, PHRASE_PATTERN)
     if hook.kind == WORDS_KIND:
-        return _additions(path, _items(value, cfg, WORD_PATTERN), cfg)
+        return _items(value, cfg, WORD_PATTERN)
     if hook.kind == NAME_KIND:
         return _name(value, cfg)
     return _line(path, value, cfg)

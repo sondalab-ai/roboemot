@@ -272,23 +272,62 @@ def test_an_unknown_field_in_an_entry_is_refused(editor):
     assert caught.value.code == "entry_invalid"
 
 
-def test_no_new_language_can_be_added(editor, stack):
-    for path, key in (
-        ("voice.keywords", "fr"),
-        ("safety.minor_lines", "fr"),
-        ("conversation.confirm_yes", "fr"),
-    ):
-        with pytest.raises(SettingNotAllowed):
-            editor.add_entry(path, key, {})
+LINES = {
+    "greeting": "Hallo!",
+    "robot_name": "Ich heisse {name}.",
+    "ask_grown_up": "Frag einen Erwachsenen.",
+    "filtered": "Das sage ich nicht.",
+}
+
+
+@pytest.fixture
+def german(monkeypatch):
+    monkeypatch.setattr("roboemot.webui.settings.supported_languages", lambda: {"it", "en", "de"})
+
+
+def test_the_supported_languages_come_from_the_voice_models():
+    from roboemot.voice.models import supported_languages
+
+    assert supported_languages() == {"it", "en"}
+
+
+def test_a_language_the_voice_stack_lacks_cannot_be_added(editor, stack):
+    for path in ("voice.keywords", "safety.minor_lines"):
+        with pytest.raises(ValidationError) as caught:
+            editor.add_entry(path, "fr", {})
+        assert caught.value.code == "language_unsupported"
+    with pytest.raises(SettingNotAllowed):
+        editor.add_entry("conversation.confirm_yes", "fr", {})
     for path in (
         "voice.keywords.fr.wake_phrases",
         "safety.minor_lines.fr.greeting",
-        "safety.minor_output_blocklist.fr",
         "conversation.confirm_yes.fr",
     ):
         with pytest.raises(SettingNotAllowed):
             editor.change(path, ["x"])
     assert "fr" not in stack.effective().voice.keywords
+
+
+def test_a_supported_language_can_be_added_removed_and_restored(german, editor, stack, tmp_path):
+    editor.add_entry("safety.minor_lines", "de", LINES)
+    editor.add_entry("voice.keywords", "de", {"wake_phrases": ["hallo robo"]})
+    assert stack.effective().safety.minor_lines["de"].greeting == "Hallo!"
+    rows = {r["path"]: r for r in editor.fields()}
+    assert rows["voice.keywords"]["removable"] == ["de"]
+    fresh = make_stack(tmp_path, llm_routes=[ROUTE], appraisal=appraisal([RULE_B, RULE_A]))
+    SettingsEditor(fresh, store=tmp_path / FILE).restore()
+    assert "de" in fresh.effective().voice.keywords and "de" in fresh.effective().safety.minor_lines
+    assert editor.remove_entry("voice.keywords.de")["changed"]
+    assert "de" not in stack.effective().voice.keywords
+
+
+def test_a_new_language_gets_the_same_line_checks_as_an_existing_one(german, editor):
+    with pytest.raises(ValidationError) as caught:
+        editor.add_entry("safety.minor_lines", "de", {**LINES, "greeting": "Hi {oops}"})
+    assert caught.value.code == "line_invalid"
+    with pytest.raises(ValidationError) as caught:
+        editor.add_entry("voice.keywords", "de", {"wake_phrases": ["bad!!"]})
+    assert caught.value.code == "phrase_invalid"
 
 
 def test_a_lower_layer_dict_entry_cannot_be_removed(editor, stack):
@@ -453,16 +492,6 @@ def test_locality_stays_refused_on_both_layers(editor, stack):
     assert {v.check for v in caught.value.violations} == {"locality"}
     assert stack.effective().llm_routes[0].base_url == ROUTE["base_url"]
     assert "llm_routes" in stack.app and "nas.local" not in json.dumps(stack.app)
-
-
-def test_a_secret_route_cannot_be_pointed_at_another_host(tmp_path):
-    route = {**ROUTE, "api_key": "${secret:k}"}
-    stack = make_stack(tmp_path, llm_routes=[route])
-    editor = SettingsEditor(stack, store=tmp_path / FILE)
-    with pytest.raises(GuardrailError) as caught:
-        editor.change("llm_routes.lan.base_url", "https://evil.example.com/v1")
-    assert {v.check for v in caught.value.violations} == {"secret"}
-    assert stack.effective().llm_routes[0].base_url == ROUTE["base_url"]
 
 
 def test_only_field_direction_safety_violations_are_retried():
@@ -697,7 +726,7 @@ def test_endpoint_errors_are_bare_codes(web, stack):
     gone = post(web, "/api/settings/entry/remove", path="voice.moods.joy")
     assert gone.status == 422 and gone.json == {"error": "entry_in_lower_layer", "field": "path"}
     odd = post(web, "/api/settings/entry", path="voice.keywords", key="fr", value={})
-    assert odd.status == 403 and odd.json["error"] == "setting_not_allowed"
+    assert odd.status == 422 and odd.json == {"error": "language_unsupported", "field": "key"}
     smuggled = post(web, "/api/settings/reset", path="affect.update_hz", layer="app")
     assert smuggled.status == 422 and smuggled.json["error"] == "unknown_field"
     assert post(web, "/api/settings/reset").status == 400
@@ -709,6 +738,7 @@ def test_new_error_codes_exist_in_both_languages():
     for code in (
         "value_range", "value_choice", "value_merged", "text_invalid", "text_too_long",
         "key_invalid", "entry_exists", "entry_invalid", "entry_in_lower_layer", "not_resettable",
+        "language_unsupported", "endpoint_ack_required", "url_credentials",
     ):  # fmt: skip
         assert EN[f"err_{code}"] and IT[f"err_{code}"]
 
@@ -797,17 +827,92 @@ def test_the_audit_file_is_private(tmp_path):
 
 
 @pytest.mark.parametrize("api_key", ["sk-literal-key", "${secret:k}"])
-@pytest.mark.parametrize("url", ["https://evil.example.com/v1", "http://api.example.com/v1"])
-def test_a_keyed_route_cannot_change_endpoint_from_the_web(tmp_path, api_key, url):
+@pytest.mark.parametrize(
+    ("url", "target"),
+    [
+        ("https://evil.example.com/v1", "https://evil.example.com"),
+        ("http://api.example.com/v1", "http://api.example.com"),
+        ("https://api.example.com:8443/v1", "https://api.example.com:8443"),
+    ],
+)
+def test_a_keyed_route_changes_endpoint_only_with_an_ack_naming_the_new_one(
+    tmp_path, api_key, url, target
+):
     stack = make_stack(tmp_path, llm_routes=[{**ROUTE, "api_key": api_key}])
     editor = SettingsEditor(stack, store=tmp_path / FILE)
-    with pytest.raises(GuardrailError) as caught:  # a different host, or an http downgrade
-        editor.change("llm_routes.lan.base_url", url)
-    assert {v.check for v in caught.value.violations} == {"secret"}
+    path = "llm_routes.lan.base_url"
+    with pytest.raises(ValidationError) as caught:
+        editor.change(path, url)
+    assert caught.value.code == "endpoint_ack_required" and caught.value.extra == {
+        "endpoint": target
+    }
+    for wrong in (None, "", "https://api.example.com", target + "/", "evil.example.com"):
+        with pytest.raises(ValidationError):
+            editor.change(path, url, ack=wrong)
     assert stack.effective().llm_routes[0].base_url == ROUTE["base_url"]
-    assert api_key not in str(caught.value)
+    assert api_key not in str(caught.value) and api_key not in caught.value.extra["endpoint"]
+    assert editor.change(path, url, ack=target)["changed"]
+    assert stack.effective().llm_routes[0].base_url == url
+    note = next(a for a in stack.audit if a.key == "llm_routes.lan.endpoint")
+    assert note.old == "https://api.example.com" and note.new == target
+    assert api_key not in (tmp_path / "audit.jsonl").read_text()
+    fresh = make_stack(tmp_path, llm_routes=[{**ROUTE, "api_key": api_key}])
+    SettingsEditor(fresh, store=tmp_path / FILE).restore()
+    assert fresh.effective().llm_routes[0].base_url == url  # the confirmed move survives a restart
+
+
+def test_the_same_endpoint_needs_no_ack_and_the_audit_names_hosts_only(tmp_path):
+    userinfo = "https://alice:pw-CANARY-9@api.example.com/v1"
+    stack = make_stack(
+        tmp_path, llm_routes=[{**ROUTE, "api_key": "${secret:k}", "base_url": userinfo}]
+    )
+    editor = SettingsEditor(stack, store=tmp_path / FILE)
     editor.change("llm_routes.lan.base_url", "https://api.example.com/v2")  # same endpoint
-    assert stack.effective().llm_routes[0].base_url.endswith("/v2")
+    assert not any(a.key.endswith(".endpoint") for a in stack.audit)
+    editor.change(
+        "llm_routes.lan.base_url", "https://other.example.com/v1", ack="https://other.example.com"
+    )
+    blob = (tmp_path / "audit.jsonl").read_text()
+    assert "pw-CANARY-9" not in blob and "alice" not in blob and "${secret" not in blob
+    note = next(a for a in stack.audit if a.key == "llm_routes.lan.endpoint")
+    assert (note.old, note.new) == ("https://api.example.com", "https://other.example.com")
+
+
+def test_an_ack_does_not_unlock_the_other_secret_rules(tmp_path):
+    stack = make_stack(tmp_path, llm_routes=[{**ROUTE, "api_key": "${secret:k}"}])
+    editor = SettingsEditor(stack, store=tmp_path / FILE)
+    with pytest.raises(GuardrailError) as caught:  # a LAN host would also make the route local
+        editor.change(
+            "llm_routes.lan.base_url", "http://nas.local:8080/v1", ack="http://nas.local:8080"
+        )
+    assert {v.check for v in caught.value.violations} == {"locality"}
+    assert stack.effective().llm_routes[0].base_url == ROUTE["base_url"]
+    with pytest.raises(SettingNotAllowed):
+        editor.change("llm_routes.lan.api_key", "x")
+
+
+def test_the_ack_travels_in_the_request_and_the_error_names_the_endpoint(tmp_path):
+    stack = make_stack(tmp_path, llm_routes=[{**ROUTE, "api_key": "${secret:k}"}])
+    srv, client = serve(tmp_path, SettingsEditor(stack, store=tmp_path / FILE), stack)
+    try:
+        body = {
+            "path": "llm_routes.lan.base_url",
+            "value": "https://evil.example.com/v1",
+            "pin": PIN,
+        }
+        first = client.request("POST", "/api/settings", body)
+        assert first.status == 422
+        assert first.json == {
+            "error": "endpoint_ack_required",
+            "field": "value",
+            "endpoint": "https://evil.example.com",
+        }
+        done = client.request(
+            "POST", "/api/settings", {**body, "ack_endpoint": first.json["endpoint"]}
+        )
+        assert done.status == 200 and done.json["layer"] == "runtime"
+    finally:
+        srv.stop()
 
 
 def test_a_route_without_a_key_may_move(tmp_path):
@@ -854,13 +959,12 @@ def test_two_added_entries_both_stay(editor, stack, tmp_path):
     assert rule(fresh, "custom.thing").valence == 0.4 and rule(fresh, "zz.third").valence == 0.5
 
 
-def test_reset_of_the_blocklist_is_refused_other_tightenings_reset(editor, stack):
+def test_the_blocklist_and_other_tightenings_reset(editor, stack):
     path = "safety.minor_output_blocklist.en"
-    editor.change(path, [*get_path(stack.effective(), path), "extra*"])
-    with pytest.raises(ValidationError) as caught:
-        editor.reset(path)
-    assert caught.value.code == "not_resettable"
-    assert "extra*" in get_path(stack.effective(), path)
+    base = get_path(stack.effective(), path)
+    editor.change(path, [*base, "extra*"])
+    assert editor.reset(path)["changed"]
+    assert get_path(stack.effective(), path) == base
     editor.change("webui.name_max_chars", 32)
     assert editor.reset("webui.name_max_chars")["changed"]
     assert stack.effective().webui.name_max_chars == 64

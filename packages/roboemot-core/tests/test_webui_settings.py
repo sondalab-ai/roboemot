@@ -133,10 +133,11 @@ def test_each_field_changes_with_the_pin_and_is_audited(served, stack, path, val
     }
     assert get(stack, path) == value
     entry = stack.audit[-1]
-    assert (entry.source, entry.key, entry.new) == ("webui:127.0.0.1", path, value)
+    logged = "***" if "minor" in path else value  # private paths are redacted in the audit
+    assert (entry.source, entry.key, entry.new) == ("webui:127.0.0.1", path, logged)
     assert entry.old != value
     line = json.loads((stack.audit_path).read_text().splitlines()[-1])
-    assert line["source"] == "webui:127.0.0.1" and line["key"] == path and line["new"] == value
+    assert line["source"] == "webui:127.0.0.1" and line["key"] == path and line["new"] == logged
     assert path in stack.changes[-1].changed_keys  # hot reload (config.changed) fired
     shown = served.request("GET", "/api/settings").json["fields"]
     if "minor" in path:
@@ -380,19 +381,31 @@ def test_error_strings_exist_in_both_languages():
 # ------------------------------------------------------------------ fix round: guardrails
 
 
-def test_blocklist_additions_pass_and_removals_are_refused_even_with_the_pin(served, stack):
+def test_blocklist_words_can_be_removed_with_the_pin_and_land_on_the_app_layer(served, stack):
     current = get(stack, BLOCK)
-    assert put(served, BLOCK, [*current, "newword*"]).status == 200
+    added = put(served, BLOCK, [*current, "newword*"])
+    assert added.status == 200 and added.json["layer"] == "runtime"
     for smaller in (current[:-1], [*current[1:], "newword*"], ["gun*"]):
         resp = put(served, BLOCK, smaller)
-        assert resp.status == 403 and resp.json["error"] == "setting_guardrail"
-    assert get(stack, BLOCK) == [*current, "newword*"]
+        assert resp.status == 200 and resp.json["layer"] == "app", resp.body
+        assert get(stack, BLOCK) == smaller
+    assert stack.audit[-1].key == BLOCK
 
 
-def test_blocklist_swap_for_a_lookalike_counts_as_a_removal(served, stack):
+def test_blocklist_swap_for_a_lookalike_is_a_removal_and_goes_to_the_app_layer(served, stack):
     current = get(stack, BLOCK)
     swapped = ["kіll*" if e == "kill*" else e for e in current]  # Cyrillic i
-    assert put(served, BLOCK, swapped).status == 403
+    assert put(served, BLOCK, swapped).json["layer"] == "app"
+
+
+def test_blocklist_changes_never_show_the_words_in_the_audit(served, stack):
+    current = get(stack, BLOCK)
+    put(served, BLOCK, [*current, "canaryword*"])
+    put(served, BLOCK, current[1:])
+    blob = json.dumps([a.__dict__ for a in stack.audit], default=str) + stack.audit_path.read_text()
+    assert "canaryword" not in blob and current[1] not in blob
+    keys = [a.key for a in stack.audit]
+    assert keys.count(BLOCK) == 2 and "approved" in keys
 
 
 def test_blocklist_case_variants_are_not_removals(served, stack):

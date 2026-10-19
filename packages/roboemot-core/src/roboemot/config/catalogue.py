@@ -27,7 +27,8 @@ Keys of every descriptor (all always present, ``None`` when not applicable):
   ``conservative``, ``description``: from the schema (``field_meta`` for the flags).
 - ``secret``: the value is a secret or secret-shaped (a field is fully secret if any element of
   its value or default is secret-shaped). ``value`` and ``default`` are then ``"***"`` (or null
-  when absent) and the field is never writable from the web.
+  when absent) and the field is never writable from the web, except a route ``base_url`` (see
+  ``write_only``): it is replaced whole, never shown.
 - ``private``: minors, privacy and location settings (``PRIVATE_PATHS``), admin only (the PIN).
   Unless the catalogue is built with ``reveal_private``, ``value`` and ``default`` are ``"***"``
   and a private container lists no entry keys and no ``entry``; the field itself stays writable.
@@ -41,13 +42,21 @@ Keys of every descriptor (all always present, ``None`` when not applicable):
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from typing import Any, Literal, TypedDict, get_args, get_origin
 
 from pydantic import BaseModel
 
 from roboemot.diagnostics import jsonable
-from roboemot.redact import REDACTED, is_secret_key, secret_shaped
+from roboemot.redact import (
+    PATH_WILDCARD,
+    PRIVATE_PATHS,
+    REDACTED,
+    is_private,
+    is_secret_key,
+    secret_shaped,
+)
 
 from .schema import RoboEmotConfig
 from .stack import (
@@ -80,23 +89,6 @@ CONTAINERS = ("dict_of_model", "keyed_list", "string_list_dict")
 ENTRY_KINDS = ("dict_of_model", "keyed_list")
 TEXT_KINDS = ("text", "enum", "string_list", "string_dict", "json")
 STRUCTURED_KINDS = ("string_dict", "json")
-PRIVATE_PATHS = (
-    "circadian.location",
-    "privacy",
-    "safety.minor_motion_factor",
-    "safety.minor_hold_s",
-    "safety.minor_hold_periods",
-    "safety.minors_allowed_llm",
-    "safety.minor_output_blocklist",
-    "safety.minor_lines",
-    "register.child.minor_content_policy",
-    "register.teen.minor_content_policy",
-    "register.adult.minor_content_policy",
-    "register.senior.minor_content_policy",
-    "register.unknown.minor_content_policy",
-    "reflexes.rules.*.suppress_with_minor",
-)
-PATH_WILDCARD = "*"
 DEFAULT_LIST_KEY = "name"
 ENTRY_PLACEHOLDER = "_"
 BLANK_SOURCE = "schema"
@@ -188,22 +180,19 @@ def descriptor(path: str, kind: str, value: Any = None, **fields: Any) -> FieldD
     return row
 
 
-def is_private(path: str) -> bool:
-    """Whether ``path`` is one of ``PRIVATE_PATHS`` or inside one (a ``*`` matches one segment)."""
-    parts = path.split(".")
-    for pattern in PRIVATE_PATHS:
-        want = pattern.split(".")
-        if len(parts) >= len(want) and all(
-            w in (PATH_WILDCARD, p) for w, p in zip(want, parts, strict=False)
-        ):
-            return True
-    return False
+WRITE_ONLY_URL = re.compile(r"llm_routes\.[^.]+\.base_url")
+
+
+def write_only(path: str) -> bool:
+    """A route ``base_url``: secret when it holds credentials, yet replaceable whole from the web
+    (the stored value is never sent, a new value may not hold credentials)."""
+    return WRITE_ONLY_URL.fullmatch(path) is not None
 
 
 def seal(row: FieldDescriptor, name: str, reveal_private: bool = False) -> None:
     """Set ``secret`` and ``private`` of a leaf row and redact its ``value`` and ``default``
     (a private value stays visible with ``reveal_private``; a secret never does). A private field
-    is admin only; a secret field is never writable."""
+    is admin only; a secret field is never writable (a route ``base_url`` apart)."""
     row["secret"] = _is_secret(row["kind"], name, row["value"], row["default"])
     row["private"] = is_private(row["path"])
     row["admin_only"] = row["admin_only"] or row["private"]
@@ -211,7 +200,7 @@ def seal(row: FieldDescriptor, name: str, reveal_private: bool = False) -> None:
     if hide:
         row["value"] = REDACTED if row["value"] is not None else None
         row["default"] = REDACTED if row["default"] is not None else None
-    if row["secret"]:
+    if row["secret"] and not write_only(row["path"]):
         row["writable"] = False
 
 
@@ -462,12 +451,14 @@ def build_catalogue(
 
 __all__ = [
     "CONTAINERS",
+    "PATH_WILDCARD",
     "DESCRIPTOR_KEYS",
     "KINDS",
     "PRIVATE_PATHS",
     "FieldDescriptor",
     "build_catalogue",
     "classify",
+    "write_only",
     "descriptor",
     "is_private",
     "seal",
