@@ -33,6 +33,9 @@ Keys of every descriptor (all always present, ``None`` when not applicable):
   and a private container lists no entry keys and no ``entry``; the field itself stays writable.
   ``admin_only`` is true on every private field. A secret stays redacted even when revealed.
 - ``writable``: the web UI may write it today.
+- ``removable``: for ``dict_of_model`` and ``keyed_list`` only (else ``None``): the entry keys the
+  web UI may remove, i.e. those no layer below the runtime one holds (a merge cannot mask them).
+  Empty for a private container that is not revealed. The page shows Remove from this list only.
 """
 
 from __future__ import annotations
@@ -47,7 +50,14 @@ from roboemot.diagnostics import jsonable
 from roboemot.redact import REDACTED, is_secret_key, secret_shaped
 
 from .schema import RoboEmotConfig
-from .stack import KEYED_LISTS, field_meta, resolve_in_layer, strip_optional
+from .stack import (
+    KEYED_LISTS,
+    entry_identity,
+    field_meta,
+    get_path,
+    resolve_in_layer,
+    strip_optional,
+)
 
 KINDS = (
     "number",
@@ -117,6 +127,7 @@ class FieldDescriptor(TypedDict):
     secret: bool
     private: bool
     writable: bool
+    removable: list[str] | None
 
 
 DESCRIPTOR_KEYS = frozenset(FieldDescriptor.__annotations__)
@@ -169,6 +180,7 @@ def descriptor(path: str, kind: str, value: Any = None, **fields: Any) -> FieldD
         "secret": False,
         "private": False,
         "writable": False,
+        "removable": None,
     }
     row.update(fields)  # type: ignore[typeddict-item]
     if kind not in CONTAINERS:
@@ -310,7 +322,11 @@ class _Walker:
             return
         if value is not None and origin is dict and len(args) == 2 and _model_of(args[1]):
             entries = {k: v for k, v in value.items() if _addressable(k)}
-            self.container(path, "dict_of_model", info, list(entries), None, _model_of(args[1]))
+            held = self.lower(path)
+            fresh = [k for k in entries if isinstance(held, dict) and k not in held]
+            self.container(
+                path, "dict_of_model", info, list(entries), None, _model_of(args[1]), fresh
+            )
             for key, entry in entries.items():
                 self.model(_model_of(args[1]), f"{path}.{key}.", entry)  # type: ignore[arg-type]
             return
@@ -318,7 +334,14 @@ class _Walker:
             key = KEYED_LISTS.get(path, DEFAULT_LIST_KEY)
             taken: set[str] = set()
             segments = [_segment(item, key, n, taken) for n, item in enumerate(value)]
-            self.container(path, "keyed_list", info, segments, key, _model_of(args[0]))
+            held = self.lower(path)
+            fresh = [
+                seg
+                for seg, item in zip(segments, value, strict=True)
+                if isinstance(held, list)
+                and all(entry_identity(path, e) != entry_identity(path, item) for e in held)
+            ]
+            self.container(path, "keyed_list", info, segments, key, _model_of(args[0]), fresh)
             for segment, entry in zip(segments, value, strict=True):
                 self.model(_model_of(args[0]), f"{path}.{segment}.", entry)  # type: ignore[arg-type]
             return
@@ -330,6 +353,16 @@ class _Walker:
                 self.leaf(f"{path}.{key}", name, info, "string_list", {}, words, False)
             return
         self.leaf(path, name, info, kind, extra, value, nullable or sub is not None)
+
+    def lower(self, path: str) -> Any:
+        """The value at ``path`` without the runtime layer; ``None`` when there is none (or in a
+        blank entry, which has no lower layer)."""
+        if self.base is None:
+            return None
+        try:
+            return get_path(self.base, path)
+        except (KeyError, IndexError, ValueError, TypeError):
+            return None
 
     def base_row(self, path: str, info: Any, kind: str) -> FieldDescriptor:
         meta = field_meta(path)
@@ -354,15 +387,19 @@ class _Walker:
         keys: list[str],
         key: str | None,
         model: type[BaseModel] | None,
+        removable: list[str] | None = None,
     ) -> None:
         row = self.base_row(path, info, kind)
         row["private"] = is_private(path)
         row["admin_only"] = row["admin_only"] or row["private"]
         row["key"] = key
+        if kind in ENTRY_KINDS:
+            row["removable"] = []
         if not row["private"] or self.reveal:
             row["value"] = list(keys)
             if kind in ENTRY_KINDS and model is not None:
                 row["entry"] = self.entry(path, model)
+                row["removable"] = removable or []
         else:
             row["value"] = []
         self.out.append(row)

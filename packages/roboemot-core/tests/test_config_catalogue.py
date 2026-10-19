@@ -35,7 +35,7 @@ def test_the_descriptor_contract_is_pinned():
     assert set(DESCRIPTOR_KEYS) == {
         "path", "kind", "nullable", "value", "default", "source", "ge", "le", "unit",
         "restart", "admin_only", "opt_in", "conservative", "description", "choices",
-        "item_kind", "length", "key", "entry", "secret", "private", "writable",
+        "item_kind", "length", "key", "entry", "secret", "private", "writable", "removable",
     }  # fmt: skip
     assert set(KINDS) == {
         "number", "int", "bool", "text", "enum", "tuple", "string_list", "enum_list",
@@ -405,3 +405,30 @@ def test_the_debug_report_keeps_plain_hosts_and_user_names(url):
 def test_the_debug_report_masks_a_user_that_looks_like_a_token_but_keeps_the_host(user):
     out = jsonable({"u": f"https://{user}@git.example/x"}, bare_user=False)
     assert out == {"u": "https://***@git.example/x"}
+
+
+def test_removable_lists_only_entries_no_lower_layer_holds():
+    stack = ConfigStack(app={"llm_routes": [{**ROUTE, "base_url": "http://x/v1"}]})
+    stack.set("voice.moods.tender", {}, source="t")
+    stack.set(
+        "llm_routes",
+        [{"name": "added", "base_url": "https://y.example/v1", "model": "m"}],
+        source="t",
+    )
+    r = rows(stack)
+    assert r["voice.moods"]["removable"] == ["tender"]
+    assert r["llm_routes"]["removable"] == ["added"]
+    assert r["voice.keywords"]["removable"] == []
+    assert r["affect.update_hz"]["removable"] is None
+
+
+LINES = dict.fromkeys(("greeting", "robot_name", "ask_grown_up", "filtered"), "hi")
+
+
+def test_a_private_container_lists_nothing_removable_until_revealed():
+    stack = ConfigStack()
+    assert rows(stack)["safety.minor_lines"]["removable"] == []
+    stack.set("safety.minor_lines.xx", LINES, source="t", admin=True)
+    assert rows(stack)["safety.minor_lines"]["removable"] == []
+    shown = {r["path"]: r for r in build_catalogue(stack, reveal_private=True)}
+    assert shown["safety.minor_lines"]["removable"] == ["xx"]

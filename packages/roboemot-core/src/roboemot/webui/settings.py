@@ -355,17 +355,17 @@ class SettingsEditor:
             }
 
     def remove_entry(self, path: object, source: str = SOURCE) -> dict[str, Any]:
-        """Remove the entry at ``path`` (``container.key`` or a list entry) if only the runtime
-        layer holds it. A lower layer's entry cannot be masked (the merge only adds and overrides),
-        so that raises ``entry_in_lower_layer``; an unknown entry raises ``SettingNotAllowed``."""
+        """Remove the entry at ``path`` (``container.key`` or a list entry) if the catalogue lists
+        it as ``removable``: only the runtime layer holds it. A lower layer's entry cannot be
+        masked (the merge only adds and overrides), so that raises ``entry_in_lower_layer``; an
+        unknown entry raises ``SettingNotAllowed``."""
         with self._lock:
             rows, tree = self._rows(), self.stack.merged_tree()
             box_path, _, name = path.rpartition(".") if isinstance(path, str) else ("", "", "")
             box = rows.get(box_path)
             if box is None or box["kind"] not in ENTRY_KINDS or name not in box["value"]:
                 raise SettingNotAllowed("path")
-            base = self.stack.merged_tree(include_runtime=False)
-            if self._in_tree(base, box, path, tree):
+            if name not in box["removable"]:
                 raise ValidationError("entry_in_lower_layer", "path")
             key = okey(tree, path)
             self.stack.clear(path, source=source, subtree=True, admin=True, refuse=REFUSED_CHECKS)
@@ -611,19 +611,6 @@ class SettingsEditor:
         if path in KEYED_LISTS:
             return path, entry_key(path, ident_fields(path, entry)), [entry]
         return path, path, [*current, entry]
-
-    def _in_tree(
-        self, base: dict[str, Any], box: FieldDescriptor, path: str, tree: dict[str, Any]
-    ) -> bool:
-        """Whether the entry at ``path`` of the effective tree exists in ``base`` (the layers
-        without runtime): by key for a dict, by identity for a list."""
-        if box["kind"] == "dict_of_model":
-            return path.rpartition(".")[2] in get_path(base, box["path"])
-        entry = get_path(tree, path)
-        return any(
-            entry_identity(box["path"], e) == entry_identity(box["path"], entry)
-            for e in get_path(base, box["path"])
-        )
 
     # ------------------------------------------------------------------ restore internals
 

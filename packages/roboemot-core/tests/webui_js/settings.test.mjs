@@ -14,7 +14,7 @@ function d(path, kind, extra = {}) {
   return {
     path, kind, nullable: false, value: null, default: null, source: "schema", ge: null, le: null, unit: null,
     restart: false, admin_only: false, opt_in: false, conservative: null, description: "", choices: null,
-    item_kind: null, length: null, key: null, entry: null, secret: false, private: false, writable: true, ...extra,
+    item_kind: null, length: null, key: null, entry: null, secret: false, private: false, writable: true, removable: null, ...extra,
   };
 }
 
@@ -42,7 +42,7 @@ function fields() {
     d("voice.opt2", "number", { value: 3, default: null, nullable: true, ge: 0, le: 5 }),
     d("voice.api_key", "text", { value: "***", secret: true, writable: false }),
     d("voice.fixed", "number", { value: 7, default: 7, writable: false, ge: 0, le: 9 }),
-    d("voice.moods", "dict_of_model", { value: ["calm"], entry: ENTRY, writable: false }),
+    d("voice.moods", "dict_of_model", { value: ["calm"], entry: ENTRY, writable: false, removable: ["calm"] }),
     d("voice.moods.calm.rate", "number", { value: 1, default: 1, ge: 0, le: 2, source: "runtime" }),
     d("voice.moods.calm.label", "text", { value: "c" }),
     d("appraisal.rules", "keyed_list", { value: ["0"], key: "event", writable: false,
@@ -415,8 +415,8 @@ test("entries: they open lazily, are removed only when the runtime holds them, a
   assert.ok(page.document.querySelector("#notice").textContent.includes("settings_entry_removed"));
 });
 
-test("entries without a runtime value have no Remove button", async () => {
-  const flat = fields().map((f) => (f.path.startsWith("voice.moods.") ? { ...f, source: "schema" } : f));
+test("entries the server does not list as removable have no Remove button, whatever their source", async () => {
+  const flat = fields().map((f) => (f.path === "voice.moods" ? { ...f, removable: [] } : f));
   const page = await settingsPage({}, { fields: flat, pin_required: true });
   await open(page, "core-voice");
   const block = page.document.querySelector('[data-entry="voice.moods.calm"]');
@@ -826,4 +826,17 @@ test("restart: the button is rebuilt on refresh, so it appears and disappears wi
   assert.equal(page.document.querySelector("#settings-restart"), null);
   page.run("settingsState.data.robot.actions = ['restart']; refreshSettings()");
   assert.ok(page.document.querySelector("#settings-restart"));
+});
+
+test("a revealed private container brings its removable list", async () => {
+  const hidden = d("safety.minor_lines", "dict_of_model", { value: [], private: true, admin_only: true, removable: [], writable: false });
+  const shown = d("safety.minor_lines", "dict_of_model", { value: ["xx"], private: true, admin_only: true, removable: ["xx"], entry: ENTRY, writable: false });
+  const page = await settingsPage({ "POST /api/settings/reveal": { fields: [shown, d("safety.minor_lines.xx.rate", "number", { value: 1, private: true, admin_only: true })] } },
+    { fields: [hidden], pin_required: true });
+  await open(page, "core-safety");
+  button(row(page, "safety.minor_lines"), "settings_reveal").click();
+  await settle();
+  await answerPin(page);
+  const block = page.document.querySelector('[data-entry="safety.minor_lines.xx"]');
+  assert.equal(buttons(block, "settings_remove_entry").length, 1);
 });

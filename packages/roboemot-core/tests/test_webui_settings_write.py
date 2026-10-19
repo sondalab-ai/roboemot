@@ -1091,3 +1091,20 @@ def test_an_edit_of_an_added_entry_survives_a_later_add(editor, stack, tmp_path)
     SettingsEditor(fresh, store=tmp_path / FILE).restore()
     check(fresh)
     assert "llm_routes#patch" not in stack._runtime  # the patch slot holds lower-layer edits only
+
+
+def test_remove_is_accepted_exactly_for_the_removable_entries(editor, stack):
+    editor.add_entry("voice.moods", "tender", {})
+    editor.add_entry("llm_routes", None, {**ROUTE, "name": "n2"})
+    rows = {r["path"]: r for r in editor.fields()}
+    assert rows["voice.moods"]["removable"] == ["tender"]
+    assert rows["llm_routes"]["removable"] == ["n2"]
+    for container in ("voice.moods", "llm_routes", "voice.keywords", "appraisal.rules"):
+        for key in rows[container]["value"]:
+            if key in rows[container]["removable"]:
+                continue
+            with pytest.raises(ValidationError) as caught:
+                editor.remove_entry(f"{container}.{key}")
+            assert caught.value.code == "entry_in_lower_layer"
+    assert editor.remove_entry("voice.moods.tender")["changed"]
+    assert editor.remove_entry("llm_routes.n2")["changed"]

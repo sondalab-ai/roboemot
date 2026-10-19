@@ -42,7 +42,7 @@ function mergeRevealed(fields) {
   const merged = new Map(fields.map((f) => [f.path, f]));
   for (const [path, shown] of revealedSettings) {
     const base = merged.get(path);
-    merged.set(path, base ? { ...base, value: shown.value, default: shown.default, entry: shown.entry } : shown);
+    merged.set(path, base ? { ...base, value: shown.value, default: shown.default, entry: shown.entry, removable: shown.removable } : shown);
   }
   return [...merged.values()];
 }
@@ -89,8 +89,6 @@ function nodeMatches(node, words, changedOnly) {
   const hit = (n) => words.every((w) => nodeText(n).includes(w)) || n.kids.some(hit);
   return hit(node) && (!changedOnly || isChanged(node));
 }
-
-const anyRuntime = (node) => node.row.source === "runtime" || node.kids.some(anyRuntime);
 
 // ---------------------------------------------------------------- small helpers
 
@@ -567,7 +565,7 @@ function entryBlock(node, key) {
   const identity = kids.find((k) => isIdentity(k));
   const title = identity && identity.row.value ? key + " · " + formatValue(identity.row.value) : key;
   const { toggle, body } = nestedDisclosure("entry:" + node.row.path + "." + key, title, () => kids.map(settingNode));
-  const removable = SETTING_ENTRY_KINDS.includes(node.row.kind) && !node.row.secret && kids.some(anyRuntime);
+  const removable = SETTING_ENTRY_KINDS.includes(node.row.kind) && !node.row.secret && (node.row.removable || []).includes(key);
   const path = node.row.path + "." + key;
   const remove = removable
     ? button(t("settings_remove_entry"), "danger", () => guarded(async () => {
