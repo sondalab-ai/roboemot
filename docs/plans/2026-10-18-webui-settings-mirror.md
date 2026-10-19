@@ -71,8 +71,10 @@ Go-ahead for 4b, 5 and a flake slice (estimate now ~31 runs).
 - Kept: `circadian.location` private; robot plugins cannot claim safety/webui/privacy/llm_routes or private/admin
   paths; raw-JSON fields read-only; only web-added entries removable; only safety loosening persists to the app YAML;
   "default" = value after reset.
-- Reboot: shown only if `pollen` can already run `systemctl reboot` without a password. The installer adds nothing.
-  Derive this from Pollen sources/docs first; ask the owner to run robot commands only for what stays unknown.
+- Reboot: dropped. reachy-mini-os >= 0.2.4 (`stage2/05-reachy-mini/00-run.sh`, `/etc/sudoers.d/010-pollen-reachy`)
+  allows `pollen` only a fixed command list (no `systemctl reboot`; `shutdown -h now` is there); older images allow
+  bare `systemctl` (CVE-2026-53605). Owner chose Restart only: remove the unused `Rebootable`/`REBOOT` hook.
+- Robot commands: derive from Pollen sources/docs first; ask the owner to run them only for what stays unknown.
 - Restart RoboEmot: daemon route accepted. The PIN dialog lists zero pose, possible WebRTC drop, kill after 20 s (EN+IT).
 - Folded into slice 5 (reverses agent defaults):
   - Remove is shown only where the server would accept it.
