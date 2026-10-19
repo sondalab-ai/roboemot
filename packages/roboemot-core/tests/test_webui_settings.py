@@ -1,4 +1,4 @@
-"""Settings API of the web UI: allowlist, PIN confirmation, guardrails, audit (SPEC 11A, 12)."""
+"""Settings API of the web UI: field catalogue, PIN, guardrails, audit (SPEC 11A, 12)."""
 
 from __future__ import annotations
 
@@ -75,7 +75,7 @@ def put(client, path, value, pin=PIN, **extra):
     )
 
 
-def test_list_carries_the_whole_catalogue_with_the_allowlist_writable(served, stack):
+def test_list_carries_the_whole_catalogue_with_every_plain_leaf_writable(served, stack):
     data = served.request("GET", "/api/settings").json
     fields = {f["path"]: f for f in data["fields"]}
     assert set(data) == {"fields", "robot", "pin_required"}, "the legacy settings list is gone"
@@ -133,10 +133,11 @@ def test_each_field_changes_with_the_pin_and_is_audited(served, stack, path, val
     }
     assert get(stack, path) == value
     entry = stack.audit[-1]
-    assert (entry.source, entry.key, entry.new) == ("webui:127.0.0.1", path, value)
+    logged = "***" if "minor" in path else value  # private paths are redacted in the audit
+    assert (entry.source, entry.key, entry.new) == ("webui:127.0.0.1", path, logged)
     assert entry.old != value
     line = json.loads((stack.audit_path).read_text().splitlines()[-1])
-    assert line["source"] == "webui:127.0.0.1" and line["key"] == path and line["new"] == value
+    assert line["source"] == "webui:127.0.0.1" and line["key"] == path and line["new"] == logged
     assert path in stack.changes[-1].changed_keys  # hot reload (config.changed) fired
     shown = served.request("GET", "/api/settings").json["fields"]
     if "minor" in path:
@@ -333,8 +334,8 @@ def test_stack_validation_error_does_not_echo(tmp_path, stack):
 
 
 def test_a_real_loosening_through_the_stack_is_refused(stack):
-    """The editor leaves the stack's guard in force: an allowlisted path that is not admin-only
-    would still be refused if it loosened a safety rule (here simulated by an unlisted one)."""
+    """The editor leaves the stack's guard in force: a writable path that is not admin-only
+    would still be refused if it loosened a safety rule (here simulated by one the stack knows)."""
     with pytest.raises(GuardrailError):
         stack.set("safety.minor_motion_factor", 1.0, source="webui", admin=True)
 
@@ -351,6 +352,7 @@ def test_admin_only_fields_pass_admin_to_the_stack(stack):
         "admin": True,  # one PIN covers operator and admin
         "must_exist": True,
         "refuse": frozenset({"reflex", "locality", "secret"}),
+        "exempt": frozenset(),
     }
     assert [c[1] for c in calls] == [expected, expected]
 
@@ -380,19 +382,31 @@ def test_error_strings_exist_in_both_languages():
 # ------------------------------------------------------------------ fix round: guardrails
 
 
-def test_blocklist_additions_pass_and_removals_are_refused_even_with_the_pin(served, stack):
+def test_blocklist_words_can_be_removed_with_the_pin_and_land_on_the_app_layer(served, stack):
     current = get(stack, BLOCK)
-    assert put(served, BLOCK, [*current, "newword*"]).status == 200
+    added = put(served, BLOCK, [*current, "newword*"])
+    assert added.status == 200 and added.json["layer"] == "runtime"
     for smaller in (current[:-1], [*current[1:], "newword*"], ["gun*"]):
         resp = put(served, BLOCK, smaller)
-        assert resp.status == 403 and resp.json["error"] == "setting_guardrail"
-    assert get(stack, BLOCK) == [*current, "newword*"]
+        assert resp.status == 200 and resp.json["layer"] == "app", resp.body
+        assert get(stack, BLOCK) == smaller
+    assert stack.audit[-1].key == BLOCK
 
 
-def test_blocklist_swap_for_a_lookalike_counts_as_a_removal(served, stack):
+def test_blocklist_swap_for_a_lookalike_is_a_removal_and_goes_to_the_app_layer(served, stack):
     current = get(stack, BLOCK)
     swapped = ["kіll*" if e == "kill*" else e for e in current]  # Cyrillic i
-    assert put(served, BLOCK, swapped).status == 403
+    assert put(served, BLOCK, swapped).json["layer"] == "app"
+
+
+def test_blocklist_changes_never_show_the_words_in_the_audit(served, stack):
+    current = get(stack, BLOCK)
+    put(served, BLOCK, [*current, "canaryword*"])
+    put(served, BLOCK, current[1:])
+    blob = json.dumps([a.__dict__ for a in stack.audit], default=str) + stack.audit_path.read_text()
+    assert "canaryword" not in blob and current[1] not in blob
+    keys = [a.key for a in stack.audit]
+    assert keys.count(BLOCK) == 2 and "approved" in keys
 
 
 def test_blocklist_case_variants_are_not_removals(served, stack):
@@ -532,7 +546,7 @@ def test_a_language_removed_between_expand_and_set_is_not_recreated():
     original = stack.set
 
     def set_after_removal(key, value, **kw):
-        stack.app = {}  # the language disappears after the allowlist was expanded
+        stack.app = {}  # the language disappears after the catalogue was built
         return original(key, value, **kw)
 
     stack.set = set_after_removal

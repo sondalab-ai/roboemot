@@ -26,10 +26,13 @@ KEY_PATTERN = re.compile(r"[A-Za-z0-9_.-]{1,128}")
 class ValidationError(ValueError):
     """A request field is missing or invalid; the message is a stable error code."""
 
-    def __init__(self, code: str, field: str | None = None) -> None:
+    def __init__(
+        self, code: str, field: str | None = None, extra: dict[str, str] | None = None
+    ) -> None:
         super().__init__(code)
         self.code = code
         self.field = field
+        self.extra = extra or {}
 
 
 def only_keys(body: dict[str, Any], allowed: set[str]) -> None:

@@ -585,7 +585,7 @@ def locality_violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> 
     ]
 
 
-def _endpoint_key(url: str) -> tuple[Any, ...]:
+def endpoint_key(url: str) -> tuple[Any, ...]:
     """Scheme, host and port of a URL: where a key would be sent."""
     try:
         parts = urlsplit(url)
@@ -607,7 +607,7 @@ def secret_violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> li
         ref = trusted.get(r.name)
         return (
             ref is not None
-            and _endpoint_key(ref.base_url) == _endpoint_key(r.base_url)
+            and endpoint_key(ref.base_url) == endpoint_key(r.base_url)
             and ref.api_key == r.api_key
         )
 
@@ -880,9 +880,12 @@ class ConfigStack:
         must_exist: bool = False,
         refuse: frozenset[str] = frozenset(),
         drop_runtime: bool = False,
+        exempt: frozenset[str] = frozenset(),
     ) -> RoboEmotConfig:
         """Set a parameter or a whole section. ``must_exist`` refuses (``ConfigError``) a key the
         effective configuration does not have yet, e.g. a language that was removed meanwhile.
+        ``exempt`` lists violation paths that ``refuse`` does not block (one route's ``api_key``
+        finding, for an acknowledged endpoint move); other paths keep every check.
         ``refuse`` names cross-field checks (``Violation.check``) that stay refused whatever
         ``admin`` says. ``drop_runtime`` (app layer) removes the runtime override of the same key
         in the same transaction, so it cannot shadow the new value and a refusal undoes both.
@@ -925,7 +928,7 @@ class ConfigStack:
                 allow = set()
             else:
                 raise ConfigError(f"layer {layer!r} is not writable")
-            cfg = self._commit(undo, allow, source, runtime_keys, refuse, persist)
+            cfg = self._commit(undo, allow, source, runtime_keys, refuse, persist, exempt=exempt)
             self._record(source, key, old, value)
             self._notify(cfg)
             return cfg
@@ -938,6 +941,7 @@ class ConfigStack:
         admin: bool = False,
         must_exist: bool = False,
         refuse: frozenset[str] = frozenset(),
+        exempt: frozenset[str] = frozenset(),
     ) -> RoboEmotConfig:
         """Set several runtime overrides as one change: validated and guarded once on the final
         state, so a rule that spans fields does not depend on their order. All or nothing."""
@@ -962,7 +966,7 @@ class ConfigStack:
                     undo()
 
             allow = {"privacy", "admin"} if admin else set()
-            cfg = self._commit(undo_all, allow, source, slots, refuse)
+            cfg = self._commit(undo_all, allow, source, slots, refuse, exempt=exempt)
             for key, value in changes.items():
                 self._record(source, key, before[key], value)
             self._notify(cfg)
@@ -1045,6 +1049,11 @@ class ConfigStack:
             return old, undo_derived
         return None
 
+    def note(self, source: str, key: str, old: Any, new: Any) -> None:
+        """Add an audit entry for something the stack did not write itself (values are scrubbed)."""
+        with self._lock:
+            self._record(source, key, old, new)
+
     def apply_preset(self, name: str, *, source: str = "api", admin: bool = False) -> None:
         """Switch personality. A preset that loosens safety or privacy needs ``admin=True``."""
         with self._lock:
@@ -1068,6 +1077,7 @@ class ConfigStack:
         refuse: frozenset[str] = frozenset(),
         persist: Callable[[], None] | None = None,
         lenient: bool = False,
+        exempt: frozenset[str] = frozenset(),
     ) -> RoboEmotConfig | None:
         """Validate the tentative state and check guardrails; roll back with ``undo`` on
         failure. ``lenient`` (a clear from a state that was already invalid) skips only the
@@ -1113,7 +1123,11 @@ class ConfigStack:
             )
             if v.path not in base_paths and (v.path, v.candidate) not in live_approved
         ]
-        blocked = [v for v in base_found + rt_found if v.kind not in allow or v.check in refuse]
+        blocked = [
+            v
+            for v in base_found + rt_found
+            if v.kind not in allow or (v.check in refuse and v.path not in exempt)
+        ]
         if blocked:
             undo()
             raise GuardrailError(

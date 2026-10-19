@@ -130,6 +130,7 @@ async function api(method, path, body) {
     const err = new Error(data.error || "generic");
     err.status = resp.status;
     err.detail = data.detail;
+    err.endpoint = data.endpoint;
     err.retryAfter = Number(resp.headers.get("Retry-After"));
     throw err;
   }
@@ -140,6 +141,7 @@ function explain(err) {
   const known = state.strings["err_" + err.message];
   let text = known || t("err_generic");
   if (err.message === "consent_refused" && err.detail) text += " " + err.detail;
+  if (err.endpoint) text = text.replace("{host}", () => err.endpoint);
   const wait = err.retryAfter;
   if (err.status === 429 && wait > 0 && wait <= 60) text += " " + t("dialog_retry_in", { n: wait });
   return text;

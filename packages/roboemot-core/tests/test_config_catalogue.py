@@ -9,14 +9,12 @@ from roboemot.config.catalogue import (
     CONTAINERS,
     DESCRIPTOR_KEYS,
     KINDS,
-    PRIVATE_PATHS,
     build_catalogue,
     descriptor,
-    is_private,
 )
 from roboemot.config.stack import ConfigStack, flatten, get_path
 from roboemot.diagnostics import jsonable
-from roboemot.redact import REDACTED, secret_shaped
+from roboemot.redact import PRIVATE_PATHS, REDACTED, is_private, secret_shaped
 
 CANARY = "hunter2-CANARY"
 ROUTE = {
@@ -35,7 +33,7 @@ def test_the_descriptor_contract_is_pinned():
     assert set(DESCRIPTOR_KEYS) == {
         "path", "kind", "nullable", "value", "default", "source", "ge", "le", "unit",
         "restart", "admin_only", "opt_in", "conservative", "description", "choices",
-        "item_kind", "length", "key", "entry", "secret", "private", "writable",
+        "item_kind", "length", "key", "entry", "secret", "private", "writable", "removable",
     }  # fmt: skip
     assert set(KINDS) == {
         "number", "int", "bool", "text", "enum", "tuple", "string_list", "enum_list",
@@ -348,5 +346,133 @@ def test_a_nullable_container_with_no_value_becomes_a_json_leaf():
     assert row["kind"] == "json" and row["nullable"] and row["value"] is None
 
 
-def test_ssh_url_with_user_info_is_redacted_in_the_debug_report():
+def test_the_debug_report_shows_a_user_name_without_a_password():
+    assert jsonable({"remote": "ssh://user@host"}, bare_user=False) == {"remote": "ssh://user@host"}
+    assert jsonable({"r": "see ssh://pollen@reachy.local now"}, bare_user=False) == {
+        "r": "see ssh://pollen@reachy.local now"
+    }
+
+
+def test_the_debug_report_still_hides_a_password_and_other_secret_shapes():
+    for value in (
+        "https://u:p@host/",
+        "ssh://user:pw@host",
+        "${secret:k}",
+        "https://h/v1?api_key=x",
+    ):
+        assert jsonable({"remote": value}, bare_user=False) == {"remote": REDACTED}
+
+
+def test_the_catalogue_still_redacts_a_user_name_without_a_password():
     assert jsonable({"remote": "ssh://user@host"}) == {"remote": REDACTED}
+    stack = ConfigStack(
+        app={"llm_routes": [{**ROUTE, "base_url": "https://alice@cloud.example/v1"}]}
+    )
+    row = rows(stack)["llm_routes.cloud.base_url"]
+    assert row["secret"] is True and row["value"] == REDACTED
+
+
+def test_the_debug_collector_shows_a_bare_user_and_hides_a_password():
+    from roboemot.diagnostics import FnSource, collect_section
+
+    def data():
+        return {"a": "ssh://pollen@reachy.local", "b": "ssh://pollen:pw@reachy.local"}
+
+    section = collect_section(FnSource("t", data, "robot"), 5)
+    assert section["data"] == {"a": "ssh://pollen@reachy.local", "b": REDACTED}
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["https://u@x:p@host", "https://u%3Ap@host", "https://a:b@c@host", "https://u:p@host"],
+)
+def test_the_debug_report_hides_user_info_that_may_hold_a_password(url):
+    assert jsonable({"u": url}, bare_user=False) == {"u": REDACTED}
+    assert secret_shaped(url) is True
+
+
+@pytest.mark.parametrize("url", ["http://[::1]", "https://user@host:8080", "ssh://Pollen@h.local"])
+def test_the_debug_report_keeps_plain_hosts_and_user_names(url):
+    assert jsonable({"u": url}, bare_user=False) == {"u": url}
+
+
+@pytest.mark.parametrize(
+    "user",
+    ["ghp_abc123", "gho_x", "github_pat_11ABC", "glpat-xyz", "xoxb-1", "sk-abc", "a" * 33],
+)
+def test_the_debug_report_masks_a_user_that_looks_like_a_token_but_keeps_the_host(user):
+    out = jsonable({"u": f"https://{user}@git.example/x"}, bare_user=False)
+    assert out == {"u": "https://***@git.example/x"}
+
+
+def test_removable_lists_only_entries_no_lower_layer_holds():
+    stack = ConfigStack(app={"llm_routes": [{**ROUTE, "base_url": "http://x/v1"}]})
+    stack.set("voice.moods.tender", {}, source="t")
+    stack.set(
+        "llm_routes",
+        [{"name": "added", "base_url": "https://y.example/v1", "model": "m"}],
+        source="t",
+    )
+    r = rows(stack)
+    assert r["voice.moods"]["removable"] == ["tender"]
+    assert r["llm_routes"]["removable"] == ["added"]
+    assert r["voice.keywords"]["removable"] == []
+    assert r["affect.update_hz"]["removable"] is None
+
+
+LINES = dict.fromkeys(("greeting", "robot_name", "ask_grown_up", "filtered"), "hi")
+
+
+def test_a_private_container_lists_nothing_removable_until_revealed():
+    stack = ConfigStack()
+    assert rows(stack)["safety.minor_lines"]["removable"] == []
+    stack.set("safety.minor_lines.xx", LINES, source="t", admin=True)
+    assert rows(stack)["safety.minor_lines"]["removable"] == []
+    shown = {r["path"]: r for r in build_catalogue(stack, reveal_private=True)}
+    assert shown["safety.minor_lines"]["removable"] == ["xx"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "https://a@b,https://c:d@e",
+        "https://host,https://u:p@h2",
+        "https://h/x?next=https://u:p@h2",
+        "see //u:p@h now",
+        "//user@h",
+    ],
+)
+def test_glued_nested_and_scheme_relative_credentials_are_secret_everywhere(text):
+    from roboemot.redact import scrub_text
+
+    assert secret_shaped(text) is True
+    assert jsonable({"u": text}, bare_user=False) == {"u": REDACTED}
+    assert "u:p" not in scrub_text(text) and "c:d" not in scrub_text(text)
+
+
+def test_scheme_relative_is_not_confused_with_a_path_or_a_full_url():
+    assert not secret_shaped("https://h/a//b@c") and not secret_shaped("see https://h/x")
+
+
+@pytest.mark.parametrize(
+    "user",
+    [
+        "hf_abcdef", "npm_abc", "pypi-AgEI", "sk_live_x", "sk_test_x", "AKIAIOSFODNN7EXAMPLE",
+        "ya29.a0Af", "0123456789abcdef0123456789abcdef", "abc123def456ghi789jk", "u" * 21,
+    ],
+)  # fmt: skip
+def test_token_like_users_are_masked_in_the_debug_report(user):
+    out = jsonable({"u": f"https://{user}@git.example/x"}, bare_user=False)
+    assert out == {"u": "https://***@git.example/x"}
+
+
+def test_ordinary_user_names_stay_visible_in_the_debug_report():
+    for user in ("pollen", "Alice", "deploy.bot", "svc_account-1"):
+        assert jsonable({"u": f"ssh://{user}@h"}, bare_user=False) == {"u": f"ssh://{user}@h"}
+
+
+def test_ipv6_origins_keep_their_brackets_so_port_and_address_differ():
+    from roboemot.redact import origin
+
+    assert origin("https://[2001:db8::1]:443/x") != origin("https://[2001:db8::1:443]/x")
+    assert origin("https://[2001:db8::1]:8443/x") == "https://[2001:db8::1]:8443"

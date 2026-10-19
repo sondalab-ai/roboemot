@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from importlib.metadata import entry_points
 from typing import Any, Literal, Protocol
 
-from roboemot.redact import REDACTED, is_secret_key, secret_shaped
+from roboemot.redact import REDACTED, is_secret_key, mask_bare_users, secret_shaped
 
 SCHEMA_VERSION = 1
 SECTION_TIMEOUT_S = 5.0
@@ -113,7 +113,7 @@ def collect_section(source: Source, timeout_s: float = SECTION_TIMEOUT_S) -> dic
         return section | {"ok": False, "error": f"timed out after {timeout_s:g} s"}
     if "error" in box:
         return section | {"ok": False, "error": box["error"]}
-    return section | {"ok": True, "data": jsonable(box.get("data"))}
+    return section | {"ok": True, "data": jsonable(box.get("data"), bare_user=False)}
 
 
 def collect(
@@ -155,16 +155,19 @@ class Diagnostics:
         return collect(self.sources, timeout_s=self.timeout_s)
 
 
-def jsonable(value: Any) -> Any:
-    """Plain JSON types only: no numpy scalars, enums, datetimes, NaN; secrets redacted."""
+def jsonable(value: Any, *, bare_user: bool = True) -> Any:
+    """Plain JSON types only: no numpy scalars, enums, datetimes, NaN; secrets redacted.
+    ``bare_user`` False (debug report) keeps ``scheme://user@host``; ``user:pass@`` stays hidden."""
     if isinstance(value, str):
-        return REDACTED if secret_shaped(value) else value
+        if not bare_user:
+            value = mask_bare_users(value)
+        return REDACTED if secret_shaped(value, bare_user=bare_user) else value
     if isinstance(value, bool | int) or value is None:
         return value
     if isinstance(value, float):
         return value if math.isfinite(value) else None
     if isinstance(value, enum.Enum):
-        return jsonable(value.value)
+        return jsonable(value.value, bare_user=bare_user)
     if isinstance(value, dt.datetime | dt.date):
         return value.isoformat()
     if isinstance(value, bytes):
@@ -176,13 +179,14 @@ def jsonable(value: Any) -> Any:
     elif hasattr(value, "model_dump"):  # pydantic
         value = value.model_dump(mode="json")
     elif hasattr(value, "tolist"):  # numpy scalar or array
-        return jsonable(value.tolist())
+        return jsonable(value.tolist(), bare_user=bare_user)
     if isinstance(value, dict):
         return {
-            str(k): REDACTED if is_secret_key(str(k)) else jsonable(v) for k, v in value.items()
+            str(k): REDACTED if is_secret_key(str(k)) else jsonable(v, bare_user=bare_user)
+            for k, v in value.items()
         }
     if isinstance(value, list | tuple | set | frozenset):
-        return [jsonable(v) for v in value]
+        return [jsonable(v, bare_user=bare_user) for v in value]
     return str(value)
 
 

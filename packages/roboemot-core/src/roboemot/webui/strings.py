@@ -79,8 +79,18 @@ EN: dict[str, str] = {
     "settings_secret": "Secret",
     "settings_readonly": "Read-only",
     "settings_json_readonly": "Structured value: edit it in the configuration file.",
-    "settings_superset_hint": "Words can only be added here. Removing one needs the config file.",
+    "settings_superset_hint": (
+        "Removing a word loosens the child-safe filter: it is saved to the app config and needs "
+        "the PIN."
+    ),
     "settings_null": "No value (null)",
+    "settings_route_move_message": (
+        "If this route has an API key, saving sends that key to {host}. Enter the PIN to allow it."
+    ),
+    "settings_write_only_hint": (
+        "The current address holds credentials and is not shown. Type a whole new address to "
+        "replace it; it may not hold credentials."
+    ),
     "settings_slider": "{path} slider",
     "settings_tuple_item": "Value {n} of {total}",
     "settings_new_item": "New entry",
@@ -329,6 +339,15 @@ EN: dict[str, str] = {
     "err_entry_in_lower_layer": (
         "This entry comes from the configuration file and cannot be removed here."
     ),
+    "err_endpoint_ack_required": (
+        "This route has an API key. Saving sends that key to {host}. Enter the PIN and press "
+        "the button again to allow it."
+    ),
+    "err_url_credentials": (
+        "The address must not hold a user name, password, token or ${secret:...} reference. "
+        "Store the key with `roboemot secrets set NAME` and use ${secret:NAME} as the api_key."
+    ),
+    "err_language_unsupported": "The voice stack has no speech models for this language.",
     "err_not_resettable": (
         "This field belongs to an entry added here and cannot be reset on its own."
     ),
@@ -446,10 +465,18 @@ IT: dict[str, str] = {
     "settings_readonly": "Sola lettura",
     "settings_json_readonly": "Valore strutturato: si modifica nel file di configurazione.",
     "settings_superset_hint": (
-        "Qui si possono solo aggiungere parole. Per toglierne una serve il file di "
-        "configurazione dell'app."
+        "Togliere una parola allenta il filtro per i minori: viene salvato nella "
+        "configurazione dell'app e richiede il PIN."
     ),
     "settings_null": "Nessun valore (null)",
+    "settings_route_move_message": (
+        "Se questa route ha una chiave API, salvando la chiave viene inviata a {host}. "
+        "Inserisci il PIN per consentirlo."
+    ),
+    "settings_write_only_hint": (
+        "L'indirizzo attuale contiene credenziali e non viene mostrato. Scrivi un nuovo indirizzo "
+        "completo per sostituirlo; non può contenere credenziali."
+    ),
     "settings_slider": "Cursore di {path}",
     "settings_tuple_item": "Valore {n} di {total}",
     "settings_new_item": "Nuova voce",
@@ -708,6 +735,15 @@ IT: dict[str, str] = {
     "err_entry_in_lower_layer": (
         "Questa voce viene dal file di configurazione e non si può rimuovere da qui."
     ),
+    "err_endpoint_ack_required": (
+        "Questa route ha una chiave API. Salvando, la chiave viene inviata a {host}. Inserisci il "
+        "PIN e premi di nuovo il pulsante per consentirlo."
+    ),
+    "err_url_credentials": (
+        "L'indirizzo non deve contenere utente, password, token o riferimenti ${secret:...}. "
+        "Salva la chiave con `roboemot secrets set NOME` e usa ${secret:NOME} come api_key."
+    ),
+    "err_language_unsupported": "Per questa lingua non ci sono modelli vocali nell'app.",
     "err_not_resettable": (
         "Questo campo appartiene a una voce aggiunta qui e non si può ripristinare da solo."
     ),

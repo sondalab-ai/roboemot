@@ -8,8 +8,9 @@ const SETTING_CONTAINERS = ["dict_of_model", "keyed_list", "string_list_dict"];
 const SETTING_ENTRY_KINDS = ["dict_of_model", "keyed_list"];
 const SETTING_SLIDER_STEPS = 100;
 const SETTING_DEFAULT_MAX_CHARS = 120;
-// Mirrors LANGUAGE_MAPS in webui/settings.py: a language is never added from the web. The server refuses it anyway.
-const SETTING_LANGUAGE_MAPS = ["voice.keywords", "safety.minor_lines"];
+// Mirrors the word-list maps of webui/settings.py (LANGUAGE_MAPS) a language may be added to; the server decides.
+const SETTING_WORD_MAPS = ["safety.minor_output_blocklist"];
+const SETTING_ROUTE_URL = /^llm_routes\.[^.]+\.base_url$/;
 const SETTING_SEARCH_DEBOUNCE_MS = 150;
 const SETTING_SEARCH_MIN_CHARS = 2;
 const SETTING_AUTO_OPEN_MAX = 50;
@@ -18,6 +19,7 @@ const SETTING_UNSAFE_KEYS = ["__proto__", "constructor", "prototype"];
 const settingsState = {
   query: "", changedOnly: false, open: new Set(), collapsed: new Set(),
   groups: [], restartPending: false, restarting: false, serial: 0, data: null,
+  leaves: new Map(), // built leaf rows by path, kept across reloads so unsaved edits elsewhere survive a save
 };
 let revealedSettings = new Map(); // private fields shown after a PIN check, kept in memory only
 
@@ -26,7 +28,7 @@ let revealedSettings = new Map(); // private fields shown after a PIN check, kep
 function resetSettingsState() {
   revealedSettings = new Map();
   Object.assign(settingsState, {
-    query: "", changedOnly: false, open: new Set(), collapsed: new Set(), groups: [], restartPending: false, restarting: false, data: null,
+    query: "", changedOnly: false, open: new Set(), collapsed: new Set(), groups: [], restartPending: false, restarting: false, data: null, leaves: new Map(),
   });
   clearTimeout(settingsState.timer);
   settingsState.timer = null;
@@ -42,7 +44,7 @@ function mergeRevealed(fields) {
   const merged = new Map(fields.map((f) => [f.path, f]));
   for (const [path, shown] of revealedSettings) {
     const base = merged.get(path);
-    merged.set(path, base ? { ...base, value: shown.value, default: shown.default, entry: shown.entry } : shown);
+    merged.set(path, base ? { ...base, value: shown.value, default: shown.default, entry: shown.entry, removable: shown.removable } : shown);
   }
   return [...merged.values()];
 }
@@ -89,8 +91,6 @@ function nodeMatches(node, words, changedOnly) {
   const hit = (n) => words.every((w) => nodeText(n).includes(w)) || n.kids.some(hit);
   return hit(node) && (!changedOnly || isChanged(node));
 }
-
-const anyRuntime = (node) => node.row.source === "runtime" || node.kids.some(anyRuntime);
 
 // ---------------------------------------------------------------- small helpers
 
@@ -264,19 +264,13 @@ function tupleListControl(desc, id, opts) {
 
 function chipsControl(desc, id, opts) {
   const items = [...(desc.value || [])];
-  const original = new Set(items);
-  const append = desc.conservative === "superset";
   const chips = el("div", { class: "sl-chips", role: "group", "aria-label": opts.label });
   const paint = () => {
-    chips.replaceChildren(...items.map((item) => {
-      const chip = el("button", {
-        type: "button", class: "sl-chip" + PRESS,
-        "aria-label": t("settings_remove_item", { item: String(item) }),
-        onclick: () => { items.splice(items.indexOf(item), 1); paint(); },
-      }, String(item));
-      chip.disabled = append && original.has(item);
-      return chip;
-    }));
+    chips.replaceChildren(...items.map((item) => el("button", {
+      type: "button", class: "sl-chip" + PRESS,
+      "aria-label": t("settings_remove_item", { item: String(item) }),
+      onclick: () => { items.splice(items.indexOf(item), 1); paint(); },
+    }, String(item))));
   };
   let entry;
   let adder;
@@ -366,15 +360,19 @@ function buildControl(desc, id, opts) {
 function settingTags(row, editable) {
   const source = state.strings["settings_source_" + row.source] || row.source;
   const tags = [el("span", { class: row.source === "runtime" ? "sl-tag" : "sl-tag sl-tag--plain" }, source)];
-  if (row.restart) {
-    const badge = el("span", { class: "sl-badge sl-badge--warning" }, t("settings_restart_badge"));
-    tags.push(canRestart() ? el("a", { href: "#settings-restart", onclick: focusRestart, "aria-label": t("settings_restart_goto"), title: t("settings_restart_goto") }, badge) : badge);
-  }
+  if (row.restart) tags.push(el("span", { "data-restart-tag": "1" }, restartBadge()));
   if (row.admin_only) tags.push(el("span", { class: "sl-tag", title: t("settings_admin_hint") }, t("settings_admin")));
   if (row.private) tags.push(el("span", { class: "sl-tag sl-tag--plain" }, t("settings_private")));
   if (row.secret) tags.push(el("span", { class: "sl-tag sl-tag--plain" }, t("settings_secret")));
   if (!editable && !row.secret && !row.private) tags.push(el("span", { class: "sl-tag sl-tag--plain" }, t("settings_readonly")));
   return tags;
+}
+
+// The restart badge, linked to the Restart button while the robot offers one. Rebuilt in place by
+// refreshSettings, so a row with unsaved edits is not rebuilt when that availability flips.
+function restartBadge() {
+  const badge = el("span", { class: "sl-badge sl-badge--warning" }, t("settings_restart_badge"));
+  return canRestart() ? el("a", { href: "#settings-restart", onclick: focusRestart, "aria-label": t("settings_restart_goto"), title: t("settings_restart_goto") }, badge) : badge;
 }
 
 const canRestart = () => {
@@ -422,10 +420,16 @@ function isIdentity(node) {
 
 const canEdit = (node) => {
   const row = node.row;
-  return row.writable && !row.secret && !SETTING_CONTAINERS.includes(row.kind) && row.kind !== "json" && !isIdentity(node);
+  return row.writable && !SETTING_CONTAINERS.includes(row.kind) && row.kind !== "json" && !isIdentity(node);
 };
 
 const labelOf = (node) => (node.parent ? node.row.path.slice(node.parent.row.path.length + 1) : node.row.path);
+
+// scheme://host[:port] of a URL as the server writes it (lower case, no user info or path); "" if none.
+function routeOrigin(url) {
+  const m = /^([A-Za-z][A-Za-z0-9+.-]*):\/\/(?:[^/?#@]*@)?([^/?#]*)/.exec(typeof url === "string" ? url : "");
+  return m && m[2] ? m[1].toLowerCase() + "://" + m[2].toLowerCase() : "";
+}
 
 // Runs a write behind the PIN dialog. Returns the response, or null when the dialog was cancelled.
 async function pinnedCall(message, confirm, call, items, title) {
@@ -452,7 +456,8 @@ function settingLeaf(node) {
   const hidden = settingHidden(row);
   const editable = canEdit(node) && !hidden;
   const id = nextSettingId();
-  const ctl = editable ? buildControl(row, id, { label: labelOf(node) }) : null;
+  const ctl = editable ? buildControl(row.secret ? { ...row, value: "" } : row, id, { label: labelOf(node) }) : null;
+  if (ctl && row.secret && ctl.main) ctl.main.setAttribute("placeholder", "***");
   const failure = el("p", { class: "sl-field__error", id: id + "-err", role: "alert", hidden: true });
   const name = el("code", { class: "sl-code" }, labelOf(node));
   const title = ctl && ctl.labelFor
@@ -461,6 +466,7 @@ function settingLeaf(node) {
   const parts = [el("div", { class: "row" }, title, settingTags(row, editable))];
   if (row.description) parts.push(el("p", { class: "hint", id: id + "-d" }, row.description));
   if (row.conservative === "superset") parts.push(el("p", { class: "hint" }, t("settings_superset_hint")));
+  if (ctl && row.secret) parts.push(el("p", { class: "hint" }, t("settings_write_only_hint")));
   if (hidden) {
     parts.push(el("p", { class: "hint setting-value" }, t("settings_hidden")),
       el("div", { class: "row" }, button(t("settings_reveal"), "plain", () => guarded(revealSettings), { small: true })));
@@ -474,7 +480,7 @@ function settingLeaf(node) {
     parts.push(ctl.node);
     const first = ctl.main || firstControl(ctl.node);
     if (first && row.description) first.setAttribute("aria-describedby", id + "-d");
-    if (JSON.stringify(row.default) !== JSON.stringify(row.value) && row.default !== null) {
+    if (!row.secret && JSON.stringify(row.default) !== JSON.stringify(row.value) && row.default !== null) {
       parts.push(el("p", { class: "hint" }, t("settings_default") + ": " + clip(formatValue(row.default))));
     }
     parts.push(failure, settingActions(node, ctl, failure));
@@ -500,9 +506,18 @@ function settingActions(node, ctl, failure) {
     const out = ctl.read();
     mark(out.code || null);
     if (out.code) return;
-    if (JSON.stringify(out.value) === JSON.stringify(row.value)) { notice(t("settings_unchanged")); return; }
-    const result = await pinnedCall(row.path, t("settings_save"),
-      (pin) => api("POST", "/api/settings", { path: row.path, value: out.value, pin }));
+    if (row.secret ? out.value === "" : JSON.stringify(out.value) === JSON.stringify(row.value)) { notice(t("settings_unchanged")); return; }
+    const moving = SETTING_ROUTE_URL.test(row.path) && routeOrigin(out.value) !== routeOrigin(row.secret ? "" : row.value);
+    let ack = moving && routeOrigin(out.value) ? routeOrigin(out.value) : null;
+    const message = ack ? t("settings_route_move_message", { host: ack }) : row.path;
+    const result = await pinnedCall(message, t("settings_save"), async (pin) => {
+      try {
+        return await api("POST", "/api/settings", { path: row.path, value: out.value, pin, ...(ack ? { ack_endpoint: ack } : {}) });
+      } catch (err) {
+        if (err.message === "endpoint_ack_required" && err.endpoint) ack = err.endpoint;
+        throw err;
+      }
+    });
     if (!result) return;
     if (revealedSettings.has(row.path) && result.changed) {
       revealedSettings.set(row.path, { ...revealedSettings.get(row.path), value: out.value });
@@ -521,7 +536,7 @@ function settingActions(node, ctl, failure) {
     await settingsReload(row.path);
   };
   const actions = [button(t("settings_save"), "primary", () => guarded(save), { small: true })];
-  if (row.source === "runtime" && row.conservative !== "superset") {
+  if (row.source === "runtime") {
     actions.push(button(t("settings_reset_layer"), "plain", () => guarded(reset), { small: true }));
   }
   return el("div", { class: "row" }, actions);
@@ -567,7 +582,7 @@ function entryBlock(node, key) {
   const identity = kids.find((k) => isIdentity(k));
   const title = identity && identity.row.value ? key + " · " + formatValue(identity.row.value) : key;
   const { toggle, body } = nestedDisclosure("entry:" + node.row.path + "." + key, title, () => kids.map(settingNode));
-  const removable = SETTING_ENTRY_KINDS.includes(node.row.kind) && !node.row.secret && kids.some(anyRuntime);
+  const removable = SETTING_ENTRY_KINDS.includes(node.row.kind) && !node.row.secret && (node.row.removable || []).includes(key);
   const path = node.row.path + "." + key;
   const remove = removable
     ? button(t("settings_remove_entry"), "danger", () => guarded(async () => {
@@ -620,10 +635,36 @@ function addEntryForm(node) {
     failure, el("div", { class: "row" }, button(t("settings_add_entry"), "primary", submit, { small: true })));
 }
 
+// The form that adds a language to a map of word lists: the language key and its words.
+function addWordsForm(node) {
+  const row = node.row;
+  const id = nextSettingId();
+  const failure = el("p", { class: "sl-field__error", role: "alert", hidden: true, id: id + "-err" });
+  const name = el("input", { type: "text", class: "sl-field__input", id: id + "-name", required: true });
+  const words = buildControl({ kind: "string_list", value: [], conservative: null, choices: null, nullable: false }, id + "-words", { label: row.path });
+  const show = (code) => { failure.hidden = !code; failure.textContent = code ? t("err_" + code) : ""; };
+  const submit = () => guarded(async () => {
+    const key = name.value.trim();
+    if (key === "") { show("key_invalid"); return; }
+    const got = words.read();
+    show(null);
+    const result = await pinnedCall(row.path, t("settings_add_entry"),
+      (pin) => api("POST", "/api/settings/entry", { path: row.path, key, value: got.value, pin }));
+    if (!result) return;
+    revealedSettings = new Map();
+    writeNotice(result, "settings_entry_added");
+    await settingsReload(null);
+  });
+  return el("div", { class: "stack" }, field(id + "-name", t("settings_entry_name"), name),
+    el("div", { class: "stack", role: "group", "aria-label": row.path }, words.node), failure,
+    el("div", { class: "row" }, button(t("settings_add_entry"), "primary", submit, { small: true })));
+}
+
 function settingContainer(node) {
   const row = node.row;
   const hidden = settingHidden(row);
-  const addable = SETTING_ENTRY_KINDS.includes(row.kind) && !row.secret && row.entry && !SETTING_LANGUAGE_MAPS.includes(row.path) && !hidden;
+  const wordMap = row.kind === "string_list_dict" && SETTING_WORD_MAPS.includes(row.path);
+  const addable = !hidden && !row.secret && ((SETTING_ENTRY_KINDS.includes(row.kind) && row.entry) || wordMap);
   const parts = [el("div", { class: "row" }, el("code", { class: "sl-code" }, labelOf(node)), settingTags(row, true))];
   if (row.description) parts.push(el("p", { class: "hint" }, row.description));
   if (hidden) {
@@ -633,14 +674,25 @@ function settingContainer(node) {
     const keys = entryKeys(node);
     parts.push(keys.length ? keys.map((key) => entryBlock(node, key)) : el("p", { class: "hint" }, t("settings_no_entries")));
     if (addable) {
-      const { toggle, body } = nestedDisclosure("add:" + row.path, t("settings_add_entry"), () => [addEntryForm(node)]);
+      const { toggle, body } = nestedDisclosure("add:" + row.path, t("settings_add_entry"), () => [wordMap ? addWordsForm(node) : addEntryForm(node)]);
       parts.push(el("div", { class: "stack" }, toggle, body));
     }
   }
   return el("div", { class: "setting stack", "data-path": row.path, "data-source": row.source }, parts);
 }
 
-const settingNode = (node) => (SETTING_CONTAINERS.includes(node.row.kind) ? settingContainer(node) : settingLeaf(node));
+// A leaf is rebuilt only when what it renders from changed (its descriptor, its place, reveal and restart state),
+// so a reload after a save leaves the other rows' unsaved edits in place.
+function cachedLeaf(node) {
+  const sig = JSON.stringify([node.row, settingHidden(node.row), node.parent && [node.parent.row.path, node.parent.row.key]]);
+  const kept = settingsState.leaves.get(node.row.path);
+  if (kept && kept.sig === sig) return kept.node;
+  const built = settingLeaf(node);
+  settingsState.leaves.set(node.row.path, { sig, node: built });
+  return built;
+}
+
+const settingNode = (node) => (SETTING_CONTAINERS.includes(node.row.kind) ? settingContainer(node) : cachedLeaf(node));
 
 // ---------------------------------------------------------------- reveal and reload
 
@@ -654,6 +706,7 @@ async function revealSettings() {
 }
 
 async function settingsReload(changedPath) {
+  if (changedPath) settingsState.leaves.delete(changedPath);
   settingsState.data = await api("GET", "/api/settings");
   settingsApplyModel(settingsState.data);
   refreshSettings();
@@ -668,6 +721,8 @@ async function settingsReload(changedPath) {
 }
 
 function settingsApplyModel(data) {
+  const live = new Set([...data.fields, ...(data.robot ? data.robot.fields : [])].map((f) => f.path));
+  for (const path of settingsState.leaves.keys()) if (!live.has(path) && !revealedSettings.has(path)) settingsState.leaves.delete(path);
   const core = settingsSections(settingsTree(data.fields), "core", null);
   const robot = data.robot ? settingsSections(settingsTree(data.robot.fields), "robot", data.robot) : [];
   const by = new Map([...core, ...robot].map((s) => [s.id, s]));
@@ -721,6 +776,7 @@ function refreshSettings() {
   if (status) status.textContent = t("settings_matches", { n: total });
   const actions = document.getElementById("settings-robot-actions");
   if (actions) actions.replaceChildren(restartButton());
+  for (const tag of document.querySelectorAll("[data-restart-tag]")) tag.replaceChildren(restartBadge());
   const hint = document.getElementById("settings-restart-hint");
   if (hint) hint.textContent = t(settingsState.restartPending ? "settings_restart_pending" : "settings_restart_hint");
 }
