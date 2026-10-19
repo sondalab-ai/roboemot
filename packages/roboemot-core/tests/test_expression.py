@@ -852,3 +852,36 @@ def test_a_reflex_keeps_the_head_while_a_gesture_plays(cfg, manifest):
     out, _ = through_core(cfg, manifest, "nod", "head.pitch", reflex)
     assert out[len(out) // 2] == pytest.approx(target, abs=1e-6)
     assert all(v == pytest.approx(target, abs=0.02) for v in out[len(out) // 3 :])
+
+
+def test_the_connectivity_gestures_keep_the_old_literals_and_the_minjerk_easing(cfg, manifest):
+    """puzzled and perk_up were GestureConfig literals (1.2 s, pose at 30% and left at 70%,
+    minjerk) before they moved into the manifest; the move must not change the motion."""
+    r = gesture_renderer(cfg, manifest)
+    expected = {
+        "puzzled": {"head.roll": 0.15, "antenna_right": -0.4, "antenna_left": 0.4},
+        "perk_up": {"head.pitch": -0.08, "antenna_right": 0.4, "antenna_left": -0.4},
+    }
+    for name, pose in expected.items():
+        prim = r.gesture(name)
+        assert prim.method == "minjerk" and prim.additive
+        assert [round(k.t, 2) for k in prim.keyframes] == [0.0, 0.36, 0.84, 1.2]
+        for key in (prim.keyframes[1], prim.keyframes[2]):
+            assert key.values == pytest.approx(pose, abs=1e-6)
+        for key in (prim.keyframes[0], prim.keyframes[3]):
+            assert set(key.values) == set(pose) and not any(key.values.values())
+
+
+def test_a_gesture_for_a_robot_that_may_not_approach_keeps_the_body_still(cfg, manifest):
+    gestures = {
+        "turn": entry(
+            **{"body_yaw": [(0, 0), (0.5, 20), (1, 0)], "head.yaw": [(0, 0), (0.5, 5), (1, 0)]}
+        )
+    }
+    r = ExpressionRenderer(
+        cfg.expression, cfg.expression_map, manifest.dofs, 0.15, gestures, body_yaw="body_yaw"
+    )
+    r.set_register(active("adult", approach_allowed=False), 1.0)
+    assert "body_yaw" not in r.gesture("turn").keyframes[1].values
+    r.set_register(active("adult", approach_allowed=True), 1.0)
+    assert "body_yaw" in r.gesture("turn").keyframes[1].values

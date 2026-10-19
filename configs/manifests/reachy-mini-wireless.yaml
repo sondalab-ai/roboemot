@@ -133,11 +133,13 @@ behaviour:                      # config layer 2 (SPEC 11A): this robot's defaul
     # 0.08 rad = 4.583662 deg. Signs as in the expression map: puzzled tilts the head and spreads
     # the antennas outward, perk_up lifts the head (pitch negative) and the antennas toward vertical.
     puzzled:
+      curve: minjerk
       channels:
         head.roll:     [[0.0, 0], [0.36, 8.594367], [0.84, 8.594367], [1.2, 0]]
         antenna_right: [[0.0, 0], [0.36, -22.918312], [0.84, -22.918312], [1.2, 0]]
         antenna_left:  [[0.0, 0], [0.36, 22.918312], [0.84, 22.918312], [1.2, 0]]
     perk_up:
+      curve: minjerk
       channels:
         head.pitch:    [[0.0, 0], [0.36, -4.583662], [0.84, -4.583662], [1.2, 0]]
         antenna_right: [[0.0, 0], [0.36, 22.918312], [0.84, 22.918312], [1.2, 0]]
