@@ -57,12 +57,11 @@ each PR. End to end: sim daemon + app, open the web UI, edit a number, a bool, a
 a safety tighten (runtime) and a safety loosen (app YAML written, audit entry), restart a restart-field, confirm
 `roboemot config dump` matches the page.
 
-## Status (2026-10-19 01:40)
-Merged into the epic branch: slice 1 (PR 58), 2 (PR 59), 3 (PR 60), 4 (PR 61). Agent runs used: 21 of the ~21 cap
-(extra runs: slice 1–2 security fix rounds, an Opus re-verify, and a CI latency investigation that proved the
-`models` barge-in failure is runner noise, not this epic). Paused for owner OK before 4b and 5.
-- 4b: superseded by the 4b slice text and Owner decisions below (Restart only, no reboot).
-- 5: SPEC 11A/12, TODO.md, exit check as above.
+## Status (2026-10-19 11:40)
+All slices merged into the epic branch: 1 (PR 58), 2 (PR 59), 3 (PR 60), 4 (PR 61), 4b Restart (PR 62), 6 barge-in
+flake (PR 63), 5 SPEC/exit + owner reversals (PR 64). Agent runs: ~33 (re-confirmed with the owner past 21).
+The `models` barge-in failure was not runner noise: keyword spotting ran Vosk on the listener thread (fixed in PR 63).
+Open on hardware (TODO.md): nod/shake, Restart through the real daemon, CM4 CPU of the keyword worker.
 Owner decision during the run: `privacy.*` and minor paths are admin-only (readable only via a PIN-checked reveal).
 
 ## Owner decisions (2026-10-19 08:50)
