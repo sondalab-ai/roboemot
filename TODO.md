@@ -101,13 +101,22 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       silent within `voice.fastpath.answer_window_s` of a question of its own (`SpeechOutput.question_end`). Italian `sì`
       is not a default yes phrase (accents are folded, `si` is a pronoun). Nod and shake signs and
       amplitudes are untested on the hardware.
-- [x] Settings API (SPEC 11A, epic settings-secrets slice 4): `GET/POST /api/settings` over an allowlist
-      (`webui/settings.py`): wake phrases, `voice.wake_word`, `safety.minor_lines.*`, the minor blocklist.
-      Admin PIN re-entered per write, runtime layer through the config stack, audited with source
-      `webui:<ip>`, persisted in `webui_settings.json` (0600) and replayed through the guardrails at startup.
-      Blocklist: additions only from the web (removing needs the app config and the admin PIN).
-      Intended (owner decisions 2026-10-18): no language is added from the web, only edited; a
-      blocklist entry is removed only through the app config with the admin PIN (SPEC 11A).
+- [x] Settings API (SPEC 11A, epic settings-secrets slice 4): superseded by the full mirror below.
+- [x] Web UI settings mirror (SPEC 11A, 12; epic webui-settings-mirror): every config field is listed and
+      editable (`config/catalogue.py`, `webui/settings.py`, `webui/static/settings.js`), core then robot
+      section, one PIN per write, safety loosening to the app YAML, entries added and removed (Remove only
+      where the server accepts it, `removable`), minors blocklist words removable behind the PIN, language
+      keys limited to the voice models, a keyed route may change endpoint after a PIN plus an
+      acknowledged host, route URLs with credentials are write-only, private fields behind a PIN reveal,
+      Restart RoboEmot (no reboot). Exit tests: `test_webui_exit.py` (volume heard on the next utterance,
+      unit level because no simulator harness covers speech; restart flag), `test_secret_leak.py`
+      (no secret in any `/api/settings` response), JS tests (restart badge).
+- [ ] Nod and shake (yes/no gestures) on the hardware: signs and amplitudes are still untested, see above.
+- [ ] Restart RoboEmot verified on the real daemon: `POST /api/apps/restart-current-app` and
+      `GET /api/apps/current-app-status` are taken from the Pollen sources (1.11.0, 1.12.0), not yet run
+      on a robot; check the zero pose, the WebRTC drop and the kill after 20 s.
+- [ ] Blocklist: a new language key for `safety.minor_output_blocklist` cannot be added from the web (only
+      `voice.keywords` and `safety.minor_lines`); decide if it should.
 
 ## M3 exit (SPEC 14, `docs/eval/m3.md`)
 
