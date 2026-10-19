@@ -382,3 +382,26 @@ def test_the_debug_collector_shows_a_bare_user_and_hides_a_password():
 
     section = collect_section(FnSource("t", data, "robot"), 5)
     assert section["data"] == {"a": "ssh://pollen@reachy.local", "b": REDACTED}
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["https://u@x:p@host", "https://u%3Ap@host", "https://a:b@c@host", "https://u:p@host"],
+)
+def test_the_debug_report_hides_user_info_that_may_hold_a_password(url):
+    assert jsonable({"u": url}, bare_user=False) == {"u": REDACTED}
+    assert secret_shaped(url) is True
+
+
+@pytest.mark.parametrize("url", ["http://[::1]", "https://user@host:8080", "ssh://Pollen@h.local"])
+def test_the_debug_report_keeps_plain_hosts_and_user_names(url):
+    assert jsonable({"u": url}, bare_user=False) == {"u": url}
+
+
+@pytest.mark.parametrize(
+    "user",
+    ["ghp_abc123", "gho_x", "github_pat_11ABC", "glpat-xyz", "xoxb-1", "sk-abc", "a" * 33],
+)
+def test_the_debug_report_masks_a_user_that_looks_like_a_token_but_keeps_the_host(user):
+    out = jsonable({"u": f"https://{user}@git.example/x"}, bare_user=False)
+    assert out == {"u": "https://***@git.example/x"}

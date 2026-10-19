@@ -27,6 +27,8 @@ SECRET_REF = re.compile(r"\$\{secret:")
 SECRET_REF_FULL = re.compile(r"\$\{secret:[^}]*\}?")
 URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'<>]+")
 URL_USER_INFO = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^/?#\s@]*@")
+USERNAME = re.compile(r"[a-z_][a-z0-9_.-]{0,31}", re.IGNORECASE)
+TOKEN_PREFIXES = ("ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "glpat-", "xox", "sk-")
 
 
 def is_secret_key(key: str) -> bool:
@@ -35,11 +37,27 @@ def is_secret_key(key: str) -> bool:
     return any(w in k for w in SECRET_WORDS)
 
 
+def _bare_user_only(url: str) -> bool:
+    """Whether the user info of ``url`` is one plain name: parsed by ``urlsplit`` (not by a
+    prefix match, which could disagree with the HTTP client), with no password, ``@``, ``%`` or
+    ``:`` in it. A URL that does not parse cleanly is not."""
+    try:
+        parts = urlsplit(url)
+        parts.port  # noqa: B018  (raises ValueError on a bad port)
+        if parts.password is not None:
+            return False
+    except ValueError:
+        return False
+    info = parts.netloc.rpartition("@")[0]
+    return not any(c in info for c in "@%:")
+
+
 def _url_secret(url: str, bare_user: bool = True) -> bool:
     """A URL with user info, or a query or fragment parameter named like a credential.
-    ``bare_user`` False lets a user name without a password through (``ssh://user@host``)."""
-    info = URL_USER_INFO.match(url)
-    if info and (bare_user or ":" in info.group(0).split("://", 1)[1]):
+    ``bare_user`` False lets a user name without a password through (``ssh://user@host``); any
+    other user info, and any that is hard to parse, stays secret."""
+    has_info = "@" in urlsplit_netloc(url) or URL_USER_INFO.match(url)
+    if has_info and (bare_user or not _bare_user_only(url)):
         return True
     try:
         parts = urlsplit(url)
@@ -48,6 +66,30 @@ def _url_secret(url: str, bare_user: bool = True) -> bool:
     except ValueError:
         return True
     return any(is_secret_key(name) for name, _ in params)
+
+
+def urlsplit_netloc(url: str) -> str:
+    """The authority of ``url`` as ``urlsplit`` sees it ('' when it cannot be parsed)."""
+    try:
+        return urlsplit(url).netloc
+    except ValueError:
+        return ""
+
+
+def mask_bare_users(text: str) -> str:
+    """``text`` with the single user name of a URL replaced by ``***`` unless it is a short plain
+    name that is no known token prefix (``https://ghp_...@github.com`` -> ``https://***@github.com``),
+    so the host stays visible. Other user info is left for ``secret_shaped`` to reject."""
+
+    def one(m: re.Match[str]) -> str:
+        url = m.group(0)
+        if not _bare_user_only(url) or "@" not in urlsplit_netloc(url):
+            return url
+        info = urlsplit_netloc(url).rpartition("@")[0]
+        plain = USERNAME.fullmatch(info) and not info.lower().startswith(TOKEN_PREFIXES)
+        return url if plain else url.replace("://" + info + "@", "://***@", 1)
+
+    return URL.sub(one, text)
 
 
 def secret_shaped(value: Any, *, bare_user: bool = True) -> bool:

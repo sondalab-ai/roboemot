@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from importlib.metadata import entry_points
 from typing import Any, Literal, Protocol
 
-from roboemot.redact import REDACTED, is_secret_key, secret_shaped
+from roboemot.redact import REDACTED, is_secret_key, mask_bare_users, secret_shaped
 
 SCHEMA_VERSION = 1
 SECTION_TIMEOUT_S = 5.0
@@ -159,6 +159,8 @@ def jsonable(value: Any, *, bare_user: bool = True) -> Any:
     """Plain JSON types only: no numpy scalars, enums, datetimes, NaN; secrets redacted.
     ``bare_user`` False (debug report) keeps ``scheme://user@host``; ``user:pass@`` stays hidden."""
     if isinstance(value, str):
+        if not bare_user:
+            value = mask_bare_users(value)
         return REDACTED if secret_shaped(value, bare_user=bare_user) else value
     if isinstance(value, bool | int) or value is None:
         return value
