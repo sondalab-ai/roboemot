@@ -274,7 +274,7 @@ def replay(
     cfg = cfg or RoboEmotConfig()
     sink = sink or RecordingSink()
     clock = ReplayClock()
-    runner = CircadianRunner(cfg, Bus(), sink, clock=clock)
+    runner = CircadianRunner(cfg, Bus(), sink, clock=clock, body_yaw=None)
     timeline: list[Point] = []
     transitions: list[tuple[float, float, str, str]] = []
     first: datetime | None = None

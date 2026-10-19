@@ -28,7 +28,7 @@ GESTURES = ("nod", "shake")
 def setup():
     manifest = load_manifest(MANIFEST, allow_unmeasured_dynamics=True)
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour)
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
     return manifest, stack.effective()
 
 
@@ -38,7 +38,12 @@ class Rig:
     def __init__(self, manifest, cfg) -> None:
         self.cfg = cfg
         self.renderer = ExpressionRenderer(
-            cfg.expression, cfg.expression_map, manifest.dofs, 0.15, cfg.gesture_map
+            cfg.expression,
+            cfg.expression_map,
+            manifest.dofs,
+            0.15,
+            cfg.gesture_map,
+            body_yaw="body_yaw",
         )
         self.now = 10.0
         self.question_end: float | None = None

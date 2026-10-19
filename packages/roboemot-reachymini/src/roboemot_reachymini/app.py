@@ -435,13 +435,18 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             allow_unmeasured_dynamics=cfg.safety.allow_unmeasured_dynamics,
             safety=cfg.safety,
         )
-        stack.set_manifest_behaviour(manifest.model.behaviour)  # the expression map (SPEC 11A)
+        # the expression map and its channels (SPEC 11A)
+        stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
         cfg = stack.effective()
-        responder = OfflineResponder(
-            cfg.connectivity,
-            set(manifest.dofs),
-            cfg.conversation.language,
+        expression = self.expression = ExpressionRenderer(
+            cfg.expression,
+            cfg.expression_map,
+            manifest.dofs,
+            cfg.motion.arbiter.crossfade_ms / MS_PER_S,
+            cfg.gesture_map,
+            body_yaw=GAZE.body_yaw,
         )
+        responder = OfflineResponder(cfg.connectivity, expression, cfg.conversation.language)
         loop = MotionLoop(
             manifest,
             ReachyMiniDriver(reachy_mini),
@@ -530,13 +535,6 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             overrides_for=lambda person_id: _register_overrides(perception.registry, person_id),
             detection_period=self.detection_period,
         )
-        expression = self.expression = ExpressionRenderer(
-            cfg.expression,
-            cfg.expression_map,
-            manifest.dofs,
-            cfg.motion.arbiter.crossfade_ms / MS_PER_S,
-            cfg.gesture_map,
-        )
         clock = self.make_circadian_clock()
         circ = self.circadian_runner = CircadianRunner(
             cfg,
@@ -544,6 +542,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             runner,
             clock=clock,
             dofs=manifest.dofs,
+            body_yaw=GAZE.body_yaw,
             detection_period=self.detection_period,
             engaged=lambda: selector.engaged,
         )

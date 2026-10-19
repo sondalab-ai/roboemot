@@ -296,7 +296,7 @@ def test_look_at_and_play_go_through_the_selector_and_the_renderer():
     world = WorldModel(cfg.world, FRAME, bus)
     selector = AttentionSelector(cfg.attention, bus)
     entry = ExpressionEntry(channels={"antenna_right": [(0, 0), (1, 10), (2, 0)]})
-    renderer = ExpressionRenderer(cfg.expression, {"joy": entry}, {}, 0.15)
+    renderer = ExpressionRenderer(cfg.expression, {"joy": entry}, {}, 0.15, body_yaw="body_yaw")
 
     class Reg:
         def get_person(self, pid):
@@ -347,7 +347,7 @@ def test_look_at_names_are_confirmed_one_line_and_capped_like_the_scene_summary(
             return records[pid]
 
     bridge = SkillBridge(
-        ExpressionRenderer(cfg.expression, {}, {}, 0.15),
+        ExpressionRenderer(cfg.expression, {}, {}, 0.15, body_yaw="body_yaw"),
         selector,
         world,
         Reg(),

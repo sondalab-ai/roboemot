@@ -88,6 +88,7 @@ class CircadianRunner:
         *,
         clock: Clock | None = None,
         dofs: dict[str, Dof] | None = None,
+        body_yaw: str | None,
         detection_period: Callable[[], float] = lambda: math.inf,
         engaged: Callable[[], bool] = lambda: False,
     ) -> None:
@@ -99,7 +100,11 @@ class CircadianRunner:
         self.engaged = engaged
         self.model = CircadianModel(cfg.circadian)
         self.sampler = LightSampler(cfg.light, cfg.circadian, self.clock.monotonic)
-        self.motion = CircadianMotion(cfg.circadian, cfg.circadian_motion, dofs) if dofs else None
+        self.motion = (
+            CircadianMotion(cfg.circadian, cfg.circadian_motion, dofs, body_yaw=body_yaw)
+            if dofs
+            else None
+        )
         self._lock = threading.RLock()
         self._seen: float | None = None  # clock time of the latest sign of people
         self._last_update: float | None = None

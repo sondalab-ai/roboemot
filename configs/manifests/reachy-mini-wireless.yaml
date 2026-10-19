@@ -61,8 +61,9 @@ behaviour:                      # config layer 2 (SPEC 11A): this robot's defaul
   # Antennas carry most of the affect (SPEC 4A); no LED, no sound in M2. Channels the robot
   # lacks are skipped. Signs (SDK order is [right, left]): antenna lift toward vertical is
   # right +, left -; droop / outward is right -, left +; head.pitch negative is up. The signs
-  # follow the connectivity gestures and are not yet checked on the hardware. All offsets are
-  # starting points to tune, scaled by the register, the persona and the minor cap at runtime.
+  # follow the connectivity gestures (gesture_map, below) and are not yet checked on the
+  # hardware. All offsets are starting points to tune, scaled by the register, the persona and
+  # the minor cap at runtime.
   expression_map:
     joy:                        # fast antenna wiggle, 3 flaps in 1.35 s
       repeat: 3
@@ -118,6 +119,21 @@ behaviour:                      # config layer 2 (SPEC 11A): this robot's defaul
       curve: minjerk
       channels:
         head.yaw: [[0.0, 0], [0.3, 12], [1.0, -12], [1.3, 0]]
+    # Connectivity gestures (SPEC 12A, Behaviour while offline): core plays them by name when a link
+    # comes back (perk_up) or someone speaks while the network is down (puzzled). 1.2 s each, the
+    # pose reached at 30% and left at 70% of it. 0.15 rad = 8.594367 deg, 0.4 rad = 22.918312 deg,
+    # 0.08 rad = 4.583662 deg. Signs as in the expression map: puzzled tilts the head and spreads
+    # the antennas outward, perk_up lifts the head (pitch negative) and the antennas toward vertical.
+    puzzled:
+      channels:
+        head.roll:     [[0.0, 0], [0.36, 8.594367], [0.84, 8.594367], [1.2, 0]]
+        antenna_right: [[0.0, 0], [0.36, -22.918312], [0.84, -22.918312], [1.2, 0]]
+        antenna_left:  [[0.0, 0], [0.36, 22.918312], [0.84, 22.918312], [1.2, 0]]
+    perk_up:
+      channels:
+        head.pitch:    [[0.0, 0], [0.36, -4.583662], [0.84, -4.583662], [1.2, 0]]
+        antenna_right: [[0.0, 0], [0.36, 22.918312], [0.84, 22.918312], [1.2, 0]]
+        antenna_left:  [[0.0, 0], [0.36, -22.918312], [0.84, -22.918312], [1.2, 0]]
   # Circadian motion (SPEC 7A, Effects by state): same keyframe format and signs as above.
   # `yawn` plays now and then while drowsy, `stretch` for 3 s when the robot wakes from resting,
   # `rest_pose_deg` is the absolute rest posture (head.pitch positive is down; antennas droop

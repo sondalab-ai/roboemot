@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from roboemot.config.schema import GestureConfig
-from roboemot.health.responder import puzzled
+from roboemot.affect.expression import build_primitive
+from roboemot.config.schema import ExpressionEntry
 from roboemot.manifest import load_manifest
 from roboemot.motion import Command, MotionCore, Player, Priority
 
@@ -59,7 +59,10 @@ def test_the_connectivity_gestures_stay_in_the_band(reachy):
     dof = reachy.dofs["head.roll"]
     core = make_core(reachy)
     core.minor_present = True
-    player = Player(puzzled(GestureConfig(), set(reachy.dofs)), 0.0)
+    puzzled = ExpressionEntry.model_validate(reachy.model.behaviour["gesture_map"]["puzzled"])
+    prim = build_primitive("puzzled", puzzled, reachy.dofs, body_yaw="body_yaw")
+    assert prim is not None
+    player = Player(prim, 0.0)
     peak = 0.0
     for i in range(300):
         t = i * DT

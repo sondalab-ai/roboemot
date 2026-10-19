@@ -64,7 +64,8 @@ class SoundLoud:
 class ReflexMap:
     """Which manifest dofs the primitives move; supplied by the robot plugin.
 
-    ``antennas`` maps a dof to the sign of a lift (the startle raises each by that sign).
+    ``startle_lift`` maps a dof to the sign of its lift (the startle moves each by that sign, scaled
+    by ``reflexes.startle_lift_ratio``; Reachy Mini: the antennas).
     ``pitch_away_sign`` is the sign of a head pitch that tips the head back, away from what is
     in front (negative on Reachy Mini: a positive pitch points the nose down).
     ``voice_sources`` names the ``Observation.source`` values that are speech directions.
@@ -73,7 +74,7 @@ class ReflexMap:
     head_yaw: str
     head_pitch: str
     body_yaw: str | None = None
-    antennas: Mapping[str, float] = field(default_factory=dict)
+    startle_lift: Mapping[str, float] = field(default_factory=dict)
     pitch_away_sign: float = -1.0
     voice_sources: tuple[str, ...] = ()
 
@@ -115,7 +116,7 @@ class ReflexEngine:
         margin_rad: float = 0.0,
         bus: Bus | None = None,
     ) -> None:
-        names = [rmap.head_yaw, rmap.head_pitch, *rmap.antennas]
+        names = [rmap.head_yaw, rmap.head_pitch, *rmap.startle_lift]
         names += [rmap.body_yaw] if rmap.body_yaw else []
         if missing := [n for n in names if n not in dofs]:
             raise KeyError(f"reflex dofs not in the manifest: {missing}")
@@ -416,9 +417,9 @@ class ReflexEngine:
         if abs(target - seed[rmap.head_pitch]) > eps and (scaled - now_pitch) * away >= 0:
             out[rmap.head_pitch] = target
         if rule.primitive == "startle":
-            for name, sign in rmap.antennas.items():
+            for name, sign in rmap.startle_lift.items():
                 d = self.dofs[name]
-                lift = _clamp(seed[name] + sign * amp * cfg.antenna_ratio, d.min, d.max)
+                lift = _clamp(seed[name] + sign * amp * cfg.startle_lift_ratio, d.min, d.max)
                 if abs(lift - seed[name]) > eps:
                     out[name] = lift
         return out

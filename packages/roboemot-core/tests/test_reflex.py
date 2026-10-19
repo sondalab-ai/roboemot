@@ -34,7 +34,7 @@ RMAP = ReflexMap(
     head_yaw=YAW,
     head_pitch=PITCH,
     body_yaw="body_yaw",
-    antennas={"antenna_right": 1.0, "antenna_left": -1.0},
+    startle_lift={"antenna_right": 1.0, "antenna_left": -1.0},
     pitch_away_sign=-1.0,
     voice_sources=("doa",),
 )
@@ -277,7 +277,7 @@ def test_a_new_reflex_setting_must_be_classified_as_shared_with_a_withdraw_or_no
     from roboemot.config.schema import WITHDRAW_RULE_FIELDS, WITHDRAW_SHARED_FIELDS
 
     assert set(WITHDRAW_RULE_FIELDS) == set(ReflexRule.model_fields) - {"name"}
-    not_read_by_a_withdraw = {"antenna_ratio", "latency_window", "audio", "rules"}
+    not_read_by_a_withdraw = {"startle_lift_ratio", "latency_window", "audio", "rules"}
     assert set(ReflexConfig.model_fields) == set(WITHDRAW_SHARED_FIELDS) | not_read_by_a_withdraw
 
 
@@ -323,6 +323,25 @@ def test_startle_lifts_the_antennas_and_never_tips_the_head_forward():
             peak[n] = max(peak[n], abs(out[n] - rig.manifest.dofs[n].home))
     assert max(rig.pitch) <= 1e-9
     assert all(v > 0 for v in peak.values())
+
+
+def test_startle_lifts_each_startle_dof_by_its_sign_times_the_ratio():
+    """Captured before the rename: 12 deg x ratio 2.0 = 0.41888 rad, right +, left -."""
+    rig = Rig(cfg_with(rule()))
+    rig.settle_audio()
+    rig.engine.offer_audio_level(LOUD, rig.t)
+    rig.tick(2)
+    offsets: dict[str, list[float]] = {"antenna_right": [], "antenna_left": []}
+    for _ in range(round(0.5 / DT)):
+        out = rig.loop.step_once(rig.t, DT)
+        rig.loop.feed(Command("idle", Priority.IDLE, {PITCH: 0.0}, rig.t))
+        rig.t += DT
+        for n, seen in offsets.items():
+            seen.append(out[n] - rig.manifest.dofs[n].home)
+    assert max(offsets["antenna_right"]) == pytest.approx(0.4188790204779121)
+    assert min(offsets["antenna_left"]) == pytest.approx(-0.4188790204779121)
+    assert min(offsets["antenna_right"]) >= 0 > max(offsets["antenna_left"]) - 1e-3
+    assert min(rig.pitch) == pytest.approx(-0.00023310183472777767)
 
 
 def test_a_steady_loud_room_is_not_an_onset():
@@ -654,12 +673,14 @@ def test_a_runtime_layer_cannot_change_what_a_rule_is():
     assert {"trigger", "primitive"} <= flagged(approved, retriggered)
 
 
-def test_antenna_ratio_may_only_fall():
-    approved = RoboEmotConfig.model_validate({"reflexes": {"antenna_ratio": 2.0}})
+def test_startle_lift_ratio_may_only_fall():
+    approved = RoboEmotConfig.model_validate({"reflexes": {"startle_lift_ratio": 2.0}})
     assert not violations(
-        approved, RoboEmotConfig.model_validate({"reflexes": {"antenna_ratio": 1}})
+        approved, RoboEmotConfig.model_validate({"reflexes": {"startle_lift_ratio": 1}})
     )
-    assert violations(approved, RoboEmotConfig.model_validate({"reflexes": {"antenna_ratio": 5}}))
+    assert violations(
+        approved, RoboEmotConfig.model_validate({"reflexes": {"startle_lift_ratio": 5}})
+    )
 
 
 def test_enabling_a_disabled_rule_or_disabling_a_withdraw_is_refused():
@@ -904,7 +925,7 @@ def with_top(path: str, value) -> RoboEmotConfig:
         ("command_ttl_ms", 50, 200),
         ("attack_fraction", 0.4, 0.1),
         ("max_future_ms", 10, 100),
-        ("antenna_ratio", 1.0, 4.0),
+        ("startle_lift_ratio", 1.0, 4.0),
         ("max_age_ms", 100, 300),
         ("enabled", False, True),
         ("audio.enabled", False, True),

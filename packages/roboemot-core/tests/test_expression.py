@@ -32,7 +32,7 @@ def manifest():
 @pytest.fixture(scope="module")
 def cfg(manifest) -> RoboEmotConfig:
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour)
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
     return stack.effective()
 
 
@@ -50,7 +50,9 @@ def active(group="adult", cfg=DEFAULTS, **params):
 
 def renderer(cfg, manifest, expression_map=None, **expr) -> ExpressionRenderer:
     ecfg = cfg.expression.model_copy(update=expr)
-    return ExpressionRenderer(ecfg, expression_map or cfg.expression_map, manifest.dofs, 0.15)
+    return ExpressionRenderer(
+        ecfg, expression_map or cfg.expression_map, manifest.dofs, 0.15, body_yaw="body_yaw"
+    )
 
 
 def entry(**channels) -> ExpressionEntry:
@@ -63,7 +65,7 @@ def entry(**channels) -> ExpressionEntry:
 def test_the_reachy_default_map_covers_all_labels(cfg, manifest):
     assert set(cfg.expression_map) == set(LABELS) == set(cfg.affect.labels)
     for label, e in cfg.expression_map.items():
-        prim = build_primitive(label, e, manifest.dofs)
+        prim = build_primitive(label, e, manifest.dofs, body_yaw="body_yaw")
         assert prim is not None and prim.additive
         assert prim.keyframes[0].values == dict.fromkeys(prim.keyframes[0].values, 0.0)
         assert prim.keyframes[-1].values == dict.fromkeys(prim.keyframes[-1].values, 0.0)
@@ -74,7 +76,9 @@ def test_the_reachy_default_map_covers_all_labels(cfg, manifest):
 
 
 def test_degrees_in_the_file_are_radians_in_the_primitive(cfg, manifest):
-    prim = build_primitive("surprise", cfg.expression_map["surprise"], manifest.dofs)
+    prim = build_primitive(
+        "surprise", cfg.expression_map["surprise"], manifest.dofs, body_yaw="body_yaw"
+    )
     peak = max(prim.keyframes, key=lambda k: k.values["antenna_right"])
     assert peak.values["antenna_right"] == pytest.approx(math.radians(25))
     assert peak.values["antenna_left"] == pytest.approx(math.radians(-25))
@@ -84,7 +88,7 @@ def test_degrees_in_the_file_are_radians_in_the_primitive(cfg, manifest):
 def test_antenna_signs_follow_the_connectivity_gestures(cfg, manifest):
     """Raise toward vertical is right +, left -; droop is the other way (health/responder)."""
     for label, sign in (("curiosity", 1), ("surprise", 1), ("sadness", -1), ("sleepy", -1)):
-        prim = build_primitive(label, cfg.expression_map[label], manifest.dofs)
+        prim = build_primitive(label, cfg.expression_map[label], manifest.dofs, body_yaw="body_yaw")
         mid = prim.sample(prim.duration / 2)
         assert mid["antenna_right"] * sign > 0 and mid["antenna_left"] * sign < 0
 
@@ -92,7 +96,7 @@ def test_antenna_signs_follow_the_connectivity_gestures(cfg, manifest):
 def test_repeat_unrolls_the_cycle_and_merges_the_seams():
     e = ExpressionEntry(channels={"antenna_right": [(0, 0), (0.1, 10), (0.2, 0)]}, repeat=3)
     dofs = load_manifest(MANIFEST, allow_unmeasured_dynamics=True).dofs
-    prim = build_primitive("joy", e, dofs)
+    prim = build_primitive("joy", e, dofs, body_yaw="body_yaw")
     assert [round(k.t, 3) for k in prim.keyframes] == [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
     assert prim.duration == pytest.approx(0.6)
 
@@ -101,7 +105,7 @@ def test_channels_are_merged_onto_one_time_grid(manifest):
     e = entry(
         **{"antenna_right": [(0, 0), (1, 10), (2, 0)], "head.pitch": [(0, 0), (0.5, 4), (2, 0)]}
     )
-    prim = build_primitive("joy", e, manifest.dofs)
+    prim = build_primitive("joy", e, manifest.dofs, body_yaw="body_yaw")
     assert [k.t for k in prim.keyframes] == [0, 0.5, 1, 2]
     assert prim.sample(1.0)["head.pitch"] == pytest.approx(math.radians(4) * (1.0 / 1.5))
     assert prim.sample(0.5)["antenna_right"] == pytest.approx(math.radians(5))
@@ -110,17 +114,20 @@ def test_channels_are_merged_onto_one_time_grid(manifest):
 def test_channels_the_robot_lacks_are_skipped(manifest):
     e = entry(**{"antenna_right": [(0, 0), (1, 10), (2, 0)], "head.roll": [(0, 0), (1, 5), (2, 0)]})
     head_only = {n: d for n, d in manifest.dofs.items() if n.startswith("head")}
-    prim = build_primitive("joy", e, head_only)
+    prim = build_primitive("joy", e, head_only, body_yaw="body_yaw")
     assert set(prim.keyframes[0].values) == {"head.roll"}
-    assert build_primitive("joy", entry(antenna_right=[(0, 0), (1, 0)]), head_only) is None
-    assert build_primitive("joy", e, {}) is None
+    assert (
+        build_primitive(
+            "joy", entry(antenna_right=[(0, 0), (1, 0)]), head_only, body_yaw="body_yaw"
+        )
+        is None
+    )
+    assert build_primitive("joy", e, {}, body_yaw="body_yaw") is None
 
 
 def test_schema_rejects_bad_maps(cfg):
     ok = [(0, 0), (1, 10), (2, 0)]
     bad = (
-        {"channels": {"antenna_up": ok}},  # not a channel
-        {"channels": {"head.x": ok}},  # translations are not expression channels
         {"channels": {"antenna_right": ok}, "speed": 2},  # unknown key
         {"channels": {"antenna_right": [(0, 0), (1, 10), (2, 5)]}},  # does not return to zero
         {"channels": {"antenna_right": [(0.1, 0), (1, 0)]}},  # does not start at t=0
@@ -195,7 +202,7 @@ def test_a_label_without_a_map_entry_or_a_usable_channel_plays_nothing(cfg, mani
     r.update(state("calm", 0.4), reg, 0.0)
     assert not r.update(state("sadness", 0.4), reg, 2.0)
     head_only = {n: d for n, d in manifest.dofs.items() if n.startswith("head")}
-    r2 = ExpressionRenderer(cfg.expression, sparse, head_only, 0.15)
+    r2 = ExpressionRenderer(cfg.expression, sparse, head_only, 0.15, body_yaw="body_yaw")
     r2.update(state("calm", 0.4), reg, 0.0)
     assert not r2.update(state("joy", 0.4), reg, 2.0)
     assert r2.commands(2.0) == []
@@ -439,7 +446,7 @@ def test_a_reload_swaps_the_map_and_parameters(cfg, manifest):
 def test_the_manifest_behaviour_becomes_part_of_the_installed_config(manifest):
     stack = ConfigStack()
     assert stack.effective().expression_map == {}
-    stack.set_manifest_behaviour(manifest.model.behaviour)
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
     assert set(stack.effective().expression_map) == set(LABELS)
     # an app layer merges channel by channel into the manifest's entry
     stack.app = {"expression_map": {"joy": {"channels": {"head.roll": [[0, 0], [0.45, 0]]}}}}
@@ -497,12 +504,14 @@ def test_manifest_behaviour_may_only_set_known_keys_and_is_audited(manifest):
 
     stack = ConfigStack()
     with pytest.raises(ConfigError, match="may set"):
-        stack.set_manifest_behaviour({"safety": {"minor_motion_factor": 1.0}})
+        stack.set_manifest_behaviour({"safety": {"minor_motion_factor": 1.0}}, manifest.channels)
     assert stack.manifest == {} and stack.effective().safety.minor_motion_factor == 0.6
     with pytest.raises(ConfigError):
-        stack.set_manifest_behaviour({"expression_map": {"rage": {"channels": {}}}})
+        stack.set_manifest_behaviour(
+            {"expression_map": {"rage": {"channels": {}}}}, manifest.channels
+        )
     assert stack.manifest == {}
-    stack.set_manifest_behaviour(manifest.model.behaviour)
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
     assert stack.audit[-1].source == "manifest" and stack.audit[-1].new == [
         "circadian_motion",
         "expression_map",
@@ -591,8 +600,6 @@ def test_the_schema_rejects_bad_gestures():
     with pytest.raises(ValidationError, match="affect labels"):
         RoboEmotConfig.model_validate({"gesture_map": {"joy": {"channels": {"head.yaw": ok}}}})
     with pytest.raises(ValidationError):
-        RoboEmotConfig.model_validate({"gesture_map": {"nod": {"channels": {"head.x": ok}}}})
-    with pytest.raises(ValidationError):
         RoboEmotConfig.model_validate(
             {"gesture_map": {"nod": {"channels": {"head.yaw": [(0, 0), (1, 10)]}}}}
         )
@@ -600,22 +607,26 @@ def test_the_schema_rejects_bad_gestures():
 
 def test_the_manifest_may_set_gesture_map_and_it_is_audited(manifest):
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour)
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
     assert "gesture_map" in stack.audit[-1].new
     assert set(stack.effective().gesture_map) >= {"nod", "shake"}
 
 
 def gesture_renderer(cfg, manifest, **expr):
     ecfg = cfg.expression.model_copy(update=expr)
-    return ExpressionRenderer(ecfg, cfg.expression_map, manifest.dofs, 0.15, cfg.gesture_map)
+    return ExpressionRenderer(
+        ecfg, cfg.expression_map, manifest.dofs, 0.15, cfg.gesture_map, body_yaw="body_yaw"
+    )
 
 
 def test_play_offers_affect_labels_and_gestures_and_refuses_unknown_names(cfg, manifest):
     r = gesture_renderer(cfg, manifest)
-    assert r.playable() == [*cfg.expression_map, "nod", "shake"]
+    assert r.playable() == [*cfg.expression_map, "nod", "shake", "puzzled", "perk_up"]
     assert r.request("nod") and not r.request("wave")
     assert (
-        ExpressionRenderer(cfg.expression, cfg.expression_map, manifest.dofs, 0.15).request("nod")
+        ExpressionRenderer(
+            cfg.expression, cfg.expression_map, manifest.dofs, 0.15, body_yaw="body_yaw"
+        ).request("nod")
         is False
     )  # a robot without a gesture_map offers none
 
@@ -675,6 +686,7 @@ def test_an_oversized_gesture_is_clamped_to_the_range_and_the_minor_cap(cfg, man
         manifest.dofs,
         0.15,
         gestures,
+        body_yaw="body_yaw",
     )
     r.request("nod")
     assert r.update(state("calm", 1.0), active("child"), 0.0)
@@ -695,6 +707,7 @@ def test_an_oversized_gesture_is_clamped_to_the_range_and_the_minor_cap(cfg, man
         manifest.dofs,
         0.15,
         gestures,
+        body_yaw="body_yaw",
     )
     r.set_register(active("child"), factor)
     r.request("nod")

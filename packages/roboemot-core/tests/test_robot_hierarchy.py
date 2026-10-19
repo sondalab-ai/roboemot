@@ -27,9 +27,7 @@ from collections import Counter
 from importlib.metadata import distributions
 from pathlib import Path
 
-import pytest
 import yaml
-from roboemot.config.stack import ConfigError
 from robot_hierarchy_scan import (
     Finding,
     build_terms,
@@ -172,11 +170,6 @@ def test_an_unregistered_group_or_a_wrong_object_breaks_the_contract():
     assert contract_violation("roboemot.installers", int) is not None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=ConfigError,
-    reason="audit #1: EXPRESSION_CHANNELS whitelists Reachy DOF names (removed in slice B)",
-)
 def test_core_builds_config_and_renderer_for_a_non_reachy_manifest():
     from roboemot.affect.expression import ExpressionRenderer, build_primitive
     from roboemot.config.stack import ConfigStack
@@ -185,17 +178,16 @@ def test_core_builds_config_and_renderer_for_a_non_reachy_manifest():
     manifest = load_manifest(MANIFESTS / "desk-head-v1.yaml")
     sweep = [[0.0, 0], [0.3, 10], [0.6, 0]]
     stack = ConfigStack()
-    try:
-        stack.set_manifest_behaviour(
-            {
-                "expression_map": {"joy": {"channels": {"neck_pan": sweep}}},
-                "gesture_map": {"nod": {"channels": {"neck_tilt": sweep}}},
-                "circadian_motion": {"rest_pose_deg": {"neck_tilt": 10}},
-            }
-        )
-    except ConfigError as exc:
-        assert "unknown channel 'neck_pan'" in str(exc), f"unrelated ConfigError: {exc}"
-        raise
+    stack.set_manifest_behaviour(
+        {
+            "expression_map": {"joy": {"channels": {"neck_pan": sweep}}},
+            "gesture_map": {"nod": {"channels": {"neck_tilt": sweep}}},
+            "circadian_motion": {"rest_pose_deg": {"neck_tilt": 10}},
+        },
+        manifest.channels,
+    )
     cfg = stack.effective()
-    ExpressionRenderer(cfg.expression, cfg.expression_map, manifest.dofs, 0.15, cfg.gesture_map)
-    assert build_primitive("joy", cfg.expression_map["joy"], manifest.dofs)
+    ExpressionRenderer(
+        cfg.expression, cfg.expression_map, manifest.dofs, 0.15, cfg.gesture_map, body_yaw=None
+    )
+    assert build_primitive("joy", cfg.expression_map["joy"], manifest.dofs, body_yaw=None)

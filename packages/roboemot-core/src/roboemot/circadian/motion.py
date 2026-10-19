@@ -44,9 +44,12 @@ class CircadianMotion:
         cfg: CircadianConfig,
         motion: CircadianMotionConfig,
         dofs: Mapping[str, Dof],
+        *,
+        body_yaw: str | None,
         rng: random.Random | None = None,
     ) -> None:
         self.dofs = dofs
+        self.body_yaw = body_yaw
         self.rng = rng or random.Random()  # noqa: S311 (jitter, not security)
         self.minor_factor = 1.0
         self._scale_now = 1.0  # the register's motion amplitude now
@@ -70,7 +73,7 @@ class CircadianMotion:
 
     def _build(self, name: str, entry: object) -> Primitive | None:
         return (
-            build_primitive(name, entry, self.dofs, body=False)  # type: ignore[arg-type]
+            build_primitive(name, entry, self.dofs, body_yaw=self.body_yaw, body=False)  # type: ignore[arg-type]
             if entry is not None
             else None
         )

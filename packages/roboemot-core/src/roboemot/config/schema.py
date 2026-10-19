@@ -375,14 +375,6 @@ class RegisterConfig(Strict):
 # --------------------------------------------------------------------------- expression (SPEC 7)
 
 EXPRESSION_MAX_CYCLE_S = 30.0  # one cycle; with repeat <= 20 an expression ends within minutes
-EXPRESSION_CHANNELS = (
-    "antenna_right",
-    "antenna_left",
-    "head.pitch",
-    "head.roll",
-    "head.yaw",
-    "body_yaw",
-)
 
 
 class IntensityFactors(Strict):
@@ -468,8 +460,6 @@ class ExpressionEntry(Strict):
             raise ValueError("an expression needs at least one channel")
         ends = set()
         for name, frames in channels.items():
-            if name not in EXPRESSION_CHANNELS:
-                raise ValueError(f"unknown channel {name!r}, expected one of {EXPRESSION_CHANNELS}")
             if len(frames) < 2:
                 raise ValueError(f"channel {name}: needs at least two keyframes")
             times = [t for t, _ in frames]
@@ -515,16 +505,8 @@ class CircadianMotion(Strict):
     yawn: ExpressionEntry | None = param(None, "Drowsy yawn primitive; none: no yawn")
     stretch: ExpressionEntry | None = param(None, "Waking stretch primitive; none: no stretch")
     rest_pose_deg: dict[str, float] = param(
-        {}, "Absolute rest posture by channel in degrees (head lowered, antennas down)"
+        {}, "Absolute rest posture by channel in degrees (the robot's own resting pose)"
     )
-
-    @field_validator("rest_pose_deg")
-    @classmethod
-    def _rest_channels(cls, pose: dict[str, float]) -> dict[str, float]:
-        for name in pose:
-            if name not in EXPRESSION_CHANNELS:
-                raise ValueError(f"unknown channel {name!r}, expected one of {EXPRESSION_CHANNELS}")
-        return pose
 
 
 class CircadianConfig(Strict):
@@ -703,9 +685,7 @@ class LightConfig(Strict):
 
 
 class ArbiterConfig(Strict):
-    loop_hz: float = param(
-        100.0, "Arbiter rate (50 towards the Reachy Mini daemon)", unit="Hz", ge=10, le=500
-    )
+    loop_hz: float = param(100.0, "Arbiter rate", unit="Hz", ge=10, le=500)
     crossfade_ms: float = param(
         150.0, "Cross-fade when the winning source changes", unit="ms", ge=0, le=2000
     )
@@ -777,8 +757,8 @@ class ReflexRule(Strict):
     )
     primitive: Literal["startle", "withdraw", "turn_toward"] = param(
         "startle",
-        "Motion played: startle (head back, antennas up), withdraw (head back) or "
-        "turn_toward (head yaw towards a voice)",
+        "Motion played: startle (head back, the robot's startle dofs lifted), withdraw (head back) "
+        "or turn_toward (head yaw towards a voice)",
     )
     threshold: float = param(
         3.0,
@@ -895,8 +875,8 @@ class ReflexConfig(Strict):
     release_fraction: float = param(
         0.4, "Share of the duration spent returning (startle and withdraw)", ge=0.05, le=0.9
     )
-    antenna_ratio: float = param(
-        2.0, "Startle antenna lift per unit of head deflection", ge=0, le=10,
+    startle_lift_ratio: float = param(
+        2.0, "Startle lift of the robot's startle dofs per unit of head deflection", ge=0, le=10,
         conservative="lower",
     )  # fmt: skip
     proximity_rearm_ratio: float = param(
@@ -2809,17 +2789,6 @@ class LinkPolicy(Strict):
     probe_timeout_s: float = param(1.5, "Timeout of one check", unit="s", ge=0.05, le=30)
 
 
-class GestureConfig(Strict):
-    duration_s: float = param(1.2, "Length of a connectivity gesture", unit="s", ge=0.2, le=5)
-    head_roll_rad: float = param(0.15, "Puzzled head tilt (roll)", unit="rad", ge=0, le=0.5)
-    head_pitch_rad: float = param(
-        0.08, "Perk-up head lift (pitch, negative is up)", unit="rad", ge=0, le=0.3
-    )
-    antenna_rad: float = param(
-        0.4, "Antenna droop (puzzled) or lift (perk up)", unit="rad", ge=0, le=1.5
-    )
-
-
 class ConnectivityConfig(Strict):
     network: LinkPolicy = param({}, "Model routes: reachability checks and backoff")
     robot: LinkPolicy = param(
@@ -2832,7 +2801,6 @@ class ConnectivityConfig(Strict):
         },
         "Robot driver link: failed motion ticks, then read_state retries",
     )
-    gestures: GestureConfig = param({}, "Nonverbal replies while offline and on recovery")
     offline_phrases: dict[str, str] = param(
         {
             "it": "Scusa, ora non riesco a pensare bene: sono senza rete.",
