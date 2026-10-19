@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from reachy_config import reachy_config
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.vision.models import ModelError
 from roboemot.voice import models as voice_models
@@ -30,7 +31,7 @@ RATE = 16000
 CHUNK = 512
 CHUNK_20MS = 320
 LEAD_S = 0.5
-CFG = RoboEmotConfig()
+CFG = reachy_config()
 
 
 def load(name: str) -> np.ndarray:

@@ -1,15 +1,19 @@
 """Keyword spotting on ASR text and the wake-word policy (SPEC 8 stage 3)."""
 
 import pytest
-from roboemot.config.schema import KeywordSet, RoboEmotConfig
+from reachy_config import reachy_config
+from roboemot.config.schema import KeywordSet
 from roboemot.voice.keywords import KeywordSpotter, normalise
+from roboemot.voice.robot_name import RobotName
 from roboemot.voice.wake import WakeGate
 
-V = RoboEmotConfig().voice
+V = reachy_config().voice
 
 
 def spotter(**kw) -> KeywordSpotter:
-    return KeywordSpotter(kw.get("sets", V.keywords), kw.get("wake", "reachy"))
+    names = RobotName()
+    names.configure(V)
+    return KeywordSpotter(kw.get("sets", V.keywords), kw.get("wake", "reachy"), names)
 
 
 @pytest.mark.parametrize(

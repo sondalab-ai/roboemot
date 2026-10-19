@@ -2,13 +2,14 @@
 
 The name is ``voice.wake_word`` when set, else the one the robot platform reports (``source``,
 the driver's ``robot_name()``; Reachy Mini: the name its owner gave it in the daemon setup),
-else none. It is shown in the prompt and, per language, turned into wake phrases through the
-language's ``name_wake_templates``, but only when every word of the name is in that
-language's recognizer vocabulary: a word the recognizer cannot produce can never be heard, so
-the language then keeps its generic ``wake_phrases`` alone and the gap is logged once. The name is
-configuration or a device label, not speech: it may be logged. It also comes from outside (the
-owner's phone), so the prompt and the spoken lines only get ``prompt_name``: letters, digits,
-spaces and ``'.-``, capped.
+else none. (``voice.default_name``, the manifest's name, is never the effective name: it only
+gates the manifest's name aliases.) It is shown in the prompt
+and, per language, turned into wake phrases through the language's ``name_wake_templates``, but
+only when every word of the name is in that language's recognizer vocabulary: a word the
+recognizer cannot produce can never be heard, so the language then keeps its generic
+``wake_phrases`` alone and the gap is logged once. The name is configuration or a device label,
+not speech: it may be logged. It also comes from outside (the owner's phone), so the prompt and
+the spoken lines only get ``prompt_name``: letters, digits, spaces and ``'.-``, capped.
 """
 
 from __future__ import annotations
@@ -40,10 +41,18 @@ class ResolvedName:
     display: str = ""
     matching: str = ""
     languages: frozenset[str] | None = None
+    own: str = ""  # the manifest's default name, normalised: the name the aliases are spellings of
 
     def usable(self, language: str) -> bool:
         """Whether a name exists and the recognizer of ``language`` can produce it."""
         return bool(self.matching) and (self.languages is None or language in self.languages)
+
+    def aliases_apply(self) -> bool:
+        """Whether the manifest's name aliases are in force: the robot has no name, or its name
+        starts with the first word of the manifest's default name."""
+        if not self.matching:
+            return True
+        return bool(self.own) and self.matching.split()[0] == self.own.split()[0]
 
 
 def display_name(raw: str | None) -> str:
@@ -82,6 +91,7 @@ class RobotName:
         self._clock = clock
         self._poll_every_s = NO_THROTTLE_S
         self._max_chars = 0
+        self._default = ""
         self._missing = missing
         self._generation = 0
         self._warned: set[tuple[str, str]] = set()
@@ -90,10 +100,12 @@ class RobotName:
         self._polled_at = clock()
 
     def configure(self, voice: Any) -> None:
-        """Take ``voice.name_poll_interval_s`` and ``voice.name_max_chars`` (idempotent)."""
+        """Take ``voice.name_poll_interval_s``, ``voice.name_max_chars`` and
+        ``voice.default_name`` (alias gating only; idempotent)."""
         with self._lock:
             self._poll_every_s = voice.name_poll_interval_s
             self._max_chars = voice.name_max_chars
+            self._default = display_name(voice.default_name)
 
     def _poll(self) -> str | None:
         """Ask the platform for its name; a failure is no name (the platform may not be ready)."""
@@ -159,19 +171,20 @@ class RobotName:
         Cached until the configuration, the platform name or the loaded models change."""
         platform = self._platform_now()
         with self._lock:
-            key = (configured, languages, self._generation, platform)
+            key = (configured, languages, self._generation, platform, self._default)
             if self._cache is not None and self._cache[0] == key:
                 return self._cache[1]
             shown = display_name(configured) or platform
             matching = normalise(shown)
+            own = normalise(self._default)
             missing = self._missing
             if not matching:
-                resolved = ResolvedName()
+                resolved = ResolvedName(own=own)
             elif missing is None:
-                resolved = ResolvedName(shown, matching, None)
+                resolved = ResolvedName(shown, matching, None, own)
             else:
                 resolved = ResolvedName(
-                    shown, matching, self._recognisable(missing, matching, languages)
+                    shown, matching, self._recognisable(missing, matching, languages), own
                 )
             self._cache = (key, resolved)
             return resolved

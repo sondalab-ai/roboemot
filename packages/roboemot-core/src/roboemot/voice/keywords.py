@@ -22,7 +22,6 @@ if TYPE_CHECKING:
     from .robot_name import ResolvedName, RobotName
 
 NON_WORD = re.compile(r"[\W_]+")
-REACHY = "reachy"  # the name the default name_aliases are spellings of
 CATEGORIES = ("stop", "yes", "no", "greeting", "name", "wake")
 
 
@@ -56,7 +55,7 @@ class KeywordSpotter:
             return
         self._resolved = resolved
         self._phrases = {}
-        aliases = not resolved.matching or resolved.matching.split()[0] == REACHY
+        aliases = resolved.aliases_apply()
         for language, ks in self._sets.items():
             wake = list(ks.wake_phrases)
             if resolved.usable(language):
