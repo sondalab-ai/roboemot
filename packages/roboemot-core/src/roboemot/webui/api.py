@@ -166,7 +166,9 @@ class Response:
     data: Any = None
     headers: dict[str, str] = field(default_factory=dict)
     cookies: list[str] = field(default_factory=list)
-    after: Callable[[], None] | None = None  # run by the server once the response is sent
+    # Run by the server only after the response was written and flushed (not after a failed
+    # write), on the connection's thread: it must return quickly; start a thread for real work.
+    after: Callable[[], None] | None = None
 
 
 class ApiError(Exception):

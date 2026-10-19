@@ -165,6 +165,9 @@ def test_every_restart_effect_core_accepts_has_text_in_both_languages():
 
     for lang in (EN, IT):
         assert [e for e in RESTART_EFFECTS if not lang.get("settings_restart_effect_" + e)] == []
+    assert "{timeout_s}" in EN["settings_restart_effect_kill_on_timeout"]
+    assert "{timeout_s}" in IT["settings_restart_effect_kill_on_timeout"]
+    assert not any("Reachy" in v for v in (*EN.values(), *IT.values()) if "restart" in v.lower())
     assert {k for k in EN if k.startswith("settings_restart_effect_")} == {
         "settings_restart_effect_" + e for e in RESTART_EFFECTS
     }
@@ -281,10 +284,3 @@ def test_settings_page_strings_are_chrome_only_and_the_legacy_ones_are_gone():
         assert "settings_edit" not in lang and "settings_platform_name" not in lang
     js = _page_js()
     assert "SETTING_GROUPS" not in js and "settingEditor" not in js
-
-
-def test_settings_page_posts_the_restart_with_a_pin_and_links_the_badge_only_for_the_action():
-    js = (STATIC / "settings.js").read_text()
-    assert '"/api/robot/restart", { pin }' in js and 'id: "settings-restart"' in js
-    assert "disabled: true" not in js
-    assert 'canRestart() ? el("a"' in js, "the badge links only when the action exists"

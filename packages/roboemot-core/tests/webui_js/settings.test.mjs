@@ -730,7 +730,9 @@ test("the debug tab works without a robot section", async () => {
   assert.ok(![...page.document.querySelectorAll("h3")].some((h) => h.textContent === "settings_robot"));
 });
 
-const RESTARTABLE = { ...ROBOT, actions: ["restart"], restart_effects: ["zero_pose", "webrtc_drop", "kill_on_timeout"] };
+const RESTARTABLE = { ...ROBOT, actions: ["restart"], restart_effects: [
+  { id: "zero_pose", params: {} }, { id: "webrtc_drop", params: {} }, { id: "kill_on_timeout", params: { timeout_s: 20 } },
+] };
 const restartPage = (extra = {}) =>
   settingsPage({ "POST /api/robot/restart": { ok: true }, ...extra }, { fields: fields(), robot: RESTARTABLE, pin_required: true });
 
@@ -749,6 +751,7 @@ test("restart: the button exists only with the action, the dialog lists the side
   assert.equal(posts(page, "/api/robot/restart").length, 0, "nothing is sent before the PIN");
   await answerPin(page);
   assert.deepEqual(posts(page, "/api/robot/restart").map((c) => c.body), [{ pin: PIN }]);
+  assert.equal(page.document.querySelector("#settings-restart").disabled, true, "no second restart after success");
   assert.equal(page.document.querySelector("dialog"), null);
   assert.equal(page.document.querySelector("#notice").textContent, "settings_restart_started");
   assert.ok(!storageDump(page.window).includes(PIN));
@@ -782,6 +785,8 @@ test("restart: the badge of a restart field links to the button; without the act
   const link = row(page, "voice.flag").querySelector(".sl-badge--warning").closest("a");
   assert.ok(link, "badge is a link");
   assert.equal(link.getAttribute("href"), "#settings-restart");
+  assert.equal(link.getAttribute("aria-label"), "settings_restart_goto");
+  assert.equal(link.getAttribute("title"), "settings_restart_goto");
   let focused = null;
   const btn = page.document.querySelector("#settings-restart");
   btn.focus = () => { focused = btn; };
@@ -795,11 +800,30 @@ test("restart: the badge of a restart field links to the button; without the act
 test("restart: effect text and the robot title stay text, never markup", async () => {
   const page = await settingsPage({}, {
     fields: fields(), pin_required: true,
-    robot: { ...RESTARTABLE, restart_effects: ["<img src=x onerror=alert(1)>"] },
+    robot: { ...RESTARTABLE, restart_effects: [{ id: "<img src=x onerror=alert(1)>", params: {} }] },
   });
   page.document.querySelector("#settings-restart").click();
   await settle();
   const dialog = page.document.querySelector("dialog");
   assert.equal(dialog.querySelectorAll("img").length, 0);
   assert.equal(dialog.querySelectorAll("li").length, 1);
+});
+
+test("restart: the {timeout_s} placeholder is filled from the effect params", async () => {
+  const page = await restartPage({
+    "GET /api/strings": { language: "en", strings: { settings_restart_effect_kill_on_timeout: "killed after {timeout_s} s" } },
+  });
+  page.document.querySelector("#settings-restart").click();
+  await settle();
+  const items = [...page.document.querySelectorAll("dialog li")].map((li) => li.textContent);
+  assert.ok(items.includes("killed after 20 s"));
+});
+
+test("restart: the button is rebuilt on refresh, so it appears and disappears with robot.actions", async () => {
+  const page = await restartPage();
+  assert.ok(page.document.querySelector("#settings-restart"));
+  page.run("settingsState.data.robot.actions = []; refreshSettings()");
+  assert.equal(page.document.querySelector("#settings-restart"), null);
+  page.run("settingsState.data.robot.actions = ['restart']; refreshSettings()");
+  assert.ok(page.document.querySelector("#settings-restart"));
 });

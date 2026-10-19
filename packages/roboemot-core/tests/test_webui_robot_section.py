@@ -12,6 +12,7 @@ import pytest
 from roboemot.config.catalogue import DESCRIPTOR_KEYS, descriptor
 from roboemot.config.stack import ConfigStack
 from roboemot.manifest import load_manifest
+from roboemot.webui import server as server_module
 from roboemot.webui.robot_section import RobotSection
 from roboemot.webui.settings import SettingsEditor
 from test_webui_settings import PIN, put, serve
@@ -196,7 +197,7 @@ def test_plugin_rows_with_secret_shaped_values_are_redacted(tmp_path):
 class Restarting(FakePlugin):
     """A plugin with the restart hook; ``up`` is whether the supervisor can restart now."""
 
-    def __init__(self, up=True, effects=("zero_pose", "webrtc_drop"), on_restart=None):
+    def __init__(self, up=True, effects=(("zero_pose", {}), ("webrtc_drop", {})), on_restart=None):
         super().__init__()
         self.up, self.effects, self.on_restart = up, effects, on_restart
 
@@ -212,11 +213,24 @@ class Restarting(FakePlugin):
 
 
 def test_restartable_plugin_gets_the_restart_action_and_known_effects_only(tmp_path):
-    plugin = Restarting(effects=("zero_pose", "<b>x</b>", "kill_on_timeout"))
-    ed, _ = editor(tmp_path, [ep(plugin)])
+    effects = (
+        ("zero_pose", {}),
+        ("<b>x</b>", {}),
+        ("kill_on_timeout", {"timeout_s": 20}),
+        ("kill_on_timeout", {"timeout_s": "20"}),
+        ("kill_on_timeout", {"timeout_s": True}),
+        ("kill_on_timeout", {"timeout_s": float("nan")}),
+        ("kill_on_timeout", {"timeout_s": [20]}),
+        ("webrtc_drop", "params"),
+        "zero_pose",
+    )
+    ed, _ = editor(tmp_path, [ep(Restarting(effects=effects))])
     robot = ed.robot_split(ed.fields())[1]
     assert robot["actions"] == ["restart"]
-    assert robot["restart_effects"] == ["zero_pose", "kill_on_timeout"]
+    assert robot["restart_effects"] == [
+        {"id": "zero_pose", "params": {}},
+        {"id": "kill_on_timeout", "params": {"timeout_s": 20}},
+    ]
 
 
 def test_no_restart_action_without_the_hook_or_when_unavailable(tmp_path, caplog):
@@ -240,7 +254,13 @@ def test_actions_a_plugin_sets_itself_are_ignored(tmp_path):
     class Pushy(FakePlugin):
         def section(self, stack, manifest):
             base = super().section(stack, manifest)
-            return RobotSection(base.title, base.fields, base.claims, ("restart",), ("zero_pose",))
+            return RobotSection(
+                base.title,
+                base.fields,
+                base.claims,
+                ("restart",),
+                ({"id": "zero_pose", "params": {}},),
+            )
 
     ed, _ = editor(tmp_path, [ep(Pushy())])
     robot = ed.robot_split(ed.fields())[1]
@@ -285,10 +305,20 @@ def test_restart_endpoint_without_a_settings_editor_is_unavailable(tmp_path):
         srv.stop()
 
 
-def test_the_response_is_sent_before_the_hook_runs_and_does_not_wait_for_it(tmp_path):
-    release, ran = threading.Event(), threading.Event()
+def test_the_hook_runs_strictly_after_the_response_was_written_and_flushed(tmp_path, monkeypatch):
+    order, release, ran = [], threading.Event(), threading.Event()
+    original = server_module._Handler._send_response
+
+    def recording(self, resp):
+        sent = original(self, resp)
+        if resp.after is not None:
+            order.append("written")
+        return sent
+
+    monkeypatch.setattr(server_module._Handler, "_send_response", recording)
 
     def hook():
+        order.append("hook")
         release.wait(5)
         ran.set()
 
@@ -300,8 +330,37 @@ def test_the_response_is_sent_before_the_hook_runs_and_does_not_wait_for_it(tmp_
         assert not ran.is_set(), "the client was answered while the hook is still running"
         release.set()
         assert ran.wait(5)
+        assert order == ["written", "hook"]
     finally:
         release.set()
+        srv.stop()
+
+
+def test_the_route_refuses_without_csrf_or_with_a_foreign_origin_and_never_runs_the_hook(tmp_path):
+    calls = []
+    ed, stack = editor(tmp_path, [ep(Restarting(on_restart=lambda: calls.append(1)))])
+    srv, client = serve(tmp_path, ed, stack)
+    try:
+        body = {"pin": PIN}
+        assert client.request("POST", "/api/robot/restart", body, csrf=False).status == 403
+        foreign = {"Origin": "http://evil.example"}
+        assert client.request("POST", "/api/robot/restart", body, headers=foreign).status == 403
+        time.sleep(0.2)
+        assert calls == []
+    finally:
+        srv.stop()
+
+
+def test_the_restart_log_line_names_the_caller_but_never_the_pin(tmp_path, caplog):
+    ed, stack = editor(tmp_path, [ep(Restarting())])
+    srv, client = serve(tmp_path, ed, stack)
+    try:
+        with caplog.at_level(logging.INFO):
+            assert restart(client).status == 200
+            restart(client, pin="000111")
+        assert "restart requested" in caplog.text
+        assert PIN not in caplog.text and "000111" not in caplog.text
+    finally:
         srv.stop()
 
 

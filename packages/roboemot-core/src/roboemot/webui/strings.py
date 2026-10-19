@@ -67,10 +67,11 @@ EN: dict[str, str] = {
     ),
     "settings_restart_effect_webrtc_drop": "A remote WebRTC session may drop.",
     "settings_restart_effect_kill_on_timeout": (
-        "If RoboEmot has not stopped after 20 s (Reachy Mini), it is killed."
+        "If RoboEmot has not stopped after {timeout_s} s, it is killed."
     ),
     "err_restart_unavailable": "RoboEmot cannot be restarted from here right now.",
     "settings_restart_badge": "Restart needed",
+    "settings_restart_goto": "Go to Restart RoboEmot",
     "settings_restart_needed": "Restart RoboEmot for it to take effect.",
     "settings_not_measured": "not measured",
     "settings_show_all": "Show all {n}",
@@ -432,10 +433,11 @@ IT: dict[str, str] = {
     "settings_restart_effect_zero_pose": "Il robot va in posa zero quando l'app si è fermata.",
     "settings_restart_effect_webrtc_drop": "Una sessione WebRTC remota può cadere.",
     "settings_restart_effect_kill_on_timeout": (
-        "Se RoboEmot non si ferma entro 20 s (Reachy Mini), viene terminato."
+        "Se RoboEmot non si ferma entro {timeout_s} s, viene terminato."
     ),
     "err_restart_unavailable": "Al momento RoboEmot non può essere riavviato da qui.",
     "settings_restart_badge": "Riavvio necessario",
+    "settings_restart_goto": "Vai a Riavvia RoboEmot",
     "settings_restart_needed": "Riavvia RoboEmot perché abbia effetto.",
     "settings_not_measured": "non misurato",
     "settings_show_all": "Mostra tutte e {n}",

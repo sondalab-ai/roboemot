@@ -10,6 +10,7 @@ the robot instead of the core sections. Core stays robot-agnostic and never writ
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from importlib.metadata import entry_points
@@ -28,8 +29,17 @@ log = logging.getLogger(__name__)
 ENTRY_POINT_GROUP = "roboemot.settings"
 PATH_ROOT = "robot"
 RESTART = "restart"
+EFFECT_PAIR = 2
 RESTART_EFFECTS = ("zero_pose", "webrtc_drop", "kill_on_timeout")
 PROTECTED_CLAIMS = ("safety", "webui", "privacy", "llm_routes")
+
+
+class RestartEffect(TypedDict):
+    """One line of the restart dialog: an id from ``RESTART_EFFECTS`` and the plain numbers its
+    text interpolates (``{name}`` placeholders)."""
+
+    id: str
+    params: dict[str, float]
 
 
 class RobotBlock(TypedDict):
@@ -38,7 +48,7 @@ class RobotBlock(TypedDict):
     id: str
     title: str
     actions: list[str]
-    restart_effects: list[str]
+    restart_effects: list[RestartEffect]
     fields: list[FieldDescriptor]
 
 
@@ -54,7 +64,7 @@ class RobotSection:
     fields: list[FieldDescriptor] = field(default_factory=list)
     claims: tuple[str, ...] = ()
     actions: tuple[str, ...] = ()
-    restart_effects: tuple[str, ...] = ()
+    restart_effects: tuple[RestartEffect, ...] = ()
 
 
 class SettingsPlugin(Protocol):
@@ -70,14 +80,18 @@ class Restartable(Protocol):
     """Optional: a plugin that can restart RoboEmot through its robot's own supervisor. Core then
     offers the ``restart`` action (button, PIN, confirm dialog) while ``restart_available()``
     holds, lists ``restart_effects()`` in the dialog in its own words and calls ``restart()`` only
-    after the web response has been sent, because the restart ends this very process."""
+    after the web response has been sent, because the restart ends this very process.
+    ``restart_available()`` runs on every settings listing, in the request thread: keep it cheap
+    (a short cache, a short timeout)."""
 
     def restart_available(self) -> bool:
         """Whether a restart can be done now (checked on every listing and again on the call)."""
         ...
 
-    def restart_effects(self) -> tuple[str, ...]:
-        """What the owner should know first: ids from ``RESTART_EFFECTS``; others are dropped."""
+    def restart_effects(self) -> tuple[tuple[str, dict[str, float]], ...]:
+        """What the owner should know first, as ``(id, params)`` pairs: ids from
+        ``RESTART_EFFECTS``, params plain numbers (e.g. ``("kill_on_timeout", {"timeout_s": 20})``).
+        An effect with an unknown id or a non-numeric param is dropped."""
         ...
 
     def restart(self) -> None:
@@ -111,13 +125,29 @@ def restart_hook(plugin: SettingsPlugin | None) -> Callable[[], None] | None:
         return None
 
 
-def _restart_effects(plugin: Restartable) -> tuple[str, ...]:
-    """The plugin's effect ids that core knows how to word; a failing plugin lists none."""
+def _restart_effects(plugin: Restartable) -> tuple[RestartEffect, ...]:
+    """The plugin's effects that core knows how to word. An effect with an unknown id, a malformed
+    pair or a param that is not a plain number is dropped; a failing plugin lists none."""
+    out: list[RestartEffect] = []
     try:
-        return tuple(e for e in plugin.restart_effects() if e in RESTART_EFFECTS)
+        for item in plugin.restart_effects():
+            if not isinstance(item, tuple | list) or len(item) != EFFECT_PAIR:
+                continue
+            effect_id, params = item
+            if effect_id not in RESTART_EFFECTS or not isinstance(params, dict):
+                continue
+            if all(
+                isinstance(k, str)
+                and isinstance(v, int | float)
+                and not isinstance(v, bool)
+                and math.isfinite(v)
+                for k, v in params.items()
+            ):
+                out.append({"id": effect_id, "params": dict(params)})
     except Exception as exc:
         log.warning("settings plugin restart effects: %s", type(exc).__name__)
         return ()
+    return tuple(out)
 
 
 def claimed(path: str, claims: tuple[str, ...]) -> bool:

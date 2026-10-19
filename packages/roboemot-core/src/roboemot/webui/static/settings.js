@@ -17,7 +17,7 @@ const SETTING_UNSAFE_KEYS = ["__proto__", "constructor", "prototype"];
 
 const settingsState = {
   query: "", changedOnly: false, open: new Set(), collapsed: new Set(),
-  groups: [], restartPending: false, serial: 0, data: null,
+  groups: [], restartPending: false, restarting: false, serial: 0, data: null,
 };
 let revealedSettings = new Map(); // private fields shown after a PIN check, kept in memory only
 
@@ -26,7 +26,7 @@ let revealedSettings = new Map(); // private fields shown after a PIN check, kep
 function resetSettingsState() {
   revealedSettings = new Map();
   Object.assign(settingsState, {
-    query: "", changedOnly: false, open: new Set(), collapsed: new Set(), groups: [], restartPending: false, data: null,
+    query: "", changedOnly: false, open: new Set(), collapsed: new Set(), groups: [], restartPending: false, restarting: false, data: null,
   });
   clearTimeout(settingsState.timer);
   settingsState.timer = null;
@@ -368,7 +368,7 @@ function settingTags(row, editable) {
   const tags = [el("span", { class: row.source === "runtime" ? "sl-tag" : "sl-tag sl-tag--plain" }, source)];
   if (row.restart) {
     const badge = el("span", { class: "sl-badge sl-badge--warning" }, t("settings_restart_badge"));
-    tags.push(canRestart() ? el("a", { href: "#settings-restart", onclick: focusRestart }, badge) : badge);
+    tags.push(canRestart() ? el("a", { href: "#settings-restart", onclick: focusRestart, "aria-label": t("settings_restart_goto"), title: t("settings_restart_goto") }, badge) : badge);
   }
   if (row.admin_only) tags.push(el("span", { class: "sl-tag", title: t("settings_admin_hint") }, t("settings_admin")));
   if (row.private) tags.push(el("span", { class: "sl-tag sl-tag--plain" }, t("settings_private")));
@@ -393,14 +393,24 @@ function focusRestart(ev) {
 // The Restart RoboEmot action: PIN and a dialog that lists what the robot does, then the server
 // answers before it restarts. The session ends with the process, so the page says to sign in again.
 async function restartRobot(robot) {
-  const effects = (robot.restart_effects || []).map((id) => t("settings_restart_effect_" + id));
+  const effects = (robot.restart_effects || []).map((e) => t("settings_restart_effect_" + e.id, e.params));
   const done = await pinnedCall(t("settings_restart_message"), t("settings_restart_confirm"),
     (pin) => api("POST", "/api/robot/restart", { pin }), effects, t("settings_restart_title"));
   if (done) {
     settingsState.restartPending = false;
+    settingsState.restarting = true;
     refreshSettings();
     notice(t("settings_restart_started"));
   }
+}
+
+// The action button, or nothing when the robot offers no restart. It stays disabled once a restart was accepted.
+function restartButton() {
+  if (!canRestart()) return [];
+  const robot = settingsState.data.robot;
+  const btn = button(t("settings_restart"), "plain", () => guarded(() => restartRobot(robot)), { small: true, attrs: { id: "settings-restart" } });
+  btn.disabled = settingsState.restarting;
+  return btn;
 }
 
 function isIdentity(node) {
@@ -709,6 +719,8 @@ function refreshSettings() {
   const total = settingsState.groups.reduce((sum, g) => sum + refreshGroup(g), 0);
   const status = document.getElementById("settings-count");
   if (status) status.textContent = t("settings_matches", { n: total });
+  const actions = document.getElementById("settings-robot-actions");
+  if (actions) actions.replaceChildren(restartButton());
   const hint = document.getElementById("settings-restart-hint");
   if (hint) hint.textContent = t(settingsState.restartPending ? "settings_restart_pending" : "settings_restart_hint");
 }
@@ -788,10 +800,7 @@ async function settingsView() {
     el("div", { class: "sl-nav__group" }, t("settings_core")), coreGroups.map((g) => g.navItem),
     robot ? [el("div", { class: "sl-nav__group" }, robot.title), robotGroups.map((g) => g.navItem)] : []);
   const groups = el("div", { class: "stack", id: "settings-groups" }, settingsState.groups.map((g) => g.section));
-  const robotActions = robot ? el("div", { class: "row", id: "settings-robot-actions" },
-    canRestart()
-      ? button(t("settings_restart"), "plain", () => guarded(() => restartRobot(robot)), { small: true, attrs: { id: "settings-restart" } })
-      : []) : [];
+  const robotActions = robot ? el("div", { class: "row", id: "settings-robot-actions" }) : [];
   view.append(intro, robotActions, el("div", { class: "settings-layout" }, nav, groups));
   refreshSettings();
 }

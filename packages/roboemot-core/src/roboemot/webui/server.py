@@ -255,8 +255,8 @@ class _Handler(BaseHTTPRequestHandler):
         resp = self.server.api.handle(
             Request(self.command, path, headers, body, self.client_address[0])
         )
-        self._send_response(resp)
-        if resp.after is not None:
+        sent = self._send_response(resp)
+        if sent and resp.after is not None:
             self.wfile.flush()
             resp.after()
 
@@ -276,14 +276,17 @@ class _Handler(BaseHTTPRequestHandler):
             return None
         return self.rfile.read(length) if length else b""
 
-    def _send_response(self, resp: Response) -> None:
+    def _send_response(self, resp: Response) -> bool:
+        """Send ``resp``; False when it was replaced by an error (it was not JSON-serialisable).
+        A failed socket write raises."""
         try:
             payload = json.dumps(resp.data, allow_nan=False).encode()
         except (TypeError, ValueError):
             log.error("web ui response is not JSON-serialisable")
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "generic"})
-            return
+            return False
         self._send(resp.status, payload, "application/json; charset=utf-8", resp)
+        return True
 
     def _send_json(self, status: HTTPStatus, data: Any) -> None:
         self._send(status, json.dumps(data).encode(), "application/json; charset=utf-8")
