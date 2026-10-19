@@ -225,9 +225,13 @@ class ExpressionRenderer:
 
         None when the manifest has no such gesture or the robot has none of its channels. For
         callers that play a gesture on their own (the offline responder, SPEC 12A) at the
-        entry's own amplitude, outside the affect-driven path of :meth:`request`.
+        entry's own amplitude, outside the affect-driven path of :meth:`request`. Not cached and
+        touching no renderer state, so any thread may call it.
         """
-        return self._primitive(name, True) if name in self.gesture_map else None
+        entry = self.gesture_map.get(name)
+        if entry is None:
+            return None
+        return build_primitive(name, entry, self.dofs, body_yaw=self.body_yaw)
 
     def _primitive(self, label: str, body: bool) -> Primitive | None:
         key = (label, body)

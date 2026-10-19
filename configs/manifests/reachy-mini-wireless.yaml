@@ -61,8 +61,9 @@ behaviour:                      # config layer 2 (SPEC 11A): this robot's defaul
   # Antennas carry most of the affect (SPEC 4A); no LED, no sound in M2. Channels the robot
   # lacks are skipped. Signs (SDK order is [right, left]): antenna lift toward vertical is
   # right +, left -; droop / outward is right -, left +; head.pitch negative is up. The signs
-  # follow the connectivity gestures (gesture_map, below) and are not yet checked on the hardware. All offsets are
-  # starting points to tune, scaled by the register, the persona and the minor cap at runtime.
+  # follow the connectivity gestures (gesture_map, below) and are not yet checked on the
+  # hardware. All offsets are starting points to tune, scaled by the register, the persona and
+  # the minor cap at runtime.
   expression_map:
     joy:                        # fast antenna wiggle, 3 flaps in 1.35 s
       repeat: 3

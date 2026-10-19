@@ -88,7 +88,7 @@ class CircadianRunner:
         *,
         clock: Clock | None = None,
         dofs: dict[str, Dof] | None = None,
-        body_yaw: str | None = None,
+        body_yaw: str | None,
         detection_period: Callable[[], float] = lambda: math.inf,
         engaged: Callable[[], bool] = lambda: False,
     ) -> None:

@@ -435,9 +435,8 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             allow_unmeasured_dynamics=cfg.safety.allow_unmeasured_dynamics,
             safety=cfg.safety,
         )
-        stack.set_manifest_behaviour(
-            manifest.model.behaviour, manifest.channels
-        )  # the expression map (SPEC 11A)
+        # the expression map and its channels (SPEC 11A)
+        stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
         cfg = stack.effective()
         expression = self.expression = ExpressionRenderer(
             cfg.expression,
