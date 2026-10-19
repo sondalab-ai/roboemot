@@ -35,7 +35,7 @@ import tempfile
 from dataclasses import dataclass
 from importlib.metadata import entry_points
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 import yaml
 
@@ -64,6 +64,7 @@ INSTALL_STEPS = 6
 UNINSTALL_STEPS = 6
 
 
+@runtime_checkable
 class Platform(Protocol):
     """What the installer needs to know about one robot model."""
 
