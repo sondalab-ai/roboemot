@@ -2904,10 +2904,15 @@ class RuntimeConfig(Strict):
         14.0,
         "Total time the stop sequence may spend waiting for component threads to end; once "
         "spent, the remaining threads get a 50 ms grace each and are then left to the process "
-        "exit. Keep it under the 20 s the Reachy daemon allows between SIGINT and kill, minus "
-        "the steps that do not wait for a thread: a larger value cannot help, the daemon kills "
-        "the app at 20 s",
+        "exit. When the robot's supervisor kills a stopping app after a fixed time, the budget "
+        "is capped at that time minus shutdown_margin_s: a larger value cannot help",
         unit="s", ge=2, le=60, restart=True,
+    )  # fmt: skip
+    shutdown_margin_s: float = param(
+        6.0,
+        "Time kept free for the steps of the stop sequence that do not wait for a thread: "
+        "the effective shutdown budget is at most the supervisor's kill timeout minus this",
+        unit="s", ge=0, le=30, restart=True,
     )  # fmt: skip
 
 

@@ -12,7 +12,6 @@
 - {check: duck, file: packages/roboemot-reachymini/src/roboemot_reachymini/driver.py, symbol: ReachyMiniDriver.motors_enabled, term: "getattr:_last_status", count: 1, audit: "D"}
 - {check: duck, file: packages/roboemot-reachymini/src/roboemot_reachymini/driver.py, symbol: ReachyMiniDriver.read_state, term: "getattr:_is_alive", count: 1, audit: "D"}
 - {check: duck, file: packages/roboemot-reachymini/src/roboemot_reachymini/driver.py, symbol: ReachyMiniDriver.robot_name, term: "getattr:_last_status", count: 1, audit: "D"}
-- {check: duck, file: packages/roboemot-reachymini/src/roboemot_reachymini/install.py, symbol: DaemonApi._call, term: "getattr:reason", count: 1, audit: "D"}
 - {check: duck, file: packages/roboemot-reachymini/src/roboemot_reachymini/speaker.py, symbol: ReachySpeaker._media, term: "getattr:media", count: 1, audit: "D"}
 - {check: duck, file: packages/roboemot-reachymini/src/roboemot_reachymini/speaker.py, symbol: ReachySpeaker.start_playing, term: "getattr:audio", count: 1, audit: "D"}
 - {check: duck, file: packages/roboemot-reachymini/src/roboemot_reachymini/speaker.py, symbol: ReachySpeaker.stop, term: "getattr:audio", count: 1, audit: "D"}
@@ -32,7 +31,6 @@
 - {check: vocabulary, file: packages/roboemot-core/src/roboemot/config/schema.py, symbol: KeywordSet, term: "reachy", count: 2, audit: "3"}
 - {check: vocabulary, file: packages/roboemot-core/src/roboemot/config/schema.py, symbol: ReflexConfig, term: "antenna", count: 2, audit: "U"}
 - {check: vocabulary, file: packages/roboemot-core/src/roboemot/config/schema.py, symbol: ReflexRule, term: "antennas", count: 1, audit: "U"}
-- {check: vocabulary, file: packages/roboemot-core/src/roboemot/config/schema.py, symbol: RuntimeConfig, term: "reachy", count: 1, audit: "B"}
 - {check: vocabulary, file: packages/roboemot-core/src/roboemot/config/schema.py, symbol: VoiceConfig, term: "reachy", count: 2, audit: "3"}
 - {check: vocabulary, file: packages/roboemot-core/src/roboemot/health/responder.py, symbol: perk_up, term: "antenna", count: 2, audit: "2"}
 - {check: vocabulary, file: packages/roboemot-core/src/roboemot/health/responder.py, symbol: perk_up, term: "antenna_left", count: 1, audit: "2"}
