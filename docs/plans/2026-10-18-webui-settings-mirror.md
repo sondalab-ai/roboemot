@@ -22,7 +22,8 @@ The M3 cleanup epic merged to `main` as PR 57 (`fe1a204`); B's node:test + jsdom
    minor lines, blocklist additions only, phrase rules). Replaces `SETTINGS`; `webui/settings.py` joins
    `test_no_magic_numbers.py`.
 2. **Generic write path.** Scalars and collections: dict-of-model by key, keyed lists by `name`/`event`
-   (`KEYED_LISTS`), add/remove entries where the schema allows (no new language from the web, earlier decision).
+   (`KEYED_LISTS`), add/remove entries where the schema allows (no new language from the web, earlier decision;
+   reversed 2026-10-19, see Owner decisions, done in slice 5).
    Write layer: runtime by default; a change refused only for `safety` loosening goes to `layer="app"` with admin
    (writes app YAML via `_persist_app`). `restore()` replays the overrides file as one batch so cross-field
    validators don't depend on order. Responses carry `restart_required`; a "reset to lower layer" clears a runtime
@@ -37,16 +38,17 @@ The M3 cleanup epic merged to `main` as PR 57 (`fe1a204`); B's node:test + jsdom
    Apply the same Core → Robot grouping to the other tabs where content is robot-specific (debug sources already
    are). CSP rules hold (CSSOM only, no innerHTML); vendored kit untouched; new chrome strings EN+IT (page test
    requires both), field texts English. JS tests on B's node:test + jsdom harness.
-4b. **Restart and reboot.** Same Core → Robot split, PIN per action, confirm dialog. Core: "Restart RoboEmot" (app
-   restarts itself, needed for `restart=True` fields; the restart badge links to it). Robot: "Reboot robot" via a
-   new `reboot()` hook on the `roboemot.settings` robot plugin, shown only when the plugin offers it. For Reachy Mini
-   the author first checks what the daemon / OS offers (daemon API vs `systemctl reboot` and the privilege it needs;
-   the installer must not leave a sudoers change unrecorded). If nothing clean exists, report before building.
+4b. **Restart RoboEmot** (owner, 2026-10-19: no reboot/power-off). Core owns the button, PIN, confirm dialog and
+   response timing; the robot plugin provides `restart()` via a `Restartable` protocol (replaces the unused
+   `Rebootable`/`REBOOT`) plus its side-effects list, which core renders EN+IT. No plugin hook, no button. Reachy:
+   daemon `POST /api/apps/restart-current-app` (present in 1.11.0 and 1.12.0), offered only when
+   `GET /api/apps/current-app-status` shows RoboEmot (`install.APP_NAME`) running; side effects: zero pose, possible
+   WebRTC drop, SIGINT then kill after 20 s. Respond before the restart fires. The restart badge links to it.
 5. **SPEC and exit.** SPEC 11A (allowlist → full mirror, app-YAML write for safety loosening, one PIN, accepted
    risks), SPEC 12 Data notes, TODO.md; exit check: `voice.base.volume_db` edited live from the page and heard on the
    next utterance (sim), a restart field shows the badge, a secret is never in any response.
 
-Order: 1 → 2 → (3 ∥ 4) → 4b → 5. Estimate: 6 slices, ~14 agent runs (Sonnet authors + one Sonnet review each, Opus
+Order: 1 → 2 → (3 ∥ 4) → 4b → 5 → 6 (6: CI `models` barge-in flake, may run alongside 4b). Estimate: 6 slices, ~14 agent runs (Sonnet authors + one Sonnet review each, Opus
 security review on 1–2). Re-confirm if it passes ~21.
 
 ## Verification
@@ -59,10 +61,7 @@ a safety tighten (runtime) and a safety loosen (app YAML written, audit entry), 
 Merged into the epic branch: slice 1 (PR 58), 2 (PR 59), 3 (PR 60), 4 (PR 61). Agent runs used: 21 of the ~21 cap
 (extra runs: slice 1–2 security fix rounds, an Opus re-verify, and a CI latency investigation that proved the
 `models` barge-in failure is runner noise, not this epic). Paused for owner OK before 4b and 5.
-- 4b: "Restart RoboEmot" via the daemon's `POST /api/apps/restart-current-app` (no privilege, no installer change).
-  "Reboot robot": no daemon route; `sudo -n systemctl reboot` likely works for `pollen` but is unverified (run
-  `sudo -n -l` on the robot); fallback is a recorded sudoers drop-in. Robot plugin gets the `Rebootable` protocol
-  (already in core, `actions: ["reboot"]`).
+- 4b: superseded by the 4b slice text and Owner decisions below (Restart only, no reboot).
 - 5: SPEC 11A/12, TODO.md, exit check as above.
 Owner decision during the run: `privacy.*` and minor paths are admin-only (readable only via a PIN-checked reveal).
 
@@ -85,4 +84,5 @@ Go-ahead for 4b, 5 and a flake slice (estimate now ~31 runs).
   - New language keys can be added (validated against the supported voice languages).
   - Minors blocklist words removable/resettable under the admin PIN, audited.
 - New slice 6, before epic -> main: fix the CI `models` barge-in flake (listener lag, GC pauses).
-- Robot TODOs (Python version, SSH user, nod/shake): same rule, derive from sources first.
+- Robot TODOs: SSH user `pollen` and Python 3.12 (reachy-mini-os `uv venv --python 3.12`) settled from source;
+  nod/shake on the hardware still needs the owner.
