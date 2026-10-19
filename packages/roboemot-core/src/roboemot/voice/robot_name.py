@@ -2,7 +2,8 @@
 
 The name is ``voice.wake_word`` when set, else the one the robot platform reports (``source``,
 the driver's ``robot_name()``; Reachy Mini: the name its owner gave it in the daemon setup),
-else ``voice.default_name`` (the robot manifest's name), else none. It is shown in the prompt
+else none. (``voice.default_name``, the manifest's name, is never the effective name: it only
+gates the manifest's name aliases.) It is shown in the prompt
 and, per language, turned into wake phrases through the language's ``name_wake_templates``, but
 only when every word of the name is in that language's recognizer vocabulary: a word the
 recognizer cannot produce can never be heard, so the language then keeps its generic
@@ -100,7 +101,7 @@ class RobotName:
 
     def configure(self, voice: Any) -> None:
         """Take ``voice.name_poll_interval_s``, ``voice.name_max_chars`` and
-        ``voice.default_name`` (idempotent)."""
+        ``voice.default_name`` (alias gating only; idempotent)."""
         with self._lock:
             self._poll_every_s = voice.name_poll_interval_s
             self._max_chars = voice.name_max_chars
@@ -155,9 +156,7 @@ class RobotName:
 
     def display(self, configured: str | None) -> str:
         """The effective name for people and logs ('' without one)."""
-        with self._lock:
-            default = self._default
-        return display_name(configured) or self._platform_now() or default
+        return display_name(configured) or self._platform_now()
 
     def prompt_name(self, configured: str | None) -> str:
         """The effective name made safe for the prompt and the spoken lines ('' without a usable
@@ -175,7 +174,7 @@ class RobotName:
             key = (configured, languages, self._generation, platform, self._default)
             if self._cache is not None and self._cache[0] == key:
                 return self._cache[1]
-            shown = display_name(configured) or platform or self._default
+            shown = display_name(configured) or platform
             matching = normalise(shown)
             own = normalise(self._default)
             missing = self._missing

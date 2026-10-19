@@ -516,17 +516,17 @@ def keeps_every_entry(candidate: Any, approved: Any) -> bool:
     return _filter_keys(approved) <= _filter_keys(candidate)
 
 
-def check_manifest_voice(voice: Any) -> None:
+def check_manifest_voice(voice: Any, cap: int | None = None) -> None:
     """A manifest may name the robot (``voice.default_name``, per-language
     ``voice.keywords.<lang>.name_aliases``) and nothing else under ``voice``. Each name must
-    survive ``sanitise_name`` unchanged and fit ``voice.name_max_chars`` (the default), like a
-    name from the platform or the owner."""
+    survive ``sanitise_name`` unchanged and fit ``voice.name_max_chars`` as in force (``cap``;
+    the schema default when None), like a name from the platform or the owner."""
     from ..voice.keywords import normalise
     from ..voice.robot_name import sanitise_name
 
     if voice is None:
         return
-    cap = RoboEmotConfig().voice.name_max_chars
+    cap = cap or RoboEmotConfig().voice.name_max_chars
 
     def check_name(where: str, value: Any) -> None:
         if not isinstance(value, str) or sanitise_name(value, cap) != value:
@@ -797,8 +797,9 @@ class ConfigStack:
             raise ConfigError(
                 f"manifest behaviour may set {sorted(MANIFEST_BEHAVIOUR_KEYS)}, not {unknown}"
             )
-        check_manifest_voice(behaviour.get("voice"))
         with self._lock:
+            cap = self.merged_tree().get("voice", {}).get("name_max_chars")
+            check_manifest_voice(behaviour.get("voice"), cap)
             saved, saved_channels = self.manifest, self.channels
             self.manifest, self.channels = behaviour, frozenset(channels)
             try:

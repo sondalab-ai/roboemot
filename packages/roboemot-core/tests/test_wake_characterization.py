@@ -70,3 +70,19 @@ def test_configured_wake_word_wins_over_the_platform_name():
 def test_without_a_vocabulary_check_a_platform_name_still_wakes():
     cats, wakes = decide("ciao neve", "it", platform="Neve", with_vocab=False)
     assert wakes
+
+
+def test_without_a_platform_name_the_robot_is_nameless_for_prompt_and_lines():
+    names = RobotName(None, vocab)
+    names.configure(VOICE)
+    assert names.display(None) == "" and names.prompt_name(None) == ""
+    assert names.resolve(None, ("it", "en")).matching == ""
+
+
+def test_without_a_vocabulary_or_platform_name_no_name_phrases_are_added():
+    plain = RobotName()
+    plain.configure(VOICE)
+    reachy = KeywordSpotter(SETS, None, plain)
+    assert reachy.spot("ciao reachy", "it") == {"greeting"}
+    assert reachy.spot("hello reachy", "en") == {"greeting"}
+    assert reachy.spot("ciao reati", "it") == {"greeting", "name"}

@@ -49,7 +49,7 @@ def test_a_manifest_name_works_for_another_robot():
     names.configure(voice)
     spotter = KeywordSpotter(voice.keywords, None, names)
     assert "name" in spotter.spot("hello bolt one", "en")
-    assert names.prompt_name(None) == "Bolt"
+    assert names.prompt_name(None) == ""
 
 
 @pytest.mark.parametrize(
@@ -95,3 +95,12 @@ def test_a_rejected_voice_block_leaves_the_stack_unchanged():
 
 def test_the_shipped_manifest_data_parses():
     assert yaml.safe_load(REACHY.read_text())["behaviour"]["voice"]
+
+
+def test_the_cap_is_the_effective_name_max_chars():
+    stack = ConfigStack(app={"voice": {"name_max_chars": 5}})
+    with pytest.raises(ConfigError):
+        stack.set_manifest_behaviour({"voice": {"default_name": "Reachy"}}, CHANNELS)
+    stack.set_manifest_behaviour({"voice": {"default_name": "Bolt"}}, CHANNELS)
+    wide = ConfigStack(app={"voice": {"name_max_chars": 50}})
+    wide.set_manifest_behaviour({"voice": {"default_name": "B" * 40}}, CHANNELS)

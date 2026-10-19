@@ -2297,8 +2297,8 @@ class VoiceConfig(Strict):
     wake_word: str | None = param(
         None,
         "The robot's name, for the prompt and wake detection. Unset (null): the name the robot "
-        "platform reports (the name its owner gave it, when the platform has one); failing that "
-        "`voice.default_name` (the robot manifest's name); a robot with none wakes on "
+        "platform reports (the name its owner gave it, when the platform has one); a robot with "
+        "none is nameless and wakes on "
         "`voice.keywords.<language>.wake_phrases` only. A value set here always wins. The name "
         "can come from outside the robot (the owner's phone): the prompt and the spoken lines "
         "only get a sanitised form. The bare name emits speech.name_called wherever it occurs in "
@@ -2311,9 +2311,10 @@ class VoiceConfig(Strict):
     )
     default_name: str = param(
         "",
-        "The robot's name when neither `voice.wake_word` nor the platform gives one; set by the "
-        "robot manifest (SPEC 4A), empty in the core defaults. Sanitised and capped like the "
-        "other names (`voice.name_max_chars`)",
+        "The robot's own name, set by the robot manifest (SPEC 4A), empty in the core defaults. It "
+        "is never the name shown or spoken; it only decides when the manifest's "
+        "`name_aliases` apply (no name, or a name starting with its first word). Sanitised and "
+        "capped like the other names (`voice.name_max_chars`)",
     )
     name_max_chars: int = param(
         32,
