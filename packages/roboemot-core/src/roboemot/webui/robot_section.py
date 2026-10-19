@@ -10,6 +10,8 @@ the robot instead of the core sections. Core stays robot-agnostic and never writ
 from __future__ import annotations
 
 import logging
+import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from importlib.metadata import entry_points
 from typing import TYPE_CHECKING, Protocol, TypedDict, cast, runtime_checkable
@@ -26,8 +28,18 @@ log = logging.getLogger(__name__)
 
 ENTRY_POINT_GROUP = "roboemot.settings"
 PATH_ROOT = "robot"
-REBOOT = "reboot"
+RESTART = "restart"
+EFFECT_PAIR = 2
+RESTART_EFFECTS = ("zero_pose", "webrtc_drop", "kill_on_timeout")
 PROTECTED_CLAIMS = ("safety", "webui", "privacy", "llm_routes")
+
+
+class RestartEffect(TypedDict):
+    """One line of the restart dialog: an id from ``RESTART_EFFECTS`` and the plain numbers its
+    text interpolates (``{name}`` placeholders)."""
+
+    id: str
+    params: dict[str, float]
 
 
 class RobotBlock(TypedDict):
@@ -36,6 +48,7 @@ class RobotBlock(TypedDict):
     id: str
     title: str
     actions: list[str]
+    restart_effects: list[RestartEffect]
     fields: list[FieldDescriptor]
 
 
@@ -44,12 +57,14 @@ class RobotSection:
     """What a plugin contributes. ``fields`` are read-only rows under ``robot.<id>.``; ``claims``
     are config paths (a path and everything below it) that move from the core list into the
     robot's, still written by path through the normal settings endpoints. ``actions`` is set by
-    core from the plugin's capabilities; a value a plugin sets is ignored."""
+    core from the plugin's capabilities, with ``restart_effects`` (ids from ``RESTART_EFFECTS``);
+    a value a plugin sets for either is ignored."""
 
     title: str
     fields: list[FieldDescriptor] = field(default_factory=list)
     claims: tuple[str, ...] = ()
     actions: tuple[str, ...] = ()
+    restart_effects: tuple[RestartEffect, ...] = ()
 
 
 class SettingsPlugin(Protocol):
@@ -61,11 +76,26 @@ class SettingsPlugin(Protocol):
 
 
 @runtime_checkable
-class Rebootable(Protocol):
-    """Optional: a plugin that can reboot its robot; core then offers the ``reboot`` action."""
+class Restartable(Protocol):
+    """Optional: a plugin that can restart RoboEmot through its robot's own supervisor. Core then
+    offers the ``restart`` action (button, PIN, confirm dialog) while ``restart_available()``
+    holds, lists ``restart_effects()`` in the dialog in its own words and calls ``restart()`` only
+    after the web response has been sent, because the restart ends this very process.
+    ``restart_available()`` runs on every settings listing, in the request thread: keep it cheap
+    (a short cache, a short timeout)."""
 
-    def reboot(self) -> None:
-        """Reboot the robot."""
+    def restart_available(self) -> bool:
+        """Whether a restart can be done now (checked on every listing and again on the call)."""
+        ...
+
+    def restart_effects(self) -> tuple[tuple[str, dict[str, float]], ...]:
+        """What the owner should know first, as ``(id, params)`` pairs: ids from
+        ``RESTART_EFFECTS``, params plain numbers (e.g. ``("kill_on_timeout", {"timeout_s": 20})``).
+        An effect with an unknown id or a non-numeric param is dropped."""
+        ...
+
+    def restart(self) -> None:
+        """Ask the robot's supervisor to restart RoboEmot. May block, may raise."""
         ...
 
 
@@ -81,6 +111,43 @@ def load_settings_plugin(robot_id: str) -> SettingsPlugin | None:
                 return None
     log.info("no settings plugin installed for %s", robot_id)
     return None
+
+
+def restart_hook(plugin: SettingsPlugin | None) -> Callable[[], None] | None:
+    """The plugin's ``restart`` when it is ``Restartable`` and available now, else ``None``. A
+    plugin whose availability check raises is treated as unavailable (logged by type only)."""
+    if not isinstance(plugin, Restartable):
+        return None
+    try:
+        return plugin.restart if plugin.restart_available() else None
+    except Exception as exc:
+        log.warning("settings plugin restart check: %s", type(exc).__name__)
+        return None
+
+
+def _restart_effects(plugin: Restartable) -> tuple[RestartEffect, ...]:
+    """The plugin's effects that core knows how to word. An effect with an unknown id, a malformed
+    pair or a param that is not a plain number is dropped; a failing plugin lists none."""
+    out: list[RestartEffect] = []
+    try:
+        for item in plugin.restart_effects():
+            if not isinstance(item, tuple | list) or len(item) != EFFECT_PAIR:
+                continue
+            effect_id, params = item
+            if effect_id not in RESTART_EFFECTS or not isinstance(params, dict):
+                continue
+            if all(
+                isinstance(k, str)
+                and isinstance(v, int | float)
+                and not isinstance(v, bool)
+                and math.isfinite(v)
+                for k, v in params.items()
+            ):
+                out.append({"id": effect_id, "params": dict(params)})
+    except Exception as exc:
+        log.warning("settings plugin restart effects: %s", type(exc).__name__)
+        return ()
+    return tuple(out)
 
 
 def claimed(path: str, claims: tuple[str, ...]) -> bool:
@@ -123,8 +190,10 @@ def build_section(
         section = plugin.section(stack, manifest)
         prefix = f"{PATH_ROOT}.{robot_id}."
         rows = [r for r in (_vet_row(row, prefix) for row in section.fields) if r is not None]
-        actions = (REBOOT,) if isinstance(plugin, Rebootable) else ()
-        return RobotSection(section.title, rows, tuple(section.claims), actions), robot_id
+        hook = restart_hook(plugin)
+        actions = (RESTART,) if hook else ()
+        effects = _restart_effects(plugin) if hook else ()
+        return RobotSection(section.title, rows, tuple(section.claims), actions, effects), robot_id
     except Exception as exc:
         log.warning("settings plugin %s section: %s", robot_id, type(exc).__name__)
         return None

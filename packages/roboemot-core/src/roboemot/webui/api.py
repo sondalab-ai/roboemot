@@ -111,6 +111,7 @@ class SettingsPort(Protocol):
     def robot_split(
         self, fields: list[FieldDescriptor]
     ) -> tuple[list[FieldDescriptor], dict[str, Any] | None]: ...
+    def restart_hook(self) -> Callable[[], None] | None: ...
     def reveal(self) -> list[FieldDescriptor]: ...
     def change(self, path: object, value: object, source: str) -> dict[str, Any]: ...
     def add_entry(
@@ -165,6 +166,9 @@ class Response:
     data: Any = None
     headers: dict[str, str] = field(default_factory=dict)
     cookies: list[str] = field(default_factory=list)
+    # Run by the server only after the response was written and flushed (not after a failed
+    # write), on the connection's thread: it must return quickly; start a thread for real work.
+    after: Callable[[], None] | None = None
 
 
 class ApiError(Exception):
@@ -327,6 +331,7 @@ class WebApi:
             ("GET", "/api/settings"): self._settings_list,
             ("POST", "/api/settings"): self._settings_change,
             ("POST", "/api/settings/reveal"): self._settings_reveal,
+            ("POST", "/api/robot/restart"): self._robot_restart,
             ("POST", "/api/settings/reset"): self._settings_reset,
             ("POST", "/api/settings/entry"): self._settings_entry_add,
             ("POST", "/api/settings/entry/remove"): self._settings_entry_remove,
@@ -668,6 +673,32 @@ class WebApi:
             raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
         self._check_pin(req, body.get("pin"))
         return self._settings_call(lambda: port.change(body["path"], body["value"], self._who(req)))
+
+    def _robot_restart(self, req: Request) -> Response:
+        """Restart RoboEmot through the robot plugin (SPEC 4A, 12). Body: ``pin``. The plugin's
+        hook runs on its own thread after the response is sent, since it ends this process; its
+        outcome is not reported. 404 when the plugin has no restart or cannot restart now."""
+        port = self._settings_port()
+        body = self._json_body(req)
+        v.only_keys(body, {"pin"})
+        self._check_pin(req, body.get("pin"))
+        hook = port.restart_hook()
+        if hook is None:
+            raise ApiError(HTTPStatus.NOT_FOUND, "restart_unavailable")
+        log.warning("restart requested from the web UI by %s", req.client_ip)
+        return Response(HTTPStatus.OK, {"ok": True}, after=lambda: self._fire(hook))
+
+    @staticmethod
+    def _fire(hook: Callable[[], None]) -> None:
+        """Run ``hook`` on a daemon thread; a failure is logged by type only."""
+
+        def run() -> None:
+            try:
+                hook()
+            except Exception as exc:
+                log.error("restart hook failed: %s", type(exc).__name__)
+
+        threading.Thread(target=run, name="roboemot-restart", daemon=True).start()
 
     def _settings_reset(self, req: Request) -> Response:
         """Drop the runtime value of a field so the lower layer shows again. Body: ``path``,

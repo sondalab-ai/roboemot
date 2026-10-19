@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from importlib.metadata import entry_points
 
+import httpx
 import pytest
 import yaml
 from roboemot.config.catalogue import DESCRIPTOR_KEYS
 from roboemot.config.stack import ConfigStack
+from roboemot.diagnostics import Target
 from roboemot.manifest import load_manifest
 from roboemot.webui.robot_section import claimed
 from roboemot.webui.settings import SettingsEditor
 from roboemot_reachymini import app as app_module
+from roboemot_reachymini import settings as settings_module
+from roboemot_reachymini.install import APP_NAME
 from roboemot_reachymini.settings import CLAIMS, ReachySettings, plugin
 
 MANIFEST = load_manifest(
@@ -158,3 +163,90 @@ def test_a_dict_valued_estop_is_summarised_not_dumped():
     rows = variant(lambda raw: raw["safety"].update(estop={"pin": 17, "secret": "x"}))
     row = rows[f"{BASE}.safety.estop"]
     assert row["value"] == "configured" and row["writable"] is False
+
+
+def daemon(app_status, calls=None, restart_reply=None, **kw):
+    """A mocked daemon: ``app_status`` is the JSON (or an exception) of current-app-status."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if calls is not None:
+            calls.append((request.method, request.url.path))
+        if request.url.path == "/api/apps/current-app-status":
+            if isinstance(app_status, Exception):
+                raise app_status
+            return httpx.Response(200, json=app_status)
+        if request.url.path == "/api/apps/restart-current-app" and request.method == "POST":
+            if isinstance(restart_reply, Exception):
+                raise restart_reply
+            if isinstance(restart_reply, int):
+                return httpx.Response(restart_reply, json={"detail": "No app is currently running"})
+            return httpx.Response(200, json=restart_reply or {})
+        return httpx.Response(404)
+
+    return ReachySettings(httpx.MockTransport(handle), **kw)
+
+
+RUNNING = {"info": {"name": APP_NAME}, "state": "running", "error": None}
+
+
+def test_restart_is_offered_only_when_the_daemon_shows_roboemot_running():
+    assert daemon(RUNNING).restart_available() is True
+    assert daemon(None).restart_available() is False
+    assert daemon({**RUNNING, "state": "starting"}).restart_available() is False
+    assert daemon({**RUNNING, "state": "stopping"}).restart_available() is False
+    assert daemon({**RUNNING, "info": {"name": "other-app"}}).restart_available() is False
+    assert daemon({"state": "running"}).restart_available() is False
+    assert daemon(httpx.ConnectError("no daemon")).restart_available() is False
+    assert daemon(httpx.ReadTimeout("slow")).restart_available() is False
+
+
+def test_restart_posts_to_the_daemon_and_does_not_depend_on_its_answer():
+    calls = []
+    daemon(RUNNING, calls).restart()
+    assert calls == [("POST", "/api/apps/restart-current-app")]
+    daemon(RUNNING, restart_reply=httpx.ReadError("the app was stopped")).restart()
+    daemon(RUNNING, restart_reply=httpx.ReadTimeout("slow")).restart()
+
+
+def test_a_daemon_error_on_restart_is_logged_at_info(caplog):
+    with caplog.at_level(logging.INFO):
+        daemon(RUNNING, restart_reply=400).restart()
+    assert "HTTP 400" in caplog.text
+
+
+def test_restart_effects_are_ids_with_numeric_params_and_the_timeout_is_the_stop_timeout():
+    from roboemot.webui.robot_section import RESTART_EFFECTS
+
+    effects = dict(plugin.restart_effects())
+    assert set(effects) == set(RESTART_EFFECTS)
+    assert effects["kill_on_timeout"] == {"timeout_s": settings_module.STOP_TIMEOUT_S}
+    assert settings_module.RESTART_TIMEOUT_S > settings_module.STOP_TIMEOUT_S
+
+
+def test_the_status_answer_is_cached_briefly_and_the_port_follows_the_target():
+    now = [100.0]
+    calls = []
+    status = daemon(
+        RUNNING, calls, clock=lambda: now[0], target=Target(host="robot.local", port=9000)
+    )
+    assert status.restart_available() and status.restart_available()
+    assert len(calls) == 1, "the second listing reuses the answer"
+    now[0] += settings_module.AVAILABLE_TTL_S + 0.1
+    assert status.restart_available()
+    assert len(calls) == 2
+    assert status._base == "http://robot.local:9000"
+    assert ReachySettings()._base == "http://localhost:8000"
+
+
+def test_core_offers_the_action_through_the_entry_point_only_while_running(tmp_path):
+    stack = ConfigStack(app={"webui": {"bind": "127.0.0.1", "port": 0}})
+    stack.set_manifest_behaviour(MANIFEST.model.behaviour)
+    for status, expected in ((RUNNING, ["restart"]), (None, [])):
+        editor = SettingsEditor(
+            stack, store=tmp_path / "s.json", manifest=MANIFEST, plugin=daemon(status)
+        )
+        block = editor.robot_split(editor.fields())[1]
+        assert block["actions"] == expected
+        assert [e["id"] for e in block["restart_effects"]] == (
+            [i for i, _ in plugin.restart_effects()] if expected else []
+        )

@@ -51,13 +51,27 @@ EN: dict[str, str] = {
     "settings_source_defaults": "Defaults",
     "settings_source_schema": "Built-in",
     "settings_restart": "Restart RoboEmot",
-    "settings_restart_hint": (
-        'Not available yet. Settings marked "Restart needed" apply after RoboEmot restarts.'
+    "settings_restart_hint": 'Settings marked "Restart needed" apply after RoboEmot restarts.',
+    "settings_restart_pending": "Saved changes are waiting for a restart.",
+    "settings_restart_title": "Restart RoboEmot?",
+    "settings_restart_message": (
+        "RoboEmot stops and starts again. This page is unavailable for a moment and you will "
+        "have to sign in again. What happens:"
     ),
-    "settings_restart_pending": (
-        "Saved changes are waiting for a restart, which is not available yet."
+    "settings_restart_confirm": "Restart",
+    "settings_restart_started": (
+        "Restarting. Wait a few seconds, then reload the page and sign in again."
     ),
+    "settings_restart_effect_zero_pose": (
+        "The robot goes to its zero pose once the app has stopped."
+    ),
+    "settings_restart_effect_webrtc_drop": "A remote WebRTC session may drop.",
+    "settings_restart_effect_kill_on_timeout": (
+        "If RoboEmot has not stopped after {timeout_s} s, it is killed."
+    ),
+    "err_restart_unavailable": "RoboEmot cannot be restarted from here right now.",
     "settings_restart_badge": "Restart needed",
+    "settings_restart_goto": "Go to Restart RoboEmot",
     "settings_restart_needed": "Restart RoboEmot for it to take effect.",
     "settings_not_measured": "not measured",
     "settings_show_all": "Show all {n}",
@@ -404,13 +418,26 @@ IT: dict[str, str] = {
     "settings_source_schema": "Integrato",
     "settings_restart": "Riavvia RoboEmot",
     "settings_restart_hint": (
-        "Non ancora disponibile. Le impostazioni con «Riavvio necessario» valgono dopo il "
-        "riavvio di RoboEmot."
+        "Le impostazioni con «Riavvio necessario» valgono dopo il riavvio di RoboEmot."
     ),
-    "settings_restart_pending": (
-        "Le modifiche salvate attendono un riavvio, non ancora disponibile da qui."
+    "settings_restart_pending": "Le modifiche salvate attendono un riavvio.",
+    "settings_restart_title": "Riavviare RoboEmot?",
+    "settings_restart_message": (
+        "RoboEmot si ferma e riparte. Questa pagina non sarà raggiungibile per un attimo e "
+        "dovrai accedere di nuovo. Cosa succede:"
     ),
+    "settings_restart_confirm": "Riavvia",
+    "settings_restart_started": (
+        "Riavvio in corso. Attendi qualche secondo, poi ricarica la pagina e accedi di nuovo."
+    ),
+    "settings_restart_effect_zero_pose": "Il robot va in posa zero quando l'app si è fermata.",
+    "settings_restart_effect_webrtc_drop": "Una sessione WebRTC remota può cadere.",
+    "settings_restart_effect_kill_on_timeout": (
+        "Se RoboEmot non si ferma entro {timeout_s} s, viene terminato."
+    ),
+    "err_restart_unavailable": "Al momento RoboEmot non può essere riavviato da qui.",
     "settings_restart_badge": "Riavvio necessario",
+    "settings_restart_goto": "Vai a Riavvia RoboEmot",
     "settings_restart_needed": "Riavvia RoboEmot perché abbia effetto.",
     "settings_not_measured": "non misurato",
     "settings_show_all": "Mostra tutte e {n}",
