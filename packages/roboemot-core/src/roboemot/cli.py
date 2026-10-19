@@ -16,7 +16,8 @@ from pathlib import Path
 import httpx
 import yaml
 
-from .config import ConfigError, ConfigStack, RoboEmotConfig
+from .config import ConfigError, ConfigStack, GuardrailError, RoboEmotConfig
+from .redact import scrub_text
 
 HTTP_CLIENT_FACTORY: Callable[[], httpx.AsyncClient] | None = None  # tests inject a transport
 
@@ -349,8 +350,8 @@ def main(argv: list[str] | None = None) -> int:
             return _models(args)
         if args.cmd == "llm":
             return _llm(args)
-    except (ConfigError, ValueError, RuntimeError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+    except (ConfigError, GuardrailError, ValueError, RuntimeError) as exc:
+        print(f"error: {scrub_text(str(exc))}", file=sys.stderr)
         return 1
     return 2
 

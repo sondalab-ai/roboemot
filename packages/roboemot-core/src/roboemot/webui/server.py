@@ -25,6 +25,7 @@ from urllib.parse import urlsplit
 
 from roboemot.config.schema import RoboEmotConfig
 
+from .. import shutdown
 from .api import (
     CataloguePort,
     DebugReport,
@@ -46,6 +47,7 @@ STATIC_FILES: dict[str, tuple[str, str]] = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/index.html": ("index.html", "text/html; charset=utf-8"),
     "/static/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "/static/settings.js": ("settings.js", "text/javascript; charset=utf-8"),
     "/static/style.css": ("style.css", "text/css; charset=utf-8"),
     "/static/theme.js": ("theme.js", "text/javascript; charset=utf-8"),
     "/static/fx.js": ("fx.js", "text/javascript; charset=utf-8"),
@@ -254,7 +256,10 @@ class _Handler(BaseHTTPRequestHandler):
         resp = self.server.api.handle(
             Request(self.command, path, headers, body, self.client_address[0])
         )
-        self._send_response(resp)
+        sent = self._send_response(resp)
+        if sent and resp.after is not None:
+            self.wfile.flush()
+            resp.after()
 
     def _read_body(self, limit: int) -> bytes | None:
         """The body, or None after an error response; the size is checked before reading."""
@@ -272,14 +277,17 @@ class _Handler(BaseHTTPRequestHandler):
             return None
         return self.rfile.read(length) if length else b""
 
-    def _send_response(self, resp: Response) -> None:
+    def _send_response(self, resp: Response) -> bool:
+        """Send ``resp``; False when it was replaced by an error (it was not JSON-serialisable).
+        A failed socket write raises."""
         try:
             payload = json.dumps(resp.data, allow_nan=False).encode()
         except (TypeError, ValueError):
             log.error("web ui response is not JSON-serialisable")
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "generic"})
-            return
+            return False
         self._send(resp.status, payload, "application/json; charset=utf-8", resp)
+        return True
 
     def _send_json(self, status: HTTPStatus, data: Any) -> None:
         self._send(status, json.dumps(data).encode(), "application/json; charset=utf-8")
@@ -351,7 +359,7 @@ class Server:
         """Stop serving, close the socket and join the thread; safe to call twice."""
         if self._thread is not None:
             self._httpd.shutdown()
-            self._thread.join()
+            shutdown.join(self._thread, None)
             self._thread = None
         self._httpd.server_close()
 

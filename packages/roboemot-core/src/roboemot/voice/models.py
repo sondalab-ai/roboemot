@@ -8,6 +8,7 @@ folder, so uninstalling the app removes the models with it.
 
 from __future__ import annotations
 
+import functools
 from pathlib import Path
 
 import httpx
@@ -17,11 +18,22 @@ from ..vision import models as _models
 from ..vision.models import FetchReport, ModelError, ModelFile, ModelSpec
 
 MANIFEST = Path(__file__).with_name("models.yaml")
+ASR_ROLE, TTS_ROLE = "asr_", "tts_"
 
 
 def load_manifest() -> dict[str, ModelSpec]:
     """Parse ``voice/models.yaml`` into ``{name: spec}`` (cached, treat as read-only)."""
     return _models.load_manifest(MANIFEST)
+
+
+@functools.cache
+def supported_languages() -> frozenset[str]:
+    """Languages the voice stack can listen to and speak: those with both an ``asr_<lang>`` and a
+    ``tts_<lang>`` model in the manifest (cached: the manifest ships with the package)."""
+    roles = {spec.role for spec in load_manifest().values()}
+    heard = {r.removeprefix(ASR_ROLE) for r in roles if r.startswith(ASR_ROLE)}
+    spoken = {r.removeprefix(TTS_ROLE) for r in roles if r.startswith(TTS_ROLE)}
+    return frozenset(heard & spoken)
 
 
 def models_dir(configured: str = "", data_dir: str = "") -> Path:
@@ -68,4 +80,5 @@ __all__ = [
     "load_manifest",
     "model_file",
     "models_dir",
+    "supported_languages",
 ]

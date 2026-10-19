@@ -84,6 +84,7 @@ BEHAVIOUR_MODULES = [
     "world/feed.py",
     "world/scan.py",
     "world/sources.py",
+    "webui/robot_section.py",
     "paths.py",
     "vision/__init__.py",
     "vision/attributes.py",
@@ -102,6 +103,9 @@ BEHAVIOUR_MODULES = [
     "webui/api.py",
     "webui/auth.py",
     "webui/server.py",
+    "webui/settings.py",
+    "webui/setting_clean.py",
+    "config/catalogue.py",
     "webui/validation.py",
 ]
 ALLOWED = {0, 1, -1, 2, 0.5, -1.0}

@@ -10,7 +10,7 @@ section number in commit messages that implement or change behaviour.
 | Path | What |
 | --- | --- |
 | `docs/specs/kickoff.md` | Engineering spec (SPEC), the source of truth |
-| `packages/roboemot-core/` | Python package `roboemot`: config, manifest, discovery, health (connectivity), diagnostics (debug report), vision (detect, track, embed, replay, model fetcher; ONNX backends need the `vision` extra), motion reference, affect (engine, appraisal, runner, register resolver, expression renderer), circadian, persona (traits), LLM router and system prompt, secret store (`secret_store.py`: `${secret:name}` route keys, 0600 file), bus |
+| `packages/roboemot-core/` | Python package `roboemot`: config, manifest, discovery, health (connectivity), diagnostics (debug report), vision (detect, track, embed, replay, model fetcher; ONNX backends need the `vision` extra), motion reference, affect (engine, appraisal, runner, register resolver, expression renderer), circadian, persona (traits), LLM router and system prompt, web UI robot section (`webui/robot_section.py`, `roboemot.settings` plugins), secret store (`secret_store.py`: `${secret:name}` route keys, 0600 file), bus |
 | `packages/roboemot-reachymini/` | Python package `roboemot_reachymini`: Reachy Mini driver and SDK bridge |
 | `packages/roboemot-core/src/roboemot/webui/static/vendor/sondalab-ui-kit/` | Vendored, pinned `@sondalab/ui-kit` (offline web UI). Never edit by hand: change the pin in `scripts/sync_ui_kit.py` and run it; `scripts/audit_webui.sh` runs `sl-audit` on the page (SPEC 12) |
 | `rt/` | C++ real-time core (`roboemot-rt`): arbiter and safety limiter, CMake + ctest |
@@ -38,6 +38,8 @@ section number in commit messages that implement or change behaviour.
 - **Secrets (SPEC 8, 12):** API keys come only from the secret store (`roboemot secrets set`, value never an argument). Never log, repr, report or return a key; a route whose `${secret:name}` cannot be resolved is unavailable, never sent with an empty key.
 - **Diagnostics (SPEC 12A):** robot-specific debug sources are registered in the
   `roboemot.diagnostics` entry-point group under the manifest `robot.id`; core stays robot-agnostic.
+- **Web UI robot section (SPEC 11A, 12):** entry-point group `roboemot.settings`, keyed by `robot.id`; the plugin's
+  `section(stack, manifest)` returns read-only `robot.<id>.*` rows and the config paths it claims. Core never writes a plugin row.
 - **Installer (SPEC 4A, Installer):** same pattern, entry-point group `roboemot.installers`. It
   must leave the robot clean: record only its own changes, pin existing versions, `--no-cache-dir`
   on every pip call, and the dry run never writes.

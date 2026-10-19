@@ -555,3 +555,18 @@ def test_unavailable_models_drain_the_source(caplog):
             time.sleep(0.01)
         r.listener.stop()
     assert len(reads) >= 3 and r.listener.snapshot()["state"] == "unavailable"
+
+
+def test_the_asr_is_handed_back_before_every_abort_and_a_failing_hook_does_not_stop_it():
+    calls = []
+
+    def hook():
+        calls.append(len(rig.asr.started))
+        raise RuntimeError("x")
+
+    rig = Rig(before_asr_reset=hook)
+    rig.listener._abort()
+    rig.listener.process(
+        SimpleNamespace(samples=np.zeros(CHUNK, np.float32), rate_hz=RATE, stamp=T0 + 1.0, gap=True)
+    )
+    assert len(calls) == 2 and rig.asr.resets == 2

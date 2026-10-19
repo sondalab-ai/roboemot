@@ -1,8 +1,8 @@
 // Behaviour of the web UI page script (SPEC 12 Web UI, 14): the dialog helper `ask()`, the PIN
-// handling and the settings editor. Run with `npm test` in this folder.
+// handling. The settings page is covered in settings.test.mjs. Run with `npm test` in this folder.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { loadPage, reply, settle, storageDump } from "./harness.mjs";
+import { loadPage, settle, storageDump } from "./harness.mjs";
 
 const SECRET_PIN = "482913";
 
@@ -122,115 +122,4 @@ test("PIN: the login form clears the PIN field and sends it only in the request 
   const login = page.calls.find((c) => c.path === "/api/login");
   assert.deepEqual(login.body, { pin: SECRET_PIN });
   assert.ok(!storageDump(page.window).includes(SECRET_PIN));
-});
-
-const LIST = {
-  path: "voice.keywords.stop", value: ["stop", "basta"], default: ["stop"], needs_admin: false,
-  schema: { type: "array", minItems: 1, maxItems: 3, items: { maxLength: 8 } },
-};
-const LINE = {
-  path: "voice.wake_word", value: "robo", default: null, needs_admin: true,
-  schema: { type: ["string", "null"], maxLength: 6 },
-};
-
-async function settingsPage(extra = {}) {
-  const page = await loadPage({ "GET /api/settings": { settings: [LIST, LINE] }, ...extra });
-  await page.run("settingsView()");
-  return page;
-}
-
-const editButton = (page, path) =>
-  page.document.querySelector(`[data-path="${path}"] button`);
-
-test("settings: the editor is built from the schema's limits", async () => {
-  const page = await settingsPage();
-  const doc = page.document;
-  assert.ok(doc.querySelector('[data-path="voice.keywords.stop"] .setting-value'));
-  editButton(page, "voice.keywords.stop").click();
-  const box = doc.querySelector('[data-path="voice.keywords.stop"]');
-  const inputs = [...box.querySelectorAll("input")];
-  assert.equal(inputs.length, 2);
-  assert.ok(inputs.every((i) => i.getAttribute("maxlength") === "8"));
-  const add = [...box.querySelectorAll("button")].find((b) => b.textContent === "settings_add");
-  add.click();
-  assert.equal(box.querySelectorAll("input").length, 3);
-  assert.equal(add.disabled, true, "maxItems reached");
-  const removes = [...box.querySelectorAll(".entry button")];
-  removes.slice(1).forEach((b) => b.click());
-  const last = box.querySelector(".entry button");
-  assert.equal(last.disabled, true, "minItems reached");
-
-  editButton(page, "voice.wake_word").click();
-  const line = doc.querySelector('[data-path="voice.wake_word"] input');
-  assert.equal(line.getAttribute("maxlength"), "6");
-  assert.equal(line.value, "robo");
-});
-
-test("settings: a value over the limit is flagged on its field and nothing is sent", async () => {
-  const page = await settingsPage();
-  editButton(page, "voice.wake_word").click();
-  const box = page.document.querySelector('[data-path="voice.wake_word"]');
-  const input = box.querySelector("input");
-  input.value = "much too long";
-  submit(page.window, box.querySelector("form"));
-  await settle();
-  const failure = box.querySelector("#set-error-1");
-  assert.equal(failure.hidden, false);
-  assert.equal(failure.textContent, "err_line_too_long");
-  assert.equal(input.getAttribute("aria-invalid"), "true");
-  assert.equal(input.getAttribute("aria-describedby"), "set-error-1");
-  assert.equal(page.document.querySelector("dialog"), null, "no PIN prompt for an invalid value");
-  assert.ok(!page.calls.some((c) => c.method === "POST" && c.path === "/api/settings"));
-});
-
-test("settings: an over-long list entry is flagged on that entry only", async () => {
-  const page = await settingsPage();
-  editButton(page, "voice.keywords.stop").click();
-  const box = page.document.querySelector('[data-path="voice.keywords.stop"]');
-  const [first, second] = box.querySelectorAll("input");
-  second.value = "waytoolongphrase";
-  submit(page.window, box.querySelector("form"));
-  await settle();
-  assert.equal(second.getAttribute("aria-invalid"), "true");
-  assert.equal(first.getAttribute("aria-invalid"), null);
-});
-
-test("settings: save asks for the PIN, posts path/value/PIN, and a server refusal maps to the PIN field", async () => {
-  let attempt = 0;
-  const page = await settingsPage({
-    "GET /api/strings": { language: "en", strings: { err_bad_pin: "Wrong PIN." } },
-    "POST /api/settings": () => (++attempt === 1 ? reply(403, { error: "bad_pin" }) : { changed: true, persisted: true }),
-  });
-  editButton(page, "voice.wake_word").click();
-  const box = page.document.querySelector('[data-path="voice.wake_word"]');
-  box.querySelector("input").value = "  nuovo  ";
-  submit(page.window, box.querySelector("form"));
-  await settle();
-
-  const dialog = page.document.querySelector("dialog");
-  const pin = dialog.querySelector("#dialog-pin");
-  pin.value = SECRET_PIN;
-  submit(page.window, dialog.querySelector("form"));
-  await settle();
-  assert.deepEqual(page.calls.filter((c) => c.path === "/api/settings" && c.method === "POST")[0].body,
-    { path: "voice.wake_word", value: "nuovo", pin: SECRET_PIN });
-  assert.equal(pin.getAttribute("aria-invalid"), "true");
-  assert.equal(dialog.querySelector("#dialog-error").textContent, "Wrong PIN.");
-
-  pin.value = SECRET_PIN;
-  submit(page.window, dialog.querySelector("form"));
-  await settle();
-  assert.equal(page.document.querySelector("dialog"), null, "closed after the accepted save");
-  assert.equal(page.document.querySelector("#notice").textContent, "saved");
-  assert.ok(!storageDump(page.window).includes(SECRET_PIN));
-});
-
-test("settings: an unchanged value is not sent and asks for no PIN", async () => {
-  const page = await settingsPage();
-  editButton(page, "voice.wake_word").click();
-  const box = page.document.querySelector('[data-path="voice.wake_word"]');
-  submit(page.window, box.querySelector("form"));
-  await settle();
-  assert.equal(page.document.querySelector("dialog"), null);
-  assert.equal(page.document.querySelector("#notice").textContent, "settings_unchanged");
 });

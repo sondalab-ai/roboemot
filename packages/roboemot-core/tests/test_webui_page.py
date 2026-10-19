@@ -83,6 +83,7 @@ def test_scripts_are_external_and_only_the_effects_loader_is_a_module(client):
     scripts = dict(_page(client).scripts)
     assert scripts == {
         "/static/theme.js": None,
+        "/static/settings.js": None,
         "/static/app.js": None,
         "/static/fx.js": "module",
     }
@@ -109,7 +110,7 @@ def test_local_stylesheet_has_only_the_registered_product_accent():
 
 
 def test_first_party_scripts_have_no_inline_style_or_html_injection():
-    for name in ("app.js", "theme.js", "fx.js"):
+    for name in ("app.js", "settings.js", "theme.js", "fx.js"):
         text = (STATIC / name).read_text()
         for banned in (
             'setAttribute("style"',
@@ -129,8 +130,12 @@ def test_no_native_confirm_prompt_or_page_level_pin_field_is_left():
     assert "ask({" in js
 
 
+def _page_js() -> str:
+    return (STATIC / "app.js").read_text() + (STATIC / "settings.js").read_text()
+
+
 def _keys_used_by_app() -> set[str]:
-    js = (STATIC / "app.js").read_text()
+    js = _page_js()
     return set(re.findall(r"""\bt\(\s*"([a-z0-9_]+)"\s*[,)]""", js))
 
 
@@ -146,13 +151,26 @@ def test_every_string_key_the_page_reads_exists_in_both_languages():
 @pytest.mark.parametrize(
     "prefix",
     [
-        "tab_", "state_", "kind_", "status_", "origin_", "theme_", "settings_group_", "check_",
+        "tab_", "state_", "kind_", "status_", "origin_", "theme_", "settings_source_", "check_",
         "route_error_", "scope_", "age_", "gender_", "conflict_", "photo_", "hint_",
     ],
 )  # fmt: skip
 def test_dynamic_string_families_are_complete(prefix):
     en = {k for k in EN if k.startswith(prefix)}
     assert en and en == {k for k in IT if k.startswith(prefix)}
+
+
+def test_every_restart_effect_core_accepts_has_text_in_both_languages():
+    from roboemot.webui.robot_section import RESTART_EFFECTS
+
+    for lang in (EN, IT):
+        assert [e for e in RESTART_EFFECTS if not lang.get("settings_restart_effect_" + e)] == []
+    assert "{timeout_s}" in EN["settings_restart_effect_kill_on_timeout"]
+    assert "{timeout_s}" in IT["settings_restart_effect_kill_on_timeout"]
+    assert not any("Reachy" in v for v in (*EN.values(), *IT.values()) if "restart" in v.lower())
+    assert {k for k in EN if k.startswith("settings_restart_effect_")} == {
+        "settings_restart_effect_" + e for e in RESTART_EFFECTS
+    }
 
 
 def test_tabs_are_the_strings_that_exist():
@@ -165,16 +183,18 @@ def test_tabs_are_the_strings_that_exist():
 
 
 def test_settings_client_prechecks_use_server_error_codes():
-    js = (STATIC / "app.js").read_text()
-    for code in ("list_empty", "list_too_long", "phrase_too_long", "line_empty", "line_too_long"):
+    js = (STATIC / "settings.js").read_text()
+    for code in ("value_type", "value_range", "key_invalid", "key_duplicate"):
         assert f'"{code}"' in js
         assert EN["err_" + code] and IT["err_" + code]
 
 
 def test_settings_posts_path_value_and_pin_to_the_api():
-    js = (STATIC / "app.js").read_text()
-    assert '"/api/settings"' in js
-    assert re.search(r"path: s\.path, value: value, pin: pin", js)
+    js = (STATIC / "settings.js").read_text()
+    for route in ("", "/reset", "/reveal", "/entry", "/entry/remove"):
+        assert f'"/api/settings{route}"' in js
+    assert re.search(r"path: row\.path, value: out\.value, pin", js)
+    assert "localStorage" not in js and "sessionStorage" not in js
 
 
 def test_theme_script_guards_storage_and_reloads_for_high_contrast():
@@ -212,9 +232,9 @@ def test_a_busy_aurora_always_carries_aria_busy():
 
 
 def test_only_a_saved_change_fires_the_glitch_burst():
-    js = (STATIC / "app.js").read_text()
+    js = (STATIC / "settings.js").read_text()
     assert js.count("roboemotFx.burst") == 1
-    assert "result.changed ? s.path : null" in js
+    assert "result.changed ? row.path : null" in js
 
 
 def test_vendored_javascript_is_the_only_place_for_effect_internals():
@@ -243,3 +263,24 @@ def test_string_templates_use_a_replacer_function():
 def test_retry_hint_strings_exist():
     for lang in (EN, IT):
         assert "{n}" in lang["dialog_retry_in"]
+
+
+def test_every_error_code_the_server_sends_has_a_string_in_both_languages():
+    root = Path(server_module.__file__).parent
+    codes: set[str] = set()
+    for source in root.glob("*.py"):
+        text = source.read_text()
+        codes |= set(re.findall(r'ValidationError\(\s*"([a-z_]+)"', text))
+        codes |= set(re.findall(r'_fail\(\s*"([a-z_]+)"', text))
+        codes |= set(re.findall(r'ApiError\(\s*HTTPStatus\.\w+,\s*"([a-z_]+)"', text))
+    assert {"setting_guardrail", "entry_in_lower_layer", "value_range"} <= codes
+    for lang in (EN, IT):
+        assert sorted(c for c in codes if "err_" + c not in lang) == []
+
+
+def test_settings_page_strings_are_chrome_only_and_the_legacy_ones_are_gone():
+    for lang in (EN, IT):
+        assert not [k for k in lang if k.startswith("settings_group_")]
+        assert "settings_edit" not in lang and "settings_platform_name" not in lang
+    js = _page_js()
+    assert "SETTING_GROUPS" not in js and "settingEditor" not in js

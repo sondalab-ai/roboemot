@@ -323,3 +323,131 @@ def test_single_route_field_addressable_at_runtime():
     assert set(routes) == {"lan", "cloud"} and routes["cloud"].max_tokens == 120
     with pytest.raises(GuardrailError):
         stack.set("llm_routes.cloud.allowed_for_minors", True)
+
+
+# ------------------------------------------------------------------ batch, preview, clear
+
+
+def rules_stack():
+    rules = [{"event": "zz.a", "valence": 0.1}, {"event": "zz.b", "valence": 0.2}]
+    return ConfigStack(
+        app={"appraisal": {"rules": rules, "extra_events": ["zz.a", "zz.b"]}},
+    )
+
+
+def test_set_many_is_all_or_nothing_with_one_event():
+    stack = ConfigStack()
+    events = []
+    stack.subscribe(events.append)
+    stack.set_many({"affect.update_hz": 30.0, "personality": "calm"}, source="t")
+    assert len(events) == 1 and set(events[0].changed_keys) == {"affect.update_hz", "personality"}
+    before = dict(stack._runtime)
+    with pytest.raises(ConfigError):
+        stack.set_many({"personality": "x", "affect.update_hz": 9999.0}, source="t")
+    with pytest.raises(GuardrailError):
+        stack.set_many({"personality": "y", "webui.name_max_chars": 200}, source="t")
+    assert stack._runtime == before and len(events) == 1
+    assert stack.effective().personality == "calm"
+
+
+def test_set_many_gives_each_approval_to_the_override_that_covers_it():
+    stack = ConfigStack()
+    stack.set_many(
+        {"privacy.multimodal_frames": True, "affect.update_hz": 30.0}, source="t", admin=True
+    )
+    assert "privacy.multimodal_frames" in stack._runtime["privacy.multimodal_frames"].approved
+    assert stack._runtime["affect.update_hz"].approved == {}
+
+
+def test_preview_changes_nothing_even_on_error():
+    stack = ConfigStack()
+    stack.set("personality", "calm", source="t")
+    before = {k: v.value for k, v in stack._runtime.items()}
+    audit, events = len(stack.audit), []
+    stack.subscribe(events.append)
+    assert stack.preview({"affect.update_hz": 33.0}).affect.update_hz == 33.0
+    with pytest.raises(ConfigError):
+        stack.preview({"affect.update_hz": 9999.0})
+    assert {k: v.value for k, v in stack._runtime.items()} == before
+    assert len(stack.audit) == audit and events == []
+    assert stack.effective().affect.update_hz == 20.0
+
+
+def test_clear_subtree_rolls_back_when_the_result_is_invalid():
+    stack = ConfigStack()
+    stack.set("voice.moods.tender", {"rate": 0.1}, source="t")
+    stack.set("voice.moods.tender.pitch_st", 1.0, source="t")
+    real, calls = stack.effective, {"n": 0}
+
+    def flaky(person=None):
+        calls["n"] += 1
+        if calls["n"] == 1:  # the commit's validation
+            raise ConfigError("boom")
+        return real(person)
+
+    stack.effective = flaky
+    with pytest.raises(ConfigError):
+        stack.clear("voice.moods.tender", subtree=True)
+    stack.effective = real
+    assert set(stack._runtime) == {"voice.moods.tender", "voice.moods.tender.pitch_st"}
+    assert stack.clear("voice.moods.tender", subtree=True)
+    assert stack._runtime == {}
+
+
+def test_clear_of_an_index_addressed_partial_finds_it_by_identity():
+    stack = rules_stack()
+    at = next(n for n, r in enumerate(stack.effective().appraisal.rules) if r.event == "zz.b")
+    stack.set(f"appraisal.rules.{at}.valence", 0.9, source="t")
+    stack.app["appraisal"]["rules"].reverse()
+    moved = next(n for n, r in enumerate(stack.effective().appraisal.rules) if r.event == "zz.b")
+    assert stack.clear(f"appraisal.rules.{moved}.valence")
+    assert stack._runtime == {}
+    assert stack.effective().appraisal.rules[moved].valence == 0.2
+
+
+def test_a_renamed_route_drops_its_override_on_restore(tmp_path):
+    from roboemot.webui.settings import SettingsEditor
+
+    route = {"name": "lan", "base_url": "https://api.example.com/v1", "model": "m"}
+    stack = ConfigStack(app={"llm_routes": [route]})
+    store = tmp_path / "webui_settings.json"
+    SettingsEditor(stack, store=store).change("llm_routes.lan.model", "m2")
+    renamed = ConfigStack(app={"llm_routes": [{**route, "name": "home"}]})
+    SettingsEditor(renamed, store=store).restore()
+    assert renamed.effective().llm_routes[0].model == "m"
+    assert json.loads(store.read_text())["overrides"] == {}
+
+
+def test_reset_with_a_stale_file_key_cleans_the_file(tmp_path):
+    from roboemot.webui.settings import SettingsEditor
+
+    store = tmp_path / "webui_settings.json"
+    store.write_text(json.dumps({"v": 1, "overrides": {"affect.update_hz": 33.0}}))
+    store.chmod(0o600)
+    stack = ConfigStack()
+    editor = SettingsEditor(stack, store=store)
+    editor.restore()
+    stack.clear("affect.update_hz")  # the live value goes, the file key is stale
+    assert editor.reset("affect.update_hz")["changed"] is False
+    assert json.loads(store.read_text())["overrides"] == {}
+
+
+def test_clear_and_set_validate_the_configuration_no_more_than_before(monkeypatch):
+    """Barge-in latency: the persona traits worker clears and sets a derived value on every run
+    and holds the GIL meanwhile. The old clear validated twice (check and notify), the old set
+    three times; guarded commits must not add validations."""
+    stack = ConfigStack()
+    traits = stack.effective().persona.traits.model_dump()
+    stack.set("persona.traits", traits, source="t", layer="derived")
+    real, calls = RoboEmotConfig.model_validate.__func__, {"n": 0}
+
+    def counting(cls, *args, **kwargs):
+        calls["n"] += 1
+        return real(cls, *args, **kwargs)
+
+    monkeypatch.setattr(RoboEmotConfig, "model_validate", classmethod(counting))
+    assert stack.clear("persona.traits", source="t", layer="derived")
+    assert calls["n"] <= 2
+    calls["n"] = 0
+    stack.set("persona.traits", traits, source="t", layer="derived")
+    assert calls["n"] <= 3

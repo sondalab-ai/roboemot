@@ -28,11 +28,11 @@ from dataclasses import dataclass
 from importlib.metadata import entry_points
 from typing import Any, Literal, Protocol
 
+from roboemot.redact import REDACTED, is_secret_key, mask_bare_users, secret_shaped
+
 SCHEMA_VERSION = 1
 SECTION_TIMEOUT_S = 5.0
 ENTRY_POINT_GROUP = "roboemot.diagnostics"
-REDACTED = "***"
-SECRET_WORDS = ("key", "token", "secret", "password", "credential")
 LOOPBACK = {"localhost", "127.0.0.1", "::1"}
 
 Scope = Literal["local", "robot", "runtime"]
@@ -113,7 +113,7 @@ def collect_section(source: Source, timeout_s: float = SECTION_TIMEOUT_S) -> dic
         return section | {"ok": False, "error": f"timed out after {timeout_s:g} s"}
     if "error" in box:
         return section | {"ok": False, "error": box["error"]}
-    return section | {"ok": True, "data": jsonable(box.get("data"))}
+    return section | {"ok": True, "data": jsonable(box.get("data"), bare_user=False)}
 
 
 def collect(
@@ -155,14 +155,19 @@ class Diagnostics:
         return collect(self.sources, timeout_s=self.timeout_s)
 
 
-def jsonable(value: Any) -> Any:
-    """Plain JSON types only: no numpy scalars, enums, datetimes, NaN; secrets redacted."""
-    if isinstance(value, bool | str | int) or value is None:
+def jsonable(value: Any, *, bare_user: bool = True) -> Any:
+    """Plain JSON types only: no numpy scalars, enums, datetimes, NaN; secrets redacted.
+    ``bare_user`` False (debug report) keeps ``scheme://user@host``; ``user:pass@`` stays hidden."""
+    if isinstance(value, str):
+        if not bare_user:
+            value = mask_bare_users(value)
+        return REDACTED if secret_shaped(value, bare_user=bare_user) else value
+    if isinstance(value, bool | int) or value is None:
         return value
     if isinstance(value, float):
         return value if math.isfinite(value) else None
     if isinstance(value, enum.Enum):
-        return jsonable(value.value)
+        return jsonable(value.value, bare_user=bare_user)
     if isinstance(value, dt.datetime | dt.date):
         return value.isoformat()
     if isinstance(value, bytes):
@@ -174,17 +179,15 @@ def jsonable(value: Any) -> Any:
     elif hasattr(value, "model_dump"):  # pydantic
         value = value.model_dump(mode="json")
     elif hasattr(value, "tolist"):  # numpy scalar or array
-        return jsonable(value.tolist())
+        return jsonable(value.tolist(), bare_user=bare_user)
     if isinstance(value, dict):
-        return {str(k): REDACTED if _secret(str(k)) else jsonable(v) for k, v in value.items()}
+        return {
+            str(k): REDACTED if is_secret_key(str(k)) else jsonable(v, bare_user=bare_user)
+            for k, v in value.items()
+        }
     if isinstance(value, list | tuple | set | frozenset):
-        return [jsonable(v) for v in value]
+        return [jsonable(v, bare_user=bare_user) for v in value]
     return str(value)
-
-
-def _secret(key: str) -> bool:
-    k = key.lower()
-    return any(w in k for w in SECRET_WORDS)
 
 
 def _printable(text: str) -> str:
@@ -253,7 +256,10 @@ __all__ = [
     "collect",
     "collect_section",
     "installed_platforms",
+    "REDACTED",
+    "is_secret_key",
     "jsonable",
+    "secret_shaped",
     "platform_sources",
     "render_text",
 ]

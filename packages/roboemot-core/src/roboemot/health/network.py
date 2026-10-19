@@ -18,6 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
+from .. import shutdown
 from ..config.schema import LinkPolicy, LLMRoute
 from . import Link, OnChange
 
@@ -190,7 +191,7 @@ class NetworkMonitor:
         self._stop.set()
         self._wake.set()
         if self._thread:
-            self._thread.join(timeout=self.policy.probe_timeout_s * len(self.routes) + 1)
+            shutdown.join(self._thread, self.policy.probe_timeout_s * len(self.routes) + 1)
 
     def _run(self) -> None:
         while not self._stop.is_set():

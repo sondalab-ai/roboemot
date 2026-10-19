@@ -32,31 +32,102 @@ EN: dict[str, str] = {
     "tab_routes": "Routes",
     "tab_settings": "Settings",
     "settings_intro": (
-        "Settings that can be changed here. Each change asks for the operator PIN and applies at "
-        "once. The app config file is never edited."
+        "Every configuration field, with its current value and the layer that decides it. Each "
+        "change asks for the operator PIN and applies at once. A change that loosens a safety "
+        "rule is saved to the app configuration file instead and survives a restart."
     ),
-    "settings_group_wake_phrases": "Wake phrases",
-    "settings_group_wake_word": "Robot name",
-    "settings_group_minor_lines": "Lines spoken to minors",
-    "settings_group_blocklist": "Child-safety word list",
-    "settings_group_other": "Other",
+    "settings_core": "Core",
+    "settings_robot": "Robot",
+    "settings_nav": "Setting groups",
+    "settings_search": "Search",
+    "settings_search_hint": "By path or description.",
+    "settings_changed_only": "Changed only",
+    "settings_matches": "{n} settings shown",
+    "settings_source_runtime": "Runtime",
+    "settings_source_derived": "Derived",
+    "settings_source_app": "App file",
+    "settings_source_preset": "Preset",
+    "settings_source_manifest": "Robot manifest",
+    "settings_source_defaults": "Defaults",
+    "settings_source_schema": "Built-in",
+    "settings_restart": "Restart RoboEmot",
+    "settings_restart_hint": 'Settings marked "Restart needed" apply after RoboEmot restarts.',
+    "settings_restart_pending": "Saved changes are waiting for a restart.",
+    "settings_restart_title": "Restart RoboEmot?",
+    "settings_restart_message": (
+        "RoboEmot stops and starts again. This page is unavailable for a moment and you will "
+        "have to sign in again. What happens:"
+    ),
+    "settings_restart_confirm": "Restart",
+    "settings_restart_started": (
+        "Restarting. Wait a few seconds, then reload the page and sign in again."
+    ),
+    "settings_restart_effect_zero_pose": (
+        "The robot goes to its zero pose once the app has stopped."
+    ),
+    "settings_restart_effect_webrtc_drop": "A remote WebRTC session may drop.",
+    "settings_restart_effect_kill_on_timeout": (
+        "If RoboEmot has not stopped after {timeout_s} s, it is killed."
+    ),
+    "err_restart_unavailable": "RoboEmot cannot be restarted from here right now.",
+    "settings_restart_badge": "Restart needed",
+    "settings_restart_goto": "Go to Restart RoboEmot",
+    "settings_restart_needed": "Restart RoboEmot for it to take effect.",
+    "settings_not_measured": "not measured",
+    "settings_show_all": "Show all {n}",
+    "settings_private": "Private",
+    "settings_secret": "Secret",
+    "settings_readonly": "Read-only",
+    "settings_json_readonly": "Structured value: edit it in the configuration file.",
+    "settings_superset_hint": (
+        "Removing a word loosens the child-safe filter: it is saved to the app config and needs "
+        "the PIN."
+    ),
+    "settings_null": "No value (null)",
+    "settings_route_move_message": (
+        "If this route has an API key, saving sends that key to {host}. Enter the PIN to allow it."
+    ),
+    "settings_write_only_hint": (
+        "The current address holds credentials and is not shown. Type a whole new address to "
+        "replace it; it may not hold credentials."
+    ),
+    "settings_slider": "{path} slider",
+    "settings_tuple_item": "Value {n} of {total}",
+    "settings_new_item": "New entry",
+    "settings_remove_item": "Remove {item}",
+    "settings_remove_n": "Remove row {n}",
+    "settings_dict_key": "Key",
+    "settings_dict_value": "Value",
+    "settings_add_entry": "Add entry",
+    "settings_entry_name": "Name",
+    "settings_remove_entry": "Remove entry",
+    "settings_no_entries": "No entries.",
+    "settings_reveal_message": (
+        "Show the private settings (minors, privacy, location). They stay in this page until you "
+        "log out or reload."
+    ),
+    "settings_reset_layer": "Reset to lower layer",
+    "settings_reset_done": "Reset.",
+    "settings_entry_added": "Entry added.",
+    "settings_entry_removed": "Entry removed.",
+    "settings_layer_runtime": "Applied now.",
+    "settings_layer_app": (
+        "Saved permanently in the app configuration file: a safety setting was loosened, and it "
+        "survives a restart."
+    ),
+    "err_key_duplicate": "Two rows use the same key.",
     "settings_default": "Default",
-    "settings_edit": "Edit",
     "settings_save": "Save",
     "settings_add": "Add entry",
     "settings_remove": "Remove",
-    "settings_reset": "Use the platform name",
-    "settings_platform_name": "platform name",
     "settings_admin": "Admin",
+    "settings_reveal": "Show with PIN",
+    "settings_hidden": "Hidden: minors, privacy and location settings need the PIN to be shown.",
     "settings_admin_hint": "Safety-relevant. The operator PIN doubles as the admin PIN.",
-    "settings_blocklist_hint": "Words can only be added here. Removing one needs the config file.",
     "settings_pin_title": "Confirm the change",
     "settings_not_persisted": "It is live but was not saved to disk: it ends at the next restart.",
     "settings_unchanged": "Nothing changed.",
     "settings_none": "No setting can be changed from the web UI.",
-    "settings_entry": "Entry {n}",
-    "settings_limits": "Up to {max} entries of {len} characters each.",
-    "settings_line_limit": "Up to {len} characters.",
     "err_routes_unavailable": "Routes are not available.",
     "err_route_unknown": "No such route.",
     "err_route_busy": "Another check is running. Try again in a moment.",
@@ -256,6 +327,30 @@ EN: dict[str, str] = {
     "err_setting_invalid": "The value is not valid for this setting.",
     "err_settings_unavailable": "Settings are not available.",
     "err_value_type": "The value has the wrong type.",
+    "err_value_range": "The value is outside the allowed range.",
+    "err_value_choice": "The value is not one of the allowed choices.",
+    "err_text_invalid": "The text has characters that are not allowed.",
+    "err_persist_failed": "The configuration file could not be written; nothing was changed.",
+    "err_value_merged": "Entries can be added or changed here, not removed.",
+    "err_text_too_long": "The text is too long.",
+    "err_key_invalid": "The name can only use letters, digits, dash and underscore.",
+    "err_entry_exists": "An entry with this name already exists.",
+    "err_entry_invalid": "The entry has a field that cannot be set from the web UI.",
+    "err_entry_in_lower_layer": (
+        "This entry comes from the configuration file and cannot be removed here."
+    ),
+    "err_endpoint_ack_required": (
+        "This route has an API key. Saving sends that key to {host}. Enter the PIN and press "
+        "the button again to allow it."
+    ),
+    "err_url_credentials": (
+        "The address must not hold a user name, password, token or ${secret:...} reference. "
+        "Store the key with `roboemot secrets set NAME` and use ${secret:NAME} as the api_key."
+    ),
+    "err_language_unsupported": "The voice stack has no speech models for this language.",
+    "err_not_resettable": (
+        "This field belongs to an entry added here and cannot be reset on its own."
+    ),
     "err_list_empty": "The list needs at least one entry.",
     "err_list_too_long": "The list has too many entries.",
     "err_phrase_too_long": "An entry is too long.",
@@ -321,34 +416,106 @@ IT: dict[str, str] = {
     "tab_routes": "Modelli",
     "tab_settings": "Impostazioni",
     "settings_intro": (
-        "Impostazioni modificabili da qui. Ogni modifica chiede il PIN operatore e vale subito. "
-        "Il file di configurazione dell'app non viene mai modificato."
+        "Ogni campo di configurazione, con il valore attuale e il livello che lo decide. Ogni "
+        "modifica chiede il PIN operatore e vale subito. Una modifica che allenta una regola di "
+        "sicurezza viene invece salvata nel file di configurazione dell'app e resta dopo un "
+        "riavvio."
     ),
-    "settings_group_wake_phrases": "Frasi di attivazione",
-    "settings_group_wake_word": "Nome del robot",
-    "settings_group_minor_lines": "Frasi dette ai minori",
-    "settings_group_blocklist": "Lista di parole per i bambini",
-    "settings_group_other": "Altre",
+    "settings_core": "Nucleo",
+    "settings_robot": "Robot",
+    "settings_nav": "Gruppi di impostazioni",
+    "settings_search": "Cerca",
+    "settings_search_hint": "Per percorso o descrizione.",
+    "settings_changed_only": "Solo modificate",
+    "settings_matches": "{n} impostazioni mostrate",
+    "settings_source_runtime": "Runtime",
+    "settings_source_derived": "Derivato",
+    "settings_source_app": "File dell'app",
+    "settings_source_preset": "Preset",
+    "settings_source_manifest": "Manifesto del robot",
+    "settings_source_defaults": "Predefiniti",
+    "settings_source_schema": "Integrato",
+    "settings_restart": "Riavvia RoboEmot",
+    "settings_restart_hint": (
+        "Le impostazioni con «Riavvio necessario» valgono dopo il riavvio di RoboEmot."
+    ),
+    "settings_restart_pending": "Le modifiche salvate attendono un riavvio.",
+    "settings_restart_title": "Riavviare RoboEmot?",
+    "settings_restart_message": (
+        "RoboEmot si ferma e riparte. Questa pagina non sarà raggiungibile per un attimo e "
+        "dovrai accedere di nuovo. Cosa succede:"
+    ),
+    "settings_restart_confirm": "Riavvia",
+    "settings_restart_started": (
+        "Riavvio in corso. Attendi qualche secondo, poi ricarica la pagina e accedi di nuovo."
+    ),
+    "settings_restart_effect_zero_pose": "Il robot va in posa zero quando l'app si è fermata.",
+    "settings_restart_effect_webrtc_drop": "Una sessione WebRTC remota può cadere.",
+    "settings_restart_effect_kill_on_timeout": (
+        "Se RoboEmot non si ferma entro {timeout_s} s, viene terminato."
+    ),
+    "err_restart_unavailable": "Al momento RoboEmot non può essere riavviato da qui.",
+    "settings_restart_badge": "Riavvio necessario",
+    "settings_restart_goto": "Vai a Riavvia RoboEmot",
+    "settings_restart_needed": "Riavvia RoboEmot perché abbia effetto.",
+    "settings_not_measured": "non misurato",
+    "settings_show_all": "Mostra tutte e {n}",
+    "settings_private": "Privata",
+    "settings_secret": "Segreta",
+    "settings_readonly": "Sola lettura",
+    "settings_json_readonly": "Valore strutturato: si modifica nel file di configurazione.",
+    "settings_superset_hint": (
+        "Togliere una parola allenta il filtro per i minori: viene salvato nella "
+        "configurazione dell'app e richiede il PIN."
+    ),
+    "settings_null": "Nessun valore (null)",
+    "settings_route_move_message": (
+        "Se questa route ha una chiave API, salvando la chiave viene inviata a {host}. "
+        "Inserisci il PIN per consentirlo."
+    ),
+    "settings_write_only_hint": (
+        "L'indirizzo attuale contiene credenziali e non viene mostrato. Scrivi un nuovo indirizzo "
+        "completo per sostituirlo; non può contenere credenziali."
+    ),
+    "settings_slider": "Cursore di {path}",
+    "settings_tuple_item": "Valore {n} di {total}",
+    "settings_new_item": "Nuova voce",
+    "settings_remove_item": "Rimuovi {item}",
+    "settings_remove_n": "Rimuovi la riga {n}",
+    "settings_dict_key": "Chiave",
+    "settings_dict_value": "Valore",
+    "settings_add_entry": "Aggiungi voce",
+    "settings_entry_name": "Nome",
+    "settings_remove_entry": "Rimuovi voce",
+    "settings_no_entries": "Nessuna voce.",
+    "settings_reveal_message": (
+        "Mostra le impostazioni private (minori, privacy, posizione). Restano in questa pagina "
+        "finché non esci o ricarichi."
+    ),
+    "settings_reset_layer": "Torna al livello inferiore",
+    "settings_reset_done": "Ripristinato.",
+    "settings_entry_added": "Voce aggiunta.",
+    "settings_entry_removed": "Voce rimossa.",
+    "settings_layer_runtime": "Applicata subito.",
+    "settings_layer_app": (
+        "Salvata in modo permanente nel file di configurazione dell'app: una regola di sicurezza "
+        "è stata allentata e resta dopo un riavvio."
+    ),
+    "err_key_duplicate": "Due righe usano la stessa chiave.",
     "settings_default": "Predefinito",
-    "settings_edit": "Modifica",
     "settings_save": "Salva",
     "settings_add": "Aggiungi voce",
     "settings_remove": "Rimuovi",
-    "settings_reset": "Usa il nome della piattaforma",
-    "settings_platform_name": "nome della piattaforma",
     "settings_admin": "Admin",
-    "settings_admin_hint": "Rilevante per la sicurezza. Il PIN operatore vale come PIN admin.",
-    "settings_blocklist_hint": (
-        "Qui si possono solo aggiungere parole. Per toglierne una serve il file di "
-        "configurazione dell'app."
+    "settings_reveal": "Mostra con il PIN",
+    "settings_hidden": (
+        "Nascosto: le impostazioni su minori, privacy e posizione si mostrano con il PIN."
     ),
+    "settings_admin_hint": "Rilevante per la sicurezza. Il PIN operatore vale come PIN admin.",
     "settings_pin_title": "Conferma la modifica",
     "settings_not_persisted": "È attiva ma non salvata su disco: termina al prossimo riavvio.",
     "settings_unchanged": "Nessuna modifica.",
     "settings_none": "Nessuna impostazione si può modificare dalla web UI.",
-    "settings_entry": "Voce {n}",
-    "settings_limits": "Fino a {max} voci di {len} caratteri ciascuna.",
-    "settings_line_limit": "Fino a {len} caratteri.",
     "err_routes_unavailable": "I modelli non sono disponibili.",
     "err_route_unknown": "Modello sconosciuto.",
     "err_route_busy": "Un altro controllo è in corso. Riprova tra poco.",
@@ -556,6 +723,30 @@ IT: dict[str, str] = {
     "err_setting_invalid": "Il valore non è valido per questa impostazione.",
     "err_settings_unavailable": "Le impostazioni non sono disponibili.",
     "err_value_type": "Il valore ha il tipo sbagliato.",
+    "err_value_range": "Il valore è fuori dall'intervallo ammesso.",
+    "err_value_choice": "Il valore non è tra quelli ammessi.",
+    "err_text_invalid": "Il testo contiene caratteri non ammessi.",
+    "err_persist_failed": "Impossibile scrivere il file di configurazione; non è cambiato nulla.",
+    "err_value_merged": "Qui le voci si possono aggiungere o modificare, non rimuovere.",
+    "err_text_too_long": "Il testo è troppo lungo.",
+    "err_key_invalid": "Il nome può usare solo lettere, cifre, trattino e trattino basso.",
+    "err_entry_exists": "Esiste già una voce con questo nome.",
+    "err_entry_invalid": ("La voce ha un campo che non si può impostare dalla web UI."),
+    "err_entry_in_lower_layer": (
+        "Questa voce viene dal file di configurazione e non si può rimuovere da qui."
+    ),
+    "err_endpoint_ack_required": (
+        "Questa route ha una chiave API. Salvando, la chiave viene inviata a {host}. Inserisci il "
+        "PIN e premi di nuovo il pulsante per consentirlo."
+    ),
+    "err_url_credentials": (
+        "L'indirizzo non deve contenere utente, password, token o riferimenti ${secret:...}. "
+        "Salva la chiave con `roboemot secrets set NOME` e usa ${secret:NOME} come api_key."
+    ),
+    "err_language_unsupported": "Per questa lingua non ci sono modelli vocali nell'app.",
+    "err_not_resettable": (
+        "Questo campo appartiene a una voce aggiunta qui e non si può ripristinare da solo."
+    ),
     "err_list_empty": "La lista richiede almeno una voce.",
     "err_list_too_long": "La lista ha troppe voci.",
     "err_phrase_too_long": "Una voce è troppo lunga.",

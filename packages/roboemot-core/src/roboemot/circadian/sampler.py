@@ -26,6 +26,7 @@ from typing import Any, NamedTuple
 
 import numpy as np
 
+from .. import shutdown
 from ..config.schema import CircadianConfig, LightConfig
 from .light import COLOR_NDIM, Level, LightEstimator, LightReading
 from .model import MINUTES_PER_HOUR, SECONDS_PER_MINUTE
@@ -259,7 +260,7 @@ class IdleLightReader:
     def stop(self) -> None:
         self._stop.set()
         if self._thread is not None:
-            self._thread.join(timeout=self.sampler.circadian.idle_poll_s * 2 + JOIN_GRACE_S)
+            shutdown.join(self._thread, self.sampler.circadian.idle_poll_s * 2 + JOIN_GRACE_S)
             if self._thread.is_alive():  # a camera read stuck in the SDK cannot be interrupted
                 log.warning("light reader did not stop in time")
 

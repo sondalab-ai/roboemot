@@ -3,12 +3,12 @@
 SPEC 6 (Enrollment, registry management), 11A (admin confirmation), 12 (Data, Behaviour,
 privacy) and 12A (the debug report as JSON).
 
-The operator PIN gates the registry and enrollment. Configuration is edited only through the
-settings allowlist (``settings.py``): each write re-enters the PIN and goes through the config
-stack's guardrails (runtime layer: safety only tightens, e.g. blocklist entries can be added but
-never removed; loosening needs the app config and the admin PIN). Responses carry summaries and
-whitelisted status fields, never images, crops or embeddings; a last-line guard refuses any
-response that holds a long list of numbers.
+The operator PIN gates the registry and enrollment. Configuration is edited through the field
+catalogue (``settings.py``, SPEC 11A): each write re-enters the PIN and goes through the config
+stack's guardrails (the runtime layer only tightens safety; a loosening, such as removing a
+blocklist word, is retried once on the app layer under the same PIN and audited). Responses
+carry summaries and whitelisted status fields, never images, crops or embeddings; a last-line
+guard refuses any response that holds a long list of numbers.
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from http import HTTPStatus
 from http.cookies import CookieError, SimpleCookie
 from typing import Any, NoReturn, Protocol
 
+from roboemot.config.catalogue import FieldDescriptor
 from roboemot.config.schema import ROUTE_NAME_MAX_CHARS, RoboEmotConfig, WebUIConfig
 from roboemot.config.stack import ConfigError, GuardrailError
 from roboemot.llm.conformance import RouteBudgetExhausted, RouteKeyUnavailable
@@ -104,10 +105,22 @@ class RoutesPort(Protocol):
 
 
 class SettingsPort(Protocol):
-    """``roboemot.webui.settings.SettingsEditor``: the allowlisted, guarded settings."""
+    """``roboemot.webui.settings.SettingsEditor``: the guarded settings over the field catalogue."""
 
-    def describe(self) -> list[dict[str, Any]]: ...
-    def change(self, path: object, value: object, source: str) -> dict[str, Any]: ...
+    def fields(self) -> list[FieldDescriptor]: ...
+    def robot_split(
+        self, fields: list[FieldDescriptor]
+    ) -> tuple[list[FieldDescriptor], dict[str, Any] | None]: ...
+    def restart_hook(self) -> Callable[[], None] | None: ...
+    def reveal(self) -> list[FieldDescriptor]: ...
+    def change(
+        self, path: object, value: object, source: str, ack: object = None
+    ) -> dict[str, Any]: ...
+    def add_entry(
+        self, path: object, key: object, value: object, source: str
+    ) -> dict[str, Any]: ...
+    def remove_entry(self, path: object, source: str) -> dict[str, Any]: ...
+    def reset(self, path: object, source: str) -> dict[str, Any]: ...
 
 
 class CataloguePort(Protocol):
@@ -155,6 +168,9 @@ class Response:
     data: Any = None
     headers: dict[str, str] = field(default_factory=dict)
     cookies: list[str] = field(default_factory=list)
+    # Run by the server only after the response was written and flushed (not after a failed
+    # write), on the connection's thread: it must return quickly; start a thread for real work.
+    after: Callable[[], None] | None = None
 
 
 class ApiError(Exception):
@@ -249,7 +265,8 @@ class WebApi:
                 resp.headers["Retry-After"] = str(int(exc.retry_after) + 1)
         except v.ValidationError as exc:
             resp = Response(
-                HTTPStatus.UNPROCESSABLE_ENTITY, {"error": exc.code, "field": exc.field}
+                HTTPStatus.UNPROCESSABLE_ENTITY,
+                {"error": exc.code, "field": exc.field, **exc.extra},
             )
         except Exception as exc:
             log.error("web ui handler failed: %s", type(exc).__name__)
@@ -316,6 +333,11 @@ class WebApi:
             ("GET", "/api/routes"): self._routes,
             ("GET", "/api/settings"): self._settings_list,
             ("POST", "/api/settings"): self._settings_change,
+            ("POST", "/api/settings/reveal"): self._settings_reveal,
+            ("POST", "/api/robot/restart"): self._robot_restart,
+            ("POST", "/api/settings/reset"): self._settings_reset,
+            ("POST", "/api/settings/entry"): self._settings_entry_add,
+            ("POST", "/api/settings/entry/remove"): self._settings_entry_remove,
             ("POST", "/api/pseudonyms/refused"): self._pseudonyms_refused,
             ("GET", "/api/catalogue"): self._catalogue,
             ("POST", CATALOGUE_IMPORT): self._catalogue_import,
@@ -624,23 +646,113 @@ class WebApi:
         return self.settings
 
     def _settings_list(self, req: Request) -> Response:
-        """The editable fields with value, default, schema limits and the admin flag."""
-        return Response(
-            HTTPStatus.OK, {"settings": self._settings_port().describe(), "pin_required": True}
-        )
+        """``fields``: the whole field catalogue (``config.catalogue``, secrets redacted);
+        ``robot``: null or the robot plugin's section (read-only hardware rows plus the config
+        rows it claims, which are then absent from ``fields``); ``pin_required``: the note that
+        every write re-enters the PIN."""
+        port = self._settings_port()
+        fields, robot = port.robot_split(port.fields())
+        return Response(HTTPStatus.OK, {"fields": fields, "robot": robot, "pin_required": True})
 
-    def _settings_change(self, req: Request) -> Response:
-        """Change one allowlisted setting (SPEC 11A). The body holds exactly ``path``, ``value``
-        and the re-entered ``pin`` (checked under the login limits). The value is never echoed
-        in an error, and the stack's guardrails refuse what the runtime layer may not do."""
+    def _settings_reveal(self, req: Request) -> Response:
+        """The private fields (minors, privacy, location) with their real values. Admin only: the
+        PIN is re-entered under the login limits, so it is a POST (every response is no-store).
+        Secrets stay redacted."""
         port = self._settings_port()
         body = self._json_body(req)
-        v.only_keys(body, {"path", "value", "pin"})
+        v.only_keys(body, {"pin"})
+        self._check_pin(req, body.get("pin"))
+        return Response(HTTPStatus.OK, {"fields": port.reveal()})
+
+    def _settings_change(self, req: Request) -> Response:
+        """Change one catalogue field (SPEC 11A). The body holds exactly ``path``, ``value``
+        and the re-entered ``pin`` (checked under the login limits), plus ``ack_endpoint`` when a
+        route with an API key moves to another endpoint (the server names the one it expects in
+        the ``endpoint_ack_required`` error). The value is never echoed
+        in an error, and the stack's guardrails refuse what the runtime layer may not do. The
+        server picks the layer; the response names it."""
+        port = self._settings_port()
+        body = self._json_body(req)
+        v.only_keys(body, {"path", "value", "pin", "ack_endpoint"})
         if "value" not in body or "path" not in body:
             raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
         self._check_pin(req, body.get("pin"))
+        return self._settings_call(
+            lambda: port.change(
+                body["path"], body["value"], self._who(req), body.get("ack_endpoint")
+            )
+        )
+
+    def _robot_restart(self, req: Request) -> Response:
+        """Restart RoboEmot through the robot plugin (SPEC 4A, 12). Body: ``pin``. The plugin's
+        hook runs on its own thread after the response is sent, since it ends this process; its
+        outcome is not reported. 404 when the plugin has no restart or cannot restart now."""
+        port = self._settings_port()
+        body = self._json_body(req)
+        v.only_keys(body, {"pin"})
+        self._check_pin(req, body.get("pin"))
+        hook = port.restart_hook()
+        if hook is None:
+            raise ApiError(HTTPStatus.NOT_FOUND, "restart_unavailable")
+        log.warning("restart requested from the web UI by %s", req.client_ip)
+        return Response(HTTPStatus.OK, {"ok": True}, after=lambda: self._fire(hook))
+
+    @staticmethod
+    def _fire(hook: Callable[[], None]) -> None:
+        """Run ``hook`` on a daemon thread; a failure is logged by type only."""
+
+        def run() -> None:
+            try:
+                hook()
+            except Exception as exc:
+                log.error("restart hook failed: %s", type(exc).__name__)
+
+        threading.Thread(target=run, name="roboemot-restart", daemon=True).start()
+
+    def _settings_reset(self, req: Request) -> Response:
+        """Drop the runtime value of a field so the lower layer shows again. Body: ``path``,
+        ``pin``."""
+        port = self._settings_port()
+        body = self._json_body(req)
+        v.only_keys(body, {"path", "pin"})
+        if "path" not in body:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
+        self._check_pin(req, body.get("pin"))
+        return self._settings_call(lambda: port.reset(body["path"], self._who(req)))
+
+    def _settings_entry_add(self, req: Request) -> Response:
+        """Add an entry to a collection. Body: ``path`` (the collection), ``key`` (dict
+        collections; a list entry carries its identity in ``value``), ``value`` (the entry),
+        ``pin``."""
+        port = self._settings_port()
+        body = self._json_body(req)
+        v.only_keys(body, {"path", "key", "value", "pin"})
+        if "value" not in body or "path" not in body:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
+        self._check_pin(req, body.get("pin"))
+        return self._settings_call(
+            lambda: port.add_entry(body["path"], body.get("key"), body["value"], self._who(req))
+        )
+
+    def _settings_entry_remove(self, req: Request) -> Response:
+        """Remove an entry only the runtime layer holds. Body: ``path`` (the entry), ``pin``."""
+        port = self._settings_port()
+        body = self._json_body(req)
+        v.only_keys(body, {"path", "pin"})
+        if "path" not in body:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
+        self._check_pin(req, body.get("pin"))
+        return self._settings_call(lambda: port.remove_entry(body["path"], self._who(req)))
+
+    @staticmethod
+    def _who(req: Request) -> str:
+        return f"webui:{req.client_ip}"
+
+    @staticmethod
+    def _settings_call(call: Callable[[], dict[str, Any]]) -> Response:
+        """Run a settings write and map its refusals to bare codes (no value, no stack message)."""
         try:
-            result = port.change(body["path"], body["value"], f"webui:{req.client_ip}")
+            return Response(HTTPStatus.OK, call())
         except SettingNotAllowed as exc:
             raise ApiError(HTTPStatus.FORBIDDEN, "setting_not_allowed", field="path") from exc
         except GuardrailError as exc:
@@ -649,7 +761,8 @@ class WebApi:
             raise ApiError(
                 HTTPStatus.UNPROCESSABLE_ENTITY, "setting_invalid", field="value"
             ) from exc
-        return Response(HTTPStatus.OK, result)
+        except OSError as exc:  # the app file could not be written: nothing was changed
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "persist_failed") from exc
 
     # ------------------------------------------------------------------ pseudonyms
 

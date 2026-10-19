@@ -40,6 +40,7 @@ export async function loadPage(routes = {}) {
   const ctx = dom.getInternalVMContext();
   const run = (src) => new vm.Script(src).runInContext(ctx);
   run(read("theme.js"));
+  run(read("settings.js"));
   run(read("app.js"));
   await settle();
   return { window, document: window.document, calls, run };

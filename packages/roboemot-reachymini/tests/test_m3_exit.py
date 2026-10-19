@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import gc
 import json
 import os
 import threading
@@ -307,6 +308,21 @@ def start_app(data, monkeypatch, language, piper, minor=False, minors_llm=False)
     return app, mini, spoken, stop, thread, errors
 
 
+class GcPauses:
+    """Longest collector pause per generation while the app ran (a secondary cause of the flake)."""
+
+    def __init__(self) -> None:
+        self.max_ms = {0: 0.0, 1: 0.0, 2: 0.0}
+        self._t0 = 0.0
+
+    def __call__(self, phase: str, info: dict) -> None:
+        if phase == "start":
+            self._t0 = time.perf_counter()
+        else:
+            gen = info["generation"]
+            self.max_ms[gen] = max(self.max_ms[gen], (time.perf_counter() - self._t0) * 1000)
+
+
 def finish(stop, thread, errors) -> None:
     stop.set()
     thread.join(timeout=20)
@@ -334,6 +350,8 @@ def test_conversation_inside_the_latency_budgets_then_a_barge_in(
     stop_clip,
     words,
 ):
+    pauses = GcPauses()
+    gc.callbacks.append(pauses)
     app, mini, spoken, stop, thread, errors = start_app(data, monkeypatch, language, real_piper)
     try:
         clip = load(wake)
@@ -371,7 +389,8 @@ def test_conversation_inside_the_latency_budgets_then_a_barge_in(
         acoustic_onset = onset_wall + speech_span_s(stop_audio)[0]
         assert wait_for(lambda: bool(mini.clears), 5), "barge-in never stopped the speaker"
         stop_acoustic_ms = (mini.clears[0] - acoustic_onset) * 1000
-        triggers = app.bargein.snapshot()["triggers"]
+        bargein_snap = app.bargein.snapshot()
+        triggers, latency_bi = bargein_snap["triggers"], bargein_snap["latency"]
         assert stop_acoustic_ms >= 0, "the speaker was cleared before the user spoke"
         time.sleep(0.3)
         assert app.speaker.queued_s() == 0.0
@@ -395,6 +414,9 @@ def test_conversation_inside_the_latency_budgets_then_a_barge_in(
                 ),
                 "barge_in_stop_after_acoustic_onset_ms": round(stop_acoustic_ms),
                 "barge_in_trigger": "vad" if triggers else "keyword",
+                "barge_in_detect_to_stop_ms": round(latency_bi["detect_to_stop"]["last_ms"], 1),
+                "barge_in_stop_call_ms": round(latency_bi["stop_call"]["last_ms"], 1),
+                "gc_max_pause_ms": {f"gen{g}": round(v, 1) for g, v in pauses.max_ms.items()},
                 "answer_audio_queued_when_cut_s": round(queued_at_cut, 1),
             },
             capsys,
@@ -414,6 +436,7 @@ def test_conversation_inside_the_latency_budgets_then_a_barge_in(
             f"barge-in state {app.bargein.snapshot()}"
         )
     finally:
+        gc.callbacks.remove(pauses)
         finish(stop, thread, errors)
 
 

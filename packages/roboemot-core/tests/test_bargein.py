@@ -47,6 +47,7 @@ class World:
             cfg=self.cfg,
             on_speaking_chunk=lambda c: self.bargein.on_chunk(c),
             on_speaking_end=lambda: self.bargein.reset(),
+            before_asr_reset=lambda: self.bargein.handback_asr(),
         )
         self.reference = PlaybackReference(RATE, self.cfg.voice.barge_in.echo_reference_s)
         self.events: list[str] = []
