@@ -30,7 +30,7 @@ BASE = "robot.reachy-mini-wireless"
 @pytest.fixture
 def stack():
     stack = ConfigStack(app={"webui": {"bind": "127.0.0.1", "port": 0}})
-    stack.set_manifest_behaviour(MANIFEST.model.behaviour)
+    stack.set_manifest_behaviour(MANIFEST.model.behaviour, MANIFEST.channels)
     return stack
 
 
@@ -250,7 +250,7 @@ def test_the_status_answer_is_cached_briefly_and_the_port_follows_the_target():
 
 def test_core_offers_the_action_through_the_entry_point_only_while_running(tmp_path):
     stack = ConfigStack(app={"webui": {"bind": "127.0.0.1", "port": 0}})
-    stack.set_manifest_behaviour(MANIFEST.model.behaviour)
+    stack.set_manifest_behaviour(MANIFEST.model.behaviour, MANIFEST.channels)
     for status, expected in ((RUNNING, ["restart"]), (None, [])):
         editor = SettingsEditor(
             stack, store=tmp_path / "s.json", manifest=MANIFEST, plugin=daemon(status)

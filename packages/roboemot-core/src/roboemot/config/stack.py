@@ -22,7 +22,7 @@ import json
 import os
 import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import UnionType
@@ -696,6 +696,7 @@ class ConfigStack:
 
     def __post_init__(self) -> None:
         self._runtime: dict[str, _RuntimeValue] = {}
+        self.channels: frozenset[str] | None = None
         self._listeners: list[Callable[[ConfigChange], None]] = []
         self._lock = threading.RLock()
         self._mtimes: dict[str, float] = {}
@@ -737,10 +738,13 @@ class ConfigStack:
         stack._remember_mtimes()
         return stack
 
-    def set_manifest_behaviour(self, behaviour: dict) -> None:
+    def set_manifest_behaviour(self, behaviour: dict, channels: Collection[str]) -> None:
         """Install the robot manifest's ``behaviour`` block (layer 2) once the manifest is loaded.
 
-        It becomes part of the installed configuration, so it also resets the approved baseline.
+        ``channels`` are the dof names expressions may drive (``Manifest.channels``): from now on
+        every configuration this stack builds is refused when a map or pose names another one.
+        The block becomes part of the installed configuration, so it also resets the approved
+        baseline.
         """
         unknown = sorted(set(behaviour) - MANIFEST_BEHAVIOUR_KEYS)
         if unknown:
@@ -748,8 +752,8 @@ class ConfigStack:
                 f"manifest behaviour may set {sorted(MANIFEST_BEHAVIOUR_KEYS)}, not {unknown}"
             )
         with self._lock:
-            saved = self.manifest
-            self.manifest = behaviour
+            saved, saved_channels = self.manifest, self.channels
+            self.manifest, self.channels = behaviour, frozenset(channels)
             try:
                 defaults = RoboEmotConfig()
                 layer = RoboEmotConfig.model_validate(
@@ -761,9 +765,10 @@ class ConfigStack:
                         "manifest behaviour would loosen: " + "; ".join(map(str, found))
                     )
                 baseline = RoboEmotConfig.model_validate(self.merged_tree(include_runtime=False))
+                self._check_channels(baseline)
                 self._check_route_budgets(baseline)
             except (ValidationError, GuardrailError, ConfigError) as exc:
-                self.manifest = saved
+                self.manifest, self.channels = saved, saved_channels
                 if isinstance(exc, ValidationError):
                     raise ConfigError(_explain(exc)) from exc
                 raise
@@ -823,9 +828,31 @@ class ConfigStack:
                 f"{SCHEMA_VERSION}); run the migration"
             )
         try:
-            return RoboEmotConfig.model_validate(tree)
+            cfg = RoboEmotConfig.model_validate(tree)
         except ValidationError as exc:
             raise ConfigError(_explain(exc)) from exc
+        self._check_channels(cfg)
+        return cfg
+
+    def _check_channels(self, cfg: RoboEmotConfig) -> None:
+        """Refuse a channel the loaded manifest has no dof for (SPEC 7, 7A, 11A). Unchecked until
+        :meth:`set_manifest_behaviour` has told the stack which dofs the robot has."""
+        if self.channels is None:
+            return
+        named = {f"expression_map.{k}": e.channels for k, e in cfg.expression_map.items()}
+        named |= {f"gesture_map.{k}": e.channels for k, e in cfg.gesture_map.items()}
+        motion = cfg.circadian_motion
+        for label in ("yawn", "stretch"):
+            if (entry := getattr(motion, label)) is not None:
+                named[f"circadian_motion.{label}"] = entry.channels
+        named["circadian_motion.rest_pose_deg"] = motion.rest_pose_deg
+        for where, names in named.items():
+            for name in names:
+                if name not in self.channels:
+                    raise ConfigError(
+                        f"{where}: unknown channel {name!r}, expected one of "
+                        f"{sorted(self.channels)}"
+                    )
 
     def get(self, key: str, person: dict | None = None) -> Any:
         return get_path(self.effective(person), key)

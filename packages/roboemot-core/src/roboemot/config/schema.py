@@ -375,14 +375,6 @@ class RegisterConfig(Strict):
 # --------------------------------------------------------------------------- expression (SPEC 7)
 
 EXPRESSION_MAX_CYCLE_S = 30.0  # one cycle; with repeat <= 20 an expression ends within minutes
-EXPRESSION_CHANNELS = (
-    "antenna_right",
-    "antenna_left",
-    "head.pitch",
-    "head.roll",
-    "head.yaw",
-    "body_yaw",
-)
 
 
 class IntensityFactors(Strict):
@@ -468,8 +460,6 @@ class ExpressionEntry(Strict):
             raise ValueError("an expression needs at least one channel")
         ends = set()
         for name, frames in channels.items():
-            if name not in EXPRESSION_CHANNELS:
-                raise ValueError(f"unknown channel {name!r}, expected one of {EXPRESSION_CHANNELS}")
             if len(frames) < 2:
                 raise ValueError(f"channel {name}: needs at least two keyframes")
             times = [t for t, _ in frames]
@@ -517,14 +507,6 @@ class CircadianMotion(Strict):
     rest_pose_deg: dict[str, float] = param(
         {}, "Absolute rest posture by channel in degrees (head lowered, antennas down)"
     )
-
-    @field_validator("rest_pose_deg")
-    @classmethod
-    def _rest_channels(cls, pose: dict[str, float]) -> dict[str, float]:
-        for name in pose:
-            if name not in EXPRESSION_CHANNELS:
-                raise ValueError(f"unknown channel {name!r}, expected one of {EXPRESSION_CHANNELS}")
-        return pose
 
 
 class CircadianConfig(Strict):

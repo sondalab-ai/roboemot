@@ -217,13 +217,15 @@ def test_a_joy_expression_moves_the_antennas_on_the_simulated_robot(loop):
 
     manifest = loop.manifest
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour)
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
     cfg = stack.effective()
     home = {n: manifest.dofs[n].home for n in ("antenna_right", "antenna_left")}
     _hold(loop, home, 8.0)
     settled = loop.driver.read_state()
     reg = resolve_register([Person("adult", "declared", {})], cfg.register, cfg.persona)
-    renderer = ExpressionRenderer(cfg.expression, cfg.expression_map, manifest.dofs, 0.15)
+    renderer = ExpressionRenderer(
+        cfg.expression, cfg.expression_map, manifest.dofs, 0.15, body_yaw="body_yaw"
+    )
     renderer.update(AffectState(0.0, 0.0, "calm", 0.0), reg, time.monotonic())
     assert renderer.update(AffectState(0.7, 0.5, "joy", 1.0, 1), reg, time.monotonic())
     seen: dict[str, list[float]] = {n: [] for n in home}
@@ -249,14 +251,19 @@ def test_a_nod_gesture_moves_the_head_pitch_on_the_simulated_robot(loop):
 
     manifest = loop.manifest
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour)
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
     cfg = stack.effective()
     home = {"head.pitch": manifest.dofs["head.pitch"].home}
     _hold(loop, home, 8.0)
     settled = loop.driver.read_state()
     reg = resolve_register([Person("adult", "declared", {})], cfg.register, cfg.persona)
     renderer = ExpressionRenderer(
-        cfg.expression, cfg.expression_map, manifest.dofs, 0.15, cfg.gesture_map
+        cfg.expression,
+        cfg.expression_map,
+        manifest.dofs,
+        0.15,
+        cfg.gesture_map,
+        body_yaw="body_yaw",
     )
     assert renderer.request("nod")
     assert renderer.update(AffectState(0.0, 0.0, "calm", 0.5), reg, time.monotonic())
@@ -572,13 +579,15 @@ def test_the_rest_posture_lowers_the_head_and_droops_the_antennas_on_the_simulat
 
     manifest = loop.manifest
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour)
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
     cfg = stack.effective()
     names = ("head.pitch", "antenna_right", "antenna_left")
     _hold(loop, {n: manifest.dofs[n].home for n in names}, 8.0)
     settled = loop.driver.read_state()
     loop.clear("test")  # the settle command is COMMANDED and never expires: it would win
-    motion = CircadianMotion(cfg.circadian, cfg.circadian_motion, manifest.dofs)
+    motion = CircadianMotion(
+        cfg.circadian, cfg.circadian_motion, manifest.dofs, body_yaw="body_yaw"
+    )
     end = time.monotonic() + 10.0
     while time.monotonic() < end:
         for cmd in motion.commands(time.monotonic(), "resting"):

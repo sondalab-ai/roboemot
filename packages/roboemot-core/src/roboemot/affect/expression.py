@@ -16,9 +16,9 @@ What stays true whatever the amplitude (SPEC 12):
 - Offsets are clamped to the manifest's range about home, so the register's scaling can never
   ask the limiter for more than the hardware allows, and the minor cap, which the arbiter
   applies to the sum about home, always wins.
-- Only angle dofs are driven: an expression never translates the robot. ``body_yaw`` is dropped
-  while the register says ``approach_allowed`` is false, so no expression turns the body toward
-  someone the robot must not approach.
+- Only angle dofs are driven: an expression never translates the robot. The body turn
+  (``GazeMap.body_yaw``) is dropped while the register says ``approach_allowed`` is false, so no
+  expression turns the body toward someone the robot must not approach.
 - Each command lives ``expression.command_ttl_s``: when the renderer stops feeding it the offset
   is gone, and a new expression blends in from the current offset over the arbiter's crossfade.
 
@@ -45,7 +45,6 @@ from . import AffectState
 from .register import ActiveRegister
 
 SOURCE = "expression"
-BODY_CHANNEL = "body_yaw"
 
 
 def _sample(frames: list[tuple[float, float]], t: float) -> float:
@@ -57,18 +56,24 @@ def _sample(frames: list[tuple[float, float]], t: float) -> float:
 
 
 def build_primitive(
-    label: str, entry: ExpressionEntry, dofs: Mapping[str, Dof], *, body: bool = True
+    label: str,
+    entry: ExpressionEntry,
+    dofs: Mapping[str, Dof],
+    *,
+    body_yaw: str | None,
+    body: bool = True,
 ) -> Primitive | None:
     """The entry as an additive primitive over the dofs this robot has (degrees to radians).
 
-    Channels the robot lacks, translation dofs and, with ``body`` false, ``body_yaw`` are
-    skipped; None when nothing is left. Keyframes of different channels are merged onto the
+    Channels the robot lacks, translation dofs and, with ``body`` false, the ``body_yaw`` dof
+    (``GazeMap.body_yaw``, None for a robot that cannot turn its body) are skipped; None when
+    nothing is left. Keyframes of different channels are merged onto the
     union of their times and ``repeat`` unrolls the cycle.
     """
     use = {
         name: frames
         for name, frames in entry.channels.items()
-        if name in dofs and dofs[name].kind == "angle" and (body or name != BODY_CHANNEL)
+        if name in dofs and dofs[name].kind == "angle" and (body or name != body_yaw)
     }
     if not use:
         return None
@@ -101,8 +106,11 @@ class ExpressionRenderer:
         dofs: Mapping[str, Dof],
         crossfade_s: float,
         gesture_map: Mapping[str, ExpressionEntry] | None = None,
+        *,
+        body_yaw: str | None,
     ) -> None:
         self.dofs = dofs
+        self.body_yaw = body_yaw
         self.circadian_factor: Callable[[], float] = lambda: 1.0
         self._request_lock = threading.Lock()
         self._requested: str | None = None  # a skill's label, from another thread (SPEC 11)
@@ -217,7 +225,9 @@ class ExpressionRenderer:
         if key not in self._cache:
             entry = self.expression_map.get(label) or self.gesture_map.get(label)
             self._cache[key] = (
-                build_primitive(label, entry, self.dofs, body=body) if entry else None
+                build_primitive(label, entry, self.dofs, body_yaw=self.body_yaw, body=body)
+                if entry
+                else None
             )
         return self._cache[key]
 
@@ -264,7 +274,7 @@ class ExpressionRenderer:
         self._last = {
             n: self._clamp(n, v * tighten)
             for n, v in out.items()
-            if self._approach or n != BODY_CHANNEL
+            if self._approach or n != self.body_yaw
         }
         if self._player is None and self._blend is None:
             self._last = {}
