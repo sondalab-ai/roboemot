@@ -17,6 +17,7 @@ from ..vision import models as _models
 from ..vision.models import FetchReport, ModelError, ModelFile, ModelSpec
 
 MANIFEST = Path(__file__).with_name("models.yaml")
+ASR_ROLE, TTS_ROLE = "asr_", "tts_"
 
 
 def load_manifest() -> dict[str, ModelSpec]:
@@ -28,7 +29,9 @@ def supported_languages() -> frozenset[str]:
     """Languages the voice stack can listen to and speak: those with both an ``asr_<lang>`` and a
     ``tts_<lang>`` model in the manifest."""
     roles = {spec.role for spec in load_manifest().values()}
-    return frozenset(r[4:] for r in roles if r.startswith("asr_") and f"tts_{r[4:]}" in roles)
+    heard = {r.removeprefix(ASR_ROLE) for r in roles if r.startswith(ASR_ROLE)}
+    spoken = {r.removeprefix(TTS_ROLE) for r in roles if r.startswith(TTS_ROLE)}
+    return frozenset(heard & spoken)
 
 
 def models_dir(configured: str = "", data_dir: str = "") -> Path:
