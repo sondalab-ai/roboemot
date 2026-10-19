@@ -840,3 +840,23 @@ test("a revealed private container brings its removable list", async () => {
   const block = page.document.querySelector('[data-entry="safety.minor_lines.xx"]');
   assert.equal(buttons(block, "settings_remove_entry").length, 1);
 });
+
+test("saving one row keeps the unsaved edits of the other rows", async () => {
+  let saved = false;
+  const page = await settingsPage({
+    "GET /api/settings": () => ({
+      fields: fields().map((f) => (f.path === "voice.count" && saved ? { ...f, value: 5, source: "runtime" } : f)),
+      pin_required: true,
+    }),
+    "POST /api/settings": () => { saved = true; return { path: "voice.count", changed: true, value: 5, layer: "runtime", persisted: true }; },
+  });
+  await open(page, "core-voice");
+  row(page, "voice.label").querySelector("input").value = "draft";
+  row(page, "voice.count").querySelector('input[type="number"]').value = "5";
+  button(row(page, "voice.count"), "settings_save").click();
+  await settle();
+  await answerPin(page);
+  assert.equal(row(page, "voice.count").querySelector('input[type="number"]').value, "5");
+  assert.equal(row(page, "voice.count").dataset.source, "runtime", "the saved row shows the new descriptor");
+  assert.equal(row(page, "voice.label").querySelector("input").value, "draft", "the other row keeps its edit");
+});
