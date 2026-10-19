@@ -72,6 +72,23 @@ class FakeBackend:
         pass
 
 
+class HoldingBackend(FakeBackend):
+    """The first request answers at once; every later one waits (until the stop cancels it), so a
+    queued sentence can never reach the sink before the test's own ``stop``."""
+
+    HOLD_S = 30.0
+
+    async def synthesize(self, text, delivery, *, language, voice, minor_present=False):
+        if self.texts:
+            self.texts.append(text)
+            await asyncio.sleep(self.HOLD_S)
+            return
+        async for chunk in super().synthesize(
+            text, delivery, language=language, voice=voice, minor_present=minor_present
+        ):
+            yield chunk
+
+
 def wait_for(cond, timeout=3.0):
     end = time.monotonic() + timeout
     while time.monotonic() < end:
@@ -504,7 +521,7 @@ def test_a_stop_moves_the_question_end_to_the_stop(make):
 
 
 def test_dropped_sentences_neither_replace_nor_extend_the_question_end(make):
-    out = make(FakeBackend(pieces=1), sink=TimelineSink())
+    out = make(HoldingBackend(pieces=1), sink=TimelineSink())
     say(out, "Vuoi un caffe?")
     assert wait_for(lambda: out.sentences_spoken == 1)
     before = out.question_end()

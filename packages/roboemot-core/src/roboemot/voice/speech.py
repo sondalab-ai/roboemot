@@ -27,6 +27,7 @@ from typing import Any, Protocol
 
 import numpy as np
 
+from .. import shutdown
 from ..bus import Bus
 from ..config.schema import RegisterParams, RoboEmotConfig, StateEffects
 from ..persona import effects
@@ -137,7 +138,7 @@ class SpeechOutput:
                 loop.call_soon_threadsafe(self.backend.cancel)
                 loop.call_soon_threadsafe(main.cancel)
         if self._thread is not None:
-            self._thread.join(JOIN_TIMEOUT_S)
+            shutdown.join(self._thread, JOIN_TIMEOUT_S)
 
     def _run(self) -> None:
         loop = self._loop = asyncio.new_event_loop()

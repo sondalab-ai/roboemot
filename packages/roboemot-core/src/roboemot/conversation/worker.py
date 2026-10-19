@@ -36,6 +36,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from .. import shutdown
 from ..bus import Bus
 from ..config.schema import RegisterParams, RoboEmotConfig, StateEffects
 from ..config.stack import ConfigStack
@@ -214,7 +215,7 @@ class ConversationWorker:
             with contextlib.suppress(RuntimeError):
                 loop.call_soon_threadsafe(main.cancel)
         if self._thread is not None:
-            self._thread.join(JOIN_TIMEOUT_S)
+            shutdown.join(self._thread, JOIN_TIMEOUT_S)
         self._end_session("closed")
         with self._lock:
             self._pending.clear()

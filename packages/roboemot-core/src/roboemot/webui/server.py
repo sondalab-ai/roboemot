@@ -25,6 +25,7 @@ from urllib.parse import urlsplit
 
 from roboemot.config.schema import RoboEmotConfig
 
+from .. import shutdown
 from .api import (
     CataloguePort,
     DebugReport,
@@ -358,7 +359,7 @@ class Server:
         """Stop serving, close the socket and join the thread; safe to call twice."""
         if self._thread is not None:
             self._httpd.shutdown()
-            self._thread.join()
+            shutdown.join(self._thread, None)
             self._thread = None
         self._httpd.server_close()
 

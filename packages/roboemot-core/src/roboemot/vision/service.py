@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .. import paths
+from .. import paths, shutdown
 from ..bus import Bus
 from ..config.schema import RoboEmotConfig
 from ..registry import FileStore, Matcher, Registry
@@ -94,7 +94,7 @@ class VisionService:
         self._stop.set()
         try:
             if self._thread is not None:
-                self._thread.join(timeout=JOIN_TIMEOUT_S)
+                shutdown.join(self._thread, JOIN_TIMEOUT_S)
                 if self._thread.is_alive():
                     log.warning("camera thread did not stop within %.0f s", JOIN_TIMEOUT_S)
         finally:

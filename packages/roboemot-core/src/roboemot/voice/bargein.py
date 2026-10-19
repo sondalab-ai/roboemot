@@ -35,7 +35,12 @@ The stop keyword path (SPEC 7A: always active): frames the VAD scores at the loo
 ``keyword_threshold`` and that pass the looser ``keyword_echo_corr_max`` are fed to the listener's
 idle recognizer, and a ``stop`` phrase in its partials stops the robot (and emits
 ``speech.keyword.stop``) even when the barge-in threshold is never met. The recognizer is the
-listener's, on the listener's thread, because only one runs at a time (cm4 budget).
+listener's, because only one runs at a time (cm4 budget), but it is *run* by a
+:class:`~roboemot.voice.keyword_worker.KeywordWorker` thread (``keyword_background``): building
+it and digesting the ring take 100 to 300 ms, which on the listener thread delayed the speech
+path's cut-off. The listener thread only submits frames and polls for a hit, and still performs
+every cut-off itself, so the barge-in state has a single thread. It hands the recognizer back
+(``reset``) before the listener restarts on the barge-in audio.
 
 Audio and text are never logged or published.
 """
@@ -55,6 +60,7 @@ import numpy as np
 from ..config.schema import RoboEmotConfig
 from .asr import ASRBackend
 from .fastpath import Emit, LatencyStats
+from .keyword_worker import KeywordWorker
 from .keywords import KeywordSpotter
 from .vad import VADBackend
 
@@ -174,6 +180,7 @@ class BargeIn:
         language: Callable[[], str],
         emit: Emit | None = None,
         clock: Callable[[], float] = time.monotonic,
+        keyword_background: bool = False,
     ) -> None:
         self._vad, self._asr, self._reference = vad, asr, reference
         self._language, self._emit, self._clock = language, emit, clock
@@ -196,8 +203,28 @@ class BargeIn:
         self._last_corr: float | None = None
         self._lang = ""
         self._deaf_until = -math.inf
+        self._session: _Session | None = None
+        self._errors_seen = 0
+        self._worker = KeywordWorker(
+            asr,
+            lambda text, lang: "stop" in self._spotter.spot(text, lang),
+            self._frame_s,
+            background=keyword_background,
+        )
         self.apply_config(cfg)
         self.reset()
+
+    def close(self) -> None:
+        """Stop the keyword worker thread and hand the recognizer back. Call it once the
+        listener thread has stopped (``voice_close`` runs after ``listener.stop``): it writes the
+        barge-in state from the caller's thread."""
+        self._worker.close()
+
+    def handback_asr(self) -> None:
+        """Take the recognizer back from the keyword worker: drop the session and wait for the
+        frame the worker has in hand. The listener calls it before it resets or restarts the
+        shared ASR (a gap, an error, a new utterance), so the two threads never use it at once."""
+        self._end_session(block=True)
 
     def apply_config(self, cfg: RoboEmotConfig) -> None:
         """Hot reload: thresholds, windows and the keyword lists."""
@@ -241,7 +268,7 @@ class BargeIn:
 
     def reset(self) -> None:
         """Forget the stretch in progress (the robot stopped speaking, or the audio has a gap)."""
-        self._end_session()
+        self.handback_asr()
         self._vad.reset()
         self._ring.clear()
         self._pending = np.empty(0, dtype=np.float32)
@@ -257,7 +284,7 @@ class BargeIn:
             "enabled": self._b.enabled,
             "bound": self.bound,
             "keyword_enabled": self._b.keyword_enabled,
-            **self._counts,
+            **{**self._counts, "errors": self._counts["errors"] + self._worker.errors},
             "keyword_seconds": self._keyword_s,
             "last_echo_corr": self._last_corr,
             "latency": self.stats.snapshot(),
@@ -279,6 +306,8 @@ class BargeIn:
             self.reset()
         if self._ring.maxlen != self._ring_len:  # a hot reload changed the windows
             self._ring = collections.deque(self._ring, maxlen=self._ring_len)
+        if self._session is not None and b.keyword_enabled and self._poll_keyword():
+            return
         if start < self._deaf_until:  # the cut-off just happened: this is its echo tail
             return
         if self._pending.size == 0:
@@ -402,7 +431,23 @@ class BargeIn:
 
     # ----------------------------------------------------------------- keywords
 
+    def _poll_keyword(self) -> bool:
+        """The worker's news: a failed session is dropped (the next candidate restarts it, as
+        when the recognizer was called inline); True when "stop" was heard and the robot was cut
+        off."""
+        if self._worker.errors != self._errors_seen:
+            self._errors_seen = self._worker.errors
+            self._end_session()
+            return False
+        detected = self._worker.take_hit()
+        if detected is None:
+            return False
+        self._trigger("keyword", detected, detected, np.empty(0, np.float32))
+        return True
+
     def _keywords(self, frame: np.ndarray, stamp: float, candidate: bool) -> bool:
+        """Hand the frame to the keyword worker; True when it has heard "stop" (inline mode: at
+        once; background: on a later frame or chunk) and the robot was cut off."""
         session = self._session
         b = self._b
         try:
@@ -410,42 +455,38 @@ class BargeIn:
                 if not candidate:
                     return False
                 lang = self._language()
-                self._asr.start(lang)
+                if lang not in self._asr.languages:
+                    self._asr.load([lang])  # on this thread: the worker never mutates the models
                 self._lang = lang
                 session = self._session = _Session(stamp)
-                audio = np.concatenate([f for _, f in self._ring])
+                frames = list(self._ring)
+                self._keyword_s += sum(f.size for _, f in frames) / self._rate
+                self._worker.start(lang, frames)
             else:
-                audio = frame
+                self._keyword_s += frame.size / self._rate
+                self._worker.feed(stamp, frame)
             if candidate:
                 session.last_candidate = stamp
-            self._keyword_s += audio.size / self._rate
-            event = self._asr.accept(audio)
         except Exception as exc:
             self._counts["errors"] += 1
             log.warning("barge-in: keyword recognizer: %s", type(exc).__name__)
             self._end_session()
             return False
-        if (
-            event is not None
-            and event.text
-            and "stop" in self._spotter.spot(event.text, self._lang)
-        ):
-            detected = stamp + self._frame_s
-            self._trigger("keyword", detected, detected, np.empty(0, np.float32))
+        if self._poll_keyword():  # before the window check: a hit counts on its own frame
             return True
+        if self._session is None:  # the worker failed on this very frame
+            return False
         over = stamp - session.started >= b.keyword_window_s
         idle = stamp - session.last_candidate >= b.keyword_hold_ms / MS_PER_S
         if over or idle:
             self._end_session()
         return False
 
-    def _end_session(self) -> None:
-        if getattr(self, "_session", None) is not None:
-            try:
-                self._asr.reset()
-            except Exception as exc:
-                log.warning("barge-in: recognizer reset: %s", type(exc).__name__)
-        self._session: _Session | None = None
+    def _end_session(self, *, block: bool = False) -> None:
+        """Drop the keyword session. ``block`` also waits for the worker and resets the
+        recognizer, which the listener may use next (``reset``, after a cut-off)."""
+        self._session = None
+        self._worker.end(block=block)
 
     # ----------------------------------------------------------------- the cut
 
@@ -457,7 +498,7 @@ class BargeIn:
         audio_stamp = min((t for t, _ in self._ring if t >= audio_from - EDGE_S), default=onset)
         audio.append(rest)
         samples = np.concatenate(audio)
-        self._end_session()
+        self._end_session()  # not blocking: the stop is the budgeted step; ``reset`` waits later
         t0 = time.perf_counter()
         stop = self._stop
         if stop is None:  # unbound: on_chunk never gets here, but a caller may

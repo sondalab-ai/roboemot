@@ -37,6 +37,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from .. import shutdown
 from ..config.schema import RoboEmotConfig
 from ..drivers import MotorMode, PoseGroupDriver
 from ..health import Link, OnChange
@@ -168,7 +169,7 @@ class MotionLoop:
     def stop(self) -> None:
         self._stop.set()
         if self._thread:
-            self._thread.join(timeout=2)
+            shutdown.join(self._thread, 2)
 
     def step_once(self, now: float, dt: float) -> dict[str, float]:
         with self._lock:

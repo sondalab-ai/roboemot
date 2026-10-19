@@ -11,6 +11,7 @@ configured) with the offline responder's gestures, stop cleanly on ``stop_event`
 
 from __future__ import annotations
 
+import gc
 import logging
 import math
 import os
@@ -21,7 +22,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from roboemot import paths
+from roboemot import paths, shutdown
 from roboemot.affect.expression import ExpressionRenderer
 from roboemot.affect.register import RegisterTracker
 from roboemot.affect.runner import AffectRunner
@@ -729,10 +730,10 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         stack.subscribe(worker.on_change)
         fx_for, fx = None, None
         idle_last = idle_t = time.monotonic()  # idle breathing phase clock (SPEC 7A, Drowsy)
-        # Everything started below is stopped in reverse order whatever fails: ExitStack runs
+        # Everything started below is stopped in reverse order whatever fails: the stack runs
         # every callback even when one raises, so the motion loop always stops and the camera
         # thread is quiet before the SDK client goes away.
-        with ExitStack() as cleanup:
+        with shutdown.BudgetedExitStack(stack.effective().runtime.shutdown_budget_s) as cleanup:
             cleanup.callback(presence.close)
             cleanup.callback(tracker.close)
             cleanup.callback(runner.close)
@@ -821,6 +822,11 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                     world_source.speaking = speech.speaking
                 cleanup.callback(world_source.stop)
                 world_source.start(publish)
+            runtime = stack.effective().runtime
+            if runtime.gc_freeze:  # SPEC 8 stage 8: no full collection walks the loaded models
+                gc.collect()
+                gc.freeze()
+                cleanup.callback(gc.unfreeze)
             while not stop_event.is_set():
                 now = time.monotonic()
                 circ.tick(now)  # before the affect tick: its events and baseline apply to it

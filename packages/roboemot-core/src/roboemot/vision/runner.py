@@ -19,6 +19,7 @@ from typing import Protocol
 
 import numpy as np
 
+from .. import shutdown
 from .stages import PerceptionModule
 from .types import Frame
 
@@ -126,7 +127,7 @@ class LatestFrameRunner:
             self._stop = True
             self._cond.notify()
         if self._thread is not None:
-            self._thread.join(timeout=JOIN_TIMEOUT_S)
+            shutdown.join(self._thread, JOIN_TIMEOUT_S)
             if self._thread.is_alive():
                 log.warning("vision worker did not stop within %.0f s", JOIN_TIMEOUT_S)
 
