@@ -190,6 +190,18 @@ Reachy Mini Wireless hardware, from the Seeed Studio hardware page and Pollen's 
 | Power | LiFePO4 battery, 2000 mAh, 6.4 V, 12.8 Wh, plus mains supply |
 | IMU | Built in (Wireless only) |
 
+### Hierarchy gate
+
+Every robot-specific capability follows one hierarchy: an abstraction in core (a protocol or an abstract method), implemented by the robot package and found through a `roboemot.*` entry point keyed by `robot.id`. `packages/roboemot-core/tests/test_robot_hierarchy.py` enforces it in the normal `pytest` run, on the syntax tree (comments and docstrings excluded):
+
+- no module of core imports a robot package or a robot SDK;
+- identifiers and string literals in core contain no robot vocabulary (terms derived from every manifest in `configs/manifests/`, plus `reachy`, `pollen`, `antenna`, `/api/apps`);
+- every installed `roboemot.*` entry-point group is registered in `roboemot.plugins.GROUPS` and each registered object satisfies its protocol;
+- robot packages do not probe core objects with `hasattr`/`getattr` on a literal name; an optional capability is declared on the protocol;
+- core builds its config and renderer with a non-Reachy manifest (`desk-head-v1`).
+
+Today's violations are listed in `packages/roboemot-core/tests/robot_hierarchy_baseline.yaml`. A finding outside the baseline fails, and so does an entry that no longer occurs: the baseline only shrinks and ends empty.
+
 ### Deployment with Reachy Mini
 
 v1 must run entirely on Reachy Mini Wireless: RoboEmot is installed as a Reachy Mini app on the robot's Raspberry Pi CM4, next to the daemon, with no external computer. The CM4 has no NPU, so the library defines a CPU-only profile, `cm4`, beside the `npu` profile: same API and features, smaller models and lower rates (section 13).
@@ -853,6 +865,8 @@ Outside app mode, `Robot.from_manifest(path)` opens its own connection: any othe
 
 `JointDriver`, PoseGroupDriver, `SensorDriver`, `ChannelDriver`, `PerceptionModule`, `WorldSource`, `ScanPlanner`, `ASRBackend`, `TTSBackend`, `LLMBackend`, `MotionPolicy`, `AppraisalRule`. Plugins are registered through Python entry points; C++ drivers through a small C ABI loaded by `roboemot-rt`.
 
+Entry-point groups are listed in `roboemot.plugins.GROUPS`, each with the core contract (a runtime-checkable protocol or a factory signature) its objects must satisfy. The groups today are `roboemot.diagnostics`, `roboemot.installers`, `roboemot.world` and `roboemot.settings`, all keyed by manifest `robot.id`. A robot capability without a core abstraction and a registered group cannot be added (see 4A, Hierarchy gate).
+
 ### Bus
 
 One process per heavy module (rt, vision, audio, core; plus the SDK bridge on Reachy Mini), connected by a local message bus with shared-memory transport for frames: Zenoh or iceoryx2 are the candidates, chosen in milestone M0. Messages are typed with versioned schemas (Protobuf or FlatBuffers). Main topics: `percept.face`, `percept.pose`, `percept.utterance`, `percept.entity`, `world.entity_appeared`, `world.entity_moved`, `world.entity_gone`, `person.recognized`, `affect.state`, `register.active`, `attention.target`, `motion.request`, `motion.state`, `speech.say`, `conversation.turn` (ids and lengths, never text), `safety.event`, `sound.loud`, circadian.state; camera frames and audio in/out travel over shared memory.
@@ -1052,7 +1066,7 @@ A debug report describes the robot state, hardware, resource use, system and bat
   - `local`: the machine that builds the report. This covers OS and board, uptime, CPU, memory, disks and network interfaces. It also covers temperatures, plus Raspberry Pi throttling and under-voltage flags. It also covers battery and power supplies: the OS battery summary and `/sys/class/power_supply` in SI units. `network.wifi` (Linux) gives, per wireless interface, link quality, signal and noise from `/proc/net/wireless`, plus SSID, frequency and tx bit rate from `iw` or, without it, the active network from `nmcli` (no rescan); the access point's BSSID is never reported, and the section says why when there is no wireless interface. The SSID is deliberately the only identifying network field (BSSID and saved network names are never reported); strip it before sharing a report publicly. Values the platform does not report are left out and labelled, never guessed. The `process` section is the app process.
   - `robot`: the robot's platform.
   - `runtime`: the running app. This covers the motion loop (mode, motors off, ticks, overruns, errors, jitter, robot link), the network links per route (endpoint only), and the manifest and mood.
-- **Robot-agnostic.** Generic sources live in the core. A platform package registers its robot sources in the `roboemot.diagnostics` entry-point group under the manifest's `robot.id`. A robot with no registered sources still gets the generic sections, plus a section saying that no platform sources are installed.
+- **Robot-agnostic.** Generic sources live in the core, and `roboemot.diagnostics` is one of the groups registered in `roboemot.plugins.GROUPS` (4A, Hierarchy gate). A platform package registers its robot sources in the `roboemot.diagnostics` entry-point group under the manifest's `robot.id`. A robot with no registered sources still gets the generic sections, plus a section saying that no platform sources are installed.
 - **Reachy Mini.** Read-only daemon calls (1.11):
   - `robot.daemon`: `/api/daemon/status`, with version, hardware id, backend control-loop stats and errors;
   - `robot.motors`: `/api/motors/status`;

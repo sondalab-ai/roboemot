@@ -1,0 +1,39 @@
+# Ratchet baseline of the robot hierarchy gate (SPEC 4A, 12A). One entry per finding of
+# test_robot_hierarchy.py at audit commit 6e67f76. Slices delete the entries they fix; an entry is
+# never added. audit: 1-4 and D as numbered in the epic plan, B = borderline item of the plan,
+# U = found by the gate but not in the plan's audit list. The epic ends with an empty file.
+- {check: duck, file: packages/roboemot-reachymini/src/roboemot_reachymini/app.py, symbol: RoboEmotApp.run, term: "getattr:appearance_embedder", audit: "D"}
+- {check: duck, file: packages/roboemot-reachymini/src/roboemot_reachymini/app.py, symbol: RoboEmotApp.run, term: "getattr:camera_model", audit: "D"}
+- {check: duck, file: packages/roboemot-reachymini/src/roboemot_reachymini/app.py, symbol: RoboEmotApp.run, term: "hasattr:speaking", audit: "D"}
+- {check: duck, file: packages/roboemot-reachymini/src/roboemot_reachymini/conversation.py, symbol: entry_name, term: "getattr:status", audit: "D"}
+- {check: duck, file: packages/roboemot-reachymini/src/roboemot_reachymini/voice.py, symbol: build_listener, term: "getattr:entry_id", audit: "D"}
+- {check: duck, file: packages/roboemot-reachymini/src/roboemot_reachymini/voice.py, symbol: build_listener, term: "hasattr:missing_words", audit: "D"}
+- {check: vocabulary, file: packages/roboemot-core/src/roboemot/affect/expression.py, symbol: <module>, term: "body_yaw", audit: "4"}
+- {check: vocabulary, file: packages/roboemot-core/src/roboemot/config/schema.py, symbol: <module>, term: "antenna_left", audit: "1"}
+- {check: vocabulary, file: packages/roboemot-core/src/roboemot/config/schema.py, symbol: <module>, term: "antenna_right", audit: "1"}
+- {check: vocabulary, file: packages/roboemot-core/src/roboemot/config/schema.py, symbol: <module>, term: "body_yaw", audit: "1"}
+- {check: vocabulary, file: packages/roboemot-core/src/roboemot/config/schema.py, symbol: <module>, term: "head.pitch", audit: "1"}
+- {check: vocabulary, file: packages/roboemot-core/src/roboemot/config/schema.py, symbol: <module>, term: "head.roll", audit: "1"}
+- {check: vocabulary, file: packages/roboemot-core/src/roboemot/config/schema.py, symbol: <module>, term: "head.yaw", audit: "1"}
+- {check: vocabulary, file: packages/roboemot-core/src/roboemot/config/schema.py, symbol: ArbiterConfig, term: "reachy", audit: "B"}
+- {check: vocabulary, file: packages/roboemot-core/src/roboemot/config/schema.py, symbol: CircadianMotion, term: "antennas", audit: "U"}
+- {check: vocabulary, file: packages/roboemot-core/src/roboemot/config/schema.py, symbol: GestureConfig, term: "antenna", audit: "2"}
+- {check: vocabulary, file: packages/roboemot-core/src/roboemot/config/schema.py, symbol: KeywordSet, term: "reachy", audit: "3"}
+- {check: vocabulary, file: packages/roboemot-core/src/roboemot/config/schema.py, symbol: ReflexConfig, term: "antenna", audit: "U"}
+- {check: vocabulary, file: packages/roboemot-core/src/roboemot/config/schema.py, symbol: ReflexRule, term: "antennas", audit: "U"}
+- {check: vocabulary, file: packages/roboemot-core/src/roboemot/config/schema.py, symbol: RuntimeConfig, term: "reachy", audit: "B"}
+- {check: vocabulary, file: packages/roboemot-core/src/roboemot/config/schema.py, symbol: VoiceConfig, term: "reachy", audit: "3"}
+- {check: vocabulary, file: packages/roboemot-core/src/roboemot/health/responder.py, symbol: perk_up, term: "antenna", audit: "2"}
+- {check: vocabulary, file: packages/roboemot-core/src/roboemot/health/responder.py, symbol: perk_up, term: "antenna_left", audit: "2"}
+- {check: vocabulary, file: packages/roboemot-core/src/roboemot/health/responder.py, symbol: perk_up, term: "antenna_right", audit: "2"}
+- {check: vocabulary, file: packages/roboemot-core/src/roboemot/health/responder.py, symbol: perk_up, term: "head.pitch", audit: "2"}
+- {check: vocabulary, file: packages/roboemot-core/src/roboemot/health/responder.py, symbol: puzzled, term: "antenna", audit: "2"}
+- {check: vocabulary, file: packages/roboemot-core/src/roboemot/health/responder.py, symbol: puzzled, term: "antenna_left", audit: "2"}
+- {check: vocabulary, file: packages/roboemot-core/src/roboemot/health/responder.py, symbol: puzzled, term: "antenna_right", audit: "2"}
+- {check: vocabulary, file: packages/roboemot-core/src/roboemot/health/responder.py, symbol: puzzled, term: "head.roll", audit: "2"}
+- {check: vocabulary, file: packages/roboemot-core/src/roboemot/reflex/engine.py, symbol: ReflexEngine.__init__, term: "antenna", audit: "U"}
+- {check: vocabulary, file: packages/roboemot-core/src/roboemot/reflex/engine.py, symbol: ReflexEngine._peak, term: "antenna", audit: "U"}
+- {check: vocabulary, file: packages/roboemot-core/src/roboemot/reflex/engine.py, symbol: ReflexMap, term: "antenna", audit: "U"}
+- {check: vocabulary, file: packages/roboemot-core/src/roboemot/skills/defaults.py, symbol: default_skills.play_description, term: "antennas", audit: "B"}
+- {check: vocabulary, file: packages/roboemot-core/src/roboemot/voice/keywords.py, symbol: <module>, term: "reachy", audit: "3"}
+- {check: vocabulary, file: packages/roboemot-core/src/roboemot/voice/keywords.py, symbol: KeywordSpotter._rebuild, term: "reachy", audit: "3"}

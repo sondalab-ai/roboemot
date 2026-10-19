@@ -36,6 +36,10 @@ section number in commit messages that implement or change behaviour.
   forced tool choice, `seed` or non-default sampling.
 - **Privacy (SPEC 12):** never write frames, audio or embeddings to logs.
 - **Secrets (SPEC 8, 12):** API keys come only from the secret store (`roboemot secrets set`, value never an argument). Never log, repr, report or return a key; a route whose `${secret:name}` cannot be resolved is unavailable, never sent with an empty key.
+- **Robot hierarchy (SPEC 4A, 11, 12A):** robot-specific behaviour only through a core protocol plus a
+  `roboemot.*` entry point keyed by `robot.id`, registered in `roboemot.plugins.GROUPS`. Core never
+  names a robot, its DOFs or its SDK. `tests/test_robot_hierarchy.py` enforces it; the baseline
+  `tests/robot_hierarchy_baseline.yaml` may only shrink, never grow.
 - **Diagnostics (SPEC 12A):** robot-specific debug sources are registered in the
   `roboemot.diagnostics` entry-point group under the manifest `robot.id`; core stays robot-agnostic.
 - **Web UI robot section (SPEC 11A, 12):** entry-point group `roboemot.settings`, keyed by `robot.id`; the plugin's
