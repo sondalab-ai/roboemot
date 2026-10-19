@@ -480,3 +480,16 @@ def test_supervisor_stop_timeout_is_read_from_a_restartable_plugin_only():
     assert supervisor_stop_timeout_s(FakePlugin()) is None
     assert supervisor_stop_timeout_s(None) is None
     assert supervisor_stop_timeout_s(Broken()) is None
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -float("inf"), 0.0, -3.0, "soon"])
+def test_a_supervisor_stop_timeout_that_is_not_a_positive_finite_number_counts_as_none(bad, caplog):
+    from roboemot.webui.robot_section import supervisor_stop_timeout_s
+
+    class Odd(Restarting):
+        def stop_timeout_s(self):
+            return bad
+
+    with caplog.at_level(logging.WARNING):
+        assert supervisor_stop_timeout_s(Odd()) is None
+    assert "stop timeout" in caplog.text

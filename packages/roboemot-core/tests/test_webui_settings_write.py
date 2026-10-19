@@ -637,6 +637,57 @@ def test_restore_skips_a_bad_entry_and_keeps_the_rest(tmp_path, caplog):
     assert "circadian.quiet_hours" in caplog.text
 
 
+def test_restore_carries_a_renamed_tightening_over_and_logs_removed_keys(tmp_path, caplog):
+    path = tmp_path / FILE
+    path.write_text(
+        json.dumps(
+            {
+                "v": 1,
+                "overrides": {
+                    "reflexes.antenna_ratio": 0.5,
+                    "connectivity.gestures.antenna_rad": 0.2,
+                },
+            }
+        )
+    )
+    path.chmod(0o600)
+    stack = ConfigStack()
+    with caplog.at_level("WARNING"):
+        SettingsEditor(stack, store=path).restore()
+    assert stack.effective().reflexes.startle_lift_ratio == 0.5
+    assert set(json.loads(path.read_text())["overrides"]) == {"reflexes.startle_lift_ratio"}
+    assert "connectivity.gestures.antenna_rad" in caplog.text and "removed" in caplog.text
+
+
+def test_restore_prefers_the_new_key_when_both_are_stored(tmp_path):
+    path = tmp_path / FILE
+    path.write_text(
+        json.dumps(
+            {
+                "v": 1,
+                "overrides": {"reflexes.antenna_ratio": 0.5, "reflexes.startle_lift_ratio": 1.0},
+            }
+        )
+    )
+    path.chmod(0o600)
+    stack = ConfigStack()
+    SettingsEditor(stack, store=path).restore()
+    assert stack.effective().reflexes.startle_lift_ratio == 1.0
+
+
+@pytest.mark.parametrize(
+    ("app", "named", "hint"),
+    [
+        ({"reflexes": {"antenna_ratio": 1.0}}, "reflexes.antenna_ratio", "reflexes.startle_lift"),
+        ({"connectivity": {"gestures": {"duration_s": 1}}}, "connectivity.gestures", "gesture_map"),
+    ],
+)
+def test_a_removed_key_in_app_yaml_names_the_key_and_its_replacement(app, named, hint):
+    with pytest.raises(ConfigError) as caught:
+        ConfigStack(app=app)
+    assert named in str(caught.value) and hint in str(caught.value)
+
+
 def test_restore_never_applies_a_secret_or_a_reflex_loosening(tmp_path):
     path = tmp_path / FILE
     path.write_text(

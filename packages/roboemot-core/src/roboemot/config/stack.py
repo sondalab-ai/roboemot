@@ -38,12 +38,16 @@ from .schema import (
     WITHDRAW_RULE_FIELDS,
     WITHDRAW_SHARED_FIELDS,
     RoboEmotConfig,
+    VoiceConfig,
     rule_identity,
 )
 
 LAYER_ORDER = ("defaults", "manifest", "preset", "app", "derived", "person", "runtime")
 KEYED_LISTS = {"appraisal.rules": "event", "llm_routes": "name"}
 AUDIT_FILE_MODE = 0o600
+_MOVED = yaml.safe_load(Path(__file__).with_name("moved_settings.yaml").read_text())
+RENAMED_SETTINGS: dict[str, str] = _MOVED["renamed"]  # old path -> new path
+REMOVED_SETTINGS: dict[str, str] = _MOVED["removed"]  # old path (or prefix) -> what replaces it
 NO_KEY = ("", "none")  # api_key values that carry no key
 PATCH = "#patch"  # runtime slot suffix: edits of existing entries of a merged list, by identity
 
@@ -516,17 +520,25 @@ def keeps_every_entry(candidate: Any, approved: Any) -> bool:
     return _filter_keys(approved) <= _filter_keys(candidate)
 
 
-def check_manifest_voice(voice: Any, cap: int | None = None) -> None:
+def _name_chars_ceiling() -> int:
+    """The schema's upper bound of ``voice.name_max_chars``: the longest name any valid
+    configuration can allow."""
+    meta = VoiceConfig.model_fields["name_max_chars"].metadata
+    return max(m.le for m in meta if hasattr(m, "le"))
+
+
+def check_manifest_voice(voice: Any) -> None:
     """A manifest may name the robot (``voice.default_name``, per-language
     ``voice.keywords.<lang>.name_aliases``) and nothing else under ``voice``. Each name must
-    survive ``sanitise_name`` unchanged and fit ``voice.name_max_chars`` as in force (``cap``;
-    the schema default when None), like a name from the platform or the owner."""
+    survive ``sanitise_name`` unchanged and fit the schema's maximum of ``voice.name_max_chars``,
+    not the owner's own setting: a tight owner cap must not make the shipped manifest unloadable
+    (the names are only matched, never shown, so the cap has nothing to cut)."""
     from ..voice.keywords import normalise
     from ..voice.robot_name import sanitise_name
 
     if voice is None:
         return
-    cap = cap or RoboEmotConfig().voice.name_max_chars
+    cap = _name_chars_ceiling()
 
     def check_name(where: str, value: Any) -> None:
         if not isinstance(value, str) or sanitise_name(value, cap) != value:
@@ -798,8 +810,7 @@ class ConfigStack:
                 f"manifest behaviour may set {sorted(MANIFEST_BEHAVIOUR_KEYS)}, not {unknown}"
             )
         with self._lock:
-            cap = self.merged_tree().get("voice", {}).get("name_max_chars")
-            check_manifest_voice(behaviour.get("voice"), cap)
+            check_manifest_voice(behaviour.get("voice"))
             saved, saved_channels = self.manifest, self.channels
             self.manifest, self.channels = behaviour, frozenset(channels)
             try:
@@ -1505,9 +1516,19 @@ def _mtime(path: Path) -> float:
         return -1.0
 
 
+def _moved_hint(path: str) -> str:
+    """ " (renamed to X)" or " (removed: use Y)" when ``path`` is a setting that moved."""
+    if path in RENAMED_SETTINGS:
+        return f" (renamed to {RENAMED_SETTINGS[path]})"
+    for old, instead in REMOVED_SETTINGS.items():
+        if path == old or path.startswith(old + "."):
+            return f" (removed: use {instead})"
+    return ""
+
+
 def _explain(exc: ValidationError) -> str:
     lines = []
     for err in exc.errors():
         loc = ".".join(str(p) for p in err["loc"])
-        lines.append(f"{loc}: {err['msg']}")
+        lines.append(f"{loc}: {err['msg']}{_moved_hint(loc)}")
     return "invalid configuration:\n  " + "\n  ".join(lines)

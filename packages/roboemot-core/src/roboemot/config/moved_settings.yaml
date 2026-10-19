@@ -1,0 +1,6 @@
+# Settings renamed or removed since an overrides file or app.yaml may have been written
+# (SPEC 11A, Renamed and removed settings). Data, not code: it records old names on purpose.
+renamed:
+  reflexes.antenna_ratio: reflexes.startle_lift_ratio
+removed:
+  connectivity.gestures: the manifest gesture_map entries puzzled and perk_up (SPEC 12A)

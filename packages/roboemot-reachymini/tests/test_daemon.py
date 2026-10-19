@@ -219,3 +219,65 @@ def test_current_app_status_path_appears_only_in_daemon_py():
             ):
                 hits.append(path.name)
     assert hits == []
+
+
+def test_stop_waits_for_the_daemon_stop_sequence():
+    seen = []
+
+    def handler(req):
+        seen.append(req.extensions["timeout"]["read"])
+        return httpx.Response(200)
+
+    c = client(handler, timeout_s=daemon.INSTALL_TIMEOUT_S)
+    c.stop_current_app()
+    c.restart_current_app()
+    assert seen[0] >= daemon.STOP_TIMEOUT_S + 1
+    assert seen[1] >= daemon.STOP_TIMEOUT_S + 1
+
+
+def test_stop_and_restart_survive_a_slow_daemon_answer():
+    class Slow(httpx.BaseTransport):
+        def handle_request(self, request):
+            if request.extensions["timeout"]["read"] < daemon.STOP_TIMEOUT_S + 1:
+                raise httpx.ReadTimeout("slow", request=request)
+            return httpx.Response(200)
+
+    c = DaemonClient(Target("robot"), timeout_s=daemon.INSTALL_TIMEOUT_S, transport=Slow())
+    c.stop_current_app()
+    c.restart_current_app()
+
+
+@pytest.mark.parametrize("proxy", ["socks5://127.0.0.1:1", "http://127.0.0.1:1"])
+def test_the_client_ignores_proxy_environment(monkeypatch, proxy):
+    for var in ("ALL_PROXY", "HTTP_PROXY", "all_proxy", "http_proxy"):
+        monkeypatch.setenv(var, proxy)
+    with pytest.raises(DaemonError, match="GET /daemon/status"):
+        DaemonClient(Target("127.0.0.1", 9), timeout_s=0.5).status()
+
+
+def test_app_running_logs_the_underlying_failure_type_only(caplog):
+    def handler(req):
+        raise httpx.ConnectError("secret-detail")
+
+    with caplog.at_level("INFO", logger="roboemot_reachymini.daemon"):
+        assert client(handler).app_running() is False
+    assert "daemon not reachable (ConnectError)" in caplog.text
+    assert "secret-detail" not in caplog.text
+
+
+@pytest.mark.parametrize("body", [{}, {"info": None, "state": "x"}, [], {"info": {}, "state": 1}])
+def test_wait_app_wraps_malformed_bodies(body):
+    with pytest.raises(DaemonError):
+        client(lambda r: httpx.Response(200, json=body)).wait_app("roboemot", poll_s=0)
+
+
+@pytest.mark.parametrize("body", [[], "x", None])
+def test_startup_app_wraps_malformed_bodies(body):
+    with pytest.raises(DaemonError):
+        client(lambda r: httpx.Response(200, json=body)).startup_app()
+
+
+@pytest.mark.parametrize("body", ["x", None, [{"nom": "a"}]])
+def test_installed_apps_wraps_malformed_bodies(body):
+    with pytest.raises(DaemonError):
+        client(lambda r: httpx.Response(200, json=body)).installed_apps()

@@ -29,10 +29,29 @@ _clock: Callable[[], float] = time.monotonic
 
 def capped_budget_s(budget_s: float, stop_timeout_s: float | None, margin_s: float) -> float:
     """``budget_s`` limited to ``stop_timeout_s - margin_s`` (never below 0) when the robot's
-    supervisor declares a kill timeout; unchanged when it declares none (``None``)."""
+    supervisor declares a kill timeout; unchanged when it declares none (``None``). Logs a
+    warning when the cap lowers the budget, and when the kill timeout leaves no time at all."""
     if stop_timeout_s is None:
         return budget_s
-    return max(0.0, min(budget_s, stop_timeout_s - margin_s))
+    allowed_s = stop_timeout_s - margin_s
+    if allowed_s <= 0:
+        log.warning(
+            "shutdown: the supervisor kills after %g s, not above the %g s margin: "
+            "the stop sequence gets no time to wait for threads",
+            stop_timeout_s,
+            margin_s,
+        )
+        return 0.0
+    if allowed_s < budget_s:
+        log.warning(
+            "shutdown: budget capped from %g s to %g s (kill timeout %g s - margin %g s)",
+            budget_s,
+            allowed_s,
+            stop_timeout_s,
+            margin_s,
+        )
+        return allowed_s
+    return budget_s
 
 
 @contextmanager

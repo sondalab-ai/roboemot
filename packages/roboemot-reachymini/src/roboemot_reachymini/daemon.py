@@ -1,8 +1,8 @@
 """The Reachy Mini daemon's REST API, the one HTTP client RoboEmot has for it (SPEC 4A, 11A, 12A).
 
-Facts from the daemon (reachy_mini 1.11, Wi-Fi router 1.12): FastAPI on port 8000, routes under
-``/api`` except ``/wifi/status``, which exists only on the Wireless daemon. The daemon runs RoboEmot
-as its current app: ``stop-current-app`` sends SIGINT and kills the process after
+Facts from the daemon (routes verified against reachy_mini 1.12.0): FastAPI on port 8000, routes
+under ``/api`` except ``/wifi/status``, which exists only on the Wireless daemon. The daemon runs
+RoboEmot as its current app: ``stop-current-app`` sends SIGINT and kills the process after
 ``STOP_TIMEOUT_S``; ``restart-current-app`` does that and starts the app again. Diagnostics, the
 web UI's Restart action and the installer all go through ``DaemonClient``; nothing else in this
 package opens a connection to the daemon.
@@ -11,6 +11,7 @@ package opens a connection to the daemon.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from collections.abc import Callable
 from typing import Any
@@ -18,11 +19,14 @@ from typing import Any
 import httpx
 from roboemot.diagnostics import Target
 
+log = logging.getLogger(__name__)
+
 APP_NAME = "roboemot"
 DEFAULT_PORT = 8000
 STOP_TIMEOUT_S = 20  # the daemon's stop_current_app default: SIGINT, then kill
 RESTART_MARGIN_S = 10.0  # for the daemon to start the app again after the stop
 RESTART_TIMEOUT_S = STOP_TIMEOUT_S + RESTART_MARGIN_S
+STOP_REQUEST_TIMEOUT_S = RESTART_TIMEOUT_S  # stop answers after the exit (<= STOP_TIMEOUT_S) + 1 s
 REQUEST_TIMEOUT_S = 2.0
 INSTALL_TIMEOUT_S = 5.0
 APP_START_TIMEOUT_S = 60.0
@@ -40,6 +44,10 @@ STATE_QUERY = {
 class DaemonError(Exception):
     """A daemon call failed: unreachable, an HTTP error status or an undecodable answer. The
     message names the call and carries the daemon's ``detail`` when there is one."""
+
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 class DaemonClient:
@@ -77,6 +85,7 @@ class DaemonClient:
                 base_url=self.base_url,
                 timeout=self._timeout_s if timeout_s is None else timeout_s,
                 transport=self._transport,
+                trust_env=False,
             ) as http:
                 resp = http.request(method, prefix + path, params=params, json=body)
         except httpx.HTTPError as exc:
@@ -84,7 +93,9 @@ class DaemonClient:
         if missing_ok and resp.status_code == httpx.codes.NOT_FOUND:
             return None
         if resp.is_error:
-            raise DaemonError(f"{call} -> HTTP {resp.status_code}: {_detail(resp)}")
+            raise DaemonError(
+                f"{call} -> HTTP {resp.status_code}: {_detail(resp)}", resp.status_code
+            )
         if not resp.content.strip():
             return None
         try:
@@ -117,7 +128,8 @@ class DaemonClient:
         not answer, or answers something else, counts as no."""
         try:
             status = self.current_app()
-        except DaemonError:
+        except DaemonError as exc:
+            log.info("daemon not reachable (%s)", type(exc.__cause__ or exc).__name__)
             return False
         info = status.get("info") if isinstance(status, dict) else None
         current = info.get("name") if isinstance(info, dict) else None
@@ -131,11 +143,15 @@ class DaemonClient:
 
     def installed_apps(self) -> list[str]:
         """Names of the apps the daemon lists as installed."""
-        return [a["name"] for a in self._send("GET", "/apps/list-available/installed")]
+        try:
+            return [a["name"] for a in self._send("GET", "/apps/list-available/installed")]
+        except (KeyError, TypeError) as exc:
+            raise DaemonError("GET /apps/list-available/installed -> unexpected answer") from exc
 
     def stop_current_app(self) -> None:
-        """``POST /api/apps/stop-current-app``."""
-        self._send("POST", "/apps/stop-current-app")
+        """``POST /api/apps/stop-current-app``. The daemon answers only after the app exited, so
+        the request gets the stop sequence's time, not the short default."""
+        self._send("POST", "/apps/stop-current-app", timeout_s=STOP_REQUEST_TIMEOUT_S)
 
     def wake_up(self) -> None:
         """``POST /api/move/play/wake_up``."""
@@ -147,7 +163,10 @@ class DaemonClient:
 
     def startup_app(self) -> str | None:
         """The app the daemon starts on wake-up."""
-        return self._send("GET", "/apps/startup-app").get("startup_app")
+        try:
+            return self._send("GET", "/apps/startup-app").get("startup_app")
+        except AttributeError as exc:
+            raise DaemonError("GET /apps/startup-app -> unexpected answer") from exc
 
     def set_startup_app(self, name: str | None) -> None:
         """``PUT /api/apps/startup-app``."""
@@ -166,13 +185,22 @@ class DaemonClient:
         status: dict[str, Any] | None = None
         while clock() < deadline:
             status = self.current_app()
-            if status is None or status["info"]["name"] != name:
+            try:
+                current, state = (None, None) if status is None else _name_and_state(status)
+            except (KeyError, AttributeError, TypeError) as exc:
+                raise DaemonError("GET /apps/current-app-status -> unexpected answer") from exc
+            if current != name:
                 raise DaemonError(f"{name} is no longer the current app (status: {status})")
-            if status["state"] in (RUNNING, "error", "done"):
+            if state in (RUNNING, "error", "done"):
                 return status
             sleep(poll_s)
         assert status is not None
         return status
+
+
+def _name_and_state(status: dict[str, Any]) -> tuple[str, str]:
+    """``(app name, state)`` of a current-app-status answer; raises on any other shape."""
+    return status["info"]["name"], status["state"]
 
 
 def _detail(resp: httpx.Response) -> str:
