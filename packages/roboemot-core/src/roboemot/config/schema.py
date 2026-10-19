@@ -2891,6 +2891,17 @@ class CatalogueConfig(Strict):
     )
 
 
+class RuntimeConfig(Strict):
+    gc_freeze: bool = param(
+        True,
+        "After the app is set up, move every object it holds to the garbage collector's "
+        "permanent generation, so a full collection no longer walks the imported modules and "
+        "models (pauses of 100 to 300 ms on a loaded core delayed the barge-in stop, SPEC 8 "
+        "stage 8, 13). Cyclic garbage made after that point out of those objects is not freed",
+        restart=True,
+    )
+
+
 class WebUIConfig(Strict):
     bind: str | None = param(
         None,
@@ -3113,6 +3124,7 @@ with warnings.catch_warnings():
         safety: SafetyConfig = param({}, "SPEC 12")
         privacy: PrivacyConfig = param({}, "SPEC 12")
         connectivity: ConnectivityConfig = param({}, "SPEC 12A")
+        runtime: RuntimeConfig = param({}, "SPEC 8, 11A")
         webui: WebUIConfig = param({}, "SPEC 6, 11A, 12")
         catalogue: CatalogueConfig = param({}, "SPEC 6")
 

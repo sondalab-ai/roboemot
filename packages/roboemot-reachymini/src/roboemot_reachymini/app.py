@@ -11,6 +11,7 @@ configured) with the offline responder's gestures, stop cleanly on ``stop_event`
 
 from __future__ import annotations
 
+import gc
 import logging
 import math
 import os
@@ -821,6 +822,11 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                     world_source.speaking = speech.speaking
                 cleanup.callback(world_source.stop)
                 world_source.start(publish)
+            runtime = stack.effective().runtime
+            if runtime.gc_freeze:  # SPEC 8 stage 8: no full collection walks the loaded models
+                gc.collect()
+                gc.freeze()
+                cleanup.callback(gc.unfreeze)
             while not stop_event.is_set():
                 now = time.monotonic()
                 circ.tick(now)  # before the affect tick: its events and baseline apply to it
