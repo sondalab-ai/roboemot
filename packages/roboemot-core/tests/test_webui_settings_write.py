@@ -1212,3 +1212,73 @@ def test_remove_is_accepted_exactly_for_the_removable_entries(editor, stack):
             assert caught.value.code == "entry_in_lower_layer"
     assert editor.remove_entry("voice.moods.tender")["changed"]
     assert editor.remove_entry("llm_routes.n2")["changed"]
+
+
+def two_routes(tmp_path):
+    routes = [
+        {**ROUTE, "name": "a", "api_key": "${secret:k}"},
+        {**ROUTE, "name": "b", "api_key": "${secret:k}"},
+    ]
+    return make_stack(tmp_path, llm_routes=routes)
+
+
+def test_restore_replays_only_the_acknowledged_route_move(tmp_path):
+    editor = SettingsEditor(two_routes(tmp_path), store=tmp_path / FILE)
+    editor.change(
+        "llm_routes.a.base_url", "https://new-a.example.com/v1", ack="https://new-a.example.com"
+    )
+    data = json.loads((tmp_path / FILE).read_text())
+    assert list(data["acks"].values()) == ["https://new-a.example.com"]
+    key_b = next(iter(data["acks"])).replace('"a"', '"b"')
+    data["overrides"][key_b] = "https://new-b.example.com/v1"  # edited into the file: never acked
+    (tmp_path / FILE).write_text(json.dumps(data))
+    fresh = two_routes(tmp_path)
+    SettingsEditor(fresh, store=tmp_path / FILE).restore()
+    urls = {r.name: r.base_url for r in fresh.effective().llm_routes}
+    assert urls == {"a": "https://new-a.example.com/v1", "b": ROUTE["base_url"]}
+    again = json.loads((tmp_path / FILE).read_text())
+    assert key_b not in again["overrides"] and len(again["acks"]) == 1
+
+
+def test_restore_drops_a_move_whose_origin_no_longer_matches_the_ack(tmp_path):
+    editor = SettingsEditor(two_routes(tmp_path), store=tmp_path / FILE)
+    editor.change(
+        "llm_routes.a.base_url", "https://new-a.example.com/v1", ack="https://new-a.example.com"
+    )
+    data = json.loads((tmp_path / FILE).read_text())
+    (key,) = data["acks"]
+    data["overrides"][key] = "https://evil.example.com/v1"
+    (tmp_path / FILE).write_text(json.dumps(data))
+    fresh = two_routes(tmp_path)
+    SettingsEditor(fresh, store=tmp_path / FILE).restore()
+    assert {r.base_url for r in fresh.effective().llm_routes} == {ROUTE["base_url"]}
+
+
+def test_a_later_edit_at_another_origin_forgets_the_ack_and_reset_drops_it(tmp_path):
+    editor = SettingsEditor(two_routes(tmp_path), store=tmp_path / FILE)
+    path = "llm_routes.a.base_url"
+    editor.change(path, "https://new-a.example.com/v1", ack="https://new-a.example.com")
+    editor.change(path, "https://new-a.example.com/v2")  # same origin: the ack stays
+    assert len(json.loads((tmp_path / FILE).read_text())["acks"]) == 1
+    editor.reset(path)
+    assert "acks" not in json.loads((tmp_path / FILE).read_text())
+
+
+def test_a_correct_ack_without_the_right_pin_changes_nothing(tmp_path):
+    stack = make_stack(tmp_path, llm_routes=[{**ROUTE, "api_key": "${secret:k}"}])
+    srv, client = serve(tmp_path, SettingsEditor(stack, store=tmp_path / FILE), stack)
+    try:
+        body = {
+            "path": "llm_routes.lan.base_url",
+            "value": "https://evil.example.com/v1",
+            "ack_endpoint": "https://evil.example.com",
+        }
+        assert client.request("POST", "/api/settings", {**body, "pin": "000000"}).status in (
+            401,
+            403,
+        )
+        assert client.request("POST", "/api/settings", body).status in (400, 401, 403)
+        assert stack.effective().llm_routes[0].base_url == ROUTE["base_url"]
+        assert not any(a.key.endswith(".endpoint") for a in stack.audit)
+    finally:
+        srv.stop()
