@@ -65,5 +65,22 @@ Merged into the epic branch: slice 1 (PR 58), 2 (PR 59), 3 (PR 60), 4 (PR 61). A
   (already in core, `actions: ["reboot"]`).
 - 5: SPEC 11A/12, TODO.md, exit check as above.
 Owner decision during the run: `privacy.*` and minor paths are admin-only (readable only via a PIN-checked reveal).
-Agent defaults, pending owner OK: `circadian.location` is private too; the minors blocklist only grows from the web
-(reset refused too); robot plugins cannot claim safety/webui/privacy/llm_routes or private/admin paths.
+
+## Owner decisions (2026-10-19 08:50)
+Go-ahead for 4b, 5 and a flake slice (estimate now ~31 runs).
+- Kept: `circadian.location` private; robot plugins cannot claim safety/webui/privacy/llm_routes or private/admin
+  paths; raw-JSON fields read-only; only web-added entries removable; only safety loosening persists to the app YAML;
+  "default" = value after reset.
+- Reboot: shown only if `pollen` can already run `systemctl reboot` without a password. The installer adds nothing.
+  Derive this from Pollen sources/docs first; ask the owner to run robot commands only for what stays unknown.
+- Restart RoboEmot: daemon route accepted. The PIN dialog lists zero pose, possible WebRTC drop, kill after 20 s (EN+IT).
+- Folded into slice 5 (reverses agent defaults):
+  - Remove is shown only where the server would accept it.
+  - A save keeps other rows' unsaved edits.
+  - Debug report: revert `scheme://user@host` redaction (only user:pass@ stays hidden).
+  - Keyed routes may change scheme/host/port, with the PIN and a dialog naming the new host the key will go to.
+  - base_url with credentials: shown masked, replaced whole and write-only.
+  - New language keys can be added (validated against the supported voice languages).
+  - Minors blocklist words removable/resettable under the admin PIN, audited.
+- New slice 6, before epic -> main: fix the CI `models` barge-in flake (listener lag, GC pauses).
+- Robot TODOs (Python version, SSH user, nod/shake): same rule, derive from sources first.
