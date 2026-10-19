@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import re
+from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -101,13 +102,13 @@ def _token_pattern(term: str) -> re.Pattern[str]:
     return re.compile(r"(?<![\w.])" + re.escape(term) + r"(?!\w)")
 
 
-def vocabulary_findings(source: str, rel: str, terms: Terms) -> set[Finding]:
+def vocabulary_findings(source: str, rel: str, terms: Terms) -> Counter[Finding]:
     """Robot vocabulary in identifiers and string literals of ``source``."""
     tree = ast.parse(source)
     skip = _docstring_ids(tree)
     static = tuple(normalise(t) for t in terms.static)
     patterns = [(t, _token_pattern(t)) for t in terms.tokens]
-    found: set[Finding] = set()
+    found: Counter[Finding] = Counter()
     for node, symbol in _walk_scoped(tree):
         matched: set[str] = set()
         ident = _identifier(node)
@@ -124,14 +125,14 @@ def vocabulary_findings(source: str, rel: str, terms: Terms) -> set[Finding]:
             if "://" in value or "localhost" in value:
                 matched |= {f":{p}" for p in terms.ports if re.search(rf":{p}(?!\d)", value)}
         for term in _drop_nested(matched):
-            found.add(Finding("vocabulary", rel, symbol, term))
+            found[Finding("vocabulary", rel, symbol, term)] += 1
     return found
 
 
-def import_findings(source: str, rel: str, forbidden: set[str]) -> set[Finding]:
+def import_findings(source: str, rel: str, forbidden: set[str]) -> Counter[Finding]:
     """Imports of a module whose top-level package is in ``forbidden`` (relative imports never
     are)."""
-    found: set[Finding] = set()
+    found: Counter[Finding] = Counter()
     for node, symbol in _walk_scoped(ast.parse(source)):
         modules: list[str] = []
         if isinstance(node, ast.Import):
@@ -141,13 +142,13 @@ def import_findings(source: str, rel: str, forbidden: set[str]) -> set[Finding]:
         for module in modules:
             top = module.split(".")[0]
             if top in forbidden:
-                found.add(Finding("import", rel, symbol, top))
+                found[Finding("import", rel, symbol, top)] += 1
     return found
 
 
-def duck_findings(source: str, rel: str) -> set[Finding]:
+def duck_findings(source: str, rel: str) -> Counter[Finding]:
     """``hasattr``/``getattr`` calls with a string-literal attribute name."""
-    found: set[Finding] = set()
+    found: Counter[Finding] = Counter()
     for node, symbol in _walk_scoped(ast.parse(source)):
         if (
             isinstance(node, ast.Call)
@@ -157,14 +158,15 @@ def duck_findings(source: str, rel: str) -> set[Finding]:
             and isinstance(node.args[1], ast.Constant)
             and isinstance(node.args[1].value, str)
         ):
-            found.add(Finding("duck", rel, symbol, f"{node.func.id}:{node.args[1].value}"))
+            found[Finding("duck", rel, symbol, f"{node.func.id}:{node.args[1].value}")] += 1
     return found
 
 
 def diff_baseline(
-    findings: set[Finding], baseline: set[Finding]
-) -> tuple[set[Finding], set[Finding]]:
-    """``(new, stale)``: findings absent from the baseline, baseline entries no longer found."""
+    findings: Counter[Finding], baseline: Counter[Finding]
+) -> tuple[Counter[Finding], Counter[Finding]]:
+    """``(new, stale)`` as surplus counts: occurrences beyond the baseline (a missing key counts
+    in full) and baseline occurrences no longer found."""
     return findings - baseline, baseline - findings
 
 

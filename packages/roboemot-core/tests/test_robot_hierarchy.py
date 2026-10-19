@@ -11,17 +11,19 @@ Checks (all AST-based, comments and docstrings excluded; scanners in ``robot_hie
   ``config/schema.py``, the installer and the CLI;
 * entry-point contract: each installed ``roboemot.*`` group is in ``GROUPS`` and each registered
   object satisfies its group's contract;
-* duck typing: no ``hasattr``/``getattr`` with a literal attribute name in robot packages, except
-  in the modules that wrap the SDK handle itself (``SDK_ADAPTER_MODULES``);
+* duck typing: no ``hasattr``/``getattr`` with a literal attribute name in robot packages (no
+  module is exempt; today's sites are baselined under audit id D);
 * a non-Reachy manifest (``desk-head-v1``) works with core's config and renderer.
 
 ``robot_hierarchy_baseline.yaml`` lists today's findings (one per check, file, symbol, term, with
-the audit id of the epic plan). A finding outside it fails, and so does an entry that no longer
-occurs: the baseline only shrinks, and slices remove entries as they fix them.
+the audit id of the epic plan and the occurrence ``count``). An occurrence beyond the baseline
+fails, and so does a count that dropped or an entry that no longer occurs: the baseline only
+shrinks, and slices lower or remove entries as they fix them.
 """
 
 from __future__ import annotations
 
+from collections import Counter
 from importlib.metadata import distributions
 from pathlib import Path
 
@@ -43,9 +45,6 @@ CORE_SRC = ROOT / "packages" / "roboemot-core" / "src" / "roboemot"
 MANIFESTS = ROOT / "configs" / "manifests"
 BASELINE = Path(__file__).with_name("robot_hierarchy_baseline.yaml")
 KNOWN_SDKS = frozenset({"reachy_mini"})
-SDK_ADAPTER_MODULES = frozenset(
-    {"audio.py", "camera.py", "driver.py", "install.py", "settings.py", "speaker.py"}
-)
 AUDIT_IDS = frozenset({"1", "2", "3", "4", "5", "6", "B", "D", "U"})
 
 
@@ -58,7 +57,7 @@ def roboemot_entry_points():
     for dist in distributions():
         for ep in dist.entry_points:
             if ep.group.startswith("roboemot."):
-                yield normalise(dist.metadata["Name"]), ep
+                yield normalise(dist.metadata["Name"] or dist.name or ""), ep
 
 
 def robot_packages() -> set[str]:
@@ -79,32 +78,35 @@ def robot_sources() -> list[Path]:
     return out
 
 
-def load_baseline() -> dict[Finding, str]:
+def load_baseline() -> tuple[Counter[Finding], dict[Finding, str]]:
+    """The baseline as occurrence counts per finding key, and the audit id per key."""
     entries = yaml.safe_load(BASELINE.read_text()) or []
-    out: dict[Finding, str] = {}
+    counts: Counter[Finding] = Counter()
+    audits: dict[Finding, str] = {}
     for e in entries:
         key = Finding(e["check"], e["file"], e["symbol"], e["term"])
-        assert key not in out, f"duplicate baseline entry {key}"
-        out[key] = str(e["audit"])
-    return out
+        assert key not in audits, f"duplicate baseline entry {key}"
+        assert isinstance(e["count"], int) and e["count"] >= 1, f"bad count for {key}"
+        counts[key] = e["count"]
+        audits[key] = str(e["audit"])
+    return counts, audits
 
 
-def current_findings() -> set[Finding]:
+def current_findings() -> Counter[Finding]:
     terms = build_terms(MANIFESTS)
     forbidden = robot_packages() | KNOWN_SDKS
-    found: set[Finding] = set()
+    found: Counter[Finding] = Counter()
     for path in sorted(CORE_SRC.rglob("*.py")):
         text = path.read_text()
-        found |= vocabulary_findings(text, rel(path), terms)
-        found |= import_findings(text, rel(path), forbidden)
+        found += vocabulary_findings(text, rel(path), terms)
+        found += import_findings(text, rel(path), forbidden)
     for path in robot_sources():
-        if path.name not in SDK_ADAPTER_MODULES:
-            found |= duck_findings(path.read_text(), rel(path))
+        found += duck_findings(path.read_text(), rel(path))
     return found
 
 
 def test_the_baseline_entries_carry_a_known_audit_id():
-    unknown = {k: a for k, a in load_baseline().items() if a not in AUDIT_IDS}
+    unknown = {k: a for k, a in load_baseline()[1].items() if a not in AUDIT_IDS}
     assert not unknown, f"audit id must be one of {sorted(AUDIT_IDS)}: {unknown}"
 
 
@@ -118,12 +120,12 @@ def test_the_vocabulary_is_derived_from_the_manifests():
 
 
 def test_core_is_robot_agnostic_and_robot_packages_use_declared_capabilities():
-    new, stale = diff_baseline(current_findings(), set(load_baseline()))
+    new, stale = diff_baseline(current_findings(), load_baseline()[0])
     assert not new, "new violations (fix them, never baseline them):\n" + "\n".join(
-        f"  {f.check} {f.file} {f.symbol} {f.term}" for f in sorted(new)
+        f"  {f.check} {f.file} {f.symbol} {f.term} (+{n})" for f, n in sorted(new.items())
     )
-    assert not stale, "baseline entries that no longer occur (delete them):\n" + "\n".join(
-        f"  {f.check} {f.file} {f.symbol} {f.term}" for f in sorted(stale)
+    assert not stale, "baseline is stale (lower the count or delete the entry):\n" + "\n".join(
+        f"  {f.check} {f.file} {f.symbol} {f.term} (-{n})" for f, n in sorted(stale.items())
     )
 
 
@@ -183,13 +185,17 @@ def test_core_builds_config_and_renderer_for_a_non_reachy_manifest():
     manifest = load_manifest(MANIFESTS / "desk-head-v1.yaml")
     sweep = [[0.0, 0], [0.3, 10], [0.6, 0]]
     stack = ConfigStack()
-    stack.set_manifest_behaviour(
-        {
-            "expression_map": {"joy": {"channels": {"neck_pan": sweep}}},
-            "gesture_map": {"nod": {"channels": {"neck_tilt": sweep}}},
-            "circadian_motion": {"rest_pose_deg": {"neck_tilt": 10}},
-        }
-    )
+    try:
+        stack.set_manifest_behaviour(
+            {
+                "expression_map": {"joy": {"channels": {"neck_pan": sweep}}},
+                "gesture_map": {"nod": {"channels": {"neck_tilt": sweep}}},
+                "circadian_motion": {"rest_pose_deg": {"neck_tilt": 10}},
+            }
+        )
+    except ConfigError as exc:
+        assert "unknown channel 'neck_pan'" in str(exc), f"unrelated ConfigError: {exc}"
+        raise
     cfg = stack.effective()
     ExpressionRenderer(cfg.expression, cfg.expression_map, manifest.dofs, 0.15, cfg.gesture_map)
     assert build_primitive("joy", cfg.expression_map["joy"], manifest.dofs)

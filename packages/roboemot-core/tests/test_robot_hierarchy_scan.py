@@ -1,6 +1,7 @@
 """Self-tests of the hierarchy gate's scanners (SPEC 4A, 12A) on small synthetic sources."""
 
 import textwrap
+from collections import Counter
 
 from robot_hierarchy_scan import (
     Finding,
@@ -115,12 +116,29 @@ def finding(term: str) -> Finding:
 
 
 def test_a_finding_missing_from_the_baseline_is_new_and_an_unused_entry_is_stale():
-    base = {finding("a"), finding("b")}
-    new, stale = diff_baseline({finding("a"), finding("c")}, base)
-    assert new == {finding("c")}
-    assert stale == {finding("b")}
+    base = Counter({finding("a"): 1, finding("b"): 1})
+    new, stale = diff_baseline(Counter({finding("a"): 1, finding("c"): 1}), base)
+    assert new == Counter({finding("c"): 1})
+    assert stale == Counter({finding("b"): 1})
 
 
-def test_an_equal_set_has_no_difference():
-    new, stale = diff_baseline({finding("a")}, {finding("a")})
+def test_an_extra_occurrence_inside_a_baselined_key_is_new_and_a_lower_count_is_stale():
+    base = Counter({finding("a"): 2})
+    new, stale = diff_baseline(Counter({finding("a"): 3}), base)
+    assert new == Counter({finding("a"): 1}) and not stale
+    new, stale = diff_baseline(Counter({finding("a"): 1}), base)
+    assert not new and stale == Counter({finding("a"): 1})
+
+
+def test_an_equal_count_has_no_difference():
+    new, stale = diff_baseline(Counter({finding("a"): 2}), Counter({finding("a"): 2}))
     assert not new and not stale
+
+
+def test_repeated_occurrences_in_one_symbol_are_counted():
+    src = """
+    def f(x):
+        return [hasattr(x, "a"), hasattr(x, "a")]
+    """
+    found = duck_findings(textwrap.dedent(src), "x.py")
+    assert found == Counter({Finding("duck", "x.py", "f", "hasattr:a"): 2})
