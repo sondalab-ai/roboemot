@@ -184,6 +184,8 @@ class BarePlatform:
     default_user = "dev"
     arch = "x86_64"
     python = "/opt/venv/bin/python"
+    env_dir = "/opt/venv"
+    base_python = None
     record_path = "/opt/.bare-install.json"
     space_paths = ("/tmp",)
     distributions = ("bare-app",)
@@ -193,6 +195,13 @@ class BarePlatform:
         self.tmp = tmp
 
     def connect(self, ui, host): ...
+    def plan_env(self, remote):
+        return ""
+
+    def create_env(self, ui, remote, plan): ...
+    def env_users(self, py):
+        return []
+
     def probe(self, ui, py): ...
     def verify(self, ui, py, dev): ...
     def running_app(self):
@@ -230,3 +239,17 @@ def test_install_and_uninstall_work_without_any_reachy_code(tmp_path, monkeypatc
     assert json.loads(robot.files[BarePlatform.record_path])["added"] == ["tomli"]
     inst.run_uninstall(inst.Options(**opts, uninstall=True), ui, tmp_path)
     assert robot.env == before and robot.files == {}
+
+
+def test_a_record_from_before_env_created_still_loads():
+    old = rec().to_json()
+    del old["env_created"], old["env_baseline"]
+    loaded = InstallRecord.from_json(old)
+    assert loaded.env_created is None and loaded.env_baseline == []
+
+
+def test_env_created_round_trips():
+    r = rec(env_created="/venvs/apps_venv")
+    assert InstallRecord.from_json(json.loads(json.dumps(r.to_json()))).env_created == (
+        "/venvs/apps_venv"
+    )

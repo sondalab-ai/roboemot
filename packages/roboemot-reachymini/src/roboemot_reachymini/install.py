@@ -1,8 +1,12 @@
 """Reachy Mini Wireless installer platform (SPEC 4A, Packaging; flow in ``roboemot.install``).
 
-Facts from the daemon source (reachy_mini 1.11, checked on the robot):
+Facts from the daemon source (reachy_mini 1.12, checked on the robot):
 
-- Every app shares one environment, ``/venvs/apps_venv``; the daemon runs an app as
+- Every app shares one environment, ``/venvs/apps_venv``. A freshly flashed robot has only
+  ``/venvs/mini_daemon``: the daemon creates the apps venv lazily on the first app install
+  (``<daemon python> -m venv``, then ``pip install reachy-mini``, unpinned, then the app). The
+  installer does the same when it is missing, pinned to the daemon's own ``reachy_mini``
+  version, and records it so uninstall can remove it. The daemon runs an app as
   ``<apps_venv>/bin/python -u -m <entry point module>`` and lists apps from the
   ``reachy_mini_apps`` entry points found there.
 - ``/venvs/.app_metadata/<app>.json`` exists only for apps the daemon installed itself (from
@@ -16,6 +20,7 @@ Facts from the daemon source (reachy_mini 1.11, checked on the robot):
 
 from __future__ import annotations
 
+import re
 import shlex
 import shutil
 import socket
@@ -27,16 +32,24 @@ from pathlib import Path
 from roboemot.diagnostics import Target
 from roboemot.install import Ui, WizardError
 from roboemot.install.pyenv import RemotePython
+from roboemot.install.remote import Remote
 
 from .daemon import APP_NAME, DEFAULT_PORT, INSTALL_TIMEOUT_S, DaemonClient, DaemonError
 
 APPS_VENV = "/venvs/apps_venv"
+DAEMON_PYTHON = "/venvs/mini_daemon/bin/python"
+VERSION_PATTERN = re.compile(r"[0-9][0-9A-Za-z.+!-]*")
 WAKE_SETTLE_S = 3.0
 PACKAGES = ("roboemot-core", "roboemot-reachymini")
 PKG_DATA = "roboemot-reachymini/src/roboemot_reachymini/data"
 DAEMON_METADATA = "/venvs/.app_metadata"
 
 PROBE = "from importlib.metadata import version; print(version('reachy_mini'))"
+OTHER_APPS = (
+    "from importlib.metadata import entry_points; "
+    f"print(*[e.name for e in entry_points(group='reachy_mini_apps') if e.name != '{APP_NAME}'],"
+    " sep='\\n')"
+)
 VERIFY = (
     "from importlib.metadata import entry_points; "
     "from reachy_mini import ReachyMiniApp; "
@@ -88,6 +101,8 @@ class ReachyMiniWireless:
     default_user = "pollen"
     arch = "aarch64"
     python = f"{APPS_VENV}/bin/python"
+    env_dir = APPS_VENV
+    base_python = DAEMON_PYTHON
     record_path = "/venvs/.roboemot-install.json"
     space_paths = ("/tmp", APPS_VENV)
     distributions = PACKAGES
@@ -119,6 +134,30 @@ class ReachyMiniWireless:
             )
         if not status.get("wireless_version"):
             ui.warn("this daemon is not a Wireless one: the apps venv layout may differ")
+
+    def plan_env(self, remote: Remote) -> str:
+        """The requirement the new apps venv gets: ``reachy-mini`` at the daemon's own version.
+        Read-only, so it runs before anything is recorded."""
+        version = RemotePython(remote, DAEMON_PYTHON).py(PROBE).strip()
+        if not VERSION_PATTERN.fullmatch(version):
+            raise WizardError(
+                f"cannot read the reachy_mini version of {DAEMON_PYTHON}: {version!r}"
+            )
+        return f"reachy-mini=={version}"
+
+    def create_env(self, ui: Ui, remote: Remote, plan: str) -> None:
+        """Create the apps venv the way the daemon does and install ``plan`` (from
+        ``plan_env``) into it."""
+        requirement = plan
+        remote.run(f"{shlex.quote(DAEMON_PYTHON)} -m venv {shlex.quote(APPS_VENV)}")
+        result = RemotePython(remote, self.python).install([requirement], None)
+        if not result.ok:
+            raise WizardError(f"pip install failed in the new {APPS_VENV}:\n{result.output}")
+        ui.ok(f"created {APPS_VENV} with {requirement}")
+
+    def env_users(self, py: RemotePython) -> list[str]:
+        """Apps other than ours that the daemon would list from this environment."""
+        return py.py(OTHER_APPS).split()
 
     def probe(self, ui: Ui, py: RemotePython) -> None:
         ui.ok(f"reachy_mini {py.py(PROBE)} in the apps venv")

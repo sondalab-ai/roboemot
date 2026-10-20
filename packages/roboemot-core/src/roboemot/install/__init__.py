@@ -8,7 +8,10 @@ package in the ``roboemot.installers`` entry-point group under the manifest's ``
 Install: find the robot (mDNS, every manifest that declares discovery), check SSH, the target
 interpreter, architecture, Python and free space, build the wheels locally, install them with
 the versions already on the robot pinned, record exactly what changed, verify, optionally
-start the app and make it the autostart app. It also creates the private app data folder
+start the app and make it the autostart app. If the target environment does not exist yet and
+the platform can create it (``Platform.base_python``), the checks run against the creating
+interpreter, the record is written, and then the platform creates the environment; the dry run
+only reports it and skips the dependency check. It also creates the private app data folder
 (``~/.local/share/roboemot``: registry, models, trait cache) when it is not there yet and
 records it. Unless declined (`--no-piper`) it also creates a Piper virtualenv in the data folder
 (`piper-tts` is GPL-3.0 and runs as its own process, SPEC 8), recorded for uninstall.
@@ -19,7 +22,9 @@ Uninstall: stop the app, give back the previous autostart app (only if the setti
 this app), uninstall what the record says this installer added, reinstall the original versions
 it replaced, keep anything another distribution still needs, remove leftovers and the recorded
 data folder (registry, models and trait cache included), verify, and only then delete the
-record. Running it twice is harmless. Both flows have a read-only ``--dry-run``.
+record. An environment the record says this installer created is removed too, unless another
+app lives in it (``Platform.env_users``); with the environment already gone, the rest of the
+cleanup still runs. Running it twice is harmless. Both flows have a read-only ``--dry-run``.
 """
 
 from __future__ import annotations
@@ -75,12 +80,17 @@ class Platform(Protocol):
     default_user: str
     arch: str  # expected `platform.machine()` of the robot
     python: str  # interpreter of the environment the app is installed into
+    env_dir: str  # that environment's folder (created and removed by the installer if missing)
+    base_python: str | None  # interpreter that creates the environment; None: cannot create it
     record_path: str  # change record: outside that environment and outside /tmp
     space_paths: tuple[str, ...]  # filesystems that need MIN_FREE_MB
     distributions: tuple[str, ...]  # this app's own distributions
     modules: tuple[str, ...]  # their top-level import names (leftover check)
 
     def connect(self, ui: Ui, host: str) -> None: ...
+    def plan_env(self, remote: Remote) -> str: ...
+    def create_env(self, ui: Ui, remote: Remote, plan: str) -> None: ...
+    def env_users(self, py: RemotePython) -> list[str]: ...
     def probe(self, ui: Ui, py: RemotePython) -> None: ...
     def stage(self, root: Path, dest: Path, dev: bool) -> list[Path]: ...
     def verify(self, ui: Ui, py: RemotePython, dev: bool) -> None: ...
@@ -194,24 +204,57 @@ def check_ssh(
     remote.connect()
     ui.ok(f"ssh {remote.target}")
     py = RemotePython(remote, platform.python)
-    if not py.exists():
-        raise WizardError(f"{platform.python} not found: is this a {platform.display_name}?")
-    arch, version = probe_platform(remote, platform.python)
+    present = py.exists()
+    if not present and need is None:
+        ui.ok(f"{platform.env_dir} is not there")
+        return py
+    if not present and _exists(remote, platform.env_dir):
+        raise WizardError(
+            f"{platform.env_dir} exists without an interpreter ({platform.python}): "
+            "remove it by hand or finish creating it, then run the installer again"
+        )
+    target = platform.python if present else creating_python(platform, remote)
+    arch, version = probe_platform(remote, target)
     if arch != platform.arch:
         raise WizardError(f"robot architecture is {arch}, expected {platform.arch}")
     if need and tuple(map(int, version.split("."))) < need:
         raise WizardError(f"target Python is {version}; the app needs {need[0]}.{need[1]}+")
-    ui.ok(f"{arch}, Python {version} at {platform.python}")
+    ui.ok(f"{arch}, Python {version} at {target}")
+    if not present:
+        ui.info(f"{platform.env_dir} does not exist yet: it is created with {target}")
     if need:
-        for path in platform.space_paths:
+        for space in platform.space_paths:
+            path = posixpath.dirname(space) if not present and space == platform.env_dir else space
             free_kb = int(remote.run(f"df -Pk {shlex.quote(path)} | tail -1").split()[3])
             if free_kb < MIN_FREE_MB * 1024:
                 raise WizardError(
                     f"only {free_kb // 1024} MB free on {path}, need {MIN_FREE_MB} MB"
                 )
             ui.ok(f"{free_kb // 1024} MB free on {path}")
-    platform.probe(ui, py)
+    if present:
+        platform.probe(ui, py)
     return py
+
+
+def current_python(platform: Platform, remote: Remote) -> str:
+    """The target interpreter, or the one that will create it while the dry run has none yet."""
+    if RemotePython(remote, platform.python).exists():
+        return platform.python
+    return creating_python(platform, remote)
+
+
+def creating_python(platform: Platform, remote: Remote) -> str:
+    """The interpreter that would create the missing environment, or a WizardError."""
+    base = platform.base_python
+    if base is None:
+        raise WizardError(
+            f"{platform.python} not found and {platform.display_name} cannot create it"
+        )
+    if not RemotePython(remote, base).exists():
+        raise WizardError(
+            f"{platform.python} not found, and neither is {base}, the interpreter that creates it"
+        )
+    return base
 
 
 def read_record(remote: Remote, path: str) -> InstallRecord | None:
@@ -318,7 +361,7 @@ def install_piper(
     if record.piper_venv != venv and _exists(remote, venv):
         ui.warn(f"{venv} exists but is not in the install record: left alone")
         return
-    lock = lock_path(*probe_platform(remote, platform.python))
+    lock = lock_path(*probe_platform(remote, current_python(platform, remote)))
     if dry_run:
         ui.info(
             f"would create the Piper virtualenv {venv} and install piper-tts=={PIPER_TTS_VERSION} "
@@ -597,6 +640,53 @@ def warn_data_dir_overrides(ui: Ui, remote: Remote, dirs: list[Path]) -> None:
 # ---------------------------------------------------------------- install
 
 
+def remove_created_env(
+    ui: Ui,
+    platform: Platform,
+    py: RemotePython,
+    remote: Remote,
+    record: InstallRecord,
+    dry_run: bool,
+) -> bool:
+    """Delete the environment this installer created, unless another app lives in it.
+
+    Only the exact path the platform names is deleted, and only if its ``realpath`` is the same.
+    Returns True when the environment is deliberately left in place.
+    """
+    env = record.env_created
+    if env is None:
+        return False
+    if env != platform.env_dir:
+        ui.warn(f"recorded environment {env!r} is not {platform.env_dir}: left as it is")
+        return True
+    if not _exists(remote, env):
+        ui.ok(f"environment {env} is not there")
+        return False
+    if not py.exists():
+        ui.warn(f"{env} has no interpreter: cannot rule out other apps in it, left as it is")
+        return True
+    users = platform.env_users(py)
+    if users:
+        ui.warn(f"keeping {env}: also used by {', '.join(users)}")
+        return True
+    accounted = {canonical(p) for p in record.packages} | set(record.added)
+    foreign = sorted(set(py.installed()) - accounted - set(record.env_baseline))
+    if foreign:
+        ui.warn(
+            f"keeping {env}: it holds packages this installer did not put there: "
+            f"{', '.join(foreign)}"
+        )
+        return True
+    real = remote.run(f"realpath {shlex.quote(env)} 2>/dev/null || true").strip()
+    if real != env:
+        ui.warn(f"{env} resolves to {real or 'nothing'}: symlink? left as it is")
+        return True
+    if not dry_run:
+        remote.run(f"rm -rf {shlex.quote(env)}")
+    ui.ok(f"{'would delete' if dry_run else 'deleted'} the environment {env}")
+    return False
+
+
 def install_packages(
     ui: Ui,
     platform: Platform,
@@ -608,14 +698,30 @@ def install_packages(
 ) -> InstallRecord:
     own = distribution_names(dirs)
     warn_data_dir_overrides(ui, remote, dirs)
-    before = py.installed()
     record = read_record(remote, platform.record_path) or InstallRecord(
         platform.app_name, platform.manifest_id, own
     )
+    record.packages = sorted(set(record.packages) | set(own))
+    if not py.exists():
+        plan = platform.plan_env(remote)
+        if dry_run:
+            ui.ok(f"would create the environment {platform.env_dir} ({plan})")
+            ui.info("dependency check skipped: the environment does not exist yet")
+            claim_data_dir(ui, platform, remote, record, dry_run=True)
+            ui.info(f"would record the changes in {platform.record_path}; nothing installed")
+            return record
+        record.env_created = platform.env_dir
+        write_record(remote, platform.record_path, record)
+        try:
+            platform.create_env(ui, remote, plan)
+        finally:
+            if py.exists():
+                record.env_baseline = sorted(py.installed())
+                write_record(remote, platform.record_path, record)
+    before = py.installed()
     if record.pending_before is not None:
         ui.warn("an earlier install was interrupted; folding its changes into the record")
         record.merge(record.pending_before, before)
-    record.packages = sorted(set(record.packages) | set(own))
     pins = py.constraints(before, set(own))
     if dry_run:
         reqs = third_party_requirements(dirs)
@@ -768,7 +874,8 @@ def run_uninstall(opts: Options, ui: Ui, root: Path) -> None:
         py = check_ssh(ui, platform, remote, None)
 
         ui.step("Install record")
-        installed = py.installed()
+        env_there = py.exists()
+        installed = py.installed() if env_there else {}
         record = read_record(remote, platform.record_path)
         if record is None:
             ui.warn(
@@ -804,10 +911,13 @@ def run_uninstall(opts: Options, ui: Ui, root: Path) -> None:
         else:
             ui.ok(f"autostart app is {current or 'none'}: left as it is")
 
-        remove_secrets(ui, platform, py, remote, record, opts.dry_run)
+        if env_there:
+            remove_secrets(ui, platform, py, remote, record, opts.dry_run)
+        elif record.secrets and record.data_dir is None:
+            ui.warn(f"cannot remove the secrets {', '.join(record.secrets)}: no environment to run")
 
         ui.step("Packages")
-        plan = plan_uninstall(record, installed, py.requires())
+        plan = plan_uninstall(record, installed, py.requires() if env_there else {})
         for name, users in plan.kept.items():
             ui.warn(f"keeping {name}: needed by {', '.join(users)}")
         for name, version in plan.drifted.items():
@@ -824,13 +934,14 @@ def run_uninstall(opts: Options, ui: Ui, root: Path) -> None:
         if not opts.dry_run:
             py.uninstall(plan.remove)
             py.install_exact(plan.restore)
-        if not (opts.dry_run and plan.remove):  # before removal, the modules are expected
+        if env_there and not (opts.dry_run and plan.remove):  # before removal, modules are expected
             for module, path in leftovers(py, platform):
                 if not opts.dry_run:
                     remote.run(f"rm -rf {shlex.quote(path)}")
                 ui.warn(f"{would}delete leftover {path} ({module})")
 
         ui.step("Clean up and verify")
+        keep_env = remove_created_env(ui, platform, py, remote, record, opts.dry_run)
         remove_piper_venv(ui, remote, record, opts.dry_run)
         remove_data_dir(ui, remote, record, opts.dry_run)
         platform.cleanup(ui, py, opts.dry_run)
@@ -844,7 +955,7 @@ def run_uninstall(opts: Options, ui: Ui, root: Path) -> None:
             ui.info(f"{would}delete {platform.record_path} once verified")
             ui.title("dry run passed")
             return
-        verify_uninstall(ui, platform, py, record, plan.restore)
+        verify_uninstall(ui, platform, py, record, plan.restore, keep_env)
         remote.run(f"rm -f {shlex.quote(platform.record_path)}")
         ui.ok(f"deleted {platform.record_path}")
         ui.title("uninstalled")
@@ -853,17 +964,30 @@ def run_uninstall(opts: Options, ui: Ui, root: Path) -> None:
 
 
 def verify_uninstall(
-    ui: Ui, platform: Platform, py: RemotePython, record: InstallRecord, restored: dict[str, str]
+    ui: Ui,
+    platform: Platform,
+    py: RemotePython,
+    record: InstallRecord,
+    restored: dict[str, str],
+    keep_env: bool,
 ) -> None:
     """The app is gone and every restored version is back; else keep the record and stop."""
-    now = py.installed()
+    env_there = py.exists()
+    now = py.installed() if env_there else {}
     problems = [f"{n} still installed" for n in map(canonical, record.packages) if n in now]
     problems += [
         f"{n} is {now.get(n, 'missing')}, expected {v}"
         for n, v in restored.items()
         if now.get(n) != v
     ]
-    problems += [f"{p} still present ({m})" for m, p in leftovers(py, platform)]
+    if env_there:
+        problems += [f"{p} still present ({m})" for m, p in leftovers(py, platform)]
+    if (
+        record.env_created == platform.env_dir
+        and not keep_env
+        and _exists(py.remote, platform.env_dir)
+    ):
+        problems.append(f"environment {platform.env_dir} still present")
     venv, _ = piper_paths(py.remote)
     if record.piper_venv == venv and _exists(py.remote, venv):
         problems.append(f"Piper virtualenv {venv} still present")
