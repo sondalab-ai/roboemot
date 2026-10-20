@@ -15,11 +15,12 @@ only reports it and skips the dependency check. It also creates the private app 
 (``~/.local/share/roboemot``: registry, models, trait cache) when it is not there yet and
 records it. Unless declined (`--no-piper`) it also creates a Piper virtualenv in the data folder
 (`piper-tts` is GPL-3.0 and runs as its own process, SPEC 8), recorded for uninstall.
-The platform's ``extras`` (Reachy: ``voice``, so vosk) are installed with ``roboemot-core``;
-``--vision`` adds the ``vision`` extra and the vision weights. The voice models (``roboemot
-models fetch --voice``) are downloaded on the robot after Piper unless declined (``--no-models``),
-when the manifests' sizes fit the free space. Before installing it offers to clear the platform's
-``clearable_caches`` (``--clear-caches``), which uninstall cannot restore.
+The platform's ``extras`` (``voice`` for a robot that listens, so vosk) are installed with
+``roboemot-core``; ``--vision`` adds the ``vision`` extra and the vision weights. The voice
+models (``roboemot models fetch --voice``) are downloaded on the robot after Piper unless
+declined (``--no-models``), when the manifests' sizes fit the free space. Before installing it
+offers to clear the platform's ``clearable_caches`` (``--clear-caches``), which uninstall cannot
+restore.
 Optionally (``--secret NAME``, or asked on a terminal) it stores an API key in the robot's secret
 store (SPEC 8, 12 Data), recorded by name; uninstall removes only the names it added.
 
@@ -1243,7 +1244,7 @@ def parse_args(argv: list[str] | None = None) -> Options:
     p.add_argument(
         "--clear-caches",
         action=argparse.BooleanOptionalAction,
-        help="delete the robot's download caches the platform names (uv on a Reachy Mini) to "
+        help="delete the robot's download caches the platform names (e.g. a uv cache) to "
         "free disk space; uninstall cannot restore them",
     )
     p.add_argument("-y", "--yes", action="store_true", help="answer yes to every confirmation")
