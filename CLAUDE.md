@@ -65,6 +65,7 @@ cmake -S rt -B rt/build && cmake --build rt/build && ctest --test-dir rt/build
 ruff check . && ruff format --check .
 python scripts/install_on_robot.py --dry-run   # read-only checks against the real robot
 python scripts/install_on_robot.py --uninstall --dry-run   # what uninstall would undo
+python scripts/install_on_robot.py --vision --no-models --no-clear-caches   # extra vision weights; skip the voice-model download; keep ~/.cache/uv (default: ask)
 python scripts/run_on_robot.py   # start RoboEmot on the robot and print the web UI address
 python scripts/robot_ssh.py [--host H] [--user U]   # shell on the robot (mDNS pick); `-- cmd` runs one command
 roboemot secrets set cloud_key           # API key for ${secret:cloud_key} (read from the prompt/stdin); list/remove too

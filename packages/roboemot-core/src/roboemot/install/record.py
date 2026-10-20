@@ -9,12 +9,13 @@ leaves enough to undo it. The app data folder (``roboemot.paths``: registry, mod
 cache) is recorded the same way, with the parents the installer had to create, but only when it
 did not exist before the install: a folder that was already there is not the installer's to
 remove. The Piper virtualenv (SPEC 8, TTS backends) is recorded on its own, so it is removed
-even when the data folder predates the install. Secrets (SPEC 8, 12 Data) are recorded by name,
-never by value, and only the ones that were not in the store before; uninstall removes those
-names and leaves the others. When the robot has no app environment yet, the installer creates
-it the way the robot's own software would and records its path before creating it
-(``env_created``) with the distributions it held afterwards (``env_baseline``); uninstall
-removes it again unless another app or package has moved in.
+even when the data folder predates the install; so are the model folders (voice, vision) the
+installer created inside a data folder that was not its own. Secrets (SPEC 8, 12 Data) are
+recorded by name, never by value, and only the ones that were not in the store before;
+uninstall removes those names and leaves the others. When the robot has no app environment
+yet, the installer creates it the way the robot's own software would and records its path
+before creating it (``env_created``) with the distributions it held afterwards
+(``env_baseline``); uninstall removes it again unless another app or package has moved in.
 """
 
 from __future__ import annotations
@@ -58,6 +59,8 @@ class InstallRecord:
     data_dir_parents: list[str] = field(default_factory=list)  # parents it had to create too
     piper_venv: str | None = None  # Piper virtualenv this installer created (absolute path)
     secrets: list[str] = field(default_factory=list)  # secret names this installer added
+    # model folders it created inside a data folder that was not its own
+    models_dirs: list[str] = field(default_factory=list)
     env_created: str | None = None  # app environment this installer created (absolute path)
     env_baseline: list[str] = field(default_factory=list)  # distributions it held once created
     version: int = RECORD_VERSION

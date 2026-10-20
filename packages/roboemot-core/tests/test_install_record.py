@@ -106,6 +106,14 @@ def test_build_metadata_from_the_checkout():
     assert any(r.startswith("scipy") for r in reqs) and any(r.startswith("psutil") for r in reqs)
 
 
+def test_extras_add_their_requirements_to_the_dependency_check():
+    dirs = [ROOT / "packages" / p for p in OWN]
+    base = set(third_party_requirements(dirs))
+    voice = set(third_party_requirements(dirs, ("voice",))) - base
+    assert any(r.startswith("vosk") for r in voice)
+    assert not any(r.startswith("opencv") for r in voice)
+
+
 # ---------------------------------------------------------------- the flow with a non-Reachy robot
 
 
@@ -197,6 +205,8 @@ class BarePlatform:
     space_paths = ("/tmp",)
     distributions = ("bare-app",)
     modules = ("bare_app",)
+    extras = ()
+    clearable_caches = ()
 
     def __init__(self, tmp: Path) -> None:
         self.tmp = tmp
