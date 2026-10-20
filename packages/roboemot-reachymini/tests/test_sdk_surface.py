@@ -8,6 +8,8 @@ import inspect
 
 import pytest
 
+pytestmark = pytest.mark.sim  # the CI sim job installs the SDK and runs `pytest -m sim`
+
 pytest.importorskip("reachy_mini")
 
 

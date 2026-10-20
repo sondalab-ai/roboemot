@@ -854,7 +854,7 @@ class ConfigStack:
             except (ValidationError, GuardrailError, ConfigError) as exc:
                 self.manifest, self.channels = saved, saved_channels
                 if isinstance(exc, ValidationError):
-                    raise ConfigError(_explain(exc)) from exc
+                    raise ConfigError(f"manifest behaviour: {_explain(exc)}") from exc
                 raise
             self._last, self._approved = self.effective(), baseline
             self._record("manifest", "behaviour", None, sorted(behaviour))

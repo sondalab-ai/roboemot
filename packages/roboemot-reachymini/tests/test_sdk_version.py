@@ -1,0 +1,32 @@
+"""The app refuses an SDK older than the one it was written for (SPEC 4A)."""
+
+import pytest
+from roboemot_reachymini import app as app_module
+from roboemot_reachymini import sdk
+
+
+@pytest.mark.parametrize("installed", ["1.12.0", "1.12", "1.12.1", "1.13.0rc1", "2.0.0"])
+def test_a_new_enough_sdk_passes(installed):
+    sdk.require_sdk(installed)
+
+
+@pytest.mark.parametrize("installed", ["1.11.0", "1.9.9", "0.9"])
+def test_an_older_sdk_fails_loud_with_the_remedy(installed):
+    with pytest.raises(RuntimeError, match=rf"reachy_mini {installed} is older than 1\.12.*update"):
+        sdk.require_sdk(installed)
+
+
+def test_a_missing_sdk_fails_too():
+    with pytest.raises(RuntimeError, match="reachy_mini is not installed"):
+        sdk.require_sdk(None)
+
+
+def test_installed_version_reads_the_distribution_metadata(monkeypatch):
+    monkeypatch.setattr(sdk, "version", lambda name: "1.12.0" if name == "reachy_mini" else "?")
+    assert sdk.installed_version() == "1.12.0"
+
+
+def test_run_checks_the_sdk_before_building_anything(monkeypatch):
+    monkeypatch.setattr(app_module, "installed_sdk_version", lambda: "1.11.0")
+    with pytest.raises(RuntimeError, match="older than 1.12"):
+        app_module.RoboEmotApp().run(object(), None)

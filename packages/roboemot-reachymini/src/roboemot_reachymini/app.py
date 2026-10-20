@@ -88,6 +88,8 @@ from .camera import ReachyCamera
 from .conversation import profile_source, registry_names, scene_source, speaker_source
 from .driver import ReachyMiniDriver
 from .gaze import FRAME, GAZE, REFLEX
+from .sdk import installed_version as installed_sdk_version
+from .sdk import require_sdk
 from .skills import SkillBridge
 from .speaker import ReachySpeaker
 from .voice import build_listener
@@ -425,6 +427,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         return server
 
     def run(self, reachy_mini: Any, stop_event: threading.Event) -> None:
+        require_sdk(installed_sdk_version())
         stack = ConfigStack.from_files(
             app=_optional(DATA / "app.yaml"), preset="default", preset_dirs=[DATA / "presets"]
         )

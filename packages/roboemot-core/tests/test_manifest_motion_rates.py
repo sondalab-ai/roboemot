@@ -46,3 +46,10 @@ def test_a_manifest_may_set_nothing_else_under_motion(motion):
 def test_a_rate_outside_the_range_is_refused():
     with pytest.raises(ConfigError):
         ConfigStack().set_manifest_behaviour({"motion": {"app_tick_hz": 0}}, ("head.yaw",))
+
+
+def test_a_non_numeric_rate_names_the_manifest_and_the_path():
+    with pytest.raises(ConfigError, match=r"(?s)manifest behaviour:.*motion\.arbiter\.loop_hz"):
+        ConfigStack().set_manifest_behaviour(
+            {"motion": {"arbiter": {"loop_hz": "fast"}}}, ("head.yaw",)
+        )

@@ -137,7 +137,7 @@ class ReachySpeaker:
         return max(0.0, self.playing_until() - self._clock())
 
     def stop(self) -> None:
-        """Barge-in: drop the queued audio now (``clear_player``, else restart the pipeline),
+        """Barge-in: drop the queued audio now (``clear_player``),
         abandon the pieces of a push in flight and reset the queued duration."""
         with self._lock:  # held throughout: no push lands between the flush and the reset
             self._generation += 1

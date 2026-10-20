@@ -2070,3 +2070,49 @@ def test_start_prompt_defaults_to_yes_after_the_auto_stop(offline, robot, daemon
     inst.run_install(options(startup=False, yes=True), ui, ROOT)
     assert ("Start roboemot now?", True) in asked
     assert daemon.current["info"]["name"] == "roboemot"
+
+
+def test_a_failure_after_the_auto_stop_says_how_to_start_it_again(offline, robot, daemon, capsys):
+    daemon.current = {"info": {"name": "roboemot"}, "state": "running"}
+    robot.conflict = {"numpy": "2.1.0"}
+    ui = quiet_ui()
+    ui.confirm = lambda question, default: "shared packages" not in question
+    with pytest.raises(WizardError, match="shared packages left as they were"):
+        inst.run_install(options(start=False, startup=False, yes=False), ui, ROOT)
+    out = capsys.readouterr().out
+    assert "roboemot was stopped before installing" in out
+    assert "python scripts/run_on_robot.py" in out
+
+
+def test_a_failure_without_an_auto_stop_prints_no_start_hint(offline, robot, daemon, capsys):
+    robot.conflict = {"numpy": "2.1.0"}
+    ui = quiet_ui()
+    ui.confirm = lambda question, default: "shared packages" not in question
+    with pytest.raises(WizardError):
+        inst.run_install(options(start=False, startup=False, yes=False), ui, ROOT)
+    assert "was stopped before installing" not in capsys.readouterr().out
+
+
+def test_a_failed_stop_aborts_with_the_daemon_message_and_installs_nothing(
+    offline, robot, daemon, monkeypatch
+):
+    daemon.current = {"info": {"name": "roboemot"}, "state": "running"}
+    real = daemon.handle
+
+    def handle(method, path, body):
+        if (method, path) == STOP:
+            return 500, {"detail": "motors busy"}
+        return real(method, path, body)
+
+    monkeypatch.setattr(daemon, "handle", handle)
+    with pytest.raises(WizardError, match="motors busy"):
+        install()
+    assert "roboemot-core" not in robot.env and robot.copies == []
+    assert not any(" -m pip install" in c for c in robot.commands)
+
+
+def test_dry_run_counts_the_stop_once(offline, robot, daemon, capsys):
+    daemon.current = {"info": {"name": "roboemot"}, "state": "running"}
+    inst.run_install(options(dry_run=True), quiet_ui(yes=True), ROOT)
+    out = capsys.readouterr().out
+    assert out.count("would stop roboemot") == 1

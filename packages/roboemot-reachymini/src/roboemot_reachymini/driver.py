@@ -1,6 +1,6 @@
 """Reachy Mini PoseGroupDriver on the official SDK (SPEC 4A).
 
-Facts from the SDK source (reachy_mini 1.11) that shape this driver:
+Facts from the SDK source (reachy_mini 1.12.0, the robot's version) that shape this driver:
 
 - ``goto_target`` blocks the caller until the move ends, so it is never used here; every
   motion is streamed with ``set_target``.
@@ -18,7 +18,8 @@ Facts from the SDK source (reachy_mini 1.11) that shape this driver:
   :meth:`read_state` checks it.
 - The motor mode is in the daemon status the client receives
   (``backend_status.motor_control_mode``: enabled, disabled, gravity_compensation).
-- Checked against the v1.11.0 source (the robot's version) and run against 1.12.0 in MuJoCo.
+- Checked against the 1.12.0 source (the robot's version, enforced at app start by
+  ``sdk.require_sdk``) and run against 1.12.0 in MuJoCo.
 """
 
 from __future__ import annotations
@@ -126,7 +127,7 @@ class ReachyMiniDriver(PoseGroupDriver):
         if mode == "active":
             if self.mode == "teach":
                 self.mini.disable_gravity_compensation()
-            self.mini.enable_motors()  # pins targets to the present pose (SDK 1.11)
+            self.mini.enable_motors()  # pins targets to the present pose (SDK 1.12)
         elif mode == "limp":
             self.mini.disable_motors()
         elif mode == "teach":

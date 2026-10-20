@@ -41,7 +41,8 @@ class FrameSource(Protocol):
 
     def camera_model(self, width: int, height: int) -> CameraModel | None:
         """The pinhole model for a ``width`` x ``height`` frame, or None when the camera does not
-        know its intrinsics (vision then falls back to ``world.camera_fov_*_deg``)."""
+        know its intrinsics (vision then falls back to ``world.camera_fov_*_deg``). Every
+        implementation declares this method; None means "not supported"."""
         ...
 
 

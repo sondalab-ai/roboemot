@@ -947,6 +947,8 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
     ui.ok(platform.display_name)
     platform.connect(ui, host)
 
+    stopped: list[bool] = []  # whether this run stopped the running app
+
     def body(remote: Remote) -> None:
         with tempfile.TemporaryDirectory(prefix="roboemot-") as tmp:
             ui.step("Configuration")
@@ -963,7 +965,7 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
             ui.step("SSH access")
 
             def free_space() -> None:
-                stop_own_app(ui, platform, opts.dry_run)
+                stopped.append(stop_own_app(ui, platform, opts.dry_run) and not opts.dry_run)
                 home, _ = remote_data_dir(remote)
                 clear_caches(
                     ui, remote, home, platform.clearable_caches, opts.clear_caches, opts.dry_run
@@ -1001,7 +1003,10 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
             ui.step("Start")
             if opts.dry_run:
                 running = platform.running_app()
-                action = f"would stop {running}, " if running else "no app running; would "
+                if running == platform.app_name:
+                    action = "the stop is counted above; would "
+                else:
+                    action = f"would stop {running}, " if running else "no app running; would "
                 ui.info(f"{action}wake the robot and start {platform.app_name}")
                 blocker = platform.start_blocker()
                 if blocker:
@@ -1035,19 +1040,29 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
             ui.info("start it later: python scripts/run_on_robot.py")
             ui.info("remove everything it changed: python scripts/install_on_robot.py --uninstall")
 
-    _with_remote(opts, ui, platform, host, body)
+    try:
+        _with_remote(opts, ui, platform, host, body)
+    except Exception:
+        if any(stopped):
+            ui.warn(
+                f"{platform.app_name} was stopped before installing; start it again with "
+                "python scripts/run_on_robot.py once the problem is fixed"
+            )
+        raise
 
 
-def stop_own_app(ui: Ui, platform: Platform, dry_run: bool) -> None:
+def stop_own_app(ui: Ui, platform: Platform, dry_run: bool) -> bool:
     """Stop the platform's app when it is the one running, before any package changes: a running
-    process keeps the old code. Another app is left alone."""
+    process keeps the old code. Another app is left alone. True when the app was running (and,
+    outside a dry run, is now stopped)."""
     if platform.running_app() != platform.app_name:
-        return
+        return False
     if dry_run:
         ui.info(f"would stop {platform.app_name} before installing")
-        return
+        return True
     platform.stop_app()
     ui.ok(f"stopped {platform.app_name} before installing: a running process keeps the old code")
+    return True
 
 
 def report_app_url(ui: Ui, platform: Platform, host: str) -> None:
