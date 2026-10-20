@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 from roboemot import robot_platform
 from roboemot.attention import GazeMap
+from roboemot.bus import Bus
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.drivers import MockPoseDriver
 from roboemot.manifest import load_manifest
@@ -17,8 +18,10 @@ from roboemot.plugins import GROUPS, contract_violation
 from roboemot.reflex import ReflexMap
 from roboemot.robot_platform import (
     AudioHub,
+    BearingSource,
     RobotPlatform,
     RobotPlatformError,
+    RobotSession,
     Speaker,
     load_robot_platform,
 )
@@ -66,22 +69,40 @@ class DeskSpeaker:
     def close(self) -> None: ...
 
 
+class DeskBearing:
+    def get(self, now, max_age_s):
+        return None
+
+    def close(self) -> None: ...
+
+
+class DeskSession:
+    def __init__(self, client):
+        self.client = client
+
+    def driver(self):
+        return MockPoseDriver(home={"neck_pan": 0.0, "neck_tilt": 0.0})
+
+    def camera(self, joint_state):
+        return DeskCamera()
+
+    def audio(self, cfg, on_level):
+        return DeskAudio(on_level)
+
+    def speaker(self, cfg, activity, reference):
+        return DeskSpeaker()
+
+    def bearing_source(self, bus):
+        return DeskBearing()
+
+
 class DeskPlatform:
     """A non-Reachy platform: every part comes from core protocols and the desk manifest."""
 
     def require_runtime(self) -> None: ...
 
-    def driver(self, client):
-        return MockPoseDriver(home={"neck_pan": 0.0, "neck_tilt": 0.0})
-
-    def camera(self, client, joint_state):
-        return DeskCamera()
-
-    def audio(self, client, cfg, on_level):
-        return DeskAudio(on_level)
-
-    def speaker(self, client, cfg, activity, reference):
-        return DeskSpeaker()
+    def bind(self, client):
+        return DeskSession(client)
 
     def gaze_map(self):
         return GazeMap(head_yaw="neck_pan", head_pitch="neck_tilt")
@@ -92,12 +113,9 @@ class DeskPlatform:
     def reflex_map(self):
         return ReflexMap(head_yaw="neck_pan", head_pitch="neck_tilt")
 
-    def listener(self, *args, **kwargs):
-        return None
 
-
-def entry_point(name: str, loaded):
-    return SimpleNamespace(name=name, load=lambda: loaded)
+def entry_point(name: str, loaded, dist: str = "desk-pkg"):
+    return SimpleNamespace(name=name, load=lambda: loaded, dist=SimpleNamespace(name=dist))
 
 
 @pytest.fixture
@@ -120,13 +138,15 @@ def test_core_obtains_every_part_from_a_non_reachy_platform(installed):
     platform = load_robot_platform(manifest.robot.id)
     cfg = RoboEmotConfig()
     platform.require_runtime()
-    assert platform.driver(object()) is not None
-    camera: FrameSource = platform.camera(object(), dict)
+    session = platform.bind(object())
+    assert isinstance(session, RobotSession)
+    assert session.driver() is not None
+    camera: FrameSource = session.camera(dict)
     assert camera.read() is None and camera.camera_model(640, 480) is None
-    audio = platform.audio(object(), cfg, None)
-    assert isinstance(audio, AudioHub)
-    assert isinstance(platform.speaker(object(), cfg, SpeechActivity(0.0), None), Speaker)
-    dofs = {d for d in manifest.dofs}
+    assert isinstance(session.audio(cfg, None), AudioHub)
+    assert isinstance(session.speaker(cfg, SpeechActivity(0.0), None), Speaker)
+    assert isinstance(session.bearing_source(Bus()), BearingSource)
+    dofs = set(manifest.dofs)
     assert {platform.gaze_map().head_yaw, platform.gaze_map().head_pitch} <= dofs
     assert set(platform.frame_spec().yaw_dofs + platform.frame_spec().pitch_dofs) <= dofs
 
@@ -153,6 +173,26 @@ def test_a_platform_that_fails_to_load_is_not_swallowed(installed):
     def boom():
         raise ImportError("no sdk")
 
-    installed(SimpleNamespace(name="desk-head-v1", load=boom))
-    with pytest.raises(RobotPlatformError, match="cannot be loaded: ImportError: no sdk"):
+    installed(SimpleNamespace(name="desk-head-v1", load=boom, dist=None))
+    with pytest.raises(
+        RobotPlatformError, match="cannot be loaded: ImportError: no sdk.*SDK extra"
+    ):
+        load_robot_platform("desk-head-v1")
+
+
+def test_another_load_failure_gets_no_install_hint(installed):
+    def boom():
+        raise ValueError("bad")
+
+    installed(SimpleNamespace(name="desk-head-v1", load=boom, dist=None))
+    with pytest.raises(RobotPlatformError, match="ValueError: bad$"):
+        load_robot_platform("desk-head-v1")
+
+
+def test_two_packages_registering_the_same_robot_id_are_refused(installed):
+    installed(
+        entry_point("desk-head-v1", DeskPlatform, dist="zeta-robot"),
+        entry_point("desk-head-v1", DeskPlatform, dist="alpha-robot"),
+    )
+    with pytest.raises(RobotPlatformError, match=r"'desk-head-v1'.*alpha-robot, zeta-robot"):
         load_robot_platform("desk-head-v1")

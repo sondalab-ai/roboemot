@@ -41,8 +41,8 @@ section number in commit messages that implement or change behaviour.
   names a robot, its DOFs or its SDK. `tests/test_robot_hierarchy.py` enforces it; the baseline
   `tests/robot_hierarchy_baseline.yaml` may only shrink, never grow.
 - **Robot platform (SPEC 4A, 11, 12A):** entry-point group `roboemot.robots`, keyed by `robot.id`: a stateless
-  `RobotPlatform` class (`roboemot.robot_platform`) that builds the driver, camera, audio hub, speaker, gaze/frame/reflex
-  maps and listener as core protocols. `load_robot_platform` fails loud (no platform, no run); the app builds the robot
+  `RobotPlatform` class (`roboemot.robot_platform`) with gaze/frame/reflex maps; `bind(client)` gives the per-run
+  `RobotSession` that builds the driver, camera, audio hub, speaker and bearing source as core protocols. `load_robot_platform` fails loud (no platform, no run); the app builds the robot
   only through it.
 - **Diagnostics (SPEC 12A):** robot-specific debug sources are registered in the
   `roboemot.diagnostics` entry-point group under the manifest `robot.id`; core stays robot-agnostic.

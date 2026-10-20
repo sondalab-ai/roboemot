@@ -8,8 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import roboemot.voice.pipeline as voice_module
 import roboemot_reachymini.app as app_module
-import roboemot_reachymini.voice as voice_module
 from roboemot.attention import AttentionSelector
 from roboemot.bus import Bus
 from roboemot.config.schema import RoboEmotConfig
@@ -18,6 +18,8 @@ from roboemot.voice.asr import ASREvent
 from roboemot.voice.vad import EnergyVAD
 from roboemot.world import Observation, WorldModel
 from roboemot_reachymini.gaze import FRAME
+from roboemot_reachymini.platform import ReachyMiniSession
+from roboemot_reachymini.voice import LatestBearing
 from roboemot_reachymini.world import SOUND_SOURCE
 from test_app_perception import data, wait_for  # noqa: F401  (data: fixture)
 from test_app_reflex import ScriptedMini, enable, run_app
@@ -123,7 +125,7 @@ def wiring(registry, fakes_ok=True):
         selector,
         world,
         registry,
-        FRAME,
+        LatestBearing(bus, FRAME),
         lambda u: None,
     )
     assert built is not None
@@ -248,3 +250,50 @@ def test_yes_no_handler_survives_a_broken_speech_output():
     _, handler, asked, _ = yes_no(SimpleNamespace(question_end=boom))
     handler("yes", 1.0)
     assert asked == []
+
+
+def test_the_app_hands_its_bus_to_the_robot_bearing_hook_and_the_result_to_the_listener(
+    data,  # noqa: F811
+    fakes,
+    monkeypatch,
+):
+    enable(data, VOICE_YAML)
+    seen = {}
+    real_hook, real_build = ReachyMiniSession.bearing_source, app_module.build_listener
+
+    def hook(self, bus):
+        seen["hook_bus"] = bus
+        seen["bearing"] = real_hook(self, bus)
+        return seen["bearing"]
+
+    def build(cfg, audio, speech, bus, emit, selector, world, registry, bearing, *rest):
+        seen["listener_args"] = (bus, selector, world, bearing, audio, speech)
+        return real_build(cfg, audio, speech, bus, emit, selector, world, registry, bearing, *rest)
+
+    monkeypatch.setattr(ReachyMiniSession, "bearing_source", hook)
+    monkeypatch.setattr(app_module, "build_listener", build)
+    app = app_module.RoboEmotApp.__new__(app_module.RoboEmotApp)
+    stop, thread, errors = run_app(app, ScriptedMini().mini)
+    try:
+        assert wait_for(lambda: app.voice_listener is not None)
+        bus, selector, world, bearing, audio, speech = seen["listener_args"]
+        assert seen["hook_bus"] is app.bus is bus
+        assert bearing is seen["bearing"] and isinstance(bearing, LatestBearing)
+        assert (selector, world, audio, speech) == (app.selector, app.world, app.audio, app.speech)
+    finally:
+        stop.set()
+        thread.join(timeout=10)
+    assert not errors
+
+
+def test_no_bearing_source_is_built_without_voice(data, monkeypatch):  # noqa: F811
+    built = []
+    monkeypatch.setattr(ReachyMiniSession, "bearing_source", lambda self, bus: built.append(bus))
+    app = app_module.RoboEmotApp.__new__(app_module.RoboEmotApp)
+    stop, thread, errors = run_app(app, ScriptedMini().mini)
+    try:
+        assert wait_for(lambda: app.diagnostics is not None)
+    finally:
+        stop.set()
+        thread.join(timeout=10)
+    assert not errors and built == []

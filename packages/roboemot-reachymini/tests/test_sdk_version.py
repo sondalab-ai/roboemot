@@ -29,6 +29,9 @@ def test_installed_version_reads_the_distribution_metadata(monkeypatch):
 
 
 def test_run_checks_the_sdk_before_building_anything(data, monkeypatch):  # noqa: F811
+    built = []
     monkeypatch.setattr(platform_module, "installed_version", lambda: "1.11.0")
+    monkeypatch.setattr(platform_module, "ReachyMiniDriver", lambda client: built.append(client))
     with pytest.raises(RuntimeError, match="older than 1.12"):
         app_module.RoboEmotApp().run(object(), None)
+    assert built == []

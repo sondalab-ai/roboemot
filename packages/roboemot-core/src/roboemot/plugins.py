@@ -49,7 +49,7 @@ GROUPS: dict[str, GroupContract] = {
         instantiate=True,
     ),
     WORLD_GROUP: GroupContract(
-        "factory (manifest, cfg, robot, joint_state) -> WorldPlugin (SPEC 5A)",
+        "factory (manifest, cfg, session, joint_state) -> WorldPlugin (SPEC 5A)",
         factory_args=4,
     ),
     ROBOTS_GROUP: GroupContract(

@@ -25,6 +25,7 @@ from roboemot.world import (
 from roboemot.world.scan import SOURCE as SCAN
 from roboemot_reachymini import app as app_module
 from roboemot_reachymini.gaze import FRAME, GAZE
+from roboemot_reachymini.platform import ReachyMiniSession
 from roboemot_reachymini.world import DoASource, ReachyScanPlanner, doa_azimuth, plugin
 
 DEG = math.radians(1)
@@ -317,7 +318,7 @@ def test_world_entry_point_is_registered_for_the_manifest_id():
 
 def test_load_world_plugin_builds_planner_and_sound_source():
     robot = MagicMock()
-    loaded = load_world_plugin(MANIFEST, CFG, robot, dict)
+    loaded = load_world_plugin(MANIFEST, CFG, ReachyMiniSession(robot), dict)
     assert isinstance(loaded.planner, ReachyScanPlanner)
     assert [s.name for s in loaded.sources] == ["doa"]
     robot.set_automatic_body_yaw.assert_not_called()  # no second driver is built

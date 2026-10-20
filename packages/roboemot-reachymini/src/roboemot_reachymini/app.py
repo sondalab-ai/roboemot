@@ -53,7 +53,7 @@ from roboemot.motion import Command, MotionLoop, Priority
 from roboemot.persona import effects as persona_effects
 from roboemot.persona.llm_traits import TraitCache, TraitsWorker
 from roboemot.reflex import ReflexEngine
-from roboemot.robot_platform import AudioHub, RobotPlatform, Speaker, load_robot_platform
+from roboemot.robot_platform import AudioHub, RobotSession, Speaker, load_robot_platform
 from roboemot.secret_store import SecretStore
 from roboemot.skills.defaults import default_skills
 from roboemot.vision import CIRCADIAN, FrameSource, LockedSource
@@ -63,6 +63,7 @@ from roboemot.voice.activity import SpeechActivity
 from roboemot.voice.bargein import BargeIn, PlaybackReference
 from roboemot.voice.factory import build_speech
 from roboemot.voice.listener import Utterance, VoiceListener
+from roboemot.voice.pipeline import build_listener
 from roboemot.voice.robot_name import RobotName
 from roboemot.voice.speech import SpeechOutput
 from roboemot.voice.yes_no import YesNoGestures
@@ -83,6 +84,7 @@ from roboemot.world import (
 )
 from roboemot.world.autoenroll import AutoEnroller, open_autoenroll, purge_stored
 from roboemot.world.scan import SOURCE as SCAN_SOURCE
+from roboemot.world.sources import JointStateFn
 
 from .conversation import profile_source, registry_names, scene_source, speaker_source
 from .skills import SkillBridge
@@ -304,7 +306,6 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
     yes_no: YesNoGestures | None = None  # spoken yes / no -> nod / shake
     expression: ExpressionRenderer | None = None  # affect label -> additive antenna/head motion
     reflexes: ReflexEngine | None = None  # runs on the motion loop's tick (SPEC 10)
-    platform: RobotPlatform | None = None  # the manifest's robot id selects it (SPEC 4A)
     audio: AudioHub | None = None  # the one reader of the microphone (reflex level, voice)
     speaker: Speaker | None = None  # playback; only when voice.enabled
     speech: SpeechActivity | None = None  # "the robot is speaking" gate (reflex, DoA)
@@ -370,10 +371,9 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
     autoenroll: AutoEnroller | None = None  # animals and objects that keep coming back (SPEC 5A)
     catalogue: Any = None  # CatalogueService: XMP import, confirm "this is Mia" (SPEC 6)
 
-    def make_frame_source(self, mini: Any, joint_state: Any) -> FrameSource:
+    def make_frame_source(self, session: RobotSession, joint_state: JointStateFn) -> FrameSource:
         """The camera the vision pump reads (overridable: tests inject a planted scene)."""
-        assert self.platform is not None
-        return self.platform.camera(mini, joint_state)
+        return session.camera(joint_state)
 
     def load_vision_stages(self, cfg: Any, profile: str | None) -> Any:
         """The vision backends (overridable: tests inject fakes)."""
@@ -435,8 +435,9 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             allow_unmeasured_dynamics=cfg.safety.allow_unmeasured_dynamics,
             safety=cfg.safety,
         )
-        platform = self.platform = load_robot_platform(manifest.robot.id)
+        platform = load_robot_platform(manifest.robot.id)
         platform.require_runtime()
+        session = platform.bind(reachy_mini)
         gaze_map, frame, reflex_map = (
             platform.gaze_map(),
             platform.frame_spec(),
@@ -456,7 +457,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         responder = OfflineResponder(cfg.connectivity, expression, cfg.conversation.language)
         loop = MotionLoop(
             manifest,
-            platform.driver(reachy_mini),
+            session.driver(),
             cfg,
             on_link_change=responder.on_event,
         )
@@ -477,8 +478,8 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         speech = self.speech = SpeechActivity(cfg.voice.echo_tail_ms)
         reflexes.speaking = speech.speaking
         reflex_audio = cfg.reflexes.enabled and cfg.reflexes.audio.enabled
-        audio = self.audio = platform.audio(
-            reachy_mini, cfg, reflexes.offer_audio_level if reflex_audio else None
+        audio = self.audio = session.audio(
+            cfg, reflexes.offer_audio_level if reflex_audio else None
         )
         reflexes.audio_status = audio.snapshot
         reference = (
@@ -487,7 +488,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             else None
         )
         speaker = self.speaker = (
-            platform.speaker(reachy_mini, cfg, speech, reference) if cfg.voice.enabled else None
+            session.speaker(cfg, speech, reference) if cfg.voice.enabled else None
         )
         # The one affect engine: appraisal events from the bus and the responder feed it, the
         # app tick decays it and publishes affect.state (SPEC 7).
@@ -504,7 +505,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             manifest.constraints,
             margin_rad=math.radians(cfg.safety.constraint_margin_deg),
         )
-        plugin = load_world_plugin(manifest, cfg, reachy_mini, loop.driver.read_state)
+        plugin = load_world_plugin(manifest, cfg, session, loop.driver.read_state)
         scan = (
             ScanController(cfg.world.scan, plugin.planner, manifest.dofs)
             if plugin.planner is not None
@@ -548,7 +549,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         self.circadian = circ.model if cfg.circadian.enabled else None
         # One lock for the vision pump and the idle light reader: the SDK media is read by one
         # thread at a time.
-        source = LockedSource(self.make_frame_source(reachy_mini, loop.driver.read_state))
+        source = LockedSource(self.make_frame_source(session, loop.driver.read_state))
         perception = self.perception = open_perception(
             cfg,
             bus,
@@ -622,8 +623,9 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
 
         # The robot's name: voice.wake_word, else the owner's name in the daemon setup (SPEC 8).
         names = self.names = RobotName(source=loop.driver.robot_name)
+        bearing = session.bearing_source(bus) if cfg.voice.enabled else None
         voice_pipeline = (
-            platform.listener(
+            build_listener(
                 cfg,
                 audio,
                 speech,
@@ -632,14 +634,17 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 selector,
                 world,
                 perception.registry,
+                bearing,
                 lambda u: self.on_utterance(u),
                 reference,
                 names,
                 yes_no,
             )
-            if cfg.voice.enabled
+            if bearing is not None
             else None
         )
+        if bearing is not None and voice_pipeline is None:
+            bearing.close()  # no listener will consume it
         listener = self.voice_listener = voice_pipeline[0] if voice_pipeline else None
         voice_close = voice_pipeline[1] if voice_pipeline else None
         bargein = self.bargein = voice_pipeline[2] if voice_pipeline else None

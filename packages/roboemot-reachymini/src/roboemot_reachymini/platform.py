@@ -10,19 +10,15 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from roboemot.attention import AttentionSelector, GazeMap
+from roboemot.attention import GazeMap
 from roboemot.bus import Bus
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.drivers import PoseGroupDriver
 from roboemot.reflex import ReflexMap
-from roboemot.robot_platform import VoicePipeline
 from roboemot.vision.runner import FrameSource
 from roboemot.voice.activity import SpeechActivity
 from roboemot.voice.bargein import PlaybackReference
-from roboemot.voice.fastpath import Emit
-from roboemot.voice.listener import Utterance
-from roboemot.voice.robot_name import RobotName
-from roboemot.world import FrameSpec, WorldModel
+from roboemot.world import FrameSpec
 from roboemot.world.sources import JointStateFn
 
 from .audio import ReachyAudio
@@ -31,32 +27,32 @@ from .driver import ReachyMiniDriver
 from .gaze import FRAME, GAZE, REFLEX
 from .sdk import installed_version, require_sdk
 from .speaker import ReachySpeaker
-from .voice import build_listener
+from .voice import LatestBearing
 
 MS_PER_S = 1000.0
 
 
-class ReachyMiniPlatform:
-    """``RobotPlatform`` of ``reachy-mini-wireless``; ``client`` is the connected ``ReachyMini``."""
+class ReachyMiniSession:
+    """``RobotSession`` over the connected ``ReachyMini`` the daemon passed to the app. ``client``
+    is public for the Reachy world plugin, which reads the microphone array through it."""
 
-    def require_runtime(self) -> None:
-        """Refuse to start without a ``reachy_mini`` SDK of the supported version."""
-        require_sdk(installed_version())
+    def __init__(self, client: Any) -> None:
+        self.client = client
 
-    def driver(self, client: Any) -> PoseGroupDriver:
+    def driver(self) -> PoseGroupDriver:
         """The pose driver over the SDK client."""
-        return ReachyMiniDriver(client)
+        return ReachyMiniDriver(self.client)
 
-    def camera(self, client: Any, joint_state: JointStateFn) -> FrameSource:
+    def camera(self, joint_state: JointStateFn) -> FrameSource:
         """The SDK media camera, each frame paired with the measured joint state."""
-        return ReachyCamera(client, joint_state)
+        return ReachyCamera(self.client, joint_state)
 
     def audio(
-        self, client: Any, cfg: RoboEmotConfig, on_level: Callable[[float, float], None] | None
+        self, cfg: RoboEmotConfig, on_level: Callable[[float, float], None] | None
     ) -> ReachyAudio:
         """The microphone hub; the voice queue is on when ``voice.enabled``."""
         return ReachyAudio(
-            client,
+            self.client,
             on_level,
             cfg.reflexes.audio.poll_hz,
             max_gap_s=cfg.reflexes.max_age_ms / MS_PER_S,
@@ -66,14 +62,28 @@ class ReachyMiniPlatform:
         )
 
     def speaker(
-        self,
-        client: Any,
-        cfg: RoboEmotConfig,
-        activity: SpeechActivity,
-        reference: PlaybackReference | None,
+        self, cfg: RoboEmotConfig, activity: SpeechActivity, reference: PlaybackReference | None
     ) -> ReachySpeaker:
         """The SDK media player, chunked at ``voice.playback_chunk_ms``."""
-        return ReachySpeaker(client, cfg.voice.playback_chunk_ms, activity, reference=reference)
+        return ReachySpeaker(
+            self.client, cfg.voice.playback_chunk_ms, activity, reference=reference
+        )
+
+    def bearing_source(self, bus: Bus) -> LatestBearing:
+        """The DoA source's newest bearing, rotated into the base frame like the world model."""
+        return LatestBearing(bus, FRAME)
+
+
+class ReachyMiniPlatform:
+    """``RobotPlatform`` of ``reachy-mini-wireless``: stateless description of the robot."""
+
+    def require_runtime(self) -> None:
+        """Refuse to start without a ``reachy_mini`` SDK of the supported version."""
+        require_sdk(installed_version())
+
+    def bind(self, client: Any) -> ReachyMiniSession:
+        """The session over the connected ``ReachyMini``."""
+        return ReachyMiniSession(client)
 
     def gaze_map(self) -> GazeMap:
         """Head yaw and pitch aim the gaze; the body turns with ``body_yaw``."""
@@ -86,35 +96,3 @@ class ReachyMiniPlatform:
     def reflex_map(self) -> ReflexMap:
         """Antenna startle, head pitch away, and the DoA sound source."""
         return REFLEX
-
-    def listener(
-        self,
-        cfg: RoboEmotConfig,
-        audio: ReachyAudio,
-        speech: SpeechActivity,
-        bus: Bus,
-        emit: Emit,
-        selector: AttentionSelector,
-        world: WorldModel,
-        registry: Any,
-        on_utterance: Callable[[Utterance], None],
-        reference: PlaybackReference | None,
-        names: RobotName,
-        on_answer: Callable[[str, float], None] | None,
-    ) -> VoicePipeline | None:
-        """The voice listener with the Reachy DoA bearing in its fast path (see ``voice``)."""
-        return build_listener(
-            cfg,
-            audio,
-            speech,
-            bus,
-            emit,
-            selector,
-            world,
-            registry,
-            self.frame_spec(),
-            on_utterance,
-            reference,
-            names,
-            on_answer,
-        )
