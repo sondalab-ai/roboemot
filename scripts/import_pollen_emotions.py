@@ -9,7 +9,7 @@ used. Downloads are untrusted data: parsed as JSON only, size-capped, hash-check
 
     python scripts/import_pollen_emotions.py              # download the pinned files, convert
     python scripts/import_pollen_emotions.py --from DIR   # use a local copy of the dataset
-    python scripts/import_pollen_emotions.py --check      # offline: outputs match the manifest
+    python scripts/import_pollen_emotions.py --check      # offline: outputs vs the pins
     python scripts/import_pollen_emotions.py --print-pins # list the upstream tree, print SHA256
 
 Per move: head matrix to ``head.roll/pitch/yaw`` degrees (the driver's Euler convention,
@@ -192,6 +192,8 @@ def parse_move(raw: bytes, name: str) -> tuple[list[float], dict[str, list[float
         if times[i] > times[keep[-1]]:
             keep.append(i)
     times, frames = [times[i] for i in keep], [frames[i] for i in keep]
+    if len(times) < 2:
+        raise ValueError(f"{name}: fewer than two distinct timestamps")
     series: dict[str, list[float]] = {c: [] for c in (*HEAD_CHANNELS, *ANTENNAS, "body_yaw")}
     for frame in frames:
         head = head_values(frame["head"])
@@ -230,7 +232,8 @@ def eased_channel(
 
     The ramps are sampled at the clip's median step so the simplification sees their curvature.
     """
-    step = sorted(b - a for a, b in zip(times, times[1:], strict=False))[len(times) // 2]
+    diffs = sorted(b - a for a, b in zip(times, times[1:], strict=False))
+    step = diffs[min(len(times) // 2, len(diffs) - 1)]
     n_in, n_out = max(2, round(ramp_in / step)), max(2, round(ramp_out / step))
     t_in = [ramp_in * i / n_in for i in range(n_in)]
     v_in = [offsets[0] * minjerk(i / n_in) for i in range(n_in)]
@@ -419,7 +422,11 @@ def write(source: Path | None) -> None:
 
 
 def check() -> int:
-    """Offline: the files on disk match VENDORED.json and the pins of this script."""
+    """Offline: VENDORED.json, ``clips.yaml`` and the license agree with the pins in this script.
+
+    This proves the outputs are consistent with the pins (hashes, revision, no stray files). It
+    does not re-read the upstream data or re-run the conversion; ``--from DIR`` does that.
+    """
     problems = []
     try:
         on_disk = json.loads((OUT_DIR / VENDORED).read_text())
@@ -454,7 +461,11 @@ def print_pins() -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--from", dest="source", type=Path, help="local copy of the dataset folder")
-    ap.add_argument("--check", action="store_true", help="verify the outputs, offline")
+    ap.add_argument(
+        "--check",
+        action="store_true",
+        help="offline: outputs consistent with the VENDORED.json pins",
+    )
     ap.add_argument("--print-pins", action="store_true", help="print SHA256 for REVISION")
     args = ap.parse_args()
     if args.check:

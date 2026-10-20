@@ -271,20 +271,19 @@ def entry_key(list_path: str, ident: dict[str, Any], rest: str = "") -> str:
 
 def parse_okey(key: str) -> tuple[str, dict[str, Any], str] | None:
     """Inverse of ``okey`` for a merged-list key: ``(list path, identity, rest)``, else ``None``."""
-    for list_path in KEYED_LISTS:
-        if not key.startswith(list_path + "["):
-            continue
-        try:
-            ident, end = json.JSONDecoder().raw_decode(key, len(list_path) + 1)
-        except ValueError:
-            return None
-        if not isinstance(ident, dict) or key[end : end + 1] != "]":
-            return None
-        rest = key[end + 1 :]
-        if rest and not rest.startswith("."):
-            return None
-        return list_path, ident, rest[1:]
-    return None
+    list_path, bracket, _ = key.partition("[{")
+    if not bracket or list_path not in KEYED_LISTS:
+        return None
+    try:
+        ident, end = json.JSONDecoder().raw_decode(key, len(list_path) + 1)
+    except ValueError:
+        return None
+    if not isinstance(ident, dict) or key[end : end + 1] != "]":
+        return None
+    rest = key[end + 1 :]
+    if rest and not rest.startswith("."):
+        return None
+    return list_path, ident, rest[1:]
 
 
 class SettingsEditor:

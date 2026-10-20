@@ -43,7 +43,54 @@ from .schema import (
 )
 
 LAYER_ORDER = ("defaults", "manifest", "preset", "app", "derived", "person", "runtime")
-KEYED_LISTS = {"appraisal.rules": "event", "llm_routes": "name"}
+
+
+class _KeyedLists(dict):
+    """List path to the field that identifies its entries. A ``*`` segment in a key stands for any
+    one segment (``expression_map.*.variants``: the label is part of the path), and lookups by a
+    concrete path resolve through it."""
+
+    def _pattern(self, path: object) -> str | None:
+        if not isinstance(path, str):
+            return None
+        if dict.__contains__(self, path):
+            return path
+        parts = path.split(".")
+        for pattern in self:
+            want = pattern.split(".")
+            if len(want) == len(parts) and all(
+                w in ("*", p) for w, p in zip(want, parts, strict=True)
+            ):
+                return pattern
+        return None
+
+    def __contains__(self, path: object) -> bool:
+        return self._pattern(path) is not None
+
+    def __getitem__(self, path: str) -> str:
+        pattern = self._pattern(path)
+        if pattern is None:
+            raise KeyError(path)
+        return dict.__getitem__(self, pattern)
+
+    def get(self, path: str, default: Any = None) -> Any:
+        pattern = self._pattern(path)
+        return default if pattern is None else dict.__getitem__(self, pattern)
+
+
+KEYED_LISTS = _KeyedLists(
+    {
+        "appraisal.rules": "event",
+        "llm_routes": "name",
+        "expression_map.*.variants": "clip",
+        "circadian_motion.yawn.variants": "clip",
+        "circadian_motion.stretch.variants": "clip",
+    }
+)
+CHANNEL_ONLY = ("repeat", "curve")  # entry fields that only make sense with channels
+# A layer that sets a ``variants`` list replaces the one below it whole (SPEC 7); the clip key only
+# addresses entries, so a runtime edit or an added entry follows the clip, not the index.
+REPLACED_BY_LAYER = "variants"
 FORM_MOTION = ("yawn", "stretch")  # circadian_motion entries that may be channels or variants
 AUDIT_FILE_MODE = 0o600
 _MOVED = yaml.safe_load(Path(__file__).with_name("moved_settings.yaml").read_text())
@@ -98,6 +145,10 @@ class _RuntimeValue:
     expires_at: float | None
     # Guarded values an admin approved for this runtime override only; they lapse with it.
     approved: dict[str, Any] = field(default_factory=dict)
+    # A ``variants`` list written to an entry that had none: it switches the entry's form and
+    # stays whatever the layers below do. Without it the list extends the entry's own variants and
+    # waits while the effective form is ``channels``.
+    switch: bool = False
 
 
 @dataclass
@@ -121,9 +172,14 @@ def is_form_entry(location: str) -> bool:
 
 
 def switch_form(base: dict, over: dict) -> dict:
-    """``base`` without the form (channels or variants) that ``over`` replaces with the other."""
+    """``base`` without the form (channels or variants) that ``over`` replaces with the other.
+    ``repeat`` and ``curve`` belong to hand-written keyframes, so they go with the channels."""
     if over.get("variants") and not over.get("channels"):
-        return {k: v for k, v in base.items() if k != "channels"}
+        return {
+            k: v
+            for k, v in base.items()
+            if k != "channels" and (k not in CHANNEL_ONLY or k in over)
+        }
     if over.get("channels") and not over.get("variants"):
         return {k: v for k, v in base.items() if k != "variants"}
     return base
@@ -145,7 +201,12 @@ def deep_merge(base: dict, over: dict, path: str = "", *, at: str | None = None)
         sub = f"{where}.{key}" if where else key
         if isinstance(value, dict) and isinstance(out.get(key), dict):
             out[key] = deep_merge(out[key], value, p, at=sub)
-        elif p in KEYED_LISTS and isinstance(value, list) and isinstance(out.get(key), list):
+        elif (
+            p in KEYED_LISTS
+            and key != REPLACED_BY_LAYER
+            and isinstance(value, list)
+            and isinstance(out.get(key), list)
+        ):
             out[key] = _merge_keyed(out[key], value, KEYED_LISTS[p])
         else:
             out[key] = copy.deepcopy(value)
@@ -198,7 +259,7 @@ def _list_item(items: list, part: str, dotted: str) -> Any:
         return items[int(part)]
     for item in items:
         key = item if isinstance(item, dict) else getattr(item, "__dict__", {})
-        if part in (key.get("name"), key.get("event")):
+        if part in (key.get("name"), key.get("event"), key.get("clip")):
             return item
     raise KeyError(f"{dotted}: no list entry named {part!r}")
 
@@ -897,7 +958,7 @@ class ConfigStack:
                         try:
                             current = get_path(tree, slot_base(key))
                         except (KeyError, IndexError, ValueError, TypeError):
-                            continue
+                            continue  # e.g. the entry switched to channels: per-clip edits wait
                         if isinstance(current, list):
                             patched = _patch_keyed(current, value, KEYED_LISTS[slot_base(key)])
                             set_path(tree, slot_base(key), patched)
@@ -906,6 +967,13 @@ class ConfigStack:
                         current = get_path(tree, key)
                     except (KeyError, IndexError, ValueError, TypeError):
                         current = None
+                    if (
+                        current is None
+                        and key in KEYED_LISTS
+                        and not rv.switch
+                        and (key.rpartition(".")[2] == REPLACED_BY_LAYER)
+                    ):
+                        continue  # added variants wait while the entry is channels
                     if isinstance(value, dict) and isinstance(current, dict):
                         # a section override keeps the rest
                         value = deep_merge(current, value, at=key)
@@ -916,6 +984,13 @@ class ConfigStack:
                     set_path(tree, key, value)
                     self._drop_other_form(tree, key)
             return tree
+
+    @staticmethod
+    def _safe_tree_get(tree: dict, key: str) -> Any:
+        try:
+            return get_path(tree, key)
+        except (KeyError, IndexError, ValueError, TypeError):
+            return None
 
     @staticmethod
     def _drop_other_form(tree: dict, key: str) -> None:
@@ -929,6 +1004,9 @@ class ConfigStack:
             return
         if isinstance(entry, dict):
             entry.pop("channels" if leaf == "variants" else "variants", None)
+            if leaf == "variants":
+                for name in CHANNEL_ONLY:
+                    entry.pop(name, None)
 
     def effective(self, person: dict | None = None) -> RoboEmotConfig:
         tree = self.merged_tree(person)
@@ -1429,8 +1507,14 @@ class ConfigStack:
         A list of entries written to the list itself is merged into the list's own slot (added
         entries). Neither can expire (``ttl_s`` is refused)."""
         expires = self.clock() + ttl_s if ttl_s else None
-        ref = keyed_ref(self.merged_tree(), key, named=True)
-        if ref is not None or (key in KEYED_LISTS and isinstance(value, list)):
+        tree = self.merged_tree()
+        ref = keyed_ref(tree, key, named=True)
+        switching = (
+            ref is None
+            and key.rpartition(".")[2] == REPLACED_BY_LAYER
+            and not isinstance(self._safe_tree_get(tree, key), list)
+        )
+        if ref is not None or (key in KEYED_LISTS and isinstance(value, list) and not switching):
             if ttl_s:
                 raise ConfigError(f"{key}: a list entry cannot expire")
             if ref is not None:
@@ -1453,9 +1537,11 @@ class ConfigStack:
                 list_path, slot, items = key, key, copy.deepcopy(value)
             held = self._runtime.get(slot)
             merged = _merge_keyed(held.value if held else [], items, KEYED_LISTS[list_path])
-            new = _RuntimeValue(merged, None, dict(held.approved) if held else {})
+            new = _RuntimeValue(
+                merged, None, dict(held.approved) if held else {}, held.switch if held else False
+            )
         else:
-            slot, new = key, _RuntimeValue(copy.deepcopy(value), expires)
+            slot, new = key, _RuntimeValue(copy.deepcopy(value), expires, switch=switching)
         before = dict(self._runtime)
         self._runtime.pop(slot, None)
         self._runtime[slot] = new  # last in order: the latest write wins

@@ -93,6 +93,15 @@ def test_a_robot_at_home_gives_no_channel():
     assert convert(move()) == {}
 
 
+def test_a_two_frame_move_converts_and_one_distinct_timestamp_is_refused():
+    out = convert(move(duration=STEP, head=lambda t: (10.0, 0.0, 0.0)))
+    assert out["head.roll"][0] == [0.0, 0.0] and out["head.roll"][-1][1] == 0.0
+    doc = json.loads(move(duration=STEP))
+    doc["time"] = [0.0, 0.0]  # the second sample repeats the timestamp: one is left
+    with pytest.raises(ValueError, match="fewer than two distinct timestamps"):
+        IMP.parse_move(json.dumps(doc).encode(), "synthetic")
+
+
 def test_head_angles_follow_the_drivers_euler_convention():
     times, series, _ = IMP.parse_move(move(head=lambda t: (10.0, -20.0, 30.0)), "synthetic")
     assert series["head.roll"][0] == pytest.approx(10.0)

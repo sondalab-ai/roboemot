@@ -44,6 +44,7 @@ def make_responder(cfg, manifest) -> OfflineResponder:
         0.15,
         cfg.gesture_map,
         body_yaw="body_yaw",
+        clips=load_clip_library(manifest),
     )
     return OfflineResponder(cfg.connectivity, renderer, "it")
 

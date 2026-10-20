@@ -677,7 +677,12 @@ def test_play_offers_affect_labels_and_gestures_and_refuses_unknown_names(cfg, m
     assert r.request("nod") and not r.request("wave")
     assert (
         ExpressionRenderer(
-            cfg.expression, cfg.expression_map, manifest.dofs, 0.15, body_yaw="body_yaw"
+            cfg.expression,
+            cfg.expression_map,
+            manifest.dofs,
+            0.15,
+            body_yaw="body_yaw",
+            clips=CLIPS,
         ).request("nod")
         is False
     )  # a robot without a gesture_map offers none
@@ -739,6 +744,7 @@ def test_an_oversized_gesture_is_clamped_to_the_range_and_the_minor_cap(cfg, man
         0.15,
         gestures,
         body_yaw="body_yaw",
+        clips=CLIPS,
     )
     r.request("nod")
     assert r.update(state("calm", 1.0), active("child"), 0.0)
@@ -760,6 +766,7 @@ def test_an_oversized_gesture_is_clamped_to_the_range_and_the_minor_cap(cfg, man
         0.15,
         gestures,
         body_yaw="body_yaw",
+        clips=CLIPS,
     )
     r.set_register(active("child"), factor)
     r.request("nod")
@@ -930,7 +937,13 @@ def test_a_gesture_for_a_robot_that_may_not_approach_keeps_the_body_still(cfg, m
         )
     }
     r = ExpressionRenderer(
-        cfg.expression, cfg.expression_map, manifest.dofs, 0.15, gestures, body_yaw="body_yaw"
+        cfg.expression,
+        cfg.expression_map,
+        manifest.dofs,
+        0.15,
+        gestures,
+        body_yaw="body_yaw",
+        clips=CLIPS,
     )
     r.set_register(active("adult", approach_allowed=False), 1.0)
     assert "body_yaw" not in r.gesture("turn").keyframes[1].values

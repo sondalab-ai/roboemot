@@ -32,6 +32,7 @@ def param(
     description: str,
     *,
     unit: str | None = None,
+    gt: float | None = None,
     ge: float | None = None,
     le: float | None = None,
     restart: bool = False,
@@ -49,6 +50,8 @@ def param(
     if admin_only:
         extra["admin_only"] = True
     kwargs: dict[str, Any] = {"description": description, "json_schema_extra": extra}
+    if gt is not None:
+        kwargs["gt"] = gt
     if ge is not None:
         kwargs["ge"] = ge
     if le is not None:
@@ -467,7 +470,7 @@ class ClipVariant(Strict):
     """One recorded clip an entry may play, with the intensity band it suits (SPEC 7)."""
 
     clip: str = param(..., "Name of a clip in the robot's clip library")
-    weight: float = param(1.0, "Relative chance among the variants eligible at the start", ge=0)
+    weight: float = param(1.0, "Relative chance among the variants eligible at the start", gt=0)
     min_intensity: float = param(
         0.0, "Lowest affect intensity at which this variant may play", ge=0, le=1
     )
@@ -477,15 +480,16 @@ class ClipVariant(Strict):
     gain: float = param(
         1.0,
         "Multiplies the amplitude factor before the expression.max_amplitude cap",
-        ge=0,
+        gt=0,
         le=2,
     )
 
-    @field_validator("weight", "gain")
+    @field_validator("weight", "gain", mode="before")
     @classmethod
-    def _finite_positive(cls, value: float) -> float:
-        if not math.isfinite(value) or value <= 0:
-            raise ValueError("must be finite and greater than 0")
+    def _finite(cls, value: Any) -> Any:
+        """Runs before the range check, which would call a NaN "not less than or equal to 2"."""
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("must be a finite number")
         return value
 
     @model_validator(mode="after")

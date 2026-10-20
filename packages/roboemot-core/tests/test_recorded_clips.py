@@ -26,6 +26,8 @@ from roboemot.manifest import load_manifest
 from roboemot.motion.curves import CURVES
 from roboemot.motion.primitives import Keyframe, Primitive
 from roboemot.plugins import GROUPS, contract_violation
+from roboemot.webui.settings import SettingNotAllowed, SettingsEditor
+from roboemot.webui.validation import ValidationError as UiValidationError
 
 MANIFESTS = Path(__file__).resolve().parents[3] / "configs" / "manifests"
 SWAY = [(0, 0), (0.5, 10), (1, 0)]
@@ -432,12 +434,32 @@ def test_a_clip_is_clamped_to_the_range_and_to_the_minor_share(manifest):
     assert peak(r, "head.yaw") == pytest.approx((dof.max - dof.home) * 0.5)
 
 
-def test_a_variant_naming_a_missing_clip_or_no_band_starts_nothing(manifest):
-    ghost = renderer(manifest, variants({"clip": "ghost"}))
-    ghost.update(state("calm"), adult(), 4.0)
-    assert not ghost.update(state("joy", 0.5, impulse=1), adult(), 5.0)
-    r = renderer(manifest, variants({"clip": "soft", "max_intensity": 0.5}, {"clip": "wide"}))
-    assert play(r, 0.5, 5.0) == "joy"
+def test_a_variant_naming_a_missing_clip_is_refused_at_construction_and_on_reload(manifest):
+    with pytest.raises(ValueError, match="unknown clip 'ghost'"):
+        renderer(manifest, variants({"clip": "ghost"}))
+    r = renderer(manifest, variants({"clip": "soft"}))
+    with pytest.raises(ValueError, match="unknown clip 'ghost'"):
+        r.apply_config(r.cfg, {"joy": variants({"clip": "ghost"})}, 0.15)
+    assert play(r, 0.5, 5.0) == "joy"  # the previous map stayed in place
+
+
+def test_an_entry_with_no_playable_variant_is_not_requestable_and_starts_nothing(manifest):
+    body_only = {**library(), "only_body": clip(body_yaw=[(0, 0), (0.5, 20), (1, 0)])}
+    head_less = {n: d for n, d in manifest.dofs.items() if n == "body_yaw"}
+    r = ExpressionRenderer(
+        DEFAULTS.expression,
+        {"joy": variants({"clip": "soft"})},
+        head_less,
+        0.15,
+        body_yaw="body_yaw",
+        clips=library(),
+        rng=random.Random(1),
+    )
+    r.update(state("calm"), adult(), 0.0)
+    assert not r.request("joy")  # soft moves head.pitch, which this robot lacks
+    assert not r.update(state("joy", 0.5, impulse=1), adult(), 5.0)
+    mixed = renderer(manifest, variants({"clip": "only_body"}, {"clip": "soft"}), lib=body_only)
+    assert mixed.request("joy")
 
 
 # ----------------------------------------------------------------------------- circadian
@@ -487,15 +509,63 @@ def test_the_circadian_clip_follows_the_affect_intensity(manifest):
     assert m.start_waking(0.0) and m._last_clip["stretch"] == "wide"
 
 
-def test_a_stretch_or_yawn_without_any_clip_is_not_played(manifest):
+def test_a_circadian_entry_naming_a_missing_clip_is_refused(manifest):
+    cm = DEFAULTS.circadian_motion.model_copy(update={"stretch": variants({"clip": "ghost"})})
+    with pytest.raises(ValueError, match="unknown clip 'ghost'"):
+        CircadianMotion(
+            DEFAULTS.circadian, cm, manifest.dofs, body_yaw="body_yaw", affect_intensity=lambda: 0.0
+        )
+    m = motion(manifest, entry_stretch=variants({"clip": "soft"}))
+    with pytest.raises(ValueError, match="unknown clip 'ghost'"):
+        m.apply_config(DEFAULTS.circadian, cm)
+
+
+def test_a_yawn_whose_clip_cannot_be_built_is_never_picked_nor_retried_every_tick(manifest):
+    lib = {**library(), "only_body": clip(body_yaw=[(0, 0), (0.5, 20), (1, 0)])}
     cm = DEFAULTS.circadian_motion.model_copy(
-        update={"stretch": variants({"clip": "ghost"}), "yawn": variants({"clip": "ghost"})}
+        update={"yawn": variants({"clip": "only_body"}), "stretch": None}
     )
     m = CircadianMotion(
-        DEFAULTS.circadian, cm, manifest.dofs, body_yaw="body_yaw", affect_intensity=lambda: 0.0
+        DEFAULTS.circadian,
+        cm,
+        manifest.dofs,
+        body_yaw="body_yaw",
+        clips=lib,
+        rng=random.Random(0),
+        affect_intensity=lambda: 0.0,
     )
-    assert not m.start_waking(0.0)
+    assert not m._can_play("yawn")
     assert all(not m.commands(t, "drowsy") for t in range(0, 600, 5))
+    mixed = DEFAULTS.circadian_motion.model_copy(
+        update={"yawn": variants({"clip": "only_body"}, {"clip": "soft"}), "stretch": None}
+    )
+    m = CircadianMotion(
+        DEFAULTS.circadian,
+        mixed,
+        manifest.dofs,
+        body_yaw="body_yaw",
+        clips=lib,
+        rng=random.Random(0),
+        affect_intensity=lambda: 0.0,
+    )
+    m.set_register(1.0, 2.0)
+    assert any(m.commands(t * 0.5, "drowsy") for t in range(800)) and m.playing == "yawn"
+
+
+def test_a_yawn_with_no_band_for_the_intensity_waits_for_its_next_slot(manifest):
+    entry = variants({"clip": "soft", "max_intensity": 0.5}, {"clip": "wide", "min_intensity": 0.5})
+    m = motion(manifest, entry_yawn=entry)
+    m.set_register(1.0, 2.0)
+    m.commands(0.0, "drowsy")  # schedules the first yawn
+    due = m._next_yawn
+    calls = []
+    real = m._choose
+    m._choose = lambda name: calls.append(name) or real(name)
+    for k in range(10):
+        m.commands(due + k * 0.01, "drowsy")
+        if m.playing:
+            break
+    assert len(calls) == 1
 
 
 # ----------------------------------------------------------------------------- bisect sampling
@@ -557,6 +627,15 @@ def test_weight_and_gain_must_be_finite_and_positive(field, bad):
         ClipVariant(clip="soft", **{field: bad})
 
 
+def test_a_non_finite_gain_is_reported_as_such_and_the_bound_is_exclusive_in_the_metadata():
+    for bad in (math.nan, math.inf):
+        with pytest.raises(ValidationError, match="finite"):
+            ClipVariant(clip="soft", gain=bad)
+    for name in ("weight", "gain"):
+        meta = ClipVariant.model_json_schema()["properties"][name]
+        assert meta["exclusiveMinimum"] == 0 and "minimum" not in meta
+
+
 def test_duplicate_clips_and_ignored_keys_are_refused():
     with pytest.raises(ValidationError, match="more than once"):
         variants({"clip": "soft", "max_intensity": 0.5}, {"clip": "soft", "min_intensity": 0.5})
@@ -613,13 +692,16 @@ def test_runtime_leaf_writes_switch_the_form(manifest):
     assert joy.variants == [] and set(joy.channels) == {"head.pitch"}
 
 
-def test_apply_config_drops_the_cached_primitives(manifest):
+def test_apply_config_rebuilds_the_clips_from_the_library(manifest):
     entry = variants({"clip": "soft"})
-    r = renderer(manifest, entry)
+    lib = library()
+    r = renderer(manifest, entry, lib=lib)
     play(r, 0.5, 1.0)
-    assert r._cache
+    before = peak(r)
+    lib["soft"] = clip(**{"head.pitch": [(0, 0), (0.5, 8), (1, 0)]})  # edited in place
     r.apply_config(r.cfg, {"joy": entry}, 0.15)
-    assert not r._cache
+    play(r, 0.5, 10.0)
+    assert peak(r, t0=10.0) == pytest.approx(before * 2)
 
 
 def test_request_on_a_variants_entry_picks_a_variant(manifest):
@@ -627,18 +709,31 @@ def test_request_on_a_variants_entry_picks_a_variant(manifest):
     r.update(state("calm", 0.7), adult(), 0.0)
     assert r.request("joy")
     assert r.update(state("calm", 0.7), adult(), 5.0)
-    assert r.last_label == "joy" and r._last_clip == {"joy": "wide"}
+    assert r.last_label == "joy"
     assert max(abs(c.targets["head.pitch"]) for k in range(25) for c in r.commands(5 + k * 0.02))
 
 
-def test_circadian_apply_config_resets_the_cached_primitives(manifest):
+def test_circadian_apply_config_rebuilds_the_clips_from_the_library(manifest):
     entry = variants({"clip": "soft"})
     m = motion(manifest, entry_stretch=entry)
     m.set_register(1.0, 2.0)
-    assert m.start_waking(0.0) and m._prims
-    cm = DEFAULTS.circadian_motion.model_copy(update={"stretch": entry})
-    m.apply_config(DEFAULTS.circadian, cm)
-    assert not m._prims
+
+    def stretch_peak(at):
+        assert m.start_waking(at)
+        return max(
+            abs(c.targets["head.pitch"])
+            for k in range(25)
+            for c in m.commands(at + k * 0.02, "awake")
+            if "head.pitch" in c.targets
+        )
+
+    before = stretch_peak(0.0)
+    m.clips["soft"] = clip(**{"head.pitch": [(0, 0), (0.5, 8), (1, 0)]})
+    m.reset()
+    m.apply_config(
+        DEFAULTS.circadian, DEFAULTS.circadian_motion.model_copy(update={"stretch": entry})
+    )
+    assert stretch_peak(100.0) == pytest.approx(before * 2, rel=0.05)
 
 
 def test_a_circadian_clip_never_emits_body_yaw(manifest):
@@ -662,3 +757,120 @@ def test_a_boosted_circadian_clip_tightens_mid_play(manifest):
     free = run(lambda m: None)
     assert run(lambda m: m.set_register(0.5, 3.0)) == pytest.approx(free * 0.5)
     assert run(lambda m: m.set_register(1.0, 1.0)) == pytest.approx(free * 0.5)
+
+
+# ---------------------------------------------------------------------------- review fixes
+
+WIGGLE_JOY = {
+    "expression_map": {"joy": {"channels": {"head.pitch": SWAY}, "repeat": 3, "curve": "minjerk"}}
+}
+TWO_JOY = {
+    "expression_map": {
+        "joy": {"variants": [{"clip": "soft", "weight": 1}, {"clip": "wide", "weight": 3}]}
+    }
+}
+
+
+def joy_variants(stack) -> dict[str, ClipVariant]:
+    return {v.clip: v for v in stack.effective().expression_map["joy"].variants}
+
+
+def test_switching_to_variants_drops_repeat_and_curve_of_the_channels_below(manifest):
+    stack = stack_with(manifest, WIGGLE_JOY)
+    stack.app = VARIANTS_JOY
+    joy = stack.effective().expression_map["joy"]
+    assert (joy.repeat, joy.curve, joy.channels) == (1, "linear", {})
+    runtime = stack_with(manifest, WIGGLE_JOY)
+    runtime.set("expression_map.joy.variants", [{"clip": "wide"}])
+    joy = runtime.effective().expression_map["joy"]
+    assert (joy.repeat, joy.curve) == (1, "linear") and joy.variants[0].clip == "wide"
+
+
+def test_a_layer_replaces_variants_whole_but_a_runtime_edit_follows_the_clip(manifest):
+    stack = stack_with(manifest, TWO_JOY)
+    stack.app = {"expression_map": {"joy": {"variants": [{"clip": "wide", "gain": 2.0}]}}}
+    assert list(joy_variants(stack)) == ["wide"]
+    stack.app = {}
+    stack.set("expression_map.joy.variants.wide.weight", 5)
+    stack.manifest = {  # a lower layer that lists the clips the other way round
+        "expression_map": {"joy": {"variants": [{"clip": "wide"}, {"clip": "soft"}]}}
+    }
+    assert list(joy_variants(stack)) == ["wide", "soft"]
+    assert joy_variants(stack)["wide"].weight == 5 and joy_variants(stack)["soft"].weight == 1
+    stack.set("expression_map.joy.variants.0.gain", 0.5)  # index 0 is wide: stored by clip
+    stack.manifest = TWO_JOY
+    assert joy_variants(stack)["wide"].gain == 0.5 and joy_variants(stack)["soft"].gain == 1.0
+
+
+def test_a_per_clip_runtime_override_does_not_block_a_switch_to_channels(manifest):
+    stack = stack_with(manifest, TWO_JOY)
+    stack.set("expression_map.joy.variants.soft.weight", 4)
+    stack.app = CHANNELS_JOY
+    joy = stack.effective().expression_map["joy"]
+    assert joy.variants == [] and set(joy.channels) == {"head.pitch"}
+    stack.app = {}
+    assert joy_variants(stack)["soft"].weight == 4  # the override waited, it did not vanish
+
+
+def editor_for(manifest, tmp_path) -> tuple[ConfigStack, SettingsEditor]:
+    stack = stack_with(manifest, TWO_JOY, clips=("soft", "wide", "sad1"))
+    return stack, SettingsEditor(stack, store=tmp_path / "webui.json")
+
+
+def test_the_web_ui_adds_a_known_clip_as_a_variant_and_refuses_an_unknown_one(manifest, tmp_path):
+    stack, editor = editor_for(manifest, tmp_path)
+    editor.add_entry("expression_map.joy.variants", None, {"clip": "sad1", "weight": 2})
+    assert joy_variants(stack)["sad1"].weight == 2 and len(joy_variants(stack)) == 3
+    with pytest.raises(UiValidationError):
+        editor.add_entry("expression_map.joy.variants", None, {"clip": "sad1"})  # taken
+    before = (dict(editor._overrides), joy_variants(stack).keys())
+    with pytest.raises(ConfigError, match="unknown clip 'nope'"):
+        editor.add_entry("expression_map.joy.variants", None, {"clip": "nope"})
+    assert (dict(editor._overrides), joy_variants(stack).keys()) == before
+    assert "nope" not in (tmp_path / "webui.json").read_text()
+
+
+def test_the_web_ui_refuses_to_rename_a_variants_clip(manifest, tmp_path):
+    stack, editor = editor_for(manifest, tmp_path)
+    paths = [row["path"] for row in editor.fields() if ".variants." in row["path"]]
+    leaf = next(p for p in paths if p.endswith(".clip"))
+    with pytest.raises(SettingNotAllowed):
+        editor.change(leaf, "nope")
+    assert not editor._overrides
+    assert set(joy_variants(stack)) == {"soft", "wide"}
+
+
+def test_web_ui_variant_edits_survive_a_restart_by_clip(manifest, tmp_path):
+    stack, editor = editor_for(manifest, tmp_path)
+    editor.add_entry("expression_map.joy.variants", None, {"clip": "sad1"})
+    editor.change("expression_map.joy.variants.wide.weight", 7.0)
+    fresh = stack_with(manifest, TWO_JOY, clips=("soft", "wide", "sad1"))
+    SettingsEditor(fresh, store=tmp_path / "webui.json").restore()
+    assert joy_variants(fresh)["wide"].weight == 7.0 and "sad1" in joy_variants(fresh)
+
+
+def test_added_variants_wait_while_the_entry_is_channels_and_a_switch_write_stays(
+    manifest, tmp_path
+):
+    stack, editor = editor_for(manifest, tmp_path)
+    editor.add_entry("expression_map.joy.variants", None, {"clip": "sad1", "min_intensity": 0.5})
+    stack.app = CHANNELS_JOY
+    joy = stack.effective().expression_map["joy"]
+    assert joy.variants == [] and set(joy.channels) == {"head.pitch"}
+    stack.app = {}
+    assert "sad1" in joy_variants(stack)
+    other = stack_with(manifest, CHANNELS_JOY)
+    other.set("expression_map.joy.variants", [{"clip": "wide"}])  # an explicit switch
+    other.app = CHANNELS_JOY
+    assert other.effective().expression_map["joy"].variants[0].clip == "wide"
+
+
+def test_the_weight_and_gain_rows_carry_an_exclusive_lower_bound(manifest, tmp_path):
+    _, editor = editor_for(manifest, tmp_path)
+    rows = {r["path"]: r for r in editor.fields()}
+    for leaf in ("weight", "gain"):
+        row = rows[f"expression_map.joy.variants.soft.{leaf}"]
+        assert row["gt"] == 0 and row["ge"] is None
+        with pytest.raises(UiValidationError):
+            editor.change(f"expression_map.joy.variants.soft.{leaf}", 0)
+    assert not editor._overrides

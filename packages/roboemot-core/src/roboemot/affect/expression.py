@@ -169,7 +169,13 @@ class ExpressionRenderer:
         gesture_map: Mapping[str, ExpressionEntry] | None = None,
     ) -> None:
         """Hot reload: new parameters and maps. An expression already playing finishes; a
-        requested name the new maps no longer have is dropped."""
+        requested name the new maps no longer have is dropped. ``ValueError`` when an entry has a
+        variant naming a clip the library lacks (the config stack refuses it too; this keeps a
+        mismatched caller from silently playing nothing)."""
+        for name, entry in (*expression_map.items(), *(gesture_map or {}).items()):
+            for v in entry.variants:
+                if v.clip not in self.clips:
+                    raise ValueError(f"expression {name!r}: unknown clip {v.clip!r}")
         self.cfg, self.expression_map, self.crossfade_s = cfg, dict(expression_map), crossfade_s
         self.gesture_map = dict(gesture_map or {})
         with self._request_lock:
@@ -215,7 +221,8 @@ class ExpressionRenderer:
         map has the name or the circadian factor is 0 (resting: the robot does not move).
         Given ``now`` (the clock ``update`` runs on), a request inside ``min_interval_s`` of
         the last start is refused instead of queued, for reactions that are worthless late."""
-        if label not in self.expression_map and label not in self.gesture_map:
+        entry = self.expression_map.get(label) or self.gesture_map.get(label)
+        if entry is None or (entry.variants and not self._playable_variants(label, entry, True)):
             return False
         if now is not None and now - self._last_start < self.cfg.min_interval_s:
             return False
@@ -279,6 +286,14 @@ class ExpressionRenderer:
             )
         return self._cache[key]
 
+    def _playable_variants(
+        self, label: str, entry: ExpressionEntry, body: bool
+    ) -> list[ClipVariant]:
+        """The variants of ``entry`` whose clip builds into something this robot can play (with
+        ``body`` false, without the body turn): a clip that moves only dofs the robot lacks, or
+        only the gated body, is not a choice."""
+        return [v for v in entry.variants if self._primitive(label, body, v.clip) is not None]
+
     def _register_scale(self, register: ActiveRegister) -> float:
         """The register's share of the amplitude: motion amplitude x reaction factor."""
         p = register.params
@@ -289,9 +304,12 @@ class ExpressionRenderer:
         variant = None
         if entry is not None and entry.variants:
             variant = pick_variant(
-                entry.variants, state.intensity, self._last_clip.get(label), self.rng
+                self._playable_variants(label, entry, register.params.approach_allowed),
+                state.intensity,
+                self._last_clip.get(label),
+                self.rng,
             )
-            if variant is None or variant.clip not in self.clips:
+            if variant is None:
                 return False
         prim = self._primitive(
             label, register.params.approach_allowed, variant.clip if variant else None

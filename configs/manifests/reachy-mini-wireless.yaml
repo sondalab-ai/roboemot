@@ -115,7 +115,7 @@ behaviour:                      # config layer 2 (SPEC 11A): this robot's defaul
         - {clip: anxiety1}
         - {clip: uncomfortable1}
     annoyance:
-      variants:
+      variants:  # the two bands overlap on purpose: all nine are eligible at exactly 0.6
         - {clip: irritated1, min_intensity: 0, max_intensity: 0.6}
         - {clip: irritated2, min_intensity: 0, max_intensity: 0.6}
         - {clip: displeased1, min_intensity: 0, max_intensity: 0.6}
