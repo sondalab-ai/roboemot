@@ -16,6 +16,7 @@ Every field carries a default, a unit and a range. Field metadata (``json_schema
 
 from __future__ import annotations
 
+import math
 import re
 import warnings
 from typing import Any, Literal
@@ -480,10 +481,15 @@ class ClipVariant(Strict):
         le=2,
     )
 
+    @field_validator("weight", "gain")
+    @classmethod
+    def _finite_positive(cls, value: float) -> float:
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError("must be finite and greater than 0")
+        return value
+
     @model_validator(mode="after")
     def _band(self) -> ClipVariant:
-        if self.weight <= 0:
-            raise ValueError("variant weight must be greater than 0")
         if self.min_intensity > self.max_intensity:
             raise ValueError("variant min_intensity must not exceed max_intensity")
         return self
@@ -517,6 +523,11 @@ class ExpressionEntry(Strict):
         if self.channels:
             check_keyframes(self.channels)
             return self
+        clips = [v.clip for v in self.variants]
+        if len(set(clips)) != len(clips):
+            raise ValueError("variants name a clip more than once")
+        if self.repeat != 1 or self.curve != "linear":
+            raise ValueError("repeat and curve belong to the clip's keyframes, not to variants")
         reach = 0.0
         for v in sorted(self.variants, key=lambda v: v.min_intensity):
             if v.min_intensity > reach:

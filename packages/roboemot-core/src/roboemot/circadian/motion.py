@@ -51,12 +51,13 @@ class CircadianMotion:
         dofs: Mapping[str, Dof],
         *,
         body_yaw: str | None,
+        affect_intensity: Callable[[], float],
         rng: random.Random | None = None,
         clips: ClipLibrary | None = None,
     ) -> None:
         self.dofs = dofs
         self.clips: ClipLibrary = clips or {}
-        self.affect_intensity: Callable[[], float] = lambda: 0.0  # the affect intensity now
+        self.affect_intensity = affect_intensity  # the affect intensity now, for variant bands
         self._last_clip: dict[str, str] = {}
         self.body_yaw = body_yaw
         self.rng = rng or random.Random()  # noqa: S311 (jitter, not security)
@@ -111,8 +112,9 @@ class CircadianMotion:
         if not entry.variants:
             prim = self._primitive(name, None)
             return (prim, 1.0) if prim is not None else None
-        intensity = min(1.0, max(0.0, self.affect_intensity()))
-        variant = pick_variant(entry.variants, intensity, self._last_clip.get(name), self.rng)
+        variant = pick_variant(
+            entry.variants, self.affect_intensity(), self._last_clip.get(name), self.rng
+        )
         prim = self._primitive(name, variant.clip) if variant is not None else None
         if variant is None or prim is None:
             return None

@@ -72,8 +72,9 @@ def pick_variant(
     variants: list[ClipVariant], intensity: float, last: str | None, rng: random.Random
 ) -> ClipVariant | None:
     """The variant to play: among those whose band holds ``intensity``, one chosen by weight
-    that is not the clip played last, unless that is the only one eligible. None if no band
-    holds ``intensity``."""
+    that is not the clip played last, unless that is the only one eligible. ``intensity`` is
+    clamped to [0, 1] first, so float drift cannot leave every band empty."""
+    intensity = min(1.0, max(0.0, intensity))
     eligible = [v for v in variants if v.min_intensity <= intensity <= v.max_intensity]
     fresh = [v for v in eligible if v.clip != last] or eligible
     return rng.choices(fresh, weights=[v.weight for v in fresh])[0] if fresh else None

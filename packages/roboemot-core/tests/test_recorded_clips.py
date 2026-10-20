@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 import random
 from pathlib import Path
 
@@ -452,6 +453,7 @@ def motion(manifest, entry_yawn=None, entry_stretch=None, seed=0, **kw) -> Circa
         rng=random.Random(seed),
         clips=library(),
         **kw,
+        affect_intensity=lambda: 0.0,
     )
 
 
@@ -489,7 +491,9 @@ def test_a_stretch_or_yawn_without_any_clip_is_not_played(manifest):
     cm = DEFAULTS.circadian_motion.model_copy(
         update={"stretch": variants({"clip": "ghost"}), "yawn": variants({"clip": "ghost"})}
     )
-    m = CircadianMotion(DEFAULTS.circadian, cm, manifest.dofs, body_yaw="body_yaw")
+    m = CircadianMotion(
+        DEFAULTS.circadian, cm, manifest.dofs, body_yaw="body_yaw", affect_intensity=lambda: 0.0
+    )
     assert not m.start_waking(0.0)
     assert all(not m.commands(t, "drowsy") for t in range(0, 600, 5))
 
@@ -541,3 +545,120 @@ def test_primitive_sampling_equals_the_linear_scan(method):
     probes = [*times, *(rng.uniform(-1, 21) for _ in range(500))]
     for t in probes:
         assert prim.sample(t) == linear_primitive_sample(prim, t)
+
+
+# ----------------------------------------------------------------------------- fix round
+
+
+@pytest.mark.parametrize("field", ["weight", "gain"])
+@pytest.mark.parametrize("bad", [math.inf, -math.inf, math.nan, 0, -1])
+def test_weight_and_gain_must_be_finite_and_positive(field, bad):
+    with pytest.raises(ValidationError):
+        ClipVariant(clip="soft", **{field: bad})
+
+
+def test_duplicate_clips_and_ignored_keys_are_refused():
+    with pytest.raises(ValidationError, match="more than once"):
+        variants({"clip": "soft", "max_intensity": 0.5}, {"clip": "soft", "min_intensity": 0.5})
+    one = [ClipVariant(clip="soft")]
+    with pytest.raises(ValidationError, match="repeat and curve"):
+        ExpressionEntry(variants=one, repeat=2)
+    with pytest.raises(ValidationError, match="repeat and curve"):
+        ExpressionEntry(variants=one, curve="minjerk")
+
+
+def test_pick_clamps_the_intensity_and_band_edges_are_inclusive():
+    low = ClipVariant(clip="soft", max_intensity=0.4)
+    high = ClipVariant(clip="wide", min_intensity=0.4)
+    rng = random.Random(0)
+    for intensity in (1.0, 1.0 + 1e-12, 1.5):
+        assert pick_variant([low, high], intensity, None, rng).clip == "wide"
+    assert pick_variant([low, high], -1e-12, None, rng).clip == "soft"
+    assert pick_variant([low], 0.4, None, rng).clip == "soft"
+    assert pick_variant([high], 0.4, None, rng).clip == "wide"
+
+
+def test_the_loader_arity_matches_the_group_contract(manifest, monkeypatch):
+    class Callable0:
+        def __call__(self):
+            return {}
+
+    patch_entry_points(monkeypatch, FakeEntryPoint(manifest.robot.id, Callable0()))
+    assert load_clip_library(manifest) == {}
+    patch_entry_points(monkeypatch, FakeEntryPoint(manifest.robot.id, lambda m=None: {}))
+    assert load_clip_library(manifest) == {}
+
+
+def test_a_reload_with_an_unknown_clip_keeps_the_last_valid_config(manifest, tmp_path):
+    app = tmp_path / "app.yaml"
+    app.write_text("expression_map:\n  joy:\n    variants:\n      - clip: wide\n")
+    stack = ConfigStack.from_files(app=app)
+    stack.set_manifest_behaviour(VARIANTS_JOY, manifest.channels, ("soft", "wide"))
+    assert stack.effective().expression_map["joy"].variants[0].clip == "wide"
+    app.write_text("expression_map:\n  joy:\n    variants:\n      - clip: ghost\n")
+    os.utime(app, (1e9, 2e9))
+    assert stack.poll() is None
+    assert "unknown clip 'ghost'" in stack.last_error
+    assert stack.effective().expression_map["joy"].variants[0].clip == "wide"
+
+
+def test_runtime_leaf_writes_switch_the_form(manifest):
+    stack = stack_with(manifest, CHANNELS_JOY)
+    stack.set("expression_map.joy.variants", [{"clip": "soft"}])
+    joy = stack.effective().expression_map["joy"]
+    assert joy.channels == {} and joy.variants[0].clip == "soft"
+    stack = stack_with(manifest, VARIANTS_JOY)
+    stack.set("expression_map.joy.channels", {"head.pitch": SWAY})
+    joy = stack.effective().expression_map["joy"]
+    assert joy.variants == [] and set(joy.channels) == {"head.pitch"}
+
+
+def test_apply_config_drops_the_cached_primitives(manifest):
+    entry = variants({"clip": "soft"})
+    r = renderer(manifest, entry)
+    play(r, 0.5, 1.0)
+    assert r._cache
+    r.apply_config(r.cfg, {"joy": entry}, 0.15)
+    assert not r._cache
+
+
+def test_request_on_a_variants_entry_picks_a_variant(manifest):
+    r = renderer(manifest, variants({"clip": "wide"}))
+    r.update(state("calm", 0.7), adult(), 0.0)
+    assert r.request("joy")
+    assert r.update(state("calm", 0.7), adult(), 5.0)
+    assert r.last_label == "joy" and r._last_clip == {"joy": "wide"}
+    assert max(abs(c.targets["head.pitch"]) for k in range(25) for c in r.commands(5 + k * 0.02))
+
+
+def test_circadian_apply_config_resets_the_cached_primitives(manifest):
+    entry = variants({"clip": "soft"})
+    m = motion(manifest, entry_stretch=entry)
+    m.set_register(1.0, 2.0)
+    assert m.start_waking(0.0) and m._prims
+    cm = DEFAULTS.circadian_motion.model_copy(update={"stretch": entry})
+    m.apply_config(DEFAULTS.circadian, cm)
+    assert not m._prims
+
+
+def test_a_circadian_clip_never_emits_body_yaw(manifest):
+    m = motion(manifest, entry_stretch=variants({"clip": "turn"}))
+    m.set_register(1.0, 2.0)
+    assert m.start_waking(0.0)
+    cmds = [c for k in range(60) for c in m.commands(k * 0.02, "awake")]
+    assert cmds and all("body_yaw" not in c.targets for c in cmds)
+    assert any(c.targets.get("head.pitch") for c in cmds)
+
+
+def test_a_boosted_circadian_clip_tightens_mid_play(manifest):
+    def run(change):
+        m = motion(manifest, entry_stretch=variants({"clip": "soft", "gain": 2.0}))
+        m.set_register(1.0, 3.0)
+        assert m.start_waking(0.0)
+        m.commands(0.0, "awake")
+        change(m)
+        return max(abs(c.targets["head.pitch"]) for c in m.commands(0.5, "awake"))
+
+    free = run(lambda m: None)
+    assert run(lambda m: m.set_register(0.5, 3.0)) == pytest.approx(free * 0.5)
+    assert run(lambda m: m.set_register(1.0, 1.0)) == pytest.approx(free * 0.5)

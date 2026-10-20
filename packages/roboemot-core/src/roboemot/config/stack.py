@@ -907,9 +907,8 @@ class ConfigStack:
                     except (KeyError, IndexError, ValueError, TypeError):
                         current = None
                     if isinstance(value, dict) and isinstance(current, dict):
-                        value = deep_merge(
-                            current, value, at=key
-                        )  # a section override keeps the rest
+                        # a section override keeps the rest
+                        value = deep_merge(current, value, at=key)
                     elif (
                         key in KEYED_LISTS and isinstance(value, list) and isinstance(current, list)
                     ):

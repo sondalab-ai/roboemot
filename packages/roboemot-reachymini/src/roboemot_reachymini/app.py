@@ -546,6 +546,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             clock=clock,
             dofs=manifest.dofs,
             body_yaw=GAZE.body_yaw,
+            affect_intensity=lambda: runner.engine.state(time.monotonic()).intensity,
             clips=clips,
             detection_period=self.detection_period,
             engaged=lambda: selector.engaged,
