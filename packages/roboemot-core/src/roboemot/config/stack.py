@@ -44,6 +44,7 @@ from .schema import (
 
 LAYER_ORDER = ("defaults", "manifest", "preset", "app", "derived", "person", "runtime")
 KEYED_LISTS = {"appraisal.rules": "event", "llm_routes": "name"}
+FORM_MOTION = ("yawn", "stretch")  # circadian_motion entries that may be channels or variants
 AUDIT_FILE_MODE = 0o600
 _MOVED = yaml.safe_load(Path(__file__).with_name("moved_settings.yaml").read_text())
 RENAMED_SETTINGS: dict[str, str] = _MOVED["renamed"]  # old path -> new path
@@ -109,12 +110,41 @@ class ConfigChange:
 # ----------------------------------------------------------------------------- dict helpers
 
 
-def deep_merge(base: dict, over: dict, path: str = "") -> dict:
+def is_form_entry(location: str) -> bool:
+    """Whether ``location`` is an entry that is either ``channels`` or ``variants`` (SPEC 7)."""
+    head, _, label = location.partition(".")
+    return (
+        bool(label)
+        and "." not in label
+        and (head == "expression_map" or (head == "circadian_motion" and label in FORM_MOTION))
+    )
+
+
+def switch_form(base: dict, over: dict) -> dict:
+    """``base`` without the form (channels or variants) that ``over`` replaces with the other."""
+    if over.get("variants") and not over.get("channels"):
+        return {k: v for k, v in base.items() if k != "channels"}
+    if over.get("channels") and not over.get("variants"):
+        return {k: v for k, v in base.items() if k != "variants"}
+    return base
+
+
+def deep_merge(base: dict, over: dict, path: str = "", *, at: str | None = None) -> dict:
+    """``over`` on ``base``, dicts key by key, lists replaced (keyed lists by identity).
+
+    A layer that sets an entry's ``variants`` drops the ``channels`` below it and vice versa
+    (SPEC 7, Rendering). ``at`` is where ``base`` sits in the tree when that differs from ``path``
+    (a runtime override merged into a section).
+    """
     out = copy.deepcopy(base)
+    where = path if at is None else at
+    if is_form_entry(where):
+        out = switch_form(out, over)
     for key, value in over.items():
         p = f"{path}.{key}" if path else key
+        sub = f"{where}.{key}" if where else key
         if isinstance(value, dict) and isinstance(out.get(key), dict):
-            out[key] = deep_merge(out[key], value, p)
+            out[key] = deep_merge(out[key], value, p, at=sub)
         elif p in KEYED_LISTS and isinstance(value, list) and isinstance(out.get(key), list):
             out[key] = _merge_keyed(out[key], value, KEYED_LISTS[p])
         else:
@@ -755,6 +785,7 @@ class ConfigStack:
     def __post_init__(self) -> None:
         self._runtime: dict[str, _RuntimeValue] = {}
         self.channels: frozenset[str] | None = None
+        self.clips: frozenset[str] = frozenset()  # clip names of the robot's library (SPEC 7)
         self._listeners: list[Callable[[ConfigChange], None]] = []
         self._lock = threading.RLock()
         self._mtimes: dict[str, float] = {}
@@ -796,11 +827,15 @@ class ConfigStack:
         stack._remember_mtimes()
         return stack
 
-    def set_manifest_behaviour(self, behaviour: dict, channels: Collection[str]) -> None:
+    def set_manifest_behaviour(
+        self, behaviour: dict, channels: Collection[str], clips: Collection[str] = ()
+    ) -> None:
         """Install the robot manifest's ``behaviour`` block (layer 2) once the manifest is loaded.
 
         ``channels`` are the dof names expressions may drive (``Manifest.channels``): from now on
         every configuration this stack builds is refused when a map or pose names another one.
+        ``clips`` are the names in the robot's clip library (empty for a robot without one): a
+        variant naming any other clip is refused too (SPEC 7, Recorded clips).
         The block becomes part of the installed configuration, so it also resets the approved
         baseline.
         """
@@ -811,8 +846,9 @@ class ConfigStack:
             )
         with self._lock:
             check_manifest_voice(behaviour.get("voice"))
-            saved, saved_channels = self.manifest, self.channels
+            saved = self.manifest, self.channels, self.clips
             self.manifest, self.channels = behaviour, frozenset(channels)
+            self.clips = frozenset(clips)
             try:
                 defaults = RoboEmotConfig()
                 layer = RoboEmotConfig.model_validate(
@@ -825,9 +861,10 @@ class ConfigStack:
                     )
                 baseline = RoboEmotConfig.model_validate(self.merged_tree(include_runtime=False))
                 self._check_channels(baseline)
+                self._check_clips(baseline)
                 self._check_route_budgets(baseline)
             except (ValidationError, GuardrailError, ConfigError) as exc:
-                self.manifest, self.channels = saved, saved_channels
+                self.manifest, self.channels, self.clips = saved
                 if isinstance(exc, ValidationError):
                     raise ConfigError(_explain(exc)) from exc
                 raise
@@ -870,13 +907,29 @@ class ConfigStack:
                     except (KeyError, IndexError, ValueError, TypeError):
                         current = None
                     if isinstance(value, dict) and isinstance(current, dict):
-                        value = deep_merge(current, value)  # a section override keeps the rest
+                        value = deep_merge(
+                            current, value, at=key
+                        )  # a section override keeps the rest
                     elif (
                         key in KEYED_LISTS and isinstance(value, list) and isinstance(current, list)
                     ):
                         value = _merge_keyed(current, value, KEYED_LISTS[key])
                     set_path(tree, key, value)
+                    self._drop_other_form(tree, key)
             return tree
+
+    @staticmethod
+    def _drop_other_form(tree: dict, key: str) -> None:
+        """A runtime write to ``<entry>.variants`` or ``<entry>.channels`` drops the other form."""
+        entry_key, _, leaf = key.rpartition(".")
+        if leaf not in ("channels", "variants") or not is_form_entry(entry_key):
+            return
+        try:
+            entry = get_path(tree, entry_key)
+        except (KeyError, IndexError, ValueError, TypeError):
+            return
+        if isinstance(entry, dict):
+            entry.pop("channels" if leaf == "variants" else "variants", None)
 
     def effective(self, person: dict | None = None) -> RoboEmotConfig:
         tree = self.merged_tree(person)
@@ -891,6 +944,7 @@ class ConfigStack:
         except ValidationError as exc:
             raise ConfigError(_explain(exc)) from exc
         self._check_channels(cfg)
+        self._check_clips(cfg)
         return cfg
 
     def _check_channels(self, cfg: RoboEmotConfig) -> None:
@@ -912,6 +966,20 @@ class ConfigStack:
                         f"{where}: unknown channel {name!r}, expected one of "
                         f"{sorted(self.channels)}"
                     )
+
+    def _check_clips(self, cfg: RoboEmotConfig) -> None:
+        """Refuse a variant naming a clip the robot's library lacks (SPEC 7, Recorded clips).
+        Unchecked until :meth:`set_manifest_behaviour`; a robot without a library has no clips."""
+        if self.channels is None:
+            return
+        entries = {f"expression_map.{k}": e for k, e in cfg.expression_map.items()}
+        for label in FORM_MOTION:
+            if (entry := getattr(cfg.circadian_motion, label)) is not None:
+                entries[f"circadian_motion.{label}"] = entry
+        for where, entry in entries.items():
+            for variant in entry.variants:
+                if variant.clip not in self.clips:
+                    raise ConfigError(f"{where}: unknown clip {variant.clip!r}")
 
     def get(self, key: str, person: dict | None = None) -> Any:
         return get_path(self.effective(person), key)

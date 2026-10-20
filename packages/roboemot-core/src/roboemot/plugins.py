@@ -13,6 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from .affect.clips import ENTRY_POINT_GROUP as CLIPS_GROUP
 from .diagnostics import ENTRY_POINT_GROUP as DIAGNOSTICS_GROUP
 from .install import ENTRY_POINT_GROUP as INSTALLERS_GROUP
 from .install import Platform
@@ -26,13 +27,14 @@ class GroupContract:
     """What an entry point of one group must be.
 
     ``protocol`` is a runtime_checkable Protocol the (optionally instantiated) object satisfies;
-    ``factory_args`` is the number of positional arguments a factory callable must accept.
+    ``factory_args`` is the number of positional arguments a factory callable must accept (a
+    tuple: any one of those counts).
     ``instantiate`` calls the loaded object without arguments first (a class).
     """
 
     summary: str
     protocol: type | None = None
-    factory_args: int | None = None
+    factory_args: int | tuple[int, ...] | None = None
     instantiate: bool = False
 
 
@@ -53,6 +55,10 @@ GROUPS: dict[str, GroupContract] = {
     SETTINGS_GROUP: GroupContract(
         "object implementing SettingsPlugin: section(stack, manifest) (SPEC 12)",
         protocol=SettingsPlugin,
+    ),
+    CLIPS_GROUP: GroupContract(
+        "factory () or (manifest) -> read-only mapping of clip name to keyframe entry (SPEC 7)",
+        factory_args=(0, 1),
     ),
 }
 
@@ -84,6 +90,11 @@ def contract_violation(group: str, loaded: Any) -> str | None:
     if contract.factory_args is not None:
         if not callable(obj):
             return "not callable"
-        if not _accepts_positional(obj, contract.factory_args):
+        counts = (
+            (contract.factory_args,)
+            if isinstance(contract.factory_args, int)
+            else contract.factory_args
+        )
+        if not any(_accepts_positional(obj, n) for n in counts):
             return f"does not accept {contract.factory_args} positional arguments"
     return None
