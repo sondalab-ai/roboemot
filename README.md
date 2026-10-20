@@ -128,7 +128,7 @@ What goes onto the robot besides the two wheels:
   logs "vision unavailable" and runs without it.
 - **Disk.** The CM4 image has about 0.5 GB free (97% used on the robot of the first run) because
   the robot image's own setup leaves a 5.6 GB uv download cache in `~/.cache/uv`. The installer
-  shows its size and asks whether to clear it (default yes; `--clear-caches` / `--no-clear-caches`).
+  shows its size and asks whether to clear it before the free-space check (default yes on a terminal; an unattended run clears it only with `-y` or `--clear-caches`, `--no-clear-caches` keeps it).
   uv downloads again whatever it needs; uninstall cannot give the cache back. Other caches
   (`~/.cache/huggingface`, `~/.cache/pip`) are left alone.
 

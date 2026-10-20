@@ -18,7 +18,7 @@ from roboemot.diagnostics import Target
 from roboemot.install import Options, Ui, WizardError
 from roboemot.install import run as run_mod
 from roboemot.install.build import with_extras
-from roboemot.install.caches import cache_path
+from roboemot.install.caches import cache_path, clear_caches
 from roboemot.install.piper_lock import lock_name
 from roboemot_reachymini import install as reachy
 from roboemot_reachymini.daemon import INSTALL_TIMEOUT_S, DaemonClient, DaemonError
@@ -75,6 +75,8 @@ class FakeRobot:
         self.fetches: list[str] = []  # `roboemot models fetch` argument lists
         self.fetch_fails = False
         self.free_kb = 20_000_000
+        self.free_kb_by_cache = self.free_kb  # free space while the uv cache is still there
+        self.df_unreadable: set[str] = set()  # paths whose `df` answers nothing
 
     def _exists(self, path: str) -> bool:
         return path in self.dirs or (path == reachy.APPS_VENV and self.apps_venv)
@@ -200,7 +202,11 @@ class FakeRobot:
         if "purelib" in plain:
             return SITE
         if command.startswith("df "):
-            return f"/dev/root 30000000 1000000 {self.free_kb} 5% /"
+            path = shlex.split(command)[2]
+            if path in self.df_unreadable:
+                return ""
+            kb = self.free_kb_by_cache if UV_CACHE in self.dirs else self.free_kb
+            return f"/dev/root 30000000 1000000 {kb} 5% /"
         if command.startswith("cat "):
             return self.files.get(shlex.split(command)[1], "")
         if command.startswith("printf %s") and "&& mv" in command:
@@ -548,6 +554,31 @@ def test_not_enough_space_warns_and_skips_the_models_without_failing(
     assert reachy.APPS_VENV and "roboemot-core" in robot.env
 
 
+def needed_mib(vision: bool = False) -> int:
+    return -(-inst.models_bytes(vision) // inst.MIB)
+
+
+def test_the_models_fit_exactly_when_free_mib_equals_the_need(offline, robot, daemon):
+    robot.free_kb = needed_mib() * 1024
+    install()
+    assert robot.fetches == ["models fetch --voice"]
+
+
+def test_one_mib_short_skips_the_models(offline, robot, daemon):
+    robot.free_kb = (needed_mib() - 1) * 1024
+    install()
+    assert robot.fetches == []
+
+
+def test_unreadable_free_space_skips_the_models_and_the_install_goes_on(
+    offline, robot, daemon, capsys
+):
+    robot.df_unreadable = {DATA}
+    install()
+    assert robot.fetches == [] and "roboemot-core" in robot.env
+    assert "cannot read the free space" in capsys.readouterr().out
+
+
 def test_a_failed_download_warns_and_the_install_goes_on(offline, robot, daemon, capsys):
     robot.fetch_fails = True
     install()
@@ -612,13 +643,44 @@ def test_install_keeps_the_uv_cache_when_declined(offline, robot):
     assert UV_CACHE in robot.dirs
 
 
-def test_install_asks_before_clearing_and_a_no_keeps_it(offline, robot, monkeypatch):
+@pytest.mark.parametrize("interactive", [True, False])
+def test_the_cache_prompt_defaults_to_yes_only_on_a_terminal(robot, monkeypatch, interactive):
     robot.dirs.add(UV_CACHE)
     asked = []
     monkeypatch.setattr(Ui, "confirm", lambda self, q, default: asked.append((q, default)) or False)
+    ui = Ui(interactive=interactive, assume_yes=False)
+    clear_caches(ui, robot, HOME, ReachyMiniWireless.clearable_caches, None, False)
+    assert UV_CACHE in robot.dirs
+    assert [d for q, d in asked if UV_CACHE in q] == [interactive]
+
+
+def test_an_unattended_run_without_consent_keeps_the_cache(offline, robot):
+    robot.dirs.add(UV_CACHE)
     inst.run_install(options(start=False, startup=False, yes=False), quiet_ui(), ROOT)
     assert UV_CACHE in robot.dirs
-    assert [d for q, d in asked if UV_CACHE in q] == [True]
+
+
+def test_the_flag_clears_the_cache_without_yes(offline, robot):
+    robot.dirs.add(UV_CACHE)
+    inst.run_install(
+        options(start=False, startup=False, yes=False, clear_caches=True), quiet_ui(), ROOT
+    )
+    assert UV_CACHE not in robot.dirs
+
+
+def test_clearing_the_cache_can_make_a_full_robot_pass_the_space_check(offline, robot):
+    robot.dirs.add(UV_CACHE)
+    robot.free_kb_by_cache = (inst.MIN_FREE_MB - 100) * 1024
+    install()
+    assert UV_CACHE not in robot.dirs and "roboemot-core" in robot.env
+
+
+def test_a_declined_clear_leaves_the_free_space_error(offline, robot):
+    robot.dirs.add(UV_CACHE)
+    robot.free_kb_by_cache = (inst.MIN_FREE_MB - 100) * 1024
+    with pytest.raises(WizardError, match="MB free"):
+        install(clear_caches=False)
+    assert UV_CACHE in robot.dirs and "roboemot-core" not in robot.env
 
 
 def test_install_dry_run_reports_the_uv_cache_and_clears_nothing(offline, robot, capsys):
@@ -642,6 +704,28 @@ def test_install_does_not_delete_a_cache_that_is_a_symlink(offline, robot, capsy
 def test_cache_paths_stay_strictly_below_home(spec):
     with pytest.raises(WizardError):
         cache_path(HOME, spec)
+
+
+@pytest.mark.parametrize("home", ["/", ""])
+def test_cache_paths_refuse_a_root_or_empty_home(home):
+    with pytest.raises(WizardError):
+        cache_path(home, "~/.cache/uv")
+
+
+def test_a_symlinked_home_skips_the_cache_with_a_warning(offline, robot, capsys):
+    robot.dirs.add(UV_CACHE)
+    robot.symlinks[UV_CACHE] = "/mnt/real-home/.cache/uv"
+    install()
+    assert UV_CACHE in robot.dirs
+    assert f"rm -rf {UV_CACHE}" not in robot.commands
+    assert "symlink" in capsys.readouterr().out
+
+
+def test_start_reports_an_error_of_the_app_the_daemon_autostarted(daemon):
+    daemon.autostart_on_wake = True
+    daemon.start_states = ["error"]
+    with pytest.raises(WizardError, match="roboemot state error"):
+        platform_for(daemon).start(quiet_ui(yes=True))
 
 
 def test_start_reports_app_error(daemon):

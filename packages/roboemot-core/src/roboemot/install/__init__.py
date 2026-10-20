@@ -46,6 +46,7 @@ import re
 import shlex
 import sys
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from importlib.metadata import entry_points
 from pathlib import Path
@@ -76,6 +77,7 @@ TMP_DIR_PATTERN = re.compile(re.escape(REMOTE_TMP_PREFIX) + r"\.[A-Za-z0-9]+")
 PIN_FILE = "webui_pin.json"  # roboemot.webui.auth.PIN_FILE, inside the app data folder
 PIN_RETRIES = 3
 DEFAULT_SECRET_NAME = "cloud_key"  # the name configs/companion.yaml gives the cloud route key
+MIB = 1024 * 1024
 VISION_DERIVED_BYTES = 170_000_000  # INT8 files made from the FP32 weights ("0.17 GB", models CLI)
 PIPER_TTS_VERSION = "1.8.0"  # exact pin: the worker protocol is tested against this API
 PLATFORM_PROBE = (
@@ -222,12 +224,21 @@ def probe_platform(remote: Remote, python: str) -> tuple[str, str]:
 
 
 def check_ssh(
-    ui: Ui, platform: Platform, remote: Remote, need: tuple[int, int] | None
+    ui: Ui,
+    platform: Platform,
+    remote: Remote,
+    need: tuple[int, int] | None,
+    free_space: Callable[[], None] | None = None,
 ) -> RemotePython:
-    """Log in once; check the target interpreter, architecture, Python and free space."""
+    """Log in once; check the target interpreter, architecture, Python and free space.
+
+    ``free_space`` runs after the login and before the free-space check, so what it frees counts.
+    """
     ui.info(f"connecting to {remote.target} (ssh may ask for the password)")
     remote.connect()
     ui.ok(f"ssh {remote.target}")
+    if free_space is not None:
+        free_space()
     py = RemotePython(remote, platform.python, ui)
     present = py.exists()
     if not present and need is None:
@@ -441,33 +452,37 @@ def model_dirs(remote: Remote, vision: bool) -> list[str]:
     return [posixpath.join(data, d) for d in subdirs]
 
 
-def models_bytes(vision: bool) -> int:
+def models_label(vision: bool) -> str:
+    return "voice and vision models" if vision else "voice models"
+
+
+def models_bytes(vision: bool, peak: bool = True) -> int:
     """Disk the fetch needs, from the pinned manifests: each file's download size plus, for a
-    zip archive, its unpacked size (both exist while it unpacks). Vision adds the INT8 files
-    derived from the FP32 weights (``VISION_DERIVED_BYTES``)."""
+    zip archive, its unpacked size (both exist while it unpacks; ``peak=False`` counts only what
+    stays). Vision adds the INT8 files derived from the FP32 weights (``VISION_DERIVED_BYTES``)."""
     from ..vision import models as vision_models
     from ..voice import models as voice_models
 
     specs = list(voice_models.load_manifest().values())
     if vision:
         specs += list(vision_models.load_manifest().values())
-    total = sum((f.size_bytes or 0) + (f.unpacked_bytes or 0) for m in specs for f in m.files)
+    total = 0
+    for f in (f for m in specs for f in m.files):
+        stays = f.unpacked_bytes if f.archive else f.size_bytes
+        total += (f.size_bytes or 0) + (f.unpacked_bytes or 0) if peak else (stays or 0)
     return total + (VISION_DERIVED_BYTES if vision else 0)
 
 
-def models_gb(vision: bool) -> float:
-    return models_bytes(vision) / 1e9
-
-
-def models_label(vision: bool) -> str:
-    return "voice and vision models" if vision else "voice models"
-
-
-def free_mb_at(remote: Remote, path: str) -> int:
-    """Free space in MB on the filesystem holding ``path`` (its nearest existing parent)."""
+def free_mib_at(remote: Remote, path: str) -> int | None:
+    """Free space in MiB on the filesystem holding ``path`` (its nearest existing parent), or
+    None when ``df`` fails or answers something unreadable."""
     while not _exists(remote, path) and path != "/":
         path = posixpath.dirname(path)
-    return int(remote.run(f"df -Pk {shlex.quote(path)} | tail -1").split()[3]) // 1024
+    try:
+        free_kib = int(remote.run(f"df -Pk {shlex.quote(path)} | tail -1").split()[3])
+    except (WizardError, ValueError, IndexError):
+        return None
+    return free_kib // 1024
 
 
 def fetch_models(
@@ -483,24 +498,31 @@ def fetch_models(
     the installed CLI, so they land where the app reads them (``roboemot.paths``).
 
     Skipped with a warning, not an error, when the filesystem lacks the space the pinned
-    manifests state or when the download fails: ``roboemot models fetch`` can be run later. Model
+    manifests state (same unit on both sides: MiB), when the free space cannot be read, or when
+    the download fails: ``roboemot models fetch`` can be run later. Model
     folders the installer creates inside a data folder that is not recorded as its own are
     recorded before the download, so uninstall removes them; inside a recorded data folder they
     go with it. The dry run only reports sizes and free space.
     """
-    need_mb, label = -(-models_bytes(vision) // 1_000_000), models_label(vision)
+    need_mib, label = -(-models_bytes(vision) // MIB), models_label(vision)
     folders = model_dirs(remote, vision)
-    free_mb = free_mb_at(remote, folders[0])
-    if free_mb < need_mb:
+    free_mib = free_mib_at(remote, folders[0])
+    if free_mib is None:
         ui.warn(
-            f"only {free_mb} MB free for the {label} in {folders[0]}, they need {need_mb} MB: "
+            f"cannot read the free space for the {label} in {folders[0]}: skipped "
+            "(run `roboemot models fetch` on the robot)"
+        )
+        return
+    if free_mib < need_mib:
+        ui.warn(
+            f"only {free_mib} MiB free for the {label} in {folders[0]}, they need {need_mib} MiB: "
             "skipped (free space, then run `roboemot models fetch` on the robot)"
         )
         return
     if dry_run:
-        ui.info(f"would download the {label} ({need_mb} MB needed, {free_mb} MB free)")
+        ui.info(f"would download the {label} ({need_mib} MiB needed, {free_mib} MiB free)")
         return
-    ui.ok(f"{free_mb} MB free, the {label} need {need_mb} MB")
+    ui.ok(f"{free_mib} MiB free, the {label} need {need_mib} MiB")
     if record.data_dir is None:
         new = [d for d in folders if d not in record.models_dirs and not _exists(remote, d)]
         if new:
@@ -939,11 +961,14 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
             dirs = platform.stage(root, Path(tmp) / "src", dev)
 
             ui.step("SSH access")
-            py = check_ssh(ui, platform, remote, min_python(dirs))
-            home, _ = remote_data_dir(remote)
-            clear_caches(
-                ui, remote, home, platform.clearable_caches, opts.clear_caches, opts.dry_run
-            )
+
+            def free_space() -> None:
+                home, _ = remote_data_dir(remote)
+                clear_caches(
+                    ui, remote, home, platform.clearable_caches, opts.clear_caches, opts.dry_run
+                )
+
+            py = check_ssh(ui, platform, remote, min_python(dirs), free_space)
 
             ui.step("Build")
             wheels = build_wheels(dirs, Path(tmp) / "wheels")
@@ -960,7 +985,9 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
                 install_piper(ui, platform, remote, record, opts.dry_run)
             if opts.models is None:
                 opts.models = ui.confirm(
-                    f"Download the {models_label(opts.vision)} (~{models_gb(opts.vision):.1f} GB) "
+                    f"Download the {models_label(opts.vision)} "
+                    f"(~{models_bytes(opts.vision) / 1e9:.1f} GB at peak while unpacking, "
+                    f"~{models_bytes(opts.vision, peak=False) / 1e9:.1f} GB once installed) "
                     "on the robot?",
                     True,
                 )

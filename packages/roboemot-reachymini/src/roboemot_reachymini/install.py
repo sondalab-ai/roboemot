@@ -232,18 +232,25 @@ class ReachyMiniWireless:
             api.wake_up()
         ui.ok("wake-up requested")
         time.sleep(WAKE_SETTLE_S)
-        if self.running_app() == APP_NAME:
+        if self._current_is_own():
             self._await_own(ui, f"{APP_NAME} started by the daemon on wake-up")
             return
         try:
             with _wizard_errors():
                 api.start_app(APP_NAME)
         except WizardError:
-            if self.running_app() != APP_NAME:
+            if not self._current_is_own():
                 raise
             self._await_own(ui, f"{APP_NAME} started by the daemon on wake-up")
             return
         self._await_own(ui)
+
+    def _current_is_own(self) -> bool:
+        """Whether RoboEmot is the daemon's current app, in any state (an errored start counts:
+        it is reported, not started again)."""
+        with _wizard_errors():
+            current = self._api().current_app()
+        return bool(current) and current["info"]["name"] == APP_NAME
 
     def _await_own(self, ui: Ui, note: str | None = None) -> None:
         """Wait until RoboEmot is the current app and running, or raise with its error."""

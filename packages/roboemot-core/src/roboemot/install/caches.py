@@ -27,13 +27,15 @@ def cache_path(home: str, spec: str) -> str:
 def clear_caches(
     ui: Ui, remote: Remote, home: str, specs: tuple[str, ...], wanted: bool | None, dry_run: bool
 ) -> None:
-    """Show the size of each existing cache and delete it when asked (``wanted`` None: ask,
-    default yes). The folder is deleted only if its ``realpath`` is the expanded path itself, so
+    """Show the size of each existing cache and delete it when asked (``wanted`` None: ask; the
+    default is yes on a terminal and no when unattended, where only ``-y`` or ``wanted`` True
+    deletes). The folder is deleted only if its ``realpath`` is the expanded path itself, so
     a symlink never redirects the delete. The dry run only reports."""
     for spec in specs:
         path = cache_path(home, spec)
         if remote.run(f"test -e {shlex.quote(path)} && echo yes || echo no").strip() != "yes":
             continue
+        ui.info(f"measuring {path}")
         size = remote.run(f"du -sh {shlex.quote(path)} 2>/dev/null | cut -f1").strip() or "?"
         label = f"{path} ({size}; uninstall cannot restore it, whatever filled it fills it again)"
         if wanted is False:
@@ -42,14 +44,15 @@ def clear_caches(
         if dry_run:
             ui.info(f"would clear {label}")
             continue
-        if wanted is None and not ui.confirm(f"{label}: clear it to free space?", True):
+        if wanted is None and not ui.confirm(f"{label}: clear it to free space?", ui.interactive):
             ui.info(f"{path} kept")
             continue
         real = remote.run(f"realpath {shlex.quote(path)} 2>/dev/null || true").strip()
         if real != path:
             ui.warn(f"{path} resolves to {real or 'nothing'}: symlink? left as it is")
             continue
-        remote.run(f"rm -rf {shlex.quote(path)}")
+        with ui.progress(f"clearing {path} ({size}), can take a minute", report=False, slow=False):
+            remote.run(f"rm -rf {shlex.quote(path)}")
         ui.ok(f"cleared {path} ({size})")
 
 
