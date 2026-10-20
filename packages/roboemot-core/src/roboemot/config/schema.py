@@ -708,6 +708,13 @@ class IdleConfig(Strict):
 class MotionConfig(Strict):
     arbiter: ArbiterConfig = param({}, "Arbiter parameters")
     idle: IdleConfig = param({}, "Idle motion parameters")
+    app_tick_hz: float = param(
+        20.0,
+        "Rate of the app's behaviour tick: affect, idle, circadian, scan, expression and "
+        "responder commands are recomputed and fed to the arbiter this often (the arbiter itself "
+        "runs at arbiter.loop_hz)",
+        unit="Hz", ge=1, le=100,
+    )  # fmt: skip
 
 
 # --------------------------------------------------------------------------- reflexes (SPEC 10)
