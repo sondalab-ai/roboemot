@@ -41,6 +41,6 @@ def pytest_unconfigure(config):
 @pytest.fixture(autouse=True)
 def sdk_version_is_current(monkeypatch):
     """Unit tests run with fake SDK handles, without the SDK installed."""
-    from roboemot_reachymini import app as app_module
+    from roboemot_reachymini import platform as platform_module
 
-    monkeypatch.setattr(app_module, "installed_sdk_version", lambda: "1.12.0")
+    monkeypatch.setattr(platform_module, "installed_version", lambda: "1.12.0")

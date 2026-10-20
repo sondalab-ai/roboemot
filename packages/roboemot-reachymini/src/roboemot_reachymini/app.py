@@ -53,6 +53,7 @@ from roboemot.motion import Command, MotionLoop, Priority
 from roboemot.persona import effects as persona_effects
 from roboemot.persona.llm_traits import TraitCache, TraitsWorker
 from roboemot.reflex import ReflexEngine
+from roboemot.robot_platform import AudioHub, RobotPlatform, Speaker, load_robot_platform
 from roboemot.secret_store import SecretStore
 from roboemot.skills.defaults import default_skills
 from roboemot.vision import CIRCADIAN, FrameSource, LockedSource
@@ -83,16 +84,8 @@ from roboemot.world import (
 from roboemot.world.autoenroll import AutoEnroller, open_autoenroll, purge_stored
 from roboemot.world.scan import SOURCE as SCAN_SOURCE
 
-from .audio import ReachyAudio
-from .camera import ReachyCamera
 from .conversation import profile_source, registry_names, scene_source, speaker_source
-from .driver import ReachyMiniDriver
-from .gaze import FRAME, GAZE, REFLEX
-from .sdk import installed_version as installed_sdk_version
-from .sdk import require_sdk
 from .skills import SkillBridge
-from .speaker import ReachySpeaker
-from .voice import build_listener
 
 try:  # the SDK is optional so unit tests run without GStreamer
     from reachy_mini import ReachyMiniApp
@@ -160,7 +153,10 @@ def attention_tick(
     try:
         wc = world.cfg
         in_view = camera_in_view(
-            loop.pose(), FRAME, math.radians(wc.camera_fov_h_deg), math.radians(wc.camera_fov_v_deg)
+            loop.pose(),
+            world.frame,
+            math.radians(wc.camera_fov_h_deg),
+            math.radians(wc.camera_fov_v_deg),
         )
         world.tick(now, in_view)
         target = selector.update(now, world.entries)
@@ -308,8 +304,9 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
     yes_no: YesNoGestures | None = None  # spoken yes / no -> nod / shake
     expression: ExpressionRenderer | None = None  # affect label -> additive antenna/head motion
     reflexes: ReflexEngine | None = None  # runs on the motion loop's tick (SPEC 10)
-    audio: ReachyAudio | None = None  # the one reader of the microphone (reflex level, voice)
-    speaker: ReachySpeaker | None = None  # playback; only when voice.enabled
+    platform: RobotPlatform | None = None  # the manifest's robot id selects it (SPEC 4A)
+    audio: AudioHub | None = None  # the one reader of the microphone (reflex level, voice)
+    speaker: Speaker | None = None  # playback; only when voice.enabled
     speech: SpeechActivity | None = None  # "the robot is speaking" gate (reflex, DoA)
     bargein: BargeIn | None = None  # user speech over the robot's voice (SPEC 8 stage 8)
     voice_listener: VoiceListener | None = None  # mic -> VAD -> ASR -> utterances; voice.enabled
@@ -375,7 +372,8 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
 
     def make_frame_source(self, mini: Any, joint_state: Any) -> FrameSource:
         """The camera the vision pump reads (overridable: tests inject a planted scene)."""
-        return ReachyCamera(mini, joint_state)
+        assert self.platform is not None
+        return self.platform.camera(mini, joint_state)
 
     def load_vision_stages(self, cfg: Any, profile: str | None) -> Any:
         """The vision backends (overridable: tests inject fakes)."""
@@ -427,7 +425,6 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         return server
 
     def run(self, reachy_mini: Any, stop_event: threading.Event) -> None:
-        require_sdk(installed_sdk_version())
         stack = ConfigStack.from_files(
             app=_optional(DATA / "app.yaml"), preset="default", preset_dirs=[DATA / "presets"]
         )
@@ -438,6 +435,13 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             allow_unmeasured_dynamics=cfg.safety.allow_unmeasured_dynamics,
             safety=cfg.safety,
         )
+        platform = self.platform = load_robot_platform(manifest.robot.id)
+        platform.require_runtime()
+        gaze_map, frame, reflex_map = (
+            platform.gaze_map(),
+            platform.frame_spec(),
+            platform.reflex_map(),
+        )
         # the expression map and its channels (SPEC 11A)
         stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
         cfg = stack.effective()
@@ -447,12 +451,12 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             manifest.dofs,
             cfg.motion.arbiter.crossfade_ms / MS_PER_S,
             cfg.gesture_map,
-            body_yaw=GAZE.body_yaw,
+            body_yaw=gaze_map.body_yaw,
         )
         responder = OfflineResponder(cfg.connectivity, expression, cfg.conversation.language)
         loop = MotionLoop(
             manifest,
-            ReachyMiniDriver(reachy_mini),
+            platform.driver(reachy_mini),
             cfg,
             on_link_change=responder.on_event,
         )
@@ -461,7 +465,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         # voice bearing and face size in, REFLEX-priority commands to the arbiter (SPEC 10).
         reflexes = self.reflexes = ReflexEngine(
             cfg.reflexes,
-            REFLEX,
+            reflex_map,
             manifest.dofs,
             manifest.constraints,
             margin_rad=math.radians(cfg.safety.constraint_margin_deg),
@@ -473,14 +477,8 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         speech = self.speech = SpeechActivity(cfg.voice.echo_tail_ms)
         reflexes.speaking = speech.speaking
         reflex_audio = cfg.reflexes.enabled and cfg.reflexes.audio.enabled
-        audio = self.audio = ReachyAudio(
-            reachy_mini,
-            reflexes.offer_audio_level if reflex_audio else None,
-            cfg.reflexes.audio.poll_hz,
-            max_gap_s=cfg.reflexes.max_age_ms / MS_PER_S,
-            voice=cfg.voice.enabled,
-            voice_rate_hz=cfg.voice.sample_rate_hz,
-            voice_queue_s=cfg.voice.capture_queue_s,
+        audio = self.audio = platform.audio(
+            reachy_mini, cfg, reflexes.offer_audio_level if reflex_audio else None
         )
         reflexes.audio_status = audio.snapshot
         reference = (
@@ -489,9 +487,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             else None
         )
         speaker = self.speaker = (
-            ReachySpeaker(reachy_mini, cfg.voice.playback_chunk_ms, speech, reference=reference)
-            if cfg.voice.enabled
-            else None
+            platform.speaker(reachy_mini, cfg, speech, reference) if cfg.voice.enabled else None
         )
         # The one affect engine: appraisal events from the bus and the responder feed it, the
         # app tick decays it and publishes affect.state (SPEC 7).
@@ -499,11 +495,11 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             cfg.affect, cfg.appraisal, bus, time.monotonic(), self.detection_period
         )
         responder.affect = runner.engine
-        world = self.world = WorldModel(cfg.world, FRAME, bus)
+        world = self.world = WorldModel(cfg.world, frame, bus)
         selector = self.selector = AttentionSelector(cfg.attention, bus)
         gaze = GazeController(
             cfg.attention,
-            GAZE,
+            gaze_map,
             manifest.dofs,
             manifest.constraints,
             margin_rad=math.radians(cfg.safety.constraint_margin_deg),
@@ -544,7 +540,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             runner,
             clock=clock,
             dofs=manifest.dofs,
-            body_yaw=GAZE.body_yaw,
+            body_yaw=gaze_map.body_yaw,
             detection_period=self.detection_period,
             engaged=lambda: selector.engaged,
         )
@@ -627,7 +623,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         # The robot's name: voice.wake_word, else the owner's name in the daemon setup (SPEC 8).
         names = self.names = RobotName(source=loop.driver.robot_name)
         voice_pipeline = (
-            build_listener(
+            platform.listener(
                 cfg,
                 audio,
                 speech,
@@ -636,7 +632,6 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 selector,
                 world,
                 perception.registry,
-                FRAME,
                 lambda u: self.on_utterance(u),
                 reference,
                 names,
