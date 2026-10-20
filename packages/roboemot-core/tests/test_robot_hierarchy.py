@@ -146,6 +146,7 @@ def test_the_registry_covers_the_groups_core_loads():
         "roboemot.installers",
         "roboemot.world",
         "roboemot.settings",
+        "roboemot.expression_clips",
     }
 
 

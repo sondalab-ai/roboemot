@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from roboemot import paths, shutdown
+from roboemot.affect.clips import load_clip_library
 from roboemot.affect.expression import ExpressionRenderer
 from roboemot.affect.register import RegisterTracker
 from roboemot.affect.runner import AffectRunner
@@ -436,7 +437,8 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             safety=cfg.safety,
         )
         # the expression map and its channels (SPEC 11A)
-        stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
+        clips = load_clip_library(manifest)
+        stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, clips)
         cfg = stack.effective()
         expression = self.expression = ExpressionRenderer(
             cfg.expression,
@@ -445,6 +447,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             cfg.motion.arbiter.crossfade_ms / MS_PER_S,
             cfg.gesture_map,
             body_yaw=GAZE.body_yaw,
+            clips=clips,
         )
         responder = OfflineResponder(cfg.connectivity, expression, cfg.conversation.language)
         loop = MotionLoop(
@@ -543,6 +546,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             clock=clock,
             dofs=manifest.dofs,
             body_yaw=GAZE.body_yaw,
+            clips=clips,
             detection_period=self.detection_period,
             engaged=lambda: selector.engaged,
         )

@@ -437,13 +437,70 @@ class ExpressionConfig(Strict):
     )
 
 
+def check_keyframes(channels: dict[str, list[tuple[float, float]]]) -> None:
+    """Raise ValueError unless ``channels`` follow the expression keyframe rules (SPEC 7).
+
+    At least one channel; each has two or more keyframes from t=0 with increasing times, starts
+    and ends at offset 0, is at most ``EXPRESSION_MAX_CYCLE_S`` long, and all end together.
+    Shared by :class:`ExpressionEntry` and the clip-library loader.
+    """
+    if not channels:
+        raise ValueError("an expression needs at least one channel")
+    ends = set()
+    for name, frames in channels.items():
+        if len(frames) < 2:
+            raise ValueError(f"channel {name}: needs at least two keyframes")
+        times = [t for t, _ in frames]
+        if times[-1] > EXPRESSION_MAX_CYCLE_S:
+            raise ValueError(f"channel {name}: longer than {EXPRESSION_MAX_CYCLE_S} s")
+        if times[0] != 0 or any(b <= a for a, b in zip(times, times[1:], strict=False)):
+            raise ValueError(f"channel {name}: times must start at 0 and increase")
+        if frames[0][1] != 0 or frames[-1][1] != 0:
+            raise ValueError(f"channel {name}: the first and last offsets must be 0")
+        ends.add(times[-1])
+    if len(ends) != 1:
+        raise ValueError("all channels must end at the same time")
+
+
+class ClipVariant(Strict):
+    """One recorded clip an entry may play, with the intensity band it suits (SPEC 7)."""
+
+    clip: str = param(..., "Name of a clip in the robot's clip library")
+    weight: float = param(1.0, "Relative chance among the variants eligible at the start", ge=0)
+    min_intensity: float = param(
+        0.0, "Lowest affect intensity at which this variant may play", ge=0, le=1
+    )
+    max_intensity: float = param(
+        1.0, "Highest affect intensity at which this variant may play", ge=0, le=1
+    )
+    gain: float = param(
+        1.0,
+        "Multiplies the amplitude factor before the expression.max_amplitude cap",
+        ge=0,
+        le=2,
+    )
+
+    @model_validator(mode="after")
+    def _band(self) -> ClipVariant:
+        if self.weight <= 0:
+            raise ValueError("variant weight must be greater than 0")
+        if self.min_intensity > self.max_intensity:
+            raise ValueError("variant min_intensity must not exceed max_intensity")
+        return self
+
+
 class ExpressionEntry(Strict):
-    """One affect label rendered as keyframes per channel (SPEC 7, Expression map)."""
+    """One affect label rendered as keyframes per channel or as recorded clips (SPEC 7)."""
 
     channels: dict[str, list[tuple[float, float]]] = param(
         {},
         "Channel name to [t_s, offset_deg] keyframes of one cycle; piecewise-linear in time. "
         "Every channel starts at t=0 and ends at the same time with offset 0",
+    )
+    variants: list[ClipVariant] = param(
+        [],
+        "Recorded clips to pick from when the entry starts (instead of channels); the "
+        "intensity bands must cover [0, 1]",
     )
     repeat: int = param(1, "How many times the cycle plays back to back (a wiggle)", ge=1, le=20)
     curve: Literal["linear", "minjerk", "ease_in_out"] = param(
@@ -453,26 +510,21 @@ class ExpressionEntry(Strict):
         True, "Layered on top of other motion; only additive expressions exist in M2"
     )
 
-    @field_validator("channels")
-    @classmethod
-    def _channels(cls, channels: dict[str, list[tuple[float, float]]]) -> dict:
-        if not channels:
-            raise ValueError("an expression needs at least one channel")
-        ends = set()
-        for name, frames in channels.items():
-            if len(frames) < 2:
-                raise ValueError(f"channel {name}: needs at least two keyframes")
-            times = [t for t, _ in frames]
-            if times[-1] > EXPRESSION_MAX_CYCLE_S:
-                raise ValueError(f"channel {name}: longer than {EXPRESSION_MAX_CYCLE_S} s")
-            if times[0] != 0 or any(b <= a for a, b in zip(times, times[1:], strict=False)):
-                raise ValueError(f"channel {name}: times must start at 0 and increase")
-            if frames[0][1] != 0 or frames[-1][1] != 0:
-                raise ValueError(f"channel {name}: the first and last offsets must be 0")
-            ends.add(times[-1])
-        if len(ends) != 1:
-            raise ValueError("all channels must end at the same time")
-        return channels
+    @model_validator(mode="after")
+    def _one_form(self) -> ExpressionEntry:
+        if bool(self.channels) == bool(self.variants):
+            raise ValueError("an expression needs either channels or variants, exactly one")
+        if self.channels:
+            check_keyframes(self.channels)
+            return self
+        reach = 0.0
+        for v in sorted(self.variants, key=lambda v: v.min_intensity):
+            if v.min_intensity > reach:
+                break
+            reach = max(reach, v.max_intensity)
+        if reach < 1:
+            raise ValueError("variant intensity bands must cover [0, 1]")
+        return self
 
 
 # --------------------------------------------------------------------------- circadian (SPEC 7A)
@@ -3153,6 +3205,13 @@ with warnings.catch_warnings():
                     f"gesture_map names {clash} are affect labels; "
                     "the play skill offers one flat list of names"
                 )
+            return self
+
+        @model_validator(mode="after")
+        def _gestures_are_channels(self) -> RoboEmotConfig:
+            variant = sorted(k for k, e in self.gesture_map.items() if e.variants)
+            if variant:
+                raise ValueError(f"gesture_map entries {variant} use variants; channels only")
             return self
 
         @model_validator(mode="after")

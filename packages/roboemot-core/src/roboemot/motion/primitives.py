@@ -7,6 +7,7 @@ A primitive is data (configurable), sampled at the loop rate and submitted as a 
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from dataclasses import dataclass
 
 from .core import Command, Priority
@@ -43,14 +44,17 @@ class Primitive:
         return self.keyframes[-1].t
 
     def sample(self, t: float) -> dict[str, float]:
+        """Dof values at ``t`` seconds: the curve between the two keyframes around it (binary
+        search, a recorded clip holds hundreds of keyframes); clamped to the first and last."""
         kfs = self.keyframes
         if t <= kfs[0].t:
             return dict(kfs[0].values)
-        for a, b in zip(kfs, kfs[1:], strict=False):
-            if t <= b.t:
-                s = CURVES[self.method]((t - a.t) / (b.t - a.t))
-                return {k: a.values[k] + (b.values[k] - a.values[k]) * s for k in a.values}
-        return dict(kfs[-1].values)
+        i = bisect_left(kfs, t, key=lambda k: k.t)  # first keyframe at or after t
+        if i >= len(kfs):
+            return dict(kfs[-1].values)
+        a, b = kfs[i - 1], kfs[i]
+        s = CURVES[self.method]((t - a.t) / (b.t - a.t))
+        return {k: a.values[k] + (b.values[k] - a.values[k]) * s for k in a.values}
 
 
 class Player:
