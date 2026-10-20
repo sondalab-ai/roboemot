@@ -63,6 +63,11 @@ behaviour:                      # config layer 2 (SPEC 11A): this robot's defaul
     keywords:
       it: {name_aliases: [reati]}
       en: {name_aliases: [riyadh she]}
+  # Loop rates (SPEC 11A): the arbiter streams `set_target` at 50 Hz over the daemon websocket
+  # (the library default is 100 Hz); the app's behaviour tick keeps its 20 Hz default.
+  # Only these two rates may sit under `motion` in a manifest.
+  motion:
+    arbiter: {loop_hz: 50}
   # Expression map (SPEC 7): per affect label, keyframes per channel as [t_s, offset_deg],
   # piecewise-linear, added on top of the current pose. Every channel starts and ends at 0 and
   # all channels of a label end together; `repeat` plays the cycle back to back.

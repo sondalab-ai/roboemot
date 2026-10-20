@@ -159,7 +159,7 @@ class Registry:
         )
 
     def get_entity(self, entity_id):
-        return SimpleNamespace(display_name="Rex")
+        return SimpleNamespace(display_name="Rex", status="active")
 
 
 def world_with(*observations):
@@ -300,10 +300,10 @@ def test_look_at_and_play_go_through_the_selector_and_the_renderer():
 
     class Reg:
         def get_person(self, pid):
-            return SimpleNamespace(display_name="Marta")
+            return SimpleNamespace(display_name="Marta", status="active")
 
         def get_entity(self, eid):
-            return SimpleNamespace(display_name="Rex")
+            return SimpleNamespace(display_name="Rex", status="active")
 
     now = [10.0]
     bridge = SkillBridge(renderer, selector, world, Reg(), lambda: cfg, clock=lambda: now[0])

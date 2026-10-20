@@ -956,7 +956,8 @@ def test_the_frame_source_is_never_read_by_two_threads_at_once():
     overlaps = []
 
     class Camera:
-        camera_model = "intrinsics"
+        def camera_model(self, width, height):
+            return ("intrinsics", width, height)
 
         def read(self):
             inside.append(1)
@@ -973,7 +974,7 @@ def test_the_frame_source_is_never_read_by_two_threads_at_once():
         t.start()
     for t in threads:
         t.join()
-    assert overlaps == [] and shared.camera_model == "intrinsics"
+    assert overlaps == [] and shared.camera_model(4, 3) == ("intrinsics", 4, 3)
     with pytest.raises(AttributeError):
         shared.nothing  # noqa: B018
 

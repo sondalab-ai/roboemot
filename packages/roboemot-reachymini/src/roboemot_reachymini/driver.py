@@ -1,6 +1,6 @@
 """Reachy Mini PoseGroupDriver on the official SDK (SPEC 4A).
 
-Facts from the SDK source (reachy_mini 1.11) that shape this driver:
+Facts from the SDK source (reachy_mini 1.12.0, the robot's version) that shape this driver:
 
 - ``goto_target`` blocks the caller until the move ends, so it is never used here; every
   motion is streamed with ``set_target``.
@@ -18,7 +18,8 @@ Facts from the SDK source (reachy_mini 1.11) that shape this driver:
   :meth:`read_state` checks it.
 - The motor mode is in the daemon status the client receives
   (``backend_status.motor_control_mode``: enabled, disabled, gravity_compensation).
-- Checked against the v1.11.0 source (the robot's version) and run against 1.12.0 in MuJoCo.
+- Checked against the 1.12.0 source (the robot's version, enforced at app start by
+  ``sdk.require_sdk``) and run against 1.12.0 in MuJoCo.
 """
 
 from __future__ import annotations
@@ -28,6 +29,8 @@ from typing import Any
 import numpy as np
 from roboemot.drivers import MotorMode, PoseGroupDriver
 from scipy.spatial.transform import Rotation
+
+from .sdk import ClientPort
 
 HEAD_ANGLES = ("head.roll", "head.pitch", "head.yaw")
 HEAD_TRANSLATIONS = ("head.x", "head.y", "head.z")
@@ -74,7 +77,8 @@ class ReachyMiniDriver(PoseGroupDriver):
             self.mini.set_target(**kwargs)
 
     def read_state(self) -> dict[str, float]:
-        if not getattr(self.mini.client, "_is_alive", True):
+        client: ClientPort = self.mini.client
+        if not client._is_alive:
             raise ConnectionError("Reachy Mini daemon: no state received (connection lost)")
         state = head_values(self.mini.get_current_head_pose())
         head_joints, antennas = self.mini.get_current_joint_positions()
@@ -84,8 +88,8 @@ class ReachyMiniDriver(PoseGroupDriver):
 
     def motors_enabled(self) -> bool | None:
         """From the last daemon status; None until one has arrived."""
-        client = self.mini.client
-        if getattr(client, "_last_status", None) is None:
+        client: ClientPort = self.mini.client
+        if client._last_status is None:
             return None
         backend = client.get_status(wait=False).backend_status
         return None if backend is None else backend.motor_control_mode == "enabled"
@@ -96,8 +100,8 @@ class ReachyMiniDriver(PoseGroupDriver):
         # Verified against reachy-mini 1.12: get_status(wait=False) clears status_received and
         # asserts _last_status, hence the guard before the call.
         try:
-            client = self.mini.client
-            if getattr(client, "_last_status", None) is None:
+            client: ClientPort = self.mini.client
+            if client._last_status is None:
                 return None
             name = client.get_status(wait=False).robot_name
         except Exception:
@@ -123,7 +127,7 @@ class ReachyMiniDriver(PoseGroupDriver):
         if mode == "active":
             if self.mode == "teach":
                 self.mini.disable_gravity_compensation()
-            self.mini.enable_motors()  # pins targets to the present pose (SDK 1.11)
+            self.mini.enable_motors()  # pins targets to the present pose (SDK 1.12)
         elif mode == "limp":
             self.mini.disable_motors()
         elif mode == "teach":

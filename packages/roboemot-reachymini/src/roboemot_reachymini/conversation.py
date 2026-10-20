@@ -45,7 +45,7 @@ def entry_name(registry: Any, entry: Entry) -> str | None:
         )
     except Exception:  # a record that is gone: describe the entry by its kind
         return None
-    return record.display_name if getattr(record, "status", "active") == "active" else None
+    return record.display_name if record.status == "active" else None
 
 
 def profile_source(

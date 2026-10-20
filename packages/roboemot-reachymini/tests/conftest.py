@@ -36,3 +36,11 @@ def daytime_circadian_clock(monkeypatch):
 @pytest.hookimpl(trylast=True)
 def pytest_unconfigure(config):
     faulthandler.dump_traceback_later(EXIT_WATCHDOG_S, exit=True)
+
+
+@pytest.fixture(autouse=True)
+def sdk_version_is_current(monkeypatch):
+    """Unit tests run with fake SDK handles, without the SDK installed."""
+    from roboemot_reachymini import app as app_module
+
+    monkeypatch.setattr(app_module, "installed_sdk_version", lambda: "1.12.0")

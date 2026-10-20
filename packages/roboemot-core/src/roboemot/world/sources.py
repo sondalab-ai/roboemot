@@ -30,6 +30,10 @@ class WorldSource(Protocol):
     """Produces observations until stopped; the sink is the bus (``percept.entity``)."""
 
     name: str
+    speaking: Callable[[float], bool] | None
+    """Mandatory member, value may be None. The host sets it before ``start`` to "is the robot
+    speaking at this stamp", so a source does not turn towards the robot's own voice. Every
+    implementation declares it; None means the source does not use it (or not set yet)."""
 
     def start(self, sink: ObservationSink) -> None:
         """Begin producing; ``sink`` may be called from the source's own thread."""

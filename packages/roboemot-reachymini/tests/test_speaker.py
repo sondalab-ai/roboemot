@@ -18,11 +18,9 @@ class Clock:
         return self.t
 
 
-def fake(out_rate=16000, clear=True, audio="present"):
+def fake(out_rate=16000, audio="present"):
     log = SimpleNamespace(pushed=[], started=0, stopped=0, cleared=0)
     audio_obj = SimpleNamespace(clear_player=lambda: setattr(log, "cleared", log.cleared + 1))
-    if not clear:
-        audio_obj = object()
     media = SimpleNamespace(
         audio=None if audio is None else audio_obj,
         start_playing=lambda: setattr(log, "started", log.started + 1),
@@ -76,13 +74,15 @@ def test_stop_flushes_through_clear_player_and_resets_the_queue():
     assert act.speaking(clock.t + 0.1) and not act.speaking(clock.t + 0.3)  # only the tail
 
 
-def test_stop_falls_back_to_restarting_the_player_without_clear_player():
-    mini, log = fake(clear=False)
-    sp = ReachySpeaker(mini, 100, clock=Clock())
+def test_a_failing_clear_player_is_logged_and_the_queue_is_still_reset():
+    mini, log = fake()
+    mini.media.audio.clear_player = lambda: (_ for _ in ()).throw(RuntimeError("x"))
+    clock = Clock()
+    sp = ReachySpeaker(mini, 100, clock=clock)
     sp.start_playing()
     sp.push_audio_sample(np.zeros(1600, np.float32), 16000)
     sp.stop()
-    assert log.stopped == 1 and log.started == 2 and sp.queued_s() == 0.0
+    assert sp.queued_s() == 0.0 and log.stopped == 0
 
 
 def test_a_stop_during_a_push_abandons_the_chunks_not_yet_pushed():
@@ -177,16 +177,6 @@ def test_stop_and_pushes_from_two_threads_never_leave_the_gate_ahead_of_the_spea
     pusher.join()
     sp.stop()
     assert act.until() <= clock.t and sp.queued_s() == 0.0
-
-
-def test_a_failed_pipeline_restart_marks_the_speaker_not_playing():
-    mini, log = fake(clear=False)
-    sp = ReachySpeaker(mini, 100, clock=Clock())
-    sp.start_playing()
-    mini.media.start_playing = lambda: (_ for _ in ()).throw(RuntimeError("x"))
-    sp.stop()
-    assert not sp.snapshot()["playing"]
-    assert sp.push_audio_sample(np.zeros(100, np.float32), 16000) == 0.0
 
 
 def test_the_return_value_is_zero_when_nothing_was_queued_and_bad_rates_are_refused():

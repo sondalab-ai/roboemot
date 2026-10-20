@@ -68,6 +68,9 @@ class PlantedSource:
     def __init__(self):
         self.n = 0
 
+    def camera_model(self, width, height):
+        return None
+
     def read(self):
         self.n += 1
         img = np.zeros((240, 320, 3), np.uint8)
@@ -77,6 +80,9 @@ class PlantedSource:
 
 
 class EmptySource:
+    def camera_model(self, width, height):
+        return None
+
     def read(self):
         return None
 

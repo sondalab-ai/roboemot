@@ -13,10 +13,11 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Mapping
-from typing import Any
 
 import numpy as np
 from roboemot.vision import CameraModel, Frame
+
+from .sdk import MiniPort
 
 JointStateFn = Callable[[], Mapping[str, float]]
 
@@ -26,7 +27,7 @@ class ReachyCamera:
 
     def __init__(
         self,
-        mini: Any,
+        mini: MiniPort,
         joint_state: JointStateFn | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -55,7 +56,8 @@ class ReachyCamera:
         ``world.camera_fov_h_deg`` and ``camera_fov_v_deg``. Lens distortion is ignored by the
         pinhole model, so bearings are approximate towards the edges of this wide-angle camera.
         """
-        k = getattr(self._mini.media.camera, "K", None)
+        camera = self._mini.media.camera
+        k = None if camera is None else camera.K
         if k is None:
             return None
         fx, fy, cx, cy = (float(k[0][0]), float(k[1][1]), float(k[0][2]), float(k[1][2]))

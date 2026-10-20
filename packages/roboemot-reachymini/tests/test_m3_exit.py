@@ -120,6 +120,9 @@ class LiveMic:
             self._overlays.append((start, samples))
             return self._t0 + start / RATE
 
+    def camera_model(self, width, height):
+        return None
+
     def read(self):
         with self._lock:
             if self._t0 is None:

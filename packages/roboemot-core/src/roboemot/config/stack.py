@@ -454,8 +454,10 @@ def resolve_preset(name: str, preset_dirs: Iterable[Path], _seen: tuple[str, ...
 # ----------------------------------------------------------------------------- guardrails
 
 MANIFEST_BEHAVIOUR_KEYS = frozenset(
-    {"expression_map", "gesture_map", "circadian_motion", "voice"}
+    {"expression_map", "gesture_map", "circadian_motion", "voice", "motion"}
 )  # what a robot manifest may set
+MANIFEST_MOTION_KEYS = frozenset({"app_tick_hz", "arbiter"})  # the rates of ``motion``
+MANIFEST_ARBITER_KEYS = frozenset({"loop_hz"})  # the rate of ``motion.arbiter``
 MANIFEST_VOICE_KEYS = frozenset({"default_name", "keywords"})  # the name fields of ``voice``
 MANIFEST_KEYWORD_KEYS = frozenset({"name_aliases"})  # per language under ``voice.keywords``
 PERSON_SECTIONS = ("register", "voice", "conversation", "persona.traits")
@@ -525,6 +527,28 @@ def _name_chars_ceiling() -> int:
     configuration can allow."""
     meta = VoiceConfig.model_fields["name_max_chars"].metadata
     return max(m.le for m in meta if hasattr(m, "le"))
+
+
+def check_manifest_motion(motion: Any) -> None:
+    """A manifest may set the loop rates of its hardware (``motion.app_tick_hz`` and
+    ``motion.arbiter.loop_hz``) and nothing else under ``motion``: limits and blending stay
+    with the schema and the owner."""
+    if motion is None:
+        return
+    if not isinstance(motion, dict) or set(motion) - MANIFEST_MOTION_KEYS:
+        extra = sorted(set(motion) - MANIFEST_MOTION_KEYS) if isinstance(motion, dict) else motion
+        raise ConfigError(
+            f"manifest behaviour motion may set {sorted(MANIFEST_MOTION_KEYS)}, not {extra}"
+        )
+    arbiter = motion.get("arbiter", {})
+    if not isinstance(arbiter, dict) or set(arbiter) - MANIFEST_ARBITER_KEYS:
+        extra = (
+            sorted(set(arbiter) - MANIFEST_ARBITER_KEYS) if isinstance(arbiter, dict) else arbiter
+        )
+        raise ConfigError(
+            f"manifest behaviour motion.arbiter may set {sorted(MANIFEST_ARBITER_KEYS)}, "
+            f"not {extra}"
+        )
 
 
 def check_manifest_voice(voice: Any) -> None:
@@ -811,6 +835,7 @@ class ConfigStack:
             )
         with self._lock:
             check_manifest_voice(behaviour.get("voice"))
+            check_manifest_motion(behaviour.get("motion"))
             saved, saved_channels = self.manifest, self.channels
             self.manifest, self.channels = behaviour, frozenset(channels)
             try:
@@ -829,7 +854,7 @@ class ConfigStack:
             except (ValidationError, GuardrailError, ConfigError) as exc:
                 self.manifest, self.channels = saved, saved_channels
                 if isinstance(exc, ValidationError):
-                    raise ConfigError(_explain(exc)) from exc
+                    raise ConfigError(f"manifest behaviour: {_explain(exc)}") from exc
                 raise
             self._last, self._approved = self.effective(), baseline
             self._record("manifest", "behaviour", None, sorted(behaviour))
