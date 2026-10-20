@@ -195,7 +195,10 @@ class BarePlatform:
         self.tmp = tmp
 
     def connect(self, ui, host): ...
-    def create_env(self, ui, remote, dry_run): ...
+    def plan_env(self, remote):
+        return ""
+
+    def create_env(self, ui, remote, plan): ...
     def env_users(self, py):
         return []
 
@@ -240,8 +243,9 @@ def test_install_and_uninstall_work_without_any_reachy_code(tmp_path, monkeypatc
 
 def test_a_record_from_before_env_created_still_loads():
     old = rec().to_json()
-    del old["env_created"]
-    assert InstallRecord.from_json(old).env_created is None
+    del old["env_created"], old["env_baseline"]
+    loaded = InstallRecord.from_json(old)
+    assert loaded.env_created is None and loaded.env_baseline == []
 
 
 def test_env_created_round_trips():

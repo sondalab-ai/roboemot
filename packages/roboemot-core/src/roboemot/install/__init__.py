@@ -88,7 +88,8 @@ class Platform(Protocol):
     modules: tuple[str, ...]  # their top-level import names (leftover check)
 
     def connect(self, ui: Ui, host: str) -> None: ...
-    def create_env(self, ui: Ui, remote: Remote, dry_run: bool) -> None: ...
+    def plan_env(self, remote: Remote) -> str: ...
+    def create_env(self, ui: Ui, remote: Remote, plan: str) -> None: ...
     def env_users(self, py: RemotePython) -> list[str]: ...
     def probe(self, ui: Ui, py: RemotePython) -> None: ...
     def stage(self, root: Path, dest: Path, dev: bool) -> list[Path]: ...
@@ -204,6 +205,14 @@ def check_ssh(
     ui.ok(f"ssh {remote.target}")
     py = RemotePython(remote, platform.python)
     present = py.exists()
+    if not present and need is None:
+        ui.ok(f"{platform.env_dir} is not there")
+        return py
+    if not present and _exists(remote, platform.env_dir):
+        raise WizardError(
+            f"{platform.env_dir} exists without an interpreter ({platform.python}): "
+            "remove it by hand or finish creating it, then run the installer again"
+        )
     target = platform.python if present else creating_python(platform, remote)
     arch, version = probe_platform(remote, target)
     if arch != platform.arch:
@@ -214,9 +223,8 @@ def check_ssh(
     if not present:
         ui.info(f"{platform.env_dir} does not exist yet: it is created with {target}")
     if need:
-        for path in platform.space_paths:
-            if not present and path == platform.env_dir:
-                path = posixpath.dirname(path)
+        for space in platform.space_paths:
+            path = posixpath.dirname(space) if not present and space == platform.env_dir else space
             free_kb = int(remote.run(f"df -Pk {shlex.quote(path)} | tail -1").split()[3])
             if free_kb < MIN_FREE_MB * 1024:
                 raise WizardError(
@@ -654,9 +662,20 @@ def remove_created_env(
     if not _exists(remote, env):
         ui.ok(f"environment {env} is not there")
         return False
-    users = platform.env_users(py) if py.exists() else []
+    if not py.exists():
+        ui.warn(f"{env} has no interpreter: cannot rule out other apps in it, left as it is")
+        return True
+    users = platform.env_users(py)
     if users:
         ui.warn(f"keeping {env}: also used by {', '.join(users)}")
+        return True
+    accounted = {canonical(p) for p in record.packages} | set(record.added)
+    foreign = sorted(set(py.installed()) - accounted - set(record.env_baseline))
+    if foreign:
+        ui.warn(
+            f"keeping {env}: it holds packages this installer did not put there: "
+            f"{', '.join(foreign)}"
+        )
         return True
     real = remote.run(f"realpath {shlex.quote(env)} 2>/dev/null || true").strip()
     if real != env:
@@ -664,7 +683,7 @@ def remove_created_env(
         return True
     if not dry_run:
         remote.run(f"rm -rf {shlex.quote(env)}")
-    ui.ok(f"{'would delete' if dry_run else 'deleted'} the apps venv {env}")
+    ui.ok(f"{'would delete' if dry_run else 'deleted'} the environment {env}")
     return False
 
 
@@ -684,15 +703,21 @@ def install_packages(
     )
     record.packages = sorted(set(record.packages) | set(own))
     if not py.exists():
+        plan = platform.plan_env(remote)
         if dry_run:
-            platform.create_env(ui, remote, dry_run=True)
+            ui.ok(f"would create the environment {platform.env_dir} ({plan})")
             ui.info("dependency check skipped: the environment does not exist yet")
             claim_data_dir(ui, platform, remote, record, dry_run=True)
             ui.info(f"would record the changes in {platform.record_path}; nothing installed")
             return record
         record.env_created = platform.env_dir
         write_record(remote, platform.record_path, record)
-        platform.create_env(ui, remote, dry_run=False)
+        try:
+            platform.create_env(ui, remote, plan)
+        finally:
+            if py.exists():
+                record.env_baseline = sorted(py.installed())
+                write_record(remote, platform.record_path, record)
     before = py.installed()
     if record.pending_before is not None:
         ui.warn("an earlier install was interrupted; folding its changes into the record")
@@ -851,8 +876,6 @@ def run_uninstall(opts: Options, ui: Ui, root: Path) -> None:
         ui.step("Install record")
         env_there = py.exists()
         installed = py.installed() if env_there else {}
-        if not env_there:
-            ui.ok(f"{platform.env_dir} is not there: no package to remove")
         record = read_record(remote, platform.record_path)
         if record is None:
             ui.warn(
@@ -890,10 +913,8 @@ def run_uninstall(opts: Options, ui: Ui, root: Path) -> None:
 
         if env_there:
             remove_secrets(ui, platform, py, remote, record, opts.dry_run)
-        elif record.secrets:
-            ui.warn(
-                f"cannot remove the secrets {', '.join(record.secrets)}: the environment is gone"
-            )
+        elif record.secrets and record.data_dir is None:
+            ui.warn(f"cannot remove the secrets {', '.join(record.secrets)}: no environment to run")
 
         ui.step("Packages")
         plan = plan_uninstall(record, installed, py.requires() if env_there else {})
@@ -948,7 +969,7 @@ def verify_uninstall(
     py: RemotePython,
     record: InstallRecord,
     restored: dict[str, str],
-    keep_env: bool = False,
+    keep_env: bool,
 ) -> None:
     """The app is gone and every restored version is back; else keep the record and stop."""
     env_there = py.exists()
@@ -966,7 +987,7 @@ def verify_uninstall(
         and not keep_env
         and _exists(py.remote, platform.env_dir)
     ):
-        problems.append(f"apps venv {platform.env_dir} still present")
+        problems.append(f"environment {platform.env_dir} still present")
     venv, _ = piper_paths(py.remote)
     if record.piper_venv == venv and _exists(py.remote, venv):
         problems.append(f"Piper virtualenv {venv} still present")

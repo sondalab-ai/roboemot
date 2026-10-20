@@ -1330,7 +1330,9 @@ def test_install_dry_run_with_a_missing_apps_venv_reports_and_writes_nothing(
     fresh_robot(robot)
     inst.run_install(options(dry_run=True), quiet_ui(yes=True), ROOT)
     out = capsys.readouterr().out
-    assert f"would create {reachy.APPS_VENV}" in out and "reachy-mini==1.11.0" in out
+    assert (
+        f"would create the environment {reachy.APPS_VENV}" in out and "reachy-mini==1.11.0" in out
+    )
     assert "dependency check skipped" in out
     assert "dry run passed" in out
     assert not robot.apps_venv and robot.files == {} and robot.tmp_dirs == set()
@@ -1410,7 +1412,7 @@ def test_uninstall_dry_run_says_it_would_remove_the_created_venv(offline, robot,
     state = copy.deepcopy(snapshot(robot, daemon))
     uninstall(dry_run=True)
     assert snapshot(robot, daemon) == state
-    assert f"would delete the apps venv {reachy.APPS_VENV}" in capsys.readouterr().out
+    assert f"would delete the environment {reachy.APPS_VENV}" in capsys.readouterr().out
 
 
 def test_uninstall_leaves_a_venv_it_did_not_create(offline, robot, daemon):
@@ -1423,9 +1425,10 @@ def test_uninstall_with_the_venv_already_gone_still_cleans_up(offline, robot, da
     install()
     assert DATA in robot.dirs
     fresh_robot(robot)
+    seen = len(robot.commands)
     uninstall()
     assert RECORD not in robot.files and DATA not in robot.dirs
-    assert not any(c.startswith(APPS_PY) for c in robot.commands[-30:])
+    assert not any(c.startswith(APPS_PY) for c in robot.commands[seen:])
     assert "uninstalled" in capsys.readouterr().out
 
 
@@ -1452,7 +1455,8 @@ def test_uninstall_ignores_a_recorded_venv_path_that_is_not_the_apps_venv(offlin
 def test_create_env_pins_the_daemons_own_reachy_mini_version(robot):
     robot.daemon_version = "1.12.0"
     robot.apps_venv = False
-    ReachyMiniWireless().create_env(quiet_ui(), robot, dry_run=False)
+    wireless = ReachyMiniWireless()
+    wireless.create_env(quiet_ui(), robot, wireless.plan_env(robot))
     pip = [c for c in robot.commands if " -m pip install" in c]
     assert len(pip) == 1 and "reachy-mini==1.12.0" in pip[0] and "--no-cache-dir" in pip[0]
 
@@ -1463,3 +1467,70 @@ def test_env_users_lists_other_apps_only(robot):
     assert ReachyMiniWireless().env_users(py) == ["conversation", "marionette"]
     robot.apps_in_env = []
     assert ReachyMiniWireless().env_users(py) == []
+
+
+def test_uninstall_with_the_venv_gone_needs_no_creating_interpreter(
+    offline, robot, daemon, monkeypatch
+):
+    install()
+    fresh_robot(robot)
+    monkeypatch.setattr(ReachyMiniWireless, "base_python", None)
+    uninstall()
+    assert RECORD not in robot.files and DATA not in robot.dirs
+
+
+def test_uninstall_with_the_venv_and_the_daemon_interpreter_both_gone(
+    offline, robot, daemon, monkeypatch
+):
+    install()
+    fresh_robot(robot)
+    run = robot.run
+    monkeypatch.setattr(
+        robot,
+        "run",
+        lambda c, **kw: "no" if c.startswith(f"test -x {DAEMON_PY}") else run(c, **kw),
+    )
+    uninstall()
+    assert RECORD not in robot.files and DATA not in robot.dirs
+
+
+def half_made(robot) -> None:
+    fresh_robot(robot)
+    robot.dirs.add(reachy.APPS_VENV)
+
+
+def test_install_refuses_a_venv_folder_without_an_interpreter(offline, robot):
+    half_made(robot)
+    with pytest.raises(WizardError, match="exists without an interpreter"):
+        install()
+    assert robot.files == {} and not any(" -m venv " in c for c in robot.commands)
+
+
+def test_uninstall_keeps_a_venv_folder_without_an_interpreter(offline, robot, daemon, capsys):
+    fresh_robot(robot)
+    install()
+    half_made(robot)
+    uninstall()
+    assert f"rm -rf {reachy.APPS_VENV}" not in robot.commands
+    assert reachy.APPS_VENV in robot.dirs and RECORD not in robot.files
+    assert "no interpreter" in capsys.readouterr().out
+
+
+def test_a_daemon_without_reachy_mini_leaves_no_record_and_no_venv(offline, robot):
+    fresh_robot(robot)
+    robot.daemon_version = ""
+    with pytest.raises(WizardError, match="reachy_mini"):
+        install()
+    assert robot.files == {} and not robot.apps_venv
+
+
+def test_uninstall_keeps_a_created_venv_holding_packages_it_does_not_account_for(
+    offline, robot, daemon, capsys
+):
+    fresh_robot(robot)
+    install()
+    robot.env["foreign-lib"] = "1.0"
+    uninstall()
+    out = capsys.readouterr().out
+    assert robot.apps_venv and f"keeping {reachy.APPS_VENV}" in out and "foreign-lib" in out
+    assert RECORD not in robot.files

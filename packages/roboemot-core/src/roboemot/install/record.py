@@ -13,7 +13,8 @@ even when the data folder predates the install. Secrets (SPEC 8, 12 Data) are re
 never by value, and only the ones that were not in the store before; uninstall removes those
 names and leaves the others. When the robot has no app environment yet, the installer creates
 it the way the robot's own software would and records its path before creating it
-(``env_created``); uninstall removes it again unless another app has moved in.
+(``env_created``) with the distributions it held afterwards (``env_baseline``); uninstall
+removes it again unless another app or package has moved in.
 """
 
 from __future__ import annotations
@@ -58,6 +59,7 @@ class InstallRecord:
     piper_venv: str | None = None  # Piper virtualenv this installer created (absolute path)
     secrets: list[str] = field(default_factory=list)  # secret names this installer added
     env_created: str | None = None  # app environment this installer created (absolute path)
+    env_baseline: list[str] = field(default_factory=list)  # distributions it held once created
     version: int = RECORD_VERSION
 
     def to_json(self) -> dict[str, Any]:
