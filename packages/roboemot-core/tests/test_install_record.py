@@ -127,7 +127,7 @@ class BareRobot:
     def copy(self, files, dest) -> None:
         pass
 
-    def stream(self, command, on_line, check: bool = True, stdin: str | None = None) -> str:
+    def stream(self, command, on_line, check: bool = True) -> str:
         out = self.run(command, check=check)
         for line in out.splitlines():
             on_line(line)
@@ -219,6 +219,9 @@ class BarePlatform:
         return True
 
     def app_url(self, host):
+        return None
+
+    def start_blocker(self):
         return None
 
     def start(self, ui): ...

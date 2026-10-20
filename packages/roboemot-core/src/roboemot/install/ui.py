@@ -8,6 +8,7 @@ and only when stdout is a terminal. Non-interactive runs take each prompt's defa
 from __future__ import annotations
 
 import getpass
+import re
 import shutil
 import sys
 import threading
@@ -30,6 +31,7 @@ def paint(text: str, role: str) -> str:
     return _palette.paint(text, role) if _palette and sys.stdout.isatty() else text
 
 
+CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 SPINNER = "|/-\\"
 TICK_S = 1.0
 
@@ -94,19 +96,23 @@ class Ui:
         label: str,
         on_line: Callable[[str], str | None] | None = None,
         done: str | None = None,
+        report: bool = True,
+        slow: bool = True,
     ) -> Iterator[Progress]:
         """Announce a long remote step and show it running; yields a ``Progress`` to call per line.
 
         On a terminal one status line is rewritten in place (spinner, elapsed time, latest
         line) and a ticker keeps the time moving while the command is silent. Otherwise each
         line is printed plainly. ``on_line`` maps a raw output line to the text worth showing
-        (None drops it). On success the step ends with a ``✓`` line carrying the total time.
+        (None drops it). On success the step ends with a ``✓`` line carrying the total time, unless
+        ``report`` is False (the caller prints its own). ``slow`` adds the "can take minutes"
+        note to the announcement. Control characters are stripped from shown lines.
         """
         keep = on_line or (lambda text: text)
         live = sys.stdout.isatty()
         state = Progress()
         start = self.clock()
-        self.info(f"{label} (can take minutes on the robot)")
+        self.info(f"{label} (can take minutes on the robot)" if slow else label)
         stop = threading.Event()
         frame = [0]
 
@@ -127,7 +133,7 @@ class Ui:
                 sys.stdout.flush()
 
         def feed(raw: str) -> None:
-            shown = keep(raw)
+            shown = keep(CONTROL.sub("", raw))
             if not shown:
                 return
             state.last = shown
@@ -156,7 +162,7 @@ class Ui:
             if live:
                 ticker.join()
                 clear()
-        if not state.failed:
+        if report and not state.failed:
             self.ok(f"{done or label} ({format_elapsed(self.clock() - start)})")
 
     def ask(self, question: str, default: str) -> str:

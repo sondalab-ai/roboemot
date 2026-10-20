@@ -86,9 +86,9 @@ class FakeRobot:
         assert dest in self.tmp_dirs
         self.copies.append(files)
 
-    def stream(self, command, on_line, check: bool = True, stdin: str | None = None) -> str:
+    def stream(self, command, on_line, check: bool = True, **kw) -> str:
         self.streamed.append(command)
-        out = self.run(command, check=check, **({} if stdin is None else {"stdin": stdin}))
+        out = self.run(command, check=check, **kw)
         for line in out.splitlines():
             on_line(line)
         return out
@@ -1575,7 +1575,7 @@ def test_uninstall_announces_the_pip_steps_it_streams(offline, robot, daemon, ca
     capsys.readouterr()
     uninstall()
     out = capsys.readouterr().out
-    assert "uninstalling Python packages (can take minutes on the robot)" in out
+    assert "uninstalling Python packages\n" in out
     assert "✓ uninstalling Python packages (" in out
 
 
@@ -1596,7 +1596,7 @@ def test_app_lock_status_reads_the_endpoint_and_tolerates_its_absence(api, daemo
 
 def test_start_refuses_while_the_mobile_app_holds_the_robot(daemon):
     daemon.lock = {"state": "remote_session", "holder_name": "Reachy phone"}
-    with pytest.raises(WizardError, match="close the Reachy mobile app"):
+    with pytest.raises(WizardError, match="Reachy mobile app holds the robot.*close it first"):
         platform_for(daemon).start(quiet_ui(yes=True))
     assert daemon.mutations == []
 
@@ -1656,4 +1656,77 @@ def test_run_reports_the_mobile_app_holding_the_robot(offline, robot, daemon, ca
     install()
     daemon.lock = {"state": "remote_session", "holder_name": "phone"}
     assert run_mod.main(run_args()) == 1
-    assert "close the Reachy mobile app" in capsys.readouterr().out
+    assert "mobile app holds the robot (phone); close it first" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------- fix round 1
+
+
+def hold_slot(daemon) -> None:
+    daemon.lock = {"state": "remote_session", "holder_name": "phone"}
+
+
+def test_start_blocker_is_read_only_and_names_the_mobile_app(daemon):
+    platform = platform_for(daemon)
+    assert platform.start_blocker() is None
+    hold_slot(daemon)
+    assert "Reachy mobile app holds the robot" in platform.start_blocker()
+    assert daemon.mutations == []
+
+
+def test_a_local_app_holding_the_slot_is_not_a_blocker_and_asks_to_stop_it(daemon):
+    daemon.lock = {"state": "local_app", "holder_name": "conversation"}
+    daemon.current = {"info": {"name": "conversation"}, "state": "running"}
+    ui = quiet_ui()
+    asked: list[str] = []
+    ui.confirm = lambda question, default: asked.append(question) or True
+    platform_for(daemon).start(ui)
+    assert asked and "conversation is running" in asked[0]
+    assert daemon.current["info"]["name"] == "roboemot"
+
+
+def test_run_dry_run_reports_that_it_would_refuse(offline, robot, daemon, capsys):
+    install()
+    hold_slot(daemon)
+    capsys.readouterr()
+    assert run_mod.main(run_args("--dry-run")) == 0
+    out = capsys.readouterr().out
+    assert "would refuse: the Reachy mobile app holds the robot" in out
+    assert daemon.current is None
+
+
+def test_installer_dry_run_reports_that_it_would_refuse(offline, robot, daemon, capsys):
+    hold_slot(daemon)
+    inst.run_install(options(dry_run=True), quiet_ui(yes=True), ROOT)
+    assert "would refuse: the Reachy mobile app holds the robot" in capsys.readouterr().out
+
+
+def test_install_with_a_held_slot_finishes_warns_and_points_to_the_run_script(
+    offline, robot, daemon, capsys
+):
+    hold_slot(daemon)
+    inst.run_install(options(start=True, startup=False), quiet_ui(yes=True), ROOT)
+    out = capsys.readouterr().out
+    assert "roboemot not started: the Reachy mobile app holds the robot" in out
+    assert "python scripts/run_on_robot.py" in out
+    assert "installed" in out and "RoboEmot" in out
+    assert daemon.current is None and RECORD in robot.files
+
+
+def test_a_new_apps_venv_prints_one_check_line(offline, robot, daemon, capsys):
+    fresh_robot(robot)
+    install()
+    out = capsys.readouterr().out
+    assert f"created {reachy.APPS_VENV} with reachy-mini==1.11.0" in out
+    assert "✓ creating the apps venv" not in out
+    first = out.index("installing Python packages")
+    assert "✓ installing Python packages" not in out[first : out.index("created /venvs")]
+
+
+def test_uninstall_pip_is_announced_without_the_minutes_note(offline, robot, daemon, capsys):
+    install()
+    capsys.readouterr()
+    uninstall()
+    out = capsys.readouterr().out
+    assert "uninstalling Python packages\n" in out
+    assert "uninstalling Python packages (can take" not in out

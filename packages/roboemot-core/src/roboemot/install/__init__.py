@@ -101,6 +101,7 @@ class Platform(Protocol):
     def stop_app(self) -> None: ...
     def app_installed(self) -> bool: ...
     def app_url(self, host: str) -> str | None: ...
+    def start_blocker(self) -> str | None: ...
     def start(self, ui: Ui) -> None: ...
     def autostart(self) -> str | None: ...
     def set_autostart(self, name: str | None) -> None: ...
@@ -380,11 +381,9 @@ def install_piper(
         remote.copy([lock], tmp)
         if recreate:
             remote.run(f"mkdir -p -m 700 {shlex.quote(posixpath.dirname(venv))}")
-            with ui.progress(
-                f"creating the Piper virtualenv {venv}", done=f"created the Piper virtualenv {venv}"
-            ):
+            with ui.progress(f"creating the Piper virtualenv {venv}", report=False):
                 remote.run(f"{shlex.quote(platform.python)} -m venv {shlex.quote(venv)}")
-        result = RemotePython(remote, python, ui).install_locked(f"{tmp}/{lock.name}")
+        result = RemotePython(remote, python, ui).install_locked(f"{tmp}/{lock.name}", report=False)
     finally:
         remote.run(f"rm -rf {shlex.quote(tmp)}", check=False)
     if not result.ok:
@@ -837,10 +836,17 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
                 running = platform.running_app()
                 action = f"would stop {running}, " if running else "no app running; would "
                 ui.info(f"{action}wake the robot and start {platform.app_name}")
+                blocker = platform.start_blocker()
+                if blocker:
+                    ui.warn(f"would refuse: {blocker}")
                 ui.info(f"autostart app now: {platform.autostart() or 'none'}")
                 ui.title("dry run passed")
                 return
-            if (
+            blocker = platform.start_blocker()
+            if blocker:
+                ui.warn(f"{platform.app_name} not started: {blocker}")
+                ui.info("start it once that is done: python scripts/run_on_robot.py")
+            elif (
                 opts.start
                 if opts.start is not None
                 else ui.confirm(f"Start {platform.app_name} now?", True)

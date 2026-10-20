@@ -74,6 +74,8 @@ class RemotePython:
         stdin: str | None = None,
         check: bool = True,
         announce: str | None = None,
+        slow: bool = True,
+        report: bool = True,
     ) -> PipResult:
         """Run pip. With ``announce`` (and a Ui) the output streams as live progress; without,
         it is collected and the call stays silent."""
@@ -82,7 +84,9 @@ class RemotePython:
             cmd = f"printf %s {shlex.quote(stdin)} | {cmd}"
         full = f'{cmd} 2>&1; echo "__rc=$?"'
         if announce and self.ui is not None:
-            with self.ui.progress(announce, pip_progress_line) as progress:
+            with self.ui.progress(
+                announce, pip_progress_line, report=report, slow=slow
+            ) as progress:
                 out = self.remote.stream(full, progress, check=True)
                 progress.failed = not _rc_ok(out)
         else:
@@ -122,20 +126,26 @@ class RemotePython:
         args = f"install --dry-run --quiet --report - {PIP_FLAGS} {c}{_join(targets)}"
         return self._pip(args, stdin=constraints, check=False)
 
-    def install(self, targets: list[str], constraints: str | None) -> PipResult:
+    def install(
+        self, targets: list[str], constraints: str | None, report: bool = True
+    ) -> PipResult:
         c = "-c /dev/stdin " if constraints is not None else ""
         return self._pip(
             f"install {LONG_FLAGS} {PIP_FLAGS} {c}{_join(targets)}",
             stdin=constraints,
             check=False,
             announce="installing Python packages",
+            report=report,
         )
 
-    def install_locked(self, lock_file: str) -> PipResult:
+    def install_locked(self, lock_file: str, report: bool = True) -> PipResult:
         """Install a hash-pinned lock file: every artifact must match, wheels only, no cache."""
         args = f"install {LONG_FLAGS} {PIP_FLAGS} --require-hashes --only-binary=:all: -r"
         return self._pip(
-            f"{args} {shlex.quote(lock_file)}", check=False, announce="installing Python packages"
+            f"{args} {shlex.quote(lock_file)}",
+            check=False,
+            announce="installing Python packages",
+            report=report,
         )
 
     def reinstall_own(self, files: list[str]) -> None:
@@ -150,6 +160,7 @@ class RemotePython:
             self._pip(
                 f"uninstall --yes {LONG_FLAGS} {PIP_FLAGS} {_join(names)}",
                 announce="uninstalling Python packages",
+                slow=False,
             )
 
     def install_exact(self, pins: dict[str, str]) -> None:

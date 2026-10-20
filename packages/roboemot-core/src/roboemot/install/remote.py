@@ -52,39 +52,36 @@ class Remote:
             raise WizardError(f"on robot: {command}\n{proc.stderr.strip() or proc.stdout.strip()}")
         return proc.stdout.strip()
 
-    def stream(
-        self,
-        command: str,
-        on_line: Callable[[str], None],
-        check: bool = True,
-        stdin: str | None = None,
-    ) -> str:
+    def stream(self, command: str, on_line: Callable[[str], None], check: bool = True) -> str:
         """Like ``run``, but hand each output line to ``on_line`` as it arrives.
 
         stderr is merged into stdout. Returns the whole output (stripped); a non-zero exit
-        raises with that output, as ``run`` does.
+        raises with that output, as ``run`` does. Whatever interrupts the read (``on_line``
+        raising, Ctrl-C) kills the ssh process before the error propagates.
         """
         proc = subprocess.Popen(
             ["ssh", *self._opts(), self.target, command],
-            stdin=subprocess.PIPE if stdin is not None else None,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            errors="replace",
         )
-        if stdin is not None:
-            assert proc.stdin is not None
-            try:
-                proc.stdin.write(stdin)
-                proc.stdin.close()
-            except BrokenPipeError:
-                pass
         lines: list[str] = []
-        assert proc.stdout is not None
-        for raw in proc.stdout:
-            line = raw.rstrip("\r\n")
-            lines.append(line)
-            on_line(line)
-        proc.wait()
+        try:
+            assert proc.stdout is not None
+            for raw in proc.stdout:
+                line = raw.rstrip("\r\n")
+                lines.append(line)
+                on_line(line)
+            proc.wait()
+        except BaseException:
+            proc.kill()
+            proc.wait()
+            raise
+        finally:
+            if proc.stdout is not None:
+                proc.stdout.close()
         output = "\n".join(lines).strip()
         if check and proc.returncode != 0:
             raise WizardError(f"on robot: {command}\n{output}")

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import io
+import os
+import stat
 import subprocess
 import time
 from pathlib import Path
@@ -13,22 +15,25 @@ from roboemot.install.remote import Remote
 from roboemot.install.ui import Ui, WizardError, format_elapsed
 
 
-class Sink:
-    def __init__(self) -> None:
-        self.sent = ""
+class Lines:
+    def __init__(self, lines: list[str]) -> None:
+        self.it, self.closed = iter(lines), False
 
-    def write(self, text: str) -> None:
-        self.sent += text
+    def __iter__(self):
+        return self.it
 
     def close(self) -> None:
-        pass
+        self.closed = True
 
 
 class FakeProc:
     def __init__(self, lines: list[str], rc: int) -> None:
-        self.stdout = iter(lines)
-        self.stdin = Sink()
+        self.stdout = Lines(lines)
         self.returncode = rc
+        self.killed = False
+
+    def kill(self) -> None:
+        self.killed = True
 
     def wait(self) -> int:
         return self.returncode
@@ -67,14 +72,6 @@ def test_stream_raises_with_the_output_on_a_non_zero_exit(monkeypatch, remote):
         remote.stream("false", lambda line: None)
     patch_popen(monkeypatch, FakeProc(["boom\n"], 3))
     assert remote.stream("false", lambda line: None, check=False) == "boom"
-
-
-def test_stream_sends_stdin_and_never_echoes_it(monkeypatch, remote):
-    proc = FakeProc(["ok\n"], 0)
-    patch_popen(monkeypatch, proc)
-    seen: list[str] = []
-    remote.stream("cat >/dev/null", seen.append, stdin="s3cret")
-    assert proc.stdin.sent == "s3cret" and seen == ["ok"]
 
 
 @pytest.mark.parametrize(
@@ -165,7 +162,7 @@ class StreamRemote:
     def __init__(self, out: str) -> None:
         self.out, self.stdin, self.command = out, None, ""
 
-    def stream(self, command, on_line, check=True, stdin=None):
+    def stream(self, command, on_line, check=True):
         self.command = command
         for line in self.out.splitlines():
             on_line(line)
@@ -192,3 +189,78 @@ def test_long_pip_drops_quiet_and_keeps_the_cache_flags():
     assert "--quiet" not in remote.command
     assert "--progress-bar off" in remote.command and "--no-cache-dir" in remote.command
     assert "a==1" in remote.command
+
+
+def test_stream_kills_the_process_and_closes_the_pipe_when_on_line_raises(monkeypatch, remote):
+    proc = FakeProc(["a\n", "b\n"], 0)
+    patch_popen(monkeypatch, proc)
+
+    def boom(line: str) -> None:
+        raise RuntimeError("render failed")
+
+    with pytest.raises(RuntimeError, match="render failed"):
+        remote.stream("pip install", boom)
+    assert proc.killed and proc.stdout.closed
+
+
+def test_stream_kills_the_process_on_ctrl_c(monkeypatch, remote):
+    proc = FakeProc(["a\n"], 0)
+    patch_popen(monkeypatch, proc)
+
+    def interrupt(line: str) -> None:
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        remote.stream("pip install", interrupt)
+    assert proc.killed
+
+
+@pytest.fixture
+def fake_ssh(tmp_path, monkeypatch):
+    """A real ``ssh`` on PATH that runs the remote command through the local shell."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    script = bin_dir / "ssh"
+    script.write_text('#!/bin/sh\nfor last; do :; done\nexec sh -c "$last"\n')
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    return Remote("u", "h", tmp_path)
+
+
+def test_stream_with_a_real_process_delivers_lines_as_they_come(fake_ssh):
+    seen: list[tuple[str, float]] = []
+    out = fake_ssh.stream(
+        "echo one; sleep 0.3; echo two >&2; echo three",
+        lambda line: seen.append((line, time.monotonic())),
+    )
+    assert [line for line, _ in seen] == ["one", "two", "three"]
+    assert out == "one\ntwo\nthree"
+    assert seen[1][1] - seen[0][1] > 0.15
+
+
+def test_stream_with_a_real_process_checks_the_exit_code(fake_ssh):
+    with pytest.raises(WizardError, match="nope"):
+        fake_ssh.stream("echo nope; exit 3", lambda line: None)
+    assert fake_ssh.stream("echo nope; exit 3", lambda line: None, check=False) == "nope"
+
+
+def test_stream_with_a_real_process_survives_undecodable_bytes(fake_ssh):
+    seen: list[str] = []
+    fake_ssh.stream("printf 'a\\377b\\n'", seen.append)
+    assert len(seen) == 1 and seen[0].startswith("a") and seen[0].endswith("b")
+
+
+def test_progress_strips_control_characters_from_shown_lines(capsys):
+    ui = Ui(interactive=False, assume_yes=True)
+    with ui.progress("installing") as p:
+        p("Collecting \x1b[2Ja\rb\x07")
+    out = capsys.readouterr().out
+    assert "Collecting [2Jab" in out and "\x1b[2J" not in out
+
+
+def test_progress_notes_the_wait_only_when_slow(capsys):
+    ui = Ui(interactive=False, assume_yes=True)
+    with ui.progress("quick thing", slow=False, report=False):
+        pass
+    out = capsys.readouterr().out
+    assert "quick thing" in out and "can take minutes" not in out and "✓" not in out

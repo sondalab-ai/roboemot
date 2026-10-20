@@ -40,6 +40,9 @@ def run_start(opts: Options, ui: Ui, root: Path) -> None:
         running = platform.running_app()
         action = f"would stop {running}, " if running else "no app running; would "
         ui.info(f"{action}wake the robot and start {platform.app_name}")
+        blocker = platform.start_blocker()
+        if blocker:
+            ui.warn(f"would refuse: {blocker}")
         url = platform.app_url(host)
         if url:
             ui.info(f"web UI would be at {url}")
