@@ -18,6 +18,7 @@ pytestmark = pytest.mark.sim
 
 reachy_mini = pytest.importorskip("reachy_mini")
 
+from roboemot.affect.clips import load_clip_library  # noqa: E402
 from roboemot.config import ConfigStack  # noqa: E402
 from roboemot.manifest import load_manifest  # noqa: E402
 from roboemot.motion import Command, MotionLoop, Priority  # noqa: E402
@@ -217,7 +218,9 @@ def test_a_joy_expression_moves_the_antennas_on_the_simulated_robot(loop):
 
     manifest = loop.manifest
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour, manifest.channels, load_clip_library(manifest)
+    )
     cfg = stack.effective()
     home = {n: manifest.dofs[n].home for n in ("antenna_right", "antenna_left")}
     _hold(loop, home, 8.0)
@@ -251,7 +254,9 @@ def test_a_nod_gesture_moves_the_head_pitch_on_the_simulated_robot(loop):
 
     manifest = loop.manifest
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour, manifest.channels, load_clip_library(manifest)
+    )
     cfg = stack.effective()
     home = {"head.pitch": manifest.dofs["head.pitch"].home}
     _hold(loop, home, 8.0)
@@ -579,7 +584,9 @@ def test_the_rest_posture_lowers_the_head_and_droops_the_antennas_on_the_simulat
 
     manifest = loop.manifest
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour, manifest.channels, load_clip_library(manifest)
+    )
     cfg = stack.effective()
     names = ("head.pitch", "antenna_right", "antenna_left")
     _hold(loop, {n: manifest.dofs[n].home for n in names}, 8.0)

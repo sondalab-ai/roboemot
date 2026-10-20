@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import math
+import random
 from pathlib import Path
 
 import pytest
 import yaml
 from pydantic import ValidationError
 from roboemot.affect import AffectEngine, AffectState
+from roboemot.affect.clips import load_clip_library
 from roboemot.affect.expression import SOURCE, ExpressionRenderer, build_primitive
 from roboemot.affect.register import Person, resolve_register
 from roboemot.config import ConfigStack
@@ -20,6 +22,7 @@ from roboemot.motion import MotionCore, Priority
 MANIFEST = (
     Path(__file__).resolve().parents[3] / "configs" / "manifests" / "reachy-mini-wireless.yaml"
 )
+CLIPS = load_clip_library(load_manifest(MANIFEST, allow_unmeasured_dynamics=True))
 LABELS = ("calm", "joy", "curiosity", "surprise", "sadness", "fear", "annoyance", "sleepy")
 DT = 0.02
 
@@ -32,7 +35,9 @@ def manifest():
 @pytest.fixture(scope="module")
 def cfg(manifest) -> RoboEmotConfig:
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour, manifest.channels, load_clip_library(manifest)
+    )
     return stack.effective()
 
 
@@ -51,7 +56,13 @@ def active(group="adult", cfg=DEFAULTS, **params):
 def renderer(cfg, manifest, expression_map=None, **expr) -> ExpressionRenderer:
     ecfg = cfg.expression.model_copy(update=expr)
     return ExpressionRenderer(
-        ecfg, expression_map or cfg.expression_map, manifest.dofs, 0.15, body_yaw="body_yaw"
+        ecfg,
+        expression_map or cfg.expression_map,
+        manifest.dofs,
+        0.15,
+        body_yaw="body_yaw",
+        clips=CLIPS,
+        rng=random.Random(0),
     )
 
 
@@ -59,26 +70,39 @@ def entry(**channels) -> ExpressionEntry:
     return ExpressionEntry(channels=channels)
 
 
+SURPRISE = entry(
+    antenna_right=[(0, 0), (0.2, 25), (0.6, 25), (1.2, 0)],
+    antenna_left=[(0, 0), (0.2, -25), (0.6, -25), (1.2, 0)],
+    **{"head.pitch": [(0, 0), (0.2, -6), (0.6, -6), (1.2, 0)]},
+)
+SADNESS = entry(
+    antenna_right=[(0, 0), (1.2, -20), (2.8, -20), (4.0, 0)],
+    antenna_left=[(0, 0), (1.2, 20), (2.8, 20), (4.0, 0)],
+    **{"head.pitch": [(0, 0), (1.2, 6), (2.8, 6), (4.0, 0)]},
+)
+
+
 # ------------------------------------------------------------------ the map
 
 
 def test_the_reachy_default_map_covers_all_labels(cfg, manifest):
     assert set(cfg.expression_map) == set(LABELS) == set(cfg.affect.labels)
+    angles = {n for n, d in manifest.dofs.items() if d.kind == "angle"}
     for label, e in cfg.expression_map.items():
-        prim = build_primitive(label, e, manifest.dofs, body_yaw="body_yaw")
-        assert prim is not None and prim.additive
-        assert prim.keyframes[0].values == dict.fromkeys(prim.keyframes[0].values, 0.0)
-        assert prim.keyframes[-1].values == dict.fromkeys(prim.keyframes[-1].values, 0.0)
-        assert prim.duration == pytest.approx(e.repeat * max(f[-1][0] for f in e.channels.values()))
-    # antennas carry the affect; no LED and no translation anywhere
-    assert all(set(e.channels) <= {"antenna_right", "antenna_left", "head.pitch", "head.roll"}
-               for e in cfg.expression_map.values())  # fmt: skip
+        assert e.variants and not e.channels, label  # every label is a set of recorded clips
+        for v in e.variants:
+            assert v.clip in CLIPS, (label, v.clip)
+            clip = CLIPS[v.clip]
+            prim = build_primitive(v.clip, clip, manifest.dofs, body_yaw="body_yaw")
+            assert prim is not None and prim.additive
+            assert prim.keyframes[0].values == dict.fromkeys(prim.keyframes[0].values, 0.0)
+            assert prim.keyframes[-1].values == dict.fromkeys(prim.keyframes[-1].values, 0.0)
+            assert prim.duration == pytest.approx(max(f[-1][0] for f in clip.channels.values()))
+            assert set(clip.channels) <= angles  # no LED and no translation anywhere
 
 
-def test_degrees_in_the_file_are_radians_in_the_primitive(cfg, manifest):
-    prim = build_primitive(
-        "surprise", cfg.expression_map["surprise"], manifest.dofs, body_yaw="body_yaw"
-    )
+def test_degrees_in_the_file_are_radians_in_the_primitive(manifest):
+    prim = build_primitive("surprise", SURPRISE, manifest.dofs, body_yaw="body_yaw")
     peak = max(prim.keyframes, key=lambda k: k.values["antenna_right"])
     assert peak.values["antenna_right"] == pytest.approx(math.radians(25))
     assert peak.values["antenna_left"] == pytest.approx(math.radians(-25))
@@ -86,9 +110,11 @@ def test_degrees_in_the_file_are_radians_in_the_primitive(cfg, manifest):
 
 
 def test_antenna_signs_follow_the_connectivity_gestures(cfg, manifest):
-    """Raise toward vertical is right +, left -; droop is the other way (health/responder)."""
-    for label, sign in (("curiosity", 1), ("surprise", 1), ("sadness", -1), ("sleepy", -1)):
-        prim = build_primitive(label, cfg.expression_map[label], manifest.dofs, body_yaw="body_yaw")
+    """Spread outward is right -, left +; lifted toward vertical is the other way (health)."""
+    for gesture, sign in (("puzzled", -1), ("perk_up", 1)):
+        prim = build_primitive(
+            gesture, cfg.gesture_map[gesture], manifest.dofs, body_yaw="body_yaw"
+        )
         mid = prim.sample(prim.duration / 2)
         assert mid["antenna_right"] * sign > 0 and mid["antenna_left"] * sign < 0
 
@@ -151,7 +177,8 @@ def test_schema_rejects_bad_maps(cfg):
 def test_the_manifest_ships_the_map_and_yaml_loads_it(cfg):
     raw = yaml.safe_load(MANIFEST.read_text())["behaviour"]["expression_map"]
     assert set(raw) == set(LABELS)
-    assert cfg.expression_map["joy"].repeat == 3
+    assert all(set(e) == {"variants"} for e in raw.values())
+    assert {v.clip for v in cfg.expression_map["joy"].variants} >= {"cheerful1", "laughing1"}
 
 
 # ------------------------------------------------------------------ triggers
@@ -196,13 +223,15 @@ def test_a_repeated_labelled_impulse_starts_again_but_not_within_the_min_interva
 
 
 def test_a_label_without_a_map_entry_or_a_usable_channel_plays_nothing(cfg, manifest):
-    sparse = {"joy": cfg.expression_map["joy"]}
+    sparse = {"joy": entry(antenna_right=[(0, 0), (0.5, 10), (1, 0)])}
     r = renderer(cfg, manifest, sparse)
     reg = active("adult")
     r.update(state("calm", 0.4), reg, 0.0)
     assert not r.update(state("sadness", 0.4), reg, 2.0)
     head_only = {n: d for n, d in manifest.dofs.items() if n.startswith("head")}
-    r2 = ExpressionRenderer(cfg.expression, sparse, head_only, 0.15, body_yaw="body_yaw")
+    r2 = ExpressionRenderer(
+        cfg.expression, sparse, head_only, 0.15, body_yaw="body_yaw", clips=CLIPS
+    )
     r2.update(state("calm", 0.4), reg, 0.0)
     assert not r2.update(state("joy", 0.4), reg, 2.0)
     assert r2.commands(2.0) == []
@@ -272,7 +301,7 @@ def drain(r, t0, seconds):
 
 
 def test_an_expression_ends_at_zero_and_stops_feeding(cfg, manifest):
-    r = renderer(cfg, manifest)
+    r = renderer(cfg, manifest, {"surprise": SURPRISE})
     reg = active("adult")
     r.update(state("calm", 0.0), reg, 0.0)
     r.update(state("surprise", 0.5), reg, 1.0)
@@ -284,7 +313,7 @@ def test_an_expression_ends_at_zero_and_stops_feeding(cfg, manifest):
 
 
 def test_a_new_expression_blends_in_from_the_current_offset(cfg, manifest):
-    r = renderer(cfg, manifest)
+    r = renderer(cfg, manifest, {"sadness": SADNESS, "surprise": SURPRISE})
     reg = active("adult")
     r.update(state("calm", 0.0), reg, 0.0)
     r.update(state("sadness", 0.5), reg, 1.0)
@@ -401,6 +430,16 @@ def test_the_minor_cap_wins_over_the_child_register(cfg, manifest):
         assert all(up[n] <= free_up[n] + 1e-9 and down[n] <= free_down[n] + 1e-9 for n in moved)
 
 
+@pytest.mark.parametrize("clip", sorted(CLIPS))
+def test_every_recorded_clip_stays_inside_the_minor_share_of_the_range(cfg, manifest, clip):
+    """SPEC 7, 12: the minor cap holds for each vendored clip at the child's amplitude."""
+    factor = cfg.safety.minor_motion_factor
+    only = ExpressionEntry(variants=[{"clip": clip}])
+    reg = active("child")
+    up, down = run_core(manifest, cfg, reg, state("joy", 1.0), True, {"joy": only})
+    within_band(manifest, factor, up, down)
+
+
 def test_the_minor_cap_holds_at_the_worst_case_the_schema_allows(cfg, manifest):
     factor = cfg.safety.minor_motion_factor
     worst = RoboEmotConfig.model_validate(
@@ -446,12 +485,14 @@ def test_a_reload_swaps_the_map_and_parameters(cfg, manifest):
 def test_the_manifest_behaviour_becomes_part_of_the_installed_config(manifest):
     stack = ConfigStack()
     assert stack.effective().expression_map == {}
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour, manifest.channels, load_clip_library(manifest)
+    )
     assert set(stack.effective().expression_map) == set(LABELS)
     # an app layer merges channel by channel into the manifest's entry
     stack.app = {"expression_map": {"joy": {"channels": {"head.roll": [[0, 0], [0.45, 0]]}}}}
     joy = stack.effective().expression_map["joy"]
-    assert set(joy.channels) == {"antenna_right", "antenna_left", "head.roll"}
+    assert set(joy.channels) == {"head.roll"} and not joy.variants  # channels drop the clips
 
 
 def test_set_register_acts_within_one_tick_even_when_the_affect_updates_are_rare(cfg, manifest):
@@ -511,7 +552,9 @@ def test_manifest_behaviour_may_only_set_known_keys_and_is_audited(manifest):
             {"expression_map": {"rage": {"channels": {}}}}, manifest.channels
         )
     assert stack.manifest == {}
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour, manifest.channels, load_clip_library(manifest)
+    )
     assert stack.audit[-1].source == "manifest" and stack.audit[-1].new == [
         "circadian_motion",
         "expression_map",
@@ -608,7 +651,9 @@ def test_the_schema_rejects_bad_gestures():
 
 def test_the_manifest_may_set_gesture_map_and_it_is_audited(manifest):
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour, manifest.channels, load_clip_library(manifest)
+    )
     assert "gesture_map" in stack.audit[-1].new
     assert set(stack.effective().gesture_map) >= {"nod", "shake"}
 
@@ -616,7 +661,13 @@ def test_the_manifest_may_set_gesture_map_and_it_is_audited(manifest):
 def gesture_renderer(cfg, manifest, **expr):
     ecfg = cfg.expression.model_copy(update=expr)
     return ExpressionRenderer(
-        ecfg, cfg.expression_map, manifest.dofs, 0.15, cfg.gesture_map, body_yaw="body_yaw"
+        ecfg,
+        cfg.expression_map,
+        manifest.dofs,
+        0.15,
+        cfg.gesture_map,
+        body_yaw="body_yaw",
+        clips=CLIPS,
     )
 
 

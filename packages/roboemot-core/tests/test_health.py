@@ -11,6 +11,7 @@ from pathlib import Path
 import httpx
 import pytest
 from roboemot.affect import AffectEngine
+from roboemot.affect.clips import load_clip_library
 from roboemot.affect.expression import ExpressionRenderer
 from roboemot.config import ConfigStack
 from roboemot.config.schema import LinkPolicy, LLMRoute, SafetyConfig
@@ -609,7 +610,9 @@ def reachy():
     """The shipped Reachy Mini manifest and the configuration it installs (gesture_map included)."""
     manifest = load_manifest(REACHY_MANIFEST, allow_unmeasured_dynamics=True)
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour, manifest.channels, load_clip_library(manifest)
+    )
     return manifest, stack.effective()
 
 

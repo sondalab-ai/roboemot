@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from roboemot.affect import AffectState
+from roboemot.affect.clips import load_clip_library
 from roboemot.affect.expression import ExpressionRenderer
 from roboemot.affect.register import Person, resolve_register
 from roboemot.config import ConfigStack
@@ -28,7 +29,9 @@ GESTURES = ("nod", "shake")
 def setup():
     manifest = load_manifest(MANIFEST, allow_unmeasured_dynamics=True)
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour, manifest.channels, load_clip_library(manifest)
+    )
     return manifest, stack.effective()
 
 

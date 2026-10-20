@@ -7,6 +7,7 @@ import time
 
 import numpy as np
 import pytest
+from roboemot.affect.clips import load_clip_library
 from roboemot.circadian.motion import FX_SOURCE, REST_SOURCE
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.drivers import MockPoseDriver
@@ -319,7 +320,12 @@ def test_the_default_clock_reads_the_local_hour(data, monkeypatch):  # noqa: F81
 
 def test_the_stretch_follows_the_register_amplitude_and_the_minor_cap(data, fed):  # noqa: F811
     """Nobody is in view: the fail-closed ``unknown`` register (0.7x) and the minor caps are on,
-    so the 25 degree antenna stretch peaks at 0.7 x 25 degrees."""
+    so the recorded stretch clip peaks at 0.7 x its own head pitch peak (SPEC 7A)."""
+    clip = load_clip_library(
+        load_manifest(app_module.DATA / "reachy-mini-wireless.yaml", allow_unmeasured_dynamics=True)
+    )["wake-mini-up"]
+    clip_peak = max(abs(v) for _, v in clip.channels["head.pitch"])
+    clip_end = max(f[-1][0] for f in clip.channels.values())
     app = new_app(app_module.RoboEmotApp)
     stop, thread, errors = start(app)
     try:
@@ -328,9 +334,10 @@ def test_the_stretch_follows_the_register_amplitude_and_the_minor_cap(data, fed)
         assert wait_for(lambda: section(app)["state"] == "resting")
         app.hold("awake", 5)
         assert wait_for(lambda: any(c.source == FX_SOURCE for c in fed))
-        assert wait_for(lambda: section(app)["waking"] is False, timeout=10)
-        peak = max(c.targets["antenna_right"] for c in fed if c.source == FX_SOURCE)
-        assert peak == pytest.approx(math.radians(25) * 0.7, rel=0.05)
+        assert wait_for(lambda: section(app)["waking"] is False, timeout=clip_end + 15)
+        peak = max(abs(c.targets["head.pitch"]) for c in fed if c.source == FX_SOURCE)
+        expected = math.radians(clip_peak) * 0.7
+        assert expected * 0.85 <= peak <= expected * 1.001
     finally:
         stop.set()
         thread.join(15)

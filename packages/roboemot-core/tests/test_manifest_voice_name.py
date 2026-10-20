@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from roboemot.affect.clips import load_clip_library
 from roboemot.config import ConfigError, ConfigStack
 from roboemot.config.schema import RoboEmotConfig, VoiceConfig
 from roboemot.manifest import load_manifest
@@ -34,7 +35,9 @@ def test_the_reachy_manifest_supplies_its_name_and_spellings():
     assert voice["keywords"]["it"]["name_aliases"] == ["reati"]
     assert voice["keywords"]["en"]["name_aliases"] == ["riyadh she"]
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour, manifest.channels, load_clip_library(manifest)
+    )
     cfg = stack.effective()
     assert cfg.voice.default_name == "Reachy"
     assert cfg.voice.keywords["it"].name_aliases == ["reati"]
@@ -115,14 +118,18 @@ def test_manifest_names_are_checked_against_the_schema_maximum_not_the_user_knob
 def test_the_reachy_manifest_starts_with_a_tiny_user_cap():
     manifest = load_manifest(REACHY, allow_unmeasured_dynamics=True)
     stack = ConfigStack(app={"voice": {"name_max_chars": 1}})
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour, manifest.channels, load_clip_library(manifest)
+    )
 
 
 @pytest.mark.parametrize("cap", [1, 5, 32])
 def test_a_tight_user_cap_does_not_change_which_platform_names_get_the_aliases(cap):
     manifest = load_manifest(REACHY, allow_unmeasured_dynamics=True)
     stack = ConfigStack(app={"voice": {"name_max_chars": cap}})
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour, manifest.channels, load_clip_library(manifest)
+    )
     names = RobotName()
     names.configure(stack.effective().voice)
     names.set_platform("reachy_mini")

@@ -11,11 +11,11 @@ section number in commit messages that implement or change behaviour.
 | --- | --- |
 | `docs/specs/kickoff.md` | Engineering spec (SPEC), the source of truth |
 | `packages/roboemot-core/` | Python package `roboemot`: config, manifest, discovery, health (connectivity), diagnostics (debug report), vision (detect, track, embed, replay, model fetcher; ONNX backends need the `vision` extra), motion reference, affect (engine, appraisal, runner, register resolver, expression renderer), circadian, persona (traits), LLM router and system prompt, web UI robot section (`webui/robot_section.py`, `roboemot.settings` plugins), secret store (`secret_store.py`: `${secret:name}` route keys, 0600 file), bus |
-| `packages/roboemot-reachymini/` | Python package `roboemot_reachymini`: Reachy Mini driver and SDK bridge |
+| `packages/roboemot-reachymini/` | Python package `roboemot_reachymini`: Reachy Mini driver and SDK bridge; vendored recorded expression clips (Pollen emotions library, Apache-2.0) in `data/emotions/` |
 | `packages/roboemot-core/src/roboemot/webui/static/vendor/sondalab-ui-kit/` | Vendored, pinned `@sondalab/ui-kit` (offline web UI). Never edit by hand: change the pin in `scripts/sync_ui_kit.py` and run it; `scripts/audit_webui.sh` runs `sl-audit` on the page (SPEC 12) |
 | `rt/` | C++ real-time core (`roboemot-rt`): arbiter and safety limiter, CMake + ctest |
 | `configs/` | Library defaults, robot manifests, personality presets |
-| `scripts/` | Dev helpers (simulation daemon, `install_on_robot.py`: wrapper over the robot-agnostic installer `roboemot.install`; `robot_ssh.py`: wrapper over `roboemot.install.ssh`) |
+| `scripts/` | Dev helpers (simulation daemon, `import_pollen_emotions.py`: pinned conversion of the emotions library, `--check` offline, `install_on_robot.py`: wrapper over the robot-agnostic installer `roboemot.install`; `robot_ssh.py`: wrapper over `roboemot.install.ssh`) |
 
 ## Rules that come from the spec
 
