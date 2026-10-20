@@ -329,6 +329,7 @@ def test_a_nod_gesture_moves_the_head_pitch_on_the_simulated_robot(loop):
         0.15,
         cfg.gesture_map,
         body_yaw="body_yaw",
+        clips=load_clip_library(manifest),
     )
     assert renderer.request("nod")
     assert renderer.update(AffectState(0.0, 0.0, "calm", 0.5), reg, time.monotonic())
@@ -653,7 +654,12 @@ def test_the_rest_posture_lowers_the_head_and_droops_the_antennas_on_the_simulat
     settled = loop.driver.read_state()
     loop.clear("test")  # the settle command is COMMANDED and never expires: it would win
     motion = CircadianMotion(
-        cfg.circadian, cfg.circadian_motion, manifest.dofs, body_yaw="body_yaw"
+        cfg.circadian,
+        cfg.circadian_motion,
+        manifest.dofs,
+        body_yaw="body_yaw",
+        affect_intensity=lambda: 0.0,
+        clips=load_clip_library(manifest),
     )
     end = time.monotonic() + 10.0
     while time.monotonic() < end:

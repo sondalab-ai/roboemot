@@ -335,3 +335,19 @@ def test_the_stretch_follows_the_register_amplitude_and_the_minor_cap(data, fed)
         stop.set()
         thread.join(15)
     assert not errors
+
+
+def test_the_app_feeds_the_affect_intensity_to_the_circadian_motion(data):  # noqa: F811
+    app = new_app(app_module.RoboEmotApp)
+    stop, thread, errors = start(app)
+    try:
+        assert wait_for(lambda: app.circadian_runner is not None and app.affect_runner is not None)
+        motion = app.circadian_runner.motion
+        app.affect_runner.engine.impulse(time.monotonic(), 0.6, 0.6, "joy")
+        expected = app.affect_runner.engine.state(time.monotonic()).intensity
+        assert expected > 0
+        assert motion.affect_intensity() == pytest.approx(expected, abs=0.05)
+    finally:
+        stop.set()
+        thread.join(15)
+    assert not errors

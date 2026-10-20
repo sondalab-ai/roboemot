@@ -47,6 +47,7 @@ class Rig:
             0.15,
             cfg.gesture_map,
             body_yaw="body_yaw",
+            clips=load_clip_library(manifest),
         )
         self.now = 10.0
         self.question_end: float | None = None

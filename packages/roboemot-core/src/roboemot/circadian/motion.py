@@ -30,7 +30,7 @@ from dataclasses import replace
 
 from ..affect.clips import ClipLibrary
 from ..affect.expression import build_primitive, pick_variant
-from ..config.schema import CircadianConfig
+from ..config.schema import CircadianConfig, ClipVariant, ExpressionEntry
 from ..config.schema import CircadianMotion as CircadianMotionConfig
 from ..manifest import Dof
 from ..motion.core import Command, Priority
@@ -51,12 +51,13 @@ class CircadianMotion:
         dofs: Mapping[str, Dof],
         *,
         body_yaw: str | None,
+        affect_intensity: Callable[[], float],
         rng: random.Random | None = None,
         clips: ClipLibrary | None = None,
     ) -> None:
         self.dofs = dofs
         self.clips: ClipLibrary = clips or {}
-        self.affect_intensity: Callable[[], float] = lambda: 0.0  # the affect intensity now
+        self.affect_intensity = affect_intensity  # the affect intensity now, for variant bands
         self._last_clip: dict[str, str] = {}
         self.body_yaw = body_yaw
         self.rng = rng or random.Random()  # noqa: S311 (jitter, not security)
@@ -71,6 +72,10 @@ class CircadianMotion:
 
     def apply_config(self, cfg: CircadianConfig, motion: CircadianMotionConfig) -> None:
         """Hot reload: new parameters and primitives; a primitive already playing finishes."""
+        for name, entry in (("yawn", motion.yawn), ("stretch", motion.stretch)):
+            for v in entry.variants if entry is not None else ():
+                if v.clip not in self.clips:
+                    raise ValueError(f"circadian {name}: unknown clip {v.clip!r}")
         self.cfg = cfg
         self.rest = {
             name: min(max(math.radians(deg), self.dofs[name].min), self.dofs[name].max)
@@ -99,8 +104,13 @@ class CircadianMotion:
         if entry is None:
             return False
         if entry.variants:
-            return any(v.clip in self.clips for v in entry.variants)
+            return bool(self._playable_variants(name, entry))
         return self._primitive(name, None) is not None
+
+    def _playable_variants(self, name: str, entry: ExpressionEntry) -> list[ClipVariant]:
+        """The variants whose clip builds into a primitive over this robot's dofs (the body turn
+        never plays here), so ``_can_play`` and ``_choose`` agree on what a pick may land on."""
+        return [v for v in entry.variants if self._primitive(name, v.clip) is not None]
 
     def _choose(self, name: str) -> tuple[Primitive, float] | None:
         """The primitive to play for ``name`` and its variant gain (1.0 for channels). With
@@ -111,8 +121,12 @@ class CircadianMotion:
         if not entry.variants:
             prim = self._primitive(name, None)
             return (prim, 1.0) if prim is not None else None
-        intensity = min(1.0, max(0.0, self.affect_intensity()))
-        variant = pick_variant(entry.variants, intensity, self._last_clip.get(name), self.rng)
+        variant = pick_variant(
+            self._playable_variants(name, entry),
+            self.affect_intensity(),
+            self._last_clip.get(name),
+            self.rng,
+        )
         prim = self._primitive(name, variant.clip) if variant is not None else None
         if variant is None or prim is None:
             return None
@@ -173,9 +187,11 @@ class CircadianMotion:
         if state == "drowsy" and not attending and self._player is None and self._can_play("yawn"):
             if self._next_yawn is None:
                 self._schedule_yawn(now)
-            elif now >= self._next_yawn and (chosen := self._choose("yawn")) is not None:
-                self._play("yawn", *chosen, now)
-                self._schedule_yawn(now + chosen[0].duration)
+            elif now >= self._next_yawn:
+                chosen = self._choose("yawn")  # None: no variant fits the affect intensity now
+                if chosen is not None:
+                    self._play("yawn", *chosen, now)
+                self._schedule_yawn(now + (chosen[0].duration if chosen else 0.0))
         elif state != "drowsy":
             self._next_yawn = None
         if state == "resting" and not attending and self.rest:

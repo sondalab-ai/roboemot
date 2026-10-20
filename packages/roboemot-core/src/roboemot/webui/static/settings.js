@@ -143,7 +143,8 @@ function readNumber(desc, input) {
   if (input.value.trim() === "") return { code: "value_type" };
   const n = Number(input.value);
   if (!Number.isFinite(n) || (desc.kind === "int" && !Number.isInteger(n))) return { code: "value_type" };
-  if ((desc.ge !== null && desc.ge !== undefined && n < desc.ge) || (desc.le !== null && desc.le !== undefined && n > desc.le)) {
+  if ((desc.gt !== null && desc.gt !== undefined && n <= desc.gt) ||
+      (desc.ge !== null && desc.ge !== undefined && n < desc.ge) || (desc.le !== null && desc.le !== undefined && n > desc.le)) {
     return { code: "value_range" };
   }
   return { value: n };

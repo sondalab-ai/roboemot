@@ -16,6 +16,7 @@ Every field carries a default, a unit and a range. Field metadata (``json_schema
 
 from __future__ import annotations
 
+import math
 import re
 import warnings
 from typing import Any, Literal
@@ -31,6 +32,7 @@ def param(
     description: str,
     *,
     unit: str | None = None,
+    gt: float | None = None,
     ge: float | None = None,
     le: float | None = None,
     restart: bool = False,
@@ -48,6 +50,8 @@ def param(
     if admin_only:
         extra["admin_only"] = True
     kwargs: dict[str, Any] = {"description": description, "json_schema_extra": extra}
+    if gt is not None:
+        kwargs["gt"] = gt
     if ge is not None:
         kwargs["ge"] = ge
     if le is not None:
@@ -466,7 +470,7 @@ class ClipVariant(Strict):
     """One recorded clip an entry may play, with the intensity band it suits (SPEC 7)."""
 
     clip: str = param(..., "Name of a clip in the robot's clip library")
-    weight: float = param(1.0, "Relative chance among the variants eligible at the start", ge=0)
+    weight: float = param(1.0, "Relative chance among the variants eligible at the start", gt=0)
     min_intensity: float = param(
         0.0, "Lowest affect intensity at which this variant may play", ge=0, le=1
     )
@@ -476,14 +480,20 @@ class ClipVariant(Strict):
     gain: float = param(
         1.0,
         "Multiplies the amplitude factor before the expression.max_amplitude cap",
-        ge=0,
+        gt=0,
         le=2,
     )
 
+    @field_validator("weight", "gain", mode="before")
+    @classmethod
+    def _finite(cls, value: Any) -> Any:
+        """Runs before the range check, which would call a NaN "not less than or equal to 2"."""
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("must be a finite number")
+        return value
+
     @model_validator(mode="after")
     def _band(self) -> ClipVariant:
-        if self.weight <= 0:
-            raise ValueError("variant weight must be greater than 0")
         if self.min_intensity > self.max_intensity:
             raise ValueError("variant min_intensity must not exceed max_intensity")
         return self
@@ -517,6 +527,11 @@ class ExpressionEntry(Strict):
         if self.channels:
             check_keyframes(self.channels)
             return self
+        clips = [v.clip for v in self.variants]
+        if len(set(clips)) != len(clips):
+            raise ValueError("variants name a clip more than once")
+        if self.repeat != 1 or self.curve != "linear":
+            raise ValueError("repeat and curve belong to the clip's keyframes, not to variants")
         reach = 0.0
         for v in sorted(self.variants, key=lambda v: v.min_intensity):
             if v.min_intensity > reach:

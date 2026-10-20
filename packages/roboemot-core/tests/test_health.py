@@ -623,7 +623,13 @@ def responder(dofs=REACHY, language="it", gesture_map=None):
     robot = {n: d for n, d in manifest.dofs.items() if n in dofs}
     gestures = cfg.gesture_map if gesture_map is None else gesture_map
     renderer = ExpressionRenderer(
-        cfg.expression, cfg.expression_map, robot, 0.15, gestures, body_yaw="body_yaw"
+        cfg.expression,
+        cfg.expression_map,
+        robot,
+        0.15,
+        gestures,
+        body_yaw="body_yaw",
+        clips=load_clip_library(manifest),
     )
     cue, affect = Cue(), AffectEngine(CFG.affect, CFG.appraisal)
     return OfflineResponder(CFG.connectivity, renderer, language, affect, cue), cue, affect

@@ -9,7 +9,6 @@ a robot without a library gets an empty one.
 
 from __future__ import annotations
 
-import inspect
 import logging
 from collections.abc import Collection, Mapping
 from importlib.metadata import entry_points
@@ -73,9 +72,11 @@ def load_clip_library(manifest: Manifest) -> dict[str, ExpressionEntry]:
     for ep in entry_points(group=ENTRY_POINT_GROUP):
         if ep.name != robot_id:
             continue
+        from ..plugins import _accepts_positional  # plugins imports this module
+
         factory = ep.load()
         try:
-            takes_manifest = bool(inspect.signature(factory).parameters)
+            takes_manifest = _accepts_positional(factory, 1)
             raw = factory(manifest) if takes_manifest else factory()
         except Exception as exc:
             raise ClipLibraryError(
