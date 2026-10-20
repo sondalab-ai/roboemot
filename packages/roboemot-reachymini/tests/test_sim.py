@@ -250,6 +250,62 @@ def test_a_joy_expression_moves_the_antennas_on_the_simulated_robot(loop):
         assert values[-1] == pytest.approx(settled[n], abs=0.1), n
 
 
+@pytest.mark.parametrize("label", sorted(ConfigStack().effective().affect.labels))
+def test_every_label_plays_a_recorded_clip_on_the_simulated_robot(loop, label):
+    """SPEC 7, Recorded clips: each label's clip moves its largest channel and comes back.
+
+    The label is pinned to its shortest full-intensity variant that swings a non-body channel by
+    at least 20 degrees, so the run stays short and the motion is large enough to see through
+    the slow fallback dynamics.
+    """
+    from roboemot.affect import AffectState
+    from roboemot.affect.expression import ExpressionRenderer
+    from roboemot.affect.register import Person, resolve_register
+
+    manifest = loop.manifest
+    clips = load_clip_library(manifest)
+    stack = ConfigStack()
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, clips)
+    cfg = stack.effective()
+
+    def peak(clip: str) -> tuple[str, float]:
+        frames = {n: f for n, f in clips[clip].channels.items() if n != "body_yaw"}
+        name = max(frames, key=lambda n: max(abs(v) for _, v in frames[n]))
+        return name, max(abs(v) for _, v in frames[name])
+
+    def length(clip: str) -> float:
+        return max(f[-1][0] for f in clips[clip].channels.values())
+
+    entry = cfg.expression_map[label]
+    eligible = [v for v in entry.variants if v.max_intensity >= 1.0 and peak(v.clip)[1] >= 20.0]
+    variant = min(eligible, key=lambda v: length(v.clip))
+    channel = peak(variant.clip)[0]
+    expression_map = {**cfg.expression_map, label: entry.model_copy(update={"variants": [variant]})}
+    home = {channel: manifest.dofs[channel].home}
+    _hold(loop, home, 8.0)
+    settled = loop.driver.read_state()[channel]
+    reg = resolve_register([Person("adult", "declared", {})], cfg.register, cfg.persona)
+    renderer = ExpressionRenderer(
+        cfg.expression, expression_map, manifest.dofs, 0.15, body_yaw="body_yaw", clips=clips
+    )
+    proto = cfg.affect.labels[label]
+    renderer.update(AffectState(0.0, 0.0, "", 0.0), reg, time.monotonic())
+    assert renderer.update(
+        AffectState(proto.valence, proto.arousal, label, 1.0, 1), reg, time.monotonic()
+    )
+    # the fallback rate limit lags a large swing, so the return gets the time it needs at that rate
+    lag_s = math.radians(peak(variant.clip)[1]) / cfg.safety.unmeasured_dynamics_fallback_vel
+    seen: list[float] = []
+    end = time.monotonic() + length(variant.clip) + lag_s + 2.0
+    while time.monotonic() < end:
+        for cmd in renderer.commands(time.monotonic()):
+            loop.feed(cmd)
+        seen.append(loop.driver.read_state()[channel])
+        time.sleep(0.02)
+    assert max(seen) - min(seen) > 0.03, (variant.clip, channel, max(seen) - min(seen))
+    assert seen[-1] == pytest.approx(settled, abs=0.1), (variant.clip, channel)
+
+
 def test_a_nod_gesture_moves_the_head_pitch_on_the_simulated_robot(loop):
     """SPEC 7, 11: the shipped nod, requested as the play skill does, dips the head and returns."""
     from roboemot.affect import AffectState
