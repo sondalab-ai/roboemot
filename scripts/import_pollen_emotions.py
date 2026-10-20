@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Convert Pollen's Reachy Mini emotions library into RoboEmot expression clips (SPEC 4A, 7).
 
-The 81 recorded moves of ``pollen-robotics/reachy-mini-emotions-library`` (Apache-2.0) are
+The 85 recorded moves of ``pollen-robotics/reachy-mini-emotions-library`` (Apache-2.0) are
 converted once, at a pinned revision, into ``data/emotions/clips.yaml`` of ``roboemot_reachymini``
 together with ``LICENSE`` and ``VENDORED.json`` (revision, licence, attribution, sha256 per source
 file and of the outputs). Nothing is downloaded at runtime and the SDK's ``play_move`` is never
@@ -54,6 +54,7 @@ MINJERK_PEAK = 1.875  # peak speed of a min-jerk ramp over its mean speed
 RDP_TOLERANCE_DEG = 0.5  # simplification tolerance and the "never leaves home" threshold
 ROUND_DEG = 0.1  # value resolution of the written keyframes
 TIME_RESOLUTION_S = 0.001  # keyframe times are rounded to the millisecond
+NAME_RE = r"[\w.-]+\.json"  # an upstream file name: no path separator, no surprises
 MAX_FILE_BYTES = 4_000_000  # an upstream move is under 0.2 MB; anything bigger is not one
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -333,6 +334,7 @@ def conversion_constants() -> dict[str, float]:
         "rdp_tolerance_deg": RDP_TOLERANCE_DEG,
         "round_deg": ROUND_DEG,
         "time_resolution_s": TIME_RESOLUTION_S,
+        "homes_deg": manifest_homes(),
     }
 
 
@@ -362,13 +364,19 @@ def fetch(url: str) -> bytes:
 
 def upstream_moves() -> list[str]:
     tree = json.loads(fetch(TREE_URL))
-    return sorted(e["path"] for e in tree if e["type"] == "file" and e["path"].endswith(".json"))
+    names = sorted(e["path"] for e in tree if e["type"] == "file" and e["path"].endswith(".json"))
+    for name in names:
+        if not re.fullmatch(NAME_RE, name):
+            sys.exit(f"unexpected upstream file name {name!r}")
+    return names
 
 
 def read_sources(source: Path | None) -> dict[str, bytes]:
     """Every pinned move, from a local copy or the pinned revision, verified against SHA256."""
     out = {}
     for name, digest in SHA256.items():
+        if not re.fullmatch(NAME_RE, name):
+            sys.exit(f"unexpected file name in SHA256: {name!r}")
         data = (source / name).read_bytes() if source else fetch(FILE_URL.format(name=name))
         if sha256(data) != digest:
             sys.exit(f"sha256 mismatch for {name}: got {sha256(data)}")
@@ -430,7 +438,7 @@ def check() -> int:
         problems.append(f"{LICENSE} is not the pinned Apache-2.0 text")
     if f"revision {REVISION}" not in clips_text.decode().split("\n", 1)[0]:
         problems.append(f"{CLIPS} header does not name the pinned revision")
-    extra = {p.name for p in OUT_DIR.iterdir() if p.is_file()} - {CLIPS, LICENSE, VENDORED}
+    extra = {p.name for p in OUT_DIR.iterdir()} - {CLIPS, LICENSE, VENDORED}
     problems += [f"not in the manifest: {name}" for name in sorted(extra)]
     print("\n".join(problems) or "vendored emotions match the manifest")
     return 1 if problems else 0
@@ -439,7 +447,7 @@ def check() -> int:
 def print_pins() -> None:
     print("    # PINS-BEGIN")
     for name in upstream_moves():
-        print(f'    "{name}": "{sha256(fetch(FILE_URL.format(name=name)))}",')
+        print(f'    {name!r}: "{sha256(fetch(FILE_URL.format(name=name)))}",')
     print("    # PINS-END")
 
 

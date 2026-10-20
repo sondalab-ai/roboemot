@@ -294,7 +294,7 @@ def test_the_licence_is_the_apache_text_beside_the_clips():
 
 def test_every_upstream_move_is_a_clip_of_the_manifest_dofs():
     assert set(LIB) == {n.removesuffix(".json") for n in IMP.SHA256}
-    assert len(LIB) >= 81
+    assert len(LIB) == len(IMP.SHA256)
     validated = validate_clip_library(LIB, MANIFEST.channels)
     assert set(validated) == set(LIB)
     for name, entry in validated.items():
@@ -337,3 +337,60 @@ def _variants(entry):
     from roboemot.config.schema import ExpressionEntry
 
     return ExpressionEntry.model_validate(entry).variants
+
+
+def test_recorded_droop_clips_put_the_right_antenna_negative_and_the_left_positive():
+    """The manifest signs (droop is right -, left +) hold on the real, converted data."""
+
+    def extreme(frames):
+        return max((v for _, v in frames), key=abs)
+
+    for name in ("sad2", "tired1", "downcast1", "exhausted1"):
+        channels = LIB[name]["channels"]
+        assert extreme(channels["antenna_right"]) < -50, name
+        assert extreme(channels["antenna_left"]) > 50, name
+
+
+def test_the_manifest_homes_are_recorded_and_compared_by_the_check(copy, monkeypatch, capsys):
+    doc = json.loads((copy / "VENDORED.json").read_text())
+    assert doc["conversion"]["homes_deg"] == HOMES
+    assert doc["conversion"]["homes_deg"]["antenna_right"] == -10
+    monkeypatch.setattr(IMP, "manifest_homes", lambda: {**HOMES, "antenna_right": -12.0})
+    assert IMP.check() == 1
+    assert "conversion" in capsys.readouterr().out
+
+
+def test_a_stray_directory_fails_the_check(copy, capsys):
+    (copy / "sub").mkdir()
+    assert IMP.check() == 1
+    assert "sub" in capsys.readouterr().out
+
+
+def _tree(monkeypatch, paths):
+    tree = [{"type": "file", "path": p} for p in paths]
+
+    def fetch(url):
+        return json.dumps(tree).encode() if url == IMP.TREE_URL else b"{}"
+
+    monkeypatch.setattr(IMP, "fetch", fetch)
+
+
+def test_print_pins_prints_names_with_repr(monkeypatch, capsys):
+    _tree(monkeypatch, ["b.json", "a.json", "README.md", "a.ogg"])
+    IMP.print_pins()
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[1].startswith("    'a.json': ") and lines[2].startswith("    'b.json': ")
+    assert len(lines) == 4  # the markers and two moves
+
+
+@pytest.mark.parametrize("bad", ["../x.json", "a b.json", 'q"uote.json', "sub/x.json", "x\n.json"])
+def test_an_upstream_name_with_odd_characters_is_refused(monkeypatch, bad):
+    _tree(monkeypatch, ["ok.json", bad])
+    with pytest.raises(SystemExit, match="unexpected upstream file name"):
+        IMP.upstream_moves()
+
+
+def test_a_pinned_name_with_a_path_in_it_is_refused(monkeypatch, tmp_path):
+    monkeypatch.setattr(IMP, "SHA256", {"../evil.json": "0" * 64})
+    with pytest.raises(SystemExit, match="unexpected file name"):
+        IMP.read_sources(tmp_path)

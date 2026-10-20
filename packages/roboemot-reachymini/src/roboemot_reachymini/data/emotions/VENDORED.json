@@ -8,7 +8,15 @@
     "ease_max_speed_deg_s": 90.0,
     "rdp_tolerance_deg": 0.5,
     "round_deg": 0.1,
-    "time_resolution_s": 0.001
+    "time_resolution_s": 0.001,
+    "homes_deg": {
+      "head.roll": 0.0,
+      "head.pitch": 0.0,
+      "head.yaw": 0.0,
+      "body_yaw": 0.0,
+      "antenna_right": -10.0,
+      "antenna_left": 10.0
+    }
   },
   "license_sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
   "clips_sha256": "239cc4b0f44631c8dedab47badc0ea7b224ad7ee168e979978308419226aa91c",

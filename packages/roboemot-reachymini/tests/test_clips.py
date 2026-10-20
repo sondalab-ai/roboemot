@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 from roboemot.affect.clips import ENTRY_POINT_GROUP, load_clip_library
 from roboemot.config import ConfigStack
@@ -65,17 +67,59 @@ def test_a_clip_missing_from_the_library_is_refused():
         ConfigStack().set_manifest_behaviour(MANIFEST.model.behaviour, MANIFEST.channels, library)
 
 
-def test_the_app_finds_the_library_and_plays_a_clip_for_every_label(data):  # noqa: F811
+def test_no_mapped_clip_overshoots_the_manifest_range_about_home():
+    """Raw peak x gain of every mapped clip (labels and yawn) fits each channel's range."""
+    from roboemot.config.schema import ExpressionEntry
+
+    library = load_clip_library(MANIFEST)
+    behaviour = MANIFEST.model.behaviour
+    entries = dict(behaviour["expression_map"])
+    entries["yawn"] = behaviour["circadian_motion"]["yawn"]
+    over = []
+    for name, raw in entries.items():
+        for v in ExpressionEntry.model_validate(raw).variants:
+            for channel, frames in library[v.clip].channels.items():
+                dof = MANIFEST.dofs[channel]
+                lo, hi = math.degrees(dof.min - dof.home), math.degrees(dof.max - dof.home)
+                peak = [f[1] * v.gain for f in frames]
+                if max(peak) > hi or min(peak) < lo:
+                    over.append((name, v.clip, channel, min(peak), max(peak)))
+    assert over == []
+
+
+def test_every_label_plays_each_of_its_clips_through_the_renderer():
+    """Public path: update starts the entry, commands feeds it; one variant at a time."""
+    from roboemot.affect import AffectState
+    from roboemot.affect.expression import ExpressionRenderer
+    from roboemot.affect.register import Person, resolve_register
+    from roboemot.config.schema import ExpressionEntry
+
+    library = load_clip_library(MANIFEST)
+    stack = ConfigStack()
+    stack.set_manifest_behaviour(MANIFEST.model.behaviour, MANIFEST.channels, library)
+    cfg = stack.effective()
+    register = resolve_register([Person("adult", "declared", {})], cfg.register, cfg.persona)
+    for label, entry in cfg.expression_map.items():
+        for variant in entry.variants:
+            only = {
+                label: ExpressionEntry(
+                    variants=[variant.model_copy(update={"min_intensity": 0, "max_intensity": 1})]
+                )
+            }
+            r = ExpressionRenderer(
+                cfg.expression, only, MANIFEST.dofs, 0.15, body_yaw="body_yaw", clips=library
+            )
+            r.update(AffectState(0.0, 0.0, "calm", 0.0, 0), register, 0.0)
+            assert r.update(AffectState(0.0, 0.0, label, 0.6, 1), register, 5.0), variant.clip
+            assert any(c.targets for c in r.commands(5.5)), (label, variant.clip)
+
+
+def test_the_app_starts_with_the_library_and_offers_every_label(data):  # noqa: F811
     app = new_app(app_module.RoboEmotApp)
     stop, thread, errors = start(app)
     try:
         assert wait_for(lambda: app.expression is not None and app.diagnostics is not None)
-        renderer = app.expression
-        named = variant_names(MANIFEST.model.behaviour)
-        assert set(renderer.clips) == set(clips_module.library())
-        for label in app.expression.expression_map:
-            for clip in named[label]:
-                assert renderer._primitive(label, True, clip) is not None, (label, clip)
+        assert set(MANIFEST.model.behaviour["expression_map"]) <= set(app.expression.playable())
         assert app.circadian_runner is not None
     finally:
         stop.set()

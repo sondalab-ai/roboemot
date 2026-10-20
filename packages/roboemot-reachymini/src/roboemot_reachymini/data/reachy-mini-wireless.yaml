@@ -104,7 +104,7 @@ behaviour:                      # config layer 2 (SPEC 11A): this robot's defaul
     sadness:
       variants:
         - {clip: sad1}
-        - {clip: sad2}
+        - {clip: sad2, gain: 0.9}    # antenna_left peaks at 177.5 deg, range 165 about home
         - {clip: downcast1}
         - {clip: lonely1}
         - {clip: resigned1}
