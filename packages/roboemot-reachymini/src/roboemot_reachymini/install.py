@@ -218,6 +218,7 @@ class ReachyMiniWireless:
         blocker = self.start_blocker()
         if blocker:
             raise WizardError(blocker)
+        self._clear_errored_app(ui)
         other = self.running_app()
         if other == APP_NAME:
             self._await_own(ui, f"{APP_NAME} is already running")
@@ -232,7 +233,7 @@ class ReachyMiniWireless:
             api.wake_up()
         ui.ok("wake-up requested")
         time.sleep(WAKE_SETTLE_S)
-        if self._current_is_own():
+        if self.running_app() == APP_NAME:
             self._await_own(ui, f"{APP_NAME} started by the daemon on wake-up")
             return
         try:
@@ -244,6 +245,19 @@ class ReachyMiniWireless:
             self._await_own(ui, f"{APP_NAME} started by the daemon on wake-up")
             return
         self._await_own(ui)
+
+    def _clear_errored_app(self, ui: Ui) -> None:
+        """The daemon refuses every start while the current app is in ``error`` (it counts as
+        running); clear such a leftover with a stop so a new start can go through."""
+        with _wizard_errors():
+            current = self._api().current_app()
+        if not current or current["state"] != "error":
+            return
+        name = current["info"]["name"]
+        ui.warn(f"{name} ended with an error earlier ({current.get('error') or 'no detail'})")
+        with _wizard_errors():
+            self._api().stop_current_app()
+        ui.ok(f"cleared {name}")
 
     def _current_is_own(self) -> bool:
         """Whether RoboEmot is the daemon's current app, in any state (an errored start counts:

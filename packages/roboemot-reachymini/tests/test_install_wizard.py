@@ -728,6 +728,19 @@ def test_start_reports_an_error_of_the_app_the_daemon_autostarted(daemon):
         platform_for(daemon).start(quiet_ui(yes=True))
 
 
+def test_start_clears_an_earlier_error_then_starts(daemon, capsys):
+    # the daemon counts an errored app as running and refuses every start until it is stopped
+    daemon.current = {"info": {"name": "roboemot"}, "state": "error", "error": "boom"}
+    platform_for(daemon).start(quiet_ui())
+    assert [(m, p) for m, p, _ in daemon.mutations] == [
+        ("POST", "/api/apps/stop-current-app"),
+        ("POST", "/api/move/play/wake_up"),
+        ("POST", "/api/apps/start-app/roboemot"),
+    ]
+    assert daemon.current["state"] == "running"
+    assert "ended with an error earlier (boom)" in capsys.readouterr().out
+
+
 def test_start_reports_app_error(daemon):
     daemon.start_states = ["error"]
     with pytest.raises(WizardError, match="roboemot state error"):
