@@ -217,6 +217,9 @@ class ReachyMiniWireless:
         if blocker:
             raise WizardError(blocker)
         other = self.running_app()
+        if other == APP_NAME:
+            self._await_own(ui, f"{APP_NAME} is already running")
+            return
         if other:
             if not ui.confirm(f"{other} is running; stop it (only one app runs at a time)?", True):
                 raise WizardError(f"{other} is still running; RoboEmot not started")
@@ -227,9 +230,25 @@ class ReachyMiniWireless:
             api.wake_up()
         ui.ok("wake-up requested")
         time.sleep(WAKE_SETTLE_S)
+        if self.running_app() == APP_NAME:
+            self._await_own(ui, f"{APP_NAME} started by the daemon on wake-up")
+            return
+        try:
+            with _wizard_errors():
+                api.start_app(APP_NAME)
+        except WizardError:
+            if self.running_app() != APP_NAME:
+                raise
+            self._await_own(ui, f"{APP_NAME} started by the daemon on wake-up")
+            return
+        self._await_own(ui)
+
+    def _await_own(self, ui: Ui, note: str | None = None) -> None:
+        """Wait until RoboEmot is the current app and running, or raise with its error."""
+        if note:
+            ui.ok(note)
         with _wizard_errors():
-            api.start_app(APP_NAME)
-            status = api.wait_app(APP_NAME)
+            status = self._api().wait_app(APP_NAME)
         if status["state"] != "running":
             raise WizardError(
                 f"{APP_NAME} state {status['state']}: {status.get('error') or 'no detail'}"

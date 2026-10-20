@@ -261,6 +261,7 @@ class FakeDaemon:
         self.start_states = ["starting", "running"]
         self.others = ["conversation"]
         self.hide_own = False  # a daemon that does not pick the app up
+        self.autostart_on_wake = False  # the startup app begins as soon as the robot wakes up
         self.lock: dict | None = {"state": "free", "holder_name": None}  # None: no endpoint
 
     @property
@@ -288,6 +289,8 @@ class FakeDaemon:
                 self.current = None
                 return 200, None
             case "POST", "/api/move/play/wake_up":
+                if self.autostart_on_wake and not self.current:
+                    self.current = {"info": {"name": "roboemot"}, "state": "starting"}
                 return 200, {"uuid": "x"}
             case "GET", "/api/daemon/robot-app-lock-status":
                 return (200, self.lock) if self.lock else (404, {"detail": "Not Found"})
@@ -449,6 +452,21 @@ def test_start_declined_leaves_running_app_alone(daemon):
     with pytest.raises(WizardError, match="conversation is still running"):
         platform_for(daemon).start(ui)
     assert daemon.mutations == []
+
+
+def test_start_waits_for_the_app_the_daemon_autostarts_on_wake_up(daemon, capsys):
+    daemon.autostart_on_wake = True
+    platform_for(daemon).start(quiet_ui(yes=True))
+    assert [(m, p) for m, p, _ in daemon.mutations] == [("POST", "/api/move/play/wake_up")]
+    assert daemon.current["state"] == "running"
+    assert "started by the daemon on wake-up" in capsys.readouterr().out
+
+
+def test_start_skips_to_the_url_when_the_app_already_runs(daemon, capsys):
+    daemon.current = {"info": {"name": "roboemot"}, "state": "running"}
+    platform_for(daemon).start(quiet_ui())
+    assert daemon.mutations == []
+    assert "roboemot is already running" in capsys.readouterr().out
 
 
 def test_start_reports_app_error(daemon):
