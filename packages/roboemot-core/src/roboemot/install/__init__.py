@@ -203,7 +203,7 @@ def check_ssh(
     ui.info(f"connecting to {remote.target} (ssh may ask for the password)")
     remote.connect()
     ui.ok(f"ssh {remote.target}")
-    py = RemotePython(remote, platform.python)
+    py = RemotePython(remote, platform.python, ui)
     present = py.exists()
     if not present and need is None:
         ui.ok(f"{platform.env_dir} is not there")
@@ -375,9 +375,11 @@ def install_piper(
         remote.copy([lock], tmp)
         if recreate:
             remote.run(f"mkdir -p -m 700 {shlex.quote(posixpath.dirname(venv))}")
-            remote.run(f"{shlex.quote(platform.python)} -m venv {shlex.quote(venv)}")
-            ui.ok(f"created the Piper virtualenv {venv}")
-        result = RemotePython(remote, python).install_locked(f"{tmp}/{lock.name}")
+            with ui.progress(
+                f"creating the Piper virtualenv {venv}", done=f"created the Piper virtualenv {venv}"
+            ):
+                remote.run(f"{shlex.quote(platform.python)} -m venv {shlex.quote(venv)}")
+        result = RemotePython(remote, python, ui).install_locked(f"{tmp}/{lock.name}")
     finally:
         remote.run(f"rm -rf {shlex.quote(tmp)}", check=False)
     if not result.ok:
@@ -754,7 +756,6 @@ def install_packages(
         files = [f"{tmp}/{w.name}" for w in wheels]
         record.pending_before = before
         write_record(remote, platform.record_path, record)
-        ui.info("installing (first time: numpy/scipy may take minutes)")
         result = py.install(files, pins)
         if not result.ok:
             ui.warn("the app does not fit the package versions already on the robot")
