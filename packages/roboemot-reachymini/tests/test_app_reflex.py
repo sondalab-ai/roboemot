@@ -6,7 +6,7 @@ import threading
 import time
 
 import numpy as np
-import roboemot_reachymini.app as app_module
+from roboemot.runtime import assembly
 from roboemot.world import Observation
 from test_app_perception import data, fake_mini, new_app, wait_for  # noqa: F401  (data: fixture)
 
@@ -218,14 +218,14 @@ class GatedSource:
 def test_the_sound_direction_source_is_gated_by_the_speaking_window(data, monkeypatch):  # noqa: F811
     enable(data, VOICE_YAML)
     source = GatedSource()
-    real = app_module.load_world_plugin
+    real = assembly.load_world_plugin
 
     def with_source(*args):
         plugin = real(*args)
         plugin.sources.append(source)
         return plugin
 
-    monkeypatch.setattr(app_module, "load_world_plugin", with_source)
+    monkeypatch.setattr(assembly, "load_world_plugin", with_source)
     app = new_app()
     scripted = ScriptedMini()
     stop, thread, errors = run_app(app, scripted.mini)

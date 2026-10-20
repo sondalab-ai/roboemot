@@ -26,11 +26,10 @@ from typing import Any
 from roboemot.affect.expression import ExpressionRenderer
 from roboemot.attention import AttentionSelector, SpeakerHint
 from roboemot.config.schema import RoboEmotConfig
+from roboemot.conversation.sources import entry_name
 from roboemot.conversation.summaries import one_line
 from roboemot.skills.defaults import SkillEnv
 from roboemot.world import Entry, WorldModel
-
-from roboemot.conversation.sources import entry_name
 
 log = logging.getLogger(__name__)
 CATEGORY_KINDS = {"animal": "animal", "object": "object"}

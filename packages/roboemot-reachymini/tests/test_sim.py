@@ -112,7 +112,8 @@ def _daemon_post(path: str) -> None:
 
 def test_robot_link_recovers_after_daemon_backend_restart(mini):
     """SPEC 12A: backend stop -> link.robot.lost; restart -> reconnect, link.robot.restored."""
-    from roboemot_reachymini.app import idle_command
+    from roboemot.runtime.ticks import idle_command
+    from roboemot_reachymini.gaze import GAZE
 
     events: list[str] = []
     cfg = ConfigStack().effective()
@@ -128,7 +129,7 @@ def test_robot_link_recovers_after_daemon_backend_restart(mini):
 
     def feed() -> None:
         while not stop.is_set():
-            loop.feed(idle_command(cfg, time.monotonic()))
+            loop.feed(idle_command(cfg, time.monotonic(), dof=GAZE.head_pitch))
             stop.wait(0.05)
 
     loop.start()
@@ -180,8 +181,8 @@ def test_attention_turns_the_head_towards_a_world_entry(loop):
     slow, so the timeout is generous.
     """
     from roboemot.attention import AttentionSelector, GazeController
+    from roboemot.runtime.ticks import attention_tick
     from roboemot.world import Observation, WorldModel
-    from roboemot_reachymini.app import attention_tick
     from roboemot_reachymini.gaze import FRAME, GAZE
 
     cfg = ConfigStack().effective()
@@ -299,6 +300,7 @@ def test_full_sweep_keeps_the_world_map_correct(loop):
 
     from roboemot.attention import AttentionSelector, GazeController
     from roboemot.config.schema import RoboEmotConfig
+    from roboemot.runtime.ticks import attention_tick, scan_context, scan_tick
     from roboemot.world import (
         Observation,
         ScanController,
@@ -306,7 +308,6 @@ def test_full_sweep_keeps_the_world_map_correct(loop):
         angular_distance,
         from_base_frame,
     )
-    from roboemot_reachymini.app import attention_tick, scan_context, scan_tick
     from roboemot_reachymini.gaze import FRAME, GAZE
     from roboemot_reachymini.world import ReachyScanPlanner
 

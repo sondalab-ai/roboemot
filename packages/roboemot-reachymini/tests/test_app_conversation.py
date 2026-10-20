@@ -14,12 +14,13 @@ import roboemot_reachymini.app as app_module
 from roboemot.attention import AttentionSelector
 from roboemot.bus import Bus
 from roboemot.config.schema import RoboEmotConfig
+from roboemot.conversation import ConversationWorker
+from roboemot.conversation.sources import profile_source, scene_source, speaker_source
 from roboemot.llm import Router
-from roboemot.voice.listener import Utterance
+from roboemot.voice.listener import Utterance, VoiceListener
 from roboemot.voice.speech import SpeechOutput
 from roboemot.voice.speech_features import Prosody
 from roboemot.world import Observation, WorldModel
-from roboemot.conversation.sources import profile_source, scene_source, speaker_source
 from roboemot_reachymini.gaze import FRAME
 from test_app_perception import data, wait_for  # noqa: F401  (data: fixture)
 from test_app_reflex import ScriptedMini, enable, run_app
@@ -114,7 +115,7 @@ def test_a_minor_without_a_cleared_route_hears_a_built_in_line(data, fakes, said
 
 def test_shutdown_stops_the_listener_then_the_worker_then_the_speech(data, fakes, monkeypatch):  # noqa: F811
     order = []
-    for cls, name in ((app_module.ConversationWorker, "close"), (SpeechOutput, "close")):
+    for cls, name in ((ConversationWorker, "close"), (SpeechOutput, "close")):
         real = getattr(cls, name)
 
         def wrapped(self, _real=real, _name=cls.__name__):
@@ -122,9 +123,9 @@ def test_shutdown_stops_the_listener_then_the_worker_then_the_speech(data, fakes
             _real(self)
 
         monkeypatch.setattr(cls, name, wrapped)
-    real_stop = app_module.VoiceListener.stop
+    real_stop = VoiceListener.stop
     monkeypatch.setattr(
-        app_module.VoiceListener,
+        VoiceListener,
         "stop",
         lambda self: (order.append("VoiceListener"), real_stop(self))[1],
     )

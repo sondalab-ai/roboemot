@@ -16,9 +16,12 @@ import numpy as np
 import pytest
 from roboemot.circadian import CircadianModel
 from roboemot.config.schema import RoboEmotConfig
+from roboemot.motion import MotionLoop
 from roboemot.registry import Consent, FileStore, Registry
 from roboemot.registry.enrollment import EnrollmentError
+from roboemot.runtime import ticks
 from roboemot.vision import CIRCADIAN, Detection, Frame
+from roboemot.vision.service import Perception
 from roboemot_reachymini import app as app_module
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -275,8 +278,7 @@ def test_circadian_state_scales_the_vision_rate(data):
 def test_circadian_scale_is_awake_while_no_model_runs():
     cfg = RoboEmotConfig()
     assert (
-        app_module.circadian_vision_scale(cfg, None)
-        == cfg.circadian.states["awake"].vision_rate_scale
+        ticks.circadian_vision_scale(cfg, None) == cfg.circadian.states["awake"].vision_rate_scale
     )
 
 
@@ -284,13 +286,13 @@ def test_circadian_scale_is_awake_while_no_model_runs():
 def stops(monkeypatch):
     """Record the order in which the app tears things down."""
     order: list[str] = []
-    real_loop_stop = app_module.MotionLoop.stop
+    real_loop_stop = MotionLoop.stop
 
     def loop_stop(self):
         order.append("loop")
         real_loop_stop(self)
 
-    monkeypatch.setattr(app_module.MotionLoop, "stop", loop_stop)
+    monkeypatch.setattr(MotionLoop, "stop", loop_stop)
     return order
 
 
@@ -299,7 +301,7 @@ def test_the_motion_loop_stops_even_when_perception_fails_to_stop(data, monkeypa
         stops.append("perception")
         raise RuntimeError("camera stuck")
 
-    monkeypatch.setattr(app_module.Perception, "stop", failing_stop)
+    monkeypatch.setattr(Perception, "stop", failing_stop)
     stop = threading.Event()
     stop.set()
     with pytest.raises(RuntimeError, match="camera stuck"):
@@ -311,7 +313,7 @@ def test_the_motion_loop_stops_when_perception_fails_to_start(data, monkeypatch,
     def failing_start(self):
         raise OSError("no camera")
 
-    monkeypatch.setattr(app_module.Perception, "start", failing_start)
+    monkeypatch.setattr(Perception, "start", failing_start)
     stop = threading.Event()
     stop.set()
     with pytest.raises(OSError, match="no camera"):

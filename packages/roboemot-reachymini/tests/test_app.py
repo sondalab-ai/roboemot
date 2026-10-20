@@ -14,7 +14,11 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
+from roboemot.motion import MotionLoop
+from roboemot.runtime import RuntimeHost, assembly, ticks
+from roboemot.runtime.reload import apply_attention_config
 from roboemot_reachymini import app as app_module
+from roboemot_reachymini.gaze import GAZE
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -97,7 +101,7 @@ def test_attention_tick_turns_the_head_then_releases_to_idle():
                     )
                 )
             if round(clock[0] * 50) % 2 == 0:
-                active = app_module.attention_tick(clock[0], world, selector, gaze, loop)
+                active = ticks.attention_tick(clock[0], world, selector, gaze, loop)
             loop.cycle(clock[0], 0.02)
             clock[0] += 0.02
         return active
@@ -140,7 +144,7 @@ def test_attention_tick_failure_is_logged_and_falls_back_to_idle(caplog):
 
     cfg, loop, world, selector, gaze = _attention_rig()
     world.observe(Observation("person", 0.0, "t", 0.5, 0.0, "face"))
-    assert app_module.attention_tick(0.0, world, selector, gaze, loop)
+    assert ticks.attention_tick(0.0, world, selector, gaze, loop)
     assert SOURCE in {c.source for c in loop.core.arbiter.active(0.0)}
 
     def boom(now, entries):
@@ -148,7 +152,7 @@ def test_attention_tick_failure_is_logged_and_falls_back_to_idle(caplog):
 
     selector.update = boom
     with caplog.at_level("WARNING"):
-        assert app_module.attention_tick(0.1, world, selector, gaze, loop) is False
+        assert ticks.attention_tick(0.1, world, selector, gaze, loop) is False
     assert "RuntimeError" in caplog.text and "selector exploded" in caplog.text
     assert SOURCE not in {c.source for c in loop.core.arbiter.active(0.1)}
     assert not gaze.active
@@ -160,8 +164,8 @@ def test_attention_tick_uses_the_camera_view_for_world_decay():
     cfg, loop, world, selector, gaze = _attention_rig()
     world.observe(Observation("person", 0.0, "t", 0.0, 0.0, "face"))
     world.observe(Observation("person", 0.0, "t", math.radians(120), 0.0, "face"))
-    app_module.attention_tick(30.0, world, selector, gaze, loop)  # remembers the view state
-    app_module.attention_tick(60.0, world, selector, gaze, loop)
+    ticks.attention_tick(30.0, world, selector, gaze, loop)  # remembers the view state
+    ticks.attention_tick(60.0, world, selector, gaze, loop)
     conf = {round(e.azimuth_rad, 2): e.confidence for e in world.entries}
     assert conf[0.0] < conf[round(math.radians(120), 2)]  # in view fades faster than out of view
 
@@ -172,14 +176,14 @@ def test_reload_updates_attention_consumers():
     new.attention.release_s = 9.0
     new.world.match_gate_deg = 33.0
     new.safety.constraint_margin_deg = 7.0
-    app_module.apply_attention_config(new, world, selector, gaze)
+    apply_attention_config(new, world, selector, gaze)
     assert selector.cfg.release_s == 9.0 and gaze.cfg.release_s == 9.0
     assert world.cfg.match_gate_deg == 33.0
     assert gaze.margin_rad == pytest.approx(math.radians(7.0))
 
 
 def test_app_exposes_its_bus():
-    assert "bus" in app_module.RoboEmotApp.__annotations__
+    assert "bus" in RuntimeHost.__annotations__
 
 
 def test_breathing_rides_on_attention_as_an_additive_layer():
@@ -192,8 +196,8 @@ def test_breathing_rides_on_attention_as_an_additive_layer():
     for _ in range(100):
         t += 0.05
         world.observe(Observation("person", t, "t", 0.0, 0.0, "face"))
-        attending = app_module.attention_tick(t, world, selector, gaze, loop)
-        app_module.feed_idle(loop, cfg, t, attending)
+        attending = ticks.attention_tick(t, world, selector, gaze, loop)
+        ticks.feed_idle(loop, cfg, t, attending, dof=GAZE.head_pitch)
     srcs = {c.source: c for c in loop.core.arbiter.active(t)}
     assert SOURCE in srcs and srcs["idle-additive"].additive
     loop.core.arbiter.crossfade_s = 0.0
@@ -201,7 +205,9 @@ def test_breathing_rides_on_attention_as_an_additive_layer():
     breathing = srcs["idle-additive"].targets["head.pitch"]
     assert out["head.pitch"] == pytest.approx(srcs[SOURCE].targets["head.pitch"] + breathing)
 
-    app_module.feed_idle(loop, cfg, t, False)  # attention released: plain idle again
+    ticks.feed_idle(
+        loop, cfg, t, False, dof=GAZE.head_pitch
+    )  # attention released: plain idle again
     assert "idle-additive" not in {c.source for c in loop.core.arbiter.active(t)}
 
 
@@ -223,17 +229,15 @@ def test_a_failing_source_start_does_not_leak_the_loop_or_network(tmp_path, monk
     shutil.copytree(app_module.DATA, data)
     shutil.copy2(ROOT / "configs/dev-unmeasured.yaml", data / "app.yaml")
     monkeypatch.setattr(app_module, "DATA", data)
-    monkeypatch.setattr(
-        app_module, "load_world_plugin", lambda *a, **k: WorldPlugin(None, [Boom()])
-    )
+    monkeypatch.setattr(assembly, "load_world_plugin", lambda *a, **k: WorldPlugin(None, [Boom()]))
     threads = []
-    real_start = app_module.MotionLoop.start
+    real_start = MotionLoop.start
 
     def tracking_start(self):
         real_start(self)
         threads.append(self)
 
-    monkeypatch.setattr(app_module.MotionLoop, "start", tracking_start)
+    monkeypatch.setattr(MotionLoop, "start", tracking_start)
     app = app_module.RoboEmotApp.__new__(app_module.RoboEmotApp)
     with pytest.raises(RuntimeError, match="no sensor"):
         app.run(fake_mini(), threading.Event())

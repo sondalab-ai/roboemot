@@ -12,8 +12,10 @@ from roboemot.config.schema import RoboEmotConfig
 from roboemot.drivers import MockPoseDriver
 from roboemot.manifest import load_manifest
 from roboemot.motion import MotionLoop, Priority
+from roboemot.runtime import ticks
 from roboemot.vision import Frame
 from roboemot_reachymini import app as app_module
+from roboemot_reachymini.gaze import GAZE
 from test_app_perception import (  # noqa: F401  (data is a fixture)
     AppWithFakes,
     FakeDetector,
@@ -225,9 +227,9 @@ def crossings(cfg, name, seconds=240.0, dt=0.05):
     n = 0
     while t < seconds:
         phase += dt / state.idle_period_scale
-        pitch = app_module.idle_command(cfg, t, state.idle_motion_scale, phase).targets[
-            "head.pitch"
-        ]
+        pitch = ticks.idle_command(
+            cfg, t, state.idle_motion_scale, phase, dof=GAZE.head_pitch
+        ).targets["head.pitch"]
         n += prev * pitch < 0
         peak = max(peak, abs(pitch))
         prev = pitch
@@ -250,7 +252,7 @@ def test_the_breathing_phase_does_not_jump_when_the_pace_changes():
     t, phase, last = 0.0, 0.0, None
     for scale in (1.0,) * 200 + (1.5,) * 200:
         phase += 0.05 / scale
-        pitch = app_module.idle_command(cfg, t, 1.0, phase).targets["head.pitch"]
+        pitch = ticks.idle_command(cfg, t, 1.0, phase, dof=GAZE.head_pitch).targets["head.pitch"]
         if last is not None:
             assert abs(pitch - last) < 0.2 * cfg.motion.idle.breathing_amplitude
         last, t = pitch, t + 0.05
@@ -269,13 +271,15 @@ def test_resting_feeds_no_idle_motion_and_clears_it():
         clock=lambda: 0.0,
     )
     loop.set_mode("active")
-    app_module.feed_idle(loop, cfg, 1.0, False)
+    ticks.feed_idle(loop, cfg, 1.0, False, dof=GAZE.head_pitch)
     assert "idle" in {c.source for c in loop.core.arbiter.active(1.0)}
-    app_module.feed_idle(loop, cfg, 1.1, False, 0.0)  # circadian resting: scale 0
+    ticks.feed_idle(loop, cfg, 1.1, False, 0.0, dof=GAZE.head_pitch)  # circadian resting: scale 0
     assert not {c.source for c in loop.core.arbiter.active(1.1)} & {"idle", "idle-additive"}
-    app_module.feed_idle(loop, cfg, 1.2, True, 0.0)
+    ticks.feed_idle(loop, cfg, 1.2, True, 0.0, dof=GAZE.head_pitch)
     assert not {c.source for c in loop.core.arbiter.active(1.2)} & {"idle", "idle-additive"}
-    assert math.isfinite(app_module.idle_command(cfg, 1.0, 0.6).targets["head.pitch"])
+    assert math.isfinite(
+        ticks.idle_command(cfg, 1.0, 0.6, dof=GAZE.head_pitch).targets["head.pitch"]
+    )
 
 
 def test_the_hold_and_wake_calls_refuse_after_the_app_stopped(data):  # noqa: F811
