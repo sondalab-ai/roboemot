@@ -2,7 +2,9 @@
 
 import pytest
 from roboemot_reachymini import app as app_module
+from roboemot_reachymini import platform as platform_module
 from roboemot_reachymini import sdk
+from test_app_perception import data  # noqa: F401  (data: fixture)
 
 
 @pytest.mark.parametrize("installed", ["1.12.0", "1.12", "1.12.1", "1.13.0rc1", "2.0.0"])
@@ -26,7 +28,10 @@ def test_installed_version_reads_the_distribution_metadata(monkeypatch):
     assert sdk.installed_version() == "1.12.0"
 
 
-def test_run_checks_the_sdk_before_building_anything(monkeypatch):
-    monkeypatch.setattr(app_module, "installed_sdk_version", lambda: "1.11.0")
+def test_run_checks_the_sdk_before_building_anything(data, monkeypatch):  # noqa: F811
+    built = []
+    monkeypatch.setattr(platform_module, "installed_version", lambda: "1.11.0")
+    monkeypatch.setattr(platform_module, "ReachyMiniDriver", lambda client: built.append(client))
     with pytest.raises(RuntimeError, match="older than 1.12"):
         app_module.RoboEmotApp().run(object(), None)
+    assert built == []
