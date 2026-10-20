@@ -215,6 +215,12 @@ class BarePlatform:
         return None
 
     def stop_app(self): ...
+    def app_installed(self):
+        return True
+
+    def app_url(self, host):
+        return None
+
     def start(self, ui): ...
     def autostart(self):
         return None

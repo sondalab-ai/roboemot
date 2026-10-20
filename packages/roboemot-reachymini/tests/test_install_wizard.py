@@ -13,8 +13,10 @@ from pathlib import Path
 import pytest
 import roboemot.install as inst
 from roboemot import paths
+from roboemot.config.schema import RoboEmotConfig
 from roboemot.diagnostics import Target
 from roboemot.install import Options, Ui, WizardError
+from roboemot.install import run as run_mod
 from roboemot.install.piper_lock import lock_name
 from roboemot_reachymini import install as reachy
 from roboemot_reachymini.daemon import INSTALL_TIMEOUT_S, DaemonClient, DaemonError
@@ -259,6 +261,7 @@ class FakeDaemon:
         self.start_states = ["starting", "running"]
         self.others = ["conversation"]
         self.hide_own = False  # a daemon that does not pick the app up
+        self.lock: dict | None = {"state": "free", "holder_name": None}  # None: no endpoint
 
     @property
     def installed(self) -> list[str]:
@@ -286,6 +289,8 @@ class FakeDaemon:
                 return 200, None
             case "POST", "/api/move/play/wake_up":
                 return 200, {"uuid": "x"}
+            case "GET", "/api/daemon/robot-app-lock-status":
+                return (200, self.lock) if self.lock else (404, {"detail": "Not Found"})
             case "GET", "/api/apps/startup-app":
                 return 200, {"startup_app": self.startup}
             case "PUT", "/api/apps/startup-app":
@@ -1577,3 +1582,78 @@ def test_uninstall_announces_the_pip_steps_it_streams(offline, robot, daemon, ca
 def test_the_dry_run_streams_nothing(offline, robot, daemon):
     inst.run_install(options(dry_run=True), quiet_ui(yes=True), ROOT)
     assert robot.streamed == []
+
+
+# ---------------------------------------------------------------- run script (SPEC 4A, Installer)
+
+
+def test_app_lock_status_reads_the_endpoint_and_tolerates_its_absence(api, daemon):
+    daemon.lock = {"state": "remote_session", "holder_name": "Mobile"}
+    assert api.app_lock_status() == {"state": "remote_session", "holder_name": "Mobile"}
+    daemon.lock = None
+    assert api.app_lock_status() is None
+
+
+def test_start_refuses_while_the_mobile_app_holds_the_robot(daemon):
+    daemon.lock = {"state": "remote_session", "holder_name": "Reachy phone"}
+    with pytest.raises(WizardError, match="close the Reachy mobile app"):
+        platform_for(daemon).start(quiet_ui(yes=True))
+    assert daemon.mutations == []
+
+
+def test_start_goes_on_when_the_daemon_has_no_lock_endpoint(daemon):
+    daemon.lock = None
+    platform_for(daemon).start(quiet_ui(yes=True))
+    assert daemon.current["state"] == "running"
+
+
+def test_app_url_uses_the_configured_web_ui_port():
+    port = RoboEmotConfig().webui.port
+    assert ReachyMiniWireless().app_url("reachy-mini.local") == f"http://reachy-mini.local:{port}"
+
+
+def test_install_start_prints_the_web_ui_address(offline, robot, daemon, capsys):
+    inst.run_install(options(start=True, startup=False), quiet_ui(yes=True), ROOT)
+    out = capsys.readouterr().out
+    assert f"web UI: http://127.0.0.1:{RoboEmotConfig().webui.port}" in out
+    assert "python scripts/run_on_robot.py" in out
+
+
+def run_args(*extra: str) -> list[str]:
+    return ["--host", "127.0.0.1", "--robot", "reachy-mini-wireless", "-y", *extra]
+
+
+def test_run_starts_the_installed_app_without_ssh(offline, robot, daemon, capsys):
+    install()
+    capsys.readouterr()
+    robot.commands.clear()
+    robot.streamed.clear()
+    assert run_mod.main(run_args()) == 0
+    out = capsys.readouterr().out
+    assert "RoboEmot run" in out and "RoboEmot installer" not in out
+    assert daemon.current["state"] == "running"
+    assert f"web UI: http://127.0.0.1:{RoboEmotConfig().webui.port}" in out
+    assert robot.commands == [] and robot.streamed == []
+
+
+def test_run_says_to_install_first_when_the_app_is_missing(offline, robot, daemon, capsys):
+    assert run_mod.main(run_args()) == 1
+    assert "not installed: run the installer first" in capsys.readouterr().out
+    assert daemon.mutations == []
+
+
+def test_run_dry_run_changes_nothing(offline, robot, daemon, capsys):
+    install()
+    daemon.current = {"info": {"name": "conversation"}, "state": "running"}
+    before = list(daemon.mutations)
+    assert run_mod.main(run_args("--dry-run")) == 0
+    out = capsys.readouterr().out
+    assert "would stop conversation" in out and "dry run passed" in out
+    assert daemon.mutations == before
+
+
+def test_run_reports_the_mobile_app_holding_the_robot(offline, robot, daemon, capsys):
+    install()
+    daemon.lock = {"state": "remote_session", "holder_name": "phone"}
+    assert run_mod.main(run_args()) == 1
+    assert "close the Reachy mobile app" in capsys.readouterr().out

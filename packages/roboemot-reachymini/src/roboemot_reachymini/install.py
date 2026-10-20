@@ -29,6 +29,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+from roboemot.config.schema import RoboEmotConfig
 from roboemot.diagnostics import Target
 from roboemot.install import Ui, WizardError
 from roboemot.install.pyenv import RemotePython
@@ -189,9 +190,31 @@ class ReachyMiniWireless:
         with _wizard_errors():
             self._api().stop_current_app()
 
+    def app_installed(self) -> bool:
+        """Whether the daemon lists RoboEmot among its installed apps."""
+        with _wizard_errors():
+            return APP_NAME in self._api().installed_apps()
+
+    def app_url(self, host: str) -> str | None:
+        """Where the app's web UI listens (``webui.port``, as ``custom_app_url`` in the app)."""
+        return f"http://{host}:{RoboEmotConfig().webui.port}"
+
+    def check_slot_free(self) -> None:
+        """The Reachy mobile app holds the robot's app slot through a remote session, and the
+        daemon then refuses to start local apps."""
+        with _wizard_errors():
+            lock = self._api().app_lock_status()
+        if lock and lock.get("state") == "remote_session":
+            holder = lock.get("holder_name") or "a remote session"
+            raise WizardError(
+                f"the robot's app slot is held by {holder}: close the Reachy mobile app "
+                "(it holds the robot) and try again"
+            )
+
     def start(self, ui: Ui) -> None:
         """Stop the running app if any, wake the robot, start RoboEmot and wait for it."""
         api = self._api()
+        self.check_slot_free()
         other = self.running_app()
         if other:
             if not ui.confirm(f"{other} is running; stop it (only one app runs at a time)?", True):

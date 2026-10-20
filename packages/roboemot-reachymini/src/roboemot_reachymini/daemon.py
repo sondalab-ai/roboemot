@@ -153,6 +153,12 @@ class DaemonClient:
         the request gets the stop sequence's time, not the short default."""
         self._send("POST", "/apps/stop-current-app", timeout_s=STOP_REQUEST_TIMEOUT_S)
 
+    def app_lock_status(self) -> dict[str, Any] | None:
+        """``GET /api/daemon/robot-app-lock-status``: who holds the robot's app slot
+        (``state`` free, local_app or remote_session, plus ``holder_name``). ``None`` on a
+        daemon that has no such endpoint."""
+        return self._send("GET", "/daemon/robot-app-lock-status", missing_ok=True)
+
     def wake_up(self) -> None:
         """``POST /api/move/play/wake_up``."""
         self._send("POST", "/move/play/wake_up")
