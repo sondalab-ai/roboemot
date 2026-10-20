@@ -8,7 +8,7 @@ on its Raspberry Pi CM4.
 The design lives in [`docs/specs/kickoff.md`](docs/specs/kickoff.md).
 Notes for coding agents are in [`CLAUDE.md`](CLAUDE.md).
 
-## Status: M2 affect and expression (work in progress)
+## Status: M0 to M3 built and tested off the robot; first real-robot run in progress
 
 | Area | SPEC | State |
 | --- | --- | --- |
@@ -17,20 +17,21 @@ Notes for coding agents are in [`CLAUDE.md`](CLAUDE.md).
 | Robot discovery on the LAN (mDNS, declared per manifest) | 4 | Done, tested; found Reachy Mini Wireless on a real LAN |
 | Connectivity: offline detection, backoff, recovery, offline behaviour | 12A | Done, tested; robot-link recovery checked by restarting the simulated daemon's backend; spoken cue waits for TTS |
 | Debug report: robot state, hardware, resources, system, battery (robot-agnostic, entry-point sources) | 12A | Done, tested; Reachy daemon sections read from a real Reachy Mini Wireless and the simulator; on the CM4 Linux exposes no battery (`/sys/class/power_supply` empty), only `vcgencmd` under-voltage flags and temperature |
-| Installer and clean uninstall (robot-agnostic, entry-point platforms; Reachy Mini Wireless) | 4A | Done, tested against a fake robot (install then uninstall restores the exact state); a real install ran on a Reachy Mini Wireless (Debian 13, daemon 1.12.0), including creating the shared apps venv on a robot with no app yet; a real uninstall on the robot is still to run |
+| Installer and clean uninstall (robot-agnostic, entry-point platforms; Reachy Mini Wireless) | 4A | Done, tested against a fake robot (install then uninstall restores the exact state), including the voice extra, the voice-model download on the robot, clearing the uv cache and starting through the daemon's autostart; a real install ran on a Reachy Mini Wireless (Debian 13, daemon 1.12.0), including creating the shared apps venv on a robot with no app yet. That first real run found three things now fixed and covered by fake-robot tests only, not yet rerun on the robot: no voice extra and no voice models were installed, the disk was 97% full (536 MB free; the robot image's `~/.cache/uv` holds 5.6 GB), and `run_on_robot.py` collided with the app the daemon auto-starts on wake-up. A real uninstall on the robot is still to run |
 | Robot plugins: core never names a robot; joint names, gestures, robot name and capabilities come from the manifest and the robot package's entry points | 4A, 11, 12A | Done, tested; enforced by `tests/test_robot_hierarchy.py` (AST gate with a ratchet baseline). Settings that moved or were renamed (e.g. `reflexes.antenna_ratio` is now `reflexes.startle_lift_ratio`) are migrated on restore and named in `app.yaml` errors |
 | Arbiter + safety limiter (Python reference) | 10, 12 | Done; two independent reviews; property and fuzz tests (limits, velocity, acceleration, 65 deg coupling with a 3 deg planning margin) |
 | Arbiter + safety limiter in C++ (`rt/`) | 10 | Matches the reference on 600-tick golden vectors (tolerance 1e-9); same input validation; not yet a running process |
-| Reachy Mini driver, motion loop, app wrapper | 4A | `pytest -m sim` passes against the MuJoCo simulator (command-to-state 37-55 ms measured on a cloud dev container, not a CM4); not yet run on the real robot |
+| Reachy Mini driver, motion loop, app wrapper | 4A | `pytest -m sim` passes against the MuJoCo simulator (command-to-state 37-55 ms measured on a cloud dev container, not a CM4). The daemon started the app on a real Reachy Mini Wireless in the first real install; its log showed vision unavailable (`opencv` was not installed, `--vision` now installs it on request). Motion, expressions and timing on the real robot are not checked |
 | Affect engine, appraisal rules, empathic register, expression maps, reflexes, circadian model with camera light sensing | 7, 7A, 10 | Done, tested; the M2 exit checks pass in the simulator and through the app on a mocked client ([M2 report](docs/eval/m2.md)); expressions, rest posture, light thresholds and reflex timing not yet seen on the real robot |
-| OpenAI-compatible LLM router | 8 | Done, tested against fake servers |
-| Voice delivery composition (Piper, speech API) | 8 | Composition only; no TTS engine wired |
+| OpenAI-compatible LLM router, conversation with skills, API keys from the secret store (`${secret:name}`) | 8, 12 | Done, tested against fake servers and a mocked LAN route (first token 0.55 s in the M3 exit test); no real LLM route used on the robot |
+| Voice: capture, VAD, fast path, wake phrases, ASR (Vosk), TTS (Piper in its own process, OpenAI-compatible speech), barge-in | 8, 13 | Done, tested; the M3 exit checks pass on a Mac with the real Silero and Vosk models and Piper in a Linux container, and run in CI (`models` job in `.github/workflows/ci.yml`): first TTS audio 1.34 to 1.43 s after the last speech frame against 2.0 s, barge-in 75 to 163 ms against 200 ms ([M3 report](docs/eval/m3.md)). Not seen on the robot: echo and AEC, CM4 load and latency, Piper install; the wake phrases missed on several synthetic voices |
+| Web UI: PIN login, settings editor mirroring the configuration, robot section from the plugin, enrollment | 11A, 12 | Done, tested (settings-mirror epic complete, [plan](docs/plans/2026-10-18-webui-settings-mirror.md)); open on hardware per `TODO.md`: nod/shake, Restart through the real daemon. No TLS yet: PIN and cookie travel in clear on the LAN (SPEC 14, M5) |
 | Bus transport (Zenoh vs iceoryx2) | 11 | In-process bus only; decision pending |
 | Vision, identity, registry, world model, enrollment web UI | 5, 5A, 6 | Done, tested (M1); measured on a Mac, the CM4 is not measured ([M1 report](docs/eval/m1.md)) |
-| ASR/TTS engines, mirror | 8, 9 | Not started (M3-M4) |
+| Mirror (live mimicry, learning from demonstration) | 9 | Not started (M4) |
 
 The affect state (valence, arousal and a label) is an expressive model: it decides which gesture
-the robot plays and how large, and will shape the tone of voice and conversation once M3 lands. It is not a claim
+the robot plays and how large, and shapes the tone of voice and the conversation. It is not a claim
 that the robot has feelings, and RoboEmot does not present it as one (SPEC 12, Behaviour and
 content).
 
@@ -89,6 +90,7 @@ python scripts/install_on_robot.py --dry-run   # read-only checks; nothing on th
 python scripts/install_on_robot.py             # install, verify, optionally start
 python scripts/install_on_robot.py --uninstall --dry-run   # what uninstall would undo
 python scripts/install_on_robot.py --uninstall # put the robot back as it was
+python scripts/install_on_robot.py --vision --no-models --no-clear-caches   # optional steps, see below
 ```
 
 To log in afterwards, `python scripts/robot_ssh.py` finds the robot the same way and opens a shell;
@@ -108,7 +110,27 @@ live status line with the elapsed time and pip's current action. If
 asked, it stops the running app (one app at a time), wakes the robot, starts RoboEmot, and makes
 it the startup app (the daemon starts it on the robot's first wake-up). Choose dev mode until
 the manifest dynamics are measured, or the app refuses to start (SPEC 12). Every prompt has a
-flag for unattended runs: `--host`, `--user`, `--robot`, `--dev`, `--start`, `--startup-app`, `--yes`.
+flag for unattended runs: `--host`, `--user`, `--robot`, `--dev`, `--start`, `--startup-app`,
+`--piper`, `--secret`, `--models`, `--clear-caches`, `--vision`, `--yes`.
+
+What goes onto the robot besides the two wheels:
+
+- **Voice.** `roboemot-core[voice]` (Vosk and ONNX Runtime) is installed by default, and a Piper
+  virtualenv in the data folder (`--no-piper` skips it). After Piper the installer runs
+  `roboemot models fetch --voice` on the robot (Silero VAD, Vosk it/en, Piper it/en; the prompt
+  names the size, from the pinned model manifests) into `~/.local/share/roboemot/voice-models`,
+  where the app reads them. If the free space is short it warns and skips, and you can run the
+  command later; `--no-models` skips it, and a dry run only reports the sizes and the free space.
+  Uninstall removes the models with the data folder (or, when the data folder was already there,
+  the model folders the installer created).
+- **Vision is off by default.** `--vision` also installs the `vision` extra (OpenCV, ONNX) and
+  fetches the vision weights (about 1.4 GB of disk together with the voice models while downloading, INT8 files included; the figure is computed from the pinned manifests); without it the app
+  logs "vision unavailable" and runs without it.
+- **Disk.** The CM4 image has about 0.5 GB free (97% used on the robot of the first run) because
+  the robot image's own setup leaves a 5.6 GB uv download cache in `~/.cache/uv`. The installer
+  shows its size and asks whether to clear it before the free-space check (default yes on a terminal; an unattended run clears it only with `-y` or `--clear-caches`, `--no-clear-caches` keeps it).
+  uv downloads again whatever it needs; uninstall cannot give the cache back. Other caches
+  (`~/.cache/huggingface`, `~/.cache/pip`) are left alone.
 
 The installer leaves the robot as it found it. It keeps the package versions already in the
 shared apps venv (it asks before changing one), and it writes no pip cache. It records what it
@@ -121,8 +143,10 @@ each robot package plugs in its own part (SPEC 4A, Installer).
 
 Afterwards start the app with `run_on_robot.py` (daemon 1.12 retired its web dashboard). It
 checks the app is installed, wakes the robot, starts RoboEmot, waits until it runs and prints the
-web UI address, `http://<robot>:8042` (the default `webui.port`). The web UI is served by the app
-itself, so it is there only while RoboEmot runs.
+web UI address. When RoboEmot is the startup app the daemon starts it itself on wake-up: the
+script then waits for that instance (it says "started by the daemon on wake-up") instead of
+sending a second start, which the daemon refuses. The address is `http://<robot>:8042` (the default
+`webui.port`). The web UI is served by the app itself, so it is there only while RoboEmot runs.
 
 ```bash
 python scripts/run_on_robot.py --dry-run   # what it would do

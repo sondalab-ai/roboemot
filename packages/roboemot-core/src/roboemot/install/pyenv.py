@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import shlex
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from .record import Versions, canonical, versions
@@ -82,20 +83,39 @@ class RemotePython:
         cmd = f"{shlex.quote(self.python)} -m pip {args}"
         if stdin is not None:
             cmd = f"printf %s {shlex.quote(stdin)} | {cmd}"
+        result = self._shell(cmd, announce, pip_progress_line, slow, report)
+        if check and not result.ok:
+            raise WizardError(f"pip {args.split()[0]} failed on the robot:\n{result.output}")
+        return result
+
+    def _shell(
+        self,
+        cmd: str,
+        announce: str | None,
+        on_line: Callable[[str], str | None] | None,
+        slow: bool,
+        report: bool,
+    ) -> PipResult:
+        """Run ``cmd`` with stderr merged and its exit code read from a marker line, so a
+        failure is a result and not an exception. With ``announce`` (and a Ui) the output
+        streams as live progress."""
         full = f'{cmd} 2>&1; echo "__rc=$?"'
         if announce and self.ui is not None:
-            with self.ui.progress(
-                announce, pip_progress_line, report=report, slow=slow
-            ) as progress:
+            with self.ui.progress(announce, on_line, report=report, slow=slow) as progress:
                 out = self.remote.stream(full, progress, check=True)
                 progress.failed = not _rc_ok(out)
         else:
             out = self.remote.run(full, check=True)
         body, _, rc = out.rpartition("__rc=")
-        result = PipResult(rc.strip() == "0", body.strip())
-        if check and not result.ok:
-            raise WizardError(f"pip {args.split()[0]} failed on the robot:\n{result.output}")
-        return result
+        return PipResult(rc.strip() == "0", body.strip())
+
+    def cli(self, args: str, announce: str) -> PipResult:
+        """Run ``python -m roboemot.cli <args>`` on the robot, streaming its output as live
+        progress. A non-zero exit is returned, not raised."""
+        cmd = f"{shlex.quote(self.python)} -m roboemot.cli {args}"
+        return self._shell(
+            cmd, announce, lambda line: None if line.startswith("__rc=") else line, False, True
+        )
 
     def exists(self) -> bool:
         return self.remote.run(f"test -x {shlex.quote(self.python)} && echo yes || echo no") == (

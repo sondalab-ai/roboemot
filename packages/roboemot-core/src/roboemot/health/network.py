@@ -184,8 +184,9 @@ class NetworkMonitor:
     # ---- background checks
 
     def start(self) -> None:
-        self._thread = threading.Thread(target=self._run, name="network-monitor", daemon=True)
-        self._thread.start()
+        thread = threading.Thread(target=self._run, name="network-monitor", daemon=True)
+        thread.start()
+        self._thread = thread
 
     def stop(self) -> None:
         self._stop.set()

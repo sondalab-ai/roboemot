@@ -15,6 +15,12 @@ only reports it and skips the dependency check. It also creates the private app 
 (``~/.local/share/roboemot``: registry, models, trait cache) when it is not there yet and
 records it. Unless declined (`--no-piper`) it also creates a Piper virtualenv in the data folder
 (`piper-tts` is GPL-3.0 and runs as its own process, SPEC 8), recorded for uninstall.
+The platform's ``extras`` (``voice`` for a robot that listens, so vosk) are installed with
+``roboemot-core``; ``--vision`` adds the ``vision`` extra and the vision weights. The voice
+models (``roboemot models fetch --voice``) are downloaded on the robot after Piper unless
+declined (``--no-models``), when the manifests' sizes fit the free space. Before installing it
+offers to clear the platform's ``clearable_caches`` (``--clear-caches``), which uninstall cannot
+restore.
 Optionally (``--secret NAME``, or asked on a terminal) it stores an API key in the robot's secret
 store (SPEC 8, 12 Data), recorded by name; uninstall removes only the names it added.
 
@@ -40,6 +46,7 @@ import re
 import shlex
 import sys
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from importlib.metadata import entry_points
 from pathlib import Path
@@ -49,7 +56,14 @@ import yaml
 
 from .. import paths
 from ..secret_store import NAME as SECRET_NAME
-from .build import build_wheels, distribution_names, min_python, third_party_requirements
+from .build import (
+    build_wheels,
+    distribution_names,
+    min_python,
+    third_party_requirements,
+    with_extras,
+)
+from .caches import clear_caches
 from .piper_lock import lock_path
 from .pyenv import RemotePython, report_changes
 from .record import InstallRecord, canonical, plan_uninstall
@@ -63,6 +77,8 @@ TMP_DIR_PATTERN = re.compile(re.escape(REMOTE_TMP_PREFIX) + r"\.[A-Za-z0-9]+")
 PIN_FILE = "webui_pin.json"  # roboemot.webui.auth.PIN_FILE, inside the app data folder
 PIN_RETRIES = 3
 DEFAULT_SECRET_NAME = "cloud_key"  # the name configs/companion.yaml gives the cloud route key
+MIB = 1024 * 1024
+VISION_DERIVED_BYTES = 170_000_000  # INT8 files made from the FP32 weights ("0.17 GB", models CLI)
 PIPER_TTS_VERSION = "1.8.0"  # exact pin: the worker protocol is tested against this API
 PLATFORM_PROBE = (
     "import sys, platform; print(platform.machine()); print('%d.%d' % sys.version_info[:2])"
@@ -89,6 +105,8 @@ class Platform(Protocol):
     space_paths: tuple[str, ...]  # filesystems that need MIN_FREE_MB
     distributions: tuple[str, ...]  # this app's own distributions
     modules: tuple[str, ...]  # their top-level import names (leftover check)
+    extras: tuple[str, ...]  # roboemot-core extras the robot needs (installed by default)
+    clearable_caches: tuple[str, ...]  # ``~/...`` caches safe to delete; not restored on uninstall
 
     def connect(self, ui: Ui, host: str) -> None: ...
     def plan_env(self, remote: Remote) -> str: ...
@@ -122,6 +140,9 @@ class Options:
     uninstall: bool = False
     piper: bool | None = None
     secrets: list[str] | None = None
+    clear_caches: bool | None = None
+    vision: bool = False
+    models: bool | None = None
 
 
 # ---------------------------------------------------------------- platforms
@@ -203,12 +224,21 @@ def probe_platform(remote: Remote, python: str) -> tuple[str, str]:
 
 
 def check_ssh(
-    ui: Ui, platform: Platform, remote: Remote, need: tuple[int, int] | None
+    ui: Ui,
+    platform: Platform,
+    remote: Remote,
+    need: tuple[int, int] | None,
+    free_space: Callable[[], None] | None = None,
 ) -> RemotePython:
-    """Log in once; check the target interpreter, architecture, Python and free space."""
+    """Log in once; check the target interpreter, architecture, Python and free space.
+
+    ``free_space`` runs after the login and before the free-space check, so what it frees counts.
+    """
     ui.info(f"connecting to {remote.target} (ssh may ask for the password)")
     remote.connect()
     ui.ok(f"ssh {remote.target}")
+    if free_space is not None:
+        free_space()
     py = RemotePython(remote, platform.python, ui)
     present = py.exists()
     if not present and need is None:
@@ -409,6 +439,122 @@ def remove_piper_venv(ui: Ui, remote: Remote, record: InstallRecord, dry_run: bo
     if not dry_run:
         remote.run(f"rm -rf {shlex.quote(venv)}")
     ui.ok(f"{'would delete' if dry_run else 'deleted'} the Piper virtualenv {venv}")
+
+
+# ---------------------------------------------------------------- models on the robot
+
+
+def model_dirs(remote: Remote, vision: bool) -> list[str]:
+    """The folders ``roboemot models fetch`` fills on the robot: voice models, and the vision
+    weights with ``vision`` (``roboemot.paths`` defaults inside the data folder)."""
+    _, data = remote_data_dir(remote)
+    subdirs = [paths.VOICE_MODELS_SUBDIR, *([paths.MODELS_SUBDIR] if vision else [])]
+    return [posixpath.join(data, d) for d in subdirs]
+
+
+def models_label(vision: bool) -> str:
+    return "voice and vision models" if vision else "voice models"
+
+
+def models_bytes(vision: bool, peak: bool = True) -> int:
+    """Disk the fetch needs, from the pinned manifests: each file's download size plus, for a
+    zip archive, its unpacked size (both exist while it unpacks; ``peak=False`` counts only what
+    stays). Vision adds the INT8 files derived from the FP32 weights (``VISION_DERIVED_BYTES``)."""
+    from ..vision import models as vision_models
+    from ..voice import models as voice_models
+
+    specs = list(voice_models.load_manifest().values())
+    if vision:
+        specs += list(vision_models.load_manifest().values())
+    total = 0
+    for f in (f for m in specs for f in m.files):
+        stays = f.unpacked_bytes if f.archive else f.size_bytes
+        total += (f.size_bytes or 0) + (f.unpacked_bytes or 0) if peak else (stays or 0)
+    return total + (VISION_DERIVED_BYTES if vision else 0)
+
+
+def free_mib_at(remote: Remote, path: str) -> int | None:
+    """Free space in MiB on the filesystem holding ``path`` (its nearest existing parent), or
+    None when ``df`` fails or answers something unreadable."""
+    while not _exists(remote, path) and path != "/":
+        path = posixpath.dirname(path)
+    try:
+        free_kib = int(remote.run(f"df -Pk {shlex.quote(path)} | tail -1").split()[3])
+    except (WizardError, ValueError, IndexError):
+        return None
+    return free_kib // 1024
+
+
+def fetch_models(
+    ui: Ui,
+    platform: Platform,
+    py: RemotePython,
+    remote: Remote,
+    record: InstallRecord,
+    vision: bool,
+    dry_run: bool,
+) -> None:
+    """Download the voice models (and the vision weights with ``vision``) on the robot by running
+    the installed CLI, so they land where the app reads them (``roboemot.paths``).
+
+    Skipped with a warning, not an error, when the filesystem lacks the space the pinned
+    manifests state (same unit on both sides: MiB), when the free space cannot be read, or when
+    the download fails: ``roboemot models fetch`` can be run later. Model
+    folders the installer creates inside a data folder that is not recorded as its own are
+    recorded before the download, so uninstall removes them; inside a recorded data folder they
+    go with it. The dry run only reports sizes and free space.
+    """
+    need_mib, label = -(-models_bytes(vision) // MIB), models_label(vision)
+    folders = model_dirs(remote, vision)
+    free_mib = free_mib_at(remote, folders[0])
+    if free_mib is None:
+        ui.warn(
+            f"cannot read the free space for the {label} in {folders[0]}: skipped "
+            "(run `roboemot models fetch` on the robot)"
+        )
+        return
+    if free_mib < need_mib:
+        ui.warn(
+            f"only {free_mib} MiB free for the {label} in {folders[0]}, they need {need_mib} MiB: "
+            "skipped (free space, then run `roboemot models fetch` on the robot)"
+        )
+        return
+    if dry_run:
+        ui.info(f"would download the {label} ({need_mib} MiB needed, {free_mib} MiB free)")
+        return
+    ui.ok(f"{free_mib} MiB free, the {label} need {need_mib} MiB")
+    if record.data_dir is None:
+        new = [d for d in folders if d not in record.models_dirs and not _exists(remote, d)]
+        if new:
+            record.models_dirs += new
+            write_record(remote, platform.record_path, record)
+    result = py.cli(f"models fetch {'--all' if vision else '--voice'}", f"downloading the {label}")
+    if not result.ok:
+        ui.warn(
+            f"the {label} were not downloaded:\n{result.output}\n"
+            "run `roboemot models fetch` on the robot later"
+        )
+        return
+    ui.ok(f"{label} are in {', '.join(folders)}")
+
+
+def remove_models_dirs(ui: Ui, remote: Remote, record: InstallRecord, dry_run: bool) -> None:
+    """Delete the recorded model folders, only at the exact paths the fetch would choose and
+    only when their ``realpath`` is the same (the data folder's own removal covers the rest)."""
+    expected = set(model_dirs(remote, vision=True))
+    for folder in record.models_dirs:
+        if folder not in expected:
+            ui.warn(
+                f"recorded model folder {folder!r} is not one of {sorted(expected)}: left as is"
+            )
+        elif not _exists(remote, folder):
+            ui.ok(f"model folder {folder} is not there")
+        elif remote.run(f"realpath {shlex.quote(folder)} 2>/dev/null || true").strip() != folder:
+            ui.warn(f"{folder} resolves elsewhere: symlink? left as it is")
+        else:
+            if not dry_run:
+                remote.run(f"rm -rf {shlex.quote(folder)}")
+            ui.ok(f"{'would delete' if dry_run else 'deleted'} the model folder {folder}")
 
 
 def ask_new_pin(ui: Ui) -> str | None:
@@ -701,6 +847,7 @@ def install_packages(
     dirs: list[Path],
     wheels: list[Path],
     dry_run: bool,
+    extras: tuple[str, ...] = (),
 ) -> InstallRecord:
     own = distribution_names(dirs)
     warn_data_dir_overrides(ui, remote, dirs)
@@ -730,7 +877,7 @@ def install_packages(
         record.merge(record.pending_before, before)
     pins = py.constraints(before, set(own))
     if dry_run:
-        reqs = third_party_requirements(dirs)
+        reqs = third_party_requirements(dirs, extras)
         plan = py.plan_install(reqs, pins)
         if plan.ok:
             added, _ = report_changes(_json(plan.output), before)
@@ -758,12 +905,13 @@ def install_packages(
         remote.copy(wheels, tmp)
         ui.ok(f"copied {', '.join(w.name for w in wheels)}")
         files = [f"{tmp}/{w.name}" for w in wheels]
+        targets = with_extras(files, extras)
         record.pending_before = before
         write_record(remote, platform.record_path, record)
-        result = py.install(files, pins)
+        result = py.install(targets, pins)
         if not result.ok:
             ui.warn("the app does not fit the package versions already on the robot")
-            free = py.plan_install(files, None)
+            free = py.plan_install(targets, None)
             if not free.ok:
                 raise WizardError(f"pip cannot resolve the dependencies:\n{free.output}")
             _, changed = report_changes(_json(free.output), before)
@@ -772,7 +920,7 @@ def install_packages(
             question = "Change these shared packages? Uninstall restores them (needs internet)"
             if not ui.confirm(question, False):
                 raise WizardError("install cancelled: shared packages left as they were")
-            result = py.install(files, None)
+            result = py.install(targets, None)
             if not result.ok:
                 raise WizardError(f"pip install failed on the robot:\n{result.output}")
         py.reinstall_own(files)
@@ -813,20 +961,38 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
             dirs = platform.stage(root, Path(tmp) / "src", dev)
 
             ui.step("SSH access")
-            py = check_ssh(ui, platform, remote, min_python(dirs))
+
+            def free_space() -> None:
+                home, _ = remote_data_dir(remote)
+                clear_caches(
+                    ui, remote, home, platform.clearable_caches, opts.clear_caches, opts.dry_run
+                )
+
+            py = check_ssh(ui, platform, remote, min_python(dirs), free_space)
 
             ui.step("Build")
             wheels = build_wheels(dirs, Path(tmp) / "wheels")
             ui.ok(f"built {', '.join(w.name for w in wheels)}")
 
             ui.step("Install (dependency check only)" if opts.dry_run else "Install")
-            record = install_packages(ui, platform, py, remote, dirs, wheels, opts.dry_run)
+            extras = (*platform.extras, *(("vision",) if opts.vision else ()))
+            record = install_packages(ui, platform, py, remote, dirs, wheels, opts.dry_run, extras)
             if not opts.dry_run:
                 platform.verify(ui, py, dev)
             if opts.piper is None:
                 opts.piper = ui.confirm("Install Piper for on-board speech (own virtualenv)?", True)
             if opts.piper:
                 install_piper(ui, platform, remote, record, opts.dry_run)
+            if opts.models is None:
+                opts.models = ui.confirm(
+                    f"Download the {models_label(opts.vision)} "
+                    f"(~{models_bytes(opts.vision) / 1e9:.1f} GB at peak while unpacking, "
+                    f"~{models_bytes(opts.vision, peak=False) / 1e9:.1f} GB once installed) "
+                    "on the robot?",
+                    True,
+                )
+            if opts.models:
+                fetch_models(ui, platform, py, remote, record, opts.vision, opts.dry_run)
             set_operator_pin(ui, py, remote, opts.dry_run)
             names = wanted_secrets(ui, opts)
             set_secrets(ui, platform, py, remote, record, names, opts.dry_run)
@@ -964,6 +1130,7 @@ def run_uninstall(opts: Options, ui: Ui, root: Path) -> None:
         ui.step("Clean up and verify")
         keep_env = remove_created_env(ui, platform, py, remote, record, opts.dry_run)
         remove_piper_venv(ui, remote, record, opts.dry_run)
+        remove_models_dirs(ui, remote, record, opts.dry_run)
         remove_data_dir(ui, remote, record, opts.dry_run)
         platform.cleanup(ui, py, opts.dry_run)
         listed = remote.run(f"ls -d {REMOTE_TMP_PREFIX}.* 2>/dev/null || true").split()
@@ -1012,6 +1179,12 @@ def verify_uninstall(
     venv, _ = piper_paths(py.remote)
     if record.piper_venv == venv and _exists(py.remote, venv):
         problems.append(f"Piper virtualenv {venv} still present")
+    expected_models = set(model_dirs(py.remote, vision=True))
+    problems += [
+        f"model folder {d} still present"
+        for d in record.models_dirs
+        if d in expected_models and _exists(py.remote, d)
+    ]
     data_dir, bad = checked_data_dir(py.remote, record)
     if bad:
         problems.append(bad)
@@ -1078,11 +1251,28 @@ def parse_args(argv: list[str] | None = None) -> Options:
         help="install Piper (on-board speech) in its own virtualenv in the data folder",
     )
     p.add_argument(
+        "--vision",
+        action=argparse.BooleanOptionalAction,
+        help="also install the vision extra (OpenCV, ONNX) and, with the models step, the vision "
+        "weights (default: off, the robot's disk is small)",
+    )
+    p.add_argument(
+        "--models",
+        action=argparse.BooleanOptionalAction,
+        help="download the voice models on the robot (default: ask)",
+    )
+    p.add_argument(
         "--secret",
         action="append",
         metavar="NAME",
         help="store the secret NAME (an API key for ${secret:NAME}) on the robot; the value is "
         "asked on this PC without echo and never appears on a command line",
+    )
+    p.add_argument(
+        "--clear-caches",
+        action=argparse.BooleanOptionalAction,
+        help="delete the robot's download caches the platform names (e.g. a uv cache) to "
+        "free disk space; uninstall cannot restore them",
     )
     p.add_argument("-y", "--yes", action="store_true", help="answer yes to every confirmation")
     a = p.parse_args(argv)
@@ -1098,6 +1288,9 @@ def parse_args(argv: list[str] | None = None) -> Options:
         a.uninstall,
         a.piper,
         a.secret,
+        a.clear_caches,
+        bool(a.vision),
+        a.models,
     )
 
 

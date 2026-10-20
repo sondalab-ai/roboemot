@@ -81,8 +81,9 @@ class VisionService:
         """Start the worker and the camera thread."""
         self._stop.clear()
         self.runner.start()
-        self._thread = threading.Thread(target=self._pump, name="roboemot-camera", daemon=True)
-        self._thread.start()
+        thread = threading.Thread(target=self._pump, name="roboemot-camera", daemon=True)
+        thread.start()
+        self._thread = thread
 
     def stop(self) -> None:
         """Quiet the camera thread, then stop the worker and the attribute worker.

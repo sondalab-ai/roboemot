@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import posixpath
 import re
 import subprocess
 import sys
@@ -10,6 +11,8 @@ from pathlib import Path
 
 from .record import canonical
 from .ui import WizardError
+
+CORE_WHEEL_PREFIX = "roboemot_core-"  # the wheel that defines the extras
 
 
 def _meta(package_dir: Path) -> dict:
@@ -34,15 +37,27 @@ def distribution_names(package_dirs: list[Path]) -> list[str]:
     return [canonical(_meta(d)["name"]) for d in package_dirs]
 
 
-def third_party_requirements(package_dirs: list[Path]) -> list[str]:
-    """Runtime dependencies of the packages, minus the packages themselves."""
+def third_party_requirements(package_dirs: list[Path], extras: tuple[str, ...] = ()) -> list[str]:
+    """Runtime dependencies of the packages (plus the named ``extras`` they define), minus the
+    packages themselves."""
     own = set(distribution_names(package_dirs))
     reqs = set()
     for d in package_dirs:
-        for r in _meta(d).get("dependencies", []):
+        meta = _meta(d)
+        optional = meta.get("optional-dependencies", {})
+        wanted = [*meta.get("dependencies", []), *(r for e in extras for r in optional.get(e, []))]
+        for r in wanted:
             if canonical(re.split(r"[\s;<>=!~\[(@]", r, maxsplit=1)[0]) not in own:
                 reqs.add(r)
     return sorted(reqs)
+
+
+def with_extras(files: list[str], extras: tuple[str, ...]) -> list[str]:
+    """``files`` with the core wheel asked for with ``extras`` (``path.whl[voice,vision]``)."""
+    if not extras:
+        return files
+    suffix = f"[{','.join(extras)}]"
+    return [f + suffix if posixpath.basename(f).startswith(CORE_WHEEL_PREFIX) else f for f in files]
 
 
 def min_python(package_dirs: list[Path]) -> tuple[int, int]:
@@ -55,4 +70,10 @@ def min_python(package_dirs: list[Path]) -> tuple[int, int]:
     return max(found)
 
 
-__all__ = ["build_wheels", "distribution_names", "min_python", "third_party_requirements"]
+__all__ = [
+    "build_wheels",
+    "distribution_names",
+    "min_python",
+    "third_party_requirements",
+    "with_extras",
+]

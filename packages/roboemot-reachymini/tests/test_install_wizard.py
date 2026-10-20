@@ -17,6 +17,8 @@ from roboemot.config.schema import RoboEmotConfig
 from roboemot.diagnostics import Target
 from roboemot.install import Options, Ui, WizardError
 from roboemot.install import run as run_mod
+from roboemot.install.build import with_extras
+from roboemot.install.caches import cache_path, clear_caches
 from roboemot.install.piper_lock import lock_name
 from roboemot_reachymini import install as reachy
 from roboemot_reachymini.daemon import INSTALL_TIMEOUT_S, DaemonClient, DaemonError
@@ -69,6 +71,12 @@ class FakeRobot:
         self.apps_in_env: list[str] = []  # other apps' entry points in the apps venv
         self.record_at_venv: str | None = None  # the record file when the venv was created
         self.daemon_version = "1.11.0"
+        self.sizes: dict[str, str] = {}  # `du -sh` answers
+        self.fetches: list[str] = []  # `roboemot models fetch` argument lists
+        self.fetch_fails = False
+        self.free_kb = 20_000_000
+        self.free_kb_by_cache = self.free_kb  # free space while the uv cache is still there
+        self.df_unreadable: set[str] = set()  # paths whose `df` answers nothing
 
     def _exists(self, path: str) -> bool:
         return path in self.dirs or (path == reachy.APPS_VENV and self.apps_venv)
@@ -118,6 +126,17 @@ class FakeRobot:
                 return "ERROR: no network\n__rc=1"
             self.piper_importable = True
             return "\n__rc=0"
+        if " -m roboemot.cli models fetch " in command:
+            assert command.startswith(APPS_PY), command
+            self.fetches.append(command.split(" -m roboemot.cli ")[1].split(" 2>&1")[0])
+            if self.fetch_fails:
+                return "ModelError: no network\n__rc=1"
+            self.dirs |= (
+                {f"{DATA}/voice-models", f"{DATA}/models"}
+                if "--all" in command
+                else {f"{DATA}/voice-models"}
+            )
+            return "downloaded silero\n__rc=0"
         if " -m roboemot.cli secrets " in command:
             words = shlex.split(command)
             action, names = words[4], words[8:]
@@ -147,6 +166,8 @@ class FakeRobot:
             return HOME
         if command == 'printf %s "${ROBOEMOT_DATA_DIR:-}"':
             return self.env_data_dir
+        if command.startswith("du -sh "):
+            return self.sizes.get(shlex.split(command)[2], "4.0K")
         if command.startswith("realpath "):
             path = shlex.split(command)[1]
             return self.symlinks.get(path, path) if self._exists(path) else ""
@@ -181,7 +202,11 @@ class FakeRobot:
         if "purelib" in plain:
             return SITE
         if command.startswith("df "):
-            return "/dev/root 30000000 1000000 20000000 5% /"
+            path = shlex.split(command)[2]
+            if path in self.df_unreadable:
+                return ""
+            kb = self.free_kb_by_cache if UV_CACHE in self.dirs else self.free_kb
+            return f"/dev/root 30000000 1000000 {kb} 5% /"
         if command.startswith("cat "):
             return self.files.get(shlex.split(command)[1], "")
         if command.startswith("printf %s") and "&& mv" in command:
@@ -235,6 +260,10 @@ class FakeRobot:
         if pinned and self.conflict:
             return "ERROR: ResolutionImpossible", 1
         changes = {**self.deps, **(self.conflict if not pinned else {})}
+        if any("[voice" in t for t in targets):
+            changes["vosk"] = "0.3.45"
+        if any("vision" in t.partition("[")[2] for t in targets):
+            changes["opencv-python-headless"] = "4.10.0"
         if "--dry-run" in args:
             items = [{"metadata": {"name": n, "version": v}} for n, v in changes.items()]
             if any(t.endswith(".whl") for t in targets):
@@ -261,6 +290,7 @@ class FakeDaemon:
         self.start_states = ["starting", "running"]
         self.others = ["conversation"]
         self.hide_own = False  # a daemon that does not pick the app up
+        self.autostart_on_wake = False  # the startup app begins as soon as the robot wakes up
         self.lock: dict | None = {"state": "free", "holder_name": None}  # None: no endpoint
 
     @property
@@ -288,6 +318,8 @@ class FakeDaemon:
                 self.current = None
                 return 200, None
             case "POST", "/api/move/play/wake_up":
+                if self.autostart_on_wake and not self.current:
+                    self.current = {"info": {"name": "roboemot"}, "state": "starting"}
                 return 200, {"uuid": "x"}
             case "GET", "/api/daemon/robot-app-lock-status":
                 return (200, self.lock) if self.lock else (404, {"detail": "Not Found"})
@@ -451,6 +483,264 @@ def test_start_declined_leaves_running_app_alone(daemon):
     assert daemon.mutations == []
 
 
+def test_start_waits_for_the_app_the_daemon_autostarts_on_wake_up(daemon, capsys):
+    daemon.autostart_on_wake = True
+    platform_for(daemon).start(quiet_ui(yes=True))
+    assert [(m, p) for m, p, _ in daemon.mutations] == [("POST", "/api/move/play/wake_up")]
+    assert daemon.current["state"] == "running"
+    assert "started by the daemon on wake-up" in capsys.readouterr().out
+
+
+def test_start_skips_to_the_url_when_the_app_already_runs(daemon, capsys):
+    daemon.current = {"info": {"name": "roboemot"}, "state": "running"}
+    platform_for(daemon).start(quiet_ui())
+    assert daemon.mutations == []
+    assert "roboemot is already running" in capsys.readouterr().out
+
+
+VOICE_MODELS = f"{DATA}/voice-models"
+UV_CACHE = f"{HOME}/.cache/uv"
+
+
+def core_targets(robot) -> list[str]:
+    """The roboemot-core wheel argument(s) of the main pip install, extras included."""
+    for command in robot.commands:
+        if " -m pip install" in command and "--no-deps" not in command and ".whl" in command:
+            return [t for t in shlex.split(command) if "roboemot_core-" in t]
+    return []
+
+
+def test_install_adds_the_voice_extra_and_records_what_it_brings(offline, robot, daemon):
+    install()
+    assert [t.partition("[")[2] for t in core_targets(robot)] == ["voice]"]
+    assert {"vosk", "scipy"} <= set(json.loads(robot.files[RECORD])["added"])
+
+
+def test_vision_flag_adds_the_vision_extra_and_the_vision_weights(offline, robot, daemon):
+    install(vision=True)
+    assert [t.partition("[")[2] for t in core_targets(robot)] == ["voice,vision]"]
+    assert robot.fetches == ["models fetch --all"]
+    assert "opencv-python-headless" in json.loads(robot.files[RECORD])["added"]
+
+
+def test_models_are_fetched_on_the_robot_and_uninstall_removes_them(offline, robot, daemon):
+    before = snapshot(robot, daemon)
+    install()
+    assert robot.fetches == ["models fetch --voice"]
+    assert VOICE_MODELS in robot.dirs
+    uninstall()
+    assert snapshot(robot, daemon) == before
+
+
+def test_models_can_be_declined_with_the_flag(offline, robot, daemon):
+    install(models=False)
+    assert robot.fetches == [] and VOICE_MODELS not in robot.dirs
+
+
+def test_the_models_question_defaults_to_yes(offline, robot, daemon, monkeypatch):
+    asked = []
+    monkeypatch.setattr(Ui, "confirm", lambda self, q, default: asked.append((q, default)) or True)
+    inst.run_install(options(start=False, startup=False, yes=False), quiet_ui(), ROOT)
+    assert [d for q, d in asked if q.startswith("Download the voice models")] == [True]
+
+
+def test_not_enough_space_warns_and_skips_the_models_without_failing(
+    offline, robot, daemon, capsys
+):
+    robot.free_kb = (inst.MIN_FREE_MB + 1) * 1024
+    install()
+    out = capsys.readouterr().out
+    assert robot.fetches == [] and "skipped" in out and "MB free" in out
+    assert reachy.APPS_VENV and "roboemot-core" in robot.env
+
+
+def needed_mib(vision: bool = False) -> int:
+    return -(-inst.models_bytes(vision) // inst.MIB)
+
+
+def test_the_models_fit_exactly_when_free_mib_equals_the_need(offline, robot, daemon):
+    robot.free_kb = needed_mib() * 1024
+    install()
+    assert robot.fetches == ["models fetch --voice"]
+
+
+def test_one_mib_short_skips_the_models(offline, robot, daemon):
+    robot.free_kb = (needed_mib() - 1) * 1024
+    install()
+    assert robot.fetches == []
+
+
+def test_unreadable_free_space_skips_the_models_and_the_install_goes_on(
+    offline, robot, daemon, capsys
+):
+    robot.df_unreadable = {DATA}
+    install()
+    assert robot.fetches == [] and "roboemot-core" in robot.env
+    assert "cannot read the free space" in capsys.readouterr().out
+
+
+def test_a_failed_download_warns_and_the_install_goes_on(offline, robot, daemon, capsys):
+    robot.fetch_fails = True
+    install()
+    assert "were not downloaded" in capsys.readouterr().out
+    assert "roboemot-core" in robot.env
+
+
+def test_dry_run_reports_the_model_sizes_and_downloads_nothing(offline, robot, daemon, capsys):
+    install(dry_run=True)
+    assert robot.fetches == [] and VOICE_MODELS not in robot.dirs
+    assert "would download the voice models" in capsys.readouterr().out
+    assert robot.files == {}
+
+
+def test_models_in_a_foreign_data_folder_are_recorded_and_removed_alone(offline, robot, daemon):
+    robot.dirs.add(DATA)
+    install()
+    assert json.loads(robot.files[RECORD])["models_dirs"] == [VOICE_MODELS]
+    uninstall()
+    assert DATA in robot.dirs and VOICE_MODELS not in robot.dirs
+
+
+def test_models_folder_that_was_already_there_is_not_recorded(offline, robot, daemon):
+    robot.dirs |= {DATA, VOICE_MODELS}
+    install()
+    assert json.loads(robot.files[RECORD])["models_dirs"] == []
+    uninstall()
+    assert VOICE_MODELS in robot.dirs
+
+
+def test_model_sizes_come_from_the_pinned_manifests():
+    assert 0 < inst.models_bytes(False) < inst.models_bytes(True)
+    assert inst.models_bytes(True) - inst.models_bytes(False) > inst.VISION_DERIVED_BYTES
+
+
+def test_with_extras_marks_only_the_core_wheel():
+    files = ["/tmp/x/roboemot_core-0.1.0-py3-none-any.whl", "/tmp/x/roboemot_reachymini-0.1.0.whl"]
+    assert with_extras(files, ("voice", "vision")) == [
+        files[0] + "[voice,vision]",
+        files[1],
+    ]
+    assert with_extras(files, ()) == files
+
+
+def test_install_clears_the_uv_cache_before_installing(offline, robot, capsys):
+    robot.dirs.add(UV_CACHE)
+    robot.sizes[UV_CACHE] = "5.6G"
+    install()
+    assert UV_CACHE not in robot.dirs
+    assert f"rm -rf {UV_CACHE}" in robot.commands
+    assert robot.commands.index(f"rm -rf {UV_CACHE}") < robot.commands.index(
+        "mktemp -d /tmp/roboemot-install.XXXXXX"
+    )
+    out = capsys.readouterr().out
+    assert "5.6G" in out and "cleared" in out
+    assert UV_CACHE not in json.loads(robot.files[RECORD]).values()
+
+
+def test_install_keeps_the_uv_cache_when_declined(offline, robot):
+    robot.dirs.add(UV_CACHE)
+    install(clear_caches=False)
+    assert UV_CACHE in robot.dirs
+
+
+@pytest.mark.parametrize("interactive", [True, False])
+def test_the_cache_prompt_defaults_to_yes_only_on_a_terminal(robot, monkeypatch, interactive):
+    robot.dirs.add(UV_CACHE)
+    asked = []
+    monkeypatch.setattr(Ui, "confirm", lambda self, q, default: asked.append((q, default)) or False)
+    ui = Ui(interactive=interactive, assume_yes=False)
+    clear_caches(ui, robot, HOME, ReachyMiniWireless.clearable_caches, None, False)
+    assert UV_CACHE in robot.dirs
+    assert [d for q, d in asked if UV_CACHE in q] == [interactive]
+
+
+def test_an_unattended_run_without_consent_keeps_the_cache(offline, robot):
+    robot.dirs.add(UV_CACHE)
+    inst.run_install(options(start=False, startup=False, yes=False), quiet_ui(), ROOT)
+    assert UV_CACHE in robot.dirs
+
+
+def test_the_flag_clears_the_cache_without_yes(offline, robot):
+    robot.dirs.add(UV_CACHE)
+    inst.run_install(
+        options(start=False, startup=False, yes=False, clear_caches=True), quiet_ui(), ROOT
+    )
+    assert UV_CACHE not in robot.dirs
+
+
+def test_clearing_the_cache_can_make_a_full_robot_pass_the_space_check(offline, robot):
+    robot.dirs.add(UV_CACHE)
+    robot.free_kb_by_cache = (inst.MIN_FREE_MB - 100) * 1024
+    install()
+    assert UV_CACHE not in robot.dirs and "roboemot-core" in robot.env
+
+
+def test_a_declined_clear_leaves_the_free_space_error(offline, robot):
+    robot.dirs.add(UV_CACHE)
+    robot.free_kb_by_cache = (inst.MIN_FREE_MB - 100) * 1024
+    with pytest.raises(WizardError, match="MB free"):
+        install(clear_caches=False)
+    assert UV_CACHE in robot.dirs and "roboemot-core" not in robot.env
+
+
+def test_install_dry_run_reports_the_uv_cache_and_clears_nothing(offline, robot, capsys):
+    robot.dirs.add(UV_CACHE)
+    robot.sizes[UV_CACHE] = "5.6G"
+    install(dry_run=True)
+    assert UV_CACHE in robot.dirs
+    assert not any(c.startswith("rm -rf " + UV_CACHE) for c in robot.commands)
+    assert f"would clear {UV_CACHE} (5.6G" in capsys.readouterr().out
+
+
+def test_install_does_not_delete_a_cache_that_is_a_symlink(offline, robot, capsys):
+    robot.dirs.add(UV_CACHE)
+    robot.symlinks[UV_CACHE] = "/data/elsewhere"
+    install()
+    assert UV_CACHE in robot.dirs
+    assert "symlink" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("spec", ["/etc", "~/", "~/..", "~/../x", "cache"])
+def test_cache_paths_stay_strictly_below_home(spec):
+    with pytest.raises(WizardError):
+        cache_path(HOME, spec)
+
+
+@pytest.mark.parametrize("home", ["/", ""])
+def test_cache_paths_refuse_a_root_or_empty_home(home):
+    with pytest.raises(WizardError):
+        cache_path(home, "~/.cache/uv")
+
+
+def test_a_symlinked_home_skips_the_cache_with_a_warning(offline, robot, capsys):
+    robot.dirs.add(UV_CACHE)
+    robot.symlinks[UV_CACHE] = "/mnt/real-home/.cache/uv"
+    install()
+    assert UV_CACHE in robot.dirs
+    assert f"rm -rf {UV_CACHE}" not in robot.commands
+    assert "symlink" in capsys.readouterr().out
+
+
+def test_start_reports_an_error_of_the_app_the_daemon_autostarted(daemon):
+    daemon.autostart_on_wake = True
+    daemon.start_states = ["error"]
+    with pytest.raises(WizardError, match="roboemot state error"):
+        platform_for(daemon).start(quiet_ui(yes=True))
+
+
+def test_start_clears_an_earlier_error_then_starts(daemon, capsys):
+    # the daemon counts an errored app as running and refuses every start until it is stopped
+    daemon.current = {"info": {"name": "roboemot"}, "state": "error", "error": "boom"}
+    platform_for(daemon).start(quiet_ui())
+    assert [(m, p) for m, p, _ in daemon.mutations] == [
+        ("POST", "/api/apps/stop-current-app"),
+        ("POST", "/api/move/play/wake_up"),
+        ("POST", "/api/apps/start-app/roboemot"),
+    ]
+    assert daemon.current["state"] == "running"
+    assert "ended with an error earlier (boom)" in capsys.readouterr().out
+
+
 def test_start_reports_app_error(daemon):
     daemon.start_states = ["error"]
     with pytest.raises(WizardError, match="roboemot state error"):
@@ -506,7 +796,7 @@ def test_install_records_changes_and_cleans_tmp(offline, robot, daemon):
     install()
     assert len(robot.copies) == 2 and robot.tmp_dirs == set()  # the wheels, then the Piper lock
     record = json.loads(robot.files[RECORD])
-    assert record["added"] == ["scipy"] and record["replaced"] == {}
+    assert record["added"] == ["scipy", "vosk"] and record["replaced"] == {}
     assert record["pending_before"] is None
     pip = [
         c
@@ -865,7 +1155,7 @@ def test_reinstall_after_the_folder_vanished_keeps_the_record_and_uninstalls_cle
 ):
     before = snapshot(robot, daemon)
     install()
-    robot.dirs -= {DATA}
+    robot.dirs = {d for d in robot.dirs if d != DATA and not d.startswith(DATA + "/")}
     install()
     assert json.loads(robot.files[RECORD])["data_dir"] == DATA
     uninstall()

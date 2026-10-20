@@ -331,6 +331,9 @@ class Server:
         self._pins = pins
         self._cfg = cfg
         self._thread: threading.Thread | None = None
+        self._stopped = False
+        self._serving = threading.Event()  # serve_forever was entered
+        self._gate = threading.Lock()  # orders _serve's entry against stop()
 
     @property
     def host(self) -> str:
@@ -347,18 +350,34 @@ class Server:
 
     def start(self) -> Server:
         if self._thread is None:
-            self._thread = threading.Thread(
-                target=lambda: self._httpd.serve_forever(poll_interval=SERVE_POLL_S),
+            with self._gate:
+                self._stopped = False
+                self._serving.clear()
+            thread = threading.Thread(
+                target=self._serve,
                 name="roboemot-webui",
                 daemon=True,
             )
-            self._thread.start()
+            thread.start()
+            self._thread = thread
         return self
+
+    def _serve(self) -> None:
+        """The serving thread; does nothing when ``stop`` ran before the thread got going."""
+        with self._gate:
+            if self._stopped:
+                return
+            self._serving.set()
+        self._httpd.serve_forever(poll_interval=SERVE_POLL_S)
 
     def stop(self) -> None:
         """Stop serving, close the socket and join the thread; safe to call twice."""
+        with self._gate:
+            self._stopped = True
+            entered = self._serving.is_set()
         if self._thread is not None:
-            self._httpd.shutdown()
+            if entered:  # shutdown() would wait for a serve_forever that never began
+                self._httpd.shutdown()
             shutdown.join(self._thread, None)
             self._thread = None
         self._httpd.server_close()

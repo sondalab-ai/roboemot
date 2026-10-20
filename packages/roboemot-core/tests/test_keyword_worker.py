@@ -264,3 +264,19 @@ def test_a_worker_error_ends_the_session_so_the_next_candidate_restarts_it():
         assert len(asr.started) >= 2, "the session was not restarted"
     finally:
         w.bargein.close()
+
+
+def test_close_between_thread_creation_and_start_does_not_join_an_unstarted_thread(monkeypatch):
+    real_start = threading.Thread.start
+    worker = KeywordWorker(
+        GatedASR(["stop"]), lambda text, lang: True, FRAME / RATE, background=True
+    )
+
+    def start_after_close(self):
+        if self.name == "roboemot-keywords":
+            worker.close()
+        real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", start_after_close)
+    worker.start("it", [(0.0, np.zeros(FRAME, np.float32))])
+    worker.close()

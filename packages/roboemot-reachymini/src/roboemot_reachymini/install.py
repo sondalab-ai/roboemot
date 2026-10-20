@@ -108,6 +108,8 @@ class ReachyMiniWireless:
     space_paths = ("/tmp", APPS_VENV)
     distributions = PACKAGES
     modules = ("roboemot", "roboemot_reachymini")
+    extras = ("voice",)
+    clearable_caches = ("~/.cache/uv",)  # the uv download cache left by the robot image's setup
 
     def __init__(self, port: int = DEFAULT_PORT) -> None:
         self.port = port
@@ -216,7 +218,11 @@ class ReachyMiniWireless:
         blocker = self.start_blocker()
         if blocker:
             raise WizardError(blocker)
+        self._clear_errored_app(ui)
         other = self.running_app()
+        if other == APP_NAME:
+            self._await_own(ui, f"{APP_NAME} is already running")
+            return
         if other:
             if not ui.confirm(f"{other} is running; stop it (only one app runs at a time)?", True):
                 raise WizardError(f"{other} is still running; RoboEmot not started")
@@ -227,9 +233,45 @@ class ReachyMiniWireless:
             api.wake_up()
         ui.ok("wake-up requested")
         time.sleep(WAKE_SETTLE_S)
+        if self.running_app() == APP_NAME:
+            self._await_own(ui, f"{APP_NAME} started by the daemon on wake-up")
+            return
+        try:
+            with _wizard_errors():
+                api.start_app(APP_NAME)
+        except WizardError:
+            if not self._current_is_own():
+                raise
+            self._await_own(ui, f"{APP_NAME} started by the daemon on wake-up")
+            return
+        self._await_own(ui)
+
+    def _clear_errored_app(self, ui: Ui) -> None:
+        """The daemon refuses every start while the current app is in ``error`` (it counts as
+        running); clear such a leftover with a stop so a new start can go through."""
         with _wizard_errors():
-            api.start_app(APP_NAME)
-            status = api.wait_app(APP_NAME)
+            current = self._api().current_app()
+        if not current or current["state"] != "error":
+            return
+        name = current["info"]["name"]
+        ui.warn(f"{name} ended with an error earlier ({current.get('error') or 'no detail'})")
+        with _wizard_errors():
+            self._api().stop_current_app()
+        ui.ok(f"cleared {name}")
+
+    def _current_is_own(self) -> bool:
+        """Whether RoboEmot is the daemon's current app, in any state (an errored start counts:
+        it is reported, not started again)."""
+        with _wizard_errors():
+            current = self._api().current_app()
+        return bool(current) and current["info"]["name"] == APP_NAME
+
+    def _await_own(self, ui: Ui, note: str | None = None) -> None:
+        """Wait until RoboEmot is the current app and running, or raise with its error."""
+        if note:
+            ui.ok(note)
+        with _wizard_errors():
+            status = self._api().wait_app(APP_NAME)
         if status["state"] != "running":
             raise WizardError(
                 f"{APP_NAME} state {status['state']}: {status.get('error') or 'no detail'}"

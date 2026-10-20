@@ -112,10 +112,9 @@ class KeywordWorker:
             self._run(op)
             return
         if self._thread is None and not self._closed:
-            self._thread = threading.Thread(
-                target=self._loop, name="roboemot-keywords", daemon=True
-            )
-            self._thread.start()
+            thread = threading.Thread(target=self._loop, name="roboemot-keywords", daemon=True)
+            thread.start()
+            self._thread = thread
         self._queue.put(op)
 
     def _drain(self) -> None:

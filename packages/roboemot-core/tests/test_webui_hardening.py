@@ -427,3 +427,20 @@ def test_pin_file_mode_is_forced_even_if_umask_is_open(tmp_path):
         os.umask(old)
     assert stat.S_IMODE((tmp_path / "data" / "webui_pin.json").stat().st_mode) == 0o600
     assert stat.S_IMODE((tmp_path / "data").stat().st_mode) == 0o700
+
+
+def test_stop_between_thread_creation_and_start_does_not_join_an_unstarted_thread(
+    tmp_path, monkeypatch
+):
+    cfg = RoboEmotConfig(webui={"bind": "127.0.0.1", "port": 0})
+    srv = make_server(FakeService(), Diagnostics(), cfg, tmp_path)
+    real_start = threading.Thread.start
+
+    def start_after_stop(self):
+        if self.name == "roboemot-webui":
+            srv.stop()
+        real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", start_after_stop)
+    srv.start()
+    srv.stop()

@@ -571,3 +571,20 @@ def test_the_asr_is_handed_back_before_every_abort_and_a_failing_hook_does_not_s
         SimpleNamespace(samples=np.zeros(CHUNK, np.float32), rate_hz=RATE, stamp=T0 + 1.0, gap=True)
     )
     assert len(calls) == 2 and rig.asr.resets == 2
+
+
+def test_stop_between_thread_creation_and_start_does_not_join_an_unstarted_thread(monkeypatch):
+    import threading
+
+    rig = Rig()
+    real_start = threading.Thread.start
+
+    def start_after_stop(self):
+        if self.name == "roboemot-listener":
+            rig.listener.stop()
+        real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", start_after_stop)
+    rig.listener.start()
+    rig.listener.stop()
+    assert rig.listener._thread is None
