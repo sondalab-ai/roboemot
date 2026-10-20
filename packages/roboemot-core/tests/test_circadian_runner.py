@@ -45,7 +45,6 @@ MANIFEST = (
 )
 DAY_S = 24 * 3600
 CLIPS = load_clip_library(load_manifest(MANIFEST, allow_unmeasured_dynamics=True))
-STRETCH_S = max(f[-1][0] for f in CLIPS["wake-mini-up"].channels.values())
 
 
 @pytest.fixture(scope="module")
@@ -529,16 +528,15 @@ def test_resting_commands_the_rest_posture_at_idle_priority(cfg, manifest):
     assert m.commands(1.2, "awake") == [] and m.commands(1.3, "drowsy") == []
 
 
-def test_waking_plays_the_stretch_clip_to_its_end(cfg, manifest):
+def test_waking_plays_a_three_second_stretch(cfg, manifest):
     m = CircadianMotion(
         cfg.circadian, cfg.circadian_motion, manifest.dofs, body_yaw="body_yaw", clips=CLIPS
     )
     assert m.start_waking(10.0)
-    run = drive(m, STRETCH_S + 1.0, "drowsy", start=10.0)
+    run = drive(m, 4.0, "drowsy", start=10.0)
     active = [t for t, cmds in run if cmds]
-    assert active[0] == pytest.approx(10.0)
-    assert STRETCH_S - 0.1 <= active[-1] - active[0] <= STRETCH_S + 0.05
-    peak = max(abs(c.targets["head.pitch"]) for _, cmds in run for c in cmds)
+    assert active[0] == pytest.approx(10.0) and 2.9 <= active[-1] - active[0] <= 3.05
+    peak = max(c.targets["antenna_right"] for _, cmds in run for c in cmds)
     assert peak > 0 and m.playing == ""
 
 
@@ -548,7 +546,7 @@ def test_primitives_respect_the_minor_cap(cfg, manifest):
     )
     m.set_minor_factor(0.001)
     m.start_waking(0.0)
-    cmds = [c for _, cs in drive(m, STRETCH_S, "drowsy") for c in cs]
+    cmds = [c for _, cs in drive(m, 3.0, "drowsy") for c in cs]
     assert cmds
     for c in cmds:
         for name, v in c.targets.items():
@@ -874,8 +872,8 @@ def test_stretch_follows_the_register_and_the_ceiling(cfg, manifest):
         )
         m.set_register(amplitude, ceiling)
         m.start_waking(0.0)
-        cmds = [c for _, cs in drive(m, STRETCH_S, "drowsy") for c in cs]
-        return max(abs(c.targets["head.pitch"]) for c in cmds)
+        cmds = [c for _, cs in drive(m, 3.0, "drowsy") for c in cs]
+        return max(c.targets["antenna_right"] for c in cmds)
 
     full = stretch(1.0)
     assert stretch(0.7) == pytest.approx(full * 0.7, rel=0.01)
@@ -889,12 +887,13 @@ def test_a_register_that_tightens_mid_play_scales_the_primitive_down_only(cfg, m
     )
     m.set_register(1.0, 2.0)
     m.start_waking(0.0)
-    mid = m.commands(1.0, "drowsy")[0].targets["head.pitch"]
-    assert abs(mid) > 0.1
+    mid = m.commands(1.0, "drowsy")[0].targets["antenna_right"]
     m.set_register(0.5, 2.0)  # a child walks in
-    assert m.commands(1.0, "drowsy")[0].targets["head.pitch"] == pytest.approx(mid * 0.5, rel=0.01)
+    assert m.commands(1.0, "drowsy")[0].targets["antenna_right"] == pytest.approx(
+        mid * 0.5, rel=0.01
+    )
     m.set_register(1.2, 2.0)  # looser again: never above where it started
-    assert m.commands(1.0, "drowsy")[0].targets["head.pitch"] == pytest.approx(mid, rel=0.01)
+    assert m.commands(1.0, "drowsy")[0].targets["antenna_right"] == pytest.approx(mid, rel=0.01)
 
 
 def test_a_quiet_hours_hold_is_not_a_night_wake_but_a_person_is(cfg, manifest):
@@ -934,7 +933,7 @@ def test_people_flapping_at_night_replay_the_stretch_only_after_the_cooldown(cfg
         r.note_presence()
         run_for(r, clock, 20)
         plays.append(r.motion.playing == "stretch")
-        for _ in range(int(STRETCH_S / 0.05) + 20):  # let any stretch play out
+        for _ in range(100):  # let any stretch play out
             clock.advance(0.05)
             r.commands(clock.t)
         run_for(r, clock, cfg.circadian.presence_window_s + 30)
@@ -958,7 +957,7 @@ def test_a_rest_pose_the_robot_cannot_hold_fails_at_manifest_load():
     for edit in (
         lambda m: m.__setitem__("rest_pose_deg", {"head.pitch": 80}),
         lambda m: m.__setitem__("rest_pose_deg", {"wheels": 1}),
-        lambda m: m.__setitem__("yawn", {"channels": {"tail": [[0, 0], [1, 5], [3, 0]]}}),
+        lambda m: m["stretch"]["channels"].__setitem__("tail", [[0, 0], [1, 5], [3, 0]]),
         lambda m: m.__setitem__("stretch", {"channels": {"head.pitch": [[0, 1], [1, 0]]}}),
     ):
         bad = copy.deepcopy(raw)

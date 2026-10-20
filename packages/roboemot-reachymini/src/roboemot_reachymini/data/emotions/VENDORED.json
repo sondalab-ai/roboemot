@@ -5,12 +5,13 @@
   "attribution": "Reachy Mini Emotions Library, Pollen Robotics (https://huggingface.co/datasets/pollen-robotics/reachy-mini-emotions-library), Apache-2.0. Converted by RoboEmot (modified). Derivatives keep the 'reachy_mini_community_moves' tag.",
   "conversion": {
     "ease_s": 0.4,
+    "ease_max_speed_deg_s": 90.0,
     "rdp_tolerance_deg": 0.5,
     "round_deg": 0.1,
     "time_resolution_s": 0.001
   },
   "license_sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
-  "clips_sha256": "962cd5202cc4c147316f025af302025f6fc5b0439b6d5f8d05cba893b09c395e",
+  "clips_sha256": "239cc4b0f44631c8dedab47badc0ea7b224ad7ee168e979978308419226aa91c",
   "files": {
     "amazed1.json": "3a80694a7de568c53e72eecb2fed8901d533f9beb0699e336dfa0636944a30e4",
     "anxiety1.json": "e0f783b4cadab1e78c44f53ac3cb05adf32ce6ead9b4d7c52c64fe1a1ffe8140",

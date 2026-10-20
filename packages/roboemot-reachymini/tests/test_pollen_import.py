@@ -147,7 +147,7 @@ def test_every_channel_eases_in_from_zero_and_out_to_zero_and_ends_together():
     )
     out = convert(raw)
     assert len(out) == 6
-    end = 2.0 + 2 * IMP.EASE_S
+    end = 2.0 + sum(IMP.ramp_times(30.0, 30.0))  # the 30 degree antenna jump sets the ramp
     for name, frames in out.items():
         assert frames[0] == [0.0, 0.0] and frames[-1][1] == 0.0, name
         assert frames[-1][0] == pytest.approx(end), name
@@ -171,10 +171,28 @@ def test_simplification_stays_within_the_tolerance_of_the_dense_signal():
 
     out = convert(move(duration=4.0, head=lambda t: (0.0, wiggle(t), 0.0)))
     times, series, _ = IMP.parse_move(move(duration=4.0, head=lambda t: (0.0, wiggle(t), 0.0)), "s")
-    t_dense, v_dense = IMP.eased_channel(times, series["head.pitch"])
+    t_dense, v_dense = IMP.eased_channel(times, series["head.pitch"], IMP.EASE_S, IMP.EASE_S)
     err = max(abs(at(out["head.pitch"], t) - v) for t, v in zip(t_dense, v_dense, strict=True))
     assert err <= TOL + 1e-6
     assert len(out["head.pitch"]) < len(t_dense) * 0.6  # and it is simpler than the recording
+
+
+def test_the_ramp_is_at_least_ease_s_and_grows_with_the_jump():
+    assert IMP.ramp_times(0.0, 5.0) == (IMP.EASE_S, IMP.EASE_S)
+    long_in, long_out = IMP.ramp_times(-160.0, 100.0)
+    assert long_in > long_out > IMP.EASE_S
+    assert long_in == pytest.approx(IMP.MINJERK_PEAK * 160 / IMP.EASE_MAX_SPEED_DEG_S)
+
+
+@pytest.mark.parametrize("jump", [10.0, 45.0, 90.0, 165.0, -165.0])
+def test_no_ramp_exceeds_the_maximum_speed(jump):
+    out = convert(move(head=lambda t: (jump, 0.0, 0.0)))
+    ramp_in, ramp_out = IMP.ramp_times(jump, jump)
+    times = [0.02 * i for i in range(101)]
+    t_dense, v_dense = IMP.eased_channel(times, [jump] * len(times), ramp_in, ramp_out)
+    speeds = np.abs(np.diff(v_dense) / np.diff(t_dense))
+    assert speeds.max() <= IMP.EASE_MAX_SPEED_DEG_S * 1.001
+    assert out["head.roll"][-1][0] == pytest.approx(2.0 + ramp_in + ramp_out, abs=0.002)
 
 
 def test_values_are_rounded_to_a_tenth_of_a_degree():
@@ -295,6 +313,15 @@ def test_every_clip_is_within_the_cycle_limit_and_starts_and_ends_at_zero():
             ends.add(times[-1])
         assert len(ends) == 1, name  # all channels end together
         assert next(iter(ends)) > 2 * IMP.EASE_S, name
+
+
+def test_the_vendored_ramps_stay_within_the_maximum_speed():
+    """The first and last segment of every channel, allowing for the simplification tolerance."""
+    for name, entry in LIB.items():
+        for channel, frames in entry["channels"].items():
+            for (t0, v0), (t1, v1) in ((frames[0], frames[1]), (frames[-2], frames[-1])):
+                limit = IMP.EASE_MAX_SPEED_DEG_S + 2 * TOL / (t1 - t0)
+                assert abs(v1 - v0) / (t1 - t0) <= limit, (name, channel)
 
 
 def test_the_clip_names_the_shipped_mapping_uses_are_all_vendored():

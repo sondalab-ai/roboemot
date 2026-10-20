@@ -16,9 +16,9 @@ MANIFEST = load_manifest(
 
 
 def variant_names(behaviour: dict) -> dict[str, list[str]]:
-    """Clip names by entry: every expression label and the circadian yawn and stretch."""
+    """Clip names by entry: every expression label and the circadian yawn."""
     entries = dict(behaviour["expression_map"])
-    entries.update({k: behaviour["circadian_motion"][k] for k in ("yawn", "stretch")})
+    entries["yawn"] = behaviour["circadian_motion"]["yawn"]
     return {name: [v["clip"] for v in e["variants"]] for name, e in entries.items()}
 
 
@@ -45,7 +45,7 @@ def test_core_loads_and_validates_the_whole_library():
 def test_every_variant_of_the_shipped_mapping_is_a_clip_and_the_stack_accepts_it():
     library = load_clip_library(MANIFEST)
     named = variant_names(MANIFEST.model.behaviour)
-    assert all(clips for clips in named.values())  # no hand-written entry is left
+    assert all(clips for clips in named.values())  # no hand-written label is left
     for entry, names in named.items():
         assert len(set(names)) == len(names), entry  # no clip twice in one entry
         assert set(names) <= set(library), entry
@@ -53,7 +53,7 @@ def test_every_variant_of_the_shipped_mapping_is_a_clip_and_the_stack_accepts_it
     stack.set_manifest_behaviour(MANIFEST.model.behaviour, MANIFEST.channels, library)
     cfg = stack.effective()
     assert set(cfg.expression_map) == set(cfg.affect.labels)
-    assert cfg.circadian_motion.yawn.variants and cfg.circadian_motion.stretch.variants
+    assert cfg.circadian_motion.yawn.variants and cfg.circadian_motion.stretch.channels
 
 
 def test_a_clip_missing_from_the_library_is_refused():

@@ -16,8 +16,9 @@ Per move: head matrix to ``head.roll/pitch/yaw`` degrees (the driver's Euler con
 translation dropped), antennas to ``antenna_right`` / ``antenna_left`` (SDK order is
 ``[right, left]``: ``set_target`` records its arguments verbatim), body yaw to ``body_yaw``. Each
 channel is an offset about the manifest home (not about the first frame), eased in from 0 and out
-to 0 over ``EASE_S``, dropped when it never leaves ``RDP_TOLERANCE_DEG``, simplified with
-Ramer-Douglas-Peucker and rounded. These numbers are constants of this script, not configuration.
+to 0 over ``EASE_S`` or longer (the ramp's peak speed stays under ``EASE_MAX_SPEED_DEG_S``),
+dropped when it never leaves ``RDP_TOLERANCE_DEG``, simplified with Ramer-Douglas-Peucker and
+rounded. These numbers are constants of this script, not configuration.
 """
 
 from __future__ import annotations
@@ -47,7 +48,9 @@ ATTRIBUTION = (
     "'reachy_mini_community_moves' tag."
 )
 
-EASE_S = 0.4  # ramp from 0 to the first frame and from the last frame back to 0 (min-jerk)
+EASE_S = 0.4  # shortest ramp from 0 to the first frame and from the last frame back to 0
+EASE_MAX_SPEED_DEG_S = 90.0  # a longer ramp keeps the min-jerk peak speed under this
+MINJERK_PEAK = 1.875  # peak speed of a min-jerk ramp over its mean speed
 RDP_TOLERANCE_DEG = 0.5  # simplification tolerance and the "never leaves home" threshold
 ROUND_DEG = 0.1  # value resolution of the written keyframes
 TIME_RESOLUTION_S = 0.001  # keyframe times are rounded to the millisecond
@@ -206,20 +209,33 @@ def minjerk(s: float) -> float:
     return s**3 * (10 - 15 * s + 6 * s * s)
 
 
-def eased_channel(times: list[float], offsets: list[float]) -> tuple[list[float], list[float]]:
+def ramp_times(first: float, last: float) -> tuple[float, float]:
+    """Ramp-in and ramp-out durations (s) for edge offsets ``first`` and ``last`` (deg).
+
+    ``EASE_S`` at least; longer when the jump from or to 0 would otherwise peak above
+    ``EASE_MAX_SPEED_DEG_S`` (a min-jerk ramp peaks at ``MINJERK_PEAK`` x its mean speed).
+    """
+
+    def one(jump: float) -> float:
+        return max(EASE_S, MINJERK_PEAK * abs(jump) / EASE_MAX_SPEED_DEG_S)
+
+    return one(first), one(last)
+
+
+def eased_channel(
+    times: list[float], offsets: list[float], ramp_in: float, ramp_out: float
+) -> tuple[list[float], list[float]]:
     """The offsets with an ease from 0 in front and back to 0 behind; both ends are exactly 0.
 
     The ramps are sampled at the clip's median step so the simplification sees their curvature.
     """
     step = sorted(b - a for a, b in zip(times, times[1:], strict=False))[len(times) // 2]
-    n = max(2, round(EASE_S / step))
-    ramp = [EASE_S * i / n for i in range(n + 1)]
-    t_in = ramp[:-1]
-    v_in = [offsets[0] * minjerk(i / n) for i in range(n)]
-    shift = EASE_S
-    t_mid = [shift + t for t in times]
-    t_out = [shift + times[-1] + r for r in ramp[1:]]
-    v_out = [offsets[-1] * (1 - minjerk(i / n)) for i in range(1, n + 1)]
+    n_in, n_out = max(2, round(ramp_in / step)), max(2, round(ramp_out / step))
+    t_in = [ramp_in * i / n_in for i in range(n_in)]
+    v_in = [offsets[0] * minjerk(i / n_in) for i in range(n_in)]
+    t_mid = [ramp_in + t for t in times]
+    t_out = [ramp_in + times[-1] + ramp_out * i / n_out for i in range(1, n_out + 1)]
+    v_out = [offsets[-1] * (1 - minjerk(i / n_out)) for i in range(1, n_out + 1)]
     v_out[-1] = 0.0
     return t_in + t_mid + t_out, v_in + list(offsets) + v_out
 
@@ -247,12 +263,16 @@ def convert_move(
 ) -> dict[str, list[list[float]]]:
     """Keyframes per channel ([t_s, offset_deg]) for one parsed move, all ending together."""
     out: dict[str, list[list[float]]] = {}
-    end = round((times[-1] + 2 * EASE_S) / TIME_RESOLUTION_S) * TIME_RESOLUTION_S
-    for channel, values in series.items():
-        offsets = [v - homes[channel] for v in values]
-        if max(abs(o) for o in offsets) <= RDP_TOLERANCE_DEG:
-            continue
-        t_all, v_all = eased_channel(times, offsets)
+    offsets_of = {c: [v - homes[c] for v in vals] for c, vals in series.items()}
+    offsets_of = {c: o for c, o in offsets_of.items() if max(abs(x) for x in o) > RDP_TOLERANCE_DEG}
+    if not offsets_of:
+        return out
+    ramp_in, ramp_out = ramp_times(
+        max(abs(o[0]) for o in offsets_of.values()), max(abs(o[-1]) for o in offsets_of.values())
+    )  # one pair per clip, so every channel ends together
+    end = round((times[-1] + ramp_in + ramp_out) / TIME_RESOLUTION_S) * TIME_RESOLUTION_S
+    for channel, offsets in offsets_of.items():
+        t_all, v_all = eased_channel(times, offsets, ramp_in, ramp_out)
         t_ms = [round(t / TIME_RESOLUTION_S) * TIME_RESOLUTION_S for t in t_all]
         keep = [0]  # millisecond rounding must keep times strictly increasing, ending at `end`
         for i in range(1, len(t_ms) - 1):
@@ -309,6 +329,7 @@ def render_yaml(clips: dict[str, tuple[dict, str]]) -> str:
 def conversion_constants() -> dict[str, float]:
     return {
         "ease_s": EASE_S,
+        "ease_max_speed_deg_s": EASE_MAX_SPEED_DEG_S,
         "rdp_tolerance_deg": RDP_TOLERANCE_DEG,
         "round_deg": ROUND_DEG,
         "time_resolution_s": TIME_RESOLUTION_S,
