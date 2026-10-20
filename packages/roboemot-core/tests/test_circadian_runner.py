@@ -12,6 +12,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from roboemot.affect.clips import load_clip_library
 from roboemot.affect.runner import AffectRunner
 from roboemot.bus import Bus
 from roboemot.circadian import (
@@ -43,6 +44,7 @@ MANIFEST = (
     Path(__file__).resolve().parents[3] / "configs" / "manifests" / "reachy-mini-wireless.yaml"
 )
 DAY_S = 24 * 3600
+CLIPS = load_clip_library(load_manifest(MANIFEST, allow_unmeasured_dynamics=True))
 
 
 @pytest.fixture(scope="module")
@@ -53,7 +55,9 @@ def manifest():
 @pytest.fixture(scope="module")
 def cfg(manifest) -> RoboEmotConfig:
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour, manifest.channels, load_clip_library(manifest)
+    )
     return stack.effective()
 
 
@@ -253,6 +257,7 @@ def runner_for(cfg, manifest=None, *, hour=12.0, affect=None, **kw):
         affect or RecordingSink(),
         clock=clock,
         dofs=manifest.dofs if manifest else None,
+        clips=CLIPS,
         **kw,
         body_yaw=None,
     )
@@ -477,6 +482,7 @@ def test_drowsy_yawns_now_and_then_additive_at_expression_priority(cfg, manifest
         manifest.dofs,
         rng=random.Random(3),
         body_yaw="body_yaw",
+        clips=CLIPS,
     )
     run = drive(m, 1200, "drowsy")
     yawns = [t for (t, cmds), (_, prev) in zip(run[1:], run, strict=False) if cmds and not prev]
@@ -498,6 +504,7 @@ def test_no_yawn_while_awake_resting_or_attending(cfg, manifest):
         manifest.dofs,
         rng=random.Random(3),
         body_yaw="body_yaw",
+        clips=CLIPS,
     )
     for state, attending in (("awake", False), ("resting", False), ("drowsy", True)):
         run = drive(m, 600, state, attending=attending)
@@ -505,7 +512,9 @@ def test_no_yawn_while_awake_resting_or_attending(cfg, manifest):
 
 
 def test_resting_commands_the_rest_posture_at_idle_priority(cfg, manifest):
-    m = CircadianMotion(cfg.circadian, cfg.circadian_motion, manifest.dofs, body_yaw="body_yaw")
+    m = CircadianMotion(
+        cfg.circadian, cfg.circadian_motion, manifest.dofs, body_yaw="body_yaw", clips=CLIPS
+    )
     cmds = m.commands(1.0, "resting")
     assert [c.source for c in cmds] == [REST_SOURCE]
     rest = cmds[0]
@@ -520,7 +529,9 @@ def test_resting_commands_the_rest_posture_at_idle_priority(cfg, manifest):
 
 
 def test_waking_plays_a_three_second_stretch(cfg, manifest):
-    m = CircadianMotion(cfg.circadian, cfg.circadian_motion, manifest.dofs, body_yaw="body_yaw")
+    m = CircadianMotion(
+        cfg.circadian, cfg.circadian_motion, manifest.dofs, body_yaw="body_yaw", clips=CLIPS
+    )
     assert m.start_waking(10.0)
     run = drive(m, 4.0, "drowsy", start=10.0)
     active = [t for t, cmds in run if cmds]
@@ -530,7 +541,9 @@ def test_waking_plays_a_three_second_stretch(cfg, manifest):
 
 
 def test_primitives_respect_the_minor_cap(cfg, manifest):
-    m = CircadianMotion(cfg.circadian, cfg.circadian_motion, manifest.dofs, body_yaw="body_yaw")
+    m = CircadianMotion(
+        cfg.circadian, cfg.circadian_motion, manifest.dofs, body_yaw="body_yaw", clips=CLIPS
+    )
     m.set_minor_factor(0.001)
     m.start_waking(0.0)
     cmds = [c for _, cs in drive(m, 3.0, "drowsy") for c in cs]
@@ -545,7 +558,7 @@ def test_a_robot_without_primitives_just_skips_them(cfg, manifest):
     bare = cfg.circadian_motion.model_copy(
         update={"yawn": None, "stretch": None, "rest_pose_deg": {}}
     )
-    m = CircadianMotion(cfg.circadian, bare, manifest.dofs, body_yaw="body_yaw")
+    m = CircadianMotion(cfg.circadian, bare, manifest.dofs, body_yaw="body_yaw", clips=CLIPS)
     assert m.start_waking(0.0) is False
     assert drive(m, 600, "drowsy") and m.commands(1.0, "resting") == []
 
@@ -854,7 +867,9 @@ def test_disabling_stops_a_stretch_in_progress(cfg, manifest):
 
 def test_stretch_follows_the_register_and_the_ceiling(cfg, manifest):
     def stretch(amplitude, ceiling=2.0):
-        m = CircadianMotion(cfg.circadian, cfg.circadian_motion, manifest.dofs, body_yaw="body_yaw")
+        m = CircadianMotion(
+            cfg.circadian, cfg.circadian_motion, manifest.dofs, body_yaw="body_yaw", clips=CLIPS
+        )
         m.set_register(amplitude, ceiling)
         m.start_waking(0.0)
         cmds = [c for _, cs in drive(m, 3.0, "drowsy") for c in cs]
@@ -867,7 +882,9 @@ def test_stretch_follows_the_register_and_the_ceiling(cfg, manifest):
 
 
 def test_a_register_that_tightens_mid_play_scales_the_primitive_down_only(cfg, manifest):
-    m = CircadianMotion(cfg.circadian, cfg.circadian_motion, manifest.dofs, body_yaw="body_yaw")
+    m = CircadianMotion(
+        cfg.circadian, cfg.circadian_motion, manifest.dofs, body_yaw="body_yaw", clips=CLIPS
+    )
     m.set_register(1.0, 2.0)
     m.start_waking(0.0)
     mid = m.commands(1.0, "drowsy")[0].targets["antenna_right"]
@@ -940,7 +957,7 @@ def test_a_rest_pose_the_robot_cannot_hold_fails_at_manifest_load():
     for edit in (
         lambda m: m.__setitem__("rest_pose_deg", {"head.pitch": 80}),
         lambda m: m.__setitem__("rest_pose_deg", {"wheels": 1}),
-        lambda m: m["yawn"]["channels"].__setitem__("tail", [[0, 0], [1, 5], [3, 0]]),
+        lambda m: m["stretch"]["channels"].__setitem__("tail", [[0, 0], [1, 5], [3, 0]]),
         lambda m: m.__setitem__("stretch", {"channels": {"head.pitch": [[0, 1], [1, 0]]}}),
     ):
         bad = copy.deepcopy(raw)

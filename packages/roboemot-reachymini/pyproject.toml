@@ -36,5 +36,10 @@ reachy-mini-wireless = "roboemot_reachymini.world:plugin"
 [project.entry-points."roboemot.settings"]
 reachy-mini-wireless = "roboemot_reachymini.settings:plugin"
 
+# Recorded expression clips (Pollen's emotions library, converted), keyed by manifest robot.id
+# (SPEC 4A, Recorded emotions; SPEC 7, Recorded clips).
+[project.entry-points."roboemot.expression_clips"]
+reachy-mini-wireless = "roboemot_reachymini.clips:library"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/roboemot_reachymini"]

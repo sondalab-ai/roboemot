@@ -63,55 +63,80 @@ behaviour:                      # config layer 2 (SPEC 11A): this robot's defaul
     keywords:
       it: {name_aliases: [reati]}
       en: {name_aliases: [riyadh she]}
-  # Expression map (SPEC 7): per affect label, keyframes per channel as [t_s, offset_deg],
-  # piecewise-linear, added on top of the current pose. Every channel starts and ends at 0 and
-  # all channels of a label end together; `repeat` plays the cycle back to back.
-  # Antennas carry most of the affect (SPEC 4A); no LED, no sound in M2. Channels the robot
-  # lacks are skipped. Signs (SDK order is [right, left]): antenna lift toward vertical is
-  # right +, left -; droop / outward is right -, left +; head.pitch negative is up. The signs
-  # follow the connectivity gestures (gesture_map, below) and are not yet checked on the
-  # hardware. All offsets are starting points to tune, scaled by the register, the persona and
-  # the minor cap at runtime.
+  # Expression map (SPEC 7, Recorded clips): per affect label, the recorded clips to pick from
+  # (Pollen's emotions library, converted: packages/roboemot-reachymini/src/roboemot_reachymini/
+  # data/emotions/clips.yaml, SPEC 4A). A clip is keyframes per channel as [t_s, offset_deg] about
+  # home; the renderer scales it by the register, the persona and `gain`, clamps it to the
+  # ranges and gates the body yaw. The label-to-clip mapping, the intensity bands and the gains
+  # are starting points to tune on the hardware, not measured.
   expression_map:
-    joy:                        # fast antenna wiggle, 3 flaps in 1.35 s
-      repeat: 3
-      channels:
-        antenna_right: [[0.0, 0], [0.15, 18], [0.3, -8], [0.45, 0]]
-        antenna_left:  [[0.0, 0], [0.15, -18], [0.3, 8], [0.45, 0]]
-    curiosity:                  # antennas raised and still, small head tilt, 2.4 s
-      channels:
-        antenna_right: [[0.0, 0], [0.5, 15], [1.8, 15], [2.4, 0]]
-        antenna_left:  [[0.0, 0], [0.5, -15], [1.8, -15], [2.4, 0]]
-        head.roll:     [[0.0, 0], [0.5, 6], [1.8, 6], [2.4, 0]]
-    sadness:                    # antennas drooping, head slightly down, 4 s
-      channels:
-        antenna_right: [[0.0, 0], [1.2, -20], [2.8, -20], [4.0, 0]]
-        antenna_left:  [[0.0, 0], [1.2, 20], [2.8, 20], [4.0, 0]]
-        head.pitch:    [[0.0, 0], [1.2, 6], [2.8, 6], [4.0, 0]]
-    surprise:                   # quick antenna lift, small head pitch up, 1.2 s
-      channels:
-        antenna_right: [[0.0, 0], [0.2, 25], [0.6, 25], [1.2, 0]]
-        antenna_left:  [[0.0, 0], [0.2, -25], [0.6, -25], [1.2, 0]]
-        head.pitch:    [[0.0, 0], [0.2, -6], [0.6, -6], [1.2, 0]]
-    sleepy:                     # slow droop with a head tilt, 5 s
-      channels:
-        antenna_right: [[0.0, 0], [2.0, -12], [3.2, -12], [5.0, 0]]
-        antenna_left:  [[0.0, 0], [2.0, 12], [3.2, 12], [5.0, 0]]
-        head.roll:     [[0.0, 0], [2.0, 8], [3.2, 8], [5.0, 0]]
-        head.pitch:    [[0.0, 0], [2.0, 4], [3.2, 4], [5.0, 0]]
-    calm:                       # gentle, small, slow, 4 s
-      channels:
-        antenna_right: [[0.0, 0], [2.0, 4], [4.0, 0]]
-        antenna_left:  [[0.0, 0], [2.0, -4], [4.0, 0]]
-        head.roll:     [[0.0, 0], [2.0, 2], [4.0, 0]]
-    fear:                       # antennas back with a tremble, a small withdraw (head pitch up, never toward), 2.2 s
-      channels:
-        antenna_right: [[0.0, 0], [0.2, -15], [0.35, -10], [0.5, -15], [0.65, -10], [0.8, -15], [1.4, -15], [2.2, 0]]
-        antenna_left:  [[0.0, 0], [0.2, 15], [0.35, 10], [0.5, 15], [0.65, 10], [0.8, 15], [1.4, 15], [2.2, 0]]
-        head.pitch:    [[0.0, 0], [0.3, -4], [1.4, -4], [2.2, 0]]
-    annoyance:                  # short flick of the right antenna, 0.5 s
-      channels:
-        antenna_right: [[0.0, 0], [0.1, 20], [0.3, -6], [0.5, 0]]
+    joy:
+      variants:
+        - {clip: cheerful1}
+        - {clip: enthusiastic1}
+        - {clip: enthusiastic2}
+        - {clip: laughing1}
+        - {clip: laughing2}
+        - {clip: success1}
+        - {clip: success2}
+        - {clip: grateful1}
+        - {clip: welcoming1}
+        - {clip: welcoming2}
+        - {clip: proud1}
+    curiosity:
+      variants:
+        - {clip: curious1}
+        - {clip: inquiring1}
+        - {clip: inquiring2}
+        - {clip: inquiring3}
+        - {clip: attentive1}
+        - {clip: attentive2}
+        - {clip: thoughtful1}
+        - {clip: thoughtful2}
+    surprise:
+      variants:
+        - {clip: amazed1}
+        - {clip: surprised1}
+        - {clip: surprised2}
+        - {clip: oops1}
+        - {clip: oops2}
+        - {clip: electric1}
+    sadness:
+      variants:
+        - {clip: sad1}
+        - {clip: sad2, gain: 0.9}    # antenna_left peaks at 177.5 deg, range 165 about home
+        - {clip: downcast1}
+        - {clip: lonely1}
+        - {clip: resigned1}
+    fear:
+      variants:
+        - {clip: fear1}
+        - {clip: scared1}
+        - {clip: anxiety1}
+        - {clip: uncomfortable1}
+    annoyance:
+      variants:
+        - {clip: irritated1, min_intensity: 0, max_intensity: 0.6}
+        - {clip: irritated2, min_intensity: 0, max_intensity: 0.6}
+        - {clip: displeased1, min_intensity: 0, max_intensity: 0.6}
+        - {clip: displeased2, min_intensity: 0, max_intensity: 0.6}
+        - {clip: impatient1, min_intensity: 0, max_intensity: 0.6}
+        - {clip: impatient2, min_intensity: 0, max_intensity: 0.6}
+        - {clip: frustrated1, min_intensity: 0, max_intensity: 0.6}
+        - {clip: furious1, min_intensity: 0.6, max_intensity: 1}
+        - {clip: rage1, min_intensity: 0.6, max_intensity: 1}
+    calm:
+      variants:
+        - {clip: serenity1}
+        - {clip: calming1}
+        - {clip: relief1}
+        - {clip: relief2}
+    sleepy:
+      variants:
+        - {clip: tired1}
+        - {clip: boredom1}
+        - {clip: boredom2}
+        - {clip: exhausted1}
   # Named gestures for the play skill (SPEC 7, 11): same format as above, not affect labels.
   # head.pitch positive is down, so a nod dips then lifts a little; yaw is symmetric. Degrees
   # are well inside the +-40 / +-180 limits; the renderer scales and clamps them at runtime.
@@ -144,7 +169,7 @@ behaviour:                      # config layer 2 (SPEC 11A): this robot's defaul
         head.pitch:    [[0.0, 0], [0.36, -4.583662], [0.84, -4.583662], [1.2, 0]]
         antenna_right: [[0.0, 0], [0.36, 22.918312], [0.84, 22.918312], [1.2, 0]]
         antenna_left:  [[0.0, 0], [0.36, -22.918312], [0.84, -22.918312], [1.2, 0]]
-  # Circadian motion (SPEC 7A, Effects by state): same keyframe format and signs as above.
+  # Circadian motion (SPEC 7A, Effects by state): same entry format as above (keyframes or recorded clips).
   # `yawn` plays now and then while drowsy, `stretch` for 3 s when the robot wakes from resting,
   # `rest_pose_deg` is the absolute rest posture (head.pitch positive is down; antennas droop
   # outward). All starting points to tune, not yet checked on the hardware; the limiter and the
@@ -154,14 +179,11 @@ behaviour:                      # config layer 2 (SPEC 11A): this robot's defaul
       head.pitch: 20
       antenna_right: -50
       antenna_left: 50
-    yawn:                       # antennas droop, head tips back then tilts, 3 s
-      channels:
-        antenna_right: [[0.0, 0], [1.0, -15], [1.8, -15], [3.0, 0]]
-        antenna_left:  [[0.0, 0], [1.0, 15], [1.8, 15], [3.0, 0]]
-        head.pitch:    [[0.0, 0], [1.0, -8], [1.8, -8], [3.0, 0]]
-        head.roll:     [[0.0, 0], [1.0, 6], [1.8, 6], [3.0, 0]]
-    stretch:                    # antennas up and out, head lifts, 3 s
-      channels:
+    yawn:                       # a recorded clip (SPEC 7A): tired1
+      variants:
+        - {clip: tired1}
+    stretch:                    # antennas up and out, head lifts, 3 s (hand-written: the recorded
+      channels:                 # wake-mini-up is a 16 s wake-from-sleep sequence with body yaw)
         antenna_right: [[0.0, 0], [0.8, 25], [2.0, 25], [3.0, 0]]
         antenna_left:  [[0.0, 0], [0.8, -25], [2.0, -25], [3.0, 0]]
         head.pitch:    [[0.0, 0], [1.0, -12], [2.0, -12], [3.0, 0]]

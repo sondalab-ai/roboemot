@@ -9,6 +9,7 @@ from importlib.metadata import entry_points
 import httpx
 import pytest
 import yaml
+from roboemot.affect.clips import load_clip_library
 from roboemot.config.catalogue import DESCRIPTOR_KEYS
 from roboemot.config.stack import ConfigStack
 from roboemot.diagnostics import Target
@@ -30,7 +31,9 @@ BASE = "robot.reachy-mini-wireless"
 @pytest.fixture
 def stack():
     stack = ConfigStack(app={"webui": {"bind": "127.0.0.1", "port": 0}})
-    stack.set_manifest_behaviour(MANIFEST.model.behaviour, MANIFEST.channels)
+    stack.set_manifest_behaviour(
+        MANIFEST.model.behaviour, MANIFEST.channels, load_clip_library(MANIFEST)
+    )
     return stack
 
 
@@ -98,10 +101,10 @@ def test_claims_resolve_in_the_catalogue_and_leave_the_core_list(split):
 
 def test_behaviour_paths_stay_writable_by_path(split, stack):
     editor, _, robot = split
-    row = next(f for f in robot["fields"] if f["path"] == "expression_map.joy.repeat")
+    row = next(f for f in robot["fields"] if f["path"] == "gesture_map.nod.repeat")
     assert row["writable"] is True and row["source"] == "manifest"
-    editor.change("expression_map.joy.repeat", 2)
-    assert stack.effective().expression_map["joy"].repeat == 2
+    editor.change("gesture_map.nod.repeat", 3)
+    assert stack.effective().gesture_map["nod"].repeat == 3
 
 
 def test_hardware_rows_cannot_be_written(split):
@@ -250,7 +253,9 @@ def test_the_status_answer_is_cached_briefly_and_the_port_follows_the_target():
 
 def test_core_offers_the_action_through_the_entry_point_only_while_running(tmp_path):
     stack = ConfigStack(app={"webui": {"bind": "127.0.0.1", "port": 0}})
-    stack.set_manifest_behaviour(MANIFEST.model.behaviour, MANIFEST.channels)
+    stack.set_manifest_behaviour(
+        MANIFEST.model.behaviour, MANIFEST.channels, load_clip_library(MANIFEST)
+    )
     for status, expected in ((RUNNING, ["restart"]), (None, [])):
         editor = SettingsEditor(
             stack, store=tmp_path / "s.json", manifest=MANIFEST, plugin=daemon(status)
