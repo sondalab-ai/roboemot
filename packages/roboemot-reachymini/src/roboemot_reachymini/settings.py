@@ -37,7 +37,7 @@ WATCHDOG_CEILING = "safety.watchdog_ms"
 AVAILABLE_TTL_S = 3.0  # how long a status answer is reused; listings call it on every request
 RESTART_EFFECTS = (
     ("zero_pose", {}),
-    ("webrtc_drop", {}),
+    ("remote_session_drop", {}),
     ("kill_on_timeout", {"timeout_s": STOP_TIMEOUT_S}),
 )
 

@@ -30,7 +30,7 @@ ENTRY_POINT_GROUP = "roboemot.settings"
 PATH_ROOT = "robot"
 RESTART = "restart"
 EFFECT_PAIR = 2
-RESTART_EFFECTS = ("zero_pose", "webrtc_drop", "kill_on_timeout")
+RESTART_EFFECTS = ("zero_pose", "remote_session_drop", "kill_on_timeout")
 PROTECTED_CLAIMS = ("safety", "webui", "privacy", "llm_routes")
 
 

@@ -65,7 +65,7 @@ EN: dict[str, str] = {
     "settings_restart_effect_zero_pose": (
         "The robot goes to its zero pose once the app has stopped."
     ),
-    "settings_restart_effect_webrtc_drop": "A remote WebRTC session may drop.",
+    "settings_restart_effect_remote_session_drop": "A remote video or audio session may drop.",
     "settings_restart_effect_kill_on_timeout": (
         "If RoboEmot has not stopped after {timeout_s} s, it is killed."
     ),
@@ -450,7 +450,7 @@ IT: dict[str, str] = {
         "Riavvio in corso. Attendi qualche secondo, poi ricarica la pagina e accedi di nuovo."
     ),
     "settings_restart_effect_zero_pose": "Il robot va in posa zero quando l'app si è fermata.",
-    "settings_restart_effect_webrtc_drop": "Una sessione WebRTC remota può cadere.",
+    "settings_restart_effect_remote_session_drop": "Una sessione video o audio remota può cadere.",
     "settings_restart_effect_kill_on_timeout": (
         "Se RoboEmot non si ferma entro {timeout_s} s, viene terminato."
     ),

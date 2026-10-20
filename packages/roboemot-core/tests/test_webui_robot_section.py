@@ -197,7 +197,9 @@ def test_plugin_rows_with_secret_shaped_values_are_redacted(tmp_path):
 class Restarting(FakePlugin):
     """A plugin with the restart hook; ``up`` is whether the supervisor can restart now."""
 
-    def __init__(self, up=True, effects=(("zero_pose", {}), ("webrtc_drop", {})), on_restart=None):
+    def __init__(
+        self, up=True, effects=(("zero_pose", {}), ("remote_session_drop", {})), on_restart=None
+    ):
         super().__init__()
         self.up, self.effects, self.on_restart = up, effects, on_restart
 
@@ -224,7 +226,7 @@ def test_restartable_plugin_gets_the_restart_action_and_known_effects_only(tmp_p
         ("kill_on_timeout", {"timeout_s": True}),
         ("kill_on_timeout", {"timeout_s": float("nan")}),
         ("kill_on_timeout", {"timeout_s": [20]}),
-        ("webrtc_drop", "params"),
+        ("remote_session_drop", "params"),
         "zero_pose",
     )
     ed, _ = editor(tmp_path, [ep(Restarting(effects=effects))])

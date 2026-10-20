@@ -737,7 +737,7 @@ test("the debug tab works without a robot section", async () => {
 });
 
 const RESTARTABLE = { ...ROBOT, actions: ["restart"], restart_effects: [
-  { id: "zero_pose", params: {} }, { id: "webrtc_drop", params: {} }, { id: "kill_on_timeout", params: { timeout_s: 20 } },
+  { id: "zero_pose", params: {} }, { id: "remote_session_drop", params: {} }, { id: "kill_on_timeout", params: { timeout_s: 20 } },
 ] };
 const restartPage = (extra = {}) =>
   settingsPage({ "POST /api/robot/restart": { ok: true }, ...extra }, { fields: fields(), robot: RESTARTABLE, pin_required: true });
@@ -752,7 +752,7 @@ test("restart: the button exists only with the action, the dialog lists the side
   assert.ok(dialog, "confirm dialog");
   assert.equal(dialog.querySelector("#dialog-title").textContent, "settings_restart_title");
   assert.deepEqual([...dialog.querySelectorAll("li")].map((li) => li.textContent), [
-    "settings_restart_effect_zero_pose", "settings_restart_effect_webrtc_drop", "settings_restart_effect_kill_on_timeout",
+    "settings_restart_effect_zero_pose", "settings_restart_effect_remote_session_drop", "settings_restart_effect_kill_on_timeout",
   ]);
   assert.equal(posts(page, "/api/robot/restart").length, 0, "nothing is sent before the PIN");
   await answerPin(page);
