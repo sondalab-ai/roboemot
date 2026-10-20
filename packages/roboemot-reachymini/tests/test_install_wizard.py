@@ -2020,3 +2020,53 @@ def test_uninstall_pip_is_announced_without_the_minutes_note(offline, robot, dae
     out = capsys.readouterr().out
     assert "uninstalling Python packages\n" in out
     assert "uninstalling Python packages (can take" not in out
+
+
+# ------------------------------------------------------- auto-stop of our own running app
+
+
+STOP = ("POST", "/api/apps/stop-current-app")
+
+
+def mutation_paths(daemon) -> list[tuple[str, str]]:
+    return [(m, p) for m, p, _ in daemon.mutations]
+
+
+def test_install_stops_its_own_running_app_before_changing_packages(offline, robot, daemon, capsys):
+    daemon.current = {"info": {"name": "roboemot"}, "state": "running"}
+    install()
+    assert STOP in mutation_paths(daemon)
+    assert "stopped roboemot before installing: a running process keeps the old code" in (
+        capsys.readouterr().out
+    )
+    pip_at = next(i for i, c in enumerate(robot.commands) if " -m pip install" in c)
+    assert pip_at > 0 and daemon.current is None
+
+
+def test_install_leaves_another_running_app_alone(offline, robot, daemon):
+    daemon.current = {"info": {"name": "conversation"}, "state": "running"}
+    install()
+    assert STOP not in mutation_paths(daemon)
+    assert daemon.current["info"]["name"] == "conversation"
+
+
+def test_install_with_no_app_running_stops_nothing(offline, robot, daemon):
+    install()
+    assert STOP not in mutation_paths(daemon)
+
+
+def test_dry_run_reports_that_it_would_stop_its_own_app(offline, robot, daemon, capsys):
+    daemon.current = {"info": {"name": "roboemot"}, "state": "running"}
+    inst.run_install(options(dry_run=True), quiet_ui(yes=True), ROOT)
+    assert "would stop roboemot before installing" in capsys.readouterr().out
+    assert daemon.mutations == [] and daemon.current["info"]["name"] == "roboemot"
+
+
+def test_start_prompt_defaults_to_yes_after_the_auto_stop(offline, robot, daemon):
+    daemon.current = {"info": {"name": "roboemot"}, "state": "running"}
+    asked: list[tuple[str, bool]] = []
+    ui = quiet_ui(yes=True)
+    ui.confirm = lambda question, default: asked.append((question, default)) or True
+    inst.run_install(options(startup=False, yes=True), ui, ROOT)
+    assert ("Start roboemot now?", True) in asked
+    assert daemon.current["info"]["name"] == "roboemot"

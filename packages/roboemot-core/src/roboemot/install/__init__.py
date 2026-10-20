@@ -963,6 +963,7 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
             ui.step("SSH access")
 
             def free_space() -> None:
+                stop_own_app(ui, platform, opts.dry_run)
                 home, _ = remote_data_dir(remote)
                 clear_caches(
                     ui, remote, home, platform.clearable_caches, opts.clear_caches, opts.dry_run
@@ -1035,6 +1036,18 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
             ui.info("remove everything it changed: python scripts/install_on_robot.py --uninstall")
 
     _with_remote(opts, ui, platform, host, body)
+
+
+def stop_own_app(ui: Ui, platform: Platform, dry_run: bool) -> None:
+    """Stop the platform's app when it is the one running, before any package changes: a running
+    process keeps the old code. Another app is left alone."""
+    if platform.running_app() != platform.app_name:
+        return
+    if dry_run:
+        ui.info(f"would stop {platform.app_name} before installing")
+        return
+    platform.stop_app()
+    ui.ok(f"stopped {platform.app_name} before installing: a running process keeps the old code")
 
 
 def report_app_url(ui: Ui, platform: Platform, host: str) -> None:
