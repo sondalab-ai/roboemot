@@ -206,33 +206,37 @@ def test_attention_turns_the_head_towards_a_world_entry(loop):
 
 
 def test_a_joy_expression_moves_the_antennas_on_the_simulated_robot(loop):
-    """SPEC 7, 10: the shipped joy expression, rendered for an adult, flaps both antennas.
+    """SPEC 7, 10: a shipped joy clip, rendered for an adult, swings both antennas.
 
     The robot first settles at the antenna home; the renderer then feeds additive EXPRESSION
     commands through the real loop. The fallback dynamics are slow, so the swing asserted is
-    far below the commanded one; what counts is that both antennas move and come back.
+    far below the commanded one; what counts is that both antennas move and come back. Joy is
+    pinned to one of its variants (success1, both antennas past 70 degrees) so the pick is fixed.
     """
     from roboemot.affect import AffectState
     from roboemot.affect.expression import ExpressionRenderer
     from roboemot.affect.register import Person, resolve_register
 
     manifest = loop.manifest
+    clips = load_clip_library(manifest)
     stack = ConfigStack()
-    stack.set_manifest_behaviour(
-        manifest.model.behaviour, manifest.channels, load_clip_library(manifest)
-    )
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, clips)
     cfg = stack.effective()
+    joy = cfg.expression_map["joy"]
+    (variant,) = [v for v in joy.variants if v.clip == "success1"]
+    expression_map = {**cfg.expression_map, "joy": joy.model_copy(update={"variants": [variant]})}
+    duration = max(frames[-1][0] for frames in clips["success1"].channels.values())
     home = {n: manifest.dofs[n].home for n in ("antenna_right", "antenna_left")}
     _hold(loop, home, 8.0)
     settled = loop.driver.read_state()
     reg = resolve_register([Person("adult", "declared", {})], cfg.register, cfg.persona)
     renderer = ExpressionRenderer(
-        cfg.expression, cfg.expression_map, manifest.dofs, 0.15, body_yaw="body_yaw"
+        cfg.expression, expression_map, manifest.dofs, 0.15, body_yaw="body_yaw", clips=clips
     )
     renderer.update(AffectState(0.0, 0.0, "calm", 0.0), reg, time.monotonic())
     assert renderer.update(AffectState(0.7, 0.5, "joy", 1.0, 1), reg, time.monotonic())
     seen: dict[str, list[float]] = {n: [] for n in home}
-    end = time.monotonic() + 3.0
+    end = time.monotonic() + duration + 2.0
     while time.monotonic() < end:
         now = time.monotonic()
         for cmd in renderer.commands(now):
