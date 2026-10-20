@@ -19,7 +19,7 @@ from roboemot.voice.listener import Utterance
 from roboemot.voice.speech import SpeechOutput
 from roboemot.voice.speech_features import Prosody
 from roboemot.world import Observation, WorldModel
-from roboemot_reachymini.conversation import profile_source, scene_source, speaker_source
+from roboemot.conversation.sources import profile_source, scene_source, speaker_source
 from roboemot_reachymini.gaze import FRAME
 from test_app_perception import data, wait_for  # noqa: F401  (data: fixture)
 from test_app_reflex import ScriptedMini, enable, run_app
@@ -289,7 +289,7 @@ def test_the_app_offers_the_default_skills_and_wires_barge_in(data, fakes, said,
 def test_look_at_and_play_go_through_the_selector_and_the_renderer():
     from roboemot.affect.expression import ExpressionRenderer
     from roboemot.config.schema import ExpressionEntry
-    from roboemot_reachymini.skills import SkillBridge
+    from roboemot.skills.bridge import SkillBridge
 
     cfg = RoboEmotConfig()
     bus = Bus()
@@ -330,7 +330,7 @@ def test_look_at_and_play_go_through_the_selector_and_the_renderer():
 
 def test_look_at_names_are_confirmed_one_line_and_capped_like_the_scene_summary():
     from roboemot.affect.expression import ExpressionRenderer
-    from roboemot_reachymini.skills import SkillBridge
+    from roboemot.skills.bridge import SkillBridge
 
     cfg = RoboEmotConfig()
     cap = cfg.conversation.summary_value_max_chars

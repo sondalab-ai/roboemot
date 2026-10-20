@@ -41,6 +41,12 @@ from roboemot.config import ConfigStack
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.conversation import ConversationWorker
 from roboemot.conversation.preferences import RegistryPreferences
+from roboemot.conversation.sources import (
+    profile_source,
+    registry_names,
+    scene_source,
+    speaker_source,
+)
 from roboemot.diagnostics import Diagnostics, FnSource, Target, platform_sources
 from roboemot.diagnostics.system import local_sources
 from roboemot.health.network import NetworkMonitor
@@ -55,6 +61,7 @@ from roboemot.persona.llm_traits import TraitCache, TraitsWorker
 from roboemot.reflex import ReflexEngine
 from roboemot.robot_platform import AudioHub, RobotSession, Speaker, load_robot_platform
 from roboemot.secret_store import SecretStore
+from roboemot.skills.bridge import SkillBridge
 from roboemot.skills.defaults import default_skills
 from roboemot.vision import CIRCADIAN, FrameSource, LockedSource
 from roboemot.vision.minor import MinorPresence
@@ -86,8 +93,6 @@ from roboemot.world.autoenroll import AutoEnroller, open_autoenroll, purge_store
 from roboemot.world.scan import SOURCE as SCAN_SOURCE
 from roboemot.world.sources import JointStateFn
 
-from .conversation import profile_source, registry_names, scene_source, speaker_source
-from .skills import SkillBridge
 
 try:  # the SDK is optional so unit tests run without GStreamer
     from reachy_mini import ReachyMiniApp

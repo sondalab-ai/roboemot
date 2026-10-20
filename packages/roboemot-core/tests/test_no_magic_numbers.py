@@ -49,6 +49,8 @@ BEHAVIOUR_MODULES = [
     "skills/defaults.py",
     "conversation/worker.py",
     "conversation/summaries.py",
+    "conversation/sources.py",
+    "skills/bridge.py",
     "conversation/output_filter.py",
     "conversation/lines.py",
     "conversation/confirm.py",

@@ -1,7 +1,7 @@
-"""App-side effects of the default LLM skills (SPEC 11, LLM tools; 5 attention; 7 expression).
+"""Effects of the default LLM skills (SPEC 11, LLM tools; 5 attention; 7 expression).
 
 Core's default skills (``roboemot.skills.defaults``) act through a ``SkillEnv`` of callables;
-this module builds it from the app's pieces. Nothing here names a joint:
+this module builds it from the runtime's pieces. Nothing here names a joint:
 
 - ``play`` asks the expression renderer for a label of the manifest's expression map; it is
   rendered at the next app tick through the usual scaling and the minor cap;
@@ -30,7 +30,7 @@ from roboemot.conversation.summaries import one_line
 from roboemot.skills.defaults import SkillEnv
 from roboemot.world import Entry, WorldModel
 
-from .conversation import entry_name
+from roboemot.conversation.sources import entry_name
 
 log = logging.getLogger(__name__)
 CATEGORY_KINDS = {"animal": "animal", "object": "object"}
