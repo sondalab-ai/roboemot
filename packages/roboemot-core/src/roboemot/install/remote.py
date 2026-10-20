@@ -8,6 +8,7 @@ under 104 bytes, and the macOS ``$TMPDIR`` is too long.
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -50,6 +51,41 @@ class Remote:
         if check and proc.returncode != 0:
             raise WizardError(f"on robot: {command}\n{proc.stderr.strip() or proc.stdout.strip()}")
         return proc.stdout.strip()
+
+    def stream(self, command: str, on_line: Callable[[str], None], check: bool = True) -> str:
+        """Like ``run``, but hand each output line to ``on_line`` as it arrives.
+
+        stderr is merged into stdout. Returns the whole output (stripped); a non-zero exit
+        raises with that output, as ``run`` does. Whatever interrupts the read (``on_line``
+        raising, Ctrl-C) kills the ssh process before the error propagates.
+        """
+        proc = subprocess.Popen(
+            ["ssh", *self._opts(), self.target, command],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+        )
+        lines: list[str] = []
+        try:
+            assert proc.stdout is not None
+            for raw in proc.stdout:
+                line = raw.rstrip("\r\n")
+                lines.append(line)
+                on_line(line)
+            proc.wait()
+        except BaseException:
+            proc.kill()
+            proc.wait()
+            raise
+        finally:
+            if proc.stdout is not None:
+                proc.stdout.close()
+        output = "\n".join(lines).strip()
+        if check and proc.returncode != 0:
+            raise WizardError(f"on robot: {command}\n{output}")
+        return output
 
     def connect(self) -> None:
         """Open the master connection interactively, so a password prompt reaches the user."""

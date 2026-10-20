@@ -18,6 +18,9 @@ records it. Unless declined (`--no-piper`) it also creates a Piper virtualenv in
 Optionally (``--secret NAME``, or asked on a terminal) it stores an API key in the robot's secret
 store (SPEC 8, 12 Data), recorded by name; uninstall removes only the names it added.
 
+Later, ``scripts/run_on_robot.py`` (``roboemot.install.run``) starts the installed app and
+prints its web UI address.
+
 Uninstall: stop the app, give back the previous autostart app (only if the setting still names
 this app), uninstall what the record says this installer added, reinstall the original versions
 it replaced, keep anything another distribution still needs, remove leftovers and the recorded
@@ -96,6 +99,9 @@ class Platform(Protocol):
     def verify(self, ui: Ui, py: RemotePython, dev: bool) -> None: ...
     def running_app(self) -> str | None: ...
     def stop_app(self) -> None: ...
+    def app_installed(self) -> bool: ...
+    def app_url(self, host: str) -> str | None: ...
+    def start_blocker(self) -> str | None: ...
     def start(self, ui: Ui) -> None: ...
     def autostart(self) -> str | None: ...
     def set_autostart(self, name: str | None) -> None: ...
@@ -203,7 +209,7 @@ def check_ssh(
     ui.info(f"connecting to {remote.target} (ssh may ask for the password)")
     remote.connect()
     ui.ok(f"ssh {remote.target}")
-    py = RemotePython(remote, platform.python)
+    py = RemotePython(remote, platform.python, ui)
     present = py.exists()
     if not present and need is None:
         ui.ok(f"{platform.env_dir} is not there")
@@ -375,9 +381,9 @@ def install_piper(
         remote.copy([lock], tmp)
         if recreate:
             remote.run(f"mkdir -p -m 700 {shlex.quote(posixpath.dirname(venv))}")
-            remote.run(f"{shlex.quote(platform.python)} -m venv {shlex.quote(venv)}")
-            ui.ok(f"created the Piper virtualenv {venv}")
-        result = RemotePython(remote, python).install_locked(f"{tmp}/{lock.name}")
+            with ui.progress(f"creating the Piper virtualenv {venv}", report=False):
+                remote.run(f"{shlex.quote(platform.python)} -m venv {shlex.quote(venv)}")
+        result = RemotePython(remote, python, ui).install_locked(f"{tmp}/{lock.name}", report=False)
     finally:
         remote.run(f"rm -rf {shlex.quote(tmp)}", check=False)
     if not result.ok:
@@ -754,7 +760,6 @@ def install_packages(
         files = [f"{tmp}/{w.name}" for w in wheels]
         record.pending_before = before
         write_record(remote, platform.record_path, record)
-        ui.info("installing (first time: numpy/scipy may take minutes)")
         result = py.install(files, pins)
         if not result.ok:
             ui.warn("the app does not fit the package versions already on the robot")
@@ -831,15 +836,23 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
                 running = platform.running_app()
                 action = f"would stop {running}, " if running else "no app running; would "
                 ui.info(f"{action}wake the robot and start {platform.app_name}")
+                blocker = platform.start_blocker()
+                if blocker:
+                    ui.warn(f"would refuse: {blocker}")
                 ui.info(f"autostart app now: {platform.autostart() or 'none'}")
                 ui.title("dry run passed")
                 return
-            if (
+            blocker = platform.start_blocker()
+            if blocker:
+                ui.warn(f"{platform.app_name} not started: {blocker}")
+                ui.info("start it once that is done: python scripts/run_on_robot.py")
+            elif (
                 opts.start
                 if opts.start is not None
                 else ui.confirm(f"Start {platform.app_name} now?", True)
             ):
                 platform.start(ui)
+                report_app_url(ui, platform, host)
             startup = opts.startup
             if startup is None:
                 startup = ui.confirm(
@@ -852,9 +865,17 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
                 platform.set_autostart(platform.app_name)
                 ui.ok(f"{platform.app_name} starts automatically on wake-up")
             ui.title("installed")
+            ui.info("start it later: python scripts/run_on_robot.py")
             ui.info("remove everything it changed: python scripts/install_on_robot.py --uninstall")
 
     _with_remote(opts, ui, platform, host, body)
+
+
+def report_app_url(ui: Ui, platform: Platform, host: str) -> None:
+    """Tell where the running app's web UI is, if the platform has one."""
+    url = platform.app_url(host)
+    if url:
+        ui.ok(f"web UI: {url}")
 
 
 # ---------------------------------------------------------------- uninstall
@@ -1103,6 +1124,8 @@ __all__ = [
     "WizardError",
     "load_platform",
     "main",
+    "report_app_url",
+    "select_robot",
     "paint",
     "run_install",
     "run_uninstall",

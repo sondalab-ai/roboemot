@@ -17,7 +17,8 @@ Notes for coding agents are in [`CLAUDE.md`](CLAUDE.md).
 | Robot discovery on the LAN (mDNS, declared per manifest) | 4 | Done, tested; found Reachy Mini Wireless on a real LAN |
 | Connectivity: offline detection, backoff, recovery, offline behaviour | 12A | Done, tested; robot-link recovery checked by restarting the simulated daemon's backend; spoken cue waits for TTS |
 | Debug report: robot state, hardware, resources, system, battery (robot-agnostic, entry-point sources) | 12A | Done, tested; Reachy daemon sections read from a real Reachy Mini Wireless and the simulator; on the CM4 Linux exposes no battery (`/sys/class/power_supply` empty), only `vcgencmd` under-voltage flags and temperature |
-| Installer and clean uninstall (robot-agnostic, entry-point platforms; Reachy Mini Wireless) | 4A | Done, tested against a fake robot (install then uninstall restores the exact state); dry runs checked on a real Reachy Mini Wireless leave no file changed; a real install and uninstall cycle on the robot is still to run |
+| Installer and clean uninstall (robot-agnostic, entry-point platforms; Reachy Mini Wireless) | 4A | Done, tested against a fake robot (install then uninstall restores the exact state); a real install ran on a Reachy Mini Wireless (Debian 13, daemon 1.12.0), including creating the shared apps venv on a robot with no app yet; a real uninstall on the robot is still to run |
+| Robot plugins: core never names a robot; joint names, gestures, robot name and capabilities come from the manifest and the robot package's entry points | 4A, 11, 12A | Done, tested; enforced by `tests/test_robot_hierarchy.py` (AST gate with a ratchet baseline). Settings that moved or were renamed (e.g. `reflexes.antenna_ratio` is now `reflexes.startle_lift_ratio`) are migrated on restore and named in `app.yaml` errors |
 | Arbiter + safety limiter (Python reference) | 10, 12 | Done; two independent reviews; property and fuzz tests (limits, velocity, acceleration, 65 deg coupling with a 3 deg planning margin) |
 | Arbiter + safety limiter in C++ (`rt/`) | 10 | Matches the reference on 600-tick golden vectors (tolerance 1e-9); same input validation; not yet a running process |
 | Reachy Mini driver, motion loop, app wrapper | 4A | `pytest -m sim` passes against the MuJoCo simulator (command-to-state 37-55 ms measured on a cloud dev container, not a CM4); not yet run on the real robot |
@@ -34,7 +35,8 @@ that the robot has feelings, and RoboEmot does not present it as one (SPEC 12, B
 content).
 
 Known limits: the Reachy Mini manifest has placeholder translation limits and null dynamics
-(measure in M0); until then the app starts only when installed with `--dev`.
+(measure in M0); until then the app starts only when installed with `--dev`. Once they are
+measured, re-run the installer with `--no-dev`: every install rewrites the app's dev config.
 
 ## Quick start
 
@@ -64,6 +66,7 @@ Scripts (run from the repository root):
 | Script | What it does |
 | --- | --- |
 | `scripts/install_on_robot.py [--dry-run] [--uninstall]` | Install, start, or cleanly uninstall the app on a robot over SSH (see below; SPEC 4A) |
+| `scripts/run_on_robot.py [--host H] [--dry-run]` | Start the installed app and print the web UI address; no SSH (SPEC 4A) |
 | `scripts/robot_ssh.py [--copy-id] [--debug] [-- cmd]` | SSH into the robot (found by mDNS), install your key, or fetch its debug report built on the robot (SPEC 4A, 12A) |
 | `scripts/sim-daemon.sh` | Headless MuJoCo Reachy Mini daemon on `localhost:8000` for `pytest -m sim` |
 | `scripts/sync-package-data.sh` | Copy manifest and presets into the Reachy app's package data |
@@ -96,7 +99,12 @@ It lists the robots it finds on the network by mDNS (or asks for a host, default
 `reachy-mini.local`) and asks for the SSH user (default `pollen`);
 `ssh` asks for the password once per run (`ssh-copy-id pollen@reachy-mini.local` avoids it).
 Then it checks the daemon, architecture and Python of the robot's apps venv, builds the wheels
-locally, installs them into `/venvs/apps_venv`, and checks that the daemon lists the app. If
+locally, installs them into `/venvs/apps_venv`, and checks that the daemon lists the app. On a
+robot where no app was ever installed (a fresh image) that venv does not exist yet: the daemon
+creates it only on its first app install. The installer then creates it the same way
+(`/venvs/mini_daemon/bin/python -m venv`, plus `reachy-mini` pinned to the daemon's version) and
+records that it did. Long steps (venv creation, pip installs, several minutes on the CM4) show a
+live status line with the elapsed time and pip's current action. If
 asked, it stops the running app (one app at a time), wakes the robot, starts RoboEmot, and makes
 it the startup app (the daemon starts it on the robot's first wake-up). Choose dev mode until
 the manifest dynamics are measured, or the app refuses to start (SPEC 12). Every prompt has a
@@ -106,16 +114,29 @@ The installer leaves the robot as it found it. It keeps the package versions alr
 shared apps venv (it asks before changing one), and it writes no pip cache. It records what it
 added or replaced in `/venvs/.roboemot-install.json`. `--uninstall` then removes exactly that:
 the app, the dependencies it added (unless another app now needs them), the original versions
-of anything it replaced, and the startup-app setting if it still names RoboEmot. It verifies
+of anything it replaced, and the startup-app setting if it still names RoboEmot. It removes the
+apps venv too when it created it and no other app or package has moved in since. It verifies
 the result before deleting the record. The installer is robot-agnostic (`roboemot.install`);
 each robot package plugs in its own part (SPEC 4A, Installer).
 
-Afterwards the app is started and stopped from the Reachy Mini Control desktop app (which
-replaced the web dashboard) or through the daemon's REST API:
+Afterwards start the app with `run_on_robot.py` (daemon 1.12 retired its web dashboard). It
+checks the app is installed, wakes the robot, starts RoboEmot, waits until it runs and prints the
+web UI address, `http://<robot>:8042` (the default `webui.port`). The web UI is served by the app
+itself, so it is there only while RoboEmot runs.
 
 ```bash
-curl -X POST http://reachy-mini.local:8000/api/apps/start-app/roboemot
+python scripts/run_on_robot.py --dry-run   # what it would do
+python scripts/run_on_robot.py             # start RoboEmot, print the web UI address
+```
+
+The daemon runs one app at a time, and the Reachy mobile app counts as one: while the phone is
+connected to the robot, the daemon refuses to start RoboEmot, including as the startup app on
+wake-up. Close the mobile app first; `run_on_robot.py` and the installer say so instead of
+failing. To stop or restart, use the daemon's REST API:
+
+```bash
 curl -X POST http://reachy-mini.local:8000/api/apps/stop-current-app
+curl -X POST http://reachy-mini.local:8000/api/apps/restart-current-app
 ```
 
 While RoboEmot runs, the robot stays awake: idle motion keeps the motors powered, and the

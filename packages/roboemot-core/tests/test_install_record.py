@@ -127,11 +127,18 @@ class BareRobot:
     def copy(self, files, dest) -> None:
         pass
 
+    def stream(self, command, on_line, check: bool = True) -> str:
+        out = self.run(command, check=check)
+        for line in out.splitlines():
+            on_line(line)
+        return out
+
     def run(self, command: str, check: bool = True) -> str:
         import shlex as sh
 
         if " -m pip " in command:
             args = command.split(" -m pip ", 1)[1].split(" 2>&1", 1)[0]
+            args = args.replace("--progress-bar off ", "")
             targets = [t for t in sh.split(args) if not t.startswith("-")][1:]
             if args.startswith("list"):
                 rows = [{"name": n, "version": v} for n, v in self.env.items()]
@@ -208,6 +215,15 @@ class BarePlatform:
         return None
 
     def stop_app(self): ...
+    def app_installed(self):
+        return True
+
+    def app_url(self, host):
+        return None
+
+    def start_blocker(self):
+        return None
+
     def start(self, ui): ...
     def autostart(self):
         return None

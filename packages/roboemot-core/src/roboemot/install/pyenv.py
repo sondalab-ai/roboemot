@@ -13,9 +13,10 @@ from dataclasses import dataclass
 
 from .record import Versions, canonical, versions
 from .remote import Remote
-from .ui import WizardError
+from .ui import Ui, WizardError
 
 PIP_FLAGS = "--disable-pip-version-check --no-cache-dir --no-input"
+LONG_FLAGS = "--progress-bar off"
 
 # Every installed distribution -> canonical names of its unconditional requirements.
 REQUIRES = r"""
@@ -46,6 +47,15 @@ print(json.dumps(found))
 SITE_PACKAGES = "import sysconfig; print(sysconfig.get_paths()['purelib'])"
 
 
+def pip_progress_line(line: str) -> str | None:
+    """The pip output line worth showing as progress, or None for noise (blank lines,
+    ``Requirement already satisfied``, ``[notice]`` and our own exit-code marker)."""
+    text = line.strip()
+    if not text or text.startswith(("Requirement already satisfied", "[notice]", "__rc=")):
+        return None
+    return text
+
+
 @dataclass
 class PipResult:
     ok: bool
@@ -56,12 +66,31 @@ class PipResult:
 class RemotePython:
     remote: Remote
     python: str
+    ui: Ui | None = None
 
-    def _pip(self, args: str, stdin: str | None = None, check: bool = True) -> PipResult:
+    def _pip(
+        self,
+        args: str,
+        stdin: str | None = None,
+        check: bool = True,
+        announce: str | None = None,
+        slow: bool = True,
+        report: bool = True,
+    ) -> PipResult:
+        """Run pip. With ``announce`` (and a Ui) the output streams as live progress; without,
+        it is collected and the call stays silent."""
         cmd = f"{shlex.quote(self.python)} -m pip {args}"
         if stdin is not None:
             cmd = f"printf %s {shlex.quote(stdin)} | {cmd}"
-        out = self.remote.run(f'{cmd} 2>&1; echo "__rc=$?"', check=True)
+        full = f'{cmd} 2>&1; echo "__rc=$?"'
+        if announce and self.ui is not None:
+            with self.ui.progress(
+                announce, pip_progress_line, report=report, slow=slow
+            ) as progress:
+                out = self.remote.stream(full, progress, check=True)
+                progress.failed = not _rc_ok(out)
+        else:
+            out = self.remote.run(full, check=True)
         body, _, rc = out.rpartition("__rc=")
         result = PipResult(rc.strip() == "0", body.strip())
         if check and not result.ok:
@@ -97,30 +126,51 @@ class RemotePython:
         args = f"install --dry-run --quiet --report - {PIP_FLAGS} {c}{_join(targets)}"
         return self._pip(args, stdin=constraints, check=False)
 
-    def install(self, targets: list[str], constraints: str | None) -> PipResult:
+    def install(
+        self, targets: list[str], constraints: str | None, report: bool = True
+    ) -> PipResult:
         c = "-c /dev/stdin " if constraints is not None else ""
         return self._pip(
-            f"install --quiet {PIP_FLAGS} {c}{_join(targets)}", stdin=constraints, check=False
+            f"install {LONG_FLAGS} {PIP_FLAGS} {c}{_join(targets)}",
+            stdin=constraints,
+            check=False,
+            announce="installing Python packages",
+            report=report,
         )
 
-    def install_locked(self, lock_file: str) -> PipResult:
+    def install_locked(self, lock_file: str, report: bool = True) -> PipResult:
         """Install a hash-pinned lock file: every artifact must match, wheels only, no cache."""
-        args = f"install --quiet {PIP_FLAGS} --require-hashes --only-binary=:all: -r"
-        return self._pip(f"{args} {shlex.quote(lock_file)}", check=False)
+        args = f"install {LONG_FLAGS} {PIP_FLAGS} --require-hashes --only-binary=:all: -r"
+        return self._pip(
+            f"{args} {shlex.quote(lock_file)}",
+            check=False,
+            announce="installing Python packages",
+            report=report,
+        )
 
     def reinstall_own(self, files: list[str]) -> None:
         """Same version numbers on a reinstall: force our wheels in, dependencies untouched."""
-        self._pip(f"install --quiet --no-deps --force-reinstall {PIP_FLAGS} {_join(files)}")
+        self._pip(
+            f"install {LONG_FLAGS} --no-deps --force-reinstall {PIP_FLAGS} {_join(files)}",
+            announce="reinstalling the app wheels",
+        )
 
     def uninstall(self, names: list[str]) -> None:
         if names:
-            self._pip(f"uninstall --yes --quiet {PIP_FLAGS} {_join(names)}")
+            self._pip(
+                f"uninstall --yes {LONG_FLAGS} {PIP_FLAGS} {_join(names)}",
+                announce="uninstalling Python packages",
+                slow=False,
+            )
 
     def install_exact(self, pins: dict[str, str]) -> None:
         """Put original versions back (from the package index: needs internet)."""
         if pins:
             reqs = [f"{n}=={v}" for n, v in sorted(pins.items())]
-            self._pip(f"install --quiet --no-deps {PIP_FLAGS} {_join(reqs)}")
+            self._pip(
+                f"install {LONG_FLAGS} --no-deps {PIP_FLAGS} {_join(reqs)}",
+                announce="restoring the original package versions (needs internet)",
+            )
 
     def find_modules(self, modules: list[str]) -> dict[str, list[str]]:
         return json.loads(self.py(FIND_MODULES, *modules))
@@ -141,8 +191,12 @@ def report_changes(report: dict, installed: Versions) -> tuple[Versions, dict[st
     return added, changed
 
 
+def _rc_ok(output: str) -> bool:
+    return output.rpartition("__rc=")[2].strip() == "0"
+
+
 def _join(items: list[str]) -> str:
     return " ".join(shlex.quote(i) for i in items)
 
 
-__all__ = ["PIP_FLAGS", "PipResult", "RemotePython", "report_changes"]
+__all__ = ["PIP_FLAGS", "PipResult", "RemotePython", "pip_progress_line", "report_changes"]
