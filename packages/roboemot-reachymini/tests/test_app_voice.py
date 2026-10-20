@@ -53,6 +53,9 @@ class FakeASR:
     def load(self, languages):
         pass
 
+    def missing_words(self, language, words):
+        return None
+
     def start(self, language):
         pass
 

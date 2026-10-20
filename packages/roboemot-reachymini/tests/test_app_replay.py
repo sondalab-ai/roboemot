@@ -71,6 +71,9 @@ class DayApp(AppWithFakes):
         class DaySource:
             n = 0
 
+            def camera_model(self, width, height):
+                return None
+
             def read(self):
                 self.n += 1
                 minute = int((app.clock.monotonic() - app.clock.origin) / SECONDS_PER_MINUTE)

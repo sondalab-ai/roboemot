@@ -45,6 +45,9 @@ class DarkSource:
 
     reads = 0
 
+    def camera_model(self, width, height):
+        return None
+
     def read(self):
         type(self).reads += 1
         img = np.full((120, 160, 3), 4, np.uint8)

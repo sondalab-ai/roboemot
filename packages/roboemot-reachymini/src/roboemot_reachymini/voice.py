@@ -30,7 +30,7 @@ from roboemot.voice.fastpath import Emit, FastPath
 from roboemot.voice.listener import Utterance, VoiceListener
 from roboemot.voice.robot_name import RobotName
 from roboemot.voice.vad import Endpointer, SileroVAD
-from roboemot.world import FrameSpec, Observation, WorldModel, to_base_frame
+from roboemot.world import Entry, FrameSpec, Observation, WorldModel, to_base_frame
 from roboemot.world.types import UNKNOWN_IDENTITY
 
 from .audio import ReachyAudio
@@ -110,12 +110,11 @@ def build_listener(
         )
         return None
     names = names if names is not None else RobotName()
-    if hasattr(asr, "missing_words"):  # a recogniser that can tell its vocabulary
-        names.attach_vocabulary(asr.missing_words)
+    names.attach_vocabulary(asr.missing_words)
     bearing = LatestBearing(bus, frame)
     max_age_s = cfg.voice.fastpath.doa_max_age_ms / 1000.0
 
-    def attended_person() -> Any:
+    def attended_person() -> Entry | None:
         """The world entry of the person the robot is attending to, or None."""
         target = selector.target
         entry = world.get(target.entry_id) if target is not None and target.entry_id else None
@@ -153,7 +152,7 @@ def build_listener(
         emit,
         selector,
         bearing=lambda now: bearing.get(now, max_age_s),
-        target_entry=lambda: getattr(attended_person(), "entry_id", None),
+        target_entry=lambda: person.entry_id if (person := attended_person()) else None,
         names=names,
         on_answer=on_answer,
     )

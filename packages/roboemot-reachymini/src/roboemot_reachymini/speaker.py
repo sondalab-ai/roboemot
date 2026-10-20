@@ -3,10 +3,11 @@
 Coded against reachy-mini 1.12's documented interface, not exercised against a real robot:
 ``mini.media.start_playing()``, ``push_audio_sample(float32)`` (an appsrc push that does not wait
 for playback), ``get_output_audio_samplerate()`` and ``mini.media.audio.clear_player()``, which
-drops queued playback at once (older SDKs lack it; ``stop_playing`` then ``start_playing`` is the
-fallback). The SDK does not report how much is queued, so the speaker counts: every pushed
-sample extends ``playing_until()``, a monotonic stamp, and ``stop`` resets it. The stamp feeds
-``SpeechActivity`` (the echo gate) and tells barge-in what is still to be cut.
+drops queued playback at once (``media/audio_base.py:319``, abstract: every audio backend has it;
+the package pins reachy-mini>=1.12 for it). The SDK does not report how much is queued, so the
+speaker counts: every pushed sample extends ``playing_until()``, a monotonic stamp, and ``stop``
+resets it. The stamp feeds ``SpeechActivity`` (the echo gate) and tells barge-in what is still to
+be cut.
 
 With a ``reference`` (:class:`~roboemot.voice.bargein.PlaybackReference`) the speaker also keeps
 the last seconds of what it played, resampled to the reference rate and stamped with the time each
@@ -30,6 +31,7 @@ from roboemot.voice.activity import SpeechActivity
 from roboemot.voice.bargein import PlaybackReference
 
 from .resample import resample
+from .sdk import MiniPort
 
 log = logging.getLogger(__name__)
 MS_PER_S = 1000.0
@@ -40,7 +42,7 @@ class ReachySpeaker:
 
     def __init__(
         self,
-        mini: Any,
+        mini: MiniPort,
         chunk_ms: float,
         activity: SpeechActivity | None = None,
         clock: Callable[[], float] = time.monotonic,
@@ -60,14 +62,11 @@ class ReachySpeaker:
         self._playing = False
         self._pushed = 0
 
-    def _media(self) -> Any:
-        return getattr(self._mini, "media", None)
-
     def start_playing(self) -> bool:
         """Start the playback pipeline and read the output rate. False (and silent) when the
         robot has no audio system or the SDK reports no usable rate."""
-        media = self._media()
-        if media is None or getattr(media, "audio", True) is None:
+        media = self._mini.media
+        if media.audio is None:
             log.warning("speaker: the SDK reports no audio system")
             return False
         try:
@@ -89,7 +88,7 @@ class ReachySpeaker:
             return
         self._playing = False
         try:
-            self._media().stop_playing()
+            self._mini.media.stop_playing()
         except Exception as exc:
             log.warning("speaker: stop_playing: %s", type(exc).__name__)
 
@@ -110,7 +109,7 @@ class ReachySpeaker:
                 if generation != self._generation:
                     break
                 try:
-                    self._media().push_audio_sample(piece)
+                    self._mini.media.push_audio_sample(piece)
                 except Exception as exc:
                     log.warning("speaker: push_audio_sample: %s", type(exc).__name__)
                     break
@@ -146,18 +145,12 @@ class ReachySpeaker:
             if self._reference is not None:
                 self._reference.truncate(now)
             if self._playing:
-                audio = getattr(self._media(), "audio", None)
-                clear = getattr(audio, "clear_player", None)
+                audio = self._mini.media.audio
                 try:
-                    if callable(clear):
-                        clear()
-                    else:
-                        self._media().stop_playing()
-                        self._media().start_playing()
+                    if audio is not None:
+                        audio.clear_player()
                 except Exception as exc:
                     log.warning("speaker: flush: %s", type(exc).__name__)
-                    if not callable(clear):
-                        self._playing = False  # the pipeline did not come back
             if self._activity is not None:
                 self._activity.reset(now)
 

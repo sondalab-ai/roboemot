@@ -433,6 +433,9 @@ class Scene:
             def __init__(self, joint_state):
                 self.joint_state, self.n = joint_state, 0
 
+            def camera_model(self, width, height):
+                return None
+
             def read(self):
                 self.n += 1
                 state = dict(self.joint_state())

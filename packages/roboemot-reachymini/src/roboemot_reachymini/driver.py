@@ -29,6 +29,8 @@ import numpy as np
 from roboemot.drivers import MotorMode, PoseGroupDriver
 from scipy.spatial.transform import Rotation
 
+from .sdk import ClientPort
+
 HEAD_ANGLES = ("head.roll", "head.pitch", "head.yaw")
 HEAD_TRANSLATIONS = ("head.x", "head.y", "head.z")
 ANTENNAS = ("antenna_right", "antenna_left")  # SDK order
@@ -74,7 +76,8 @@ class ReachyMiniDriver(PoseGroupDriver):
             self.mini.set_target(**kwargs)
 
     def read_state(self) -> dict[str, float]:
-        if not getattr(self.mini.client, "_is_alive", True):
+        client: ClientPort = self.mini.client
+        if not client._is_alive:
             raise ConnectionError("Reachy Mini daemon: no state received (connection lost)")
         state = head_values(self.mini.get_current_head_pose())
         head_joints, antennas = self.mini.get_current_joint_positions()
@@ -84,8 +87,8 @@ class ReachyMiniDriver(PoseGroupDriver):
 
     def motors_enabled(self) -> bool | None:
         """From the last daemon status; None until one has arrived."""
-        client = self.mini.client
-        if getattr(client, "_last_status", None) is None:
+        client: ClientPort = self.mini.client
+        if client._last_status is None:
             return None
         backend = client.get_status(wait=False).backend_status
         return None if backend is None else backend.motor_control_mode == "enabled"
@@ -96,8 +99,8 @@ class ReachyMiniDriver(PoseGroupDriver):
         # Verified against reachy-mini 1.12: get_status(wait=False) clears status_received and
         # asserts _last_status, hence the guard before the call.
         try:
-            client = self.mini.client
-            if getattr(client, "_last_status", None) is None:
+            client: ClientPort = self.mini.client
+            if client._last_status is None:
                 return None
             name = client.get_status(wait=False).robot_name
         except Exception:

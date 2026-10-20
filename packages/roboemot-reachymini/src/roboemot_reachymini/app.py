@@ -451,7 +451,6 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             manifest,
             ReachyMiniDriver(reachy_mini),
             cfg,
-            rate_hz=50.0,
             on_link_change=responder.on_event,
         )
         bus = self.bus = Bus()
@@ -556,14 +555,15 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             bus,
             source,
             profile=manifest.robot.profile,
-            camera_model=getattr(source, "camera_model", None),
+            camera_model=source.camera_model,
             load_stages=self.load_vision_stages,
         )
         if perception.pipeline is not None:  # light from the frames vision already captures
             perception.pipeline.light_tap = circ.sampler.offer
         light_reader = self.light_reader = IdleLightReader(circ.sampler, source)
         self.enrollment = perception.enrollment
-        appearance = getattr(perception.pipeline, "appearance_embedder", None)
+        pipeline = perception.pipeline
+        appearance = pipeline.appearance_embedder if pipeline is not None else None
         self.autoenroll = open_autoenroll(
             perception.registry,
             appearance,
@@ -574,7 +574,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         self.catalogue = open_catalogue(
             perception.registry,
             stack.effective,
-            embedder=lambda: getattr(perception.pipeline, "appearance_embedder", None),
+            embedder=lambda: pipeline.appearance_embedder if pipeline is not None else None,
             world=world,
             purge_candidates=(
                 self.autoenroll.purge
@@ -824,8 +824,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
             cleanup.callback(self._forget_circadian)
             self.start_webui(stack, cfg, manifest, cleanup)
             for world_source in plugin.sources:
-                if hasattr(world_source, "speaking"):  # no turning towards its own voice
-                    world_source.speaking = speech.speaking
+                world_source.speaking = speech.speaking  # no turning towards its own voice
                 cleanup.callback(world_source.stop)
                 world_source.start(publish)
             runtime = stack.effective().runtime
@@ -895,7 +894,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                     loop.feed(cmd)
                 for cmd in expression.commands(now):
                     loop.feed(cmd)
-                stop_event.wait(0.05)
+                stop_event.wait(1.0 / live.motion.app_tick_hz)
 
 
 def _optional(p: Path) -> Path | None:

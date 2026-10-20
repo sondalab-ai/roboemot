@@ -46,6 +46,7 @@ import numpy as np
 from roboemot import shutdown
 
 from .resample import StreamResampler
+from .sdk import MiniPort
 
 log = logging.getLogger(__name__)
 JOIN_TIMEOUT_S = 2.0
@@ -91,7 +92,7 @@ class ReachyAudio:
 
     def __init__(
         self,
-        mini: Any,
+        mini: MiniPort,
         sink: Callable[[float, float], None] | None,
         poll_hz: float,
         clock: Callable[[], float] = time.monotonic,
@@ -182,8 +183,8 @@ class ReachyAudio:
         to ``unavailable`` (and starts nothing) when the robot has no audio system."""
         if self._thread is not None and self._thread.is_alive():
             return
-        media = getattr(self._mini, "media", None)
-        if media is None or getattr(media, "audio", True) is None:
+        media = self._mini.media
+        if media.audio is None:
             self._set("unavailable", "the SDK reports no audio system")
             return
         try:
