@@ -30,6 +30,9 @@ class WorldSource(Protocol):
     """Produces observations until stopped; the sink is the bus (``percept.entity``)."""
 
     name: str
+    speaking: Callable[[float], bool] | None
+    """Set by the host before ``start`` to "is the robot speaking at this stamp", so a source
+    does not turn towards the robot's own voice; None until then."""
 
     def start(self, sink: ObservationSink) -> None:
         """Begin producing; ``sink`` may be called from the source's own thread."""

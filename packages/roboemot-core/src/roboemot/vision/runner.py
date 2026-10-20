@@ -20,6 +20,7 @@ from typing import Protocol
 import numpy as np
 
 from .. import shutdown
+from .geometry import CameraModel
 from .stages import PerceptionModule
 from .types import Frame
 
@@ -38,11 +39,16 @@ class FrameSource(Protocol):
 
     def read(self) -> Frame | None: ...
 
+    def camera_model(self, width: int, height: int) -> CameraModel | None:
+        """The pinhole model for a ``width`` x ``height`` frame, or None when the camera does not
+        know its intrinsics (vision then falls back to ``world.camera_fov_*_deg``)."""
+        ...
+
 
 class LockedSource:
     """One lock around a ``FrameSource``, shared by every reader (the vision pump and the
     circadian idle light reader), so the SDK media is never read from two threads at once.
-    Other attributes (``camera_model``) pass through."""
+    ``camera_model`` passes through."""
 
     def __init__(self, source: FrameSource) -> None:
         self._source = source
@@ -52,8 +58,8 @@ class LockedSource:
         with self._lock:
             return self._source.read()
 
-    def __getattr__(self, name: str) -> object:
-        return getattr(self._source, name)
+    def camera_model(self, width: int, height: int) -> CameraModel | None:
+        return self._source.camera_model(width, height)
 
 
 class LatestFrameRunner:

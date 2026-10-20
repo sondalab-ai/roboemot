@@ -48,6 +48,11 @@ class ASRBackend(Protocol):
         """Load the models of ``languages`` now (raises when one is missing)."""
         ...
 
+    def missing_words(self, language: str, words: list[str]) -> list[str] | None:
+        """The ``words`` the ``language`` model's vocabulary lacks (it can never output them);
+        None when the backend cannot tell (no vocabulary, or that model is not loaded)."""
+        ...
+
     def start(self, language: str) -> None:
         """Begin an utterance in ``language``, dropping any one in progress."""
         ...
