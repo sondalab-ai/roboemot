@@ -183,6 +183,20 @@ def test_monitor_without_routes_starts_and_stops():
     assert mon.online
 
 
+def test_monitor_stop_between_thread_creation_and_start_does_not_join_it(monkeypatch):
+    real_start = threading.Thread.start
+    mon = NetworkMonitor([], POLICY)
+
+    def start_after_stop(self):
+        if self.name == "network-monitor":
+            mon.stop()
+        real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", start_after_stop)
+    mon.start()
+    mon.stop()
+
+
 def test_set_routes_adds_probed_link_and_keeps_existing_state():
     ev, clock = Events(), Clock()
     up = {"cloud": False, "lan": True, "new": False}

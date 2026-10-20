@@ -212,10 +212,11 @@ class DoASource:
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop.clear()
-        self._thread = threading.Thread(
+        thread = threading.Thread(
             target=self._run, args=(sink,), name="roboemot-doa", daemon=True
         )
-        self._thread.start()
+        thread.start()
+        self._thread = thread
 
     def stop(self) -> None:
         """Stop polling and wait briefly. A thread stuck in the SDK keeps its handle, so a later

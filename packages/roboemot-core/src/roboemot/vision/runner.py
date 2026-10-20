@@ -113,8 +113,9 @@ class LatestFrameRunner:
         """Start the worker thread."""
         self._stop = False
         self._started = self._clock()
-        self._thread = threading.Thread(target=self._loop, name="roboemot-vision", daemon=True)
-        self._thread.start()
+        thread = threading.Thread(target=self._loop, name="roboemot-vision", daemon=True)
+        thread.start()
+        self._thread = thread
 
     def stop(self) -> None:
         """Stop the worker and wait for the frame in flight.

@@ -163,8 +163,9 @@ class MotionLoop:
             self.mode = "active"
             self._note_error(exc)
             self.link.set(False, self.clock())
-        self._thread = threading.Thread(target=self._run, name="motion-loop", daemon=True)
-        self._thread.start()
+        thread = threading.Thread(target=self._run, name="motion-loop", daemon=True)
+        thread.start()
+        self._thread = thread
 
     def stop(self) -> None:
         self._stop.set()

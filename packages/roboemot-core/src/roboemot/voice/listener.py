@@ -163,8 +163,9 @@ class VoiceListener:
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop.clear()
-        self._thread = threading.Thread(target=self._run, name="roboemot-listener", daemon=True)
-        self._thread.start()
+        thread = threading.Thread(target=self._run, name="roboemot-listener", daemon=True)
+        thread.start()
+        self._thread = thread
 
     def stop(self) -> None:
         """Stop the thread (waits briefly for the chunk in hand)."""

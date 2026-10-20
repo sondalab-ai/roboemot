@@ -198,8 +198,9 @@ class ReachyAudio:
             self._open_voice(media)
         self._set("no_data", "no audio chunk read yet")
         self._stop.clear()
-        self._thread = threading.Thread(target=self._run, name="roboemot-audio", daemon=True)
-        self._thread.start()
+        thread = threading.Thread(target=self._run, name="roboemot-audio", daemon=True)
+        thread.start()
+        self._thread = thread
 
     def _open_voice(self, media: Any) -> None:
         """Read the input rate and channel count from the SDK (never assumed) and set up the

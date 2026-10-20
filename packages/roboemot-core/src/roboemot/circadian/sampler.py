@@ -254,8 +254,9 @@ class IdleLightReader:
 
     def start(self) -> None:
         self._stop.clear()
-        self._thread = threading.Thread(target=self._run, name="roboemot-light", daemon=True)
-        self._thread.start()
+        thread = threading.Thread(target=self._run, name="roboemot-light", daemon=True)
+        thread.start()
+        self._thread = thread
 
     def stop(self) -> None:
         self._stop.set()
