@@ -149,11 +149,12 @@ class ReachyMiniWireless:
         """Create the apps venv the way the daemon does and install ``plan`` (from
         ``plan_env``) into it."""
         requirement = plan
-        remote.run(f"{shlex.quote(DAEMON_PYTHON)} -m venv {shlex.quote(APPS_VENV)}")
-        result = RemotePython(remote, self.python).install([requirement], None)
+        with ui.progress(f"creating the apps venv {APPS_VENV}", done=f"created {APPS_VENV}"):
+            remote.run(f"{shlex.quote(DAEMON_PYTHON)} -m venv {shlex.quote(APPS_VENV)}")
+        result = RemotePython(remote, self.python, ui).install([requirement], None)
         if not result.ok:
             raise WizardError(f"pip install failed in the new {APPS_VENV}:\n{result.output}")
-        ui.ok(f"created {APPS_VENV} with {requirement}")
+        ui.ok(f"installed {requirement} in {APPS_VENV}")
 
     def env_users(self, py: RemotePython) -> list[str]:
         """Apps other than ours that the daemon would list from this environment."""

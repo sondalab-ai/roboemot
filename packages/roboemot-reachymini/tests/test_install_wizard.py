@@ -51,6 +51,7 @@ class FakeRobot:
         self.stray: dict[str, list[str]] = {}  # module -> leftover paths
         self.dev_cfg = True
         self.commands: list[str] = []
+        self.streamed: list[str] = []
         self.copies: list[list[Path]] = []
         self.fail_install = False
         self.stdins: list[str | None] = []
@@ -82,6 +83,13 @@ class FakeRobot:
     def copy(self, files, dest) -> None:
         assert dest in self.tmp_dirs
         self.copies.append(files)
+
+    def stream(self, command, on_line, check: bool = True, stdin: str | None = None) -> str:
+        self.streamed.append(command)
+        out = self.run(command, check=check, **({} if stdin is None else {"stdin": stdin}))
+        for line in out.splitlines():
+            on_line(line)
+        return out
 
     def run(self, command: str, check: bool = True, stdin: str | None = None) -> str:
         self.commands.append(command)
@@ -202,6 +210,7 @@ class FakeRobot:
         assert "--no-cache-dir" in command, command
         pinned = "-c /dev/stdin" in command
         args = command.split(" -m pip ", 1)[1].split(" 2>&1", 1)[0]
+        args = args.replace("--progress-bar off ", "")
         targets = [t for t in shlex.split(args) if not t.startswith("-")][1:]
         if args.startswith("list"):
             return json.dumps([{"name": n, "version": v} for n, v in self.env.items()]), 0
@@ -1304,7 +1313,7 @@ def test_install_creates_the_missing_apps_venv_like_the_daemon_and_records_it_fi
     assert json.loads(robot.record_at_venv)["env_created"] == reachy.APPS_VENV
     assert json.loads(robot.files[RECORD])["env_created"] == reachy.APPS_VENV
     venv = f"{DAEMON_PY} -m venv {reachy.APPS_VENV}"
-    pin = f"{APPS_PY} -m pip install --quiet"
+    pin = f"{APPS_PY} -m pip install --progress-bar off"
     cmds = robot.commands
     assert venv in cmds
     created = cmds.index(venv)
@@ -1534,3 +1543,37 @@ def test_uninstall_keeps_a_created_venv_holding_packages_it_does_not_account_for
     out = capsys.readouterr().out
     assert robot.apps_venv and f"keeping {reachy.APPS_VENV}" in out and "foreign-lib" in out
     assert RECORD not in robot.files
+
+
+# ---------------------------------------------------------------- progress (SPEC 4A, Installer)
+
+
+def test_long_steps_are_announced_and_pip_is_streamed(offline, robot, daemon, capsys):
+    robot.apps_venv = False
+    install()
+    out = capsys.readouterr().out
+    for step in (
+        "creating the apps venv",
+        "creating the Piper virtualenv",
+        "installing Python packages",
+        "reinstalling the app wheels",
+    ):
+        assert f"{step}" in out
+    assert out.count("can take minutes on the robot") >= 5
+    streamed = [c for c in robot.streamed if " -m pip " in c]
+    assert streamed and all("--no-cache-dir" in c and "--progress-bar off" in c for c in streamed)
+    assert not [c for c in streamed if "--quiet" in c]
+
+
+def test_uninstall_announces_the_pip_steps_it_streams(offline, robot, daemon, capsys):
+    install()
+    capsys.readouterr()
+    uninstall()
+    out = capsys.readouterr().out
+    assert "uninstalling Python packages (can take minutes on the robot)" in out
+    assert "✓ uninstalling Python packages (" in out
+
+
+def test_the_dry_run_streams_nothing(offline, robot, daemon):
+    inst.run_install(options(dry_run=True), quiet_ui(yes=True), ROOT)
+    assert robot.streamed == []
