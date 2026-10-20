@@ -17,6 +17,7 @@ from roboemot.config.schema import RoboEmotConfig
 from roboemot.diagnostics import Target
 from roboemot.install import Options, Ui, WizardError
 from roboemot.install import run as run_mod
+from roboemot.install.caches import cache_path
 from roboemot.install.piper_lock import lock_name
 from roboemot_reachymini import install as reachy
 from roboemot_reachymini.daemon import INSTALL_TIMEOUT_S, DaemonClient, DaemonError
@@ -69,6 +70,7 @@ class FakeRobot:
         self.apps_in_env: list[str] = []  # other apps' entry points in the apps venv
         self.record_at_venv: str | None = None  # the record file when the venv was created
         self.daemon_version = "1.11.0"
+        self.sizes: dict[str, str] = {}  # `du -sh` answers
 
     def _exists(self, path: str) -> bool:
         return path in self.dirs or (path == reachy.APPS_VENV and self.apps_venv)
@@ -147,6 +149,8 @@ class FakeRobot:
             return HOME
         if command == 'printf %s "${ROBOEMOT_DATA_DIR:-}"':
             return self.env_data_dir
+        if command.startswith("du -sh "):
+            return self.sizes.get(shlex.split(command)[2], "4.0K")
         if command.startswith("realpath "):
             path = shlex.split(command)[1]
             return self.symlinks.get(path, path) if self._exists(path) else ""
@@ -467,6 +471,61 @@ def test_start_skips_to_the_url_when_the_app_already_runs(daemon, capsys):
     platform_for(daemon).start(quiet_ui())
     assert daemon.mutations == []
     assert "roboemot is already running" in capsys.readouterr().out
+
+
+UV_CACHE = f"{HOME}/.cache/uv"
+
+
+def test_install_clears_the_uv_cache_before_installing(offline, robot, capsys):
+    robot.dirs.add(UV_CACHE)
+    robot.sizes[UV_CACHE] = "5.6G"
+    install()
+    assert UV_CACHE not in robot.dirs
+    assert f"rm -rf {UV_CACHE}" in robot.commands
+    assert robot.commands.index(f"rm -rf {UV_CACHE}") < robot.commands.index(
+        "mktemp -d /tmp/roboemot-install.XXXXXX"
+    )
+    out = capsys.readouterr().out
+    assert "5.6G" in out and "cleared" in out
+    assert UV_CACHE not in json.loads(robot.files[RECORD]).values()
+
+
+def test_install_keeps_the_uv_cache_when_declined(offline, robot):
+    robot.dirs.add(UV_CACHE)
+    install(clear_caches=False)
+    assert UV_CACHE in robot.dirs
+
+
+def test_install_asks_before_clearing_and_a_no_keeps_it(offline, robot, monkeypatch):
+    robot.dirs.add(UV_CACHE)
+    asked = []
+    monkeypatch.setattr(Ui, "confirm", lambda self, q, default: asked.append((q, default)) or False)
+    inst.run_install(options(start=False, startup=False, yes=False), quiet_ui(), ROOT)
+    assert UV_CACHE in robot.dirs
+    assert [d for q, d in asked if UV_CACHE in q] == [True]
+
+
+def test_install_dry_run_reports_the_uv_cache_and_clears_nothing(offline, robot, capsys):
+    robot.dirs.add(UV_CACHE)
+    robot.sizes[UV_CACHE] = "5.6G"
+    install(dry_run=True)
+    assert UV_CACHE in robot.dirs
+    assert not any(c.startswith("rm -rf " + UV_CACHE) for c in robot.commands)
+    assert f"would clear {UV_CACHE} (5.6G" in capsys.readouterr().out
+
+
+def test_install_does_not_delete_a_cache_that_is_a_symlink(offline, robot, capsys):
+    robot.dirs.add(UV_CACHE)
+    robot.symlinks[UV_CACHE] = "/data/elsewhere"
+    install()
+    assert UV_CACHE in robot.dirs
+    assert "symlink" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("spec", ["/etc", "~/", "~/..", "~/../x", "cache"])
+def test_cache_paths_stay_strictly_below_home(spec):
+    with pytest.raises(WizardError):
+        cache_path(HOME, spec)
 
 
 def test_start_reports_app_error(daemon):

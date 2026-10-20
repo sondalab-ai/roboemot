@@ -50,6 +50,7 @@ import yaml
 from .. import paths
 from ..secret_store import NAME as SECRET_NAME
 from .build import build_wheels, distribution_names, min_python, third_party_requirements
+from .caches import clear_caches
 from .piper_lock import lock_path
 from .pyenv import RemotePython, report_changes
 from .record import InstallRecord, canonical, plan_uninstall
@@ -89,6 +90,8 @@ class Platform(Protocol):
     space_paths: tuple[str, ...]  # filesystems that need MIN_FREE_MB
     distributions: tuple[str, ...]  # this app's own distributions
     modules: tuple[str, ...]  # their top-level import names (leftover check)
+    extras: tuple[str, ...]  # roboemot-core extras the robot needs (installed by default)
+    clearable_caches: tuple[str, ...]  # ``~/...`` caches safe to delete; not restored on uninstall
 
     def connect(self, ui: Ui, host: str) -> None: ...
     def plan_env(self, remote: Remote) -> str: ...
@@ -122,6 +125,9 @@ class Options:
     uninstall: bool = False
     piper: bool | None = None
     secrets: list[str] | None = None
+    clear_caches: bool | None = None
+    vision: bool = False
+    models: bool | None = None
 
 
 # ---------------------------------------------------------------- platforms
@@ -814,6 +820,10 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
 
             ui.step("SSH access")
             py = check_ssh(ui, platform, remote, min_python(dirs))
+            home, _ = remote_data_dir(remote)
+            clear_caches(
+                ui, remote, home, platform.clearable_caches, opts.clear_caches, opts.dry_run
+            )
 
             ui.step("Build")
             wheels = build_wheels(dirs, Path(tmp) / "wheels")
@@ -1084,6 +1094,12 @@ def parse_args(argv: list[str] | None = None) -> Options:
         help="store the secret NAME (an API key for ${secret:NAME}) on the robot; the value is "
         "asked on this PC without echo and never appears on a command line",
     )
+    p.add_argument(
+        "--clear-caches",
+        action=argparse.BooleanOptionalAction,
+        help="delete the robot's download caches the platform names (uv on a Reachy Mini) to "
+        "free disk space; uninstall cannot restore them",
+    )
     p.add_argument("-y", "--yes", action="store_true", help="answer yes to every confirmation")
     a = p.parse_args(argv)
     return Options(
@@ -1098,6 +1114,7 @@ def parse_args(argv: list[str] | None = None) -> Options:
         a.uninstall,
         a.piper,
         a.secret,
+        a.clear_caches,
     )
 
 

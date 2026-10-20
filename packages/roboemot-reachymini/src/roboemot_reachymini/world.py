@@ -212,9 +212,7 @@ class DoASource:
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop.clear()
-        thread = threading.Thread(
-            target=self._run, args=(sink,), name="roboemot-doa", daemon=True
-        )
+        thread = threading.Thread(target=self._run, args=(sink,), name="roboemot-doa", daemon=True)
         thread.start()
         self._thread = thread
 
