@@ -341,3 +341,17 @@ test("an expired session on the audio poll goes to the login", async (t) => {
   await settle();
   assert.equal(page.document.querySelector("#tabs").hidden, true);
 });
+
+test("leaving the tab and logging out drop the drawn transcript rows from memory", async (t) => {
+  const page = await livePage(t);
+  await openLive(page);
+  assert.ok(page.run("liveState.ui !== null"));
+  page.document.querySelector('#tabs button[data-tab="debug"]').click();
+  await settle();
+  assert.equal(page.run("liveState.ui"), null);
+  await openLive(page);
+  assert.ok(page.run("liveState.ui !== null"));
+  page.document.querySelector("#logout").click();
+  await settle();
+  assert.equal(page.run("liveState.ui"), null);
+});

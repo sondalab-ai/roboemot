@@ -145,9 +145,11 @@ async function livePoll(box, serial) {
 
 // ---------------------------------------------------------------- audio cards
 
-function liveStopAudio() {
+// `drop`: also forget the drawn rows (leaving the tab, logging out), so their text is not kept.
+function liveStopAudio(drop) {
   clearTimeout(liveState.audioTimer);
   liveState.audioTimer = null;
+  if (drop) liveState.ui = null;
 }
 
 function liveMeter(label) {

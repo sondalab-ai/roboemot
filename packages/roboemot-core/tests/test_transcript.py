@@ -192,3 +192,87 @@ def test_the_live_tab_itself_must_be_on():
     assert r.add("user", "x", "en") == 1
     r.apply_config(LiveConfig(enabled=False, transcript=True))
     assert r.size == 0
+
+
+def test_a_reply_generation_from_before_a_clear_is_refused():
+    r, _ = ring()
+    seq, gen = r.begin("user", "q", "en")
+    assert seq == 1 and r.add("robot", "a", "en", generation=gen) is not None
+    r.clear()
+    assert r.add("robot", "late", "en", generation=gen) is None
+    assert r.size == 0
+    seq2, gen2 = r.begin("user", "q2", "en")
+    assert gen2 != gen and r.add("robot", "ok", "en", generation=gen2) is not None
+
+
+def test_begin_off_returns_a_generation_nothing_can_match():
+    r, _ = ring(transcript=False)
+    seq, gen = r.begin("user", "q", "en")
+    assert seq is None
+    r.apply_config(LiveConfig(enabled=True, transcript=True))
+    assert r.add("robot", "a", "en", generation=gen) is None
+
+
+def test_asleep_records_nothing_and_clears_and_waking_resumes():
+    r, _ = ring()
+    r.add("user", "x", "en")
+    r.set_asleep(True)
+    assert (
+        r.size == 0 and r.add("user", "y", "en") is None and r.begin("user", "y", "en")[0] is None
+    )
+    r.set_asleep(False)
+    assert r.add("user", "z", "en") is not None
+
+
+def test_flag_off_clears_once_and_a_repeated_reload_does_not_churn_the_epoch():
+    r, _ = ring()
+    r.add("user", "x", "en")
+    r.apply_config(LiveConfig(enabled=True, transcript=False))
+    epoch = r.snapshot(0)["epoch"]
+    r.apply_config(LiveConfig(enabled=True, transcript=False))
+    assert r.snapshot(0)["epoch"] == epoch
+
+
+def test_the_age_bound_holds_without_a_read_when_trim_is_called():
+    r, now = ring(transcript_max_age_s=60.0)
+    r.add("user", "old", "en")
+    now[0] += 61
+    r.trim()
+    assert r.size == 0
+
+
+def test_a_turn_repr_never_shows_its_text():
+    r, _ = ring()
+    r.add("user", "tokenSECRET", "en")
+    assert "tokenSECRET" not in repr(r._turns[0]) and "tokenSECRET" not in repr(r._turns)
+
+
+def test_a_full_list_over_the_response_budget_sends_the_newest_turns():
+    r, _ = ring(transcript_response_max_chars=1000)
+    for i in range(10):
+        r.add("user", f"{i}" * 300, "en")
+    texts = [t["text"][0] for t in r.snapshot(0)["turns"]]
+    assert texts == ["7", "8", "9"] or texts == ["8", "9"] or texts[-1] == "9" and len(texts) <= 4
+    assert sum(len(t["text"]) for t in r.snapshot(0)["turns"]) <= 1300
+
+
+def test_a_single_turn_is_always_sent():
+    r, _ = ring(transcript_response_max_chars=1000, transcript_max_chars=2000)
+    r.add("user", "x" * 1500, "en")
+    assert len(r.snapshot(0)["turns"]) == 1
+
+
+def test_attach_follows_the_stack_even_when_a_later_listener_raises():
+    from roboemot.config.stack import ConfigStack
+
+    stack = ConfigStack(app={"webui": {"live": {"enabled": True, "transcript": True}}})
+    r = TranscriptRing(stack.effective().webui.live)
+    r.attach(stack)
+
+    def broken(change):
+        raise RuntimeError("an earlier reload step failed")
+
+    stack.subscribe(broken)
+    r.add("user", "x", "en")
+    stack.set("webui.live.transcript", False, source="test", admin=True)
+    assert r.size == 0 and r.add("user", "y", "en") is None

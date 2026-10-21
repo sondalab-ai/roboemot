@@ -91,6 +91,8 @@ class LiveState:
             return None
         live = cfg.webui.live
         levels, ring = self._host.levels, self._host.transcript
+        if ring is not None and not live.transcript:
+            ring.apply_config(live)  # the flag is off here: whatever it still holds goes
         parts = self._p.sleep.paused_parts()
         paused = self._p.sleep.asleep or "listener" in parts
         return {
@@ -98,7 +100,11 @@ class LiveState:
             "levels": (levels or AudioLevels()).snapshot(
                 paused=paused, max_age_s=live.level_max_age_s, window_ms=live.level_window_ms
             ),
-            "transcript": ring.snapshot(after, epoch) if ring is not None else NO_TRANSCRIPT,
+            "transcript": (
+                ring.snapshot(after, epoch)
+                if ring is not None and live.transcript
+                else NO_TRANSCRIPT
+            ),
         }
 
     def clear_transcript(self) -> bool:

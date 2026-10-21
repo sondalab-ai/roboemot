@@ -21,10 +21,11 @@ from typing import Any
 
 from roboemot.config.schema import LiveConfig
 
+NOT_RECORDED = -1  # the generation of an utterance that was never recorded: its reply never is
 EPOCH_BYTES = 4  # random bytes naming one life of the ring (a restart gives the page a new one)
 
 
-@dataclass
+@dataclass(repr=False)
 class _Turn:
     seq: int
     at: float  # monotonic, for the age bound
@@ -56,6 +57,8 @@ class TranscriptRing:
         self._rev = 0  # bumped by every add, extend and settle: the page's cursor
         self._boot = secrets.token_hex(EPOCH_BYTES)
         self._generation = 0
+        self._clears = 0  # generation fence: every clear bumps it
+        self._asleep = False
 
     def __repr__(self) -> str:
         return f"TranscriptRing(enabled={self._enabled}, size={len(self._turns)})"
@@ -69,41 +72,85 @@ class TranscriptRing:
         with self._lock:
             return len(self._turns)
 
+    def attach(self, stack: Any) -> Callable[[], None]:
+        """Follow ``webui.live`` on the configuration stack as a listener of its own, so turning the
+        flag off stops the recording and clears the ring whatever the other listeners do."""
+        return stack.subscribe(lambda change: self.apply_config(change.config.webui.live))
+
     def apply_config(self, cfg: LiveConfig) -> None:
         """Hot reload: new bounds apply at once; turning the flag off clears the ring."""
         with self._lock:
+            had = self._enabled or bool(self._turns)
             self._cfg = cfg
             self._enabled = cfg.enabled and cfg.transcript
             if not self._enabled:
-                self._clear_locked()
+                if had:
+                    self._clear_locked()
             else:
                 self._trim_locked(self._clock())
 
-    def add(self, who: str, text: str, language: str, *, interrupted: bool = False) -> int | None:
-        """Keep one turn; returns its ``seq``, or None while the transcript is off or ``text`` is
-        empty. The text is cut to ``transcript_max_chars``."""
+    def set_asleep(self, asleep: bool) -> None:
+        """The robot fell asleep (True: nothing is recorded while it sleeps and the ring is
+        cleared, whether or not the rest of the runtime pauses) or woke up."""
+        with self._lock:
+            self._asleep = asleep
+            if asleep:
+                self._clear_locked()
+
+    def trim(self) -> None:
+        """Drop turns past the age bound. Called from the app tick, so text does not outlive
+        ``transcript_max_age_s`` in memory when nobody polls or speaks."""
+        if self._turns:
+            with self._lock:
+                self._trim_locked(self._clock())
+
+    def begin(self, who: str, text: str, language: str) -> tuple[int | None, int]:
+        """Record the user's turn and return ``(seq, generation)`` atomically. The reply to it
+        passes the generation to ``add``: a clear in between makes the ring refuse it.
+        ``NOT_RECORDED`` as the generation when nothing was kept."""
+        with self._lock:
+            seq = self._add_locked(who, text, language, False)
+            return seq, (self._clears if seq is not None else NOT_RECORDED)
+
+    def add(
+        self,
+        who: str,
+        text: str,
+        language: str,
+        *,
+        interrupted: bool = False,
+        generation: int | None = None,
+    ) -> int | None:
+        """Keep one turn; returns its ``seq``, or None while the transcript is off or asleep,
+        ``text`` is empty, or ``generation`` is not the current one (a clear came after the
+        utterance this is the reply to). The text is cut to ``transcript_max_chars``."""
         if not self._enabled or not text:
             return None
-        now = self._clock()
         with self._lock:
-            if not self._enabled:
+            if generation is not None and generation != self._clears:
                 return None
-            self._seq += 1
-            self._rev += 1
-            self._turns.append(
-                _Turn(
-                    self._seq,
-                    now,
-                    self._wall(),
-                    who,
-                    text[: self._cfg.transcript_max_chars],
-                    language,
-                    interrupted,
-                    self._rev,
-                )
+            return self._add_locked(who, text, language, interrupted)
+
+    def _add_locked(self, who: str, text: str, language: str, interrupted: bool) -> int | None:
+        if not self._enabled or self._asleep or not text:
+            return None
+        now = self._clock()
+        self._seq += 1
+        self._rev += 1
+        self._turns.append(
+            _Turn(
+                self._seq,
+                now,
+                self._wall(),
+                who,
+                text[: self._cfg.transcript_max_chars],
+                language,
+                interrupted,
+                self._rev,
             )
-            self._trim_locked(now)
-            return self._seq
+        )
+        self._trim_locked(now)
+        return self._seq
 
     def extend(self, seq: int | None, text: str) -> None:
         """Another sentence of the robot turn ``seq`` is queued to play; a turn that has left the
@@ -150,6 +197,8 @@ class TranscriptRing:
             current = f"{self._boot}.{self._generation}"
             stale = after > self._rev or bool(epoch and epoch != current)
             cursor = 0 if stale else after
+            kept = [t for t in self._turns if t.rev > cursor and (t.text or cursor > 0)]
+            kept = self._within_budget(kept)
             turns = [
                 {
                     "seq": t.seq,
@@ -159,8 +208,7 @@ class TranscriptRing:
                     "language": t.language,
                     "interrupted": t.interrupted,
                 }
-                for t in self._turns
-                if t.rev > cursor and (t.text or cursor > 0)
+                for t in kept
             ]
             return {
                 "enabled": self._enabled,
@@ -170,6 +218,17 @@ class TranscriptRing:
                 "max_turns": self._cfg.transcript_max_turns,
                 "turns": turns,
             }
+
+    def _within_budget(self, turns: list[_Turn]) -> list[_Turn]:
+        """The newest turns whose text fits ``transcript_response_max_chars`` (at least one):
+        a full list larger than that sends its newest part."""
+        budget, out = self._cfg.transcript_response_max_chars, []
+        for turn in reversed(turns):
+            budget -= len(turn.text)
+            if budget < 0 and out:
+                break
+            out.append(turn)
+        return out[::-1]
 
     def _find(self, seq: int) -> _Turn | None:
         for turn in reversed(self._turns):
@@ -186,6 +245,7 @@ class TranscriptRing:
     def _clear_locked(self) -> None:
         self._turns.clear()
         self._generation += 1
+        self._clears += 1
 
     def _trim_locked(self, now: float) -> None:
         while len(self._turns) > self._cfg.transcript_max_turns:

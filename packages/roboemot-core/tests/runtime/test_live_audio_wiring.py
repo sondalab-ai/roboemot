@@ -43,7 +43,8 @@ def test_levels_and_transcript_are_wired_into_the_running_runtime():
         assert SECRET not in report
 
         host.bus.publish("robot.asleep", None, time.monotonic())
-        assert ring.size == 0  # sleeping forgets
+        assert ring.size == 0 and ring.add("user", SECRET, "en") is None  # asleep records nothing
+        host.bus.publish("robot.awake", None, time.monotonic())
 
         ring.add("user", SECRET, "en")
         stack.set("webui.live.transcript", False, source="test", admin=True)

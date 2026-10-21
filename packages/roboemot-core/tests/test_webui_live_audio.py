@@ -8,6 +8,7 @@ import logging
 from types import SimpleNamespace
 
 import pytest
+from roboemot.config.schema import LiveConfig
 from roboemot.config.stack import ConfigStack
 from roboemot.conversation import ConversationPhase, TranscriptRing
 from roboemot.diagnostics import Diagnostics
@@ -288,3 +289,21 @@ def test_the_settings_page_lists_the_new_fields_with_the_flag_as_an_opt_in(serve
     assert fields["webui.live.transcript"]["default"] is False
     for name in ("audio_poll_ms", "transcript_max_turns", "transcript_max_age_s"):
         assert f"webui.live.{name}" in fields
+
+
+def test_the_endpoint_checks_the_transcript_flag_itself(served):
+    c = served.client
+    c.login()
+    switch(c, True)
+    setting(c, "webui.live.transcript", True)
+    served.host.transcript.add("user", SECRET, "en")
+    # a reload step failed earlier, so the ring never heard that the flag went off:
+    served.stack.set("webui.live.transcript", False, source="test", admin=True)
+    served.host.transcript.apply_config(LiveConfig(enabled=True, transcript=True))
+    served.host.transcript.add("user", SECRET, "en")
+    body = audio(c).json["transcript"]
+    assert body["enabled"] is False and body["turns"] == []
+    assert (
+        served.host.transcript.size == 0
+        and SECRET not in c.request("GET", "/api/live/audio").body.decode()
+    )

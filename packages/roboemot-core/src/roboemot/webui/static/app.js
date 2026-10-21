@@ -159,7 +159,7 @@ async function guarded(fn) {
 function stopPolling() {
   if (state.timer) clearTimeout(state.timer);
   state.timer = null;
-  liveStopAudio();
+  liveStopAudio(true);
 }
 
 // ---------------------------------------------------------------- dialogs

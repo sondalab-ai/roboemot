@@ -3039,6 +3039,12 @@ class LiveConfig(Strict):
     transcript_max_chars: int = param(
         1000, "Longest text kept for one turn; more is cut", ge=80, le=8000
     )
+    transcript_response_max_chars: int = param(
+        20000,
+        "Most text characters one Live poll carries; a longer list sends its newest turns",
+        ge=1000,
+        le=200000,
+    )
 
 
 class WebUIConfig(Strict):

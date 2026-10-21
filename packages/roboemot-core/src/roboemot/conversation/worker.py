@@ -63,7 +63,7 @@ from .confirm import Pending, PreferenceStore, reply_kind, sanitise_preference
 from .lines import line_text, minor_line, pick
 from .output_filter import OutputFilter
 from .phase import ConversationPhase
-from .transcript import TranscriptRing
+from .transcript import NOT_RECORDED, TranscriptRing
 
 log = logging.getLogger(__name__)
 
@@ -111,6 +111,9 @@ class _Turn:
     interrupted: bool = False  # a barge-in is under way: nothing more is said (set first)
     stopped: bool = False  # ... and the speech was stopped: history keeps what was heard
     reply_seq: int | None = None  # this reply's entry in the live transcript
+    ring_gen: int = NOT_RECORDED  # the transcript generation of the utterance it answers
+    speech_stopped: bool = False  # the speech was stopped during the turn (barge-in, stop, minor)
+    ring_deferred: bool = False  # a minor was present: the reply is recorded once it played
     done: bool = False  # the turn is over: a late skill callback does nothing
     exchange_spoken: int = 0  # queued sentences already in the exchange messages
     cut: bool = False  # stop_talking cut it
@@ -191,7 +194,8 @@ class ConversationWorker:
         self._tail: _Tail | None = None
         self._barge_at = -math.inf  # when the last barge-in or stop keyword cut the robot off
         self._lock = threading.Lock()
-        self._pending: collections.deque[Utterance] = collections.deque()
+        # (utterance, the live transcript's generation when it was recorded)
+        self._pending: collections.deque[tuple[Utterance, int]] = collections.deque()
         self._turns: collections.deque[list[dict[str, Any]]] = collections.deque()
         self._max_turns = 0
         self._session: _Session | None = None
@@ -255,15 +259,16 @@ class ConversationWorker:
             self._counts["stop_consumed"] += 1  # the command that already stopped the robot
             return False
         limit = cfg.conversation.pending_utterances
+        gen = NOT_RECORDED
+        if self.transcript is not None:
+            _, gen = self.transcript.begin(
+                "user", utterance.text.strip(), utterance.language or cfg.conversation.language
+            )
         with self._lock:
             while len(self._pending) >= limit:
                 self._pending.popleft()
                 self._counts["replaced"] += 1
-            self._pending.append(utterance)
-        if self.transcript is not None:
-            self.transcript.add(
-                "user", utterance.text.strip(), utterance.language or cfg.conversation.language
-            )
+            self._pending.append((utterance, gen))
         loop, wake = self._loop, self._wake
         if loop is not None and wake is not None:
             with contextlib.suppress(RuntimeError):
@@ -384,13 +389,13 @@ class ConversationWorker:
         self._ready.set()
         while not self._closed:
             with self._lock:
-                utterance = self._pending.popleft() if self._pending else None
-            if utterance is None:
+                item = self._pending.popleft() if self._pending else None
+            if item is None:
                 await self._wake.wait()
                 self._wake.clear()
                 continue
             try:
-                await self._answer(utterance)
+                await self._answer(*item)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # one bad turn must not end the worker
@@ -461,7 +466,7 @@ class ConversationWorker:
             self._barge_at = self.clock()
             turn = self._active_turn
             if turn is not None:
-                turn.interrupted = turn.stopped = True
+                turn.interrupted = turn.stopped = turn.speech_stopped = True
             self._drop_unheard_question()
         if turn is None:
             self._settle_reply()
@@ -517,7 +522,7 @@ class ConversationWorker:
             self._counts["history_trimmed"] += 1
         return True
 
-    async def _answer(self, utterance: Utterance) -> None:
+    async def _answer(self, utterance: Utterance, ring_gen: int = NOT_RECORDED) -> None:
         now = self.clock()
         cfg = self.stack.effective()
         self.apply_config(cfg)
@@ -537,6 +542,7 @@ class ConversationWorker:
             max_reply_sentences(cfg, register),
             speaker=speaker,
         )
+        turn.ring_gen = ring_gen
         turn.stamps["heard"] = utterance.last_speech_stamp
         self.affect.new_turn()
         with self._lock:
@@ -787,7 +793,7 @@ class ConversationWorker:
         if turn.done or turn.interrupted:
             return
         self.speech.stop()
-        turn.cut = True
+        turn.cut = turn.speech_stopped = True
         turn.outcome = "stopped"
 
     # ----------------------------------------------------------------- confirmation
@@ -900,6 +906,7 @@ class ConversationWorker:
             return False
         if not turn.minor or not self._cleared(active):
             self.speech.stop()
+            turn.speech_stopped = True
             turn.outcome = "minor_cut"
             return True
         return False
@@ -965,10 +972,22 @@ class ConversationWorker:
             turn.spoken.append(text)
             turn.queued.append((job, text))
             if self.transcript is not None:
-                if turn.reply_seq is None:
-                    turn.reply_seq = self.transcript.add("robot", text, turn.language)
-                else:
-                    self.transcript.extend(turn.reply_seq, text)
+                self._note_reply(turn, text)
+
+    def _note_reply(self, turn: _Turn, text: str) -> None:
+        """Add a queued sentence to the live transcript's reply, if the ring still accepts the
+        turn's generation. With a minor present nothing is added yet: ``_finish`` records what
+        played, so a sentence written without the minor rules is never shown as said."""
+        ring = self.transcript
+        if ring is None:
+            return
+        if turn.ring_deferred or turn.minor or self._minor():
+            turn.ring_deferred = True
+            return
+        if turn.reply_seq is None:
+            turn.reply_seq = ring.add("robot", text, turn.language, generation=turn.ring_gen)
+        else:
+            ring.extend(turn.reply_seq, text)
 
     def _prompt_name(self, cfg: RoboEmotConfig) -> str:
         """The robot's name as safe to say and to put in a prompt ('' without one)."""
@@ -1055,8 +1074,13 @@ class ConversationWorker:
                 self._tail = None
             self._active_turn = None
             self._reply = None
-            if turn.reply_seq is not None and self.transcript is not None:
-                if cut or turn.outcome == "minor_cut":  # the transcript keeps what was heard
+            if turn.ring_deferred and turn.reply_seq is None and self.transcript is not None:
+                heard = [t for job, t in turn.queued if self.speech.played(job)]
+                turn.reply_seq = self.transcript.add(
+                    "robot", " ".join(heard), turn.language, generation=turn.ring_gen
+                )
+            elif turn.reply_seq is not None and self.transcript is not None:
+                if cut or turn.speech_stopped:  # the transcript keeps what was heard
                     heard = [t for job, t in turn.queued if self.speech.played(job)]
                     self.transcript.settle(
                         turn.reply_seq, " ".join(heard), interrupted=len(heard) < len(turn.queued)

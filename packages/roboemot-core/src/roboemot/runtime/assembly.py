@@ -174,7 +174,9 @@ def assemble(
     levels = host.levels = AudioLevels(reflexes.offer_audio_level if reflex_audio else None)
     levels.noise_floor = lambda: reflexes.noise_floor
     transcript = host.transcript = TranscriptRing(cfg.webui.live)
-    bus.subscribe("robot.asleep", lambda msg: transcript.clear())
+    bus.subscribe("robot.asleep", lambda msg: transcript.set_asleep(True))
+    bus.subscribe("robot.awake", lambda msg: transcript.set_asleep(False))
+    transcript.attach(stack)  # its own listener: runs before the reload fan-out is subscribed
     audio = host.audio = session.audio(cfg, levels.offer if reflex_audio else None)
     reflexes.audio_status = audio.snapshot
     reference = (
