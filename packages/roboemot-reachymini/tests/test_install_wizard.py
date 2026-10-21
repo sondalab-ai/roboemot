@@ -400,7 +400,14 @@ def quiet_ui(yes: bool = False) -> Ui:
 
 
 def options(**kw) -> Options:
-    base = dict(host="127.0.0.1", user="pollen", robot="reachy-mini-wireless", dev=True, yes=True)
+    base = dict(
+        host="127.0.0.1",
+        user="pollen",
+        robot="reachy-mini-wireless",
+        dev=True,
+        yes=True,
+        vision=False,
+    )
     return Options(**{**base, **kw})
 
 
@@ -514,6 +521,59 @@ def test_install_adds_the_voice_extra_and_records_what_it_brings(offline, robot,
     install()
     assert [t.partition("[")[2] for t in core_targets(robot)] == ["voice]"]
     assert {"vosk", "scipy"} <= set(json.loads(robot.files[RECORD])["added"])
+
+
+def test_vision_is_on_by_default_and_no_vision_turns_it_off():
+    assert inst.parse_args(["--yes"]).vision is True and Options().vision is True
+    assert inst.parse_args(["--yes", "--no-vision"]).vision is False
+    assert inst.parse_args(["--yes", "--vision"]).vision is True
+
+
+def test_the_default_install_adds_the_vision_extra_and_the_vision_weights(offline, robot, daemon):
+    inst.run_install(
+        Options(
+            host="127.0.0.1",
+            user="pollen",
+            robot="reachy-mini-wireless",
+            dev=True,
+            yes=True,
+            start=False,
+            startup=False,
+        ),
+        quiet_ui(yes=True),
+        ROOT,
+    )
+    assert [t.partition("[")[2] for t in core_targets(robot)] == ["voice,vision]"]
+    assert robot.fetches == ["models fetch --all"]
+
+
+def test_the_dry_run_says_vision_will_be_installed(offline, robot, daemon, capsys):
+    inst.run_install(
+        Options(
+            host="127.0.0.1",
+            user="pollen",
+            robot="reachy-mini-wireless",
+            dev=True,
+            yes=True,
+            dry_run=True,
+        ),
+        quiet_ui(yes=True),
+        ROOT,
+    )
+    out = capsys.readouterr().out
+    assert "would install the vision extra" in out and "voice and vision models" in out
+
+
+def test_the_dry_run_with_no_vision_does_not_mention_vision(offline, robot, daemon, capsys):
+    inst.run_install(options(dry_run=True), quiet_ui(yes=True), ROOT)
+    assert "vision" not in capsys.readouterr().out
+
+
+def test_not_enough_space_for_the_vision_weights_suggests_no_vision(offline, robot, daemon, capsys):
+    robot.free_kb = needed_mib() * 1024
+    install(vision=True)
+    out = capsys.readouterr().out
+    assert robot.fetches == [] and "--no-vision" in out
 
 
 def test_vision_flag_adds_the_vision_extra_and_the_vision_weights(offline, robot, daemon):
@@ -976,6 +1036,19 @@ def test_install_creates_and_records_the_data_folder(offline, robot, daemon):
     assert record["data_dir_parents"] == [f"{HOME}/.local", f"{HOME}/.local/share"]
     assert DATA in robot.dirs
     assert f"mkdir -p -m 700 {DATA}" in robot.commands
+
+
+def test_reinstall_with_vision_over_an_install_without_it_adds_it_and_uninstall_restores(
+    offline, robot, daemon
+):
+    before = snapshot(robot, daemon)
+    install(vision=False)
+    assert robot.fetches == ["models fetch --voice"]
+    install(vision=True)
+    assert robot.fetches[-1] == "models fetch --all"
+    assert "opencv-python-headless" in json.loads(robot.files[RECORD])["added"]
+    uninstall()
+    assert snapshot(robot, daemon) == before
 
 
 def test_reinstall_keeps_the_recorded_data_folder(offline, robot, daemon):

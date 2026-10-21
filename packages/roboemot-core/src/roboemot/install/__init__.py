@@ -16,11 +16,11 @@ only reports it and skips the dependency check. It also creates the private app 
 records it. Unless declined (`--no-piper`) it also creates a Piper virtualenv in the data folder
 (`piper-tts` is GPL-3.0 and runs as its own process, SPEC 8), recorded for uninstall.
 The platform's ``extras`` (``voice`` for a robot that listens, so vosk) are installed with
-``roboemot-core``; ``--vision`` adds the ``vision`` extra and the vision weights. The voice
-models (``roboemot models fetch --voice``) are downloaded on the robot after Piper unless
-declined (``--no-models``), when the manifests' sizes fit the free space. Before installing it
-offers to clear the platform's ``clearable_caches`` (``--clear-caches``), which uninstall cannot
-restore.
+``roboemot-core``; the ``vision`` extra and the vision weights come too unless declined
+(``--no-vision``, SPEC 4A Installer). The voice models (``roboemot models fetch --voice``) are
+downloaded on the robot after Piper unless declined (``--no-models``), when the manifests'
+sizes fit the free space. Before installing it offers to clear the platform's
+``clearable_caches`` (``--clear-caches``), which uninstall cannot restore.
 Optionally (``--secret NAME``, or asked on a terminal) it stores an API key in the robot's secret
 store (SPEC 8, 12 Data), recorded by name; uninstall removes only the names it added.
 
@@ -141,7 +141,7 @@ class Options:
     piper: bool | None = None
     secrets: list[str] | None = None
     clear_caches: bool | None = None
-    vision: bool = False
+    vision: bool = True
     models: bool | None = None
 
 
@@ -516,7 +516,9 @@ def fetch_models(
     if free_mib < need_mib:
         ui.warn(
             f"only {free_mib} MiB free for the {label} in {folders[0]}, they need {need_mib} MiB: "
-            "skipped (free space, then run `roboemot models fetch` on the robot)"
+            "skipped (free space, then run `roboemot models fetch` on the robot"
+            + (", or install with --no-vision" if vision else "")
+            + ")"
         )
         return
     if dry_run:
@@ -979,6 +981,8 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
 
             ui.step("Install (dependency check only)" if opts.dry_run else "Install")
             extras = (*platform.extras, *(("vision",) if opts.vision else ()))
+            if opts.vision and opts.dry_run:
+                ui.info("would install the vision extra (OpenCV, ONNX); --no-vision skips it")
             record = install_packages(ui, platform, py, remote, dirs, wheels, opts.dry_run, extras)
             if not opts.dry_run:
                 platform.verify(ui, py, dev)
@@ -1281,8 +1285,9 @@ def parse_args(argv: list[str] | None = None) -> Options:
     p.add_argument(
         "--vision",
         action=argparse.BooleanOptionalAction,
-        help="also install the vision extra (OpenCV, ONNX) and, with the models step, the vision "
-        "weights (default: off, the robot's disk is small)",
+        default=True,
+        help="install the vision extra (OpenCV, ONNX) and, with the models step, the vision "
+        "weights (default: on; --no-vision skips both, e.g. when the robot's disk is small)",
     )
     p.add_argument(
         "--models",
@@ -1317,7 +1322,7 @@ def parse_args(argv: list[str] | None = None) -> Options:
         a.piper,
         a.secret,
         a.clear_caches,
-        bool(a.vision),
+        a.vision,
         a.models,
     )
 
