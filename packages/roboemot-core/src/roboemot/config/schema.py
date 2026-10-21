@@ -2971,7 +2971,8 @@ class RuntimeConfig(Strict):
 
 
 class LiveConfig(Strict):
-    """The web UI's Live tab: the robot's inner state (SPEC 11A, 12). State only: no media."""
+    """The web UI's Live tab: inner state, audio levels and an opt-in transcript (SPEC 11A, 12).
+    No audio samples and no video."""
 
     enabled: bool = param(
         False,
@@ -2996,6 +2997,47 @@ class LiveConfig(Strict):
         unit="s",
         ge=1,
         le=300,
+    )
+    audio_poll_ms: int = param(
+        500,
+        "How often the open Live tab asks for the audio levels and the new transcript turns",
+        unit="ms",
+        ge=200,
+        le=5000,
+    )
+    level_window_ms: int = param(
+        500,
+        "Length of the stretch of the robot's own playback its output level is measured over",
+        unit="ms",
+        ge=50,
+        le=2000,
+    )
+    level_max_age_s: float = param(
+        1.0,
+        "A microphone level older than this counts as no data",
+        unit="s",
+        ge=0.2,
+        le=10,
+    )
+    transcript: bool = param(
+        False,
+        "Keep the recent conversation (what was heard and said, text only) in memory for the "
+        "Live tab; off by default and then nothing at all is kept. Never saved, logged or put "
+        "in the debug report",
+        opt_in=True,
+    )
+    transcript_max_turns: int = param(
+        50, "Most turns the live transcript keeps; the oldest go first", ge=1, le=500
+    )
+    transcript_max_age_s: float = param(
+        1800.0,
+        "A turn older than this leaves the live transcript",
+        unit="s",
+        ge=30,
+        le=86400,
+    )
+    transcript_max_chars: int = param(
+        1000, "Longest text kept for one turn; more is cut", ge=80, le=8000
     )
 
 
