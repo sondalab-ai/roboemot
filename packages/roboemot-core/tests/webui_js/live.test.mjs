@@ -23,7 +23,7 @@ const STATE = {
 const AUDIO = {
   audio_poll_ms: POLL_MS * 4,
   levels: { mic: { state: "ok", db: -30 }, out: { state: "ok", db: -60 }, floor_db: null },
-  transcript: { enabled: false, epoch: "", seq: 0, min_seq: 0, max_turns: 0, turns: [] },
+  transcript: { enabled: false, epoch: "", rev: 0, min_seq: 0, max_turns: 0, turns: [] },
 };
 
 const STRINGS = {

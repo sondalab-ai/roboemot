@@ -197,6 +197,16 @@ function liveTurnRow(turn) {
   return el("p", { class: "live-turn live-turn--" + who, "data-seq": turn.seq }, parts);
 }
 
+// A reply grows and can be trimmed after the page first saw it: the same `seq` comes again with its
+// new text and replaces its row; an empty text (nothing of it was heard) removes the row.
+function liveUpsertTurn(list, turn) {
+  const key = String(turn.seq);
+  const old = [...list.children].find((row) => row.dataset.seq === key);
+  if (turn.text === "") { if (old) old.remove(); return; }
+  if (old) old.replaceWith(liveTurnRow(turn));
+  else list.append(liveTurnRow(turn));
+}
+
 function liveRenderTranscript(ui, tr) {
   ui.off.hidden = tr.enabled;
   ui.clear.hidden = !tr.enabled;
@@ -210,10 +220,10 @@ function liveRenderTranscript(ui, tr) {
   }
   if (liveState.epoch !== tr.epoch) ui.list.replaceChildren();
   liveState.epoch = tr.epoch;
-  for (const turn of tr.turns) ui.list.append(liveTurnRow(turn));
+  for (const turn of tr.turns) liveUpsertTurn(ui.list, turn);
   while (ui.list.firstChild && Number(ui.list.firstChild.dataset.seq) < tr.min_seq) ui.list.firstChild.remove();
   while (tr.max_turns > 0 && ui.list.children.length > tr.max_turns) ui.list.firstChild.remove();
-  liveState.after = tr.seq;
+  liveState.after = tr.rev;
   ui.none.hidden = ui.list.children.length > 0;
   if (tr.turns.length) ui.list.scrollTop = ui.list.scrollHeight;
 }
@@ -239,7 +249,8 @@ async function liveAudioPoll(box, serial) {
   if (!liveActive(serial)) return;
   let delay = LIVE_RETRY_MS;
   try {
-    const data = await api("GET", "/api/live/audio?after=" + liveState.after);
+    const epoch = liveState.epoch ? "&epoch=" + encodeURIComponent(liveState.epoch) : "";
+    const data = await api("GET", "/api/live/audio?after=" + liveState.after + epoch);
     if (!liveActive(serial)) return;
     liveAudioRender(box, data);
     delay = data.audio_poll_ms || LIVE_RETRY_MS;
@@ -268,6 +279,8 @@ function liveResume() {
   const box = document.getElementById("live-cards");
   const audio = document.getElementById("live-audio");
   if (!box || !audio) return liveView();
+  liveState.after = 0; // turns may have changed while hidden: ask for the full list again
+  liveState.epoch = null;
   const serial = ++liveState.serial;
   return Promise.all([livePoll(box, serial), liveAudioPoll(audio, serial)]);
 }

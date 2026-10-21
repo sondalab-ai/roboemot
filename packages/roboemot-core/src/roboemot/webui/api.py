@@ -174,7 +174,7 @@ class LivePort(Protocol):
     or None while ``webui.live.enabled`` is off. State only: no media, text, ids or positions."""
 
     def state(self) -> dict[str, Any] | None: ...
-    def audio(self, after: int) -> dict[str, Any] | None: ...
+    def audio(self, after: int, epoch: str = "") -> dict[str, Any] | None: ...
     def clear_transcript(self) -> bool: ...
 
 
@@ -205,15 +205,19 @@ class Response:
     after: Callable[[], None] | None = None
 
 
-def live_cursor(query: str) -> int:
-    """The ``after`` cursor of the Live audio poll: absent is 0, otherwise one plain unsigned
-    integer (``bad_request`` for anything else, a repeated key included)."""
-    values = [val for key, val in parse_qsl(query, keep_blank_values=True) if key == "after"]
-    if not values:
-        return 0
-    if len(values) > 1 or not re.fullmatch(rf"[0-9]{{1,{LIVE_CURSOR_DIGITS}}}", values[0]):
+def live_cursor(query: str) -> tuple[int, str]:
+    """The ``after`` and ``epoch`` of the Live audio poll. ``after`` absent is 0, otherwise one
+    plain unsigned integer; ``epoch`` absent is "", otherwise the ring's ``<hex>.<number>`` token.
+    Anything else, or a repeated key, is ``bad_request``."""
+    pairs = parse_qsl(query, keep_blank_values=True)
+    after, epoch = [v for k, v in pairs if k == "after"], [v for k, v in pairs if k == "epoch"]
+    if len(after) > 1 or len(epoch) > 1:
         raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
-    return int(values[0])
+    if after and not re.fullmatch(rf"[0-9]{{1,{LIVE_CURSOR_DIGITS}}}", after[0]):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
+    if epoch and not re.fullmatch(r"[0-9a-f]{1,16}\.[0-9]{1,12}", epoch[0]):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
+    return (int(after[0]) if after else 0), (epoch[0] if epoch else "")
 
 
 class ApiError(Exception):
@@ -710,9 +714,10 @@ class WebApi:
         return self.live
 
     def _live_audio(self, req: Request) -> Response:
-        """Audio levels in dBFS and the live transcript turns newer than ``?after=<seq>``. Same
-        disabled codes as the state; levels and text only, never samples; nothing stored."""
-        data = self._live_source().audio(live_cursor(req.query))
+        """Audio levels in dBFS and the live transcript turns added or changed after
+        ``?after=<rev>`` (``&epoch=`` is the ring's, so a cursor from another life starts over).
+        Same disabled codes as the state; levels and text only, never samples; nothing stored."""
+        data = self._live_source().audio(*live_cursor(req.query))
         if data is None:
             raise ApiError(HTTPStatus.NOT_FOUND, "live_disabled")
         return Response(HTTPStatus.OK, data)

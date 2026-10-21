@@ -49,7 +49,10 @@ def test_levels_and_transcript_are_wired_into_the_running_runtime():
         stack.set("webui.live.transcript", False, source="test", admin=True)
         assert wait_for(lambda: ring.size == 0)  # the flag off clears it, via the reload
         assert ring.add("user", SECRET, "en") is None
+        stack.set("webui.live.transcript", True, source="test", admin=True)
+        assert wait_for(lambda: ring.add("user", SECRET, "en") is not None)
     finally:
         stop.set()
         thread.join(timeout=30)
     assert not thread.is_alive()
+    assert ring.size == 0  # shutdown forgets, with or without a voice listener

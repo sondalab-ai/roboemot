@@ -113,8 +113,6 @@ def start_voice_output(
         phase=host.phase,
         transcript=host.transcript,
     )
-    if host.transcript is not None:  # runs after conv.close (LIFO): a late sentence is wiped too
-        cleanup.callback(host.transcript.clear)
     cleanup.callback(conv.close)
     conv.start()
     if bargein is not None:  # stop the speech first, then the stream, then listen
@@ -129,6 +127,10 @@ def start_all(
     cleanup: ExitStack,
 ) -> None:
     """Start every part in the order that lets the reverse order stop them safely."""
+    if (
+        host.transcript is not None
+    ):  # registered first, so it runs last: a late sentence is wiped too
+        cleanup.callback(host.transcript.clear)
     cleanup.callback(p.presence.close)
     cleanup.callback(p.tracker.close)
     cleanup.callback(p.runner.close)

@@ -1056,7 +1056,7 @@ class ConversationWorker:
             self._active_turn = None
             self._reply = None
             if turn.reply_seq is not None and self.transcript is not None:
-                if cut:  # the reply in the live transcript is what was heard
+                if cut or turn.outcome == "minor_cut":  # the transcript keeps what was heard
                     heard = [t for job, t in turn.queued if self.speech.played(job)]
                     self.transcript.settle(
                         turn.reply_seq, " ".join(heard), interrupted=len(heard) < len(turn.queued)

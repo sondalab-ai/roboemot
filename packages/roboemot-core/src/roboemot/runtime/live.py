@@ -24,7 +24,7 @@ from .levels import AudioLevels
 
 ROUND_DIGITS = 3  # decimals kept in the numbers sent to the page
 NO_TRANSCRIPT = {
-    "enabled": False, "epoch": "", "seq": 0, "min_seq": 0, "max_turns": 0, "turns": []
+    "enabled": False, "epoch": "", "rev": 0, "min_seq": 0, "max_turns": 0, "turns": []
 }  # fmt: skip
 
 
@@ -81,10 +81,11 @@ class LiveState:
             "system": self._system(cfg, now),
         }
 
-    def audio(self, after: int = 0) -> dict[str, Any] | None:
-        """The audio poll's payload: the levels in dBFS and the transcript turns newer than
-        ``after``; None while ``webui.live.enabled`` is off. Reads cached scalars and the ring:
-        it never starts or reads the microphone, and while asleep or paused reports ``paused``."""
+    def audio(self, after: int = 0, epoch: str = "") -> dict[str, Any] | None:
+        """The audio poll's payload: the levels in dBFS and the transcript turns added or
+        changed after revision ``after`` (all of them if ``epoch`` is not the ring's); None while
+        ``webui.live.enabled`` is off. Reads cached scalars and the ring: it never starts or reads
+        the microphone, and while asleep or paused reports ``paused``."""
         cfg = self._cfg
         if not cfg.webui.live.enabled:
             return None
@@ -97,7 +98,7 @@ class LiveState:
             "levels": (levels or AudioLevels()).snapshot(
                 paused=paused, max_age_s=live.level_max_age_s, window_ms=live.level_window_ms
             ),
-            "transcript": ring.snapshot(after) if ring is not None else NO_TRANSCRIPT,
+            "transcript": ring.snapshot(after, epoch) if ring is not None else NO_TRANSCRIPT,
         }
 
     def clear_transcript(self) -> bool:

@@ -33,6 +33,7 @@ class _Turn:
     text: str
     language: str
     interrupted: bool = False
+    rev: int = 0  # the ring's revision when this turn was last added to or changed
 
 
 class TranscriptRing:
@@ -52,6 +53,7 @@ class TranscriptRing:
         self._lock = threading.Lock()
         self._turns: collections.deque[_Turn] = collections.deque()
         self._seq = 0
+        self._rev = 0  # bumped by every add, extend and settle: the page's cursor
         self._boot = secrets.token_hex(EPOCH_BYTES)
         self._generation = 0
 
@@ -87,6 +89,7 @@ class TranscriptRing:
             if not self._enabled:
                 return None
             self._seq += 1
+            self._rev += 1
             self._turns.append(
                 _Turn(
                     self._seq,
@@ -96,6 +99,7 @@ class TranscriptRing:
                     text[: self._cfg.transcript_max_chars],
                     language,
                     interrupted,
+                    self._rev,
                 )
             )
             self._trim_locked(now)
@@ -111,36 +115,41 @@ class TranscriptRing:
             if turn is not None:
                 joined = f"{turn.text} {text}"
                 turn.text = joined[: self._cfg.transcript_max_chars]
+                self._touch(turn)
 
     def settle(self, seq: int | None, heard: str, *, interrupted: bool) -> None:
-        """The robot turn ``seq`` ended: its text becomes what was heard. Nothing heard removes
-        the turn; ``interrupted`` marks a reply cut by a barge-in or a stop."""
+        """The robot turn ``seq`` ended: its text becomes what was heard. Nothing heard leaves an
+        empty turn (a page that has the old text then drops it; ``snapshot`` from the start never
+        lists it); ``interrupted`` marks a reply cut by a barge-in or a stop."""
         if seq is None or not self._enabled:
             return
         with self._lock:
             turn = self._find(seq)
             if turn is None:
                 return
-            if not heard:
-                self._turns.remove(turn)
-                return
             turn.text = heard[: self._cfg.transcript_max_chars]
-            turn.interrupted = interrupted
+            turn.interrupted = interrupted and bool(heard)
+            self._touch(turn)
 
     def clear(self) -> None:
         """Forget everything (the Clear button, sleep, shutdown). Sequence numbers keep rising."""
         with self._lock:
             self._clear_locked()
 
-    def snapshot(self, after: int = 0) -> dict[str, Any]:
+    def snapshot(self, after: int = 0, epoch: str = "") -> dict[str, Any]:
         """``enabled``, ``epoch`` (changes on clear and restart: the page then starts over),
-        ``seq`` (the newest), ``max_turns``, ``min_seq`` (the oldest kept, 0 if none) and the
-        turns newer than ``after`` (all of them when ``after`` is ahead of the ring: the page's
-        cursor is from another life)."""
+        ``rev`` (the cursor to send back), ``max_turns``, ``min_seq`` (the oldest kept, 0 if none)
+        and the turns added or changed after revision ``after``: a reply that grew or was trimmed
+        since the page last asked comes again with the same ``seq``. Everything is returned when
+        ``after`` is ahead of the ring or ``epoch`` is given and is not the current one (the
+        page's cursor is from another life). Empty turns are listed only to a page that has
+        already seen them."""
         with self._lock:
             now = self._clock()
             self._trim_locked(now)
-            cursor = after if after <= self._seq else 0
+            current = f"{self._boot}.{self._generation}"
+            stale = after > self._rev or bool(epoch and epoch != current)
+            cursor = 0 if stale else after
             turns = [
                 {
                     "seq": t.seq,
@@ -151,12 +160,12 @@ class TranscriptRing:
                     "interrupted": t.interrupted,
                 }
                 for t in self._turns
-                if t.seq > cursor
+                if t.rev > cursor and (t.text or cursor > 0)
             ]
             return {
                 "enabled": self._enabled,
-                "epoch": f"{self._boot}.{self._generation}",
-                "seq": self._seq,
+                "epoch": current,
+                "rev": self._rev,
                 "min_seq": self._turns[0].seq if self._turns else 0,
                 "max_turns": self._cfg.transcript_max_turns,
                 "turns": turns,
@@ -169,6 +178,10 @@ class TranscriptRing:
             if turn.seq < seq:
                 break
         return None
+
+    def _touch(self, turn: _Turn) -> None:
+        self._rev += 1
+        turn.rev = self._rev
 
     def _clear_locked(self) -> None:
         self._turns.clear()

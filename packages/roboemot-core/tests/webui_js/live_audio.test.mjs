@@ -21,12 +21,12 @@ const STATE = {
   system: { cpu_temp_c: null },
 };
 
-const turn = (seq, who, text, extra = {}) => ({ seq, t: 1000 + seq, who, text, language: "en", interrupted: false, ...extra });
+const turn = (seq, who, text, extra = {}) => ({ seq, rev: seq, t: 1000 + seq, who, text, language: "en", interrupted: false, ...extra });
 const levels = (mic = -23.4, out = -40.0, floor = -55.2) => ({
   mic: { state: "ok", db: mic }, out: { state: "ok", db: out }, floor_db: floor,
 });
 const block = (turns, extra = {}) => ({
-  enabled: true, epoch: "a.0", seq: turns.length ? turns.at(-1).seq : 0, min_seq: turns.length ? turns[0].seq : 0,
+  enabled: true, epoch: "a.0", rev: turns.length ? turns.at(-1).rev : 0, min_seq: turns.length ? turns[0].seq : 0,
   max_turns: 50, turns, ...extra,
 });
 const AUDIO = { audio_poll_ms: POLL_MS, levels: levels(), transcript: block([turn(1, "user", "hello"), turn(2, "robot", "hi there")]) };
@@ -63,13 +63,15 @@ async function livePage(t, audio = AUDIO, extra = {}) {
 // A server that, like the real one, returns only the turns newer than the `after` cursor.
 function ringServer(ring) {
   return (body, path) => {
-    const after = Number(new URL(path, "http://x").searchParams.get("after"));
-    const cursor = after <= ring.seq ? after : 0;
-    return { ...AUDIO, transcript: { ...ring, turns: ring.all.filter((x) => x.seq > cursor) } };
+    const q = new URL(path, "http://x").searchParams;
+    const after = Number(q.get("after"));
+    const stale = after > ring.rev || (q.get("epoch") && q.get("epoch") !== ring.epoch);
+    const cursor = stale ? 0 : after;
+    return { ...AUDIO, transcript: { ...ring, turns: ring.all.filter((x) => x.rev > cursor && (x.text || cursor > 0)) } };
   };
 }
 const ringOf = (all, extra = {}) => ({
-  enabled: true, epoch: "a.0", all, seq: all.at(-1)?.seq ?? 0, min_seq: all[0]?.seq ?? 0, max_turns: 50, ...extra,
+  enabled: true, epoch: "a.0", all, rev: all.at(-1)?.rev ?? 0, min_seq: all[0]?.seq ?? 0, max_turns: 50, ...extra,
 });
 
 const audioCalls = (page) => page.calls.filter((c) => c.path.startsWith("/api/live/audio"));
@@ -149,13 +151,51 @@ test("each poll asks only for turns after the last one it has and appends them",
   assert.equal(audioCalls(page)[0].path, "/api/live/audio?after=0");
   assert.equal(turns(page).length, 1);
   ring.all.push(turn(2, "robot", "two"));
-  ring.seq = 2;
+  ring.rev = 2;
   await sleep(WAIT_MS);
   assert.deepEqual(turns(page).map((r) => r.dataset.seq), ["1", "2"]);
-  assert.ok(audioCalls(page).some((c) => c.path === "/api/live/audio?after=1"));
+  assert.ok(audioCalls(page).some((c) => c.path === "/api/live/audio?after=1&epoch=a.0"));
   await sleep(WAIT_MS);
   assert.equal(turns(page).length, 2, "nothing new, nothing redrawn");
-  assert.ok(audioCalls(page).at(-1).path.endsWith("after=2"));
+  assert.ok(audioCalls(page).at(-1).path.includes("after=2&epoch="));
+});
+
+test("a reply that grows, is cut and then is dropped is updated in its row, not duplicated", async (t) => {
+  const ring = ringOf([turn(1, "user", "q"), turn(2, "robot", "Uno.")]);
+  const page = await livePage(t, undefined, { "GET /api/live/audio": ringServer(ring) });
+  await openLive(page);
+  const row = () => turns(page).map((r) => [r.dataset.seq, r.textContent]);
+  assert.equal(turns(page).length, 2);
+  ring.all[1] = turn(2, "robot", "Uno. Due.", { rev: 3 });
+  ring.rev = 3;
+  await sleep(WAIT_MS);
+  assert.equal(turns(page).length, 2, "same seq, same row");
+  assert.ok(row()[1][1].includes("Uno. Due."));
+  ring.all[1] = turn(2, "robot", "Uno.", { rev: 4, interrupted: true });
+  ring.rev = 4;
+  await sleep(WAIT_MS);
+  assert.equal(turns(page).length, 2);
+  assert.ok(row()[1][1].includes("Uno.") && !row()[1][1].includes("Due.") && row()[1][1].includes("cut off"));
+  ring.all[1] = turn(2, "robot", "", { rev: 5 });
+  ring.rev = 5;
+  await sleep(WAIT_MS);
+  assert.deepEqual(turns(page).map((r) => r.dataset.seq), ["1"], "nothing heard: the row goes");
+});
+
+test("the poll sends the epoch it has, and a page back in view starts over from the full list", async (t) => {
+  const ring = ringOf([turn(1, "user", "one")]);
+  const page = await livePage(t, undefined, { "GET /api/live/audio": ringServer(ring) });
+  await openLive(page);
+  await sleep(WAIT_MS);
+  assert.ok(audioCalls(page).some((c) => c.path === "/api/live/audio?after=1&epoch=a.0"));
+  visibility(page, "hidden");
+  await settle();
+  ring.all[0] = turn(1, "user", "changed while hidden", { rev: 2 });
+  ring.rev = 2;
+  visibility(page, "visible");
+  await sleep(WAIT_MS);
+  assert.deepEqual(turns(page).map((r) => r.textContent.includes("changed while hidden")), [true]);
+  assert.ok(audioCalls(page).some((c) => c.path === "/api/live/audio?after=0"), "asked from the start");
 });
 
 test("a new turn scrolls the log to the bottom", async (t) => {
@@ -166,7 +206,7 @@ test("a new turn scrolls the log to the bottom", async (t) => {
   Object.defineProperty(box, "scrollHeight", { configurable: true, value: 500 });
   box.scrollTop = 0;
   ring.all.push(turn(2, "robot", "two"));
-  ring.seq = 2;
+  ring.rev = 2;
   await sleep(WAIT_MS);
   assert.equal(box.scrollTop, 500);
 });
@@ -178,11 +218,11 @@ test("turns the server dropped (min_seq) and an over-long list leave the page to
   assert.equal(turns(page).length, 3);
   ring.all.splice(0, 2, ...[]);
   ring.all.push(turn(4, "robot", "d"));
-  Object.assign(ring, { seq: 4, min_seq: 3 });
+  Object.assign(ring, { rev: 4, min_seq: 3 });
   await sleep(WAIT_MS);
   assert.deepEqual(turns(page).map((r) => r.dataset.seq), ["3", "4"]);
   ring.all.push(turn(5, "user", "e"), turn(6, "robot", "f"));
-  Object.assign(ring, { seq: 6, min_seq: 3, max_turns: 3 });
+  Object.assign(ring, { rev: 6, min_seq: 3, max_turns: 3 });
   await sleep(WAIT_MS);
   assert.deepEqual(turns(page).map((r) => r.dataset.seq), ["4", "5", "6"]);
 });
@@ -192,7 +232,7 @@ test("a new epoch (cleared, restarted or switched off and on) starts the list ov
   const page = await livePage(t, undefined, { "GET /api/live/audio": ringServer(ring) });
   await openLive(page);
   assert.ok(turns(page)[0].textContent.includes("old"));
-  Object.assign(ring, { epoch: "b.0", all: [turn(2, "user", "fresh")], seq: 2, min_seq: 2 });
+  Object.assign(ring, { epoch: "b.0", all: [turn(2, "user", "fresh")], rev: 2, min_seq: 2 });
   await sleep(WAIT_MS);
   assert.deepEqual(turns(page).map((r) => r.textContent.includes("fresh")), [true]);
 });
@@ -209,7 +249,7 @@ test("the Clear button posts and empties the list", async (t) => {
 });
 
 test("with the transcript off the card explains it and hides Clear", async (t) => {
-  const audio = { ...AUDIO, transcript: { enabled: false, epoch: "", seq: 0, min_seq: 0, max_turns: 0, turns: [] } };
+  const audio = { ...AUDIO, transcript: { enabled: false, epoch: "", rev: 0, min_seq: 0, max_turns: 0, turns: [] } };
   const page = await livePage(t, audio);
   await openLive(page);
   assert.ok(page.document.querySelector("#live-transcript-card").textContent.includes("Transcript is off."));

@@ -19,7 +19,7 @@ def ring(**kw):
 def test_off_keeps_nothing_at_all():
     r, _ = ring(transcript=False)
     assert r.add("user", "hello", "en") is None
-    assert r.snapshot(0)["turns"] == [] and r.snapshot(0)["seq"] == 0
+    assert r.snapshot(0)["turns"] == [] and r.snapshot(0)["rev"] == 0
     assert r.size == 0
 
 
@@ -64,10 +64,41 @@ def test_the_text_is_cut_to_the_character_bound():
 def test_the_cursor_returns_only_newer_turns():
     r, _ = ring()
     a = r.add("user", "one", "en")
+    cursor = r.snapshot(0)["rev"]
     b = r.add("robot", "two", "en")
-    snap = r.snapshot(a)
-    assert [t["seq"] for t in snap["turns"]] == [b] and snap["seq"] == b
-    assert r.snapshot(b)["turns"] == []
+    snap = r.snapshot(cursor)
+    assert [t["seq"] for t in snap["turns"]] == [b] and a < b
+    assert r.snapshot(snap["rev"])["turns"] == []
+
+
+def test_a_reply_that_grew_since_the_last_poll_comes_again_with_the_same_seq():
+    r, _ = ring()
+    seq = r.add("robot", "Uno.", "it")
+    first = r.snapshot(0)
+    r.extend(seq, "Due.")
+    again = r.snapshot(first["rev"])
+    assert [(t["seq"], t["text"]) for t in again["turns"]] == [(seq, "Uno. Due.")]
+    assert r.snapshot(again["rev"])["turns"] == []
+
+
+def test_a_cut_reply_reaches_a_page_that_already_has_its_first_sentence():
+    r, _ = ring()
+    seq = r.add("robot", "Uno.", "it")
+    r.extend(seq, "Due.")
+    seen = r.snapshot(0)["rev"]
+    r.settle(seq, "Uno.", interrupted=True)
+    turn = r.snapshot(seen)["turns"][0]
+    assert (turn["seq"], turn["text"], turn["interrupted"]) == (seq, "Uno.", True)
+
+
+def test_a_reply_with_nothing_heard_goes_empty_for_pages_that_had_it_and_is_never_listed_afresh():
+    r, _ = ring()
+    r.add("user", "q", "it")
+    seq = r.add("robot", "Never heard.", "it")
+    seen = r.snapshot(0)["rev"]
+    r.settle(seq, "", interrupted=True)
+    assert [(t["seq"], t["text"]) for t in r.snapshot(seen)["turns"]] == [(seq, "")]
+    assert [t["text"] for t in r.snapshot(0)["turns"]] == ["q"]
 
 
 def test_a_cursor_ahead_of_the_ring_gets_everything():
@@ -75,6 +106,16 @@ def test_a_cursor_ahead_of_the_ring_gets_everything():
     r.add("user", "one", "en")
     snap = r.snapshot(9999)  # ahead of the ring: the page's cursor is from another life
     assert [t["text"] for t in snap["turns"]] == ["one"]
+
+
+def test_a_cursor_from_another_epoch_gets_everything_even_when_it_looks_valid():
+    r, _ = ring()
+    r.add("user", "one", "en")
+    r.add("user", "two", "en")
+    epoch = r.snapshot(0)["epoch"]
+    cursor = r.snapshot(0)["rev"]
+    assert r.snapshot(cursor, epoch)["turns"] == []
+    assert [t["text"] for t in r.snapshot(cursor, "deadbeef.0")["turns"]] == ["one", "two"]
 
 
 @pytest.mark.parametrize("trigger", ["clear", "flag_off"])
@@ -121,13 +162,6 @@ def test_a_robot_turn_grows_then_is_marked_interrupted_with_the_heard_part():
     r.settle(seq, "Uno.", interrupted=True)
     turn = r.snapshot(0)["turns"][0]
     assert turn["text"] == "Uno." and turn["interrupted"] is True
-
-
-def test_settling_with_nothing_heard_removes_the_turn():
-    r, _ = ring()
-    seq = r.add("robot", "Never heard.", "it")
-    r.settle(seq, "", interrupted=True)
-    assert r.snapshot(0)["turns"] == []
 
 
 def test_extending_or_settling_a_turn_that_is_gone_does_nothing():

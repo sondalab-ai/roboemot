@@ -143,7 +143,7 @@ def test_transcript_is_off_until_its_own_flag_and_keeps_nothing_before(served):
     seq = served.host.transcript.add("user", SECRET, "en")
     body = audio(c).json["transcript"]
     assert body["enabled"] is True and [t["text"] for t in body["turns"]] == [SECRET]
-    assert body["seq"] == seq and body["max_turns"] == 50
+    assert body["turns"][0]["seq"] == seq and body["max_turns"] == 50 and body["rev"] >= 1
 
 
 def test_the_since_cursor_returns_only_new_turns(served):
@@ -152,20 +152,56 @@ def test_the_since_cursor_returns_only_new_turns(served):
     switch(c, True)
     setting(c, "webui.live.transcript", True)
     ring = served.host.transcript
-    first = ring.add("user", "one", "en")
+    ring.add("user", "one", "en")
+    cursor = audio(c).json["transcript"]["rev"]
     ring.add("robot", "two", "en")
     assert [t["text"] for t in audio(c).json["transcript"]["turns"]] == ["one", "two"]
-    after = audio(c, first).json["transcript"]
+    after = audio(c, cursor).json["transcript"]
     assert [t["text"] for t in after["turns"]] == ["two"]
-    assert audio(c, after["seq"]).json["transcript"]["turns"] == []
+    assert audio(c, after["rev"]).json["transcript"]["turns"] == []
 
 
-@pytest.mark.parametrize("bad", ["abc", "-1", "1.5", "", "99999999999999999999999", "1&after=2"])
+def test_a_reply_that_grows_or_is_cut_after_a_poll_comes_again(served):
+    c = served.client
+    c.login()
+    switch(c, True)
+    setting(c, "webui.live.transcript", True)
+    ring = served.host.transcript
+    seq = ring.add("robot", "Uno.", "it")
+    first = audio(c).json["transcript"]
+    ring.extend(seq, "Due.")
+    grown = audio(c, first["rev"]).json["transcript"]
+    assert [(t["seq"], t["text"]) for t in grown["turns"]] == [(seq, "Uno. Due.")]
+    ring.settle(seq, "Uno.", interrupted=True)
+    cut = audio(c, grown["rev"]).json["transcript"]["turns"]
+    assert [(t["seq"], t["text"], t["interrupted"]) for t in cut] == [(seq, "Uno.", True)]
+
+
+def test_a_cursor_with_another_epoch_starts_over(served):
+    c = served.client
+    c.login()
+    switch(c, True)
+    setting(c, "webui.live.transcript", True)
+    served.host.transcript.add("user", "one", "en")
+    body = audio(c).json["transcript"]
+    same = c.request("GET", f"/api/live/audio?after={body['rev']}&epoch={body['epoch']}")
+    assert same.json["transcript"]["turns"] == []
+    other = c.request("GET", f"/api/live/audio?after={body['rev']}&epoch=0123abcd.9")
+    assert [t["text"] for t in other.json["transcript"]["turns"]] == ["one"]
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "after=abc", "after=-1", "after=1.5", "after=", "after=99999999999999999999999",
+        "after=1&after=2", "epoch=zz", "epoch=a.b", "epoch=%3Cb%3E", "epoch=1.2&epoch=1.3",
+    ],
+)  # fmt: skip
 def test_a_bad_cursor_is_a_clean_400(served, bad):
     c = served.client
     c.login()
     switch(c, True)
-    r = c.request("GET", "/api/live/audio?after=" + bad)
+    r = c.request("GET", "/api/live/audio?" + bad)
     assert r.status == 400 and r.json == {"error": "bad_request"}
 
 
