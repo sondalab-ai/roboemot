@@ -817,6 +817,7 @@ const TABS = {
   catalogue: catalogueView,
   routes: routesView,
   settings: settingsView,
+  live: liveView,
   debug: debugView,
 };
 
