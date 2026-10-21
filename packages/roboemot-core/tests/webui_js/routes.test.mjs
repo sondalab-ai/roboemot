@@ -252,3 +252,23 @@ test("route form: the poll does not redraw while a field has the focus", async (
   await page.run("refreshRoutes()");
   assert.equal(sel(page, "route-new-name").value, "typing");
 });
+
+test("route form: a change of the path only, on the same host, is still sent", async () => {
+  const page = await formsPage([ROUTE], { "POST /api/settings": { changed: true } });
+  sel(page, "route-lan-url").value = "https://api.example.com/v2";
+  submit(page.window, sel(page, "route-lan-url").closest("form"));
+  await settle();
+  await answerPin(page);
+  const call = page.calls.find((c) => c.path === "/api/settings");
+  assert.deepEqual(call.body, { path: "llm_routes.lan.base_url", value: "https://api.example.com/v2", pin: PIN });
+});
+
+test("route form: a path-only change of a keyed route carries the origin as the acknowledgement", async () => {
+  const page = await formsPage([ADDED], { "POST /api/settings": { changed: true } });
+  sel(page, "route-cloud-url").value = "https://api.example.com/v2";
+  submit(page.window, sel(page, "route-cloud-url").closest("form"));
+  await settle();
+  await answerPin(page);
+  const call = page.calls.find((c) => c.path === "/api/settings");
+  assert.equal(call.body.ack_endpoint, "https://api.example.com");
+});

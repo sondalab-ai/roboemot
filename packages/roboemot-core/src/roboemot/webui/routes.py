@@ -5,8 +5,9 @@ file in the data folder, and shown next to the route; it does not gate the route
 its own thread, bounded by ``llm_check.deadline_s``, because it outlives the per-request
 deadline of the web server (``webui.request_deadline_s``): the POST returns at once and the
 page polls the list. Nothing secret leaves this module: a route is described by name, model,
-``host[:port]`` of its base URL and the minors flag, and a report holds statuses and short
-reasons only.
+``host[:port]`` of its base URL, its locality, the kind of its key and the minors flag, plus the
+full base URL only when it holds no credentials (the settings list shows the same value), and a
+report holds statuses and short reasons only.
 """
 
 from __future__ import annotations

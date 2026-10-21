@@ -236,7 +236,7 @@ def test_the_keyed_route_survives_a_restart_twice(tmp_path, editor, stack):
         assert routes(stack)["cloud"].api_key == "${secret:cloud_key}"
         data = saved(tmp_path)
         assert data["keys"] == {"cloud": "${secret:cloud_key}"}
-        assert any(k.endswith(".base_url") for k in data["acks"])
+        assert any(k.endswith(".api_key") for k in data["acks"])
 
 
 def test_a_path_only_edit_after_a_restart(tmp_path, editor, stack):
@@ -374,3 +374,41 @@ def test_a_key_stored_for_a_route_that_is_gone_is_dropped(tmp_path, editor, stac
     assert "cloud" not in routes(stack)
     assert "keys" not in saved(tmp_path)
     assert "dropped: no such route" in caplog.text and "cloud_key" not in caplog.text
+
+
+def make_keyed_stack(tmp_path):
+    route = {**LAN, "api_key": "${secret:cloud_key}"}
+    return make_stack(tmp_path, routes=(route,))
+
+
+@pytest.mark.parametrize("then", ["other_key", None])
+def test_a_moved_yaml_key_then_rebound_survives_a_restart(tmp_path, then):
+    stack = make_keyed_stack(tmp_path)
+    editor = make_editor(tmp_path, stack)
+    editor.change(
+        "llm_routes.lan.base_url", "https://moved.example/v1", ack="https://moved.example"
+    )
+    editor.set_route_key("lan", then, "https://moved.example")
+    stack = make_keyed_stack(tmp_path)
+    editor = make_editor(tmp_path, stack)
+    editor.restore()
+    route = routes(stack)["lan"]
+    assert route.base_url == "https://moved.example/v1"
+    assert route.api_key == (f"${{secret:{then}}}" if then else "none")
+
+
+def test_a_yaml_key_rebound_and_then_moved_reverts_whole_at_start(tmp_path):
+    """Known limit, fails closed: the move record names the web-bound key while the batch
+    replays the route with the key of the configuration file, so neither the move nor the
+    binding is replayed and the route is back to its file (old host, old key)."""
+    stack = make_keyed_stack(tmp_path)
+    editor = make_editor(tmp_path, stack)
+    editor.set_route_key("lan", "other_key", "https://api.example.com")
+    editor.change(
+        "llm_routes.lan.base_url", "https://moved.example/v1", ack="https://moved.example"
+    )
+    stack = make_keyed_stack(tmp_path)
+    editor = make_editor(tmp_path, stack)
+    editor.restore()
+    route = routes(stack)["lan"]
+    assert route.base_url == LAN["base_url"] and route.api_key == "${secret:cloud_key}"

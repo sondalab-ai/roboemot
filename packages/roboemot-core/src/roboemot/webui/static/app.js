@@ -655,7 +655,8 @@ async function saveRoute(route, v) {
   let ack = null;
   const origin = routeOrigin(v.base_url || (route && route.base_url) || "");
   const keyed = v.key !== "" && v.key !== ROUTE_KEY_LITERAL;
-  const moved = route && v.base_url && routeOrigin(v.base_url) !== routeOrigin(route.base_url || "");
+  const urlChanged = route && v.base_url && v.base_url !== (route.base_url || "");
+  const moved = urlChanged && routeOrigin(v.base_url) !== routeOrigin(route.base_url || "");
   const target = origin || ack;
   const steps = [];
   const mapAck = async (call) => {
@@ -676,7 +677,7 @@ async function saveRoute(route, v) {
     const path = (f) => "llm_routes." + route.name + "." + f;
     const set = (f, value) => (pin) => mapAck(() => api("POST", "/api/settings", { path: path(f), value, pin,
       ...(f === "base_url" && route.key !== "none" && (ack || routeOrigin(value)) ? { ack_endpoint: ack || routeOrigin(value) } : {}) }));
-    if (moved) steps.push(set("base_url", v.base_url));
+    if (urlChanged) steps.push(set("base_url", v.base_url));
     if (v.key !== (route.key === "none" ? "" : (route.key === "secret" ? route.secret.name : ROUTE_KEY_LITERAL))) {
       steps.push((pin) => mapAck(() => api("POST", "/api/routes/key", {
         name: route.name, secret: keyed ? v.key : null, pin,

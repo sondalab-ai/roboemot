@@ -404,6 +404,7 @@ class SettingsEditor:
             if result["changed"] and result["layer"] == "runtime":
                 self._remember(key, result["value"])
                 self._keep_ack(key, result["value"], acked)
+                self._rebase_binding(path, acked)
                 result["persisted"] = self._persist()
             elif result["changed"] and self._overrides.pop(key, None) is not None:
                 self._acks.pop(key, None)
@@ -596,10 +597,11 @@ class SettingsEditor:
 
     def _remember_key(self, name: str, ref: str) -> None:
         """Keep the key bound to route ``name`` for the next start, with the acknowledged origin and
-        a fingerprint of the reference stored at the route's ``base_url`` (the same record a route
-        move uses), so later ``base_url`` edits at that origin keep working."""
+        a salted fingerprint of the reference in ``acks`` under the route's ``api_key`` file key (a
+        record apart from the one of a route move, which names the key the move was made with).
+        ``_moved_endpoint`` reads both, so later ``base_url`` edits at that origin keep working."""
         route = next(r for r in self.stack.effective().llm_routes if r.name == name)
-        ack_key = okey(self.stack.merged_tree(), f"llm_routes.{name}.base_url")
+        ack_key = okey(self.stack.merged_tree(), f"llm_routes.{name}.api_key")
         self._keys[name] = ref
         if ref == NO_KEY_REF:
             self._acks.pop(ack_key, None)
@@ -615,7 +617,7 @@ class SettingsEditor:
         for name, ref in keys.items():
             route = next((r for r in self.stack.effective().llm_routes if r.name == name), None)
             path = f"llm_routes.{name}.api_key"
-            ack_key = okey(self.stack.merged_tree(), f"llm_routes.{name}.base_url")
+            ack_key = okey(self.stack.merged_tree(), f"llm_routes.{name}.api_key")
             record = acks.get(ack_key)
             if route is None:
                 log.warning("web UI key of route %s dropped: no such route", name)
@@ -760,7 +762,10 @@ class SettingsEditor:
             raise ValidationError("value_merged", "value")
         tree = self.stack.merged_tree()
         stored = okey(tree, path)
-        moved = self._moved_endpoint(path, old, clean, cfg, ack, self._acks.get(stored))
+        bound = okey(tree, f"{path.rpartition('.')[0]}.api_key") if write_only(path) else stored
+        moved = self._moved_endpoint(
+            path, old, clean, cfg, ack, (self._acks.get(stored), self._acks.get(bound))
+        )
         layer = self._write(
             path,
             clean,
@@ -787,18 +792,24 @@ class SettingsEditor:
         new: Any,
         cfg: RoboEmotConfig,
         ack: object,
-        record: dict[str, str] | None,
+        records: Iterable[dict[str, str] | None],
     ) -> Move | None:
         """The ``Move`` when ``path`` is the ``base_url`` of a route with an API key and the
-        endpoint changes, or stays at the origin acknowledged earlier for this very key
-        (``record``, so a later path edit there is not refused again); else ``None``. Raises
-        ``endpoint_ack_required`` (carrying the new origin) unless ``ack`` is that origin."""
+        endpoint changes, or stays at the origin acknowledged earlier for this very key (any of
+        ``records``: the route's move record and its key-binding record, so a later path edit
+        there is not refused again); else ``None``. Raises ``endpoint_ack_required`` (carrying
+        the new origin) unless ``ack`` is that origin."""
         if not write_only(path) or not isinstance(old, str) or not isinstance(new, str):
             return None
         route = plain(get_path(cfg, path.rpartition(".")[0]))
         target = origin(new)
         acked = (
-            record["origin"] if record and key_matches(record["key"], route["api_key"]) else None
+            target
+            if any(
+                r and r["origin"] == target and key_matches(r["key"], route["api_key"])
+                for r in records
+            )
+            else None
         )
         same = endpoint_key(old) == endpoint_key(new)
         # a path-only edit at the origin acknowledged for this key still needs the secret exemption:
@@ -889,6 +900,16 @@ class SettingsEditor:
             ),
             None,
         )
+
+    def _rebase_binding(self, path: object, acked: dict[str, str] | None) -> None:
+        """After an acknowledged move of a route ``base_url``, the key-binding record of that route
+        (if any) names the new origin: the owner acknowledged it for this very key."""
+        if not acked or not isinstance(path, str) or not write_only(path):
+            return
+        parent = path.rpartition(".")[0]
+        bound = okey(self.stack.merged_tree(), f"{parent}.api_key")
+        if bound in self._acks:
+            self._acks[bound] = {**self._acks[bound], "origin": acked["origin"]}
 
     def _keep_ack(self, key: str, value: Any, acked: dict[str, str] | None) -> None:
         """Record the origin (and key fingerprint) the owner acknowledged for a moved route
