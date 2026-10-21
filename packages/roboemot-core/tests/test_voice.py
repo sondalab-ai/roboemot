@@ -78,3 +78,49 @@ def test_mood_tags_parsed_and_bounded_by_affect():
         )
         == "curiosity"
     )
+
+
+def _reachy_voice():
+    from pathlib import Path
+
+    from roboemot.manifest import load_manifest
+
+    path = Path(__file__).resolve().parents[3] / "configs/manifests/reachy-mini-wireless.yaml"
+    manifest = load_manifest(path, allow_unmeasured_dynamics=True)
+    stack = ConfigStack()
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
+    return stack.effective().voice
+
+
+def test_reachy_neutral_delivery_is_five_semitones_up():
+    from roboemot.persona import PersonaEffects
+
+    voice = _reachy_voice()
+    d = deliver(None, voice=voice)
+    assert d.pitch_st == pytest.approx(5.0)
+    # the energy curve spans -1 .. +0.5 st: still inside the limits
+    for add in (-1.0, 0.5):
+        e = compose_delivery(
+            voice,
+            register=CFG.register.adult,
+            circadian=CFG.circadian.states["awake"],
+            mood=None,
+            intensity=0.0,
+            persona=PersonaEffects(voice_pitch_st_add=add),
+        )
+        assert e.pitch_st == pytest.approx(5.0 + add)
+    assert to_piper(d, voice)["pitch_shift_st"] == pytest.approx(5.0)
+
+
+def test_reachy_delivery_pitch_clamps_at_eight():
+    from roboemot.persona import PersonaEffects
+
+    d = compose_delivery(
+        _reachy_voice(),
+        register=CFG.register.child,
+        circadian=CFG.circadian.states["awake"],
+        mood=None,
+        intensity=0.0,
+        persona=PersonaEffects(voice_pitch_st_add=5.0),
+    )
+    assert d.pitch_st == 8.0

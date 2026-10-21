@@ -57,8 +57,14 @@ safety:
 behaviour:                      # config layer 2 (SPEC 11A): this robot's defaults
   # Name (SPEC 4A, 8 stage 3): the default name when the owner and the daemon give none, and the
   # spellings the small Vosk models produce for it (`reachy` itself is out of their vocabulary).
-  # Only these name fields may sit under `voice` in a manifest.
+  # Voice (SPEC 8): a child-like, gender-neutral voice, chosen by ear by the owner (2026-10-21).
+  # The dsp pitch shift is varispeed, so the formants move with the pitch. The limits are wider than
+  # the library's (-4, 4) so moods (+-2 x expressivity), the energy curve (-1 to +0.5) and the
+  # child register (+2) keep room; the delivery clamps at +8 (2^(8/12) = 1.59x length_scale).
+  # Only the name fields and `base.pitch_st` / `limits.pitch_st` may sit under `voice` in a manifest.
   voice:
+    base: {pitch_st: 5}
+    limits: {pitch_st: [-4, 8]}
     default_name: Reachy
     keywords:
       it: {name_aliases: [reati]}
