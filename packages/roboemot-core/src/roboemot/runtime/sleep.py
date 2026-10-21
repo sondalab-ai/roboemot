@@ -66,6 +66,18 @@ class SleepGate:
             (self._pause if want else self._resume)()
         return self.paused
 
+    def paused_parts(self) -> list[str]:
+        """Names of the parts paused right now (``app_tick``, ``vision``, ``light_reader``,
+        ``listener``); reads flags only, never the configuration."""
+        service = self._perception.service
+        flags = {
+            "app_tick": self.paused,
+            "vision": service.paused if service is not None else False,
+            "light_reader": self._light.paused,
+            "listener": self._listener.paused if self._listener is not None else False,
+        }
+        return [name for name, on in flags.items() if on]
+
     def snapshot(self, now: float) -> dict[str, Any]:
         """The ``roboemot.sleep`` report section: the state and what is paused."""
         service = self._perception.service

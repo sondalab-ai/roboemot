@@ -54,6 +54,7 @@ BEHAVIOUR_MODULES = [
     "runtime/assembly.py",
     "runtime/diagnostics.py",
     "runtime/host.py",
+    "runtime/live.py",
     "runtime/loop.py",
     "runtime/reload.py",
     "runtime/sleep.py",
