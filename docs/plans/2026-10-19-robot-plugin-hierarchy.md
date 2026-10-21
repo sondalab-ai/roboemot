@@ -96,6 +96,26 @@ Order: 0 (+0b) → A → B → C → D → E1 → E2 (B–D may run in parallel 
 removes its baseline entries. Estimate: 7 slices, ~16–18 agent runs (Sonnet authors, one Sonnet review each; no security review unless a slice touches secrets/web
 auth). Re-confirm past ~27.
 
+### Live view (added 2026-10-21, owner request; slices S, T, U)
+Owner decisions (2026-10-21): a "Live" web UI tab; audio as levels + transcript only (no raw audio leaves the
+robot); video shown normally whoever is in view (the PIN is the gate); indicator = a web UI banner on every open
+page while a video viewer is active, no antenna pose; built inside this epic so the owner's robot run covers it.
+Common rules: PIN session + CSRF like every page API; feature flag(s) off by default (SPEC 11A privacy opt-in),
+rates and sizes as schema fields; nothing written to disk, logs or the debug report; the live view never wakes a
+paused pump or the robot; plain HTTP residual risk recorded in SPEC 12 (TLS is M5).
+S. **Inner-state panel.** One cheap endpoint built from the existing snapshot sources (`runtime/diagnostics.py`:
+   affect/mood, sleep, network, minor, circadian, reflexes, motion, voice, vision tracks) plus a conversation phase
+   (idle / listening / thinking = LLM stream in flight, with route and elapsed / speaking), added where missing.
+   Page polls at a config rate; per-source cost measured; no catalogue rebuild per poll.
+T. **Audio levels + transcript.** Mic level (the hub/onset RMS already computed) and the robot's output level;
+   an in-memory ring of recent utterances and replies (size and age as schema fields), never persisted, logged or in
+   the debug report. Opus security review (new exposure: SPEC 8/12A today keep replies out of reports).
+U. **Video preview.** JPEG snapshot endpoint the page polls, tapped from the vision pump's latest frame (never opens
+   the camera, SPEC 4A); encodes only while a viewer polled within a window; face boxes and names drawn; shows
+   "asleep"/"unavailable" (no cv2) instead of failing; CSP `img-src` checked; banner on every open page while a
+   viewer is active. Opus security review.
+Estimate: 3 slices, ~7–9 agents (Sonnet authors and S review, Opus reviews for T and U, 1–2 fix rounds).
+
 ## Rules for authors
 - Worktree per slice from `origin/epic/robot-plugin-hierarchy`, own `.venv`, check `roboemot.__file__`.
 - Each slice deletes the baseline entries it fixes in `robot_hierarchy_baseline.yaml`; never adds one.
