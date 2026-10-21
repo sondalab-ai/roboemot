@@ -89,6 +89,29 @@ EN: dict[str, str] = {
     "live_system": "System",
     "live_cpu_temp": "CPU temperature: {n} °C",
     "live_cpu_temp_none": "CPU temperature: not available",
+    "live_levels": "Audio levels",
+    "live_levels_note": "Levels only: no sound leaves the robot and none is kept.",
+    "live_mic": "Microphone",
+    "live_out": "Robot voice",
+    "live_db": "{n} dBFS",
+    "live_floor": "Noise floor: {n} dBFS",
+    "live_level_paused": "paused while asleep",
+    "live_level_no_data": "no signal",
+    "live_level_unavailable": "not available",
+    "live_transcript": "Conversation",
+    "live_transcript_note": (
+        "Kept in the robot's memory only, never saved. Names appear as the conversation has them."
+    ),
+    "live_transcript_off": (
+        "The transcript is off, so nothing is kept. To turn it on, open Settings, find "
+        "webui.live.transcript and switch it on. It applies at once; switching it off "
+        "forgets what was kept."
+    ),
+    "live_transcript_empty": "Nothing said yet.",
+    "live_transcript_user": "Heard",
+    "live_transcript_robot": "Said",
+    "live_transcript_cut": "cut off",
+    "live_transcript_clear": "Clear",
     "err_live_disabled": "The Live tab is off.",
     "err_live_unavailable": "The Live tab is not available on this robot.",
     "tab_routes": "Routes",
@@ -615,6 +638,30 @@ IT: dict[str, str] = {
     "live_system": "Sistema",
     "live_cpu_temp": "Temperatura CPU: {n} °C",
     "live_cpu_temp_none": "Temperatura CPU: non disponibile",
+    "live_levels": "Livelli audio",
+    "live_levels_note": "Solo livelli: nessun suono lascia il robot e nessuno viene conservato.",
+    "live_mic": "Microfono",
+    "live_out": "Voce del robot",
+    "live_db": "{n} dBFS",
+    "live_floor": "Rumore di fondo: {n} dBFS",
+    "live_level_paused": "in pausa mentre dorme",
+    "live_level_no_data": "nessun segnale",
+    "live_level_unavailable": "non disponibile",
+    "live_transcript": "Conversazione",
+    "live_transcript_note": (
+        "Resta solo nella memoria del robot, non viene mai salvata. I nomi compaiono come "
+        "li ha la conversazione."
+    ),
+    "live_transcript_off": (
+        "La trascrizione è spenta, quindi non si conserva nulla. Per attivarla apri "
+        "Impostazioni, cerca webui.live.transcript e attivala. Vale subito; spegnerla "
+        "cancella quanto conservato."
+    ),
+    "live_transcript_empty": "Ancora nulla di detto.",
+    "live_transcript_user": "Sentito",
+    "live_transcript_robot": "Detto",
+    "live_transcript_cut": "interrotto",
+    "live_transcript_clear": "Cancella",
     "err_live_disabled": "La scheda Live è spenta.",
     "err_live_unavailable": "La scheda Live non è disponibile su questo robot.",
     "tab_routes": "Modelli",

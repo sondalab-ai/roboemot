@@ -46,3 +46,7 @@ ul.row { list-style: none; padding: 0; margin: 0; }
 .nested { padding-inline-start: var(--sl-space-4); border-inline-start: 1px solid var(--slc-border-subtle); }
 .sl-slider { flex: 1 1 8rem; min-width: 6rem; }
 .row input[type="number"] { max-width: 10rem; }
+.live-transcript { max-height: 20rem; overflow-y: auto; display: flex; flex-direction: column; gap: var(--sl-space-2); }
+.live-turn { margin: 0; overflow-wrap: anywhere; }
+.live-meter { display: grid; gap: var(--sl-space-1); }
+#live-audio { margin-top: var(--sl-space-4); }
