@@ -3,7 +3,7 @@
 Runs on a PC on the robot's LAN, never on the robot. The flow is robot-agnostic; everything
 that depends on the robot model sits behind a :class:`Platform`, registered by the platform
 package in the ``roboemot.installers`` entry-point group under the manifest's ``robot.id``
-(Reachy Mini: ``roboemot_reachymini.install``).
+(for example ``roboemot_reachymini.install``).
 
 Install: find the robot (mDNS, every manifest that declares discovery), check SSH, the target
 interpreter, architecture, Python and free space, build the wheels locally, install them with

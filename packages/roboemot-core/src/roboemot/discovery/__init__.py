@@ -26,9 +26,9 @@ DEFAULT_TIMEOUT_S = 3.0
 class ServiceRecord:
     """One resolved mDNS service instance."""
 
-    service_type: str  # "_reachy-mini._tcp", without ".local."
+    service_type: str  # e.g. "_robot._tcp", without ".local."
     name: str  # instance name, e.g. "Neve"
-    host: str  # advertised host, e.g. "reachy-mini.local"
+    host: str  # advertised host, e.g. "robot.local"
     addresses: tuple[str, ...]
     port: int
     txt: dict[str, str] = field(default_factory=dict)
@@ -126,7 +126,7 @@ def zeroconf_browse(service_types: list[str], timeout_s: float) -> list[ServiceR
             if not info.server or not info.port:
                 continue
             host = info.server.rstrip(".")
-            # Reachy Mini 1.11 answers SRV/TXT reliably but its A/AAAA records only some of the
+            # Some robots answer SRV/TXT reliably but their A/AAAA records only some of the
             # time; the OS resolver (mDNSResponder, avahi) still knows the host.
             addresses = tuple(info.parsed_addresses()) or resolve_host(host, info.port)
             records.append(

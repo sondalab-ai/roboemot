@@ -10,8 +10,8 @@ MotorMode = Literal["active", "limp", "teach"]
 
 
 class PoseGroupDriver(ABC):
-    """For vendor SDKs that take poses, not servo angles (Reachy Mini). Values in rad and m,
-    keyed by manifest dof name."""
+    """For vendor SDKs that take poses, not servo angles (a robot platform's own driver).
+    Values in rad and m, keyed by manifest dof name."""
 
     @abstractmethod
     def write_pose_targets(self, t: float, values: dict[str, float]) -> None: ...
