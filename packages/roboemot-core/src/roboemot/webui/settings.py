@@ -32,7 +32,7 @@ import threading
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from roboemot import paths
 from roboemot.config.catalogue import (
@@ -64,6 +64,7 @@ from roboemot.secret_store import NAME as SECRET_NAME
 from roboemot.secret_store import SECRET_REF
 from roboemot.voice.models import ModelError, supported_languages
 
+from .languages import LANGUAGE_PATH, installed_languages
 from .robot_section import (
     RobotBlock,
     SettingsPlugin,
@@ -94,6 +95,17 @@ GROUP_OTHER_BITS = 0o077
 NOT_WRITABLE = frozenset({"schema_version"})
 # keyed by language: a new key must be one the voice stack supports
 LANGUAGE_MAPS = frozenset({"voice.keywords", "safety.minor_lines", "safety.minor_output_blocklist"})
+# whole-value maps keyed by language (free text per key): a key that is new must be a language the
+# voice stack supports, as for the keyed language maps above
+LANGUAGE_DICTS = frozenset(
+    {
+        "voice.voices",
+        "voice.asr.models",
+        "conversation.fallback_lines",
+        "privacy.pseudonym_templates",
+        "connectivity.offline_phrases",
+    }
+)
 REFUSED_CHECKS = frozenset({"reflex", "locality", "secret"})  # never granted, on any layer
 APP_FILE = "app"
 NO_KEY_REF = "none"  # the api_key of a route without a key
@@ -313,8 +325,10 @@ class SettingsEditor:
         manifest: Manifest | None = None,
         plugin: SettingsPlugin | None = None,
         known_secrets: Callable[[], Iterable[str]] | None = None,
+        installed: Callable[[RoboEmotConfig], Iterable[str]] = installed_languages,
     ):
         self.stack = stack
+        self._installed = installed
         self.manifest = manifest
         self._known_secrets = known_secrets
         self._plugin = plugin
@@ -333,7 +347,7 @@ class SettingsEditor:
     def fields(self) -> list[FieldDescriptor]:
         """The full field catalogue, ``writable`` true for every non-secret leaf. Private values
         (minors, privacy, location) are hidden."""
-        return build_catalogue(self.stack, _writable)
+        return self._catalogue()
 
     def robot_split(
         self, fields: list[FieldDescriptor]
@@ -365,8 +379,7 @@ class SettingsEditor:
     def reveal(self) -> list[FieldDescriptor]:
         """Only the private fields, with their real values (secrets stay redacted). The caller
         has verified the PIN."""
-        every = build_catalogue(self.stack, _writable, reveal_private=True)
-        return [f for f in every if f["private"]]
+        return [f for f in self._catalogue(reveal_private=True) if f["private"]]
 
     # ------------------------------------------------------------------ writing
 
@@ -701,8 +714,21 @@ class SettingsEditor:
     # ------------------------------------------------------------------ write internals
 
     def _rows(self) -> dict[str, FieldDescriptor]:
-        every = build_catalogue(self.stack, _writable, reveal_private=True)
-        return {row["path"]: row for row in every}
+        return {row["path"]: row for row in self._catalogue(reveal_private=True)}
+
+    def _catalogue(self, **kwargs: Any) -> list[FieldDescriptor]:
+        """The field catalogue with ``conversation.language`` as a choice: the languages whose voice
+        models are installed (``languages.installed_languages``) plus the current value, so any
+        other value is refused by the enum cleaner, on every write path."""
+        rows = build_catalogue(self.stack, _writable, **kwargs)
+        current = self.stack.effective()
+        offered = sorted({*self._installed(current), current.conversation.language})
+        return [
+            cast(FieldDescriptor, {**row, "kind": "enum", "choices": offered})
+            if row["path"] == LANGUAGE_PATH
+            else row
+            for row in rows
+        ]
 
     def _apply(
         self,
@@ -723,6 +749,12 @@ class SettingsEditor:
         old = plain(get_path(cfg, path))
         if clean == old:
             return {"path": path, "changed": False, "value": old}
+        if (
+            path in LANGUAGE_DICTS
+            and isinstance(clean, dict)
+            and set(clean) - set(old) - languages()
+        ):
+            raise ValidationError("language_unsupported", "value")
         # a runtime dict merges, so a value that would drop a key cannot be expressed there
         if isinstance(clean, dict) and deep_merge(old or {}, clean) != clean:
             raise ValidationError("value_merged", "value")
