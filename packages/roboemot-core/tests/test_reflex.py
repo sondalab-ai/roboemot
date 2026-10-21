@@ -118,6 +118,13 @@ class Rig:
         return self.engine.snapshot()["rules"][name]
 
 
+def test_the_noise_floor_is_readable_for_the_live_tab():
+    rig = Rig(cfg_with(rule()))
+    assert rig.engine.noise_floor is None
+    rig.settle_audio()
+    assert rig.engine.noise_floor == QUIET
+
+
 # --------------------------------------------------------------------------- config
 
 

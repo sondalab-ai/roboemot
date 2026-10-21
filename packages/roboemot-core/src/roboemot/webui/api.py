@@ -28,6 +28,7 @@ from datetime import UTC, datetime
 from http import HTTPStatus
 from http.cookies import CookieError, SimpleCookie
 from typing import Any, NoReturn, Protocol
+from urllib.parse import parse_qsl
 
 from roboemot.config.catalogue import FieldDescriptor
 from roboemot.config.schema import ROUTE_NAME_MAX_CHARS, RoboEmotConfig, WebUIConfig
@@ -57,6 +58,7 @@ ROUTE_FIELDS = frozenset({"name", "base_url", "model", "locality", "allowed_for_
 ROUTE_NAME = re.compile(rf"[A-Za-z0-9_-]{{1,{ROUTE_NAME_MAX_CHARS}}}")
 JSON_TYPE = "application/json; charset=utf-8"
 CATALOGUE_IMPORT = "/api/catalogue/import"
+LIVE_CURSOR_DIGITS = 15  # digits of the transcript cursor a client may send
 BASE64_GROUP_IN = 3
 BASE64_GROUP_OUT = 4
 CATALOGUE_STATUS = {
@@ -172,6 +174,8 @@ class LivePort(Protocol):
     or None while ``webui.live.enabled`` is off. State only: no media, text, ids or positions."""
 
     def state(self) -> dict[str, Any] | None: ...
+    def audio(self, after: int, epoch: str = "") -> dict[str, Any] | None: ...
+    def clear_transcript(self) -> bool: ...
 
 
 class DebugReport(Protocol):
@@ -187,6 +191,7 @@ class Request:
     headers: dict[str, str]
     body: bytes
     client_ip: str
+    query: str = ""  # the raw query string (only the Live audio cursor reads it)
 
 
 @dataclass
@@ -198,6 +203,21 @@ class Response:
     # Run by the server only after the response was written and flushed (not after a failed
     # write), on the connection's thread: it must return quickly; start a thread for real work.
     after: Callable[[], None] | None = None
+
+
+def live_cursor(query: str) -> tuple[int, str]:
+    """The ``after`` and ``epoch`` of the Live audio poll. ``after`` absent is 0, otherwise one
+    plain unsigned integer; ``epoch`` absent is "", otherwise the ring's ``<hex>.<number>`` token.
+    Anything else, or a repeated key, is ``bad_request``."""
+    pairs = parse_qsl(query, keep_blank_values=True)
+    after, epoch = [v for k, v in pairs if k == "after"], [v for k, v in pairs if k == "epoch"]
+    if len(after) > 1 or len(epoch) > 1:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
+    if after and not re.fullmatch(rf"[0-9]{{1,{LIVE_CURSOR_DIGITS}}}", after[0]):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
+    if epoch and not re.fullmatch(r"[0-9a-f]{1,16}\.[0-9]{1,12}", epoch[0]):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
+    return (int(after[0]) if after else 0), (epoch[0] if epoch else "")
 
 
 class ApiError(Exception):
@@ -362,6 +382,8 @@ class WebApi:
             ("POST", "/api/registry/quarantined/purge"): self._purge,
             ("GET", "/api/debug"): self._debug,
             ("GET", "/api/live/state"): self._live_state,
+            ("GET", "/api/live/audio"): self._live_audio,
+            ("POST", "/api/live/transcript/clear"): self._live_transcript_clear,
             ("GET", "/api/routes"): self._routes,
             ("POST", "/api/routes/add"): self._route_add,
             ("POST", "/api/routes/key"): self._route_key,
@@ -685,6 +707,26 @@ class WebApi:
         if data is None:
             raise ApiError(HTTPStatus.NOT_FOUND, "live_disabled")
         return Response(HTTPStatus.OK, data)
+
+    def _live_source(self) -> LivePort:
+        if self.live is None:
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "live_unavailable")
+        return self.live
+
+    def _live_audio(self, req: Request) -> Response:
+        """Audio levels in dBFS and the live transcript turns added or changed after
+        ``?after=<rev>`` (``&epoch=`` is the ring's, so a cursor from another life starts over).
+        Same disabled codes as the state; levels and text only, never samples; nothing stored."""
+        data = self._live_source().audio(*live_cursor(req.query))
+        if data is None:
+            raise ApiError(HTTPStatus.NOT_FOUND, "live_disabled")
+        return Response(HTTPStatus.OK, data)
+
+    def _live_transcript_clear(self, req: Request) -> Response:
+        """The Clear button: forget the live transcript (PIN session and CSRF were checked)."""
+        if not self._live_source().clear_transcript():
+            raise ApiError(HTTPStatus.NOT_FOUND, "live_disabled")
+        return Response(HTTPStatus.OK, {"ok": True})
 
     # ------------------------------------------------------------------ settings
 

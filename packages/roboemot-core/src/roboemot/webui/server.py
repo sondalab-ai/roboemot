@@ -257,7 +257,9 @@ class _Handler(BaseHTTPRequestHandler):
         if body is None:
             return
         resp = self.server.api.handle(
-            Request(self.command, path, headers, body, self.client_address[0])
+            Request(
+                self.command, path, headers, body, self.client_address[0], urlsplit(self.path).query
+            )
         )
         sent = self._send_response(resp)
         if sent and resp.after is not None:

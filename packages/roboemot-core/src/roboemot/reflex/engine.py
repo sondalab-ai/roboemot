@@ -236,6 +236,12 @@ class ReflexEngine:
             fn()
         self._unsubscribe.clear()
 
+    @property
+    def noise_floor(self) -> float | None:
+        """The running room level (RMS, full scale 1.0) the onsets are measured against, or None
+        before the first chunk. One float read without the lock: a display, not a decision."""
+        return self._floor
+
     def offer_audio_level(self, rms: float, stamp: float) -> None:
         """One microphone chunk's RMS (full scale 1.0) captured at ``stamp``.
 

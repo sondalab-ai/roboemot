@@ -20,7 +20,12 @@ import psutil
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.conversation.sources import entry_name
 
+from .levels import AudioLevels
+
 ROUND_DIGITS = 3  # decimals kept in the numbers sent to the page
+NO_TRANSCRIPT = {
+    "enabled": False, "epoch": "", "rev": 0, "min_seq": 0, "max_turns": 0, "turns": []
+}  # fmt: skip
 
 
 def cpu_temperature_c() -> float | None:
@@ -75,6 +80,42 @@ class LiveState:
             "motion": self._motion(),
             "system": self._system(cfg, now),
         }
+
+    def audio(self, after: int = 0, epoch: str = "") -> dict[str, Any] | None:
+        """The audio poll's payload: the levels in dBFS and the transcript turns added or
+        changed after revision ``after`` (all of them if ``epoch`` is not the ring's); None while
+        ``webui.live.enabled`` is off. Reads cached scalars and the ring: it never starts or reads
+        the microphone, and while asleep or paused reports ``paused``."""
+        cfg = self._cfg
+        if not cfg.webui.live.enabled:
+            return None
+        live = cfg.webui.live
+        levels, ring = self._host.levels, self._host.transcript
+        if ring is not None and not live.transcript:
+            ring.apply_config(live)  # the flag is off here: whatever it still holds goes
+        parts = self._p.sleep.paused_parts()
+        paused = self._p.sleep.asleep or "listener" in parts
+        return {
+            "audio_poll_ms": live.audio_poll_ms,
+            "levels": (levels or AudioLevels()).snapshot(
+                paused=paused, max_age_s=live.level_max_age_s, window_ms=live.level_window_ms
+            ),
+            "transcript": (
+                ring.snapshot(after, epoch)
+                if ring is not None and live.transcript
+                else NO_TRANSCRIPT
+            ),
+        }
+
+    def clear_transcript(self) -> bool:
+        """The Clear button. False while ``webui.live.enabled`` is off (the API answers
+        ``live_disabled``)."""
+        if not self._cfg.webui.live.enabled:
+            return False
+        ring = self._host.transcript
+        if ring is not None:
+            ring.clear()
+        return True
 
     def _mood(self, now: float) -> dict[str, Any]:
         s = self._p.runner.engine.state(now)

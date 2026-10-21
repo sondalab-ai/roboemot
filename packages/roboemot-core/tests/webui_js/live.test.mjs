@@ -20,6 +20,12 @@ const STATE = {
   system: { cpu_temp_c: 51.2 },
 };
 
+const AUDIO = {
+  audio_poll_ms: POLL_MS * 4,
+  levels: { mic: { state: "ok", db: -30 }, out: { state: "ok", db: -60 }, floor_db: null },
+  transcript: { enabled: false, epoch: "", rev: 0, min_seq: 0, max_turns: 0, turns: [] },
+};
+
 const STRINGS = {
   live_reflex_last: "Last: {name}, {n} s ago",
   live_cpu_temp: "CPU temperature: {n} C",
@@ -34,6 +40,7 @@ async function livePage(t, extra = {}) {
     "GET /api/strings": { language: "en", strings: STRINGS },
     "GET /api/enrollment/status": { state: "idle", frames_collected: 0, frames_needed: 0, hints: [] },
     "GET /api/live/state": STATE,
+    "GET /api/live/audio": AUDIO,
     "POST /api/logout": () => { loggedIn = false; return { ok: true }; },
     ...extra,
   });
@@ -164,6 +171,7 @@ test("live_disabled shows how to turn it on and keeps retrying at the slow delay
   let enabled = false;
   const page = await livePage(t, {
     "GET /api/live/state": () => (enabled ? STATE : reply(404, { error: "live_disabled" })),
+    "GET /api/live/audio": () => (enabled ? AUDIO : reply(404, { error: "live_disabled" })),
   });
   const timers = [];
   const real = page.window.setTimeout.bind(page.window);
@@ -172,9 +180,10 @@ test("live_disabled shows how to turn it on and keeps retrying at the slow delay
   assert.equal(polls(page), 1);
   assert.ok(page.document.querySelector("#live-cards").textContent.includes("live_disabled_body"));
   assert.equal(page.document.querySelector("#notice").hidden, true, "not an error banner");
-  assert.equal(timers.at(-1).ms, 5000, "retry armed at the slow delay");
+  const retries = timers.filter((x) => x.ms === 5000);
+  assert.ok(retries.length >= 1, "retry armed at the slow delay");
   enabled = true;
-  timers.at(-1).fn();
+  retries.forEach((x) => x.fn());
   await settle();
   assert.equal(page.document.querySelector("#live-cards").children.length, 7, "self-healed");
 });

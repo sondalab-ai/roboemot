@@ -1,16 +1,19 @@
 "use strict";
-// Live tab (SPEC 11A, 12): the robot's inner state, polled from GET /api/live/state. State only: no
-// media, no transcript (later slices add their own cards). Shares the helpers of app.js (el, t, api,
+// Live tab (SPEC 11A, 12): the robot's inner state, polled from GET /api/live/state, plus the audio
+// cards (two level meters and the opt-in transcript), polled from GET /api/live/audio at their own
+// rate. Levels and text only: no sound, no media. Shares the helpers of app.js (el, t, api,
 // card, badge, progress, empty, notice, explain, stopPolling, boot, state), so this file loads first
 // and only calls them at run time. Text goes through textContent and styles through the CSSOM.
 //
-// Polling: one timer in `state.timer` (so leaving the tab, logging out and showTab stop it), only
-// while the document is visible. `liveState.serial` retires a request that was in flight when the
+// Polling: the state timer is `state.timer` and the audio timer `liveState.audioTimer` (stopPolling
+// clears both, so leaving the tab, logging out and showTab stop them), only while the document is
+// visible. `liveState.serial` retires a request that was in flight when the
 // tab was left, hidden or reopened, so a late reply neither draws nor re-arms the timer.
 
 const LIVE_RETRY_MS = 5000;
 const LIVE_PERCENT = 100;
-const liveState = { serial: 0 };
+const LIVE_METER_FLOOR_DB = -60;
+const liveState = { serial: 0, audioTimer: null, after: 0, epoch: null, ui: null };
 
 // Each card is { key, render(data) -> Node }. Slices T (audio, transcript) and U (video) add theirs
 // here and read their own part of `data` (or poll their own endpoint from `render`).
@@ -120,7 +123,8 @@ function liveActive(serial) {
 }
 
 async function livePoll(box, serial) {
-  stopPolling();
+  clearTimeout(state.timer);
+  state.timer = null;
   if (!liveActive(serial)) return;
   let delay = LIVE_RETRY_MS;
   try {
@@ -139,20 +143,148 @@ async function livePoll(box, serial) {
   state.timer = setTimeout(() => livePoll(box, serial), delay);
 }
 
+// ---------------------------------------------------------------- audio cards
+
+// `drop`: also forget the drawn rows (leaving the tab, logging out), so their text is not kept.
+function liveStopAudio(drop) {
+  clearTimeout(liveState.audioTimer);
+  liveState.audioTimer = null;
+  if (drop) liveState.ui = null;
+}
+
+function liveMeter(label) {
+  const bar = progress(label, 0, LIVE_PERCENT);
+  const text = el("span", { class: "hint" });
+  return { bar, text, node: el("div", { class: "live-meter" }, el("span", { class: "sl-eyebrow" }, label), " ", text, bar) };
+}
+
+function liveSetMeter(meter, level) {
+  const ok = level.state === "ok" && level.db !== null;
+  const span = -LIVE_METER_FLOOR_DB;
+  const pct = ok ? Math.round(Math.min(Math.max((level.db - LIVE_METER_FLOOR_DB) / span, 0), 1) * LIVE_PERCENT) : 0;
+  meter.bar.setAttribute("aria-valuenow", pct);
+  meter.bar.style.setProperty("--sl-progress", pct + "%");
+  meter.text.textContent = ok ? t("live_db", { n: level.db.toFixed(1) }) : t("live_level_" + level.state);
+}
+
+function liveAudioBuild(box) {
+  const mic = liveMeter(t("live_mic"));
+  const out = liveMeter(t("live_out"));
+  const floor = el("p", { class: "hint" });
+  const levelsCard = card(t("tab_live"), t("live_levels"), mic.node, out.node, floor, el("p", { class: "hint" }, t("live_levels_note")));
+  levelsCard.id = "live-levels";
+  const list = el("div", { class: "live-transcript", id: "live-transcript", role: "log", "aria-live": "polite", tabindex: "0" });
+  const off = el("p", { class: "hint" }, t("live_transcript_off"));
+  const none = el("p", { class: "hint" }, t("live_transcript_empty"));
+  const clear = button(t("live_transcript_clear"), "plain", () => guarded(liveClearTranscript), { small: true, attrs: { id: "live-transcript-clear" } });
+  const textCard = card(t("tab_live"), t("live_transcript"), off, none, list, clear, el("p", { class: "hint" }, t("live_transcript_note")));
+  textCard.id = "live-transcript-card";
+  box.replaceChildren(levelsCard, textCard);
+  liveState.ui = { mic, out, floor, list, off, none, clear };
+}
+
+function liveAudioReset(box) {
+  box.replaceChildren();
+  liveState.ui = null;
+  liveState.after = 0;
+  liveState.epoch = null;
+}
+
+function liveTurnRow(turn) {
+  const who = turn.who === "robot" ? "robot" : "user";
+  const stamp = new Date(turn.t * 1000).toLocaleTimeString();
+  const label = stamp + " " + t("live_transcript_" + who);
+  const parts = [el("span", { class: "sl-eyebrow" }, label), " ", turn.text];
+  if (turn.interrupted) parts.push(" ", badge(t("live_transcript_cut"), "warning"));
+  return el("p", { class: "live-turn live-turn--" + who, "data-seq": turn.seq }, parts);
+}
+
+// A reply grows and can be trimmed after the page first saw it: the same `seq` comes again with its
+// new text and replaces its row; an empty text (nothing of it was heard) removes the row.
+function liveUpsertTurn(list, turn) {
+  const key = String(turn.seq);
+  const old = [...list.children].find((row) => row.dataset.seq === key);
+  if (turn.text === "") { if (old) old.remove(); return; }
+  if (old) old.replaceWith(liveTurnRow(turn));
+  else list.append(liveTurnRow(turn));
+}
+
+function liveRenderTranscript(ui, tr) {
+  ui.off.hidden = tr.enabled;
+  ui.clear.hidden = !tr.enabled;
+  ui.list.hidden = !tr.enabled;
+  if (!tr.enabled) {
+    ui.none.hidden = true;
+    ui.list.replaceChildren();
+    liveState.after = 0;
+    liveState.epoch = tr.epoch;
+    return;
+  }
+  if (liveState.epoch !== tr.epoch) ui.list.replaceChildren();
+  liveState.epoch = tr.epoch;
+  for (const turn of tr.turns) liveUpsertTurn(ui.list, turn);
+  while (ui.list.firstChild && Number(ui.list.firstChild.dataset.seq) < tr.min_seq) ui.list.firstChild.remove();
+  while (tr.max_turns > 0 && ui.list.children.length > tr.max_turns) ui.list.firstChild.remove();
+  liveState.after = tr.rev;
+  ui.none.hidden = ui.list.children.length > 0;
+  if (tr.turns.length) ui.list.scrollTop = ui.list.scrollHeight;
+}
+
+function liveAudioRender(box, data) {
+  if (liveState.ui === null || !box.contains(liveState.ui.list)) liveAudioBuild(box);
+  const ui = liveState.ui;
+  liveSetMeter(ui.mic, data.levels.mic);
+  liveSetMeter(ui.out, data.levels.out);
+  ui.floor.hidden = data.levels.floor_db === null;
+  ui.floor.textContent = data.levels.floor_db === null ? "" : t("live_floor", { n: data.levels.floor_db.toFixed(1) });
+  liveRenderTranscript(ui, data.transcript);
+}
+
+async function liveClearTranscript() {
+  await api("POST", "/api/live/transcript/clear", {});
+  if (liveState.ui) liveState.ui.list.replaceChildren();
+  if (liveState.ui) liveState.ui.none.hidden = false;
+}
+
+async function liveAudioPoll(box, serial) {
+  liveStopAudio();
+  if (!liveActive(serial)) return;
+  let delay = LIVE_RETRY_MS;
+  try {
+    const epoch = liveState.epoch ? "&epoch=" + encodeURIComponent(liveState.epoch) : "";
+    const data = await api("GET", "/api/live/audio?after=" + liveState.after + epoch);
+    if (!liveActive(serial)) return;
+    liveAudioRender(box, data);
+    delay = data.audio_poll_ms || LIVE_RETRY_MS;
+  } catch (err) {
+    if (!liveActive(serial)) return;
+    if (err.status === 401 && err.message === "unauthorized") { await boot(); return; }
+    if (err.message === "live_disabled" || err.message === "live_unavailable") liveAudioReset(box);
+    else notice(explain(err), true);
+  }
+  liveState.audioTimer = setTimeout(() => liveAudioPoll(box, serial), delay);
+}
+
 function liveView() {
   const view = document.getElementById("view");
   view.replaceChildren();
   const box = el("div", { class: "live-grid", id: "live-cards" });
-  view.append(el("div", { class: "stack" }, el("p", { class: "hint" }, t("live_intro")), box));
+  const audio = el("div", { class: "live-grid", id: "live-audio" });
+  view.append(el("div", { class: "stack" }, el("p", { class: "hint" }, t("live_intro")), box, audio));
+  liveAudioReset(audio);
   const serial = ++liveState.serial;
-  return livePoll(box, serial);
+  return Promise.all([livePoll(box, serial), liveAudioPoll(audio, serial)]);
 }
 
-// Back in view: keep the cards on screen (their last values) and only restart the poll.
+// Back in view: keep the cards on screen (their last values) and only restart the polls.
 function liveResume() {
   const box = document.getElementById("live-cards");
-  if (!box) return liveView();
-  return livePoll(box, ++liveState.serial);
+  const audio = document.getElementById("live-audio");
+  if (!box || !audio) return liveView();
+  liveState.after = 0; // turns may have changed while hidden: ask for the full list again
+  liveState.epoch = null;
+  const serial = ++liveState.serial;
+  return Promise.all([livePoll(box, serial), liveAudioPoll(audio, serial)]);
 }
 
 // Hidden page: stop at once and retire the request in flight. Visible again: redraw and resume.

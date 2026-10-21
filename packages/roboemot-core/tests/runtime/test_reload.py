@@ -55,3 +55,11 @@ def test_a_config_change_reaches_every_part_that_holds_a_copy():
 def test_optional_parts_that_do_not_exist_are_skipped():
     p, host = pipeline(), RuntimeHost()
     make_reload(host, p)(SimpleNamespace(config=RoboEmotConfig()))  # no listener, scan, speech
+
+
+def test_the_live_transcript_follows_the_flag_on_reload():
+    p, host = pipeline(), RuntimeHost()
+    host.transcript = Recorder()
+    cfg = RoboEmotConfig()
+    make_reload(host, p)(SimpleNamespace(config=cfg))
+    assert ("apply_config", (cfg.webui.live,)) in host.transcript.calls

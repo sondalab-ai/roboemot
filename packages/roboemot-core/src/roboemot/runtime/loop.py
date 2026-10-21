@@ -44,6 +44,8 @@ def run_loop(
     fx_for, fx = None, None
     while not stop_event.is_set():
         now = time.monotonic()
+        if host.transcript is not None:
+            host.transcript.trim()  # the age bound holds when nobody polls or speaks
         if p.sleep.tick(now):  # asleep (SPEC 12A): only the clocks run; the work waits for the wake
             p.circ.tick(now)
             p.runner.tick(now)
