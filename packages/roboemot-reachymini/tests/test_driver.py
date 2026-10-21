@@ -47,6 +47,14 @@ class FakeMini:
 
     def set_target(self, **kw) -> None:
         self.calls.append(("set_target", kw))
+        # tracks perfectly once told where to go (a static pose reads as external control)
+        if "head" in kw:
+            self.pose = np.asarray(kw["head"])
+        joints = list(self.joints[0])
+        if "body_yaw" in kw:
+            joints[0] = kw["body_yaw"]
+        antennas = list(kw["antennas"]) if "antennas" in kw else self.joints[1]
+        self.joints = (joints, antennas)
 
     def goto_target(self, **kw) -> None:  # must never be called (blocking in SDK 1.11)
         raise AssertionError("goto_target used")
