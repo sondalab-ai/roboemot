@@ -425,10 +425,19 @@ const canEdit = (node) => {
 
 const labelOf = (node) => (node.parent ? node.row.path.slice(node.parent.row.path.length + 1) : node.row.path);
 
+// A scheme the URL parser IDNA-encodes hosts for (written in two parts: the page holds no literal URL).
+const HOST_PROBE = "http" + ":" + "//";
+
 // scheme://host[:port] of a URL as the server writes it (lower case, no user info or path); "" if none.
 function routeOrigin(url) {
   const m = /^([A-Za-z][A-Za-z0-9+.-]*):\/\/(?:[^/?#@]*@)?([^/?#]*)/.exec(typeof url === "string" ? url : "");
-  return m && m[2] ? m[1].toLowerCase() + "://" + m[2].toLowerCase() : "";
+  if (!m || !m[2]) return "";
+  // the host in its ASCII (punycode) form, as the server names it; the port text is kept as typed
+  const hp = /^(\[[^\]]*\]|[^:]*)(:\d*)?$/.exec(m[2].toLowerCase());
+  if (!hp) return "";
+  let host = hp[1];
+  try { host = new URL(HOST_PROBE + host).hostname; } catch (e) { return ""; }
+  return m[1].toLowerCase() + "://" + host + (hp[2] || "");
 }
 
 // Runs a write behind the PIN dialog. Returns the response, or null when the dialog was cancelled.

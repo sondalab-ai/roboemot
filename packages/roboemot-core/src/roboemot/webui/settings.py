@@ -32,7 +32,10 @@ import threading
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
+from urllib.parse import urlsplit
+
+import httpx
 
 from roboemot import paths
 from roboemot.config.catalogue import (
@@ -59,9 +62,13 @@ from roboemot.config.stack import (
     keyed_ref,
     set_path,
 )
-from roboemot.redact import REDACTED, origin, secret_shaped
+from roboemot.redact import REDACTED, secret_shaped
+from roboemot.redact import origin as plain_origin
+from roboemot.secret_store import NAME as SECRET_NAME
+from roboemot.secret_store import SECRET_REF
 from roboemot.voice.models import ModelError, supported_languages
 
+from .languages import LANGUAGE_PATH, installed_languages
 from .robot_section import (
     RobotBlock,
     SettingsPlugin,
@@ -92,8 +99,20 @@ GROUP_OTHER_BITS = 0o077
 NOT_WRITABLE = frozenset({"schema_version"})
 # keyed by language: a new key must be one the voice stack supports
 LANGUAGE_MAPS = frozenset({"voice.keywords", "safety.minor_lines", "safety.minor_output_blocklist"})
+# whole-value maps keyed by language (free text per key): a key that is new must be a language the
+# voice stack supports, as for the keyed language maps above
+LANGUAGE_DICTS = frozenset(
+    {
+        "voice.voices",
+        "voice.asr.models",
+        "conversation.fallback_lines",
+        "privacy.pseudonym_templates",
+        "connectivity.offline_phrases",
+    }
+)
 REFUSED_CHECKS = frozenset({"reflex", "locality", "secret"})  # never granted, on any layer
 APP_FILE = "app"
+NO_KEY_REF = "none"  # the api_key of a route without a key
 
 
 @dataclass(frozen=True)
@@ -185,14 +204,15 @@ class OverridesFile:
     def __init__(self, path: Path) -> None:
         self.path = path
 
-    def load(self) -> tuple[dict[str, Any], dict[str, dict[str, str]]]:
-        """The stored edits and the acknowledged route moves (``{file key: {"origin", "key"}}``,
-        see ``SettingsEditor.change``); both {} when there is no file. Raises ``ValueError`` (reason
-        only, no content) when the file is unsafe or malformed."""
+    def load(self) -> tuple[dict[str, Any], dict[str, dict[str, str]], dict[str, str]]:
+        """The stored edits, the acknowledged route endpoints (``{file key: {"origin", "key"}}``,
+        see ``SettingsEditor.change``) and the keys bound to routes from the web (``{route name:
+        "none" or "${secret:name}"}``); all {} when there is no file. Raises ``ValueError``
+        (reason only, no content) when the file is unsafe or malformed."""
         try:
             fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
         except FileNotFoundError:
-            return {}, {}
+            return {}, {}, {}
         except OSError as exc:
             raise ValueError(f"cannot open ({exc.strerror})") from exc
         with os.fdopen(fd, "rb") as handle:
@@ -211,17 +231,20 @@ class OverridesFile:
         found = data.get("overrides") if isinstance(data, dict) else None
         if not isinstance(data, dict) or data.get("v") != FILE_VERSION:
             raise ValueError("unexpected shape")
-        acks = data.get("acks", {})
-        if not isinstance(found, dict) or not isinstance(acks, dict):
+        acks, keys = data.get("acks", {}), data.get("keys", {})
+        if not isinstance(found, dict) or not isinstance(acks, dict) or not isinstance(keys, dict):
             raise ValueError("unexpected shape")
         good = {
             k: v
             for k, v in acks.items()
             if isinstance(v, dict) and all(isinstance(v.get(f), str) for f in ("origin", "key"))
         }
-        return found, good
+        bound = {k: v for k, v in keys.items() if isinstance(k, str) and is_key_ref(v)}
+        return found, good, bound
 
-    def save(self, overrides: dict[str, Any], acks: dict[str, dict[str, str]]) -> None:
+    def save(
+        self, overrides: dict[str, Any], acks: dict[str, dict[str, str]], keys: dict[str, str]
+    ) -> None:
         """Replace the file atomically; the data folder is created private when missing."""
         folder = paths.data_dir(str(self.path.parent))
         fd, name = tempfile.mkstemp(dir=folder, prefix=self.path.name + ".")  # 0600
@@ -235,6 +258,7 @@ class OverridesFile:
                             "v": FILE_VERSION,
                             "overrides": overrides,
                             **({"acks": acks} if acks else {}),
+                            **({"keys": keys} if keys else {}),
                         },
                         indent=2,
                         sort_keys=True,
@@ -252,6 +276,29 @@ class OverridesFile:
             with contextlib.suppress(OSError):
                 tmp.unlink()
             raise
+
+
+def origin(url: str) -> str:
+    """``scheme://host[:port]`` as the web UI names and acknowledges it: the host as the HTTP client
+    resolves it (``httpx.URL(...).raw_host``: IDNA 2008, UTS 46 non-transitional), so a look-alike
+    letter cannot pass for another host and the acknowledged host is the one the key goes to.
+    '' when unparsable or the host cannot be encoded."""
+    found = plain_origin(url)
+    if found.isascii():
+        return found
+    try:
+        host = httpx.URL(url).raw_host.decode("ascii")
+        parts = urlsplit(url)
+        port = f":{parts.port}" if parts.port else ""
+        return f"{parts.scheme.lower()}://{'[' + host + ']' if ':' in host else host}{port}"
+    except (httpx.InvalidURL, ValueError, UnicodeError):
+        return ""
+
+
+def is_key_ref(value: object) -> bool:
+    """Whether ``value`` is a route key a web edit may bind: ``none`` or one whole
+    ``${secret:name}`` reference (never a literal key)."""
+    return isinstance(value, str) and (value == NO_KEY_REF or SECRET_REF.match(value) is not None)
 
 
 def okey(tree: dict[str, Any], path: str) -> str:
@@ -298,9 +345,13 @@ class SettingsEditor:
         store: Path | None = None,
         manifest: Manifest | None = None,
         plugin: SettingsPlugin | None = None,
+        known_secrets: Callable[[], Iterable[str]] | None = None,
+        installed: Callable[[RoboEmotConfig], Iterable[str]] = installed_languages,
     ):
         self.stack = stack
+        self._installed = installed
         self.manifest = manifest
+        self._known_secrets = known_secrets
         self._plugin = plugin
         if plugin is None and manifest is not None:
             self._plugin = load_settings_plugin(manifest.robot.id)
@@ -308,6 +359,8 @@ class SettingsEditor:
         self._overrides: dict[str, Any] = {}
         # file key of a moved route base_url -> acknowledged origin and key fingerprint
         self._acks: dict[str, dict[str, str]] = {}
+        # route name -> key bound from the web (``none`` or ``${secret:name}``), SPEC 8 Secrets
+        self._keys: dict[str, str] = {}
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------ reading
@@ -315,7 +368,7 @@ class SettingsEditor:
     def fields(self) -> list[FieldDescriptor]:
         """The full field catalogue, ``writable`` true for every non-secret leaf. Private values
         (minors, privacy, location) are hidden."""
-        return build_catalogue(self.stack, _writable)
+        return self._catalogue()
 
     def robot_split(
         self, fields: list[FieldDescriptor]
@@ -347,8 +400,7 @@ class SettingsEditor:
     def reveal(self) -> list[FieldDescriptor]:
         """Only the private fields, with their real values (secrets stay redacted). The caller
         has verified the PIN."""
-        every = build_catalogue(self.stack, _writable, reveal_private=True)
-        return [f for f in every if f["private"]]
+        return [f for f in self._catalogue(reveal_private=True) if f["private"]]
 
     # ------------------------------------------------------------------ writing
 
@@ -373,6 +425,7 @@ class SettingsEditor:
             if result["changed"] and result["layer"] == "runtime":
                 self._remember(key, result["value"])
                 self._keep_ack(key, result["value"], acked)
+                self._rebase_binding(path, acked)
                 result["persisted"] = self._persist()
             elif result["changed"] and self._overrides.pop(key, None) is not None:
                 self._acks.pop(key, None)
@@ -385,49 +438,77 @@ class SettingsEditor:
         """Add an entry to the collection at ``path`` (a dict of models by ``key``, a keyed list
         by the identity inside ``value``) on the runtime layer. A new language key of a language
         map (``LANGUAGE_MAPS``; for the blocklist ``value`` is its word list) must be one the voice
-        stack supports (``supported_languages``).
+        stack supports (``supported_languages``). A route added here has no key (``add_route``).
 
         Raises like ``change``; ``entry_exists`` when the key or identity is taken,
         ``entry_invalid`` for a field the entry type does not have or a secret field.
         """
         with self._lock:
-            rows, cfg = self._rows(), self.stack.effective()
-            box = rows.get(path) if isinstance(path, str) else None
-            words = box is not None and _is_word_map(box)
-            if box is None or box["secret"] or (box["kind"] not in ENTRY_KINDS and not words):
-                raise SettingNotAllowed("path")
-            if box["path"] == "llm_routes" and secret_shaped(
-                value.get("base_url") if isinstance(value, dict) else None
-            ):
-                raise ValidationError("url_credentials", "value")
-            if secret_shaped([key, value]):
-                raise ValidationError("value_type", "value")
-            name = clean_key(key, cfg) if box["kind"] != "keyed_list" else None
-            if name is not None and box["path"] in LANGUAGE_MAPS and name not in languages():
-                raise ValidationError("language_unsupported", "key")
-            if words:
-                target = f"{box['path']}.{name}"
-                entry = clean_hooked(hook_for(target), target, value, cfg)
-            else:
-                entry = self._clean_entry(box, value, cfg, name)
-            tree = self.stack.merged_tree()
-            if name is not None:
-                if name in get_path(tree, box["path"]):
-                    raise ValidationError("entry_exists", "key")
-                target, stored, written = f"{box['path']}.{name}", f"{box['path']}.{name}", entry
-            else:
-                target, stored, written = self._list_add(box, entry, tree, cfg)
-            self.stack.set(
-                target, written, source=source, admin=True, layer="runtime", refuse=REFUSED_CHECKS
+            return self._add_entry(path, key, value, source)
+
+    def _add_entry(
+        self,
+        path: object,
+        key: object,
+        value: object,
+        source: str,
+        bind: tuple[str, str | None] | None = None,
+    ) -> dict[str, Any]:
+        """``add_entry`` under the lock. ``bind`` (a route only) is ``(reference, ack)``: the
+        entry is written with that ``api_key`` once its endpoint is acknowledged."""
+        rows, cfg = self._rows(), self.stack.effective()
+        box = rows.get(path) if isinstance(path, str) else None
+        words = box is not None and _is_word_map(box)
+        if box is None or box["secret"] or (box["kind"] not in ENTRY_KINDS and not words):
+            raise SettingNotAllowed("path")
+        if box["path"] == "llm_routes" and secret_shaped(
+            value.get("base_url") if isinstance(value, dict) else None
+        ):
+            raise ValidationError("url_credentials", "value")
+        if secret_shaped([key, value]):
+            raise ValidationError("value_type", "value")
+        name = clean_key(key, cfg) if box["kind"] != "keyed_list" else None
+        if name is not None and box["path"] in LANGUAGE_MAPS and name not in languages():
+            raise ValidationError("language_unsupported", "key")
+        if words:
+            target = f"{box['path']}.{name}"
+            entry = clean_hooked(hook_for(target), target, value, cfg)
+        else:
+            entry = self._clean_entry(box, value, cfg, name)
+        tree = self.stack.merged_tree()
+        exempt: frozenset[str] = frozenset()
+        if name is not None:
+            if name in get_path(tree, box["path"]):
+                raise ValidationError("entry_exists", "key")
+            target, stored, written = f"{box['path']}.{name}", f"{box['path']}.{name}", entry
+        else:
+            target, stored, written = self._list_add(box, entry, tree, cfg)
+            if bind is not None and bind[0] != NO_KEY_REF:
+                self._check_endpoint_ack(entry.get("base_url"), bind[1])
+                written = [{**entry, "api_key": bind[0]}]
+                exempt = frozenset({f"llm_routes.{entry['name']}.api_key"})
+        self.stack.set(
+            target,
+            written,
+            source=source,
+            admin=True,
+            layer="runtime",
+            refuse=REFUSED_CHECKS,
+            exempt=exempt,
+        )
+        self._overrides[stored] = entry
+        if bind is not None and bind[0] != NO_KEY_REF:
+            self._remember_key(entry["name"], bind[0])
+            self.stack.note(
+                source, f"llm_routes.{entry['name']}.endpoint", "", origin(entry["base_url"])
             )
-            self._overrides[stored] = entry
-            return {
-                "path": box["path"],
-                "changed": True,
-                "layer": "runtime",
-                "restart_required": self._restart(box, entry_rows=box["entry"]),
-                "persisted": self._persist(),
-            }
+        return {
+            "path": box["path"],
+            "changed": True,
+            "layer": "runtime",
+            "restart_required": self._restart(box, entry_rows=box["entry"]),
+            "persisted": self._persist(),
+        }
 
     def remove_entry(self, path: object, source: str = SOURCE) -> dict[str, Any]:
         """Remove the entry at ``path`` (``container.key`` or a list entry) if the catalogue lists
@@ -446,7 +527,10 @@ class SettingsEditor:
             self.stack.clear(path, source=source, subtree=True, admin=True, refuse=REFUSED_CHECKS)
             for stored in [k for k in self._overrides if k == key or k.startswith(key + ".")]:
                 del self._overrides[stored]
-                self._acks.pop(stored, None)
+            for stored in [k for k in self._acks if k == key or k.startswith(key + ".")]:
+                del self._acks[stored]
+            if box_path == "llm_routes":
+                self._keys.pop(name, None)
             return {
                 "path": path,
                 "changed": True,
@@ -454,6 +538,135 @@ class SettingsEditor:
                 "restart_required": self._restart(box, entry_rows=box["entry"]),
                 "persisted": self._persist(),
             }
+
+    # ------------------------------------------------------------------ route keys (SPEC 8, 11A)
+
+    def add_route(
+        self, value: object, secret: object = None, ack: object = None, source: str = SOURCE
+    ) -> dict[str, Any]:
+        """Add an LLM route (``value``: name, base_url, model, locality, allowed_for_minors, ...) on
+        the runtime layer, with the key ``secret`` (a name in the secret store) or none. A route
+        with a key needs ``ack`` equal to the origin of its ``base_url`` (``endpoint_ack_required``
+        carries it): the stack's ``secret`` rule is passed for that one ``api_key`` only, the
+        locality and reflex rules stay refused. A key typed into ``value`` is never accepted."""
+        with self._lock:
+            ref = self._key_ref(secret)
+            name = value.get("name") if isinstance(value, dict) else None
+            if isinstance(name, str) and name.isdigit():  # the catalogue would read it as an index
+                raise ValidationError("key_invalid", "name")
+            return self._add_entry("llm_routes", None, value, source, bind=(ref, ack))
+
+    def set_route_key(
+        self, name: object, secret: object, ack: object = None, source: str = SOURCE
+    ) -> dict[str, Any]:
+        """Point route ``name`` at the stored secret ``secret`` (``None`` for no key). Unlike a
+        field edit, a key other than none needs ``ack`` equal to the origin of the route's
+        ``base_url``: that is where the key will be sent. Raises ``SettingNotAllowed`` (unknown
+        route), ``ValidationError`` (``secret_name_invalid``, ``secret_unknown``,
+        ``endpoint_ack_required``) and the stack's refusals. The value is kept on the runtime layer
+        and in the overrides file (``keys``) with the acknowledgement that replays it."""
+        with self._lock:
+            route = next((r for r in self.stack.effective().llm_routes if r.name == name), None)
+            if route is None:
+                raise SettingNotAllowed("path")
+            ref = self._key_ref(secret)
+            if ref == route.api_key:
+                return {"name": route.name, "changed": False}
+            path = f"llm_routes.{route.name}.api_key"
+            if ref != NO_KEY_REF:
+                self._check_endpoint_ack(route.base_url, ack)
+            self.stack.set(
+                path,
+                ref,
+                source=source,
+                admin=True,
+                must_exist=True,
+                refuse=REFUSED_CHECKS,
+                exempt=frozenset({path}) if ref != NO_KEY_REF else frozenset(),
+            )
+            self._remember_key(route.name, ref)
+            if ref != NO_KEY_REF:
+                self.stack.note(
+                    source, f"llm_routes.{route.name}.endpoint", "", origin(route.base_url)
+                )
+            return {"name": route.name, "changed": True, "persisted": self._persist()}
+
+    def removable_routes(self) -> list[str]:
+        """Names of the routes only the runtime layer holds (``remove_entry`` accepts them)."""
+        row = self._rows().get("llm_routes")
+        return list(row["removable"] or []) if row else []
+
+    def _key_ref(self, secret: object) -> str:
+        """``none`` for no secret, else ``${secret:name}`` for a name in the secret store; any
+        other text (a key typed in) is refused and never echoed."""
+        if secret is None:
+            return NO_KEY_REF
+        cap = self.stack.effective().webui.secret_name_max_chars
+        if not isinstance(secret, str) or len(secret) > cap or SECRET_NAME.match(secret) is None:
+            raise ValidationError("secret_name_invalid", "secret")
+        if self._known_secrets is None or secret not in set(self._known_secrets()):
+            raise ValidationError("secret_unknown", "secret")
+        return f"${{secret:{secret}}}"
+
+    @staticmethod
+    def _check_endpoint_ack(base_url: object, ack: object) -> None:
+        """The key goes to the origin of ``base_url``; ``ack`` must be exactly that origin."""
+        target = origin(base_url) if isinstance(base_url, str) else ""
+        if not target:
+            raise ValidationError("value_type", "value")
+        if ack != target:
+            raise ValidationError("endpoint_ack_required", "value", {"endpoint": target})
+
+    def _remember_key(self, name: str, ref: str) -> None:
+        """Keep the key bound to route ``name`` for the next start, with the acknowledged origin and
+        a salted fingerprint of the reference in ``acks`` under the route's ``api_key`` file key (a
+        record apart from the one of a route move, which names the key the move was made with).
+        ``_moved_endpoint`` reads both, so later ``base_url`` edits at that origin keep working."""
+        route = next(r for r in self.stack.effective().llm_routes if r.name == name)
+        ack_key = okey(self.stack.merged_tree(), f"llm_routes.{name}.api_key")
+        self._keys[name] = ref
+        if ref == NO_KEY_REF:
+            self._acks.pop(ack_key, None)
+        else:
+            self._acks[ack_key] = {"origin": origin(route.base_url), "key": fingerprint(ref)}
+
+    def _restore_keys(self, keys: dict[str, str], acks: dict[str, dict[str, str]]) -> None:
+        """Replay the keys bound from the web, after the other edits. A key other than none is set
+        past the secret rule (for that route alone) only when the stored acknowledgement still
+        names the route's origin and the fingerprint matches the reference; anything else is
+        dropped with a warning that names the route only."""
+        self._keys = {}
+        for name, ref in keys.items():
+            route = next((r for r in self.stack.effective().llm_routes if r.name == name), None)
+            path = f"llm_routes.{name}.api_key"
+            ack_key = okey(self.stack.merged_tree(), f"llm_routes.{name}.api_key")
+            record = acks.get(ack_key)
+            if route is None:
+                log.warning("web UI key of route %s dropped: no such route", name)
+                continue
+            if ref != NO_KEY_REF and not (
+                record
+                and record["origin"] == origin(route.base_url)
+                and key_matches(record["key"], ref)
+            ):
+                log.warning("web UI key of route %s dropped: its endpoint changed", name)
+                continue
+            try:
+                self.stack.set(
+                    path,
+                    ref,
+                    source=RESTORE_SOURCE,
+                    admin=True,
+                    must_exist=True,
+                    refuse=REFUSED_CHECKS,
+                    exempt=frozenset({path}) if ref != NO_KEY_REF else frozenset(),
+                )
+            except (GuardrailError, ConfigError):
+                log.warning("web UI key of route %s dropped: no longer acceptable", name)
+                continue
+            self._keys[name] = ref
+            if ref != NO_KEY_REF and record:
+                self._acks[ack_key] = record
 
     def reset(self, path: object, source: str = SOURCE) -> dict[str, Any]:
         """Drop the runtime value of the leaf ``path`` so the lower layer shows again, and its
@@ -493,7 +706,7 @@ class SettingsEditor:
         if self._file is None:
             return
         try:
-            stored, acks = self._file.load()
+            stored, acks, keys = self._file.load()
         except ValueError as exc:
             log.warning("web UI settings file ignored: %s", exc)
             return
@@ -518,14 +731,28 @@ class SettingsEditor:
                 except (ValidationError, SettingNotAllowed, GuardrailError):
                     log.warning("web UI setting %s dropped: no longer acceptable", _shown(key))
             self._overrides, self._acks = self._commit_batch(cleaned, acks)
-            if set(self._overrides) != set(stored):
+            self._restore_keys(keys, acks)
+            if set(self._overrides) != set(stored) or self._keys != keys:
                 self._persist()
 
     # ------------------------------------------------------------------ write internals
 
     def _rows(self) -> dict[str, FieldDescriptor]:
-        every = build_catalogue(self.stack, _writable, reveal_private=True)
-        return {row["path"]: row for row in every}
+        return {row["path"]: row for row in self._catalogue(reveal_private=True)}
+
+    def _catalogue(self, **kwargs: Any) -> list[FieldDescriptor]:
+        """The field catalogue with ``conversation.language`` as a choice: the languages whose voice
+        models are installed (``languages.installed_languages``) plus the current value, so any
+        other value is refused by the enum cleaner, on every write path."""
+        rows = build_catalogue(self.stack, _writable, **kwargs)
+        current = self.stack.effective()
+        offered = sorted({*self._installed(current), current.conversation.language})
+        return [
+            cast(FieldDescriptor, {**row, "kind": "enum", "choices": offered})
+            if row["path"] == LANGUAGE_PATH
+            else row
+            for row in rows
+        ]
 
     def _apply(
         self,
@@ -546,12 +773,21 @@ class SettingsEditor:
         old = plain(get_path(cfg, path))
         if clean == old:
             return {"path": path, "changed": False, "value": old}
+        if (
+            path in LANGUAGE_DICTS
+            and isinstance(clean, dict)
+            and set(clean) - set(old or {}) - languages()
+        ):
+            raise ValidationError("language_unsupported", "value")
         # a runtime dict merges, so a value that would drop a key cannot be expressed there
         if isinstance(clean, dict) and deep_merge(old or {}, clean) != clean:
             raise ValidationError("value_merged", "value")
         tree = self.stack.merged_tree()
         stored = okey(tree, path)
-        moved = self._moved_endpoint(path, old, clean, cfg, ack, self._acks.get(stored))
+        bound = okey(tree, f"{path.rpartition('.')[0]}.api_key") if write_only(path) else stored
+        moved = self._moved_endpoint(
+            path, old, clean, cfg, ack, (self._acks.get(stored), self._acks.get(bound))
+        )
         layer = self._write(
             path,
             clean,
@@ -578,18 +814,24 @@ class SettingsEditor:
         new: Any,
         cfg: RoboEmotConfig,
         ack: object,
-        record: dict[str, str] | None,
+        records: Iterable[dict[str, str] | None],
     ) -> Move | None:
         """The ``Move`` when ``path`` is the ``base_url`` of a route with an API key and the
-        endpoint changes, or stays at the origin acknowledged earlier for this very key
-        (``record``, so a later path edit there is not refused again); else ``None``. Raises
-        ``endpoint_ack_required`` (carrying the new origin) unless ``ack`` is that origin."""
+        endpoint changes, or stays at the origin acknowledged earlier for this very key (any of
+        ``records``: the route's move record and its key-binding record, so a later path edit
+        there is not refused again); else ``None``. Raises ``endpoint_ack_required`` (carrying
+        the new origin) unless ``ack`` is that origin."""
         if not write_only(path) or not isinstance(old, str) or not isinstance(new, str):
             return None
         route = plain(get_path(cfg, path.rpartition(".")[0]))
         target = origin(new)
         acked = (
-            record["origin"] if record and key_matches(record["key"], route["api_key"]) else None
+            target
+            if any(
+                r and r["origin"] == target and key_matches(r["key"], route["api_key"])
+                for r in records
+            )
+            else None
         )
         same = endpoint_key(old) == endpoint_key(new)
         # a path-only edit at the origin acknowledged for this key still needs the secret exemption:
@@ -681,6 +923,16 @@ class SettingsEditor:
             None,
         )
 
+    def _rebase_binding(self, path: object, acked: dict[str, str] | None) -> None:
+        """After an acknowledged move of a route ``base_url``, the key-binding record of that route
+        (if any) names the new origin: the owner acknowledged it for this very key."""
+        if not acked or not isinstance(path, str) or not write_only(path):
+            return
+        parent = path.rpartition(".")[0]
+        bound = okey(self.stack.merged_tree(), f"{parent}.api_key")
+        if bound in self._acks:
+            self._acks[bound] = {**self._acks[bound], "origin": acked["origin"]}
+
     def _keep_ack(self, key: str, value: Any, acked: dict[str, str] | None) -> None:
         """Record the origin (and key fingerprint) the owner acknowledged for a moved route
         ``base_url``; a later value at another origin forgets it, so a replay never trusts more
@@ -694,7 +946,7 @@ class SettingsEditor:
         if self._file is None:
             return True
         try:
-            self._file.save(self._overrides, self._acks)
+            self._file.save(self._overrides, self._acks, self._keys)
         except OSError as exc:
             log.warning("web UI settings not saved (%s)", type(exc).__name__)
             return False

@@ -25,8 +25,8 @@ from . import paths
 
 # Starts with a letter or digit so a name is never read as a command line option.
 NAME_PATTERN = r"[A-Za-z0-9][A-Za-z0-9_.-]*"
-NAME = re.compile(rf"^{NAME_PATTERN}$")
-SECRET_REF = re.compile(rf"^\$\{{secret:({NAME_PATTERN})\}}$")  # a route's api_key
+NAME = re.compile(rf"{NAME_PATTERN}\Z")  # \Z: "$" would accept a trailing newline
+SECRET_REF = re.compile(rf"^\$\{{secret:({NAME_PATTERN})\}}\Z")  # a route's api_key
 FILE_MODE = 0o600
 MAX_VALUE_CHARS = 4096  # a key is a short token; this only bounds what the file can hold
 

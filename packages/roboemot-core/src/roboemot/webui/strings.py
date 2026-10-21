@@ -146,6 +146,87 @@ EN: dict[str, str] = {
         "the daily budget of the route."
     ),
     "routes_none": "No LLM route is configured.",
+    "route_add_title": "Add a route",
+    "route_add_intro": (
+        "A route is an OpenAI-compatible model the robot can talk to. Pick its key from the "
+        "stored keys below; a key is never typed here. Changes ask for the operator PIN and apply "
+        "at once."
+    ),
+    "route_name": "Name",
+    "route_url": "Base URL",
+    "route_url_keep": "Leave empty to keep it",
+    "route_url_placeholder": "https://api.example.com/v1",
+    "route_url_hint_edit": "The stored address is not shown if it holds credentials.",
+    "route_model": "Model",
+    "route_locality": "Where the model runs",
+    "route_locality_auto": "Automatic",
+    "route_locality_local": "Local (home network)",
+    "route_locality_cloud": "Cloud",
+    "route_locality_hint": (
+        "A route on this machine or the home network sees real names. Setting one up needs the "
+        "configuration file; from here only cloud routes are accepted."
+    ),
+    "route_minors_label": "Cleared for minors",
+    "route_minors_hint": (
+        "While a minor is present, or when the camera is off and the robot assumes one, a route "
+        "that is not cleared for minors is skipped. A route added here cannot be cleared; "
+        "that needs the configuration file."
+    ),
+    "route_minors_hint_edit": (
+        "While a minor is present, or when the camera is off and the robot assumes one, a route "
+        "that is not cleared for minors is skipped. It is also used only if the setting "
+        "safety.minors_allowed_llm is on."
+    ),
+    "route_minors_off": "Skipped while a minor is present (not cleared for minors).",
+    "route_key": "Key",
+    "route_key_none": "No key",
+    "route_key_literal": "A key written in the configuration file",
+    "route_key_hint": "Only stored keys can be chosen. Add one in the API keys card below.",
+    "route_key_message": "The key will be sent to {host}. Enter the PIN to allow it.",
+    "route_key_insecure": (
+        "This address is not encrypted (http): the key will cross the network in clear."
+    ),
+    "route_add": "Add route",
+    "route_save": "Save route",
+    "route_edit": "Edit",
+    "route_remove": "Remove",
+    "route_remove_title": "Remove route {name}?",
+    "route_remove_message": "The route is deleted. Its key stays in the store.",
+    "route_added": "Route {name} added.",
+    "route_saved": "Route {name} saved.",
+    "route_removed": "Route {name} removed.",
+    "secrets_title": "API keys",
+    "secrets_intro": (
+        "API keys are stored on the robot and can only be written here, never read back: the "
+        "page shows the name of a key and whether a route uses it, not its value. A route "
+        "refers to a key by its name."
+    ),
+    "secrets_none": "No key is stored yet.",
+    "secret_name": "Name",
+    "secret_name_hint": (
+        "Letters, digits, dot, dash or underscore; it starts with a letter or digit."
+    ),
+    "secret_value": "Key",
+    "secret_value_hint": "Pasted once and cleared on save. The page never shows it again.",
+    "secret_save": "Save key",
+    "secret_saved": "Key {name} saved.",
+    "secret_removed": "Key {name} removed.",
+    "secret_remove": "Remove",
+    "secret_remove_title": "Remove key {name}?",
+    "secret_remove_message": "The key is deleted from the robot. This cannot be undone.",
+    "secret_used_by": "used by {routes}",
+    "secret_unused": "not used by a route",
+    "secret_set": "set",
+    "secret_unset": "not set",
+    "secret_in_use_hint": "Choose another key or no key on those routes first.",
+    "err_secrets_unavailable": "API keys are not available.",
+    "err_secret_name_invalid": "The key name is not valid.",
+    "err_secret_value_invalid": (
+        "The key must be visible ASCII characters without spaces, and not too long."
+    ),
+    "err_secret_in_use": "A route uses this key. Choose another key on that route first.",
+    "err_secret_unknown": "No such key.",
+    "err_secret_store": "The key store cannot be used. Check its file permissions on the robot.",
     "err_pseudonyms_unavailable": "The list of names is not available.",
     "refused_title": "Names not replaced by aliases",
     "refused_hint": (
@@ -534,6 +615,96 @@ IT: dict[str, str] = {
         "token dal budget giornaliero del modello."
     ),
     "routes_none": "Nessun modello LLM configurato.",
+    "route_add_title": "Aggiungi un modello",
+    "route_add_intro": (
+        "Un modello è un servizio compatibile OpenAI con cui il robot può parlare. La chiave si "
+        "sceglie tra quelle salvate qui sotto; non si scrive mai in questo modulo. Le modifiche "
+        "chiedono il PIN operatore e valgono subito."
+    ),
+    "route_name": "Nome",
+    "route_url": "Indirizzo base",
+    "route_url_keep": "Lascia vuoto per non cambiarlo",
+    "route_url_placeholder": "https://api.example.com/v1",
+    "route_url_hint_edit": "L'indirizzo salvato non viene mostrato se contiene credenziali.",
+    "route_model": "Modello",
+    "route_locality": "Dove gira il modello",
+    "route_locality_auto": "Automatico",
+    "route_locality_local": "Locale (rete di casa)",
+    "route_locality_cloud": "Cloud",
+    "route_locality_hint": (
+        "Un modello su questa macchina o sulla rete di casa vede i nomi veri. Configurarne uno "
+        "richiede il file di configurazione; da qui si accettano solo modelli cloud."
+    ),
+    "route_minors_label": "Adatto ai minori",
+    "route_minors_hint": (
+        "Quando c'è un minore, o quando la camera è spenta e il robot ne presume uno, un modello "
+        "non adatto ai minori viene saltato. Un modello aggiunto da qui non può essere reso "
+        "adatto: serve il file di configurazione."
+    ),
+    "route_minors_hint_edit": (
+        "Quando c'è un minore, o quando la camera è spenta e il robot ne presume uno, un modello "
+        "non adatto ai minori viene saltato. Viene usato solo se anche l'impostazione "
+        "safety.minors_allowed_llm è attiva."
+    ),
+    "route_minors_off": "Saltato quando c'è un minore (non adatto ai minori).",
+    "route_key": "Chiave",
+    "route_key_none": "Nessuna chiave",
+    "route_key_literal": "Una chiave scritta nel file di configurazione",
+    "route_key_hint": (
+        "Si possono scegliere solo chiavi salvate. Aggiungila nella scheda Chiavi API."
+    ),
+    "route_key_message": "La chiave verrà inviata a {host}. Inserisci il PIN per consentirlo.",
+    "route_key_insecure": (
+        "Questo indirizzo non è cifrato (http): la chiave attraverserà la rete in chiaro."
+    ),
+    "route_add": "Aggiungi modello",
+    "route_save": "Salva modello",
+    "route_edit": "Modifica",
+    "route_remove": "Rimuovi",
+    "route_remove_title": "Rimuovere il modello {name}?",
+    "route_remove_message": "Il modello viene eliminato. La sua chiave resta nell'archivio.",
+    "route_added": "Modello {name} aggiunto.",
+    "route_saved": "Modello {name} salvato.",
+    "route_removed": "Modello {name} rimosso.",
+    "secrets_title": "Chiavi API",
+    "secrets_intro": (
+        "Le chiavi API sono salvate sul robot e qui si possono solo scrivere, mai rileggere: la "
+        "pagina mostra il nome di una chiave e se un modello la usa, non il suo valore. Un "
+        "modello si riferisce a una chiave con il suo nome."
+    ),
+    "secrets_none": "Nessuna chiave salvata.",
+    "secret_name": "Nome",
+    "secret_name_hint": (
+        "Lettere, cifre, punto, trattino o underscore; inizia con una lettera o una cifra."
+    ),
+    "secret_value": "Chiave",
+    "secret_value_hint": (
+        "Si incolla una volta e il campo viene svuotato al "
+        "salvataggio. La pagina non la mostra più."
+    ),
+    "secret_save": "Salva chiave",
+    "secret_saved": "Chiave {name} salvata.",
+    "secret_removed": "Chiave {name} rimossa.",
+    "secret_remove": "Rimuovi",
+    "secret_remove_title": "Rimuovere la chiave {name}?",
+    "secret_remove_message": "La chiave viene cancellata dal robot. Non si può annullare.",
+    "secret_used_by": "usata da {routes}",
+    "secret_unused": "non usata da nessun modello",
+    "secret_set": "impostata",
+    "secret_unset": "non impostata",
+    "secret_in_use_hint": "Prima scegli un'altra chiave, o nessuna chiave, su quei modelli.",
+    "err_secrets_unavailable": "Le chiavi API non sono disponibili.",
+    "err_secret_name_invalid": "Il nome della chiave non è valido.",
+    "err_secret_value_invalid": (
+        "La chiave deve avere caratteri ASCII visibili, senza spazi, e non essere troppo lunga."
+    ),
+    "err_secret_in_use": (
+        "Un modello usa questa chiave. Prima scegli un'altra chiave su quel modello."
+    ),
+    "err_secret_unknown": "Chiave sconosciuta.",
+    "err_secret_store": (
+        "L'archivio delle chiavi non è utilizzabile. Controlla i permessi del file sul robot."
+    ),
     "err_pseudonyms_unavailable": "L'elenco dei nomi non è disponibile.",
     "refused_title": "Nomi non sostituiti da alias",
     "refused_hint": (

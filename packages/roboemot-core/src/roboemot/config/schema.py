@@ -2459,7 +2459,9 @@ class ConversationConfig(Strict):
     )
     history_turns: int = param(12, "Short-term turns kept in RAM", ge=0, le=100)
     max_reply_sentences: int = param(3, "Reply length cap", ge=1, le=20)
-    language: str = param("it", "Default conversation language")
+    language: str = param(
+        "it", "Default conversation language (the web UI offers those with installed voice models)"
+    )
     profile_summary_max_chars: int = param(
         400, "Cap on the speaker's profile summary in the system prompt", ge=0, le=4000
     )
@@ -3081,6 +3083,13 @@ class WebUIConfig(Strict):
     )
     name_max_chars: int = param(
         64, "Longest display name or consent name", ge=1, le=200, conservative="lower"
+    )
+    secret_name_max_chars: int = param(
+        128,
+        "Longest secret name the web UI accepts (SPEC 8 Secrets, 11A)",
+        ge=1,
+        le=200,
+        conservative="lower",
     )
     settings_phrase_max_chars: int = param(
         40,
