@@ -129,3 +129,53 @@ def test_a_tight_user_cap_does_not_change_which_platform_names_get_the_aliases(c
     assert names.resolve(None, ("en",)).aliases_apply()
     names.set_platform("Bolt")
     assert not names.resolve(None, ("en",)).aliases_apply()
+
+
+def test_a_manifest_may_set_the_voice_pitch_and_its_limits():
+    stack = stack_with({"base": {"pitch_st": 5}, "limits": {"pitch_st": [-4, 8]}})
+    voice = stack.effective().voice
+    assert voice.base.pitch_st == 5
+    assert tuple(voice.limits.pitch_st) == (-4, 8)
+
+
+def test_the_owner_pitch_wins_over_the_manifest():
+    stack = stack_with({"base": {"pitch_st": 5}, "limits": {"pitch_st": [-4, 8]}})
+    stack.set("voice.base.pitch_st", 2, layer="runtime")
+    stack.set("voice.limits.pitch_st", [-3, 3], layer="runtime")
+    voice = stack.effective().voice
+    assert voice.base.pitch_st == 2
+    assert tuple(voice.limits.pitch_st) == (-3, 3)
+
+
+@pytest.mark.parametrize(
+    "voice",
+    [
+        {"base": {"rate": 1.1}},
+        {"base": {"pitch_st": 1, "volume_db": 2}},
+        {"limits": {"rate": [0.7, 1.3]}},
+        {"base": 5},
+        {"limits": [1, 2]},
+        {"base": {"pitch_st": 7}, "limits": {"pitch_st": [-4, 8]}},
+        {"base": {"pitch_st": 5}, "limits": {"pitch_st": [-4, 4]}},
+        {"base": {"pitch_st": 5}},
+        {"limits": {"pitch_st": [8, -4]}},
+        {"limits": {"pitch_st": [-4]}},
+        {"limits": {"pitch_st": "wide"}},
+        {"base": {"pitch_st": "high"}, "limits": {"pitch_st": [-4, 8]}},
+        {"base": {"pitch_st": 5}, "limits": {"pitch_st": [-4, 8]}, "pitch_shift_backend": "none"},
+    ],
+)
+def test_manifest_voice_pitch_is_checked(voice):
+    with pytest.raises(ConfigError):
+        stack_with(voice)
+
+
+def test_the_reachy_manifest_voice_is_child_like():
+    manifest = load_manifest(REACHY, allow_unmeasured_dynamics=True)
+    stack = ConfigStack()
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
+    voice = stack.effective().voice
+    assert voice.base.pitch_st == 5
+    assert tuple(voice.limits.pitch_st) == (-4, 8)
+    packaged = REPO / "packages/roboemot-reachymini/src/roboemot_reachymini/data"
+    assert (packaged / REACHY.name).read_text() == REACHY.read_text()

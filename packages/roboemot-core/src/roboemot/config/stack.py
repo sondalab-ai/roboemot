@@ -458,7 +458,12 @@ MANIFEST_BEHAVIOUR_KEYS = frozenset(
 )  # what a robot manifest may set
 MANIFEST_MOTION_KEYS = frozenset({"app_tick_hz", "arbiter"})  # the rates of ``motion``
 MANIFEST_ARBITER_KEYS = frozenset({"loop_hz"})  # the rate of ``motion.arbiter``
-MANIFEST_VOICE_KEYS = frozenset({"default_name", "keywords"})  # the name fields of ``voice``
+MANIFEST_VOICE_KEYS = frozenset(
+    {"default_name", "keywords", "base", "limits"}
+)  # the name fields and the pitch of ``voice``
+MANIFEST_VOICE_PITCH_KEYS = frozenset(
+    {"pitch_st"}
+)  # all that ``voice.base`` / ``voice.limits`` take
 MANIFEST_KEYWORD_KEYS = frozenset({"name_aliases"})  # per language under ``voice.keywords``
 PERSON_SECTIONS = ("register", "voice", "conversation", "persona.traits")
 
@@ -553,7 +558,9 @@ def check_manifest_motion(motion: Any) -> None:
 
 def check_manifest_voice(voice: Any) -> None:
     """A manifest may name the robot (``voice.default_name``, per-language
-    ``voice.keywords.<lang>.name_aliases``) and nothing else under ``voice``. Each name must
+    ``voice.keywords.<lang>.name_aliases``) and give it a voice pitch (``voice.base.pitch_st``,
+    ``voice.limits.pitch_st`` as a [lo, hi] pair holding the base) and nothing else under
+    ``voice``. Each name must
     survive ``sanitise_name`` unchanged and fit the schema's maximum of ``voice.name_max_chars``,
     not the owner's own setting: a tight owner cap must not make the shipped manifest unloadable
     (the names are only matched, never shown, so the cap has nothing to cut)."""
@@ -578,6 +585,7 @@ def check_manifest_voice(voice: Any) -> None:
         )
     if "default_name" in voice:
         check_name("default_name", voice["default_name"])
+    check_manifest_voice_pitch(voice)
     keywords = voice.get("keywords", {})
     if not isinstance(keywords, dict):
         raise ConfigError("manifest behaviour voice.keywords must map languages to name_aliases")
@@ -594,6 +602,38 @@ def check_manifest_voice(voice: Any) -> None:
             check_name(f"{where}.name_aliases", alias)
             if not normalise(alias):
                 raise ConfigError(f"manifest behaviour voice.{where}.name_aliases: empty alias")
+
+
+def check_manifest_voice_pitch(voice: dict) -> None:
+    """``voice.base`` and ``voice.limits`` take ``pitch_st`` only; the limits are a [lo, hi] pair
+    and must hold the base (each side falls back to the schema default when the manifest sets
+    only the other)."""
+    for block in ("base", "limits"):
+        entry = voice.get(block, {})
+        if not isinstance(entry, dict) or set(entry) - MANIFEST_VOICE_PITCH_KEYS:
+            extra = (
+                sorted(set(entry) - MANIFEST_VOICE_PITCH_KEYS) if isinstance(entry, dict) else entry
+            )
+            raise ConfigError(
+                f"manifest behaviour voice.{block} may set {sorted(MANIFEST_VOICE_PITCH_KEYS)}, "
+                f"not {extra}"
+            )
+    if not voice.get("base") and not voice.get("limits"):
+        return
+    limits = voice.get("limits", {}).get("pitch_st", VoiceConfig().limits.pitch_st)
+    if (
+        not isinstance(limits, (list, tuple))
+        or len(limits) != 2
+        or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in limits)
+    ):
+        raise ConfigError("manifest behaviour voice.limits.pitch_st must be a [lo, hi] pair")
+    lo, hi = limits
+    base = voice.get("base", {}).get("pitch_st", VoiceConfig().base.pitch_st)
+    if not isinstance(base, (int, float)) or isinstance(base, bool) or not lo <= base <= hi:
+        raise ConfigError(
+            f"manifest behaviour voice.limits.pitch_st {[lo, hi]} must hold "
+            f"voice.base.pitch_st {base!r}"
+        )
 
 
 def violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Violation]:
