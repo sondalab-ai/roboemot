@@ -147,7 +147,8 @@ def test_a_runtime_without_voice_or_vision_still_gates():
     r.gate._perception = SimpleNamespace(service=None)
     assert r.sleep(1.0) is True
     assert not any(line.startswith("pause vision") for line in r.log)
-    assert r.gate.snapshot(2.0)["paused"]["vision"] is False
+    paused = r.gate.snapshot(2.0)["paused"]
+    assert paused["vision"] == "absent" and paused["listener"] == "absent"
     assert r.sleep(2.0, asleep=False) is False
 
 

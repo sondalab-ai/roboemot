@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import functools
 import json
 import logging
 import os
@@ -807,6 +808,27 @@ def reflex_violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> li
 # ----------------------------------------------------------------------------- the stack
 
 
+def _mutator(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """A method that edits the stack: whatever happens inside, the cached effective configuration
+    is dropped on the way out (a safety net over the targeted invalidations)."""
+
+    @functools.wraps(fn)
+    def wrapper(self: ConfigStack, *args: Any, **kwargs: Any) -> Any:
+        try:
+            return fn(self, *args, **kwargs)
+        finally:
+            with self._lock:
+                self._invalidate()
+
+    return wrapper
+
+
+# Attributes whose rebinding changes the merged result: they drop the cached effective config.
+_CACHE_INPUTS = frozenset(
+    {"defaults", "manifest", "preset", "app", "derived", "channels", "clock", "_runtime"}
+)
+
+
 @dataclass
 class ConfigStack:
     defaults: dict = field(default_factory=dict)
@@ -820,6 +842,8 @@ class ConfigStack:
     preset_dirs: list[Path] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        self._cached: RoboEmotConfig | None = None
+        self._cached_until: float | None = None
         self._runtime: dict[str, _RuntimeValue] = {}
         self.channels: frozenset[str] | None = None
         self._listeners: list[Callable[[ConfigChange], None]] = []
@@ -831,6 +855,19 @@ class ConfigStack:
         self._check_route_budgets(self._last)
         # The configuration installed by the owner is the initial approved baseline.
         self._approved = self._last
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Rebinding a layer, the runtime store, the channels or the clock drops the cached
+        effective configuration (in-place edits call :meth:`_invalidate` themselves)."""
+        object.__setattr__(self, name, value)
+        if name in _CACHE_INPUTS:
+            self._invalidate()
+
+    def _invalidate(self) -> None:
+        """Drop the cached effective configuration: the next ``effective()`` rebuilds it."""
+        if "_cached" in self.__dict__:
+            self._cached = None
+            self._cached_until = None
 
     # ---- construction from files
 
@@ -863,6 +900,7 @@ class ConfigStack:
         stack._remember_mtimes()
         return stack
 
+    @_mutator
     def set_manifest_behaviour(self, behaviour: dict, channels: Collection[str]) -> None:
         """Install the robot manifest's ``behaviour`` block (layer 2) once the manifest is loaded.
 
@@ -947,6 +985,27 @@ class ConfigStack:
             return tree
 
     def effective(self, person: dict | None = None) -> RoboEmotConfig:
+        """The merged, validated configuration. Without ``person`` it is cached until a layer,
+        the runtime store, the channels change or the earliest runtime TTL lapses (SPEC 11A), so
+        callers get the same read-only object: never mutate it. A ``person`` call is rebuilt every
+        time and never cached."""
+        if person:
+            return self._build(person)
+        with self._lock:
+            until = self._cached_until
+            if self._cached is not None and (until is None or self.clock() < until):
+                return self._cached
+            now = self.clock()
+            cfg = self._build(None)
+            pending = [
+                rv.expires_at
+                for rv in self._runtime.values()
+                if rv.expires_at is not None and rv.expires_at > now
+            ]
+            self._cached, self._cached_until = cfg, min(pending, default=None)
+            return cfg
+
+    def _build(self, person: dict | None) -> RoboEmotConfig:
         tree = self.merged_tree(person)
         version = tree.get("schema_version", SCHEMA_VERSION)
         if version != SCHEMA_VERSION:
@@ -1022,6 +1081,7 @@ class ConfigStack:
 
     # ---- writing
 
+    @_mutator
     def set(
         self,
         key: str,
@@ -1063,6 +1123,7 @@ class ConfigStack:
             elif layer == "app":
                 saved_app, saved_rt = copy.deepcopy(self.app), copy.deepcopy(self._runtime)
                 set_in_layer(self.app, self.merged_tree(), key, copy.deepcopy(value))
+                self._invalidate()
                 if drop_runtime:
                     self._take_runtime(key, False)
                 persist = self._persist_app
@@ -1075,6 +1136,7 @@ class ConfigStack:
             elif layer == "derived":
                 saved_derived = copy.deepcopy(self.derived)
                 set_in_layer(self.derived, self.merged_tree(), key, copy.deepcopy(value))
+                self._invalidate()
 
                 def undo() -> None:
                     self.derived = saved_derived
@@ -1087,6 +1149,7 @@ class ConfigStack:
             self._notify(cfg)
             return cfg
 
+    @_mutator
     def set_many(
         self,
         changes: dict[str, Any],
@@ -1126,6 +1189,7 @@ class ConfigStack:
             self._notify(cfg)
             return cfg
 
+    @_mutator
     def preview(self, changes: dict[str, Any]) -> RoboEmotConfig:
         """The effective configuration with ``changes`` laid over the runtime layer, nothing kept
         (no guardrail, no event). ``ConfigError`` when the result is invalid."""
@@ -1138,6 +1202,7 @@ class ConfigStack:
             finally:
                 self._runtime = saved
 
+    @_mutator
     def clear(
         self,
         key: str,
@@ -1196,6 +1261,7 @@ class ConfigStack:
             parent, _, leaf = key.rpartition(".")
             saved_derived = copy.deepcopy(self.derived)
             (get_path(self.derived, parent) if parent else self.derived).pop(leaf)
+            self._invalidate()
 
             def undo_derived() -> None:
                 self.derived = saved_derived
@@ -1208,6 +1274,7 @@ class ConfigStack:
         with self._lock:
             self._record(source, key, old, new)
 
+    @_mutator
     def apply_preset(self, name: str, *, source: str = "api", admin: bool = False) -> None:
         """Switch personality. A preset that loosens safety or privacy needs ``admin=True``."""
         with self._lock:
@@ -1469,10 +1536,12 @@ class ConfigStack:
         before = dict(self._runtime)
         self._runtime.pop(slot, None)
         self._runtime[slot] = new  # last in order: the latest write wins
+        self._invalidate()
 
         def undo() -> None:
             self._runtime.clear()
             self._runtime.update(before)
+            self._invalidate()
 
         return slot, undo
 
@@ -1507,6 +1576,7 @@ class ConfigStack:
             old = self._runtime[key].value if key in self._runtime else old
             for k in gone:
                 self._runtime.pop(k)
+        self._invalidate()
         return found or bool(gone), old
 
     def _known_path(self, key: str) -> bool:
@@ -1552,6 +1622,7 @@ class ConfigStack:
         expired = [k for k, v in self._runtime.items() if v.expires_at and v.expires_at <= now]
         for key in expired:
             old = self._runtime.pop(key).value
+            self._invalidate()
             self.audit.append(AuditEntry(now, "ttl", key, scrub(key, _plain(old)), None))
         return bool(expired)
 

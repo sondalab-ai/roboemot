@@ -88,9 +88,9 @@ class SleepGate:
             "changes": self.changes,
             "paused": {
                 "app_tick": self.paused,
-                "vision": service.paused if service is not None else False,
+                "vision": service.paused if service is not None else "absent",
                 "light_reader": self._light.paused,
-                "listener": self._listener.paused if self._listener is not None else False,
+                "listener": self._listener.paused if self._listener is not None else "absent",
             },
         }
 

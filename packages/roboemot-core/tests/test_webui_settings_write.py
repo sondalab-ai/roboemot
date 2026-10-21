@@ -1144,6 +1144,7 @@ def test_a_clear_that_does_not_make_an_invalid_state_worse_is_allowed(tmp_path):
 
     stack = make_stack(tmp_path)
     stack._runtime["affect.update_hz"] = _RuntimeValue(9999.0, None)  # out of range
+    stack._invalidate()  # an in-place edit of the store is invisible to the effective() cache
     with pytest.raises(ConfigError):
         stack.effective()
     assert stack.clear("affect.update_hz") is True
