@@ -131,7 +131,8 @@ class LiveState:
 
     def _motion(self) -> dict[str, Any]:
         loop = self._p.loop  # two flags read without the loop's lock: never waits for a tick
-        state = "motors_off" if loop.motors_off else "external" if loop.external else "writing"
+        off = loop.motors_off or self._p.sleep.asleep
+        state = "motors_off" if off else "external" if loop.external else "writing"
         return {"state": state}
 
     def _system(self, cfg: RoboEmotConfig, now: float) -> dict[str, Any]:

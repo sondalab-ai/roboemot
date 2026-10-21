@@ -158,6 +158,14 @@ def test_motion_state():
         assert live(parts(loop=SimpleNamespace(**flags))).state()["motion"] == {"state": expect}
 
 
+def test_an_asleep_robot_never_reports_writing():
+    p = parts(
+        loop=SimpleNamespace(motors_off=False, external=False),
+        sleep=SimpleNamespace(asleep=True, paused_parts=lambda: []),
+    )
+    assert live(p).state()["motion"] == {"state": "motors_off"}
+
+
 def test_faces_are_named_only_from_confirmed_records_and_the_target_comes_first():
     registry = Registry({SECRET_ID: record("Mia"), "pend": record("Nobody", "pending")})
     entries = [
