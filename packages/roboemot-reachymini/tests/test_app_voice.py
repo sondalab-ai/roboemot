@@ -267,9 +267,11 @@ def test_the_app_hands_its_bus_to_the_robot_bearing_hook_and_the_result_to_the_l
         seen["bearing"] = real_hook(self, bus)
         return seen["bearing"]
 
-    def build(cfg, audio, speech, bus, emit, selector, world, registry, bearing, *rest):
+    def build(cfg, audio, speech, bus, emit, selector, world, registry, bearing, *rest, **kw):
         seen["listener_args"] = (bus, selector, world, bearing, audio, speech)
-        return real_build(cfg, audio, speech, bus, emit, selector, world, registry, bearing, *rest)
+        return real_build(
+            cfg, audio, speech, bus, emit, selector, world, registry, bearing, *rest, **kw
+        )
 
     monkeypatch.setattr(ReachyMiniSession, "bearing_source", hook)
     monkeypatch.setattr(assembly, "build_listener", build)
