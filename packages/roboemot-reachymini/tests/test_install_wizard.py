@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 import roboemot.install as inst
+import yaml
 from roboemot import paths
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.diagnostics import Target
@@ -53,7 +54,7 @@ class FakeRobot:
         self.files: dict[str, str] = {}
         self.tmp_dirs: set[str] = set()
         self.stray: dict[str, list[str]] = {}  # module -> leftover paths
-        self.dev_cfg = True
+        self.app_yaml: str | None = None  # data/app.yaml as staged (set by the offline fixture)
         self.commands: list[str] = []
         self.streamed: list[str] = []
         self.copies: list[list[Path]] = []
@@ -191,7 +192,8 @@ class FakeRobot:
         if "e.name !=" in plain:
             return "\n".join(self.apps_in_env)
         if "reachy_mini_apps" in plain:
-            return f"roboemot_reachymini.main\n{self.dev_cfg}"
+            cfg = yaml.safe_load(self.app_yaml) if self.app_yaml is not None else None
+            return f"roboemot_reachymini.main\n{json.dumps(cfg)}"
         if "distributions()" in plain:
             return json.dumps({n: self.requires.get(n, []) for n in self.env})
         if "find_spec" in plain:
@@ -388,11 +390,13 @@ def no_settle(monkeypatch):
 def offline(monkeypatch, robot, daemon):
     monkeypatch.setattr(inst, "load_platform", lambda rid: ReachyMiniWireless(port=daemon.port))
     monkeypatch.setattr(inst, "Remote", lambda user, host, control_dir: robot)
-    monkeypatch.setattr(
-        inst,
-        "build_wheels",
-        lambda dirs, out: [out / f"{d.name.replace('-', '_')}-0.1.whl" for d in dirs],
-    )
+
+    def build(dirs, out):
+        staged = dirs[0].parent / reachy.PKG_DATA / "app.yaml"
+        robot.app_yaml = staged.read_text() if staged.exists() else None
+        return [out / f"{d.name.replace('-', '_')}-0.1.whl" for d in dirs]
+
+    monkeypatch.setattr(inst, "build_wheels", build)
 
 
 def quiet_ui(yes: bool = False) -> Ui:
@@ -581,6 +585,174 @@ def test_vision_flag_adds_the_vision_extra_and_the_vision_weights(offline, robot
     assert [t.partition("[")[2] for t in core_targets(robot)] == ["voice,vision]"]
     assert robot.fetches == ["models fetch --all"]
     assert "opencv-python-headless" in json.loads(robot.files[RECORD])["added"]
+
+
+# ---------------------------------------------------------------- voice on by default (SPEC 4A)
+
+
+def staged_config(tmp_path, dev, voice):
+    reachy.stage_packages(ROOT, tmp_path, dev, inst.app_config_overrides(voice))
+    path = tmp_path / reachy.PKG_DATA / "app.yaml"
+    return yaml.safe_load(path.read_text()) if path.exists() else None
+
+
+def test_voice_is_on_by_default_and_no_voice_turns_it_off():
+    assert inst.parse_args(["--yes"]).voice is True and Options().voice is True
+    assert inst.parse_args(["--yes", "--no-voice"]).voice is False
+    assert inst.parse_args(["--yes", "--voice"]).voice is True
+
+
+def test_the_staged_app_config_carries_voice_and_the_dev_content(tmp_path):
+    cfg = staged_config(tmp_path, dev=True, voice=True)
+    assert cfg["voice"] == {"enabled": True}
+    assert cfg["safety"] == {"allow_unmeasured_dynamics": True}
+
+
+def test_without_dev_the_staged_app_config_is_voice_only(tmp_path):
+    cfg = staged_config(tmp_path, dev=False, voice=True)
+    assert cfg == {"schema_version": 1, "voice": {"enabled": True}}
+
+
+def test_no_voice_with_dev_keeps_the_dev_content_only(tmp_path):
+    cfg = staged_config(tmp_path, dev=True, voice=False)
+    assert "voice" not in cfg and cfg["safety"] == {"allow_unmeasured_dynamics": True}
+
+
+def test_no_voice_without_dev_writes_no_app_config(tmp_path):
+    assert staged_config(tmp_path, dev=False, voice=False) is None
+
+
+def test_the_staged_app_config_is_generated_with_a_header_and_a_note_per_part(tmp_path):
+    reachy.stage_packages(ROOT, tmp_path, True, inst.app_config_overrides(True))
+    text = (tmp_path / reachy.PKG_DATA / "app.yaml").read_text()
+    assert text.startswith("# Written by the RoboEmot installer")
+    assert "# voice: " in text and "# dev: " in text
+
+
+def test_app_config_parts_that_share_a_top_level_key_are_refused():
+    with pytest.raises(ValueError, match="share a top-level key"):
+        reachy.app_yaml_text({"voice": {"x": 1}}, {"voice": {"enabled": True}})
+
+
+def test_the_default_install_enables_voice_in_the_app_config(offline, robot, daemon):
+    install()
+    cfg = yaml.safe_load(robot.app_yaml)
+    assert cfg["voice"] == {"enabled": True}
+    assert cfg["safety"]["allow_unmeasured_dynamics"] is True
+
+
+def test_install_without_dev_still_writes_the_voice_config(offline, robot, daemon):
+    install(dev=False)
+    assert yaml.safe_load(robot.app_yaml) == {"schema_version": 1, "voice": {"enabled": True}}
+
+
+def test_no_voice_writes_no_voice_key_and_no_file_without_dev(offline, robot, daemon):
+    install(dev=False, voice=False)
+    assert robot.app_yaml is None
+
+
+def test_no_voice_defaults_piper_and_the_models_to_off(offline, robot, daemon):
+    install(voice=False, vision=False)
+    assert robot.piper_pips == [] and PIPER_PYTHON not in robot.dirs
+    assert robot.fetches == [] and VOICE_MODELS not in robot.dirs
+    assert "voice" not in yaml.safe_load(robot.app_yaml)
+
+
+def test_no_voice_does_not_even_ask_about_piper_or_the_models(offline, robot, daemon, monkeypatch):
+    asked = []
+    monkeypatch.setattr(Ui, "confirm", lambda self, q, default: asked.append(q) or True)
+    inst.run_install(options(voice=False, start=False, startup=False, yes=False), quiet_ui(), ROOT)
+    assert not [q for q in asked if q.startswith(("Install Piper", "Download the"))]
+
+
+def test_no_voice_with_vision_still_fetches_the_vision_weights(offline, robot, daemon):
+    install(voice=False, vision=True)
+    assert robot.fetches == ["models fetch --all"] and robot.piper_pips == []
+
+
+def test_no_voice_installs_piper_and_the_models_when_asked_explicitly(offline, robot, daemon):
+    install(voice=False, piper=True, models=True)
+    assert len(robot.piper_pips) == 1 and robot.fetches == ["models fetch --voice"]
+
+
+def test_voice_on_with_piper_and_models_declined_warns_the_robot_will_not_speak_or_listen(
+    offline, robot, daemon, capsys
+):
+    install(piper=False, models=False)
+    out = capsys.readouterr().out
+    assert "the robot will not speak" in out and "the robot will not listen" in out
+
+
+def test_voice_on_with_everything_installed_has_no_voice_warning(offline, robot, daemon, capsys):
+    install()
+    out = capsys.readouterr().out
+    assert "will not speak" not in out and "will not listen" not in out
+
+
+def test_no_voice_warns_about_nothing_declined(offline, robot, daemon, capsys):
+    install(voice=False)
+    out = capsys.readouterr().out
+    assert "will not speak" not in out and "will not listen" not in out
+
+
+def test_the_dry_run_prints_what_the_app_config_will_contain_and_writes_nothing(
+    offline, robot, daemon, capsys
+):
+    before = dict(robot.files), set(robot.dirs)
+    inst.run_install(options(dry_run=True, start=False, startup=False), quiet_ui(yes=True), ROOT)
+    out = capsys.readouterr().out
+    assert "voice.enabled=true" in out and "safety.allow_unmeasured_dynamics=true (dev)" in out
+    assert (dict(robot.files), set(robot.dirs)) == before
+
+
+def test_the_dry_run_with_no_voice_and_no_dev_says_there_is_no_app_config(
+    offline, robot, daemon, capsys
+):
+    inst.run_install(
+        options(dry_run=True, dev=False, voice=False, start=False, startup=False),
+        quiet_ui(yes=True),
+        ROOT,
+    )
+    out = capsys.readouterr().out
+    assert "no app config file" in out and "voice.enabled" not in out
+
+
+def test_verification_fails_when_the_installed_app_config_lacks_voice(offline, robot, monkeypatch):
+    real = reachy.app_yaml_text
+    monkeypatch.setattr(
+        reachy, "app_yaml_text", lambda dev_content, app_config: real(dev_content, {})
+    )
+    with pytest.raises(WizardError, match="expected voice="):
+        install()
+
+
+def test_verification_fails_when_a_no_voice_install_finds_voice_in_the_app_config(
+    offline, robot, monkeypatch
+):
+    real = reachy.app_yaml_text
+    monkeypatch.setattr(
+        reachy,
+        "app_yaml_text",
+        lambda dev_content, app_config: real(dev_content, {"voice": {"enabled": True}}),
+    )
+    with pytest.raises(WizardError, match="expected no voice"):
+        install(voice=False)
+
+
+def test_verification_accepts_the_app_config_as_asked_in_every_combination(offline, robot, daemon):
+    for dev in (True, False):
+        for voice in (True, False):
+            install(dev=dev, voice=voice, piper=False, models=False)
+
+
+def test_uninstall_after_a_default_install_restores_the_robot_and_records_no_app_config(
+    offline, robot, daemon
+):
+    before = snapshot(robot, daemon)
+    install()
+    assert "app.yaml" not in robot.files[RECORD]
+    uninstall()
+    assert snapshot(robot, daemon) == before
 
 
 def test_models_are_fetched_on_the_robot_and_uninstall_removes_them(offline, robot, daemon):
@@ -811,7 +983,7 @@ def test_start_reports_app_error(daemon):
 def test_stage_packages_leaves_checkout_untouched(tmp_path, dev):
     repo_app_yaml = ROOT / "packages" / reachy.PKG_DATA / "app.yaml"
     existed = repo_app_yaml.exists()
-    dirs = reachy.stage_packages(ROOT, tmp_path, dev)
+    dirs = reachy.stage_packages(ROOT, tmp_path, dev, {})
     data = tmp_path / reachy.PKG_DATA
     assert [d.name for d in dirs] == ["roboemot-core", "roboemot-reachymini"]
     assert (data / "app.yaml").exists() is dev
@@ -888,8 +1060,8 @@ def test_install_upgrades_shared_packages_only_when_allowed(offline, robot, daem
     }
 
 
-def test_install_fails_when_dev_config_mismatches(offline, robot):
-    robot.dev_cfg = False
+def test_install_fails_when_dev_config_mismatches(offline, robot, monkeypatch):
+    monkeypatch.setattr(reachy, "app_yaml_text", lambda dev_content, app_config: "voice: {}\n")
     with pytest.raises(WizardError, match="expected dev=True"):
         install()
 
@@ -900,8 +1072,8 @@ def test_install_fails_when_daemon_does_not_list_app(offline, daemon):
         install()
 
 
-def test_main_returns_1_and_prints_reason(offline, robot, capsys):
-    robot.dev_cfg = False
+def test_main_returns_1_and_prints_reason(offline, robot, capsys, monkeypatch):
+    monkeypatch.setattr(reachy, "app_yaml_text", lambda dev_content, app_config: "voice: {}\n")
     rc = inst.main(
         ["--host", "127.0.0.1", "--user", "pollen", "--robot", "reachy-mini-wireless", "--dev",
          "--no-start", "--no-startup-app"],

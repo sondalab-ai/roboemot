@@ -37,7 +37,7 @@ content).
 
 Known limits: the Reachy Mini manifest has placeholder translation limits and null dynamics
 (measure in M0); until then the app starts only when installed with `--dev`. Once they are
-measured, re-run the installer with `--no-dev`: every install rewrites the app's dev config.
+measured, re-run the installer with `--no-dev`: every install rewrites the app's config file (dev content and the voice setting).
 
 ## Quick start
 
@@ -111,12 +111,18 @@ asked, it stops the running app (one app at a time), wakes the robot, starts Rob
 it the startup app (the daemon starts it on the robot's first wake-up). Choose dev mode until
 the manifest dynamics are measured, or the app refuses to start (SPEC 12). Every prompt has a
 flag for unattended runs: `--host`, `--user`, `--robot`, `--dev`, `--start`, `--startup-app`,
-`--piper`, `--secret`, `--models`, `--clear-caches`, `--vision`, `--yes` (the boolean ones also
+`--voice`, `--piper`, `--secret`, `--models`, `--clear-caches`, `--vision`, `--yes` (the boolean ones also
 have a `--no-` form).
 
 What goes onto the robot besides the two wheels:
 
-- **Voice.** `roboemot-core[voice]` (Vosk and ONNX Runtime) is installed by default, and a Piper
+- **Voice is on by default.** The installer writes the app config (`data/app.yaml`) with
+  `voice.enabled: true` (the library default stays off), together with the dev content when
+  `--dev`; the dry run prints what it will contain. `--no-voice` leaves voice off and makes
+  Piper and the models step default to off (they still run when asked with `--piper` or
+  `--models`, and the models step still fetches the vision weights while vision is on). With voice
+  on, declining Piper or the models warns that the robot will not speak or listen.
+- **Voice packages.** `roboemot-core[voice]` (Vosk and ONNX Runtime) is installed by default, and a Piper
   virtualenv in the data folder (`--no-piper` skips it). After Piper the installer runs
   `roboemot models fetch --voice` on the robot (Silero VAD, Vosk it/en, Piper it/en; the prompt
   names the size, from the pinned model manifests) into `~/.local/share/roboemot/voice-models`,
