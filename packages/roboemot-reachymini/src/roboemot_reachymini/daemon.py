@@ -159,15 +159,6 @@ class DaemonClient:
         daemon that has no such endpoint."""
         return self._send("GET", "/daemon/robot-app-lock-status", missing_ok=True)
 
-    def move_running(self) -> bool:
-        """Whether the daemon backend is running a move (any transport), by posting an empty
-        target to ``POST /api/move/set_target``. That route answers ``{"status": "ignored",
-        "reason": "move_running"}`` from ``Backend.is_move_running`` and otherwise calls
-        ``Backend.set_target()`` with nothing to set, which changes no target. Each probe made
-        during a move makes the daemon log one "Ignoring set_target request" warning."""
-        answer = self._send("POST", "/move/set_target", body={})
-        return isinstance(answer, dict) and answer.get("reason") == "move_running"
-
     def wake_up(self) -> None:
         """``POST /api/move/play/wake_up``."""
         self._send("POST", "/move/play/wake_up")

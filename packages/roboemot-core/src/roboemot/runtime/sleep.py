@@ -1,11 +1,12 @@
 """Pausing the heavy work while the robot sleeps (SPEC 12, 12A).
 
-The platform puts a robot to sleep by holding its motors off (the owner's app, a daemon reset).
-The motion loop already follows the measured pose meanwhile (``MotionLoop.motors_off``); the rest
-of the runtime would keep running at full CPU for no effect: camera perception, the idle light
-read, the microphone listener and the behaviour tick. At 53 C idle a Reachy Mini Wireless sits
-2 C below its fan's start, so a busy "sleeping" robot is audible. :class:`SleepGate` watches the
-loop from the app tick (never from the 50 Hz thread), publishes ``robot.asleep`` and
+The robot is asleep while the platform does not hold its motors in position control (the owner's
+app, a daemon reset). The motion loop already follows the measured pose meanwhile
+(``MotionLoop.motors_off``); the rest of the runtime would keep running at full CPU for no effect:
+camera perception, the idle light read, the microphone listener and the behaviour tick. A small
+robot's SBC idles only a few degrees below the threshold where its fan starts, so a busy
+"sleeping" robot is audible. :class:`SleepGate` watches the loop from the app tick (never from the
+50 Hz thread), publishes ``robot.asleep`` and
 ``robot.awake`` on the bus (the pattern of ``link.robot.lost`` and ``.restored``) and, with
 ``runtime.pause_when_asleep``, pauses those parts and resumes them on wake. Pausing keeps every
 thread alive and idle: nothing is stopped, restarted or leaked, and models stay loaded. Kept

@@ -645,18 +645,84 @@ def test_the_robot_reacts_distinctly_to_an_adult_a_child_and_a_stranger_without_
         assert yaw[case] < yaw["adult"]
 
 
-def test_loop_yields_to_the_daemons_own_goto_sleep_move(mini):
-    """SPEC 4A, 12A: no target is written while the daemon runs ``goto_sleep`` and during the
-    grace after it, so nothing pulls the robot back from the sleep pose; writes then resume.
-    (MuJoCo ignores motor-mode changes, so the motors-off half is covered by unit tests.)"""
+def _watch_tracking_error(lp: MotionLoop) -> dict[str, float]:
+    """Record the worst divergence the loop's own detector sees: per kind, the largest distance
+    of a measured joint from the closest pose commanded within the lag window."""
+    worst = {"angle": 0.0, "translation": 0.0, "raw_angle": 0.0, "raw_translation": 0.0}
+    real = lp._detect_external
+
+    def spy(now: float, out: dict[str, float]) -> None:
+        real(now, out)
+        measured = lp.driver.read_state()
+        for name, value in measured.items():
+            dof = lp.core.limiter.dofs.get(name)
+            errors = [abs(value - c[name]) for _, c in lp._commanded if name in c]
+            if dof is not None and errors:
+                worst[dof.kind] = max(worst[dof.kind], min(errors))
+                raw = f"raw_{dof.kind}"
+                worst[raw] = max(worst[raw], abs(value - out[name]))
+
+    lp._detect_external = spy  # type: ignore[method-assign]
+    return worst
+
+
+def test_our_own_gestures_and_extreme_motion_never_look_like_external_control(loop):
+    """SPEC 12A: the divergence detector must not fire on the robot's own motion. Every motion
+    passes the limiter, so full-range reversals of every joint at once, at the limiter's speed
+    and acceleration limits, are the worst tracking error; the shipped gestures and expressions
+    are played on top. Records the worst error (printed with ``-s``) and asserts the loop never
+    yielded and stayed under half the tolerance."""
+    from roboemot.affect import AffectState
+    from roboemot.affect.expression import ExpressionRenderer
+    from roboemot.affect.register import Person, resolve_register
+
+    manifest = loop.manifest
+    stack = ConfigStack()
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
+    cfg = stack.effective()
+    worst = _watch_tracking_error(loop)
+    _hold(loop, {n: d.home for n, d in manifest.dofs.items() if d.measured}, 6.0)
+    extremes = {n: 0.9 * d.max for n, d in manifest.dofs.items() if d.measured}
+    opposite = {n: 0.9 * d.min for n, d in manifest.dofs.items() if d.measured}
+    for _ in range(4):
+        _hold(loop, extremes, 1.5)
+        _hold(loop, opposite, 1.5)
+    loop.clear("test")
+    reg = resolve_register([Person("adult", "declared", {})], cfg.register, cfg.persona)
+    renderer = ExpressionRenderer(
+        cfg.expression, cfg.expression_map, manifest.dofs, 0.15, body_yaw="body_yaw"
+    )
+    now = time.monotonic()
+    renderer.update(AffectState(0.0, 0.0, "calm", 0.0), reg, now)
+    for label in renderer.playable():
+        renderer.request(label, time.monotonic())
+        end = time.monotonic() + 4.0
+        while time.monotonic() < end:
+            for cmd in renderer.commands(time.monotonic()):
+                loop.feed(cmd)
+            time.sleep(0.02)
+    print(
+        f"\nworst tracking error vs commands within {cfg.motion.external.lag_window_s} s: "
+        f"{worst['angle']:.4f} rad, {worst['translation']:.5f} m "
+        f"(against the latest command only: {worst['raw_angle']:.4f} rad, "
+        f"{worst['raw_translation']:.5f} m)"
+    )
+    assert loop.external_events == 0 and not loop.external
+    assert worst["angle"] < cfg.motion.external.tolerance_rad / 2
+    assert worst["translation"] < cfg.motion.external.tolerance_m / 2
+
+
+def test_loop_detects_the_daemons_own_goto_sleep_move(mini):
+    """SPEC 4A, 12A: ``goto_sleep`` runs in the daemon and drops our targets; the loop sees the
+    pose leave its commands, stops writing, writes nothing until the pose has been still for
+    the grace, and nothing pulls the robot back from the sleep pose. (MuJoCo ignores motor-mode
+    changes, so the motors-off half is covered by unit tests.)"""
     from roboemot.diagnostics import Target
     from roboemot_reachymini.daemon import DaemonClient
-    from roboemot_reachymini.driver import MOVE_REQUEST_TIMEOUT_S
 
     cfg = ConfigStack().effective()
     manifest = load_manifest(DATA / "reachy-mini-wireless.yaml", allow_unmeasured_dynamics=True)
-    daemon = DaemonClient(Target(), timeout_s=MOVE_REQUEST_TIMEOUT_S)
-    driver = ReachyMiniDriver(mini, daemon.move_running)
+    driver = ReachyMiniDriver(mini)
     writes: list[float] = []
     real_write = driver.write_pose_targets
 
@@ -667,47 +733,35 @@ def test_loop_yields_to_the_daemons_own_goto_sleep_move(mini):
     driver.write_pose_targets = counting  # type: ignore[method-assign]
     loop = MotionLoop(manifest, driver, cfg, rate_hz=50)
     loop.start()
+    stop = threading.Event()
+
+    def feeder() -> None:  # a source that keeps asking for the awake pose throughout
+        while not stop.is_set():
+            loop.feed(Command("test", Priority.COMMANDED, {"head.pitch": 0.0}, time.monotonic()))
+            stop.wait(0.02)
+
+    th = threading.Thread(target=feeder, daemon=True)
+    daemon = DaemonClient(Target())
     try:
         _hold(loop, {"head.yaw": 0.0, "head.pitch": 0.0}, 3.0)
         daemon.wake_up()
         time.sleep(3.0)
-        stop = threading.Event()
-
-        def feeder() -> None:  # a source that keeps asking for the awake pose throughout
-            while not stop.is_set():
-                loop.feed(
-                    Command("test", Priority.COMMANDED, {"head.pitch": 0.0}, time.monotonic())
-                )
-                stop.wait(0.02)
-
-        th = threading.Thread(target=feeder, daemon=True)
         th.start()
         _daemon_post("/move/play/goto_sleep")
-        seen_start = seen_end = None
+        detected = None
         deadline = time.monotonic() + 15
-        while time.monotonic() < deadline:
-            moving = loop.snapshot()["platform_move"]
-            now = time.monotonic()
-            if moving and seen_start is None:
-                seen_start = now
-            if seen_start is not None and not moving:
-                seen_end = now
-                break
+        while time.monotonic() < deadline and detected is None:
+            if loop.external:
+                detected = time.monotonic()
             time.sleep(0.02)
-        assert seen_start is not None and seen_end is not None, "the move flag never showed"
-        pose_at_end = driver.read_state()
-        grace = cfg.motion.platform_move_grace_s
-        time.sleep(grace - 0.3)
-        pose_late = driver.read_state()
-        yielded = [w for w in writes if seen_start + 0.1 < w < seen_end + grace - 0.3]
-        assert yielded == [], f"{len(yielded)} targets written during the move and its grace"
-        for k, v in pose_at_end.items():
-            assert pose_late[k] == pytest.approx(v, abs=0.05), k  # nothing pulled it back
-        time.sleep(1.0)
-        assert writes and writes[-1] > seen_end + grace  # streaming resumed after the grace
-        stop.set()
-        th.join()
+        assert detected is not None, "the loop never noticed the daemon's move"
+        n = len(writes)
+        time.sleep(cfg.motion.platform_move_grace_s - 1.0)
+        assert len(writes) == n and loop.external  # not writing while the move runs and settles
+        time.sleep(cfg.motion.platform_move_grace_s + 2.0)
+        assert not loop.external and len(writes) > n  # resumed after the pose stayed still
     finally:
+        stop.set()
         loop.stop()
         daemon.wake_up()
         time.sleep(3.0)

@@ -13,7 +13,6 @@ from typing import Any
 from roboemot.attention import GazeMap
 from roboemot.bus import Bus
 from roboemot.config.schema import RoboEmotConfig
-from roboemot.diagnostics import Target
 from roboemot.drivers import PoseGroupDriver
 from roboemot.reflex import ReflexMap
 from roboemot.vision.runner import FrameSource
@@ -24,8 +23,7 @@ from roboemot.world.sources import JointStateFn
 
 from .audio import ReachyAudio
 from .camera import ReachyCamera
-from .daemon import DaemonClient
-from .driver import MOVE_REQUEST_TIMEOUT_S, ReachyMiniDriver
+from .driver import ReachyMiniDriver
 from .gaze import FRAME, GAZE, REFLEX
 from .sdk import installed_version, require_sdk
 from .speaker import ReachySpeaker
@@ -42,13 +40,8 @@ class ReachyMiniSession:
         self.client = client
 
     def driver(self) -> PoseGroupDriver:
-        """The pose driver over the SDK client, probing the daemon it is connected to for the
-        platform's own moves."""
-        daemon = DaemonClient(
-            Target(host=self.client.client.host, port=self.client.client.port),
-            timeout_s=MOVE_REQUEST_TIMEOUT_S,
-        )
-        return ReachyMiniDriver(self.client, daemon.move_running)
+        """The pose driver over the SDK client."""
+        return ReachyMiniDriver(self.client)
 
     def camera(self, joint_state: JointStateFn) -> FrameSource:
         """The SDK media camera, each frame paired with the measured joint state."""

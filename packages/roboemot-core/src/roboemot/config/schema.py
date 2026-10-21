@@ -705,6 +705,44 @@ class IdleConfig(Strict):
     gaze_shift_amplitude: float = param(0.15, "Max gaze shift on head yaw", unit="rad", ge=0, le=1)
 
 
+class ExternalControlConfig(Strict):
+    """Divergence between the pose the loop commands and the pose the robot reports (SPEC 12A):
+    the platform dropping our targets (a move of its own is running) or a hand on the head."""
+
+    tolerance_rad: float = param(
+        0.15,
+        "An angular joint further than this from every pose commanded within lag_window_s counts "
+        "as diverging (tracking lag and sag of our own motion stay under it)",
+        unit="rad", ge=0.01, le=1.0,
+    )  # fmt: skip
+    tolerance_m: float = param(
+        0.02,
+        "The same for translations",
+        unit="m", ge=0.002, le=0.1,
+    )  # fmt: skip
+    lag_window_s: float = param(
+        0.4,
+        "The measured pose is compared with the poses commanded this far back, so the "
+        "servos' tracking lag is not mistaken for external control",
+        unit="s", ge=0.05, le=2.0,
+    )  # fmt: skip
+    confirm_s: float = param(
+        0.2,
+        "Divergence must last this long before the loop yields",
+        unit="s", ge=0.02, le=2.0,
+    )  # fmt: skip
+    still_speed_rad_s: float = param(
+        0.05,
+        "While yielding, the pose counts as still below this joint speed",
+        unit="rad/s", ge=0.001, le=1.0,
+    )  # fmt: skip
+    still_speed_m_s: float = param(
+        0.005,
+        "The same for translations",
+        unit="m/s", ge=0.0005, le=0.1,
+    )  # fmt: skip
+
+
 class MotionConfig(Strict):
     arbiter: ArbiterConfig = param({}, "Arbiter parameters")
     idle: IdleConfig = param({}, "Idle motion parameters")
@@ -716,13 +754,17 @@ class MotionConfig(Strict):
         unit="Hz", ge=1, le=100,
     )  # fmt: skip
     platform_move_grace_s: float = param(
-        2.0,
-        "After the robot platform ends a move of its own (a go-to-sleep or wake-up from the "
-        "owner's app), the loop keeps following the measured pose without writing for this long, "
-        "so a motors-off that follows the move is seen before any target is streamed (SPEC 4A, "
-        "12A). 0 resumes at once",
+        4.0,
+        "After external control of the robot is detected (the platform runs a move of its own, "
+        "such as the owner's go-to-sleep, or a hand moves the head), the loop keeps following the "
+        "measured pose without writing until the pose has been still this long with the motors "
+        "on, then resumes from it. Must exceed the platform's delay between the end of a sleep "
+        "move and the motors being switched off (2.0 s on the reference robot, SPEC 4A) plus the "
+        "motor status latency, so the motors-off is seen before any target is streamed again "
+        "(SPEC 12A)",
         unit="s", ge=0, le=30,
     )  # fmt: skip
+    external: ExternalControlConfig = param({}, "Detection of external control of the robot")
 
 
 # --------------------------------------------------------------------------- reflexes (SPEC 10)

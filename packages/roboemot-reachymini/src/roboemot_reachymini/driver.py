@@ -18,35 +18,15 @@ Facts from the SDK source (reachy_mini 1.12.0, the robot's version) that shape t
   :meth:`read_state` checks it.
 - The motor mode is in the daemon status the client receives
   (``backend_status.motor_control_mode``: enabled, disabled, gravity_compensation).
-- Platform moves (the owner's go-to-sleep or wake-up from the mobile app, the daemon's idle
-  reset) run in ``Backend.play_move`` and raise ``Backend._active_move_depth``
-  (``daemon/backend/abstract.py:485-500``, ``is_move_running``); while it is above 0 the daemon
-  drops every ``set_target``/``set_full_target`` from every transport (``abstract.py:1662``) and
-  accepts them again as soon as it ends. That flag is in the WebRTC ``StateSnapshot``
-  (``io/protocol.py:145``) but not in anything the SDK client (``/ws/sdk``) receives, and
-  ``GET /api/move/running`` and ``WS /api/move/ws/updates`` list only the moves the REST router
-  created itself (``daemon/app/routers/move.py``, ``move_tasks``): a go-to-sleep sent over the
-  WebRTC data channel (``GotoSleepCmd``, ``abstract.py:1714``) or run by the idle reset is in
-  neither. The one REST route that reads the flag itself is ``POST /api/move/set_target``
-  (``move.py:219-225``), which answers ``move_running`` and, with an empty target, sets
-  nothing: ``DaemonClient.move_running`` sends that. A background thread polls it every
-  ``MOVE_POLL_S`` so ``platform_move_running`` is a cached read for the 50 Hz loop; an answer older
-  than ``MOVE_STALE_S``, or a failed probe, reads as None (unknown). Not verified on a real robot
-  with a control-only session; the MuJoCo daemon answers it as the real one.
 - Checked against the 1.12.0 source (the robot's version, enforced at app start by
   ``sdk.require_sdk``) and run against 1.12.0 in MuJoCo.
 """
 
 from __future__ import annotations
 
-import logging
-import threading
-import time
-from collections.abc import Callable
 from typing import Any
 
 import numpy as np
-from roboemot import shutdown
 from roboemot.drivers import MotorMode, PoseGroupDriver
 from scipy.spatial.transform import Rotation
 
@@ -55,12 +35,6 @@ from .sdk import ClientPort
 HEAD_ANGLES = ("head.roll", "head.pitch", "head.yaw")
 HEAD_TRANSLATIONS = ("head.x", "head.y", "head.z")
 ANTENNAS = ("antenna_right", "antenna_left")  # SDK order
-MOVE_POLL_S = 0.2  # between probes of the daemon's move flag
-MOVE_STALE_S = 1.0  # a probe answer older than this is unknown
-MOVE_REQUEST_TIMEOUT_S = 0.5  # one probe's HTTP timeout: the poller joins within the budget
-MOVE_JOIN_S = 2.0
-
-log = logging.getLogger(__name__)
 
 
 def head_matrix(values: dict[str, float]) -> np.ndarray:
@@ -84,21 +58,9 @@ def head_values(matrix: Any) -> dict[str, float]:
 class ReachyMiniDriver(PoseGroupDriver):
     """Wraps a connected ``reachy_mini.ReachyMini`` (owned by the bridge / app process)."""
 
-    def __init__(
-        self,
-        mini: Any,
-        move_probe: Callable[[], bool] | None = None,
-        *,
-        clock: Callable[[], float] = time.monotonic,
-        poll_s: float = MOVE_POLL_S,
-    ) -> None:
+    def __init__(self, mini: Any) -> None:
         self.mini = mini
         self.mode: MotorMode | None = None
-        self._move_probe, self._clock, self._poll_s = move_probe, clock, poll_s
-        self._move: tuple[bool, float] | None = None  # (running, when probed)
-        self._move_stop = threading.Event()
-        self._move_thread: threading.Thread | None = None
-        self._move_error: str | None = None
         mini.set_automatic_body_yaw(False)
 
     def write_pose_targets(self, t: float, values: dict[str, float]) -> None:
@@ -131,48 +93,6 @@ class ReachyMiniDriver(PoseGroupDriver):
             return None
         backend = client.get_status(wait=False).backend_status
         return None if backend is None else backend.motor_control_mode == "enabled"
-
-    def platform_move_running(self) -> bool | None:
-        """The daemon's move flag from the last probe (see the module docstring); None without a
-        probe, before the first answer, when the last probe failed or when it is stale. The first
-        call starts the poller; never blocks."""
-        if self._move_probe is None:
-            return None
-        if self._move_thread is None:
-            self._start_move_poller()
-        move = self._move
-        if move is None or self._clock() - move[1] > MOVE_STALE_S:
-            return None
-        return move[0]
-
-    def _start_move_poller(self) -> None:
-        self._move_stop.clear()
-        thread = threading.Thread(target=self._poll_move, name="reachy-move-flag", daemon=True)
-        thread.start()
-        self._move_thread = thread
-
-    def _poll_move(self) -> None:
-        """Probe the move flag until closed; a failure is logged once per type and reads as
-        unknown."""
-        assert self._move_probe is not None
-        while not self._move_stop.is_set():
-            try:
-                self._move = (self._move_probe(), self._clock())
-                self._move_error = None
-            except Exception as exc:
-                self._move = None
-                name = type(exc).__name__
-                if name != self._move_error:
-                    self._move_error = name
-                    log.warning("platform move probe: %s", name)
-            self._move_stop.wait(self._poll_s)
-
-    def close(self) -> None:
-        """Stop the move poller (joined within ``MOVE_JOIN_S``)."""
-        self._move_stop.set()
-        if self._move_thread is not None:
-            shutdown.join(self._move_thread, MOVE_JOIN_S)
-            self._move_thread = None
 
     def robot_name(self) -> str | None:
         """The daemon's ``robot_name`` (the owner's name for the robot) from its last status;
