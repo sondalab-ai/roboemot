@@ -35,6 +35,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
 from urllib.parse import urlsplit
 
+import httpx
+
 from roboemot import paths
 from roboemot.config.catalogue import (
     CONTAINERS,
@@ -277,16 +279,19 @@ class OverridesFile:
 
 
 def origin(url: str) -> str:
-    """``scheme://host[:port]`` as the web UI names and acknowledges it: the host in its ASCII
-    (IDNA, punycode) form so a look-alike letter cannot pass for another host; '' when unparsable
-    or the host cannot be encoded."""
+    """``scheme://host[:port]`` as the web UI names and acknowledges it: the host as the HTTP client
+    resolves it (``httpx.URL(...).raw_host``: IDNA 2008, UTS 46 non-transitional), so a look-alike
+    letter cannot pass for another host and the acknowledged host is the one the key goes to.
+    '' when unparsable or the host cannot be encoded."""
     found = plain_origin(url)
     if found.isascii():
         return found
     try:
-        host = urlsplit(found).hostname or ""
-        return found.replace(host, host.encode("idna").decode("ascii"), 1)
-    except (ValueError, UnicodeError):
+        host = httpx.URL(url).raw_host.decode("ascii")
+        parts = urlsplit(url)
+        port = f":{parts.port}" if parts.port else ""
+        return f"{parts.scheme.lower()}://{'[' + host + ']' if ':' in host else host}{port}"
+    except (httpx.InvalidURL, ValueError, UnicodeError):
         return ""
 
 

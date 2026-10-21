@@ -437,3 +437,28 @@ def test_a_language_dict_with_no_old_value_does_not_crash(editor, monkeypatch):
         pytest.fail("TypeError")
     except Exception:  # noqa: BLE001  any other refusal is fine
         pass
+
+
+def test_origin_uses_the_http_clients_idna_not_the_stdlib_codec():
+    from roboemot.webui.settings import origin
+
+    assert origin("https://straße.example/v1") == "https://xn--strae-oqa.example"
+    assert "ss" not in origin("https://straße.example/v1")
+
+
+def test_only_the_host_is_encoded_not_the_same_text_in_the_path_or_port():
+    from roboemot.webui.settings import origin
+
+    assert origin("https://ß.example:8443/ß.example?x=ß.example") == (
+        "https://xn--zca.example:8443"
+    )
+
+
+@pytest.mark.parametrize("url", ["https://" + "é" * 70 + ".example/v1", "https://ß..example/"])
+def test_an_unencodable_host_is_rejected(editor, stack, url):
+    from roboemot.webui.settings import origin
+
+    assert origin(url) == ""
+    with pytest.raises(ValidationError):
+        editor.add_route({**CLOUD, "base_url": url}, "cloud_key", "https://x")
+    assert "cloud" not in routes(stack)
