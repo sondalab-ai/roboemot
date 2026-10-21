@@ -50,6 +50,8 @@ def make_reload(host: RuntimeHost, p: Pipeline) -> Callable[[Any], None]:
             host.speech_output.config = change.config
         if host.conversation is not None:
             host.conversation.apply_config(change.config)
+        if host.transcript is not None:
+            host.transcript.apply_config(change.config.webui.live)
         p.reflexes.apply_config(
             change.config.reflexes, math.radians(change.config.safety.constraint_margin_deg)
         )

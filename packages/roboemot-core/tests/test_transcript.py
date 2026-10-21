@@ -12,7 +12,7 @@ from roboemot.conversation.transcript import TranscriptRing
 
 def ring(**kw):
     now = [1000.0]
-    cfg = LiveConfig(transcript=kw.pop("transcript", True), **kw)
+    cfg = LiveConfig(enabled=True, transcript=kw.pop("transcript", True), **kw)
     return TranscriptRing(cfg, clock=lambda: now[0], wall=lambda: 5000.0 + now[0]), now
 
 
@@ -85,7 +85,7 @@ def test_every_trigger_clears_and_changes_the_epoch(trigger):
     if trigger == "clear":
         r.clear()
     else:
-        r.apply_config(LiveConfig(transcript=False))
+        r.apply_config(LiveConfig(enabled=True, transcript=False))
     snap = r.snapshot(0)
     assert snap["turns"] == [] and snap["epoch"] != before and r.size == 0
 
@@ -99,9 +99,9 @@ def test_clearing_does_not_reuse_sequence_numbers():
 
 def test_turning_the_flag_on_starts_empty_and_a_reload_keeps_what_is_kept():
     r, _ = ring(transcript=False)
-    r.apply_config(LiveConfig(transcript=True))
+    r.apply_config(LiveConfig(enabled=True, transcript=True))
     r.add("user", "kept", "en")
-    r.apply_config(LiveConfig(transcript=True, transcript_max_turns=10))
+    r.apply_config(LiveConfig(enabled=True, transcript=True, transcript_max_turns=10))
     assert [t["text"] for t in r.snapshot(0)["turns"]] == ["kept"]
 
 
@@ -109,7 +109,7 @@ def test_a_smaller_bound_applies_at_once():
     r, _ = ring()
     for i in range(5):
         r.add("user", f"t{i}", "en")
-    r.apply_config(LiveConfig(transcript=True, transcript_max_turns=2))
+    r.apply_config(LiveConfig(enabled=True, transcript=True, transcript_max_turns=2))
     assert [t["text"] for t in r.snapshot(0)["turns"]] == ["t3", "t4"]
 
 
@@ -149,3 +149,12 @@ def test_nothing_is_logged(caplog):
     r.snapshot(0)
     r.clear()
     assert "tokenSECRET" not in caplog.text
+
+
+def test_the_live_tab_itself_must_be_on():
+    r = TranscriptRing(LiveConfig(enabled=False, transcript=True))
+    assert r.add("user", "x", "en") is None
+    r.apply_config(LiveConfig(enabled=True, transcript=True))
+    assert r.add("user", "x", "en") == 1
+    r.apply_config(LiveConfig(enabled=False, transcript=True))
+    assert r.size == 0

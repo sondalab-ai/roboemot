@@ -23,7 +23,7 @@ from roboemot.attention import AttentionSelector, GazeController
 from roboemot.bus import Bus
 from roboemot.circadian import CircadianRunner, IdleLightReader
 from roboemot.config import ConfigStack
-from roboemot.conversation import ConversationPhase
+from roboemot.conversation import ConversationPhase, TranscriptRing
 from roboemot.conversation.sources import registry_names, speaker_source
 from roboemot.health.network import NetworkMonitor
 from roboemot.health.responder import OfflineResponder
@@ -55,6 +55,7 @@ from roboemot.world import (
 from roboemot.world.autoenroll import open_autoenroll, purge_stored
 
 from .host import RuntimeHost
+from .levels import AudioLevels
 from .reports import register_overrides
 from .sleep import SleepGate
 
@@ -168,13 +169,20 @@ def assemble(
     reflexes.speaking = speech.speaking
     phase = host.phase = ConversationPhase(speech.speaking)
     reflex_audio = cfg.reflexes.enabled and cfg.reflexes.audio.enabled
-    audio = host.audio = session.audio(cfg, reflexes.offer_audio_level if reflex_audio else None)
+    # The Live tab's levels ride on the hub's reflex sink (one tuple store more, no new work on
+    # the microphone thread); the transcript ring is cleared whenever the robot falls asleep.
+    levels = host.levels = AudioLevels(reflexes.offer_audio_level if reflex_audio else None)
+    levels.noise_floor = lambda: reflexes.noise_floor
+    transcript = host.transcript = TranscriptRing(cfg.webui.live)
+    bus.subscribe("robot.asleep", lambda msg: transcript.clear())
+    audio = host.audio = session.audio(cfg, levels.offer if reflex_audio else None)
     reflexes.audio_status = audio.snapshot
     reference = (
         PlaybackReference(cfg.voice.sample_rate_hz, cfg.voice.barge_in.echo_reference_s)
         if cfg.voice.enabled
         else None
     )
+    levels.reference = reference
     speaker = host.speaker = session.speaker(cfg, speech, reference) if cfg.voice.enabled else None
     # The one affect engine: appraisal events from the bus and the responder feed it, the
     # app tick decays it and publishes affect.state (SPEC 7).

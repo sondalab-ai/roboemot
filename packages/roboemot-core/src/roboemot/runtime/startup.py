@@ -111,7 +111,10 @@ def start_voice_output(
         ),
         bus=p.bus,
         phase=host.phase,
+        transcript=host.transcript,
     )
+    if host.transcript is not None:  # runs after conv.close (LIFO): a late sentence is wiped too
+        cleanup.callback(host.transcript.clear)
     cleanup.callback(conv.close)
     conv.start()
     if bargein is not None:  # stop the speech first, then the stream, then listen

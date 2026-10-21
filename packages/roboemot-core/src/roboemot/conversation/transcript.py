@@ -2,10 +2,11 @@
 
 An in-memory ring of ``{seq, t, who, text, language, interrupted}``, filled by the conversation
 worker (the user's final utterance, the robot's sentences as they are queued to play) and read by
-the Live tab behind the PIN. Opt-in (``webui.live.transcript``): while it is off ``add`` keeps
-nothing at all, and turning it off clears what was kept. Bounded by count, age and text length,
-all from the configuration. Never persisted, logged, repr-ed or put in a debug report: this module
-has no logger and no ``__repr__`` that shows a turn. It is per robot, not per login session.
+the Live tab behind the PIN. Opt-in (``webui.live.transcript``, with the Live tab itself on): while
+either is off ``add`` keeps nothing at all, and turning it off clears what was kept. Bounded by
+count, age and text length, all from the configuration. Never persisted, logged, repr-ed or put in
+a debug report: this module has no logger and no ``__repr__`` that shows a turn. It is per robot,
+not per login session.
 """
 
 from __future__ import annotations
@@ -46,7 +47,7 @@ class TranscriptRing:
         wall: Callable[[], float] = time.time,
     ) -> None:
         self._cfg = cfg
-        self._enabled = cfg.transcript
+        self._enabled = cfg.enabled and cfg.transcript
         self._clock, self._wall = clock, wall
         self._lock = threading.Lock()
         self._turns: collections.deque[_Turn] = collections.deque()
@@ -70,8 +71,8 @@ class TranscriptRing:
         """Hot reload: new bounds apply at once; turning the flag off clears the ring."""
         with self._lock:
             self._cfg = cfg
-            self._enabled = cfg.transcript
-            if not cfg.transcript:
+            self._enabled = cfg.enabled and cfg.transcript
+            if not self._enabled:
                 self._clear_locked()
             else:
                 self._trim_locked(self._clock())

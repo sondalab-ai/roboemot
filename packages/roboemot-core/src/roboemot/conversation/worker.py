@@ -63,6 +63,7 @@ from .confirm import Pending, PreferenceStore, reply_kind, sanitise_preference
 from .lines import line_text, minor_line, pick
 from .output_filter import OutputFilter
 from .phase import ConversationPhase
+from .transcript import TranscriptRing
 
 log = logging.getLogger(__name__)
 
@@ -109,6 +110,7 @@ class _Turn:
     speaker: str | None = None
     interrupted: bool = False  # a barge-in is under way: nothing more is said (set first)
     stopped: bool = False  # ... and the speech was stopped: history keeps what was heard
+    reply_seq: int | None = None  # this reply's entry in the live transcript
     done: bool = False  # the turn is over: a late skill callback does nothing
     exchange_spoken: int = 0  # queued sentences already in the exchange messages
     cut: bool = False  # stop_talking cut it
@@ -166,8 +168,13 @@ class ConversationWorker:
         names: RobotName | None = None,
         known_names: Callable[[], Iterable[str]] = lambda: (),
         phase: ConversationPhase | None = None,
+        transcript: TranscriptRing | None = None,
     ) -> None:
         self.phase = phase if phase is not None else ConversationPhase()
+        self.transcript = transcript  # the Live tab's opt-in ring of turns (SPEC 11A, 12)
+        self._reply: tuple[int, list[tuple[int, str]]] | None = (
+            None  # (ring seq, queued) of the last reply
+        )
         self.names = names if names is not None else RobotName()
         self.stack, self.hub, self.speech = stack, hub, speech
         self.affect, self.responder = affect, responder
@@ -253,6 +260,10 @@ class ConversationWorker:
                 self._pending.popleft()
                 self._counts["replaced"] += 1
             self._pending.append(utterance)
+        if self.transcript is not None:
+            self.transcript.add(
+                "user", utterance.text.strip(), utterance.language or cfg.conversation.language
+            )
         loop, wake = self._loop, self._wake
         if loop is not None and wake is not None:
             with contextlib.suppress(RuntimeError):
@@ -453,6 +464,7 @@ class ConversationWorker:
                 turn.interrupted = turn.stopped = True
             self._drop_unheard_question()
         if turn is None:
+            self._settle_reply()
             return self._trim_tail()
         self._counts["interrupts"] += 1
         loop = self._loop
@@ -460,6 +472,18 @@ class ConversationWorker:
             with contextlib.suppress(RuntimeError):
                 loop.call_soon_threadsafe(self._cancel_inner)
         return True
+
+    def _settle_reply(self) -> None:
+        """A barge-in after the stream ended: the last reply in the live transcript becomes the
+        sentences that played, marked interrupted (nothing played removes it)."""
+        with self._lock:
+            reply, self._reply = self._reply, None
+        if reply is None or self.transcript is None:
+            return
+        seq, queued = reply
+        heard = [text for job, text in queued if self.speech.played(job)]
+        if len(heard) < len(queued):
+            self.transcript.settle(seq, " ".join(heard), interrupted=True)
 
     def _drop_unheard_question(self) -> None:
         """Forget a pending confirmation unless its question finished playing before now
@@ -940,6 +964,11 @@ class ConversationWorker:
             turn.stamps.setdefault("say", self.clock())
             turn.spoken.append(text)
             turn.queued.append((job, text))
+            if self.transcript is not None:
+                if turn.reply_seq is None:
+                    turn.reply_seq = self.transcript.add("robot", text, turn.language)
+                else:
+                    self.transcript.extend(turn.reply_seq, text)
 
     def _prompt_name(self, cfg: RoboEmotConfig) -> str:
         """The robot's name as safe to say and to put in a prompt ('' without one)."""
@@ -1025,6 +1054,15 @@ class ConversationWorker:
             else:
                 self._tail = None
             self._active_turn = None
+            self._reply = None
+            if turn.reply_seq is not None and self.transcript is not None:
+                if cut:  # the reply in the live transcript is what was heard
+                    heard = [t for job, t in turn.queued if self.speech.played(job)]
+                    self.transcript.settle(
+                        turn.reply_seq, " ".join(heard), interrupted=len(heard) < len(turn.queued)
+                    )
+                else:  # a barge-in while the last sentences still play settles it later
+                    self._reply = (turn.reply_seq, list(turn.queued))
         self._counts["turns"] += 1
         self._counts[turn.outcome] += 1
         with self._lock:
