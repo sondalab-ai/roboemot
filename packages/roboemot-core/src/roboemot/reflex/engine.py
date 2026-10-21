@@ -46,7 +46,9 @@ from ..world.types import Observation
 
 MS_PER_S = 1000.0
 P50 = 0.5
+P90 = 0.9
 P95 = 0.95
+P99 = 0.99
 INBOX_MAX = 64
 HALF_PLANE = math.pi / 2
 SOURCE_PREFIX = "reflex."
@@ -93,6 +95,19 @@ class _RuleStats:
     cooldown: int = 0
     minor: int = 0
     no_motion: int = 0
+
+
+@dataclass
+class _OnsetTrack:
+    """Onset peaks of one loud-onset rule: scalars only, bounded (SPEC 12A).
+
+    An episode starts at the rising edge of ``watch`` and ends when the ratio falls below it (or
+    the robot starts to speak); its peak is kept with whether it reached the rule's threshold.
+    """
+
+    watch: float
+    peaks: deque[tuple[float, bool]]
+    open_peak: float | None = None
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
@@ -144,6 +159,7 @@ class ReflexEngine:
         self._last_fire: dict[str, float] = {}
         self._moving: dict[str, tuple[float, str, dict[str, float]]] = {}
         self._stats: dict[str, _RuleStats] = {}
+        self._onset: dict[str, _OnsetTrack] = {}
         self._lat: dict[str, dict[str, deque[float]]] = {}
         self.cfg = cfg
         self.margin_rad = margin_rad
@@ -152,9 +168,53 @@ class ReflexEngine:
     # ---- configuration
 
     def apply_config(self, cfg: ReflexConfig, margin_rad: float) -> None:
-        """Hot reload (SPEC 11A): new rules and limits; running reflexes finish as started."""
+        """Hot reload (SPEC 11A): new rules and limits; running reflexes finish as started.
+
+        Onset peaks (SPEC 12A) survive a reload like the counters do, except that a new watch
+        level starts a rule's record afresh (the peaks are not comparable) and a rule that is no
+        longer a loud-onset rule loses it; a new window resizes the record.
+        """
         with self._lock:
             self.cfg, self.margin_rad, self._rules = cfg, margin_rad, list(cfg.rules)
+            names = {r.name for r in self._rules if r.trigger == "loud_onset"}
+            for name in set(self._onset) - names:
+                del self._onset[name]
+            for rule in self._rules:
+                track = self._onset.get(rule.name)
+                if track is None:
+                    continue
+                if track.watch != self._watch(rule):
+                    del self._onset[rule.name]
+                elif track.peaks.maxlen != cfg.onset_window:
+                    track.peaks = deque(track.peaks, maxlen=cfg.onset_window)
+
+    def _watch(self, rule: ReflexRule) -> float:
+        return min(self.cfg.onset_watch_ratio, rule.threshold)
+
+    def _track_onset(self, rule: ReflexRule, ratio: float, prev: float) -> None:
+        """Follow one loud-onset rule's episode above its watch level (caller holds the lock)."""
+        watch = self._watch(rule)
+        track = self._onset.get(rule.name)
+        if track is None:
+            track = self._onset[rule.name] = _OnsetTrack(watch, deque(maxlen=self.cfg.onset_window))
+        if track.open_peak is None:
+            if ratio >= watch > prev:
+                track.open_peak = ratio
+        elif ratio >= watch:
+            track.open_peak = max(track.open_peak, ratio)
+        else:
+            self._close_onset(rule, track)
+
+    def _close_onset(self, rule: ReflexRule, track: _OnsetTrack) -> None:
+        if track.open_peak is not None:
+            track.peaks.append((track.open_peak, track.open_peak >= rule.threshold))
+            track.open_peak = None
+
+    def _close_onsets(self) -> None:
+        for rule in self._rules:
+            track = self._onset.get(rule.name)
+            if track is not None:
+                self._close_onset(rule, track)
 
     # ---- inputs (any thread; scalars only)
 
@@ -197,6 +257,7 @@ class ReflexEngine:
         speaking = self.speaking
         if speaking is not None and speaking(stamp):
             with self._lock:
+                self._close_onsets()
                 self._audio_stamp, self._prev_ratio = stamp, math.inf
             return
         event: SoundLoud | None = None
@@ -206,7 +267,10 @@ class ReflexEngine:
             ratio = rms / floor
             prev = self._prev_ratio
             for rule in self._rules:
-                if rule.enabled and rule.trigger == "loud_onset" and ratio >= rule.threshold > prev:
+                if not (rule.enabled and rule.trigger == "loud_onset"):
+                    continue
+                self._track_onset(rule, ratio, prev)
+                if ratio >= rule.threshold > prev:
                     self._inbox.append(_Pending(rule.name, stamp, ratio))
             edge = ratio >= audio.loud_event_ratio > prev
             if edge and stamp - self._last_event >= audio.loud_event_refractory_s:
@@ -488,6 +552,31 @@ class ReflexEngine:
         """Rules whose reflex is playing now."""
         return sorted(self._players)
 
+    @staticmethod
+    def _onset_report(track: _OnsetTrack) -> dict[str, Any]:
+        """Peak ratios of the sounds that rose above the watch level, split by whether they
+        reached the rule's threshold; numbers only (SPEC 12A)."""
+
+        def summary(values: list[float]) -> dict[str, Any]:
+            ordered = sorted(values)
+            if not ordered:
+                return {"count": 0}
+            return {
+                "count": len(ordered),
+                "p50": _quantile(ordered, P50),
+                "p90": _quantile(ordered, P90),
+                "p99": _quantile(ordered, P99),
+                "max": ordered[-1],
+            }
+
+        peaks = list(track.peaks)
+        return {
+            "watch_ratio": track.watch,
+            "window": track.peaks.maxlen,
+            "fired": summary([p for p, hit in peaks if hit]),
+            "below_threshold": summary([p for p, hit in peaks if not hit]),
+        }
+
     def snapshot(self) -> dict[str, Any]:
         """Debug-report section: counts, latencies and the audio source's state; scalars only."""
         latency: dict[str, dict[str, Any]] = {}
@@ -505,7 +594,7 @@ class ReflexEngine:
         rules = {}
         for r in list(self._rules):
             s = self._stats.get(r.name) or _RuleStats()
-            rules[r.name] = {
+            entry: dict[str, Any] = {
                 "trigger": r.trigger,
                 "primitive": r.primitive,
                 "enabled": r.enabled,
@@ -515,6 +604,14 @@ class ReflexEngine:
                 "suppressed_minor": s.minor,
                 "no_motion": s.no_motion,
             }
+            track = self._onset.get(r.name)
+            if r.trigger == "loud_onset" and track is not None:
+                entry["onset"] = self._onset_report(track)
+            elif r.trigger == "loud_onset":
+                entry["onset"] = self._onset_report(
+                    _OnsetTrack(self._watch(r), deque(maxlen=self.cfg.onset_window))
+                )
+            rules[r.name] = entry
         audio = self.audio_status() if self.audio_status is not None else {"state": "off"}
         return {
             "enabled": self.cfg.enabled,

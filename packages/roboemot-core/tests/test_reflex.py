@@ -277,7 +277,10 @@ def test_a_new_reflex_setting_must_be_classified_as_shared_with_a_withdraw_or_no
     from roboemot.config.schema import WITHDRAW_RULE_FIELDS, WITHDRAW_SHARED_FIELDS
 
     assert set(WITHDRAW_RULE_FIELDS) == set(ReflexRule.model_fields) - {"name"}
-    not_read_by_a_withdraw = {"startle_lift_ratio", "latency_window", "audio", "rules"}
+    not_read_by_a_withdraw = {
+        "startle_lift_ratio", "latency_window", "audio", "rules", "onset_watch_ratio",
+        "onset_window",
+    }  # fmt: skip
     assert set(ReflexConfig.model_fields) == set(WITHDRAW_SHARED_FIELDS) | not_read_by_a_withdraw
 
 
@@ -895,7 +898,7 @@ def test_enabling_the_reflexes_with_a_face_already_close_withdraws_once():
 NEUTRAL = {
     ReflexConfig: {
         "release_fraction", "proximity_rearm_ratio", "latency_window", "rules",
-        "audio",
+        "audio", "onset_watch_ratio", "onset_window",
     },
     ReflexAudioConfig: {"poll_hz", "loud_event_ratio", "loud_event_refractory_s"},
     # trigger, primitive, threshold and enabled have per-trigger rules in reflex_violations
@@ -1057,3 +1060,158 @@ def test_loud_then_speaking_then_one_quiet_chunk_then_loud_fires():
     rig.engine.offer_audio_level(LOUD, rig.t)
     rig.tick(2)
     assert rig.stats()["fired"] == 1
+
+
+# ------------------------------------------------------------------ startle tuning (SPEC 10, 12A)
+
+
+def speech_like(rig: Rig, peak_ratio: float) -> None:
+    """A speech onset: the level climbs to ``peak_ratio`` x the floor in a few chunks."""
+    for r in (2.0, peak_ratio / 2, peak_ratio, peak_ratio / 2, 1.5):
+        rig.engine.offer_audio_level(QUIET * r, rig.t)
+        rig.tick()
+    rig.settle_audio(0.3)
+
+
+def onset(rig: Rig, name: str = "startle-loud") -> dict:
+    return rig.stats(name)["onset"]
+
+
+def test_the_default_startle_threshold_is_12():
+    startle = next(r for r in ReflexConfig().rules if r.name == "startle-loud")
+    assert startle.threshold == 12.0
+
+
+def test_a_speech_like_onset_at_ratio_8_no_longer_fires_the_default_startle():
+    rig = Rig(ReflexConfig())
+    rig.settle_audio()
+    speech_like(rig, 8.0)
+    rig.run(0.3)
+    assert rig.stats("startle-loud")["fired"] == 0
+    assert rig.reflex_sources() == []
+
+
+def test_a_clap_like_onset_at_ratio_20_fires_the_default_startle():
+    rig = Rig(ReflexConfig())
+    rig.settle_audio()
+    rig.engine.offer_audio_level(LOUD, rig.t)
+    rig.tick()
+    assert rig.stats("startle-loud")["fired"] == 1
+
+
+def test_onset_stats_hold_the_peak_of_each_episode_fired_or_below_the_threshold():
+    rig = Rig(ReflexConfig())
+    rig.settle_audio()
+    speech_like(rig, 8.0)
+    speech_like(rig, 6.0)
+    rig.engine.offer_audio_level(LOUD, rig.t)
+    rig.tick()
+    rig.settle_audio(0.3)
+    stats = onset(rig)
+    assert stats["watch_ratio"] == ReflexConfig().onset_watch_ratio
+    assert stats["below_threshold"]["count"] == 2
+    assert stats["below_threshold"]["max"] == pytest.approx(8.0, rel=0.1)
+    assert stats["below_threshold"]["p50"] == pytest.approx(6.0, rel=0.1)
+    assert stats["fired"]["count"] == 1
+    assert stats["fired"]["max"] == pytest.approx(20.0, rel=0.1)
+    assert {"p50", "p90", "p99", "max"} <= set(stats["fired"])
+
+
+def test_onset_stats_carry_numbers_only():
+    rig = Rig(ReflexConfig())
+    rig.settle_audio()
+    speech_like(rig, 8.0)
+
+    def leaves(v):
+        if isinstance(v, dict):
+            for x in v.values():
+                yield from leaves(x)
+        else:
+            yield v
+
+    assert all(isinstance(x, int | float) for x in leaves(onset(rig)))
+
+
+def test_a_sound_that_has_not_ended_leaves_no_sample_until_it_does():
+    rig = Rig(ReflexConfig())
+    rig.settle_audio()
+    rig.engine.offer_audio_level(QUIET * 8, rig.t)
+    rig.tick()
+    assert onset(rig)["below_threshold"]["count"] == 0
+    rig.settle_audio(0.1)
+    assert onset(rig)["below_threshold"]["count"] == 1
+
+
+def test_onset_stats_are_bounded_by_the_window():
+    rig = Rig(ReflexConfig(onset_window=10))
+    rig.settle_audio()
+    for _ in range(25):
+        speech_like(rig, 8.0)
+    assert onset(rig)["below_threshold"]["count"] == 10
+    assert onset(rig)["window"] == 10
+
+
+def test_a_reload_keeps_the_stats_but_a_new_watch_level_or_a_removed_rule_resets_them():
+    rig = Rig(ReflexConfig())
+    rig.settle_audio()
+    speech_like(rig, 8.0)
+    rig.engine.apply_config(ReflexConfig(), math.radians(3))
+    assert onset(rig)["below_threshold"]["count"] == 1
+    rig.engine.apply_config(ReflexConfig(onset_window=20), math.radians(3))
+    assert onset(rig)["below_threshold"]["count"] == 1
+    assert onset(rig)["window"] == 20
+    rig.engine.apply_config(ReflexConfig(onset_watch_ratio=3.0), math.radians(3))
+    assert onset(rig)["below_threshold"]["count"] == 0
+    assert onset(rig)["watch_ratio"] == 3.0
+    speech_like(rig, 8.0)
+    rig.engine.apply_config(cfg_with(rule(name="other")), math.radians(3))
+    rig.engine.apply_config(ReflexConfig(), math.radians(3))
+    assert onset(rig)["below_threshold"]["count"] == 0
+
+
+def test_the_watch_level_never_sits_above_a_rules_own_threshold():
+    rig = Rig(cfg_with(rule(threshold=1.5), onset_watch_ratio=4.0))
+    rig.settle_audio()
+    rig.engine.offer_audio_level(QUIET * 2, rig.t)
+    rig.tick()
+    rig.settle_audio(0.1)
+    assert onset(rig, "r")["watch_ratio"] == 1.5
+    assert onset(rig, "r")["fired"]["count"] == 1
+
+
+def test_the_robots_own_voice_closes_the_open_episode():
+    rig = Rig(ReflexConfig())
+    rig.settle_audio()
+    rig.engine.offer_audio_level(QUIET * 8, rig.t)
+    rig.tick()
+    rig.engine.speaking = lambda stamp: True
+    rig.engine.offer_audio_level(QUIET * 8, rig.t)
+    assert onset(rig)["below_threshold"]["count"] == 1
+
+
+def test_only_loud_onset_rules_carry_onset_stats():
+    rig = Rig(cfg_with(rule(), PROXIMITY))
+    assert "onset" in rig.stats("r")
+    assert "onset" not in rig.stats("w")
+
+
+def test_an_app_layer_threshold_below_the_new_default_stays_the_installed_baseline():
+    from roboemot.config.stack import ConfigStack, GuardrailError
+
+    rules = [r.model_dump() for r in ReflexConfig().rules]
+    rules[0]["threshold"] = 6.0
+    stack = ConfigStack(app={"reflexes": {"rules": rules}})
+    assert stack.effective().reflexes.rules[0].threshold == 6.0
+    stack.set("reflexes.rules.startle-loud.threshold", 8.0)
+    with pytest.raises(GuardrailError):
+        stack.set("reflexes.rules.startle-loud.threshold", 4.0)
+
+
+def test_a_runtime_override_below_the_new_default_is_refused_and_one_above_is_allowed():
+    from roboemot.config.stack import ConfigStack, GuardrailError
+
+    stack = ConfigStack()
+    with pytest.raises(GuardrailError):
+        stack.set("reflexes.rules.startle-loud.threshold", 8.0)
+    stack.set("reflexes.rules.startle-loud.threshold", 15.0)
+    assert stack.effective().reflexes.rules[0].threshold == 15.0
