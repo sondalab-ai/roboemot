@@ -5,6 +5,7 @@ private in the answer, nothing logged."""
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -19,6 +20,7 @@ from roboemot.webui.settings import SettingsEditor
 from roboemot.world.types import Entry
 from test_webui import PIN, Client, FakeService
 
+CONFIGS = Path(__file__).resolve().parents[3] / "configs"
 SECRET_ID = "9d41-registry-private-id"
 NOW = 100.0
 
@@ -42,7 +44,7 @@ def pipeline():
         perception=SimpleNamespace(registry=SimpleNamespace(get_person=people.__getitem__)),
         world=SimpleNamespace(entries=[face]),
         reflexes=SimpleNamespace(last_fired=lambda now: None),
-        loop=SimpleNamespace(motors_off=False, external=False),
+        loop=SimpleNamespace(motors_off=False, external=False, clock=lambda: NOW),
     )  # fmt: skip
 
 
@@ -198,3 +200,89 @@ def test_the_settings_are_in_the_catalogue_hot_reloadable_and_opt_in(stack):
         assert not fields[f"webui.live.{name}"]["restart"]
     poll = fields["webui.live.poll_ms"]
     assert (poll["unit"], poll["ge"], poll["le"]) == ("ms", 250, 10000)
+
+
+def test_start_webui_keeps_its_live_port_in_step_with_the_stack(tmp_path, stack):
+    from contextlib import ExitStack
+
+    from roboemot.manifest import load_manifest
+    from roboemot.runtime.webui import start_webui
+
+    manifest = load_manifest(
+        CONFIGS / "manifests" / "desk-head-v1.yaml",
+        allow_unmeasured_dynamics=True,
+        safety=stack.effective().safety,
+    )
+    host = SimpleNamespace(
+        perception=SimpleNamespace(enrollment=FakeService()),
+        diagnostics=Diagnostics(),
+        catalogue=None,
+        name_source=None,
+        route_check_router=lambda: None,
+        circadian=None,
+        minor_present=False,
+        phase=ConversationPhase(),
+        webui=None,
+    )
+    with ExitStack() as cleanup:
+        server = start_webui(host, stack, stack.effective(), manifest, cleanup, pipeline())
+        assert server is not None
+        live = server._httpd.api.live
+        assert live.state() is None
+        stack.set("webui.live.enabled", True, source="test", admin=True)
+        assert live.state() is not None
+        stack.set("webui.live.enabled", False, source="test", admin=True)
+        assert live.state() is None
+
+
+def test_a_failed_start_leaves_no_listener_behind(tmp_path, stack, monkeypatch):
+    from contextlib import ExitStack
+
+    from roboemot.runtime import webui as webui_module
+
+    def boom(*a, **kw):
+        raise OSError("port taken")
+
+    monkeypatch.setattr(webui_module, "make_server", boom)
+    before = len(stack._listeners)
+    host = SimpleNamespace(
+        perception=SimpleNamespace(enrollment=None), diagnostics=None, catalogue=None,
+        name_source=None, route_check_router=lambda: None, circadian=None,
+        minor_present=False, phase=ConversationPhase(), webui=None,
+    )  # fmt: skip
+    manifest = SimpleNamespace(robot=SimpleNamespace(profile=None, id="x"))
+    with ExitStack() as cleanup:
+        assert (
+            webui_module.start_webui(host, stack, stack.effective(), manifest, cleanup, pipeline())
+            is None
+        )
+    assert len(stack._listeners) == before
+
+
+def test_a_listener_that_raises_does_not_starve_the_next_one(stack, caplog):
+    seen = []
+
+    def bad(change):
+        raise RuntimeError("secret detail")
+
+    stack.subscribe(bad)
+    stack.subscribe(lambda change: seen.append(change.config.webui.live.enabled))
+    stack.set("webui.live.enabled", True, source="test", admin=True)
+    assert seen == [True]
+    assert "RuntimeError" in caplog.text and "secret detail" not in caplog.text
+
+
+def test_subscribing_twice_keeps_one_entry_and_unsubscribe_removes_it(stack):
+    calls = []
+
+    def fn(change):
+        calls.append(1)
+
+    off = stack.subscribe(fn)
+    stack.subscribe(fn)
+    stack.set("webui.live.poll_ms", 400, source="test")
+    assert calls == [1]
+    off()
+    off()
+    stack.set("webui.live.poll_ms", 500, source="test")
+    assert calls == [1]

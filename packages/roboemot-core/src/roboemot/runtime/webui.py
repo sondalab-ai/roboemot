@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import ExitStack
+from types import SimpleNamespace
 from typing import Any
 
 from roboemot import paths
@@ -35,9 +36,11 @@ def start_webui(
     page: enrollment is a side channel, not a reason to stop the robot. ``p`` is the pipeline the
     Live tab reads its inner state from (SPEC 11A).
     """
+    unsubscribe = None
     try:
         live = LiveState(host, p, stack.effective(), clock=p.loop.clock)
-        stack.subscribe(live.apply_config)
+        unsubscribe = stack.subscribe(live.apply_config)
+        live.apply_config(SimpleNamespace(config=stack.effective()))  # a change since the read above
         secrets = SecretsAdmin(stack.effective, store=SecretStore.for_data_dir(cfg.data_dir))
         settings = SettingsEditor(
             stack,
@@ -65,6 +68,8 @@ def start_webui(
             live=live,
         )
     except Exception as exc:
+        if unsubscribe is not None:
+            unsubscribe()
         log.error("web UI not started: %s", type(exc).__name__)
         return None
     cleanup.callback(server.stop)

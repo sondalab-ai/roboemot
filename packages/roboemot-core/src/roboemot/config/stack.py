@@ -19,6 +19,7 @@ from __future__ import annotations
 import contextlib
 import copy
 import json
+import logging
 import os
 import threading
 import time
@@ -41,6 +42,8 @@ from .schema import (
     VoiceConfig,
     rule_identity,
 )
+
+log = logging.getLogger(__name__)
 
 LAYER_ORDER = ("defaults", "manifest", "preset", "app", "derived", "person", "runtime")
 KEYED_LISTS = {"appraisal.rules": "event", "llm_routes": "name"}
@@ -1324,8 +1327,17 @@ class ConfigStack:
         except ValueError as exc:
             raise ConfigError(str(exc)) from exc
 
-    def subscribe(self, fn: Callable[[ConfigChange], None]) -> None:
-        self._listeners.append(fn)
+    def subscribe(self, fn: Callable[[ConfigChange], None]) -> Callable[[], None]:
+        """Call ``fn`` on every change; subscribing the same ``fn`` twice keeps one entry.
+        Returns a function that removes it again (safe to call twice)."""
+        if fn not in self._listeners:
+            self._listeners.append(fn)
+
+        def unsubscribe() -> None:
+            if fn in self._listeners:
+                self._listeners.remove(fn)
+
+        return unsubscribe
 
     # ---- hot reload (SPEC 11A: applies within 1 s)
 
@@ -1565,7 +1577,10 @@ class ConfigStack:
         restart = [k for k in keys if field_meta(k).get("restart")]
         change = ConfigChange(keys, restart, new)
         for fn in list(self._listeners):
-            fn(change)
+            try:
+                fn(change)
+            except Exception as exc:  # one failing listener must not starve the others
+                log.warning("config listener failed: %s", type(exc).__name__)
         return change
 
     def _remember_mtimes(self) -> None:
