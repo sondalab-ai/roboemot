@@ -34,6 +34,7 @@ from .api import (
     Request,
     Response,
     RoutesPort,
+    SecretsPort,
     SettingsPort,
     WebApi,
 )
@@ -395,6 +396,7 @@ def make_server(
     routes: RoutesPort | None = None,
     settings: SettingsPort | None = None,
     pseudonyms: PseudonymsPort | None = None,
+    secrets: SecretsPort | None = None,
 ) -> Server:
     """Build the web UI on ``cfg.webui.bind:port``; nothing is served until ``start()``.
 
@@ -416,6 +418,7 @@ def make_server(
         routes=routes,
         settings=settings,
         pseudonyms=pseudonyms,
+        secrets=secrets,
     )
     bind = web.bind or (ANY_INTERFACE if robot_hosted else LOOPBACK_INTERFACE)
     httpd = _Httpd((bind, web.port), _Handler)

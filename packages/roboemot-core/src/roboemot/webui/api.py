@@ -34,11 +34,13 @@ from roboemot.config.schema import ROUTE_NAME_MAX_CHARS, RoboEmotConfig, WebUICo
 from roboemot.config.stack import ConfigError, GuardrailError
 from roboemot.llm.conformance import RouteBudgetExhausted, RouteKeyUnavailable
 from roboemot.registry.records import Consent, ConsentError
+from roboemot.secret_store import MAX_VALUE_CHARS, SecretUnavailable
 
 from . import validation as v
 from .auth import LoginLimiter, PinStore, Sessions
 from .guard import same_origin
 from .routes import RouteBusy
+from .secrets_admin import SecretInUse, secret_name, secret_value
 from .settings import SettingNotAllowed
 from .strings import STRINGS, language_for
 
@@ -121,6 +123,15 @@ class SettingsPort(Protocol):
     ) -> dict[str, Any]: ...
     def remove_entry(self, path: object, source: str) -> dict[str, Any]: ...
     def reset(self, path: object, source: str) -> dict[str, Any]: ...
+
+
+class SecretsPort(Protocol):
+    """``roboemot.webui.secrets_admin.SecretsAdmin`` (SPEC 8 Secrets): secret names with the
+    routes that use them, and write-only set/remove. Nothing here returns a value."""
+
+    def listing(self) -> list[dict[str, Any]]: ...
+    def set(self, name: str, value: str) -> None: ...
+    def remove(self, name: str) -> bool: ...
 
 
 class CataloguePort(Protocol):
@@ -226,9 +237,11 @@ class WebApi:
         routes: RoutesPort | None = None,
         settings: SettingsPort | None = None,
         pseudonyms: PseudonymsPort | None = None,
+        secrets: SecretsPort | None = None,
     ) -> None:
         self.service = service
         self.settings = settings
+        self.secrets = secrets
         self.pseudonyms = pseudonyms
         self.catalogue = catalogue
         self.routes = routes
@@ -331,6 +344,9 @@ class WebApi:
             ("POST", "/api/registry/quarantined/purge"): self._purge,
             ("GET", "/api/debug"): self._debug,
             ("GET", "/api/routes"): self._routes,
+            ("GET", "/api/secrets"): self._secrets_list,
+            ("POST", "/api/secrets/set"): self._secret_set,
+            ("POST", "/api/secrets/remove"): self._secret_remove,
             ("GET", "/api/settings"): self._settings_list,
             ("POST", "/api/settings"): self._settings_change,
             ("POST", "/api/settings/reveal"): self._settings_reveal,
@@ -809,6 +825,64 @@ class WebApi:
         except RouteKeyUnavailable as exc:
             raise ApiError(HTTPStatus.CONFLICT, "route_secret") from exc
         return Response(HTTPStatus.ACCEPTED, {"running": True})
+
+    # ------------------------------------------------------------------ secrets
+
+    def _secrets_port(self) -> SecretsPort:
+        if self.secrets is None:
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "secrets_unavailable")
+        return self.secrets
+
+    def _secrets_list(self, req: Request) -> Response:
+        """Secret names with the routes that use each. Never a value, length or prefix."""
+        port = self._secrets_port()
+        try:
+            rows = port.listing()
+        except SecretUnavailable as exc:
+            raise ApiError(HTTPStatus.CONFLICT, "secret_store") from exc
+        return Response(HTTPStatus.OK, {"secrets": rows, "max_value_chars": MAX_VALUE_CHARS})
+
+    def _secret_set(self, req: Request) -> Response:
+        """Add or replace a secret (SPEC 8 Secrets). Body: ``name``, ``value``, ``pin``. The PIN is
+        checked first; the value is validated, stored and never echoed, logged or kept (not even
+        its length is returned)."""
+        port = self._secrets_port()
+        body = self._json_body(req)
+        v.only_keys(body, {"name", "value", "pin"})
+        if "name" not in body or "value" not in body:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
+        self._check_pin(req, body.get("pin"))
+        name, value = secret_name(body["name"]), secret_value(body["value"])
+        self._secret_call(lambda: port.set(name, value), name)
+        return Response(HTTPStatus.OK, {"name": name, "set": True})
+
+    def _secret_remove(self, req: Request) -> Response:
+        """Delete a secret no route uses. Body: ``name``, ``pin``."""
+        port = self._secrets_port()
+        body = self._json_body(req)
+        v.only_keys(body, {"name", "pin"})
+        if "name" not in body:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
+        self._check_pin(req, body.get("pin"))
+        name = secret_name(body["name"])
+        gone = self._secret_call(lambda: port.remove(name), name)
+        if not gone:
+            raise ApiError(HTTPStatus.NOT_FOUND, "secret_unknown")
+        return Response(HTTPStatus.OK, {"name": name, "set": False})
+
+    @staticmethod
+    def _secret_call(call: Callable[[], Any], name: str) -> Any:
+        """Run a store write; refusals become bare codes (no value, no path, no store message)."""
+        try:
+            return call()
+        except SecretInUse as exc:
+            raise ApiError(HTTPStatus.CONFLICT, "secret_in_use") from exc
+        except SecretUnavailable as exc:
+            log.warning("secret %r: store not usable", name)
+            raise ApiError(HTTPStatus.CONFLICT, "secret_store") from exc
+        except OSError as exc:
+            log.error("secret store write failed (%s)", type(exc).__name__)
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "persist_failed") from exc
 
     # ------------------------------------------------------------------ catalogue
 

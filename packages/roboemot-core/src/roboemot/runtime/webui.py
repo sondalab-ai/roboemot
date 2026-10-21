@@ -10,6 +10,7 @@ from roboemot import paths
 from roboemot.config import ConfigStack
 from roboemot.webui import Server, make_server
 from roboemot.webui.routes import RouteChecker
+from roboemot.webui.secrets_admin import SecretsAdmin
 from roboemot.webui.settings import SettingsEditor
 
 from .host import RuntimeHost
@@ -40,6 +41,7 @@ def start_webui(
             catalogue=host.catalogue,
             settings=settings,
             pseudonyms=host.name_source,
+            secrets=SecretsAdmin(stack.effective),
             routes=RouteChecker(
                 stack.effective,
                 paths.route_checks_path(cfg.data_dir),

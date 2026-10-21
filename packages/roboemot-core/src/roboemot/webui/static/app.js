@@ -546,9 +546,70 @@ async function catalogueView() {
         async () => { if (await clearTombstones()) await guarded(catalogueView); }) : [])));
 }
 
+// ---------------------------------------------------------------- secrets (write-only)
+
+// The key is typed once: it is read from the field and the field is emptied before the request is
+// sent, and the PIN likewise, so a failure never leaves either in the page. The page never holds a
+// stored value: the list has names and the routes that use them.
+function secretsCard(data, reload) {
+  const name = textInput("secret-name", { required: true, maxlength: "128", autocomplete: "off", autocapitalize: "off", spellcheck: "false" });
+  const value = textInput("secret-value", {
+    type: "password", required: true, autocomplete: "off", autocapitalize: "off", spellcheck: "false",
+    maxlength: String(data.max_value_chars),
+  });
+  const pin = textInput("secret-pin", { type: "password", autocomplete: "off", inputmode: "numeric", required: true, maxlength: "64" });
+  const form = el("form", {
+    class: "stack", autocomplete: "off",
+    onsubmit: (ev) => {
+      ev.preventDefault();
+      const body = { name: name.value.trim(), value: value.value, pin: pin.value };
+      value.value = "";
+      pin.value = "";
+      guarded(async () => {
+        try {
+          await api("POST", "/api/secrets/set", body);
+        } finally {
+          body.value = "";
+          body.pin = "";
+        }
+        name.value = "";
+        notice(t("secret_saved", { name: body.name }));
+        await reload();
+      });
+    },
+  },
+  field("secret-name", t("secret_name"), name, t("secret_name_hint")),
+  field("secret-value", t("secret_value"), value, t("secret_value_hint")),
+  field("secret-pin", t("pin"), pin),
+  el("div", { class: "row" }, submitButton(t("secret_save"))));
+  const remove = (s) => guarded(async () => {
+    const done = await ask({
+      title: t("secret_remove_title", { name: s.name }), message: t("secret_remove_message"),
+      pin: true, danger: true, confirm: t("secret_remove"),
+      run: async ({ pin: entered }) => { await api("POST", "/api/secrets/remove", { name: s.name, pin: entered }); },
+    });
+    if (done) { notice(t("secret_removed", { name: s.name })); await reload(); }
+  });
+  const rows = data.secrets.map((s) => el("tr", {},
+    el("td", {}, s.name),
+    el("td", {}, badge(t(s.set ? "secret_set" : "secret_unset"), s.set ? "success" : "warning")),
+    el("td", {}, s.used_by.length ? t("secret_used_by", { routes: s.used_by.join(", ") }) : t("secret_unused")),
+    el("td", {}, button(t("secret_remove"), "danger", () => remove(s), { small: true, attrs: { disabled: s.used_by.length > 0, title: s.used_by.length ? t("secret_in_use_hint") : null } }))));
+  return card(t("tab_routes"), t("secrets_title"), el("p", { class: "hint" }, t("secrets_intro")),
+    rows.length ? table([t("secret_name"), "", "", ""], rows) : el("p", { class: "hint" }, t("secrets_none")),
+    form);
+}
+
 async function routesView() {
   const view = document.getElementById("view");
   const data = await api("GET", "/api/routes");
+  let secrets = null;
+  try {
+    secrets = await api("GET", "/api/secrets");
+  } catch (err) {
+    if (err.message === "secret_store") notice(explain(err), true);
+    else if (err.message !== "secrets_unavailable") throw err;
+  }
   view.replaceChildren();
   const verdict = (c) => el("li", {}, t("check_" + c.name) + ": ", badge(t("status_" + c.status), c.status === "pass" ? "success" : (c.status === "fail" ? "danger" : "info")), " " + c.reason);
   const show = (box, report) => {
@@ -585,6 +646,7 @@ async function routesView() {
   };
   view.append(card(t("tab_routes"), t("tab_routes"), el("p", { class: "hint" }, t("routes_intro"))),
     ...(cards.length ? cards : [empty(t("tab_routes"), t("routes_none"))]),
+    ...(secrets ? [secretsCard(secrets, routesView)] : []),
     card(t("tab_routes"), t("refused_title"), el("p", { class: "hint" }, t("refused_hint")),
       el("div", { class: "row" }, button(t("refused_show"), "plain", () => guarded(showRefused))), refusedBox));
   if (state.tab === "routes" && data.routes.some((r) => r.running)) {

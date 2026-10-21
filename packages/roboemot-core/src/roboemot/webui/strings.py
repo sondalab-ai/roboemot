@@ -146,6 +146,38 @@ EN: dict[str, str] = {
         "the daily budget of the route."
     ),
     "routes_none": "No LLM route is configured.",
+    "secrets_title": "API keys",
+    "secrets_intro": (
+        "API keys are stored on the robot and can only be written here, never read back: the "
+        "page shows the name of a key and whether a route uses it, not its value. A route "
+        "refers to a key by its name."
+    ),
+    "secrets_none": "No key is stored yet.",
+    "secret_name": "Name",
+    "secret_name_hint": (
+        "Letters, digits, dot, dash or underscore; it starts with a letter or digit."
+    ),
+    "secret_value": "Key",
+    "secret_value_hint": "Pasted once and cleared on save. The page never shows it again.",
+    "secret_save": "Save key",
+    "secret_saved": "Key {name} saved.",
+    "secret_removed": "Key {name} removed.",
+    "secret_remove": "Remove",
+    "secret_remove_title": "Remove key {name}?",
+    "secret_remove_message": "The key is deleted from the robot. This cannot be undone.",
+    "secret_used_by": "used by {routes}",
+    "secret_unused": "not used by a route",
+    "secret_set": "set",
+    "secret_unset": "not set",
+    "secret_in_use_hint": "Choose another key or no key on those routes first.",
+    "err_secrets_unavailable": "API keys are not available.",
+    "err_secret_name_invalid": "The key name is not valid.",
+    "err_secret_value_invalid": (
+        "The key must be visible ASCII characters without spaces, and not too long."
+    ),
+    "err_secret_in_use": "A route uses this key. Choose another key on that route first.",
+    "err_secret_unknown": "No such key.",
+    "err_secret_store": "The key store cannot be used. Check its file permissions on the robot.",
     "err_pseudonyms_unavailable": "The list of names is not available.",
     "refused_title": "Names not replaced by aliases",
     "refused_hint": (
@@ -534,6 +566,45 @@ IT: dict[str, str] = {
         "token dal budget giornaliero del modello."
     ),
     "routes_none": "Nessun modello LLM configurato.",
+    "secrets_title": "Chiavi API",
+    "secrets_intro": (
+        "Le chiavi API sono salvate sul robot e qui si possono solo scrivere, mai rileggere: la "
+        "pagina mostra il nome di una chiave e se un modello la usa, non il suo valore. Un "
+        "modello si riferisce a una chiave con il suo nome."
+    ),
+    "secrets_none": "Nessuna chiave salvata.",
+    "secret_name": "Nome",
+    "secret_name_hint": (
+        "Lettere, cifre, punto, trattino o underscore; inizia con una lettera o una cifra."
+    ),
+    "secret_value": "Chiave",
+    "secret_value_hint": (
+        "Si incolla una volta e il campo viene svuotato al "
+        "salvataggio. La pagina non la mostra più."
+    ),
+    "secret_save": "Salva chiave",
+    "secret_saved": "Chiave {name} salvata.",
+    "secret_removed": "Chiave {name} rimossa.",
+    "secret_remove": "Rimuovi",
+    "secret_remove_title": "Rimuovere la chiave {name}?",
+    "secret_remove_message": "La chiave viene cancellata dal robot. Non si può annullare.",
+    "secret_used_by": "usata da {routes}",
+    "secret_unused": "non usata da nessun modello",
+    "secret_set": "impostata",
+    "secret_unset": "non impostata",
+    "secret_in_use_hint": "Prima scegli un'altra chiave, o nessuna chiave, su quei modelli.",
+    "err_secrets_unavailable": "Le chiavi API non sono disponibili.",
+    "err_secret_name_invalid": "Il nome della chiave non è valido.",
+    "err_secret_value_invalid": (
+        "La chiave deve avere caratteri ASCII visibili, senza spazi, e non essere troppo lunga."
+    ),
+    "err_secret_in_use": (
+        "Un modello usa questa chiave. Prima scegli un'altra chiave su quel modello."
+    ),
+    "err_secret_unknown": "Chiave sconosciuta.",
+    "err_secret_store": (
+        "L'archivio delle chiavi non è utilizzabile. Controlla i permessi del file sul robot."
+    ),
     "err_pseudonyms_unavailable": "L'elenco dei nomi non è disponibile.",
     "refused_title": "Nomi non sostituiti da alias",
     "refused_hint": (
