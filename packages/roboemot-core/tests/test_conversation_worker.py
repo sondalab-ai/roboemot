@@ -656,6 +656,13 @@ def test_offline_with_a_minor_adds_a_child_line_to_the_nonverbal_reaction(rigs):
     assert rig.responder.last == {"language": "en", "speak": False}  # one line for a child
 
 
+def test_no_configured_route_is_the_fallback_line_not_the_offline_path(rigs):
+    rig = rigs(routes=())
+    rig.turn("hello", language="en")
+    assert rig.responder.calls == 0
+    assert rig.speech.texts() == ["Sorry, I can't think right now."]
+
+
 def test_no_route_available_speaks_the_fallback_line_in_the_utterance_language(rigs):
     rig = rigs()
     rig.server.status["lan.local"] = 500

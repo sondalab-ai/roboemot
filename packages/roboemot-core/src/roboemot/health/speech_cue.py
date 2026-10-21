@@ -30,14 +30,15 @@ class SpeechCue:
     ) -> None:
         self._output, self._delivery, self._muted = output, delivery, muted
 
-    def say(self, text: str, language: str) -> None:
-        """Queue ``text``; called under the responder's lock, from any thread."""
+    def say(self, text: str, language: str) -> bool:
+        """Queue ``text``; True if the output took it. Called under the responder's lock, from
+        any thread."""
         try:
             out = self._output()
             if out is None or self._muted():
-                return
+                return False
             register, circadian, mood, intensity = self._delivery()
-            out.say(
+            job = out.say(
                 text,
                 language=language,
                 register=register,
@@ -45,8 +46,10 @@ class SpeechCue:
                 mood=mood,
                 intensity=intensity,
             )
+            return job is not None
         except Exception as exc:
             log.warning("offline cue: not said (%s)", type(exc).__name__)
+            return False
 
 
 __all__ = ["Delivery", "SpeechCue"]

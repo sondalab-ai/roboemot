@@ -36,14 +36,16 @@ UNAVAILABLE = "conversation.unavailable"
 
 
 class OfflineCue(Protocol):
-    def say(self, text: str, language: str) -> None: ...
+    def say(self, text: str, language: str) -> bool:
+        """Say ``text``; whether it was actually queued (muted or no output: ``False``)."""
+        ...
 
 
 class SilentCue:
     """The cue when there is no speech output (voice disabled, or before it is built)."""
 
-    def say(self, text: str, language: str) -> None:
-        pass
+    def say(self, text: str, language: str) -> bool:
+        return False
 
 
 PERK_UP, PUZZLED = "perk_up", "puzzled"
@@ -99,9 +101,9 @@ class OfflineResponder:
         phrases = self.cfg.offline_phrases
         lang = language if language in phrases else self.language
         text = phrases.get(lang)
-        if text and now - self._last_cue >= self.cfg.cue_cooldown_s:
+        due = now - self._last_cue >= self.cfg.cue_cooldown_s
+        if text and due and self.cue.say(text, lang):  # a muted cue leaves the cooldown free
             self._last_cue = now
-            self.cue.say(text, lang)
 
 
 __all__ = ["PERK_UP", "PUZZLED", "OfflineCue", "OfflineResponder", "SilentCue"]

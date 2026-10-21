@@ -101,3 +101,24 @@ def test_a_failing_output_never_breaks_the_responder():
     r.on_event("link.network.lost", 0.0)
     r.speech_while_offline(COOLDOWN_S, "it")
     assert r.commands(COOLDOWN_S + 0.5)
+
+
+def test_a_muted_cue_does_not_use_up_the_cooldown():
+    r, out, mute = wired(muted=True)
+    r.on_event("link.network.lost", 0.0)  # muted: nothing said, cooldown not consumed
+    mute[0] = False
+    r.speech_while_offline(1.0, "it")
+    assert len(out.said) == 1
+
+
+def test_no_output_does_not_use_up_the_cooldown():
+    r, _, _ = wired(speech=False)
+    r.on_event("link.network.lost", 0.0)
+    out = FakeSpeech()
+    r.cue = SpeechCue(
+        lambda: out,
+        lambda: (CFG.register.unknown, CFG.circadian.states["awake"], "joy", 0.5),
+        lambda: False,
+    )
+    r.speech_while_offline(1.0, "it")
+    assert len(out.said) == 1
