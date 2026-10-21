@@ -32,6 +32,10 @@ section number in commit messages that implement or change behaviour.
   `set_automatic_body_yaw(False)` on start and after a reconnect. Call `set_target` only after
   `enable_motors()`. Antenna order in the SDK is `[right, left]`. One process owns the SDK
   client and its media.
+- **Platform moves and sleep (SPEC 4A, 12A):** the motion loop never writes while the platform
+  runs a move of its own (`driver.platform_move_running()`) or during `motion.platform_move_grace_s`
+  after it. While the platform holds the motors off the robot is asleep (`robot.asleep` on the bus)
+  and the runtime pauses perception, listener and the behaviour tick (`runtime.pause_when_asleep`).
 - **LLM routes are OpenAI-compatible only (SPEC 8).** Use the common subset: streaming,
   `tools` with `tool_choice="auto"`, `max_tokens`. Do not rely on `response_format`,
   forced tool choice, `seed` or non-default sampling.
