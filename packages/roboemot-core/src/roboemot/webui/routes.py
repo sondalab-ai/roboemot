@@ -25,6 +25,7 @@ import httpx
 
 from .. import paths
 from ..config.schema import LLMRoute, RoboEmotConfig
+from ..config.stack import NO_KEY
 from ..llm.conformance import (
     RouteBudgetExhausted,
     RouteKeyUnavailable,
@@ -34,6 +35,7 @@ from ..llm.conformance import (
 )
 from ..llm.pseudonyms import NameSource
 from ..llm.router import SECRET, Router
+from ..redact import secret_shaped
 from ..secret_store import SecretStore
 
 log = logging.getLogger(__name__)
@@ -76,8 +78,9 @@ class RouteChecker:
     def list_routes(self) -> list[dict[str, Any]]:
         """Routes with their running flag and last report; a report made for another model or
         endpoint than the route has now is not shown. A route whose key is a ``${secret:name}``
-        reference shows ``secret`` (the name and whether it is set), never the value. ``api_key``,
-        credentials, path and query of the URL are never included."""
+        reference shows ``secret`` (the name and whether it is set), never the value; ``key`` says
+        which kind of key the route has (``none``, ``secret`` or ``literal``). ``api_key`` and the
+        credentials of the URL are never included, and ``base_url`` is null when it holds any."""
         with self._lock:
             running = self._running
             cfg = self.cfg()
@@ -87,6 +90,9 @@ class RouteChecker:
                     "name": r.name,
                     "model": r.model,
                     "endpoint": route_endpoint(r),
+                    "base_url": None if secret_shaped(r.base_url) else r.base_url,
+                    "locality": r.locality,
+                    "key": _key_kind(r),
                     "allowed_for_minors": r.allowed_for_minors,
                     "running": r.name == running,
                     "secret": _secret_state(r, store),
@@ -213,6 +219,13 @@ class RouteChecker:
             log.warning("route checks: not written (%s)", type(exc).__name__)
             with contextlib.suppress(OSError):
                 tmp.unlink()
+
+
+def _key_kind(route: LLMRoute) -> str:
+    """``none``, ``secret`` (a ``${secret:name}`` reference) or ``literal`` (a key in the config)"""
+    if route.api_key in NO_KEY:
+        return "none"
+    return "secret" if SECRET.match(route.api_key) else "literal"
 
 
 def _secret_state(route: LLMRoute, store: SecretStore) -> dict[str, Any] | None:

@@ -28,8 +28,12 @@ def start_webui(
     page: enrollment is a side channel, not a reason to stop the robot.
     """
     try:
+        secrets = SecretsAdmin(stack.effective)
         settings = SettingsEditor(
-            stack, store=paths.settings_overrides_path(cfg.data_dir), manifest=manifest
+            stack,
+            store=paths.settings_overrides_path(cfg.data_dir),
+            manifest=manifest,
+            known_secrets=secrets.names,
         )
         settings.restore()
         server = make_server(
@@ -41,7 +45,7 @@ def start_webui(
             catalogue=host.catalogue,
             settings=settings,
             pseudonyms=host.name_source,
-            secrets=SecretsAdmin(stack.effective),
+            secrets=secrets,
             routes=RouteChecker(
                 stack.effective,
                 paths.route_checks_path(cfg.data_dir),

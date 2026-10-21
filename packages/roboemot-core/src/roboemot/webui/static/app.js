@@ -600,6 +600,106 @@ function secretsCard(data, reload) {
     form);
 }
 
+// ---------------------------------------------------------------- route form (add and edit)
+
+const ROUTE_LOCALITIES = ["auto", "local", "cloud"];
+const ROUTE_KEY_LITERAL = "@literal"; // not a valid secret name: a key written in the config file
+
+// One form for a new route (`route` null) and for an existing one. A key is chosen from the stored
+// names, never typed. `canClear`: the route may be cleared for minors (a route added from this page
+// cannot: the server refuses that loosening). `save(values, form)` runs the PIN dialog and the calls.
+function routeForm(route, secrets, nameMax, save) {
+  const id = (k) => "route-" + (route ? route.name : "new") + "-" + k;
+  const name = route ? null : textInput(id("name"), { required: true, maxlength: String(nameMax), autocomplete: "off", spellcheck: "false" });
+  const url = textInput(id("url"), { type: "url", required: !route, autocomplete: "off", spellcheck: "false", placeholder: t(route ? "route_url_keep" : "route_url_placeholder") });
+  const model = textInput(id("model"), { required: true, autocomplete: "off", spellcheck: "false", value: route ? route.model : "" });
+  const locality = el("select", { id: id("locality"), class: "sl-field__input" },
+    ROUTE_LOCALITIES.map((l) => el("option", { value: l }, t("route_locality_" + l))));
+  locality.value = route ? route.locality : "cloud";
+  const clearable = route && !route.removable;
+  const minors = el("input", { type: "checkbox", id: id("minors"), disabled: !clearable });
+  minors.checked = Boolean(route && route.allowed_for_minors);
+  const current = !route || route.key === "none" ? "" : (route.key === "secret" ? route.secret.name : ROUTE_KEY_LITERAL);
+  const names = secrets.filter((s) => s.set).map((s) => s.name);
+  const keys = [["", t("route_key_none")]];
+  if (current === ROUTE_KEY_LITERAL) keys.push([ROUTE_KEY_LITERAL, t("route_key_literal")]);
+  else if (current && !names.includes(current)) keys.push([current, current + " (" + t("secret_unset") + ")"]);
+  for (const n of names) keys.push([n, n]);
+  const key = el("select", { id: id("key"), class: "sl-field__input" }, keys.map(([v, label]) => el("option", { value: v }, label)));
+  key.value = current;
+  const form = el("form", {
+    class: "stack", autocomplete: "off",
+    onsubmit: (ev) => {
+      ev.preventDefault();
+      guarded(() => save({
+        name: name ? name.value.trim() : route.name, base_url: url.value.trim(), model: model.value.trim(),
+        locality: locality.value, allowed_for_minors: minors.checked, key: key.value,
+      }));
+    },
+  },
+  name ? field(id("name"), t("route_name"), name) : [],
+  field(id("url"), t("route_url"), url, route ? t("route_url_hint_edit") : null),
+  field(id("model"), t("route_model"), model),
+  field(id("locality"), t("route_locality"), locality, t("route_locality_hint")),
+  check(t("route_minors_label"), minors),
+  el("p", { class: "hint" }, t(clearable ? "route_minors_hint_edit" : "route_minors_hint")),
+  field(id("key"), t("route_key"), key, t("route_key_hint")),
+  el("div", { class: "row" }, submitButton(t(route ? "route_save" : "route_add"))));
+  return form;
+}
+
+// Calls for a new route or for the changed fields of an existing one, behind one PIN dialog. A route
+// with a key sends it to the host of its URL: the dialog names that host and the call carries it as
+// the acknowledgement (the server names the one it expects when it differs).
+async function saveRoute(route, v) {
+  let ack = null;
+  const origin = routeOrigin(v.base_url || (route && route.base_url) || "");
+  const keyed = v.key !== "" && v.key !== ROUTE_KEY_LITERAL;
+  const moved = route && v.base_url && routeOrigin(v.base_url) !== routeOrigin(route.base_url || "");
+  const target = origin || ack;
+  const steps = [];
+  const mapAck = async (call) => {
+    try {
+      return await call();
+    } catch (err) {
+      if (err.message === "endpoint_ack_required" && err.endpoint) ack = err.endpoint;
+      throw err;
+    }
+  };
+  if (!route) {
+    steps.push((pin) => mapAck(() => api("POST", "/api/routes/add", {
+      name: v.name, base_url: v.base_url, model: v.model, locality: v.locality,
+      allowed_for_minors: v.allowed_for_minors, secret: keyed ? v.key : null, pin,
+      ...(keyed && (ack || origin) ? { ack_endpoint: ack || origin } : {}),
+    })));
+  } else {
+    const path = (f) => "llm_routes." + route.name + "." + f;
+    const set = (f, value) => (pin) => mapAck(() => api("POST", "/api/settings", { path: path(f), value, pin,
+      ...(f === "base_url" && route.key !== "none" && (ack || routeOrigin(value)) ? { ack_endpoint: ack || routeOrigin(value) } : {}) }));
+    if (moved) steps.push(set("base_url", v.base_url));
+    if (v.key !== (route.key === "none" ? "" : (route.key === "secret" ? route.secret.name : ROUTE_KEY_LITERAL))) {
+      steps.push((pin) => mapAck(() => api("POST", "/api/routes/key", {
+        name: route.name, secret: keyed ? v.key : null, pin,
+        ...(keyed && (ack || origin) ? { ack_endpoint: ack || origin } : {}),
+      })));
+    }
+    if (v.locality !== route.locality) steps.push(set("locality", v.locality));
+    if (!route.removable && v.allowed_for_minors !== route.allowed_for_minors) steps.push(set("allowed_for_minors", v.allowed_for_minors));
+    if (v.model !== route.model) steps.push(set("model", v.model));
+    if (!steps.length) { notice(t("settings_unchanged")); return; }
+  }
+  const sends = keyed || (moved && route.key !== "none");
+  const message = sends && target ? t("route_key_message", { host: target }) : (route ? route.name : v.name);
+  let ran = false;
+  await pinnedCall(message, t(route ? "route_save" : "route_add"), async (pin) => {
+    for (const step of steps) await step(pin);
+    ran = true;
+    return {};
+  });
+  if (ran) notice(t(route ? "route_saved" : "route_added", { name: route ? route.name : v.name }));
+  await routesView();
+}
+
 async function routesView() {
   const view = document.getElementById("view");
   const data = await api("GET", "/api/routes");
@@ -610,6 +710,7 @@ async function routesView() {
     if (err.message === "secret_store") notice(explain(err), true);
     else if (err.message !== "secrets_unavailable") throw err;
   }
+  const secretList = secrets ? secrets.secrets : [];
   view.replaceChildren();
   const verdict = (c) => el("li", {}, t("check_" + c.name) + ": ", badge(t("status_" + c.status), c.status === "pass" ? "success" : (c.status === "fail" ? "danger" : "info")), " " + c.reason);
   const show = (box, report) => {
@@ -627,11 +728,25 @@ async function routesView() {
       await api("POST", "/api/routes/" + encodeURIComponent(r.name) + "/check", {});
       await routesView();
     }), { attrs: { disabled: r.running } });
+    const edit = el("div", { hidden: true }, routeForm(r, secretList, data.name_max_chars, (v) => saveRoute(r, v)));
+    const toggle = button(t("route_edit"), "plain", () => { edit.hidden = !edit.hidden; });
+    const remove = button(t("route_remove"), "danger", () => guarded(async () => {
+      const done = await ask({
+        title: t("route_remove_title", { name: r.name }), message: t("route_remove_message"), pin: true, danger: true,
+        confirm: t("route_remove"),
+        run: async ({ pin }) => { await api("POST", "/api/routes/remove", { name: r.name, pin }); },
+      });
+      if (done) { notice(t("route_removed", { name: r.name })); await routesView(); }
+    }));
     return busy(card(t("tab_routes"), r.name,
-      el("p", { class: "hint" }, r.model + " @ " + r.endpoint + (r.allowed_for_minors ? ", " + t("route_minors") : "")),
-      r.secret ? el("p", { class: "hint" }, t(r.secret.set ? "route_secret_set" : "route_secret_missing", { name: r.secret.name })) : [],
-      el("div", { class: "row" }, run), box), r.running);
+      el("p", { class: "hint" }, r.model + " @ " + r.endpoint + ", " + t("route_locality_" + r.locality) + (r.allowed_for_minors ? ", " + t("route_minors") : "")),
+      !r.allowed_for_minors ? el("p", { class: "hint" }, t("route_minors_off")) : [],
+      r.secret ? el("p", { class: "hint" }, t(r.secret.set ? "route_secret_set" : "route_secret_missing", { name: r.secret.name })) :
+        (r.key === "literal" ? el("p", { class: "hint" }, t("route_key_literal")) : []),
+      el("div", { class: "row" }, run, toggle, r.removable ? remove : []), box, edit), r.running);
   });
+  const addCard = card(t("tab_routes"), t("route_add_title"), el("p", { class: "hint" }, t("route_add_intro")),
+    routeForm(null, secretList, data.name_max_chars, (v) => saveRoute(null, v)));
   // Names kept as typed (admin PIN, one request): shown here only until the view is redrawn.
   const refusedBox = el("div", { role: "status" });
   const showRefused = async () => {
@@ -646,12 +761,21 @@ async function routesView() {
   };
   view.append(card(t("tab_routes"), t("tab_routes"), el("p", { class: "hint" }, t("routes_intro"))),
     ...(cards.length ? cards : [empty(t("tab_routes"), t("routes_none"))]),
+    addCard,
     ...(secrets ? [secretsCard(secrets, routesView)] : []),
     card(t("tab_routes"), t("refused_title"), el("p", { class: "hint" }, t("refused_hint")),
       el("div", { class: "row" }, button(t("refused_show"), "plain", () => guarded(showRefused))), refusedBox));
   if (state.tab === "routes" && data.routes.some((r) => r.running)) {
-    state.timer = setTimeout(() => guarded(routesView), ROUTES_POLL_MS);
+    state.timer = setTimeout(() => guarded(refreshRoutes), ROUTES_POLL_MS);
   }
+}
+
+// The poll redraws the page; it waits while a form field has the focus so typing is not lost.
+async function refreshRoutes() {
+  const focus = document.activeElement;
+  const typing = focus && document.getElementById("view").contains(focus) && ["INPUT", "SELECT", "TEXTAREA"].includes(focus.tagName);
+  if (!typing) { await routesView(); return; }
+  if (state.tab === "routes") state.timer = setTimeout(() => guarded(refreshRoutes), ROUTES_POLL_MS);
 }
 
 async function debugView() {

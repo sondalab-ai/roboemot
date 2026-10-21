@@ -53,6 +53,8 @@ MAX_PIN_CHARS = 64
 ENROLLMENT_ID_BYTES = 8
 STATE_PATTERN = re.compile(r"[a-z_]{1,32}")
 ENTITY_KINDS = frozenset({"animal", "object"})
+ROUTE_FIELDS = frozenset({"name", "base_url", "model", "locality", "allowed_for_minors"})
+ROUTE_NAME = re.compile(rf"[A-Za-z0-9_-]{{1,{ROUTE_NAME_MAX_CHARS}}}")
 JSON_TYPE = "application/json; charset=utf-8"
 CATALOGUE_IMPORT = "/api/catalogue/import"
 BASE64_GROUP_IN = 3
@@ -123,6 +125,13 @@ class SettingsPort(Protocol):
     ) -> dict[str, Any]: ...
     def remove_entry(self, path: object, source: str) -> dict[str, Any]: ...
     def reset(self, path: object, source: str) -> dict[str, Any]: ...
+    def add_route(
+        self, value: object, secret: object, ack: object, source: str
+    ) -> dict[str, Any]: ...
+    def set_route_key(
+        self, name: object, secret: object, ack: object, source: str
+    ) -> dict[str, Any]: ...
+    def removable_routes(self) -> list[str]: ...
 
 
 class SecretsPort(Protocol):
@@ -344,6 +353,9 @@ class WebApi:
             ("POST", "/api/registry/quarantined/purge"): self._purge,
             ("GET", "/api/debug"): self._debug,
             ("GET", "/api/routes"): self._routes,
+            ("POST", "/api/routes/add"): self._route_add,
+            ("POST", "/api/routes/key"): self._route_key,
+            ("POST", "/api/routes/remove"): self._route_remove,
             ("GET", "/api/secrets"): self._secrets_list,
             ("POST", "/api/secrets/set"): self._secret_set,
             ("POST", "/api/secrets/remove"): self._secret_remove,
@@ -807,8 +819,64 @@ class WebApi:
         return self.routes
 
     def _routes(self, req: Request) -> Response:
-        """Routes by name, model, host and minors flag, with the last conformance report."""
-        return Response(HTTPStatus.OK, {"routes": self._routes_port().list_routes()})
+        """Routes by name, model, host and minors flag, with the last conformance report and
+        ``removable`` (only the runtime layer holds the route, so the page may remove it)."""
+        rows = self._routes_port().list_routes()
+        removable = set(self.settings.removable_routes()) if self.settings else set()
+        return Response(
+            HTTPStatus.OK, {"routes": [{**r, "removable": r["name"] in removable} for r in rows]}
+        )
+
+    def _route_add(self, req: Request) -> Response:
+        """Add a route (SPEC 8, 11A). Body: ``name``, ``base_url``, ``model`` and optionally
+        ``locality``, ``allowed_for_minors``, ``secret`` (a name in the secret store; omitted or
+        null for no key), ``ack_endpoint`` (required with a key: the endpoint the server names in
+        ``endpoint_ack_required``) and ``pin``. A key typed into any field is refused."""
+        port = self._settings_port()
+        body = self._json_body(req)
+        v.only_keys(body, ROUTE_FIELDS | {"secret", "ack_endpoint", "pin"})
+        if not {"name", "base_url", "model"} <= set(body):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
+        self._check_pin(req, body.get("pin"))
+        value = {k: body[k] for k in ROUTE_FIELDS if k in body}
+        return self._route_call(
+            lambda: port.add_route(
+                value, body.get("secret"), body.get("ack_endpoint"), self._who(req)
+            )
+        )
+
+    def _route_key(self, req: Request) -> Response:
+        """Choose the key of a route. Body: ``name``, ``secret`` (a stored name, or null for no
+        key), ``ack_endpoint`` (required unless null) and ``pin``."""
+        port = self._settings_port()
+        body = self._json_body(req)
+        v.only_keys(body, {"name", "secret", "ack_endpoint", "pin"})
+        if "name" not in body or "secret" not in body:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
+        self._check_pin(req, body.get("pin"))
+        return self._route_call(
+            lambda: port.set_route_key(
+                body["name"], body["secret"], body.get("ack_endpoint"), self._who(req)
+            )
+        )
+
+    def _route_remove(self, req: Request) -> Response:
+        """Remove a route that only the runtime layer holds. Body: ``name``, ``pin``."""
+        port = self._settings_port()
+        body = self._json_body(req)
+        v.only_keys(body, {"name", "pin"})
+        name = body.get("name")
+        if not isinstance(name, str) or ROUTE_NAME.fullmatch(name) is None:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
+        self._check_pin(req, body.get("pin"))
+        return self._route_call(lambda: port.remove_entry(f"llm_routes.{name}", self._who(req)))
+
+    def _route_call(self, call: Callable[[], dict[str, Any]]) -> Response:
+        """A route write: the settings refusals, plus an unusable secret store as a bare code."""
+        try:
+            return self._settings_call(call)
+        except SecretUnavailable as exc:
+            raise ApiError(HTTPStatus.CONFLICT, "secret_store") from exc
 
     def _route_check(self, name: str) -> Response:
         """Start the conformance test of one route in the background (it outlives the request

@@ -146,6 +146,52 @@ EN: dict[str, str] = {
         "the daily budget of the route."
     ),
     "routes_none": "No LLM route is configured.",
+    "route_add_title": "Add a route",
+    "route_add_intro": (
+        "A route is an OpenAI-compatible model the robot can talk to. Pick its key from the "
+        "stored keys below; a key is never typed here. Changes ask for the operator PIN and apply "
+        "at once."
+    ),
+    "route_name": "Name",
+    "route_url": "Base URL",
+    "route_url_keep": "Leave empty to keep it",
+    "route_url_placeholder": "https://api.example.com/v1",
+    "route_url_hint_edit": "The stored address is not shown if it holds credentials.",
+    "route_model": "Model",
+    "route_locality": "Where the model runs",
+    "route_locality_auto": "Automatic",
+    "route_locality_local": "Local (home network)",
+    "route_locality_cloud": "Cloud",
+    "route_locality_hint": (
+        "A route on this machine or the home network sees real names. Setting one up needs the "
+        "configuration file; from here only cloud routes are accepted."
+    ),
+    "route_minors_label": "Cleared for minors",
+    "route_minors_hint": (
+        "While a minor is present, or when the camera is off and the robot assumes one, a route "
+        "that is not cleared for minors is skipped. A route added here cannot be cleared; "
+        "that needs the configuration file."
+    ),
+    "route_minors_hint_edit": (
+        "While a minor is present, or when the camera is off and the robot assumes one, a route "
+        "that is not cleared for minors is skipped. It is also used only if the setting "
+        "safety.minors_allowed_llm is on."
+    ),
+    "route_minors_off": "Skipped while a minor is present (not cleared for minors).",
+    "route_key": "Key",
+    "route_key_none": "No key",
+    "route_key_literal": "A key written in the configuration file",
+    "route_key_hint": "Only stored keys can be chosen. Add one in the API keys card below.",
+    "route_key_message": "The key will be sent to {host}. Enter the PIN to allow it.",
+    "route_add": "Add route",
+    "route_save": "Save route",
+    "route_edit": "Edit",
+    "route_remove": "Remove",
+    "route_remove_title": "Remove route {name}?",
+    "route_remove_message": "The route is deleted. Its key stays in the store.",
+    "route_added": "Route {name} added.",
+    "route_saved": "Route {name} saved.",
+    "route_removed": "Route {name} removed.",
     "secrets_title": "API keys",
     "secrets_intro": (
         "API keys are stored on the robot and can only be written here, never read back: the "
@@ -566,6 +612,54 @@ IT: dict[str, str] = {
         "token dal budget giornaliero del modello."
     ),
     "routes_none": "Nessun modello LLM configurato.",
+    "route_add_title": "Aggiungi un modello",
+    "route_add_intro": (
+        "Un modello è un servizio compatibile OpenAI con cui il robot può parlare. La chiave si "
+        "sceglie tra quelle salvate qui sotto; non si scrive mai in questo modulo. Le modifiche "
+        "chiedono il PIN operatore e valgono subito."
+    ),
+    "route_name": "Nome",
+    "route_url": "Indirizzo base",
+    "route_url_keep": "Lascia vuoto per non cambiarlo",
+    "route_url_placeholder": "https://api.example.com/v1",
+    "route_url_hint_edit": "L'indirizzo salvato non viene mostrato se contiene credenziali.",
+    "route_model": "Modello",
+    "route_locality": "Dove gira il modello",
+    "route_locality_auto": "Automatico",
+    "route_locality_local": "Locale (rete di casa)",
+    "route_locality_cloud": "Cloud",
+    "route_locality_hint": (
+        "Un modello su questa macchina o sulla rete di casa vede i nomi veri. Configurarne uno "
+        "richiede il file di configurazione; da qui si accettano solo modelli cloud."
+    ),
+    "route_minors_label": "Adatto ai minori",
+    "route_minors_hint": (
+        "Quando c'è un minore, o quando la camera è spenta e il robot ne presume uno, un modello "
+        "non adatto ai minori viene saltato. Un modello aggiunto da qui non può essere reso "
+        "adatto: serve il file di configurazione."
+    ),
+    "route_minors_hint_edit": (
+        "Quando c'è un minore, o quando la camera è spenta e il robot ne presume uno, un modello "
+        "non adatto ai minori viene saltato. Viene usato solo se anche l'impostazione "
+        "safety.minors_allowed_llm è attiva."
+    ),
+    "route_minors_off": "Saltato quando c'è un minore (non adatto ai minori).",
+    "route_key": "Chiave",
+    "route_key_none": "Nessuna chiave",
+    "route_key_literal": "Una chiave scritta nel file di configurazione",
+    "route_key_hint": (
+        "Si possono scegliere solo chiavi salvate. Aggiungila nella scheda Chiavi API."
+    ),
+    "route_key_message": "La chiave verrà inviata a {host}. Inserisci il PIN per consentirlo.",
+    "route_add": "Aggiungi modello",
+    "route_save": "Salva modello",
+    "route_edit": "Modifica",
+    "route_remove": "Rimuovi",
+    "route_remove_title": "Rimuovere il modello {name}?",
+    "route_remove_message": "Il modello viene eliminato. La sua chiave resta nell'archivio.",
+    "route_added": "Modello {name} aggiunto.",
+    "route_saved": "Modello {name} salvato.",
+    "route_removed": "Modello {name} rimosso.",
     "secrets_title": "Chiavi API",
     "secrets_intro": (
         "Le chiavi API sono salvate sul robot e qui si possono solo scrivere, mai rileggere: la "

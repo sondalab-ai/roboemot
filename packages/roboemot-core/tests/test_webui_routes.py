@@ -94,10 +94,14 @@ def test_list_shows_endpoint_only_and_no_key(served):
             "name": "lan",
             "model": "m",
             "endpoint": "lan.local:8443",
+            "base_url": None,  # it holds user info: never sent, only replaceable whole
+            "locality": "auto",
+            "key": "literal",
             "allowed_for_minors": False,
             "running": False,
             "secret": None,
             "last_check": None,
+            "removable": False,
         }
     ]
     for leaked in (SECRET_KEY, "user", "pw", "token=abc", "/v1"):
