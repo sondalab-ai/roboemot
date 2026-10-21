@@ -34,11 +34,27 @@ def mini():
     yield m
 
 
+def _wait_until_still(
+    driver: ReachyMiniDriver, still_s: float = 1.5, limit_s: float = 20.0
+) -> None:
+    """A move a previous test left running in the daemon (a wake-up) would, rightly, be read as
+    external control and delay the loop under test by the grace: start from a settled robot."""
+    end, since, last = time.monotonic() + limit_s, time.monotonic(), driver.read_state()
+    while time.monotonic() < end and time.monotonic() - since < still_s:
+        time.sleep(0.05)
+        now = driver.read_state()
+        if any(abs(now[k] - last[k]) > 0.002 for k in now):
+            since = time.monotonic()
+        last = now
+
+
 @pytest.fixture()
 def loop(mini):
     cfg = ConfigStack().effective()
     manifest = load_manifest(DATA / "reachy-mini-wireless.yaml", allow_unmeasured_dynamics=True)
-    lp = MotionLoop(manifest, ReachyMiniDriver(mini), cfg, rate_hz=50)
+    driver = ReachyMiniDriver(mini)
+    _wait_until_still(driver)
+    lp = MotionLoop(manifest, driver, cfg, rate_hz=50)
     lp.start()
     yield lp
     lp.stop()
