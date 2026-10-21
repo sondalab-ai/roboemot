@@ -172,10 +172,11 @@ def test_attention_tick_uses_the_camera_view_for_world_decay():
 
 def test_reload_updates_attention_consumers():
     cfg, loop, world, selector, gaze = _attention_rig()
-    new = cfg.model_copy(deep=True)
-    new.attention.release_s = 9.0
-    new.world.match_gate_deg = 33.0
-    new.safety.constraint_margin_deg = 7.0
+    tree = cfg.model_dump(mode="python")  # the configuration models are frozen
+    tree["attention"]["release_s"] = 9.0
+    tree["world"]["match_gate_deg"] = 33.0
+    tree["safety"]["constraint_margin_deg"] = 7.0
+    new = type(cfg).model_validate(tree)
     apply_attention_config(new, world, selector, gaze)
     assert selector.cfg.release_s == 9.0 and gaze.cfg.release_s == 9.0
     assert world.cfg.match_gate_deg == 33.0

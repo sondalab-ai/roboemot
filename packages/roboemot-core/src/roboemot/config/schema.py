@@ -68,7 +68,9 @@ def _copy(value: Any) -> Any:
 class Strict(BaseModel):
     """Base model: unknown keys are rejected (SPEC 11A, Rules: Schema)."""
 
-    model_config = ConfigDict(extra="forbid", validate_assignment=True, validate_default=True)
+    model_config = ConfigDict(
+        extra="forbid", validate_assignment=True, validate_default=True, frozen=True
+    )
 
 
 # --------------------------------------------------------------------------- affect (SPEC 7)
