@@ -497,6 +497,7 @@ class FlakyDriver(MockPoseDriver):
     def write_pose_targets(self, t, values):
         self._check()
         super().write_pose_targets(t, values)
+        self.home = {**self.home, **values}  # the robot follows its targets (until moved by hand)
 
     def read_state(self):
         self._check()

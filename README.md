@@ -165,8 +165,12 @@ curl -X POST http://reachy-mini.local:8000/api/apps/restart-current-app
 
 While RoboEmot runs, the robot stays awake: idle motion keeps the motors powered, and the
 daemon only puts the robot to sleep once the app stops. RoboEmot never wakes the robot itself,
-and if the motors are turned off from outside it follows the pose without moving. There is no
-automatic nap on inactivity yet.
+and if the motors are turned off from outside it follows the pose without moving. When the
+owner puts the robot to sleep from the app, RoboEmot notices that the robot stopped following its
+commands, stops writing until it has been still for `motion.platform_move_grace_s`, and while the
+motors stay off pauses the camera perception, the microphone listener and the behaviour tick
+(`runtime.pause_when_asleep`). The microphone read loop and the web UI keep running, so this lowers
+CPU use but does not stop it. There is no automatic nap on inactivity yet.
 
 Debug report with the robot's own system, temperature and battery data (SPEC 12A):
 

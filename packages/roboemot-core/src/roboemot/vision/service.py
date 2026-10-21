@@ -75,7 +75,20 @@ class VisionService:
         self.source = CountingSource(source)
         self.runner = LatestFrameRunner(pipeline)
         self._stop = threading.Event()
+        self._paused = threading.Event()
         self._thread: threading.Thread | None = None
+
+    def pause(self) -> None:
+        """Stop reading the camera until :meth:`resume` (the robot is asleep, SPEC 12A); the
+        threads stay, idle, so nothing is restarted or leaked."""
+        self._paused.set()
+
+    def resume(self) -> None:
+        self._paused.clear()
+
+    @property
+    def paused(self) -> bool:
+        return self._paused.is_set()
 
     def start(self) -> None:
         """Start the worker and the camera thread."""
@@ -109,7 +122,13 @@ class VisionService:
         reported: str | None = None
         while not self._stop.is_set():
             try:
-                pump(self.source, self.runner, self._stop, self.cfg.vision.rates.camera_hz)
+                pump(
+                    self.source,
+                    self.runner,
+                    self._stop,
+                    self.cfg.vision.rates.camera_hz,
+                    paused=self._paused,
+                )
             except Exception as exc:
                 name = type(exc).__name__
                 if name != reported:
@@ -120,7 +139,7 @@ class VisionService:
     def snapshot(self) -> dict[str, Any]:
         """Rates, drops, tracks and last error types for the debug report (SPEC 12A)."""
         return {
-            "state": "running",
+            "state": "paused" if self._paused.is_set() else "running",
             "camera": {
                 "reads": self.source.reads,
                 "frames": self.source.frames,

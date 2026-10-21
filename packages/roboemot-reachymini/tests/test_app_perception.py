@@ -35,8 +35,24 @@ def fake_mini() -> MagicMock:
     mini = MagicMock()
     mini.client._is_alive = True
     mini.client._last_status = None
-    mini.get_current_head_pose.return_value = np.eye(4)
-    mini.get_current_joint_positions.return_value = ([0.0] * 7, [0.0, 0.0])
+    # a robot that tracks its targets perfectly: the motion loop yields to a pose that does not
+    # follow its commands (external control, SPEC 12A), so a static fake would silence it
+    pose: dict = {"head": np.eye(4), "antennas": [0.0, 0.0], "body_yaw": 0.0}
+
+    def set_target(head=None, antennas=None, body_yaw=None) -> None:
+        if head is not None:
+            pose["head"] = np.asarray(head)
+        if antennas is not None:
+            pose["antennas"] = [float(a) for a in antennas]
+        if body_yaw is not None:
+            pose["body_yaw"] = float(body_yaw)
+
+    mini.set_target.side_effect = set_target
+    mini.get_current_head_pose.side_effect = lambda: pose["head"]
+    mini.get_current_joint_positions.side_effect = lambda: (
+        [pose["body_yaw"], *[0.0] * 6],
+        list(pose["antennas"]),
+    )
     return mini
 
 
