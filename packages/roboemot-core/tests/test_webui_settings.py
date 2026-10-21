@@ -301,6 +301,7 @@ def test_values_are_cleaned(served, stack):
 
 def test_limits_follow_the_schema_fields(tmp_path, stack):
     stack.app["webui"].update(settings_phrase_max_chars=5, settings_list_max_items=2)
+    stack._invalidate()  # an in-place edit of a layer is invisible to the effective() cache
     srv, client = serve(tmp_path, SettingsEditor(stack), stack)
     try:
         assert put(client, WAKE, ["abcdef"]).json["error"] == "phrase_too_long"
