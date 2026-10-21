@@ -26,6 +26,17 @@ class PoseGroupDriver(ABC):
         """Whether the motors hold position commands; None when the driver cannot tell."""
         return None
 
+    def platform_move_running(self) -> bool | None:
+        """Whether the platform is running a move of its own (a go-to-sleep or wake-up from
+        its owner's app, an idle reset) that it protects from other writers; None when the driver
+        cannot tell. Must be cheap and never block (a cached value): the motion loop reads it
+        every tick. A driver that cannot see moves started over every transport returns None."""
+        return None
+
+    def close(self) -> None:  # noqa: B027 - optional hook, not abstract
+        """Release what the driver started (a background poller); called once the motion loop
+        has stopped. Drivers with nothing to release keep this no-op."""
+
     def robot_name(self) -> str | None:
         """The name the robot's owner gave it, when the platform keeps one (SPEC 8, Wake word);
         None when it has none or cannot tell. Never raises."""
@@ -44,6 +55,7 @@ class MockPoseDriver(PoseGroupDriver):
     writes: list[tuple[float, dict[str, float]]] = field(default_factory=list)
     mode: MotorMode = "limp"
     modes: list[MotorMode] = field(default_factory=list)
+    platform_move: bool | None = None  # what ``platform_move_running`` reports (tests set it)
 
     def write_pose_targets(self, t: float, values: dict[str, float]) -> None:
         if self.mode != "active":
@@ -59,3 +71,6 @@ class MockPoseDriver(PoseGroupDriver):
 
     def motors_enabled(self) -> bool | None:
         return self.mode == "active"
+
+    def platform_move_running(self) -> bool | None:
+        return self.platform_move

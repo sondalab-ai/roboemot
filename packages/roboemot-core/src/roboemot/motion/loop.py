@@ -26,6 +26,15 @@ Motors (SPEC 4A, 12A): the loop never turns the motors on after start-up. It pol
 asleep, stopped by its owner, a backend restarted without wake-up) it follows the measured pose
 without writing, and resumes from that pose once they are on again. Sources keep feeding the
 arbiter meanwhile. A robot unreachable at ``start`` begins lost.
+
+Platform moves (SPEC 4A, 12A): a move the platform runs itself (the owner's go-to-sleep, a
+wake-up, an idle reset) makes the platform ignore every target streamed meanwhile, and accept
+them again the moment it ends, which pulled the robot back from the pose the move had just
+reached. ``driver.platform_move_running`` (a cached read) is checked every tick: while it is true
+and for ``motion.platform_move_grace_s`` after it stops (or turns unknown) the loop follows the
+measured pose without writing, like ``motors_off``, and checks the motors every tick, because the
+platform typically disables them right after a sleep move. A new move in the grace restarts it.
+When the grace ends with the motors on, the loop resumes from the measured pose.
 """
 
 from __future__ import annotations
@@ -87,6 +96,9 @@ class MotionLoop:
         self.last_error: str | None = None
         self.max_jitter_s = 0.0
         self.motors_off = False  # the platform holds the motors off: track, do not write
+        self.platform_move: bool | None = None  # the driver's last answer (None: cannot tell)
+        self._moving = False  # a platform move was running at the last check
+        self._grace_until = -math.inf  # no writes before this time (a move just ended)
         self._next_motor_check = -math.inf
         # Called every active tick with ``(now, core)``, under the loop's lock and before the
         # arbiter runs: they may feed or clear ``core`` directly (never ``feed`` or ``clear`` of
@@ -108,6 +120,7 @@ class MotionLoop:
         self.core.watchdog_return_factor = cfg.safety.watchdog_return_factor
         self.core.limiter.constraint_margin = math.radians(cfg.safety.constraint_margin_deg)
         self.link.policy = cfg.connectivity.robot
+        self.platform_move_grace_s = cfg.motion.platform_move_grace_s
 
     # ---- inputs
 
@@ -139,10 +152,15 @@ class MotionLoop:
 
     def snapshot(self) -> dict[str, object]:
         """Loop health for diagnostics (SPEC 12A); safe to call from any thread."""
+        now = self.clock()
         with self._lock:
             out: dict[str, object] = {
                 "mode": self.mode,
                 "motors_off": self.motors_off,
+                "asleep": self.motors_off,
+                "platform_move": self.platform_move,
+                "yielding": self._yielding(now),
+                "platform_move_grace_left_s": max(0.0, self._grace_until - now),
                 "minor_present": self.core.minor_present,
                 "rate_hz": self.rate_hz,
                 "ticks": self.ticks,
@@ -171,12 +189,16 @@ class MotionLoop:
         self._stop.set()
         if self._thread:
             shutdown.join(self._thread, 2)
+        try:
+            self.driver.close()
+        except Exception as exc:
+            log.warning("motion: driver close: %s", type(exc).__name__)
 
     def step_once(self, now: float, dt: float) -> dict[str, float]:
         with self._lock:
-            if self.mode != "active" or self.motors_off:
-                # limp / teach / motors held off by the platform: follow the measured pose so
-                # re-enabling never jumps
+            if self.mode != "active" or self.motors_off or self._yielding(now):
+                # limp / teach / motors held off by the platform / a platform move running or
+                # just ended: follow the measured pose so re-enabling never jumps
                 state = self._resync()
                 self.ticks += 1
                 return state
@@ -193,6 +215,10 @@ class MotionLoop:
             self._call(self.driver.write_pose_targets, now, out)
             self.ticks += 1
             return out
+
+    def _yielding(self, now: float) -> bool:
+        """Whether a platform move is running or ended less than the grace ago."""
+        return self._moving or now < self._grace_until
 
     def _resync(self) -> dict[str, float]:
         measured = self._call(self.driver.read_state)
@@ -213,6 +239,7 @@ class MotionLoop:
         """One loop period: a tick while the robot link is up, else a due recovery check."""
         if self.link.online:
             try:
+                self._check_platform_move(now)
                 self._check_motors(now)
                 self.step_once(now, dt)
                 self.link.report(True, now)
@@ -224,10 +251,25 @@ class MotionLoop:
         elif self.link.due(now):
             self._try_recover(now)
 
+    def _check_platform_move(self, now: float) -> None:
+        """Read the driver's cached move signal; a move that stops, or whose signal turns unknown
+        (a stale cache), starts the grace, and a move seen again restarts it (a go-to-sleep can
+        be two moves back to back)."""
+        if self.mode != "active":
+            return
+        running = self._call(self.driver.platform_move_running)
+        self.platform_move = running
+        if running:
+            self._moving = True
+        elif self._moving:
+            self._moving = False
+            self._grace_until = now + self.platform_move_grace_s
+
     def _check_motors(self, now: float) -> None:
         """Track whether the platform keeps the motors off (asleep, stopped by its owner).
-        The loop never turns them on itself (SPEC 4A, 12A); it resumes when they are on."""
-        if self.mode != "active" or now < self._next_motor_check:
+        The loop never turns them on itself (SPEC 4A, 12A); it resumes when they are on. While a
+        platform move runs or just ended the status is read every tick (a cached value)."""
+        if self.mode != "active" or (now < self._next_motor_check and not self._yielding(now)):
             return
         self._next_motor_check = now + self.link.policy.probe_initial_s
         enabled = self._call(self.driver.motors_enabled)

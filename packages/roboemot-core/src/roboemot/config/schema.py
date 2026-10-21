@@ -715,6 +715,14 @@ class MotionConfig(Strict):
         "runs at arbiter.loop_hz)",
         unit="Hz", ge=1, le=100,
     )  # fmt: skip
+    platform_move_grace_s: float = param(
+        2.0,
+        "After the robot platform ends a move of its own (a go-to-sleep or wake-up from the "
+        "owner's app), the loop keeps following the measured pose without writing for this long, "
+        "so a motors-off that follows the move is seen before any target is streamed (SPEC 4A, "
+        "12A). 0 resumes at once",
+        unit="s", ge=0, le=30,
+    )  # fmt: skip
 
 
 # --------------------------------------------------------------------------- reflexes (SPEC 10)

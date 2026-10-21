@@ -22,6 +22,8 @@ from test_app_perception import data  # noqa: F401  (data: fixture)
 
 
 class Mini:
+    client = MagicMock(host="localhost", port=8000)
+
     def set_automatic_body_yaw(self, enabled: bool) -> None:
         self.body_yaw = enabled
 

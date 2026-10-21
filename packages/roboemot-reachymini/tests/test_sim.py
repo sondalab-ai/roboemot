@@ -643,3 +643,71 @@ def test_the_robot_reacts_distinctly_to_an_adult_a_child_and_a_stranger_without_
     for case in ("child", "stranger"):
         assert 0.5 * cap * PLANTED_AZ < yaw[case] <= cap * PLANTED_AZ + math.radians(2), yaw
         assert yaw[case] < yaw["adult"]
+
+
+def test_loop_yields_to_the_daemons_own_goto_sleep_move(mini):
+    """SPEC 4A, 12A: no target is written while the daemon runs ``goto_sleep`` and during the
+    grace after it, so nothing pulls the robot back from the sleep pose; writes then resume.
+    (MuJoCo ignores motor-mode changes, so the motors-off half is covered by unit tests.)"""
+    from roboemot.diagnostics import Target
+    from roboemot_reachymini.daemon import DaemonClient
+    from roboemot_reachymini.driver import MOVE_REQUEST_TIMEOUT_S
+
+    cfg = ConfigStack().effective()
+    manifest = load_manifest(DATA / "reachy-mini-wireless.yaml", allow_unmeasured_dynamics=True)
+    daemon = DaemonClient(Target(), timeout_s=MOVE_REQUEST_TIMEOUT_S)
+    driver = ReachyMiniDriver(mini, daemon.move_running)
+    writes: list[float] = []
+    real_write = driver.write_pose_targets
+
+    def counting(t: float, values: dict[str, float]) -> None:
+        writes.append(time.monotonic())
+        real_write(t, values)
+
+    driver.write_pose_targets = counting  # type: ignore[method-assign]
+    loop = MotionLoop(manifest, driver, cfg, rate_hz=50)
+    loop.start()
+    try:
+        _hold(loop, {"head.yaw": 0.0, "head.pitch": 0.0}, 3.0)
+        daemon.wake_up()
+        time.sleep(3.0)
+        stop = threading.Event()
+
+        def feeder() -> None:  # a source that keeps asking for the awake pose throughout
+            while not stop.is_set():
+                loop.feed(
+                    Command("test", Priority.COMMANDED, {"head.pitch": 0.0}, time.monotonic())
+                )
+                stop.wait(0.02)
+
+        th = threading.Thread(target=feeder, daemon=True)
+        th.start()
+        _daemon_post("/move/play/goto_sleep")
+        seen_start = seen_end = None
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            moving = loop.snapshot()["platform_move"]
+            now = time.monotonic()
+            if moving and seen_start is None:
+                seen_start = now
+            if seen_start is not None and not moving:
+                seen_end = now
+                break
+            time.sleep(0.02)
+        assert seen_start is not None and seen_end is not None, "the move flag never showed"
+        pose_at_end = driver.read_state()
+        grace = cfg.motion.platform_move_grace_s
+        time.sleep(grace - 0.3)
+        pose_late = driver.read_state()
+        yielded = [w for w in writes if seen_start + 0.1 < w < seen_end + grace - 0.3]
+        assert yielded == [], f"{len(yielded)} targets written during the move and its grace"
+        for k, v in pose_at_end.items():
+            assert pose_late[k] == pytest.approx(v, abs=0.05), k  # nothing pulled it back
+        time.sleep(1.0)
+        assert writes and writes[-1] > seen_end + grace  # streaming resumed after the grace
+        stop.set()
+        th.join()
+    finally:
+        loop.stop()
+        daemon.wake_up()
+        time.sleep(3.0)
