@@ -160,13 +160,42 @@ test("a re-opened tab runs one timer, not one per visit", async (t) => {
   assert.ok(rate <= 1.6, `about one request per interval, got ${rate}`);
 });
 
-test("live_disabled shows how to turn it on and stops polling", async (t) => {
-  const page = await livePage(t, { "GET /api/live/state": reply(404, { error: "live_disabled" }) });
+test("live_disabled shows how to turn it on and keeps retrying at the slow delay", async (t) => {
+  let enabled = false;
+  const page = await livePage(t, {
+    "GET /api/live/state": () => (enabled ? STATE : reply(404, { error: "live_disabled" })),
+  });
+  const timers = [];
+  const real = page.window.setTimeout.bind(page.window);
+  page.window.setTimeout = (fn, ms, ...rest) => { timers.push({ fn, ms }); return real(() => {}, 1e9); };
   await openLive(page);
-  await sleep(WAIT_MS);
   assert.equal(polls(page), 1);
   assert.ok(page.document.querySelector("#live-cards").textContent.includes("live_disabled_body"));
   assert.equal(page.document.querySelector("#notice").hidden, true, "not an error banner");
+  assert.equal(timers.at(-1).ms, 5000, "retry armed at the slow delay");
+  enabled = true;
+  timers.at(-1).fn();
+  await settle();
+  assert.equal(page.document.querySelector("#live-cards").children.length, 7, "self-healed");
+});
+
+test("coming back into view keeps the last cards until the next reply", async (t) => {
+  let release = null;
+  let hold = false;
+  const page = await livePage(t, {
+    "GET /api/live/state": async () => { if (hold) await new Promise((r) => { release = r; }); return STATE; },
+  });
+  await openLive(page);
+  await sleep(POLL_MS * 2);
+  visibility(page, "hidden");
+  hold = true;
+  visibility(page, "visible");
+  await settle();
+  assert.equal(page.document.querySelector("#live-cards").children.length, 7, "cards kept while the poll is pending");
+  release();
+  await settle();
+  visibility(page, "hidden");
+  await settle();
 });
 
 test("a failed poll shows the error and retries", async (t) => {

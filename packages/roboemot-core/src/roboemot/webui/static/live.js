@@ -132,12 +132,9 @@ async function livePoll(box, serial) {
   } catch (err) {
     if (!liveActive(serial)) return;
     if (err.status === 401 && err.message === "unauthorized") { await boot(); return; }
-    if (err.message === "live_disabled" || err.message === "live_unavailable") {
-      if (err.message === "live_disabled") liveDisabledView(box);
-      else box.replaceChildren(card(t("tab_live"), t("live_title"), el("p", {}, explain(err))));
-      return;
-    }
-    notice(explain(err), true);
+    if (err.message === "live_disabled") liveDisabledView(box);
+    else if (err.message === "live_unavailable") box.replaceChildren(card(t("tab_live"), t("live_title"), el("p", {}, explain(err))));
+    else notice(explain(err), true);
   }
   state.timer = setTimeout(() => livePoll(box, serial), delay);
 }
@@ -151,11 +148,18 @@ function liveView() {
   return livePoll(box, serial);
 }
 
+// Back in view: keep the cards on screen (their last values) and only restart the poll.
+function liveResume() {
+  const box = document.getElementById("live-cards");
+  if (!box) return liveView();
+  return livePoll(box, ++liveState.serial);
+}
+
 // Hidden page: stop at once and retire the request in flight. Visible again: redraw and resume.
 document.addEventListener("visibilitychange", () => {
   if (state.tab !== "live" || state.csrf === null) return;
   if (document.visibilityState === "visible") {
-    guarded(async () => { await liveView(); });
+    guarded(async () => { await liveResume(); });
   } else {
     liveState.serial += 1;
     stopPolling();
