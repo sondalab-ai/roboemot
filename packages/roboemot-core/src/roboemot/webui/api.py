@@ -167,6 +167,13 @@ class PseudonymsPort(Protocol):
     def refused_names(self, cfg: RoboEmotConfig) -> list[str]: ...
 
 
+class LivePort(Protocol):
+    """``roboemot.runtime.live.LiveState`` (SPEC 11A, 12): ``state()`` is the Live tab's payload,
+    or None while ``webui.live.enabled`` is off. State only: no media, text, ids or positions."""
+
+    def state(self) -> dict[str, Any] | None: ...
+
+
 class DebugReport(Protocol):
     """``roboemot.diagnostics.Diagnostics``: ``report()`` is the SPEC 12A JSON."""
 
@@ -247,7 +254,9 @@ class WebApi:
         settings: SettingsPort | None = None,
         pseudonyms: PseudonymsPort | None = None,
         secrets: SecretsPort | None = None,
+        live: LivePort | None = None,
     ) -> None:
+        self.live = live
         self.service = service
         self.settings = settings
         self.secrets = secrets
@@ -352,6 +361,7 @@ class WebApi:
             ("GET", "/api/registry/quarantined"): self._quarantined,
             ("POST", "/api/registry/quarantined/purge"): self._purge,
             ("GET", "/api/debug"): self._debug,
+            ("GET", "/api/live/state"): self._live_state,
             ("GET", "/api/routes"): self._routes,
             ("POST", "/api/routes/add"): self._route_add,
             ("POST", "/api/routes/key"): self._route_key,
@@ -665,6 +675,16 @@ class WebApi:
                         "error": "withheld",
                     }
         return Response(HTTPStatus.OK, report)
+
+    def _live_state(self, req: Request) -> Response:
+        """The Live tab's inner state. ``live_disabled`` (404) while ``webui.live.enabled`` is off,
+        ``live_unavailable`` (503) when the host built no source. Read-only, nothing stored."""
+        if self.live is None:
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "live_unavailable")
+        data = self.live.state()
+        if data is None:
+            raise ApiError(HTTPStatus.NOT_FOUND, "live_disabled")
+        return Response(HTTPStatus.OK, data)
 
     # ------------------------------------------------------------------ settings
 

@@ -2970,6 +2970,35 @@ class RuntimeConfig(Strict):
     )
 
 
+class LiveConfig(Strict):
+    """The web UI's Live tab: the robot's inner state (SPEC 11A, 12). State only: no media."""
+
+    enabled: bool = param(
+        False,
+        "Serve the Live tab's inner-state panel (mood, modes, conversation phase, who is in "
+        "view by display name, last reflex, motion state, CPU temperature); off by default "
+        "because it shows who the robot sees",
+        opt_in=True,
+    )
+    poll_ms: int = param(
+        1000,
+        "How often the open Live tab asks for the state",
+        unit="ms",
+        ge=250,
+        le=10000,
+    )
+    max_tracked: int = param(
+        8, "Most tracked people the Live tab lists (the count is always complete)", ge=1, le=32
+    )
+    system_cache_s: float = param(
+        5.0,
+        "How long the Live tab reuses one CPU temperature reading",
+        unit="s",
+        ge=1,
+        le=300,
+    )
+
+
 class WebUIConfig(Strict):
     bind: str | None = param(
         None,
@@ -3133,6 +3162,7 @@ class WebUIConfig(Strict):
     status_poll_ms: int = param(
         1000, "How often the page polls the enrollment status", unit="ms", ge=200, le=10000
     )
+    live: LiveConfig = param({}, "SPEC 11A, 12: the Live tab")
 
     @field_validator("frame_ancestors")
     @classmethod

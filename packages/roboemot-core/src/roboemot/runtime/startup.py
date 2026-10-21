@@ -110,6 +110,7 @@ def start_voice_output(
             else None
         ),
         bus=p.bus,
+        phase=host.phase,
     )
     cleanup.callback(conv.close)
     conv.start()
@@ -152,7 +153,7 @@ def start_all(
         p.listener.start()
     cleanup.callback(p.light_reader.stop)  # stopped before the camera thread
     cleanup.callback(host.forget_circadian)
-    start_webui(host, stack, p.cfg, manifest, cleanup)
+    start_webui(host, stack, p.cfg, manifest, cleanup, p)
     for world_source in p.plugin.sources:
         world_source.speaking = p.speech.speaking  # no turning towards its own voice
         cleanup.callback(world_source.stop)

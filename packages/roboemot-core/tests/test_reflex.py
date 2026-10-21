@@ -380,6 +380,19 @@ def test_cooldown_blocks_a_second_firing_until_it_has_passed():
     assert stats["fired"] == 2 and stats["dropped_cooldown"] == 2
 
 
+def test_last_fired_names_the_rule_and_its_age_on_the_loops_clock():
+    rig = Rig(cfg_with(rule()))
+    assert rig.engine.last_fired(rig.t) is None
+    rig.settle_audio()
+    rig.engine.offer_audio_level(LOUD, rig.t)
+    rig.tick()
+    fired_at = rig.t
+    name, age = rig.engine.last_fired(fired_at)
+    assert name == "r" and age < 0.1
+    assert rig.engine.last_fired(fired_at + 7.0)[1] == pytest.approx(7.0 + age)
+    assert rig.engine.last_fired(0.0)[1] == 0.0  # never negative
+
+
 def test_a_trigger_older_than_max_age_is_dropped_not_played_late():
     rig = Rig(cfg_with(rule(), max_age_ms=150))
     rig.settle_audio()

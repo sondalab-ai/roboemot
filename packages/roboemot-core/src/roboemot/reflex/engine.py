@@ -157,6 +157,7 @@ class ReflexEngine:
         # playback (loop thread only)
         self._players: dict[str, Player] = {}
         self._last_fire: dict[str, float] = {}
+        self._last_fired: tuple[str, float] | None = None  # (rule, stamp): one atomic store
         self._moving: dict[str, tuple[float, str, dict[str, float]]] = {}
         self._stats: dict[str, _RuleStats] = {}
         self._onset: dict[str, _OnsetTrack] = {}
@@ -434,6 +435,7 @@ class ReflexEngine:
         prim = Primitive(source, tuple(frames))
         self._players[rule.name] = Player(prim, now, source=source, priority=Priority.REFLEX)
         self._last_fire[rule.name] = now
+        self._last_fired = (rule.name, now)
         stats.fired += 1
         self._record(rule.trigger, "command", max(0.0, now - p.stamp))
         self._moving[rule.name] = (p.stamp, rule.trigger, start)
@@ -576,6 +578,12 @@ class ReflexEngine:
             "fired": summary([p for p, hit in peaks if hit]),
             "below_threshold": summary([p for p, hit in peaks if not hit]),
         }
+
+    def last_fired(self, now: float) -> tuple[str, float] | None:
+        """The rule that fired last and its age in seconds at ``now`` (the loop's clock), or None
+        before any fired. Safe from any thread: the pair is stored in one assignment."""
+        last = self._last_fired
+        return None if last is None else (last[0], max(0.0, now - last[1]))
 
     def snapshot(self) -> dict[str, Any]:
         """Debug-report section: counts, latencies and the audio source's state; scalars only."""

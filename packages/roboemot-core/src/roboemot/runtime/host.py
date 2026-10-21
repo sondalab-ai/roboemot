@@ -19,7 +19,7 @@ from roboemot.affect.runner import AffectRunner
 from roboemot.attention import AttentionSelector
 from roboemot.bus import Bus
 from roboemot.circadian import CircadianModel, CircadianRunner, IdleLightReader, SystemClock
-from roboemot.conversation import ConversationWorker
+from roboemot.conversation import ConversationPhase, ConversationWorker
 from roboemot.diagnostics import Diagnostics
 from roboemot.health.network import NetworkMonitor
 from roboemot.llm import Router
@@ -72,6 +72,7 @@ class RuntimeHost:
     name_source: NameSource | None = None  # registry names for pseudonyms outside the conversation
     router_hub: RouterHub | None = None  # the one router: traits, conversation, speech, checks
     conversation: ConversationWorker | None = None  # answers addressed utterances (voice.enabled)
+    phase: ConversationPhase | None = None  # idle / listening / thinking / speaking (Live tab)
     names: RobotName | None = None  # the robot's name for the wake word and addressing
     perception: Perception | None = None
     enrollment: Any = None  # EnrollmentService: the web UI enrolls through it (SPEC 6)

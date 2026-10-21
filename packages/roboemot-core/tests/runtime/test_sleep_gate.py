@@ -111,6 +111,18 @@ def test_asleep_publishes_once_and_pauses_everything_then_wake_resumes():
     assert not r.vision.paused and not r.light.paused and not r.listener.paused
 
 
+def test_paused_parts_names_what_is_paused_and_never_reads_the_config():
+    r = Rig()
+    r.gate._enabled = lambda: (_ for _ in ()).throw(AssertionError("config read"))
+    assert r.gate.paused_parts() == []
+    r.gate.paused = True
+    r.vision.paused = r.light.paused = r.listener.paused = True
+    assert r.gate.paused_parts() == ["app_tick", "vision", "light_reader", "listener"]
+    r.gate._listener = None
+    r.vision.paused = False
+    assert r.gate.paused_parts() == ["app_tick", "light_reader"]
+
+
 def test_the_opt_out_publishes_but_pauses_nothing_and_lifting_it_while_asleep_resumes():
     r = Rig()
     r.enabled = False

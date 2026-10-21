@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import ExitStack
+from types import SimpleNamespace
 from typing import Any
 
 from roboemot import paths
@@ -15,20 +16,33 @@ from roboemot.webui.secrets_admin import SecretsAdmin
 from roboemot.webui.settings import SettingsEditor
 
 from .host import RuntimeHost
+from .live import LiveState
 
 log = logging.getLogger(__name__)
 
 
 def start_webui(
-    host: RuntimeHost, stack: ConfigStack, cfg: Any, manifest: Any, cleanup: ExitStack
+    host: RuntimeHost,
+    stack: ConfigStack,
+    cfg: Any,
+    manifest: Any,
+    cleanup: ExitStack,
+    p: Any,
 ) -> Server | None:
     """Serve the web UI over the runtime's enrollment service and diagnostics registry.
 
     The server is stopped by ``cleanup`` (registered before it starts). A port that is
     taken or an unusable data folder is logged (type only) and the runtime goes on without the
-    page: enrollment is a side channel, not a reason to stop the robot.
+    page: enrollment is a side channel, not a reason to stop the robot. ``p`` is the pipeline the
+    Live tab reads its inner state from (SPEC 11A).
     """
+    unsubscribe = None
     try:
+        live = LiveState(host, p, stack.effective(), clock=p.loop.clock)
+        unsubscribe = stack.subscribe(live.apply_config)
+        live.apply_config(
+            SimpleNamespace(config=stack.effective())
+        )  # catches a change since the read
         secrets = SecretsAdmin(stack.effective, store=SecretStore.for_data_dir(cfg.data_dir))
         settings = SettingsEditor(
             stack,
@@ -53,8 +67,11 @@ def start_webui(
                 router=host.route_check_router,
                 names=host.name_source,
             ),
+            live=live,
         )
     except Exception as exc:
+        if unsubscribe is not None:
+            unsubscribe()
         log.error("web UI not started: %s", type(exc).__name__)
         return None
     cleanup.callback(server.stop)

@@ -84,6 +84,7 @@ def test_scripts_are_external_and_only_the_effects_loader_is_a_module(client):
     assert scripts == {
         "/static/theme.js": None,
         "/static/settings.js": None,
+        "/static/live.js": None,
         "/static/app.js": None,
         "/static/fx.js": "module",
     }
@@ -110,7 +111,7 @@ def test_local_stylesheet_has_only_the_registered_product_accent():
 
 
 def test_first_party_scripts_have_no_inline_style_or_html_injection():
-    for name in ("app.js", "settings.js", "theme.js", "fx.js"):
+    for name in ("app.js", "settings.js", "live.js", "theme.js", "fx.js"):
         text = (STATIC / name).read_text()
         for banned in (
             'setAttribute("style"',
@@ -131,7 +132,7 @@ def test_no_native_confirm_prompt_or_page_level_pin_field_is_left():
 
 
 def _page_js() -> str:
-    return (STATIC / "app.js").read_text() + (STATIC / "settings.js").read_text()
+    return "".join((STATIC / n).read_text() for n in ("app.js", "settings.js", "live.js"))
 
 
 def _keys_used_by_app() -> set[str]:
@@ -177,7 +178,7 @@ def test_tabs_are_the_strings_that_exist():
     js = (STATIC / "app.js").read_text()
     block = js[js.index("const TABS = {") :]
     names = re.findall(r"^\s+([a-z]+): [a-zA-Z]+View,", block, re.M)
-    assert names == ["enroll", "registry", "catalogue", "routes", "settings", "debug"]
+    assert names == ["enroll", "registry", "catalogue", "routes", "settings", "live", "debug"]
     for name in names:
         assert EN["tab_" + name] and IT["tab_" + name]
 

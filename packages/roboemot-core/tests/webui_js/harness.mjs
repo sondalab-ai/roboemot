@@ -41,6 +41,7 @@ export async function loadPage(routes = {}) {
   const run = (src) => new vm.Script(src).runInContext(ctx);
   run(read("theme.js"));
   run(read("settings.js"));
+  run(read("live.js"));
   run(read("app.js"));
   await settle();
   return { window, document: window.document, calls, run };

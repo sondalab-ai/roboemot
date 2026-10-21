@@ -23,6 +23,7 @@ from roboemot.attention import AttentionSelector, GazeController
 from roboemot.bus import Bus
 from roboemot.circadian import CircadianRunner, IdleLightReader
 from roboemot.config import ConfigStack
+from roboemot.conversation import ConversationPhase
 from roboemot.conversation.sources import registry_names, speaker_source
 from roboemot.health.network import NetworkMonitor
 from roboemot.health.responder import OfflineResponder
@@ -165,6 +166,7 @@ def assemble(
     # window (playback end + echo tail) and the reflex engine and the DoA source read it.
     speech = host.speech = SpeechActivity(cfg.voice.echo_tail_ms)
     reflexes.speaking = speech.speaking
+    phase = host.phase = ConversationPhase(speech.speaking)
     reflex_audio = cfg.reflexes.enabled and cfg.reflexes.audio.enabled
     audio = host.audio = session.audio(cfg, reflexes.offer_audio_level if reflex_audio else None)
     reflexes.audio_status = audio.snapshot
@@ -321,6 +323,7 @@ def assemble(
             reference,
             names,
             yes_no,
+            on_activity=phase.set_listening,
         )
         if bearing is not None
         else None

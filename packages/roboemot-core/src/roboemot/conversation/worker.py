@@ -62,6 +62,7 @@ from ..voice.tts import Sentence, SentenceSplitter
 from .confirm import Pending, PreferenceStore, reply_kind, sanitise_preference
 from .lines import line_text, minor_line, pick
 from .output_filter import OutputFilter
+from .phase import ConversationPhase
 
 log = logging.getLogger(__name__)
 
@@ -164,7 +165,9 @@ class ConversationWorker:
         clock: Callable[[], float] = time.monotonic,
         names: RobotName | None = None,
         known_names: Callable[[], Iterable[str]] = lambda: (),
+        phase: ConversationPhase | None = None,
     ) -> None:
+        self.phase = phase if phase is not None else ConversationPhase()
         self.names = names if names is not None else RobotName()
         self.stack, self.hub, self.speech = stack, hub, speech
         self.affect, self.responder = affect, responder
@@ -519,6 +522,7 @@ class ConversationWorker:
                 await self._converse(turn, router)
         finally:
             self._inner = None
+            self.phase.end_thinking()
         self._finish(turn)
 
     async def _converse(self, turn: _Turn, router: Any) -> None:
@@ -552,6 +556,7 @@ class ConversationWorker:
         )
         splitter = SentenceSplitter(cfg.voice.sentence_max_chars, strip_tags=True)
         turn.stamps["request"] = self.clock()
+        self.phase.begin_thinking()
         inner = self._inner = asyncio.ensure_future(self._rounds(turn, router, messages, splitter))
         if turn.interrupted:  # a barge-in landed before the task existed
             inner.cancel()
@@ -613,6 +618,8 @@ class ConversationWorker:
             cut = False
             async with contextlib.aclosing(stream):
                 async for ev in stream:
+                    if active.route is not None:
+                        self.phase.set_route(active.route.name)
                     if isinstance(ev, TextDelta):
                         turn.stamps.setdefault("token", self.clock())
                         turn.out_chars += len(ev.text)
