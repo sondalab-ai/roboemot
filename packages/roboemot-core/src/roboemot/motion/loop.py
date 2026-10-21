@@ -105,6 +105,7 @@ class MotionLoop:
         self._commanded: deque[tuple[float, dict[str, float]]] = deque()
         self._diverged_since: float | None = None
         self._still_since: float | None = None
+        self._anchor: dict[str, float] | None = None  # the pose the stillness is judged against
         self._last_measured: tuple[float, dict[str, float]] | None = None
         self._next_motor_check = -math.inf
         # Called every active tick with ``(now, core)``, under the loop's lock and before the
@@ -129,6 +130,18 @@ class MotionLoop:
         self.link.policy = cfg.connectivity.robot
         self.platform_move_grace_s = cfg.motion.platform_move_grace_s
         self.ext = cfg.motion.external
+        self._reset_peaks()
+
+    def _reset_peaks(self) -> None:
+        """Clear the calibration peaks (on creation and on a config reload)."""
+        self._peak = dict.fromkeys(
+            (
+                "err_rad", "err_m", "latest_rad", "latest_m",
+                "diverged_s", "speed_rad", "speed_m",
+            ),
+            0.0,
+        )  # fmt: skip
+        self.external_last_event: dict[str, object] | None = None
 
     # ---- inputs
 
@@ -171,6 +184,14 @@ class MotionLoop:
                 "external_still_s": (
                     0.0 if self._still_since is None else max(0.0, now - self._still_since)
                 ),
+                "external_peak_err_rad": self._peak["err_rad"],
+                "external_peak_err_m": self._peak["err_m"],
+                "external_peak_err_latest_rad": self._peak["latest_rad"],
+                "external_peak_err_latest_m": self._peak["latest_m"],
+                "external_peak_diverged_s": self._peak["diverged_s"],
+                "external_peak_speed_rad_s": self._peak["speed_rad"],
+                "external_peak_speed_m_s": self._peak["speed_m"],
+                "external_last_event": self.external_last_event,
                 "minor_present": self.core.minor_present,
                 "rate_hz": self.rate_hz,
                 "ticks": self.ticks,
@@ -229,64 +250,84 @@ class MotionLoop:
         dof = self.core.limiter.dofs[name]
         return self.ext.tolerance_m if dof.kind == "translation" else self.ext.tolerance_rad
 
+    def _kind(self, name: str) -> str:
+        return "m" if self.core.limiter.dofs[name].kind == "translation" else "rad"
+
     def _detect_external(self, now: float, out: dict[str, float]) -> None:
         """After a write: compare the measured pose with the poses commanded within the lag
         window; a measured joint further than its tolerance from all of them, for ``confirm_s``
-        in a row, means something else controls the robot (see the module docstring)."""
+        in a row, means something else controls the robot (see the module docstring). Every
+        joint is judged, and the worst errors are kept for calibration (``snapshot``)."""
         self._commanded.append((now, dict(out)))
         while self._commanded and now - self._commanded[0][0] > self.ext.lag_window_s:
             self._commanded.popleft()
         measured = self._call(self.driver.read_state)
-        diverged = False
+        worst: tuple[str, float, float] | None = None  # joint, error, tolerance
         for name, value in measured.items():
-            dof = self.core.limiter.dofs.get(name)
-            if dof is None:
+            if name not in self.core.limiter.dofs:
                 continue
             errors = [abs(value - cmd[name]) for _, cmd in self._commanded if name in cmd]
-            if errors and min(errors) > self._tolerance(name):
-                diverged = True
-                break
-        if not diverged:
+            if not errors:
+                continue
+            kind, tol = self._kind(name), self._tolerance(name)
+            self._peak[f"err_{kind}"] = max(self._peak[f"err_{kind}"], min(errors))
+            if name in out:
+                latest = abs(value - out[name])
+                self._peak[f"latest_{kind}"] = max(self._peak[f"latest_{kind}"], latest)
+            if min(errors) > tol and (worst is None or min(errors) - tol > worst[1] - worst[2]):
+                worst = (name, min(errors), tol)
+        if worst is None:
             self._diverged_since = None
             return
         if self._diverged_since is None:
             self._diverged_since = now
-        if now - self._diverged_since >= self.ext.confirm_s:
-            self.external, self._still_since = True, None
+        run = now - self._diverged_since
+        self._peak["diverged_s"] = max(self._peak["diverged_s"], run)
+        if run >= self.ext.confirm_s:
+            self.external, self._still_since, self._anchor = True, None, None
             self._diverged_since = None
             self._commanded.clear()
             self._last_measured = (now, dict(measured))
             self.external_events += 1
+            self.external_last_event = {
+                "t": now,
+                "joint": worst[0],
+                "error": worst[1],
+                "tolerance": worst[2],
+            }
             log.info("motion: external control of the robot detected, yielding")
 
     def _watch_external(self, now: float, measured: dict[str, float]) -> None:
-        """While yielding: once the measured pose has been still for ``platform_move_grace_s``
-        (the motors are on: the caller checked), take control again from where it is."""
+        """While yielding: once the measured pose has stayed inside ``still_band_*`` of an anchor
+        pose for ``platform_move_grace_s`` (the motors are on: the caller checked), take control
+        again from where it is. The anchor is the pose when the count started; a joint drifting
+        beyond the band restarts the count from the new pose. Judging against an anchor, not
+        tick to tick, keeps encoder jitter and a slow state cache from resetting the count."""
         last = self._last_measured
         self._last_measured = (now, dict(measured))
-        if last is None or now <= last[0]:
+        if last is not None and now > last[0]:
+            dt = now - last[0]
+            for name, value in measured.items():
+                if name in last[1] and name in self.core.limiter.dofs:
+                    key = f"speed_{self._kind(name)}"
+                    self._peak[key] = max(self._peak[key], abs(value - last[1][name]) / dt)
+        anchor = self._anchor
+        if anchor is not None:
+            for name, value in measured.items():
+                dof = self.core.limiter.dofs.get(name)
+                if dof is None or name not in anchor:
+                    continue
+                band = (
+                    self.ext.still_band_m if dof.kind == "translation" else self.ext.still_band_rad
+                )
+                if abs(value - anchor[name]) > band:
+                    anchor = None
+                    break
+        if anchor is None:
+            self._anchor, self._still_since = dict(measured), now
             return
-        dt = now - last[0]
-        moving = False
-        for name, value in measured.items():
-            dof = self.core.limiter.dofs.get(name)
-            if dof is None or name not in last[1]:
-                continue
-            limit = (
-                self.ext.still_speed_m_s
-                if dof.kind == "translation"
-                else self.ext.still_speed_rad_s
-            )
-            if abs(value - last[1][name]) / dt > limit:
-                moving = True
-                break
-        if moving:
-            self._still_since = None
-            return
-        if self._still_since is None:
-            self._still_since = now
-        if now - self._still_since >= self.platform_move_grace_s:
-            self.external, self._still_since = False, None
+        if self._still_since is not None and now - self._still_since >= self.platform_move_grace_s:
+            self.external, self._still_since, self._anchor = False, None, None
             self._commanded.clear()
             log.info("motion: robot still, resuming control")
 
@@ -296,6 +337,7 @@ class MotionLoop:
         self.core.limiter.reset(state)
         self.core.arbiter.last = {**self.core.arbiter.last, **state}
         self._commanded.clear()
+        self._diverged_since = None
         return state
 
     @staticmethod
@@ -331,14 +373,13 @@ class MotionLoop:
         enabled = self._call(self.driver.motors_enabled)
         if enabled is None:
             return
-        if enabled and self.motors_off:
-            with self._lock:
+        with self._lock:
+            if enabled and self.motors_off:
                 self._resync()  # resume from wherever the platform's wake-up left the robot
-        if not enabled:
-            self.external, self._still_since = False, None
-        self.motors_off = not enabled
-        if self.motors_off:
-            self._commanded.clear()
+            if not enabled:
+                self.external, self._still_since, self._anchor = False, None, None
+                self._commanded.clear()
+            self.motors_off = not enabled
 
     def _note_hook_error(self, exc: Exception) -> None:
         """Count a failing hook every tick but log it once per distinct message until a clean tick

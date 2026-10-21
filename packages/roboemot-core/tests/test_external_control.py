@@ -51,8 +51,20 @@ class ServoDriver(MockPoseDriver):
             self.target = dict(values)
             self.accepted.append(t)
 
+    jitter = 0.0  # +- one encoder quantum on every reading
+    stale_ticks = 0  # a state cache that refreshes only every this many readings
+    reads = 0
+    cache: dict[str, float] | None = None
+
     def read_state(self):
-        return dict(self.pose)
+        self.reads += 1
+        base = self.pose
+        if self.stale_ticks:
+            if self.cache is None or self.reads % self.stale_ticks == 0:
+                self.cache = dict(self.pose)
+            base = self.cache
+        sign = 1 if self.reads % 2 else -1
+        return {k: v + sign * self.jitter for k, v in base.items()}
 
     def advance(self, dt: float) -> None:
         for k in self.pose:
@@ -171,3 +183,76 @@ def test_a_move_that_is_seen_again_in_the_grace_keeps_it_going():
     n = len(driver.writes)
     t = drive(loop, driver, t, 1.5)
     assert loop.external and len(driver.writes) == n
+
+
+def _move_then_settle(loop, driver, t):
+    t = drive(loop, driver, t, 1.0)
+    driver.external, driver.goal = True, {"head.yaw": -0.8}
+    t = drive(loop, driver, t, 2.0)
+    assert loop.external
+    driver.external = False
+    return t
+
+
+def test_encoder_jitter_does_not_keep_a_settled_robot_from_resuming():
+    loop, driver = make()
+    driver.jitter = 0.0015  # one quantum, alternating: 0.15 rad/s tick to tick
+    t = _move_then_settle(loop, driver, 0.0)
+    drive(loop, driver, t, GRACE_S + 1.0)
+    assert not loop.external
+
+
+def test_a_state_cache_slower_than_the_loop_does_not_keep_a_settled_robot_from_resuming():
+    loop, driver = make()
+    driver.stale_ticks = 7  # the same value for several ticks, then a step
+    driver.jitter = 0.0015
+    t = _move_then_settle(loop, driver, 0.0)
+    drive(loop, driver, t, GRACE_S + 1.0)
+    assert not loop.external
+
+
+def test_a_real_drift_beyond_the_band_restarts_the_count():
+    loop, driver = make()
+    t = _move_then_settle(loop, driver, 0.0)
+    t = drive(loop, driver, t, GRACE_S - 1.0)
+    assert loop.external
+    driver.pose["head.yaw"] -= 3 * CFG.motion.external.still_band_rad  # pushed again
+    driver.target = dict(driver.pose)
+    t = drive(loop, driver, t, 2.0)  # the first count would have ended by now
+    assert loop.external
+    drive(loop, driver, t, GRACE_S)
+    assert not loop.external
+
+
+def test_calibration_figures_are_kept_and_reset_on_reload():
+    loop, driver = make()
+    driver.jitter = 0.001
+    t = drive(loop, driver, 0.0, 2.0)
+    snap = loop.snapshot()
+    assert 0.0005 < snap["external_peak_err_rad"] < CFG.motion.external.tolerance_rad
+    assert snap["external_peak_err_latest_rad"] >= snap["external_peak_err_rad"]
+    assert snap["external_peak_diverged_s"] == 0.0 and snap["external_last_event"] is None
+    assert snap["external_peak_err_m"] < 0.01
+    driver.jitter = 0.0
+    driver.external, driver.goal = True, {"head.yaw": -0.8}
+    t = drive(loop, driver, t, 2.0)
+    snap = loop.snapshot()
+    event = snap["external_last_event"]
+    assert event["joint"] == "head.yaw" and event["tolerance"] == CFG.motion.external.tolerance_rad
+    assert event["error"] > event["tolerance"]
+    assert snap["external_peak_diverged_s"] >= CFG.motion.external.confirm_s
+    assert snap["external_peak_speed_rad_s"] > 0.5  # the move at 1 rad/s, seen while yielding
+    loop.apply_config(CFG)
+    snap = loop.snapshot()
+    assert snap["external_peak_err_rad"] == 0.0 and snap["external_last_event"] is None
+    assert snap["external_peak_diverged_s"] == 0.0 and snap["external_peak_speed_rad_s"] == 0.0
+
+
+def test_the_latest_command_error_exceeds_the_windowed_one_under_servo_lag():
+    loop, driver = make()
+    t = 0.0
+    for yaw in (0.8, -0.8, 0.8):
+        t = drive(loop, driver, t, 1.5, yaw=yaw)
+    snap = loop.snapshot()
+    assert snap["external_peak_err_latest_rad"] > snap["external_peak_err_rad"]
+    assert snap["external_events"] == 0

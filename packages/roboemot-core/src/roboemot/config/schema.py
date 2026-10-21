@@ -731,15 +731,16 @@ class ExternalControlConfig(Strict):
         "Divergence must last this long before the loop yields",
         unit="s", ge=0.02, le=2.0,
     )  # fmt: skip
-    still_speed_rad_s: float = param(
-        0.05,
-        "While yielding, the pose counts as still below this joint speed",
-        unit="rad/s", ge=0.001, le=1.0,
+    still_band_rad: float = param(
+        0.02,
+        "While yielding, the pose counts as still while every angular joint stays within this "
+        "band of the pose where the stillness count started (wider than encoder jitter)",
+        unit="rad", ge=0.002, le=0.5,
     )  # fmt: skip
-    still_speed_m_s: float = param(
-        0.005,
+    still_band_m: float = param(
+        0.003,
         "The same for translations",
-        unit="m/s", ge=0.0005, le=0.1,
+        unit="m", ge=0.0005, le=0.05,
     )  # fmt: skip
 
 
