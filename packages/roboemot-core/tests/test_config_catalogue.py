@@ -84,6 +84,10 @@ def test_metadata_comes_from_the_schema():
     assert any(row["opt_in"] for row in r.values())
 
 
+def test_the_arbiter_rate_needs_a_restart_because_the_loop_reads_it_once():
+    assert rows(ConfigStack())["motion.arbiter.loop_hz"]["restart"] is True
+
+
 def test_source_of_names_the_deciding_layer():
     path = "voice.base.volume_db"
     stack = ConfigStack(

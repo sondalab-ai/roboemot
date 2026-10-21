@@ -685,7 +685,7 @@ class LightConfig(Strict):
 
 
 class ArbiterConfig(Strict):
-    loop_hz: float = param(100.0, "Arbiter rate", unit="Hz", ge=10, le=500)
+    loop_hz: float = param(100.0, "Arbiter rate", unit="Hz", ge=10, le=500, restart=True)
     crossfade_ms: float = param(
         150.0, "Cross-fade when the winning source changes", unit="ms", ge=0, le=2000
     )
