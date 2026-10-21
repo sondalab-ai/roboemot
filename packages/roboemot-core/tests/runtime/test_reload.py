@@ -30,7 +30,7 @@ def pipeline() -> SimpleNamespace:
         perception=Recorder(), runner=Recorder(), circ=Recorder(), speech=Recorder(),
         yes_no=Recorder(), listener=None, bargein=None, reflexes=Recorder(),
         tracker=SimpleNamespace(cfg=None), expression=Recorder(),
-        responder=SimpleNamespace(cfg=None), network=Recorder(),
+        responder=SimpleNamespace(cfg=None, language=None), network=Recorder(),
     )  # fmt: skip
 
 
@@ -42,6 +42,7 @@ def test_a_config_change_reaches_every_part_that_holds_a_copy():
     make_reload(host, p)(SimpleNamespace(config=cfg))
     assert p.world.cfg is cfg.world and p.selector.cfg is cfg.attention is p.gaze.cfg
     assert p.tracker.cfg is cfg.expression and p.responder.cfg is cfg.connectivity
+    assert p.responder.language == cfg.conversation.language
     assert host.speech_output.config is cfg
     assert ("sync", (cfg,)) in p.hub.calls and ("apply_config", (cfg,)) in p.loop.calls
     assert ("apply_config", (cfg,)) in p.perception.calls

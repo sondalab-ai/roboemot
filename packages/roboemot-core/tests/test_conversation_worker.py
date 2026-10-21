@@ -138,9 +138,11 @@ class FakeAffect:
 class FakeResponder:
     def __init__(self) -> None:
         self.calls = 0
+        self.last: dict = {}
 
-    def speech_while_offline(self, now):
+    def speech_while_offline(self, now, language=None, *, speak=True):
         self.calls += 1
+        self.last = {"language": language, "speak": speak}
 
 
 class FakeMonitor:
@@ -639,6 +641,7 @@ def test_offline_answers_nonverbally(rigs):
     rig = rigs(monitor=FakeMonitor())
     rig.turn("ciao")
     assert rig.responder.calls == 1 and rig.speech.said == [] and rig.server.requests == []
+    assert rig.responder.last == {"language": "it", "speak": True}
     assert rig.worker.snapshot()["offline"] == 1
     assert rig.worker.snapshot()["history_turns"] == 0
 
@@ -650,6 +653,7 @@ def test_offline_with_a_minor_adds_a_child_line_to_the_nonverbal_reaction(rigs):
     assert rig.responder.calls == 1
     assert rig.speech.texts() == ["Please ask a grown-up about that, they will know better."]
     assert rig.speech.said[0]["minor"] is True
+    assert rig.responder.last == {"language": "en", "speak": False}  # one line for a child
 
 
 def test_no_route_available_speaks_the_fallback_line_in_the_utterance_language(rigs):

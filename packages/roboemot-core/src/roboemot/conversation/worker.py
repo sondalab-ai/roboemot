@@ -559,8 +559,10 @@ class ConversationWorker:
             await inner
         except Offline:
             turn.outcome = "offline"
-            self.responder.speech_while_offline(self.clock())
-            if turn.minor or self._minor():  # never silence for a child
+            child = turn.minor or self._minor()
+            # a child hears one line, the child-safe one; the offline phrase is for adults
+            self.responder.speech_while_offline(self.clock(), turn.language, speak=not child)
+            if child:  # never silence for a child
                 self._say_minor_line(turn, "no_route")
         except NoRouteAvailable:
             turn.outcome = "no_route"
