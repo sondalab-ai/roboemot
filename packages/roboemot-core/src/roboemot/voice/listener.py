@@ -108,6 +108,7 @@ class VoiceListener:
         on_speaking_chunk: Callable[[VoiceChunkLike], None] | None = None,
         on_speaking_end: Callable[[], None] | None = None,
         before_asr_reset: Callable[[], None] | None = None,
+        on_activity: Callable[[bool], None] | None = None,
         enrolled_in_view: Callable[[float], bool] = lambda now: False,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -123,6 +124,7 @@ class VoiceListener:
         self._on_speaking_chunk = on_speaking_chunk
         self._on_speaking_end = on_speaking_end
         self._before_asr_reset = before_asr_reset
+        self._on_activity = on_activity
         self._enrolled_in_view = enrolled_in_view
         self._clock = clock
         self._gate = WakeGate("always", 0.0)  # configured by apply_config
@@ -261,6 +263,17 @@ class VoiceListener:
         with self._lock:
             self._counts[key] += 1
 
+    def _set_active(self, active: bool) -> None:
+        """Track "an utterance is in progress" and tell ``on_activity`` (the Live tab's phase) when
+        it changes. A raising hook is logged, never allowed to break the audio path."""
+        changed = self._active != active
+        self._active = active
+        if changed and self._on_activity is not None:
+            try:
+                self._on_activity(active)
+            except Exception as exc:
+                log.warning("voice listener: activity hook: %s", type(exc).__name__)
+
     # ---- one chunk
 
     def _abort(self) -> None:
@@ -274,7 +287,7 @@ class VoiceListener:
         self._endpointer.reset()
         self._asr.reset()
         self._fast.reset()
-        self._active = False
+        self._set_active(False)
 
     def process(self, chunk: VoiceChunkLike) -> None:
         """Handle one chunk (see the module docstring)."""
@@ -352,13 +365,13 @@ class VoiceListener:
         )
         self._fast.begin(ev.stamp, audio_end, self._language)
         self._asr.start(self._language)
-        self._active = True
+        self._set_active(True)
         self._partial(self._asr.accept(ev.pre_roll), audio_end)
 
     def _end(self, ev: SpeechEnd) -> None:
         if not self._active:
             return
-        self._active = False
+        self._set_active(False)
         text = self._asr.finish().strip()
         if not text:
             self._count("empty")

@@ -53,6 +53,7 @@ def build_listener(
     reference: PlaybackReference | None = None,
     names: RobotName | None = None,
     on_answer: Callable[[str, float], None] | None = None,
+    on_activity: Callable[[bool], None] | None = None,
 ) -> tuple[VoiceListener, Callable[[], None], BargeIn] | None:
     """The listener, a ``close`` for the bearing source and the barge-in detector (not yet bound
     to its actions), or None when voice can't run. ``bearing`` is the robot's sound direction in
@@ -145,6 +146,7 @@ def build_listener(
         on_speaking_chunk=bargein.on_chunk,
         on_speaking_end=bargein.reset,
         before_asr_reset=bargein.handback_asr,
+        on_activity=on_activity,
         enrolled_in_view=enrolled_in_view,
     )
 

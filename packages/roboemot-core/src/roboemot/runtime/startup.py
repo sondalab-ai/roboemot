@@ -110,6 +110,7 @@ def start_voice_output(
             else None
         ),
         bus=p.bus,
+        phase=host.phase,
     )
     cleanup.callback(conv.close)
     conv.start()
