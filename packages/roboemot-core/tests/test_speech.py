@@ -31,6 +31,9 @@ class FakeSink:
         self.pushed_at.append(time.monotonic())
         return 0.0
 
+    def playing_until(self):
+        return time.monotonic()
+
     def stop(self):
         self.stopped_at.append(time.monotonic())
 

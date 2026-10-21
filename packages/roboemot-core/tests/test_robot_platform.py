@@ -62,6 +62,9 @@ class DeskSpeaker:
     def push_audio_sample(self, samples, rate_hz: int) -> float:
         return 0.0
 
+    def playing_until(self) -> float:
+        return 0.0
+
     def stop(self) -> None: ...
     def start_playing(self) -> bool:
         return True
@@ -196,3 +199,17 @@ def test_two_packages_registering_the_same_robot_id_are_refused(installed):
     )
     with pytest.raises(RobotPlatformError, match=r"'desk-head-v1'.*alpha-robot, zeta-robot"):
         load_robot_platform("desk-head-v1")
+
+
+def test_a_speaker_without_a_playback_timeline_is_not_a_speaker():
+    class NoTimeline:
+        def push_audio_sample(self, samples, rate_hz: int) -> float:
+            return 0.0
+
+        def stop(self) -> None: ...
+        def start_playing(self) -> bool:
+            return True
+
+        def close(self) -> None: ...
+
+    assert isinstance(DeskSpeaker(), Speaker) and not isinstance(NoTimeline(), Speaker)

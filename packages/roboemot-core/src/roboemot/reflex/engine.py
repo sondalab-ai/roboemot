@@ -65,9 +65,9 @@ class ReflexMap:
     """Which manifest dofs the primitives move; supplied by the robot plugin.
 
     ``startle_lift`` maps a dof to the sign of its lift (the startle moves each by that sign, scaled
-    by ``reflexes.startle_lift_ratio``; Reachy Mini: the antennas).
+    by ``reflexes.startle_lift_ratio``).
     ``pitch_away_sign`` is the sign of a head pitch that tips the head back, away from what is
-    in front (negative on Reachy Mini: a positive pitch points the nose down).
+    in front (negative where a positive pitch points the nose down).
     ``voice_sources`` names the ``Observation.source`` values that are speech directions.
     """
 

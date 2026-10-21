@@ -5,7 +5,7 @@ worker), so the caller, the conversation worker or the app tick, never blocks on
 ``say`` composes the sentence's :class:`~roboemot.voice.prosody.Delivery` from the voice
 configuration, the persona effects, the register, the circadian state and the mood the caller
 passes, queues it, and the loop streams it through the backend into the sink, which resamples
-(``ReachySpeaker``). ``stop`` is the barge-in path: it cuts the sink first, then cancels the
+(the robot's speaker). ``stop`` is the barge-in path: it cuts the sink first, then cancels the
 synthesis in flight and drops the queue; an epoch counter makes any chunk that was already on its
 way fall on the floor, so nothing plays after ``stop`` returns.
 
@@ -54,9 +54,11 @@ def ends_with_question(text: str) -> bool:
 
 
 class AudioSink(Protocol):
-    """What plays the audio: ``ReachySpeaker`` (it resamples to the output rate itself)."""
+    """What plays the audio: the robot's speaker (it resamples to the output rate itself).
+    ``playing_until`` is the monotonic stamp at which everything pushed so far has played."""
 
     def push_audio_sample(self, samples: np.ndarray, rate_hz: int) -> float: ...
+    def playing_until(self) -> float: ...
     def stop(self) -> None: ...
 
 
@@ -404,8 +406,7 @@ class SpeechOutput:
         """Where the sink's queue ends: when a sample pushed now would play (the clock when it
         has no timeline)."""
         now = self.clock()
-        playing_until = getattr(self.sink, "playing_until", None)
-        return max(now, playing_until()) if callable(playing_until) else now
+        return max(now, self.sink.playing_until())
 
     def _pad(self, job: _Job, rate_hz: int) -> bool:
         """Silence between two sentences of one answer, less the idle gap already there.
@@ -413,9 +414,7 @@ class SpeechOutput:
         if job.utterance != self._last_utterance:
             return job.epoch == self._epoch
         pause_s = self.config.voice.sentence_pause_ms / MS_PER_S * job.delivery.pause_scale
-        playing_until = getattr(self.sink, "playing_until", None)
-        if callable(playing_until):
-            pause_s -= max(0.0, self.clock() - playing_until())
+        pause_s -= max(0.0, self.clock() - self.sink.playing_until())
         if pause_s > 0:
             return self._push(job, np.zeros(round(pause_s * rate_hz), np.float32), rate_hz)
         return job.epoch == self._epoch

@@ -1,7 +1,7 @@
 """The robot's name for the voice pipeline (SPEC 8 stage 3, Wake word).
 
 The name is ``voice.wake_word`` when set, else the one the robot platform reports (``source``,
-the driver's ``robot_name()``; Reachy Mini: the name its owner gave it in the daemon setup),
+the driver's ``robot_name()``; for example the name its owner gave it in the robot's setup),
 else none. (``voice.default_name``, the manifest's name, is never the effective name: it only
 gates the manifest's name aliases.) It is shown in the prompt
 and, per language, turned into wake phrases through the language's ``name_wake_templates``, but
@@ -57,7 +57,7 @@ class ResolvedName:
 
 def display_name(raw: str | None) -> str:
     """``raw`` as a person would say it: underscores and hyphens become spaces, edges trimmed,
-    and a name that is all lower case gets a capital per word ("reachy mini" -> "Reachy Mini")."""
+    and a name that is all lower case gets a capital per word ("desk head" -> "Desk Head")."""
     text = " ".join((raw or "").replace("_", " ").replace("-", " ").split())
     if text and text == text.lower():
         text = " ".join(w[:1].upper() + w[1:] for w in text.split())

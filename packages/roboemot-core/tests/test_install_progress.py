@@ -129,7 +129,7 @@ def test_progress_without_a_terminal_prints_plain_lines(monkeypatch, capsys):
 def test_progress_on_a_terminal_rewrites_one_line_then_clears_it(monkeypatch):
     out = Tty()
     monkeypatch.setattr("sys.stdout", out)
-    monkeypatch.setattr("shutil.get_terminal_size", lambda: type("S", (), {"columns": 60})())
+    monkeypatch.setattr("shutil.get_terminal_size", lambda *a, **k: os.terminal_size((60, 24)))
     clock = Clock()
     ui = Ui(interactive=False, assume_yes=True)
     ui.clock, ui.tick_s = clock, 0.001

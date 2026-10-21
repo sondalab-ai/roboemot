@@ -28,7 +28,8 @@ section number in commit messages that implement or change behaviour.
   with `allow_unmeasured_dynamics: true` in dev, and the limiter then uses conservative
   fallbacks.
 - **Reachy Mini (SPEC 4A):** stream with `set_target` only; never call `goto_target` in a
-  session (it blocks). Connect with `automatic_body_yaw=False`. Call `set_target` only after
+  session (it blocks). The daemon's runner connects; the driver calls
+  `set_automatic_body_yaw(False)` on start and after a reconnect. Call `set_target` only after
   `enable_motors()`. Antenna order in the SDK is `[right, left]`. One process owns the SDK
   client and its media.
 - **LLM routes are OpenAI-compatible only (SPEC 8).** Use the common subset: streaming,

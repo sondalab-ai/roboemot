@@ -1,6 +1,6 @@
 """Motion of the circadian states (SPEC 7A, Effects by state; SPEC 10, 12).
 
-- **Drowsy:** an occasional yawn (antennas droop, head tilts), every ``circadian.yawn_interval_s``
+- **Drowsy:** an occasional yawn (appendages droop, head tilts), every ``circadian.yawn_interval_s``
   with jitter. The slower, smaller idle breathing is the app's ``idle_command`` scaled by the
   state's ``StateEffects``.
 - **Resting:** the rest posture (``circadian_motion.rest_pose_deg``), a plain IDLE command.
