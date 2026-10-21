@@ -12,7 +12,8 @@ Checks (all AST-based, comments and docstrings excluded; scanners in ``robot_hie
 * entry-point contract: each installed ``roboemot.*`` group is in ``GROUPS`` and each registered
   object satisfies its group's contract;
 * duck typing: no ``hasattr``/``getattr`` with a literal attribute name in robot packages (no
-  module is exempt; today's sites are baselined under audit id D);
+  module is exempt) nor in core, except the sites of ``CORE_DUCK_ALLOWED`` that probe a non-robot
+  object (what a robot object offers is declared on its core protocol, never probed);
 * a non-Reachy manifest (``desk-head-v1``) works with core's config and renderer.
 
 ``robot_hierarchy_baseline.yaml`` lists today's findings (one per check, file, symbol, term, with
@@ -23,6 +24,7 @@ shrinks, and slices lower or remove entries as they fix them.
 
 from __future__ import annotations
 
+import textwrap
 from collections import Counter
 from importlib.metadata import distributions
 from pathlib import Path
@@ -43,6 +45,31 @@ CORE_SRC = ROOT / "packages" / "roboemot-core" / "src" / "roboemot"
 MANIFESTS = ROOT / "configs" / "manifests"
 BASELINE = Path(__file__).with_name("robot_hierarchy_baseline.yaml")
 KNOWN_SDKS = frozenset({"reachy_mini"})
+CORE_DUCK_ALLOWED: dict[tuple[str, str], str] = {
+    ("affect/appraisal.py", "getattr:addressed"): "bus payload of another stage",
+    ("circadian/runner.py", "getattr:addressed"): "bus payload of another stage",
+    ("circadian/runner.py", "getattr:wake_word"): "bus payload of another stage",
+    ("vision/minor.py", "getattr:possible_minor"): "bus payload of another stage",
+    ("config/stack.py", "getattr:__dict__"): "pydantic or plain config item",
+    ("config/stack.py", "getattr:model_fields"): "pydantic model introspection",
+    ("config/stack.py", "getattr:__args__"): "typing annotation introspection",
+    ("config/stack.py", "hasattr:le"): "pydantic constraint metadata",
+    ("persona/__init__.py", "getattr:ge"): "pydantic constraint metadata",
+    ("persona/__init__.py", "getattr:le"): "pydantic constraint metadata",
+    ("diagnostics/__init__.py", "hasattr:_asdict"): "namedtuple in a JSON-ification helper",
+    ("diagnostics/__init__.py", "hasattr:model_dump"): "pydantic model in a JSON-ification helper",
+    ("diagnostics/__init__.py", "hasattr:tolist"): "numpy value in a JSON-ification helper",
+    ("diagnostics/system.py", "hasattr:getloadavg"): "stdlib os, platform-dependent",
+    ("diagnostics/system.py", "getattr:sensors_temperatures"): "psutil, platform-dependent",
+    ("diagnostics/system.py", "getattr:sensors_fans"): "psutil, platform-dependent",
+    ("diagnostics/system.py", "hasattr:sensors_battery"): "psutil, platform-dependent",
+    ("diagnostics/system.py", "hasattr:num_fds"): "psutil process, platform-dependent",
+    ("llm/router.py", "getattr:usage"): "OpenAI stream chunk, optional field",
+    ("skills/registry.py", "getattr:skill"): "skill record or wrapper, not a robot object",
+    ("voice/bargein.py", "hasattr:_ring"): "own lazily created attribute",
+    ("webui/api.py", "getattr:age_group"): "registry record, not a robot object",
+    ("webui/api.py", "getattr:code"): "exception attribute",
+}
 AUDIT_IDS = frozenset({"1", "2", "3", "4", "5", "6", "B", "D", "U"})
 
 
@@ -100,7 +127,21 @@ def current_findings() -> Counter[Finding]:
         found += import_findings(text, rel(path), forbidden)
     for path in robot_sources():
         found += duck_findings(path.read_text(), rel(path))
+    for path in sorted(CORE_SRC.rglob("*.py")):
+        found += core_duck_findings(path.read_text(), rel(path))
     return found
+
+
+def core_duck_findings(text: str, file: str) -> Counter[Finding]:
+    """``duck_findings`` of a core file minus the ``CORE_DUCK_ALLOWED`` sites."""
+    prefix = rel(CORE_SRC) + "/"
+    return Counter(
+        {
+            f: n
+            for f, n in duck_findings(text, file).items()
+            if (f.file.removeprefix(prefix), f.term) not in CORE_DUCK_ALLOWED
+        }
+    )
 
 
 def test_the_baseline_entries_carry_a_known_audit_id():
@@ -125,6 +166,26 @@ def test_core_is_robot_agnostic_and_robot_packages_use_declared_capabilities():
     assert not stale, "baseline is stale (lower the count or delete the entry):\n" + "\n".join(
         f"  {f.check} {f.file} {f.symbol} {f.term} (-{n})" for f, n in sorted(stale.items())
     )
+
+
+def test_the_ratchet_is_closed_and_the_duck_allowlist_has_no_stale_entry():
+    assert (yaml.safe_load(BASELINE.read_text()) or []) == [], "the baseline stays empty"
+    prefix = rel(CORE_SRC) + "/"
+    seen = {
+        (rel(p).removeprefix(prefix), f.term)
+        for p in CORE_SRC.rglob("*.py")
+        for f in duck_findings(p.read_text(), rel(p))
+    }
+    assert set(CORE_DUCK_ALLOWED) <= seen, f"stale: {sorted(set(CORE_DUCK_ALLOWED) - seen)}"
+
+
+def test_the_core_duck_check_catches_a_probe_of_the_robot_speaker():
+    src = """
+    def _queue_end(self):
+        return getattr(self.sink, "playing_until", None)
+    """
+    found = core_duck_findings(textwrap.dedent(src), rel(CORE_SRC) + "/voice/speech.py")
+    assert {f.term for f in found} == {"getattr:playing_until"}
 
 
 def test_the_import_boundary_covers_the_installed_robot_package():
