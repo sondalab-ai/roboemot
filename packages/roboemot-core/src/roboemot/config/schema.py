@@ -947,6 +947,16 @@ class ReflexConfig(Strict):
         conservative="higher",
     )  # fmt: skip
     latency_window: int = param(200, "Latency samples kept per trigger", ge=10, le=10000)
+    onset_watch_ratio: float = param(
+        2.0,
+        "Report only (SPEC 12A): a loud-onset sound that rises above this ratio over the floor "
+        "is recorded in the debug report with its peak ratio, fired or not, so the threshold can "
+        "be tuned from a real run. A rule with a lower threshold watches from its own threshold",
+        unit="ratio", ge=1.5, le=100,
+    )  # fmt: skip
+    onset_window: int = param(
+        500, "Onset peaks kept per loud-onset rule for the debug report", ge=10, le=10000
+    )
     audio: ReflexAudioConfig = param({}, "Microphone level source")
     rules: list[ReflexRule] = param(
         [
@@ -954,7 +964,7 @@ class ReflexConfig(Strict):
                 "name": "startle-loud",
                 "trigger": "loud_onset",
                 "primitive": "startle",
-                "threshold": 6.0,
+                "threshold": 12.0,
                 "amplitude_deg": 12,
                 "cooldown_s": 3,
                 "duration_ms": 400,
