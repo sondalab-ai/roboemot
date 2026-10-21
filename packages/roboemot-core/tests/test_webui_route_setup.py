@@ -361,3 +361,16 @@ def test_a_secret_set_from_the_web_is_picked_up_by_the_router(tmp_path):
     assert router.key_problem(cfg.llm_routes[0]) is None and not router.secrets_changed()
     admin.set("cloud_key", "sk-SECOND-2")
     assert router.secrets_changed()
+
+
+def test_a_key_stored_for_a_route_that_is_gone_is_dropped(tmp_path, editor, stack, caplog):
+    editor.add_route(CLOUD, "cloud_key", ORIGIN)
+    data = saved(tmp_path)
+    data["overrides"] = {}  # the route itself was lost, its key record stayed
+    (tmp_path / FILE).write_text(json.dumps(data))
+    (tmp_path / FILE).chmod(0o600)
+    caplog.set_level(logging.WARNING)
+    stack, editor = restarted(tmp_path)
+    assert "cloud" not in routes(stack)
+    assert "keys" not in saved(tmp_path)
+    assert "dropped: no such route" in caplog.text and "cloud_key" not in caplog.text
