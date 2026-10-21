@@ -2871,7 +2871,7 @@ class ConnectivityConfig(Strict):
             "it": "Scusa, ora non riesco a pensare bene: sono senza rete.",
             "en": "Sorry, I can't think clearly right now: I'm offline.",
         },
-        "Spoken cue per language while offline (used once speech output is wired)",
+        "Spoken cue per language while offline (said through the speech output)",
     )
     cue_cooldown_s: float = param(
         120.0, "Minimum time between two spoken offline cues", unit="s", ge=0, le=3600

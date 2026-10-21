@@ -8,6 +8,7 @@ quiet before the robot link goes away.
 from __future__ import annotations
 
 import gc
+import time
 from contextlib import ExitStack
 from typing import Any
 
@@ -15,6 +16,8 @@ from roboemot.config import ConfigStack
 from roboemot.conversation import ConversationWorker
 from roboemot.conversation.preferences import RegistryPreferences
 from roboemot.conversation.sources import profile_source, registry_names, scene_source
+from roboemot.health.speech_cue import Delivery, SpeechCue
+from roboemot.persona import apply_to_register, effects
 from roboemot.skills.bridge import SkillBridge
 from roboemot.skills.defaults import default_skills
 from roboemot.voice.factory import build_speech
@@ -22,6 +25,30 @@ from roboemot.voice.factory import build_speech
 from .assembly import Pipeline
 from .host import RuntimeHost
 from .webui import start_webui
+
+
+def offline_cue(host: RuntimeHost, stack: ConfigStack, p: Pipeline) -> SpeechCue:
+    """The responder's cue, speaking on ``host.speech_output`` (SPEC 12A, Behaviour while
+    offline). Installed once that output exists; the register, circadian state and affect are
+    read when the phrase is said. Muted while asleep (the speaker is quiet then) and while a
+    minor is present (the conversation says the child-safe lines)."""
+
+    def delivery() -> Delivery:
+        cfg, active = stack.effective(), p.tracker.active
+        register = (
+            active.params
+            if active
+            else apply_to_register(cfg.register.unknown, effects(cfg.persona))
+        )
+        circadian = p.circ.model.effects() if host.circadian else cfg.circadian.states["awake"]
+        state = p.runner.engine.state(time.monotonic())
+        return register, circadian, state.label, state.intensity
+
+    return SpeechCue(
+        lambda: host.speech_output,
+        delivery,
+        lambda: p.sleep.asleep or p.sleep.paused or host.minor_present,
+    )
 
 
 def start_voice_output(
@@ -39,6 +66,7 @@ def start_voice_output(
     )
     cleanup.callback(output.close)
     output.start()
+    p.responder.cue = offline_cue(host, stack, p)
     if listener is None:
         return
     # Shutdown order: listener (no new utterances), conversation (cancels the

@@ -610,8 +610,9 @@ class Cue:
     def __init__(self) -> None:
         self.said: list[tuple[str, str]] = []
 
-    def say(self, text: str, language: str) -> None:
+    def say(self, text: str, language: str) -> bool:
         self.said.append((text, language))
+        return True
 
 
 REACHY_MANIFEST = (
@@ -741,3 +742,26 @@ def test_motion_snapshot_reflects_link_loss():
     assert snap["mode"] == "active" and snap["errors"] >= CFG.connectivity.robot.failures_to_offline
     assert snap["robot_link"]["online"] is False
     assert "ConnectionError" in snap["last_error"]
+
+
+# ---------------------------------------------------------------- no route is not an outage
+
+
+def test_no_routes_is_not_an_outage_at_start_or_after_removing_the_last_route():
+    ev, clock = Events(), Clock()
+    mon = NetworkMonitor([], POLICY, ev, probe=lambda *a: False, clock=clock)
+    mon.check_due()
+    assert mon.online and ev == []
+    mon.set_routes([route("cloud")])
+    mon.report("cloud", True)
+    mon.set_routes([])
+    assert mon.online and "link.network.lost" not in ev
+
+
+async def test_router_without_routes_raises_no_route_available_not_offline():
+    mon = NetworkMonitor([], POLICY, Events(), clock=Clock())
+    r = Router([], SafetyConfig(), monitor=mon)
+    assert not r.offline
+    with pytest.raises(NoRouteAvailable) as err:
+        await collect(r)
+    assert not isinstance(err.value, Offline)

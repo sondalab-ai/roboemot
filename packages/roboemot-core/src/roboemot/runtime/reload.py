@@ -61,6 +61,7 @@ def make_reload(host: RuntimeHost, p: Pipeline) -> Callable[[Any], None]:
             change.config.gesture_map,
         )
         p.responder.cfg = change.config.connectivity
+        p.responder.language = change.config.conversation.language
         p.network.set_policy(change.config.connectivity.network)
         p.network.set_routes(change.config.llm_routes)  # new routes are probed, removed dropped
 

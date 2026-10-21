@@ -7,8 +7,9 @@ from contextlib import ExitStack
 from types import SimpleNamespace
 
 import pytest
+from roboemot.config import ConfigStack
 from roboemot.runtime import RuntimeHost
-from roboemot.runtime.startup import start_all
+from roboemot.runtime.startup import offline_cue, start_all
 
 
 class Part:
@@ -56,3 +57,30 @@ def test_a_failure_while_starting_stops_what_already_started_in_reverse_order():
         "stop worker", "stop network", "stop loop", "stop watcher",
         "stop reflexes", "stop circ", "stop runner", "stop tracker", "stop presence",
     ]  # fmt: skip
+
+
+def test_offline_cue_speaks_on_the_host_output_and_is_muted_asleep_or_with_a_minor():
+    said: list[dict] = []
+    host, stack = RuntimeHost(), ConfigStack()
+    p = SimpleNamespace(
+        tracker=SimpleNamespace(active=None),
+        circ=None,
+        runner=SimpleNamespace(
+            engine=SimpleNamespace(state=lambda now: SimpleNamespace(label="joy", intensity=0.4))
+        ),
+        sleep=SimpleNamespace(asleep=False, paused=False),
+    )
+    cue = offline_cue(host, stack, p)
+    cue.say("no output yet", "it")  # the output does not exist: silent, no exception
+    host.speech_output = SimpleNamespace(say=lambda text, **kw: said.append({"text": text, **kw}))
+    cue.say("ciao", "it")
+    assert [s["text"] for s in said] == ["ciao"] and said[0]["mood"] == "joy"
+    assert said[0]["register"] == stack.effective().register.unknown
+    p.sleep.asleep = True
+    cue.say("asleep", "it")
+    p.sleep.asleep, p.sleep.paused = False, True
+    cue.say("paused", "it")
+    p.sleep.paused = False
+    host.minor_presence = SimpleNamespace(present=lambda: True)  # type: ignore[assignment]
+    cue.say("minor", "it")
+    assert len(said) == 1
