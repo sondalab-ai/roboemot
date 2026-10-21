@@ -33,6 +33,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
+from urllib.parse import urlsplit
 
 from roboemot import paths
 from roboemot.config.catalogue import (
@@ -59,7 +60,8 @@ from roboemot.config.stack import (
     keyed_ref,
     set_path,
 )
-from roboemot.redact import REDACTED, origin, secret_shaped
+from roboemot.redact import REDACTED, secret_shaped
+from roboemot.redact import origin as plain_origin
 from roboemot.secret_store import NAME as SECRET_NAME
 from roboemot.secret_store import SECRET_REF
 from roboemot.voice.models import ModelError, supported_languages
@@ -272,6 +274,20 @@ class OverridesFile:
             with contextlib.suppress(OSError):
                 tmp.unlink()
             raise
+
+
+def origin(url: str) -> str:
+    """``scheme://host[:port]`` as the web UI names and acknowledges it: the host in its ASCII
+    (IDNA, punycode) form so a look-alike letter cannot pass for another host; '' when unparsable
+    or the host cannot be encoded."""
+    found = plain_origin(url)
+    if found.isascii():
+        return found
+    try:
+        host = urlsplit(found).hostname or ""
+        return found.replace(host, host.encode("idna").decode("ascii"), 1)
+    except (ValueError, UnicodeError):
+        return ""
 
 
 def is_key_ref(value: object) -> bool:
@@ -580,7 +596,8 @@ class SettingsEditor:
         other text (a key typed in) is refused and never echoed."""
         if secret is None:
             return NO_KEY_REF
-        if not isinstance(secret, str) or SECRET_NAME.match(secret) is None:
+        cap = self.stack.effective().webui.secret_name_max_chars
+        if not isinstance(secret, str) or len(secret) > cap or SECRET_NAME.match(secret) is None:
             raise ValidationError("secret_name_invalid", "secret")
         if self._known_secrets is None or secret not in set(self._known_secrets()):
             raise ValidationError("secret_unknown", "secret")
@@ -754,7 +771,7 @@ class SettingsEditor:
         if (
             path in LANGUAGE_DICTS
             and isinstance(clean, dict)
-            and set(clean) - set(old) - languages()
+            and set(clean) - set(old or {}) - languages()
         ):
             raise ValidationError("language_unsupported", "value")
         # a runtime dict merges, so a value that would drop a key cannot be expressed there

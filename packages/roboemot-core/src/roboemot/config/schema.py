@@ -3084,6 +3084,13 @@ class WebUIConfig(Strict):
     name_max_chars: int = param(
         64, "Longest display name or consent name", ge=1, le=200, conservative="lower"
     )
+    secret_name_max_chars: int = param(
+        128,
+        "Longest secret name the web UI accepts (SPEC 8 Secrets, 11A)",
+        ge=1,
+        le=200,
+        conservative="lower",
+    )
     settings_phrase_max_chars: int = param(
         40,
         "Longest wake phrase or blocklist entry the settings editor accepts (SPEC 11A)",

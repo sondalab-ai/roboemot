@@ -139,7 +139,7 @@ class SecretsPort(Protocol):
     routes that use them, and write-only set/remove. Nothing here returns a value."""
 
     def listing(self) -> list[dict[str, Any]]: ...
-    def set(self, name: str, value: str) -> None: ...
+    def set(self, name: str, value: str) -> tuple[bool, list[str]]: ...
     def remove(self, name: str) -> bool: ...
 
 
@@ -908,7 +908,14 @@ class WebApi:
             rows = port.listing()
         except SecretUnavailable as exc:
             raise ApiError(HTTPStatus.CONFLICT, "secret_store") from exc
-        return Response(HTTPStatus.OK, {"secrets": rows, "max_value_chars": MAX_VALUE_CHARS})
+        return Response(
+            HTTPStatus.OK,
+            {
+                "secrets": rows,
+                "max_value_chars": MAX_VALUE_CHARS,
+                "max_name_chars": self.web.secret_name_max_chars,
+            },
+        )
 
     def _secret_set(self, req: Request) -> Response:
         """Add or replace a secret (SPEC 8 Secrets). Body: ``name``, ``value``, ``pin``. The PIN is
@@ -920,8 +927,16 @@ class WebApi:
         if "name" not in body or "value" not in body:
             raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
         self._check_pin(req, body.get("pin"))
-        name, value = secret_name(body["name"]), secret_value(body["value"])
-        self._secret_call(lambda: port.set(name, value), name)
+        name = secret_name(body["name"], self.web.secret_name_max_chars)
+        value = secret_value(body["value"])
+        replaced, users = self._secret_call(lambda: port.set(name, value), name)
+        log.info(
+            "secret %r %s from the web UI by %s%s",
+            name,
+            "replaced" if replaced else "added",
+            self._who(req),
+            f"; used by routes {users}" if replaced and users else "",
+        )
         return Response(HTTPStatus.OK, {"name": name, "set": True})
 
     def _secret_remove(self, req: Request) -> Response:
@@ -932,10 +947,11 @@ class WebApi:
         if "name" not in body:
             raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
         self._check_pin(req, body.get("pin"))
-        name = secret_name(body["name"])
+        name = secret_name(body["name"], self.web.secret_name_max_chars)
         gone = self._secret_call(lambda: port.remove(name), name)
         if not gone:
             raise ApiError(HTTPStatus.NOT_FOUND, "secret_unknown")
+        log.info("secret %r removed from the web UI by %s", name, self._who(req))
         return Response(HTTPStatus.OK, {"name": name, "set": False})
 
     @staticmethod

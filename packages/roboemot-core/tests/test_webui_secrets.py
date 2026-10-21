@@ -69,6 +69,7 @@ def test_list_has_names_and_users_and_nothing_else(web):
             {"name": "spare", "set": True, "used_by": []},
         ],
         "max_value_chars": MAX_VALUE_CHARS,
+        "max_name_chars": RoboEmotConfig().webui.secret_name_max_chars,
     }
     assert OLD.encode() not in resp.body and b"SPARE" not in resp.body
 
@@ -218,3 +219,53 @@ def test_without_a_secrets_port_the_api_says_so(tmp_path):
         assert json.dumps(post(client, "/api/secrets/set", {"name": "a", "value": "b"}).json)
     finally:
         srv.stop()
+
+
+# ------------------------------------------------------------------ fix round 1 (security review)
+
+
+@pytest.mark.parametrize("name", ["cloud\n", "cloud\n\n", "a\nb"])
+def test_a_name_with_a_newline_is_refused_everywhere(web, store, name):
+    resp = post(web, "/api/secrets/set", {"name": name, "value": CANARY})
+    assert resp.status == 422 and resp.json["error"] == "secret_name_invalid"
+    assert "cloud\n" not in store.names()
+    with pytest.raises(ValueError):
+        store.set(name, CANARY)
+
+
+def test_a_name_over_the_cap_is_refused_and_the_cap_is_sent(web, store):
+    cap = web.request("GET", "/api/secrets").json["max_name_chars"]
+    assert post(web, "/api/secrets/set", {"name": "n" * cap, "value": CANARY}).status == 200
+    resp = post(web, "/api/secrets/set", {"name": "n" * (cap + 1), "value": CANARY})
+    assert resp.status == 422 and resp.json["error"] == "secret_name_invalid"
+    assert "n" * (cap + 1) not in store.names()
+
+
+def test_the_secret_reference_pattern_is_anchored_at_the_end():
+    from roboemot.secret_store import SECRET_REF
+
+    assert SECRET_REF.match("${secret:x}") and not SECRET_REF.match("${secret:x}\n")
+
+
+def test_set_and_remove_are_logged_by_name_and_never_by_value(web, store, caplog):
+    caplog.set_level(logging.INFO)
+    post(web, "/api/secrets/set", {"name": "fresh", "value": CANARY})
+    post(web, "/api/secrets/set", {"name": "cloud_key", "value": CANARY + "2"})
+    assert post(web, "/api/secrets/remove", {"name": "fresh"}).status == 200
+    lines = [r.getMessage() for r in caplog.records if "secret" in r.getMessage()]
+    assert any("added" in m and "fresh" in m for m in lines)
+    replaced = [m for m in lines if "replaced" in m]
+    assert replaced and "cloud_key" in replaced[0] and "cloud" in replaced[0]
+    assert any("removed" in m and "fresh" in m for m in lines)
+    assert CANARY not in caplog.text and OLD not in caplog.text
+
+
+def test_the_store_is_the_one_resolved_at_start(tmp_path, data):
+    cfg = {"data": str(data)}
+    live = RoboEmotConfig(data_dir=str(data))
+    moved = RoboEmotConfig(data_dir=str(tmp_path / "elsewhere"))
+    now = {"cfg": live}
+    admin = SecretsAdmin(lambda: now["cfg"], store=SecretStore.for_data_dir(live.data_dir))
+    now["cfg"] = moved
+    admin.set("k", "v")
+    assert not (tmp_path / "elsewhere").exists() and cfg

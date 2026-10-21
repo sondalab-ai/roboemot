@@ -183,6 +183,9 @@ EN: dict[str, str] = {
     "route_key_literal": "A key written in the configuration file",
     "route_key_hint": "Only stored keys can be chosen. Add one in the API keys card below.",
     "route_key_message": "The key will be sent to {host}. Enter the PIN to allow it.",
+    "route_key_insecure": (
+        "This address is not encrypted (http): the key will cross the network in clear."
+    ),
     "route_add": "Add route",
     "route_save": "Save route",
     "route_edit": "Edit",
@@ -651,6 +654,9 @@ IT: dict[str, str] = {
         "Si possono scegliere solo chiavi salvate. Aggiungila nella scheda Chiavi API."
     ),
     "route_key_message": "La chiave verrà inviata a {host}. Inserisci il PIN per consentirlo.",
+    "route_key_insecure": (
+        "Questo indirizzo non è cifrato (http): la chiave attraverserà la rete in chiaro."
+    ),
     "route_add": "Aggiungi modello",
     "route_save": "Salva modello",
     "route_edit": "Modifica",

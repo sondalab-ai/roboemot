@@ -8,6 +8,7 @@ from typing import Any
 
 from roboemot import paths
 from roboemot.config import ConfigStack
+from roboemot.secret_store import SecretStore
 from roboemot.webui import Server, make_server
 from roboemot.webui.routes import RouteChecker
 from roboemot.webui.secrets_admin import SecretsAdmin
@@ -28,7 +29,7 @@ def start_webui(
     page: enrollment is a side channel, not a reason to stop the robot.
     """
     try:
-        secrets = SecretsAdmin(stack.effective)
+        secrets = SecretsAdmin(stack.effective, store=SecretStore.for_data_dir(cfg.data_dir))
         settings = SettingsEditor(
             stack,
             store=paths.settings_overrides_path(cfg.data_dir),

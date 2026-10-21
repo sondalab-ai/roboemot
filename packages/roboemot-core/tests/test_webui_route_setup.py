@@ -412,3 +412,28 @@ def test_a_yaml_key_rebound_and_then_moved_reverts_whole_at_start(tmp_path):
     editor.restore()
     route = routes(stack)["lan"]
     assert route.base_url == LAN["base_url"] and route.api_key == "${secret:cloud_key}"
+
+
+# ------------------------------------------------------------------ fix round 1 (security review)
+
+
+def test_a_host_is_acknowledged_in_its_punycode_form(editor, stack):
+    cyr = {**CLOUD, "base_url": "https://аpple.example/v1"}
+    with pytest.raises(ValidationError) as caught:
+        editor.add_route(cyr, "cloud_key", None)
+    ascii_origin = caught.value.extra["endpoint"]
+    assert ascii_origin.startswith("https://xn--") and ascii_origin.isascii()
+    editor.add_route(cyr, "cloud_key", ascii_origin)
+    assert routes(stack)["cloud"].api_key == "${secret:cloud_key}"
+
+
+def test_a_language_dict_with_no_old_value_does_not_crash(editor, monkeypatch):
+    import roboemot.webui.settings as mod
+
+    monkeypatch.setattr(mod, "plain", lambda v: None)
+    try:
+        editor.change("voice.voices", {"xx": "a"})
+    except TypeError:
+        pytest.fail("TypeError")
+    except Exception:  # noqa: BLE001  any other refusal is fine
+        pass

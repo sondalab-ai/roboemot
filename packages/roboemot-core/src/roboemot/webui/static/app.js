@@ -552,7 +552,7 @@ async function catalogueView() {
 // sent, and the PIN likewise, so a failure never leaves either in the page. The page never holds a
 // stored value: the list has names and the routes that use them.
 function secretsCard(data, reload) {
-  const name = textInput("secret-name", { required: true, maxlength: "128", autocomplete: "off", autocapitalize: "off", spellcheck: "false" });
+  const name = textInput("secret-name", { required: true, maxlength: String(data.max_name_chars), autocomplete: "off", autocapitalize: "off", spellcheck: "false" });
   const value = textInput("secret-value", {
     type: "password", required: true, autocomplete: "off", autocapitalize: "off", spellcheck: "false",
     maxlength: String(data.max_value_chars),
@@ -648,6 +648,12 @@ function routeForm(route, secrets, nameMax, save) {
   return form;
 }
 
+// A key sent over http to a host that is not this machine crosses the network unencrypted.
+function insecureHost(origin) {
+  const m = /^http:[/][/](\[[^\]]*\]|[^:/]*)/.exec(origin);
+  return Boolean(m) && !(m[1] === "localhost" || m[1] === "[::1]" || /^127\./.test(m[1]));
+}
+
 // Calls for a new route or for the changed fields of an existing one, behind one PIN dialog. A route
 // with a key sends it to the host of its URL: the dialog names that host and the call carries it as
 // the acknowledgement (the server names the one it expects when it differs).
@@ -663,7 +669,11 @@ async function saveRoute(route, v) {
     try {
       return await call();
     } catch (err) {
-      if (err.message === "endpoint_ack_required" && err.endpoint) ack = err.endpoint;
+      if (err.message === "endpoint_ack_required" && err.endpoint) {
+        ack = err.endpoint;
+        const text = document.querySelector("dialog .sl-dialog__body p");
+        if (text) text.textContent = ackMessage(ack);
+      }
       throw err;
     }
   };
@@ -690,7 +700,8 @@ async function saveRoute(route, v) {
     if (!steps.length) { notice(t("settings_unchanged")); return; }
   }
   const sends = keyed || (moved && route.key !== "none");
-  const message = sends && target ? t("route_key_message", { host: target }) : (route ? route.name : v.name);
+  const ackMessage = (host) => t("route_key_message", { host }) + (insecureHost(host) ? " " + t("route_key_insecure") : "");
+  const message = sends && target ? ackMessage(target) : (route ? route.name : v.name);
   let ran = false;
   await pinnedCall(message, t(route ? "route_save" : "route_add"), async (pin) => {
     for (const step of steps) await step(pin);

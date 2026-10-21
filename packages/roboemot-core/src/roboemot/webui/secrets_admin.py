@@ -28,9 +28,9 @@ class SecretInUse(RuntimeError):
         self.routes = routes
 
 
-def secret_name(value: object, field: str = "name") -> str:
-    """``value`` as a store name, else ``ValidationError("secret_name_invalid")``."""
-    if not isinstance(value, str) or NAME.match(value) is None:
+def secret_name(value: object, max_chars: int, field: str = "name") -> str:
+    """``value`` as a store name of at most ``max_chars``, else ``secret_name_invalid``."""
+    if not isinstance(value, str) or len(value) > max_chars or NAME.match(value) is None:
         raise ValidationError("secret_name_invalid", field)
     return value
 
@@ -84,9 +84,12 @@ class SecretsAdmin:
             for n in sorted({*have, *used})
         ]
 
-    def set(self, name: str, value: str) -> None:
-        """Add or replace ``name`` (already validated by ``secret_name`` / ``secret_value``)."""
+    def set(self, name: str, value: str) -> tuple[bool, list[str]]:
+        """Add or replace ``name`` (already validated by ``secret_name`` / ``secret_value``).
+        Returns whether it replaced a value and the routes that use it (for the audit line)."""
+        replaced = self.store.has(name)
         self.store.set(name, value)
+        return replaced, self.used_by().get(name, [])
 
     def remove(self, name: str) -> bool:
         """Delete ``name``; True when it was there. Raises :class:`SecretInUse` while a route

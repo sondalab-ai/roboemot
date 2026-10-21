@@ -272,3 +272,50 @@ test("route form: a path-only change of a keyed route carries the origin as the 
   const call = page.calls.find((c) => c.path === "/api/settings");
   assert.equal(call.body.ack_endpoint, "https://api.example.com");
 });
+
+test("route form: an http host that is not this machine adds the unencrypted warning", async () => {
+  const page = await formsPage([], { "GET /api/strings": { language: "en", strings: { route_key_message: "Key to {host}", route_key_insecure: "CLEAR" } } });
+  const fill = (url) => {
+    sel(page, "route-new-name").value = "n";
+    sel(page, "route-new-url").value = url;
+    sel(page, "route-new-model").value = "m";
+    sel(page, "route-new-key").value = "cloud_key";
+    submit(page.window, sel(page, "route-new-name").closest("form"));
+  };
+  fill("http://192.168.1.9/v1");
+  await settle();
+  assert.match(page.document.querySelector("dialog").textContent, /CLEAR/);
+  page.document.querySelector("dialog").close();
+  fill("http://localhost:8080/v1");
+  await settle();
+  assert.doesNotMatch(page.document.querySelector("dialog").textContent, /CLEAR/);
+});
+
+test("route form: the host is acknowledged in punycode", async () => {
+  let seen = null;
+  const page = await formsPage([], { "POST /api/routes/add": (b) => { seen = b; return { changed: true }; } });
+  sel(page, "route-new-name").value = "n";
+  sel(page, "route-new-url").value = "https://аpple.example/v1";
+  sel(page, "route-new-model").value = "m";
+  sel(page, "route-new-key").value = "cloud_key";
+  submit(page.window, sel(page, "route-new-name").closest("form"));
+  await settle();
+  assert.match(page.document.querySelector("dialog").textContent, /xn--/);
+  await answerPin(page);
+  assert.match(seen.ack_endpoint, /^https:\/\/xn--[a-z0-9-]+\.example$/);
+});
+
+test("route form: when the server names another endpoint the dialog text is rebuilt from it", async () => {
+  const page = await formsPage([], {
+    "GET /api/strings": { language: "en", strings: { route_key_message: "Key to {host}" } },
+    "POST /api/routes/add": reply(422, { error: "endpoint_ack_required", endpoint: "https://server.example" }),
+  });
+  sel(page, "route-new-name").value = "n";
+  sel(page, "route-new-url").value = "https://client.example/v1";
+  sel(page, "route-new-model").value = "m";
+  sel(page, "route-new-key").value = "cloud_key";
+  submit(page.window, sel(page, "route-new-name").closest("form"));
+  await settle();
+  await answerPin(page);
+  assert.match(page.document.querySelector("dialog").textContent, /Key to https:\/\/server\.example/);
+});
