@@ -220,7 +220,7 @@ class BarePlatform:
         return []
 
     def probe(self, ui, py): ...
-    def verify(self, ui, py, dev): ...
+    def verify(self, ui, py, dev, app_config): ...
     def running_app(self):
         return None
 
@@ -242,7 +242,7 @@ class BarePlatform:
     def cleanup(self, ui, py, dry_run): ...
     def verify_removed(self, ui): ...
 
-    def stage(self, root, dest, dev):
+    def stage(self, root, dest, dev, app_config):
         pkg = dest / "bare-app"
         pkg.mkdir(parents=True)
         (pkg / "pyproject.toml").write_text(

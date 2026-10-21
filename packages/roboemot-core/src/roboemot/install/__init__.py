@@ -13,7 +13,9 @@ the platform can create it (``Platform.base_python``), the checks run against th
 interpreter, the record is written, and then the platform creates the environment; the dry run
 only reports it and skips the dependency check. It also creates the private app data folder
 (``~/.local/share/roboemot``: registry, models, trait cache) when it is not there yet and
-records it. Unless declined (`--no-piper`) it also creates a Piper virtualenv in the data folder
+records it. It writes the app config (``data/app.yaml``) with ``voice.enabled: true`` (plus the
+dev content with ``--dev``) unless ``--no-voice``, which also makes Piper and the models default
+to off. Unless declined (`--no-piper`) it also creates a Piper virtualenv in the data folder
 (`piper-tts` is GPL-3.0 and runs as its own process, SPEC 8), recorded for uninstall.
 The platform's ``extras`` (``voice`` for a robot that listens, so vosk) are installed with
 ``roboemot-core``; the ``vision`` extra and the vision weights come too unless declined
@@ -113,8 +115,12 @@ class Platform(Protocol):
     def create_env(self, ui: Ui, remote: Remote, plan: str) -> None: ...
     def env_users(self, py: RemotePython) -> list[str]: ...
     def probe(self, ui: Ui, py: RemotePython) -> None: ...
-    def stage(self, root: Path, dest: Path, dev: bool) -> list[Path]: ...
-    def verify(self, ui: Ui, py: RemotePython, dev: bool) -> None: ...
+    def stage(
+        self, root: Path, dest: Path, dev: bool, app_config: dict[str, object]
+    ) -> list[Path]: ...
+    def verify(
+        self, ui: Ui, py: RemotePython, dev: bool, app_config: dict[str, object]
+    ) -> None: ...
     def running_app(self) -> str | None: ...
     def stop_app(self) -> None: ...
     def app_installed(self) -> bool: ...
@@ -143,6 +149,41 @@ class Options:
     clear_caches: bool | None = None
     vision: bool = True
     models: bool | None = None
+    voice: bool = True
+
+
+# ---------------------------------------------------------------- app config
+
+
+def app_config_overrides(voice: bool) -> dict[str, object]:
+    """What the installer sets in the robot's app config besides the platform's dev content:
+    ``voice.enabled: true`` with voice (the library default is off, so a robot without a
+    microphone or speaker is unchanged; the installer enables it for the robot it sets up).
+    The platform writes it into ``app.yaml`` and reads it back to verify (SPEC 4A, Installer)."""
+    return {"voice": {"enabled": True}} if voice else {}
+
+
+def describe_app_config(dev: bool, app_config: dict[str, object]) -> str:
+    """One line naming what the app config on the robot will contain (empty: no app.yaml)."""
+    parts = [
+        f"{key}.{sub}={str(value).lower()}"
+        for key, group in app_config.items()
+        for sub, value in (group.items() if isinstance(group, dict) else [("", group)])
+    ]
+    if dev:
+        parts.append("safety.allow_unmeasured_dynamics=true (dev)")
+    return ", ".join(parts)
+
+
+def warn_voice_gaps(ui: Ui, opts: Options) -> None:
+    """With voice on, say what a declined Piper or voice-models step costs: no speech, no
+    listening. Called once both answers are known."""
+    if not opts.voice:
+        return
+    if not opts.piper:
+        ui.warn("voice is on but Piper is not installed: the robot will not speak")
+    if not opts.models:
+        ui.warn("voice is on but the voice models are not downloaded: the robot will not listen")
 
 
 # ---------------------------------------------------------------- platforms
@@ -962,7 +1003,10 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
                 )
                 dev = ui.confirm("Install in dev mode?", True)
             ui.ok("dev mode (configs/dev-unmeasured.yaml)" if dev else "production config")
-            dirs = platform.stage(root, Path(tmp) / "src", dev)
+            app_config = app_config_overrides(opts.voice)
+            content = describe_app_config(dev, app_config)
+            ui.ok(f"app config (data/app.yaml): {content}" if content else "no app config file")
+            dirs = platform.stage(root, Path(tmp) / "src", dev, app_config)
 
             ui.step("SSH access")
 
@@ -985,19 +1029,22 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
                 ui.info("would install the vision extra (OpenCV, ONNX); --no-vision skips it")
             record = install_packages(ui, platform, py, remote, dirs, wheels, opts.dry_run, extras)
             if not opts.dry_run:
-                platform.verify(ui, py, dev)
+                platform.verify(ui, py, dev, app_config)
             if opts.piper is None:
-                opts.piper = ui.confirm("Install Piper for on-board speech (own virtualenv)?", True)
+                opts.piper = opts.voice and ui.confirm(
+                    "Install Piper for on-board speech (own virtualenv)?", True
+                )
             if opts.piper:
                 install_piper(ui, platform, remote, record, opts.dry_run)
             if opts.models is None:
-                opts.models = ui.confirm(
+                opts.models = (opts.voice or opts.vision) and ui.confirm(
                     f"Download the {models_label(opts.vision)} "
                     f"(~{models_bytes(opts.vision) / 1e9:.1f} GB at peak while unpacking, "
                     f"~{models_bytes(opts.vision, peak=False) / 1e9:.1f} GB once installed) "
                     "on the robot?",
                     True,
                 )
+            warn_voice_gaps(ui, opts)
             if opts.models:
                 fetch_models(ui, platform, py, remote, record, opts.vision, opts.dry_run)
             set_operator_pin(ui, py, remote, opts.dry_run)
@@ -1278,9 +1325,18 @@ def parse_args(argv: list[str] | None = None) -> Options:
         "--dry-run", action="store_true", help="read-only checks; nothing on the robot changes"
     )
     p.add_argument(
+        "--voice",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="turn the voice pipeline on in the app config (voice.enabled; default: on). "
+        "--no-voice writes no voice setting and makes --piper and --models default to off "
+        "(--models still defaults to on with vision, whose weights it fetches)",
+    )
+    p.add_argument(
         "--piper",
         action=argparse.BooleanOptionalAction,
-        help="install Piper (on-board speech) in its own virtualenv in the data folder",
+        help="install Piper (on-board speech) in its own virtualenv in the data folder "
+        "(default: ask, off with --no-voice)",
     )
     p.add_argument(
         "--vision",
@@ -1292,7 +1348,8 @@ def parse_args(argv: list[str] | None = None) -> Options:
     p.add_argument(
         "--models",
         action=argparse.BooleanOptionalAction,
-        help="download the voice models on the robot (default: ask)",
+        help="download the voice models (and the vision weights with --vision) on the robot "
+        "(default: ask)",
     )
     p.add_argument(
         "--secret",
@@ -1324,6 +1381,7 @@ def parse_args(argv: list[str] | None = None) -> Options:
         a.clear_caches,
         a.vision,
         a.models,
+        a.voice,
     )
 
 
