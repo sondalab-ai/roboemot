@@ -21,7 +21,7 @@ Notes for coding agents are in [`CLAUDE.md`](CLAUDE.md).
 | Robot plugins: core never names a robot; joint names, gestures, robot name and capabilities come from the manifest and the robot package's entry points | 4A, 11, 12A | Done, tested; enforced by `tests/test_robot_hierarchy.py` (AST gate with a ratchet baseline). Settings that moved or were renamed (e.g. `reflexes.antenna_ratio` is now `reflexes.startle_lift_ratio`) are migrated on restore and named in `app.yaml` errors |
 | Arbiter + safety limiter (Python reference) | 10, 12 | Done; two independent reviews; property and fuzz tests (limits, velocity, acceleration, 65 deg coupling with a 3 deg planning margin) |
 | Arbiter + safety limiter in C++ (`rt/`) | 10 | Matches the reference on 600-tick golden vectors (tolerance 1e-9); same input validation; not yet a running process |
-| Reachy Mini driver, motion loop, app wrapper | 4A | `pytest -m sim` passes against the MuJoCo simulator (command-to-state 37-55 ms measured on a cloud dev container, not a CM4). The daemon started the app on a real Reachy Mini Wireless in the first real install; its log showed vision unavailable (`opencv` was not installed, `--vision` now installs it on request). Motion, expressions and timing on the real robot are not checked |
+| Reachy Mini driver, motion loop, app wrapper | 4A | `pytest -m sim` passes against the MuJoCo simulator (command-to-state 37-55 ms measured on a cloud dev container, not a CM4). The daemon started the app on a real Reachy Mini Wireless in the first real install; its log showed vision unavailable (`opencv` was not installed, the installer now installs it by default, `--no-vision` skips it). Motion, expressions and timing on the real robot are not checked |
 | Affect engine, appraisal rules, empathic register, expression maps, reflexes, circadian model with camera light sensing | 7, 7A, 10 | Done, tested; the M2 exit checks pass in the simulator and through the app on a mocked client ([M2 report](docs/eval/m2.md)); expressions, rest posture, light thresholds and reflex timing not yet seen on the real robot |
 | OpenAI-compatible LLM router, conversation with skills, API keys from the secret store (`${secret:name}`) | 8, 12 | Done, tested against fake servers and a mocked LAN route (first token 0.55 s in the M3 exit test); no real LLM route used on the robot |
 | Voice: capture, VAD, fast path, wake phrases, ASR (Vosk), TTS (Piper in its own process, OpenAI-compatible speech), barge-in | 8, 13 | Done, tested; the M3 exit checks pass on a Mac with the real Silero and Vosk models and Piper in a Linux container, and run in CI (`models` job in `.github/workflows/ci.yml`): first TTS audio 1.34 to 1.43 s after the last speech frame against 2.0 s, barge-in 75 to 163 ms against 200 ms ([M3 report](docs/eval/m3.md)). Not seen on the robot: echo and AEC, CM4 load and latency, Piper install; the wake phrases missed on several synthetic voices |
@@ -90,7 +90,7 @@ python scripts/install_on_robot.py --dry-run   # read-only checks; nothing on th
 python scripts/install_on_robot.py             # install, verify, optionally start
 python scripts/install_on_robot.py --uninstall --dry-run   # what uninstall would undo
 python scripts/install_on_robot.py --uninstall # put the robot back as it was
-python scripts/install_on_robot.py --vision --no-models --no-clear-caches   # optional steps, see below
+python scripts/install_on_robot.py --no-vision --no-models --no-clear-caches   # skip optional steps, see below
 ```
 
 To log in afterwards, `python scripts/robot_ssh.py` finds the robot the same way and opens a shell;
@@ -111,7 +111,8 @@ asked, it stops the running app (one app at a time), wakes the robot, starts Rob
 it the startup app (the daemon starts it on the robot's first wake-up). Choose dev mode until
 the manifest dynamics are measured, or the app refuses to start (SPEC 12). Every prompt has a
 flag for unattended runs: `--host`, `--user`, `--robot`, `--dev`, `--start`, `--startup-app`,
-`--piper`, `--secret`, `--models`, `--clear-caches`, `--vision`, `--yes`.
+`--piper`, `--secret`, `--models`, `--clear-caches`, `--vision`, `--yes` (the boolean ones also
+have a `--no-` form).
 
 What goes onto the robot besides the two wheels:
 
@@ -123,9 +124,11 @@ What goes onto the robot besides the two wheels:
   command later; `--no-models` skips it, and a dry run only reports the sizes and the free space.
   Uninstall removes the models with the data folder (or, when the data folder was already there,
   the model folders the installer created).
-- **Vision is off by default.** `--vision` also installs the `vision` extra (OpenCV, ONNX) and
-  fetches the vision weights (about 1.4 GB of disk together with the voice models while downloading, INT8 files included; the figure is computed from the pinned manifests); without it the app
-  logs "vision unavailable" and runs without it.
+- **Vision is on by default.** The installer also installs the `vision` extra (OpenCV, ONNX) and
+  fetches the vision weights (about 1.4 GB of disk together with the voice models while downloading, INT8 files included; the figure is computed from the pinned manifests); `--no-vision` skips both,
+  and then the app logs "vision unavailable" and runs without it. If the free space is short the
+  models step is skipped with a warning that suggests `--no-vision`; a re-run over an install
+  made with `--no-vision` adds the extra and the weights.
 - **Disk.** The CM4 image has about 0.5 GB free (97% used on the robot of the first run) because
   the robot image's own setup leaves a 5.6 GB uv download cache in `~/.cache/uv`. The installer
   shows its size and asks whether to clear it before the free-space check (default yes on a terminal; an unattended run clears it only with `-y` or `--clear-caches`, `--no-clear-caches` keeps it).
