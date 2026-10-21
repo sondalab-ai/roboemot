@@ -40,7 +40,9 @@ def start_webui(
     try:
         live = LiveState(host, p, stack.effective(), clock=p.loop.clock)
         unsubscribe = stack.subscribe(live.apply_config)
-        live.apply_config(SimpleNamespace(config=stack.effective()))  # a change since the read above
+        live.apply_config(
+            SimpleNamespace(config=stack.effective())
+        )  # catches a change since the read
         secrets = SecretsAdmin(stack.effective, store=SecretStore.for_data_dir(cfg.data_dir))
         settings = SettingsEditor(
             stack,
