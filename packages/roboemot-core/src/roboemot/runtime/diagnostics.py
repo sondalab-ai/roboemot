@@ -26,6 +26,7 @@ def build_diagnostics(
         *local_sources(process_pid=os.getpid()),
         *platform_sources(manifest.robot.id, Target()),
         FnSource("roboemot.motion", p.loop.snapshot),
+        FnSource("roboemot.sleep", lambda: p.sleep.snapshot(time.monotonic())),
         FnSource("roboemot.network", p.network.snapshot),
         FnSource("roboemot.vision", p.perception.vision_snapshot),
         FnSource("roboemot.world", lambda: world_snapshot(p.world.entries, time.monotonic())),

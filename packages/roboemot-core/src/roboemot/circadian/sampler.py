@@ -245,8 +245,20 @@ class IdleLightReader:
         self.sampler = sampler
         self.source = source
         self._stop = threading.Event()
+        self._paused = threading.Event()
         self._thread: threading.Thread | None = None
         self.reads = 0
+
+    def pause(self) -> None:
+        """Read no frame until :meth:`resume` (the robot is asleep, SPEC 12A); the thread idles."""
+        self._paused.set()
+
+    def resume(self) -> None:
+        self._paused.clear()
+
+    @property
+    def paused(self) -> bool:
+        return self._paused.is_set()
 
     @property
     def running(self) -> bool:
@@ -286,5 +298,6 @@ class IdleLightReader:
 
     def _run(self) -> None:
         while not self._stop.is_set():
-            self.step()
+            if not self._paused.is_set():
+                self.step()
             self._stop.wait(self.sampler.circadian.idle_poll_s)

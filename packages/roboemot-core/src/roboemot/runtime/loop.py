@@ -44,6 +44,12 @@ def run_loop(
     fx_for, fx = None, None
     while not stop_event.is_set():
         now = time.monotonic()
+        if p.sleep.tick(now):  # asleep (SPEC 12A): only the clocks run; the work waits for the wake
+            p.circ.tick(now)
+            p.runner.tick(now)
+            clock.last_s = now
+            stop_event.wait(1.0 / stack.effective().motion.app_tick_hz)
+            continue
         p.circ.tick(now)  # before the affect tick: its events and baseline apply to it
         state = p.runner.tick(now)
         minor = p.presence.apply(now)

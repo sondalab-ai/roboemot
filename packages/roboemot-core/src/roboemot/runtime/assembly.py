@@ -55,6 +55,7 @@ from roboemot.world.autoenroll import open_autoenroll, purge_stored
 
 from .host import RuntimeHost
 from .reports import register_overrides
+from .sleep import SleepGate
 
 log = logging.getLogger(__name__)
 MS_PER_S = 1000.0
@@ -100,6 +101,7 @@ class Pipeline:
     conv_speaker: Callable[[], str | None]
     value_cap: Callable[[], int]
     pitch_dof: str
+    sleep: SleepGate
 
 
 def make_yes_no(
@@ -370,4 +372,15 @@ def assemble(
         conv_speaker=speaker_source(selector, world),
         value_cap=value_cap,
         pitch_dof=gaze_map.head_pitch,
+        sleep=SleepGate(
+            host,
+            bus,
+            loop,
+            perception,
+            light_reader,
+            listener,
+            gaze,
+            scan,
+            lambda: stack.effective().runtime.pause_when_asleep,
+        ),
     )

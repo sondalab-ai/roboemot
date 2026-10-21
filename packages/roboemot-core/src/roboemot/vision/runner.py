@@ -27,6 +27,7 @@ from .types import Frame
 log = logging.getLogger(__name__)
 
 IDLE_WAIT_S = 0.01
+PAUSED_WAIT_S = 0.25  # between checks of the pause flag while the camera is paused
 GRID = 8
 RATE_WINDOW_S = 10.0
 MAX_RATE_HZ = 120.0  # vision.rates.camera_hz upper bound: sizes the rate windows
@@ -172,8 +173,10 @@ def pump(
     stop: threading.Event,
     max_hz: float,
     clock: Callable[[], float] = time.monotonic,
+    paused: threading.Event | None = None,
 ) -> None:
     """Feed ``runner`` from ``source`` until ``stop`` is set (run it in the camera thread).
+    While ``paused`` is set the camera is not read at all (the robot is asleep, SPEC 12A).
 
     Reads at most ``max_hz`` times per second (``vision.rates.camera_hz``) and sleeps on
     ``stop.wait`` between reads, so it never spins whether the SDK call blocks or returns at
@@ -183,6 +186,9 @@ def pump(
     period = 1.0 / max_hz
     last_key: int | None = None
     while not stop.is_set():
+        if paused is not None and paused.is_set():
+            stop.wait(PAUSED_WAIT_S)
+            continue
         started = clock()
         frame = source.read()
         pause = IDLE_WAIT_S

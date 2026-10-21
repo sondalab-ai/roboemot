@@ -128,6 +128,7 @@ class VoiceListener:
         self._gate = WakeGate("always", 0.0)  # configured by apply_config
         self.apply_config(cfg)
         self._stop = threading.Event()
+        self._paused = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._counts = {
@@ -174,10 +175,28 @@ class VoiceListener:
             shutdown.join(self._thread, JOIN_S)
             self._thread = None
 
+    def pause_listening(self) -> None:
+        """Run no VAD or recognizer until :meth:`resume_listening` (the robot is asleep, SPEC
+        12A). The thread drops the utterance in hand, then keeps emptying the audio queue (so
+        stale audio is not recognised on wake) and idles."""
+        self._paused.set()
+
+    def resume_listening(self) -> None:
+        """Listen again after :meth:`pause_listening`, on the audio that arrives from now."""
+        self._paused.clear()
+
+    @property
+    def paused(self) -> bool:
+        return self._paused.is_set()
+
     def snapshot(self) -> dict[str, Any]:
         """Counters and fast-path latencies for the debug report: numbers only, no content."""
         with self._lock:
-            snap: dict[str, Any] = {"state": self._state, **self._counts}
+            snap: dict[str, Any] = {
+                "state": self._state,
+                "paused": self._paused.is_set(),
+                **self._counts,
+            }
         snap["latency"] = self._fast.stats.snapshot()
         snap["wake"] = self._gate.snapshot(self._clock())
         return snap
@@ -201,7 +220,20 @@ class VoiceListener:
                     self._name_vocabulary()
                 except Exception as exc:
                     log.warning("voice listener: model %s: %s", language, type(exc).__name__)
+        was_paused = False
         while not self._stop.is_set():
+            if self._paused.is_set():
+                if not was_paused:  # on this thread: the endpointer and recognizer are ours
+                    was_paused = True
+                    try:
+                        self._abort()
+                    except Exception as exc:
+                        log.warning("voice listener: pause: %s", type(exc).__name__)
+                while self._source(0.0) is not None:
+                    pass
+                self._stop.wait(POLL_S)
+                continue
+            was_paused = False
             chunk = self._source(POLL_S)
             if chunk is None:
                 continue
