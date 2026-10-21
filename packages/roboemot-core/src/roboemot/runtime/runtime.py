@@ -59,4 +59,4 @@ class Runtime:
         )
         with shutdown.BudgetedExitStack(stop_budget_s) as cleanup:
             start_all(host, stack, manifest, p, cleanup)
-            run_loop(host, stack, p, clock, self.platform.gaze_map().head_pitch, stop_event)
+            run_loop(host, stack, p, clock, p.pitch_dof, stop_event)

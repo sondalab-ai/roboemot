@@ -29,7 +29,8 @@ def start_voice_output(
 ) -> None:
     """Start the speaker, the speech output and, with a listener, the conversation worker."""
     speaker, listener, bargein = p.speaker, p.listener, p.bargein
-    assert speaker is not None
+    if speaker is None:
+        raise RuntimeError("no speaker to start")
     cleanup.callback(speaker.close)  # flushes the player before the robot link goes away
     speaker.start_playing()
     # Closed before the speaker (callbacks run last in, first out).

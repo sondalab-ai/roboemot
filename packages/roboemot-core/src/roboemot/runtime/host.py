@@ -4,7 +4,8 @@
 circadian clock, the frame source, the vision backends) and the parts it publishes while it runs
 (the bus, the world model, the diagnostics registry, the voice and conversation workers). The
 robot app inherits from it, so a test overrides a seam by subclassing the app and reads the
-running parts off the app. A bare ``RuntimeHost`` is the default owner.
+running parts off the app. A bare ``RuntimeHost`` is the default owner. One ``Runtime.run`` per
+host: the parts are not reset between runs.
 """
 
 from __future__ import annotations
@@ -119,14 +120,14 @@ class RuntimeHost:
         ``minutes``, e.g. during a party (SPEC 7A, API)."""
         runner = self.circadian_runner
         if runner is None:
-            raise RuntimeError("the app is not running")
+            raise RuntimeError("the runtime is not running")
         runner.hold(state, minutes)
 
     def wake(self) -> None:
         """Wake the robot as the wake word or a direct address does (SPEC 7A, Waking)."""
         runner = self.circadian_runner
         if runner is None:
-            raise RuntimeError("the app is not running")
+            raise RuntimeError("the runtime is not running")
         runner.wake()
 
     def detection_period(self) -> float:

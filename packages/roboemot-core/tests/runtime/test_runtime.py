@@ -1,12 +1,14 @@
 """SPEC 4A, 11, 12A: the runtime is robot-agnostic. A fake platform and session built for the
 ``desk-head-v1`` manifest (fake driver, a camera without frames, no microphone) run the whole
-pipeline for a few ticks, and it stops inside the shutdown budget."""
+pipeline: the main loop's idle breathing reaches the desk head's pitch joint (from the platform's
+gaze map), and it stops inside the shutdown budget."""
 
 from __future__ import annotations
 
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 from roboemot.config import ConfigStack
 from roboemot.drivers import MockPoseDriver
@@ -16,11 +18,19 @@ from roboemot.runtime import Runtime, RuntimeHost
 from test_robot_platform import DeskPlatform, DeskSession
 
 CONFIGS = Path(__file__).resolve().parents[3].parent / "configs"
-TICKS = 3
+
+
+class DaytimeHost(RuntimeHost):
+    """Real monotonic time at a fixed noon: quiet hours would put the robot to rest."""
+
+    def make_circadian_clock(self):
+        return SimpleNamespace(monotonic=time.monotonic, hour=lambda: 12.0)
 
 
 class RecordingSession(DeskSession):
     """The desk session, keeping the driver the runtime's motion loop was given."""
+
+    built: MockPoseDriver | None = None
 
     def driver(self):
         self.built = MockPoseDriver(home={"neck_pan": 0.0, "neck_tilt": 0.0})
@@ -53,9 +63,16 @@ def test_the_runtime_runs_a_non_reachy_robot_and_stops_within_the_budget():
     assert isinstance(platform, RobotPlatform)
     session = platform.bind(object())
     assert isinstance(session, RobotSession)
-    host = RuntimeHost()
+    host = DaytimeHost()
+
+    def breathing() -> bool:
+        """The idle command moved the desk head's pitch joint (the gaze map's dof)."""
+        driver = platform.session.built
+        return driver is not None and any(
+            abs(w.get("neck_tilt", 0.0)) > 0 for _, w in driver.writes
+        )
+
     stop, errors = threading.Event(), []
-    ticks = []
 
     def run() -> None:
         try:
@@ -68,11 +85,7 @@ def test_the_runtime_runs_a_non_reachy_robot_and_stops_within_the_budget():
     try:
         assert wait_for(lambda: host.diagnostics is not None)
         assert wait_for(lambda: host.expression is not None and host.circadian_runner is not None)
-        t0 = time.monotonic()
-        period_s = 1.0 / stack.effective().motion.app_tick_hz
-        while time.monotonic() - t0 < TICKS * period_s + 0.5 and thread.is_alive():
-            time.sleep(period_s)
-            ticks.append(1)
+        assert wait_for(breathing)
     finally:
         started = time.monotonic()
         stop.set()
@@ -81,9 +94,8 @@ def test_the_runtime_runs_a_non_reachy_robot_and_stops_within_the_budget():
     assert not errors, errors
     assert not thread.is_alive()
     assert time.monotonic() - started < budget_s
-    assert len(ticks) >= TICKS
     report = host.diagnostics.report()["sections"]
     assert report["roboemot.app"]["data"]["manifest"] == "desk-head-v1"
     assert report["roboemot.motion"]["ok"]
-    assert platform.session.built.writes  # the motion loop drove the fake joints
+    assert breathing()
     assert host.circadian_runner is None  # stopped: hold and wake report it

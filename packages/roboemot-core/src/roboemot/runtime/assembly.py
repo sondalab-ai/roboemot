@@ -99,6 +99,7 @@ class Pipeline:
     bargein: BargeIn | None
     conv_speaker: Callable[[], str | None]
     value_cap: Callable[[], int]
+    pitch_dof: str
 
 
 def make_yes_no(
@@ -368,4 +369,5 @@ def assemble(
         bargein=bargein,
         conv_speaker=speaker_source(selector, world),
         value_cap=value_cap,
+        pitch_dof=gaze_map.head_pitch,
     )
