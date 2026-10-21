@@ -1,4 +1,4 @@
-"""App-side lookups for the conversation worker (SPEC 8 stage 6, 12).
+"""Runtime-side lookups for the conversation worker (SPEC 8 stage 6, 12).
 
 The worker lives in core and stays robot-agnostic; these closures read the world model, the
 attention selector and the registry for the two summaries in the system prompt: who is talking
@@ -15,8 +15,7 @@ from collections.abc import Callable
 from typing import Any
 
 from roboemot.attention import AttentionSelector
-from roboemot.conversation import profile_summary, scene_summary
-from roboemot.conversation.summaries import one_line
+from roboemot.conversation.summaries import one_line, profile_summary, scene_summary
 from roboemot.world import Entry, WorldModel
 from roboemot.world.types import UNKNOWN_IDENTITY
 

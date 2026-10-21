@@ -10,8 +10,8 @@ section number in commit messages that implement or change behaviour.
 | Path | What |
 | --- | --- |
 | `docs/specs/kickoff.md` | Engineering spec (SPEC), the source of truth |
-| `packages/roboemot-core/` | Python package `roboemot`: config, manifest, discovery, health (connectivity), diagnostics (debug report), vision (detect, track, embed, replay, model fetcher; ONNX backends need the `vision` extra), motion reference, affect (engine, appraisal, runner, register resolver, expression renderer), circadian, persona (traits), LLM router and system prompt, web UI robot section (`webui/robot_section.py`, `roboemot.settings` plugins), secret store (`secret_store.py`: `${secret:name}` route keys, 0600 file), bus |
-| `packages/roboemot-reachymini/` | Python package `roboemot_reachymini`: Reachy Mini driver and SDK bridge |
+| `packages/roboemot-core/` | Python package `roboemot`: config, manifest, discovery, health (connectivity), diagnostics (debug report), vision (detect, track, embed, replay, model fetcher; ONNX backends need the `vision` extra), motion reference, affect (engine, appraisal, runner, register resolver, expression renderer), circadian, persona (traits), LLM router and system prompt, runtime (`runtime/`: `Runtime` pipeline assembly, hot reload, main loop, debug-report wiring; `RuntimeHost` seams), conversation sources and skill bridge, web UI robot section (`webui/robot_section.py`, `roboemot.settings` plugins), secret store (`secret_store.py`: `${secret:name}` route keys, 0600 file), bus |
+| `packages/roboemot-reachymini/` | Python package `roboemot_reachymini`: Reachy Mini driver and SDK bridge; `app.py` is a thin adapter (config + manifest, platform by `robot.id`, then core `Runtime.run`) |
 | `packages/roboemot-core/src/roboemot/webui/static/vendor/sondalab-ui-kit/` | Vendored, pinned `@sondalab/ui-kit` (offline web UI). Never edit by hand: change the pin in `scripts/sync_ui_kit.py` and run it; `scripts/audit_webui.sh` runs `sl-audit` on the page (SPEC 12) |
 | `rt/` | C++ real-time core (`roboemot-rt`): arbiter and safety limiter, CMake + ctest |
 | `configs/` | Library defaults, robot manifests, personality presets |
@@ -43,7 +43,7 @@ section number in commit messages that implement or change behaviour.
 - **Robot platform (SPEC 4A, 11, 12A):** entry-point group `roboemot.robots`, keyed by `robot.id`: a stateless
   `RobotPlatform` class (`roboemot.robot_platform`) with gaze/frame/reflex maps; `bind(client)` gives the per-run
   `RobotSession` that builds the driver, camera, audio hub, speaker and bearing source as core protocols. `load_robot_platform` fails loud (no platform, no run); the app builds the robot
-  only through it.
+  only through it and core's `roboemot.runtime.Runtime` runs it; the Reachy app only adapts (SPEC 4A rules stay in the driver/session).
 - **Diagnostics (SPEC 12A):** robot-specific debug sources are registered in the
   `roboemot.diagnostics` entry-point group under the manifest `robot.id`; core stays robot-agnostic.
 - **Web UI robot section (SPEC 11A, 12):** entry-point group `roboemot.settings`, keyed by `robot.id`; the plugin's

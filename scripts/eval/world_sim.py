@@ -93,6 +93,7 @@ def one_run(mini, seed: int, spec: list[tuple[str, str]]) -> dict:
     from roboemot.config.schema import RoboEmotConfig
     from roboemot.manifest import load_manifest
     from roboemot.motion import MotionLoop
+    from roboemot.runtime.ticks import attention_tick, scan_context, scan_tick
     from roboemot.world import (
         Observation,
         ScanController,
@@ -102,7 +103,6 @@ def one_run(mini, seed: int, spec: list[tuple[str, str]]) -> dict:
         from_base_frame,
     )
     from roboemot_reachymini import ReachyMiniDriver
-    from roboemot_reachymini.app import attention_tick, scan_context, scan_tick
     from roboemot_reachymini.gaze import FRAME, GAZE
     from roboemot_reachymini.world import ReachyScanPlanner
 

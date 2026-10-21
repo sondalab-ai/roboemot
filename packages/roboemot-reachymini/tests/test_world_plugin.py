@@ -14,6 +14,7 @@ from roboemot.config.schema import RoboEmotConfig
 from roboemot.drivers import MockPoseDriver
 from roboemot.manifest import load_manifest
 from roboemot.motion import MotionLoop
+from roboemot.runtime import ticks
 from roboemot.world import (
     Observation,
     ScanController,
@@ -348,9 +349,9 @@ def rig(*, scan_cfg: dict | None = None, attention: dict | None = None):
 def run_tick(cfg, loop, clock, world, selector, gaze, scan, *, engaged_hint=None):
     """One app cycle: attention first, then scan, then a motion tick (as in ``run``)."""
     now = clock[0]
-    attending = app_module.attention_tick(now, world, selector, gaze, loop)
-    ctx = app_module.scan_context(now, cfg, selector, hour=12.0)
-    scanning = app_module.scan_tick(ctx, scan, loop, cfg)
+    attending = ticks.attention_tick(now, world, selector, gaze, loop)
+    ctx = ticks.scan_context(now, cfg, selector, hour=12.0)
+    scanning = ticks.scan_tick(ctx, scan, loop, cfg)
     loop.cycle(now, 0.02)
     clock[0] += 0.02
     return attending, scanning
@@ -416,14 +417,14 @@ def test_scan_tick_failure_is_logged_and_falls_back_to_idle(caplog):
 )
 def test_quiet_hours_boundaries_in_the_app_context(hour, quiet):
     cfg, loop, driver, clock, world, selector, gaze, scan = rig()
-    ctx = app_module.scan_context(0.0, cfg, selector, hour=hour)
+    ctx = ticks.scan_context(0.0, cfg, selector, hour=hour)
     assert ctx.quiet_hours is quiet and ctx.asleep is quiet
 
 
 def test_quiet_hours_do_not_apply_when_the_circadian_model_is_disabled():
     cfg = RoboEmotConfig.model_validate({"circadian": {"enabled": False}})
     selector = AttentionSelector(cfg.attention)
-    assert not app_module.scan_context(0.0, cfg, selector, hour=2.0).quiet_hours
+    assert not ticks.scan_context(0.0, cfg, selector, hour=2.0).quiet_hours
 
 
 def test_resting_circadian_state_stops_scanning_in_the_app_context():
@@ -432,7 +433,7 @@ def test_resting_circadian_state_stops_scanning_in_the_app_context():
     cfg, loop, driver, clock, world, selector, gaze, scan = rig()
     model = CircadianModel(cfg.circadian)
     model.state = "resting"
-    ctx = app_module.scan_context(0.0, cfg, selector, hour=12.0, circadian=model)
+    ctx = ticks.scan_context(0.0, cfg, selector, hour=12.0, circadian=model)
     assert ctx.asleep
 
 

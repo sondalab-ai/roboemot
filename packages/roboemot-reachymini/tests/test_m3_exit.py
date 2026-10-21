@@ -32,6 +32,7 @@ import roboemot_reachymini.app as app_module
 from roboemot import paths
 from roboemot.config.schema import RoboEmotConfig, VoiceConfig
 from roboemot.llm import Router
+from roboemot.runtime import assembly
 from roboemot.vision.models import ModelError
 from roboemot.voice import factory
 from roboemot.voice import models as voice_models
@@ -271,9 +272,9 @@ def start_app(data, monkeypatch, language, piper, minor=False, minors_llm=False)
     # Where that name fails fast (CI) the link goes offline after three probes and the robot
     # replies nonverbally; where it hangs (macOS mDNS) it does not, which hid the dependency.
     monkeypatch.setattr(
-        app_module,
+        assembly,
         "NetworkMonitor",
-        functools.partial(app_module.NetworkMonitor, probe=lambda host, port, timeout_s: True),
+        functools.partial(assembly.NetworkMonitor, probe=lambda host, port, timeout_s: True),
     )
     if piper is None:
         monkeypatch.setattr(factory, "build_backend", lambda cfg, router: DelayedTTS(spoken))

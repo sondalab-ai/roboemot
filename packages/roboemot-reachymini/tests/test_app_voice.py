@@ -13,6 +13,7 @@ import roboemot_reachymini.app as app_module
 from roboemot.attention import AttentionSelector
 from roboemot.bus import Bus
 from roboemot.config.schema import RoboEmotConfig
+from roboemot.runtime import assembly
 from roboemot.voice.activity import SpeechActivity
 from roboemot.voice.asr import ASREvent
 from roboemot.voice.vad import EnergyVAD
@@ -210,7 +211,7 @@ def yes_no(speech_output):
     app = SimpleNamespace(speech_output=speech_output)
     speech = SpeechActivity(0.0)
     expression = SimpleNamespace(request=lambda label, now=None: asked.append(label) or True)
-    handler = app_module.make_yes_no(app, expression, speech, RoboEmotConfig().voice.fastpath)
+    handler = assembly.make_yes_no(app, expression, speech, RoboEmotConfig().voice.fastpath)
     return app, handler, asked, speech
 
 
@@ -259,7 +260,7 @@ def test_the_app_hands_its_bus_to_the_robot_bearing_hook_and_the_result_to_the_l
 ):
     enable(data, VOICE_YAML)
     seen = {}
-    real_hook, real_build = ReachyMiniSession.bearing_source, app_module.build_listener
+    real_hook, real_build = ReachyMiniSession.bearing_source, assembly.build_listener
 
     def hook(self, bus):
         seen["hook_bus"] = bus
@@ -271,7 +272,7 @@ def test_the_app_hands_its_bus_to_the_robot_bearing_hook_and_the_result_to_the_l
         return real_build(cfg, audio, speech, bus, emit, selector, world, registry, bearing, *rest)
 
     monkeypatch.setattr(ReachyMiniSession, "bearing_source", hook)
-    monkeypatch.setattr(app_module, "build_listener", build)
+    monkeypatch.setattr(assembly, "build_listener", build)
     app = app_module.RoboEmotApp.__new__(app_module.RoboEmotApp)
     stop, thread, errors = run_app(app, ScriptedMini().mini)
     try:

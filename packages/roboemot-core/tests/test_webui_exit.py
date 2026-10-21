@@ -2,10 +2,10 @@
 utterance, a restart field says so, and no response holds a secret.
 
 The volume check is unit level (no simulator harness covers speech): a real ``SpeechOutput`` with
-a fake backend. The subscription copies the app's own line (the `reload` closure in
-`RoboEmotApp.run` sets `speech_output.config = change.config`); that closure is inline in a long
-method and cannot be called alone, so the line is mirrored here. The only link between the page
-and the voice is the configuration.
+a fake backend. The subscription copies the runtime's own line (the `reload` closure from
+`roboemot.runtime.reload.make_reload` sets `speech_output.config = change.config`); that closure
+needs the whole pipeline and cannot be called alone, so the line is mirrored here. The only link
+between the page and the voice is the configuration.
 """
 
 from __future__ import annotations
