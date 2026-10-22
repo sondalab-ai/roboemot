@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import math
 import threading
 import time
 
@@ -33,6 +35,9 @@ class FakeSink:
 
     def playing_until(self):
         return time.monotonic()
+
+    def end_stream(self):
+        return 0.0
 
     def stop(self):
         self.stopped_at.append(time.monotonic())
@@ -534,3 +539,248 @@ def test_dropped_sentences_neither_replace_nor_extend_the_question_end(make):
     out.stop()  # drops the queue (barge-in, the stop keyword)
     after = out.question_end()
     assert after is not None and after <= before and after <= time.monotonic()
+
+
+# ------------------------------------------------- report counters (SPEC 12A)
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class ClockedSink(FakeSink):
+    """Timeline on a fake clock, like the Reachy speaker's ``playing_until``."""
+
+    def __init__(self, clock: FakeClock) -> None:
+        super().__init__()
+        self.clock, self.until = clock, 0.0
+
+    def push_audio_sample(self, samples, rate_hz):
+        self.until = max(self.until, self.clock()) + samples.size / rate_hz
+        return super().push_audio_sample(samples, rate_hz)
+
+    def playing_until(self):
+        return self.until
+
+
+class ClockedBackend(FakeBackend):
+    """Request n yields one 100 ms chunk per value of ``synth_s[n]``, each taking that long to
+    synthesize on the fake clock."""
+
+    def __init__(self, clock: FakeClock, synth_s: list[list[float]]) -> None:
+        super().__init__()
+        self.clock, self.synth_s = clock, list(synth_s)
+
+    async def synthesize(self, text, delivery, *, language, voice, minor_present=False):
+        for took in self.synth_s.pop(0):
+            self.clock.now += took
+            yield AudioChunk(np.ones(RATE // 10, np.float32), RATE)
+
+
+def test_speech_reports_tts_rtf_and_underruns_within_a_sentence(make):
+    clock = FakeClock()
+    sink = ClockedSink(clock)
+    # 100 ms chunks: the third takes 250 ms, so the speaker runs dry for 100 ms before it
+    out = make(ClockedBackend(clock, [[0.05, 0.05, 0.25, 0.05]]), sink=sink, clock=clock)
+    say(out)
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    snap = out.snapshot()
+    rtf = snap["tts_rtf"]
+    assert rtf["count"] == 4
+    assert rtf["p50"] == pytest.approx(0.5) and rtf["max"] == pytest.approx(2.5)
+    assert snap["underruns"] == 1 and snap["underrun_sentences"] == 1
+    assert snap["underrun_ms_total"] == pytest.approx(100.0)
+    # the sentence waited 0.4 s in all for 0.4 s of audio
+    sentence = snap["tts_rtf_sentence"]
+    assert sentence["count"] == 1 and sentence["max"] == pytest.approx(1.0)
+    json.dumps(snap)
+
+
+def test_the_gap_before_a_sentence_and_its_pause_is_not_an_underrun(make):
+    clock = FakeClock()
+    sink = ClockedSink(clock)
+    # two one-chunk sentences of one answer; the second arrives long after the first ended
+    out = make(ClockedBackend(clock, [[0.05], [0.5]]), sink=sink, clock=clock)
+    u = out.new_utterance()
+    say(out, "Uno.", utterance=u)
+    say(out, "Due.", utterance=u)
+    assert wait_for(lambda: out.sentences_spoken == 2)
+    snap = out.snapshot()
+    assert snap["underruns"] == 0 and snap["underrun_ms_total"] == 0.0
+    assert snap["tts_rtf"]["count"] == 2
+
+
+def test_report_window_bounds_the_rtf_summary(make):
+    clock = FakeClock()
+    cfg = RoboEmotConfig(voice={"report_window": 10})
+    out = make(ClockedBackend(clock, [[0.01] * 15]), cfg=cfg, sink=ClockedSink(clock), clock=clock)
+    say(out)
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    assert out.snapshot()["tts_rtf"]["count"] == 10
+    assert RoboEmotConfig().voice.report_window == 200
+
+
+class DeadSink(ClockedSink):
+    """A speaker whose output never opened: nothing is queued and ``playing_until`` stays -inf."""
+
+    def push_audio_sample(self, samples, rate_hz):
+        return 0.0
+
+    def playing_until(self):
+        return -math.inf
+
+
+def test_a_dead_sink_counts_no_underruns_and_no_late_sentences(make):
+    clock = FakeClock()
+    out = make(ClockedBackend(clock, [[0.05, 0.25], [0.5]]), sink=DeadSink(clock), clock=clock)
+    u = out.new_utterance()
+    say(out, "Uno.", utterance=u)
+    say(out, "Due.", utterance=u)
+    assert wait_for(lambda: out.sentences_spoken == 2)
+    snap = out.snapshot()
+    assert snap["underruns"] == 0 and snap["underrun_ms_total"] == 0.0
+    assert snap["late_sentences"] == 0 and snap["late_ms_total"] == 0.0
+    json.dumps(snap, allow_nan=False)
+
+
+def test_underrun_sentences_counts_each_sentence_that_ran_dry_once(make):
+    clock = FakeClock()
+    sink = ClockedSink(clock)
+    out = make(ClockedBackend(clock, [[0.05, 0.25, 0.3], [0.05, 0.25]]), sink=sink, clock=clock)
+    say(out, "Uno.")  # two answers: no pause between them
+    say(out, "Due.")
+    assert wait_for(lambda: out.sentences_spoken == 2)
+    snap = out.snapshot()
+    # first: dry 150 ms then 200 ms; second: queued behind the first, then dry 100 ms
+    assert snap["underruns"] == 3 and snap["underrun_sentences"] == 2
+    assert snap["underrun_ms_total"] == pytest.approx(450.0)
+
+
+def test_a_push_refused_after_a_stop_counts_no_underrun(make):
+    clock = FakeClock()
+    holder = {}
+
+    class Stopping(ClockedBackend):
+        async def synthesize(self, text, delivery, *, language, voice, minor_present=False):
+            n = 0
+            async for chunk in super().synthesize(
+                text, delivery, language=language, voice=voice, minor_present=minor_present
+            ):
+                if n == 1:
+                    holder["out"].stop()  # barge-in after the sink ran dry
+                n += 1
+                yield chunk
+
+    out = holder["out"] = make(Stopping(clock, [[0.05, 0.5]]), sink=ClockedSink(clock), clock=clock)
+    say(out)
+    assert wait_for(lambda: out._current is not None and out._current.done())
+    snap = out.snapshot()
+    assert snap["underruns"] == 0 and snap["tts_rtf_sentence"] == {"count": 0}
+
+
+def test_a_sentence_later_than_its_pause_is_counted_late(make):
+    clock = FakeClock()
+    cfg = RoboEmotConfig(voice={"sentence_pause_ms": 0})
+    sink = ClockedSink(clock)
+    out = make(ClockedBackend(clock, [[0.05], [0.5]]), cfg=cfg, sink=sink, clock=clock)
+    u = out.new_utterance()
+    say(out, "Uno.", utterance=u)
+    say(out, "Due.", utterance=u)
+    assert wait_for(lambda: out.sentences_spoken == 2)
+    snap = out.snapshot()
+    # the first ends at 0.15, the second arrives at 0.55 with no pause planned
+    assert snap["late_sentences"] == 1 and snap["late_ms_total"] == pytest.approx(400.0)
+    assert snap["boundary_dry"] == 1
+
+
+def test_a_sentence_inside_its_pause_is_not_late(make):
+    clock = FakeClock()
+    cfg = RoboEmotConfig(voice={"sentence_pause_ms": 500})
+    out = make(
+        ClockedBackend(clock, [[0.05], [0.1]]), cfg=cfg, sink=ClockedSink(clock), clock=clock
+    )
+    u = out.new_utterance()
+    say(out, "Uno.", utterance=u)
+    say(out, "Due.", utterance=u)
+    assert wait_for(lambda: out.sentences_spoken == 2)
+    snap = out.snapshot()
+    assert snap["late_sentences"] == 0 and snap["late_ms_total"] == 0.0
+    assert snap["boundary_dry"] == 0
+
+
+def test_push_ms_times_each_push_into_the_sink(make):
+    clock = FakeClock()
+
+    class SlowSink(ClockedSink):
+        def push_audio_sample(self, samples, rate_hz):
+            clock.now += 0.003
+            return super().push_audio_sample(samples, rate_hz)
+
+    out = make(ClockedBackend(clock, [[0.05, 0.05]]), sink=SlowSink(clock), clock=clock)
+    say(out)
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    push = out.snapshot()["push_ms"]
+    assert push["count"] == 2 and push["max"] == pytest.approx(3.0)
+
+
+class StreamSink(ClockedSink):
+    """A speaker that resamples as a stream: ``end_stream`` flushes a 10 ms tail."""
+
+    TAIL_S = 0.01
+
+    def __init__(self, clock: FakeClock) -> None:
+        super().__init__(clock)
+        self.ends = 0
+
+    def end_stream(self):
+        self.ends += 1
+        self.until = max(self.until, self.clock()) + self.TAIL_S
+        return self.until
+
+
+def test_each_finished_sentence_ends_the_sinks_stream_and_its_tail_counts(make):
+    clock = FakeClock()
+    sink = StreamSink(clock)
+    out = make(ClockedBackend(clock, [[0.05, 0.05], [0.05]]), sink=sink, clock=clock)
+    first = say(out, "Vero?")
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    assert sink.ends == 1
+    assert out.ended_at(first) == pytest.approx(sink.until)  # the flushed tail included
+    assert out.question_end() == pytest.approx(sink.until)
+
+
+def test_a_failing_sentence_still_ends_the_stream_but_a_stopped_one_does_not(make):
+    clock = FakeClock()
+    sink = StreamSink(clock)
+
+    class FailsMidway(ClockedBackend):
+        async def synthesize(self, text, delivery, *, language, voice, minor_present=False):
+            async for chunk in super().synthesize(
+                text, delivery, language=language, voice=voice, minor_present=minor_present
+            ):
+                yield chunk
+            raise TTSError("boom")
+
+    out = make(FailsMidway(clock, [[0.05]]), sink=sink, clock=clock)
+    say(out)
+    assert wait_for(lambda: out.failures == 1)
+    assert wait_for(lambda: sink.ends == 1)
+    holder = {}
+
+    class Stopping(ClockedBackend):
+        async def synthesize(self, text, delivery, *, language, voice, minor_present=False):
+            async for chunk in super().synthesize(
+                text, delivery, language=language, voice=voice, minor_present=minor_present
+            ):
+                yield chunk
+                holder["out"].stop()
+
+    sink2 = StreamSink(clock)
+    out2 = holder["out"] = make(Stopping(clock, [[0.05, 0.05]]), sink=sink2, clock=clock)
+    say(out2)
+    assert wait_for(lambda: out2._current is not None and out2._current.done())
+    assert sink2.ends == 0  # the stop already reset the sink's stream

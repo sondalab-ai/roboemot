@@ -39,3 +39,26 @@ def test_equal_rates_pass_through_and_bad_rates_are_refused():
             StreamResampler(16000, bad)
         with pytest.raises(ValueError):
             StreamResampler(bad, 16000)
+
+
+@pytest.mark.parametrize("chunk", [7, 480, 4410])
+@pytest.mark.parametrize(("a", "b"), [*PAIRS, (22050, 48000)])
+def test_flush_completes_the_stream_to_the_whole_array(a, b, chunk):
+    x = tone(a, 0.3)
+    s = StreamResampler(a, b)
+    parts = [s.process(x[i : i + chunk]) for i in range(0, x.size, chunk)]
+    out = np.concatenate([*parts, s.flush()])
+    ref = resample(x, a, b)
+    assert out.size == ref.size
+    assert np.abs(out - ref).max() < 1e-5
+
+
+def test_flush_starts_a_fresh_stream():
+    a, b = 22050, 48000
+    x = tone(a, 0.1)
+    s = StreamResampler(a, b)
+    s.process(x)
+    s.flush()
+    out = np.concatenate([s.process(x), s.flush()])
+    assert np.abs(out - resample(x, a, b)).max() < 1e-5
+    assert s.flush().size == 0  # nothing pending

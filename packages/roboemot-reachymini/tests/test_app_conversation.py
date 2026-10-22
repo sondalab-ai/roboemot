@@ -90,6 +90,7 @@ def test_an_addressed_utterance_is_answered_through_the_shared_router(data, fake
         assert app.traits_worker.router.used("lan") == app.router_hub.router.used("lan")
         section = app.diagnostics.report()["sections"]["roboemot.voice"]["data"]
         assert section["conversation"]["turns"] == 1 and "ciao robot" not in json.dumps(section)
+        assert section["speech"]["tts_rtf"] == {"count": 0} and section["speech"]["underruns"] == 0
     finally:
         stop.set()
         thread.join(timeout=10)
