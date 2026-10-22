@@ -713,7 +713,7 @@ class SettingsEditor:
         except ValueError as exc:
             log.warning("web UI settings file ignored: %s", exc)
             return
-        migrated, stripped = _migrated(stored)
+        migrated, stripped = _migrated(stored, str(self._file.path))
         with self._lock:
             tree, rows = self.stack.merged_tree(), self._rows()
             planned: dict[str, tuple[str, Any, bool]] = {}  # file key -> (stack path, value, add)
@@ -1169,11 +1169,12 @@ def combine(edits: Iterable[tuple[str, Any]]) -> dict[str, Any]:
     return out
 
 
-def _migrated(stored: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+def _migrated(stored: dict[str, Any], source: str) -> tuple[dict[str, Any], bool]:
     """The stored overrides with renamed settings under their new path (a value already stored
     under the new path wins) and removed ones dropped with a log line naming the key only. A
     dropped setting (``DROPPED_SETTINGS``) is taken out of a stored value too, e.g. an added
-    route; the flag says whether a value changed that way, so the file is rewritten."""
+    route, and logged once under ``source`` (the file); the flag says whether a value changed
+    that way, so the file is rewritten."""
     out: dict[str, Any] = {}
     stripped = False
     for key, value in stored.items():
@@ -1181,7 +1182,7 @@ def _migrated(stored: dict[str, Any]) -> tuple[dict[str, Any], bool]:
             log.warning("web UI setting %s dropped: removed from the configuration", _shown(key))
             continue
         value, found = without_dropped(_pattern_path(key), value)
-        log_dropped("web UI settings", found)
+        log_dropped(source, found)
         if value is DROP:
             continue
         stripped = stripped or bool(found)

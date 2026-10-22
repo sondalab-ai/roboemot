@@ -2,7 +2,7 @@
 
 Follows the LLM routes' rules: it uses the route named by ``voice.openai_speech.route`` (URL,
 key, ``first_token_timeout_s`` for the first audio chunk, ``stall_timeout_s`` for later gaps),
-is eligible only when the router would allow that route (reachable, daily budget left), and
+is eligible only when the router would allow that route (reachable, budget, key), and
 charges the characters it sends against the route's budget at ``CHARS_PER_TOKEN`` per token.
 Failures before the first chunk raise :class:`~roboemot.voice.tts.TTSError`, so
 :class:`~roboemot.voice.tts.FallbackTTS` answers with Piper. Only the sentence text leaves the

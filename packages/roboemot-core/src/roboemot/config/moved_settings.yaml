@@ -1,7 +1,7 @@
 # Settings renamed or removed since an overrides file or app.yaml may have been written
 # (SPEC 11A, Renamed and removed settings). Data, not code: it records old names on purpose.
 # `removed` keys have a replacement and fail in app.yaml; `dropped` keys have none and are
-# ignored wherever they are found (`*` matches every entry of a list).
+# ignored wherever they are found (`*` matches every entry of a list or value of a mapping).
 renamed:
   reflexes.antenna_ratio: reflexes.startle_lift_ratio
 removed:

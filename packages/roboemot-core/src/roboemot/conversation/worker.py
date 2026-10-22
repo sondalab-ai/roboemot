@@ -406,7 +406,7 @@ class ConversationWorker:
 
     def _minor(self) -> bool:
         """Whether a minor is present now; True (fail closed) when the signal cannot be read.
-        The one read of the signal: routes, prompt, filter and the mid-answer check use it."""
+        The one read of the signal: the prompt, the filter and the mid-answer check use it."""
         try:
             return bool(self._minor_present())
         except Exception as exc:
