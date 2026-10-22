@@ -134,6 +134,11 @@ EN: dict[str, str] = {
     "err_video_asleep": "The robot is asleep, so the camera is off.",
     "err_video_no_vision": "Vision is not running on this robot, so there is no picture.",
     "err_video_no_frame": "Waiting for the next camera picture.",
+    "err_video_stale": "The camera has not sent a new picture for a while.",
+    "err_cross_site": "The camera picture is only served to this page.",
+    "live_video_idle": (
+        "The preview stopped after a while without activity on this page. Press Resume."
+    ),
     "tab_routes": "Routes",
     "tab_settings": "Settings",
     "settings_intro": (
@@ -704,6 +709,11 @@ IT: dict[str, str] = {
     "err_video_asleep": "Il robot dorme, quindi la telecamera è spenta.",
     "err_video_no_vision": "La visione non è attiva su questo robot, quindi non c'è immagine.",
     "err_video_no_frame": "In attesa della prossima immagine della telecamera.",
+    "err_video_stale": "La telecamera non invia una nuova immagine da un po'.",
+    "err_cross_site": "L'immagine della telecamera è servita solo a questa pagina.",
+    "live_video_idle": (
+        "L'anteprima si è fermata dopo un po' senza attività su questa pagina. Premi Riprendi."
+    ),
     "tab_routes": "Modelli",
     "tab_settings": "Impostazioni",
     "settings_intro": (

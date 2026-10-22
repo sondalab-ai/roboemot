@@ -739,6 +739,9 @@ class WebApi:
         """One preview JPEG (the vision pump's newest frame, faces drawn), or a JSON error with no
         picture: ``live_disabled`` / ``video_off`` (404), ``video_asleep`` / ``video_no_vision`` /
         ``video_no_frame`` (503). Never wakes the robot or the pump; nothing is stored."""
+        site = req.headers.get("sec-fetch-site", "same-origin")
+        if site not in ("same-origin", "none"):  # an <img> or fetch from another origin or port
+            raise ApiError(HTTPStatus.FORBIDDEN, "cross_site")
         jpeg, code = self._live_source().video_frame(req.client_ip)
         if jpeg is None:
             status = (

@@ -314,7 +314,9 @@ def test_start_webui_drops_the_preview_when_the_robot_falls_asleep_and_at_shutdo
     )
     runner = LatestFrameRunner(Module())
     service = SimpleNamespace(runner=runner, paused=False)
-    faces = SimpleNamespace(face_overlay=lambda: [], matcher=SimpleNamespace(registry=None))
+    faces = SimpleNamespace(
+        face_overlay=lambda: [], clear_overlay=lambda: None, matcher=SimpleNamespace(registry=None)
+    )
     bus = Bus()
     host = SimpleNamespace(
         perception=SimpleNamespace(enrollment=FakeService(), service=service, pipeline=faces),

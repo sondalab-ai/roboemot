@@ -87,6 +87,7 @@ class LatestFrameRunner:
         self._frame: Frame | None = None
         self._watch_until = float("-inf")
         self._latest: tuple[Frame, int] | None = None
+        self._latest_at = float("-inf")
         self._seq = 0
         self._stop = False
         self._thread: threading.Thread | None = None
@@ -105,6 +106,7 @@ class LatestFrameRunner:
             self._arrived.append(now)
             self._seq += 1
             self._latest = (frame, self._seq) if now < self._watch_until else None
+            self._latest_at = now
             self._cond.notify()
 
     def watch(self, window_s: float) -> None:
@@ -120,6 +122,11 @@ class LatestFrameRunner:
         is shared with the pipeline: read it, never write to it."""
         with self._cond:
             return self._latest
+
+    def latest_age_s(self) -> float | None:
+        """Seconds (on the runner's clock) since the kept frame was submitted, or None."""
+        with self._cond:
+            return None if self._latest is None else self._clock() - self._latest_at
 
     def unwatch(self) -> None:
         """Stop watching now and drop the kept frame (viewing stopped, flag off, robot asleep)."""

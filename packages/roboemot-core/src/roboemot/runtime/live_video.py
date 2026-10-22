@@ -17,6 +17,7 @@ is written to disk, logs or reports.
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 import unicodedata
@@ -37,6 +38,7 @@ VIDEO_OFF = "video_off"
 VIDEO_ASLEEP = "video_asleep"
 VIDEO_NO_VISION = "video_no_vision"
 VIDEO_NO_FRAME = "video_no_frame"
+VIDEO_STALE = "video_stale"
 
 BGR_FACE = (80, 200, 80)
 BGR_TARGET = (0, 215, 255)
@@ -51,7 +53,9 @@ LABEL_MAX_CHARS = 24
 
 def ascii_label(name: str) -> str:
     """``name`` folded to what cv2's Hershey font can draw (accents dropped, the rest '?')."""
-    base = "".join(c for c in unicodedata.normalize("NFKD", name) if not unicodedata.combining(c))
+    base = "".join(
+        c for c in unicodedata.normalize("NFKD", str(name)) if not unicodedata.combining(c)
+    )
     return base.encode("ascii", "replace").decode("ascii")[:LABEL_MAX_CHARS]
 
 
@@ -69,7 +73,12 @@ class LiveVideo:
     ) -> None:
         self._host, self._p, self._clock = host, p, clock
         self._cfg = cfg
-        self._lock = threading.Lock()  # serialises the encode; viewers wait for the same JPEG
+        # ``_lock`` guards the state below and is never held across an encode, so a drop (sleep,
+        # flag off, the app tick) never waits for one. ``_encode_lock`` makes concurrent viewers
+        # share one encode.
+        self._lock = threading.Lock()
+        self._encode_lock = threading.Lock()
+        self._generation = 0  # bumped by every release: an encode started before it is discarded
         self._jpeg: bytes | None = None
         self._jpeg_seq = -1
         self._jpeg_at = float("-inf")
@@ -112,12 +121,24 @@ class LiveVideo:
 
     def drop(self) -> None:
         """Viewing ends now (flag off, robot asleep, shutdown): log the stops, free the frame
-        and the JPEG."""
+        and the JPEG. Takes the lock only for a moment, whatever an encode is doing, and no
+        request that began before it can re-arm the watch afterwards (``frame`` re-checks under
+        the same lock)."""
         with self._lock:
-            for ip in self._seen:
-                log.info("live video view stopped (%s)", ip)
-            self._seen.clear()
-            self._release()
+            self._drop_locked()
+
+    def _drop_locked(self) -> None:
+        for ip in self._seen:
+            log.info("live video view stopped (%s)", ip)
+        self._seen.clear()
+        self._release()
+
+    def sleep(self) -> None:
+        """The robot fell asleep: ``drop`` and forget the face tracks of the last frame."""
+        self.drop()
+        pipeline = self._host.perception.pipeline if self._host.perception else None
+        if pipeline is not None:
+            pipeline.clear_overlay()
 
     def expire(self) -> None:
         """Called from the app tick, so the age bound holds when no page polls: once the last
@@ -132,6 +153,7 @@ class LiveVideo:
                 self._release()
 
     def _release(self) -> None:
+        self._generation += 1
         self._jpeg, self._jpeg_seq, self._jpeg_at = None, -1, float("-inf")
         self._armed_until = float("-inf")
         if self._runner is not None:
@@ -146,43 +168,87 @@ class LiveVideo:
             self._cv2 = cv2
         return self._cv2
 
+    def _gate(self) -> tuple[Any, Any, str | None]:
+        """``(service, live, code)``: the code is why nothing can be served right now."""
+        live = self._cfg.webui.live
+        if not live.enabled:
+            return None, live, LIVE_DISABLED
+        if not live.video:
+            return None, live, VIDEO_OFF
+        perception = self._host.perception
+        service = perception.service if perception is not None else None
+        if service is None or self._load_cv2() is None:
+            return None, live, VIDEO_NO_VISION
+        if self._p.sleep.asleep or service.paused:
+            return service, live, VIDEO_ASLEEP
+        return service, live, None
+
     def frame(self, client: str) -> tuple[bytes | None, str | None]:
         """``(jpeg, None)`` or ``(None, code)``. Codes: ``live_disabled``, ``video_off``,
         ``video_asleep`` (asleep, or the camera pump is paused: it is never resumed here),
-        ``video_no_vision`` (no perception service or no cv2) and ``video_no_frame`` (watching
-        has just started: the next frame the pump captures is kept)."""
-        live = self._cfg.webui.live
-        if not live.enabled:
-            return None, LIVE_DISABLED
-        if not live.video:
-            return None, VIDEO_OFF
-        perception = self._host.perception
-        service = perception.service if perception is not None else None
-        cv2 = self._load_cv2()
-        if service is None or cv2 is None:
-            return None, VIDEO_NO_VISION
-        if self._p.sleep.asleep or service.paused:
-            self.drop()
-            return None, VIDEO_ASLEEP
+        ``video_no_vision`` (no perception service or no cv2), ``video_no_frame`` (watching has
+        just started, or a drop overtook this request) and ``video_stale`` (the newest frame is
+        older than ``webui.live.video_stale_s``: the camera stalled)."""
+        _, _, code = self._gate()
+        if code is not None:  # quick refusal; the same checks run again under the lock
+            if code == VIDEO_ASLEEP:
+                self.drop()
+            return None, code
         with self._lock:
+            service, live, code = self._gate()  # a drop may have run since the check above
+            if code is not None:
+                if code == VIDEO_ASLEEP:
+                    self._drop_locked()
+                return None, code
             now = self._clock()
-            self._runner = service.runner
-            self._runner.watch(live.viewer_window_s)
+            runner = service.runner
+            if self._runner is not None and self._runner is not runner:
+                self._runner.unwatch()
+            self._runner = runner
+            runner.watch(live.viewer_window_s)
             self._armed_until = now + live.viewer_window_s
-            latest = self._runner.latest()
+            latest = runner.latest()
             if latest is None:
                 self._prune(now)
                 return None, VIDEO_NO_FRAME
-            frame, seq = latest
-            fresh = self._jpeg is not None and now - self._jpeg_at < 1.0 / live.video_fps
-            if self._jpeg is None or (seq != self._jpeg_seq and not fresh):
-                self._jpeg = self._encode(cv2, frame.image, live)
-                self._jpeg_seq, self._jpeg_at = seq, now
-            if client not in self._seen:
-                log.info("live video view started (%s)", client)
-            self._seen[client] = now
-            self._prune(now)
-            return self._jpeg, None
+            age = runner.latest_age_s()
+            if age is not None and age > live.video_stale_s:
+                self._prune(now)
+                return None, VIDEO_STALE
+            image, seq = latest[0].image, latest[1]
+            if self._cached(seq, now, live) is not None:
+                return self._serve(client, now), None
+            generation = self._generation
+        with self._encode_lock:  # outside ``_lock``: a drop never waits for the encode
+            with self._lock:
+                now = self._clock()
+                if generation != self._generation:
+                    return None, VIDEO_NO_FRAME
+                if self._cached(seq, now, live) is not None:  # another viewer encoded meanwhile
+                    return self._serve(client, now), None
+            jpeg = self._encode(self._load_cv2(), image, live)
+            with self._lock:
+                now = self._clock()
+                if generation != self._generation:  # dropped while encoding: discard the result
+                    return None, VIDEO_NO_FRAME
+                self._jpeg, self._jpeg_seq, self._jpeg_at = jpeg, seq, now
+                return self._serve(client, now), None
+
+    def _cached(self, seq: int, now: float, live: Any) -> bytes | None:
+        """The cached JPEG when it is for this frame or younger than ``1 / video_fps``."""
+        if self._jpeg is None:
+            return None
+        if seq == self._jpeg_seq or now - self._jpeg_at < 1.0 / live.video_fps:
+            return self._jpeg
+        return None
+
+    def _serve(self, client: str, now: float) -> bytes | None:
+        """Count ``client`` as a viewer and return the cached JPEG (call with ``_lock`` held)."""
+        if client not in self._seen:
+            log.info("live video view started (%s)", client)
+        self._seen[client] = now
+        self._prune(now)
+        return self._jpeg
 
     # ------------------------------------------------------------------ drawing
 
@@ -220,16 +286,25 @@ class LiveVideo:
         lone = (
             unowned[0] if target is not None and target_owner is None and len(unowned) == 1 else -1
         )
+        height, width = canvas.shape[:2]
         for i, (box, owner) in enumerate(faces):
-            is_target = (owner is not None and owner == target_owner) or i == lone
-            x1, y1, x2, y2 = (round(v * scale) for v in box)
-            color = BGR_TARGET if is_target else BGR_FACE
-            cv2.rectangle(
-                canvas, (x1, y1), (x2, y2), color, TARGET_LINE_PX if is_target else LINE_PX
-            )
-            name = person_name(registry, owner)
-            if name:
-                self._label(cv2, canvas, ascii_label(name), x1, y1, color)
+            try:
+                if not all(math.isfinite(v) for v in box):
+                    continue  # a diverged track: skip the face, the picture is still served
+                is_target = (owner is not None and owner == target_owner) or i == lone
+                x1, y1, x2, y2 = (
+                    min(max(round(v * scale), -width), 2 * width) if k % 2 == 0
+                    else min(max(round(v * scale), -height), 2 * height)
+                    for k, v in enumerate(box)
+                )  # fmt: skip
+                color = BGR_TARGET if is_target else BGR_FACE
+                line = TARGET_LINE_PX if is_target else LINE_PX
+                cv2.rectangle(canvas, (x1, y1), (x2, y2), color, line)
+                name = person_name(registry, owner)
+                if name:
+                    self._label(cv2, canvas, ascii_label(name), x1, y1, color)
+            except (ValueError, OverflowError, TypeError, cv2.error):
+                log.warning("live video: a face could not be drawn")
 
     @staticmethod
     def _label(cv2: Any, canvas: np.ndarray, text: str, x: int, y: int, color: Any) -> None:

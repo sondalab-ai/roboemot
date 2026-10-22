@@ -27,3 +27,11 @@ def test_a_recognised_track_carries_the_owner_id(tmp_path):
     run(pipe, 24)
     [(_, owner)] = pipe.face_overlay()
     assert owner is not None
+
+
+def test_clear_overlay_forgets_the_tracks(tmp_path):
+    _, _, pipe, _, _ = rig(tmp_path, lambda i: [face(250, y=10, size=50)])
+    run(pipe, 6)
+    assert pipe.face_overlay()
+    pipe.clear_overlay()
+    assert pipe.face_overlay() == []

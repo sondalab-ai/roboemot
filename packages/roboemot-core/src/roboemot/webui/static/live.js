@@ -20,8 +20,12 @@ const LIVE_RETRY_MS = 5000;
 const LIVE_PERCENT = 100;
 const LIVE_METER_FLOOR_DB = -60;
 const liveState = { serial: 0, audioTimer: null, after: 0, epoch: null, ui: null };
-const liveVideo = { timer: null, ui: null, url: null, paused: false, chain: 0, running: null, pollMs: LIVE_RETRY_MS };
+const liveVideo = { timer: null, ui: null, url: null, paused: false, chain: 0, running: null, pollMs: LIVE_RETRY_MS, idleMs: Infinity };
 const liveBanner = { timer: null, serial: 0 };
+const liveInput = { at: Date.now() };
+for (const kind of ["pointerdown", "keydown", "wheel", "touchstart"]) {
+  document.addEventListener(kind, () => { liveInput.at = Date.now(); }, { passive: true });
+}
 
 // Each card is { key, render(data) -> Node }. Slices T (audio, transcript) and U (video) add theirs
 // here and read their own part of `data` (or poll their own endpoint from `render`).
@@ -208,6 +212,7 @@ function liveVideoBuild() {
 function liveVideoToggle() {
   const ui = liveVideo.ui;
   if (!ui) return;
+  liveInput.at = Date.now();
   liveVideo.paused = !liveVideo.paused;
   ui.pause.textContent = t(liveVideo.paused ? "live_video_resume" : "live_video_pause");
   if (liveVideo.paused) {
@@ -217,6 +222,17 @@ function liveVideoToggle() {
   } else {
     liveVideoStart();
   }
+}
+
+// No click, key or touch for `idle_stop_ms`: stop streaming and wait for Resume.
+function liveVideoIdleStop() {
+  const ui = liveVideo.ui;
+  if (!ui) return;
+  liveVideo.paused = true;
+  liveStopVideo(false);
+  liveRevokeVideo();
+  ui.pause.textContent = t("live_video_resume");
+  liveVideoText(t("live_video_idle"));
 }
 
 function liveVideoStart() {
@@ -244,6 +260,7 @@ function liveVideoCard(d) {
   }
   liveVideo.ui.pause.hidden = false;
   liveVideo.pollMs = v.poll_ms;
+  liveVideo.idleMs = v.idle_stop_ms;
   liveVideoStart();
   return liveVideo.ui.node;
 }
@@ -251,6 +268,7 @@ function liveVideoCard(d) {
 async function liveVideoPoll(serial, chain) {
   liveVideo.timer = null;
   if (!liveVideoLive(serial, chain)) return;
+  if (Date.now() - liveInput.at > liveVideo.idleMs) { liveVideoIdleStop(); return; }
   let delay = liveVideo.pollMs;
   try {
     const resp = await fetch("/api/live/frame.jpg", { method: "GET", credentials: "same-origin", cache: "no-store" });
@@ -305,6 +323,7 @@ async function liveBannerPoll(serial) {
   } catch (err) {
     if (!liveBannerActive(serial)) return;
     if (err.status === 401 && err.message === "unauthorized") { await boot(); return; }
+    document.getElementById("live-video-banner").hidden = false; // cannot tell: fail visible
   }
   liveBanner.timer = setTimeout(() => liveBannerPoll(serial), delay);
 }

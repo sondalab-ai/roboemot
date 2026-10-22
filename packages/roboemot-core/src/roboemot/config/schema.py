@@ -3082,11 +3082,32 @@ class LiveConfig(Strict):
         "How often every open page asks whether someone is watching the video (the banner)",
         unit="ms",
         ge=1000,
-        le=30000,
+        le=5000,
+    )
+    video_stale_s: float = param(
+        10.0,
+        "A camera picture older than this is not served (the page says the camera stalled)",
+        unit="s",
+        ge=2,
+        le=120,
+    )
+    video_idle_stop_s: float = param(
+        600.0,
+        "The open Live tab stops polling the video after this long without a click, key or "
+        "touch on the page, and waits for Resume",
+        unit="s",
+        ge=60,
+        le=86400,
     )
 
     @model_validator(mode="after")
     def _window_spans_two_polls(self) -> LiveConfig:
+        if self.banner_poll_ms / 1000 > self.viewer_window_s / 2:
+            raise ValueError(
+                f"webui.live.banner_poll_ms ({self.banner_poll_ms} ms) must be at most half of "
+                f"webui.live.viewer_window_s ({self.viewer_window_s} s), so every viewing spans "
+                "two banner polls"
+            )
         if self.viewer_window_s * self.video_fps < 2:
             raise ValueError(
                 f"webui.live.viewer_window_s ({self.viewer_window_s} s) must cover at least two "

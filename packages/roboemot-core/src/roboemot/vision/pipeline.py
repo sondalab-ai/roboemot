@@ -358,6 +358,10 @@ class VisionPipeline:
                 log.warning("face tap failed: %s", type(exc).__name__)
         self._publish("percept.face_frame", frame.stamp, frame.stamp)
 
+    def clear_overlay(self) -> None:
+        """Forget the visible tracks the live preview would draw (the robot fell asleep)."""
+        self._visible = []
+
     def face_overlay(self) -> list[tuple[Box, str | None]]:
         """The visible face tracks of the last processed frame as ``(box in pixels, owner_id or
         None)``, for the web UI's live preview. Read on demand from another thread; no cost per

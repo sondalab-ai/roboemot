@@ -94,6 +94,7 @@ class LiveState:
             "video": {
                 "enabled": cfg.webui.live.video,
                 "poll_ms": round(MS_PER_S / cfg.webui.live.video_fps),
+                "idle_stop_ms": round(MS_PER_S * cfg.webui.live.video_idle_stop_s),
             },
         }
 

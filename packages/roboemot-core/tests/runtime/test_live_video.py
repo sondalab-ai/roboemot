@@ -393,3 +393,180 @@ def test_logs_and_the_real_debug_report_hold_no_image_bytes(caplog):
         ):
             assert needle not in text, needle
     assert '"frames"' in dump  # the real vision section was built
+
+
+# ---------------------------------------------------------------- races (security review B1, N5-N7)
+
+
+class Held:
+    """Hold ``video._lock`` so a ``frame()`` call that passed its quick checks blocks on it."""
+
+    def __init__(self, rig):
+        self.rig = rig
+        self.result = None
+
+    def __enter__(self):
+        import threading
+        import time
+
+        self.rig.video._lock.acquire()
+        self.thread = threading.Thread(target=self._call, daemon=True)
+        self.thread.start()
+        time.sleep(0.2)  # the call is past the quick checks and waits for the lock
+        return self
+
+    def _call(self):
+        self.result = self.rig.video.frame("10.0.0.5")
+
+    def __exit__(self, *exc):
+        return False
+
+    def release(self):
+        self.rig.video._lock.release()
+        self.thread.join(5)
+        assert not self.thread.is_alive()
+
+
+def primed():
+    rig = Rig()
+    rig.video.frame("10.0.0.5")
+    rig.submit()
+    rig.video.frame("10.0.0.5")
+    return rig
+
+
+def test_a_request_in_flight_cannot_rearm_the_watch_after_sleep():
+    rig = primed()
+    held = Held(rig)
+    with held:
+        rig.p.sleep.asleep = True  # the tick sets asleep, then the bus subscriber drops
+        rig.video._drop_locked()
+    held.release()
+    assert held.result == (None, "video_asleep")
+    assert rig.runner._watch_until == float("-inf")
+    rig.submit()  # the pump submits once more before it pauses
+    assert rig.runner.latest() is None
+    rig.p.sleep.asleep = False
+    rig.clock.now += 1
+    assert rig.video.frame("10.0.0.5") == (None, "video_no_frame")  # not the frame from sleep
+
+
+def test_a_request_in_flight_cannot_rearm_the_watch_after_the_flag_goes_off():
+    rig = primed()
+    held = Held(rig)
+    with held:
+        rig.video._cfg = config(video=False)
+        rig.video._drop_locked()
+    held.release()
+    assert held.result == (None, "video_off")
+    assert rig.runner._watch_until == float("-inf")
+    rig.submit()
+    assert rig.runner.latest() is None
+    rig.apply(video=True)
+    assert rig.video.frame("10.0.0.5") == (None, "video_no_frame")
+
+
+def test_a_request_in_flight_cannot_rearm_the_watch_when_the_pump_is_paused():
+    rig = primed()
+    held = Held(rig)
+    with held:
+        rig.service.paused = True
+        rig.video._drop_locked()
+    held.release()
+    assert held.result == (None, "video_asleep")
+    assert rig.runner._watch_until == float("-inf")
+    rig.submit()
+    assert rig.runner.latest() is None
+
+
+def test_a_drop_does_not_wait_for_an_encode_and_the_late_result_is_discarded():
+    import threading
+
+    rig = Rig()
+    rig.video.frame("a")
+    rig.submit()
+    started, go = threading.Event(), threading.Event()
+    real = rig.video._encode
+
+    def slow(*args):
+        started.set()
+        assert go.wait(5)
+        return real(*args)
+
+    rig.video._encode = slow
+    out = []
+    t = threading.Thread(target=lambda: out.append(rig.video.frame("a")), daemon=True)
+    t.start()
+    assert started.wait(5)
+    rig.video.drop()  # returns at once: the encode holds no lock the drop needs
+    rig.video.expire()
+    go.set()
+    t.join(5)
+    assert out == [(None, "video_no_frame")]
+    assert rig.video._jpeg is None and rig.runner.latest() is None
+    assert rig.video.viewers()["video_viewers_active"] is False
+
+
+def test_switching_runners_unwatches_the_old_one(rig):
+    rig.video.frame("a")
+    old = rig.runner
+    new = LatestFrameRunner(Module(), clock=rig.clock)
+    rig.service.runner = new
+    rig.video.frame("a")
+    assert old._watch_until == float("-inf") and new._watch_until > rig.clock.now
+
+
+def test_a_frame_older_than_the_bound_is_not_served(rig):
+    rig.video.frame("a")
+    rig.submit()
+    assert rig.video.frame("a")[1] is None
+    rig.clock.now += config().webui.live.video_stale_s + 1
+    rig.video._jpeg = None
+    assert rig.video.frame("a") == (None, "video_stale")
+    rig.video.frame("a")  # arms the watch again
+    rig.submit()
+    assert rig.video.frame("a")[1] is None
+
+
+def test_sleep_forgets_the_face_tracks_too(rig):
+    cleared = []
+    rig.host.perception.pipeline.clear_overlay = lambda: cleared.append(1)
+    rig.video.frame("a")
+    rig.submit()
+    rig.video.sleep()
+    assert cleared == [1] and rig.video._jpeg is None and rig.runner.latest() is None
+
+
+# ---------------------------------------------------------------- hostile overlay input (S2)
+
+
+@pytest.mark.parametrize(
+    "box",
+    [
+        (float("nan"),) * 4,
+        (float("inf"), 0.0, 10.0, 10.0),
+        (1e12, 1e12, 2e12, 2e12),
+        (-1e6, -1e6, 1e6, 1e6),
+        (0.0, 0.0, 3e9, 3e9),
+    ],
+)
+def test_a_bad_face_box_never_stops_the_picture(box):
+    rig = Rig(faces=[(box, None), ((100.0, 100.0, 200.0, 220.0), None)])
+    rig.video.frame("a")
+    rig.submit()
+    jpeg, code = rig.video.frame("a")
+    assert code is None and jpeg[:2] == b"\xff\xd8"
+
+
+@pytest.mark.parametrize(
+    "display_name", [None, 123, b"bytes", "x" * 10000, "\x00a\nb", "\U0001f600"]
+)
+def test_a_bad_display_name_never_stops_the_picture(display_name):
+    rig = Rig(faces=[((100.0, 100.0, 200.0, 220.0), "p")])
+    rig.host.perception.pipeline.matcher.registry = SimpleNamespace(
+        get_person=lambda _i: SimpleNamespace(display_name=display_name, status="active")
+    )
+    rig.video.frame("a")
+    rig.submit()
+    jpeg, code = rig.video.frame("a")
+    assert code is None and jpeg[:2] == b"\xff\xd8"

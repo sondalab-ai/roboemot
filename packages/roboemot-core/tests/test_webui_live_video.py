@@ -270,8 +270,51 @@ def test_the_viewer_window_must_cover_two_polls():
     from pydantic import ValidationError
     from roboemot.config.schema import LiveConfig
 
-    LiveConfig(video_fps=0.5, viewer_window_s=4)
+    LiveConfig(video_fps=0.5, viewer_window_s=4, banner_poll_ms=2000)
     with pytest.raises(ValidationError):
-        LiveConfig(video_fps=0.5, viewer_window_s=3)
+        LiveConfig(video_fps=0.5, viewer_window_s=3, banner_poll_ms=1000)
     with pytest.raises(ValidationError):
-        LiveConfig(video_fps=0.5, viewer_window_s=1)
+        LiveConfig(video_fps=0.5, viewer_window_s=1, banner_poll_ms=1000)
+
+
+def test_a_banner_poll_slower_than_half_the_window_is_refused_and_capped():
+    from pydantic import ValidationError
+    from roboemot.config.schema import LiveConfig
+
+    LiveConfig(viewer_window_s=6, banner_poll_ms=3000)
+    for window, banner in ((1, 1000), (6, 3500), (2, 1500)):
+        with pytest.raises(ValidationError):
+            LiveConfig(viewer_window_s=window, banner_poll_ms=banner)
+    with pytest.raises(ValidationError):
+        LiveConfig(viewer_window_s=60, banner_poll_ms=30000)  # the field is capped at 5 s
+    probe = dict(viewer_window_s=1, video_fps=2.0, banner_poll_ms=30000)
+    with pytest.raises(ValidationError):  # the reviewer's combination
+        LiveConfig(**probe)
+
+
+def test_a_cross_site_request_is_refused_before_the_handler(served):
+    c = served.client
+    enable(c)
+    c.request("GET", "/api/live/frame.jpg")
+    feed(served)
+    for site in ("cross-site", "same-site"):
+        r = c.request("GET", "/api/live/frame.jpg", headers={"Sec-Fetch-Site": site})
+        assert (r.status, r.json) == (403, {"error": "cross_site"})
+    assert c.request("GET", "/api/live/viewers").json["video_viewers_active"] is False
+    for site in ("same-origin", "none"):
+        r = c.request("GET", "/api/live/frame.jpg", headers={"Sec-Fetch-Site": site})
+        assert r.status == 200
+    assert r.headers["Cross-Origin-Resource-Policy"] == "same-origin"
+
+
+def test_the_new_video_settings_have_units_and_ranges():
+    from roboemot.config.schema import LiveConfig
+
+    f = LiveConfig.model_fields
+    assert (
+        f["video_stale_s"].json_schema_extra["unit"] == "s" and f["video_stale_s"].default == 10.0
+    )
+    assert f["video_idle_stop_s"].json_schema_extra["unit"] == "s"
+    assert f["video_idle_stop_s"].default == 600.0
+    assert f["banner_poll_ms"].json_schema_extra["unit"] == "ms"
+    assert max(m.le for m in f["banner_poll_ms"].metadata if hasattr(m, "le")) == 5000

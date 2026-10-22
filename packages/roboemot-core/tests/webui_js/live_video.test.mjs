@@ -32,6 +32,7 @@ const STRINGS = {
   live_video_resume: "Resume",
   live_video_paused: "Paused.",
   live_video_off: "The camera preview is off.",
+  live_video_idle: "Stopped after a while without activity.",
   live_video_banner: "Live video view active",
   err_video_asleep: "The robot is asleep, so the camera is off.",
   err_video_no_frame: "Waiting for the next camera picture.",
@@ -208,6 +209,39 @@ test("an expired session on a frame goes back to the login", async (t) => {
   assert.equal(page.document.querySelector("#tabs").hidden, true);
 });
 
+test("after the idle time without input the video stops and waits for Resume", async (t) => {
+  const page = await videoPage(t, {
+    "GET /api/live/state": { ...STATE, video: { enabled: true, poll_ms: POLL_MS, idle_stop_ms: POLL_MS * 6 } },
+  });
+  await openLive(page);
+  await sleep(WAIT_MS * 3);
+  const at = frames(page);
+  assert.ok(at >= 1 && at < 12, "stopped on its own: " + at);
+  assert.equal(img(page).hidden, true);
+  assert.deepEqual(page.urls.revoked.sort(), [...page.urls.created].sort());
+  assert.equal(page.document.querySelector("#live-video-text").textContent, STRINGS.live_video_idle);
+  const pause = page.document.querySelector("#live-video-pause");
+  assert.equal(pause.textContent, "Resume");
+  await sleep(WAIT_MS);
+  assert.equal(frames(page), at, "no polls until a click");
+  pause.click();
+  await sleep(POLL_MS * 3);
+  assert.ok(frames(page) > at);
+});
+
+test("input on the page keeps the video going", async (t) => {
+  const page = await videoPage(t, {
+    "GET /api/live/state": { ...STATE, video: { enabled: true, poll_ms: POLL_MS, idle_stop_ms: POLL_MS * 8 } },
+  });
+  await openLive(page);
+  for (let i = 0; i < 8; i++) {
+    page.document.dispatchEvent(new page.window.Event("pointerdown"));
+    await sleep(POLL_MS * 2);
+  }
+  assert.equal(img(page).hidden, false);
+  assert.equal(page.document.querySelector("#live-video-pause").textContent, "Pause");
+});
+
 // ---------------------------------------------------------------- banner
 
 test("the banner shows on any tab while someone watches and hides when they stop", async (t) => {
@@ -226,6 +260,19 @@ test("the banner shows on any tab while someone watches and hides when they stop
   active = false;
   await sleep(WAIT_MS);
   assert.equal(banner.hidden, true);
+});
+
+test("a failed banner poll shows the banner instead of hiding it", async (t) => {
+  let fail = false;
+  const page = await videoPage(t, {
+    "GET /api/live/viewers": () => (fail ? reply(503, { error: "generic" }) : { video_viewers_active: false, count: 0, poll_ms: POLL_MS }),
+  });
+  const banner = page.document.querySelector("#live-video-banner");
+  await sleep(WAIT_MS);
+  assert.equal(banner.hidden, true);
+  fail = true;
+  await sleep(WAIT_MS * 2);
+  assert.equal(banner.hidden, false);
 });
 
 test("the banner poll stops while the page is hidden and restarts when it is shown", async (t) => {
