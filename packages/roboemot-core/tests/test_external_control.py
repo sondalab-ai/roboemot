@@ -329,12 +329,18 @@ def drive_irregular(loop, driver, t, seconds, yaw, stall_every=None, stall_s=0.0
     return t
 
 
-def make_with(driver: ServoDriver, man: Manifest | None = None) -> MotionLoop:
+def make_with(driver: ServoDriver, man: Manifest | None = None, cfg=CFG) -> MotionLoop:
     NOW[0] = 0.0
     driver.setup()
-    loop = MotionLoop(man or manifest(), driver, CFG, rate_hz=50, clock=lambda: NOW[0])
+    loop = MotionLoop(man or manifest(), driver, cfg, rate_hz=50, clock=lambda: NOW[0])
     loop.set_mode("active")
     return loop
+
+
+def solo(*groups: str):
+    """The config with ``motion.external.solo_groups`` set: those groups may yield alone."""
+    ext = CFG.motion.external.model_copy(update={"solo_groups": list(groups)})
+    return CFG.model_copy(update={"motion": CFG.motion.model_copy(update={"external": ext})})
 
 
 @pytest.mark.parametrize("age_s", [0.35, 0.38, 0.5])
@@ -484,9 +490,9 @@ def grouped_manifest() -> Manifest:
     )
 
 
-def test_an_antenna_held_by_a_hand_yields_the_antennas_only():
+def test_an_antenna_held_by_a_hand_yields_the_antennas_only_when_they_may_yield_alone():
     driver = ServoDriver(home=dict.fromkeys(GROUPED, 0.0))
-    loop = make_with(driver, grouped_manifest())
+    loop = make_with(driver, grouped_manifest(), solo("antennas"))
     t = drive(loop, driver, 0.0, 1.0)
     driver.pose["antenna_left"] = 1.0  # pinched and held
     driver.target = dict(driver.pose)
@@ -508,7 +514,7 @@ def test_an_antenna_held_by_a_hand_yields_the_antennas_only():
 
 def test_head_and_body_yield_together_since_a_constraint_couples_them():
     driver = ServoDriver(home=dict.fromkeys(GROUPED, 0.0))
-    loop = make_with(driver, grouped_manifest())
+    loop = make_with(driver, grouped_manifest(), solo("head", "body_yaw"))
     t = drive(loop, driver, 0.0, 1.0)
     driver.external, driver.goal = True, {"body_yaw": -1.0}
     drive(loop, driver, t, 0.6)
@@ -792,7 +798,7 @@ def test_the_resume_grace_covers_a_min_jerk_move_a_slow_status_and_old_state(age
 
 def test_a_hook_feeding_a_yielding_dof_writes_nothing_to_it():
     driver = ServoDriver(home=dict.fromkeys(GROUPED, 0.0))
-    loop = make_with(driver, grouped_manifest())
+    loop = make_with(driver, grouped_manifest(), solo("antennas"))
     loop.tick_hooks.append(
         lambda now, core: core.feed(
             Command("reflex", Priority.REFLEX, {"antenna_left": -0.5}, now), liveness=False
@@ -812,7 +818,7 @@ def test_a_hook_feeding_a_yielding_dof_writes_nothing_to_it():
 def test_units_that_yielded_apart_resume_apart():
     """An antenna kept moving in a hand does not keep a head pushed later from resuming."""
     driver = ServoDriver(home=dict.fromkeys(GROUPED, 0.0))
-    loop = make_with(driver, grouped_manifest())
+    loop = make_with(driver, grouped_manifest(), solo("antennas"))
     t = drive(loop, driver, 0.0, 1.0)
     driver.external, driver.speed = True, 3.0
 
@@ -832,3 +838,27 @@ def test_units_that_yielded_apart_resume_apart():
     assert loop.snapshot()["external_groups"] == ["antennas", "body_yaw+head"]
     hold(GRACE_S + 1.5, 0.3)  # the head let go, back where it is commanded
     assert loop.snapshot()["external_groups"] == ["antennas"]
+
+
+# ---- fix round 2: the daemon's goto_sleep moves the antennas first (MuJoCo sim, SDK 1.12)
+
+
+def test_a_platform_move_seen_first_on_the_antennas_stops_every_write():
+    """In the sim, goto_sleep's antennas diverge ~0.6 s before the head: per-unit yielding kept
+    streaming head targets meanwhile, and the daemon accepts them in the pause between its two
+    gotos and after the last one, pulling the head out of the sleep pose (SPEC 4A, 12A). By
+    default any divergence yields every unit: a hand cannot be told from the platform."""
+    driver = ServoDriver(home=dict.fromkeys(GROUPED, 0.0))
+    loop = make_with(driver, grouped_manifest())
+    t = drive(loop, driver, 0.0, 1.0)
+    driver.external, driver.speed = True, 3.0
+    driver.goal = {"antenna_left": 1.5, "antenna_right": -1.5}  # the antennas go first
+    while not loop.external:
+        t = drive(loop, driver, t, DT)
+    n = len(driver.writes)
+    driver.speed, driver.goal = 0.5, {"antenna_left": 1.5, "antenna_right": -1.5, "head.yaw": -1.0}
+    t = drive(loop, driver, t, 2.0)
+    assert len(driver.writes) == n
+    assert loop.snapshot()["external_groups"] == ["antennas", "body_yaw+head"]
+    event = loop.snapshot()["external_last_event"]
+    assert event["group"] == "antennas"  # the record names the unit that diverged

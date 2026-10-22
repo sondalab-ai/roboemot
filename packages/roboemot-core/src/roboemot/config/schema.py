@@ -753,6 +753,14 @@ class ExternalControlConfig(Strict):
         "max_state_age_s + confirm_s; longer is more tolerant of old state, slower to catch it",
         unit="s", ge=0.0, le=5.0,
     )  # fmt: skip
+    solo_groups: list[str] = param(
+        [],
+        "Manifest groups that yield on their own when only they diverge (a hand on an "
+        "antenna). Any other divergence yields every group: the platform's own moves (a "
+        "go-to-sleep) may show first on any group, and the groups not yet diverging would "
+        "otherwise keep streaming targets the platform accepts as its move ends. List a group "
+        "only if the platform's moves never move it first",
+    )
     recent_events: int = param(
         8,
         "How many recent external-control events the debug report keeps (joint, group, error, "

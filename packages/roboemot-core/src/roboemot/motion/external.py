@@ -20,10 +20,14 @@ yield falsely:
   sample read in a tick later than ``late_tick_periods`` periods after the previous one (an
   overloaded CPU) does not count, so a stall cannot bridge the confirmation, but it does not
   restart the count either: under steady overruns a push is still caught.
-- **Yield units.** A manifest group yields on its own, merged with every group a constraint ties
-  it to (writing one side of a coupled pair while the other is pushed would fight the
-  constraint). An antenna held by a hand stops the antennas only; a head and a body yaw tied by
-  a yaw-delta constraint yield together.
+- **Yield units.** A unit is a manifest group, merged with every group a constraint ties it to
+  (writing one side of a coupled pair while the other is pushed would fight the constraint). A
+  diverging unit yields every unit, unless all its groups are in ``solo_groups``: then it
+  yields alone. A platform's own move can show first on any unit (in the MuJoCo sim the daemon's
+  goto_sleep moves the antennas ~0.6 s before the head), and a unit still written would have its
+  targets accepted in the move's pauses and as it ends; a hand on one part cannot be told from
+  it. A robot whose platform moves never move a group first may list that group (an antenna held
+  by a hand then stops the antennas only).
 
 While a unit yields the loop writes none of its dofs and follows its measured pose. Units that
 started yielding within ``motion.platform_move_grace_s`` of each other (one platform move) resume
@@ -55,6 +59,7 @@ class Unit:
 
     name: str
     dofs: tuple[str, ...]
+    groups: frozenset[str] = frozenset()
     yielding: bool = False
     run: int = 0  # new divergent samples in a row
     run_since: float = 0.0
@@ -80,10 +85,11 @@ def yield_units(dofs: dict[str, Dof], constraints: list[Constraint]) -> list[Uni
     members: dict[str, list[str]] = {}
     for name, dof in dofs.items():
         members.setdefault(root(dof.group), []).append(name)
-    return [
-        Unit("+".join(sorted({dofs[n].group for n in names})), tuple(names))
-        for names in members.values()
-    ]
+    units = []
+    for names in members.values():
+        groups = frozenset(dofs[n].group for n in names)
+        units.append(Unit("+".join(sorted(groups)), tuple(names), groups))
+    return units
 
 
 class _Window:
@@ -243,7 +249,12 @@ class ExternalControl:
             self.peak["diverged_samples"] = max(self.peak["diverged_samples"], unit.run)
             if unit.run >= self._confirm:
                 joint, error, tolerance = worst
-                self._start_yield(unit, now, measured)
+                alone = unit.groups <= set(self.cfg.solo_groups)
+                others = [] if alone else [u for u in self.units if not u.yielding]
+                for each in [unit, *[u for u in others if u is not unit]]:
+                    self._start_yield(each, now, measured)
+                    started.append(each)
+                self.events += 1
                 self.recent.append(
                     {
                         "t": now,
@@ -258,7 +269,6 @@ class ExternalControl:
                     }
                 )
                 unit.run = 0
-                started.append(unit)
         return started
 
     def _worst(
@@ -316,7 +326,6 @@ class ExternalControl:
         for name in unit.dofs:
             self._windows[name].reset(None)
         self._update_held()
-        self.events += 1
         self._last_seen = (now, dict(measured))
 
     # ---- while yielding
