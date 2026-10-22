@@ -17,6 +17,7 @@ from roboemot.config.schema import RoboEmotConfig
 from roboemot.conversation import ConversationWorker
 from roboemot.conversation.sources import profile_source, scene_source, speaker_source
 from roboemot.llm import Router
+from roboemot.llm.prompt import MINOR_RULE
 from roboemot.voice.listener import Utterance, VoiceListener
 from roboemot.voice.speech import SpeechOutput
 from roboemot.voice.speech_features import Prosody
@@ -97,7 +98,8 @@ def test_an_addressed_utterance_is_answered_through_the_shared_router(data, fake
     assert not app.conversation._thread.is_alive()
 
 
-def test_a_minor_without_a_cleared_route_hears_a_built_in_line(data, fakes, said):  # noqa: F811
+def test_a_minor_is_answered_by_the_route_under_the_minor_rules(data, fakes, said):  # noqa: F811
+    """SPEC 8, 12 (owner decision 2026-10-22): no route is skipped while a minor is present."""
     enable(data, VOICE_YAML + ROUTES)
     app = ConvApp.__new__(ConvApp)
     app.requests, app.minor_flag = [], True
@@ -105,8 +107,9 @@ def test_a_minor_without_a_cleared_route_hears_a_built_in_line(data, fakes, said
     try:
         assert wait_for(lambda: app.conversation is not None)
         app.voice_listener._on_utterance(utterance())
-        assert wait_for(lambda: len(said) == 1)
-        assert app.requests == [] and "grande" in said[0]
+        assert wait_for(lambda: said == ["Ciao a te.", "Come va?"])
+        assert len(app.requests) == 1
+        assert MINOR_RULE in app.requests[0]["messages"][0]["content"]
     finally:
         stop.set()
         thread.join(timeout=10)
