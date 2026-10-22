@@ -532,6 +532,18 @@ def test_idle_waits_for_the_audio_already_pushed_to_play(make):
     assert wait_for(out.idle, timeout=2.0)
 
 
+@pytest.mark.parametrize("until", [math.inf, -math.inf, math.nan])
+def test_idle_with_a_sink_that_reports_no_finite_end(make, until):
+    class Unopened(FakeSink):
+        def playing_until(self):
+            return until
+
+    out = make(sink=Unopened())
+    say(out, "Uno.")
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    assert wait_for(out.idle)
+
+
 @pytest.mark.parametrize(
     "text,expected",
     [

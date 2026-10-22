@@ -329,7 +329,8 @@ class SpeechOutput:
         with self._lock:
             if self._jobs or self._busy_job is not None:
                 return False
-        return not self.sink.playing_until() > self.clock()
+        until = self.sink.playing_until()
+        return not (math.isfinite(until) and until > self.clock())  # never opened: nothing plays
 
     def question_end(self) -> float | None:
         """Clock stamp at which the last sentence that began to play ends (or ended, or was cut
