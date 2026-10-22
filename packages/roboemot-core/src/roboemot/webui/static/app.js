@@ -142,6 +142,7 @@ function explain(err) {
   let text = known || t("err_generic");
   if (err.message === "consent_refused" && err.detail) text += " " + err.detail;
   if (err.endpoint) text = text.replace("{host}", () => err.endpoint);
+  if (err.saved) text += " " + err.saved;
   const wait = err.retryAfter;
   if (err.status === 429 && wait > 0 && wait <= 60) text += " " + t("dialog_retry_in", { n: wait });
   return text;
@@ -653,14 +654,21 @@ function insecureHost(origin) {
 // Calls for a new route or for the changed fields of an existing one, behind one PIN dialog. A route
 // with a key sends it to the host of its URL: the dialog names that host and the call carries it as
 // the acknowledgement (the server names the one it expects when it differs).
+// An edit is several calls (R3 SF4), ordered so a key never reaches a host the owner did not mean:
+// a key that changes is unbound first when it goes away or the route moves, then the URL moves (with
+// no key bound, no acknowledgement), then the new key is bound to the new host, then the rest. The
+// first failure stops the rest; the error names what was already saved, and a retry resumes there.
 async function saveRoute(route, v) {
   let ack = null;
   const origin = routeOrigin(v.base_url || (route && route.base_url) || "");
   const keyed = v.key !== "" && v.key !== ROUTE_KEY_LITERAL;
+  const current = !route || route.key === "none" ? "" : (route.key === "secret" ? route.secret.name : ROUTE_KEY_LITERAL);
+  const keyChanged = route && v.key !== current;
   const urlChanged = route && v.base_url && v.base_url !== (route.base_url || "");
   const moved = urlChanged && routeOrigin(v.base_url) !== routeOrigin(route.base_url || "");
+  const unbind = keyChanged && current !== "" && (!keyed || moved);
   const target = origin || ack;
-  const steps = [];
+  const steps = []; // [label, call(pin)]
   const mapAck = async (call) => {
     try {
       return await call();
@@ -673,37 +681,54 @@ async function saveRoute(route, v) {
       throw err;
     }
   };
+  const bindKey = (secret) => (pin) => mapAck(() => api("POST", "/api/routes/key", {
+    name: route.name, secret, pin,
+    ...(secret !== null && (ack || origin) ? { ack_endpoint: ack || origin } : {}),
+  }));
   if (!route) {
-    steps.push((pin) => mapAck(() => api("POST", "/api/routes/add", {
+    steps.push([v.name, (pin) => mapAck(() => api("POST", "/api/routes/add", {
       name: v.name, base_url: v.base_url, model: v.model, locality: v.locality,
       secret: keyed ? v.key : null, pin,
       ...(keyed && (ack || origin) ? { ack_endpoint: ack || origin } : {}),
-    })));
+    }))]);
   } else {
+    const keyAtMove = current !== "" && !unbind; // the key still bound when the URL moves
     const path = (f) => "llm_routes." + route.name + "." + f;
     const set = (f, value) => (pin) => mapAck(() => api("POST", "/api/settings", { path: path(f), value, pin,
-      ...(f === "base_url" && route.key !== "none" && (ack || routeOrigin(value)) ? { ack_endpoint: ack || routeOrigin(value) } : {}) }));
-    if (urlChanged) steps.push(set("base_url", v.base_url));
-    if (v.key !== (route.key === "none" ? "" : (route.key === "secret" ? route.secret.name : ROUTE_KEY_LITERAL))) {
-      steps.push((pin) => mapAck(() => api("POST", "/api/routes/key", {
-        name: route.name, secret: keyed ? v.key : null, pin,
-        ...(keyed && (ack || origin) ? { ack_endpoint: ack || origin } : {}),
-      })));
-    }
-    if (v.locality !== route.locality) steps.push(set("locality", v.locality));
-    if (v.model !== route.model) steps.push(set("model", v.model));
+      ...(f === "base_url" && keyAtMove && (ack || routeOrigin(value)) ? { ack_endpoint: ack || routeOrigin(value) } : {}) }));
+    if (unbind) steps.push([t("route_key"), bindKey(null)]);
+    if (urlChanged) steps.push([t("route_url"), set("base_url", v.base_url)]);
+    if (keyChanged && keyed) steps.push([t("route_key"), bindKey(v.key)]);
+    if (v.locality !== route.locality) steps.push([t("route_locality"), set("locality", v.locality)]);
+    if (v.model !== route.model) steps.push([t("route_model"), set("model", v.model)]);
     if (!steps.length) { notice(t("settings_unchanged")); return; }
   }
-  const sends = keyed || (moved && route.key !== "none");
+  const sends = keyed || (moved && current !== "" && !keyChanged);
   const ackMessage = (host) => t("route_key_message", { host }) + (insecureHost(host) ? " " + t("route_key_insecure") : "");
   const message = sends && target ? ackMessage(target) : (route ? route.name : v.name);
+  let next = 0; // steps before this index are saved: a retry of the dialog resumes here
+  let notApplied = false;
   let ran = false;
   await pinnedCall(message, t(route ? "route_save" : "route_add"), async (pin) => {
-    for (const step of steps) await step(pin);
+    for (; next < steps.length; next++) {
+      try {
+        const result = await steps[next][1](pin);
+        if (result && result.applied === false) notApplied = true;
+      } catch (err) {
+        if (route && next > 0) {
+          const saved = [...new Set(steps.slice(0, next).map(([label]) => label))].join(", ");
+          err.saved = t("route_partial", { items: saved });
+        }
+        throw err;
+      }
+    }
     ran = true;
     return {};
   });
-  if (ran) notice(t(route ? "route_saved" : "route_added", { name: route ? route.name : v.name }));
+  if (ran) {
+    const done = t(route ? "route_saved" : "route_added", { name: route ? route.name : v.name });
+    notice(notApplied ? done + " " + t("settings_not_applied") : done, notApplied);
+  }
   await routesView();
 }
 

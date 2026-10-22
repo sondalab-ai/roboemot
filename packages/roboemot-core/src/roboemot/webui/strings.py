@@ -295,6 +295,7 @@ EN: dict[str, str] = {
     "route_remove_message": "The route is deleted. Its key stays in the store.",
     "route_added": "Route {name} added.",
     "route_saved": "Route {name} saved.",
+    "route_partial": "Already saved: {items}. The rest was not sent.",
     "route_removed": "Route {name} removed.",
     "secrets_title": "API keys",
     "secrets_intro": (
@@ -871,6 +872,7 @@ IT: dict[str, str] = {
     "route_remove_message": "Il modello viene eliminato. La sua chiave resta nell'archivio.",
     "route_added": "Modello {name} aggiunto.",
     "route_saved": "Modello {name} salvato.",
+    "route_partial": "Già salvato: {items}. Il resto non è stato inviato.",
     "route_removed": "Modello {name} rimosso.",
     "secrets_title": "Chiavi API",
     "secrets_intro": (
