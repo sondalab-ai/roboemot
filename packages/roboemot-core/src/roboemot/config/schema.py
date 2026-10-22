@@ -1558,6 +1558,22 @@ class VisionConfig(Strict):
         le=64,
         restart=True,
     )
+    report_window: int = param(
+        200,
+        "Report only: ended face tracks, age and gender jobs and their crops kept for the "
+        "lifetime, duration and time-to-estimate summaries",
+        ge=10,
+        le=10000,
+        restart=True,
+    )
+    report_rate_window_s: float = param(
+        60.0,
+        "Report only: capture-time window of the face track creation rate (per minute), "
+        "ending at the last processed frame",
+        unit="s",
+        ge=10,
+        le=3600,
+    )
     models_dir: str = param(
         "",
         "Folder with the ONNX model files; empty means models/ in the app data folder (data_dir)",
@@ -2378,6 +2394,14 @@ class VoiceConfig(Strict):
     )  # fmt: skip
     queue_max_sentences: int = param(
         16, "Sentences waiting for synthesis; a further one is dropped", ge=1, le=256
+    )
+    report_window: int = param(
+        200,
+        "Report only: TTS chunks kept for the real-time factor summary (synthesis time over "
+        "audio duration)",
+        ge=10,
+        le=10000,
+        restart=True,
     )
     piper: PiperConfig = param({}, "Piper subprocess backend", restart=True)
     openai_speech: OpenAISpeechConfig = param({}, "Remote speech backend")
