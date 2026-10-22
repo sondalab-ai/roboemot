@@ -3,4 +3,5 @@
 renamed:
   reflexes.antenna_ratio: reflexes.startle_lift_ratio
 removed:
+  vision.attribute_precision: the single yolo11n-face-age file, which has one precision (SPEC 5, 13)
   connectivity.gestures: the manifest gesture_map entries puzzled and perk_up (SPEC 12A)

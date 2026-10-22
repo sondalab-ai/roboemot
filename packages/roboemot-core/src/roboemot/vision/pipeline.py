@@ -179,6 +179,7 @@ class VisionPipeline:
                 cfg.attribute_queue_max,
                 executor,
                 report_window=cfg.report_window,
+                age_confidence_min=cfg.attribute_score_min,
             )
             if attribute_estimator is not None
             else None

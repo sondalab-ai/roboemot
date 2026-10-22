@@ -1,9 +1,10 @@
 """ONNX backends for the vision stages (SPEC 5, 13): needs the ``vision`` extra.
 
-YuNet face detector (MIT), SFace face embedder (Apache-2.0), FairFace ViT-B age and gender
-(Apache-2.0), DINOv2-S appearance embedder (Apache-2.0) and NanoDet-Plus-m object detector
-(Apache-2.0), with the preprocessing verified
-in the M1 spike (docs/spikes/2026-10-m1-models.md). Everything runs on CPU with two threads;
+YuNet face detector (MIT), SFace face embedder (Apache-2.0), yolo11n-face-age age classes
+(CC-BY-NC-4.0; no gender model, gender is always unknown), DINOv2-S appearance embedder
+(Apache-2.0) and NanoDet-Plus-m object detector (Apache-2.0), with the preprocessing verified
+in the M1 spike (docs/spikes/2026-10-m1-models.md) and, for the age model, in
+the 2026-10-22 research (letterbox, best anchor). Everything runs on CPU with two threads;
 the cm4 budget leaves two cores to vision, audio and core together (SPEC 13). All resizing,
 letterboxing, alignment and cropping happens here: crops live only inside a call (SPEC 12).
 Weights are never downloaded here, see ``roboemot models fetch``.
@@ -11,6 +12,7 @@ Weights are never downloaded here, see ``roboemot models fetch``.
 
 from __future__ import annotations
 
+import ast
 import logging
 import threading
 from dataclasses import dataclass
@@ -21,6 +23,7 @@ import numpy as np
 import onnxruntime as ort
 
 from ..config.schema import VisionConfig
+from ..registry.records import AGE_GROUPS
 from . import models
 from .models import ModelError
 from .types import AttributeSample, Box, Detection
@@ -50,24 +53,16 @@ ARCFACE_TEMPLATE = np.array(
     dtype=np.float32,
 )
 
-VIT_SIZE = 224
-VIT_MEAN = 0.5
-VIT_STD = 0.5
 PIXEL_MAX = 255.0
-# FairFace age bins by label. The bin 10-19 cannot be split at 13, so it maps to teen (SPEC 5
-# groups: child, teen, adult, senior). The output index order comes from models.yaml.
-AGE_LABEL_GROUPS = {
-    "0-2": "child",
-    "3-9": "child",
-    "10-19": "teen",
-    "20-29": "adult",
-    "30-39": "adult",
-    "40-49": "adult",
-    "50-59": "adult",
-    "60-69": "senior",
-    "more than 70": "senior",
-}
-GENDER_LABEL_VALUES = {"Female": "female", "Male": "male"}
+
+# yolo11n-face-age (Ultralytics YOLO11 export, no NMS): output rows are the box (cx, cy, w, h)
+# then one sigmoid score per class, per anchor. Ultralytics letterboxes with grey 114.
+AGE_MODEL_NAME = "yolo11n-face-age"
+YOLO_BOX_ROWS = 4
+YOLO_PAD_VALUE = 114
+YOLO_NAMES_KEY = "names"
+YOLO_STRIDE_KEY = "stride"
+UNKNOWN = "unknown"
 
 # NanoDet-Plus-m 320 (config nanodet-plus-m_320.yml of the release): plain resize without
 # keeping the aspect ratio, BGR mean/std, four strides, distance distribution of 8 bins per side.
@@ -99,11 +94,6 @@ def _session(path: Path, threads: int) -> ort.InferenceSession:
     options.intra_op_num_threads = threads
     options.inter_op_num_threads = 1
     return ort.InferenceSession(str(path), options, providers=["CPUExecutionProvider"])
-
-
-def _softmax(x: np.ndarray) -> np.ndarray:
-    e = np.exp(x - x.max())
-    return e / e.sum()
 
 
 def _unit(x: np.ndarray) -> np.ndarray:
@@ -179,52 +169,88 @@ class SFaceEmbedder:
         return _unit(self._rec.feature(align_face(image, face.landmarks))[0])
 
 
-class FairFaceEstimator:
-    """FairFace ViT-B age and gender classifiers on a padded face crop.
+def decode_age_classes(output: np.ndarray) -> tuple[int, float]:
+    """Class index and score of the anchor with the highest class score.
 
-    Per crop: the argmax age group (bins summed into child, teen, adult, senior) and gender
-    with their probabilities. Thresholding and aggregation over crops are done by the registry
-    estimate helpers, so the 0.8 rule is applied once.
+    ``output`` is one image of the YOLO output, ``(4 + classes, anchors)``. The box rows are
+    ignored: the face crop is the whole input, so the model is used as a classifier. Scores are
+    independent sigmoids (not a softmax), returned as they are.
+    """
+    scores = output[YOLO_BOX_ROWS:]
+    anchor = int(scores.max(axis=0).argmax())
+    cls = int(scores[:, anchor].argmax())
+    return cls, float(scores[cls, anchor])
+
+
+def _metadata_labels(meta: dict[str, str]) -> list[str] | None:
+    """The class names stored in the ONNX metadata (a Python dict literal), in index order."""
+    try:
+        names = ast.literal_eval(meta.get(YOLO_NAMES_KEY, ""))
+    except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+        return None
+    if not isinstance(names, dict) or sorted(names) != list(range(len(names))):
+        return None
+    return [str(names[i]) for i in range(len(names))]
+
+
+class YoloAgeEstimator:
+    """yolo11n-face-age on the padded face crop: age group only, gender always unknown.
+
+    The crop is letterboxed (aspect kept, grey padding) to ``input_px`` square, RGB, scaled to
+    0..1. The best anchor's class maps to an age group through the manifest ``groups``; a score
+    below ``score_min`` gives ``unknown`` (a possible minor, SPEC 5). Aggregation over crops is
+    done by the registry helpers with the same floor. At load the file's own metadata must name
+    the manifest labels in order, and ``input_px`` must be a multiple of its stride.
     """
 
     def __init__(
         self,
-        age_path: Path,
-        gender_path: Path,
-        age_labels: list[str],
-        gender_labels: list[str],
+        path: Path,
+        labels: list[str],
+        groups: dict[str, str],
+        input_px: int,
+        score_min: float,
         threads: int,
     ):
-        unknown = [x for x in age_labels if x not in AGE_LABEL_GROUPS] + [
-            x for x in gender_labels if x not in GENDER_LABEL_VALUES
-        ]
-        if unknown:
-            raise ModelError(f"unexpected FairFace labels {unknown}")
-        self._age_groups = [AGE_LABEL_GROUPS[x] for x in age_labels]
-        self._genders = [GENDER_LABEL_VALUES[x] for x in gender_labels]
-        self._age = _session(age_path, threads)
-        self._gender = _session(gender_path, threads)
+        bad = sorted(set(groups.values()) - set(AGE_GROUPS))
+        if bad:
+            raise ModelError(f"{AGE_MODEL_NAME}: unknown age group(s) {bad} in models.yaml")
+        self._groups = [groups[x] for x in labels]
+        self._size = input_px
+        self._score_min = score_min
+        self._sess = _session(path, threads)
+        self._input = self._sess.get_inputs()[0].name
+        meta = self._sess.get_modelmeta().custom_metadata_map
+        if _metadata_labels(meta) != labels:
+            raise ModelError(f"{path.name}: class labels differ from models.yaml {labels}")
+        stride = meta.get(YOLO_STRIDE_KEY, "")
+        if not stride.isdigit() or input_px % int(stride):
+            raise ModelError(
+                f"{path.name}: input {input_px} px is not a multiple of stride {stride!r}"
+            )
 
-    @staticmethod
-    def _input(crop: np.ndarray) -> np.ndarray:
-        rgb = cv2.cvtColor(cv2.resize(crop, (VIT_SIZE, VIT_SIZE)), cv2.COLOR_BGR2RGB)
-        return ((rgb.astype(np.float32) / PIXEL_MAX - VIT_MEAN) / VIT_STD).transpose(2, 0, 1)[None]
+    def _letterbox(self, crop: np.ndarray) -> np.ndarray:
+        height, width = crop.shape[:2]
+        scale = self._size / max(height, width)
+        nh, nw = max(1, round(height * scale)), max(1, round(width * scale))
+        canvas = np.full((self._size, self._size, CHANNELS), YOLO_PAD_VALUE, np.uint8)
+        top, left = (self._size - nh) // 2, (self._size - nw) // 2
+        canvas[top : top + nh, left : left + nw] = cv2.resize(
+            crop, (nw, nh), interpolation=cv2.INTER_LINEAR
+        )
+        rgb = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB).astype(np.float32) / PIXEL_MAX
+        return np.ascontiguousarray(rgb.transpose(2, 0, 1)[None])
 
     def estimate(self, crop: np.ndarray) -> AttributeSample:
-        """Age group and gender of one crop (BGR).
+        """Age group and score of one crop (BGR); gender ``unknown`` with confidence 0.
 
-        The crop is resized to 224x224 and normalised as the FairFace ViT expects. Returns the
-        most likely age group and gender with their probabilities, no thresholding.
+        Below ``score_min`` the group is ``unknown``; the score is returned either way for the
+        aggregation and is never logged. Nothing of the crop outlives the call (SPEC 12).
         """
-        x = self._input(crop)
-        age = _softmax(self._age.run(None, {self._age.get_inputs()[0].name: x})[0][0])
-        gender = _softmax(self._gender.run(None, {self._gender.get_inputs()[0].name: x})[0][0])
-        totals: dict[str, float] = {}
-        for group, p in zip(self._age_groups, age, strict=True):
-            totals[group] = totals.get(group, 0.0) + float(p)
-        age_group, age_conf = max(totals.items(), key=lambda kv: kv[1])
-        g = int(gender.argmax())
-        return AttributeSample(age_group, age_conf, self._genders[g], float(gender[g]))
+        output = self._sess.run(None, {self._input: self._letterbox(crop)})[0][0]
+        cls, score = decode_age_classes(output)
+        group = self._groups[cls] if score >= self._score_min else UNKNOWN
+        return AttributeSample(group, score, UNKNOWN, 0.0)
 
 
 class DinoV2Embedder:
@@ -401,7 +427,7 @@ class Stages:
 
     face_detector: YuNetDetector
     face_embedder: SFaceEmbedder
-    attribute_estimator: FairFaceEstimator | None
+    attribute_estimator: YoloAgeEstimator | None
     appearance_embedder: DinoV2Embedder | None
     object_detector: NanoDetDetector | None = None
     objects_unavailable: str | None = None  # why the animal and object stage was dropped
@@ -440,9 +466,9 @@ def load_stages(
     appearance: bool = True,
     objects: bool = True,
 ) -> Stages:
-    """Load the backends from ``root``; the ViTs, DINOv2 and the object detector can be left out.
+    """Load the backends from ``root``; age model, DINOv2 and object detector can be skipped.
 
-    The face stack (YuNet, SFace) and the age and gender models are required: a missing or
+    The face stack (YuNet, SFace) and the age model are required: a missing or
     unverified file raises ``ModelError``. The animal and object stage is optional: the
     NanoDet-Plus-m 320 detector (when ``objects`` is true and ``vision.objects_enabled`` is on;
     it returns the ``vision.animal_categories`` and ``vision.object_categories`` classes only)
@@ -452,27 +478,24 @@ def load_stages(
 
     Every file must carry a valid ``.verified`` marker (``roboemot models fetch`` writes it);
     otherwise ``ModelError`` names the file. Frame-path sessions use ``vision.threads`` CPU
-    threads, the age and gender sessions ``vision.attribute_threads`` (SPEC 13: two cores are
-    shared by vision, audio and core). ``vision.attribute_precision`` picks the INT8 files or the
-    343 MB FP32 files of the age and gender models; ``auto`` follows ``profile``, the robot
-    manifest's profile (``cm4`` gives INT8, anything else FP32). Sets the OpenCV and ONNX
-    Runtime globals once.
+    threads, the age session ``vision.attribute_threads`` (SPEC 13: two cores are shared by
+    vision, audio and core) at ``vision.attribute_input_px`` with ``vision.attribute_score_min``.
+    There is no gender model: gender is always ``unknown``. ``profile`` (the robot manifest's) is
+    accepted for callers and not used. Sets the OpenCV and ONNX Runtime globals once.
     """
     configure(cfg.threads)
     specs = models.load_manifest()
     estimator = None
     if attributes:
-        precision = models.resolve_precision(cfg.attribute_precision, profile)
-        suffix = "-int8" if precision == "int8" else ""
-        age_name, gender_name = f"fairface-age{suffix}", f"fairface-gender{suffix}"
-        age, gender = specs[age_name], specs[gender_name]
-        if age.labels is None or gender.labels is None:
-            raise ModelError("models.yaml lacks the FairFace label order")
-        estimator = FairFaceEstimator(
-            _file(root, age_name),
-            _file(root, gender_name),
+        age = specs[AGE_MODEL_NAME]
+        if age.labels is None or age.groups is None:
+            raise ModelError(f"models.yaml lacks the {AGE_MODEL_NAME} labels or groups")
+        estimator = YoloAgeEstimator(
+            _file(root, AGE_MODEL_NAME),
             age.labels,
-            gender.labels,
+            age.groups,
+            cfg.attribute_input_px,
+            cfg.attribute_score_min,
             cfg.attribute_threads,
         )
     detector, embedder, unavailable = None, None, None

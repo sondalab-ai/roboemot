@@ -5,7 +5,7 @@
 
 1. per person, first match wins: the record's ``register_overrides`` (laid over the group's
    register, guarded fields only ever tighter), the declared age group, the estimated age group
-   (the pipeline already withholds an estimate below ``identity.estimate_confidence_min``), then
+   (the pipeline already withholds an estimate below ``vision.attribute_score_min``), then
    ``unknown``;
 2. the most restrictive register of the people present (see :func:`most_restrictive`);
 3. the persona's traits shape it once (``apply_to_register``);
