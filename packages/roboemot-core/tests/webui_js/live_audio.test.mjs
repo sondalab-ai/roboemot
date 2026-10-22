@@ -19,6 +19,7 @@ const STATE = {
   reflexes: { last: null },
   motion: { state: "writing" },
   system: { cpu_temp_c: null },
+  video: { enabled: false, poll_ms: 333 },
 };
 
 const turn = (seq, who, text, extra = {}) => ({ seq, rev: seq, t: 1000 + seq, who, text, language: "en", interrupted: false, ...extra });

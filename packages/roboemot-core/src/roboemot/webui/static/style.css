@@ -50,3 +50,5 @@ ul.row { list-style: none; padding: 0; margin: 0; }
 .live-turn { margin: 0; overflow-wrap: anywhere; }
 .live-meter { display: grid; gap: var(--sl-space-1); }
 #live-audio { margin-top: var(--sl-space-4); }
+.live-video { display: block; width: 100%; height: auto; border-radius: var(--sl-radius-2, 0.5rem); }
+#live-video-banner { margin-bottom: var(--sl-space-4); }

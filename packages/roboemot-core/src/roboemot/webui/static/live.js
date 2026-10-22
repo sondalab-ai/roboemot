@@ -5,6 +5,12 @@
 // card, badge, progress, empty, notice, explain, stopPolling, boot, state), so this file loads first
 // and only calls them at run time. Text goes through textContent and styles through the CSSOM.
 //
+// Video card: polls GET /api/live/frame.jpg at the rate the state names (`video.poll_ms`), only
+// while the tab is open and visible and the card is not paused. Each JPEG becomes an object URL on
+// the <img>; the previous URL is revoked at once, and every URL is revoked when polling stops.
+// Banner: while logged in, every page polls GET /api/live/viewers and shows the kit callout
+// #live-video-banner while someone is watching the video (any tab, any browser).
+//
 // Polling: the state timer is `state.timer` and the audio timer `liveState.audioTimer` (stopPolling
 // clears both, so leaving the tab, logging out and showTab stop them), only while the document is
 // visible. `liveState.serial` retires a request that was in flight when the
@@ -14,6 +20,8 @@ const LIVE_RETRY_MS = 5000;
 const LIVE_PERCENT = 100;
 const LIVE_METER_FLOOR_DB = -60;
 const liveState = { serial: 0, audioTimer: null, after: 0, epoch: null, ui: null };
+const liveVideo = { timer: null, ui: null, url: null, paused: false, chain: 0, running: null, pollMs: LIVE_RETRY_MS };
+const liveBanner = { timer: null, serial: 0 };
 
 // Each card is { key, render(data) -> Node }. Slices T (audio, transcript) and U (video) add theirs
 // here and read their own part of `data` (or poll their own endpoint from `render`).
@@ -25,6 +33,7 @@ const LIVE_CARDS = [
   { key: "reflexes", render: liveReflexesCard },
   { key: "motion", render: liveMotionCard },
   { key: "system", render: liveSystemCard },
+  { key: "video", render: liveVideoCard },
 ];
 
 function liveRow(label, ...value) {
@@ -142,6 +151,178 @@ async function livePoll(box, serial) {
   }
   state.timer = setTimeout(() => livePoll(box, serial), delay);
 }
+
+// ---------------------------------------------------------------- video card
+
+function liveRevokeVideo() {
+  if (liveVideo.url !== null) URL.revokeObjectURL(liveVideo.url);
+  liveVideo.url = null;
+  if (liveVideo.ui) {
+    liveVideo.ui.img.removeAttribute("src");
+    liveVideo.ui.img.hidden = true;
+  }
+}
+
+// `drop`: also forget the card and the picture (leaving the tab, hiding the page, logging out).
+function liveStopVideo(drop) {
+  clearTimeout(liveVideo.timer);
+  liveVideo.timer = null;
+  liveVideo.running = null;
+  liveVideo.chain += 1;
+  if (drop) {
+    liveRevokeVideo();
+    liveVideo.ui = null;
+    liveVideo.paused = false;
+  }
+}
+
+function liveVideoText(text) {
+  const ui = liveVideo.ui;
+  if (!ui) return;
+  ui.text.textContent = text;
+  ui.text.hidden = text === "";
+}
+
+function liveShowFrame(blob) {
+  const ui = liveVideo.ui;
+  if (!ui) return;
+  const old = liveVideo.url;
+  liveVideo.url = URL.createObjectURL(blob);
+  ui.img.src = liveVideo.url;
+  ui.img.hidden = false;
+  if (old !== null) URL.revokeObjectURL(old);
+  liveVideoText("");
+}
+
+function liveVideoBuild() {
+  const img = el("img", { class: "live-video", alt: t("live_video_alt"), id: "live-video-img" });
+  img.hidden = true;
+  const text = el("p", { class: "hint", id: "live-video-text" });
+  text.hidden = true;
+  const pause = button(t("live_video_pause"), "plain", () => liveVideoToggle(), { small: true, attrs: { id: "live-video-pause" } });
+  const node = card(t("tab_live"), t("live_video"), img, text, pause, el("p", { class: "hint" }, t("live_video_note")));
+  node.id = "live-video-card";
+  liveVideo.ui = { node, img, text, pause };
+}
+
+function liveVideoToggle() {
+  const ui = liveVideo.ui;
+  if (!ui) return;
+  liveVideo.paused = !liveVideo.paused;
+  ui.pause.textContent = t(liveVideo.paused ? "live_video_resume" : "live_video_pause");
+  if (liveVideo.paused) {
+    liveStopVideo(false);
+    liveRevokeVideo();
+    liveVideoText(t("live_video_paused"));
+  } else {
+    liveVideoStart();
+  }
+}
+
+function liveVideoStart() {
+  const serial = liveState.serial;
+  if (liveVideo.running === serial || liveVideo.paused) return;
+  liveVideo.running = serial;
+  liveVideo.chain += 1;
+  liveVideoPoll(serial, liveVideo.chain);
+}
+
+// True while the request chain `chain` (started for `serial`) may still draw and re-arm its timer.
+function liveVideoLive(serial, chain) {
+  return liveActive(serial) && liveVideo.chain === chain && !liveVideo.paused;
+}
+
+function liveVideoCard(d) {
+  if (liveVideo.ui === null) liveVideoBuild();
+  const v = d.video;
+  if (!v.enabled) {
+    liveStopVideo(false);
+    liveRevokeVideo();
+    liveVideoText(t("live_video_off"));
+    liveVideo.ui.pause.hidden = true;
+    return liveVideo.ui.node;
+  }
+  liveVideo.ui.pause.hidden = false;
+  liveVideo.pollMs = v.poll_ms;
+  liveVideoStart();
+  return liveVideo.ui.node;
+}
+
+async function liveVideoPoll(serial, chain) {
+  liveVideo.timer = null;
+  if (!liveVideoLive(serial, chain)) return;
+  let delay = liveVideo.pollMs;
+  try {
+    const resp = await fetch("/api/live/frame.jpg", { method: "GET", credentials: "same-origin", cache: "no-store" });
+    if (!liveVideoLive(serial, chain)) return;
+    if (resp.ok) {
+      const blob = await resp.blob();
+      if (!liveVideoLive(serial, chain)) return;
+      liveShowFrame(blob);
+    } else {
+      let code = "generic";
+      try { code = (await resp.json()).error || code; } catch (e) { code = "generic"; }
+      if (!liveVideoLive(serial, chain)) return;
+      if (resp.status === 401 && code === "unauthorized") { await boot(); return; }
+      liveRevokeVideo();
+      liveVideoText(state.strings["err_" + code] || t("err_generic"));
+      if (code !== "video_no_frame") delay = Math.max(delay, LIVE_RETRY_MS);
+    }
+  } catch (e) {
+    if (!liveVideoLive(serial, chain)) return;
+    liveRevokeVideo();
+    liveVideoText(t("err_generic"));
+    delay = Math.max(delay, LIVE_RETRY_MS);
+  }
+  liveVideo.timer = setTimeout(() => liveVideoPoll(serial, chain), delay);
+}
+
+// ---------------------------------------------------------------- banner
+
+function liveBannerStop() {
+  clearTimeout(liveBanner.timer);
+  liveBanner.timer = null;
+  liveBanner.serial += 1;
+  const box = document.getElementById("live-video-banner");
+  if (box) box.hidden = true;
+}
+
+function liveBannerActive(serial) {
+  return serial === liveBanner.serial && state.csrf !== null && document.visibilityState === "visible";
+}
+
+async function liveBannerPoll(serial) {
+  clearTimeout(liveBanner.timer);
+  liveBanner.timer = null;
+  if (!liveBannerActive(serial)) return;
+  let delay = LIVE_RETRY_MS;
+  try {
+    const data = await api("GET", "/api/live/viewers");
+    if (!liveBannerActive(serial)) return;
+    const box = document.getElementById("live-video-banner");
+    box.hidden = !data.active;
+    delay = data.poll_ms || LIVE_RETRY_MS;
+  } catch (err) {
+    if (!liveBannerActive(serial)) return;
+    if (err.status === 401 && err.message === "unauthorized") { await boot(); return; }
+  }
+  liveBanner.timer = setTimeout(() => liveBannerPoll(serial), delay);
+}
+
+// Logged in: ask now, then at the interval the server names (called by the page shell).
+function liveBannerStart() {
+  liveBannerStop();
+  const box = document.getElementById("live-video-banner");
+  const body = box.querySelector(".sl-callout__body");
+  body.textContent = t("live_video_banner");
+  liveBannerPoll(liveBanner.serial);
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (state.csrf === null) return;
+  if (document.visibilityState === "visible") liveBannerStart();
+  else liveBannerStop();
+});
 
 // ---------------------------------------------------------------- audio cards
 

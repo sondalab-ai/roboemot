@@ -18,6 +18,7 @@ const STATE = {
   reflexes: { last: { name: "startle", age_s: 2.5 } },
   motion: { state: "writing" },
   system: { cpu_temp_c: 51.2 },
+  video: { enabled: false, poll_ms: 333 },
 };
 
 const AUDIO = {
@@ -64,7 +65,7 @@ test("the Live tab sits next to the others and draws one card per group", async 
   assert.deepEqual(tabs, ["enroll", "registry", "catalogue", "routes", "settings", "live", "debug"]);
   await openLive(page);
   const grid = page.document.querySelector("#live-cards");
-  assert.equal(grid.children.length, 7);
+  assert.equal(grid.children.length, 8);
   const text = grid.textContent;
   for (const expected of ["joy", "0.25", "lan", "Mia", "startle", "writing", "51.2", "adult"]) {
     assert.ok(text.includes(expected) || text.toLowerCase().includes(expected), expected);
@@ -185,7 +186,7 @@ test("live_disabled shows how to turn it on and keeps retrying at the slow delay
   enabled = true;
   retries.forEach((x) => x.fn());
   await settle();
-  assert.equal(page.document.querySelector("#live-cards").children.length, 7, "self-healed");
+  assert.equal(page.document.querySelector("#live-cards").children.length, 8, "self-healed");
 });
 
 test("coming back into view keeps the last cards until the next reply", async (t) => {
@@ -200,7 +201,7 @@ test("coming back into view keeps the last cards until the next reply", async (t
   hold = true;
   visibility(page, "visible");
   await settle();
-  assert.equal(page.document.querySelector("#live-cards").children.length, 7, "cards kept while the poll is pending");
+  assert.equal(page.document.querySelector("#live-cards").children.length, 8, "cards kept while the poll is pending");
   release();
   await settle();
   visibility(page, "hidden");
@@ -236,6 +237,7 @@ test("everything the state holds goes through textContent", async (t) => {
   const page = await livePage(t, { "GET /api/live/state": hostile });
   await openLive(page);
   const grid = page.document.querySelector("#live-cards");
-  assert.equal(grid.querySelector("img"), null);
+  const images = [...grid.querySelectorAll("img")];
+  assert.ok(images.every((i) => i.id === "live-video-img" && !i.hasAttribute("onerror")), "only the preview <img>");
   assert.ok(grid.textContent.includes("<img src=x"));
 });

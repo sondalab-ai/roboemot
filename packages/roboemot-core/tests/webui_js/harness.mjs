@@ -2,14 +2,21 @@
 // `fetch`, so the page script runs as in a browser. The vendored kit is not loaded: it only styles.
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
+import { after } from "node:test";
 import { JSDOM } from "jsdom";
+
+const windows = new Set(); // closed when the test file ends: the page timers (banner poll) would keep node alive
+after(() => { for (const w of windows) w.close(); });
 
 const STATIC = new URL("../../src/roboemot/webui/static/", import.meta.url);
 const read = (name) => readFileSync(new URL(name, STATIC), "utf8");
 
 /** A fetch-like reply: `status` and a JSON `body`, optional response `headers`. */
 export function reply(status, body, headers = {}) {
-  return { ok: status >= 200 && status < 300, status, headers: { get: (k) => headers[k] ?? null }, json: async () => body };
+  return {
+    ok: status >= 200 && status < 300, status, headers: { get: (k) => headers[k] ?? null },
+    json: async () => body, blob: async () => ({ size: 1, type: headers["Content-Type"] || "" }),
+  };
 }
 
 /**
@@ -20,6 +27,7 @@ export async function loadPage(routes = {}) {
   const html = read("index.html").replace(/<script[\s\S]*?<\/script>/g, "");
   const dom = new JSDOM(html, { url: "http://localhost/", runScripts: "outside-only", pretendToBeVisual: true });
   const { window } = dom;
+  windows.add(window);
   const calls = [];
   const table = {
     "GET /api/strings": { language: "en", strings: {} },
@@ -35,6 +43,9 @@ export async function loadPage(routes = {}) {
     return out && out.ok !== undefined && out.json ? out : reply(200, out);
   };
   window.CSS = { escape: (s) => s };
+  const urls = { created: [], revoked: [] }; // object URLs of the live preview: made and revoked
+  window.URL.createObjectURL = () => { const u = "blob:test/" + urls.created.length; urls.created.push(u); return u; };
+  window.URL.revokeObjectURL = (u) => { urls.revoked.push(u); };
   window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
   if (!window.HTMLDialogElement.prototype.showModal) polyfillDialog(window);
   const ctx = dom.getInternalVMContext();
@@ -44,7 +55,7 @@ export async function loadPage(routes = {}) {
   run(read("live.js"));
   run(read("app.js"));
   await settle();
-  return { window, document: window.document, calls, run };
+  return { window, document: window.document, calls, run, urls };
 }
 
 /** jsdom has no modal dialog: open/close and the `cancel` and `close` events behave like a browser's. */
