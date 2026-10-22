@@ -151,11 +151,17 @@ class VoiceListener:
         self._last_error = ""
 
     def apply_config(self, cfg: RoboEmotConfig) -> None:
-        """Hot reload: keyword lists, wake policy and window, default language."""
+        """Hot reload: keyword lists, wake policy and window, default language, VAD settings."""
         self._cfg = cfg
+        self._endpointer.apply_config(cfg.voice.vad)
         self._fast.apply_config(cfg.voice)
         fp = cfg.voice.fastpath
         self._gate.apply(cfg.voice.wake_word_policy, fp.addressed_window_s, fp.window_max_s)
+
+    @property
+    def config(self) -> RoboEmotConfig:
+        """The config of the last ``apply_config``: the live values for the voice wiring."""
+        return self._cfg
 
     # ---- lifecycle
 

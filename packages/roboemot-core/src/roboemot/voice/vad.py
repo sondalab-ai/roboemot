@@ -176,24 +176,42 @@ class Endpointer:
         self._rate = backend.rate_hz
         self._size = backend.frame_samples
         self._frame_s = self._size / self._rate
-        frame_ms = self._frame_s * MS_PER_S
-        self._on = config.threshold
-        self._off = max(config.threshold - config.off_margin, MIN_OFF_THRESHOLD)
-        self._min_frames = max(1, math.ceil(config.min_speech_ms / frame_ms))
-        self._end_frames = max(1, math.ceil(config.end_silence_ms / frame_ms))
-        self._max_s = config.max_utterance_s
-        pre_frames = math.ceil(config.pre_roll_ms / frame_ms)
-        self._ring: deque[tuple[float, np.ndarray]] = deque(maxlen=pre_frames + self._min_frames)
+        self._frame_ms = self._frame_s * MS_PER_S
         self._pending = np.empty(0, dtype=np.float32)
         self._pending_stamp = 0.0
         # Report-only watch (SPEC 12A): feed() runs on the listener thread, snapshot() on the
-        # report thread; the lock covers the counters and the deque of finished bursts.
-        self._watch = min(config.watch_prob, config.threshold)
-        self._frame_ms = frame_ms
+        # report thread; the lock covers the counters, the deque of finished bursts and the
+        # config a hot reload leaves for the next feed().
+        self._watch_prob = config.watch_prob
         self._watch_lock = threading.Lock()
         self._counts = dict.fromkeys(WATCH_COUNTS, 0)
         self._bursts: deque[tuple[float, float, bool]] = deque(maxlen=config.watch_window)
+        self._next_config: VadConfig | None = None
+        self._ring: deque[tuple[float, np.ndarray]] = deque()
+        self._run = 0
+        self._configure(config)
         self.reset()
+
+    def apply_config(self, config: VadConfig) -> None:
+        """Hot reload (SPEC 11A), from any thread: the new values apply from the next chunk fed,
+        on the feeding thread, and an utterance in progress goes on. ``watch_prob``,
+        ``watch_window`` and ``threads`` keep their start-up values (restart fields)."""
+        with self._watch_lock:
+            self._next_config = config
+
+    def _configure(self, config: VadConfig) -> None:
+        """Derive the frame counts and thresholds; the pre-roll ring keeps its newest frames.
+        A run being counted is capped so the frame that confirms it still finds its first
+        frame in the ring, wherever the new sizes put it."""
+        self._on = config.threshold
+        self._off = max(config.threshold - config.off_margin, MIN_OFF_THRESHOLD)
+        self._min_frames = max(1, math.ceil(config.min_speech_ms / self._frame_ms))
+        self._end_frames = max(1, math.ceil(config.end_silence_ms / self._frame_ms))
+        self._max_s = config.max_utterance_s
+        self._watch = min(self._watch_prob, config.threshold)
+        size = math.ceil(config.pre_roll_ms / self._frame_ms) + self._min_frames
+        self._ring = deque(self._ring, maxlen=size)
+        self._run = min(self._run, size - 1)
 
     @property
     def frame_s(self) -> float:
@@ -226,6 +244,10 @@ class Endpointer:
         """Add a chunk (mono float32, any length) starting at ``stamp``; returns new events."""
         if samples.dtype != np.float32 or samples.ndim != 1:
             raise ValueError(f"expected mono float32 samples, got {samples.dtype} {samples.shape}")
+        with self._watch_lock:
+            config, self._next_config = self._next_config, None
+        if config is not None:
+            self._configure(config)
         if len(self._pending) == 0:
             self._pending_stamp = stamp
         buf = np.concatenate([self._pending, samples]) if len(self._pending) else samples.copy()
