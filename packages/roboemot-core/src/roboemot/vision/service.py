@@ -199,7 +199,7 @@ class Perception:
         if self.registry is not None:
             self.registry.identity = cfg.identity
         if self.pipeline is not None:
-            self.pipeline.apply_config(cfg.vision, cfg.identity)
+            self.pipeline.apply_config(cfg.vision, cfg.identity, cfg.world)
 
     def vision_snapshot(self) -> dict[str, Any]:
         """The ``roboemot.vision`` report section."""
