@@ -7,6 +7,7 @@ import json
 
 import httpx
 import pytest
+from openai import APIStatusError
 from roboemot.config.schema import LLMCheckConfig, LLMRoute, SafetyConfig
 from roboemot.llm import Router
 from roboemot.llm.conformance import (
@@ -14,6 +15,7 @@ from roboemot.llm.conformance import (
     PASS,
     SKIP,
     RouteBudgetExhausted,
+    _why,
     check_route,
     italian_ratio,
 )
@@ -186,6 +188,23 @@ async def test_http_error_path_leaves_out_the_query():
     r = LLMRoute(name="c", base_url="https://api.example.com/v1?key=k1", model="m")
     report = await run(Fake(status=404), r)
     assert "k1" not in json.dumps(report.to_dict())
+
+
+@pytest.mark.parametrize(
+    ("url", "shown"),
+    [
+        ("https://api.example.com/v1/chat/completions", " at /v1/chat/completions"),
+        ("https://api.example.com/tok_s3cr3t/x", ""),  # a redirect elsewhere
+        ("https://api.example.com/v1x/chat/completions", ""),  # not under /v1/
+        ("https://api.example.com/v1/%3Cb%3E", ""),  # not plain characters
+        ("https://api.example.com/v1/" + "a" * 200, ""),  # too long
+    ],
+)
+def test_http_error_path_only_under_the_route_base_path(url, shown):
+    request = httpx.Request("POST", url)
+    exc = APIStatusError("x", response=httpx.Response(404, request=request), body=None)
+    r = LLMRoute(name="c", base_url="https://api.example.com/v1", model="m")
+    assert _why(exc, r) == f"HTTP 404{shown}"
 
 
 async def test_unreachable_route_skips_the_tool_check():
