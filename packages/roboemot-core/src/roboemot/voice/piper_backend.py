@@ -53,6 +53,11 @@ RATE_RANGE_HZ = (8000, 192000)  # sane voice sample rates
 BYTES_PER_SAMPLE = 2
 MS_PER_S = 1000.0
 _DEAD, _CANCELLED, _PROTOCOL = b"-", b"~", b"!"  # queue markers, never sent by a worker
+RESTART_FIELDS = frozenset(
+    name
+    for name, info in PiperConfig.model_fields.items()
+    if (info.json_schema_extra or {}).get("restart")
+)
 
 
 class _ProtocolError(Exception):
@@ -191,6 +196,12 @@ class PiperBackend:
         self._failures: dict[str, int] = {}
         self._retry_at: dict[str, float] = {}
         self.restarts = 0
+
+    def apply_config(self, voice: VoiceConfig) -> None:
+        """Hot reload (SPEC 11A): ``voice.piper``'s timeouts and restart backoff apply from the
+        next request or worker start; its restart fields (``python``, ``chunk_ms``) stay."""
+        keep = {name: getattr(self.config, name) for name in RESTART_FIELDS}
+        self.config = voice.piper.model_copy(update=keep)
 
     # ----------------------------------------------------------------- availability
 

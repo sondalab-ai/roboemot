@@ -599,3 +599,18 @@ def test_stop_between_thread_creation_and_start_does_not_join_an_unstarted_threa
     rig.listener.start()
     rig.listener.stop()
     assert rig.listener._thread is None
+
+
+def test_a_listener_reload_reaches_the_endpointer():
+    rig = Rig()
+    vad = rig.cfg.voice.vad
+    quiet = 0.0566  # probability 0.4 with the energy VAD
+    assert vad.threshold > 0.4
+    rig.feed(voice(amp=quiet, seconds=0.5))
+    assert rig.listener.snapshot()["vad"]["starts"] == 0
+    lower = vad.model_copy(update={"threshold": 0.35})
+    rig.listener.apply_config(
+        rig.cfg.model_copy(update={"voice": rig.cfg.voice.model_copy(update={"vad": lower})})
+    )
+    rig.feed(voice(amp=quiet, seconds=0.5))
+    assert rig.listener.snapshot()["vad"]["starts"] == 1

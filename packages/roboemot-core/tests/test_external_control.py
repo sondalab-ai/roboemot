@@ -224,7 +224,8 @@ def test_a_real_drift_beyond_the_band_restarts_the_count():
     assert not loop.external
 
 
-def test_calibration_figures_are_kept_and_reset_on_reload():
+def _calibrated_after_an_event() -> tuple[MotionLoop, dict]:
+    """A loop that saw jitter, then one external move: peaks and a last event are set."""
     loop, driver = make()
     driver.jitter = 0.001
     t = drive(loop, driver, 0.0, 2.0)
@@ -242,9 +243,29 @@ def test_calibration_figures_are_kept_and_reset_on_reload():
     assert event["error"] > event["tolerance"]
     assert snap["external_peak_diverged_s"] >= CFG.motion.external.confirm_s
     assert snap["external_peak_speed_rad_s"] > 0.5  # the move at 1 rad/s, seen while yielding
+    return loop, snap
+
+
+def test_an_unrelated_reload_keeps_the_peaks_and_the_last_event():
+    loop, before = _calibrated_after_an_event()
+    unrelated = CFG.model_copy(
+        update={"motion": CFG.motion.model_copy(update={"platform_move_grace_s": GRACE_S + 1})}
+    )
+    loop.apply_config(unrelated)
     loop.apply_config(CFG)
+    assert loop.snapshot() == before
+
+
+def test_a_new_external_tolerance_resets_the_peaks_and_keeps_the_last_event():
+    loop, before = _calibrated_after_an_event()
+    external = CFG.motion.external.model_copy(update={"tolerance_rad": 0.2})
+    loop.apply_config(
+        CFG.model_copy(update={"motion": CFG.motion.model_copy(update={"external": external})})
+    )
     snap = loop.snapshot()
-    assert snap["external_peak_err_rad"] == 0.0 and snap["external_last_event"] is None
+    assert snap["external_last_event"] == before["external_last_event"] is not None
+    assert snap["external_events"] == before["external_events"] == 1
+    assert snap["external_peak_err_rad"] == 0.0 and snap["external_peak_err_latest_rad"] == 0.0
     assert snap["external_peak_diverged_s"] == 0.0 and snap["external_peak_speed_rad_s"] == 0.0
 
 

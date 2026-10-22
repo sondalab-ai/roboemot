@@ -78,6 +78,7 @@ python scripts/install_on_robot.py --dry-run   # read-only checks against the re
 python scripts/install_on_robot.py --uninstall --dry-run   # what uninstall would undo
 python scripts/install_on_robot.py --no-vision --no-voice --no-clear-caches   # skip the vision extra and weights; leave voice off (no voice.enabled, Piper and models default off); keep ~/.cache/uv (default: ask)
 python scripts/run_on_robot.py   # start RoboEmot on the robot and print the web UI address
+python scripts/run_on_robot.py --restart   # restart a running RoboEmot via the daemon (asks; -y skips; the head moves)
 python scripts/robot_ssh.py [--host H] [--user U]   # shell on the robot (mDNS pick); `-- cmd` runs one command
 roboemot secrets set cloud_key           # API key for ${secret:cloud_key} (read from the prompt/stdin); list/remove too
 python scripts/robot_ssh.py --copy-id    # install your SSH key; --debug: roboemot debug --json built on the robot; --dry-run prints the ssh line (discovery still runs, no exec)

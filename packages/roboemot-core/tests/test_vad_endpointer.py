@@ -365,3 +365,84 @@ def test_watch_settings_have_defaults_and_ranges():
     ]:
         with pytest.raises(ValidationError):
             model(**{field: bad})
+
+
+def feed_probs(ep, probs, start=0):
+    """Feed one silent frame per probability of ``ep``'s ScriptedVAD from frame ``start``;
+    returns the events and the next frame index."""
+    ep._vad.probs.extend(probs)
+    events = []
+    for i in range(start, start + len(probs)):
+        events += ep.feed(np.zeros(FRAME, np.float32), T0 + i * FRAME_S)
+    return events, start + len(probs)
+
+
+def test_a_hot_reload_changes_threshold_and_min_speech_ms_of_a_running_endpointer():
+    ep = Endpointer(ScriptedVAD([]), cfg(threshold=0.5, min_speech_ms=100))  # 5 frames
+    events, n = feed_probs(ep, [0.4] * 8)
+    assert kinds(events, SpeechStart) == []
+    ep.apply_config(cfg(threshold=0.35, min_speech_ms=40))  # 2 frames
+    events, n = feed_probs(ep, [0.0, 0.4, 0.4], n)
+    starts = kinds(events, SpeechStart)
+    assert len(starts) == 1 and starts[0].stamp == pytest.approx(T0 + 9 * FRAME_S)
+
+
+def test_a_reload_mid_utterance_keeps_it_and_applies_the_new_end_silence():
+    ep = Endpointer(ScriptedVAD([]), cfg(end_silence_ms=200))  # 10 frames
+    events, n = feed_probs(ep, [0.9] * 6 + [0.0] * 3)
+    assert ep.in_speech
+    ep.apply_config(cfg(end_silence_ms=100))  # 5 frames: 2 more silent frames end it
+    events, n = feed_probs(ep, [0.0, 0.0], n)
+    ends = kinds(events, SpeechEnd)
+    assert len(ends) == 1 and ends[0].reason == "silence"
+    assert ends[0].audio_stamp == pytest.approx(T0) and len(ends[0].audio) == n * FRAME
+
+
+def test_a_reload_while_a_run_is_counting_keeps_the_true_start_stamp():
+    for min_ms in (40, 200):  # shrink to 2 frames, grow to 10
+        ep = Endpointer(ScriptedVAD([]), cfg(min_speech_ms=100))
+        events, n = feed_probs(ep, [0.0, 0.9, 0.9, 0.9])
+        ep.apply_config(cfg(min_speech_ms=min_ms))
+        events, n = feed_probs(ep, [0.9] * 8, n)
+        starts = kinds(events, SpeechStart)
+        assert len(starts) == 1 and starts[0].stamp == pytest.approx(T0 + FRAME_S)
+
+
+def test_a_reload_with_no_pre_roll_and_a_shorter_run_never_misplaces_the_start():
+    ep = Endpointer(ScriptedVAD([]), cfg(pre_roll_ms=0, min_speech_ms=100))
+    events, n = feed_probs(ep, [0.9] * 4)
+    ep.apply_config(cfg(pre_roll_ms=0, min_speech_ms=40))
+    events, n = feed_probs(ep, [0.9], n)
+    start = kinds(events, SpeechStart)[0]
+    assert start.pre_roll_stamp <= start.stamp <= T0 + 4 * FRAME_S
+    assert start.pre_roll_stamp == pytest.approx(start.stamp)
+
+
+def test_a_reload_moves_the_watch_level_with_the_threshold_only():
+    ep = Endpointer(ScriptedVAD([]), cfg(threshold=0.5, watch_prob=0.9, watch_window=10))
+    ep.apply_config(cfg(threshold=0.35, watch_prob=0.1, watch_window=50))
+    feed_probs(ep, [0.0])
+    snap = ep.snapshot()
+    assert snap["watch_prob"] == 0.35 and snap["window"] == 10  # restart-only fields stay
+
+
+def test_a_shorter_min_speech_starts_a_run_that_already_qualifies_without_more_speech():
+    ep = Endpointer(ScriptedVAD([]), cfg(min_speech_ms=200))  # 10 frames
+    events, n = feed_probs(ep, [0.0] + [0.9] * 6)
+    ep.apply_config(cfg(min_speech_ms=40))  # 2 frames: the run of 6 already qualifies
+    events, n = feed_probs(ep, [0.0], n)
+    starts = kinds(events, SpeechStart)
+    assert len(starts) == 1 and starts[0].stamp == pytest.approx(T0 + FRAME_S)
+    assert ep.in_speech
+
+
+def test_a_reload_after_a_max_length_cut_keeps_the_continued_utterance():
+    ep = Endpointer(ScriptedVAD([]), cfg(max_utterance_s=1))
+    events, n = feed_probs(ep, [0.9] * 55)  # cut at 1 s, the speech goes on in a new utterance
+    assert kinds(events, SpeechEnd)[0].reason == "max_length" and ep.in_speech
+    ep.apply_config(cfg(max_utterance_s=1, min_speech_ms=200, pre_roll_ms=0, end_silence_ms=100))
+    events, n = feed_probs(ep, [0.9] * 3 + [0.0] * 5, n)
+    ends = kinds(events, SpeechEnd)
+    assert kinds(events, SpeechStart) == [] and len(ends) == 1 and ends[0].reason == "silence"
+    assert ends[0].start_stamp == pytest.approx(T0 + 49 * FRAME_S)
+    assert len(ends[0].audio) == (n - 49) * FRAME

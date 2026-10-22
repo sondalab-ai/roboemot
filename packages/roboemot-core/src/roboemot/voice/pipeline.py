@@ -37,6 +37,7 @@ from roboemot.world.types import UNKNOWN_IDENTITY
 log = logging.getLogger(__name__)
 
 LANGUAGE_PREFERENCE = "language"
+MS_PER_S = 1000.0
 
 
 def build_listener(
@@ -77,7 +78,8 @@ def build_listener(
         return None
     names = names if names is not None else RobotName()
     names.attach_vocabulary(asr.missing_words)
-    max_age_s = cfg.voice.fastpath.doa_max_age_ms / 1000.0
+    # The lookups below run after start-up: they read ``listener.config``, which the hot reload
+    # keeps current, never the start-up ``cfg``.
 
     def attended_person() -> Entry | None:
         """The world entry of the person the robot is attending to, or None."""
@@ -104,7 +106,7 @@ def build_listener(
         # The policy default (SPEC 8 stage 2): any enrolled person in view drops the wake-word
         # requirement for every voice, including a stranger's or a television's. Kept as
         # specified; see the voice.wake_word_policy help for the consequence.
-        stale = cfg.attention.stale_s
+        stale = listener.config.attention.stale_s
         return any(
             e.kind == "person"
             and e.identity not in ("", UNKNOWN_IDENTITY)
@@ -116,7 +118,9 @@ def build_listener(
         cfg.voice,
         emit,
         selector,
-        bearing=lambda now: bearing.get(now, max_age_s),
+        bearing=lambda now: bearing.get(
+            now, listener.config.voice.fastpath.doa_max_age_ms / MS_PER_S
+        ),
         target_entry=lambda: person.entry_id if (person := attended_person()) else None,
         names=names,
         on_answer=on_answer,
@@ -127,7 +131,7 @@ def build_listener(
         asr,
         reference,
         language=lambda: resolve_language(
-            asr.languages, speaker_language(), cfg.conversation.language
+            asr.languages, speaker_language(), listener.config.conversation.language
         ),
         emit=emit,
         keyword_background=True,

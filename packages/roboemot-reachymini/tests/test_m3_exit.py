@@ -181,6 +181,9 @@ class DelayedTTS:
     async def warm(self, language: str, voice: VoiceConfig) -> None:
         pass
 
+    def apply_config(self, voice: VoiceConfig) -> None:
+        pass
+
     async def aclose(self) -> None:
         pass
 
