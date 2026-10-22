@@ -378,3 +378,32 @@ test("route edit: a failing step stops the rest, names what was saved, and a ret
   await answerPin(page);
   assert.deepEqual(rec.order.map((s) => s.label), ["unbind", "base_url", "base_url", "model"], "no step is sent twice once done");
 });
+
+test("route edit: moving a keyed LAN route to the cloud sets it to cloud before anything else (review ZG)", async () => {
+  // A local route refuses a new base_url while it is still local: the locality must go first, and a
+  // refusal there must leave the key bound (nothing unbound yet).
+  const rec = editRecorder();
+  const LOCAL = { ...ADDED, name: "box", base_url: "http://192.168.1.20:1234/v1", locality: "local" };
+  const page = await formsPage([LOCAL], rec.routes);
+  sel(page, "route-box-url").value = "https://api.cloud.example/v1";
+  sel(page, "route-box-key").value = "spare";
+  sel(page, "route-box-locality").value = "cloud";
+  submit(page.window, sel(page, "route-box-url").closest("form"));
+  await settle();
+  await answerPin(page);
+  assert.deepEqual(rec.order.map((s) => s.label), ["locality", "unbind", "base_url", "bind"]);
+  assert.equal(rec.order[0].body.value, "cloud");
+});
+
+test("route edit: a refused locality step unbinds nothing", async () => {
+  const rec = editRecorder({ locality: 1 });
+  const LOCAL = { ...ADDED, name: "box", base_url: "http://192.168.1.20:1234/v1", locality: "local" };
+  const page = await formsPage([LOCAL], rec.routes);
+  sel(page, "route-box-url").value = "https://api.cloud.example/v1";
+  sel(page, "route-box-key").value = "";
+  sel(page, "route-box-locality").value = "cloud";
+  submit(page.window, sel(page, "route-box-url").closest("form"));
+  await settle();
+  await answerPin(page);
+  assert.deepEqual(rec.order.map((s) => s.label), ["locality"]);
+});

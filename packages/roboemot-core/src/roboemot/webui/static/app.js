@@ -655,8 +655,9 @@ function insecureHost(origin) {
 // with a key sends it to the host of its URL: the dialog names that host and the call carries it as
 // the acknowledgement (the server names the one it expects when it differs).
 // An edit is several calls (R3 SF4), ordered so a key never reaches a host the owner did not mean:
-// a key that changes is unbound first when it goes away or the route moves, then the URL moves (with
-// no key bound, no acknowledgement), then the new key is bound to the new host, then the rest. The
+// a locality change to cloud first (stricter; a local route refuses a new URL), then a key that
+// changes is unbound when it goes away or the route moves, then the URL moves (with no key bound,
+// no acknowledgement), then the new key is bound to the new host, then the rest. The
 // first failure stops the rest; the error names what was already saved, and a retry resumes there.
 async function saveRoute(route, v) {
   let ack = null;
@@ -696,10 +697,13 @@ async function saveRoute(route, v) {
     const path = (f) => "llm_routes." + route.name + "." + f;
     const set = (f, value) => (pin) => mapAck(() => api("POST", "/api/settings", { path: path(f), value, pin,
       ...(f === "base_url" && keyAtMove && (ack || routeOrigin(value)) ? { ack_endpoint: ack || routeOrigin(value) } : {}) }));
+    // To cloud is stricter and goes first: a local route refuses a new URL while it is local.
+    const toCloud = v.locality !== route.locality && v.locality === "cloud";
+    if (toCloud) steps.push([t("route_locality"), set("locality", v.locality)]);
     if (unbind) steps.push([t("route_key"), bindKey(null)]);
     if (urlChanged) steps.push([t("route_url"), set("base_url", v.base_url)]);
     if (keyChanged && keyed) steps.push([t("route_key"), bindKey(v.key)]);
-    if (v.locality !== route.locality) steps.push([t("route_locality"), set("locality", v.locality)]);
+    if (v.locality !== route.locality && !toCloud) steps.push([t("route_locality"), set("locality", v.locality)]);
     if (v.model !== route.model) steps.push([t("route_model"), set("model", v.model)]);
     if (!steps.length) { notice(t("settings_unchanged")); return; }
   }
