@@ -1650,6 +1650,8 @@ def test_daemon_api_against_simulator():
     assert status["state"] == "running" and status["simulation_enabled"]
     assert isinstance(real.installed_apps(), list)
     assert real.current_app() is None
+    lock = real.app_lock_status()  # R4 T3: the shape start_blocker reads, not only the fake's
+    assert lock is None or lock["state"] in ("free", "local_app", "remote_session")
     real.wake_up()
     assert real.startup_app() is None
     with pytest.raises(DaemonError, match="HTTP 400"):
