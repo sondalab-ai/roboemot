@@ -180,7 +180,9 @@ def phase_during_finish(final_text="ciao", fail=False):
     try:
         r.say(1.0)
     except RuntimeError:
+        after = phase.snapshot()["phase"]  # before the loop's own _abort could reset it
         r.listener._abort()  # what the listener's loop does with a chunk that raised
+        return during, after, r
     return during, phase.snapshot()["phase"], r
 
 
