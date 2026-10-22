@@ -10,6 +10,13 @@ synthesis in flight and drops the queue; an epoch counter makes any chunk that w
 way fall on the floor, so nothing plays after ``stop`` returns.
 
 The bus gets ``speech.say`` with ids, lengths, language and mood, never the text (SPEC 12).
+
+For the debug report (SPEC 12A) the output measures, for any backend, the real-time factor of each
+chunk (time waited for it since the previous push, or since the request, over its audio duration)
+and counts underruns: a push of a sentence that already pushed audio, arriving after the sink's
+``playing_until`` (the speaker ran dry in the middle of a sentence), with the gap in ms. Only here
+is it known that a sentence has more audio to come; the gap before a sentence's first audio (and
+its pause) is not counted. Numbers only.
 """
 
 from __future__ import annotations
@@ -31,8 +38,9 @@ from .. import shutdown
 from ..bus import Bus
 from ..config.schema import RegisterParams, RoboEmotConfig, StateEffects
 from ..persona import effects
+from ..stats import P50, P90, summarise
 from .prosody import Delivery, compose_delivery
-from .tts import TTSBackend, TTSError
+from .tts import AudioChunk, TTSBackend, TTSError
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +49,7 @@ LATENCY_WINDOW = 20
 PLAYED_WINDOW = 64  # sentences whose playback start is remembered, for ``played``
 READY_TIMEOUT_S = 5.0
 JOIN_TIMEOUT_S = 2.0
+RTF_LEVELS = {"p50": P50, "p90": P90}
 
 
 QUESTION_MARKS = ("?", "？")
@@ -117,6 +126,11 @@ class SpeechOutput:
         self._unplayed: set[int] = set()
         self._ended: collections.OrderedDict[int, float] = collections.OrderedDict()
         self._question_end: float | None = None  # end of the last spoken sentence, if a question
+        self._rtf: collections.deque[float] = collections.deque(maxlen=config.voice.report_window)
+        self._underruns = 0
+        self._underrun_ms = 0.0
+        self._underrun_sentences = 0
+        self._underrun_job = 0  # last sentence counted in _underrun_sentences
         self.sentences_spoken = 0
         self.sentences_dropped = 0
         self.failures = 0
@@ -298,6 +312,12 @@ class SpeechOutput:
         """Counts and timings for the debug report; never text."""
         with self._lock:
             lat, queued = list(self._latencies), len(self._jobs)
+            rtf = list(self._rtf)
+            underruns = {
+                "underruns": self._underruns,
+                "underrun_ms_total": self._underrun_ms,
+                "underrun_sentences": self._underrun_sentences,
+            }
         return {
             "queued": queued,
             "spoken": self.sentences_spoken,
@@ -306,6 +326,8 @@ class SpeechOutput:
             "first_audio_ms_last": lat[-1] if lat else None,
             "first_audio_ms_max": max(lat) if lat else None,
             "backend": self.backend.name,
+            "tts_rtf": summarise(rtf, RTF_LEVELS),
+            **underruns,
         }
 
     # ----------------------------------------------------------------- loop thread
@@ -348,7 +370,10 @@ class SpeechOutput:
         with self._lock:
             if job.epoch != self._epoch:
                 return False
-            start = self._queue_end()
+            now, until = self.clock(), self.sink.playing_until()
+            start = max(now, until)
+            if speech and job.id in self._audible and now > until:
+                self._count_underrun(job, now - until)
             self.sink.push_audio_sample(samples, rate_hz)
             if speech and job.id not in self._audible:
                 self._audible[job.id] = start
@@ -361,11 +386,27 @@ class SpeechOutput:
                     self._ended.popitem(last=False)
             return True
 
+    def _count_underrun(self, job: _Job, gap_s: float) -> None:
+        """A push of ``job`` found the sink dry for ``gap_s``; the lock is held."""
+        self._underruns += 1
+        self._underrun_ms += gap_s * MS_PER_S
+        if self._underrun_job != job.id:
+            self._underrun_job = job.id
+            self._underrun_sentences += 1
+
+    def _note_rtf(self, chunk: AudioChunk, waited_s: float) -> None:
+        """Real-time factor of one chunk: the time waited for it over its audio duration."""
+        if chunk.rate_hz <= 0 or chunk.samples.size == 0:
+            return
+        with self._lock:
+            self._rtf.append(waited_s * chunk.rate_hz / chunk.samples.size)
+
     async def _speak(self, job: _Job) -> None:
         cfg, first = self.config, True
         try:
             if self._stale(job):
                 return
+            asked = self.clock()
             async for chunk in self.backend.synthesize(
                 job.text,
                 job.delivery,
@@ -373,6 +414,7 @@ class SpeechOutput:
                 voice=cfg.voice,
                 minor_present=self._minor(),
             ):
+                self._note_rtf(chunk, self.clock() - asked)
                 if self._stale(job):
                     return
                 if first:
@@ -390,6 +432,7 @@ class SpeechOutput:
                 self._last_rate_hz = chunk.rate_hz
                 if not self._push(job, chunk.samples, chunk.rate_hz, speech=True):
                     return
+                asked = self.clock()
             self.sentences_spoken += 1
         except asyncio.CancelledError:
             raise

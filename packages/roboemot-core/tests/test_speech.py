@@ -534,3 +534,85 @@ def test_dropped_sentences_neither_replace_nor_extend_the_question_end(make):
     out.stop()  # drops the queue (barge-in, the stop keyword)
     after = out.question_end()
     assert after is not None and after <= before and after <= time.monotonic()
+
+
+# ------------------------------------------------- report counters (SPEC 12A)
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class ClockedSink(FakeSink):
+    """Timeline on a fake clock, like the Reachy speaker's ``playing_until``."""
+
+    def __init__(self, clock: FakeClock) -> None:
+        super().__init__()
+        self.clock, self.until = clock, 0.0
+
+    def push_audio_sample(self, samples, rate_hz):
+        self.until = max(self.until, self.clock()) + samples.size / rate_hz
+        return super().push_audio_sample(samples, rate_hz)
+
+    def playing_until(self):
+        return self.until
+
+
+class ClockedBackend(FakeBackend):
+    """Request n yields one 100 ms chunk per value of ``synth_s[n]``, each taking that long to
+    synthesize on the fake clock."""
+
+    def __init__(self, clock: FakeClock, synth_s: list[list[float]]) -> None:
+        super().__init__()
+        self.clock, self.synth_s = clock, list(synth_s)
+
+    async def synthesize(self, text, delivery, *, language, voice, minor_present=False):
+        for took in self.synth_s.pop(0):
+            self.clock.now += took
+            yield AudioChunk(np.ones(RATE // 10, np.float32), RATE)
+
+
+def test_speech_reports_tts_rtf_and_underruns_within_a_sentence(make):
+    clock = FakeClock()
+    sink = ClockedSink(clock)
+    # 100 ms chunks: the third takes 250 ms, so the speaker runs dry for 100 ms before it
+    out = make(ClockedBackend(clock, [[0.05, 0.05, 0.25, 0.05]]), sink=sink, clock=clock)
+    say(out)
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    snap = out.snapshot()
+    rtf = snap["tts_rtf"]
+    assert rtf["count"] == 4
+    assert rtf["p50"] == pytest.approx(0.5) and rtf["max"] == pytest.approx(2.5)
+    assert snap["underruns"] == 1 and snap["underrun_sentences"] == 1
+    assert snap["underrun_ms_total"] == pytest.approx(100.0)
+    import json
+
+    json.dumps(snap)
+
+
+def test_the_gap_before_a_sentence_and_its_pause_is_not_an_underrun(make):
+    clock = FakeClock()
+    sink = ClockedSink(clock)
+    # two one-chunk sentences of one answer; the second arrives long after the first ended
+    out = make(ClockedBackend(clock, [[0.05], [0.5]]), sink=sink, clock=clock)
+    u = out.new_utterance()
+    say(out, "Uno.", utterance=u)
+    say(out, "Due.", utterance=u)
+    assert wait_for(lambda: out.sentences_spoken == 2)
+    snap = out.snapshot()
+    assert snap["underruns"] == 0 and snap["underrun_ms_total"] == 0.0
+    assert snap["tts_rtf"]["count"] == 2
+
+
+def test_report_window_bounds_the_rtf_summary(make):
+    clock = FakeClock()
+    cfg = RoboEmotConfig(voice={"report_window": 10})
+    out = make(ClockedBackend(clock, [[0.01] * 15]), cfg=cfg, sink=ClockedSink(clock), clock=clock)
+    say(out)
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    assert out.snapshot()["tts_rtf"]["count"] == 10
+    assert RoboEmotConfig().voice.report_window == 200

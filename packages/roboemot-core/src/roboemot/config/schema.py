@@ -2393,6 +2393,14 @@ class VoiceConfig(Strict):
     queue_max_sentences: int = param(
         16, "Sentences waiting for synthesis; a further one is dropped", ge=1, le=256
     )
+    report_window: int = param(
+        200,
+        "Report only: TTS chunks kept for the real-time factor summary (synthesis time over "
+        "audio duration)",
+        ge=10,
+        le=10000,
+        restart=True,
+    )
     piper: PiperConfig = param({}, "Piper subprocess backend", restart=True)
     openai_speech: OpenAISpeechConfig = param({}, "Remote speech backend")
     piper_noise_scale: tuple[float, float] = param(
