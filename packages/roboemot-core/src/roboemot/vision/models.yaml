@@ -9,9 +9,10 @@
 # download. Licence fields are the weight licences checked in docs/spikes/2026-10-m1-models.md;
 # the ONNX conversion repositories (Hugging Face onnx-community, Xenova) carry no licence tag
 # of their own, and the licence of the training data was not verified.
-# Files with `quantize` are not downloaded: `roboemot models fetch` produces them from the
-# verified FP32 `source` file with ONNX Runtime dynamic quantization (SPEC 5, 13); their digest
-# depends on the ORT version, so it is recorded in the `.verified` marker, not pinned here.
+# Files with `quantize` (none since the FairFace INT8 pair was retired) are not downloaded:
+# `roboemot models fetch` produces them from the verified FP32 `source` file with ONNX Runtime
+# dynamic quantization (SPEC 5, 13); their digest depends on the ORT version, so it is recorded
+# in the `.verified` marker, not pinned here.
 models:
   - name: yunet
     role: face_detector

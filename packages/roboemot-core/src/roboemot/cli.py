@@ -280,12 +280,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     mod.add_argument("--voice", action="store_true", help="fetch every voice model (about 0.3 GB)")
     mod.add_argument(
-        "--requantize", action="store_true", help="fetch: rebuild INT8 files from the FP32 sources"
+        "--requantize",
+        action="store_true",
+        help="fetch: rebuild quantized files from their sources (none ship today)",
     )
     mod.add_argument(
         "--sources",
         action="store_true",
-        help="prune: delete FP32 files whose INT8 files are verified",
+        help="prune: also delete source files whose quantized files are verified (none ship today)",
     )
     mod.add_argument(
         "--cache-dir", help="models folder (default: vision.models_dir, else the app data folder)"

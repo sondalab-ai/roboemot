@@ -13,13 +13,16 @@ into the models folder only when asked (``roboemot models fetch``), never at imp
   already holds the right files (for example the spike cache) writes the markers after hashing.
 - Folders created by the fetcher are private (0o700), markers 0o600.
 
-- Derived files (INT8 FairFace, SPEC 5, 13) are not downloaded: ``fetch`` first downloads and
+- Derived files (``quantize``; none in the shipped manifests since the FairFace INT8 pair was
+  retired, SPEC 5, 13) are not downloaded: ``fetch`` first downloads and
   verifies the FP32 source, then quantizes it with ONNX Runtime ``quantize_dynamic`` (the same
   call and settings as ``scripts/bench/quantize.py``; needs the ``vision`` extra). Their marker
   records the source sha256, the weight type, the ORT version and the produced file's sha256,
   size and mtime, and stands alone: ``check_file`` accepts a produced file without its source
   present, and ``prune_sources`` (``roboemot models prune --sources``) deletes the FP32 sources
-  once every file derived from them is verified (about 690 MB freed; only about 174 MB stay).
+  once every file derived from them is verified.
+- Retired files (``retired`` in the manifest: files of replaced models, such as the FairFace
+  pair) are deleted by ``prune_retired`` (``roboemot models prune``), and nothing else is.
 - ORT version policy: the quantized ops are stable across ONNX Runtime versions, so a file made
   by another ORT version still loads. ``status`` reports it as ``stale-ort`` and ``fetch``
   re-quantizes only on ``requantize=True`` (``--requantize``), which needs the FP32 source again;
