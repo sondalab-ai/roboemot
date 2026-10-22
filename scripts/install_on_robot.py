@@ -8,6 +8,7 @@ model's specifics come from the installer its platform package registers (Reachy
     python scripts/install_on_robot.py                         # interactive wizard
     python scripts/install_on_robot.py --dry-run               # read-only checks
     python scripts/install_on_robot.py --host 192.168.1.20 --dev --start --yes
+                                    # --yes keeps ~/.cache/uv; add --clear-caches to free it
     python scripts/install_on_robot.py --uninstall --dry-run   # what uninstall would undo
     python scripts/install_on_robot.py --uninstall             # leave the robot as it was
 

@@ -141,7 +141,9 @@ What goes onto the robot besides the two wheels:
 - **Disk.** The CM4 image has about 0.5 GB free (97% used on the robot of the first run) because
   the robot image's own setup leaves a 5.6 GB uv download cache in `~/.cache/uv`. The installer
   shows its size and asks whether to clear it before the free-space check (default yes on a terminal; an unattended run clears it only with `--clear-caches`, not with `-y` alone; `--no-clear-caches` keeps it).
-  uv downloads again whatever it needs; uninstall cannot give the cache back. A cache that a
+  uv downloads again whatever it needs; uninstall cannot give the cache back. The dry run says
+  exactly what the real run will do with it, and a failed free-space check names the kept cache
+  and `--clear-caches`. A cache that a
   venv under `/venvs` links into is kept. The space the install needs is worked out from what it
   installs (the app, the voice and vision extras, and a new apps venv), and a rerun of the models
   step counts only the files not yet downloaded. Other caches
@@ -151,7 +153,9 @@ The installer leaves the robot as it found it. It keeps the package versions alr
 shared apps venv (it asks before changing one), and it writes no pip cache. It records what it
 added or replaced in `/venvs/.roboemot-install.json`. `--uninstall` then removes exactly that:
 the app, the dependencies it added (unless another app now needs them), the original versions
-of anything it replaced, and the startup-app setting if it still names RoboEmot. It removes the
+of anything it replaced, and the startup-app setting if it still names RoboEmot. It also removes
+the app config it wrote (`~/.local/share/roboemot/app.yaml`) whole, including settings saved
+from the web UI, and says so (also in the dry run). It removes the
 apps venv too when it created it and no other app or package has moved in since. It verifies
 the result before deleting the record. The installer is robot-agnostic (`roboemot.install`);
 each robot package plugs in its own part (SPEC 4A, Installer).
