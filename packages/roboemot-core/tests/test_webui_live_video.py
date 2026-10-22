@@ -88,6 +88,7 @@ def enable(c):
 
 def feed(served):
     served.runner.submit(Frame(np.full((480, 640, 3), 90, np.uint8), 1.0))
+    served.runner.run_pending()
 
 
 def test_it_needs_a_session_like_the_other_page_apis(served):

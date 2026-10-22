@@ -4,7 +4,8 @@ processed frame as (pixel box, owner id or None)."""
 from __future__ import annotations
 
 import numpy as np
-from test_vision import CONSENT, FACE_MODEL, axis, face, rig, run
+from roboemot.vision.types import Frame
+from test_vision import CIRCADIAN, CONSENT, FACE_MODEL, axis, face, image, rig, run
 
 
 def test_no_faces_gives_an_empty_overlay(tmp_path):
@@ -35,3 +36,19 @@ def test_clear_overlay_forgets_the_tracks(tmp_path):
     assert pipe.face_overlay()
     pipe.clear_overlay()
     assert pipe.face_overlay() == []
+
+
+def test_the_preview_overlay_is_only_for_frames_faces_were_detected_on(tmp_path):
+    _, _, pipe, _, _ = rig(tmp_path, lambda i: [face(250, y=10, size=50)])
+    run(pipe, 6)
+    detected = pipe.process(Frame(image(7), 10.0))
+    assert detected.faces_detected and pipe.preview_overlay(detected) == pipe.face_overlay()
+    skipped = pipe.process(Frame(image(8), 10.001))  # inside the detection period
+    assert not skipped.faces_detected and pipe.preview_overlay(skipped) is None
+
+
+def test_a_resting_pipeline_previews_frames_without_boxes(tmp_path):
+    _, _, pipe, _, _ = rig(tmp_path, lambda i: [face(250, y=10, size=50)])
+    run(pipe, 6)
+    pipe.governor.set_scale(CIRCADIAN, 0.0)  # no detection at all: the picture still shows
+    assert pipe.preview_overlay(pipe.process(Frame(image(7), 10.0))) == []

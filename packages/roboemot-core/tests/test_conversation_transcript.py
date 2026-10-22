@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 
 from roboemot.conversation import TranscriptRing
 from test_conversation_worker import (
@@ -243,17 +244,93 @@ def test_an_utterance_that_was_never_recorded_never_gets_a_reply_recorded(rigs):
 # ------------------------------------------------------------------ minors and cuts (S2)
 
 
-def test_with_a_minor_present_the_reply_is_recorded_only_once_it_played(rigs):  # noqa: F811
-    rig = with_ring(rigs, routes=(LAN,))
+SETTLE_FAST = {"transcript_settle_ms": 20}
+
+
+def minor_reply(rigs, unplayed, *, settle=SETTLE_FAST):  # noqa: F811
+    """A minor is present; the three-sentence reply's stream ends while the sentences in
+    ``unplayed`` have not started to play yet and the speech output is still busy."""
+    rig = with_ring(rigs, routes=(LAN,), conversation=settle)
     rig.minor[0] = True
     rig.server.scripts["lan.local"] = ["Uno. ", "Due. ", "Tre", GATE, "."]
     n = rig.say("ciao")
     assert wait_for(lambda: rig.speech.texts() == ["Uno.", "Due."])
     assert turns(rig) == [("user", "ciao", False)], "nothing shown as said while the turn runs"
-    rig.speech.unplayed.update({2, 3})
+    rig.speech.unplayed.update(unplayed)
+    rig.speech.busy = True
     rig.server.gate.set()
     assert rig.done(n)
-    assert turns(rig)[-1][:2] == ("robot", "Uno.")
+    return rig
+
+
+def test_with_a_minor_present_the_reply_is_recorded_once_all_of_it_played(rigs):  # noqa: F811
+    rig = minor_reply(rigs, {2, 3})
+    assert turns(rig) == [("user", "ciao", False)], "the rest still plays: nothing recorded yet"
+    rig.speech.unplayed.clear()  # sentences 2 and 3 play after the stream ended
+    assert wait_for(lambda: len(turns(rig)) == 2)
+    assert turns(rig)[-1] == ("robot", "Uno. Due. Tre.", False)
+
+
+def test_with_a_minor_present_a_reply_that_had_not_started_still_appears(rigs):  # noqa: F811
+    rig = minor_reply(rigs, {1, 2, 3})
+    assert turns(rig) == [("user", "ciao", False)]
+    rig.speech.unplayed.clear()
+    assert wait_for(lambda: len(turns(rig)) == 2)
+    assert turns(rig)[-1] == ("robot", "Uno. Due. Tre.", False)
+
+
+def test_with_a_minor_present_sentences_that_never_play_are_left_out_once_idle(rigs):  # noqa: F811
+    rig = minor_reply(rigs, {2, 3})
+    rig.speech.busy = False  # the output dropped them (a stop, the minor guard) and went idle
+    assert wait_for(lambda: len(turns(rig)) == 2)
+    assert turns(rig)[-1] == ("robot", "Uno.", False)
+
+
+def test_with_a_minor_present_a_barge_in_after_the_stream_keeps_what_was_heard(rigs):  # noqa: F811
+    rig = minor_reply(rigs, {3}, settle={"transcript_settle_ms": 2000})
+    rig.worker.interrupt()  # the speech was stopped while sentence 3 waited
+    assert turns(rig)[-1] == ("robot", "Uno. Due.", True)
+
+
+def test_with_a_minor_present_the_reply_settles_before_the_next_utterance(rigs):  # noqa: F811
+    rig = minor_reply(rigs, {3}, settle={"transcript_settle_ms": 2000})
+    rig.speech.unplayed.clear()
+    rig.speech.busy = False
+    rig.turn("e poi?")  # no timer ran yet: the next utterance settles it first
+    assert [t[:2] for t in turns(rig)][:3] == [
+        ("user", "ciao"),
+        ("robot", "Uno. Due. Tre."),
+        ("user", "e poi?"),
+    ]
+
+
+def test_closing_with_a_reply_still_pending_records_nothing_afterwards(rigs):  # noqa: F811
+    rig = minor_reply(rigs, {2, 3})
+    rig.worker.close()
+    assert not rig.worker._deferred, "no reply text kept in memory after close"
+    rig.speech.unplayed.clear()
+    rig.speech.busy = False
+    time.sleep(0.1)  # several settle periods
+    rig.worker.interrupt()
+    assert turns(rig) == [("user", "ciao", False)]
+
+
+def test_with_the_transcript_off_no_reply_is_deferred(rigs):  # noqa: F811
+    rig = with_ring(rigs, on=False, routes=(LAN,))
+    rig.minor[0] = True
+    rig.speech.busy = True
+    rig.speech.unplayed.add(1)  # still waiting to play when the stream ends
+    rig.turn("ciao")
+    assert not rig.worker._deferred
+
+
+def test_with_a_minor_present_a_clear_before_the_reply_settles_keeps_it_out(rigs):  # noqa: F811
+    rig = minor_reply(rigs, {2, 3})
+    rig.worker.transcript.clear()
+    rig.speech.unplayed.clear()
+    rig.speech.busy = False
+    rig.worker.interrupt()  # forces the settle now: the ring refuses the old generation
+    assert turns(rig) == []
 
 
 def test_a_cut_flag_trims_even_when_the_outcome_is_overwritten(rigs):  # noqa: F811

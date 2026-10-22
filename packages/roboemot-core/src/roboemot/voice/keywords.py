@@ -45,6 +45,7 @@ class KeywordSpotter:
         self._names = names if names is not None else RobotName()
         self._resolved: ResolvedName | None = None
         self._phrases: dict[str, dict[str, list[str]]] = {}
+        self._oov: dict[str, int] = {}
         self._rebuild()
 
     def _rebuild(self) -> None:
@@ -55,6 +56,7 @@ class KeywordSpotter:
             return
         self._resolved = resolved
         self._phrases = {}
+        oov: dict[str, int] = {}  # assigned once below: a report never reads a partial dict
         aliases = resolved.aliases_apply()
         for language, ks in self._sets.items():
             wake = list(ks.wake_phrases)
@@ -72,6 +74,15 @@ class KeywordSpotter:
                 cat: [p for p in (normalise(x) for x in phrases) if p]
                 for cat, phrases in lists.items()
             }
+            bad = self._names.out_of_vocab(language, self._phrases[language]["wake"])
+            if bad is not None:
+                oov[language] = bad
+        self._oov = oov
+
+    def wake_out_of_vocab(self) -> dict[str, int]:
+        """Per language whose recognizer vocabulary is known, how many wake phrases (generic
+        and rendered with the name) can never be heard (SPEC 8, 12A: numbers only)."""
+        return dict(self._oov)
 
     def spot(self, text: str, language: str) -> set[str]:
         """The categories whose phrases occur as whole words in ``text``."""
