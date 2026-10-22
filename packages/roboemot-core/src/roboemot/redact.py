@@ -42,7 +42,6 @@ PRIVATE_PATHS = (
     "safety.minor_motion_factor",
     "safety.minor_hold_s",
     "safety.minor_hold_periods",
-    "safety.minors_allowed_llm",
     "safety.minor_output_blocklist",
     "safety.minor_lines",
     "register.child.minor_content_policy",

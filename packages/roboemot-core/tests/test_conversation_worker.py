@@ -27,7 +27,6 @@ from test_llm_router import chunk
 
 LAN = {"name": "lan", "base_url": "http://lan.local/v1", "model": "m1"}
 CLOUD = {"name": "cloud", "base_url": "http://cloud.local/v1", "model": "m2"}
-CLEARED = {**LAN, "allowed_for_minors": True}
 GATE = object()  # in a script: hold the stream here until the test opens the gate
 FAIL = object()  # in a script: the stream breaks here
 
@@ -449,22 +448,20 @@ def test_a_newer_utterance_replaces_the_one_waiting_while_a_turn_runs(rigs):
 # ------------------------------------------------------------------ children (SPEC 8, 12)
 
 
-def test_a_minor_with_a_cleared_route_gets_that_route_and_the_child_rules(rigs):
-    rig = rigs(
-        routes=(CLOUD, CLEARED),
-        safety={"minors_allowed_llm": True},
-    )
+def test_a_minor_is_answered_by_the_first_route_with_the_child_rules(rigs):
+    """SPEC 8, 12 (owner decision 2026-10-22): no route is skipped while a minor is present."""
+    rig = rigs(routes=(CLOUD, LAN))
     rig.minor[0] = True
     rig.register[0] = rig.stack.effective().register.child
     rig.turn("ciao")
-    assert rig.server.hosts() == ["lan.local"]  # the uncleared first route is never asked
+    assert rig.server.hosts() == ["cloud.local"]
     system = rig.system()
     assert MINOR_RULE in system and "at most 2 sentences" in system
     assert "Use simple words" in system
 
 
 def test_the_child_register_is_used_while_a_minor_is_present_under_an_adult_register(rigs):
-    rig = rigs(routes=(CLEARED,), safety={"minors_allowed_llm": True})
+    rig = rigs()
     rig.minor[0] = True
     rig.register[0] = RegisterParams()  # the tracker resolved an adult (the child just left)
     rig.turn("ciao")
@@ -479,8 +476,8 @@ def test_an_adult_gets_the_conversation_sentence_cap_and_no_minor_rule(rigs):
     assert "at most 3 sentences" in rig.system() and MINOR_RULE not in rig.system()
 
 
-def test_no_cleared_route_means_a_built_in_line_and_no_request(rigs):
-    rig = rigs(routes=(CLOUD, LAN), safety={"minors_allowed_llm": True})
+def test_no_route_left_for_a_minor_means_a_built_in_line_and_no_request(rigs):
+    rig = rigs(routes=({**LAN, "daily_token_budget": 0},))
     rig.minor[0] = True
     rig.turn("che cos'e' la guerra?", language="it")
     assert rig.server.requests == []
@@ -495,19 +492,13 @@ def test_no_cleared_route_means_a_built_in_line_and_no_request(rigs):
     assert rig.server.requests == []
 
 
-def test_the_master_switch_off_also_means_built_in_lines(rigs):
-    rig = rigs(routes=(CLEARED,))  # safety.minors_allowed_llm stays false
-    rig.minor[0] = True
-    rig.turn("ciao")
-    assert rig.server.requests == [] and len(rig.speech.said) == 1
-
-
-def test_a_cleared_route_that_fails_gives_a_child_line_not_an_uncleared_route(rigs):
-    rig = rigs(routes=(CLEARED, CLOUD), safety={"minors_allowed_llm": True})
+def test_when_every_route_fails_a_minor_gets_a_child_line(rigs):
+    rig = rigs(routes=(LAN, CLOUD))
     rig.minor[0] = True
     rig.server.status["lan.local"] = 500
+    rig.server.status["cloud.local"] = 500
     rig.turn("ciao", language="en")
-    assert rig.server.hosts() == ["lan.local"]
+    assert rig.server.hosts() == ["lan.local", "cloud.local"]
     assert rig.speech.texts() == ["Please ask a grown-up about that, they will know better."]
 
 
@@ -520,8 +511,8 @@ def test_a_built_in_line_the_output_filter_blocks_is_replaced_by_a_safe_one(rigs
         "filtered": "Ask a grown-up.",
     }
     rig = rigs(
-        routes=(CLEARED,),
-        safety={"minors_allowed_llm": True, "minor_lines": {"en": lines}},
+        routes=(LAN,),
+        safety={"minor_lines": {"en": lines}},
     )
     rig.minor[0] = True
     rig.server.status["lan.local"] = 500
@@ -530,7 +521,7 @@ def test_a_built_in_line_the_output_filter_blocks_is_replaced_by_a_safe_one(rigs
 
 
 def test_the_child_register_cuts_the_reply_to_two_sentences_and_cancels_the_stream(rigs):
-    rig = rigs(routes=(CLEARED,), safety={"minors_allowed_llm": True})
+    rig = rigs()
     rig.minor[0] = True
     rig.register[0] = rig.stack.effective().register.child
     rig.server.scripts["lan.local"] = ["Uno. Due. Tre. Quattro. ", GATE, "Cinque."]
@@ -549,7 +540,7 @@ def test_a_register_cap_overrides_the_conversation_cap(rigs):
 
 
 def test_the_output_filter_replaces_a_sentence_and_drops_the_rest(rigs):
-    rig = rigs(routes=(CLEARED,), safety={"minors_allowed_llm": True})
+    rig = rigs()
     rig.minor[0] = True
     rig.register[0] = rig.stack.effective().register.child
     rig.server.scripts["lan.local"] = ["Ciao. ", "Oggi voglio uccidere il tempo. ", "Poi gioco."]
@@ -568,7 +559,7 @@ def test_the_output_filter_is_not_applied_for_adults(rigs):
 
 
 def test_the_filtered_text_is_not_kept_in_the_history(rigs):
-    rig = rigs(routes=(CLEARED,), safety={"minors_allowed_llm": True})
+    rig = rigs()
     rig.minor[0] = True
     rig.server.scripts["lan.local"] = ["Voglio uccidere il tempo."]
     rig.turn("ciao")
@@ -591,7 +582,7 @@ def test_a_minor_appearing_mid_answer_stops_the_speech_and_the_stream(rigs):
 
 
 def test_the_next_turn_after_a_mid_answer_cut_runs_under_the_minor_rules(rigs):
-    rig = rigs(routes=(CLOUD, CLEARED), safety={"minors_allowed_llm": True})
+    rig = rigs(routes=(CLOUD, LAN))
     rig.server.scripts["cloud.local"] = ["Prima. ", "Seconda", GATE, " frase."]
     n = rig.say("ciao")
     assert wait_for(lambda: rig.speech.texts() == ["Prima."])
@@ -599,28 +590,17 @@ def test_the_next_turn_after_a_mid_answer_cut_runs_under_the_minor_rules(rigs):
     rig.server.gate.set()
     assert rig.done(n)
     rig.turn("e adesso?")
-    assert rig.server.hosts() == ["cloud.local", "lan.local"]
+    assert rig.server.hosts() == ["cloud.local", "cloud.local"]
     assert MINOR_RULE in rig.system()
-    # the adult session ended when the minor appeared: nothing of it is sent to the next route
+    # the adult session ended when the minor appeared: nothing of it is sent with the next turn
     assert "Prima." not in json.dumps(rig.server.requests[1][1]["messages"])
 
 
-def test_a_minor_appearing_mid_answer_on_a_cleared_route_also_stops_the_speech(rigs):
-    rig = rigs(routes=(CLEARED,), safety={"minors_allowed_llm": True})
-    rig.server.scripts["lan.local"] = ["Prima. ", "Seconda", GATE, " frase."]
-    n = rig.say("ciao")
-    assert wait_for(lambda: rig.speech.texts() == ["Prima."])
-    rig.minor[0] = True
-    rig.server.gate.set()
-    assert rig.done(n)
-    assert rig.speech.stops == 1 and rig.speech.texts() == ["Prima."]
-
-
 def test_a_failing_minor_signal_is_treated_as_a_minor(rigs):
-    rig = rigs(routes=(CLOUD,), safety={"minors_allowed_llm": True})
+    rig = rigs(routes=(CLOUD,))
     rig.minor[0] = RuntimeError("no signal")
     rig.turn("ciao")
-    assert rig.server.requests == [] and len(rig.speech.said) == 1
+    assert MINOR_RULE in rig.system() and rig.speech.said[0]["minor"] is True
 
 
 def test_a_signal_that_fails_mid_answer_cuts_it(rigs):
@@ -800,7 +780,7 @@ def test_the_flushed_tail_is_not_spoken_when_a_minor_appears_after_the_last_delt
 
 
 def test_the_flushed_tail_goes_through_the_output_filter(rigs):
-    rig = rigs(routes=(CLEARED,), safety={"minors_allowed_llm": True})
+    rig = rigs()
     rig.minor[0] = True
     rig.server.scripts["lan.local"] = ["Ciao. ", "voglio uccidere"]
     rig.turn("ciao")
@@ -809,8 +789,8 @@ def test_the_flushed_tail_goes_through_the_output_filter(rigs):
 
 def test_a_phrase_split_across_two_sentences_is_filtered(rigs):
     rig = rigs(
-        routes=(CLEARED,),
-        safety={"minors_allowed_llm": True, "minor_output_blocklist": {"it": ["cattiva parola"]}},
+        routes=(LAN,),
+        safety={"minor_output_blocklist": {"it": ["cattiva parola"]}},
     )
     rig.minor[0] = True
     rig.server.scripts["lan.local"] = ["Dico una cattiva. ", "Parola davvero. ", "Fine."]
@@ -863,14 +843,14 @@ def test_spoken_sentences_carry_the_minor_state_they_were_written_under(rigs):
     rig = rigs()
     rig.turn("ciao")
     assert rig.speech.said[0]["minor"] is False
-    rig2 = rigs(routes=(CLEARED,), safety={"minors_allowed_llm": True})
+    rig2 = rigs()
     rig2.minor[0] = True
     rig2.turn("ciao")
     assert rig2.speech.said[0]["minor"] is True
 
 
 def test_the_filter_runs_on_a_turn_that_started_under_minor_rules_even_if_the_signal_flaps(rigs):
-    rig = rigs(routes=(CLEARED,), safety={"minors_allowed_llm": True})
+    rig = rigs()
     seq = iter([True, True, False, False, False, False])
     rig.worker._minor_present = lambda: next(seq, False)
     rig.server.scripts["lan.local"] = ["Voglio uccidere il tempo."]
@@ -878,27 +858,8 @@ def test_the_filter_runs_on_a_turn_that_started_under_minor_rules_even_if_the_si
     assert "uccidere" not in " ".join(rig.speech.texts())
 
 
-def test_a_stale_router_does_not_keep_a_revoked_route_cleared(rigs):
-    rig = rigs(routes=(CLEARED,), safety={"minors_allowed_llm": True})
-    rig.minor[0] = True
-    rig.server.scripts["lan.local"] = ["Prima. ", "Seconda", GATE, " frase."]
-
-    def broken(cfg):
-        raise RuntimeError("no router")
-
-    rig.hub.make_router = broken  # the router keeps the old routes after the change
-    n = rig.say("ciao")
-    assert wait_for(lambda: rig.speech.texts() == ["Prima."])
-    rig.stack.set("llm_routes", [LAN], layer="app")  # clearance revoked
-    rig.minor[0] = False  # the turn began as a minor turn; flap to force the route check
-    rig.minor[0] = True
-    rig.server.gate.set()
-    assert rig.done(n)
-    assert rig.worker.snapshot()["minor_cut"] == 1 and rig.speech.stops == 1
-
-
 def test_a_minor_after_an_adult_session_ends_it_and_unknown_speakers_share_otherwise(rigs):
-    rig = rigs(routes=(CLEARED,), safety={"minors_allowed_llm": True})
+    rig = rigs()
     rig.turn("uno")
     rig.turn("due")  # unknown adult, same unknown session: history kept
     assert len(rig.server.requests[1][1]["messages"]) == 4
@@ -909,7 +870,7 @@ def test_a_minor_after_an_adult_session_ends_it_and_unknown_speakers_share_other
 
 
 def test_history_written_without_minor_rules_is_never_sent_for_a_child_later(rigs):
-    rig = rigs(routes=(CLEARED,), safety={"minors_allowed_llm": True})
+    rig = rigs()
     rig.minor[0] = True
     rig.server.scripts["lan.local"] = ["Risposta per bambini."]
     rig.turn("uno")

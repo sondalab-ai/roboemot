@@ -60,7 +60,7 @@ def test_safety_only_tightens_at_runtime():
     with pytest.raises(GuardrailError):
         stack.set("safety.minor_motion_factor", 0.9)  # looser: refused
     with pytest.raises(GuardrailError):
-        stack.set("safety.minors_allowed_llm", True)
+        stack.set("safety.allow_unmeasured_dynamics", True)
     # loosening is possible only by editing the app layer with admin confirmation
     with pytest.raises(GuardrailError):
         stack.set("safety.minor_motion_factor", 0.9, layer="app")
@@ -166,7 +166,7 @@ def test_section_level_override_cannot_bypass_guardrails():
     with pytest.raises(GuardrailError):
         stack.set(
             "llm_routes",
-            [{"name": "x", "base_url": "http://a/v1", "model": "m", "allowed_for_minors": True}],
+            [{"name": "x", "base_url": "http://a/v1", "model": "m", "locality": "local"}],
         )
     assert stack.get("safety.watchdog_ms") == 200
 
@@ -322,7 +322,7 @@ def test_single_route_field_addressable_at_runtime():
     routes = {r.name: r for r in stack.effective().llm_routes}
     assert set(routes) == {"lan", "cloud"} and routes["cloud"].max_tokens == 120
     with pytest.raises(GuardrailError):
-        stack.set("llm_routes.cloud.allowed_for_minors", True)
+        stack.set("llm_routes.cloud.locality", "local")
 
 
 # ------------------------------------------------------------------ batch, preview, clear

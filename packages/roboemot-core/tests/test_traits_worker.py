@@ -304,7 +304,7 @@ def test_only_prompt_source_routes_and_minor_safety_wake_it():
         return bool(calls)
 
     assert woken("persona.prompt") and woken("persona.traits_source")
-    assert woken("llm_routes.0.model") and woken("safety.minors_allowed_llm")
+    assert woken("llm_routes.0.model")
     assert not woken("persona.traits.energy", "persona.prompt_max_chars", "persona.trait_effects")
     assert not woken("conversation.language", "safety.minor_motion_factor")
 

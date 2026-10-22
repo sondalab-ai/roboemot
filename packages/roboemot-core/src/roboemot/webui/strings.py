@@ -276,18 +276,6 @@ EN: dict[str, str] = {
         "A route on this machine or the home network sees real names. Setting one up needs the "
         "configuration file; from here only cloud routes are accepted."
     ),
-    "route_minors_label": "Cleared for minors",
-    "route_minors_hint": (
-        "While a minor is present, or when the camera is off and the robot assumes one, a route "
-        "that is not cleared for minors is skipped. A route added here cannot be cleared; "
-        "that needs the configuration file."
-    ),
-    "route_minors_hint_edit": (
-        "While a minor is present, or when the camera is off and the robot assumes one, a route "
-        "that is not cleared for minors is skipped. It is also used only if the setting "
-        "safety.minors_allowed_llm is on."
-    ),
-    "route_minors_off": "Skipped while a minor is present (not cleared for minors).",
     "route_key": "Key",
     "route_key_none": "No key",
     "route_key_literal": "A key written in the configuration file",
@@ -347,7 +335,6 @@ EN: dict[str, str] = {
     "refused_show": "Show names",
     "refused_none": "No name is sent as typed.",
     "refused_off": "Pseudonyms for cloud routes are off.",
-    "route_minors": "cleared for minors",
     "route_check": "Check",
     "route_checking": "Checking...",
     "route_never": "Not checked yet",
@@ -855,18 +842,6 @@ IT: dict[str, str] = {
         "Un modello su questa macchina o sulla rete di casa vede i nomi veri. Configurarne uno "
         "richiede il file di configurazione; da qui si accettano solo modelli cloud."
     ),
-    "route_minors_label": "Adatto ai minori",
-    "route_minors_hint": (
-        "Quando c'è un minore, o quando la camera è spenta e il robot ne presume uno, un modello "
-        "non adatto ai minori viene saltato. Un modello aggiunto da qui non può essere reso "
-        "adatto: serve il file di configurazione."
-    ),
-    "route_minors_hint_edit": (
-        "Quando c'è un minore, o quando la camera è spenta e il robot ne presume uno, un modello "
-        "non adatto ai minori viene saltato. Viene usato solo se anche l'impostazione "
-        "safety.minors_allowed_llm è attiva."
-    ),
-    "route_minors_off": "Saltato quando c'è un minore (non adatto ai minori).",
     "route_key": "Chiave",
     "route_key_none": "Nessuna chiave",
     "route_key_literal": "Una chiave scritta nel file di configurazione",
@@ -936,7 +911,6 @@ IT: dict[str, str] = {
     "refused_show": "Mostra i nomi",
     "refused_none": "Nessun nome viene inviato così com'è.",
     "refused_off": "Gli pseudonimi per i modelli cloud sono disattivati.",
-    "route_minors": "adatto ai minori",
     "route_check": "Controlla",
     "route_checking": "Controllo in corso...",
     "route_never": "Mai controllato",

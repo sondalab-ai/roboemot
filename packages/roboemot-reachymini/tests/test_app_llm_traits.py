@@ -197,7 +197,7 @@ def test_a_missing_secret_makes_its_route_unavailable_with_one_warning(data, cap
         stop, thread, errors = start(app)
         try:
             assert wait_for(lambda: rated(app))  # route "b" has no secret and answers
-            assert [r.name for r in app.router_hub.router.eligible(False)] == ["b"]
+            assert [r.name for r in app.router_hub.router.eligible()] == ["b"]
         finally:
             stop.set()
             thread.join(15)
@@ -216,7 +216,7 @@ def test_a_stored_secret_is_the_route_key_at_startup(data, caplog):  # noqa: F81
         stop, thread, errors = start(app)
         try:
             assert wait_for(lambda: rated(app))
-            assert [r.name for r in app.router_hub.router.eligible(False)] == ["lan", "b"]
+            assert [r.name for r in app.router_hub.router.eligible()] == ["lan", "b"]
             report = json.dumps(app.diagnostics.report())
         finally:
             stop.set()

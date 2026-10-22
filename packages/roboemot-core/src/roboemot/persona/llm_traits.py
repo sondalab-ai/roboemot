@@ -101,7 +101,7 @@ async def rate_traits(
     """Traits for ``persona.prompt`` from the cache or the first route that answers; None when
     no route is configured, eligible or reachable, or the reply does not validate. With
     ``pseudonyms`` a registry name in the prompt is aliased on routes that are not local."""
-    routes = router.eligible(minor_present=False)
+    routes = router.eligible()
     if not routes:
         return None
     for route in routes:  # the answering route is not known yet: any eligible model's rating
@@ -165,7 +165,7 @@ async def apply_llm_traits(
     return True
 
 
-WATCHED = ("persona.prompt", "persona.traits_source", "llm_routes", "safety.minors_allowed_llm")
+WATCHED = ("persona.prompt", "persona.traits_source", "llm_routes")
 JOIN_TIMEOUT_S = 2.0  # how long close() waits for the worker thread after cancelling it
 READY_TIMEOUT_S = 5.0  # how long start() waits for the worker's event loop to come up
 
@@ -179,11 +179,11 @@ class TraitsWorker:
     route never blocks the app tick or the motion loop.
 
     ``on_change`` is the ``config.changed`` listener: changes to ``persona.prompt``,
-    ``persona.traits_source``, ``llm_routes`` or ``safety.minors_allowed_llm`` wake the worker;
-    wake-ups coalesce into one run. Changes published by the worker itself (the derived layer
-    ``persona.llm``) are ignored, so it cannot trigger itself. The router is rebuilt (keeping
-    its token budgets) when the routes or the safety config change; if building it fails the
-    old one stays. After a failed rating the same prompt and routes are not asked again for
+    ``persona.traits_source`` or ``llm_routes`` wake the worker; wake-ups coalesce into one
+    run. Changes published by the worker itself (the derived layer ``persona.llm``) are
+    ignored, so it cannot trigger itself. The router is rebuilt (keeping its token budgets)
+    when the routes or the safety config change; if building it fails the old one stays. After
+    a failed rating the same prompt and routes are not asked again for
     ``persona.traits_retry_s`` (a later wake-up is scheduled for when it ends).
 
     ``close`` cancels a request in flight and waits at most ``JOIN_TIMEOUT_S``. Cancellation is

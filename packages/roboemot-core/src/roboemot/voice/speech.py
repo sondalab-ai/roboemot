@@ -451,7 +451,7 @@ class SpeechOutput:
                 job.delivery,
                 language=job.language,
                 voice=cfg.voice,
-                minor_present=self._minor(),
+                minor_present=job.minor or self._minor(),
             ):
                 waited = self.clock() - asked
                 waited_s += waited

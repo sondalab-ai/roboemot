@@ -145,12 +145,6 @@ def test_a_local_route_stays_refused_with_or_without_a_key(editor, stack):
     assert "cloud" not in routes(stack)
 
 
-def test_a_new_route_cannot_be_cleared_for_minors(editor, stack):
-    with pytest.raises(GuardrailError):
-        editor.add_route({**CLOUD, "allowed_for_minors": True}, None, None)
-    assert "cloud" not in routes(stack)
-
-
 def test_credentials_in_the_url_are_refused(editor, stack):
     with pytest.raises(ValidationError) as caught:
         editor.add_route({**CLOUD, "base_url": "https://u:p@api.cloudco.example/v1"}, None, None)
