@@ -99,8 +99,15 @@ def test_an_addressed_utterance_is_answered_through_the_shared_router(data, fake
 
 
 def test_a_minor_is_answered_by_the_route_under_the_minor_rules(data, fakes, said):  # noqa: F811
-    """SPEC 8, 12 (owner decision 2026-10-22): no route is skipped while a minor is present."""
-    enable(data, VOICE_YAML + ROUTES)
+    """SPEC 8, 12 (owner decision 2026-10-22): no route is skipped while a minor is present. The
+    app config still holds the removed gate keys, as on a robot set up before: the app starts and
+    ignores them (SPEC 11A, Renamed and removed settings)."""
+    app_yaml = data / "app.yaml"
+    assert "safety:\n" in app_yaml.read_text()
+    app_yaml.write_text(
+        app_yaml.read_text().replace("safety:\n", "safety:\n  minors_allowed_llm: true\n")
+    )
+    enable(data, VOICE_YAML + ROUTES.replace("model: m1}", "model: m1, allowed_for_minors: true}"))
     app = ConvApp.__new__(ConvApp)
     app.requests, app.minor_flag = [], True
     stop, thread, errors = run_app(app, ScriptedMini().mini)
