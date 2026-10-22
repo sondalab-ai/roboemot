@@ -35,3 +35,29 @@ def test_run_checks_the_sdk_before_building_anything(data, monkeypatch):  # noqa
     with pytest.raises(RuntimeError, match="older than 1.12"):
         app_module.RoboEmotApp().run(object(), None)
     assert built == []
+
+
+@pytest.mark.parametrize(
+    ("installed", "newer"),
+    [("1.12.0", False), ("1.12.9", False), ("1.11.0", False), ("1.13.0", True), ("2.0", True)],
+)
+def test_newer_than_tested_compares_major_minor(installed, newer):
+    assert sdk.newer_than_tested(installed) is newer
+
+
+def test_a_newer_sdk_starts_with_a_warning(monkeypatch, caplog):
+    """R4 S10: a daemon update past the tested SDK must not stop the app, but it is logged."""
+    monkeypatch.setattr(platform_module, "installed_version", lambda: "1.13.0")
+    platform_module.ReachyMiniPlatform().require_runtime()
+    assert "newer than 1.12" in caplog.text
+
+
+def test_the_sim_extra_pins_the_tested_sdk():
+    """Review S-8: the sim pin and TESTED_SDK are written in two places; keep them together."""
+    import tomllib
+    from pathlib import Path
+
+    project = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
+    (sim,) = project["project"]["optional-dependencies"]["sim"]
+    major, minor = map(int, sdk.TESTED_SDK.split("."))
+    assert sim.endswith(f">={sdk.MIN_SDK},<{major}.{minor + 1}"), sim

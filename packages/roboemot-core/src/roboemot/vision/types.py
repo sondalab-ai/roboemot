@@ -16,6 +16,9 @@ import numpy as np
 
 Box = tuple[float, float, float, float]
 FACE_LABEL = "face"
+# Ultralytics letterbox grey: the age model's padding, and the fill for other faces that fall
+# inside an age crop (SPEC 5), so they look like padding to the model.
+LETTERBOX_GREY = 114
 
 
 @dataclass

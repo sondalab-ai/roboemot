@@ -166,3 +166,14 @@ def test_exceptions_in_server_stop_do_not_skip_the_rest_of_the_shutdown(webui_da
     ]
     monkeypatch.undo()
     app.webui.stop()
+
+
+def test_the_declared_page_follows_a_port_set_in_the_app_config(tmp_path):
+    """R4 S4 port point: an owner's webui.port in the data-folder app.yaml reaches the URL."""
+    path = tmp_path / "app.yaml"
+    path.write_text("schema_version: 1\nwebui:\n  port: 8080\n")
+    assert app_module.webui_port(path) == 8080
+    for text in ("webui:\n  port: 0\n", "webui: [1\n", "- x\n"):
+        path.write_text(text)
+        assert app_module.webui_port(path) == 8042
+    assert app_module.webui_port(tmp_path / "missing.yaml") == 8042

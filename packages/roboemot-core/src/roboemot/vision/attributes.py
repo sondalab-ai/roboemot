@@ -1,9 +1,11 @@
 """Age and gender per track, in a low-priority worker (SPEC 5, Rules; 13; 12).
 
-The estimator is slow (two ViT-B models), so it never runs in the frame path. Per track the
+The estimator is too slow for the frame path on the CM4, so it never runs there. Per track the
 pipeline collects the first ``vision.attribute_crops`` face crops and submits ONE job
 that runs the estimator on each crop and aggregates the per-crop values with the registry
-helpers (median age group, majority gender, confidence threshold). Until the result comes
+helpers (median age group, majority gender, confidence threshold). The age threshold is
+``age_confidence_min`` when given (the age model's own score floor, ``vision.attribute_score_min``)
+and the 0.8 rule otherwise; gender always uses the 0.8 rule. Until the result comes
 back the track is ``unknown`` and so a possible minor. Crops are held in memory only for the
 job and dropped when it ends, success or failure (SPEC 12); nothing is logged or written.
 
@@ -85,7 +87,8 @@ class AttributeWorker:
     """Runs one age and gender job per track and hands back the results on ``poll``.
 
     ``report_window`` sizes the job and crop duration windows of ``snapshot``; ``clock`` times
-    them (seconds, monotonic).
+    them (seconds, monotonic). ``age_confidence_min`` replaces ``identity.estimate_confidence_min``
+    for the age group (None keeps it).
     """
 
     def __init__(
@@ -97,9 +100,11 @@ class AttributeWorker:
         *,
         report_window: int = REPORT_WINDOW,
         clock: Callable[[], float] = time.perf_counter,
+        age_confidence_min: float | None = None,
     ):
         self.estimator = estimator
         self.config = config
+        self.age_confidence_min = age_confidence_min
         self.queue_max = queue_max
         self.owns_executor = executor is None
         self.executor: Executor = executor or ThreadPoolExecutor(
@@ -162,7 +167,9 @@ class AttributeWorker:
         try:
             samples = [self._timed_estimate(crop) for _, crop in crops]
             age = estimate_age_group(
-                [(s.age_group, s.age_confidence) for s in samples], self.config
+                [(s.age_group, s.age_confidence) for s in samples],
+                self.config,
+                confidence_min=self.age_confidence_min,
             )
             gender = estimate_gender(
                 [(s.gender, s.gender_confidence) for s in samples], self.config

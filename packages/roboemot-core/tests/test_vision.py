@@ -30,6 +30,9 @@ from roboemot.vision.replay import ReplayError, load_session, replay, summarize
 from roboemot.world import FrameSpec, WorldModel, feed_world
 
 CFG = RoboEmotConfig()
+# Three crops per track, for the tests of crop collection and median aggregation (the default is
+# one crop since the yolo11n-face-age swap, SPEC 5).
+THREE_CROPS = CFG.vision.model_copy(update={"attribute_crops": 3})
 W, H = 320, 240
 DIM = 8
 FACE_MODEL = "mock-face"
@@ -335,10 +338,11 @@ def test_small_faces_are_ignored(tmp_path):
 
 def test_attribute_job_runs_once_per_track_on_n_crops(tmp_path):
     est, ex = CountingEstimator(), CountingExecutor()
-    _, _, pipe, _, got = rig(tmp_path, lambda i: [face(100)], estimator=est, executor=ex)
+    _, _, pipe, _, got = rig(
+        tmp_path, lambda i: [face(100)], estimator=est, executor=ex, vision=THREE_CROPS
+    )
     run(pipe, 40)
-    needed = CFG.vision.attribute_crops
-    assert needed == 3
+    needed = THREE_CROPS.attribute_crops
     assert ex.jobs == 1
     assert len(est.crops) == needed
     state = next(iter(pipe._faces.values()))
@@ -385,7 +389,7 @@ def test_single_crop_with_frames_min_one_gives_a_confident_value(tmp_path):
     assert (last.age_group, last.gender, last.possible_minor) == ("adult", "female", False)
 
 
-def test_single_crop_still_applies_the_confidence_rule(tmp_path):
+def test_single_crop_still_applies_the_score_floor(tmp_path):
     cfg = RoboEmotConfig(vision={"attribute_crops": 1}, identity={"estimate_frames_min": 1})
     pipe = VisionPipeline(
         cfg.vision,
@@ -394,7 +398,7 @@ def test_single_crop_still_applies_the_confidence_rule(tmp_path):
         Matcher(registry(tmp_path), cfg.identity),
         face_detector=ScriptedDetector(lambda i: [face(100)]),
         face_embedder=FixedFaceEmbedder(axis(0)),
-        attribute_estimator=CountingEstimator(conf=0.5),
+        attribute_estimator=CountingEstimator(conf=cfg.vision.attribute_score_min - 0.01),
         executor=InlineExecutor(),
     )
     got = []
@@ -406,7 +410,11 @@ def test_single_crop_still_applies_the_confidence_rule(tmp_path):
 def test_track_shorter_than_the_crops_needed_runs_no_job(tmp_path):
     est, ex = CountingEstimator(), CountingExecutor()
     _, _, pipe, _, got = rig(
-        tmp_path, lambda i: [face(100)] if i < 3 else [], estimator=est, executor=ex
+        tmp_path,
+        lambda i: [face(100)] if i < 3 else [],
+        estimator=est,
+        executor=ex,
+        vision=THREE_CROPS,
     )
     run(pipe, 60)
     assert ex.jobs == 0 and est.crops == []
@@ -414,12 +422,12 @@ def test_track_shorter_than_the_crops_needed_runs_no_job(tmp_path):
 
 
 def test_attribute_crops_and_frames_min_validation():
-    assert CFG.vision.attribute_crops == 3 and CFG.identity.estimate_frames_min == 3
+    assert CFG.vision.attribute_crops == 1 and CFG.identity.estimate_frames_min == 1
     for bad in (0, 11):
         with pytest.raises(ValueError):
             RoboEmotConfig(vision={"attribute_crops": bad})
     with pytest.raises(ValueError, match="attribute_crops must be at least"):
-        RoboEmotConfig(vision={"attribute_crops": 2})
+        RoboEmotConfig(vision={"attribute_crops": 2}, identity={"estimate_frames_min": 3})
     with pytest.raises(ValueError, match="attribute_crops must be at least"):
         RoboEmotConfig(identity={"estimate_frames_min": 5})
     RoboEmotConfig(vision={"attribute_crops": 5}, identity={"estimate_frames_min": 5})
@@ -437,7 +445,8 @@ def test_second_track_gets_its_own_job(tmp_path):
 
 
 def test_low_confidence_attributes_stay_unknown_and_minor(tmp_path):
-    _, _, pipe, _, got = rig(tmp_path, lambda i: [face(100)], estimator=CountingEstimator(conf=0.5))
+    weak = CountingEstimator(conf=CFG.vision.attribute_score_min - 0.01)
+    _, _, pipe, _, got = rig(tmp_path, lambda i: [face(100)], estimator=weak)
     run(pipe, 40)
     last = got["percept.face"][-1].payload
     assert last.age_group == "unknown" and last.possible_minor
@@ -941,7 +950,9 @@ def test_lifetime_summary_keeps_the_last_report_window_tracks(tmp_path):
 
 
 def test_attribute_job_counters_and_time_to_estimate(tmp_path):
-    _, _, pipe, _, _ = rig(tmp_path, lambda i: [face(100)], estimator=CountingEstimator())
+    _, _, pipe, _, _ = rig(
+        tmp_path, lambda i: [face(100)], estimator=CountingEstimator(), vision=THREE_CROPS
+    )
     run(pipe, 40)
     attrs = pipe.stats()["attributes"]
     assert attrs["submitted"] == attrs["completed"] == 1
@@ -958,7 +969,7 @@ def test_attribute_job_counters_and_time_to_estimate(tmp_path):
 
 @pytest.mark.parametrize(
     ("age", "conf", "outcome"),
-    [("child", 0.95, "minor"), ("teen", 0.95, "minor"), ("adult", 0.5, "unknown")],
+    [("child", 0.95, "minor"), ("teen", 0.95, "minor"), ("adult", 0.45, "unknown")],
 )
 def test_attribute_outcomes_count_minor_and_unknown(tmp_path, age, conf, outcome):
     est = CountingEstimator(age=age, conf=conf)
@@ -970,7 +981,8 @@ def test_attribute_outcomes_count_minor_and_unknown(tmp_path, age, conf, outcome
 
 def test_a_declared_person_counts_as_an_outcome_without_a_job(tmp_path):
     est = CountingEstimator(age="child")
-    reg, _, pipe, _, _ = rig(tmp_path, lambda i: [face(100)], estimator=est)
+    # Three crops: the person is recognised before they are collected (one crop goes earlier).
+    reg, _, pipe, _, _ = rig(tmp_path, lambda i: [face(100)], estimator=est, vision=THREE_CROPS)
     reg.enroll(
         "Gran", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT, age_group="senior",
         gender="female",
@@ -1016,6 +1028,7 @@ def test_a_track_that_ends_waiting_for_a_full_queue_is_dropped_queue_full(tmp_pa
         lambda i: [face(20), face(200)] if i < 12 else [],
         estimator=CountingEstimator(),
         executor=ex,
+        vision=THREE_CROPS,
     )
     pipe.worker.queue_max = 1
     run(pipe, 40)

@@ -13,16 +13,18 @@ the platform can create it (``Platform.base_python``), the checks run against th
 interpreter, the record is written, and then the platform creates the environment; the dry run
 only reports it and skips the dependency check. It also creates the private app data folder
 (``~/.local/share/roboemot``: registry, models, trait cache) when it is not there yet and
-records it. It writes the app config (``data/app.yaml``) with ``voice.enabled: true`` (plus the
-dev content with ``--dev``) unless ``--no-voice``, which also makes Piper and the models default
-to off. Unless declined (`--no-piper`) it also creates a Piper virtualenv in the data folder
-(`piper-tts` is GPL-3.0 and runs as its own process, SPEC 8), recorded for uninstall.
+records it. It sets its own keys in the app config (``app.yaml`` in the data folder, kept across
+reinstalls): ``voice.enabled: true`` unless ``--no-voice`` (which also makes Piper and the models
+default to off) and the dev content with ``--dev``; every other key stays. Unless declined
+(`--no-piper`) it also creates a Piper virtualenv in the data folder (`piper-tts` is GPL-3.0 and
+runs as its own process, SPEC 8), recorded for uninstall.
 The platform's ``extras`` (``voice`` for a robot that listens, so vosk) are installed with
 ``roboemot-core``; the ``vision`` extra and the vision weights come too unless declined
 (``--no-vision``, SPEC 4A Installer). The voice models (``roboemot models fetch --voice``) are
 downloaded on the robot after Piper unless declined (``--no-models``), when the manifests'
-sizes fit the free space. Before installing it offers to clear the platform's
-``clearable_caches`` (``--clear-caches``), which uninstall cannot restore.
+sizes of the files not yet verified fit the free space. Before the free-space check it offers to
+clear the platform's ``clearable_caches`` (``--clear-caches``; ``-y`` alone keeps them), which
+uninstall cannot restore.
 Optionally (``--secret NAME``, or asked on a terminal) it stores an API key in the robot's secret
 store (SPEC 8, 12 Data), recorded by name; uninstall removes only the names it added.
 
@@ -34,13 +36,16 @@ this app), uninstall what the record says this installer added, reinstall the or
 it replaced, keep anything another distribution still needs, remove leftovers and the recorded
 data folder (registry, models and trait cache included), verify, and only then delete the
 record. An environment the record says this installer created is removed too, unless another
-app lives in it (``Platform.env_users``); with the environment already gone, the rest of the
-cleanup still runs. Running it twice is harmless. Both flows have a read-only ``--dry-run``.
+app lives in it (``Platform.env_users``); when it goes whole, its packages are not restored
+first. With the environment already gone, the rest of the cleanup still runs. A rerun of install
+finishes an environment an earlier run created but could not complete. Running it twice is
+harmless. Both flows have a read-only ``--dry-run``.
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import posixpath
@@ -68,25 +73,69 @@ from .build import (
 from .caches import clear_caches
 from .piper_lock import lock_path
 from .pyenv import RemotePython, report_changes
-from .record import InstallRecord, canonical, plan_uninstall
+from .record import InstallRecord, UninstallPlan, canonical, plan_uninstall, unknown_keys
 from .remote import Remote
 from .ui import Ui, WizardError, paint
 
 ENTRY_POINT_GROUP = "roboemot.installers"
-MIN_FREE_MB = 300  # wheels plus numpy/scipy/openai if the target environment lacks them
+# Disk at the install's peak, in MB as (downloads, unpacked), measured from the aarch64 cp312
+# wheels pip picks for each set (2026-10-22), unpacked sizes rounded up about 25% for the .pyc
+# files pip compiles. The app with its dependencies: scipy, numpy, openai, pydantic (52 MiB
+# downloaded, 184 MiB unpacked). Extras: voice is onnxruntime and vosk (24, 66); vision is
+# opencv-python-headless and onnx (43, 105) plus onnxruntime (20, 53), counted again so that
+# vision alone also fits.
+APP_DISK_MB = (60, 230)
+EXTRA_DISK_MB = {"voice": (30, 85), "vision": (70, 200)}
+ENV_DOWNLOAD_SHARE = 0.5  # downloads next to a created environment's tree (measured 0.3-0.4)
+ENV_FALLBACK_MB = 1500  # that tree when `du` on the creating environment answers nothing
 REMOTE_TMP_PREFIX = "/tmp/roboemot-install"
 TMP_DIR_PATTERN = re.compile(re.escape(REMOTE_TMP_PREFIX) + r"\.[A-Za-z0-9]+")
 PIN_FILE = "webui_pin.json"  # roboemot.webui.auth.PIN_FILE, inside the app data folder
 PIN_RETRIES = 3
 DEFAULT_SECRET_NAME = "cloud_key"  # the name configs/companion.yaml gives the cloud route key
 MIB = 1024 * 1024
-VISION_DERIVED_BYTES = 170_000_000  # INT8 files made from the FP32 weights ("0.17 GB", models CLI)
 PIPER_TTS_VERSION = "1.8.0"  # exact pin: the worker protocol is tested against this API
+FETCH_ATTEMPTS = 2  # `roboemot models fetch` runs once more after a failure (it resumes)
+# The model files already verified on the robot (marker check only, read-only: no folder made),
+# as "voice:<path>" / "vision:<path>", and for the others the bytes already on disk that the
+# fetch frees or keeps: a stale ``.part`` (deleted before the new download) and a complete-size
+# file (kept when its digest matches). Run with the app's interpreter.
+VERIFIED_MODELS = r"""
+import json
+from roboemot.vision import models as m
+from roboemot.voice import models as v
+done, on_disk = [], {}
+for kind, specs, root in (("vision", m.load_manifest(), m.models_dir()),
+                          ("voice", v.load_manifest(), v.models_dir())):
+    for spec in specs.values():
+        for f in spec.files:
+            key = kind + ":" + f.path
+            try:
+                m.check_file(root, f)
+            except Exception:
+                t = root / f.path
+                part = t.with_name(t.name + (".zip" if f.archive else "") + m.PART_SUFFIX)
+                n = part.stat().st_size if part.is_file() else 0
+                if not f.archive and f.size_bytes and t.is_file():
+                    n += f.size_bytes if t.stat().st_size == f.size_bytes else 0
+                if n:
+                    on_disk[key] = n
+                continue
+            done.append(key)
+print(json.dumps({"done": done, "on_disk": on_disk}))
+"""
 PLATFORM_PROBE = (
     "import sys, platform; print(platform.machine()); print('%d.%d' % sys.version_info[:2])"
 )
 PROBE_PATTERN = re.compile(r"[A-Za-z0-9_]+\n\d+\.\d+")
 INSTALL_STEPS = 6
+DEV_CONFIG = "configs/dev-unmeasured.yaml"
+APP_CONFIG_SCHEMA = 1
+APP_CONFIG_HEADER = (
+    "# RoboEmot app config (SPEC 4A, Installer). The installer sets only voice.enabled and, in\n"
+    "# dev mode, safety.allow_unmeasured_dynamics; every other key is kept on reinstall (comments\n"
+    "# are not). Uninstall removes this whole file, settings saved from the web UI included.\n"
+)
 UNINSTALL_STEPS = 6
 
 
@@ -104,7 +153,7 @@ class Platform(Protocol):
     env_dir: str  # that environment's folder (created and removed by the installer if missing)
     base_python: str | None  # interpreter that creates the environment; None: cannot create it
     record_path: str  # change record: outside that environment and outside /tmp
-    space_paths: tuple[str, ...]  # filesystems that need MIN_FREE_MB
+    space_paths: tuple[str, ...]  # filesystems the install fills (``install_need_mb``)
     distributions: tuple[str, ...]  # this app's own distributions
     modules: tuple[str, ...]  # their top-level import names (leftover check)
     extras: tuple[str, ...]  # roboemot-core extras the robot needs (installed by default)
@@ -117,17 +166,14 @@ class Platform(Protocol):
     def plan_env(self, remote: Remote) -> str: ...
     def create_env(self, ui: Ui, remote: Remote, plan: str) -> None: ...
     def env_users(self, py: RemotePython) -> list[str]: ...
+    def env_ready(self, py: RemotePython) -> bool: ...
     def probe(self, ui: Ui, py: RemotePython) -> None: ...
-    def stage(
-        self, root: Path, dest: Path, dev: bool, app_config: dict[str, object]
-    ) -> list[Path]: ...
-    def verify(
-        self, ui: Ui, py: RemotePython, dev: bool, app_config: dict[str, object]
-    ) -> None: ...
+    def stage(self, root: Path, dest: Path) -> list[Path]: ...
+    def verify(self, ui: Ui, py: RemotePython) -> None: ...
     def running_app(self) -> str | None: ...
     def stop_app(self) -> None: ...
     def app_installed(self) -> bool: ...
-    def app_url(self, host: str) -> str | None: ...
+    def app_url(self, host: str, port: int | None = None) -> str | None: ...
     def start_blocker(self) -> str | None: ...
     def start(self, ui: Ui) -> None: ...
     def autostart(self) -> str | None: ...
@@ -160,15 +206,83 @@ class Options:
 
 
 def app_config_overrides(voice: bool) -> dict[str, object]:
-    """What the installer sets in the robot's app config besides the platform's dev content:
+    """What the installer sets in the robot's app config besides the dev content:
     ``voice.enabled: true`` with voice (the library default is off, so a robot without a
     microphone or speaker is unchanged; the installer enables it for the robot it sets up).
-    The platform writes it into ``app.yaml`` and reads it back to verify (SPEC 4A, Installer)."""
+    ``apply_app_config`` writes it into ``app.yaml`` in the data folder and reads it back to
+    verify (SPEC 4A, Installer)."""
     return {"voice": {"enabled": True}} if voice else {}
 
 
+def dev_config(root: Path) -> dict[str, object]:
+    """The dev content (``configs/dev-unmeasured.yaml`` without its ``schema_version``; empty
+    when the checkout has no such file)."""
+    path = root / DEV_CONFIG
+    data = (yaml.safe_load(path.read_text()) or {}) if path.exists() else {}
+    return {k: v for k, v in data.items() if k != "schema_version"}
+
+
+def leaves(tree: dict, prefix: tuple[str, ...] = ()) -> dict[tuple[str, ...], object]:
+    """Every non-mapping value of a nested mapping, keyed by its path."""
+    out: dict[tuple[str, ...], object] = {}
+    for key, value in tree.items():
+        if isinstance(value, dict) and value:
+            out.update(leaves(value, (*prefix, key)))
+        else:
+            out[(*prefix, key)] = value
+    return out
+
+
+def owned_app_config(
+    root: Path, dev: bool, voice: bool
+) -> tuple[dict[tuple[str, ...], object], set[tuple[str, ...]]]:
+    """The installer's keys in the app config: (the values asked for this run, every key it
+    owns). It owns the voice switch and the dev content's keys; a key it owns but was not asked
+    for this run (``--no-voice``, ``--no-dev``) is removed from the file."""
+    dev_leaves = leaves(dev_config(root))
+    if dev and not dev_leaves:
+        raise WizardError(f"dev mode needs {DEV_CONFIG} in {root}")
+    voice_leaves = leaves(app_config_overrides(True))
+    wanted = {**(dev_leaves if dev else {}), **(voice_leaves if voice else {})}
+    return wanted, set(dev_leaves) | set(voice_leaves)
+
+
+def merge_app_config(
+    existing: dict, wanted: dict[tuple[str, ...], object], owned: set[tuple[str, ...]]
+) -> dict:
+    """``existing`` with every owned key set to its wanted value or removed (and a mapping left
+    empty by that removed too); every other key is kept as it is."""
+    merged = copy.deepcopy(existing)
+    for path in sorted(owned):
+        parents, node = [], merged
+        for key in path[:-1]:
+            child = node.get(key)
+            if not isinstance(child, dict):
+                if path not in wanted:
+                    break
+                child = node[key] = {}
+            parents.append((node, key))
+            node = child
+        else:
+            if path in wanted:
+                node[path[-1]] = wanted[path]
+            else:
+                node.pop(path[-1], None)
+                for parent, key in reversed(parents):
+                    if parent[key] == {}:
+                        del parent[key]
+    if merged and "schema_version" not in merged:
+        merged = {"schema_version": APP_CONFIG_SCHEMA, **merged}
+    return merged
+
+
+def app_config_text(config: dict) -> str:
+    """The app config as the installer writes it: a header saying what it owns, then the YAML."""
+    return APP_CONFIG_HEADER + yaml.safe_dump(config, sort_keys=False)
+
+
 def describe_app_config(dev: bool, app_config: dict[str, object]) -> str:
-    """One line naming what the app config on the robot will contain (empty: no app.yaml)."""
+    """One line naming the installer's keys in the app config on the robot (empty: none)."""
     parts = [
         f"{key}.{sub}={str(value).lower()}"
         for key, group in app_config.items()
@@ -273,17 +387,22 @@ def check_ssh(
     platform: Platform,
     remote: Remote,
     need: tuple[int, int] | None,
-    free_space: Callable[[], None] | None = None,
+    free_space: Callable[[], str | None] | None = None,
+    extras: tuple[str, ...] = (),
 ) -> RemotePython:
     """Log in once; check the target interpreter, architecture, Python and free space.
 
-    ``free_space`` runs after the login and before the free-space check, so what it frees counts.
+    ``free_space`` (validate the app config, stop the running app, clear caches) runs once the
+    interpreter, architecture, Python and environment checks passed (an incomplete environment
+    the installer may not finish is refused here) and before the free-space check, so a refused
+    install has stopped nothing and what it frees counts; what it returns (caches it kept) is
+    added to a free-space error. The space needed comes from what will be installed
+    (``install_need_mb``: the app, ``extras`` and, when the environment is created or finished,
+    the tree of the creating one).
     """
     ui.info(f"connecting to {remote.target} (ssh may ask for the password)")
     remote.connect()
     ui.ok(f"ssh {remote.target}")
-    if free_space is not None:
-        free_space()
     py = RemotePython(remote, platform.python, ui)
     present = py.exists()
     if not present and need is None:
@@ -303,18 +422,52 @@ def check_ssh(
     ui.ok(f"{arch}, Python {version} at {target}")
     if not present:
         ui.info(f"{platform.env_dir} does not exist yet: it is created with {target}")
+    ready = present and platform.env_ready(py)
+    if ready:
+        platform.probe(ui, py)
+    elif present:
+        ui.warn(f"{platform.env_dir} is incomplete (an earlier install stopped while creating it?)")
+        if need:
+            refusal = finish_refusal(platform, py, read_record(remote, platform.record_path))
+            if refusal:
+                raise WizardError(refusal)
+    hint = free_space() if free_space is not None else None
     if need:
+        downloads, unpacked = install_need_mb(platform, remote, extras, creating=not ready)
+        tmp = posixpath.dirname(REMOTE_TMP_PREFIX)
         for space in platform.space_paths:
             path = posixpath.dirname(space) if not present and space == platform.env_dir else space
+            want = downloads if space == tmp else downloads + unpacked
             free_kb = int(remote.run(f"df -Pk {shlex.quote(path)} | tail -1").split()[3])
-            if free_kb < MIN_FREE_MB * 1024:
+            if free_kb < want * 1024:
                 raise WizardError(
-                    f"only {free_kb // 1024} MB free on {path}, need {MIN_FREE_MB} MB"
+                    f"only {free_kb // 1024} MB free on {path}, need {want} MB (worst case: "
+                    "every package counted as new)" + (f"; {hint}" if hint else "")
                 )
-            ui.ok(f"{free_kb // 1024} MB free on {path}")
-    if present:
-        platform.probe(ui, py)
+            ui.ok(f"{free_kb // 1024} MB free on {path} (need {want} MB)")
     return py
+
+
+def install_need_mb(
+    platform: Platform, remote: Remote, extras: tuple[str, ...], creating: bool
+) -> tuple[int, int]:
+    """Disk the install needs at its peak, in MB, as (downloads, unpacked): the app and its
+    dependencies (``APP_DISK_MB``), each extra (``EXTRA_DISK_MB``) and, when the environment is
+    created or finished, the size of the creating interpreter's own environment (``du``) as a
+    stand-in for the tree the platform installs into it, plus ``ENV_DOWNLOAD_SHARE`` of it for
+    the downloads. Every pip call runs with ``--no-cache-dir``, so the wheels sit in a temporary
+    folder until pip is done: downloads and unpacked files both count where pip unpacks."""
+    downloads, unpacked = APP_DISK_MB
+    for extra in sorted(set(extras)):
+        d, u = EXTRA_DISK_MB.get(extra, (0, 0))
+        downloads, unpacked = downloads + d, unpacked + u
+    if creating and platform.base_python is not None:
+        base_env = posixpath.dirname(posixpath.dirname(platform.base_python))
+        out = remote.run(f"du -sk {shlex.quote(base_env)} 2>/dev/null | cut -f1 || true").strip()
+        tree = int(out) // 1024 if out.isdigit() else ENV_FALLBACK_MB
+        downloads += int(tree * ENV_DOWNLOAD_SHARE)
+        unpacked += tree
+    return downloads, unpacked
 
 
 def current_python(platform: Platform, remote: Remote) -> str:
@@ -338,9 +491,18 @@ def creating_python(platform: Platform, remote: Remote) -> str:
     return base
 
 
-def read_record(remote: Remote, path: str) -> InstallRecord | None:
+def read_record(remote: Remote, path: str, ui: Ui | None = None) -> InstallRecord | None:
+    """The change record on the robot, or None. A record from a newer installer raises
+    ``WizardError``; keys this installer does not know are dropped with a warning."""
     raw = remote.run(f"cat {shlex.quote(path)} 2>/dev/null || true")
-    return InstallRecord.from_json(json.loads(raw)) if raw else None
+    if not raw:
+        return None
+    data = json.loads(raw)
+    record = InstallRecord.from_json(data)
+    ignored = unknown_keys(data)
+    if ignored and ui is not None:
+        ui.warn(f"install record has fields this installer does not know: {', '.join(ignored)}")
+    return record
 
 
 def write_record(remote: Remote, path: str, record: InstallRecord) -> None:
@@ -501,21 +663,47 @@ def models_label(vision: bool) -> str:
     return "voice and vision models" if vision else "voice models"
 
 
-def models_bytes(vision: bool, peak: bool = True) -> int:
+def models_bytes(
+    vision: bool,
+    peak: bool = True,
+    done: frozenset[str] = frozenset(),
+    on_disk: dict[str, int] | None = None,
+) -> int:
     """Disk the fetch needs, from the pinned manifests: each file's download size plus, for a
     zip archive, its unpacked size (both exist while it unpacks; ``peak=False`` counts only what
-    stays). Vision adds the INT8 files derived from the FP32 weights (``VISION_DERIVED_BYTES``)."""
+    stays). Files in ``done`` (``"voice:<path>"``, ``"vision:<path>"``: already verified on the
+    robot) need nothing. ``on_disk`` (same keys) are bytes a file already holds on the robot (a
+    stale partial download, a complete file not yet marked), taken off that file's download size."""
     from ..vision import models as vision_models
     from ..voice import models as voice_models
 
-    specs = list(voice_models.load_manifest().values())
+    groups = [("voice", voice_models.load_manifest().values())]
     if vision:
-        specs += list(vision_models.load_manifest().values())
+        groups.append(("vision", vision_models.load_manifest().values()))
     total = 0
-    for f in (f for m in specs for f in m.files):
-        stays = f.unpacked_bytes if f.archive else f.size_bytes
-        total += (f.size_bytes or 0) + (f.unpacked_bytes or 0) if peak else (stays or 0)
-    return total + (VISION_DERIVED_BYTES if vision else 0)
+    for kind, specs in groups:
+        for f in (f for m in specs for f in m.files):
+            if f"{kind}:{f.path}" in done:
+                continue
+            stays = f.unpacked_bytes if f.archive else f.size_bytes
+            have = min((on_disk or {}).get(f"{kind}:{f.path}", 0), f.size_bytes or 0)
+            download = (f.size_bytes or 0) - have
+            total += download + (f.unpacked_bytes or 0) if peak else (stays or 0)
+    return total
+
+
+def verified_models(py: RemotePython) -> tuple[frozenset[str], dict[str, int]]:
+    """The model files already verified on the robot and the bytes others already hold
+    (``VERIFIED_MODELS``); empty when the app is not installed yet or the query fails, so the
+    full size counts."""
+    if not py.exists():
+        return frozenset(), {}
+    try:
+        data = json.loads(py.py(VERIFIED_MODELS))
+        on_disk = {str(k): int(n) for k, n in data["on_disk"].items()}
+        return frozenset(map(str, data["done"])), on_disk
+    except (WizardError, ValueError, TypeError, KeyError, AttributeError):
+        return frozenset(), {}
 
 
 def free_mib_at(remote: Remote, path: str) -> int | None:
@@ -542,15 +730,22 @@ def fetch_models(
     """Download the voice models (and the vision weights with ``vision``) on the robot by running
     the installed CLI, so they land where the app reads them (``roboemot.paths``).
 
-    Skipped with a warning, not an error, when the filesystem lacks the space the pinned
-    manifests state (same unit on both sides: MiB), when the free space cannot be read, or when
-    the download fails: ``roboemot models fetch`` can be run later. Model
+    The space needed is what the pinned manifests state for the files not yet verified on the
+    robot (a rerun after a partial fetch needs only the rest); with every file verified there is
+    nothing to do. Skipped with a warning, not an error, when the filesystem lacks that space
+    (same unit on both sides: MiB), when the free space cannot be read, or when the download
+    fails twice (``FETCH_ATTEMPTS``): ``roboemot models fetch`` can be run later. Model
     folders the installer creates inside a data folder that is not recorded as its own are
     recorded before the download, so uninstall removes them; inside a recorded data folder they
     go with it. The dry run only reports sizes and free space.
     """
-    need_mib, label = -(-models_bytes(vision) // MIB), models_label(vision)
+    label = models_label(vision)
+    done, on_disk = verified_models(py)
+    need_mib = -(-models_bytes(vision, done=done, on_disk=on_disk) // MIB)
     folders = model_dirs(remote, vision)
+    if need_mib == 0:
+        ui.ok(f"the {label} are already there and verified: nothing to download")
+        return
     free_mib = free_mib_at(remote, folders[0])
     if free_mib is None:
         ui.warn(
@@ -575,7 +770,13 @@ def fetch_models(
         if new:
             record.models_dirs += new
             write_record(remote, platform.record_path, record)
-    result = py.cli(f"models fetch {'--all' if vision else '--voice'}", f"downloading the {label}")
+    args = f"models fetch {'--all' if vision else '--voice'}"
+    result = py.cli(args, f"downloading the {label}")
+    for _ in range(FETCH_ATTEMPTS - 1):
+        if result.ok:
+            break
+        ui.warn(f"the download stopped: trying once more (it resumes)\n{result.output}")
+        result = py.cli(args, f"downloading the {label} (again)")
     if not result.ok:
         ui.warn(
             f"the {label} were not downloaded:\n{result.output}\n"
@@ -815,31 +1016,228 @@ def remove_data_dir(ui: Ui, remote: Remote, record: InstallRecord, dry_run: bool
             remote.run(f"rmdir {shlex.quote(parent)} 2>/dev/null || true", check=False)
 
 
-def warn_data_dir_overrides(ui: Ui, remote: Remote, dirs: list[Path]) -> None:
+def warn_data_dir_overrides(ui: Ui, remote: Remote) -> None:
     """Warn when the app would keep its data outside the folder the installer records.
 
-    Looks at ``ROBOEMOT_DATA_DIR`` in the SSH user's environment and at a ``data_dir`` in the
-    staged ``app.yaml``. The app's own environment may differ, so this is a hint, not a check.
+    Looks at ``ROBOEMOT_DATA_DIR`` in the SSH user's environment (a ``data_dir`` in the app
+    config is checked by ``apply_app_config``). The app's own environment may differ, so this is
+    a hint, not a check.
     """
     env = remote.run('printf %s "${ROBOEMOT_DATA_DIR:-}"').strip()
     if env:
         ui.warn(
             f"ROBOEMOT_DATA_DIR={env} is set for the SSH user: data may land outside the record"
         )
-    for root in dirs:
-        for cfg in root.rglob("app.yaml"):
-            try:
-                value = (yaml.safe_load(cfg.read_text()) or {}).get("data_dir")
-            except (OSError, yaml.YAMLError, AttributeError):
-                continue
-            if value:
-                ui.warn(f"{cfg.name} sets data_dir={value}: uninstall will not remove that folder")
+
+
+# ---------------------------------------------------------------- app config
+
+
+def app_config_remote_path(remote: Remote) -> str:
+    """``app.yaml`` in the robot's data folder (``roboemot.paths.app_config_path`` there)."""
+    _, data = remote_data_dir(remote)
+    return posixpath.join(data, paths.APP_CONFIG_FILE)
+
+
+def read_app_config(remote: Remote, path: str) -> dict | None:
+    """The app config on the robot, None when there is no file; not YAML or not a mapping is a
+    WizardError (the app would refuse it too)."""
+    if not _exists(remote, path):
+        return None
+    raw = remote.run(f"cat {shlex.quote(path)}")
+    try:
+        data = yaml.safe_load(raw) or {}
+    except yaml.YAMLError as e:
+        raise WizardError(f"{path} is not valid YAML ({e}): fix or remove it") from e
+    if not isinstance(data, dict):
+        raise WizardError(f"{path} is not a mapping: fix or remove it")
+    return data
+
+
+def apply_app_config(
+    ui: Ui,
+    platform: Platform,
+    remote: Remote,
+    record: InstallRecord,
+    wanted: dict[tuple[str, ...], object],
+    owned: set[tuple[str, ...]],
+    dry_run: bool,
+) -> None:
+    """Write the installer's keys into ``app.yaml`` in the data folder and keep every other key
+    (SPEC 4A, Installer): owner edits survive a reinstall. Comments are not kept. Every file the
+    installer writes, created or edited, is recorded (before the write), and uninstall removes it
+    whole, including the settings saved from the web UI (owner decision 2026-10-22; no per-key
+    restore); editing a file the owner already had says so. A ``data_dir`` in the file is warned
+    about. The dry run only says what it would write. The content travels on the SSH channel's
+    standard input, never on a command line."""
+    path = app_config_remote_path(remote)
+    existing = read_app_config(remote, path)
+    merged = merge_app_config(existing or {}, wanted, owned)
+    if (existing or {}).get("data_dir"):
+        ui.warn(f"{path} sets data_dir={existing['data_dir']}: uninstall will not remove it")
+    keys = ", ".join(".".join(k) + f"={str(v).lower()}" for k, v in sorted(wanted.items()))
+    if merged == (existing or {}) and (existing is not None or not merged):
+        ui.ok(f"app config {path} already as asked ({keys or 'no installer keys'})")
+        return
+    adopted = existing is not None and record.app_config != path
+    if adopted:
+        ui.warn(
+            f"{path} was there before: {'it would be' if dry_run else 'it is'} recorded, and "
+            "uninstall removes it whole, other settings and those saved from the web UI included"
+        )
+    if dry_run:
+        ui.info(
+            f"would write {path} ({keys or 'no installer keys'}; other keys kept; "
+            "uninstall removes the file)"
+        )
+        return
+    if record.app_config != path:
+        record.app_config = path
+        write_record(remote, platform.record_path, record)
+    tmp = f"{path}.tmp"
+    remote.run(
+        f"umask 077 && mkdir -p {shlex.quote(posixpath.dirname(path))} && "
+        f"cat > {shlex.quote(tmp)} && mv {shlex.quote(tmp)} {shlex.quote(path)}",
+        stdin=app_config_text(merged),
+    )
+    ui.ok(f"app config {path}: {keys or 'installer keys removed'}; other keys kept")
+
+
+def configured_webui_port(remote: Remote) -> int | None:
+    """``webui.port`` in the robot's app config when it sets a positive one, else None (the
+    file was validated before the install changed anything)."""
+    config = read_app_config(remote, app_config_remote_path(remote)) or {}
+    webui = config.get("webui")
+    port = webui.get("port") if isinstance(webui, dict) else None
+    if isinstance(port, int) and not isinstance(port, bool) and port > 0:
+        return port
+    return None
+
+
+def verify_app_config(
+    remote: Remote, wanted: dict[tuple[str, ...], object], owned: set[tuple[str, ...]]
+) -> None:
+    """The app config on the robot has every owned key as asked (set or absent)."""
+    path = app_config_remote_path(remote)
+    found = leaves(read_app_config(remote, path) or {})
+    for key in sorted(owned):
+        if found.get(key) != wanted.get(key):
+            name = ".".join(key)
+            raise WizardError(
+                f"{path} has {name}={found.get(key)}, expected {name}={wanted.get(key)}"
+            )
+
+
+def remove_app_config(ui: Ui, remote: Remote, record: InstallRecord, dry_run: bool) -> None:
+    """Delete the app config the installer wrote (created or edited), whole: settings saved from
+    the web UI go with it. Only at the exact path it would pick and only if its ``realpath`` is
+    the same."""
+    if record.app_config is None:
+        return
+    path = app_config_remote_path(remote)
+    if record.app_config != path:
+        ui.warn(f"recorded app config {record.app_config!r} is not {path}: left as it is")
+    elif not _exists(remote, path):
+        ui.ok(f"app config {path} is not there")
+    elif remote.run(f"realpath {shlex.quote(path)} 2>/dev/null || true").strip() != path:
+        ui.warn(f"{path} resolves elsewhere: symlink? left as it is")
+    else:
+        if not dry_run:
+            remote.run(f"rm -f {shlex.quote(path)}")
+        ui.ok(
+            f"{'would remove' if dry_run else 'removed'} {path}, including settings saved "
+            "from the web UI"
+        )
 
 
 # ---------------------------------------------------------------- install
 
 
+@dataclass
+class EnvFate:
+    """What uninstall does with the environment the record says this installer created:
+    ``action`` is ``none`` (not created by it), ``gone``, ``keep`` or ``delete``; ``note`` says
+    why, for the report."""
+
+    action: str
+    note: str = ""
+
+
+def created_env_fate(
+    platform: Platform, py: RemotePython, remote: Remote, record: InstallRecord
+) -> EnvFate:
+    """Decide, read-only, whether the created environment goes: only the exact path the
+    platform names, only with an interpreter, no other app or foreign package in it, and only
+    if its ``realpath`` is the same."""
+    env = record.env_created
+    if env is None:
+        return EnvFate("none")
+    if env != platform.env_dir:
+        return EnvFate(
+            "keep", f"recorded environment {env!r} is not {platform.env_dir}: left as it is"
+        )
+    if not _exists(remote, env):
+        return EnvFate("gone", f"environment {env} is not there")
+    if not py.exists():
+        return EnvFate(
+            "keep", f"{env} has no interpreter: cannot rule out other apps in it, left as it is"
+        )
+    users = platform.env_users(py)
+    if users:
+        return EnvFate("keep", f"keeping {env}: also used by {', '.join(users)}")
+    accounted = {canonical(p) for p in record.packages} | set(record.added)
+    foreign = sorted(set(py.installed()) - accounted - set(record.env_baseline))
+    if foreign:
+        return EnvFate(
+            "keep",
+            f"keeping {env}: it holds packages this installer did not put there: "
+            f"{', '.join(foreign)}",
+        )
+    real = remote.run(f"realpath {shlex.quote(env)} 2>/dev/null || true").strip()
+    if real != env:
+        return EnvFate("keep", f"{env} resolves to {real or 'nothing'}: symlink? left as it is")
+    return EnvFate("delete")
+
+
 def remove_created_env(
+    ui: Ui, platform: Platform, remote: Remote, fate: EnvFate, dry_run: bool
+) -> bool:
+    """Carry out ``fate`` (from ``created_env_fate``). Returns True when the environment is
+    deliberately left in place."""
+    if fate.action == "gone":
+        ui.ok(fate.note)
+    elif fate.action == "keep":
+        ui.warn(fate.note)
+    elif fate.action == "delete":
+        env = platform.env_dir
+        if not dry_run:
+            remote.run(f"rm -rf {shlex.quote(env)}")
+        ui.ok(f"{'would delete' if dry_run else 'deleted'} the environment {env}")
+    return fate.action == "keep"
+
+
+def finish_refusal(
+    platform: Platform, py: RemotePython, record: InstallRecord | None
+) -> str | None:
+    """Why an incomplete environment may not be finished, or None: it must be the one the
+    record says this installer created, and hold nothing beyond the baseline taken when it was
+    created (the finish step installs unpinned, which must not touch another app's packages)."""
+    env = platform.env_dir
+    if record is None or record.env_created != env:
+        return (
+            f"{env} lacks what {platform.display_name} apps need and was not created by this "
+            "installer: repair it with the robot's own software, then run the installer again"
+        )
+    extra = sorted(set(py.installed()) - set(record.env_baseline))
+    if extra:
+        return (
+            f"{env} is incomplete but holds packages added since it was created "
+            f"({', '.join(extra)}): repair it by hand, or uninstall, then run the installer again"
+        )
+    return None
+
+
+def finish_env(
     ui: Ui,
     platform: Platform,
     py: RemotePython,
@@ -847,43 +1245,26 @@ def remove_created_env(
     record: InstallRecord,
     dry_run: bool,
 ) -> bool:
-    """Delete the environment this installer created, unless another app lives in it.
-
-    Only the exact path the platform names is deleted, and only if its ``realpath`` is the same.
-    Returns True when the environment is deliberately left in place.
-    """
-    env = record.env_created
-    if env is None:
+    """Finish an environment an earlier install created but could not complete (the venv is
+    there, the platform's base packages are not), by running the platform's create step again,
+    then take the baseline anew. An incomplete environment this installer did not create is not
+    its to change: a WizardError. Returns False after the dry run's report (nothing more to
+    check without the environment)."""
+    env = platform.env_dir
+    refusal = finish_refusal(platform, py, record)
+    if refusal:
+        raise WizardError(refusal)
+    plan = platform.plan_env(remote)
+    if dry_run:
+        ui.ok(f"would finish the environment {env} an earlier install created ({plan})")
+        ui.info("dependency check skipped: the environment is not complete yet")
+        claim_data_dir(ui, platform, remote, record, dry_run=True)
         return False
-    if env != platform.env_dir:
-        ui.warn(f"recorded environment {env!r} is not {platform.env_dir}: left as it is")
-        return True
-    if not _exists(remote, env):
-        ui.ok(f"environment {env} is not there")
-        return False
-    if not py.exists():
-        ui.warn(f"{env} has no interpreter: cannot rule out other apps in it, left as it is")
-        return True
-    users = platform.env_users(py)
-    if users:
-        ui.warn(f"keeping {env}: also used by {', '.join(users)}")
-        return True
-    accounted = {canonical(p) for p in record.packages} | set(record.added)
-    foreign = sorted(set(py.installed()) - accounted - set(record.env_baseline))
-    if foreign:
-        ui.warn(
-            f"keeping {env}: it holds packages this installer did not put there: "
-            f"{', '.join(foreign)}"
-        )
-        return True
-    real = remote.run(f"realpath {shlex.quote(env)} 2>/dev/null || true").strip()
-    if real != env:
-        ui.warn(f"{env} resolves to {real or 'nothing'}: symlink? left as it is")
-        return True
-    if not dry_run:
-        remote.run(f"rm -rf {shlex.quote(env)}")
-    ui.ok(f"{'would delete' if dry_run else 'deleted'} the environment {env}")
-    return False
+    ui.warn(f"{env} was created by an earlier install that stopped: finishing it")
+    platform.create_env(ui, remote, plan)
+    record.env_baseline = sorted(py.installed())
+    write_record(remote, platform.record_path, record)
+    return True
 
 
 def install_packages(
@@ -897,12 +1278,15 @@ def install_packages(
     extras: tuple[str, ...] = (),
 ) -> InstallRecord:
     own = distribution_names(dirs)
-    warn_data_dir_overrides(ui, remote, dirs)
-    record = read_record(remote, platform.record_path) or InstallRecord(
+    warn_data_dir_overrides(ui, remote)
+    record = read_record(remote, platform.record_path, ui) or InstallRecord(
         platform.app_name, platform.manifest_id, own
     )
     record.packages = sorted(set(record.packages) | set(own))
-    if not py.exists():
+    if py.exists() and not platform.env_ready(py):
+        if not finish_env(ui, platform, py, remote, record, dry_run):
+            return record
+    elif not py.exists():
         plan = platform.plan_env(remote)
         if dry_run:
             ui.ok(f"would create the environment {platform.env_dir} ({plan})")
@@ -1007,33 +1391,45 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
                 )
                 dev = ui.confirm("Install in dev mode?", True)
             ui.ok("dev mode (configs/dev-unmeasured.yaml)" if dev else "production config")
-            app_config = app_config_overrides(opts.voice)
-            content = describe_app_config(dev, app_config)
-            ui.ok(f"app config (data/app.yaml): {content}" if content else "no app config file")
-            dirs = platform.stage(root, Path(tmp) / "src", dev, app_config)
+            content = describe_app_config(dev, app_config_overrides(opts.voice))
+            ui.ok(f"app config (app.yaml in the data folder): {content or 'no installer keys'}")
+            wanted, owned = owned_app_config(root, dev, opts.voice)
+            dirs = platform.stage(root, Path(tmp) / "src")
 
             ui.step("SSH access")
 
-            def free_space() -> None:
+            def free_space() -> str | None:
+                read_app_config(remote, app_config_remote_path(remote))  # refuse a broken one now
                 stopped.append(stop_own_app(ui, platform, opts.dry_run) and not opts.dry_run)
                 home, _ = remote_data_dir(remote)
-                clear_caches(
-                    ui, remote, home, platform.clearable_caches, opts.clear_caches, opts.dry_run
+                kept = clear_caches(
+                    ui,
+                    remote,
+                    home,
+                    platform.clearable_caches,
+                    opts.clear_caches,
+                    opts.dry_run,
+                    (posixpath.dirname(platform.env_dir),),
                 )
+                if not kept:
+                    return None
+                return f"kept {', '.join(kept)}: --clear-caches frees it"
 
-            py = check_ssh(ui, platform, remote, min_python(dirs), free_space)
+            extras = (*platform.extras, *(("vision",) if opts.vision else ()))
+            py = check_ssh(ui, platform, remote, min_python(dirs), free_space, extras)
 
             ui.step("Build")
             wheels = build_wheels(dirs, Path(tmp) / "wheels")
             ui.ok(f"built {', '.join(w.name for w in wheels)}")
 
             ui.step("Install (dependency check only)" if opts.dry_run else "Install")
-            extras = (*platform.extras, *(("vision",) if opts.vision else ()))
             if opts.vision and opts.dry_run:
                 ui.info("would install the vision extra (OpenCV, ONNX); --no-vision skips it")
             record = install_packages(ui, platform, py, remote, dirs, wheels, opts.dry_run, extras)
+            apply_app_config(ui, platform, remote, record, wanted, owned, opts.dry_run)
             if not opts.dry_run:
-                platform.verify(ui, py, dev, app_config)
+                platform.verify(ui, py)
+                verify_app_config(remote, wanted, owned)
             if opts.piper is None:
                 opts.piper = opts.voice and ui.confirm(
                     "Install Piper for on-board speech (own virtualenv)?", True
@@ -1079,7 +1475,7 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
                 else ui.confirm(f"Start {platform.app_name} now?", True)
             ):
                 platform.start(ui)
-                report_app_url(ui, platform, host)
+                report_app_url(ui, platform, host, configured_webui_port(remote))
             startup = opts.startup
             if startup is None:
                 startup = ui.confirm(
@@ -1120,9 +1516,11 @@ def stop_own_app(ui: Ui, platform: Platform, dry_run: bool) -> bool:
     return True
 
 
-def report_app_url(ui: Ui, platform: Platform, host: str) -> None:
-    """Tell where the running app's web UI is, if the platform has one."""
-    url = platform.app_url(host)
+def report_app_url(ui: Ui, platform: Platform, host: str, port: int | None = None) -> None:
+    """Tell where the running app's web UI is, if the platform has one. ``port`` is the
+    ``webui.port`` the app config sets, when the caller could read it (the installer, over
+    SSH); without it the platform's default is used (``run_on_robot.py`` has no SSH)."""
+    url = platform.app_url(host) if port is None else platform.app_url(host, port)
     if url:
         ui.ok(f"web UI: {url}")
 
@@ -1146,7 +1544,7 @@ def run_uninstall(opts: Options, ui: Ui, root: Path) -> None:
         ui.step("Install record")
         env_there = py.exists()
         installed = py.installed() if env_there else {}
-        record = read_record(remote, platform.record_path)
+        record = read_record(remote, platform.record_path, ui)
         if record is None:
             ui.warn(
                 f"no install record at {platform.record_path}: only the app's own packages "
@@ -1187,7 +1585,17 @@ def run_uninstall(opts: Options, ui: Ui, root: Path) -> None:
             ui.warn(f"cannot remove the secrets {', '.join(record.secrets)}: no environment to run")
 
         ui.step("Packages")
-        plan = plan_uninstall(record, installed, py.requires() if env_there else {})
+        fate = created_env_fate(platform, py, remote, record)
+        if fate.action == "delete":
+            # The whole environment goes below: restoring versions inside it first would only
+            # need the package index (internet) for nothing.
+            verb = "would be" if opts.dry_run else "are"
+            ui.ok(f"the app's packages {verb} removed with the environment {platform.env_dir}")
+            plan = UninstallPlan([], {}, {}, {})
+        else:
+            plan = plan_uninstall(record, installed, py.requires() if env_there else {})
+        if not env_there:
+            plan.drifted = {}  # nothing to compare against: the environment is gone
         for name, users in plan.kept.items():
             ui.warn(f"keeping {name}: needed by {', '.join(users)}")
         for name, version in plan.drifted.items():
@@ -1204,16 +1612,18 @@ def run_uninstall(opts: Options, ui: Ui, root: Path) -> None:
         if not opts.dry_run:
             py.uninstall(plan.remove)
             py.install_exact(plan.restore)
-        if env_there and not (opts.dry_run and plan.remove):  # before removal, modules are expected
+        # before removal (dry run), the app's modules are expected
+        if fate.action != "delete" and env_there and not (opts.dry_run and plan.remove):
             for module, path in leftovers(py, platform):
                 if not opts.dry_run:
                     remote.run(f"rm -rf {shlex.quote(path)}")
                 ui.warn(f"{would}delete leftover {path} ({module})")
 
         ui.step("Clean up and verify")
-        keep_env = remove_created_env(ui, platform, py, remote, record, opts.dry_run)
+        keep_env = remove_created_env(ui, platform, remote, fate, opts.dry_run)
         remove_piper_venv(ui, remote, record, opts.dry_run)
         remove_models_dirs(ui, remote, record, opts.dry_run)
+        remove_app_config(ui, remote, record, opts.dry_run)
         remove_data_dir(ui, remote, record, opts.dry_run)
         platform.cleanup(ui, py, opts.dry_run)
         listed = remote.run(f"ls -d {REMOTE_TMP_PREFIX}.* 2>/dev/null || true").split()
@@ -1268,6 +1678,9 @@ def verify_uninstall(
         for d in record.models_dirs
         if d in expected_models and _exists(py.remote, d)
     ]
+    config = app_config_remote_path(py.remote)
+    if record.app_config == config and _exists(py.remote, config):
+        problems.append(f"app config {config} still present")
     data_dir, bad = checked_data_dir(py.remote, record)
     if bad:
         problems.append(bad)
@@ -1366,7 +1779,8 @@ def parse_args(argv: list[str] | None = None) -> Options:
         "--clear-caches",
         action=argparse.BooleanOptionalAction,
         help="delete the robot's download caches the platform names (e.g. a uv cache) to "
-        "free disk space; uninstall cannot restore them",
+        "free disk space; uninstall cannot restore them (default: ask on a terminal; -y alone "
+        "keeps them)",
     )
     p.add_argument("-y", "--yes", action="store_true", help="answer yes to every confirmation")
     a = p.parse_args(argv)
