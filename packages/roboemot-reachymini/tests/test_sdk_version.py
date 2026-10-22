@@ -50,3 +50,14 @@ def test_a_newer_sdk_starts_with_a_warning(monkeypatch, caplog):
     monkeypatch.setattr(platform_module, "installed_version", lambda: "1.13.0")
     platform_module.ReachyMiniPlatform().require_runtime()
     assert "newer than 1.12" in caplog.text
+
+
+def test_the_sim_extra_pins_the_tested_sdk():
+    """Review S-8: the sim pin and TESTED_SDK are written in two places; keep them together."""
+    import tomllib
+    from pathlib import Path
+
+    project = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
+    (sim,) = project["project"]["optional-dependencies"]["sim"]
+    major, minor = map(int, sdk.TESTED_SDK.split("."))
+    assert sim.endswith(f">={sdk.MIN_SDK},<{major}.{minor + 1}"), sim

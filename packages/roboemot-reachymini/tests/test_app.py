@@ -253,3 +253,21 @@ def test_the_app_reads_its_config_from_the_data_folder_not_the_package():
     """R4 S4: a reinstall replaces the package; the app config outside it survives."""
     assert app_module.app_config_path() == paths.data_path() / "app.yaml"
     assert app_module.DATA not in app_module.app_config_path().parents
+
+
+def test_a_legacy_app_yaml_left_in_the_package_is_ignored(tmp_path, monkeypatch):
+    """Review MT1: an old install's data/app.yaml (here broken) inside the package does not
+    reach the app; only the data-folder app config does."""
+    data = tmp_path / "data"
+    shutil.copytree(app_module.DATA, data)
+    (data / "app.yaml").write_text("voice: [unclosed\nllm_routes: nonsense\n")
+    config = tmp_path / "roboemot-data" / "app.yaml"
+    config.parent.mkdir(exist_ok=True)
+    shutil.copy2(ROOT / "configs/dev-unmeasured.yaml", config)
+    monkeypatch.setattr(app_module, "DATA", data)
+    monkeypatch.setattr(app_module, "app_config_path", lambda: config)
+    stop = threading.Event()
+    stop.set()
+    app = app_module.RoboEmotApp.__new__(app_module.RoboEmotApp)
+    app.run(fake_mini(), stop)
+    assert app.diagnostics.report()["sections"]["roboemot.app"]["data"]["manifest"]
