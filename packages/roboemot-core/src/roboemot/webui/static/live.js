@@ -22,9 +22,18 @@ const LIVE_METER_FLOOR_DB = -60;
 const liveState = { serial: 0, audioTimer: null, after: 0, epoch: null, ui: null };
 const liveVideo = { timer: null, ui: null, url: null, paused: false, chain: 0, running: null, pollMs: LIVE_RETRY_MS, idleMs: Infinity };
 const liveBanner = { timer: null, serial: 0 };
-const liveInput = { at: Date.now() };
+const liveInput = { at: Date.now(), reported: 0 }; // reported 0: loading the page counts as input
 for (const kind of ["pointerdown", "keydown", "wheel", "touchstart"]) {
   document.addEventListener(kind, () => { liveInput.at = Date.now(); }, { passive: true });
+}
+
+// The server lets a Live poll extend the idle session only when it carries this mark: a click,
+// key or touch since the previous marked poll. An unattended tab then still times out after
+// `webui.session_ttl_s` (SPEC 11A, 12); the 401 that follows brings back the login.
+function liveActivity() {
+  if (liveInput.at <= liveInput.reported) return {};
+  liveInput.reported = liveInput.at;
+  return { "X-RoboEmot-Active": "1" };
 }
 
 // Each card is { key, render(data) -> Node }. Slices T (audio, transcript) and U (video) add theirs
@@ -141,7 +150,7 @@ async function livePoll(box, serial) {
   if (!liveActive(serial)) return;
   let delay = LIVE_RETRY_MS;
   try {
-    const data = await api("GET", "/api/live/state");
+    const data = await api("GET", "/api/live/state", undefined, liveActivity());
     if (!liveActive(serial)) return;
     notice("");
     liveRender(box, data);
@@ -271,7 +280,7 @@ async function liveVideoPoll(serial, chain) {
   if (Date.now() - liveInput.at > liveVideo.idleMs) { liveVideoIdleStop(); return; }
   let delay = liveVideo.pollMs;
   try {
-    const resp = await fetch("/api/live/frame.jpg", { method: "GET", credentials: "same-origin", cache: "no-store" });
+    const resp = await fetch("/api/live/frame.jpg", { method: "GET", credentials: "same-origin", cache: "no-store", headers: liveActivity() });
     if (!liveVideoLive(serial, chain)) return;
     if (resp.ok) {
       const blob = await resp.blob();
@@ -452,7 +461,7 @@ async function liveAudioPoll(box, serial) {
   let delay = LIVE_RETRY_MS;
   try {
     const epoch = liveState.epoch ? "&epoch=" + encodeURIComponent(liveState.epoch) : "";
-    const data = await api("GET", "/api/live/audio?after=" + liveState.after + epoch);
+    const data = await api("GET", "/api/live/audio?after=" + liveState.after + epoch, undefined, liveActivity());
     if (!liveActive(serial)) return;
     liveAudioRender(box, data);
     delay = data.audio_poll_ms || LIVE_RETRY_MS;

@@ -130,6 +130,7 @@ def test_each_field_changes_with_the_pin_and_is_audited(served, stack, path, val
         "persisted": True,
         "layer": "runtime",
         "restart_required": False,
+        "applied": True,
     }
     assert get(stack, path) == value
     entry = stack.audit[-1]

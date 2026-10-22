@@ -168,6 +168,9 @@ def assemble(
     speech = host.speech = SpeechActivity(cfg.voice.echo_tail_ms)
     reflexes.speaking = speech.speaking
     phase = host.phase = ConversationPhase(speech.speaking)
+    # The microphone opens only for a consumer: the reflex engine with its audio on, or voice. An
+    # engine turned on later runs at once, but its loud-onset part needs a restart (the reload
+    # warns); turned off, it stops reading the level at once (it checks ``reflexes.enabled``).
     reflex_audio = cfg.reflexes.enabled and cfg.reflexes.audio.enabled
     # The Live tab's levels ride on the hub's reflex sink (one tuple store more, no new work on
     # the microphone thread); the transcript ring is cleared whenever the robot falls asleep.

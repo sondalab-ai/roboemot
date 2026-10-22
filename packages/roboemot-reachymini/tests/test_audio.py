@@ -462,6 +462,16 @@ def test_levels_are_plain_json_and_the_chunk_is_not_kept():
     assert all(type(v) is float for k in ("ch0_dbfs", "corr") for v in lv[k].values())
 
 
+def test_a_reload_takes_the_new_stall_limit():
+    """Sweep (SPEC 11A): the catch-up limit follows ``reflexes.max_age_ms`` without a restart."""
+    from roboemot.config.schema import RoboEmotConfig
+
+    mini, _ = media([])
+    audio = ReachyAudio(mini, None, 50, max_gap_s=0.15)
+    audio.apply_config(RoboEmotConfig(reflexes={"max_age_ms": 400}))
+    assert audio.max_gap_s == 0.4
+
+
 def test_the_levels_are_kept_without_the_voice_pipeline():
     """R4 S8/T6: with no listener (voice off) the reflex path still reads every chunk, and the
     channel levels are reported from it: that setup is where the question comes up."""

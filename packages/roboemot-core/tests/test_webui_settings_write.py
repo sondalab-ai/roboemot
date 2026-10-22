@@ -742,6 +742,7 @@ def test_endpoints_write_entries_and_reset_with_the_pin(web, stack):
         "layer": "runtime",
         "restart_required": False,
         "persisted": True,
+        "applied": True,
     }
     assert stack.effective().voice.moods["tender"].rate == -0.1
     assert post(web, "/api/settings/entry/remove", path="voice.moods.tender").status == 200
@@ -1439,3 +1440,33 @@ def test_the_supported_languages_are_cached():
     from roboemot.voice.models import supported_languages
 
     assert supported_languages() is supported_languages()
+
+
+def test_a_change_the_parts_did_not_take_is_reported_as_not_applied():
+    """R3 SF3: the stack kept the value but a reload listener failed: the response says so."""
+    from roboemot.config.stack import ConfigStack
+    from roboemot.webui.settings import SettingsEditor
+
+    stack = ConfigStack()
+    editor = SettingsEditor(stack)
+    assert editor.change("voice.expressivity", 0.3)["applied"] is True
+
+    def broken(change):
+        raise RuntimeError
+
+    stack.subscribe(broken)
+    result = editor.change("voice.expressivity", 0.4)
+    assert result["changed"] is True and result["applied"] is False
+    assert editor.reset("voice.expressivity")["applied"] is False
+
+
+def test_the_web_ui_cannot_turn_the_reflexes_on():
+    """Review ZG should-fix 2 context: turning the reflex engine on is a new motion the web never
+    grants (the ``reflex`` check), so only the app config file can; the reload then reports the
+    restart its microphone part needs (tests/runtime/test_reload.py)."""
+    from roboemot.config.stack import ConfigStack, GuardrailError
+    from roboemot.webui.settings import SettingsEditor
+
+    stack = ConfigStack(app={"reflexes": {"enabled": False}})
+    with pytest.raises(GuardrailError):
+        SettingsEditor(stack).change("reflexes.enabled", True)

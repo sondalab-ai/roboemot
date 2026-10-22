@@ -42,7 +42,9 @@ class AudioHub(Protocol):
     ``start`` and ``stop`` bracket the capture thread (``start`` degrades to an ``unavailable``
     snapshot when there is no microphone, never raises); ``read`` drains the voice queue for the
     listener (None on timeout); ``set_voice`` turns that queue off before ``start`` when no
-    listener exists; ``snapshot`` is the debug-report state (counts and states, never samples).
+    listener exists; ``snapshot`` is the debug-report state (counts and states, never samples);
+    ``apply_config`` is the hot reload (SPEC 11A) of the hub's settings that are not restart
+    fields (a hub with none makes it a no-op).
     """
 
     def start(self) -> None: ...
@@ -50,6 +52,7 @@ class AudioHub(Protocol):
     def set_voice(self, enabled: bool) -> None: ...
     def snapshot(self) -> dict[str, Any]: ...
     def read(self, timeout: float = 0.0) -> VoiceChunkLike | None: ...
+    def apply_config(self, cfg: RoboEmotConfig) -> None: ...
 
 
 @runtime_checkable

@@ -36,7 +36,7 @@ export async function loadPage(routes = {}) {
   };
   window.fetch = async (path, init = {}) => {
     const body = init.body === undefined ? undefined : JSON.parse(init.body);
-    calls.push({ method: init.method, path, body });
+    calls.push({ method: init.method, path, body, headers: init.headers || {} });
     const hit = table[`${init.method} ${path}`] ?? table[`${init.method} ${path.split("?")[0]}`];
     if (hit === undefined) return reply(404, { error: "not_found" });
     const out = typeof hit === "function" ? await hit(body, path) : hit;

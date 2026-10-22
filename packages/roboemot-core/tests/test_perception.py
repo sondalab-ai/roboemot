@@ -405,3 +405,24 @@ def test_objects_report_off_when_the_flag_is_off_even_with_the_model_loaded():
     )
     p.apply_config(off)
     assert p.vision_snapshot()["objects"] == {"state": "off"}
+
+
+def test_hot_reload_reaches_the_camera_field_of_view_and_the_age_and_gender_votes():
+    """Sweep (SPEC 11A): the pipeline's world settings (camera field of view, for the bearings)
+    and the age and gender worker's identity settings were start-up copies."""
+
+    def with_attributes(cfg, profile):
+        stages = fake_stages(cfg, profile)
+        stages.attribute_estimator = object()  # never called here
+        return stages
+
+    p = open_perception(CFG, Bus(), Source(), load_stages=with_attributes)
+    try:
+        new = RoboEmotConfig.model_validate(
+            {"world": {"camera_fov_h_deg": 66.0}, "identity": {"estimate_confidence_min": 0.7}}
+        )
+        p.apply_config(new)
+        assert p.pipeline.world.camera_fov_h_deg == 66.0
+        assert p.pipeline.worker is not None and p.pipeline.worker.config is new.identity
+    finally:
+        p.stop()

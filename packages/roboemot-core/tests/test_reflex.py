@@ -1237,3 +1237,41 @@ def test_a_runtime_override_below_the_new_default_is_refused_and_one_above_is_al
         stack.set("reflexes.rules.startle-loud.threshold", 8.0)
     stack.set("reflexes.rules.startle-loud.threshold", 15.0)
     assert stack.effective().reflexes.rules[0].threshold == 15.0
+
+
+def test_turning_the_engine_off_at_runtime_stops_sound_loud_too():
+    """Sweep (SPEC 11A): ``reflexes.enabled`` is not a restart field. Off at runtime, the engine
+    publishes no ``sound.loud`` (as when it starts off); on again, it does."""
+    rig = Rig(cfg_with(rule(), enabled=False))
+    published = []
+    rig.bus.subscribe("sound.loud", lambda m: published.append(m.payload))
+    rig.settle_audio()
+    rig.engine.offer_audio_level(LOUD, rig.t)
+    rig.tick()
+    assert published == []
+    rig.engine.apply_config(cfg_with(rule()), 0.0)
+    rig.settle_audio()
+    rig.engine.offer_audio_level(LOUD, rig.t)
+    rig.tick()
+    assert len(published) == 1
+
+
+def test_turning_the_engine_back_on_does_not_fire_on_a_sound_that_went_on_while_it_was_off():
+    """A steady sound that started while the engine was off is not an onset when it comes back:
+    like after the robot's own speech, the first chunk cannot be a rising edge."""
+    rig = Rig(cfg_with(rule()))
+    published = []
+    rig.bus.subscribe("sound.loud", lambda m: published.append(m.payload))
+    rig.settle_audio()
+    rig.engine.apply_config(cfg_with(rule(), enabled=False), 0.0)
+    for _ in range(5):  # the television goes on while the engine is off
+        rig.engine.offer_audio_level(LOUD, rig.t)
+        rig.tick()
+    rig.engine.apply_config(cfg_with(rule()), 0.0)
+    rig.engine.offer_audio_level(LOUD, rig.t)
+    rig.tick(2)
+    assert published == [] and rig.reflex_sources() == []
+    rig.settle_audio()
+    rig.engine.offer_audio_level(LOUD, rig.t)
+    rig.tick()
+    assert len(published) == 1  # a real onset after it fires again
