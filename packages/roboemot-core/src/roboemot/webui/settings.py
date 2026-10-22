@@ -47,6 +47,7 @@ from roboemot.config.catalogue import (
 )
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.config.stack import (
+    DROP,
     KEYED_LISTS,
     NO_KEY,
     REMOVED_SETTINGS,
@@ -60,7 +61,9 @@ from roboemot.config.stack import (
     ident_fields,
     keyed_index,
     keyed_ref,
+    log_dropped,
     set_path,
+    without_dropped,
 )
 from roboemot.redact import REDACTED, secret_shaped
 from roboemot.redact import origin as plain_origin
@@ -710,7 +713,7 @@ class SettingsEditor:
         except ValueError as exc:
             log.warning("web UI settings file ignored: %s", exc)
             return
-        migrated = _migrated(stored)
+        migrated, stripped = _migrated(stored)
         with self._lock:
             tree, rows = self.stack.merged_tree(), self._rows()
             planned: dict[str, tuple[str, Any, bool]] = {}  # file key -> (stack path, value, add)
@@ -732,7 +735,7 @@ class SettingsEditor:
                     log.warning("web UI setting %s dropped: no longer acceptable", _shown(key))
             self._overrides, self._acks = self._commit_batch(cleaned, acks)
             self._restore_keys(keys, acks)
-            if set(self._overrides) != set(stored) or self._keys != keys:
+            if stripped or set(self._overrides) != set(stored) or self._keys != keys:
                 self._persist()
 
     # ------------------------------------------------------------------ write internals
@@ -1166,19 +1169,36 @@ def combine(edits: Iterable[tuple[str, Any]]) -> dict[str, Any]:
     return out
 
 
-def _migrated(stored: dict[str, Any]) -> dict[str, Any]:
+def _migrated(stored: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     """The stored overrides with renamed settings under their new path (a value already stored
-    under the new path wins) and removed ones dropped with a log line naming the key only."""
+    under the new path wins) and removed ones dropped with a log line naming the key only. A
+    dropped setting (``DROPPED_SETTINGS``) is taken out of a stored value too, e.g. an added
+    route; the flag says whether a value changed that way, so the file is rewritten."""
     out: dict[str, Any] = {}
+    stripped = False
     for key, value in stored.items():
         if any(key == old or key.startswith(old + ".") for old in REMOVED_SETTINGS):
             log.warning("web UI setting %s dropped: removed from the configuration", _shown(key))
             continue
+        value, found = without_dropped(_pattern_path(key), value)
+        log_dropped("web UI settings", found)
+        if value is DROP:
+            continue
+        stripped = stripped or bool(found)
         new = RENAMED_SETTINGS.get(key, key)
         if new != key and new in stored:
             continue
         out[new] = value
-    return out
+    return out, stripped
+
+
+def _pattern_path(key: str) -> str:
+    """A file key as a stack path, a merged-list entry's identity as ``*``."""
+    parsed = parse_okey(key)
+    if parsed is None:
+        return key
+    list_path, _, rest = parsed
+    return f"{list_path}.*" + (f".{rest}" if rest else "")
 
 
 def _shown(key: str) -> str:
