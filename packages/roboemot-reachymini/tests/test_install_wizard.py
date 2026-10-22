@@ -21,6 +21,7 @@ from roboemot.install import run as run_mod
 from roboemot.install.build import with_extras
 from roboemot.install.caches import cache_path, clear_caches
 from roboemot.install.piper_lock import lock_name
+from roboemot_reachymini import daemon as daemon_mod
 from roboemot_reachymini import install as reachy
 from roboemot_reachymini.daemon import INSTALL_TIMEOUT_S, DaemonClient, DaemonError
 from roboemot_reachymini.install import ReachyMiniWireless
@@ -294,6 +295,8 @@ class FakeDaemon:
         self.hide_own = False  # a daemon that does not pick the app up
         self.autostart_on_wake = False  # the startup app begins as soon as the robot wakes up
         self.lock: dict | None = {"state": "free", "holder_name": None}  # None: no endpoint
+        self.restart_start_fails = False  # the stop runs, then the start raises (HTTP 400)
+        self.restart_answer_s = 0.0  # the restart answers this late (the new start is under way)
 
     @property
     def installed(self) -> list[str]:
@@ -322,9 +325,13 @@ class FakeDaemon:
             case "POST", "/api/apps/restart-current-app":
                 if not self.current:
                     return 400, {"detail": "No app is running"}
+                if self.restart_start_fails:
+                    self.current = None
+                    return 400, {"detail": "Another app holds the robot"}
                 self.current = {"info": self.current["info"], "state": "starting"}
                 self.start_states = ["running"]
-                return 200, None
+                threading.Event().wait(self.restart_answer_s)  # no_settle stubs time.sleep
+                return 200, self.current
             case "POST", "/api/move/play/wake_up":
                 if self.autostart_on_wake and not self.current:
                     self.current = {"info": {"name": "roboemot"}, "state": "starting"}
@@ -2437,4 +2444,41 @@ def test_run_dry_run_restart_reports_and_changes_nothing(offline, robot, daemon,
     assert run_mod.main(run_args("--dry-run", "--restart")) == 0
     out = capsys.readouterr().out
     assert "would restart roboemot" in out and "dry run passed" in out
+    assert daemon.mutations == before
+
+
+def test_run_restart_whose_start_fails_after_the_stop_says_roboemot_is_stopped(
+    offline, robot, daemon, capsys
+):
+    install()
+    own_running(daemon)
+    daemon.restart_start_fails = True
+    capsys.readouterr()
+    assert run_mod.main(run_args("--restart")) == 1
+    out = capsys.readouterr().out
+    assert "roboemot is stopped" in out and "without --restart" in out
+    assert "Another app holds the robot" in out
+
+
+def test_run_restart_that_times_out_waits_for_the_new_start(
+    offline, robot, daemon, capsys, monkeypatch
+):
+    install()
+    own_running(daemon)
+    monkeypatch.setattr(daemon_mod, "RESTART_TIMEOUT_S", 0.2)
+    daemon.restart_answer_s = 1.0
+    capsys.readouterr()
+    assert run_mod.main(run_args("--restart")) == 0
+    out = capsys.readouterr().out
+    assert "still restarting" in out and "roboemot is running" in out
+    assert daemon.current == {"info": {"name": "roboemot"}, "state": "running"}
+
+
+def test_run_restart_refuses_while_the_mobile_app_holds_the_robot(offline, robot, daemon, capsys):
+    install()
+    own_running(daemon)
+    hold_slot(daemon)
+    before = list(daemon.mutations)
+    assert run_mod.main(run_args("--restart")) == 1
+    assert "mobile app holds the robot (phone)" in capsys.readouterr().out
     assert daemon.mutations == before

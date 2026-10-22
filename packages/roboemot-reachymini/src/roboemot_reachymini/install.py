@@ -290,21 +290,37 @@ class ReachyMiniWireless:
 
     def restart(self, ui: Ui) -> None:
         """Restart the running RoboEmot through the daemon and wait until it runs again. It asks
-        first, and a no is the default (scripts pass ``-y``): the daemon's stop sends the head to
-        its zero pose before the app starts again."""
+        first, and a no is the default (scripts pass ``-y``): the daemon's stop may move the head
+        to its zero pose. A failed request says what state it left the app in."""
         blocker = self.start_blocker()
         if blocker:
             raise WizardError(blocker)
         question = (
-            f"restart {APP_NAME}? The head moves: it goes to its zero pose while the app stops, "
-            "then the app starts again"
+            f"restart {APP_NAME}? The head may move to its zero pose (unless asleep) while the "
+            "app stops, then the app starts again"
         )
         if not ui.confirm(question, False):
             raise WizardError(f"{APP_NAME} not restarted")
-        with _wizard_errors():
+        try:
             self._api().restart_current_app()
+        except DaemonError as exc:
+            self._after_failed_restart(ui, exc)
+            return
         ui.ok("restart requested")
         self._await_own(ui)
+
+    def _after_failed_restart(self, ui: Ui, error: DaemonError) -> None:
+        """The restart request failed (an error answer, a timeout): read the current app once.
+        Still ours, the daemon is finishing the restart and the wait goes on; otherwise the
+        stop ran and the start did not, so RoboEmot is stopped."""
+        if self._current_is_own():
+            ui.warn(f"the restart request ended ({error}); {APP_NAME} is still restarting")
+            self._await_own(ui)
+            return
+        raise WizardError(
+            f"restart failed ({error}); {APP_NAME} is stopped: start it with "
+            "python scripts/run_on_robot.py (without --restart)"
+        )
 
     def _clear_errored_app(self, ui: Ui) -> None:
         """The daemon refuses every start while the current app is in ``error`` (it counts as
