@@ -106,6 +106,7 @@ def test_the_payload_shape():
         "reflexes",
         "motion",
         "system",
+        "video",
     }
     assert s["poll_ms"] == 750
     assert s["mood"] == {
@@ -248,3 +249,11 @@ def test_the_default_temperature_reader_survives_an_os_without_sensors(monkeypat
     assert cpu_temperature_c() == 55.5
     monkeypatch.setattr(psutil, "sensors_temperatures", lambda: 1 / 0, raising=False)
     assert cpu_temperature_c() is None
+
+
+def test_the_state_names_the_video_flag_and_its_poll_interval():
+    state = live(config=cfg())
+    assert state.state()["video"] == {"enabled": False, "poll_ms": 333, "idle_stop_ms": 600000}
+    on = ConfigStack(app={"webui": {"live": {"enabled": True, "video": True, "video_fps": 5.0}}})
+    state.apply_config(SimpleNamespace(config=on.effective()))
+    assert state.state()["video"] == {"enabled": True, "poll_ms": 200, "idle_stop_ms": 600000}

@@ -5,8 +5,8 @@ memory: the affect engine, the sleep gate, the network monitor, the register tra
 model with the attention selector, the reflex engine, the motion loop and the conversation phase.
 It never calls the heavy debug sources and never reads the configuration stack: the settings it
 needs come from a copy kept up to date by ``apply_config`` (a stack subscriber), because the stack
-validates the whole configuration on every read. State only: no frames, audio, text, embeddings,
-registry ids, bearings or positions, and nothing is logged or stored.
+validates the whole configuration on every read. State only: no audio, text, embeddings, registry
+ids, bearings or positions, and nothing is logged or stored. The preview frame is ``LiveVideo``'s.
 """
 
 from __future__ import annotations
@@ -21,7 +21,9 @@ from roboemot.config.schema import RoboEmotConfig
 from roboemot.conversation.sources import entry_name
 
 from .levels import AudioLevels
+from .live_video import LiveVideo
 
+MS_PER_S = 1000
 ROUND_DIGITS = 3  # decimals kept in the numbers sent to the page
 NO_TRANSCRIPT = {
     "enabled": False, "epoch": "", "rev": 0, "min_seq": 0, "max_turns": 0, "turns": []
@@ -54,10 +56,20 @@ class LiveState:
         self._host, self._p, self._clock, self._read_temp = host, p, clock, temperature
         self._cfg = cfg
         self._temp: tuple[float, float | None] | None = None  # (read at, value)
+        self.video = LiveVideo(host, p, cfg, clock=clock)
 
     def apply_config(self, change: Any) -> None:
         """``ConfigStack`` subscriber: keep the settings this view reads (hot reload)."""
         self._cfg = change.config
+        self.video.apply_config(change)
+
+    def video_frame(self, client: str) -> tuple[bytes | None, str | None]:
+        """The preview JPEG for ``client`` (an IP), or ``(None, code)``; see ``LiveVideo``."""
+        return self.video.frame(client)
+
+    def video_viewers(self) -> dict[str, Any]:
+        """The banner's answer: ``active``, ``count`` and the page's poll interval."""
+        return self.video.viewers()
 
     @property
     def enabled(self) -> bool:
@@ -79,6 +91,11 @@ class LiveState:
             "reflexes": self._reflexes(now),
             "motion": self._motion(),
             "system": self._system(cfg, now),
+            "video": {
+                "enabled": cfg.webui.live.video,
+                "poll_ms": round(MS_PER_S / cfg.webui.live.video_fps),
+                "idle_stop_ms": round(MS_PER_S * cfg.webui.live.video_idle_stop_s),
+            },
         }
 
     def audio(self, after: int = 0, epoch: str = "") -> dict[str, Any] | None:

@@ -160,6 +160,7 @@ function stopPolling() {
   if (state.timer) clearTimeout(state.timer);
   state.timer = null;
   liveStopAudio(true);
+  liveStopVideo(true);
 }
 
 // ---------------------------------------------------------------- dialogs
@@ -876,11 +877,13 @@ function shell() {
     state.csrf = null;
     await boot();
   });
+  liveBannerStart();
   showTab(state.tab);
 }
 
 async function boot() {
   stopPolling();
+  liveBannerStop();
   const [strings, session] = await Promise.all([api("GET", "/api/strings"), api("GET", "/api/session")]);
   state.strings = strings.strings;
   state.session = session;

@@ -46,6 +46,8 @@ def run_loop(
         now = time.monotonic()
         if host.transcript is not None:
             host.transcript.trim()  # the age bound holds when nobody polls or speaks
+        if host.live_video is not None:
+            host.live_video.expire()  # the same for the preview's frame and JPEG
         if p.sleep.tick(now):  # asleep (SPEC 12A): only the clocks run; the work waits for the wake
             p.circ.tick(now)
             p.runner.tick(now)

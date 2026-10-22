@@ -113,6 +113,7 @@ def test_switching_it_on_from_the_settings_page_needs_no_restart_and_off_again(s
     assert resp.json["poll_ms"] == 1000
     assert set(resp.json) == {
         "poll_ms", "mood", "modes", "conversation", "attention", "reflexes", "motion", "system",
+        "video",
     }  # fmt: skip
     assert resp.json["mood"]["label"] == "joy"
     assert resp.json["attention"]["faces"] == [{"name": "Mia", "target": True}]
@@ -223,6 +224,7 @@ def test_start_webui_keeps_its_live_port_in_step_with_the_stack(tmp_path, stack)
         minor_present=False,
         phase=ConversationPhase(),
         webui=None,
+        bus=None,
     )
     with ExitStack() as cleanup:
         server = start_webui(host, stack, stack.effective(), manifest, cleanup, pipeline())
@@ -286,3 +288,69 @@ def test_subscribing_twice_keeps_one_entry_and_unsubscribe_removes_it(stack):
     off()
     stack.set("webui.live.poll_ms", 500, source="test")
     assert calls == [1]
+
+
+def test_start_webui_drops_the_preview_when_the_robot_falls_asleep_and_at_shutdown(tmp_path, stack):
+    pytest.importorskip("cv2")  # encodes a JPEG: the vision extra (python-vision CI job)
+    from contextlib import ExitStack
+
+    from roboemot.bus import Bus
+    from roboemot.manifest import load_manifest
+    from roboemot.runtime.webui import start_webui
+    from roboemot.vision.runner import LatestFrameRunner
+    from roboemot.vision.types import Frame
+
+    class Module:
+        name = "dummy"
+
+        def process(self, frame):
+            pass
+
+    stack.set("webui.live.enabled", True, source="test", admin=True)
+    stack.set("webui.live.video", True, source="test", admin=True)
+    manifest = load_manifest(
+        CONFIGS / "manifests" / "desk-head-v1.yaml",
+        allow_unmeasured_dynamics=True,
+        safety=stack.effective().safety,
+    )
+    runner = LatestFrameRunner(Module())
+    service = SimpleNamespace(runner=runner, paused=False)
+    faces = SimpleNamespace(
+        face_overlay=lambda: [], clear_overlay=lambda: None, matcher=SimpleNamespace(registry=None)
+    )
+    bus = Bus()
+    host = SimpleNamespace(
+        perception=SimpleNamespace(enrollment=FakeService(), service=service, pipeline=faces),
+        diagnostics=Diagnostics(),
+        catalogue=None,
+        name_source=None,
+        route_check_router=lambda: None,
+        circadian=None,
+        minor_present=False,
+        phase=ConversationPhase(),
+        webui=None,
+        bus=bus,
+        live_video=None,
+    )
+    with ExitStack() as cleanup:
+        parts = pipeline()
+        parts.world.get = lambda _id: None
+        server = start_webui(host, stack, stack.effective(), manifest, cleanup, parts)
+        assert server is not None and host.live_video is server._httpd.api.live.video
+        video = host.live_video
+
+        def serve():
+            video.frame("10.0.0.1")
+            runner.submit(Frame(np.zeros((48, 64, 3), np.uint8), 1.0))
+            return video.frame("10.0.0.1")
+
+        assert serve()[1] is None and video._jpeg is not None and runner.latest() is not None
+        bus.publish("robot.asleep", None, 1.0)
+        assert video._jpeg is None and runner.latest() is None
+        assert video.viewers()["video_viewers_active"] is False
+        assert serve()[1] is None
+        stack.set("webui.live.video", False, source="test", admin=True)
+        assert video._jpeg is None and runner.latest() is None
+        stack.set("webui.live.video", True, source="test", admin=True)
+        assert serve()[1] is None
+    assert video._jpeg is None and runner.latest() is None  # shutdown

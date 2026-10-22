@@ -240,7 +240,9 @@ def test_only_a_saved_change_fires_the_glitch_burst():
 
 def test_vendored_javascript_is_the_only_place_for_effect_internals():
     server_text = Path(server_module.__file__).read_text()
-    assert "img-src 'self';" in server_text  # CSP unchanged: no data: images, so no glass lens
+    assert (
+        "img-src 'self' blob:;" in server_text
+    )  # blob: for the live preview only; no data: images
 
 
 def test_dialogs_cover_merge_and_guard_the_pending_request():

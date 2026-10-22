@@ -2971,8 +2971,8 @@ class RuntimeConfig(Strict):
 
 
 class LiveConfig(Strict):
-    """The web UI's Live tab: inner state, audio levels and an opt-in transcript (SPEC 11A, 12).
-    No audio samples and no video."""
+    """The web UI's Live tab: inner state, audio levels, an opt-in transcript and an opt-in video
+    preview (SPEC 11A, 12). No audio samples; video frames are never kept."""
 
     enabled: bool = param(
         False,
@@ -3045,6 +3045,75 @@ class LiveConfig(Strict):
         ge=1000,
         le=200000,
     )
+    video: bool = param(
+        False,
+        "Serve a live camera preview (one JPEG at a time, with face boxes and names) to the Live "
+        "tab for a logged-in page; needs webui.live.enabled. Off by default because it shows the "
+        "room. Frames are never saved or logged; the page shows a banner while it is watched",
+        opt_in=True,
+    )
+    video_fps: float = param(
+        3.0,
+        "How often the open Live tab asks for a preview frame; a faster poll is served the "
+        "cached picture",
+        unit="hz",
+        ge=0.5,
+        le=10,
+    )
+    video_max_width: int = param(
+        320,
+        "Widest preview picture; a wider camera frame is scaled down before it is encoded",
+        unit="px",
+        ge=80,
+        le=1280,
+    )
+    video_jpeg_quality: int = param(
+        60, "JPEG quality of the preview (higher is bigger and slower)", ge=20, le=95
+    )
+    viewer_window_s: float = param(
+        6.0,
+        "A page counts as watching the video until this long after the last frame it was sent",
+        unit="s",
+        ge=1,
+        le=60,
+    )
+    banner_poll_ms: int = param(
+        3000,
+        "How often every open page asks whether someone is watching the video (the banner)",
+        unit="ms",
+        ge=1000,
+        le=5000,
+    )
+    video_stale_s: float = param(
+        10.0,
+        "A camera picture older than this is not served (the page says the camera stalled)",
+        unit="s",
+        ge=2,
+        le=120,
+    )
+    video_idle_stop_s: float = param(
+        600.0,
+        "The open Live tab stops polling the video after this long without a click, key or "
+        "touch on the page, and waits for Resume",
+        unit="s",
+        ge=60,
+        le=86400,
+    )
+
+    @model_validator(mode="after")
+    def _window_spans_two_polls(self) -> LiveConfig:
+        if self.banner_poll_ms / 1000 > self.viewer_window_s / 2:
+            raise ValueError(
+                f"webui.live.banner_poll_ms ({self.banner_poll_ms} ms) must be at most half of "
+                f"webui.live.viewer_window_s ({self.viewer_window_s} s), so every viewing spans "
+                "two banner polls"
+            )
+        if self.viewer_window_s * self.video_fps < 2:
+            raise ValueError(
+                f"webui.live.viewer_window_s ({self.viewer_window_s} s) must cover at least two "
+                f"polls at webui.live.video_fps ({self.video_fps} Hz)"
+            )
+        return self
 
 
 class WebUIConfig(Strict):

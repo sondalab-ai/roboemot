@@ -34,15 +34,25 @@ def entry_name(registry: Any, entry: Entry) -> str | None:
     (``status == "active"``): a pending record's name was typed or imported and nobody vouched
     for it. None for an unknown, missing or pending record, or without a registry. The one
     lookup behind the scene summary and the ``look_at`` choices."""
+    if entry.kind == "person":
+        return person_name(registry, entry.identity)
     if registry is None or entry.identity in ("", UNKNOWN_IDENTITY):
         return None
     try:
-        record = (
-            registry.get_person(entry.identity)
-            if entry.kind == "person"
-            else registry.get_entity(entry.identity)
-        )
+        record = registry.get_entity(entry.identity)
     except Exception:  # a record that is gone: describe the entry by its kind
+        return None
+    return record.display_name if record.status == "active" else None
+
+
+def person_name(registry: Any, person_id: str | None) -> str | None:
+    """The display name of a confirmed (``active``) person record, else None. The same rule as
+    ``entry_name``, for callers that hold a registry id instead of a world entry."""
+    if registry is None or person_id in (None, "", UNKNOWN_IDENTITY):
+        return None
+    try:
+        record = registry.get_person(person_id)
+    except Exception:
         return None
     return record.display_name if record.status == "active" else None
 

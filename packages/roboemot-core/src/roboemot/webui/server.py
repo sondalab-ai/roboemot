@@ -73,7 +73,7 @@ SECURITY_HEADERS = {
     "Cache-Control": "no-store",
 }
 CSP = (
-    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; "
+    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; "
     "connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; "
     "frame-ancestors {ancestors}"
 )
@@ -285,6 +285,11 @@ class _Handler(BaseHTTPRequestHandler):
     def _send_response(self, resp: Response) -> bool:
         """Send ``resp``; False when it was replaced by an error (it was not JSON-serialisable).
         A failed socket write raises."""
+        if isinstance(resp.data, bytes):
+            self._send(
+                resp.status, resp.data, resp.content_type or "application/octet-stream", resp
+            )
+            return True
         try:
             payload = json.dumps(resp.data, allow_nan=False).encode()
         except (TypeError, ValueError):

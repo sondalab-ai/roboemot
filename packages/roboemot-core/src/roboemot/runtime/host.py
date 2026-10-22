@@ -28,6 +28,7 @@ from roboemot.llm.pseudonyms import NameSource
 from roboemot.persona.llm_traits import TraitsWorker
 from roboemot.reflex import ReflexEngine
 from roboemot.robot_platform import AudioHub, RobotSession, Speaker
+from roboemot.runtime.live_video import LiveVideo
 from roboemot.secret_store import SecretStore
 from roboemot.vision import FrameSource
 from roboemot.vision.minor import MinorPresence
@@ -75,6 +76,7 @@ class RuntimeHost:
     router_hub: RouterHub | None = None  # the one router: traits, conversation, speech, checks
     conversation: ConversationWorker | None = None  # answers addressed utterances (voice.enabled)
     phase: ConversationPhase | None = None  # idle / listening / thinking / speaking (Live tab)
+    live_video: LiveVideo | None = None  # the Live tab's preview (set when the web UI starts)
     transcript: TranscriptRing | None = None  # opt-in in-memory turns (Live tab, SPEC 12)
     levels: AudioLevels | None = None  # microphone and output levels in dBFS (Live tab)
     names: RobotName | None = None  # the robot's name for the wake word and addressing

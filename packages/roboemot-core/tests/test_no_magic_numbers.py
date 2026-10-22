@@ -56,6 +56,7 @@ BEHAVIOUR_MODULES = [
     "runtime/host.py",
     "runtime/levels.py",
     "runtime/live.py",
+    "runtime/live_video.py",
     "conversation/transcript.py",
     "runtime/loop.py",
     "runtime/reload.py",
