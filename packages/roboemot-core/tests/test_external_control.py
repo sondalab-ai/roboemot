@@ -577,3 +577,22 @@ def test_snapshot_reports_the_watchdog():
         t += DT
     snap = loop.snapshot()
     assert snap["holding"] is True and snap["watchdog_engagements"] == 1
+
+
+def test_a_unit_that_settles_early_waits_for_the_others_before_resuming():
+    """goto_sleep moves antennas and head together: the antennas, at their goal well before
+    the head, must not resume (and be pulled out of the sleep pose once the move ends) before
+    the motors-off that follows the whole move is seen (SPEC 4A, 12A)."""
+    driver = StatusServo(home=dict.fromkeys(GROUPED, 0.0))
+    loop = make_with(driver, grouped_manifest())
+    t = drive(loop, driver, 0.0, 1.0)
+    driver.external, driver.speed = True, 1.0
+    driver.goal = {"antenna_left": 0.4, "antenna_right": -0.4, "head.yaw": -2.5}
+    t = drive(loop, driver, t, 2.5)  # the antennas arrive after 0.4 s, the head after 2.5 s
+    assert loop.snapshot()["external_groups"] == ["antennas", "body_yaw+head"]
+    n = len(driver.writes)
+    driver.external = False  # the move is over: targets are accepted again
+    t = drive(loop, driver, t, 2.0)  # the platform's wait before motors off
+    driver.mode = "limp"
+    drive(loop, driver, t, GRACE_S + 1.0)
+    assert len(driver.writes) == n and loop.motors_off

@@ -21,11 +21,11 @@ yield falsely:
   constraint). On Reachy Mini an antenna held by a hand stops the antennas only; head and body
   yaw yield together.
 
-While a unit yields the loop writes none of its dofs and follows its measured pose. It resumes,
-from the measured pose, once the unit's pose has stayed inside ``still_band_*`` of an anchor for
-``motion.platform_move_grace_s`` (the loop checks the motors first; off means asleep). The
-recent events, with the largest tick gap and the overruns of the confirming run, stay in the
-debug report.
+While a unit yields the loop writes none of its dofs and follows its measured pose. The yielding
+units resume together, from the measured pose, once each one's pose has stayed inside
+``still_band_*`` of an anchor for ``motion.platform_move_grace_s`` (the loop checks the motors
+first; off means asleep). The recent events, with the largest tick gap and the overruns of the
+confirming run, stay in the debug report.
 """
 
 from __future__ import annotations
@@ -274,10 +274,13 @@ class ExternalControl:
     # ---- while yielding
 
     def watch(self, now: float, measured: dict[str, float], grace_s: float) -> list[Unit]:
-        """Stillness of the yielding units; returns those whose pose has stayed inside the band
-        of its anchor for ``grace_s`` (the anchor is the pose where the count started; a joint
-        beyond the band restarts it from the new pose, so encoder jitter or a slow cache does
-        not). The caller checks the motors before resuming them."""
+        """Stillness of the yielding units. Each unit's pose must stay inside the band of its
+        anchor (the pose where its count started; a joint beyond the band restarts it from the
+        new pose, so encoder jitter or a slow cache does not). Returns every yielding unit once
+        *all* of them have been still for ``grace_s``, counted from the latest start: one
+        platform move drives several units, and the one that settles first must not resume
+        while the move runs on (its targets would be accepted the moment the move ends, before
+        the motors-off that follows it is seen). The caller checks the motors first."""
         last = self._last_seen
         self._last_seen = (now, dict(measured))
         if last is not None and now > last[0]:
@@ -287,10 +290,8 @@ class ExternalControl:
                     key = f"speed_{self._kind[name]}"
                     speed = abs(measured[name] - last[1][name]) / dt
                     self.peak[key] = max(self.peak[key], speed)
-        ready: list[Unit] = []
-        for unit in self.units:
-            if not unit.yielding:
-                continue
+        yielding = [u for u in self.units if u.yielding]
+        for unit in yielding:
             anchor = unit.anchor
             if anchor is not None and any(
                 name in measured and abs(measured[name] - anchor[name]) > self._band[name]
@@ -301,9 +302,10 @@ class ExternalControl:
             if anchor is None:
                 unit.anchor = {n: measured[n] for n in unit.dofs if n in measured}
                 unit.still_since = now
-            elif unit.still_since is not None and now - unit.still_since >= grace_s:
-                ready.append(unit)
-        return ready
+        starts = [u.still_since for u in yielding if u.still_since is not None]
+        if not starts or now - max(starts) < grace_s:
+            return []
+        return yielding
 
     def resume(self, unit: Unit, measured: dict[str, float]) -> None:
         unit.yielding, unit.still_since, unit.anchor, unit.run = False, None, None, 0
