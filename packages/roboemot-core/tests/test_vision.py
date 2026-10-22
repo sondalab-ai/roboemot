@@ -868,3 +868,188 @@ def test_a_track_survives_the_return_to_full_rate_for_one_frame(tmp_path):
     pipe.process(Frame(image(26), 26.0))
     assert pipe.object_tracker.cfg.lost_s == CFG.vision.object_lost_s
     assert list(pipe._entities) == [track_id]
+
+
+# ------------------------------------------------- report counters (SPEC 12A)
+
+
+class DeferredExecutor(InlineExecutor):
+    """Keeps each job until ``run_all``, so a track can end while its job waits."""
+
+    def __init__(self):
+        self.waiting = []
+
+    def submit(self, fn, /, *args, **kwargs):
+        from concurrent.futures import Future
+
+        future = Future()
+        self.waiting.append((future, fn, args, kwargs))
+        return future
+
+    def run_all(self):
+        waiting, self.waiting = self.waiting, []
+        for future, fn, args, kwargs in waiting:
+            future.set_running_or_notify_cancel()
+            future.set_result(fn(*args, **kwargs))
+
+
+def test_track_churn_counts_created_ended_lifetime_and_rate(tmp_path):
+    # a face for frames 0-9, gone until it expires, back as a new track at frames 30-39
+    _, _, pipe, _, _ = rig(tmp_path, lambda i: [face(100)] if i < 10 or 30 <= i < 40 else [])
+    run(pipe, 45)
+    tracks = pipe.stats()["tracks"]
+    assert tracks["created"] == 2 and tracks["ended"] == 1
+    assert tracks["rate_window_s"] == CFG.vision.report_rate_window_s
+    assert tracks["created_per_min"] == pytest.approx(2 * 60 / CFG.vision.report_rate_window_s)
+    # first stamp 0 (tentative), last matched at frame 9 (1.125 s); the expiry tail is excluded
+    assert tracks["lifetime_s"] == {"count": 1, "p50": 1.125, "p90": 1.125, "max": 1.125}
+    json.dumps(pipe.stats())
+
+
+def test_track_rate_counts_only_the_window_before_the_last_frame(tmp_path):
+    vision = CFG.vision.model_copy(update={"report_rate_window_s": 10.0})
+    on = [True]
+    _, _, pipe, _, _ = rig(tmp_path, lambda i: [face(100)] if on[0] else [], vision=vision)
+    run(pipe, 6)
+    assert pipe.stats()["tracks"]["created_per_min"] == pytest.approx(6.0)
+    on[0] = False
+    run(pipe, 2, start=20.0)
+    tracks = pipe.stats()["tracks"]
+    assert tracks["created_per_min"] == 0.0 and tracks["created"] == 1 and tracks["ended"] == 1
+
+
+def test_reset_ends_the_live_tracks_in_the_report(tmp_path):
+    _, _, pipe, _, _ = rig(tmp_path, lambda i: [face(20), face(200)])
+    run(pipe, 4)
+    pipe.reset()
+    tracks = pipe.stats()["tracks"]
+    assert tracks["created"] == 2 and tracks["ended"] == 2
+    assert tracks["lifetime_s"]["count"] == 2
+
+
+def test_lifetime_summary_keeps_the_last_report_window_tracks(tmp_path):
+    vision = CFG.vision.model_copy(update={"report_window": 10})
+    on = [True]
+    _, _, pipe, _, _ = rig(tmp_path, lambda i: [face(100)] if on[0] else [], vision=vision)
+    for k in range(13):  # 3 frames with the face, then 2.5 s without: 12 tracks end
+        on[0] = True
+        run(pipe, 3, start=k * 3.0)
+        on[0] = False
+        run(pipe, 2, start=k * 3.0 + 0.5, dt=1.25)
+    tracks = pipe.stats()["tracks"]
+    assert tracks["ended"] == 12 and tracks["lifetime_s"]["count"] == 10
+
+
+def test_attribute_job_counters_and_time_to_estimate(tmp_path):
+    _, _, pipe, _, _ = rig(tmp_path, lambda i: [face(100)], estimator=CountingEstimator())
+    run(pipe, 40)
+    attrs = pipe.stats()["attributes"]
+    assert attrs["submitted"] == attrs["completed"] == 1
+    assert attrs["failed"] == attrs["cancelled"] == attrs["queue_full_refusals"] == 0
+    assert attrs["dropped_queue_full"] == attrs["dropped_track_gone"] == 0
+    assert attrs["queue_len"] == 0 and attrs["busy"] is False
+    assert attrs["job_ms"]["count"] == 1 and attrs["crop_ms"]["count"] == 3
+    assert attrs["outcomes"] == {"adult": 1, "minor": 0, "unknown": 0}
+    # crops at 0.125, 0.5 and 0.875 s, job inline, result read at the next frame (1.0 s);
+    # the track started (tentative) at 0
+    assert attrs["time_to_estimate_ms"] == {"count": 1, "p50": 1000.0, "p90": 1000.0, "max": 1000.0}
+    json.dumps(pipe.stats())
+
+
+@pytest.mark.parametrize(
+    ("age", "conf", "outcome"),
+    [("child", 0.95, "minor"), ("teen", 0.95, "minor"), ("adult", 0.5, "unknown")],
+)
+def test_attribute_outcomes_count_minor_and_unknown(tmp_path, age, conf, outcome):
+    est = CountingEstimator(age=age, conf=conf)
+    _, _, pipe, _, _ = rig(tmp_path, lambda i: [face(100)], estimator=est)
+    run(pipe, 40)
+    outcomes = pipe.stats()["attributes"]["outcomes"]
+    assert outcomes[outcome] == 1 and sum(outcomes.values()) == 1
+
+
+def test_a_declared_person_counts_as_an_outcome_without_a_job(tmp_path):
+    est = CountingEstimator(age="child")
+    reg, _, pipe, _, _ = rig(tmp_path, lambda i: [face(100)], estimator=est)
+    reg.enroll(
+        "Gran", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT, age_group="senior",
+        gender="female",
+    )  # fmt: skip
+    run(pipe, 40)
+    attrs = pipe.stats()["attributes"]
+    assert attrs["submitted"] == 0 and attrs["outcomes"] == {"adult": 1, "minor": 0, "unknown": 0}
+
+
+def test_a_failed_job_is_counted_and_gives_no_outcome(tmp_path):
+    class Broken(CountingEstimator):
+        def estimate(self, crop):
+            raise RuntimeError("boom")
+
+    _, _, pipe, _, _ = rig(tmp_path, lambda i: [face(100)], estimator=Broken())
+    run(pipe, 40)
+    attrs = pipe.stats()["attributes"]
+    assert attrs["submitted"] == attrs["failed"] == 1 and attrs["completed"] == 0
+    assert sum(attrs["outcomes"].values()) == 0 and attrs["time_to_estimate_ms"] == {"count": 0}
+
+
+def test_a_result_for_an_ended_track_is_dropped_as_track_gone(tmp_path):
+    ex, on = DeferredExecutor(), [True]
+    _, _, pipe, _, _ = rig(
+        tmp_path, lambda i: [face(100)] if on[0] else [], estimator=CountingEstimator(), executor=ex
+    )
+    run(pipe, 10)
+    attrs = pipe.stats()["attributes"]
+    assert attrs["submitted"] == 1 and attrs["queue_len"] == 1 and attrs["busy"] is False
+    on[0] = False
+    run(pipe, 20, start=10 * 0.125)  # the track expires
+    ex.run_all()
+    run(pipe, 1, start=5.0)
+    attrs = pipe.stats()["attributes"]
+    assert attrs["completed"] == 1 and attrs["dropped_track_gone"] == 1
+    assert sum(attrs["outcomes"].values()) == 0 and attrs["queue_len"] == 0
+
+
+def test_a_track_that_ends_waiting_for_a_full_queue_is_dropped_queue_full(tmp_path):
+    ex = DeferredExecutor()
+    _, _, pipe, _, _ = rig(
+        tmp_path,
+        lambda i: [face(20), face(200)] if i < 12 else [],
+        estimator=CountingEstimator(),
+        executor=ex,
+    )
+    pipe.worker.queue_max = 1
+    run(pipe, 40)
+    attrs = pipe.stats()["attributes"]
+    assert attrs["submitted"] == 1 and attrs["dropped_queue_full"] == 1
+    assert attrs["queue_full_refusals"] >= 1
+
+
+def test_attribute_worker_times_jobs_and_crops_with_its_clock():
+    from roboemot.vision import AttributeWorker
+
+    now = [0.0]
+    seen = []
+
+    class Timed(CountingEstimator):
+        def estimate(self, crop):
+            seen.append(worker.snapshot())
+            now[0] += 0.1
+            return super().estimate(crop)
+
+    worker = AttributeWorker(Timed(), CFG.identity, 2, InlineExecutor(), clock=lambda: now[0])
+    crops = [(float(i), np.zeros((4, 4, 3), np.uint8)) for i in range(3)]
+    assert worker.submit(1, 1, crops)
+    assert seen[0]["busy"] is True and seen[0]["queue_len"] == 0
+    snap = worker.snapshot()
+    assert snap["busy"] is False and snap["completed"] == 1
+    assert snap["crop_ms"]["count"] == 3 and snap["crop_ms"]["max"] == pytest.approx(100.0)
+    assert snap["job_ms"]["max"] == pytest.approx(300.0)
+    json.dumps(snap)
+
+
+def test_report_window_settings_have_defaults_and_ranges():
+    v = CFG.vision
+    assert v.report_window == 200 and v.report_rate_window_s == 60.0
+    for bad in ({"report_window": 5}, {"report_rate_window_s": 1.0}):
+        with pytest.raises(ValidationError):
+            RoboEmotConfig(vision=bad)
