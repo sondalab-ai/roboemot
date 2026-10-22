@@ -900,6 +900,8 @@ class ConfigStack:
         self._mtimes: dict[str, float] = {}
         self.audit: list[AuditEntry] = []
         self.last_error: str | None = None
+        # Listener calls that raised; a writer compares it before and after (R3 SF3)
+        self.listener_failures = 0
         self._last = self.effective()
         self._check_route_budgets(self._last)
         # The configuration installed by the owner is the initial approved baseline.
@@ -1700,7 +1702,12 @@ class ConfigStack:
             try:
                 fn(change)
             except Exception as exc:  # one failing listener must not starve the others
-                log.warning("config listener failed: %s", type(exc).__name__)
+                # visible, not silent: the value is in effect() but a part may hold the old one
+                kind = type(exc).__name__
+                log.warning("config listener failed: %s", kind)
+                self.listener_failures += 1
+                self.last_error = f"config listener failed: {kind}"
+                self._record("listener", "listener_failed", None, kind)
         return change
 
     def _remember_mtimes(self) -> None:

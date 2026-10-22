@@ -986,3 +986,18 @@ test("a language can be added to the blocklist: key and words are posted with th
   assert.deepEqual(posts(page, "/api/settings/entry")[0].body, { path: lists[0].path, key: "de", value: ["mist"], pin: PIN });
 });
 
+
+test("save: a change the robot's parts did not take is announced as an error (R3 SF3)", async () => {
+  const page = await settingsPage({
+    "POST /api/settings": { path: "voice.flag", changed: true, value: false, layer: "runtime", restart_required: false, persisted: true, applied: false },
+  });
+  await open(page, "core-voice");
+  const box = row(page, "voice.flag");
+  box.querySelector("input").checked = false;
+  button(box, "settings_save").click();
+  await settle();
+  await answerPin(page);
+  const notice = page.document.querySelector("#notice");
+  assert.ok(notice.textContent.includes("settings_not_applied"));
+  assert.ok(notice.className.includes("sl-callout--danger"), notice.className);
+});

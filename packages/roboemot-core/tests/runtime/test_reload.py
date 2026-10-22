@@ -63,3 +63,29 @@ def test_the_live_transcript_follows_the_flag_on_reload():
     cfg = RoboEmotConfig()
     make_reload(host, p)(SimpleNamespace(config=cfg))
     assert ("apply_config", (cfg.webui.live,)) in host.transcript.calls
+
+
+class Boom(Exception):
+    pass
+
+
+def test_a_failing_part_does_not_skip_the_safety_parts_and_the_failure_is_raised():
+    """R3 SF3, SPEC 11A/12: one part refusing the new values must not leave the safety margins,
+    the minor caps or the motion limits on the old ones; the stack then sees the failure."""
+    import pytest
+
+    p, host = pipeline(), RuntimeHost()
+
+    def boom(*args):
+        raise Boom
+
+    p.hub = SimpleNamespace(sync=boom)  # the first step of the fan-out
+    p.perception = SimpleNamespace(apply_config=boom)
+    cfg = RoboEmotConfig()
+    with pytest.raises(Boom):
+        make_reload(host, p)(SimpleNamespace(config=cfg))
+    assert ("configure", (cfg.safety,)) in p.presence.calls
+    assert ("apply_config", (cfg,)) in p.loop.calls
+    assert any(name == "apply_config" for name, _ in p.reflexes.calls)
+    assert p.gaze.cfg is cfg.attention
+    assert ("set_routes", (cfg.llm_routes,)) in p.network.calls  # later steps still ran

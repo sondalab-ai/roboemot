@@ -236,6 +236,9 @@ EN: dict[str, str] = {
     "settings_admin_hint": "Safety-relevant. The operator PIN doubles as the admin PIN.",
     "settings_pin_title": "Confirm the change",
     "settings_not_persisted": "It is live but was not saved to disk: it ends at the next restart.",
+    "settings_not_applied": (
+        "Saved, but a part of the robot did not take the new value: restart the app to apply it."
+    ),
     "settings_unchanged": "Nothing changed.",
     "settings_none": "No setting can be changed from the web UI.",
     "err_routes_unavailable": "Routes are not available.",
@@ -806,6 +809,10 @@ IT: dict[str, str] = {
     "settings_admin_hint": "Rilevante per la sicurezza. Il PIN operatore vale come PIN admin.",
     "settings_pin_title": "Conferma la modifica",
     "settings_not_persisted": "È attiva ma non salvata su disco: termina al prossimo riavvio.",
+    "settings_not_applied": (
+        "Salvata, ma una parte del robot non ha preso il nuovo valore: riavvia l'app per "
+        "applicarla."
+    ),
     "settings_unchanged": "Nessuna modifica.",
     "settings_none": "Nessuna impostazione si può modificare dalla web UI.",
     "err_routes_unavailable": "I modelli non sono disponibili.",

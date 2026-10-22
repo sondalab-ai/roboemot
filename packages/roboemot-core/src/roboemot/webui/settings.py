@@ -449,6 +449,7 @@ class SettingsEditor:
         written: the edit is live until restart).
         """
         with self._lock:
+            before = self._failures()
             result = self._apply(path, value, source, self._rows(), self.stack.effective(), ack)
             key = result.pop("okey", None)
             acked = result.pop("acked", None)
@@ -460,7 +461,7 @@ class SettingsEditor:
             elif result["changed"] and self._overrides.pop(key, None) is not None:
                 self._acks.pop(key, None)
                 result["persisted"] = self._persist()  # the app value replaced a runtime edit
-            return result
+            return self._applied(result, before)
 
     def add_entry(
         self, path: object, key: object, value: object, source: str = SOURCE
@@ -474,7 +475,8 @@ class SettingsEditor:
         ``entry_invalid`` for a field the entry type does not have or a secret field.
         """
         with self._lock:
-            return self._add_entry(path, key, value, source)
+            before = self._failures()
+            return self._applied(self._add_entry(path, key, value, source), before)
 
     def _add_entry(
         self,
@@ -555,6 +557,7 @@ class SettingsEditor:
             if name not in box["removable"]:
                 raise ValidationError("entry_in_lower_layer", "path")
             key = okey(tree, path)
+            before = self._failures()
             self.stack.clear(path, source=source, subtree=True, admin=True, refuse=REFUSED_CHECKS)
             for stored in [k for k in self._overrides if k == key or k.startswith(key + ".")]:
                 del self._overrides[stored]
@@ -562,13 +565,14 @@ class SettingsEditor:
                 del self._acks[stored]
             if box_path == "llm_routes":
                 self._keys.pop(name, None)
-            return {
+            result = {
                 "path": path,
                 "changed": True,
                 "layer": "runtime",
                 "restart_required": self._restart(box, entry_rows=box["entry"]),
                 "persisted": self._persist(),
             }
+            return self._applied(result, before)
 
     # ------------------------------------------------------------------ route keys (SPEC 8, 11A)
 
@@ -585,7 +589,9 @@ class SettingsEditor:
             name = value.get("name") if isinstance(value, dict) else None
             if isinstance(name, str) and name.isdigit():  # the catalogue would read it as an index
                 raise ValidationError("key_invalid", "name")
-            return self._add_entry("llm_routes", None, value, source, bind=(ref, ack))
+            before = self._failures()
+            result = self._add_entry("llm_routes", None, value, source, bind=(ref, ack))
+            return self._applied(result, before)
 
     def set_route_key(
         self, name: object, secret: object, ack: object = None, source: str = SOURCE
@@ -606,6 +612,7 @@ class SettingsEditor:
             path = f"llm_routes.{route.name}.api_key"
             if ref != NO_KEY_REF:
                 self._check_endpoint_ack(route.base_url, ack)
+            before = self._failures()
             self.stack.set(
                 path,
                 ref,
@@ -620,7 +627,8 @@ class SettingsEditor:
                 self.stack.note(
                     source, f"llm_routes.{route.name}.endpoint", "", origin(route.base_url)
                 )
-            return {"name": route.name, "changed": True, "persisted": self._persist()}
+            result = {"name": route.name, "changed": True, "persisted": self._persist()}
+            return self._applied(result, before)
 
     def removable_routes(self) -> list[str]:
         """Names of the routes only the runtime layer holds (``remove_entry`` accepts them)."""
@@ -712,10 +720,11 @@ class SettingsEditor:
             key = okey(self.stack.merged_tree(), path)
             if self._added_parent(key) is not None:  # an added entry's field has no lower value
                 raise ValidationError("not_resettable", "path")
+            before = self._failures()
             changed = self.stack.clear(path, source=source, admin=True, refuse=REFUSED_CHECKS)
             stale = self._overrides.pop(key, None) is not None
             self._acks.pop(key, None)
-            return {
+            result = {
                 "path": path,
                 "changed": changed,
                 "value": self._shown(get_path(self.stack.effective(), path)),
@@ -723,6 +732,7 @@ class SettingsEditor:
                 "restart_required": self._restart(row),
                 "persisted": self._persist() if changed or stale else True,
             }
+            return self._applied(result, before)
 
     def restore(self) -> None:
         """Replay the overrides file at startup as one batch: every entry is cleaned against the
@@ -978,6 +988,17 @@ class SettingsEditor:
             self._acks[key] = acked
         elif key in self._acks and origin(str(value)) != self._acks[key]["origin"]:
             del self._acks[key]
+
+    def _failures(self) -> int:
+        """The stack's count of reload listeners that raised (R3 SF3)."""
+        return int(getattr(self.stack, "listener_failures", 0))
+
+    def _applied(self, result: dict[str, Any], before: int) -> dict[str, Any]:
+        """``result`` with ``applied``: False when a reload listener raised during the write, so
+        a part of the robot may still run the old value although the config holds the new one.
+        A failure on another thread in the same moment also counts: it errs towards a warning."""
+        result["applied"] = self._failures() == before
+        return result
 
     def _persist(self) -> bool:
         if self._file is None:

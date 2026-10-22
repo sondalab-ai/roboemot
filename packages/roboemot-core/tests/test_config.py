@@ -502,3 +502,25 @@ def test_a_route_base_url_must_be_http_or_https_with_a_host(url):
     """SPEC 8: routes speak HTTP(S) to a host; any other scheme fails at load, not at first use."""
     with pytest.raises(ConfigError):
         ConfigStack(app={"llm_routes": [{"name": "r", "base_url": url, "model": "m"}]})
+
+
+def test_a_failing_listener_is_audited_and_kept_in_last_error(tmp_path):
+    """R3 SF3: listener failures stay isolated but leave a trace (audit, last_error, counter)."""
+    audit = tmp_path / "audit.jsonl"
+    stack = ConfigStack(audit_path=audit)
+    seen = []
+
+    def broken(change):
+        raise RuntimeError("secret detail never shown")
+
+    stack.subscribe(broken)
+    stack.subscribe(seen.append)
+    assert stack.listener_failures == 0
+    stack.set("voice.expressivity", 0.2)
+    assert len(seen) == 1  # the others still ran
+    assert stack.listener_failures == 1
+    assert stack.last_error == "config listener failed: RuntimeError"
+    entry = stack.audit[-1]
+    assert (entry.source, entry.key, entry.new) == ("listener", "listener_failed", "RuntimeError")
+    assert "listener_failed" in audit.read_text()
+    assert "secret detail" not in audit.read_text()
