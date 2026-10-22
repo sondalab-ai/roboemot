@@ -327,6 +327,13 @@ def test_snapshot_is_plain_json():
     assert json.loads(json.dumps(snap)) == snap
 
 
+def test_a_nan_probability_closes_the_burst_and_keeps_the_report_valid_json():
+    ep = scripted([float("nan"), 0.0, 0.3, 0.0])
+    snap = ep.snapshot()
+    json.loads(json.dumps(snap, allow_nan=False))
+    assert snap["not_started"]["peak_prob"]["count"] == 1
+
+
 def test_watch_settings_have_defaults_and_ranges():
     from pydantic import ValidationError
     from roboemot.config.schema import ReflexAudioConfig

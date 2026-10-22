@@ -276,7 +276,7 @@ class Endpointer:
             self._counts["frames_on"] += on
             if self._speaking:
                 return
-            if prob < self._watch:
+            if not prob >= self._watch:  # NaN closes the burst too: no NaN peak in the report
                 self._close_burst(started=False)
                 return
             self._burst_peak = prob if self._burst_peak is None else max(self._burst_peak, prob)

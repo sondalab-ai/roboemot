@@ -179,7 +179,8 @@ class ReachyAudio:
 
     def _accumulate_levels(self, chunk: np.ndarray) -> None:
         """Add a finite ``(n, 2+)`` chunk to the running sums; close the block once it holds
-        ``level_block_s`` seconds of input (the chunk that crosses the limit completes it)."""
+        ``level_block_s`` seconds of input (the chunk that crosses the limit completes it).
+        Non-finite chunks are not added, so a block can span more wall time than that."""
         x = chunk.astype(np.float64, copy=False)
         x0, x1, mono = x[:, 0], x[:, 1], x.mean(axis=1)
         add = (float(x0 @ x0), float(x1 @ x1), float(mono @ mono), float(x0 @ x1))
