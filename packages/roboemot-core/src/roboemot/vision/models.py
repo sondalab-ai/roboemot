@@ -9,17 +9,20 @@ into the models folder only when asked (``roboemot models fetch``), never at imp
   size and digest match; any failure deletes the ``.part`` file.
 - A verified file gets a ``<file>.verified`` marker (sha256, size, mtime). The backends refuse
   files whose size or mtime no longer match the marker (``check_file``), so a swapped file is
-  caught without rehashing 343 MB at every start. ``roboemot models fetch`` on a folder that
+  caught without rehashing every file at every start. ``roboemot models fetch`` on a folder that
   already holds the right files (for example the spike cache) writes the markers after hashing.
 - Folders created by the fetcher are private (0o700), markers 0o600.
 
-- Derived files (INT8 FairFace, SPEC 5, 13) are not downloaded: ``fetch`` first downloads and
+- Derived files (``quantize``; none in the shipped manifests since the FairFace INT8 pair was
+  retired, SPEC 5, 13) are not downloaded: ``fetch`` first downloads and
   verifies the FP32 source, then quantizes it with ONNX Runtime ``quantize_dynamic`` (the same
   call and settings as ``scripts/bench/quantize.py``; needs the ``vision`` extra). Their marker
   records the source sha256, the weight type, the ORT version and the produced file's sha256,
   size and mtime, and stands alone: ``check_file`` accepts a produced file without its source
   present, and ``prune_sources`` (``roboemot models prune --sources``) deletes the FP32 sources
-  once every file derived from them is verified (about 690 MB freed; only about 174 MB stay).
+  once every file derived from them is verified.
+- Retired files (``retired`` in the manifest: files of replaced models, such as the FairFace
+  pair) are deleted by ``prune_retired`` (``roboemot models prune``), and nothing else is.
 - ORT version policy: the quantized ops are stable across ONNX Runtime versions, so a file made
   by another ORT version still loads. ``status`` reports it as ``stale-ort`` and ``fetch``
   re-quantizes only on ``requantize=True`` (``--requantize``), which needs the FP32 source again;
@@ -131,9 +134,10 @@ class ModelSpec(_Strict):
     """A model: role, weight licence, source page, files and (classifiers) the label order.
 
     ``labels`` is the output order of a classifier or detector, read from the ``id2label`` of the
-    model's ``config.json`` or the class list of its training config (``labels_source``, pinned
-    by ``labels_sha256``), so index meaning is part of the pinned manifest and not assumed in
-    code.
+    model's ``config.json``, the class list of its training config (``labels_source``, pinned
+    by ``labels_sha256``) or the metadata of the pinned file itself, so index meaning is part of
+    the pinned manifest and not assumed in code. ``groups`` maps each label of an age classifier
+    to a SPEC 5 age group, so the cutoffs are data, not code.
     """
 
     name: str
@@ -145,12 +149,34 @@ class ModelSpec(_Strict):
     labels: list[str] | None = None
     labels_source: str | None = None
     labels_sha256: str | None = None
+    groups: dict[str, str] | None = None
+
+    @model_validator(mode="after")
+    def _groups_cover_labels(self) -> ModelSpec:
+        if self.groups is not None and set(self.groups) != set(self.labels or []):
+            raise ValueError(f"{self.name}: groups must map every label, and only labels")
+        return self
 
 
 class Manifest(_Strict):
-    """The parsed ``models.yaml``."""
+    """The parsed ``models.yaml``; ``retired`` lists files earlier versions fetched."""
 
     models: list[ModelSpec]
+    retired: list[str] = []
+
+
+@cache
+def _parse(path: Path) -> Manifest:
+    manifest = Manifest.model_validate(yaml.safe_load(path.read_text()))
+    sources = {f.path for m in manifest.models for f in m.files if f.quantize is None}
+    for m in manifest.models:
+        for f in m.files:
+            if f.quantize is not None and f.quantize.source not in sources:
+                raise ValueError(f"{f.path}: quantize source {f.quantize.source} is not a file")
+    current = {f.path for m in manifest.models for f in m.files}
+    if current & set(manifest.retired):
+        raise ValueError(f"retired paths still in use: {sorted(current & set(manifest.retired))}")
+    return manifest
 
 
 @cache
@@ -161,24 +187,12 @@ def load_manifest(path: Path = MANIFEST) -> dict[str, ModelSpec]:
     are rejected, so a typo in a digest or URL field fails loudly. The result is cached per
     path (treat it as read-only), so the manifest is parsed once per process.
     """
-    manifest = Manifest.model_validate(yaml.safe_load(path.read_text()))
-    sources = {f.path for m in manifest.models for f in m.files if f.quantize is None}
-    for m in manifest.models:
-        for f in m.files:
-            if f.quantize is not None and f.quantize.source not in sources:
-                raise ValueError(f"{f.path}: quantize source {f.quantize.source} is not a file")
-    return {m.name: m for m in manifest.models}
+    return {m.name: m for m in _parse(path).models}
 
 
-def resolve_precision(configured: str, profile: str | None) -> str:
-    """``int8`` or ``fp32`` for the age and gender models.
-
-    ``vision.attribute_precision`` is ``auto`` by default: INT8 on the ``cm4`` profile of the
-    robot manifest, FP32 on ``npu`` or when the profile is not known. ``int8``/``fp32`` force it.
-    """
-    if configured == "auto":
-        return "int8" if profile == "cm4" else "fp32"
-    return configured
+def retired_paths(path: Path = MANIFEST) -> list[str]:
+    """Files (relative to the models folder) that earlier manifests fetched and nothing loads."""
+    return list(_parse(path).retired)
 
 
 def default_dir(data_dir: str = "") -> Path:
@@ -224,6 +238,33 @@ def _target(root: Path, file: ModelFile) -> Path:
     if not target.is_relative_to(root.resolve()):
         raise ModelError(f"{file.path}: path leaves the models folder")
     return target
+
+
+def prune_retired(root: Path, manifest: Path = MANIFEST) -> list[Path]:
+    """Delete the manifest's ``retired`` files and their markers; returns the files deleted.
+
+    Only the listed paths are touched, never other files in the folder. A listed path that
+    resolves outside ``root`` (for example a symlink pointing out) is left alone with its
+    marker; an in-root symlink is unlinked, not followed. Folders left empty by a deletion are
+    removed up to ``root``. On the bench cache (``--cache-dir ~/.cache/roboemot-bench/models``)
+    this deletes the FairFace files that ``scripts/bench`` and ``scripts/eval`` still use.
+    """
+    base = root.resolve()
+    deleted = []
+    for rel in retired_paths(manifest):
+        path = root / rel
+        if not path.resolve().is_relative_to(base):
+            continue
+        for suffix in (MARKER_SUFFIX, PART_SUFFIX):
+            path.with_name(path.name + suffix).unlink(missing_ok=True)
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+            deleted.append(path)
+        parent = path.parent
+        while parent.resolve() != base and parent.is_dir() and not any(parent.iterdir()):
+            parent.rmdir()
+            parent = parent.parent
+    return deleted
 
 
 def _marker(target: Path) -> Path:
@@ -306,7 +347,7 @@ def status(spec: ModelSpec, root: Path, *, verify: bool = False) -> str:
     ``fetch --requantize`` rebuilds it.
 
     ``missing`` means none of the files exists. By default a file is trusted when its marker
-    matches (cheap); ``verify=True`` rehashes every file (slow for the 343 MB models), and for an
+    matches (cheap); ``verify=True`` rehashes every file (slow for the large models), and for an
     unpacked archive every file recorded in its marker.
     """
     targets = [_target(root, f) for f in spec.files]
@@ -400,6 +441,8 @@ def _stream(client: httpx.Client, url: str, file: ModelFile, part: Path) -> str:
                 _get_into(client, url, file, out, state)
                 break
             except RETRIED:
+                if file.size_bytes is not None and state.done == file.size_bytes:
+                    break  # dropped after the last byte: a resume gets a 416; the digest decides
                 if attempt == DOWNLOAD_ATTEMPTS - 1:
                     raise
                 time.sleep(RETRY_WAIT_S * 2**attempt)

@@ -98,6 +98,7 @@ class FakeSpeech:
         self.first_audio: dict[int, float] = {}
         self.unplayed: set[int] = set()
         self.ends: dict[int, float] = {}  # job id -> when its audio ends (default: long ago)
+        self.busy = False  # something is still queued, in synthesis or playing
 
     def new_utterance(self) -> int:
         self._ids += 1
@@ -118,6 +119,9 @@ class FakeSpeech:
 
     def ended_at(self, job_id):
         return self.ends.get(job_id, 0.0)
+
+    def idle(self):
+        return not self.busy
 
     def texts(self) -> list[str]:
         return [s["text"] for s in self.said]

@@ -37,9 +37,9 @@ def _mean(values: Sequence[float]) -> float:
     return sum(values) / len(values)
 
 
-def _settle(value: str, confidences: Sequence[float], config: IdentityConfig) -> Estimate:
+def _settle(value: str, confidences: Sequence[float], confidence_min: float) -> Estimate:
     confidence = _mean(confidences)
-    if confidence < config.estimate_confidence_min:
+    if confidence < confidence_min:
         return Estimate(UNKNOWN, "none", confidence)
     return Estimate(value, "estimated", confidence)
 
@@ -51,14 +51,20 @@ def _vocabulary(samples: Sequence[tuple[str, float]], allowed: tuple[str, ...]) 
 
 
 def estimate_age_group(
-    samples: Sequence[tuple[str, float]], config: IdentityConfig, declared: str | None = None
+    samples: Sequence[tuple[str, float]],
+    config: IdentityConfig,
+    declared: str | None = None,
+    *,
+    confidence_min: float | None = None,
 ) -> Estimate:
     """Median age group of ``(group, confidence)`` frames; declared values override.
 
     Order is unknown < child < teen < adult < senior, so ``unknown`` frames pull the median
     down: mostly-unknown frames give unknown. With an even number of frames the lower middle
-    one is used, the conservative choice. Fewer than ``estimate_frames_min`` frames, or a low
-    mean confidence of the winning frames, give unknown.
+    one is used, the conservative choice. Fewer than ``estimate_frames_min`` frames, or a mean
+    confidence of the winning frames below ``confidence_min``, give unknown. ``confidence_min``
+    defaults to ``identity.estimate_confidence_min`` (the 0.8 rule); an estimator that already
+    turns weak crops into ``unknown`` with its own score floor passes that floor instead.
     """
     if declared is not None:
         return Estimate(check_age_group(declared), "declared", 1.0)
@@ -69,7 +75,8 @@ def estimate_age_group(
     value = ORDERED_AGE_GROUPS[ranks[(len(ranks) - 1) // 2]]
     if value == UNKNOWN:
         return Estimate(UNKNOWN, "none")
-    return _settle(value, [c for g, c in samples if g == value], config)
+    floor = config.estimate_confidence_min if confidence_min is None else confidence_min
+    return _settle(value, [c for g, c in samples if g == value], floor)
 
 
 def estimate_gender(
@@ -89,4 +96,4 @@ def estimate_gender(
     if (len(ranked) > 1 and ranked[0][1] == ranked[1][1]) or ranked[0][0] == UNKNOWN:
         return Estimate(UNKNOWN, "none")
     value = ranked[0][0]
-    return _settle(value, [c for g, c in samples if g == value], config)
+    return _settle(value, [c for g, c in samples if g == value], config.estimate_confidence_min)

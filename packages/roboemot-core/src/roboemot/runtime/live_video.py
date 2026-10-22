@@ -1,12 +1,13 @@
 """The live camera preview for the web UI's Live tab (SPEC 4A, 11A, 12).
 
-``LiveVideo.frame`` serves one JPEG of the newest frame the vision pump already captured: it never
+``LiveVideo.frame`` serves one JPEG of the newest frame vision already processed: it never
 opens the camera, never resumes a paused pump and never reads a frame itself. The frame comes
-from ``LatestFrameRunner.latest``, which keeps one reference only while a page asked within
-``webui.live.viewer_window_s``. A request encodes only when that frame is newer than the last
-one encoded and the last encode is older than ``1 / video_fps``; otherwise it returns the cached
-JPEG, so any number of viewers cost one encode. Face boxes and confirmed names are drawn on the
-picture, the gaze target highlighted.
+from ``LatestFrameRunner.latest`` with the face boxes computed on it (under overload it lags
+the camera, but the boxes never trail the picture); it keeps one reference only while a page
+asked within ``webui.live.viewer_window_s``. A request encodes only when that frame is newer than
+the last one encoded and the last encode is older than ``1 / video_fps``; otherwise it returns
+the cached JPEG, so any number of viewers cost one encode. Face boxes and confirmed names are
+drawn on the picture, the gaze target highlighted.
 
 A viewer is a client IP that was sent a frame within the window. ``viewers`` feeds the banner every
 open page shows. Start and stop of viewing are logged once each per client IP (the address only).
@@ -205,17 +206,17 @@ class LiveVideo:
             if self._runner is not None and self._runner is not runner:
                 self._runner.unwatch()
             self._runner = runner
-            runner.watch(live.viewer_window_s)
+            runner.watch(live.viewer_window_s, 1.0 / live.video_fps)
             self._armed_until = now + live.viewer_window_s
             latest = runner.latest()
             if latest is None:
                 self._prune(now)
                 return None, VIDEO_NO_FRAME
-            age = runner.latest_age_s()
+            age = runner.camera_age_s()
             if age is not None and age > live.video_stale_s:
                 self._prune(now)
                 return None, VIDEO_STALE
-            image, seq = latest[0].image, latest[1]
+            image, seq, faces = latest.frame.image, latest.seq, latest.overlay
             if self._cached(seq, now, live) is not None:
                 return self._serve(client, now), None
             generation = self._generation
@@ -226,7 +227,7 @@ class LiveVideo:
                     return None, VIDEO_NO_FRAME
                 if self._cached(seq, now, live) is not None:  # another viewer encoded meanwhile
                     return self._serve(client, now), None
-            jpeg = self._encode(self._load_cv2(), image, live)
+            jpeg = self._encode(self._load_cv2(), image, live, faces)
             with self._lock:
                 now = self._clock()
                 if generation != self._generation:  # dropped while encoding: discard the result
@@ -252,7 +253,7 @@ class LiveVideo:
 
     # ------------------------------------------------------------------ drawing
 
-    def _encode(self, cv2: Any, image: np.ndarray, live: Any) -> bytes:
+    def _encode(self, cv2: Any, image: np.ndarray, live: Any, faces: Any = None) -> bytes:
         height, width = image.shape[:2]
         scale = min(1.0, live.video_max_width / width)
         small = (
@@ -262,19 +263,20 @@ class LiveVideo:
             if scale < 1.0
             else image.copy()
         )
-        self._draw(cv2, small, scale)
+        self._draw(cv2, small, scale, faces)
         ok, buf = cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, live.video_jpeg_quality])
         if not ok:
             raise RuntimeError("jpeg encode failed")
         return bytes(buf)
 
-    def _draw(self, cv2: Any, canvas: np.ndarray, scale: float) -> None:
+    def _draw(self, cv2: Any, canvas: np.ndarray, scale: float, faces: Any = None) -> None:
         """Face boxes with the confirmed name (nothing for an unknown face), the gaze target in
         another colour and a thicker line."""
         pipeline = self._host.perception.pipeline
         if pipeline is None:
             return
-        faces = pipeline.face_overlay()
+        if faces is None:  # a runner without an overlay hook: the pipeline's latest boxes
+            faces = pipeline.face_overlay()
         registry = pipeline.matcher.registry
         target = self._p.selector.target
         target_owner = None

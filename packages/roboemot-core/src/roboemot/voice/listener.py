@@ -207,6 +207,7 @@ class VoiceListener:
             }
         snap["latency"] = self._fast.stats.snapshot()
         snap["wake"] = self._gate.snapshot(self._clock())
+        snap["wake_phrases_out_of_vocab"] = self._fast.wake_out_of_vocab()
         snap["vad"] = self._endpointer.snapshot()
         return snap
 
@@ -376,9 +377,16 @@ class VoiceListener:
         self._partial(self._asr.accept(ev.pre_roll), audio_end)
 
     def _end(self, ev: SpeechEnd) -> None:
+        """The utterance ended: the recognizer's final (seconds on a loaded robot), the gate and
+        the hand-off. The Live phase stays ``listening`` until it is handed off or dropped."""
         if not self._active:
             return
-        self._set_active(False)
+        try:
+            self._finish_utterance(ev)
+        finally:
+            self._set_active(False)
+
+    def _finish_utterance(self, ev: SpeechEnd) -> None:
         text = self._asr.finish().strip()
         if not text:
             self._count("empty")

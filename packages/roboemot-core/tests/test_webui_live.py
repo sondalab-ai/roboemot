@@ -342,6 +342,7 @@ def test_start_webui_drops_the_preview_when_the_robot_falls_asleep_and_at_shutdo
         def serve():
             video.frame("10.0.0.1")
             runner.submit(Frame(np.zeros((48, 64, 3), np.uint8), 1.0))
+            runner.run_pending()
             return video.frame("10.0.0.1")
 
         assert serve()[1] is None and video._jpeg is not None and runner.latest() is not None

@@ -124,6 +124,10 @@ class FastPath:
         self.names.configure(cfg)
         self._spotter = KeywordSpotter(cfg.keywords, cfg.wake_word, self.names)
 
+    def wake_out_of_vocab(self) -> dict[str, int]:
+        """Per language, the wake phrases the recognizer can never produce (report only)."""
+        return self._spotter.wake_out_of_vocab()
+
     def reset(self) -> None:
         """Forget the utterance in progress."""
         self._language = ""

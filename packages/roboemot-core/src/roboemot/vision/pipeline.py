@@ -14,7 +14,9 @@ deterministic; ``LatestFrameRunner`` drives it live. Per frame, when the governo
    published.
 3. Per track, once, the first ``vision.attribute_crops`` face crops go to the attribute
    worker (skipped when the recognised person has declared age and gender); until it answers,
-   age and gender are ``unknown`` (a possible minor).
+   age and gender are ``unknown`` (a possible minor). Other visible faces that fall inside a
+   crop's margin are filled with the letterbox grey (outside the subject's own box), so a
+   neighbour's face cannot pull the estimate toward the neighbour's age.
 4. Published: ``percept.face`` (no embedding), ``person.recognized`` when a track turns into a
    known person, ``percept.entity`` (kind person, with the camera-frame bearing; the joint state
    at capture travels in the message ``meta`` for the world model to rotate into the base
@@ -79,7 +81,15 @@ from .stages import (
     ObjectDetector,
 )
 from .tracker import Track, Tracker
-from .types import Box, Detection, FacePercept, Frame, FrameReport, PersonRecognized
+from .types import (
+    LETTERBOX_GREY,
+    Box,
+    Detection,
+    FacePercept,
+    Frame,
+    FrameReport,
+    PersonRecognized,
+)
 
 log = logging.getLogger(__name__)
 
@@ -124,6 +134,14 @@ class _EntityState:
 
 def _declared(attr: Attribute | None) -> str | None:
     return attr.value if attr is not None and attr.source == "declared" else None
+
+
+def _inside(box: Box, left: int, top: int, shape: tuple[int, ...]) -> tuple[slice, slice]:
+    """Rows and columns of ``box`` (frame pixels) within a crop at ``left, top`` of ``shape``."""
+    x1, y1, x2, y2 = box
+    rows = slice(min(max(0, int(y1) - top), shape[0]), min(max(0, int(y2) - top), shape[0]))
+    cols = slice(min(max(0, int(x1) - left), shape[1]), min(max(0, int(x2) - left), shape[1]))
+    return rows, cols
 
 
 class VisionPipeline:
@@ -179,6 +197,7 @@ class VisionPipeline:
                 cfg.attribute_queue_max,
                 executor,
                 report_window=cfg.report_window,
+                age_confidence_min=cfg.attribute_score_min,
             )
             if attribute_estimator is not None
             else None
@@ -272,20 +291,22 @@ class VisionPipeline:
         self, vision: VisionConfig, identity: IdentityConfig, world: WorldConfig | None = None
     ) -> None:
         """Hot reload (SPEC 11A): thresholds, rates and tracker settings take effect at once, and
-        so do the age and gender votes and, with ``world``, the camera field of view.
+        so does, with ``world``, the camera field of view.
 
-        ``vision.attribute_queue_max``, the thread counts, the detector size and the models
-        folder are restart-only (the schema marks them).
+        The attribute worker gets the new ``identity`` too, so ``identity.estimate_frames_min``
+        and ``estimate_confidence_min`` apply to the next job. ``vision.attribute_queue_max``,
+        the age model's input size and score floor, the thread counts, the detector size and the
+        models folder are restart-only (the schema marks them).
         """
         self.cfg, self.identity = vision, identity
         if world is not None:
             self.world = world
+        if self.worker is not None:
+            self.worker.config = identity  # frames_min and the gender rule apply to new jobs
         self.governor.rates = vision.rates
         self.face_tracker.cfg = vision.tracker
         self.object_tracker.cfg = self._object_tracker_cfg()
         self.matcher.config = identity
-        if self.worker is not None:
-            self.worker.config = identity
 
     def _object_lost_s(self) -> float:
         """Lifetime of an animal or object track at the rate the governor allows now."""
@@ -478,6 +499,17 @@ class VisionPipeline:
             out.append((track.box, state.owner_id if state is not None else None))
         return out
 
+    def preview_overlay(self, report: FrameReport) -> list[tuple[Box, str | None]] | None:
+        """The live preview's boxes for the frame ``report`` is about: ``face_overlay`` when
+        face detection ran on it, ``[]`` while detection is off (governor scale 0: the picture
+        shows without boxes), else None (the boxes belong to an earlier frame; the runner keeps
+        that one for a poll period, then shows newer frames without boxes)."""
+        if report.faces_detected:
+            return self.face_overlay()
+        if math.isinf(self.governor.period("detection")):
+            return []
+        return None
+
     def _face_due(self, track: Track, state: _FaceState, stamp: float) -> bool:
         if track.score < self.cfg.tracker.high_score or track.detection is None:
             return False
@@ -528,7 +560,8 @@ class VisionPipeline:
         if len(state.crops) < needed and (
             state.last_crop is None or frame.stamp - state.last_crop >= gap
         ):
-            crop = self._crop(frame.image, track.box)
+            others = [t.box for t in self._visible if t.track_id != track.track_id]
+            crop = self._crop(frame.image, track.box, others)
             if crop.size:
                 state.crops.append((frame.stamp, crop))
                 state.last_crop = frame.stamp
@@ -538,15 +571,27 @@ class VisionPipeline:
             state.crops = []
             state.attr = "submitted"
 
-    def _crop(self, image: np.ndarray, box: Box) -> np.ndarray:
-        """Copy of a square around the box (longer side plus margin), clipped to the frame."""
+    def _crop(self, image: np.ndarray, box: Box, others: list[Box] | None = None) -> np.ndarray:
+        """Copy of a square around the box (longer side plus margin), clipped to the frame.
+
+        The parts of ``others`` (the other visible face boxes) inside the square are filled with
+        ``LETTERBOX_GREY``; the subject's own box is then copied back, so an overlapping
+        neighbour never hides the subject's face. Only the copy is changed, never ``image``.
+        """
         height, width = image.shape[:2]
         x1, y1, x2, y2 = box
         half = max(x2 - x1, y2 - y1) * (1 + 2 * self.cfg.attribute_crop_margin) / 2
         cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
         left, right = max(0, int(cx - half)), min(width, int(cx + half))
         top, bottom = max(0, int(cy - half)), min(height, int(cy + half))
-        return image[top:bottom, left:right].copy()
+        crop = image[top:bottom, left:right].copy()
+        if not others or not crop.size:
+            return crop
+        for other in others:
+            crop[_inside(other, left, top, crop.shape)] = LETTERBOX_GREY
+        own = _inside(box, left, top, crop.shape)
+        crop[own] = image[top:bottom, left:right][own]
+        return crop
 
     def _absorb_attributes(self, stamp: float) -> None:
         """Apply finished jobs to their tracks; ``stamp`` (this frame's) times the estimate."""

@@ -45,10 +45,7 @@ def test_manifest_is_complete_and_pinned():
     assert set(specs) == {
         "yunet",
         "sface",
-        "fairface-age",
-        "fairface-gender",
-        "fairface-age-int8",
-        "fairface-gender-int8",
+        "yolo11n-face-age",
         "dinov2-small",
         "nanodet-plus-m-320",
     }
@@ -63,12 +60,41 @@ def test_manifest_is_complete_and_pinned():
                 assert f.url.startswith("https://")
             else:
                 assert f.sha256 is None and f.url is None
-    for fp32, int8 in (
-        ("fairface-age", "fairface-age-int8"),
-        ("fairface-gender", "fairface-gender-int8"),
-    ):
-        assert specs[int8].labels == specs[fp32].labels
-        assert specs[int8].files[0].quantize.source == specs[fp32].files[0].path
+    assert not [n for n in specs if "fairface" in n]
+    retired = models.retired_paths()
+    assert sorted(retired) == [
+        "fairface/age_model.onnx",
+        "fairface/gender_model.onnx",
+        "fairface_int8/age_model.onnx",
+        "fairface_int8/gender_model.onnx",
+    ]
+    assert not set(retired) & set(paths)
+
+
+def test_prune_deletes_only_the_retired_files_and_their_empty_folders(tmp_path):
+    for rel in [*models.retired_paths(), "fairface/notes.txt", "clip_b32/model.onnx"]:
+        target = tmp_path / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"x")
+        (tmp_path / (rel + ".verified")).write_text("{}")
+    deleted = models.prune_retired(tmp_path)
+    assert sorted(deleted) == sorted(tmp_path / r for r in models.retired_paths())
+    assert not (tmp_path / "fairface_int8").exists()  # emptied, so removed
+    assert (tmp_path / "fairface/notes.txt").exists()  # not listed: kept, folder kept
+    assert not (tmp_path / "fairface/age_model.onnx.verified").exists()
+    assert (tmp_path / "clip_b32/model.onnx").exists()
+    assert models.prune_retired(tmp_path) == []
+    assert models.prune_retired(tmp_path / "absent") == []
+
+
+def test_prune_does_not_follow_a_symlink_out_of_the_folder(tmp_path):
+    outside = tmp_path / "outside.onnx"
+    outside.write_bytes(b"keep")
+    root = tmp_path / "models"
+    (root / "fairface").mkdir(parents=True)
+    (root / "fairface/age_model.onnx").symlink_to(outside)
+    assert models.prune_retired(root) == []
+    assert outside.read_bytes() == b"keep"
 
 
 SOURCE_BODY = b"fp32-weights" * 50
@@ -175,13 +201,20 @@ def test_prune_keeps_a_source_whose_derived_file_is_not_verified(tmp_path, deriv
     assert (tmp_path / "fp/m.onnx").exists()
 
 
-def test_cli_prune_needs_sources_flag(tmp_path, derived_manifest, capsys):
+def test_cli_prune_deletes_retired_files_and_sources_only_on_request(
+    tmp_path, derived_manifest, capsys, monkeypatch
+):
     produced(tmp_path)
-    assert cli.main(["models", "prune", "--cache-dir", str(tmp_path)]) == 1
-    assert (tmp_path / "fp/m.onnx").exists()
+    old = tmp_path / "fairface/age_model.onnx"
+    old.parent.mkdir()
+    old.write_bytes(b"old")
+    retired = ["fairface/age_model.onnx"]
+    monkeypatch.setattr(models, "retired_paths", lambda path=models.MANIFEST: retired)
+    assert cli.main(["models", "prune", "--cache-dir", str(tmp_path)]) == 0
+    assert not old.exists() and (tmp_path / "fp/m.onnx").exists()
+    assert "1 file(s) deleted" in capsys.readouterr().out
     assert cli.main(["models", "prune", "--sources", "--cache-dir", str(tmp_path)]) == 0
     assert not (tmp_path / "fp/m.onnx").exists()
-    assert "1 source file(s) deleted" in capsys.readouterr().out
 
 
 def test_derived_marker_must_match_the_manifest_and_the_file(tmp_path, derived_manifest):
@@ -281,53 +314,6 @@ def test_quantize_weight_type_is_required_and_restricted():
         ModelFile(path="a.onnx", quantize={"source": "b"})
     with pytest.raises(ValueError):
         ModelFile(path="a.onnx", quantize={"source": "b", "weight_type": "int4"})
-
-
-@pytest.mark.parametrize(
-    ("configured", "profile", "expected"),
-    [
-        ("auto", "cm4", "int8"),
-        ("auto", "npu", "fp32"),
-        ("auto", None, "fp32"),
-        ("int8", "npu", "int8"),
-        ("fp32", "cm4", "fp32"),
-    ],
-)
-def test_resolve_precision(configured, profile, expected):
-    assert models.resolve_precision(configured, profile) == expected
-
-
-def test_auto_precision_follows_the_manifest_profile(monkeypatch, tmp_path):
-    pytest.importorskip("cv2")
-    pytest.importorskip("onnxruntime")
-    from roboemot.manifest import load_manifest as load_robot
-    from roboemot.vision import onnx
-
-    asked: list[str] = []
-    monkeypatch.setattr(onnx, "configure", lambda threads: None)
-    monkeypatch.setattr(onnx, "_file", lambda root, name, index=0: asked.append(name) or tmp_path)
-    monkeypatch.setattr(onnx, "FairFaceEstimator", lambda *a: "estimator")
-    monkeypatch.setattr(onnx, "YuNetDetector", lambda *a: None)
-    monkeypatch.setattr(onnx, "SFaceEmbedder", lambda *a: None)
-    cfg = RoboEmotConfig().vision
-    assert cfg.attribute_precision == "auto"
-    manifest_dir = Path(__file__).resolve().parents[3] / "configs" / "manifests"
-    cm4 = load_robot(manifest_dir / "reachy-mini-wireless.yaml", allow_unmeasured_dynamics=True)
-    assert cm4.robot.profile == "cm4"
-    onnx.load_stages(tmp_path, cfg, profile=cm4.robot.profile, appearance=False, objects=False)
-    assert "fairface-age-int8" in asked and "fairface-gender-int8" in asked
-    asked.clear()
-    onnx.load_stages(tmp_path, cfg, profile="npu", appearance=False, objects=False)
-    assert "fairface-age" in asked and not [n for n in asked if n.endswith("int8")]
-    asked.clear()
-    onnx.load_stages(tmp_path, cfg, appearance=False, objects=False)
-    assert "fairface-age" in asked
-    asked.clear()
-    forced = cfg.model_copy(update={"attribute_precision": "int8"})
-    onnx.load_stages(tmp_path, forced, profile="npu", appearance=False, objects=False)
-    assert "fairface-age-int8" in asked
-    with pytest.raises(ValueError):
-        RoboEmotConfig(vision={"attribute_precision": "int4"})
 
 
 def test_nanodet_manifest_pins_the_class_order_and_covers_the_default_mapping():
@@ -433,46 +419,33 @@ def test_the_object_stage_loads_whole_or_not_at_all_and_can_be_off(monkeypatch, 
     assert stages.object_detector is None and stages.appearance_embedder is None and built == []
 
 
-def test_load_stages_int8_pair_uses_the_real_marker_check(monkeypatch, tmp_path):
+def test_load_stages_age_model_uses_the_real_marker_check(monkeypatch, tmp_path):
     pytest.importorskip("cv2")
     pytest.importorskip("onnxruntime")
     from roboemot.vision import onnx
 
     specs = load_manifest()
-    for name in ("yunet", "sface"):
+    for name in ("yunet", "sface", "yolo11n-face-age"):
         f = specs[name].files[0]
         target = tmp_path / f.path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(b"x")
         models._write_marker(target, f.sha256)
-    for name in ("fairface-age-int8", "fairface-gender-int8"):
-        f = specs[name].files[0]
-        target = tmp_path / f.path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(b"int8")
-        models._write_marker(
-            target,
-            hashlib.sha256(b"int8").hexdigest(),
-            {
-                "source_sha256": models._source_of(f).sha256,
-                "weight_type": "QInt8",
-                "ort_version": "1.0",
-            },
-        )
-    opened: list[str] = []
+    built: list[tuple] = []
     monkeypatch.setattr(onnx, "configure", lambda threads: None)
-    monkeypatch.setattr(onnx, "_session", lambda path, threads: opened.append(path.name))
+    monkeypatch.setattr(onnx, "YoloAgeEstimator", lambda *a: built.append(a) or "estimator")
     monkeypatch.setattr(onnx, "YuNetDetector", lambda *a: None)
     monkeypatch.setattr(onnx, "SFaceEmbedder", lambda *a: None)
-    cfg = RoboEmotConfig().vision
+    cfg = RoboEmotConfig(vision={"attribute_input_px": 128, "attribute_score_min": 0.6}).vision
     stages = onnx.load_stages(tmp_path, cfg, profile="cm4", appearance=False, objects=False)
-    assert stages.attribute_estimator is not None
-    assert opened == ["age_model.onnx", "gender_model.onnx"]
-    (tmp_path / "fairface_int8/age_model.onnx").write_bytes(b"swapped")
+    assert stages.attribute_estimator == "estimator"
+    path, labels, groups, input_px, score_min, threads = built[0]
+    assert path == tmp_path / "yolo11n_face_age/model.onnx"
+    assert labels == ["0-14", "15-22", "22+"] and groups["15-22"] == "teen"
+    assert (input_px, score_min, threads) == (128, 0.6, cfg.attribute_threads)
+    (tmp_path / "yolo11n_face_age/model.onnx").write_bytes(b"swapped")
     with pytest.raises(ModelError, match="changed since"):
-        onnx.load_stages(tmp_path, cfg, profile="cm4", appearance=False, objects=False)
-    with pytest.raises(ModelError, match="not verified"):
-        onnx.load_stages(tmp_path, cfg, profile="npu", appearance=False, objects=False)
+        onnx.load_stages(tmp_path, cfg, appearance=False, objects=False)
 
 
 def test_fetch_downloads_verifies_and_is_idempotent(tmp_path):
@@ -587,6 +560,43 @@ def test_fetch_refuses_a_resume_at_the_wrong_offset(tmp_path, waits):
     assert list(tmp_path.rglob("*")) == [tmp_path / "sub"]
 
 
+def test_a_resume_resends_the_range_on_every_redirect_hop(tmp_path, waits):
+    origin = Flaky(drops=1)
+    hops: list[tuple[str, str | None]] = []
+
+    def serve(request: httpx.Request) -> httpx.Response:
+        hops.append((request.url.host, request.headers.get("range")))
+        if request.url.host == "example.test":  # the manifest host redirects to a CDN
+            return httpx.Response(302, headers={"location": "https://cdn.example.test/m.onnx"})
+        return origin(request)
+
+    client = httpx.Client(transport=httpx.MockTransport(serve))
+    assert fetch_file(GOOD, tmp_path, client) == "downloaded"
+    assert (tmp_path / "sub/model.onnx").read_bytes() == BODY
+    assert hops == [
+        ("example.test", None),
+        ("cdn.example.test", None),
+        ("example.test", "bytes=300-"),
+        ("cdn.example.test", "bytes=300-"),
+    ]
+
+
+def test_a_drop_after_the_last_byte_is_not_resumed_into_a_416(tmp_path, waits):
+    sized = GOOD.model_copy(update={"size_bytes": len(BODY)})
+
+    class AtEof(Flaky):
+        def __call__(self, request):
+            if request.headers.get("range") == f"bytes={len(BODY)}-":
+                self.ranges.append(request.headers["range"])
+                return httpx.Response(416)  # a compliant server: nothing left to send
+            return super().__call__(request)
+
+    server = AtEof(drops=1, cut=len(BODY))  # the whole body arrived, then the close failed
+    assert fetch_file(sized, tmp_path, flaky(server)) == "downloaded"
+    assert (tmp_path / "sub/model.onnx").read_bytes() == BODY
+    assert server.ranges == [None]  # the digest decides; no resume was asked
+
+
 def test_fetch_does_not_retry_http_errors(tmp_path, waits):
     seen: list[httpx.Request] = []
     transport = httpx.MockTransport(lambda req: seen.append(req) or httpx.Response(503))
@@ -645,8 +655,7 @@ CACHE = models.default_dir()
 NEEDED = [
     "yunet",
     "sface",
-    "fairface-age-int8",
-    "fairface-gender-int8",
+    "yolo11n-face-age",
     "dinov2-small",
     "nanodet-plus-m-320",
 ]
@@ -675,8 +684,8 @@ def test_real_backends_run_end_to_end_on_a_synthetic_image(stages):
     assert stages.face_detector.detect(img) == []
     crop = img[100:300, 100:300]
     sample = stages.attribute_estimator.estimate(crop)
-    assert sample.age_group in {"child", "teen", "adult", "senior"}
-    assert 0 < sample.age_confidence <= 1 and sample.gender in {"female", "male"}
+    assert sample.age_group in {"child", "teen", "adult", "unknown"}
+    assert 0 <= sample.age_confidence <= 1 and sample.gender == "unknown"
     app = stages.appearance_embedder.embed(img, (100.0, 100.0, 300.0, 300.0))
     assert app.shape == (384,) and np.linalg.norm(app) == pytest.approx(1.0, abs=1e-4)
     same = stages.appearance_embedder.embed(img, (100.0, 100.0, 300.0, 300.0))
@@ -701,3 +710,11 @@ def test_real_face_pipeline_on_a_face_image(stages):
     )
     assert e1.shape == (128,) and float(e1 @ e2) > 0.45
     assert time.perf_counter() - start < 5
+    # ROBOEMOT_TEST_FACE is an adult portrait: the age model must see an adult on the padded crop
+    # the pipeline makes (a BGR/RGB swap drops the adult score well below the floor on most).
+    x1, y1, x2, y2 = faces[0].box
+    half = max(x2 - x1, y2 - y1) * (1 + 2 * RoboEmotConfig().vision.attribute_crop_margin) / 2
+    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+    top, left = max(0, int(cy - half)), max(0, int(cx - half))
+    crop = img[top : int(cy + half), left : int(cx + half)]
+    assert stages.attribute_estimator.estimate(crop).age_group == "adult"

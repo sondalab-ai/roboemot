@@ -23,15 +23,17 @@ and nothing else may read the SDK. Two consumers:
   replaced by silence of the same length, also marked ``gap``.
 
 The levels of the two microphone channels (RMS in dBFS, mono mix, correlation) are kept per block
-of ``level_block_s`` input seconds for the debug report, to tell two live microphones from one
-silent or anti-phase channel (SPEC 12A); only running sums leave a chunk, never samples.
+of ``level_block_s`` input seconds for the debug report (``snapshot()["levels"]``), to tell two
+live microphones from one silent or anti-phase channel (SPEC 12A). Every chunk read counts,
+drained ones included, with or without the voice pipeline (the input rate is read at start
+either way); only running sums leave a chunk, never samples.
 
 Voice stamps are approximate, monotone and not capture times: the newest chunk of a read ends
 at the read time, earlier chunks of one drained batch end one chunk duration before the next,
 and the resampler's lookahead is subtracted.
 
-Privacy (SPEC 12): without ``voice`` a chunk is only held while its RMS is taken, and only
-that scalar leaves this module. With ``voice`` the queue holds audio for the voice
+Privacy (SPEC 12): without ``voice`` a chunk is only held while its RMS and the level sums are
+taken, and only those scalars leave this module. With ``voice`` the queue holds audio for the voice
 pipeline by design and nothing else; frames are never published on the bus, written to disk or
 logged, and ``snapshot()`` carries counts only.
 """
@@ -164,6 +166,7 @@ class ReachyAudio:
                 "dropped_stale": self._dropped,
                 "voice": None,
             }
+        snap["levels"] = self._levels_report()
         if self._voice:
             with self._voice_cond:
                 snap["voice"] = {
@@ -175,7 +178,6 @@ class ReachyAudio:
                     "dropped": self._voice_dropped,
                     "dropped_samples": self._voice_dropped_samples,
                     "sanitised": self._voice_sanitised,
-                    "levels": self._levels_report(),
                 }
         return snap
 
@@ -184,17 +186,28 @@ class ReachyAudio:
         self._level_sums = [0.0] * 4  # x0^2, x1^2, mono^2, x0*x1
         self._level_n = 0
 
-    def _accumulate_levels(self, chunk: np.ndarray) -> None:
+    def _accumulate_levels(self, chunk: Any) -> None:
         """Add a finite ``(n, 2+)`` chunk to the running sums; close the block once it holds
         ``level_block_s`` seconds of input (the chunk that crosses the limit completes it).
-        Non-finite chunks are not added, so a block can span more wall time than that."""
+        Anything else (mono, empty, non-finite, no input rate known) is not added, so a block
+        can span more wall time than that."""
+        if (
+            self._in_rate is None
+            or not isinstance(chunk, np.ndarray)
+            or chunk.ndim != 2
+            or chunk.shape[1] < 2
+            or chunk.shape[0] == 0
+        ):
+            return
         x = chunk.astype(np.float64, copy=False)
+        if not np.isfinite(x).all():
+            return
         x0, x1, mono = x[:, 0], x[:, 1], x.mean(axis=1)
         add = (float(x0 @ x0), float(x1 @ x1), float(mono @ mono), float(x0 @ x1))
         with self._level_lock:
             self._level_sums = [a + b for a, b in zip(self._level_sums, add, strict=True)]
             self._level_n += x.shape[0]
-            if self._level_n >= self._level_block_s * (self._in_rate or 1):
+            if self._level_n >= self._level_block_s * self._in_rate:
                 self._level_blocks.append(self._close_block())
                 self._level_reset()
 
@@ -269,30 +282,39 @@ class ReachyAudio:
         except Exception as exc:
             self._set("unavailable", f"start_recording failed: {type(exc).__name__}")
             return
+        self._level_reset()
         if self._voice:
             with self._voice_cond:
                 self._voice_q.clear()
                 self._voice_queued, self._voice_gap, self._voice_closed = 0, False, False
-            self._level_reset()
             self._open_voice(media)
+        else:
+            self._read_format(media)
         self._set("no_data", "no audio chunk read yet")
         self._stop.clear()
         thread = threading.Thread(target=self._run, name="roboemot-audio", daemon=True)
         thread.start()
         self._thread = thread
 
-    def _open_voice(self, media: Any) -> None:
-        """Read the input rate and channel count from the SDK (never assumed) and set up the
-        conversion to ``voice_rate_hz``; an unusable rate leaves the voice side silent."""
-        self._resampler = None
+    def _read_format(self, media: Any) -> None:
+        """Read the input rate and channel count from the SDK (never assumed); an unusable rate
+        is None (no voice frames, no level blocks)."""
         try:
             rate = int(media.get_input_audio_samplerate())
             self._in_channels = int(media.get_input_channels())
         except Exception as exc:
-            log.warning("audio: input format: %s", type(exc).__name__)
+            # Without voice the format only feeds the level report: not worth a warning.
+            level = logging.WARNING if self._voice else logging.DEBUG
+            log.log(level, "audio: input format: %s", type(exc).__name__)
             self._in_rate = None
             return
         self._in_rate = rate if rate > 0 else None
+
+    def _open_voice(self, media: Any) -> None:
+        """Read the input format (``_read_format``) and set up the conversion to
+        ``voice_rate_hz``; an unusable rate leaves the voice side silent."""
+        self._resampler = None
+        self._read_format(media)
         if self._in_rate is None:
             log.warning("audio: the SDK reports no input rate; voice frames are off")
         elif self._in_rate != self._voice_rate:
@@ -317,8 +339,6 @@ class ReachyAudio:
         bad = not np.isfinite(mono).all()
         if bad:
             mono = np.zeros_like(mono)
-        elif chunk.ndim == 2 and chunk.shape[1] >= 2:
-            self._accumulate_levels(chunk)
         if self._resampler is not None:
             mono = self._resampler.process(mono)
             stamp = end_stamp - self._resampler.lookahead_s
@@ -372,6 +392,7 @@ class ReachyAudio:
         try:
             media = self._mini.media
             chunk = media.get_audio_sample()
+            self._accumulate_levels(chunk)
             batch = [chunk] if self._voice and chunk is not None else []
             skipped = 0
             drain = drain and self._sink is not None
@@ -380,6 +401,7 @@ class ReachyAudio:
                 if newer is None:
                     break
                 chunk, skipped = newer, skipped + 1
+                self._accumulate_levels(newer)
                 if self._voice:
                     batch.append(newer)
             if skipped:
