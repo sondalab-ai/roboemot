@@ -121,14 +121,12 @@ def _models(args: argparse.Namespace) -> int:
             )
         return 0
     if args.action == "prune":
-        if not args.sources:
-            raise ValueError(
-                "prune needs --sources (delete FP32 files whose INT8 files are verified)"
-            )
-        removed = models.prune_sources(vision_root)
+        removed = models.prune_retired(vision_root)
+        if args.sources:
+            removed += models.prune_sources(vision_root)
         for path in removed:
             print(f"deleted    {path}")
-        print(f"{len(removed)} source file(s) deleted")
+        print(f"{len(removed)} file(s) deleted from {vision_root}")
         return 0
     wanted = set(args.names)
     if args.all:
@@ -268,24 +266,29 @@ def main(argv: list[str] | None = None) -> int:
     dbg.add_argument("--json", action="store_true")
 
     mod = sub.add_parser(
-        "models", help="vision and voice model files: list, fetch, prune (SPEC 5, 8, 13)"
+        "models",
+        help="vision and voice model files: list, fetch, prune (delete the files of replaced "
+        "models, such as the FairFace pair; on the bench cache that includes files the bench "
+        "scripts use) (SPEC 5, 8, 13)",
     )
     mod.add_argument("action", choices=["list", "fetch", "prune"])
     mod.add_argument("names", nargs="*", help="models to fetch (see `list`)")
     mod.add_argument(
         "--all",
         action="store_true",
-        help="fetch every vision and voice model (about 0.8 GB plus 0.17 GB of INT8 files made "
-        "from it, and about 0.3 GB of voice models)",
+        help="fetch every vision and voice model (about 0.14 GB of vision and 0.3 GB of voice "
+        "models)",
     )
     mod.add_argument("--voice", action="store_true", help="fetch every voice model (about 0.3 GB)")
     mod.add_argument(
-        "--requantize", action="store_true", help="fetch: rebuild INT8 files from the FP32 sources"
+        "--requantize",
+        action="store_true",
+        help="fetch: rebuild quantized files from their sources (none ship today)",
     )
     mod.add_argument(
         "--sources",
         action="store_true",
-        help="prune: delete FP32 files whose INT8 files are verified",
+        help="prune: also delete source files whose quantized files are verified (none ship today)",
     )
     mod.add_argument(
         "--cache-dir", help="models folder (default: vision.models_dir, else the app data folder)"

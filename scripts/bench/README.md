@@ -81,6 +81,23 @@ and gender in one process and time both per call. To bench INT8 on the robot, co
 `fairface_*_vit_int8.onnx` files into the `models` dir next to the FP32 ones; the commands in the
 next section pick them up automatically, or use `--only` as above and `--threads 1` / `--threads 2`.
 
+## Age model yolo11n-face-age (SPEC 5, 13)
+
+The shipped age model since 2026-10-22 (CC-BY-NC-4.0, revision `410bdd84`, sha256
+`e37945afcbc1b855f4a66bbf1e13db9d19d5ca2e8ddb2ffe2be2906d53f5ff93`). The library runs it with one
+thread on a letterboxed crop of `vision.attribute_input_px` (160; 128 is the fallback). Time it on
+the robot (network only; the letterbox adds well under 1 ms on a Mac) and keep 160 if it stays
+under about 100 ms:
+
+```bash
+$PY -I scripts/bench/fetch.py yolo11n-face-age && $PY -I scripts/bench/fetch.py --export-flat ./models
+python run_cm4.py --models-dir ./models --threads 1 --runs 100 \
+    --only yolo11n_face_age_128,yolo11n_face_age_160,yolo11n_face_age_224 --json cm4_age.json
+```
+
+`roboemot models fetch yolo11n-face-age` on the robot puts the same file at
+`~/.local/share/roboemot/models/yolo11n_face_age/model.onnx`; copy it as `models/yolo11n_face_age.onnx`.
+
 ## Object detector (SPEC 5, 13)
 
 YOLOX-Nano and NanoDet-Plus-m 320 on a seeded COCO val2017 subset (Apache-2.0 code and official

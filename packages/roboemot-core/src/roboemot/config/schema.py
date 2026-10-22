@@ -1260,10 +1260,14 @@ class IdentityConfig(Strict):
     votes_required: int = param(3, "Positive evaluations required", ge=1, le=20)
     votes_window: int = param(5, "Evaluations considered", ge=1, le=50)
     estimate_confidence_min: float = param(
-        0.8, "Below this, age/gender estimates are unknown", ge=0, le=1
+        0.8,
+        "Below this, gender estimates are unknown; the age model has its own floor, "
+        "vision.attribute_score_min",
+        ge=0,
+        le=1,
     )
     estimate_frames_min: int = param(
-        3,
+        1,
         "Frames aggregated before an estimate is used; vision.attribute_crops must be at "
         "least this",
         ge=1,
@@ -1359,6 +1363,10 @@ class EnrollmentConfig(Strict):
         120.0, "A session without completion is dropped after this time", unit="s", ge=5, le=3600
     )
 
+
+# yolo11n-face-age is a YOLO11 network: its input side must be a multiple of the largest stride
+# (ONNX metadata ``stride``, checked again at load).
+ATTRIBUTE_INPUT_STRIDE_PX = 32
 
 ATTENTION_CATEGORIES = ("active_speaker", "enrolled_person", "nearest_face", "salient_motion")
 
@@ -1507,7 +1515,7 @@ class VisionConfig(Strict):
     tracker: TrackerConfig = param({}, "ByteTrack-class tracker")
     threads: int = param(2, "CPU threads of the frame-path models", ge=1, le=8, restart=True)
     attribute_threads: int = param(
-        1, "CPU threads of the age and gender models (background job)", ge=1, le=8, restart=True
+        1, "CPU threads of the age model (background job)", ge=1, le=8, restart=True
     )
     detector_width_px: int = param(
         320, "Face detector input width (SPEC 13: 320x240)", unit="px", ge=64, le=1280, restart=True
@@ -1549,28 +1557,45 @@ class VisionConfig(Strict):
         ge=0,
         le=10,
     )
-    attribute_precision: Literal["auto", "int8", "fp32"] = param(
-        "auto",
-        "Age and gender model files: int8 (dynamic INT8, about 87 MB each), fp32 (343 MB each) "
-        "or auto (int8 when the robot manifest profile is cm4, fp32 otherwise)",
+    attribute_input_px: int = param(
+        160,
+        "Side of the square age-model input (yolo11n-face-age, SPEC 5, 13); a multiple of 32. "
+        "128 is the fallback if 160 is too slow on the CM4",
+        unit="px",
+        ge=128,
+        le=224,
+        restart=True,
+    )
+    attribute_score_min: float = param(
+        0.5,
+        "Age-model class score (an independent sigmoid) below which a crop's age group is "
+        "unknown, a possible minor; replaces the 0.8 rule for age. The estimator and the "
+        "worker take it at start. At least 0.3 (the research's matched point at 128 px is "
+        "0.32), so the floor cannot be switched off",
+        ge=0.3,
+        le=1,
         restart=True,
     )
     attribute_crops: int = param(
-        3,
-        "Face crops per track for the age and gender job (SPEC 5); at least "
-        "identity.estimate_frames_min, and the 0.8 confidence rule applies at any count",
+        1,
+        "Face crops per track for the age job (SPEC 5); at least identity.estimate_frames_min. "
+        "One crop decides by default; with more the median age group is used",
         ge=1,
         le=10,
     )
     attribute_crop_interval_s: float = param(
         0.3,
-        "Minimum capture-time gap between the face crops kept for the age and gender job",
+        "Minimum capture-time gap between the face crops kept for the age job",
         unit="s",
         ge=0,
         le=10,
     )
     attribute_crop_margin: float = param(
-        0.25, "Face box padding for the age and gender crop, per side", ge=0, le=1
+        0.25,
+        "Face box padding for the age crop, per side; other visible faces inside it are filled "
+        "with grey",
+        ge=0,
+        le=1,
     )
     attribute_queue_max: int = param(
         4,
@@ -1681,6 +1706,10 @@ class VisionConfig(Strict):
         both = set(self.animal_categories) & set(self.object_categories)
         if both:
             raise ValueError(f"vision categories are both animal and object: {sorted(both)}")
+        if self.attribute_input_px % ATTRIBUTE_INPUT_STRIDE_PX:
+            raise ValueError(
+                f"vision.attribute_input_px must be a multiple of {ATTRIBUTE_INPUT_STRIDE_PX}"
+            )
         return self
 
 

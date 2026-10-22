@@ -7,6 +7,7 @@ motors enabled before targets, antenna order ``[right, left]``, one process owns
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import Any
 
@@ -25,11 +26,12 @@ from .audio import ReachyAudio
 from .camera import ReachyCamera
 from .driver import ReachyMiniDriver
 from .gaze import FRAME, GAZE, REFLEX
-from .sdk import installed_version, require_sdk
+from .sdk import TESTED_SDK, installed_version, newer_than_tested, require_sdk
 from .speaker import ReachySpeaker
 from .voice import LatestBearing
 
 MS_PER_S = 1000.0
+log = logging.getLogger(__name__)
 
 
 class ReachyMiniSession:
@@ -80,8 +82,17 @@ class ReachyMiniPlatform:
     """``RobotPlatform`` of ``reachy-mini-wireless``: stateless description of the robot."""
 
     def require_runtime(self) -> None:
-        """Refuse to start without a ``reachy_mini`` SDK of the supported version."""
-        require_sdk(installed_version())
+        """Refuse to start without a ``reachy_mini`` SDK of the supported version; warn when it
+        is newer than the one the package was tested against (private names may have moved)."""
+        installed = installed_version()
+        require_sdk(installed)
+        if newer_than_tested(installed):
+            log.warning(
+                "reachy_mini %s is newer than %s, the version this app was tested against: "
+                "report any SDK error from the robot section of the debug report",
+                installed,
+                TESTED_SDK,
+            )
 
     def bind(self, client: Any) -> ReachyMiniSession:
         """The session over the connected ``ReachyMini``."""

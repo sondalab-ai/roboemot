@@ -1,10 +1,12 @@
 """The slice of the ``reachy_mini`` SDK this package touches, as typed protocols (SPEC 4A, 12A).
 
-Every member is read straight from the SDK source of the version the package pins (1.12, the
-robot's); nothing is probed with ``hasattr``/``getattr``. Where a name is private to the SDK
-(``_is_alive``, ``_last_status``) the SDK line it comes from is cited here, so an SDK upgrade
-that moves it fails loudly instead of degrading silently. Paths are relative to ``reachy_mini/``
-of the 1.12.0 wheel.
+Every member is read straight from the SDK source of the version the package is tested against
+(1.12, the robot's; the package requires at least that, ``MIN_SDK``, and the simulation CI job
+installs 1.12.x); nothing is probed with ``hasattr``/``getattr``. Where a name is private to the
+SDK (``_is_alive``, ``_last_status``) the SDK line it comes from is cited here, so an SDK upgrade
+that moves it fails loudly instead of degrading silently; a newer SDK than ``TESTED_SDK`` is
+logged at start (``newer_than_tested``). Paths are relative to ``reachy_mini/`` of the 1.12.0
+wheel.
 """
 
 from __future__ import annotations
@@ -19,6 +21,11 @@ import numpy.typing as npt
 MIN_SDK = "1.12"
 """Oldest SDK the package is written for: ``AudioBase.clear_player`` (barge-in) and the private
 websocket state below are read as in 1.12.0, the version of the daemon and SDK on the robot."""
+
+TESTED_SDK = "1.12"
+"""Newest SDK major.minor the package was checked against (the sim CI job pins it). A newer one
+may have moved a private name read here: the app warns at start but runs (a daemon update must
+not stop it)."""
 
 
 def _numbers(text: str) -> tuple[int, ...]:
@@ -53,6 +60,11 @@ def require_sdk(installed: str | None) -> None:
             "(AudioBase.clear_player for barge-in, the websocket status fields); "
             "update the robot's Reachy Mini software"
         )
+
+
+def newer_than_tested(installed: str | None) -> bool:
+    """Whether ``installed`` has a higher major.minor than ``TESTED_SDK``."""
+    return installed is not None and _numbers(installed)[:2] > _numbers(TESTED_SDK)[:2]
 
 
 class AudioPort(Protocol):

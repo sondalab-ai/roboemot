@@ -252,7 +252,7 @@ def open_perception(
 
     ``source`` is the robot's camera; ``camera_model`` gives its intrinsics for a frame size
     (None: the field of view in ``world.camera_fov_*``); ``profile`` is the robot manifest's
-    profile (``cm4`` picks the INT8 attribute models); ``load_stages`` is a seam for tests and
+    profile, passed to ``load_stages``; ``load_stages`` is a seam for tests and
     other backends. Nothing here starts a thread: call ``Perception.start``.
     """
     try:

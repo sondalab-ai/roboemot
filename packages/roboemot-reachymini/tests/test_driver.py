@@ -206,6 +206,8 @@ def test_read_state_raises_on_dead_connection():
         driver.read_state()
 
 
+# The SDK is installed only in the sim job (`-m sim`); without the mark these never ran in CI.
+@pytest.mark.sim
 def test_reconnect_swaps_client_and_restores_body_yaw(monkeypatch):
     ws = pytest.importorskip("reachy_mini.io.ws_client")
 
@@ -225,6 +227,8 @@ def test_reconnect_swaps_client_and_restores_body_yaw(monkeypatch):
     assert (made[0].host, made[0].port) == ("localhost", 8000)
 
 
+# The SDK is installed only in the sim job (`-m sim`); without the mark these never ran in CI.
+@pytest.mark.sim
 def test_reconnect_failure_keeps_old_client(monkeypatch):
     ws = pytest.importorskip("reachy_mini.io.ws_client")
 
