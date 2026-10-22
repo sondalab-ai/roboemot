@@ -91,6 +91,25 @@ DEFAULT_SECRET_NAME = "cloud_key"  # the name configs/companion.yaml gives the c
 MIB = 1024 * 1024
 VISION_DERIVED_BYTES = 170_000_000  # INT8 files made from the FP32 weights ("0.17 GB", models CLI)
 PIPER_TTS_VERSION = "1.8.0"  # exact pin: the worker protocol is tested against this API
+FETCH_ATTEMPTS = 2  # `roboemot models fetch` runs once more after a failure (it resumes)
+# The model files already verified on the robot (marker check only, read-only: no folder made),
+# as "voice:<path>" / "vision:<path>"; run with the app's interpreter.
+VERIFIED_MODELS = r"""
+import json
+from roboemot.vision import models as m
+from roboemot.voice import models as v
+done = []
+for kind, specs, root in (("vision", m.load_manifest(), m.models_dir()),
+                          ("voice", v.load_manifest(), v.models_dir())):
+    for spec in specs.values():
+        for f in spec.files:
+            try:
+                m.check_file(root, f)
+            except Exception:
+                continue
+            done.append(kind + ":" + f.path)
+print(json.dumps(done))
+"""
 PLATFORM_PROBE = (
     "import sys, platform; print(platform.machine()); print('%d.%d' % sys.version_info[:2])"
 )
@@ -547,21 +566,38 @@ def models_label(vision: bool) -> str:
     return "voice and vision models" if vision else "voice models"
 
 
-def models_bytes(vision: bool, peak: bool = True) -> int:
+def models_bytes(vision: bool, peak: bool = True, done: frozenset[str] = frozenset()) -> int:
     """Disk the fetch needs, from the pinned manifests: each file's download size plus, for a
     zip archive, its unpacked size (both exist while it unpacks; ``peak=False`` counts only what
-    stays). Vision adds the INT8 files derived from the FP32 weights (``VISION_DERIVED_BYTES``)."""
+    stays). Vision adds the INT8 files derived from the FP32 weights (``VISION_DERIVED_BYTES``).
+    Files in ``done`` (``"voice:<path>"``, ``"vision:<path>"``: already verified on the robot)
+    need nothing; the derived bytes count until every derived file is done."""
     from ..vision import models as vision_models
     from ..voice import models as voice_models
 
-    specs = list(voice_models.load_manifest().values())
+    groups = [("voice", voice_models.load_manifest().values())]
     if vision:
-        specs += list(vision_models.load_manifest().values())
-    total = 0
-    for f in (f for m in specs for f in m.files):
-        stays = f.unpacked_bytes if f.archive else f.size_bytes
-        total += (f.size_bytes or 0) + (f.unpacked_bytes or 0) if peak else (stays or 0)
-    return total + (VISION_DERIVED_BYTES if vision else 0)
+        groups.append(("vision", vision_models.load_manifest().values()))
+    total, derived_left = 0, False
+    for kind, specs in groups:
+        for f in (f for m in specs for f in m.files):
+            if f"{kind}:{f.path}" in done:
+                continue
+            derived_left = derived_left or f.quantize is not None
+            stays = f.unpacked_bytes if f.archive else f.size_bytes
+            total += (f.size_bytes or 0) + (f.unpacked_bytes or 0) if peak else (stays or 0)
+    return total + (VISION_DERIVED_BYTES if derived_left else 0)
+
+
+def verified_models(py: RemotePython) -> frozenset[str]:
+    """The model files already verified on the robot (``VERIFIED_MODELS``); empty when the app
+    is not installed yet or the query fails, so the full size counts."""
+    if not py.exists():
+        return frozenset()
+    try:
+        return frozenset(json.loads(py.py(VERIFIED_MODELS)))
+    except (WizardError, ValueError, TypeError):
+        return frozenset()
 
 
 def free_mib_at(remote: Remote, path: str) -> int | None:
@@ -588,15 +624,21 @@ def fetch_models(
     """Download the voice models (and the vision weights with ``vision``) on the robot by running
     the installed CLI, so they land where the app reads them (``roboemot.paths``).
 
-    Skipped with a warning, not an error, when the filesystem lacks the space the pinned
-    manifests state (same unit on both sides: MiB), when the free space cannot be read, or when
-    the download fails: ``roboemot models fetch`` can be run later. Model
+    The space needed is what the pinned manifests state for the files not yet verified on the
+    robot (a rerun after a partial fetch needs only the rest); with every file verified there is
+    nothing to do. Skipped with a warning, not an error, when the filesystem lacks that space
+    (same unit on both sides: MiB), when the free space cannot be read, or when the download
+    fails twice (``FETCH_ATTEMPTS``): ``roboemot models fetch`` can be run later. Model
     folders the installer creates inside a data folder that is not recorded as its own are
     recorded before the download, so uninstall removes them; inside a recorded data folder they
     go with it. The dry run only reports sizes and free space.
     """
-    need_mib, label = -(-models_bytes(vision) // MIB), models_label(vision)
+    label = models_label(vision)
+    need_mib = -(-models_bytes(vision, done=verified_models(py)) // MIB)
     folders = model_dirs(remote, vision)
+    if need_mib == 0:
+        ui.ok(f"the {label} are already there and verified: nothing to download")
+        return
     free_mib = free_mib_at(remote, folders[0])
     if free_mib is None:
         ui.warn(
@@ -621,7 +663,13 @@ def fetch_models(
         if new:
             record.models_dirs += new
             write_record(remote, platform.record_path, record)
-    result = py.cli(f"models fetch {'--all' if vision else '--voice'}", f"downloading the {label}")
+    args = f"models fetch {'--all' if vision else '--voice'}"
+    result = py.cli(args, f"downloading the {label}")
+    for _ in range(FETCH_ATTEMPTS - 1):
+        if result.ok:
+            break
+        ui.warn(f"the download stopped: trying once more (it resumes)\n{result.output}")
+        result = py.cli(args, f"downloading the {label} (again)")
     if not result.ok:
         ui.warn(
             f"the {label} were not downloaded:\n{result.output}\n"

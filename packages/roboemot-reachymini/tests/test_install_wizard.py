@@ -75,7 +75,8 @@ class FakeRobot:
         self.sizes: dict[str, str] = {}  # `du -sh` answers
         self.daemon_venv_kb = 900_000  # `du -sk` of /venvs/mini_daemon
         self.fetches: list[str] = []  # `roboemot models fetch` argument lists
-        self.fetch_fails = False
+        self.fetch_fails = False  # True: every fetch fails; an int: that many fail first
+        self.verified_models: list[str] = []  # "voice:<path>" files with a valid marker
         self.free_kb = 20_000_000
         self.free_kb_by_cache = self.free_kb  # free space while the uv cache is still there
         self.home_free_kb: int | None = None  # `df` below HOME (the models), else free_kb
@@ -133,6 +134,8 @@ class FakeRobot:
             assert command.startswith(APPS_PY), command
             self.fetches.append(command.split(" -m roboemot.cli ")[1].split(" 2>&1")[0])
             if self.fetch_fails:
+                if self.fetch_fails is not True:
+                    self.fetch_fails -= 1
                 return "ModelError: no network\n__rc=1"
             self.dirs |= (
                 {f"{DATA}/voice-models", f"{DATA}/models"}
@@ -189,6 +192,8 @@ class FakeRobot:
             if not any(d.startswith(path + "/") for d in self.dirs):
                 self.dirs.discard(path)
             return ""
+        if "check_file" in plain:
+            return json.dumps(self.verified_models)
         if "platform.machine" in plain:
             return self.machine
         if "version('reachy_mini')" in plain:
@@ -872,6 +877,42 @@ def test_a_failed_download_warns_and_the_install_goes_on(offline, robot, daemon,
     install()
     assert "were not downloaded" in capsys.readouterr().out
     assert "roboemot-core" in robot.env
+
+
+def voice_files(robot, share: float) -> list[str]:
+    """The first ``share`` of the voice model files, as the robot's verified list names them."""
+    from roboemot.voice import models as voice_models
+
+    files = [f"voice:{f.path}" for m in voice_models.load_manifest().values() for f in m.files]
+    return files[: int(len(files) * share)]
+
+
+def test_a_rerun_after_a_partial_fetch_needs_only_the_rest(offline, robot, daemon, capsys):
+    """R4 S2/T2: files already verified on the robot are not counted again, so a disk that
+    cannot hold the full peak still fits the rest of an interrupted fetch."""
+    robot.verified_models = voice_files(robot, 0.6)
+    rest = -(-inst.models_bytes(False, done=frozenset(robot.verified_models)) // inst.MIB)
+    assert 0 < rest < needed_mib()
+    robot.home_free_kb = rest * 1024
+    install()
+    assert robot.fetches == ["models fetch --voice"]
+    assert f"need {rest} MiB" in capsys.readouterr().out
+
+
+def test_with_every_model_verified_there_is_nothing_to_download(offline, robot, daemon, capsys):
+    robot.verified_models = voice_files(robot, 1.0)
+    robot.home_free_kb = 1024
+    install()
+    assert robot.fetches == []
+    assert "nothing to download" in capsys.readouterr().out
+
+
+def test_a_failed_download_is_tried_once_more(offline, robot, daemon, capsys):
+    robot.fetch_fails = 1
+    install()
+    out = capsys.readouterr().out
+    assert robot.fetches == ["models fetch --voice"] * 2
+    assert "trying once more" in out and "were not downloaded" not in out
 
 
 def test_dry_run_reports_the_model_sizes_and_downloads_nothing(offline, robot, daemon, capsys):
