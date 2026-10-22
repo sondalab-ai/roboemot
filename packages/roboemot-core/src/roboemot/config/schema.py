@@ -2317,7 +2317,9 @@ class VoiceConfig(Strict):
     backend: Literal["piper", "openai_speech", "kokoro"] = param(
         "piper", "TTS backend", restart=True
     )
-    fallback_backend: Literal["piper", "kokoro"] = param("piper", "Offline fallback backend")
+    fallback_backend: Literal["piper", "kokoro"] = param(
+        "piper", "Offline fallback backend", restart=True
+    )
     voices: dict[str, str] = param(
         {"it": "it_IT-paola-medium", "en": "en_US-amy-medium"}, "Voice per language", restart=True
     )

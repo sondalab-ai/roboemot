@@ -591,3 +591,9 @@ def test_a_reload_takes_the_piper_timeouts_and_keeps_its_restart_fields(tmp_path
     )
     assert local.config.model_dump(include=set(hot)) == new.model_dump(include=set(hot))
     assert (local.config.chunk_ms, local.config.python) == (before.chunk_ms, before.python)
+
+
+def test_the_backend_choice_is_a_restart_field_like_the_backend():
+    fields = type(VOICE).model_fields
+    for name in ("backend", "fallback_backend"):
+        assert fields[name].json_schema_extra["restart"], name
