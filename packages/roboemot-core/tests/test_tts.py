@@ -358,22 +358,10 @@ async def test_openai_instructions_only_on_instructable_models():
     assert backend.controls == frozenset()
 
 
-async def test_openai_is_refused_while_a_minor_is_present_unless_the_route_is_cleared():
-    server = SpeechServer()
-    backend, _ = openai_backend(server)
-    assert backend.available(minor_present=False)
-    assert not backend.available(minor_present=True)
-    with pytest.raises(TTSUnavailable):
-        async for _ in backend.synthesize(
-            "x", delivery(), language="it", voice=VOICE, minor_present=True
-        ):
-            pass
-    assert server.requests == []
-    allowed = SafetyConfig(minors_allowed_llm=True)
-    cleared, _ = openai_backend(server, route(allowed_for_minors=True), safety=allowed)
-    assert cleared.available(minor_present=True)
-    uncleared, _ = openai_backend(server, safety=allowed)
-    assert not uncleared.available(minor_present=True)
+async def test_openai_speech_is_used_while_a_minor_is_present():
+    """SPEC 8 (owner decision 2026-10-22): a minor present does not skip the speech route."""
+    backend, _ = openai_backend(SpeechServer())
+    assert backend.available(minor_present=True)
 
 
 async def test_openai_unknown_route_and_spent_budget_are_unavailable():
@@ -419,18 +407,11 @@ async def test_fallback_to_piper_when_the_remote_route_fails_or_is_not_eligible(
         tts = FallbackTTS(failing, local)
         chunks = await collect(tts, "ciao")
         assert chunks[0].rate_hz == RATE and tts.last_used == "piper"
-        # minor present, route not cleared: the remote is never contacted
+        # budget spent, so not eligible: the remote is never contacted
         server = SpeechServer()
-        remote, _ = openai_backend(server)
-        chunks = await collect(FallbackTTS(remote, local), "ciao", language="it")
-        assert chunks and chunks[0].rate_hz == OPENAI_PCM_RATE_HZ  # adult: remote is used
-        tts = FallbackTTS(remote, local)
-        got = []
-        async for c in tts.synthesize(
-            "ciao", delivery(), language="it", voice=voice_cfg(), minor_present=True
-        ):
-            got.append(c)
-        assert got[0].rate_hz == RATE and len(server.requests) == 1
+        spent, _ = openai_backend(server, route(daily_token_budget=0))
+        chunks = await collect(FallbackTTS(spent, local), "ciao", language="it")
+        assert chunks[0].rate_hz == RATE and server.requests == []
     finally:
         await local.aclose()
 
@@ -458,10 +439,10 @@ async def test_fallback_does_not_switch_voice_after_audio_started(tmp_path):
 
 
 async def test_fallback_with_nothing_available_raises_unavailable():
-    remote, _ = openai_backend(SpeechServer())
+    remote, _ = openai_backend(SpeechServer(), route(daily_token_budget=0))
     with pytest.raises(TTSUnavailable):
         async for _ in FallbackTTS(remote, None).synthesize(
-            "x", delivery(), language="it", voice=VOICE, minor_present=True
+            "x", delivery(), language="it", voice=VOICE
         ):
             pass
 

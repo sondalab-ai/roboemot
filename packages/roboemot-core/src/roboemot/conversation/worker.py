@@ -11,10 +11,10 @@ last utterance or the last time the app reported the person in view (``note_pres
 history of whole turns (RAM only, at most ``history_turns``) is dropped by a timer on the loop,
 not on the next utterance. Nothing is persisted.
 
-Children (user decision 2026-10-17): while a minor is present only routes cleared for minors are
-used (``Router.eligible``), the request carries the minor content rules and, when the active
+Children (owner decision 2026-10-22, SPEC 8, 12): the routes are used whether or not a minor
+is present; while one is, the request carries the minor content rules and, when the active
 register is not already a minor one, the child register; replies are cut to the register's
-sentence cap; every sentence passes the output filter before TTS; with no cleared route a
+sentence cap; every sentence passes the output filter before TTS; when no route can answer a
 built-in child-safe line is spoken instead of silence; a minor appearing mid-answer stops the
 speech and cancels the stream. The minor signal is read through one fail-closed wrapper.
 
@@ -620,7 +620,7 @@ class ConversationWorker:
         as it is complete, and a round that called tools is followed by another request with
         the results, until the model answers in text, a skill ends the turn, or
         ``conversation.max_tool_rounds`` rounds ran (the next request then has no tools). The
-        minor rules apply to every round: routes, the filter, the mid-answer switch."""
+        minor rules apply to every round: the content rules, the filter, the mid-answer switch."""
         conv = turn.cfg.conversation
         cap = conv.max_tool_calls_per_round
         while True:
@@ -637,7 +637,7 @@ class ConversationWorker:
             )
             round_from = len(turn.spoken)
             pseudonyms = self._learn_names(turn)
-            if turn.rounds and self._minor_appeared(turn, turn.active):
+            if turn.rounds and self._minor_appeared(turn):
                 return
             active = turn.active = ActiveRoute()
             stream = router.stream(
@@ -653,12 +653,12 @@ class ConversationWorker:
                     if isinstance(ev, TextDelta):
                         turn.stamps.setdefault("token", self.clock())
                         turn.out_chars += len(ev.text)
-                        if self._minor_appeared(turn, active):
+                        if self._minor_appeared(turn):
                             cut = True
                         else:
                             cut = not self._speak_all(turn, splitter.feed(ev.text))
                     elif isinstance(ev, ToolCall) and offered:  # (none offered: ignored)
-                        if self._minor_appeared(turn, active):
+                        if self._minor_appeared(turn):
                             cut = True
                         else:
                             # what the model said before the call is said before the skill acts
@@ -889,22 +889,13 @@ class ConversationWorker:
         self._counts["confirm_saved" if stored else "confirm_declined"] += 1
         return True
 
-    def _cleared(self, active: ActiveRoute) -> bool:
-        """Whether the route answering is cleared for minors in the configuration as it is now
-        (not the router's, which may be stale): looked up by name, a missing route is not."""
-        if active.route is None:
-            return False
-        cfg = self.stack.effective()
-        route = next((r for r in cfg.llm_routes if r.name == active.route.name), None)
-        return route is not None and route.allowed_for_minors and cfg.safety.minors_allowed_llm
-
-    def _minor_appeared(self, turn: _Turn, active: ActiveRoute) -> bool:
-        """A minor showed up after the request was composed, or the route answering is not
-        cleared while one is present: stop the speech, drop the rest of the answer (it was
-        written without the minor rules). The caller cancels the stream, which charges it."""
+    def _minor_appeared(self, turn: _Turn) -> bool:
+        """A minor showed up after the request was composed: stop the speech, drop the rest
+        of the answer (it was written without the minor rules). The caller cancels the stream,
+        which charges it."""
         if not self._minor():
             return False
-        if not turn.minor or not self._cleared(active):
+        if not turn.minor:
             self.speech.stop()
             turn.speech_stopped = True
             turn.outcome = "minor_cut"
@@ -919,7 +910,7 @@ class ConversationWorker:
         if turn.sentences >= turn.cap:
             turn.outcome = "capped"
             return False
-        if self._minor_appeared(turn, turn.active):
+        if self._minor_appeared(turn):
             return False
         if (turn.minor or self._minor()) and self._filter.blocked(
             sentence.text, " ".join(turn.spoken)
@@ -1032,8 +1023,8 @@ class ConversationWorker:
         return ""
 
     def _say_fallback(self, turn: _Turn) -> None:
-        """No route answered: while a minor is present a child-safe line (an uncleared route is
-        never asked), otherwise the register's "can't think right now" line."""
+        """No route answered: while a minor is present a child-safe line, otherwise the
+        register's "can't think right now" line."""
         if turn.minor or self._minor():
             self._say_minor_line(turn, "no_route")
             return

@@ -55,7 +55,7 @@ MAX_PIN_CHARS = 64
 ENROLLMENT_ID_BYTES = 8
 STATE_PATTERN = re.compile(r"[a-z_]{1,32}")
 ENTITY_KINDS = frozenset({"animal", "object"})
-ROUTE_FIELDS = frozenset({"name", "base_url", "model", "locality", "allowed_for_minors"})
+ROUTE_FIELDS = frozenset({"name", "base_url", "model", "locality"})
 ROUTE_NAME = re.compile(rf"[A-Za-z0-9_-]{{1,{ROUTE_NAME_MAX_CHARS}}}")
 JSON_TYPE = "application/json; charset=utf-8"
 CATALOGUE_IMPORT = "/api/catalogue/import"
@@ -925,7 +925,7 @@ class WebApi:
         return self.routes
 
     def _routes(self, req: Request) -> Response:
-        """Routes by name, model, host and minors flag, with the last conformance report and
+        """Routes by name, model and host, with the last conformance report and
         ``removable`` (only the runtime layer holds the route, so the page may remove it)."""
         rows = self._routes_port().list_routes()
         removable = set(self.settings.removable_routes()) if self.settings else set()
@@ -935,7 +935,7 @@ class WebApi:
 
     def _route_add(self, req: Request) -> Response:
         """Add a route (SPEC 8, 11A). Body: ``name``, ``base_url``, ``model`` and optionally
-        ``locality``, ``allowed_for_minors``, ``secret`` (a name in the secret store; omitted or
+        ``locality``, ``secret`` (a name in the secret store; omitted or
         null for no key), ``ack_endpoint`` (required with a key: the endpoint the server names in
         ``endpoint_ack_required``) and ``pin``. A key typed into any field is refused."""
         port = self._settings_port()

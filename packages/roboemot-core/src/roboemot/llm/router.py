@@ -2,9 +2,10 @@
 
 Uses only the common subset of Chat Completions: messages with system/user/assistant/tool
 roles, ``stream=True``, ``tools`` with ``tool_choice="auto"``, ``max_tokens``. Routes are tried
-in order; a route is skipped when it is not cleared for minors (while a minor is present) or
-its daily token budget is spent, and abandoned for the next one on error or when the first
-token arrives later than ``first_token_timeout_s``, as long as nothing was yielded yet.
+in order; a route is skipped when its daily token budget is spent (never because a minor is
+present: SPEC 8, owner decision 2026-10-22), and abandoned for the next one on error or when
+the first token arrives later than ``first_token_timeout_s``, as long as nothing was yielded
+yet.
 
 With a :class:`~roboemot.health.network.NetworkMonitor` (SPEC 12A), routes known to be
 unreachable are skipped without waiting for their timeouts, every request reports whether its
@@ -208,8 +209,6 @@ class Router:
                 continue
             if self.monitor and not self.monitor.is_online(r.name):
                 continue
-            if minor_present and not (r.allowed_for_minors and self.safety.minors_allowed_llm):
-                continue
             if self.used(r.name) >= r.daily_token_budget:
                 continue
             out.append(r)
@@ -274,7 +273,7 @@ class Router:
         routes = self.eligible(minor_present)
         if not routes:
             raise NoRouteAvailable(
-                "no eligible route (minor present, budgets spent or unreachable)"
+                "no eligible route (budgets spent, key unavailable or unreachable)"
             )
         for route in routes:
             yielded = False

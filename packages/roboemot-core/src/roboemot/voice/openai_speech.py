@@ -2,13 +2,12 @@
 
 Follows the LLM routes' rules: it uses the route named by ``voice.openai_speech.route`` (URL,
 key, ``first_token_timeout_s`` for the first audio chunk, ``stall_timeout_s`` for later gaps),
-is eligible only when the router would allow that route (reachable, daily budget left, and
-``allowed_for_minors`` while a minor is present), and charges the characters it sends against the
-route's budget at ``CHARS_PER_TOKEN`` per token. Failures before the first chunk raise
-:class:`~roboemot.voice.tts.TTSError`, so :class:`~roboemot.voice.tts.FallbackTTS` answers with
-Piper. Only the sentence text leaves the robot (SPEC 12); it and the response body are never
-logged. The text is what is spoken, so it holds the real names even with
-``privacy.pseudonyms_to_cloud`` (owner decision, 2026-10-18).
+is eligible only when the router would allow that route (reachable, daily budget left), and
+charges the characters it sends against the route's budget at ``CHARS_PER_TOKEN`` per token.
+Failures before the first chunk raise :class:`~roboemot.voice.tts.TTSError`, so
+:class:`~roboemot.voice.tts.FallbackTTS` answers with Piper. Only the sentence text leaves the
+robot (SPEC 12); it and the response body are never logged. The text is what is spoken, so it
+holds the real names even with ``privacy.pseudonyms_to_cloud`` (owner decision, 2026-10-18).
 
 ``response_format: pcm`` is documented as 24 kHz, 16-bit, mono little-endian.
 """

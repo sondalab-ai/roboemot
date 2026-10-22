@@ -547,7 +547,7 @@ class SettingsEditor:
     def add_route(
         self, value: object, secret: object = None, ack: object = None, source: str = SOURCE
     ) -> dict[str, Any]:
-        """Add an LLM route (``value``: name, base_url, model, locality, allowed_for_minors, ...) on
+        """Add an LLM route (``value``: name, base_url, model, locality, ...) on
         the runtime layer, with the key ``secret`` (a name in the secret store) or none. A route
         with a key needs ``ack`` equal to the origin of its ``base_url`` (``endpoint_ack_required``
         carries it): the stack's ``secret`` rule is passed for that one ``api_key`` only, the

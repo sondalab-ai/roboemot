@@ -240,7 +240,8 @@ def test_minor_appearing_after_enqueue_blocks_the_remote_route(make):
     assert out.sentences_spoken == 0 and sink.pushed == []
 
 
-def test_a_sentence_written_for_a_minor_uses_the_local_route(make):
+def test_a_sentence_written_for_a_minor_uses_the_remote_route(make):
+    """SPEC 8 (owner decision 2026-10-22): a minor present does not skip the speech route."""
     server = SpeechServer()
     remote, _ = openai_backend(server)
     local = FakeBackend()
@@ -248,7 +249,7 @@ def test_a_sentence_written_for_a_minor_uses_the_local_route(make):
     out = make(FallbackTTS(remote, local), minor_present=lambda: True)
     say(out, minor=True)
     assert wait_for(lambda: out.sentences_spoken == 1)
-    assert server.requests == [] and local.minors == [True]
+    assert len(server.requests) == 1 and local.minors == []
 
 
 def test_queued_sentences_are_dropped_when_a_minor_appears_after_the_stream_ended(make):
