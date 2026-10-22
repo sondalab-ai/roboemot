@@ -43,6 +43,9 @@ def start_webui(
         live.apply_config(
             SimpleNamespace(config=stack.effective())
         )  # catches a change since the read
+        if host.bus is not None:  # the preview never outlives the robot's waking
+            host.bus.subscribe("robot.asleep", lambda msg: live.video.drop())
+        cleanup.callback(live.video.drop)
         secrets = SecretsAdmin(stack.effective, store=SecretStore.for_data_dir(cfg.data_dir))
         settings = SettingsEditor(
             stack,

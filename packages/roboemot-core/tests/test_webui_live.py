@@ -113,6 +113,7 @@ def test_switching_it_on_from_the_settings_page_needs_no_restart_and_off_again(s
     assert resp.json["poll_ms"] == 1000
     assert set(resp.json) == {
         "poll_ms", "mood", "modes", "conversation", "attention", "reflexes", "motion", "system",
+        "video",
     }  # fmt: skip
     assert resp.json["mood"]["label"] == "joy"
     assert resp.json["attention"]["faces"] == [{"name": "Mia", "target": True}]
@@ -223,6 +224,7 @@ def test_start_webui_keeps_its_live_port_in_step_with_the_stack(tmp_path, stack)
         minor_present=False,
         phase=ConversationPhase(),
         webui=None,
+        bus=None,
     )
     with ExitStack() as cleanup:
         server = start_webui(host, stack, stack.effective(), manifest, cleanup, pipeline())

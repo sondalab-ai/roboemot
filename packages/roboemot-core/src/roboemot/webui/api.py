@@ -176,6 +176,13 @@ class LivePort(Protocol):
     def state(self) -> dict[str, Any] | None: ...
     def audio(self, after: int, epoch: str = "") -> dict[str, Any] | None: ...
     def clear_transcript(self) -> bool: ...
+    def video_frame(self, client: str) -> tuple[bytes | None, str | None]:
+        """One preview JPEG, or ``(None, code)``; the code is a stable error name."""
+        ...
+
+    def video_viewers(self) -> dict[str, Any]:
+        """``{"active", "count", "poll_ms"}``: whether a page is watching the video (banner)."""
+        ...
 
 
 class DebugReport(Protocol):
@@ -203,6 +210,8 @@ class Response:
     # Run by the server only after the response was written and flushed (not after a failed
     # write), on the connection's thread: it must return quickly; start a thread for real work.
     after: Callable[[], None] | None = None
+    # Set with ``bytes`` data (a JPEG): the body is sent as is with this media type.
+    content_type: str | None = None
 
 
 def live_cursor(query: str) -> tuple[int, str]:
@@ -383,6 +392,8 @@ class WebApi:
             ("GET", "/api/debug"): self._debug,
             ("GET", "/api/live/state"): self._live_state,
             ("GET", "/api/live/audio"): self._live_audio,
+            ("GET", "/api/live/frame.jpg"): self._live_frame,
+            ("GET", "/api/live/viewers"): self._live_viewers,
             ("POST", "/api/live/transcript/clear"): self._live_transcript_clear,
             ("GET", "/api/routes"): self._routes,
             ("POST", "/api/routes/add"): self._route_add,
@@ -721,6 +732,30 @@ class WebApi:
         if data is None:
             raise ApiError(HTTPStatus.NOT_FOUND, "live_disabled")
         return Response(HTTPStatus.OK, data)
+
+    def _live_frame(self, req: Request) -> Response:
+        """One preview JPEG (the vision pump's newest frame, faces drawn), or a JSON error with no
+        picture: ``live_disabled`` / ``video_off`` (404), ``video_asleep`` / ``video_no_vision`` /
+        ``video_no_frame`` (503). Never wakes the robot or the pump; nothing is stored."""
+        jpeg, code = self._live_source().video_frame(req.client_ip)
+        if jpeg is None:
+            status = (
+                HTTPStatus.NOT_FOUND
+                if code in ("live_disabled", "video_off")
+                else HTTPStatus.SERVICE_UNAVAILABLE
+            )
+            raise ApiError(status, code or "generic")
+        return Response(HTTPStatus.OK, jpeg, content_type="image/jpeg")
+
+    def _live_viewers(self, req: Request) -> Response:
+        """The banner poll every open page makes: is anyone watching the video. Cheap; answers
+        ``active: false`` when there is no live source."""
+        if self.live is None:
+            return Response(
+                HTTPStatus.OK,
+                {"active": False, "count": 0, "poll_ms": self.web.live.banner_poll_ms},
+            )
+        return Response(HTTPStatus.OK, self.live.video_viewers())
 
     def _live_transcript_clear(self, req: Request) -> Response:
         """The Clear button: forget the live transcript (PIN session and CSRF were checked)."""

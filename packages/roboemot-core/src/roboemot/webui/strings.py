@@ -114,6 +114,26 @@ EN: dict[str, str] = {
     "live_transcript_clear": "Clear",
     "err_live_disabled": "The Live tab is off.",
     "err_live_unavailable": "The Live tab is not available on this robot.",
+    "live_video": "Camera",
+    "live_video_alt": "Live camera picture",
+    "live_video_pause": "Pause",
+    "live_video_resume": "Resume",
+    "live_video_paused": "Paused.",
+    "live_video_note": (
+        "A still picture refreshed a few times a second, with face boxes and the names of "
+        "people the robot knows. Shown only on this page, never saved. The robot does not "
+        "wake or move for it."
+    ),
+    "live_video_off": (
+        "The camera preview is off. To turn it on, open Settings, find webui.live.video and "
+        "switch it on. It applies at once. While anyone watches it, every open page shows a "
+        "banner."
+    ),
+    "live_video_banner": "Live video view active",
+    "err_video_off": "The camera preview is off.",
+    "err_video_asleep": "The robot is asleep, so the camera is off.",
+    "err_video_no_vision": "Vision is not running on this robot, so there is no picture.",
+    "err_video_no_frame": "Waiting for the next camera picture.",
     "tab_routes": "Routes",
     "tab_settings": "Settings",
     "settings_intro": (
@@ -664,6 +684,26 @@ IT: dict[str, str] = {
     "live_transcript_clear": "Cancella",
     "err_live_disabled": "La scheda Live è spenta.",
     "err_live_unavailable": "La scheda Live non è disponibile su questo robot.",
+    "live_video": "Camera",
+    "live_video_alt": "Immagine dal vivo della telecamera",
+    "live_video_pause": "Pausa",
+    "live_video_resume": "Riprendi",
+    "live_video_paused": "In pausa.",
+    "live_video_note": (
+        "Un'immagine ferma aggiornata alcune volte al secondo, con i riquadri dei volti e i "
+        "nomi delle persone che il robot conosce. Si vede solo in questa pagina e non viene "
+        "mai salvata. Il robot non si sveglia e non si muove per questo."
+    ),
+    "live_video_off": (
+        "L'anteprima della telecamera è spenta. Per accenderla apri Impostazioni, cerca "
+        "webui.live.video e attivala. Vale subito. Finché qualcuno la guarda, ogni pagina "
+        "aperta mostra un avviso."
+    ),
+    "live_video_banner": "Visione video in diretta attiva",
+    "err_video_off": "L'anteprima della telecamera è spenta.",
+    "err_video_asleep": "Il robot dorme, quindi la telecamera è spenta.",
+    "err_video_no_vision": "La visione non è attiva su questo robot, quindi non c'è immagine.",
+    "err_video_no_frame": "In attesa della prossima immagine della telecamera.",
     "tab_routes": "Modelli",
     "tab_settings": "Impostazioni",
     "settings_intro": (
