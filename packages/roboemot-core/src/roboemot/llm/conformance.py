@@ -53,6 +53,8 @@ TOOLS = [
     }
 ]
 WORD = re.compile(r"[^\W\d_]+")
+# A path shown in an HTTP error: plain characters and a bounded length only.
+SAFE_PATH = re.compile(r"/[A-Za-z0-9._~/-]{0,127}")
 
 
 class RouteBudgetExhausted(RuntimeError):
@@ -119,15 +121,26 @@ def route_endpoint(route: LLMRoute) -> str:
     return f"{host}:{port}" if port else host
 
 
-def _why(exc: Exception) -> str:
-    """A reason that carries no server text: it may echo the request or a key."""
+def _why(exc: Exception, route: LLMRoute) -> str:
+    """A reason that carries no server text: it may echo the request or a key. An HTTP status
+    names the path called, so a wrong base URL shows at once: only a path under the route's own
+    base path (never one a redirect chose) of plain characters, no host, credentials or query."""
     if isinstance(exc, APIStatusError):
-        return f"HTTP {exc.status_code}"
+        return f"HTTP {exc.status_code}{_called_path(exc, route)}"
     if isinstance(exc, (TimeoutError, APITimeoutError)):
         return "timed out"
     if isinstance(exc, (APIConnectionError, OSError)):
         return "route unreachable"
     return type(exc).__name__
+
+
+def _called_path(exc: APIStatusError, route: LLMRoute) -> str:
+    """`` at <path>`` for the request that failed, or empty when the path is not the route's."""
+    path = exc.request.url.path
+    base = urlsplit(route.base_url).path.rstrip("/")
+    if not SAFE_PATH.fullmatch(path) or not path.startswith(base + "/"):
+        return ""
+    return f" at {path}"
 
 
 def italian_ratio(text: str, stopwords: list[str]) -> tuple[int, float]:
@@ -160,12 +173,12 @@ async def _ask(
     return ans
 
 
-def _streaming(ans: _Answer) -> CheckResult:
+def _streaming(ans: _Answer, route: LLMRoute) -> CheckResult:
     if ans.error is not None and not ans.chunks:
-        return CheckResult(STREAMING, FAIL, f"no streamed text: {_why(ans.error)}")
+        return CheckResult(STREAMING, FAIL, f"no streamed text: {_why(ans.error, route)}")
     if ans.error is not None:
         return CheckResult(
-            STREAMING, FAIL, f"stream broke after {ans.chunks} chunks: {_why(ans.error)}"
+            STREAMING, FAIL, f"stream broke after {ans.chunks} chunks: {_why(ans.error, route)}"
         )
     if ans.chunks > 1:
         return CheckResult(STREAMING, PASS, f"{ans.chunks} chunks")
@@ -234,7 +247,7 @@ async def check_route(
     ask = await _ask(router, route, [{"role": "user", "content": ITALIAN_PROMPT}], None, pseudonyms)
     report.first_token_s = ask.timing.seconds
     tool = await _tool_round_trip(router, route, ask.unreachable, pseudonyms)
-    report.checks += [_streaming(ask), tool, _latency(ask, route), _italian(ask, settings)]
+    report.checks += [_streaming(ask, route), tool, _latency(ask, route), _italian(ask, settings)]
     report.tokens = router.used(route.name) - spent
     log.info(
         "llm route %s check: %s",
@@ -255,7 +268,9 @@ async def _tool_round_trip(
     messages: list[dict[str, Any]] = [{"role": "user", "content": TOOL_PROMPT}]
     first = await _ask(router, route, messages, TOOLS, pseudonyms)
     if first.error is not None:
-        return CheckResult(TOOL_ROUND_TRIP, FAIL, f"tool request failed: {_why(first.error)}")
+        return CheckResult(
+            TOOL_ROUND_TRIP, FAIL, f"tool request failed: {_why(first.error, route)}"
+        )
     if not first.calls:
         return CheckResult(TOOL_ROUND_TRIP, FAIL, "no tool call in the reply")
     call = first.calls[0]
@@ -285,7 +300,9 @@ async def _tool_round_trip(
     ]
     second = await _ask(router, route, messages, TOOLS, pseudonyms)
     if second.error is not None:
-        return CheckResult(TOOL_ROUND_TRIP, FAIL, f"tool result rejected: {_why(second.error)}")
+        return CheckResult(
+            TOOL_ROUND_TRIP, FAIL, f"tool result rejected: {_why(second.error, route)}"
+        )
     if not second.text.strip():
         return CheckResult(TOOL_ROUND_TRIP, FAIL, "no text answer after the tool result")
     return CheckResult(TOOL_ROUND_TRIP, PASS, "call, result and answer")
