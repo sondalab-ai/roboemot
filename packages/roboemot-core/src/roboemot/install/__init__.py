@@ -94,7 +94,6 @@ PIN_FILE = "webui_pin.json"  # roboemot.webui.auth.PIN_FILE, inside the app data
 PIN_RETRIES = 3
 DEFAULT_SECRET_NAME = "cloud_key"  # the name configs/companion.yaml gives the cloud route key
 MIB = 1024 * 1024
-VISION_DERIVED_BYTES = 170_000_000  # INT8 files made from the FP32 weights ("0.17 GB", models CLI)
 PIPER_TTS_VERSION = "1.8.0"  # exact pin: the worker protocol is tested against this API
 FETCH_ATTEMPTS = 2  # `roboemot models fetch` runs once more after a failure (it resumes)
 # The model files already verified on the robot (marker check only, read-only: no folder made),
@@ -672,28 +671,25 @@ def models_bytes(
 ) -> int:
     """Disk the fetch needs, from the pinned manifests: each file's download size plus, for a
     zip archive, its unpacked size (both exist while it unpacks; ``peak=False`` counts only what
-    stays). Vision adds the INT8 files derived from the FP32 weights (``VISION_DERIVED_BYTES``).
-    Files in ``done`` (``"voice:<path>"``, ``"vision:<path>"``: already verified on the robot)
-    need nothing; the derived bytes count until every derived file is done. ``on_disk`` (same
-    keys) are bytes a file already holds on the robot (a stale partial download, a complete
-    file not yet marked), taken off that file's download size."""
+    stays). Files in ``done`` (``"voice:<path>"``, ``"vision:<path>"``: already verified on the
+    robot) need nothing. ``on_disk`` (same keys) are bytes a file already holds on the robot (a
+    stale partial download, a complete file not yet marked), taken off that file's download size."""
     from ..vision import models as vision_models
     from ..voice import models as voice_models
 
     groups = [("voice", voice_models.load_manifest().values())]
     if vision:
         groups.append(("vision", vision_models.load_manifest().values()))
-    total, derived_left = 0, False
+    total = 0
     for kind, specs in groups:
         for f in (f for m in specs for f in m.files):
             if f"{kind}:{f.path}" in done:
                 continue
-            derived_left = derived_left or f.quantize is not None
             stays = f.unpacked_bytes if f.archive else f.size_bytes
             have = min((on_disk or {}).get(f"{kind}:{f.path}", 0), f.size_bytes or 0)
             download = (f.size_bytes or 0) - have
             total += download + (f.unpacked_bytes or 0) if peak else (stays or 0)
-    return total + (VISION_DERIVED_BYTES if derived_left else 0)
+    return total
 
 
 def verified_models(py: RemotePython) -> tuple[frozenset[str], dict[str, int]]:

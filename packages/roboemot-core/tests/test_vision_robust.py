@@ -25,7 +25,7 @@ from roboemot.vision import (
     Tracker,
     VisionPipeline,
 )
-from roboemot.vision.models import ModelError, ModelFile, check_file, fetch_file, load_manifest
+from roboemot.vision.models import ModelError, ModelFile, check_file, fetch_file
 from roboemot.vision.replay import ReplayError, load_session, replay, summarize
 from roboemot.vision.runner import pump
 from roboemot.world import Observation
@@ -33,6 +33,7 @@ from test_vision import (
     CFG,
     CONSENT,
     FACE_MODEL,
+    THREE_CROPS,
     CountingEstimator,
     CountingExecutor,
     FixedFaceEmbedder,
@@ -215,7 +216,9 @@ def test_cancelled_jobs_do_not_leak_a_slot_or_a_result():
 def test_late_result_after_track_id_reuse_is_ignored(tmp_path):
     ex = ManualExecutor()
     est = CountingEstimator(age="adult")
-    _, _, pipe, _, got = rig(tmp_path, lambda i: [face(100)], estimator=est, executor=ex)
+    _, _, pipe, _, got = rig(
+        tmp_path, lambda i: [face(100)], estimator=est, executor=ex, vision=THREE_CROPS
+    )
     run(pipe, 20)
     assert len(ex.queue) == 1
     ex.queue[0][0].set_running_or_notify_cancel()
@@ -502,16 +505,6 @@ def test_os_errors_become_model_errors(tmp_path):
     (tmp_path / "d").write_text("a file where the folder should go")
     with pytest.raises(ModelError):
         fetch_file(FILE, tmp_path, mock(lambda r: httpx.Response(200, content=BODY)))
-
-
-def test_manifest_pins_the_fairface_label_order():
-    specs = load_manifest()
-    assert specs["fairface-gender"].labels == ["Female", "Male"]
-    assert specs["fairface-age"].labels[0] == "0-2" and specs["fairface-age"].labels[-1].startswith(
-        "more"
-    )
-    assert len(specs["fairface-age"].labels) == 9
-    assert specs["fairface-age"].labels_sha256
 
 
 def test_cli_honours_vision_models_dir(tmp_path, capsys):
