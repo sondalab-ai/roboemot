@@ -1,5 +1,10 @@
 """Age group and gender error per demographic group on FairFace (SPEC 5, 14 Perception eval).
 
+Written for the FairFace ViT-B pair, retired on 2026-10-22 (SPEC 5, 13); ``results/`` holds its
+numbers. ``load_stages`` now loads yolo11n-face-age whatever ``--precision`` says, so the int8 and
+fp32 runs are the same model, and the 0.8-rule tables (``single_crop``, ``crop_stats``) do not
+describe it: its floor is ``vision.attribute_score_min``. Rework before using it on the new model.
+
 Shipped path: frames go through ``VisionPipeline`` (YuNet, tracker, face crop with the shipped
 margin, ``vision.attribute_crops`` crops at least ``attribute_crop_interval_s`` apart) into
 ``AttributeWorker`` (FairFace ViT-B pair, per-crop values, the median age group and the

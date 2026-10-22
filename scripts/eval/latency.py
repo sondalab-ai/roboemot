@@ -6,10 +6,11 @@ of ``vision.embedding_burst`` evaluations at least ``burst_min_gap_s`` apart, 3 
 The camera is a stand-in that reads at 30 Hz and shows a new LFW photo of the person every
 0.2 s (independent photos, not video, so each evaluation sees a different one). Scenarios:
 one new person at 5 and at 8 detections per second, three people appearing together, and one
-person with the age and gender job running in its worker (INT8, profile cm4).
+person with the age job running in its worker (yolo11n-face-age since 2026-10-22; the results
+in ``results/`` were measured with the FairFace INT8 pair).
 
-``stages``: p50 and p95 of one call of each stage (YuNet, SFace, FairFace INT8 and FP32 per
-crop, NanoDet, DINOv2-S) at 1 and 2 threads.
+``stages``: p50 and p95 of one call of each stage (YuNet, SFace, the age model per crop,
+NanoDet, DINOv2-S) at 1 and 2 threads.
 
 The Mac is not the Raspberry Pi CM4 (4x Cortex-A72); no number here is a CM4 number.
 
@@ -81,7 +82,7 @@ def stage_row(threads: int, photo: np.ndarray, street: np.ndarray) -> dict:
     face = st.face_detector.detect(photo)[0]
     row["yunet_detect_320x240_incl_resize"] = bench(lambda: st.face_detector.detect(photo))
     row["sface_embed_incl_align"] = bench(lambda: st.face_embedder.embed(photo, face))
-    row["fairface_int8_pair_per_crop"] = bench(
+    row["age_yolo11n_face_age_per_crop"] = bench(
         lambda: st.attribute_estimator.estimate(photo), runs=30
     )
     row["nanodet_detect_640x480"] = bench(lambda: st.object_detector.detect(street))
@@ -89,10 +90,6 @@ def stage_row(threads: int, photo: np.ndarray, street: np.ndarray) -> dict:
     dino = DinoV2Embedder(path, threads)
     box = (0.0, 0.0, 250.0, 250.0)
     row["dinov2_small_embed"] = bench(lambda: dino.embed(photo, box), runs=30)
-    fp32 = common.load_stages(cfg, profile=None, appearance=False, objects=False)
-    row["fairface_fp32_pair_per_crop"] = bench(
-        lambda: fp32.attribute_estimator.estimate(photo), runs=15
-    )
     return row
 
 
