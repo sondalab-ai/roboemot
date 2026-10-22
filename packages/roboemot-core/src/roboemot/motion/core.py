@@ -258,6 +258,7 @@ class MotionCore:
         self.minor_present = False
         self._last_feed: float | None = None
         self.holding = False
+        self.watchdog_engagements = 0
 
     def feed(self, cmd: Command, *, liveness: bool = True) -> None:
         """Submit a command. ``liveness=False`` is for sources inside the loop (reflexes): they
@@ -274,6 +275,7 @@ class MotionCore:
                 home = {n: d.home for n, d in self.arbiter.dofs.items()}
                 self.arbiter.submit(Command("watchdog", Priority.SAFETY, home, now))
                 self.holding = True
+                self.watchdog_engagements += 1
         elif self.holding:
             self.arbiter.clear("watchdog")
             self.holding = False

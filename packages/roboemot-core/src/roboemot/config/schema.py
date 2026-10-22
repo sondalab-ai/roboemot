@@ -713,8 +713,9 @@ class ExternalControlConfig(Strict):
 
     tolerance_rad: float = param(
         0.15,
-        "An angular joint further than this from every pose commanded within lag_window_s counts "
-        "as diverging (tracking lag and sag of our own motion stay under it)",
+        "An angular joint further than this outside the range of the poses commanded within "
+        "lag_window_s counts as diverging (tracking lag and sag of our own motion stay under it). "
+        "Behind the commands, on the side they came from, is lag however far, until they settle",
         unit="rad", ge=0.01, le=1.0,
     )  # fmt: skip
     tolerance_m: float = param(
@@ -725,13 +726,27 @@ class ExternalControlConfig(Strict):
     lag_window_s: float = param(
         0.4,
         "The measured pose is compared with the poses commanded this far back, so the "
-        "servos' tracking lag is not mistaken for external control",
+        "servos' tracking lag is not mistaken for external control. Counted in loop ticks "
+        "(lag_window_s x motion.arbiter.loop_hz commands), so late ticks do not shorten it",
         unit="s", ge=0.05, le=2.0,
     )  # fmt: skip
     confirm_s: float = param(
         0.2,
-        "Divergence must last this long before the loop yields",
+        "Divergence must hold on confirm_s x motion.arbiter.loop_hz new state samples in a row "
+        "before the loop yields; a repeated sample does not count, a late tick starts again",
         unit="s", ge=0.02, le=2.0,
+    )  # fmt: skip
+    late_tick_periods: float = param(
+        2.0,
+        "A loop tick that comes more than this many periods after the previous one is late "
+        "(an overloaded CPU): the divergence count starts again, a stall is no evidence",
+        unit="periods", ge=1.0, le=10.0,
+    )  # fmt: skip
+    recent_events: int = param(
+        8,
+        "How many recent external-control events the debug report keeps (joint, group, error, "
+        "samples, largest tick gap, overruns)",
+        ge=1, le=100,
     )  # fmt: skip
     still_band_rad: float = param(
         0.02,

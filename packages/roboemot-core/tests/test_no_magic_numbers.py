@@ -73,6 +73,7 @@ BEHAVIOUR_MODULES = [
     "persona/__init__.py",
     "persona/llm_traits.py",
     "motion/loop.py",
+    "motion/external.py",
     "motion/primitives.py",
     "reflex/__init__.py",
     "reflex/engine.py",
