@@ -37,7 +37,8 @@ content).
 
 Known limits: the Reachy Mini manifest has placeholder translation limits and null dynamics
 (measure in M0); until then the app starts only when installed with `--dev`. Once they are
-measured, re-run the installer with `--no-dev`: every install rewrites the app's config file (dev content and the voice setting).
+measured, re-run the installer with `--no-dev`: it removes the dev key from the app config
+(`app.yaml` in the data folder) and keeps your other settings there.
 
 ## Quick start
 
