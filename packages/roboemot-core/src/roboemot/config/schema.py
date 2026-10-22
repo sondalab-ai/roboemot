@@ -745,10 +745,10 @@ class ExternalControlConfig(Strict):
     )  # fmt: skip
     max_state_age_s: float = param(
         0.8,
-        "The oldest a measured state sample may be (the platform's state queue, about 0.67 s on "
-        "Reachy Mini, plus client buffering): a joint where the commands were up to this long "
-        "before the lag window, or behind moving commands and moved within this time, counts as "
-        "lag. A push against a moving head is caught within about lag_window_s + "
+        "The oldest a measured state sample may be (a platform's state queue, about 0.67 s on "
+        "the reference robot, plus client buffering): a joint where the commands were up to "
+        "this long before the lag window, or behind moving commands and moved within this time, "
+        "counts as lag. A push against a moving head is caught within about lag_window_s + "
         "max_state_age_s + confirm_s; longer is more tolerant of old state, slower to catch it",
         unit="s", ge=0.0, le=5.0,
     )  # fmt: skip

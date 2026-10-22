@@ -22,8 +22,8 @@ yield falsely:
   restart the count either: under steady overruns a push is still caught.
 - **Yield units.** A manifest group yields on its own, merged with every group a constraint ties
   it to (writing one side of a coupled pair while the other is pushed would fight the
-  constraint). On Reachy Mini an antenna held by a hand stops the antennas only; head and body
-  yaw yield together.
+  constraint). An antenna held by a hand stops the antennas only; a head and a body yaw tied by
+  a yaw-delta constraint yield together.
 
 While a unit yields the loop writes none of its dofs and follows its measured pose. Units that
 started yielding within ``motion.platform_move_grace_s`` of each other (one platform move) resume
