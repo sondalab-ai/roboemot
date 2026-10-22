@@ -1111,9 +1111,8 @@ def configured_webui_port(remote: Remote) -> int | None:
     """``webui.port`` in the robot's app config when it sets a positive one, else None (the
     file was validated before the install changed anything)."""
     config = read_app_config(remote, app_config_remote_path(remote)) or {}
-    port = (
-        (config.get("webui") or {}).get("port") if isinstance(config.get("webui"), dict) else None
-    )
+    webui = config.get("webui")
+    port = webui.get("port") if isinstance(webui, dict) else None
     if isinstance(port, int) and not isinstance(port, bool) and port > 0:
         return port
     return None
