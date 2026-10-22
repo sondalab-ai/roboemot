@@ -68,7 +68,7 @@ from .build import (
 from .caches import clear_caches
 from .piper_lock import lock_path
 from .pyenv import RemotePython, report_changes
-from .record import InstallRecord, canonical, plan_uninstall, unknown_keys
+from .record import InstallRecord, UninstallPlan, canonical, plan_uninstall, unknown_keys
 from .remote import Remote
 from .ui import Ui, WizardError, paint
 
@@ -847,51 +847,67 @@ def warn_data_dir_overrides(ui: Ui, remote: Remote, dirs: list[Path]) -> None:
 # ---------------------------------------------------------------- install
 
 
-def remove_created_env(
-    ui: Ui,
-    platform: Platform,
-    py: RemotePython,
-    remote: Remote,
-    record: InstallRecord,
-    dry_run: bool,
-) -> bool:
-    """Delete the environment this installer created, unless another app lives in it.
+@dataclass
+class EnvFate:
+    """What uninstall does with the environment the record says this installer created:
+    ``action`` is ``none`` (not created by it), ``gone``, ``keep`` or ``delete``; ``note`` says
+    why, for the report."""
 
-    Only the exact path the platform names is deleted, and only if its ``realpath`` is the same.
-    Returns True when the environment is deliberately left in place.
-    """
+    action: str
+    note: str = ""
+
+
+def created_env_fate(
+    platform: Platform, py: RemotePython, remote: Remote, record: InstallRecord
+) -> EnvFate:
+    """Decide, read-only, whether the created environment goes: only the exact path the
+    platform names, only with an interpreter, no other app or foreign package in it, and only
+    if its ``realpath`` is the same."""
     env = record.env_created
     if env is None:
-        return False
+        return EnvFate("none")
     if env != platform.env_dir:
-        ui.warn(f"recorded environment {env!r} is not {platform.env_dir}: left as it is")
-        return True
+        return EnvFate(
+            "keep", f"recorded environment {env!r} is not {platform.env_dir}: left as it is"
+        )
     if not _exists(remote, env):
-        ui.ok(f"environment {env} is not there")
-        return False
+        return EnvFate("gone", f"environment {env} is not there")
     if not py.exists():
-        ui.warn(f"{env} has no interpreter: cannot rule out other apps in it, left as it is")
-        return True
+        return EnvFate(
+            "keep", f"{env} has no interpreter: cannot rule out other apps in it, left as it is"
+        )
     users = platform.env_users(py)
     if users:
-        ui.warn(f"keeping {env}: also used by {', '.join(users)}")
-        return True
+        return EnvFate("keep", f"keeping {env}: also used by {', '.join(users)}")
     accounted = {canonical(p) for p in record.packages} | set(record.added)
     foreign = sorted(set(py.installed()) - accounted - set(record.env_baseline))
     if foreign:
-        ui.warn(
+        return EnvFate(
+            "keep",
             f"keeping {env}: it holds packages this installer did not put there: "
-            f"{', '.join(foreign)}"
+            f"{', '.join(foreign)}",
         )
-        return True
     real = remote.run(f"realpath {shlex.quote(env)} 2>/dev/null || true").strip()
     if real != env:
-        ui.warn(f"{env} resolves to {real or 'nothing'}: symlink? left as it is")
-        return True
-    if not dry_run:
-        remote.run(f"rm -rf {shlex.quote(env)}")
-    ui.ok(f"{'would delete' if dry_run else 'deleted'} the environment {env}")
-    return False
+        return EnvFate("keep", f"{env} resolves to {real or 'nothing'}: symlink? left as it is")
+    return EnvFate("delete")
+
+
+def remove_created_env(
+    ui: Ui, platform: Platform, remote: Remote, fate: EnvFate, dry_run: bool
+) -> bool:
+    """Carry out ``fate`` (from ``created_env_fate``). Returns True when the environment is
+    deliberately left in place."""
+    if fate.action == "gone":
+        ui.ok(fate.note)
+    elif fate.action == "keep":
+        ui.warn(fate.note)
+    elif fate.action == "delete":
+        env = platform.env_dir
+        if not dry_run:
+            remote.run(f"rm -rf {shlex.quote(env)}")
+        ui.ok(f"{'would delete' if dry_run else 'deleted'} the environment {env}")
+    return fate.action == "keep"
 
 
 def finish_env(
@@ -1230,7 +1246,16 @@ def run_uninstall(opts: Options, ui: Ui, root: Path) -> None:
             ui.warn(f"cannot remove the secrets {', '.join(record.secrets)}: no environment to run")
 
         ui.step("Packages")
-        plan = plan_uninstall(record, installed, py.requires() if env_there else {})
+        fate = created_env_fate(platform, py, remote, record)
+        if fate.action == "delete":
+            # The whole environment goes below: restoring versions inside it first would only
+            # need the package index (internet) for nothing.
+            ui.ok(f"the app's packages are {would}removed with the environment {platform.env_dir}")
+            plan = UninstallPlan([], {}, {}, {})
+        else:
+            plan = plan_uninstall(record, installed, py.requires() if env_there else {})
+        if not env_there:
+            plan.drifted = {}  # nothing to compare against: the environment is gone
         for name, users in plan.kept.items():
             ui.warn(f"keeping {name}: needed by {', '.join(users)}")
         for name, version in plan.drifted.items():
@@ -1247,14 +1272,15 @@ def run_uninstall(opts: Options, ui: Ui, root: Path) -> None:
         if not opts.dry_run:
             py.uninstall(plan.remove)
             py.install_exact(plan.restore)
-        if env_there and not (opts.dry_run and plan.remove):  # before removal, modules are expected
+        # before removal (dry run), the app's modules are expected
+        if fate.action != "delete" and env_there and not (opts.dry_run and plan.remove):
             for module, path in leftovers(py, platform):
                 if not opts.dry_run:
                     remote.run(f"rm -rf {shlex.quote(path)}")
                 ui.warn(f"{would}delete leftover {path} ({module})")
 
         ui.step("Clean up and verify")
-        keep_env = remove_created_env(ui, platform, py, remote, record, opts.dry_run)
+        keep_env = remove_created_env(ui, platform, remote, fate, opts.dry_run)
         remove_piper_venv(ui, remote, record, opts.dry_run)
         remove_models_dirs(ui, remote, record, opts.dry_run)
         remove_data_dir(ui, remote, record, opts.dry_run)

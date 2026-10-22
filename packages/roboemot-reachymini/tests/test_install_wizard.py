@@ -2080,6 +2080,40 @@ def test_uninstall_with_the_venv_and_the_daemon_interpreter_both_gone(
     assert RECORD not in robot.files and DATA not in robot.dirs
 
 
+def test_uninstall_of_a_created_venv_with_replaced_packages_needs_no_internet(
+    offline, robot, daemon, capsys
+):
+    """R4 S7/T5: the venv the installer created goes whole, so the replaced versions inside it
+    are not restored first (that needs the package index): offline, uninstall still ends clean."""
+    fresh_robot(robot)
+    before = snapshot(robot, daemon)
+    robot.conflict = {"pip": "26.0"}
+    install()
+    assert json.loads(robot.files[RECORD])["replaced"] == {
+        "pip": {"before": "25.0.1", "after": "26.0"}
+    }
+    run = robot.run
+    robot.run = lambda c, **kw: (
+        "ERROR: no network\n__rc=1" if " -m pip install" in c else run(c, **kw)
+    )
+    start = len(robot.commands)
+    uninstall()
+    assert snapshot(robot, daemon) == before
+    assert not any(" -m pip uninstall" in c for c in robot.commands[start:])
+    assert "removed with the environment" in capsys.readouterr().out
+
+
+def test_uninstall_with_the_venv_gone_reports_no_drift(offline, robot, daemon, capsys):
+    """R4 N10: with the environment already gone, the replaced packages are not "changed"."""
+    fresh_robot(robot)
+    robot.conflict = {"pip": "26.0"}
+    install()
+    fresh_robot(robot)
+    capsys.readouterr()
+    uninstall()
+    assert "changed since the install" not in capsys.readouterr().out
+
+
 def half_made(robot) -> None:
     fresh_robot(robot)
     robot.dirs.add(reachy.APPS_VENV)
