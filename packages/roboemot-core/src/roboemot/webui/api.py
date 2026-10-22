@@ -48,7 +48,14 @@ from .strings import STRINGS, language_for
 log = logging.getLogger(__name__)
 
 COOKIE = "roboemot_session"
-LIVE_VIEWERS = "/api/live/viewers"  # polled by every page: does not extend the idle session
+LIVE_VIEWERS = "/api/live/viewers"  # polled by every page
+# Polls that never extend the idle session on their own (SPEC 11A, 12): an unattended Live tab
+# still times out after ``webui.session_ttl_s``. The page marks a poll with ``ACTIVE_HEADER``
+# when it saw a click, key or touch since its previous poll; only that poll counts as activity.
+PASSIVE_POLLS = frozenset(
+    {"/api/live/state", "/api/live/audio", "/api/live/frame.jpg", LIVE_VIEWERS}
+)
+ACTIVE_HEADER = "x-roboemot-active"
 CSRF_HEADER = "x-csrf-token"
 VECTOR_GUARD_LEN = 32
 MAX_PIN_CHARS = 64
@@ -172,7 +179,9 @@ class PseudonymsPort(Protocol):
 
 class LivePort(Protocol):
     """``roboemot.runtime.live.LiveState`` (SPEC 11A, 12): ``state()`` is the Live tab's payload,
-    or None while ``webui.live.enabled`` is off. State only: no media, text, ids or positions."""
+    or None while ``webui.live.enabled`` is off, and holds no media, text, ids or positions.
+    ``audio()`` adds the levels and the opt-in transcript text; ``video_frame()`` is one opt-in
+    preview JPEG."""
 
     def state(self) -> dict[str, Any] | None: ...
     def audio(self, after: int, epoch: str = "") -> dict[str, Any] | None: ...
@@ -364,7 +373,9 @@ class WebApi:
         if (method, path) in public:
             return public[(method, path)](req)
         token = parse_cookie(req.headers.get("cookie"))
-        passive = (method, path) == ("GET", LIVE_VIEWERS)  # the banner poll: no idle refresh
+        passive = (
+            method == "GET" and path in PASSIVE_POLLS and req.headers.get(ACTIVE_HEADER) != "1"
+        )
         session = self.sessions.get(token, self.clock(), self.pins.version(), refresh=not passive)
         if session is None:
             if not path.startswith("/api/"):

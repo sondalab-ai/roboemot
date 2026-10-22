@@ -114,8 +114,8 @@ function notice(message, isError) {
 
 // ---------------------------------------------------------------- api
 
-async function api(method, path, body) {
-  const headers = {};
+async function api(method, path, body, extra) {
+  const headers = { ...extra };
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (method !== "GET" && state.csrf) headers["X-CSRF-Token"] = state.csrf;
   const resp = await fetch(path, {

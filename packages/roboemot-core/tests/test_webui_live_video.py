@@ -18,6 +18,7 @@ from roboemot.runtime.live import LiveState
 from roboemot.vision.runner import LatestFrameRunner
 from roboemot.vision.types import Frame
 from roboemot.webui import make_server
+from roboemot.webui.api import ACTIVE_HEADER
 from roboemot.webui.settings import SettingsEditor
 from test_webui import PIN, Client, FakeService
 
@@ -323,3 +324,39 @@ def test_the_new_video_settings_have_units_and_ranges():
     assert f["video_idle_stop_s"].default == 600.0
     assert f["banner_poll_ms"].json_schema_extra["unit"] == "ms"
     assert max(m.le for m in f["banner_poll_ms"].metadata if hasattr(m, "le")) == 5000
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/api/live/state", "/api/live/audio?after=0", "/api/live/frame.jpg", "/api/live/viewers"],
+)
+def test_no_live_poll_extends_an_idle_session_unless_the_page_saw_input(tmp_path, stack, path):
+    """R3 SF1, SPEC 11A/12: an open, unattended Live tab still times out after session_ttl_s.
+    Only a poll that carries the page's "user active" mark (a click, key or touch since the
+    previous poll) counts as activity."""
+
+    class Clock:
+        now = 1000.0
+
+        def __call__(self):
+            return self.now
+
+    clock = Clock()
+    srv = make_server(FakeService(), Diagnostics(), stack.effective, tmp_path, clock=clock)
+    srv.set_pin(PIN)
+    srv.start()
+    try:
+        client = Client(srv.port)
+        ttl = stack.effective().webui.session_ttl_s
+        client.login()
+        clock.now += ttl - 10
+        assert client.request("GET", path).status != 401
+        clock.now += 20
+        assert client.request("GET", "/api/registry").status == 401  # idle since the login
+        client.login()
+        clock.now += ttl - 10
+        assert client.request("GET", path, headers={ACTIVE_HEADER: "1"}).status != 401
+        clock.now += 20
+        assert client.request("GET", "/api/registry").status == 200  # the input counted
+    finally:
+        srv.stop()
