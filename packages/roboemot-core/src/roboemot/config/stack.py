@@ -22,6 +22,8 @@ import functools
 import json
 import logging
 import os
+import stat
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Collection, Iterable
@@ -1661,7 +1663,7 @@ class ConfigStack:
     def _persist_app(self) -> None:
         path = self.files.get("app")
         if path and not str(path).startswith("preset:"):
-            path.write_text(yaml.safe_dump(self.app, sort_keys=False))
+            _replace_file(Path(path), yaml.safe_dump(self.app, sort_keys=False))
             self._mtimes["app"] = _mtime(path)
 
     def _expire(self) -> bool:
@@ -1705,6 +1707,37 @@ class ConfigStack:
         for layer, path in self.files.items():
             if not str(path).startswith("preset:"):
                 self._mtimes[layer] = _mtime(path)
+
+
+def _replace_file(path: Path, text: str) -> None:
+    """Write ``text`` over ``path`` atomically (SPEC 11A, 12): a temp file in the same folder with
+    the old file's mode, synced, renamed over the target, then the folder synced. A kill at any
+    point leaves the old file or the new one, never a truncated one. A symlink keeps pointing at
+    its target, which is the file replaced."""
+    target = path.resolve()
+    try:
+        mode: int | None = stat.S_IMODE(target.stat().st_mode)
+    except FileNotFoundError:
+        mode = None
+    fd, name = tempfile.mkstemp(dir=target.parent, prefix=target.name + ".")  # 0600
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            if mode is not None:
+                os.fchmod(handle.fileno(), mode)
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+    dir_fd = os.open(target.parent, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
 
 
 def _mtime(path: Path) -> float:

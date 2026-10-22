@@ -451,3 +451,38 @@ def test_clear_and_set_validate_the_configuration_no_more_than_before(monkeypatc
     calls["n"] = 0
     stack.set("persona.traits", traits, source="t", layer="derived")
     assert calls["n"] <= 3
+
+
+# ----------------------------------------------------------------------------- app.yaml writes
+
+
+def test_app_write_interrupted_keeps_the_old_file_whole(tmp_path, monkeypatch):
+    """SPEC 11A, 12: a kill mid-write must leave the old app.yaml, never a truncated one."""
+    app = tmp_path / "app.yaml"
+    app.write_text("schema_version: 1\naffect: {half_life_s: 7}\n")
+    before = app.read_bytes()
+    stack = ConfigStack.from_files(app=app)
+
+    def crash(src: object, dst: object) -> None:
+        raise OSError("killed")
+
+    monkeypatch.setattr(os, "replace", crash)
+    with pytest.raises(OSError):
+        stack.set("safety.minor_motion_factor", 0.9, layer="app", admin=True)
+    assert app.read_bytes() == before
+    assert [p.name for p in tmp_path.iterdir()] == ["app.yaml"]  # no temp file left behind
+    assert stack.get("safety.minor_motion_factor") == 0.6  # undone with the file
+
+
+def test_app_write_keeps_the_file_mode_and_a_symlink(tmp_path):
+    real = tmp_path / "real.yaml"
+    real.write_text("schema_version: 1\n")
+    real.chmod(0o640)
+    link = tmp_path / "app.yaml"
+    link.symlink_to(real)
+    stack = ConfigStack.from_files(app=link)
+    stack.set("safety.minor_motion_factor", 0.9, layer="app", admin=True)
+    assert link.is_symlink()
+    assert "minor_motion_factor: 0.9" in real.read_text()
+    assert real.stat().st_mode & 0o777 == 0o640
+    assert stack.poll() is None  # own write is not a reload
