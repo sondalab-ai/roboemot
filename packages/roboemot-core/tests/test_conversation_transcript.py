@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 
 from roboemot.conversation import TranscriptRing
 from test_conversation_worker import (
@@ -301,6 +302,26 @@ def test_with_a_minor_present_the_reply_settles_before_the_next_utterance(rigs):
         ("robot", "Uno. Due. Tre."),
         ("user", "e poi?"),
     ]
+
+
+def test_closing_with_a_reply_still_pending_records_nothing_afterwards(rigs):  # noqa: F811
+    rig = minor_reply(rigs, {2, 3})
+    rig.worker.close()
+    assert not rig.worker._deferred, "no reply text kept in memory after close"
+    rig.speech.unplayed.clear()
+    rig.speech.busy = False
+    time.sleep(0.1)  # several settle periods
+    rig.worker.interrupt()
+    assert turns(rig) == [("user", "ciao", False)]
+
+
+def test_with_the_transcript_off_no_reply_is_deferred(rigs):  # noqa: F811
+    rig = with_ring(rigs, on=False, routes=(LAN,))
+    rig.minor[0] = True
+    rig.speech.busy = True
+    rig.speech.unplayed.add(1)  # still waiting to play when the stream ends
+    rig.turn("ciao")
+    assert not rig.worker._deferred
 
 
 def test_with_a_minor_present_a_clear_before_the_reply_settles_keeps_it_out(rigs):  # noqa: F811

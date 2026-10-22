@@ -247,6 +247,7 @@ class ConversationWorker:
         self._end_session("closed")
         with self._lock:
             self._pending.clear()
+            self._deferred.clear()  # no reply text outlives the worker
 
     def apply_config(self, cfg: RoboEmotConfig) -> None:
         """Hot reload: the history cap and the output filter follow the configuration (the rest
@@ -511,28 +512,28 @@ class ConversationWorker:
         speech output is idle (what never played was dropped), or ``force`` (a barge-in: the
         speech was just stopped). Only the sentences that played are shown, and a reply that a
         cut shortened is marked interrupted. Any thread. Returns whether any is still waiting."""
-        ring = self.transcript
         with self._lock:
-            if not self._deferred:
-                return False
-            idle = force or self.speech.idle()
-            now = self.clock()
-            while self._deferred:
-                item = self._deferred[0]
-                if not (idle or self._played_through(item.queued, now)):
-                    break
-                self._deferred.popleft()
-                heard = [t for job, t in item.queued if self.speech.played(job)]
-                cut = (item.cut or force) and len(heard) < len(item.queued)
-                if ring is not None:
-                    ring.add(
-                        "robot",
-                        " ".join(heard),
-                        item.language,
-                        interrupted=cut,
-                        generation=item.generation,
-                    )
-            return bool(self._deferred)
+            pending = list(self._deferred)
+        if not pending:
+            return False
+        idle = force or self.speech.idle()  # speech and sink locks: outside the worker's
+        now = self.clock()
+        over = 0
+        while over < len(pending) and (idle or self._played_through(pending[over].queued, now)):
+            over += 1
+        ready: list[_Deferred] = []
+        with self._lock:  # pop only what was judged, once: never recorded twice
+            while len(ready) < over and self._deferred and self._deferred[0] is pending[len(ready)]:
+                ready.append(self._deferred.popleft())
+            waiting = bool(self._deferred)
+        ring = self.transcript
+        for item in ready if ring is not None else ():
+            heard = [t for job, t in item.queued if self.speech.played(job)]
+            cut = (item.cut or force) and len(heard) < len(item.queued)
+            ring.add(
+                "robot", " ".join(heard), item.language, interrupted=cut, generation=item.generation
+            )
+        return waiting
 
     def _played_through(self, queued: list[tuple[int, str]], now: float) -> bool:
         """Whether every sentence of ``queued`` played and its audio is over."""
@@ -1130,15 +1131,17 @@ class ConversationWorker:
                 self._tail = None
             self._active_turn = None
             self._reply = None
-            if turn.ring_deferred and turn.reply_seq is None and self.transcript is not None:
-                self._deferred.append(
-                    _Deferred(
-                        turn.ring_gen,
-                        turn.language,
-                        list(turn.queued),
-                        cut or turn.speech_stopped,
+            ring = self.transcript
+            if turn.ring_deferred and turn.reply_seq is None and ring is not None:
+                if ring.enabled:  # off: the ring would refuse it anyway
+                    self._deferred.append(
+                        _Deferred(
+                            turn.ring_gen,
+                            turn.language,
+                            list(turn.queued),
+                            cut or turn.speech_stopped,
+                        )
                     )
-                )
             elif turn.reply_seq is not None and self.transcript is not None:
                 if cut or turn.speech_stopped:  # the transcript keeps what was heard
                     heard = [t for job, t in turn.queued if self.speech.played(job)]
