@@ -5,9 +5,18 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from roboemot.install.build import distribution_names, min_python, third_party_requirements
 from roboemot.install.pyenv import RemotePython, report_changes
-from roboemot.install.record import InstallRecord, Replaced, canonical, plan_uninstall
+from roboemot.install.record import (
+    RECORD_VERSION,
+    InstallRecord,
+    Replaced,
+    canonical,
+    plan_uninstall,
+    unknown_keys,
+)
+from roboemot.install.ui import WizardError
 
 ROOT = Path(__file__).resolve().parents[3]
 OWN = ["roboemot-core", "roboemot-reachymini"]
@@ -279,3 +288,21 @@ def test_env_created_round_trips():
     assert InstallRecord.from_json(json.loads(json.dumps(r.to_json()))).env_created == (
         "/venvs/apps_venv"
     )
+
+
+def test_a_record_from_a_newer_installer_is_refused_with_a_clear_error():
+    """R4 S1/T4: a record written by a newer installer is a WizardError, not a TypeError."""
+    newer = {**rec().to_json(), "version": RECORD_VERSION + 1, "brand_new": 1}
+    with pytest.raises(WizardError, match="newer than this installer"):
+        InstallRecord.from_json(newer)
+
+
+def test_unknown_keys_of_the_same_version_are_dropped_and_named():
+    data = {**rec(added=["scipy"]).to_json(), "brand_new": [1]}
+    loaded = InstallRecord.from_json(data)
+    assert loaded.added == ["scipy"] and unknown_keys(data) == ["brand_new"]
+
+
+def test_an_old_record_is_written_back_at_the_current_version():
+    old = {"app": "a", "platform": "p", "packages": ["x"], "version": 1}
+    assert InstallRecord.from_json(old).to_json()["version"] == RECORD_VERSION == 2

@@ -68,7 +68,7 @@ from .build import (
 from .caches import clear_caches
 from .piper_lock import lock_path
 from .pyenv import RemotePython, report_changes
-from .record import InstallRecord, canonical, plan_uninstall
+from .record import InstallRecord, canonical, plan_uninstall, unknown_keys
 from .remote import Remote
 from .ui import Ui, WizardError, paint
 
@@ -334,9 +334,18 @@ def creating_python(platform: Platform, remote: Remote) -> str:
     return base
 
 
-def read_record(remote: Remote, path: str) -> InstallRecord | None:
+def read_record(remote: Remote, path: str, ui: Ui | None = None) -> InstallRecord | None:
+    """The change record on the robot, or None. A record from a newer installer raises
+    ``WizardError``; keys this installer does not know are dropped with a warning."""
     raw = remote.run(f"cat {shlex.quote(path)} 2>/dev/null || true")
-    return InstallRecord.from_json(json.loads(raw)) if raw else None
+    if not raw:
+        return None
+    data = json.loads(raw)
+    record = InstallRecord.from_json(data)
+    ignored = unknown_keys(data)
+    if ignored and ui is not None:
+        ui.warn(f"install record has fields this installer does not know: {', '.join(ignored)}")
+    return record
 
 
 def write_record(remote: Remote, path: str, record: InstallRecord) -> None:
@@ -894,7 +903,7 @@ def install_packages(
 ) -> InstallRecord:
     own = distribution_names(dirs)
     warn_data_dir_overrides(ui, remote, dirs)
-    record = read_record(remote, platform.record_path) or InstallRecord(
+    record = read_record(remote, platform.record_path, ui) or InstallRecord(
         platform.app_name, platform.manifest_id, own
     )
     record.packages = sorted(set(record.packages) | set(own))
@@ -1142,7 +1151,7 @@ def run_uninstall(opts: Options, ui: Ui, root: Path) -> None:
         ui.step("Install record")
         env_there = py.exists()
         installed = py.installed() if env_there else {}
-        record = read_record(remote, platform.record_path)
+        record = read_record(remote, platform.record_path, ui)
         if record is None:
             ui.warn(
                 f"no install record at {platform.record_path}: only the app's own packages "

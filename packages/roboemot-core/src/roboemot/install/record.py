@@ -16,15 +16,23 @@ uninstall removes those names and leaves the others. When the robot has no app e
 yet, the installer creates it the way the robot's own software would and records its path
 before creating it (``env_created``) with the distributions it held afterwards
 (``env_baseline``); uninstall removes it again unless another app or package has moved in.
+
+The record carries a ``version``. A record from a newer installer (a higher version) is refused
+with a message naming the cause, since this installer cannot honour fields it does not know;
+keys this version does not know in a record of the same or an older version are ignored (the
+caller warns). An older record loads with the missing fields at their defaults and is written
+back at the current version.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from typing import Any
 
-RECORD_VERSION = 1
+from .ui import WizardError
+
+RECORD_VERSION = 2  # 2: models_dirs, env_created, env_baseline
 
 Versions = dict[str, str]  # canonical distribution name -> version
 
@@ -70,8 +78,18 @@ class InstallRecord:
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> InstallRecord:
-        data = dict(data)
+        """The record from its JSON form; a newer ``version`` raises ``WizardError`` and keys
+        this version does not know are dropped (``unknown_keys`` names them)."""
+        version = data.get("version", 1)
+        if not isinstance(version, int) or version > RECORD_VERSION:
+            raise WizardError(
+                f"the install record has version {version!r}, newer than this installer's "
+                f"{RECORD_VERSION}: use the installer that wrote it (a newer checkout)"
+            )
+        known = {f.name for f in fields(cls)}
+        data = {k: v for k, v in data.items() if k in known}
         data["replaced"] = {k: Replaced(**v) for k, v in data.get("replaced", {}).items()}
+        data["version"] = RECORD_VERSION
         return cls(**data)
 
     def merge(self, before: Versions, after: Versions) -> None:
@@ -93,6 +111,12 @@ class InstallRecord:
                     self.replaced[name] = Replaced(before[name], version)
         self.added = sorted(added)
         self.pending_before = None
+
+
+def unknown_keys(data: dict[str, Any]) -> list[str]:
+    """Keys of a record's JSON form that this version does not know (``from_json`` drops them)."""
+    known = {f.name for f in fields(InstallRecord)}
+    return sorted(set(data) - known)
 
 
 @dataclass
@@ -143,5 +167,6 @@ __all__ = [
     "Versions",
     "canonical",
     "plan_uninstall",
+    "unknown_keys",
     "versions",
 ]
