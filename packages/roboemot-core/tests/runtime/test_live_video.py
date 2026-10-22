@@ -1,5 +1,5 @@
-"""SPEC 4A, 11A, 12: the Live tab's video preview. One JPEG from the frame the vision pump already
-captured; encoded only on request from a newer frame; one encode shared by every viewer; viewers
+"""SPEC 4A, 11A, 12: the Live tab's video preview. One JPEG from the frame vision already
+processed; encoded only on request from a newer frame; one encode shared by every viewer; viewers
 tracked by a window; the frame and JPEG dropped when viewing stops, the flag goes off or the robot
 sleeps; nothing in logs or reports."""
 
@@ -96,6 +96,7 @@ class Rig:
 
     def submit(self, img=None):
         self.runner.submit(Frame(image() if img is None else img, self.clock()))
+        self.runner.run_pending()  # the preview shows frames vision finished
 
     def apply(self, **live):
         self.video.apply_config(SimpleNamespace(config=config(**live)))
