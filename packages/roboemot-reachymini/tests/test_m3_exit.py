@@ -32,6 +32,7 @@ import roboemot_reachymini.app as app_module
 from roboemot import paths
 from roboemot.config.schema import RoboEmotConfig, VoiceConfig
 from roboemot.llm import Router
+from roboemot.llm.prompt import MINOR_RULE
 from roboemot.runtime import assembly
 from roboemot.vision.models import ModelError
 from roboemot.voice import factory
@@ -269,7 +270,7 @@ def yaml_for(language: str, piper: Path | None) -> str:
     return "\n".join(lines) + "\n"
 
 
-def start_app(data, monkeypatch, language, piper, minor=False, minors_llm=False):  # noqa: F811
+def start_app(data, monkeypatch, language, piper, minor=False):  # noqa: F811
     spoken: list[tuple[str, str]] = []
     # The route is an in-process mock, but the app's network monitor probes "lan.local" over TCP.
     # Where that name fails fast (CI) the link goes offline after three probes and the robot
@@ -291,11 +292,6 @@ def start_app(data, monkeypatch, language, piper, minor=False, minors_llm=False)
             return real(self, text, delivery, language=language, **kw)
 
         monkeypatch.setattr(piper_backend.PiperBackend, "synthesize", spy)
-    if minors_llm:  # the master switch on, the route still not cleared for minors
-        text = (data / "app.yaml").read_text()
-        (data / "app.yaml").write_text(
-            text.replace("safety:\n", "safety:\n  minors_allowed_llm: true\n")
-        )
     enable(data, yaml_for(language, piper))
     app = ExitApp.__new__(ExitApp)
     app.requests, app.utterances, app.minor_flag = [], [], minor
@@ -447,33 +443,30 @@ def test_conversation_inside_the_latency_budgets_then_a_barge_in(
         finish(stop, thread, errors)
 
 
-@pytest.mark.parametrize("minors_llm", [False, True], ids=["master_switch_off", "master_switch_on"])
-def test_a_minor_without_a_cleared_route_gets_a_built_in_line_and_no_request(
+def test_a_minor_is_answered_by_the_route_under_the_minor_rules(
     models_ready,
     data,  # noqa: F811
     monkeypatch,
     capsys,
-    minors_llm,
 ):
-    """No route has ``allowed_for_minors``: with ``safety.minors_allowed_llm`` off (the default) or
-    on, a minor hears the built-in line and no request goes out (SPEC 8, 12)."""
-    app, mini, spoken, stop, thread, errors = start_app(
-        data, monkeypatch, "it", None, minor=True, minors_llm=minors_llm
-    )
+    """The route answers a minor, its request carrying the minor content rules (SPEC 8, 12;
+    owner decision 2026-10-22: no route is skipped while a minor is present)."""
+    app, mini, spoken, stop, thread, errors = start_app(data, monkeypatch, "it", None, minor=True)
     try:
         assert app.conversation is not None
         clip = load("it_greeting_name")
         _, last = speech_span_s(clip)
         t_clip = mini.mic.play(np.concatenate([np.zeros(round(LEAD_S * RATE), np.float32), clip]))
         end_wall = t_clip + LEAD_S + last
-        assert wait_for(lambda: bool(mini.pushes), 20), "no built-in line was spoken"
+        assert wait_for(lambda: bool(mini.pushes), 20), "nothing was spoken"
         ms = (mini.pushes[0][0] - end_wall) * 1000
-        assert app.requests == [], "a request went out while a minor was present"
-        assert spoken == [("it", RoboEmotConfig().safety.minor_lines["it"].greeting)]
+        assert len(app.requests) == 1, "the route was not asked while a minor was present"
+        assert MINOR_RULE in app.requests[0]["messages"][0]["content"]
+        assert spoken and {lang for lang, _ in spoken} == {"it"}
         assert ms <= FIRST_AUDIO_BUDGET_MS
         report(
-            f"child_it_minors_llm_{minors_llm}",
-            {"tts": f"fake, {FAKE_TTS_FIRST_CHUNK_S} s first chunk", "requests": 0,
+            "child_it",
+            {"tts": f"fake, {FAKE_TTS_FIRST_CHUNK_S} s first chunk", "requests": 1,
              "first_audio_push_vs_mic_last_speech_ms": round(ms)},
             capsys,
         )  # fmt: skip

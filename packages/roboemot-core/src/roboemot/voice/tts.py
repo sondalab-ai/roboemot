@@ -70,7 +70,7 @@ class TTSBackend(Protocol):
     controls: frozenset[str]
 
     def available(self, *, minor_present: bool = False) -> bool:
-        """Whether a request may be started now (route rules, restart backoff)."""
+        """Whether a request may be started now (minor present, route rules, restart backoff)."""
         ...
 
     def synthesize(

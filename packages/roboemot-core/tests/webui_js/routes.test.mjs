@@ -114,10 +114,10 @@ test("secrets: the card is absent when the server has no secret store", async ()
 
 // ---------------------------------------------------------------- the route form
 
-const STRINGS = { language: "en", strings: { route_key_message: "Key to {host}", route_minors_hint: "NOT CLEARABLE" } };
+const STRINGS = { language: "en", strings: { route_key_message: "Key to {host}" } };
 const ROUTE = {
   name: "lan", model: "m", endpoint: "api.example.com", base_url: "https://api.example.com/v1", locality: "auto",
-  key: "none", allowed_for_minors: false, running: false, secret: null, last_check: null, removable: false,
+  key: "none", running: false, secret: null, last_check: null, removable: false,
 };
 const ADDED = { ...ROUTE, name: "cloud", key: "secret", secret: { name: "cloud_key", set: true }, locality: "cloud", removable: true };
 
@@ -140,11 +140,10 @@ async function answerPin(page, pin = PIN) {
 
 const sel = (page, id) => page.document.querySelector("#" + id);
 
-test("route form: a new route defaults to cloud, cannot be cleared for minors and offers only stored keys", async () => {
+test("route form: a new route defaults to cloud, has no minors flag and offers only stored keys", async () => {
   const page = await formsPage([]);
   assert.equal(sel(page, "route-new-locality").value, "cloud");
-  assert.equal(sel(page, "route-new-minors").disabled, true);
-  assert.match(page.document.querySelector("#view").textContent, /NOT CLEARABLE/);
+  assert.equal(sel(page, "route-new-minors"), null);
   const options = [...sel(page, "route-new-key").options].map((o) => o.value);
   assert.deepEqual(options, ["", "cloud_key", "spare"]);
   assert.equal(sel(page, "route-new-key").value, "");
@@ -164,7 +163,7 @@ test("route form: adding with a key names the host in the PIN dialog and sends t
   await answerPin(page);
   assert.deepEqual(seen, {
     name: "cloud2", base_url: "https://API.Cloudco.example/v1", model: "big", locality: "cloud",
-    allowed_for_minors: false, secret: "cloud_key", pin: PIN, ack_endpoint: "https://api.cloudco.example",
+    secret: "cloud_key", pin: PIN, ack_endpoint: "https://api.cloudco.example",
   });
   noTrace(page, PIN);
 });
@@ -182,10 +181,8 @@ test("route form: adding without a key sends no acknowledgement and no secret", 
   assert.ok(!("ack_endpoint" in seen));
 });
 
-test("route form: only a route of the config file can be cleared for minors; only an added one can be removed", async () => {
+test("route form: only a route added here can be removed", async () => {
   const page = await formsPage([ROUTE, ADDED]);
-  assert.equal(sel(page, "route-lan-minors").disabled, false);
-  assert.equal(sel(page, "route-cloud-minors").disabled, true);
   const cards = [...page.document.querySelectorAll("section.sl-card")].filter((c) => /lan|cloud/.test(c.querySelector("h2").textContent));
   const removers = (c) => [...c.querySelectorAll("button")].filter((b) => b.textContent === "route_remove");
   assert.equal(removers(cards.find((c) => c.querySelector("h2").textContent === "lan")).length, 0);
@@ -201,11 +198,10 @@ test("route form: an edit sends only what changed, one request after the other, 
   });
   sel(page, "route-lan-model").value = "m2";
   sel(page, "route-lan-key").value = "spare";
-  sel(page, "route-lan-minors").checked = true;
   submit(page.window, sel(page, "route-lan-model").closest("form"));
   await settle();
   await answerPin(page);
-  assert.deepEqual(order, ["key", "llm_routes.lan.allowed_for_minors", "llm_routes.lan.model"]);
+  assert.deepEqual(order, ["key", "llm_routes.lan.model"]);
   const key = page.calls.find((c) => c.path === "/api/routes/key").body;
   assert.deepEqual(key, { name: "lan", secret: "spare", pin: PIN, ack_endpoint: "https://api.example.com" });
   noTrace(page, PIN);
