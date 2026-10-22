@@ -22,7 +22,6 @@ import functools
 import json
 import logging
 import os
-import stat
 import tempfile
 import threading
 import time
@@ -51,6 +50,7 @@ log = logging.getLogger(__name__)
 LAYER_ORDER = ("defaults", "manifest", "preset", "app", "derived", "person", "runtime")
 KEYED_LISTS = {"appraisal.rules": "event", "llm_routes": "name"}
 AUDIT_FILE_MODE = 0o600
+APP_FILE_MODE = 0o600  # app.yaml: owner only, it may hold a literal api_key (SPEC 12)
 _MOVED = yaml.safe_load(Path(__file__).with_name("moved_settings.yaml").read_text())
 RENAMED_SETTINGS: dict[str, str] = _MOVED["renamed"]  # old path -> new path
 REMOVED_SETTINGS: dict[str, str] = _MOVED["removed"]  # old path (or prefix) -> what replaces it
@@ -1717,21 +1717,18 @@ class ConfigStack:
 
 
 def _replace_file(path: Path, text: str) -> None:
-    """Write ``text`` over ``path`` atomically (SPEC 11A, 12): a temp file in the same folder with
-    the old file's mode, synced, renamed over the target, then the folder synced. A kill at any
+    """Write ``text`` over ``path`` atomically (SPEC 11A, 12): a temp file in the same folder,
+    owner-only (``APP_FILE_MODE``: the file may hold a literal ``api_key``) whatever the old mode
+    was, synced, renamed over the target, then the folder synced as a best effort. A kill at any
     point leaves the old file or the new one, never a truncated one. A symlink keeps pointing at
-    its target, which is the file replaced."""
+    its target, which is the file replaced: planting one needs write access to the data folder,
+    which is already the app user's, so following it grants nothing new."""
     target = path.resolve()
-    try:
-        mode: int | None = stat.S_IMODE(target.stat().st_mode)
-    except FileNotFoundError:
-        mode = None
-    fd, name = tempfile.mkstemp(dir=target.parent, prefix=target.name + ".")  # 0600
+    fd, name = tempfile.mkstemp(dir=target.parent, prefix=target.name + ".")
     tmp = Path(name)
     try:
         with os.fdopen(fd, "w") as handle:
-            if mode is not None:
-                os.fchmod(handle.fileno(), mode)
+            os.fchmod(handle.fileno(), APP_FILE_MODE)
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
@@ -1740,11 +1737,12 @@ def _replace_file(path: Path, text: str) -> None:
         with contextlib.suppress(OSError):
             tmp.unlink()
         raise
-    dir_fd = os.open(target.parent, os.O_RDONLY)
-    try:
-        os.fsync(dir_fd)
-    finally:
-        os.close(dir_fd)
+    with contextlib.suppress(OSError):  # the new file is in place: durability is best effort
+        dir_fd = os.open(target.parent, os.O_RDONLY | os.O_CLOEXEC)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
 
 
 def _mtime(path: Path) -> float:

@@ -529,6 +529,7 @@ EN: dict[str, str] = {
         "From this page a route cannot point at this robot or at a link-local address. Write "
         "such a route in the app config."
     ),
+    "err_url_query": "The address of a route cannot hold a query (?) or a fragment (#).",
     "err_url_credentials": (
         "The address must not hold a user name, password, token or ${secret:...} reference. "
         "Store the key with `roboemot secrets set NAME` and use ${secret:NAME} as the api_key."
@@ -1121,6 +1122,7 @@ IT: dict[str, str] = {
         "Da questa pagina una route non può puntare a questo robot né a un indirizzo "
         "link-local. Scrivi una route così nella configurazione dell'app."
     ),
+    "err_url_query": "L'indirizzo di una route non può contenere una query (?) o un frammento (#).",
     "err_url_credentials": (
         "L'indirizzo non deve contenere utente, password, token o riferimenti ${secret:...}. "
         "Salva la chiave con `roboemot secrets set NOME` e usa ${secret:NOME} come api_key."

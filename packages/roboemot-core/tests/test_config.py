@@ -474,17 +474,17 @@ def test_app_write_interrupted_keeps_the_old_file_whole(tmp_path, monkeypatch):
     assert stack.get("safety.minor_motion_factor") == 0.6  # undone with the file
 
 
-def test_app_write_keeps_the_file_mode_and_a_symlink(tmp_path):
+def test_app_write_is_owner_only_and_keeps_a_symlink(tmp_path):
     real = tmp_path / "real.yaml"
     real.write_text("schema_version: 1\n")
-    real.chmod(0o640)
+    real.chmod(0o644)  # as the installer leaves it
     link = tmp_path / "app.yaml"
     link.symlink_to(real)
     stack = ConfigStack.from_files(app=link)
     stack.set("safety.minor_motion_factor", 0.9, layer="app", admin=True)
     assert link.is_symlink()
     assert "minor_motion_factor: 0.9" in real.read_text()
-    assert real.stat().st_mode & 0o777 == 0o640
+    assert real.stat().st_mode & 0o777 == 0o600  # owner only, whatever it was (review ZG)
     assert stack.poll() is None  # own write is not a reload
 
 
@@ -496,6 +496,15 @@ def test_app_write_keeps_the_file_mode_and_a_symlink(tmp_path):
         "javascript:alert(1)",
         "x.example/v1",
         "http:///v1",
+        # the parser that sends the request (httpx) cannot use these (review ZG)
+        " http://127.0.0.1:8000/v1",
+        "\thttp://127.0.0.1:8000/v1",
+        "http://\t127.0.0.1:8000/v1",
+        "http://127.0.0.1\t:8000/v1",
+        "http://0177.0.0.1:8000/v1",
+        "http://\uff11\uff12\uff17.0.0.1/v1",
+        "http://127.0.0.1:8000/v1\n",
+        "http://x.example\\v1",
     ],
 )
 def test_a_route_base_url_must_be_http_or_https_with_a_host(url):

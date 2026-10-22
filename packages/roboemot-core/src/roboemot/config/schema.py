@@ -19,7 +19,6 @@ from __future__ import annotations
 import re
 import warnings
 from typing import Any, Literal
-from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -2746,6 +2745,22 @@ class PersonaConfig(Strict):
         return self
 
 
+def route_url_ok(url: str) -> bool:
+    """Whether ``url`` is a route base URL the client can use as written (SPEC 8): parsed by
+    httpx, the library that sends the request, with an http(s) scheme and a host, and no space,
+    control character or backslash (parsers read a backslash differently). A query is accepted
+    here, for configs that carry one; the web UI refuses a query or fragment (``url_query``)."""
+    import httpx  # lazy: keeps the config package light
+
+    if any(c.isspace() or ord(c) < ord(" ") or c == "\\" for c in url):
+        return False
+    try:
+        parsed = httpx.URL(url)
+    except (httpx.InvalidURL, ValueError, TypeError):
+        return False
+    return parsed.scheme in ROUTE_SCHEMES and bool(parsed.host)
+
+
 class LLMRoute(Strict):
     @field_validator("api_key")
     @classmethod
@@ -2798,13 +2813,11 @@ class LLMRoute(Strict):
             )
         if not self.base_url or not self.model:
             raise ValueError(f"route {self.name}: base_url and model are required")
-        try:
-            parts = urlsplit(self.base_url)
-            ok = parts.scheme.lower() in ROUTE_SCHEMES and bool(parts.hostname)
-        except ValueError:
-            ok = False
-        if not ok:
-            raise ValueError(f"route {self.name}: base_url must be an http(s) URL with a host")
+        if not route_url_ok(self.base_url):
+            raise ValueError(
+                f"route {self.name}: base_url must be an http(s) URL with a host, without "
+                "spaces, control characters or '\\'"
+            )
         return self
 
 

@@ -302,17 +302,26 @@ def origin(url: str) -> str:
         return ""
 
 
+# IPv6 forms that carry an IPv4 address in their low 32 bits: IPv4-compatible (``::a.b.c.d``),
+# IPv4-mapped, IPv4-translated (``::ffff:0:a.b.c.d``) and the NAT64 well-known prefix
+EMBEDS_IPV4 = tuple(
+    ipaddress.IPv6Network(net)
+    for net in ("::/96", "::ffff:0:0/96", "::ffff:0:0:0/96", "64:ff9b::/96")
+)
+IPV4_BITS = 0xFFFFFFFF
+
+
 def this_machine(url: object) -> bool:
     """Whether ``url`` points at this machine or a link-local address (SPEC 8, 12): loopback,
     ``localhost`` and ``*.localhost``, the unspecified address (it reaches loopback on Linux),
-    169.254/16 and fe80::/10, in any spelling (``127.1``, ``0x7f000001``, ``2130706433``, an
-    IPv4-mapped IPv6 address). The host is read by httpx, the client that connects. Names are not
-    resolved: a public name that resolves to loopback is not caught here. Private LAN addresses
-    stay allowed, a LAN model server is the usual local route."""
+    169.254/16 and fe80::/10, in any spelling (``127.1``, ``0x7f000001``, ``2130706433``, an IPv6
+    address that carries one of them, ``EMBEDS_IPV4``). The host is read by httpx, the client
+    that connects. Names are not resolved: a public name that resolves to loopback is not caught
+    here. Private LAN addresses stay allowed, a LAN model server is the usual local route."""
     try:
         host = httpx.URL(str(url)).host.lower().rstrip(".")
     except (httpx.InvalidURL, ValueError, TypeError):
-        return False  # unparsable: the URL checks refuse it
+        return False  # unparsable: ``LLMRoute`` refuses it (``route_url_ok``, same parser)
     if host == "localhost" or host.endswith(".localhost"):
         return True
     try:
@@ -322,9 +331,23 @@ def this_machine(url: object) -> bool:
             ip = ipaddress.IPv4Address(socket.inet_aton(host))
         except OSError:
             return False
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
-        ip = ip.ipv4_mapped
-    return ip.is_loopback or ip.is_link_local or ip.is_unspecified
+    if ip.is_loopback or ip.is_link_local or ip.is_unspecified:
+        return True
+    if isinstance(ip, ipaddress.IPv6Address) and any(ip in net for net in EMBEDS_IPV4):
+        carried = ipaddress.IPv4Address(int(ip) & IPV4_BITS)
+        return carried.is_loopback or carried.is_link_local or carried.is_unspecified
+    return False
+
+
+def check_web_route_url(url: object, old: object = None) -> None:
+    """The web UI's rules for a route ``base_url`` it writes (SPEC 8, 12), on top of the schema's:
+    no query or fragment (``url_query``: the SDK appends its path, so either would sit inside the
+    request path), and not this machine or a link-local address (``url_local_refused``) unless the
+    origin stays the one the route already has (a path edit of a route of the app config)."""
+    if isinstance(url, str) and ("?" in url or "#" in url):
+        raise ValidationError("url_query", "value")
+    if this_machine(url) and not (isinstance(old, str) and origin(old) == origin(str(url))):
+        raise ValidationError("url_local_refused", "value")
 
 
 def is_key_ref(value: object) -> bool:
@@ -498,8 +521,8 @@ class SettingsEditor:
         url = value.get("base_url") if isinstance(value, dict) else None
         if box["path"] == "llm_routes" and secret_shaped(url):
             raise ValidationError("url_credentials", "value")
-        if box["path"] == "llm_routes" and this_machine(url):
-            raise ValidationError("url_local_refused", "value")
+        if box["path"] == "llm_routes":
+            check_web_route_url(url)
         if secret_shaped([key, value]):
             raise ValidationError("value_type", "value")
         name = clean_key(key, cfg) if box["kind"] != "keyed_list" else None
@@ -774,9 +797,28 @@ class SettingsEditor:
                 except (ValidationError, SettingNotAllowed, GuardrailError):
                     log.warning("web UI setting %s dropped: no longer acceptable", _shown(key))
             self._overrides, self._acks = self._commit_batch(cleaned, acks)
+            self._warn_local_routes()
             self._restore_keys(keys, acks)
             if stripped or set(self._overrides) != set(stored) or self._keys != keys:
                 self._persist()
+
+    def _warn_local_routes(self) -> None:
+        """A route added or moved from the web before the address rule (``this_machine``) that
+        points at this machine or a link-local address is kept, so startup never fails on it,
+        with a warning naming the route (never the URL)."""
+        for key, value in self._overrides.items():
+            found = parse_okey(key)
+            if found is None or found[0] != "llm_routes":
+                continue
+            _, ident, rest = found
+            url = value.get("base_url") if not rest and isinstance(value, dict) else None
+            url = value if rest == "base_url" else url
+            if this_machine(url):
+                log.warning(
+                    "web UI route %s points at this machine or a link-local address: kept, but "
+                    "the web UI refuses such an address now; move it to the app config",
+                    ident.get("name"),
+                )
 
     # ------------------------------------------------------------------ write internals
 
@@ -816,12 +858,8 @@ class SettingsEditor:
         old = plain(get_path(cfg, path))
         if clean == old:
             return {"path": path, "changed": False, "value": old}
-        if (
-            write_only(path)
-            and this_machine(clean)
-            and (not isinstance(old, str) or origin(old) != origin(clean))
-        ):
-            raise ValidationError("url_local_refused", "value")
+        if write_only(path):
+            check_web_route_url(clean, old)
         if (
             path in LANGUAGE_DICTS
             and isinstance(clean, dict)
