@@ -412,3 +412,25 @@ def test_a_reload_moves_the_watch_level_with_the_threshold_only():
     feed_probs(ep, [0.0])
     snap = ep.snapshot()
     assert snap["watch_prob"] == 0.35 and snap["window"] == 10  # restart-only fields stay
+
+
+def test_a_shorter_min_speech_starts_a_run_that_already_qualifies_without_more_speech():
+    ep = Endpointer(ScriptedVAD([]), cfg(min_speech_ms=200))  # 10 frames
+    events, n = feed_probs(ep, [0.0] + [0.9] * 6)
+    ep.apply_config(cfg(min_speech_ms=40))  # 2 frames: the run of 6 already qualifies
+    events, n = feed_probs(ep, [0.0], n)
+    starts = kinds(events, SpeechStart)
+    assert len(starts) == 1 and starts[0].stamp == pytest.approx(T0 + FRAME_S)
+    assert ep.in_speech
+
+
+def test_a_reload_after_a_max_length_cut_keeps_the_continued_utterance():
+    ep = Endpointer(ScriptedVAD([]), cfg(max_utterance_s=1))
+    events, n = feed_probs(ep, [0.9] * 55)  # cut at 1 s, the speech goes on in a new utterance
+    assert kinds(events, SpeechEnd)[0].reason == "max_length" and ep.in_speech
+    ep.apply_config(cfg(max_utterance_s=1, min_speech_ms=200, pre_roll_ms=0, end_silence_ms=100))
+    events, n = feed_probs(ep, [0.9] * 3 + [0.0] * 5, n)
+    ends = kinds(events, SpeechEnd)
+    assert kinds(events, SpeechStart) == [] and len(ends) == 1 and ends[0].reason == "silence"
+    assert ends[0].start_stamp == pytest.approx(T0 + 49 * FRAME_S)
+    assert len(ends[0].audio) == (n - 49) * FRAME

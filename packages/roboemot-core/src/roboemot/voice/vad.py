@@ -246,12 +246,15 @@ class Endpointer:
             raise ValueError(f"expected mono float32 samples, got {samples.dtype} {samples.shape}")
         with self._watch_lock:
             config, self._next_config = self._next_config, None
+        events: list[VADEvent] = []
         if config is not None:
             self._configure(config)
+            # A run that already qualifies under a shorter min_speech_ms starts now.
+            if not self._speaking and self._run >= self._min_frames:
+                events.append(self._begin(self._ring[-1][0]))
         if len(self._pending) == 0:
             self._pending_stamp = stamp
         buf = np.concatenate([self._pending, samples]) if len(self._pending) else samples.copy()
-        events: list[VADEvent] = []
         pos = 0
         while len(buf) - pos >= self._size:
             frame = buf[pos : pos + self._size]
