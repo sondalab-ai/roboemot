@@ -2,7 +2,10 @@
 
 A platform names the caches that are safe to drop (``Platform.clearable_caches``, paths written
 ``~/...``). They are not part of the install record: a deleted cache cannot be restored, only
-rebuilt by whatever filled it, so uninstall leaves them alone.
+rebuilt by whatever filled it, so uninstall leaves them alone. Because of that, ``-y`` alone
+does not clear one: only ``--clear-caches`` or a yes on a terminal does. A cache that a
+virtualenv links into (uv's ``--link-mode=symlink``) is not a cache any more but part of that
+environment, so a symlink into it under the given folders keeps it.
 """
 
 from __future__ import annotations
@@ -24,13 +27,35 @@ def cache_path(home: str, spec: str) -> str:
     return path
 
 
+def linked_from(remote: Remote, cache: str, guard_dirs: tuple[str, ...]) -> str | None:
+    """A symlink under ``guard_dirs`` whose target lies inside ``cache`` (a virtualenv uv made
+    with symlinks into its cache), or None."""
+    pattern = shlex.quote(f"{cache}/*")
+    for folder in guard_dirs:
+        found = remote.run(
+            f"find {shlex.quote(folder)} -lname {pattern} -print -quit 2>/dev/null || true"
+        ).strip()
+        if found:
+            return found
+    return None
+
+
 def clear_caches(
-    ui: Ui, remote: Remote, home: str, specs: tuple[str, ...], wanted: bool | None, dry_run: bool
-) -> None:
-    """Show the size of each existing cache and delete it when asked (``wanted`` None: ask; the
-    default is yes on a terminal and no when unattended, where only ``-y`` or ``wanted`` True
-    deletes). The folder is deleted only if its ``realpath`` is the expanded path itself, so
-    a symlink never redirects the delete. The dry run only reports."""
+    ui: Ui,
+    remote: Remote,
+    home: str,
+    specs: tuple[str, ...],
+    wanted: bool | None,
+    dry_run: bool,
+    guard_dirs: tuple[str, ...] = (),
+) -> list[str]:
+    """Show the size of each existing cache and delete it when asked (``wanted`` None: ask on a
+    terminal, default yes; unattended or with ``-y`` it is kept, only ``wanted`` True deletes
+    without asking). The folder is deleted only if its ``realpath`` is the expanded path itself,
+    so a symlink never redirects the delete, and only if no symlink under ``guard_dirs`` points
+    into it (``linked_from``). The dry run only reports, with the same decisions as the real run.
+    Returns the caches left in place, with their size, for the free-space error."""
+    kept: list[str] = []
     for spec in specs:
         path = cache_path(home, spec)
         if remote.run(f"test -e {shlex.quote(path)} && echo yes || echo no").strip() != "yes":
@@ -38,22 +63,55 @@ def clear_caches(
         ui.info(f"measuring {path}")
         size = remote.run(f"du -sh {shlex.quote(path)} 2>/dev/null | cut -f1").strip() or "?"
         label = f"{path} ({size}; uninstall cannot restore it, whatever filled it fills it again)"
-        if wanted is False:
-            ui.info(f"{label} kept")
+        if not _clearable(ui, remote, path, label, wanted, dry_run, guard_dirs):
+            kept.append(f"{path} ({size})")
             continue
         if dry_run:
             ui.info(f"would clear {label}")
             continue
-        if wanted is None and not ui.confirm(f"{label}: clear it to free space?", ui.interactive):
-            ui.info(f"{path} kept")
-            continue
-        real = remote.run(f"realpath {shlex.quote(path)} 2>/dev/null || true").strip()
-        if real != path:
-            ui.warn(f"{path} resolves to {real or 'nothing'}: symlink? left as it is")
-            continue
         with ui.progress(f"clearing {path} ({size}), can take a minute", report=False, slow=False):
             remote.run(f"rm -rf {shlex.quote(path)}")
         ui.ok(f"cleared {path} ({size})")
+    return kept
 
 
-__all__ = ["HOME_PREFIX", "cache_path", "clear_caches"]
+def _clearable(
+    ui: Ui,
+    remote: Remote,
+    path: str,
+    label: str,
+    wanted: bool | None,
+    dry_run: bool,
+    guard_dirs: tuple[str, ...],
+) -> bool:
+    """Decide, in the same order for the dry run and the real run, whether ``path`` goes: kept
+    when declined, with ``-y`` alone, when an environment links into it or when it resolves
+    elsewhere; else asked (a dry run says it would ask) unless ``wanted`` is True."""
+    if wanted is False:
+        ui.info(f"{label} kept")
+        return False
+    if wanted is None and ui.assume_yes:
+        ui.info(f"{label} kept: -y does not clear it, --clear-caches does")
+        return False
+    if wanted is None and not ui.interactive:
+        ui.info(f"{label} kept: unattended runs clear it only with --clear-caches")
+        return False
+    link = linked_from(remote, path, guard_dirs)
+    if link:
+        ui.warn(f"{path} kept: {link} links into it (an environment depends on it)")
+        return False
+    real = remote.run(f"realpath {shlex.quote(path)} 2>/dev/null || true").strip()
+    if real != path:
+        ui.warn(f"{path} resolves to {real or 'nothing'}: symlink? left as it is")
+        return False
+    if wanted is None:
+        if dry_run:
+            ui.info(f"would ask whether to clear {label} (default yes)")
+            return False
+        if not ui.confirm(f"{label}: clear it to free space?", True):
+            ui.info(f"{path} kept")
+            return False
+    return True
+
+
+__all__ = ["HOME_PREFIX", "cache_path", "clear_caches", "linked_from"]

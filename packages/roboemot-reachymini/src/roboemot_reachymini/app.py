@@ -6,7 +6,9 @@ robot: the platform does. The app is a thin adapter: it loads the config and the
 the robot platform up by the manifest ``robot.id`` (entry-point group ``roboemot.robots``), binds
 the connected robot to a session and hands both to core's ``Runtime``, which builds and runs the
 whole pipeline until ``stop_event`` is set. The app is also the runtime's host (``RuntimeHost``):
-the seams tests override and the parts the runtime publishes live on it.
+the seams tests override and the parts the runtime publishes live on it. The app config is
+``app.yaml`` in the data folder (``roboemot.paths.app_config_path``), not package data, so a
+reinstall keeps the owner's edits (SPEC 4A, Installer).
 """
 
 from __future__ import annotations
@@ -15,6 +17,8 @@ import threading
 from pathlib import Path
 from typing import Any
 
+import yaml
+from roboemot import paths
 from roboemot.config import ConfigStack
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.manifest import load_manifest
@@ -27,18 +31,35 @@ except ImportError:  # pragma: no cover
     ReachyMiniApp = object  # type: ignore[misc,assignment]
 
 DATA = Path(__file__).resolve().parent / "data"
+app_config_path = paths.app_config_path  # the app config: app.yaml in the data folder
+
+
+def webui_port(path: Path) -> int:
+    """``webui.port`` from the app config at ``path`` when it sets a positive one, else the
+    default: the daemon shows ``custom_app_url``, which must follow an owner's port change.
+    An unreadable file gives the default here; the app itself refuses it at ``run``."""
+    try:
+        port = ((yaml.safe_load(path.read_text()) or {}).get("webui") or {}).get("port")
+    except (OSError, yaml.YAMLError, AttributeError):
+        port = None
+    if isinstance(port, int) and not isinstance(port, bool) and port > 0:
+        return port
+    return RoboEmotConfig().webui.port
 
 
 class RoboEmotApp(RuntimeHost, ReachyMiniApp):  # type: ignore[misc,valid-type]
     # The enrollment and registry web UI (SPEC 4A, 6): the daemon reads this class attribute to
-    # show the page; the port is webui.port (change both together). The app serves the page
-    # itself (roboemot.webui), so the SDK must not start its own server on that port.
-    custom_app_url: str | None = f"http://0.0.0.0:{RoboEmotConfig().webui.port}"
+    # show the page; the port is webui.port, read from the app config when the app is imported.
+    # The app serves the page itself (roboemot.webui), so the SDK must not start its own server
+    # on that port.
+    custom_app_url: str | None = f"http://0.0.0.0:{webui_port(app_config_path())}"
     dont_start_webserver: bool = True
 
     def run(self, reachy_mini: Any, stop_event: threading.Event) -> None:
         stack = ConfigStack.from_files(
-            app=_optional(DATA / "app.yaml"), preset="default", preset_dirs=[DATA / "presets"]
+            app=_optional(app_config_path()),
+            preset="default",
+            preset_dirs=[DATA / "presets"],
         )
         cfg = stack.effective()
         # Unmeasured dynamics only when the owner enabled it in the app config (SPEC 12).
