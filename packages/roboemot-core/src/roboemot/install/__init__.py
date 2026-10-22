@@ -15,8 +15,9 @@ only reports it and skips the dependency check. It also creates the private app 
 (``~/.local/share/roboemot``: registry, models, trait cache) when it is not there yet and
 records it. It sets its own keys in the app config (``app.yaml`` in the data folder, kept across
 reinstalls): ``voice.enabled: true`` unless ``--no-voice`` (which also makes Piper and the models
-default to off) and the dev content with ``--dev``; every other key stays. Unless declined (`--no-piper`) it also creates a Piper virtualenv in the data folder
-(`piper-tts` is GPL-3.0 and runs as its own process, SPEC 8), recorded for uninstall.
+default to off) and the dev content with ``--dev``; every other key stays. Unless declined
+(`--no-piper`) it also creates a Piper virtualenv in the data folder (`piper-tts` is GPL-3.0 and
+runs as its own process, SPEC 8), recorded for uninstall.
 The platform's ``extras`` (``voice`` for a robot that listens, so vosk) are installed with
 ``roboemot-core``; the ``vision`` extra and the vision weights come too unless declined
 (``--no-vision``, SPEC 4A Installer). The voice models (``roboemot models fetch --voice``) are
@@ -37,7 +38,8 @@ data folder (registry, models and trait cache included), verify, and only then d
 record. An environment the record says this installer created is removed too, unless another
 app lives in it (``Platform.env_users``); when it goes whole, its packages are not restored
 first. With the environment already gone, the rest of the cleanup still runs. A rerun of install
-finishes an environment an earlier run created but could not complete. Running it twice is harmless. Both flows have a read-only ``--dry-run``.
+finishes an environment an earlier run created but could not complete. Running it twice is
+harmless. Both flows have a read-only ``--dry-run``.
 """
 
 from __future__ import annotations
