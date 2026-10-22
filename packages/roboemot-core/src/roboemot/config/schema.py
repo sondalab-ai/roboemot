@@ -755,8 +755,8 @@ class ExternalControlConfig(Strict):
     )  # fmt: skip
     solo_groups: list[str] = param(
         [],
-        "Manifest groups that yield on their own when only they diverge (a hand on an "
-        "antenna). Any other divergence yields every group: the platform's own moves (a "
+        "Manifest groups that yield on their own when only they diverge (a hand on a light "
+        "part). Any other divergence yields every group: the platform's own moves (a "
         "go-to-sleep) may show first on any group, and the groups not yet diverging would "
         "otherwise keep streaming targets the platform accepts as its move ends. List a group "
         "only if the platform's moves never move it first",
