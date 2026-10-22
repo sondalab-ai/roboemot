@@ -81,10 +81,12 @@ class LatestFrameRunner:
         module: PerceptionModule,
         clock: Callable[[], float] = time.monotonic,
         max_hz: float = MAX_RATE_HZ,
-        overlay: Callable[[], Any] | None = None,
+        overlay: Callable[[Any], Any] | None = None,
     ):
-        """``overlay`` is read on the worker thread right after a frame was processed, only
-        while watched, and kept with that frame (the face boxes of the live preview)."""
+        """``overlay`` gets what ``process`` returned, on the worker thread right after it and
+        only while watched, and returns the overlay to keep with that frame (the face boxes of
+        the live preview), or None to keep the previous frame (no detection ran on this one).
+        Without it every processed frame is kept, with no overlay."""
         self.module = module
         self._overlay = overlay
         self.dropped = 0
@@ -134,11 +136,10 @@ class LatestFrameRunner:
             self._watch_until = self._clock() + window_s
 
     def latest(self) -> Kept | None:
-        """The newest frame the pipeline finished while watched, with its sequence number and
-        the overlay computed on it, or None. Under overload it lags the camera, but the boxes
-        always belong to the picture (they are the tracker's state after that frame: on a frame
-        without a face detection, as of the last one). The frame is shared with the pipeline:
-        read it, never write to it."""
+        """The newest frame the pipeline finished while watched and the overlay hook accepted,
+        with its sequence number and the overlay computed on it, or None. It lags the camera
+        (by the detection period and its processing time), but the boxes always belong to the
+        picture. The frame is shared with the pipeline: read it, never write to it."""
         with self._cond:
             return self._latest
 
@@ -211,8 +212,8 @@ class LatestFrameRunner:
             frame, self._frame = self._frame, None
             seq, arrived = self._frame_seq, self._frame_at
         try:
-            self.module.process(frame)
-            self._keep(frame, seq, arrived)
+            report = self.module.process(frame)
+            self._keep(frame, seq, arrived, report)
             with self._cond:
                 self.processed += 1
                 self._done.append(self._clock())
@@ -223,17 +224,21 @@ class LatestFrameRunner:
             log.warning("vision frame failed: %s", type(exc).__name__)
         return True
 
-    def _keep(self, frame: Frame, seq: int, arrived: float) -> None:
+    def _keep(self, frame: Frame, seq: int, arrived: float, report: Any) -> None:
         """While watched, keep ``frame`` with the overlay computed on it (worker thread, right
         after ``process``, so nothing newer has touched the pipeline's state)."""
         with self._cond:
             if self._clock() >= self._watch_until:
                 return
-        try:
-            overlay = self._overlay() if self._overlay is not None else None
-        except Exception as exc:  # the preview loses this frame, vision goes on
-            log.warning("vision overlay failed: %s", type(exc).__name__)
-            return
+        overlay = None
+        if self._overlay is not None:
+            try:
+                overlay = self._overlay(report)
+            except Exception as exc:  # the preview loses this frame, vision goes on
+                log.warning("vision overlay failed: %s", type(exc).__name__)
+                return
+            if overlay is None:
+                return
         with self._cond:
             if self._clock() < self._watch_until:  # unwatch() may have run meanwhile
                 self._latest = Kept(frame, seq, overlay)

@@ -38,19 +38,22 @@ def until(cond, timeout=5.0):
 
 
 class Gated(Module):
-    """Holds each frame until released; the overlay names the frame it was computed on."""
+    """Holds each frame until released; the overlay names the frame it was computed on. Faces
+    are detected on every frame unless its stamp is in ``skip``."""
 
-    def __init__(self):
+    def __init__(self, skip=()):
         self.entered, self.release = threading.Semaphore(0), threading.Semaphore(0)
-        self.current = None
+        self.current, self.skip = None, set(skip)
 
     def process(self, f):
         self.entered.release()
         self.release.acquire()
-        self.current = f.stamp
+        if f.stamp not in self.skip:
+            self.current = f.stamp
+        return f.stamp not in self.skip
 
-    def overlay(self):
-        return [self.current]
+    def overlay(self, detected):
+        return [self.current] if detected else None
 
 
 def started(module, clock=None, overlay=None):
@@ -104,6 +107,23 @@ def test_the_preview_shows_the_frame_the_boxes_were_computed_on_not_a_newer_one(
         runner.stop()
 
 
+def test_a_frame_without_a_detection_does_not_replace_the_kept_one():
+    module = Gated(skip={2.0})
+    runner = started(module, overlay=module.overlay)
+    try:
+        runner.watch(5.0)
+        for stamp in (1.0, 2.0):
+            runner.submit(frame(stamp))
+            assert module.entered.acquire(timeout=5)
+            module.release.release()
+            assert until(lambda n=stamp: runner.processed == n)
+        kept, seq, overlay = runner.latest()
+        assert kept.stamp == 1.0 and seq == 1 and overlay == [1.0]  # not frame 2 with old boxes
+    finally:
+        module.release.release()
+        runner.stop()
+
+
 def test_the_window_lapses_and_nothing_more_is_kept():
     clock = Clock()
     runner = started(Module(), clock=clock)
@@ -137,7 +157,7 @@ def test_unwatch_drops_the_reference_at_once_and_a_frame_in_flight_is_not_kept()
 
 def test_the_overlay_is_not_computed_while_nobody_watches():
     calls = []
-    runner = started(Module(), overlay=lambda: calls.append(1))
+    runner = started(Module(), overlay=lambda report: calls.append(1))
     try:
         runner.submit(frame())
         assert until(lambda: runner.processed == 1)

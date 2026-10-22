@@ -73,7 +73,9 @@ class VisionService:
         self.pipeline = pipeline
         self.cfg = cfg
         self.source = CountingSource(source)
-        self.runner = LatestFrameRunner(pipeline, overlay=getattr(pipeline, "face_overlay", None))
+        self.runner = LatestFrameRunner(
+            pipeline, overlay=getattr(pipeline, "preview_overlay", None)
+        )
         self._stop = threading.Event()
         self._paused = threading.Event()
         self._thread: threading.Thread | None = None
