@@ -98,6 +98,7 @@ def test_it_needs_a_session_like_the_other_page_apis(served):
 
 
 def test_each_unavailable_state_answers_a_stable_code_and_no_image(served):
+    pytest.importorskip("cv2")  # encodes a JPEG: the vision extra (python-vision CI job)
     c = served.client
     c.login()
     r = c.request("GET", "/api/live/frame.jpg")
@@ -128,6 +129,7 @@ def test_no_vision_answers_its_own_code(served):
 
 
 def test_it_serves_one_jpeg_with_the_security_headers(served):
+    pytest.importorskip("cv2")  # encodes a JPEG: the vision extra (python-vision CI job)
     c = served.client
     enable(c)
     assert c.request("GET", "/api/live/frame.jpg").status == 503  # starts watching
@@ -150,6 +152,7 @@ def test_post_is_not_served(served):
 
 
 def test_the_banner_flag_follows_who_was_sent_a_frame(served):
+    pytest.importorskip("cv2")  # encodes a JPEG: the vision extra (python-vision CI job)
     c = served.client
     enable(c)
     assert c.request("GET", "/api/live/viewers").json == {
@@ -209,6 +212,7 @@ def test_the_video_settings_are_in_the_catalogue_with_units_and_ranges(served):
 
 
 def test_logs_hold_the_client_address_and_no_image(served, caplog):
+    pytest.importorskip("cv2")  # encodes a JPEG: the vision extra (python-vision CI job)
     caplog.set_level(logging.DEBUG)
     c = served.client
     enable(c)
@@ -293,6 +297,7 @@ def test_a_banner_poll_slower_than_half_the_window_is_refused_and_capped():
 
 
 def test_a_cross_site_request_is_refused_before_the_handler(served):
+    pytest.importorskip("cv2")  # encodes a JPEG: the vision extra (python-vision CI job)
     c = served.client
     enable(c)
     c.request("GET", "/api/live/frame.jpg")

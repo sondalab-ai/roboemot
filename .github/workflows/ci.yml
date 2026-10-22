@@ -38,7 +38,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e "packages/roboemot-core[dev,vision]" -e "packages/roboemot-reachymini[dev]"
-      - run: pytest packages/roboemot-core/tests/test_catalogue_photos.py packages/roboemot-core/tests/test_vision_models.py packages/roboemot-core/tests/test_vision_objects.py packages/roboemot-core/tests/test_vision.py packages/roboemot-core/tests/runtime/test_live_video.py -rs
+      - run: pytest packages/roboemot-core/tests/test_catalogue_photos.py packages/roboemot-core/tests/test_vision_models.py packages/roboemot-core/tests/test_vision_objects.py packages/roboemot-core/tests/test_vision.py packages/roboemot-core/tests/runtime/test_live_video.py packages/roboemot-core/tests/test_webui_live_video.py packages/roboemot-core/tests/test_webui_live.py -rs
 
   # SPEC 14, M3 exit: the tests that load the real Silero VAD, Vosk and Piper models (`-m models`,
   # deselected by default), including `test_m3_exit.py` with its latency budgets. The vision models

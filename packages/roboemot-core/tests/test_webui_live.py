@@ -291,6 +291,7 @@ def test_subscribing_twice_keeps_one_entry_and_unsubscribe_removes_it(stack):
 
 
 def test_start_webui_drops_the_preview_when_the_robot_falls_asleep_and_at_shutdown(tmp_path, stack):
+    pytest.importorskip("cv2")  # encodes a JPEG: the vision extra (python-vision CI job)
     from contextlib import ExitStack
 
     from roboemot.bus import Bus
