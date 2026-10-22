@@ -272,8 +272,8 @@ class VisionPipeline:
     def apply_config(self, vision: VisionConfig, identity: IdentityConfig) -> None:
         """Hot reload (SPEC 11A): thresholds, rates and tracker settings take effect at once.
 
-        ``vision.attribute_queue_max``, the thread counts, the detector size and the models
-        folder are restart-only (the schema marks them).
+        ``vision.attribute_queue_max``, the age model's input size and score floor, the thread
+        counts, the detector size and the models folder are restart-only (the schema marks them).
         """
         self.cfg, self.identity = vision, identity
         self.governor.rates = vision.rates

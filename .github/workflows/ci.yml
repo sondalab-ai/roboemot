@@ -38,12 +38,12 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e "packages/roboemot-core[dev,vision]" -e "packages/roboemot-reachymini[dev]"
-      - run: pytest packages/roboemot-core/tests/test_catalogue_photos.py packages/roboemot-core/tests/test_vision_models.py packages/roboemot-core/tests/test_vision_objects.py packages/roboemot-core/tests/test_vision.py packages/roboemot-core/tests/runtime/test_live_video.py packages/roboemot-core/tests/test_webui_live_video.py packages/roboemot-core/tests/test_webui_live.py -rs
+      - run: pytest packages/roboemot-core/tests/test_catalogue_photos.py packages/roboemot-core/tests/test_vision_models.py packages/roboemot-core/tests/test_vision_objects.py packages/roboemot-core/tests/test_vision.py packages/roboemot-core/tests/test_vision_age.py packages/roboemot-core/tests/runtime/test_live_video.py packages/roboemot-core/tests/test_webui_live_video.py packages/roboemot-core/tests/test_webui_live.py -rs
 
   # SPEC 14, M3 exit: the tests that load the real Silero VAD, Vosk and Piper models (`-m models`,
   # deselected by default), including `test_m3_exit.py` with its latency budgets. The vision models
-  # are not fetched (0.8 GB); their `-m models` tests skip here. Runs on PRs too: about 1.5 min with a
-  # warm cache, under 2 min cold. The nightly run keeps the cache warm.
+  # are not fetched (about 0.14 GB); their `-m models` tests skip here. Runs on PRs too: about
+  # 1.5 min with a warm cache, under 2 min cold. The nightly run keeps the cache warm.
   models:
     runs-on: ubuntu-24.04
     timeout-minutes: 15

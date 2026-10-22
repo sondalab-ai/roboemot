@@ -1548,9 +1548,11 @@ class VisionConfig(Strict):
     attribute_score_min: float = param(
         0.5,
         "Age-model class score (an independent sigmoid) below which a crop's age group is "
-        "unknown, a possible minor; replaces the 0.8 rule for age",
+        "unknown, a possible minor; replaces the 0.8 rule for age. The estimator and the "
+        "worker take it at start",
         ge=0,
         le=1,
+        restart=True,
     )
     attribute_crops: int = param(
         1,

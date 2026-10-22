@@ -27,6 +27,8 @@ def output(scores: list[list[float]]) -> np.ndarray:
 
 
 def test_decode_takes_the_best_anchor_and_its_class():
+    pytest.importorskip("cv2")
+    pytest.importorskip("onnxruntime")
     from roboemot.vision.onnx import decode_age_classes
 
     out = output([[0.1, 0.2, 0.3], [0.05, 0.9, 0.4], [0.7, 0.1, 0.2]])
@@ -68,6 +70,10 @@ def test_schema_defaults_and_ranges():
         RoboEmotConfig(vision={"attribute_input_px": px})
     with pytest.raises(ValueError):
         RoboEmotConfig(vision={"attribute_precision": "int8"})
+    # Both are copied into the estimator and the worker at start, so a hot edit must say restart.
+    fields = type(VISION).model_fields
+    for name in ("attribute_input_px", "attribute_score_min"):
+        assert fields[name].json_schema_extra["restart"] is True
 
 
 # ------------------------------------------------------------- aggregation with the score floor
@@ -113,6 +119,23 @@ def test_worker_uses_the_age_floor_and_gender_stays_unknown():
     assert result.age.value == "adult" and result.age.source == "estimated"
     assert result.gender.value == "unknown" and result.gender.source == "none"
     assert run_worker(AttributeSample("unknown", 0.3, "unknown", 0.0)).age.possible_minor
+
+
+def test_pipeline_publishes_unknown_gender_and_a_declared_one_still_wins(tmp_path):
+    from test_vision import CONSENT, FACE_MODEL, axis, face, rig, run
+
+    est = Fixed(AttributeSample("adult", 0.9, "unknown", 0.0))
+    _, _, pipe, _, got = rig(tmp_path / "a", lambda i: [face(100)], estimator=est)
+    run(pipe, 20)
+    last = got["percept.face"][-1].payload
+    assert (last.age_group, last.gender, last.gender_source) == ("adult", "unknown", "none")
+    reg, _, pipe, _, got = rig(tmp_path / "b", lambda i: [face(100)], estimator=est)
+    faces = np.stack([axis(0)] * 5)
+    reg.enroll("Ada", faces, FACE_MODEL, consent=CONSENT, age_group="adult", gender="female")
+    run(pipe, 40)
+    last = got["percept.face"][-1].payload
+    assert (last.gender, last.gender_source) == ("female", "declared")
+    assert (last.age_group, last.age_source) == ("adult", "declared")
 
 
 # ------------------------------------------------------------- estimator on a synthetic ONNX
