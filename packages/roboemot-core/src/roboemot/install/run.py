@@ -40,7 +40,7 @@ def run_start(opts: Options, ui: Ui, root: Path) -> None:
     ui.step("Start")
     running = platform.running_app()
     restarting = opts.restart and running == platform.app_name
-    restart = getattr(platform, "restart", None)
+    restart = platform.restart
     missing = f"{platform.display_name} cannot restart {platform.app_name} from here"
     if restarting and restart is None and not opts.dry_run:
         raise WizardError(missing)

@@ -14,6 +14,7 @@ class NoRestartPlatform:
 
     display_name = "Bare robot"
     app_name = "bare"
+    restart = None
 
     def __init__(self) -> None:
         self.calls: list[str] = []

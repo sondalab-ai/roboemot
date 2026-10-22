@@ -92,8 +92,7 @@ UNINSTALL_STEPS = 6
 
 @runtime_checkable
 class Platform(Protocol):
-    """What the installer needs to know about one robot model. Optional, so not declared here:
-    ``restart(ui)`` restarts the running app and waits for it (``run --restart``)."""
+    """What the installer needs to know about one robot model."""
 
     manifest_id: str
     display_name: str
@@ -110,6 +109,9 @@ class Platform(Protocol):
     modules: tuple[str, ...]  # their top-level import names (leftover check)
     extras: tuple[str, ...]  # roboemot-core extras the robot needs (installed by default)
     clearable_caches: tuple[str, ...]  # ``~/...`` caches safe to delete; not restored on uninstall
+    # Restart the running app, asking first, and wait until it runs (``run --restart``); None: the
+    # platform cannot restart it.
+    restart: Callable[[Ui], None] | None
 
     def connect(self, ui: Ui, host: str) -> None: ...
     def plan_env(self, remote: Remote) -> str: ...
