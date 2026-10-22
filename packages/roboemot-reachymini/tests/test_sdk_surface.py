@@ -18,6 +18,7 @@ def test_ws_client_has_the_private_state_the_driver_reads():
 
     source = inspect.getsource(WSClient.__init__)
     assert "self._is_alive" in source and "self._last_status" in source
+    assert "self._last_head_pose" in source and "self._last_joint_positions" in source
     assert "wait" in inspect.signature(WSClient.get_status).parameters
 
 
