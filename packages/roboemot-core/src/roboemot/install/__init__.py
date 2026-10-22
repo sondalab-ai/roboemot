@@ -73,7 +73,16 @@ from .remote import Remote
 from .ui import Ui, WizardError, paint
 
 ENTRY_POINT_GROUP = "roboemot.installers"
-MIN_FREE_MB = 300  # wheels plus numpy/scipy/openai if the target environment lacks them
+# Disk at the install's peak, in MB as (downloads, unpacked), measured from the aarch64 cp312
+# wheels pip picks for each set (2026-10-22), unpacked sizes rounded up about 25% for the .pyc
+# files pip compiles. The app with its dependencies: scipy, numpy, openai, pydantic (52 MiB
+# downloaded, 184 MiB unpacked). Extras: voice is onnxruntime and vosk (24, 66); vision is
+# opencv-python-headless and onnx (43, 105) plus onnxruntime (20, 53), counted again so that
+# vision alone also fits.
+APP_DISK_MB = (60, 230)
+EXTRA_DISK_MB = {"voice": (30, 85), "vision": (70, 200)}
+ENV_DOWNLOAD_SHARE = 0.5  # downloads next to a created environment's tree (measured 0.3-0.4)
+ENV_FALLBACK_MB = 1500  # that tree when `du` on the creating environment answers nothing
 REMOTE_TMP_PREFIX = "/tmp/roboemot-install"
 TMP_DIR_PATTERN = re.compile(re.escape(REMOTE_TMP_PREFIX) + r"\.[A-Za-z0-9]+")
 PIN_FILE = "webui_pin.json"  # roboemot.webui.auth.PIN_FILE, inside the app data folder
@@ -104,7 +113,7 @@ class Platform(Protocol):
     env_dir: str  # that environment's folder (created and removed by the installer if missing)
     base_python: str | None  # interpreter that creates the environment; None: cannot create it
     record_path: str  # change record: outside that environment and outside /tmp
-    space_paths: tuple[str, ...]  # filesystems that need MIN_FREE_MB
+    space_paths: tuple[str, ...]  # filesystems the install fills (``install_need_mb``)
     distributions: tuple[str, ...]  # this app's own distributions
     modules: tuple[str, ...]  # their top-level import names (leftover check)
     extras: tuple[str, ...]  # roboemot-core extras the robot needs (installed by default)
@@ -271,16 +280,19 @@ def check_ssh(
     remote: Remote,
     need: tuple[int, int] | None,
     free_space: Callable[[], None] | None = None,
+    extras: tuple[str, ...] = (),
 ) -> RemotePython:
     """Log in once; check the target interpreter, architecture, Python and free space.
 
-    ``free_space`` runs after the login and before the free-space check, so what it frees counts.
+    ``free_space`` (stop the running app, clear caches) runs once the interpreter, architecture
+    and Python checks passed and before the free-space check, so a refused install has stopped
+    nothing and what it frees counts. The space needed comes from what will be installed
+    (``install_need_mb``: the app, ``extras`` and, when the environment is created or finished,
+    the tree of the creating one).
     """
     ui.info(f"connecting to {remote.target} (ssh may ask for the password)")
     remote.connect()
     ui.ok(f"ssh {remote.target}")
-    if free_space is not None:
-        free_space()
     py = RemotePython(remote, platform.python, ui)
     present = py.exists()
     if not present and need is None:
@@ -300,20 +312,46 @@ def check_ssh(
     ui.ok(f"{arch}, Python {version} at {target}")
     if not present:
         ui.info(f"{platform.env_dir} does not exist yet: it is created with {target}")
+    ready = present and platform.env_ready(py)
+    if free_space is not None:
+        free_space()
     if need:
+        downloads, unpacked = install_need_mb(platform, remote, extras, creating=not ready)
+        tmp = posixpath.dirname(REMOTE_TMP_PREFIX)
         for space in platform.space_paths:
             path = posixpath.dirname(space) if not present and space == platform.env_dir else space
+            want = downloads if space == tmp else downloads + unpacked
             free_kb = int(remote.run(f"df -Pk {shlex.quote(path)} | tail -1").split()[3])
-            if free_kb < MIN_FREE_MB * 1024:
-                raise WizardError(
-                    f"only {free_kb // 1024} MB free on {path}, need {MIN_FREE_MB} MB"
-                )
-            ui.ok(f"{free_kb // 1024} MB free on {path}")
-    if present and platform.env_ready(py):
+            if free_kb < want * 1024:
+                raise WizardError(f"only {free_kb // 1024} MB free on {path}, need {want} MB")
+            ui.ok(f"{free_kb // 1024} MB free on {path} (need {want} MB)")
+    if ready:
         platform.probe(ui, py)
     elif present:
         ui.warn(f"{platform.env_dir} is incomplete (an earlier install stopped while creating it?)")
     return py
+
+
+def install_need_mb(
+    platform: Platform, remote: Remote, extras: tuple[str, ...], creating: bool
+) -> tuple[int, int]:
+    """Disk the install needs at its peak, in MB, as (downloads, unpacked): the app and its
+    dependencies (``APP_DISK_MB``), each extra (``EXTRA_DISK_MB``) and, when the environment is
+    created or finished, the size of the creating interpreter's own environment (``du``) as a
+    stand-in for the tree the platform installs into it, plus ``ENV_DOWNLOAD_SHARE`` of it for
+    the downloads. Every pip call runs with ``--no-cache-dir``, so the wheels sit in a temporary
+    folder until pip is done: downloads and unpacked files both count where pip unpacks."""
+    downloads, unpacked = APP_DISK_MB
+    for extra in sorted(set(extras)):
+        d, u = EXTRA_DISK_MB.get(extra, (0, 0))
+        downloads, unpacked = downloads + d, unpacked + u
+    if creating and platform.base_python is not None:
+        base_env = posixpath.dirname(posixpath.dirname(platform.base_python))
+        out = remote.run(f"du -sk {shlex.quote(base_env)} 2>/dev/null | cut -f1 || true").strip()
+        tree = int(out) // 1024 if out.isdigit() else ENV_FALLBACK_MB
+        downloads += int(tree * ENV_DOWNLOAD_SHARE)
+        unpacked += tree
+    return downloads, unpacked
 
 
 def current_python(platform: Platform, remote: Remote) -> str:
@@ -1080,14 +1118,14 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
                     ui, remote, home, platform.clearable_caches, opts.clear_caches, opts.dry_run
                 )
 
-            py = check_ssh(ui, platform, remote, min_python(dirs), free_space)
+            extras = (*platform.extras, *(("vision",) if opts.vision else ()))
+            py = check_ssh(ui, platform, remote, min_python(dirs), free_space, extras)
 
             ui.step("Build")
             wheels = build_wheels(dirs, Path(tmp) / "wheels")
             ui.ok(f"built {', '.join(w.name for w in wheels)}")
 
             ui.step("Install (dependency check only)" if opts.dry_run else "Install")
-            extras = (*platform.extras, *(("vision",) if opts.vision else ()))
             if opts.vision and opts.dry_run:
                 ui.info("would install the vision extra (OpenCV, ONNX); --no-vision skips it")
             record = install_packages(ui, platform, py, remote, dirs, wheels, opts.dry_run, extras)

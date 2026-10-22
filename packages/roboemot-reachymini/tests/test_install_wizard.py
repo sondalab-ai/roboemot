@@ -73,10 +73,12 @@ class FakeRobot:
         self.record_at_venv: str | None = None  # the record file when the venv was created
         self.daemon_version = "1.11.0"
         self.sizes: dict[str, str] = {}  # `du -sh` answers
+        self.daemon_venv_kb = 900_000  # `du -sk` of /venvs/mini_daemon
         self.fetches: list[str] = []  # `roboemot models fetch` argument lists
         self.fetch_fails = False
         self.free_kb = 20_000_000
         self.free_kb_by_cache = self.free_kb  # free space while the uv cache is still there
+        self.home_free_kb: int | None = None  # `df` below HOME (the models), else free_kb
         self.df_unreadable: set[str] = set()  # paths whose `df` answers nothing
 
     def _exists(self, path: str) -> bool:
@@ -167,6 +169,8 @@ class FakeRobot:
             return HOME
         if command == 'printf %s "${ROBOEMOT_DATA_DIR:-}"':
             return self.env_data_dir
+        if command.startswith("du -sk "):
+            return str(self.daemon_venv_kb)
         if command.startswith("du -sh "):
             return self.sizes.get(shlex.split(command)[2], "4.0K")
         if command.startswith("realpath "):
@@ -212,6 +216,8 @@ class FakeRobot:
             if path in self.df_unreadable:
                 return ""
             kb = self.free_kb_by_cache if UV_CACHE in self.dirs else self.free_kb
+            if path.startswith(HOME) and self.home_free_kb is not None:
+                kb = self.home_free_kb
             return f"/dev/root 30000000 1000000 {kb} 5% /"
         if command.startswith("cat "):
             return self.files.get(shlex.split(command)[1], "")
@@ -578,7 +584,7 @@ def test_the_dry_run_with_no_vision_does_not_mention_vision(offline, robot, daem
 
 
 def test_not_enough_space_for_the_vision_weights_suggests_no_vision(offline, robot, daemon, capsys):
-    robot.free_kb = needed_mib() * 1024
+    robot.home_free_kb = needed_mib() * 1024
     install(vision=True)
     out = capsys.readouterr().out
     assert robot.fetches == [] and "--no-vision" in out
@@ -783,11 +789,57 @@ def test_the_models_question_defaults_to_yes(offline, robot, daemon, monkeypatch
 def test_not_enough_space_warns_and_skips_the_models_without_failing(
     offline, robot, daemon, capsys
 ):
-    robot.free_kb = (inst.MIN_FREE_MB + 1) * 1024
+    robot.home_free_kb = (needed_mib() - 100) * 1024
     install()
     out = capsys.readouterr().out
     assert robot.fetches == [] and "skipped" in out and "MB free" in out
     assert reachy.APPS_VENV and "roboemot-core" in robot.env
+
+
+def app_need_mb(extras: tuple[str, ...] = ("voice",)) -> int:
+    """MB the app install needs on the apps venv's filesystem (downloads and unpacked), with the
+    venv already there."""
+    return sum(inst.install_need_mb(ReachyMiniWireless(), None, extras, creating=False))
+
+
+def test_the_space_check_counts_the_extras(offline, robot, capsys):
+    """R4 S3: the free-space floor comes from what is installed: vision adds its share."""
+    robot.free_kb = (app_need_mb() + 1) * 1024
+    with pytest.raises(WizardError, match=f"need {app_need_mb(('voice', 'vision'))} MB"):
+        install(vision=True)
+    assert "roboemot-core" not in robot.env
+
+
+def test_a_new_apps_venv_counts_the_daemon_venv_tree(offline, robot, capsys):
+    """R4 S3: creating the apps venv installs reachy-mini's tree; the daemon venv's size
+    (`du`) stands in for it, plus its downloads."""
+    fresh_robot(robot)
+    robot.daemon_venv_kb = 1_000 * 1024
+    tree = 1_000 + int(1_000 * inst.ENV_DOWNLOAD_SHARE)
+    robot.free_kb = (app_need_mb() + tree - 1) * 1024
+    with pytest.raises(WizardError, match=f"need {app_need_mb() + tree} MB"):
+        install()
+    assert robot.files == {} and not robot.apps_venv
+
+
+def test_a_too_old_python_is_refused_before_the_running_app_is_stopped(offline, robot, daemon):
+    """R4 S5: the interpreter, architecture and Python checks come before the auto-stop."""
+    daemon.current = {"info": {"name": "roboemot"}, "state": "running"}
+    robot.machine = "aarch64\n3.9"
+    with pytest.raises(WizardError, match="target Python is 3.9"):
+        install()
+    assert STOP not in mutation_paths(daemon) and daemon.current["state"] == "running"
+
+
+def test_the_auto_stop_and_the_cache_step_come_before_the_space_check(offline, robot, daemon):
+    daemon.current = {"info": {"name": "roboemot"}, "state": "running"}
+    robot.dirs.add(UV_CACHE)
+    install()
+    cmds = robot.commands
+    probe = next(i for i, c in enumerate(cmds) if "platform.machine" in c)
+    clear = cmds.index(f"rm -rf {UV_CACHE}")
+    space = next(i for i, c in enumerate(cmds) if c.startswith("df -Pk /tmp"))
+    assert probe < clear < space and STOP in mutation_paths(daemon)
 
 
 def needed_mib(vision: bool = False) -> int:
@@ -795,13 +847,13 @@ def needed_mib(vision: bool = False) -> int:
 
 
 def test_the_models_fit_exactly_when_free_mib_equals_the_need(offline, robot, daemon):
-    robot.free_kb = needed_mib() * 1024
+    robot.home_free_kb = needed_mib() * 1024
     install()
     assert robot.fetches == ["models fetch --voice"]
 
 
 def test_one_mib_short_skips_the_models(offline, robot, daemon):
-    robot.free_kb = (needed_mib() - 1) * 1024
+    robot.home_free_kb = (needed_mib() - 1) * 1024
     install()
     assert robot.fetches == []
 
@@ -906,14 +958,14 @@ def test_the_flag_clears_the_cache_without_yes(offline, robot):
 
 def test_clearing_the_cache_can_make_a_full_robot_pass_the_space_check(offline, robot):
     robot.dirs.add(UV_CACHE)
-    robot.free_kb_by_cache = (inst.MIN_FREE_MB - 100) * 1024
+    robot.free_kb_by_cache = (app_need_mb() - 100) * 1024
     install()
     assert UV_CACHE not in robot.dirs and "roboemot-core" in robot.env
 
 
 def test_a_declined_clear_leaves_the_free_space_error(offline, robot):
     robot.dirs.add(UV_CACHE)
-    robot.free_kb_by_cache = (inst.MIN_FREE_MB - 100) * 1024
+    robot.free_kb_by_cache = (app_need_mb() - 100) * 1024
     with pytest.raises(WizardError, match="MB free"):
         install(clear_caches=False)
     assert UV_CACHE in robot.dirs and "roboemot-core" not in robot.env
