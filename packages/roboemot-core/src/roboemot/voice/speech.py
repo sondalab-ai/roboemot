@@ -11,12 +11,21 @@ way fall on the floor, so nothing plays after ``stop`` returns.
 
 The bus gets ``speech.say`` with ids, lengths, language and mood, never the text (SPEC 12).
 
-For the debug report (SPEC 12A) the output measures, for any backend, the real-time factor of each
-chunk (time waited for it since the previous push, or since the request, over its audio duration)
-and counts underruns: a push of a sentence that already pushed audio, arriving after the sink's
-``playing_until`` (the speaker ran dry in the middle of a sentence), with the gap in ms. Only here
-is it known that a sentence has more audio to come; the gap before a sentence's first audio (and
-its pause) is not counted. Numbers only.
+For the debug report (SPEC 12A) the output measures, for any backend:
+
+- the real-time factor of each chunk (time waited for it since the previous push, or since the
+  request, over its audio duration) and of each finished sentence (all its waits over all its
+  audio; a backend that synthesizes a sentence whole, like Piper, puts all of it on the first
+  chunk, so the per-sentence value is the one that says whether synthesis keeps up);
+- underruns: a push of a sentence that already pushed audio, arriving after the sink's
+  ``playing_until`` (the speaker ran dry in the middle of a sentence), with the gap in ms. Only
+  here is it known that a sentence has more audio to come;
+- late sentences: the next sentence of one answer arriving after the previous one ended by more
+  than its planned pause (the silence beyond the pause, in ms), and ``boundary_dry``, how often the
+  sink ran dry at all between two sentences of one answer;
+- ``push_ms``: the time spent in the sink's push (the speaker resamples there).
+
+A sink with no finite ``playing_until`` (its output never opened) counts no gaps. Numbers only.
 """
 
 from __future__ import annotations
@@ -26,6 +35,7 @@ import collections
 import contextlib
 import itertools
 import logging
+import math
 import threading
 import time
 from collections.abc import Callable
@@ -126,7 +136,13 @@ class SpeechOutput:
         self._unplayed: set[int] = set()
         self._ended: collections.OrderedDict[int, float] = collections.OrderedDict()
         self._question_end: float | None = None  # end of the last spoken sentence, if a question
-        self._rtf: collections.deque[float] = collections.deque(maxlen=config.voice.report_window)
+        window = config.voice.report_window
+        self._rtf: collections.deque[float] = collections.deque(maxlen=window)
+        self._rtf_sentence: collections.deque[float] = collections.deque(maxlen=window)
+        self._push_ms: collections.deque[float] = collections.deque(maxlen=window)
+        self._late_sentences = 0
+        self._late_ms = 0.0
+        self._boundary_dry = 0
         self._underruns = 0
         self._underrun_ms = 0.0
         self._underrun_sentences = 0
@@ -312,11 +328,18 @@ class SpeechOutput:
         """Counts and timings for the debug report; never text."""
         with self._lock:
             lat, queued = list(self._latencies), len(self._jobs)
-            rtf = list(self._rtf)
-            underruns = {
+            rtf, rtf_sentence, push_ms = (
+                list(self._rtf),
+                list(self._rtf_sentence),
+                list(self._push_ms),
+            )
+            gaps = {
                 "underruns": self._underruns,
                 "underrun_ms_total": self._underrun_ms,
                 "underrun_sentences": self._underrun_sentences,
+                "late_sentences": self._late_sentences,
+                "late_ms_total": self._late_ms,
+                "boundary_dry": self._boundary_dry,
             }
         return {
             "queued": queued,
@@ -327,7 +350,9 @@ class SpeechOutput:
             "first_audio_ms_max": max(lat) if lat else None,
             "backend": self.backend.name,
             "tts_rtf": summarise(rtf, RTF_LEVELS),
-            **underruns,
+            "tts_rtf_sentence": summarise(rtf_sentence, RTF_LEVELS),
+            "push_ms": summarise(push_ms, RTF_LEVELS),
+            **gaps,
         }
 
     # ----------------------------------------------------------------- loop thread
@@ -372,9 +397,10 @@ class SpeechOutput:
                 return False
             now, until = self.clock(), self.sink.playing_until()
             start = max(now, until)
-            if speech and job.id in self._audible and now > until:
+            if speech and job.id in self._audible and math.isfinite(until) and now > until:
                 self._count_underrun(job, now - until)
             self.sink.push_audio_sample(samples, rate_hz)
+            self._push_ms.append((self.clock() - now) * MS_PER_S)
             if speech and job.id not in self._audible:
                 self._audible[job.id] = start
                 while len(self._audible) > PLAYED_WINDOW:
@@ -394,12 +420,21 @@ class SpeechOutput:
             self._underrun_job = job.id
             self._underrun_sentences += 1
 
-    def _note_rtf(self, chunk: AudioChunk, waited_s: float) -> None:
-        """Real-time factor of one chunk: the time waited for it over its audio duration."""
+    def _note_rtf(self, chunk: AudioChunk, waited_s: float) -> float:
+        """Real-time factor of one chunk: the time waited for it over its audio duration.
+        Returns that duration in seconds (0 for an empty or rateless chunk, not recorded)."""
         if chunk.rate_hz <= 0 or chunk.samples.size == 0:
-            return
+            return 0.0
+        audio_s = chunk.samples.size / chunk.rate_hz
         with self._lock:
-            self._rtf.append(waited_s * chunk.rate_hz / chunk.samples.size)
+            self._rtf.append(waited_s / audio_s)
+        return audio_s
+
+    def _note_sentence_rtf(self, waited_s: float, audio_s: float) -> None:
+        """Real-time factor of a finished sentence: all its waits over all its audio."""
+        if audio_s > 0:
+            with self._lock:
+                self._rtf_sentence.append(waited_s / audio_s)
 
     async def _speak(self, job: _Job) -> None:
         cfg, first = self.config, True
@@ -407,6 +442,7 @@ class SpeechOutput:
             if self._stale(job):
                 return
             asked = self.clock()
+            waited_s = audio_s = 0.0
             async for chunk in self.backend.synthesize(
                 job.text,
                 job.delivery,
@@ -414,7 +450,9 @@ class SpeechOutput:
                 voice=cfg.voice,
                 minor_present=self._minor(),
             ):
-                self._note_rtf(chunk, self.clock() - asked)
+                waited = self.clock() - asked
+                waited_s += waited
+                audio_s += self._note_rtf(chunk, waited)
                 if self._stale(job):
                     return
                 if first:
@@ -433,6 +471,7 @@ class SpeechOutput:
                 if not self._push(job, chunk.samples, chunk.rate_hz, speech=True):
                     return
                 asked = self.clock()
+            self._note_sentence_rtf(waited_s, audio_s)
             self.sentences_spoken += 1
         except asyncio.CancelledError:
             raise
@@ -451,13 +490,25 @@ class SpeechOutput:
         now = self.clock()
         return max(now, self.sink.playing_until())
 
+    def _note_boundary(self, idle_s: float, pause_s: float) -> None:
+        """Count a dry sink between two sentences of one answer, and a late sentence when the
+        silence already there is longer than the planned pause."""
+        with self._lock:
+            self._boundary_dry += idle_s > 0
+            if idle_s > pause_s:
+                self._late_sentences += 1
+                self._late_ms += (idle_s - pause_s) * MS_PER_S
+
     def _pad(self, job: _Job, rate_hz: int) -> bool:
         """Silence between two sentences of one answer, less the idle gap already there.
         False if a stop made the sentence stale."""
         if job.utterance != self._last_utterance:
             return job.epoch == self._epoch
         pause_s = self.config.voice.sentence_pause_ms / MS_PER_S * job.delivery.pause_scale
-        pause_s -= max(0.0, self.clock() - self.sink.playing_until())
+        until = self.sink.playing_until()
+        idle_s = max(0.0, self.clock() - until) if math.isfinite(until) else 0.0
+        self._note_boundary(idle_s, pause_s)
+        pause_s -= idle_s
         if pause_s > 0:
             return self._push(job, np.zeros(round(pause_s * rate_hz), np.float32), rate_hz)
         return job.epoch == self._epoch
