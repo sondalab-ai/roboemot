@@ -14,6 +14,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
+from roboemot import paths
 from roboemot.motion import MotionLoop
 from roboemot.runtime import RuntimeHost, assembly, ticks
 from roboemot.runtime.reload import apply_attention_config
@@ -52,6 +53,7 @@ def test_run_fills_a_json_ready_diagnostics_registry(tmp_path, monkeypatch):
     shutil.copytree(app_module.DATA, data)
     shutil.copy2(ROOT / "configs/dev-unmeasured.yaml", data / "app.yaml")
     monkeypatch.setattr(app_module, "DATA", data)
+    monkeypatch.setattr(app_module, "app_config_path", lambda: data / "app.yaml")
     stop = threading.Event()
     stop.set()
     app = app_module.RoboEmotApp.__new__(app_module.RoboEmotApp)  # skip the SDK's daemon probe
@@ -230,6 +232,7 @@ def test_a_failing_source_start_does_not_leak_the_loop_or_network(tmp_path, monk
     shutil.copytree(app_module.DATA, data)
     shutil.copy2(ROOT / "configs/dev-unmeasured.yaml", data / "app.yaml")
     monkeypatch.setattr(app_module, "DATA", data)
+    monkeypatch.setattr(app_module, "app_config_path", lambda: data / "app.yaml")
     monkeypatch.setattr(assembly, "load_world_plugin", lambda *a, **k: WorldPlugin(None, [Boom()]))
     threads = []
     real_start = MotionLoop.start
@@ -244,3 +247,9 @@ def test_a_failing_source_start_does_not_leak_the_loop_or_network(tmp_path, monk
         app.run(fake_mini(), threading.Event())
     assert Boom.stopped
     assert not threads[0]._thread.is_alive()
+
+
+def test_the_app_reads_its_config_from_the_data_folder_not_the_package():
+    """R4 S4: a reinstall replaces the package; the app config outside it survives."""
+    assert app_module.app_config_path() == paths.data_path() / "app.yaml"
+    assert app_module.DATA not in app_module.app_config_path().parents

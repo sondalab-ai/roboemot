@@ -34,6 +34,7 @@ OWN = {"roboemot-core": "0.1.0.dev0", "roboemot-reachymini": "0.1.0.dev0"}
 HOME = "/home/pollen"
 DATA = f"{HOME}/.local/share/roboemot"
 PIN_PATH = f"{DATA}/webui_pin.json"
+APP_YAML = f"{DATA}/app.yaml"
 PIPER_VENV = f"{DATA}/piper-venv"
 PIPER_PYTHON = f"{PIPER_VENV}/bin/python"
 PIN = "246810"
@@ -54,7 +55,6 @@ class FakeRobot:
         self.files: dict[str, str] = {}
         self.tmp_dirs: set[str] = set()
         self.stray: dict[str, list[str]] = {}  # module -> leftover paths
-        self.app_yaml: str | None = None  # data/app.yaml as staged (set by the offline fixture)
         self.commands: list[str] = []
         self.streamed: list[str] = []
         self.copies: list[list[Path]] = []
@@ -84,7 +84,14 @@ class FakeRobot:
         self.df_unreadable: set[str] = set()  # paths whose `df` answers nothing
 
     def _exists(self, path: str) -> bool:
-        return path in self.dirs or (path == reachy.APPS_VENV and self.apps_venv)
+        return (
+            path in self.dirs or path in self.files or (path == reachy.APPS_VENV and self.apps_venv)
+        )
+
+    @property
+    def app_yaml(self) -> str | None:
+        """The app config in the data folder, as written."""
+        return self.files.get(APP_YAML)
 
     # Remote interface
     target = "pollen@robot"
@@ -209,8 +216,7 @@ class FakeRobot:
         if "e.name !=" in plain:
             return "\n".join(self.apps_in_env)
         if "reachy_mini_apps" in plain:
-            cfg = yaml.safe_load(self.app_yaml) if self.app_yaml is not None else None
-            return f"roboemot_reachymini.main\n{json.dumps(cfg)}"
+            return "roboemot_reachymini.main"
         if "distributions()" in plain:
             return json.dumps({n: self.requires.get(n, []) for n in self.env})
         if "find_spec" in plain:
@@ -230,6 +236,11 @@ class FakeRobot:
             return f"/dev/root 30000000 1000000 {kb} 5% /"
         if command.startswith("cat "):
             return self.files.get(shlex.split(command)[1], "")
+        if command.startswith("umask 077 && mkdir -p ") and "&& mv" in command:
+            t = shlex.split(command)
+            assert t[4] == "-p" and t[-1] == APP_YAML, command
+            self.files[t[-1]] = t[t.index("printf") + 2]
+            return ""
         if command.startswith("printf %s") and "&& mv" in command:
             t = shlex.split(command)
             self.files[t[8]] = t[2]
@@ -248,6 +259,7 @@ class FakeRobot:
             if path == reachy.APPS_VENV:
                 self.apps_venv, self.env = False, {}
             self.dirs = {d for d in self.dirs if d != path and not d.startswith(path + "/")}
+            self.files = {f: v for f, v in self.files.items() if not f.startswith(path + "/")}
             self.tmp_dirs.discard(path)
             self.stray = {m: [p for p in ps if p != path] for m, ps in self.stray.items()}
             self.stray = {m: ps for m, ps in self.stray.items() if ps}
@@ -411,8 +423,7 @@ def offline(monkeypatch, robot, daemon):
     monkeypatch.setattr(inst, "Remote", lambda user, host, control_dir: robot)
 
     def build(dirs, out):
-        staged = dirs[0].parent / reachy.PKG_DATA / "app.yaml"
-        robot.app_yaml = staged.read_text() if staged.exists() else None
+        assert not (dirs[0].parent / reachy.PKG_DATA / "app.yaml").exists()  # not package data
         return [out / f"{d.name.replace('-', '_')}-0.1.whl" for d in dirs]
 
     monkeypatch.setattr(inst, "build_wheels", build)
@@ -609,10 +620,9 @@ def test_vision_flag_adds_the_vision_extra_and_the_vision_weights(offline, robot
 # ---------------------------------------------------------------- voice on by default (SPEC 4A)
 
 
-def staged_config(tmp_path, dev, voice):
-    reachy.stage_packages(ROOT, tmp_path, dev, inst.app_config_overrides(voice))
-    path = tmp_path / reachy.PKG_DATA / "app.yaml"
-    return yaml.safe_load(path.read_text()) if path.exists() else None
+def merged_config(dev, voice, existing=None):
+    wanted, owned = inst.owned_app_config(ROOT, dev, voice)
+    return inst.merge_app_config(existing or {}, wanted, owned)
 
 
 def test_voice_is_on_by_default_and_no_voice_turns_it_off():
@@ -621,36 +631,88 @@ def test_voice_is_on_by_default_and_no_voice_turns_it_off():
     assert inst.parse_args(["--yes", "--voice"]).voice is True
 
 
-def test_the_staged_app_config_carries_voice_and_the_dev_content(tmp_path):
-    cfg = staged_config(tmp_path, dev=True, voice=True)
+def test_the_app_config_carries_voice_and_the_dev_content():
+    cfg = merged_config(dev=True, voice=True)
     assert cfg["voice"] == {"enabled": True}
     assert cfg["safety"] == {"allow_unmeasured_dynamics": True}
 
 
-def test_without_dev_the_staged_app_config_is_voice_only(tmp_path):
-    cfg = staged_config(tmp_path, dev=False, voice=True)
-    assert cfg == {"schema_version": 1, "voice": {"enabled": True}}
+def test_without_dev_the_app_config_is_voice_only():
+    assert merged_config(dev=False, voice=True) == {"schema_version": 1, "voice": {"enabled": True}}
 
 
-def test_no_voice_with_dev_keeps_the_dev_content_only(tmp_path):
-    cfg = staged_config(tmp_path, dev=True, voice=False)
+def test_no_voice_with_dev_keeps_the_dev_content_only():
+    cfg = merged_config(dev=True, voice=False)
     assert "voice" not in cfg and cfg["safety"] == {"allow_unmeasured_dynamics": True}
 
 
-def test_no_voice_without_dev_writes_no_app_config(tmp_path):
-    assert staged_config(tmp_path, dev=False, voice=False) is None
+def test_no_voice_without_dev_has_no_app_config():
+    assert merged_config(dev=False, voice=False) == {}
 
 
-def test_the_staged_app_config_is_generated_with_a_header_and_a_note_per_part(tmp_path):
-    reachy.stage_packages(ROOT, tmp_path, True, inst.app_config_overrides(True))
-    text = (tmp_path / reachy.PKG_DATA / "app.yaml").read_text()
-    assert text.startswith("# Written by the RoboEmot installer")
-    assert "# voice: " in text and "# dev: " in text
+OWNER_CONFIG = {
+    "schema_version": 1,
+    "webui": {"port": 8080},
+    "voice": {"enabled": True, "language": "en"},
+    "safety": {"allow_unmeasured_dynamics": True, "max_speed_scale": 0.5},
+}
 
 
-def test_app_config_parts_that_share_a_top_level_key_are_refused():
-    with pytest.raises(ValueError, match="share a top-level key"):
-        reachy.app_yaml_text({"voice": {"x": 1}}, {"voice": {"enabled": True}})
+def test_the_merge_keeps_every_key_the_installer_does_not_own():
+    """R4 S4: owner edits survive; only voice.enabled and the dev flag follow the flags."""
+    cfg = merged_config(dev=False, voice=False, existing=OWNER_CONFIG)
+    assert cfg == {
+        "schema_version": 1,
+        "webui": {"port": 8080},
+        "voice": {"language": "en"},
+        "safety": {"max_speed_scale": 0.5},
+    }
+    assert OWNER_CONFIG["voice"]["enabled"] is True  # the input is not changed
+
+
+def test_the_written_app_config_has_a_header_naming_what_the_installer_owns():
+    text = inst.app_config_text(merged_config(dev=True, voice=True))
+    assert text.startswith("# RoboEmot app config") and "voice.enabled" in text.splitlines()[0]
+    assert yaml.safe_load(text)["voice"] == {"enabled": True}
+
+
+def test_a_reinstall_keeps_the_owners_edits_in_the_data_folder(offline, robot, daemon):
+    """R4 S4: the app config lives in the data folder and a reinstall changes only the keys
+    the installer owns."""
+    install()
+    cfg = yaml.safe_load(robot.app_yaml)
+    cfg["webui"] = {"port": 8080}
+    robot.files[APP_YAML] = yaml.safe_dump(cfg)
+    install(dev=False)
+    cfg = yaml.safe_load(robot.app_yaml)
+    assert cfg["webui"] == {"port": 8080} and cfg["voice"] == {"enabled": True}
+    assert "safety" not in cfg
+
+
+def test_an_app_config_created_in_a_foreign_data_folder_is_recorded_and_removed(
+    offline, robot, daemon
+):
+    robot.dirs |= {f"{HOME}/.local", f"{HOME}/.local/share", DATA}  # predates the install
+    install()
+    record = json.loads(robot.files[RECORD])
+    assert record["data_dir"] is None and record["app_config"] == APP_YAML
+    uninstall()
+    assert APP_YAML not in robot.files and DATA in robot.dirs
+
+
+def test_an_app_config_the_owner_had_is_edited_but_not_recorded(offline, robot, daemon, capsys):
+    robot.dirs |= {f"{HOME}/.local", f"{HOME}/.local/share", DATA}
+    robot.files[APP_YAML] = yaml.safe_dump({"schema_version": 1, "webui": {"port": 8080}})
+    install()
+    assert json.loads(robot.files[RECORD])["app_config"] is None
+    uninstall()
+    assert yaml.safe_load(robot.app_yaml)["webui"] == {"port": 8080}
+
+
+def test_an_app_config_that_is_not_yaml_stops_the_install(offline, robot, daemon):
+    robot.files[APP_YAML] = "voice: [unclosed\n"
+    with pytest.raises(WizardError, match="not valid YAML"):
+        install()
 
 
 def test_the_default_install_enables_voice_in_the_app_config(offline, robot, daemon):
@@ -724,7 +786,7 @@ def test_the_dry_run_prints_what_the_app_config_will_contain_and_writes_nothing(
     assert (dict(robot.files), set(robot.dirs)) == before
 
 
-def test_the_dry_run_with_no_voice_and_no_dev_says_there_is_no_app_config(
+def test_the_dry_run_with_no_voice_and_no_dev_says_there_are_no_installer_keys(
     offline, robot, daemon, capsys
 ):
     inst.run_install(
@@ -733,28 +795,24 @@ def test_the_dry_run_with_no_voice_and_no_dev_says_there_is_no_app_config(
         ROOT,
     )
     out = capsys.readouterr().out
-    assert "no app config file" in out and "voice.enabled" not in out
+    assert "no installer keys" in out and "voice.enabled" not in out
+    assert APP_YAML not in robot.files
 
 
-def test_verification_fails_when_the_installed_app_config_lacks_voice(offline, robot, monkeypatch):
-    real = reachy.app_yaml_text
-    monkeypatch.setattr(
-        reachy, "app_yaml_text", lambda dev_content, app_config: real(dev_content, {})
-    )
-    with pytest.raises(WizardError, match="expected voice="):
-        install()
+def test_verification_fails_when_the_app_config_lacks_voice(offline, robot, monkeypatch):
+    monkeypatch.setattr(inst, "app_config_text", lambda config: "schema_version: 1\n")
+    with pytest.raises(WizardError, match="has voice.enabled=None, expected voice.enabled=True"):
+        install(dev=False)
 
 
 def test_verification_fails_when_a_no_voice_install_finds_voice_in_the_app_config(
     offline, robot, monkeypatch
 ):
-    real = reachy.app_yaml_text
+    real = inst.app_config_text
     monkeypatch.setattr(
-        reachy,
-        "app_yaml_text",
-        lambda dev_content, app_config: real(dev_content, {"voice": {"enabled": True}}),
+        inst, "app_config_text", lambda config: real({**config, "voice": {"enabled": True}})
     )
-    with pytest.raises(WizardError, match="expected no voice"):
+    with pytest.raises(WizardError, match="expected voice.enabled=None"):
         install(voice=False)
 
 
@@ -769,7 +827,7 @@ def test_uninstall_after_a_default_install_restores_the_robot_and_records_no_app
 ):
     before = snapshot(robot, daemon)
     install()
-    assert "app.yaml" not in robot.files[RECORD]
+    assert json.loads(robot.files[RECORD])["app_config"] is None  # goes with the data folder
     uninstall()
     assert snapshot(robot, daemon) == before
 
@@ -1096,14 +1154,13 @@ def test_start_reports_app_error(daemon):
         platform_for(daemon).start(quiet_ui())
 
 
-@pytest.mark.parametrize("dev", [True, False])
-def test_stage_packages_leaves_checkout_untouched(tmp_path, dev):
+def test_stage_packages_leaves_checkout_untouched(tmp_path):
     repo_app_yaml = ROOT / "packages" / reachy.PKG_DATA / "app.yaml"
     existed = repo_app_yaml.exists()
-    dirs = reachy.stage_packages(ROOT, tmp_path, dev, {})
+    dirs = reachy.stage_packages(ROOT, tmp_path)
     data = tmp_path / reachy.PKG_DATA
     assert [d.name for d in dirs] == ["roboemot-core", "roboemot-reachymini"]
-    assert (data / "app.yaml").exists() is dev
+    assert not (data / "app.yaml").exists()  # the app config is not package data
     assert (data / "reachy-mini-wireless.yaml").exists()
     assert {p.name for p in (data / "presets").glob("*.yaml")} >= {"default.yaml"}
     assert repo_app_yaml.exists() is existed
@@ -1178,8 +1235,8 @@ def test_install_upgrades_shared_packages_only_when_allowed(offline, robot, daem
 
 
 def test_install_fails_when_dev_config_mismatches(offline, robot, monkeypatch):
-    monkeypatch.setattr(reachy, "app_yaml_text", lambda dev_content, app_config: "voice: {}\n")
-    with pytest.raises(WizardError, match="expected dev=True"):
+    monkeypatch.setattr(inst, "app_config_text", lambda config: "voice: {enabled: true}\n")
+    with pytest.raises(WizardError, match="expected safety.allow_unmeasured_dynamics=True"):
         install()
 
 
@@ -1190,14 +1247,14 @@ def test_install_fails_when_daemon_does_not_list_app(offline, daemon):
 
 
 def test_main_returns_1_and_prints_reason(offline, robot, capsys, monkeypatch):
-    monkeypatch.setattr(reachy, "app_yaml_text", lambda dev_content, app_config: "voice: {}\n")
+    monkeypatch.setattr(inst, "app_config_text", lambda config: "voice: {enabled: true}\n")
     rc = inst.main(
         ["--host", "127.0.0.1", "--user", "pollen", "--robot", "reachy-mini-wireless", "--dev",
          "--no-start", "--no-startup-app"],
         root=ROOT,
     )  # fmt: skip
     assert rc == 1
-    assert "expected dev=True" in capsys.readouterr().out
+    assert "expected safety.allow_unmeasured_dynamics=True" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------- uninstall
@@ -1539,13 +1596,11 @@ def test_install_warns_when_the_data_folder_may_land_elsewhere(offline, robot, d
     assert "ROBOEMOT_DATA_DIR=/data/elsewhere" in capsys.readouterr().out
 
 
-def test_install_warns_about_a_data_dir_in_the_staged_config(tmp_path, capsys):
-    (tmp_path / "app.yaml").write_text("schema_version: 1\ndata_dir: /mnt/big\n")
-    (tmp_path / "other.yaml").write_text("data_dir: /ignored\n")
-    robot = FakeRobot()
-    inst.warn_data_dir_overrides(quiet_ui(), robot, [tmp_path])
-    out = capsys.readouterr().out
-    assert "data_dir=/mnt/big" in out and "/ignored" not in out
+def test_install_warns_about_a_data_dir_in_the_app_config(offline, robot, daemon, capsys):
+    robot.dirs |= {f"{HOME}/.local", f"{HOME}/.local/share", DATA}
+    robot.files[APP_YAML] = "schema_version: 1\ndata_dir: /mnt/big\n"
+    install()
+    assert "data_dir=/mnt/big" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------- robot selection

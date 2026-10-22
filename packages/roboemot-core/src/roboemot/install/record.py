@@ -10,7 +10,8 @@ cache) is recorded the same way, with the parents the installer had to create, b
 did not exist before the install: a folder that was already there is not the installer's to
 remove. The Piper virtualenv (SPEC 8, TTS backends) is recorded on its own, so it is removed
 even when the data folder predates the install; so are the model folders (voice, vision) the
-installer created inside a data folder that was not its own. Secrets (SPEC 8, 12 Data) are
+installer created inside a data folder that was not its own, and the app config (``app.yaml``)
+it created there. Secrets (SPEC 8, 12 Data) are
 recorded by name, never by value, and only the ones that were not in the store before;
 uninstall removes those names and leaves the others. When the robot has no app environment
 yet, the installer creates it the way the robot's own software would and records its path
@@ -32,7 +33,7 @@ from typing import Any
 
 from .ui import WizardError
 
-RECORD_VERSION = 2  # 2: models_dirs, env_created, env_baseline
+RECORD_VERSION = 2  # 2: models_dirs, env_created, env_baseline, app_config
 
 Versions = dict[str, str]  # canonical distribution name -> version
 
@@ -71,6 +72,8 @@ class InstallRecord:
     models_dirs: list[str] = field(default_factory=list)
     env_created: str | None = None  # app environment this installer created (absolute path)
     env_baseline: list[str] = field(default_factory=list)  # distributions it held once created
+    # app config (app.yaml) it created inside a data folder that was not its own
+    app_config: str | None = None
     version: int = RECORD_VERSION
 
     def to_json(self) -> dict[str, Any]:

@@ -41,6 +41,7 @@ cleanup still runs. Running it twice is harmless. Both flows have a read-only ``
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import posixpath
@@ -115,6 +116,13 @@ PLATFORM_PROBE = (
 )
 PROBE_PATTERN = re.compile(r"[A-Za-z0-9_]+\n\d+\.\d+")
 INSTALL_STEPS = 6
+DEV_CONFIG = "configs/dev-unmeasured.yaml"
+APP_CONFIG_SCHEMA = 1
+APP_CONFIG_HEADER = (
+    "# RoboEmot app config (SPEC 4A, Installer). The installer sets only voice.enabled and, in\n"
+    "# dev mode, safety.allow_unmeasured_dynamics; every other key is kept on reinstall (comments\n"
+    "# are not). The web UI's admin changes land here too.\n"
+)
 UNINSTALL_STEPS = 6
 
 
@@ -144,12 +152,8 @@ class Platform(Protocol):
     def env_users(self, py: RemotePython) -> list[str]: ...
     def env_ready(self, py: RemotePython) -> bool: ...
     def probe(self, ui: Ui, py: RemotePython) -> None: ...
-    def stage(
-        self, root: Path, dest: Path, dev: bool, app_config: dict[str, object]
-    ) -> list[Path]: ...
-    def verify(
-        self, ui: Ui, py: RemotePython, dev: bool, app_config: dict[str, object]
-    ) -> None: ...
+    def stage(self, root: Path, dest: Path) -> list[Path]: ...
+    def verify(self, ui: Ui, py: RemotePython) -> None: ...
     def running_app(self) -> str | None: ...
     def stop_app(self) -> None: ...
     def app_installed(self) -> bool: ...
@@ -185,15 +189,83 @@ class Options:
 
 
 def app_config_overrides(voice: bool) -> dict[str, object]:
-    """What the installer sets in the robot's app config besides the platform's dev content:
+    """What the installer sets in the robot's app config besides the dev content:
     ``voice.enabled: true`` with voice (the library default is off, so a robot without a
     microphone or speaker is unchanged; the installer enables it for the robot it sets up).
-    The platform writes it into ``app.yaml`` and reads it back to verify (SPEC 4A, Installer)."""
+    ``apply_app_config`` writes it into ``app.yaml`` in the data folder and reads it back to
+    verify (SPEC 4A, Installer)."""
     return {"voice": {"enabled": True}} if voice else {}
 
 
+def dev_config(root: Path) -> dict[str, object]:
+    """The dev content (``configs/dev-unmeasured.yaml`` without its ``schema_version``; empty
+    when the checkout has no such file)."""
+    path = root / DEV_CONFIG
+    data = (yaml.safe_load(path.read_text()) or {}) if path.exists() else {}
+    return {k: v for k, v in data.items() if k != "schema_version"}
+
+
+def leaves(tree: dict, prefix: tuple[str, ...] = ()) -> dict[tuple[str, ...], object]:
+    """Every non-mapping value of a nested mapping, keyed by its path."""
+    out: dict[tuple[str, ...], object] = {}
+    for key, value in tree.items():
+        if isinstance(value, dict) and value:
+            out.update(leaves(value, (*prefix, key)))
+        else:
+            out[(*prefix, key)] = value
+    return out
+
+
+def owned_app_config(
+    root: Path, dev: bool, voice: bool
+) -> tuple[dict[tuple[str, ...], object], set[tuple[str, ...]]]:
+    """The installer's keys in the app config: (the values asked for this run, every key it
+    owns). It owns the voice switch and the dev content's keys; a key it owns but was not asked
+    for this run (``--no-voice``, ``--no-dev``) is removed from the file."""
+    dev_leaves = leaves(dev_config(root))
+    if dev and not dev_leaves:
+        raise WizardError(f"dev mode needs {DEV_CONFIG} in {root}")
+    voice_leaves = leaves(app_config_overrides(True))
+    wanted = {**(dev_leaves if dev else {}), **(voice_leaves if voice else {})}
+    return wanted, set(dev_leaves) | set(voice_leaves)
+
+
+def merge_app_config(
+    existing: dict, wanted: dict[tuple[str, ...], object], owned: set[tuple[str, ...]]
+) -> dict:
+    """``existing`` with every owned key set to its wanted value or removed (and a mapping left
+    empty by that removed too); every other key is kept as it is."""
+    merged = copy.deepcopy(existing)
+    for path in sorted(owned):
+        parents, node = [], merged
+        for key in path[:-1]:
+            child = node.get(key)
+            if not isinstance(child, dict):
+                if path not in wanted:
+                    break
+                child = node[key] = {}
+            parents.append((node, key))
+            node = child
+        else:
+            if path in wanted:
+                node[path[-1]] = wanted[path]
+            else:
+                node.pop(path[-1], None)
+                for parent, key in reversed(parents):
+                    if parent[key] == {}:
+                        del parent[key]
+    if merged and "schema_version" not in merged:
+        merged = {"schema_version": APP_CONFIG_SCHEMA, **merged}
+    return merged
+
+
+def app_config_text(config: dict) -> str:
+    """The app config as the installer writes it: a header saying what it owns, then the YAML."""
+    return APP_CONFIG_HEADER + yaml.safe_dump(config, sort_keys=False)
+
+
 def describe_app_config(dev: bool, app_config: dict[str, object]) -> str:
-    """One line naming what the app config on the robot will contain (empty: no app.yaml)."""
+    """One line naming the installer's keys in the app config on the robot (empty: none)."""
     parts = [
         f"{key}.{sub}={str(value).lower()}"
         for key, group in app_config.items()
@@ -909,25 +981,112 @@ def remove_data_dir(ui: Ui, remote: Remote, record: InstallRecord, dry_run: bool
             remote.run(f"rmdir {shlex.quote(parent)} 2>/dev/null || true", check=False)
 
 
-def warn_data_dir_overrides(ui: Ui, remote: Remote, dirs: list[Path]) -> None:
+def warn_data_dir_overrides(ui: Ui, remote: Remote) -> None:
     """Warn when the app would keep its data outside the folder the installer records.
 
-    Looks at ``ROBOEMOT_DATA_DIR`` in the SSH user's environment and at a ``data_dir`` in the
-    staged ``app.yaml``. The app's own environment may differ, so this is a hint, not a check.
+    Looks at ``ROBOEMOT_DATA_DIR`` in the SSH user's environment (a ``data_dir`` in the app
+    config is checked by ``apply_app_config``). The app's own environment may differ, so this is
+    a hint, not a check.
     """
     env = remote.run('printf %s "${ROBOEMOT_DATA_DIR:-}"').strip()
     if env:
         ui.warn(
             f"ROBOEMOT_DATA_DIR={env} is set for the SSH user: data may land outside the record"
         )
-    for root in dirs:
-        for cfg in root.rglob("app.yaml"):
-            try:
-                value = (yaml.safe_load(cfg.read_text()) or {}).get("data_dir")
-            except (OSError, yaml.YAMLError, AttributeError):
-                continue
-            if value:
-                ui.warn(f"{cfg.name} sets data_dir={value}: uninstall will not remove that folder")
+
+
+# ---------------------------------------------------------------- app config
+
+
+def app_config_remote_path(remote: Remote) -> str:
+    """``app.yaml`` in the robot's data folder (``roboemot.paths.app_config_path`` there)."""
+    _, data = remote_data_dir(remote)
+    return posixpath.join(data, paths.APP_CONFIG_FILE)
+
+
+def read_app_config(remote: Remote, path: str) -> dict | None:
+    """The app config on the robot, None when there is no file; not YAML or not a mapping is a
+    WizardError (the app would refuse it too)."""
+    if not _exists(remote, path):
+        return None
+    raw = remote.run(f"cat {shlex.quote(path)}")
+    try:
+        data = yaml.safe_load(raw) or {}
+    except yaml.YAMLError as e:
+        raise WizardError(f"{path} is not valid YAML ({e}): fix or remove it") from e
+    if not isinstance(data, dict):
+        raise WizardError(f"{path} is not a mapping: fix or remove it")
+    return data
+
+
+def apply_app_config(
+    ui: Ui,
+    platform: Platform,
+    remote: Remote,
+    record: InstallRecord,
+    wanted: dict[tuple[str, ...], object],
+    owned: set[tuple[str, ...]],
+    dry_run: bool,
+) -> None:
+    """Write the installer's keys into ``app.yaml`` in the data folder and keep every other key
+    (SPEC 4A, Installer): owner edits survive a reinstall. Comments are not kept. A file the
+    installer creates in a data folder that is not recorded as its own is recorded (before it is
+    written) so uninstall removes it; in a recorded data folder it goes with the folder. A
+    ``data_dir`` in the file is warned about. The dry run only says what it would write."""
+    path = app_config_remote_path(remote)
+    existing = read_app_config(remote, path)
+    merged = merge_app_config(existing or {}, wanted, owned)
+    if (existing or {}).get("data_dir"):
+        ui.warn(f"{path} sets data_dir={existing['data_dir']}: uninstall will not remove it")
+    keys = ", ".join(".".join(k) + f"={str(v).lower()}" for k, v in sorted(wanted.items()))
+    if merged == (existing or {}) and (existing is not None or not merged):
+        ui.ok(f"app config {path} already as asked ({keys or 'no installer keys'})")
+        return
+    if dry_run:
+        ui.info(f"would write {path} ({keys or 'no installer keys'}; other keys kept)")
+        return
+    if existing is None and record.data_dir is None and record.app_config != path:
+        record.app_config = path
+        write_record(remote, platform.record_path, record)
+    tmp = f"{path}.tmp"
+    remote.run(
+        f"umask 077 && mkdir -p {shlex.quote(posixpath.dirname(path))} && "
+        f"printf %s {shlex.quote(app_config_text(merged))} > {shlex.quote(tmp)} "
+        f"&& mv {shlex.quote(tmp)} {shlex.quote(path)}"
+    )
+    ui.ok(f"app config {path}: {keys or 'installer keys removed'}; other keys kept")
+
+
+def verify_app_config(
+    remote: Remote, wanted: dict[tuple[str, ...], object], owned: set[tuple[str, ...]]
+) -> None:
+    """The app config on the robot has every owned key as asked (set or absent)."""
+    path = app_config_remote_path(remote)
+    found = leaves(read_app_config(remote, path) or {})
+    for key in sorted(owned):
+        if found.get(key) != wanted.get(key):
+            name = ".".join(key)
+            raise WizardError(
+                f"{path} has {name}={found.get(key)}, expected {name}={wanted.get(key)}"
+            )
+
+
+def remove_app_config(ui: Ui, remote: Remote, record: InstallRecord, dry_run: bool) -> None:
+    """Delete the app config the installer created outside its own data folder, only at the
+    exact path it would pick and only if its ``realpath`` is the same."""
+    if record.app_config is None:
+        return
+    path = app_config_remote_path(remote)
+    if record.app_config != path:
+        ui.warn(f"recorded app config {record.app_config!r} is not {path}: left as it is")
+    elif not _exists(remote, path):
+        ui.ok(f"app config {path} is not there")
+    elif remote.run(f"realpath {shlex.quote(path)} 2>/dev/null || true").strip() != path:
+        ui.warn(f"{path} resolves elsewhere: symlink? left as it is")
+    else:
+        if not dry_run:
+            remote.run(f"rm -f {shlex.quote(path)}")
+        ui.ok(f"{'would delete' if dry_run else 'deleted'} the app config {path}")
 
 
 # ---------------------------------------------------------------- install
@@ -1039,7 +1198,7 @@ def install_packages(
     extras: tuple[str, ...] = (),
 ) -> InstallRecord:
     own = distribution_names(dirs)
-    warn_data_dir_overrides(ui, remote, dirs)
+    warn_data_dir_overrides(ui, remote)
     record = read_record(remote, platform.record_path, ui) or InstallRecord(
         platform.app_name, platform.manifest_id, own
     )
@@ -1152,10 +1311,10 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
                 )
                 dev = ui.confirm("Install in dev mode?", True)
             ui.ok("dev mode (configs/dev-unmeasured.yaml)" if dev else "production config")
-            app_config = app_config_overrides(opts.voice)
-            content = describe_app_config(dev, app_config)
-            ui.ok(f"app config (data/app.yaml): {content}" if content else "no app config file")
-            dirs = platform.stage(root, Path(tmp) / "src", dev, app_config)
+            content = describe_app_config(dev, app_config_overrides(opts.voice))
+            ui.ok(f"app config (app.yaml in the data folder): {content or 'no installer keys'}")
+            wanted, owned = owned_app_config(root, dev, opts.voice)
+            dirs = platform.stage(root, Path(tmp) / "src")
 
             ui.step("SSH access")
 
@@ -1183,8 +1342,10 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
             if opts.vision and opts.dry_run:
                 ui.info("would install the vision extra (OpenCV, ONNX); --no-vision skips it")
             record = install_packages(ui, platform, py, remote, dirs, wheels, opts.dry_run, extras)
+            apply_app_config(ui, platform, remote, record, wanted, owned, opts.dry_run)
             if not opts.dry_run:
-                platform.verify(ui, py, dev, app_config)
+                platform.verify(ui, py)
+                verify_app_config(remote, wanted, owned)
             if opts.piper is None:
                 opts.piper = opts.voice and ui.confirm(
                     "Install Piper for on-board speech (own virtualenv)?", True
@@ -1375,6 +1536,7 @@ def run_uninstall(opts: Options, ui: Ui, root: Path) -> None:
         keep_env = remove_created_env(ui, platform, remote, fate, opts.dry_run)
         remove_piper_venv(ui, remote, record, opts.dry_run)
         remove_models_dirs(ui, remote, record, opts.dry_run)
+        remove_app_config(ui, remote, record, opts.dry_run)
         remove_data_dir(ui, remote, record, opts.dry_run)
         platform.cleanup(ui, py, opts.dry_run)
         listed = remote.run(f"ls -d {REMOTE_TMP_PREFIX}.* 2>/dev/null || true").split()
@@ -1429,6 +1591,9 @@ def verify_uninstall(
         for d in record.models_dirs
         if d in expected_models and _exists(py.remote, d)
     ]
+    config = app_config_remote_path(py.remote)
+    if record.app_config == config and _exists(py.remote, config):
+        problems.append(f"app config {config} still present")
     data_dir, bad = checked_data_dir(py.remote, record)
     if bad:
         problems.append(bad)

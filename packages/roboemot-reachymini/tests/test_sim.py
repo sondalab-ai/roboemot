@@ -416,6 +416,7 @@ class Scene:
         shutil.copy2(root / "configs/dev-unmeasured.yaml", data / "app.yaml")
         (data / "app.yaml").write_text((data / "app.yaml").read_text() + extra_config)
         monkeypatch.setattr(app_module, "DATA", data)
+        monkeypatch.setattr(app_module, "app_config_path", lambda: data / "app.yaml")
         self.plant = plant  # a test may set it later: the person walks into view
         cfg = RoboEmotConfig()
         face_vec = np.eye(8, dtype=np.float32)[0]

@@ -6,7 +6,9 @@ robot: the platform does. The app is a thin adapter: it loads the config and the
 the robot platform up by the manifest ``robot.id`` (entry-point group ``roboemot.robots``), binds
 the connected robot to a session and hands both to core's ``Runtime``, which builds and runs the
 whole pipeline until ``stop_event`` is set. The app is also the runtime's host (``RuntimeHost``):
-the seams tests override and the parts the runtime publishes live on it.
+the seams tests override and the parts the runtime publishes live on it. The app config is
+``app.yaml`` in the data folder (``roboemot.paths.app_config_path``), not package data, so a
+reinstall keeps the owner's edits (SPEC 4A, Installer).
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from roboemot import paths
 from roboemot.config import ConfigStack
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.manifest import load_manifest
@@ -27,6 +30,7 @@ except ImportError:  # pragma: no cover
     ReachyMiniApp = object  # type: ignore[misc,assignment]
 
 DATA = Path(__file__).resolve().parent / "data"
+app_config_path = paths.app_config_path  # the app config: app.yaml in the data folder
 
 
 class RoboEmotApp(RuntimeHost, ReachyMiniApp):  # type: ignore[misc,valid-type]
@@ -38,7 +42,9 @@ class RoboEmotApp(RuntimeHost, ReachyMiniApp):  # type: ignore[misc,valid-type]
 
     def run(self, reachy_mini: Any, stop_event: threading.Event) -> None:
         stack = ConfigStack.from_files(
-            app=_optional(DATA / "app.yaml"), preset="default", preset_dirs=[DATA / "presets"]
+            app=_optional(app_config_path()),
+            preset="default",
+            preset_dirs=[DATA / "presets"],
         )
         cfg = stack.effective()
         # Unmeasured dynamics only when the owner enabled it in the app config (SPEC 12).

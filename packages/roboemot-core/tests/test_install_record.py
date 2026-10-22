@@ -169,6 +169,12 @@ class BareRobot:
                 self.env.update({"bare-app": "1.0", "tomli": "2.0"})
             return "\n__rc=0"
         plain = " ".join(sh.split(command)) if command.startswith("/opt") else command
+        if command.startswith("test -e"):
+            path = sh.split(command)[2]
+            there = any(f == path or f.startswith(path + "/") for f in self.files)
+            return "yes" if there else "no"
+        if command.startswith("realpath "):
+            return sh.split(command)[1]
         if command.startswith("test -"):
             return "yes" if command.startswith("test -x") else "no"
         if "platform.machine" in plain:
@@ -188,6 +194,14 @@ class BareRobot:
         if command == 'printf %s "$HOME"':
             return "/home/dev"
         if command == 'printf %s "${ROBOEMOT_DATA_DIR:-}"':
+            return ""
+        if command.startswith("umask 077 && mkdir -p "):  # the app config
+            t = sh.split(command)
+            self.files[t[-1]] = t[t.index("printf") + 2]
+            return ""
+        if command.startswith("rm -rf "):
+            path = sh.split(command)[2]
+            self.files = {f: v for f, v in self.files.items() if not f.startswith(path + "/")}
             return ""
         if command.startswith("printf %s"):
             t = sh.split(command)
@@ -232,7 +246,7 @@ class BarePlatform:
         return True
 
     def probe(self, ui, py): ...
-    def verify(self, ui, py, dev, app_config): ...
+    def verify(self, ui, py): ...
     def running_app(self):
         return None
 
@@ -254,7 +268,7 @@ class BarePlatform:
     def cleanup(self, ui, py, dry_run): ...
     def verify_removed(self, ui): ...
 
-    def stage(self, root, dest, dev, app_config):
+    def stage(self, root, dest):
         pkg = dest / "bare-app"
         pkg.mkdir(parents=True)
         (pkg / "pyproject.toml").write_text(
