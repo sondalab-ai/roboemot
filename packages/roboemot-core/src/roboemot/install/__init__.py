@@ -125,7 +125,7 @@ APP_CONFIG_SCHEMA = 1
 APP_CONFIG_HEADER = (
     "# RoboEmot app config (SPEC 4A, Installer). The installer sets only voice.enabled and, in\n"
     "# dev mode, safety.allow_unmeasured_dynamics; every other key is kept on reinstall (comments\n"
-    "# are not). The web UI's admin changes land here too.\n"
+    "# are not). Uninstall removes this whole file, settings saved from the web UI included.\n"
 )
 UNINSTALL_STEPS = 6
 
@@ -1041,10 +1041,12 @@ def apply_app_config(
     dry_run: bool,
 ) -> None:
     """Write the installer's keys into ``app.yaml`` in the data folder and keep every other key
-    (SPEC 4A, Installer): owner edits survive a reinstall. Comments are not kept. A file the
-    installer creates in a data folder that is not recorded as its own is recorded (before it is
-    written) so uninstall removes it; in a recorded data folder it goes with the folder. A
-    ``data_dir`` in the file is warned about. The dry run only says what it would write."""
+    (SPEC 4A, Installer): owner edits survive a reinstall. Comments are not kept. Every file the
+    installer writes, created or edited, is recorded (before the write), and uninstall removes it
+    whole, including the settings saved from the web UI (owner decision 2026-10-22; no per-key
+    restore); editing a file the owner already had says so. A ``data_dir`` in the file is warned
+    about. The dry run only says what it would write. The content travels on the SSH channel's
+    standard input, never on a command line."""
     path = app_config_remote_path(remote)
     existing = read_app_config(remote, path)
     merged = merge_app_config(existing or {}, wanted, owned)
@@ -1054,17 +1056,26 @@ def apply_app_config(
     if merged == (existing or {}) and (existing is not None or not merged):
         ui.ok(f"app config {path} already as asked ({keys or 'no installer keys'})")
         return
+    adopted = existing is not None and record.app_config != path
+    if adopted:
+        ui.warn(
+            f"{path} was there before: {'it would be' if dry_run else 'it is'} recorded, and "
+            "uninstall removes it whole, other settings and those saved from the web UI included"
+        )
     if dry_run:
-        ui.info(f"would write {path} ({keys or 'no installer keys'}; other keys kept)")
+        ui.info(
+            f"would write {path} ({keys or 'no installer keys'}; other keys kept; "
+            "uninstall removes the file)"
+        )
         return
-    if existing is None and record.data_dir is None and record.app_config != path:
+    if record.app_config != path:
         record.app_config = path
         write_record(remote, platform.record_path, record)
     tmp = f"{path}.tmp"
     remote.run(
         f"umask 077 && mkdir -p {shlex.quote(posixpath.dirname(path))} && "
-        f"printf %s {shlex.quote(app_config_text(merged))} > {shlex.quote(tmp)} "
-        f"&& mv {shlex.quote(tmp)} {shlex.quote(path)}"
+        f"cat > {shlex.quote(tmp)} && mv {shlex.quote(tmp)} {shlex.quote(path)}",
+        stdin=app_config_text(merged),
     )
     ui.ok(f"app config {path}: {keys or 'installer keys removed'}; other keys kept")
 
@@ -1084,8 +1095,9 @@ def verify_app_config(
 
 
 def remove_app_config(ui: Ui, remote: Remote, record: InstallRecord, dry_run: bool) -> None:
-    """Delete the app config the installer created outside its own data folder, only at the
-    exact path it would pick and only if its ``realpath`` is the same."""
+    """Delete the app config the installer wrote (created or edited), whole: settings saved from
+    the web UI go with it. Only at the exact path it would pick and only if its ``realpath`` is
+    the same."""
     if record.app_config is None:
         return
     path = app_config_remote_path(remote)
@@ -1098,7 +1110,10 @@ def remove_app_config(ui: Ui, remote: Remote, record: InstallRecord, dry_run: bo
     else:
         if not dry_run:
             remote.run(f"rm -f {shlex.quote(path)}")
-        ui.ok(f"{'would delete' if dry_run else 'deleted'} the app config {path}")
+        ui.ok(
+            f"{'would remove' if dry_run else 'removed'} {path}, including settings saved "
+            "from the web UI"
+        )
 
 
 # ---------------------------------------------------------------- install

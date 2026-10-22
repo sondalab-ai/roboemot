@@ -238,8 +238,8 @@ class FakeRobot:
             return self.files.get(shlex.split(command)[1], "")
         if command.startswith("umask 077 && mkdir -p ") and "&& mv" in command:
             t = shlex.split(command)
-            assert t[4] == "-p" and t[-1] == APP_YAML, command
-            self.files[t[-1]] = t[t.index("printf") + 2]
+            assert t[4] == "-p" and t[-1] == APP_YAML and "printf" not in t, command
+            self.files[t[-1]] = stdin or ""
             return ""
         if command.startswith("printf %s") and "&& mv" in command:
             t = shlex.split(command)
@@ -700,13 +700,67 @@ def test_an_app_config_created_in_a_foreign_data_folder_is_recorded_and_removed(
     assert APP_YAML not in robot.files and DATA in robot.dirs
 
 
-def test_an_app_config_the_owner_had_is_edited_but_not_recorded(offline, robot, daemon, capsys):
+def test_an_app_config_the_owner_had_is_recorded_and_uninstall_removes_it_whole(
+    offline, robot, daemon, capsys
+):
+    """Review SF2, owner decision 2026-10-22: the file the installer wrote goes whole, said both
+    at install and at uninstall; no per-key restore."""
     robot.dirs |= {f"{HOME}/.local", f"{HOME}/.local/share", DATA}
     robot.files[APP_YAML] = yaml.safe_dump({"schema_version": 1, "webui": {"port": 8080}})
     install()
-    assert json.loads(robot.files[RECORD])["app_config"] is None
+    assert json.loads(robot.files[RECORD])["app_config"] == APP_YAML
+    assert "uninstall removes it whole" in capsys.readouterr().out
     uninstall()
-    assert yaml.safe_load(robot.app_yaml)["webui"] == {"port": 8080}
+    assert APP_YAML not in robot.files
+    assert f"removed {APP_YAML}, including settings saved from the web UI" in (
+        capsys.readouterr().out
+    )
+
+
+def test_the_uninstall_dry_run_names_the_app_config_it_would_remove(offline, robot, daemon, capsys):
+    """Review MT3."""
+    install()
+    capsys.readouterr()
+    uninstall(dry_run=True)
+    assert f"would remove {APP_YAML}, including settings saved from the web UI" in (
+        capsys.readouterr().out
+    )
+    assert APP_YAML in robot.files
+
+
+@pytest.mark.parametrize("case", ["symlink", "elsewhere"])
+def test_uninstall_refuses_an_app_config_it_cannot_trust(offline, robot, daemon, capsys, case):
+    """Review MT3: a symlinked file, or a recorded path that is not the computed one, stays."""
+    robot.dirs |= {f"{HOME}/.local", f"{HOME}/.local/share", DATA}
+    install()
+    record = json.loads(robot.files[RECORD])
+    if case == "symlink":
+        robot.symlinks[APP_YAML] = "/etc/shadow-copy"
+    else:
+        record["app_config"] = "/etc/app.yaml"
+        robot.files[RECORD] = json.dumps(record)
+    if case == "symlink":  # verification then keeps the record, as for the data folder
+        with pytest.raises(WizardError, match="still present"):
+            uninstall()
+    else:
+        uninstall()
+    assert APP_YAML in robot.files
+    assert ("symlink?" if case == "symlink" else "left as it is") in capsys.readouterr().out
+
+
+def test_an_install_dry_run_over_an_owner_app_config_names_the_keys_and_writes_nothing(
+    offline, robot, daemon, capsys
+):
+    """Review MT2."""
+    robot.dirs |= {f"{HOME}/.local", f"{HOME}/.local/share", DATA}
+    owner = yaml.safe_dump({"schema_version": 1, "webui": {"port": 8080}})
+    robot.files[APP_YAML] = owner
+    install(dry_run=True)
+    out = capsys.readouterr().out
+    assert (
+        f"would write {APP_YAML} (safety.allow_unmeasured_dynamics=true, voice.enabled=true" in out
+    )
+    assert robot.files[APP_YAML] == owner and RECORD not in robot.files
 
 
 def test_an_app_config_that_is_not_yaml_stops_the_install(offline, robot, daemon):
@@ -835,12 +889,12 @@ def test_verification_accepts_the_app_config_as_asked_in_every_combination(offli
             install(dev=dev, voice=voice, piper=False, models=False)
 
 
-def test_uninstall_after_a_default_install_restores_the_robot_and_records_no_app_config(
+def test_uninstall_after_a_default_install_restores_the_robot_and_removes_the_app_config(
     offline, robot, daemon
 ):
     before = snapshot(robot, daemon)
     install()
-    assert json.loads(robot.files[RECORD])["app_config"] is None  # goes with the data folder
+    assert json.loads(robot.files[RECORD])["app_config"] == APP_YAML
     uninstall()
     assert snapshot(robot, daemon) == before
 

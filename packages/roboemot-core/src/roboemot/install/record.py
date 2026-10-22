@@ -11,7 +11,7 @@ did not exist before the install: a folder that was already there is not the ins
 remove. The Piper virtualenv (SPEC 8, TTS backends) is recorded on its own, so it is removed
 even when the data folder predates the install; so are the model folders (voice, vision) the
 installer created inside a data folder that was not its own, and the app config (``app.yaml``)
-it created there. Secrets (SPEC 8, 12 Data) are
+it wrote, which uninstall removes whole. Secrets (SPEC 8, 12 Data) are
 recorded by name, never by value, and only the ones that were not in the store before;
 uninstall removes those names and leaves the others. When the robot has no app environment
 yet, the installer creates it the way the robot's own software would and records its path
@@ -72,7 +72,7 @@ class InstallRecord:
     models_dirs: list[str] = field(default_factory=list)
     env_created: str | None = None  # app environment this installer created (absolute path)
     env_baseline: list[str] = field(default_factory=list)  # distributions it held once created
-    # app config (app.yaml) it created inside a data folder that was not its own
+    # app config (app.yaml) it wrote, created or edited: uninstall removes it whole
     app_config: str | None = None
     version: int = RECORD_VERSION
 

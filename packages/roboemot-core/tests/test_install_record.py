@@ -150,7 +150,7 @@ class BareRobot:
             on_line(line)
         return out
 
-    def run(self, command: str, check: bool = True) -> str:
+    def run(self, command: str, check: bool = True, stdin: str | None = None) -> str:
         import shlex as sh
 
         if " -m pip " in command:
@@ -197,7 +197,7 @@ class BareRobot:
             return ""
         if command.startswith("umask 077 && mkdir -p "):  # the app config
             t = sh.split(command)
-            self.files[t[-1]] = t[t.index("printf") + 2]
+            self.files[t[-1]] = stdin or ""
             return ""
         if command.startswith("rm -rf "):
             path = sh.split(command)[2]
