@@ -65,6 +65,9 @@ class DeskSpeaker:
     def playing_until(self) -> float:
         return 0.0
 
+    def end_stream(self) -> float:
+        return 0.0
+
     def stop(self) -> None: ...
     def start_playing(self) -> bool:
         return True

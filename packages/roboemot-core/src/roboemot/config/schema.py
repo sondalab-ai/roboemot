@@ -1135,11 +1135,6 @@ class SafetyConfig(Strict):
         "Run with manifest dynamics still null (development only, SPEC 12)",
         conservative="false",
     )
-    minors_allowed_llm: bool = param(
-        False,
-        "Allow conversation while a minor is present on routes cleared for minors",
-        conservative="false",
-    )
     minor_output_blocklist: dict[str, list[str]] = param(
         {
             "it": [
@@ -1178,8 +1173,8 @@ class SafetyConfig(Strict):
                 "filtered": "I would rather talk about something else. Ask a grown-up.",
             },
         },
-        "Short child-safe lines per language, spoken when no route cleared for minors can answer "
-        "and when the output filter replaces a sentence (SPEC 8, 12)",
+        "Short child-safe lines per language, spoken to a minor when no route can answer and "
+        "when the output filter replaces a sentence (SPEC 8, 12)",
         admin_only=True,
     )  # fmt: skip
 
@@ -1557,6 +1552,22 @@ class VisionConfig(Strict):
         ge=1,
         le=64,
         restart=True,
+    )
+    report_window: int = param(
+        200,
+        "Report only: ended face tracks, age and gender jobs and their crops kept for the "
+        "lifetime, duration and time-to-estimate summaries",
+        ge=10,
+        le=10000,
+        restart=True,
+    )
+    report_rate_window_s: float = param(
+        60.0,
+        "Report only: capture-time window of the face track creation rate (per minute), "
+        "ending at the last processed frame",
+        unit="s",
+        ge=10,
+        le=3600,
     )
     models_dir: str = param(
         "",
@@ -2377,6 +2388,14 @@ class VoiceConfig(Strict):
     queue_max_sentences: int = param(
         16, "Sentences waiting for synthesis; a further one is dropped", ge=1, le=256
     )
+    report_window: int = param(
+        200,
+        "Report only: TTS chunks kept for the real-time factor summary (synthesis time over "
+        "audio duration)",
+        ge=10,
+        le=10000,
+        restart=True,
+    )
     piper: PiperConfig = param({}, "Piper subprocess backend", restart=True)
     openai_speech: OpenAISpeechConfig = param({}, "Remote speech backend")
     piper_noise_scale: tuple[float, float] = param(
@@ -2746,9 +2765,6 @@ class LLMRoute(Strict):
         5.0, "Max gap between chunks once the answer started", unit="s", ge=0.1, le=60
     )
     max_tokens: int = param(300, "Reply token cap", ge=16, le=8192)
-    allowed_for_minors: bool = param(
-        False, "Route cleared for use while a minor is present", conservative="false"
-    )
     daily_token_budget: int = param(200_000, "Daily token cap", ge=0)
     context_budget_tokens: int = param(
         8192,

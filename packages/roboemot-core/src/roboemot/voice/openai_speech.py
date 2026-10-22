@@ -2,13 +2,13 @@
 
 Follows the LLM routes' rules: it uses the route named by ``voice.openai_speech.route`` (URL,
 key, ``first_token_timeout_s`` for the first audio chunk, ``stall_timeout_s`` for later gaps),
-is eligible only when the router would allow that route (reachable, daily budget left, and
-``allowed_for_minors`` while a minor is present), and charges the characters it sends against the
-route's budget at ``CHARS_PER_TOKEN`` per token. Failures before the first chunk raise
-:class:`~roboemot.voice.tts.TTSError`, so :class:`~roboemot.voice.tts.FallbackTTS` answers with
-Piper. Only the sentence text leaves the robot (SPEC 12); it and the response body are never
-logged. The text is what is spoken, so it holds the real names even with
-``privacy.pseudonyms_to_cloud`` (owner decision, 2026-10-18).
+is eligible only when no minor is present (a minor's sentences are spoken by Piper, owner
+decision 2026-10-22) and the router would allow that route (reachable, budget, key), and
+charges the characters it sends against the route's budget at ``CHARS_PER_TOKEN`` per token.
+Failures before the first chunk raise :class:`~roboemot.voice.tts.TTSError`, so
+:class:`~roboemot.voice.tts.FallbackTTS` answers with Piper. Only the sentence text leaves the
+robot (SPEC 12); it and the response body are never logged. The text is what is spoken, so it
+holds the real names even with ``privacy.pseudonyms_to_cloud`` (owner decision, 2026-10-18).
 
 ``response_format: pcm`` is documented as 24 kHz, 16-bit, mono little-endian.
 """
@@ -56,11 +56,12 @@ class OpenAISpeechBackend:
         return next((r for r in self.router.routes if r.name == self.config.route), None)
 
     def available(self, *, minor_present: bool = False) -> bool:
-        """The route exists and the router would use it now (online, budget, minors rule)."""
+        """No minor is present, the route exists and the router would use it now (online,
+        budget, key)."""
+        if minor_present:
+            return False
         route = self._route()
-        return route is not None and any(
-            r.name == route.name for r in self.router.eligible(minor_present)
-        )
+        return route is not None and any(r.name == route.name for r in self.router.eligible())
 
     async def synthesize(
         self,
@@ -73,7 +74,7 @@ class OpenAISpeechBackend:
     ) -> AsyncIterator[AudioChunk]:
         router = self.router  # one router for the whole request, even if the app swaps it
         route = next((r for r in router.routes if r.name == self.config.route), None)
-        if route is None or route not in router.eligible(minor_present):
+        if minor_present or route is None or route not in router.eligible():
             raise TTSUnavailable("speech route not eligible")
         body: dict[str, Any] = {
             "model": self.config.model,

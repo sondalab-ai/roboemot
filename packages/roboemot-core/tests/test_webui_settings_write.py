@@ -1098,14 +1098,6 @@ def test_persist_failure_is_a_bare_code_over_http(tmp_path):
         srv.stop()
 
 
-def test_no_app_retry_for_a_field_inside_an_entry_added_here(editor, stack):
-    editor.add_entry("llm_routes", None, {**ROUTE, "name": "n2"})
-    with pytest.raises(GuardrailError):
-        editor.change("llm_routes.n2.allowed_for_minors", True)
-    assert "llm_routes" in stack.app and [r["name"] for r in stack.app["llm_routes"]] == ["lan"]
-    assert editor.change("llm_routes.lan.allowed_for_minors", True)["layer"] == "app"
-
-
 def test_reset_with_nothing_to_clear_keeps_file_and_memory_consistent(editor, stack, tmp_path):
     editor.change("affect.update_hz", 33.0)
     stack.clear("affect.update_hz")  # the runtime value goes, the file entry stays: stale

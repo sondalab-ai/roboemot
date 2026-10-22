@@ -5,7 +5,7 @@ file in the data folder, and shown next to the route; it does not gate the route
 its own thread, bounded by ``llm_check.deadline_s``, because it outlives the per-request
 deadline of the web server (``webui.request_deadline_s``): the POST returns at once and the
 page polls the list. Nothing secret leaves this module: a route is described by name, model,
-``host[:port]`` of its base URL, its locality, the kind of its key and the minors flag, plus the
+``host[:port]`` of its base URL, its locality and the kind of its key, plus the
 full base URL only when it holds no credentials (the settings list shows the same value), and a
 report holds statuses and short reasons only.
 """
@@ -94,7 +94,6 @@ class RouteChecker:
                     "base_url": None if secret_shaped(r.base_url) else r.base_url,
                     "locality": r.locality,
                     "key": _key_kind(r),
-                    "allowed_for_minors": r.allowed_for_minors,
                     "running": r.name == running,
                     "secret": _secret_state(r, store),
                     "last_check": self._current_report(r),
