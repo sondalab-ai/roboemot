@@ -58,7 +58,7 @@ class Unit:
     yielding: bool = False
     run: int = 0  # new divergent samples in a row
     run_since: float = 0.0
-    run_gap_s: float = 0.0  # the largest tick gap during the run
+    run_gap_s: float = 0.0  # the largest tick gap during the run, late ticks included (report only)
     run_overruns: int = 0  # the loop's overrun count when the run started
     yield_t: float = 0.0  # when it started yielding
     still_since: float | None = None
