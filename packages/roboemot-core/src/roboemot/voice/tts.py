@@ -70,7 +70,7 @@ class TTSBackend(Protocol):
     controls: frozenset[str]
 
     def available(self, *, minor_present: bool = False) -> bool:
-        """Whether a request may be started now (route rules, restart backoff)."""
+        """Whether a request may be started now (minor present, route rules, restart backoff)."""
         ...
 
     def synthesize(
@@ -91,6 +91,10 @@ class TTSBackend(Protocol):
 
     async def warm(self, language: str, voice: VoiceConfig) -> None:
         """Load what the first sentence of ``language`` needs (may be a no-op)."""
+        ...
+
+    def apply_config(self, voice: VoiceConfig) -> None:
+        """Hot reload of the settings the backend keeps itself (may be a no-op)."""
         ...
 
     async def aclose(self) -> None: ...
@@ -114,6 +118,11 @@ class FallbackTTS:
 
     def _chain(self) -> list[TTSBackend]:
         return [b for b in (self.primary, self.fallback) if b is not None]
+
+    def apply_config(self, voice: VoiceConfig) -> None:
+        """Hot reload: hand ``voice`` to each backend of the chain."""
+        for backend in self._chain():
+            backend.apply_config(voice)
 
     async def synthesize(
         self,

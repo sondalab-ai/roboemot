@@ -47,7 +47,7 @@ def make_reload(host: RuntimeHost, p: Pipeline) -> Callable[[Any], None]:
         if p.bargein is not None:
             p.bargein.apply_config(change.config)
         if host.speech_output is not None:
-            host.speech_output.config = change.config
+            host.speech_output.apply_config(change.config)
         if host.conversation is not None:
             host.conversation.apply_config(change.config)
         if host.transcript is not None:

@@ -15,7 +15,6 @@ from roboemot.llm.prompt import MINOR_RULE
 from roboemot.skills import SkillContext, SkillRegistry, skill
 from roboemot.skills.defaults import SkillEnv, default_skills
 from test_conversation_worker import (
-    CLEARED,
     GATE,
     LAN,
     rigs,  # noqa: F401  (fixture)
@@ -258,8 +257,7 @@ def test_every_round_applies_the_minor_rules(tooled):
     rig, srv, env = tooled(
         [C(0, "c1", "play", {"gesture": "joy"})],
         ["Ciao. ", "Voglio uccidere il tempo."],
-        routes=(CLEARED,),
-        safety={"minors_allowed_llm": True},
+        routes=(LAN,),
     )
     rig.minor[0] = True
     rig.register[0] = rig.stack.effective().register.child
@@ -294,8 +292,7 @@ def test_a_minor_appearing_between_rounds_ends_the_turn(tooled):
 def test_skills_not_allowed_with_a_minor_are_not_offered_to_a_child(tooled):
     rig, srv, _ = tooled(
         ["Ciao."],
-        routes=(CLEARED,),
-        safety={"minors_allowed_llm": True},
+        routes=(LAN,),
         conversation={"llm_skills": ["adults_only", "anyone"]},
     )
 
@@ -468,9 +465,8 @@ def test_the_question_for_a_child_passes_the_output_filter(tooled):
     rig, srv, _ = tooled(
         [remember("gioco", "uccidere")],
         ["Ok."],
-        routes=(CLEARED,),
+        routes=(LAN,),
         store=Store(),
-        safety={"minors_allowed_llm": True},
     )
     rig.minor[0] = True
     rig.turn("ricordati")
@@ -482,8 +478,7 @@ def test_the_question_for_a_child_passes_the_output_filter(tooled):
 def test_a_child_may_confirm_a_harmless_preference(tooled):
     store = Store()
     rig, srv, _ = tooled(
-        [remember("animale", "gatto")], routes=(CLEARED,), store=store,
-        safety={"minors_allowed_llm": True},
+        [remember("animale", "gatto")], routes=(LAN,), store=store,
     )  # fmt: skip
     rig.minor[0] = True
     rig.turn("ricordati")

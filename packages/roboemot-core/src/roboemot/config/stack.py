@@ -52,6 +52,9 @@ AUDIT_FILE_MODE = 0o600
 _MOVED = yaml.safe_load(Path(__file__).with_name("moved_settings.yaml").read_text())
 RENAMED_SETTINGS: dict[str, str] = _MOVED["renamed"]  # old path -> new path
 REMOVED_SETTINGS: dict[str, str] = _MOVED["removed"]  # old path (or prefix) -> what replaces it
+DROPPED_SETTINGS: dict[str, str] = _MOVED["dropped"]  # old path (``*``: any entry) -> why
+DROP = object()  # ``without_dropped``: the value is a dropped setting as a whole
+_dropped_logged: set[tuple[str, str]] = set()  # (source, path) pairs already logged
 NO_KEY = ("", "none")  # api_key values that carry no key
 PATCH = "#patch"  # runtime slot suffix: edits of existing entries of a merged list, by identity
 
@@ -434,7 +437,51 @@ def load_yaml(path: Path) -> dict:
         raise ConfigError(f"{path}: {exc}") from exc
     if not isinstance(data, dict):
         raise ConfigError(f"{path}: top level must be a mapping")
+    data, found = without_dropped("", data)
+    log_dropped(str(path), found)
     return data
+
+
+def without_dropped(path: str, value: Any) -> tuple[Any, list[str]]:
+    """``value`` stored at ``path`` (``""`` for a whole file) without the dropped settings it
+    holds (``DROPPED_SETTINGS``), removed in place, and their paths as found. ``DROP`` when
+    ``path`` is itself a dropped setting or lies under one; a ``*`` in ``path`` stands for any
+    list entry (the identity of a web UI file key)."""
+    here = [p for p in path.split(".") if p]
+    found: list[str] = []
+    for pattern in DROPPED_SETTINGS:
+        parts = pattern.split(".")
+        if not all(p in ("*", h) for p, h in zip(parts, here, strict=False)):
+            continue
+        if len(here) >= len(parts):
+            return DROP, [path]
+        _strip(value, parts[len(here) :], here, found)
+    return value, found
+
+
+def _strip(node: Any, parts: list[str], trail: list[str], found: list[str]) -> None:
+    """Delete the keys ``parts`` names under ``node`` (``*``: every list entry or mapping
+    value), appending the full path of each deleted key (``trail`` is ``node``'s) to ``found``."""
+    head, rest = parts[0], parts[1:]
+    if head == "*":
+        items: list[tuple[Any, Any]] = list(enumerate(node)) if isinstance(node, list) else []
+        items += list(node.items()) if isinstance(node, dict) else []
+    else:
+        items = [(head, node[head])] if isinstance(node, dict) and head in node else []
+    for key, child in items:
+        if rest:
+            _strip(child, rest, [*trail, str(key)], found)
+        elif isinstance(node, dict):
+            del node[key]
+            found.append(".".join([*trail, str(key)]))
+
+
+def log_dropped(source: str, paths: Iterable[str]) -> None:
+    """One warning per ``source`` and dropped ``path``, naming the path and never its value."""
+    for path in paths:
+        if (source, path) not in _dropped_logged:
+            _dropped_logged.add((source, path))
+            log.warning("%s: setting %s ignored: removed from the configuration", source, path)
 
 
 def resolve_preset(name: str, preset_dirs: Iterable[Path], _seen: tuple[str, ...] = ()) -> dict:

@@ -136,9 +136,11 @@ class DaemonClient:
         return current == name and status.get("state") == RUNNING
 
     def restart_current_app(self) -> None:
-        """``POST /api/apps/restart-current-app``. The daemon stops this process (SIGINT) before
-        it answers, so a dropped connection is the normal outcome and callers expect
-        ``DaemonError``."""
+        """``POST /api/apps/restart-current-app``: the daemon stops the app (SIGINT, kill after
+        ``STOP_TIMEOUT_S``, zero pose unless asleep), starts it again, then answers. Called from
+        inside the app (the web UI Restart) the caller is the process being stopped, so a
+        dropped connection is the normal outcome; called from a PC (``run --restart``) it
+        answers once the new start is under way, and an error may come after the stop."""
         self._send("POST", "/apps/restart-current-app", timeout_s=RESTART_TIMEOUT_S)
 
     def installed_apps(self) -> list[str]:

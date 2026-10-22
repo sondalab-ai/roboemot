@@ -165,7 +165,7 @@ async def test_missing_secret_makes_the_route_unavailable_with_one_warning(store
             secrets=store.get,
             http_client_factory=mock_client(srv.handler),
         )
-        assert r.eligible(False) == []
+        assert r.eligible() == []
         with pytest.raises(NoRouteAvailable):
             await collect(r)
     assert srv.requests == []
@@ -174,13 +174,13 @@ async def test_missing_secret_makes_the_route_unavailable_with_one_warning(store
 
 
 async def test_a_router_without_a_store_treats_secret_routes_as_unavailable():
-    assert Router([cloud()], SafetyConfig()).eligible(False) == []
+    assert Router([cloud()], SafetyConfig()).eligible() == []
 
 
 async def test_an_empty_secret_value_is_unavailable_too(store):
     store.set("cloud_key", "x")
     store.path.write_text(json.dumps({"cloud_key": ""}))
-    assert Router([cloud()], SafetyConfig(), secrets=store.get).eligible(False) == []
+    assert Router([cloud()], SafetyConfig(), secrets=store.get).eligible() == []
 
 
 async def test_an_unsafe_store_makes_the_route_unavailable_and_the_next_route_answers(store):
@@ -222,10 +222,10 @@ def test_the_hub_rebuilds_when_a_secret_changes_on_reload(store):
 
     hub = RouterHub(make(cfg), make)
     first = hub.router
-    assert hub.sync(cfg) is first and first.eligible(False) == []
+    assert hub.sync(cfg) is first and first.eligible() == []
     store.set("cloud_key", KEY)
     second = hub.sync(cfg)
-    assert second is not first and [r.name for r in second.eligible(False)] == ["cloud"]
+    assert second is not first and [r.name for r in second.eligible()] == ["cloud"]
     assert hub.sync(cfg) is second
     store.set("cloud_key", KEY + "2")
     assert hub.sync(cfg) is not second
@@ -269,8 +269,8 @@ def test_a_check_probe_does_not_hide_a_later_secret_from_the_reload(store):
     hub = RouterHub(make(cfg), make)
     store.set("cloud_key", KEY)
     assert hub.router.key_problem(hub.router.routes[0]) is None
-    assert hub.router.eligible(False) == []
-    assert [r.name for r in hub.sync(cfg).eligible(False)] == ["cloud"]
+    assert hub.router.eligible() == []
+    assert [r.name for r in hub.sync(cfg).eligible()] == ["cloud"]
 
 
 @pytest.mark.parametrize("bad", ["-h", "--x", "-"])
@@ -313,10 +313,10 @@ def test_the_web_ui_private_router_follows_the_secret(store, tmp_path):
     cfg = RoboEmotConfig(data_dir=str(store.path.parent), llm_routes=[cloud().model_dump()])
     checker = RouteChecker(lambda: cfg)
     first = checker._private_router(cfg)
-    assert first.eligible(False) == []
+    assert first.eligible() == []
     store.set("cloud_key", KEY)
     second = checker._private_router(cfg)
-    assert second is not first and [r.name for r in second.eligible(False)] == ["cloud"]
+    assert second is not first and [r.name for r in second.eligible()] == ["cloud"]
     assert checker._private_router(cfg) is second
 
 

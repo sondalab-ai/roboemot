@@ -10,9 +10,9 @@ import logging
 
 from roboemot.conversation import TranscriptRing
 from test_conversation_worker import (
-    CLEARED,
     CLOUD,
     GATE,
+    LAN,
     rigs,  # noqa: F401  (fixture)
     utt,
     wait_for,
@@ -244,7 +244,7 @@ def test_an_utterance_that_was_never_recorded_never_gets_a_reply_recorded(rigs):
 
 
 def test_with_a_minor_present_the_reply_is_recorded_only_once_it_played(rigs):  # noqa: F811
-    rig = with_ring(rigs, routes=(CLEARED,), safety={"minors_allowed_llm": True})
+    rig = with_ring(rigs, routes=(LAN,))
     rig.minor[0] = True
     rig.server.scripts["lan.local"] = ["Uno. ", "Due. ", "Tre", GATE, "."]
     n = rig.say("ciao")

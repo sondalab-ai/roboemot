@@ -608,8 +608,7 @@ const ROUTE_LOCALITIES = ["auto", "local", "cloud"];
 const ROUTE_KEY_LITERAL = "@literal"; // not a valid secret name: a key written in the config file
 
 // One form for a new route (`route` null) and for an existing one. A key is chosen from the stored
-// names, never typed. `canClear`: the route may be cleared for minors (a route added from this page
-// cannot: the server refuses that loosening). `save(values, form)` runs the PIN dialog and the calls.
+// names, never typed. `save(values, form)` runs the PIN dialog and the calls.
 function routeForm(route, secrets, nameMax, save) {
   const id = (k) => "route-" + (route ? route.name : "new") + "-" + k;
   const name = route ? null : textInput(id("name"), { required: true, maxlength: String(nameMax), autocomplete: "off", spellcheck: "false" });
@@ -618,9 +617,6 @@ function routeForm(route, secrets, nameMax, save) {
   const locality = el("select", { id: id("locality"), class: "sl-field__input" },
     ROUTE_LOCALITIES.map((l) => el("option", { value: l }, t("route_locality_" + l))));
   locality.value = route ? route.locality : "cloud";
-  const clearable = route && !route.removable;
-  const minors = el("input", { type: "checkbox", id: id("minors"), disabled: !clearable });
-  minors.checked = Boolean(route && route.allowed_for_minors);
   const current = !route || route.key === "none" ? "" : (route.key === "secret" ? route.secret.name : ROUTE_KEY_LITERAL);
   const names = secrets.filter((s) => s.set).map((s) => s.name);
   const keys = [["", t("route_key_none")]];
@@ -635,7 +631,7 @@ function routeForm(route, secrets, nameMax, save) {
       ev.preventDefault();
       guarded(() => save({
         name: name ? name.value.trim() : route.name, base_url: url.value.trim(), model: model.value.trim(),
-        locality: locality.value, allowed_for_minors: minors.checked, key: key.value,
+        locality: locality.value, key: key.value,
       }));
     },
   },
@@ -643,8 +639,6 @@ function routeForm(route, secrets, nameMax, save) {
   field(id("url"), t("route_url"), url, route ? t("route_url_hint_edit") : null),
   field(id("model"), t("route_model"), model),
   field(id("locality"), t("route_locality"), locality, t("route_locality_hint")),
-  check(t("route_minors_label"), minors),
-  el("p", { class: "hint" }, t(clearable ? "route_minors_hint_edit" : "route_minors_hint")),
   field(id("key"), t("route_key"), key, t("route_key_hint")),
   el("div", { class: "row" }, submitButton(t(route ? "route_save" : "route_add"))));
   return form;
@@ -682,7 +676,7 @@ async function saveRoute(route, v) {
   if (!route) {
     steps.push((pin) => mapAck(() => api("POST", "/api/routes/add", {
       name: v.name, base_url: v.base_url, model: v.model, locality: v.locality,
-      allowed_for_minors: v.allowed_for_minors, secret: keyed ? v.key : null, pin,
+      secret: keyed ? v.key : null, pin,
       ...(keyed && (ack || origin) ? { ack_endpoint: ack || origin } : {}),
     })));
   } else {
@@ -697,7 +691,6 @@ async function saveRoute(route, v) {
       })));
     }
     if (v.locality !== route.locality) steps.push(set("locality", v.locality));
-    if (!route.removable && v.allowed_for_minors !== route.allowed_for_minors) steps.push(set("allowed_for_minors", v.allowed_for_minors));
     if (v.model !== route.model) steps.push(set("model", v.model));
     if (!steps.length) { notice(t("settings_unchanged")); return; }
   }
@@ -753,8 +746,7 @@ async function routesView() {
       if (done) { notice(t("route_removed", { name: r.name })); await routesView(); }
     }));
     return busy(card(t("tab_routes"), r.name,
-      el("p", { class: "hint" }, r.model + " @ " + r.endpoint + ", " + t("route_locality_" + r.locality) + (r.allowed_for_minors ? ", " + t("route_minors") : "")),
-      !r.allowed_for_minors ? el("p", { class: "hint" }, t("route_minors_off")) : [],
+      el("p", { class: "hint" }, r.model + " @ " + r.endpoint + ", " + t("route_locality_" + r.locality)),
       r.secret ? el("p", { class: "hint" }, t(r.secret.set ? "route_secret_set" : "route_secret_missing", { name: r.secret.name })) :
         (r.key === "literal" ? el("p", { class: "hint" }, t("route_key_literal")) : []),
       el("div", { class: "row" }, run, toggle, r.removable ? remove : []), box, edit), r.running);

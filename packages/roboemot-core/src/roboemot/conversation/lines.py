@@ -41,7 +41,7 @@ def minor_line(
     keywords: Collection[str],
     name: str = "",
 ) -> str:
-    """The child-safe line for a turn no cleared route can answer: a greeting back for a
+    """The child-safe line for a minor's turn no route can answer: a greeting back for a
     greeting, the robot's name when it was called (``name``, already sanitised, fills the line's
     ``{name}``; without one the line's nameless variant), otherwise "ask a grown-up"."""
     if "greeting" in keywords:

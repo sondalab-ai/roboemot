@@ -1,7 +1,12 @@
 # Settings renamed or removed since an overrides file or app.yaml may have been written
 # (SPEC 11A, Renamed and removed settings). Data, not code: it records old names on purpose.
+# `removed` keys have a replacement and fail in app.yaml; `dropped` keys have none and are
+# ignored wherever they are found (`*` matches every entry of a list or value of a mapping).
 renamed:
   reflexes.antenna_ratio: reflexes.startle_lift_ratio
 removed:
   vision.attribute_precision: the single yolo11n-face-age file, which has one precision (SPEC 5, 13)
   connectivity.gestures: the manifest gesture_map entries puzzled and perk_up (SPEC 12A)
+dropped:
+  safety.minors_allowed_llm: the LLM is used while a minor is present (SPEC 8, 2026-10-22)
+  llm_routes.*.allowed_for_minors: the LLM is used while a minor is present (SPEC 8, 2026-10-22)

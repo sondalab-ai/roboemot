@@ -97,7 +97,6 @@ def test_list_shows_endpoint_only_and_no_key(served):
             "base_url": None,  # it holds user info: never sent, only replaceable whole
             "locality": "auto",
             "key": "literal",
-            "allowed_for_minors": False,
             "running": False,
             "secret": None,
             "last_check": None,

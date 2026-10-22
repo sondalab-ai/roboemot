@@ -8,6 +8,7 @@ import logging
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import numpy as np
@@ -358,22 +359,17 @@ async def test_openai_instructions_only_on_instructable_models():
     assert backend.controls == frozenset()
 
 
-async def test_openai_is_refused_while_a_minor_is_present_unless_the_route_is_cleared():
+async def test_openai_speech_is_never_used_while_a_minor_is_present():
+    """Owner decision 2026-10-22 (SPEC 8 TTS): a minor's sentences go to Piper, not the cloud."""
     server = SpeechServer()
     backend, _ = openai_backend(server)
-    assert backend.available(minor_present=False)
-    assert not backend.available(minor_present=True)
+    assert backend.available() and not backend.available(minor_present=True)
     with pytest.raises(TTSUnavailable):
         async for _ in backend.synthesize(
             "x", delivery(), language="it", voice=VOICE, minor_present=True
         ):
             pass
     assert server.requests == []
-    allowed = SafetyConfig(minors_allowed_llm=True)
-    cleared, _ = openai_backend(server, route(allowed_for_minors=True), safety=allowed)
-    assert cleared.available(minor_present=True)
-    uncleared, _ = openai_backend(server, safety=allowed)
-    assert not uncleared.available(minor_present=True)
 
 
 async def test_openai_unknown_route_and_spent_budget_are_unavailable():
@@ -419,18 +415,22 @@ async def test_fallback_to_piper_when_the_remote_route_fails_or_is_not_eligible(
         tts = FallbackTTS(failing, local)
         chunks = await collect(tts, "ciao")
         assert chunks[0].rate_hz == RATE and tts.last_used == "piper"
-        # minor present, route not cleared: the remote is never contacted
+        # a minor present: Piper speaks and the remote is never contacted
         server = SpeechServer()
         remote, _ = openai_backend(server)
-        chunks = await collect(FallbackTTS(remote, local), "ciao", language="it")
-        assert chunks and chunks[0].rate_hz == OPENAI_PCM_RATE_HZ  # adult: remote is used
         tts = FallbackTTS(remote, local)
-        got = []
-        async for c in tts.synthesize(
-            "ciao", delivery(), language="it", voice=voice_cfg(), minor_present=True
-        ):
-            got.append(c)
-        assert got[0].rate_hz == RATE and len(server.requests) == 1
+        got = [
+            c
+            async for c in tts.synthesize(
+                "ciao", delivery(), language="it", voice=voice_cfg(), minor_present=True
+            )
+        ]
+        assert got[0].rate_hz == RATE and server.requests == [] and tts.last_used == "piper"
+        # budget spent, so not eligible: the remote is never contacted
+        server = SpeechServer()
+        spent, _ = openai_backend(server, route(daily_token_budget=0))
+        chunks = await collect(FallbackTTS(spent, local), "ciao", language="it")
+        assert chunks[0].rate_hz == RATE and server.requests == []
     finally:
         await local.aclose()
 
@@ -458,10 +458,10 @@ async def test_fallback_does_not_switch_voice_after_audio_started(tmp_path):
 
 
 async def test_fallback_with_nothing_available_raises_unavailable():
-    remote, _ = openai_backend(SpeechServer())
+    remote, _ = openai_backend(SpeechServer(), route(daily_token_budget=0))
     with pytest.raises(TTSUnavailable):
         async for _ in FallbackTTS(remote, None).synthesize(
-            "x", delivery(), language="it", voice=VOICE, minor_present=True
+            "x", delivery(), language="it", voice=VOICE
         ):
             pass
 
@@ -578,3 +578,20 @@ def test_router_does_not_hand_out_the_key():
 )
 def test_splitter_abbreviations_do_not_swallow_ordinary_words(text, expected):
     assert [t for t, _ in split([text])] == expected
+
+
+def test_a_reload_takes_the_piper_timeouts_and_keeps_its_restart_fields(tmp_path):
+    local = piper(tmp_path)
+    before = local.config
+    hot = {"startup_timeout_s": 7.0, "request_timeout_s": 9.0, "restart_backoff_s": (0.5, 2.0)}
+    new = PiperConfig(**hot, chunk_ms=40.0, python="/elsewhere/python")
+    remote = SimpleNamespace(name="remote", controls=frozenset(), apply_config=lambda voice: None)
+    FallbackTTS(remote, local).apply_config(VOICE.model_copy(update={"piper": new}))
+    assert local.config.model_dump(include=set(hot)) == new.model_dump(include=set(hot))
+    assert (local.config.chunk_ms, local.config.python) == (before.chunk_ms, before.python)
+
+
+def test_the_backend_choice_is_a_restart_field_like_the_backend():
+    fields = type(VOICE).model_fields
+    for name in ("backend", "fallback_backend"):
+        assert fields[name].json_schema_extra["restart"], name

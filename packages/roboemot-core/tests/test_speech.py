@@ -76,6 +76,9 @@ class FakeBackend:
     async def warm(self, language, voice):
         pass
 
+    def apply_config(self, voice):
+        pass
+
     async def aclose(self):
         pass
 
@@ -245,15 +248,35 @@ def test_minor_appearing_after_enqueue_blocks_the_remote_route(make):
     assert out.sentences_spoken == 0 and sink.pushed == []
 
 
-def test_a_sentence_written_for_a_minor_uses_the_local_route(make):
+@pytest.mark.parametrize(
+    ("written_for_minor", "minor_now"),
+    [(True, True), (True, False)],
+    ids=["minor_present", "written_for_a_minor_who_left"],
+)
+def test_a_minors_sentence_is_spoken_by_piper_never_the_cloud_voice(
+    make, written_for_minor, minor_now
+):
+    """Owner decision 2026-10-22 (SPEC 8 TTS, 12 Data): while a minor is present, or for a
+    sentence written for one, the cloud speech voice is never asked; Piper speaks."""
     server = SpeechServer()
     remote, _ = openai_backend(server)
     local = FakeBackend()
     local.name = "piper"
-    out = make(FallbackTTS(remote, local), minor_present=lambda: True)
-    say(out, minor=True)
+    out = make(FallbackTTS(remote, local), minor_present=lambda: minor_now)
+    say(out, minor=written_for_minor)
     assert wait_for(lambda: out.sentences_spoken == 1)
     assert server.requests == [] and local.minors == [True]
+
+
+def test_an_adults_sentence_uses_the_cloud_voice_when_configured(make):
+    server = SpeechServer()
+    remote, _ = openai_backend(server)
+    local = FakeBackend()
+    local.name = "piper"
+    out = make(FallbackTTS(remote, local), minor_present=lambda: False)
+    say(out)
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    assert len(server.requests) == 1 and local.texts == []
 
 
 def test_queued_sentences_are_dropped_when_a_minor_appears_after_the_stream_ended(make):
@@ -539,6 +562,18 @@ def test_dropped_sentences_neither_replace_nor_extend_the_question_end(make):
     out.stop()  # drops the queue (barge-in, the stop keyword)
     after = out.question_end()
     assert after is not None and after <= before and after <= time.monotonic()
+
+
+def test_a_reload_reaches_the_backend(make):
+    class Configurable(FakeBackend):
+        def apply_config(self, voice):
+            self.applied = voice
+
+    backend = Configurable()
+    out = make(backend)
+    cfg = RoboEmotConfig(conversation={"language": "en"})
+    out.apply_config(cfg)
+    assert out.config is cfg and backend.applied is cfg.voice
 
 
 # ------------------------------------------------- report counters (SPEC 12A)
