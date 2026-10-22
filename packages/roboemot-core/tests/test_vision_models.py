@@ -511,6 +511,98 @@ def test_fetch_refuses_http_traversal_and_http_errors(tmp_path):
     assert not list(tmp_path.rglob("*.part"))
 
 
+class Flaky:
+    """Serves ``BODY``, dropping the connection after ``cut`` bytes for the first ``drops`` GETs."""
+
+    def __init__(self, drops: int, cut: int = 300, honour_range: bool = True, offset_bug: int = 0):
+        self.drops, self.cut, self.honour_range, self.offset_bug = (
+            drops,
+            cut,
+            honour_range,
+            offset_bug,
+        )
+        self.ranges: list[str | None] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.ranges.append(request.headers.get("range"))
+        start = 0
+        if request.headers.get("range") and self.honour_range:
+            start = int(request.headers["range"].removeprefix("bytes=").rstrip("-"))
+        body = BODY[start:]
+        status, headers = 200, {}
+        if start:
+            status = 206
+            shown = start + self.offset_bug
+            headers = {"content-range": f"bytes {shown}-{len(BODY) - 1}/{len(BODY)}"}
+        if len(self.ranges) <= self.drops:
+            return httpx.Response(status, headers=headers, content=self._cut(body))
+        return httpx.Response(status, headers=headers, content=body)
+
+    def _cut(self, body: bytes):
+        yield body[: self.cut]
+        raise httpx.RemoteProtocolError("peer closed connection")
+
+
+@pytest.fixture
+def waits(monkeypatch):
+    """Records retry waits; small chunks so bytes before a drop reach the file."""
+    monkeypatch.setattr(models, "CHUNK_BYTES", 100)
+    slept: list[float] = []
+    monkeypatch.setattr(models.time, "sleep", slept.append)
+    return slept
+
+
+def flaky(server: Flaky) -> httpx.Client:
+    return httpx.Client(transport=httpx.MockTransport(server))
+
+
+def test_fetch_resumes_a_dropped_download_from_the_bytes_written(tmp_path, waits):
+    server = Flaky(drops=2)
+    assert fetch_file(GOOD, tmp_path, flaky(server)) == "downloaded"
+    assert (tmp_path / "sub/model.onnx").read_bytes() == BODY
+    assert server.ranges == [None, "bytes=300-", "bytes=600-"]
+    assert waits == [models.RETRY_WAIT_S, models.RETRY_WAIT_S * 2]
+    assert not list(tmp_path.rglob("*.part"))
+
+
+def test_fetch_restarts_when_the_server_ignores_the_range(tmp_path, waits):
+    sized = GOOD.model_copy(update={"size_bytes": len(BODY)})
+    server = Flaky(drops=1, honour_range=False)
+    assert fetch_file(sized, tmp_path, flaky(server)) == "downloaded"
+    assert (tmp_path / "sub/model.onnx").read_bytes() == BODY
+
+
+def test_fetch_gives_up_after_the_last_attempt_and_leaves_no_orphans(tmp_path, waits):
+    server = Flaky(drops=models.DOWNLOAD_ATTEMPTS)
+    with pytest.raises(ModelError, match=r"download failed \(RemoteProtocolError\)"):
+        fetch_file(GOOD, tmp_path, flaky(server))
+    assert len(server.ranges) == models.DOWNLOAD_ATTEMPTS
+    assert len(waits) == models.DOWNLOAD_ATTEMPTS - 1
+    assert list(tmp_path.rglob("*")) == [tmp_path / "sub"]
+
+
+def test_fetch_refuses_a_resume_at_the_wrong_offset(tmp_path, waits):
+    with pytest.raises(ModelError, match="wrong offset"):
+        fetch_file(GOOD, tmp_path, flaky(Flaky(drops=1, offset_bug=1)))
+    assert list(tmp_path.rglob("*")) == [tmp_path / "sub"]
+
+
+def test_fetch_does_not_retry_http_errors(tmp_path, waits):
+    seen: list[httpx.Request] = []
+    transport = httpx.MockTransport(lambda req: seen.append(req) or httpx.Response(503))
+    with pytest.raises(ModelError, match="download failed"):
+        fetch_file(GOOD, tmp_path, httpx.Client(transport=transport))
+    assert len(seen) == 1 and waits == []
+
+
+def test_fetch_replaces_a_part_file_left_by_a_killed_run(tmp_path):
+    part = tmp_path / "sub/model.onnx.part"
+    part.parent.mkdir()
+    part.write_bytes(b"left over")
+    assert fetch_file(GOOD, tmp_path, client()) == "downloaded"
+    assert not part.exists()
+
+
 def test_fetch_unknown_name_and_status(tmp_path):
     with pytest.raises(ModelError, match="unknown"):
         fetch(["nope"], tmp_path)
