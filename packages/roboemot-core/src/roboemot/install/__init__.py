@@ -174,7 +174,7 @@ class Platform(Protocol):
     def running_app(self) -> str | None: ...
     def stop_app(self) -> None: ...
     def app_installed(self) -> bool: ...
-    def app_url(self, host: str) -> str | None: ...
+    def app_url(self, host: str, port: int | None = None) -> str | None: ...
     def start_blocker(self) -> str | None: ...
     def start(self, ui: Ui) -> None: ...
     def autostart(self) -> str | None: ...
@@ -1107,6 +1107,18 @@ def apply_app_config(
     ui.ok(f"app config {path}: {keys or 'installer keys removed'}; other keys kept")
 
 
+def configured_webui_port(remote: Remote) -> int | None:
+    """``webui.port`` in the robot's app config when it sets a positive one, else None (the
+    file was validated before the install changed anything)."""
+    config = read_app_config(remote, app_config_remote_path(remote)) or {}
+    port = (
+        (config.get("webui") or {}).get("port") if isinstance(config.get("webui"), dict) else None
+    )
+    if isinstance(port, int) and not isinstance(port, bool) and port > 0:
+        return port
+    return None
+
+
 def verify_app_config(
     remote: Remote, wanted: dict[tuple[str, ...], object], owned: set[tuple[str, ...]]
 ) -> None:
@@ -1468,7 +1480,7 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
                 else ui.confirm(f"Start {platform.app_name} now?", True)
             ):
                 platform.start(ui)
-                report_app_url(ui, platform, host)
+                report_app_url(ui, platform, host, configured_webui_port(remote))
             startup = opts.startup
             if startup is None:
                 startup = ui.confirm(
@@ -1509,9 +1521,11 @@ def stop_own_app(ui: Ui, platform: Platform, dry_run: bool) -> bool:
     return True
 
 
-def report_app_url(ui: Ui, platform: Platform, host: str) -> None:
-    """Tell where the running app's web UI is, if the platform has one."""
-    url = platform.app_url(host)
+def report_app_url(ui: Ui, platform: Platform, host: str, port: int | None = None) -> None:
+    """Tell where the running app's web UI is, if the platform has one. ``port`` is the
+    ``webui.port`` the app config sets, when the caller could read it (the installer, over
+    SSH); without it the platform's default is used (``run_on_robot.py`` has no SSH)."""
+    url = platform.app_url(host) if port is None else platform.app_url(host, port)
     if url:
         ui.ok(f"web UI: {url}")
 

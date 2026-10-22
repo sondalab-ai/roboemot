@@ -203,10 +203,10 @@ class ReachyMiniWireless:
         with _wizard_errors():
             return APP_NAME in self._api().installed_apps()
 
-    def app_url(self, host: str) -> str | None:
-        """The app's web UI address from the default ``webui.port`` (as ``custom_app_url`` in
-        the app); a ``webui.port`` override on the robot is not seen."""
-        return f"http://{host}:{RoboEmotConfig().webui.port}"
+    def app_url(self, host: str, port: int | None = None) -> str | None:
+        """The app's web UI address: ``port`` (the app config's ``webui.port``, which the app
+        also puts in ``custom_app_url``) when the caller read it, else the default."""
+        return f"http://{host}:{port or RoboEmotConfig().webui.port}"
 
     def start_blocker(self) -> str | None:
         """Why the app cannot start now, read-only: the Reachy mobile app holds the robot's

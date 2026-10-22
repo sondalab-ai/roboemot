@@ -2882,3 +2882,18 @@ def test_run_restart_refuses_while_the_mobile_app_holds_the_robot(offline, robot
     assert run_mod.main(run_args("--restart")) == 1
     assert "mobile app holds the robot (phone)" in capsys.readouterr().out
     assert daemon.mutations == before
+
+
+def test_the_installer_prints_the_web_ui_address_with_the_configured_port(
+    offline, robot, daemon, capsys
+):
+    """R4 S4 port point: a webui.port the owner set in app.yaml is the one printed."""
+    robot.dirs |= {f"{HOME}/.local", f"{HOME}/.local/share", DATA}
+    robot.files[APP_YAML] = yaml.safe_dump({"schema_version": 1, "webui": {"port": 8080}})
+    inst.run_install(options(start=True, startup=False), quiet_ui(yes=True), ROOT)
+    assert "web UI: http://127.0.0.1:8080" in capsys.readouterr().out
+
+
+def test_without_a_port_in_the_app_config_the_default_is_printed(offline, robot, daemon, capsys):
+    inst.run_install(options(start=True, startup=False), quiet_ui(yes=True), ROOT)
+    assert f"web UI: http://127.0.0.1:{RoboEmotConfig().webui.port}" in capsys.readouterr().out
