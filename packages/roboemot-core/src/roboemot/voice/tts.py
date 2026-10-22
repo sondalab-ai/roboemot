@@ -115,6 +115,13 @@ class FallbackTTS:
     def _chain(self) -> list[TTSBackend]:
         return [b for b in (self.primary, self.fallback) if b is not None]
 
+    def apply_config(self, voice: VoiceConfig) -> None:
+        """Hot reload: hand ``voice`` to each backend of the chain that takes one."""
+        for backend in self._chain():
+            apply = getattr(backend, "apply_config", None)
+            if apply is not None:
+                apply(voice)
+
     async def synthesize(
         self,
         text: str,

@@ -121,6 +121,14 @@ class SpeechOutput:
         self.sentences_dropped = 0
         self.failures = 0
 
+    def apply_config(self, config: RoboEmotConfig) -> None:
+        """Hot reload: the next sentence reads ``config``; a backend that keeps settings of its
+        own (Piper's timeouts) gets ``config.voice``."""
+        self.config = config
+        apply = getattr(self.backend, "apply_config", None)
+        if apply is not None:
+            apply(config.voice)
+
     # ----------------------------------------------------------------- lifecycle
 
     def start(self) -> None:
