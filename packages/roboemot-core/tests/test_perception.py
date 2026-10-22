@@ -390,6 +390,10 @@ def test_the_pipeline_gets_the_stage_detector_and_reports_objects_running():
     p = open_perception(CFG, Bus(), Source(), load_stages=lambda cfg, profile: stages)
     assert p.pipeline.object_detector is objs
     assert p.vision_snapshot()["objects"] == {"state": "running"}
+    snap = p.vision_snapshot()
+    assert snap["tracks"]["created"] == 0 and "lifetime_s" in snap["tracks"]
+    assert snap["attributes"] == {"state": "off"}  # the fake stages have no estimator
+    json.dumps(snap)
 
 
 def test_objects_report_off_when_the_flag_is_off_even_with_the_model_loaded():

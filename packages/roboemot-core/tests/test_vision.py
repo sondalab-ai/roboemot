@@ -1021,7 +1021,8 @@ def test_a_track_that_ends_waiting_for_a_full_queue_is_dropped_queue_full(tmp_pa
     run(pipe, 40)
     attrs = pipe.stats()["attributes"]
     assert attrs["submitted"] == 1 and attrs["dropped_queue_full"] == 1
-    assert attrs["queue_full_refusals"] >= 1
+    # the second track's crops are ready at frame 7 (0.875 s); it retries each frame to frame 11
+    assert attrs["queue_full_refusals"] == 5
 
 
 def test_attribute_worker_times_jobs_and_crops_with_its_clock():
@@ -1053,3 +1054,16 @@ def test_report_window_settings_have_defaults_and_ranges():
     for bad in ({"report_window": 5}, {"report_rate_window_s": 1.0}):
         with pytest.raises(ValidationError):
             RoboEmotConfig(vision=bad)
+
+
+def test_reset_cancels_a_waiting_job_and_counts_it_cancelled_not_track_gone(tmp_path):
+    ex = DeferredExecutor()
+    _, _, pipe, _, _ = rig(
+        tmp_path, lambda i: [face(100)], estimator=CountingEstimator(), executor=ex
+    )
+    run(pipe, 10)
+    pipe.reset()
+    run(pipe, 1, start=5.0)
+    attrs = pipe.stats()["attributes"]
+    assert attrs["submitted"] == attrs["cancelled"] == 1
+    assert attrs["completed"] == attrs["dropped_track_gone"] == 0 and attrs["queue_len"] == 0
