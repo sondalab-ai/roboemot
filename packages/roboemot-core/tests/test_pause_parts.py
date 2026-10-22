@@ -49,6 +49,29 @@ def test_the_camera_pump_reads_nothing_while_paused_and_goes_on_after():
     assert not thread.is_alive()
 
 
+def test_the_vision_service_reports_paused_and_resumes_within_one_pause_wait():
+    from roboemot.config.schema import RoboEmotConfig
+    from roboemot.vision.runner import PAUSED_WAIT_S
+    from roboemot.vision.service import VisionService
+
+    pipeline = SimpleNamespace(stats=lambda: {}, close=lambda: None, process=lambda f: None)
+    source = CountingSource()
+    service = VisionService(pipeline, source, RoboEmotConfig())
+    service.pause()
+    service.start()
+    try:
+        assert service.snapshot()["state"] == "paused"
+        time.sleep(PAUSED_WAIT_S)
+        assert source.reads == 0
+        service.resume()
+        resumed = time.monotonic()
+        assert wait_for(lambda: source.reads > 0)
+        assert time.monotonic() - resumed <= PAUSED_WAIT_S + 0.5  # one pause wait, plus slack
+        assert service.snapshot()["state"] == "running"
+    finally:
+        service.stop()
+
+
 def test_the_idle_light_reader_reads_no_frame_while_paused():
     class Sampler:
         circadian = SimpleNamespace(idle_poll_s=0.01)
