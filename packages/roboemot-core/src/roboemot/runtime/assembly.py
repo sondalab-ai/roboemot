@@ -168,7 +168,9 @@ def assemble(
     speech = host.speech = SpeechActivity(cfg.voice.echo_tail_ms)
     reflexes.speaking = speech.speaking
     phase = host.phase = ConversationPhase(speech.speaking)
-    reflex_audio = cfg.reflexes.enabled and cfg.reflexes.audio.enabled
+    # ``reflexes.audio.enabled`` is a restart field; ``reflexes.enabled`` is read live by the
+    # engine, so the level is wired even when the engine starts off and can be turned on later.
+    reflex_audio = cfg.reflexes.audio.enabled
     # The Live tab's levels ride on the hub's reflex sink (one tuple store more, no new work on
     # the microphone thread); the transcript ring is cleared whenever the robot falls asleep.
     levels = host.levels = AudioLevels(reflexes.offer_audio_level if reflex_audio else None)

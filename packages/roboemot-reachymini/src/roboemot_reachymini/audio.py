@@ -48,6 +48,7 @@ from typing import Any, NamedTuple
 
 import numpy as np
 from roboemot import shutdown
+from roboemot.config.schema import RoboEmotConfig
 from roboemot.stats import P10, P50, P90, summarise
 
 from .resample import StreamResampler
@@ -55,6 +56,7 @@ from .sdk import MiniPort
 
 log = logging.getLogger(__name__)
 JOIN_TIMEOUT_S = 2.0
+MS_PER_S = 1000.0
 IDLE_WAIT_S = 0.01
 DRAIN_MAX = 1000  # most chunks thrown away in one catch-up
 LEVEL_FLOOR_DB = -120.0  # silence, and the lowest level reported
@@ -114,7 +116,7 @@ class ReachyAudio:
     ) -> None:
         self._mini, self._sink, self._clock = mini, sink, clock
         self._period = 1.0 / poll_hz
-        self._max_gap_s = max_gap_s
+        self.max_gap_s = max_gap_s
         self._dropped = 0
         self._voice = voice
         self._voice_rate = voice_rate_hz
@@ -141,6 +143,11 @@ class ReachyAudio:
         self._state, self._reason = "off", None
         self._chunks = 0
         self._last_error: str | None = None
+
+    def apply_config(self, cfg: RoboEmotConfig) -> None:
+        """Hot reload (SPEC 11A): the stall limit follows ``reflexes.max_age_ms``. The read rate,
+        the voice queue and the level blocks are restart fields."""
+        self.max_gap_s = cfg.reflexes.max_age_ms / MS_PER_S
 
     def set_voice(self, enabled: bool) -> None:
         """Turn the voice queue on or off before ``start`` (the app learns whether a listener
@@ -410,6 +417,6 @@ class ReachyAudio:
         while not self._stop.is_set():
             now = self._clock()
             # Read what is queued, then wait out the rest of the period; after a stall, catch up.
-            used = self.poll_once(drain=now - last > self._max_gap_s)
+            used = self.poll_once(drain=now - last > self.max_gap_s)
             last = now
             self._stop.wait(IDLE_WAIT_S if used else self._period)

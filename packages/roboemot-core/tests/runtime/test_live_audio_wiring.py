@@ -57,3 +57,24 @@ def test_levels_and_transcript_are_wired_into_the_running_runtime():
         thread.join(timeout=30)
     assert not thread.is_alive()
     assert ring.size == 0  # shutdown forgets, with or without a voice listener
+
+
+def test_the_reflex_audio_is_wired_when_the_engine_starts_off():
+    """Sweep (SPEC 11A): ``reflexes.enabled`` is read live by the engine, so the microphone level
+    reaches it whenever ``reflexes.audio`` is on; turning the engine on later needs no restart."""
+    from roboemot.runtime.assembly import assemble
+
+    stack = ConfigStack.from_files(preset="default", preset_dirs=[CONFIGS / "presets"])
+    stack.set("reflexes.enabled", False, source="test", admin=True, layer="app")
+    manifest = load_manifest(
+        CONFIGS / "manifests" / "desk-head-v1.yaml",
+        allow_unmeasured_dynamics=True,
+        safety=stack.effective().safety,
+    )
+    platform = RecordingPlatform()
+    host = DaytimeHost()
+    p = assemble(host, stack, manifest, platform, platform.bind(object()))
+    try:
+        assert p.reflex_audio is True and host.levels.mic_fed
+    finally:
+        p.perception.stop()

@@ -24,7 +24,7 @@ class Recorder:
 
 def pipeline() -> SimpleNamespace:
     return SimpleNamespace(
-        hub=Recorder(), loop=Recorder(), presence=Recorder(),
+        hub=Recorder(), loop=Recorder(), presence=Recorder(), audio=Recorder(),
         world=SimpleNamespace(cfg=None), selector=SimpleNamespace(cfg=None),
         gaze=SimpleNamespace(cfg=None, margin_rad=0.0), scan=None, plugin=None,
         perception=Recorder(), runner=Recorder(), circ=Recorder(), speech=Recorder(),
@@ -89,3 +89,10 @@ def test_a_failing_part_does_not_skip_the_safety_parts_and_the_failure_is_raised
     assert any(name == "apply_config" for name, _ in p.reflexes.calls)
     assert p.gaze.cfg is cfg.attention
     assert ("set_routes", (cfg.llm_routes,)) in p.network.calls  # later steps still ran
+
+
+def test_the_audio_hub_takes_the_reload():
+    p, host = pipeline(), RuntimeHost()
+    cfg = RoboEmotConfig()
+    make_reload(host, p)(SimpleNamespace(config=cfg))
+    assert ("apply_config", (cfg,)) in p.audio.calls

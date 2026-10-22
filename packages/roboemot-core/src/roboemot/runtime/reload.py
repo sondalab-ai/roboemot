@@ -42,6 +42,7 @@ def make_reload(host: RuntimeHost, p: Pipeline) -> Callable[[Any], None]:
             ("reflexes", lambda: p.reflexes.apply_config(cfg.reflexes, margin_rad)),
             ("attention", lambda: apply_attention_config(cfg, p.world, p.selector, p.gaze)),
             ("hub", lambda: p.hub.sync(cfg)),  # the web UI check and the speech backend
+            ("audio", lambda: p.audio.apply_config(cfg)),
         ]
         if p.scan is not None:
             scan = p.scan

@@ -451,3 +451,13 @@ def test_levels_are_plain_json_and_the_chunk_is_not_kept():
     lv = levels_of([lambda x: x, lambda x: 0.5 * x])
     assert json.loads(json.dumps(lv)) == lv
     assert all(type(v) is float for k in ("ch0_dbfs", "corr") for v in lv[k].values())
+
+
+def test_a_reload_takes_the_new_stall_limit():
+    """Sweep (SPEC 11A): the catch-up limit follows ``reflexes.max_age_ms`` without a restart."""
+    from roboemot.config.schema import RoboEmotConfig
+
+    mini, _ = media([])
+    audio = ReachyAudio(mini, None, 50, max_gap_s=0.15)
+    audio.apply_config(RoboEmotConfig(reflexes={"max_age_ms": 400}))
+    assert audio.max_gap_s == 0.4
