@@ -358,6 +358,19 @@ async def test_openai_instructions_only_on_instructable_models():
     assert backend.controls == frozenset()
 
 
+async def test_openai_speech_is_never_used_while_a_minor_is_present():
+    """Owner decision 2026-10-22 (SPEC 8 TTS): a minor's sentences go to Piper, not the cloud."""
+    server = SpeechServer()
+    backend, _ = openai_backend(server)
+    assert backend.available() and not backend.available(minor_present=True)
+    with pytest.raises(TTSUnavailable):
+        async for _ in backend.synthesize(
+            "x", delivery(), language="it", voice=VOICE, minor_present=True
+        ):
+            pass
+    assert server.requests == []
+
+
 async def test_openai_unknown_route_and_spent_budget_are_unavailable():
     backend, _ = openai_backend(SpeechServer(), route(daily_token_budget=0))
     assert not backend.available()
@@ -401,6 +414,17 @@ async def test_fallback_to_piper_when_the_remote_route_fails_or_is_not_eligible(
         tts = FallbackTTS(failing, local)
         chunks = await collect(tts, "ciao")
         assert chunks[0].rate_hz == RATE and tts.last_used == "piper"
+        # a minor present: Piper speaks and the remote is never contacted
+        server = SpeechServer()
+        remote, _ = openai_backend(server)
+        tts = FallbackTTS(remote, local)
+        got = [
+            c
+            async for c in tts.synthesize(
+                "ciao", delivery(), language="it", voice=voice_cfg(), minor_present=True
+            )
+        ]
+        assert got[0].rate_hz == RATE and server.requests == [] and tts.last_used == "piper"
         # budget spent, so not eligible: the remote is never contacted
         server = SpeechServer()
         spent, _ = openai_backend(server, route(daily_token_budget=0))

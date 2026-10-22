@@ -43,15 +43,16 @@ class FakeBackend:
 
     def __init__(self, pieces=1, delay=0.0, fail=False) -> None:
         self.pieces, self.delay, self.fail = pieces, delay, fail
-        self.deliveries, self.cancelled = [], threading.Event()
+        self.deliveries, self.minors, self.cancelled = [], [], threading.Event()
         self.texts: list[str] = []
         self.started = threading.Event()
 
-    def available(self):
+    def available(self, *, minor_present=False):
         return True
 
-    async def synthesize(self, text, delivery, *, language, voice):
+    async def synthesize(self, text, delivery, *, language, voice, minor_present=False):
         self.deliveries.append(delivery)
+        self.minors.append(minor_present)
         self.texts.append(text)
         self.started.set()
         if self.fail:
@@ -80,12 +81,14 @@ class HoldingBackend(FakeBackend):
 
     HOLD_S = 30.0
 
-    async def synthesize(self, text, delivery, *, language, voice):
+    async def synthesize(self, text, delivery, *, language, voice, minor_present=False):
         if self.texts:
             self.texts.append(text)
             await asyncio.sleep(self.HOLD_S)
             return
-        async for chunk in super().synthesize(text, delivery, language=language, voice=voice):
+        async for chunk in super().synthesize(
+            text, delivery, language=language, voice=voice, minor_present=minor_present
+        ):
             yield chunk
 
 
@@ -233,18 +236,37 @@ def test_minor_appearing_after_enqueue_blocks_the_remote_route(make):
     minor["present"] = True
     gate.set()
     assert wait_for(lambda: sink.stopped_at)
-    assert server.requests == [] and local.texts == []  # no route was contacted
+    assert server.requests == [] and local.minors == []  # no route was contacted
     assert out.sentences_spoken == 0 and sink.pushed == []
 
 
-def test_a_sentence_written_for_a_minor_uses_the_remote_route(make):
-    """SPEC 8 (owner decision 2026-10-22): a minor present does not skip the speech route."""
+@pytest.mark.parametrize(
+    ("written_for_minor", "minor_now"),
+    [(True, True), (True, False)],
+    ids=["minor_present", "written_for_a_minor_who_left"],
+)
+def test_a_minors_sentence_is_spoken_by_piper_never_the_cloud_voice(
+    make, written_for_minor, minor_now
+):
+    """Owner decision 2026-10-22 (SPEC 8 TTS, 12 Data): while a minor is present, or for a
+    sentence written for one, the cloud speech voice is never asked; Piper speaks."""
     server = SpeechServer()
     remote, _ = openai_backend(server)
     local = FakeBackend()
     local.name = "piper"
-    out = make(FallbackTTS(remote, local), minor_present=lambda: True)
-    say(out, minor=True)
+    out = make(FallbackTTS(remote, local), minor_present=lambda: minor_now)
+    say(out, minor=written_for_minor)
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    assert server.requests == [] and local.minors == [True]
+
+
+def test_an_adults_sentence_uses_the_cloud_voice_when_configured(make):
+    server = SpeechServer()
+    remote, _ = openai_backend(server)
+    local = FakeBackend()
+    local.name = "piper"
+    out = make(FallbackTTS(remote, local), minor_present=lambda: False)
+    say(out)
     assert wait_for(lambda: out.sentences_spoken == 1)
     assert len(server.requests) == 1 and local.texts == []
 
@@ -392,7 +414,7 @@ def test_a_failing_minor_signal_fails_closed(make):
 
     out = make(backend, minor_present=broken)
     say(out, minor=True)
-    assert wait_for(lambda: out.sentences_spoken == 1)
+    assert wait_for(lambda: backend.minors == [True])
     say(out)  # written for adults, and the signal cannot be read: not spoken
     time.sleep(0.2)
     assert out.sentences_spoken == 1
@@ -455,9 +477,11 @@ def test_a_sentence_whose_first_push_lost_the_race_with_a_stop_never_counts_as_p
     holder = {}
 
     class Racing(FakeBackend):
-        async def synthesize(self, text, delivery, *, language, voice):
+        async def synthesize(self, text, delivery, *, language, voice, minor_present=False):
             holder["out"].stop()  # a barge-in lands after the sentence started, before its push
-            async for chunk in super().synthesize(text, delivery, language=language, voice=voice):
+            async for chunk in super().synthesize(
+                text, delivery, language=language, voice=voice, minor_present=minor_present
+            ):
                 yield chunk
 
     sink = TimelineSink()

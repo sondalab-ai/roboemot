@@ -371,6 +371,7 @@ class SpeechOutput:
                 job.delivery,
                 language=job.language,
                 voice=cfg.voice,
+                minor_present=job.minor or self._minor(),
             ):
                 if self._stale(job):
                     return
