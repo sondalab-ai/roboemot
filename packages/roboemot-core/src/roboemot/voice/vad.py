@@ -307,11 +307,11 @@ class Endpointer:
             bursts = list(self._bursts)
 
         def part(started: bool) -> dict[str, Any]:
-            chosen = [b for b in bursts if b[3] is started]
+            chosen = [(peak, on, watch) for peak, on, watch, s in bursts if s is started]
             return {
-                "peak_prob": summarise([b[0] for b in chosen], PEAK_LEVELS),
-                "longest_on_run_ms": summarise([b[1] for b in chosen], RUN_LEVELS),
-                "longest_watch_run_ms": summarise([b[2] for b in chosen], RUN_LEVELS),
+                "peak_prob": summarise([c[0] for c in chosen], PEAK_LEVELS),
+                "longest_on_run_ms": summarise([c[1] for c in chosen], RUN_LEVELS),
+                "longest_watch_run_ms": summarise([c[2] for c in chosen], RUN_LEVELS),
             }
 
         return {
