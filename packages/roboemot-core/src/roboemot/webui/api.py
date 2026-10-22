@@ -298,9 +298,8 @@ class WebApi:
         self.pins = pin_store
         self.clock = clock
         self.now = now
-        web = self.config.webui
-        self.sessions = Sessions(web)
-        self.limiter = LoginLimiter(web, pin_store.version())
+        self.sessions = Sessions(lambda: self.web)
+        self.limiter = LoginLimiter(lambda: self.web, pin_store.version())
         self._hashing = threading.Semaphore(1)
 
     @property

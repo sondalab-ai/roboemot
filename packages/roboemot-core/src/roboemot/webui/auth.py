@@ -14,6 +14,7 @@ import os
 import secrets
 import threading
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -119,13 +120,18 @@ class Sessions:
     """Sessions keyed by the hash of an unguessable cookie token.
 
     A session ends after ``session_ttl_s`` idle, after ``session_max_s`` in all, and when the
-    PIN file it was created under has been replaced.
+    PIN file it was created under has been replaced. ``web`` returns the current web UI config,
+    read on every call, so a value changed at runtime applies at once (SPEC 11A, 12).
     """
 
-    def __init__(self, cfg: WebUIConfig) -> None:
-        self.cfg = cfg
+    def __init__(self, web: Callable[[], WebUIConfig]) -> None:
+        self._web = web
         self._items: OrderedDict[str, Session] = OrderedDict()
         self._lock = threading.Lock()
+
+    @property
+    def cfg(self) -> WebUIConfig:
+        return self._web()
 
     @staticmethod
     def _key(token: str) -> str:
@@ -196,17 +202,22 @@ class LoginLimiter:
     Loopback (another process on the robot's own host) has its own finite budget,
     ``loopback_max_attempts``, with its own back-off and lockout. The two budgets are
     independent: loopback failures never lock LAN clients and a LAN lockout never blocks
-    loopback. A new PIN file (``sync``) or an app restart clears everything.
+    loopback. A new PIN file (``sync``) or an app restart clears everything. ``web`` returns the
+    current web UI config, read on every attempt, so a tighter budget applies at once.
     """
 
-    def __init__(self, cfg: WebUIConfig, pin_version: int = 0) -> None:
-        self.cfg = cfg
+    def __init__(self, web: Callable[[], WebUIConfig], pin_version: int = 0) -> None:
+        self._web = web
         self._lan = _Pool()
         self._local = _Pool()
         self._local_client = _Client()
         self._clients: OrderedDict[str, _Client] = OrderedDict()
         self._version = pin_version
         self._lock = threading.Lock()
+
+    @property
+    def cfg(self) -> WebUIConfig:
+        return self._web()
 
     def sync(self, pin_version: int) -> None:
         """Forget all limits when the PIN file changed (the CLI ``set-pin`` clears a lockout)."""

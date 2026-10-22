@@ -3186,7 +3186,12 @@ class WebUIConfig(Strict):
         admin_only=True,
     )
     max_connections: int = param(
-        32, "Simultaneous connections served; more are refused", ge=1, le=256, conservative="lower"
+        32,
+        "Simultaneous connections served; more are refused",
+        ge=1,
+        le=256,
+        conservative="lower",
+        restart=True,
     )
     request_deadline_s: float = param(
         15.0,

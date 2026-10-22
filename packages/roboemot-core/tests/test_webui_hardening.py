@@ -444,3 +444,90 @@ def test_stop_between_thread_creation_and_start_does_not_join_an_unstarted_threa
     monkeypatch.setattr(threading.Thread, "start", start_after_stop)
     srv.start()
     srv.stop()
+
+
+# ------------------------------------------------------------- R3 SF2: security fields apply live
+
+
+def live_api(tmp_path, **webui):
+    """A WebApi over a config stack, as the runtime builds it (the config is a callable)."""
+    from roboemot.config.stack import ConfigStack
+
+    stack = ConfigStack(app={"webui": {"pin_lockout_s": 60, "client_backoff_s": 0.1} | webui})
+    pins = PinStore(tmp_path)
+    pins.set(PIN)
+    clock = Clock()
+    return WebApi(FakeService(), Diagnostics(), stack.effective, pins, clock=clock), clock, stack
+
+
+def get(api, path, cookie):
+    headers = {"host": "192.168.1.2:8042", "cookie": cookie}
+    return api.handle(Request("GET", path, headers, b"", REMOTE))
+
+
+def cookie_of(resp):
+    return resp.cookies[0].split(";")[0]
+
+
+def test_a_tighter_session_ttl_applies_without_a_restart(tmp_path):
+    api, clock, stack = live_api(tmp_path, session_ttl_s=900)
+    cookie = cookie_of(login(api, PIN))
+    stack.set("webui.session_ttl_s", 120)
+    clock.now += 121
+    assert get(api, "/api/registry", cookie).status == 401
+
+
+def test_a_tighter_session_max_and_max_sessions_apply_without_a_restart(tmp_path):
+    api, clock, stack = live_api(tmp_path, max_sessions=8)
+    first = cookie_of(login(api, PIN))
+    second = cookie_of(login(api, PIN))
+    stack.set("webui.max_sessions", 1)
+    third = cookie_of(login(api, PIN))
+    assert get(api, "/api/registry", first).status == 401
+    assert get(api, "/api/registry", second).status == 401
+    assert get(api, "/api/registry", third).status == 200
+    stack.set("webui.session_max_s", 600)
+    clock.now += 601
+    assert get(api, "/api/registry", third).status == 401
+
+
+def test_a_tighter_pin_budget_applies_without_a_restart(tmp_path):
+    api, clock, stack = live_api(tmp_path, pin_max_attempts=10)
+    stack.set("webui.pin_max_attempts", 2)
+    assert login(api, "000000").status == 401
+    clock.now += 1
+    assert login(api, "000000").status == 401
+    clock.now += 1
+    assert login(api, PIN, ip="192.168.1.77").status == 429  # the LAN pool is locked
+
+
+def test_server_limits_follow_the_config_or_need_a_restart(tmp_path):
+    """frame_ancestors and the request deadlines are read per connection; the connection cap is a
+    semaphore built once, so it is a restart field and the web UI says so."""
+    from roboemot.config import field_meta
+    from roboemot.config.stack import ConfigStack
+
+    assert field_meta("webui.max_connections").get("restart") is True
+    for path in ("webui.frame_ancestors", "webui.request_deadline_s", "webui.request_timeout_s"):
+        assert not field_meta(path).get("restart"), path
+    stack = ConfigStack(
+        app={"webui": {"bind": "127.0.0.1", "port": 0, "frame_ancestors": "'self'"}}
+    )
+    srv = make_server(FakeService(), Diagnostics(), stack.effective, tmp_path).start()
+    try:
+        stack.set("webui.frame_ancestors", "'none'", admin=True)
+        csp = Client(srv.port).request("GET", "/").headers["Content-Security-Policy"]
+        assert csp.endswith("frame-ancestors 'none'")
+        stack.set("webui.request_deadline_s", 1)
+        sock = socket.create_connection(("127.0.0.1", srv.port), timeout=5)
+        start = time.monotonic()
+        sock.sendall(b"GET /api/strings HTTP/1.0\r\n")  # never finished
+        sock.settimeout(4)
+        try:
+            closed = sock.recv(1) == b""
+        except OSError:
+            closed = True
+        sock.close()
+        assert closed and time.monotonic() - start < 3
+    finally:
+        srv.stop()
