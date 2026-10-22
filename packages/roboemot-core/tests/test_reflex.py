@@ -920,7 +920,9 @@ NEUTRAL = {
         "release_fraction", "proximity_rearm_ratio", "latency_window", "rules",
         "audio", "onset_watch_ratio", "onset_window",
     },
-    ReflexAudioConfig: {"poll_hz", "loud_event_ratio", "loud_event_refractory_s"},
+    ReflexAudioConfig: {
+        "poll_hz", "loud_event_ratio", "loud_event_refractory_s", "level_block_s", "level_window",
+    },
     # trigger, primitive, threshold and enabled have per-trigger rules in reflex_violations
     ReflexRule: {"name", "trigger", "primitive", "threshold", "enabled"},
 }  # fmt: skip

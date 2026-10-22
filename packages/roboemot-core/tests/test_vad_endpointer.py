@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 from roboemot.config.schema import VadConfig
@@ -219,3 +221,128 @@ def test_mutating_the_input_after_feed_does_not_change_the_audio():
         events += ep.feed(buf[: len(chunk)], T0 + i / RATE)
         buf[:] = 0.0
     np.testing.assert_array_equal(kinds(events, SpeechEnd)[0].audio, ref)
+
+
+class ScriptedVAD:
+    """Backend that returns the scripted probabilities, one per frame (then 0)."""
+
+    rate_hz = RATE
+    frame_samples = FRAME
+
+    def __init__(self, probs):
+        self.probs = list(probs)
+        self.resets = 0
+
+    def speech_prob(self, frame):
+        return self.probs.pop(0) if self.probs else 0.0
+
+    def reset(self):
+        self.resets += 1
+
+
+def scripted(probs, config=None, extra_frames=0):
+    """An Endpointer over ``ScriptedVAD(probs)`` after feeding one frame per probability."""
+    ep = Endpointer(ScriptedVAD(probs), config or cfg())
+    silence = np.zeros(FRAME, np.float32)
+    for i in range(len(probs) + extra_frames):
+        ep.feed(silence, T0 + i * FRAME_S)
+    return ep
+
+
+def test_a_burst_that_starts_speech_is_recorded_as_started():
+    # min_speech_ms 100 = 5 frames; the burst is 2 frames at 0.3, then 6 frames at 0.8/0.9
+    ep = scripted([0.0, 0.3, 0.35, 0.8, 0.9, 0.8, 0.8, 0.8, 0.8])
+    snap = ep.snapshot()
+    assert snap["started"]["peak_prob"] == {
+        "count": 1,
+        "p50": 0.9,
+        "p90": 0.9,
+        "p99": 0.9,
+        "max": 0.9,
+    }
+    assert snap["started"]["longest_on_run_ms"]["max"] == pytest.approx(5 * FRAME_S * 1000)
+    assert snap["not_started"] == {
+        "peak_prob": {"count": 0},
+        "longest_on_run_ms": {"count": 0},
+    }
+    assert snap["starts"] == 1
+
+
+def test_a_burst_that_does_not_start_speech_keeps_its_peak_and_longest_run():
+    # frames at or above 0.5 form runs of 2 and 3 inside one burst (0.3 keeps it open)
+    ep = scripted([0.0, 0.6, 0.7, 0.3, 0.5, 0.55, 0.9, 0.3, 0.0, 0.1])
+    snap = ep.snapshot()
+    assert snap["starts"] == 0
+    peak = snap["not_started"]["peak_prob"]
+    assert peak["count"] == 1 and peak["max"] == 0.9
+    run = snap["not_started"]["longest_on_run_ms"]
+    assert run["max"] == pytest.approx(3 * FRAME_S * 1000) and run["p50"] == run["max"]
+    assert snap["started"]["peak_prob"] == {"count": 0}
+
+
+def test_a_burst_ends_at_the_first_frame_below_watch_prob():
+    ep = scripted([0.3, 0.3, 0.1, 0.4, 0.0])
+    peaks = ep.snapshot()["not_started"]["peak_prob"]
+    assert peaks["count"] == 2 and peaks["p50"] == 0.3 and peaks["max"] == 0.4
+    assert ep.snapshot()["not_started"]["longest_on_run_ms"]["max"] == 0.0
+
+
+def test_reset_in_the_middle_of_a_burst_records_nothing_and_keeps_counters():
+    ep = scripted([0.0, 0.6, 0.7])
+    ep.reset()
+    ep.feed(np.zeros(FRAME, np.float32), T0 + 10)  # the next frame (prob 0) must not close it
+    snap = ep.snapshot()
+    assert snap["not_started"]["peak_prob"] == {"count": 0}
+    assert snap["frames"] == 4 and snap["frames_on"] == 2
+
+
+def test_counters_follow_frames_starts_and_both_ways_to_end():
+    # 6 on frames start speech, 10 silent frames (200 ms) end it; 70 more (1.4 s) are cut at 1 s
+    probs = [0.9] * 6 + [0.0] * 10 + [0.9] * 70
+    ep = scripted(probs, cfg(max_utterance_s=1))
+    snap = ep.snapshot()
+    assert snap["frames"] == len(probs)
+    assert snap["frames_on"] == 76
+    assert snap["ends_silence"] == 1
+    assert snap["ends_max_length"] == 1
+    assert snap["starts"] == 3  # the first, the second, and the one the cut continues into
+
+
+def test_watch_prob_above_threshold_watches_from_threshold():
+    ep = scripted([0.55, 0.0, 0.2, 0.0], cfg(threshold=0.5, watch_prob=0.9))
+    snap = ep.snapshot()
+    assert snap["watch_prob"] == 0.5
+    assert snap["not_started"]["peak_prob"]["count"] == 1
+
+
+def test_watch_window_keeps_only_the_latest_bursts():
+    ep = scripted([0.3, 0.0] * 12, cfg(watch_window=10))
+    snap = ep.snapshot()
+    assert snap["window"] == 10 and snap["not_started"]["peak_prob"]["count"] == 10
+
+
+def test_snapshot_is_plain_json():
+    ep = scripted([np.float32(0.3), np.float32(0.0), np.float32(0.9)] * 4)
+    snap = ep.snapshot()
+    assert json.loads(json.dumps(snap)) == snap
+
+
+def test_watch_settings_have_defaults_and_ranges():
+    from pydantic import ValidationError
+    from roboemot.config.schema import ReflexAudioConfig
+
+    vad, audio = VadConfig(), ReflexAudioConfig()
+    assert (vad.watch_prob, vad.watch_window) == (0.2, 500)
+    assert (audio.level_block_s, audio.level_window) == (1.0, 300)
+    for model, field, bad in [
+        (VadConfig, "watch_prob", 0.0),
+        (VadConfig, "watch_prob", 0.96),
+        (VadConfig, "watch_window", 9),
+        (VadConfig, "watch_window", 10001),
+        (ReflexAudioConfig, "level_block_s", 0.05),
+        (ReflexAudioConfig, "level_block_s", 61),
+        (ReflexAudioConfig, "level_window", 9),
+        (ReflexAudioConfig, "level_window", 10001),
+    ]:
+        with pytest.raises(ValidationError):
+            model(**{field: bad})

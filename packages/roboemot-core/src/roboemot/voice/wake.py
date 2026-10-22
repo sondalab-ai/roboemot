@@ -18,6 +18,14 @@ import math
 import threading
 from typing import Any
 
+DECISIONS = (
+    "not_required",
+    "wake_word",
+    "window",
+    "rejected_no_window",
+    "rejected_other_speaker",
+)
+
 
 class WakeGate:
     """Thread-safe addressed-window state machine; stamps are in the audio clock (seconds)."""
@@ -30,6 +38,7 @@ class WakeGate:
         self._until = -math.inf
         self._opened = -math.inf
         self._speaker: str | None = None
+        self._decisions = dict.fromkeys(DECISIONS, 0)
 
     def apply(self, policy: str, window_s: float, max_s: float = math.inf) -> None:
         """Take a reloaded policy and window lengths; an open window stays open."""
@@ -51,25 +60,34 @@ class WakeGate:
                 self._policy == "unless_enrolled_in_view" and not enrolled_in_view
             )
             if not required:
+                self._decisions["not_required"] += 1
                 return True
             if wake_word:
                 self._opened, self._speaker = last_speech, speaker
-            elif not self._follows(start, speaker):
+                outcome = "wake_word"
+            else:
+                outcome = self._follow(start, speaker)
+            self._decisions[outcome] += 1
+            if outcome.startswith("rejected"):
                 return False
             self._until = min(last_speech + self._window, self._opened + self._max)
             return True
 
-    def _follows(self, start: float, speaker: str | None) -> bool:
-        """Whether an utterance without the wake word falls in the open window (lock held)."""
+    def _follow(self, start: float, speaker: str | None) -> str:
+        """Outcome of an utterance without the wake word: ``window`` when it falls in the open
+        window (same person if both are known), else the ``rejected_*`` reason (lock held)."""
         if start > self._until:
-            return False
-        return speaker is None or self._speaker is None or speaker == self._speaker
+            return "rejected_no_window"
+        if speaker is None or self._speaker is None or speaker == self._speaker:
+            return "window"
+        return "rejected_other_speaker"
 
     def snapshot(self, now: float) -> dict[str, Any]:
-        """Policy and window state for the debug report (no content)."""
+        """Policy, window state and decision counts for the debug report (no content)."""
         with self._lock:
             return {
                 "policy": self._policy,
                 "window_open": now <= self._until,
                 "window_left_s": max(0.0, self._until - now) if math.isfinite(self._until) else 0.0,
+                "decisions": dict(self._decisions),
             }

@@ -22,6 +22,10 @@ and nothing else may read the SDK. Two consumers:
   ``snapshot()``, and the next chunk carries ``gap=True``. A chunk with non-finite samples is
   replaced by silence of the same length, also marked ``gap``.
 
+The levels of the two microphone channels (RMS in dBFS, mono mix, correlation) are kept per block
+of ``level_block_s`` input seconds for the debug report, to tell two live microphones from one
+silent or anti-phase channel (SPEC 12A); only running sums leave a chunk, never samples.
+
 Voice stamps are approximate, monotone and not capture times: the newest chunk of a read ends
 at the read time, earlier chunks of one drained batch end one chunk duration before the next,
 and the resampler's lookahead is subtracted.
@@ -44,6 +48,7 @@ from typing import Any, NamedTuple
 
 import numpy as np
 from roboemot import shutdown
+from roboemot.stats import P10, P50, P90, summarise
 
 from .resample import StreamResampler
 from .sdk import MiniPort
@@ -52,6 +57,9 @@ log = logging.getLogger(__name__)
 JOIN_TIMEOUT_S = 2.0
 IDLE_WAIT_S = 0.01
 DRAIN_MAX = 1000  # most chunks thrown away in one catch-up
+LEVEL_FLOOR_DB = -120.0  # silence, and the lowest level reported
+DB_PER_DECADE = 20.0  # amplitude ratio to dB
+LEVEL_QUANTILES = {"p10": P10, "p50": P50, "p90": P90}
 
 
 def chunk_rms(chunk: Any) -> float | None:
@@ -101,6 +109,8 @@ class ReachyAudio:
         voice: bool = False,
         voice_rate_hz: int = 16000,
         voice_queue_s: float = 10.0,
+        level_block_s: float = 1.0,
+        level_window: int = 300,
     ) -> None:
         self._mini, self._sink, self._clock = mini, sink, clock
         self._period = 1.0 / poll_hz
@@ -118,6 +128,10 @@ class ReachyAudio:
         self._voice_gap = False  # the next queued chunk follows a loss
         self._voice_closed = False
         self._voice_frames = 0
+        self._level_block_s = level_block_s
+        self._level_lock = threading.Lock()
+        self._level_blocks: deque[tuple[float, float, float, float]] = deque(maxlen=level_window)
+        self._level_reset()
         self._in_rate: int | None = None
         self._in_channels: int | None = None
         self._resampler: StreamResampler | None = None
@@ -154,8 +168,63 @@ class ReachyAudio:
                     "dropped": self._voice_dropped,
                     "dropped_samples": self._voice_dropped_samples,
                     "sanitised": self._voice_sanitised,
+                    "levels": self._levels_report(),
                 }
         return snap
+
+    def _level_reset(self) -> None:
+        """Zero the running sums of the block in progress (the finished blocks stay)."""
+        self._level_sums = [0.0] * 4  # x0^2, x1^2, mono^2, x0*x1
+        self._level_n = 0
+
+    def _accumulate_levels(self, chunk: np.ndarray) -> None:
+        """Add a finite ``(n, 2+)`` chunk to the running sums; close the block once it holds
+        ``level_block_s`` seconds of input (the chunk that crosses the limit completes it)."""
+        x = chunk.astype(np.float64, copy=False)
+        x0, x1, mono = x[:, 0], x[:, 1], x.mean(axis=1)
+        add = (float(x0 @ x0), float(x1 @ x1), float(mono @ mono), float(x0 @ x1))
+        with self._level_lock:
+            self._level_sums = [a + b for a, b in zip(self._level_sums, add, strict=True)]
+            self._level_n += x.shape[0]
+            if self._level_n >= self._level_block_s * (self._in_rate or 1):
+                self._level_blocks.append(self._close_block())
+                self._level_reset()
+
+    def _close_block(self) -> tuple[float, float, float, float]:
+        """(ch0 dBFS, ch1 dBFS, mono dBFS, correlation) of the running sums; the lock is held."""
+        s0, s1, sm, cross = self._level_sums
+
+        def dbfs(power_sum: float) -> float:
+            rms = math.sqrt(power_sum / self._level_n)
+            return (
+                max(LEVEL_FLOOR_DB, DB_PER_DECADE * math.log10(rms)) if rms > 0 else LEVEL_FLOOR_DB
+            )
+
+        norm = math.sqrt(s0 * s1)
+        corr = max(-1.0, min(1.0, cross / norm)) if norm > 0 else 0.0
+        return dbfs(s0), dbfs(s1), dbfs(sm), corr
+
+    def _levels_report(self) -> dict[str, Any] | None:
+        """Block count and summaries of the channel levels, or None before the first block (and
+        for a mono input, which never makes one)."""
+        with self._level_lock:
+            blocks = list(self._level_blocks)
+        if not blocks:
+            return None
+
+        def summary(i: int, *, with_min: bool = False) -> dict[str, float]:
+            out = summarise([b[i] for b in blocks], LEVEL_QUANTILES, with_min=with_min)
+            del out["count"]
+            return out
+
+        return {
+            "block_s": self._level_block_s,
+            "blocks": len(blocks),
+            "ch0_dbfs": summary(0),
+            "ch1_dbfs": summary(1),
+            "mono_dbfs": summary(2),
+            "corr": summary(3, with_min=True),
+        }
 
     def read(self, timeout: float = 0.0) -> VoiceChunk | None:
         """Pop the oldest voice chunk, waiting up to ``timeout`` s; ``None`` if there is none
@@ -196,6 +265,7 @@ class ReachyAudio:
             with self._voice_cond:
                 self._voice_q.clear()
                 self._voice_queued, self._voice_gap, self._voice_closed = 0, False, False
+            self._level_reset()
             self._open_voice(media)
         self._set("no_data", "no audio chunk read yet")
         self._stop.clear()
@@ -239,6 +309,8 @@ class ReachyAudio:
         bad = not np.isfinite(mono).all()
         if bad:
             mono = np.zeros_like(mono)
+        elif chunk.ndim == 2 and chunk.shape[1] >= 2:
+            self._accumulate_levels(chunk)
         if self._resampler is not None:
             mono = self._resampler.process(mono)
             stamp = end_stamp - self._resampler.lookahead_s

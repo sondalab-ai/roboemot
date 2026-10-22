@@ -59,6 +59,8 @@ class ReachyMiniSession:
             voice=cfg.voice.enabled,
             voice_rate_hz=cfg.voice.sample_rate_hz,
             voice_queue_s=cfg.voice.capture_queue_s,
+            level_block_s=cfg.reflexes.audio.level_block_s,
+            level_window=cfg.reflexes.audio.level_window,
         )
 
     def speaker(
