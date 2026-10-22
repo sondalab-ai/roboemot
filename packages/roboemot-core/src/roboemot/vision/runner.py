@@ -85,6 +85,9 @@ class LatestFrameRunner:
         self._started: float | None = None
         self._cond = threading.Condition()
         self._frame: Frame | None = None
+        self._watch_until = float("-inf")
+        self._latest: tuple[Frame, int] | None = None
+        self._seq = 0
         self._stop = False
         self._thread: threading.Thread | None = None
 
@@ -98,8 +101,31 @@ class LatestFrameRunner:
             if self._frame is not None:
                 self.dropped += 1
             self._frame = frame
-            self._arrived.append(self._clock())
+            now = self._clock()
+            self._arrived.append(now)
+            self._seq += 1
+            self._latest = (frame, self._seq) if now < self._watch_until else None
             self._cond.notify()
+
+    def watch(self, window_s: float) -> None:
+        """Keep a reference to the newest submitted frame for the next ``window_s`` seconds (the
+        web UI's live preview, SPEC 11A). With nobody watching ``submit`` keeps nothing: one
+        clock comparison, no copy. The window lapses on its own and the next ``submit`` after it
+        drops the reference."""
+        with self._cond:
+            self._watch_until = self._clock() + window_s
+
+    def latest(self) -> tuple[Frame, int] | None:
+        """The newest frame submitted while watched and its sequence number, or None. The frame
+        is shared with the pipeline: read it, never write to it."""
+        with self._cond:
+            return self._latest
+
+    def unwatch(self) -> None:
+        """Stop watching now and drop the kept frame (viewing stopped, flag off, robot asleep)."""
+        with self._cond:
+            self._watch_until = float("-inf")
+            self._latest = None
 
     def rates(self) -> dict[str, float]:
         """Frames per second handed in and processed over the last ``RATE_WINDOW_S`` seconds.

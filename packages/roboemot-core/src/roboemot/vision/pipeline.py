@@ -144,6 +144,7 @@ class VisionPipeline:
         self.camera_model = camera_model
         self.world = world or WorldConfig()
         self.face_tap: FaceTap | None = None
+        self._visible: list[Track] = []
         self.light_tap: LightTap | None = None
         self.governor = governor or RateGovernor(cfg.rates)
         self.face_detector = face_detector
@@ -340,6 +341,7 @@ class VisionPipeline:
         min_px = self.cfg.face_min_px
         dets = [d for d in self.face_detector.detect(frame.image) if d.min_side >= min_px]
         result = self.face_tracker.update(dets, frame.stamp)
+        self._visible = result.visible
         for track_id in result.removed_ids:
             self._drop_face(track_id)
         for track in result.visible:
@@ -355,6 +357,17 @@ class VisionPipeline:
             except Exception as exc:
                 log.warning("face tap failed: %s", type(exc).__name__)
         self._publish("percept.face_frame", frame.stamp, frame.stamp)
+
+    def face_overlay(self) -> list[tuple[Box, str | None]]:
+        """The visible face tracks of the last processed frame as ``(box in pixels, owner_id or
+        None)``, for the web UI's live preview. Read on demand from another thread; no cost per
+        frame beyond one reference swap."""
+        visible = self._visible
+        out: list[tuple[Box, str | None]] = []
+        for track in visible:
+            state = self._faces.get(track.track_id)
+            out.append((track.box, state.owner_id if state is not None else None))
+        return out
 
     def _face_due(self, track: Track, state: _FaceState, stamp: float) -> bool:
         if track.score < self.cfg.tracker.high_score or track.detection is None:

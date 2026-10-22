@@ -2971,8 +2971,8 @@ class RuntimeConfig(Strict):
 
 
 class LiveConfig(Strict):
-    """The web UI's Live tab: inner state, audio levels and an opt-in transcript (SPEC 11A, 12).
-    No audio samples and no video."""
+    """The web UI's Live tab: inner state, audio levels, an opt-in transcript and an opt-in video
+    preview (SPEC 11A, 12). No audio samples; video frames are never kept."""
 
     enabled: bool = param(
         False,
@@ -3044,6 +3044,45 @@ class LiveConfig(Strict):
         "Most text characters one Live poll carries; a longer list sends its newest turns",
         ge=1000,
         le=200000,
+    )
+    video: bool = param(
+        False,
+        "Serve a live camera preview (one JPEG at a time, with face boxes and names) to the Live "
+        "tab for a logged-in page; needs webui.live.enabled. Off by default because it shows the "
+        "room. Frames are never saved or logged; the page shows a banner while it is watched",
+        opt_in=True,
+    )
+    video_fps: float = param(
+        3.0,
+        "How often the open Live tab asks for a preview frame; a faster poll is served the "
+        "cached picture",
+        unit="hz",
+        ge=0.5,
+        le=10,
+    )
+    video_max_width: int = param(
+        320,
+        "Widest preview picture; a wider camera frame is scaled down before it is encoded",
+        unit="px",
+        ge=80,
+        le=1280,
+    )
+    video_jpeg_quality: int = param(
+        60, "JPEG quality of the preview (higher is bigger and slower)", ge=20, le=95
+    )
+    viewer_window_s: float = param(
+        6.0,
+        "A page counts as watching the video until this long after the last frame it was sent",
+        unit="s",
+        ge=1,
+        le=60,
+    )
+    banner_poll_ms: int = param(
+        3000,
+        "How often every open page asks whether someone is watching the video (the banner)",
+        unit="ms",
+        ge=1000,
+        le=30000,
     )
 
 
