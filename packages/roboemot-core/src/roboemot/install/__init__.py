@@ -80,7 +80,6 @@ PIN_FILE = "webui_pin.json"  # roboemot.webui.auth.PIN_FILE, inside the app data
 PIN_RETRIES = 3
 DEFAULT_SECRET_NAME = "cloud_key"  # the name configs/companion.yaml gives the cloud route key
 MIB = 1024 * 1024
-VISION_DERIVED_BYTES = 170_000_000  # INT8 files made from the FP32 weights ("0.17 GB", models CLI)
 PIPER_TTS_VERSION = "1.8.0"  # exact pin: the worker protocol is tested against this API
 PLATFORM_PROBE = (
     "import sys, platform; print(platform.machine()); print('%d.%d' % sys.version_info[:2])"
@@ -500,7 +499,7 @@ def models_label(vision: bool) -> str:
 def models_bytes(vision: bool, peak: bool = True) -> int:
     """Disk the fetch needs, from the pinned manifests: each file's download size plus, for a
     zip archive, its unpacked size (both exist while it unpacks; ``peak=False`` counts only what
-    stays). Vision adds the INT8 files derived from the FP32 weights (``VISION_DERIVED_BYTES``)."""
+    stays)."""
     from ..vision import models as vision_models
     from ..voice import models as voice_models
 
@@ -511,7 +510,7 @@ def models_bytes(vision: bool, peak: bool = True) -> int:
     for f in (f for m in specs for f in m.files):
         stays = f.unpacked_bytes if f.archive else f.size_bytes
         total += (f.size_bytes or 0) + (f.unpacked_bytes or 0) if peak else (stays or 0)
-    return total + (VISION_DERIVED_BYTES if vision else 0)
+    return total
 
 
 def free_mib_at(remote: Remote, path: str) -> int | None:

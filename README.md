@@ -131,7 +131,7 @@ What goes onto the robot besides the two wheels:
   Uninstall removes the models with the data folder (or, when the data folder was already there,
   the model folders the installer created).
 - **Vision is on by default.** The installer also installs the `vision` extra (OpenCV, ONNX) and
-  fetches the vision weights (about 1.4 GB of disk together with the voice models while downloading, INT8 files included; the figure is computed from the pinned manifests); `--no-vision` skips both,
+  fetches the vision weights (about 0.53 GB of disk together with the voice models while downloading; the figure is computed from the pinned manifests); `--no-vision` skips both,
   and then the app logs "vision unavailable" and runs without it. If the free space is short the
   models step is skipped with a warning that suggests `--no-vision`; a re-run over an install
   made with `--no-vision` adds the extra and the weights.

@@ -843,7 +843,10 @@ def test_models_folder_that_was_already_there_is_not_recorded(offline, robot, da
 
 def test_model_sizes_come_from_the_pinned_manifests():
     assert 0 < inst.models_bytes(False) < inst.models_bytes(True)
-    assert inst.models_bytes(True) - inst.models_bytes(False) > inst.VISION_DERIVED_BYTES
+    from roboemot.vision import models as vision_models
+
+    vision = sum(f.size_bytes for s in vision_models.load_manifest().values() for f in s.files)
+    assert inst.models_bytes(True) - inst.models_bytes(False) == vision
 
 
 def test_with_extras_marks_only_the_core_wheel():
