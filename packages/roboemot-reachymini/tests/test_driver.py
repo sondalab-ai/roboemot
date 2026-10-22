@@ -379,10 +379,30 @@ def test_motors_enabled_does_not_consume_the_sdk_status_event():
     assert mini.client.status_received.is_set()
 
 
-def test_grace_outlasts_the_sleep_wait_plus_one_status_period():
+STATUS_BUILD_S = 0.3  # the status thread builds the status before its 1 s sleep (loaded CM4)
+MIN_JERK_TAIL_S = 0.5  # a short min-jerk goto reads as still this long before it ends
+GRACE_MARGIN_S = 0.5  # kept in hand for scheduling on a saturated CPU
+
+
+def test_grace_outlasts_the_sleep_wait_a_slow_status_and_old_state():
     """SPEC 4A, 12A: motors-off comes ``SLEEP_MOTORS_OFF_DELAY_S`` after the sleep move and is
-    in the status up to ``status_period_s`` later; the resume grace must outlast both."""
+    in the status up to a period (plus its build time) later, through a queue up to
+    ``max_state_age_s`` old, while stillness may start in the move's min-jerk tail. The pose
+    comes through the same queue as the status, so that age delays both alike and cancels."""
     from roboemot_reachymini.driver import SLEEP_MOTORS_OFF_DELAY_S
 
     grace = ConfigStack().effective().motion.platform_move_grace_s
-    assert grace > SLEEP_MOTORS_OFF_DELAY_S + ReachyMiniDriver.status_period_s
+    status = ReachyMiniDriver.status_period_s + STATUS_BUILD_S
+    assert grace > SLEEP_MOTORS_OFF_DELAY_S + status + MIN_JERK_TAIL_S + GRACE_MARGIN_S
+
+
+def test_head_values_round_trip_near_gimbal_lock():
+    rng = np.random.default_rng(3)
+    for pitch in (math.pi / 2 - 1e-9, -math.pi / 2 + 1e-9, math.pi / 2 - 1e-4):
+        vals = {
+            "head.roll": rng.uniform(-1, 1),
+            "head.pitch": pitch,
+            "head.yaw": rng.uniform(-1, 1),
+        }
+        m = head_matrix(vals)
+        np.testing.assert_allclose(head_matrix(head_values(m)), m, atol=1e-8)

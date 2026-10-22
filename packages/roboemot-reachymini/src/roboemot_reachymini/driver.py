@@ -41,8 +41,11 @@ from .sdk import ClientPort
 HEAD_ANGLES = ("head.roll", "head.pitch", "head.yaw")
 HEAD_TRANSLATIONS = ("head.x", "head.y", "head.z")
 ANTENNAS = ("antenna_right", "antenna_left")  # SDK order
-DAEMON_STATUS_PERIOD_S = 1.0  # the daemon's status thread (reachy_mini io/ws_server.py)
-SLEEP_MOTORS_OFF_DELAY_S = 2.0  # goto_sleep: motors disabled this long after the move (SPEC 4A)
+# SDK 1.12 facts, to re-check on an SDK bump: the status thread builds the status, then sleeps
+# 1 s (daemon/daemon.py:872-882), so its period is a little over this; goto_sleep disables the
+# motors after a 2 s asyncio.sleep that follows its last goto (daemon/backend/abstract.py:1370).
+DAEMON_STATUS_PERIOD_S = 1.0
+SLEEP_MOTORS_OFF_DELAY_S = 2.0
 
 
 def head_matrix(values: dict[str, float]) -> np.ndarray:
@@ -69,7 +72,7 @@ def head_values(matrix: Any) -> dict[str, float]:
     m = np.asarray(matrix, dtype=float).reshape(4, 4).tolist()
     return {
         "head.roll": math.atan2(m[2][1], m[2][2]),
-        "head.pitch": math.asin(max(-1.0, min(1.0, -m[2][0]))),
+        "head.pitch": math.atan2(-m[2][0], math.hypot(m[2][1], m[2][2])),
         "head.yaw": math.atan2(m[1][0], m[0][0]),
         "head.x": m[0][3],
         "head.y": m[1][3],

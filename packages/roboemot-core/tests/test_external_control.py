@@ -5,7 +5,9 @@ a motors-off seen then is never written over."""
 
 from __future__ import annotations
 
+import bisect
 import math
+import random
 
 import pytest
 from roboemot.config import ConfigStack
@@ -295,10 +297,8 @@ class DelayedServo(ServoDriver):
         self.history: list[tuple[float, dict[str, float]]] = [(0.0, dict(self.pose))]
 
     def _sample(self) -> tuple[int, dict[str, float]]:
-        best = 0
-        for i, (ts, _) in enumerate(self.history):
-            if ts <= self.clock - self.age_s + 1e-9:
-                best = i
+        cut = self.clock - self.age_s + 1e-9
+        best = max(0, bisect.bisect_right(self.history, cut, key=lambda h: h[0]) - 1)
         return best, self.history[best][1]
 
     def read_state(self):
@@ -596,3 +596,239 @@ def test_a_unit_that_settles_early_waits_for_the_others_before_resuming():
     driver.mode = "limp"
     drive(loop, driver, t, GRACE_S + 1.0)
     assert len(driver.writes) == n and loop.motors_off
+
+
+# ---- review of slice ZE: stalls, old state on step-and-hold, reloads, bounded exemption
+
+
+def _time_to_yield(loop, driver, t, yaw, every, stall, limit_s=10.0):
+    t0, n = t, 0
+    while t - t0 < limit_s and not loop.external:
+        t = drive_irregular(loop, driver, t, DT, yaw)
+        n += 1
+        if every and n % every == 0:
+            driver.advance(stall)
+            t += stall
+    return t - t0 if loop.external else None
+
+
+STALLS = [None, (13, 0.21), (9, 0.21), (7, 0.21), (5, 0.05), (3, 0.05)]
+
+
+@pytest.mark.parametrize("stalls", STALLS)
+def test_a_hand_push_yields_under_the_overload_stall_patterns(stalls):
+    """Review ZE B1: a late tick restarting the count made a push undetectable once a stall
+    came every 9 ticks or more often; a late sample only does not count."""
+    every, stall = stalls or (None, 0.0)
+    driver = DelayedServo(home={"head.pitch": 0.0, "head.yaw": 0.0, "head.z": 0.0})
+    loop = make_with(driver)
+    t = drive_irregular(loop, driver, 0.0, 1.0, 0.3)
+    driver.pose["head.yaw"] = 0.7  # pushed and held
+    driver.target = dict(driver.pose)
+    driver.external, driver.goal = True, {"head.yaw": 0.7}
+    took = _time_to_yield(loop, driver, t, 0.3, every, stall)
+    assert took is not None and took < 1.0
+
+
+@pytest.mark.parametrize("stalls", STALLS)
+def test_a_platform_move_yields_under_the_overload_stall_patterns(stalls):
+    every, stall = stalls or (None, 0.0)
+    driver = DelayedServo(home={"head.pitch": 0.0, "head.yaw": 0.0, "head.z": 0.0})
+    loop = make_with(driver)
+    t = drive_irregular(loop, driver, 0.0, 1.0, 0.3)
+    driver.external, driver.speed = True, 1.0
+    driver.goal = {"head.yaw": -1.0, "head.pitch": 0.5}
+    took = _time_to_yield(loop, driver, t, 0.3, every, stall)
+    assert took is not None and took < 1.0  # the first goto of goto_sleep lasts 1 s
+
+
+def _gaze(seed: int, seconds: float):
+    """Random gaze shifts of up to 1.2 rad, each held 0.3-1.5 s (step and hold)."""
+    rng = random.Random(seed)
+    steps, t = [], 0.0
+    while t < seconds:
+        t += rng.uniform(0.3, 1.5)
+        steps.append((t, rng.uniform(-1.2, 1.2)))
+
+    def at(now: float) -> float:
+        i = bisect.bisect_right(steps, now, key=lambda s: s[0])
+        return steps[i - 1][1] if i else 0.0
+
+    return at
+
+
+@pytest.mark.parametrize("age_s", [0.6, 0.67, 0.8])
+@pytest.mark.parametrize("seed", [0, 1])
+def test_old_state_on_step_and_hold_gaze_never_triggers_it(age_s, seed):
+    """Review ZE S1: commands that hold still longer than a window turned the direction rule
+    off, and a state 0.6 s old (the daemon queue alone can hold ~0.67 s) still showed the pose
+    from before the shift. A sample still closing in on the commands is lag."""
+    driver = DelayedServo(home={"head.pitch": 0.0, "head.yaw": 0.0, "head.z": 0.0})
+    driver.age_s = age_s
+    loop = make_with(driver)
+    gaze, t = _gaze(seed, 20.0), 0.0
+    for _ in range(round(20.0 / DT)):
+        cmd = {"head.yaw": gaze(t), "head.pitch": 0.5 * gaze(t * 1.3)}
+        loop.feed(Command("app", Priority.COMMANDED, cmd, t))
+        NOW[0] = t
+        loop.cycle(t, DT)
+        driver.advance(DT)
+        t += DT
+    assert loop.external_events == 0
+
+
+@pytest.mark.parametrize("age_s", [0.0, 0.2, 0.35])
+def test_a_reload_in_the_middle_of_a_fast_move_keeps_the_windows(age_s):
+    """Review ZE S2: a motion.external.* reload emptied the windows mid-move."""
+    driver = DelayedServo(home={"head.pitch": 0.0, "head.yaw": 0.0, "head.z": 0.0})
+    driver.age_s = age_s
+    loop = make_with(driver)
+    t = drive_irregular(loop, driver, 0.0, 1.5, -1.2)
+    t = drive_irregular(loop, driver, t, 0.3, 1.2)  # moving fast toward +1.2
+    ext = CFG.motion.external.model_copy(update={"tolerance_rad": 0.16, "lag_window_s": 0.5})
+    loop.apply_config(
+        CFG.model_copy(update={"motion": CFG.motion.model_copy(update={"external": ext})})
+    )
+    drive_irregular(loop, driver, t, 1.5, 1.2)
+    assert loop.external_events == 0
+
+
+def _held_against(commands, hold: float, seconds: float) -> float | None:
+    loop, driver = make()
+    t = drive(loop, driver, 0.0, 1.0, yaw=commands(0.0))
+    driver.pose["head.yaw"] = hold
+    driver.target = dict(driver.pose)
+    driver.external, driver.goal = True, {"head.yaw": hold}
+    t0 = t
+    while t - t0 < seconds and not loop.external:
+        t = drive(loop, driver, t, DT, yaw=commands(t - t0))
+    return t - t0 if loop.external else None
+
+
+@pytest.mark.parametrize(
+    "commands,hold",
+    [
+        (lambda s: math.sin(2 * math.pi * s / 6), 0.9),
+        (lambda s: 0.3 * s, -0.4),  # slow tracking of a person, the head held behind
+        (lambda s: 0.1 * s, -0.4),
+    ],
+)
+def test_a_head_held_against_moving_commands_is_caught_within_the_bound(commands, hold):
+    """Review ZE S3: behind the path was exempt for as long as the commands moved. A joint that
+    has not moved for ``max_state_age_s`` is not lagging: the exemption ends."""
+    ext = CFG.motion.external
+    took = _held_against(commands, hold, 10.0)
+    assert took is not None and took <= ext.max_state_age_s + ext.confirm_s + 0.3
+
+
+class MinJerkPlatform(DelayedServo):
+    """goto_sleep as the daemon runs it: a min-jerk goto of ``move_s`` to ``goal`` (the state
+    cache ``age_s`` behind), then motors off ``off_after_s`` after it ends, in a status refreshed
+    every ``status_period_s`` and delivered ``age_s`` late."""
+
+    move_s = 2.0
+    off_after_s = 2.0
+    status_period_s = 1.3
+
+    def start(self, goal: dict[str, float]) -> None:
+        self.external, self.goal = True, goal
+        self.start_t, self.origin = self.clock, dict(self.pose)
+        self.off_at = self.clock + self.move_s + self.off_after_s
+
+    def advance(self, dt: float) -> None:
+        if self.external:
+            self.clock += dt
+            u = min(1.0, (self.clock - self.start_t) / self.move_s)
+            s = u**3 * (10 - 15 * u + 6 * u**2)
+            for k, g in self.goal.items():
+                self.pose[k] = self.origin[k] + (g - self.origin[k]) * s
+            self.target = dict(self.pose)
+            self.history.append((self.clock, dict(self.pose)))
+            if u >= 1.0:
+                self.external = False  # the move is over: targets are accepted again
+            return
+        super().advance(dt)
+
+    def motors_enabled(self):
+        """The last status published before ``clock - age_s``; the worst phase: one is
+        published just before the motors go off, the next a full period later."""
+        if not hasattr(self, "off_at"):
+            return True
+        phase = self.off_at - 1e-3
+        seen = self.clock - self.age_s
+        published = phase + math.floor((seen - phase) / self.status_period_s) * self.status_period_s
+        return published < self.off_at
+
+
+GRACE_MARGIN_S = 0.5  # what the default must keep in hand: status build time, scheduling
+
+
+@pytest.mark.parametrize("age_s", [0.0, 0.67])
+@pytest.mark.parametrize(
+    "goal",
+    [
+        {"head.pitch": 0.6, "head.yaw": -1.5, "head.z": -0.04},
+        {"head.yaw": 0.3 - 0.25},  # a short travel: its min-jerk tail is still for longer
+    ],
+)
+def test_the_resume_grace_covers_a_min_jerk_move_a_slow_status_and_old_state(age_s, goal):
+    """Review ZE S4: stillness starts in the min-jerk tail, before the move ends; the daemon's
+    status comes every 1 s plus the time to build it, through a queue that may be ~0.67 s old.
+    Nothing may be written between the end of the move and the motors-off being seen, with
+    ``GRACE_MARGIN_S`` of the default grace to spare."""
+    driver = MinJerkPlatform(home={"head.pitch": 0.0, "head.yaw": 0.0, "head.z": 0.0})
+    driver.age_s = age_s
+    loop = make_with(driver)
+    loop.platform_move_grace_s = GRACE_S - GRACE_MARGIN_S
+    t = drive(loop, driver, 0.0, 2.0)
+    driver.start(goal)
+    while driver.external:
+        t = drive(loop, driver, t, DT)
+    assert loop.external
+    n = len(driver.writes)
+    drive(loop, driver, t, GRACE_S + 3.0)
+    assert len(driver.writes) == n and loop.motors_off
+
+
+def test_a_hook_feeding_a_yielding_dof_writes_nothing_to_it():
+    driver = ServoDriver(home=dict.fromkeys(GROUPED, 0.0))
+    loop = make_with(driver, grouped_manifest())
+    loop.tick_hooks.append(
+        lambda now, core: core.feed(
+            Command("reflex", Priority.REFLEX, {"antenna_left": -0.5}, now), liveness=False
+        )
+    )
+    t = drive(loop, driver, 0.0, 1.0)
+    driver.pose["antenna_left"] = 1.0
+    driver.target = dict(driver.pose)
+    driver.external, driver.goal = True, {"antenna_left": 1.0}
+    t = drive(loop, driver, t, 0.5)
+    assert loop.snapshot()["external_groups"] == ["antennas"]
+    n = len(driver.writes)
+    drive(loop, driver, t, 1.0)
+    assert all("antenna_left" not in v for _, v in driver.writes[n:])
+
+
+def test_units_that_yielded_apart_resume_apart():
+    """An antenna kept moving in a hand does not keep a head pushed later from resuming."""
+    driver = ServoDriver(home=dict.fromkeys(GROUPED, 0.0))
+    loop = make_with(driver, grouped_manifest())
+    t = drive(loop, driver, 0.0, 1.0)
+    driver.external, driver.speed = True, 3.0
+
+    def hold(seconds: float, head: float | None) -> float:
+        nonlocal t
+        for _ in range(round(seconds / DT)):
+            goal = {"antenna_left": 1.0 + 0.1 * math.sin(t * 6)}  # wiggles in the hand
+            if head is not None:
+                goal["head.yaw"] = head
+            driver.goal = goal
+            t = drive(loop, driver, t, DT)
+        return t
+
+    hold(GRACE_S + 1.0, None)
+    assert loop.snapshot()["external_groups"] == ["antennas"]
+    hold(1.5, -0.8)  # later, a push on the head
+    assert loop.snapshot()["external_groups"] == ["antennas", "body_yaw+head"]
+    hold(GRACE_S + 1.5, 0.3)  # the head let go, back where it is commanded
+    assert loop.snapshot()["external_groups"] == ["antennas"]
