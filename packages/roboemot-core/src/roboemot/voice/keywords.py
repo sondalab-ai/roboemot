@@ -56,7 +56,7 @@ class KeywordSpotter:
             return
         self._resolved = resolved
         self._phrases = {}
-        self._oov = {}
+        oov: dict[str, int] = {}  # assigned once below: a report never reads a partial dict
         aliases = resolved.aliases_apply()
         for language, ks in self._sets.items():
             wake = list(ks.wake_phrases)
@@ -76,7 +76,8 @@ class KeywordSpotter:
             }
             bad = self._names.out_of_vocab(language, self._phrases[language]["wake"])
             if bad is not None:
-                self._oov[language] = bad
+                oov[language] = bad
+        self._oov = oov
 
     def wake_out_of_vocab(self) -> dict[str, int]:
         """Per language whose recognizer vocabulary is known, how many wake phrases (generic

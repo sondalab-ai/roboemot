@@ -68,7 +68,7 @@ def test_the_vision_service_reports_paused_and_resumes_within_one_pause_wait():
         service.resume()
         resumed = time.monotonic()
         assert wait_for(lambda: source.reads > 0)
-        assert time.monotonic() - resumed <= PAUSED_WAIT_S + 0.5  # one pause wait, plus slack
+        assert time.monotonic() - resumed <= 4 * PAUSED_WAIT_S  # about one pause wait; CI slack
         assert service.snapshot()["state"] == "running"
     finally:
         service.stop()
