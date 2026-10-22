@@ -162,6 +162,44 @@ def test_the_listener_reports_an_utterance_in_progress_and_its_end():
     assert seen == [True, False]
 
 
+def phase_during_finish(final_text="ciao", fail=False):
+    """The Live phase as the recognizer's final runs (2-5 s on the robot), and after it."""
+    phase = ConversationPhase()
+    r = ListenerRig(["ciao"], on_activity=phase.set_listening)
+    during: list[str] = []
+    finish = r.asr.finish
+
+    def slow_finish():
+        during.append(phase.snapshot()["phase"])
+        if fail:
+            raise RuntimeError("decoder")
+        finish()
+        return final_text
+
+    r.asr.finish = slow_finish
+    try:
+        r.say(1.0)
+    except RuntimeError:
+        r.listener._abort()  # what the listener's loop does with a chunk that raised
+    return during, phase.snapshot()["phase"], r
+
+
+def test_the_phase_stays_listening_while_the_recognizer_finishes():
+    during, after, r = phase_during_finish()
+    assert during == ["listening"], "not idle while the final result is computed"
+    assert after == "idle" and len(r.utterances) == 1
+
+
+def test_an_empty_final_still_ends_listening():
+    during, after, r = phase_during_finish(final_text="")
+    assert during == ["listening"] and after == "idle" and r.utterances == []
+
+
+def test_a_failing_final_still_ends_listening():
+    during, after, _ = phase_during_finish(fail=True)
+    assert during == ["listening"] and after == "idle"
+
+
 def test_the_listener_reports_the_end_when_the_utterance_is_discarded():
     from test_voice_listener import silence, voice
 
