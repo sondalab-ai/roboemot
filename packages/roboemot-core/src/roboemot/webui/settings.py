@@ -148,6 +148,8 @@ class StackPort(Protocol):
 
     files: dict[str, Path]
 
+    listener_failures: int  # reload listeners that raised so far (R3 SF3)
+
     def effective(self) -> RoboEmotConfig: ...
 
     def merged_tree(self, *, include_runtime: bool = True) -> dict[str, Any]: ...
@@ -991,7 +993,7 @@ class SettingsEditor:
 
     def _failures(self) -> int:
         """The stack's count of reload listeners that raised (R3 SF3)."""
-        return int(getattr(self.stack, "listener_failures", 0))
+        return self.stack.listener_failures
 
     def _applied(self, result: dict[str, Any], before: int) -> dict[str, Any]:
         """``result`` with ``applied``: False when a reload listener raised during the write, so
