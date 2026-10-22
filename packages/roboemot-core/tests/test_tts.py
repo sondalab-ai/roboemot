@@ -586,9 +586,8 @@ def test_a_reload_takes_the_piper_timeouts_and_keeps_its_restart_fields(tmp_path
     before = local.config
     hot = {"startup_timeout_s": 7.0, "request_timeout_s": 9.0, "restart_backoff_s": (0.5, 2.0)}
     new = PiperConfig(**hot, chunk_ms=40.0, python="/elsewhere/python")
-    FallbackTTS(SimpleNamespace(name="remote", controls=frozenset()), local).apply_config(
-        VOICE.model_copy(update={"piper": new})
-    )
+    remote = SimpleNamespace(name="remote", controls=frozenset(), apply_config=lambda voice: None)
+    FallbackTTS(remote, local).apply_config(VOICE.model_copy(update={"piper": new}))
     assert local.config.model_dump(include=set(hot)) == new.model_dump(include=set(hot))
     assert (local.config.chunk_ms, local.config.python) == (before.chunk_ms, before.python)
 

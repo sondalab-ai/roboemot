@@ -157,5 +157,8 @@ class OpenAISpeechBackend:
     async def warm(self, language: str, voice: VoiceConfig) -> None:
         return None
 
+    def apply_config(self, voice: VoiceConfig) -> None:
+        """Nothing kept here: the speech settings it reads are restart fields."""
+
     async def aclose(self) -> None:
         return None

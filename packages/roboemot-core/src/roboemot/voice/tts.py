@@ -93,6 +93,10 @@ class TTSBackend(Protocol):
         """Load what the first sentence of ``language`` needs (may be a no-op)."""
         ...
 
+    def apply_config(self, voice: VoiceConfig) -> None:
+        """Hot reload of the settings the backend keeps itself (may be a no-op)."""
+        ...
+
     async def aclose(self) -> None: ...
 
 
@@ -116,11 +120,9 @@ class FallbackTTS:
         return [b for b in (self.primary, self.fallback) if b is not None]
 
     def apply_config(self, voice: VoiceConfig) -> None:
-        """Hot reload: hand ``voice`` to each backend of the chain that takes one."""
+        """Hot reload: hand ``voice`` to each backend of the chain."""
         for backend in self._chain():
-            apply = getattr(backend, "apply_config", None)
-            if apply is not None:
-                apply(voice)
+            backend.apply_config(voice)
 
     async def synthesize(
         self,

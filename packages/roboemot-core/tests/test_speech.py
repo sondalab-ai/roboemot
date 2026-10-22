@@ -71,6 +71,9 @@ class FakeBackend:
     async def warm(self, language, voice):
         pass
 
+    def apply_config(self, voice):
+        pass
+
     async def aclose(self):
         pass
 
