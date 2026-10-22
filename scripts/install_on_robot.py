@@ -11,9 +11,10 @@ model's specifics come from the installer its platform package registers (Reachy
     python scripts/install_on_robot.py --uninstall --dry-run   # what uninstall would undo
     python scripts/install_on_robot.py --uninstall             # leave the robot as it was
 
---dev installs configs/dev-unmeasured.yaml as the app config, so the app runs before the
-manifest dynamics are measured (SPEC 12). Without it the app refuses to start. Voice is enabled in
-the same file (voice.enabled) unless --no-voice (SPEC 4A, Installer).
+--dev sets the keys of configs/dev-unmeasured.yaml in the app config (app.yaml in the robot's data
+folder), so the app runs before the manifest dynamics are measured (SPEC 12). Without it the app
+refuses to start. Voice is enabled in the same file (voice.enabled) unless --no-voice; other keys
+in the file are kept (SPEC 4A, Installer).
 """
 
 import sys
