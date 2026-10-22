@@ -288,6 +288,24 @@ class ReachyMiniWireless:
             return
         self._await_own(ui)
 
+    def restart(self, ui: Ui) -> None:
+        """Restart the running RoboEmot through the daemon and wait until it runs again. It asks
+        first, and a no is the default (scripts pass ``-y``): the daemon's stop sends the head to
+        its zero pose before the app starts again."""
+        blocker = self.start_blocker()
+        if blocker:
+            raise WizardError(blocker)
+        question = (
+            f"restart {APP_NAME}? The head moves: it goes to its zero pose while the app stops, "
+            "then the app starts again"
+        )
+        if not ui.confirm(question, False):
+            raise WizardError(f"{APP_NAME} not restarted")
+        with _wizard_errors():
+            self._api().restart_current_app()
+        ui.ok("restart requested")
+        self._await_own(ui)
+
     def _clear_errored_app(self, ui: Ui) -> None:
         """The daemon refuses every start while the current app is in ``error`` (it counts as
         running); clear such a leftover with a stop so a new start can go through."""

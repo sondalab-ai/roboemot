@@ -319,6 +319,12 @@ class FakeDaemon:
             case "POST", "/api/apps/stop-current-app":
                 self.current = None
                 return 200, None
+            case "POST", "/api/apps/restart-current-app":
+                if not self.current:
+                    return 400, {"detail": "No app is running"}
+                self.current = {"info": self.current["info"], "state": "starting"}
+                self.start_states = ["running"]
+                return 200, None
             case "POST", "/api/move/play/wake_up":
                 if self.autostart_on_wake and not self.current:
                     self.current = {"info": {"name": "roboemot"}, "state": "starting"}
@@ -2361,3 +2367,74 @@ def test_dry_run_counts_the_stop_once(offline, robot, daemon, capsys):
     inst.run_install(options(dry_run=True), quiet_ui(yes=True), ROOT)
     out = capsys.readouterr().out
     assert out.count("would stop roboemot") == 1
+
+
+# ---------------------------------------------------------------- run --restart
+
+RESTART = ("POST", "/api/apps/restart-current-app", None)
+
+
+def own_running(daemon) -> None:
+    daemon.current = {"info": {"name": "roboemot"}, "state": "running"}
+
+
+def test_run_restart_restarts_a_running_roboemot_and_prints_the_web_ui(
+    offline, robot, daemon, capsys
+):
+    install()
+    own_running(daemon)
+    capsys.readouterr()
+    assert run_mod.main(run_args("--restart")) == 0
+    out = capsys.readouterr().out
+    assert RESTART in daemon.mutations
+    assert daemon.current == {"info": {"name": "roboemot"}, "state": "running"}
+    assert f"web UI: http://127.0.0.1:{RoboEmotConfig().webui.port}" in out
+    assert not any(m[1].startswith("/api/apps/start-app/") for m in daemon.mutations)
+
+
+def test_restart_asks_first_says_the_head_moves_and_a_no_changes_nothing(daemon):
+    own_running(daemon)
+    ui = quiet_ui()
+    asked: list[str] = []
+    ui.confirm = lambda question, default: asked.append(question) or False
+    with pytest.raises(WizardError, match="not restarted"):
+        platform_for(daemon).restart(ui)
+    assert asked and "head" in asked[0]
+    assert daemon.mutations == []
+
+
+def test_run_restart_without_yes_does_not_restart_unattended(offline, robot, daemon, capsys):
+    install()
+    own_running(daemon)
+    before = list(daemon.mutations)
+    args = ["--host", "127.0.0.1", "--robot", "reachy-mini-wireless", "--restart"]
+    assert run_mod.main(args) == 1
+    assert daemon.mutations == before
+
+
+def test_run_restart_starts_roboemot_when_it_is_not_running(offline, robot, daemon, capsys):
+    install()
+    assert run_mod.main(run_args("--restart")) == 0
+    assert RESTART not in daemon.mutations
+    assert ("POST", "/api/apps/start-app/roboemot", None) in daemon.mutations
+    assert daemon.current["state"] == "running"
+
+
+def test_run_restart_with_another_app_running_takes_the_start_flow(offline, robot, daemon):
+    install()
+    daemon.current = {"info": {"name": "conversation"}, "state": "running"}
+    assert run_mod.main(run_args("--restart")) == 0
+    assert RESTART not in daemon.mutations
+    assert ("POST", "/api/apps/stop-current-app", None) in daemon.mutations
+    assert daemon.current["info"]["name"] == "roboemot"
+
+
+def test_run_dry_run_restart_reports_and_changes_nothing(offline, robot, daemon, capsys):
+    install()
+    own_running(daemon)
+    before = list(daemon.mutations)
+    capsys.readouterr()
+    assert run_mod.main(run_args("--dry-run", "--restart")) == 0
+    out = capsys.readouterr().out
+    assert "would restart roboemot" in out and "dry run passed" in out
+    assert daemon.mutations == before

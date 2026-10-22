@@ -92,7 +92,8 @@ UNINSTALL_STEPS = 6
 
 @runtime_checkable
 class Platform(Protocol):
-    """What the installer needs to know about one robot model."""
+    """What the installer needs to know about one robot model. Optional, so not declared here:
+    ``restart(ui)`` restarts the running app and waits for it (``run --restart``)."""
 
     manifest_id: str
     display_name: str
@@ -150,6 +151,7 @@ class Options:
     vision: bool = True
     models: bool | None = None
     voice: bool = True
+    restart: bool = False
 
 
 # ---------------------------------------------------------------- app config
