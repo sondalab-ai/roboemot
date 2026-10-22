@@ -24,6 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 ROUTE_NAME = re.compile(r"[A-Za-z0-9_-]+")
 ROUTE_NAME_MAX_CHARS = 64
+ROUTE_SCHEMES = ("http", "https")  # the OpenAI-compatible client speaks only these (SPEC 8)
 
 
 def param(
@@ -939,7 +940,13 @@ class ReflexAudioConfig(Strict):
 
 
 class ReflexConfig(Strict):
-    enabled: bool = param(True, "Run the reflex engine", conservative="false")
+    enabled: bool = param(
+        True,
+        "Run the reflex engine. Off, it stops at once; on after a start with it off, the "
+        "loud-onset reflexes need a restart (the microphone is opened at start only for a "
+        "consumer)",
+        conservative="false",
+    )
     max_amplitude_deg: float = param(
         45.0,
         "Ceiling on every rule's amplitude (the manifest limits and the minor cap still apply)",
@@ -2805,6 +2812,22 @@ class PersonaConfig(Strict):
         return self
 
 
+def route_url_ok(url: str) -> bool:
+    """Whether ``url`` is a route base URL the client can use as written (SPEC 8): parsed by
+    httpx, the library that sends the request, with an http(s) scheme and a host, and no space,
+    control character or backslash (parsers read a backslash differently). A query is accepted
+    here, for configs that carry one; the web UI refuses a query or fragment (``url_query``)."""
+    import httpx  # lazy: keeps the config package light
+
+    if any(c.isspace() or ord(c) < ord(" ") or c == "\\" for c in url):
+        return False
+    try:
+        parsed = httpx.URL(url)
+    except (httpx.InvalidURL, ValueError, TypeError):
+        return False
+    return parsed.scheme in ROUTE_SCHEMES and bool(parsed.host)
+
+
 class LLMRoute(Strict):
     @field_validator("api_key")
     @classmethod
@@ -2857,6 +2880,11 @@ class LLMRoute(Strict):
             )
         if not self.base_url or not self.model:
             raise ValueError(f"route {self.name}: base_url and model are required")
+        if not route_url_ok(self.base_url):
+            raise ValueError(
+                f"route {self.name}: base_url must be an http(s) URL with a host, without "
+                "spaces, control characters or '\\'"
+            )
         return self
 
 
@@ -3238,7 +3266,12 @@ class WebUIConfig(Strict):
         admin_only=True,
     )
     max_connections: int = param(
-        32, "Simultaneous connections served; more are refused", ge=1, le=256, conservative="lower"
+        32,
+        "Simultaneous connections served; more are refused",
+        ge=1,
+        le=256,
+        conservative="lower",
+        restart=True,
     )
     request_deadline_s: float = param(
         15.0,

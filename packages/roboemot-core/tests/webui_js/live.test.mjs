@@ -241,3 +241,19 @@ test("everything the state holds goes through textContent", async (t) => {
   assert.ok(images.every((i) => i.id === "live-video-img" && !i.hasAttribute("onerror")), "only the preview <img>");
   assert.ok(grid.textContent.includes("<img src=x"));
 });
+
+test("a Live poll carries the activity mark only after a click, key or touch (R3 SF1)", async (t) => {
+  const page = await livePage(t);
+  const marked = (c) => c.headers["X-RoboEmot-Active"] === "1";
+  await openLive(page); // the click that opened the tab is input
+  await sleep(WAIT_MS);
+  const live = () => page.calls.filter((c) => c.path.startsWith("/api/live/") && c.path !== "/api/live/viewers");
+  assert.equal(live().filter(marked).length, 1, "one poll reports the click, the rest are passive");
+  const before = live().length;
+  page.document.dispatchEvent(new page.window.Event("keydown"));
+  await sleep(WAIT_MS);
+  const after = live().slice(before);
+  assert.ok(after.length > 1);
+  assert.equal(after.filter(marked).length, 1);
+  assert.ok(page.calls.filter((c) => c.path === "/api/live/viewers").every((c) => !marked(c)), "the banner poll stays passive");
+});

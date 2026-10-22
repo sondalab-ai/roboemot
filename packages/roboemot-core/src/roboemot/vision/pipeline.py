@@ -287,8 +287,11 @@ class VisionPipeline:
         if self.worker is not None:
             self.worker.cancel_pending()
 
-    def apply_config(self, vision: VisionConfig, identity: IdentityConfig) -> None:
-        """Hot reload (SPEC 11A): thresholds, rates and tracker settings take effect at once.
+    def apply_config(
+        self, vision: VisionConfig, identity: IdentityConfig, world: WorldConfig | None = None
+    ) -> None:
+        """Hot reload (SPEC 11A): thresholds, rates and tracker settings take effect at once, and
+        so does, with ``world``, the camera field of view.
 
         The attribute worker gets the new ``identity`` too, so ``identity.estimate_frames_min``
         and ``estimate_confidence_min`` apply to the next job. ``vision.attribute_queue_max``,
@@ -296,6 +299,8 @@ class VisionPipeline:
         models folder are restart-only (the schema marks them).
         """
         self.cfg, self.identity = vision, identity
+        if world is not None:
+            self.world = world
         if self.worker is not None:
             self.worker.config = identity  # frames_min and the gender rule apply to new jobs
         self.governor.rates = vision.rates

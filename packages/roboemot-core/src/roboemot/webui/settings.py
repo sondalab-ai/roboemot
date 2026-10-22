@@ -22,10 +22,12 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import ipaddress
 import json
 import logging
 import os
 import secrets
+import socket
 import stat
 import tempfile
 import threading
@@ -145,6 +147,8 @@ class StackPort(Protocol):
     """The part of ``roboemot.config.ConfigStack`` this module uses."""
 
     files: dict[str, Path]
+
+    listener_failures: int  # reload listeners that raised so far (R3 SF3)
 
     def effective(self) -> RoboEmotConfig: ...
 
@@ -298,6 +302,54 @@ def origin(url: str) -> str:
         return ""
 
 
+# IPv6 forms that carry an IPv4 address in their low 32 bits: IPv4-compatible (``::a.b.c.d``),
+# IPv4-mapped, IPv4-translated (``::ffff:0:a.b.c.d``) and the NAT64 well-known prefix
+EMBEDS_IPV4 = tuple(
+    ipaddress.IPv6Network(net)
+    for net in ("::/96", "::ffff:0:0/96", "::ffff:0:0:0/96", "64:ff9b::/96")
+)
+IPV4_BITS = 0xFFFFFFFF
+
+
+def this_machine(url: object) -> bool:
+    """Whether ``url`` points at this machine or a link-local address (SPEC 8, 12): loopback,
+    ``localhost`` and ``*.localhost``, the unspecified address (it reaches loopback on Linux),
+    169.254/16 and fe80::/10, in any spelling (``127.1``, ``0x7f000001``, ``2130706433``, an IPv6
+    address that carries one of them, ``EMBEDS_IPV4``). The host is read by httpx, the client
+    that connects. Names are not resolved: a public name that resolves to loopback is not caught
+    here. Private LAN addresses stay allowed, a LAN model server is the usual local route."""
+    try:
+        host = httpx.URL(str(url)).host.lower().rstrip(".")
+    except (httpx.InvalidURL, ValueError, TypeError):
+        return False  # unparsable: ``LLMRoute`` refuses it (``route_url_ok``, same parser)
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        ip: ipaddress.IPv4Address | ipaddress.IPv6Address = ipaddress.ip_address(host)
+    except ValueError:
+        try:  # the shorthand IPv4 forms the socket layer accepts
+            ip = ipaddress.IPv4Address(socket.inet_aton(host))
+        except OSError:
+            return False
+    if ip.is_loopback or ip.is_link_local or ip.is_unspecified:
+        return True
+    if isinstance(ip, ipaddress.IPv6Address) and any(ip in net for net in EMBEDS_IPV4):
+        carried = ipaddress.IPv4Address(int(ip) & IPV4_BITS)
+        return carried.is_loopback or carried.is_link_local or carried.is_unspecified
+    return False
+
+
+def check_web_route_url(url: object, old: object = None) -> None:
+    """The web UI's rules for a route ``base_url`` it writes (SPEC 8, 12), on top of the schema's:
+    no query or fragment (``url_query``: the SDK appends its path, so either would sit inside the
+    request path), and not this machine or a link-local address (``url_local_refused``) unless the
+    origin stays the one the route already has (a path edit of a route of the app config)."""
+    if isinstance(url, str) and ("?" in url or "#" in url):
+        raise ValidationError("url_query", "value")
+    if this_machine(url) and not (isinstance(old, str) and origin(old) == origin(str(url))):
+        raise ValidationError("url_local_refused", "value")
+
+
 def is_key_ref(value: object) -> bool:
     """Whether ``value`` is a route key a web edit may bind: ``none`` or one whole
     ``${secret:name}`` reference (never a literal key)."""
@@ -422,6 +474,7 @@ class SettingsEditor:
         written: the edit is live until restart).
         """
         with self._lock:
+            before = self._failures()
             result = self._apply(path, value, source, self._rows(), self.stack.effective(), ack)
             key = result.pop("okey", None)
             acked = result.pop("acked", None)
@@ -433,7 +486,7 @@ class SettingsEditor:
             elif result["changed"] and self._overrides.pop(key, None) is not None:
                 self._acks.pop(key, None)
                 result["persisted"] = self._persist()  # the app value replaced a runtime edit
-            return result
+            return self._applied(result, before)
 
     def add_entry(
         self, path: object, key: object, value: object, source: str = SOURCE
@@ -447,7 +500,8 @@ class SettingsEditor:
         ``entry_invalid`` for a field the entry type does not have or a secret field.
         """
         with self._lock:
-            return self._add_entry(path, key, value, source)
+            before = self._failures()
+            return self._applied(self._add_entry(path, key, value, source), before)
 
     def _add_entry(
         self,
@@ -464,10 +518,11 @@ class SettingsEditor:
         words = box is not None and _is_word_map(box)
         if box is None or box["secret"] or (box["kind"] not in ENTRY_KINDS and not words):
             raise SettingNotAllowed("path")
-        if box["path"] == "llm_routes" and secret_shaped(
-            value.get("base_url") if isinstance(value, dict) else None
-        ):
+        url = value.get("base_url") if isinstance(value, dict) else None
+        if box["path"] == "llm_routes" and secret_shaped(url):
             raise ValidationError("url_credentials", "value")
+        if box["path"] == "llm_routes":
+            check_web_route_url(url)
         if secret_shaped([key, value]):
             raise ValidationError("value_type", "value")
         name = clean_key(key, cfg) if box["kind"] != "keyed_list" else None
@@ -527,6 +582,7 @@ class SettingsEditor:
             if name not in box["removable"]:
                 raise ValidationError("entry_in_lower_layer", "path")
             key = okey(tree, path)
+            before = self._failures()
             self.stack.clear(path, source=source, subtree=True, admin=True, refuse=REFUSED_CHECKS)
             for stored in [k for k in self._overrides if k == key or k.startswith(key + ".")]:
                 del self._overrides[stored]
@@ -534,13 +590,14 @@ class SettingsEditor:
                 del self._acks[stored]
             if box_path == "llm_routes":
                 self._keys.pop(name, None)
-            return {
+            result = {
                 "path": path,
                 "changed": True,
                 "layer": "runtime",
                 "restart_required": self._restart(box, entry_rows=box["entry"]),
                 "persisted": self._persist(),
             }
+            return self._applied(result, before)
 
     # ------------------------------------------------------------------ route keys (SPEC 8, 11A)
 
@@ -557,7 +614,9 @@ class SettingsEditor:
             name = value.get("name") if isinstance(value, dict) else None
             if isinstance(name, str) and name.isdigit():  # the catalogue would read it as an index
                 raise ValidationError("key_invalid", "name")
-            return self._add_entry("llm_routes", None, value, source, bind=(ref, ack))
+            before = self._failures()
+            result = self._add_entry("llm_routes", None, value, source, bind=(ref, ack))
+            return self._applied(result, before)
 
     def set_route_key(
         self, name: object, secret: object, ack: object = None, source: str = SOURCE
@@ -578,6 +637,7 @@ class SettingsEditor:
             path = f"llm_routes.{route.name}.api_key"
             if ref != NO_KEY_REF:
                 self._check_endpoint_ack(route.base_url, ack)
+            before = self._failures()
             self.stack.set(
                 path,
                 ref,
@@ -592,7 +652,8 @@ class SettingsEditor:
                 self.stack.note(
                     source, f"llm_routes.{route.name}.endpoint", "", origin(route.base_url)
                 )
-            return {"name": route.name, "changed": True, "persisted": self._persist()}
+            result = {"name": route.name, "changed": True, "persisted": self._persist()}
+            return self._applied(result, before)
 
     def removable_routes(self) -> list[str]:
         """Names of the routes only the runtime layer holds (``remove_entry`` accepts them)."""
@@ -684,10 +745,11 @@ class SettingsEditor:
             key = okey(self.stack.merged_tree(), path)
             if self._added_parent(key) is not None:  # an added entry's field has no lower value
                 raise ValidationError("not_resettable", "path")
+            before = self._failures()
             changed = self.stack.clear(path, source=source, admin=True, refuse=REFUSED_CHECKS)
             stale = self._overrides.pop(key, None) is not None
             self._acks.pop(key, None)
-            return {
+            result = {
                 "path": path,
                 "changed": changed,
                 "value": self._shown(get_path(self.stack.effective(), path)),
@@ -695,6 +757,7 @@ class SettingsEditor:
                 "restart_required": self._restart(row),
                 "persisted": self._persist() if changed or stale else True,
             }
+            return self._applied(result, before)
 
     def restore(self) -> None:
         """Replay the overrides file at startup as one batch: every entry is cleaned against the
@@ -734,9 +797,28 @@ class SettingsEditor:
                 except (ValidationError, SettingNotAllowed, GuardrailError):
                     log.warning("web UI setting %s dropped: no longer acceptable", _shown(key))
             self._overrides, self._acks = self._commit_batch(cleaned, acks)
+            self._warn_local_routes()
             self._restore_keys(keys, acks)
             if stripped or set(self._overrides) != set(stored) or self._keys != keys:
                 self._persist()
+
+    def _warn_local_routes(self) -> None:
+        """A route added or moved from the web before the address rule (``this_machine``) that
+        points at this machine or a link-local address is kept, so startup never fails on it,
+        with a warning naming the route (never the URL)."""
+        for key, value in self._overrides.items():
+            found = parse_okey(key)
+            if found is None or found[0] != "llm_routes":
+                continue
+            _, ident, rest = found
+            url = value.get("base_url") if not rest and isinstance(value, dict) else None
+            url = value if rest == "base_url" else url
+            if this_machine(url):
+                log.warning(
+                    "web UI route %s points at this machine or a link-local address: kept, but "
+                    "the web UI refuses such an address now; move it to the app config",
+                    ident.get("name"),
+                )
 
     # ------------------------------------------------------------------ write internals
 
@@ -776,6 +858,8 @@ class SettingsEditor:
         old = plain(get_path(cfg, path))
         if clean == old:
             return {"path": path, "changed": False, "value": old}
+        if write_only(path):
+            check_web_route_url(clean, old)
         if (
             path in LANGUAGE_DICTS
             and isinstance(clean, dict)
@@ -944,6 +1028,17 @@ class SettingsEditor:
             self._acks[key] = acked
         elif key in self._acks and origin(str(value)) != self._acks[key]["origin"]:
             del self._acks[key]
+
+    def _failures(self) -> int:
+        """The stack's count of reload listeners that raised (R3 SF3)."""
+        return self.stack.listener_failures
+
+    def _applied(self, result: dict[str, Any], before: int) -> dict[str, Any]:
+        """``result`` with ``applied``: False when a reload listener raised during the write, so
+        a part of the robot may still run the old value although the config holds the new one.
+        A failure on another thread in the same moment also counts: it errs towards a warning."""
+        result["applied"] = self._failures() == before
+        return result
 
     def _persist(self) -> bool:
         if self._file is None:

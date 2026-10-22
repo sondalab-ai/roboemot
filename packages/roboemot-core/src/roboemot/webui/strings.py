@@ -236,6 +236,9 @@ EN: dict[str, str] = {
     "settings_admin_hint": "Safety-relevant. The operator PIN doubles as the admin PIN.",
     "settings_pin_title": "Confirm the change",
     "settings_not_persisted": "It is live but was not saved to disk: it ends at the next restart.",
+    "settings_not_applied": (
+        "Saved, but a part of the robot did not take the new value: restart the app to apply it."
+    ),
     "settings_unchanged": "Nothing changed.",
     "settings_none": "No setting can be changed from the web UI.",
     "err_routes_unavailable": "Routes are not available.",
@@ -292,6 +295,7 @@ EN: dict[str, str] = {
     "route_remove_message": "The route is deleted. Its key stays in the store.",
     "route_added": "Route {name} added.",
     "route_saved": "Route {name} saved.",
+    "route_partial": "Already saved: {items}. The rest was not sent.",
     "route_removed": "Route {name} removed.",
     "secrets_title": "API keys",
     "secrets_intro": (
@@ -521,6 +525,11 @@ EN: dict[str, str] = {
         "This route has an API key. Saving sends that key to {host}. Enter the PIN and press "
         "the button again to allow it."
     ),
+    "err_url_local_refused": (
+        "From this page a route cannot point at this robot or at a link-local address. Write "
+        "such a route in the app config."
+    ),
+    "err_url_query": "The address of a route cannot hold a query (?) or a fragment (#).",
     "err_url_credentials": (
         "The address must not hold a user name, password, token or ${secret:...} reference. "
         "Store the key with `roboemot secrets set NAME` and use ${secret:NAME} as the api_key."
@@ -802,6 +811,10 @@ IT: dict[str, str] = {
     "settings_admin_hint": "Rilevante per la sicurezza. Il PIN operatore vale come PIN admin.",
     "settings_pin_title": "Conferma la modifica",
     "settings_not_persisted": "È attiva ma non salvata su disco: termina al prossimo riavvio.",
+    "settings_not_applied": (
+        "Salvata, ma una parte del robot non ha preso il nuovo valore: riavvia l'app per "
+        "applicarla."
+    ),
     "settings_unchanged": "Nessuna modifica.",
     "settings_none": "Nessuna impostazione si può modificare dalla web UI.",
     "err_routes_unavailable": "I modelli non sono disponibili.",
@@ -860,6 +873,7 @@ IT: dict[str, str] = {
     "route_remove_message": "Il modello viene eliminato. La sua chiave resta nell'archivio.",
     "route_added": "Modello {name} aggiunto.",
     "route_saved": "Modello {name} salvato.",
+    "route_partial": "Già salvato: {items}. Il resto non è stato inviato.",
     "route_removed": "Modello {name} rimosso.",
     "secrets_title": "Chiavi API",
     "secrets_intro": (
@@ -1104,6 +1118,11 @@ IT: dict[str, str] = {
         "Questa route ha una chiave API. Salvando, la chiave viene inviata a {host}. Inserisci il "
         "PIN e premi di nuovo il pulsante per consentirlo."
     ),
+    "err_url_local_refused": (
+        "Da questa pagina una route non può puntare a questo robot né a un indirizzo "
+        "link-local. Scrivi una route così nella configurazione dell'app."
+    ),
+    "err_url_query": "L'indirizzo di una route non può contenere una query (?) o un frammento (#).",
     "err_url_credentials": (
         "L'indirizzo non deve contenere utente, password, token o riferimenti ${secret:...}. "
         "Salva la chiave con `roboemot secrets set NOME` e usa ${secret:NOME} come api_key."

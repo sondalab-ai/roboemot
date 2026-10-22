@@ -451,3 +451,85 @@ def test_clear_and_set_validate_the_configuration_no_more_than_before(monkeypatc
     calls["n"] = 0
     stack.set("persona.traits", traits, source="t", layer="derived")
     assert calls["n"] <= 3
+
+
+# ----------------------------------------------------------------------------- app.yaml writes
+
+
+def test_app_write_interrupted_keeps_the_old_file_whole(tmp_path, monkeypatch):
+    """SPEC 11A, 12: a kill mid-write must leave the old app.yaml, never a truncated one."""
+    app = tmp_path / "app.yaml"
+    app.write_text("schema_version: 1\naffect: {half_life_s: 7}\n")
+    before = app.read_bytes()
+    stack = ConfigStack.from_files(app=app)
+
+    def crash(src: object, dst: object) -> None:
+        raise OSError("killed")
+
+    monkeypatch.setattr(os, "replace", crash)
+    with pytest.raises(OSError):
+        stack.set("safety.minor_motion_factor", 0.9, layer="app", admin=True)
+    assert app.read_bytes() == before
+    assert [p.name for p in tmp_path.iterdir()] == ["app.yaml"]  # no temp file left behind
+    assert stack.get("safety.minor_motion_factor") == 0.6  # undone with the file
+
+
+def test_app_write_is_owner_only_and_keeps_a_symlink(tmp_path):
+    real = tmp_path / "real.yaml"
+    real.write_text("schema_version: 1\n")
+    real.chmod(0o644)  # as the installer leaves it
+    link = tmp_path / "app.yaml"
+    link.symlink_to(real)
+    stack = ConfigStack.from_files(app=link)
+    stack.set("safety.minor_motion_factor", 0.9, layer="app", admin=True)
+    assert link.is_symlink()
+    assert "minor_motion_factor: 0.9" in real.read_text()
+    assert real.stat().st_mode & 0o777 == 0o600  # owner only, whatever it was (review ZG)
+    assert stack.poll() is None  # own write is not a reload
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ftp://x.example/v1",
+        "file:///etc/passwd",
+        "javascript:alert(1)",
+        "x.example/v1",
+        "http:///v1",
+        # the parser that sends the request (httpx) cannot use these (review ZG)
+        " http://127.0.0.1:8000/v1",
+        "\thttp://127.0.0.1:8000/v1",
+        "http://\t127.0.0.1:8000/v1",
+        "http://127.0.0.1\t:8000/v1",
+        "http://0177.0.0.1:8000/v1",
+        "http://\uff11\uff12\uff17.0.0.1/v1",
+        "http://127.0.0.1:8000/v1\n",
+        "http://x.example\\v1",
+    ],
+)
+def test_a_route_base_url_must_be_http_or_https_with_a_host(url):
+    """SPEC 8: routes speak HTTP(S) to a host; any other scheme fails at load, not at first use."""
+    with pytest.raises(ConfigError):
+        ConfigStack(app={"llm_routes": [{"name": "r", "base_url": url, "model": "m"}]})
+
+
+def test_a_failing_listener_is_audited_and_kept_in_last_error(tmp_path):
+    """R3 SF3: listener failures stay isolated but leave a trace (audit, last_error, counter)."""
+    audit = tmp_path / "audit.jsonl"
+    stack = ConfigStack(audit_path=audit)
+    seen = []
+
+    def broken(change):
+        raise RuntimeError("secret detail never shown")
+
+    stack.subscribe(broken)
+    stack.subscribe(seen.append)
+    assert stack.listener_failures == 0
+    stack.set("voice.expressivity", 0.2)
+    assert len(seen) == 1  # the others still ran
+    assert stack.listener_failures == 1
+    assert stack.last_error == "config listener failed: RuntimeError"
+    entry = stack.audit[-1]
+    assert (entry.source, entry.key, entry.new) == ("listener", "listener_failed", "RuntimeError")
+    assert "listener_failed" in audit.read_text()
+    assert "secret detail" not in audit.read_text()

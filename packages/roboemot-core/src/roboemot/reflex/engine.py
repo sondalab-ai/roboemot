@@ -255,6 +255,11 @@ class ReflexEngine:
         """
         if not (math.isfinite(rms) and math.isfinite(stamp)) or rms < 0:
             return
+        if not self.cfg.enabled:  # off at runtime as at start: no onset, no sound.loud
+            with self._lock:  # and, as after speech, the first chunk once on is not an edge
+                self._close_onsets()
+                self._prev_ratio = math.inf
+            return
         speaking = self.speaking
         if speaking is not None and speaking(stamp):
             with self._lock:

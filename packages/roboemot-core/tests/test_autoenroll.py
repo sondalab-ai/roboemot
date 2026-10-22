@@ -352,8 +352,23 @@ def test_disabling_deletes_candidates_now_and_at_startup(tmp_path):
     assert rig.files() == []
     seed(rig, np.eye(2, DIM, dtype=np.float32), [START.toordinal()] * 2)
     off = WorldAutoenrollConfig(enabled=False)
-    assert open_autoenroll(rig.registry, SimpleModel(), off) is None
+    disabled = open_autoenroll(rig.registry, SimpleModel(), off)
+    assert disabled is not None and disabled.stats()["clusters"] == 0
     assert rig.files() == []
+
+
+def test_an_enroller_that_starts_disabled_can_be_turned_on_without_a_restart(tmp_path):
+    """Sweep (SPEC 11A): ``world.autoenroll.enabled`` is not a restart field. Started off, the
+    enroller exists, keeps nothing, and a reload that turns it on makes it collect sightings."""
+    rig = Rig(tmp_path, enabled=False)
+    enroller = open_autoenroll(rig.registry, SimpleModel(), rig.cfg, world=rig.world)
+    assert enroller is not None
+    rig.enroller = enroller
+    sights(rig, 2)
+    assert enroller.stats()["clusters"] == 0
+    enroller.apply_config(rig.cfg.model_copy(update={"enabled": True}))
+    sights(rig, 2)
+    assert enroller.stats()["clusters"] > 0
 
 
 class SimpleModel:

@@ -118,3 +118,20 @@ async def test_the_speech_client_does_not_follow_a_redirect(servers):
     assert chunks == []
     assert origin.seen[0]["authorization"] == f"Bearer {KEY}"
     assert target.seen == []
+
+
+async def test_the_route_check_does_not_follow_a_redirect(servers):
+    """R3 SF6: the web UI's route check (conformance) uses the production client defaults too."""
+    from roboemot.llm.conformance import check_route
+
+    origin, target = servers
+    route = LLMRoute(
+        name="cloud",
+        base_url=f"http://127.0.0.1:{origin.port}/v1",
+        model="m",
+        api_key=KEY,
+        first_token_timeout_s=5.0,
+    )
+    report = await check_route(route, SafetyConfig())
+    assert report.checks and all(c.status != "pass" for c in report.checks[:2])
+    assert origin.seen and target.seen == []

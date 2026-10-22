@@ -68,12 +68,23 @@ def test_this_machine_and_the_home_network_are_local_by_default(host):
         "134744072", "2130706433", "0x7f.1", "0x7f000001", "3232235777",
         "[2002:808:808::1]", "[::ffff:8.8.8.8]", "[::ffff:192.168.1.1]", "[64:ff9b::808:808]",
         "evil.localhost.example.com", "localhost.example.com", "nas.local.example.com",
-        "api.openai.com\\@127.0.0.1", "127.0.0.1\\@api.openai.com",
         "user@127.0.0.1", "user@127.0.0.1@api.openai.com",
     ],
 )  # fmt: skip
 def test_everything_else_is_cloud_by_default(host):
     assert not route_is_local(route(host))
+
+
+@pytest.mark.parametrize("host", ["api.openai.com\\@127.0.0.1", "127.0.0.1\\@api.openai.com"])
+def test_a_backslash_host_is_refused_at_load_and_would_be_cloud(host):
+    """Parsers read a backslash differently: the schema refuses it (``route_url_ok``), and a route
+    built past the schema is still cloud."""
+    with pytest.raises(ValueError):
+        route(host)
+    built = LLMRoute.model_construct(
+        name="r", base_url=f"http://{host}/v1", model="m", locality="auto"
+    )
+    assert not route_is_local(built)
 
 
 def test_the_admin_can_mark_a_lan_gateway_as_cloud_or_a_host_as_local():

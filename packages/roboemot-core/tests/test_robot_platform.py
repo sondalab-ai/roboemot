@@ -48,6 +48,9 @@ class DeskAudio:
 
     def start(self) -> None: ...
     def stop(self) -> None: ...
+    def apply_config(self, cfg) -> None:
+        pass
+
     def set_voice(self, enabled: bool) -> None:
         self.voice = enabled
 

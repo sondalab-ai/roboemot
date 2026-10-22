@@ -57,3 +57,27 @@ def test_levels_and_transcript_are_wired_into_the_running_runtime():
         thread.join(timeout=30)
     assert not thread.is_alive()
     assert ring.size == 0  # shutdown forgets, with or without a voice listener
+
+
+def test_the_microphone_stays_closed_with_the_engine_off_and_no_voice():
+    """Review ZG should-fix 2: with ``reflexes.enabled: false`` and voice off nothing consumes the
+    microphone, so the hub is not fed (nor started) even though ``reflexes.audio.enabled`` is on.
+    Turning the engine on later needs a restart for its loud-onset part (the reload warns)."""
+    from roboemot.runtime.assembly import assemble
+
+    stack = ConfigStack.from_files(preset="default", preset_dirs=[CONFIGS / "presets"])
+    stack.set("reflexes.enabled", False, source="test", admin=True, layer="app")
+    assert stack.effective().reflexes.audio.enabled and not stack.effective().voice.enabled
+    manifest = load_manifest(
+        CONFIGS / "manifests" / "desk-head-v1.yaml",
+        allow_unmeasured_dynamics=True,
+        safety=stack.effective().safety,
+    )
+    platform = RecordingPlatform()
+    host = DaytimeHost()
+    p = assemble(host, stack, manifest, platform, platform.bind(object()))
+    try:
+        assert p.reflex_audio is False and not host.levels.mic_fed
+        assert p.listener is None  # so start_all does not start the hub
+    finally:
+        p.perception.stop()

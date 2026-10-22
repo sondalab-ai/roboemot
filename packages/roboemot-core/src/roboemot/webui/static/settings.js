@@ -456,8 +456,9 @@ function writeNotice(result, verbKey) {
   if (result.layer === "app") parts.push(t("settings_layer_app"));
   else if (result.layer === "runtime") parts.push(t("settings_layer_runtime"));
   if (result.persisted === false) parts.push(t("settings_not_persisted"));
+  if (result.applied === false) parts.push(t("settings_not_applied"));
   if (result.restart_required) { settingsState.restartPending = true; parts.push(t("settings_restart_needed")); }
-  notice(parts.join(" "), result.persisted === false);
+  notice(parts.join(" "), result.persisted === false || result.applied === false);
 }
 
 function settingLeaf(node) {

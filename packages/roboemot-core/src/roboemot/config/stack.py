@@ -22,6 +22,7 @@ import functools
 import json
 import logging
 import os
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Collection, Iterable
@@ -49,6 +50,7 @@ log = logging.getLogger(__name__)
 LAYER_ORDER = ("defaults", "manifest", "preset", "app", "derived", "person", "runtime")
 KEYED_LISTS = {"appraisal.rules": "event", "llm_routes": "name"}
 AUDIT_FILE_MODE = 0o600
+APP_FILE_MODE = 0o600  # app.yaml: owner only, it may hold a literal api_key (SPEC 12)
 _MOVED = yaml.safe_load(Path(__file__).with_name("moved_settings.yaml").read_text())
 RENAMED_SETTINGS: dict[str, str] = _MOVED["renamed"]  # old path -> new path
 REMOVED_SETTINGS: dict[str, str] = _MOVED["removed"]  # old path (or prefix) -> what replaces it
@@ -898,6 +900,8 @@ class ConfigStack:
         self._mtimes: dict[str, float] = {}
         self.audit: list[AuditEntry] = []
         self.last_error: str | None = None
+        # Listener calls that raised; a writer compares it before and after (R3 SF3)
+        self.listener_failures = 0
         self._last = self.effective()
         self._check_route_budgets(self._last)
         # The configuration installed by the owner is the initial approved baseline.
@@ -1661,7 +1665,7 @@ class ConfigStack:
     def _persist_app(self) -> None:
         path = self.files.get("app")
         if path and not str(path).startswith("preset:"):
-            path.write_text(yaml.safe_dump(self.app, sort_keys=False))
+            _replace_file(Path(path), yaml.safe_dump(self.app, sort_keys=False))
             self._mtimes["app"] = _mtime(path)
 
     def _expire(self) -> bool:
@@ -1698,13 +1702,47 @@ class ConfigStack:
             try:
                 fn(change)
             except Exception as exc:  # one failing listener must not starve the others
-                log.warning("config listener failed: %s", type(exc).__name__)
+                # visible, not silent: the value is in effect() but a part may hold the old one
+                kind = type(exc).__name__
+                log.warning("config listener failed: %s", kind)
+                self.listener_failures += 1
+                self.last_error = f"config listener failed: {kind}"
+                self._record("listener", "listener_failed", None, kind)
         return change
 
     def _remember_mtimes(self) -> None:
         for layer, path in self.files.items():
             if not str(path).startswith("preset:"):
                 self._mtimes[layer] = _mtime(path)
+
+
+def _replace_file(path: Path, text: str) -> None:
+    """Write ``text`` over ``path`` atomically (SPEC 11A, 12): a temp file in the same folder,
+    owner-only (``APP_FILE_MODE``: the file may hold a literal ``api_key``) whatever the old mode
+    was, synced, renamed over the target, then the folder synced as a best effort. A kill at any
+    point leaves the old file or the new one, never a truncated one. A symlink keeps pointing at
+    its target, which is the file replaced: planting one needs write access to the data folder,
+    which is already the app user's, so following it grants nothing new."""
+    target = path.resolve()
+    fd, name = tempfile.mkstemp(dir=target.parent, prefix=target.name + ".")
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            os.fchmod(handle.fileno(), APP_FILE_MODE)
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+    with contextlib.suppress(OSError):  # the new file is in place: durability is best effort
+        dir_fd = os.open(target.parent, os.O_RDONLY | os.O_CLOEXEC)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
 
 
 def _mtime(path: Path) -> float:
