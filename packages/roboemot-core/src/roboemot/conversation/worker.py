@@ -84,6 +84,18 @@ class Speech(Protocol):
     def first_audio_at(self, utterance: int) -> float | None: ...
     def played(self, job_id: int) -> bool: ...
     def ended_at(self, job_id: int) -> float | None: ...
+    def idle(self) -> bool: ...
+
+
+@dataclass
+class _Deferred:
+    """A reply written while a minor was present: it enters the live transcript once it is over,
+    as the sentences that played (SPEC 11A, 12)."""
+
+    generation: int  # the transcript generation of the utterance it answers
+    language: str
+    queued: list[tuple[int, str]]  # (speech job id, text)
+    cut: bool  # a barge-in, a stop or stop_talking already cut it
 
 
 @dataclass
@@ -178,6 +190,8 @@ class ConversationWorker:
         self._reply: tuple[int, list[tuple[int, str]]] | None = (
             None  # (ring seq, queued) of the last reply
         )
+        self._deferred: collections.deque[_Deferred] = collections.deque()
+        self._settle_timer: asyncio.TimerHandle | None = None
         self.names = names if names is not None else RobotName()
         self.stack, self.hub, self.speech = stack, hub, speech
         self.affect, self.responder = affect, responder
@@ -261,6 +275,7 @@ class ConversationWorker:
         limit = cfg.conversation.pending_utterances
         gen = NOT_RECORDED
         if self.transcript is not None:
+            self._settle_deferred()  # a reply that is over goes before the next question
             _, gen = self.transcript.begin(
                 "user", utterance.text.strip(), utterance.language or cfg.conversation.language
             )
@@ -470,6 +485,7 @@ class ConversationWorker:
             self._drop_unheard_question()
         if turn is None:
             self._settle_reply()
+            self._settle_deferred(force=True)
             return self._trim_tail()
         self._counts["interrupts"] += 1
         loop = self._loop
@@ -489,6 +505,56 @@ class ConversationWorker:
         heard = [text for job, text in queued if self.speech.played(job)]
         if len(heard) < len(queued):
             self.transcript.settle(seq, " ".join(heard), interrupted=True)
+
+    def _settle_deferred(self, *, force: bool = False) -> bool:
+        """Record each deferred reply that is over: every sentence played to its end, or the
+        speech output is idle (what never played was dropped), or ``force`` (a barge-in: the
+        speech was just stopped). Only the sentences that played are shown, and a reply that a
+        cut shortened is marked interrupted. Any thread. Returns whether any is still waiting."""
+        ring = self.transcript
+        with self._lock:
+            if not self._deferred:
+                return False
+            idle = force or self.speech.idle()
+            now = self.clock()
+            while self._deferred:
+                item = self._deferred[0]
+                if not (idle or self._played_through(item.queued, now)):
+                    break
+                self._deferred.popleft()
+                heard = [t for job, t in item.queued if self.speech.played(job)]
+                cut = (item.cut or force) and len(heard) < len(item.queued)
+                if ring is not None:
+                    ring.add(
+                        "robot",
+                        " ".join(heard),
+                        item.language,
+                        interrupted=cut,
+                        generation=item.generation,
+                    )
+            return bool(self._deferred)
+
+    def _played_through(self, queued: list[tuple[int, str]], now: float) -> bool:
+        """Whether every sentence of ``queued`` played and its audio is over."""
+        for job, _ in queued:
+            ended = self.speech.ended_at(job)
+            if not self.speech.played(job) or ended is None or ended > now:
+                return False
+        return True
+
+    def _arm_settle(self, cfg: RoboEmotConfig) -> None:
+        """Check the deferred replies again in ``conversation.transcript_settle_ms`` (worker
+        loop thread)."""
+        loop = self._loop
+        if loop is None or self._settle_timer is not None:
+            return
+        delay_s = cfg.conversation.transcript_settle_ms / MS_PER_S
+        self._settle_timer = loop.call_later(delay_s, self._on_settle_timer)
+
+    def _on_settle_timer(self) -> None:
+        self._settle_timer = None
+        if self._settle_deferred() and not self._closed:
+            self._arm_settle(self.stack.effective())
 
     def _drop_unheard_question(self) -> None:
         """Forget a pending confirmation unless its question finished playing before now
@@ -965,8 +1031,9 @@ class ConversationWorker:
 
     def _note_reply(self, turn: _Turn, text: str) -> None:
         """Add a queued sentence to the live transcript's reply, if the ring still accepts the
-        turn's generation. With a minor present nothing is added yet: ``_finish`` records what
-        played, so a sentence written without the minor rules is never shown as said."""
+        turn's generation. With a minor present nothing is added yet: ``_finish`` defers the reply
+        and ``_settle_deferred`` records what played once it is over, so a sentence written
+        without the minor rules is never shown as said."""
         ring = self.transcript
         if ring is None:
             return
@@ -1064,9 +1131,13 @@ class ConversationWorker:
             self._active_turn = None
             self._reply = None
             if turn.ring_deferred and turn.reply_seq is None and self.transcript is not None:
-                heard = [t for job, t in turn.queued if self.speech.played(job)]
-                turn.reply_seq = self.transcript.add(
-                    "robot", " ".join(heard), turn.language, generation=turn.ring_gen
+                self._deferred.append(
+                    _Deferred(
+                        turn.ring_gen,
+                        turn.language,
+                        list(turn.queued),
+                        cut or turn.speech_stopped,
+                    )
                 )
             elif turn.reply_seq is not None and self.transcript is not None:
                 if cut or turn.speech_stopped:  # the transcript keeps what was heard
@@ -1076,6 +1147,8 @@ class ConversationWorker:
                     )
                 else:  # a barge-in while the last sentences still play settles it later
                     self._reply = (turn.reply_seq, list(turn.queued))
+        if self._settle_deferred():
+            self._arm_settle(turn.cfg)
         self._counts["turns"] += 1
         self._counts[turn.outcome] += 1
         with self._lock:

@@ -127,6 +127,7 @@ class SpeechOutput:
         self._main: asyncio.Task | None = None
         self._current: asyncio.Task | None = None
         self._current_epoch = -1
+        self._busy_job: int | None = None  # the sentence being synthesized and pushed
         self._ready = threading.Event()
         self._closed = False
         self._last_utterance = 0
@@ -203,6 +204,7 @@ class SpeechOutput:
         while True:
             with self._lock:
                 job = self._jobs.popleft() if self._jobs else None
+                self._busy_job = job.id if job is not None else None
             if job is None:
                 await self._wake.wait()
                 self._wake.clear()
@@ -212,6 +214,8 @@ class SpeechOutput:
             self._current_epoch = job.epoch
             self._current = asyncio.ensure_future(self._speak(job))
             await asyncio.wait({self._current})
+            with self._lock:
+                self._busy_job = None
 
     # ----------------------------------------------------------------- API
 
@@ -317,6 +321,15 @@ class SpeechOutput:
         to the stop."""
         with self._lock:
             return self._ended.get(job_id)
+
+    def idle(self) -> bool:
+        """Whether the output has nothing left to say: no sentence queued or in synthesis, and
+        the speaker has played everything pushed to it. A sentence a stop dropped never plays,
+        so after a stop the output goes idle once the cut audio is over."""
+        with self._lock:
+            if self._jobs or self._busy_job is not None:
+                return False
+        return not self.sink.playing_until() > self.clock()
 
     def question_end(self) -> float | None:
         """Clock stamp at which the last sentence that began to play ends (or ended, or was cut

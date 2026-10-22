@@ -2617,6 +2617,12 @@ class ConversationConfig(Strict):
         "the command that already stopped the robot and is not answered",
         unit="s", ge=0, le=60,
     )  # fmt: skip
+    transcript_settle_ms: int = param(
+        200,
+        "With a minor present the live transcript shows a reply only once it played; while "
+        "the speech still plays, whether it is over is checked this often",
+        unit="ms", ge=20, le=2000,
+    )  # fmt: skip
     confirm_no: dict[str, list[str]] = param(
         {
             "it": ["no", "non", "mai", "lascia stare", "basta", "stop"],
