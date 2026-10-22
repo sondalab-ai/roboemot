@@ -9,7 +9,6 @@ import json
 import logging
 from types import SimpleNamespace
 
-import cv2
 import numpy as np
 import pytest
 from roboemot.config.schema import RoboEmotConfig
@@ -18,6 +17,8 @@ from roboemot.runtime.live_video import LiveVideo, ascii_label
 from roboemot.vision.runner import LatestFrameRunner
 from roboemot.vision.types import Frame
 from roboemot.world.types import Entry
+
+cv2 = pytest.importorskip("cv2")  # the vision extra: run by the python-vision CI job
 
 SENTINEL_BGR = (13, 77, 201)
 WINDOW_S = 6.0
