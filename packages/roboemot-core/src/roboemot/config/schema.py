@@ -3085,6 +3085,15 @@ class LiveConfig(Strict):
         le=30000,
     )
 
+    @model_validator(mode="after")
+    def _window_spans_two_polls(self) -> LiveConfig:
+        if self.viewer_window_s * self.video_fps < 2:
+            raise ValueError(
+                f"webui.live.viewer_window_s ({self.viewer_window_s} s) must cover at least two "
+                f"polls at webui.live.video_fps ({self.video_fps} Hz)"
+            )
+        return self
+
 
 class WebUIConfig(Strict):
     bind: str | None = param(

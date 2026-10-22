@@ -300,7 +300,7 @@ async function liveBannerPoll(serial) {
     const data = await api("GET", "/api/live/viewers");
     if (!liveBannerActive(serial)) return;
     const box = document.getElementById("live-video-banner");
-    box.hidden = !data.active;
+    box.hidden = !data.video_viewers_active;
     delay = data.poll_ms || LIVE_RETRY_MS;
   } catch (err) {
     if (!liveBannerActive(serial)) return;

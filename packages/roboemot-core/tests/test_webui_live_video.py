@@ -153,25 +153,25 @@ def test_the_banner_flag_follows_who_was_sent_a_frame(served):
     c = served.client
     enable(c)
     assert c.request("GET", "/api/live/viewers").json == {
-        "active": False, "count": 0, "poll_ms": 3000,
+        "video_viewers_active": False, "count": 0, "poll_ms": 3000,
     }  # fmt: skip
     c.request("GET", "/api/live/frame.jpg")
     feed(served)
     assert c.request("GET", "/api/live/frame.jpg").status == 200
     assert c.request("GET", "/api/live/viewers").json == {
-        "active": True,
+        "video_viewers_active": True,
         "count": 1,
         "poll_ms": 3000,
     }
     set_flag(c, "video", False)
-    assert c.request("GET", "/api/live/viewers").json["active"] is False
+    assert c.request("GET", "/api/live/viewers").json["video_viewers_active"] is False
 
 
 def test_viewers_is_inactive_by_default_and_the_banner_poll_follows_its_setting(served):
     c = served.client
     c.login()
     assert c.request("GET", "/api/live/viewers").json == {
-        "active": False,
+        "video_viewers_active": False,
         "count": 0,
         "poll_ms": 3000,
     }
@@ -186,7 +186,7 @@ def test_without_a_live_source_the_banner_poll_still_answers(tmp_path, stack):
     try:
         client = Client(srv.port)
         client.login()
-        assert client.request("GET", "/api/live/viewers").json["active"] is False
+        assert client.request("GET", "/api/live/viewers").json["video_viewers_active"] is False
         r = client.request("GET", "/api/live/frame.jpg")
         assert (r.status, r.json) == (503, {"error": "live_unavailable"})
     finally:
@@ -234,3 +234,44 @@ def test_the_page_polls_the_frame_and_the_banner_with_the_strings_in_both_langua
     static = Path(__file__).resolve().parents[1] / "src/roboemot/webui/static"
     html = (static / "index.html").read_text()
     assert 'id="live-video-banner"' in html and "sl-callout" in html
+
+
+def test_the_banner_poll_does_not_extend_an_idle_session(tmp_path, stack):
+    class Clock:
+        now = 1000.0
+
+        def __call__(self):
+            return self.now
+
+    clock = Clock()
+    srv = make_server(FakeService(), Diagnostics(), stack.effective, tmp_path, clock=clock)
+    srv.set_pin(PIN)
+    srv.start()
+    try:
+        client = Client(srv.port)
+        client.login()
+        ttl = stack.effective().webui.session_ttl_s
+        clock.now += ttl - 10
+        assert (
+            client.request("GET", "/api/live/viewers").status == 200
+        )  # still valid, not refreshed
+        clock.now += 20
+        assert client.request("GET", "/api/live/viewers").status == 401  # idle since the login
+        client.login()
+        clock.now += ttl - 10
+        assert client.request("GET", "/api/registry").status != 401  # a real call refreshes
+        clock.now += ttl - 10
+        assert client.request("GET", "/api/live/viewers").status == 200
+    finally:
+        srv.stop()
+
+
+def test_the_viewer_window_must_cover_two_polls():
+    from pydantic import ValidationError
+    from roboemot.config.schema import LiveConfig
+
+    LiveConfig(video_fps=0.5, viewer_window_s=4)
+    with pytest.raises(ValidationError):
+        LiveConfig(video_fps=0.5, viewer_window_s=3)
+    with pytest.raises(ValidationError):
+        LiveConfig(video_fps=0.5, viewer_window_s=1)

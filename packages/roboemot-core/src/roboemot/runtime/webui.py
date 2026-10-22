@@ -46,6 +46,7 @@ def start_webui(
         if host.bus is not None:  # the preview never outlives the robot's waking
             host.bus.subscribe("robot.asleep", lambda msg: live.video.drop())
         cleanup.callback(live.video.drop)
+        host.live_video = live.video
         secrets = SecretsAdmin(stack.effective, store=SecretStore.for_data_dir(cfg.data_dir))
         settings = SettingsEditor(
             stack,

@@ -48,6 +48,7 @@ from .strings import STRINGS, language_for
 log = logging.getLogger(__name__)
 
 COOKIE = "roboemot_session"
+LIVE_VIEWERS = "/api/live/viewers"  # polled by every page: does not extend the idle session
 CSRF_HEADER = "x-csrf-token"
 VECTOR_GUARD_LEN = 32
 MAX_PIN_CHARS = 64
@@ -181,7 +182,7 @@ class LivePort(Protocol):
         ...
 
     def video_viewers(self) -> dict[str, Any]:
-        """``{"active", "count", "poll_ms"}``: whether a page is watching the video (banner)."""
+        """``{"video_viewers_active", "count", "poll_ms"}``: is a page watching (the banner)."""
         ...
 
 
@@ -364,7 +365,8 @@ class WebApi:
         if (method, path) in public:
             return public[(method, path)](req)
         token = parse_cookie(req.headers.get("cookie"))
-        session = self.sessions.get(token, self.clock(), self.pins.version())
+        passive = (method, path) == ("GET", LIVE_VIEWERS)  # the banner poll: no idle refresh
+        session = self.sessions.get(token, self.clock(), self.pins.version(), refresh=not passive)
         if session is None:
             if not path.startswith("/api/"):
                 raise ApiError(HTTPStatus.NOT_FOUND, "not_found")
@@ -393,7 +395,7 @@ class WebApi:
             ("GET", "/api/live/state"): self._live_state,
             ("GET", "/api/live/audio"): self._live_audio,
             ("GET", "/api/live/frame.jpg"): self._live_frame,
-            ("GET", "/api/live/viewers"): self._live_viewers,
+            ("GET", LIVE_VIEWERS): self._live_viewers,
             ("POST", "/api/live/transcript/clear"): self._live_transcript_clear,
             ("GET", "/api/routes"): self._routes,
             ("POST", "/api/routes/add"): self._route_add,
@@ -749,11 +751,15 @@ class WebApi:
 
     def _live_viewers(self, req: Request) -> Response:
         """The banner poll every open page makes: is anyone watching the video. Cheap; answers
-        ``active: false`` when there is no live source."""
+        ``video_viewers_active: false`` when there is no live source."""
         if self.live is None:
             return Response(
                 HTTPStatus.OK,
-                {"active": False, "count": 0, "poll_ms": self.web.live.banner_poll_ms},
+                {
+                    "video_viewers_active": False,
+                    "count": 0,
+                    "poll_ms": self.web.live.banner_poll_ms,
+                },
             )
         return Response(HTTPStatus.OK, self.live.video_viewers())
 

@@ -140,8 +140,11 @@ class Sessions:
                 self._items.popitem(last=False)
         return token, session
 
-    def get(self, token: str | None, now: float, pin_version: int) -> Session | None:
-        """The live session for ``token``, refreshed; an expired or stale one is dropped."""
+    def get(
+        self, token: str | None, now: float, pin_version: int, *, refresh: bool = True
+    ) -> Session | None:
+        """The live session for ``token``, refreshed unless ``refresh`` is False (a passive poll
+        must not keep an idle session alive); an expired or stale one is dropped."""
         if not token:
             return None
         key = self._key(token)
@@ -156,8 +159,9 @@ class Sessions:
             ):
                 del self._items[key]
                 return None
-            session.last_seen = now
-            self._items.move_to_end(key)
+            if refresh:
+                session.last_seen = now
+                self._items.move_to_end(key)
             return session
 
     def drop(self, token: str | None) -> None:

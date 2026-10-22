@@ -48,7 +48,7 @@ async function videoPage(t, extra = {}) {
     "GET /api/live/state": STATE,
     "GET /api/live/audio": AUDIO,
     "GET /api/live/frame.jpg": JPEG,
-    "GET /api/live/viewers": { active: false, count: 0, poll_ms: POLL_MS },
+    "GET /api/live/viewers": { video_viewers_active: false, count: 0, poll_ms: POLL_MS },
     "POST /api/logout": () => { loggedIn = false; return { ok: true }; },
     ...extra,
   });
@@ -182,7 +182,7 @@ test("leaving the tab stops the polling and revokes the URLs", async (t) => {
 });
 
 test("logging out stops the polling, revokes the URLs and hides the banner", async (t) => {
-  const page = await videoPage(t, { "GET /api/live/viewers": { active: true, count: 1, poll_ms: POLL_MS } });
+  const page = await videoPage(t, { "GET /api/live/viewers": { video_viewers_active: true, count: 1, poll_ms: POLL_MS } });
   await openLive(page);
   await sleep(WAIT_MS);
   assert.equal(page.document.querySelector("#live-video-banner").hidden, false);
@@ -212,7 +212,7 @@ test("an expired session on a frame goes back to the login", async (t) => {
 
 test("the banner shows on any tab while someone watches and hides when they stop", async (t) => {
   let active = false;
-  const page = await videoPage(t, { "GET /api/live/viewers": () => ({ active, count: active ? 1 : 0, poll_ms: POLL_MS }) });
+  const page = await videoPage(t, { "GET /api/live/viewers": () => ({ video_viewers_active: active, count: active ? 1 : 0, poll_ms: POLL_MS }) });
   const banner = page.document.querySelector("#live-video-banner");
   assert.ok(banner.classList.contains("sl-callout"));
   await sleep(WAIT_MS);
@@ -245,7 +245,7 @@ test("no banner poll before login", async (t) => {
   const page = await loadPage({
     "GET /api/session": { authenticated: false, pin_set: true },
     "GET /api/strings": { language: "en", strings: STRINGS },
-    "GET /api/live/viewers": { active: true, count: 1, poll_ms: POLL_MS },
+    "GET /api/live/viewers": { video_viewers_active: true, count: 1, poll_ms: POLL_MS },
   });
   t.after(() => page.window.close());
   await sleep(WAIT_MS);

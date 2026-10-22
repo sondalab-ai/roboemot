@@ -76,6 +76,7 @@ class LiveVideo:
         self._seen: dict[str, float] = {}  # client ip -> when it was last sent a frame
         self._cv2: Any = None
         self._runner: Any = None  # the runner this view asked to keep a frame (set by ``frame``)
+        self._armed_until = float("-inf")  # the runner keeps a frame until then, if still armed
 
     def apply_config(self, change: Any) -> None:
         """``ConfigStack`` subscriber: hot reload; turning the preview off drops everything."""
@@ -101,11 +102,11 @@ class LiveVideo:
         many. Cheap: no config read, no encode."""
         live = self._cfg.webui.live
         if not (live.enabled and live.video):
-            return {"active": False, "count": 0, "poll_ms": live.banner_poll_ms}
+            return {"video_viewers_active": False, "count": 0, "poll_ms": live.banner_poll_ms}
         with self._lock:
             self._prune(self._clock())
             count = len(self._seen)
-        return {"active": count > 0, "count": count, "poll_ms": live.banner_poll_ms}
+        return {"video_viewers_active": count > 0, "count": count, "poll_ms": live.banner_poll_ms}
 
     # ------------------------------------------------------------------ frames
 
@@ -118,8 +119,21 @@ class LiveVideo:
             self._seen.clear()
             self._release()
 
+    def expire(self) -> None:
+        """Called from the app tick, so the age bound holds when no page polls: once the last
+        request is older than the window, log the stops and drop the frame and the JPEG. Free
+        (two reads, no lock) while nothing is held."""
+        if self._armed_until == float("-inf"):
+            return
+        with self._lock:
+            now = self._clock()
+            self._prune(now)
+            if not self._seen and now > self._armed_until:
+                self._release()
+
     def _release(self) -> None:
         self._jpeg, self._jpeg_seq, self._jpeg_at = None, -1, float("-inf")
+        self._armed_until = float("-inf")
         if self._runner is not None:
             self._runner.unwatch()
 
@@ -154,6 +168,7 @@ class LiveVideo:
             now = self._clock()
             self._runner = service.runner
             self._runner.watch(live.viewer_window_s)
+            self._armed_until = now + live.viewer_window_s
             latest = self._runner.latest()
             if latest is None:
                 self._prune(now)

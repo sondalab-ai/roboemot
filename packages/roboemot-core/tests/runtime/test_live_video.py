@@ -114,11 +114,11 @@ def test_nothing_is_kept_or_encoded_with_no_viewer(rig):
 
 def test_the_first_request_starts_watching_and_the_next_frame_is_served(rig):
     assert rig.video.frame("10.0.0.5") == (None, "video_no_frame")
-    assert rig.video.viewers()["active"] is False  # nothing was sent yet
+    assert rig.video.viewers()["video_viewers_active"] is False  # nothing was sent yet
     rig.submit()
     jpeg, code = rig.video.frame("10.0.0.5")
     assert code is None and jpeg[:2] == b"\xff\xd8"
-    assert rig.video.viewers() == {"active": True, "count": 1, "poll_ms": 3000}
+    assert rig.video.viewers() == {"video_viewers_active": True, "count": 1, "poll_ms": 3000}
     assert rig.encodes == 1
 
 
@@ -184,12 +184,12 @@ def test_the_viewer_window_starts_and_stops_and_the_banner_flag_follows(rig, cap
     rig.submit()
     rig.video.frame("10.0.0.5")
     rig.clock.now += WINDOW_S - 0.5
-    assert rig.video.viewers()["active"] is True
+    assert rig.video.viewers()["video_viewers_active"] is True
     rig.video.frame("10.0.0.6")  # a second client; the first lapses first
     rig.clock.now += 1.0
-    assert rig.video.viewers() == {"active": True, "count": 1, "poll_ms": 3000}
+    assert rig.video.viewers() == {"video_viewers_active": True, "count": 1, "poll_ms": 3000}
     rig.clock.now += WINDOW_S
-    assert rig.video.viewers() == {"active": False, "count": 0, "poll_ms": 3000}
+    assert rig.video.viewers() == {"video_viewers_active": False, "count": 0, "poll_ms": 3000}
     lines = [r.getMessage() for r in caplog.records]
     assert lines == [
         "live video view started (10.0.0.5)",
@@ -197,7 +197,9 @@ def test_the_viewer_window_starts_and_stops_and_the_banner_flag_follows(rig, cap
         "live video view stopped (10.0.0.5)",
         "live video view stopped (10.0.0.6)",
     ]
-    assert rig.video.viewers()["active"] is False and len(caplog.records) == 4  # once each
+    assert (
+        rig.video.viewers()["video_viewers_active"] is False and len(caplog.records) == 4
+    )  # once each
 
 
 def test_the_frame_and_jpeg_are_dropped_when_viewing_stops(rig):
@@ -217,7 +219,7 @@ def test_the_frame_and_jpeg_are_dropped_when_the_flag_goes_off(rig):
     rig.apply(video=False)
     assert rig.runner.latest() is None and rig.video._jpeg is None
     assert rig.video.frame("a") == (None, "video_off")
-    assert rig.video.viewers()["active"] is False
+    assert rig.video.viewers()["video_viewers_active"] is False
     rig.apply(video=True, enabled=True)
     rig.apply(enabled=False)
     assert rig.video.frame("a") == (None, "live_disabled")
@@ -231,7 +233,7 @@ def test_the_frame_and_jpeg_are_dropped_when_the_robot_sleeps(rig):
     assert rig.video.frame("a") == (None, "video_asleep")
     assert rig.runner.latest() is None and rig.video._jpeg is None
     rig.p.sleep.asleep = False
-    assert rig.video.viewers()["active"] is False
+    assert rig.video.viewers()["video_viewers_active"] is False
     rig.submit()
     assert rig.runner.latest() is None  # nobody watches until the next request
 
@@ -242,7 +244,7 @@ def test_drop_is_the_bus_and_shutdown_hook(rig):
     rig.video.frame("a")
     rig.video.drop()
     assert rig.video._jpeg is None and rig.runner.latest() is None
-    assert rig.video.viewers()["active"] is False
+    assert rig.video.viewers()["video_viewers_active"] is False
 
 
 def decode(jpeg):
@@ -324,23 +326,70 @@ def test_label_text_is_folded_to_what_the_font_can_draw():
     assert len(ascii_label("x" * 100)) == live_video.LABEL_MAX_CHARS
 
 
-def test_logs_and_the_vision_report_hold_no_image_bytes(caplog):
+def test_the_tick_drops_the_frame_and_jpeg_when_no_page_polls_any_more(rig, caplog):
+    caplog.set_level(logging.INFO, logger=live_video.__name__)
+    rig.video.expire()  # nothing held: free, no lock
+    rig.video.frame("10.0.0.5")
+    rig.submit()
+    rig.video.frame("10.0.0.5")
+    rig.clock.now += WINDOW_S - 1
+    rig.video.expire()
+    assert rig.video._jpeg is not None and rig.runner.latest() is not None  # still inside
+    rig.clock.now += 2
+    rig.video.expire()  # no request, no banner poll: only the tick
+    assert rig.video._jpeg is None and rig.runner.latest() is None
+    assert [r.getMessage() for r in caplog.records][-1] == "live video view stopped (10.0.0.5)"
+    rig.submit()
+    assert rig.runner.latest() is None
+
+
+def test_the_tick_releases_a_watch_that_never_got_a_frame(rig):
+    assert rig.video.frame("a") == (None, "video_no_frame")
+    rig.clock.now += WINDOW_S + 1
+    rig.video.expire()
+    rig.submit()
+    assert rig.runner.latest() is None
+
+
+def test_the_loop_tick_calls_expire():
+    import inspect
+
+    from roboemot.runtime import loop
+
+    assert "live_video.expire()" in inspect.getsource(loop.run_loop)
+
+
+def test_logs_and_the_real_debug_report_hold_no_image_bytes(caplog):
+    import base64
+
+    from roboemot.diagnostics import Diagnostics, FnSource
+    from roboemot.vision.service import Perception, VisionService
+
     caplog.set_level(logging.DEBUG)
     rig = Rig()
+    pipeline = SimpleNamespace(stats=lambda: {"face_tracks": 0}, close=lambda: None)
+    service = VisionService(pipeline, SimpleNamespace(read=lambda: None), RoboEmotConfig())
+    service.runner = rig.runner
+    perception = Perception(None, None, None, None, service, None)
+    rig.host.perception.service = service
+    report = Diagnostics().add(FnSource("roboemot.vision", perception.vision_snapshot))
     rig.video.frame("10.0.0.9")
-    rig.submit()
+    rig.submit(np.full((480, 640, 3), SENTINEL_BGR, np.uint8))
     jpeg, _ = rig.video.frame("10.0.0.9")
-    rig.video.drop()
-    text = "\n".join(r.getMessage() + repr(r.args) for r in caplog.records)
-    assert "10.0.0.9" in text
-    assert jpeg[:16].decode("latin-1") not in text and repr(jpeg[:16]) not in text
-    assert "\\xff\\xd8" not in text and str(SENTINEL_BGR) not in text
+    assert rig.runner.latest() is not None  # a frame is held and a JPEG cached right now
 
-    runner = rig.runner
-    runner.watch(WINDOW_S)
-    runner.submit(Frame(image(), 1.0))
-    assert runner.latest() is not None
-    report = json.dumps(
-        {"frames": {"processed": runner.processed, "dropped": runner.dropped, **runner.rates()}}
-    )
-    assert "image" not in report and "ffd8" not in report.lower()
+    dump = json.dumps(report.report(), default=str)
+    logs = "\n".join(f"{r.getMessage()} {r.args!r}" for r in caplog.records)
+    pixels = bytes(SENTINEL_BGR) * 8
+    for text in (dump, logs):
+        assert "10.0.0.9" in logs
+        for needle in (
+            jpeg[:12].hex(),
+            base64.b64encode(jpeg[:24]).decode(),
+            pixels.hex(),
+            base64.b64encode(pixels).decode(),
+            repr(jpeg[:12]),
+            "\\xff\\xd8",
+        ):
+            assert needle not in text, needle
+    assert '"frames"' in dump  # the real vision section was built
