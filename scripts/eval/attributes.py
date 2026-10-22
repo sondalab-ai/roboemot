@@ -107,6 +107,10 @@ def run(args: argparse.Namespace) -> None:
     from roboemot.registry import FileStore, Matcher, Registry
     from roboemot.vision import Frame, InlineExecutor, VisionPipeline
 
+    raise SystemExit(
+        "attributes.py run is FairFace-only (int8 against fp32) and the shipped age model is now "
+        "yolo11n-face-age: rework it before running (the `report` of old results still works)"
+    )
     profile = "cm4" if args.precision == "int8" else None
     cfg = common.config({"vision": {"attribute_threads": args.threads}})
     stages = common.load_stages(cfg, profile=profile, appearance=False, objects=False)

@@ -23,10 +23,11 @@ import numpy as np
 import onnxruntime as ort
 
 from ..config.schema import VisionConfig
+from ..registry.estimates import UNKNOWN
 from ..registry.records import AGE_GROUPS
 from . import models
 from .models import ModelError
-from .types import AttributeSample, Box, Detection
+from .types import LETTERBOX_GREY, AttributeSample, Box, Detection
 
 log = logging.getLogger(__name__)
 
@@ -59,10 +60,9 @@ PIXEL_MAX = 255.0
 # then one sigmoid score per class, per anchor. Ultralytics letterboxes with grey 114.
 AGE_MODEL_NAME = "yolo11n-face-age"
 YOLO_BOX_ROWS = 4
-YOLO_PAD_VALUE = 114
+YOLO_PAD_VALUE = LETTERBOX_GREY
 YOLO_NAMES_KEY = "names"
 YOLO_STRIDE_KEY = "stride"
-UNKNOWN = "unknown"
 
 # NanoDet-Plus-m 320 (config nanodet-plus-m_320.yml of the release): plain resize without
 # keeping the aspect ratio, BGR mean/std, four strides, distance distribution of 8 bins per side.

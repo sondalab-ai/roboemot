@@ -243,9 +243,11 @@ def _target(root: Path, file: ModelFile) -> Path:
 def prune_retired(root: Path, manifest: Path = MANIFEST) -> list[Path]:
     """Delete the manifest's ``retired`` files and their markers; returns the files deleted.
 
-    Only the listed paths are touched, never other files in the folder (it may be a shared
-    cache). A listed path that resolves outside ``root`` is skipped; a symlink is removed, not
-    followed. Folders left empty by a deletion are removed up to ``root``.
+    Only the listed paths are touched, never other files in the folder. A listed path that
+    resolves outside ``root`` (for example a symlink pointing out) is left alone with its
+    marker; an in-root symlink is unlinked, not followed. Folders left empty by a deletion are
+    removed up to ``root``. On the bench cache (``--cache-dir ~/.cache/roboemot-bench/models``)
+    this deletes the FairFace files that ``scripts/bench`` and ``scripts/eval`` still use.
     """
     base = root.resolve()
     deleted = []

@@ -673,3 +673,11 @@ def test_real_face_pipeline_on_a_face_image(stages):
     )
     assert e1.shape == (128,) and float(e1 @ e2) > 0.45
     assert time.perf_counter() - start < 5
+    # ROBOEMOT_TEST_FACE is an adult portrait: the age model must see an adult on the padded crop
+    # the pipeline makes (a BGR/RGB swap drops the adult score well below the floor on most).
+    x1, y1, x2, y2 = faces[0].box
+    half = max(x2 - x1, y2 - y1) * (1 + 2 * RoboEmotConfig().vision.attribute_crop_margin) / 2
+    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+    top, left = max(0, int(cy - half)), max(0, int(cx - half))
+    crop = img[top : int(cy + half), left : int(cx + half)]
+    assert stages.attribute_estimator.estimate(crop).age_group == "adult"

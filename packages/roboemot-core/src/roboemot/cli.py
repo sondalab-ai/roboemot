@@ -268,7 +268,8 @@ def main(argv: list[str] | None = None) -> int:
     mod = sub.add_parser(
         "models",
         help="vision and voice model files: list, fetch, prune (delete the files of replaced "
-        "models, such as the FairFace pair) (SPEC 5, 8, 13)",
+        "models, such as the FairFace pair; on the bench cache that includes files the bench "
+        "scripts use) (SPEC 5, 8, 13)",
     )
     mod.add_argument("action", choices=["list", "fetch", "prune"])
     mod.add_argument("names", nargs="*", help="models to fetch (see `list`)")

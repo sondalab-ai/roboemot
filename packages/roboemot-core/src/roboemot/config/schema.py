@@ -1549,8 +1549,9 @@ class VisionConfig(Strict):
         0.5,
         "Age-model class score (an independent sigmoid) below which a crop's age group is "
         "unknown, a possible minor; replaces the 0.8 rule for age. The estimator and the "
-        "worker take it at start",
-        ge=0,
+        "worker take it at start. At least 0.3 (the research's matched point at 128 px is "
+        "0.32), so the floor cannot be switched off",
+        ge=0.3,
         le=1,
         restart=True,
     )
@@ -1563,13 +1564,17 @@ class VisionConfig(Strict):
     )
     attribute_crop_interval_s: float = param(
         0.3,
-        "Minimum capture-time gap between the face crops kept for the age and gender job",
+        "Minimum capture-time gap between the face crops kept for the age job",
         unit="s",
         ge=0,
         le=10,
     )
     attribute_crop_margin: float = param(
-        0.25, "Face box padding for the age and gender crop, per side", ge=0, le=1
+        0.25,
+        "Face box padding for the age crop, per side; other visible faces inside it are filled "
+        "with grey",
+        ge=0,
+        le=1,
     )
     attribute_queue_max: int = param(
         4,
