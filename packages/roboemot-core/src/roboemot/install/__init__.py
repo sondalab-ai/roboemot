@@ -159,6 +159,9 @@ class Platform(Protocol):
     modules: tuple[str, ...]  # their top-level import names (leftover check)
     extras: tuple[str, ...]  # roboemot-core extras the robot needs (installed by default)
     clearable_caches: tuple[str, ...]  # ``~/...`` caches safe to delete; not restored on uninstall
+    # Restart the running app, asking first, and wait until it runs (``run --restart``); None: the
+    # platform cannot restart it.
+    restart: Callable[[Ui], None] | None
 
     def connect(self, ui: Ui, host: str) -> None: ...
     def plan_env(self, remote: Remote) -> str: ...
@@ -197,6 +200,7 @@ class Options:
     vision: bool = True
     models: bool | None = None
     voice: bool = True
+    restart: bool = False
 
 
 # ---------------------------------------------------------------- app config

@@ -230,6 +230,7 @@ class BarePlatform:
     modules = ("bare_app",)
     extras = ()
     clearable_caches = ()
+    restart = None
 
     def __init__(self, tmp: Path) -> None:
         self.tmp = tmp

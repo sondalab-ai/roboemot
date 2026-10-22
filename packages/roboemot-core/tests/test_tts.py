@@ -8,6 +8,7 @@ import logging
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import numpy as np
@@ -577,3 +578,20 @@ def test_router_does_not_hand_out_the_key():
 )
 def test_splitter_abbreviations_do_not_swallow_ordinary_words(text, expected):
     assert [t for t, _ in split([text])] == expected
+
+
+def test_a_reload_takes_the_piper_timeouts_and_keeps_its_restart_fields(tmp_path):
+    local = piper(tmp_path)
+    before = local.config
+    hot = {"startup_timeout_s": 7.0, "request_timeout_s": 9.0, "restart_backoff_s": (0.5, 2.0)}
+    new = PiperConfig(**hot, chunk_ms=40.0, python="/elsewhere/python")
+    remote = SimpleNamespace(name="remote", controls=frozenset(), apply_config=lambda voice: None)
+    FallbackTTS(remote, local).apply_config(VOICE.model_copy(update={"piper": new}))
+    assert local.config.model_dump(include=set(hot)) == new.model_dump(include=set(hot))
+    assert (local.config.chunk_ms, local.config.python) == (before.chunk_ms, before.python)
+
+
+def test_the_backend_choice_is_a_restart_field_like_the_backend():
+    fields = type(VOICE).model_fields
+    for name in ("backend", "fallback_backend"):
+        assert fields[name].json_schema_extra["restart"], name

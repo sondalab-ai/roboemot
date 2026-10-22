@@ -36,14 +36,14 @@ def pipeline() -> SimpleNamespace:
 
 def test_a_config_change_reaches_every_part_that_holds_a_copy():
     p, host = pipeline(), RuntimeHost()
-    host.speech_output = SimpleNamespace(config=None)
+    host.speech_output = Recorder()
     host.conversation = Recorder()
     cfg = RoboEmotConfig()
     make_reload(host, p)(SimpleNamespace(config=cfg))
     assert p.world.cfg is cfg.world and p.selector.cfg is cfg.attention is p.gaze.cfg
     assert p.tracker.cfg is cfg.expression and p.responder.cfg is cfg.connectivity
     assert p.responder.language == cfg.conversation.language
-    assert host.speech_output.config is cfg
+    assert ("apply_config", (cfg,)) in host.speech_output.calls
     assert ("sync", (cfg,)) in p.hub.calls and ("apply_config", (cfg,)) in p.loop.calls
     assert ("apply_config", (cfg,)) in p.perception.calls
     assert ("apply_config", (cfg,)) in host.conversation.calls

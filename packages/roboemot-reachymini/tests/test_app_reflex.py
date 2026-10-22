@@ -260,6 +260,9 @@ def test_voice_builds_a_speech_output_that_plays_through_the_speaker(data):  # n
         async def warm(self, language, voice):
             pass
 
+        def apply_config(self, voice):
+            pass
+
         async def aclose(self):
             pass
 

@@ -90,6 +90,9 @@ class MotionLoop:
             watchdog_return_factor=1.0,
         )
         self._lock = threading.Lock()
+        self.ext = cfg.motion.external
+        self._reset_peaks()
+        self.external_last_event: dict[str, object] | None = None
         self.apply_config(cfg)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -129,11 +132,14 @@ class MotionLoop:
         self.core.limiter.constraint_margin = math.radians(cfg.safety.constraint_margin_deg)
         self.link.policy = cfg.connectivity.robot
         self.platform_move_grace_s = cfg.motion.platform_move_grace_s
+        if cfg.motion.external != self.ext:
+            self._reset_peaks()
         self.ext = cfg.motion.external
-        self._reset_peaks()
 
     def _reset_peaks(self) -> None:
-        """Clear the calibration peaks (on creation and on a config reload)."""
+        """Clear the calibration peaks: on creation and when ``motion.external`` changes, since
+        they are measured against its tolerances and windows. The last event is a record of
+        what happened, so it stays."""
         self._peak = dict.fromkeys(
             (
                 "err_rad", "err_m", "latest_rad", "latest_m",
@@ -141,7 +147,6 @@ class MotionLoop:
             ),
             0.0,
         )  # fmt: skip
-        self.external_last_event: dict[str, object] | None = None
 
     # ---- inputs
 

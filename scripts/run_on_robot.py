@@ -7,6 +7,7 @@ robot model's specifics come from the installer its platform package registers.
     python scripts/run_on_robot.py                        # find the robot (mDNS), start the app
     python scripts/run_on_robot.py --host 192.168.1.20 -y
     python scripts/run_on_robot.py --dry-run              # what it would do
+    python scripts/run_on_robot.py --restart -y           # restart it if running (the head moves)
 """
 
 import sys

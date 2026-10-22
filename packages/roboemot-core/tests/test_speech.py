@@ -76,6 +76,9 @@ class FakeBackend:
     async def warm(self, language, voice):
         pass
 
+    def apply_config(self, voice):
+        pass
+
     async def aclose(self):
         pass
 
@@ -559,6 +562,18 @@ def test_dropped_sentences_neither_replace_nor_extend_the_question_end(make):
     out.stop()  # drops the queue (barge-in, the stop keyword)
     after = out.question_end()
     assert after is not None and after <= before and after <= time.monotonic()
+
+
+def test_a_reload_reaches_the_backend(make):
+    class Configurable(FakeBackend):
+        def apply_config(self, voice):
+            self.applied = voice
+
+    backend = Configurable()
+    out = make(backend)
+    cfg = RoboEmotConfig(conversation={"language": "en"})
+    out.apply_config(cfg)
+    assert out.config is cfg and backend.applied is cfg.voice
 
 
 # ------------------------------------------------- report counters (SPEC 12A)
