@@ -261,9 +261,11 @@ def test_a_burst_that_starts_speech_is_recorded_as_started():
         "max": 0.9,
     }
     assert snap["started"]["longest_on_run_ms"]["max"] == pytest.approx(5 * FRAME_S * 1000)
+    assert snap["started"]["longest_watch_run_ms"]["max"] == pytest.approx(7 * FRAME_S * 1000)
     assert snap["not_started"] == {
         "peak_prob": {"count": 0},
         "longest_on_run_ms": {"count": 0},
+        "longest_watch_run_ms": {"count": 0},
     }
     assert snap["starts"] == 1
 
@@ -285,6 +287,16 @@ def test_a_burst_ends_at_the_first_frame_below_watch_prob():
     peaks = ep.snapshot()["not_started"]["peak_prob"]
     assert peaks["count"] == 2 and peaks["p50"] == 0.3 and peaks["max"] == 0.4
     assert ep.snapshot()["not_started"]["longest_on_run_ms"]["max"] == 0.0
+
+
+def test_a_burst_below_threshold_still_reports_its_length_at_the_watch_level():
+    # never reaches threshold 0.5: longest_on_run_ms is 0, the watch run is the 4-frame burst
+    ep = scripted([0.0, 0.3, 0.4, 0.45, 0.3, 0.1, 0.25, 0.0])
+    not_started = ep.snapshot()["not_started"]
+    assert not_started["longest_on_run_ms"]["max"] == 0.0
+    watch = not_started["longest_watch_run_ms"]
+    assert watch["count"] == 2 and watch["max"] == pytest.approx(4 * FRAME_S * 1000)
+    assert watch["p50"] == pytest.approx(FRAME_S * 1000)
 
 
 def test_reset_in_the_middle_of_a_burst_records_nothing_and_keeps_counters():

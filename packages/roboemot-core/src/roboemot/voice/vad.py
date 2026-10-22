@@ -192,7 +192,7 @@ class Endpointer:
         self._frame_ms = frame_ms
         self._watch_lock = threading.Lock()
         self._counts = dict.fromkeys(WATCH_COUNTS, 0)
-        self._bursts: deque[tuple[float, float, bool]] = deque(maxlen=config.watch_window)
+        self._bursts: deque[tuple[float, float, float, bool]] = deque(maxlen=config.watch_window)
         self.reset()
 
     @property
@@ -221,6 +221,7 @@ class Endpointer:
         self._burst_peak: float | None = None
         self._burst_run = 0
         self._burst_longest = 0
+        self._burst_frames = 0
 
     def feed(self, samples: np.ndarray, stamp: float) -> list[VADEvent]:
         """Add a chunk (mono float32, any length) starting at ``stamp``; returns new events."""
@@ -280,17 +281,24 @@ class Endpointer:
                 self._close_burst(started=False)
                 return
             self._burst_peak = prob if self._burst_peak is None else max(self._burst_peak, prob)
+            self._burst_frames += 1
             self._burst_run = self._burst_run + 1 if on else 0
             self._burst_longest = max(self._burst_longest, self._burst_run)
 
     def _close_burst(self, *, started: bool) -> None:
-        """Record the open burst (peak, longest run above threshold in ms, started), if any;
-        the watch lock is held."""
+        """Record the open burst (peak, longest run above threshold in ms, its length at or above
+        the watch level in ms, started), if any; the watch lock is held."""
         if self._burst_peak is not None:
             self._bursts.append(
-                (float(self._burst_peak), self._burst_longest * self._frame_ms, started)
+                (
+                    float(self._burst_peak),
+                    self._burst_longest * self._frame_ms,
+                    self._burst_frames * self._frame_ms,
+                    started,
+                )
             )
         self._burst_peak, self._burst_run, self._burst_longest = None, 0, 0
+        self._burst_frames = 0
 
     def snapshot(self) -> dict[str, Any]:
         """Counters and burst summaries for the debug report: numbers only, no audio."""
@@ -299,10 +307,11 @@ class Endpointer:
             bursts = list(self._bursts)
 
         def part(started: bool) -> dict[str, Any]:
-            chosen = [(peak, run) for peak, run, s in bursts if s is started]
+            chosen = [(peak, on, watch) for peak, on, watch, s in bursts if s is started]
             return {
-                "peak_prob": summarise([p for p, _ in chosen], PEAK_LEVELS),
-                "longest_on_run_ms": summarise([r for _, r in chosen], RUN_LEVELS),
+                "peak_prob": summarise([c[0] for c in chosen], PEAK_LEVELS),
+                "longest_on_run_ms": summarise([c[1] for c in chosen], RUN_LEVELS),
+                "longest_watch_run_ms": summarise([c[2] for c in chosen], RUN_LEVELS),
             }
 
         return {

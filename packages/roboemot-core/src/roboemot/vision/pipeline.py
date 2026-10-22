@@ -35,6 +35,14 @@ separate processes later) and the in-process bus calls subscribers synchronously
 stays deterministic. A subscriber that raises is logged by type and skipped; it never aborts
 the frame. Frames and crops are never logged or written (SPEC 12).
 
+For the debug report (SPEC 12A) ``stats`` adds face track churn (created, ended, the creation
+rate over ``vision.report_rate_window_s`` of capture time, the visible lifetime of the last
+``vision.report_window`` ended tracks) and the age and gender jobs (the worker's counts and
+timings, results dropped because their track ended or never sent because the queue stayed full,
+capture time from a track's first detection to its estimate, and the outcome: adult, minor or
+unknown). Numbers only; the frame thread writes them and the report thread reads them under one
+lock.
+
 ``refresh`` lets the matcher add embeddings of confident matches to the registry (SPEC 6,
 online refresh). ``replay`` forces it off: refresh uses the registry's wall clock and mutates
 the stored galleries, so a replay would change the enrolled people.
@@ -45,6 +53,8 @@ from __future__ import annotations
 import itertools
 import logging
 import math
+import threading
+from collections import deque
 from collections.abc import Callable
 from concurrent.futures import Executor
 from dataclasses import dataclass, field
@@ -54,8 +64,9 @@ import numpy as np
 
 from ..bus import Bus
 from ..config.schema import IdentityConfig, TrackerConfig, VisionConfig, WorldConfig
-from ..registry import Estimate, Matcher
+from ..registry import Estimate, Matcher, possible_minor
 from ..registry.records import Attribute
+from ..stats import P50, P90, summarise
 from ..world import Observation
 from .attributes import AttributeWorker
 from .geometry import CameraModel
@@ -75,6 +86,10 @@ log = logging.getLogger(__name__)
 PERSON = "person"
 UNKNOWN = "unknown"
 NO_ESTIMATE = Estimate(UNKNOWN, "none")
+MS_PER_S = 1000.0
+S_PER_MIN = 60.0
+SUMMARY_LEVELS = {"p50": P50, "p90": P90}
+OUTCOMES = ("adult", "minor", "unknown")
 CameraProvider = Callable[[int, int], CameraModel | None]
 FaceTap = Callable[[Frame, list[Track]], None]
 LightTap = Callable[[np.ndarray], object]
@@ -83,6 +98,8 @@ LightTap = Callable[[np.ndarray], object]
 @dataclass
 class _FaceState:
     generation: int
+    first_seen: float = 0.0  # capture stamp of the track's first detection
+    last_seen: float = 0.0  # capture stamp of its last visible frame
     evals: int = 0
     last_embed: float | None = None
     owner_id: str | None = None
@@ -156,7 +173,13 @@ class VisionPipeline:
         self.face_tracker = Tracker(cfg.tracker, ids)
         self.object_tracker = Tracker(self._object_tracker_cfg(), ids)
         self.worker = (
-            AttributeWorker(attribute_estimator, identity, cfg.attribute_queue_max, executor)
+            AttributeWorker(
+                attribute_estimator,
+                identity,
+                cfg.attribute_queue_max,
+                executor,
+                report_window=cfg.report_window,
+            )
             if attribute_estimator is not None
             else None
         )
@@ -167,6 +190,15 @@ class VisionPipeline:
         self._budget = 0
         self._entity_budget = 0
         self._entity_embeds = 0
+        self._report_lock = threading.Lock()
+        self._last_stamp: float | None = None
+        self._tracks_created = 0
+        self._tracks_ended = 0
+        self._created_stamps: deque[float] = deque()
+        self._lifetimes_s: deque[float] = deque(maxlen=cfg.report_window)
+        self._to_estimate_ms: deque[float] = deque(maxlen=cfg.report_window)
+        self._outcomes = dict.fromkeys(OUTCOMES, 0)
+        self._attr_drops = {"dropped_queue_full": 0, "dropped_track_gone": 0}
         matcher.registry.add_forget_listener(self._on_forget)
 
     def process(self, frame: Frame) -> FrameReport:
@@ -177,9 +209,11 @@ class VisionPipeline:
         even when the governor is off, so state never outlives its track. Raises whatever a
         stage raises: ``LatestFrameRunner`` catches it per frame.
         """
-        self._absorb_attributes()
-        self._tap_light(frame)
         stamp = frame.stamp
+        with self._report_lock:
+            self._last_stamp = stamp
+        self._absorb_attributes(stamp)
+        self._tap_light(frame)
         self.object_tracker.cfg = self._object_tracker_cfg()
         self._expire(stamp)
         if self.governor.scale <= 0:
@@ -222,6 +256,8 @@ class VisionPipeline:
         """
         for track_id in (*self._faces, *self._entities):
             self.matcher.release(track_id)
+        for state in self._faces.values():
+            self._end_face(state)
         self._faces.clear()
         self._entities.clear()
         ids = itertools.count(1)
@@ -273,15 +309,40 @@ class VisionPipeline:
         )
 
     def stats(self) -> dict[str, Any]:
-        """Counts for the debug report (SPEC 12A): live tracks, governor scale and drops.
+        """Counts for the debug report (SPEC 12A): live tracks, governor scale and drops, face
+        track churn and the age and gender jobs (see the module docstring).
 
         Numbers only; no identity, embedding or image.
         """
+        window_s = self.cfg.report_rate_window_s
+        with self._report_lock:
+            last = self._last_stamp
+            recent = sum(
+                1 for t in self._created_stamps if last is not None and t >= last - window_s
+            )
+            tracks = {
+                "created": self._tracks_created,
+                "ended": self._tracks_ended,
+                "created_per_min": recent * S_PER_MIN / window_s,
+                "rate_window_s": window_s,
+                "lifetime_s": summarise(list(self._lifetimes_s), SUMMARY_LEVELS),
+            }
+            attributes: dict[str, Any] = {
+                **self._attr_drops,
+                "outcomes": dict(self._outcomes),
+                "time_to_estimate_ms": summarise(list(self._to_estimate_ms), SUMMARY_LEVELS),
+            }
+        if self.worker is None:
+            attributes = {"state": "off"}
+        else:
+            attributes = {**self.worker.snapshot(), **attributes}
         return {
             "face_tracks": len(self._faces),
             "entity_tracks": len(self._entities),
             "rate_scale": self.governor.scale,
             "stage_drops": dict(self.governor.dropped),
+            "tracks": tracks,
+            "attributes": attributes,
         }
 
     def close(self) -> None:
@@ -328,8 +389,44 @@ class VisionPipeline:
             self._drop_entity(track_id)
 
     def _drop_face(self, track_id: int) -> None:
-        self._faces.pop(track_id, None)
+        state = self._faces.pop(track_id, None)
         self.matcher.release(track_id)
+        if state is not None:
+            self._end_face(state)
+
+    def _end_face(self, state: _FaceState) -> None:
+        """Count an ended face track: its visible lifetime, and a job it never sent because the
+        attribute queue stayed full while its crops were ready."""
+        never_sent = (
+            self.worker is not None
+            and state.attr == "collecting"
+            and len(state.crops) >= self.cfg.attribute_crops
+        )
+        with self._report_lock:
+            self._tracks_ended += 1
+            self._lifetimes_s.append(state.last_seen - state.first_seen)
+            self._attr_drops["dropped_queue_full"] += never_sent
+
+    def _new_face(self, track: Track, stamp: float) -> _FaceState:
+        """Per-track state of a newly confirmed face track, counted for the churn report."""
+        window_s = self.cfg.report_rate_window_s
+        with self._report_lock:
+            self._tracks_created += 1
+            self._created_stamps.append(stamp)
+            while self._created_stamps and self._created_stamps[0] < stamp - window_s:
+                self._created_stamps.popleft()
+        return _FaceState(next(self._generations), first_seen=track.first_stamp)
+
+    def _count_outcome(self, age: Estimate) -> None:
+        """Adult (adult or senior), unknown, or minor (a declared or estimated younger group)."""
+        if age.value == UNKNOWN:
+            outcome = "unknown"
+        elif possible_minor(age.value):
+            outcome = "minor"
+        else:
+            outcome = "adult"
+        with self._report_lock:
+            self._outcomes[outcome] += 1
 
     def _drop_entity(self, track_id: int) -> None:
         self._entities.pop(track_id, None)
@@ -347,7 +444,8 @@ class VisionPipeline:
         for track in result.visible:
             state = self._faces.get(track.track_id)
             if state is None:
-                state = self._faces[track.track_id] = _FaceState(next(self._generations))
+                state = self._faces[track.track_id] = self._new_face(track, frame.stamp)
+            state.last_seen = frame.stamp
             self._evaluate_face(frame, track, state)
             self._collect_crop(frame, track, state)
             self._publish_face(frame, camera, track, state)
@@ -416,6 +514,7 @@ class VisionPipeline:
             return
         if self._declared_complete(state.owner_id):
             state.attr, state.crops = "skipped", []
+            self._count_outcome(self._attributes(state)[0])
             return
         needed = self.cfg.attribute_crops
         gap = self.cfg.attribute_crop_interval_s
@@ -442,13 +541,20 @@ class VisionPipeline:
         top, bottom = max(0, int(cy - half)), min(height, int(cy + half))
         return image[top:bottom, left:right].copy()
 
-    def _absorb_attributes(self) -> None:
+    def _absorb_attributes(self, stamp: float) -> None:
+        """Apply finished jobs to their tracks; ``stamp`` (this frame's) times the estimate."""
         if self.worker is None:
             return
         for result in self.worker.poll():
             state = self._faces.get(result.track_id)
-            if state is not None and state.generation == result.generation:
-                state.age, state.gender, state.attr_stamp = result.age, result.gender, result.stamp
+            if state is None or state.generation != result.generation:
+                with self._report_lock:
+                    self._attr_drops["dropped_track_gone"] += 1
+                continue
+            state.age, state.gender, state.attr_stamp = result.age, result.gender, result.stamp
+            self._count_outcome(self._attributes(state)[0])
+            with self._report_lock:
+                self._to_estimate_ms.append((stamp - state.first_seen) * MS_PER_S)
 
     def _attributes(self, state: _FaceState) -> tuple[Estimate, Estimate]:
         """Declared values of a recognised person override the estimates (SPEC 5)."""

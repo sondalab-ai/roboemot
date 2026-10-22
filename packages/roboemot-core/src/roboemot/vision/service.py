@@ -209,7 +209,7 @@ class Perception:
         if self.objects_unavailable is not None:
             snapshot["objects"] = {"state": "unavailable", "reason": self.objects_unavailable}
         elif self.pipeline is not None:
-            on = self.pipeline.object_detector is not None
+            on = self.pipeline.object_detector is not None and self.pipeline.cfg.objects_enabled
             snapshot["objects"] = {"state": "running" if on else "off"}
         return snapshot
 
