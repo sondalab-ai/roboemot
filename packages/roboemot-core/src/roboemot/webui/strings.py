@@ -521,6 +521,10 @@ EN: dict[str, str] = {
         "This route has an API key. Saving sends that key to {host}. Enter the PIN and press "
         "the button again to allow it."
     ),
+    "err_url_local_refused": (
+        "From this page a route cannot point at this robot or at a link-local address. Write "
+        "such a route in the app config."
+    ),
     "err_url_credentials": (
         "The address must not hold a user name, password, token or ${secret:...} reference. "
         "Store the key with `roboemot secrets set NAME` and use ${secret:NAME} as the api_key."
@@ -1103,6 +1107,10 @@ IT: dict[str, str] = {
     "err_endpoint_ack_required": (
         "Questa route ha una chiave API. Salvando, la chiave viene inviata a {host}. Inserisci il "
         "PIN e premi di nuovo il pulsante per consentirlo."
+    ),
+    "err_url_local_refused": (
+        "Da questa pagina una route non può puntare a questo robot né a un indirizzo "
+        "link-local. Scrivi una route così nella configurazione dell'app."
     ),
     "err_url_credentials": (
         "L'indirizzo non deve contenere utente, password, token o riferimenti ${secret:...}. "

@@ -177,3 +177,59 @@ def test_an_unsafe_secret_store_is_a_bare_code(web, store):
     resp = post(web, "/api/routes/add", {**CLOUD, "secret": "cloud_key", "ack_endpoint": ORIGIN})
     assert resp.status == 409 and resp.json == {"error": "secret_store"}
     assert str(store.path).encode() not in resp.body
+
+
+# ------------------------------------------------------------ R3 SF6: where a web route may point
+
+THIS_MACHINE = [
+    "http://127.0.0.1:8000/v1",
+    "http://127.1/v1",
+    "http://0x7f000001/v1",
+    "http://2130706433/v1",
+    "http://localhost:8000/v1",
+    "http://api.localhost/v1",
+    "http://[::1]:8000/v1",
+    "http://[::ffff:127.0.0.1]/v1",
+    "http://0.0.0.0:8000/v1",
+    "http://169.254.169.254/v1",
+    "http://[fe80::1]/v1",
+]
+
+
+@pytest.mark.parametrize("url", THIS_MACHINE)
+def test_a_web_route_may_not_point_at_this_machine_or_link_local(web, stack, url):
+    """SPEC 8, 12: a PIN holder cannot aim a route (and the check that posts to it) at the robot's
+    own services or the link-local metadata range, in any spelling of the address."""
+    added = post(web, "/api/routes/add", {**CLOUD, "name": "probe", "base_url": url})
+    assert added.status == 422 and added.json["error"] == "url_local_refused"
+    moved = post(web, "/api/settings", {"path": "llm_routes.lan.base_url", "value": url})
+    assert moved.status == 422 and moved.json["error"] == "url_local_refused"
+    assert [r.name for r in stack.effective().llm_routes] == ["lan"]
+    assert stack.effective().llm_routes[0].base_url == LAN["base_url"]
+
+
+def test_a_lan_route_from_the_web_stays_allowed(web, stack):
+    added = post(
+        web, "/api/routes/add", {**CLOUD, "name": "box", "base_url": "http://192.168.1.20:1234/v1"}
+    )
+    assert added.status == 200
+
+
+def test_a_local_route_of_the_config_keeps_its_path_editable(tmp_path):
+    """A route on this machine written in the YAML stays usable: a path edit at the same origin
+    is not a new target."""
+    stack = ConfigStack(
+        app={
+            "llm_routes": [
+                {
+                    "name": "here",
+                    "base_url": "http://127.0.0.1:11434/v1",
+                    "model": "m",
+                    "locality": "cloud",
+                }
+            ]
+        }
+    )
+    editor = SettingsEditor(stack)
+    done = editor.change("llm_routes.here.base_url", "http://127.0.0.1:11434/v2")
+    assert done["changed"] is True

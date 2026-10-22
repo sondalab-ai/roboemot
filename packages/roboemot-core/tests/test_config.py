@@ -486,3 +486,19 @@ def test_app_write_keeps_the_file_mode_and_a_symlink(tmp_path):
     assert "minor_motion_factor: 0.9" in real.read_text()
     assert real.stat().st_mode & 0o777 == 0o640
     assert stack.poll() is None  # own write is not a reload
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ftp://x.example/v1",
+        "file:///etc/passwd",
+        "javascript:alert(1)",
+        "x.example/v1",
+        "http:///v1",
+    ],
+)
+def test_a_route_base_url_must_be_http_or_https_with_a_host(url):
+    """SPEC 8: routes speak HTTP(S) to a host; any other scheme fails at load, not at first use."""
+    with pytest.raises(ConfigError):
+        ConfigStack(app={"llm_routes": [{"name": "r", "base_url": url, "model": "m"}]})

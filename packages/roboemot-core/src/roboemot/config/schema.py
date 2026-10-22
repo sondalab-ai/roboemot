@@ -19,11 +19,13 @@ from __future__ import annotations
 import re
 import warnings
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ROUTE_NAME = re.compile(r"[A-Za-z0-9_-]+")
 ROUTE_NAME_MAX_CHARS = 64
+ROUTE_SCHEMES = ("http", "https")  # the OpenAI-compatible client speaks only these (SPEC 8)
 
 
 def param(
@@ -2796,6 +2798,13 @@ class LLMRoute(Strict):
             )
         if not self.base_url or not self.model:
             raise ValueError(f"route {self.name}: base_url and model are required")
+        try:
+            parts = urlsplit(self.base_url)
+            ok = parts.scheme.lower() in ROUTE_SCHEMES and bool(parts.hostname)
+        except ValueError:
+            ok = False
+        if not ok:
+            raise ValueError(f"route {self.name}: base_url must be an http(s) URL with a host")
         return self
 
 

@@ -22,10 +22,12 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import ipaddress
 import json
 import logging
 import os
 import secrets
+import socket
 import stat
 import tempfile
 import threading
@@ -298,6 +300,31 @@ def origin(url: str) -> str:
         return ""
 
 
+def this_machine(url: object) -> bool:
+    """Whether ``url`` points at this machine or a link-local address (SPEC 8, 12): loopback,
+    ``localhost`` and ``*.localhost``, the unspecified address (it reaches loopback on Linux),
+    169.254/16 and fe80::/10, in any spelling (``127.1``, ``0x7f000001``, ``2130706433``, an
+    IPv4-mapped IPv6 address). The host is read by httpx, the client that connects. Names are not
+    resolved: a public name that resolves to loopback is not caught here. Private LAN addresses
+    stay allowed, a LAN model server is the usual local route."""
+    try:
+        host = httpx.URL(str(url)).host.lower().rstrip(".")
+    except (httpx.InvalidURL, ValueError, TypeError):
+        return False  # unparsable: the URL checks refuse it
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        ip: ipaddress.IPv4Address | ipaddress.IPv6Address = ipaddress.ip_address(host)
+    except ValueError:
+        try:  # the shorthand IPv4 forms the socket layer accepts
+            ip = ipaddress.IPv4Address(socket.inet_aton(host))
+        except OSError:
+            return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return ip.is_loopback or ip.is_link_local or ip.is_unspecified
+
+
 def is_key_ref(value: object) -> bool:
     """Whether ``value`` is a route key a web edit may bind: ``none`` or one whole
     ``${secret:name}`` reference (never a literal key)."""
@@ -464,10 +491,11 @@ class SettingsEditor:
         words = box is not None and _is_word_map(box)
         if box is None or box["secret"] or (box["kind"] not in ENTRY_KINDS and not words):
             raise SettingNotAllowed("path")
-        if box["path"] == "llm_routes" and secret_shaped(
-            value.get("base_url") if isinstance(value, dict) else None
-        ):
+        url = value.get("base_url") if isinstance(value, dict) else None
+        if box["path"] == "llm_routes" and secret_shaped(url):
             raise ValidationError("url_credentials", "value")
+        if box["path"] == "llm_routes" and this_machine(url):
+            raise ValidationError("url_local_refused", "value")
         if secret_shaped([key, value]):
             raise ValidationError("value_type", "value")
         name = clean_key(key, cfg) if box["kind"] != "keyed_list" else None
@@ -776,6 +804,12 @@ class SettingsEditor:
         old = plain(get_path(cfg, path))
         if clean == old:
             return {"path": path, "changed": False, "value": old}
+        if (
+            write_only(path)
+            and this_machine(clean)
+            and (not isinstance(old, str) or origin(old) != origin(clean))
+        ):
+            raise ValidationError("url_local_refused", "value")
         if (
             path in LANGUAGE_DICTS
             and isinstance(clean, dict)
