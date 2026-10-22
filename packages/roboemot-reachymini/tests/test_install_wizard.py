@@ -77,6 +77,7 @@ class FakeRobot:
         self.fetches: list[str] = []  # `roboemot models fetch` argument lists
         self.fetch_fails = False  # True: every fetch fails; an int: that many fail first
         self.verified_models: list[str] = []  # "voice:<path>" files with a valid marker
+        self.models_on_disk: dict[str, int] = {}  # bytes unverified files already hold
         self.free_kb = 20_000_000
         self.free_kb_by_cache = self.free_kb  # free space while the uv cache is still there
         self.links_into_cache: list[str] = []  # symlinks under /venvs into ~/.cache/uv
@@ -204,7 +205,7 @@ class FakeRobot:
                 self.dirs.discard(path)
             return ""
         if "check_file" in plain:
-            return json.dumps(self.verified_models)
+            return json.dumps({"done": self.verified_models, "on_disk": self.models_on_disk})
         if "platform.machine" in plain:
             return self.machine
         if "version('reachy_mini')" in plain:
@@ -1026,6 +1027,23 @@ def test_a_rerun_after_a_partial_fetch_needs_only_the_rest(offline, robot, daemo
     install()
     assert robot.fetches == ["models fetch --voice"]
     assert f"need {rest} MiB" in capsys.readouterr().out
+
+
+def test_bytes_already_on_disk_are_taken_off_the_need(offline, robot, daemon, capsys):
+    """Review (S2 caveat): a stale partial download is freed before the new one, and a complete
+    file not yet marked is kept, so neither is counted again."""
+    from roboemot.voice import models as voice_models
+
+    big = max(
+        (f for m in voice_models.load_manifest().values() for f in m.files),
+        key=lambda f: f.size_bytes or 0,
+    )
+    robot.models_on_disk = {f"voice:{big.path}": big.size_bytes}
+    rest = -(-inst.models_bytes(False, on_disk=robot.models_on_disk) // inst.MIB)
+    assert rest < needed_mib()
+    robot.home_free_kb = rest * 1024
+    install()
+    assert robot.fetches == ["models fetch --voice"]
 
 
 def test_with_every_model_verified_there_is_nothing_to_download(offline, robot, daemon, capsys):

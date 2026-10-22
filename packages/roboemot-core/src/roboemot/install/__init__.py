@@ -98,22 +98,32 @@ VISION_DERIVED_BYTES = 170_000_000  # INT8 files made from the FP32 weights ("0.
 PIPER_TTS_VERSION = "1.8.0"  # exact pin: the worker protocol is tested against this API
 FETCH_ATTEMPTS = 2  # `roboemot models fetch` runs once more after a failure (it resumes)
 # The model files already verified on the robot (marker check only, read-only: no folder made),
-# as "voice:<path>" / "vision:<path>"; run with the app's interpreter.
+# as "voice:<path>" / "vision:<path>", and for the others the bytes already on disk that the
+# fetch frees or keeps: a stale ``.part`` (deleted before the new download) and a complete-size
+# file (kept when its digest matches). Run with the app's interpreter.
 VERIFIED_MODELS = r"""
 import json
 from roboemot.vision import models as m
 from roboemot.voice import models as v
-done = []
+done, on_disk = [], {}
 for kind, specs, root in (("vision", m.load_manifest(), m.models_dir()),
                           ("voice", v.load_manifest(), v.models_dir())):
     for spec in specs.values():
         for f in spec.files:
+            key = kind + ":" + f.path
             try:
                 m.check_file(root, f)
             except Exception:
+                t = root / f.path
+                part = t.with_name(t.name + (".zip" if f.archive else "") + m.PART_SUFFIX)
+                n = part.stat().st_size if part.is_file() else 0
+                if not f.archive and f.size_bytes and t.is_file():
+                    n += f.size_bytes if t.stat().st_size == f.size_bytes else 0
+                if n:
+                    on_disk[key] = n
                 continue
-            done.append(kind + ":" + f.path)
-print(json.dumps(done))
+            done.append(key)
+print(json.dumps({"done": done, "on_disk": on_disk}))
 """
 PLATFORM_PROBE = (
     "import sys, platform; print(platform.machine()); print('%d.%d' % sys.version_info[:2])"
@@ -650,12 +660,19 @@ def models_label(vision: bool) -> str:
     return "voice and vision models" if vision else "voice models"
 
 
-def models_bytes(vision: bool, peak: bool = True, done: frozenset[str] = frozenset()) -> int:
+def models_bytes(
+    vision: bool,
+    peak: bool = True,
+    done: frozenset[str] = frozenset(),
+    on_disk: dict[str, int] | None = None,
+) -> int:
     """Disk the fetch needs, from the pinned manifests: each file's download size plus, for a
     zip archive, its unpacked size (both exist while it unpacks; ``peak=False`` counts only what
     stays). Vision adds the INT8 files derived from the FP32 weights (``VISION_DERIVED_BYTES``).
     Files in ``done`` (``"voice:<path>"``, ``"vision:<path>"``: already verified on the robot)
-    need nothing; the derived bytes count until every derived file is done."""
+    need nothing; the derived bytes count until every derived file is done. ``on_disk`` (same
+    keys) are bytes a file already holds on the robot (a stale partial download, a complete
+    file not yet marked), taken off that file's download size."""
     from ..vision import models as vision_models
     from ..voice import models as voice_models
 
@@ -669,19 +686,24 @@ def models_bytes(vision: bool, peak: bool = True, done: frozenset[str] = frozens
                 continue
             derived_left = derived_left or f.quantize is not None
             stays = f.unpacked_bytes if f.archive else f.size_bytes
-            total += (f.size_bytes or 0) + (f.unpacked_bytes or 0) if peak else (stays or 0)
+            have = min((on_disk or {}).get(f"{kind}:{f.path}", 0), f.size_bytes or 0)
+            download = (f.size_bytes or 0) - have
+            total += download + (f.unpacked_bytes or 0) if peak else (stays or 0)
     return total + (VISION_DERIVED_BYTES if derived_left else 0)
 
 
-def verified_models(py: RemotePython) -> frozenset[str]:
-    """The model files already verified on the robot (``VERIFIED_MODELS``); empty when the app
-    is not installed yet or the query fails, so the full size counts."""
+def verified_models(py: RemotePython) -> tuple[frozenset[str], dict[str, int]]:
+    """The model files already verified on the robot and the bytes others already hold
+    (``VERIFIED_MODELS``); empty when the app is not installed yet or the query fails, so the
+    full size counts."""
     if not py.exists():
-        return frozenset()
+        return frozenset(), {}
     try:
-        return frozenset(json.loads(py.py(VERIFIED_MODELS)))
-    except (WizardError, ValueError, TypeError):
-        return frozenset()
+        data = json.loads(py.py(VERIFIED_MODELS))
+        on_disk = {str(k): int(n) for k, n in data["on_disk"].items()}
+        return frozenset(map(str, data["done"])), on_disk
+    except (WizardError, ValueError, TypeError, KeyError, AttributeError):
+        return frozenset(), {}
 
 
 def free_mib_at(remote: Remote, path: str) -> int | None:
@@ -718,7 +740,8 @@ def fetch_models(
     go with it. The dry run only reports sizes and free space.
     """
     label = models_label(vision)
-    need_mib = -(-models_bytes(vision, done=verified_models(py)) // MIB)
+    done, on_disk = verified_models(py)
+    need_mib = -(-models_bytes(vision, done=done, on_disk=on_disk) // MIB)
     folders = model_dirs(remote, vision)
     if need_mib == 0:
         ui.ok(f"the {label} are already there and verified: nothing to download")
