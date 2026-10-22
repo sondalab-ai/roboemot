@@ -369,7 +369,9 @@ def test_logs_and_the_real_debug_report_hold_no_image_bytes(caplog):
 
     caplog.set_level(logging.DEBUG)
     rig = Rig()
-    pipeline = SimpleNamespace(stats=lambda: {"face_tracks": 0}, close=lambda: None)
+    pipeline = SimpleNamespace(
+        stats=lambda: {"face_tracks": 0}, close=lambda: None, preview_overlay=lambda r: None
+    )
     service = VisionService(pipeline, SimpleNamespace(read=lambda: None), RoboEmotConfig())
     service.runner = rig.runner
     perception = Perception(None, None, None, None, service, None)

@@ -54,7 +54,9 @@ def test_the_vision_service_reports_paused_and_resumes_within_one_pause_wait():
     from roboemot.vision.runner import PAUSED_WAIT_S
     from roboemot.vision.service import VisionService
 
-    pipeline = SimpleNamespace(stats=lambda: {}, close=lambda: None, process=lambda f: None)
+    pipeline = SimpleNamespace(
+        stats=lambda: {}, close=lambda: None, process=lambda f: None, preview_overlay=lambda r: []
+    )
     source = CountingSource()
     service = VisionService(pipeline, source, RoboEmotConfig())
     service.pause()
