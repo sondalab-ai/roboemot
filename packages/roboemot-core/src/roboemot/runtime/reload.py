@@ -87,7 +87,22 @@ def make_reload(host: RuntimeHost, p: Pipeline) -> Callable[[Any], None]:
         ]
         return out
 
+    warned = False
+
+    def note_reflex_audio(cfg: Any) -> None:
+        """The microphone level is wired at start only (``Pipeline.reflex_audio``): an engine
+        turned on later needs a restart for its loud-onset reflexes. Said once per run."""
+        nonlocal warned
+        if cfg.reflexes.enabled and cfg.reflexes.audio.enabled and not p.reflex_audio:
+            if not warned:
+                log.warning(
+                    "reflexes.enabled is on: the loud-onset reflexes need a restart "
+                    "(the microphone level was not wired at start)"
+                )
+            warned = True
+
     def reload(change: Any) -> None:
+        note_reflex_audio(change.config)
         failed: Exception | None = None
         for name, step in steps(change.config):
             try:

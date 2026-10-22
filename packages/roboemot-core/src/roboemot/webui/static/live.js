@@ -22,7 +22,7 @@ const LIVE_METER_FLOOR_DB = -60;
 const liveState = { serial: 0, audioTimer: null, after: 0, epoch: null, ui: null };
 const liveVideo = { timer: null, ui: null, url: null, paused: false, chain: 0, running: null, pollMs: LIVE_RETRY_MS, idleMs: Infinity };
 const liveBanner = { timer: null, serial: 0 };
-const liveInput = { at: Date.now(), reported: 0 };
+const liveInput = { at: Date.now(), reported: 0 }; // reported 0: loading the page counts as input
 for (const kind of ["pointerdown", "keydown", "wheel", "touchstart"]) {
   document.addEventListener(kind, () => { liveInput.at = Date.now(); }, { passive: true });
 }

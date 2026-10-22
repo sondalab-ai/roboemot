@@ -1458,3 +1458,15 @@ def test_a_change_the_parts_did_not_take_is_reported_as_not_applied():
     result = editor.change("voice.expressivity", 0.4)
     assert result["changed"] is True and result["applied"] is False
     assert editor.reset("voice.expressivity")["applied"] is False
+
+
+def test_the_web_ui_cannot_turn_the_reflexes_on():
+    """Review ZG should-fix 2 context: turning the reflex engine on is a new motion the web never
+    grants (the ``reflex`` check), so only the app config file can; the reload then reports the
+    restart its microphone part needs (tests/runtime/test_reload.py)."""
+    from roboemot.config.stack import ConfigStack, GuardrailError
+    from roboemot.webui.settings import SettingsEditor
+
+    stack = ConfigStack(app={"reflexes": {"enabled": False}})
+    with pytest.raises(GuardrailError):
+        SettingsEditor(stack).change("reflexes.enabled", True)

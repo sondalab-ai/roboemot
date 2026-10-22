@@ -158,9 +158,10 @@ class Sessions:
             session = self._items.get(key)
             if session is None:
                 return None
+            cfg = self.cfg  # one read: a reload in between cannot mix two configs
             if (
-                now - session.last_seen > self.cfg.session_ttl_s
-                or now - session.created > self.cfg.session_max_s
+                now - session.last_seen > cfg.session_ttl_s
+                or now - session.created > cfg.session_max_s
                 or session.pin_version != pin_version
             ):
                 del self._items[key]
@@ -228,23 +229,25 @@ class LoginLimiter:
                 self._local_client = _Client()
                 self._clients.clear()
 
-    def _slot(self, ip: str) -> tuple[_Pool, _Client | None, int]:
+    def _slot(self, ip: str, cfg: WebUIConfig | None = None) -> tuple[_Pool, _Client | None, int]:
         """The pool, the client record (None if unknown) and the budget that apply to ``ip``."""
+        cfg = cfg or self.cfg
         if ip in LOOPBACK:
-            return self._local, self._local_client, self.cfg.loopback_max_attempts
-        return self._lan, self._clients.get(ip), self.cfg.pin_max_attempts
+            return self._local, self._local_client, cfg.loopback_max_attempts
+        return self._lan, self._clients.get(ip), cfg.pin_max_attempts
 
     def reserve(self, ip: str, now: float) -> float:
         """0 if the attempt may go ahead (and is now counted), else seconds to wait."""
+        cfg = self.cfg  # one read: a reload in between cannot mix two configs
         with self._lock:
-            pool, client, budget = self._slot(ip)
+            pool, client, budget = self._slot(ip, cfg)
             client = client or _Client()
             wait = max(pool.locked_until - now, client.blocked_until - now, 0.0)
             if wait > 0:
                 return wait
             client.failures += 1
-            step = self.cfg.client_backoff_s * 2 ** (client.failures - 1)
-            client.blocked_until = now + min(step, self.cfg.client_backoff_max_s)
+            step = cfg.client_backoff_s * 2 ** (client.failures - 1)
+            client.blocked_until = now + min(step, cfg.client_backoff_max_s)
             if ip not in LOOPBACK:
                 self._clients[ip] = client
                 self._clients.move_to_end(ip)
@@ -252,7 +255,7 @@ class LoginLimiter:
                     self._clients.popitem(last=False)
             pool.failures += 1
             if pool.failures >= budget:
-                pool.locked_until = now + self.cfg.pin_lockout_s
+                pool.locked_until = now + cfg.pin_lockout_s
                 pool.failures = 0
             return 0.0
 

@@ -914,7 +914,13 @@ class ReflexAudioConfig(Strict):
 
 
 class ReflexConfig(Strict):
-    enabled: bool = param(True, "Run the reflex engine", conservative="false")
+    enabled: bool = param(
+        True,
+        "Run the reflex engine. Off, it stops at once; on after a start with it off, the "
+        "loud-onset reflexes need a restart (the microphone is opened at start only for a "
+        "consumer)",
+        conservative="false",
+    )
     max_amplitude_deg: float = param(
         45.0,
         "Ceiling on every rule's amplitude (the manifest limits and the minor cap still apply)",
