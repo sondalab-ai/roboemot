@@ -60,3 +60,19 @@ def test_dry_run_restart_without_the_hook_says_it_would_refuse(platform, capsys)
     out = capsys.readouterr().out
     assert "would refuse: Bare robot cannot restart bare" in out
     assert platform.calls == []
+
+
+class OlderPlatform(NoRestartPlatform):
+    """An out-of-tree platform written before ``Platform.restart``: no attribute at all."""
+
+    restart = property(lambda self: (_ for _ in ()).throw(AttributeError("restart")))
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_a_plain_run_never_reads_restart(monkeypatch, capsys, dry_run):
+    fake = OlderPlatform()
+    monkeypatch.setattr(run_mod, "select_robot", lambda ui, opts, root: ("bare.local", fake))
+    run_mod.run_start(
+        Options(dry_run=dry_run, yes=True), Ui(interactive=False, assume_yes=True), Path()
+    )
+    assert fake.calls == ([] if dry_run else ["start"])

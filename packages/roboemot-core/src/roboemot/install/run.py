@@ -11,7 +11,7 @@ import os
 import sys
 from pathlib import Path
 
-from . import Options, installed_platforms, report_app_url, select_robot
+from . import Options, Platform, installed_platforms, report_app_url, select_robot
 from .ui import Ui, WizardError
 
 RUN_STEPS = 3
@@ -38,20 +38,17 @@ def run_start(opts: Options, ui: Ui, root: Path) -> None:
     ui.ok(f"{platform.app_name} is installed")
 
     ui.step("Start")
-    running = platform.running_app()
-    restarting = opts.restart and running == platform.app_name
-    restart = platform.restart
-    missing = f"{platform.display_name} cannot restart {platform.app_name} from here"
-    if restarting and restart is None and not opts.dry_run:
-        raise WizardError(missing)
     if opts.dry_run:
-        if restarting:
-            app = platform.app_name
+        running = platform.running_app()
+        app = platform.app_name
+        if opts.restart and running == app:
             ui.info(f"{app} is running; would restart {app} (asks first)")
+            blocker = _no_restart(platform) if platform.restart is None else None
         else:
             action = f"would stop {running}, " if running else "no app running; would "
-            ui.info(f"{action}wake the robot and start {platform.app_name}")
-        blocker = missing if restarting and restart is None else platform.start_blocker()
+            ui.info(f"{action}wake the robot and start {app}")
+            blocker = None
+        blocker = blocker or platform.start_blocker()
         if blocker:
             ui.warn(f"would refuse: {blocker}")
         url = platform.app_url(host)
@@ -59,12 +56,20 @@ def run_start(opts: Options, ui: Ui, root: Path) -> None:
             ui.info(f"web UI would be at {url}")
         ui.title("dry run passed")
         return
-    if restarting:
-        restart(ui)
+    if opts.restart and platform.running_app() == platform.app_name:
+        if platform.restart is None:
+            raise WizardError(_no_restart(platform))
+        platform.restart(ui)
     else:
         platform.start(ui)
     report_app_url(ui, platform, host)
     ui.title("running")
+
+
+def _no_restart(platform: Platform) -> str:
+    """Why ``--restart`` is refused on a platform whose ``restart`` is None. ``restart`` is read
+    only for ``--restart``, so a platform written before it still runs and starts its app."""
+    return f"{platform.display_name} cannot restart {platform.app_name} from here"
 
 
 def parse_args(argv: list[str] | None = None) -> Options:
