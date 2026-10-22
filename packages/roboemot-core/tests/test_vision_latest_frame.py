@@ -111,7 +111,7 @@ def test_a_frame_without_a_detection_does_not_replace_the_kept_one():
     module = Gated(skip={2.0})
     runner = started(module, overlay=module.overlay)
     try:
-        runner.watch(5.0)
+        runner.watch(5.0, hold_s=5.0)
         for stamp in (1.0, 2.0):
             runner.submit(frame(stamp))
             assert module.entered.acquire(timeout=5)
@@ -196,3 +196,39 @@ def test_the_cost_on_the_submit_path_with_no_watcher_is_a_comparison():
         runner.submit(f)
     per_call_us = (time.perf_counter() - start) / runs * 1e6
     assert per_call_us < 50  # generous bound; the measured figure is in the slice report
+
+
+def test_with_rare_detection_a_newer_frame_without_boxes_follows_after_the_hold():
+    clock = Clock()
+    runner = LatestFrameRunner(
+        Module(), clock=clock, overlay=lambda report: ["box"] if detected[0] else None
+    )
+    detected = [True]
+    runner.watch(60.0, hold_s=1.0)
+    runner.submit(frame(1.0))
+    runner.run_pending()
+    assert runner.latest()[0].stamp == 1.0 and runner.latest().overlay == ["box"]
+    detected[0] = False
+    clock.now += 0.5
+    runner.submit(frame(2.0))
+    runner.run_pending()
+    assert runner.latest()[0].stamp == 1.0, "a detection frame is held for hold_s"
+    clock.now += 0.6
+    runner.submit(frame(3.0))
+    runner.run_pending()
+    kept = runner.latest()
+    assert kept.frame.stamp == 3.0 and kept.overlay == []  # live picture, no stale boxes
+
+
+def test_camera_age_follows_the_camera_not_the_kept_frame():
+    clock = Clock()
+    runner = LatestFrameRunner(Module(), clock=clock, overlay=lambda report: ["box"])
+    assert runner.camera_age_s() is None
+    runner.watch(60.0, hold_s=100.0)
+    runner.submit(frame(1.0))
+    runner.run_pending()
+    clock.now += 50.0
+    runner.submit(frame(2.0))  # not processed yet (a slow detection): the camera is alive
+    assert runner.latest().frame.stamp == 1.0 and runner.camera_age_s() == 0.0
+    clock.now += 7.0
+    assert runner.camera_age_s() == 7.0

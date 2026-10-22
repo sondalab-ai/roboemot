@@ -85,8 +85,9 @@ class LatestFrameRunner:
     ):
         """``overlay`` gets what ``process`` returned, on the worker thread right after it and
         only while watched, and returns the overlay to keep with that frame (the face boxes of
-        the live preview), or None to keep the previous frame (no detection ran on this one).
-        Without it every processed frame is kept, with no overlay."""
+        the live preview), or None when face detection did not run on it: the kept frame then
+        stays for ``hold_s`` (see ``watch``), after which this one is kept without boxes.
+        Without a hook every processed frame is kept, with no overlay."""
         self.module = module
         self._overlay = overlay
         self.dropped = 0
@@ -103,6 +104,7 @@ class LatestFrameRunner:
         self._frame_seq = 0
         self._frame_at = float("-inf")
         self._watch_until = float("-inf")
+        self._hold_s = 0.0
         self._latest: Kept | None = None
         self._latest_at = float("-inf")
         self._seq = 0
@@ -127,26 +129,29 @@ class LatestFrameRunner:
                 self._latest = None
             self._cond.notify()
 
-    def watch(self, window_s: float) -> None:
+    def watch(self, window_s: float, hold_s: float = 0.0) -> None:
         """Keep a reference to the newest processed frame for the next ``window_s`` seconds (the
         web UI's live preview, SPEC 11A). With nobody watching nothing is kept: one clock
         comparison per frame, no copy. The window lapses on its own and the next frame after it
-        drops the reference."""
+        drops the reference. A frame with boxes stays kept for ``hold_s`` (the page's poll
+        period) before a newer frame without a detection replaces it, without boxes: rare
+        detection never turns the picture into a slideshow, and boxes always match it."""
         with self._cond:
             self._watch_until = self._clock() + window_s
+            self._hold_s = hold_s
 
     def latest(self) -> Kept | None:
-        """The newest frame the pipeline finished while watched and the overlay hook accepted,
-        with its sequence number and the overlay computed on it, or None. It lags the camera
-        (by the detection period and its processing time), but the boxes always belong to the
-        picture. The frame is shared with the pipeline: read it, never write to it."""
+        """The frame the live preview shows (see ``watch``), with its sequence number and the
+        overlay computed on it, or None. The boxes always belong to the picture. The frame is
+        shared with the pipeline: read it, never write to it."""
         with self._cond:
             return self._latest
 
-    def latest_age_s(self) -> float | None:
-        """Seconds (on the runner's clock) since the kept frame was submitted, or None."""
+    def camera_age_s(self) -> float | None:
+        """Seconds (on the runner's clock) since the camera last handed a frame in, while a
+        frame is kept (None otherwise): camera liveness, whatever the detection cadence."""
         with self._cond:
-            return None if self._latest is None else self._clock() - self._latest_at
+            return None if self._latest is None else self._clock() - self._frame_at
 
     def unwatch(self) -> None:
         """Stop watching now and drop the kept frame (viewing stopped, flag off, robot asleep)."""
@@ -206,6 +211,9 @@ class LatestFrameRunner:
         """Process the waiting frame on the calling thread, if there is one; returns whether
         there was. The worker thread's step (tests drive the runner with it); never call it
         while the worker thread runs."""
+        thread = self._thread
+        if thread is not None and thread.is_alive() and threading.current_thread() is not thread:
+            raise RuntimeError("run_pending() while the worker thread runs")
         with self._cond:
             if self._frame is None:
                 return False
@@ -237,12 +245,16 @@ class LatestFrameRunner:
             except Exception as exc:  # the preview loses this frame, vision goes on
                 log.warning("vision overlay failed: %s", type(exc).__name__)
                 return
-            if overlay is None:
-                return
         with self._cond:
-            if self._clock() < self._watch_until:  # unwatch() may have run meanwhile
-                self._latest = Kept(frame, seq, overlay)
-                self._latest_at = arrived
+            if self._clock() >= self._watch_until:  # unwatch() may have run meanwhile
+                return
+            if self._overlay is not None and overlay is None:
+                held = self._latest is not None and self._latest.overlay
+                if held and arrived - self._latest_at < self._hold_s:
+                    return  # the detection frame still shows, with its boxes
+                overlay = []  # a live picture without boxes rather than stale ones
+            self._latest = Kept(frame, seq, overlay)
+            self._latest_at = arrived
 
 
 def fingerprint(image: np.ndarray) -> int:

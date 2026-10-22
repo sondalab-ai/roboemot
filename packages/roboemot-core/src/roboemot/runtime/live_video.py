@@ -206,13 +206,13 @@ class LiveVideo:
             if self._runner is not None and self._runner is not runner:
                 self._runner.unwatch()
             self._runner = runner
-            runner.watch(live.viewer_window_s)
+            runner.watch(live.viewer_window_s, 1.0 / live.video_fps)
             self._armed_until = now + live.viewer_window_s
             latest = runner.latest()
             if latest is None:
                 self._prune(now)
                 return None, VIDEO_NO_FRAME
-            age = runner.latest_age_s()
+            age = runner.camera_age_s()
             if age is not None and age > live.video_stale_s:
                 self._prune(now)
                 return None, VIDEO_STALE
