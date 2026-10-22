@@ -37,7 +37,8 @@ content).
 
 Known limits: the Reachy Mini manifest has placeholder translation limits and null dynamics
 (measure in M0); until then the app starts only when installed with `--dev`. Once they are
-measured, re-run the installer with `--no-dev`: every install rewrites the app's config file (dev content and the voice setting).
+measured, re-run the installer with `--no-dev`: it removes the dev key from the app config
+(`app.yaml` in the data folder) and keeps your other settings there.
 
 ## Quick start
 
@@ -116,9 +117,11 @@ have a `--no-` form).
 
 What goes onto the robot besides the two wheels:
 
-- **Voice is on by default.** The installer writes the app config (`data/app.yaml`) with
-  `voice.enabled: true` (the library default stays off), together with the dev content when
-  `--dev`; the dry run prints what it will contain. `--no-voice` leaves voice off and makes
+- **Voice is on by default.** The installer sets `voice.enabled: true` (the library default
+  stays off), and with `--dev` the dev content, in the app config: `app.yaml` in the data folder
+  (`~/.local/share/roboemot/app.yaml`). It changes only those keys and keeps any other key you
+  put there, so a reinstall does not undo your edits (comments are not kept); the dry run says
+  what it would write. `--no-voice` leaves voice off and makes
   Piper and the models step default to off (they still run when asked with `--piper` or
   `--models`, and the models step still fetches the vision weights while vision is on). With voice
   on, declining Piper or the models warns that the robot will not speak or listen.
@@ -137,15 +140,22 @@ What goes onto the robot besides the two wheels:
   made with `--no-vision` adds the extra and the weights.
 - **Disk.** The CM4 image has about 0.5 GB free (97% used on the robot of the first run) because
   the robot image's own setup leaves a 5.6 GB uv download cache in `~/.cache/uv`. The installer
-  shows its size and asks whether to clear it before the free-space check (default yes on a terminal; an unattended run clears it only with `-y` or `--clear-caches`, `--no-clear-caches` keeps it).
-  uv downloads again whatever it needs; uninstall cannot give the cache back. Other caches
+  shows its size and asks whether to clear it before the free-space check (default yes on a terminal; an unattended run clears it only with `--clear-caches`, not with `-y` alone; `--no-clear-caches` keeps it).
+  uv downloads again whatever it needs; uninstall cannot give the cache back. The dry run says
+  exactly what the real run will do with it, and a failed free-space check names the kept cache
+  and `--clear-caches`. A cache that a
+  venv under `/venvs` links into is kept. The space the install needs is worked out from what it
+  installs (the app, the voice and vision extras, and a new apps venv), and a rerun of the models
+  step counts only the files not yet downloaded. Other caches
   (`~/.cache/huggingface`, `~/.cache/pip`) are left alone.
 
 The installer leaves the robot as it found it. It keeps the package versions already in the
 shared apps venv (it asks before changing one), and it writes no pip cache. It records what it
 added or replaced in `/venvs/.roboemot-install.json`. `--uninstall` then removes exactly that:
 the app, the dependencies it added (unless another app now needs them), the original versions
-of anything it replaced, and the startup-app setting if it still names RoboEmot. It removes the
+of anything it replaced, and the startup-app setting if it still names RoboEmot. It also removes
+the app config it wrote (`~/.local/share/roboemot/app.yaml`) whole, including settings saved
+from the web UI, and says so (also in the dry run). It removes the
 apps venv too when it created it and no other app or package has moved in since. It verifies
 the result before deleting the record. The installer is robot-agnostic (`roboemot.install`);
 each robot package plugs in its own part (SPEC 4A, Installer).

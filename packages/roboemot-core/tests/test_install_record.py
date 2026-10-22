@@ -5,9 +5,18 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from roboemot.install.build import distribution_names, min_python, third_party_requirements
 from roboemot.install.pyenv import RemotePython, report_changes
-from roboemot.install.record import InstallRecord, Replaced, canonical, plan_uninstall
+from roboemot.install.record import (
+    RECORD_VERSION,
+    InstallRecord,
+    Replaced,
+    canonical,
+    plan_uninstall,
+    unknown_keys,
+)
+from roboemot.install.ui import WizardError
 
 ROOT = Path(__file__).resolve().parents[3]
 OWN = ["roboemot-core", "roboemot-reachymini"]
@@ -141,7 +150,7 @@ class BareRobot:
             on_line(line)
         return out
 
-    def run(self, command: str, check: bool = True) -> str:
+    def run(self, command: str, check: bool = True, stdin: str | None = None) -> str:
         import shlex as sh
 
         if " -m pip " in command:
@@ -160,6 +169,12 @@ class BareRobot:
                 self.env.update({"bare-app": "1.0", "tomli": "2.0"})
             return "\n__rc=0"
         plain = " ".join(sh.split(command)) if command.startswith("/opt") else command
+        if command.startswith("test -e"):
+            path = sh.split(command)[2]
+            there = any(f == path or f.startswith(path + "/") for f in self.files)
+            return "yes" if there else "no"
+        if command.startswith("realpath "):
+            return sh.split(command)[1]
         if command.startswith("test -"):
             return "yes" if command.startswith("test -x") else "no"
         if "platform.machine" in plain:
@@ -179,6 +194,14 @@ class BareRobot:
         if command == 'printf %s "$HOME"':
             return "/home/dev"
         if command == 'printf %s "${ROBOEMOT_DATA_DIR:-}"':
+            return ""
+        if command.startswith("umask 077 && mkdir -p "):  # the app config
+            t = sh.split(command)
+            self.files[t[-1]] = stdin or ""
+            return ""
+        if command.startswith("rm -rf "):
+            path = sh.split(command)[2]
+            self.files = {f: v for f, v in self.files.items() if not f.startswith(path + "/")}
             return ""
         if command.startswith("printf %s"):
             t = sh.split(command)
@@ -220,8 +243,11 @@ class BarePlatform:
     def env_users(self, py):
         return []
 
+    def env_ready(self, py):
+        return True
+
     def probe(self, ui, py): ...
-    def verify(self, ui, py, dev, app_config): ...
+    def verify(self, ui, py): ...
     def running_app(self):
         return None
 
@@ -243,7 +269,7 @@ class BarePlatform:
     def cleanup(self, ui, py, dry_run): ...
     def verify_removed(self, ui): ...
 
-    def stage(self, root, dest, dev, app_config):
+    def stage(self, root, dest):
         pkg = dest / "bare-app"
         pkg.mkdir(parents=True)
         (pkg / "pyproject.toml").write_text(
@@ -280,3 +306,27 @@ def test_env_created_round_trips():
     assert InstallRecord.from_json(json.loads(json.dumps(r.to_json()))).env_created == (
         "/venvs/apps_venv"
     )
+
+
+def test_a_record_from_a_newer_installer_is_refused_with_a_clear_error():
+    """R4 S1/T4: a record written by a newer installer is a WizardError, not a TypeError."""
+    newer = {**rec().to_json(), "version": RECORD_VERSION + 1, "brand_new": 1}
+    with pytest.raises(WizardError, match="newer than this installer"):
+        InstallRecord.from_json(newer)
+
+
+def test_unknown_keys_of_the_same_version_are_dropped_and_named():
+    data = {**rec(added=["scipy"]).to_json(), "brand_new": [1]}
+    loaded = InstallRecord.from_json(data)
+    assert loaded.added == ["scipy"] and unknown_keys(data) == ["brand_new"]
+
+
+def test_an_old_record_is_written_back_at_the_current_version():
+    old = {"app": "a", "platform": "p", "packages": ["x"], "version": 1}
+    assert InstallRecord.from_json(old).to_json()["version"] == RECORD_VERSION == 2
+
+
+@pytest.mark.parametrize("version", ["2", None, True, 1.5])
+def test_an_unreadable_record_version_is_named_as_such(version):
+    with pytest.raises(WizardError, match="unreadable version"):
+        InstallRecord.from_json({**rec().to_json(), "version": version})

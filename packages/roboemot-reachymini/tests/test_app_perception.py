@@ -62,6 +62,7 @@ def data(tmp_path, monkeypatch):
     shutil.copytree(app_module.DATA, folder)
     shutil.copy2(ROOT / "configs/dev-unmeasured.yaml", folder / "app.yaml")
     monkeypatch.setattr(app_module, "DATA", folder)
+    monkeypatch.setattr(app_module, "app_config_path", lambda: folder / "app.yaml")
     return folder
 
 

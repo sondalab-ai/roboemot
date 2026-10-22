@@ -10,21 +10,30 @@ cache) is recorded the same way, with the parents the installer had to create, b
 did not exist before the install: a folder that was already there is not the installer's to
 remove. The Piper virtualenv (SPEC 8, TTS backends) is recorded on its own, so it is removed
 even when the data folder predates the install; so are the model folders (voice, vision) the
-installer created inside a data folder that was not its own. Secrets (SPEC 8, 12 Data) are
+installer created inside a data folder that was not its own, and the app config (``app.yaml``)
+it wrote, which uninstall removes whole. Secrets (SPEC 8, 12 Data) are
 recorded by name, never by value, and only the ones that were not in the store before;
 uninstall removes those names and leaves the others. When the robot has no app environment
 yet, the installer creates it the way the robot's own software would and records its path
 before creating it (``env_created``) with the distributions it held afterwards
 (``env_baseline``); uninstall removes it again unless another app or package has moved in.
+
+The record carries a ``version``. A record from a newer installer (a higher version) is refused
+with a message naming the cause, since this installer cannot honour fields it does not know;
+keys this version does not know in a record of the same or an older version are ignored (the
+caller warns). An older record loads with the missing fields at their defaults and is written
+back at the current version.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from typing import Any
 
-RECORD_VERSION = 1
+from .ui import WizardError
+
+RECORD_VERSION = 2  # 2: models_dirs, env_created, env_baseline, app_config
 
 Versions = dict[str, str]  # canonical distribution name -> version
 
@@ -63,6 +72,8 @@ class InstallRecord:
     models_dirs: list[str] = field(default_factory=list)
     env_created: str | None = None  # app environment this installer created (absolute path)
     env_baseline: list[str] = field(default_factory=list)  # distributions it held once created
+    # app config (app.yaml) it wrote, created or edited: uninstall removes it whole
+    app_config: str | None = None
     version: int = RECORD_VERSION
 
     def to_json(self) -> dict[str, Any]:
@@ -70,8 +81,20 @@ class InstallRecord:
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> InstallRecord:
-        data = dict(data)
+        """The record from its JSON form; a newer ``version`` raises ``WizardError`` and keys
+        this version does not know are dropped (``unknown_keys`` names them)."""
+        version = data.get("version", 1)
+        if not isinstance(version, int) or isinstance(version, bool):
+            raise WizardError(f"the install record has an unreadable version {version!r}")
+        if version > RECORD_VERSION:
+            raise WizardError(
+                f"the install record has version {version!r}, newer than this installer's "
+                f"{RECORD_VERSION}: use the installer that wrote it (a newer checkout)"
+            )
+        known = {f.name for f in fields(cls)}
+        data = {k: v for k, v in data.items() if k in known}
         data["replaced"] = {k: Replaced(**v) for k, v in data.get("replaced", {}).items()}
+        data["version"] = RECORD_VERSION
         return cls(**data)
 
     def merge(self, before: Versions, after: Versions) -> None:
@@ -93,6 +116,12 @@ class InstallRecord:
                     self.replaced[name] = Replaced(before[name], version)
         self.added = sorted(added)
         self.pending_before = None
+
+
+def unknown_keys(data: dict[str, Any]) -> list[str]:
+    """Keys of a record's JSON form that this version does not know (``from_json`` drops them)."""
+    known = {f.name for f in fields(InstallRecord)}
+    return sorted(set(data) - known)
 
 
 @dataclass
@@ -143,5 +172,6 @@ __all__ = [
     "Versions",
     "canonical",
     "plan_uninstall",
+    "unknown_keys",
     "versions",
 ]

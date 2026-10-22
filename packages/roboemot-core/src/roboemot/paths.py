@@ -30,6 +30,7 @@ TRAITS_CACHE_FILE = "llm_traits.json"
 ROUTE_CHECKS_FILE = "route_checks.json"
 SECRETS_FILE = "secrets.json"
 SETTINGS_OVERRIDES_FILE = "webui_settings.json"
+APP_CONFIG_FILE = "app.yaml"
 
 
 def data_path(configured: str = "") -> Path:
@@ -99,6 +100,14 @@ def secrets_path(configured: str = "") -> Path:
     return data_path(configured) / SECRETS_FILE
 
 
+def app_config_path() -> Path:
+    """``<data folder>/app.yaml``, the robot app's config (the ``ConfigStack`` app layer; SPEC 4A
+    Installer, not created here). It cannot depend on the ``data_dir`` config value, which lives
+    in this file: only ``$ROBOEMOT_DATA_DIR`` or the default decide. Outside the package, so a
+    reinstall keeps the owner's edits."""
+    return data_path() / APP_CONFIG_FILE
+
+
 def settings_overrides_path(configured: str = "") -> Path:
     """``<data folder>/webui_settings.json``, the web UI's persisted settings edits (SPEC 11A,
     12 Data; not created here). Mode 0o600; inside the data folder, so uninstall removes it."""
@@ -119,6 +128,7 @@ def piper_python(configured: str = "") -> Path:
 
 
 __all__ = [
+    "APP_CONFIG_FILE",
     "DEFAULT_REL",
     "ENV_DIR",
     "MODELS_SUBDIR",
@@ -129,6 +139,7 @@ __all__ = [
     "SETTINGS_OVERRIDES_FILE",
     "TRAITS_CACHE_FILE",
     "VOICE_MODELS_SUBDIR",
+    "app_config_path",
     "data_dir",
     "data_path",
     "models_subdir",

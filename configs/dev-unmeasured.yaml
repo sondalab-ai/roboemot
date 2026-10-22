@@ -1,5 +1,5 @@
 # Development only (SPEC 12): run before the manifest dynamics are measured in M0.
-# Installed as the app's data/app.yaml by `scripts/install_on_robot.py --dev`.
+# `scripts/install_on_robot.py --dev` sets these keys in the app config (app.yaml in the data folder).
 schema_version: 1
 safety:
   allow_unmeasured_dynamics: true
