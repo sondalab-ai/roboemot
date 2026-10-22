@@ -170,6 +170,24 @@ async def test_http_error_fails_without_server_text_or_key():
         assert leaked not in dumped
 
 
+async def test_http_error_names_the_path_called_without_host_or_credentials():
+    r = LLMRoute(
+        name="c", base_url="https://u:p@api.example.com/api", model="m", api_key=SECRET_KEY
+    )
+    report = await run(Fake(status=404), r)
+    reasons = [c.reason for c in report.checks if c.status == FAIL]
+    assert "no streamed text: HTTP 404 at /api/chat/completions" in reasons
+    dumped = json.dumps(report.to_dict())
+    for leaked in ("u:p", "api.example.com/api", SECRET_KEY):
+        assert leaked not in dumped
+
+
+async def test_http_error_path_leaves_out_the_query():
+    r = LLMRoute(name="c", base_url="https://api.example.com/v1?key=k1", model="m")
+    report = await run(Fake(status=404), r)
+    assert "k1" not in json.dumps(report.to_dict())
+
+
 async def test_unreachable_route_skips_the_tool_check():
     async def refuse(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("down", request=request)

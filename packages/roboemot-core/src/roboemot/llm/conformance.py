@@ -120,9 +120,10 @@ def route_endpoint(route: LLMRoute) -> str:
 
 
 def _why(exc: Exception) -> str:
-    """A reason that carries no server text: it may echo the request or a key."""
+    """A reason that carries no server text: it may echo the request or a key. An HTTP status
+    names the path called (no host, credentials or query), so a wrong base URL shows at once."""
     if isinstance(exc, APIStatusError):
-        return f"HTTP {exc.status_code}"
+        return f"HTTP {exc.status_code} at {exc.request.url.path}"
     if isinstance(exc, (TimeoutError, APITimeoutError)):
         return "timed out"
     if isinstance(exc, (APIConnectionError, OSError)):
