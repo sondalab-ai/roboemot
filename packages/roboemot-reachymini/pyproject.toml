@@ -10,9 +10,11 @@ requires-python = ">=3.11"
 dependencies = ["roboemot-core", "numpy>=1.26", "scipy>=1.11", "httpx>=0.27"]
 
 [project.optional-dependencies]
-# The SDK pulls GStreamer/PyGObject; keep it optional so unit tests run without it.
+# The SDK pulls GStreamer/PyGObject; keep it optional so unit tests run without it. The package
+# requires at least 1.12; the simulator extra (the sim CI job) stays on 1.12.x, the version the
+# code is tested against (sdk.TESTED_SDK), so CI matches the robot.
 sdk = ["reachy-mini>=1.12"]
-sim = ["reachy-mini[mujoco]>=1.12"]
+sim = ["reachy-mini[mujoco]>=1.12,<1.13"]
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6"]
 
 [project.entry-points."reachy_mini_apps"]

@@ -35,3 +35,18 @@ def test_run_checks_the_sdk_before_building_anything(data, monkeypatch):  # noqa
     with pytest.raises(RuntimeError, match="older than 1.12"):
         app_module.RoboEmotApp().run(object(), None)
     assert built == []
+
+
+@pytest.mark.parametrize(
+    ("installed", "newer"),
+    [("1.12.0", False), ("1.12.9", False), ("1.11.0", False), ("1.13.0", True), ("2.0", True)],
+)
+def test_newer_than_tested_compares_major_minor(installed, newer):
+    assert sdk.newer_than_tested(installed) is newer
+
+
+def test_a_newer_sdk_starts_with_a_warning(monkeypatch, caplog):
+    """R4 S10: a daemon update past the tested SDK must not stop the app, but it is logged."""
+    monkeypatch.setattr(platform_module, "installed_version", lambda: "1.13.0")
+    platform_module.ReachyMiniPlatform().require_runtime()
+    assert "newer than 1.12" in caplog.text
