@@ -194,7 +194,7 @@ class PiperBackend:
 
     # ----------------------------------------------------------------- availability
 
-    def available(self, *, minor_present: bool = False) -> bool:
+    def available(self) -> bool:
         """Local and offline: always eligible; a worker in restart backoff makes the request
         fail fast with :class:`TTSUnavailable`, which a fallback backend answers."""
         return True
@@ -295,7 +295,6 @@ class PiperBackend:
         *,
         language: str,
         voice: VoiceConfig,
-        minor_present: bool = False,
     ) -> AsyncIterator[AudioChunk]:
         params = to_piper(delivery, voice)
         factor = 2.0 ** (params["pitch_shift_st"] / SEMITONES_PER_OCTAVE)

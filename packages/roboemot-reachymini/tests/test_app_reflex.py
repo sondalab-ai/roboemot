@@ -248,10 +248,10 @@ def test_voice_builds_a_speech_output_that_plays_through_the_speaker(data):  # n
     class Tone:
         name, controls = "tone", frozenset()
 
-        def available(self, *, minor_present=False):
+        def available(self):
             return True
 
-        async def synthesize(self, text, delivery, *, language, voice, minor_present=False):
+        async def synthesize(self, text, delivery, *, language, voice):
             yield AudioChunk(np.full(1600, 0.1, np.float32), 16000)
 
         def cancel(self):

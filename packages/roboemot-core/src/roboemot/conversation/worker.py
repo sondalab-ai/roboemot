@@ -640,9 +640,7 @@ class ConversationWorker:
             if turn.rounds and self._minor_appeared(turn):
                 return
             active = turn.active = ActiveRoute()
-            stream = router.stream(
-                messages, tools, minor_present=turn.minor, active=active, pseudonyms=pseudonyms
-            )
+            stream = router.stream(messages, tools, active=active, pseudonyms=pseudonyms)
             calls: list[ToolCall] = []
             results: list[ToolOutcome] = []
             cut = False

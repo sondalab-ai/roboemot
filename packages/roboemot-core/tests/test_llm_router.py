@@ -196,12 +196,6 @@ async def test_no_route_raises_for_fallback_phrase():
         await collect(r)
 
 
-async def test_a_minor_present_does_not_skip_a_route():
-    """SPEC 8 (owner decision 2026-10-22): the LLM is used while a minor is present."""
-    r = router(Server(), [route("cloud", "lan.local")])
-    assert isinstance((await collect(r, minor_present=True))[-1], Done)
-
-
 async def test_daily_budget_skips_route_and_resets_next_day():
     srv = Server()
     day = [dt.date(2026, 10, 14)]

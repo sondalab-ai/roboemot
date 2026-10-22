@@ -43,16 +43,15 @@ class FakeBackend:
 
     def __init__(self, pieces=1, delay=0.0, fail=False) -> None:
         self.pieces, self.delay, self.fail = pieces, delay, fail
-        self.deliveries, self.minors, self.cancelled = [], [], threading.Event()
+        self.deliveries, self.cancelled = [], threading.Event()
         self.texts: list[str] = []
         self.started = threading.Event()
 
-    def available(self, *, minor_present=False):
+    def available(self):
         return True
 
-    async def synthesize(self, text, delivery, *, language, voice, minor_present=False):
+    async def synthesize(self, text, delivery, *, language, voice):
         self.deliveries.append(delivery)
-        self.minors.append(minor_present)
         self.texts.append(text)
         self.started.set()
         if self.fail:
@@ -81,14 +80,12 @@ class HoldingBackend(FakeBackend):
 
     HOLD_S = 30.0
 
-    async def synthesize(self, text, delivery, *, language, voice, minor_present=False):
+    async def synthesize(self, text, delivery, *, language, voice):
         if self.texts:
             self.texts.append(text)
             await asyncio.sleep(self.HOLD_S)
             return
-        async for chunk in super().synthesize(
-            text, delivery, language=language, voice=voice, minor_present=minor_present
-        ):
+        async for chunk in super().synthesize(text, delivery, language=language, voice=voice):
             yield chunk
 
 
@@ -236,7 +233,7 @@ def test_minor_appearing_after_enqueue_blocks_the_remote_route(make):
     minor["present"] = True
     gate.set()
     assert wait_for(lambda: sink.stopped_at)
-    assert server.requests == [] and local.minors == []  # no route was contacted
+    assert server.requests == [] and local.texts == []  # no route was contacted
     assert out.sentences_spoken == 0 and sink.pushed == []
 
 
@@ -249,7 +246,7 @@ def test_a_sentence_written_for_a_minor_uses_the_remote_route(make):
     out = make(FallbackTTS(remote, local), minor_present=lambda: True)
     say(out, minor=True)
     assert wait_for(lambda: out.sentences_spoken == 1)
-    assert len(server.requests) == 1 and local.minors == []
+    assert len(server.requests) == 1 and local.texts == []
 
 
 def test_queued_sentences_are_dropped_when_a_minor_appears_after_the_stream_ended(make):
@@ -395,7 +392,7 @@ def test_a_failing_minor_signal_fails_closed(make):
 
     out = make(backend, minor_present=broken)
     say(out, minor=True)
-    assert wait_for(lambda: backend.minors == [True])
+    assert wait_for(lambda: out.sentences_spoken == 1)
     say(out)  # written for adults, and the signal cannot be read: not spoken
     time.sleep(0.2)
     assert out.sentences_spoken == 1
@@ -458,11 +455,9 @@ def test_a_sentence_whose_first_push_lost_the_race_with_a_stop_never_counts_as_p
     holder = {}
 
     class Racing(FakeBackend):
-        async def synthesize(self, text, delivery, *, language, voice, minor_present=False):
+        async def synthesize(self, text, delivery, *, language, voice):
             holder["out"].stop()  # a barge-in lands after the sentence started, before its push
-            async for chunk in super().synthesize(
-                text, delivery, language=language, voice=voice, minor_present=minor_present
-            ):
+            async for chunk in super().synthesize(text, delivery, language=language, voice=voice):
                 yield chunk
 
     sink = TimelineSink()

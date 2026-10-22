@@ -166,10 +166,10 @@ class DelayedTTS:
     def __init__(self, spoken: list[tuple[str, str]]) -> None:
         self.spoken = spoken
 
-    def available(self, *, minor_present=False) -> bool:
+    def available(self) -> bool:
         return True
 
-    async def synthesize(self, text, delivery, *, language, voice, minor_present=False):
+    async def synthesize(self, text, delivery, *, language, voice):
         self.spoken.append((language, text))
         await asyncio.sleep(FAKE_TTS_FIRST_CHUNK_S)
         n = round(22050 * 0.3 * max(1, len(text.split())))

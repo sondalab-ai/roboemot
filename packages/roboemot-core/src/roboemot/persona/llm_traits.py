@@ -101,7 +101,7 @@ async def rate_traits(
     """Traits for ``persona.prompt`` from the cache or the first route that answers; None when
     no route is configured, eligible or reachable, or the reply does not validate. With
     ``pseudonyms`` a registry name in the prompt is aliased on routes that are not local."""
-    routes = router.eligible(minor_present=False)
+    routes = router.eligible()
     if not routes:
         return None
     for route in routes:  # the answering route is not known yet: any eligible model's rating

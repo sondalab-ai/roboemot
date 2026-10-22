@@ -45,7 +45,7 @@ class TTSError(RuntimeError):
 
 
 class TTSUnavailable(TTSError):
-    """The backend cannot be used right now (offline, minor present, route spent, restarting)."""
+    """The backend cannot be used right now (offline, route spent, key unavailable, restarting)."""
 
 
 @dataclass
@@ -69,7 +69,7 @@ class TTSBackend(Protocol):
     name: str
     controls: frozenset[str]
 
-    def available(self, *, minor_present: bool = False) -> bool:
+    def available(self) -> bool:
         """Whether a request may be started now (route rules, restart backoff)."""
         ...
 
@@ -80,7 +80,6 @@ class TTSBackend(Protocol):
         *,
         language: str,
         voice: VoiceConfig,
-        minor_present: bool = False,
     ) -> AsyncIterator[AudioChunk]:
         """Stream the audio of one sentence; raises :class:`TTSError` on failure."""
         ...
@@ -109,8 +108,8 @@ class FallbackTTS:
         self.controls = primary.controls
         self.last_used: str | None = None
 
-    def available(self, *, minor_present: bool = False) -> bool:
-        return any(b.available(minor_present=minor_present) for b in self._chain())
+    def available(self) -> bool:
+        return any(b.available() for b in self._chain())
 
     def _chain(self) -> list[TTSBackend]:
         return [b for b in (self.primary, self.fallback) if b is not None]
@@ -122,16 +121,15 @@ class FallbackTTS:
         *,
         language: str,
         voice: VoiceConfig,
-        minor_present: bool = False,
     ) -> AsyncIterator[AudioChunk]:
         last: TTSError = TTSUnavailable("no TTS backend available")
         for backend in self._chain():
-            if not backend.available(minor_present=minor_present):
+            if not backend.available():
                 continue
             yielded = False
             try:
                 async for chunk in backend.synthesize(
-                    text, delivery, language=language, voice=voice, minor_present=minor_present
+                    text, delivery, language=language, voice=voice
                 ):
                     yielded = True
                     self.last_used = backend.name

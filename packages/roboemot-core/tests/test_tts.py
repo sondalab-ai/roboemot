@@ -358,12 +358,6 @@ async def test_openai_instructions_only_on_instructable_models():
     assert backend.controls == frozenset()
 
 
-async def test_openai_speech_is_used_while_a_minor_is_present():
-    """SPEC 8 (owner decision 2026-10-22): a minor present does not skip the speech route."""
-    backend, _ = openai_backend(SpeechServer())
-    assert backend.available(minor_present=True)
-
-
 async def test_openai_unknown_route_and_spent_budget_are_unavailable():
     backend, _ = openai_backend(SpeechServer(), route(daily_token_budget=0))
     assert not backend.available()

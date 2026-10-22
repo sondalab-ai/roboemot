@@ -202,7 +202,7 @@ class Router:
     def offline(self) -> bool:
         return self.monitor is not None and not self.monitor.online
 
-    def eligible(self, minor_present: bool) -> list[LLMRoute]:
+    def eligible(self) -> list[LLMRoute]:
         out = []
         for r in self.routes:
             if r.name in self._unavailable:
@@ -259,7 +259,6 @@ class Router:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         *,
-        minor_present: bool = False,
         active: ActiveRoute | None = None,
         pseudonyms: Pseudonyms | None = None,
     ) -> AsyncIterator[Event]:
@@ -270,7 +269,7 @@ class Router:
         from a local to a cloud route never carries the real names."""
         if self.offline:
             raise Offline("no route reachable")
-        routes = self.eligible(minor_present)
+        routes = self.eligible()
         if not routes:
             raise NoRouteAvailable(
                 "no eligible route (budgets spent, key unavailable or unreachable)"

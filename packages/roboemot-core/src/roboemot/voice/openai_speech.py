@@ -54,12 +54,10 @@ class OpenAISpeechBackend:
     def _route(self) -> LLMRoute | None:
         return next((r for r in self.router.routes if r.name == self.config.route), None)
 
-    def available(self, *, minor_present: bool = False) -> bool:
-        """The route exists and the router would use it now (online, budget, minors rule)."""
+    def available(self) -> bool:
+        """The route exists and the router would use it now (online, budget, key)."""
         route = self._route()
-        return route is not None and any(
-            r.name == route.name for r in self.router.eligible(minor_present)
-        )
+        return route is not None and any(r.name == route.name for r in self.router.eligible())
 
     async def synthesize(
         self,
@@ -68,11 +66,10 @@ class OpenAISpeechBackend:
         *,
         language: str,
         voice: VoiceConfig,
-        minor_present: bool = False,
     ) -> AsyncIterator[AudioChunk]:
         router = self.router  # one router for the whole request, even if the app swaps it
         route = next((r for r in router.routes if r.name == self.config.route), None)
-        if route is None or route not in router.eligible(minor_present):
+        if route is None or route not in router.eligible():
             raise TTSUnavailable("speech route not eligible")
         body: dict[str, Any] = {
             "model": self.config.model,
