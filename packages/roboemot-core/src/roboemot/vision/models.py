@@ -42,10 +42,12 @@ The folder is ``--cache-dir``,
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import shutil
 import stat
+import time
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -64,6 +66,10 @@ ENV_DIR = "ROBOEMOT_MODELS_DIR"
 CHUNK_BYTES = 1 << 20
 TIMEOUT_S = 60.0
 MAX_REDIRECTS = 5
+# A dropped connection resumes from the bytes already written; waits double from RETRY_WAIT_S.
+DOWNLOAD_ATTEMPTS = 5
+RETRY_WAIT_S = 2.0
+RETRIED = (httpx.NetworkError, httpx.TimeoutException, httpx.RemoteProtocolError)
 PRIVATE_DIR_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
 MARKER_SUFFIX = ".verified"
@@ -372,33 +378,65 @@ def _make_dirs(root: Path, target: Path) -> None:
         raise ModelError(f"cannot create {d}: {exc.strerror}") from exc
 
 
+@dataclass
+class _Progress:
+    done: int = 0
+    digest: hashlib._Hash = field(default_factory=hashlib.sha256)
+
+
 def _stream(client: httpx.Client, url: str, file: ModelFile, part: Path) -> str:
-    """Download ``url`` (https hops only) into ``part``; returns the hex digest."""
+    """Download ``url`` (https hops only) into a fresh ``part``; returns the hex digest.
+
+    A connection dropped mid-body is retried up to ``DOWNLOAD_ATTEMPTS`` times with doubling
+    waits, resuming with a ``Range`` request from the bytes already written; a server that
+    answers the range with the whole file restarts it. HTTP status, size and redirect errors
+    are not retried. The caller owns ``part`` and deletes it on any failure.
+    """
+    fd = os.open(part, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, PRIVATE_FILE_MODE)
+    state = _Progress()
+    with os.fdopen(fd, "wb") as out:
+        for attempt in range(DOWNLOAD_ATTEMPTS):
+            try:
+                _get_into(client, url, file, out, state)
+                break
+            except RETRIED:
+                if attempt == DOWNLOAD_ATTEMPTS - 1:
+                    raise
+                time.sleep(RETRY_WAIT_S * 2**attempt)
+        out.flush()
+        os.fsync(out.fileno())
+    if file.size_bytes is not None and state.done != file.size_bytes:
+        raise ModelError(f"{file.path}: size {state.done} differs from the manifest")
+    return state.digest.hexdigest()
+
+
+def _get_into(
+    client: httpx.Client, url: str, file: ModelFile, out: io.BufferedWriter, state: _Progress
+) -> None:
+    """One GET of ``url`` appended to ``out`` from ``state.done`` (each redirect re-checked)."""
+    headers = {"Range": f"bytes={state.done}-"} if state.done else {}
     for _ in range(MAX_REDIRECTS + 1):
         if not url.startswith("https://"):
             raise ModelError(f"{file.path}: only https URLs are fetched")
-        with client.stream("GET", url, follow_redirects=False) as response:
+        with client.stream("GET", url, headers=headers, follow_redirects=False) as response:
             if response.is_redirect:
                 url = str(response.url.join(response.headers.get("location", "")))
                 continue
             response.raise_for_status()
-            digest = hashlib.sha256()
-            done = 0
-            fd = os.open(
-                part, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, PRIVATE_FILE_MODE
-            )
-            with os.fdopen(fd, "wb") as out:
-                for chunk in response.iter_bytes(CHUNK_BYTES):
-                    done += len(chunk)
-                    if file.size_bytes is not None and done > file.size_bytes:
-                        raise ModelError(f"{file.path}: larger than the manifest size")
-                    out.write(chunk)
-                    digest.update(chunk)
-                out.flush()
-                os.fsync(out.fileno())
-            if file.size_bytes is not None and done != file.size_bytes:
-                raise ModelError(f"{file.path}: size {done} differs from the manifest")
-            return digest.hexdigest()
+            if state.done and response.status_code == httpx.codes.PARTIAL_CONTENT:
+                if not response.headers.get("content-range", "").startswith(f"bytes {state.done}-"):
+                    raise ModelError(f"{file.path}: resumed at the wrong offset")
+            elif state.done:
+                out.seek(0)
+                out.truncate()
+                state.done, state.digest = 0, hashlib.sha256()
+            for chunk in response.iter_bytes(CHUNK_BYTES):
+                if file.size_bytes is not None and state.done + len(chunk) > file.size_bytes:
+                    raise ModelError(f"{file.path}: larger than the manifest size")
+                out.write(chunk)
+                state.digest.update(chunk)
+                state.done += len(chunk)
+            return
     raise ModelError(f"{file.path}: too many redirects")
 
 
