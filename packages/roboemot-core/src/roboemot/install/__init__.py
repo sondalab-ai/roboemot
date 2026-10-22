@@ -374,14 +374,16 @@ def check_ssh(
     platform: Platform,
     remote: Remote,
     need: tuple[int, int] | None,
-    free_space: Callable[[], None] | None = None,
+    free_space: Callable[[], str | None] | None = None,
     extras: tuple[str, ...] = (),
 ) -> RemotePython:
     """Log in once; check the target interpreter, architecture, Python and free space.
 
-    ``free_space`` (stop the running app, clear caches) runs once the interpreter, architecture
-    and Python checks passed and before the free-space check, so a refused install has stopped
-    nothing and what it frees counts. The space needed comes from what will be installed
+    ``free_space`` (validate the app config, stop the running app, clear caches) runs once the
+    interpreter, architecture, Python and environment checks passed (an incomplete environment
+    the installer may not finish is refused here) and before the free-space check, so a refused
+    install has stopped nothing and what it frees counts; what it returns (caches it kept) is
+    added to a free-space error. The space needed comes from what will be installed
     (``install_need_mb``: the app, ``extras`` and, when the environment is created or finished,
     the tree of the creating one).
     """
@@ -408,8 +410,15 @@ def check_ssh(
     if not present:
         ui.info(f"{platform.env_dir} does not exist yet: it is created with {target}")
     ready = present and platform.env_ready(py)
-    if free_space is not None:
-        free_space()
+    if ready:
+        platform.probe(ui, py)
+    elif present:
+        ui.warn(f"{platform.env_dir} is incomplete (an earlier install stopped while creating it?)")
+        if need:
+            refusal = finish_refusal(platform, py, read_record(remote, platform.record_path))
+            if refusal:
+                raise WizardError(refusal)
+    hint = free_space() if free_space is not None else None
     if need:
         downloads, unpacked = install_need_mb(platform, remote, extras, creating=not ready)
         tmp = posixpath.dirname(REMOTE_TMP_PREFIX)
@@ -418,12 +427,11 @@ def check_ssh(
             want = downloads if space == tmp else downloads + unpacked
             free_kb = int(remote.run(f"df -Pk {shlex.quote(path)} | tail -1").split()[3])
             if free_kb < want * 1024:
-                raise WizardError(f"only {free_kb // 1024} MB free on {path}, need {want} MB")
+                raise WizardError(
+                    f"only {free_kb // 1024} MB free on {path}, need {want} MB (worst case: "
+                    "every package counted as new)" + (f"; {hint}" if hint else "")
+                )
             ui.ok(f"{free_kb // 1024} MB free on {path} (need {want} MB)")
-    if ready:
-        platform.probe(ui, py)
-    elif present:
-        ui.warn(f"{platform.env_dir} is incomplete (an earlier install stopped while creating it?)")
     return py
 
 
@@ -1159,6 +1167,27 @@ def remove_created_env(
     return fate.action == "keep"
 
 
+def finish_refusal(
+    platform: Platform, py: RemotePython, record: InstallRecord | None
+) -> str | None:
+    """Why an incomplete environment may not be finished, or None: it must be the one the
+    record says this installer created, and hold nothing beyond the baseline taken when it was
+    created (the finish step installs unpinned, which must not touch another app's packages)."""
+    env = platform.env_dir
+    if record is None or record.env_created != env:
+        return (
+            f"{env} lacks what {platform.display_name} apps need and was not created by this "
+            "installer: repair it with the robot's own software, then run the installer again"
+        )
+    extra = sorted(set(py.installed()) - set(record.env_baseline))
+    if extra:
+        return (
+            f"{env} is incomplete but holds packages added since it was created "
+            f"({', '.join(extra)}): repair it by hand, or uninstall, then run the installer again"
+        )
+    return None
+
+
 def finish_env(
     ui: Ui,
     platform: Platform,
@@ -1173,11 +1202,9 @@ def finish_env(
     its to change: a WizardError. Returns False after the dry run's report (nothing more to
     check without the environment)."""
     env = platform.env_dir
-    if record.env_created != env:
-        raise WizardError(
-            f"{env} lacks what {platform.display_name} apps need and was not created by this "
-            "installer: repair it with the robot's own software, then run the installer again"
-        )
+    refusal = finish_refusal(platform, py, record)
+    if refusal:
+        raise WizardError(refusal)
     plan = platform.plan_env(remote)
     if dry_run:
         ui.ok(f"would finish the environment {env} an earlier install created ({plan})")
@@ -1322,10 +1349,11 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
 
             ui.step("SSH access")
 
-            def free_space() -> None:
+            def free_space() -> str | None:
+                read_app_config(remote, app_config_remote_path(remote))  # refuse a broken one now
                 stopped.append(stop_own_app(ui, platform, opts.dry_run) and not opts.dry_run)
                 home, _ = remote_data_dir(remote)
-                clear_caches(
+                kept = clear_caches(
                     ui,
                     remote,
                     home,
@@ -1334,6 +1362,9 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
                     opts.dry_run,
                     (posixpath.dirname(platform.env_dir),),
                 )
+                if not kept:
+                    return None
+                return f"kept {', '.join(kept)}: --clear-caches frees it"
 
             extras = (*platform.extras, *(("vision",) if opts.vision else ()))
             py = check_ssh(ui, platform, remote, min_python(dirs), free_space, extras)
@@ -1507,7 +1538,8 @@ def run_uninstall(opts: Options, ui: Ui, root: Path) -> None:
         if fate.action == "delete":
             # The whole environment goes below: restoring versions inside it first would only
             # need the package index (internet) for nothing.
-            ui.ok(f"the app's packages are {would}removed with the environment {platform.env_dir}")
+            verb = "would be" if opts.dry_run else "are"
+            ui.ok(f"the app's packages {verb} removed with the environment {platform.env_dir}")
             plan = UninstallPlan([], {}, {}, {})
         else:
             plan = plan_uninstall(record, installed, py.requires() if env_there else {})

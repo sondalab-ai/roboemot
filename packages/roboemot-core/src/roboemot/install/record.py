@@ -84,7 +84,9 @@ class InstallRecord:
         """The record from its JSON form; a newer ``version`` raises ``WizardError`` and keys
         this version does not know are dropped (``unknown_keys`` names them)."""
         version = data.get("version", 1)
-        if not isinstance(version, int) or version > RECORD_VERSION:
+        if not isinstance(version, int) or isinstance(version, bool):
+            raise WizardError(f"the install record has an unreadable version {version!r}")
+        if version > RECORD_VERSION:
             raise WizardError(
                 f"the install record has version {version!r}, newer than this installer's "
                 f"{RECORD_VERSION}: use the installer that wrote it (a newer checkout)"

@@ -710,9 +710,22 @@ def test_an_app_config_the_owner_had_is_edited_but_not_recorded(offline, robot, 
 
 
 def test_an_app_config_that_is_not_yaml_stops_the_install(offline, robot, daemon):
+    """Review SF1/MT4: a broken app.yaml is refused before the auto-stop, the caches and pip."""
     robot.files[APP_YAML] = "voice: [unclosed\n"
+    robot.dirs.add(UV_CACHE)
+    daemon.current = {"info": {"name": "roboemot"}, "state": "running"}
     with pytest.raises(WizardError, match="not valid YAML"):
+        install(clear_caches=True)
+    assert "roboemot-core" not in robot.env and RECORD not in robot.files
+    assert UV_CACHE in robot.dirs and daemon.current["state"] == "running"
+    assert not any(" -m pip install" in c for c in robot.commands)
+
+
+def test_an_app_config_that_is_not_a_mapping_stops_the_install(offline, robot, daemon):
+    robot.files[APP_YAML] = "- a list\n"
+    with pytest.raises(WizardError, match="not a mapping"):
         install()
+    assert "roboemot-core" not in robot.env
 
 
 def test_the_default_install_enables_voice_in_the_app_config(offline, robot, daemon):
@@ -1058,7 +1071,7 @@ def test_the_cache_prompt_defaults_to_yes_only_on_a_terminal(robot, monkeypatch,
     ui = Ui(interactive=interactive, assume_yes=False)
     clear_caches(ui, robot, HOME, ReachyMiniWireless.clearable_caches, None, False)
     assert UV_CACHE in robot.dirs
-    assert [d for q, d in asked if UV_CACHE in q] == [interactive]
+    assert [d for q, d in asked if UV_CACHE in q] == ([True] if interactive else [])
 
 
 def test_an_unattended_run_without_consent_keeps_the_cache(offline, robot):
@@ -1093,10 +1106,42 @@ def test_a_declined_clear_leaves_the_free_space_error(offline, robot):
 def test_install_dry_run_reports_the_uv_cache_and_clears_nothing(offline, robot, capsys):
     robot.dirs.add(UV_CACHE)
     robot.sizes[UV_CACHE] = "5.6G"
-    install(dry_run=True)
+    install(dry_run=True, clear_caches=True)
     assert UV_CACHE in robot.dirs
     assert not any(c.startswith("rm -rf " + UV_CACHE) for c in robot.commands)
     assert f"would clear {UV_CACHE} (5.6G" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("kw", "said"),
+    [
+        ({}, "-y does not clear it"),
+        ({"clear_caches": False}, "kept"),
+    ],
+)
+def test_the_dry_run_says_what_the_real_run_does_with_the_cache(offline, robot, capsys, kw, said):
+    """Review SF3/MT5: `--dry-run -y` reports the cache as kept, as the real `-y` run keeps it."""
+    robot.dirs.add(UV_CACHE)
+    install(dry_run=True, **kw)
+    out = capsys.readouterr().out
+    assert said in out and "would clear" not in out
+
+
+def test_the_dry_run_reports_a_linked_cache_as_kept(offline, robot, capsys):
+    robot.dirs.add(UV_CACHE)
+    robot.links_into_cache = ["/venvs/mini_daemon/lib/x"]
+    install(dry_run=True, clear_caches=True)
+    out = capsys.readouterr().out
+    assert "links into it" in out and "would clear" not in out
+
+
+def test_the_free_space_error_names_the_kept_cache_and_the_flag(offline, robot):
+    """Review S-4: a full robot whose cache was kept (-y alone) is told how to free it."""
+    robot.dirs.add(UV_CACHE)
+    robot.sizes[UV_CACHE] = "5.6G"
+    robot.free_kb_by_cache = (app_need_mb() - 100) * 1024
+    with pytest.raises(WizardError, match=r"kept .*\.cache/uv \(5\.6G\): --clear-caches frees it"):
+        install()
 
 
 def test_install_does_not_delete_a_cache_that_is_a_symlink(offline, robot, capsys):
@@ -2136,10 +2181,52 @@ def test_a_rerun_after_a_failed_pip_in_the_new_venv_finishes_it(offline, robot, 
 def test_a_venv_without_its_base_package_that_the_installer_did_not_create_is_refused(
     offline, robot, daemon
 ):
+    """Review S-6: refused before the auto-stop and the cache step."""
     del robot.env["reachy-mini"]
+    robot.dirs.add(UV_CACHE)
+    daemon.current = {"info": {"name": "roboemot"}, "state": "running"}
     with pytest.raises(WizardError, match="not created by this installer"):
+        install(clear_caches=True)
+    assert robot.files == {} and UV_CACHE in robot.dirs
+    assert daemon.current["state"] == "running"
+
+
+def half_created(robot) -> None:
+    """A venv the installer created whose `pip install reachy-mini` failed."""
+    fresh_robot(robot)
+    run, failing = robot.run, [True]
+    robot.run = lambda c, **kw: (
+        "ERROR: no network\n__rc=1"
+        if failing[0] and "reachy-mini==" in c and " -m pip " in c
+        else run(c, **kw)
+    )
+    with pytest.raises(WizardError, match="pip install failed"):
         install()
-    assert robot.files == {}
+    failing[0] = False
+
+
+def test_an_incomplete_created_venv_another_package_moved_into_is_not_finished(
+    offline, robot, daemon
+):
+    """Review S-1: the finish step installs unpinned, so it refuses a venv with new packages."""
+    half_created(robot)
+    robot.env["someone-else"] = "1.0"
+    with pytest.raises(WizardError, match="holds packages added since it was created"):
+        install()
+    assert "reachy-mini" not in robot.env
+
+
+def test_the_dry_run_says_it_would_finish_the_venv_and_writes_nothing(
+    offline, robot, daemon, capsys
+):
+    """Review MT6."""
+    half_created(robot)
+    files, env = dict(robot.files), dict(robot.env)
+    capsys.readouterr()
+    install(dry_run=True)
+    out = capsys.readouterr().out
+    assert f"would finish the environment {reachy.APPS_VENV}" in out
+    assert robot.files == files and robot.env == env
 
 
 def test_uninstall_removes_the_venv_the_installer_created(offline, robot, daemon):

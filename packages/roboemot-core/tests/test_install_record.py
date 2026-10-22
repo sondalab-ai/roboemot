@@ -323,3 +323,9 @@ def test_unknown_keys_of_the_same_version_are_dropped_and_named():
 def test_an_old_record_is_written_back_at_the_current_version():
     old = {"app": "a", "platform": "p", "packages": ["x"], "version": 1}
     assert InstallRecord.from_json(old).to_json()["version"] == RECORD_VERSION == 2
+
+
+@pytest.mark.parametrize("version", ["2", None, True, 1.5])
+def test_an_unreadable_record_version_is_named_as_such(version):
+    with pytest.raises(WizardError, match="unreadable version"):
+        InstallRecord.from_json({**rec().to_json(), "version": version})
