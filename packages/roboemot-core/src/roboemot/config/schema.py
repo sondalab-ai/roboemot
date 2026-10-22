@@ -898,6 +898,18 @@ class ReflexAudioConfig(Strict):
     loud_event_refractory_s: float = param(
         1.0, "Minimum time between two sound.loud events", unit="s", ge=0, le=60
     )
+    level_block_s: float = param(
+        1.0,
+        "Report only: length of one microphone level block (per-channel and mono dBFS, "
+        "channel correlation) in seconds of input audio",
+        unit="s",
+        ge=0.1,
+        le=60,
+        restart=True,
+    )
+    level_window: int = param(
+        300, "Report only: level blocks kept for the report", ge=10, le=10000, restart=True
+    )
 
 
 class ReflexConfig(Strict):
@@ -1881,6 +1893,18 @@ class VoiceLimits(Strict):
 class VadConfig(Strict):
     threshold: float = param(
         0.5, "Speech probability at or above which a frame counts as speech", ge=0.05, le=0.95
+    )
+    watch_prob: float = param(
+        0.2,
+        "Report only: a burst of frames at or above this probability is recorded with its peak "
+        "and its longest run above threshold, started or not, so the threshold can be tuned "
+        "from a real run. A value above threshold watches from threshold",
+        ge=0.01,
+        le=0.95,
+        restart=True,
+    )
+    watch_window: int = param(
+        500, "Report only: bursts kept for the report", ge=10, le=10000, restart=True
     )
     off_margin: float = param(
         0.15,

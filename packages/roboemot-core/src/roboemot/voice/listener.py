@@ -201,6 +201,7 @@ class VoiceListener:
             }
         snap["latency"] = self._fast.stats.snapshot()
         snap["wake"] = self._gate.snapshot(self._clock())
+        snap["vad"] = self._endpointer.snapshot()
         return snap
 
     def _run(self) -> None:

@@ -42,13 +42,11 @@ from ..bus import Bus, Message
 from ..config.schema import ReflexConfig, ReflexRule
 from ..manifest import Constraint, Dof
 from ..motion import Keyframe, MotionCore, Player, Primitive, Priority
+from ..stats import P50, P90, P95, P99, quantile, summarise
 from ..world.types import Observation
 
 MS_PER_S = 1000.0
-P50 = 0.5
-P90 = 0.9
-P95 = 0.95
-P99 = 0.99
+ONSET_LEVELS = {"p50": P50, "p90": P90, "p99": P99}
 INBOX_MAX = 64
 HALF_PLANE = math.pi / 2
 SOURCE_PREFIX = "reflex."
@@ -112,10 +110,6 @@ class _OnsetTrack:
 
 def _clamp(v: float, lo: float, hi: float) -> float:
     return min(max(v, lo), hi)
-
-
-def _quantile(sorted_ms: list[float], q: float) -> float:
-    return sorted_ms[max(0, math.ceil(q * len(sorted_ms)) - 1)]
 
 
 class ReflexEngine:
@@ -566,16 +560,7 @@ class ReflexEngine:
         reached the rule's threshold; numbers only (SPEC 12A)."""
 
         def summary(values: list[float]) -> dict[str, Any]:
-            ordered = sorted(values)
-            if not ordered:
-                return {"count": 0}
-            return {
-                "count": len(ordered),
-                "p50": _quantile(ordered, P50),
-                "p90": _quantile(ordered, P90),
-                "p99": _quantile(ordered, P99),
-                "max": ordered[-1],
-            }
+            return summarise(values, ONSET_LEVELS)
 
         peaks = list(track.peaks)
         return {
@@ -601,8 +586,8 @@ class ReflexEngine:
                 if ms:
                     latency[trigger][f"{kind}_ms"] = {
                         "count": len(ms),
-                        "p50": _quantile(ms, P50),
-                        "p95": _quantile(ms, P95),
+                        "p50": quantile(ms, P50),
+                        "p95": quantile(ms, P95),
                         "max": ms[-1],
                     }
         rules = {}

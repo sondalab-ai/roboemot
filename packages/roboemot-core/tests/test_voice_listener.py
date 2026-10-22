@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import queue
 import time
@@ -181,6 +182,16 @@ def test_nothing_recognised_means_no_utterance():
     r.say(1.0)
     assert r.utterances == [] and r.infos == []
     assert r.listener.snapshot()["empty"] == 1
+
+
+def test_snapshot_has_the_wake_decisions_and_the_vad_watch_as_json():
+    r = Rig(["ciao"])
+    r.say(1.0)
+    snap = r.listener.snapshot()
+    assert sum(snap["wake"]["decisions"].values()) == 1
+    assert snap["vad"]["starts"] == 1 and snap["vad"]["frames"] > 0
+    assert snap["vad"]["started"]["peak_prob"]["count"] == 1
+    assert json.loads(json.dumps(snap)) == snap
 
 
 def test_robot_speaking_drops_the_microphone():
