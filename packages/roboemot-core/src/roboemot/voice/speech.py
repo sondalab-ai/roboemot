@@ -74,7 +74,9 @@ def ends_with_question(text: str) -> bool:
 
 class AudioSink(Protocol):
     """What plays the audio: the robot's speaker (it resamples to the output rate itself).
-    ``playing_until`` is the monotonic stamp at which everything pushed so far has played."""
+    ``playing_until`` is the monotonic stamp at which everything pushed so far has played.
+    A sink that resamples as a stream may also have ``end_stream()``: the output calls it after
+    each sentence (also a failed one, not one a stop cut) to flush the held-back tail."""
 
     def push_audio_sample(self, samples: np.ndarray, rate_hz: int) -> float: ...
     def playing_until(self) -> float: ...
@@ -113,6 +115,7 @@ class SpeechOutput:
             clock,
         )
         self._minor_present = minor_present  # read when synthesis starts, never at enqueue
+        self._end_stream: Callable[[], object] | None = getattr(sink, "end_stream", None)
         self._lock = threading.Lock()
         self._jobs: collections.deque[_Job] = collections.deque()
         self._epoch = 0
@@ -482,7 +485,25 @@ class SpeechOutput:
             self.failures += 1
             log.warning("speech %d crashed: %s", job.id, type(exc).__name__)
         finally:
+            self._finish_stream(job)
             self._last_utterance = job.utterance
+
+    def _finish_stream(self, job: _Job) -> None:
+        """End the sink's stream after ``job`` (its tail extends where the sentence ends),
+        unless a stop since it was queued already reset the sink."""
+        if self._end_stream is None:
+            return
+        with self._lock:
+            if job.epoch != self._epoch:
+                return
+            try:
+                self._end_stream()
+            except Exception as exc:
+                log.warning("speech: end_stream: %s", type(exc).__name__)
+                return
+            if job.id in self._ended:
+                self._ended[job.id] = self._queue_end()
+                self._question_end = self._ended[job.id] if ends_with_question(job.text) else None
 
     def _queue_end(self) -> float:
         """Where the sink's queue ends: when a sample pushed now would play (the clock when it

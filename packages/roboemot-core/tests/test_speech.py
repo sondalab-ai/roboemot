@@ -722,3 +722,62 @@ def test_push_ms_times_each_push_into_the_sink(make):
     assert wait_for(lambda: out.sentences_spoken == 1)
     push = out.snapshot()["push_ms"]
     assert push["count"] == 2 and push["max"] == pytest.approx(3.0)
+
+
+class StreamSink(ClockedSink):
+    """A speaker that resamples as a stream: ``end_stream`` flushes a 10 ms tail."""
+
+    TAIL_S = 0.01
+
+    def __init__(self, clock: FakeClock) -> None:
+        super().__init__(clock)
+        self.ends = 0
+
+    def end_stream(self):
+        self.ends += 1
+        self.until = max(self.until, self.clock()) + self.TAIL_S
+        return self.until
+
+
+def test_each_finished_sentence_ends_the_sinks_stream_and_its_tail_counts(make):
+    clock = FakeClock()
+    sink = StreamSink(clock)
+    out = make(ClockedBackend(clock, [[0.05, 0.05], [0.05]]), sink=sink, clock=clock)
+    first = say(out, "Vero?")
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    assert sink.ends == 1
+    assert out.ended_at(first) == pytest.approx(sink.until)  # the flushed tail included
+    assert out.question_end() == pytest.approx(sink.until)
+
+
+def test_a_failing_sentence_still_ends_the_stream_but_a_stopped_one_does_not(make):
+    clock = FakeClock()
+    sink = StreamSink(clock)
+
+    class FailsMidway(ClockedBackend):
+        async def synthesize(self, text, delivery, *, language, voice, minor_present=False):
+            async for chunk in super().synthesize(
+                text, delivery, language=language, voice=voice, minor_present=minor_present
+            ):
+                yield chunk
+            raise TTSError("boom")
+
+    out = make(FailsMidway(clock, [[0.05]]), sink=sink, clock=clock)
+    say(out)
+    assert wait_for(lambda: out.failures == 1)
+    assert wait_for(lambda: sink.ends == 1)
+    holder = {}
+
+    class Stopping(ClockedBackend):
+        async def synthesize(self, text, delivery, *, language, voice, minor_present=False):
+            async for chunk in super().synthesize(
+                text, delivery, language=language, voice=voice, minor_present=minor_present
+            ):
+                yield chunk
+                holder["out"].stop()
+
+    sink2 = StreamSink(clock)
+    out2 = holder["out"] = make(Stopping(clock, [[0.05, 0.05]]), sink=sink2, clock=clock)
+    say(out2)
+    assert wait_for(lambda: out2._current is not None and out2._current.done())
+    assert sink2.ends == 0  # the stop already reset the sink's stream
