@@ -1,5 +1,5 @@
-"""SPEC 4A, 11A, 12: the Live tab's video preview. One JPEG from the frame the vision pump already
-captured; encoded only on request from a newer frame; one encode shared by every viewer; viewers
+"""SPEC 4A, 11A, 12: the Live tab's video preview. One JPEG from the frame vision already
+processed; encoded only on request from a newer frame; one encode shared by every viewer; viewers
 tracked by a window; the frame and JPEG dropped when viewing stops, the flag goes off or the robot
 sleeps; nothing in logs or reports."""
 
@@ -63,9 +63,11 @@ class World:
 class Rig:
     """A LiveVideo over a real runner, a fake pipeline overlay and a settable clock."""
 
-    def __init__(self, faces=(), names=None, target_identity=None, **live):
+    def __init__(self, faces=(), names=None, target_identity=None, hook=None, **live):
+        """``hook``: the runner's overlay hook (production wires the pipeline's); without it
+        every frame is kept and the pipeline's ``face_overlay`` (``faces``) is drawn."""
         self.clock = Clock()
-        self.runner = LatestFrameRunner(Module(), clock=self.clock)
+        self.runner = LatestFrameRunner(Module(), clock=self.clock, overlay=hook)
         self.service = SimpleNamespace(runner=self.runner, paused=False)
         people = {
             k: SimpleNamespace(display_name=v, status="active") for k, v in (names or {}).items()
@@ -96,6 +98,7 @@ class Rig:
 
     def submit(self, img=None):
         self.runner.submit(Frame(image() if img is None else img, self.clock()))
+        self.runner.run_pending()  # the preview shows frames vision finished
 
     def apply(self, **live):
         self.video.apply_config(SimpleNamespace(config=config(**live)))
@@ -368,7 +371,9 @@ def test_logs_and_the_real_debug_report_hold_no_image_bytes(caplog):
 
     caplog.set_level(logging.DEBUG)
     rig = Rig()
-    pipeline = SimpleNamespace(stats=lambda: {"face_tracks": 0}, close=lambda: None)
+    pipeline = SimpleNamespace(
+        stats=lambda: {"face_tracks": 0}, close=lambda: None, preview_overlay=lambda r: None
+    )
     service = VisionService(pipeline, SimpleNamespace(read=lambda: None), RoboEmotConfig())
     service.runner = rig.runner
     perception = Perception(None, None, None, None, service, None)
@@ -515,6 +520,34 @@ def test_switching_runners_unwatches_the_old_one(rig):
     rig.service.runner = new
     rig.video.frame("a")
     assert old._watch_until == float("-inf") and new._watch_until > rig.clock.now
+
+
+def test_the_boxes_drawn_are_the_ones_kept_with_the_frame():
+    kept = [((20.0, 40.0, 140.0, 200.0), "mia")]
+    rig = Rig(faces=[], names={"mia": "Mia"}, hook=lambda report: kept)
+    assert green_pixels(drawn(rig)) > 0  # the pipeline's current overlay is empty
+
+
+def test_rare_face_detection_with_a_working_camera_is_never_stale():
+    rig = Rig(hook=lambda report: None)  # no frame ever gets a detection (resting, low rate)
+    stale_s = config().webui.live.video_stale_s
+    rig.video.frame("a")
+    for _ in range(4):
+        rig.submit()
+        jpeg, code = rig.video.frame("a")
+        assert code is None and jpeg is not None
+        rig.clock.now += stale_s / 2  # the camera keeps handing frames in
+    assert rig.runner.latest().overlay == []  # a live picture, without boxes
+
+
+def test_a_stalled_camera_is_stale_even_with_a_kept_frame():
+    rig = Rig(hook=lambda report: [])
+    rig.video.frame("a")
+    rig.submit()
+    assert rig.video.frame("a")[1] is None
+    rig.clock.now += config().webui.live.video_stale_s + 1  # no frame since
+    rig.video._jpeg = None
+    assert rig.video.frame("a") == (None, "video_stale")
 
 
 def test_a_frame_older_than_the_bound_is_not_served(rig):

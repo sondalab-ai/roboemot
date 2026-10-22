@@ -95,6 +95,7 @@ class RobotName:
         self._missing = missing
         self._generation = 0
         self._warned: set[tuple[str, str]] = set()
+        self._oov_warned: set[tuple[str, int]] = set()  # (language, count) wake checks logged
         self._cache: tuple[tuple[Any, ...], ResolvedName] | None = None
         self._platform = display_name(platform) or display_name(self._poll())
         self._polled_at = clock()
@@ -188,6 +189,34 @@ class RobotName:
                 )
             self._cache = (key, resolved)
             return resolved
+
+    def out_of_vocab(self, language: str, phrases: list[str]) -> int | None:
+        """How many of ``phrases`` (normalised wake phrases) have a word the ``language``
+        recognizer can never output, so they can never wake the robot; None when it cannot tell
+        (no vocabulary, or that model is not loaded). A non-zero count is logged once per
+        language and count, without the phrases."""
+        with self._lock:
+            missing = self._missing
+        if missing is None:
+            return None
+        bad = 0
+        for phrase in phrases:
+            absent = missing(language, phrase.split())
+            if absent is None:
+                return None
+            bad += bool(absent)
+        with self._lock:
+            fresh = bad and (language, bad) not in self._oov_warned
+            if fresh:
+                self._oov_warned.add((language, bad))
+        if fresh:
+            log.warning(
+                "voice: %d %s wake phrase(s) have a word missing from the recognizer vocabulary "
+                "and can never wake the robot",
+                bad,
+                language,
+            )
+        return bad
 
     def _recognisable(
         self, missing: MissingWords, matching: str, languages: tuple[str, ...]

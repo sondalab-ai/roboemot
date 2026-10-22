@@ -441,6 +441,8 @@ def _stream(client: httpx.Client, url: str, file: ModelFile, part: Path) -> str:
                 _get_into(client, url, file, out, state)
                 break
             except RETRIED:
+                if file.size_bytes is not None and state.done == file.size_bytes:
+                    break  # dropped after the last byte: a resume gets a 416; the digest decides
                 if attempt == DOWNLOAD_ATTEMPTS - 1:
                     raise
                 time.sleep(RETRY_WAIT_S * 2**attempt)

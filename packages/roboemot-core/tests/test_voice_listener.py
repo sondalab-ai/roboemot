@@ -194,6 +194,16 @@ def test_snapshot_has_the_wake_decisions_and_the_vad_watch_as_json():
     assert json.loads(json.dumps(snap)) == snap
 
 
+def test_snapshot_counts_wake_phrases_the_recognizer_can_never_hear():
+    r = Rig(["ciao"])
+    assert r.listener.snapshot()["wake_phrases_out_of_vocab"] == {}  # no vocabulary yet
+    r.fast.names.attach_vocabulary(lambda language, words: words if language == "it" else [])
+    r.fast.apply_config(r.cfg.voice)  # what the listener does once a model loaded
+    counts = r.listener.snapshot()["wake_phrases_out_of_vocab"]
+    assert counts["it"] == len(r.cfg.voice.keywords["it"].wake_phrases) > 0
+    assert counts["en"] == 0
+
+
 def test_robot_speaking_drops_the_microphone():
     r = Rig(["ciao"])
     r.speech.extend(r.t + 5.0)

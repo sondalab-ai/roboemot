@@ -512,6 +512,39 @@ def test_ended_at_follows_the_sinks_timeline_and_a_stop_cuts_it(make):
     assert out.ended_at(9999) is None
 
 
+def test_idle_only_once_nothing_is_queued_in_synthesis_or_still_playing(make):
+    out = make(HoldingBackend())
+    assert out.idle() is True  # nothing said yet
+    first, second = say(out, "Uno."), say(out, "Due.")
+    assert wait_for(lambda: out.played(first) and len(out.backend.texts) == 2)
+    assert out.idle() is False  # the second sentence is still in synthesis
+    out.stop()
+    assert wait_for(out.idle)  # a stop drops it: it never plays, and the output is idle
+    assert out.played(second) is False
+
+
+def test_idle_waits_for_the_audio_already_pushed_to_play(make):
+    sink = TimelineSink()
+    out = make(FakeBackend(pieces=5), sink=sink)  # 0.5 s of audio
+    say(out, "Uno.")
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    assert out.idle() is False  # pushed, still playing on the speaker
+    assert wait_for(out.idle, timeout=2.0)
+
+
+def test_idle_with_a_sink_that_reports_an_infinite_end(make):
+    until = math.inf  # -inf and NaN were idle before the guard
+
+    class Unopened(FakeSink):
+        def playing_until(self):
+            return until
+
+    out = make(sink=Unopened())
+    say(out, "Uno.")
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    assert wait_for(out.idle)
+
+
 @pytest.mark.parametrize(
     "text,expected",
     [

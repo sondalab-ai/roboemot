@@ -560,6 +560,43 @@ def test_fetch_refuses_a_resume_at_the_wrong_offset(tmp_path, waits):
     assert list(tmp_path.rglob("*")) == [tmp_path / "sub"]
 
 
+def test_a_resume_resends_the_range_on_every_redirect_hop(tmp_path, waits):
+    origin = Flaky(drops=1)
+    hops: list[tuple[str, str | None]] = []
+
+    def serve(request: httpx.Request) -> httpx.Response:
+        hops.append((request.url.host, request.headers.get("range")))
+        if request.url.host == "example.test":  # the manifest host redirects to a CDN
+            return httpx.Response(302, headers={"location": "https://cdn.example.test/m.onnx"})
+        return origin(request)
+
+    client = httpx.Client(transport=httpx.MockTransport(serve))
+    assert fetch_file(GOOD, tmp_path, client) == "downloaded"
+    assert (tmp_path / "sub/model.onnx").read_bytes() == BODY
+    assert hops == [
+        ("example.test", None),
+        ("cdn.example.test", None),
+        ("example.test", "bytes=300-"),
+        ("cdn.example.test", "bytes=300-"),
+    ]
+
+
+def test_a_drop_after_the_last_byte_is_not_resumed_into_a_416(tmp_path, waits):
+    sized = GOOD.model_copy(update={"size_bytes": len(BODY)})
+
+    class AtEof(Flaky):
+        def __call__(self, request):
+            if request.headers.get("range") == f"bytes={len(BODY)}-":
+                self.ranges.append(request.headers["range"])
+                return httpx.Response(416)  # a compliant server: nothing left to send
+            return super().__call__(request)
+
+    server = AtEof(drops=1, cut=len(BODY))  # the whole body arrived, then the close failed
+    assert fetch_file(sized, tmp_path, flaky(server)) == "downloaded"
+    assert (tmp_path / "sub/model.onnx").read_bytes() == BODY
+    assert server.ranges == [None]  # the digest decides; no resume was asked
+
+
 def test_fetch_does_not_retry_http_errors(tmp_path, waits):
     seen: list[httpx.Request] = []
     transport = httpx.MockTransport(lambda req: seen.append(req) or httpx.Response(503))

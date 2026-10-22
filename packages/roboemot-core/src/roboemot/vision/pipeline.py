@@ -494,6 +494,17 @@ class VisionPipeline:
             out.append((track.box, state.owner_id if state is not None else None))
         return out
 
+    def preview_overlay(self, report: FrameReport) -> list[tuple[Box, str | None]] | None:
+        """The live preview's boxes for the frame ``report`` is about: ``face_overlay`` when
+        face detection ran on it, ``[]`` while detection is off (governor scale 0: the picture
+        shows without boxes), else None (the boxes belong to an earlier frame; the runner keeps
+        that one for a poll period, then shows newer frames without boxes)."""
+        if report.faces_detected:
+            return self.face_overlay()
+        if math.isinf(self.governor.period("detection")):
+            return []
+        return None
+
     def _face_due(self, track: Track, state: _FaceState, stamp: float) -> bool:
         if track.score < self.cfg.tracker.high_score or track.detection is None:
             return False
