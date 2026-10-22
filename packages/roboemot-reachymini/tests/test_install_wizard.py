@@ -79,6 +79,7 @@ class FakeRobot:
         self.verified_models: list[str] = []  # "voice:<path>" files with a valid marker
         self.free_kb = 20_000_000
         self.free_kb_by_cache = self.free_kb  # free space while the uv cache is still there
+        self.links_into_cache: list[str] = []  # symlinks under /venvs into ~/.cache/uv
         self.home_free_kb: int | None = None  # `df` below HOME (the models), else free_kb
         self.df_unreadable: set[str] = set()  # paths whose `df` answers nothing
 
@@ -172,6 +173,9 @@ class FakeRobot:
             return HOME
         if command == 'printf %s "${ROBOEMOT_DATA_DIR:-}"':
             return self.env_data_dir
+        if command.startswith("find /venvs -lname "):
+            assert shlex.split(command)[3] == f"{UV_CACHE}/*", command
+            return self.links_into_cache[0] if self.links_into_cache else ""
         if command.startswith("du -sk "):
             return str(self.daemon_venv_kb)
         if command.startswith("du -sh "):
@@ -839,7 +843,7 @@ def test_a_too_old_python_is_refused_before_the_running_app_is_stopped(offline, 
 def test_the_auto_stop_and_the_cache_step_come_before_the_space_check(offline, robot, daemon):
     daemon.current = {"info": {"name": "roboemot"}, "state": "running"}
     robot.dirs.add(UV_CACHE)
-    install()
+    install(clear_caches=True)
     cmds = robot.commands
     probe = next(i for i, c in enumerate(cmds) if "platform.machine" in c)
     clear = cmds.index(f"rm -rf {UV_CACHE}")
@@ -955,7 +959,7 @@ def test_with_extras_marks_only_the_core_wheel():
 def test_install_clears_the_uv_cache_before_installing(offline, robot, capsys):
     robot.dirs.add(UV_CACHE)
     robot.sizes[UV_CACHE] = "5.6G"
-    install()
+    install(clear_caches=True)
     assert UV_CACHE not in robot.dirs
     assert f"rm -rf {UV_CACHE}" in robot.commands
     assert robot.commands.index(f"rm -rf {UV_CACHE}") < robot.commands.index(
@@ -964,6 +968,22 @@ def test_install_clears_the_uv_cache_before_installing(offline, robot, capsys):
     out = capsys.readouterr().out
     assert "5.6G" in out and "cleared" in out
     assert UV_CACHE not in json.loads(robot.files[RECORD]).values()
+
+
+def test_yes_alone_does_not_clear_the_cache(offline, robot, capsys):
+    """R4 S6: the cache is the one change uninstall cannot undo; -y does not consent to it."""
+    robot.dirs.add(UV_CACHE)
+    install()
+    assert UV_CACHE in robot.dirs and "--clear-caches does" in capsys.readouterr().out
+
+
+def test_a_cache_an_environment_links_into_is_kept(offline, robot, capsys):
+    """R4 S6: a venv made by uv with symlinks into its cache would break if it went."""
+    robot.dirs.add(UV_CACHE)
+    robot.links_into_cache = ["/venvs/mini_daemon/lib/python3.12/site-packages/numpy"]
+    install(clear_caches=True)
+    assert UV_CACHE in robot.dirs and f"rm -rf {UV_CACHE}" not in robot.commands
+    assert "links into it" in capsys.readouterr().out
 
 
 def test_install_keeps_the_uv_cache_when_declined(offline, robot):
@@ -1000,7 +1020,7 @@ def test_the_flag_clears_the_cache_without_yes(offline, robot):
 def test_clearing_the_cache_can_make_a_full_robot_pass_the_space_check(offline, robot):
     robot.dirs.add(UV_CACHE)
     robot.free_kb_by_cache = (app_need_mb() - 100) * 1024
-    install()
+    install(clear_caches=True)
     assert UV_CACHE not in robot.dirs and "roboemot-core" in robot.env
 
 
@@ -1024,7 +1044,7 @@ def test_install_dry_run_reports_the_uv_cache_and_clears_nothing(offline, robot,
 def test_install_does_not_delete_a_cache_that_is_a_symlink(offline, robot, capsys):
     robot.dirs.add(UV_CACHE)
     robot.symlinks[UV_CACHE] = "/data/elsewhere"
-    install()
+    install(clear_caches=True)
     assert UV_CACHE in robot.dirs
     assert "symlink" in capsys.readouterr().out
 
@@ -1044,7 +1064,7 @@ def test_cache_paths_refuse_a_root_or_empty_home(home):
 def test_a_symlinked_home_skips_the_cache_with_a_warning(offline, robot, capsys):
     robot.dirs.add(UV_CACHE)
     robot.symlinks[UV_CACHE] = "/mnt/real-home/.cache/uv"
-    install()
+    install(clear_caches=True)
     assert UV_CACHE in robot.dirs
     assert f"rm -rf {UV_CACHE}" not in robot.commands
     assert "symlink" in capsys.readouterr().out

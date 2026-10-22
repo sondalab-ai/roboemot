@@ -1163,7 +1163,13 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
                 stopped.append(stop_own_app(ui, platform, opts.dry_run) and not opts.dry_run)
                 home, _ = remote_data_dir(remote)
                 clear_caches(
-                    ui, remote, home, platform.clearable_caches, opts.clear_caches, opts.dry_run
+                    ui,
+                    remote,
+                    home,
+                    platform.clearable_caches,
+                    opts.clear_caches,
+                    opts.dry_run,
+                    (posixpath.dirname(platform.env_dir),),
                 )
 
             extras = (*platform.extras, *(("vision",) if opts.vision else ()))
@@ -1521,7 +1527,8 @@ def parse_args(argv: list[str] | None = None) -> Options:
         "--clear-caches",
         action=argparse.BooleanOptionalAction,
         help="delete the robot's download caches the platform names (e.g. a uv cache) to "
-        "free disk space; uninstall cannot restore them",
+        "free disk space; uninstall cannot restore them (default: ask on a terminal; -y alone "
+        "keeps them)",
     )
     p.add_argument("-y", "--yes", action="store_true", help="answer yes to every confirmation")
     a = p.parse_args(argv)
