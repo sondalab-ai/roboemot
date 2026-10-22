@@ -228,6 +228,9 @@ class BarePlatform:
     def env_users(self, py):
         return []
 
+    def env_ready(self, py):
+        return True
+
     def probe(self, ui, py): ...
     def verify(self, ui, py, dev, app_config): ...
     def running_app(self):

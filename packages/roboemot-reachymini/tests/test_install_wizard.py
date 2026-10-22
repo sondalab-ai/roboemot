@@ -188,7 +188,11 @@ class FakeRobot:
         if "platform.machine" in plain:
             return self.machine
         if "version('reachy_mini')" in plain:
-            return "1.11.0"
+            if "reachy-mini" in self.env:
+                return self.env["reachy-mini"]
+            if command.endswith("|| true"):
+                return ""
+            raise WizardError(f"on robot: {command}\nPackageNotFoundError: reachy_mini")
         if "e.name !=" in plain:
             return "\n".join(self.apps_in_env)
         if "reachy_mini_apps" in plain:
@@ -1933,6 +1937,39 @@ def test_failed_pip_in_the_new_venv_keeps_the_record_so_uninstall_can_clean_up(
     offline_pip[0] = False
     uninstall()
     assert not robot.apps_venv and RECORD not in robot.files
+
+
+def test_a_rerun_after_a_failed_pip_in_the_new_venv_finishes_it(offline, robot, daemon, capsys):
+    """R4 B1/T1: the venv was created but `pip install reachy-mini==` failed (network); the
+    rerun with the network back finishes the venv instead of failing on the reachy_mini probe,
+    and uninstall then removes the venv (its baseline covers what the finish installed)."""
+    fresh_robot(robot)
+    before = snapshot(robot, daemon)
+    run, offline_pip = robot.run, [True]
+    robot.run = lambda c, **kw: (
+        "ERROR: no network\n__rc=1"
+        if offline_pip[0] and "reachy-mini==" in c and " -m pip " in c
+        else run(c, **kw)
+    )
+    with pytest.raises(WizardError, match="pip install failed"):
+        install()
+    assert robot.apps_venv and "reachy-mini" not in robot.env
+    offline_pip[0] = False
+    install()
+    assert robot.env["reachy-mini"] == "1.11.0" and "roboemot-core" in robot.env
+    assert "finishing it" in capsys.readouterr().out
+    assert "reachy-mini" in json.loads(robot.files[RECORD])["env_baseline"]
+    uninstall()
+    assert snapshot(robot, daemon) == before and not robot.apps_venv
+
+
+def test_a_venv_without_its_base_package_that_the_installer_did_not_create_is_refused(
+    offline, robot, daemon
+):
+    del robot.env["reachy-mini"]
+    with pytest.raises(WizardError, match="not created by this installer"):
+        install()
+    assert robot.files == {}
 
 
 def test_uninstall_removes_the_venv_the_installer_created(offline, robot, daemon):

@@ -183,7 +183,8 @@ class ReachyMiniWireless:
 
     def create_env(self, ui: Ui, remote: Remote, plan: str) -> None:
         """Create the apps venv the way the daemon does and install ``plan`` (from
-        ``plan_env``) into it."""
+        ``plan_env``) into it. Also finishes a venv whose earlier creation stopped: ``venv`` over
+        an existing one keeps it, and pip installs what is missing."""
         with ui.progress(f"creating the apps venv {APPS_VENV}", report=False):
             remote.run(f"{shlex.quote(DAEMON_PYTHON)} -m venv {shlex.quote(APPS_VENV)}")
         result = RemotePython(remote, self.python, ui).install([plan], None, report=False)
@@ -194,6 +195,12 @@ class ReachyMiniWireless:
     def env_users(self, py: RemotePython) -> list[str]:
         """Apps other than ours that the daemon would list from this environment."""
         return py.py(OTHER_APPS).split()
+
+    def env_ready(self, py: RemotePython) -> bool:
+        """Whether the apps venv holds ``reachy_mini`` (read-only; False for a venv whose
+        creation stopped before ``pip install reachy-mini``)."""
+        cmd = f"{shlex.quote(py.python)} -c {shlex.quote(PROBE)} 2>/dev/null || true"
+        return VERSION_PATTERN.fullmatch(py.remote.run(cmd).strip()) is not None
 
     def probe(self, ui: Ui, py: RemotePython) -> None:
         ui.ok(f"reachy_mini {py.py(PROBE)} in the apps venv")

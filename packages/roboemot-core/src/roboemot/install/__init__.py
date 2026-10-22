@@ -114,6 +114,7 @@ class Platform(Protocol):
     def plan_env(self, remote: Remote) -> str: ...
     def create_env(self, ui: Ui, remote: Remote, plan: str) -> None: ...
     def env_users(self, py: RemotePython) -> list[str]: ...
+    def env_ready(self, py: RemotePython) -> bool: ...
     def probe(self, ui: Ui, py: RemotePython) -> None: ...
     def stage(
         self, root: Path, dest: Path, dev: bool, app_config: dict[str, object]
@@ -308,8 +309,10 @@ def check_ssh(
                     f"only {free_kb // 1024} MB free on {path}, need {MIN_FREE_MB} MB"
                 )
             ui.ok(f"{free_kb // 1024} MB free on {path}")
-    if present:
+    if present and platform.env_ready(py):
         platform.probe(ui, py)
+    elif present:
+        ui.warn(f"{platform.env_dir} is incomplete (an earlier install stopped while creating it?)")
     return py
 
 
@@ -891,6 +894,38 @@ def remove_created_env(
     return False
 
 
+def finish_env(
+    ui: Ui,
+    platform: Platform,
+    py: RemotePython,
+    remote: Remote,
+    record: InstallRecord,
+    dry_run: bool,
+) -> bool:
+    """Finish an environment an earlier install created but could not complete (the venv is
+    there, the platform's base packages are not), by running the platform's create step again,
+    then take the baseline anew. An incomplete environment this installer did not create is not
+    its to change: a WizardError. Returns False after the dry run's report (nothing more to
+    check without the environment)."""
+    env = platform.env_dir
+    if record.env_created != env:
+        raise WizardError(
+            f"{env} lacks what {platform.display_name} apps need and was not created by this "
+            "installer: repair it with the robot's own software, then run the installer again"
+        )
+    plan = platform.plan_env(remote)
+    if dry_run:
+        ui.ok(f"would finish the environment {env} an earlier install created ({plan})")
+        ui.info("dependency check skipped: the environment is not complete yet")
+        claim_data_dir(ui, platform, remote, record, dry_run=True)
+        return False
+    ui.warn(f"{env} was created by an earlier install that stopped: finishing it")
+    platform.create_env(ui, remote, plan)
+    record.env_baseline = sorted(py.installed())
+    write_record(remote, platform.record_path, record)
+    return True
+
+
 def install_packages(
     ui: Ui,
     platform: Platform,
@@ -907,7 +942,10 @@ def install_packages(
         platform.app_name, platform.manifest_id, own
     )
     record.packages = sorted(set(record.packages) | set(own))
-    if not py.exists():
+    if py.exists() and not platform.env_ready(py):
+        if not finish_env(ui, platform, py, remote, record, dry_run):
+            return record
+    elif not py.exists():
         plan = platform.plan_env(remote)
         if dry_run:
             ui.ok(f"would create the environment {platform.env_dir} ({plan})")
