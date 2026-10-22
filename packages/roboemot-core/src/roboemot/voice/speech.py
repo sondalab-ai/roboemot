@@ -75,11 +75,12 @@ def ends_with_question(text: str) -> bool:
 class AudioSink(Protocol):
     """What plays the audio: the robot's speaker (it resamples to the output rate itself).
     ``playing_until`` is the monotonic stamp at which everything pushed so far has played.
-    A sink that resamples as a stream may also have ``end_stream()``: the output calls it after
-    each sentence (also a failed one, not one a stop cut) to flush the held-back tail."""
+    ``end_stream`` is called after each sentence (also a failed one, not one a stop cut): a sink
+    that resamples as a stream flushes its held-back tail (a no-op for one that does not)."""
 
     def push_audio_sample(self, samples: np.ndarray, rate_hz: int) -> float: ...
     def playing_until(self) -> float: ...
+    def end_stream(self) -> float: ...
     def stop(self) -> None: ...
 
 
@@ -115,7 +116,6 @@ class SpeechOutput:
             clock,
         )
         self._minor_present = minor_present  # read when synthesis starts, never at enqueue
-        self._end_stream: Callable[[], object] | None = getattr(sink, "end_stream", None)
         self._lock = threading.Lock()
         self._jobs: collections.deque[_Job] = collections.deque()
         self._epoch = 0
@@ -491,13 +491,11 @@ class SpeechOutput:
     def _finish_stream(self, job: _Job) -> None:
         """End the sink's stream after ``job`` (its tail extends where the sentence ends),
         unless a stop since it was queued already reset the sink."""
-        if self._end_stream is None:
-            return
         with self._lock:
             if job.epoch != self._epoch:
                 return
             try:
-                self._end_stream()
+                self.sink.end_stream()
             except Exception as exc:
                 log.warning("speech: end_stream: %s", type(exc).__name__)
                 return
