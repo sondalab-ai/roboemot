@@ -714,8 +714,9 @@ class ExternalControlConfig(Strict):
 
     tolerance_rad: float = param(
         0.15,
-        "An angular joint further than this from every pose commanded within lag_window_s counts "
-        "as diverging (tracking lag and sag of our own motion stay under it)",
+        "An angular joint further than this outside the range of the poses commanded within "
+        "lag_window_s counts as diverging (tracking lag and sag of our own motion stay under it). "
+        "Behind the commands, on the side they came from, is lag however far, until they settle",
         unit="rad", ge=0.01, le=1.0,
     )  # fmt: skip
     tolerance_m: float = param(
@@ -726,13 +727,45 @@ class ExternalControlConfig(Strict):
     lag_window_s: float = param(
         0.4,
         "The measured pose is compared with the poses commanded this far back, so the "
-        "servos' tracking lag is not mistaken for external control",
+        "servos' tracking lag is not mistaken for external control. Counted in loop ticks "
+        "(lag_window_s x motion.arbiter.loop_hz commands), so late ticks do not shorten it",
         unit="s", ge=0.05, le=2.0,
     )  # fmt: skip
     confirm_s: float = param(
         0.2,
-        "Divergence must last this long before the loop yields",
+        "Divergence must hold on confirm_s x motion.arbiter.loop_hz new state samples in a row "
+        "before the loop yields; a repeated sample does not count, a late tick starts again",
         unit="s", ge=0.02, le=2.0,
+    )  # fmt: skip
+    late_tick_periods: float = param(
+        2.0,
+        "A loop tick that comes more than this many periods after the previous one is late "
+        "(an overloaded CPU): its sample does not count toward the confirmation (a stall cannot "
+        "bridge it), but the count goes on, so a push is still caught under steady overruns",
+        unit="periods", ge=1.0, le=10.0,
+    )  # fmt: skip
+    max_state_age_s: float = param(
+        0.8,
+        "The oldest a measured state sample may be (a platform's state queue, about 0.67 s on "
+        "the reference robot, plus client buffering): a joint where the commands were up to "
+        "this long before the lag window, or behind moving commands and moved within this time, "
+        "counts as lag. A push against a moving head is caught within about lag_window_s + "
+        "max_state_age_s + confirm_s; longer is more tolerant of old state, slower to catch it",
+        unit="s", ge=0.0, le=5.0,
+    )  # fmt: skip
+    solo_groups: list[str] = param(
+        [],
+        "Manifest groups that yield on their own when only they diverge (a hand on a light "
+        "part). Any other divergence yields every group: the platform's own moves (a "
+        "go-to-sleep) may show first on any group, and the groups not yet diverging would "
+        "otherwise keep streaming targets the platform accepts as its move ends. List a group "
+        "only if the platform's moves never move it first",
+    )
+    recent_events: int = param(
+        8,
+        "How many recent external-control events the debug report keeps (joint, group, error, "
+        "samples, largest tick gap, overruns)",
+        ge=1, le=100,
     )  # fmt: skip
     still_band_rad: float = param(
         0.02,
@@ -758,14 +791,15 @@ class MotionConfig(Strict):
         unit="Hz", ge=1, le=100,
     )  # fmt: skip
     platform_move_grace_s: float = param(
-        4.0,
+        5.0,
         "After external control of the robot is detected (the platform runs a move of its own, "
         "such as the owner's go-to-sleep, or a hand moves the head), the loop keeps following the "
         "measured pose without writing until the pose has been still this long with the motors "
         "on, then resumes from it. Must exceed the platform's delay between the end of a sleep "
         "move and the motors being switched off (2.0 s on the reference robot, SPEC 4A) plus the "
-        "motor status latency, so the motors-off is seen before any target is streamed again "
-        "(SPEC 12A)",
+        "motor status latency (a 1 s status period plus the time to build it, and the state "
+        "queue's age), less the min-jerk tail in which the pose already reads as still, so the "
+        "motors-off is seen before any target is streamed again (SPEC 12A)",
         unit="s", ge=0, le=30,
     )  # fmt: skip
     external: ExternalControlConfig = param({}, "Detection of external control of the robot")

@@ -25,6 +25,8 @@ class FakeClient:
         self._is_alive = True
         self.disconnected = False
         self.fail_connect = False
+        self._last_head_pose: object = object()  # replaced on every message, as the SDK does
+        self._last_joint_positions: object = object()
 
     def wait_for_connection(self, timeout: float = 5.0) -> None:
         if self.fail_connect:
@@ -55,6 +57,7 @@ class FakeMini:
             joints[0] = kw["body_yaw"]
         antennas = list(kw["antennas"]) if "antennas" in kw else self.joints[1]
         self.joints = (joints, antennas)
+        self.client._last_head_pose, self.client._last_joint_positions = object(), object()
 
     def goto_target(self, **kw) -> None:  # must never be called (blocking in SDK 1.11)
         raise AssertionError("goto_target used")
@@ -303,3 +306,107 @@ def test_robot_name_is_the_daemon_status_name_and_never_raises(client, expected)
     mini = FakeMini()
     mini.client = client
     assert ReachyMiniDriver(mini).robot_name() == expected
+
+
+# ---------------------------------------------------------------- review R1 (B1, S2, S4)
+
+
+def test_head_pose_conversions_equal_scipy_over_random_poses():
+    """The closed forms replace scipy's Rotation on the 50 Hz path; same values (SDK order xyz)."""
+    from scipy.spatial.transform import Rotation
+
+    rng = np.random.default_rng(7)
+    for _ in range(2000):
+        rpy = rng.uniform([-math.pi, -1.5, -math.pi], [math.pi, 1.5, math.pi])
+        vals = dict(zip(("head.roll", "head.pitch", "head.yaw"), rpy, strict=True))
+        vals.update(zip(("head.x", "head.y", "head.z"), rng.uniform(-0.05, 0.05, 3), strict=True))
+        m = head_matrix(vals)
+        np.testing.assert_allclose(
+            m[:3, :3], Rotation.from_euler("xyz", rpy).as_matrix(), rtol=0, atol=1e-12
+        )
+        ref = Rotation.from_matrix(m[:3, :3]).as_euler("xyz")
+        got = head_values(m)
+        for k, v in zip(("head.roll", "head.pitch", "head.yaw"), ref, strict=True):
+            assert got[k] == pytest.approx(float(v), abs=1e-9)
+        assert got["head.z"] == vals["head.z"]
+
+
+def test_head_values_of_a_slightly_skewed_matrix_stay_close_to_scipy():
+    """The daemon's pose comes from its kinematics in floats: scipy projects onto the nearest
+    rotation first, the closed form reads the entries; a 1e-6 skew moves them by about as much."""
+    from scipy.spatial.transform import Rotation
+
+    rng = np.random.default_rng(11)
+    for _ in range(500):
+        rpy = rng.uniform([-0.7, -0.7, -math.pi], [0.7, 0.7, math.pi])
+        m = np.eye(4)
+        m[:3, :3] = Rotation.from_euler("xyz", rpy).as_matrix() + rng.normal(0, 1e-6, (3, 3))
+        ref = Rotation.from_matrix(m[:3, :3]).as_euler("xyz")
+        got = head_values(m)
+        for k, v in zip(("head.roll", "head.pitch", "head.yaw"), ref, strict=True):
+            assert got[k] == pytest.approx(float(v), abs=1e-5)
+
+
+def test_state_seq_counts_new_messages_only():
+    mini = FakeMini()
+    driver = ReachyMiniDriver(mini)
+    first = driver.state_seq()
+    assert driver.state_seq() == first  # nothing arrived: a repeat
+    mini.client._last_head_pose = object()
+    assert driver.state_seq() == first  # the joints are still the old message
+    mini.client._last_joint_positions = object()
+    second = driver.state_seq()
+    assert second != first and driver.state_seq() == second
+
+
+def test_state_seq_raises_on_dead_connection():
+    mini = FakeMini()
+    mini.client._is_alive = False
+    with pytest.raises(ConnectionError):
+        ReachyMiniDriver(mini).state_seq()
+
+
+def test_motors_enabled_does_not_consume_the_sdk_status_event():
+    """``get_status(wait=False)`` clears ``status_received``, which the SDK's own waits rely on
+    (review R1 S4): the driver reads the cached status without it."""
+    import threading
+    from types import SimpleNamespace
+
+    mini = FakeMini()
+    mini.client._last_status = SimpleNamespace(
+        backend_status=SimpleNamespace(motor_control_mode="enabled")
+    )
+    mini.client.status_received = threading.Event()
+    mini.client.status_received.set()
+    mini.client.get_status = lambda wait=True, timeout=5.0: pytest.fail("get_status called")
+    assert ReachyMiniDriver(mini).motors_enabled() is True
+    assert mini.client.status_received.is_set()
+
+
+STATUS_BUILD_S = 0.3  # the status thread builds the status before its 1 s sleep (loaded CM4)
+MIN_JERK_TAIL_S = 0.5  # a short min-jerk goto reads as still this long before it ends
+GRACE_MARGIN_S = 0.5  # kept in hand for scheduling on a saturated CPU
+
+
+def test_grace_outlasts_the_sleep_wait_a_slow_status_and_old_state():
+    """SPEC 4A, 12A: motors-off comes ``SLEEP_MOTORS_OFF_DELAY_S`` after the sleep move and is
+    in the status up to a period (plus its build time) later, through a queue up to
+    ``max_state_age_s`` old, while stillness may start in the move's min-jerk tail. The pose
+    comes through the same queue as the status, so that age delays both alike and cancels."""
+    from roboemot_reachymini.driver import SLEEP_MOTORS_OFF_DELAY_S
+
+    grace = ConfigStack().effective().motion.platform_move_grace_s
+    status = ReachyMiniDriver.status_period_s + STATUS_BUILD_S
+    assert grace > SLEEP_MOTORS_OFF_DELAY_S + status + MIN_JERK_TAIL_S + GRACE_MARGIN_S
+
+
+def test_head_values_round_trip_near_gimbal_lock():
+    rng = np.random.default_rng(3)
+    for pitch in (math.pi / 2 - 1e-9, -math.pi / 2 + 1e-9, math.pi / 2 - 1e-4):
+        vals = {
+            "head.roll": rng.uniform(-1, 1),
+            "head.pitch": pitch,
+            "head.yaw": rng.uniform(-1, 1),
+        }
+        m = head_matrix(vals)
+        np.testing.assert_allclose(head_matrix(head_values(m)), m, atol=1e-8)

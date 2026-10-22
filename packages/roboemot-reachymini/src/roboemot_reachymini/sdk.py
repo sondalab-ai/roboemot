@@ -150,6 +150,12 @@ class ClientPort(Protocol):
         (``:233``), hence the guard in the callers."""
         ...
 
+    _last_head_pose: Any
+    """The last ``HeadPoseMsg``; a new object per message (``io/ws_client.py:70``, ``:189``)."""
+
+    _last_joint_positions: Any
+    """The last ``JointPositionsMsg``; a new object per message (``:69``, set at ``:186``)."""
+
 
 class MiniPort(Protocol):
     """The ``ReachyMini`` instance the daemon hands to ``run``."""

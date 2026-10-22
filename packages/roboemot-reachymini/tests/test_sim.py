@@ -664,22 +664,26 @@ def test_the_robot_reacts_distinctly_to_an_adult_a_child_and_a_stranger_without_
 
 def _watch_tracking_error(lp: MotionLoop) -> dict[str, float]:
     """Record the worst divergence the loop's own detector sees: per kind, the largest distance
-    of a measured joint from the closest pose commanded within the lag window."""
+    of a new measured sample from the range of the poses commanded within the lag window (what
+    ``motion.external.ExternalControl.judge`` compares, before any lag rule), and from the
+    latest command only."""
     worst = {"angle": 0.0, "translation": 0.0, "raw_angle": 0.0, "raw_translation": 0.0}
-    real = lp._detect_external
+    ext = lp.external_ctl
+    real = ext.judge
 
-    def spy(now: float, out: dict[str, float]) -> None:
-        real(now, out)
-        measured = lp.driver.read_state()
+    def spy(now: float, measured: dict[str, float], overruns: int) -> list:
         for name, value in measured.items():
             dof = lp.core.limiter.dofs.get(name)
-            errors = [abs(value - c[name]) for _, c in lp._commanded if name in c]
-            if dof is not None and errors:
-                worst[dof.kind] = max(worst[dof.kind], min(errors))
-                raw = f"raw_{dof.kind}"
-                worst[raw] = max(worst[raw], abs(value - out[name]))
+            window = ext._windows.get(name)
+            if dof is None or window is None or not window.values:
+                continue
+            lo, hi = min(window.values), max(window.values)
+            worst[dof.kind] = max(worst[dof.kind], value - hi, lo - value)
+            raw = f"raw_{dof.kind}"
+            worst[raw] = max(worst[raw], abs(value - window.values[-1]))
+        return real(now, measured, overruns)
 
-    lp._detect_external = spy  # type: ignore[method-assign]
+    ext.judge = spy  # type: ignore[method-assign]
     return worst
 
 
