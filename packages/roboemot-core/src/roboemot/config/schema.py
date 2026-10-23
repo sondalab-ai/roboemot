@@ -1502,6 +1502,16 @@ class VisionRates(Strict):
         le=120,
         restart=True,
     )
+    conversation_scale: float = param(
+        0.5,
+        "Vision rate multiplier while the robot thinks or speaks (SPEC 5, 8, 13), so the TTS "
+        "keeps its CPU; an utterance in progress and idle keep 1. It also divides the new-track "
+        "burst gaps. At least 0.5, so the 3-of-5 identity decision of a track that starts while "
+        "the robot speaks stays inside the 2.5 s budget of SPEC 13, awake or drowsy, with one "
+        "missed vote",
+        ge=0.5,
+        le=1,
+    )
 
 
 class TrackerConfig(Strict):
@@ -1540,6 +1550,14 @@ class VisionConfig(Strict):
     )
     face_min_px: int = param(
         24, "Faces with a shorter box side are ignored", unit="px", ge=8, le=512
+    )
+    face_lost_periods: float = param(
+        3.0,
+        "A face track also survives this many face-detection periods at the rate the governor "
+        "allows now: the lifetime is the larger of this and tracker.lost_s, so a slower detector "
+        "(conversation, circadian or load scale) does not end tracks between two detections",
+        ge=1,
+        le=100,
     )
     embed_min_face_px: int = param(
         40, "Faces with a shorter box side are tracked but not embedded", unit="px", ge=8, le=512
@@ -1604,6 +1622,18 @@ class VisionConfig(Strict):
         unit="s",
         ge=0,
         le=10,
+    )
+    attribute_retry_s: float = param(
+        5.0,
+        "A track whose age job came back unknown (and no declared age) collects new crops for "
+        "another job this long after the result or after a failed or cancelled job (capture time, "
+        "SPEC 5), or at the first face "
+        "frame after the robot stops thinking or speaking; a confident age stops the retries "
+        "(an adult or senior one after an unknown result needs a second agreeing one), and the "
+        "track stays a possible minor until then",
+        unit="s",
+        ge=0.5,
+        le=600,
     )
     attribute_crop_margin: float = param(
         0.25,

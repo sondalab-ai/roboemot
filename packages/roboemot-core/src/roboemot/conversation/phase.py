@@ -38,6 +38,13 @@ class ConversationPhase:
         with self._lock:
             self._listening = active
 
+    @property
+    def listening(self) -> bool:
+        """An utterance is in progress, whatever the phase (a barge-in or a user who talks
+        while the answer streams is listening and thinking or speaking at once)."""
+        with self._lock:
+            return self._listening
+
     def begin_thinking(self) -> None:
         """A request is about to be sent: the route is not known until the first event."""
         with self._lock:
@@ -54,9 +61,23 @@ class ConversationPhase:
         with self._lock:
             self._since = self._route = None
 
+    def current(self) -> tuple[str, bool]:
+        """The phase name and whether an utterance is in progress, from one read (the vision
+        governor needs both: listening during thinking or speaking keeps the full rate)."""
+        phase, listening, _, _, _ = self._read()
+        return phase, listening
+
     def snapshot(self) -> dict[str, Any]:
         """``phase`` plus, while a stream is in flight (even if the robot already speaks the
         first sentences), its ``route`` (None until known) and ``elapsed_s``."""
+        phase, _, since, route, now = self._read()
+        out: dict[str, Any] = {"phase": phase, "route": None, "elapsed_s": None}
+        if since is not None:
+            out["route"], out["elapsed_s"] = route, max(0.0, now - since)
+        return out
+
+    def _read(self) -> tuple[str, bool, float | None, str | None, float]:
+        """Phase, listening flag, stream start, route and the clock reading, all from one read."""
         now = self._clock()
         with self._lock:
             listening, since, route = self._listening, self._since, self._route
@@ -70,7 +91,4 @@ class ConversationPhase:
             if listening
             else IDLE
         )
-        out: dict[str, Any] = {"phase": phase, "route": None, "elapsed_s": None}
-        if since is not None:
-            out["route"], out["elapsed_s"] = route, max(0.0, now - since)
-        return out
+        return phase, listening, since, route, now

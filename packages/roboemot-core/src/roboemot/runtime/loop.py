@@ -9,13 +9,14 @@ from dataclasses import dataclass, field
 from roboemot.circadian.motion import REST_SOURCE
 from roboemot.config import ConfigStack
 from roboemot.persona import effects as persona_effects
-from roboemot.vision import CIRCADIAN
+from roboemot.vision import CIRCADIAN, CONVERSATION
 
 from .assembly import Pipeline
 from .host import RuntimeHost
 from .ticks import (
     attention_tick,
     circadian_vision_scale,
+    conversation_vision_scale,
     feed_idle,
     scan_context,
     scan_tick,
@@ -80,9 +81,9 @@ def run_loop(
         if host.autoenroll is not None:
             host.autoenroll.tick()  # retention does not wait for a sighting
         if p.perception.pipeline is not None:
-            p.perception.pipeline.governor.set_scale(
-                CIRCADIAN, circadian_vision_scale(live, host.circadian)
-            )
+            governor = p.perception.pipeline.governor
+            governor.set_scale(CIRCADIAN, circadian_vision_scale(live, host.circadian))
+            governor.set_scale(CONVERSATION, conversation_vision_scale(live, host.phase))
         if p.scan is not None:
             ctx = scan_context(
                 now,

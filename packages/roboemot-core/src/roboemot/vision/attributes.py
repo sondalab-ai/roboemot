@@ -111,6 +111,7 @@ class AttributeWorker:
             1, thread_name_prefix=THREAD_NAME, initializer=lower_thread_priority
         )
         self._results: queue.SimpleQueue[AttributeResult] = queue.SimpleQueue()
+        self._missed: queue.SimpleQueue[tuple[int, int]] = queue.SimpleQueue()
         self._lock = threading.Lock()
         self._pending = 0
         self._futures: set[Future[AttributeResult]] = set()
@@ -155,7 +156,7 @@ class AttributeWorker:
         with self._lock:
             self._futures.add(future)
             self._counts["submitted"] += 1
-        future.add_done_callback(self._done)
+        future.add_done_callback(lambda f: self._done(f, track_id, generation))
         return True
 
     def _run(
@@ -191,19 +192,21 @@ class AttributeWorker:
             self._crop_ms.append(elapsed_ms)
         return sample
 
-    def _done(self, future: Future[AttributeResult]) -> None:
+    def _done(self, future: Future[AttributeResult], track_id: int, generation: int) -> None:
         with self._lock:
             self._pending -= 1
             self._futures.discard(future)
         if future.cancelled():
             with self._lock:
                 self._counts["cancelled"] += 1
+            self._missed.put((track_id, generation))
             return
         exc = future.exception()
         if exc is not None:
             with self._lock:
                 self._counts["failed"] += 1
             log.warning("attribute job failed: %s", type(exc).__name__)
+            self._missed.put((track_id, generation))
             return
         with self._lock:
             self._counts["completed"] += 1
@@ -224,10 +227,20 @@ class AttributeWorker:
             "crop_ms": summarise(crop_ms, DURATION_LEVELS),
         }
 
+    def poll_missed(self) -> list[tuple[int, int]]:
+        """``(track_id, generation)`` of the jobs that failed or were cancelled since the last
+        call, so the pipeline can retry them (SPEC 5); polled on the frame thread like ``poll``."""
+        out = []
+        while True:
+            try:
+                out.append(self._missed.get_nowait())
+            except queue.Empty:
+                return out
+
     def poll(self) -> list[AttributeResult]:
         """Results finished since the last call, oldest first.
 
-        Failed or cancelled jobs produce no result (the track stays unknown). The pipeline
+        Failed or cancelled jobs produce no result; ``poll_missed`` reports them. The pipeline
         polls at the start of each frame, which keeps result delivery on the frame thread.
         """
         out = []
@@ -247,6 +260,7 @@ class AttributeWorker:
         for future in futures:
             future.cancel()
         self.poll()
+        self.poll_missed()
 
     def close(self) -> None:
         """Refuse new jobs, cancel waiting ones and stop the pool if this worker created it.

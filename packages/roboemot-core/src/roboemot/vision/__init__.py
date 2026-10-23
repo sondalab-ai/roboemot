@@ -6,7 +6,7 @@ the optional ``vision`` extra and are imported explicitly.
 
 from .attributes import AttributeResult, AttributeWorker, InlineExecutor
 from .geometry import CameraModel
-from .governor import CIRCADIAN, LOAD, RateGovernor
+from .governor import CIRCADIAN, CONVERSATION, LOAD, RateGovernor
 from .pipeline import VisionPipeline
 from .runner import FrameSource, LatestFrameRunner, LockedSource, pump
 from .stages import (
@@ -30,6 +30,7 @@ from .types import (
 
 __all__ = [
     "CIRCADIAN",
+    "CONVERSATION",
     "LOAD",
     "AppearanceEmbedder",
     "AttributeEstimator",
