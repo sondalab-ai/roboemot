@@ -14,9 +14,12 @@ deterministic; ``LatestFrameRunner`` drives it live. Per frame, when the governo
    lets one missed vote still fit the SPEC 13 identity budget of 2.5 s with the 3-of-5 votes
    of SPEC 6. The embedding goes straight to ``Matcher.observe`` and is dropped; it is never
    published.
-3. Per track, once, the first ``vision.attribute_crops`` face crops go to the attribute
-   worker (skipped when the recognised person has declared age and gender); until it answers,
-   age and gender are ``unknown`` (a possible minor). Other visible faces that fall inside a
+3. Per track, the first ``vision.attribute_crops`` face crops go to the attribute worker
+   (skipped when the recognised person has declared age and gender); until it answers, age and
+   gender are ``unknown`` (a possible minor). A job whose age comes back unknown (and no
+   declared age) is retried: ``vision.attribute_retry_s`` of capture time after the result, the
+   track collects new crops, until a confident age or a declared one stops it. The age stays
+   unknown, a possible minor, in between. Other visible faces that fall inside a
    crop's margin are filled with the letterbox grey (outside the subject's own box), so a
    neighbour's face cannot pull the estimate toward the neighbour's age.
 4. Published: ``percept.face`` (no embedding), ``person.recognized`` when a track turns into a
@@ -43,9 +46,11 @@ For the debug report (SPEC 12A) ``stats`` adds face track churn (created, ended,
 rate over ``vision.report_rate_window_s`` of capture time, the visible lifetime of the last
 ``vision.report_window`` ended tracks) and the age and gender jobs (the worker's counts and
 timings, results dropped because their track ended or never sent because the queue stayed full,
-capture time from a track's first detection to its estimate, and the outcome: adult, minor or
-unknown). Numbers only; the frame thread writes them and the report thread reads them under one
-lock.
+retry jobs sent for an unknown age, capture time from a track's first detection to each estimate,
+and each job's outcome: adult, minor or unknown; with retries these count jobs, not tracks).
+``rate_scales`` lists the governor's multipliers by source (circadian, load, conversation)
+beside their product ``rate_scale``. Numbers only; the frame thread writes them and the report
+thread reads them under one lock.
 
 ``refresh`` lets the matcher add embeddings of confident matches to the registry (SPEC 6,
 online refresh). ``replay`` forces it off: refresh uses the registry's wall clock and mutates
@@ -124,6 +129,8 @@ class _FaceState:
     age: Estimate = NO_ESTIMATE
     gender: Estimate = NO_ESTIMATE
     attr_stamp: float | None = None
+    retry_at: float | None = None  # capture stamp from which an unknown age is estimated again
+    retrying: bool = False  # the crops being collected are for a retry job
 
 
 @dataclass
@@ -220,6 +227,7 @@ class VisionPipeline:
         self._to_estimate_ms: deque[float] = deque(maxlen=cfg.report_window)
         self._outcomes = dict.fromkeys(OUTCOMES, 0)
         self._attr_drops = {"dropped_queue_full": 0, "dropped_track_gone": 0}
+        self._retries = 0
         matcher.registry.add_forget_listener(self._on_forget)
 
     def process(self, frame: Frame) -> FrameReport:
@@ -359,6 +367,7 @@ class VisionPipeline:
             }
             attributes: dict[str, Any] = {
                 **self._attr_drops,
+                "retries": self._retries,
                 "outcomes": dict(self._outcomes),
                 "time_to_estimate_ms": summarise(list(self._to_estimate_ms), SUMMARY_LEVELS),
             }
@@ -552,7 +561,10 @@ class VisionPipeline:
         return _declared(person.age_group) is not None and _declared(person.gender) is not None
 
     def _collect_crop(self, frame: Frame, track: Track, state: _FaceState) -> None:
-        if self.worker is None or state.attr != "collecting":
+        if self.worker is None:
+            return
+        self._rearm(state, frame.stamp)
+        if state.attr != "collecting":
             return
         if self._declared_complete(state.owner_id):
             state.attr, state.crops = "skipped", []
@@ -573,6 +585,20 @@ class VisionPipeline:
         ):
             state.crops = []
             state.attr = "submitted"
+            if state.retrying:
+                with self._report_lock:
+                    self._retries += 1
+
+    def _rearm(self, state: _FaceState, stamp: float) -> None:
+        """Back to collecting crops once a retry is due (SPEC 5): the age stays unknown, a
+        possible minor, meanwhile. Not when the age turned known since (a declared value of a
+        person recognised in between), which also cancels the retry."""
+        if state.retry_at is None or stamp < state.retry_at:
+            return
+        state.retry_at = None
+        if self._attributes(state)[0].value != UNKNOWN:
+            return
+        state.attr, state.retrying, state.last_crop = "collecting", True, None
 
     def _crop(self, image: np.ndarray, box: Box, others: list[Box] | None = None) -> np.ndarray:
         """Copy of a square around the box (longer side plus margin), clipped to the frame.
@@ -607,7 +633,10 @@ class VisionPipeline:
                     self._attr_drops["dropped_track_gone"] += 1
                 continue
             state.age, state.gender, state.attr_stamp = result.age, result.gender, result.stamp
-            self._count_outcome(self._attributes(state)[0])
+            age = self._attributes(state)[0]
+            self._count_outcome(age)
+            if age.value == UNKNOWN:  # retried later; a confident or declared age stops it
+                state.retry_at = stamp + self.cfg.attribute_retry_s
             with self._report_lock:
                 self._to_estimate_ms.append((stamp - state.first_seen) * MS_PER_S)
 

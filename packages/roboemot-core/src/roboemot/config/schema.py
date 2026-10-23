@@ -1618,6 +1618,15 @@ class VisionConfig(Strict):
         ge=0,
         le=10,
     )
+    attribute_retry_s: float = param(
+        5.0,
+        "A track whose age job came back unknown (and no declared age) collects new crops for "
+        "another job this long after the result (capture time, SPEC 5); a confident age stops "
+        "the retries, and the track stays a possible minor until then",
+        unit="s",
+        ge=0.5,
+        le=600,
+    )
     attribute_crop_margin: float = param(
         0.25,
         "Face box padding for the age crop, per side; other visible faces inside it are filled "
