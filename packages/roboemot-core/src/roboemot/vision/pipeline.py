@@ -781,7 +781,6 @@ class VisionPipeline:
             gender=gender.value,
             gender_source=gender.source,
             attribute_confidence=age.confidence,
-            possible_minor=age.possible_minor,
             new_track=not state.reported,
             attributes_stamp=state.attr_stamp,
         )
@@ -796,7 +795,6 @@ class VisionPipeline:
                 azimuth_rad=azimuth,
                 elevation_rad=elevation,
                 age_group=age.value,
-                possible_minor=age.possible_minor,
             )
             if self._publish("person.recognized", recognized, frame.stamp):
                 state.announced = owner

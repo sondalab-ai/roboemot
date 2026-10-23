@@ -109,12 +109,10 @@ def scan_context(
     hour: float,
     effects: Any = None,
     circadian: CircadianModel | None = None,
-    minor_present: bool = False,
 ) -> ScanContext:
     """What the scan policy needs this tick: engagement from attention, the circadian state and
     quiet hours (SPEC 7A) from the local ``hour``, the persona's energy effects (``effects``,
-    computed from the persona when the caller has not cached them) and the minor factor
-    (SPEC 12)."""
+    computed from the persona when the caller has not cached them)."""
     quiet = cfg.circadian.enabled and in_window(hour, cfg.circadian.quiet_hours)
     target = selector.target
     return ScanContext(
@@ -125,7 +123,6 @@ def scan_context(
         circadian=circadian.state if circadian else "awake",
         quiet_hours=quiet,
         effects=effects if effects is not None else persona_effects(cfg.persona),
-        minor_factor=cfg.safety.minor_motion_factor if minor_present else 1.0,
     )
 
 

@@ -6,9 +6,7 @@ Every field carries a default, a unit and a range. Field metadata (``json_schema
 - ``restart``: True when a change needs a process restart instead of hot reload.
 - ``conservative``: for safety parameters, which direction is safer at runtime:
   ``"lower"`` (smaller values are safer), ``"higher"``, ``"false"`` / ``"true"`` for booleans
-  that are safer off / on, ``"superset"`` for lists where only adding entries is safer (compared
-  on the output filter's normalised forms). Changes in the other direction need admin approval
-  (stack.py).
+  that are safer off / on. Changes in the other direction need admin approval (stack.py).
 - ``opt_in``: privacy options; turning them on needs the admin confirmation.
 - ``admin_only``: prompt text, where no direction is safe; any change needs the admin
   confirmation.
@@ -35,7 +33,7 @@ def param(
     ge: float | None = None,
     le: float | None = None,
     restart: bool = False,
-    conservative: Literal["lower", "higher", "false", "true", "superset"] | None = None,
+    conservative: Literal["lower", "higher", "false", "true"] | None = None,
     opt_in: bool = False,
     admin_only: bool = False,
 ) -> Any:
@@ -109,11 +107,6 @@ class AffectConfig(Strict):
 APPRAISAL_EVENTS = frozenset(
     {
         "person.known",
-        "person.known_child",
-        "person.known_teen",
-        "person.known_adult",
-        "person.known_senior",
-        "person.known_unknown",
         "person.unknown_appears",
         "animal.appears",
         "idle.long",
@@ -196,20 +189,15 @@ class AppraisalConfig(Strict):
     )
     rules: list[AppraisalRule] = param(
         [
-            # Starting points (SPEC 7): an enrolled person gives +0.4/+0.2; a child adds joy, an
-            # adult stays calm, a stranger raises curiosity with almost no valence change.
-            {"event": "person.known", "valence": 0.4, "arousal": 0.2, "cooldown_s": 60},
+            # Starting points (SPEC 7): an enrolled person gives +0.5/+0.2 and calm, a stranger
+            # raises curiosity with almost no valence change.
             {
-                "event": "person.known_child",
-                "valence": 0.3,
-                "arousal": 0.3,
-                "label": "joy",
+                "event": "person.known",
+                "valence": 0.5,
+                "arousal": 0.2,
+                "label": "calm",
                 "cooldown_s": 60,
             },
-            # Teen and senior start with the adult values (SPEC 7).
-            {"event": "person.known_teen", "valence": 0.1, "label": "calm", "cooldown_s": 60},
-            {"event": "person.known_adult", "valence": 0.1, "label": "calm", "cooldown_s": 60},
-            {"event": "person.known_senior", "valence": 0.1, "label": "calm", "cooldown_s": 60},
             {
                 "event": "person.unknown_appears",
                 "valence": 0.05,
@@ -316,7 +304,6 @@ class RegisterParams(Strict):
         True, "Whether the robot may move toward the person", conservative="false"
     )
     reaction_intensity: Literal["low", "medium", "high"] = param("medium", "Reaction intensity")
-    minor_content_policy: bool = param(False, "Apply the minor content policy", conservative="true")
     max_reply_sentences: int | None = param(
         None,
         "Reply length cap in sentences for this register; unset uses "
@@ -327,51 +314,32 @@ class RegisterParams(Strict):
     )
 
 
-class RegisterConfig(Strict):
-    child: RegisterParams = param(
-        {
-            "speech_rate": 0.9,
-            "pitch_st": 2.0,
-            "vocabulary": "simple",
-            "persona_fragment": "Playful, encouraging, child-safe.",
-            "motion_amplitude": 1.2,
-            "approach_allowed": False,
-            "reaction_intensity": "high",
-            "minor_content_policy": True,
-            "max_reply_sentences": 2,
-        },
-        "Register for children",
-    )
-    teen: RegisterParams = param({"minor_content_policy": True}, "Register for teens")
-    adult: RegisterParams = param({}, "Register for adults")
-    senior: RegisterParams = param({}, "Register for seniors")
-    unknown: RegisterParams = param(
-        {
-            "vocabulary": "formal",
-            "persona_fragment": "Polite, reserved.",
-            "motion_amplitude": 0.7,
-            "approach_allowed": False,
-            "reaction_intensity": "low",
-            "minor_content_policy": True,
-        },
-        "Register for people of unknown age group (treated as possible minors)",
-    )
+class RegisterConfig(RegisterParams):
+    """The one register the robot uses with everyone (SPEC 7; no age groups, owner decision
+    2026-10-23), plus the settings about registers."""
+
     gender_affects_params: bool = param(
         False, "If true, gender may change register parameters, not only forms of address"
     )
     persona_fragment_max_chars: int = param(
-        300, "Longest accepted persona_fragment, in every group", ge=20, le=2000
+        300, "Longest accepted persona_fragment", ge=20, le=2000
     )
 
+    @property
+    def params(self) -> RegisterParams:
+        """The register parameters alone, as a person's overrides and the persona shape them."""
+        return RegisterParams.model_validate(
+            self.model_dump(include=set(RegisterParams.model_fields))
+        )
+
     @model_validator(mode="after")
-    def _fragments_fit(self) -> RegisterConfig:
-        for group in ("child", "teen", "adult", "senior", "unknown"):
-            n = len(getattr(self, group).persona_fragment)
-            if n > self.persona_fragment_max_chars:
-                raise ValueError(
-                    f"register.{group}.persona_fragment has {n} characters, "
-                    f"max {self.persona_fragment_max_chars}"
-                )
+    def _fragment_fits(self) -> RegisterConfig:
+        n = len(self.persona_fragment)
+        if n > self.persona_fragment_max_chars:
+            raise ValueError(
+                f"register.persona_fragment has {n} characters, "
+                f"max {self.persona_fragment_max_chars}"
+            )
         return self
 
 
@@ -831,7 +799,7 @@ REFLEX_DURATION_MS = (100.0, 800.0)  # SPEC 10: a reflex pre-empts lower sources
 # (or to the explicit "does not affect a withdraw" list in the tests).
 WITHDRAW_RULE_FIELDS = (
     "enabled", "trigger", "primitive", "threshold", "amplitude_deg", "cooldown_s",
-    "duration_ms", "suppress_with_minor",
+    "duration_ms",
 )  # fmt: skip
 WITHDRAW_SHARED_FIELDS = (
     "enabled", "max_amplitude_deg", "max_age_ms", "max_age_vision_ms", "max_future_ms",
@@ -884,12 +852,6 @@ class ReflexRule(Strict):
         le=REFLEX_DURATION_MS[1],
         conservative="lower",
     )
-    suppress_with_minor: bool = param(
-        False,
-        "Do not fire while a possible minor is present (always on for turn_toward: the robot "
-        "never moves towards a minor, SPEC 12)",
-        conservative="true",
-    )
 
     @model_validator(mode="after")
     def _consistent(self) -> ReflexRule:
@@ -905,8 +867,6 @@ class ReflexRule(Strict):
             raise ValueError(
                 f"reflex {self.name!r}: threshold for {self.trigger} must be within {lo} and {hi}"
             )
-        if self.primitive == "turn_toward" and not self.suppress_with_minor:
-            raise ValueError(f"reflex {self.name!r}: turn_toward must set suppress_with_minor")
         return self
 
 
@@ -957,7 +917,7 @@ class ReflexConfig(Strict):
     )
     max_amplitude_deg: float = param(
         45.0,
-        "Ceiling on every rule's amplitude (the manifest limits and the minor cap still apply)",
+        "Ceiling on every rule's amplitude (the manifest limits still apply)",
         unit="deg", ge=0, le=90, conservative="lower",
     )  # fmt: skip
     max_age_ms: float = param(
@@ -1041,7 +1001,6 @@ class ReflexConfig(Strict):
                 "amplitude_deg": 40,
                 "cooldown_s": 5,
                 "duration_ms": 800,
-                "suppress_with_minor": True,
             },
         ],
         "Reflex rules (SPEC 10)",
@@ -1061,62 +1020,11 @@ class ReflexConfig(Strict):
 # --------------------------------------------------------------------------- safety (SPEC 12)
 
 
-class MinorLines(Strict):
-    greeting: str = param("", "Said when the person greeted the robot")
-    robot_name: str = param(
-        "",
-        "Said when the robot's name was called and it has one; `{name}` is replaced by the name "
-        "(sanitised, see `voice.name_max_chars`)",
-    )
-    robot_unnamed: str = param(
-        "",
-        "Said instead of `robot_name` when the robot has no name; empty falls back to "
-        "`ask_grown_up`",
-    )
-    ask_grown_up: str = param("", "Said for anything else")
-    filtered: str = param("", "Said in place of a sentence the output filter removed")
-
-    @model_validator(mode="after")
-    def _spoken(self) -> MinorLines:
-        empty = [
-            n
-            for n in ("greeting", "robot_name", "ask_grown_up", "filtered")
-            if not getattr(self, n).strip()
-        ]
-        if empty:
-            raise ValueError(f"minor_lines: {', '.join(empty)} must not be empty (never silence)")
-        return self
-
-
 class SafetyConfig(Strict):
     extra_prompt_rules: list[str] = param(
         [],
         "Rules appended to the system prompt's safety block (SPEC 8); changes need the admin",
         admin_only=True,
-    )
-    minor_motion_factor: float = param(
-        0.6,
-        "Speed and amplitude factor while a minor is present",
-        ge=0.05,
-        le=1,
-        conservative="lower",
-    )
-    minor_hold_s: float = param(
-        5.0,
-        "Keep the minor-present caps this long after the last possible-minor face; also the "
-        "evidence the face stage must deliver before they release (see minor_hold_periods)",
-        unit="s",
-        ge=1,
-        le=600,
-        conservative="higher",
-    )
-    minor_hold_periods: float = param(
-        3.0,
-        "The minor-present hold is at least this many face-detection periods at the current "
-        "governor rate, so a throttled detector cannot make the caps flap",
-        ge=1,
-        le=100,
-        conservative="higher",
     )
     watchdog_ms: float = param(
         200.0,
@@ -1176,48 +1084,6 @@ class SafetyConfig(Strict):
         "Run with manifest dynamics still null (development only, SPEC 12)",
         conservative="false",
     )
-    minor_output_blocklist: dict[str, list[str]] = param(
-        {
-            "it": [
-                "cazz*", "merd*", "puttan*", "troia*", "stronz*", "vaffanculo*", "scopare*",
-                "porn*", "uccid*", "uccis*", "ammazz*", "suicid*", "cocain*", "eroin*", "drog*",
-                "pistol*", "fucil*", "sesso*",
-            ],
-            "en": [
-                "fuck*", "shit*", "bitch*", "asshole*", "cunt*", "porn*", "sex*", "kill*",
-                "murder*", "suicid*", "cocaine*", "heroin*", "drug*", "gun*", "rifle*",
-            ],
-        },
-        "Words (whole words, accents and case ignored; a trailing * makes an entry a prefix, so "
-        "kill* also blocks killing) that never reach the speaker while a "
-        "minor is present, per language; a sentence containing one is replaced by "
-        "minor_lines.filtered and the rest of the answer is dropped (SPEC 12). Starting values "
-        "to review with the deployment, not a validated list. Entries can be added at runtime, "
-        "never removed (only the app config with the admin PIN removes)",
-        admin_only=True,
-        conservative="superset",
-    )  # fmt: skip
-    minor_lines: dict[str, MinorLines] = param(
-        {
-            "it": {
-                "greeting": "Ciao! Che bello vederti.",
-                "robot_name": "Mi chiamo {name}.",
-                "robot_unnamed": "Sono un robot.",
-                "ask_grown_up": "Questa domanda falla a un grande, che ti sa rispondere meglio.",
-                "filtered": "Preferisco parlare d'altro. Chiedi a un grande.",
-            },
-            "en": {
-                "greeting": "Hello! Nice to see you.",
-                "robot_name": "My name is {name}.",
-                "robot_unnamed": "I am a robot.",
-                "ask_grown_up": "Please ask a grown-up about that, they will know better.",
-                "filtered": "I would rather talk about something else. Ask a grown-up.",
-            },
-        },
-        "Short child-safe lines per language, spoken to a minor when no route can answer and "
-        "when the output filter replaces a sentence (SPEC 8, 12)",
-        admin_only=True,
-    )  # fmt: skip
 
 
 PSEUDONYM_LABEL = "{label}"
@@ -1602,7 +1468,7 @@ class VisionConfig(Strict):
     attribute_score_min: float = param(
         0.5,
         "Age-model class score (an independent sigmoid) below which a crop's age group is "
-        "unknown, a possible minor; replaces the 0.8 rule for age. The estimator and the "
+        "unknown; replaces the 0.8 rule for age. The estimator and the "
         "worker take it at start. At least 0.3 (the research's matched point at 128 px is "
         "0.32), so the floor cannot be switched off",
         ge=0.3,
@@ -1630,7 +1496,7 @@ class VisionConfig(Strict):
         "SPEC 5), or at the first face "
         "frame after the robot stops thinking or speaking; a confident age stops the retries "
         "(an adult or senior one after an unknown result needs a second agreeing one), and the "
-        "track stays a possible minor until then",
+        "age stays unknown until then",
         unit="s",
         ge=0.5,
         le=600,
@@ -2250,8 +2116,8 @@ class OpenAISpeechConfig(Strict):
 
     route: str = param(
         "",
-        "Name of the llm_routes entry whose base_url, key, timeouts and minors flag the speech "
-        "requests use; empty disables the backend",
+        "Name of the llm_routes entry whose base_url, key and timeouts the speech requests "
+        "use; empty disables the backend",
         restart=True,
     )
     model: str = param("gpt-4o-mini-tts", "Speech model sent to /audio/speech", restart=True)
@@ -2731,12 +2597,6 @@ class ConversationConfig(Strict):
         "After a barge-in, an utterance made only of a stop phrase that is heard this soon is "
         "the command that already stopped the robot and is not answered",
         unit="s", ge=0, le=60,
-    )  # fmt: skip
-    transcript_settle_ms: int = param(
-        200,
-        "With a minor present the live transcript shows a reply only once it played; while "
-        "the speech still plays, whether it is over is checked this often",
-        unit="ms", ge=20, le=2000,
     )  # fmt: skip
     confirm_no: dict[str, list[str]] = param(
         {
@@ -3442,7 +3302,7 @@ class WebUIConfig(Strict):
     )
     settings_line_max_chars: int = param(
         200,
-        "Longest child-safe spoken line the settings editor accepts (SPEC 11A)",
+        "Longest list item or entry key the settings editor accepts (SPEC 11A)",
         ge=1,
         le=500,
         conservative="lower",

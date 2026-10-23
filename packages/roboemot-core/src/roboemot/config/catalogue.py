@@ -29,7 +29,7 @@ Keys of every descriptor (all always present, ``None`` when not applicable):
   its value or default is secret-shaped). ``value`` and ``default`` are then ``"***"`` (or null
   when absent) and the field is never writable from the web, except a route ``base_url`` (see
   ``write_only``): it is replaced whole, never shown.
-- ``private``: minors, privacy and location settings (``PRIVATE_PATHS``), admin only (the PIN).
+- ``private``: privacy and location settings (``PRIVATE_PATHS``), admin only (the PIN).
   Unless the catalogue is built with ``reveal_private``, ``value`` and ``default`` are ``"***"``
   and a private container lists no entry keys and no ``entry``; the field itself stays writable.
   ``admin_only`` is true on every private field. A secret stays redacted even when revealed.

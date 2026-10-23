@@ -31,7 +31,6 @@ from roboemot.robot_platform import AudioHub, RobotSession, Speaker
 from roboemot.runtime.live_video import LiveVideo
 from roboemot.secret_store import SecretStore
 from roboemot.vision import FrameSource
-from roboemot.vision.minor import MinorPresence
 from roboemot.vision.service import Perception, default_stages
 from roboemot.voice.activity import SpeechActivity
 from roboemot.voice.bargein import BargeIn
@@ -60,7 +59,6 @@ class RuntimeHost:
     circadian_runner: CircadianRunner | None = None  # light, presence, state, motion (SPEC 7A)
     light_reader: IdleLightReader | None = None  # reads a frame when vision gave none
     affect_runner: AffectRunner | None = None  # owns the one affect engine
-    minor_presence: MinorPresence | None = None  # the one source of the minor-present signal
     register_tracker: RegisterTracker | None = None  # people in view -> register.active
     yes_no: YesNoGestures | None = None  # spoken yes / no -> nod / shake
     expression: ExpressionRenderer | None = None  # affect label -> additive motion
@@ -141,8 +139,3 @@ class RuntimeHost:
         """Seconds between face-stage runs now (infinite while vision is off)."""
         pipeline = self.perception.pipeline if self.perception is not None else None
         return math.inf if pipeline is None else pipeline.governor.period("detection")
-
-    @property
-    def minor_present(self) -> bool:
-        """Whether a possible minor is in view or was within the hold time (SPEC 5, 12)."""
-        return self.minor_presence.present() if self.minor_presence is not None else False

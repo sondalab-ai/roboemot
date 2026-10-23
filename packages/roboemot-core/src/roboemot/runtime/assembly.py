@@ -35,7 +35,6 @@ from roboemot.persona.llm_traits import TraitCache, TraitsWorker
 from roboemot.reflex import ReflexEngine
 from roboemot.robot_platform import AudioHub, RobotPlatform, RobotSession, Speaker
 from roboemot.vision import LockedSource
-from roboemot.vision.minor import MinorPresence
 from roboemot.vision.service import Perception, open_perception
 from roboemot.voice.activity import SpeechActivity
 from roboemot.voice.bargein import BargeIn, PlaybackReference
@@ -85,7 +84,6 @@ class Pipeline:
     gaze: GazeController
     plugin: Any
     scan: ScanController | None
-    presence: MinorPresence
     tracker: RegisterTracker
     clock: Any
     circ: CircadianRunner
@@ -221,12 +219,7 @@ def assemble(
                 log.warning("auto-enrollment: %s", type(exc).__name__)
 
     feed_world(bus, world, on_result)
-    # No face frames (vision off or dead) keep the caps on: release needs evidence (SPEC 12).
-    presence = host.minor_presence = MinorPresence(
-        bus, cfg.safety, sink=loop.set_minor_present, period=lambda: host.detection_period()
-    )
-    presence.apply(time.monotonic())  # the loop's caps are on from its first tick
-    reflexes.attach(bus)  # after MinorPresence: it can never come before the minor latch
+    reflexes.attach(bus)
     tracker = host.register_tracker = RegisterTracker(
         bus,
         cfg.expression,
@@ -371,7 +364,6 @@ def assemble(
         gaze=gaze,
         plugin=plugin,
         scan=scan,
-        presence=presence,
         tracker=tracker,
         clock=clock,
         circ=circ,

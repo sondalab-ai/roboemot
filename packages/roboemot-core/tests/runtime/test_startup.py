@@ -37,7 +37,7 @@ def test_a_failure_while_starting_stops_what_already_started_in_reverse_order():
         return Part(name, log, fail)
 
     p = SimpleNamespace(
-        presence=part("presence"), tracker=part("tracker"), runner=part("runner"),
+        tracker=part("tracker"), runner=part("runner"),
         circ=part("circ"), reflexes=part("reflexes"), loop=part("loop"),
         network=part("network"), worker=part("worker"),
         perception=part("perception", fail=True), audio=part("audio"),
@@ -55,11 +55,11 @@ def test_a_failure_while_starting_stops_what_already_started_in_reverse_order():
         "start loop", "start network", "start worker", "start perception",
         "stop perception",
         "stop worker", "stop network", "stop loop", "stop watcher",
-        "stop reflexes", "stop circ", "stop runner", "stop tracker", "stop presence",
+        "stop reflexes", "stop circ", "stop runner", "stop tracker",
     ]  # fmt: skip
 
 
-def test_offline_cue_speaks_on_the_host_output_and_is_muted_asleep_or_with_a_minor():
+def test_offline_cue_speaks_on_the_host_output_and_is_muted_asleep():
     said: list[dict] = []
     host, stack = RuntimeHost(), ConfigStack()
     p = SimpleNamespace(
@@ -75,12 +75,9 @@ def test_offline_cue_speaks_on_the_host_output_and_is_muted_asleep_or_with_a_min
     host.speech_output = SimpleNamespace(say=lambda text, **kw: said.append({"text": text, **kw}))
     cue.say("ciao", "it")
     assert [s["text"] for s in said] == ["ciao"] and said[0]["mood"] == "joy"
-    assert said[0]["register"] == stack.effective().register.unknown
+    assert said[0]["register"] == stack.effective().register.params
     p.sleep.asleep = True
     cue.say("asleep", "it")
     p.sleep.asleep, p.sleep.paused = False, True
     cue.say("paused", "it")
-    p.sleep.paused = False
-    host.minor_presence = SimpleNamespace(present=lambda: True)  # type: ignore[assignment]
-    cue.say("minor", "it")
     assert len(said) == 1

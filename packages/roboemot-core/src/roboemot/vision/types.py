@@ -61,8 +61,8 @@ class FacePercept:
     """Published on ``percept.face`` for each confirmed face track in a processed frame.
 
     ``box`` is normalised to the frame (0..1). ``age_group`` and ``gender`` are ``unknown``
-    until the track's attribute job returns (and stay so below the confidence threshold);
-    ``possible_minor`` follows SPEC 5 (unknown counts as a minor). ``owner_id`` is a registry
+    until the track's attribute job returns (and stay so below the confidence threshold); no
+    behaviour reads them (owner decision 2026-10-23). ``owner_id`` is a registry
     ID once the track is recognised, else ``anonymous_id`` (session-only) is set.
     ``attributes_stamp`` is the capture stamp of the last crop behind the estimate.
     """
@@ -80,7 +80,6 @@ class FacePercept:
     gender: str
     gender_source: str
     attribute_confidence: float
-    possible_minor: bool
     new_track: bool
     attributes_stamp: float | None = None
 
@@ -95,7 +94,6 @@ class PersonRecognized:
     azimuth_rad: float
     elevation_rad: float
     age_group: str
-    possible_minor: bool
 
 
 @dataclass(frozen=True)

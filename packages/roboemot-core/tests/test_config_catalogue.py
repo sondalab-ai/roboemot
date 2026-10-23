@@ -76,8 +76,8 @@ def test_metadata_comes_from_the_schema():
     assert r["voice.limits.rate"]["kind"] == "tuple" and r["voice.limits.rate"]["length"] == 2
     assert r["voice.keywords"]["kind"] == "dict_of_model"
     assert r["llm_routes"]["kind"] == "keyed_list" and r["llm_routes"]["key"] == "name"
-    assert r["safety.minor_output_blocklist.en"]["kind"] == "string_list"
-    assert r["safety.minor_output_blocklist.en"]["conservative"] == "superset"
+    assert r["appraisal.extra_events"]["kind"] == "string_list"
+    assert r["safety.watchdog_ms"]["conservative"] == "lower"
     assert r["voice.wake_word"]["nullable"] is True
     assert any(row["restart"] for row in r.values())
     assert any(row["admin_only"] for row in r.values())
@@ -205,7 +205,7 @@ def test_source_and_default_follow_rule_identity_not_position():
                 "extra_events": ["brand.new"],
                 "rules": [
                     {"event": "brand.new", "valence": 0.5},
-                    {"event": "person.known_adult", "valence": 0.9},
+                    {"event": "sound.loud", "valence": 0.9},
                 ],
             }
         }
@@ -214,12 +214,12 @@ def test_source_and_default_follow_rule_identity_not_position():
     events = {r[p]["value"]: p.removesuffix(".event") for p in r if p.endswith(".event")}
     new = events["brand.new"]
     assert (r[new + ".valence"]["source"], r[new + ".valence"]["default"]) == ("app", 0.5)
-    adult = events["person.known_adult"]
+    adult = events["sound.loud"]
     assert adult == "appraisal.rules.3"  # the default rule keeps its place
     assert (r[adult + ".valence"]["source"], r[adult + ".valence"]["default"]) == ("app", 0.9)
     assert r[adult + ".arousal"]["source"] == "schema"
     assert r["appraisal.rules.0.valence"]["source"] == "schema"  # not claimed by app index 0
-    assert r["appraisal.rules.0.valence"]["default"] == 0.4
+    assert r["appraisal.rules.0.valence"]["default"] == 0.5
 
 
 def test_keyed_entries_with_numeric_names_get_index_segments_and_plain_ones_their_name():
@@ -280,13 +280,12 @@ def test_circadian_location_is_private_but_not_secret_and_can_stay_writable():
     }
 
 
-def test_private_paths_are_listed_explicitly_and_cover_every_minor_and_privacy_field():
+def test_private_paths_are_listed_explicitly_and_cover_every_privacy_field():
     private = {p for p, r in rows(ConfigStack()).items() if r["private"]}
-    assert is_private("privacy.debug_recording") and is_private("safety.minor_lines.it.greeting")
+    assert is_private("privacy.debug_recording") and is_private("circadian.location.lat")
     assert not is_private("privacy_x") and not is_private("voice.wake_word")
+    assert not [p for p in rows(ConfigStack()) if "minor" in p]
     for path in rows(ConfigStack()):
-        if path.split(".")[0] in ("safety", "voice", "register", "reflexes") and "minor" in path:
-            assert path in private, path
         if path.startswith("privacy."):
             assert path in private, path
 
@@ -296,9 +295,9 @@ def test_private_paths_are_listed_explicitly_and_cover_every_minor_and_privacy_f
     [
         ("affect.update_hz", "number"),
         ("schema_version", "int"),
-        ("register.child.approach_allowed", "bool"),
+        ("register.approach_allowed", "bool"),
         ("personality", "text"),
-        ("register.child.vocabulary", "enum"),
+        ("register.vocabulary", "enum"),
         ("circadian.quiet_hours", "tuple"),
         ("appraisal.extra_events", "string_list"),
         ("world.autoenroll.kinds", "enum_list"),
@@ -422,18 +421,6 @@ def test_removable_lists_only_entries_no_lower_layer_holds():
     assert r["llm_routes"]["removable"] == ["added"]
     assert r["voice.keywords"]["removable"] == []
     assert r["affect.update_hz"]["removable"] is None
-
-
-LINES = dict.fromkeys(("greeting", "robot_name", "ask_grown_up", "filtered"), "hi")
-
-
-def test_a_private_container_lists_nothing_removable_until_revealed():
-    stack = ConfigStack()
-    assert rows(stack)["safety.minor_lines"]["removable"] == []
-    stack.set("safety.minor_lines.xx", LINES, source="t", admin=True)
-    assert rows(stack)["safety.minor_lines"]["removable"] == []
-    shown = {r["path"]: r for r in build_catalogue(stack, reveal_private=True)}
-    assert shown["safety.minor_lines"]["removable"] == ["xx"]
 
 
 @pytest.mark.parametrize(

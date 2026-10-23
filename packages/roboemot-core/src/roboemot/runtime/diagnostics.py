@@ -31,7 +31,6 @@ def build_diagnostics(
         FnSource("roboemot.vision", p.perception.vision_snapshot),
         FnSource("roboemot.world", lambda: world_snapshot(p.world.entries, time.monotonic())),
         FnSource("roboemot.registry", p.perception.registry_snapshot),
-        FnSource("roboemot.minor", p.presence.snapshot),
         FnSource("roboemot.register", lambda: register_report(p.tracker)),
         FnSource("roboemot.circadian", p.circ.snapshot),
         FnSource("roboemot.reflexes", p.reflexes.snapshot),

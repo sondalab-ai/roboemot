@@ -24,7 +24,7 @@ class Recorder:
 
 def pipeline() -> SimpleNamespace:
     return SimpleNamespace(
-        hub=Recorder(), loop=Recorder(), presence=Recorder(), audio=Recorder(), reflex_audio=True,
+        hub=Recorder(), loop=Recorder(), audio=Recorder(), reflex_audio=True,
         world=SimpleNamespace(cfg=None), selector=SimpleNamespace(cfg=None),
         gaze=SimpleNamespace(cfg=None, margin_rad=0.0), scan=None, plugin=None,
         perception=Recorder(), runner=Recorder(), circ=Recorder(), speech=Recorder(),
@@ -71,7 +71,7 @@ class Boom(Exception):
 
 def test_a_failing_part_does_not_skip_the_safety_parts_and_the_failure_is_raised():
     """R3 SF3, SPEC 11A/12: one part refusing the new values must not leave the safety margins,
-    the minor caps or the motion limits on the old ones; the stack then sees the failure."""
+    or the motion limits on the old ones; the stack then sees the failure."""
     import pytest
 
     p, host = pipeline(), RuntimeHost()
@@ -84,7 +84,6 @@ def test_a_failing_part_does_not_skip_the_safety_parts_and_the_failure_is_raised
     cfg = RoboEmotConfig()
     with pytest.raises(Boom):
         make_reload(host, p)(SimpleNamespace(config=cfg))
-    assert ("configure", (cfg.safety,)) in p.presence.calls
     assert ("apply_config", (cfg,)) in p.loop.calls
     assert any(name == "apply_config" for name, _ in p.reflexes.calls)
     assert p.gaze.cfg is cfg.attention

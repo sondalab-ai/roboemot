@@ -30,7 +30,7 @@ def make_reload(host: RuntimeHost, p: Pipeline) -> Callable[[Any], None]:
     """The ``ConfigStack`` subscriber that pushes each effective-config change into the parts.
 
     Each part is its own step: one that raises does not skip the others, and the safety steps
-    (motion limits, minor caps, reflex and gaze margins) run first. The first failure is raised
+    (motion limits, reflex and gaze margins) run first. The first failure is raised
     again once every step ran, so the stack audits it and the web UI reports the change as not
     applied (SPEC 11A, 12)."""
 
@@ -38,7 +38,6 @@ def make_reload(host: RuntimeHost, p: Pipeline) -> Callable[[Any], None]:
         margin_rad = math.radians(cfg.safety.constraint_margin_deg)
         out: list[tuple[str, Callable[[], None]]] = [
             ("loop", lambda: p.loop.apply_config(cfg)),
-            ("presence", lambda: p.presence.configure(cfg.safety)),
             ("reflexes", lambda: p.reflexes.apply_config(cfg.reflexes, margin_rad)),
             ("attention", lambda: apply_attention_config(cfg, p.world, p.selector, p.gaze)),
             ("hub", lambda: p.hub.sync(cfg)),  # the web UI check and the speech backend

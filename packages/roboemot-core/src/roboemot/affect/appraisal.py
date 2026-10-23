@@ -3,14 +3,11 @@
 The adapter listens to the perception topics and names what happened; the affect engine's
 appraisal rules decide what it means. Events (payload fields usable in a rule's ``when``):
 
-- ``person.known``: any ``person.recognized``; also exactly one of ``person.known_child``,
-  ``person.known_teen``, ``person.known_adult``, ``person.known_senior`` or
-  ``person.known_unknown`` (one per registry age group). Payload: ``person_id``,
-  ``age_group``, ``possible_minor``.
+- ``person.known``: any ``person.recognized`` (one event for everyone: no age groups, owner
+  decision 2026-10-23). Payload: ``person_id``.
 - ``person.unknown_appears``: a new face track that has no owner after
   ``appraisal.unknown_face_after_s``; not for a face recognised inside that window (one
-  recognised later has already emitted it). Payload: ``track_id``, ``age_group``,
-  ``possible_minor``.
+  recognised later has already emitted it). Payload: ``track_id``.
 - ``animal.appears`` (named ``animal.appeared`` in early drafts): ``world.entity_appeared`` of
   kind ``animal``. Payload: ``entity_id``, ``category``.
 - ``sound.loud``: a ``sound.loud`` message from the reflex engine's audio intake (a level scalar,
@@ -36,18 +33,14 @@ from typing import Any
 
 from ..bus import Bus, Message
 from ..config.schema import AppraisalConfig
-from ..registry.records import AGE_GROUPS
 
 Emit = Callable[[str, float, dict[str, Any]], None]
-UNKNOWN = "unknown"
 
 
 @dataclass
 class _Pending:
     first: float
     last: float
-    age_group: str
-    possible_minor: bool
 
 
 @dataclass
@@ -100,12 +93,7 @@ class AppraisalAdapter:
                 elif now - p.first >= self.cfg.unknown_face_after_s:
                     del self._pending[track]
                     self._announced[track] = p.last
-                    payload = {
-                        "track_id": track,
-                        "age_group": p.age_group,
-                        "possible_minor": p.possible_minor,
-                    }
-                    events.append(("person.unknown_appears", payload))
+                    events.append(("person.unknown_appears", {"track_id": track}))
             if not self._idle_fired and now - self._last_interaction >= self.cfg.idle_after_s:
                 self._idle_fired = True
                 events.append(("idle.long", {}))
@@ -137,11 +125,8 @@ class AppraisalAdapter:
             pend = self._pending.get(p.track_id)
             if pend is not None:
                 pend.last = msg.stamp
-                pend.age_group, pend.possible_minor = p.age_group, p.possible_minor
             elif p.new_track:
-                self._pending[p.track_id] = _Pending(
-                    msg.stamp, msg.stamp, p.age_group, p.possible_minor
-                )
+                self._pending[p.track_id] = _Pending(msg.stamp, msg.stamp)
 
     def _on_recognized(self, msg: Message) -> None:
         p = msg.payload
@@ -149,14 +134,7 @@ class AppraisalAdapter:
             self._interaction(msg.stamp)
             self._pending.pop(p.track_id, None)
             self._announced.pop(p.track_id, None)
-        payload = {
-            "person_id": p.person_id,
-            "age_group": p.age_group,
-            "possible_minor": p.possible_minor,
-        }
-        group = p.age_group if p.age_group in AGE_GROUPS else UNKNOWN
-        for name in ("person.known", f"person.known_{group}"):
-            self.emit(name, msg.stamp, dict(payload))
+        self.emit("person.known", msg.stamp, {"person_id": p.person_id})
 
     def _on_entity(self, msg: Message) -> None:
         if msg.payload.kind == "animal":

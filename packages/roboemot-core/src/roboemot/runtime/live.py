@@ -159,8 +159,7 @@ class LiveState:
             "asleep": p.sleep.asleep,
             "paused": p.sleep.paused_parts(),
             "online": p.network.online,
-            "minor_present": self._host.minor_present,
-            "register": active.group if active is not None else None,
+            "people": active.people if active is not None else 0,
             "persona": cfg.personality,
         }
 

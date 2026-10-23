@@ -62,7 +62,7 @@ def schema_has(pattern: str) -> bool:
 
 def test_no_dropped_setting_names_a_live_field():
     """A live path in ``dropped`` would be discarded on every load without an error."""
-    assert schema_has("safety.minor_hold_s") and schema_has("llm_routes.*.model")
+    assert schema_has("safety.watchdog_ms") and schema_has("llm_routes.*.model")
     assert DROPPED_SETTINGS
     assert [p for p in DROPPED_SETTINGS if schema_has(p)] == []
 
@@ -158,7 +158,7 @@ def test_a_near_miss_in_the_web_ui_file_is_dropped_as_no_longer_acceptable(tmp_p
     ("key", "value", "kept"),
     [
         ("llm_routes.0.allowed_for_minors", False, None),
-        ("safety", {"minors_allowed_llm": True, "minor_hold_s": 6.0}, {"minor_hold_s": 6.0}),
+        ("safety", {"minors_allowed_llm": True, "watchdog_ms": 150.0}, {"watchdog_ms": 150.0}),
         (
             "llm_routes",
             [{"name": "x", "model": "m", "allowed_for_minors": True}],
@@ -173,3 +173,90 @@ def test_index_form_and_section_keys_lose_only_the_dropped_field(key, value, kep
     assert out == ({} if kept is None else {key: kept})
     assert stripped is (kept is not None)
     assert "overrides-file" in caplog.text and "true" not in caplog.text.lower()
+
+
+# ------------------------------------------------------------------ owner decision 2026-10-23
+
+# Every setting of the adult/minor split, as an app.yaml written before 2026-10-23 holds them.
+NO_MINOR_YAML = """\
+safety:
+  minor_motion_factor: 0.5
+  minor_hold_s: 9
+  minor_hold_periods: 4
+  minor_output_blocklist: {en: [zork*]}
+  minor_lines:
+    en: {greeting: Hi, robot_name: "I am {name}.", ask_grown_up: Ask, filtered: No}
+register:
+  child: {motion_amplitude: 1.1, minor_content_policy: true}
+  teen: {minor_content_policy: true}
+  senior: {}
+  unknown: {approach_allowed: false}
+  adult: {minor_content_policy: false}
+reflexes:
+  rules:
+    - {name: startle-loud, trigger: loud_onset, primitive: startle, threshold: 6.0,
+       amplitude_deg: 12, cooldown_s: 5, duration_ms: 400, suppress_with_minor: true}
+conversation:
+  transcript_settle_ms: 300
+appraisal:
+  rules:
+    - {event: person.known_child, valence: 0.3, label: joy}
+    - {event: person.known_adult, valence: 0.1}
+    - {event: person.known, valence: 0.45}
+"""
+NO_MINOR_PATHS = (
+    "safety.minor_motion_factor", "safety.minor_hold_s", "safety.minor_hold_periods",
+    "safety.minor_output_blocklist", "safety.minor_lines", "register.child", "register.teen",
+    "register.senior", "register.unknown", "register.adult.minor_content_policy",
+    "reflexes.rules.0.suppress_with_minor", "conversation.transcript_settle_ms",
+    "appraisal.rules[person.known_child]", "appraisal.rules[person.known_adult]",
+)  # fmt: skip
+
+
+def test_an_old_app_config_with_the_minor_settings_loads_and_logs_each_path(tmp_path, caplog):
+    app = tmp_path / "app.yaml"
+    app.write_text(NO_MINOR_YAML)
+    with caplog.at_level("WARNING"):
+        cfg = ConfigStack.from_files(app=app).effective()
+    for path in NO_MINOR_PATHS:
+        assert caplog.text.count(f"setting {path} ignored") == 1, path
+    assert "zork" not in caplog.text and "Ask" not in caplog.text  # paths, never values
+    assert cfg.appraisal.rules[0].event == "person.known" and cfg.appraisal.rules[0].valence == 0.45
+    assert not [r for r in cfg.appraisal.rules if r.event.startswith("person.known_")]
+    assert cfg.reflexes.rules[0].name == "startle-loud"
+    assert cfg.register.params == RoboEmotConfig().register.params  # adult's only key was dropped
+
+
+def test_an_old_web_ui_file_with_the_minor_settings_restores_the_rest(tmp_path, caplog):
+    store = tmp_path / FILE
+    write_overrides(
+        store,
+        {
+            "safety.minor_motion_factor": 0.4,
+            "safety.minor_lines.en.greeting": "Hey",
+            "safety.minor_output_blocklist.en": ["zork*"],
+            "register.child.speech_rate": 1.1,
+            "register.unknown.approach_allowed": False,
+            "reflexes.rules.turn-to-voice.suppress_with_minor": True,
+            "conversation.transcript_settle_ms": 300,
+            'appraisal.rules[{"event":"person.known_child"}].valence': 0.2,
+            "register.adult.speech_rate": 0.9,  # renamed: the one register keeps the tweak
+            "affect.update_hz": 33.0,
+        },
+    )
+    stack = ConfigStack()
+    with caplog.at_level("WARNING"):
+        SettingsEditor(stack, store=store).restore()
+    cfg = stack.effective()
+    assert cfg.affect.update_hz == 33.0 and cfg.register.speech_rate == 0.9
+    assert set(json.loads(store.read_text())["overrides"]) == {
+        "affect.update_hz",
+        "register.speech_rate",
+    }
+    for path in (
+        "safety.minor_motion_factor",
+        "register.child",
+        "appraisal.rules[person.known_child]",
+    ):
+        assert path in caplog.text, path
+    assert "zork" not in caplog.text and "Hey" not in caplog.text
