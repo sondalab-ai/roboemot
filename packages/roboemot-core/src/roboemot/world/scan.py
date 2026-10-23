@@ -17,9 +17,7 @@
   ``glance_hold_s`` so it can show over the idle-tier attention command.
 
 Pace and amplitude come from the persona's energy effects (``idle_period_x``,
-``motion_amplitude_x``); a present minor only slows the pace, because the arbiter already scales
-amplitude and speed around home (SPEC 12) and scaling twice would stop the waypoints being
-reached.
+``motion_amplitude_x``).
 """
 
 from __future__ import annotations
@@ -53,7 +51,6 @@ class ScanContext:
     circadian: str = "awake"  # awake | drowsy | resting
     quiet_hours: bool = False
     effects: PersonaEffects = PersonaEffects()
-    minor_factor: float = 1.0  # safety.minor_motion_factor while a minor is present, else 1
 
     @property
     def asleep(self) -> bool:
@@ -185,7 +182,7 @@ class ScanPolicy:
         return max(0.0, base + self._rng.uniform(-jitter, jitter))
 
     def _pace(self, ctx: ScanContext) -> float:
-        return ctx.minor_factor / ctx.effects.idle_period_x
+        return 1.0 / ctx.effects.idle_period_x
 
     def _start(self, ctx: ScanContext, reason: Reason) -> ScanDecision:
         self._running = True
@@ -237,7 +234,6 @@ class SweepRunner:
         self._i = 0
         self._cur: dict[str, float] = {}
         self._pace = 1.0
-        self._cap = 1.0
         self._priority = Priority.IDLE
         self._last = 0.0
         self._slew_done_at: float | None = None
@@ -255,15 +251,13 @@ class SweepRunner:
         waypoints: list[ScanWaypoint],
         *,
         pace_x: float = 1.0,
-        cap: float = 1.0,
         priority: Priority = Priority.IDLE,
     ) -> None:
-        """Begin a sweep from ``pose``. ``cap`` is the arbiter's amplitude factor around home
-        (minor present), so arrival is judged against the pose the arbiter will really allow."""
+        """Begin a sweep from ``pose``."""
         self._wps, self._i = list(waypoints), 0
         names = {n for wp in self._wps for n in wp.targets}
         self._cur = {n: pose.get(n, self.dofs[n].home) for n in names}
-        self._pace, self._cap, self._priority = pace_x, cap, priority
+        self._pace, self._priority = pace_x, priority
         self._last = now
         self._arrived_at = self._slew_done_at = None
 
@@ -314,9 +308,7 @@ class SweepRunner:
     def _reached(self, wp: ScanWaypoint, pose: Mapping[str, float]) -> bool:
         tol = math.radians(self.cfg.arrive_tol_deg)
         for name, goal in wp.targets.items():
-            home = self.dofs[name].home
-            expected = home + (goal - home) * self._cap
-            if name in pose and abs(pose[name] - expected) > tol:
+            if name in pose and abs(pose[name] - goal) > tol:
                 return False
         return True
 
@@ -388,6 +380,4 @@ class ScanController:
             wps = [*wps, ScanWaypoint(0.0, home, 0.0)]
         self._engaged_glance = d.engaged
         priority = Priority.EXPRESSION if d.engaged else Priority.IDLE
-        self.runner.start(
-            ctx.now, pose, wps, pace_x=d.pace_x, cap=ctx.minor_factor, priority=priority
-        )
+        self.runner.start(ctx.now, pose, wps, pace_x=d.pace_x, priority=priority)

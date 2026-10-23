@@ -78,7 +78,7 @@ void Arbiter::submit(const Command& cmd) {
 
 void Arbiter::clear(const std::string& source) { cmds_.erase(source); }
 
-Values Arbiter::step(double now, double amplitude) {
+Values Arbiter::step(double now) {
   for (auto it = cmds_.begin(); it != cmds_.end();) {
     if (it->second.expires && *it->second.expires <= now) it = cmds_.erase(it); else ++it;
   }
@@ -98,10 +98,7 @@ Values Arbiter::step(double now, double amplitude) {
       for (const auto& [_, c] : cmds_)
         if (c.additive && c.targets.count(dof.name)) target += c.targets.at(dof.name);
     }
-    if (prio != Priority::Safety) {
-      target = std::min(std::max(target, dof.min), dof.max);
-      target = dof.home + (target - dof.home) * amplitude;
-    }
+    if (prio != Priority::Safety) target = std::min(std::max(target, dof.min), dof.max);
     if (winner != winner_[dof.name]) {
       fade_[dof.name] = prio == Priority::Safety ? std::nullopt
                                                  : std::optional<Fade>(Fade{now, last_[dof.name]});
@@ -206,12 +203,11 @@ Values Limiter::step(const Values& targets, double dt, double factor) {
 // --------------------------------------------------------------------------- MotionCore
 
 MotionCore::MotionCore(std::vector<Dof> dofs, std::vector<YawDelta> constraints, double crossfade_s,
-                       double watchdog_s, double minor_factor, double watchdog_return_factor,
+                       double watchdog_s, double watchdog_return_factor,
                        double constraint_margin)
     : arbiter_(dofs, crossfade_s),
       limiter_(dofs, std::move(constraints), constraint_margin),
       watchdog_s_(watchdog_s),
-      minor_factor_(minor_factor),
       watchdog_return_factor_(watchdog_return_factor) {}
 
 void MotionCore::feed(const Command& cmd) {
@@ -231,9 +227,8 @@ Values MotionCore::tick(double now, double dt) {
     arbiter_.clear("watchdog");
     holding_ = false;
   }
-  const double factor = minor_present_ ? minor_factor_ : 1.0;
-  const Values targets = arbiter_.step(now, factor);
-  const double speed = holding_ ? std::min(factor, watchdog_return_factor_) : factor;
+  const Values targets = arbiter_.step(now);
+  const double speed = holding_ ? watchdog_return_factor_ : 1.0;
   return limiter_.step(targets, dt, speed);
 }
 

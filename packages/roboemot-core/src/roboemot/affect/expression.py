@@ -14,8 +14,7 @@ The register passed in is already persona-shaped (``resolve_register``), so the 
 What stays true whatever the amplitude (SPEC 12):
 
 - Offsets are clamped to the manifest's range about home, so the register's scaling can never
-  ask the limiter for more than the hardware allows, and the minor cap, which the arbiter
-  applies to the sum about home, always wins.
+  ask the limiter for more than the hardware allows.
 - Only angle dofs are driven: an expression never translates the robot. The body turn
   (``GazeMap.body_yaw``) is dropped while the register says ``approach_allowed`` is false, so no
   expression turns the body toward someone the robot must not approach.
@@ -24,8 +23,8 @@ What stays true whatever the amplitude (SPEC 12):
 
 Named gestures (``gesture_map``: nod, shake) use the same entry format and are played by the
 same code, but they are started by an explicit :meth:`request` (any caller, today the ``play``
-skill) and never by the affect state. The same interval, register, persona, circadian, minor
-and clamping rules apply.
+skill) and never by the affect state. The same interval, register, persona, circadian and
+clamping rules apply.
 
 Not scaled by speed: expressions play at the keyframe times.
 """
@@ -123,7 +122,6 @@ class ExpressionRenderer:
         self._player: Player | None = None
         self._blend: tuple[float, dict[str, float]] | None = None
         self._last: dict[str, float] = {}
-        self._minor_factor = 1.0  # safety.minor_motion_factor while a minor is present, else 1
         self._approach = False  # the register's latest approach_allowed: checked every tick
         self._scale_now = 0.0  # the register's latest motion factor
         self._scale_start = 0.0  # the same when the playing expression started
@@ -157,17 +155,14 @@ class ExpressionRenderer:
         raw = register.params.motion_amplitude * reaction * affect * self.circadian_factor()
         return max(0.0, min(c.max_amplitude, raw))
 
-    def set_register(self, register: ActiveRegister, minor_factor: float = 1.0) -> None:
+    def set_register(self, register: ActiveRegister) -> None:
         """Take the register in effect now; call it every app tick, whatever the affect rate.
 
         A stricter register (no approach, lower amplitude) acts on the playing expression at
-        once. ``minor_factor`` is ``safety.minor_motion_factor`` while a minor is present (1.0
-        otherwise): offsets are then kept inside that share of the range, on top of the cap the
-        arbiter applies (defence in depth, SPEC 12).
+        once.
         """
         self._approach = register.params.approach_allowed
         self._scale_now = self._register_scale(register)
-        self._minor_factor = minor_factor
 
     def playable(self) -> list[str]:
         """Every name ``request`` accepts: the affect labels, then the named gestures."""
@@ -179,8 +174,8 @@ class ExpressionRenderer:
     def request(self, label: str, now: float | None = None) -> bool:
         """The ``play`` skill (SPEC 11, LLM tools): play the expression or gesture ``label`` at
         the next :meth:`update`, from any thread. It takes the same path as an affect-driven
-        one (the minimum interval, the register, circadian and persona scaling, the minor cap,
-        the body channel rule); only the label differs. False, and nothing queued, when neither
+        one (the minimum interval, the register, circadian and persona scaling, the body channel
+        rule); only the label differs. False, and nothing queued, when neither
         map has the name or the circadian factor is 0 (resting: the robot does not move).
         Given ``now`` (the clock ``update`` runs on), a request inside ``min_interval_s`` of
         the last start is refused instead of queued, for reactions that are worthless late."""
@@ -201,7 +196,7 @@ class ExpressionRenderer:
         ``expression.min_interval_s`` after the last start), or the label has been held for
         ``retrigger_s`` with the affect intensity still at ``retrigger_min_intensity``.
         """
-        self.set_register(register, self._minor_factor)
+        self.set_register(register)
         if self._label is not None:
             changed = state.label != self._label or state.impulse != self._serial
             held = (
@@ -280,7 +275,7 @@ class ExpressionRenderer:
                     n: out.get(n, 0.0) * w + previous.get(n, 0.0) * (1 - w)
                     for n in out.keys() | previous.keys()
                 }
-        # The register can tighten while an expression plays (a child walks in): the body
+        # The register can tighten while an expression plays (someone walks in): the body
         # channel goes at once and the amplitude follows the register down, never up.
         tighten = min(1.0, self._scale_now / self._scale_start) if self._scale_start > 0 else 1.0
         if self.last_amplitude > self.cfg.max_amplitude:  # the ceiling was lowered by a reload
@@ -307,8 +302,7 @@ class ExpressionRenderer:
 
     def _clamp(self, name: str, offset: float) -> float:
         dof = self.dofs[name]
-        k = self._minor_factor
-        return max((dof.min - dof.home) * k, min((dof.max - dof.home) * k, offset))
+        return max(dof.min - dof.home, min(dof.max - dof.home, offset))
 
     @property
     def playing(self) -> bool:

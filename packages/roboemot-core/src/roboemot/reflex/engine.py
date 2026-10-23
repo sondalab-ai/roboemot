@@ -11,17 +11,14 @@ bearing and a face size, the last two read off the bus (``attach``). Nothing but
 its threshold; the trigger waits in a small inbox. ``on_tick`` runs inside ``MotionLoop.step_once``
 (the loop's lock is held, so it feeds ``core`` directly and never calls the loop's methods): it
 drops triggers older than ``reflexes.max_age_ms`` (``max_age_vision_ms`` for faces: the frame
-stamp is the capture time), applies each rule's cooldown and minor
-suppression, and starts a ``Player`` at ``Priority.REFLEX`` that expires after the rule's duration.
+stamp is the capture time), applies each rule's cooldown, and starts a ``Player`` at
+``Priority.REFLEX`` that expires after the rule's duration.
 
-Safety. The commands go through the arbiter and the limiter like every other source: the minor
-band and the manifest ranges still apply, and REFLEX is not additive. Nothing tips the head forward:
+Safety. The commands go through the arbiter and the limiter like every other source: the
+manifest ranges still apply, and REFLEX is not additive. Nothing tips the head forward:
 ``startle`` and ``withdraw`` only deflect the head away (``ReflexMap.pitch_away_sign``);
 ``turn_toward`` answers a voice, stays in the front half-plane, within ``amplitude_deg`` of where
-the head points, inside the manifest range and the head-body ``yaw_delta`` reach, is never started
-while a possible minor is present, and is cut off on the first tick after one appears. The pose a
-reflex starts from is un-scaled by the minor factor, because the arbiter scales the absolute target
-about home: otherwise a head already tipped back would be pulled forward by the band.
+the head points, and inside the manifest range and the head-body ``yaw_delta`` reach.
 
 Latency. Each firing records the time from the producer's stamp to the command being fed (the
 SPEC 13 budget) and to the first pose change of the commanded output. Producers stamp at read
@@ -91,7 +88,6 @@ class _RuleStats:
     fired: int = 0
     stale: int = 0
     cooldown: int = 0
-    minor: int = 0
     no_motion: int = 0
 
 
@@ -216,8 +212,7 @@ class ReflexEngine:
     def attach(self, bus: Bus) -> None:
         """Listen for voice bearings (``percept.entity``) and faces (``percept.face``, and
         ``percept.face_frame``: a processed frame without a face is a height of 0, which re-arms
-        a close-face rule). Attach after ``MinorPresence``, so a failure here can never come
-        before the minor latch in the bus's subscriber order."""
+        a close-face rule)."""
         self._unsubscribe += [
             bus.subscribe("percept.entity", self._on_entity),
             bus.subscribe("percept.face", self._on_face),
@@ -356,8 +351,6 @@ class ReflexEngine:
             self._rearm(triggers)
             self._stop_all(core)
             return
-        if core.minor_present:
-            self._stop_minor_sensitive(core)
         for p in triggers:
             self._start(p, now, core, cfg)
         self._advance(now, core, cfg)
@@ -418,9 +411,6 @@ class ReflexEngine:
         if last is not None and now - last < rule.cooldown_s:
             stats.cooldown += 1
             return
-        if (rule.suppress_with_minor or rule.primitive == "turn_toward") and core.minor_present:
-            stats.minor += 1
-            return
         seed = self._seed(core)
         peak = self._peak(rule, p.value, seed, core, cfg)
         if not peak:
@@ -446,18 +436,11 @@ class ReflexEngine:
         self._moving[rule.name] = (p.stamp, rule.trigger, start)
 
     def _seed(self, core: MotionCore) -> dict[str, float]:
-        """The pose a reflex starts from, un-scaled by the minor factor.
-
-        The arbiter scales an absolute target about home by the factor, and the limiter's pose
-        is already scaled, so seeding from the pose would pull it back to home (forward, for a
-        head tipped back) on every reflex while a minor is present.
-        """
-        factor = core.minor_factor if core.minor_present else 1.0
-        out = {}
-        for name, dof in self.dofs.items():
-            pos = core.limiter.pos.get(name, dof.home)
-            out[name] = _clamp(dof.home + (pos - dof.home) / factor, dof.min, dof.max)
-        return out
+        """The pose a reflex starts from: the limiter's pose, inside the manifest range."""
+        return {
+            name: _clamp(core.limiter.pos.get(name, dof.home), dof.min, dof.max)
+            for name, dof in self.dofs.items()
+        }
 
     def _peak(
         self,
@@ -479,13 +462,11 @@ class ReflexEngine:
         out: dict[str, float] = {}
         eps = math.radians(cfg.motion_eps_deg)  # less than this is not a movement
         target = _clamp(seed[rmap.head_pitch] + away * amp, pitch.min, pitch.max)
-        # The arbiter scales the target about home by the minor factor. If that lands the head
-        # forward of where it is now (a pose still outside the band), the pitch is left alone:
-        # a reflex never tips the head forward, and one that cannot move it is no_motion.
-        factor = core.minor_factor if core.minor_present else 1.0
-        scaled = pitch.home + (target - pitch.home) * factor
+        # If the target lands the head forward of where it is now (a pose outside the manifest
+        # range), the pitch is left alone: a reflex never tips the head forward, and one that
+        # cannot move it is no_motion.
         now_pitch = core.limiter.pos.get(rmap.head_pitch, pitch.home)
-        if abs(target - seed[rmap.head_pitch]) > eps and (scaled - now_pitch) * away >= 0:
+        if abs(target - seed[rmap.head_pitch]) > eps and (target - now_pitch) * away >= 0:
             out[rmap.head_pitch] = target
         if rule.primitive == "startle":
             for name, sign in rmap.startle_lift.items():
@@ -529,16 +510,6 @@ class ReflexEngine:
                 if any(abs(core.limiter.pos.get(k, v) - v) > eps for k, v in start.items()):
                     self._record(trigger, "motion", max(0.0, now - stamp))
                     del self._moving[name]
-
-    def _stop_minor_sensitive(self, core: MotionCore) -> None:
-        """A minor appeared while a reflex that must not play near one is running: end it now."""
-        for name, player in list(self._players.items()):
-            rule = self._rule(name)
-            if rule is None or rule.suppress_with_minor or rule.primitive == "turn_toward":
-                core.arbiter.clear(player.source)
-                del self._players[name]
-                self._moving.pop(name, None)
-                self._stat(name).minor += 1
 
     def _stop_all(self, core: MotionCore) -> None:
         for player in self._players.values():
@@ -605,7 +576,6 @@ class ReflexEngine:
                 "fired": s.fired,
                 "dropped_stale": s.stale,
                 "dropped_cooldown": s.cooldown,
-                "suppressed_minor": s.minor,
                 "no_motion": s.no_motion,
             }
             track = self._onset.get(r.name)

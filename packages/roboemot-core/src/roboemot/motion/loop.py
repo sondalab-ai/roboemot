@@ -86,7 +86,6 @@ class MotionLoop:
             manifest.constraints,
             crossfade_s=0.0,
             watchdog_s=0.0,
-            minor_factor=1.0,
             watchdog_return_factor=1.0,
         )
         self._lock = threading.Lock()
@@ -121,7 +120,6 @@ class MotionLoop:
         watchdog_ms = min(cfg.safety.watchdog_ms, self.manifest.model.safety.watchdog_ms)
         self.core.arbiter.crossfade_s = cfg.motion.arbiter.crossfade_ms / MS_PER_S
         self.core.watchdog_s = watchdog_ms / MS_PER_S
-        self.core.minor_factor = cfg.safety.minor_motion_factor
         self.core.watchdog_return_factor = cfg.safety.watchdog_return_factor
         self.core.limiter.constraint_margin = math.radians(cfg.safety.constraint_margin_deg)
         self.link.policy = cfg.connectivity.robot
@@ -153,11 +151,6 @@ class MotionLoop:
         with self._lock:
             return dict(self.core.limiter.pos)
 
-    def set_minor_present(self, present: bool) -> None:
-        """Engage or release the minor motion caps (SPEC 12); fed by ``MinorPresence``."""
-        with self._lock:
-            self.core.minor_present = present
-
     def set_mode(self, mode: MotorMode) -> None:
         with self._lock:
             self.driver.set_mode(mode)
@@ -176,7 +169,6 @@ class MotionLoop:
                 **self.external_ctl.snapshot(now),
                 "holding": self.core.holding,
                 "watchdog_engagements": self.core.watchdog_engagements,
-                "minor_present": self.core.minor_present,
                 "rate_hz": self.rate_hz,
                 "ticks": self.ticks,
                 "overruns": self.overruns,
