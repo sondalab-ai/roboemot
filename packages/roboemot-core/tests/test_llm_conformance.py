@@ -13,6 +13,7 @@ from roboemot.llm import Router
 from roboemot.llm.conformance import (
     FAIL,
     PASS,
+    SERVER_TEXT_MAX_CHARS,
     SKIP,
     RouteBudgetExhausted,
     _why,
@@ -162,14 +163,62 @@ async def test_english_answer_fails_italian():
     assert s["italian"] == FAIL and s["streaming"] == PASS
 
 
-async def test_http_error_fails_without_server_text_or_key():
+async def test_http_error_fails_with_the_server_message_and_no_key():
     report = await run(Fake(status=401))
     s = status(report)
     assert s["streaming"] == FAIL and s["tool_round_trip"] == FAIL
     dumped = json.dumps(report.to_dict())
-    assert "HTTP 401" in dumped
-    for leaked in ("prompt echo", SECRET_KEY, "sunny", "get_time"):
+    assert "HTTP 401 at /v1/chat/completions: prompt echo" in dumped
+    for leaked in (SECRET_KEY, "sunny", "get_time"):
         assert leaked not in dumped
+
+
+def status_error(body, url="https://api.example.com/v1/chat/completions"):
+    request = httpx.Request("POST", url)
+    return APIStatusError("x", response=httpx.Response(404, request=request), body=body)
+
+
+R = LLMRoute(name="c", base_url="https://api.example.com/v1", model="m")
+
+
+def test_http_error_names_a_retired_model():
+    # the 2026-10-22 robot test: a preset still on a retired ":free" model gave a bare 404
+    message = "The `:free` variant has been retired; use `minimax/minimax-m3.1-flash` instead."
+    assert _why(status_error({"message": message, "code": 404}), R) == (
+        f"HTTP 404 at /v1/chat/completions: {message}"
+    )
+
+
+def test_http_error_reads_an_unwrapped_error_body():
+    assert _why(status_error({"error": {"message": "no endpoints"}}), R).endswith(": no endpoints")
+
+
+@pytest.mark.parametrize(
+    "body", [None, "plain text", {"message": 404}, {"error": "x"}, {"message": "  \n "}]
+)
+def test_http_error_without_a_message_shows_the_status_only(body):
+    assert _why(status_error(body), R) == "HTTP 404 at /v1/chat/completions"
+
+
+def test_http_error_message_masks_keys_and_ids():
+    key = "sk-or-v1-" + "ab12" * 16
+    reason = _why(status_error({"message": f"bad key {key} for user_3GidxfYvzBvtsyfIfp6Y"}), R)
+    assert key not in reason and "3GidxfYvzBvtsyfIfp6Y" not in reason
+    assert reason.endswith(": bad key [masked] for [masked]")
+
+
+def test_http_error_message_masks_a_short_literal_key():
+    r = LLMRoute(name="c", base_url="https://api.example.com/v1", model="m", api_key="k-123")
+    assert _why(status_error({"message": "key k-123 is invalid"}), r).endswith(
+        ": key [masked] is invalid"
+    )
+
+
+def test_http_error_message_is_one_bounded_line():
+    reason = _why(status_error({"message": "a\nb\x1b[31m  c " + "word " * 100}), R)
+    shown = reason.split(": ", 1)[1]
+    assert shown.startswith("a b [31m c word")
+    assert len(shown) == SERVER_TEXT_MAX_CHARS and shown.endswith("…")
 
 
 async def test_http_error_names_the_path_called_without_host_or_credentials():
@@ -178,7 +227,7 @@ async def test_http_error_names_the_path_called_without_host_or_credentials():
     )
     report = await run(Fake(status=404), r)
     reasons = [c.reason for c in report.checks if c.status == FAIL]
-    assert "no streamed text: HTTP 404 at /api/chat/completions" in reasons
+    assert "no streamed text: HTTP 404 at /api/chat/completions: prompt echo" in reasons
     dumped = json.dumps(report.to_dict())
     for leaked in ("u:p", "api.example.com/api", SECRET_KEY):
         assert leaked not in dumped
@@ -335,3 +384,24 @@ async def test_a_leaking_request_fails_the_check_and_is_not_sent(monkeypatch):
     assert not report.ok
     streaming = next(c for c in report.checks if c.name == "streaming")
     assert streaming.status == FAIL and "PseudonymLeak" in streaming.reason
+
+
+async def test_http_error_masks_a_stored_key_and_its_fragments():
+    stored = "Ab9+xY/2"  # short, with "/" (ends a key-like run): only the sent key masks it
+    label = "sk-or-v1-74c0d2e9"
+
+    class Echo(Fake):
+        async def handler(self, request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                404,
+                json={"error": {"message": f"key {stored} (sk-or-v1-74c...e9) no ${{secret:k}}"}},
+            )
+
+    r = LLMRoute(name="c", base_url="https://api.example.com/v1", model="m", api_key="${secret:k}")
+    report = await run(Echo(), r, secrets=lambda name: stored if name == "k" else "")
+    dumped = json.dumps(report.to_dict())
+    assert stored not in dumped and "${secret:k}" not in dumped
+    assert "no streamed text: HTTP 404 at /v1/chat/completions: key [masked]" in dumped
+    r2 = LLMRoute(name="c", base_url="https://api.example.com/v1", model="m", api_key=label)
+    report = await run(Echo(), r2)
+    assert "74c" not in json.dumps(report.to_dict())
