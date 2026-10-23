@@ -46,6 +46,7 @@ expression_map:
 ARRIVAL_LABEL = {"adult": "calm", "child": "calm", "stranger": "curiosity"}
 SETTLED_DOFS = ("head.yaw", "body_yaw", "antenna_right", "antenna_left")
 SETTLED_RAD = math.radians(3.0)  # head, body and antennas within this of home: settled
+SETTLED_HOLD_S = 3.0  # ... for this long without a break
 QUIET_MARGIN_S = 1.5  # beyond the label hold: the follow-on expression has started
 PROVOKE = (0.3, 0.3, "curiosity")  # valence, arousal, label of the provoked phase
 
@@ -245,11 +246,16 @@ def react(
         "the register with nobody in view",
     )
     wait(lambda: states and not app.expression.playing, 20, "the startup expression to end")
-    wait(
-        lambda: all(abs(pose().get(n, home[n]) - home[n]) < SETTLED_RAD for n in SETTLED_DOFS),
-        30,
-        "the robot to be back at home",
-    )
+    at_home = [math.inf]  # since when the robot has stayed at home
+
+    def settled() -> bool:
+        now = time.monotonic()
+        home_now = all(abs(pose().get(n, home[n]) - home[n]) < SETTLED_RAD for n in SETTLED_DOFS)
+        at_home[0] = min(at_home[0], now) if home_now else math.inf
+        return now - at_home[0] >= SETTLED_HOLD_S
+
+    # back at home and staying there: startup gestures (a connectivity perk-up) are over
+    wait(settled, 30, "the robot to stay at home")
     probe = Probe(app, pose, home)
     probe.start()
     try:
