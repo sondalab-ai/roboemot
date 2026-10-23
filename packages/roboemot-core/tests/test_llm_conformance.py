@@ -384,3 +384,24 @@ async def test_a_leaking_request_fails_the_check_and_is_not_sent(monkeypatch):
     assert not report.ok
     streaming = next(c for c in report.checks if c.name == "streaming")
     assert streaming.status == FAIL and "PseudonymLeak" in streaming.reason
+
+
+async def test_http_error_masks_a_stored_key_and_its_fragments():
+    stored = "Ab9+xY/2"  # short, with "/" (ends a key-like run): only the sent key masks it
+    label = "sk-or-v1-74c0d2e9"
+
+    class Echo(Fake):
+        async def handler(self, request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                404,
+                json={"error": {"message": f"key {stored} (sk-or-v1-74c...e9) no ${{secret:k}}"}},
+            )
+
+    r = LLMRoute(name="c", base_url="https://api.example.com/v1", model="m", api_key="${secret:k}")
+    report = await run(Echo(), r, secrets=lambda name: stored if name == "k" else "")
+    dumped = json.dumps(report.to_dict())
+    assert stored not in dumped and "${secret:k}" not in dumped
+    assert "no streamed text: HTTP 404 at /v1/chat/completions: key [masked]" in dumped
+    r2 = LLMRoute(name="c", base_url="https://api.example.com/v1", model="m", api_key=label)
+    report = await run(Echo(), r2)
+    assert "74c" not in json.dumps(report.to_dict())

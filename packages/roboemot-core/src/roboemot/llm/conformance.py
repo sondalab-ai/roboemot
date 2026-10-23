@@ -27,6 +27,7 @@ import httpx
 from openai import APIConnectionError, APIStatusError, APITimeoutError
 
 from ..config.schema import LLMCheckConfig, LLMRoute, SafetyConfig
+from ..redact import scrub_text
 from ..secret_store import SECRET_REF, no_secrets
 from .pseudonyms import Pseudonyms
 from .router import Done, FirstToken, Router, TextDelta, ToolCall
@@ -57,9 +58,12 @@ TOOLS = [
 WORD = re.compile(r"[^\W\d_]+")
 # A path shown in an HTTP error: plain characters and a bounded length only.
 SAFE_PATH = re.compile(r"/[A-Za-z0-9._~/-]{0,127}")
-# The server's error message: a bounded length, and runs that look like a key or an id masked.
+# The server's error message: a bounded length, the key and its fragments masked, and runs that
+# look like a key or an id masked. "/" and "." end a run, so a model id stays readable.
 SERVER_TEXT_MAX_CHARS = 200
-TOKEN_RUN = re.compile(r"[A-Za-z0-9_-]{20,}")
+TOKEN_RUN = re.compile(r"[A-Za-z0-9_+=-]{20,}")
+KEY_FRAGMENT_MIN_CHARS = 6
+KEY_FRAGMENT = re.compile(rf"[A-Za-z0-9_+/=.:-]{{{KEY_FRAGMENT_MIN_CHARS},}}")
 MASK = "[masked]"
 
 
@@ -106,6 +110,7 @@ class _Answer:
     calls: list[ToolCall] = field(default_factory=list)
     timing: FirstToken = field(default_factory=FirstToken)
     error: Exception | None = None
+    why: str = ""
 
     @property
     def timed_out(self) -> bool:
@@ -127,12 +132,13 @@ def route_endpoint(route: LLMRoute) -> str:
     return f"{host}:{port}" if port else host
 
 
-def _why(exc: Exception, route: LLMRoute) -> str:
+def _why(exc: Exception, route: LLMRoute, key: str = "") -> str:
     """A short reason. An HTTP status names the path called, so a wrong base URL shows at once:
     only a path under the route's own base path (never one a redirect chose) of plain
-    characters, no host, credentials or query. It then adds the server's message, cleaned."""
+    characters, no host, credentials or query. It then adds the server's message, cleaned, with
+    ``key`` (the key the request carried) masked too."""
     if isinstance(exc, APIStatusError):
-        return f"HTTP {exc.status_code}{_called_path(exc, route)}{_server_says(exc, route)}"
+        return f"HTTP {exc.status_code}{_called_path(exc, route)}{_server_says(exc, route, key)}"
     if isinstance(exc, (TimeoutError, APITimeoutError)):
         return "timed out"
     if isinstance(exc, (APIConnectionError, OSError)):
@@ -149,9 +155,10 @@ def _called_path(exc: APIStatusError, route: LLMRoute) -> str:
     return f" at {path}"
 
 
-def _server_says(exc: APIStatusError, route: LLMRoute) -> str:
+def _server_says(exc: APIStatusError, route: LLMRoute, key: str = "") -> str:
     """``: <message>`` from the server's JSON error, or empty. The message may echo the request
-    or a key: the route's literal key and every key-like run are masked, control characters
+    or a key: the key sent, the route's literal key, any run of 6+ characters found inside a
+    key and every key-like run are masked, then the shared redactor runs; control characters
     and repeated spaces are removed and the length is capped. The check sends only its own
     synthetic prompts, so an echoed prompt carries nothing private."""
     body = exc.body
@@ -160,13 +167,26 @@ def _server_says(exc: APIStatusError, route: LLMRoute) -> str:
     message = body.get("message") if isinstance(body, dict) else None
     if not isinstance(message, str):
         return ""
-    if route.api_key and not SECRET_REF.fullmatch(route.api_key):
-        message = message.replace(route.api_key, MASK)
-    message = TOKEN_RUN.sub(MASK, message)
+    literal = "" if SECRET_REF.fullmatch(route.api_key) else route.api_key
+    keys = [k for k in (key, literal) if k and k != "none"]
+    for k in keys:
+        message = message.replace(k, MASK)
+    message = KEY_FRAGMENT.sub(
+        lambda m: MASK if any(_shares_fragment(m.group(0), k) for k in keys) else m.group(0),
+        message,
+    )
+    message = scrub_text(TOKEN_RUN.sub(MASK, message))
     message = " ".join("".join(c if c.isprintable() else " " for c in message).split())
     if len(message) > SERVER_TEXT_MAX_CHARS:
         message = message[: SERVER_TEXT_MAX_CHARS - 1] + "…"
     return f": {message}" if message else ""
+
+
+def _shares_fragment(run: str, key: str) -> bool:
+    """Whether ``run`` holds 6+ consecutive characters of ``key`` (a partial echo such as
+    ``sk-or-v1-74c...bd1``)."""
+    size = KEY_FRAGMENT_MIN_CHARS
+    return any(run[i : i + size] in key for i in range(len(run) - size + 1))
 
 
 def italian_ratio(text: str, stopwords: list[str]) -> tuple[int, float]:
@@ -196,16 +216,25 @@ async def _ask(
                 pass
     except Exception as exc:  # CancelledError (the caller's deadline) is not caught
         ans.error = exc
+        ans.why = _why(exc, route, _sent_key(router, route))
     return ans
+
+
+def _sent_key(router: Router, route: LLMRoute) -> str:
+    """The key the request carried (a ``${secret:name}`` resolved), so a server message that
+    echoes it can be masked; empty when there is none to mask."""
+    try:
+        header = router.auth_headers(route).get("Authorization", "")
+    except Exception:  # the request was sent, so the key resolved: never fail the report here
+        return ""
+    return header.removeprefix("Bearer ")
 
 
 def _streaming(ans: _Answer, route: LLMRoute) -> CheckResult:
     if ans.error is not None and not ans.chunks:
-        return CheckResult(STREAMING, FAIL, f"no streamed text: {_why(ans.error, route)}")
+        return CheckResult(STREAMING, FAIL, f"no streamed text: {ans.why}")
     if ans.error is not None:
-        return CheckResult(
-            STREAMING, FAIL, f"stream broke after {ans.chunks} chunks: {_why(ans.error, route)}"
-        )
+        return CheckResult(STREAMING, FAIL, f"stream broke after {ans.chunks} chunks: {ans.why}")
     if ans.chunks > 1:
         return CheckResult(STREAMING, PASS, f"{ans.chunks} chunks")
     return CheckResult(
@@ -294,9 +323,7 @@ async def _tool_round_trip(
     messages: list[dict[str, Any]] = [{"role": "user", "content": TOOL_PROMPT}]
     first = await _ask(router, route, messages, TOOLS, pseudonyms)
     if first.error is not None:
-        return CheckResult(
-            TOOL_ROUND_TRIP, FAIL, f"tool request failed: {_why(first.error, route)}"
-        )
+        return CheckResult(TOOL_ROUND_TRIP, FAIL, f"tool request failed: {first.why}")
     if not first.calls:
         return CheckResult(TOOL_ROUND_TRIP, FAIL, "no tool call in the reply")
     call = first.calls[0]
@@ -326,9 +353,7 @@ async def _tool_round_trip(
     ]
     second = await _ask(router, route, messages, TOOLS, pseudonyms)
     if second.error is not None:
-        return CheckResult(
-            TOOL_ROUND_TRIP, FAIL, f"tool result rejected: {_why(second.error, route)}"
-        )
+        return CheckResult(TOOL_ROUND_TRIP, FAIL, f"tool result rejected: {second.why}")
     if not second.text.strip():
         return CheckResult(TOOL_ROUND_TRIP, FAIL, "no text answer after the tool result")
     return CheckResult(TOOL_ROUND_TRIP, PASS, "call, result and answer")
