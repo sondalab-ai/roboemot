@@ -47,6 +47,7 @@ ARRIVAL_LABEL = {"adult": "calm", "child": "calm", "stranger": "curiosity"}
 SETTLED_DOFS = ("head.yaw", "body_yaw", "antenna_right", "antenna_left")
 SETTLED_RAD = math.radians(3.0)  # head, body and antennas within this of home: settled
 SETTLED_HOLD_S = 3.0  # ... for this long without a break
+FACE_FRAMES_READY = 3  # processed face-stage frames before the robot counts as ready
 QUIET_MARGIN_S = 1.5  # beyond the label hold: the follow-on expression has started
 PROVOKE = (0.3, 0.3, "curiosity")  # valence, arousal, label of the provoked phase
 
@@ -230,12 +231,15 @@ def react(
 ) -> Run:
     """Let the robot settle with nobody in view, call ``appear()``, record both phases.
 
-    Settled: nobody in view and no expression playing, so the arrival is what the robot reacts
-    to, not the startup.
+    Settled: the face stage is running, nobody is in view and no expression is playing, so the
+    arrival is what the robot reacts to, not the startup.
     """
-    states, registers = [], []
+    states, registers, frames = [], [], []
     app.bus.subscribe("affect.state", lambda m: states.append(m.payload))
     app.bus.subscribe("register.active", lambda m: registers.append(m.payload.people))
+    app.bus.subscribe("percept.face_frame", lambda m: frames.append(m.stamp))
+    # the face stage is running (it processed a frame), so the arrival cannot race its start-up
+    wait(lambda: len(frames) >= FACE_FRAMES_READY, ready_timeout, "the face stage to run")
     wait(
         lambda: (
             app.register_tracker is not None
@@ -310,14 +314,13 @@ def check_exit(adult: Run, child: Run, stranger: Run, adult_yaw_max: float) -> N
     for r in known:
         assert r.arrival.valence > stranger.arrival.valence, r
     assert abs(adult.arrival.valence - child.arrival.valence) < 0.05
-    # one register for everyone: the same parameters, approach allowed, nobody damped
+    # one register for everyone: the configured parameters, approach allowed, nobody damped
+    reg = RoboEmotConfig().register
+    expected = (reg.motion_amplitude, reg.reaction_intensity, reg.approach_allowed)
+    assert expected[2], "the exit expects a register that allows approach"
     for r in (adult, child, stranger):
         for p in (r.arrival, r.provoked):
-            assert (p.motion_amplitude, p.reaction_intensity, p.approach_allowed) == (
-                1.0,
-                "medium",
-                True,
-            ), r
+            assert (p.motion_amplitude, p.reaction_intensity, p.approach_allowed) == expected, r
     # the same curiosity impulse for everyone: the register term alone (the factor with the affect
     # term, floor + (1 - floor) x intensity, divided out) is the same for all three
     floor = RoboEmotConfig().expression.intensity_floor
