@@ -93,7 +93,6 @@ class _Job:
     delivery: Delivery
     epoch: int
     said_at: float
-    minor: bool = False  # a minor was present when the sentence was written (SPEC 12)
 
 
 class SpeechOutput:
@@ -105,7 +104,6 @@ class SpeechOutput:
         sink: AudioSink,
         backend: TTSBackend,
         bus: Bus | None = None,
-        minor_present: Callable[[], bool] = lambda: False,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.config, self.sink, self.backend, self.bus, self.clock = (
@@ -115,7 +113,6 @@ class SpeechOutput:
             bus,
             clock,
         )
-        self._minor_present = minor_present  # read when synthesis starts, never at enqueue
         self._lock = threading.Lock()
         self._jobs: collections.deque[_Job] = collections.deque()
         self._epoch = 0
@@ -127,7 +124,6 @@ class SpeechOutput:
         self._main: asyncio.Task | None = None
         self._current: asyncio.Task | None = None
         self._current_epoch = -1
-        self._busy_job: int | None = None  # the sentence being synthesized and pushed
         self._ready = threading.Event()
         self._closed = False
         self._last_utterance = 0
@@ -204,7 +200,6 @@ class SpeechOutput:
         while True:
             with self._lock:
                 job = self._jobs.popleft() if self._jobs else None
-                self._busy_job = job.id if job is not None else None
             if job is None:
                 await self._wake.wait()
                 self._wake.clear()
@@ -214,8 +209,6 @@ class SpeechOutput:
             self._current_epoch = job.epoch
             self._current = asyncio.ensure_future(self._speak(job))
             await asyncio.wait({self._current})
-            with self._lock:
-                self._busy_job = None
 
     # ----------------------------------------------------------------- API
 
@@ -233,14 +226,10 @@ class SpeechOutput:
         mood: str | None,
         intensity: float,
         utterance: int | None = None,
-        minor: bool = False,
     ) -> int | None:
         """Queue one sentence; returns its id, or ``None`` when it was dropped (queue full or
         closed). Safe from any thread. The caller resolves ``mood`` (affect label, or the LLM's
-        tag through ``resolve_tag``) and passes the register and circadian state of this moment.
-        ``minor`` says a minor was present when the sentence was written: a sentence written
-        without minor rules is dropped, and the speech stopped, if one is present by the time
-        it would play (SPEC 12)."""
+        tag through ``resolve_tag``) and passes the register and circadian state of this moment."""
         cfg = self.config
         delivery = compose_delivery(
             cfg.voice,
@@ -262,7 +251,6 @@ class SpeechOutput:
                 delivery,
                 self._epoch,
                 self.clock(),
-                minor,
             )
             self._jobs.append(job)
         if self.bus is not None:
@@ -321,16 +309,6 @@ class SpeechOutput:
         to the stop."""
         with self._lock:
             return self._ended.get(job_id)
-
-    def idle(self) -> bool:
-        """Whether the output has nothing left to say: no sentence queued or in synthesis, and
-        the speaker has played everything pushed to it. A sentence a stop dropped never plays,
-        so after a stop the output goes idle once the cut audio is over."""
-        with self._lock:
-            if self._jobs or self._busy_job is not None:
-                return False
-        until = self.sink.playing_until()
-        return not (math.isfinite(until) and until > self.clock())  # never opened: nothing plays
 
     def question_end(self) -> float | None:
         """Clock stamp at which the last sentence that began to play ends (or ended, or was cut
@@ -394,22 +372,6 @@ class SpeechOutput:
         if task is not None and not task.done() and self._current_epoch < epoch:
             task.cancel()
 
-    def _minor(self) -> bool:
-        """Whether a minor is present now; fail closed (True) if the signal cannot be read."""
-        try:
-            return bool(self._minor_present())
-        except Exception as exc:
-            log.warning("speech: minor signal failed, assuming a minor: %s", type(exc).__name__)
-            return True
-
-    def _stale(self, job: _Job) -> bool:
-        """Whether ``job`` was written for adults and a minor is present now. The speech is
-        stopped (queue dropped, audio cut) and the caller abandons the sentence."""
-        if job.minor or not self._minor():
-            return False
-        self.stop()
-        return True
-
     def _push(self, job: _Job, samples: np.ndarray, rate_hz: int, *, speech: bool = False) -> bool:
         """Push unless a stop happened since ``job`` was queued. The check, the push and the
         notes about it (when the sentence starts to play, where its audio ends) are one step
@@ -462,8 +424,6 @@ class SpeechOutput:
     async def _speak(self, job: _Job) -> None:
         cfg, first = self.config, True
         try:
-            if self._stale(job):
-                return
             asked = self.clock()
             waited_s = audio_s = 0.0
             async for chunk in self.backend.synthesize(
@@ -471,13 +431,10 @@ class SpeechOutput:
                 job.delivery,
                 language=job.language,
                 voice=cfg.voice,
-                minor_present=job.minor or self._minor(),
             ):
                 waited = self.clock() - asked
                 waited_s += waited
                 audio_s += self._note_rtf(chunk, waited)
-                if self._stale(job):
-                    return
                 if first:
                     first = False
                     if not self._pad(job, chunk.rate_hz):

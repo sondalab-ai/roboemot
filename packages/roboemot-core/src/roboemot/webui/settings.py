@@ -2,8 +2,8 @@
 
 Every catalogue leaf that is not a secret can be written (``fields()`` marks it ``writable``);
 a path that is not such a leaf is refused. A value is cleaned from its descriptor (kind and
-limits, ``setting_clean.clean_value``) or by the per-path hook that owns it (wake word, child-safe
-lines, wake phrases, blocklist: ``setting_clean.HOOKS``), then written through
+limits, ``setting_clean.clean_value``) or by the per-path hook that owns it (wake word, wake
+phrases: ``setting_clean.HOOKS``), then written through
 ``ConfigStack.set``, so pydantic validation, the guardrails, audit (source ``webui:<ip>``) and hot
 reload apply unchanged. A secret field and a secret-shaped value (also inside an added entry) are
 never accepted.
@@ -57,6 +57,7 @@ from roboemot.config.stack import (
     ConfigError,
     GuardrailError,
     deep_merge,
+    dropped_entry,
     endpoint_key,
     entry_identity,
     get_path,
@@ -103,7 +104,7 @@ FILE_MODE = 0o600
 GROUP_OTHER_BITS = 0o077
 NOT_WRITABLE = frozenset({"schema_version"})
 # keyed by language: a new key must be one the voice stack supports
-LANGUAGE_MAPS = frozenset({"voice.keywords", "safety.minor_lines", "safety.minor_output_blocklist"})
+LANGUAGE_MAPS = frozenset({"voice.keywords"})
 # whole-value maps keyed by language (free text per key): a key that is new must be a language the
 # voice stack supports, as for the keyed language maps above
 LANGUAGE_DICTS = frozenset(
@@ -163,11 +164,6 @@ class StackPort(Protocol):
     def preview(self, changes: dict[str, Any]) -> RoboEmotConfig: ...
 
     def clear(self, key: str, **kwargs: Any) -> bool: ...
-
-
-def _is_word_map(box: FieldDescriptor) -> bool:
-    """A language-keyed map of word lists a new language may be added to (the blocklist)."""
-    return box["kind"] == "string_list_dict" and box["path"] in LANGUAGE_MAPS
 
 
 def languages() -> frozenset[str]:
@@ -422,7 +418,7 @@ class SettingsEditor:
 
     def fields(self) -> list[FieldDescriptor]:
         """The full field catalogue, ``writable`` true for every non-secret leaf. Private values
-        (minors, privacy, location) are hidden."""
+        (privacy, location) are hidden."""
         return self._catalogue()
 
     def robot_split(
@@ -493,8 +489,8 @@ class SettingsEditor:
     ) -> dict[str, Any]:
         """Add an entry to the collection at ``path`` (a dict of models by ``key``, a keyed list
         by the identity inside ``value``) on the runtime layer. A new language key of a language
-        map (``LANGUAGE_MAPS``; for the blocklist ``value`` is its word list) must be one the voice
-        stack supports (``supported_languages``). A route added here has no key (``add_route``).
+        map (``LANGUAGE_MAPS``) must be one the voice stack supports (``supported_languages``).
+        A route added here has no key (``add_route``).
 
         Raises like ``change``; ``entry_exists`` when the key or identity is taken,
         ``entry_invalid`` for a field the entry type does not have or a secret field.
@@ -515,8 +511,7 @@ class SettingsEditor:
         entry is written with that ``api_key`` once its endpoint is acknowledged."""
         rows, cfg = self._rows(), self.stack.effective()
         box = rows.get(path) if isinstance(path, str) else None
-        words = box is not None and _is_word_map(box)
-        if box is None or box["secret"] or (box["kind"] not in ENTRY_KINDS and not words):
+        if box is None or box["secret"] or box["kind"] not in ENTRY_KINDS:
             raise SettingNotAllowed("path")
         url = value.get("base_url") if isinstance(value, dict) else None
         if box["path"] == "llm_routes" and secret_shaped(url):
@@ -528,11 +523,7 @@ class SettingsEditor:
         name = clean_key(key, cfg) if box["kind"] != "keyed_list" else None
         if name is not None and box["path"] in LANGUAGE_MAPS and name not in languages():
             raise ValidationError("language_unsupported", "key")
-        if words:
-            target = f"{box['path']}.{name}"
-            entry = clean_hooked(hook_for(target), target, value, cfg)
-        else:
-            entry = self._clean_entry(box, value, cfg, name)
+        entry = self._clean_entry(box, value, cfg, name)
         tree = self.stack.merged_tree()
         exempt: frozenset[str] = frozenset()
         if name is not None:
@@ -1150,9 +1141,6 @@ class SettingsEditor:
         if parent is not None and parent["kind"] == "dict_of_model" and isinstance(value, dict):
             absent = key.rpartition(".")[2] not in get_path(base, parent["path"])
             return (key, value, True) if absent else None
-        added = parent is not None and _is_word_map(parent) and isinstance(value, list)
-        if added and key.rpartition(".")[2] not in get_path(base, parent["path"]):
-            return key, value, True  # a language added from the web
         return (key, value, False) if key in rows else None
 
     def _clean_planned(
@@ -1170,13 +1158,11 @@ class SettingsEditor:
         if add:
             parsed = parse_okey(key)
             box = rows.get(parsed[0] if parsed else key.rpartition(".")[0])
-            if box is None or not (box["kind"] in ENTRY_KINDS or _is_word_map(box)):
+            if box is None or box["kind"] not in ENTRY_KINDS:
                 raise SettingNotAllowed("path")
             language = key.rpartition(".")[2]
             if not parsed and box["path"] in LANGUAGE_MAPS and language not in languages():
                 raise SettingNotAllowed("path")
-            if _is_word_map(box):
-                return path, clean_hooked(hook_for(path), path, value, cfg)
             entry = self._clean_entry(
                 box, value[0] if parsed else value, cfg, None if parsed else language
             )
@@ -1275,6 +1261,11 @@ def _migrated(stored: dict[str, Any], source: str) -> tuple[dict[str, Any], bool
     for key, value in stored.items():
         if any(key == old or key.startswith(old + ".") for old in REMOVED_SETTINGS):
             log.warning("web UI setting %s dropped: removed from the configuration", _shown(key))
+            continue
+        parsed = parse_okey(key)
+        if parsed is not None and dropped_entry(parsed[0], parsed[1]):
+            log_dropped(source, [f"{parsed[0]}[{parsed[1][KEYED_LISTS[parsed[0]]]}]"])
+            stripped = True
             continue
         value, found = without_dropped(_pattern_path(key), value)
         log_dropped(source, found)

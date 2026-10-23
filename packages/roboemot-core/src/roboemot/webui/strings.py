@@ -55,15 +55,13 @@ EN: dict[str, str] = {
     "live_asleep": "Asleep",
     "live_online": "Online",
     "live_offline": "Offline",
-    "live_minor_yes": "Possible minor in view",
-    "live_minor_no": "No minor in view",
     "live_paused": "Paused while asleep",
     "live_paused_none": "Nothing paused",
     "live_part_app_tick": "behaviour",
     "live_part_vision": "vision",
     "live_part_light_reader": "light reader",
     "live_part_listener": "listening",
-    "live_register": "Register",
+    "live_in_view": "People in view",
     "live_persona": "Personality",
     "live_conversation": "Conversation",
     "live_phase_idle": "Idle",
@@ -189,10 +187,6 @@ EN: dict[str, str] = {
     "settings_secret": "Secret",
     "settings_readonly": "Read-only",
     "settings_json_readonly": "Structured value: edit it in the configuration file.",
-    "settings_superset_hint": (
-        "Removing a word loosens the child-safe filter: it is saved to the app config and needs "
-        "the PIN."
-    ),
     "settings_null": "No value (null)",
     "settings_route_move_message": (
         "If this route has an API key, saving sends that key to {host}. Enter the PIN to allow it."
@@ -213,7 +207,7 @@ EN: dict[str, str] = {
     "settings_remove_entry": "Remove entry",
     "settings_no_entries": "No entries.",
     "settings_reveal_message": (
-        "Show the private settings (minors, privacy, location). They stay in this page until you "
+        "Show the private settings (privacy, location). They stay in this page until you "
         "log out or reload."
     ),
     "settings_reset_layer": "Reset to lower layer",
@@ -232,7 +226,7 @@ EN: dict[str, str] = {
     "settings_remove": "Remove",
     "settings_admin": "Admin",
     "settings_reveal": "Show with PIN",
-    "settings_hidden": "Hidden: minors, privacy and location settings need the PIN to be shown.",
+    "settings_hidden": "Hidden: privacy and location settings need the PIN to be shown.",
     "settings_admin_hint": "Safety-relevant. The operator PIN doubles as the admin PIN.",
     "settings_pin_title": "Confirm the change",
     "settings_not_persisted": "It is live but was not saved to disk: it ends at the next restart.",
@@ -542,11 +536,6 @@ EN: dict[str, str] = {
     "err_list_too_long": "The list has too many entries.",
     "err_phrase_too_long": "An entry is too long.",
     "err_phrase_invalid": "An entry has characters that are not allowed.",
-    "err_line_empty": "This line cannot be empty.",
-    "err_line_too_long": "The line is too long.",
-    "err_line_invalid": "The line has characters or placeholders that are not allowed.",
-    "err_line_blocked": "The line contains a word the child-safety word list blocks.",
-    "err_name_blocked": "The name is blocked by the child-safety word list.",
     "err_locked": (
         "Too many attempts. Try again later, or restart the app or run set-pin on the robot."
     ),
@@ -625,15 +614,13 @@ IT: dict[str, str] = {
     "live_asleep": "Dorme",
     "live_online": "In linea",
     "live_offline": "Fuori linea",
-    "live_minor_yes": "Possibile minore in vista",
-    "live_minor_no": "Nessun minore in vista",
     "live_paused": "In pausa durante il sonno",
     "live_paused_none": "Niente in pausa",
     "live_part_app_tick": "comportamento",
     "live_part_vision": "visione",
     "live_part_light_reader": "lettura della luce",
     "live_part_listener": "ascolto",
-    "live_register": "Registro",
+    "live_in_view": "Persone in vista",
     "live_persona": "Personalità",
     "live_conversation": "Conversazione",
     "live_phase_idle": "A riposo",
@@ -761,10 +748,6 @@ IT: dict[str, str] = {
     "settings_secret": "Segreta",
     "settings_readonly": "Sola lettura",
     "settings_json_readonly": "Valore strutturato: si modifica nel file di configurazione.",
-    "settings_superset_hint": (
-        "Togliere una parola allenta il filtro per i minori: viene salvato nella "
-        "configurazione dell'app e richiede il PIN."
-    ),
     "settings_null": "Nessun valore (null)",
     "settings_route_move_message": (
         "Se questa route ha una chiave API, salvando la chiave viene inviata a {host}. "
@@ -786,7 +769,7 @@ IT: dict[str, str] = {
     "settings_remove_entry": "Rimuovi voce",
     "settings_no_entries": "Nessuna voce.",
     "settings_reveal_message": (
-        "Mostra le impostazioni private (minori, privacy, posizione). Restano in questa pagina "
+        "Mostra le impostazioni private (privacy, posizione). Restano in questa pagina "
         "finché non esci o ricarichi."
     ),
     "settings_reset_layer": "Torna al livello inferiore",
@@ -805,9 +788,7 @@ IT: dict[str, str] = {
     "settings_remove": "Rimuovi",
     "settings_admin": "Admin",
     "settings_reveal": "Mostra con il PIN",
-    "settings_hidden": (
-        "Nascosto: le impostazioni su minori, privacy e posizione si mostrano con il PIN."
-    ),
+    "settings_hidden": ("Nascosto: le impostazioni su privacy e posizione si mostrano con il PIN."),
     "settings_admin_hint": "Rilevante per la sicurezza. Il PIN operatore vale come PIN admin.",
     "settings_pin_title": "Conferma la modifica",
     "settings_not_persisted": "È attiva ma non salvata su disco: termina al prossimo riavvio.",
@@ -1135,11 +1116,6 @@ IT: dict[str, str] = {
     "err_list_too_long": "La lista ha troppe voci.",
     "err_phrase_too_long": "Una voce è troppo lunga.",
     "err_phrase_invalid": "Una voce contiene caratteri non ammessi.",
-    "err_line_empty": "Questa frase non può essere vuota.",
-    "err_line_too_long": "La frase è troppo lunga.",
-    "err_line_invalid": "La frase contiene caratteri o segnaposto non ammessi.",
-    "err_line_blocked": "La frase contiene una parola bloccata dalla lista per i bambini.",
-    "err_name_blocked": "Il nome è bloccato dalla lista di parole per i bambini.",
     "err_locked": (
         "Troppi tentativi. Riprova più tardi, oppure riavvia l'app o esegui set-pin sul robot."
     ),

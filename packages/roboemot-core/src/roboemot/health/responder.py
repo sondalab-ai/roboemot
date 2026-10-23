@@ -72,18 +72,14 @@ class OfflineResponder:
             elif event in (NETWORK_RESTORED, ROBOT_RESTORED):
                 self._play(self.expression.gesture(PERK_UP), now)
 
-    def speech_while_offline(
-        self, now: float, language: str | None = None, *, speak: bool = True
-    ) -> None:
-        """Someone spoke and the router is :class:`~roboemot.llm.Offline`: reply nonverbally and,
-        with ``speak``, with the cue in ``language`` (the utterance's; default the configured
-        one). The caller passes ``speak=False`` when it says its own line (a child hears one)."""
+    def speech_while_offline(self, now: float, language: str | None = None) -> None:
+        """Someone spoke and the router is :class:`~roboemot.llm.Offline`: reply nonverbally and
+        with the cue in ``language`` (the utterance's; default the configured one)."""
         with self._lock:
             if self.affect:
                 self.affect.on_event(UNAVAILABLE, now)
             self._play(self.expression.gesture(PUZZLED), now)
-            if speak:
-                self._say(now, language)
+            self._say(now, language)
 
     def commands(self, now: float) -> list[Command]:
         """Gesture commands for this tick; feed them to the motion loop with the idle ones."""

@@ -8,7 +8,7 @@ fast path as before, independent of this module.
 The handler asks the expression renderer for ``nod`` / ``shake`` with the current time, so the
 renderer's rules decide: a request inside ``expression.min_interval_s`` of the last expression is
 refused rather than played late, and a resting robot (circadian) does not move; reflex priority,
-register, minor cap and limiter apply to what does play.
+register and limiter apply to what does play.
 
 No gesture when the yes or no is not for the robot to mirror:
 

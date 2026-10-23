@@ -18,8 +18,7 @@ class SpeechCue:
     """An :class:`~roboemot.health.responder.OfflineCue` that queues the phrase on the speech
     output with the register, circadian state and affect of this moment.
 
-    Nothing is said (and nothing raised) when ``muted()`` (asleep, paused, or a minor present:
-    the offline phrase is an adult line, a child gets the child-safe ones), or when
+    Nothing is said (and nothing raised) when ``muted()`` (asleep or paused), or when
     ``output()`` is ``None``. The text is never logged here (SPEC 12)."""
 
     def __init__(

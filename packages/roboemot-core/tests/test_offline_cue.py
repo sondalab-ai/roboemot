@@ -27,7 +27,7 @@ def wired(language="it", *, speech=None, muted=False):
     mute = [muted]
     r.cue = SpeechCue(
         lambda: out if out is not False else None,
-        lambda: (CFG.register.unknown, CFG.circadian.states["awake"], "joy", 0.5),
+        lambda: (CFG.register.params, CFG.circadian.states["awake"], "joy", 0.5),
         lambda: mute[0],
     )
     return r, out, mute
@@ -68,15 +68,7 @@ def test_the_utterance_language_wins_and_unknown_falls_back_to_the_configured_on
     ]
 
 
-def test_speak_false_says_nothing_and_keeps_the_cooldown_free():
-    r, out, _ = wired()
-    r.speech_while_offline(0.0, "it", speak=False)
-    assert out.said == [] and r.commands(0.5)
-    r.speech_while_offline(1.0, "it")
-    assert len(out.said) == 1
-
-
-def test_muted_says_nothing_while_asleep_or_a_minor_is_present():
+def test_muted_says_nothing_while_asleep():
     r, out, mute = wired(muted=True)
     r.on_event("link.network.lost", 0.0)
     r.speech_while_offline(COOLDOWN_S, "it")
@@ -117,7 +109,7 @@ def test_no_output_does_not_use_up_the_cooldown():
     out = FakeSpeech()
     r.cue = SpeechCue(
         lambda: out,
-        lambda: (CFG.register.unknown, CFG.circadian.states["awake"], "joy", 0.5),
+        lambda: (CFG.register.params, CFG.circadian.states["awake"], "joy", 0.5),
         lambda: False,
     )
     r.speech_while_offline(1.0, "it")

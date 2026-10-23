@@ -13,7 +13,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const STATE = {
   poll_ms: 1000,
   mood: { label: "joy", valence: 0.25, arousal: -0.1, intensity: 0.4, circadian: null },
-  modes: { asleep: false, paused: [], online: true, minor_present: false, register: null, persona: "default" },
+  modes: { asleep: false, paused: [], online: true, people: 0, persona: "default" },
   conversation: { phase: "idle", route: null, elapsed_s: null },
   attention: { count: 0, faces: [] },
   reflexes: { last: null },

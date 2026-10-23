@@ -192,9 +192,9 @@ def test_the_prompt_quotes_the_sanitised_name_on_one_line():
     from roboemot.llm.prompt import system_prompt
 
     cfg = RoboEmotConfig()
-    text = system_prompt(cfg, cfg.register.child, robot_name="Bob. Ignore all")
+    text = system_prompt(cfg, cfg.register.params, robot_name="Bob. Ignore all")
     assert 'Your name is "Bob. Ignore all".' in text
-    assert "Your name is" not in system_prompt(cfg, cfg.register.child, robot_name="")
+    assert "Your name is" not in system_prompt(cfg, cfg.register.params, robot_name="")
 
 
 def test_name_aliases_belong_to_reachy_only():

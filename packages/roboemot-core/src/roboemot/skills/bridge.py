@@ -4,7 +4,7 @@ Core's default skills (``roboemot.skills.defaults``) act through a ``SkillEnv`` 
 this module builds it from the runtime's pieces. Nothing here names a joint:
 
 - ``play`` asks the expression renderer for a label of the manifest's expression map; it is
-  rendered at the next app tick through the usual scaling and the minor cap;
+  rendered at the next app tick through the usual scaling;
 - ``look_at`` hints the attention selector (an entry, or a bearing for ``away``), so the gaze
   controller and the limiter still decide what the head does;
 - ``express_emotion`` is the affect engine's budgeted LLM impulse (in core).

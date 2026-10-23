@@ -25,10 +25,6 @@ SAFETY_RULES = (
     "If you are not sure about something, say so instead of guessing.",
     "Never suggest actions that could put a person, an animal or yourself at physical risk.",
 )
-MINOR_RULE = (
-    "A child may be listening: keep every topic and word suitable for children, and never ask "
-    "for personal details."
-)
 VOCABULARY_RULES = {
     "simple": "Use simple words and short sentences.",
     "normal": "",
@@ -38,8 +34,8 @@ LANGUAGE_NAMES = {"it": "Italian", "en": "English"}
 
 
 def max_reply_sentences(cfg: RoboEmotConfig, register: RegisterParams) -> int:
-    """Reply length cap: the register's own (the child's is shorter) but never above the
-    conversation's, which applies when the register sets none."""
+    """Reply length cap: the register's own (a person's overrides may shorten it) but never
+    above the conversation's, which applies when the register sets none."""
     own, base = register.max_reply_sentences, cfg.conversation.max_reply_sentences
     return base if own is None else min(own, base)
 
@@ -49,7 +45,6 @@ def system_prompt(
     register: RegisterParams,
     *,
     language: str | None = None,
-    minor_present: bool = False,
     robot_name: str = "",
 ) -> str:
     """Parts 1 to 4 of the system prompt. ``register`` is the active register as the persona
@@ -69,10 +64,7 @@ def system_prompt(
             f"Start each sentence with a mood tag such as [mood=joy], choosing from: {labels}. "
             "Let interjections and punctuation match the mood."
         )
-    safety = list(SAFETY_RULES)
-    if minor_present or register.minor_content_policy:
-        safety.append(MINOR_RULE)
-    safety += cfg.safety.extra_prompt_rules
+    safety = [*SAFETY_RULES, *cfg.safety.extra_prompt_rules]
     parts = [
         cfg.persona.prompt,
         register.persona_fragment,
@@ -154,21 +146,12 @@ def trim_history(
 
 def system_tokens_worst_case(cfg: RoboEmotConfig) -> int:
     """Tokens of the largest system message a request can carry: parts 1 to 4 for the longest
-    register fragment, the longest vocabulary rule and language name, the minor rule, plus the
-    two summaries at their caps (part 5 is capped, the affect line is a few words)."""
+    register fragment, the longest vocabulary rule and language name, plus the two summaries at
+    their caps (part 5 is capped, the affect line is a few words)."""
     vocabulary = max(VOCABULARY_RULES, key=lambda v: len(VOCABULARY_RULES[v]))
     language = max([*LANGUAGE_NAMES.values(), cfg.conversation.language], key=len)
-    fixed = max(
-        len(
-            system_prompt(
-                cfg,
-                getattr(cfg.register, group).model_copy(update={"vocabulary": vocabulary}),
-                language=language,
-                minor_present=True,
-            )
-        )
-        for group in ("child", "teen", "adult", "senior", "unknown")
-    )
+    register = cfg.register.params.model_copy(update={"vocabulary": vocabulary})
+    fixed = len(system_prompt(cfg, register, language=language))
     conv = cfg.conversation
     chars = fixed + conv.profile_summary_max_chars + conv.scene_summary_max_chars
     return _ceil_tokens(chars) + SUMMARY_LABEL_TOKENS

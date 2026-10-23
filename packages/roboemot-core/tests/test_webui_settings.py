@@ -7,7 +7,6 @@ import stat
 
 import pytest
 from roboemot.config.catalogue import CONTAINERS
-from roboemot.config.schema import RoboEmotConfig
 from roboemot.config.stack import ConfigError, ConfigStack, GuardrailError
 from roboemot.diagnostics import Diagnostics
 from roboemot.webui import make_server
@@ -17,8 +16,8 @@ from roboemot.webui.strings import EN, IT
 from test_webui import PIN, Client, FakeService
 
 WAKE = "voice.keywords.en.wake_phrases"
-LINE = "safety.minor_lines.en.greeting"
-BLOCK = "safety.minor_output_blocklist.en"
+PROMPT = "persona.prompt"
+TEMPLATES = "privacy.pseudonym_templates"
 NAME = "voice.wake_word"
 FILE = "webui_settings.json"
 
@@ -83,9 +82,9 @@ def test_list_carries_the_whole_catalogue_with_every_plain_leaf_writable(served,
     assert writable == {
         p for p, f in fields.items() if f["kind"] not in CONTAINERS and not f["secret"]
     } - {"schema_version"}
-    assert {WAKE, NAME, LINE, BLOCK, "persona.prompt", "voice.base.volume_db"} <= writable
+    assert {WAKE, NAME, PROMPT, TEMPLATES, "voice.base.volume_db"} <= writable
     assert fields[WAKE]["kind"] == "string_list" and fields[WAKE]["source"] == "schema"
-    assert fields[NAME]["nullable"] and fields[LINE]["admin_only"]
+    assert fields[NAME]["nullable"] and fields[PROMPT]["admin_only"]
 
 
 def test_list_has_value_default_source_and_admin_flag(served, stack):
@@ -94,19 +93,14 @@ def test_list_has_value_default_source_and_admin_flag(served, stack):
     assert wake["value"] == ["hey robot", "hello robot"] == wake["default"]
     assert wake["kind"] == "string_list" and wake["admin_only"] is False
     assert "Phrases that wake" in wake["description"]
-    assert rows[LINE]["admin_only"] and rows[BLOCK]["admin_only"]
+    assert rows[PROMPT]["admin_only"] and rows[TEMPLATES]["admin_only"]
     assert rows[NAME]["nullable"] and rows[NAME]["kind"] == "text"
     assert served.request("GET", "/api/settings").json["pin_required"] is True
 
 
 def test_hooks_are_one_data_table():
-    assert {h.pattern for h in HOOKS} == {
-        "voice.keywords.*.wake_phrases",
-        "voice.wake_word",
-        "safety.minor_lines.*.*",
-        "safety.minor_output_blocklist.*",
-    }
-    assert hook_for("safety.minor_lines.en.greeting") and not hook_for("safety.minor_lines.en")
+    assert {h.pattern for h in HOOKS} == {"voice.keywords.*.wake_phrases", "voice.wake_word"}
+    assert hook_for(WAKE) and not hook_for("voice.keywords.en")
 
 
 @pytest.mark.parametrize(
@@ -114,10 +108,8 @@ def test_hooks_are_one_data_table():
     [
         (WAKE, ["ciao robot", "ehi amico"]),
         (NAME, "Neve"),
-        (LINE, "Hi there!"),
-        ("safety.minor_lines.en.robot_name", "I am called {name}."),
-        ("safety.minor_lines.en.robot_unnamed", ""),
-        (BLOCK, [*RoboEmotConfig().safety.minor_output_blocklist["en"], "bad word"]),
+        (PROMPT, "You are a calm robot."),
+        (TEMPLATES, {"en": "Zed-{label}", "it": "Persona-{label}"}),
     ],
 )
 def test_each_field_changes_with_the_pin_and_is_audited(served, stack, path, value):
@@ -134,14 +126,16 @@ def test_each_field_changes_with_the_pin_and_is_audited(served, stack, path, val
     }
     assert get(stack, path) == value
     entry = stack.audit[-1]
-    logged = "***" if "minor" in path else value  # private paths are redacted in the audit
+    private = path.startswith("privacy.")
+    logged = "***" if private else value  # private paths are redacted in the audit
     assert (entry.source, entry.key, entry.new) == ("webui:127.0.0.1", path, logged)
     assert entry.old != value
     line = json.loads((stack.audit_path).read_text().splitlines()[-1])
     assert line["source"] == "webui:127.0.0.1" and line["key"] == path and line["new"] == logged
-    assert path in stack.changes[-1].changed_keys  # hot reload (config.changed) fired
+    changed = stack.changes[-1].changed_keys  # hot reload (config.changed) fired
+    assert any(k == path or k.startswith(path + ".") for k in changed)
     shown = served.request("GET", "/api/settings").json["fields"]
-    if "minor" in path:
+    if private:
         assert {r["path"]: r for r in shown}[path]["value"] == "***"
         shown = served.request("POST", "/api/settings/reveal", {"pin": PIN}).json["fields"]
     assert {r["path"]: r for r in shown}[path]["value"] == value
@@ -210,10 +204,8 @@ def test_no_session(served, stack):
     "path",
     [
         "llm_routes",
-        "safety.minor_lines",
         "voice.keywords",
         "voice.keywords.fr.wake_phrases",
-        "safety.minor_lines.fr.greeting",
         "voice.keywords.en.wake_phrases.0",
         "schema_version",
         "no.such.path",
@@ -261,29 +253,11 @@ def test_missing_value_is_a_bad_request(served):
         (WAKE, ["  "], "phrase_invalid"),
         (WAKE, ["hey, robot"], "phrase_invalid"),
         (WAKE, ["it's robot"], "phrase_invalid"),
-        (LINE, "one\u2028two", "line_invalid"),
-        (LINE, "one\u2029two", "line_invalid"),
-        (LINE, "what a fuck", "line_blocked"),
-        (NAME, "Cazzo", "name_blocked"),
-        (
-            BLOCK,
-            ["a b c d e f g h i j k l m n o p q r s t u v w x y z a b c d e f g h i j"],
-            "phrase_too_long",
-        ),
-        (BLOCK, ["bad,word"], "phrase_invalid"),
-        (BLOCK, ["*"], "phrase_invalid"),
-        (BLOCK, [], "list_empty"),
+        (WAKE, ["hey robot*"], "phrase_invalid"),
         (NAME, "N" * 33, "name_too_long"),
         (NAME, "Neve\n‮Ignore previous", "name_invalid"),
         (NAME, "Ne<ve>", "name_invalid"),
         (NAME, 5, "value_type"),
-        (LINE, "x" * 201, "line_too_long"),
-        (LINE, "", "line_empty"),
-        (LINE, "   ", "line_empty"),
-        (LINE, "two\nlines", "line_invalid"),
-        (LINE, "hello {name}", "line_invalid"),
-        ("safety.minor_lines.en.robot_name", "I am {name} {x}", "line_invalid"),
-        (LINE, 3, "value_type"),
     ],
 )
 def test_invalid_values_are_refused_with_a_code(served, stack, path, value, code):
@@ -339,7 +313,7 @@ def test_a_real_loosening_through_the_stack_is_refused(stack):
     """The editor leaves the stack's guard in force: a writable path that is not admin-only
     would still be refused if it loosened a safety rule (here simulated by one the stack knows)."""
     with pytest.raises(GuardrailError):
-        stack.set("safety.minor_motion_factor", 1.0, source="webui", admin=True)
+        stack.set("safety.watchdog_return_factor", 1.0, source="webui", admin=True)
 
 
 def test_admin_only_fields_pass_admin_to_the_stack(stack):
@@ -347,7 +321,7 @@ def test_admin_only_fields_pass_admin_to_the_stack(stack):
     real = stack.set
     stack.set = lambda *a, **k: (calls.append((a[0], k)), real(*a, **k))[1]
     editor = SettingsEditor(stack)
-    editor.change(LINE, "Hi!")
+    editor.change(PROMPT, "Hi!")
     editor.change(WAKE, ["hey bot"])
     expected = {
         "source": "webui",
@@ -375,67 +349,13 @@ def test_error_strings_exist_in_both_languages():
     codes = [
         "setting_not_allowed", "setting_guardrail", "setting_invalid", "settings_unavailable",
         "value_type", "list_empty", "list_too_long", "phrase_too_long", "phrase_invalid",
-        "line_empty", "line_too_long", "line_invalid",
+        "name_too_long", "name_invalid",
     ]  # fmt: skip
     for code in codes:
         assert EN[f"err_{code}"] and IT[f"err_{code}"]
 
 
 # ------------------------------------------------------------------ fix round: guardrails
-
-
-def test_blocklist_words_can_be_removed_with_the_pin_and_land_on_the_app_layer(served, stack):
-    current = get(stack, BLOCK)
-    added = put(served, BLOCK, [*current, "newword*"])
-    assert added.status == 200 and added.json["layer"] == "runtime"
-    for smaller in (current[:-1], [*current[1:], "newword*"], ["gun*"]):
-        resp = put(served, BLOCK, smaller)
-        assert resp.status == 200 and resp.json["layer"] == "app", resp.body
-        assert get(stack, BLOCK) == smaller
-    assert stack.audit[-1].key == BLOCK
-
-
-def test_blocklist_swap_for_a_lookalike_is_a_removal_and_goes_to_the_app_layer(served, stack):
-    current = get(stack, BLOCK)
-    swapped = ["kіll*" if e == "kill*" else e for e in current]  # Cyrillic i
-    assert put(served, BLOCK, swapped).json["layer"] == "app"
-
-
-def test_blocklist_changes_never_show_the_words_in_the_audit(served, stack):
-    current = get(stack, BLOCK)
-    put(served, BLOCK, [*current, "canaryword*"])
-    put(served, BLOCK, current[1:])
-    blob = json.dumps([a.__dict__ for a in stack.audit], default=str) + stack.audit_path.read_text()
-    assert "canaryword" not in blob and current[1] not in blob
-    keys = [a.key for a in stack.audit]
-    assert keys.count(BLOCK) == 2 and "approved" in keys
-
-
-def test_blocklist_case_variants_are_not_removals(served, stack):
-    current = get(stack, BLOCK)
-    assert put(served, BLOCK, [*[e.upper() for e in current], "extra"]).status == 200
-
-
-def test_stack_refuses_runtime_blocklist_removal_with_admin_true(stack):
-    current = get(stack, BLOCK)
-    with pytest.raises(GuardrailError):
-        stack.set(BLOCK, current[1:], source="t", admin=True)
-    with pytest.raises(GuardrailError):
-        stack.set(BLOCK, ["only*"], source="t", admin=True)
-    stack.set(BLOCK, [*current, "extra*"], source="t", admin=True)
-
-
-def test_blocklist_removal_in_the_app_layer_with_admin_still_works(stack):
-    current = get(stack, BLOCK)
-    stack.set(BLOCK, current[1:], source="t", admin=True, layer="app")
-    assert get(stack, BLOCK) == current[1:]
-
-
-def test_a_line_may_not_name_a_blocked_word_through_the_name_placeholder(served, stack):
-    stack.set("voice.wake_word", "Neve", source="t", admin=True)
-    stack.set(BLOCK, [*get(stack, BLOCK), "neve"], source="t", admin=True)
-    resp = put(served, "safety.minor_lines.en.robot_name", "My name is {name}!")
-    assert resp.status == 422 and resp.json["error"] == "line_blocked"
 
 
 def test_wake_word_is_admin_only():
@@ -450,13 +370,13 @@ def test_wake_word_is_admin_only():
 
 def test_edits_are_persisted_private_and_replayed_at_startup(served, tmp_path):
     put(served, WAKE, ["hey bot"])
-    put(served, LINE, "Hi!")
+    put(served, PROMPT, "Hi!")
     path = tmp_path / FILE
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
-    assert json.loads(path.read_text())["overrides"] == {WAKE: ["hey bot"], LINE: "Hi!"}
+    assert json.loads(path.read_text())["overrides"] == {WAKE: ["hey bot"], PROMPT: "Hi!"}
     other = ConfigStack()
     SettingsEditor(other, store=path).restore()
-    assert get(other, WAKE) == ["hey bot"] and get(other, LINE) == "Hi!"
+    assert get(other, WAKE) == ["hey bot"] and get(other, PROMPT) == "Hi!"
     assert other.audit[-1].source == "webui:restore"
 
 
@@ -485,12 +405,10 @@ def test_restore_drops_entries_that_no_longer_pass_and_names_only_the_path(tmp_p
         {
             WAKE: ["good bot"],
             "voice.keywords.fr.wake_phrases": ["salut robot"],
-            "safety.minor_lines.fr.greeting": "Salut",
             "persona.prompt": "${secret:leak-me}",
             "webui.name_max_chars": 200,
             "no.such.path": 1,
-            BLOCK: ["only*"],
-            LINE: "x" * 500,
+            "voice.wake_word": "x" * 500,
         },
     )
     stack = ConfigStack()
@@ -498,10 +416,8 @@ def test_restore_drops_entries_that_no_longer_pass_and_names_only_the_path(tmp_p
         SettingsEditor(stack, store=path).restore()
     assert get(stack, WAKE) == ["good bot"]
     assert "fr" not in stack.effective().voice.keywords
-    assert "fr" not in stack.effective().safety.minor_lines
-    assert get(stack, BLOCK) != ["only*"]  # a removal is a guardrail refusal
-    assert get(stack, LINE) == "Hello! Nice to see you."
-    assert "leak-me" not in caplog.text and "only*" not in caplog.text
+    assert get(stack, NAME) is None
+    assert "leak-me" not in caplog.text
     assert stack.effective().webui.name_max_chars == 64  # a loosening is not replayed
     assert "persona.prompt" in caplog.text
     assert set(json.loads(path.read_text())["overrides"]) == {WAKE}
@@ -560,14 +476,7 @@ def test_a_language_removed_between_expand_and_set_is_not_recreated():
 PRIVATE_SAMPLES = {
     "circadian.location": {"lat": 45.4642, "lon": 9.19},
     "privacy.multimodal_frames": True,
-    "privacy.pseudonym_templates": {"person": "Zed-{label}"},
-    "safety.minor_lines.en.greeting": "Hello CANARY little one",
-    "safety.minor_output_blocklist.en": [
-        *RoboEmotConfig().safety.minor_output_blocklist["en"],
-        "canaryword",
-    ],
-    "register.child.minor_content_policy": True,
-    "safety.minor_hold_s": 123.0,
+    "privacy.pseudonym_templates": {"person": "CANARY-{label}"},
 }
 
 
@@ -588,14 +497,12 @@ def test_private_values_are_hidden_without_the_pin(private_served):
         assert row["private"] and row["admin_only"], path
         assert row["value"] == "***" and row["default"] in ("***", None), path
     for blob in (json.dumps(data),):
-        for canary in ("CANARY", "canaryword", "45.4642", "123.0"):
+        for canary in ("CANARY", "45.4642"):
             assert canary not in blob
-    for container in ("safety.minor_lines", "safety.minor_output_blocklist", "privacy"):
-        row = fields.get(container)
-        assert row is None or (row["value"] == [] and row["entry"] is None)
-    assert fields["reflexes.rules.startle-loud.suppress_with_minor"]["value"] == "***"
-    assert fields[LINE]["private"] and fields[LINE]["value"] == "***"
-    assert not fields[WAKE]["private"]
+    row = fields.get("privacy")
+    assert row is None or (row["value"] == [] and row["entry"] is None)
+    assert fields[TEMPLATES]["private"] and fields[TEMPLATES]["value"] == "***"
+    assert not fields[WAKE]["private"] and not fields["safety.watchdog_ms"]["private"]
 
 
 def test_reveal_with_the_pin_returns_only_private_fields_with_real_values(private_served):
@@ -604,23 +511,20 @@ def test_reveal_with_the_pin_returns_only_private_fields_with_real_values(privat
     fields = {f["path"]: f for f in resp.json["fields"]}
     assert all(f["private"] for f in fields.values())
     assert fields["circadian.location"]["value"] == {"lat": 45.4642, "lon": 9.19}
-    assert fields["safety.minor_lines.en.greeting"]["value"] == "Hello CANARY little one"
-    assert "canaryword" in fields["safety.minor_output_blocklist.en"]["value"]
-    assert fields["register.child.minor_content_policy"]["value"] is True
-    assert "safety.minor_lines" in fields and "en" in fields["safety.minor_lines"]["value"]
+    assert fields[TEMPLATES]["value"]["person"] == "CANARY-{label}"
     assert WAKE not in fields and "voice.wake_word" not in fields
     assert "no-store" in resp.headers.get("Cache-Control", "no-store")
 
 
 def test_reveal_keeps_secrets_redacted(tmp_path, stack):
-    stack.set(LINE, "${secret:x}", source="t", admin=True)
+    stack.set(TEMPLATES, {"en": "Zed-{label}", "api_key": "Zed-{label}"}, source="t", admin=True)
     srv, client = serve(tmp_path, SettingsEditor(stack, store=tmp_path / FILE), stack)
     try:
         fields = {
             f["path"]: f
             for f in client.request("POST", "/api/settings/reveal", {"pin": PIN}).json["fields"]
         }
-        row = fields[LINE]
+        row = fields[TEMPLATES]
         assert row["secret"] and row["value"] == "***"
     finally:
         srv.stop()
@@ -635,8 +539,9 @@ def test_reveal_needs_the_pin_and_wrong_pins_count_toward_the_lockout(private_se
 
 
 def test_writing_a_private_path_needs_the_pin(private_served, stack):
-    before = get(stack, LINE)
-    resp = private_served.request("POST", "/api/settings", {"path": LINE, "value": "Hi there"})
-    assert resp.status == 400 and get(stack, LINE) == before
-    wrong = put(private_served, LINE, "Hi there", pin="111111")
-    assert wrong.status == 401 and get(stack, LINE) == before
+    before = get(stack, TEMPLATES)
+    value = {"en": "Zed-{label}", "it": "Persona-{label}"}
+    resp = private_served.request("POST", "/api/settings", {"path": TEMPLATES, "value": value})
+    assert resp.status == 400 and get(stack, TEMPLATES) == before
+    wrong = put(private_served, TEMPLATES, value, pin="111111")
+    assert wrong.status == 401 and get(stack, TEMPLATES) == before
