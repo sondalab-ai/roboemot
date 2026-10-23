@@ -38,6 +38,13 @@ class ConversationPhase:
         with self._lock:
             self._listening = active
 
+    @property
+    def listening(self) -> bool:
+        """An utterance is in progress, whatever the phase (a barge-in or a user who talks
+        while the answer streams is listening and thinking or speaking at once)."""
+        with self._lock:
+            return self._listening
+
     def begin_thinking(self) -> None:
         """A request is about to be sent: the route is not known until the first event."""
         with self._lock:

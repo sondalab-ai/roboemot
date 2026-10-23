@@ -168,7 +168,8 @@ def circadian_vision_scale(cfg: Any, circadian: CircadianModel | None) -> float:
 def conversation_vision_scale(cfg: Any, phase: ConversationPhase | None) -> float:
     """The vision rate multiplier of the conversation (SPEC 5, 8, 13): ``vision.rates.
     conversation_scale`` while the robot thinks or speaks, so the TTS keeps its CPU, else 1.
-    Listening keeps 1 because the face attributes the speech; no conversation is 1 too."""
-    if phase is None or phase.snapshot()["phase"] not in (THINKING, SPEAKING):
+    An utterance in progress keeps 1 even while the robot thinks or speaks, because the face
+    attributes the speech; no conversation is 1 too."""
+    if phase is None or phase.listening or phase.snapshot()["phase"] not in (THINKING, SPEAKING):
         return 1.0
     return cfg.vision.rates.conversation_scale

@@ -48,10 +48,14 @@ def test_phase_sets_the_scale_while_thinking_or_speaking_only():
     phase.set_listening(True)
     assert conversation_vision_scale(CFG, phase) == 1.0  # the face attributes the speech
     phase.begin_thinking()
+    assert conversation_vision_scale(CFG, phase) == 1.0  # still talking while the stream runs
+    phase.set_listening(False)
     assert conversation_vision_scale(CFG, phase) == SCALE
     speaking["on"] = True
     phase.end_thinking()
     assert conversation_vision_scale(CFG, phase) == SCALE
+    phase.set_listening(True)
+    assert conversation_vision_scale(CFG, phase) == 1.0  # a barge-in while speaking
     speaking["on"] = False
     phase.set_listening(False)
     assert conversation_vision_scale(CFG, phase) == 1.0
@@ -114,6 +118,22 @@ def test_the_face_burst_gap_is_stretched_by_the_governor_scale(tmp_path):
     assert len(stamps) == CFG.vision.embedding_burst
     assert np.diff(stamps).min() >= gap - 1e-9
     assert np.diff(stamps).max() <= gap + 2 * DT + 1e-9
+
+
+def test_identity_decision_while_speaking_stays_inside_the_cm4_budget(tmp_path):
+    """3-of-5 votes at 4 Hz detection and a 0.5 s burst gap: confirmed at 0.25 s, then votes
+    at 0.25, 0.75 and 1.25 s; one or two missed votes still land by 1.75 or 2.25 s (SPEC 13)."""
+    reg, _, pipe, _, got = rig(tmp_path, lambda i: [face(100)])
+    reg.enroll("Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT, age_group="adult")
+    pipe.governor.set_scale(CONVERSATION, SCALE)
+    for i in range(24):
+        pipe.process(Frame(image(i), i * DT))
+    rec = got["person.recognized"]
+    assert len(rec) == 1
+    assert rec[0].stamp == pytest.approx(1.25)
+    budget_s = 2.5
+    last_burst = 0.25 + (CFG.vision.embedding_burst - 1) * CFG.vision.burst_min_gap_s / SCALE
+    assert last_burst <= budget_s
 
 
 def test_the_face_burst_keeps_its_gap_at_full_rate(tmp_path):
