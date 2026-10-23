@@ -1667,8 +1667,8 @@ class VisionConfig(Strict):
     )
     rebirth_window_s: float = param(
         5.0,
-        "Report only: a face track born at most this long (capture time) after another one was "
-        "last matched, near its last box, counts as a rebirth of it in the tracks report",
+        "Report only: a face track born at most this long (capture time) after another one "
+        "expired, near its last box, counts as a rebirth of it in the tracks report",
         unit="s",
         ge=0.1,
         le=60,

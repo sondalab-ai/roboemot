@@ -226,7 +226,7 @@ class Tracker:
                 t.confirmed = True
                 new_ids.add(t.track_id)
                 if self.observer is not None:
-                    self.observer.confirmed(t.track_id, stamp)
+                    self.observer.confirmed(t.track_id)
             if t.confirmed:
                 visible.append(t)
         for t in missed:
@@ -243,7 +243,7 @@ class Tracker:
                 new_ids.add(t.track_id)
                 visible.append(t)
                 if self.observer is not None:
-                    self.observer.confirmed(t.track_id, stamp)
+                    self.observer.confirmed(t.track_id)
             self._tracks.append(t)
         dropped = [t for t in self._tracks if not t.confirmed and not t._matched_last]
         self._tracks = [t for t in self._tracks if t not in dropped]

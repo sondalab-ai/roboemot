@@ -13,13 +13,16 @@ tracker only). Per update the cost is O(tracks); memory is the live tracks plus 
   expired tracks had a low-score detection near them refused because they had missed the
   update before (``after_refused_low``).
 - ``rebirths``: pairs of an ended (or ending) confirmed track and a confirmed track born after
-  its last match, at most ``vision.rebirth_window_s`` later, whose first box centre lies within
-  ``vision.rebirth_distance_heights`` heights of the old track's last (Kalman predicted) box.
-  Pairs are found when the new track is confirmed (old track already ended) or when the old
-  track expires (new track already confirmed: ``overlapped``, the two lived side by side).
-  Summaries: the gap from the old track's last match to the new track's first detection, the
-  IoU and the centre distance between the two boxes, and, when the frames carry the head joint
-  state and the robot gave a ``FrameSpec``, the head yaw and pitch change in degrees.
+  its last match, whose first box centre lies within ``vision.rebirth_distance_heights``
+  heights of the old track's last (Kalman predicted) box. Pairs are found when the new track is
+  confirmed (old track already ended, the new one born at most ``vision.rebirth_window_s``
+  after the expiry, so the window does not shrink when ``lost_s`` grows with the detection
+  period) or when the old track expires (new track already confirmed: ``overlapped``, the two
+  lived side by side; no window). Summaries: the gap from the old track's last match to the new
+  track's first detection, the old track's ``lost_s`` at expiry (how much of the gap was
+  tracker lifetime), the IoU and the centre distance between the two boxes, and, when the
+  frames carry the head joint state and the robot gave a ``FrameSpec``, the head yaw and pitch
+  change in degrees.
 - ``low_score``: low-score detections refused because the near track (IoU at least
   ``low_match_iou``) missed the update before (``refused``, with a score summary), and the
   other low-score detections that matched nothing (``unmatched``: they never start a track).
@@ -93,6 +96,7 @@ class _Ended:
     last_stamp: float
     box: Box
     last_pose: Pose | None
+    lost_s: float
 
 
 class TrackDiagnostics:
@@ -117,6 +121,7 @@ class TrackDiagnostics:
         self._rebirths = 0
         self._overlapped = 0
         self._gap_s: deque[float] = deque(maxlen=window)
+        self._rebirth_lost_s: deque[float] = deque(maxlen=window)
         self._iou: deque[float] = deque(maxlen=window)
         self._distance: deque[float] = deque(maxlen=window)
         self._yaw_deg: deque[float] = deque(maxlen=window)
@@ -169,28 +174,26 @@ class TrackDiagnostics:
             self._live.pop(track_id, None)
             self._tentative_dropped += 1
 
-    def confirmed(self, track_id: int, stamp: float) -> None:
-        """A track was confirmed: pair it with the nearest recently ended track, if any."""
+    def confirmed(self, track_id: int) -> None:
+        """A track was confirmed: pair it with the nearest ended track in the window, if any
+        (the last ``report_window`` ended tracks are kept; the window is checked per pair)."""
         with self._lock:
             live = self._live.get(track_id)
             if live is None:
                 return
             live.confirmed = True
-            window = self.cfg.rebirth_window_s
-            while self._ended and stamp - self._ended[0].end_stamp > window:
-                self._ended.popleft()
             best = self._nearest(live, list(self._ended))
             if best is not None:
                 self._ended.remove(best)
                 live.paired = True
-                self._record(best.box, best.last_stamp, best.last_pose, live, overlapped=False)
+                self._record(best, live, overlapped=False)
 
     def expired(
         self, track_id: int, box: Box, last_stamp: float, stamp: float, lost_s: float
     ) -> None:
         """A confirmed track expired at ``stamp`` with ``lost_s`` in force; ``box`` is its last
         predicted box. It is paired with a confirmed live track born after its last match (the
-        two overlapped), or kept for a rebirth that confirms later."""
+        two overlapped: no window applies), or kept for a rebirth that confirms later."""
         with self._lock:
             live = self._live.pop(track_id, None)
             self._ended_by["expired"] += 1
@@ -199,7 +202,7 @@ class TrackDiagnostics:
                 return
             self._misses.append(live.misses)
             self._after_refused += live.refused_low
-            ended = _Ended(stamp, last_stamp, box, live.last_pose)
+            ended = _Ended(stamp, last_stamp, box, live.last_pose, lost_s)
             born = [
                 other
                 for other in self._live.values()
@@ -210,7 +213,7 @@ class TrackDiagnostics:
                 self._ended.append(ended)
                 return
             match.paired = True
-            self._record(box, last_stamp, live.last_pose, match, overlapped=True)
+            self._record(ended, match, overlapped=True)
 
     def reset(self, confirmed: int) -> None:
         """The pipeline was reset: ``confirmed`` live tracks ended; nothing pairs across it."""
@@ -238,6 +241,7 @@ class TrackDiagnostics:
                     "window_s": self.cfg.rebirth_window_s,
                     "distance_heights_max": self.cfg.rebirth_distance_heights,
                     "gap_s": summarise(list(self._gap_s), LEVELS),
+                    "lost_s": summarise(list(self._rebirth_lost_s), LEVELS),
                     "iou": summarise(list(self._iou), LEVELS),
                     "distance_heights": summarise(list(self._distance), LEVELS),
                     "head_yaw_change_deg": summarise(list(self._yaw_deg), LEVELS),
@@ -265,8 +269,7 @@ class TrackDiagnostics:
         window, limit = self.cfg.rebirth_window_s, self.cfg.rebirth_distance_heights
         best, best_d = None, math.inf
         for old in ended:
-            gap = live.birth_stamp - old.last_stamp
-            if gap <= 0 or gap > window:
+            if live.birth_stamp <= old.last_stamp or live.birth_stamp - old.end_stamp > window:
                 continue
             d = self._distance_heights(old.box, live.birth_box)
             if d <= limit and d < best_d:
@@ -274,30 +277,22 @@ class TrackDiagnostics:
         return best
 
     def _nearest_born(self, old: _Ended, born: list[_Live]) -> _Live | None:
-        window, limit = self.cfg.rebirth_window_s, self.cfg.rebirth_distance_heights
+        limit = self.cfg.rebirth_distance_heights
         best, best_d = None, math.inf
         for live in born:
-            if live.birth_stamp - old.last_stamp > window:
-                continue
             d = self._distance_heights(old.box, live.birth_box)
             if d <= limit and d < best_d:
                 best, best_d = live, d
         return best
 
-    def _record(
-        self,
-        old_box: Box,
-        last_stamp: float,
-        old_pose: Pose | None,
-        new: _Live,
-        *,
-        overlapped: bool,
-    ) -> None:
+    def _record(self, old: _Ended, new: _Live, *, overlapped: bool) -> None:
         self._rebirths += 1
         self._overlapped += overlapped
-        self._gap_s.append(new.birth_stamp - last_stamp)
-        self._iou.append(_iou(new.birth_box, old_box))
-        self._distance.append(self._distance_heights(old_box, new.birth_box))
+        self._gap_s.append(new.birth_stamp - old.last_stamp)
+        self._rebirth_lost_s.append(old.lost_s)
+        self._iou.append(_iou(new.birth_box, old.box))
+        self._distance.append(self._distance_heights(old.box, new.birth_box))
+        old_pose = old.last_pose
         if old_pose is not None and new.birth_pose is not None:
             self._yaw_deg.append(abs(math.degrees(new.birth_pose[0] - old_pose[0])))
             self._pitch_deg.append(abs(math.degrees(new.birth_pose[1] - old_pose[1])))

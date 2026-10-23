@@ -141,7 +141,7 @@ def test_far_or_late_tracks_are_not_rebirths():
     tid, last = confirm(tracker, 20)
     stamp, _ = until_expired(tracker, tid, last)
     confirm(tracker, 220, stamp + DT)  # 200 px away: more than one box height
-    late = last + CFG.vision.rebirth_window_s + DT
+    late = stamp + CFG.vision.rebirth_window_s + DT  # the window runs from the expiry
     tracker.update([], late)  # the far track expires too
     confirm(tracker, 20, late)  # near the first one, but past the window
     assert diag.snapshot()["rebirths"]["count"] == 0
@@ -222,3 +222,28 @@ def test_pipeline_expiry_records_the_effective_lost_s(tmp_path):
     assert effective > LOST
     assert tracks["expiry"]["lost_s"]["p50"] == pytest.approx(effective)
     assert tracks["rebirths"]["window_s"] == CFG.vision.rebirth_window_s
+
+
+def test_rebirth_window_starts_at_expiry_not_at_the_last_match(tmp_path):
+    # a slow detector stretches lost_s to 3.75 s: a window from the last match (2 s) would miss
+    # a face back right after the expiry; from the expiry it is a rebirth
+    vision = CFG.vision.model_copy(update={"rebirth_window_s": 2.0})
+    on = [True]
+    _, _, pipe, _, _ = rig(tmp_path, lambda i: [face(100)] if on[0] else [], vision=vision)
+    pipe.governor.set_scale(CIRCADIAN, 0.1)
+    i = 0
+    for _ in range(40):
+        pipe.process(Frame(image(i), i * DT))
+        i += 1
+    on[0] = False
+    while pipe.stats()["tracks"]["ended_by"]["expired"] == 0:
+        pipe.process(Frame(image(i), i * DT))
+        i += 1
+    on[0] = True
+    for _ in range(30):
+        pipe.process(Frame(image(i), i * DT))
+        i += 1
+    reb = pipe.stats()["tracks"]["rebirths"]
+    assert reb["count"] == 1 and reb["overlapped"] == 0
+    assert reb["lost_s"]["p50"] == pytest.approx(pipe._face_lost_s())
+    assert reb["gap_s"]["p50"] > vision.rebirth_window_s
