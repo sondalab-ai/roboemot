@@ -507,3 +507,11 @@ async def test_deep_arguments_from_a_cloud_route_with_pseudonyms_come_back_raw()
     evs = [ev async for ev in r.stream(messages, [{"type": "function"}], pseudonyms=names)]
     call = next(e for e in evs if isinstance(e, ToolCall))
     assert call.arguments == {"_raw": text} and r.failures == []
+
+
+def test_first_token_timeout_default_fits_cloud_routes():
+    # robot 2026-10-23: Claude Haiku answered in 0.8 to 1.8 s, so 1.5 s failed 5 turns of 8
+    assert (
+        LLMRoute(name="c", base_url="https://api.example.com/v1", model="m").first_token_timeout_s
+        == 3.0
+    )

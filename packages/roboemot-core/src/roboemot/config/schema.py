@@ -2898,7 +2898,12 @@ class LLMRoute(Strict):
     api_key: str = param("none", "API key or ${secret:name}")
     model: str = param("", "Model id")
     first_token_timeout_s: float = param(
-        1.5, "Fallback to next route after this", unit="s", ge=0.1, le=30
+        3.0,
+        "Fallback to next route after this. 3 s fits cloud routes (Claude Haiku 0.8 to 1.8 s "
+        "from the robot, 2026-10-23); a LAN route can set less",
+        unit="s",
+        ge=0.1,
+        le=30,
     )
     stall_timeout_s: float = param(
         5.0, "Max gap between chunks once the answer started", unit="s", ge=0.1, le=60
