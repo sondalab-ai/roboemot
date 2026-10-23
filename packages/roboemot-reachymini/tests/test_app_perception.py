@@ -459,67 +459,28 @@ def test_a_missing_object_detector_leaves_the_rest_of_vision_running(data):
     assert "animal" not in kinds and "object" not in kinds
 
 
-def test_a_possible_minor_face_engages_the_motion_caps_and_releases_after_the_hold(data):
-    (data / "app.yaml").write_text(
-        "schema_version: 1\nsafety: {allow_unmeasured_dynamics: true, minor_hold_s: 1}\n"
-    )
+def test_an_unknown_age_face_engages_no_caps_and_keeps_the_one_register(data):
+    """Owner decision 2026-10-23: a face whose age stays unknown changes nothing (SPEC 12)."""
     FakeDetector.empty = False
     app = new_app(AppWithFakes)  # no attribute model: the face's age stays unknown (SPEC 5)
     stop, thread, errors = start(app)
-
-    def caps() -> bool:
-        return app.diagnostics.report()["sections"]["roboemot.motion"]["data"]["minor_present"]
-
     try:
-        assert wait_for(lambda: app.diagnostics is not None)
-        assert wait_for(caps), "an unknown-age face did not engage the minor caps"
-        assert app.minor_present
-        FakeDetector.empty = True  # frames keep coming, with nobody in them: positive evidence
-        assert wait_for(lambda: not caps(), timeout=30), "the caps never released"
-        assert not app.minor_present
-    finally:
-        FakeDetector.empty = False
-        stop.set()
-        thread.join(15)
-    assert not errors and not thread.is_alive()
-
-
-def test_the_minor_caps_stay_on_without_vision_and_when_frames_stop(data):
-    (data / "app.yaml").write_text(
-        "schema_version: 1\nsafety: {allow_unmeasured_dynamics: true, minor_hold_s: 1}\n"
-    )
-    app = new_app()  # the real loader finds no models: perception.pipeline is None
-    stop, thread, errors = start(app)
-    try:
-        assert wait_for(lambda: app.perception is not None and app.diagnostics is not None)
-        assert app.perception.pipeline is None
-
-        def caps() -> bool:
-            sections = app.diagnostics.report()["sections"]
-            return sections["roboemot.motion"]["data"]["minor_present"]
-
-        assert wait_for(caps), "the caps were never engaged without vision"
-        time.sleep(2)  # longer than the hold
-        assert app.minor_present and caps()
+        assert wait_for(lambda: app.diagnostics is not None and app.register_tracker is not None)
+        tracker = app.register_tracker
+        assert wait_for(lambda: tracker.active is not None and tracker.active.people > 0)
+        register = tracker.active.params
+        assert register.approach_allowed
+        assert register.motion_amplitude == RoboEmotConfig().register.motion_amplitude
+        sections = app.diagnostics.report()["sections"]
+        assert "roboemot.minor" not in sections
+        assert "minor_present" not in sections["roboemot.motion"]["data"]
     finally:
         stop.set()
         thread.join(15)
     assert not errors and not thread.is_alive()
 
-    app = new_app(AppWithFakes)
-    app.source_class = EmptySource  # the camera gives no frames at all
-    stop, thread, errors = start(app)
-    try:
-        assert wait_for(lambda: app.perception is not None and app.perception.pipeline)
-        time.sleep(2)
-        assert app.minor_present
-    finally:
-        stop.set()
-        thread.join(15)
-    assert not errors
 
-
-def test_a_known_child_gives_joy_on_affect_state_and_in_the_debug_report(data):
+def test_a_known_child_gives_calm_like_anyone_on_affect_state_and_in_the_debug_report(data):
     from roboemot.vision.types import PersonRecognized
 
     app = new_app(app_module.RoboEmotApp)
@@ -532,11 +493,11 @@ def test_a_known_child_gives_joy_on_affect_state_and_in_the_debug_report(data):
         assert states[-1].valence == pytest.approx(0.0, abs=0.01)
         app.bus.publish(
             "person.recognized",
-            PersonRecognized(1, "p-1", time.monotonic(), 0.0, 0.0, "child", True),
+            PersonRecognized(1, "p-1", time.monotonic(), 0.0, 0.0, "child"),
             time.monotonic(),
         )
-        assert wait_for(lambda: states[-1].valence > 0.5), "no positive valence after the child"
-        assert states[-1].label == "joy"
+        assert wait_for(lambda: states[-1].valence > 0.4), "no positive valence after the child"
+        assert states[-1].label == "calm"  # one person.known rule for everyone (2026-10-23)
         report = app.diagnostics.report()["sections"]["roboemot.app"]["data"]
         assert report["valence"] > 0 and report["label"] in app.affect_runner.engine.cfg.labels
         assert "p-1" not in json.dumps(report)

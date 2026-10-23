@@ -17,7 +17,6 @@ from roboemot.config.schema import RoboEmotConfig
 from roboemot.conversation import ConversationWorker
 from roboemot.conversation.sources import profile_source, scene_source, speaker_source
 from roboemot.llm import Router
-from roboemot.llm.prompt import MINOR_RULE
 from roboemot.voice.listener import Utterance, VoiceListener
 from roboemot.voice.speech import SpeechOutput
 from roboemot.voice.speech_features import Prosody
@@ -32,12 +31,7 @@ ROUTES = "llm_routes:\n  - {name: lan, base_url: 'http://lan.local/v1', model: m
 
 
 class ConvApp(app_module.RoboEmotApp):
-    minor_flag = False
     requests: list
-
-    @property
-    def minor_present(self) -> bool:
-        return self.minor_flag
 
     def make_router(self, cfg, monitor):
         def handler(request: httpx.Request) -> httpx.Response:
@@ -99,25 +93,29 @@ def test_an_addressed_utterance_is_answered_through_the_shared_router(data, fake
     assert not app.conversation._thread.is_alive()
 
 
-def test_a_minor_is_answered_by_the_route_under_the_minor_rules(data, fakes, said):  # noqa: F811
-    """SPEC 8, 12 (owner decision 2026-10-22): no route is skipped while a minor is present. The
-    app config still holds the removed gate keys, as on a robot set up before: the app starts and
-    ignores them (SPEC 11A, Renamed and removed settings)."""
+def test_an_app_config_with_the_removed_minor_keys_starts_and_answers_normally(data, fakes, said):  # noqa: F811
+    """SPEC 8, 12, 11A (owner decisions 2026-10-22 and 2026-10-23): the app config still holds the
+    removed minor keys, as on a robot set up before: the app starts, ignores them and answers
+    with the one behaviour for everyone."""
     app_yaml = data / "app.yaml"
     assert "safety:\n" in app_yaml.read_text()
-    app_yaml.write_text(
-        app_yaml.read_text().replace("safety:\n", "safety:\n  minors_allowed_llm: true\n")
+    old = "safety:\n  minors_allowed_llm: true\n  minor_motion_factor: 0.5\n  minor_hold_s: 9\n"
+    app_yaml.write_text(app_yaml.read_text().replace("safety:\n", old))
+    enable(
+        data,
+        VOICE_YAML
+        + ROUTES.replace("model: m1}", "model: m1, allowed_for_minors: true}")
+        + "register:\n  child: {minor_content_policy: true}\n  unknown: {speech_rate: 1}\n",
     )
-    enable(data, VOICE_YAML + ROUTES.replace("model: m1}", "model: m1, allowed_for_minors: true}"))
     app = ConvApp.__new__(ConvApp)
-    app.requests, app.minor_flag = [], True
+    app.requests = []
     stop, thread, errors = run_app(app, ScriptedMini().mini)
     try:
         assert wait_for(lambda: app.conversation is not None)
         app.voice_listener._on_utterance(utterance())
         assert wait_for(lambda: said == ["Ciao a te.", "Come va?"])
         assert len(app.requests) == 1
-        assert MINOR_RULE in app.requests[0]["messages"][0]["content"]
+        assert "child" not in app.requests[0]["messages"][0]["content"].lower()
     finally:
         stop.set()
         thread.join(timeout=10)

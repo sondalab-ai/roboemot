@@ -1,5 +1,6 @@
 """M2 exit (SPEC 14), app level: a known adult, a known child and a stranger each walk up to the
-robot and it reacts distinctly, with no LLM. Mocked SDK client; the same probe as the simulated
+robot; it reacts distinctly to a known person and a stranger, the same to any known person
+(owner decision 2026-10-23), with no LLM. Mocked SDK client; the same probe as the simulated
 robot test (``test_sim.py``), reading the driver's commanded targets, not the robot's state."""
 
 from __future__ import annotations
@@ -113,7 +114,7 @@ def run_case(data, tmp_path, monkeypatch, commanded, case: str) -> Run:  # noqa:
     return result
 
 
-def test_the_robot_reacts_distinctly_to_an_adult_a_child_and_a_stranger_without_an_llm(
+def test_the_robot_reacts_to_a_known_person_and_a_stranger_the_same_whatever_the_age(
     data,  # noqa: F811
     tmp_path,
     monkeypatch,
