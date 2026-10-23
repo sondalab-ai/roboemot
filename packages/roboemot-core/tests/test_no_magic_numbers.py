@@ -119,6 +119,7 @@ BEHAVIOUR_MODULES = [
     "vision/runner.py",
     "vision/service.py",
     "vision/stages.py",
+    "vision/track_stats.py",
     "vision/tracker.py",
     "vision/types.py",
     "webui/api.py",

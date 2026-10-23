@@ -1665,6 +1665,21 @@ class VisionConfig(Strict):
         ge=10,
         le=3600,
     )
+    rebirth_window_s: float = param(
+        5.0,
+        "Report only: a face track born at most this long (capture time) after another one was "
+        "last matched, near its last box, counts as a rebirth of it in the tracks report",
+        unit="s",
+        ge=0.1,
+        le=60,
+    )
+    rebirth_distance_heights: float = param(
+        1.0,
+        "Report only: largest distance between the new track's first box centre and the ended "
+        "track's last box centre, in heights of the ended box, for a rebirth",
+        ge=0.1,
+        le=10,
+    )
     models_dir: str = param(
         "",
         "Folder with the ONNX model files; empty means models/ in the app data folder (data_dir)",
