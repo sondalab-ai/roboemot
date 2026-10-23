@@ -1506,10 +1506,10 @@ class VisionRates(Strict):
         0.5,
         "Vision rate multiplier while the robot thinks or speaks (SPEC 5, 8, 13), so the TTS "
         "keeps its CPU; an utterance in progress and idle keep 1. It also divides the new-track "
-        "burst gaps. At least 0.35, so the 3-of-5 identity decision of a track that starts while "
-        "the robot speaks stays inside the 2.5 s budget of SPEC 13 (awake with one missed vote, "
-        "drowsy with none)",
-        ge=0.35,
+        "burst gaps. At least 0.5, so the 3-of-5 identity decision of a track that starts while "
+        "the robot speaks stays inside the 2.5 s budget of SPEC 13, awake or drowsy, with one "
+        "missed vote",
+        ge=0.5,
         le=1,
     )
 
@@ -1626,9 +1626,10 @@ class VisionConfig(Strict):
     attribute_retry_s: float = param(
         5.0,
         "A track whose age job came back unknown (and no declared age) collects new crops for "
-        "another job this long after the result (capture time, SPEC 5), or at the first face "
+        "another job this long after the result or after a failed or cancelled job (capture time, "
+        "SPEC 5), or at the first face "
         "frame after the robot stops thinking or speaking; a confident age stops the retries "
-        "(an adult or senior one reached by a retry needs a second agreeing result), and the "
+        "(an adult or senior one after an unknown result needs a second agreeing one), and the "
         "track stays a possible minor until then",
         unit="s",
         ge=0.5,

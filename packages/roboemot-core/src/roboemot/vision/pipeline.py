@@ -18,13 +18,14 @@ deterministic; ``LatestFrameRunner`` drives it live. Per frame, when the governo
 3. Per track, the first ``vision.attribute_crops`` face crops go to the attribute worker
    (skipped when the recognised person has declared age and gender); until it answers, age and
    gender are ``unknown`` (a possible minor). A job whose age comes back unknown (and no
-   declared age) is retried: ``vision.attribute_retry_s`` of capture time after the result (or,
-   while the robot thinks or speaks, at the first face frame after), the track collects new
-   crops, until a confident age or a declared one stops it. An adult or senior age reached
-   through a retry needs a second agreeing confident result. The age stays unknown, a possible
-   minor, in between. Other visible faces that fall inside a
-   crop's margin are filled with the letterbox grey (outside the subject's own box), so a
-   neighbour's face cannot pull the estimate toward the neighbour's age.
+   declared age), or that fails or is cancelled while its track lives, is retried:
+   ``vision.attribute_retry_s`` of capture time after the result (or, while the robot thinks or
+   speaks, at the first face frame after), the track collects new crops, until a confident age
+   or a declared one stops it. An adult or senior age that follows an unknown result needs a
+   second agreeing confident result. The age stays unknown, a possible minor, in between.
+   Other visible faces that fall inside a crop's margin are filled with the letterbox grey
+   (outside the subject's own box), so a neighbour's face cannot pull the estimate toward the
+   neighbour's age.
 4. Published: ``percept.face`` (no embedding), ``person.recognized`` when a track turns into a
    known person, ``percept.entity`` (kind person, with the camera-frame bearing; the joint state
    at capture travels in the message ``meta`` for the world model to rotate into the base
@@ -685,7 +686,7 @@ class VisionPipeline:
             first = state.jobs_done == 0
             state.jobs_done += 1
             state.in_flight = False
-            state.age = self._confirmed_age(state, result.age)
+            state.age = self._confirmed_age(state, result.age, first)
             state.gender, state.attr_stamp = result.gender, result.stamp
             age = self._attributes(state)[0]
             self._count_outcome(age)
@@ -694,14 +695,28 @@ class VisionPipeline:
             if first:
                 with self._report_lock:
                     self._to_estimate_ms.append((stamp - state.first_seen) * MS_PER_S)
+        for track_id, generation in self.worker.poll_missed():
+            self._retry_missed(track_id, generation, stamp)
 
-    def _confirmed_age(self, state: _FaceState, age: Estimate) -> Estimate:
+    def _retry_missed(self, track_id: int, generation: int, stamp: float) -> None:
+        """A job that failed or was cancelled while its track lives is retried like an unknown
+        result (SPEC 5): ``attribute_retry_s`` later, waiting for the conversation like any
+        retry; the age is untouched, so the track stays as it was (unknown: a possible minor)."""
+        state = self._faces.get(track_id)
+        if state is None or state.generation != generation or not state.in_flight:
+            return
+        state.in_flight = False
+        if self._attributes(state)[0].value == UNKNOWN:
+            state.retry_at = stamp + self.cfg.attribute_retry_s
+
+    def _confirmed_age(self, state: _FaceState, age: Estimate, first: bool) -> Estimate:
         """The age a result gives the track (SPEC 5). Retrying until a crop clears the score
-        floor selects for confident errors, so a non-minor (adult or senior) age reached
-        through a retry counts only when the next confident result agrees with it; until then
+        floor selects for confident errors, so a non-minor (adult or senior) age that follows
+        an unknown result counts only when the next confident result agrees with it; until then
         it is held as ``candidate`` and the track stays unknown, a possible minor. Any other
-        result (unknown, a minor group, or the first job's) clears the candidate."""
-        if not state.retrying or age.value == UNKNOWN or age.possible_minor:
+        result (unknown, a minor group, or the track's first result, also after a failed job)
+        clears the candidate."""
+        if first or age.value == UNKNOWN or age.possible_minor:
             state.candidate = None
             return age
         if state.candidate == age.value:

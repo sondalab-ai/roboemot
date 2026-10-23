@@ -139,7 +139,7 @@ def identity_stamp(tmp_path, circadian: float, conversation: float, miss=()) -> 
 
 
 DROWSY = CFG.circadian.states["drowsy"].vision_rate_scale
-FLOOR = 0.35
+FLOOR = 0.5  # the lowest conversation_scale allowed, also the default
 
 
 @pytest.mark.parametrize(
@@ -147,8 +147,6 @@ FLOOR = 0.35
     [
         (1.0, SCALE, 1.25),  # awake, speaking: votes at 0.25, 0.75, 1.25 s
         (DROWSY, SCALE, 1.5),  # drowsy, speaking: detection at 2 Hz, the burst at every frame
-        (1.0, FLOOR, 1.875),  # detection at 2.8 Hz: frames of a 8 Hz camera are 0.125 s apart
-        (DROWSY, FLOOR, 2.25),
     ],
 )
 def test_identity_decision_while_speaking(tmp_path, circadian, conversation, expected):
@@ -157,9 +155,10 @@ def test_identity_decision_while_speaking(tmp_path, circadian, conversation, exp
 
 
 def test_identity_decision_while_speaking_survives_one_missed_vote(tmp_path):
-    """Awake and drowsy at the default scale, and awake at the floor: one missed vote (the
-    face gone from the frame of the deciding vote) still fits 2.5 s."""
-    for n, (circadian, conversation) in enumerate(((1.0, SCALE), (DROWSY, SCALE), (1.0, FLOOR))):
+    """Awake and drowsy at the floor (the default): one missed vote (the face gone from the
+    frame of the deciding vote) still fits 2.5 s."""
+    assert FLOOR == SCALE
+    for n, (circadian, conversation) in enumerate(((1.0, FLOOR), (DROWSY, FLOOR))):
         clean = identity_stamp(tmp_path / f"c{n}", circadian, conversation)
         miss = {round(clean / DT)}
         stamp = identity_stamp(tmp_path / f"m{n}", circadian, conversation, miss=miss)
@@ -470,3 +469,61 @@ def test_retry_interval_range():
     with pytest.raises(ValidationError):
         RoboEmotConfig(vision={"attribute_retry_s": 0.0})
     assert RoboEmotConfig(vision={"attribute_retry_s": 30}).vision.attribute_retry_s == 30
+
+
+class FailingEstimator(CountingEstimator):
+    """Raises on the first ``fails`` crops, then answers confidently."""
+
+    def __init__(self, fails: int, age="adult"):
+        super().__init__(age=age)
+        self.fails = fails
+
+    def estimate(self, crop):
+        self.crops.append(crop.shape)
+        if len(self.crops) <= self.fails:
+            raise RuntimeError("model failed")
+        return self.sample
+
+
+def test_a_failed_job_is_retried_after_the_interval(tmp_path):
+    """SPEC 5: a failed job no longer leaves the track unknown for life; it is retried like
+    an unknown result and stays a possible minor until then."""
+    est, ex = FailingEstimator(fails=1), CountingExecutor()
+    _, _, pipe, _, got = rig(tmp_path, lambda i: [face(100)], estimator=est, executor=ex)
+    seen = run_jobs(pipe, ex, got, 0, 3 * ROUND)
+    first = next(t for t, jobs in seen if jobs == 1)
+    second = next(t for t, jobs in seen if jobs == 2)
+    absorbed = first + DT
+    assert absorbed + RETRY_S - 1e-9 <= second <= absorbed + RETRY_S + DT + 1e-9
+    assert ex.jobs == 2  # the first job after a failure counts once, no agreement needed
+    attributes = pipe.stats()["attributes"]
+    assert attributes["failed"] == 1 and attributes["retries"] == 1
+    last = got["percept.face"][-1].payload
+    assert (last.age_group, last.possible_minor) == ("adult", False)
+
+
+def test_a_failed_job_waits_for_the_conversation_like_any_retry(tmp_path):
+    est, ex = FailingEstimator(fails=1), CountingExecutor()
+    _, _, pipe, _, got = rig(tmp_path, lambda i: [face(100)], estimator=est, executor=ex)
+    run_jobs(pipe, ex, got, 0, 4)
+    pipe.governor.set_scale(CONVERSATION, SCALE)
+    run_jobs(pipe, ex, got, 4, 2 * ROUND)
+    assert ex.jobs == 1 and got["percept.face"][-1].payload.possible_minor
+    pipe.governor.set_scale(CONVERSATION, 1.0)
+    run_jobs(pipe, ex, got, 4 + 2 * ROUND, 4)
+    assert ex.jobs == 2
+
+
+def test_a_cancelled_job_of_a_live_track_is_retried(tmp_path):
+    est, ex = CountingEstimator(), DeferredExecutor()
+    _, _, pipe, _, got = rig(tmp_path, lambda i: [face(100)], estimator=est, executor=ex)
+    for i in range(3):
+        pipe.process(Frame(image(i), i * DT))
+    assert len(ex.waiting) == 1
+    future = ex.waiting.pop()[0]
+    assert future.cancel()
+    for i in range(3, ROUND):
+        pipe.process(Frame(image(i), i * DT))
+    assert len(ex.waiting) == 1  # the retry
+    attributes = pipe.stats()["attributes"]
+    assert attributes["cancelled"] == 1 and attributes["retries"] == 1
