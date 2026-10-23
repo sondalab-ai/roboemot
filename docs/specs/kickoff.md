@@ -631,7 +631,7 @@ Voice has two paths: a fast on-board path that triggers emotional reactions with
 ### LLM router
 
 - Interface `LLMBackend.stream(messages, tools, policy) -> tokens | tool_calls`; the only v1 implementation is an OpenAI-compatible client (next subsection).
-- Route order is configured per app, for example: LAN server → cloud provider. Fallback triggers on timeout (first token later than 1.5 s) or error.
+- Route order is configured per app, for example: LAN server → cloud provider. Fallback triggers on timeout (first token later than the route's `first_token_timeout_s`, 3 s by default: cloud routes measured 0.8 to 1.8 s from the robot, 2026-10-23; the LAN example sets 1.5 s) or error.
 - Only text leaves the robot: transcripts and the scene summary. Audio and images are never sent unless an app enables a multimodal route explicitly.
 - The minor signal does not filter routes (owner decision 2026-10-22): while a minor is present every available route is used, with the minor content rules, the child register and the output filter (section 12).
 - When no route answers, the robot plays a register-appropriate fallback ("I can't think right now") and keeps reflexes running. When no route is even reachable, the router says so at once (`Offline`) instead of waiting for timeouts, and the robot replies nonverbally (section 12A).
