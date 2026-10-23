@@ -1,9 +1,12 @@
-"""Rate governor: per-stage target rates scaled by circadian state and load (SPEC 5, 13, 7A).
+"""Rate governor: per-stage target rates scaled by circadian state, load and conversation
+(SPEC 5, 13, 7A).
 
 Stage rates come from ``vision.rates`` (``<stage>_hz``). Scales multiply: the circadian
-``vision_rate_scale`` and a load scale the CPU and thermal governor of SPEC 13 sets. A scale
-of 0 turns every stage off. Decisions use capture stamps only, so replays are deterministic;
-a frame that arrives before its stage is due is dropped, never queued (latest-wins).
+``vision_rate_scale``, a load scale the CPU and thermal governor of SPEC 13 sets, and the
+conversation scale (``vision.rates.conversation_scale`` while the robot thinks or speaks, SPEC 8,
+so the TTS keeps its CPU). A scale of 0 turns every stage off. Decisions use capture stamps
+only, so replays are deterministic; a frame that arrives before its stage is due is dropped,
+never queued (latest-wins).
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ from ..config.schema import VisionRates
 
 CIRCADIAN = "circadian"
 LOAD = "load"
+CONVERSATION = "conversation"
 EPSILON_S = 1e-9
 
 
@@ -29,10 +33,11 @@ class RateGovernor:
         self.dropped: dict[str, int] = {}
 
     def set_scale(self, source: str, value: float) -> None:
-        """Set one multiplier (``CIRCADIAN`` or ``LOAD``), clamped to [0, 1].
+        """Set one multiplier (``CIRCADIAN``, ``LOAD`` or ``CONVERSATION``), clamped to [0, 1].
 
         The circadian model sets ``CIRCADIAN`` from its state's ``vision_rate_scale``; the CPU
-        and thermal governor sets ``LOAD``. They multiply; 0 turns every stage off.
+        and thermal governor sets ``LOAD``; the app tick sets ``CONVERSATION`` from the
+        conversation phase. They multiply; 0 turns every stage off.
         """
         with self._lock:
             self._scales[source] = min(1.0, max(0.0, value))
@@ -42,6 +47,20 @@ class RateGovernor:
         """Product of all scales; 1 when none is set."""
         with self._lock:
             return math.prod(self._scales.values())
+
+    def scales(self) -> dict[str, float]:
+        """Each multiplier set so far by source, for the debug report (SPEC 12A)."""
+        with self._lock:
+            return dict(self._scales)
+
+    def stretch(self, gap_s: float) -> float:
+        """A minimum gap between two runs, stretched by the current scale like the stage
+        periods are: ``gap_s / scale``, infinite when the scale is 0. A gap of 0 stays 0 while
+        any stage runs (no 0/0)."""
+        scale = self.scale
+        if scale <= 0:
+            return math.inf
+        return gap_s / scale
 
     def period(self, stage: str) -> float:
         """Seconds between two runs of ``stage`` (infinite when the scale is 0).

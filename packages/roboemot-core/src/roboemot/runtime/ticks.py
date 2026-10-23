@@ -11,6 +11,7 @@ from typing import Any
 from roboemot.attention import SOURCE as ATTENTION_SOURCE
 from roboemot.attention import AttentionSelector, GazeController
 from roboemot.circadian import CircadianModel, in_window
+from roboemot.conversation.phase import SPEAKING, THINKING, ConversationPhase
 from roboemot.motion import Command, MotionLoop, Priority
 from roboemot.persona import effects as persona_effects
 from roboemot.world import ScanContext, ScanController, WorldModel, camera_in_view
@@ -162,3 +163,12 @@ def circadian_vision_scale(cfg: Any, circadian: CircadianModel | None) -> float:
     or ``awake`` while no model is attached (circadian disabled)."""
     effects = circadian.effects() if circadian is not None else cfg.circadian.states["awake"]
     return effects.vision_rate_scale
+
+
+def conversation_vision_scale(cfg: Any, phase: ConversationPhase | None) -> float:
+    """The vision rate multiplier of the conversation (SPEC 5, 8, 13): ``vision.rates.
+    conversation_scale`` while the robot thinks or speaks, so the TTS keeps its CPU, else 1.
+    Listening keeps 1 because the face attributes the speech; no conversation is 1 too."""
+    if phase is None or phase.snapshot()["phase"] not in (THINKING, SPEAKING):
+        return 1.0
+    return cfg.vision.rates.conversation_scale

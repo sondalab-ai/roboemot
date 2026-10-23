@@ -1382,6 +1382,9 @@ class EnrollmentConfig(Strict):
 # yolo11n-face-age is a YOLO11 network: its input side must be a multiple of the largest stride
 # (ONNX metadata ``stride``, checked again at load).
 ATTRIBUTE_INPUT_STRIDE_PX = 32
+# Face detections a track gets within tracker.lost_s at the conversation rate, at least: one
+# missed detection then never ends a track (SPEC 5, 13).
+TRACK_DETECTIONS_PER_LOST_MIN = 2.0
 
 ATTENTION_CATEGORIES = ("active_speaker", "enrolled_person", "nearest_face", "salient_motion")
 
@@ -1501,6 +1504,16 @@ class VisionRates(Strict):
         ge=1,
         le=120,
         restart=True,
+    )
+    conversation_scale: float = param(
+        0.5,
+        "Vision rate multiplier while the robot thinks or speaks (SPEC 5, 8, 13), so the TTS "
+        "keeps its CPU; listening and idle keep 1. It also stretches the new-track burst gaps. "
+        "Detection at detection_hz x this must stay well above 1 / tracker.lost_s or face tracks "
+        "end between two detections: the configuration is rejected below 2 detections per "
+        "lost_s",
+        ge=0.05,
+        le=1,
     )
 
 
@@ -1724,6 +1737,14 @@ class VisionConfig(Strict):
         if self.attribute_input_px % ATTRIBUTE_INPUT_STRIDE_PX:
             raise ValueError(
                 f"vision.attribute_input_px must be a multiple of {ATTRIBUTE_INPUT_STRIDE_PX}"
+            )
+        rates = self.rates
+        per_lost = rates.detection_hz * rates.conversation_scale * self.tracker.lost_s
+        if per_lost < TRACK_DETECTIONS_PER_LOST_MIN:
+            raise ValueError(
+                "vision.rates.detection_hz x conversation_scale x tracker.lost_s must be at "
+                f"least {TRACK_DETECTIONS_PER_LOST_MIN:g}: face tracks would end between two "
+                "detections while the robot thinks or speaks"
             )
         return self
 

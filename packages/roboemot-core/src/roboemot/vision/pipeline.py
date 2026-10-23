@@ -6,8 +6,10 @@ deterministic; ``LatestFrameRunner`` drives it live. Per frame, when the governo
 1. Faces are detected, filtered by ``face_min_px`` and tracked (stable ``track_id``). Tracks
    unmatched for ``tracker.lost_s`` of capture time expire before association, so a face that
    comes back after a long gap is a new track with no inherited identity or attributes.
-2. A new track gets ``embedding_burst`` face evaluations, at least ``burst_min_gap_s`` apart,
-   stopping early once it is recognised, then one per ``1 / embedding_hz``. Only confidently
+2. A new track gets ``embedding_burst`` face evaluations, at least ``burst_min_gap_s`` apart
+   (stretched by the governor scale like every rate: ``gap / scale``, so a thinking or speaking
+   robot spends less on bursts too), stopping early once it is recognised, then one per
+   ``1 / embedding_hz``. Only confidently
    detected faces of at least ``embed_min_face_px`` are embedded. The burst (5 by default)
    lets one missed vote still fit the SPEC 13 identity budget of 2.5 s with the 3-of-5 votes
    of SPEC 6. The embedding goes straight to ``Matcher.observe`` and is dropped; it is never
@@ -72,7 +74,7 @@ from ..stats import P50, P90, summarise
 from ..world import Observation
 from .attributes import AttributeWorker
 from .geometry import CameraModel
-from .governor import RateGovernor
+from .governor import EPSILON_S, RateGovernor
 from .stages import (
     AppearanceEmbedder,
     AttributeEstimator,
@@ -368,6 +370,7 @@ class VisionPipeline:
             "face_tracks": len(self._faces),
             "entity_tracks": len(self._entities),
             "rate_scale": self.governor.scale,
+            "rate_scales": self.governor.scales(),
             "stage_drops": dict(self.governor.dropped),
             "tracks": tracks,
             "attributes": attributes,
@@ -519,7 +522,7 @@ class VisionPipeline:
             return True
         gap = stamp - state.last_embed
         if state.owner_id is None and state.evals < self.cfg.embedding_burst:
-            return gap >= self.cfg.burst_min_gap_s
+            return gap >= self.governor.stretch(self.cfg.burst_min_gap_s) - EPSILON_S
         return gap >= self.governor.period("embedding")
 
     def _evaluate_face(self, frame: Frame, track: Track, state: _FaceState) -> None:
@@ -744,7 +747,7 @@ class VisionPipeline:
         else:
             gap = stamp - state.last_embed
             if state.owner_id is None and state.evals < self.cfg.embedding_burst:
-                due = gap >= self.cfg.entity_burst_min_gap_s
+                due = gap >= self.governor.stretch(self.cfg.entity_burst_min_gap_s) - EPSILON_S
             else:
                 due = gap >= self.governor.period("appearance")
         if not due:

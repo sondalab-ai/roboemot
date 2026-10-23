@@ -16,11 +16,12 @@ import numpy as np
 import pytest
 from roboemot.circadian import CircadianModel
 from roboemot.config.schema import RoboEmotConfig
+from roboemot.conversation.phase import ConversationPhase
 from roboemot.motion import MotionLoop
 from roboemot.registry import Consent, FileStore, Registry
 from roboemot.registry.enrollment import EnrollmentError
 from roboemot.runtime import ticks
-from roboemot.vision import CIRCADIAN, Detection, Frame
+from roboemot.vision import CIRCADIAN, CONVERSATION, Detection, Frame
 from roboemot.vision.service import Perception
 from roboemot_reachymini import app as app_module
 
@@ -290,6 +291,27 @@ def test_circadian_state_scales_the_vision_rate(data):
         stop.set()
         thread.join(15)
     assert not errors and CIRCADIAN == "circadian"
+
+
+def test_conversation_phase_scales_the_vision_rate(data):
+    """SPEC 5, 8, 13: thinking or speaking lowers the vision rate; idle brings it back to 1."""
+    app = new_app(AppWithFakes)
+    app.source_class = EmptySource
+    stop, thread, errors = start(app)
+    want = RoboEmotConfig().vision.rates.conversation_scale
+    try:
+        assert wait_for(lambda: app.perception is not None and app.perception.pipeline is not None)
+        governor = app.perception.pipeline.governor
+        if app.phase is None:  # no voice stack with the fakes: the tick reads whatever is set
+            app.phase = ConversationPhase()
+        app.phase.begin_thinking()
+        assert wait_for(lambda: governor.scales().get(CONVERSATION) == want)
+        app.phase.end_thinking()
+        assert wait_for(lambda: governor.scales().get(CONVERSATION) == 1.0)
+    finally:
+        stop.set()
+        thread.join(15)
+    assert not errors
 
 
 def test_circadian_scale_is_awake_while_no_model_runs():
