@@ -6,8 +6,10 @@ round trip (a call to ``get_time``, then its result sent back). The result is ad
 (SPEC 8): it is shown and stored, it does not gate the route. The requests are charged to the
 route's daily token budget like any other; a route whose budget is spent is refused.
 
-The report holds statuses and short reasons only: never prompts, replies or keys, and errors
-are reduced to a type or an HTTP status.
+The report holds statuses and short reasons only: never prompts, replies or keys. Errors are
+reduced to a type or an HTTP status; an HTTP status adds the server's own error message, cleaned
+(``_server_says``), because a provider names the real cause there (a retired model, a data
+policy) and the status alone does not.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ import httpx
 from openai import APIConnectionError, APIStatusError, APITimeoutError
 
 from ..config.schema import LLMCheckConfig, LLMRoute, SafetyConfig
-from ..secret_store import no_secrets
+from ..secret_store import SECRET_REF, no_secrets
 from .pseudonyms import Pseudonyms
 from .router import Done, FirstToken, Router, TextDelta, ToolCall
 
@@ -55,6 +57,10 @@ TOOLS = [
 WORD = re.compile(r"[^\W\d_]+")
 # A path shown in an HTTP error: plain characters and a bounded length only.
 SAFE_PATH = re.compile(r"/[A-Za-z0-9._~/-]{0,127}")
+# The server's error message: a bounded length, and runs that look like a key or an id masked.
+SERVER_TEXT_MAX_CHARS = 200
+TOKEN_RUN = re.compile(r"[A-Za-z0-9_-]{20,}")
+MASK = "[masked]"
 
 
 class RouteBudgetExhausted(RuntimeError):
@@ -122,11 +128,11 @@ def route_endpoint(route: LLMRoute) -> str:
 
 
 def _why(exc: Exception, route: LLMRoute) -> str:
-    """A reason that carries no server text: it may echo the request or a key. An HTTP status
-    names the path called, so a wrong base URL shows at once: only a path under the route's own
-    base path (never one a redirect chose) of plain characters, no host, credentials or query."""
+    """A short reason. An HTTP status names the path called, so a wrong base URL shows at once:
+    only a path under the route's own base path (never one a redirect chose) of plain
+    characters, no host, credentials or query. It then adds the server's message, cleaned."""
     if isinstance(exc, APIStatusError):
-        return f"HTTP {exc.status_code}{_called_path(exc, route)}"
+        return f"HTTP {exc.status_code}{_called_path(exc, route)}{_server_says(exc, route)}"
     if isinstance(exc, (TimeoutError, APITimeoutError)):
         return "timed out"
     if isinstance(exc, (APIConnectionError, OSError)):
@@ -141,6 +147,26 @@ def _called_path(exc: APIStatusError, route: LLMRoute) -> str:
     if not SAFE_PATH.fullmatch(path) or not path.startswith(base + "/"):
         return ""
     return f" at {path}"
+
+
+def _server_says(exc: APIStatusError, route: LLMRoute) -> str:
+    """``: <message>`` from the server's JSON error, or empty. The message may echo the request
+    or a key: the route's literal key and every key-like run are masked, control characters
+    and repeated spaces are removed and the length is capped. The check sends only its own
+    synthetic prompts, so an echoed prompt carries nothing private."""
+    body = exc.body
+    if isinstance(body, dict) and isinstance(body.get("error"), dict):
+        body = body["error"]
+    message = body.get("message") if isinstance(body, dict) else None
+    if not isinstance(message, str):
+        return ""
+    if route.api_key and not SECRET_REF.fullmatch(route.api_key):
+        message = message.replace(route.api_key, MASK)
+    message = TOKEN_RUN.sub(MASK, message)
+    message = " ".join("".join(c if c.isprintable() else " " for c in message).split())
+    if len(message) > SERVER_TEXT_MAX_CHARS:
+        message = message[: SERVER_TEXT_MAX_CHARS - 1] + "…"
+    return f": {message}" if message else ""
 
 
 def italian_ratio(text: str, stopwords: list[str]) -> tuple[int, float]:
