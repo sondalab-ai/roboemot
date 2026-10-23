@@ -145,12 +145,16 @@ def trim_history(
 
 
 def system_tokens_worst_case(cfg: RoboEmotConfig) -> int:
-    """Tokens of the largest system message a request can carry: parts 1 to 4 for the longest
-    register fragment, the longest vocabulary rule and language name, plus the two summaries at
-    their caps (part 5 is capped, the affect line is a few words)."""
+    """Tokens of the largest system message a request can carry: parts 1 to 4 with a persona
+    fragment at ``register.persona_fragment_max_chars`` (a person's override may be that long),
+    the longest vocabulary rule and language name, plus the two summaries at their caps (part 5
+    is capped, the affect line is a few words)."""
     vocabulary = max(VOCABULARY_RULES, key=lambda v: len(VOCABULARY_RULES[v]))
     language = max([*LANGUAGE_NAMES.values(), cfg.conversation.language], key=len)
-    register = cfg.register.params.model_copy(update={"vocabulary": vocabulary})
+    fragment = "x" * cfg.register.persona_fragment_max_chars
+    register = cfg.register.params.model_copy(
+        update={"vocabulary": vocabulary, "persona_fragment": fragment}
+    )
     fixed = len(system_prompt(cfg, register, language=language))
     conv = cfg.conversation
     chars = fixed + conv.profile_summary_max_chars + conv.scene_summary_max_chars

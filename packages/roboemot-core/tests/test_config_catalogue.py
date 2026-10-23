@@ -467,3 +467,10 @@ def test_ipv6_origins_keep_their_brackets_so_port_and_address_differ():
 
     assert origin("https://[2001:db8::1]:443/x") != origin("https://[2001:db8::1:443]/x")
     assert origin("https://[2001:db8::1]:8443/x") == "https://[2001:db8::1]:8443"
+
+
+def test_no_private_path_is_a_container():
+    """The catalogue lists a container's entry keys as they are: a private one would show them
+    without the PIN, so there must be none (review ZM N6)."""
+    private = [r for r in rows(ConfigStack()).values() if r["private"]]
+    assert private and not [r["path"] for r in private if r["kind"] in CONTAINERS]

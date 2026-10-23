@@ -2648,7 +2648,7 @@ class PersonaTraits(Strict):
 
 class EnergyEffects(Strict):
     motion_amplitude_x: Curve = param(
-        [(0, 0.8), (0.5, 1.0), (1, 1.2)], "Multiplies register.*.motion_amplitude"
+        [(0, 0.8), (0.5, 1.0), (1, 1.2)], "Multiplies register.motion_amplitude"
     )
     idle_period_x: Curve = param(
         [(0, 1.25), (0.5, 1.0), (1, 0.8)],
@@ -2666,7 +2666,7 @@ class WarmthEffects(Strict):
 
 class PlayfulnessEffects(Strict):
     reaction_steps: Curve = param(
-        [(0, -1), (0.5, 0), (1, 1)], "Steps on register.*.reaction_intensity (low, medium, high)"
+        [(0, -1), (0.5, 0), (1, 1)], "Steps on register.reaction_intensity (low, medium, high)"
     )
     voice_variability_add: Curve = param(
         [(0, -0.1), (0.5, 0), (1, 0.1)], "Added to voice.base.variability"
@@ -2675,7 +2675,7 @@ class PlayfulnessEffects(Strict):
 
 class FormalityEffects(Strict):
     vocabulary_steps: Curve = param(
-        [(0, 0), (0.7, 0), (1, 1)], "Steps on register.*.vocabulary toward formal"
+        [(0, 0), (0.7, 0), (1, 1)], "Steps on register.vocabulary toward formal"
     )
 
 
@@ -3295,14 +3295,14 @@ class WebUIConfig(Strict):
     )
     settings_phrase_max_chars: int = param(
         40,
-        "Longest wake phrase or blocklist entry the settings editor accepts (SPEC 11A)",
+        "Longest wake phrase or new entry key the settings editor accepts (SPEC 11A)",
         ge=1,
         le=200,
         conservative="lower",
     )
     settings_line_max_chars: int = param(
         200,
-        "Longest list item or entry key the settings editor accepts (SPEC 11A)",
+        "Longest item of a plain string list the settings editor accepts (SPEC 11A)",
         ge=1,
         le=500,
         conservative="lower",
