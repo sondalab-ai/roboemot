@@ -85,7 +85,7 @@ from ..bus import Bus
 from ..config.schema import IdentityConfig, TrackerConfig, VisionConfig, WorldConfig
 from ..registry import Estimate, Matcher, possible_minor
 from ..registry.records import Attribute
-from ..stats import P50, P90, summarise
+from ..stats import SUMMARY_LEVELS, summarise
 from ..world import FrameSpec, Observation
 from .attributes import AttributeWorker
 from .geometry import CameraModel
@@ -116,7 +116,6 @@ UNKNOWN = "unknown"
 NO_ESTIMATE = Estimate(UNKNOWN, "none")
 MS_PER_S = 1000.0
 S_PER_MIN = 60.0
-SUMMARY_LEVELS = {"p50": P50, "p90": P90}
 OUTCOMES = ("adult", "minor", "unknown")
 CameraProvider = Callable[[int, int], CameraModel | None]
 FaceTap = Callable[[Frame, list[Track]], None]
@@ -405,6 +404,7 @@ class VisionPipeline:
                 "created_per_min": recent * S_PER_MIN / window_s,
                 "rate_window_s": window_s,
                 "lifetime_s": summarise(list(self._lifetimes_s), SUMMARY_LEVELS),
+                **self.track_stats.snapshot(),  # report lock, then observer lock: one report
             }
             attributes: dict[str, Any] = {
                 **self._attr_drops,
@@ -413,7 +413,6 @@ class VisionPipeline:
                 "outcomes": dict(self._outcomes),
                 "time_to_estimate_ms": summarise(list(self._to_estimate_ms), SUMMARY_LEVELS),
             }
-        tracks.update(self.track_stats.snapshot())
         if self.worker is None:
             attributes = {"state": "off"}
         else:
@@ -534,7 +533,10 @@ class VisionPipeline:
 
     def _process_faces(self, frame: Frame, camera: CameraModel) -> None:
         min_px = self.cfg.face_min_px
-        dets = [d for d in self.face_detector.detect(frame.image) if d.min_side >= min_px]
+        found = self.face_detector.detect(frame.image)
+        dets = [d for d in found if d.min_side >= min_px]
+        if len(dets) < len(found):
+            self.track_stats.below_min_px(len(found) - len(dets))
         self.track_stats.pose = head_pose(frame.joint_state, self.frame_spec)
         result = self.face_tracker.update(dets, frame.stamp)
         self._face_lost_held = self._face_lost_s()

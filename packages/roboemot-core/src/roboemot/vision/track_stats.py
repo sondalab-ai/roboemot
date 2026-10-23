@@ -10,23 +10,30 @@ tracker only). Per update the cost is O(tracks); memory is the live tracks plus 
   tracks that ended before they were confirmed.
 - ``expiry``: for each expired track, the updates it went unmatched (``misses``), the lifetime
   ``lost_s`` in force when it expired (SPEC 5: it follows the detection period), and how many
-  expired tracks had a low-score detection near them refused because they had missed the
-  update before (``after_refused_low``).
+  expired tracks had a low-score detection near them refused during their final run of misses
+  (``after_refused_low``; a match clears it).
 - ``rebirths``: pairs of an ended (or ending) confirmed track and a confirmed track born after
   its last match, whose first box centre lies within ``vision.rebirth_distance_heights``
   heights of the old track's last (Kalman predicted) box. Pairs are found when the new track is
   confirmed (old track already ended, the new one born at most ``vision.rebirth_window_s``
   after the expiry, so the window does not shrink when ``lost_s`` grows with the detection
   period) or when the old track expires (new track already confirmed: ``overlapped``, the two
-  lived side by side; no window). Summaries: the gap from the old track's last match to the new
+  lived side by side; no window, and the old box is the one the tracker predicted, and refused,
+  at the new track's birth). Summaries: the gap from the old track's last match to the new
   track's first detection, the old track's ``lost_s`` at expiry (how much of the gap was
   tracker lifetime), the IoU and the centre distance between the two boxes, and, when the
   frames carry the head joint state and the robot gave a ``FrameSpec``, the head yaw and pitch
   change in degrees.
 - ``low_score``: low-score detections refused because the near track (IoU at least
-  ``low_match_iou``) missed the update before (``refused``, with a score summary), and the
-  other low-score detections that matched nothing (``unmatched``: they never start a track).
-- ``start_score``: scores of the detections that started tracks.
+  ``low_match_iou``) missed the update before (``refused``, with a score summary); those that
+  overlap no live track (``unmatched``, with a score summary: they never start a track); and,
+  among these, those within the rebirth gate of a track that expired at most
+  ``vision.rebirth_window_s`` before (``near_ended``, with a score summary: the face was there,
+  too weak to restart a track).
+- ``start_score``: scores of the detections that started tracks; ``start_near_iou``: for a start
+  next to confirmed tracks the update left unmatched, the best IoU with their predicted boxes
+  (the association that failed ``match_iou``: a split rather than a new face).
+- ``below_min_px``: face detections dropped by ``vision.face_min_px`` before the tracker.
 
 Numbers only, no boxes or images leave this module (SPEC 12).
 """
@@ -43,12 +50,12 @@ from typing import Any
 import numpy as np
 
 from ..config.schema import VisionConfig
-from ..stats import P50, P90, summarise
+from ..stats import SUMMARY_LEVELS as LEVELS
+from ..stats import summarise
 from ..world import FrameSpec
 from .tracker import iou_matrix
 from .types import Box, Detection
 
-LEVELS = {"p50": P50, "p90": P90}
 Pose = tuple[float, float]
 
 
@@ -82,6 +89,7 @@ class _Live:
     birth_stamp: float
     birth_pose: Pose | None
     last_pose: Pose | None
+    neighbours: dict[int, Box]
     misses: int = 0
     refused_low: bool = False
     confirmed: bool = False
@@ -92,6 +100,7 @@ class _Live:
 class _Ended:
     """An expired confirmed track waiting for a rebirth within the window."""
 
+    track_id: int
     end_stamp: float
     last_stamp: float
     box: Box
@@ -128,16 +137,26 @@ class TrackDiagnostics:
         self._pitch_deg: deque[float] = deque(maxlen=window)
         self._refused = 0
         self._refused_score: deque[float] = deque(maxlen=window)
-        self._low_unmatched = 0
+        self._unmatched = 0
+        self._unmatched_score: deque[float] = deque(maxlen=window)
+        self._near_ended = 0
+        self._near_ended_score: deque[float] = deque(maxlen=window)
         self._start_score: deque[float] = deque(maxlen=window)
+        self._start_near_iou: deque[float] = deque(maxlen=window)
+        self._below_min_px = 0
 
     # ------------------------------------------------------------ tracker hooks
 
-    def started(self, track_id: int, det: Detection, stamp: float) -> None:
-        """A detection started a (tentative) track."""
+    def started(
+        self, track_id: int, det: Detection, stamp: float, neighbours: dict[int, Box]
+    ) -> None:
+        """A detection started a (tentative) track. ``neighbours`` are the predicted boxes of
+        the confirmed tracks of its label that this update left unmatched, by track ID."""
         with self._lock:
-            self._live[track_id] = _Live(det.box, stamp, self.pose, self.pose)
+            self._live[track_id] = _Live(det.box, stamp, self.pose, self.pose, neighbours)
             self._start_score.append(det.score)
+            if neighbours:
+                self._start_near_iou.append(max(_iou(det.box, b) for b in neighbours.values()))
 
     def matched(self, track_id: int) -> None:
         """The track was matched in this update."""
@@ -145,6 +164,7 @@ class TrackDiagnostics:
             live = self._live.get(track_id)
             if live is not None:
                 live.misses = 0
+                live.refused_low = False
                 live.last_pose = self.pose
 
     def missed(self, track_id: int) -> None:
@@ -163,10 +183,23 @@ class TrackDiagnostics:
             if live is not None:
                 live.refused_low = True
 
-    def low_unmatched(self, count: int) -> None:
-        """Low-score detections that matched no track and were not refused."""
+    def low_unmatched(self, dets: list[Detection], stamp: float) -> None:
+        """Low-score detections that overlap no live track; those within the rebirth gate of a
+        track that expired in the window are counted apart (``near_ended``)."""
+        window, limit = self.cfg.rebirth_window_s, self.cfg.rebirth_distance_heights
         with self._lock:
-            self._low_unmatched += count
+            recent = [old for old in self._ended if stamp - old.end_stamp <= window]
+            for det in dets:
+                self._unmatched += 1
+                self._unmatched_score.append(det.score)
+                if any(self._distance_heights(old.box, det.box) <= limit for old in recent):
+                    self._near_ended += 1
+                    self._near_ended_score.append(det.score)
+
+    def below_min_px(self, count: int) -> None:
+        """Face detections dropped before the tracker for a box side below ``face_min_px``."""
+        with self._lock:
+            self._below_min_px += count
 
     def dropped(self, track_id: int) -> None:
         """A track ended before it was confirmed."""
@@ -182,6 +215,9 @@ class TrackDiagnostics:
             if live is None:
                 return
             live.confirmed = True
+            window = self.cfg.rebirth_window_s
+            while self._ended and live.birth_stamp - self._ended[0].end_stamp > window:
+                self._ended.popleft()  # confirmations come in birth order
             best = self._nearest(live, list(self._ended))
             if best is not None:
                 self._ended.remove(best)
@@ -193,16 +229,17 @@ class TrackDiagnostics:
     ) -> None:
         """A confirmed track expired at ``stamp`` with ``lost_s`` in force; ``box`` is its last
         predicted box. It is paired with a confirmed live track born after its last match (the
-        two overlapped: no window applies), or kept for a rebirth that confirms later."""
+        two overlapped: no window applies, and the box is the one predicted at that track's
+        birth), or kept for a rebirth that confirms later."""
         with self._lock:
             live = self._live.pop(track_id, None)
             self._ended_by["expired"] += 1
-            self._lost_s.append(lost_s)
             if live is None:
                 return
+            self._lost_s.append(lost_s)
             self._misses.append(live.misses)
             self._after_refused += live.refused_low
-            ended = _Ended(stamp, last_stamp, box, live.last_pose, lost_s)
+            ended = _Ended(track_id, stamp, last_stamp, box, live.last_pose, lost_s)
             born = [
                 other
                 for other in self._live.values()
@@ -250,9 +287,14 @@ class TrackDiagnostics:
                 "low_score": {
                     "refused": self._refused,
                     "refused_score": summarise(list(self._refused_score), LEVELS),
-                    "unmatched": self._low_unmatched,
+                    "unmatched": self._unmatched,
+                    "unmatched_score": summarise(list(self._unmatched_score), LEVELS),
+                    "near_ended": self._near_ended,
+                    "near_ended_score": summarise(list(self._near_ended_score), LEVELS),
                 },
                 "start_score": summarise(list(self._start_score), LEVELS),
+                "start_near_iou": summarise(list(self._start_near_iou), LEVELS),
+                "below_min_px": self._below_min_px,
             }
 
     # ----------------------------------------------------------------- helpers
@@ -280,7 +322,7 @@ class TrackDiagnostics:
         limit = self.cfg.rebirth_distance_heights
         best, best_d = None, math.inf
         for live in born:
-            d = self._distance_heights(old.box, live.birth_box)
+            d = self._distance_heights(live.neighbours.get(old.track_id, old.box), live.birth_box)
             if d <= limit and d < best_d:
                 best, best_d = live, d
         return best
@@ -290,8 +332,9 @@ class TrackDiagnostics:
         self._overlapped += overlapped
         self._gap_s.append(new.birth_stamp - old.last_stamp)
         self._rebirth_lost_s.append(old.lost_s)
-        self._iou.append(_iou(new.birth_box, old.box))
-        self._distance.append(self._distance_heights(old.box, new.birth_box))
+        old_box = new.neighbours.get(old.track_id, old.box) if overlapped else old.box
+        self._iou.append(_iou(new.birth_box, old_box))
+        self._distance.append(self._distance_heights(old_box, new.birth_box))
         old_pose = old.last_pose
         if old_pose is not None and new.birth_pose is not None:
             self._yaw_deg.append(abs(math.degrees(new.birth_pose[0] - old_pose[0])))

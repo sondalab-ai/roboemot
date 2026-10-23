@@ -213,7 +213,7 @@ class Tracker:
         stale = [t for t in rest_t if t not in recent]
         missed = stale + rest_t2
         if self.observer is not None:
-            self._observe_low(self.observer, stale, rest_low)
+            self._observe_low(self.observer, stale, rest_low, stamp)
         new_ids: set[int] = set()
         visible: list[Track] = []
         for t, d in matched + matched_low:
@@ -237,7 +237,8 @@ class Tracker:
             t = Track(next(self._ids), d.label, d.score, stamp, stamp, detection=d)
             t._start(d, stamp)
             if self.observer is not None:
-                self.observer.started(t.track_id, d, stamp)
+                near = {m.track_id: m.box for m in missed if m.confirmed and m.label == d.label}
+                self.observer.started(t.track_id, d, stamp, near)
             if self.cfg.confirm_hits <= 1:
                 t.confirmed = True
                 new_ids.add(t.track_id)
@@ -254,25 +255,27 @@ class Tracker:
         return TrackerResult(visible, new_ids, expired)
 
     def _observe_low(
-        self, observer: TrackDiagnostics, stale: list[Track], low: list[Detection]
+        self, observer: TrackDiagnostics, stale: list[Track], low: list[Detection], stamp: float
     ) -> None:
         """Tell the observer which unmatched low-score detections lie near a track (IoU at least
         ``low_match_iou``, same label) that the low pass skipped because it missed the update
-        before, and how many others matched nothing. Reads only; O(stale x low)."""
-        iou = iou_matrix(
-            np.array([t.box for t in stale]).reshape(-1, BOX_COLUMNS),
-            np.array([d.box for d in low]).reshape(-1, BOX_COLUMNS),
-        )
-        unmatched = 0
+        before, and which overlap no live track of their label at all. Reads only;
+        O(tracks x low), nothing when there is no low-score detection left."""
+        if not low:
+            return
+        boxes = np.array([d.box for d in low]).reshape(-1, BOX_COLUMNS)
+        live = iou_matrix(np.array([t.box for t in self._tracks]).reshape(-1, BOX_COLUMNS), boxes)
+        unmatched = []
         for j, d in enumerate(low):
             near = [
-                (iou[i, j], t)
-                for i, t in enumerate(stale)
-                if t.label == d.label and iou[i, j] >= self.cfg.low_match_iou and iou[i, j] > 0
+                (live[i, j], t)
+                for i, t in enumerate(self._tracks)
+                if t.label == d.label and live[i, j] > 0
             ]
-            if near:
-                observer.refused_low(max(near, key=lambda p: p[0])[1].track_id, d)
-            else:
-                unmatched += 1
+            refusable = [p for p in near if p[1] in stale and p[0] >= self.cfg.low_match_iou]
+            if refusable:
+                observer.refused_low(max(refusable, key=lambda p: p[0])[1].track_id, d)
+            elif not near:
+                unmatched.append(d)
         if unmatched:
-            observer.low_unmatched(unmatched)
+            observer.low_unmatched(unmatched, stamp)

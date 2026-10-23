@@ -8,8 +8,10 @@ import math
 
 import numpy as np
 import pytest
+from pydantic import ValidationError
+from roboemot.config.schema import RoboEmotConfig, TrackerConfig
 from roboemot.vision import CIRCADIAN, Frame, Tracker
-from roboemot.vision.track_stats import TrackDiagnostics, head_pose
+from roboemot.vision.track_stats import TrackDiagnostics, _iou, head_pose
 from roboemot.world import FrameSpec
 from test_vision import CFG, face, image, rig
 
@@ -89,11 +91,8 @@ def test_low_score_matched_after_a_hit_is_not_refused():
     tracker, diag = observed()
     _, stamp = confirm(tracker, 50)
     tracker.update([face(50, score=0.3)], stamp + DT)
-    assert diag.snapshot()["low_score"] == {
-        "refused": 0,
-        "refused_score": {"count": 0},
-        "unmatched": 0,
-    }
+    low = diag.snapshot()["low_score"]
+    assert low["refused"] == low["unmatched"] == low["near_ended"] == 0
 
 
 def test_start_scores_and_tentative_drops():
@@ -247,3 +246,152 @@ def test_rebirth_window_starts_at_expiry_not_at_the_last_match(tmp_path):
     assert reb["count"] == 1 and reb["overlapped"] == 0
     assert reb["lost_s"]["p50"] == pytest.approx(pipe._face_lost_s())
     assert reb["gap_s"]["p50"] > vision.rebirth_window_s
+
+
+# ------------------------------------------------------------------ fix round 1
+
+
+def test_a_refusal_followed_by_a_recovery_does_not_mark_the_expiry():
+    # refused once, then matched again for a while: the later expiry is a plain absence
+    tracker, diag = observed()
+    tid, stamp = confirm(tracker, 50)
+    tracker.update([], stamp + DT)
+    tracker.update([face(50, score=0.3)], stamp + 2 * DT)
+    for k in range(3, 14):
+        tracker.update([face(50)], stamp + k * DT)
+    until_expired(tracker, tid, stamp + 13 * DT)
+    snap = diag.snapshot()
+    assert snap["low_score"]["refused"] == 1
+    assert snap["expiry"]["after_refused_low"] == 0
+
+
+def test_a_low_detection_overlapping_a_matched_track_is_not_unmatched():
+    tracker, diag = observed()
+    _, stamp = confirm(tracker, 100)
+    tracker.update([face(100), face(105, score=0.3)], stamp + DT)
+    tracker.update([face(100), face(250, score=0.2)], stamp + 2 * DT)
+    low = diag.snapshot()["low_score"]
+    assert low["unmatched"] == 1 and low["unmatched_score"]["p50"] == 0.2
+    assert low["near_ended"] == 0
+
+
+def test_a_weak_face_where_a_track_just_ended_counts_near_ended():
+    tracker, diag = observed()
+    tid, last = confirm(tracker, 100)
+    stamp, _ = until_expired(tracker, tid, last)
+    tracker.update([face(104, score=0.4)], stamp + DT)  # near the ended track
+    tracker.update([face(250, score=0.3)], stamp + 2 * DT)  # far from it
+    late = stamp + CFG.vision.rebirth_window_s + DT
+    tracker.update([face(104, score=0.45)], late)  # near, past the window
+    low = diag.snapshot()["low_score"]
+    assert low["unmatched"] == 3
+    assert low["near_ended"] == 1 and low["near_ended_score"]["p50"] == 0.4
+
+
+def test_overlapped_rebirth_iou_is_taken_at_the_birth_not_at_the_expiry():
+    # a face moving 10 px per frame jumps 40 px: the old track coasts on its velocity until it
+    # expires, but the IoU that failed is the one against its box predicted at the new birth
+    tracker, diag = observed()
+    x, stamp = 20.0, 0.0
+    for _ in range(8):
+        tracker.update([face(x)], stamp)
+        x, stamp = x + 10, stamp + DT
+    birth_box = face(x + 40).box
+    old_id = tracker._tracks[0].track_id
+    predicted = None
+    removed: list[int] = []
+    while old_id not in removed:
+        res = tracker.update([face(x + 40)], stamp)
+        removed = res.removed_ids
+        if predicted is None:
+            predicted = next(t.box for t in tracker._tracks if t.track_id == old_id)
+        stamp += DT
+    snap = diag.snapshot()
+    reb = snap["rebirths"]
+    assert reb["count"] == 1 and reb["overlapped"] == 1
+    assert reb["iou"]["p50"] == pytest.approx(_iou(birth_box, predicted))
+    assert snap["start_near_iou"] == {
+        "count": 1,
+        "p50": reb["iou"]["p50"],
+        "p90": reb["iou"]["p50"],
+        "max": reb["iou"]["p50"],
+    }
+    assert reb["iou"]["p50"] < CFG.vision.tracker.match_iou
+
+
+def test_the_nearer_of_two_ended_tracks_is_paired_once():
+    tracker, diag = observed()
+    tracker.update([face(100), face(150)], 0.0)
+    res = tracker.update([face(100), face(150)], DT)
+    ids = [t.track_id for t in res.visible]
+    stamp = DT
+    removed: list[int] = []
+    while len(removed) < 2:
+        stamp += DT
+        removed += tracker.update([], stamp).removed_ids
+    assert sorted(removed) == sorted(ids)
+    confirm(tracker, 140, stamp + DT)  # 10 px from the second, 40 px from the first
+    reb = diag.snapshot()["rebirths"]
+    assert reb["count"] == 1 and reb["distance_heights"]["p50"] == pytest.approx(10 / 60)
+    # a second birth near the consumed track only (25 px from it, 75 px from the other)
+    tracker.update([face(140), face(175)], stamp + 3 * DT)
+    tracker.update([face(140), face(175)], stamp + 4 * DT)
+    assert diag.snapshot()["rebirths"]["count"] == 1
+
+
+def test_single_hit_confirmation_still_reports_rebirths():
+    tracker = Tracker(TrackerConfig(confirm_hits=1))
+    diag = TrackDiagnostics(CFG.vision)
+    tracker.observer = diag
+    tid = tracker.update([face(100)], 0.0).visible[0].track_id
+    stamp, _ = until_expired(tracker, tid, 0.0)
+    res = tracker.update([face(102)], stamp + DT)
+    assert res.new_ids and diag.snapshot()["rebirths"]["count"] == 1
+
+
+def test_rebirth_settings_hot_reload_through_apply_config(tmp_path):
+    _, _, pipe, _, _ = rig(
+        tmp_path, lambda i: [face(100)] if i < 10 else [face(150)] if 30 <= i < 40 else []
+    )
+    wide = CFG.vision.model_copy(update={"rebirth_distance_heights": 2.0})
+    pipe.apply_config(wide, CFG.identity)
+    for i in range(45):
+        pipe.process(Frame(image(i), i * DT))
+    reb = pipe.stats()["tracks"]["rebirths"]
+    assert reb["distance_heights_max"] == 2.0
+    assert reb["count"] == 1 and reb["distance_heights"]["p50"] == pytest.approx(50 / 60)
+
+
+def test_ended_by_adds_up_to_ended_with_expiry_and_reset(tmp_path):
+    on = [True]
+    _, _, pipe, _, _ = rig(tmp_path, lambda i: [face(20), face(200)] if on[0] else [face(200)])
+    for i in range(4):
+        pipe.process(Frame(image(i), i * DT))
+    on[0] = False
+    for i in range(4, 24):
+        pipe.process(Frame(image(i), i * DT))
+    pipe.reset()
+    tracks = pipe.stats()["tracks"]
+    assert tracks["ended_by"] == {"expired": 1, "reset": 1}
+    assert sum(tracks["ended_by"].values()) == tracks["ended"] == 2
+
+
+def test_faces_below_min_px_are_counted(tmp_path):
+    small = CFG.vision.face_min_px - 1
+    _, _, pipe, _, _ = rig(tmp_path, lambda i: [face(100), face(200, size=small)])
+    for i in range(3):
+        pipe.process(Frame(image(i), i * DT))
+    assert pipe.stats()["tracks"]["below_min_px"] == 3
+
+
+def test_rebirth_settings_have_defaults_and_ranges():
+    v = CFG.vision
+    assert v.rebirth_window_s == 5.0 and v.rebirth_distance_heights == 1.0
+    for bad in (
+        {"rebirth_window_s": 0.0},
+        {"rebirth_window_s": 61.0},
+        {"rebirth_distance_heights": 0.05},
+        {"rebirth_distance_heights": 11.0},
+    ):
+        with pytest.raises(ValidationError):
+            RoboEmotConfig(vision=bad)
