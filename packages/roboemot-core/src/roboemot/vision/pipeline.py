@@ -53,6 +53,11 @@ timings, results dropped because their track ended or never sent because the que
 retry jobs sent for an unknown age, ended tracks whose age was still unknown, capture time from a
 track's first detection to its first estimate, and the age each job left the track with: adult,
 minor or unknown; with retries these count jobs, not tracks).
+``tracks`` also explains the churn (``track_stats``): how confirmed face tracks ended
+(``ended_by``), the misses and effective ``lost_s`` behind each expiry, rebirths (a new track
+born near where one ended, with gap, IoU, distance and head pose change), and the scores of
+low-score detections the tracker refused or left unmatched, beside those that started tracks.
+The head pose comes from the frame's joint state through the robot's ``frame_spec``.
 ``rate_scales`` lists the governor's multipliers by source (circadian, load, conversation)
 beside their product ``rate_scale``. Numbers only; the frame thread writes them and the report
 thread reads them under one lock.
@@ -81,7 +86,7 @@ from ..config.schema import IdentityConfig, TrackerConfig, VisionConfig, WorldCo
 from ..registry import Estimate, Matcher, possible_minor
 from ..registry.records import Attribute
 from ..stats import P50, P90, summarise
-from ..world import Observation
+from ..world import FrameSpec, Observation
 from .attributes import AttributeWorker
 from .geometry import CameraModel
 from .governor import CONVERSATION, EPSILON_S, RateGovernor
@@ -92,6 +97,7 @@ from .stages import (
     FaceEmbedder,
     ObjectDetector,
 )
+from .track_stats import TrackDiagnostics, head_pose
 from .tracker import Track, Tracker
 from .types import (
     LETTERBOX_GREY,
@@ -184,6 +190,7 @@ class VisionPipeline:
         refresh: bool = True,
         camera_model: CameraProvider | None = None,
         world: WorldConfig | None = None,
+        frame_spec: FrameSpec | None = None,
     ):
         if cfg.embedding_burst < identity.votes_required:
             raise ValueError("vision.embedding_burst must be at least identity.votes_required")
@@ -206,6 +213,9 @@ class VisionPipeline:
         self._lost_held = 0.0
         ids = itertools.count(1)
         self.face_tracker = Tracker(cfg.tracker, ids)
+        self.frame_spec = frame_spec
+        self.track_stats = TrackDiagnostics(cfg)
+        self.face_tracker.observer = self.track_stats
         self.object_tracker = Tracker(self._object_tracker_cfg(), ids)
         self.worker = (
             AttributeWorker(
@@ -298,6 +308,7 @@ class VisionPipeline:
             self.matcher.release(track_id)
         for state in self._faces.values():
             self._end_face(state)
+        self.track_stats.reset(len(self._faces))
         self._faces.clear()
         self._entities.clear()
         ids = itertools.count(1)
@@ -321,6 +332,7 @@ class VisionPipeline:
         models folder are restart-only (the schema marks them).
         """
         self.cfg, self.identity = vision, identity
+        self.track_stats.cfg = vision
         if world is not None:
             self.world = world
         if self.worker is not None:
@@ -401,6 +413,7 @@ class VisionPipeline:
                 "outcomes": dict(self._outcomes),
                 "time_to_estimate_ms": summarise(list(self._to_estimate_ms), SUMMARY_LEVELS),
             }
+        tracks.update(self.track_stats.snapshot())
         if self.worker is None:
             attributes = {"state": "off"}
         else:
@@ -522,6 +535,7 @@ class VisionPipeline:
     def _process_faces(self, frame: Frame, camera: CameraModel) -> None:
         min_px = self.cfg.face_min_px
         dets = [d for d in self.face_detector.detect(frame.image) if d.min_side >= min_px]
+        self.track_stats.pose = head_pose(frame.joint_state, self.frame_spec)
         result = self.face_tracker.update(dets, frame.stamp)
         self._face_lost_held = self._face_lost_s()
         self._visible = result.visible

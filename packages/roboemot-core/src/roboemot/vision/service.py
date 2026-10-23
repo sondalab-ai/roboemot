@@ -29,6 +29,7 @@ from ..bus import Bus
 from ..config.schema import RoboEmotConfig
 from ..registry import FileStore, Matcher, Registry
 from ..registry.enrollment import EnrollmentService
+from ..world import FrameSpec
 from .geometry import CameraModel
 from .governor import RateGovernor
 from .pipeline import VisionPipeline
@@ -247,13 +248,15 @@ def open_perception(
     profile: str | None = None,
     camera_model: CameraProvider | None = None,
     load_stages: StagesLoader = default_stages,
+    frame_spec: FrameSpec | None = None,
 ) -> Perception:
     """Open the registry under the data folder and, if the models load, build the pipeline.
 
     ``source`` is the robot's camera; ``camera_model`` gives its intrinsics for a frame size
     (None: the field of view in ``world.camera_fov_*``); ``profile`` is the robot manifest's
     profile, passed to ``load_stages``; ``load_stages`` is a seam for tests and
-    other backends. Nothing here starts a thread: call ``Perception.start``.
+    other backends; ``frame_spec`` names the dofs that turn the camera, for the head pose in the
+    track report. Nothing here starts a thread: call ``Perception.start``.
     """
     try:
         data = paths.data_dir(cfg.data_dir)
@@ -292,6 +295,7 @@ def open_perception(
         governor=RateGovernor(cfg.vision.rates),
         camera_model=camera_model,
         world=cfg.world,
+        frame_spec=frame_spec,
     )
     enrollment.attach(pipeline)
     return Perception(

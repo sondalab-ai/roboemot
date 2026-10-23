@@ -256,6 +256,7 @@ def assemble(
         profile=manifest.robot.profile,
         camera_model=source.camera_model,
         load_stages=host.load_vision_stages,
+        frame_spec=frame,
     )
     if perception.pipeline is not None:  # light from the frames vision already captures
         perception.pipeline.light_tap = circ.sampler.offer
