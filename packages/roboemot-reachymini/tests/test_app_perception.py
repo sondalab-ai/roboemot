@@ -294,7 +294,8 @@ def test_circadian_state_scales_the_vision_rate(data):
 
 
 def test_conversation_phase_scales_the_vision_rate(data):
-    """SPEC 5, 8, 13: thinking or speaking lowers the vision rate; idle brings it back to 1."""
+    """SPEC 5, 8, 13: thinking or speaking lowers the vision rate; a barge-in and idle bring
+    it back to 1."""
     app = new_app(AppWithFakes)
     app.source_class = EmptySource
     stop, thread, errors = start(app)
@@ -302,12 +303,25 @@ def test_conversation_phase_scales_the_vision_rate(data):
     try:
         assert wait_for(lambda: app.perception is not None and app.perception.pipeline is not None)
         governor = app.perception.pipeline.governor
-        if app.phase is None:  # no voice stack with the fakes: the tick reads whatever is set
-            app.phase = ConversationPhase()
-        app.phase.begin_thinking()
-        assert wait_for(lambda: governor.scales().get(CONVERSATION) == want)
-        app.phase.end_thinking()
-        assert wait_for(lambda: governor.scales().get(CONVERSATION) == 1.0)
+        speaking = threading.Event()
+        # The tick reads host.phase each time, so a phase set here drives it whatever the fakes
+        # built (with or without a voice stack).
+        phase = app.phase = ConversationPhase(lambda now: speaking.is_set())
+
+        def scale() -> float | None:
+            return governor.scales().get(CONVERSATION)
+
+        phase.begin_thinking()
+        assert wait_for(lambda: scale() == want)
+        speaking.set()
+        phase.end_thinking()
+        assert wait_for(lambda: scale() == want and phase.current()[0] == "speaking")
+        phase.set_listening(True)  # barge-in while the robot speaks
+        assert wait_for(lambda: scale() == 1.0)
+        phase.set_listening(False)
+        assert wait_for(lambda: scale() == want)
+        speaking.clear()
+        assert wait_for(lambda: scale() == 1.0)
     finally:
         stop.set()
         thread.join(15)

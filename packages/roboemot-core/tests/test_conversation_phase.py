@@ -20,6 +20,23 @@ def clocked(speaking=lambda now: False):
     return ConversationPhase(speaking, clock=lambda: now[0]), now
 
 
+def test_listening_reads_true_during_an_utterance_whatever_the_phase():
+    """SPEC 5, 8: the vision governor keeps the full rate while someone talks, also when the
+    robot thinks or speaks (a barge-in); ``current`` gives phase and flag from one read."""
+    spoken = [False]
+    phase, _ = clocked(lambda t: spoken[0])
+    assert not phase.listening and phase.current() == ("idle", False)
+    phase.set_listening(True)
+    assert phase.listening and phase.current() == ("listening", True)
+    phase.begin_thinking()
+    assert phase.listening and phase.current() == ("thinking", True)
+    spoken[0] = True
+    assert phase.listening and phase.current() == ("speaking", True)
+    phase.set_listening(False)
+    assert not phase.listening and phase.current() == ("speaking", False)
+    assert "listening" not in phase.snapshot()  # the Live tab payload is unchanged
+
+
 def test_a_conversation_goes_idle_listening_thinking_speaking_idle():
     spoken = [False]
     phase, now = clocked(lambda t: spoken[0])
