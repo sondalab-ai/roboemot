@@ -11,6 +11,8 @@ P50 = 0.5
 P90 = 0.9
 P95 = 0.95
 P99 = 0.99
+# The report's usual summary: median and 90th percentile (plus count and max).
+SUMMARY_LEVELS = {"p50": P50, "p90": P90}
 
 
 def quantile(ordered: Sequence[float], q: float) -> float:

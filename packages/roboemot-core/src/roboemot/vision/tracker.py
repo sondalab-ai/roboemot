@@ -11,6 +11,10 @@ equals the optimal assignment for the few, well separated faces of a home scene.
 
 Track IDs come from an allocator that can be shared between trackers, so IDs are unique across
 faces and objects. No wall clock is read: everything uses the stamps passed in.
+
+An optional ``observer`` (``track_stats.TrackDiagnostics``) is told about starts, matches,
+misses, confirmations, refused low-score detections and endings, for the debug report. It only
+watches: the tracks and IDs are the same with or without it.
 """
 
 from __future__ import annotations
@@ -18,11 +22,15 @@ from __future__ import annotations
 import itertools
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from ..config.schema import TrackerConfig
 from .types import Box, Detection
+
+if TYPE_CHECKING:
+    from .track_stats import TrackDiagnostics
 
 # Kalman noise as a fraction of the box height (the ByteTrack defaults).
 POSITION_STD = 1.0 / 20
@@ -130,6 +138,7 @@ class Tracker:
         self.cfg = cfg
         self._ids = ids if ids is not None else itertools.count(1)
         self._tracks: list[Track] = []
+        self.observer: TrackDiagnostics | None = None
 
     def reset(self, ids: Iterator[int] | None = None) -> None:
         """Drop all tracks; IDs keep counting from the allocator unless a new one is given.
@@ -178,6 +187,12 @@ class Tracker:
         """
         gone = [t for t in self._tracks if stamp - t.last_stamp > self.cfg.lost_s]
         self._tracks = [t for t in self._tracks if t not in gone]
+        if self.observer is not None:
+            for t in gone:
+                if t.confirmed:
+                    self.observer.expired(t.track_id, t.box, t.last_stamp, stamp, self.cfg.lost_s)
+                else:
+                    self.observer.dropped(t.track_id)
         return [t.track_id for t in gone if t.confirmed]
 
     def update(self, detections: list[Detection], stamp: float) -> TrackerResult:
@@ -194,30 +209,73 @@ class Tracker:
         low = [d for d in detections if self.cfg.low_score <= d.score < self.cfg.high_score]
         matched, rest_t, rest_d = self._greedy(self._tracks, high, self.cfg.match_iou)
         recent = [t for t in rest_t if t._matched_last]
-        matched_low, rest_t2, _ = self._greedy(recent, low, self.cfg.low_match_iou)
-        missed = [t for t in rest_t if t not in recent] + rest_t2
+        matched_low, rest_t2, rest_low = self._greedy(recent, low, self.cfg.low_match_iou)
+        stale = [t for t in rest_t if t not in recent]
+        missed = stale + rest_t2
+        if self.observer is not None:
+            self._observe_low(self.observer, stale, rest_low, stamp)
         new_ids: set[int] = set()
         visible: list[Track] = []
         for t, d in matched + matched_low:
             t._correct(d)
             t.detection, t.score, t.last_stamp, t.hits = d, d.score, stamp, t.hits + 1
             t._matched_last = True
+            if self.observer is not None:
+                self.observer.matched(t.track_id)
             if not t.confirmed and t.hits >= self.cfg.confirm_hits:
                 t.confirmed = True
                 new_ids.add(t.track_id)
+                if self.observer is not None:
+                    self.observer.confirmed(t.track_id)
             if t.confirmed:
                 visible.append(t)
         for t in missed:
             t._matched_last = False
+            if self.observer is not None:
+                self.observer.missed(t.track_id)
         for d in rest_d:
             t = Track(next(self._ids), d.label, d.score, stamp, stamp, detection=d)
             t._start(d, stamp)
+            if self.observer is not None:
+                near = {m.track_id: m.box for m in missed if m.confirmed and m.label == d.label}
+                self.observer.started(t.track_id, d, stamp, near)
             if self.cfg.confirm_hits <= 1:
                 t.confirmed = True
                 new_ids.add(t.track_id)
                 visible.append(t)
+                if self.observer is not None:
+                    self.observer.confirmed(t.track_id)
             self._tracks.append(t)
         dropped = [t for t in self._tracks if not t.confirmed and not t._matched_last]
         self._tracks = [t for t in self._tracks if t not in dropped]
+        if self.observer is not None:
+            for t in dropped:
+                self.observer.dropped(t.track_id)
         visible.sort(key=lambda t: t.track_id)
         return TrackerResult(visible, new_ids, expired)
+
+    def _observe_low(
+        self, observer: TrackDiagnostics, stale: list[Track], low: list[Detection], stamp: float
+    ) -> None:
+        """Tell the observer which unmatched low-score detections lie near a track (IoU at least
+        ``low_match_iou``, same label) that the low pass skipped because it missed the update
+        before, and which overlap no live track of their label at all. Reads only;
+        O(tracks x low), nothing when there is no low-score detection left."""
+        if not low:
+            return
+        boxes = np.array([d.box for d in low]).reshape(-1, BOX_COLUMNS)
+        live = iou_matrix(np.array([t.box for t in self._tracks]).reshape(-1, BOX_COLUMNS), boxes)
+        unmatched = []
+        for j, d in enumerate(low):
+            near = [
+                (live[i, j], t)
+                for i, t in enumerate(self._tracks)
+                if t.label == d.label and live[i, j] > 0
+            ]
+            refusable = [p for p in near if p[1] in stale and p[0] >= self.cfg.low_match_iou]
+            if refusable:
+                observer.refused_low(max(refusable, key=lambda p: p[0])[1].track_id, d)
+            elif not near:
+                unmatched.append(d)
+        if unmatched:
+            observer.low_unmatched(unmatched, stamp)
