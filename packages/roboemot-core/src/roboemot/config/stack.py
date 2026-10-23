@@ -52,7 +52,8 @@ KEYED_LISTS = {"appraisal.rules": "event", "llm_routes": "name"}
 AUDIT_FILE_MODE = 0o600
 APP_FILE_MODE = 0o600  # app.yaml: owner only, it may hold a literal api_key (SPEC 12)
 _MOVED = yaml.safe_load(Path(__file__).with_name("moved_settings.yaml").read_text())
-RENAMED_SETTINGS: dict[str, str] = _MOVED["renamed"]  # old path -> new path
+RENAMED_SETTINGS: dict[str, str] = _MOVED["renamed"]  # old path -> new path (web UI file only)
+MIGRATED_SETTINGS: dict[str, str] = _MOVED["migrated"]  # old path -> new path (everywhere)
 REMOVED_SETTINGS: dict[str, str] = _MOVED["removed"]  # old path (or prefix) -> what replaces it
 DROPPED_SETTINGS: dict[str, str] = _MOVED["dropped"]  # old path (``*``: any entry) -> why
 # keyed list path -> {identity of an entry that no longer exists: why}
@@ -443,7 +444,49 @@ def load_yaml(path: Path) -> dict:
         raise ConfigError(f"{path}: top level must be a mapping")
     data, found = without_dropped("", data)
     log_dropped(str(path), found)
+    for old in migrate_paths(data):
+        log_migrated(str(path), old)
     return data
+
+
+def migrate_paths(data: dict[str, Any]) -> list[str]:
+    """Move, in place, every ``MIGRATED_SETTINGS`` path found in the nested ``data`` to its new
+    path (a value already at the new path wins) and drop the sections it leaves empty. Returns
+    the old paths that were found."""
+    found = []
+    for old, new in MIGRATED_SETTINGS.items():
+        *parents, leaf = old.split(".")
+        node: Any = data
+        for part in parents:
+            node = node.get(part) if isinstance(node, dict) else None
+        if not isinstance(node, dict) or leaf not in node:
+            continue
+        value = node.pop(leaf)
+        found.append(old)
+        try:
+            get_path(data, new)
+        except (KeyError, AttributeError, IndexError, TypeError):
+            set_path(data, new, value)
+        _prune(data, parents)
+    return found
+
+
+def _prune(data: dict[str, Any], parents: list[str]) -> None:
+    """Remove the empty mappings along ``parents``, deepest first."""
+    for depth in range(len(parents), 0, -1):
+        node: Any = data
+        for part in parents[: depth - 1]:
+            node = node.get(part) if isinstance(node, dict) else None
+        key = parents[depth - 1]
+        if isinstance(node, dict) and node.get(key) == {}:
+            del node[key]
+
+
+def log_migrated(source: str, path: str) -> None:
+    """One warning per ``source`` and migrated ``path``, naming the paths and never the value."""
+    if (source, path) not in _dropped_logged:
+        _dropped_logged.add((source, path))
+        log.warning("%s: setting %s moved to %s", source, path, MIGRATED_SETTINGS[path])
 
 
 def without_dropped(path: str, value: Any) -> tuple[Any, list[str]]:

@@ -260,3 +260,23 @@ def test_an_old_web_ui_file_with_the_minor_settings_restores_the_rest(tmp_path, 
     ):
         assert path in caplog.text, path
     assert "zork" not in caplog.text and "Hey" not in caplog.text
+
+
+def test_an_old_app_config_with_adult_register_values_moves_them_to_the_one_register(
+    tmp_path, caplog
+):
+    """An admin-confirmed adult value (a raised reply cap is a loosening) may sit in app.yaml: it
+    moves to the one register instead of failing the start."""
+    app = tmp_path / "app.yaml"
+    app.write_text(
+        "register:\n"
+        "  adult: {speech_rate: 1.1, max_reply_sentences: 2, minor_content_policy: false}\n"
+        "  child: {speech_rate: 0.7}\n"
+    )
+    with caplog.at_level("WARNING"):
+        cfg = ConfigStack.from_files(app=app).effective()
+    assert cfg.register.speech_rate == 1.1 and cfg.register.max_reply_sentences == 2
+    assert "setting register.adult.speech_rate moved to register.speech_rate" in caplog.text
+    assert "setting register.adult.minor_content_policy ignored" in caplog.text
+    assert "setting register.child ignored" in caplog.text
+    assert "1.1" not in caplog.text and "0.7" not in caplog.text

@@ -51,6 +51,7 @@ from roboemot.config.schema import RoboEmotConfig
 from roboemot.config.stack import (
     DROP,
     KEYED_LISTS,
+    MIGRATED_SETTINGS,
     NO_KEY,
     REMOVED_SETTINGS,
     RENAMED_SETTINGS,
@@ -1272,7 +1273,7 @@ def _migrated(stored: dict[str, Any], source: str) -> tuple[dict[str, Any], bool
         if value is DROP:
             continue
         stripped = stripped or bool(found)
-        new = RENAMED_SETTINGS.get(key, key)
+        new = RENAMED_SETTINGS.get(key) or MIGRATED_SETTINGS.get(key, key)
         if new != key and new in stored:
             continue
         out[new] = value
