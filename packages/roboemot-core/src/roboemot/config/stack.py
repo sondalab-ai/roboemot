@@ -58,6 +58,8 @@ REMOVED_SETTINGS: dict[str, str] = _MOVED["removed"]  # old path (or prefix) -> 
 DROPPED_SETTINGS: dict[str, str] = _MOVED["dropped"]  # old path (``*``: any entry) -> why
 # keyed list path -> {identity of an entry that no longer exists: why}
 DROPPED_ENTRIES: dict[str, dict[str, str]] = _MOVED["dropped_entries"]
+# keyed list path -> {a ``when`` key no event payload carries any more: why}
+DROPPED_WHEN: dict[str, dict[str, str]] = _MOVED["dropped_when"]
 DROP = object()  # ``without_dropped``: the value is a dropped setting as a whole
 _dropped_logged: set[tuple[str, str]] = set()  # (source, path) pairs already logged
 NO_KEY = ("", "none")  # api_key values that carry no key
@@ -444,16 +446,16 @@ def load_yaml(path: Path) -> dict:
         raise ConfigError(f"{path}: top level must be a mapping")
     data, found = without_dropped("", data)
     log_dropped(str(path), found)
-    for old in migrate_paths(data):
-        log_migrated(str(path), old)
+    for old, moved in migrate_paths(data):
+        log_migrated(str(path), old, moved=moved)
     return data
 
 
-def migrate_paths(data: dict[str, Any]) -> list[str]:
+def migrate_paths(data: dict[str, Any]) -> list[tuple[str, bool]]:
     """Move, in place, every ``MIGRATED_SETTINGS`` path found in the nested ``data`` to its new
-    path (a value already at the new path wins) and drop the sections it leaves empty. Returns
-    the old paths that were found."""
-    found = []
+    path and drop the sections it leaves empty. A value already at the new path wins: the old
+    one is then dropped. Returns ``(old path, moved)`` for each old path found."""
+    found: list[tuple[str, bool]] = []
     for old, new in MIGRATED_SETTINGS.items():
         *parents, leaf = old.split(".")
         node: Any = data
@@ -462,11 +464,12 @@ def migrate_paths(data: dict[str, Any]) -> list[str]:
         if not isinstance(node, dict) or leaf not in node:
             continue
         value = node.pop(leaf)
-        found.append(old)
         try:
             get_path(data, new)
+            found.append((old, False))
         except (KeyError, AttributeError, IndexError, TypeError):
             set_path(data, new, value)
+            found.append((old, True))
         _prune(data, parents)
     return found
 
@@ -482,11 +485,16 @@ def _prune(data: dict[str, Any], parents: list[str]) -> None:
             del node[key]
 
 
-def log_migrated(source: str, path: str) -> None:
-    """One warning per ``source`` and migrated ``path``, naming the paths and never the value."""
+def log_migrated(source: str, path: str, *, moved: bool) -> None:
+    """One warning per ``source`` and migrated ``path``, naming the paths and never the value:
+    moved to its new path, or ignored because a value was already set there."""
     if (source, path) not in _dropped_logged:
         _dropped_logged.add((source, path))
-        log.warning("%s: setting %s moved to %s", source, path, MIGRATED_SETTINGS[path])
+        new = MIGRATED_SETTINGS[path]
+        if moved:
+            log.warning("%s: setting %s moved to %s", source, path, new)
+        else:
+            log.warning("%s: setting %s ignored: %s already set", source, path, new)
 
 
 def without_dropped(path: str, value: Any) -> tuple[Any, list[str]]:
@@ -504,7 +512,7 @@ def without_dropped(path: str, value: Any) -> tuple[Any, list[str]]:
         if len(here) >= len(parts):
             return DROP, [path]
         _strip(value, parts[len(here) :], here, found)
-    for list_path in DROPPED_ENTRIES:
+    for list_path in sorted(DROPPED_ENTRIES.keys() | DROPPED_WHEN.keys()):
         parts = list_path.split(".")
         if here == parts[: len(here)]:
             _strip_entries(value, parts[len(here) :], list_path, found)
@@ -512,10 +520,16 @@ def without_dropped(path: str, value: Any) -> tuple[Any, list[str]]:
 
 
 def dropped_entry(list_path: str, ident: dict[str, Any]) -> bool:
-    """Whether the keyed-list entry ``ident`` of ``list_path`` no longer exists
-    (``DROPPED_ENTRIES``)."""
-    names = DROPPED_ENTRIES.get(list_path, {})
-    return list_path in KEYED_LISTS and ident.get(KEYED_LISTS[list_path]) in names
+    """Whether the keyed-list entry ``ident`` of ``list_path`` no longer exists: its identity is
+    in ``DROPPED_ENTRIES``, or its ``when`` names a key in ``DROPPED_WHEN`` (a rule that could
+    never match again)."""
+    if list_path not in KEYED_LISTS:
+        return False
+    when = ident.get("when")
+    gone = DROPPED_WHEN.get(list_path, {})
+    return ident.get(KEYED_LISTS[list_path]) in DROPPED_ENTRIES.get(list_path, {}) or (
+        isinstance(when, dict) and any(k in gone for k in when)
+    )
 
 
 def _strip_entries(node: Any, parts: list[str], list_path: str, found: list[str]) -> None:

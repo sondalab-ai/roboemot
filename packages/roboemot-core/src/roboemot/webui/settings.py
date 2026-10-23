@@ -66,6 +66,7 @@ from roboemot.config.stack import (
     keyed_index,
     keyed_ref,
     log_dropped,
+    log_migrated,
     set_path,
     without_dropped,
 )
@@ -1273,6 +1274,9 @@ def _migrated(stored: dict[str, Any], source: str) -> tuple[dict[str, Any], bool
         if value is DROP:
             continue
         stripped = stripped or bool(found)
+        if key in MIGRATED_SETTINGS:
+            log_migrated(source, key, moved=MIGRATED_SETTINGS[key] not in stored)
+            stripped = True  # the file is rewritten under the new path
         new = RENAMED_SETTINGS.get(key) or MIGRATED_SETTINGS.get(key, key)
         if new != key and new in stored:
             continue

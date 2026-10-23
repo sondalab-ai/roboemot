@@ -259,6 +259,7 @@ def test_an_old_web_ui_file_with_the_minor_settings_restores_the_rest(tmp_path, 
         "appraisal.rules[person.known_child]",
     ):
         assert path in caplog.text, path
+    assert "setting register.adult.speech_rate moved to register.speech_rate" in caplog.text
     assert "zork" not in caplog.text and "Hey" not in caplog.text
 
 
@@ -280,3 +281,79 @@ def test_an_old_app_config_with_adult_register_values_moves_them_to_the_one_regi
     assert "setting register.adult.minor_content_policy ignored" in caplog.text
     assert "setting register.child ignored" in caplog.text
     assert "1.1" not in caplog.text and "0.7" not in caplog.text
+
+
+AGE_WHEN_YAML = """\
+appraisal:
+  rules:
+    - {event: person.unknown_appears, when: {possible_minor: false}, valence: 0.2}
+    - {event: person.known, when: {age_group: child}, valence: 0.9}
+    - {event: person.known, when: {person_id: p-1}, valence: 0.7}
+"""
+
+
+def test_old_appraisal_rules_on_an_age_condition_are_dropped_and_logged(tmp_path, caplog):
+    """Review ZM S2: a rule whose `when` names age_group or possible_minor could never match
+    again (the payloads no longer carry them): it is dropped, by event, not left silently dead."""
+    app = tmp_path / "app.yaml"
+    app.write_text(AGE_WHEN_YAML)
+    with caplog.at_level("WARNING"):
+        cfg = ConfigStack.from_files(app=app).effective()
+    whens = [r.when for r in cfg.appraisal.rules]
+    assert {"person_id": "p-1"} in whens
+    assert not [w for w in whens if {"age_group", "possible_minor"} & set(w)]
+    assert "setting appraisal.rules[person.unknown_appears] ignored" in caplog.text
+    assert "setting appraisal.rules[person.known] ignored" in caplog.text
+    store = tmp_path / FILE
+    key = 'appraisal.rules[{"event":"person.known","when":{"age_group":"child"}}].valence'
+    write_overrides(store, {key: 0.3, "affect.update_hz": 33.0})
+    stack = ConfigStack()
+    with caplog.at_level("WARNING"):
+        SettingsEditor(stack, store=store).restore()
+    assert set(json.loads(store.read_text())["overrides"]) == {"affect.update_hz"}
+    assert f"{store}: setting appraisal.rules[person.known] ignored" in caplog.text
+
+
+def test_a_value_already_at_the_new_register_path_wins(tmp_path, caplog):
+    """Review ZM S5: an old adult value next to a value of the one register is dropped, and
+    logged as such, in app.yaml and in the web UI file."""
+    app = tmp_path / "app.yaml"
+    app.write_text("register:\n  speech_rate: 0.8\n  adult: {speech_rate: 1.1}\n")
+    with caplog.at_level("WARNING"):
+        cfg = ConfigStack.from_files(app=app).effective()
+    assert cfg.register.speech_rate == 0.8
+    assert "register.adult.speech_rate ignored: register.speech_rate already set" in caplog.text
+    assert "moved to" not in caplog.text
+    store = tmp_path / FILE
+    write_overrides(store, {"register.adult.speech_rate": 1.1, "register.speech_rate": 0.8})
+    stack = ConfigStack()
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        SettingsEditor(stack, store=store).restore()
+    assert stack.effective().register.speech_rate == 0.8
+    assert set(json.loads(store.read_text())["overrides"]) == {"register.speech_rate"}
+    assert f"{store}: setting register.adult.speech_rate ignored: register.speech_rate" in (
+        caplog.text
+    )
+
+
+def test_a_preset_with_the_old_settings_loads_through_extends(tmp_path, caplog):
+    """Review ZM S5: presets go through the same migration and dropping, also a parent one."""
+    (tmp_path / "base.yaml").write_text(
+        "safety: {minor_motion_factor: 0.5}\n"
+        "appraisal:\n  rules:\n    - {event: person.known_child, valence: 0.3, label: joy}\n"
+    )
+    (tmp_path / "old.yaml").write_text(
+        "extends: base\nregister:\n  adult: {speech_rate: 1.1}\n  child: {pitch_st: 2}\n"
+    )
+    with caplog.at_level("WARNING"):
+        cfg = ConfigStack.from_files(preset="old", preset_dirs=[tmp_path]).effective()
+    assert cfg.register.speech_rate == 1.1
+    assert not [r for r in cfg.appraisal.rules if r.event.startswith("person.known_")]
+    for line in (
+        "old.yaml: setting register.adult.speech_rate moved to register.speech_rate",
+        "old.yaml: setting register.child ignored",
+        "base.yaml: setting safety.minor_motion_factor ignored",
+        "base.yaml: setting appraisal.rules[person.known_child] ignored",
+    ):
+        assert line in caplog.text, line
