@@ -4,12 +4,13 @@
 deterministic; ``LatestFrameRunner`` drives it live. Per frame, when the governor allows:
 
 1. Faces are detected, filtered by ``face_min_px`` and tracked (stable ``track_id``). Tracks
-   unmatched for ``tracker.lost_s`` of capture time expire before association, so a face that
-   comes back after a long gap is a new track with no inherited identity or attributes.
+   unmatched for the larger of ``tracker.lost_s`` and ``face_lost_periods`` detection periods
+   at the governor's rate (capture time) expire before association, so a face that comes back
+   after a long gap is a new track with no inherited identity or attributes.
 2. A new track gets ``embedding_burst`` face evaluations, at least ``burst_min_gap_s`` apart
-   (stretched by the governor scale like every rate: ``gap / scale``, so a thinking or speaking
-   robot spends less on bursts too), stopping early once it is recognised, then one per
-   ``1 / embedding_hz``. Only confidently
+   (divided by the conversation scale only, so a thinking or speaking robot spends less on
+   bursts; the circadian and load scales slow bursts only through the detection rate),
+   stopping early once it is recognised, then one per ``1 / embedding_hz``. Only confidently
    detected faces of at least ``embed_min_face_px`` are embedded. The burst (5 by default)
    lets one missed vote still fit the SPEC 13 identity budget of 2.5 s with the 3-of-5 votes
    of SPEC 6. The embedding goes straight to ``Matcher.observe`` and is dropped; it is never
@@ -17,9 +18,11 @@ deterministic; ``LatestFrameRunner`` drives it live. Per frame, when the governo
 3. Per track, the first ``vision.attribute_crops`` face crops go to the attribute worker
    (skipped when the recognised person has declared age and gender); until it answers, age and
    gender are ``unknown`` (a possible minor). A job whose age comes back unknown (and no
-   declared age) is retried: ``vision.attribute_retry_s`` of capture time after the result, the
-   track collects new crops, until a confident age or a declared one stops it. The age stays
-   unknown, a possible minor, in between. Other visible faces that fall inside a
+   declared age) is retried: ``vision.attribute_retry_s`` of capture time after the result (or,
+   while the robot thinks or speaks, at the first face frame after), the track collects new
+   crops, until a confident age or a declared one stops it. An adult or senior age reached
+   through a retry needs a second agreeing confident result. The age stays unknown, a possible
+   minor, in between. Other visible faces that fall inside a
    crop's margin are filled with the letterbox grey (outside the subject's own box), so a
    neighbour's face cannot pull the estimate toward the neighbour's age.
 4. Published: ``percept.face`` (no embedding), ``person.recognized`` when a track turns into a
@@ -46,8 +49,9 @@ For the debug report (SPEC 12A) ``stats`` adds face track churn (created, ended,
 rate over ``vision.report_rate_window_s`` of capture time, the visible lifetime of the last
 ``vision.report_window`` ended tracks) and the age and gender jobs (the worker's counts and
 timings, results dropped because their track ended or never sent because the queue stayed full,
-retry jobs sent for an unknown age, capture time from a track's first detection to each estimate,
-and each job's outcome: adult, minor or unknown; with retries these count jobs, not tracks).
+retry jobs sent for an unknown age, ended tracks whose age was still unknown, capture time from a
+track's first detection to its first estimate, and the age each job left the track with: adult,
+minor or unknown; with retries these count jobs, not tracks).
 ``rate_scales`` lists the governor's multipliers by source (circadian, load, conversation)
 beside their product ``rate_scale``. Numbers only; the frame thread writes them and the report
 thread reads them under one lock.
@@ -79,7 +83,7 @@ from ..stats import P50, P90, summarise
 from ..world import Observation
 from .attributes import AttributeWorker
 from .geometry import CameraModel
-from .governor import EPSILON_S, RateGovernor
+from .governor import CONVERSATION, EPSILON_S, RateGovernor
 from .stages import (
     AppearanceEmbedder,
     AttributeEstimator,
@@ -131,6 +135,9 @@ class _FaceState:
     attr_stamp: float | None = None
     retry_at: float | None = None  # capture stamp from which an unknown age is estimated again
     retrying: bool = False  # the crops being collected are for a retry job
+    in_flight: bool = False  # a job was sent and its result not absorbed yet
+    jobs_done: int = 0  # results absorbed for this track
+    candidate: str | None = None  # a retry's non-minor age waiting for a second agreeing result
 
 
 @dataclass
@@ -228,6 +235,8 @@ class VisionPipeline:
         self._outcomes = dict.fromkeys(OUTCOMES, 0)
         self._attr_drops = {"dropped_queue_full": 0, "dropped_track_gone": 0}
         self._retries = 0
+        self._ended_unknown = 0
+        self._face_lost_held = 0.0
         matcher.registry.add_forget_listener(self._on_forget)
 
     def process(self, frame: Frame) -> FrameReport:
@@ -243,6 +252,7 @@ class VisionPipeline:
             self._last_stamp = stamp
         self._absorb_attributes(stamp)
         self._tap_light(frame)
+        self.face_tracker.cfg = self._face_tracker_cfg()
         self.object_tracker.cfg = self._object_tracker_cfg()
         self._expire(stamp)
         if self.governor.scale <= 0:
@@ -293,6 +303,7 @@ class VisionPipeline:
         self.face_tracker.reset(ids)
         self.object_tracker.reset(ids)
         self._lost_held = 0.0
+        self._face_lost_held = 0.0
         self.governor.reset()
         if self.worker is not None:
             self.worker.cancel_pending()
@@ -314,9 +325,26 @@ class VisionPipeline:
         if self.worker is not None:
             self.worker.config = identity  # frames_min and the gender rule apply to new jobs
         self.governor.rates = vision.rates
-        self.face_tracker.cfg = vision.tracker
+        self.face_tracker.cfg = self._face_tracker_cfg()
         self.object_tracker.cfg = self._object_tracker_cfg()
         self.matcher.config = identity
+
+    def _face_lost_s(self) -> float:
+        """Lifetime of a face track at the rate the governor allows now: the larger of
+        ``tracker.lost_s`` and ``face_lost_periods`` face-detection periods."""
+        lost = self.cfg.tracker.lost_s
+        period = self.governor.period("detection")
+        if math.isfinite(period):
+            lost = max(lost, self.cfg.face_lost_periods * period)
+        return lost
+
+    def _face_tracker_cfg(self) -> TrackerConfig:
+        """Face tracker settings: ``vision.tracker`` with a lifetime that follows the detection
+        period (SPEC 5, 13), so a slower detector (conversation, circadian or load scale) does
+        not end tracks between two detections. As for objects, the longer lifetime is kept
+        until the next face frame has been folded in after the rate goes back up."""
+        lost = max(self._face_lost_s(), self._face_lost_held)
+        return self.cfg.tracker.model_copy(update={"lost_s": lost})
 
     def _object_lost_s(self) -> float:
         """Lifetime of an animal or object track at the rate the governor allows now."""
@@ -368,6 +396,7 @@ class VisionPipeline:
             attributes: dict[str, Any] = {
                 **self._attr_drops,
                 "retries": self._retries,
+                "ended_unknown": self._ended_unknown,
                 "outcomes": dict(self._outcomes),
                 "time_to_estimate_ms": summarise(list(self._to_estimate_ms), SUMMARY_LEVELS),
             }
@@ -412,10 +441,12 @@ class VisionPipeline:
         return True
 
     def _on_forget(self, owner_id: str) -> None:
-        """Registry forget listener: tracks of that person become unknown again."""
+        """Registry forget listener: tracks of that person become unknown again, and a declared
+        age that hid an unknown estimate no longer does, so the age job runs or is retried."""
         for state in self._faces.values():
             if state.owner_id == owner_id:
                 state.owner_id = None
+                self._unhide_age(state)
             if state.announced == owner_id:
                 state.announced = None
         for entity in self._entities.values():
@@ -434,18 +465,31 @@ class VisionPipeline:
         if state is not None:
             self._end_face(state)
 
+    def _unhide_age(self, state: _FaceState) -> None:
+        """After a forget: a track whose job was skipped for declared values collects crops,
+        and one whose estimate is unknown (no job in flight) is retried at once."""
+        if self.worker is None:
+            return
+        if state.attr == "skipped":
+            state.attr = "collecting"
+        elif not state.in_flight and state.retry_at is None and state.age.value == UNKNOWN:
+            state.retry_at = state.last_seen
+
     def _end_face(self, state: _FaceState) -> None:
-        """Count an ended face track: its visible lifetime, and a job it never sent because the
-        attribute queue stayed full while its crops were ready."""
+        """Count an ended face track: its visible lifetime, a job it never sent because the
+        attribute queue stayed full while its crops were ready, and whether its age was still
+        unknown (a possible minor for its whole life)."""
         never_sent = (
             self.worker is not None
             and state.attr == "collecting"
             and len(state.crops) >= self.cfg.attribute_crops
         )
+        unknown = self.worker is not None and self._attributes(state)[0].value == UNKNOWN
         with self._report_lock:
             self._tracks_ended += 1
             self._lifetimes_s.append(state.last_seen - state.first_seen)
             self._attr_drops["dropped_queue_full"] += never_sent
+            self._ended_unknown += unknown
 
     def _new_face(self, track: Track, stamp: float) -> _FaceState:
         """Per-track state of a newly confirmed face track, counted for the churn report."""
@@ -478,6 +522,7 @@ class VisionPipeline:
         min_px = self.cfg.face_min_px
         dets = [d for d in self.face_detector.detect(frame.image) if d.min_side >= min_px]
         result = self.face_tracker.update(dets, frame.stamp)
+        self._face_lost_held = self._face_lost_s()
         self._visible = result.visible
         for track_id in result.removed_ids:
             self._drop_face(track_id)
@@ -531,7 +576,7 @@ class VisionPipeline:
             return True
         gap = stamp - state.last_embed
         if state.owner_id is None and state.evals < self.cfg.embedding_burst:
-            return gap >= self.governor.stretch(self.cfg.burst_min_gap_s) - EPSILON_S
+            return gap >= self.governor.stretch(self.cfg.burst_min_gap_s, CONVERSATION) - EPSILON_S
         return gap >= self.governor.period("embedding")
 
     def _evaluate_face(self, frame: Frame, track: Track, state: _FaceState) -> None:
@@ -568,7 +613,8 @@ class VisionPipeline:
             return
         if self._declared_complete(state.owner_id):
             state.attr, state.crops = "skipped", []
-            self._count_outcome(self._attributes(state)[0])
+            if state.jobs_done == 0:  # an earlier job already counted its outcome
+                self._count_outcome(self._attributes(state)[0])
             return
         needed = self.cfg.attribute_crops
         gap = self.cfg.attribute_crop_interval_s
@@ -584,7 +630,7 @@ class VisionPipeline:
             track.track_id, state.generation, state.crops
         ):
             state.crops = []
-            state.attr = "submitted"
+            state.attr, state.in_flight = "submitted", True
             if state.retrying:
                 with self._report_lock:
                     self._retries += 1
@@ -592,8 +638,12 @@ class VisionPipeline:
     def _rearm(self, state: _FaceState, stamp: float) -> None:
         """Back to collecting crops once a retry is due (SPEC 5): the age stays unknown, a
         possible minor, meanwhile. Not when the age turned known since (a declared value of a
-        person recognised in between), which also cancels the retry."""
+        person recognised in between), which also cancels the retry. While the robot thinks or
+        speaks (conversation scale below 1) a due retry waits, ``retry_at`` kept, for the first
+        detection frame after it, so the TTS keeps the CPU."""
         if state.retry_at is None or stamp < state.retry_at:
+            return
+        if self.governor.scale_of(CONVERSATION) < 1.0:
             return
         state.retry_at = None
         if self._attributes(state)[0].value != UNKNOWN:
@@ -632,13 +682,33 @@ class VisionPipeline:
                 with self._report_lock:
                     self._attr_drops["dropped_track_gone"] += 1
                 continue
-            state.age, state.gender, state.attr_stamp = result.age, result.gender, result.stamp
+            first = state.jobs_done == 0
+            state.jobs_done += 1
+            state.in_flight = False
+            state.age = self._confirmed_age(state, result.age)
+            state.gender, state.attr_stamp = result.gender, result.stamp
             age = self._attributes(state)[0]
             self._count_outcome(age)
             if age.value == UNKNOWN:  # retried later; a confident or declared age stops it
                 state.retry_at = stamp + self.cfg.attribute_retry_s
-            with self._report_lock:
-                self._to_estimate_ms.append((stamp - state.first_seen) * MS_PER_S)
+            if first:
+                with self._report_lock:
+                    self._to_estimate_ms.append((stamp - state.first_seen) * MS_PER_S)
+
+    def _confirmed_age(self, state: _FaceState, age: Estimate) -> Estimate:
+        """The age a result gives the track (SPEC 5). Retrying until a crop clears the score
+        floor selects for confident errors, so a non-minor (adult or senior) age reached
+        through a retry counts only when the next confident result agrees with it; until then
+        it is held as ``candidate`` and the track stays unknown, a possible minor. Any other
+        result (unknown, a minor group, or the first job's) clears the candidate."""
+        if not state.retrying or age.value == UNKNOWN or age.possible_minor:
+            state.candidate = None
+            return age
+        if state.candidate == age.value:
+            state.candidate = None
+            return age
+        state.candidate = age.value
+        return NO_ESTIMATE
 
     def _attributes(self, state: _FaceState) -> tuple[Estimate, Estimate]:
         """Declared values of a recognised person override the estimates (SPEC 5)."""
@@ -776,7 +846,8 @@ class VisionPipeline:
         else:
             gap = stamp - state.last_embed
             if state.owner_id is None and state.evals < self.cfg.embedding_burst:
-                due = gap >= self.governor.stretch(self.cfg.entity_burst_min_gap_s) - EPSILON_S
+                burst_gap = self.governor.stretch(self.cfg.entity_burst_min_gap_s, CONVERSATION)
+                due = gap >= burst_gap - EPSILON_S
             else:
                 due = gap >= self.governor.period("appearance")
         if not due:

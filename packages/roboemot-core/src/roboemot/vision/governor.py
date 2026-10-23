@@ -53,11 +53,17 @@ class RateGovernor:
         with self._lock:
             return dict(self._scales)
 
-    def stretch(self, gap_s: float) -> float:
-        """A minimum gap between two runs, stretched by the current scale like the stage
-        periods are: ``gap_s / scale``, infinite when the scale is 0. A gap of 0 stays 0 while
-        any stage runs (no 0/0)."""
-        scale = self.scale
+    def scale_of(self, source: str) -> float:
+        """The multiplier one source set; 1 when it set none."""
+        with self._lock:
+            return self._scales.get(source, 1.0)
+
+    def stretch(self, gap_s: float, source: str) -> float:
+        """A minimum gap between two runs, stretched by one source's scale: ``gap_s / scale``,
+        infinite when that scale is 0. A gap of 0 stays 0 while the scale is above 0 (no 0/0).
+        The pipeline stretches the new-track burst gaps by ``CONVERSATION`` only, so the
+        circadian and load scales keep bursts bounded by the detection period alone."""
+        scale = self.scale_of(source)
         if scale <= 0:
             return math.inf
         return gap_s / scale

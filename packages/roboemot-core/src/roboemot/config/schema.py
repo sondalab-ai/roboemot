@@ -1382,9 +1382,6 @@ class EnrollmentConfig(Strict):
 # yolo11n-face-age is a YOLO11 network: its input side must be a multiple of the largest stride
 # (ONNX metadata ``stride``, checked again at load).
 ATTRIBUTE_INPUT_STRIDE_PX = 32
-# Face detections a track gets within tracker.lost_s at the conversation rate, at least: one
-# missed detection then never ends a track (SPEC 5, 13).
-TRACK_DETECTIONS_PER_LOST_MIN = 2.0
 
 ATTENTION_CATEGORIES = ("active_speaker", "enrolled_person", "nearest_face", "salient_motion")
 
@@ -1508,11 +1505,11 @@ class VisionRates(Strict):
     conversation_scale: float = param(
         0.5,
         "Vision rate multiplier while the robot thinks or speaks (SPEC 5, 8, 13), so the TTS "
-        "keeps its CPU; listening and idle keep 1. It also stretches the new-track burst gaps. "
-        "Detection at detection_hz x this must stay well above 1 / tracker.lost_s or face tracks "
-        "end between two detections: the configuration is rejected below 2 detections per "
-        "lost_s",
-        ge=0.05,
+        "keeps its CPU; an utterance in progress and idle keep 1. It also divides the new-track "
+        "burst gaps. At least 0.35, so the 3-of-5 identity decision of a track that starts while "
+        "the robot speaks stays inside the 2.5 s budget of SPEC 13 (awake with one missed vote, "
+        "drowsy with none)",
+        ge=0.35,
         le=1,
     )
 
@@ -1553,6 +1550,14 @@ class VisionConfig(Strict):
     )
     face_min_px: int = param(
         24, "Faces with a shorter box side are ignored", unit="px", ge=8, le=512
+    )
+    face_lost_periods: float = param(
+        3.0,
+        "A face track also survives this many face-detection periods at the rate the governor "
+        "allows now: the lifetime is the larger of this and tracker.lost_s, so a slower detector "
+        "(conversation, circadian or load scale) does not end tracks between two detections",
+        ge=1,
+        le=100,
     )
     embed_min_face_px: int = param(
         40, "Faces with a shorter box side are tracked but not embedded", unit="px", ge=8, le=512
@@ -1621,8 +1626,10 @@ class VisionConfig(Strict):
     attribute_retry_s: float = param(
         5.0,
         "A track whose age job came back unknown (and no declared age) collects new crops for "
-        "another job this long after the result (capture time, SPEC 5); a confident age stops "
-        "the retries, and the track stays a possible minor until then",
+        "another job this long after the result (capture time, SPEC 5), or at the first face "
+        "frame after the robot stops thinking or speaking; a confident age stops the retries "
+        "(an adult or senior one reached by a retry needs a second agreeing result), and the "
+        "track stays a possible minor until then",
         unit="s",
         ge=0.5,
         le=600,
@@ -1746,14 +1753,6 @@ class VisionConfig(Strict):
         if self.attribute_input_px % ATTRIBUTE_INPUT_STRIDE_PX:
             raise ValueError(
                 f"vision.attribute_input_px must be a multiple of {ATTRIBUTE_INPUT_STRIDE_PX}"
-            )
-        rates = self.rates
-        per_lost = rates.detection_hz * rates.conversation_scale * self.tracker.lost_s
-        if per_lost < TRACK_DETECTIONS_PER_LOST_MIN:
-            raise ValueError(
-                "vision.rates.detection_hz x conversation_scale x tracker.lost_s must be at "
-                f"least {TRACK_DETECTIONS_PER_LOST_MIN:g}: face tracks would end between two "
-                "detections while the robot thinks or speaks"
             )
         return self
 
