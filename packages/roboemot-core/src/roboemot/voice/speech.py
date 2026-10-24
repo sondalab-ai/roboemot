@@ -4,10 +4,12 @@
 worker), so the caller, the conversation worker or the app tick, never blocks on synthesis.
 ``say`` composes the sentence's :class:`~roboemot.voice.prosody.Delivery` from the voice
 configuration, the persona effects, the register, the circadian state and the mood the caller
-passes, queues it, and the loop streams it through the backend into the sink, which resamples
-(the robot's speaker). ``stop`` is the barge-in path: it cuts the sink first, then cancels the
-synthesis in flight and drops the queue; an epoch counter makes any chunk that was already on its
-way fall on the floor, so nothing plays after ``stop`` returns.
+passes, plus the sentence's variation (seeded by the utterance id and the sentence's index in it;
+a question is raised; the rest of a sentence the splitter cut keeps the delivery of its first
+piece), queues it, and the loop streams it through the backend into the sink,
+which resamples (the robot's speaker). ``stop`` is the barge-in path: it cuts the sink first,
+then cancels the synthesis in flight and drops the queue; an epoch counter makes any chunk that
+was already on its way fall on the floor, so nothing plays after ``stop`` returns.
 
 The bus gets ``speech.say`` with ids, lengths, language and mood, never the text (SPEC 12).
 
@@ -60,6 +62,7 @@ PLAYED_WINDOW = 64  # sentences whose playback start is remembered, for ``played
 READY_TIMEOUT_S = 5.0
 JOIN_TIMEOUT_S = 2.0
 RTF_LEVELS = {"p50": P50, "p90": P90}
+SAID_UTTERANCES_MAX = 64  # answers whose sentence count and last delivery are remembered
 
 
 QUESTION_MARKS = ("?", "？")
@@ -136,6 +139,8 @@ class SpeechOutput:
         self._unplayed: set[int] = set()
         self._ended: collections.OrderedDict[int, float] = collections.OrderedDict()
         self._question_end: float | None = None  # end of the last spoken sentence, if a question
+        # utterance -> (index of its next sentence, delivery of its last one)
+        self._said: collections.OrderedDict[int, tuple[int, Delivery]] = collections.OrderedDict()
         window = config.voice.report_window
         self._rtf: collections.deque[float] = collections.deque(maxlen=window)
         self._rtf_sentence: collections.deque[float] = collections.deque(maxlen=window)
@@ -226,26 +231,46 @@ class SpeechOutput:
         mood: str | None,
         intensity: float,
         utterance: int | None = None,
+        continued: bool = False,
     ) -> int | None:
         """Queue one sentence; returns its id, or ``None`` when it was dropped (queue full or
         closed). Safe from any thread. The caller resolves ``mood`` (affect label, or the LLM's
-        tag through ``resolve_tag``) and passes the register and circadian state of this moment."""
+        tag through ``resolve_tag``) and passes the register and circadian state of this moment.
+        ``continued`` (the splitter's mark on the rest of a cut sentence) reuses the delivery of
+        the utterance's previous piece, so one sentence is spoken with one delivery."""
         cfg = self.config
-        delivery = compose_delivery(
-            cfg.voice,
-            register=register,
-            circadian=circadian,
-            mood=mood,
-            intensity=intensity,
-            persona=effects(cfg.persona),
-        )
+        if utterance is None:
+            utterance = self.new_utterance()
+        with self._lock:
+            previous = self._said.get(utterance)
+        if continued and previous is not None:
+            index, delivery = previous
+        else:
+            index = previous[0] if previous is not None else 0
+            delivery = compose_delivery(
+                cfg.voice,
+                register=register,
+                circadian=circadian,
+                mood=mood,
+                intensity=intensity,
+                persona=effects(cfg.persona),
+                seed=utterance,
+                index=index,
+                question=ends_with_question(text),
+            )
+            index += 1
+        with self._lock:
+            self._said.pop(utterance, None)
+            self._said[utterance] = (index, delivery)
+            while len(self._said) > SAID_UTTERANCES_MAX:
+                self._said.popitem(last=False)
         with self._lock:
             if self._closed or len(self._jobs) >= cfg.voice.queue_max_sentences:
                 self.sentences_dropped += 1
                 return None
             job = _Job(
                 next(self._ids),
-                utterance if utterance is not None else self.new_utterance(),
+                utterance,
                 text,
                 language,
                 delivery,

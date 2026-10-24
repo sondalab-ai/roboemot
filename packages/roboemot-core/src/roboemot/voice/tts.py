@@ -60,6 +60,7 @@ class AudioChunk:
 class Sentence:
     text: str
     mood: str | None = None  # the LLM's tag for it (``mood_source: llm_tagged``)
+    continued: bool = False  # the rest of a sentence the splitter cut at ``max_chars``
 
 
 class TTSBackend(Protocol):
@@ -170,9 +171,10 @@ class SentenceSplitter:
     A sentence ends at ``. ! ? …`` followed by whitespace (the look-ahead keeps decimals such as
     ``3.5``, initials and the abbreviations in ``ABBREVIATIONS`` whole; a dot before a lower-case
     word does not end one either) or at a newline. Text that reaches ``max_chars`` without an end
-    is cut at the last comma, else the last space. With ``strip_tags`` (``mood_source:
-    llm_tagged``) ``[mood=x]`` tags, even split across deltas, are removed, start a new sentence
-    and set the mood of what follows.
+    is cut at the last comma, else the last space; the pieces after such a cut are marked
+    ``continued``, so the speech output keeps one delivery for the whole sentence. With
+    ``strip_tags`` (``mood_source: llm_tagged``) ``[mood=x]`` tags, even split across deltas, are
+    removed, start a new sentence and set the mood of what follows.
     """
 
     def __init__(self, max_chars: int, *, strip_tags: bool = False) -> None:
@@ -180,6 +182,7 @@ class SentenceSplitter:
         self._pending = ""
         self._tail = ""  # raw text that may be the start of a tag
         self._mood: str | None = None
+        self._continued = False  # the next piece continues a cut sentence
 
     def feed(self, delta: str) -> list[Sentence]:
         """Add a text delta; returns the sentences it completed (possibly none)."""
@@ -191,7 +194,7 @@ class SentenceSplitter:
             for m in TAG.finditer(raw):
                 self._add(raw[pos : m.start()], out)
                 self._emit_pending(out)
-                self._mood = m.group(1)
+                self._mood, self._continued = m.group(1), False
                 pos = m.end()
             raw = raw[pos:]
             cut = self._partial_tag_start(raw)
@@ -225,7 +228,8 @@ class SentenceSplitter:
     def _emit(self, text: str, out: list[Sentence]) -> None:
         text = text.strip()
         if any(c.isalnum() for c in text):
-            out.append(Sentence(text, self._mood))
+            out.append(Sentence(text, self._mood, self._continued))
+            self._continued = False
 
     def _emit_pending(self, out: list[Sentence]) -> None:
         self._emit(self._pending, out)
@@ -261,6 +265,7 @@ class SentenceSplitter:
         while len(buf) > self.max_chars:
             cut = self._cut_point(buf)
             self._emit(buf[:cut], out)
+            self._continued = True
             buf = buf[cut:]
         self._pending = buf
 

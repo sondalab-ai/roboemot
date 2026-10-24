@@ -698,3 +698,57 @@ def test_a_failing_sentence_still_ends_the_stream_but_a_stopped_one_does_not(mak
     say(out2)
     assert wait_for(lambda: out2._current is not None and out2._current.done())
     assert sink2.ends == 0  # the stop already reset the sink's stream
+
+
+def test_sentences_of_one_reply_vary_by_index_and_a_question_is_raised(make):
+    """SPEC 8, variation: the reply's id seeds each sentence's offsets, so the same reply gets the
+    same delivery again; a question gets the configured raise on top."""
+    from roboemot.persona import effects
+    from roboemot.voice.prosody import compose_delivery
+
+    backend = FakeBackend()
+    out = make(backend)
+    u = out.new_utterance()
+    for text in ("Uno.", "Due.", "Tre?"):
+        say(out, text, utterance=u)
+    assert wait_for(lambda: len(backend.deliveries) == 3)
+    cfg = out.config
+
+    def expected(index, question):
+        return compose_delivery(
+            cfg.voice, register=REG, circadian=CIRC, mood=None, intensity=0.0,
+            persona=effects(cfg.persona), seed=u, index=index, question=question,
+        )  # fmt: skip
+
+    assert backend.deliveries == [expected(0, False), expected(1, False), expected(2, True)]
+    assert len({d.pitch_st for d in backend.deliveries}) == 3
+
+
+def test_the_pieces_of_a_cut_sentence_share_one_delivery(make):
+    """Review S3: a continuation reuses the first piece's delivery (index, variation and the
+    question raise, which only the full sentence could tell), and the next sentence goes on."""
+    backend = FakeBackend()
+    out = make(backend)
+    u = out.new_utterance()
+    say(out, "Una frase lunga, molto lunga,", utterance=u)
+    say(out, "che finisce con una domanda?", utterance=u, continued=True)
+    say(out, "Poi un'altra.", utterance=u)
+    assert wait_for(lambda: len(backend.deliveries) == 3)
+    head, tail, nxt = backend.deliveries
+    assert tail == head
+    assert nxt != head
+
+
+def test_a_dropped_sentence_does_not_repeat_a_delivery_of_its_reply(make):
+    backend = HoldingBackend()
+    cfg = RoboEmotConfig.model_validate({"voice": {"queue_max_sentences": 1}})
+    out = make(backend, cfg=cfg)
+    u = out.new_utterance()
+    say(out, "Uno.", utterance=u)
+    assert wait_for(lambda: backend.started.is_set())
+    assert say(out, "Due.", utterance=u) is not None  # queued
+    assert say(out, "Tre.", utterance=u) is None  # dropped: queue full
+    out.stop()
+    later = say(out, "Quattro.", utterance=u)
+    assert later is not None
+    assert out._said[u][0] == 4  # the drop consumed index 2, the sequence goes on

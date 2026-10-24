@@ -322,6 +322,16 @@ def test_a_failing_summary_does_not_stop_the_answer(rigs):
     assert rig.speech.texts() == ["Va bene."]
 
 
+def test_a_sentence_cut_by_the_splitter_is_said_as_a_continuation(rigs):
+    """Review S3: the speech output keeps one delivery for the pieces of one cut sentence."""
+    rig = rigs(voice={"sentence_max_chars": 40})
+    long = "Questa frase è lunga, molto lunga, davvero troppo lunga per una sola richiesta. "
+    rig.server.scripts["lan.local"] = [long]
+    rig.turn("ciao")
+    flags = [s["continued"] for s in rig.speech.said]
+    assert len(flags) >= 2 and flags == [False] + [True] * (len(flags) - 1)
+
+
 def test_mood_tags_are_stripped_and_used_when_close_to_the_affect_state(rigs):
     rig = rigs(voice={"mood_source": "llm_tagged"})
     rig.server.scripts["lan.local"] = ["[mood=joy] Che bello! ", "[mood=anger] Oh no!"]

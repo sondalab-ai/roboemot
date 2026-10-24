@@ -59,8 +59,10 @@ behaviour:                      # config layer 2 (SPEC 11A): this robot's defaul
   # spellings the small Vosk models produce for it (`reachy` itself is out of their vocabulary).
   # Voice (SPEC 8): a child-like, gender-neutral voice, chosen by ear by the owner (2026-10-21).
   # The dsp pitch shift is varispeed, so the formants move with the pitch. The limits are wider than
-  # the library's (-4, 4) so moods (+-2 x expressivity), the energy curve (-1 to +0.5) and the
-  # register's pitch_st keep room; the delivery clamps at +8 (2^(8/12) = 1.59x length_scale).
+  # the library's (-4, 4) so moods (-2.5 to +3 x expressivity), the sentence variation (+-0.8 and a
+  # question's +1, x expressivity), the energy curve (-1 to +0.5) and the register's pitch_st keep
+  # room; the delivery clamps at +8 (2^(8/12) = 1.59x length_scale), which a surprised question
+  # can reach: liveliness comes mostly from rate, pauses, variability and volume.
   # Only the name fields and `base.pitch_st` / `limits.pitch_st` may sit under `voice` in a manifest.
   voice:
     base: {pitch_st: 5}
