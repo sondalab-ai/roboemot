@@ -1840,6 +1840,26 @@ class VoiceLimits(Strict):
     variability: tuple[float, float] = param((0.0, 1.0), "Allowed variability range")
 
 
+class VoiceVariation(Strict):
+    """Within one reply each sentence gets its own rate and pitch offset, drawn from the reply's
+    seed and the sentence's index (deterministic, bounded), so a long answer is not monotone."""
+
+    rate: float = param(
+        0.05, "Largest rate offset of one sentence, times the expressivity", ge=0, le=0.3
+    )
+    pitch_st: float = param(
+        0.8,
+        "Largest pitch offset of one sentence, times the expressivity",
+        unit="semitones", ge=0, le=3,
+    )  # fmt: skip
+    question_pitch_st: float = param(
+        1.0,
+        "Pitch raise of a sentence that ends in a question mark, times the expressivity (the "
+        "DSP pitch shift moves the whole sentence, not only its end)",
+        unit="semitones", ge=0, le=4,
+    )  # fmt: skip
+
+
 class VadConfig(Strict):
     threshold: float = param(
         0.5, "Speech probability at or above which a frame counts as speech", ge=0.05, le=0.95
@@ -2291,40 +2311,84 @@ class VoiceConfig(Strict):
     llm_tag_max_deviation: float = param(
         0.3, "Max distance of an LLM mood tag from the affect state", ge=0, le=2
     )
+    intensity_exponent: float = param(
+        0.5,
+        "Mood weight = intensity ** exponent x expressivity: below 1 a mid-intensity mood is "
+        "heard (affect intensity rarely passes 0.5), 1 is linear; 0 stays 0",
+        ge=0.1, le=2,
+    )  # fmt: skip
     moods: dict[str, Prosody] = param(
         {
+            "calm": {
+                "rate": -0.06,
+                "pitch_st": -0.5,
+                "volume_db": -1,
+                "variability": -0.1,
+                "pause_scale": 1.2,
+                "instructions": "calm, warm, unhurried",
+            },
             "joy": {
-                "rate": 0.10,
-                "pitch_st": 2,
-                "volume_db": 1,
-                "variability": 0.2,
+                "rate": 0.15,
+                "pitch_st": 2.5,
+                "volume_db": 1.5,
+                "variability": 0.25,
                 "pause_scale": 0.8,
                 "instructions": "bright, warm, smiling",
                 "sounds": ["giggle"],
             },
+            "curiosity": {
+                "rate": 0.10,
+                "pitch_st": 1.5,
+                "variability": 0.15,
+                "pause_scale": 1.05,
+                "instructions": "intrigued, rising intonation",
+            },
+            "surprise": {
+                "rate": 0.20,
+                "pitch_st": 3,
+                "volume_db": 2,
+                "variability": 0.35,
+                "pause_scale": 0.75,
+                "instructions": "astonished, quick, wide-eyed",
+            },
             "sadness": {
-                "rate": -0.15,
-                "pitch_st": -2,
+                "rate": -0.18,
+                "pitch_st": -2.5,
                 "volume_db": -3,
-                "variability": -0.2,
+                "variability": -0.25,
                 "pause_scale": 1.4,
                 "instructions": "soft, slow, a little down",
             },
-            "curiosity": {
-                "rate": 0.05,
+            "fear": {
+                "rate": 0.15,
                 "pitch_st": 1,
-                "pause_scale": 1.1,
-                "instructions": "intrigued, rising intonation",
+                "volume_db": -3,
+                "variability": 0.2,
+                "pause_scale": 0.8,
+                "instructions": "tense, hushed, quick",
+            },
+            "annoyance": {
+                "rate": 0.06,
+                "pitch_st": -1,
+                "volume_db": 2,
+                "variability": -0.2,
+                "pause_scale": 0.7,
+                "instructions": "firm, clipped, a little curt",
             },
             "sleepy": {
-                "rate": -0.20,
+                "rate": -0.25,
+                "pitch_st": -1,
                 "volume_db": -6,
+                "variability": -0.2,
                 "pause_scale": 1.6,
                 "instructions": "drowsy, quiet, near a whisper",
                 "sounds": ["yawn"],
             },
         },
-        "Per-mood prosody deltas",
+        "Per-mood prosody deltas, at full weight; one per affect label",
+    )
+    variation: VoiceVariation = param(
+        {}, "Sentence-to-sentence variation within one reply, and the raise of a question"
     )
     limits: VoiceLimits = param({}, "Clamp for the final delivery")
     sentence_max_chars: int = param(

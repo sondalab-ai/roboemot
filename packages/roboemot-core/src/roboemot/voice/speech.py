@@ -4,10 +4,11 @@
 worker), so the caller, the conversation worker or the app tick, never blocks on synthesis.
 ``say`` composes the sentence's :class:`~roboemot.voice.prosody.Delivery` from the voice
 configuration, the persona effects, the register, the circadian state and the mood the caller
-passes, queues it, and the loop streams it through the backend into the sink, which resamples
-(the robot's speaker). ``stop`` is the barge-in path: it cuts the sink first, then cancels the
-synthesis in flight and drops the queue; an epoch counter makes any chunk that was already on its
-way fall on the floor, so nothing plays after ``stop`` returns.
+passes, plus the sentence's variation (seeded by the utterance id and the sentence's index in it;
+a question is raised), queues it, and the loop streams it through the backend into the sink,
+which resamples (the robot's speaker). ``stop`` is the barge-in path: it cuts the sink first,
+then cancels the synthesis in flight and drops the queue; an epoch counter makes any chunk that
+was already on its way fall on the floor, so nothing plays after ``stop`` returns.
 
 The bus gets ``speech.say`` with ids, lengths, language and mood, never the text (SPEC 12).
 
@@ -136,6 +137,7 @@ class SpeechOutput:
         self._unplayed: set[int] = set()
         self._ended: collections.OrderedDict[int, float] = collections.OrderedDict()
         self._question_end: float | None = None  # end of the last spoken sentence, if a question
+        self._said: collections.OrderedDict[int, int] = collections.OrderedDict()  # utterance -> n
         window = config.voice.report_window
         self._rtf: collections.deque[float] = collections.deque(maxlen=window)
         self._rtf_sentence: collections.deque[float] = collections.deque(maxlen=window)
@@ -231,6 +233,13 @@ class SpeechOutput:
         closed). Safe from any thread. The caller resolves ``mood`` (affect label, or the LLM's
         tag through ``resolve_tag``) and passes the register and circadian state of this moment."""
         cfg = self.config
+        if utterance is None:
+            utterance = self.new_utterance()
+        with self._lock:
+            index = self._said.pop(utterance, 0)
+            self._said[utterance] = index + 1
+            while len(self._said) > LATENCY_WINDOW:
+                self._said.popitem(last=False)
         delivery = compose_delivery(
             cfg.voice,
             register=register,
@@ -238,6 +247,9 @@ class SpeechOutput:
             mood=mood,
             intensity=intensity,
             persona=effects(cfg.persona),
+            seed=utterance,
+            index=index,
+            question=ends_with_question(text),
         )
         with self._lock:
             if self._closed or len(self._jobs) >= cfg.voice.queue_max_sentences:
@@ -245,7 +257,7 @@ class SpeechOutput:
                 return None
             job = _Job(
                 next(self._ids),
-                utterance if utterance is not None else self.new_utterance(),
+                utterance,
                 text,
                 language,
                 delivery,
