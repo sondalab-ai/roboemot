@@ -357,3 +357,79 @@ def test_a_preset_with_the_old_settings_loads_through_extends(tmp_path, caplog):
         "base.yaml: setting appraisal.rules[person.known_child] ignored",
     ):
         assert line in caplog.text, line
+
+
+# ------------------------------------------------- owner decision 2026-10-23: no age model
+
+# Every setting of the age model and the attribute worker, as an app.yaml written before holds them.
+NO_AGE_YAML = """\
+vision:
+  attribute_precision: fp32
+  attribute_threads: 1
+  attribute_input_px: 128
+  attribute_score_min: 0.6
+  attribute_crops: 3
+  attribute_crop_interval_s: 0.5
+  attribute_retry_s: 9
+  attribute_crop_margin: 0.3
+  attribute_queue_max: 2
+  threads: 1
+identity:
+  estimate_confidence_min: 0.7
+  estimate_frames_min: 3
+  match_threshold: 0.5
+register:
+  gender_affects_params: true
+"""
+NO_AGE_PATHS = (
+    "vision.attribute_precision", "vision.attribute_threads", "vision.attribute_input_px",
+    "vision.attribute_score_min", "vision.attribute_crops", "vision.attribute_crop_interval_s",
+    "vision.attribute_retry_s", "vision.attribute_crop_margin", "vision.attribute_queue_max",
+    "identity.estimate_confidence_min", "identity.estimate_frames_min",
+    "register.gender_affects_params",
+)  # fmt: skip
+
+
+def test_no_age_model_setting_is_left_in_the_schema():
+    assert all(not schema_has(p) for p in NO_AGE_PATHS)
+    assert set(NO_AGE_PATHS) <= set(DROPPED_SETTINGS)
+
+
+def test_an_old_app_config_with_the_age_model_settings_loads_and_logs_each_path(tmp_path, caplog):
+    """``vision.attribute_precision`` used to fail in app.yaml (``removed``, a replacement hint);
+    with no age model left it is ``dropped`` like the others."""
+    app = tmp_path / "app.yaml"
+    app.write_text(NO_AGE_YAML)
+    with caplog.at_level("WARNING"):
+        cfg = ConfigStack.from_files(app=app).effective()
+    for path in NO_AGE_PATHS:
+        assert caplog.text.count(f"setting {path} ignored") == 1, path
+    assert cfg.vision.threads == 1 and cfg.identity.match_threshold == 0.5  # the rest is kept
+    assert "fp32" not in caplog.text and "0.7" not in caplog.text  # paths, never values
+
+
+def test_an_old_web_ui_file_with_the_age_model_settings_restores_the_rest(tmp_path, caplog):
+    store = tmp_path / FILE
+    write_overrides(
+        store,
+        {
+            "vision.attribute_crops": 3,
+            "vision.attribute_retry_s": 9.0,
+            "identity.estimate_frames_min": 3,
+            "register.gender_affects_params": True,
+            "vision.attribute_queue_max": 2,
+            "vision.threads": 1,
+            "affect.update_hz": 33.0,
+        },
+    )
+    stack = ConfigStack()
+    with caplog.at_level("WARNING"):
+        SettingsEditor(stack, store=store).restore()
+    cfg = stack.effective()
+    assert cfg.affect.update_hz == 33.0 and cfg.vision.threads == 1
+    assert json.loads(store.read_text())["overrides"] == {
+        "vision.threads": 1,
+        "affect.update_hz": 33.0,
+    }
+    for path in ("vision.attribute_crops", "identity.estimate_frames_min"):
+        assert path in caplog.text, path
