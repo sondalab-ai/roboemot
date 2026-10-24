@@ -153,7 +153,7 @@ def test_every_string_key_the_page_reads_exists_in_both_languages():
     "prefix",
     [
         "tab_", "state_", "kind_", "status_", "origin_", "theme_", "settings_source_", "check_",
-        "route_error_", "scope_", "age_", "gender_", "conflict_", "photo_", "hint_",
+        "route_error_", "scope_", "conflict_", "photo_", "hint_",
     ],
 )  # fmt: skip
 def test_dynamic_string_families_are_complete(prefix):

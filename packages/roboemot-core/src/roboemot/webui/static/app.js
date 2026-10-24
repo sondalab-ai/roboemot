@@ -323,18 +323,10 @@ async function renderEnrollment(box, s) {
   box.replaceChildren(...cards);
 }
 
-function selectInput(id, values, prefix) {
-  return el("select", { id, class: "sl-field__input" }, values.map((v) => el("option", { value: v }, t(prefix + v))));
-}
-
 function consentForm(pendingPeople) {
   const max = String(state.session.name_max_chars || 64);
   const name = textInput("display_name", { maxlength: max, required: true });
   const who = textInput("consent_who", { maxlength: max, required: true });
-  const guardian = textInput("guardian", { maxlength: max });
-  const age = selectInput("age_group", ["unknown", "child", "teen", "adult", "senior"], "age_");
-  const gender = selectInput("gender", ["unknown", "female", "male"], "gender_");
-  const minor = () => !["adult", "senior"].includes(age.value);
   const scopes = ["face", "voice", "refresh"].map((s) =>
     check(t("scope_" + s), el("input", { type: "checkbox", value: s, checked: s !== "voice" })));
   const agreed = el("input", { type: "checkbox", id: "agreed" });
@@ -348,10 +340,7 @@ function consentForm(pendingPeople) {
       guarded(async () => {
         await api("POST", "/api/enrollment/complete", {
           display_name: name.value,
-          consent_who: minor() ? guardian.value : who.value,
-          guardian: guardian.value,
-          age_group: age.value,
-          gender: gender.value,
+          consent_who: who.value,
           scope: scopes.map((l) => l.firstChild).filter((c) => c.checked).map((c) => c.value),
           agreed: agreed.checked,
           pending_id: link.value || null,
@@ -366,9 +355,6 @@ function consentForm(pendingPeople) {
   pendingPeople.length ? field("pending_id", t("pending_link"), link) : [],
   field("display_name", t("display_name"), name),
   field("consent_who", t("consent_who"), who),
-  field("age_group", t("age_group"), age),
-  field("gender", t("gender"), gender),
-  field("guardian", t("guardian"), guardian, t("guardian_hint")),
   el("fieldset", { class: "stack" }, el("legend", { class: "sl-field__label" }, t("scope_title")), el("div", { class: "check-list" }, scopes)),
   check(t("agree"), agreed),
   el("div", { class: "row" }, submitButton(t("enroll_complete"))));

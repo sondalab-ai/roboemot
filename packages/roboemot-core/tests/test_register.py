@@ -122,10 +122,8 @@ def test_persona_shapes_the_register_once_whoever_is_present():
 # ------------------------------------------------------------------ tracker and bus
 
 
-def face(track, group="unknown", source="none", owner=None, stamp=0.0):
-    return SimpleNamespace(
-        track_id=track, age_group=group, age_source=source, owner_id=owner, stamp=stamp
-    )
+def face(track, owner=None, stamp=0.0):
+    return SimpleNamespace(track_id=track, owner_id=owner, stamp=stamp)
 
 
 def test_tracker_publishes_only_on_change_and_never_an_id():
@@ -143,24 +141,13 @@ def test_tracker_publishes_only_on_change_and_never_an_id():
     assert first.people == 0 and len(seen) == 1
     tracker.tick(0.1, REG, NEUTRAL)
     assert len(seen) == 1  # unchanged: not republished
-    bus.publish("percept.face", face(1, "child", "declared", owner="p-secret"), 1.0)
+    bus.publish("percept.face", face(1, owner="p-secret"), 1.0)
     now = tracker.tick(1.1, REG, NEUTRAL)
     assert now.people == 1 and now.params.speech_rate == 0.8 and lookups == ["p-secret"]
     assert len(seen) == 2
     assert "p-secret" not in repr(seen) and "p-secret" not in str(now.summary())
     assert "persona_fragment" not in now.summary()
     tracker.close()
-
-
-def test_the_age_on_a_face_changes_nothing():
-    """Owner decision 2026-10-23: a child, an adult and an unknown age get the one register."""
-    for group, source in (("child", "declared"), ("adult", "estimated"), ("unknown", "none")):
-        bus = Bus()
-        tracker = RegisterTracker(bus, CFG.expression)
-        bus.publish("percept.face", face(1, group, source), 0.0)
-        got = tracker.tick(0.1, REG, NEUTRAL)
-        assert got.people == 1 and got.params == BASE, group
-        tracker.close()
 
 
 def test_a_track_stays_for_the_hold_and_the_detection_periods_then_expires():

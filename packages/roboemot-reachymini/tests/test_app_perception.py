@@ -119,7 +119,6 @@ class AppWithFakes(app_module.RoboEmotApp):
         return SimpleNamespace(
             face_detector=FakeDetector(),
             face_embedder=FakeEmbedder(),
-            attribute_estimator=None,
             appearance_embedder=None,
             object_detector=None,
             objects_unavailable=None,
@@ -176,7 +175,7 @@ def test_app_with_fake_stages_names_an_enrolled_person_and_reports(data, tmp_pat
     reg = Registry(FileStore(tmp_path / "roboemot-data" / "registry", allow_plaintext=True),
                    RoboEmotConfig().identity)  # fmt: skip
     person = reg.enroll("Ada", [PLANTED * (1 + 0.01 * i) for i in range(5)], MODEL,
-                        consent=CONSENT, age_group="adult")  # fmt: skip
+                        consent=CONSENT)  # fmt: skip
     app = new_app(AppWithFakes)
     stop, thread, errors = start(app)
     try:
@@ -459,10 +458,10 @@ def test_a_missing_object_detector_leaves_the_rest_of_vision_running(data):
     assert "animal" not in kinds and "object" not in kinds
 
 
-def test_an_unknown_age_face_engages_no_caps_and_keeps_the_one_register(data):
-    """Owner decision 2026-10-23: a face whose age stays unknown changes nothing (SPEC 12)."""
+def test_a_face_in_view_engages_no_caps_and_keeps_the_one_register(data):
+    """Owner decision 2026-10-23: no age is estimated and a face changes nothing (SPEC 5, 12)."""
     FakeDetector.empty = False
-    app = new_app(AppWithFakes)  # no attribute model: the face's age stays unknown (SPEC 5)
+    app = new_app(AppWithFakes)
     stop, thread, errors = start(app)
     try:
         assert wait_for(lambda: app.diagnostics is not None and app.register_tracker is not None)
@@ -480,7 +479,7 @@ def test_an_unknown_age_face_engages_no_caps_and_keeps_the_one_register(data):
     assert not errors and not thread.is_alive()
 
 
-def test_a_known_child_gives_calm_like_anyone_on_affect_state_and_in_the_debug_report(data):
+def test_a_known_person_gives_calm_on_affect_state_and_in_the_debug_report(data):
     from roboemot.vision.types import PersonRecognized
 
     app = new_app(app_module.RoboEmotApp)
@@ -493,10 +492,10 @@ def test_a_known_child_gives_calm_like_anyone_on_affect_state_and_in_the_debug_r
         assert states[-1].valence == pytest.approx(0.0, abs=0.01)
         app.bus.publish(
             "person.recognized",
-            PersonRecognized(1, "p-1", time.monotonic(), 0.0, 0.0, "child"),
+            PersonRecognized(1, "p-1", time.monotonic(), 0.0, 0.0),
             time.monotonic(),
         )
-        assert wait_for(lambda: states[-1].valence > 0.4), "no positive valence after the child"
+        assert wait_for(lambda: states[-1].valence > 0.4), "no positive valence after the person"
         assert states[-1].label == "calm"  # one person.known rule for everyone (2026-10-23)
         report = app.diagnostics.report()["sections"]["roboemot.app"]["data"]
         assert report["valence"] > 0 and report["label"] in app.affect_runner.engine.cfg.labels

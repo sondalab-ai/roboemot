@@ -99,7 +99,8 @@ FETCH_ATTEMPTS = 2  # `roboemot models fetch` runs once more after a failure (it
 # The model files already verified on the robot (marker check only, read-only: no folder made),
 # as "voice:<path>" / "vision:<path>", and for the others the bytes already on disk that the
 # fetch frees or keeps: a stale ``.part`` (deleted before the new download) and a complete-size
-# file (kept when its digest matches). Run with the app's interpreter.
+# file (kept when its digest matches), plus the bytes of retired vision files still in the folder
+# (``roboemot models prune`` deletes them; the installer does not). Run with the app's interpreter.
 VERIFIED_MODELS = r"""
 import json
 from roboemot.vision import models as m
@@ -122,7 +123,8 @@ for kind, specs, root in (("vision", m.load_manifest(), m.models_dir()),
                     on_disk[key] = n
                 continue
             done.append(key)
-print(json.dumps({"done": done, "on_disk": on_disk}))
+retired = sum(n for _, n in m.retired_on_disk(m.models_dir()))
+print(json.dumps({"done": done, "on_disk": on_disk, "retired": retired}))
 """
 PLATFORM_PROBE = (
     "import sys, platform; print(platform.machine()); print('%d.%d' % sys.version_info[:2])"
@@ -692,18 +694,18 @@ def models_bytes(
     return total
 
 
-def verified_models(py: RemotePython) -> tuple[frozenset[str], dict[str, int]]:
-    """The model files already verified on the robot and the bytes others already hold
-    (``VERIFIED_MODELS``); empty when the app is not installed yet or the query fails, so the
-    full size counts."""
+def verified_models(py: RemotePython) -> tuple[frozenset[str], dict[str, int], int]:
+    """The model files already verified on the robot, the bytes others already hold and the
+    bytes of retired model files still there (``VERIFIED_MODELS``); empty when the app is not
+    installed yet or the query fails, so the full size counts."""
     if not py.exists():
-        return frozenset(), {}
+        return frozenset(), {}, 0
     try:
         data = json.loads(py.py(VERIFIED_MODELS))
         on_disk = {str(k): int(n) for k, n in data["on_disk"].items()}
-        return frozenset(map(str, data["done"])), on_disk
+        return frozenset(map(str, data["done"])), on_disk, int(data.get("retired", 0))
     except (WizardError, ValueError, TypeError, KeyError, AttributeError):
-        return frozenset(), {}
+        return frozenset(), {}, 0
 
 
 def free_mib_at(remote: Remote, path: str) -> int | None:
@@ -737,10 +739,16 @@ def fetch_models(
     fails twice (``FETCH_ATTEMPTS``): ``roboemot models fetch`` can be run later. Model
     folders the installer creates inside a data folder that is not recorded as its own are
     recorded before the download, so uninstall removes them; inside a recorded data folder they
-    go with it. The dry run only reports sizes and free space.
+    go with it. The dry run only reports sizes and free space. Retired model files still on the
+    robot are reported with a hint to run ``roboemot models prune``; the installer deletes none.
     """
     label = models_label(vision)
-    done, on_disk = verified_models(py)
+    done, on_disk, retired = verified_models(py)
+    if retired:
+        ui.warn(
+            f"{-(-retired // MIB)} MiB of retired model files on the robot: run "
+            "`roboemot models prune` there to delete them"
+        )
     need_mib = -(-models_bytes(vision, done=done, on_disk=on_disk) // MIB)
     folders = model_dirs(remote, vision)
     if need_mib == 0:

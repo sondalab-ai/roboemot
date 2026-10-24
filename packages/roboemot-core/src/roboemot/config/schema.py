@@ -318,9 +318,6 @@ class RegisterConfig(RegisterParams):
     """The one register the robot uses with everyone (SPEC 7; no age groups, owner decision
     2026-10-23), plus the settings about registers."""
 
-    gender_affects_params: bool = param(
-        False, "If true, gender may change register parameters, not only forms of address"
-    )
     persona_fragment_max_chars: int = param(
         300, "Longest accepted persona_fragment", ge=20, le=2000
     )
@@ -1140,20 +1137,6 @@ class IdentityConfig(Strict):
     margin: float = param(0.1, "Required margin over the second best match", ge=0, le=1)
     votes_required: int = param(3, "Positive evaluations required", ge=1, le=20)
     votes_window: int = param(5, "Evaluations considered", ge=1, le=50)
-    estimate_confidence_min: float = param(
-        0.8,
-        "Below this, gender estimates are unknown; the age model has its own floor, "
-        "vision.attribute_score_min",
-        ge=0,
-        le=1,
-    )
-    estimate_frames_min: int = param(
-        1,
-        "Frames aggregated before an estimate is used; vision.attribute_crops must be at "
-        "least this",
-        ge=1,
-        le=100,
-    )
     enroll_min_embeddings: int = param(5, "Face embeddings required at enrollment", ge=5, le=20)
     max_embeddings_per_person: int = param(
         20, "Cap on stored face embeddings per person, refresh included", ge=5, le=20
@@ -1244,10 +1227,6 @@ class EnrollmentConfig(Strict):
         120.0, "A session without completion is dropped after this time", unit="s", ge=5, le=3600
     )
 
-
-# yolo11n-face-age is a YOLO11 network: its input side must be a multiple of the largest stride
-# (ONNX metadata ``stride``, checked again at load).
-ATTRIBUTE_INPUT_STRIDE_PX = 32
 
 ATTENTION_CATEGORIES = ("active_speaker", "enrolled_person", "nearest_face", "salient_motion")
 
@@ -1405,9 +1384,6 @@ class VisionConfig(Strict):
     rates: VisionRates = param({}, "Per-stage target rates, scaled by the circadian state")
     tracker: TrackerConfig = param({}, "ByteTrack-class tracker")
     threads: int = param(2, "CPU threads of the frame-path models", ge=1, le=8, restart=True)
-    attribute_threads: int = param(
-        1, "CPU threads of the age model (background job)", ge=1, le=8, restart=True
-    )
     detector_width_px: int = param(
         320, "Face detector input width (SPEC 13: 320x240)", unit="px", ge=64, le=1280, restart=True
     )
@@ -1456,69 +1432,9 @@ class VisionConfig(Strict):
         ge=0,
         le=10,
     )
-    attribute_input_px: int = param(
-        160,
-        "Side of the square age-model input (yolo11n-face-age, SPEC 5, 13); a multiple of 32. "
-        "128 is the fallback if 160 is too slow on the CM4",
-        unit="px",
-        ge=128,
-        le=224,
-        restart=True,
-    )
-    attribute_score_min: float = param(
-        0.5,
-        "Age-model class score (an independent sigmoid) below which a crop's age group is "
-        "unknown; replaces the 0.8 rule for age. The estimator and the "
-        "worker take it at start. At least 0.3 (the research's matched point at 128 px is "
-        "0.32), so the floor cannot be switched off",
-        ge=0.3,
-        le=1,
-        restart=True,
-    )
-    attribute_crops: int = param(
-        1,
-        "Face crops per track for the age job (SPEC 5); at least identity.estimate_frames_min. "
-        "One crop decides by default; with more the median age group is used",
-        ge=1,
-        le=10,
-    )
-    attribute_crop_interval_s: float = param(
-        0.3,
-        "Minimum capture-time gap between the face crops kept for the age job",
-        unit="s",
-        ge=0,
-        le=10,
-    )
-    attribute_retry_s: float = param(
-        5.0,
-        "A track whose age job came back unknown (and no declared age) collects new crops for "
-        "another job this long after the result or after a failed or cancelled job (capture time, "
-        "SPEC 5), or at the first face "
-        "frame after the robot stops thinking or speaking; a confident age stops the retries "
-        "(an adult or senior one after an unknown result needs a second agreeing one), and the "
-        "age stays unknown until then",
-        unit="s",
-        ge=0.5,
-        le=600,
-    )
-    attribute_crop_margin: float = param(
-        0.25,
-        "Face box padding for the age crop, per side; other visible faces inside it are filled "
-        "with grey",
-        ge=0,
-        le=1,
-    )
-    attribute_queue_max: int = param(
-        4,
-        "Age and gender jobs waiting for the worker; further tracks wait",
-        ge=1,
-        le=64,
-        restart=True,
-    )
     report_window: int = param(
         200,
-        "Report only: ended face tracks, age and gender jobs and their crops kept for the "
-        "lifetime, duration and time-to-estimate summaries",
+        "Report only: ended face tracks kept for the lifetime summary",
         ge=10,
         le=10000,
         restart=True,
@@ -1632,10 +1548,6 @@ class VisionConfig(Strict):
         both = set(self.animal_categories) & set(self.object_categories)
         if both:
             raise ValueError(f"vision categories are both animal and object: {sorted(both)}")
-        if self.attribute_input_px % ATTRIBUTE_INPUT_STRIDE_PX:
-            raise ValueError(
-                f"vision.attribute_input_px must be a multiple of {ATTRIBUTE_INPUT_STRIDE_PX}"
-            )
         return self
 
 
@@ -3469,10 +3381,6 @@ with warnings.catch_warnings():
         def _vision_fits_identity(self) -> RoboEmotConfig:
             if self.vision.embedding_burst < self.identity.votes_required:
                 raise ValueError("vision.embedding_burst must be at least identity.votes_required")
-            if self.vision.attribute_crops < self.identity.estimate_frames_min:
-                raise ValueError(
-                    "vision.attribute_crops must be at least identity.estimate_frames_min"
-                )
             if self.vision.embed_min_face_px < self.vision.face_min_px:
                 raise ValueError("vision.embed_min_face_px must be at least face_min_px")
             return self

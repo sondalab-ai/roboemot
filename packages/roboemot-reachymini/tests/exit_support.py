@@ -13,8 +13,9 @@ Two phases per person:
   a little; ``check_exit`` divides it out of the expression factor to compare the register alone
   (amplitude, approach gate).
 
-One behaviour for everyone (owner decision 2026-10-23): a known adult and a known child get the
-same register and the same reaction; a stranger differs only by what the affect rules say.
+One behaviour for everyone (owner decision 2026-10-23; no age is estimated or declared): a known
+person and a stranger get the same register; the stranger differs only by what the affect rules
+say.
 """
 
 from __future__ import annotations
@@ -43,7 +44,7 @@ expression_map:
       body_yaw: [[0.0, 0], [0.5, 12], [1.8, 12], [2.4, 0]]
 """
 
-ARRIVAL_LABEL = {"adult": "calm", "child": "calm", "stranger": "curiosity"}
+ARRIVAL_LABEL = {"known": "calm", "stranger": "curiosity"}
 SETTLED_DOFS = ("head.yaw", "body_yaw", "antenna_right", "antenna_left")
 SETTLED_RAD = math.radians(3.0)  # head, body and antennas within this of home: settled
 SETTLED_HOLD_S = 3.0  # ... for this long without a break
@@ -298,42 +299,34 @@ def format_run(run: Run) -> str:
     return "\n".join(lines)
 
 
-def check_exit(adult: Run, child: Run, stranger: Run, adult_yaw_max: float) -> None:
+def check_exit(known: Run, stranger: Run, known_yaw_max: float) -> None:
     """The M2 exit criterion's first half (SPEC 14, owner decision 2026-10-23): the robot reacts
-    distinctly to a known person and to a stranger, and the same to a known adult and a known
-    child. Shared by the app-level and the simulated robot tests; ``adult_yaw_max`` bounds the
-    known people's head yaw (radians) for the caller's setup."""
+    distinctly to a known person and to a stranger, with one register for both. Shared by the
+    app-level and the simulated robot tests; ``known_yaw_max`` bounds the known person's head yaw
+    (radians) for the caller's setup."""
     deg = math.radians
-    known = (adult, child)
-    # affect: a known person is calm whatever the age, a stranger raises curiosity
-    assert (adult.arrival.label, child.arrival.label, stranger.arrival.label) == (
-        "calm",
-        "calm",
-        "curiosity",
-    )
-    for r in known:
-        assert r.arrival.valence > stranger.arrival.valence, r
-    assert abs(adult.arrival.valence - child.arrival.valence) < 0.05
+    # affect: a known person is calm, a stranger raises curiosity
+    assert (known.arrival.label, stranger.arrival.label) == ("calm", "curiosity")
+    assert known.arrival.valence > stranger.arrival.valence, known
     # one register for everyone: the configured parameters, approach allowed, nobody damped
     reg = RoboEmotConfig().register
     expected = (reg.motion_amplitude, reg.reaction_intensity, reg.approach_allowed)
     assert expected[2], "the exit expects a register that allows approach"
-    for r in (adult, child, stranger):
+    for r in (known, stranger):
         for p in (r.arrival, r.provoked):
             assert (p.motion_amplitude, p.reaction_intensity, p.approach_allowed) == expected, r
-    # the same curiosity impulse for everyone: the register term alone (the factor with the affect
-    # term, floor + (1 - floor) x intensity, divided out) is the same for all three
+    # the same curiosity impulse for both: the register term alone (the factor with the affect
+    # term, floor + (1 - floor) x intensity, divided out) is the same
     floor = RoboEmotConfig().expression.intensity_floor
     terms = [
         r.provoked.expression_amplitude
         / (floor + (1 - floor) * min(1.0, r.provoked.affect_intensity))
-        for r in (adult, child, stranger)
+        for r in (known, stranger)
     ]
     assert max(terms) - min(terms) < 1e-6 and min(terms) > 0, terms
     # the approach gate is open for everyone: the body moved for each provoked expression
-    for r in (adult, child, stranger):
+    for r in (known, stranger):
         assert r.provoked.body_yaw_peak > deg(1.0), r
-    for r in (adult, child, stranger):  # every arrival moved the antennas, well over the idle noise
+    for r in (known, stranger):  # every arrival moved the antennas, well over the idle noise
         assert r.arrival.antenna_peak > max(10 * r.idle_antenna, deg(0.5)), r
-    for r in known:
-        assert r.provoked.head_yaw_peak <= adult_yaw_max, r.provoked.head_yaw_peak
+    assert known.provoked.head_yaw_peak <= known_yaw_max, known.provoked.head_yaw_peak

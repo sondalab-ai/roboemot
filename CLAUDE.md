@@ -68,7 +68,7 @@ pip install -e "packages/roboemot-core[dev]" -e "packages/roboemot-reachymini[de
 # `python -c "import roboemot; print(roboemot.__file__)"` is inside the worktree before trusting a test run
 pytest                                   # unit tests (no robot, no simulator)
 scripts/sim-daemon.sh &                  # MuJoCo Reachy Mini daemon, headless, port 8000
-roboemot models fetch --all              # vision weights (~0.14 GB, voice models too) into the app data folder (~/.local/share/roboemot/models), sha256-verified
+roboemot models fetch --all              # vision weights (~0.13 GB, voice models too) into the app data folder (~/.local/share/roboemot/models), sha256-verified
 roboemot models fetch --voice            # Silero VAD, Vosk it/en, Piper it/en (~0.3 GB) into ~/.local/share/roboemot/voice-models
 pytest -m models                         # real ONNX models, needs the vision extra and fetched weights
 pytest -m sim                            # integration tests against the simulated robot

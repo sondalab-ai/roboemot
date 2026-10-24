@@ -231,7 +231,7 @@ def real_stages():
     specs = load_manifest()
     if any(models.status(specs[n], CACHE) != "ok" for n in ("nanodet-plus-m-320", "dinov2-small")):
         pytest.skip(f"model files missing in {CACHE} (roboemot models fetch --all)")
-    return onnx.load_stages(CACHE, RoboEmotConfig().vision, attributes=False)
+    return onnx.load_stages(CACHE, RoboEmotConfig().vision)
 
 
 @pytest.mark.models

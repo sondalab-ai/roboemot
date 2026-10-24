@@ -24,7 +24,7 @@ def test_a_confirmed_track_gives_its_box_and_no_owner_until_recognised(tmp_path)
 
 def test_a_recognised_track_carries_the_owner_id(tmp_path):
     reg, _, pipe, _, _ = rig(tmp_path, lambda i: [face(100)])
-    reg.enroll("Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT, age_group="adult")
+    reg.enroll("Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT)
     run(pipe, 24)
     [(_, owner)] = pipe.face_overlay()
     assert owner is not None

@@ -94,8 +94,6 @@ class EnrollmentPort(Protocol):
         self,
         name: str,
         consent: Consent,
-        declared_age_group: str | None,
-        declared_gender: str | None,
         pending_id: str | None = None,
     ) -> Any: ...
     def cancel(self) -> Any: ...
@@ -590,15 +588,8 @@ class WebApi:
                 who=form["who"],
                 when=self.now(),
                 scope=form["scope"],
-                guardian=form["guardian"],
             )
-            self.service.complete(
-                form["display_name"],
-                consent,
-                form["age_group"],
-                form["gender"],
-                form["pending_id"],
-            )
+            self.service.complete(form["display_name"], consent, form["pending_id"])
         except ConsentError as exc:
             raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, "consent_refused") from exc
         except (RuntimeError, ValueError) as exc:
@@ -620,7 +611,6 @@ class WebApi:
                 "status": str(r.status),
                 "kind": str(r.kind),
                 "last_seen": None if r.last_seen is None else r.last_seen.isoformat(),
-                "age_group": getattr(r, "age_group", None),
             }
             for r in self.service.list_records()
         ]

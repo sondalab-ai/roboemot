@@ -222,7 +222,7 @@ def test_attention_turns_the_head_towards_a_world_entry(loop):
 
 
 def test_a_joy_expression_moves_the_antennas_on_the_simulated_robot(loop):
-    """SPEC 7, 10: the shipped joy expression, rendered for an adult, flaps both antennas.
+    """SPEC 7, 10: the shipped joy expression flaps both antennas.
 
     The robot first settles at the antenna home; the renderer then feeds additive EXPRESSION
     commands through the real loop. The fallback dynamics are slow, so the swing asserted is
@@ -395,7 +395,6 @@ class Scene:
         *,
         enroll: bool,
         plant: bool,
-        age_group: str = "adult",
         extra_config: str = "",
     ):
         import shutil
@@ -430,13 +429,7 @@ class Scene:
                 "Ada",
                 [face_vec * (1 + 0.01 * i) for i in range(5)],
                 "sim-face",
-                consent=Consent(
-                    "Ada",
-                    datetime(2026, 1, 1, tzinfo=UTC),
-                    ("face", "refresh"),
-                    guardian=None if age_group in ("adult", "senior") else "Mum",
-                ),
-                age_group=age_group,
+                consent=Consent("Ada", datetime(2026, 1, 1, tzinfo=UTC), ("face", "refresh")),
             ).person_id
         width, height, box = 320, 240, 80
         camera = CameraModel(
@@ -492,7 +485,6 @@ class Scene:
                 return SimpleNamespace(
                     face_detector=PlantedDetector(),
                     face_embedder=PlantedEmbedder(),
-                    attribute_estimator=None,
                     appearance_embedder=None,
                     object_detector=None,
                     objects_unavailable=None,
@@ -622,26 +614,24 @@ def test_the_rest_posture_lowers_the_head_and_droops_the_antennas_on_the_simulat
     assert state["antenna_left"] > settled["antenna_left"] + 0.05
 
 
-def test_the_robot_reacts_to_a_known_person_and_a_stranger_the_same_whatever_the_age(
+def test_the_robot_reacts_to_a_known_person_and_a_stranger_with_one_register(
     mini, tmp_path, monkeypatch
 ):
     """SPEC 14 (M2 exit, first half; owner decision 2026-10-23), on the simulated robot: the same
-    planted face is a known adult, a known child (declared age) or nobody enrolled, and walks
-    into view of a settled robot. Only ONNX is faked (see ``Scene``); no LLM. See
-    ``exit_support`` for what is measured and ``docs/eval/m2.md`` for the numbers."""
+    planted face is a known person or nobody enrolled, and walks into view of a settled robot.
+    Only ONNX is faked (see ``Scene``); no LLM. See ``exit_support`` for what is measured and
+    ``docs/eval/m2.md`` for the numbers."""
     from exit_support import BODY_MAP_YAML, check_exit, format_run, react
 
     manifest = load_manifest(DATA / "reachy-mini-wireless.yaml", allow_unmeasured_dynamics=True)
     home = {n: d.home for n, d in manifest.dofs.items()}
     runs = {}
-    for case, enroll, age in (("adult", True, "adult"), ("child", True, "child"),
-                              ("stranger", False, "adult")):  # fmt: skip
+    for case, enroll in (("known", True), ("stranger", False)):
         root = tmp_path / case
         root.mkdir()
         monkeypatch.setenv("ROBOEMOT_DATA_DIR", str(root / "roboemot-data"))
         with Scene(
-            mini, root, monkeypatch, enroll=enroll, plant=False, age_group=age,
-            extra_config=BODY_MAP_YAML,
+            mini, root, monkeypatch, enroll=enroll, plant=False, extra_config=BODY_MAP_YAML,
         ) as scene:  # fmt: skip
             runs[case] = react(
                 scene.app,
@@ -652,9 +642,9 @@ def test_the_robot_reacts_to_a_known_person_and_a_stranger_the_same_whatever_the
             )
         print(format_run(runs[case]))
     # the simulated servos overshoot the planted bearing by a few degrees (28.6 against 25 once)
-    check_exit(runs["adult"], runs["child"], runs["stranger"], PLANTED_AZ + math.radians(5))
+    check_exit(runs["known"], runs["stranger"], PLANTED_AZ + math.radians(5))
     yaw = {c: max(r.arrival.head_yaw_peak, r.provoked.head_yaw_peak) for c, r in runs.items()}
-    # all three are looked at and followed all the way: no cap scales anyone's head
+    # both are looked at and followed all the way: no cap scales anyone's head
     for case in runs:
         assert yaw[case] > 0.9 * PLANTED_AZ, yaw
 

@@ -25,8 +25,6 @@ FORM = {
     "display_name": "Ada",
     "consent_who": "Ada",
     "scope": ["face", "refresh"],
-    "age_group": "adult",
-    "gender": "female",
     "agreed": True,
 }
 

@@ -1,8 +1,8 @@
-"""Owner decision 2026-10-23 (SPEC 5, 7, 8, 10, 12), through the real app: a face whose age is
-unknown is in view (the fake vision has no age model, so every track's age stays unknown), and
-the robot behaves as with anybody. Each case failed while the adult/minor split existed: the
-possible-minor latch capped the motion, held the turn toward a voice, swapped the fallback line
-for a child line and kept every sentence off the remote voice.
+"""Owner decision 2026-10-23 (SPEC 5, 7, 8, 10, 12), through the real app: a face is in view (no
+age is estimated at all since the age model went), and the robot behaves as with anybody. Each
+case failed while the adult/minor split existed: the possible-minor latch capped the motion, held
+the turn toward a voice, swapped the fallback line for a child line and kept every sentence off
+the remote voice.
 """
 
 from __future__ import annotations

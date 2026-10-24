@@ -21,7 +21,6 @@ migrated:
   register.adult.reaction_intensity: register.reaction_intensity
   register.adult.max_reply_sentences: register.max_reply_sentences
 removed:
-  vision.attribute_precision: the single yolo11n-face-age file, which has one precision (SPEC 5, 13)
   connectivity.gestures: the manifest gesture_map entries puzzled and perk_up (SPEC 12A)
 dropped:
   safety.minors_allowed_llm: the LLM is used while a minor is present (SPEC 8, 2026-10-22)
@@ -39,6 +38,18 @@ dropped:
   register.minor_content_policy: no minor content policy (SPEC 7, 12, 2026-10-23)
   reflexes.rules.*.suppress_with_minor: no possible-minor signal (SPEC 10, 2026-10-23)
   conversation.transcript_settle_ms: no deferred live transcript (SPEC 11A, 2026-10-23)
+  vision.attribute_precision: no age model (SPEC 5, 13, 2026-10-23)
+  vision.attribute_threads: no age model (SPEC 5, 13, 2026-10-23)
+  vision.attribute_input_px: no age model (SPEC 5, 13, 2026-10-23)
+  vision.attribute_score_min: no age model (SPEC 5, 2026-10-23)
+  vision.attribute_crops: no age model (SPEC 5, 2026-10-23)
+  vision.attribute_crop_interval_s: no age model (SPEC 5, 2026-10-23)
+  vision.attribute_retry_s: no age model (SPEC 5, 2026-10-23)
+  vision.attribute_crop_margin: no age model (SPEC 5, 2026-10-23)
+  vision.attribute_queue_max: no age model (SPEC 5, 2026-10-23)
+  identity.estimate_confidence_min: no age or gender estimate (SPEC 5, 2026-10-23)
+  identity.estimate_frames_min: no age or gender estimate (SPEC 5, 2026-10-23)
+  register.gender_affects_params: no gender, declared or estimated (SPEC 7, 2026-10-23)
 dropped_entries:
   appraisal.rules:
     person.known_child: one person.known event for everyone (SPEC 7, 2026-10-23)

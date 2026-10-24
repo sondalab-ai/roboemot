@@ -134,7 +134,7 @@ What goes onto the robot besides the two wheels:
   Uninstall removes the models with the data folder (or, when the data folder was already there,
   the model folders the installer created).
 - **Vision is on by default.** The installer also installs the `vision` extra (OpenCV, ONNX) and
-  fetches the vision weights (about 0.53 GB of disk together with the voice models while downloading; the figure is computed from the pinned manifests); `--no-vision` skips both,
+  fetches the vision weights (about 0.52 GB of disk together with the voice models while downloading; the figure is computed from the pinned manifests); `--no-vision` skips both,
   and then the app logs "vision unavailable" and runs without it. If the free space is short the
   models step is skipped with a warning that suggests `--no-vision`; a re-run over an install
   made with `--no-vision` adds the extra and the weights.
@@ -207,15 +207,14 @@ voice models too, and their state.
 | --- | --- | --- | ---: | --- |
 | YuNet 2023mar | Face detection | MIT | 0.2 MB | [opencv_zoo](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) |
 | SFace 2021dec | Face embedding | Apache-2.0 | 38.7 MB | [opencv_zoo](https://github.com/opencv/opencv_zoo/tree/main/models/face_recognition_sface) |
-| yolo11n-face-age | Age group (0-14, 15-22, 22+); no gender model | CC-BY-NC-4.0, non-commercial only (the ONNX metadata also carries the Ultralytics AGPL-3.0 stamp) | 10.5 MB | [AdamCodd/yolo11n-face-age](https://huggingface.co/AdamCodd/yolo11n-face-age), revision `410bdd84` |
 | DINOv2-S | Animal and object appearance | Apache-2.0 | 88.5 MB | [facebook/dinov2-small](https://huggingface.co/facebook/dinov2-small) (ONNX by Xenova) |
 | NanoDet-Plus-m 320 | Animal and object detection | Apache-2.0 | 4.8 MB | [RangiLyu/nanodet](https://github.com/RangiLyu/nanodet/releases/tag/v1.0.0-alpha-1) |
 
-The age model replaced the FairFace ViT-B age and gender pair (SPEC 5, 13). On a robot that still
-has the FairFace files, `roboemot models prune` deletes them.
+No age or gender is estimated (owner decision 2026-10-23, SPEC 5): the yolo11n-face-age model,
+and the FairFace ViT-B pair before it, are retired. On a robot that still has their files,
+`roboemot models prune` deletes them.
 
 ## Licence
 
 Not decided yet (SPEC 15). Note that Piper TTS is GPL-3.0 and is meant to run as a separate
-process, and that the age model (yolo11n-face-age) is licensed for non-commercial use only: a
-commercial use needs another age model.
+process. The vision models above all have permissive weight licences (MIT, Apache-2.0).
