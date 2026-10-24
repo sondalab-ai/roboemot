@@ -210,13 +210,14 @@ def _voice(args: argparse.Namespace) -> int:
     from .voice.factory import piper_python
     from .voice.piper_backend import WORKER_SCRIPT, PiperBackend, manifest_voice_files
     from .voice.sample import render_samples
+    from .voice.tts import TTSError, TTSUnavailable
 
     stack = _stack(args)
     if args.manifest:
         from .manifest import load_manifest
 
         # only the behaviour block (config layer 2) is used: nothing moves
-        m = load_manifest(Path(args.manifest), allow_unmeasured_dynamics=True)
+        m = load_manifest(Path(args.manifest), allow_unmeasured_dynamics=args.dev)
         stack.set_manifest_behaviour(m.model.behaviour, m.channels)
     cfg = stack.effective()
     root = voice_models.models_dir(args.voice_dir or cfg.voice.models_dir, cfg.data_dir)
@@ -235,7 +236,16 @@ def _voice(args: argparse.Namespace) -> int:
         finally:
             await backend.aclose()
 
-    samples = asyncio.run(run())  # a TTSError is a RuntimeError: reported by main
+    try:
+        samples = asyncio.run(run())
+    except TTSUnavailable as exc:
+        raise RuntimeError(
+            f"{exc}; fetch the voices with `roboemot models fetch --voice` or pass --voice-dir"
+        ) from exc
+    except TTSError as exc:
+        raise RuntimeError(
+            f"{exc}; pass --python <piper-venv>/bin/python (the interpreter that has piper-tts)"
+        ) from exc
     for s in samples:
         rates = " ".join(f"{d.rate:.2f}" for d in s.deliveries)
         pitches = " ".join(f"{d.pitch_st:+.1f}" for d in s.deliveries)
@@ -388,6 +398,9 @@ def main(argv: list[str] | None = None) -> int:
     voice.add_argument(
         "--manifest",
         help="robot manifest whose behaviour layer applies (e.g. the robot's base pitch)",
+    )
+    voice.add_argument(
+        "--dev", action="store_true", help="accept a manifest with unmeasured dynamics"
     )
     voice.add_argument(
         "--python", help="Piper virtualenv interpreter (default: voice.piper.python, else the "

@@ -83,7 +83,7 @@ def test_cli_voice_sample_uses_piper_with_the_manifest_layer(tmp_path, monkeypat
     )
     code = cli.main(
         ["voice", "sample", "--out", str(tmp_path / "wav"), "--lang", "en",
-         "--python", sys.executable, "--manifest", str(manifest)]
+         "--python", sys.executable, "--manifest", str(manifest), "--dev"]
     )  # fmt: skip
     assert code == 0
     lines = capsys.readouterr().out.splitlines()
@@ -102,3 +102,37 @@ def test_cli_voice_sample_rejects_bad_arguments(tmp_path, argv, capsys):
     except SystemExit as exc:  # argparse choices
         code = exc.code
     assert code != 0
+
+
+def test_cli_voice_sample_needs_dev_for_a_manifest_with_unmeasured_dynamics(tmp_path, capsys):
+    manifest = (
+        cli.Path(__file__).resolve().parents[3] / "configs/manifests/reachy-mini-wireless.yaml"
+    )
+    assert cli.main(["voice", "sample", "--out", str(tmp_path), "--manifest", str(manifest)]) == 1
+    assert "allow_unmeasured_dynamics" in capsys.readouterr().err
+
+
+def test_cli_voice_sample_errors_say_what_to_do_and_leave_no_folder(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "PIPER_SCRIPT", FAKE_WORKER)
+    empty = tmp_path / "no-voices"
+    empty.mkdir()
+    monkeypatch.setattr(piper_backend, "manifest_voice_files", lambda root: resolver(empty))
+    out = tmp_path / "wav"
+    argv = ["voice", "sample", "--out", str(out), "--python", sys.executable]
+    assert cli.main(argv) == 1
+    assert "roboemot models fetch --voice" in capsys.readouterr().err
+    monkeypatch.setattr(
+        piper_backend, "manifest_voice_files", lambda root: resolver(_voices(tmp_path))
+    )
+    argv[-1] = str(tmp_path / "no-python")
+    assert cli.main(argv) == 1
+    assert "--python <piper-venv>/bin/python" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_a_chunk_above_the_sample_rate_is_refused_not_aliased():
+    import numpy as np
+    from roboemot.voice.sample import _resample
+
+    with pytest.raises(ValueError, match="above the sample rate"):
+        _resample(np.ones(10, np.float32), SAMPLE_RATE_HZ * 2, SAMPLE_RATE_HZ)

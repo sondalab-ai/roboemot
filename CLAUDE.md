@@ -70,7 +70,7 @@ pytest                                   # unit tests (no robot, no simulator)
 scripts/sim-daemon.sh &                  # MuJoCo Reachy Mini daemon, headless, port 8000
 roboemot models fetch --all              # vision weights (~0.13 GB, voice models too) into the app data folder (~/.local/share/roboemot/models), sha256-verified
 roboemot models fetch --voice            # Silero VAD, Vosk it/en, Piper it/en (~0.3 GB) into ~/.local/share/roboemot/voice-models
-roboemot voice sample --out DIR --manifest configs/manifests/reachy-mini-wireless.yaml --python <piper-venv>/bin/python   # one WAV per mood (SPEC 8)
+roboemot voice sample --out DIR --manifest configs/manifests/reachy-mini-wireless.yaml --dev --python <piper-venv>/bin/python   # one WAV per mood (SPEC 8)
 pytest -m models                         # real ONNX models, needs the vision extra and fetched weights
 pytest -m sim                            # integration tests against the simulated robot
 cmake -S rt -B rt/build && cmake --build rt/build && ctest --test-dir rt/build

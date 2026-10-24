@@ -5,7 +5,10 @@ configured voice and delivery: neutral, then once per ``voice.moods`` entry at t
 intensity, with the sentence variation and the question raise of a real reply (fixed seed, so two
 runs give the same files). Sentences are joined with the reply pause (``sentence_pause_ms`` times
 the mood's ``pause_scale``). The backend's chunks carry their own rate (the dsp pitch shift moves
-it per sentence), so every chunk is resampled to ``SAMPLE_RATE_HZ`` before writing.
+it per sentence), so every chunk is resampled to ``SAMPLE_RATE_HZ`` before writing. That rate is
+above any declared rate the pitch limits allow, so resampling only ever goes up (linear
+interpolation adds no aliasing then). The robot's speaker path is band-limited to 16 kHz, so these
+files sound a little brighter than the robot.
 """
 
 from __future__ import annotations
@@ -22,7 +25,7 @@ from .prosody import Delivery, compose_delivery
 from .speech import ends_with_question
 from .tts import TTSBackend
 
-SAMPLE_RATE_HZ = 22050  # the rate of the medium Piper voices
+SAMPLE_RATE_HZ = 48000  # above every pitch-shifted voice rate: resampling only goes up
 SAMPLE_SEED = 1  # the reply id the variation is drawn from
 NEUTRAL = "neutral"
 INT16_MAX = 32767
@@ -44,6 +47,8 @@ class Sample:
 def _resample(samples: np.ndarray, in_hz: int, out_hz: int) -> np.ndarray:
     if in_hz == out_hz or samples.size == 0:
         return samples
+    if in_hz > out_hz:  # downsampling without a low-pass filter would alias
+        raise ValueError(f"a chunk at {in_hz} Hz is above the sample rate {out_hz} Hz")
     n = max(1, round(samples.size * out_hz / in_hz))
     return np.interp(np.arange(n) * (in_hz / out_hz), np.arange(samples.size), samples)
 
@@ -71,7 +76,6 @@ async def render_samples(
         raise ValueError(f"no sample text for language {language!r} (have {sorted(SAMPLE_TEXT)})")
     voice = cfg.voice.model_copy(update={"mood_source": "auto"})
     persona = effects(cfg.persona)
-    out_dir.mkdir(parents=True, exist_ok=True)
     written = []
     for mood in [NEUTRAL, *voice.moods]:
         parts: list[np.ndarray] = []
@@ -95,6 +99,7 @@ async def render_samples(
                 parts.append(_resample(chunk.samples, chunk.rate_hz, SAMPLE_RATE_HZ))
             deliveries.append(d)
         audio = np.concatenate(parts) if parts else np.zeros(0, np.float32)
+        out_dir.mkdir(parents=True, exist_ok=True)  # only once there is audio to write
         path = out_dir / f"{language}-{mood}.wav"
         _write_wav(path, audio)
         written.append(Sample(mood, path, deliveries, audio.size / SAMPLE_RATE_HZ))
