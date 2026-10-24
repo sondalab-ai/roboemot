@@ -2088,7 +2088,8 @@ class PiperConfig(Strict):
     )  # fmt: skip
     inter_op_threads: int = param(
         1,
-        "ONNX Runtime threads the worker uses across operators; 0 keeps the runtime default",
+        "ONNX Runtime threads the worker uses across operators (only used in the runtime's "
+        "parallel execution mode, not the default sequential one); 0 keeps the runtime default",
         ge=0, le=16, restart=True,
     )  # fmt: skip
 

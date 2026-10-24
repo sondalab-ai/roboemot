@@ -99,6 +99,14 @@ def test_splitter_strips_mood_tags_even_when_split_across_deltas():
     assert split(["[mood=joy] Ciao"], strip_tags=False) == [("[mood=joy] Ciao", None)]
 
 
+def test_splitter_marks_the_pieces_after_a_forced_cut_as_continued():
+    s = SentenceSplitter(40)
+    out = s.feed("Una frase lunga, molto lunga, che supera di gran lunga il limite? Poi. ")
+    out += s.flush()
+    assert [x.continued for x in out] == [False] + [True] * (len(out) - 2) + [False]
+    assert out[-1].text == "Poi."
+
+
 def test_splitter_drops_fragments_without_letters():
     assert split(["... ?! Sì."]) == [("Sì.", None)]
 
@@ -560,11 +568,15 @@ def test_a_reload_takes_the_piper_timeouts_and_keeps_its_restart_fields(tmp_path
     local = piper(tmp_path)
     before = local.config
     hot = {"startup_timeout_s": 7.0, "request_timeout_s": 9.0, "restart_backoff_s": (0.5, 2.0)}
-    new = PiperConfig(**hot, chunk_ms=40.0, python="/elsewhere/python")
+    new = PiperConfig(
+        **hot, chunk_ms=40.0, python="/elsewhere/python", intra_op_threads=4, inter_op_threads=3
+    )
     remote = SimpleNamespace(name="remote", controls=frozenset(), apply_config=lambda voice: None)
     FallbackTTS(remote, local).apply_config(VOICE.model_copy(update={"piper": new}))
     assert local.config.model_dump(include=set(hot)) == new.model_dump(include=set(hot))
     assert (local.config.chunk_ms, local.config.python) == (before.chunk_ms, before.python)
+    kept = (local.config.intra_op_threads, local.config.inter_op_threads)
+    assert kept == (before.intra_op_threads, before.inter_op_threads)
 
 
 def test_the_backend_choice_is_a_restart_field_like_the_backend():
@@ -587,12 +599,6 @@ async def test_piper_worker_gets_the_onnx_thread_counts_on_its_command_line(tmp_
         assert (tmp_path / "custom" / "voices" / "v.onnx.threads").read_text() == "3 0"
     finally:
         await custom.aclose()
-
-
-def test_a_reload_keeps_the_thread_counts():
-    fields = PiperConfig.model_fields
-    for name in ("intra_op_threads", "inter_op_threads"):
-        assert fields[name].json_schema_extra["restart"], name
 
 
 def _load_worker():
@@ -638,3 +644,66 @@ def test_piper_engine_rebuilds_the_session_with_the_thread_counts(
         assert loaded.session == "rebuilt"
     else:
         assert sessions == [] and loaded.session == "default"
+
+
+def test_piper_engine_volume_never_clips_and_keeps_quiet_sentences_as_asked(monkeypatch, tmp_path):
+    """Regression (review S1): a positive volume pushed loud sentences into Piper's hard clip.
+    Piper is asked for the pre-gain only and the worker caps the rest at the peak limit."""
+    worker = _load_worker()
+    voice = make_voice(tmp_path) / "v.onnx"
+    asked = []
+    t = np.arange(2205) / RATE
+
+    def synthesize(text, config):
+        asked.append(config.volume)
+        model = np.sin(2 * np.pi * 440 * t) * (0.95 if "loud" in text else 0.2)
+        yield SimpleNamespace(audio_float_array=(model * config.volume).astype(np.float32))
+
+    loaded = SimpleNamespace(session="default", synthesize=synthesize)
+    monkeypatch.setitem(sys.modules, "onnxruntime", SimpleNamespace())
+    monkeypatch.setitem(
+        sys.modules,
+        "piper",
+        SimpleNamespace(
+            PiperVoice=SimpleNamespace(load=lambda path: loaded),
+            SynthesisConfig=lambda **kw: SimpleNamespace(**kw),
+        ),
+    )
+    engine = worker.PiperEngine(str(voice))
+
+    def peak(text, volume):
+        (pcm,) = engine.synthesize({"text": text, "volume": volume})
+        return np.abs(np.frombuffer(pcm, "<i2")).max() / worker.INT16_FULL_SCALE
+
+    loud_db3 = 10 ** (3 / 20)
+    assert peak("loud", loud_db3) == pytest.approx(worker.PEAK_LIMIT, abs=1e-3)  # capped, no clip
+    assert peak("quiet", loud_db3) == pytest.approx(0.2 * loud_db3, abs=1e-3)  # gain as asked
+    assert peak("quiet", 0.5) == pytest.approx(0.1, abs=1e-3)
+    assert set(asked) == {worker.PIPER_PRE_GAIN}
+
+
+def test_piper_engine_keeps_the_loaded_session_when_the_rebuild_fails(
+    tmp_path, monkeypatch, capsys
+):
+    voice = make_voice(tmp_path) / "v.onnx"
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("bad option")
+
+    class Options:
+        pass
+
+    loaded = SimpleNamespace(session="default")
+    monkeypatch.setitem(
+        sys.modules, "onnxruntime", SimpleNamespace(SessionOptions=Options, InferenceSession=broken)
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "piper",
+        SimpleNamespace(
+            PiperVoice=SimpleNamespace(load=lambda path: loaded), SynthesisConfig=object
+        ),
+    )
+    _load_worker().PiperEngine(str(voice), 2, 1)
+    assert loaded.session == "default"
+    assert "RuntimeError" in capsys.readouterr().err

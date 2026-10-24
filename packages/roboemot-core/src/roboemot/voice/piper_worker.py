@@ -17,7 +17,10 @@ Protocol (little glue, no text ever leaves the process except as audio):
   cancel), ``X`` failure (JSON ``{"error": exception class name}``, followed by ``E``).
 - the thread counts (``voice.piper.intra_op_threads`` / ``inter_op_threads``, 0 = the ONNX
   Runtime default) are applied by rebuilding the voice's session: ``PiperVoice.load`` takes no
-  session options.
+  session options. A rebuild that fails keeps the loaded session (one line on stderr).
+- volume never clips: Piper is asked for ``PIPER_PRE_GAIN`` (so its own clip at full scale never
+  acts on the model output) and the worker applies the rest of the requested volume, capped so
+  the sentence's peak stays at ``PEAK_LIMIT`` of full scale.
 - stderr is free text for humans; the parent drains it. File descriptor 1 is pointed at stderr
   right after start-up, so a stray ``print`` cannot corrupt the frames.
 """
@@ -37,6 +40,9 @@ from typing import Any, BinaryIO
 HEADER = struct.Struct(">cII")
 BYTES_PER_SAMPLE = 2
 MS_PER_S = 1000.0
+PIPER_PRE_GAIN = 0.5  # 6 dB of headroom: Piper clips at +-1 after its own volume
+PEAK_LIMIT = 0.98  # highest peak, as a share of full scale, the requested volume may reach
+INT16_FULL_SCALE = 32767
 
 
 def read_sample_rate(voice_path: str) -> int:
@@ -62,18 +68,25 @@ class PiperEngine:
     def __init__(
         self, voice_path: str, intra_op_threads: int = 0, inter_op_threads: int = 0
     ) -> None:
+        import numpy
         import onnxruntime
         from piper import PiperVoice, SynthesisConfig
 
         self.sample_rate = read_sample_rate(voice_path)
+        # load() builds a default session that is replaced below: building the voice ourselves
+        # would tie the worker to more of Piper's internals than one public field.
         self._voice = PiperVoice.load(voice_path)
         if intra_op_threads > 0 or inter_op_threads > 0:
-            self._voice.session = onnxruntime.InferenceSession(
-                voice_path,
-                sess_options=session_options(onnxruntime, intra_op_threads, inter_op_threads),
-                providers=["CPUExecutionProvider"],
-            )
+            try:
+                self._voice.session = onnxruntime.InferenceSession(
+                    voice_path,
+                    sess_options=session_options(onnxruntime, intra_op_threads, inter_op_threads),
+                    providers=["CPUExecutionProvider"],
+                )
+            except Exception as exc:  # a bad option must not silence the robot
+                print(f"thread options not applied: {type(exc).__name__}", file=sys.stderr)
         self._config = SynthesisConfig
+        self._np = numpy
 
     def synthesize(self, request: dict[str, Any]) -> Iterator[bytes]:
         # normalize_audio off: the volume the caller computed must mean something absolute.
@@ -81,11 +94,22 @@ class PiperEngine:
             length_scale=request.get("length_scale"),
             noise_scale=request.get("noise_scale"),
             noise_w_scale=request.get("noise_w_scale"),
-            volume=request.get("volume", 1.0),
+            volume=PIPER_PRE_GAIN,
             normalize_audio=False,
         )
+        volume = float(request.get("volume", 1.0))
         for chunk in self._voice.synthesize(request["text"], config):
-            yield chunk.audio_int16_bytes
+            yield limited_pcm(self._np, chunk.audio_float_array, volume / PIPER_PRE_GAIN)
+
+
+def limited_pcm(np: Any, audio: Any, gain: float) -> bytes:
+    """``audio * gain`` as little-endian int16, the gain lowered when it would push the peak
+    above ``PEAK_LIMIT`` of full scale (a volume that would clip plays as loud as it can)."""
+    peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+    if peak > 0.0:
+        gain = min(gain, PEAK_LIMIT / peak)
+    out = np.clip(audio * gain, -1.0, 1.0) * INT16_FULL_SCALE
+    return out.astype("<i2").tobytes()
 
 
 def _send(out: BinaryIO, kind: bytes, request_id: int, payload: bytes = b"") -> None:
