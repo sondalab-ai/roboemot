@@ -843,7 +843,7 @@ class ConversationWorker:
             turn.outcome = "capped"
             return False
         mood, intensity = self._mood(turn.cfg, sentence.mood)
-        self._say(turn, sentence.text, mood, intensity)
+        self._say(turn, sentence.text, mood, intensity, continued=sentence.continued)
         turn.sentences += 1
         if turn.sentences >= turn.cap:
             turn.outcome = "capped"
@@ -867,7 +867,9 @@ class ConversationWorker:
             )
         return label, state.intensity
 
-    def _say(self, turn: _Turn, text: str, mood: str | None, intensity: float) -> None:
+    def _say(
+        self, turn: _Turn, text: str, mood: str | None, intensity: float, continued: bool = False
+    ) -> None:
         if not text or turn.interrupted:  # a barge-in is under way: nothing more is said
             return
         job = self.speech.say(
@@ -878,6 +880,7 @@ class ConversationWorker:
             mood=mood,
             intensity=intensity,
             utterance=turn.speech_id,
+            continued=continued,
         )
         if job is not None:
             turn.stamps.setdefault("say", self.clock())
