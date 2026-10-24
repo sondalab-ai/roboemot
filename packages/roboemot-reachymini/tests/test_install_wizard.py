@@ -79,6 +79,7 @@ class FakeRobot:
         self.fetch_fails = False  # True: every fetch fails; an int: that many fail first
         self.verified_models: list[str] = []  # "voice:<path>" files with a valid marker
         self.models_on_disk: dict[str, int] = {}  # bytes unverified files already hold
+        self.retired_bytes = 0  # retired model files still in the models folder
         self.free_kb = 20_000_000
         self.free_kb_by_cache = self.free_kb  # free space while the uv cache is still there
         self.links_into_cache: list[str] = []  # symlinks under /venvs into ~/.cache/uv
@@ -206,7 +207,13 @@ class FakeRobot:
                 self.dirs.discard(path)
             return ""
         if "check_file" in plain:
-            return json.dumps({"done": self.verified_models, "on_disk": self.models_on_disk})
+            return json.dumps(
+                {
+                    "done": self.verified_models,
+                    "on_disk": self.models_on_disk,
+                    "retired": self.retired_bytes,
+                }
+            )
         if "platform.machine" in plain:
             return self.machine
         if "version('reachy_mini')" in plain:
@@ -1065,6 +1072,17 @@ def test_with_every_model_verified_there_is_nothing_to_download(offline, robot, 
     install()
     assert robot.fetches == []
     assert "nothing to download" in capsys.readouterr().out
+
+
+def test_retired_model_files_are_reported_never_deleted(offline, robot, daemon, capsys):
+    """Review ZN N3: the age model (10.5 MB) left on a robot is pointed at `models prune`; the
+    installer itself deletes nothing it did not create."""
+    robot.verified_models = voice_files(robot, 1.0)
+    robot.retired_bytes = 10_513_214
+    install()
+    out = capsys.readouterr().out
+    assert "11 MiB of retired model files" in out and "roboemot models prune" in out
+    assert not any("prune" in f for f in robot.fetches)
 
 
 def test_a_failed_download_is_tried_once_more(offline, robot, daemon, capsys):

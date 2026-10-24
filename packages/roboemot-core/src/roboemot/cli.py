@@ -19,6 +19,8 @@ import yaml
 from .config import ConfigError, ConfigStack, GuardrailError, RoboEmotConfig
 from .redact import scrub_text
 
+MB = 1e6  # model sizes as the README and the manifests state them
+
 HTTP_CLIENT_FACTORY: Callable[[], httpx.AsyncClient] | None = None  # tests inject a transport
 
 
@@ -112,6 +114,11 @@ def _models(args: argparse.Namespace) -> int:
             for name, role, licence, state in rows:
                 print(f"{name:{widths[0]}}  {role:{widths[1]}}  {licence:{widths[2]}}  {state}")
             print(f"folder: {root}")
+        for path, size in models.retired_on_disk(vision_root):
+            print(
+                f"retired, unused: {path} ({size / MB:.1f} MB); run `roboemot models prune` "
+                "to delete it"
+            )
         legacy = models.legacy_dir()
         if vision_root != legacy and legacy.is_dir() and any(legacy.iterdir()):
             print(

@@ -233,6 +233,19 @@ def _target(root: Path, file: ModelFile) -> Path:
     return target
 
 
+def retired_on_disk(root: Path, manifest: Path = MANIFEST) -> list[tuple[Path, int]]:
+    """The manifest's ``retired`` files still in ``root``, with their sizes in bytes: what
+    ``prune_retired`` would delete (same rule: a path resolving outside ``root`` is not counted).
+    Read-only."""
+    base = root.resolve()
+    found = []
+    for rel in retired_paths(manifest):
+        path = root / rel
+        if path.is_file() and path.resolve().is_relative_to(base):
+            found.append((path, path.stat().st_size))
+    return found
+
+
 def prune_retired(root: Path, manifest: Path = MANIFEST) -> list[Path]:
     """Delete the manifest's ``retired`` files and their markers; returns the files deleted.
 
@@ -240,7 +253,8 @@ def prune_retired(root: Path, manifest: Path = MANIFEST) -> list[Path]:
     resolves outside ``root`` (for example a symlink pointing out) is left alone with its
     marker; an in-root symlink is unlinked, not followed. Folders left empty by a deletion are
     removed up to ``root``. On the bench cache (``--cache-dir ~/.cache/roboemot-bench/models``)
-    this deletes the FairFace files that ``scripts/bench`` and ``scripts/eval`` still use.
+    this deletes the FairFace files that ``scripts/bench`` and ``scripts/eval`` still use, and the
+    yolo11n-face-age file that ``scripts/bench`` can still time.
     """
     base = root.resolve()
     deleted = []

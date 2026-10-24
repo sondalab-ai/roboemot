@@ -372,7 +372,7 @@ EN: dict[str, str] = {
     "scope_face": "Face recognition",
     "scope_voice": "Speaker recognition (voice)",
     "scope_refresh": "Adding new samples over time",
-    "agree": "The person has read the text above and agrees.",
+    "agree": "The person consenting has read the text above and agrees.",
     "consent_title": "Consent",
     "consent_biometric": (
         "The robot stores face (and, if chosen, voice) embeddings of this person to recognise "
@@ -931,7 +931,7 @@ IT: dict[str, str] = {
     "scope_face": "Riconoscimento del volto",
     "scope_voice": "Riconoscimento di chi parla (voce)",
     "scope_refresh": "Aggiunta di nuovi campioni nel tempo",
-    "agree": "La persona ha letto il testo sopra ed è d'accordo.",
+    "agree": "Chi dà il consenso ha letto il testo sopra ed è d'accordo.",
     "consent_title": "Consenso",
     "consent_biometric": (
         "Il robot conserva i vettori del volto (e, se scelto, della voce) di questa persona per "

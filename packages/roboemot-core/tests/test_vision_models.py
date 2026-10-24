@@ -89,6 +89,22 @@ def test_prune_deletes_only_the_retired_files_and_their_empty_folders(tmp_path):
     assert models.prune_retired(tmp_path / "absent") == []
 
 
+def test_cli_list_names_retired_files_on_disk_and_prune_deletes_them(tmp_path, capsys):
+    """Review ZN S2: `models list` shows each retired file still in the folder (the age model
+    included) and points at `models prune`, which then deletes it."""
+    age = tmp_path / "yolo11n_face_age/model.onnx"
+    age.parent.mkdir()
+    age.write_bytes(b"x" * 2_000_000)
+    assert models.retired_on_disk(tmp_path) == [(age, 2_000_000)]
+    assert cli.main(["models", "list", "--cache-dir", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert f"retired, unused: {age} (2.0 MB); run `roboemot models prune`" in out
+    assert cli.main(["models", "prune", "--cache-dir", str(tmp_path)]) == 0
+    assert str(age) in capsys.readouterr().out and not age.exists()
+    assert cli.main(["models", "list", "--cache-dir", str(tmp_path)]) == 0
+    assert "retired, unused" not in capsys.readouterr().out
+
+
 def test_prune_does_not_follow_a_symlink_out_of_the_folder(tmp_path):
     outside = tmp_path / "outside.onnx"
     outside.write_bytes(b"keep")
