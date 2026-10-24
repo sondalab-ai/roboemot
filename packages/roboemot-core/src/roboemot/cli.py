@@ -1,6 +1,6 @@
 """Command line: ``roboemot config {validate,schema,dump}``, ``roboemot manifest check``,
 ``roboemot discover``, ``roboemot debug``, ``roboemot models {list,fetch}`` and
-``roboemot llm check`` and ``roboemot secrets {set,remove,list}``."""
+``roboemot llm check``, ``roboemot secrets {set,remove,list}`` and ``roboemot voice sample``."""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ from .redact import scrub_text
 MB = 1e6  # model sizes as the README and the manifests state them
 
 HTTP_CLIENT_FACTORY: Callable[[], httpx.AsyncClient] | None = None  # tests inject a transport
+PIPER_SCRIPT: Path | None = None  # tests inject a fake Piper worker
 
 
 def _stack(args: argparse.Namespace) -> ConfigStack:
@@ -202,6 +203,46 @@ def _llm(args: argparse.Namespace) -> int:
     return 0 if report.ok else 1
 
 
+def _voice(args: argparse.Namespace) -> int:
+    """Render the sample reply in every mood with the local Piper voice (SPEC 8): no network,
+    whatever ``voice.backend`` says."""
+    from .voice import models as voice_models
+    from .voice.factory import piper_python
+    from .voice.piper_backend import WORKER_SCRIPT, PiperBackend, manifest_voice_files
+    from .voice.sample import render_samples
+
+    stack = _stack(args)
+    if args.manifest:
+        from .manifest import load_manifest
+
+        # only the behaviour block (config layer 2) is used: nothing moves
+        m = load_manifest(Path(args.manifest), allow_unmeasured_dynamics=True)
+        stack.set_manifest_behaviour(m.model.behaviour, m.channels)
+    cfg = stack.effective()
+    root = voice_models.models_dir(args.voice_dir or cfg.voice.models_dir, cfg.data_dir)
+    backend = PiperBackend(
+        cfg.voice.piper,
+        args.python or piper_python(cfg),
+        manifest_voice_files(root),
+        script=PIPER_SCRIPT or WORKER_SCRIPT,
+    )
+
+    async def run():
+        try:
+            return await render_samples(
+                cfg, backend, Path(args.out), language=args.lang, intensity=args.intensity
+            )
+        finally:
+            await backend.aclose()
+
+    samples = asyncio.run(run())  # a TTSError is a RuntimeError: reported by main
+    for s in samples:
+        rates = " ".join(f"{d.rate:.2f}" for d in s.deliveries)
+        pitches = " ".join(f"{d.pitch_st:+.1f}" for d in s.deliveries)
+        print(f"{s.path}  {s.seconds:.1f} s  rate {rates}  pitch_st {pitches}")
+    return 0
+
+
 def read_secret_value(stdin=None) -> str | None:
     """The value to store: asked twice without echo on a terminal, else the first line of stdin
     (the installer pipes it over SSH). Never an argument. None when the two entries differ."""
@@ -332,8 +373,41 @@ def main(argv: list[str] | None = None) -> int:
     sec.add_argument("--preset")
     sec.add_argument("--preset-dir", action="append", default=["configs/presets"])
 
+    voice = sub.add_parser(
+        "voice",
+        help="voice tools: `sample` renders one fixed reply, neutral and in every mood, to WAV "
+        "with the local Piper voice and the configured delivery (SPEC 8); needs the Piper "
+        "virtualenv and the voice models (`roboemot models fetch --voice`), no network",
+    )
+    voice.add_argument("action", choices=["sample"])
+    voice.add_argument("--out", required=True, help="folder for the WAV files")
+    voice.add_argument("--lang", default="it", choices=["it", "en"])
+    voice.add_argument(
+        "--intensity", type=float, default=0.5, help="affect intensity 0..1 (default 0.5)"
+    )
+    voice.add_argument(
+        "--manifest",
+        help="robot manifest whose behaviour layer applies (e.g. the robot's base pitch)",
+    )
+    voice.add_argument(
+        "--python", help="Piper virtualenv interpreter (default: voice.piper.python, else the "
+        "app data folder's piper-venv)",
+    )  # fmt: skip
+    voice.add_argument(
+        "--voice-dir",
+        help="voice models folder (default: voice.models_dir, else the app data folder)",
+    )
+    voice.add_argument("--app")
+    voice.add_argument("--defaults")
+    voice.add_argument("--preset")
+    voice.add_argument("--preset-dir", action="append", default=["configs/presets"])
+
     args = parser.parse_args(argv)
     try:
+        if args.cmd == "voice":
+            if not 0.0 <= args.intensity <= 1.0:
+                raise ValueError("--intensity must be within 0 and 1")
+            return _voice(args)
         if args.cmd == "secrets":
             return _secrets(args)
         if args.cmd == "config":
