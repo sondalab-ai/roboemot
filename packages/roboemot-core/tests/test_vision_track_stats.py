@@ -464,3 +464,12 @@ def test_low_score_refused_within_the_distance_gate_after_a_miss():
     tracker.update([weak], stamp + 2 * DT)
     low = diag.snapshot()["low_score"]
     assert low["refused"] == 1 and low["unmatched"] == 0
+
+
+def test_low_pass_distance_matches_are_counted_apart():
+    tracker, diag = observed()
+    _, stamp = confirm(tracker, 100)
+    tracker.update([Detection((122, 80, 182, 140), 0.3)], stamp + DT)  # IoU 0.46, 0.37 heights
+    assoc = diag.snapshot()["association"]
+    assert assoc["low_distance_matches"] == 1 and assoc["distance_matches"] == 0
+    assert assoc["low_distance_heights"]["p50"] == pytest.approx(22 / 60, abs=0.02)

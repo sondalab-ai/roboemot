@@ -32,10 +32,11 @@ tracker only). Per update the cost is O(tracks); memory is the live tracks plus 
   among these, those within the rebirth gate of a track that expired at most
   ``vision.rebirth_window_s`` before (``near_ended``, with a score summary: the face was there,
   too weak to restart a track).
-- ``association``: matches the centre-distance gate made after the IoU gate failed
-  (``distance_matches``, with a summary of their ``distance_heights``), and high-score
-  detections not started because they lay within ``match_distance_heights`` of a track matched
-  in the same update (``duplicates_not_started``).
+- ``association``: matches the centre-distance gate made after the IoU gate failed, per pass
+  (``distance_matches`` with a summary of their ``distance_heights`` for the high-score pass,
+  ``low_distance_matches`` and ``low_distance_heights`` for the low-score pass), and high-score
+  detections not started because they lay within ``match_distance_heights`` of a confirmed track
+  matched in the same update (``duplicates_not_started``).
 - ``start_score``: scores of the detections that started tracks; ``start_near_iou`` and
   ``start_near_distance_heights``: for a start next to confirmed tracks the update left
   unmatched, the best IoU with their predicted boxes and the smallest centre distance in their
@@ -157,6 +158,8 @@ class TrackDiagnostics:
         self._start_near_distance: deque[float] = deque(maxlen=window)
         self._distance_matches = 0
         self._match_distance: deque[float] = deque(maxlen=window)
+        self._low_distance_matches = 0
+        self._low_match_distance: deque[float] = deque(maxlen=window)
         self._duplicates = 0
         self._below_min_px = 0
 
@@ -176,11 +179,17 @@ class TrackDiagnostics:
                     min(_distance(b, det.box) for b in neighbours.values())
                 )
 
-    def matched(self, track_id: int, distance_heights: float | None = None) -> None:
+    def matched(
+        self, track_id: int, distance_heights: float | None = None, *, low: bool = False
+    ) -> None:
         """The track was matched in this update; ``distance_heights`` is set when the
-        centre-distance gate made the match (the IoU gate failed)."""
+        centre-distance gate made the match (the IoU gate failed), ``low`` when the low-score
+        pass made it."""
         with self._lock:
-            if distance_heights is not None:
+            if distance_heights is not None and low:
+                self._low_distance_matches += 1
+                self._low_match_distance.append(distance_heights)
+            elif distance_heights is not None:
                 self._distance_matches += 1
                 self._match_distance.append(distance_heights)
             live = self._live.get(track_id)
@@ -190,7 +199,9 @@ class TrackDiagnostics:
                 live.last_pose = self.pose
 
     def duplicate(self, track_id: int, det: Detection) -> None:
-        """A high-score detection near ``track_id``, matched in this update, started no track."""
+        """A high-score detection near ``track_id``, matched in this update, started no track.
+        Only the count is kept; the track and detection are passed for symmetry with the other
+        hooks."""
         with self._lock:
             self._duplicates += 1
 
@@ -219,7 +230,7 @@ class TrackDiagnostics:
             for det in dets:
                 self._unmatched += 1
                 self._unmatched_score.append(det.score)
-                if any(self._distance_heights(old.box, det.box) <= limit for old in recent):
+                if any(_distance(old.box, det.box) <= limit for old in recent):
                     self._near_ended += 1
                     self._near_ended_score.append(det.score)
 
@@ -322,6 +333,8 @@ class TrackDiagnostics:
                 "association": {
                     "distance_matches": self._distance_matches,
                     "distance_heights": summarise(list(self._match_distance), LEVELS),
+                    "low_distance_matches": self._low_distance_matches,
+                    "low_distance_heights": summarise(list(self._low_match_distance), LEVELS),
                     "duplicates_not_started": self._duplicates,
                 },
                 "start_score": summarise(list(self._start_score), LEVELS),
@@ -332,21 +345,13 @@ class TrackDiagnostics:
 
     # ----------------------------------------------------------------- helpers
 
-    def _distance_heights(self, old_box: Box, new_box: Box) -> float:
-        _, top, _, bottom = old_box
-        height = bottom - top
-        if height <= 0:
-            return math.inf
-        (ox, oy), (nx, ny) = _centre(old_box), _centre(new_box)
-        return math.hypot(nx - ox, ny - oy) / height
-
     def _nearest(self, live: _Live, ended: list[_Ended]) -> _Ended | None:
         window, limit = self.cfg.rebirth_window_s, self.cfg.rebirth_distance_heights
         best, best_d = None, math.inf
         for old in ended:
             if live.birth_stamp <= old.last_stamp or live.birth_stamp - old.end_stamp > window:
                 continue
-            d = self._distance_heights(old.box, live.birth_box)
+            d = _distance(old.box, live.birth_box)
             if d <= limit and d < best_d:
                 best, best_d = old, d
         return best
@@ -355,7 +360,7 @@ class TrackDiagnostics:
         limit = self.cfg.rebirth_distance_heights
         best, best_d = None, math.inf
         for live in born:
-            d = self._distance_heights(live.neighbours.get(old.track_id, old.box), live.birth_box)
+            d = _distance(live.neighbours.get(old.track_id, old.box), live.birth_box)
             if d <= limit and d < best_d:
                 best, best_d = live, d
         return best
@@ -367,7 +372,7 @@ class TrackDiagnostics:
         self._rebirth_lost_s.append(old.lost_s)
         old_box = new.neighbours.get(old.track_id, old.box) if overlapped else old.box
         self._iou.append(_iou(new.birth_box, old_box))
-        self._distance.append(self._distance_heights(old_box, new.birth_box))
+        self._distance.append(_distance(old_box, new.birth_box))
         old_pose = old.last_pose
         if old_pose is not None and new.birth_pose is not None:
             self._yaw_deg.append(abs(math.degrees(new.birth_pose[0] - old_pose[0])))

@@ -6,13 +6,16 @@ against the tracks still unmatched that were matched at the previous update (thi
 alive through a weak detection, such as a partly turned face). A pair matches when its IoU
 reaches the pass's IoU gate or, failing that, when the detection's box centre lies within the
 pass's distance gate, in heights of the track's predicted box (``match_distance_heights``,
-``low_match_distance_heights``): a face seen side-on changes its box shape and size, so the
-IoU with its own track drops below the gate (robot, 2026-10-23). Association is greedy: IoU
-pairs first by descending IoU, then distance pairs by ascending distance, which equals the
-optimal assignment for the few, well separated faces of a home scene.
+``low_match_distance_heights``), and the two box heights differ by at most
+``match_height_ratio``: a face seen side-on changes its box shape, so the IoU with its own
+track drops below the gate (robot, 2026-10-23), but keeps its size, while a smaller face beside
+or behind it does not. Association is greedy: IoU pairs first by descending IoU (for the few,
+well separated faces of a home scene this matches the optimal assignment), then distance pairs
+by ascending distance.
 
 Unmatched high-score detections start tracks, except a duplicate: one whose centre lies within
-``match_distance_heights`` of a track matched in this update. A track is reported only after
+``match_distance_heights`` of the corrected box of a confirmed track matched in this update,
+with a height within ``match_height_ratio``. A track is reported only after
 ``confirm_hits`` matches, and removed once unmatched for ``lost_s`` seconds of capture stamps
 (the rate varies with the governor, so frame counts would be wrong).
 
@@ -82,6 +85,19 @@ def distance_matrix(tracks: np.ndarray, dets: np.ndarray) -> np.ndarray:
     dy = (dy1 + dy2)[None, :] / 2 - (ty1 + ty2)[:, None] / 2
     gap, height = np.hypot(dx, dy), ty2 - ty1
     return np.where(height[:, None] > 0, gap / np.where(height > 0, height, 1)[:, None], np.inf)
+
+
+def gated_distance(tracks: np.ndarray, dets: np.ndarray, ratio: float) -> np.ndarray:
+    """``distance_matrix``, with ``inf`` where the larger of the two box heights is more than
+    ``ratio`` times the smaller (a box of zero height never passes)."""
+    dist = distance_matrix(tracks, dets)
+    if dist.size == 0:
+        return dist
+    _, ty1, _, ty2 = tracks.T
+    _, dy1, _, dy2 = dets.T
+    th, dh = (ty2 - ty1)[:, None], (dy2 - dy1)[None, :]
+    small, large = np.minimum(th, dh), np.maximum(th, dh)
+    return np.where((small > 0) & (large <= ratio * small), dist, np.inf)
 
 
 def _cxcywh(box: Box) -> np.ndarray:
@@ -170,21 +186,22 @@ class Tracker:
         if ids is not None:
             self._ids = ids
 
-    @staticmethod
     def _greedy(
-        tracks: list[Track], dets: list[Detection], min_iou: float, max_distance: float
+        self, tracks: list[Track], dets: list[Detection], min_iou: float, max_distance: float
     ) -> tuple[list[tuple[Track, Detection, float | None]], list[Track], list[Detection]]:
         """Greedy association of one pass: IoU pairs at or above ``min_iou`` (and above 0) by
         descending IoU, then the remaining same-label pairs within ``max_distance`` track heights
-        by ascending distance (none when it is 0). Matches carry the distance when the distance
-        gate made them, else None; also returns the unmatched tracks and detections."""
+        and ``match_height_ratio`` by ascending distance (none when it is 0). Matches carry the
+        distance when the distance gate made them, else None; also returns the unmatched tracks
+        and detections."""
         t_boxes = np.array([t.box for t in tracks]).reshape(-1, BOX_COLUMNS)
         d_boxes = np.array([d.box for d in dets]).reshape(-1, BOX_COLUMNS)
         same_label = np.array([[t.label == d.label for d in dets] for t in tracks]).reshape(
             len(tracks), len(dets)
         )
         iou = iou_matrix(t_boxes, d_boxes) * same_label
-        dist = np.where(same_label, distance_matrix(t_boxes, d_boxes), np.inf)
+        ratio = self.cfg.match_height_ratio
+        dist = np.where(same_label, gated_distance(t_boxes, d_boxes, ratio), np.inf)
         cells = [(i, j) for i in range(len(tracks)) for j in range(len(dets))]
         by_iou = sorted(
             (p for p in cells if iou[p] > 0 and iou[p] >= min_iou), key=lambda p: -iou[p]
@@ -243,6 +260,7 @@ class Tracker:
         matched_low, rest_t2, rest_low = self._greedy(
             recent, low, cfg.low_match_iou, cfg.low_match_distance_heights
         )
+        low_tracks = {id(m[0]) for m in matched_low}
         stale = [t for t in rest_t if t not in recent]
         missed = stale + rest_t2
         if self.observer is not None:
@@ -254,7 +272,7 @@ class Tracker:
             t.detection, t.score, t.last_stamp, t.hits = d, d.score, stamp, t.hits + 1
             t._matched_last = True
             if self.observer is not None:
-                self.observer.matched(t.track_id, distance)
+                self.observer.matched(t.track_id, distance, low=id(t) in low_tracks)
             if not t.confirmed and t.hits >= self.cfg.confirm_hits:
                 t.confirmed = True
                 new_ids.add(t.track_id)
@@ -266,7 +284,8 @@ class Tracker:
             t._matched_last = False
             if self.observer is not None:
                 self.observer.missed(t.track_id)
-        for d in self._not_duplicates(rest_d, [m[0] for m in matched + matched_low]):
+        confirmed = [m[0] for m in matched + matched_low if m[0].confirmed]
+        for d in self._not_duplicates(rest_d, confirmed):
             t = Track(next(self._ids), d.label, d.score, stamp, stamp, detection=d)
             t._start(d, stamp)
             if self.observer is not None:
@@ -289,15 +308,17 @@ class Tracker:
 
     def _not_duplicates(self, dets: list[Detection], matched: list[Track]) -> list[Detection]:
         """The unmatched high-score detections that may start a track: those whose centre is
-        farther than ``match_distance_heights`` from every track (same label) matched in this
-        update, measured on the corrected box. The others are duplicates of the face that track
-        already follows; the observer counts them. All pass when the gate is 0."""
+        farther than ``match_distance_heights`` from every confirmed track (same label, height
+        within ``match_height_ratio``) matched in this update, measured on the corrected box.
+        The others are duplicates of the face that track already follows; the observer counts
+        them. All pass when the gate is 0."""
         gate = self.cfg.match_distance_heights
         if gate <= 0 or not dets or not matched:
             return dets
-        dist = distance_matrix(
+        dist = gated_distance(
             np.array([t.box for t in matched]).reshape(-1, BOX_COLUMNS),
             np.array([d.box for d in dets]).reshape(-1, BOX_COLUMNS),
+            self.cfg.match_height_ratio,
         )
         keep = []
         for j, d in enumerate(dets):
@@ -314,7 +335,8 @@ class Tracker:
     ) -> None:
         """Tell the observer which unmatched low-score detections the low pass would have matched
         to a track (IoU at least ``low_match_iou``, or centre within
-        ``low_match_distance_heights``, same label) that it skipped because the track missed the
+        ``low_match_distance_heights`` with a height within ``match_height_ratio``, same label)
+        that it skipped because the track missed the
         update before, and which neither overlap nor lie within that gate of any live track of
         their label. Reads only; O(tracks x low), nothing when no low-score detection is left."""
         if not low:
@@ -322,7 +344,8 @@ class Tracker:
         cfg = self.cfg
         boxes = np.array([d.box for d in low]).reshape(-1, BOX_COLUMNS)
         t_boxes = np.array([t.box for t in self._tracks]).reshape(-1, BOX_COLUMNS)
-        live, dist = iou_matrix(t_boxes, boxes), distance_matrix(t_boxes, boxes)
+        live = iou_matrix(t_boxes, boxes)
+        dist = gated_distance(t_boxes, boxes, cfg.match_height_ratio)
         gate = cfg.low_match_distance_heights
         unmatched = []
         for j, d in enumerate(low):

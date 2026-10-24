@@ -25,7 +25,7 @@ from roboemot.vision import (
     VisionPipeline,
 )
 from roboemot.vision.replay import ReplayError, load_session, replay, summarize
-from roboemot.vision.tracker import distance_matrix, iou_matrix
+from roboemot.vision.tracker import distance_matrix, gated_distance, iou_matrix
 from roboemot.world import FrameSpec, WorldModel, feed_world
 
 CFG = RoboEmotConfig()
@@ -255,11 +255,11 @@ def test_tracker_a_new_face_beside_an_unmatched_track_starts_its_own():
 def test_tracker_iou_matches_win_over_nearer_centres():
     t = Tracker(TrackerConfig(confirm_hits=1))
     tid = t.update([face(100)], 0.0).visible[0].track_id
-    tiny = Detection((125, 105, 135, 115), 0.9)  # centre on the track, IoU 0.03
-    res = t.update([tiny, face(115)], 0.125)  # IoU 0.6, 0.25 heights away
+    sliver = Detection((125, 70, 135, 150), 0.9)  # centre on the track, IoU 0.16, 1.33x tall
+    res = t.update([sliver, face(115)], 0.125)  # IoU 0.6, 0.25 heights away
     assert [tr.track_id for tr in res.visible] == [tid]
     assert res.visible[0].detection.box == face(115).box
-    assert len(t._tracks) == 1  # the tiny box is a duplicate: no track
+    assert len(t._tracks) == 1  # the sliver is a duplicate: no track
 
 
 def test_tracker_low_score_pass_uses_its_own_distance_gate():
@@ -273,6 +273,54 @@ def test_tracker_low_score_pass_uses_its_own_distance_gate():
     t2.update([face(100)], 0.125)
     weak_far = Detection((130, 80, 190, 140), 0.3)  # IoU 0.33, 0.5 heights: past both
     assert t2.update([weak_far], 0.25).visible == []
+
+
+HALF = Detection((145.6, 95, 175.6, 125), 0.9)  # 30 px face, centre 0.51 heights right of face(100)
+
+
+def test_tracker_half_size_face_beside_a_matched_face_starts_its_own_track():
+    # a child beside or behind an adult: close centres, half the height, so not a duplicate
+    assert gated_distance(np.array([face(100).box]), np.array([HALF.box]), 1.5)[0, 0] == np.inf
+    t = Tracker(CFG.vision.tracker)
+    for i in range(4):
+        res = t.update([face(100), HALF], i * 0.125)
+    assert len(res.visible) == 2 and len(t._tracks) == 2
+
+
+def test_tracker_half_size_face_does_not_take_over_a_track_that_missed():
+    t = Tracker(CFG.vision.tracker)
+    t.update([face(100)], 0.0)
+    tid = t.update([face(100)], 0.125).visible[0].track_id
+    t.update([HALF], 0.25)  # the adult looks away; the child's face is near its track
+    res = t.update([HALF], 0.375)
+    assert len(res.visible) == 1 and res.visible[0].track_id != tid
+
+
+def test_tracker_another_label_within_the_gate_does_not_take_over_a_missed_track():
+    t = Tracker(TrackerConfig(confirm_hits=1))
+    tid = t.update([face(100)], 0.0).visible[0].track_id
+    cat = Detection((124, 80, 184, 140), 0.9, "cat")  # same size, 0.4 heights, IoU 0.43
+    res = t.update([cat], 0.125)
+    assert [(tr.label, tr.track_id != tid) for tr in res.visible] == [("cat", True)]
+
+
+def test_tracker_another_label_within_the_gate_of_a_matched_track_is_not_a_duplicate():
+    t = Tracker(TrackerConfig(confirm_hits=1))
+    t.update([face(100)], 0.0)
+    cat = Detection((124, 80, 184, 140), 0.9, "cat")
+    res = t.update([face(100), cat], 0.125)
+    assert sorted(tr.label for tr in res.visible) == ["cat", "face"]
+
+
+@pytest.mark.parametrize(("gap_px", "tracks"), [(39, 2), (33, 1)])
+def test_tracker_duplicate_boundary_pins_the_default_gate(gap_px, tracks):
+    # 0.65 heights apart: two faces; 0.55: the second box is a duplicate of the first
+    t = Tracker(CFG.vision.tracker)
+    t.update([face(100)], 0.0)
+    t.update([face(100)], 0.125)
+    for i in range(2, 6):
+        t.update([face(100), face(100 + gap_px)], i * 0.125)
+    assert len(t._tracks) == tracks
 
 
 def test_tracker_distance_gates_must_stay_below_the_rebirth_gate():
