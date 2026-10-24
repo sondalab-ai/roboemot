@@ -54,11 +54,10 @@ MODELS: dict[str, tuple[str, tuple[int, int, int, int], str]] = {
         (1, 3, 224, 224),
         "gender (ViT-B, INT8 dynamic)",
     ),
-    # The shipped age model (SPEC 5, 13): vision.attribute_input_px 160, 128 the fallback. The
-    # library runs it with one thread (vision.attribute_threads), so time it with --threads 1.
-    "yolo11n_face_age_128": ("yolo11n_face_age.onnx", (1, 3, 128, 128), "age (shipped, 128 px)"),
-    "yolo11n_face_age_160": ("yolo11n_face_age.onnx", (1, 3, 160, 160), "age (shipped, default)"),
-    "yolo11n_face_age_224": ("yolo11n_face_age.onnx", (1, 3, 224, 224), "age (shipped, 224 px)"),
+    # The age model shipped 2026-10-22 to 2026-10-23 (removed with all age estimation, SPEC 5).
+    "yolo11n_face_age_128": ("yolo11n_face_age.onnx", (1, 3, 128, 128), "age (retired, 128 px)"),
+    "yolo11n_face_age_160": ("yolo11n_face_age.onnx", (1, 3, 160, 160), "age (retired, 160 px)"),
+    "yolo11n_face_age_224": ("yolo11n_face_age.onnx", (1, 3, 224, 224), "age (retired, 224 px)"),
     "dinov2_s_224": ("dinov2_s.onnx", (1, 3, 224, 224), "individual embedding"),
     "clip_b32_224": ("clip_b32_vision.onnx", (1, 3, 224, 224), "individual embedding"),
     "mobileclip_s0_256": ("mobileclip_s0_vision.onnx", (1, 3, 256, 256), "individual embedding"),

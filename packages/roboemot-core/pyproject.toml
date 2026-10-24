@@ -24,7 +24,7 @@ dependencies = [
 discovery = ["zeroconf>=0.132"]
 # The robot installer (runs on the PC): mDNS plus sondalab-palette's terminal colour roles.
 install = ["zeroconf>=0.132", "sondalab-palette>=0.3.8"]
-# ONNX vision backends (YuNet, SFace, yolo11n-face-age, DINOv2, NanoDet): `roboemot models fetch`
+# ONNX vision backends (YuNet, SFace, DINOv2, NanoDet): `roboemot models fetch`
 # gets the weights.
 vision = ["onnxruntime>=1.18", "onnx>=1.16", "opencv-python-headless>=4.9"]
 # Voice (SPEC 8): Silero VAD on ONNX Runtime and Vosk streaming ASR. Piper is not a dependency: it

@@ -202,7 +202,7 @@ def test_conversation_scale_floor():
 def test_face_tracks_survive_a_detector_slower_than_lost_s(tmp_path):
     """SPEC 5, 13: at the resting scale detection runs every 2.5 s, longer than tracker.lost_s
     (1.5 s); the lifetime follows face_lost_periods detection periods, so one face stays one
-    track instead of a new track (and a new burst and age job) at every detection."""
+    track instead of a new track (and a new burst) at every detection."""
     _, _, pipe, _, _ = rig(tmp_path, lambda i: [face(100)])
     resting = CFG.circadian.states["resting"].vision_rate_scale
     pipe.governor.set_scale(CIRCADIAN, resting)
