@@ -107,7 +107,6 @@ BEHAVIOUR_MODULES = [
     "webui/robot_section.py",
     "paths.py",
     "vision/__init__.py",
-    "vision/attributes.py",
     "vision/geometry.py",
     "vision/governor.py",
     "vision/models.py",

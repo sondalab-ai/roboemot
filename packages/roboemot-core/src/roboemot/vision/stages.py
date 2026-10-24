@@ -12,7 +12,7 @@ from typing import Protocol, runtime_checkable
 
 import numpy as np
 
-from .types import AttributeSample, Box, Detection, Frame
+from .types import Box, Detection, Frame
 
 
 class FaceDetector(Protocol):
@@ -27,12 +27,6 @@ class FaceEmbedder(Protocol):
     model_id: str
 
     def embed(self, image: np.ndarray, face: Detection) -> np.ndarray: ...
-
-
-class AttributeEstimator(Protocol):
-    """Age group and gender of one face crop (BGR, margin included)."""
-
-    def estimate(self, crop: np.ndarray) -> AttributeSample: ...
 
 
 class AppearanceEmbedder(Protocol):

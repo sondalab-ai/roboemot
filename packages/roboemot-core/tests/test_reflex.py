@@ -475,9 +475,7 @@ def test_sound_loud_is_published_once_per_onset_and_reaches_appraisal():
 def face(stamp: float, height: float, y1: float = 0.2) -> FacePercept:
     return FacePercept(
         track_id=1, stamp=stamp, box=(0.3, y1, 0.6, y1 + height), score=0.9, azimuth_rad=0.0,
-        elevation_rad=0.0, owner_id=None, anonymous_id="a", age_group="adult", age_source="x",
-        gender="unknown", gender_source="none", attribute_confidence=0.9,
-        new_track=False,
+        elevation_rad=0.0, owner_id=None, anonymous_id="a", new_track=False,
     )  # fmt: skip
 
 

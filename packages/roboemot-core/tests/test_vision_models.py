@@ -45,7 +45,6 @@ def test_manifest_is_complete_and_pinned():
     assert set(specs) == {
         "yunet",
         "sface",
-        "yolo11n-face-age",
         "dinov2-small",
         "nanodet-plus-m-320",
     }
@@ -67,8 +66,10 @@ def test_manifest_is_complete_and_pinned():
         "fairface/gender_model.onnx",
         "fairface_int8/age_model.onnx",
         "fairface_int8/gender_model.onnx",
+        "yolo11n_face_age/model.onnx",
     ]
     assert not set(retired) & set(paths)
+    assert not [n for n in specs if "age" in n.split("-")]
 
 
 def test_prune_deletes_only_the_retired_files_and_their_empty_folders(tmp_path):
@@ -80,6 +81,7 @@ def test_prune_deletes_only_the_retired_files_and_their_empty_folders(tmp_path):
     deleted = models.prune_retired(tmp_path)
     assert sorted(deleted) == sorted(tmp_path / r for r in models.retired_paths())
     assert not (tmp_path / "fairface_int8").exists()  # emptied, so removed
+    assert not (tmp_path / "yolo11n_face_age").exists()  # the age model (2026-10-23) too
     assert (tmp_path / "fairface/notes.txt").exists()  # not listed: kept, folder kept
     assert not (tmp_path / "fairface/age_model.onnx.verified").exists()
     assert (tmp_path / "clip_b32/model.onnx").exists()
@@ -340,22 +342,15 @@ def test_load_stages_builds_the_object_detector_from_the_class_mapping(monkeypat
     monkeypatch.setattr(onnx, "SFaceEmbedder", lambda *a: None)
     monkeypatch.setattr(onnx, "NanoDetDetector", lambda *a: built.append(a) or "detector")
     cfg = RoboEmotConfig().vision
-    stages = onnx.load_stages(tmp_path, cfg, attributes=False, appearance=False)
+    stages = onnx.load_stages(tmp_path, cfg, appearance=False)
     path, labels, classes, score_min, nms_iou, threads = built[0]
     assert stages.object_detector == "detector" and path.name == "nanodet-plus-m-320"
     assert len(labels) == 80 and classes == [*cfg.animal_categories, *cfg.object_categories]
     assert (score_min, nms_iou, threads) == (cfg.object_score_min, cfg.object_nms_iou, cfg.threads)
     built.clear()
     off = cfg.model_copy(update={"objects_enabled": False})
-    assert (
-        onnx.load_stages(tmp_path, off, attributes=False, appearance=False).object_detector is None
-    )
-    assert (
-        onnx.load_stages(
-            tmp_path, cfg, attributes=False, appearance=False, objects=False
-        ).object_detector
-        is None
-    )
+    assert onnx.load_stages(tmp_path, off, appearance=False).object_detector is None
+    assert onnx.load_stages(tmp_path, cfg, appearance=False, objects=False).object_detector is None
     assert built == []
 
 
@@ -382,7 +377,7 @@ def test_missing_dinov2_keeps_faces_and_drops_the_object_stage(monkeypatch, tmp_
     pytest.importorskip("cv2")
     pytest.importorskip("onnxruntime")
     onnx, built = _optional_stage_rig(monkeypatch, tmp_path, "dinov2-small")
-    stages = onnx.load_stages(tmp_path, RoboEmotConfig().vision, attributes=False)
+    stages = onnx.load_stages(tmp_path, RoboEmotConfig().vision)
     assert stages.face_detector == "yunet" and stages.face_embedder == "sface"
     assert stages.appearance_embedder is None and stages.object_detector is None
     assert (
@@ -395,7 +390,7 @@ def test_a_failing_detector_drops_dinov2_too_and_never_loads_it(monkeypatch, tmp
     pytest.importorskip("cv2")
     pytest.importorskip("onnxruntime")
     onnx, built = _optional_stage_rig(monkeypatch, tmp_path, "nanodet-plus-m-320")
-    stages = onnx.load_stages(tmp_path, RoboEmotConfig().vision, attributes=False)
+    stages = onnx.load_stages(tmp_path, RoboEmotConfig().vision)
     assert stages.face_detector == "yunet"
     assert stages.appearance_embedder is None and stages.object_detector is None
     assert "nanodet-plus-m-320" in stages.objects_unavailable
@@ -407,7 +402,7 @@ def test_the_object_stage_loads_whole_or_not_at_all_and_can_be_off(monkeypatch, 
     pytest.importorskip("onnxruntime")
     onnx, built = _optional_stage_rig(monkeypatch, tmp_path, None)
     cfg = RoboEmotConfig().vision
-    ok = onnx.load_stages(tmp_path, cfg, attributes=False)
+    ok = onnx.load_stages(tmp_path, cfg)
     assert (ok.object_detector, ok.appearance_embedder, ok.objects_unavailable) == (
         "nanodet",
         "dino",
@@ -415,35 +410,35 @@ def test_the_object_stage_loads_whole_or_not_at_all_and_can_be_off(monkeypatch, 
     )
     built.clear()
     off = cfg.model_copy(update={"objects_enabled": False})
-    stages = onnx.load_stages(tmp_path, off, attributes=False, appearance=False)
+    stages = onnx.load_stages(tmp_path, off, appearance=False)
     assert stages.object_detector is None and stages.appearance_embedder is None and built == []
 
 
-def test_load_stages_age_model_uses_the_real_marker_check(monkeypatch, tmp_path):
+def test_load_stages_needs_only_the_face_stack_and_uses_the_real_marker_check(
+    monkeypatch, tmp_path
+):
+    """No age model since 2026-10-23: YuNet and SFace alone make the required stages."""
     pytest.importorskip("cv2")
     pytest.importorskip("onnxruntime")
     from roboemot.vision import onnx
 
     specs = load_manifest()
-    for name in ("yunet", "sface", "yolo11n-face-age"):
+    built: list[tuple] = []
+    for name in ("yunet", "sface"):
         f = specs[name].files[0]
         target = tmp_path / f.path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(b"x")
         models._write_marker(target, f.sha256)
-    built: list[tuple] = []
     monkeypatch.setattr(onnx, "configure", lambda threads: None)
-    monkeypatch.setattr(onnx, "YoloAgeEstimator", lambda *a: built.append(a) or "estimator")
-    monkeypatch.setattr(onnx, "YuNetDetector", lambda *a: None)
-    monkeypatch.setattr(onnx, "SFaceEmbedder", lambda *a: None)
-    cfg = RoboEmotConfig(vision={"attribute_input_px": 128, "attribute_score_min": 0.6}).vision
+    monkeypatch.setattr(onnx, "YuNetDetector", lambda *a: built.append(a) or "detector")
+    monkeypatch.setattr(onnx, "SFaceEmbedder", lambda *a: "embedder")
+    cfg = RoboEmotConfig().vision
     stages = onnx.load_stages(tmp_path, cfg, profile="cm4", appearance=False, objects=False)
-    assert stages.attribute_estimator == "estimator"
-    path, labels, groups, input_px, score_min, threads = built[0]
-    assert path == tmp_path / "yolo11n_face_age/model.onnx"
-    assert labels == ["0-14", "15-22", "22+"] and groups["15-22"] == "teen"
-    assert (input_px, score_min, threads) == (128, 0.6, cfg.attribute_threads)
-    (tmp_path / "yolo11n_face_age/model.onnx").write_bytes(b"swapped")
+    assert (stages.face_detector, stages.face_embedder) == ("detector", "embedder")
+    assert not hasattr(stages, "attribute_estimator")
+    assert built[0][0] == tmp_path / specs["yunet"].files[0].path
+    (tmp_path / specs["sface"].files[0].path).write_bytes(b"swapped")
     with pytest.raises(ModelError, match="changed since"):
         onnx.load_stages(tmp_path, cfg, appearance=False, objects=False)
 
@@ -655,7 +650,6 @@ CACHE = models.default_dir()
 NEEDED = [
     "yunet",
     "sface",
-    "yolo11n-face-age",
     "dinov2-small",
     "nanodet-plus-m-320",
 ]
@@ -682,10 +676,6 @@ def textured_scene() -> np.ndarray:
 def test_real_backends_run_end_to_end_on_a_synthetic_image(stages):
     img = textured_scene()
     assert stages.face_detector.detect(img) == []
-    crop = img[100:300, 100:300]
-    sample = stages.attribute_estimator.estimate(crop)
-    assert sample.age_group in {"child", "teen", "adult", "unknown"}
-    assert 0 <= sample.age_confidence <= 1 and sample.gender == "unknown"
     app = stages.appearance_embedder.embed(img, (100.0, 100.0, 300.0, 300.0))
     assert app.shape == (384,) and np.linalg.norm(app) == pytest.approx(1.0, abs=1e-4)
     same = stages.appearance_embedder.embed(img, (100.0, 100.0, 300.0, 300.0))
@@ -710,11 +700,3 @@ def test_real_face_pipeline_on_a_face_image(stages):
     )
     assert e1.shape == (128,) and float(e1 @ e2) > 0.45
     assert time.perf_counter() - start < 5
-    # ROBOEMOT_TEST_FACE is an adult portrait: the age model must see an adult on the padded crop
-    # the pipeline makes (a BGR/RGB swap drops the adult score well below the floor on most).
-    x1, y1, x2, y2 = faces[0].box
-    half = max(x2 - x1, y2 - y1) * (1 + 2 * RoboEmotConfig().vision.attribute_crop_margin) / 2
-    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-    top, left = max(0, int(cy - half)), max(0, int(cx - half))
-    crop = img[top : int(cy + half), left : int(cx + half)]
-    assert stages.attribute_estimator.estimate(crop).age_group == "adult"

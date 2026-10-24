@@ -1,18 +1,15 @@
 """ONNX backends for the vision stages (SPEC 5, 13): needs the ``vision`` extra.
 
-YuNet face detector (MIT), SFace face embedder (Apache-2.0), yolo11n-face-age age classes
-(CC-BY-NC-4.0; no gender model, gender is always unknown), DINOv2-S appearance embedder
+YuNet face detector (MIT), SFace face embedder (Apache-2.0), DINOv2-S appearance embedder
 (Apache-2.0) and NanoDet-Plus-m object detector (Apache-2.0), with the preprocessing verified
-in the M1 spike (docs/spikes/2026-10-m1-models.md) and, for the age model, in
-the 2026-10-22 research (letterbox, best anchor). Everything runs on CPU with two threads;
+in the M1 spike (docs/spikes/2026-10-m1-models.md). Everything runs on CPU with two threads;
 the cm4 budget leaves two cores to vision, audio and core together (SPEC 13). All resizing,
-letterboxing, alignment and cropping happens here: crops live only inside a call (SPEC 12).
+alignment and cropping happens here: crops live only inside a call (SPEC 12).
 Weights are never downloaded here, see ``roboemot models fetch``.
 """
 
 from __future__ import annotations
 
-import ast
 import logging
 import threading
 from dataclasses import dataclass
@@ -23,11 +20,9 @@ import numpy as np
 import onnxruntime as ort
 
 from ..config.schema import VisionConfig
-from ..registry.estimates import UNKNOWN
-from ..registry.records import AGE_GROUPS
 from . import models
 from .models import ModelError
-from .types import LETTERBOX_GREY, AttributeSample, Box, Detection
+from .types import Box, Detection
 
 log = logging.getLogger(__name__)
 
@@ -55,14 +50,6 @@ ARCFACE_TEMPLATE = np.array(
 )
 
 PIXEL_MAX = 255.0
-
-# yolo11n-face-age (Ultralytics YOLO11 export, no NMS): output rows are the box (cx, cy, w, h)
-# then one sigmoid score per class, per anchor. Ultralytics letterboxes with grey 114.
-AGE_MODEL_NAME = "yolo11n-face-age"
-YOLO_BOX_ROWS = 4
-YOLO_PAD_VALUE = LETTERBOX_GREY
-YOLO_NAMES_KEY = "names"
-YOLO_STRIDE_KEY = "stride"
 
 # NanoDet-Plus-m 320 (config nanodet-plus-m_320.yml of the release): plain resize without
 # keeping the aspect ratio, BGR mean/std, four strides, distance distribution of 8 bins per side.
@@ -167,90 +154,6 @@ class SFaceEmbedder:
         if face.landmarks is None:
             raise ValueError("SFace needs the detector's landmarks")
         return _unit(self._rec.feature(align_face(image, face.landmarks))[0])
-
-
-def decode_age_classes(output: np.ndarray) -> tuple[int, float]:
-    """Class index and score of the anchor with the highest class score.
-
-    ``output`` is one image of the YOLO output, ``(4 + classes, anchors)``. The box rows are
-    ignored: the face crop is the whole input, so the model is used as a classifier. Scores are
-    independent sigmoids (not a softmax), returned as they are.
-    """
-    scores = output[YOLO_BOX_ROWS:]
-    anchor = int(scores.max(axis=0).argmax())
-    cls = int(scores[:, anchor].argmax())
-    return cls, float(scores[cls, anchor])
-
-
-def _metadata_labels(meta: dict[str, str]) -> list[str] | None:
-    """The class names stored in the ONNX metadata (a Python dict literal), in index order."""
-    try:
-        names = ast.literal_eval(meta.get(YOLO_NAMES_KEY, ""))
-    except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
-        return None
-    if not isinstance(names, dict) or sorted(names) != list(range(len(names))):
-        return None
-    return [str(names[i]) for i in range(len(names))]
-
-
-class YoloAgeEstimator:
-    """yolo11n-face-age on the padded face crop: age group only, gender always unknown.
-
-    The crop is letterboxed (aspect kept, grey padding) to ``input_px`` square, RGB, scaled to
-    0..1. The best anchor's class maps to an age group through the manifest ``groups``; a score
-    below ``score_min`` gives ``unknown`` (a possible minor, SPEC 5). Aggregation over crops is
-    done by the registry helpers with the same floor. At load the file's own metadata must name
-    the manifest labels in order, and ``input_px`` must be a multiple of its stride.
-    """
-
-    def __init__(
-        self,
-        path: Path,
-        labels: list[str],
-        groups: dict[str, str],
-        input_px: int,
-        score_min: float,
-        threads: int,
-    ):
-        bad = sorted(set(groups.values()) - set(AGE_GROUPS))
-        if bad:
-            raise ModelError(f"{AGE_MODEL_NAME}: unknown age group(s) {bad} in models.yaml")
-        self._groups = [groups[x] for x in labels]
-        self._size = input_px
-        self._score_min = score_min
-        self._sess = _session(path, threads)
-        self._input = self._sess.get_inputs()[0].name
-        meta = self._sess.get_modelmeta().custom_metadata_map
-        if _metadata_labels(meta) != labels:
-            raise ModelError(f"{path.name}: class labels differ from models.yaml {labels}")
-        stride = meta.get(YOLO_STRIDE_KEY, "")
-        if not stride.isdigit() or input_px % int(stride):
-            raise ModelError(
-                f"{path.name}: input {input_px} px is not a multiple of stride {stride!r}"
-            )
-
-    def _letterbox(self, crop: np.ndarray) -> np.ndarray:
-        height, width = crop.shape[:2]
-        scale = self._size / max(height, width)
-        nh, nw = max(1, round(height * scale)), max(1, round(width * scale))
-        canvas = np.full((self._size, self._size, CHANNELS), YOLO_PAD_VALUE, np.uint8)
-        top, left = (self._size - nh) // 2, (self._size - nw) // 2
-        canvas[top : top + nh, left : left + nw] = cv2.resize(
-            crop, (nw, nh), interpolation=cv2.INTER_LINEAR
-        )
-        rgb = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB).astype(np.float32) / PIXEL_MAX
-        return np.ascontiguousarray(rgb.transpose(2, 0, 1)[None])
-
-    def estimate(self, crop: np.ndarray) -> AttributeSample:
-        """Age group and score of one crop (BGR); gender ``unknown`` with confidence 0.
-
-        Below ``score_min`` the group is ``unknown``; the score is returned either way for the
-        aggregation and is never logged. Nothing of the crop outlives the call (SPEC 12).
-        """
-        output = self._sess.run(None, {self._input: self._letterbox(crop)})[0][0]
-        cls, score = decode_age_classes(output)
-        group = self._groups[cls] if score >= self._score_min else UNKNOWN
-        return AttributeSample(group, score, UNKNOWN, 0.0)
 
 
 class DinoV2Embedder:
@@ -427,7 +330,6 @@ class Stages:
 
     face_detector: YuNetDetector
     face_embedder: SFaceEmbedder
-    attribute_estimator: YoloAgeEstimator | None
     appearance_embedder: DinoV2Embedder | None
     object_detector: NanoDetDetector | None = None
     objects_unavailable: str | None = None  # why the animal and object stage was dropped
@@ -462,42 +364,25 @@ def load_stages(
     cfg: VisionConfig,
     *,
     profile: str | None = None,
-    attributes: bool = True,
     appearance: bool = True,
     objects: bool = True,
 ) -> Stages:
-    """Load the backends from ``root``; age model, DINOv2 and object detector can be skipped.
+    """Load the backends from ``root``; DINOv2 and the object detector can be skipped.
 
-    The face stack (YuNet, SFace) and the age model are required: a missing or
-    unverified file raises ``ModelError``. The animal and object stage is optional: the
-    NanoDet-Plus-m 320 detector (when ``objects`` is true and ``vision.objects_enabled`` is on;
-    it returns the ``vision.animal_categories`` and ``vision.object_categories`` classes only)
-    and the DINOv2-S embedder (when ``appearance``) are loaded together, and if either fails
-    both are dropped (no 88 MB embedder kept for nothing), ``Stages.objects_unavailable`` holds
-    the reason and faces keep working.
+    The face stack (YuNet, SFace) is required: a missing or unverified file raises
+    ``ModelError``. The animal and object stage is optional: the NanoDet-Plus-m 320 detector
+    (when ``objects`` is true and ``vision.objects_enabled`` is on; it returns the
+    ``vision.animal_categories`` and ``vision.object_categories`` classes only) and the DINOv2-S
+    embedder (when ``appearance``) are loaded together, and if either fails both are dropped
+    (no 88 MB embedder kept for nothing), ``Stages.objects_unavailable`` holds the reason and
+    faces keep working.
 
     Every file must carry a valid ``.verified`` marker (``roboemot models fetch`` writes it);
-    otherwise ``ModelError`` names the file. Frame-path sessions use ``vision.threads`` CPU
-    threads, the age session ``vision.attribute_threads`` (SPEC 13: two cores are shared by
-    vision, audio and core) at ``vision.attribute_input_px`` with ``vision.attribute_score_min``.
-    There is no gender model: gender is always ``unknown``. ``profile`` (the robot manifest's) is
+    otherwise ``ModelError`` names the file. Sessions use ``vision.threads`` CPU threads (SPEC 13:
+    two cores are shared by vision, audio and core). ``profile`` (the robot manifest's) is
     accepted for callers and not used. Sets the OpenCV and ONNX Runtime globals once.
     """
     configure(cfg.threads)
-    specs = models.load_manifest()
-    estimator = None
-    if attributes:
-        age = specs[AGE_MODEL_NAME]
-        if age.labels is None or age.groups is None:
-            raise ModelError(f"models.yaml lacks the {AGE_MODEL_NAME} labels or groups")
-        estimator = YoloAgeEstimator(
-            _file(root, AGE_MODEL_NAME),
-            age.labels,
-            age.groups,
-            cfg.attribute_input_px,
-            cfg.attribute_score_min,
-            cfg.attribute_threads,
-        )
     detector, embedder, unavailable = None, None, None
     wanted = objects and cfg.objects_enabled
     if wanted or appearance:
@@ -517,7 +402,6 @@ def load_stages(
             (cfg.detector_width_px, cfg.detector_height_px),
         ),
         SFaceEmbedder(_file(root, "sface")),
-        estimator,
         embedder,
         detector,
         unavailable,

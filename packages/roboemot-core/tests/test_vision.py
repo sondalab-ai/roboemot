@@ -16,11 +16,9 @@ from roboemot.config.schema import RoboEmotConfig, TrackerConfig
 from roboemot.registry import Consent, FileStore, Matcher, Registry
 from roboemot.vision import (
     CIRCADIAN,
-    AttributeSample,
     CameraModel,
     Detection,
     Frame,
-    InlineExecutor,
     LatestFrameRunner,
     RateGovernor,
     Tracker,
@@ -30,9 +28,6 @@ from roboemot.vision.replay import ReplayError, load_session, replay, summarize
 from roboemot.world import FrameSpec, WorldModel, feed_world
 
 CFG = RoboEmotConfig()
-# Three crops per track, for the tests of crop collection and median aggregation (the default is
-# one crop since the yolo11n-face-age swap, SPEC 5).
-THREE_CROPS = CFG.vision.model_copy(update={"attribute_crops": 3})
 W, H = 320, 240
 DIM = 8
 FACE_MODEL = "mock-face"
@@ -81,25 +76,6 @@ class FixedFaceEmbedder:
         return self.vector.copy()
 
 
-class CountingEstimator:
-    def __init__(self, age="adult", gender="female", conf=0.95):
-        self.sample = AttributeSample(age, conf, gender, conf)
-        self.crops: list[tuple[int, ...]] = []
-
-    def estimate(self, crop):
-        self.crops.append(crop.shape)
-        return self.sample
-
-
-class CountingExecutor(InlineExecutor):
-    def __init__(self):
-        self.jobs = 0
-
-    def submit(self, fn, /, *args, **kwargs):
-        self.jobs += 1
-        return super().submit(fn, *args, **kwargs)
-
-
 class AppearanceMock:
     model_id = APP_MODEL
 
@@ -124,7 +100,7 @@ def registry(tmp_path) -> Registry:
     return Registry(FileStore(tmp_path / "reg", allow_plaintext=True), CFG.identity)
 
 
-def rig(tmp_path, script, *, vector=None, estimator=None, executor=None, vision=None, **kw):
+def rig(tmp_path, script, *, vector=None, vision=None, **kw):
     reg = registry(tmp_path)
     bus = Bus()
     matcher = Matcher(reg, CFG.identity)
@@ -136,8 +112,6 @@ def rig(tmp_path, script, *, vector=None, estimator=None, executor=None, vision=
         matcher,
         face_detector=ScriptedDetector(script),
         face_embedder=embedder,
-        attribute_estimator=estimator,
-        executor=executor or InlineExecutor(),
         **kw,
     )
     got: dict[str, list] = {}
@@ -300,7 +274,7 @@ def test_identity_decision_inside_the_cm4_budget(tmp_path):
 
 
 def test_published_payloads_carry_no_embeddings(tmp_path):
-    reg, _, pipe, _, got = rig(tmp_path, lambda i: [face(100)], estimator=CountingEstimator())
+    reg, _, pipe, _, got = rig(tmp_path, lambda i: [face(100)])
     reg.enroll("Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT, age_group="adult")
     run(pipe, 24)
 
@@ -327,165 +301,12 @@ def test_face_percept_has_bearing_and_anonymous_id_until_recognised(tmp_path):
     assert p.azimuth_rad < 0 and p.elevation_rad > 0
     assert p.new_track and not got["percept.face"][-1].payload.new_track
     assert got["person.recognized"] == []
-    assert p.age_group == "unknown"
 
 
 def test_small_faces_are_ignored(tmp_path):
     _, _, pipe, emb, got = rig(tmp_path, lambda i: [face(100, size=CFG.vision.face_min_px - 1)])
     run(pipe, 8)
     assert got["percept.face"] == [] and emb.stamps == []
-
-
-def test_attribute_job_runs_once_per_track_on_n_crops(tmp_path):
-    est, ex = CountingEstimator(), CountingExecutor()
-    _, _, pipe, _, got = rig(
-        tmp_path, lambda i: [face(100)], estimator=est, executor=ex, vision=THREE_CROPS
-    )
-    run(pipe, 40)
-    needed = THREE_CROPS.attribute_crops
-    assert ex.jobs == 1
-    assert len(est.crops) == needed
-    state = next(iter(pipe._faces.values()))
-    assert state.crops == []
-    early, late = got["percept.face"][0].payload, got["percept.face"][-1].payload
-    assert early.age_group == "unknown"
-    assert late.age_group == "adult"
-    assert late.gender == "female" and late.attributes_stamp is not None
-
-
-@pytest.mark.parametrize("crops", [3, 5])
-def test_attribute_crops_sets_the_crops_per_track(tmp_path, crops):
-    vision = CFG.vision.model_copy(update={"attribute_crops": crops})
-    est, ex = CountingEstimator(), CountingExecutor()
-    _, _, pipe, _, got = rig(
-        tmp_path, lambda i: [face(100)], estimator=est, executor=ex, vision=vision
-    )
-    run(pipe, 60)
-    assert ex.jobs == 1 and len(est.crops) == crops
-    assert pipe.worker.config is pipe.identity
-    late = got["percept.face"][-1].payload
-    assert (late.age_group, late.gender) == ("adult", "female")
-
-
-def test_single_crop_with_frames_min_one_gives_a_confident_value(tmp_path):
-    cfg = RoboEmotConfig(vision={"attribute_crops": 1}, identity={"estimate_frames_min": 1})
-    est, ex = CountingEstimator(conf=0.9), CountingExecutor()
-    reg = registry(tmp_path)
-    pipe = VisionPipeline(
-        cfg.vision,
-        cfg.identity,
-        Bus(),
-        Matcher(reg, cfg.identity),
-        face_detector=ScriptedDetector(lambda i: [face(100)]),
-        face_embedder=FixedFaceEmbedder(axis(0)),
-        attribute_estimator=est,
-        executor=ex,
-    )
-    got = []
-    pipe.bus.subscribe("percept.face", got.append)
-    run(pipe, 20)
-    assert ex.jobs == 1 and len(est.crops) == 1
-    last = got[-1].payload
-    assert (last.age_group, last.gender) == ("adult", "female")
-
-
-def test_single_crop_still_applies_the_score_floor(tmp_path):
-    cfg = RoboEmotConfig(vision={"attribute_crops": 1}, identity={"estimate_frames_min": 1})
-    pipe = VisionPipeline(
-        cfg.vision,
-        cfg.identity,
-        Bus(),
-        Matcher(registry(tmp_path), cfg.identity),
-        face_detector=ScriptedDetector(lambda i: [face(100)]),
-        face_embedder=FixedFaceEmbedder(axis(0)),
-        attribute_estimator=CountingEstimator(conf=cfg.vision.attribute_score_min - 0.01),
-        executor=InlineExecutor(),
-    )
-    got = []
-    pipe.bus.subscribe("percept.face", got.append)
-    run(pipe, 20)
-    assert got[-1].payload.age_group == "unknown"
-
-
-def test_track_shorter_than_the_crops_needed_runs_no_job(tmp_path):
-    est, ex = CountingEstimator(), CountingExecutor()
-    _, _, pipe, _, got = rig(
-        tmp_path,
-        lambda i: [face(100)] if i < 3 else [],
-        estimator=est,
-        executor=ex,
-        vision=THREE_CROPS,
-    )
-    run(pipe, 60)
-    assert ex.jobs == 0 and est.crops == []
-    assert all(m.payload.age_group == "unknown" for m in got["percept.face"])
-
-
-def test_attribute_crops_and_frames_min_validation():
-    assert CFG.vision.attribute_crops == 1 and CFG.identity.estimate_frames_min == 1
-    for bad in (0, 11):
-        with pytest.raises(ValueError):
-            RoboEmotConfig(vision={"attribute_crops": bad})
-    with pytest.raises(ValueError, match="attribute_crops must be at least"):
-        RoboEmotConfig(vision={"attribute_crops": 2}, identity={"estimate_frames_min": 3})
-    with pytest.raises(ValueError, match="attribute_crops must be at least"):
-        RoboEmotConfig(identity={"estimate_frames_min": 5})
-    RoboEmotConfig(vision={"attribute_crops": 5}, identity={"estimate_frames_min": 5})
-
-
-def test_second_track_gets_its_own_job(tmp_path):
-    est, ex = CountingEstimator(), CountingExecutor()
-
-    def script(i):
-        return [face(20)] + ([face(200)] if i >= 10 else [])
-
-    _, _, pipe, _, _ = rig(tmp_path, script, estimator=est, executor=ex)
-    run(pipe, 50)
-    assert ex.jobs == 2
-
-
-def test_low_confidence_attributes_stay_unknown_and_minor(tmp_path):
-    weak = CountingEstimator(conf=CFG.vision.attribute_score_min - 0.01)
-    _, _, pipe, _, got = rig(tmp_path, lambda i: [face(100)], estimator=weak)
-    run(pipe, 40)
-    last = got["percept.face"][-1].payload
-    assert last.age_group == "unknown"
-
-
-def test_declared_age_overrides_the_estimate(tmp_path):
-    reg, _, pipe, _, got = rig(
-        tmp_path, lambda i: [face(100)], estimator=CountingEstimator(age="child")
-    )
-    reg.enroll("Kid", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT, age_group="senior")
-    run(pipe, 40)
-    last = got["percept.face"][-1].payload
-    assert (last.age_group, last.age_source) == ("senior", "declared")
-
-
-def test_worker_queue_is_bounded(tmp_path):
-    release = threading.Event()
-
-    class Slow(CountingEstimator):
-        def estimate(self, crop):
-            release.wait(5)
-            return super().estimate(crop)
-
-    from concurrent.futures import ThreadPoolExecutor
-
-    pool = ThreadPoolExecutor(1)
-    est = Slow()
-    try:
-
-        def script(i):
-            return [face(20 + 60 * k) for k in range(4)]
-
-        _, _, pipe, _, _ = rig(tmp_path, script, estimator=est, executor=pool)
-        pipe.worker.queue_max = 2
-        run(pipe, 30)
-        assert pipe.worker._pending == 2
-    finally:
-        release.set()
-        pool.shutdown(wait=True)
 
 
 def test_ended_tracks_release_matcher_state(tmp_path):
@@ -654,7 +475,7 @@ def script(i):
 
 
 def run_replay(tmp_path, session, name):
-    _, bus, pipe, _, _ = rig(tmp_path / name, script, estimator=CountingEstimator())
+    _, bus, pipe, _, _ = rig(tmp_path / name, script)
     return replay(session, pipe, bus)
 
 
@@ -882,26 +703,6 @@ def test_a_track_survives_the_return_to_full_rate_for_one_frame(tmp_path):
 # ------------------------------------------------- report counters (SPEC 12A)
 
 
-class DeferredExecutor(InlineExecutor):
-    """Keeps each job until ``run_all``, so a track can end while its job waits."""
-
-    def __init__(self):
-        self.waiting = []
-
-    def submit(self, fn, /, *args, **kwargs):
-        from concurrent.futures import Future
-
-        future = Future()
-        self.waiting.append((future, fn, args, kwargs))
-        return future
-
-    def run_all(self):
-        waiting, self.waiting = self.waiting, []
-        for future, fn, args, kwargs in waiting:
-            future.set_running_or_notify_cancel()
-            future.set_result(fn(*args, **kwargs))
-
-
 def test_track_churn_counts_created_ended_lifetime_and_rate(tmp_path):
     # a face for frames 0-9, gone until it expires, back as a new track at frames 30-39
     _, _, pipe, _, _ = rig(tmp_path, lambda i: [face(100)] if i < 10 or 30 <= i < 40 else [])
@@ -913,6 +714,19 @@ def test_track_churn_counts_created_ended_lifetime_and_rate(tmp_path):
     # first stamp 0 (tentative), last matched at frame 9 (1.125 s); the expiry tail is excluded
     assert tracks["lifetime_s"] == {"count": 1, "p50": 1.125, "p90": 1.125, "max": 1.125}
     json.dumps(pipe.stats())
+
+
+def test_no_age_or_gender_anywhere_in_the_pipeline(tmp_path):
+    """Owner decision 2026-10-23: no age model, no attribute worker, nothing estimated."""
+    reg, _, pipe, _, got = rig(tmp_path, lambda i: [face(100)])
+    reg.enroll("Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT, age_group="adult")
+    run(pipe, 24)
+    removed = {"age_group", "age_source", "gender", "gender_source", "attribute_confidence"}
+    for topic in ("percept.face", "person.recognized"):
+        assert got[topic], topic
+        payload_fields = {f.name for m in got[topic] for f in fields(m.payload)}
+        assert not removed & payload_fields, topic
+    assert "attributes" not in pipe.stats() and not hasattr(pipe, "worker")
 
 
 def test_track_rate_counts_only_the_window_before_the_last_frame(tmp_path):
@@ -949,134 +763,9 @@ def test_lifetime_summary_keeps_the_last_report_window_tracks(tmp_path):
     assert tracks["ended"] == 12 and tracks["lifetime_s"]["count"] == 10
 
 
-def test_attribute_job_counters_and_time_to_estimate(tmp_path):
-    _, _, pipe, _, _ = rig(
-        tmp_path, lambda i: [face(100)], estimator=CountingEstimator(), vision=THREE_CROPS
-    )
-    run(pipe, 40)
-    attrs = pipe.stats()["attributes"]
-    assert attrs["submitted"] == attrs["completed"] == 1
-    assert attrs["failed"] == attrs["cancelled"] == attrs["queue_full_refusals"] == 0
-    assert attrs["dropped_queue_full"] == attrs["dropped_track_gone"] == 0
-    assert attrs["queue_len"] == 0 and attrs["busy"] is False
-    assert attrs["job_ms"]["count"] == 1 and attrs["crop_ms"]["count"] == 3
-    assert attrs["outcomes"] == {"adult": 1, "minor": 0, "unknown": 0}
-    # crops at 0.125, 0.5 and 0.875 s, job inline, result read at the next frame (1.0 s);
-    # the track started (tentative) at 0
-    assert attrs["time_to_estimate_ms"] == {"count": 1, "p50": 1000.0, "p90": 1000.0, "max": 1000.0}
-    json.dumps(pipe.stats())
-
-
-@pytest.mark.parametrize(
-    ("age", "conf", "outcome"),
-    [("child", 0.95, "minor"), ("teen", 0.95, "minor"), ("adult", 0.45, "unknown")],
-)
-def test_attribute_outcomes_count_minor_and_unknown(tmp_path, age, conf, outcome):
-    est = CountingEstimator(age=age, conf=conf)
-    _, _, pipe, _, _ = rig(tmp_path, lambda i: [face(100)], estimator=est)
-    run(pipe, 40)
-    outcomes = pipe.stats()["attributes"]["outcomes"]
-    assert outcomes[outcome] == 1 and sum(outcomes.values()) == 1
-
-
-def test_a_declared_person_counts_as_an_outcome_without_a_job(tmp_path):
-    est = CountingEstimator(age="child")
-    # Three crops: the person is recognised before they are collected (one crop goes earlier).
-    reg, _, pipe, _, _ = rig(tmp_path, lambda i: [face(100)], estimator=est, vision=THREE_CROPS)
-    reg.enroll(
-        "Gran", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT, age_group="senior",
-        gender="female",
-    )  # fmt: skip
-    run(pipe, 40)
-    attrs = pipe.stats()["attributes"]
-    assert attrs["submitted"] == 0 and attrs["outcomes"] == {"adult": 1, "minor": 0, "unknown": 0}
-
-
-def test_a_failed_job_is_counted_and_gives_no_outcome(tmp_path):
-    class Broken(CountingEstimator):
-        def estimate(self, crop):
-            raise RuntimeError("boom")
-
-    _, _, pipe, _, _ = rig(tmp_path, lambda i: [face(100)], estimator=Broken())
-    run(pipe, 40)
-    attrs = pipe.stats()["attributes"]
-    assert attrs["submitted"] == attrs["failed"] == 1 and attrs["completed"] == 0
-    assert sum(attrs["outcomes"].values()) == 0 and attrs["time_to_estimate_ms"] == {"count": 0}
-
-
-def test_a_result_for_an_ended_track_is_dropped_as_track_gone(tmp_path):
-    ex, on = DeferredExecutor(), [True]
-    _, _, pipe, _, _ = rig(
-        tmp_path, lambda i: [face(100)] if on[0] else [], estimator=CountingEstimator(), executor=ex
-    )
-    run(pipe, 10)
-    attrs = pipe.stats()["attributes"]
-    assert attrs["submitted"] == 1 and attrs["queue_len"] == 1 and attrs["busy"] is False
-    on[0] = False
-    run(pipe, 20, start=10 * 0.125)  # the track expires
-    ex.run_all()
-    run(pipe, 1, start=5.0)
-    attrs = pipe.stats()["attributes"]
-    assert attrs["completed"] == 1 and attrs["dropped_track_gone"] == 1
-    assert sum(attrs["outcomes"].values()) == 0 and attrs["queue_len"] == 0
-
-
-def test_a_track_that_ends_waiting_for_a_full_queue_is_dropped_queue_full(tmp_path):
-    ex = DeferredExecutor()
-    _, _, pipe, _, _ = rig(
-        tmp_path,
-        lambda i: [face(20), face(200)] if i < 12 else [],
-        estimator=CountingEstimator(),
-        executor=ex,
-        vision=THREE_CROPS,
-    )
-    pipe.worker.queue_max = 1
-    run(pipe, 40)
-    attrs = pipe.stats()["attributes"]
-    assert attrs["submitted"] == 1 and attrs["dropped_queue_full"] == 1
-    # the second track's crops are ready at frame 7 (0.875 s); it retries each frame to frame 11
-    assert attrs["queue_full_refusals"] == 5
-
-
-def test_attribute_worker_times_jobs_and_crops_with_its_clock():
-    from roboemot.vision import AttributeWorker
-
-    now = [0.0]
-    seen = []
-
-    class Timed(CountingEstimator):
-        def estimate(self, crop):
-            seen.append(worker.snapshot())
-            now[0] += 0.1
-            return super().estimate(crop)
-
-    worker = AttributeWorker(Timed(), CFG.identity, 2, InlineExecutor(), clock=lambda: now[0])
-    crops = [(float(i), np.zeros((4, 4, 3), np.uint8)) for i in range(3)]
-    assert worker.submit(1, 1, crops)
-    assert seen[0]["busy"] is True and seen[0]["queue_len"] == 0
-    snap = worker.snapshot()
-    assert snap["busy"] is False and snap["completed"] == 1
-    assert snap["crop_ms"]["count"] == 3 and snap["crop_ms"]["max"] == pytest.approx(100.0)
-    assert snap["job_ms"]["max"] == pytest.approx(300.0)
-    json.dumps(snap)
-
-
 def test_report_window_settings_have_defaults_and_ranges():
     v = CFG.vision
     assert v.report_window == 200 and v.report_rate_window_s == 60.0
     for bad in ({"report_window": 5}, {"report_rate_window_s": 1.0}):
         with pytest.raises(ValidationError):
             RoboEmotConfig(vision=bad)
-
-
-def test_reset_cancels_a_waiting_job_and_counts_it_cancelled_not_track_gone(tmp_path):
-    ex = DeferredExecutor()
-    _, _, pipe, _, _ = rig(
-        tmp_path, lambda i: [face(100)], estimator=CountingEstimator(), executor=ex
-    )
-    run(pipe, 10)
-    pipe.reset()
-    run(pipe, 1, start=5.0)
-    attrs = pipe.stats()["attributes"]
-    assert attrs["submitted"] == attrs["cancelled"] == 1
-    assert attrs["completed"] == attrs["dropped_track_gone"] == 0 and attrs["queue_len"] == 0

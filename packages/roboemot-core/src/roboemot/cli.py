@@ -276,7 +276,7 @@ def main(argv: list[str] | None = None) -> int:
     mod.add_argument(
         "--all",
         action="store_true",
-        help="fetch every vision and voice model (about 0.14 GB of vision and 0.3 GB of voice "
+        help="fetch every vision and voice model (about 0.13 GB of vision and 0.3 GB of voice "
         "models)",
     )
     mod.add_argument("--voice", action="store_true", help="fetch every voice model (about 0.3 GB)")

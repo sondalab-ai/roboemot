@@ -492,7 +492,6 @@ class Scene:
                 return SimpleNamespace(
                     face_detector=PlantedDetector(),
                     face_embedder=PlantedEmbedder(),
-                    attribute_estimator=None,
                     appearance_embedder=None,
                     object_detector=None,
                     objects_unavailable=None,

@@ -11,9 +11,8 @@ need OpenCV (the ``vision`` extra). The library never records sessions: frames a
 to disk only by an explicit, opt-in debug recorder (SPEC 12), which this is not.
 
 ``replay`` feeds frames to the pipeline in order with their recorded capture stamps. The
-pipeline reads no wall clock, so with an inline attribute executor two runs give the same
-messages. Anonymous IDs are random per run; ``summarize`` renumbers them in order of first
-appearance before runs are compared.
+pipeline reads no wall clock, so two runs give the same messages. Anonymous IDs are random per
+run; ``summarize`` renumbers them in order of first appearance before runs are compared.
 
 ``replay`` turns the matcher's online refresh off (it would add embeddings to the registry
 using its wall clock). ``Registry.mark_seen`` also stamps ``last_seen``
@@ -32,7 +31,6 @@ import numpy as np
 
 from ..bus import Bus, Message
 from ..world import Observation
-from .attributes import InlineExecutor
 from .pipeline import VisionPipeline
 from .types import Frame
 
@@ -129,13 +127,9 @@ def replay(
 
     Frames go in recorded order with their recorded stamps and joint states, one ``process``
     call each. To be reproducible it resets the pipeline (tracks, track IDs, governor) and the
-    matcher session first, forces online refresh off for the duration (restored afterwards)
-    and refuses a pipeline whose attribute worker is not inline. The subscription is removed
-    afterwards even on error.
+    matcher session first and forces online refresh off for the duration (restored
+    afterwards). The subscription is removed afterwards even on error.
     """
-    worker = pipeline.worker
-    if worker is not None and not isinstance(worker.executor, InlineExecutor):
-        raise ReplayError("replay needs the pipeline built with executor=InlineExecutor()")
     messages: list[Recorded] = []
     current = [0]
 

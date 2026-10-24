@@ -4,14 +4,12 @@ Importing this package needs only numpy: the ONNX backends (``roboemot.vision.on
 the optional ``vision`` extra and are imported explicitly.
 """
 
-from .attributes import AttributeResult, AttributeWorker, InlineExecutor
 from .geometry import CameraModel
 from .governor import CIRCADIAN, CONVERSATION, LOAD, RateGovernor
 from .pipeline import VisionPipeline
 from .runner import FrameSource, LatestFrameRunner, LockedSource, pump
 from .stages import (
     AppearanceEmbedder,
-    AttributeEstimator,
     FaceDetector,
     FaceEmbedder,
     ObjectDetector,
@@ -19,7 +17,6 @@ from .stages import (
 )
 from .tracker import Track, Tracker, TrackerResult
 from .types import (
-    AttributeSample,
     Box,
     Detection,
     FacePercept,
@@ -33,10 +30,6 @@ __all__ = [
     "CONVERSATION",
     "LOAD",
     "AppearanceEmbedder",
-    "AttributeEstimator",
-    "AttributeResult",
-    "AttributeSample",
-    "AttributeWorker",
     "Box",
     "CameraModel",
     "Detection",
@@ -47,7 +40,6 @@ __all__ = [
     "FrameReport",
     "FrameSource",
     "LockedSource",
-    "InlineExecutor",
     "LatestFrameRunner",
     "ObjectDetector",
     "PerceptionModule",

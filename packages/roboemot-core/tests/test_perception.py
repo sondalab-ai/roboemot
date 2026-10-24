@@ -69,7 +69,6 @@ def fake_stages(cfg, profile):
     return SimpleNamespace(
         face_detector=Detector(),
         face_embedder=Embedder(),
-        attribute_estimator=None,
         appearance_embedder=None,
         object_detector=None,
         objects_unavailable=None,
@@ -392,7 +391,7 @@ def test_the_pipeline_gets_the_stage_detector_and_reports_objects_running():
     assert p.vision_snapshot()["objects"] == {"state": "running"}
     snap = p.vision_snapshot()
     assert snap["tracks"]["created"] == 0 and "lifetime_s" in snap["tracks"]
-    assert snap["attributes"] == {"state": "off"}  # the fake stages have no estimator
+    assert "attributes" not in snap  # no age model, no attribute worker (2026-10-23)
     json.dumps(snap)
 
 
@@ -407,22 +406,16 @@ def test_objects_report_off_when_the_flag_is_off_even_with_the_model_loaded():
     assert p.vision_snapshot()["objects"] == {"state": "off"}
 
 
-def test_hot_reload_reaches_the_camera_field_of_view_and_the_age_and_gender_votes():
+def test_hot_reload_reaches_the_camera_field_of_view_and_the_identity_settings():
     """Sweep (SPEC 11A): the pipeline's world settings (camera field of view, for the bearings)
-    and the age and gender worker's identity settings were start-up copies."""
-
-    def with_attributes(cfg, profile):
-        stages = fake_stages(cfg, profile)
-        stages.attribute_estimator = object()  # never called here
-        return stages
-
-    p = open_perception(CFG, Bus(), Source(), load_stages=with_attributes)
+    and the matcher's identity settings were start-up copies."""
+    p = open_perception(CFG, Bus(), Source(), load_stages=fake_stages)
     try:
         new = RoboEmotConfig.model_validate(
-            {"world": {"camera_fov_h_deg": 66.0}, "identity": {"estimate_confidence_min": 0.7}}
+            {"world": {"camera_fov_h_deg": 66.0}, "identity": {"match_threshold": 0.5}}
         )
         p.apply_config(new)
         assert p.pipeline.world.camera_fov_h_deg == 66.0
-        assert p.pipeline.worker is not None and p.pipeline.worker.config is new.identity
+        assert p.pipeline.matcher.config is new.identity
     finally:
         p.stop()

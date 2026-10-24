@@ -55,7 +55,6 @@ class ExitApp(app_module.RoboEmotApp):
         return SimpleNamespace(
             face_detector=RoomDetector(),
             face_embedder=FakeEmbedder(),
-            attribute_estimator=None,
             appearance_embedder=None,
             object_detector=None,
             objects_unavailable=None,

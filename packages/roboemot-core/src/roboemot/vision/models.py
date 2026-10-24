@@ -21,8 +21,9 @@ into the models folder only when asked (``roboemot models fetch``), never at imp
   size and mtime, and stands alone: ``check_file`` accepts a produced file without its source
   present, and ``prune_sources`` (``roboemot models prune --sources``) deletes the FP32 sources
   once every file derived from them is verified.
-- Retired files (``retired`` in the manifest: files of replaced models, such as the FairFace
-  pair) are deleted by ``prune_retired`` (``roboemot models prune``), and nothing else is.
+- Retired files (``retired`` in the manifest: files of replaced or removed models, such as the
+  FairFace pair and the yolo11n-face-age age model) are deleted by ``prune_retired``
+  (``roboemot models prune``), and nothing else is.
 - ORT version policy: the quantized ops are stable across ONNX Runtime versions, so a file made
   by another ORT version still loads. ``status`` reports it as ``stale-ort`` and ``fetch``
   re-quantizes only on ``requantize=True`` (``--requantize``), which needs the FP32 source again;
@@ -136,8 +137,7 @@ class ModelSpec(_Strict):
     ``labels`` is the output order of a classifier or detector, read from the ``id2label`` of the
     model's ``config.json``, the class list of its training config (``labels_source``, pinned
     by ``labels_sha256``) or the metadata of the pinned file itself, so index meaning is part of
-    the pinned manifest and not assumed in code. ``groups`` maps each label of an age classifier
-    to a SPEC 5 age group, so the cutoffs are data, not code.
+    the pinned manifest and not assumed in code.
     """
 
     name: str
@@ -149,13 +149,6 @@ class ModelSpec(_Strict):
     labels: list[str] | None = None
     labels_source: str | None = None
     labels_sha256: str | None = None
-    groups: dict[str, str] | None = None
-
-    @model_validator(mode="after")
-    def _groups_cover_labels(self) -> ModelSpec:
-        if self.groups is not None and set(self.groups) != set(self.labels or []):
-            raise ValueError(f"{self.name}: groups must map every label, and only labels")
-        return self
 
 
 class Manifest(_Strict):

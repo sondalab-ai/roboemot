@@ -21,16 +21,15 @@ AP = CFG.appraisal
 PRESETS = Path(__file__).resolve().parents[3] / "configs" / "presets"
 
 
-def face(track=1, stamp=0.0, owner=None, new=True, age="unknown") -> FacePercept:
+def face(track=1, stamp=0.0, owner=None, new=True) -> FacePercept:
     return FacePercept(
         track_id=track, stamp=stamp, box=(0, 0, 1, 1), score=0.9, azimuth_rad=0, elevation_rad=0,
-        owner_id=owner, anonymous_id=None if owner else "anon", age_group=age, age_source="x",
-        gender="unknown", gender_source="x", attribute_confidence=0.0, new_track=new,
+        owner_id=owner, anonymous_id=None if owner else "anon", new_track=new,
     )  # fmt: skip
 
 
-def recognized(age="adult", track=1, stamp=0.0) -> PersonRecognized:
-    return PersonRecognized(track, "p-1", stamp, 0.0, 0.0, age)
+def recognized(track=1, stamp=0.0) -> PersonRecognized:
+    return PersonRecognized(track, "p-1", stamp, 0.0, 0.0)
 
 
 def entry(kind="animal", category="cat") -> Entry:
@@ -48,11 +47,10 @@ def names(events) -> list[str]:
     return [e[0] for e in events]
 
 
-@pytest.mark.parametrize("age", ["adult", "child", "teen", "senior", "unknown"])
-def test_person_recognized_is_one_event_whatever_the_age(rig, age):
+def test_person_recognized_is_one_event(rig):
     """Owner decision 2026-10-23: no age groups; the payload carries the id alone."""
     bus, _, events = rig
-    bus.publish("person.recognized", recognized(age), 1.0)
+    bus.publish("person.recognized", recognized(), 1.0)
     assert names(events) == ["person.known"]
     assert events[0][2] == {"person_id": "p-1"}
 
@@ -297,7 +295,7 @@ def test_runner_routes_bus_events_into_the_one_engine_and_publishes_the_state():
     bus, got = Bus(), []
     bus.subscribe("affect.state", lambda m: got.append(m.payload))
     runner = AffectRunner(CFG.affect, AP, bus)
-    bus.publish("person.recognized", recognized("child"), 1.0)
+    bus.publish("person.recognized", recognized(), 1.0)
     runner.tick(1.0)
     assert got[-1].valence > 0.4 and got[-1].label == "calm"
     assert got[-1] is not runner.engine

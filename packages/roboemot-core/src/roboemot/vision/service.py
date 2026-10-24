@@ -100,11 +100,11 @@ class VisionService:
         self._thread = thread
 
     def stop(self) -> None:
-        """Quiet the camera thread, then stop the worker and the attribute worker.
+        """Quiet the camera thread, then stop the worker.
 
         The camera thread is joined with a timeout and a timeout is logged: a read stuck in the
         SDK cannot be interrupted, so the caller must tear the SDK down knowing it may still be
-        inside it. The worker and the pipeline are stopped even then.
+        inside it. The worker is stopped even then.
         """
         self._stop.set()
         try:
@@ -113,10 +113,7 @@ class VisionService:
                 if self._thread.is_alive():
                     log.warning("camera thread did not stop within %.0f s", JOIN_TIMEOUT_S)
         finally:
-            try:
-                self.runner.stop()
-            finally:
-                self.pipeline.close()
+            self.runner.stop()
 
     def _pump(self) -> None:
         """Pump frames; a failing camera read is counted, logged once per type, and retried."""
@@ -289,7 +286,6 @@ def open_perception(
         matcher,
         face_detector=stages.face_detector,
         face_embedder=stages.face_embedder,
-        attribute_estimator=stages.attribute_estimator,
         appearance_embedder=stages.appearance_embedder,
         object_detector=stages.object_detector,
         governor=RateGovernor(cfg.vision.rates),

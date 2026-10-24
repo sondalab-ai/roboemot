@@ -5,12 +5,12 @@ through the real ``LatestFrameRunner``, ``pump`` and ``VisionPipeline`` (governo
 of ``vision.embedding_burst`` evaluations at least ``burst_min_gap_s`` apart, 3 of 5 voting).
 The camera is a stand-in that reads at 30 Hz and shows a new LFW photo of the person every
 0.2 s (independent photos, not video, so each evaluation sees a different one). Scenarios:
-one new person at 5 and at 8 detections per second, three people appearing together, and one
-person with the age job running in its worker (yolo11n-face-age since 2026-10-22; the results
-in ``results/`` were measured with the FairFace INT8 pair).
+one new person at 5 and at 8 detections per second and three people appearing together. The
+results in ``results/`` predate the removal of the age model (2026-10-23) and still hold a
+scenario with the age job running.
 
-``stages``: p50 and p95 of one call of each stage (YuNet, SFace, the age model per crop,
-NanoDet, DINOv2-S) at 1 and 2 threads.
+``stages``: p50 and p95 of one call of each stage (YuNet, SFace, NanoDet, DINOv2-S) at 1 and
+2 threads.
 
 The Mac is not the Raspberry Pi CM4 (4x Cortex-A72); no number here is a CM4 number.
 
@@ -76,15 +76,12 @@ def stage_row(threads: int, photo: np.ndarray, street: np.ndarray) -> dict:
     from roboemot.vision import models as vmodels
     from roboemot.vision.onnx import DinoV2Embedder
 
-    cfg = common.config({"vision": {"threads": threads, "attribute_threads": threads}})
+    cfg = common.config({"vision": {"threads": threads}})
     row: dict = {}
     st = common.load_stages(cfg, profile="cm4", appearance=False)
     face = st.face_detector.detect(photo)[0]
     row["yunet_detect_320x240_incl_resize"] = bench(lambda: st.face_detector.detect(photo))
     row["sface_embed_incl_align"] = bench(lambda: st.face_embedder.embed(photo, face))
-    row["age_yolo11n_face_age_per_crop"] = bench(
-        lambda: st.attribute_estimator.estimate(photo), runs=30
-    )
     row["nanodet_detect_640x480"] = bench(lambda: st.object_detector.detect(street))
     path = vmodels.check_file(common.MODELS, vmodels.load_manifest()["dinov2-small"].files[0])
     dino = DinoV2Embedder(path, threads)
@@ -149,7 +146,7 @@ def cv2_resize(photo: np.ndarray, side: int) -> np.ndarray:
     return cv2.resize(photo, (side, side))
 
 
-def run_scenario(name, args, stages_, cfg, registry, people, tracks_per_trial, attributes):
+def run_scenario(name, args, stages_, cfg, registry, people, tracks_per_trial):
     """Trials of one scenario; returns the per-person decision times in seconds."""
     import cv2
     from roboemot.bus import Bus
@@ -157,7 +154,7 @@ def run_scenario(name, args, stages_, cfg, registry, people, tracks_per_trial, a
     from roboemot.vision import LatestFrameRunner, VisionPipeline, pump
 
     rng = random.Random(1)
-    decisions, firsts, ages, extra_tracks, late = [], [], [], 0, []
+    decisions, firsts, extra_tracks, late = [], [], 0, []
     for trial in range(args.trials):
         chosen = rng.sample(people, tracks_per_trial)
         scene = Scene(
@@ -168,17 +165,13 @@ def run_scenario(name, args, stages_, cfg, registry, people, tracks_per_trial, a
         )
         bus = Bus()
         seen: dict[str, float] = {}
-        age_at: dict[int, float] = {}
         first: dict[int, float] = {}
 
         def on_recognized(msg, seen=seen):
             seen.setdefault(msg.payload.person_id, time.monotonic())
 
-        def on_face(msg, first=first, age_at=age_at):
-            p = msg.payload
-            first.setdefault(p.track_id, time.monotonic())
-            if p.age_source == "estimated":
-                age_at.setdefault(p.track_id, time.monotonic())
+        def on_face(msg, first=first):
+            first.setdefault(msg.payload.track_id, time.monotonic())
 
         bus.subscribe("person.recognized", on_recognized)
         bus.subscribe("percept.face", on_face)
@@ -189,7 +182,6 @@ def run_scenario(name, args, stages_, cfg, registry, people, tracks_per_trial, a
             Matcher(registry, cfg.identity),
             face_detector=stages_.face_detector,
             face_embedder=stages_.face_embedder,
-            attribute_estimator=stages_.attribute_estimator if attributes else None,
             refresh=False,
         )
         runner = LatestFrameRunner(pipeline)
@@ -202,18 +194,14 @@ def run_scenario(name, args, stages_, cfg, registry, people, tracks_per_trial, a
         deadline = t0 + TRACK_WINDOW_S
         while time.monotonic() < deadline and len(seen) < tracks_per_trial:
             time.sleep(0.01)
-        while attributes and time.monotonic() < deadline and not age_at:
-            time.sleep(0.01)
         for ids, _ in chosen:
             decisions.append(seen[ids] - t0 if ids in seen else None)
         firsts += [min(first.values()) - t0] if first else []
         extra_tracks += max(0, len(first) - tracks_per_trial)
         late += [t - t0 for t in sorted(first.values())[tracks_per_trial:]]
-        ages += [t - t0 for t in age_at.values()]
         stop.set()
         thread.join()
         runner.stop()
-        pipeline.close()
         time.sleep(GAP_S)
         common.log(
             f"{name} trial {trial}: "
@@ -228,7 +216,6 @@ def run_scenario(name, args, stages_, cfg, registry, people, tracks_per_trial, a
         "first_percept_earliest_track_per_trial": stats(firsts),
         "tracks_beyond_the_planted_ones": extra_tracks,
         "extra_track_first_percept": stats(late),
-        "age_gender_available": stats(ages),
     }
 
 
@@ -243,30 +230,19 @@ def track(args: argparse.Namespace) -> None:
     rng = random.Random(0)
     names = rng.sample(pool, ENROLLED)
     scenarios = [
-        ("one_person_5hz", 5.0, 1, 2, 2, False),
-        ("one_person_8hz", 8.0, 1, 2, 2, False),
-        ("three_people_8hz_burst", 8.0, 3, 2, 2, False),
-        ("one_person_8hz_with_age_gender_job_1+1_threads", 8.0, 1, 1, 1, True),
+        ("one_person_5hz", 5.0, 1, 2),
+        ("one_person_8hz", 8.0, 1, 2),
+        ("three_people_8hz_burst", 8.0, 3, 2),
     ]
-    for label, hz, people_n, threads, attr_threads, attributes in scenarios:
+    for label, hz, people_n, threads in scenarios:
         if args.only and args.only not in label:
             continue
-        cfg = common.config(
-            {
-                "vision": {
-                    "rates": {"detection_hz": hz},
-                    "threads": threads,
-                    "attribute_threads": attr_threads,
-                }
-            }
-        )
-        st = common.load_stages(
-            cfg, profile="cm4", appearance=False, objects=False, attributes=attributes
-        )
+        cfg = common.config({"vision": {"rates": {"detection_hz": hz}, "threads": threads}})
+        st = common.load_stages(cfg, profile="cm4", appearance=False, objects=False)
         folder = common.SCRATCH / "latency-registry"
         shutil.rmtree(folder, ignore_errors=True)
         registry = Registry(FileStore(folder, allow_plaintext=True), cfg.identity)
-        consent = Consent("eval", datetime(2026, 1, 1, tzinfo=UTC), ("face",), guardian="eval")
+        consent = Consent("eval", datetime(2026, 1, 1, tzinfo=UTC), ("face",))
         people = []
         for n in names:
             embs = []
@@ -275,9 +251,9 @@ def track(args: argparse.Namespace) -> None:
                 embs.append(st.face_embedder.embed(image, st.face_detector.detect(image)[0]))
             rec = registry.enroll(n[:2], embs, st.face_embedder.model_id, consent=consent)
             people.append((rec.person_id, paths[n][5:]))
-        row = run_scenario(label, args, st, cfg, registry, people, people_n, attributes)
+        row = run_scenario(label, args, st, cfg, registry, people, people_n)
         row["detection_hz"] = hz
-        row["threads"] = {"frame_path": threads, "attribute": attr_threads}
+        row["threads"] = {"frame_path": threads}
         results.append(row)
         shutil.rmtree(folder, ignore_errors=True)
     out = {
