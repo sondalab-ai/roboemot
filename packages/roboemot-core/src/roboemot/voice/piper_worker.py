@@ -1,9 +1,9 @@
 """Piper worker: one persistent process per loaded voice (SPEC 8, TTS backends).
 
-Runs INSIDE the Piper virtualenv, as ``python -I piper_worker.py --voice <voice.onnx>``, never
-imported by RoboEmot: ``piper-tts`` (piper1-gpl) is GPL-3.0, so it stays behind a process
-boundary. Only the standard library is needed to speak the protocol; ``piper`` is imported when
-the engine loads.
+Runs INSIDE the Piper virtualenv, as ``python -I piper_worker.py --voice <voice.onnx> --chunk-ms
+<ms> --intra-op-threads <n> --inter-op-threads <n>``, never imported by RoboEmot: ``piper-tts``
+(piper1-gpl) is GPL-3.0, so it stays behind a process boundary. Only the standard library is
+needed to speak the protocol; ``piper`` and ``onnxruntime`` are imported when the engine loads.
 
 Protocol (little glue, no text ever leaves the process except as audio):
 
@@ -15,6 +15,9 @@ Protocol (little glue, no text ever leaves the process except as audio):
   (JSON ``{"rate_hz": r, "voice": name}``, once, rate read from ``<voice>.onnx.json``), ``A``
   little-endian int16 mono PCM of at most ``--chunk-ms``, ``E`` end of a request (also after a
   cancel), ``X`` failure (JSON ``{"error": exception class name}``, followed by ``E``).
+- the thread counts (``voice.piper.intra_op_threads`` / ``inter_op_threads``, 0 = the ONNX
+  Runtime default) are applied by rebuilding the voice's session: ``PiperVoice.load`` takes no
+  session options.
 - stderr is free text for humans; the parent drains it. File descriptor 1 is pointed at stderr
   right after start-up, so a stray ``print`` cannot corrupt the frames.
 """
@@ -42,14 +45,34 @@ def read_sample_rate(voice_path: str) -> int:
         return int(json.load(f)["audio"]["sample_rate"])
 
 
+def session_options(onnxruntime: Any, intra_op_threads: int, inter_op_threads: int) -> Any:
+    """ONNX Runtime session options with the given thread counts (0 leaves a count at the
+    runtime's default)."""
+    options = onnxruntime.SessionOptions()
+    if intra_op_threads > 0:
+        options.intra_op_num_threads = intra_op_threads
+    if inter_op_threads > 0:
+        options.inter_op_num_threads = inter_op_threads
+    return options
+
+
 class PiperEngine:
     """The real engine: ``piper.PiperVoice`` (piper-tts 1.x), one int16 piece per sentence."""
 
-    def __init__(self, voice_path: str) -> None:
+    def __init__(
+        self, voice_path: str, intra_op_threads: int = 0, inter_op_threads: int = 0
+    ) -> None:
+        import onnxruntime
         from piper import PiperVoice, SynthesisConfig
 
         self.sample_rate = read_sample_rate(voice_path)
         self._voice = PiperVoice.load(voice_path)
+        if intra_op_threads > 0 or inter_op_threads > 0:
+            self._voice.session = onnxruntime.InferenceSession(
+                voice_path,
+                sess_options=session_options(onnxruntime, intra_op_threads, inter_op_threads),
+                providers=["CPUExecutionProvider"],
+            )
         self._config = SynthesisConfig
 
     def synthesize(self, request: dict[str, Any]) -> Iterator[bytes]:
@@ -70,16 +93,19 @@ def _send(out: BinaryIO, kind: bytes, request_id: int, payload: bytes = b"") -> 
     out.flush()
 
 
-def serve(load_engine: Callable[[str], Any], argv: list[str] | None = None) -> int:
-    """Run the request loop with ``load_engine(voice_path)`` (an object with ``sample_rate``
-    and ``synthesize(request) -> Iterator[bytes]``); tests plug a fake engine in here."""
+def serve(load_engine: Callable[[str, int, int], Any], argv: list[str] | None = None) -> int:
+    """Run the request loop with ``load_engine(voice_path, intra_op_threads, inter_op_threads)``
+    (an object with ``sample_rate`` and ``synthesize(request) -> Iterator[bytes]``); tests plug a
+    fake engine in here."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--voice", required=True)
     parser.add_argument("--chunk-ms", type=float, required=True)
+    parser.add_argument("--intra-op-threads", type=int, default=0)
+    parser.add_argument("--inter-op-threads", type=int, default=0)
     args = parser.parse_args(argv)
     out = os.fdopen(os.dup(1), "wb", buffering=0)
     os.dup2(2, 1)
-    engine = load_engine(args.voice)
+    engine = load_engine(args.voice, args.intra_op_threads, args.inter_op_threads)
     piece_bytes = max(
         BYTES_PER_SAMPLE,
         int(engine.sample_rate * args.chunk_ms / MS_PER_S) * BYTES_PER_SAMPLE,

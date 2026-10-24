@@ -199,7 +199,8 @@ class PiperBackend:
 
     def apply_config(self, voice: VoiceConfig) -> None:
         """Hot reload (SPEC 11A): ``voice.piper``'s timeouts and restart backoff apply from the
-        next request or worker start; its restart fields (``python``, ``chunk_ms``) stay."""
+        next request or worker start; its restart fields (``python``, ``chunk_ms``, the thread
+        counts) stay."""
         keep = {name: getattr(self.config, name) for name in RESTART_FIELDS}
         self.config = voice.piper.model_copy(update=keep)
 
@@ -271,6 +272,8 @@ class PiperBackend:
             proc = await asyncio.create_subprocess_exec(
                 self.python, "-I", self.script, "--voice", str(path),
                 "--chunk-ms", str(self.config.chunk_ms),
+                "--intra-op-threads", str(self.config.intra_op_threads),
+                "--inter-op-threads", str(self.config.inter_op_threads),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

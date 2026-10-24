@@ -2060,6 +2060,17 @@ class PiperConfig(Strict):
         (0.5, 30.0),
         "First and longest wait before a crashed worker is started again (doubles each time)",
     )
+    intra_op_threads: int = param(
+        2,
+        "ONNX Runtime threads the worker uses inside one operator; 0 keeps the runtime default "
+        "(one per core). On the CM4, 2 measured the best real-time factor (SPEC 13)",
+        ge=0, le=16, restart=True,
+    )  # fmt: skip
+    inter_op_threads: int = param(
+        1,
+        "ONNX Runtime threads the worker uses across operators; 0 keeps the runtime default",
+        ge=0, le=16, restart=True,
+    )  # fmt: skip
 
     @field_validator("python")
     @classmethod

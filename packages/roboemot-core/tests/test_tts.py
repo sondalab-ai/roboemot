@@ -571,3 +571,70 @@ def test_the_backend_choice_is_a_restart_field_like_the_backend():
     fields = type(VOICE).model_fields
     for name in ("backend", "fallback_backend"):
         assert fields[name].json_schema_extra["restart"], name
+
+
+async def test_piper_worker_gets_the_onnx_thread_counts_on_its_command_line(tmp_path):
+    b = piper(tmp_path)
+    try:
+        await collect(b, "ciao")
+        assert (tmp_path / "voices" / "v.onnx.threads").read_text() == "2 1"
+    finally:
+        await b.aclose()
+    (tmp_path / "custom").mkdir()
+    custom = piper(tmp_path / "custom", intra_op_threads=3, inter_op_threads=0)
+    try:
+        await collect(custom, "ciao")
+        assert (tmp_path / "custom" / "voices" / "v.onnx.threads").read_text() == "3 0"
+    finally:
+        await custom.aclose()
+
+
+def test_a_reload_keeps_the_thread_counts():
+    fields = PiperConfig.model_fields
+    for name in ("intra_op_threads", "inter_op_threads"):
+        assert fields[name].json_schema_extra["restart"], name
+
+
+def _load_worker():
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[1] / "src/roboemot/voice/piper_worker.py"
+    spec = importlib.util.spec_from_file_location("piper_worker_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize(("intra", "inter", "rebuilt"), [(2, 1, True), (0, 0, False)])
+def test_piper_engine_rebuilds_the_session_with_the_thread_counts(
+    tmp_path, monkeypatch, intra, inter, rebuilt
+):
+    """The worker replaces PiperVoice.load's session (which takes no options) by its own."""
+    voice = make_voice(tmp_path) / "v.onnx"
+
+    class Options:
+        intra_op_num_threads = 0
+        inter_op_num_threads = 0
+
+    sessions = []
+
+    def session(path, sess_options, providers):
+        sessions.append((path, sess_options, providers))
+        return "rebuilt"
+
+    loaded = SimpleNamespace(session="default")
+    fake_ort = SimpleNamespace(SessionOptions=Options, InferenceSession=session)
+    fake_piper = SimpleNamespace(
+        PiperVoice=SimpleNamespace(load=lambda path: loaded), SynthesisConfig=object
+    )
+    monkeypatch.setitem(sys.modules, "onnxruntime", fake_ort)
+    monkeypatch.setitem(sys.modules, "piper", fake_piper)
+    engine = _load_worker().PiperEngine(str(voice), intra, inter)
+    assert engine.sample_rate == RATE
+    if rebuilt:
+        ((path, options, providers),) = sessions
+        assert path == str(voice) and providers == ["CPUExecutionProvider"]
+        assert (options.intra_op_num_threads, options.inter_op_num_threads) == (intra, inter)
+        assert loaded.session == "rebuilt"
+    else:
+        assert sessions == [] and loaded.session == "default"
