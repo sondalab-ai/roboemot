@@ -189,8 +189,8 @@ def test_loop_survives_bad_tick_and_applies_config():
     manifest = load_manifest(DATA / "reachy-mini-wireless.yaml", allow_unmeasured_dynamics=True)
     loop = MotionLoop(manifest, ReachyMiniDriver(mini), stack.effective(), rate_hz=50)
     stack.subscribe(lambda ch: loop.apply_config(ch.config))
-    stack.set("safety.minor_motion_factor", 0.3)
-    assert loop.core.minor_factor == 0.3
+    stack.set("safety.watchdog_return_factor", 0.2)
+    assert loop.core.watchdog_return_factor == 0.2
     assert loop.core.watchdog_s <= manifest.model.safety.watchdog_ms / 1000
     loop.set_mode("active")
     with pytest.raises(ValueError):

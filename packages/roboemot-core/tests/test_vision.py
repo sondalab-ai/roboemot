@@ -327,7 +327,7 @@ def test_face_percept_has_bearing_and_anonymous_id_until_recognised(tmp_path):
     assert p.azimuth_rad < 0 and p.elevation_rad > 0
     assert p.new_track and not got["percept.face"][-1].payload.new_track
     assert got["person.recognized"] == []
-    assert p.age_group == "unknown" and p.possible_minor
+    assert p.age_group == "unknown"
 
 
 def test_small_faces_are_ignored(tmp_path):
@@ -348,8 +348,8 @@ def test_attribute_job_runs_once_per_track_on_n_crops(tmp_path):
     state = next(iter(pipe._faces.values()))
     assert state.crops == []
     early, late = got["percept.face"][0].payload, got["percept.face"][-1].payload
-    assert early.age_group == "unknown" and early.possible_minor
-    assert late.age_group == "adult" and not late.possible_minor
+    assert early.age_group == "unknown"
+    assert late.age_group == "adult"
     assert late.gender == "female" and late.attributes_stamp is not None
 
 
@@ -386,7 +386,7 @@ def test_single_crop_with_frames_min_one_gives_a_confident_value(tmp_path):
     run(pipe, 20)
     assert ex.jobs == 1 and len(est.crops) == 1
     last = got[-1].payload
-    assert (last.age_group, last.gender, last.possible_minor) == ("adult", "female", False)
+    assert (last.age_group, last.gender) == ("adult", "female")
 
 
 def test_single_crop_still_applies_the_score_floor(tmp_path):
@@ -404,7 +404,7 @@ def test_single_crop_still_applies_the_score_floor(tmp_path):
     got = []
     pipe.bus.subscribe("percept.face", got.append)
     run(pipe, 20)
-    assert got[-1].payload.age_group == "unknown" and got[-1].payload.possible_minor
+    assert got[-1].payload.age_group == "unknown"
 
 
 def test_track_shorter_than_the_crops_needed_runs_no_job(tmp_path):
@@ -449,7 +449,7 @@ def test_low_confidence_attributes_stay_unknown_and_minor(tmp_path):
     _, _, pipe, _, got = rig(tmp_path, lambda i: [face(100)], estimator=weak)
     run(pipe, 40)
     last = got["percept.face"][-1].payload
-    assert last.age_group == "unknown" and last.possible_minor
+    assert last.age_group == "unknown"
 
 
 def test_declared_age_overrides_the_estimate(tmp_path):
@@ -459,7 +459,7 @@ def test_declared_age_overrides_the_estimate(tmp_path):
     reg.enroll("Kid", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT, age_group="senior")
     run(pipe, 40)
     last = got["percept.face"][-1].payload
-    assert (last.age_group, last.age_source, last.possible_minor) == ("senior", "declared", False)
+    assert (last.age_group, last.age_source) == ("senior", "declared")
 
 
 def test_worker_queue_is_bounded(tmp_path):

@@ -56,17 +56,17 @@ def test_unknown_keys_and_out_of_range_are_rejected():
 
 def test_safety_only_tightens_at_runtime():
     stack = ConfigStack()
-    stack.set("safety.minor_motion_factor", 0.4)  # more conservative: allowed
+    stack.set("safety.watchdog_return_factor", 0.2)  # more conservative: allowed
     with pytest.raises(GuardrailError):
-        stack.set("safety.minor_motion_factor", 0.9)  # looser: refused
+        stack.set("safety.watchdog_return_factor", 0.9)  # looser: refused
     with pytest.raises(GuardrailError):
         stack.set("safety.allow_unmeasured_dynamics", True)
     # loosening is possible only by editing the app layer with admin confirmation
     with pytest.raises(GuardrailError):
-        stack.set("safety.minor_motion_factor", 0.9, layer="app")
-    stack.clear("safety.minor_motion_factor")
-    stack.set("safety.minor_motion_factor", 0.9, layer="app", admin=True)
-    assert stack.get("safety.minor_motion_factor") == 0.9
+        stack.set("safety.watchdog_return_factor", 0.9, layer="app")
+    stack.clear("safety.watchdog_return_factor")
+    stack.set("safety.watchdog_return_factor", 0.9, layer="app", admin=True)
+    assert stack.get("safety.watchdog_return_factor") == 0.9
 
 
 def test_privacy_opt_in_needs_admin():
@@ -160,7 +160,7 @@ def test_schema_version_mismatch():
 def test_section_level_override_cannot_bypass_guardrails():
     stack = ConfigStack()
     with pytest.raises(GuardrailError):
-        stack.set("safety", {"minor_motion_factor": 1.0, "watchdog_ms": 2000})
+        stack.set("safety", {"watchdog_return_factor": 1.0, "watchdog_ms": 2000})
     with pytest.raises(GuardrailError):
         stack.set("privacy", {"debug_recording": True, "multimodal_frames": True})
     with pytest.raises(GuardrailError):
@@ -183,25 +183,24 @@ def test_privacy_opt_in_with_integer_one_still_needs_admin():
         stack.set("privacy.debug_recording", 1)
 
 
-def test_minors_policy_is_guarded():
-    stack = ConfigStack()
+def test_the_register_approach_is_guarded():
+    stack = ConfigStack(app={"register": {"approach_allowed": False}})
     with pytest.raises(GuardrailError):
-        stack.set("register.child.minor_content_policy", False)
-    with pytest.raises(GuardrailError):
-        stack.set("register.unknown.approach_allowed", True)
+        stack.set("register.approach_allowed", True)
 
 
 def test_loosening_preset_needs_admin(tmp_path):
     (tmp_path / "default.yaml").write_text("schema_version: 1\n")
     (tmp_path / "evil.yaml").write_text(
-        "extends: default\nsafety: {minor_motion_factor: 1.0}\nprivacy: {debug_recording: true}\n"
+        "extends: default\nsafety: {watchdog_return_factor: 1.0}\n"
+        "privacy: {debug_recording: true}\n"
     )
     stack = ConfigStack(preset_dirs=[tmp_path])
     with pytest.raises(GuardrailError):
         stack.apply_preset("evil")
-    assert stack.get("safety.minor_motion_factor") == 0.6
+    assert stack.get("safety.watchdog_return_factor") == 0.3
     stack.apply_preset("evil", admin=True)
-    assert stack.get("safety.minor_motion_factor") == 1.0
+    assert stack.get("safety.watchdog_return_factor") == 1.0
 
 
 def test_invalid_preset_is_rolled_back(tmp_path):
@@ -212,16 +211,16 @@ def test_invalid_preset_is_rolled_back(tmp_path):
     assert stack.get("affect.half_life_s") == 8.0  # still usable
 
 
-def test_person_layer_cannot_touch_safety_or_minors():
-    stack = ConfigStack()
+def test_person_layer_cannot_touch_safety():
+    stack = ConfigStack(app={"register": {"approach_allowed": False}})
     person = {
-        "safety": {"minor_motion_factor": 1.0},
-        "register": {"child": {"minor_content_policy": False, "speech_rate": 1.1}},
+        "safety": {"watchdog_return_factor": 1.0},
+        "register": {"approach_allowed": True, "speech_rate": 1.1},
     }
     cfg = stack.effective(person)
-    assert cfg.safety.minor_motion_factor == 0.6
-    assert cfg.register.child.minor_content_policy is True
-    assert cfg.register.child.speech_rate == 1.1  # allowed part kept
+    assert cfg.safety.watchdog_return_factor == 0.3
+    assert cfg.register.approach_allowed is False
+    assert cfg.register.speech_rate == 1.1  # allowed part kept
     assert any(e.source == "person" for e in stack.audit)
 
 
@@ -234,9 +233,9 @@ def test_hot_reload_refuses_loosening_and_invalid_files(tmp_path):
         app.write_text(text)
         os.utime(app, (time.time() + bump, time.time() + bump))
 
-    write("safety: {minor_motion_factor: 1.0}\n", 5)
+    write("safety: {watchdog_return_factor: 1.0}\n", 5)
     assert stack.poll() is None and "loosen" in stack.last_error
-    assert stack.get("safety.minor_motion_factor") == 0.6
+    assert stack.get("safety.watchdog_return_factor") == 0.3
     write("affect: {half_life_s: -1}\n", 10)
     assert stack.poll() is None and stack.last_error
     assert stack.get("affect.half_life_s") == 7  # last valid config kept
@@ -248,8 +247,8 @@ def test_admin_app_edit_is_persisted(tmp_path):
     app = tmp_path / "app.yaml"
     app.write_text("schema_version: 1\n")
     stack = ConfigStack.from_files(app=app)
-    stack.set("safety.minor_motion_factor", 0.9, layer="app", admin=True)
-    assert "minor_motion_factor: 0.9" in app.read_text()
+    stack.set("safety.watchdog_return_factor", 0.9, layer="app", admin=True)
+    assert "watchdog_return_factor: 0.9" in app.read_text()
     assert stack.poll() is None  # own write is not a reload
 
 
@@ -271,7 +270,7 @@ def test_baseline_never_absorbs_runtime_values():
     """N1: a runtime tightening + an admin approval must not lock the stack afterwards."""
     clock = Clock()
     stack = ConfigStack(clock=clock)
-    stack.set("safety.minor_motion_factor", 0.3, ttl_s=60)
+    stack.set("safety.watchdog_return_factor", 0.1, ttl_s=60)
     stack.set("privacy.multimodal_frames", True, admin=True)
     clock.t += 61
     stack.poll()  # tightening expired
@@ -293,7 +292,7 @@ def test_runtime_privacy_approval_lapses_with_the_override():
 
 
 def test_route_names_validated_and_unique():
-    """N4: names with dots or duplicates could bypass the minors guardrail."""
+    """N4: names with dots or duplicates could bypass a route guardrail."""
     with pytest.raises(ConfigError):
         ConfigStack(
             app={"llm_routes": [{"name": "cloud.v2", "base_url": "http://a/v1", "model": "m"}]}
@@ -468,10 +467,10 @@ def test_app_write_interrupted_keeps_the_old_file_whole(tmp_path, monkeypatch):
 
     monkeypatch.setattr(os, "replace", crash)
     with pytest.raises(OSError):
-        stack.set("safety.minor_motion_factor", 0.9, layer="app", admin=True)
+        stack.set("safety.watchdog_return_factor", 0.9, layer="app", admin=True)
     assert app.read_bytes() == before
     assert [p.name for p in tmp_path.iterdir()] == ["app.yaml"]  # no temp file left behind
-    assert stack.get("safety.minor_motion_factor") == 0.6  # undone with the file
+    assert stack.get("safety.watchdog_return_factor") == 0.3  # undone with the file
 
 
 def test_app_write_is_owner_only_and_keeps_a_symlink(tmp_path):
@@ -481,9 +480,9 @@ def test_app_write_is_owner_only_and_keeps_a_symlink(tmp_path):
     link = tmp_path / "app.yaml"
     link.symlink_to(real)
     stack = ConfigStack.from_files(app=link)
-    stack.set("safety.minor_motion_factor", 0.9, layer="app", admin=True)
+    stack.set("safety.watchdog_return_factor", 0.9, layer="app", admin=True)
     assert link.is_symlink()
-    assert "minor_motion_factor: 0.9" in real.read_text()
+    assert "watchdog_return_factor: 0.9" in real.read_text()
     assert real.stat().st_mode & 0o777 == 0o600  # owner only, whatever it was (review ZG)
     assert stack.poll() is None  # own write is not a reload
 

@@ -24,13 +24,13 @@ from roboemot.skills import (
 )
 from roboemot.skills.defaults import SkillEnv, default_skills
 
-CTX = SkillContext(speaker="p1", language="it", minor=False, now=10.0)
+CTX = SkillContext(speaker="p1", language="it", now=10.0)
 EXEC = {"timeout_s": 1.0, "max_chars": 50, "enum_max": 20}
 
 
-def tools(*fns, minor=False, allow=None):
+def tools(*fns, allow=None):
     reg = SkillRegistry(fns)
-    offered = reg.offered(allow or reg.names(), minor=minor)
+    offered = reg.offered(allow or reg.names())
     return reg, offered, SkillRegistry.tools(offered)
 
 
@@ -98,7 +98,7 @@ def test_the_context_is_not_in_the_schema_and_a_skill_without_name_uses_the_func
     assert tool["function"]["description"] == "Tell who. More text."
 
 
-def test_only_visible_listed_skills_are_offered_and_minors_filter_per_skill():
+def test_only_visible_listed_skills_are_offered():
     @skill(llm_visible=True)
     def seen() -> str:
         return "1"
@@ -107,16 +107,14 @@ def test_only_visible_listed_skills_are_offered_and_minors_filter_per_skill():
     def hidden() -> str:
         return "2"
 
-    @skill(llm_visible=True, allowed_with_minor=False)
-    def adults() -> str:
+    @skill(llm_visible=True)
+    def other() -> str:
         return "3"
 
-    reg = SkillRegistry([seen, hidden, adults])
-    names = lambda **kw: [s.name for s in reg.offered(reg.names(), **kw)]  # noqa: E731
-    assert names(minor=False) == ["seen", "adults"]
-    assert names(minor=True) == ["seen"]
-    assert [s.name for s in reg.offered(["adults"], minor=False)] == ["adults"]
-    assert reg.offered([], minor=False) == []
+    reg = SkillRegistry([seen, hidden, other])
+    assert [s.name for s in reg.offered(reg.names())] == ["seen", "other"]
+    assert [s.name for s in reg.offered(["other"])] == ["other"]
+    assert reg.offered([]) == []
     with pytest.raises(ValueError):
         reg.add(seen)
 
@@ -129,10 +127,10 @@ def test_dynamic_choices_become_the_enum_and_are_capped_and_empty_hides_the_skil
         return who
 
     reg = SkillRegistry([pick])
-    [tool] = reg.tools(reg.offered(["pick"], minor=False), enum_max=3)
+    [tool] = reg.tools(reg.offered(["pick"]), enum_max=3)
     assert tool["function"]["parameters"]["properties"]["who"]["enum"] == ["a", "b", "c"]
     names.clear()
-    assert reg.offered(["pick"], minor=False) == []
+    assert reg.offered(["pick"]) == []
 
 
 async def run(reg, name, args, ctx=CTX, offered=None):
@@ -270,7 +268,7 @@ def test_the_default_skills_are_the_five_of_the_spec_and_all_visible():
         "stop_talking",
     ]
     allow = RoboEmotConfig().conversation.llm_skills
-    offered = reg.offered(allow, minor=True)
+    offered = reg.offered(allow)
     assert [s.name for s in offered] == reg.names()
     by = {t["function"]["name"]: t["function"]["parameters"] for t in reg.tools(offered)}
     assert by["play"]["properties"]["gesture"]["enum"] == ["joy", "curiosity"]
@@ -303,7 +301,7 @@ async def test_play_and_look_at_only_take_known_names():
 
 async def test_express_emotion_uses_the_per_turn_impulse_budget():
     e = Env()
-    ctx = SkillContext("p1", "it", False, 100.0)
+    ctx = SkillContext("p1", "it", 100.0)
     e.engine.new_turn()
     before = (e.engine.valence, e.engine.arousal)
     out = await run(e.reg, "express_emotion", {"emotion": "joy", "intensity": 1.0}, ctx)
@@ -323,7 +321,7 @@ async def test_remember_preference_asks_and_ends_the_turn_and_stop_talking_stops
     e = Env()
     asked, stopped = [], []
     ctx = SkillContext(
-        "p1", "it", False, 1.0,
+        "p1", "it", 1.0,
         stop_speech=lambda: stopped.append(1),
         ask_confirmation=lambda k, v: asked.append((k, v)) or "asked",
     )  # fmt: skip

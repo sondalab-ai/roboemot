@@ -187,7 +187,7 @@ def test_an_adult_face_in_the_margin_does_not_change_the_childs_crop(tmp_path, a
     for m in got["percept.face"]:
         by_track[m.payload.track_id] = m.payload
     child = min(by_track.values(), key=lambda p: p.box[0])
-    assert child.age_group == "child" and child.possible_minor
+    assert child.age_group == "child"
     assert len(est.crops) == 2  # one job per track
     child_crop = next(c for c in est.crops if (c[..., 1] == CHILD).sum() == 60 * 60)
     assert not (child_crop == ADULT).any()

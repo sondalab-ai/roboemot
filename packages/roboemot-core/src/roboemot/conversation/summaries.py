@@ -3,8 +3,7 @@
 Plain text only: a registered speaker's display name and the preferences they confirmed, and the
 entities the robot sees, by attention priority. No embeddings, ids, ages, genders or images. A
 person is named only when the registry knows them, otherwise they are "a person": age and gender
-estimates are never offered to the LLM as facts (SPEC 12), so there is no "a child" here either;
-the minor content rules in the safety block cover that case.
+estimates are never offered to the LLM as facts (SPEC 12), so there is no "a child" here either.
 """
 
 from __future__ import annotations

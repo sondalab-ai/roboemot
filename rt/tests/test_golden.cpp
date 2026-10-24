@@ -42,13 +42,11 @@ int main(int argc, char** argv) {
       ss >> c.a >> c.b >> c.max;
       yd.push_back(c);
     } else if (kind == "config") {
-      double cf, wd, mf, wr, margin;
-      ss >> cf >> wd >> mf >> wr >> margin >> dt;
-      core = std::make_unique<MotionCore>(dofs, yd, cf, wd, mf, wr, margin);
+      double cf, wd, wr, margin;
+      ss >> cf >> wd >> wr >> margin >> dt;
+      core = std::make_unique<MotionCore>(dofs, yd, cf, wd, wr, margin);
     } else if (kind == "tick") {
-      int minor;
-      ss >> now >> minor;
-      core->set_minor_present(minor != 0);
+      ss >> now;
     } else if (kind == "cmd") {
       Command c;
       int prio, add, n;

@@ -259,7 +259,7 @@ def test_extra_safety_rules_and_summary_caps_count_toward_the_budget():
 def test_the_worst_register_is_checked_not_the_active_one():
     route = {**ROUTE, "context_budget_tokens": 800}
     ConfigStack(app={"llm_routes": [route]})
-    long_fragment = {"child": {"persona_fragment": "f" * 300}}
+    long_fragment = {"persona_fragment": "f" * 300}
     assert "'lan'" in refused(
         llm_routes=[{**route, "context_budget_tokens": 600}], register=long_fragment
     )
@@ -292,36 +292,32 @@ def test_effective_does_not_run_the_budget_check(monkeypatch):
     calls = []
     monkeypatch.setattr(prompt, "check_route_budgets", lambda cfg: calls.append(cfg))
     stack.effective()
-    stack.effective(person={"register": {"adult": {"speech_rate": 1.1}}})
+    stack.effective(person={"register": {"speech_rate": 1.1}})
     assert calls == []
 
 
 def test_a_long_person_fragment_is_dropped_and_lookups_still_work():
     stack = ConfigStack(app={"llm_routes": [ROUTE]})
-    person = {"register": {"adult": {"persona_fragment": "f" * 40_000}}}
+    person = {"register": {"persona_fragment": "f" * 40_000}}
     cfg = stack.effective(person=person)
-    assert len(cfg.register.adult.persona_fragment) <= cfg.register.persona_fragment_max_chars
+    assert len(cfg.register.persona_fragment) <= cfg.register.persona_fragment_max_chars
     assert any(e.key == "dropped" and "persona_fragment" in str(e.new) for e in stack.audit)
-    ok = stack.effective(person={"register": {"adult": {"persona_fragment": "Calm."}}})
-    assert ok.register.adult.persona_fragment == "Calm."
+    ok = stack.effective(person={"register": {"persona_fragment": "Calm."}})
+    assert ok.register.persona_fragment == "Calm."
 
 
 def test_a_person_cannot_raise_the_fragment_cap():
     stack = ConfigStack()
-    person = {
-        "register": {"persona_fragment_max_chars": 2000, "adult": {"persona_fragment": "f" * 900}}
-    }
+    person = {"register": {"persona_fragment_max_chars": 2000, "persona_fragment": "f" * 900}}
     cfg = stack.effective(person=person)
     assert cfg.register.persona_fragment_max_chars == 300
-    assert cfg.register.adult.persona_fragment != "f" * 900
+    assert cfg.register.persona_fragment != "f" * 900
 
 
 def test_the_fragment_cap_is_enforced_in_the_config():
-    with pytest.raises(ValueError, match="register.child.persona_fragment has 301"):
-        RoboEmotConfig(register={"child": {"persona_fragment": "f" * 301}})
-    RoboEmotConfig(
-        register={"child": {"persona_fragment": "f" * 301}, "persona_fragment_max_chars": 400}
-    )
+    with pytest.raises(ValueError, match="register.persona_fragment has 301"):
+        RoboEmotConfig(register={"persona_fragment": "f" * 301})
+    RoboEmotConfig(register={"persona_fragment": "f" * 301, "persona_fragment_max_chars": 400})
 
 
 def test_budget_params_have_defaults_and_ranges():

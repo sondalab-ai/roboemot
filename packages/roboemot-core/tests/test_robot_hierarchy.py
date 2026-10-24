@@ -49,7 +49,6 @@ CORE_DUCK_ALLOWED: dict[tuple[str, str], str] = {
     ("affect/appraisal.py", "getattr:addressed"): "bus payload of another stage",
     ("circadian/runner.py", "getattr:addressed"): "bus payload of another stage",
     ("circadian/runner.py", "getattr:wake_word"): "bus payload of another stage",
-    ("vision/minor.py", "getattr:possible_minor"): "bus payload of another stage",
     ("config/stack.py", "getattr:__dict__"): "pydantic or plain config item",
     ("config/stack.py", "getattr:model_fields"): "pydantic model introspection",
     ("config/stack.py", "getattr:__args__"): "typing annotation introspection",

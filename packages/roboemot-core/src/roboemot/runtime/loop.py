@@ -57,7 +57,6 @@ def run_loop(
             continue
         p.circ.tick(now)  # before the affect tick: its events and baseline apply to it
         state = p.runner.tick(now)
-        minor = p.presence.apply(now)
         attending = attention_tick(now, p.world, p.selector, p.gaze, p.loop)
         if host.conversation is not None and p.selector.engaged:
             host.conversation.note_presence(
@@ -73,8 +72,8 @@ def run_loop(
             p.light_reader.start()  # lazily: never for a clock-only or disabled rhythm
         if live.persona is not fx_for:  # recompute only after a reload
             fx_for, fx = live.persona, persona_effects(live.persona)
-        register = p.tracker.tick(now, live.register, fx, minor_present=minor)
-        p.expression.set_register(register, live.safety.minor_motion_factor if minor else 1.0)
+        register = p.tracker.tick(now, live.register, fx)
+        p.expression.set_register(register)
         if state is not None:
             p.expression.update(state, register, now)
         p.perception.enrollment.expire()
@@ -92,7 +91,6 @@ def run_loop(
                 effects=fx,
                 hour=p.clock.hour(),
                 circadian=host.circadian,
-                minor_present=minor,
             )
             scan_tick(ctx, p.scan, p.loop, live)
         state_fx = p.circ.model.effects() if host.circadian else live.circadian.states["awake"]
@@ -108,7 +106,6 @@ def run_loop(
             dof=pitch_dof,
         )
         if p.circ.motion is not None:
-            p.circ.motion.set_minor_factor(live.safety.minor_motion_factor if minor else 1.0)
             p.circ.motion.set_register(
                 register.params.motion_amplitude, live.expression.max_amplitude
             )

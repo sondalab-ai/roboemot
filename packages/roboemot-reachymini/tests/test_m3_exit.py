@@ -32,7 +32,6 @@ import roboemot_reachymini.app as app_module
 from roboemot import paths
 from roboemot.config.schema import RoboEmotConfig, VoiceConfig
 from roboemot.llm import Router
-from roboemot.llm.prompt import MINOR_RULE
 from roboemot.runtime import assembly
 from roboemot.vision.models import ModelError
 from roboemot.voice import factory
@@ -166,10 +165,10 @@ class DelayedTTS:
     def __init__(self, spoken: list[tuple[str, str]]) -> None:
         self.spoken = spoken
 
-    def available(self, *, minor_present=False) -> bool:
+    def available(self) -> bool:
         return True
 
-    async def synthesize(self, text, delivery, *, language, voice, minor_present=False):
+    async def synthesize(self, text, delivery, *, language, voice):
         self.spoken.append((language, text))
         await asyncio.sleep(FAKE_TTS_FIRST_CHUNK_S)
         n = round(22050 * 0.3 * max(1, len(text.split())))
@@ -199,13 +198,8 @@ def sse(text: str) -> bytes:
 class ExitApp(app_module.RoboEmotApp):
     """The real app with the LLM route mocked in-process and the utterances collected."""
 
-    minor_flag = False
     requests: list
     utterances: list
-
-    @property
-    def minor_present(self) -> bool:
-        return self.minor_flag
 
     def on_utterance(self, utterance) -> None:
         self.utterances.append((time.monotonic(), utterance))
@@ -270,7 +264,7 @@ def yaml_for(language: str, piper: Path | None) -> str:
     return "\n".join(lines) + "\n"
 
 
-def start_app(data, monkeypatch, language, piper, minor=False):  # noqa: F811
+def start_app(data, monkeypatch, language, piper):  # noqa: F811
     spoken: list[tuple[str, str]] = []
     # The route is an in-process mock, but the app's network monitor probes "lan.local" over TCP.
     # Where that name fails fast (CI) the link goes offline after three probes and the robot
@@ -294,7 +288,7 @@ def start_app(data, monkeypatch, language, piper, minor=False):  # noqa: F811
         monkeypatch.setattr(piper_backend.PiperBackend, "synthesize", spy)
     enable(data, yaml_for(language, piper))
     app = ExitApp.__new__(ExitApp)
-    app.requests, app.utterances, app.minor_flag = [], [], minor
+    app.requests, app.utterances = [], []
     mini = ExitMini()
     stop, thread, errors = run_app(app, mini.mini)
     try:
@@ -440,37 +434,6 @@ def test_conversation_inside_the_latency_budgets_then_a_barge_in(
         )
     finally:
         gc.callbacks.remove(pauses)
-        finish(stop, thread, errors)
-
-
-def test_a_minor_is_answered_by_the_route_under_the_minor_rules(
-    models_ready,
-    data,  # noqa: F811
-    monkeypatch,
-    capsys,
-):
-    """The route answers a minor, its request carrying the minor content rules (SPEC 8, 12;
-    owner decision 2026-10-22: no route is skipped while a minor is present)."""
-    app, mini, spoken, stop, thread, errors = start_app(data, monkeypatch, "it", None, minor=True)
-    try:
-        assert app.conversation is not None
-        clip = load("it_greeting_name")
-        _, last = speech_span_s(clip)
-        t_clip = mini.mic.play(np.concatenate([np.zeros(round(LEAD_S * RATE), np.float32), clip]))
-        end_wall = t_clip + LEAD_S + last
-        assert wait_for(lambda: bool(mini.pushes), 20), "nothing was spoken"
-        ms = (mini.pushes[0][0] - end_wall) * 1000
-        assert len(app.requests) == 1, "the route was not asked while a minor was present"
-        assert MINOR_RULE in app.requests[0]["messages"][0]["content"]
-        assert spoken and {lang for lang, _ in spoken} == {"it"}
-        assert ms <= FIRST_AUDIO_BUDGET_MS
-        report(
-            "child_it",
-            {"tts": f"fake, {FAKE_TTS_FIRST_CHUNK_S} s first chunk", "requests": 1,
-             "first_audio_push_vs_mic_last_speech_ms": round(ms)},
-            capsys,
-        )  # fmt: skip
-    finally:
         finish(stop, thread, errors)
 
 

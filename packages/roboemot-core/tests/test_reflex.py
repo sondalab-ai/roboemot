@@ -150,7 +150,7 @@ def test_100_and_800_ms_are_accepted():
     "bad",
     [
         {"trigger": "proximity", "primitive": "startle", "threshold": 0.4},
-        {"trigger": "loud_onset", "primitive": "turn_toward", "suppress_with_minor": True},
+        {"trigger": "loud_onset", "primitive": "turn_toward"},
         {"trigger": "new_voice", "primitive": "withdraw", "threshold": 3},
         {"trigger": "proximity", "primitive": "withdraw", "threshold": 3.0},  # fraction > 1
         {"trigger": "loud_onset", "threshold": 1.0},  # onset ratio below 1.5
@@ -164,11 +164,10 @@ def test_invalid_rules_are_rejected(bad):
         ReflexRule(**rule(**bad))
 
 
-def test_a_turn_toward_rule_must_suppress_with_a_minor():
-    voice = rule(trigger="new_voice", primitive="turn_toward", threshold=3)
-    with pytest.raises(ValidationError, match="suppress_with_minor"):
-        ReflexRule(**voice)
-    ReflexRule(**voice, suppress_with_minor=True)
+def test_a_turn_toward_rule_needs_no_minor_condition():
+    """Owner decision 2026-10-23: the turn toward a voice is the same for everyone."""
+    ReflexRule(**rule(trigger="new_voice", primitive="turn_toward", threshold=3))
+    assert "suppress_with_minor" not in ReflexRule.model_fields
 
 
 def test_duplicate_names_and_a_shape_without_a_hold_are_rejected():
@@ -196,9 +195,6 @@ def test_runtime_overrides_may_tighten_never_loosen_a_reflex():
         assert [v.path for v in violations(approved, candidate(**loose))], loose
     loosened_cap = RoboEmotConfig.model_validate({"reflexes": {"max_amplitude_deg": 90}})
     assert violations(RoboEmotConfig(), loosened_cap)
-    off = RoboEmotConfig.model_validate({"reflexes": {"rules": [rule(suppress_with_minor=False)]}})
-    on = RoboEmotConfig.model_validate({"reflexes": {"rules": [rule(suppress_with_minor=True)]}})
-    assert violations(on, off) and not violations(off, on)
 
 
 def test_removing_a_rule_is_refused_and_does_not_shift_the_next_one():
@@ -236,7 +232,6 @@ RULE_CHANGES = {
     "amplitude_deg": [5, 20],
     "cooldown_s": [1, 9],
     "duration_ms": [300, 700],
-    "suppress_with_minor": True,
 }
 SHARED_CHANGES = {
     "max_amplitude_deg": [10, 90],
@@ -481,7 +476,7 @@ def face(stamp: float, height: float, y1: float = 0.2) -> FacePercept:
     return FacePercept(
         track_id=1, stamp=stamp, box=(0.3, y1, 0.6, y1 + height), score=0.9, azimuth_rad=0.0,
         elevation_rad=0.0, owner_id=None, anonymous_id="a", age_group="adult", age_source="x",
-        gender="unknown", gender_source="none", attribute_confidence=0.9, possible_minor=False,
+        gender="unknown", gender_source="none", attribute_confidence=0.9,
         new_track=False,
     )  # fmt: skip
 
@@ -512,15 +507,12 @@ def test_the_tallest_face_of_a_frame_counts():
     assert rig.stats("w")["fired"] == 1
 
 
-@pytest.mark.parametrize("minor", [False, True])
-def test_withdraw_never_moves_the_head_forward_even_with_the_minor_band_on(minor):
-    # The head is tipped back at -0.5 rad. The arbiter scales an absolute target about home by the
-    # minor factor, which would pull a naive withdraw back towards home, i.e. forward.
+def test_withdraw_never_moves_the_head_forward():
+    # The head is tipped back at -0.5 rad: a withdraw starts from there and only tips it further.
     rig = Rig(cfg_with(PROXIMITY), hold={PITCH: -0.5})
-    rig.loop.set_minor_present(minor)
     rig.run(0.5)
     start = rig.pitch[-1]
-    assert start == pytest.approx(-0.5 * (0.6 if minor else 1.0), abs=0.01)
+    assert start == pytest.approx(-0.5, abs=0.01)
     rig.bus.publish("percept.face", face(rig.t, 0.6), rig.t)
     n = len(rig.pitch)
     rig.run(0.8)
@@ -540,7 +532,6 @@ VOICE = rule(
     amplitude_deg=40,
     cooldown_s=0,
     duration_ms=800,
-    suppress_with_minor=True,
 )
 
 
@@ -556,7 +547,6 @@ def doa(rig: Rig, azimuth: float, head_yaw: float = 0.0) -> None:
 
 def test_a_new_voice_turns_the_head_toward_it_within_the_amplitude_and_audio_budget():
     rig = Rig(cfg_with(VOICE))
-    rig.loop.set_minor_present(False)
     rig.tick(3)
     doa(rig, 0.4)
     rig.tick()
@@ -569,7 +559,6 @@ def test_a_new_voice_turns_the_head_toward_it_within_the_amplitude_and_audio_bud
 
 def test_the_turn_is_limited_to_the_amplitude_and_the_front_half_plane():
     rig = Rig(cfg_with(VOICE))
-    rig.loop.set_minor_present(False)
     rig.tick(3)
     doa(rig, 1.4)  # 80 degrees: past the 40 degree amplitude
     rig.run(1.2)
@@ -577,7 +566,6 @@ def test_the_turn_is_limited_to_the_amplitude_and_the_front_half_plane():
     # a bearing from the head's own turn (head at +60 deg, voice 50 deg left of it) is 110 deg in
     # the base frame: the target stays inside the front half-plane
     rig2 = Rig(cfg_with(replace_rule(VOICE, amplitude_deg=90)))
-    rig2.loop.set_minor_present(False)
     rig2.tick(3)
     doa(rig2, math.radians(50), head_yaw=math.radians(60))
     rig2.run(1.5)
@@ -591,38 +579,14 @@ def replace_rule(base: dict, **kw) -> dict:
 def test_the_turn_stays_inside_the_head_body_reach():
     rig = Rig(cfg_with(replace_rule(VOICE, amplitude_deg=90)))
     rig.engine.margin_rad = math.radians(60)  # 65 - 60 = 5 degrees of reach
-    rig.loop.set_minor_present(False)
     rig.tick(3)
     doa(rig, 1.2)
     rig.run(1.5)
     assert 0 < peak_yaw(rig) <= math.radians(5) + 1e-6
 
 
-def test_no_reflex_turns_toward_a_voice_while_a_minor_is_present():
-    rig = Rig(cfg_with(VOICE))
-    rig.loop.set_minor_present(True)
-    rig.tick(3)
-    doa(rig, 0.4)
-    rig.run(1.0)
-    stats = rig.stats("v")
-    assert stats["fired"] == 0 and stats["suppressed_minor"] == 1
-    assert rig.reflex_sources() == []
-    assert rig.driver.writes[-1][1][YAW] == pytest.approx(0.0, abs=1e-9)
-
-
-def test_the_minor_flag_gates_the_turn_even_if_a_rule_says_otherwise():
-    rig = Rig(cfg_with(VOICE))
-    object.__setattr__(rig.engine._rules[0], "suppress_with_minor", False)  # a bypassed validator
-    rig.loop.set_minor_present(True)
-    rig.tick(3)
-    doa(rig, 0.4)
-    rig.run(0.5)
-    assert rig.stats("v")["fired"] == 0
-
-
 def test_a_continuing_voice_is_not_new_but_one_after_a_silence_is():
     rig = Rig(cfg_with(VOICE))
-    rig.loop.set_minor_present(False)
     rig.tick(3)
     for _ in range(10):  # speech for 0.2 s, one bearing every tick
         doa(rig, 0.3)
@@ -635,23 +599,11 @@ def test_a_continuing_voice_is_not_new_but_one_after_a_silence_is():
 
 def test_other_observation_sources_do_not_trigger_the_voice_reflex():
     rig = Rig(cfg_with(VOICE))
-    rig.loop.set_minor_present(False)
     rig.tick()
     obs = Observation("person", rig.t, "camera", 0.3, 0.0)
     rig.bus.publish("percept.entity", obs, rig.t, joint_state={YAW: 0.0})
     rig.tick()
     assert rig.stats("v")["fired"] == 0
-
-
-def test_startle_is_allowed_with_a_minor_but_inside_the_scaled_band():
-    rig = Rig(cfg_with(rule(amplitude_deg=20)))
-    rig.loop.set_minor_present(True)
-    rig.settle_audio()
-    rig.engine.offer_audio_level(LOUD, rig.t)
-    rig.run(0.6)
-    assert rig.stats()["fired"] == 1
-    assert max(rig.pitch) <= 1e-9
-    assert -0.6 * math.radians(20) - 1e-6 <= min(rig.pitch) < -math.radians(3)
 
 
 def test_the_global_amplitude_cap_limits_every_rule():
@@ -724,33 +676,6 @@ def test_the_threshold_may_only_move_the_safe_way_per_trigger():
     voice = cfg_rules(dict(VOICE, name="a", threshold=3.0))
     assert "threshold" in flagged(voice, cfg_rules(dict(VOICE, name="a", threshold=1.0)))
     assert "threshold" not in flagged(voice, cfg_rules(dict(VOICE, name="a", threshold=8.0)))
-
-
-def test_a_minor_appearing_mid_turn_cuts_the_turn_off_on_the_next_tick():
-    rig = Rig(cfg_with(VOICE))
-    rig.loop.set_minor_present(False)
-    rig.tick(3)
-    doa(rig, 0.6)
-    rig.run(0.2)
-    assert rig.reflex_sources() == ["reflex.v"]
-    yaw_before = rig.driver.writes[-1][1][YAW]
-    rig.loop.set_minor_present(True)
-    rig.tick()
-    assert rig.reflex_sources() == [] and rig.engine.active() == []
-    assert rig.stats("v")["suppressed_minor"] == 1
-    rig.run(0.5)
-    assert max(w[YAW] for _, w in rig.driver.writes[-25:]) <= yaw_before + 1e-9  # no further turn
-
-
-def test_a_minor_appearing_cuts_off_a_suppressible_startle_but_not_a_plain_one():
-    rig = Rig(cfg_with(rule(name="s", suppress_with_minor=True), rule(name="p")))
-    rig.settle_audio()
-    rig.engine.offer_audio_level(LOUD, rig.t)
-    rig.tick(2)
-    assert sorted(rig.reflex_sources()) == ["reflex.p", "reflex.s"]
-    rig.loop.set_minor_present(True)
-    rig.tick()
-    assert rig.reflex_sources() == ["reflex.p"]
 
 
 def test_a_close_face_is_judged_against_the_vision_age_not_the_audio_age():
@@ -859,9 +784,9 @@ def test_a_close_face_dropped_as_stale_or_future_re_arms_the_rule():
     assert rig.engine._face_armed["w"] is True  # the next face frame can fire it
 
 
-def test_a_trigger_dropped_by_cooldown_or_a_minor_keeps_the_arm_consumed_until_the_face_leaves():
-    """SPEC 10: only a hold, a disabled engine or age give the arm back. A cooldown or a minor
-    suppression is an answer: the face must leave and return to fire again."""
+def test_a_trigger_dropped_by_cooldown_keeps_the_arm_consumed_until_the_face_leaves():
+    """SPEC 10: only a hold, a disabled engine or age give the arm back. A cooldown is an
+    answer: the face must leave and return to fire again."""
 
     def leave_and_return(rig):
         for _ in range(3):
@@ -885,18 +810,6 @@ def test_a_trigger_dropped_by_cooldown_or_a_minor_keeps_the_arm_consumed_until_t
     assert rig.stats("w")["fired"] == 1
     leave_and_return(rig)
     assert rig.stats("w")["fired"] == 2
-
-    rig = Rig(cfg_with(PROXIMITY | {"suppress_with_minor": True}))
-    rig.loop.set_minor_present(True)
-    rig.tick()
-    rig.bus.publish("percept.face", face(rig.t, 0.6), rig.t)
-    rig.tick()
-    assert rig.stats("w")["suppressed_minor"] == 1
-    rig.loop.set_minor_present(False)
-    stay_close(rig, 0.5)
-    assert rig.stats("w")["fired"] == 0
-    leave_and_return(rig)
-    assert rig.stats("w")["fired"] == 1
 
 
 def test_enabling_the_reflexes_with_a_face_already_close_withdraws_once():
@@ -959,20 +872,6 @@ def with_top(path: str, value) -> RoboEmotConfig:
 def test_shared_reflex_settings_move_only_the_safe_way_without_a_withdraw(path, safe, unsafe):
     assert violations(with_top(path, unsafe), with_top(path, safe)) == []
     assert violations(with_top(path, safe), with_top(path, unsafe))
-
-
-def test_a_pose_outside_the_minor_band_gets_no_withdraw_that_would_pull_it_forward():
-    rig = Rig(cfg_with(PROXIMITY))
-    rig.tick(3)
-    # tipped back past the band the minor factor will draw: the band would scale a withdraw target
-    # (-40 deg at most) to -0.42 rad, forward of this pose
-    rig.loop.core.limiter.pos[PITCH] = -0.65
-    rig.loop.set_minor_present(True)
-    rig.bus.publish("percept.face", face(rig.t, 0.6), rig.t)
-    rig.tick()
-    stats = rig.stats("w")
-    assert stats["fired"] == 0 and stats["no_motion"] == 1
-    assert rig.reflex_sources() == []
 
 
 def test_a_withdraw_that_cannot_move_the_head_is_no_motion_not_a_hold():

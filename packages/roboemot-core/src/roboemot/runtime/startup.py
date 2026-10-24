@@ -30,15 +30,14 @@ from .webui import start_webui
 def offline_cue(host: RuntimeHost, stack: ConfigStack, p: Pipeline) -> SpeechCue:
     """The responder's cue, speaking on ``host.speech_output`` (SPEC 12A, Behaviour while
     offline). Installed once that output exists; the register, circadian state and affect are
-    read when the phrase is said. Muted while asleep (the speaker is quiet then) and while a
-    minor is present (the conversation says the child-safe lines)."""
+    read when the phrase is said. Muted while asleep (the speaker is quiet then)."""
 
     def delivery() -> Delivery:
         cfg, active = stack.effective(), p.tracker.active
         register = (
             active.params
             if active
-            else apply_to_register(cfg.register.unknown, effects(cfg.persona))
+            else apply_to_register(cfg.register.params, effects(cfg.persona))
         )
         circadian = p.circ.model.effects() if host.circadian else cfg.circadian.states["awake"]
         state = p.runner.engine.state(time.monotonic())
@@ -47,7 +46,7 @@ def offline_cue(host: RuntimeHost, stack: ConfigStack, p: Pipeline) -> SpeechCue
     return SpeechCue(
         lambda: host.speech_output,
         delivery,
-        lambda: p.sleep.asleep or p.sleep.paused or host.minor_present,
+        lambda: p.sleep.asleep or p.sleep.paused,
     )
 
 
@@ -61,9 +60,7 @@ def start_voice_output(
     cleanup.callback(speaker.close)  # flushes the player before the robot link goes away
     speaker.start_playing()
     # Closed before the speaker (callbacks run last in, first out).
-    output = host.speech_output = build_speech(
-        p.cfg, speaker, lambda: p.hub.router, p.bus, lambda: host.minor_present
-    )
+    output = host.speech_output = build_speech(p.cfg, speaker, lambda: p.hub.router, p.bus)
     cleanup.callback(output.close)
     output.start()
     p.responder.cue = offline_cue(host, stack, p)
@@ -84,7 +81,6 @@ def start_voice_output(
             if host.circadian
             else stack.effective().circadian.states["awake"]
         ),
-        minor_present=lambda: host.minor_present,
         profile=profile_source(p.selector, p.world, registry, p.value_cap),
         scene=scene_source(
             p.selector,
@@ -131,7 +127,6 @@ def start_all(
         host.transcript is not None
     ):  # registered first, so it runs last: a late sentence is wiped too
         cleanup.callback(host.transcript.clear)
-    cleanup.callback(p.presence.close)
     cleanup.callback(p.tracker.close)
     cleanup.callback(p.runner.close)
     cleanup.callback(p.circ.close)

@@ -251,8 +251,6 @@ def run_jobs(pipe, ex, got, start: int, frames: int) -> list[tuple[float, int]]:
     for i in range(start, start + frames):
         pipe.process(Frame(image(i % 256), i * DT))
         out.append((i * DT, ex.jobs))
-        if got["percept.face"] and got["percept.face"][-1].payload.age_group == "unknown":
-            assert got["percept.face"][-1].payload.possible_minor
     return out
 
 
@@ -266,7 +264,7 @@ def test_an_unknown_age_is_retried_after_the_interval_not_before(tmp_path):
     assert second >= absorbed + RETRY_S - 1e-9
     assert second <= absorbed + RETRY_S + DT + 1e-9
     assert pipe.stats()["attributes"]["retries"] == ex.jobs - 1 >= 2
-    assert got["percept.face"][-1].payload.possible_minor
+    assert got["percept.face"][-1].payload.age_group == "unknown"
 
 
 ROUND = int(RETRY_S / DT) + 4  # frames from one job to the next retry's result, and a margin
@@ -283,11 +281,11 @@ def test_a_retried_adult_needs_a_second_agreeing_result_then_retries_stop(tmp_pa
     run_jobs(pipe, ex, got, ROUND, ROUND)
     assert ex.jobs == 3
     last = got["percept.face"][-1].payload
-    assert (last.age_group, last.possible_minor) == ("unknown", True)  # held, not yet used
+    assert last.age_group == "unknown"  # held, not yet used
     run_jobs(pipe, ex, got, 2 * ROUND, ROUND)
     assert ex.jobs == 4
     last = got["percept.face"][-1].payload
-    assert (last.age_group, last.possible_minor) == ("adult", False)
+    assert last.age_group == "adult"
     run_jobs(pipe, ex, got, 3 * ROUND, int(4 * RETRY_S / DT))
     assert ex.jobs == 4 and pipe.stats()["attributes"]["retries"] == 3
 
@@ -327,9 +325,11 @@ def test_an_unknown_between_two_retried_adults_clears_the_candidate(tmp_path):
     ex = CountingExecutor()
     _, _, pipe, _, got = rig(tmp_path, lambda i: [face(100)], estimator=est, executor=ex)
     i = run_until(pipe, ex, got, 0, 4)
-    assert got["percept.face"][-1].payload.possible_minor  # adult, unknown, adult: not agreed
+    assert (
+        got["percept.face"][-1].payload.age_group == "unknown"
+    )  # adult, unknown, adult: not agreed
     run_until(pipe, ex, got, i, 5)
-    assert not got["percept.face"][-1].payload.possible_minor
+    assert got["percept.face"][-1].payload.age_group == "adult"
 
 
 def test_a_retried_minor_counts_at_once(tmp_path):
@@ -359,7 +359,7 @@ def test_no_retry_while_the_robot_thinks_or_speaks(tmp_path):
     seen = run_jobs(pipe, ex, got, start, 4)
     assert ex.jobs == 2
     assert seen[0][1] == 2  # the first face frame back at full rate sends it
-    assert got["percept.face"][-1].payload.possible_minor
+    assert got["percept.face"][-1].payload.age_group == "unknown"
 
 
 def test_report_counts_tracks_that_ended_unknown_and_first_estimates_only(tmp_path):
@@ -422,7 +422,7 @@ def test_forgetting_a_declared_age_retries_the_hidden_unknown(tmp_path):
     reg.forget(person.person_id)
     run_jobs(pipe, ex, got, 2 * ROUND, 4)
     assert ex.jobs == 2 and pipe.stats()["attributes"]["retries"] == 1
-    assert got["percept.face"][-1].payload.possible_minor
+    assert got["percept.face"][-1].payload.age_group == "unknown"
 
 
 def test_forgetting_a_fully_declared_person_runs_the_skipped_job(tmp_path):
@@ -451,7 +451,7 @@ def test_a_confident_minor_is_not_retried(tmp_path):
     _, _, pipe, _, got = rig(tmp_path, lambda i: [face(100)], estimator=est, executor=ex)
     run_jobs(pipe, ex, got, 0, int(4 * RETRY_S / DT))
     assert ex.jobs == 1 and pipe.stats()["attributes"]["retries"] == 0
-    assert got["percept.face"][-1].payload.possible_minor
+    assert got["percept.face"][-1].payload.age_group == "child"
 
 
 def test_a_declared_age_is_not_retried(tmp_path):
@@ -499,7 +499,7 @@ def test_a_failed_job_is_retried_after_the_interval(tmp_path):
     attributes = pipe.stats()["attributes"]
     assert attributes["failed"] == 1 and attributes["retries"] == 1
     last = got["percept.face"][-1].payload
-    assert (last.age_group, last.possible_minor) == ("adult", False)
+    assert last.age_group == "adult"
 
 
 def test_a_failed_job_waits_for_the_conversation_like_any_retry(tmp_path):
@@ -508,7 +508,7 @@ def test_a_failed_job_waits_for_the_conversation_like_any_retry(tmp_path):
     run_jobs(pipe, ex, got, 0, 4)
     pipe.governor.set_scale(CONVERSATION, SCALE)
     run_jobs(pipe, ex, got, 4, 2 * ROUND)
-    assert ex.jobs == 1 and got["percept.face"][-1].payload.possible_minor
+    assert ex.jobs == 1 and got["percept.face"][-1].payload.age_group == "unknown"
     pipe.governor.set_scale(CONVERSATION, 1.0)
     run_jobs(pipe, ex, got, 4 + 2 * ROUND, 4)
     assert ex.jobs == 2

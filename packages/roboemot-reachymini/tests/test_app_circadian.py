@@ -324,9 +324,9 @@ def test_the_default_clock_reads_the_local_hour(data, monkeypatch):  # noqa: F81
     assert not errors
 
 
-def test_the_stretch_follows_the_register_amplitude_and_the_minor_cap(data, fed):  # noqa: F811
-    """Nobody is in view: the fail-closed ``unknown`` register (0.7x) and the minor caps are on,
-    so the 25 degree antenna stretch peaks at 0.7 x 25 degrees."""
+def test_the_stretch_follows_the_register_amplitude(data, fed):  # noqa: F811
+    """Nobody is in view: the one register (1.0x, owner decision 2026-10-23) and no minor cap,
+    so the 25 degree antenna stretch peaks at 25 degrees."""
     app = new_app(app_module.RoboEmotApp)
     stop, thread, errors = start(app)
     try:
@@ -337,7 +337,7 @@ def test_the_stretch_follows_the_register_amplitude_and_the_minor_cap(data, fed)
         assert wait_for(lambda: any(c.source == FX_SOURCE for c in fed))
         assert wait_for(lambda: section(app)["waking"] is False, timeout=10)
         peak = max(c.targets["antenna_right"] for c in fed if c.source == FX_SOURCE)
-        assert peak == pytest.approx(math.radians(25) * 0.7, rel=0.05)
+        assert peak == pytest.approx(math.radians(25), rel=0.05)
     finally:
         stop.set()
         thread.join(15)

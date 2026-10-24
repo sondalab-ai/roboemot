@@ -12,8 +12,8 @@
 
 Yawn and stretch are additive offsets at EXPRESSION priority, from the same keyframe format and
 renderer code as affect expressions. Nothing here bypasses the safety path: offsets are clamped
-to the manifest range about home (inside the minor share while a minor is present), the arbiter
-scales the sum by the minor factor and the limiter rate-limits the result. The pose and primitive
+to the manifest range about home, the arbiter clamps the sum to the range and the limiter
+rate-limits the result. The pose and primitive
 angles are starting points, not verified on hardware.
 """
 
@@ -51,7 +51,6 @@ class CircadianMotion:
         self.dofs = dofs
         self.body_yaw = body_yaw
         self.rng = rng or random.Random()  # noqa: S311 (jitter, not security)
-        self.minor_factor = 1.0
         self._scale_now = 1.0  # the register's motion amplitude now
         self._scale_start = 1.0  # the same when the playing primitive started
         self._amp = 1.0  # amplitude the playing primitive started with
@@ -90,10 +89,6 @@ class CircadianMotion:
     def reset(self) -> None:
         """Stop any yawn or stretch and forget the yawn schedule (the rhythm was switched off)."""
         self._player, self._playing, self._next_yawn = None, "", None
-
-    def set_minor_factor(self, factor: float) -> None:
-        """``safety.minor_motion_factor`` while a minor is present, else 1.0 (SPEC 12)."""
-        self.minor_factor = factor
 
     @property
     def playing(self) -> str:
@@ -160,5 +155,4 @@ class CircadianMotion:
 
     def _clamp(self, name: str, offset: float) -> float:
         dof = self.dofs[name]
-        k = self.minor_factor
-        return max((dof.min - dof.home) * k, min((dof.max - dof.home) * k, offset))
+        return max(dof.min - dof.home, min(dof.max - dof.home, offset))

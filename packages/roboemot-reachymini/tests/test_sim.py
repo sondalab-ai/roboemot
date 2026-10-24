@@ -239,7 +239,7 @@ def test_a_joy_expression_moves_the_antennas_on_the_simulated_robot(loop):
     home = {n: manifest.dofs[n].home for n in ("antenna_right", "antenna_left")}
     _hold(loop, home, 8.0)
     settled = loop.driver.read_state()
-    reg = resolve_register([Person("adult", "declared", {})], cfg.register, cfg.persona)
+    reg = resolve_register([Person({})], cfg.register, cfg.persona)
     renderer = ExpressionRenderer(
         cfg.expression, cfg.expression_map, manifest.dofs, 0.15, body_yaw="body_yaw"
     )
@@ -273,7 +273,7 @@ def test_a_nod_gesture_moves_the_head_pitch_on_the_simulated_robot(loop):
     home = {"head.pitch": manifest.dofs["head.pitch"].home}
     _hold(loop, home, 8.0)
     settled = loop.driver.read_state()
-    reg = resolve_register([Person("adult", "declared", {})], cfg.register, cfg.persona)
+    reg = resolve_register([Person({})], cfg.register, cfg.persona)
     renderer = ExpressionRenderer(
         cfg.expression,
         cfg.expression_map,
@@ -581,16 +581,18 @@ def test_an_unenrolled_face_is_followed_but_never_named(mini, tmp_path, monkeypa
     assert scene.recognized == []
 
 
-def test_an_unknown_age_face_engages_the_minor_caps(mini, tmp_path, monkeypatch):
-    """SPEC 5, 12: no attribute model, so the planted face's age is unknown (a possible minor);
-    the motion loop's minor caps engage."""
+def test_an_unknown_age_face_keeps_the_one_register(mini, tmp_path, monkeypatch):
+    """SPEC 5, 7, 12 (owner decision 2026-10-23): no attribute model, so the planted face's age
+    is unknown; the register is the one the robot uses with everyone and no cap engages."""
     with Scene(mini, tmp_path, monkeypatch, enroll=False, plant=True) as scene:
-        deadline, engaged = time.monotonic() + 30, False
-        while time.monotonic() < deadline and not engaged:
-            motion = scene.app.diagnostics.report()["sections"]["roboemot.motion"]["data"]
-            engaged = motion["minor_present"]
+        tracker = scene.app.register_tracker
+        deadline, seen = time.monotonic() + 30, False
+        while time.monotonic() < deadline and not seen:
+            seen = tracker.active is not None and tracker.active.people > 0
             time.sleep(0.1)
-    assert engaged
+        assert seen and tracker.active.params.approach_allowed
+        motion = scene.app.diagnostics.report()["sections"]["roboemot.motion"]["data"]
+        assert "minor_present" not in motion
 
 
 def test_the_rest_posture_lowers_the_head_and_droops_the_antennas_on_the_simulated_robot(loop):
@@ -620,15 +622,14 @@ def test_the_rest_posture_lowers_the_head_and_droops_the_antennas_on_the_simulat
     assert state["antenna_left"] > settled["antenna_left"] + 0.05
 
 
-def test_the_robot_reacts_distinctly_to_an_adult_a_child_and_a_stranger_without_an_llm(
+def test_the_robot_reacts_to_a_known_person_and_a_stranger_the_same_whatever_the_age(
     mini, tmp_path, monkeypatch
 ):
-    """SPEC 14 (M2 exit, first half), on the simulated robot: the same planted face is a known
-    adult, a known child (declared age) or nobody enrolled, and walks into view of a settled
-    robot. Only ONNX is faked (see ``Scene``); no LLM. See ``exit_support`` for what is
-    measured and ``docs/eval/m2.md`` for the numbers."""
+    """SPEC 14 (M2 exit, first half; owner decision 2026-10-23), on the simulated robot: the same
+    planted face is a known adult, a known child (declared age) or nobody enrolled, and walks
+    into view of a settled robot. Only ONNX is faked (see ``Scene``); no LLM. See
+    ``exit_support`` for what is measured and ``docs/eval/m2.md`` for the numbers."""
     from exit_support import BODY_MAP_YAML, check_exit, format_run, react
-    from roboemot.config.schema import RoboEmotConfig
 
     manifest = load_manifest(DATA / "reachy-mini-wireless.yaml", allow_unmeasured_dynamics=True)
     home = {n: d.home for n, d in manifest.dofs.items()}
@@ -653,13 +654,9 @@ def test_the_robot_reacts_distinctly_to_an_adult_a_child_and_a_stranger_without_
     # the simulated servos overshoot the planted bearing by a few degrees (28.6 against 25 once)
     check_exit(runs["adult"], runs["child"], runs["stranger"], PLANTED_AZ + math.radians(5))
     yaw = {c: max(r.arrival.head_yaw_peak, r.provoked.head_yaw_peak) for c, r in runs.items()}
-    cap = RoboEmotConfig().safety.minor_motion_factor
-    # all three are looked at (attention is not gated by the register); the adult is followed all
-    # the way, while the minor caps scale the child's and the stranger's head to the cap's share
-    assert yaw["adult"] > 0.9 * PLANTED_AZ
-    for case in ("child", "stranger"):
-        assert 0.5 * cap * PLANTED_AZ < yaw[case] <= cap * PLANTED_AZ + math.radians(2), yaw
-        assert yaw[case] < yaw["adult"]
+    # all three are looked at and followed all the way: no cap scales anyone's head
+    for case in runs:
+        assert yaw[case] > 0.9 * PLANTED_AZ, yaw
 
 
 def _watch_tracking_error(lp: MotionLoop) -> dict[str, float]:
@@ -709,7 +706,7 @@ def test_our_own_gestures_and_extreme_motion_never_look_like_external_control(lo
         _hold(loop, extremes, 1.5)
         _hold(loop, opposite, 1.5)
     loop.clear("test")
-    reg = resolve_register([Person("adult", "declared", {})], cfg.register, cfg.persona)
+    reg = resolve_register([Person({})], cfg.register, cfg.persona)
     renderer = ExpressionRenderer(
         cfg.expression, cfg.expression_map, manifest.dofs, 0.15, body_yaw="body_yaw"
     )

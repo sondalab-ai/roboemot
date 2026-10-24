@@ -337,7 +337,7 @@ def test_a_wake_up_sweep_and_a_glance_are_held_like_an_idle_sweep():
     assert q.update(hold_ctx(0.5 + HOLD)) is None
 
 
-# ---- energy and minors
+# ---- energy
 
 
 def test_energy_scales_pace_amplitude_and_interval():
@@ -359,12 +359,6 @@ def test_amplitude_has_a_floor():
     tiny = PersonaEffects(motion_amplitude_x=0.01)
     _, d = first_decision(ScanPolicy(CFG, random.Random(1)), 0.0, effects=tiny)
     assert d.amplitude == CFG.min_amplitude
-
-
-def test_minor_present_slows_the_pace():
-    _, d = first_decision(ScanPolicy(CFG, random.Random(1)), 0.0, minor_factor=0.6)
-    assert d.pace_x == pytest.approx(0.6)
-    assert d.dwell_s == pytest.approx(CFG.dwell_s / 0.6)
 
 
 # ---- runner
@@ -427,19 +421,6 @@ def test_runner_waits_for_the_pose_then_gives_up_on_timeout():
         r.step(t, stuck)
         t += 0.05
     assert r._i == 1  # timed out
-
-
-def test_runner_judges_arrival_against_the_minor_cap():
-    r = SweepRunner(DOFS, CFG)
-    pose = {"head.yaw": 0.0, "body_yaw": 0.0}
-    r.start(0.0, pose, [wp(1.0, 1.0, dwell=0.0)], cap=0.5)
-    t = 0.0
-    while r.active and t < 20.0:
-        cmd = r.step(t, pose)
-        if cmd:
-            pose["head.yaw"] = 0.5 * cmd.targets["head.yaw"]  # the arbiter halves the amplitude
-        t += 0.05
-    assert not r.active and t < 10.0  # arrived, no timeout
 
 
 def test_cancel_stops_at_once():
@@ -587,28 +568,20 @@ def test_controller_stops_when_the_robot_goes_to_rest():
     assert ctrl.tick(ctx(70.0, circadian="resting"), pose, 1.0) is None
 
 
-def test_sweep_stays_inside_the_minor_cap_in_the_motion_core():
-    """With a minor present the arbiter scales the amplitude around home; the sweep follows."""
-    core = MotionCore(
-        DOFS,
-        [],
-        crossfade_s=0.0,
-        watchdog_s=100.0,
-        minor_factor=0.5,
-        watchdog_return_factor=1.0,
-    )
-    core.minor_present = True
+def test_sweep_reaches_its_waypoints_in_the_motion_core():
+    """The arbiter passes the sweep's targets through unscaled: the head reaches the waypoints."""
+    core = MotionCore(DOFS, [], crossfade_s=0.0, watchdog_s=100.0, watchdog_return_factor=1.0)
     ctrl = ScanController(CFG, FakePlanner(), DOFS, random.Random(2))
     t, peak = 0.0, 0.0
     pose = dict(core.limiter.pos)
     while t < 120.0:
-        cmd = ctrl.tick(ctx(t, minor_factor=0.5), pose, 1.0)
+        cmd = ctrl.tick(ctx(t), pose, 1.0)
         if cmd is not None:
             core.feed(cmd)
         pose = core.tick(t, 0.05)
         peak = max(peak, abs(pose["head.yaw"]))
         t += 0.05
-    assert 0.1 < peak <= 0.5 * 0.3 + 1e-9  # waypoints are +-0.3 rad, halved by the cap
+    assert 0.3 - 1e-6 < peak <= 0.3 + 1e-9  # waypoints are +-0.3 rad
 
 
 def test_controller_reset_drops_the_sweep():

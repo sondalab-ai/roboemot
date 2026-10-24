@@ -7,17 +7,17 @@ from roboemot.voice import compose_delivery, parse_mood_tags, resolve_tag, to_op
 CFG = ConfigStack().effective()
 
 
-def deliver(mood, intensity=1.0, register="adult", state="awake", voice=None):
+def deliver(mood, intensity=1.0, register=None, state="awake", voice=None):
     return compose_delivery(
         voice or CFG.voice,
-        register=getattr(CFG.register, register),
+        register=register or CFG.register.params,
         circadian=CFG.circadian.states[state],
         mood=mood,
         intensity=intensity,
     )
 
 
-def test_neutral_adult_awake_is_base():
+def test_neutral_awake_is_base():
     d = deliver(None)
     assert (d.rate, d.pitch_st, d.volume_db) == (1.0, 0.0, 0.0)
 
@@ -33,11 +33,12 @@ def test_mood_scaled_by_intensity_and_expressivity():
 
 
 def test_register_and_circadian_compose_then_clamp():
-    d = deliver("sleepy", register="child", state="resting")
+    raised = CFG.register.params.model_copy(update={"pitch_st": 2.0})
+    d = deliver("sleepy", register=raised, state="resting")
     lim = CFG.voice.limits
     assert lim.rate[0] <= d.rate <= lim.rate[1]
     assert d.volume_db == pytest.approx(max(lim.volume_db[0], -6.0 - 6.0 * CFG.voice.expressivity))
-    assert d.pitch_st == pytest.approx(2.0)  # child register
+    assert d.pitch_st == pytest.approx(2.0)  # the register's pitch
 
 
 def test_fixed_mood_source():
@@ -102,7 +103,7 @@ def test_reachy_neutral_delivery_is_five_semitones_up():
     for add in (-1.0, 0.5):
         e = compose_delivery(
             voice,
-            register=CFG.register.adult,
+            register=CFG.register.params,
             circadian=CFG.circadian.states["awake"],
             mood=None,
             intensity=0.0,
@@ -117,7 +118,7 @@ def test_reachy_delivery_pitch_clamps_at_eight():
 
     d = compose_delivery(
         _reachy_voice(),
-        register=CFG.register.child,
+        register=CFG.register.params.model_copy(update={"pitch_st": 2.0}),
         circadian=CFG.circadian.states["awake"],
         mood=None,
         intensity=0.0,

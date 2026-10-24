@@ -64,9 +64,7 @@ class Rig:
             on_answer=self.handler,
         )
         base = RoboEmotConfig()
-        self.register = resolve_register(
-            [Person("adult", "declared", {})], base.register, base.persona
-        )
+        self.register = resolve_register([Person({})], base.register, base.persona)
         self.state = AffectState(0.0, 0.0, "calm", 0.5, 0)
         self.renderer.update(self.state, self.register, 0.0)  # the first state only sets the label
 

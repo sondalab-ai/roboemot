@@ -54,7 +54,7 @@ def parts(entries=(), target=None, registry=None, **over):
         circ=SimpleNamespace(snapshot=lambda: {"state": "awake", "sleepiness": 0.2}),
         sleep=SimpleNamespace(asleep=False, paused_parts=lambda: []),
         network=SimpleNamespace(online=True),
-        tracker=SimpleNamespace(active=SimpleNamespace(group="adult", params="PRIVATE-PARAMS")),
+        tracker=SimpleNamespace(active=SimpleNamespace(people=1, params="PRIVATE-PARAMS")),
         selector=SimpleNamespace(target=target),
         perception=SimpleNamespace(registry=registry),
         world=SimpleNamespace(entries=list(entries)),
@@ -67,9 +67,7 @@ def parts(entries=(), target=None, registry=None, **over):
 
 
 def live(p=None, config=None, host=None, **kw):
-    host = host or SimpleNamespace(
-        circadian=object(), minor_present=False, phase=ConversationPhase()
-    )
+    host = host or SimpleNamespace(circadian=object(), phase=ConversationPhase())
     return LiveState(
         host, p or parts(), config or cfg(), clock=lambda: NOW, temperature=lambda: None, **kw
     )
@@ -114,8 +112,8 @@ def test_the_payload_shape():
         "circadian": {"state": "awake", "sleepiness": 0.2},
     }  # fmt: skip
     assert s["modes"] == {
-        "asleep": False, "paused": [], "online": True, "minor_present": False,
-        "register": "adult", "persona": "default",
+        "asleep": False, "paused": [], "online": True,
+        "people": 1, "persona": "default",
     }  # fmt: skip
     assert s["conversation"] == {"phase": "idle", "route": None, "elapsed_s": None}
     assert s["attention"] == {"count": 0, "faces": []}
@@ -126,7 +124,7 @@ def test_the_payload_shape():
 
 
 def test_modes_follow_the_parts():
-    host = SimpleNamespace(circadian=None, minor_present=True, phase=ConversationPhase())
+    host = SimpleNamespace(circadian=None, phase=ConversationPhase())
     p = parts(
         sleep=SimpleNamespace(asleep=True, paused_parts=lambda: ["vision", "listener"]),
         network=SimpleNamespace(online=False),
@@ -135,14 +133,14 @@ def test_modes_follow_the_parts():
     )
     s = live(p, host=host).state()
     assert s["modes"] == {
-        "asleep": True, "paused": ["vision", "listener"], "online": False, "minor_present": True,
-        "register": None, "persona": "default",
+        "asleep": True, "paused": ["vision", "listener"], "online": False,
+        "people": 0, "persona": "default",
     }  # fmt: skip
     assert s["mood"]["circadian"] is None and s["reflexes"] == {"last": None}
 
 
 def test_the_conversation_card_is_the_phase():
-    host = SimpleNamespace(circadian=None, minor_present=False, phase=ConversationPhase())
+    host = SimpleNamespace(circadian=None, phase=ConversationPhase())
     host.phase.begin_thinking()
     host.phase.set_route("lan")
     c = live(host=host).state()["conversation"]
@@ -219,7 +217,7 @@ def test_the_temperature_is_read_once_per_cache_window():
         return 61.234
 
     state = LiveState(
-        SimpleNamespace(circadian=None, minor_present=False, phase=ConversationPhase()),
+        SimpleNamespace(circadian=None, phase=ConversationPhase()),
         parts(),
         cfg(system_cache_s=5.0),
         clock=lambda: clock[0],

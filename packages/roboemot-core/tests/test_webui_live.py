@@ -39,7 +39,7 @@ def pipeline():
         circ=SimpleNamespace(snapshot=lambda: {"state": "awake", "sleepiness": 0.1}),
         sleep=SimpleNamespace(asleep=False, paused_parts=lambda: []),
         network=SimpleNamespace(online=True),
-        tracker=SimpleNamespace(active=SimpleNamespace(group="adult")),
+        tracker=SimpleNamespace(active=SimpleNamespace(people=1)),
         selector=SimpleNamespace(target=SimpleNamespace(entry_id="entry-5")),
         perception=SimpleNamespace(registry=SimpleNamespace(get_person=people.__getitem__)),
         world=SimpleNamespace(entries=[face]),
@@ -56,7 +56,7 @@ def stack(tmp_path):
 
 @pytest.fixture
 def served(tmp_path, stack):
-    host = SimpleNamespace(circadian=object(), minor_present=False, phase=ConversationPhase())
+    host = SimpleNamespace(circadian=object(), phase=ConversationPhase())
     live = LiveState(host, pipeline(), stack.effective(), clock=lambda: NOW)
     stack.subscribe(live.apply_config)
     editor = SettingsEditor(stack, store=tmp_path / "webui_settings.json")
@@ -221,7 +221,6 @@ def test_start_webui_keeps_its_live_port_in_step_with_the_stack(tmp_path, stack)
         name_source=None,
         route_check_router=lambda: None,
         circadian=None,
-        minor_present=False,
         phase=ConversationPhase(),
         webui=None,
         bus=None,
@@ -250,7 +249,7 @@ def test_a_failed_start_leaves_no_listener_behind(tmp_path, stack, monkeypatch):
     host = SimpleNamespace(
         perception=SimpleNamespace(enrollment=None), diagnostics=None, catalogue=None,
         name_source=None, route_check_router=lambda: None, circadian=None,
-        minor_present=False, phase=ConversationPhase(), webui=None,
+        phase=ConversationPhase(), webui=None,
     )  # fmt: skip
     manifest = SimpleNamespace(robot=SimpleNamespace(profile=None, id="x"))
     with ExitStack() as cleanup:
@@ -326,7 +325,6 @@ def test_start_webui_drops_the_preview_when_the_robot_falls_asleep_and_at_shutdo
         name_source=None,
         route_check_router=lambda: None,
         circadian=None,
-        minor_present=False,
         phase=ConversationPhase(),
         webui=None,
         bus=bus,

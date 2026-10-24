@@ -799,7 +799,7 @@ class WebApi:
         return Response(HTTPStatus.OK, {"fields": fields, "robot": robot, "pin_required": True})
 
     def _settings_reveal(self, req: Request) -> Response:
-        """The private fields (minors, privacy, location) with their real values. Admin only: the
+        """The private fields (privacy, location) with their real values. Admin only: the
         PIN is re-entered under the login limits, so it is a POST (every response is no-store).
         Secrets stay redacted."""
         port = self._settings_port()

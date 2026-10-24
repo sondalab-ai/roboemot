@@ -1,4 +1,4 @@
-"""SPEC 8, stage 7 / 13: SpeechOutput (queue, persona effects, stop latency, privacy, minors)."""
+"""SPEC 8, stage 7 / 13: SpeechOutput (queue, persona effects, stop latency, privacy)."""
 
 from __future__ import annotations
 
@@ -48,16 +48,15 @@ class FakeBackend:
 
     def __init__(self, pieces=1, delay=0.0, fail=False) -> None:
         self.pieces, self.delay, self.fail = pieces, delay, fail
-        self.deliveries, self.minors, self.cancelled = [], [], threading.Event()
+        self.deliveries, self.cancelled = [], threading.Event()
         self.texts: list[str] = []
         self.started = threading.Event()
 
-    def available(self, *, minor_present=False):
+    def available(self):
         return True
 
-    async def synthesize(self, text, delivery, *, language, voice, minor_present=False):
+    async def synthesize(self, text, delivery, *, language, voice):
         self.deliveries.append(delivery)
-        self.minors.append(minor_present)
         self.texts.append(text)
         self.started.set()
         if self.fail:
@@ -89,14 +88,12 @@ class HoldingBackend(FakeBackend):
 
     HOLD_S = 30.0
 
-    async def synthesize(self, text, delivery, *, language, voice, minor_present=False):
+    async def synthesize(self, text, delivery, *, language, voice):
         if self.texts:
             self.texts.append(text)
             await asyncio.sleep(self.HOLD_S)
             return
-        async for chunk in super().synthesize(
-            text, delivery, language=language, voice=voice, minor_present=minor_present
-        ):
+        async for chunk in super().synthesize(text, delivery, language=language, voice=voice):
             yield chunk
 
 
@@ -220,104 +217,8 @@ def test_bus_and_logs_carry_no_text(make, caplog):
     assert "riservata" not in repr(out.snapshot())
 
 
-def test_minor_appearing_after_enqueue_blocks_the_remote_route(make):
-    """The minors flag is read when synthesis starts, not when the sentence was queued."""
-    server = SpeechServer()
-    remote, _ = openai_backend(server)
-    local = FakeBackend()
-    local.name = "piper"
-    minor = {"present": False}
-    gate = threading.Event()
-
-    sink = FakeSink()
-    out = make(FallbackTTS(remote, local), sink=sink, minor_present=lambda: minor["present"])
-    # first sentence keeps the loop busy while the minor walks in
-    original = out.backend.synthesize
-
-    async def gated(*a, **k):
-        gate.wait(2)
-        async for c in original(*a, **k):
-            yield c
-
-    out.backend.synthesize = gated
-    say(out)  # queued while no minor is present
-    minor["present"] = True
-    gate.set()
-    assert wait_for(lambda: sink.stopped_at)
-    assert server.requests == [] and local.minors == []  # no route was contacted
-    assert out.sentences_spoken == 0 and sink.pushed == []
-
-
-@pytest.mark.parametrize(
-    ("written_for_minor", "minor_now"),
-    [(True, True), (True, False)],
-    ids=["minor_present", "written_for_a_minor_who_left"],
-)
-def test_a_minors_sentence_is_spoken_by_piper_never_the_cloud_voice(
-    make, written_for_minor, minor_now
-):
-    """Owner decision 2026-10-22 (SPEC 8 TTS, 12 Data): while a minor is present, or for a
-    sentence written for one, the cloud speech voice is never asked; Piper speaks."""
-    server = SpeechServer()
-    remote, _ = openai_backend(server)
-    local = FakeBackend()
-    local.name = "piper"
-    out = make(FallbackTTS(remote, local), minor_present=lambda: minor_now)
-    say(out, minor=written_for_minor)
-    assert wait_for(lambda: out.sentences_spoken == 1)
-    assert server.requests == [] and local.minors == [True]
-
-
-def test_an_adults_sentence_uses_the_cloud_voice_when_configured(make):
-    server = SpeechServer()
-    remote, _ = openai_backend(server)
-    local = FakeBackend()
-    local.name = "piper"
-    out = make(FallbackTTS(remote, local), minor_present=lambda: False)
-    say(out)
-    assert wait_for(lambda: out.sentences_spoken == 1)
-    assert len(server.requests) == 1 and local.texts == []
-
-
-def test_queued_sentences_are_dropped_when_a_minor_appears_after_the_stream_ended(make):
-    minor = {"present": False}
-    sink, backend = FakeSink(), FakeBackend(pieces=3, delay=0.05)
-    out = make(backend, sink=sink, minor_present=lambda: minor["present"])
-    u = out.new_utterance()
-    for text in ("Uno.", "Due.", "Tre."):
-        say(out, text, utterance=u)
-    assert wait_for(lambda: sink.pushed)  # the first sentence is playing, 2 and 3 are queued
-    minor["present"] = True
-    assert wait_for(lambda: sink.stopped_at)
-    time.sleep(0.4)
-    assert out.sentences_spoken == 0 and backend.texts == ["Uno."]
-    assert out.snapshot()["queued"] == 0
-
-
-def test_a_minor_appearing_during_a_stall_cuts_the_sentence_in_flight(make):
-    minor = {"present": False}
-    gate = threading.Event()
-    sink, backend = FakeSink(), FakeBackend(pieces=5, delay=0.02)
-    out = make(backend, sink=sink, minor_present=lambda: minor["present"])
-    original = backend.synthesize
-
-    async def stalled(*a, **k):
-        async for chunk in original(*a, **k):
-            yield chunk
-            while not gate.is_set() and len(sink.pushed) == 1:
-                await asyncio.sleep(0.01)  # the LLM side is stalled, the sentence is held
-
-    backend.synthesize = stalled
-    say(out, "Uno due tre.")
-    assert wait_for(lambda: len(sink.pushed) == 1)
-    minor["present"] = True
-    gate.set()
-    assert wait_for(lambda: sink.stopped_at)
-    time.sleep(0.2)
-    assert len(sink.pushed) == 1 and out.sentences_spoken == 0
-
-
-def test_adult_sentence_uses_the_remote_route(make):
+def test_every_sentence_may_use_the_remote_route(make):
+    """Owner decision 2026-10-23: no possible-minor rule keeps a sentence on Piper."""
     server = SpeechServer()
     remote, _ = openai_backend(server)
     out = make(FallbackTTS(remote, FakeBackend()))
@@ -414,20 +315,6 @@ def test_no_chunk_is_pushed_after_stop_returns(make):
     assert sink.stopped_at and sink.stopped_at[0] >= max(sink.pushed_at)
 
 
-def test_a_failing_minor_signal_fails_closed(make):
-    backend = FakeBackend()
-
-    def broken():
-        raise RuntimeError("no signal")
-
-    out = make(backend, minor_present=broken)
-    say(out, minor=True)
-    assert wait_for(lambda: backend.minors == [True])
-    say(out)  # written for adults, and the signal cannot be read: not spoken
-    time.sleep(0.2)
-    assert out.sentences_spoken == 1
-
-
 def test_a_failing_warm_up_does_not_kill_the_output(make):
     class Cold(FakeBackend):
         async def warm(self, language, voice):
@@ -485,11 +372,9 @@ def test_a_sentence_whose_first_push_lost_the_race_with_a_stop_never_counts_as_p
     holder = {}
 
     class Racing(FakeBackend):
-        async def synthesize(self, text, delivery, *, language, voice, minor_present=False):
+        async def synthesize(self, text, delivery, *, language, voice):
             holder["out"].stop()  # a barge-in lands after the sentence started, before its push
-            async for chunk in super().synthesize(
-                text, delivery, language=language, voice=voice, minor_present=minor_present
-            ):
+            async for chunk in super().synthesize(text, delivery, language=language, voice=voice):
                 yield chunk
 
     sink = TimelineSink()
@@ -510,39 +395,6 @@ def test_ended_at_follows_the_sinks_timeline_and_a_stop_cuts_it(make):
     out.stop()
     assert out.ended_at(job) <= time.monotonic()
     assert out.ended_at(9999) is None
-
-
-def test_idle_only_once_nothing_is_queued_in_synthesis_or_still_playing(make):
-    out = make(HoldingBackend())
-    assert out.idle() is True  # nothing said yet
-    first, second = say(out, "Uno."), say(out, "Due.")
-    assert wait_for(lambda: out.played(first) and len(out.backend.texts) == 2)
-    assert out.idle() is False  # the second sentence is still in synthesis
-    out.stop()
-    assert wait_for(out.idle)  # a stop drops it: it never plays, and the output is idle
-    assert out.played(second) is False
-
-
-def test_idle_waits_for_the_audio_already_pushed_to_play(make):
-    sink = TimelineSink()
-    out = make(FakeBackend(pieces=5), sink=sink)  # 0.5 s of audio
-    say(out, "Uno.")
-    assert wait_for(lambda: out.sentences_spoken == 1)
-    assert out.idle() is False  # pushed, still playing on the speaker
-    assert wait_for(out.idle, timeout=2.0)
-
-
-def test_idle_with_a_sink_that_reports_an_infinite_end(make):
-    until = math.inf  # -inf and NaN were idle before the guard
-
-    class Unopened(FakeSink):
-        def playing_until(self):
-            return until
-
-    out = make(sink=Unopened())
-    say(out, "Uno.")
-    assert wait_for(lambda: out.sentences_spoken == 1)
-    assert wait_for(out.idle)
 
 
 @pytest.mark.parametrize(
@@ -643,7 +495,7 @@ class ClockedBackend(FakeBackend):
         super().__init__()
         self.clock, self.synth_s = clock, list(synth_s)
 
-    async def synthesize(self, text, delivery, *, language, voice, minor_present=False):
+    async def synthesize(self, text, delivery, *, language, voice):
         for took in self.synth_s.pop(0):
             self.clock.now += took
             yield AudioChunk(np.ones(RATE // 10, np.float32), RATE)
@@ -733,11 +585,9 @@ def test_a_push_refused_after_a_stop_counts_no_underrun(make):
     holder = {}
 
     class Stopping(ClockedBackend):
-        async def synthesize(self, text, delivery, *, language, voice, minor_present=False):
+        async def synthesize(self, text, delivery, *, language, voice):
             n = 0
-            async for chunk in super().synthesize(
-                text, delivery, language=language, voice=voice, minor_present=minor_present
-            ):
+            async for chunk in super().synthesize(text, delivery, language=language, voice=voice):
                 if n == 1:
                     holder["out"].stop()  # barge-in after the sink ran dry
                 n += 1
@@ -826,10 +676,8 @@ def test_a_failing_sentence_still_ends_the_stream_but_a_stopped_one_does_not(mak
     sink = StreamSink(clock)
 
     class FailsMidway(ClockedBackend):
-        async def synthesize(self, text, delivery, *, language, voice, minor_present=False):
-            async for chunk in super().synthesize(
-                text, delivery, language=language, voice=voice, minor_present=minor_present
-            ):
+        async def synthesize(self, text, delivery, *, language, voice):
+            async for chunk in super().synthesize(text, delivery, language=language, voice=voice):
                 yield chunk
             raise TTSError("boom")
 
@@ -840,10 +688,8 @@ def test_a_failing_sentence_still_ends_the_stream_but_a_stopped_one_does_not(mak
     holder = {}
 
     class Stopping(ClockedBackend):
-        async def synthesize(self, text, delivery, *, language, voice, minor_present=False):
-            async for chunk in super().synthesize(
-                text, delivery, language=language, voice=voice, minor_present=minor_present
-            ):
+        async def synthesize(self, text, delivery, *, language, voice):
+            async for chunk in super().synthesize(text, delivery, language=language, voice=voice):
                 yield chunk
                 holder["out"].stop()
 

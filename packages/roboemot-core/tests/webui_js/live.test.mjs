@@ -12,7 +12,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const STATE = {
   poll_ms: POLL_MS,
   mood: { label: "joy", valence: 0.25, arousal: -0.1, intensity: 0.4, circadian: { state: "awake", sleepiness: 0.2 } },
-  modes: { asleep: false, paused: [], online: true, minor_present: false, register: "adult", persona: "default" },
+  modes: { asleep: false, paused: [], online: true, people: 1, persona: "default" },
   conversation: { phase: "thinking", route: "lan", elapsed_s: 1.234 },
   attention: { count: 2, faces: [{ name: "Mia", target: true }, { name: null, target: false }] },
   reflexes: { last: { name: "startle", age_s: 2.5 } },
@@ -67,7 +67,7 @@ test("the Live tab sits next to the others and draws one card per group", async 
   const grid = page.document.querySelector("#live-cards");
   assert.equal(grid.children.length, 8);
   const text = grid.textContent;
-  for (const expected of ["joy", "0.25", "lan", "Mia", "startle", "writing", "51.2", "adult"]) {
+  for (const expected of ["joy", "0.25", "lan", "Mia", "startle", "writing", "51.2"]) {
     assert.ok(text.includes(expected) || text.toLowerCase().includes(expected), expected);
   }
   assert.equal(page.document.querySelector("#notice").hidden, true);

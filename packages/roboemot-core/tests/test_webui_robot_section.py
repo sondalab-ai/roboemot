@@ -443,7 +443,7 @@ def test_protected_and_admin_claims_are_refused(tmp_path, caplog, claim):
 
 
 def test_a_parent_of_private_rows_is_refused(tmp_path):
-    ed, _ = editor(tmp_path, [ep(FakePlugin(claims=("circadian", "register")))])
+    ed, _ = editor(tmp_path, [ep(FakePlugin(claims=("circadian", "privacy")))])
     fields = ed.fields()
     assert ed.robot_split(fields)[0] == fields
 

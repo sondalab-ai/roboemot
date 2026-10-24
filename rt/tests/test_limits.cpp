@@ -36,7 +36,8 @@ static void velocity_acceleration_no_overshoot() {
 }
 
 static void factor_drop_mid_motion_stays_in_limits() {
-  // Review finding 2: a minor appears while the joint rushes toward its limit.
+  // Review finding 2: the speed factor drops (the watchdog engages) while the joint rushes
+  // toward its limit.
   Dof d{"j", -1.0, 1.0, 2.0, 4.0, 0.0};
   Limiter lim({d}, {});
   const double dt = 0.01;

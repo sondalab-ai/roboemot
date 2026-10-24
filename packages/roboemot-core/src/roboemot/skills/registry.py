@@ -2,8 +2,8 @@
 
 ``@skill`` marks a function as a skill and derives its parameters from the type hints
 (:mod:`roboemot.skills.schema`). A skill the model may call has ``llm_visible=True``; the
-registry offers it as an OpenAI ``tool`` only when it is also in ``conversation.llm_skills`` and,
-while a minor is present, ``allowed_with_minor``. Skills never take joints: what they do goes
+registry offers it as an OpenAI ``tool`` only when it is also in ``conversation.llm_skills``.
+Skills never take joints: what they do goes
 through the same paths as everything else (the expression renderer, the attention selector, the
 affect engine's budgeted impulse, the registry's confirmed preferences).
 
@@ -31,13 +31,12 @@ Choices = Mapping[str, Callable[[], Sequence[Any]]]
 
 @dataclass
 class SkillContext:
-    """What a skill may know about the call: who is talking, in which language, whether a
-    minor is present, and the few actions a skill needs from the conversation. The actions are
-    injected by the worker (so skills stay testable and robot-agnostic)."""
+    """What a skill may know about the call: who is talking, in which language, and the few
+    actions a skill needs from the conversation. The actions are injected by the worker (so
+    skills stay testable and robot-agnostic)."""
 
     speaker: str | None
     language: str
-    minor: bool
     now: float
     stop_speech: Callable[[], None] = lambda: None
     ask_confirmation: Callable[[str, str], str] = lambda key, value: "unavailable"
@@ -59,7 +58,6 @@ class Skill:
     description: str
     llm_visible: bool
     confirm: bool
-    allowed_with_minor: bool
     signature: Signature
     choices: Choices = field(default_factory=dict)
     inline: bool = False
@@ -94,7 +92,6 @@ def skill(
     llm_visible: bool = False,
     description: str = "",
     confirm: bool = False,
-    allowed_with_minor: bool = True,
     choices: Choices | None = None,
     inline: bool = False,
     describe: Callable[[], str] | None = None,
@@ -120,7 +117,6 @@ def skill(
             text,
             llm_visible,
             confirm,
-            allowed_with_minor,
             sig,
             dict(choices or {}),
             inline,
@@ -167,15 +163,14 @@ class SkillRegistry:
             [p.name for s in self._skills.values() for p in s.params] + list(RESULT_KEYS)
         )
 
-    def offered(self, allow: Collection[str], *, minor: bool) -> list[Skill]:
-        """The skills the model may call now: visible, listed in ``allow``, and allowed with a
-        minor present when there is one. Call it for every request."""
+    def offered(self, allow: Collection[str]) -> list[Skill]:
+        """The skills the model may call now: visible and listed in ``allow``. Call it for every
+        request."""
         return [
             s
             for s in self._skills.values()
             if s.llm_visible
             and s.name in allow
-            and (s.allowed_with_minor or not minor)
             and all(s.resolved_choices().values())  # a parameter with nothing to choose from
         ]
 

@@ -52,9 +52,14 @@ KEYED_LISTS = {"appraisal.rules": "event", "llm_routes": "name"}
 AUDIT_FILE_MODE = 0o600
 APP_FILE_MODE = 0o600  # app.yaml: owner only, it may hold a literal api_key (SPEC 12)
 _MOVED = yaml.safe_load(Path(__file__).with_name("moved_settings.yaml").read_text())
-RENAMED_SETTINGS: dict[str, str] = _MOVED["renamed"]  # old path -> new path
+RENAMED_SETTINGS: dict[str, str] = _MOVED["renamed"]  # old path -> new path (web UI file only)
+MIGRATED_SETTINGS: dict[str, str] = _MOVED["migrated"]  # old path -> new path (everywhere)
 REMOVED_SETTINGS: dict[str, str] = _MOVED["removed"]  # old path (or prefix) -> what replaces it
 DROPPED_SETTINGS: dict[str, str] = _MOVED["dropped"]  # old path (``*``: any entry) -> why
+# keyed list path -> {identity of an entry that no longer exists: why}
+DROPPED_ENTRIES: dict[str, dict[str, str]] = _MOVED["dropped_entries"]
+# keyed list path -> {a ``when`` key no event payload carries any more: why}
+DROPPED_WHEN: dict[str, dict[str, str]] = _MOVED["dropped_when"]
 DROP = object()  # ``without_dropped``: the value is a dropped setting as a whole
 _dropped_logged: set[tuple[str, str]] = set()  # (source, path) pairs already logged
 NO_KEY = ("", "none")  # api_key values that carry no key
@@ -441,14 +446,63 @@ def load_yaml(path: Path) -> dict:
         raise ConfigError(f"{path}: top level must be a mapping")
     data, found = without_dropped("", data)
     log_dropped(str(path), found)
+    for old, moved in migrate_paths(data):
+        log_migrated(str(path), old, moved=moved)
     return data
+
+
+def migrate_paths(data: dict[str, Any]) -> list[tuple[str, bool]]:
+    """Move, in place, every ``MIGRATED_SETTINGS`` path found in the nested ``data`` to its new
+    path and drop the sections it leaves empty. A value already at the new path wins: the old
+    one is then dropped. Returns ``(old path, moved)`` for each old path found."""
+    found: list[tuple[str, bool]] = []
+    for old, new in MIGRATED_SETTINGS.items():
+        *parents, leaf = old.split(".")
+        node: Any = data
+        for part in parents:
+            node = node.get(part) if isinstance(node, dict) else None
+        if not isinstance(node, dict) or leaf not in node:
+            continue
+        value = node.pop(leaf)
+        try:
+            get_path(data, new)
+            found.append((old, False))
+        except (KeyError, AttributeError, IndexError, TypeError):
+            set_path(data, new, value)
+            found.append((old, True))
+        _prune(data, parents)
+    return found
+
+
+def _prune(data: dict[str, Any], parents: list[str]) -> None:
+    """Remove the empty mappings along ``parents``, deepest first."""
+    for depth in range(len(parents), 0, -1):
+        node: Any = data
+        for part in parents[: depth - 1]:
+            node = node.get(part) if isinstance(node, dict) else None
+        key = parents[depth - 1]
+        if isinstance(node, dict) and node.get(key) == {}:
+            del node[key]
+
+
+def log_migrated(source: str, path: str, *, moved: bool) -> None:
+    """One warning per ``source`` and migrated ``path``, naming the paths and never the value:
+    moved to its new path, or ignored because a value was already set there."""
+    if (source, path) not in _dropped_logged:
+        _dropped_logged.add((source, path))
+        new = MIGRATED_SETTINGS[path]
+        if moved:
+            log.warning("%s: setting %s moved to %s", source, path, new)
+        else:
+            log.warning("%s: setting %s ignored: %s already set", source, path, new)
 
 
 def without_dropped(path: str, value: Any) -> tuple[Any, list[str]]:
     """``value`` stored at ``path`` (``""`` for a whole file) without the dropped settings it
     holds (``DROPPED_SETTINGS``), removed in place, and their paths as found. ``DROP`` when
     ``path`` is itself a dropped setting or lies under one; a ``*`` in ``path`` stands for any
-    list entry (the identity of a web UI file key)."""
+    list entry (the identity of a web UI file key). Entries of a keyed list whose identity is in
+    ``DROPPED_ENTRIES`` are removed too, found as ``list[identity]``."""
     here = [p for p in path.split(".") if p]
     found: list[str] = []
     for pattern in DROPPED_SETTINGS:
@@ -458,7 +512,37 @@ def without_dropped(path: str, value: Any) -> tuple[Any, list[str]]:
         if len(here) >= len(parts):
             return DROP, [path]
         _strip(value, parts[len(here) :], here, found)
+    for list_path in sorted(DROPPED_ENTRIES.keys() | DROPPED_WHEN.keys()):
+        parts = list_path.split(".")
+        if here == parts[: len(here)]:
+            _strip_entries(value, parts[len(here) :], list_path, found)
     return value, found
+
+
+def dropped_entry(list_path: str, ident: dict[str, Any]) -> bool:
+    """Whether the keyed-list entry ``ident`` of ``list_path`` no longer exists: its identity is
+    in ``DROPPED_ENTRIES``, or its ``when`` names a key in ``DROPPED_WHEN`` (a rule that could
+    never match again)."""
+    if list_path not in KEYED_LISTS:
+        return False
+    when = ident.get("when")
+    gone = DROPPED_WHEN.get(list_path, {})
+    return ident.get(KEYED_LISTS[list_path]) in DROPPED_ENTRIES.get(list_path, {}) or (
+        isinstance(when, dict) and any(k in gone for k in when)
+    )
+
+
+def _strip_entries(node: Any, parts: list[str], list_path: str, found: list[str]) -> None:
+    """Delete, in place, the entries of the keyed list ``parts`` names under ``node`` that
+    ``dropped_entry`` matches, appending ``list_path[identity]`` for each to ``found``."""
+    for part in parts:
+        node = node.get(part) if isinstance(node, dict) else None
+    if not isinstance(node, list):
+        return
+    key = KEYED_LISTS[list_path]
+    gone = [e for e in node if isinstance(e, dict) and dropped_entry(list_path, e)]
+    node[:] = [e for e in node if not any(e is g for g in gone)]
+    found += [f"{list_path}[{e[key]}]" for e in gone]
 
 
 def _strip(node: Any, parts: list[str], trail: list[str], found: list[str]) -> None:
@@ -472,7 +556,10 @@ def _strip(node: Any, parts: list[str], trail: list[str], found: list[str]) -> N
         items = [(head, node[head])] if isinstance(node, dict) and head in node else []
     for key, child in items:
         if rest:
+            before = len(found)
             _strip(child, rest, [*trail, str(key)], found)
+            if len(found) > before and child == {} and isinstance(node, dict):
+                del node[key]  # a section that held only dropped settings goes with them
         elif isinstance(node, dict):
             del node[key]
             found.append(".".join([*trail, str(key)]))
@@ -560,24 +647,6 @@ def guarded_leaves(cfg: RoboEmotConfig) -> dict[str, tuple[Any, dict[str, Any]]]
 
 
 NEW_RULE_REFUSED = "reflexes.rules."
-
-
-def _filter_keys(entries: Any) -> set[tuple[str, bool]]:
-    """Entries of an output-filter list as (normalised text, is prefix), the forms the matcher
-    compares, so an accent, case or invisible-character swap is a different entry."""
-    from ..conversation.output_filter import PREFIX, clean  # lazy: conversation imports config
-    from ..voice.keywords import normalise
-
-    keys = set()
-    for entry in entries if isinstance(entries, list) else []:
-        text = clean(str(entry)).strip()
-        keys.add((normalise(text.rstrip(PREFIX + " ")), text.endswith(PREFIX)))
-    return keys
-
-
-def keeps_every_entry(candidate: Any, approved: Any) -> bool:
-    """``superset`` direction: the candidate list has every approved entry (normalised)."""
-    return _filter_keys(approved) <= _filter_keys(candidate)
 
 
 def _name_chars_ceiling() -> int:
@@ -711,7 +780,6 @@ def violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Viol
             "higher": lambda v, r: v >= r,
             "false": lambda v, r: (not v) or v == r,
             "true": lambda v, r: bool(v) or v == r,
-            "superset": keeps_every_entry,
             None: lambda v, r: True,
         }[direction](value, ref)
         if meta.get("admin_only") and value != ref:
@@ -726,8 +794,6 @@ def violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Viol
     for path, (ref, meta) in base.items():  # an admin-only entry (a language's list) removed
         if meta.get("admin_only") and path not in cand and not path.startswith(NEW_RULE_REFUSED):
             found.append(Violation("admin", path, ref, None))
-        if meta.get("conservative") == "superset" and path not in cand:
-            found.append(Violation("safety", path, ref, None))  # a whole list removed
     return (
         found
         + reflex_violations(approved, candidate)
@@ -1639,7 +1705,7 @@ class ConfigStack:
 
     def _sanitize_person(self, person: dict) -> dict:
         """Per-person overrides may shape register, voice, conversation and persona traits only
-        (never the persona prompt), and never a guarded (safety / minors / privacy) value;
+        (never the persona prompt), and never a guarded (safety / privacy) value;
         anything else is dropped and audited."""
         clean: dict = {}
         dropped: list[str] = []

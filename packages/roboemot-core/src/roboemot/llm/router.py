@@ -2,10 +2,9 @@
 
 Uses only the common subset of Chat Completions: messages with system/user/assistant/tool
 roles, ``stream=True``, ``tools`` with ``tool_choice="auto"``, ``max_tokens``. Routes are tried
-in order; a route is skipped when its daily token budget is spent (never because a minor is
-present: SPEC 8, owner decision 2026-10-22), and abandoned for the next one on error or when
-the first token arrives later than ``first_token_timeout_s``, as long as nothing was yielded
-yet.
+in order; a route is skipped when its daily token budget is spent, and abandoned for the next
+one on error or when the first token arrives later than ``first_token_timeout_s``, as long as
+nothing was yielded yet.
 
 With a :class:`~roboemot.health.network.NetworkMonitor` (SPEC 12A), routes known to be
 unreachable are skipped without waiting for their timeouts, every request reports whether its
@@ -104,8 +103,8 @@ class FirstToken:
 
 @dataclass
 class ActiveRoute:
-    """The route a ``stream`` call is on, set before its first event. A caller that must cut
-    the answer when the situation changes (a minor appears mid-answer, SPEC 8) reads it."""
+    """The route a ``stream`` call is on, set before its first event (the conversation phase
+    reads it to show which route is answering)."""
 
     route: LLMRoute | None = None
 

@@ -55,7 +55,6 @@ def served(tmp_path, stack):
     faces = SimpleNamespace(face_overlay=lambda: [], matcher=SimpleNamespace(registry=None))
     host = SimpleNamespace(
         circadian=None,
-        minor_present=False,
         phase=ConversationPhase(),
         perception=SimpleNamespace(service=service, pipeline=faces),
     )

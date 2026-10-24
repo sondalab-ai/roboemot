@@ -186,7 +186,7 @@ def test_estimator_failure_leaves_the_track_unknown_and_frees_the_slot(tmp_path,
     run(pipe, 30)
     assert pipe.worker.pending == 0
     last = got["percept.face"][-1].payload
-    assert last.age_group == "unknown" and last.possible_minor
+    assert last.age_group == "unknown"
     assert SECRET not in caplog.text and "array(" not in caplog.text
 
 
