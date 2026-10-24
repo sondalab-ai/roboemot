@@ -1,9 +1,9 @@
 """Speaker profile and scene summaries for the system prompt (SPEC 8, Conversation state; 12).
 
 Plain text only: a registered speaker's display name and the preferences they confirmed, and the
-entities the robot sees, by attention priority. No embeddings, ids, ages, genders or images. A
-person is named only when the registry knows them, otherwise they are "a person": age and gender
-estimates are never offered to the LLM as facts (SPEC 12), so there is no "a child" here either.
+entities the robot sees, by attention priority. No embeddings, ids or images, and no age or
+gender (none is estimated or declared). A person is named only when the registry knows them,
+otherwise they are "a person".
 """
 
 from __future__ import annotations

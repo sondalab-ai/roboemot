@@ -93,7 +93,6 @@ BEHAVIOUR_MODULES = [
     "registry/records.py",
     "registry/store.py",
     "registry/matcher.py",
-    "registry/estimates.py",
     "registry/enrollment.py",
     "registry/xmp.py",
     "registry/images.py",

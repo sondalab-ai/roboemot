@@ -175,7 +175,7 @@ def test_app_with_fake_stages_names_an_enrolled_person_and_reports(data, tmp_pat
     reg = Registry(FileStore(tmp_path / "roboemot-data" / "registry", allow_plaintext=True),
                    RoboEmotConfig().identity)  # fmt: skip
     person = reg.enroll("Ada", [PLANTED * (1 + 0.01 * i) for i in range(5)], MODEL,
-                        consent=CONSENT, age_group="adult")  # fmt: skip
+                        consent=CONSENT)  # fmt: skip
     app = new_app(AppWithFakes)
     stop, thread, errors = start(app)
     try:

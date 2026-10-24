@@ -7,8 +7,6 @@ DEFAULT_LANGUAGE = "en"
 EN: dict[str, str] = {
     "no_pin": "No operator PIN is set. Set the PIN with the installer or the CLI.",
     "err_busy": "Busy checking another PIN. Try again in a moment.",
-    "err_consent_who_guardian": "For a minor, the person consenting is the parent or guardian.",
-    "err_guardian_is_subject": "The guardian cannot be the person being enrolled.",
     "err_bad_host": "Host not accepted.",
     "title": "RoboEmot",
     "dialog_cancel": "Cancel",
@@ -370,29 +368,17 @@ EN: dict[str, str] = {
     "hint_turn_head": "Turn your head slightly left and right",
     "display_name": "Display name",
     "consent_who": "Name of the person who consents",
-    "guardian": "Parent or guardian name",
-    "guardian_hint": "Required unless the person is declared adult or senior.",
-    "age_group": "Age group",
-    "gender": "Gender",
-    "age_unknown": "Not declared",
-    "age_child": "Child",
-    "age_teen": "Teenager",
-    "age_adult": "Adult",
-    "age_senior": "Senior",
-    "gender_unknown": "Not declared",
-    "gender_female": "Female",
-    "gender_male": "Male",
     "scope_title": "Consent covers",
     "scope_face": "Face recognition",
     "scope_voice": "Speaker recognition (voice)",
     "scope_refresh": "Adding new samples over time",
-    "agree": "The person (or guardian) has read the text above and agrees.",
+    "agree": "The person has read the text above and agrees.",
     "consent_title": "Consent",
     "consent_biometric": (
         "The robot stores face (and, if chosen, voice) embeddings of this person to recognise "
         "them. These are biometric data, a special category under GDPR Art. 9. Camera images "
-        "are discarded after enrollment. For a minor, a parent or guardian must consent. The "
-        "person can ask to see or erase their data at any time."
+        "are discarded after enrollment. The person can ask to see or erase their data at any "
+        "time."
     ),
     "consent_cloud_names": (
         "Names, preferences and conversation text may be sent to the cloud language-model "
@@ -545,10 +531,8 @@ EN: dict[str, str] = {
     "err_name_required": "A name is required.",
     "err_name_invalid": "The name has characters that are not allowed.",
     "err_name_too_long": "The name is too long.",
-    "err_guardian_required": "A parent or guardian name is required unless the person is adult.",
     "err_consent_not_agreed": "Consent has to be confirmed.",
     "err_scope_invalid": "Pick at least one consent scope.",
-    "err_choice_invalid": "Invalid choice.",
     "err_id_invalid": "Invalid identifier.",
     "err_unknown_field": "Unexpected field.",
     "err_confirm_required": "Confirmation required.",
@@ -567,8 +551,6 @@ EN: dict[str, str] = {
 IT: dict[str, str] = {
     "no_pin": "Nessun PIN operatore impostato. Impostalo con l'installer o con la CLI.",
     "err_busy": "Sto controllando un altro PIN. Riprova tra un momento.",
-    "err_consent_who_guardian": "Per un minore dà il consenso il genitore o tutore.",
-    "err_guardian_is_subject": "Il tutore non può essere la persona registrata.",
     "err_bad_host": "Host non accettato.",
     "dialog_cancel": "Annulla",
     "dialog_confirm": "Conferma",
@@ -945,30 +927,17 @@ IT: dict[str, str] = {
     "hint_turn_head": "Gira leggermente la testa a sinistra e a destra",
     "display_name": "Nome da mostrare",
     "consent_who": "Nome di chi dà il consenso",
-    "guardian": "Nome del genitore o tutore",
-    "guardian_hint": "Obbligatorio salvo che la persona sia dichiarata adulta o anziana.",
-    "age_group": "Fascia d'età",
-    "gender": "Genere",
-    "age_unknown": "Non dichiarata",
-    "age_child": "Bambino",
-    "age_teen": "Adolescente",
-    "age_adult": "Adulto",
-    "age_senior": "Anziano",
-    "gender_unknown": "Non dichiarato",
-    "gender_female": "Femmina",
-    "gender_male": "Maschio",
     "scope_title": "Il consenso copre",
     "scope_face": "Riconoscimento del volto",
     "scope_voice": "Riconoscimento di chi parla (voce)",
     "scope_refresh": "Aggiunta di nuovi campioni nel tempo",
-    "agree": "La persona (o il tutore) ha letto il testo sopra ed è d'accordo.",
+    "agree": "La persona ha letto il testo sopra ed è d'accordo.",
     "consent_title": "Consenso",
     "consent_biometric": (
         "Il robot conserva i vettori del volto (e, se scelto, della voce) di questa persona per "
         "riconoscerla. Sono dati biometrici, categoria particolare ai sensi dell'art. 9 GDPR. "
-        "Le immagini della camera vengono scartate dopo la registrazione. Per un minore serve "
-        "il consenso di un genitore o tutore. La persona può chiedere in ogni momento di "
-        "vedere o cancellare i propri dati."
+        "Le immagini della camera vengono scartate dopo la registrazione. La persona può "
+        "chiedere in ogni momento di vedere o cancellare i propri dati."
     ),
     "consent_cloud_names": (
         "Nomi, preferenze e testo delle conversazioni possono essere inviati al fornitore cloud "
@@ -1125,12 +1094,8 @@ IT: dict[str, str] = {
     "err_name_required": "Il nome è obbligatorio.",
     "err_name_invalid": "Il nome contiene caratteri non ammessi.",
     "err_name_too_long": "Il nome è troppo lungo.",
-    "err_guardian_required": (
-        "Serve il nome di un genitore o tutore, salvo che la persona sia adulta."
-    ),
     "err_consent_not_agreed": "Il consenso va confermato.",
     "err_scope_invalid": "Scegli almeno un ambito di consenso.",
-    "err_choice_invalid": "Scelta non valida.",
     "err_id_invalid": "Identificativo non valido.",
     "err_unknown_field": "Campo inatteso.",
     "err_confirm_required": "Serve la conferma.",

@@ -123,7 +123,7 @@ def identity_stamp(tmp_path, circadian: float, conversation: float, miss=()) -> 
     """Capture stamp of ``person.recognized`` for a track that starts at 0 under the given
     scales; frames listed in ``miss`` carry no face (a missed vote)."""
     reg, _, pipe, _, got = rig(tmp_path, lambda i: [] if i in miss else [face(100)])
-    reg.enroll("Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT, age_group="adult")
+    reg.enroll("Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT)
     pipe.governor.set_scale(CIRCADIAN, circadian)
     pipe.governor.set_scale(CONVERSATION, conversation)
     for i in range(80):

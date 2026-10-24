@@ -212,8 +212,6 @@ class EnrollmentService:
         self,
         name: str,
         consent: Consent,
-        declared_age_group: str | None = None,
-        declared_gender: str | None = None,
         pending_id: str | None = None,
     ) -> str:
         """Enroll the collected samples as ``name`` and return the person id.
@@ -244,14 +242,7 @@ class EnrollmentService:
             self._state = COMPLETING
         try:
             if pending_id is None:
-                record = self._reg().enroll(
-                    name,
-                    matrix,
-                    model_id,
-                    consent=consent,
-                    age_group=declared_age_group,
-                    gender=declared_gender,
-                )
+                record = self._reg().enroll(name, matrix, model_id, consent=consent)
             else:
                 record = self._reg().complete_enrollment(
                     pending_id,
@@ -259,8 +250,6 @@ class EnrollmentService:
                     model_id,
                     consent,
                     display_name=name,
-                    age_group=declared_age_group,
-                    gender=declared_gender,
                 )
         except BaseException:
             with self._lock:

@@ -3,8 +3,7 @@
 The worker lives in core and stays robot-agnostic; these closures read the world model, the
 attention selector and the registry for the two summaries in the system prompt: who is talking
 (display name and confirmed preferences) and what is in view. A missing record or a registry
-error gives no summary rather than an error. Nothing here returns an id, an embedding or an
-estimate.
+error gives no summary rather than an error. Nothing here returns an id or an embedding.
 """
 
 from __future__ import annotations

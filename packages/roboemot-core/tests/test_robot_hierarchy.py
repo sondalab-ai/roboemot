@@ -66,7 +66,6 @@ CORE_DUCK_ALLOWED: dict[tuple[str, str], str] = {
     ("llm/router.py", "getattr:usage"): "OpenAI stream chunk, optional field",
     ("skills/registry.py", "getattr:skill"): "skill record or wrapper, not a robot object",
     ("voice/bargein.py", "hasattr:_ring"): "own lazily created attribute",
-    ("webui/api.py", "getattr:age_group"): "registry record, not a robot object",
     ("webui/api.py", "getattr:code"): "exception attribute",
 }
 AUDIT_IDS = frozenset({"1", "2", "3", "4", "5", "6", "B", "D", "U"})

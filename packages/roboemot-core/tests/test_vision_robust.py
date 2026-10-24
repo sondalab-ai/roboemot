@@ -81,7 +81,7 @@ def test_tracker_crossing_faces_keep_their_ids():
 def test_returning_face_is_a_new_track_without_old_identity(tmp_path):
     present = lambda i: [face(100)] if (i < 20 or i >= 60) else []  # noqa: E731
     reg, _, pipe, _, got = rig(tmp_path, present)
-    reg.enroll("Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT, age_group="senior")
+    reg.enroll("Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT)
     run(pipe, 100)
     faces = [m.payload for m in got["percept.face"]]
     old, new = faces[0].track_id, faces[-1].track_id
@@ -117,9 +117,7 @@ def test_small_and_weak_faces_are_tracked_but_not_embedded(tmp_path):
 
 def test_identity_within_budget_with_one_missed_vote_at_5_hz(tmp_path):
     reg, _, pipe, emb, got = rig(tmp_path, lambda i: [face(100)])
-    person = reg.enroll(
-        "Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT, age_group="adult"
-    )
+    person = reg.enroll("Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT)
     vectors = iter([axis(0), axis(5), axis(0), axis(0)] + [axis(0)] * 20)
     emb.embed = lambda img, det: next(vectors).copy()
     run(pipe, 25, dt=0.2)
@@ -150,9 +148,7 @@ def test_config_ties_burst_to_votes_and_embed_size_to_detection_size(tmp_path):
 
 def test_forgotten_person_stops_being_announced_or_reported(tmp_path):
     reg, _, pipe, _, got = rig(tmp_path, lambda i: [face(100)])
-    person = reg.enroll(
-        "Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT, age_group="adult"
-    )
+    person = reg.enroll("Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT)
     run(pipe, 10)
     state = next(iter(pipe._faces.values()))
     assert state.owner_id == person.person_id and state.announced == person.person_id
@@ -237,7 +233,7 @@ def test_replay_forces_refresh_off_and_restores_it(tmp_path):
     session = load_session(root)
     near = (axis(0) + 0.3 * axis(1)) / np.linalg.norm(axis(0) + 0.3 * axis(1))
     reg, bus, pipe, _, _ = rig(tmp_path / "a", lambda i: [face(100)], vector=near)
-    reg.enroll("Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT, age_group="adult")
+    reg.enroll("Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT)
     before = reg.gallery("face", FACE_MODEL)
     replay(session, pipe, bus)
     assert pipe.refresh is True

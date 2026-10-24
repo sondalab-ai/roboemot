@@ -262,9 +262,7 @@ def test_new_track_gets_a_burst_then_the_steady_rate(tmp_path):
 
 def test_identity_decision_inside_the_cm4_budget(tmp_path):
     reg, _, pipe, emb, got = rig(tmp_path, lambda i: [face(100)])
-    person = reg.enroll(
-        "Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT, age_group="adult"
-    )
+    person = reg.enroll("Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT)
     run(pipe, 24)
     rec = got["person.recognized"]
     assert len(rec) == 1
@@ -275,7 +273,7 @@ def test_identity_decision_inside_the_cm4_budget(tmp_path):
 
 def test_published_payloads_carry_no_embeddings(tmp_path):
     reg, _, pipe, _, got = rig(tmp_path, lambda i: [face(100)])
-    reg.enroll("Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT, age_group="adult")
+    reg.enroll("Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT)
     run(pipe, 24)
 
     def arrays(obj):
@@ -517,7 +515,7 @@ def test_replay_against_one_registry_does_not_change_it(tmp_path):
     write_session(root, 40)
     session = load_session(root)
     reg, bus, pipe, _, _ = rig(tmp_path / "r", script)
-    reg.enroll("Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT, age_group="adult")
+    reg.enroll("Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT)
     before = reg.gallery("face", FACE_MODEL)
     first = summarize(replay(session, pipe, bus).messages)
     second = summarize(replay(session, pipe, bus).messages)
@@ -719,7 +717,7 @@ def test_track_churn_counts_created_ended_lifetime_and_rate(tmp_path):
 def test_no_age_or_gender_anywhere_in_the_pipeline(tmp_path):
     """Owner decision 2026-10-23: no age model, no attribute worker, nothing estimated."""
     reg, _, pipe, _, got = rig(tmp_path, lambda i: [face(100)])
-    reg.enroll("Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT, age_group="adult")
+    reg.enroll("Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT)
     run(pipe, 24)
     removed = {"age_group", "age_source", "gender", "gender_source", "attribute_confidence"}
     for topic in ("percept.face", "person.recognized"):
