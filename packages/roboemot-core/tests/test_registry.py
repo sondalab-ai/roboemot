@@ -378,22 +378,52 @@ def test_anyone_enrolls_with_a_consent_and_no_age_gender_or_guardian(tmp_path):
         Consent("M", WHEN, SCOPE, guardian="P")
 
 
-def test_a_record_stored_with_age_gender_and_guardian_still_loads(tmp_path):
-    """A record written before 2026-10-23 loads with those fields ignored; the next write drops
-    them (no migration)."""
+def plant_legacy(tmp_path):
+    """A person stored as before 2026-10-23: age group, gender and a guardian in the consent."""
     reg = make(tmp_path)
     p = enroll(reg, 0)
     old = p.meta()
     old["age_group"] = {"value": "child", "source": "declared"}
     old["gender"] = {"value": "female", "source": "estimated"}
-    old["consent"]["guardian"] = "Parent"
+    old["consent"]["guardian"] = "Parent-Secret"
     reg.store.put(PEOPLE, p.person_id, old, p.arrays())
+    return p
+
+
+def raw_meta(tmp_path, person_id):
+    return json.loads((tmp_path / "reg" / "people" / f"{person_id}.json").read_bytes()[1:])
+
+
+def test_a_record_stored_with_age_gender_and_guardian_loads_and_is_cleaned_at_once(tmp_path):
+    """SPEC 5, 6, 12: the registry stores no age, gender or guardian, and an access request shows
+    everything stored, so a pre-2026-10-23 record is rewritten without them at load."""
+    p = plant_legacy(tmp_path)
     again = reopen(tmp_path)
     back = again.get_person(p.person_id)
     assert back.consent == CONSENT and back.meta() == p.meta()
-    again.rename_person(p.person_id, "B")
-    raw = json.loads((tmp_path / "reg" / "people" / f"{p.person_id}.json").read_bytes()[1:])
+    raw = raw_meta(tmp_path, p.person_id)
     assert not {"age_group", "gender"} & set(raw) and "guardian" not in raw["consent"]
+    exported = again.export(p.person_id)
+    assert not {"age_group", "gender"} & set(exported) and "guardian" not in exported["consent"]
+    assert "Parent-Secret" not in json.dumps(exported)
+
+
+def test_a_failed_legacy_rewrite_keeps_the_record_loaded_and_logs_the_key_only(
+    tmp_path, monkeypatch, caplog
+):
+    p = plant_legacy(tmp_path)
+
+    def refuse(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(FileStore, "put", refuse)
+    with caplog.at_level(logging.ERROR):
+        again = reopen(tmp_path)
+    assert again.get_person(p.person_id).meta() == p.meta()  # loaded, not quarantined
+    assert raw_meta(tmp_path, p.person_id)["consent"]["guardian"] == "Parent-Secret"  # next load
+    assert p.person_id in caplog.text and "OSError" in caplog.text
+    assert "quarantined" not in caplog.text and "Parent-Secret" not in caplog.text
+    assert "disk full" not in caplog.text
 
 
 def test_consent_contents_are_validated():

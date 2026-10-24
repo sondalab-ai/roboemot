@@ -37,6 +37,9 @@ from .tombstones import TombstoneSet
 log = logging.getLogger(__name__)
 
 PEOPLE = "people"
+# Fields of a person stored before the owner decision of 2026-10-23 (no age, gender or guardian).
+LEGACY_PERSON_KEYS = ("age_group", "gender")
+LEGACY_CONSENT_KEY = "guardian"
 ENTITIES = "entities"
 GalleryKind = Literal["face", "voice", "entity"]
 Vectors = Sequence[Sequence[float]] | np.ndarray
@@ -99,16 +102,44 @@ class Registry:
         self._load(ENTITIES, EntityRecord, self._entities, "entity_id")
 
     def _load(self, collection: str, cls: Any, target: dict[str, Any], id_field: str) -> None:
-        """Read every item; one that fails to parse is quarantined and logged by key only."""
+        """Read every item; one that fails to parse is quarantined and logged by key only.
+
+        A person stored before 2026-10-23 with ``age_group``, ``gender`` or a consent
+        ``guardian`` is rewritten at once without them (SPEC 5, 6, 12: the registry stores none,
+        and an access request shows everything stored); see ``_strip_legacy``."""
         for key in self.store.keys(collection):
             try:
-                record = cls.from_stored(*self.store.get(collection, key))
+                meta, arrays = self.store.get(collection, key)
+                record = cls.from_stored(meta, arrays)
                 if getattr(record, id_field) != key:
                     raise ValueError("key does not match the stored id")
                 target[key] = record
             except Exception as exc:
                 log.error("quarantined %s item %s (%s)", collection, key, type(exc).__name__)
                 self.store.quarantine(collection, key)
+                continue
+            self._strip_legacy(collection, key, meta, record)
+
+    def _strip_legacy(self, collection: str, key: str, meta: dict[str, Any], record: Any) -> None:
+        """Atomically rewrite a record whose raw ``meta`` still holds a legacy personal field.
+
+        A failed rewrite is logged by key only (never a value) and the loaded record is kept: a
+        readable person is never quarantined for it; the next load tries again."""
+        consent = meta.get("consent")
+        legacy = any(k in meta for k in LEGACY_PERSON_KEYS) or (
+            isinstance(consent, dict) and LEGACY_CONSENT_KEY in consent
+        )
+        if not legacy:
+            return
+        try:
+            self.store.put(collection, key, record.meta(), record.arrays())
+        except Exception as exc:
+            log.error(
+                "could not drop legacy fields of %s item %s (%s)",
+                collection,
+                key,
+                type(exc).__name__,
+            )
 
     def attach_history(self, link: HistoryLink) -> None:
         """Include ``link`` in ``export`` and ``forget`` (the world history, SPEC 5A)."""

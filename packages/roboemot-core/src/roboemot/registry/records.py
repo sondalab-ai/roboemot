@@ -3,7 +3,8 @@
 Embeddings are model-specific, so every record names the embedding model that produced them
 and the matcher ignores records from another model. Animal and object records have no consent
 or register fields. People carry no age group or gender (owner decision 2026-10-23); a record
-stored before that still loads, its ``age_group``, ``gender`` and consent ``guardian`` ignored.
+stored before that still loads, and ``Registry`` drops its ``age_group``, ``gender`` and consent
+``guardian`` from disk at load.
 """
 
 from __future__ import annotations
@@ -108,7 +109,8 @@ class Consent:
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> Consent:
-        """Read a stored consent; a ``guardian`` key written before 2026-10-23 is ignored."""
+        """Read a stored consent; a ``guardian`` key written before 2026-10-23 is not read (the
+        registry drops it from disk at load)."""
         when = datetime.fromisoformat(data["when"])
         return cls(data["who"], when, tuple(data["scope"]))
 
@@ -156,8 +158,8 @@ class PersonRecord:
 
     @classmethod
     def from_stored(cls, meta: dict[str, Any], arrays: dict[str, np.ndarray]) -> PersonRecord:
-        """Rebuild a stored person; the ``age_group`` and ``gender`` of an older record are
-        ignored (no migration: they go when the record is next written)."""
+        """Rebuild a stored person; the ``age_group`` and ``gender`` of an older record are not
+        read (the registry drops them from disk at load)."""
         consent = meta["consent"]
         _check_version(meta)
         return cls(
