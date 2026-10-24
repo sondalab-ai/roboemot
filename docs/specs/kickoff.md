@@ -701,6 +701,8 @@ The robot's voice is configured on three independent axes: **voice** (who speaks
 
 Kokoro-82M (Apache 2.0) is an optional plugin; its two Italian voices are graded C by the authors, so it is not a default. The remote backend follows the LLM routes' rules (section 8): text only, timeout, budget, key, and fallback to Piper when offline. Every sentence may use the remote backend (owner decision 2026-10-23: the rule that kept a minor's sentences on Piper is gone). OpenAI states its voices are optimised for English, so Italian quality is evaluated in M3. Remote PCM arrives at 24 kHz and is resampled to the 16 kHz that Reachy Mini's speaker path takes.
 
+Piper speed (2026-10-24, Reachy Mini Wireless, `it_IT-paola-medium`, persistent worker, three Italian sentences, RoboEmot mostly idle): with ONNX Runtime intra-op threads 1, 2, 3 and 4 the real-time factor was 0.93, 0.54, 0.55 and 0.63; 4 is the runtime's default on the CM4's four cores, and under conversation load (vision and daemon) the default measured 1.33 on 2026-10-23, slower than real time. The worker therefore takes `voice.piper.intra_op_threads` (default 2) and `inter_op_threads` (default 1) on its command line and rebuilds the voice's ONNX session with them (`PiperVoice.load` takes no session options); 0 keeps the runtime default. Both are restart fields.
+
 Licence note: the maintained Piper (`piper1-gpl`) is GPL-3.0, so RoboEmot calls it as a separate process, not as a linked library. The owner accepted this on 2026-10-18 (GPL subprocess in its own virtualenv, `piper_worker.py` as the process; section 15); the project licence decision still has to cover the rest.
 
 #### Configuration
@@ -712,30 +714,47 @@ voice:
   voices: {it: it_IT-paola-medium, en: en_US-amy-medium}
   base: {rate: 1.0, pitch_st: 0, volume_db: 0, variability: 0.6}
   expressivity: 0.7                   # 0 = flat delivery, 1 = full mood modulation
+  intensity_exponent: 0.5             # mood weight = intensity ** 0.5 x expressivity
   mood_source: auto                   # auto (affect engine) | fixed | llm_tagged
   fixed_mood: null                    # used when mood_source is fixed
   llm_tag_max_deviation: 0.3          # how far an LLM sentence tag may move from the affect state
-  moods:
-    joy:      {rate: +0.10, pitch_st: +2, volume_db: +1, variability: +0.2, pause_scale: 0.8,
-               instructions: "bright, warm, smiling", sounds: [giggle]}
-    sadness:  {rate: -0.15, pitch_st: -2, volume_db: -3, variability: -0.2, pause_scale: 1.4,
-               instructions: "soft, slow, a little down"}
-    curiosity: {rate: +0.05, pitch_st: +1, pause_scale: 1.1, instructions: "intrigued, rising intonation"}
-    sleepy:   {rate: -0.20, volume_db: -6, pause_scale: 1.6, instructions: "drowsy, quiet, near a whisper",
-               sounds: [yawn]}
+  moods:                              # one per affect label; deltas at full weight
+    calm:      {rate: -0.06, pitch_st: -0.5, volume_db: -1,   variability: -0.1,  pause_scale: 1.2,
+                instructions: "calm, warm, unhurried"}
+    joy:       {rate: +0.15, pitch_st: +2.5, volume_db: +1.5, variability: +0.25, pause_scale: 0.8,
+                instructions: "bright, warm, smiling", sounds: [giggle]}
+    curiosity: {rate: +0.10, pitch_st: +1.5,                  variability: +0.15, pause_scale: 1.05,
+                instructions: "intrigued, rising intonation"}
+    surprise:  {rate: +0.20, pitch_st: +3,   volume_db: +2,   variability: +0.35, pause_scale: 0.75,
+                instructions: "astonished, quick, wide-eyed"}
+    sadness:   {rate: -0.18, pitch_st: -2.5, volume_db: -3,   variability: -0.25, pause_scale: 1.4,
+                instructions: "soft, slow, a little down"}
+    fear:      {rate: +0.15, pitch_st: +1,   volume_db: -3,   variability: +0.2,  pause_scale: 0.8,
+                instructions: "tense, hushed, quick"}
+    annoyance: {rate: +0.06, pitch_st: -1,   volume_db: +2,   variability: -0.2,  pause_scale: 0.7,
+                instructions: "firm, clipped, a little curt"}
+    sleepy:    {rate: -0.25, pitch_st: -1,   volume_db: -6,   variability: -0.2,  pause_scale: 1.6,
+                instructions: "drowsy, quiet, near a whisper", sounds: [yawn]}
+  variation: {rate: 0.05, pitch_st: 0.8, question_pitch_st: 1.0}   # per sentence, x expressivity
   limits: {rate: [0.7, 1.3], pitch_st: [-4, 4], volume_db: [-12, 3]}
+  piper: {intra_op_threads: 2, inter_op_threads: 1}   # ONNX Runtime threads of the worker
 ```
+
+Moods were retuned on 2026-10-24 (owner: the Piper voice "sounds bored"). Affect intensity is the distance from the circadian baseline over sqrt(2) and rarely passes 0.5 in conversation, so with a linear weight a mid-intensity mood moved the pitch by 0.7 st and the rate by 3.5% (joy), which is barely heard. The weight is now `intensity ** intensity_exponent x expressivity`: at intensity 0.5 joy moves by +1.2 st and +7%, at 0.25 by +0.9 st and +5%, and an intensity of 0 still gives no mood, so a robot resting at its baseline (awake: the curiosity label) does not sound curious. Upward pitch stays modest because the dsp pitch shift is varispeed (formants move with it, section 8 TTS backends) and Reachy Mini sits at +5 st with a ceiling of +8; most of the liveliness comes from rate, pauses, Piper's variability and volume. Surprise is the fastest, highest and most variable; fear is fast, slightly higher and quieter; annoyance is louder, lower, flatter and with short pauses; calm is a little slower and softer with longer pauses.
 
 #### How the final delivery is computed
 
 1. Start from `voice.base`.
 2. Apply the persona traits (section 11A, Persona), the register (section 7) and the circadian state (section 7A), as multipliers and offsets.
-3. Add the mood deltas, scaled by affect intensity times `expressivity`.
-4. Clamp to `voice.limits` and to the backend's supported range, then render: native parameters for Piper, `instructions` text for instructable remote models.
+3. Add the mood deltas, scaled by `intensity ** intensity_exponent` times `expressivity`.
+4. Add the sentence's variation. Within one reply each sentence gets a rate offset and a pitch offset, each uniform within plus or minus `voice.variation.rate` / `pitch_st` times `expressivity`, drawn from a generator seeded by the reply's utterance id and the sentence's index in it: the same reply gets the same delivery again, two sentences of one reply differ, and `expressivity: 0` (or zero bounds) turns it off. A sentence that ends in a question mark is raised by `question_pitch_st` times `expressivity`. The dsp pitch shift moves a whole sentence, so a question is spoken higher throughout rather than rising at its end.
+5. Clamp to `voice.limits` and to the backend's supported range, then render: native parameters for Piper, `instructions` text for instructable remote models.
 
 Mood sources: `auto` follows the affect engine sentence by sentence; `fixed` pins one mood (useful for an app or a demo); `llm_tagged` lets the LLM tag each sentence with a mood, stripped before synthesis and kept within `llm_tag_max_deviation` of the affect state, so the voice and the robot's body never contradict each other. On Piper, wording also carries mood: the rules rendered into the system prompt (Conversation state) ask the LLM for interjections and punctuation that match it.
 
 The web UI previews any sentence in any mood and voice before saving, and every value above is part of the `voice` parameter group (section 11A).
+
+To compare the moods by ear, `roboemot voice sample --out DIR [--lang it|en] [--intensity 0.5] [--manifest PATH] [--python PATH] [--voice-dir DIR]` renders one fixed reply (a greeting, a statement and a question) to `DIR/<lang>-neutral.wav` and one `DIR/<lang>-<mood>.wav` per `voice.moods` entry, with the configured delivery and a fixed variation seed. It always uses the local Piper voice, whatever `voice.backend` says, and needs no network: the Piper virtualenv (`--python`, default `voice.piper.python`, else the installer's `piper-venv`) and the voice models (`roboemot models fetch --voice`; `--voice-dir`, default `voice.models_dir`). `--manifest` adds the robot manifest's behaviour layer, so the samples have the robot's own pitch (Reachy Mini: +5 st). Piper's noise makes two runs sound alike but not bit-identical.
 
 ## 9. Mirror neural net
 
@@ -1136,7 +1155,7 @@ Every feature stays available on the CM4; what changes is model size and rate. A
 | Objects | NanoDet-Plus-m 320 (Apache-2.0, 4.8 MB, 80 COCO classes, ONNX Runtime CPU), on by default (`vision.objects_enabled`) | 1 fps (`vision.rates.objects_hz`) |
 | Speech emotion | Prosody features; classifier optional | Per utterance |
 | ASR | Vosk small streaming models (vosk-model-small-it-0.22, 48 MB, WER 16.9% on Common Voice; small English model alongside) | Real time |
-| TTS | Piper, Italian voices paola, riccardo or serena (remote speech API optional for richer mood) | Faster than real time |
+| TTS | Piper, Italian voices paola, riccardo or serena (remote speech API optional for richer mood), 2 ONNX intra-op threads (`voice.piper.intra_op_threads`) | Faster than real time: RTF 0.54 on the CM4 with 2 threads, mostly idle (0.63 with the 4-thread default, 1.33 with it under conversation load; section 8) |
 
 No age or gender model runs (owner decision 2026-10-23, section 5), so no attribute worker competes for the CPU. Before, the FairFace ViT-B age and gender pair's `roboemot-attributes` thread used about 93% of one CM4 core (profile of 2026-10-22), and its replacement, yolo11n-face-age (10.5 MB, one thread at 160 px), was guessed at 50 to 130 ms per crop on the CM4 ([research](../spikes/2026-10-22-age-model.md)). On a robot that still has their files, `roboemot models prune` deletes them (the manifest lists them as retired): about 10.5 MB for yolo11n-face-age, about 174 MB for the INT8 FairFace pair, plus about 690 MB where the FP32 pair is still there. Individual animals and objects use DINOv2-S (Apache-2.0, 88 MB). The object detector is on by default because the detector itself is cheap: 11.3 ms per frame on a Mac with 2 threads for the whole `detect()` (9.7 ms for the network), 84 MB peak RSS. The total CM4 cost of the object stage is not known. With the guessed Mac-to-CM4 factor of 8 to 20x (not measured, section 15) the detector takes about 90 to 230 ms per second at 1 fps, and the animal and object embeddings (DINOv2-S, 76 ms on the Mac, so 0.6 to 1.5 s each on the guess) add at most one embedding per object frame, because `vision.max_entity_embeds_per_frame` (default 1) bounds them and is separate from the face budget `vision.max_embeds_per_frame`, so faces never wait for entities; entities take turns, oldest embedding first, and one track's burst evaluations are at least `vision.entity_burst_min_gap_s` (1 s) apart. The worst case, with many new tracks in view, is therefore roughly 0.7 to 1.75 s of two-thread compute per second on top of the faces; above 1 s the frame path cannot keep up, frames are dropped (latest wins), and the governor lowers vision rates under CPU load or temperature. In steady state each track is re-embedded every `1 / vision.rates.appearance_hz` (2 s). If the CM4 shows pressure the levers are `vision.rates.objects_hz`, `vision.max_entity_embeds_per_frame` and `vision.objects_enabled: false`. If the NanoDet or DINOv2-S file is missing or unverified, faces keep running and the object stage is off, with the reason in the debug report. Which COCO classes count as animal or object is configuration: `vision.animal_categories` (default bird, cat, dog, horse, sheep, cow) and `vision.object_categories` (default cup, bottle, chair, couch, potted_plant, tv, laptop, book, remote, cell_phone, bowl, teddy_bear); every other class, `person` included, is ignored (people come from the face detector). Observations carry readable category names (`vision.object_display_names`, for example `potted plant`). If the model file is missing or unverified, the app runs with objects off and the debug report says why. Animal and object tracks start at `vision.object_score_min` and live for the larger of `vision.object_lost_s` and `vision.object_lost_periods` detection periods at the current governor rate. A track is reported after `vision.object_confirm_hits` (default 2) matched detections, so a thing seen in a single object frame is not reported (about 31% of detections at the default score are false and rarely repeat; the price is a 1 s delay and lost recall for things seen once). Detections start a track at `vision.object_score_min` (0.4: 69% precision and 24% recall over these classes on 1,500 COCO val images, AP50 41.0% mean; the detector finds large, close things and misses small ones). Measurements: [model spike](../spikes/2026-10-m1-models.md).
 
