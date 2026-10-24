@@ -2314,7 +2314,8 @@ class VoiceConfig(Strict):
     intensity_exponent: float = param(
         0.5,
         "Mood weight = intensity ** exponent x expressivity: below 1 a mid-intensity mood is "
-        "heard (affect intensity rarely passes 0.5), 1 is linear; 0 stays 0",
+        "heard (affect intensity, the distance from the baseline, decays and is expected to stay "
+        "low), 1 is linear; 0 stays 0",
         ge=0.1, le=2,
     )  # fmt: skip
     moods: dict[str, Prosody] = param(

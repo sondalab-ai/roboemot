@@ -217,3 +217,13 @@ def test_a_question_is_raised_and_still_clamped():
     voice = _reachy_voice()
     top = _say(voice, mood="surprise", intensity=1.0, question=True, seed=1, index=0)
     assert top.pitch_st <= voice.limits.pitch_st[1]
+
+
+def test_openai_rate_words_ignore_the_sentence_variation():
+    """Regression: the seeded rate jitter made a neutral reply say "faster" then "slower"."""
+    assert to_openai(_say(mood=None)) == {}
+    for seed in range(10):
+        for index in range(4):
+            assert to_openai(_say(mood=None, seed=seed, index=index)) == {}
+            sad = to_openai(_say(mood="sadness", seed=seed, index=index))["instructions"]
+            assert "slower" in sad and "faster" not in sad

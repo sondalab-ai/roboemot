@@ -37,6 +37,7 @@ class Delivery:
     instructions: str = ""
     sounds: list[str] = field(default_factory=list)
     mood: str | None = None
+    steady_rate: float | None = None  # rate before the sentence variation (clamped)
 
 
 def _clamp(x: float, rng: tuple[float, float]) -> float:
@@ -77,7 +78,7 @@ def compose_delivery(
         pause = 1.0 + (m.pause_scale - 1.0) * k
         instructions = m.instructions if k > 0 else ""
         sounds = list(m.sounds) if k > 0 else []
-    var = voice.variation
+    var, steady_rate = voice.variation, rate
     if seed is not None:
         rng = random.Random(seed * SEED_STRIDE + index)  # noqa: S311 (prosody, not security)
         rate += rng.uniform(-1.0, 1.0) * var.rate * expressivity
@@ -94,6 +95,7 @@ def compose_delivery(
         instructions,
         sounds,
         mood if m else None,
+        _clamp(steady_rate, lim.rate),
     )
 
 
@@ -112,11 +114,14 @@ def to_piper(d: Delivery, voice: VoiceConfig) -> dict[str, float]:
 
 
 def to_openai(d: Delivery) -> dict[str, str]:
-    """``/v1/audio/speech`` extras for instructable models: delivery as natural language."""
+    """``/v1/audio/speech`` extras for instructable models: delivery as natural language. The
+    rate words follow the rate before the sentence variation, so a neutral reply does not flip
+    between "faster" and "slower" from one sentence to the next."""
     parts = [d.instructions] if d.instructions else []
-    if d.rate < 1.0:
+    rate = d.rate if d.steady_rate is None else d.steady_rate
+    if rate < 1.0:
         parts.append("speak a little slower than usual")
-    elif d.rate > 1.0:
+    elif rate > 1.0:
         parts.append("speak a little faster than usual")
     if d.volume_db < 0:
         parts.append("keep the voice soft")
