@@ -1368,6 +1368,32 @@ class TrackerConfig(Strict):
     )
     match_iou: float = param(0.3, "Minimum IoU for the first association", ge=0, le=1)
     low_match_iou: float = param(0.5, "Minimum IoU for the low-score association", ge=0, le=1)
+    match_distance_heights: float = param(
+        0.6,
+        "A high-score detection that fails match_iou may still match a track (same label, height "
+        "within match_height_ratio) whose predicted box centre is at most this many of the "
+        "track's box heights away; IoU matches go first. A high-score detection this close to a "
+        "confirmed track matched in the same update is a duplicate of it and starts no track. 0 "
+        "turns both off. Must stay below vision.rebirth_distance_heights",
+        ge=0,
+        le=2,
+    )
+    low_match_distance_heights: float = param(
+        0.4,
+        "The same centre-distance gate for the low-score association (stricter: weaker "
+        "evidence); 0 turns it off. Must stay below vision.rebirth_distance_heights",
+        ge=0,
+        le=2,
+    )
+    match_height_ratio: float = param(
+        1.5,
+        "The centre-distance gates and the duplicate rule apply only when the larger of the "
+        "detection and track box heights is at most this many times the smaller: a face seen "
+        "side-on keeps its size (1.13x on the robot), a smaller face beside or behind it does "
+        "not (0.5x), so it starts its own track",
+        ge=1,
+        le=4,
+    )
     confirm_hits: int = param(2, "Matched detections before a track is reported", ge=1, le=10)
     lost_s: float = param(
         1.5, "A track unmatched for this long (capture stamps) is removed", unit="s", ge=0.1, le=60
@@ -1458,7 +1484,8 @@ class VisionConfig(Strict):
     rebirth_distance_heights: float = param(
         1.0,
         "Report only: largest distance between the new track's first box centre and the ended "
-        "track's last box centre, in heights of the ended box, for a rebirth",
+        "track's last box centre, in heights of the ended box, for a rebirth. Must stay above "
+        "both vision.tracker distance gates, or an overlapped rebirth could never be counted",
         ge=0.1,
         le=10,
     )
@@ -1505,6 +1532,15 @@ class VisionConfig(Strict):
         ge=1,
         le=10,
     )
+    object_match_distance_heights: float = param(
+        0.0,
+        "Replaces both tracker centre-distance gates (and the duplicate rule) for the animal and "
+        "object tracker. Off by default: the gate is in box heights, tuned on faces, and two tall "
+        "things side by side (bottles) are about 0.3 heights apart, so the second one would "
+        "never start a track",
+        ge=0,
+        le=2,
+    )
     object_nms_iou: float = param(
         0.6,
         "Detections of one class overlapping more than this IoU are merged (NanoDet's own value)",
@@ -1548,6 +1584,16 @@ class VisionConfig(Strict):
         both = set(self.animal_categories) & set(self.object_categories)
         if both:
             raise ValueError(f"vision categories are both animal and object: {sorted(both)}")
+        return self
+
+    @model_validator(mode="after")
+    def _association_below_rebirth(self) -> VisionConfig:
+        gate = max(self.tracker.match_distance_heights, self.tracker.low_match_distance_heights)
+        if gate >= self.rebirth_distance_heights:
+            raise ValueError(
+                "vision.tracker distance gates must stay below vision.rebirth_distance_heights, "
+                "or an overlapped rebirth could never be counted"
+            )
         return self
 
 
