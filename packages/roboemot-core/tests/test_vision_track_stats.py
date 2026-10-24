@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 from pydantic import ValidationError
 from roboemot.config.schema import RoboEmotConfig, TrackerConfig
-from roboemot.vision import CIRCADIAN, Frame, Tracker
+from roboemot.vision import CIRCADIAN, Detection, Frame, Tracker
 from roboemot.vision.track_stats import TrackDiagnostics, _iou, head_pose
 from roboemot.world import FrameSpec
 from test_vision import CFG, face, image, rig
@@ -120,7 +120,8 @@ def test_rebirth_after_the_old_track_ended():
 
 
 def test_rebirth_while_the_old_track_still_lived_is_overlapped():
-    # the face jumps 40 px: IoU 0.2 is below match_iou, so a second track starts beside the first
+    # the face jumps 40 px: IoU 0.2 is below match_iou and 0.67 heights is past
+    # match_distance_heights, so a second track starts beside the first
     tracker, diag = observed()
     tracker.update([face(50)], 0.0)
     old = tracker.update([face(50)], DT).visible[0].track_id
@@ -333,10 +334,13 @@ def test_the_nearer_of_two_ended_tracks_is_paired_once():
     confirm(tracker, 140, stamp + DT)  # 10 px from the second, 40 px from the first
     reb = diag.snapshot()["rebirths"]
     assert reb["count"] == 1 and reb["distance_heights"]["p50"] == pytest.approx(10 / 60)
-    # a second birth near the consumed track only (25 px from it, 75 px from the other)
-    tracker.update([face(140), face(175)], stamp + 3 * DT)
-    tracker.update([face(140), face(175)], stamp + 4 * DT)
-    assert diag.snapshot()["rebirths"]["count"] == 1
+    # a second birth near the consumed track only (30 px from it, 80 px from the other), past
+    # the duplicate gate of the live track at 140 (40 px, 0.67 heights)
+    tracker.update([face(140), face(180)], stamp + 3 * DT)
+    tracker.update([face(140), face(180)], stamp + 4 * DT)
+    snap = diag.snapshot()
+    assert snap["rebirths"]["count"] == 1
+    assert snap["association"]["duplicates_not_started"] == 0
 
 
 def test_single_hit_confirmation_still_reports_rebirths():
@@ -395,3 +399,68 @@ def test_rebirth_settings_have_defaults_and_ranges():
     ):
         with pytest.raises(ValidationError):
             RoboEmotConfig(vision=bad)
+
+
+def side_on(x: float, score: float = 0.9) -> Detection:
+    """The face seen side-on: a narrow, taller box 0.4 heights right of ``face(x)``, IoU 0.24."""
+    return Detection((x + 44, 76, x + 64, 144), score, landmarks=np.zeros((5, 2)))
+
+
+def turning_face_script() -> list[list[Detection]]:
+    """One face that turns side-on for longer than ``lost_s`` and back, as on the robot
+    (2026-10-23), then a few quick turns."""
+    side = int(2 * LOST / DT)
+    quick = [[side_on(100)] if (i // 3) % 2 else [face(100)] for i in range(24)]
+    return [[face(100)]] * 4 + [[side_on(100)]] * side + [[face(100)]] * 4 + quick
+
+
+def test_turning_face_keeps_one_track_and_counts_distance_matches():
+    tracker, diag = observed()
+    for i, dets in enumerate(turning_face_script()):
+        tracker.update(dets, i * DT)
+    snap = diag.snapshot()
+    assert len(tracker._tracks) == 1
+    assert snap["rebirths"]["count"] == 0 and snap["ended_by"]["expired"] == 0
+    assert snap["start_score"]["count"] == 1
+    assert snap["association"]["distance_matches"] > 0
+    gate = CFG.vision.tracker.match_distance_heights
+    assert snap["association"]["distance_heights"]["max"] <= gate
+
+
+def test_turning_face_without_the_gate_gives_overlapped_rebirths():
+    cfg = CFG.vision.tracker.model_copy(
+        update={"match_distance_heights": 0.0, "low_match_distance_heights": 0.0}
+    )
+    tracker, diag = Tracker(cfg), TrackDiagnostics(CFG.vision)
+    tracker.observer = diag
+    stamp = 0.0
+    for i, dets in enumerate(turning_face_script()):
+        stamp = i * DT
+        tracker.update(dets, stamp)
+    for i in range(1, int(LOST / DT) + 2):
+        tracker.update([], stamp + i * DT)
+    snap = diag.snapshot()
+    assert snap["rebirths"]["overlapped"] > 0
+    assert snap["start_near_distance_heights"]["p50"] == pytest.approx(0.4, abs=0.1)
+    assert snap["association"]["distance_matches"] == 0
+
+
+def test_a_duplicate_detection_is_not_started_and_is_counted():
+    tracker, diag = observed()
+    tid, stamp = confirm(tracker, 100)
+    res = tracker.update([face(100), side_on(100)], stamp + DT)
+    assert [t.track_id for t in res.visible] == [tid] and len(tracker._tracks) == 1
+    snap = diag.snapshot()
+    assert snap["association"]["duplicates_not_started"] == 1
+    assert snap["start_score"]["count"] == 1
+
+
+def test_low_score_refused_within_the_distance_gate_after_a_miss():
+    tracker, diag = observed()
+    tid, stamp = confirm(tracker, 100)
+    tracker.update([], stamp + DT)
+    weak = Detection((122, 80, 182, 140), 0.3)  # IoU 0.46 < low_match_iou, 0.37 heights
+    assert _iou(face(100).box, weak.box) < CFG.vision.tracker.low_match_iou
+    tracker.update([weak], stamp + 2 * DT)
+    low = diag.snapshot()["low_score"]
+    assert low["refused"] == 1 and low["unmatched"] == 0

@@ -301,12 +301,15 @@ class VisionPipeline:
         now, so a slow object stage (circadian or load scale) does not expire tracks between
         two frames. When the rate goes back up the longer lifetime is kept until the next
         object frame has been folded in, so tracks do not expire just before it can match them.
+        Both centre-distance gates take ``object_match_distance_heights`` (off by default).
         """
         return self.cfg.tracker.model_copy(
             update={
                 "high_score": self.cfg.object_score_min,
                 "low_score": self.cfg.object_score_min,
                 "confirm_hits": self.cfg.object_confirm_hits,
+                "match_distance_heights": self.cfg.object_match_distance_heights,
+                "low_match_distance_heights": self.cfg.object_match_distance_heights,
                 "lost_s": max(self._object_lost_s(), self._lost_held),
             }
         )

@@ -25,6 +25,7 @@ from roboemot.vision import (
     VisionPipeline,
 )
 from roboemot.vision.replay import ReplayError, load_session, replay, summarize
+from roboemot.vision.tracker import distance_matrix, iou_matrix
 from roboemot.world import FrameSpec, WorldModel, feed_world
 
 CFG = RoboEmotConfig()
@@ -202,6 +203,81 @@ def test_tracker_low_score_detection_keeps_track_and_id_survives_a_gap():
 def test_tracker_low_score_alone_never_starts_a_track():
     t = Tracker(TrackerConfig(confirm_hits=1))
     assert t.update([face(50, score=0.3)], 0.0).visible == []
+
+
+SIDE_ON = Detection((144, 76, 164, 144), 0.9, landmarks=np.zeros((5, 2)))  # narrow, taller box
+
+
+def test_tracker_side_on_box_below_match_iou_keeps_its_track_by_centre_distance():
+    # robot 2026-10-23: rebirth IoU p50 0.24, centre distance p50 0.39 heights (face side-on)
+    t = Tracker(CFG.vision.tracker)
+    t.update([face(100)], 0.0)
+    tid = t.update([face(100)], 0.125).visible[0].track_id
+    predicted = np.array([t._tracks[0].box])
+    side = np.array([SIDE_ON.box])
+    assert iou_matrix(predicted, side)[0, 0] == pytest.approx(0.24, abs=0.005)
+    assert distance_matrix(predicted, side)[0, 0] == pytest.approx(0.4, abs=0.005)
+    assert iou_matrix(predicted, side)[0, 0] < CFG.vision.tracker.match_iou
+    res = t.update([SIDE_ON], 0.25)
+    assert [tr.track_id for tr in res.visible] == [tid] and len(t._tracks) == 1
+
+
+def test_tracker_without_the_distance_gate_splits_the_side_on_face():
+    cfg = CFG.vision.tracker.model_copy(
+        update={"match_distance_heights": 0.0, "low_match_distance_heights": 0.0}
+    )
+    t = Tracker(cfg)
+    t.update([face(100)], 0.0)
+    t.update([face(100)], 0.125)
+    t.update([SIDE_ON], 0.25)
+    assert len(t._tracks) == 2
+
+
+def test_tracker_two_faces_one_and_a_half_heights_apart_never_merge():
+    t = Tracker(CFG.vision.tracker)
+    t.update([face(100), face(190)], 0.0)
+    both = t.update([face(100), face(190)], 0.125).visible
+    assert len(both) == 2
+    first = t.update([face(100)], 0.25).visible[0].track_id  # the other one looks away
+    alone = [t.update([face(190)], 0.375 + i * 0.125) for i in range(3)]
+    ids = {tr.track_id for res in alone for tr in res.visible}
+    assert first not in ids
+    assert ids == {both[1].track_id}  # it keeps its own track while it lives
+
+
+def test_tracker_a_new_face_beside_an_unmatched_track_starts_its_own():
+    t = Tracker(TrackerConfig(confirm_hits=1))
+    old = t.update([face(100)], 0.0).visible[0].track_id
+    new = t.update([face(190)], 0.125).visible  # 1.5 heights from the unmatched track
+    assert len(new) == 1 and new[0].track_id != old
+
+
+def test_tracker_iou_matches_win_over_nearer_centres():
+    t = Tracker(TrackerConfig(confirm_hits=1))
+    tid = t.update([face(100)], 0.0).visible[0].track_id
+    tiny = Detection((125, 105, 135, 115), 0.9)  # centre on the track, IoU 0.03
+    res = t.update([tiny, face(115)], 0.125)  # IoU 0.6, 0.25 heights away
+    assert [tr.track_id for tr in res.visible] == [tid]
+    assert res.visible[0].detection.box == face(115).box
+    assert len(t._tracks) == 1  # the tiny box is a duplicate: no track
+
+
+def test_tracker_low_score_pass_uses_its_own_distance_gate():
+    t = Tracker(CFG.vision.tracker)
+    t.update([face(100)], 0.0)
+    tid = t.update([face(100)], 0.125).visible[0].track_id
+    weak_near = Detection((122, 80, 182, 140), 0.3)  # IoU 0.46, 0.37 heights
+    assert t.update([weak_near], 0.25).visible[0].track_id == tid
+    t2 = Tracker(CFG.vision.tracker)
+    t2.update([face(100)], 0.0)
+    t2.update([face(100)], 0.125)
+    weak_far = Detection((130, 80, 190, 140), 0.3)  # IoU 0.33, 0.5 heights: past both
+    assert t2.update([weak_far], 0.25).visible == []
+
+
+def test_tracker_distance_gates_must_stay_below_the_rebirth_gate():
+    with pytest.raises(ValidationError):
+        CFG.vision.model_validate({**CFG.vision.model_dump(), "rebirth_distance_heights": 0.5})
 
 
 def test_tracker_config_rejects_inverted_scores():
@@ -561,6 +637,24 @@ def test_the_object_tracker_has_no_low_score_pass(tmp_path):
     _, _, pipe, _, _ = rig(tmp_path, lambda i: [], object_detector=ObjectMock([]))
     cfg = pipe.object_tracker.cfg
     assert cfg.low_score == cfg.high_score == CFG.vision.object_score_min
+
+
+def test_two_bottles_side_by_side_both_get_object_tracks(tmp_path):
+    # tall boxes 0.3 heights apart: a face-tuned distance gate would call the second a duplicate
+    bottles = [
+        Detection((100, 40, 130, 140), 0.8, "bottle"),
+        Detection((130, 40, 160, 140), 0.8, "bottle"),
+    ]
+    _, _, pipe, _, _ = rig(tmp_path, lambda i: [], object_detector=ObjectMock(bottles))
+    cfg = pipe.object_tracker.cfg
+    assert cfg.match_distance_heights == cfg.low_match_distance_heights == 0
+    t = Tracker(cfg)
+    t.update(bottles, 0.0)
+    assert len(t.update(bottles, 1.0).visible) == 2
+    t_face = Tracker(cfg.model_copy(update={"match_distance_heights": 0.6}))
+    t_face.update(bottles[:1], 0.0)
+    t_face.update(bottles, 1.0)
+    assert len(t_face._tracks) == 1  # why the object tracker keeps the gate off
 
 
 def test_categories_are_readable_names(tmp_path):
