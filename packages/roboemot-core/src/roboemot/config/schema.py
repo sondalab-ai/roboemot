@@ -2712,10 +2712,18 @@ class SpeechMotionConfig(Strict):
     )
     levels: SpeechMotionLevels = param({}, "Peak degrees and shares per liveliness preset")
     attack_ms: float = param(
-        150.0, "Rise time of the two-pole smoother of the beat", unit="ms", ge=10, le=2000
+        150.0,
+        "Time constant of the rise of the two-pole smoother of the beat",
+        unit="ms",
+        ge=10,
+        le=2000,
     )
     release_ms: float = param(
-        300.0, "Fall time of the two-pole smoother of the beat", unit="ms", ge=10, le=5000
+        300.0,
+        "Time constant of the fall of the two-pole smoother of the beat",
+        unit="ms",
+        ge=10,
+        le=5000,
     )
     sway_smoothing_ms: float = param(
         800.0, "Time constant of the slow sway's change of side", unit="ms", ge=50, le=5000
@@ -2729,8 +2737,9 @@ class SpeechMotionConfig(Strict):
     )
     latency_ms: float = param(
         0.0,
-        "The motion samples the timeline this far ahead of the clock (signed): the player delay "
-        "of the robot's speaker, measured on the robot",
+        "The motion samples the timeline at now + this (signed). A speaker that plays its audio "
+        "D ms after the timeline's stamp needs -D (the motion then waits for the sound); "
+        "measured on the robot",
         unit="ms",
         ge=-500,
         le=500,
