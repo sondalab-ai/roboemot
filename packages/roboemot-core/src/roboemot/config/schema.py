@@ -2367,9 +2367,11 @@ class VoiceDirectionConfig(Strict):
         unit="ms", ge=0, le=5000,
     )  # fmt: skip
     face_max_age_s: float = param(
-        1.0,
+        4.0,
         "A person (face) counts as visible when the camera saw it at most this long before the "
-        "audio sample",
+        "audio sample. As long as attention.stale_s by default: face detection runs slower under "
+        "load, at night and while the robot speaks, and a shorter age would reject the owner's "
+        "own voice while the wake-word policy still counts them in view",
         unit="s", ge=0, le=10,
     )  # fmt: skip
     degraded_rule: Literal["engaged", "reject"] = param(
