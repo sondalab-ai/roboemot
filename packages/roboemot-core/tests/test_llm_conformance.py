@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from urllib.parse import quote
 
 import httpx
 import pytest
@@ -634,3 +635,51 @@ async def test_owner_persona_names_are_aliased_on_a_cloud_route_with_a_name_map(
     await run(fake, cloud_route(), config=cfg, pseudonyms=_named("Marta"))
     system = fake.bodies[0]["messages"][0]["content"]
     assert "Marta" not in system and "Person-" in system and "small flat" in system
+
+
+ECHOED_SYSTEM = "Sei Neve.\nLa tua padrona è Marta Rossi.\nVivi a Torino, c'è sempre il sole."
+
+
+@pytest.mark.parametrize(
+    "encode",
+    [
+        pytest.param(lambda t: quote(t), id="percent-encoded"),
+        pytest.param(lambda t: t.replace(" ", "&nbsp;"), id="nbsp-entities"),
+        pytest.param(lambda t: t.replace(" ", "&#32;"), id="numeric-space-entities"),
+        pytest.param(
+            lambda t: " ".join(w[:1] + "­" + w[1:] for w in t.split(" ")), id="soft-hyphens"
+        ),
+        pytest.param(lambda t: quote(t.replace(" ", "&nbsp;")), id="entities-then-percent"),
+    ],
+)
+def test_an_encoded_echo_is_withheld(encode):
+    # security re-review 2026-10-25: each of these reached the reason in clear at f7c9105
+    message = f"bad body: content={encode(ECHOED_SYSTEM)}"
+    reason = _why(status_error({"message": message}), R, sent=(ECHOED_SYSTEM,))
+    assert reason.endswith(f": {ECHO_WITHHELD}")
+    assert "Torino" not in reason and "Rossi" not in reason
+
+
+async def test_an_echo_of_the_aliased_body_is_withheld():
+    cfg = RoboEmotConfig.model_validate(
+        {"persona": {"prompt": PRIVATE_PERSONA}, "privacy": {"pseudonyms_to_cloud": True}}
+    )
+    seen: list[dict] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        seen.append(body)
+        return httpx.Response(400, json={"error": {"message": "bad: " + json.dumps(body)}})
+
+    report = await check_route(
+        cloud_route(),
+        SafetyConfig(),
+        config=cfg,
+        pseudonyms=_named("Marta"),
+        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    assert "Person-" in json.dumps(seen[0])  # the server saw the aliased body
+    dumped = json.dumps(report.to_dict())
+    assert ECHO_WITHHELD in dumped
+    for word in ("Marta", "Person-", "small flat", "cat"):
+        assert word not in dumped

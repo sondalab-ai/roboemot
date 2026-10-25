@@ -21,13 +21,15 @@ policy) and the status alone does not.
 from __future__ import annotations
 
 import datetime as dt
+import html
 import json
 import logging
 import re
+import unicodedata
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 import httpx
 from openai import APIConnectionError, APIStatusError, APITimeoutError
@@ -159,8 +161,8 @@ def _why(exc: Exception, route: LLMRoute, key: str = "", sent: tuple[str, ...] =
     """A short reason. An HTTP status names the path called, so a wrong base URL shows at once:
     only a path under the route's own base path (never one a redirect chose) of plain
     characters, no host, credentials or query. It then adds the server's message, cleaned, with
-    ``key`` (the key the request carried) and any echo of ``sent`` (the request's texts) masked
-    too."""
+    ``key`` (the key the request carried) masked too; a message that echoes ``sent`` (the
+    request's texts) is withheld whole."""
     if isinstance(exc, APIStatusError):
         says = _server_says(exc, route, key, sent)
         return f"HTTP {exc.status_code}{_called_path(exc, route)}{says}"
@@ -213,18 +215,36 @@ def _server_says(
 
 
 def _echoes(message: str, sent: tuple[str, ...]) -> bool:
-    """Whether ``message`` holds ``ECHO_MIN_WORDS`` consecutive words that also occur in a row
-    in one of ``sent``. Both sides are normalised first: JSON escapes decoded (``\\n`` and the
-    other short escapes read as a space, ``\\uXXXX`` as its character, surrogate pairs too),
-    case folded, accents dropped, punctuation and whitespace ignored. So an echo of the request
-    body written as JSON matches like a plain one."""
+    """Whether any reading of ``message`` (see :func:`_readings`) holds ``ECHO_MIN_WORDS``
+    consecutive words that also occur in a row in a reading of one of ``sent``."""
     n = ECHO_MIN_WORDS
     seen: set[tuple[str, ...]] = set()
     for text in sent:
-        words = ECHO_WORD.findall(_fold(text)[0])
-        seen.update(tuple(words[i : i + n]) for i in range(len(words) - n + 1))
-    words = ECHO_WORD.findall(_fold(message)[0])
-    return any(tuple(words[i : i + n]) in seen for i in range(len(words) - n + 1))
+        for form in _folded(text):
+            words = ECHO_WORD.findall(form)
+            seen.update(tuple(words[i : i + n]) for i in range(len(words) - n + 1))
+    for form in _readings(message):
+        words = ECHO_WORD.findall(form)
+        if any(tuple(words[i : i + n]) in seen for i in range(len(words) - n + 1)):
+            return True
+    return False
+
+
+def _readings(message: str) -> set[str]:
+    """The forms a server may have written the request in, decoded and folded: as it is,
+    percent-decoded, HTML-unescaped (``&nbsp;``, ``&#32;``) and both in either order."""
+    forms = {message, unquote(message), html.unescape(message)}
+    forms |= {html.unescape(unquote(message)), unquote(html.unescape(message))}
+    return {folded for form in forms for folded in _folded(form)}
+
+
+def _folded(text: str) -> tuple[str, str]:
+    """``text`` normalised two ways: JSON escapes decoded (``\\n`` and the other short escapes
+    read as a space, ``\\uXXXX`` as its character, surrogate pairs too), case folded, accents
+    dropped; then once with format characters (category Cf: soft hyphen, zero-width space)
+    kept as word breaks and once with them removed, as either may hide a word."""
+    folded = _fold(text)[0]
+    return folded, "".join(c for c in folded if unicodedata.category(c) != "Cf")
 
 
 def _shares_fragment(run: str, key: str) -> bool:
