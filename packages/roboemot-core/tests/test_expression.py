@@ -433,6 +433,7 @@ def test_manifest_behaviour_may_only_set_known_keys_and_is_audited(manifest):
         "expression_map",
         "gesture_map",
         "motion",
+        "speech_motion_map",
         "voice",
     ]
 

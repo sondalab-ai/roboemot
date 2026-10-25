@@ -178,3 +178,33 @@ behaviour:                      # config layer 2 (SPEC 11A): this robot's defaul
         antenna_right: [[0.0, 0], [0.8, 25], [2.0, 25], [3.0, 0]]
         antenna_left:  [[0.0, 0], [0.8, -25], [2.0, -25], [3.0, 0]]
         head.pitch:    [[0.0, 0], [1.0, -12], [2.0, -12], [3.0, 0]]
+  # Speaking motion (SPEC 7, Speaking motion): the channels and shapes of the layer that moves
+  # while the robot speaks. `beat` and `sway` map a channel to a sign. The gestures use the
+  # expression entry format, but the keyframes are the shape only: the largest offset is scaled
+  # to the preset's degrees (speech_motion.levels). head.pitch positive is down (the beat and the
+  # nod dip, the breath lifts); the tilt rolls like curiosity and lifts a little; the accent flicks
+  # the antennas outward (right -, left +). Minjerk halves of 0.5 s or more, so the motion still
+  # reads under the dev fallback caps (0.5 rad/s, 2 rad/s^2): a min-jerk move of D rad needs
+  # T >= sqrt(5.77 D / a). Never the body yaw or a translation. Signs not yet checked on the robot.
+  speech_motion_map:
+    beat: {head.pitch: 1}
+    sway: {head.yaw: 1}
+    phrase_nod:                 # dip in the pause after a phrase, 1.2 s
+      curve: minjerk
+      channels:
+        head.pitch: [[0.0, 0], [0.6, 1], [1.2, 0]]
+    question_tilt:              # roll and a slight lift, held at 0.6 s, back in 0.8 s
+      curve: minjerk
+      hold_at_s: 0.6
+      channels:
+        head.roll:  [[0.0, 0], [0.6, 1], [1.4, 0]]
+        head.pitch: [[0.0, 0], [0.6, -0.3], [1.4, 0]]
+    accent:                     # outward flick on an emphasis, 1.2 s
+      curve: minjerk
+      channels:
+        antenna_right: [[0.0, 0], [0.6, -1], [1.2, 0]]
+        antenna_left:  [[0.0, 0], [0.6, 1], [1.2, 0]]
+    breath:                     # inhale lift before a sentence, 1 s
+      curve: minjerk
+      channels:
+        head.pitch: [[0.0, 0], [0.5, -1], [1.0, 0]]

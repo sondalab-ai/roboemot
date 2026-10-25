@@ -366,6 +366,14 @@ class SpeechTimeline:
                     return replace(s)
             return None
 
+    def sentence(self, sentence_id: int) -> SpeechSentence | None:
+        """The sentence ``sentence_id`` while it is in the history; a copy."""
+        with self._lock:
+            for s in reversed(self._sentences):
+                if s.id == sentence_id:
+                    return replace(s)
+            return None
+
     def last_cut(self) -> float | None:
         """Clock stamp of the last barge-in truncation, None before any."""
         with self._lock:

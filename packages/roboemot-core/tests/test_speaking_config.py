@@ -99,3 +99,12 @@ def test_a_runtime_override_naming_body_yaw_is_refused(manifest):
     stack = stack_with(manifest, {})
     with pytest.raises(ConfigError, match="turns the body"):
         stack.set("speech_motion_map.sway", {"body_yaw": 1})
+
+
+def test_the_shipped_map_passes_and_names_no_body_yaw(manifest):
+    stack = ConfigStack()
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw="body_yaw")
+    smap = stack.effective().speech_motion_map
+    named = {c for names in smap.channels().values() for c in names}
+    assert named and "body_yaw" not in named
+    assert named <= manifest.channels

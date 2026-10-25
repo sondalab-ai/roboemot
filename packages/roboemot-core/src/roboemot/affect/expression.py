@@ -309,5 +309,10 @@ class ExpressionRenderer:
         """Whether an expression is being fed right now."""
         return bool(self._last)
 
+    @property
+    def channels(self) -> frozenset[str]:
+        """The channels the expression being fed drives right now (empty when idle)."""
+        return frozenset(self._last)
+
 
 __all__ = ["SOURCE", "ExpressionRenderer", "build_primitive"]
