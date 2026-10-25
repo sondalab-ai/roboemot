@@ -435,11 +435,13 @@ class Router:
                             yield done
             for done in self._complete(calls, sent):
                 yield done
-            tokens = self._tokens(usage_tokens, prompt_chars, out_chars)
+            tokens = self._tokens(usage_tokens, prompt_chars, out_chars + reasoning_chars)
             yield Done(route.name, tokens, usage_tokens is None, finish_reason, reasoning_chars)
         finally:
             # Charged once, also on barge-in / timeout / error (review finding 9).
-            self._charge(route.name, self._tokens(usage_tokens, prompt_chars, out_chars))
+            # Reasoning is billed by the provider: it counts in the estimate like the answer.
+            estimate = self._tokens(usage_tokens, prompt_chars, out_chars + reasoning_chars)
+            self._charge(route.name, estimate)
             if stream is not None:
                 with contextlib.suppress(Exception):
                     await stream.close()
@@ -489,8 +491,12 @@ class Router:
 
 
 def _reasoning_chars(delta: Any) -> int:
-    """Characters in a delta's non-standard reasoning fields (0 when the server sends none)."""
-    return sum(len(v) for f in REASONING_FIELDS if isinstance(v := getattr(delta, f, None), str))
+    """Characters in a delta's non-standard reasoning fields, the longer one when both are
+    present (some servers stream the same text in both); 0 when the server sends none."""
+    return max(
+        (len(v) for f in REASONING_FIELDS if isinstance(v := getattr(delta, f, None), str)),
+        default=0,
+    )
 
 
 def _outgoing(

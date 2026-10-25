@@ -174,8 +174,9 @@ def _llm(args: argparse.Namespace) -> int:
     if cfg.privacy.pseudonyms_to_cloud:
         print(
             "warning: pseudonyms are on, but the CLI does not read the registry; on a route "
-            "that is not local the check sends the library's default persona and rules instead "
-            "of yours (no registry names are in them)",
+            "that is not local the check sends a system prompt built from the library's default "
+            "config instead of yours (persona, register, rules, mood labels; no registry names "
+            "are in them)",
             file=sys.stderr,
         )
 

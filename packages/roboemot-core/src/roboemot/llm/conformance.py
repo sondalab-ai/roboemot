@@ -37,7 +37,7 @@ from ..persona import apply_to_register, effects
 from ..redact import scrub_text
 from ..secret_store import SECRET_REF, no_secrets
 from .prompt import system_prompt
-from .pseudonyms import Pseudonyms, route_is_local
+from .pseudonyms import Pseudonyms, _fold, route_is_local
 from .router import Done, FirstToken, Router, TextDelta, ToolCall, build_messages
 
 log = logging.getLogger(__name__)
@@ -76,10 +76,12 @@ TOKEN_RUN = re.compile(r"[A-Za-z0-9_+=-]{20,}")
 KEY_FRAGMENT_MIN_CHARS = 6
 KEY_FRAGMENT = re.compile(rf"[A-Za-z0-9_+/=.:-]{{{KEY_FRAGMENT_MIN_CHARS},}}")
 MASK = "[masked]"
-# A server message that echoes the request: any run of this many consecutive words found in
-# the texts sent (the system prompt, the user turn) is masked, so no prompt text reaches a reason.
+# A server message that echoes the request (any run of this many consecutive words of the texts
+# sent, both sides with JSON escapes decoded and case folded) is withheld whole: masking only
+# the matched runs would leave the short pieces between them, where a name or a place sits.
 ECHO_MIN_WORDS = 4
 ECHO_WORD = re.compile(r"[^\W_]+")
+ECHO_WITHHELD = "[server message withheld: it quoted the request]"
 # The ``[mood=x]`` tags of ``voice.mood_source: llm_tagged`` (as ``voice.prosody.TAG``).
 MOOD_TAG = re.compile(r"\[mood=([a-z_]+)\]\s*")
 
@@ -184,18 +186,19 @@ def _server_says(
     """``: <message>`` from the server's JSON error, or empty. The message may echo the request
     or a key: the key sent, the route's literal key, any run of 6+ characters found inside a
     key and every key-like run are masked, then the shared redactor runs; control characters
-    and repeated spaces are removed and the length is capped. Any run of ``ECHO_MIN_WORDS``
-    words found in ``sent`` (the system prompt built from the config, the user turn) is masked
-    first, so an echoed prompt never reaches the reason."""
+    and repeated spaces are removed and the length is capped. A message that quotes ``sent``
+    (the system prompt built from the config, the user turn; see :func:`_echoes`) is replaced
+    whole by ``ECHO_WITHHELD``, so an echoed prompt never reaches the reason."""
     body = exc.body
     if isinstance(body, dict) and isinstance(body.get("error"), dict):
         body = body["error"]
     message = body.get("message") if isinstance(body, dict) else None
     if not isinstance(message, str):
         return ""
+    if _echoes(message, sent):
+        return f": {ECHO_WITHHELD}"
     literal = "" if SECRET_REF.fullmatch(route.api_key) else route.api_key
     keys = [k for k in (key, literal) if k and k != "none"]
-    message = _mask_echo(message, sent)
     for k in keys:
         message = message.replace(k, MASK)
     message = KEY_FRAGMENT.sub(
@@ -209,30 +212,19 @@ def _server_says(
     return f": {message}" if message else ""
 
 
-def _mask_echo(message: str, sent: tuple[str, ...]) -> str:
-    """``message`` with every run of ``ECHO_MIN_WORDS``+ consecutive words that also occur in a
-    row in one of ``sent`` replaced by ``MASK`` (case-insensitive, punctuation ignored)."""
+def _echoes(message: str, sent: tuple[str, ...]) -> bool:
+    """Whether ``message`` holds ``ECHO_MIN_WORDS`` consecutive words that also occur in a row
+    in one of ``sent``. Both sides are normalised first: JSON escapes decoded (``\\n`` and the
+    other short escapes read as a space, ``\\uXXXX`` as its character, surrogate pairs too),
+    case folded, accents dropped, punctuation and whitespace ignored. So an echo of the request
+    body written as JSON matches like a plain one."""
     n = ECHO_MIN_WORDS
-    seen = set()
+    seen: set[tuple[str, ...]] = set()
     for text in sent:
-        words = [w.lower() for w in ECHO_WORD.findall(text)]
+        words = ECHO_WORD.findall(_fold(text)[0])
         seen.update(tuple(words[i : i + n]) for i in range(len(words) - n + 1))
-    found = list(ECHO_WORD.finditer(message))
-    hidden = [False] * len(found)
-    for i in range(len(found) - n + 1):
-        if tuple(m.group(0).lower() for m in found[i : i + n]) in seen:
-            hidden[i : i + n] = [True] * n
-    out, at, i = [], 0, 0
-    while i < len(found):
-        if not hidden[i]:
-            i += 1
-            continue
-        j = i
-        while j + 1 < len(found) and hidden[j + 1]:
-            j += 1
-        out += [message[at : found[i].start()], MASK]
-        at, i = found[j].end(), j + 1
-    return "".join(out) + message[at:]
+    words = ECHO_WORD.findall(_fold(message)[0])
+    return any(tuple(words[i : i + n]) in seen for i in range(len(words) - n + 1))
 
 
 def _shares_fragment(run: str, key: str) -> bool:
@@ -378,8 +370,10 @@ async def check_route(
 
     cfg = config or RoboEmotConfig()
     if pseudonyms is None and cfg.privacy.pseudonyms_to_cloud and not route_is_local(route):
-        # The owner's free text (persona, extra rules) may name a person, and nothing would
-        # alias it on this route: the library's defaults stand in for it.
+        # The owner's free text may name a person (persona prompt, register.persona_fragment,
+        # safety.extra_prompt_rules, affect.labels, and any free-text field added later) and
+        # nothing would alias it on this route: the whole config is replaced by the library's
+        # defaults, never a list of fields reset (a new field would leak).
         cfg = RoboEmotConfig()
     ask = await _ask(router, route, realistic_turn(cfg), None, pseudonyms)
     report.first_token_s = ask.timing.seconds
@@ -399,7 +393,8 @@ async def check_route(
 def realistic_turn(cfg: RoboEmotConfig) -> list[dict[str, Any]]:
     """The messages of a first turn as a conversation sends them: the system prompt (persona,
     register as the persona shapes it, rules, safety block) with Italian as the language, and
-    ``USER_TURN``. No robot name, summaries or history: nothing about a person."""
+    ``USER_TURN``. Left out: the robot name, the speaker and scene summaries, the affect line
+    and the history (nothing about a person; a few tokens less than a real turn)."""
     register = apply_to_register(cfg.register.params, effects(cfg.persona))
     system = system_prompt(cfg, register, language=CHECK_LANGUAGE)
     return build_messages(
@@ -418,9 +413,15 @@ async def _tool_round_trip(
     messages: list[dict[str, Any]] = [{"role": "user", "content": TOOL_PROMPT}]
     first = await _ask(router, route, messages, TOOLS, pseudonyms)
     if first.error is not None:
-        return CheckResult(TOOL_ROUND_TRIP, FAIL, f"tool request failed: {first.why}")
+        why = f"tool request failed: {first.why}{_reasoned(first)}"
+        return CheckResult(TOOL_ROUND_TRIP, FAIL, why)
     if not first.calls:
-        return CheckResult(TOOL_ROUND_TRIP, FAIL, "no tool call in the reply")
+        why = (
+            _no_text(first, route, "no tool call in the reply")
+            if not first.text.strip()
+            else "no tool call in the reply"
+        )
+        return CheckResult(TOOL_ROUND_TRIP, FAIL, why)
     call = first.calls[0]
     if call.name != TOOL_NAME:
         return CheckResult(TOOL_ROUND_TRIP, FAIL, "tool call names an unknown tool")

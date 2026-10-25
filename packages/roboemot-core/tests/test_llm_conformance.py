@@ -11,6 +11,7 @@ from openai import APIStatusError
 from roboemot.config.schema import LLMCheckConfig, LLMRoute, RoboEmotConfig, SafetyConfig
 from roboemot.llm import Router
 from roboemot.llm.conformance import (
+    ECHO_WITHHELD,
     FAIL,
     PASS,
     SERVER_TEXT_MAX_CHARS,
@@ -476,10 +477,12 @@ async def test_plain_text_has_no_reasoning_hint():
 
 
 async def test_reasoning_past_the_first_token_timeout_fails_latency_with_a_hint():
+    gate = asyncio.Event()  # never set: the stream stays open until the router closes it
+
     async def slow() -> httpx.Response:
         async def body():
             yield sse([thought("w" * 12)])[: -len(b"data: [DONE]\n\n")]
-            await asyncio.sleep(2)
+            await gate.wait()
             yield b"data: [DONE]\n\n"
 
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body())
@@ -553,11 +556,24 @@ async def test_a_local_route_gets_the_owners_persona_with_pseudonyms_on():
     assert "Marta" in fake.bodies[0]["messages"][0]["content"]
 
 
-def test_an_echoed_prompt_is_masked_in_the_server_message():
+def test_an_echoed_prompt_withholds_the_whole_server_message():
     message = f"Invalid request: '{PRIVATE_PERSONA.upper()}' is too long for model org/m-3.5"
     reason = _why(status_error({"message": message}), R, sent=(PRIVATE_PERSONA, USER_TURN))
-    assert "MARTA" not in reason and "CAT" not in reason
-    assert reason.endswith(": Invalid request: '[masked].' is too long for model org/m-3.5")
+    assert reason == f"HTTP 404 at /v1/chat/completions: {ECHO_WITHHELD}"
+
+
+def test_a_server_message_that_quotes_nothing_is_shown():
+    message = "The `:free` variant has been retired; use `minimax/minimax-m3.1-flash` instead."
+    reason = _why(status_error({"message": message}), R, sent=(PRIVATE_PERSONA, USER_TURN))
+    assert reason.endswith(f": {message}")
+
+
+@pytest.mark.parametrize("ensure_ascii", [True, False])
+def test_an_echo_written_as_json_is_withheld(ensure_ascii):
+    system = "Sei Neve.\nLa tua padrona è Marta Rossi, c'è sempre il sole.\nYou live in Torino."
+    message = "bad request body: " + json.dumps({"content": system}, ensure_ascii=ensure_ascii)
+    reason = _why(status_error({"message": message}), R, sent=(system,))
+    assert reason.endswith(f": {ECHO_WITHHELD}")
 
 
 async def test_an_echo_of_the_realistic_turn_never_reaches_the_report():
@@ -576,3 +592,45 @@ async def test_an_echo_of_the_realistic_turn_never_reaches_the_report():
     )
     dumped = json.dumps(report.to_dict())
     assert "Marta" not in dumped and "small flat" not in dumped and "HTTP 400" in dumped
+    assert ECHO_WITHHELD in dumped
+
+
+async def test_a_json_echo_of_the_request_body_never_reaches_the_report():
+    # review 2026-10-25: "\n" in the escaped JSON broke the word runs, a short line leaked
+    persona = "You are Neve, a small robot.\nYour owner is Marta Rossi.\nYou live in Torino."
+    cfg = RoboEmotConfig.model_validate({"persona": {"prompt": persona}})
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        return httpx.Response(
+            400, json={"error": {"message": "bad request body: " + json.dumps(body)}}
+        )
+
+    report = await check_route(
+        route(),
+        SafetyConfig(),
+        config=cfg,
+        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    dumped = json.dumps(report.to_dict())
+    for word in ("Torino", "Marta", "Neve", "owner"):
+        assert word not in dumped
+    assert ECHO_WITHHELD in dumped
+
+
+async def test_a_tool_request_out_of_tokens_is_named():
+    report = await run(Fake(tool=reply([thought("r" * 7), ended(chunk())])), route(max_tokens=90))
+    assert reason(report, "tool_round_trip") == (
+        "ran out of tokens before answering (max_tokens 90); "
+        "the model reasoned for 7 chars before answering"
+    )
+
+
+async def test_owner_persona_names_are_aliased_on_a_cloud_route_with_a_name_map():
+    cfg = RoboEmotConfig.model_validate(
+        {"persona": {"prompt": PRIVATE_PERSONA}, "privacy": {"pseudonyms_to_cloud": True}}
+    )
+    fake = Fake()
+    await run(fake, cloud_route(), config=cfg, pseudonyms=_named("Marta"))
+    system = fake.bodies[0]["messages"][0]["content"]
+    assert "Marta" not in system and "Person-" in system and "small flat" in system

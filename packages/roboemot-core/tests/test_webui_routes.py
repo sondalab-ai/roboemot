@@ -323,3 +323,21 @@ def test_a_route_check_sends_the_configured_system_prompt(tmp_path):
     finally:
         srv.stop()
     assert "PERSONA-4c1d" in fake.bodies[0]["messages"][0]["content"]
+
+
+def test_a_cloud_route_check_without_a_name_source_keeps_owner_text_out(tmp_path):
+    cloud = {**ROUTE, "base_url": "https://api.example.com/v1"}
+    cfg = RoboEmotConfig(
+        webui={"bind": "127.0.0.1", "port": 0},
+        llm_routes=[cloud],
+        privacy={"pseudonyms_to_cloud": True},
+        persona={"prompt": "PERSONA-4c1d lives with Marta."},
+    )
+    fake = Fake()
+    srv, client = serve(tmp_path, cfg, checker_for(cfg, fake))
+    try:
+        assert client.request("POST", "/api/routes/lan/check", {}).status == 202
+        assert finish(client)["last_check"] is not None
+    finally:
+        srv.stop()
+    assert fake.bodies and all("PERSONA-4c1d" not in json.dumps(b) for b in fake.bodies)

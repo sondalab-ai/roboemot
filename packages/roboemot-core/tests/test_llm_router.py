@@ -576,3 +576,30 @@ async def test_length_finish_with_only_reasoning_is_recorded():
     assert timing.seconds is None  # reasoning is not a first token
     assert timing.reasoning_chars == 40 and timing.finish_reason == "length"
     assert evs[0].finish_reason == "length"
+
+
+async def test_reasoning_counts_in_the_estimated_charge_without_usage():
+    handler, _ = _canned([_reasoning("x" * 400), _ended(chunk(), "length")])
+    r = Router(
+        [route("lan", "lan.local")],
+        SafetyConfig(),
+        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    msgs = [{"role": "user", "content": "x"}]
+    evs = [ev async for ev in r.stream_route(r.routes[0], msgs, None, FirstToken())]
+    assert r.used("lan") == (1 + 400) // 4 == evs[-1].tokens and evs[-1].estimated
+
+
+async def test_reasoning_streamed_in_both_fields_counts_once():
+    both = _reasoning("abcdef")
+    both["choices"][0]["delta"]["reasoning_content"] = "abcdef"
+    handler, _ = _canned([both, chunk("Ciao")])
+    r = Router(
+        [route("lan", "lan.local")],
+        SafetyConfig(),
+        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    timing = FirstToken()
+    msgs = [{"role": "user", "content": "x"}]
+    _ = [ev async for ev in r.stream_route(r.routes[0], msgs, None, timing)]
+    assert timing.reasoning_chars == 6
