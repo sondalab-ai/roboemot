@@ -29,7 +29,7 @@ def manifest():
 @pytest.fixture(scope="module")
 def cfg(manifest):
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw=None)
     return stack.effective()
 
 
@@ -124,7 +124,7 @@ DESK = ["neck_pan", "neck_tilt"]
 
 def desk_stack(behaviour: dict, **layers) -> ConfigStack:
     stack = ConfigStack(**layers)
-    stack.set_manifest_behaviour(behaviour, DESK)
+    stack.set_manifest_behaviour(behaviour, DESK, body_yaw=None)
     return stack
 
 
@@ -159,17 +159,17 @@ def test_translation_dofs_are_not_channels(manifest):
     stack = ConfigStack()
     behaviour = {"expression_map": {"joy": {"channels": {"head.x": SWEEP}}}}
     with pytest.raises(ConfigError, match="unknown channel 'head.x'"):
-        stack.set_manifest_behaviour(behaviour, manifest.channels)
+        stack.set_manifest_behaviour(behaviour, manifest.channels, body_yaw=None)
 
 
 def test_a_later_layer_cannot_name_a_missing_channel():
     app = {"expression_map": {"joy": {"channels": {"antenna_left": SWEEP}}}}
     stack = ConfigStack(app=app)
     with pytest.raises(ConfigError, match="unknown channel 'antenna_left'"):
-        stack.set_manifest_behaviour({}, DESK)
+        stack.set_manifest_behaviour({}, DESK, body_yaw=None)
     assert stack.channels is None
     stack.app = {}
-    stack.set_manifest_behaviour({}, DESK)
+    stack.set_manifest_behaviour({}, DESK, body_yaw=None)
     stack.app = app
     with pytest.raises(ConfigError, match="unknown channel 'antenna_left'"):
         stack.effective()

@@ -16,6 +16,7 @@ from typing import Any
 from roboemot.affect.expression import ExpressionRenderer
 from roboemot.affect.register import RegisterTracker
 from roboemot.affect.runner import AffectRunner
+from roboemot.affect.speaking import SpeakingRenderer
 from roboemot.attention import AttentionSelector
 from roboemot.bus import Bus
 from roboemot.circadian import CircadianModel, CircadianRunner, IdleLightReader, SystemClock
@@ -62,6 +63,7 @@ class RuntimeHost:
     register_tracker: RegisterTracker | None = None  # people in view -> register.active
     yes_no: YesNoGestures | None = None  # spoken yes / no -> nod / shake
     expression: ExpressionRenderer | None = None  # affect label -> additive motion
+    speaking: SpeakingRenderer | None = None  # speech timeline -> additive motion (SPEC 7)
     reflexes: ReflexEngine | None = None  # runs on the motion loop's tick (SPEC 10)
     audio: AudioHub | None = None  # the one reader of the microphone (reflex level, voice)
     speaker: Speaker | None = None  # playback; only when voice.enabled

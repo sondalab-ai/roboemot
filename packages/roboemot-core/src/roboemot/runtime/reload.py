@@ -81,6 +81,12 @@ def make_reload(host: RuntimeHost, p: Pipeline) -> Callable[[Any], None]:
                     cfg.gesture_map,
                 ),
             ),
+            (
+                "speaking",
+                lambda: p.speaking.apply_config(
+                    cfg.speech_motion, cfg.speech_motion_map, cfg.expression.max_amplitude
+                ),
+            ),
             ("responder", lambda: _apply_responder(p, cfg)),
             ("network", lambda: _apply_network(p, cfg)),
         ]

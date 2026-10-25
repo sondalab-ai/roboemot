@@ -19,6 +19,7 @@ from roboemot import paths
 from roboemot.affect.expression import ExpressionRenderer
 from roboemot.affect.register import RegisterTracker
 from roboemot.affect.runner import AffectRunner
+from roboemot.affect.speaking import SpeakingRenderer
 from roboemot.attention import AttentionSelector, GazeController
 from roboemot.bus import Bus
 from roboemot.circadian import CircadianRunner, IdleLightReader
@@ -69,6 +70,7 @@ class Pipeline:
 
     cfg: Any
     expression: ExpressionRenderer
+    speaking: SpeakingRenderer
     responder: OfflineResponder
     loop: MotionLoop
     bus: Bus
@@ -131,8 +133,10 @@ def assemble(
         platform.frame_spec(),
         platform.reflex_map(),
     )
-    # the expression map and its channels (SPEC 11A)
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
+    # the expression map and its channels (SPEC 11A); the speaking motion never turns the body
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour, manifest.channels, body_yaw=gaze_map.body_yaw
+    )
     cfg = stack.effective()
     expression = host.expression = ExpressionRenderer(
         cfg.expression,
@@ -238,6 +242,19 @@ def assemble(
         engaged=lambda: selector.engaged,
     )
     expression.circadian_factor = circ.amplitude_factor
+    # Speaking motion (SPEC 7): reads the speech timeline of the speech output, which is built
+    # after assembly (startup), so lazily; ducks the channels of a playing expression.
+    speaking = host.speaking = SpeakingRenderer(
+        cfg.speech_motion,
+        cfg.speech_motion_map,
+        manifest.dofs,
+        body_yaw=gaze_map.body_yaw,
+        max_amplitude=cfg.expression.max_amplitude,
+        timeline=lambda: out.timeline if (out := host.speech_output) is not None else None,
+        listening=lambda: phase.listening,
+        ducked=lambda: expression.channels,
+    )
+    speaking.circadian_factor = circ.amplitude_factor
     host.circadian = circ.model if cfg.circadian.enabled else None
     # One lock for the vision pump and the idle light reader: the camera is read by one
     # thread at a time.
@@ -350,6 +367,7 @@ def assemble(
     return Pipeline(
         cfg=cfg,
         expression=expression,
+        speaking=speaking,
         responder=responder,
         loop=loop,
         bus=bus,
