@@ -208,6 +208,9 @@ class VoiceListener:
         snap["latency"] = self._fast.stats.snapshot()
         snap["wake"] = self._gate.snapshot(self._clock())
         snap["wake_phrases_out_of_vocab"] = self._fast.wake_out_of_vocab()
+        grammar = self._fast.grammar_snapshot()
+        if grammar is not None:
+            snap["grammar"] = grammar
         snap["vad"] = self._endpointer.snapshot()
         return snap
 
@@ -401,6 +404,7 @@ class VoiceListener:
             rate,
             last_speech_stamp=ev.last_speech_stamp,
             endpoint_stamp=ev.endpoint_stamp,
+            grammar_audio=ev.audio,
         )
         addressed = self._gate.decide(
             wake_word=fast.wake_word,
