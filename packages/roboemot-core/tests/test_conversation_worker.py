@@ -66,6 +66,8 @@ class Server:
                     raise httpx.ReadError("broken")
                 elif self.hang and piece == "HANG":
                     await asyncio.sleep(3600)
+                elif isinstance(piece, dict):  # a raw chunk (e.g. a reasoning delta)
+                    yield f"data: {json.dumps(piece)}\n\n".encode()
                 else:
                     yield sse_piece(piece)
             yield b"data: [DONE]\n\n"
@@ -616,9 +618,21 @@ def test_the_turn_event_has_ids_and_lengths_only(rigs):
     event = rig.events[0]
     assert set(event) == {
         "turn", "language", "chars_in", "chars_out", "sentences", "route", "tokens",
-        "tool_calls", "rounds", "outcome",
+        "reasoning_chars", "tool_calls", "rounds", "outcome",
     }  # fmt: skip
     assert event["route"] == "lan" and event["sentences"] == 1
+
+
+def test_reasoning_deltas_are_counted_for_the_report_never_spoken(rigs):
+    rig = rigs()
+    thought = chunk()
+    thought["choices"][0]["delta"]["reasoning"] = "THOUGHT-1f2a" * 3
+    rig.server.scripts["lan.local"] = [thought, "Ciao."]
+    rig.turn("ciao")
+    assert rig.speech.texts() == ["Ciao."]
+    assert rig.events[0]["reasoning_chars"] == len("THOUGHT-1f2a") * 3
+    assert rig.worker.snapshot()["last_reasoning_chars"] == len("THOUGHT-1f2a") * 3
+    assert "THOUGHT" not in json.dumps(rig.events) + json.dumps(rig.worker.snapshot())
 
 
 # ------------------------------------------------------------------ review fixes

@@ -39,6 +39,7 @@ BEHAVIOUR_MODULES = [
     "voice/piper_worker.py",
     "voice/openai_speech.py",
     "voice/speech.py",
+    "voice/envelope.py",
     "voice/yes_no.py",
     "voice/factory.py",
     "voice/pipeline.py",
