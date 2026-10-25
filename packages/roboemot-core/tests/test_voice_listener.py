@@ -116,6 +116,8 @@ class Rig:
             bearing=kw.pop("bearing", lambda now: None),
             target_entry=kw.pop("target_entry", lambda: None),
             clock=lambda: self.now,
+            names=kw.pop("names", None),
+            grammar=kw.pop("grammar", None),
         )
         vad = EnergyVAD(RATE, FRAME)
         self.listener = VoiceListener(

@@ -22,6 +22,9 @@ class FakeASR:
     def missing_words(self, language, words):
         return None
 
+    def grammar_words(self, language, samples, phrases):
+        return None
+
 
 class Bearing:
     def __init__(self):

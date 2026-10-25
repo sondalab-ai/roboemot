@@ -4,6 +4,7 @@
 hub's voice queue, with the app-side lookups they need: the robot's sound bearing in the base
 frame (a ``BearingSource``), the attended person, whether an enrolled person is in view, and the
 speaker's language preference.
+The fast path gets the grammar pass (SPEC 8 stage 3) over the same Vosk models.
 The barge-in detector (SPEC 8 stage 8) is built with the listener, on its own Silero instance, and
 hooked to the listener's speaking chunks; the app binds its actions (stop the speech, interrupt the
 conversation, resume the listener) once the speech output and the conversation exist. It returns
@@ -28,6 +29,7 @@ from roboemot.voice.activity import SpeechActivity
 from roboemot.voice.asr import VoskASR, resolve_language
 from roboemot.voice.bargein import BargeIn, PlaybackReference
 from roboemot.voice.fastpath import Emit, FastPath
+from roboemot.voice.grammar import GrammarSpotter
 from roboemot.voice.listener import Utterance, VoiceListener
 from roboemot.voice.robot_name import RobotName
 from roboemot.voice.vad import Endpointer, SileroVAD
@@ -124,6 +126,9 @@ def build_listener(
         target_entry=lambda: person.entry_id if (person := attended_person()) else None,
         names=names,
         on_answer=on_answer,
+        grammar=GrammarSpotter(
+            cfg.voice.grammar, asr.grammar_words, asr.missing_words, cfg.voice.sample_rate_hz
+        ),
     )
     bargein = BargeIn(
         cfg,
