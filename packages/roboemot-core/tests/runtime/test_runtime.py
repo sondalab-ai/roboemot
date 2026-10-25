@@ -85,6 +85,7 @@ def test_the_runtime_runs_a_non_reachy_robot_and_stops_within_the_budget():
     try:
         assert wait_for(lambda: host.diagnostics is not None)
         assert wait_for(lambda: host.expression is not None and host.circadian_runner is not None)
+        assert host.speaking is not None  # idle: the desk head ships no speech_motion_map
         assert wait_for(breathing)
     finally:
         started = time.monotonic()

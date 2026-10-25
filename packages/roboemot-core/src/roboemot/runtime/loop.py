@@ -41,7 +41,7 @@ def run_loop(
     stop_event: threading.Event,
 ) -> None:
     """Tick until ``stop_event`` is set: circadian, affect, attention, expression, scanning,
-    idle breathing and the commands of every layer into the motion loop."""
+    idle breathing, speaking motion and the commands of every layer into the motion loop."""
     fx_for, fx = None, None
     while not stop_event.is_set():
         now = time.monotonic()
@@ -74,8 +74,10 @@ def run_loop(
             fx_for, fx = live.persona, persona_effects(live.persona)
         register = p.tracker.tick(now, live.register, fx)
         p.expression.set_register(register)
+        p.speaking.set_register(register)
         if state is not None:
             p.expression.update(state, register, now)
+            p.speaking.set_affect(state)
         p.perception.enrollment.expire()
         if host.autoenroll is not None:
             host.autoenroll.tick()  # retention does not wait for a sighting
@@ -117,5 +119,7 @@ def run_loop(
         for cmd in p.responder.commands(now):
             p.loop.feed(cmd)
         for cmd in p.expression.commands(now):
+            p.loop.feed(cmd)
+        for cmd in p.speaking.commands(now):  # after the expression: it ducks under it
             p.loop.feed(cmd)
         stop_event.wait(1.0 / live.motion.app_tick_hz)
