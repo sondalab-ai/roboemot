@@ -219,9 +219,10 @@ def _voice(args: argparse.Namespace) -> int:
     if args.manifest:
         from .manifest import load_manifest
 
-        # only the behaviour block (config layer 2) is used: nothing moves
+        # only the behaviour block (config layer 2) is used: nothing moves, so no platform is
+        # loaded for its body yaw (the runtime refuses a body turn in the speaking map at start)
         m = load_manifest(Path(args.manifest), allow_unmeasured_dynamics=args.dev)
-        stack.set_manifest_behaviour(m.model.behaviour, m.channels)
+        stack.set_manifest_behaviour(m.model.behaviour, m.channels, body_yaw=None)
     cfg = stack.effective()
     root = voice_models.models_dir(args.voice_dir or cfg.voice.models_dir, cfg.data_dir)
     backend = PiperBackend(

@@ -48,12 +48,28 @@ def test_the_presets_ship_the_design_table_and_lively_is_the_default():
         assert got == values, field
 
 
-def test_every_new_field_has_a_range_and_the_degrees_a_unit():
+def test_every_new_field_has_a_range_and_the_timed_ones_a_unit():
     for model in (SpeechMotionConfig, type(SpeechMotionConfig().levels.natural)):
         for name, f in model.model_fields.items():
             extra = f.json_schema_extra or {}
             if name.endswith(("_deg", "_ms", "_s")):
                 assert extra.get("unit"), name
+            if f.annotation in ("float", "int", float, int):
+                bounds = {type(m).__name__ for m in f.metadata}
+                assert {"Ge", "Le"} <= bounds, name
+
+
+def test_the_command_ttl_must_outlast_one_app_tick():
+    with pytest.raises(ValidationError, match="command_ttl_s"):
+        RoboEmotConfig.model_validate(
+            {"speech_motion": {"command_ttl_s": 0.05}, "motion": {"app_tick_hz": 20}}
+        )
+    RoboEmotConfig.model_validate({"speech_motion": {"command_ttl_s": 0.06}})
+
+
+def test_body_yaw_must_be_given_when_installing_the_manifest(manifest):
+    with pytest.raises(TypeError):
+        ConfigStack().set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
 
 
 def test_mood_gain_labels_must_be_affect_labels_and_fade_fits_the_crossfade():

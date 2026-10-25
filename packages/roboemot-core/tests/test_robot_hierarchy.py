@@ -245,6 +245,7 @@ def test_core_builds_config_and_renderer_for_a_non_reachy_manifest():
             "circadian_motion": {"rest_pose_deg": {"neck_tilt": 10}},
         },
         manifest.channels,
+        body_yaw=None,
     )
     cfg = stack.effective()
     ExpressionRenderer(

@@ -32,7 +32,7 @@ def manifest():
 @pytest.fixture(scope="module")
 def cfg(manifest) -> RoboEmotConfig:
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw=None)
     return stack.effective()
 
 
@@ -374,7 +374,7 @@ def test_a_reload_swaps_the_map_and_parameters(cfg, manifest):
 def test_the_manifest_behaviour_becomes_part_of_the_installed_config(manifest):
     stack = ConfigStack()
     assert stack.effective().expression_map == {}
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw=None)
     assert set(stack.effective().expression_map) == set(LABELS)
     # an app layer merges channel by channel into the manifest's entry
     stack.app = {"expression_map": {"joy": {"channels": {"head.roll": [[0, 0], [0.45, 0]]}}}}
@@ -419,15 +419,17 @@ def test_manifest_behaviour_may_only_set_known_keys_and_is_audited(manifest):
 
     stack = ConfigStack()
     with pytest.raises(ConfigError, match="may set"):
-        stack.set_manifest_behaviour({"safety": {"watchdog_ms": 50}}, manifest.channels)
+        stack.set_manifest_behaviour(
+            {"safety": {"watchdog_ms": 50}}, manifest.channels, body_yaw=None
+        )
     assert stack.manifest == {}
     assert stack.effective().safety.watchdog_ms == RoboEmotConfig().safety.watchdog_ms
     with pytest.raises(ConfigError):
         stack.set_manifest_behaviour(
-            {"expression_map": {"rage": {"channels": {}}}}, manifest.channels
+            {"expression_map": {"rage": {"channels": {}}}}, manifest.channels, body_yaw=None
         )
     assert stack.manifest == {}
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw=None)
     assert stack.audit[-1].source == "manifest" and stack.audit[-1].new == [
         "circadian_motion",
         "expression_map",
@@ -514,7 +516,7 @@ def test_the_schema_rejects_bad_gestures():
 
 def test_the_manifest_may_set_gesture_map_and_it_is_audited(manifest):
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw=None)
     assert "gesture_map" in stack.audit[-1].new
     assert set(stack.effective().gesture_map) >= {"nod", "shake"}
 

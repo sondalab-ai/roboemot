@@ -2755,7 +2755,8 @@ class SpeechMotionConfig(Strict):
     fade_ms: float = param(
         150.0,
         "Offsets ramp to zero over this at the end of speech or a barge-in, and back in at the "
-        "start (at most motion.arbiter.crossfade_ms)",
+        "start (at most motion.arbiter.crossfade_ms; 0 switches them in one tick, a step, and "
+        "exists only so a crossfade of 0 stays valid)",
         unit="ms",
         ge=0,
         le=2000,
@@ -2763,7 +2764,7 @@ class SpeechMotionConfig(Strict):
     command_ttl_s: float = param(
         0.25,
         "Lifetime of each speaking motion command in the arbiter: the offset drops by itself if "
-        "the app stops feeding it",
+        "the app stops feeding it (it must exceed one app tick, 1 / motion.app_tick_hz)",
         unit="s",
         ge=0.05,
         le=2,
@@ -3763,6 +3764,11 @@ with warnings.catch_warnings():
             if unknown:
                 raise ValueError(
                     f"speech_motion.mood_gain has labels {unknown} that are not in affect.labels"
+                )
+            if sm.command_ttl_s <= 1 / self.motion.app_tick_hz:
+                raise ValueError(
+                    "speech_motion.command_ttl_s must exceed one app tick (1 / "
+                    "motion.app_tick_hz), or the offset drops between two ticks"
                 )
             if sm.fade_ms > self.motion.arbiter.crossfade_ms:
                 raise ValueError(

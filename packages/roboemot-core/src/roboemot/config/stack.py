@@ -1020,14 +1020,15 @@ class ConfigStack:
 
     @_mutator
     def set_manifest_behaviour(
-        self, behaviour: dict, channels: Collection[str], *, body_yaw: str | None = None
+        self, behaviour: dict, channels: Collection[str], *, body_yaw: str | None
     ) -> None:
         """Install the robot manifest's ``behaviour`` block (layer 2) once the manifest is loaded.
 
         ``channels`` are the dof names expressions may drive (``Manifest.channels``): from now on
         every configuration this stack builds is refused when a map or pose names another one.
         ``body_yaw`` (``GazeMap.body_yaw``, None when the robot cannot turn its body) is refused
-        in ``speech_motion_map`` on top of that: the speaking motion never turns the body.
+        in ``speech_motion_map`` on top of that: the speaking motion never turns the body. It is
+        required (keyword), so a caller cannot forget it and silently accept a body turn.
         The block becomes part of the installed configuration, so it also resets the approved
         baseline.
         """
