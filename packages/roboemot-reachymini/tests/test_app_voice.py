@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,7 +22,7 @@ from roboemot.world import Observation, WorldModel
 from roboemot_reachymini.gaze import FRAME
 from roboemot_reachymini.platform import ReachyMiniSession
 from roboemot_reachymini.voice import LatestBearing
-from roboemot_reachymini.world import SOUND_SOURCE
+from roboemot_reachymini.world import SOUND_SOURCE, DoASource
 from test_app_perception import data, wait_for  # noqa: F401  (data: fixture)
 from test_app_reflex import ScriptedMini, enable, run_app
 
@@ -93,6 +94,7 @@ def test_app_builds_the_listener_and_stops_it_cleanly(data, fakes):  # noqa: F81
         assert wait_for(lambda: app.voice_listener.snapshot()["state"] == "running")
         report = app.diagnostics.report()["sections"]["roboemot.voice"]["data"]
         assert report["state"] == "running" and "latency" in report
+        assert report["direction"]["enabled"] is True
         u = SimpleNamespace(text="x")
         app.voice_listener._on_utterance(u)  # slice 5 hooks `on_utterance`
         assert got == [u]
@@ -167,6 +169,63 @@ def test_enrolled_in_view_needs_a_fresh_known_person(fakes):
     put_person(world, selector, "p-1")
     assert listener._enrolled_in_view(10.5)
     assert not listener._enrolled_in_view(10.0 + RoboEmotConfig().attention.stale_s + 1)
+
+
+# ---- voice-at-face check through the real bearing source and world model (SPEC 8, 5A, 4A)
+
+HEAD_YAW = 0.8  # rad, about 46 deg to the left
+
+
+def hear(bus, sdk_angle, head_yaw, now=10.0):
+    """One DoA reading through the real source: the SDK angle with the head at ``head_yaw``,
+    published on the bus with its joint state as the app does."""
+    mini = SimpleNamespace(media=SimpleNamespace(get_DoA=lambda: (sdk_angle, True)))
+    source = DoASource(
+        mini, RoboEmotConfig().world.scan, lambda: {"head.yaw": head_yaw}, lambda: now
+    )
+    sink = lambda obs, js: bus.publish("percept.entity", obs, obs.stamp, joint_state=js)  # noqa: E731
+    assert source.poll_once(sink)
+
+
+def check(listener, now=10.0):
+    d = listener._direction
+    d.begin()
+    d.sample(now)
+    return d.check()
+
+
+def face_ahead_of_turned_head(world, selector, now=10.0):
+    """A face in the middle of the picture with the head turned ``HEAD_YAW`` to the left."""
+    world.observe(Observation("person", now, "vision", 0.0, 0.0), {"head.yaw": HEAD_YAW})
+    selector.update(now, world.entries)
+
+
+def test_voice_from_the_face_matches_with_the_head_turned(fakes):
+    listener, bus, world, selector = wiring(Registry({}))
+    face_ahead_of_turned_head(world, selector)
+    hear(bus, math.pi / 2, HEAD_YAW)  # straight ahead of the turned head: at the face
+    assert check(listener)
+    hear(bus, math.pi / 2, 0.0)  # same SDK angle, head straight: 46 deg off the face
+    assert not check(listener)
+    snap = listener.snapshot()["direction"]
+    assert snap["checks"]["passed"] == 1 and snap["checks"]["rejected"] == 1
+
+
+def test_music_60_deg_off_the_face_is_rejected_through_the_real_frame(fakes):
+    listener, bus, world, selector = wiring(Registry({}))
+    face_ahead_of_turned_head(world, selector)
+    hear(bus, math.pi / 2 + math.radians(60.0), HEAD_YAW)  # 60 deg to the right of the face
+    assert not check(listener)
+    assert listener.snapshot()["direction"]["face_offset_deg"]["last"] == pytest.approx(60.0)
+
+
+def test_without_a_reading_the_check_falls_back_to_the_attended_face(fakes):
+    listener, bus, world, selector = wiring(Registry({}))
+    assert not check(listener)  # nobody in view, no reading
+    face_ahead_of_turned_head(world, selector)
+    assert check(listener)
+    assert not check(listener, now=10.0 + RoboEmotConfig().voice.direction.face_max_age_s + 1)
+    assert listener.snapshot()["direction"]["degraded"] == 3
 
 
 def test_sound_bearing_is_rotated_into_the_base_frame_and_expires(fakes):
