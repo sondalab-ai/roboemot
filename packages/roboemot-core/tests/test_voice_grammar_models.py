@@ -1,11 +1,13 @@
 """Grammar pass with the real small Vosk models (SPEC 8 stage 3; needs the voice extra and
 fetched voice models).
 
-Clips are macOS `say` output (Alice it_IT, Samantha en_US), 16 kHz mono, under tests/data/voice;
+Clips are macOS `say` output (Alice, Eddy and Flo it_IT, Samantha en_US), 16 kHz mono, under
+tests/data/voice;
 noise is seeded white noise at a fixed SNR, so a run is deterministic on one machine. The
 on-robot failure ("ciao neve" heard as "cadeva") does not reproduce on clean synthetic audio:
-these clips show the same kind of miss (a wake phrase the free text lost) and the guards that
-keep ordinary speech from turning into keywords.
+these clips show the same kind of miss (a wake phrase the free text lost, here in noise) and the
+guards that keep ordinary speech, and speech that mentions the robot without addressing it, from
+turning into keywords or a wake.
 """
 
 from __future__ import annotations
@@ -31,7 +33,8 @@ RATE = 16000
 CFG = reachy_config()
 SEEDS = (0, 1, 2)
 SNR_DB = 5.0
-RTF_MAX = 0.5  # the grammar pass must stay well inside real time even on a slow core
+NOISE_DB = (10.0, 5.0)
+RTF_MAX = 0.05  # measured about 0.01 on a Mac: a tenfold regression fails
 
 
 def load(name: str) -> np.ndarray:
@@ -79,8 +82,13 @@ def run(rig, audio: np.ndarray, language: str):
 
 
 def test_grammar_recovers_a_wake_phrase_the_free_text_lost(rig):
-    free, both, _ = run(rig, load("it_ehi_robot_luce"), "it")  # free text: "i robot ..."
-    assert "wake" not in free and "wake" in both
+    # In noise the free text hears "una volta in di la luce": no word of "ehi robot" survives.
+    rescued = 0
+    for seed in SEEDS:
+        free, both, _ = run(rig, noisy(load("it_ehi_robot_luce"), seed), "it")
+        assert free <= both
+        rescued += "wake" in both and "wake" not in free
+    assert rescued >= 1
 
 
 def test_grammar_recovers_wake_phrases_in_noise(rig):
@@ -100,6 +108,24 @@ def test_ordinary_speech_does_not_become_stop_or_wake(rig, clip, language):
     for audio in (load(clip), *(noisy(load(clip), seed) for seed in SEEDS)):
         _, both, _ = run(rig, audio, language)
         assert not both & {"stop", "wake"}
+
+
+@pytest.mark.parametrize(
+    "clip,language",
+    [
+        ("it_i_robot_utili", "it"),
+        ("it_il_robot_ferma", "it"),
+        ("en_the_robot_kitchen", "en"),
+        ("en_hello_to_the_robot", "en"),
+    ],
+)
+def test_speech_about_the_robot_does_not_wake_it(rig, clip, language):
+    """'i robot' decodes as 'ehi robot' and 'hello [to the] robot' as 'hello robot' at confidence
+    1.0: the free-text guard and the word-gap check keep them from waking the robot."""
+    clean = load(clip)
+    for audio in (clean, *(noisy(clean, seed, db) for db in NOISE_DB for seed in SEEDS)):
+        free, both, _ = run(rig, audio, language)
+        assert "wake" not in both - free
 
 
 def test_grammar_pass_cost_per_utterance(rig):
