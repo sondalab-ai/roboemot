@@ -1,10 +1,16 @@
 """Route conformance test (SPEC 8, OpenAI-compatible routes).
 
 ``check_route`` runs three requests against ONE route, bypassing fallback and eligibility:
-an Italian prompt without tools (streaming, first-token latency, Italian output) and a tool
-round trip (a call to ``get_time``, then its result sent back). The result is advisory in v1
-(SPEC 8): it is shown and stored, it does not gate the route. The requests are charged to the
-route's daily token budget like any other; a route whose budget is spent is refused.
+a realistic turn without tools (the system prompt a conversation sends, built from the config
+with Italian as the language, plus a short user turn, at the route's own ``max_tokens``:
+streaming, first-text latency, Italian output) and a tool round trip (a call to ``get_time``,
+then its result sent back). The result is advisory in v1 (SPEC 8): it is shown and stored, it
+does not gate the route. The requests are charged to the route's daily token budget like any
+other; a route whose budget is spent is refused.
+
+A model that reasons before answering may spend the whole ``max_tokens`` on it: the verdict
+rests on standard fields only (``finish_reason: length`` with no text), and the length of any
+non-standard reasoning deltas the router counted is added to the reason as a hint.
 
 The report holds statuses and short reasons only: never prompts, replies or keys. Errors are
 reduced to a type or an HTTP status; an HTTP status adds the server's own error message, cleaned
@@ -15,22 +21,26 @@ policy) and the status alone does not.
 from __future__ import annotations
 
 import datetime as dt
+import html
 import json
 import logging
 import re
+import unicodedata
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 import httpx
 from openai import APIConnectionError, APIStatusError, APITimeoutError
 
-from ..config.schema import LLMCheckConfig, LLMRoute, SafetyConfig
+from ..config.schema import LLMCheckConfig, LLMRoute, RoboEmotConfig, SafetyConfig
+from ..persona import apply_to_register, effects
 from ..redact import scrub_text
 from ..secret_store import SECRET_REF, no_secrets
-from .pseudonyms import Pseudonyms
-from .router import Done, FirstToken, Router, TextDelta, ToolCall
+from .prompt import system_prompt
+from .pseudonyms import Pseudonyms, _fold, route_is_local
+from .router import Done, FirstToken, Router, TextDelta, ToolCall, build_messages
 
 log = logging.getLogger(__name__)
 
@@ -43,7 +53,10 @@ STREAMING, TOOL_ROUND_TRIP, FIRST_TOKEN, ITALIAN = (
 )
 TOOL_NAME = "get_time"
 TOOL_RESULT = "10:30"
-ITALIAN_PROMPT = "Reply in Italian, in two short sentences: greet me and describe a sunny day."
+CHECK_LANGUAGE = "it"  # the realistic turn asks for Italian, whatever conversation.language says
+# In English while the system prompt asks for Italian, so the reply also shows the rule is kept.
+USER_TURN = "Hi! What is a sunny day like where you are?"
+LENGTH = "length"
 TOOL_PROMPT = "What time is it? Use the get_time tool."
 TOOLS = [
     {
@@ -65,6 +78,14 @@ TOKEN_RUN = re.compile(r"[A-Za-z0-9_+=-]{20,}")
 KEY_FRAGMENT_MIN_CHARS = 6
 KEY_FRAGMENT = re.compile(rf"[A-Za-z0-9_+/=.:-]{{{KEY_FRAGMENT_MIN_CHARS},}}")
 MASK = "[masked]"
+# A server message that echoes the request (any run of this many consecutive words of the texts
+# sent, both sides with JSON escapes decoded and case folded) is withheld whole: masking only
+# the matched runs would leave the short pieces between them, where a name or a place sits.
+ECHO_MIN_WORDS = 4
+ECHO_WORD = re.compile(r"[^\W_]+")
+ECHO_WITHHELD = "[server message withheld: it quoted the request]"
+# The ``[mood=x]`` tags of ``voice.mood_source: llm_tagged`` (as ``voice.prosody.TAG``).
+MOOD_TAG = re.compile(r"\[mood=([a-z_]+)\]\s*")
 
 
 class RouteBudgetExhausted(RuntimeError):
@@ -92,6 +113,9 @@ class RouteReport:
     checks: list[CheckResult] = field(default_factory=list)
     first_token_s: float | None = None
     tokens: int = 0
+    # The realistic turn's standard finish reason and non-standard reasoning length (a hint).
+    finish_reason: str | None = None
+    reasoning_chars: int = 0
     error: str = ""  # "timeout", "budget", "secret" or "failed": the check did not complete
 
     @property
@@ -107,6 +131,7 @@ class RouteReport:
 class _Answer:
     text: str = ""
     chunks: int = 0
+    finish_reason: str | None = None
     calls: list[ToolCall] = field(default_factory=list)
     timing: FirstToken = field(default_factory=FirstToken)
     error: Exception | None = None
@@ -132,13 +157,15 @@ def route_endpoint(route: LLMRoute) -> str:
     return f"{host}:{port}" if port else host
 
 
-def _why(exc: Exception, route: LLMRoute, key: str = "") -> str:
+def _why(exc: Exception, route: LLMRoute, key: str = "", sent: tuple[str, ...] = ()) -> str:
     """A short reason. An HTTP status names the path called, so a wrong base URL shows at once:
     only a path under the route's own base path (never one a redirect chose) of plain
     characters, no host, credentials or query. It then adds the server's message, cleaned, with
-    ``key`` (the key the request carried) masked too."""
+    ``key`` (the key the request carried) masked too; a message that echoes ``sent`` (the
+    request's texts) is withheld whole."""
     if isinstance(exc, APIStatusError):
-        return f"HTTP {exc.status_code}{_called_path(exc, route)}{_server_says(exc, route, key)}"
+        says = _server_says(exc, route, key, sent)
+        return f"HTTP {exc.status_code}{_called_path(exc, route)}{says}"
     if isinstance(exc, (TimeoutError, APITimeoutError)):
         return "timed out"
     if isinstance(exc, (APIConnectionError, OSError)):
@@ -155,18 +182,23 @@ def _called_path(exc: APIStatusError, route: LLMRoute) -> str:
     return f" at {path}"
 
 
-def _server_says(exc: APIStatusError, route: LLMRoute, key: str = "") -> str:
+def _server_says(
+    exc: APIStatusError, route: LLMRoute, key: str = "", sent: tuple[str, ...] = ()
+) -> str:
     """``: <message>`` from the server's JSON error, or empty. The message may echo the request
     or a key: the key sent, the route's literal key, any run of 6+ characters found inside a
     key and every key-like run are masked, then the shared redactor runs; control characters
-    and repeated spaces are removed and the length is capped. The check sends only its own
-    synthetic prompts, so an echoed prompt carries nothing private."""
+    and repeated spaces are removed and the length is capped. A message that quotes ``sent``
+    (the system prompt built from the config, the user turn; see :func:`_echoes`) is replaced
+    whole by ``ECHO_WITHHELD``, so an echoed prompt never reaches the reason."""
     body = exc.body
     if isinstance(body, dict) and isinstance(body.get("error"), dict):
         body = body["error"]
     message = body.get("message") if isinstance(body, dict) else None
     if not isinstance(message, str):
         return ""
+    if _echoes(message, sent):
+        return f": {ECHO_WITHHELD}"
     literal = "" if SECRET_REF.fullmatch(route.api_key) else route.api_key
     keys = [k for k in (key, literal) if k and k != "none"]
     for k in keys:
@@ -180,6 +212,39 @@ def _server_says(exc: APIStatusError, route: LLMRoute, key: str = "") -> str:
     if len(message) > SERVER_TEXT_MAX_CHARS:
         message = message[: SERVER_TEXT_MAX_CHARS - 1] + "…"
     return f": {message}" if message else ""
+
+
+def _echoes(message: str, sent: tuple[str, ...]) -> bool:
+    """Whether any reading of ``message`` (see :func:`_readings`) holds ``ECHO_MIN_WORDS``
+    consecutive words that also occur in a row in a reading of one of ``sent``."""
+    n = ECHO_MIN_WORDS
+    seen: set[tuple[str, ...]] = set()
+    for text in sent:
+        for form in _folded(text):
+            words = ECHO_WORD.findall(form)
+            seen.update(tuple(words[i : i + n]) for i in range(len(words) - n + 1))
+    for form in _readings(message):
+        words = ECHO_WORD.findall(form)
+        if any(tuple(words[i : i + n]) in seen for i in range(len(words) - n + 1)):
+            return True
+    return False
+
+
+def _readings(message: str) -> set[str]:
+    """The forms a server may have written the request in, decoded and folded: as it is,
+    percent-decoded, HTML-unescaped (``&nbsp;``, ``&#32;``) and both in either order."""
+    forms = {message, unquote(message), html.unescape(message)}
+    forms |= {html.unescape(unquote(message)), unquote(html.unescape(message))}
+    return {folded for form in forms for folded in _folded(form)}
+
+
+def _folded(text: str) -> tuple[str, str]:
+    """``text`` normalised two ways: JSON escapes decoded (``\\n`` and the other short escapes
+    read as a space, ``\\uXXXX`` as its character, surrogate pairs too), case folded, accents
+    dropped; then once with format characters (category Cf: soft hyphen, zero-width space)
+    kept as word breaks and once with them removed, as either may hide a word."""
+    folded = _fold(text)[0]
+    return folded, "".join(c for c in folded if unicodedata.category(c) != "Cf")
 
 
 def _shares_fragment(run: str, key: str) -> bool:
@@ -213,10 +278,11 @@ async def _ask(
             elif isinstance(ev, ToolCall):
                 ans.calls.append(ev)
             elif isinstance(ev, Done):
-                pass
+                ans.finish_reason = ev.finish_reason
     except Exception as exc:  # CancelledError (the caller's deadline) is not caught
         ans.error = exc
-        ans.why = _why(exc, route, _sent_key(router, route))
+        sent = tuple(str(m.get("content") or "") for m in messages)
+        ans.why = _why(exc, route, _sent_key(router, route), sent)
     return ans
 
 
@@ -230,16 +296,34 @@ def _sent_key(router: Router, route: LLMRoute) -> str:
     return header.removeprefix("Bearer ")
 
 
+def _reasoned(ans: _Answer) -> str:
+    """``; the model reasoned for N chars before answering`` when the router counted
+    non-standard reasoning deltas, else empty: a hint, never the verdict."""
+    n = ans.timing.reasoning_chars
+    return f"; the model reasoned for {n} chars before answering" if n else ""
+
+
+def _no_text(ans: _Answer, route: LLMRoute, fallback: str) -> str:
+    """Why a reply that ended cleanly has no text: out of tokens (``finish_reason: length``,
+    a standard field) or ``fallback``, with the reasoning hint."""
+    if ans.finish_reason == LENGTH:
+        why = f"ran out of tokens before answering (max_tokens {route.max_tokens})"
+    else:
+        why = fallback
+    return why + _reasoned(ans)
+
+
 def _streaming(ans: _Answer, route: LLMRoute) -> CheckResult:
     if ans.error is not None and not ans.chunks:
-        return CheckResult(STREAMING, FAIL, f"no streamed text: {ans.why}")
+        return CheckResult(STREAMING, FAIL, f"no streamed text: {ans.why}{_reasoned(ans)}")
     if ans.error is not None:
         return CheckResult(STREAMING, FAIL, f"stream broke after {ans.chunks} chunks: {ans.why}")
-    if ans.chunks > 1:
-        return CheckResult(STREAMING, PASS, f"{ans.chunks} chunks")
-    return CheckResult(
-        STREAMING, FAIL, "text came as a single chunk" if ans.chunks else "no text in the stream"
-    )
+    if not ans.chunks:
+        return CheckResult(STREAMING, FAIL, _no_text(ans, route, "no text in the stream"))
+    if ans.chunks == 1:
+        return CheckResult(STREAMING, FAIL, "text came as a single chunk")
+    cut = f", cut at max_tokens {route.max_tokens}" if ans.finish_reason == LENGTH else ""
+    return CheckResult(STREAMING, PASS, f"{ans.chunks} chunks{cut}")
 
 
 def _latency(ans: _Answer, route: LLMRoute) -> CheckResult:
@@ -247,20 +331,21 @@ def _latency(ans: _Answer, route: LLMRoute) -> CheckResult:
     seconds = ans.timing.seconds
     if seconds is None:
         if ans.timed_out:
-            return CheckResult(FIRST_TOKEN, FAIL, f"no content within {limit:g} s")
+            return CheckResult(FIRST_TOKEN, FAIL, f"no content within {limit:g} s{_reasoned(ans)}")
         return CheckResult(FIRST_TOKEN, SKIP, "no answer to measure")
     verdict = PASS if seconds <= limit else FAIL
     return CheckResult(
         FIRST_TOKEN,
         verdict,
-        f"{seconds:.2f} s of {limit:g} s allowed (one cold sample, TLS setup included)",
+        f"{seconds:.2f} s of {limit:g} s allowed (one cold sample, TLS setup included)"
+        f"{_reasoned(ans)}",
     )
 
 
 def _italian(ans: _Answer, settings: LLMCheckConfig) -> CheckResult:
     if not ans.text:
         return CheckResult(ITALIAN, SKIP, "no reply to judge")
-    count, ratio = italian_ratio(ans.text, settings.italian_stopwords)
+    count, ratio = italian_ratio(MOOD_TAG.sub("", ans.text), settings.italian_stopwords)
     if count < settings.italian_min_words:
         return CheckResult(ITALIAN, FAIL, f"reply too short to judge ({count} words)")
     need = settings.italian_min_stopword_ratio
@@ -278,12 +363,16 @@ async def check_route(
     pseudonyms: Pseudonyms | None = None,
     http_client_factory: Callable[[], httpx.AsyncClient] | None = None,
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
+    config: RoboEmotConfig | None = None,
 ) -> RouteReport:
-    """Run the four checks against ``route`` only. Pass the app's ``router`` to share its daily
-    budgets; otherwise a private one is built from ``safety``, ``secrets`` and the client
-    factory. Raises :class:`RouteKeyUnavailable` when the route's secret cannot be read and
-    :class:`RouteBudgetExhausted` when the budget is spent, both before anything is sent. With
-    ``pseudonyms`` a route that is not local gets the requests aliased like any cloud request.
+    """Run the four checks against ``route`` only. The realistic turn's system prompt is built
+    from ``config`` (the library defaults when omitted, and on a route that is not local when
+    ``config`` turns pseudonyms on but no ``pseudonyms`` are given). Pass the app's ``router``
+    to share its daily budgets; otherwise a private one is built from ``safety``, ``secrets``
+    and the client factory. Raises :class:`RouteKeyUnavailable` when the route's secret cannot
+    be read and :class:`RouteBudgetExhausted` when the budget is spent, both before anything is
+    sent. With ``pseudonyms`` a route that is not local gets the requests aliased like any
+    cloud request.
     Failures of the route become ``fail`` results, never exceptions."""
     settings = settings or LLMCheckConfig()
     router = router or Router(
@@ -299,8 +388,17 @@ async def check_route(
         route.name, route.model, route_endpoint(route), now().isoformat(timespec="seconds")
     )
 
-    ask = await _ask(router, route, [{"role": "user", "content": ITALIAN_PROMPT}], None, pseudonyms)
+    cfg = config or RoboEmotConfig()
+    if pseudonyms is None and cfg.privacy.pseudonyms_to_cloud and not route_is_local(route):
+        # The owner's free text may name a person (persona prompt, register.persona_fragment,
+        # safety.extra_prompt_rules, affect.labels, and any free-text field added later) and
+        # nothing would alias it on this route: the whole config is replaced by the library's
+        # defaults, never a list of fields reset (a new field would leak).
+        cfg = RoboEmotConfig()
+    ask = await _ask(router, route, realistic_turn(cfg), None, pseudonyms)
     report.first_token_s = ask.timing.seconds
+    report.reasoning_chars = ask.timing.reasoning_chars
+    report.finish_reason = ask.finish_reason or ask.timing.finish_reason
     tool = await _tool_round_trip(router, route, ask.unreachable, pseudonyms)
     report.checks += [_streaming(ask, route), tool, _latency(ask, route), _italian(ask, settings)]
     report.tokens = router.used(route.name) - spent
@@ -310,6 +408,18 @@ async def check_route(
         ", ".join(f"{c.name}={c.status}" for c in report.checks),
     )
     return report
+
+
+def realistic_turn(cfg: RoboEmotConfig) -> list[dict[str, Any]]:
+    """The messages of a first turn as a conversation sends them: the system prompt (persona,
+    register as the persona shapes it, rules, safety block) with Italian as the language, and
+    ``USER_TURN``. Left out: the robot name, the speaker and scene summaries, the affect line
+    and the history (nothing about a person; a few tokens less than a real turn)."""
+    register = apply_to_register(cfg.register.params, effects(cfg.persona))
+    system = system_prompt(cfg, register, language=CHECK_LANGUAGE)
+    return build_messages(
+        system=system, profile_summary=None, scene_summary=None, history=[], user_text=USER_TURN
+    )
 
 
 async def _tool_round_trip(
@@ -323,9 +433,15 @@ async def _tool_round_trip(
     messages: list[dict[str, Any]] = [{"role": "user", "content": TOOL_PROMPT}]
     first = await _ask(router, route, messages, TOOLS, pseudonyms)
     if first.error is not None:
-        return CheckResult(TOOL_ROUND_TRIP, FAIL, f"tool request failed: {first.why}")
+        why = f"tool request failed: {first.why}{_reasoned(first)}"
+        return CheckResult(TOOL_ROUND_TRIP, FAIL, why)
     if not first.calls:
-        return CheckResult(TOOL_ROUND_TRIP, FAIL, "no tool call in the reply")
+        why = (
+            _no_text(first, route, "no tool call in the reply")
+            if not first.text.strip()
+            else "no tool call in the reply"
+        )
+        return CheckResult(TOOL_ROUND_TRIP, FAIL, why)
     call = first.calls[0]
     if call.name != TOOL_NAME:
         return CheckResult(TOOL_ROUND_TRIP, FAIL, "tool call names an unknown tool")
@@ -355,5 +471,6 @@ async def _tool_round_trip(
     if second.error is not None:
         return CheckResult(TOOL_ROUND_TRIP, FAIL, f"tool result rejected: {second.why}")
     if not second.text.strip():
-        return CheckResult(TOOL_ROUND_TRIP, FAIL, "no text answer after the tool result")
+        why = _no_text(second, route, "no text answer after the tool result")
+        return CheckResult(TOOL_ROUND_TRIP, FAIL, why)
     return CheckResult(TOOL_ROUND_TRIP, PASS, "call, result and answer")

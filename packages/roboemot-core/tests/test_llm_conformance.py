@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import json
+from urllib.parse import quote
 
 import httpx
 import pytest
 from openai import APIStatusError
-from roboemot.config.schema import LLMCheckConfig, LLMRoute, SafetyConfig
+from roboemot.config.schema import LLMCheckConfig, LLMRoute, RoboEmotConfig, SafetyConfig
 from roboemot.llm import Router
 from roboemot.llm.conformance import (
+    ECHO_WITHHELD,
     FAIL,
     PASS,
     SERVER_TEXT_MAX_CHARS,
     SKIP,
+    USER_TURN,
     RouteBudgetExhausted,
     _why,
     check_route,
@@ -405,3 +408,278 @@ async def test_http_error_masks_a_stored_key_and_its_fragments():
     r2 = LLMRoute(name="c", base_url="https://api.example.com/v1", model="m", api_key=label)
     report = await run(Echo(), r2)
     assert "74c" not in json.dumps(report.to_dict())
+
+
+# ------------------------------------------------------------ realistic turn, reasoning models
+
+
+def thought(text: str) -> dict:
+    c = chunk()
+    c["choices"][0]["delta"]["reasoning"] = text
+    return c
+
+
+def ended(c: dict, reason: str = "length") -> dict:
+    c["choices"][0]["finish_reason"] = reason
+    return c
+
+
+def reason(report, name: str) -> str:
+    return next(c.reason for c in report.checks if c.name == name)
+
+
+async def test_first_request_is_a_realistic_turn_at_the_routes_max_tokens():
+    fake = Fake()
+    cfg = RoboEmotConfig.model_validate(
+        {"conversation": {"language": "en"}, "persona": {"prompt": "PERSONA-4c1d"}}
+    )
+    await run(fake, route(max_tokens=300), config=cfg)
+    body = fake.bodies[0]
+    system, user = body["messages"][0], body["messages"][-1]
+    assert system["role"] == "system" and "PERSONA-4c1d" in system["content"]
+    assert "Always reply in Italian." in system["content"]  # whatever the conversation language
+    assert user == {"role": "user", "content": USER_TURN}
+    assert body["max_tokens"] == 300 and "tools" not in body
+    assert not [k for k in body if "reason" in k]  # nothing non-standard is asked for
+
+
+async def test_reasoning_that_uses_the_whole_budget_fails_with_a_hint():
+    plain = reply([thought("x" * 25), thought("y" * 15), ended(chunk())])
+    report = await run(Fake(plain=plain), route(max_tokens=300))
+    assert status(report)["streaming"] == FAIL and not report.ok
+    assert reason(report, "streaming") == (
+        "ran out of tokens before answering (max_tokens 300); "
+        "the model reasoned for 40 chars before answering"
+    )
+    assert status(report)["italian"] == SKIP
+    assert report.reasoning_chars == 40 and report.finish_reason == "length"
+
+
+async def test_length_with_no_text_fails_without_reasoning_fields_too():
+    report = await run(Fake(plain=reply([ended(chunk())])), route(max_tokens=64))
+    assert reason(report, "streaming") == "ran out of tokens before answering (max_tokens 64)"
+    assert report.reasoning_chars == 0
+
+
+async def test_reasoning_then_text_passes_and_shows_the_hint():
+    plain = reply([thought("z" * 30), *text_chunks(ITALIAN)])
+    report = await run(Fake(plain=plain))
+    assert report.ok and status(report)["streaming"] == PASS
+    assert reason(report, "first_token_latency").endswith(
+        "; the model reasoned for 30 chars before answering"
+    )
+    assert report.reasoning_chars == 30
+
+
+async def test_plain_text_has_no_reasoning_hint():
+    report = await run(Fake())
+    assert report.reasoning_chars == 0 and report.finish_reason is None
+    assert all("reasoned" not in c.reason for c in report.checks)
+
+
+async def test_reasoning_past_the_first_token_timeout_fails_latency_with_a_hint():
+    gate = asyncio.Event()  # never set: the stream stays open until the router closes it
+
+    async def slow() -> httpx.Response:
+        async def body():
+            yield sse([thought("w" * 12)])[: -len(b"data: [DONE]\n\n")]
+            await gate.wait()
+            yield b"data: [DONE]\n\n"
+
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body())
+
+    report = await run(Fake(plain=slow), route(first_token_timeout_s=0.3))
+    assert status(report)["first_token_latency"] == FAIL
+    assert reason(report, "first_token_latency") == (
+        "no content within 0.3 s; the model reasoned for 12 chars before answering"
+    )
+    assert reason(report, "streaming").endswith(
+        "; the model reasoned for 12 chars before answering"
+    )
+    assert report.reasoning_chars == 12 and report.first_token_s is None
+
+
+async def test_answer_cut_at_max_tokens_still_streams():
+    plain = reply([*text_chunks(ITALIAN[:-1]), ended(chunk(ITALIAN[-1]))])
+    report = await run(Fake(plain=plain), route(max_tokens=50))
+    assert status(report)["streaming"] == PASS
+    assert reason(report, "streaming") == "4 chunks, cut at max_tokens 50"
+
+
+async def test_tool_answer_out_of_tokens_is_named():
+    report = await run(Fake(final=reply([thought("q" * 9), ended(chunk())])), route(max_tokens=80))
+    assert status(report)["tool_round_trip"] == FAIL
+    assert reason(report, "tool_round_trip") == (
+        "ran out of tokens before answering (max_tokens 80); "
+        "the model reasoned for 9 chars before answering"
+    )
+
+
+async def test_mood_tags_do_not_count_against_italian():
+    tagged = ["[mood=joy] Ciao, ", "oggi c'è ", "[mood=calm] il sole ", "e il cielo è bello."]
+    report = await run(Fake(plain=reply(text_chunks(tagged))))
+    assert status(report)["italian"] == PASS
+
+
+async def test_reasons_never_hold_the_prompt_or_the_reasoning():
+    cfg = RoboEmotConfig.model_validate({"persona": {"prompt": "PERSONA-4c1d"}})
+    plain = reply([thought("THOUGHT-8e2b"), ended(chunk())])
+    report = await run(Fake(plain=plain), config=cfg)
+    dumped = json.dumps(report.to_dict())
+    for secret in ("PERSONA-4c1d", "THOUGHT-8e2b", USER_TURN, SECRET_KEY):
+        assert secret not in dumped
+
+
+PRIVATE_PERSONA = "You live with Marta in a small flat and you love her cat."
+
+
+def cloud_route(**kw) -> LLMRoute:
+    kw.setdefault("first_token_timeout_s", 0.5)
+    return LLMRoute(name="cloud", base_url="https://api.example.com/v1", model="m", **kw)
+
+
+async def test_pseudonyms_on_without_a_name_map_keep_free_text_off_a_cloud_route():
+    cfg = RoboEmotConfig.model_validate(
+        {"persona": {"prompt": PRIVATE_PERSONA}, "privacy": {"pseudonyms_to_cloud": True}}
+    )
+    fake = Fake()
+    await run(fake, cloud_route(), config=cfg)
+    sent = json.dumps(fake.bodies)
+    assert "Marta" not in sent and "Always reply in Italian." in sent
+
+
+async def test_a_local_route_gets_the_owners_persona_with_pseudonyms_on():
+    cfg = RoboEmotConfig.model_validate(
+        {"persona": {"prompt": PRIVATE_PERSONA}, "privacy": {"pseudonyms_to_cloud": True}}
+    )
+    fake = Fake()
+    await run(fake, route(), config=cfg)
+    assert "Marta" in fake.bodies[0]["messages"][0]["content"]
+
+
+def test_an_echoed_prompt_withholds_the_whole_server_message():
+    message = f"Invalid request: '{PRIVATE_PERSONA.upper()}' is too long for model org/m-3.5"
+    reason = _why(status_error({"message": message}), R, sent=(PRIVATE_PERSONA, USER_TURN))
+    assert reason == f"HTTP 404 at /v1/chat/completions: {ECHO_WITHHELD}"
+
+
+def test_a_server_message_that_quotes_nothing_is_shown():
+    message = "The `:free` variant has been retired; use `minimax/minimax-m3.1-flash` instead."
+    reason = _why(status_error({"message": message}), R, sent=(PRIVATE_PERSONA, USER_TURN))
+    assert reason.endswith(f": {message}")
+
+
+@pytest.mark.parametrize("ensure_ascii", [True, False])
+def test_an_echo_written_as_json_is_withheld(ensure_ascii):
+    system = "Sei Neve.\nLa tua padrona è Marta Rossi, c'è sempre il sole.\nYou live in Torino."
+    message = "bad request body: " + json.dumps({"content": system}, ensure_ascii=ensure_ascii)
+    reason = _why(status_error({"message": message}), R, sent=(system,))
+    assert reason.endswith(f": {ECHO_WITHHELD}")
+
+
+async def test_an_echo_of_the_realistic_turn_never_reaches_the_report():
+    cfg = RoboEmotConfig.model_validate({"persona": {"prompt": PRIVATE_PERSONA}})
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        echo = " ".join(str(m.get("content") or "") for m in body["messages"])
+        return httpx.Response(400, json={"error": {"message": f"bad: {echo}"[:150]}})
+
+    report = await check_route(
+        route(),
+        SafetyConfig(),
+        config=cfg,
+        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    dumped = json.dumps(report.to_dict())
+    assert "Marta" not in dumped and "small flat" not in dumped and "HTTP 400" in dumped
+    assert ECHO_WITHHELD in dumped
+
+
+async def test_a_json_echo_of_the_request_body_never_reaches_the_report():
+    # review 2026-10-25: "\n" in the escaped JSON broke the word runs, a short line leaked
+    persona = "You are Neve, a small robot.\nYour owner is Marta Rossi.\nYou live in Torino."
+    cfg = RoboEmotConfig.model_validate({"persona": {"prompt": persona}})
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        return httpx.Response(
+            400, json={"error": {"message": "bad request body: " + json.dumps(body)}}
+        )
+
+    report = await check_route(
+        route(),
+        SafetyConfig(),
+        config=cfg,
+        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    dumped = json.dumps(report.to_dict())
+    for word in ("Torino", "Marta", "Neve", "owner"):
+        assert word not in dumped
+    assert ECHO_WITHHELD in dumped
+
+
+async def test_a_tool_request_out_of_tokens_is_named():
+    report = await run(Fake(tool=reply([thought("r" * 7), ended(chunk())])), route(max_tokens=90))
+    assert reason(report, "tool_round_trip") == (
+        "ran out of tokens before answering (max_tokens 90); "
+        "the model reasoned for 7 chars before answering"
+    )
+
+
+async def test_owner_persona_names_are_aliased_on_a_cloud_route_with_a_name_map():
+    cfg = RoboEmotConfig.model_validate(
+        {"persona": {"prompt": PRIVATE_PERSONA}, "privacy": {"pseudonyms_to_cloud": True}}
+    )
+    fake = Fake()
+    await run(fake, cloud_route(), config=cfg, pseudonyms=_named("Marta"))
+    system = fake.bodies[0]["messages"][0]["content"]
+    assert "Marta" not in system and "Person-" in system and "small flat" in system
+
+
+ECHOED_SYSTEM = "Sei Neve.\nLa tua padrona è Marta Rossi.\nVivi a Torino, c'è sempre il sole."
+
+
+@pytest.mark.parametrize(
+    "encode",
+    [
+        pytest.param(lambda t: quote(t), id="percent-encoded"),
+        pytest.param(lambda t: t.replace(" ", "&nbsp;"), id="nbsp-entities"),
+        pytest.param(lambda t: t.replace(" ", "&#32;"), id="numeric-space-entities"),
+        pytest.param(
+            lambda t: " ".join(w[:1] + "­" + w[1:] for w in t.split(" ")), id="soft-hyphens"
+        ),
+        pytest.param(lambda t: quote(t.replace(" ", "&nbsp;")), id="entities-then-percent"),
+    ],
+)
+def test_an_encoded_echo_is_withheld(encode):
+    # security re-review 2026-10-25: each of these reached the reason in clear at f7c9105
+    message = f"bad body: content={encode(ECHOED_SYSTEM)}"
+    reason = _why(status_error({"message": message}), R, sent=(ECHOED_SYSTEM,))
+    assert reason.endswith(f": {ECHO_WITHHELD}")
+    assert "Torino" not in reason and "Rossi" not in reason
+
+
+async def test_an_echo_of_the_aliased_body_is_withheld():
+    cfg = RoboEmotConfig.model_validate(
+        {"persona": {"prompt": PRIVATE_PERSONA}, "privacy": {"pseudonyms_to_cloud": True}}
+    )
+    seen: list[dict] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        seen.append(body)
+        return httpx.Response(400, json={"error": {"message": "bad: " + json.dumps(body)}})
+
+    report = await check_route(
+        cloud_route(),
+        SafetyConfig(),
+        config=cfg,
+        pseudonyms=_named("Marta"),
+        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    assert "Person-" in json.dumps(seen[0])  # the server saw the aliased body
+    dumped = json.dumps(report.to_dict())
+    assert ECHO_WITHHELD in dumped
+    for word in ("Marta", "Person-", "small flat", "cat"):
+        assert word not in dumped
