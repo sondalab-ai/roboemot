@@ -28,6 +28,10 @@ For the debug report (SPEC 12A) the output measures, for any backend:
 - ``push_ms``: the time spent in the sink's push (the speaker resamples there).
 
 A sink with no finite ``playing_until`` (its output never opened) counts no gaps. Numbers only.
+
+Every push also feeds :attr:`SpeechOutput.timeline` (:mod:`roboemot.voice.envelope`): energy
+frames, sentence bounds, phrase gaps and emphasis peaks on the playback clock, for the speaking
+motion. ``stop`` truncates it under the same lock, so nothing after a barge-in stays on it.
 """
 
 from __future__ import annotations
@@ -51,6 +55,7 @@ from ..bus import Bus
 from ..config.schema import RegisterParams, RoboEmotConfig, StateEffects
 from ..persona import effects
 from ..stats import P50, P90, summarise
+from .envelope import SpeechTimeline
 from .prosody import Delivery, compose_delivery
 from .tts import AudioChunk, TTSBackend, TTSError
 
@@ -96,6 +101,8 @@ class _Job:
     delivery: Delivery
     epoch: int
     said_at: float
+    question: bool = False  # this piece's own text ends in a question mark
+    continued: bool = False  # the rest of a sentence the splitter cut
 
 
 class SpeechOutput:
@@ -155,12 +162,15 @@ class SpeechOutput:
         self.sentences_spoken = 0
         self.sentences_dropped = 0
         self.failures = 0
+        # energy, phrase and emphasis stamps of what is pushed, for the speaking motion (SPEC 8)
+        self.timeline = SpeechTimeline(config.speech_motion, clock)
 
     def apply_config(self, config: RoboEmotConfig) -> None:
         """Hot reload: the next sentence reads ``config``; the backend gets ``config.voice`` for
         the settings it keeps itself (Piper's timeouts)."""
         self.config = config
         self.backend.apply_config(config.voice)
+        self.timeline.apply_config(config.speech_motion)
 
     # ----------------------------------------------------------------- lifecycle
 
@@ -276,6 +286,8 @@ class SpeechOutput:
                 delivery,
                 self._epoch,
                 self.clock(),
+                ends_with_question(text),
+                continued,
             )
             self._jobs.append(job)
         if self.bus is not None:
@@ -306,6 +318,7 @@ class SpeechOutput:
             self.sentences_dropped += len(self._jobs)
             self._jobs.clear()
             now = self.clock()
+            self.timeline.truncate(now)
             self._unplayed.update(i for i, at in self._audible.items() if at > now)
             for job_id, end in self._ended.items():
                 self._ended[job_id] = min(end, now)
@@ -379,6 +392,7 @@ class SpeechOutput:
             "tts_rtf_sentence": summarise(rtf_sentence, RTF_LEVELS),
             "push_ms": summarise(push_ms, RTF_LEVELS),
             **gaps,
+            "timeline": self.timeline.snapshot(),
         }
 
     # ----------------------------------------------------------------- loop thread
@@ -411,13 +425,26 @@ class SpeechOutput:
                 self._count_underrun(job, now - until)
             self.sink.push_audio_sample(samples, rate_hz)
             self._push_ms.append((self.clock() - now) * MS_PER_S)
+            if speech:
+                self.timeline.push(
+                    job.id,
+                    samples,
+                    rate_hz,
+                    start,
+                    utterance=job.utterance,
+                    question=job.question,
+                    mood=job.delivery.mood,
+                    continued=job.continued,
+                )
+            else:
+                self.timeline.pad(job.id, start)
             if speech and job.id not in self._audible:
                 self._audible[job.id] = start
                 while len(self._audible) > PLAYED_WINDOW:
                     self._unplayed.discard(self._audible.popitem(last=False)[0])
             if speech:
                 self._ended[job.id] = self._queue_end()
-                self._question_end = self._ended[job.id] if ends_with_question(job.text) else None
+                self._question_end = self._ended[job.id] if job.question else None
                 while len(self._ended) > PLAYED_WINDOW:
                     self._ended.popitem(last=False)
             return True
@@ -503,7 +530,8 @@ class SpeechOutput:
                 return
             if job.id in self._ended:
                 self._ended[job.id] = self._queue_end()
-                self._question_end = self._ended[job.id] if ends_with_question(job.text) else None
+                self.timeline.finish(job.id, self._ended[job.id])
+                self._question_end = self._ended[job.id] if job.question else None
 
     def _queue_end(self) -> float:
         """Where the sink's queue ends: when a sample pushed now would play (the clock when it
