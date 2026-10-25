@@ -75,9 +75,11 @@ class Speaker(Protocol):
 
 @runtime_checkable
 class BearingSource(Protocol):
-    """The newest sound direction in the base frame (the robot's own source, e.g. a microphone
-    array's direction of arrival). ``get`` is the azimuth if the newest reading is at most
-    ``max_age_s`` old, else None; ``close`` stops listening to whatever feeds it."""
+    """The sound direction in the base frame (the robot's own source, e.g. a microphone array's
+    direction of arrival). ``get`` is the azimuth of the reading nearest to ``now`` if it is at
+    most ``max_age_s`` away on either side, else None: a caller behind real time (the listener
+    sampling old audio) must not get a later sound. ``close`` stops listening to whatever feeds
+    it."""
 
     def get(self, now: float, max_age_s: float) -> float | None: ...
     def close(self) -> None: ...

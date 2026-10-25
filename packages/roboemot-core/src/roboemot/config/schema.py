@@ -2016,7 +2016,8 @@ class FastpathConfig(Strict):
     )
     doa_max_age_ms: float = param(
         1500.0,
-        "A sound direction reading older than this does not point the head at the speaker",
+        "A sound direction reading older than this does not point the head at the speaker "
+        "(voice.direction.doa_max_age_ms is the stricter age for the voice-at-face check)",
         unit="ms", ge=0, le=10000,
     )  # fmt: skip
     loud_db: float = param(
@@ -2326,6 +2327,71 @@ class GrammarConfig(Strict):
     )  # fmt: skip
 
 
+class VoiceDirectionConfig(Strict):
+    """Voice-at-face gate: without the wake word, answer only a voice that comes from a visible
+    face (SPEC 8 stage 2, 5A)."""
+
+    enabled: bool = param(
+        True,
+        "An utterance that would be addressed without the wake word (policy never, an enrolled "
+        "person in view, or a follow-up in the open window) is addressed only when its sound "
+        "direction matched a visible face during the utterance; otherwise it needs the wake "
+        "word. An utterance with the wake word always passes. Off: no check (music and TV in "
+        "the room can be answered)",
+    )
+    tolerance_deg: float = param(
+        25.0,
+        "A sound direction reading matches a face when it is at most this far from the face's "
+        "azimuth (both in the robot base frame, head turn compensated). Covers the microphone "
+        "array's direction error and the face position's own error, with margin to sound "
+        "coming from 60 deg off any face",
+        unit="deg", ge=1, le=90,
+    )  # fmt: skip
+    min_match_share: float = param(
+        0.5,
+        "Share of the utterance's sound direction readings that must match a face. Every reading "
+        "counts, however few: a reading off every face is evidence against the utterance",
+        ge=0, le=1,
+    )  # fmt: skip
+    min_doa_readings: int = param(
+        1,
+        "Fewest sound direction readings the utterance needs to be judged on them; with fewer, "
+        "the check runs degraded (degraded_rule) and is counted by reason",
+        ge=1, le=100,
+    )  # fmt: skip
+    doa_max_age_ms: float = param(
+        500.0,
+        "A sound direction reading further than this from the audio sample's time does not count "
+        "for the check (a robot's source may read only a few times a second, and only while its "
+        "own detector hears speech). Stricter than voice.fastpath.doa_max_age_ms, which only "
+        "turns the head",
+        unit="ms", ge=0, le=5000,
+    )  # fmt: skip
+    face_max_age_s: float | None = param(
+        None,
+        "A person counts as visible when the camera saw them (the vision source reports faces) "
+        "at most this long before the audio sample. Empty: follow attention.stale_s, the age the "
+        "wake-word policy uses for 'in view', so the two never disagree (face detection runs "
+        "slower under load, at night and while the robot speaks)",
+        unit="s", ge=0, le=10,
+    )  # fmt: skip
+    degraded_rule: Literal["auto", "engaged", "reject"] = param(
+        "auto",
+        "Without enough sound direction readings: engaged = addressed when attention is on a "
+        "visible person for degraded_engaged_share of the samples; reject = the wake word is "
+        "needed; auto = reject when the robot measures sound direction and gave none (its "
+        "detector did not take the sound for speech: music, TV, or a quiet voice, which then "
+        "repeats with the wake word), engaged when the robot has no sound direction or muted "
+        "it itself (its own voice and echo, a barge-in)",
+    )
+    degraded_engaged_share: float = param(
+        0.5,
+        "Degraded, engaged rule: share of the utterance's samples during which attention must be "
+        "on a visible person",
+        ge=0, le=1,
+    )  # fmt: skip
+
+
 class VoiceConfig(Strict):
     enabled: bool = param(
         False,
@@ -2523,9 +2589,10 @@ class VoiceConfig(Strict):
     wake_word_policy: Literal["always", "never", "unless_enrolled_in_view"] = param(
         "unless_enrolled_in_view",
         "When the wake word is required: always; never; or unless an enrolled person is in view. "
-        "With unless_enrolled_in_view, anyone speaking while an enrolled person is in view "
-        "(a stranger, a television) is addressed without the wake word, and a stranger alone "
-        "must say it",
+        "With unless_enrolled_in_view, anyone speaking while an enrolled person is in view is "
+        "addressed without the wake word, and a stranger alone must say it. Without the wake "
+        "word, voice.direction then asks that the voice come from a visible face (music and TV "
+        "need the wake word)",
     )
     asr: AsrConfig = param({}, "Speech recognition (SPEC 8 stage 3)")
     keywords: dict[str, KeywordSet] = param(
@@ -2556,6 +2623,9 @@ class VoiceConfig(Strict):
     fastpath: FastpathConfig = param({}, "Speech fast path: keywords, wake word window, prosody")
     grammar: GrammarConfig = param(
         {}, "Grammar pass: wake phrases and keywords heard by a grammar recognizer (SPEC 8)"
+    )
+    direction: VoiceDirectionConfig = param(
+        {}, "Without the wake word, answer only a voice from a visible face (SPEC 8, 5A)"
     )
     barge_in: BargeInConfig = param({}, "Barge-in: user speech over the robot's voice (SPEC 8)")
 

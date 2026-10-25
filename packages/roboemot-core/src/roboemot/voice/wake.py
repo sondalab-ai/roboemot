@@ -1,10 +1,13 @@
 """Whether an utterance is addressed to the robot (SPEC 8 stage 3, ``voice.wake_word_policy``).
 
 The wake word is *required* with policy ``always``, never with ``never``, and with
-``unless_enrolled_in_view`` only while no enrolled person is in view. Note what that means: while
-an enrolled person is in view, every voice (a stranger, a television) is addressed without the
-wake word; the policy is the spec's (SPEC 8 stage 2), and a stricter reading needs the speaker
-identified from the voice, which the robot cannot do yet.
+``unless_enrolled_in_view`` only while no enrolled person is in view (SPEC 8 stage 2).
+
+Every utterance that would be addressed *without* the wake word (not required, or a follow-up in
+the open window) must also pass ``at_face``, the voice-at-face check (``voice.direction``): its
+sound direction pointed at a visible face. Otherwise it is ``rejected_no_face_at_voice`` and needs
+the wake word, so music or a television is not answered. An utterance with the wake word never
+runs the check.
 
 When required, an utterance is addressed if it contains the wake word, or it starts within
 ``voice.fastpath.addressed_window_s`` after the last speech of an addressed one. A follow-up
@@ -16,6 +19,7 @@ from __future__ import annotations
 
 import math
 import threading
+from collections.abc import Callable
 from typing import Any
 
 DECISIONS = (
@@ -24,6 +28,7 @@ DECISIONS = (
     "window",
     "rejected_no_window",
     "rejected_other_speaker",
+    "rejected_no_face_at_voice",
 )
 
 
@@ -53,20 +58,29 @@ class WakeGate:
         start: float,
         last_speech: float,
         speaker: str | None = None,
+        at_face: Callable[[], bool] | None = None,
     ) -> bool:
-        """Whether the utterance (first and last speech stamps, speaker id if known) is addressed"""
+        """Whether the utterance (first and last speech stamps, speaker id if known) is addressed.
+        ``at_face`` is the voice-at-face check, called only when the utterance would be addressed
+        without the wake word (None: no check). It runs under this gate's lock, so it may take
+        only leaf locks (``VoiceDirection`` does)."""
         with self._lock:
             required = self._policy == "always" or (
                 self._policy == "unless_enrolled_in_view" and not enrolled_in_view
             )
             if not required:
-                self._decisions["not_required"] += 1
-                return True
+                outcome = "not_required"
+                if not wake_word and at_face is not None and not at_face():
+                    outcome = "rejected_no_face_at_voice"
+                self._decisions[outcome] += 1
+                return outcome == "not_required"
             if wake_word:
                 self._opened, self._speaker = last_speech, speaker
                 outcome = "wake_word"
             else:
                 outcome = self._follow(start, speaker)
+                if outcome == "window" and at_face is not None and not at_face():
+                    outcome = "rejected_no_face_at_voice"
             self._decisions[outcome] += 1
             if outcome.startswith("rejected"):
                 return False

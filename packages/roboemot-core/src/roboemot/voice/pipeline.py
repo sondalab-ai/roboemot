@@ -2,8 +2,9 @@
 
 ``build_listener`` assembles Silero VAD, Vosk, the fast path and the listener over the audio
 hub's voice queue, with the app-side lookups they need: the robot's sound bearing in the base
-frame (a ``BearingSource``), the attended person, whether an enrolled person is in view, and the
-speaker's language preference.
+frame (a ``BearingSource``), the attended person, whether an enrolled person is in view, the
+sound direction and visible faces for the voice-at-face check, and the speaker's language
+preference.
 The fast path gets the grammar pass (SPEC 8 stage 3) over the same Vosk models.
 The barge-in detector (SPEC 8 stage 8) is built with the listener, on its own Silero instance, and
 hooked to the listener's speaking chunks; the app binds its actions (stop the speech, interrupt the
@@ -28,6 +29,7 @@ from roboemot.voice import models as voice_models
 from roboemot.voice.activity import SpeechActivity
 from roboemot.voice.asr import VoskASR, resolve_language
 from roboemot.voice.bargein import BargeIn, PlaybackReference
+from roboemot.voice.direction import DirectionSample, VoiceDirection
 from roboemot.voice.fastpath import Emit, FastPath
 from roboemot.voice.grammar import GrammarSpotter
 from roboemot.voice.listener import Utterance, VoiceListener
@@ -57,10 +59,12 @@ def build_listener(
     names: RobotName | None = None,
     on_answer: Callable[[str, float], None] | None = None,
     on_activity: Callable[[bool], None] | None = None,
+    doa_available: bool = False,
 ) -> tuple[VoiceListener, Callable[[], None], BargeIn] | None:
     """The listener, a ``close`` for the bearing source and the barge-in detector (not yet bound
     to its actions), or None when voice can't run. ``bearing`` is the robot's sound direction in
-    the base frame (``RobotSession.bearing_source``)."""
+    the base frame (``RobotSession.bearing_source``); ``doa_available`` is whether the manifest
+    declares a sound direction (``doa``), which the voice-at-face check's degraded rule needs."""
     root = voice_models.models_dir(cfg.voice.models_dir, cfg.data_dir)
     try:
         vad_path = voice_models.model_file(root, "silero-vad")
@@ -106,8 +110,7 @@ def build_listener(
 
     def enrolled_in_view(now: float) -> bool:
         # The policy default (SPEC 8 stage 2): any enrolled person in view drops the wake-word
-        # requirement for every voice, including a stranger's or a television's. Kept as
-        # specified; see the voice.wake_word_policy help for the consequence.
+        # requirement; the voice-at-face check (voice.direction) still has to pass.
         stale = listener.config.attention.stale_s
         return any(
             e.kind == "person"
@@ -115,6 +118,18 @@ def build_listener(
             and now - e.last_seen <= stale
             for e in world.entries
         )
+
+    def direction_sample(now: float) -> DirectionSample:
+        """The sound direction and the visible faces (base frame) at ``now`` for the
+        voice-at-face check, and whether attention is on one of those faces."""
+        live = listener.config
+        dcfg = live.voice.direction
+        max_age = dcfg.face_max_age_s if dcfg.face_max_age_s is not None else live.attention.stale_s
+        heard = bearing.get(now, dcfg.doa_max_age_ms / MS_PER_S)
+        faces = [e for e in world.entries if e.kind == "person" and now - e.last_seen <= max_age]
+        attended = attended_person()
+        engaged = attended is not None and any(e.entry_id == attended.entry_id for e in faces)
+        return DirectionSample(heard, tuple(e.azimuth_rad for e in faces), engaged)
 
     fast = FastPath(
         cfg.voice,
@@ -157,6 +172,9 @@ def build_listener(
         before_asr_reset=bargein.handback_asr,
         on_activity=on_activity,
         enrolled_in_view=enrolled_in_view,
+        direction=VoiceDirection(
+            cfg.voice.direction, direction_sample, doa_available=doa_available
+        ),
     )
 
     def close() -> None:
