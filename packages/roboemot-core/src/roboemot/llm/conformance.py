@@ -36,9 +36,8 @@ from ..config.schema import LLMCheckConfig, LLMRoute, RoboEmotConfig, SafetyConf
 from ..persona import apply_to_register, effects
 from ..redact import scrub_text
 from ..secret_store import SECRET_REF, no_secrets
-from ..voice.prosody import TAG
 from .prompt import system_prompt
-from .pseudonyms import Pseudonyms
+from .pseudonyms import Pseudonyms, route_is_local
 from .router import Done, FirstToken, Router, TextDelta, ToolCall, build_messages
 
 log = logging.getLogger(__name__)
@@ -77,6 +76,12 @@ TOKEN_RUN = re.compile(r"[A-Za-z0-9_+=-]{20,}")
 KEY_FRAGMENT_MIN_CHARS = 6
 KEY_FRAGMENT = re.compile(rf"[A-Za-z0-9_+/=.:-]{{{KEY_FRAGMENT_MIN_CHARS},}}")
 MASK = "[masked]"
+# A server message that echoes the request: any run of this many consecutive words found in
+# the texts sent (the system prompt, the user turn) is masked, so no prompt text reaches a reason.
+ECHO_MIN_WORDS = 4
+ECHO_WORD = re.compile(r"[^\W_]+")
+# The ``[mood=x]`` tags of ``voice.mood_source: llm_tagged`` (as ``voice.prosody.TAG``).
+MOOD_TAG = re.compile(r"\[mood=([a-z_]+)\]\s*")
 
 
 class RouteBudgetExhausted(RuntimeError):
@@ -148,13 +153,15 @@ def route_endpoint(route: LLMRoute) -> str:
     return f"{host}:{port}" if port else host
 
 
-def _why(exc: Exception, route: LLMRoute, key: str = "") -> str:
+def _why(exc: Exception, route: LLMRoute, key: str = "", sent: tuple[str, ...] = ()) -> str:
     """A short reason. An HTTP status names the path called, so a wrong base URL shows at once:
     only a path under the route's own base path (never one a redirect chose) of plain
     characters, no host, credentials or query. It then adds the server's message, cleaned, with
-    ``key`` (the key the request carried) masked too."""
+    ``key`` (the key the request carried) and any echo of ``sent`` (the request's texts) masked
+    too."""
     if isinstance(exc, APIStatusError):
-        return f"HTTP {exc.status_code}{_called_path(exc, route)}{_server_says(exc, route, key)}"
+        says = _server_says(exc, route, key, sent)
+        return f"HTTP {exc.status_code}{_called_path(exc, route)}{says}"
     if isinstance(exc, (TimeoutError, APITimeoutError)):
         return "timed out"
     if isinstance(exc, (APIConnectionError, OSError)):
@@ -171,14 +178,15 @@ def _called_path(exc: APIStatusError, route: LLMRoute) -> str:
     return f" at {path}"
 
 
-def _server_says(exc: APIStatusError, route: LLMRoute, key: str = "") -> str:
+def _server_says(
+    exc: APIStatusError, route: LLMRoute, key: str = "", sent: tuple[str, ...] = ()
+) -> str:
     """``: <message>`` from the server's JSON error, or empty. The message may echo the request
     or a key: the key sent, the route's literal key, any run of 6+ characters found inside a
     key and every key-like run are masked, then the shared redactor runs; control characters
-    and repeated spaces are removed and the length is capped. The check sends synthetic user
-    turns and a system prompt built from the config only (persona, register, rules, safety
-    block; no robot name, summaries or history), so an echoed prompt carries nothing about a
-    person."""
+    and repeated spaces are removed and the length is capped. Any run of ``ECHO_MIN_WORDS``
+    words found in ``sent`` (the system prompt built from the config, the user turn) is masked
+    first, so an echoed prompt never reaches the reason."""
     body = exc.body
     if isinstance(body, dict) and isinstance(body.get("error"), dict):
         body = body["error"]
@@ -187,6 +195,7 @@ def _server_says(exc: APIStatusError, route: LLMRoute, key: str = "") -> str:
         return ""
     literal = "" if SECRET_REF.fullmatch(route.api_key) else route.api_key
     keys = [k for k in (key, literal) if k and k != "none"]
+    message = _mask_echo(message, sent)
     for k in keys:
         message = message.replace(k, MASK)
     message = KEY_FRAGMENT.sub(
@@ -198,6 +207,32 @@ def _server_says(exc: APIStatusError, route: LLMRoute, key: str = "") -> str:
     if len(message) > SERVER_TEXT_MAX_CHARS:
         message = message[: SERVER_TEXT_MAX_CHARS - 1] + "…"
     return f": {message}" if message else ""
+
+
+def _mask_echo(message: str, sent: tuple[str, ...]) -> str:
+    """``message`` with every run of ``ECHO_MIN_WORDS``+ consecutive words that also occur in a
+    row in one of ``sent`` replaced by ``MASK`` (case-insensitive, punctuation ignored)."""
+    n = ECHO_MIN_WORDS
+    seen = set()
+    for text in sent:
+        words = [w.lower() for w in ECHO_WORD.findall(text)]
+        seen.update(tuple(words[i : i + n]) for i in range(len(words) - n + 1))
+    found = list(ECHO_WORD.finditer(message))
+    hidden = [False] * len(found)
+    for i in range(len(found) - n + 1):
+        if tuple(m.group(0).lower() for m in found[i : i + n]) in seen:
+            hidden[i : i + n] = [True] * n
+    out, at, i = [], 0, 0
+    while i < len(found):
+        if not hidden[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < len(found) and hidden[j + 1]:
+            j += 1
+        out += [message[at : found[i].start()], MASK]
+        at, i = found[j].end(), j + 1
+    return "".join(out) + message[at:]
 
 
 def _shares_fragment(run: str, key: str) -> bool:
@@ -234,7 +269,8 @@ async def _ask(
                 ans.finish_reason = ev.finish_reason
     except Exception as exc:  # CancelledError (the caller's deadline) is not caught
         ans.error = exc
-        ans.why = _why(exc, route, _sent_key(router, route))
+        sent = tuple(str(m.get("content") or "") for m in messages)
+        ans.why = _why(exc, route, _sent_key(router, route), sent)
     return ans
 
 
@@ -297,7 +333,7 @@ def _latency(ans: _Answer, route: LLMRoute) -> CheckResult:
 def _italian(ans: _Answer, settings: LLMCheckConfig) -> CheckResult:
     if not ans.text:
         return CheckResult(ITALIAN, SKIP, "no reply to judge")
-    count, ratio = italian_ratio(TAG.sub("", ans.text), settings.italian_stopwords)
+    count, ratio = italian_ratio(MOOD_TAG.sub("", ans.text), settings.italian_stopwords)
     if count < settings.italian_min_words:
         return CheckResult(ITALIAN, FAIL, f"reply too short to judge ({count} words)")
     need = settings.italian_min_stopword_ratio
@@ -318,11 +354,13 @@ async def check_route(
     config: RoboEmotConfig | None = None,
 ) -> RouteReport:
     """Run the four checks against ``route`` only. The realistic turn's system prompt is built
-    from ``config`` (the library defaults when omitted). Pass the app's ``router`` to share its
-    daily budgets; otherwise a private one is built from ``safety``, ``secrets`` and the client
-    factory. Raises :class:`RouteKeyUnavailable` when the route's secret cannot be read and
-    :class:`RouteBudgetExhausted` when the budget is spent, both before anything is sent. With
-    ``pseudonyms`` a route that is not local gets the requests aliased like any cloud request.
+    from ``config`` (the library defaults when omitted, and on a route that is not local when
+    ``config`` turns pseudonyms on but no ``pseudonyms`` are given). Pass the app's ``router``
+    to share its daily budgets; otherwise a private one is built from ``safety``, ``secrets``
+    and the client factory. Raises :class:`RouteKeyUnavailable` when the route's secret cannot
+    be read and :class:`RouteBudgetExhausted` when the budget is spent, both before anything is
+    sent. With ``pseudonyms`` a route that is not local gets the requests aliased like any
+    cloud request.
     Failures of the route become ``fail`` results, never exceptions."""
     settings = settings or LLMCheckConfig()
     router = router or Router(
@@ -338,7 +376,12 @@ async def check_route(
         route.name, route.model, route_endpoint(route), now().isoformat(timespec="seconds")
     )
 
-    ask = await _ask(router, route, realistic_turn(config or RoboEmotConfig()), None, pseudonyms)
+    cfg = config or RoboEmotConfig()
+    if pseudonyms is None and cfg.privacy.pseudonyms_to_cloud and not route_is_local(route):
+        # The owner's free text (persona, extra rules) may name a person, and nothing would
+        # alias it on this route: the library's defaults stand in for it.
+        cfg = RoboEmotConfig()
+    ask = await _ask(router, route, realistic_turn(cfg), None, pseudonyms)
     report.first_token_s = ask.timing.seconds
     report.reasoning_chars = ask.timing.reasoning_chars
     report.finish_reason = ask.finish_reason or ask.timing.finish_reason

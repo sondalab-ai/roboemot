@@ -524,3 +524,55 @@ async def test_reasons_never_hold_the_prompt_or_the_reasoning():
     dumped = json.dumps(report.to_dict())
     for secret in ("PERSONA-4c1d", "THOUGHT-8e2b", USER_TURN, SECRET_KEY):
         assert secret not in dumped
+
+
+PRIVATE_PERSONA = "You live with Marta in a small flat and you love her cat."
+
+
+def cloud_route(**kw) -> LLMRoute:
+    kw.setdefault("first_token_timeout_s", 0.5)
+    return LLMRoute(name="cloud", base_url="https://api.example.com/v1", model="m", **kw)
+
+
+async def test_pseudonyms_on_without_a_name_map_keep_free_text_off_a_cloud_route():
+    cfg = RoboEmotConfig.model_validate(
+        {"persona": {"prompt": PRIVATE_PERSONA}, "privacy": {"pseudonyms_to_cloud": True}}
+    )
+    fake = Fake()
+    await run(fake, cloud_route(), config=cfg)
+    sent = json.dumps(fake.bodies)
+    assert "Marta" not in sent and "Always reply in Italian." in sent
+
+
+async def test_a_local_route_gets_the_owners_persona_with_pseudonyms_on():
+    cfg = RoboEmotConfig.model_validate(
+        {"persona": {"prompt": PRIVATE_PERSONA}, "privacy": {"pseudonyms_to_cloud": True}}
+    )
+    fake = Fake()
+    await run(fake, route(), config=cfg)
+    assert "Marta" in fake.bodies[0]["messages"][0]["content"]
+
+
+def test_an_echoed_prompt_is_masked_in_the_server_message():
+    message = f"Invalid request: '{PRIVATE_PERSONA.upper()}' is too long for model org/m-3.5"
+    reason = _why(status_error({"message": message}), R, sent=(PRIVATE_PERSONA, USER_TURN))
+    assert "MARTA" not in reason and "CAT" not in reason
+    assert reason.endswith(": Invalid request: '[masked].' is too long for model org/m-3.5")
+
+
+async def test_an_echo_of_the_realistic_turn_never_reaches_the_report():
+    cfg = RoboEmotConfig.model_validate({"persona": {"prompt": PRIVATE_PERSONA}})
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        echo = " ".join(str(m.get("content") or "") for m in body["messages"])
+        return httpx.Response(400, json={"error": {"message": f"bad: {echo}"[:150]}})
+
+    report = await check_route(
+        route(),
+        SafetyConfig(),
+        config=cfg,
+        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    dumped = json.dumps(report.to_dict())
+    assert "Marta" not in dumped and "small flat" not in dumped and "HTTP 400" in dumped
