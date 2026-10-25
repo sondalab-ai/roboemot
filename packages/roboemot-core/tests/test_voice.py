@@ -95,7 +95,7 @@ def _reachy_voice():
     path = Path(__file__).resolve().parents[3] / "configs/manifests/reachy-mini-wireless.yaml"
     manifest = load_manifest(path, allow_unmeasured_dynamics=True)
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw=None)
     return stack.effective().voice
 
 

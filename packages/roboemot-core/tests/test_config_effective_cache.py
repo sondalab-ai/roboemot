@@ -97,7 +97,9 @@ def test_apply_preset_invalidates():
 def test_manifest_behaviour_and_channels_invalidate():
     stack = ConfigStack()
     a = stack.effective()
-    stack.set_manifest_behaviour({"motion": {"app_tick_hz": 7.0}}, ["head_yaw", "head_pitch"])
+    stack.set_manifest_behaviour(
+        {"motion": {"app_tick_hz": 7.0}}, ["head_yaw", "head_pitch"], body_yaw=None
+    )
     b = stack.effective()
     assert b is not a and b.motion.app_tick_hz == 7.0
     stack.defaults = {"circadian_motion": {"rest_pose_deg": {"head_yaw": 1.0}}}

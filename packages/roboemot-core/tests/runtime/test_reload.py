@@ -29,7 +29,7 @@ def pipeline() -> SimpleNamespace:
         gaze=SimpleNamespace(cfg=None, margin_rad=0.0), scan=None, plugin=None,
         perception=Recorder(), runner=Recorder(), circ=Recorder(), speech=Recorder(),
         yes_no=Recorder(), listener=None, bargein=None, reflexes=Recorder(),
-        tracker=SimpleNamespace(cfg=None), expression=Recorder(),
+        tracker=SimpleNamespace(cfg=None), expression=Recorder(), speaking=Recorder(),
         responder=SimpleNamespace(cfg=None, language=None), network=Recorder(),
     )  # fmt: skip
 
@@ -50,6 +50,8 @@ def test_a_config_change_reaches_every_part_that_holds_a_copy():
     assert ("set_echo_tail_ms", (cfg.voice.echo_tail_ms,)) in p.speech.calls
     assert ("set_policy", (cfg.connectivity.network,)) in p.network.calls
     assert ("set_routes", (cfg.llm_routes,)) in p.network.calls
+    speaking = (cfg.speech_motion, cfg.speech_motion_map, cfg.expression.max_amplitude)
+    assert ("apply_config", speaking) in p.speaking.calls
 
 
 def test_optional_parts_that_do_not_exist_are_skipped():

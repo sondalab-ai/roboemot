@@ -53,7 +53,7 @@ def manifest():
 @pytest.fixture(scope="module")
 def cfg(manifest) -> RoboEmotConfig:
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw=None)
     return stack.effective()
 
 
@@ -744,7 +744,7 @@ def test_a_log_out_of_order_is_rejected():
 def test_circadian_config_validation_of_the_new_fields():
     stack = ConfigStack(app={"circadian_motion": {"rest_pose_deg": {"wheels": 1}}})
     with pytest.raises(ConfigError, match="unknown channel 'wheels'"):
-        stack.set_manifest_behaviour({}, {"head.yaw"})
+        stack.set_manifest_behaviour({}, {"head.yaw"}, body_yaw=None)
     with pytest.raises(ConfigError):
         ConfigStack(app={"circadian": {"yawn_jitter": 2.0}})
     assert {f.name for f in fields(LightSample)} >= {"when", "luma", "noise", "presence"}

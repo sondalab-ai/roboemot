@@ -234,7 +234,7 @@ def test_a_joy_expression_moves_the_antennas_on_the_simulated_robot(loop):
 
     manifest = loop.manifest
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw=None)
     cfg = stack.effective()
     home = {n: manifest.dofs[n].home for n in ("antenna_right", "antenna_left")}
     _hold(loop, home, 8.0)
@@ -268,7 +268,7 @@ def test_a_nod_gesture_moves_the_head_pitch_on_the_simulated_robot(loop):
 
     manifest = loop.manifest
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw=None)
     cfg = stack.effective()
     home = {"head.pitch": manifest.dofs["head.pitch"].home}
     _hold(loop, home, 8.0)
@@ -594,7 +594,7 @@ def test_the_rest_posture_lowers_the_head_and_droops_the_antennas_on_the_simulat
 
     manifest = loop.manifest
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw=None)
     cfg = stack.effective()
     names = ("head.pitch", "antenna_right", "antenna_left")
     _hold(loop, {n: manifest.dofs[n].home for n in names}, 8.0)
@@ -649,6 +649,98 @@ def test_the_robot_reacts_to_a_known_person_and_a_stranger_with_one_register(
         assert yaw[case] > 0.9 * PLANTED_AZ, yaw
 
 
+def test_the_speaking_motion_moves_the_head_pitch_with_a_canned_reply(loop):
+    """SPEC 7 (Speaking motion), 12A: a canned speech timeline (phrases, a loud stretch, a
+    question) through the shipped speech_motion_map and the real loop: the measured head pitch
+    follows the commanded offsets (dip, nod, breath, tilt lift) and comes back, and the robot's
+    own speaking motion never looks like external control."""
+    import numpy as np
+    from roboemot.affect import AffectState
+    from roboemot.affect.register import Person, resolve_register
+    from roboemot.affect.speaking import SpeakingRenderer
+    from roboemot.voice.envelope import SpeechTimeline
+
+    manifest = loop.manifest
+    stack = ConfigStack()
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw="body_yaw")
+    stack.set("speech_motion.levels.lively.nod_share", 1.0, source="test")  # not seed-dependent
+    cfg = stack.effective()
+    _hold(loop, {"head.pitch": manifest.dofs["head.pitch"].home}, 6.0)
+    settled = loop.driver.read_state()["head.pitch"]
+    rate = 16000
+
+    def seg(db, s):
+        n = int(rate * s)
+        if db is None:
+            return np.zeros(n, np.float32)
+        amp = 10 ** (db / 20) * math.sqrt(2)
+        return (amp * np.sin(2 * math.pi * 220 * np.arange(n) / rate)).astype(np.float32)
+
+    tl = SpeechTimeline(cfg.speech_motion)
+    start = time.monotonic() + 1.0
+    parts = [(-26, 0.8), (None, 0.4), (-26, 0.5), (-14, 0.5), (-26, 0.8), (None, 0.4), (-26, 0.8)]
+    x = np.concatenate([seg(db, s) for db, s in parts])
+    tl.push(1, x, rate, start, utterance=1, question=False, mood="joy", continued=False)
+    tl.finish(1, start + x.size / rate)
+    q = seg(-26, 1.0)
+    tl.push(2, q, rate, start + x.size / rate + 0.5, utterance=1, question=True, mood="joy",
+            continued=False)  # fmt: skip
+    tl.finish(2, start + x.size / rate + 0.5 + q.size / rate)
+    renderer = SpeakingRenderer(
+        cfg.speech_motion,
+        cfg.speech_motion_map,
+        manifest.dofs,
+        body_yaw="body_yaw",
+        max_amplitude=cfg.expression.max_amplitude,
+        timeline=lambda: tl,
+    )
+    renderer.set_register(resolve_register([Person({})], cfg.register, cfg.persona))
+    renderer.set_affect(AffectState(0.5, 0.0, "joy", 0.5))
+    commanded, measured = [], []
+    others = ("head.roll", "antenna_left")  # the tilt and the accent: a sim baseline for signs
+    start_pose = loop.driver.read_state()
+    other_cmd: dict[str, list[float]] = {n: [] for n in others}
+    other_meas: dict[str, list[float]] = {n: [] for n in others}
+    end = time.monotonic() + 12.0
+    while time.monotonic() < end:
+        now = time.monotonic()
+        targets: dict[str, float] = {}
+        for cmd in renderer.commands(now):
+            loop.feed(cmd)
+            targets = cmd.targets
+        commanded.append(targets.get("head.pitch", 0.0))
+        state = loop.driver.read_state()
+        measured.append(state["head.pitch"] - settled)
+        for n in others:
+            other_cmd[n].append(targets.get(n, 0.0))
+            other_meas[n].append(state[n] - start_pose[n])
+        time.sleep(0.05)
+    for n in others:
+        peak_cmd = max(other_cmd[n], key=abs)
+        peak_meas = max((m * math.copysign(1, peak_cmd) for m in other_meas[n]), default=0.0)
+        print(f"\n{n}: commanded peak {peak_cmd:+.4f} rad, measured {peak_meas:+.4f} rad that way")
+        assert peak_cmd != 0 and peak_meas >= 0.3 * abs(peak_cmd), n
+    snap = renderer.snapshot()
+    assert snap["phrase_nod"] >= 1 and snap["question_tilt"] == 1 and snap["breath"] >= 1
+    down, up = max(commanded), min(commanded)
+    assert max(measured) >= 0.5 * down and min(measured) <= 0.5 * up, (down, up)
+
+    def agreement(lag: int) -> float:
+        """Share of the clearly moving samples where the measured pitch has the commanded sign
+        ``lag`` samples later (the limiter and the daemon trail the command)."""
+        pairs = [(c, m) for c, m in zip(commanded, measured[lag:], strict=False) if abs(c) > 0.02]
+        return sum(1 for c, m in pairs if c * m > 0) / max(1, len(pairs))
+
+    best = max(range(11), key=agreement)  # up to 0.5 s at the 20 Hz sampling here
+    print(
+        f"\nspeaking motion: commanded {down:.4f} / {up:.4f} rad, measured {max(measured):.4f} / "
+        f"{min(measured):.4f} rad, best lag {best * 50} ms, sign agreement {agreement(best):.2f}"
+    )
+    assert agreement(best) >= 0.8
+    assert measured[-1] == pytest.approx(0.0, abs=0.02)
+    assert loop.external_events == 0 and not loop.external
+
+
 def _watch_tracking_error(lp: MotionLoop) -> dict[str, float]:
     """Record the worst divergence the loop's own detector sees: per kind, the largest distance
     of a new measured sample from the range of the poses commanded within the lag window (what
@@ -686,7 +778,7 @@ def test_our_own_gestures_and_extreme_motion_never_look_like_external_control(lo
 
     manifest = loop.manifest
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw=None)
     cfg = stack.effective()
     worst = _watch_tracking_error(loop)
     _hold(loop, {n: d.home for n, d in manifest.dofs.items() if d.measured}, 6.0)
