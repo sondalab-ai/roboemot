@@ -2542,13 +2542,21 @@ class SpeechMotionConfig(Strict):
         ge=1,
         le=30,
     )
-    emphasis_min_interval_s: float = param(
+    emphasis_floor_interval_s: float = param(
         0.8,
-        "At most one emphasis per this interval on the timeline (the motion presets may thin "
-        "them further)",
+        "At most one emphasis per this interval on the timeline, across sentences (the motion "
+        "presets may thin them further)",
         unit="s",
         ge=0.1,
         le=10,
+    )
+    emphasis_warmup_ms: int = param(
+        250,
+        "No emphasis until a sentence has this much voiced audio: its first frames only feed the "
+        "running median (a sentence onset is not an emphasis)",
+        unit="ms",
+        ge=0,
+        le=2000,
     )
     history_s: float = param(
         5.0,

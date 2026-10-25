@@ -292,3 +292,140 @@ def test_frames_stay_in_order_on_a_sink_without_a_timeline(make):
     starts = [a for a, _ in out.timeline.frames_between(-math.inf, math.inf)]
     assert len(starts) == 30
     assert np.diff(starts) == pytest.approx(np.full(29, 0.02))
+
+
+# ------------------------------------------------- fix round 1 (review of ZT1)
+
+
+def seg(db: float, s: float) -> np.ndarray:
+    """A steady tone whose frames have an RMS of ``db`` dBFS."""
+    return tone(10 ** (db / 20) * math.sqrt(2), s)
+
+
+def push(t: SpeechTimeline, sentence: int, x: np.ndarray, start: float, **kw) -> float:
+    """Push ``x`` whole for ``sentence`` at ``start`` and finish it; returns its end."""
+    args = {"utterance": 1, "question": False, "mood": None, "continued": False} | kw
+    t.push(sentence, x, RATE, start, **args)
+    end = start + x.size / RATE
+    t.finish(sentence, end)
+    return end
+
+
+def emphases(t: SpeechTimeline) -> list[float]:
+    return [e.at_s for e in kinds(t.events_between(-math.inf, math.inf), "emphasis")]
+
+
+@pytest.mark.parametrize("continued", [False, True])
+def test_the_emphasis_interval_holds_across_back_to_back_sentences(continued):
+    t = SpeechTimeline(SpeechMotionConfig(emphasis_warmup_ms=0), FakeClock())
+    end = push(t, 1, np.concatenate([seg(-26, 0.6), seg(-14, 0.04), seg(-26, 0.1)]), 0.0)
+    # the next sentence (or the rest of the same one) peaks 0.24 s after the first peak
+    s2 = np.concatenate([seg(-26, 0.1), seg(-14, 0.04), seg(-26, 0.6)])
+    end = push(t, 2, s2, end, continued=continued)
+    assert emphases(t) == pytest.approx([0.62])
+    # a peak a full interval later still fires
+    push(t, 3, np.concatenate([seg(-26, 1.0), seg(-14, 0.04), seg(-26, 0.2)]), end)
+    assert emphases(t) == pytest.approx([0.62, end + 1.02])
+
+
+def test_a_cut_resets_the_emphasis_interval():
+    t = SpeechTimeline(SpeechMotionConfig(emphasis_warmup_ms=0), FakeClock())
+    end = push(t, 1, np.concatenate([seg(-26, 0.6), seg(-14, 0.04), seg(-26, 0.1)]), 0.0)
+    t.truncate(end)  # nothing after the cut plays, so the first peak no longer limits the next
+    push(t, 2, np.concatenate([seg(-26, 0.1), seg(-14, 0.04), seg(-26, 0.6)]), end)
+    assert emphases(t) == pytest.approx([0.62, end + 0.12])
+
+
+@pytest.mark.parametrize("warmup_ms, expected", [(250, 0), (0, 1)])
+def test_a_sentence_onset_ramp_is_not_an_emphasis(warmup_ms, expected):
+    t = SpeechTimeline(SpeechMotionConfig(emphasis_warmup_ms=warmup_ms), FakeClock())
+    ramp = [seg(db, 0.02) for db in (-40, -30, -22, -18)]
+    push(t, 1, np.concatenate([*ramp, seg(-20, 1.0)]), 0.0)
+    # the -18 frame clears the median of the ramp by 8 dB; only the warm-up keeps it out
+    assert len(emphases(t)) == expected
+
+
+def test_the_sentence_end_covers_its_frames_on_a_sink_without_a_timeline(make):
+    clock = FakeClock()
+    out = make(ScriptBackend([tone(0.3, 1.0)]), sink=NoTimelineSink(clock), clock=clock)
+    say(out)
+    assert wait_for(lambda: ended(out, 1))
+    t = out.timeline
+    assert t.sentence_at(0.5) is not None and t.sentence_at(0.5).end_s == pytest.approx(1.0)
+    (end,) = kinds(t.events_between(-math.inf, math.inf), "sentence_end")
+    assert end.at_s >= max(a for a, _ in t.frames_between(-math.inf, math.inf)) + 0.02 - 1e-9
+
+
+def test_the_report_has_the_time_spent_writing_the_timeline(make):
+    clock = FakeClock()
+    out = make(ScriptBackend([tone(0.3, 0.5)], chunk=1600), sink=ClockedSink(clock), clock=clock)
+    say(out)
+    assert wait_for(lambda: ended(out, 1))
+    timeline_ms = out.snapshot()["timeline_ms"]
+    assert timeline_ms["count"] == 5 and timeline_ms["max"] >= 0  # one per speech push
+
+
+class DryingBackend(FakeBackend):
+    """Two 1000-sample chunks (3 frames and a 40-sample rest each); between them the clock moves
+    past the end of the sink's queue, as when a streamed backend falls behind."""
+
+    def __init__(self, clock, dry_until: float) -> None:
+        super().__init__()
+        self.clock, self.dry_until = clock, dry_until
+
+    async def synthesize(self, text, delivery, *, language, voice):
+        yield AudioChunk(tone(0.3, 1000 / RATE), RATE)
+        self.clock.now = self.dry_until
+        yield AudioChunk(tone(0.3, 1000 / RATE), RATE)
+
+
+def test_a_sink_running_dry_mid_sentence_leaves_no_frame_across_the_gap(make):
+    clock = FakeClock()
+    out = make(DryingBackend(clock, 0.5), sink=ClockedSink(clock), clock=clock)
+    say(out)
+    assert wait_for(lambda: ended(out, 1))
+    t = out.timeline
+    starts = [a for a, _ in t.frames_between(-math.inf, math.inf)]
+    assert starts[:5] == pytest.approx([0.0, 0.02, 0.04, 0.06, 0.5])
+    assert t.level_at(0.062) is not None  # the flushed rest ends where the audio stopped ...
+    assert t.level_at(0.063) is None and t.level_at(0.3) is None  # ... and nothing spans the gap
+    assert t.level_at(0.5) is not None
+    (gap,) = kinds(t.events_between(-math.inf, math.inf), "phrase_gap")  # the pause is heard
+    assert gap.at_s == pytest.approx(0.0625) and gap.until_s == pytest.approx(0.5)
+
+
+def test_a_sample_rate_change_mid_sentence_gives_frames_at_the_new_rate():
+    t = SpeechTimeline(SpeechMotionConfig(), FakeClock())
+    args = {"utterance": 1, "question": False, "mood": None, "continued": False}
+    t.push(1, tone(0.3, 1000 / RATE), RATE, 0.0, **args)  # 3 frames and a 2.5 ms rest
+    slow = (0.3 * np.sin(2 * np.pi * TONE_HZ * np.arange(800) / 8000)).astype(np.float32)
+    t.push(1, slow, 8000, 1000 / RATE, **args)  # 100 ms at 8 kHz: 160-sample frames
+    t.finish(1, 1000 / RATE + 0.1)
+    starts = [a for a, _ in t.frames_between(-math.inf, math.inf)]
+    assert starts == pytest.approx([0.0, 0.02, 0.04, 0.06, 0.0625, 0.0825, 0.1025, 0.1225, 0.1425])
+    assert t.level_at(0.0624) is not None and t.level_at(0.15) is not None
+
+
+def test_a_stop_with_nothing_on_the_timeline_is_not_a_cut():
+    t = SpeechTimeline(SpeechMotionConfig(), FakeClock())
+    t.truncate(5.0)
+    assert t.snapshot()["cuts"] == 0 and t.last_cut() is None
+    end = push(t, 1, tone(0.3, 0.2), 6.0)
+    t.truncate(end + 1.0)  # after the sentence ended: still nothing to cut
+    assert t.snapshot()["cuts"] == 0
+    t.push(2, tone(0.3, 0.2), RATE, 8.0, utterance=1, question=False, mood=None, continued=False)
+    t.truncate(8.1)
+    assert t.snapshot()["cuts"] == 1 and t.last_cut() == 8.1
+
+
+def test_the_phrase_index_survives_a_long_pause_inside_one_utterance():
+    clock = FakeClock()
+    t = SpeechTimeline(SpeechMotionConfig(history_s=1.0), clock)
+    gapped = np.concatenate([tone(0.3, 0.2), silence(0.3), tone(0.3, 0.2)])
+    push(t, 1, gapped, 0.0)
+    clock.now = 10.0  # an LLM stall far longer than the history between two sentences, ...
+    push(t, 2, tone(0.3, 0.2), 10.0, utterance=2)  # ... and a cue of another answer meanwhile
+    clock.now = 20.0
+    push(t, 3, gapped, 20.0)
+    gaps = kinds(t.events_between(-math.inf, math.inf), "phrase_gap")
+    assert [(g.utterance, g.index) for g in gaps] == [(1, 1)]  # the count outlived the history

@@ -12,8 +12,13 @@ before it is heard (audio is pushed ahead of playback). Per sentence it keeps:
 - events: ``sentence_start``, ``sentence_end``, ``phrase_gap`` (between two voiced frames of one
   sentence, at least ``phrase_gap_ms`` with no voiced frame, stamped where the last voiced frame
   ended; leading and trailing silence never count) and ``emphasis`` (a local maximum at least
-  ``emphasis_db`` above the running median of the sentence's voiced frames so far, at most once
-  per ``emphasis_min_interval_s``).
+  ``emphasis_db`` above the running median of the sentence's voiced frames so far, once the
+  sentence has ``emphasis_warmup_ms`` of voiced audio, at most once per
+  ``emphasis_floor_interval_s`` across sentences).
+
+A phrase gap is written when the voice resumes: with whole-sentence pushes (Piper) that is ahead of
+playback, but a streamed backend may write it at or after its ``at_s``, so a reader must accept
+events stamped in its past.
 
 A barge-in truncates it at the stop: nothing at or after the cut remains, and a phrase gap the
 cut ends early is dropped (the speech after it never plays). It never holds text or samples
@@ -38,6 +43,7 @@ import numpy as np
 from ..config.schema import SpeechMotionConfig
 
 MS_PER_S = 1000.0
+PHRASE_UTTERANCES_MAX = 64  # answers whose phrase-gap count is remembered (not by time)
 POWER_DB = 10.0  # dB per decade of a mean square
 FLOOR_DBFS = -120.0  # the level of digital silence (log of zero)
 
@@ -92,7 +98,6 @@ class _Writer:
     cand_at: float | None = None  # the last frame, waiting for the next to be judged a peak
     cand_db: float = FLOOR_DBFS
     prev_db: float = FLOOR_DBFS
-    last_emphasis: float = -math.inf
 
 
 class SpeechTimeline:
@@ -112,10 +117,12 @@ class SpeechTimeline:
         self._phrases: dict[int, int] = {}  # utterance -> phrase gaps so far
         self._writer: _Writer | None = None
         self._last_cut: float | None = None
+        self._last_emphasis = -math.inf  # held across sentences, reset by a cut
         self._counts = {"frames": 0, "sentences": 0, "cuts": 0} | dict.fromkeys(EVENT_KINDS, 0)
 
     def apply_config(self, config: SpeechMotionConfig) -> None:
-        """Hot reload; a new frame length applies from the next sentence."""
+        """Hot reload. A new frame length applies from the next sentence; the levels, the gap,
+        the emphasis margin, warm-up and interval apply at once, mid-sentence too."""
         with self._lock:
             self.config = config
 
@@ -172,8 +179,11 @@ class SpeechTimeline:
     def truncate(self, now: float) -> None:
         """Barge-in at ``now``: drop everything at or after it and the unfinished writer state."""
         with self._lock:
+            w = self._writer
+            active = w is not None or any(s.end_s > now for s in self._sentences)
             self._writer = None
             self._pads.clear()
+            self._last_emphasis = -math.inf
             keep = bisect.bisect_left(self._starts, now)
             del self._starts[keep:], self._ends[keep:], self._dbfs[keep:]
             if self._ends and self._ends[-1] > now:
@@ -183,8 +193,9 @@ class SpeechTimeline:
             for s in self._sentences:
                 if s.end_s > now:
                     s.end_s, s.cut = now, True
-            self._last_cut = now
-            self._counts["cuts"] += 1
+            if active:  # a stop with nothing playing or pending is not a cut
+                self._last_cut = now
+                self._counts["cuts"] += 1
 
     def _begin(
         self,
@@ -262,8 +273,10 @@ class SpeechTimeline:
             cfg.phrase_gap_ms / MS_PER_S
         ):
             utt = w.sentence.utterance
-            index = self._phrases.get(utt, 0)
+            index = self._phrases.pop(utt, 0)
             self._phrases[utt] = index + 1
+            while len(self._phrases) > PHRASE_UTTERANCES_MAX:
+                del self._phrases[next(iter(self._phrases))]
             self._event("phrase_gap", w.last_voiced_end, at, w.sentence, index=index)
         w.last_voiced_end = end
         assert w.voiced is not None
@@ -277,18 +290,22 @@ class SpeechTimeline:
             return
         at, db = w.cand_at, w.cand_db
         prev, w.prev_db, w.cand_at = w.prev_db, db, None
-        if not (db >= prev and db > next_db) or at - w.last_emphasis < (
-            self.config.emphasis_min_interval_s
+        cfg = self.config
+        if not (db >= prev and db > next_db) or at - self._last_emphasis < (
+            cfg.emphasis_floor_interval_s
         ):
             return
-        if db - _median(w.voiced or [db]) >= self.config.emphasis_db:
-            w.last_emphasis = at
+        voiced = w.voiced or [db]
+        if len(voiced) * w.frame_s * MS_PER_S < cfg.emphasis_warmup_ms:
+            return
+        if db - _median(voiced) >= cfg.emphasis_db:
+            self._last_emphasis = at
             self._event("emphasis", at, at, w.sentence, dbfs=db)
 
     def _finish(self, w: _Writer, end_s: float) -> None:
         self._flush_carry(w)
         self._judge(w, FLOOR_DBFS)
-        w.sentence.end_s = max(end_s, w.sentence.start_s)
+        w.sentence.end_s = max(end_s, w.sentence.end_s)  # a sink without a timeline says "now"
         self._event("sentence_end", w.sentence.end_s, w.sentence.end_s, w.sentence)
         self._writer = None
         self._prune()
@@ -317,9 +334,7 @@ class SpeechTimeline:
         if old:
             del self._starts[:old], self._ends[:old], self._dbfs[:old]
         self._events = [e for e in self._events if e.until_s >= horizon]
-        live = {s.utterance for s in self._sentences if s.end_s >= horizon}
         self._sentences = [s for s in self._sentences if s.end_s >= horizon]
-        self._phrases = {u: n for u, n in self._phrases.items() if u in live}
 
     # ----------------------------------------------------------------- reader
 
