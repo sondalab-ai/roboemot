@@ -95,6 +95,7 @@ def test_app_builds_the_listener_and_stops_it_cleanly(data, fakes):  # noqa: F81
         report = app.diagnostics.report()["sections"]["roboemot.voice"]["data"]
         assert report["state"] == "running" and "latency" in report
         assert report["direction"]["enabled"] is True
+        assert report["direction"]["doa_available"] is True  # the manifest declares doa
         u = SimpleNamespace(text="x")
         app.voice_listener._on_utterance(u)  # slice 5 hooks `on_utterance`
         assert got == [u]
@@ -116,7 +117,7 @@ class Registry:
         return SimpleNamespace(preferences=self.prefs[person_id])
 
 
-def wiring(registry, fakes_ok=True):
+def wiring(registry, fakes_ok=True, doa=True):
     cfg = RoboEmotConfig()
     bus = Bus()
     world = WorldModel(cfg.world, FRAME, bus)
@@ -133,6 +134,7 @@ def wiring(registry, fakes_ok=True):
         registry,
         LatestBearing(bus, FRAME),
         lambda u: None,
+        doa_available=doa,
     )
     assert built is not None
     return built[0], bus, world, selector
@@ -219,13 +221,42 @@ def test_music_60_deg_off_the_face_is_rejected_through_the_real_frame(fakes):
     assert listener.snapshot()["direction"]["face_offset_deg"]["last"] == pytest.approx(60.0)
 
 
-def test_without_a_reading_the_check_falls_back_to_the_attended_face(fakes):
+def test_without_a_reading_reachy_needs_the_wake_word(fakes):
     listener, bus, world, selector = wiring(Registry({}))
-    assert not check(listener)  # nobody in view, no reading
+    face_ahead_of_turned_head(world, selector)
+    assert not check(listener)  # the array could hear and gave nothing (auto: silent -> reject)
+    assert listener.snapshot()["direction"]["degraded"]["silent"] == 1
+
+
+def test_without_a_sound_direction_the_check_falls_back_to_the_attended_face(fakes):
+    listener, bus, world, selector = wiring(Registry({}), doa=False)
+    assert not check(listener)  # nobody in view
     face_ahead_of_turned_head(world, selector)
     assert check(listener)
-    assert not check(listener, now=10.0 + RoboEmotConfig().voice.direction.face_max_age_s + 1)
-    assert listener.snapshot()["direction"]["degraded"] == 3
+    stale = RoboEmotConfig().attention.stale_s  # face_max_age_s empty: follows attention.stale_s
+    assert not check(listener, now=10.0 + stale + 1)
+    assert listener.snapshot()["direction"]["degraded"]["no_source"] == 3
+
+
+def test_a_voice_from_a_face_behind_is_mirrored_to_the_front_and_rejected(fakes):
+    listener, bus, world, selector = wiring(Registry({}))
+    behind = math.radians(150.0)
+    world.observe(Observation("person", 10.0, "vision", 0.0, 0.0), {"head.yaw": behind})
+    selector.update(10.0, world.entries)
+    # The voice comes from 150 deg with the head straight; the half-plane array reports 30 deg.
+    hear(bus, math.pi / 2 - math.radians(30.0), 0.0)
+    assert not check(listener)
+    assert listener.snapshot()["direction"]["face_offset_deg"]["last"] == pytest.approx(120.0)
+
+
+def test_a_rear_sound_mirrored_onto_a_front_face_passes(fakes):
+    listener, bus, world, selector = wiring(Registry({}))
+    front = math.radians(30.0)
+    world.observe(Observation("person", 10.0, "vision", 0.0, 0.0), {"head.yaw": front})
+    selector.update(10.0, world.entries)
+    # Music from 150 deg (behind) is reported mirrored at 30 deg: on the face (known limit).
+    hear(bus, math.pi / 2 - math.radians(30.0), 0.0)
+    assert check(listener)
 
 
 def test_sound_bearing_is_rotated_into_the_base_frame_and_expires(fakes):
@@ -362,3 +393,16 @@ def test_no_bearing_source_is_built_without_voice(data, monkeypatch):  # noqa: F
         stop.set()
         thread.join(timeout=10)
     assert not errors and built == []
+
+
+def test_bearing_is_the_reading_nearest_to_the_asked_time_on_either_side():
+    bus = Bus()
+    bearing = LatestBearing(bus, FRAME)
+    assert bearing.get(10.0, 0.5) is None
+    for stamp, sdk_angle in ((10.0, math.pi / 2), (11.0, 0.0)):  # front, then full left
+        hear(bus, sdk_angle, 0.0, now=stamp)
+    assert bearing.get(10.1, 0.5) == pytest.approx(0.0)  # a lagging listener gets its own sound
+    assert bearing.get(10.9, 0.5) == pytest.approx(math.pi / 2)
+    assert bearing.get(9.0, 0.5) is None  # the nearest reading is a later sound
+    assert bearing.get(12.0, 0.5) is None  # stale
+    bearing.close()
