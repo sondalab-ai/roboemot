@@ -636,22 +636,30 @@ FACE_RAD = 0.2
 OFF_FACE_RAD = FACE_RAD + math.radians(60.0)
 
 
-def direction_rig(final, bearing_rad, cfg=None, **kw):
-    """A rig with policy never and a voice-at-face check over one face at ``FACE_RAD``; the
-    returned list collects the stamps the check sampled."""
-    cfg = cfg or RoboEmotConfig.model_validate({"voice": {"wake_word_policy": "never"}})
+def direction_rig(final, bearing_rad, policy="never", cfg=None, **kw):
+    """A rig with ``policy`` and a voice-at-face check over one attended face at ``FACE_RAD``
+    on a robot with a sound direction. Returns the rig, the stamps the check sampled, and
+    ``where`` (``where["bearing"]`` is the reading every sample gets; change it between
+    utterances)."""
+    cfg = cfg or RoboEmotConfig.model_validate({"voice": {"wake_word_policy": policy}})
     stamps: list[float] = []
+    where = {"bearing": bearing_rad}
 
     def lookup(now):
         stamps.append(now)
-        return DirectionSample(bearing_rad, (FACE_RAD,), True)
+        return DirectionSample(where["bearing"], (FACE_RAD,), True)
 
-    direction = VoiceDirection(cfg.voice.direction, lookup)
-    return Rig([final], final=final, cfg=cfg, direction=direction, **kw), stamps
+    direction = VoiceDirection(cfg.voice.direction, lookup, doa_available=True)
+    return Rig([final], final=final, cfg=cfg, direction=direction, **kw), stamps, where
+
+
+def say_text(r, final):
+    r.asr.script, r.asr.final_text = [final], final
+    r.say()
 
 
 def test_music_off_any_face_is_not_addressed_without_the_wake_word():
-    r, stamps = direction_rig("la la la amore mio", OFF_FACE_RAD)
+    r, stamps, _ = direction_rig("la la la amore mio", OFF_FACE_RAD)
     r.say()
     assert not r.utterances[0].addressed
     snap = r.listener.snapshot()
@@ -662,7 +670,7 @@ def test_music_off_any_face_is_not_addressed_without_the_wake_word():
 
 
 def test_a_voice_from_the_face_is_addressed_without_the_wake_word():
-    r, _ = direction_rig("come stai", FACE_RAD)
+    r, _, _ = direction_rig("come stai", FACE_RAD)
     r.say()
     assert r.utterances[0].addressed
     assert r.listener.snapshot()["direction"]["checks"]["passed"] == 1
@@ -679,7 +687,7 @@ def test_wake_phrase_rescued_by_the_grammar_pass_skips_the_check():
         def snapshot(self):
             return {}
 
-    r, _ = direction_rig("cadeva come stai", OFF_FACE_RAD, grammar=Rescue())
+    r, _, _ = direction_rig("cadeva come stai", OFF_FACE_RAD, grammar=Rescue())
     r.say()
     u = r.utterances[0]
     assert u.addressed and u.wake_word
@@ -689,7 +697,7 @@ def test_wake_phrase_rescued_by_the_grammar_pass_skips_the_check():
 
 
 def test_direction_check_off_by_hot_reload():
-    r, _ = direction_rig("la la la", OFF_FACE_RAD)
+    r, stamps, _ = direction_rig("la la la", OFF_FACE_RAD)
     r.listener.apply_config(
         RoboEmotConfig.model_validate(
             {"voice": {"wake_word_policy": "never", "direction": {"enabled": False}}}
@@ -698,3 +706,56 @@ def test_direction_check_off_by_hot_reload():
     r.say()
     assert r.utterances[0].addressed
     assert r.listener.snapshot()["direction"]["enabled"] is False
+    assert stamps == []  # no world scan while the check is off
+
+
+def test_enrolled_in_view_still_needs_the_voice_at_the_face():
+    r, _, where = direction_rig(
+        "la la la", OFF_FACE_RAD, policy="unless_enrolled_in_view", enrolled_in_view=lambda n: True
+    )
+    r.say()
+    assert not r.utterances[0].addressed
+    where["bearing"] = FACE_RAD
+    say_text(r, "come stai")
+    assert r.utterances[1].addressed
+    decisions = r.listener.snapshot()["wake"]["decisions"]
+    assert decisions["rejected_no_face_at_voice"] == 1 and decisions["not_required"] == 1
+
+
+def test_window_follow_up_off_face_is_rejected_and_the_wake_word_still_passes():
+    r, _, where = direction_rig("ehi robot cosa fai", FACE_RAD, policy="always")
+    r.say()
+    assert r.utterances[0].addressed and r.utterances[0].wake_word
+    where["bearing"] = OFF_FACE_RAD
+    say_text(r, "la la la amore")  # music inside the open window
+    assert not r.utterances[1].addressed
+    say_text(r, "ehi robot dimmi")  # the wake word passes from anywhere
+    assert r.utterances[2].addressed
+    where["bearing"] = FACE_RAD
+    say_text(r, "e poi")  # follow-up from the face, window still open
+    assert r.utterances[3].addressed
+    decisions = r.listener.snapshot()["wake"]["decisions"]
+    assert decisions == {
+        **dict.fromkeys(decisions, 0),
+        "wake_word": 2,
+        "window": 1,
+        "rejected_no_face_at_voice": 1,
+    }
+
+
+def test_barge_in_samples_are_muted_and_fall_back_to_the_engaged_face():
+    r, _, _ = direction_rig("aspetta", None)
+    r.speech.extend(r.t + 2.0)  # the robot is speaking; the barge-in detector cut in
+    r.listener.resume(voice(seconds=1.0), r.t)
+    r.t += 1.0
+    r.feed(silence(r.cfg.voice.vad.end_silence_ms / 1000 + 2.0))
+    assert r.utterances and r.utterances[0].addressed
+    snap = r.listener.snapshot()["direction"]
+    assert snap["degraded"]["muted"] == 1 and snap["checks"]["degraded_passed"] == 1
+
+
+def test_no_reading_on_a_robot_with_a_sound_direction_needs_the_wake_word():
+    r, _, _ = direction_rig("la la la", None)  # the detector never took it for speech
+    r.say()
+    assert not r.utterances[0].addressed
+    assert r.listener.snapshot()["direction"]["degraded"]["silent"] == 1

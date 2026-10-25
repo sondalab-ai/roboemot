@@ -62,7 +62,8 @@ class WakeGate:
     ) -> bool:
         """Whether the utterance (first and last speech stamps, speaker id if known) is addressed.
         ``at_face`` is the voice-at-face check, called only when the utterance would be addressed
-        without the wake word (None: no check)."""
+        without the wake word (None: no check). It runs under this gate's lock, so it may take
+        only leaf locks (``VoiceDirection`` does)."""
         with self._lock:
             required = self._policy == "always" or (
                 self._policy == "unless_enrolled_in_view" and not enrolled_in_view

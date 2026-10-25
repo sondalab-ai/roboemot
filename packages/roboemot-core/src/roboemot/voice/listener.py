@@ -368,8 +368,7 @@ class VoiceListener:
     def _feed(self, parts: list[np.ndarray], audio_end: float) -> None:
         if parts and self._active:
             self._partial(self._asr.accept(np.concatenate(parts)), audio_end)
-            if self._direction is not None:
-                self._direction.sample(audio_end)
+            self._sample_direction(audio_end)
 
     def _partial(self, event: ASREvent | None, audio_end: float) -> None:
         if event is not None and event.text:
@@ -390,7 +389,7 @@ class VoiceListener:
         self._set_active(True)
         if self._direction is not None:
             self._direction.begin()
-            self._direction.sample(audio_end)
+        self._sample_direction(audio_end)
         self._partial(self._asr.accept(ev.pre_roll), audio_end)
 
     def _end(self, ev: SpeechEnd) -> None:
@@ -447,6 +446,13 @@ class VoiceListener:
             self._on_utterance(utterance)
         except Exception as exc:
             log.warning("voice listener: utterance consumer raised %s", type(exc).__name__)
+
+    def _sample_direction(self, stamp: float) -> None:
+        """One voice-at-face sample at ``stamp`` (skipped while the check is off: it scans the
+        world model). Muted while the robot speaks: its sound direction is off then (barge-in)."""
+        d = self._direction
+        if d is not None and d.enabled:
+            d.sample(stamp, muted=self._speech.speaking(stamp))
 
     def _at_face(self) -> Callable[[], bool] | None:
         """The voice-at-face check for the wake gate, None when there is none or it is off."""

@@ -2016,7 +2016,8 @@ class FastpathConfig(Strict):
     )
     doa_max_age_ms: float = param(
         1500.0,
-        "A sound direction reading older than this does not point the head at the speaker",
+        "A sound direction reading older than this does not point the head at the speaker "
+        "(voice.direction.doa_max_age_ms is the stricter age for the voice-at-face check)",
         unit="ms", ge=0, le=10000,
     )  # fmt: skip
     loud_db: float = param(
@@ -2348,37 +2349,47 @@ class VoiceDirectionConfig(Strict):
     )  # fmt: skip
     min_match_share: float = param(
         0.5,
-        "Share of the utterance's sound direction readings that must match a face (or, degraded, "
-        "share of its samples with an engaged face in view)",
+        "Share of the utterance's sound direction readings that must match a face. Every reading "
+        "counts, however few: a reading off every face is evidence against the utterance",
         ge=0, le=1,
     )  # fmt: skip
-    min_doa_share: float = param(
-        0.3,
-        "Share of the utterance's audio samples that must have a fresh sound direction reading; "
-        "below it (no direction on this robot, or the readings stale) the check runs degraded "
-        "(degraded_rule) and is counted. Pauses inside an utterance have no reading, so this "
-        "is below 1",
-        ge=0, le=1,
+    min_doa_readings: int = param(
+        1,
+        "Fewest sound direction readings the utterance needs to be judged on them; with fewer, "
+        "the check runs degraded (degraded_rule) and is counted by reason",
+        ge=1, le=100,
     )  # fmt: skip
     doa_max_age_ms: float = param(
         500.0,
-        "A sound direction reading older than this is stale for the check (a robot's source "
-        "may read only a few times a second, and only while its own detector hears speech)",
+        "A sound direction reading further than this from the audio sample's time does not count "
+        "for the check (a robot's source may read only a few times a second, and only while its "
+        "own detector hears speech). Stricter than voice.fastpath.doa_max_age_ms, which only "
+        "turns the head",
         unit="ms", ge=0, le=5000,
     )  # fmt: skip
-    face_max_age_s: float = param(
-        4.0,
-        "A person (face) counts as visible when the camera saw it at most this long before the "
-        "audio sample. As long as attention.stale_s by default: face detection runs slower under "
-        "load, at night and while the robot speaks, and a shorter age would reject the owner's "
-        "own voice while the wake-word policy still counts them in view",
+    face_max_age_s: float | None = param(
+        None,
+        "A person counts as visible when the camera saw them (the vision source reports faces) "
+        "at most this long before the audio sample. Empty: follow attention.stale_s, the age the "
+        "wake-word policy uses for 'in view', so the two never disagree (face detection runs "
+        "slower under load, at night and while the robot speaks)",
         unit="s", ge=0, le=10,
     )  # fmt: skip
-    degraded_rule: Literal["engaged", "reject"] = param(
-        "engaged",
+    degraded_rule: Literal["auto", "engaged", "reject"] = param(
+        "auto",
         "Without enough sound direction readings: engaged = addressed when attention is on a "
-        "visible person for min_match_share of the samples; reject = the wake word is needed",
+        "visible person for degraded_engaged_share of the samples; reject = the wake word is "
+        "needed; auto = reject when the robot measures sound direction and gave none (its "
+        "detector did not take the sound for speech: music, TV, or a quiet voice, which then "
+        "repeats with the wake word), engaged when the robot has no sound direction or muted "
+        "it itself (its own voice and echo, a barge-in)",
     )
+    degraded_engaged_share: float = param(
+        0.5,
+        "Degraded, engaged rule: share of the utterance's samples during which attention must be "
+        "on a visible person",
+        ge=0, le=1,
+    )  # fmt: skip
 
 
 class VoiceConfig(Strict):
