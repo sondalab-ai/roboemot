@@ -663,6 +663,7 @@ def test_the_speaking_motion_moves_the_head_pitch_with_a_canned_reply(loop):
     manifest = loop.manifest
     stack = ConfigStack()
     stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw="body_yaw")
+    stack.set("speech_motion.levels.lively.nod_share", 1.0, source="test")  # not seed-dependent
     cfg = stack.effective()
     _hold(loop, {"head.pitch": manifest.dofs["head.pitch"].home}, 6.0)
     settled = loop.driver.read_state()["head.pitch"]
@@ -718,7 +719,10 @@ def test_the_speaking_motion_moves_the_head_pitch_with_a_canned_reply(loop):
         return sum(1 for c, m in pairs if c * m > 0) / max(1, len(pairs))
 
     best = max(range(11), key=agreement)  # up to 0.5 s at the 20 Hz sampling here
-    print(f"\nspeaking motion: best lag {best * 50} ms, sign agreement {agreement(best):.2f}")
+    print(
+        f"\nspeaking motion: commanded {down:.4f} / {up:.4f} rad, measured {max(measured):.4f} / "
+        f"{min(measured):.4f} rad, best lag {best * 50} ms, sign agreement {agreement(best):.2f}"
+    )
     assert agreement(best) >= 0.8
     assert measured[-1] == pytest.approx(0.0, abs=0.02)
     assert loop.external_events == 0 and not loop.external
