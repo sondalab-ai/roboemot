@@ -59,6 +59,9 @@ class FakeASR:
     def missing_words(self, language, words):
         return None
 
+    def grammar_words(self, language, samples, phrases):
+        return None
+
     def start(self, language):
         pass
 

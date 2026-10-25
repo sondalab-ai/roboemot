@@ -2268,6 +2268,64 @@ class BargeInConfig(Strict):
         return self
 
 
+class GrammarConfig(Strict):
+    """The grammar pass of wake and keyword spotting (SPEC 8 stage 3)."""
+
+    enabled: bool = param(
+        True,
+        "At the end of each utterance, decode its audio a second time with a recognizer limited "
+        "to a grammar: the voice.keywords phrases of its language (wake phrases, name templates "
+        "rendered with the robot's name, the name and its aliases, stop, yes, no, greetings), the "
+        "words of the free-text result as competitors, and the unknown-word filler. A phrase "
+        "it hears confidently counts like one found in the final text (it only adds: the "
+        "free-text match stays). Phrases with a word missing from the recognizer vocabulary are "
+        "left out and counted in the debug report",
+    )
+    wake_min_word_conf: float = param(
+        0.9,
+        "A wake phrase, the robot's name or a name alias heard by the grammar pass counts only "
+        "when every one of its words has at least this recognizer confidence",
+        ge=0, le=1,
+    )  # fmt: skip
+    keyword_min_word_conf: float = param(
+        0.9,
+        "A stop, yes, no or greeting phrase heard by the grammar pass counts only when every one "
+        "of its words has at least this recognizer confidence",
+        ge=0, le=1,
+    )  # fmt: skip
+    rescue_wake: bool = param(
+        True,
+        "Let the grammar pass add a wake phrase, the robot's name or a name alias the free text "
+        "missed. Only when the free text holds none of the phrase's words (it lost them, rather "
+        "than heard them next to another word: `i robot` is not `ehi robot`) and its words are "
+        "adjacent in the audio (max_word_gap_s). Off: the pass adds stop, yes, no and greetings "
+        "only",
+    )
+    max_word_gap_s: float = param(
+        0.15,
+        "Consecutive words of a phrase heard by the grammar pass must be at most this far apart "
+        "in the audio (Vosk word timings), so `hello [to the] robot` with the middle words lost "
+        "is not `hello robot`",
+        unit="s", ge=0, le=2,
+    )  # fmt: skip
+    max_competitor_words: int = param(
+        64,
+        "Most distinct free-text words added to the grammar as competitors; an utterance with "
+        "more gets no grammar pass (counted), since cutting the list would leave part of the "
+        "audio to the keywords alone. Without competitors the small Italian model forces "
+        "ordinary speech onto the keywords (its unknown-word filler is weak), so an utterance "
+        "without a usable free-text word gets no pass either",
+        ge=8, le=512,
+    )  # fmt: skip
+    max_audio_s: float = param(
+        8.0,
+        "Longest utterance the grammar pass decodes (pre-roll to the last speech frame); a longer "
+        "one gets no pass (counted). The pass runs on the listener thread before the hand-off "
+        "to the conversation, so this bounds the latency it adds",
+        unit="s", ge=1, le=60,
+    )  # fmt: skip
+
+
 class VoiceConfig(Strict):
     enabled: bool = param(
         False,
@@ -2491,9 +2549,14 @@ class VoiceConfig(Strict):
         },
         "Fast-path keyword lists per language, matched on whole words in the ASR partials "
         "(case and accents ignored; a phrase may have several words; no stemming, so list "
-        "inflections you want)",
+        "inflections you want). The grammar pass (voice.grammar) also listens for them at the "
+        "end of an utterance: there accents count, and a phrase with a word missing from the "
+        "recognizer vocabulary is left out",
     )
     fastpath: FastpathConfig = param({}, "Speech fast path: keywords, wake word window, prosody")
+    grammar: GrammarConfig = param(
+        {}, "Grammar pass: wake phrases and keywords heard by a grammar recognizer (SPEC 8)"
+    )
     barge_in: BargeInConfig = param({}, "Barge-in: user speech over the robot's voice (SPEC 8)")
 
     @field_validator("voices")

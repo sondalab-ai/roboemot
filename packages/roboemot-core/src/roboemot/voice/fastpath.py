@@ -15,6 +15,10 @@ Everything here is cheap and runs on the listener thread, ahead of the conversat
 A short final text with exactly one yes or no keyword, in an addressed utterance, also goes to
 ``on_answer(category, now)`` (the nod / shake handler, ``roboemot.voice.yes_no``); partials do not.
 
+With a ``grammar`` (``roboemot.voice.grammar``), the end of an utterance also runs the grammar pass
+on its audio: the categories it hears confidently join those of the final text, before the wake
+and answer decisions.
+
 Events go to ``emit(event, now, payload)`` (the affect runner). Payloads carry the language only:
 never audio or text. Latencies (SPEC 13) are counted from the start of the last speech frame:
 negative means the reaction came before the person had finished speaking.
@@ -32,6 +36,7 @@ import numpy as np
 
 from ..attention import SpeakerHint
 from ..config.schema import VoiceConfig
+from .grammar import GrammarSpotter
 from .keywords import KeywordSpotter
 from .robot_name import RobotName
 from .speech_features import Prosody, analyse
@@ -106,8 +111,10 @@ class FastPath:
         clock: Callable[[], float] = time.monotonic,
         names: RobotName | None = None,
         on_answer: Callable[[str, float], None] | None = None,
+        grammar: GrammarSpotter | None = None,
     ) -> None:
         self._on_answer = on_answer
+        self._grammar = grammar
         self.names = names if names is not None else RobotName()
         self._emit = emit
         self._selector = selector
@@ -123,10 +130,16 @@ class FastPath:
         self.cfg = cfg
         self.names.configure(cfg)
         self._spotter = KeywordSpotter(cfg.keywords, cfg.wake_word, self.names)
+        if self._grammar is not None:
+            self._grammar.apply_config(cfg.grammar)
 
     def wake_out_of_vocab(self) -> dict[str, int]:
         """Per language, the wake phrases the recognizer can never produce (report only)."""
         return self._spotter.wake_out_of_vocab()
+
+    def grammar_snapshot(self) -> dict[str, Any] | None:
+        """The grammar pass report (counts only), None without one."""
+        return None if self._grammar is None else self._grammar.snapshot()
 
     def reset(self) -> None:
         """Forget the utterance in progress."""
@@ -191,14 +204,21 @@ class FastPath:
         *,
         last_speech_stamp: float,
         endpoint_stamp: float,
+        grammar_audio: np.ndarray | None = None,
     ) -> FastResult:
-        """The utterance ended with final ``text``; ``speech_audio`` spans its speech frames.
+        """The utterance ended with final ``text``; ``speech_audio`` spans its speech frames,
+        ``grammar_audio`` (pre-roll to the last speech frame) is what the grammar pass decodes. A
+        yes or no only the grammar pass heard can make the answer: today that drives the nod or
+        shake gesture only (SPEC 8 stage 3).
 
         Keywords only the final text has are emitted now. Records the first reaction (hint or
         keyword) and the first keyword against ``last_speech_stamp``. Call ``impulses`` next.
         """
         words = len(text.split())
-        cats = self._spotter.spot(text, self._language)
+        spotter = self._spotter  # one spotter for the utterance, whatever a reload does meanwhile
+        cats = spotter.spot(text, self._language)
+        if self._grammar is not None and grammar_audio is not None:
+            cats |= self._grammar.check(spotter, self._language, grammar_audio, text, cats)
         before = self._keyword_at
         self._fire(cats)
         if before is None and self._keyword_at is not None:

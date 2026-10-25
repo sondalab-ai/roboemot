@@ -8,6 +8,9 @@ finds a pause by itself (Vosk does) must keep accumulating: its text is everythi
 
 ``VoskASR`` keeps one Vosk model per language, loaded by ``load`` (the app does this at start so
 the first utterance does not pay for it) and one recognizer at a time, created by ``start``.
+``grammar_words`` decodes a finished piece of audio with a throwaway recognizer limited to a
+grammar (the grammar pass, ``roboemot.voice.grammar``); it shares the loaded model, not the
+streaming recognizer.
 """
 
 from __future__ import annotations
@@ -16,13 +19,30 @@ import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, NamedTuple, Protocol, runtime_checkable
 
 import numpy as np
 
 INT16_MAX = 32767
 VOSK_QUIET = -1
 VOSK_NO_WORD = -1  # vosk_model_find_word: the word is not in the vocabulary
+VOSK_UNKNOWN = "[unk]"  # Vosk's grammar token for any word outside the grammar
+# A model can run a grammar only with a runtime graph (the small models); a static HCLG graph
+# (the big models) makes Vosk ignore the grammar and decode free text.
+RUNTIME_GRAPH = ("graph/HCLr.fst", "graph/Gr.fst")
+
+
+class GrammarUnsupported(Exception):
+    """The language's model has no runtime graph, so it cannot decode with a grammar."""
+
+
+class HeardWord(NamedTuple):
+    """One word of a grammar decode: the word, its confidence and its span in the audio (s)."""
+
+    word: str
+    conf: float
+    start_s: float
+    end_s: float
 
 
 @dataclass(frozen=True)
@@ -104,6 +124,7 @@ class VoskASR:
         self.rate_hz = rate_hz
         self._paths = dict(model_paths)
         self._models: dict[str, Any] = {}
+        self._grammar_graph: dict[str, bool] = {}
         self._rec: Any = None
         self._committed: list[str] = []
         self._last = ""
@@ -116,7 +137,9 @@ class VoskASR:
     def load(self, languages: Iterable[str]) -> None:
         for language in languages:
             if language not in self._models:
-                self._models[language] = self._vosk.Model(str(self._paths[language]))
+                root = Path(self._paths[language])
+                self._models[language] = self._vosk.Model(str(root))
+                self._grammar_graph[language] = all((root / f).is_file() for f in RUNTIME_GRAPH)
 
     def missing_words(self, language: str, words: list[str]) -> list[str] | None:
         """The ``words`` the ``language`` model's vocabulary lacks (it can never output them);
@@ -125,6 +148,28 @@ class VoskASR:
         if model is None:
             return None
         return [w for w in words if model.vosk_model_find_word(w) == VOSK_NO_WORD]
+
+    def grammar_words(
+        self, language: str, samples: np.ndarray, phrases: list[str]
+    ) -> list[HeardWord] | None:
+        """``samples`` decoded with a recognizer limited to ``phrases`` (plus the unknown-word
+        filler): the words heard with confidence and timing. None while that model is not loaded;
+        raises ``GrammarUnsupported`` for a model without a runtime graph. Every phrase must be in
+        the vocabulary (Vosk warns, naming the word, on one that is not)."""
+        model = self._models.get(language)
+        if model is None:
+            return None
+        if not self._grammar_graph.get(language, False):
+            raise GrammarUnsupported(language)
+        grammar = json.dumps([*phrases, VOSK_UNKNOWN], ensure_ascii=False)
+        rec = self._vosk.KaldiRecognizer(model, self.rate_hz, grammar)
+        rec.SetWords(True)
+        rec.AcceptWaveform(to_int16(samples))
+        words = json.loads(rec.FinalResult()).get("result", [])
+        return [
+            HeardWord(w["word"], float(w["conf"]), float(w["start"]), float(w["end"]))
+            for w in words
+        ]
 
     def start(self, language: str) -> None:
         self.load([language])
