@@ -2326,6 +2326,59 @@ class GrammarConfig(Strict):
     )  # fmt: skip
 
 
+class VoiceDirectionConfig(Strict):
+    """Voice-at-face gate: without the wake word, answer only a voice that comes from a visible
+    face (SPEC 8 stage 2, 5A)."""
+
+    enabled: bool = param(
+        True,
+        "An utterance that would be addressed without the wake word (policy never, an enrolled "
+        "person in view, or a follow-up in the open window) is addressed only when its sound "
+        "direction matched a visible face during the utterance; otherwise it needs the wake "
+        "word. An utterance with the wake word always passes. Off: no check (music and TV in "
+        "the room can be answered)",
+    )
+    tolerance_deg: float = param(
+        25.0,
+        "A sound direction reading matches a face when it is at most this far from the face's "
+        "azimuth (both in the robot base frame, head turn compensated). Covers the microphone "
+        "array's direction error and the face position's own error, with margin to sound "
+        "coming from 60 deg off any face",
+        unit="deg", ge=1, le=90,
+    )  # fmt: skip
+    min_match_share: float = param(
+        0.5,
+        "Share of the utterance's sound direction readings that must match a face (or, degraded, "
+        "share of its samples with an engaged face in view)",
+        ge=0, le=1,
+    )  # fmt: skip
+    min_doa_share: float = param(
+        0.3,
+        "Share of the utterance's audio samples that must have a fresh sound direction reading; "
+        "below it (no direction on this robot, or the readings stale) the check runs degraded "
+        "(degraded_rule) and is counted. Pauses inside an utterance have no reading, so this "
+        "is below 1",
+        ge=0, le=1,
+    )  # fmt: skip
+    doa_max_age_ms: float = param(
+        500.0,
+        "A sound direction reading older than this is stale for the check (a robot's source "
+        "may read only a few times a second, and only while its own detector hears speech)",
+        unit="ms", ge=0, le=5000,
+    )  # fmt: skip
+    face_max_age_s: float = param(
+        1.0,
+        "A person (face) counts as visible when the camera saw it at most this long before the "
+        "audio sample",
+        unit="s", ge=0, le=10,
+    )  # fmt: skip
+    degraded_rule: Literal["engaged", "reject"] = param(
+        "engaged",
+        "Without enough sound direction readings: engaged = addressed when attention is on a "
+        "visible person for min_match_share of the samples; reject = the wake word is needed",
+    )
+
+
 class VoiceConfig(Strict):
     enabled: bool = param(
         False,
@@ -2523,9 +2576,10 @@ class VoiceConfig(Strict):
     wake_word_policy: Literal["always", "never", "unless_enrolled_in_view"] = param(
         "unless_enrolled_in_view",
         "When the wake word is required: always; never; or unless an enrolled person is in view. "
-        "With unless_enrolled_in_view, anyone speaking while an enrolled person is in view "
-        "(a stranger, a television) is addressed without the wake word, and a stranger alone "
-        "must say it",
+        "With unless_enrolled_in_view, anyone speaking while an enrolled person is in view is "
+        "addressed without the wake word, and a stranger alone must say it. Without the wake "
+        "word, voice.direction then asks that the voice come from a visible face (music and TV "
+        "need the wake word)",
     )
     asr: AsrConfig = param({}, "Speech recognition (SPEC 8 stage 3)")
     keywords: dict[str, KeywordSet] = param(
@@ -2556,6 +2610,9 @@ class VoiceConfig(Strict):
     fastpath: FastpathConfig = param({}, "Speech fast path: keywords, wake word window, prosody")
     grammar: GrammarConfig = param(
         {}, "Grammar pass: wake phrases and keywords heard by a grammar recognizer (SPEC 8)"
+    )
+    direction: VoiceDirectionConfig = param(
+        {}, "Without the wake word, answer only a voice from a visible face (SPEC 8, 5A)"
     )
     barge_in: BargeInConfig = param({}, "Barge-in: user speech over the robot's voice (SPEC 8)")
 

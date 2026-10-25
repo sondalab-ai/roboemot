@@ -27,6 +27,7 @@ BEHAVIOUR_MODULES = [
     "voice/grammar.py",
     "voice/robot_name.py",
     "voice/wake.py",
+    "voice/direction.py",
     "voice/speech_features.py",
     "voice/fastpath.py",
     "voice/listener.py",
