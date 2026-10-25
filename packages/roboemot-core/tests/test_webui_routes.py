@@ -307,3 +307,19 @@ def test_a_route_check_whose_names_cannot_be_read_sends_nothing_and_reports_fail
     finally:
         srv.stop()
     assert fake.bodies == []
+
+
+def test_a_route_check_sends_the_configured_system_prompt(tmp_path):
+    cfg = RoboEmotConfig(
+        webui={"bind": "127.0.0.1", "port": 0},
+        llm_routes=[ROUTE],
+        persona={"prompt": "PERSONA-4c1d"},
+    )
+    fake = Fake()
+    srv, client = serve(tmp_path, cfg, checker_for(cfg, fake))
+    try:
+        assert client.request("POST", "/api/routes/lan/check", {}).status == 202
+        assert finish(client)["last_check"] is not None
+    finally:
+        srv.stop()
+    assert "PERSONA-4c1d" in fake.bodies[0]["messages"][0]["content"]

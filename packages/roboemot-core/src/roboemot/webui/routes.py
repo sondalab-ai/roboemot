@@ -153,6 +153,7 @@ class RouteChecker:
                         route,
                         cfg.safety,
                         settings=cfg.llm_check,
+                        config=cfg,
                         router=router,
                         pseudonyms=pseudonyms,
                         http_client_factory=self._factory,

@@ -173,8 +173,9 @@ def _llm(args: argparse.Namespace) -> int:
 
     if cfg.privacy.pseudonyms_to_cloud:
         print(
-            "warning: pseudonyms are on, but the CLI does not read the registry; the synthetic "
-            "prompts are sent as they are (no registry names are in them)",
+            "warning: pseudonyms are on, but the CLI does not read the registry; the check "
+            "prompts (synthetic user turns, a system prompt built from the config) are sent as "
+            "they are",
             file=sys.stderr,
         )
 
@@ -184,6 +185,7 @@ def _llm(args: argparse.Namespace) -> int:
                 route,
                 cfg.safety,
                 settings=cfg.llm_check,
+                config=cfg,
                 secrets=SecretStore.for_data_dir(cfg.data_dir).get,
                 http_client_factory=HTTP_CLIENT_FACTORY,
             ),

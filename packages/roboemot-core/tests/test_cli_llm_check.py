@@ -71,3 +71,12 @@ def test_spent_budget_is_refused(app_yaml, monkeypatch, capsys):
     serve(monkeypatch, fake)
     assert cli.main(argv(app_yaml)) == 1
     assert "budget" in capsys.readouterr().err and fake.bodies == []
+
+
+def test_the_check_sends_the_configured_system_prompt(app_yaml, monkeypatch):
+    data = yaml.safe_load(app_yaml.read_text())
+    app_yaml.write_text(yaml.safe_dump({**data, "persona": {"prompt": "PERSONA-4c1d"}}))
+    fake = Fake()
+    serve(monkeypatch, fake)
+    cli.main(argv(app_yaml))
+    assert "PERSONA-4c1d" in fake.bodies[0]["messages"][0]["content"]
