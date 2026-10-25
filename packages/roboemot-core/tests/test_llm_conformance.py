@@ -8,13 +8,14 @@ import json
 import httpx
 import pytest
 from openai import APIStatusError
-from roboemot.config.schema import LLMCheckConfig, LLMRoute, SafetyConfig
+from roboemot.config.schema import LLMCheckConfig, LLMRoute, RoboEmotConfig, SafetyConfig
 from roboemot.llm import Router
 from roboemot.llm.conformance import (
     FAIL,
     PASS,
     SERVER_TEXT_MAX_CHARS,
     SKIP,
+    USER_TURN,
     RouteBudgetExhausted,
     _why,
     check_route,
@@ -405,3 +406,121 @@ async def test_http_error_masks_a_stored_key_and_its_fragments():
     r2 = LLMRoute(name="c", base_url="https://api.example.com/v1", model="m", api_key=label)
     report = await run(Echo(), r2)
     assert "74c" not in json.dumps(report.to_dict())
+
+
+# ------------------------------------------------------------ realistic turn, reasoning models
+
+
+def thought(text: str) -> dict:
+    c = chunk()
+    c["choices"][0]["delta"]["reasoning"] = text
+    return c
+
+
+def ended(c: dict, reason: str = "length") -> dict:
+    c["choices"][0]["finish_reason"] = reason
+    return c
+
+
+def reason(report, name: str) -> str:
+    return next(c.reason for c in report.checks if c.name == name)
+
+
+async def test_first_request_is_a_realistic_turn_at_the_routes_max_tokens():
+    fake = Fake()
+    cfg = RoboEmotConfig.model_validate(
+        {"conversation": {"language": "en"}, "persona": {"prompt": "PERSONA-4c1d"}}
+    )
+    await run(fake, route(max_tokens=300), config=cfg)
+    body = fake.bodies[0]
+    system, user = body["messages"][0], body["messages"][-1]
+    assert system["role"] == "system" and "PERSONA-4c1d" in system["content"]
+    assert "Always reply in Italian." in system["content"]  # whatever the conversation language
+    assert user == {"role": "user", "content": USER_TURN}
+    assert body["max_tokens"] == 300 and "tools" not in body
+    assert not [k for k in body if "reason" in k]  # nothing non-standard is asked for
+
+
+async def test_reasoning_that_uses_the_whole_budget_fails_with_a_hint():
+    plain = reply([thought("x" * 25), thought("y" * 15), ended(chunk())])
+    report = await run(Fake(plain=plain), route(max_tokens=300))
+    assert status(report)["streaming"] == FAIL and not report.ok
+    assert reason(report, "streaming") == (
+        "ran out of tokens before answering (max_tokens 300); "
+        "the model reasoned for 40 chars before answering"
+    )
+    assert status(report)["italian"] == SKIP
+    assert report.reasoning_chars == 40 and report.finish_reason == "length"
+
+
+async def test_length_with_no_text_fails_without_reasoning_fields_too():
+    report = await run(Fake(plain=reply([ended(chunk())])), route(max_tokens=64))
+    assert reason(report, "streaming") == "ran out of tokens before answering (max_tokens 64)"
+    assert report.reasoning_chars == 0
+
+
+async def test_reasoning_then_text_passes_and_shows_the_hint():
+    plain = reply([thought("z" * 30), *text_chunks(ITALIAN)])
+    report = await run(Fake(plain=plain))
+    assert report.ok and status(report)["streaming"] == PASS
+    assert reason(report, "first_token_latency").endswith(
+        "; the model reasoned for 30 chars before answering"
+    )
+    assert report.reasoning_chars == 30
+
+
+async def test_plain_text_has_no_reasoning_hint():
+    report = await run(Fake())
+    assert report.reasoning_chars == 0 and report.finish_reason is None
+    assert all("reasoned" not in c.reason for c in report.checks)
+
+
+async def test_reasoning_past_the_first_token_timeout_fails_latency_with_a_hint():
+    async def slow() -> httpx.Response:
+        async def body():
+            yield sse([thought("w" * 12)])[: -len(b"data: [DONE]\n\n")]
+            await asyncio.sleep(2)
+            yield b"data: [DONE]\n\n"
+
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body())
+
+    report = await run(Fake(plain=slow), route(first_token_timeout_s=0.3))
+    assert status(report)["first_token_latency"] == FAIL
+    assert reason(report, "first_token_latency") == (
+        "no content within 0.3 s; the model reasoned for 12 chars before answering"
+    )
+    assert reason(report, "streaming").endswith(
+        "; the model reasoned for 12 chars before answering"
+    )
+    assert report.reasoning_chars == 12 and report.first_token_s is None
+
+
+async def test_answer_cut_at_max_tokens_still_streams():
+    plain = reply([*text_chunks(ITALIAN[:-1]), ended(chunk(ITALIAN[-1]))])
+    report = await run(Fake(plain=plain), route(max_tokens=50))
+    assert status(report)["streaming"] == PASS
+    assert reason(report, "streaming") == "4 chunks, cut at max_tokens 50"
+
+
+async def test_tool_answer_out_of_tokens_is_named():
+    report = await run(Fake(final=reply([thought("q" * 9), ended(chunk())])), route(max_tokens=80))
+    assert status(report)["tool_round_trip"] == FAIL
+    assert reason(report, "tool_round_trip") == (
+        "ran out of tokens before answering (max_tokens 80); "
+        "the model reasoned for 9 chars before answering"
+    )
+
+
+async def test_mood_tags_do_not_count_against_italian():
+    tagged = ["[mood=joy] Ciao, ", "oggi c'è ", "[mood=calm] il sole ", "e il cielo è bello."]
+    report = await run(Fake(plain=reply(text_chunks(tagged))))
+    assert status(report)["italian"] == PASS
+
+
+async def test_reasons_never_hold_the_prompt_or_the_reasoning():
+    cfg = RoboEmotConfig.model_validate({"persona": {"prompt": "PERSONA-4c1d"}})
+    plain = reply([thought("THOUGHT-8e2b"), ended(chunk())])
+    report = await run(Fake(plain=plain), config=cfg)
+    dumped = json.dumps(report.to_dict())
+    for secret in ("PERSONA-4c1d", "THOUGHT-8e2b", USER_TURN, SECRET_KEY):
+        assert secret not in dumped

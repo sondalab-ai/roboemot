@@ -1,10 +1,16 @@
 """Route conformance test (SPEC 8, OpenAI-compatible routes).
 
 ``check_route`` runs three requests against ONE route, bypassing fallback and eligibility:
-an Italian prompt without tools (streaming, first-token latency, Italian output) and a tool
-round trip (a call to ``get_time``, then its result sent back). The result is advisory in v1
-(SPEC 8): it is shown and stored, it does not gate the route. The requests are charged to the
-route's daily token budget like any other; a route whose budget is spent is refused.
+a realistic turn without tools (the system prompt a conversation sends, built from the config
+with Italian as the language, plus a short user turn, at the route's own ``max_tokens``:
+streaming, first-text latency, Italian output) and a tool round trip (a call to ``get_time``,
+then its result sent back). The result is advisory in v1 (SPEC 8): it is shown and stored, it
+does not gate the route. The requests are charged to the route's daily token budget like any
+other; a route whose budget is spent is refused.
+
+A model that reasons before answering may spend the whole ``max_tokens`` on it: the verdict
+rests on standard fields only (``finish_reason: length`` with no text), and the length of any
+non-standard reasoning deltas the router counted is added to the reason as a hint.
 
 The report holds statuses and short reasons only: never prompts, replies or keys. Errors are
 reduced to a type or an HTTP status; an HTTP status adds the server's own error message, cleaned
@@ -26,11 +32,14 @@ from urllib.parse import urlsplit
 import httpx
 from openai import APIConnectionError, APIStatusError, APITimeoutError
 
-from ..config.schema import LLMCheckConfig, LLMRoute, SafetyConfig
+from ..config.schema import LLMCheckConfig, LLMRoute, RoboEmotConfig, SafetyConfig
+from ..persona import apply_to_register, effects
 from ..redact import scrub_text
 from ..secret_store import SECRET_REF, no_secrets
+from ..voice.prosody import TAG
+from .prompt import system_prompt
 from .pseudonyms import Pseudonyms
-from .router import Done, FirstToken, Router, TextDelta, ToolCall
+from .router import Done, FirstToken, Router, TextDelta, ToolCall, build_messages
 
 log = logging.getLogger(__name__)
 
@@ -43,7 +52,10 @@ STREAMING, TOOL_ROUND_TRIP, FIRST_TOKEN, ITALIAN = (
 )
 TOOL_NAME = "get_time"
 TOOL_RESULT = "10:30"
-ITALIAN_PROMPT = "Reply in Italian, in two short sentences: greet me and describe a sunny day."
+CHECK_LANGUAGE = "it"  # the realistic turn asks for Italian, whatever conversation.language says
+# In English while the system prompt asks for Italian, so the reply also shows the rule is kept.
+USER_TURN = "Hi! What is a sunny day like where you are?"
+LENGTH = "length"
 TOOL_PROMPT = "What time is it? Use the get_time tool."
 TOOLS = [
     {
@@ -92,6 +104,9 @@ class RouteReport:
     checks: list[CheckResult] = field(default_factory=list)
     first_token_s: float | None = None
     tokens: int = 0
+    # The realistic turn's standard finish reason and non-standard reasoning length (a hint).
+    finish_reason: str | None = None
+    reasoning_chars: int = 0
     error: str = ""  # "timeout", "budget", "secret" or "failed": the check did not complete
 
     @property
@@ -107,6 +122,7 @@ class RouteReport:
 class _Answer:
     text: str = ""
     chunks: int = 0
+    finish_reason: str | None = None
     calls: list[ToolCall] = field(default_factory=list)
     timing: FirstToken = field(default_factory=FirstToken)
     error: Exception | None = None
@@ -159,8 +175,10 @@ def _server_says(exc: APIStatusError, route: LLMRoute, key: str = "") -> str:
     """``: <message>`` from the server's JSON error, or empty. The message may echo the request
     or a key: the key sent, the route's literal key, any run of 6+ characters found inside a
     key and every key-like run are masked, then the shared redactor runs; control characters
-    and repeated spaces are removed and the length is capped. The check sends only its own
-    synthetic prompts, so an echoed prompt carries nothing private."""
+    and repeated spaces are removed and the length is capped. The check sends synthetic user
+    turns and a system prompt built from the config only (persona, register, rules, safety
+    block; no robot name, summaries or history), so an echoed prompt carries nothing about a
+    person."""
     body = exc.body
     if isinstance(body, dict) and isinstance(body.get("error"), dict):
         body = body["error"]
@@ -213,7 +231,7 @@ async def _ask(
             elif isinstance(ev, ToolCall):
                 ans.calls.append(ev)
             elif isinstance(ev, Done):
-                pass
+                ans.finish_reason = ev.finish_reason
     except Exception as exc:  # CancelledError (the caller's deadline) is not caught
         ans.error = exc
         ans.why = _why(exc, route, _sent_key(router, route))
@@ -230,16 +248,34 @@ def _sent_key(router: Router, route: LLMRoute) -> str:
     return header.removeprefix("Bearer ")
 
 
+def _reasoned(ans: _Answer) -> str:
+    """``; the model reasoned for N chars before answering`` when the router counted
+    non-standard reasoning deltas, else empty: a hint, never the verdict."""
+    n = ans.timing.reasoning_chars
+    return f"; the model reasoned for {n} chars before answering" if n else ""
+
+
+def _no_text(ans: _Answer, route: LLMRoute, fallback: str) -> str:
+    """Why a reply that ended cleanly has no text: out of tokens (``finish_reason: length``,
+    a standard field) or ``fallback``, with the reasoning hint."""
+    if ans.finish_reason == LENGTH:
+        why = f"ran out of tokens before answering (max_tokens {route.max_tokens})"
+    else:
+        why = fallback
+    return why + _reasoned(ans)
+
+
 def _streaming(ans: _Answer, route: LLMRoute) -> CheckResult:
     if ans.error is not None and not ans.chunks:
-        return CheckResult(STREAMING, FAIL, f"no streamed text: {ans.why}")
+        return CheckResult(STREAMING, FAIL, f"no streamed text: {ans.why}{_reasoned(ans)}")
     if ans.error is not None:
         return CheckResult(STREAMING, FAIL, f"stream broke after {ans.chunks} chunks: {ans.why}")
-    if ans.chunks > 1:
-        return CheckResult(STREAMING, PASS, f"{ans.chunks} chunks")
-    return CheckResult(
-        STREAMING, FAIL, "text came as a single chunk" if ans.chunks else "no text in the stream"
-    )
+    if not ans.chunks:
+        return CheckResult(STREAMING, FAIL, _no_text(ans, route, "no text in the stream"))
+    if ans.chunks == 1:
+        return CheckResult(STREAMING, FAIL, "text came as a single chunk")
+    cut = f", cut at max_tokens {route.max_tokens}" if ans.finish_reason == LENGTH else ""
+    return CheckResult(STREAMING, PASS, f"{ans.chunks} chunks{cut}")
 
 
 def _latency(ans: _Answer, route: LLMRoute) -> CheckResult:
@@ -247,20 +283,21 @@ def _latency(ans: _Answer, route: LLMRoute) -> CheckResult:
     seconds = ans.timing.seconds
     if seconds is None:
         if ans.timed_out:
-            return CheckResult(FIRST_TOKEN, FAIL, f"no content within {limit:g} s")
+            return CheckResult(FIRST_TOKEN, FAIL, f"no content within {limit:g} s{_reasoned(ans)}")
         return CheckResult(FIRST_TOKEN, SKIP, "no answer to measure")
     verdict = PASS if seconds <= limit else FAIL
     return CheckResult(
         FIRST_TOKEN,
         verdict,
-        f"{seconds:.2f} s of {limit:g} s allowed (one cold sample, TLS setup included)",
+        f"{seconds:.2f} s of {limit:g} s allowed (one cold sample, TLS setup included)"
+        f"{_reasoned(ans)}",
     )
 
 
 def _italian(ans: _Answer, settings: LLMCheckConfig) -> CheckResult:
     if not ans.text:
         return CheckResult(ITALIAN, SKIP, "no reply to judge")
-    count, ratio = italian_ratio(ans.text, settings.italian_stopwords)
+    count, ratio = italian_ratio(TAG.sub("", ans.text), settings.italian_stopwords)
     if count < settings.italian_min_words:
         return CheckResult(ITALIAN, FAIL, f"reply too short to judge ({count} words)")
     need = settings.italian_min_stopword_ratio
@@ -278,9 +315,11 @@ async def check_route(
     pseudonyms: Pseudonyms | None = None,
     http_client_factory: Callable[[], httpx.AsyncClient] | None = None,
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
+    config: RoboEmotConfig | None = None,
 ) -> RouteReport:
-    """Run the four checks against ``route`` only. Pass the app's ``router`` to share its daily
-    budgets; otherwise a private one is built from ``safety``, ``secrets`` and the client
+    """Run the four checks against ``route`` only. The realistic turn's system prompt is built
+    from ``config`` (the library defaults when omitted). Pass the app's ``router`` to share its
+    daily budgets; otherwise a private one is built from ``safety``, ``secrets`` and the client
     factory. Raises :class:`RouteKeyUnavailable` when the route's secret cannot be read and
     :class:`RouteBudgetExhausted` when the budget is spent, both before anything is sent. With
     ``pseudonyms`` a route that is not local gets the requests aliased like any cloud request.
@@ -299,8 +338,10 @@ async def check_route(
         route.name, route.model, route_endpoint(route), now().isoformat(timespec="seconds")
     )
 
-    ask = await _ask(router, route, [{"role": "user", "content": ITALIAN_PROMPT}], None, pseudonyms)
+    ask = await _ask(router, route, realistic_turn(config or RoboEmotConfig()), None, pseudonyms)
     report.first_token_s = ask.timing.seconds
+    report.reasoning_chars = ask.timing.reasoning_chars
+    report.finish_reason = ask.finish_reason or ask.timing.finish_reason
     tool = await _tool_round_trip(router, route, ask.unreachable, pseudonyms)
     report.checks += [_streaming(ask, route), tool, _latency(ask, route), _italian(ask, settings)]
     report.tokens = router.used(route.name) - spent
@@ -310,6 +351,17 @@ async def check_route(
         ", ".join(f"{c.name}={c.status}" for c in report.checks),
     )
     return report
+
+
+def realistic_turn(cfg: RoboEmotConfig) -> list[dict[str, Any]]:
+    """The messages of a first turn as a conversation sends them: the system prompt (persona,
+    register as the persona shapes it, rules, safety block) with Italian as the language, and
+    ``USER_TURN``. No robot name, summaries or history: nothing about a person."""
+    register = apply_to_register(cfg.register.params, effects(cfg.persona))
+    system = system_prompt(cfg, register, language=CHECK_LANGUAGE)
+    return build_messages(
+        system=system, profile_summary=None, scene_summary=None, history=[], user_text=USER_TURN
+    )
 
 
 async def _tool_round_trip(
@@ -355,5 +407,6 @@ async def _tool_round_trip(
     if second.error is not None:
         return CheckResult(TOOL_ROUND_TRIP, FAIL, f"tool result rejected: {second.why}")
     if not second.text.strip():
-        return CheckResult(TOOL_ROUND_TRIP, FAIL, "no text answer after the tool result")
+        why = _no_text(second, route, "no text answer after the tool result")
+        return CheckResult(TOOL_ROUND_TRIP, FAIL, why)
     return CheckResult(TOOL_ROUND_TRIP, PASS, "call, result and answer")
