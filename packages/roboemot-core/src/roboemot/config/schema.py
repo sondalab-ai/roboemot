@@ -2513,6 +2513,52 @@ class VoiceConfig(Strict):
     )
 
 
+class SpeechMotionConfig(Strict):
+    """Speech timeline built from the robot's own TTS output (SPEC 8): the energy envelope and
+    the phrase and emphasis events that the speaking motion layer reads (design ZT)."""
+
+    envelope_frame_ms: int = param(
+        20, "Length of one energy frame of the spoken audio", unit="ms", ge=5, le=100
+    )
+    silence_dbfs: float = param(
+        -45.0,
+        "A frame quieter than this is silence (phrase gaps); louder frames are voiced",
+        unit="dBFS",
+        ge=-90,
+        le=-10,
+    )
+    phrase_gap_ms: int = param(
+        180,
+        "A silent run at least this long between two voiced frames of one sentence is a phrase gap",
+        unit="ms",
+        ge=40,
+        le=2000,
+    )
+    emphasis_db: float = param(
+        6.0,
+        "A local energy peak at least this far above the running median of the sentence's voiced "
+        "frames is an emphasis",
+        unit="dB",
+        ge=1,
+        le=30,
+    )
+    emphasis_min_interval_s: float = param(
+        0.8,
+        "At most one emphasis per this interval on the timeline (the motion presets may thin "
+        "them further)",
+        unit="s",
+        ge=0.1,
+        le=10,
+    )
+    history_s: float = param(
+        5.0,
+        "Frames, events and sentences that ended this long ago are dropped from the timeline",
+        unit="s",
+        ge=1,
+        le=60,
+    )
+
+
 # --------------------------------------------------------------------------- conversation, LLM
 
 
@@ -3428,6 +3474,7 @@ with warnings.catch_warnings():
         world: WorldConfig = param({}, "SPEC 5A")
         mirror: MirrorConfig = param({}, "SPEC 9")
         voice: VoiceConfig = param({}, "SPEC 8")
+        speech_motion: SpeechMotionConfig = param({}, "SPEC 8: speech timeline")
         persona: PersonaConfig = param({}, "SPEC 11A")
         conversation: ConversationConfig = param({}, "SPEC 8")
         llm_routes: list[LLMRoute] = param([], "SPEC 8")
