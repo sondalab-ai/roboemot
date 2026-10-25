@@ -12,6 +12,7 @@ import httpx
 import pytest
 from roboemot.config.schema import LLMRoute, SafetyConfig
 from roboemot.llm import Done, NoRouteAvailable, Router, TextDelta, ToolCall, build_messages
+from roboemot.llm.router import FirstToken
 
 
 def sse(chunks: list[dict]) -> bytes:
@@ -515,3 +516,63 @@ def test_first_token_timeout_default_fits_cloud_routes():
         LLMRoute(name="c", base_url="https://api.example.com/v1", model="m").first_token_timeout_s
         == 3.0
     )
+
+
+def _canned(chunks: list[dict]):
+    """A server that answers every request with ``chunks`` and records the request bodies."""
+    bodies: list[dict] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, content=sse(chunks)
+        )
+
+    return handler, bodies
+
+
+def _reasoning(text: str, field: str = "reasoning") -> dict:
+    c = chunk()
+    c["choices"][0]["delta"][field] = text
+    return c
+
+
+def _ended(c: dict, reason: str) -> dict:
+    c["choices"][0]["finish_reason"] = reason
+    return c
+
+
+async def test_reasoning_deltas_are_counted_never_yielded_or_requested():
+    handler, bodies = _canned(
+        [_reasoning("let me think"), _reasoning("... ok", "reasoning_content"), chunk("Ciao")]
+    )
+    r = Router(
+        [route("lan", "lan.local", max_tokens=300)],
+        SafetyConfig(),
+        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    timing = FirstToken()
+    msgs = [{"role": "user", "content": "x"}]
+    evs = [ev async for ev in r.stream_route(r.routes[0], msgs, None, timing)]
+    assert [e.text for e in evs if isinstance(e, TextDelta)] == ["Ciao"]
+    assert timing.reasoning_chars == len("let me think") + len("... ok")
+    assert evs[-1].reasoning_chars == timing.reasoning_chars
+    body = bodies[0]
+    assert body["max_tokens"] == 300
+    assert not [k for k in body if "reason" in k or k == "include_reasoning"]
+
+
+async def test_length_finish_with_only_reasoning_is_recorded():
+    handler, _ = _canned([_reasoning("x" * 40), _ended(chunk(), "length")])
+    r = Router(
+        [route("lan", "lan.local")],
+        SafetyConfig(),
+        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    timing = FirstToken()
+    msgs = [{"role": "user", "content": "x"}]
+    evs = [ev async for ev in r.stream_route(r.routes[0], msgs, None, timing)]
+    assert [type(e) for e in evs] == [Done]
+    assert timing.seconds is None  # reasoning is not a first token
+    assert timing.reasoning_chars == 40 and timing.finish_reason == "length"
+    assert evs[0].finish_reason == "length"

@@ -116,6 +116,7 @@ class _Turn:
     outcome: str = "ok"
     route: str | None = None
     tokens: int = 0
+    reasoning_chars: int = 0  # the route's non-standard reasoning deltas (a count, never text)
     out_chars: int = 0
     stamps: dict[str, float] = field(default_factory=dict)
     active: ActiveRoute = field(default_factory=ActiveRoute)
@@ -622,6 +623,7 @@ class ConversationWorker:
                             cut = turn.cut or results[-1].end_turn
                     elif isinstance(ev, Done):
                         turn.route, turn.tokens = ev.route, turn.tokens + ev.tokens
+                        turn.reasoning_chars += ev.reasoning_chars
                     if cut:
                         break
             if not cut:
@@ -955,7 +957,11 @@ class ConversationWorker:
         self._counts["turns"] += 1
         self._counts[turn.outcome] += 1
         with self._lock:
-            self._last = {"speech_id": turn.speech_id, **turn.stamps}
+            self._last = {
+                "speech_id": turn.speech_id,
+                "reasoning_chars": turn.reasoning_chars,
+                **turn.stamps,
+            }
         if self.bus is not None:
             self.bus.publish(
                 TOPIC,
@@ -967,6 +973,7 @@ class ConversationWorker:
                     "sentences": turn.sentences,
                     "route": turn.route,
                     "tokens": turn.tokens,
+                    "reasoning_chars": turn.reasoning_chars,
                     "tool_calls": turn.tool_calls,
                     "rounds": turn.rounds,
                     "outcome": turn.outcome,
@@ -994,6 +1001,7 @@ class ConversationWorker:
             def ms(stamp: float | None) -> float | None:
                 return None if stamp is None else (stamp - heard) * MS_PER_S
 
+            out["last_reasoning_chars"] = last["reasoning_chars"]
             out["latency_ms"] = {
                 "request": ms(last.get("request")),
                 "first_token": ms(last.get("token")),
