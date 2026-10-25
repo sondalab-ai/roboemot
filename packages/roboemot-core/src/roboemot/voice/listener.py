@@ -10,8 +10,10 @@ One thread reads ``source(timeout)`` (the audio hub's voice queue), and for each
 2. runs the VAD endpointer; the ASR only ever sees speech (pre-roll included);
 3. on speech start picks the language, runs the fast path (head turn, ``speech.heard``) and
    starts the recognizer; on each partial runs the keyword spotter;
-4. on speech end finishes the ASR and builds an ``Utterance``: handed to ``on_utterance`` (the
-   conversation, in-process) and announced on the bus as ``percept.utterance`` without its text.
+4. on speech end finishes the ASR, runs the wake gate (with the voice-at-face check, whose
+   ``direction`` samples are taken on speech start and on each piece of utterance audio) and
+   builds an ``Utterance``: handed to ``on_utterance`` (the conversation, in-process) and
+   announced on the bus as ``percept.utterance`` without its text.
 
 Chunk stamps are the monotonic time the chunk *ends*; the endpointer wants its start. The work
 per utterance is bounded by ``voice.vad.max_utterance_s``. Audio and text are never logged.
@@ -34,6 +36,7 @@ from ..bus import Bus
 from ..config.schema import RoboEmotConfig
 from .activity import SpeechActivity
 from .asr import ASRBackend, ASREvent, resolve_language
+from .direction import VoiceDirection
 from .fastpath import FastPath
 from .speech_features import Prosody
 from .vad import Endpointer, SpeechAudio, SpeechEnd, SpeechStart
@@ -110,6 +113,7 @@ class VoiceListener:
         before_asr_reset: Callable[[], None] | None = None,
         on_activity: Callable[[bool], None] | None = None,
         enrolled_in_view: Callable[[float], bool] = lambda now: False,
+        direction: VoiceDirection | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._source = source
@@ -127,6 +131,7 @@ class VoiceListener:
         self._on_activity = on_activity
         self._enrolled_in_view = enrolled_in_view
         self._clock = clock
+        self._direction = direction
         self._gate = WakeGate("always", 0.0)  # configured by apply_config
         self.apply_config(cfg)
         self._stop = threading.Event()
@@ -157,6 +162,8 @@ class VoiceListener:
         self._fast.apply_config(cfg.voice)
         fp = cfg.voice.fastpath
         self._gate.apply(cfg.voice.wake_word_policy, fp.addressed_window_s, fp.window_max_s)
+        if self._direction is not None:
+            self._direction.apply_config(cfg.voice.direction)
 
     @property
     def config(self) -> RoboEmotConfig:
@@ -207,6 +214,8 @@ class VoiceListener:
             }
         snap["latency"] = self._fast.stats.snapshot()
         snap["wake"] = self._gate.snapshot(self._clock())
+        if self._direction is not None:
+            snap["direction"] = self._direction.snapshot()
         snap["wake_phrases_out_of_vocab"] = self._fast.wake_out_of_vocab()
         grammar = self._fast.grammar_snapshot()
         if grammar is not None:
@@ -359,6 +368,8 @@ class VoiceListener:
     def _feed(self, parts: list[np.ndarray], audio_end: float) -> None:
         if parts and self._active:
             self._partial(self._asr.accept(np.concatenate(parts)), audio_end)
+            if self._direction is not None:
+                self._direction.sample(audio_end)
 
     def _partial(self, event: ASREvent | None, audio_end: float) -> None:
         if event is not None and event.text:
@@ -377,6 +388,9 @@ class VoiceListener:
         self._fast.begin(ev.stamp, audio_end, self._language)
         self._asr.start(self._language)
         self._set_active(True)
+        if self._direction is not None:
+            self._direction.begin()
+            self._direction.sample(audio_end)
         self._partial(self._asr.accept(ev.pre_roll), audio_end)
 
     def _end(self, ev: SpeechEnd) -> None:
@@ -412,6 +426,7 @@ class VoiceListener:
             start=ev.start_stamp,
             last_speech=ev.last_speech_stamp,
             speaker=self._speaker(),
+            at_face=self._at_face(),
         )
         self._fast.impulses(fast, addressed)
         utterance = Utterance(
@@ -432,6 +447,11 @@ class VoiceListener:
             self._on_utterance(utterance)
         except Exception as exc:
             log.warning("voice listener: utterance consumer raised %s", type(exc).__name__)
+
+    def _at_face(self) -> Callable[[], bool] | None:
+        """The voice-at-face check for the wake gate, None when there is none or it is off."""
+        d = self._direction
+        return d.check if d is not None and d.enabled else None
 
     def _speaker(self) -> str | None:
         try:

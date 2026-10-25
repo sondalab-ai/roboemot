@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import queue
 import time
 from dataclasses import asdict
@@ -17,6 +18,7 @@ from roboemot.bus import Bus
 from roboemot.config.schema import APPRAISAL_EVENTS, RoboEmotConfig
 from roboemot.voice.activity import SpeechActivity
 from roboemot.voice.asr import ASREvent, resolve_language
+from roboemot.voice.direction import DirectionSample, VoiceDirection
 from roboemot.voice.fastpath import EVENT_FOR, FastPath
 from roboemot.voice.listener import UtteranceInfo, VoiceListener
 from roboemot.voice.vad import Endpointer, EnergyVAD
@@ -626,3 +628,73 @@ def test_a_listener_reload_reaches_the_endpointer():
     )
     rig.feed(voice(amp=quiet, seconds=0.5))
     assert rig.listener.snapshot()["vad"]["starts"] == 1
+
+
+# ---- voice-at-face check (voice.direction, SPEC 8 stage 2, 5A)
+
+FACE_RAD = 0.2
+OFF_FACE_RAD = FACE_RAD + math.radians(60.0)
+
+
+def direction_rig(final, bearing_rad, cfg=None, **kw):
+    """A rig with policy never and a voice-at-face check over one face at ``FACE_RAD``; the
+    returned list collects the stamps the check sampled."""
+    cfg = cfg or RoboEmotConfig.model_validate({"voice": {"wake_word_policy": "never"}})
+    stamps: list[float] = []
+
+    def lookup(now):
+        stamps.append(now)
+        return DirectionSample(bearing_rad, (FACE_RAD,), True)
+
+    direction = VoiceDirection(cfg.voice.direction, lookup)
+    return Rig([final], final=final, cfg=cfg, direction=direction, **kw), stamps
+
+
+def test_music_off_any_face_is_not_addressed_without_the_wake_word():
+    r, stamps = direction_rig("la la la amore mio", OFF_FACE_RAD)
+    r.say()
+    assert not r.utterances[0].addressed
+    snap = r.listener.snapshot()
+    assert snap["wake"]["decisions"]["rejected_no_face_at_voice"] == 1
+    assert snap["direction"]["checks"]["rejected"] == 1
+    assert len(stamps) > 2  # sampled during the utterance, not once
+    assert all(T0 <= s <= r.t for s in stamps)
+
+
+def test_a_voice_from_the_face_is_addressed_without_the_wake_word():
+    r, _ = direction_rig("come stai", FACE_RAD)
+    r.say()
+    assert r.utterances[0].addressed
+    assert r.listener.snapshot()["direction"]["checks"]["passed"] == 1
+
+
+def test_wake_phrase_rescued_by_the_grammar_pass_skips_the_check():
+    class Rescue:
+        def apply_config(self, cfg):
+            pass
+
+        def check(self, spotter, language, audio, text, cats):
+            return {"wake"}
+
+        def snapshot(self):
+            return {}
+
+    r, _ = direction_rig("cadeva come stai", OFF_FACE_RAD, grammar=Rescue())
+    r.say()
+    u = r.utterances[0]
+    assert u.addressed and u.wake_word
+    snap = r.listener.snapshot()
+    assert snap["wake"]["decisions"]["not_required"] == 1
+    assert sum(snap["direction"]["checks"].values()) == 0
+
+
+def test_direction_check_off_by_hot_reload():
+    r, _ = direction_rig("la la la", OFF_FACE_RAD)
+    r.listener.apply_config(
+        RoboEmotConfig.model_validate(
+            {"voice": {"wake_word_policy": "never", "direction": {"enabled": False}}}
+        )
+    )
+    r.say()
+    assert r.utterances[0].addressed
+    assert r.listener.snapshot()["direction"]["enabled"] is False
