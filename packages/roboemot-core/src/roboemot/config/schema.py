@@ -2513,9 +2513,148 @@ class VoiceConfig(Strict):
     )
 
 
+SPEECH_MOTION_PRESETS = ("subtle", "natural", "lively")
+SPEECH_MOOD_GAIN_MAX = 3.0  # range of one speech_motion.mood_gain value
+
+
+class SpeechMotionLevel(Strict):
+    """One liveliness preset of the speaking motion (SPEC 7, Speaking motion): the peak of each
+    role in degrees, before the register, circadian and arousal factors."""
+
+    beat_deg: float = param(
+        1.5, "Peak dip of the beat on stressed stretches of speech", unit="deg", ge=0, le=10
+    )
+    phrase_nod_deg: float = param(
+        3.0, "Peak of the nod in the pause after a phrase or a statement", unit="deg", ge=0, le=15
+    )
+    nod_share: float = param(
+        0.5,
+        "Share of the phrase ends and statement ends that get a nod (seeded per reply and phrase, "
+        "so the same reply moves the same way)",
+        ge=0,
+        le=1,
+    )
+    question_tilt_deg: float = param(
+        5.0,
+        "Peak of the tilt at the end of a question, held into the listening window",
+        unit="deg",
+        ge=0,
+        le=15,
+    )
+    accent_deg: float = param(
+        6.0, "Peak of the accent flick on emphasis peaks (0: off)", unit="deg", ge=0, le=20
+    )
+    emphasis_min_interval_s: float = param(
+        1.2,
+        "At most one accent per this interval (the timeline's emphasis_floor_interval_s is the "
+        "floor: a smaller value here changes nothing)",
+        unit="s",
+        ge=0.1,
+        le=10,
+    )
+    breath_deg: float = param(
+        1.5, "Peak of the inhale lift before each sentence", unit="deg", ge=0, le=10
+    )
+    sway_deg: float = param(
+        0.0,
+        "Peak of the very slow drift that changes side at each phrase (0: off)",
+        unit="deg",
+        ge=0,
+        le=5,
+    )
+    arousal_gain: float = param(
+        0.5,
+        "The amplitude is multiplied by (1 + arousal_gain x affect arousal)",
+        ge=0,
+        le=2,
+    )
+
+
+class SpeechMotionLevels(Strict):
+    """The three presets; ``speech_motion.liveliness`` picks one, every row stays tunable."""
+
+    subtle: SpeechMotionLevel = param(
+        {
+            "beat_deg": 1.0,
+            "phrase_nod_deg": 2.0,
+            "nod_share": 0.3,
+            "question_tilt_deg": 3.0,
+            "accent_deg": 0.0,
+            "emphasis_min_interval_s": 2.0,
+            "breath_deg": 1.0,
+            "sway_deg": 0.0,
+            "arousal_gain": 0.3,
+        },
+        "Small and sparse",
+    )
+    natural: SpeechMotionLevel = param({}, "The middle preset")
+    lively: SpeechMotionLevel = param(
+        {
+            "beat_deg": 2.5,
+            "phrase_nod_deg": 5.0,
+            "nod_share": 0.7,
+            "question_tilt_deg": 7.0,
+            "accent_deg": 10.0,
+            "emphasis_min_interval_s": 0.8,
+            "breath_deg": 2.0,
+            "sway_deg": 1.5,
+            "arousal_gain": 0.8,
+        },
+        "Larger and more frequent; clipped by the limiter's dev fallback dynamics until the "
+        "robot's dynamics are measured, so it then looks much like natural",
+    )
+
+
+class SpeechTiltEntry(ExpressionEntry):
+    """The question tilt: an expression entry that stops at ``hold_at_s`` until it is released."""
+
+    hold_at_s: float = param(
+        0.0,
+        "Time in the keyframes where the tilt holds until the listener hears an utterance, "
+        "speech_motion.question_hold_s passes or a barge-in",
+        unit="s",
+        ge=0,
+        le=EXPRESSION_MAX_CYCLE_S,
+    )
+
+    @model_validator(mode="after")
+    def _hold_inside(self) -> SpeechTiltEntry:
+        end = max(frames[-1][0] for frames in self.channels.values())
+        if not 0 < self.hold_at_s < end:
+            raise ValueError(f"hold_at_s must lie inside the keyframes (0 to {end} s, exclusive)")
+        return self
+
+
+class SpeechMotionMap(Strict):
+    """The robot's speaking motion channels and shapes (SPEC 4A, 7); the robot manifest ships it.
+
+    ``beat`` and ``sway`` map a channel to a sign. The gestures are expression entries whose
+    keyframes give the shape only: they are scaled so that their largest offset equals the
+    preset's degrees. Empty: the layer does not move anything.
+    """
+
+    beat: dict[str, Literal[-1, 1]] = param(
+        {}, "Channel to sign of the beat (the sign that dips the head)"
+    )
+    sway: dict[str, Literal[-1, 1]] = param({}, "Channel to sign of the slow sway")
+    phrase_nod: ExpressionEntry | None = param(None, "Shape of the phrase nod")
+    question_tilt: SpeechTiltEntry | None = param(None, "Shape of the question tilt")
+    accent: ExpressionEntry | None = param(None, "Shape of the accent flick")
+    breath: ExpressionEntry | None = param(None, "Shape of the inhale lift before a sentence")
+
+    def channels(self) -> dict[str, list[str]]:
+        """Every channel named, by role."""
+        out = {"beat": list(self.beat), "sway": list(self.sway)}
+        for role in ("phrase_nod", "question_tilt", "accent", "breath"):
+            entry = getattr(self, role)
+            out[role] = list(entry.channels) if entry is not None else []
+        return out
+
+
 class SpeechMotionConfig(Strict):
     """Speech timeline built from the robot's own TTS output (SPEC 8): the energy envelope and
-    the phrase and emphasis events that the speaking motion layer reads (design ZT)."""
+    the phrase and emphasis events; and the speaking motion layer that reads it (SPEC 7,
+    Speaking motion)."""
 
     envelope_frame_ms: int = param(
         20, "Length of one energy frame of the spoken audio", unit="ms", ge=5, le=100
@@ -2565,6 +2704,86 @@ class SpeechMotionConfig(Strict):
         ge=1,
         le=60,
     )
+    enabled: bool = param(
+        True, "Move while speaking (off: the timeline is still written, nothing moves)"
+    )
+    liveliness: Literal["subtle", "natural", "lively"] = param(
+        "lively", "Which preset of speech_motion.levels the speaking motion uses"
+    )
+    levels: SpeechMotionLevels = param({}, "Peak degrees and shares per liveliness preset")
+    attack_ms: float = param(
+        150.0, "Rise time of the two-pole smoother of the beat", unit="ms", ge=10, le=2000
+    )
+    release_ms: float = param(
+        300.0, "Fall time of the two-pole smoother of the beat", unit="ms", ge=10, le=5000
+    )
+    sway_smoothing_ms: float = param(
+        800.0, "Time constant of the slow sway's change of side", unit="ms", ge=50, le=5000
+    )
+    question_hold_s: float = param(
+        2.5,
+        "Longest hold of the question tilt when nobody answers",
+        unit="s",
+        ge=0,
+        le=30,
+    )
+    latency_ms: float = param(
+        0.0,
+        "The motion samples the timeline this far ahead of the clock (signed): the player delay "
+        "of the robot's speaker, measured on the robot",
+        unit="ms",
+        ge=-500,
+        le=500,
+    )
+    event_max_late_s: float = param(
+        0.5,
+        "A gesture whose event reaches the layer late (a streamed voice writes a phrase gap when "
+        "the voice resumes) still plays up to this long after its stamp",
+        unit="s",
+        ge=0,
+        le=5,
+    )
+    fade_ms: float = param(
+        150.0,
+        "Offsets ramp to zero over this at the end of speech or a barge-in, and back in at the "
+        "start (at most motion.arbiter.crossfade_ms)",
+        unit="ms",
+        ge=0,
+        le=2000,
+    )
+    command_ttl_s: float = param(
+        0.25,
+        "Lifetime of each speaking motion command in the arbiter: the offset drops by itself if "
+        "the app stops feeding it",
+        unit="s",
+        ge=0.05,
+        le=2,
+    )
+    mood_gain: dict[str, float] = param(
+        {
+            "joy": 1.3,
+            "surprise": 1.3,
+            "curiosity": 1.0,
+            "annoyance": 0.8,
+            "calm": 0.6,
+            "fear": 0.5,
+            "sadness": 0.3,
+            "sleepy": 0.2,
+        },
+        "Accent amplitude factor per mood of the sentence (affect labels; a label not listed: 1.0)",
+    )
+
+    @field_validator("mood_gain")
+    @classmethod
+    def _mood_gains(cls, v: dict[str, float]) -> dict[str, float]:
+        bad = sorted(k for k, g in v.items() if not 0 <= g <= SPEECH_MOOD_GAIN_MAX)
+        if bad:
+            raise ValueError(f"mood_gain must be within 0 and {SPEECH_MOOD_GAIN_MAX}: {bad}")
+        return v
+
+    def level(self) -> SpeechMotionLevel:
+        """The preset in effect."""
+        return getattr(self.levels, self.liveliness)
 
 
 # --------------------------------------------------------------------------- conversation, LLM
@@ -3482,7 +3701,13 @@ with warnings.catch_warnings():
         world: WorldConfig = param({}, "SPEC 5A")
         mirror: MirrorConfig = param({}, "SPEC 9")
         voice: VoiceConfig = param({}, "SPEC 8")
-        speech_motion: SpeechMotionConfig = param({}, "SPEC 8: speech timeline")
+        speech_motion: SpeechMotionConfig = param(
+            {}, "SPEC 7, 8: speech timeline and speaking motion"
+        )
+        speech_motion_map: SpeechMotionMap = param(
+            {},
+            "SPEC 4A, 7: channels and shapes of the speaking motion; the robot manifest ships it",
+        )
         persona: PersonaConfig = param({}, "SPEC 11A")
         conversation: ConversationConfig = param({}, "SPEC 8")
         llm_routes: list[LLMRoute] = param([], "SPEC 8")
@@ -3519,6 +3744,20 @@ with warnings.catch_warnings():
                 raise ValueError(
                     f"expression_map has labels {unknown} that are not in affect.labels "
                     f"{sorted(self.affect.labels)}"
+                )
+            return self
+
+        @model_validator(mode="after")
+        def _speech_motion_fits(self) -> RoboEmotConfig:
+            sm = self.speech_motion
+            unknown = sorted(set(sm.mood_gain) - set(self.affect.labels))
+            if unknown:
+                raise ValueError(
+                    f"speech_motion.mood_gain has labels {unknown} that are not in affect.labels"
+                )
+            if sm.fade_ms > self.motion.arbiter.crossfade_ms:
+                raise ValueError(
+                    "speech_motion.fade_ms must be at most motion.arbiter.crossfade_ms"
                 )
             return self
 

@@ -594,7 +594,7 @@ def resolve_preset(name: str, preset_dirs: Iterable[Path], _seen: tuple[str, ...
 # ----------------------------------------------------------------------------- guardrails
 
 MANIFEST_BEHAVIOUR_KEYS = frozenset(
-    {"expression_map", "gesture_map", "circadian_motion", "voice", "motion"}
+    {"expression_map", "gesture_map", "circadian_motion", "speech_motion_map", "voice", "motion"}
 )  # what a robot manifest may set
 MANIFEST_MOTION_KEYS = frozenset({"app_tick_hz", "arbiter"})  # the rates of ``motion``
 MANIFEST_ARBITER_KEYS = frozenset({"loop_hz"})  # the rate of ``motion.arbiter``
@@ -961,6 +961,7 @@ class ConfigStack:
         self._cached_until: float | None = None
         self._runtime: dict[str, _RuntimeValue] = {}
         self.channels: frozenset[str] | None = None
+        self.body_yaw: str | None = None  # refused in speech_motion_map (set with the channels)
         self._listeners: list[Callable[[ConfigChange], None]] = []
         self._lock = threading.RLock()
         self._mtimes: dict[str, float] = {}
@@ -1018,11 +1019,15 @@ class ConfigStack:
         return stack
 
     @_mutator
-    def set_manifest_behaviour(self, behaviour: dict, channels: Collection[str]) -> None:
+    def set_manifest_behaviour(
+        self, behaviour: dict, channels: Collection[str], *, body_yaw: str | None = None
+    ) -> None:
         """Install the robot manifest's ``behaviour`` block (layer 2) once the manifest is loaded.
 
         ``channels`` are the dof names expressions may drive (``Manifest.channels``): from now on
         every configuration this stack builds is refused when a map or pose names another one.
+        ``body_yaw`` (``GazeMap.body_yaw``, None when the robot cannot turn its body) is refused
+        in ``speech_motion_map`` on top of that: the speaking motion never turns the body.
         The block becomes part of the installed configuration, so it also resets the approved
         baseline.
         """
@@ -1034,8 +1039,9 @@ class ConfigStack:
         with self._lock:
             check_manifest_voice(behaviour.get("voice"))
             check_manifest_motion(behaviour.get("motion"))
-            saved, saved_channels = self.manifest, self.channels
+            saved, saved_channels, saved_body = self.manifest, self.channels, self.body_yaw
             self.manifest, self.channels = behaviour, frozenset(channels)
+            self.body_yaw = body_yaw
             try:
                 defaults = RoboEmotConfig()
                 layer = RoboEmotConfig.model_validate(
@@ -1051,6 +1057,7 @@ class ConfigStack:
                 self._check_route_budgets(baseline)
             except (ValidationError, GuardrailError, ConfigError) as exc:
                 self.manifest, self.channels = saved, saved_channels
+                self.body_yaw = saved_body
                 if isinstance(exc, ValidationError):
                     raise ConfigError(f"manifest behaviour: {_explain(exc)}") from exc
                 raise
@@ -1149,6 +1156,13 @@ class ConfigStack:
             if (entry := getattr(motion, label)) is not None:
                 named[f"circadian_motion.{label}"] = entry.channels
         named["circadian_motion.rest_pose_deg"] = motion.rest_pose_deg
+        for role, names in cfg.speech_motion_map.channels().items():
+            named[f"speech_motion_map.{role}"] = names
+            if self.body_yaw is not None and self.body_yaw in names:
+                raise ConfigError(
+                    f"speech_motion_map.{role}: {self.body_yaw!r} turns the body; the speaking "
+                    "motion never does"
+                )
         for where, names in named.items():
             for name in names:
                 if name not in self.channels:
