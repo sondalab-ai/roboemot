@@ -25,7 +25,9 @@ For the debug report (SPEC 12A) the output measures, for any backend:
 - late sentences: the next sentence of one answer arriving after the previous one ended by more
   than its planned pause (the silence beyond the pause, in ms), and ``boundary_dry``, how often the
   sink ran dry at all between two sentences of one answer;
-- ``push_ms``: the time spent in the sink's push (the speaker resamples there).
+- ``push_ms``: the time spent in the sink's push (the speaker resamples there);
+- ``timeline_ms``: the time each push spends writing the speech timeline (wall time, under the
+  lock ``stop`` takes), so its cost is visible on the robot.
 
 A sink with no finite ``playing_until`` (its output never opened) counts no gaps. Numbers only.
 
@@ -152,6 +154,7 @@ class SpeechOutput:
         self._rtf: collections.deque[float] = collections.deque(maxlen=window)
         self._rtf_sentence: collections.deque[float] = collections.deque(maxlen=window)
         self._push_ms: collections.deque[float] = collections.deque(maxlen=window)
+        self._timeline_ms: collections.deque[float] = collections.deque(maxlen=window)
         self._late_sentences = 0
         self._late_ms = 0.0
         self._boundary_dry = 0
@@ -367,10 +370,11 @@ class SpeechOutput:
         """Counts and timings for the debug report; never text."""
         with self._lock:
             lat, queued = list(self._latencies), len(self._jobs)
-            rtf, rtf_sentence, push_ms = (
+            rtf, rtf_sentence, push_ms, timeline_ms = (
                 list(self._rtf),
                 list(self._rtf_sentence),
                 list(self._push_ms),
+                list(self._timeline_ms),
             )
             gaps = {
                 "underruns": self._underruns,
@@ -391,6 +395,7 @@ class SpeechOutput:
             "tts_rtf": summarise(rtf, RTF_LEVELS),
             "tts_rtf_sentence": summarise(rtf_sentence, RTF_LEVELS),
             "push_ms": summarise(push_ms, RTF_LEVELS),
+            "timeline_ms": summarise(timeline_ms, RTF_LEVELS),
             **gaps,
             "timeline": self.timeline.snapshot(),
         }
@@ -426,6 +431,7 @@ class SpeechOutput:
             self.sink.push_audio_sample(samples, rate_hz)
             self._push_ms.append((self.clock() - now) * MS_PER_S)
             if speech:
+                began = time.perf_counter()
                 self.timeline.push(
                     job.id,
                     samples,
@@ -436,6 +442,7 @@ class SpeechOutput:
                     mood=job.delivery.mood,
                     continued=job.continued,
                 )
+                self._timeline_ms.append((time.perf_counter() - began) * MS_PER_S)
             else:
                 self.timeline.pad(job.id, start)
             if speech and job.id not in self._audible:
