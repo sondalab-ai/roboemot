@@ -207,15 +207,18 @@ class FastPath:
         grammar_audio: np.ndarray | None = None,
     ) -> FastResult:
         """The utterance ended with final ``text``; ``speech_audio`` spans its speech frames,
-        ``grammar_audio`` (pre-roll included) is what the grammar pass decodes.
+        ``grammar_audio`` (pre-roll to the last speech frame) is what the grammar pass decodes. A
+        yes or no only the grammar pass heard can make the answer: today that drives the nod or
+        shake gesture only (SPEC 8 stage 3).
 
         Keywords only the final text has are emitted now. Records the first reaction (hint or
         keyword) and the first keyword against ``last_speech_stamp``. Call ``impulses`` next.
         """
         words = len(text.split())
-        cats = self._spotter.spot(text, self._language)
+        spotter = self._spotter  # one spotter for the utterance, whatever a reload does meanwhile
+        cats = spotter.spot(text, self._language)
         if self._grammar is not None and grammar_audio is not None:
-            cats |= self._grammar.check(self._spotter, self._language, grammar_audio, text, cats)
+            cats |= self._grammar.check(spotter, self._language, grammar_audio, text, cats)
         before = self._keyword_at
         self._fire(cats)
         if before is None and self._keyword_at is not None:

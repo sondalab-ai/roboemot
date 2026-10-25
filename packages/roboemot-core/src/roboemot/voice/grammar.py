@@ -12,18 +12,28 @@ time from configuration and the robot's state, never from literals:
 - the words of the utterance's free-text result, as competitors;
 - the recognizer's unknown-word filler.
 
-The competitors are what keeps the pass honest. Measured on synthetic clips with the small
-Italian model, a grammar of keywords and the filler alone turned ordinary sentences into
-confident keywords ("mi piace molto la pizza margherita" -> ``stop`` at confidence 1.0): its
-unknown-word filler is weak. With the free-text words in the grammar a keyword wins only where
-it fits the audio better than what the free-text recognizer heard. So an utterance whose free
-text has no usable word gets no pass.
+The competitors are needed: measured on synthetic clips with the small Italian model, a grammar
+of keywords and the filler alone turned ordinary sentences into confident keywords ("mi piace
+molto la pizza margherita" -> ``stop`` at confidence 1.0), its unknown-word filler is weak. They
+are not enough: a multi-word keyword phrase still beats an article and a word, so "i robot sono
+utili" came out as ``ehi robot`` at confidence 1.0, and confidence does not tell such a hit from
+a true one. So, besides the confidence floor (``voice.grammar.wake_min_word_conf`` for wake
+phrases, the name and aliases, ``keyword_min_word_conf`` for the others):
 
-A phrase counts when its words come out consecutively, each with a confidence of at least
-``voice.grammar.wake_min_word_conf`` (wake phrases, the name and aliases) or
-``keyword_min_word_conf`` (the others). Hits only add to what the free text found. The phrase
-part of the grammar is rebuilt when its inputs change (a config hot reload, the robot's name, a
-model that finished loading); the report counts the builds.
+- a phrase counts only when its words come out consecutively *and* adjacent in the audio
+  (``max_word_gap_s``, Vosk word timings), so "hello [to the] robot" with the middle words lost
+  is not ``hello robot``;
+- a wake phrase, the name or an alias the free text missed is added only when the free text holds
+  none of its words (it lost them, as "cadeva" for "ciao neve", rather than heard them next to
+  another word, as "i robot"); ``rescue_wake`` off adds none. Stop, yes, no and greetings are
+  added on the floor and the gap alone.
+
+An utterance gets no pass when its free text has no usable word, more distinct words than
+``max_competitor_words`` (cutting the list would leave part of the audio to the keywords alone),
+or lasts longer than ``max_audio_s`` (the pass runs on the listener thread before the hand-off), or
+when the model has no runtime graph (a big static-graph Vosk model ignores grammars). Hits only
+add to what the free text found. The phrase part of the grammar is rebuilt when its inputs change
+(a config hot reload, the robot's name, a model that finished loading); the report counts builds.
 
 No transcript, phrase or word leaves this module: the report has counts and confidences only.
 """
@@ -40,18 +50,27 @@ from typing import Any
 import numpy as np
 
 from ..config.schema import GrammarConfig
-from .asr import VOSK_UNKNOWN
-from .keywords import CATEGORIES, KeywordSpotter, fold, normalise
+from .asr import VOSK_UNKNOWN, GrammarUnsupported, HeardWord
+from .keywords import CATEGORIES, KeywordSpotter, fold
 from .robot_name import MissingWords
 
 log = logging.getLogger(__name__)
 
 MS_PER_S = 1000.0
 WAKE_CLASSES = frozenset({"wake", "name"})
-SKIPS = ("no_vocabulary", "no_competitors", "no_model", "errors")
-# (language, audio, phrases) -> the words heard with their confidence; None: model not loaded.
-Decode = Callable[[str, np.ndarray, list[str]], list[tuple[str, float]] | None]
-Target = tuple[str, tuple[str, ...]]  # (category, normalised words of one phrase)
+SKIPS = (
+    "no_vocabulary",
+    "no_competitors",
+    "too_many_words",
+    "too_long",
+    "no_model",
+    "no_grammar_graph",
+    "errors",
+)
+# (language, audio, phrases) -> the words heard, with confidence and timing; None: model not
+# loaded; raises GrammarUnsupported for a model without a runtime graph.
+Decode = Callable[[str, np.ndarray, list[str]], list[HeardWord] | None]
+Target = tuple[str, tuple[str, ...]]  # (category, folded words of one phrase)
 
 
 @dataclass(frozen=True)
@@ -84,6 +103,16 @@ class _Conf:
 
 
 @dataclass
+class _Match:
+    """What one decode gave, per category (see ``GrammarSpotter._match``)."""
+
+    hits: dict[str, float] = field(default_factory=dict)
+    rejected: dict[str, float] = field(default_factory=dict)
+    guarded: set[str] = field(default_factory=set)
+    gapped: set[str] = field(default_factory=set)
+
+
+@dataclass
 class _Stats:
     passes: int = 0
     builds: int = 0
@@ -92,6 +121,8 @@ class _Stats:
     rejected: dict[str, int] = field(default_factory=lambda: dict.fromkeys(CATEGORIES, 0))
     rescued: dict[str, int] = field(default_factory=lambda: dict.fromkeys(CATEGORIES, 0))
     missed: dict[str, int] = field(default_factory=lambda: dict.fromkeys(CATEGORIES, 0))
+    guarded: dict[str, int] = field(default_factory=lambda: dict.fromkeys(CATEGORIES, 0))
+    gapped: dict[str, int] = field(default_factory=lambda: dict.fromkeys(CATEGORIES, 0))
     accepted_conf: _Conf = field(default_factory=_Conf)
     rejected_conf: _Conf = field(default_factory=_Conf)
     last_ms: float = 0.0
@@ -100,7 +131,9 @@ class _Stats:
 
 
 class GrammarSpotter:
-    """See the module docstring. ``check`` runs on the listener thread; ``snapshot`` anywhere."""
+    """See the module docstring. ``check`` runs on the listener thread; ``snapshot`` anywhere.
+    The listener thread is the only writer of the grammar cache, so it reads it without the lock;
+    the report reads it under the lock."""
 
     def __init__(
         self,
@@ -133,27 +166,35 @@ class GrammarSpotter:
         cfg = self._cfg
         if not cfg.enabled:
             return frozenset()
+        if audio.size > cfg.max_audio_s * self._rate:
+            return self._skip("too_long")
         built = self._build(spotter, language)
         if built is None:
             return self._skip("no_vocabulary")
-        competitors = self._competitors(language, text, cfg.max_competitor_words)
-        if competitors is None:
+        free = self._free_words(language, text)
+        if free is None:
             return self._skip("no_vocabulary")
-        if not competitors:
+        if not free:
             return self._skip("no_competitors")
-        grammar = list(dict.fromkeys([*built.phrases, *competitors]))
+        if len(free) > cfg.max_competitor_words:
+            return self._skip("too_many_words")
+        grammar = list(dict.fromkeys([*built.phrases, *free]))
         t0 = self._clock()
         try:
             words = self._decode(language, audio, grammar)
+        except GrammarUnsupported:
+            return self._skip("no_grammar_graph")
         except Exception as exc:
+            # The type only: a recognizer error message can quote grammar words.
             log.warning("voice: grammar pass: %s", type(exc).__name__)
             return self._skip("errors")
         spent = self._clock() - t0
         if words is None:
             return self._skip("no_model")
-        hits, rejected = self._match(built.targets, words, cfg)
-        self._record(spent, audio.size, hits, rejected, set(found))
-        return frozenset(hits)
+        found = set(found)
+        result = self._match(built.targets, words, set(free), found, cfg)
+        self._record(spent, audio.size, result, found)
+        return frozenset(result.hits)
 
     def snapshot(self) -> dict[str, Any]:
         """Counts, confidences and cost for the debug report (no phrase, word or text)."""
@@ -171,6 +212,8 @@ class GrammarSpotter:
                 "rejected": dict(s.rejected),
                 "rescued": dict(s.rescued),
                 "missed": dict(s.missed),
+                "guarded": dict(s.guarded),
+                "gapped": dict(s.gapped),
                 "confidence": {
                     "accepted": s.accepted_conf.snapshot(),
                     "rejected": s.rejected_conf.snapshot(),
@@ -200,53 +243,64 @@ class GrammarSpotter:
                     oov += 1
                     continue
                 kept.append(phrase)
-                targets.append((category, tuple(normalise(phrase).split())))
+                targets.append((category, tuple(phrase.split())))
         built = _Built(key, tuple(dict.fromkeys(kept)), tuple(targets), oov)
         with self._lock:
             self._built[language] = built
             self._stats.builds += 1
         return built
 
-    def _competitors(self, language: str, text: str, cap: int) -> list[str] | None:
-        """The distinct in-vocabulary words of ``text``, at most ``cap``; None when the
-        vocabulary cannot be checked."""
+    def _free_words(self, language: str, text: str) -> list[str] | None:
+        """The distinct folded in-vocabulary words of the free text ``text`` (the competitors);
+        None when the vocabulary cannot be checked."""
         words = list(dict.fromkeys(fold(text).split()))
         absent = self._missing(language, words)
         if absent is None:
             return None
         gone = set(absent)
-        return [w for w in words if w not in gone][:cap]
+        return [w for w in words if w not in gone]
 
     # ---- matching
 
     @staticmethod
     def _match(
-        targets: tuple[Target, ...], words: list[tuple[str, float]], cfg: GrammarConfig
-    ) -> tuple[dict[str, float], dict[str, float]]:
-        """Per category, the best phrase confidence (lowest word confidence of one occurrence)
-        that passed its threshold, and the best of those that did not."""
-        seq = [("" if w == VOSK_UNKNOWN else normalise(w), c) for w, c in words]
-        hits: dict[str, float] = {}
-        rejected: dict[str, float] = {}
+        targets: tuple[Target, ...],
+        words: list[HeardWord],
+        free: set[str],
+        found: set[str],
+        cfg: GrammarConfig,
+    ) -> _Match:
+        """Per category, the best phrase confidence (lowest word confidence of one occurrence
+        whose words are adjacent in the audio) that passed its floor, the best of those that did
+        not, and the categories dropped by the gap check or the wake guard (module docstring)."""
+        seq = [HeardWord("" if w.word == VOSK_UNKNOWN else fold(w.word), *w[1:]) for w in words]
+        out = _Match()
         for category, target in targets:
             n = len(target)
-            best = max(
-                (
-                    min(c for _, c in seq[i : i + n])
-                    for i in range(len(seq) - n + 1)
-                    if tuple(w for w, _ in seq[i : i + n]) == target
-                ),
-                default=None,
-            )
-            if best is None:
+            spans = [
+                seq[i : i + n]
+                for i in range(len(seq) - n + 1)
+                if tuple(w.word for w in seq[i : i + n]) == target
+            ]
+            if not spans:
+                continue
+            close = [s for s in spans if _adjacent(s, cfg.max_word_gap_s)]
+            if not close:
+                out.gapped.add(category)
                 continue
             wake = category in WAKE_CLASSES
+            if wake and category not in found and not (cfg.rescue_wake and free.isdisjoint(target)):
+                out.guarded.add(category)
+                continue
+            best = max(min(w.conf for w in span) for span in close)
             floor = cfg.wake_min_word_conf if wake else cfg.keyword_min_word_conf
-            bucket = hits if best >= floor else rejected
+            bucket = out.hits if best >= floor else out.rejected
             bucket[category] = max(bucket.get(category, 0.0), best)
-        for category in hits:
-            rejected.pop(category, None)
-        return hits, rejected
+        for category in out.hits:
+            out.rejected.pop(category, None)
+            out.guarded.discard(category)
+            out.gapped.discard(category)
+        return out
 
     # ---- report
 
@@ -255,14 +309,7 @@ class GrammarSpotter:
             self._stats.skipped[reason] += 1
         return frozenset()
 
-    def _record(
-        self,
-        spent: float,
-        samples: int,
-        hits: dict[str, float],
-        rejected: dict[str, float],
-        found: set[str],
-    ) -> None:
+    def _record(self, spent: float, samples: int, result: _Match, found: set[str]) -> None:
         with self._lock:
             s = self._stats
             s.passes += 1
@@ -270,14 +317,23 @@ class GrammarSpotter:
             s.max_ms = max(s.max_ms, s.last_ms)
             if samples:
                 s.max_rtf = max(s.max_rtf, spent * self._rate / samples)
-            for category, conf in hits.items():
+            for category, conf in result.hits.items():
                 s.hits[category] += 1
                 s.accepted_conf.add(conf)
                 if category not in found:
                     s.rescued[category] += 1
-            for category, conf in rejected.items():
+            for category, conf in result.rejected.items():
                 s.rejected[category] += 1
                 s.rejected_conf.add(conf)
-            for category in found - hits.keys():
+            for category in result.guarded:
+                s.guarded[category] += 1
+            for category in result.gapped:
+                s.gapped[category] += 1
+            for category in found - result.hits.keys():
                 if category in s.missed:
                     s.missed[category] += 1
+
+
+def _adjacent(span: list[HeardWord], max_gap_s: float) -> bool:
+    """Whether each word of ``span`` starts at most ``max_gap_s`` after the previous one ends."""
+    return all(b.start_s - a.end_s <= max_gap_s for a, b in zip(span, span[1:], strict=False))

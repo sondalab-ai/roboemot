@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import sys
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 from roboemot.config.schema import RoboEmotConfig
+from roboemot.voice.asr import GrammarUnsupported, HeardWord, VoskASR
 from roboemot.voice.fastpath import FastPath
 from roboemot.voice.grammar import GrammarSpotter
 from roboemot.voice.keywords import KeywordSpotter, fold
@@ -34,11 +37,23 @@ def config(**grammar):
     )
 
 
+WORD_S = 0.3  # each scripted word lasts this long
+
+
+def heard(pairs, gaps=None):
+    """``(word, conf)`` pairs as adjacent ``HeardWord``s; ``gaps[i]`` seconds before word i+1."""
+    out, t = [], 0.0
+    for i, (word, conf) in enumerate(pairs):
+        out.append(HeardWord(word, conf, t, t + WORD_S))
+        t += WORD_S + ((gaps or {}).get(i, 0.0))
+    return out
+
+
 class Decoder:
     """Scripted Vosk grammar decode: returns ``words`` and records each grammar it got."""
 
-    def __init__(self, words=(), result=True):
-        self.words = list(words)
+    def __init__(self, words=(), result=True, gaps=None):
+        self.words = heard(words, gaps)
         self.result = result
         self.grammars: list[list[str]] = []
 
@@ -64,10 +79,10 @@ def build(cfg, decoder, platform=None, oov=()):
     return fast, grammar, names
 
 
-def end(fast, text, language="it"):
+def end(fast, text, language="it", audio=AUDIO):
     fast.begin(0.0, 0.0, language)
     return fast.end(
-        text, AUDIO, RATE, last_speech_stamp=1.0, endpoint_stamp=1.5, grammar_audio=AUDIO
+        text, AUDIO, RATE, last_speech_stamp=1.0, endpoint_stamp=1.5, grammar_audio=audio
     )
 
 
@@ -203,11 +218,130 @@ def test_free_text_hits_the_grammar_did_not_confirm_count_as_missed():
     assert grammar.snapshot()["missed"]["stop"] == 1
 
 
-def test_competitors_are_capped():
-    dec = Decoder()
-    fast, _, _ = build(config(max_competitor_words=2), dec)
-    end(fast, "uno due tre quattro")
-    assert "due" in dec.grammars[0] and "tre" not in dec.grammars[0]
+def test_more_free_text_words_than_the_cap_skip_the_pass():
+    dec = Decoder([("fermati", 1.0)])
+    fast, grammar, _ = build(config(max_competitor_words=8), dec)
+    assert "stop" not in end(fast, "uno due tre quattro cinque sei sette otto nove").keywords
+    assert dec.grammars == [] and grammar.snapshot()["skipped"]["too_many_words"] == 1
+    end(fast, "uno due tre quattro cinque sei sette otto")
+    assert len(dec.grammars) == 1
+
+
+def test_an_utterance_longer_than_max_audio_skips_the_pass():
+    dec = Decoder([("fermati", 1.0)])
+    fast, grammar, _ = build(config(max_audio_s=1.0), dec)
+    long_audio = np.zeros(2 * RATE, np.float32)
+    assert "stop" not in end(fast, "che", audio=long_audio).keywords
+    assert dec.grammars == [] and grammar.snapshot()["skipped"]["too_long"] == 1
+
+
+def test_a_model_without_a_runtime_graph_skips_the_pass():
+    dec = Decoder(result=GrammarUnsupported("it"))
+    fast, grammar, _ = build(config(), dec)
+    assert end(fast, "ehi robot").wake_word  # the free-text match stands
+    assert grammar.snapshot()["skipped"]["no_grammar_graph"] == 1
+
+
+def test_a_wake_phrase_whose_words_the_free_text_heard_is_not_rescued():
+    dec = Decoder([("ehi", 1.0), ("robot", 1.0), ("sono", 1.0), ("utili", 1.0)])
+    fast, grammar, _ = build(config(), dec)
+    result = end(fast, "i robot sono utili")
+    assert not result.wake_word
+    snap = grammar.snapshot()
+    assert snap["guarded"]["wake"] == 1 and snap["hits"]["wake"] == 0
+
+
+def test_rescue_wake_off_adds_no_wake_but_keeps_keywords():
+    dec = Decoder([("ciao", 1.0), ("neve", 1.0), ("fermati", 1.0)])
+    fast, grammar, _ = build(config(rescue_wake=False), dec, platform="Neve")
+    result = end(fast, "cadeva fermarti")
+    assert not result.wake_word and "stop" in result.keywords
+    assert grammar.snapshot()["guarded"]["wake"] == 1
+
+
+def test_phrase_words_too_far_apart_in_the_audio_do_not_match():
+    dec = Decoder([("ciao", 1.0), ("neve", 1.0)], gaps={0: 0.4})
+    fast, grammar, _ = build(config(max_word_gap_s=0.15), dec, platform="Neve")
+    text = "cadeva per favore dimmi adesso"  # long: the bare name alone does not wake
+    result = end(fast, text)
+    assert not result.wake_word and "name" in result.keywords
+    assert grammar.snapshot()["gapped"]["wake"] == 1
+    fast.apply_config(config(max_word_gap_s=0.5).voice)
+    assert end(fast, text).wake_word
+
+
+def test_a_phrase_with_an_apostrophe_matches():
+    cfg = RoboEmotConfig.model_validate({"voice": {"keywords": {"it": {"yes": ["d'accordo"]}}}})
+    dec = Decoder([("d'accordo", 1.0)])
+    fast, grammar, _ = build(cfg, dec)
+    result = end(fast, "da cordo")
+    assert "yes" in result.keywords and result.answer == "yes"
+    assert grammar.snapshot()["rescued"]["yes"] == 1
+
+
+def test_a_grammar_yes_with_a_free_text_no_gives_no_answer():
+    dec = Decoder([("certo", 1.0)])
+    fast, _, _ = build(config(), dec)
+    result = end(fast, "no")
+    assert {"yes", "no"} <= result.keywords and result.answer is None
+
+
+def test_the_grammar_builds_once_the_model_vocabulary_is_available():
+    cfg = config()
+    dec = Decoder([("fermati", 1.0)])
+    loaded = {"it": False}
+
+    def missing(language, words):
+        return [] if loaded[language] else None
+
+    grammar = GrammarSpotter(cfg.voice.grammar, dec, missing, RATE)
+    spotter = KeywordSpotter(cfg.voice.keywords, None)
+    assert grammar.check(spotter, "it", AUDIO, "che") == frozenset()
+    assert grammar.snapshot()["skipped"]["no_vocabulary"] == 1 and grammar.snapshot()["builds"] == 0
+    loaded["it"] = True
+    assert grammar.check(spotter, "it", AUDIO, "che") == {"stop"}
+    snap = grammar.snapshot()
+    assert snap["builds"] == 1 and snap["passes"] == 1
+
+
+class FakeVosk:
+    """Stands in for the vosk module: models load from any folder, decodes return one word."""
+
+    def __init__(self):
+        self.grammars = []
+
+    def SetLogLevel(self, level):  # noqa: N802 (the vosk API)
+        pass
+
+    def Model(self, path):  # noqa: N802
+        return SimpleNamespace(path=path)
+
+    def KaldiRecognizer(self, model, rate, grammar=None):  # noqa: N802
+        self.grammars.append(grammar)
+        result = {"result": [{"word": "così", "conf": 1.0, "start": 0.1, "end": 0.4}]}
+        return SimpleNamespace(
+            SetWords=lambda on: None,
+            AcceptWaveform=lambda data: True,
+            FinalResult=lambda: json.dumps(result),
+        )
+
+
+def test_vosk_grammar_needs_a_runtime_graph(tmp_path, monkeypatch):
+    fake = FakeVosk()
+    monkeypatch.setitem(sys.modules, "vosk", fake)
+    small, big = tmp_path / "small", tmp_path / "big"
+    (small / "graph").mkdir(parents=True)
+    (big / "graph").mkdir(parents=True)
+    for name in ("HCLr.fst", "Gr.fst"):
+        (small / "graph" / name).write_bytes(b"")
+    (big / "graph" / "HCLG.fst").write_bytes(b"")
+    asr = VoskASR({"it": small, "en": big}, RATE)
+    assert asr.grammar_words("it", AUDIO, ["così"]) is None  # not loaded yet
+    asr.load(["it", "en"])
+    assert asr.grammar_words("it", AUDIO, ["così"]) == [HeardWord("così", 1.0, 0.1, 0.4)]
+    assert fake.grammars[-1] == '["così", "[unk]"]'  # accents reach Vosk unescaped
+    with pytest.raises(GrammarUnsupported):
+        asr.grammar_words("en", AUDIO, ["stop"])
 
 
 def test_listener_runs_the_pass_on_the_utterance_audio_and_reports_counts_only():

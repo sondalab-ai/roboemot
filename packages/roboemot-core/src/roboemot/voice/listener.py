@@ -404,7 +404,7 @@ class VoiceListener:
             rate,
             last_speech_stamp=ev.last_speech_stamp,
             endpoint_stamp=ev.endpoint_stamp,
-            grammar_audio=ev.audio,
+            grammar_audio=ev.audio[:last],  # pre-roll on, the end silence off
         )
         addressed = self._gate.decide(
             wake_word=fast.wake_word,

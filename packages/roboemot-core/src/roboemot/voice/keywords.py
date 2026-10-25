@@ -71,6 +71,8 @@ class KeywordSpotter:
         folded: dict[str, dict[str, tuple[str, ...]]] = {}
         oov: dict[str, int] = {}  # assigned once below: a report never reads a partial dict
         aliases = resolved.aliases_apply()
+        # The grammar lists render the name with accents kept (the vocabulary's spelling), the
+        # free-text lists with them stripped; ``usable`` checked the stripped form.
         spoken = fold(resolved.display)
         for language, ks in self._sets.items():
             usable = resolved.usable(language)
