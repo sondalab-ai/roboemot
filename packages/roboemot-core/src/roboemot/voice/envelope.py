@@ -82,6 +82,26 @@ class SpeechSentence:
     cut: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class TimelineView:
+    """One consistent read of the timeline for one reader tick, taken under one lock
+    acquisition (copy-on-read): a truncation or push cannot land between its parts.
+
+    ``sentence`` and ``level`` are at ``t``; ``frames`` start in ``[frames_from, t)``; ``events``
+    are stamped in ``[events_from, events_to)``; ``sentences`` holds copies of the sentences
+    those events name and of ``sentence``; ``sentence_dbfs`` is the level of every frame of
+    ``sentence`` when the reader asked for it (None otherwise)."""
+
+    t: float
+    last_cut: float | None
+    sentence: SpeechSentence | None
+    level: float | None
+    frames: tuple[tuple[float, float], ...]
+    events: tuple[SpeechEvent, ...]
+    sentences: dict[int, SpeechSentence]
+    sentence_dbfs: tuple[float, ...] | None = None
+
+
 @dataclass(slots=True)
 class _Writer:
     """State of the sentence being written: scalars and the sorted voiced energies only."""
@@ -341,16 +361,12 @@ class SpeechTimeline:
     def level_at(self, t: float) -> float | None:
         """dBFS of the frame playing at ``t``; None between sentences or outside the history."""
         with self._lock:
-            i = bisect.bisect_right(self._starts, t) - 1
-            if i >= 0 and t < self._ends[i]:
-                return self._dbfs[i]
-            return None
+            return self._level_at(t)
 
     def frames_between(self, t0: float, t1: float) -> list[tuple[float, float]]:
         """``(start_s, dbfs)`` of the frames that start in ``[t0, t1)``."""
         with self._lock:
-            a, b = bisect.bisect_left(self._starts, t0), bisect.bisect_left(self._starts, t1)
-            return list(zip(self._starts[a:b], self._dbfs[a:b], strict=True))
+            return self._frames_between(t0, t1)
 
     def events_between(self, t0: float, t1: float) -> list[SpeechEvent]:
         """Events stamped in ``[t0, t1)``, in time order."""
@@ -360,11 +376,8 @@ class SpeechTimeline:
     def sentence_at(self, t: float) -> SpeechSentence | None:
         """The sentence playing at ``t`` (its pause before it included); a copy."""
         with self._lock:
-            for s in reversed(self._sentences):
-                first = s.pad_start_s if s.pad_start_s is not None else s.start_s
-                if first <= t < s.end_s:
-                    return replace(s)
-            return None
+            s = self._sentence_at(t)
+            return replace(s) if s is not None else None
 
     def sentence(self, sentence_id: int) -> SpeechSentence | None:
         """The sentence ``sentence_id`` while it is in the history; a copy."""
@@ -373,6 +386,54 @@ class SpeechTimeline:
                 if s.id == sentence_id:
                     return replace(s)
             return None
+
+    def view(
+        self,
+        t: float,
+        *,
+        frames_from: float,
+        events_from: float,
+        events_to: float,
+        known: tuple[int, float] | None = None,
+    ) -> TimelineView:
+        """Everything a reader tick needs, under one lock (see :class:`TimelineView`).
+        ``sentence_dbfs`` is filled unless ``known`` is the current sentence's ``(id, end_s)``
+        (the reader already has its levels)."""
+        with self._lock:
+            now = self._sentence_at(t)
+            events = tuple(e for e in self._events if events_from <= e.at_s < events_to)
+            ids = {e.sentence for e in events} | ({now.id} if now is not None else set())
+            sentences = {s.id: replace(s) for s in self._sentences if s.id in ids}
+            dbfs = None
+            if now is not None and (now.id, now.end_s) != known:
+                dbfs = tuple(db for _, db in self._frames_between(now.start_s, now.end_s))
+            return TimelineView(
+                t,
+                self._last_cut,
+                sentences.get(now.id) if now is not None else None,
+                self._level_at(t),
+                tuple(self._frames_between(frames_from, t)),
+                events,
+                sentences,
+                dbfs,
+            )
+
+    def _level_at(self, t: float) -> float | None:
+        i = bisect.bisect_right(self._starts, t) - 1
+        if i >= 0 and t < self._ends[i]:
+            return self._dbfs[i]
+        return None
+
+    def _frames_between(self, t0: float, t1: float) -> list[tuple[float, float]]:
+        a, b = bisect.bisect_left(self._starts, t0), bisect.bisect_left(self._starts, t1)
+        return list(zip(self._starts[a:b], self._dbfs[a:b], strict=True))
+
+    def _sentence_at(self, t: float) -> SpeechSentence | None:
+        for s in reversed(self._sentences):
+            first = s.pad_start_s if s.pad_start_s is not None else s.start_s
+            if first <= t < s.end_s:
+                return s
+        return None
 
     def last_cut(self) -> float | None:
         """Clock stamp of the last barge-in truncation, None before any."""

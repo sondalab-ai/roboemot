@@ -148,31 +148,41 @@ CASES = {
 }
 
 
+# Cases the dev fallback dynamics (0.5 rad/s, 2 rad/s^2) clip until the robot's dynamics are
+# measured in M0 (design ZT 4): their lag check is an expected failure; when one passes, the test
+# fails and asks for the entry to be removed (strict). Visibility itself is never excused.
+EXPECTED_CLIPPED = {
+    ("lively", "accent", 0.0),
+    ("natural", "accent", 1.0),
+    ("lively", "accent", 1.0),
+    ("lively", "question_tilt", 1.0),
+}
+
+
 def visibility_cases():
-    for preset in PRESETS:
-        for role in CASES:
-            marks = ()
-            if preset == "lively" and role == "accent":
-                marks = pytest.mark.xfail(
-                    strict=True,
-                    reason="expected-clipped until M0: the dev fallback dynamics flatten the "
-                    "lively accent (design ZT 4); measured dynamics should make this pass",
-                )
-            yield pytest.param(preset, role, marks=marks, id=f"{preset}-{role}")
+    for arousal in (0.0, 1.0):
+        for preset in PRESETS:
+            for role in CASES:
+                yield pytest.param(preset, role, arousal, id=f"{preset}-{role}-arousal{arousal:g}")
 
 
-@pytest.mark.parametrize(("preset", "role"), list(visibility_cases()))
-def test_each_preset_stays_visible_under_the_fallback_dynamics(cfg, manifest, preset, role):
-    """Worst case: the preset's degrees with the default register, neutral arousal, awake, and the
-    accent at the largest mood gain, so a preset cannot go invisible silently. Visible: the
-    limiter output reaches VISIBLE_SHARE of the commanded peak and never trails the command by
-    more than LAG_SHARE of it. A higher arousal (up to 1 + arousal_gain) is clipped more."""
+@pytest.mark.parametrize(("preset", "role", "arousal"), list(visibility_cases()))
+def test_each_preset_stays_visible_under_the_fallback_dynamics(
+    cfg, manifest, preset, role, arousal
+):
+    """Each preset's role with the default register, awake, the accent at the largest mood gain,
+    at neutral arousal and at the largest arousal (1: x (1 + arousal_gain), under the
+    expression.max_amplitude cap), so a preset cannot go invisible silently.
+
+    Visible (always asserted): the limiter output reaches VISIBLE_SHARE of the commanded peak.
+    Not clipped: it never trails the command by more than LAG_SHARE of the peak; the cases in
+    EXPECTED_CLIPPED are expected to fail only that check until M0."""
     parts, question, mood = CASES[role]
     clock = Clock()
     tl = SpeechTimeline(cfg.speech_motion, clock)
     speak(tl, 1, 0.5, parts, question=question, mood=mood)
     sm = settings(cfg, preset, {"nod_share": 1.0})
-    r = make(cfg, manifest, tl, only(cfg, role), sm, mood=mood)
+    r = make(cfg, manifest, tl, only(cfg, role), sm, mood=mood, arousal=arousal)
     core = MotionCore(
         manifest.dofs,
         manifest.constraints,
@@ -182,23 +192,29 @@ def test_each_preset_stays_visible_under_the_fallback_dynamics(cfg, manifest, pr
     )
     ch, home = MAIN[role], manifest.dofs[MAIN[role]].home
     commanded = reached = lag = last = 0.0
-    t, n = 0.0, 0
+    t, next_tick = 0.0, 0.0
     while t < 6.0:
         clock.t = t
-        if n % round(TICK / LOOP_DT) == 0:
+        if t >= next_tick - 1e-9:
+            next_tick = round(next_tick + TICK, 6)
             for cmd in r.commands(t):
                 core.feed(cmd)
                 last = cmd.targets.get(ch, 0.0)
                 commanded = max(commanded, abs(last))
         pos = core.tick(t, LOOP_DT)[ch] - home
         reached, lag = max(reached, abs(pos)), max(lag, abs(pos - last))
-        t, n = round(t + LOOP_DT, 6), n + 1
+        t = round(t + LOOP_DT, 6)
     if getattr(sm.level(), f"{role}_deg") == 0:  # the subtle accent is off
         assert commanded == 0.0
         return
     assert commanded > 0
     assert reached >= VISIBLE_SHARE * commanded, (reached, commanded)
-    assert lag <= LAG_SHARE * commanded, (lag, commanded)
+    clipped = lag > LAG_SHARE * commanded
+    if (preset, role, arousal) in EXPECTED_CLIPPED:
+        if clipped:
+            pytest.xfail(f"expected-clipped until M0: lag {lag / commanded:.2f} of the peak")
+        pytest.fail("no longer clipped: remove the case from EXPECTED_CLIPPED")
+    assert not clipped, (lag, commanded)
 
 
 # ------------------------------------------------------------------ safety and priority
@@ -280,9 +296,147 @@ def test_no_timeline_moves_nothing(cfg, manifest):
     assert all(o is None for _, o in run(r, Clock(), 0.0, 1.0))
 
 
+def held_offsets(cfg, manifest, ticks_at, cut=None):
+    """Tick the renderer at the stamps ``ticks_at`` (a beat-only reply, loud from 1.5 s to
+    3.0 s), submit each command to an ``Arbiter`` and read what the arbiter holds every 5 ms;
+    ``cut`` truncates the timeline at that tick. Returns ``[(t, offset about home)]``."""
+    clock = Clock()
+    tl = SpeechTimeline(cfg.speech_motion, clock)
+    end = speak(tl, 1, 0.5, [(-26, 1.0), (-14, 1.5), (-26, 1.0)])
+    r = make(cfg, manifest, tl, only(cfg, "beat"))
+    arb = Arbiter(manifest.dofs, 0.0)
+    home = manifest.dofs["head.pitch"].home
+    held, ticks = [], list(ticks_at)
+    for a, b in zip(ticks, ticks[1:], strict=False):
+        clock.t = a
+        if cut is not None and a >= cut and tl.last_cut() is None:
+            tl.truncate(a)
+        for cmd in r.commands(a):
+            arb.submit(cmd)
+        sample = a
+        while sample < b:
+            held.append((sample, arb.step(sample)["head.pitch"] - home))
+            sample += 0.005
+    return held, end
+
+
+def jittered(dt, jitter, until, seed=0):
+    rng, t, out = random.Random(seed), 0.0, []
+    while t < until:
+        out.append(t)
+        t += dt + rng.uniform(0.0, jitter)
+    return out
+
+
+TICKINGS = {
+    "52ms": lambda until: jittered(0.052, 0.0, until),
+    "jittered": lambda until: jittered(0.05, 0.012, until, seed=3),
+    "50ms": lambda until: [round(i * TICK, 6) for i in range(int(until / TICK))],
+}
+
+
+@pytest.mark.parametrize("ticking", list(TICKINGS))
+def test_a_barge_in_leaves_no_residue_in_the_arbiter_for_any_tick_length(cfg, manifest, ticking):
+    """Regression (review ZT2, blocking): the fade ends at exactly zero in the arbiter within
+    fade_ms plus one tick, whatever the tick length, and nothing steps at command_ttl_s."""
+    ticks = TICKINGS[ticking](4.0)
+    cut = 2.2
+    held, _ = held_offsets(cfg, manifest, ticks, cut=cut)
+    cut_at = min(t for t in ticks if t >= cut)
+    tick = max(b - a for a, b in zip(ticks, ticks[1:], strict=False))
+    fade = cfg.speech_motion.fade_ms / 1000
+    assert max(abs(v) for t, v in held if t < cut_at) > math.radians(0.5)
+    late = [v for t, v in held if t > cut_at + fade + tick]
+    assert late and all(abs(v) < 1e-9 for v in late)
+
+
+@pytest.mark.parametrize("ticking", list(TICKINGS))
+def test_the_end_of_speech_leaves_no_residue_in_the_arbiter(cfg, manifest, ticking):
+    ticks = TICKINGS[ticking](6.0)
+    held, end = held_offsets(cfg, manifest, ticks)
+    moving = [t for t, v in held if abs(v) > 1e-9]
+    assert moving
+    last = max(moving)
+    tick = max(b - a for a, b in zip(ticks, ticks[1:], strict=False))
+    assert all(abs(v) < 1e-9 for t, v in held if t > last)
+    # it ended through the fade, not by a command expiring: the last offsets ramp down
+    tail = [abs(v) for t, v in held if last - 2 * tick <= t <= last]
+    assert tail == sorted(tail, reverse=True)
+    assert end < last
+
+
+def test_the_accent_stays_under_the_amplitude_cap(cfg, manifest):
+    """Review ZT2 should-fix 1: mood_gain is inside the expression.max_amplitude cap."""
+    clock = Clock()
+    tl = SpeechTimeline(cfg.speech_motion, clock)
+    speak(tl, 1, 0.5, EMPHASIS, mood="joy")
+    r = make(cfg, manifest, tl, only(cfg, "accent"), mood="joy", arousal=1.0)
+    r.set_register(register(motion_amplitude=2.0))
+    cap = cfg.expression.max_amplitude * math.radians(cfg.speech_motion.levels.lively.accent_deg)
+    got = peak(run(r, clock, 0.0, 4.0), "antenna_left")
+    assert got == pytest.approx(cap)
+
+
+def test_a_reload_that_removes_a_role_mid_tick_does_not_raise(cfg, manifest):
+    """Review ZT2 should-fix 5: the reload runs on another thread; a tick keeps the settings it
+    started with, so a gesture removed while its event is due cannot raise."""
+    clock = Clock()
+    tl = SpeechTimeline(cfg.speech_motion, clock)
+    speak(tl, 1, 0.5, EMPHASIS, mood="joy")
+    holder = {}
+
+    class Reloading:
+        def __getattr__(self, name):
+            return getattr(tl, name)
+
+        def view(self, *args, **kw):
+            v = tl.view(*args, **kw)
+            lead = max(f[-1][0] for f in cfg.speech_motion_map.accent.channels.values()) / 2
+            due = any(e.kind == "emphasis" and e.at_s - lead <= v.t for e in v.events)
+            if due and not holder.get("done"):  # the accent's peak is half way
+                holder["done"] = True
+                holder["r"].apply_config(cfg.speech_motion, SpeechMotionMap(), 2.0)
+            return v
+
+    r = make(cfg, manifest, tl, only(cfg, "accent"), mood="joy")
+    r.timeline = lambda: Reloading()
+    holder["r"] = r
+    run(r, clock, 0.0, 4.0)
+    assert r.snapshot()["accent"] == 1  # the tick that saw the event kept the old map
+
+
+def test_motors_off_means_no_write_whatever_the_layer_feeds(cfg, manifest):
+    """Review ZT2 should-fix 7: with runtime.pause_when_asleep off the app tick keeps feeding,
+    and the motion loop writes nothing while the platform holds the motors off."""
+    from roboemot.drivers import MockPoseDriver
+    from roboemot.motion import MotionLoop
+
+    driver = MockPoseDriver(home={n: d.home for n, d in manifest.dofs.items()})
+    loop = MotionLoop(manifest, driver, cfg, rate_hz=50, clock=lambda: 0.0)
+    loop.set_mode("active")
+    driver.mode = "limp"  # the platform puts the robot to sleep
+    clock = Clock()
+    tl = SpeechTimeline(cfg.speech_motion, clock)
+    speak(tl, 1, 0.5, LOUD_STRETCH)
+    r = make(cfg, manifest, tl, only(cfg, "beat"))
+    t, fed, n = 0.0, 0, None
+    while t < 3.0:
+        clock.t = t
+        for cmd in r.commands(t):
+            loop.feed(cmd)
+            fed += 1
+        loop.cycle(t, 0.05)
+        if loop.motors_off and n is None:
+            n = len(driver.writes)
+        t = round(t + 0.05, 6)
+    assert fed and loop.motors_off and n is not None and len(driver.writes) == n
+
+
 @pytest.mark.parametrize("preset", PRESETS)
 def test_no_command_ever_names_body_yaw_or_a_translation(cfg, manifest, preset):
-    """Property over random replies (seeded): every channel is an angle dof, never the body."""
+    """Property over random replies (seeded): every channel is an angle dof, never the body.
+    The shipped map cannot name the body (the stack refuses it), so this is a regression guard on
+    the shipped map and the renderer's output; refusing a bad map is tested separately."""
     allowed = {n for n, d in manifest.dofs.items() if d.kind == "angle"} - {"body_yaw"}
     rng = random.Random(preset)
     for _ in range(5):
@@ -493,3 +647,23 @@ def test_the_snapshot_holds_integers_only(cfg, manifest):
     run(r, clock, 0.0, 4.0)
     snap = r.snapshot()
     assert snap and all(type(v) is int for v in snap.values())
+
+
+def test_the_timeline_view_is_one_consistent_read(cfg):
+    """Review ZT2 should-fix 4: the per-tick read is one lock acquisition; it matches the single
+    readers and returns the sentence's levels only when the reader does not have them yet."""
+    clock = Clock()
+    tl = SpeechTimeline(cfg.speech_motion, clock)
+    speak(tl, 1, 0.5, EMPHASIS, mood="joy")
+    v = tl.view(1.0, frames_from=0.9, events_from=0.0, events_to=5.0)
+    assert v.sentence == tl.sentence_at(1.0) and v.level == tl.level_at(1.0)
+    assert list(v.frames) == tl.frames_between(0.9, 1.0)
+    assert list(v.events) == tl.events_between(0.0, 5.0)
+    assert set(v.sentences) == {1} and v.last_cut is None
+    assert v.sentence_dbfs is not None and len(v.sentence_dbfs) > 50
+    known = (v.sentence.id, v.sentence.end_s)
+    assert (
+        tl.view(1.0, frames_from=1.0, events_from=0, events_to=0, known=known).sentence_dbfs is None
+    )
+    tl.truncate(1.2)
+    assert tl.view(1.3, frames_from=1.0, events_from=0, events_to=5).last_cut == 1.2

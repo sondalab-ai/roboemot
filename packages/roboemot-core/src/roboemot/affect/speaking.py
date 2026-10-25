@@ -26,14 +26,20 @@ Amplitude, re-read every tick so a stricter register lowers it at once::
 
     preset degrees x register.motion_amplitude x circadian factor x (1 + arousal_gain x arousal)
 
-the accent also x ``mood_gain[mood]``; the product of the factors is capped by
+the accent also x ``mood_gain[mood]``; the product of the factors (mood included) is capped by
 ``expression.max_amplitude`` and each offset is clamped to the manifest range about home.
 
 Offsets ramp in and out over ``fade_ms`` (the arbiter cross-fades only on a change of winner, so
 an additive source that appeared or vanished would step). A barge-in (the timeline's last cut
 moved), a disabled layer or a circadian factor of 0 freezes the offsets and ramps them to zero.
-Channels the playing expression drives fade out the same way, so the two do not double up.
-Never moves the body yaw or a translation: the map is refused at load, and skipped here.
+The tick the ramp reaches zero sends one last command with every channel at 0, so the arbiter
+holds no residue until the previous command's TTL. Channels the playing expression drives fade
+out the same way, so the two do not double up. Never moves the body yaw or a translation: a map
+naming one is refused at load and by :meth:`SpeakingRenderer.apply_config`.
+
+Threads: the app tick calls everything except :meth:`SpeakingRenderer.apply_config`, which the
+config reload calls from the thread that changed the configuration. It swaps one immutable
+bundle; each tick reads the bundle once, so a tick never mixes old and new settings.
 """
 
 from __future__ import annotations
@@ -54,13 +60,14 @@ from ..manifest import Dof
 from ..motion.core import Command, Priority
 from ..motion.curves import min_jerk
 from ..motion.primitives import Primitive
-from ..voice.envelope import SpeechEvent, SpeechSentence, SpeechTimeline
+from ..voice.envelope import SpeechEvent, SpeechTimeline, TimelineView
 from . import AffectState
 from .expression import build_primitive
 from .register import ActiveRegister
 
 SOURCE = "speaking"
 MS_PER_S = 1000.0
+GAIN_EPSILON = 1e-9  # a fade gain below this is zero (float rounding of the per-tick steps)
 GESTURES = ("phrase_nod", "question_tilt", "accent", "breath")
 ROLE_DEGREES = {
     "phrase_nod": "phrase_nod_deg",
@@ -80,13 +87,33 @@ class _Shape:
     hold_at: float | None
 
 
+@dataclass(frozen=True)
+class _Settings:
+    """Everything :meth:`SpeakingRenderer.apply_config` sets, swapped as one object."""
+
+    cfg: SpeechMotionConfig
+    max_amplitude: float
+    beat: dict[str, int]
+    sway: dict[str, int]
+    shapes: dict[str, _Shape | None]
+
+    def lead(self, role: str) -> float:
+        """How long before its event a gesture starts: its peak time (the tilt: its hold)."""
+        shape = self.shapes.get(role)
+        if shape is None or role == "phrase_nod":
+            return 0.0
+        return shape.hold_at if shape.hold_at is not None else shape.peak_t
+
+
 @dataclass
 class _Play:
-    """One gesture playing, on the timeline clock; ``gain`` is radians per unit of the shape."""
+    """One gesture playing, on the timeline clock; ``gain`` is radians per unit of the shape and
+    ``mood`` the accent's mood gain (1 for the others), applied under the amplitude cap."""
 
     shape: _Shape
     start: float
     gain: float
+    mood: float = 1.0
     released: float | None = None
 
     def at(self, t: float) -> float:
@@ -151,8 +178,7 @@ class SpeakingRenderer:
     ``timeline`` returns the speech timeline, or None while there is no speech output (it is
     built after assembly, so it is read lazily). ``listening`` says whether the listener has an
     utterance in progress; ``ducked`` returns the channels the playing expression drives.
-    ``circadian_factor`` is a hook like the expression renderer's. Single-threaded: all calls
-    come from the app loop.
+    ``circadian_factor`` is a hook like the expression renderer's.
     """
 
     def __init__(
@@ -179,6 +205,7 @@ class SpeakingRenderer:
         self._last_accent = -math.inf
         self._norm_key: tuple[int, float] | None = None
         self._norm: tuple[float, float] | None = None
+        self._sent: frozenset[str] = frozenset()  # channels of the last command sent
         self._s = _State()
         self.counts = dict.fromkeys((*GESTURES, "late", "skipped", "cuts"), 0)
         self.apply_config(cfg, speech_map, max_amplitude)
@@ -188,21 +215,29 @@ class SpeakingRenderer:
     def apply_config(
         self, cfg: SpeechMotionConfig, speech_map: SpeechMotionMap, max_amplitude: float
     ) -> None:
-        """Hot reload: the preset and every field apply from the next tick; a gesture already
-        playing keeps its shape. ValueError when the map names the body yaw or a translation."""
+        """Hot reload, from any thread: the preset and every field apply from the next tick; a
+        gesture already playing keeps its shape. ValueError, and the old settings kept, when the
+        map names the body yaw or a translation."""
         for role, names in speech_map.channels().items():
             for name in names:
                 dof = self.dofs.get(name)
                 if name == self.body_yaw or (dof is not None and dof.kind != "angle"):
                     raise ValueError(f"speech_motion_map.{role}: {name!r} may not move")
-        self.cfg, self.max_amplitude = cfg, max_amplitude
-        self._beat_signs = self._signs(speech_map.beat)
-        self._sway_signs = self._signs(speech_map.sway)
-        self._shapes = {
-            role: self._shape(role, entry)
-            for role in GESTURES
-            if (entry := getattr(speech_map, role)) is not None
-        }
+        self._b = _Settings(
+            cfg,
+            max_amplitude,
+            self._signs(speech_map.beat),
+            self._signs(speech_map.sway),
+            {
+                role: self._shape(role, entry)
+                for role in GESTURES
+                if (entry := getattr(speech_map, role)) is not None
+            },
+        )
+
+    @property
+    def cfg(self) -> SpeechMotionConfig:
+        return self._b.cfg
 
     def set_register(self, register: ActiveRegister) -> None:
         """Take the register in effect now; it scales the very next offsets."""
@@ -226,44 +261,46 @@ class SpeakingRenderer:
         hold = entry.hold_at_s if isinstance(entry, SpeechTiltEntry) else None
         return _Shape(prim, peak, k.t, hold)
 
-    def scale(self, level: SpeechMotionLevel | None = None) -> float:
+    def scale(self, b: _Settings | None = None) -> float:
         """The amplitude factor now: register x circadian x arousal, capped."""
-        level = level or self.cfg.level()
-        arousal = max(0.0, 1 + level.arousal_gain * self._arousal)
+        b = b or self._b
+        arousal = max(0.0, 1 + b.cfg.level().arousal_gain * self._arousal)
         raw = self._motion_amplitude * self.circadian_factor() * arousal
-        return max(0.0, min(self.max_amplitude, raw))
+        return max(0.0, min(b.max_amplitude, raw))
 
     # ------------------------------------------------------------------ the tick
 
     def commands(self, now: float) -> list[Command]:
         """The speaking offset for this tick, to feed to the motion loop (empty when idle)."""
-        cfg, s = self.cfg, self._s
+        b, s = self._b, self._s
+        cfg = b.cfg
         dt = 0.0 if self._last_now is None else max(0.0, now - self._last_now)
         self._last_now = now
         tl = self.timeline()
         t = now + cfg.latency_ms / MS_PER_S
-        cut = tl.last_cut() if tl is not None else None
+        view = self._view(tl, t, b) if tl is not None else None
+        cut = view.last_cut if view is not None else None
         if cut != self._cut_seen:
             self._cut_seen = cut
             if cut is not None:
                 self.counts["cuts"] += 1
+                self._last_accent = -math.inf
                 self._freeze()
-        level = cfg.level()
-        live = cfg.enabled and tl is not None and self.scale(level) > 0
+        live = cfg.enabled and view is not None and self.scale(b) > 0
         if not live:
             self._freeze()
-        if s.frozen is not None or tl is None:
+        if s.frozen is not None or view is None:
             raw, active = dict(s.frozen or {}), False
         else:
-            raw, active = self._render(tl, t, level)
+            raw, active = self._render(view, b)
         fade_s = cfg.fade_ms / MS_PER_S
         step = dt / fade_s if fade_s > 0 else 1.0
         target = 1.0 if active else 0.0
         s.gain = min(target, s.gain + step) if target > s.gain else max(target, s.gain - step)
-        if s.gain <= 0:
+        if s.gain <= GAIN_EPSILON:
             self._s = _State()
             self._plays.clear()
-            return []
+            return self._emit(now, cfg, {})  # a last zero for every channel still held
         s.raw = raw
         ducked = self.ducked()
         w = min_jerk(s.gain)
@@ -273,18 +310,37 @@ class SpeakingRenderer:
             d = max(0.0, d - step) if n in ducked else min(1.0, d + step)
             s.duck[n] = d
             out[n] = self._clamp(n, v * w * d)
-        if not out:
+        return self._emit(now, cfg, out)
+
+    def _emit(self, now: float, cfg: SpeechMotionConfig, out: dict[str, float]) -> list[Command]:
+        """The command for ``out``, with 0 for a channel the previous command set and this one
+        does not: the arbiter keeps a source's last command until it expires, so a channel left
+        out would hold its last offset for the TTL and then step."""
+        targets = dict.fromkeys(self._sent - set(out), 0.0) | out
+        self._sent = frozenset(out)
+        if not targets:
             return []
         return [
             Command(
                 SOURCE,
                 Priority.EXPRESSION,
-                out,
+                targets,
                 now,
                 expires=now + cfg.command_ttl_s,
                 additive=True,
             )
         ]
+
+    def _view(self, tl: SpeechTimeline, t: float, b: _Settings) -> TimelineView:
+        s, late = self._s, b.cfg.event_max_late_s
+        lead = max((b.lead(role) for role in b.shapes), default=0.0)
+        return tl.view(
+            t,
+            frames_from=s.beat_t if s.beat_t is not None and s.beat_t <= t else t,
+            events_from=t - late,
+            events_to=t + lead + b.cfg.envelope_frame_ms / MS_PER_S,
+            known=self._norm_key,
+        )
 
     def _freeze(self) -> None:
         """Stop following the timeline: drop the gestures, fade the last offsets out."""
@@ -293,39 +349,37 @@ class SpeakingRenderer:
             s.frozen = dict(s.raw)
         self._plays.clear()
 
-    def _render(
-        self, tl: SpeechTimeline, t: float, level: SpeechMotionLevel
-    ) -> tuple[dict[str, float], bool]:
-        """The offsets at timeline time ``t`` before the fade, and whether speech is active."""
-        sentence = tl.sentence_at(t)
-        self._events(tl, t, level)
+    def _render(self, view: TimelineView, b: _Settings) -> tuple[dict[str, float], bool]:
+        """The offsets at timeline time ``view.t`` before the fade, and whether speech is
+        active."""
+        t, level = view.t, b.cfg.level()
+        self._events(view, b, level)
+        k = self.scale(b)
         raw: dict[str, float] = {}
 
         def add(name: str, value: float) -> None:
             raw[name] = raw.get(name, 0.0) + value
 
-        x = self._beat_step(tl, t, sentence)
-        for n, sign in self._beat_signs.items():
-            add(n, sign * math.radians(level.beat_deg) * x)
-        if self._sway_signs:
-            want = self._s.side * math.radians(level.sway_deg) if sentence is not None else 0.0
-            tau = self.cfg.sway_smoothing_ms / MS_PER_S
-            dt = self._sway_dt(t)
-            y = self._s.sway.step(want, dt, tau, tau)
-            for n, sign in self._sway_signs.items():
-                add(n, sign * y)
+        x = self._beat_step(view, b)
+        for n, sign in b.beat.items():
+            add(n, sign * math.radians(level.beat_deg) * x * k)
+        if b.sway:
+            want = self._s.side * math.radians(level.sway_deg) if view.sentence else 0.0
+            tau = b.cfg.sway_smoothing_ms / MS_PER_S
+            y = self._s.sway.step(want, self._sway_dt(t), tau, tau)
+            for n, sign in b.sway.items():
+                add(n, sign * y * k)
         for role, play in list(self._plays.items()):
-            if play.shape.hold_at is not None and play.released is None:
-                held = play.held_for(t)
-                if self.listening() or held >= self.cfg.question_hold_s:
-                    play.released = t
+            holding = play.shape.hold_at is not None and play.released is None
+            if holding and (self.listening() or play.held_for(t) >= b.cfg.question_hold_s):
+                play.released = t
             if play.done(t):
                 del self._plays[role]
                 continue
+            factor = min(b.max_amplitude, k * play.mood)  # mood under the cap too
             for n, v in play.offsets(t).items():
-                add(n, v)
-        k = self.scale(level)
-        return {n: v * k for n, v in raw.items()}, sentence is not None or bool(self._plays)
+                add(n, v * factor)
+        return raw, view.sentence is not None or bool(self._plays)
 
     def _sway_dt(self, t: float) -> float:
         last, self._s.sway_t = self._s.sway_t, t
@@ -333,39 +387,41 @@ class SpeakingRenderer:
 
     # ------------------------------------------------------------------ beat
 
-    def _beat_step(self, tl: SpeechTimeline, t: float, sentence: SpeechSentence | None) -> float:
+    def _beat_step(self, view: TimelineView, b: _Settings) -> float:
         """Advance the beat smoother over the frames since the last tick, at frame rate."""
-        s, cfg = self._s, self.cfg
+        s, cfg, t = self._s, b.cfg, view.t
         rise, fall = cfg.attack_ms / MS_PER_S, cfg.release_ms / MS_PER_S
         if s.beat_t is None or t < s.beat_t:
             s.beat_t = t
-        norm = self._normaliser(tl, sentence)
+        norm = self._normaliser(view, cfg)
         cur = s.beat_t
-        for start, db in tl.frames_between(s.beat_t, t):
+        for start, db in view.frames:
+            if start < cur:
+                continue
             s.beat.step(s.x, start - cur, rise, fall)
             cur, s.x = start, self._normalise(db, norm)
         y = s.beat.step(s.x, t - cur, rise, fall)
         s.beat_t = t
-        if tl.level_at(t) is None:
+        if view.level is None:
             s.x = 0.0
         return y
 
     def _normaliser(
-        self, tl: SpeechTimeline, sentence: SpeechSentence | None
+        self, view: TimelineView, cfg: SpeechMotionConfig
     ) -> tuple[float, float] | None:
         """``(median, span)`` of the sentence's voiced frames, cached while it does not grow."""
+        sentence = view.sentence
         if sentence is None:
             return None
         key = (sentence.id, sentence.end_s)
-        if key != self._norm_key:
-            frames = tl.frames_between(sentence.start_s, sentence.end_s)
-            voiced = sorted(db for _, db in frames if db >= self.cfg.silence_dbfs)
+        if key != self._norm_key and view.sentence_dbfs is not None:
+            voiced = sorted(db for db in view.sentence_dbfs if db >= cfg.silence_dbfs)
             self._norm_key, self._norm = key, None
             if voiced:
                 n = len(voiced)
                 mid = n // 2
                 median = voiced[mid] if n % 2 else (voiced[mid - 1] + voiced[mid]) / 2
-                self._norm = (median, max(voiced[-1] - median, self.cfg.emphasis_db))
+                self._norm = (median, max(voiced[-1] - median, cfg.emphasis_db))
         return self._norm
 
     @staticmethod
@@ -377,32 +433,26 @@ class SpeakingRenderer:
 
     # ------------------------------------------------------------------ gestures
 
-    def _events(self, tl: SpeechTimeline, t: float, level: SpeechMotionLevel) -> None:
-        late = self.cfg.event_max_late_s
-        leads = [sh.hold_at or sh.peak_t for sh in self._shapes.values() if sh is not None]
-        horizon = t + max(leads, default=0.0)
+    def _events(self, view: TimelineView, b: _Settings, level: SpeechMotionLevel) -> None:
+        t, late = view.t, b.cfg.event_max_late_s
         self._handled = {k: at for k, at in self._handled.items() if at >= t - late}
-        for e in tl.events_between(t - late, horizon + self._frame_s()):
+        for e in view.events:
             if e.kind in ("phrase_gap", "sentence_start") and e.at_s <= t:
                 self._once(("sway", e), e, self._flip)
-            role, lead, sentence = self._role(tl, e)
+            role = self._role(view, b, e)
             if role is None:
                 continue
             key = (role, e)
-            if key in self._handled or t < e.at_s - lead:
+            if key in self._handled or t < e.at_s - b.lead(role):
                 continue
             deadline = e.at_s + late
             if e.kind == "phrase_gap":
                 deadline = min(deadline, e.until_s)
+            self._handled[key] = e.at_s
             if t > deadline:
-                self._handled[key] = e.at_s
                 self.counts["late"] += 1
                 continue
-            self._handled[key] = e.at_s
-            self._start(role, e, t, level, sentence)
-
-    def _frame_s(self) -> float:
-        return self.cfg.envelope_frame_ms / MS_PER_S
+            self._start(role, e, t, b, level, view)
 
     def _once(self, key: tuple, e: SpeechEvent, action: Callable[[], None]) -> None:
         if key not in self._handled:
@@ -412,13 +462,12 @@ class SpeakingRenderer:
     def _flip(self) -> None:
         self._s.side = -self._s.side
 
-    def _role(
-        self, tl: SpeechTimeline, e: SpeechEvent
-    ) -> tuple[str | None, float, SpeechSentence | None]:
-        """The gesture ``e`` starts, how long before its stamp, and its sentence."""
-        sentence = tl.sentence(e.sentence)
+    @staticmethod
+    def _role(view: TimelineView, b: _Settings, e: SpeechEvent) -> str | None:
+        """The gesture ``e`` starts (None: none, or the map has no shape for it)."""
+        sentence = view.sentences.get(e.sentence)
         if sentence is None or sentence.cut:
-            return None, 0.0, None
+            return None
         role: str | None = None
         if e.kind == "phrase_gap":
             role = "phrase_nod"
@@ -428,38 +477,36 @@ class SpeakingRenderer:
             role = "breath"
         elif e.kind == "emphasis":
             role = "accent"
-        shape = self._shapes.get(role) if role is not None else None
-        if shape is None:
-            return None, 0.0, None
-        lead = 0.0 if role == "phrase_nod" else (shape.hold_at or shape.peak_t)
-        return role, lead, sentence
+        if role is None or b.shapes.get(role) is None:
+            return None
+        return role
 
     def _start(
         self,
         role: str,
         e: SpeechEvent,
         t: float,
+        b: _Settings,
         level: SpeechMotionLevel,
-        sentence: SpeechSentence | None,
+        view: TimelineView,
     ) -> None:
-        shape = self._shapes[role]
+        shape = b.shapes.get(role)
         deg = getattr(level, ROLE_DEGREES[role])
         if shape is None or deg <= 0:
             return
-        if role == "accent":
-            if e.at_s - self._last_accent < level.emphasis_min_interval_s:
-                return
-            self._last_accent = e.at_s
+        if role == "accent" and e.at_s - self._last_accent < level.emphasis_min_interval_s:
+            return
         if role == "phrase_nod" and not self._chosen(e, level.nod_share):
             return
         if role in self._plays:
             self.counts["skipped"] += 1
             return
-        gain = math.radians(deg) / shape.peak
+        mood = 1.0
         if role == "accent":
-            mood = sentence.mood if sentence is not None else None
-            gain *= self.cfg.mood_gain.get(mood, 1.0) if mood is not None else 1.0
-        self._plays[role] = _Play(shape, t, gain)
+            self._last_accent = e.at_s
+            label = view.sentences[e.sentence].mood
+            mood = b.cfg.mood_gain.get(label, 1.0) if label is not None else 1.0
+        self._plays[role] = _Play(shape, t, math.radians(deg) / shape.peak, mood)
         self.counts[role] += 1
 
     @staticmethod
@@ -472,11 +519,6 @@ class SpeakingRenderer:
     def _clamp(self, name: str, offset: float) -> float:
         dof = self.dofs[name]
         return max(dof.min - dof.home, min(dof.max - dof.home, offset))
-
-    @property
-    def moving(self) -> bool:
-        """Whether the layer is feeding offsets right now."""
-        return self._s.gain > 0
 
     def snapshot(self) -> dict[str, int]:
         """Counts since start for the debug report (SPEC 12A): gestures per role, late events,
