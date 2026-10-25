@@ -234,7 +234,7 @@ def test_a_joy_expression_moves_the_antennas_on_the_simulated_robot(loop):
 
     manifest = loop.manifest
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw=None)
     cfg = stack.effective()
     home = {n: manifest.dofs[n].home for n in ("antenna_right", "antenna_left")}
     _hold(loop, home, 8.0)
@@ -268,7 +268,7 @@ def test_a_nod_gesture_moves_the_head_pitch_on_the_simulated_robot(loop):
 
     manifest = loop.manifest
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw=None)
     cfg = stack.effective()
     home = {"head.pitch": manifest.dofs["head.pitch"].home}
     _hold(loop, home, 8.0)
@@ -594,7 +594,7 @@ def test_the_rest_posture_lowers_the_head_and_droops_the_antennas_on_the_simulat
 
     manifest = loop.manifest
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw=None)
     cfg = stack.effective()
     names = ("head.pitch", "antenna_right", "antenna_left")
     _hold(loop, {n: manifest.dofs[n].home for n in names}, 8.0)
@@ -697,16 +697,29 @@ def test_the_speaking_motion_moves_the_head_pitch_with_a_canned_reply(loop):
     renderer.set_register(resolve_register([Person({})], cfg.register, cfg.persona))
     renderer.set_affect(AffectState(0.5, 0.0, "joy", 0.5))
     commanded, measured = [], []
+    others = ("head.roll", "antenna_left")  # the tilt and the accent: a sim baseline for signs
+    start_pose = loop.driver.read_state()
+    other_cmd: dict[str, list[float]] = {n: [] for n in others}
+    other_meas: dict[str, list[float]] = {n: [] for n in others}
     end = time.monotonic() + 12.0
     while time.monotonic() < end:
         now = time.monotonic()
-        offset = 0.0
+        targets: dict[str, float] = {}
         for cmd in renderer.commands(now):
             loop.feed(cmd)
-            offset = cmd.targets.get("head.pitch", 0.0)
-        commanded.append(offset)
-        measured.append(loop.driver.read_state()["head.pitch"] - settled)
+            targets = cmd.targets
+        commanded.append(targets.get("head.pitch", 0.0))
+        state = loop.driver.read_state()
+        measured.append(state["head.pitch"] - settled)
+        for n in others:
+            other_cmd[n].append(targets.get(n, 0.0))
+            other_meas[n].append(state[n] - start_pose[n])
         time.sleep(0.05)
+    for n in others:
+        peak_cmd = max(other_cmd[n], key=abs)
+        peak_meas = max((m * math.copysign(1, peak_cmd) for m in other_meas[n]), default=0.0)
+        print(f"\n{n}: commanded peak {peak_cmd:+.4f} rad, measured {peak_meas:+.4f} rad that way")
+        assert peak_cmd != 0 and peak_meas >= 0.3 * abs(peak_cmd), n
     snap = renderer.snapshot()
     assert snap["phrase_nod"] >= 1 and snap["question_tilt"] == 1 and snap["breath"] >= 1
     down, up = max(commanded), min(commanded)
@@ -765,7 +778,7 @@ def test_our_own_gestures_and_extreme_motion_never_look_like_external_control(lo
 
     manifest = loop.manifest
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels)
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw=None)
     cfg = stack.effective()
     worst = _watch_tracking_error(loop)
     _hold(loop, {n: d.home for n, d in manifest.dofs.items() if d.measured}, 6.0)
