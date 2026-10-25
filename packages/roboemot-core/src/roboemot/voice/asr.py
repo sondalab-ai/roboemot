@@ -8,6 +8,9 @@ finds a pause by itself (Vosk does) must keep accumulating: its text is everythi
 
 ``VoskASR`` keeps one Vosk model per language, loaded by ``load`` (the app does this at start so
 the first utterance does not pay for it) and one recognizer at a time, created by ``start``.
+``grammar_words`` decodes a finished piece of audio with a throwaway recognizer limited to a
+grammar (the grammar pass, ``roboemot.voice.grammar``); it shares the loaded model, not the
+streaming recognizer.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ import numpy as np
 INT16_MAX = 32767
 VOSK_QUIET = -1
 VOSK_NO_WORD = -1  # vosk_model_find_word: the word is not in the vocabulary
+VOSK_UNKNOWN = "[unk]"  # Vosk's grammar token for any word outside the grammar
 
 
 @dataclass(frozen=True)
@@ -125,6 +129,22 @@ class VoskASR:
         if model is None:
             return None
         return [w for w in words if model.vosk_model_find_word(w) == VOSK_NO_WORD]
+
+    def grammar_words(
+        self, language: str, samples: np.ndarray, phrases: list[str]
+    ) -> list[tuple[str, float]] | None:
+        """``samples`` decoded with a recognizer limited to ``phrases`` (plus the unknown-word
+        filler): the words heard with their confidence. None while that model is not loaded.
+        Every phrase must be in the vocabulary (Vosk warns, naming the word, on one that is not)."""
+        model = self._models.get(language)
+        if model is None:
+            return None
+        grammar = json.dumps([*phrases, VOSK_UNKNOWN], ensure_ascii=False)
+        rec = self._vosk.KaldiRecognizer(model, self.rate_hz, grammar)
+        rec.SetWords(True)
+        rec.AcceptWaveform(to_int16(samples))
+        words = json.loads(rec.FinalResult()).get("result", [])
+        return [(w["word"], float(w["conf"])) for w in words]
 
     def start(self, language: str) -> None:
         self.load([language])

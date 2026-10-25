@@ -2268,6 +2268,40 @@ class BargeInConfig(Strict):
         return self
 
 
+class GrammarConfig(Strict):
+    """The grammar pass of wake and keyword spotting (SPEC 8 stage 3)."""
+
+    enabled: bool = param(
+        True,
+        "At the end of each utterance, decode its audio a second time with a recognizer limited "
+        "to a grammar: the voice.keywords phrases of its language (wake phrases, name templates "
+        "rendered with the robot's name, the name and its aliases, stop, yes, no, greetings), the "
+        "words of the free-text result as competitors, and the unknown-word filler. A phrase "
+        "it hears confidently counts like one found in the final text (it only adds: the "
+        "free-text match stays). Phrases with a word missing from the recognizer vocabulary are "
+        "left out and counted in the debug report",
+    )
+    wake_min_word_conf: float = param(
+        0.9,
+        "A wake phrase, the robot's name or a name alias heard by the grammar pass counts only "
+        "when every one of its words has at least this recognizer confidence",
+        ge=0, le=1,
+    )  # fmt: skip
+    keyword_min_word_conf: float = param(
+        0.9,
+        "A stop, yes, no or greeting phrase heard by the grammar pass counts only when every one "
+        "of its words has at least this recognizer confidence",
+        ge=0, le=1,
+    )  # fmt: skip
+    max_competitor_words: int = param(
+        64,
+        "Most distinct free-text words added to the grammar as competitors. Without competitors "
+        "the small Italian model forces ordinary speech onto the keywords (its unknown-word "
+        "filler is weak), so an utterance without a usable free-text word gets no grammar pass",
+        ge=1, le=512,
+    )  # fmt: skip
+
+
 class VoiceConfig(Strict):
     enabled: bool = param(
         False,
@@ -2494,6 +2528,9 @@ class VoiceConfig(Strict):
         "inflections you want)",
     )
     fastpath: FastpathConfig = param({}, "Speech fast path: keywords, wake word window, prosody")
+    grammar: GrammarConfig = param(
+        {}, "Grammar pass: wake phrases and keywords heard by a grammar recognizer (SPEC 8)"
+    )
     barge_in: BargeInConfig = param({}, "Barge-in: user speech over the robot's voice (SPEC 8)")
 
     @field_validator("voices")
