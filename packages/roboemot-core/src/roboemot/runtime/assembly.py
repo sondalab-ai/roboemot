@@ -259,16 +259,17 @@ def assemble(
     # One lock for the vision pump and the idle light reader: the camera is read by one
     # thread at a time.
     source = LockedSource(host.make_frame_source(session, loop.driver.read_state))
-    with priority.lower_new_threads(priority.VISION_MODELS):  # their ONNX Runtime pools (SPEC 13)
-        perception = host.perception = open_perception(
-            cfg,
-            bus,
-            source,
-            profile=manifest.robot.profile,
-            camera_model=source.camera_model,
-            load_stages=host.load_vision_stages,
-            frame_spec=frame,
-        )
+    perception = host.perception = open_perception(
+        cfg,
+        bus,
+        source,
+        profile=manifest.robot.profile,
+        camera_model=source.camera_model,
+        load_stages=lambda c, profile: priority.run_lowered(  # their ONNX Runtime pools, SPEC 13
+            priority.VISION_MODELS, host.load_vision_stages, c, profile
+        ),
+        frame_spec=frame,
+    )
     if perception.pipeline is not None:  # light from the frames vision already captures
         perception.pipeline.light_tap = circ.sampler.offer
     light_reader = host.light_reader = IdleLightReader(circ.sampler, source)

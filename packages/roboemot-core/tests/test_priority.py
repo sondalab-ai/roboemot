@@ -21,13 +21,11 @@ DEFAULTS = RoboEmotConfig().runtime
 def fake(monkeypatch):
     """Linux-like seams: every ``renice`` is recorded, thread ids come from a counter."""
     calls: list[tuple[int, int]] = []
-    state = {"tasks": {1, 2}, "next": 100}
     monkeypatch.setattr(priority, "is_supported", lambda: True)
     monkeypatch.setattr(priority, "renice", lambda tid, inc: calls.append((tid, inc)))
-    monkeypatch.setattr(priority, "tasks", lambda: set(state["tasks"]))
     monkeypatch.setattr(priority, "native_id", threading.get_native_id)
     priority.configure(DEFAULTS.background_nice, DEFAULTS.background_threads)
-    yield calls, state
+    yield calls
     priority.configure(0, ())
 
 
@@ -62,7 +60,7 @@ def test_defaults_list_vision_and_not_the_real_time_threads():
 
 
 def test_only_the_listed_threads_are_lowered(fake):
-    calls, _ = fake
+    calls = fake
     vision = run_in_thread("roboemot-vision")
     run_in_thread("roboemot-listener")
     run_in_thread("roboemot-audio")
@@ -72,7 +70,7 @@ def test_only_the_listed_threads_are_lowered(fake):
 
 
 def test_the_vision_runner_thread_lowers_itself(fake):
-    calls, _ = fake
+    calls = fake
 
     class Module:
         name = "m"
@@ -93,23 +91,37 @@ def test_the_vision_runner_thread_lowers_itself(fake):
     assert len(calls) == 1
 
 
-def test_threads_created_while_the_models_load_are_lowered_under_their_role(fake):
-    calls, state = fake
-    with priority.lower_new_threads(priority.VISION_MODELS):
-        state["tasks"] |= {7, 8}  # the ONNX Runtime pools of two sessions
-    assert calls == [(7, 5), (8, 5)]
-    with priority.lower_new_threads("not-listed"):
-        state["tasks"] |= {9}
-    assert calls == [(7, 5), (8, 5)]
-    assert priority.snapshot()["lowered"] == {"vision-models": 2}
+def test_the_models_load_on_a_lowered_thread_named_after_their_role(fake):
+    calls = fake
+    seen: list[tuple[str, int]] = []
+
+    def load(x):
+        seen.append((threading.current_thread().name, threading.get_native_id()))
+        return x * 2
+
+    assert priority.run_lowered(priority.VISION_MODELS, load, 21) == 42
+    ((name, tid),) = seen
+    assert name == "vision-models" and calls == [(tid, 5)]
+    assert priority.snapshot()["lowered"] == {"vision-models": 1}
+
+    def boom():
+        raise ValueError("model")
+
+    with pytest.raises(ValueError):
+        priority.run_lowered(priority.VISION_MODELS, boom)
+    assert priority.run_lowered("not-listed", lambda: threading.current_thread().name) == (
+        threading.current_thread().name
+    )
+    assert len(calls) == 2
 
 
 def test_no_op_off_linux_or_at_zero(fake, monkeypatch):
-    calls, state = fake
+    calls = fake
     monkeypatch.setattr(priority, "is_supported", lambda: False)
     run_in_thread("roboemot-vision")
-    with priority.lower_new_threads(priority.VISION_MODELS):
-        state["tasks"] |= {7}
+    assert priority.run_lowered(priority.VISION_MODELS, threading.get_native_id) == (
+        threading.get_native_id()
+    )  # inline: nothing to lower
     monkeypatch.setattr(priority, "is_supported", lambda: True)
     priority.configure(0, DEFAULTS.background_threads)
     run_in_thread("roboemot-vision")
@@ -144,5 +156,30 @@ def test_linux_an_unprivileged_thread_can_raise_its_own_nice():
         assert seen == [min(priority.NICE_MAX, main + 3)]
         assert os.getpriority(os.PRIO_PROCESS, threading.get_native_id()) == main
         assert priority.snapshot()["lowered"] == {"probe": 1}
+    finally:
+        priority.configure(0, ())
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="per-thread nice is Linux only")
+def test_linux_threads_started_by_a_lowered_thread_inherit_its_nice():
+    """What the ONNX Runtime pools of the vision models rely on (run_lowered)."""
+    main = os.getpriority(os.PRIO_PROCESS, threading.get_native_id())
+    priority.configure(3, [priority.VISION_MODELS])
+    try:
+
+        def start_child() -> int:
+            seen: list[int] = []
+            child = threading.Thread(
+                target=lambda: seen.append(
+                    os.getpriority(os.PRIO_PROCESS, threading.get_native_id())
+                )
+            )
+            child.start()
+            child.join()
+            return seen[0]
+
+        assert priority.run_lowered(priority.VISION_MODELS, start_child) == min(
+            priority.NICE_MAX, main + 3
+        )
     finally:
         priority.configure(0, ())
