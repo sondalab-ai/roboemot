@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import pytest
+from roboemot.affect.clips import load_clip_library
 from roboemot.config import ConfigError, ConfigStack
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.manifest import load_manifest
@@ -20,7 +21,9 @@ def test_defaults_are_the_library_rates():
 def test_the_reachy_manifest_keeps_its_50_hz_stream():
     manifest = load_manifest(REACHY, allow_unmeasured_dynamics=True)
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw=None)
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour, manifest.channels, load_clip_library(manifest), body_yaw=None
+    )
     motion = stack.effective().motion
     assert motion.arbiter.loop_hz == 50.0
     assert motion.app_tick_hz == 20.0

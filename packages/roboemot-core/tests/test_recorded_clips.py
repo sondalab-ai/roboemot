@@ -60,12 +60,14 @@ def state(label="joy", intensity=0.5, impulse=0) -> AffectState:
     return AffectState(0.0, 0.0, label, intensity, impulse)
 
 
-def adult():
-    return resolve_register([Person("adult", "declared", {})], DEFAULTS.register, DEFAULTS.persona)
+def plain():
+    return resolve_register([Person({})], DEFAULTS.register, DEFAULTS.persona)
 
 
-def child():
-    return resolve_register([Person("child", "declared", {})], DEFAULTS.register, DEFAULTS.persona)
+def closed():
+    """A register whose person overrides forbid approaching (the body-yaw gate drops)."""
+    person = Person({"approach_allowed": False})
+    return resolve_register([person], DEFAULTS.register, DEFAULTS.persona)
 
 
 def renderer(manifest, entry, *, seed=1, lib=None, **expr) -> ExpressionRenderer:
@@ -83,7 +85,7 @@ def renderer(manifest, entry, *, seed=1, lib=None, **expr) -> ExpressionRenderer
 
 def play(r, intensity, now, reg=None) -> str:
     """Start the joy entry at ``now`` and return the clip it chose (via the last amplitude)."""
-    reg = reg or adult()
+    reg = reg or plain()
     r.update(state("calm", intensity), reg, now - 0.5)
     assert r.update(state("joy", intensity, impulse=int(now)), reg, now)
     return r.last_label
@@ -92,8 +94,8 @@ def play(r, intensity, now, reg=None) -> str:
 def chosen_clips(r, n, intensity=0.5) -> list[str]:
     out = []
     for i in range(n):
-        r.update(state("calm", intensity), adult(), i * 100.0)
-        r.update(state("joy", intensity, impulse=i + 1), adult(), i * 100.0 + 50)
+        r.update(state("calm", intensity), plain(), i * 100.0)
+        r.update(state("joy", intensity, impulse=i + 1), plain(), i * 100.0 + 50)
         out.append(next(iter(r._last_clip.values())))
     return out
 
@@ -352,9 +354,9 @@ def test_each_entry_remembers_its_own_last_clip(manifest):
         clips=library(),
         rng=random.Random(2),
     )
-    r.update(state("calm"), adult(), 0.0)
-    r.update(state("joy", impulse=1), adult(), 10.0)
-    r.update(state("sadness", impulse=2), adult(), 20.0)
+    r.update(state("calm"), plain(), 0.0)
+    r.update(state("joy", impulse=1), plain(), 10.0)
+    r.update(state("sadness", impulse=2), plain(), 20.0)
     assert set(r._last_clip) == {"joy", "sadness"}
 
 
@@ -410,28 +412,23 @@ def test_the_body_yaw_gate_applies_to_a_clip(manifest):
     play(free, 0.5, 1.0)
     assert peak(free, "body_yaw") > 0
     shut = renderer(manifest, entry)
-    play(shut, 0.5, 1.0, reg=child())
-    assert not child().params.approach_allowed
+    play(shut, 0.5, 1.0, reg=closed())
+    assert not closed().params.approach_allowed
     assert peak(shut, "body_yaw") == 0 and peak(shut, "head.pitch") > 0
 
 
 def test_the_register_tightening_applies_to_a_playing_clip(manifest):
     r = renderer(manifest, variants({"clip": "turn"}))
     play(r, 0.5, 1.0)
-    r.set_register(child())
+    r.set_register(closed())
     assert all("body_yaw" not in c.targets for k in range(50) for c in r.commands(1.1 + k * 0.01))
 
 
-def test_a_clip_is_clamped_to_the_range_and_to_the_minor_share(manifest):
+def test_a_clip_is_clamped_to_the_range(manifest):
     r = renderer(manifest, variants({"clip": "big"}), max_amplitude=3)
     play(r, 1.0, 1.0)
     dof = manifest.dofs["head.yaw"]
-    top = peak(r, "head.yaw")
-    assert top == pytest.approx(dof.max - dof.home)
-    r = renderer(manifest, variants({"clip": "big"}), max_amplitude=3)
-    r.set_register(adult(), 0.5)
-    play(r, 1.0, 1.0)
-    assert peak(r, "head.yaw") == pytest.approx((dof.max - dof.home) * 0.5)
+    assert peak(r, "head.yaw") == pytest.approx(dof.max - dof.home)
 
 
 def test_a_variant_naming_a_missing_clip_is_refused_at_construction_and_on_reload(manifest):
@@ -455,9 +452,9 @@ def test_an_entry_with_no_playable_variant_is_not_requestable_and_starts_nothing
         clips=library(),
         rng=random.Random(1),
     )
-    r.update(state("calm"), adult(), 0.0)
+    r.update(state("calm"), plain(), 0.0)
     assert not r.request("joy")  # soft moves head.pitch, which this robot lacks
-    assert not r.update(state("joy", 0.5, impulse=1), adult(), 5.0)
+    assert not r.update(state("joy", 0.5, impulse=1), plain(), 5.0)
     mixed = renderer(manifest, variants({"clip": "only_body"}, {"clip": "soft"}), lib=body_only)
     assert mixed.request("joy")
 
@@ -706,9 +703,9 @@ def test_apply_config_rebuilds_the_clips_from_the_library(manifest):
 
 def test_request_on_a_variants_entry_picks_a_variant(manifest):
     r = renderer(manifest, variants({"clip": "wide"}))
-    r.update(state("calm", 0.7), adult(), 0.0)
+    r.update(state("calm", 0.7), plain(), 0.0)
     assert r.request("joy")
-    assert r.update(state("calm", 0.7), adult(), 5.0)
+    assert r.update(state("calm", 0.7), plain(), 5.0)
     assert r.last_label == "joy"
     assert max(abs(c.targets["head.pitch"]) for k in range(25) for c in r.commands(5 + k * 0.02))
 

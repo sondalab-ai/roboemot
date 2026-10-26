@@ -105,7 +105,9 @@ class Pipeline:
     value_cap: Callable[[], int]
     pitch_dof: str
     sleep: SleepGate
-    voice_heard: list[float] = field(default_factory=lambda: [-math.inf])  # last utterance, monotonic
+    voice_heard: list[float] = field(
+        default_factory=lambda: [-math.inf]
+    )  # last utterance, monotonic
 
 
 def make_yes_no(
@@ -373,9 +375,7 @@ def assemble(
         return stack.effective().conversation.summary_value_max_chars
 
     voice_heard = [-math.inf]  # monotonic time of the last utterance, addressed or not (SPEC 7B)
-    bus.subscribe(
-        "percept.utterance", lambda _msg: voice_heard.__setitem__(0, time.monotonic())
-    )
+    bus.subscribe("percept.utterance", lambda _msg: voice_heard.__setitem__(0, time.monotonic()))
 
     return Pipeline(
         voice_heard=voice_heard,

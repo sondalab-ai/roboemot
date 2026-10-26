@@ -9,8 +9,9 @@ from types import SimpleNamespace
 
 import pytest
 from roboemot.config.schema import RegisterParams, SootheConfig, StateEffects
+from roboemot.runtime import startup as startup_module
+from roboemot.runtime import ticks as ticks_module
 from roboemot.soothe import SootheRunner
-from roboemot_reachymini import app as app_module
 from test_app_perception import (  # noqa: F401  (data is a fixture)
     AppWithFakes,
     data,
@@ -64,9 +65,11 @@ class EarlyRandom(random.Random):
 
 
 def test_a_sound_plays_next_to_a_visible_person_and_a_queued_sentence_cuts_it(data, monkeypatch):  # noqa: F811
-    monkeypatch.setattr(app_module, "random", SimpleNamespace(Random=EarlyRandom))
+    monkeypatch.setattr(startup_module, "random", SimpleNamespace(Random=EarlyRandom))
     enable(data, YAML)  # validated settings; the 3 s first gap is the schema's shortest
     mini = ScriptedMini().mini
+    flushes = []
+    mini.media.audio = SimpleNamespace(clear_player=lambda: flushes.append(1))
     app = new_app(SootheApp)  # the fake camera keeps one face in view
     stop, thread, errors = run_app(app, mini)
     try:
@@ -94,7 +97,7 @@ def test_a_sound_plays_next_to_a_visible_person_and_a_queued_sentence_cuts_it(da
             intensity=0.0,
         )
         assert wait_for(lambda: cancelled, timeout=15)
-        assert mini.media.stop_playing.called  # the sink was flushed (no clear_player here)
+        assert flushes  # the sink was flushed through clear_player
     finally:
         stop.set()
         thread.join(timeout=10)
@@ -104,7 +107,7 @@ def test_a_sound_plays_next_to_a_visible_person_and_a_queued_sentence_cuts_it(da
 def context(**over):
     """A ``SootheContext`` for a quiet room, with ``over`` changed."""
     base = {"in_session": False, "voice_recent": False, "other_queued": 0}
-    return app_module.SootheContext(**{"speaking": False, "ours": False, **base, **over})
+    return ticks_module.SootheContext(**{"speaking": False, "ours": False, **base, **over})
 
 
 @pytest.mark.parametrize(
@@ -117,14 +120,14 @@ def context(**over):
     ],
 )
 def test_interaction_or_other_audio_ends_idle(over):
-    assert app_module.soothe_idle(context()) and not app_module.soothe_idle(context(**over))
+    assert ticks_module.soothe_idle(context()) and not ticks_module.soothe_idle(context(**over))
 
 
 def test_our_own_sound_is_not_activity_but_a_session_or_queue_still_is():
     own = {"speaking": True, "ours": True}
-    assert app_module.soothe_idle(context(**own))
-    assert not app_module.soothe_idle(context(**own, other_queued=1))
-    assert not app_module.soothe_idle(context(**own, in_session=True))
+    assert ticks_module.soothe_idle(context(**own))
+    assert not ticks_module.soothe_idle(context(**own, other_queued=1))
+    assert not ticks_module.soothe_idle(context(**own, in_session=True))
 
 
 def soothe_args(**over):
@@ -143,18 +146,18 @@ def soothe_args(**over):
         "last_voice": float("-inf"),
         "echo_tail_s": 0.3,
     }
-    return app_module.soothe_context(100.0, **{**base, **over})
+    return ticks_module.soothe_context(100.0, **{**base, **over})
 
 
 def test_a_visible_face_and_an_attention_target_with_no_speech_keep_idle():
-    assert app_module.soothe_idle(soothe_args())
+    assert ticks_module.soothe_idle(soothe_args())
 
 
 def test_a_speaker_hint_or_a_recent_utterance_ends_idle_until_the_quiet_window_passes():
     hinted = SimpleNamespace(target=None, speaker_active=lambda now: True)
-    assert not app_module.soothe_idle(soothe_args(selector=hinted))
-    assert not app_module.soothe_idle(soothe_args(last_voice=95.0))
-    assert app_module.soothe_idle(soothe_args(last_voice=85.0))
+    assert not ticks_module.soothe_idle(soothe_args(selector=hinted))
+    assert not ticks_module.soothe_idle(soothe_args(last_voice=95.0))
+    assert ticks_module.soothe_idle(soothe_args(last_voice=85.0))
 
 
 class BrokenOutput:
@@ -175,9 +178,9 @@ def test_a_failing_soothe_tick_is_logged_and_does_not_stop_the_app(caplog):
     cfg = SootheConfig(interval_s=30, jitter=0, idle_min_s=0)
     output = BrokenOutput()
     runner = SootheRunner(cfg, output, on_event=lambda *a: None, rng=random.Random(1))
-    quiet = app_module.SootheContext(False, False, 0, False, False)
+    quiet = ticks_module.SootheContext(False, False, 0, False, False)
     with caplog.at_level("WARNING"):
         for t in (0.0, cfg.interval_s):  # the second tick is due: play raises
-            app_module.soothe_tick(runner, t, lambda: quiet, "awake", False)
-        app_module.soothe_tick(runner, 1.0, lambda: 1 / 0, "awake", False)  # the context fails
+            ticks_module.soothe_tick(runner, t, lambda: quiet, "awake", False)
+        ticks_module.soothe_tick(runner, 1.0, lambda: 1 / 0, "awake", False)  # the context fails
     assert "sink gone" in caplog.text and "ZeroDivisionError" in caplog.text

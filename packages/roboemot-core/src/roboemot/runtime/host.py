@@ -31,13 +31,13 @@ from roboemot.reflex import ReflexEngine
 from roboemot.robot_platform import AudioHub, RobotSession, Speaker
 from roboemot.runtime.live_video import LiveVideo
 from roboemot.secret_store import SecretStore
+from roboemot.soothe import SootheRunner
 from roboemot.vision import FrameSource
 from roboemot.vision.service import Perception, default_stages
 from roboemot.voice.activity import SpeechActivity
 from roboemot.voice.bargein import BargeIn
 from roboemot.voice.listener import Utterance, VoiceListener
 from roboemot.voice.robot_name import RobotName
-from roboemot.soothe import SootheRunner
 from roboemot.voice.speech import SpeechOutput
 from roboemot.voice.yes_no import YesNoGestures
 from roboemot.webui import Server

@@ -1,6 +1,7 @@
 """SPEC 8: voice delivery composition, backend mapping and mood tags."""
 
 import pytest
+from roboemot.affect.clips import load_clip_library
 from roboemot.config import ConfigStack
 from roboemot.voice import compose_delivery, parse_mood_tags, resolve_tag, to_openai, to_piper
 
@@ -95,7 +96,9 @@ def _reachy_voice():
     path = Path(__file__).resolve().parents[3] / "configs/manifests/reachy-mini-wireless.yaml"
     manifest = load_manifest(path, allow_unmeasured_dynamics=True)
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw=None)
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour, manifest.channels, load_clip_library(manifest), body_yaw=None
+    )
     return stack.effective().voice
 
 

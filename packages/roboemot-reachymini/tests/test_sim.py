@@ -237,9 +237,7 @@ def test_a_joy_expression_moves_the_antennas_on_the_simulated_robot(loop):
     manifest = loop.manifest
     clips = load_clip_library(manifest)
     stack = ConfigStack()
-    stack.set_manifest_behaviour(
-        manifest.model.behaviour, manifest.channels, clips, body_yaw=None
-    )
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, clips, body_yaw=None)
     cfg = stack.effective()
     joy = cfg.expression_map["joy"]
     (variant,) = [v for v in joy.variants if v.clip == "success1"]
@@ -743,7 +741,12 @@ def test_the_speaking_motion_moves_the_head_pitch_with_a_canned_reply(loop):
 
     manifest = loop.manifest
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw="body_yaw")
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour,
+        manifest.channels,
+        load_clip_library(manifest),
+        body_yaw="body_yaw",
+    )
     stack.set("speech_motion.levels.lively.nod_share", 1.0, source="test")  # not seed-dependent
     cfg = stack.effective()
     _hold(loop, {"head.pitch": manifest.dofs["head.pitch"].home}, 6.0)
@@ -859,7 +862,9 @@ def test_our_own_gestures_and_extreme_motion_never_look_like_external_control(lo
 
     manifest = loop.manifest
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw=None)
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour, manifest.channels, load_clip_library(manifest), body_yaw=None
+    )
     cfg = stack.effective()
     worst = _watch_tracking_error(loop)
     _hold(loop, {n: d.home for n, d in manifest.dofs.items() if d.measured}, 6.0)

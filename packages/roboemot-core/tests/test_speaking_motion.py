@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from roboemot.affect import AffectState
+from roboemot.affect.clips import load_clip_library
 from roboemot.affect.register import Person, resolve_register
 from roboemot.affect.speaking import SOURCE, SpeakingRenderer
 from roboemot.config import ConfigStack
@@ -56,7 +57,12 @@ def manifest():
 @pytest.fixture(scope="module")
 def cfg(manifest):
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw="body_yaw")
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour,
+        manifest.channels,
+        load_clip_library(manifest),
+        body_yaw="body_yaw",
+    )
     return stack.effective()
 
 

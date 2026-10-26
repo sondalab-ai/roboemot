@@ -193,7 +193,9 @@ def test_manifest_voice_pitch_is_checked(voice):
 def test_the_reachy_manifest_voice_is_child_like():
     manifest = load_manifest(REACHY, allow_unmeasured_dynamics=True)
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw=None)
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour, manifest.channels, load_clip_library(manifest), body_yaw=None
+    )
     voice = stack.effective().voice
     assert voice.base.pitch_st == 5
     assert tuple(voice.limits.pitch_st) == (-4, 8)

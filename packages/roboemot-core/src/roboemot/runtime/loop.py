@@ -6,8 +6,8 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-from roboemot.circadian.motion import REST_SOURCE
 from roboemot.circadian import in_window
+from roboemot.circadian.motion import REST_SOURCE
 from roboemot.config import ConfigStack
 from roboemot.persona import effects as persona_effects
 from roboemot.vision import CIRCADIAN, CONVERSATION, LOAD
@@ -24,7 +24,6 @@ from .ticks import (
     soothe_context,
     soothe_tick,
 )
-
 
 MS_PER_S = 1000.0
 
