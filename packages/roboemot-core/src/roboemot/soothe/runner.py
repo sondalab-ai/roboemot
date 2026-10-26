@@ -5,12 +5,16 @@ the app passes ``now`` to :meth:`SootheRunner.tick` and injects the ``random.Ran
 continuous idle time, schedules a sound lazily, picks a variant eligible in the circadian state,
 synthesizes it, queues it on the speech output and publishes the appraisal event ``self.soothe``.
 When idle ends while the sound plays it cancels exactly that sound.
+
+Threads: ``tick`` runs on the app tick thread, ``apply_config`` on the config watcher's thread
+(``ConfigStack.start_watcher``), so both take one lock; ``sounding`` and ``job`` only read.
 """
 
 from __future__ import annotations
 
 import math
 import random
+import threading
 from collections.abc import Callable
 from typing import Any, Protocol
 
@@ -20,7 +24,7 @@ from ..config.schema import SootheConfig, SootheVariant
 from .synth import synthesize
 
 EVENT = "self.soothe"
-RESTING = "resting"
+RESTING = "resting"  # the circadian state name (circadian.model.State)
 
 
 class RawOutput(Protocol):
@@ -28,6 +32,7 @@ class RawOutput(Protocol):
 
     def play(self, samples: np.ndarray, rate_hz: int, volume_db: float = 0.0) -> int | None: ...
     def cancel(self, job_id: int) -> None: ...
+    def live(self, job_id: int) -> bool: ...
 
 
 class SootheRunner:
@@ -47,18 +52,22 @@ class SootheRunner:
         self.on_event = on_event
         self.rng = rng or random.Random()  # noqa: S311 (a pick and a jitter, not security)
         self.volume_db = volume_db  # the circadian volume offset now
+        self._lock = threading.Lock()
         self._idle_since: float | None = None
+        self._anchor: float | None = None  # where the next gap is measured from (None: now)
         self._due: float | None = None
         self._cooldown_until = -math.inf
         self._last: SootheVariant | None = None
-        self._job: int | None = None  # id of the sound queued or playing, until it has played
-        self._sound_end = -math.inf  # when the last sound ends (or was cut)
+        self._job: int | None = None  # id of the sound queued or playing
+        self._sound_end = -math.inf  # estimate of the end of the sound from its start
+        self._ended = -math.inf  # when the last sound was seen to be over (or was cut)
 
     def apply_config(self, cfg: SootheConfig) -> None:
-        """Hot reload: new parameters and variants, schedule redrawn. A sound in flight
+        """Hot reload: new parameters and variants, schedule redrawn from now. A sound in flight
         finishes, unless the runner was switched off (the next tick then cuts it)."""
-        self.cfg = cfg
-        self._due = None
+        with self._lock:
+            self.cfg = cfg
+            self._due = self._anchor = None
 
     @property
     def job(self) -> int | None:
@@ -66,49 +75,63 @@ class SootheRunner:
         return self._job
 
     def sounding(self, now: float, tail_s: float = 0.0) -> bool:
-        """Whether our own sound plays at ``now``, or ended less than ``tail_s`` ago. The app
-        uses it so that the "speaking" window our sound opens on the speaker does not count as
-        somebody else's audio and cancel the sound (or reset the idle clock at its end)."""
-        return now < self._sound_end + tail_s
+        """Whether our own sound is queued or playing at ``now``, or ended less than ``tail_s``
+        ago. The app uses it so that the "speaking" window our sound opens on the speaker, and
+        its end, do not count as somebody else's audio and cancel it or reset the idle clock."""
+        return self._job is not None or now < self._ended + tail_s
 
     def tick(self, now: float, idle: bool, circadian_state: str, quiet: bool) -> None:
         """One app tick. ``idle`` is the app's predicate (SPEC 7B), ``quiet`` the quiet hours.
         A non-idle tick (or a disabled runner) resets the idle clock, clears the schedule and
-        cuts a sound still playing."""
-        if self._job is not None and now >= self._sound_end:
-            self._job = None  # played to its end: nothing to cancel
-        if not (idle and self.cfg.enabled):
-            self._lose_idle(now)
-            return
-        if self._idle_since is None:
-            self._idle_since = now
-        if self._job is not None or now - self._idle_since < self.cfg.idle_min_s:
-            return
-        if self._due is None:
-            self._schedule(now)
-        elif now >= self._due:
-            self._start(now, circadian_state, quiet)
+        cuts a sound still playing. A sound that stopped before its estimated end was cut by a
+        barge-in: the cooldown starts from the cut."""
+        with self._lock:
+            self._check_job(now)
+            if not (idle and self.cfg.enabled):
+                self._lose_idle(now)
+                return
+            if self._idle_since is None:
+                self._idle_since = self._anchor = now
+            if self._job is not None:
+                return
+            if self._due is None:
+                at, self._anchor = self._anchor if self._anchor is not None else now, None
+                self._schedule(at)
+            elif now >= self._due:
+                self._start(now, circadian_state, quiet)
 
     def close(self) -> None:
         """Shutdown: cut the sound if one is queued or playing."""
-        if self._job is not None:
-            self.output.cancel(self._job)
-            self._job = None
+        with self._lock:
+            if self._job is not None:
+                self.output.cancel(self._job)
+                self._job = None
+
+    def _check_job(self, now: float) -> None:
+        """Forget our job once the output no longer has it: played out, or (before the
+        estimated end) cut by a stop."""
+        if self._job is None or self.output.live(self._job):
+            return
+        if now < self._sound_end:
+            self._cooldown_until = now + self.cfg.cooldown_s
+        self._job, self._ended = None, now
 
     def _schedule(self, at: float) -> None:
-        """Next sound at ``at + interval * (1 + jitter * u)``, never inside the cooldown."""
+        """Next sound at ``at + interval * (1 + jitter * u)``, but not before ``idle_min_s`` of
+        idle time and never inside the cooldown."""
         c = self.cfg
         gap = c.interval_s * (1 + c.jitter * self.rng.uniform(-1, 1))
-        self._due = max(at + gap, self._cooldown_until)
+        floor = -math.inf if self._idle_since is None else self._idle_since + c.idle_min_s
+        self._due = max(at + gap, floor, self._cooldown_until)
 
     def _lose_idle(self, now: float) -> None:
         """Idle ended: forget the idle clock and the schedule; cut our sound if it still plays
         (the cooldown then starts from the cut)."""
         if self._job is not None:
             self.output.cancel(self._job)
-            self._job, self._sound_end = None, now
+            self._job, self._ended = None, now
             self._cooldown_until = now + self.cfg.cooldown_s
-        self._idle_since = self._due = None
+        self._idle_since = self._anchor = self._due = None
 
     def _eligible(self, state: str) -> list[SootheVariant]:
         """Variants allowed in ``state``, without the previous pick unless it is the only one."""

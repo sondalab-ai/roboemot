@@ -792,7 +792,7 @@ class SootheVariant(Strict):
 class SootheConfig(Strict):
     enabled: bool = param(True, "Let the robot comfort itself with a sound while idle")
     interval_s: float = param(
-        900.0, "Mean time between two sounds while idle", unit="s", ge=30, le=86400
+        300.0, "Mean time between two sounds while idle", unit="s", ge=30, le=86400
     )
     jitter: float = param(
         0.5, "Interval jitter as a share of the interval (0: regular)", ge=0, le=0.9
@@ -801,7 +801,15 @@ class SootheConfig(Strict):
         120.0, "Continuous idle time before the first sound", unit="s", ge=0, le=3600
     )
     cooldown_s: float = param(
-        300.0, "Least time after a sound that played or was cut", unit="s", ge=0, le=86400
+        120.0, "Least time after a sound that played or was cut", unit="s", ge=0, le=86400
+    )
+    speech_quiet_s: float = param(
+        10.0,
+        "A heard voice (a speaker hint or an utterance) keeps the robot from starting or "
+        "continuing a sound for this long",
+        unit="s",
+        ge=0,
+        le=600,
     )
     rate_hz: int = param(
         16000, "Sample rate the sounds are synthesised at", unit="Hz", ge=8000, le=48000

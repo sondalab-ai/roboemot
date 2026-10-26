@@ -620,15 +620,15 @@ Every sound starts and ends exactly at zero with a fade, so it never clicks, and
 
 ### Scheduling
 
-- A sound is due `soothe.interval_s` (900 s) times `1 + soothe.jitter * u` after the idle clock starts, with `u` drawn uniformly in [-1, 1] from the injected generator; the schedule is lazy (drawn at the first idle tick) and cleared when idle ends.
-- **Idle** means all of: no attended person, no attention target, no person present (section 7A), the robot is not speaking and its speech queue is empty, no conversation session, no scan in progress. The sound waits for `soothe.idle_min_s` (120 s) of continuous idle time, and after a sound that was played or cut at least `soothe.cooldown_s` (300 s) pass before the next.
+- The first sound is due at `max(idle_since + soothe.idle_min_s, idle_since + soothe.interval_s * (1 + soothe.jitter * u))`, where `idle_since` is the start of the continuous idle time and `u` is drawn uniformly in [-1, 1] from the injected generator; the schedule is lazy (drawn at the first idle tick) and cleared when idle ends. With the defaults (300 s, jitter 0.5, `idle_min_s` 120 s) that is 150 to 450 s after idle starts.
+- **Idle** means that nobody is interacting with the robot: no conversation session is open, nobody spoke within `soothe.speech_quiet_s` (10 s; a valid speaker hint of the attention selector, or an utterance, addressed or not, heard in that time), and the robot is not speaking and its speech queue holds nothing but the sound itself. A person who is merely present does not stop the robot from soothing itself: a visible face, an attention target, presence (section 7A) and a scan in progress do not matter, because the robot may sit next to someone who works. The sound never plays before `soothe.idle_min_s` (120 s) of continuous idle time, and after a sound that was played or cut at least `soothe.cooldown_s` (120 s) pass before the next.
 - Never in `resting`, never in the quiet hours, never when `soothe.enabled` is false.
 - When the sound is due and the state is `resting`, the quiet hours apply or no variant is eligible in the state, nothing plays and the next sound is scheduled as after a played one. When the speech queue is full (`play` returns nothing) no event is published and the next try is the next scheduled time. The next sound is `soothe.interval_s` with jitter after the end of the previous one and never inside `soothe.cooldown_s`.
-- The app tick (section 10) feeds the runner. The robot's own sound opens the speaker's speaking window (echo gating, section 8), so while the sound plays, and for `voice.echo_tail_ms` after it, the speaking and queue conditions of idle ignore it; any other queued sentence or audio ends idle. `ConversationWorker.in_session()` tells whether a session is open. Without voice (no speech output) the runner is not built. A hot reload of `soothe` redraws the schedule; a sound already playing finishes.
+- The app tick (section 10) feeds the runner. The robot's own sound opens the speaker's speaking window (echo gating, section 8), so while the sound is queued or playing (`SpeechOutput.live`), and for `voice.echo_tail_ms` after it, the speaking and queue conditions of idle ignore it; any other queued sentence or audio ends idle (so do the session and the voice conditions above). `ConversationWorker.in_session()` tells whether a session is open. Without voice (no speech output) the runner is not built. A hot reload of `soothe` (run on the config watcher's thread, so the runner takes a lock) redraws the schedule from the moment of the reload; a sound already playing finishes.
 
 ### Cancellation
 
-The sound goes through the speech output queue (section 8), so a barge-in stops it like speech. When idle ends while it plays (a face, a voice, an attention target) the runner cancels exactly that sound: a queued one is removed, a playing one is cut and the sink flushed. Other queued sentences are never touched. A playing sound holds later speech in the queue until it ends or the runner cancels it; it starts only after the audio already in the sink has played, so cancelling it never cuts speech. A cut sound still starts the cooldown.
+The sound goes through the speech output queue (section 8), so a barge-in stops it like speech. When idle ends while it plays (a session starts, a voice is heard or addressed, a sentence is queued) the runner cancels exactly that sound: a queued one is removed, a playing one is cut and the sink flushed. Other queued sentences are never touched. A playing sound holds later speech in the queue until it ends or the runner cancels it; it starts only after the audio already in the sink has played, so cancelling it never cuts speech. A cut sound still starts the cooldown, also when a barge-in or `stop()` drops the sound before its end (the runner sees that its job is no longer live). A voice ends the sound through the idle conditions above and through the barge-in, whichever comes first. Raw sounds bypass minor gating by design (section 8): they are local, wordless and quiet.
 
 ### Emotion
 
@@ -641,10 +641,11 @@ Illustrative values (the shipped defaults have five variants and differ in shape
 ```yaml
 soothe:
   enabled: true
-  interval_s: 900        # mean time between two sounds while idle (30..86400)
+  interval_s: 300        # mean time between two sounds while idle (30..86400)
   jitter: 0.5            # interval jitter as a share of the interval (0..0.9)
   idle_min_s: 120        # continuous idle time before the first sound
-  cooldown_s: 300        # least gap after a sound that played or was cut
+  cooldown_s: 120        # least gap after a sound that played or was cut
+  speech_quiet_s: 10     # a heard voice stops a sound and holds the next (0..600)
   rate_hz: 16000         # synthesis sample rate
   variants:
     - {label: calm, sound: hum, weight: 1.0, states: [awake, drowsy],
@@ -989,7 +990,7 @@ The effective configuration is the merge of six layers; a later layer overrides 
 | `register` | per age group (child, teen, adult, senior, unknown): speech rate, pitch, vocabulary, persona fragment, motion amplitude, approach distance, reaction intensity; whether gender changes parameters | Section 7 |
 | `expression_map` | per label: motion keyframes and amplitude, antenna poses, sound, TTS prosody offsets, LED pattern | Section 7, manifest |
 | `circadian` | period, max daily shift, S and C time constants, state thresholds, per-state effects, quiet hours (default 22:30 to 07:00), light sampling | Section 7A |
-| `soothe` | enabled, interval and jitter, minimum idle time, cooldown, sample rate, variants (emotion label, sound kind `hum` or `blirp`, weight, circadian states, shape ranges: tempo, pitch, length, gain) | Section 7B |
+| `soothe` | enabled, interval and jitter, minimum idle time, cooldown, voice quiet window, sample rate, variants (emotion label, sound kind `hum` or `blirp`, weight, circadian states, shape ranges: tempo, pitch, length, gain) | Section 7B |
 | `motion.idle` | breathing amplitude and period, gaze-shift interval, micro-movement noise | Section 10 |
 | `motion.arbiter` | source priorities, cross-fade time, loop rate | Section 10 |
 | `reflexes` | rules: trigger, condition (`suppress_with_minor`), threshold, primitive, amplitude, cooldown, duration (100 to 800 ms); the amplitude ceiling, the maximum trigger age, the primitive shape, the microphone floor and the `sound.loud` ratio | Section 10 |

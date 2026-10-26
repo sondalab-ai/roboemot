@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 import random
+import time
 
 import pytest
-from roboemot.config.schema import APPRAISAL_EVENTS, RoboEmotConfig, SootheConfig
+from roboemot.config.schema import (
+    APPRAISAL_EVENTS,
+    RegisterParams,
+    RoboEmotConfig,
+    SootheConfig,
+    StateEffects,
+)
 from roboemot.soothe import SootheRunner
+from roboemot.voice.speech import SpeechOutput
+from test_speech import FakeBackend, TimelineSink, wait_for
 
 RATE = 8000
 LENGTH_S = 1.0
@@ -36,23 +45,36 @@ def config(**extra) -> SootheConfig:
 
 
 class Output:
-    def __init__(self, full=False):
-        self.full, self.played, self.cancelled, self.next_id = full, [], [], 1
+    """A fake speech output: a job is live from ``play`` until its length has passed on the
+    rig's clock, or until it is cancelled or ``drop`` (a barge-in) is called."""
+
+    def __init__(self, rig, full=False):
+        self.rig, self.full, self.played, self.cancelled, self.next_id = rig, full, [], [], 1
+        self.until: dict[int, float] = {}
 
     def play(self, samples, rate_hz, volume_db=0.0):
         if self.full:
             return None
         self.played.append((samples, rate_hz, volume_db))
+        self.until[self.next_id] = self.rig.now + samples.size / rate_hz
         self.next_id += 1
         return self.next_id - 1
 
     def cancel(self, job_id):
         self.cancelled.append(job_id)
+        self.until.pop(job_id, None)
+
+    def live(self, job_id):
+        return self.rig.now < self.until.get(job_id, -1.0)
+
+    def drop(self):
+        self.until.clear()
 
 
 class Rig:
     def __init__(self, cfg=None, seed=1, full=False, volume_db=0.0):
-        self.out, self.events, self.now = Output(full), [], 0.0
+        self.now, self.events = 0.0, []
+        self.out = Output(self, full)
         self.runner = SootheRunner(
             cfg or config(),
             self.out,
@@ -80,7 +102,16 @@ def test_no_sound_before_idle_min_and_the_first_is_an_interval_later():
     rig.run(IDLE_MIN - STEP)
     assert not rig.out.played
     assert rig.run_until_sound()
-    assert rig.now - STEP >= IDLE_MIN + INTERVAL * (1 - JITTER) - STEP
+    assert rig.now - STEP >= max(IDLE_MIN, INTERVAL * (1 - JITTER))
+
+
+def test_the_first_sound_is_the_later_of_idle_min_and_the_drawn_interval():
+    rig = Rig(config(interval_s=30, jitter=0, idle_min_s=200))
+    rig.run(200 - STEP)
+    assert not rig.out.played
+    assert rig.run_until_sound() and rig.now - STEP == 200
+    rig = Rig(config(interval_s=60, jitter=0, idle_min_s=20))
+    assert rig.run_until_sound() and rig.now - STEP == 60  # measured from the start of idle
 
 
 @pytest.mark.parametrize("seed", range(6))
@@ -114,7 +145,7 @@ def test_a_non_idle_tick_resets_the_idle_clock_and_the_schedule():
     rig.run(STEP, idle=False)
     n = rig.now
     assert rig.run_until_sound()
-    assert rig.now - STEP - n >= IDLE_MIN + INTERVAL * (1 - JITTER) - STEP
+    assert rig.now - STEP - n >= max(IDLE_MIN, INTERVAL * (1 - JITTER))
 
 
 @pytest.mark.parametrize(("state", "quiet"), [("resting", False), ("awake", True)])
@@ -184,6 +215,32 @@ def test_idle_ending_mid_sound_cancels_that_sound_and_starts_the_cooldown():
     assert rig.now - STEP - cut >= COOLDOWN
 
 
+def test_a_stop_that_drops_the_sound_ends_it_without_a_cancel_and_starts_the_cooldown():
+    rig = Rig()
+    assert rig.run_until_sound()
+    assert rig.runner.sounding(rig.now)
+    rig.run(STEP)
+    rig.out.drop()  # barge-in: the output no longer has the job
+    rig.run(STEP)
+    assert rig.out.cancelled == [] and rig.runner.job is None
+    assert not rig.runner.sounding(rig.now)
+    cut = rig.now - STEP
+    assert rig.run_until_sound()
+    assert rig.now - STEP - cut >= COOLDOWN
+
+
+def test_the_sound_counts_as_ours_until_the_output_has_played_it_out():
+    rig = Rig()
+    assert rig.run_until_sound()
+    start = rig.now - STEP
+    rig.out.until[1] = start + LENGTH_S * 5  # a slow sink: the output still holds the sound
+    rig.run(LENGTH_S * 3)  # the tick estimate is long past
+    assert rig.runner.sounding(rig.now) and rig.out.cancelled == []
+    rig.out.until[1] = 0.0
+    rig.run(STEP)
+    assert not rig.runner.sounding(rig.now) and rig.runner.sounding(rig.now, 5.0)
+
+
 def test_no_cancel_once_the_sound_has_finished():
     rig = Rig()
     assert rig.run_until_sound()
@@ -219,16 +276,22 @@ def test_apply_config_takes_effect_at_the_next_schedule():
     assert rig.events[0][2]["label"] == "curiosity"
 
 
-def test_sounding_covers_the_sound_and_its_tail_and_close_cuts_it():
+def test_sounding_covers_the_tail_after_the_sound():
     rig = Rig()
     assert not rig.runner.sounding(0.0, 5.0)
     assert rig.run_until_sound()
-    start = rig.now - STEP
-    assert rig.runner.sounding(start + LENGTH_S / 2)
-    assert not rig.runner.sounding(start + LENGTH_S + 1.0)
-    assert rig.runner.sounding(start + LENGTH_S + 1.0, 2.0)
+    assert rig.runner.sounding(rig.now)
+    rig.run(LENGTH_S + STEP)  # played out
+    assert not rig.runner.sounding(rig.now)
+    assert rig.runner.sounding(rig.now, 2.0)
+    assert not rig.runner.sounding(rig.now + 3.0, 2.0)
+
+
+def test_close_cuts_a_sound_still_playing():
+    rig = Rig()
+    assert rig.run_until_sound()
     rig.runner.close()
-    assert rig.out.cancelled == [1]
+    assert rig.out.cancelled == [1] and rig.runner.job is None
 
 
 def test_self_soothe_is_an_appraisal_event_and_every_default_label_has_a_rule():
@@ -239,3 +302,95 @@ def test_self_soothe_is_an_appraisal_event_and_every_default_label_has_a_rule():
     for label, rule in rules.items():
         assert rule.label == label and 0.1 <= rule.valence <= 0.15 and rule.arousal == 0
         assert label in cfg.affect.labels
+
+
+OFFSET_S = 1000.0  # the runner's clock runs ahead of the real one: the schedule needs no wait
+TAIL_S = 0.2
+REAL_LENGTH_S = 0.4
+
+
+class RealRig:
+    """The runner over a real ``SpeechOutput`` and a timeline sink (a real sound of 0.4 s)."""
+
+    def __init__(self):
+        self.sink = TimelineSink()
+        self.out = SpeechOutput(RoboEmotConfig(), self.sink, FakeBackend())
+        self.out.start()
+        self.cancelled = []
+        real_cancel = self.out.cancel
+        self.out.cancel = lambda job: (self.cancelled.append(job), real_cancel(job))[1]
+        cfg = config(
+            interval_s=30,
+            jitter=0,
+            idle_min_s=0,
+            cooldown_s=0,
+            variants=[variant("calm", shape={"length_s": (REAL_LENGTH_S, REAL_LENGTH_S)})],
+        )
+        self.runner = SootheRunner(cfg, self.out, on_event=lambda *a: None, rng=random.Random(1))
+
+    def now(self) -> float:
+        return time.monotonic() + OFFSET_S
+
+    def idle(self) -> bool:
+        """The audio part of the app predicate."""
+        if self.out.waiting(exclude=self.runner.job) > 0:
+            return False
+        speaking = time.monotonic() < self.sink.until + TAIL_S
+        return self.runner.sounding(self.now(), TAIL_S) or not speaking
+
+    def start_sound(self) -> int:
+        self.runner.tick(self.now(), True, "awake", False)  # draws the schedule
+        self.runner.tick(self.now() + self.runner.cfg.interval_s, True, "awake", False)
+        assert self.runner.job is not None
+        return self.runner.job
+
+
+def test_a_real_output_never_makes_the_robot_non_idle_through_the_sound_or_its_end():
+    rig = RealRig()
+    try:
+        job = rig.start_sound()
+        deadline = time.monotonic() + REAL_LENGTH_S + TAIL_S + 0.3
+        seen = []
+        while time.monotonic() < deadline:
+            seen.append(rig.idle())
+            rig.runner.tick(rig.now() + rig.runner.cfg.interval_s, seen[-1], "awake", False)
+            time.sleep(0.01)
+        assert rig.sink.pushed and all(seen)
+        assert rig.cancelled == [] and rig.runner.job is None and not rig.out.live(job)
+    finally:
+        rig.out.close()
+
+
+def test_a_stop_that_cuts_the_real_sound_is_seen_without_a_cancel():
+    rig = RealRig()
+    try:
+        job = rig.start_sound()
+        assert wait_for(lambda: rig.sink.pushed)
+        rig.out.stop()  # barge-in
+        assert wait_for(lambda: not rig.out.live(job))
+        later = rig.now() + rig.runner.cfg.interval_s
+        rig.runner.tick(later, True, "awake", False)
+        assert rig.cancelled == [] and rig.runner.job is None
+        assert not rig.runner.sounding(later)
+    finally:
+        rig.out.close()
+
+
+def test_a_sentence_queued_behind_the_sound_ends_idle_and_cancels_only_the_sound():
+    rig = RealRig()
+    try:
+        job = rig.start_sound()
+        assert wait_for(lambda: rig.sink.pushed)
+        rig.out.say(
+            "Ciao.",
+            language="it",
+            register=RegisterParams(),
+            circadian=StateEffects(),
+            mood=None,
+            intensity=0.0,
+        )
+        assert rig.out.waiting(exclude=job) == 1 and not rig.idle()
+        rig.runner.tick(rig.now() + rig.runner.cfg.interval_s, False, "awake", False)
+        assert rig.cancelled == [job]
+    finally:
+        rig.out.close()

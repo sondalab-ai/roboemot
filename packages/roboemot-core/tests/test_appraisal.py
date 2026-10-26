@@ -240,7 +240,8 @@ def test_cooldown_is_per_rule_and_a_non_matching_rule_does_not_burn_it():
 def test_when_accepts_bool_string_and_float_and_existing_rules_stay_valid():
     parsed = cfg_with({"event": "x", "when": {"a": True, "b": "s", "c": 1.5}}).rules[0]
     assert parsed.when == {"a": True, "b": "s", "c": 1.5}
-    assert all(r.when == {} for r in AP.rules if r.event != "self.soothe")  # only SPEC 7B uses it
+    for rule in AP.rules:  # only the SPEC 7B rules use `when`, on the payload's label alone
+        assert rule.when == {} or (rule.event == "self.soothe" and set(rule.when) == {"label"})
 
 
 def test_keyed_merge_keeps_conditional_rules_apart(tmp_path):
