@@ -2396,6 +2396,38 @@ class OpenAISpeechConfig(Strict):
     )
 
 
+class BargeInDuckConfig(Strict):
+    """Ducking: the robot lowers its voice while barge-in may be hearing the user (SPEC 8)."""
+
+    enabled: bool = param(
+        True,
+        "A frame that starts counting towards a barge-in cut-off (main or onset path, after the "
+        "echo guard) lowers the robot's voice to gain; only the cut-off stops it. Audio already "
+        "handed to the robot's player keeps its volume",
+    )
+    gain: float = param(
+        0.25,
+        "Amplitude factor of the robot's voice while ducked (0.25 is about -12 dB)",
+        ge=0.0, le=1.0,
+    )  # fmt: skip
+    attack_ms: float = param(
+        10.0,
+        "Ramp from full gain down to gain, so the step does not click",
+        unit="ms", ge=0, le=100,
+    )  # fmt: skip
+    release_ms: float = param(
+        64.0,
+        "Non-speech after the last candidate frame before the voice comes back; rounded up to "
+        "whole VAD frames",
+        unit="ms", ge=32, le=1000,
+    )  # fmt: skip
+    ramp_ms: float = param(
+        50.0,
+        "Ramp from gain back up to full gain after a release",
+        unit="ms", ge=0, le=500,
+    )  # fmt: skip
+
+
 class BargeInConfig(Strict):
     enabled: bool = param(
         True,
@@ -2528,6 +2560,9 @@ class BargeInConfig(Strict):
         "The keyword recognizer stops after this much audio without a candidate frame",
         unit="ms", ge=64, le=2000,
     )  # fmt: skip
+    duck: BargeInDuckConfig = param(
+        {}, "Ducking: a lower voice while a barge-in is a candidate, not yet confirmed"
+    )
 
     @model_validator(mode="after")
     def _onset_is_not_stricter_than_the_main_path(self) -> BargeInConfig:

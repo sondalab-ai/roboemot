@@ -574,3 +574,117 @@ def test_the_pre_roll_of_an_onset_cut_starts_before_the_fricative():
     assert len(handed) == 1
     onset_s = 2 * FRAME / RATE
     assert handed[0][1] == pytest.approx(onset_s - 0.064)  # pre_roll_ms before the /s/
+
+
+# ------------------------------------------------------------------ ducking (candidate stage)
+
+FRAME_MS = FRAME / RATE * 1000
+
+
+def duck_snap(bi):
+    return bi.snapshot()["duck"]
+
+
+def test_music_like_non_speech_does_not_duck():
+    probs = [0.2, 0.3, 0.25, 0.35] * 6  # under onset_threshold and threshold: never a candidate
+    stops, bi = onset_run(probs, user_voice(len(probs) * FRAME / RATE, 0.2), keyword_enabled=False)
+    assert stops == []
+    assert duck_snap(bi)["started"] == 0 and not bi.duck.ducking(0.5)
+
+
+def test_a_cough_ducks_then_releases_without_a_cut():
+    probs = [0.0, 0.0, 0.9, 0.0, 0.0, 0.0, 0.0, 0.0]  # one confident frame: a cough, a click
+    stops, bi = onset_run(probs, user_voice(8 * FRAME / RATE, 0.1), keyword_enabled=False)
+    assert stops == []
+    snap = duck_snap(bi)
+    assert (snap["started"], snap["released"], snap["cut"]) == (1, 1, 0)
+    # from the cough frame to the end of release_ms (64 ms: two frames) of non-speech
+    assert snap["last_ms"] == pytest.approx(3 * FRAME_MS) and snap["max_ms"] == snap["last_ms"]
+    cough = 2 * FRAME / RATE
+    assert bi.duck.ducking(cough + 0.01)
+    assert not bi.duck.ducking(cough + 3 * FRAME / RATE)  # released: later audio at full gain
+
+
+def test_candidate_frames_inside_the_release_window_keep_one_episode():
+    probs = [0.9, 0.0, 0.9, 0.0, 0.0, 0.0, 0.0, 0.0]
+    stops, bi = onset_run(probs, user_voice(8 * FRAME / RATE, 0.1), keyword_enabled=False)
+    snap = duck_snap(bi)
+    assert stops == [] and (snap["started"], snap["released"]) == (1, 1)
+    assert snap["last_ms"] == pytest.approx(5 * FRAME_MS)
+
+
+def test_a_fricative_onset_ducks_and_its_cut_counts_as_a_cut_duck():
+    stops, bi = onset_run([0.5, 0.6, 0.55, 0.3], hiss(4), keyword_enabled=False)
+    snap = duck_snap(bi)
+    assert len(stops) == 1
+    assert (snap["started"], snap["released"], snap["cut"]) == (1, 0, 1)
+    assert snap["last_ms"] == pytest.approx(2 * FRAME_MS)  # the two onset frames
+    assert not bi.duck.ducking(0.01)  # the cut clears the duck: the next answer is at full gain
+
+
+def test_ducking_can_be_switched_off_and_the_cut_still_happens():
+    stops, bi = onset_run(
+        [0.5, 0.6, 0.55, 0.3], hiss(4), keyword_enabled=False, duck={"enabled": False}
+    )
+    assert len(stops) == 1 and duck_snap(bi)["started"] == 0
+
+
+def test_the_robots_own_echo_does_not_duck():
+    w = World()
+    w.speak(3.0)
+    w.feed(3.0)
+    assert w.bargein.snapshot()["echo_frames"] > 20 and duck_snap(w.bargein)["started"] == 0
+
+
+def test_real_speech_ducks_then_cuts_at_the_same_latency_as_without_ducking():
+    def run(enabled):
+        cfg = RoboEmotConfig.model_validate({"voice": {"barge_in": {"duck": {"enabled": enabled}}}})
+        w = World(["ciao", "ciao robot come stai"], cfg=cfg)
+        w.speak(5.0)
+        w.feed(1.0)
+        w.feed(2.0, user_voice(1.5, 0.21), user_at=0.5)
+        assert len(w.stops) == 1
+        return w.bargein.snapshot()
+
+    on, off = run(True), run(False)
+    assert on["latency"]["onset_to_stop"] == off["latency"]["onset_to_stop"]  # SPEC 13
+    assert on["latency"]["detect_to_stop"] == off["latency"]["detect_to_stop"]
+    assert on["latency"]["onset_to_stop"]["last_ms"] < 200
+    assert (on["duck"]["started"], on["duck"]["cut"]) == (1, 1) and off["duck"]["started"] == 0
+
+
+def test_the_end_of_the_robots_speech_releases_the_duck_and_clears_the_gain():
+    probs = [0.0, 0.9, 0.0]
+    stops, bi = onset_run(probs, user_voice(3 * FRAME / RATE, 0.1), keyword_enabled=False)
+    assert duck_snap(bi)["started"] == 1 and duck_snap(bi)["released"] == 0
+    bi.reset()  # the listener: the robot stopped speaking
+    snap = duck_snap(bi)
+    assert (snap["released"], snap["cut"]) == (1, 0)
+    assert not bi.duck.ducking(FRAME / RATE + 0.01)
+    bi.reset()  # nothing more to count
+    assert duck_snap(bi)["released"] == 1
+
+
+def test_the_snapshot_reports_how_much_audio_was_queued_when_the_duck_started():
+    now = [0.0]
+    bi = BargeIn(
+        RoboEmotConfig.model_validate({"voice": {"barge_in": {"keyword_enabled": False}}}),
+        ScriptedVAD([0.9, 0.0, 0.0, 0.0]),
+        SimpleNamespace(start=lambda *a: None, accept=lambda a: None, reset=lambda: None),
+        None,
+        language=lambda: "en",
+        clock=lambda: now[0],
+    )
+    bi.bind(lambda: None, lambda: None, None)
+    bi.duck.apply(np.zeros(RATE * 3, np.float32), RATE, 0.0)  # the speech output pushed 3 s
+    audio = user_voice(4 * FRAME / RATE, 0.1)
+    for i in range(0, audio.size, CHUNK):
+        now[0] = (i + CHUNK) / RATE
+        bi.on_chunk(
+            SimpleNamespace(samples=audio[i : i + CHUNK], rate_hz=RATE, stamp=now[0], gap=False)
+        )
+    snap = duck_snap(bi)
+    # the duck starts on the first frame, decided when the first chunk arrives (now = 64 ms)
+    assert snap["queued_last_ms"] == pytest.approx(3000 - 64)
+    assert snap["queued_max_ms"] == snap["queued_last_ms"]
+    assert all(isinstance(v, (int, float)) or v is None for v in snap.values())

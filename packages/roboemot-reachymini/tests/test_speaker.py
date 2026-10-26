@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import math
+import time
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from roboemot.config.schema import BargeInDuckConfig, RegisterParams, RoboEmotConfig, StateEffects
 from roboemot.voice.activity import SpeechActivity
+from roboemot.voice.bargein import PlaybackReference
+from roboemot.voice.duck import DuckGain
+from roboemot.voice.speech import SpeechOutput
+from roboemot.voice.tts import AudioChunk
 from roboemot_reachymini.speaker import ReachySpeaker
 
 
@@ -294,3 +301,61 @@ def test_a_rate_change_ends_the_previous_stream_first():
     out = np.concatenate(log.pushed)
     assert out.size == ref.size and np.abs(out - ref).max() < 1e-5
     assert sp.end_stream() == 0.0  # nothing left to flush
+
+
+class ToneBackend:
+    """One sentence of a 300 Hz tone at 0.5 amplitude, in 100 ms chunks."""
+
+    name, controls = "tone", frozenset()
+
+    async def synthesize(self, text, delivery, *, language, voice):
+        t = np.arange(1600) / 16000
+        for _ in range(5):
+            yield AudioChunk((0.5 * np.sin(2 * np.pi * 300 * t)).astype(np.float32), 16000)
+
+    def available(self):
+        return True
+
+    def cancel(self):
+        pass
+
+    async def warm(self, language, voice):
+        pass
+
+    def apply_config(self, voice):
+        pass
+
+    async def aclose(self):
+        pass
+
+
+def test_the_echo_reference_holds_the_ducked_audio_the_speaker_really_played():
+    """SPEC 8 stage 8: the echo guard compares the microphone with what played, after the duck."""
+    mini, log = fake()
+    ref = PlaybackReference(16000, 2.0)
+    sp = ReachySpeaker(mini, 100, clock=time.monotonic, reference=ref)
+    sp.start_playing()
+    out = SpeechOutput(RoboEmotConfig(), sp, ToneBackend())
+    out.duck = DuckGain(BargeInDuckConfig(gain=0.25))
+    out.duck.duck(0.0, math.inf)
+    out.start()
+    try:
+        out.say(
+            "Ciao.",
+            language="it",
+            register=RegisterParams(),
+            circadian=StateEffects(),
+            mood=None,
+            intensity=0.0,
+        )
+        end = time.monotonic() + 3.0
+        while out.sentences_spoken == 0 and time.monotonic() < end:
+            time.sleep(0.005)
+        assert out.sentences_spoken == 1
+    finally:
+        out.close()
+    pushed = np.concatenate(log.pushed)
+    assert float(np.abs(pushed).max()) == pytest.approx(0.125, abs=0.01)  # 0.5 at 0.25 gain
+    until = sp.playing_until()
+    played = ref.window(until - 0.5, until)
+    assert float(np.abs(played).max()) == pytest.approx(0.125, abs=0.01)

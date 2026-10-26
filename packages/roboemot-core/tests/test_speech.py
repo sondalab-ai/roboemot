@@ -14,7 +14,8 @@ import httpx
 import numpy as np
 import pytest
 from roboemot.bus import Bus
-from roboemot.config.schema import RegisterParams, RoboEmotConfig, StateEffects
+from roboemot.config.schema import BargeInDuckConfig, RegisterParams, RoboEmotConfig, StateEffects
+from roboemot.voice.duck import DuckGain
 from roboemot.voice.speech import SpeechOutput, ends_with_question
 from roboemot.voice.tts import AudioChunk, FallbackTTS, TTSError
 from test_tts import SpeechServer, openai_backend
@@ -972,3 +973,54 @@ def test_a_dropped_sentence_does_not_repeat_a_delivery_of_its_reply(make):
     later = say(out, "Quattro.", utterance=u)
     assert later is not None
     assert out._said[u][0] == 4  # the drop consumed index 2, the sequence goes on
+
+
+# ------------------------------------------------------------------ barge-in ducking (SPEC 8)
+
+
+class PlayingSink(FakeSink):
+    """Keeps the samples and a playback timeline, as the robot's speaker does."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.samples: list[np.ndarray] = []
+        self.until = -math.inf
+
+    def push_audio_sample(self, samples, rate_hz):
+        self.samples.append(np.array(samples, np.float32))
+        self.until = max(self.until, time.monotonic()) + samples.size / rate_hz
+        return super().push_audio_sample(samples, rate_hz)
+
+    def playing_until(self):
+        return self.until
+
+
+def spoken_with(make, duck):
+    sink = PlayingSink()
+    out = make(FakeBackend(pieces=3), sink=sink)
+    out.duck = duck
+    say(out, "Ciao.")
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    frames = [db for _, db in out.timeline.frames_between(-math.inf, math.inf)]
+    return np.concatenate(sink.samples), frames
+
+
+def test_a_duck_lowers_what_the_sink_gets_but_not_the_speech_timeline(make):
+    duck = DuckGain(BargeInDuckConfig(gain=0.25))
+    duck.duck(0.0, math.inf)  # every sample plays inside the episode
+    ducked, ducked_frames = spoken_with(make, duck)
+    plain, plain_frames = spoken_with(make, None)
+    assert ducked == pytest.approx(0.25 * plain)
+    # the speaking motion reads the timeline: it sees the sentence as spoken, not the duck
+    assert ducked_frames and ducked_frames == pytest.approx(plain_frames)
+
+
+def test_stop_clears_the_duck_so_the_next_answer_plays_at_full_gain(make):
+    sink = PlayingSink()
+    out = make(FakeBackend(), sink=sink)
+    out.duck = DuckGain(BargeInDuckConfig(gain=0.25))
+    out.duck.duck(0.0, math.inf)
+    out.stop()
+    say(out, "Ciao.")
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    assert np.concatenate(sink.samples) == pytest.approx(1.0)
