@@ -74,6 +74,9 @@ class FakeASR:
     def reset(self):
         self.resets += 1
 
+    def stats(self):
+        return {}
+
 
 class Selector:
     def __init__(self):
@@ -759,3 +762,175 @@ def test_no_reading_on_a_robot_with_a_sound_direction_needs_the_wake_word():
     r.say()
     assert not r.utterances[0].addressed
     assert r.listener.snapshot()["direction"]["degraded"]["silent"] == 1
+
+
+# ---- realtime account (SPEC 8, 13)
+
+
+class SlowASR(FakeASR):
+    """Each accept costs ``delay_s`` of wall time."""
+
+    def __init__(self, *a, delay_s=0.002, **kw):
+        super().__init__(*a, **kw)
+        self.delay_s = delay_s
+
+    def accept(self, samples):
+        time.sleep(self.delay_s)
+        return super().accept(samples)
+
+
+def test_realtime_block_has_stage_costs_lag_and_dropped_audio():
+    r = Rig(["ciao"])
+    r.asr = SlowASR(["ciao"])
+    r.asr.loaded = list(r.cfg.voice.asr.models)
+    r.listener._asr = r.asr
+    r.say(1.0)
+    r.t += 0.5  # half a second lost in the hub before the next chunk
+    r.feed(silence(0.2), gap=True)
+    rt = r.listener.snapshot()["realtime"]
+    total = rt["total"]
+    fed = 1.0 + r.cfg.voice.vad.end_silence_ms / 1000 + 0.2 + 0.2
+    assert total["audio_s"] == pytest.approx(fed, abs=CHUNK / RATE)
+    assert total["dropped_s"] == pytest.approx(0.5, abs=1e-6)
+    cost = total["ms_per_audio_s"]
+    assert set(cost) == {
+        "vad",
+        "asr_accept",
+        "asr_start",
+        "asr_finish",
+        "bargein",
+        "grammar_wait",
+        "handoff",
+        "grammar",
+        "listener_total",
+    }
+    assert cost["asr_accept"] > 0 and cost["vad"] > 0
+    assert cost["listener_total"] >= cost["asr_accept"] + cost["vad"]
+    assert total["share"] == pytest.approx(cost["listener_total"] / 1000)
+    assert rt["lag_s"] == 0.0 and rt["last_window"] is None and not rt["over_budget"]
+    assert json.loads(json.dumps(rt)) == rt
+
+
+def test_realtime_lag_is_the_age_of_the_chunk_when_read():
+    r = Rig(["ciao"])
+    r.listener.process(
+        SimpleNamespace(samples=silence(0.1), rate_hz=RATE, stamp=T0 - 3.0, gap=False)
+    )
+    rt = r.listener.snapshot()["realtime"]
+    assert rt["lag_s"] == pytest.approx(3.0) and rt["total"]["lag_max_s"] == pytest.approx(3.0)
+
+
+def test_realtime_window_rolls_and_flags_over_budget():
+    from roboemot.voice.listener_load import ListenerLoad
+
+    cfg = reachy_config().voice.listener.model_copy(
+        update={"report_window_s": 5.0, "budget_share": 0.5}
+    )
+    load = ListenerLoad(cfg)
+    for _ in range(5):
+        load.chunk(1.0, 0.8, 0.1, 0.0)  # 80 % of real time
+    load.stage("grammar", 0.2)
+    snap = load.snapshot()
+    assert snap["last_window"]["share"] == pytest.approx(0.8) and snap["over_budget"]
+    for _ in range(5):
+        load.chunk(1.0, 0.1, 0.1, 0.0)
+    snap = load.snapshot()
+    assert snap["last_window"]["share"] == pytest.approx(0.1) and not snap["over_budget"]
+    assert snap["total"]["share"] == pytest.approx(0.45)
+    assert snap["total"]["ms_per_audio_s"]["grammar"] == pytest.approx(20.0)
+
+
+# ---- fix round 1 (SPEC 8, 13)
+
+
+class QueueSource:
+    """The hub's voice queue for a running listener thread."""
+
+    def __init__(self):
+        self.q: queue.Queue = queue.Queue()
+
+    def __call__(self, timeout):
+        try:
+            return self.q.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    def push(self, samples, start):
+        for i in range(0, samples.size, CHUNK):
+            part = samples[i : i + CHUNK]
+            start += part.size / RATE
+            self.q.put(SimpleNamespace(samples=part, rate_hz=RATE, stamp=start, gap=False))
+        return start
+
+
+def until(cond, timeout_s=5.0):
+    deadline = time.monotonic() + timeout_s
+    while not cond() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return cond()
+
+
+class BrokenASR(FakeASR):
+    """A recognizer whose accept and reset both raise (a broken Vosk decoder)."""
+
+    def accept(self, samples):
+        raise RuntimeError("decoder")
+
+    def reset(self):
+        raise RuntimeError("decoder")
+
+
+def test_a_recognizer_failing_in_accept_and_reset_does_not_end_the_listener_thread():
+    r = Rig(["ciao"])
+    r.asr = BrokenASR(["ciao"])
+    r.asr.loaded = list(r.cfg.voice.asr.models)
+    r.listener._asr = r.asr
+    source = QueueSource()
+    r.listener._source = source
+    r.listener.start()
+    try:
+        t = source.push(voice(seconds=1.0), T0)
+        assert until(lambda: r.listener.snapshot()["errors"] >= 1)
+        t = source.push(voice(seconds=0.5), t)
+        assert until(lambda: source.q.empty())
+        assert r.listener._thread is not None and r.listener._thread.is_alive()
+        assert r.listener.snapshot()["state"] == "running"
+    finally:
+        r.listener.stop()
+
+
+def test_a_hand_off_on_the_listener_thread_counts_in_the_realtime_total():
+    """The hand-off (prosody, wake gate, publish, on_utterance) is listener work: it runs from
+    the read loop once the background pass is done, and must be in listener_total."""
+    from roboemot.voice.grammar import GrammarSpotter
+    from test_voice_grammar import Decoder, config, vocab
+
+    hold_s, deliver_s = 0.05, 0.3
+
+    class SlowDecoder(Decoder):
+        def __call__(self, language, audio, phrases):
+            time.sleep(hold_s)
+            return super().__call__(language, audio, phrases)
+
+    cfg = config()
+    r = Rig(
+        ["ciao"],
+        cfg=cfg,
+        grammar=GrammarSpotter(cfg.voice.grammar, SlowDecoder([("ciao", 1.0)]), vocab(), RATE),
+        grammar_background=True,
+    )
+    r.listener._on_utterance = lambda u: (time.sleep(deliver_s), r.utterances.append(u))
+    source = QueueSource()
+    r.listener._source = source
+    r.listener.start()
+    try:
+        t = source.push(voice(seconds=1.0), T0)
+        source.push(silence(r.cfg.voice.vad.end_silence_ms / 1000 + 0.2), t)
+        assert until(lambda: len(r.utterances) == 1)
+        total = r.listener.snapshot()["realtime"]["total"]
+        busy_s = total["ms_per_audio_s"]["listener_total"] * total["audio_s"] / 1000
+        assert busy_s >= deliver_s
+        handoff_s = total["ms_per_audio_s"]["handoff"] * total["audio_s"] / 1000
+        assert handoff_s >= deliver_s
+    finally:
+        r.listener.stop()

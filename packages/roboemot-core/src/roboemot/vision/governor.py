@@ -4,7 +4,8 @@
 Stage rates come from ``vision.rates`` (``<stage>_hz``). Scales multiply: the circadian
 ``vision_rate_scale``, a load scale the CPU and thermal governor of SPEC 13 sets, and the
 conversation scale (``vision.rates.conversation_scale`` while the robot thinks or speaks, SPEC 8,
-so the TTS keeps its CPU). A scale of 0 turns every stage off. Decisions use capture stamps
+so the TTS keeps its CPU, and ``listening_scale`` while the user speaks, so the listener keeps
+up). A scale of 0 turns every stage off. Decisions use capture stamps
 only, so replays are deterministic; a frame that arrives before its stage is due is dropped,
 never queued (latest-wins).
 """

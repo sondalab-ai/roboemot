@@ -10,13 +10,24 @@ One thread reads ``source(timeout)`` (the audio hub's voice queue), and for each
 2. runs the VAD endpointer; the ASR only ever sees speech (pre-roll included);
 3. on speech start picks the language, runs the fast path (head turn, ``speech.heard``) and
    starts the recognizer; on each partial runs the keyword spotter;
-4. on speech end finishes the ASR, runs the wake gate (with the voice-at-face check, whose
-   ``direction`` samples are taken on speech start and on each piece of utterance audio) and
-   builds an ``Utterance``: handed to ``on_utterance`` (the conversation, in-process) and
-   announced on the bus as ``percept.utterance`` without its text.
+4. on speech end finishes the ASR and submits the utterance's grammar pass to the grammar
+   worker (its own thread, ``roboemot.voice.grammar_worker``), then keeps reading audio;
+5. hands the utterance off once the pass is done, its wait (``voice.grammar.handoff_timeout_s``)
+   is over (free-text keywords only, counted ``timeouts``). The next utterance starting, or a
+   gap, waits for the pass within the same deadline first (on a lagging listener the next
+   utterance is already queued); the robot speaking, a barge-in or a pause hand off at once with
+   the result so far (counted ``superseded``). A finished utterance is never dropped. The
+   hand-off runs the wake gate (with the voice-at-face check, whose ``direction`` samples are
+   taken on speech start and on each piece of utterance audio) and builds an ``Utterance``:
+   handed to ``on_utterance`` (the conversation, in-process) and announced on the bus as
+   ``percept.utterance`` without its text. ``on_activity`` sees the utterance in progress until
+   then.
 
 Chunk stamps are the monotonic time the chunk *ends*; the endpointer wants its start. The work
-per utterance is bounded by ``voice.vad.max_utterance_s``. Audio and text are never logged.
+per utterance is bounded by ``voice.vad.max_utterance_s``. The ``realtime`` block of the report
+(``ListenerLoad``) says whether the listener keeps up: its time per second of audio by stage, its
+lag behind the microphone and the audio lost before it read it (SPEC 13). Audio and text are
+never logged.
 """
 
 from __future__ import annotations
@@ -37,7 +48,9 @@ from ..config.schema import RoboEmotConfig
 from .activity import SpeechActivity
 from .asr import ASRBackend, ASREvent, resolve_language
 from .direction import VoiceDirection
-from .fastpath import FastPath
+from .fastpath import FastPath, GrammarPass
+from .grammar_worker import GrammarJob, GrammarWorker
+from .listener_load import ListenerLoad
 from .speech_features import Prosody
 from .vad import Endpointer, SpeechAudio, SpeechEnd, SpeechStart
 from .wake import WakeGate
@@ -46,6 +59,7 @@ log = logging.getLogger(__name__)
 TOPIC = "percept.utterance"
 POLL_S = 0.1
 JOIN_S = 2.0
+MS_PER_S = 1000.0
 
 
 class VoiceChunkLike(Protocol):
@@ -92,8 +106,23 @@ class UtteranceInfo:
     words_per_s: float | None
 
 
+@dataclass
+class _Handoff:
+    """A finished utterance waiting for its grammar pass (``job``) until ``deadline``."""
+
+    ev: SpeechEnd
+    text: str = field(repr=False)
+    language: str
+    grammar_pass: GrammarPass | None
+    job: GrammarJob | None
+    ended: float
+    deadline: float
+
+
 class VoiceListener:
-    """See the module docstring. ``process`` is the synchronous step; ``start`` runs it."""
+    """See the module docstring. ``process`` is the synchronous step; ``start`` runs it.
+    ``grammar_background`` runs the grammar pass on its own thread (the app); without it the
+    pass runs inline at the end of the utterance (tests, deterministic)."""
 
     def __init__(
         self,
@@ -115,6 +144,8 @@ class VoiceListener:
         enrolled_in_view: Callable[[float], bool] = lambda now: False,
         direction: VoiceDirection | None = None,
         clock: Callable[[], float] = time.monotonic,
+        timer: Callable[[], float] = time.perf_counter,
+        grammar_background: bool = False,
     ) -> None:
         self._source = source
         self._endpointer = endpointer
@@ -131,8 +162,21 @@ class VoiceListener:
         self._on_activity = on_activity
         self._enrolled_in_view = enrolled_in_view
         self._clock = clock
+        self._timer = timer
         self._direction = direction
         self._gate = WakeGate("always", 0.0)  # configured by apply_config
+        self.load = ListenerLoad(cfg.voice.listener)
+        self._last_end: float | None = None  # stamp of the end of the last chunk read
+        self._grammar = GrammarWorker(
+            background=grammar_background,
+            on_spent=lambda seconds: self.load.stage("grammar", seconds),
+            timer=timer,
+            clock=clock,
+        )
+        self._pending: _Handoff | None = None
+        self._handoff = {"waits": 0, "timeouts": 0, "superseded": 0, "dropped_on_stop": 0}
+        self._wait_last_s = 0.0
+        self._wait_max_s = 0.0
         self.apply_config(cfg)
         self._stop = threading.Event()
         self._paused = threading.Event()
@@ -148,7 +192,8 @@ class VoiceListener:
         }
         # Written by the listener thread, read by snapshot(): single-word stores, atomic in
         # CPython, so no lock; the counters have their own.
-        self._active = False
+        self._active = False  # an utterance is in progress or waiting for its hand-off
+        self._recording = False  # the recognizer is taking the utterance's audio
         self._muted = False
         self._open_until = -math.inf  # barge-in handoff: chunks starting before this pass the gate
         self._state = "off"
@@ -162,6 +207,7 @@ class VoiceListener:
         self._fast.apply_config(cfg.voice)
         fp = cfg.voice.fastpath
         self._gate.apply(cfg.voice.wake_word_policy, fp.addressed_window_s, fp.window_max_s)
+        self.load.apply_config(cfg.voice.listener)
         if self._direction is not None:
             self._direction.apply_config(cfg.voice.direction)
 
@@ -188,7 +234,12 @@ class VoiceListener:
         self._stop.set()
         if self._thread is not None:
             shutdown.join(self._thread, JOIN_S)
+            if not self._thread.is_alive():
+                self._drop_pending()
             self._thread = None
+        else:
+            self._drop_pending()
+        self._grammar.close()
 
     def pause_listening(self) -> None:
         """Run no VAD or recognizer until :meth:`resume_listening` (the robot is asleep, SPEC
@@ -221,6 +272,18 @@ class VoiceListener:
         if grammar is not None:
             snap["grammar"] = grammar
         snap["vad"] = self._endpointer.snapshot()
+        snap["realtime"] = {**self.load.snapshot(), "recognizers": self._asr.stats()}
+        with self._lock:
+            snap["grammar_handoff"] = {
+                **self._handoff,
+                "pending": self._pending is not None,
+                "replaced": self._grammar.replaced,
+                "skipped_stale": self._grammar.skipped_stale,
+                "wait_ms": {
+                    "last": self._wait_last_s * MS_PER_S,
+                    "max": self._wait_max_s * MS_PER_S,
+                },
+            }
         return snap
 
     def _run(self) -> None:
@@ -251,23 +314,30 @@ class VoiceListener:
                         self._abort()
                     except Exception as exc:
                         log.warning("voice listener: pause: %s", type(exc).__name__)
-                while self._source(0.0) is not None:
-                    pass
+                while (chunk := self._source(0.0)) is not None:
+                    self._last_end = chunk.stamp  # a pause is not lost audio
                 self._stop.wait(POLL_S)
                 continue
             was_paused = False
-            chunk = self._source(POLL_S)
-            if chunk is None:
-                continue
+            pending = self._pending
+            wait = POLL_S if pending is None else min(POLL_S, pending.deadline - self._clock())
+            chunk = self._source(max(0.0, wait))
             try:
-                self.process(chunk)
+                if chunk is not None:
+                    self.process(chunk)
+                t0 = self._timer()
+                self.poll_handoff()  # a hand-off here is listener work outside ``process``
+                self.load.busy(self._timer() - t0)
             except Exception as exc:  # one bad chunk must not end the listener
-                self._abort()
                 self._count("errors")
                 name = type(exc).__name__
                 if name != self._last_error:
                     self._last_error = name
                     log.warning("voice listener: %s", name)
+                try:
+                    self._abort()
+                except Exception as again:  # nor a recognizer that fails to reset
+                    log.warning("voice listener: abort: %s", type(again).__name__)
 
     def _name_vocabulary(self) -> None:
         """A model loaded: check the robot's name against its vocabulary now (logs once)."""
@@ -296,25 +366,51 @@ class VoiceListener:
 
     # ---- one chunk
 
-    def _abort(self) -> None:
-        """Drop the utterance in progress and every buffered sample. The barge-in gives the
-        recognizer back first (``before_asr_reset``): its keyword worker may be using it."""
+    def _abort(self, wait: bool = False) -> None:
+        """Drop the utterance in progress and every buffered sample; one that already ended is
+        handed off first (``wait``: for its grammar pass, within its deadline). The barge-in gives
+        the recognizer back first (``before_asr_reset``): its keyword worker may be using it."""
+        self._settle(wait)
+        self._recording = False
         if self._before_asr_reset is not None:
             try:
                 self._before_asr_reset()
             except Exception as exc:
                 log.warning("voice listener: asr hand-back: %s", type(exc).__name__)
         self._endpointer.reset()
-        self._asr.reset()
+        try:
+            self._asr.reset()
+        except Exception as exc:
+            log.warning("voice listener: asr reset: %s", type(exc).__name__)
         self._fast.reset()
         self._set_active(False)
 
     def process(self, chunk: VoiceChunkLike) -> None:
-        """Handle one chunk (see the module docstring)."""
-        start = chunk.stamp - chunk.samples.size / chunk.rate_hz
+        """Handle one chunk (see the module docstring) and account for it (``realtime``)."""
+        t0 = self._timer()
+        lag = self._clock() - chunk.stamp
+        duration = chunk.samples.size / chunk.rate_hz
+        lost = 0.0
+        if chunk.gap and self._last_end is not None:
+            lost = max(0.0, chunk.stamp - duration - self._last_end)
+        self._last_end = chunk.stamp
+        try:
+            self._process(chunk, chunk.stamp - duration)
+        finally:
+            self.load.chunk(duration, self._timer() - t0, lag, lost)
+
+    def _timed(self, stage: str, fn: Callable[..., Any], *args: Any) -> Any:
+        """``fn(*args)``, its wall time added to ``stage`` of the realtime account."""
+        t0 = self._timer()
+        try:
+            return fn(*args)
+        finally:
+            self.load.stage(stage, self._timer() - t0)
+
+    def _process(self, chunk: VoiceChunkLike, start: float) -> None:
         if chunk.gap:
             self._count("gaps")
-            self._abort()
+            self._abort(wait=True)
         speaking = self._speech.speaking(start) or self._speech.speaking(chunk.stamp)
         if speaking and start >= self._open_until:
             if not self._muted:
@@ -322,8 +418,8 @@ class VoiceListener:
                 self._abort()
             self._count("dropped_speaking")
             if self._on_speaking_chunk is not None:
-                try:
-                    self._on_speaking_chunk(chunk)
+                try:  # its hand-back (resume) replays audio: counted here and in its stages
+                    self._timed("bargein", self._on_speaking_chunk, chunk)
                 except Exception as exc:
                     log.warning("voice listener: speaking-chunk hook: %s", type(exc).__name__)
             return
@@ -353,7 +449,7 @@ class VoiceListener:
     def _ingest(self, samples: np.ndarray, start: float, audio_end: float) -> None:
         """Run ``samples`` (starting at ``start``) through the endpointer and the recognizer."""
         buffered: list[np.ndarray] = []
-        for ev in self._endpointer.feed(samples, start):
+        for ev in self._timed("vad", self._endpointer.feed, samples, start):
             if isinstance(ev, SpeechAudio):
                 buffered.append(ev.samples)
                 continue
@@ -366,8 +462,10 @@ class VoiceListener:
         self._feed(buffered, audio_end)
 
     def _feed(self, parts: list[np.ndarray], audio_end: float) -> None:
-        if parts and self._active:
-            self._partial(self._asr.accept(np.concatenate(parts)), audio_end)
+        if parts and self._recording:
+            self._partial(
+                self._timed("asr_accept", self._asr.accept, np.concatenate(parts)), audio_end
+            )
             self._sample_direction(audio_end)
 
     def _partial(self, event: ASREvent | None, audio_end: float) -> None:
@@ -377,6 +475,7 @@ class VoiceListener:
     # ---- utterance edges
 
     def _begin(self, ev: SpeechStart, audio_end: float) -> None:
+        self._settle(wait=True)  # the per-utterance state below is the pending one's until then
         try:
             speaker = self._speaker_language()
         except Exception:
@@ -385,39 +484,121 @@ class VoiceListener:
             self._asr.languages, speaker, self._cfg.conversation.language
         )
         self._fast.begin(ev.stamp, audio_end, self._language)
-        self._asr.start(self._language)
+        self._timed("asr_start", self._asr.start, self._language)
+        self._recording = True
         self._set_active(True)
         if self._direction is not None:
             self._direction.begin()
         self._sample_direction(audio_end)
-        self._partial(self._asr.accept(ev.pre_roll), audio_end)
+        self._partial(self._timed("asr_accept", self._asr.accept, ev.pre_roll), audio_end)
 
     def _end(self, ev: SpeechEnd) -> None:
-        """The utterance ended: the recognizer's final (seconds on a loaded robot), the gate and
-        the hand-off. The Live phase stays ``listening`` until it is handed off or dropped."""
-        if not self._active:
+        """The utterance ended: the recognizer's final (seconds on a loaded robot) and the
+        grammar pass submitted. The Live phase stays ``listening`` until it is handed off or
+        dropped."""
+        if not self._recording:
             return
+        self._recording = False
         try:
-            self._finish_utterance(ev)
-        finally:
+            text = self._timed("asr_finish", self._asr.finish).strip()
+        except BaseException:
             self._set_active(False)
-
-    def _finish_utterance(self, ev: SpeechEnd) -> None:
-        text = self._asr.finish().strip()
+            raise
         if not text:
             self._count("empty")
             self._fast.reset()
+            self._set_active(False)
             return
+        grammar_pass = self._fast.grammar_pass(text, ev.audio[: self._last_sample(ev)])
+        now = self._clock()
+        deadline = now + self._cfg.voice.grammar.handoff_timeout_s
+        job = None if grammar_pass is None else self._grammar.submit(grammar_pass.run, deadline)
+        self._pending = _Handoff(ev, text, self._language, grammar_pass, job, now, deadline)
+        self.poll_handoff()
+
+    def _last_sample(self, ev: SpeechEnd) -> int:
+        """Index in ``ev.audio`` just past the last speech frame (the end silence off)."""
+        rate = self._cfg.voice.sample_rate_hz
+        return round((ev.last_speech_stamp - ev.audio_stamp + self._endpointer.frame_s) * rate)
+
+    def poll_handoff(self) -> None:
+        """Hand the waiting utterance off if its grammar pass is done or its wait is over
+        (the listener thread calls this after every chunk and every empty read)."""
+        p = self._pending
+        if p is None:
+            return
+        if p.job is None or (p.job.done and p.job.ran):
+            self._hand_off(p.job.result if p.job is not None else frozenset())
+        elif p.job.done or self._clock() >= p.deadline:  # skipped as stale, or out of time
+            self._count_handoff("timeouts")
+            self._hand_off(frozenset())
+
+    def _settle(self, wait: bool) -> None:
+        """Hand the waiting utterance off now; with ``wait``, after waiting for its grammar
+        pass up to its deadline (else a timeout), without, with its result only if it is in
+        (else superseded)."""
+        p = self._pending
+        if p is None:
+            return
+        if wait and p.job is not None and not p.job.done:
+            self._timed("grammar_wait", self._wait_for, p)
+            if self._stop.is_set() and not p.job.done:
+                self._drop_pending()
+                return
+        if p.job is not None and not p.job.done:
+            self._count_handoff("timeouts" if wait else "superseded")
+            self._hand_off(frozenset())
+        else:
+            self.poll_handoff()
+
+    def _wait_for(self, p: _Handoff) -> None:
+        """Wait for ``p``'s pass until its deadline (as wall time from now), or ``stop``."""
+        assert p.job is not None
+        end = self._timer() + max(0.0, p.deadline - self._clock())
+        while not p.job.done and not self._stop.is_set():
+            left = end - self._timer()
+            if left <= 0:
+                return
+            p.job.wait(min(POLL_S, left))
+
+    def _drop_pending(self) -> None:
+        """The listener stops with an utterance still waiting: drop it, counted."""
+        if self._pending is None:
+            return
+        self._pending = None
+        self._count_handoff("dropped_on_stop")
+        self._set_active(False)
+
+    def _count_handoff(self, key: str) -> None:
+        with self._lock:
+            self._handoff[key] += 1
+
+    def _hand_off(self, heard: frozenset[str]) -> None:
+        p, self._pending = self._pending, None
+        if p is None:
+            return
+        waited = self._clock() - p.ended
+        with self._lock:
+            self._handoff["waits"] += 1
+            self._wait_last_s = waited
+            self._wait_max_s = max(self._wait_max_s, waited)
+        try:
+            self._timed("handoff", self._deliver, p, heard)
+        finally:
+            self._set_active(False)
+
+    def _deliver(self, p: _Handoff, heard: frozenset[str]) -> None:
+        ev, text = p.ev, p.text
         rate = self._cfg.voice.sample_rate_hz
         first = max(0, round((ev.start_stamp - ev.audio_stamp) * rate))
-        last = round((ev.last_speech_stamp - ev.audio_stamp + self._endpointer.frame_s) * rate)
         fast = self._fast.end(
             text,
-            ev.audio[first:last],
+            ev.audio[first : self._last_sample(ev)],
             rate,
             last_speech_stamp=ev.last_speech_stamp,
             endpoint_stamp=ev.endpoint_stamp,
-            grammar_audio=ev.audio[:last],  # pre-roll on, the end silence off
+            grammar_pass=p.grammar_pass,
+            heard=heard,
         )
         addressed = self._gate.decide(
             wake_word=fast.wake_word,
@@ -430,7 +611,7 @@ class VoiceListener:
         self._fast.impulses(fast, addressed)
         utterance = Utterance(
             text,
-            self._language,
+            p.language,
             ev.start_stamp,
             ev.last_speech_stamp,
             ev.endpoint_stamp,

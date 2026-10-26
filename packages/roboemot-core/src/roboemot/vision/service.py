@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .. import paths, shutdown
+from .. import paths, priority, shutdown
 from ..bus import Bus
 from ..config.schema import RoboEmotConfig
 from ..registry import FileStore, Matcher, Registry
@@ -117,6 +117,7 @@ class VisionService:
 
     def _pump(self) -> None:
         """Pump frames; a failing camera read is counted, logged once per type, and retried."""
+        priority.lower_current()
         reported: str | None = None
         while not self._stop.is_set():
             try:

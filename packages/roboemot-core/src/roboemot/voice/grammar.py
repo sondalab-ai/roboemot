@@ -30,7 +30,7 @@ phrases, the name and aliases, ``keyword_min_word_conf`` for the others):
 
 An utterance gets no pass when its free text has no usable word, more distinct words than
 ``max_competitor_words`` (cutting the list would leave part of the audio to the keywords alone),
-or lasts longer than ``max_audio_s`` (the pass runs on the listener thread before the hand-off), or
+or lasts longer than ``max_audio_s`` (the hand-off to the conversation waits for the pass), or
 when the model has no runtime graph (a big static-graph Vosk model ignores grammars). Hits only
 add to what the free text found. The phrase part of the grammar is rebuilt when its inputs change
 (a config hot reload, the robot's name, a model that finished loading); the report counts builds.
@@ -131,9 +131,10 @@ class _Stats:
 
 
 class GrammarSpotter:
-    """See the module docstring. ``check`` runs on the listener thread; ``snapshot`` anywhere.
-    The listener thread is the only writer of the grammar cache, so it reads it without the lock;
-    the report reads it under the lock."""
+    """See the module docstring. ``check`` runs on one thread at a time (the listener's grammar
+    worker, or the listener itself inline); ``snapshot`` anywhere. That thread is the only
+    writer of the grammar cache, so it reads it without the lock; the report reads it under the
+    lock."""
 
     def __init__(
         self,

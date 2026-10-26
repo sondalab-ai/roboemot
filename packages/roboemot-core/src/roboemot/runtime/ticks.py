@@ -162,14 +162,29 @@ def circadian_vision_scale(cfg: Any, circadian: CircadianModel | None) -> float:
     return effects.vision_rate_scale
 
 
-def conversation_vision_scale(cfg: Any, phase: ConversationPhase | None) -> float:
+def conversation_vision_scale(
+    cfg: Any, phase: ConversationPhase | None, other_scale: float = 1.0
+) -> float:
     """The vision rate multiplier of the conversation (SPEC 5, 8, 13): ``vision.rates.
-    conversation_scale`` while the robot thinks or speaks, so the TTS keeps its CPU, else 1.
-    An utterance in progress keeps 1 even while the robot thinks or speaks, because the face
-    attributes the speech; no conversation is 1 too."""
+    conversation_scale`` while the robot thinks or speaks, so the TTS keeps its CPU, and
+    ``listening_scale`` while an utterance is in progress, so the listener keeps up (the lower of
+    the two when both hold); 1 when idle or with no conversation. ``other_scale`` is the product
+    of the governor's other scales (circadian, load): the listening scale is raised so that the
+    face detection period at the resulting rate leaves ``listening_face_detections`` detections
+    within the age the voice-at-face check accepts, and is 1 when even the full rate cannot."""
     if phase is None:
         return 1.0
     name, listening = phase.current()
-    if listening or name not in (THINKING, SPEAKING):
+    rates = cfg.vision.rates
+    talking = name in (THINKING, SPEAKING)
+    if not listening:
+        return rates.conversation_scale if talking else 1.0
+    scale = (
+        min(rates.listening_scale, rates.conversation_scale) if talking else rates.listening_scale
+    )
+    age = cfg.voice.direction.face_max_age_s
+    age = cfg.attention.stale_s if age is None else age
+    full = rates.detection_hz * other_scale * age  # detections within the age at scale 1
+    if full <= 0:
         return 1.0
-    return cfg.vision.rates.conversation_scale
+    return min(1.0, max(scale, rates.listening_face_detections / full))

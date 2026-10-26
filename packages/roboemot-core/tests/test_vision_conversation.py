@@ -37,25 +37,60 @@ def test_defaults():
     assert SCALE == 0.5
 
 
-def test_phase_sets_the_scale_while_thinking_or_speaking_only():
+LISTEN = CFG.vision.rates.listening_scale
+
+
+def test_phase_sets_the_scale_while_thinking_speaking_or_listening():
     speaking = {"on": False}
     phase = ConversationPhase(lambda now: speaking["on"])
     assert conversation_vision_scale(CFG, None) == 1.0
     assert conversation_vision_scale(CFG, phase) == 1.0  # idle
     phase.set_listening(True)
-    assert conversation_vision_scale(CFG, phase) == 1.0  # the face attributes the speech
+    assert conversation_vision_scale(CFG, phase) == LISTEN  # the listener keeps its CPU
     phase.begin_thinking()
-    assert conversation_vision_scale(CFG, phase) == 1.0  # still talking while the stream runs
+    assert conversation_vision_scale(CFG, phase) == min(LISTEN, SCALE)  # never below the floor
     phase.set_listening(False)
     assert conversation_vision_scale(CFG, phase) == SCALE
     speaking["on"] = True
     phase.end_thinking()
     assert conversation_vision_scale(CFG, phase) == SCALE
     phase.set_listening(True)
-    assert conversation_vision_scale(CFG, phase) == 1.0  # a barge-in while speaking
+    assert conversation_vision_scale(CFG, phase) == min(LISTEN, SCALE)  # a barge-in
     speaking["on"] = False
     phase.set_listening(False)
-    assert conversation_vision_scale(CFG, phase) == 1.0
+    assert conversation_vision_scale(CFG, phase) == 1.0  # released after the hand-off
+
+
+def test_listening_keeps_enough_face_detections_for_the_voice_at_face_check():
+    """SPEC 8 stage 2: the faces the check reads must stay younger than its age, whatever the
+    circadian state. Awake (8 Hz x 0.5, 4 s) leaves 16 detections; drowsy (x 0.5) 8; resting
+    (x 0.05) only 1.6 even at full rate, so listening does not slow vision there."""
+    phase = ConversationPhase(lambda now: False)
+    phase.set_listening(True)
+    rates = CFG.vision.rates
+    age = CFG.attention.stale_s
+    assert CFG.voice.direction.face_max_age_s is None and age == 4.0
+    assert conversation_vision_scale(CFG, phase, 1.0) == LISTEN
+    assert conversation_vision_scale(CFG, phase, 0.5) == LISTEN
+    assert conversation_vision_scale(CFG, phase, 0.05) == 1.0
+    need = rates.listening_face_detections / (rates.detection_hz * 0.1 * age)
+    assert conversation_vision_scale(CFG, phase, 0.1) == pytest.approx(need)  # 0.625
+    for other in (1.0, 0.5, 0.1, 0.05):
+        rate = rates.detection_hz * other * conversation_vision_scale(CFG, phase, other)
+        assert rate * age >= min(rates.listening_face_detections, rates.detection_hz * other * age)
+    strict = CFG.model_copy(
+        update={
+            "voice": CFG.voice.model_copy(
+                update={"direction": CFG.voice.direction.model_copy(update={"face_max_age_s": 0.4})}
+            )
+        }
+    )
+    assert conversation_vision_scale(strict, phase, 1.0) == pytest.approx(2 / (8 * 0.4))
+
+
+def test_listening_scale_has_the_conversation_floor():
+    with pytest.raises(ValidationError):
+        RoboEmotConfig.model_validate({"vision": {"rates": {"listening_scale": 0.4}}})
 
 
 def test_conversation_scale_multiplies_the_other_scales_and_is_reported(tmp_path):

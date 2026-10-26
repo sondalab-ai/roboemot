@@ -15,7 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from roboemot import paths
+from roboemot import paths, priority
 from roboemot.affect.expression import ExpressionRenderer
 from roboemot.affect.register import RegisterTracker
 from roboemot.affect.runner import AffectRunner
@@ -265,7 +265,9 @@ def assemble(
         source,
         profile=manifest.robot.profile,
         camera_model=source.camera_model,
-        load_stages=host.load_vision_stages,
+        load_stages=lambda c, profile: priority.run_lowered(  # their ONNX Runtime pools, SPEC 13
+            priority.VISION_MODELS, host.load_vision_stages, c, profile
+        ),
         frame_spec=frame,
     )
     if perception.pipeline is not None:  # light from the frames vision already captures

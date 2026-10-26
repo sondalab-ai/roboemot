@@ -1350,12 +1350,31 @@ class VisionRates(Strict):
     conversation_scale: float = param(
         0.5,
         "Vision rate multiplier while the robot thinks or speaks (SPEC 5, 8, 13), so the TTS "
-        "keeps its CPU; an utterance in progress and idle keep 1. It also divides the new-track "
-        "burst gaps. At least 0.5, so the 3-of-5 identity decision of a track that starts while "
-        "the robot speaks stays inside the 2.5 s budget of SPEC 13, awake or drowsy, with one "
-        "missed vote",
+        "keeps its CPU; idle keeps 1, an utterance in progress uses listening_scale. It also "
+        "divides the new-track burst gaps. At least 0.5, so the 3-of-5 identity decision of a "
+        "track that starts while the robot speaks stays inside the 2.5 s budget of SPEC 13, "
+        "awake or drowsy, with one missed vote",
         ge=0.5,
         le=1,
+    )
+    listening_scale: float = param(
+        0.5,
+        "Vision rate multiplier while an utterance is in progress (from speech start to its "
+        "hand-off), so the voice listener keeps up with the microphone on a loaded CPU (SPEC 8, "
+        "13); the lower of this and conversation_scale while the robot also thinks or speaks. "
+        "Same 0.5 floor and burst-gap rule as conversation_scale. Raised as needed so that "
+        "listening_face_detections face detections still fall within the voice-at-face age",
+        ge=0.5,
+        le=1,
+    )
+    listening_face_detections: int = param(
+        2,
+        "While listening, vision runs at least fast enough for this many face detections within "
+        "voice.direction.face_max_age_s (else attention.stale_s), the age the voice-at-face "
+        "check and the enrolled-in-view rule accept, so one missed detection still leaves a "
+        "fresh face; when even the full rate cannot, the listening scale is 1",
+        ge=1,
+        le=10,
     )
 
 
@@ -2321,9 +2340,39 @@ class GrammarConfig(Strict):
     max_audio_s: float = param(
         8.0,
         "Longest utterance the grammar pass decodes (pre-roll to the last speech frame); a longer "
-        "one gets no pass (counted). The pass runs on the listener thread before the hand-off "
-        "to the conversation, so this bounds the latency it adds",
+        "one gets no pass (counted). The pass runs off the listener thread, but the hand-off to "
+        "the conversation waits for it (at most handoff_timeout_s), so this bounds the work and "
+        "the latency it adds",
         unit="s", ge=1, le=60,
+    )  # fmt: skip
+    handoff_timeout_s: float = param(
+        1.0,
+        "Longest the hand-off of an utterance to the conversation waits for its grammar pass, "
+        "which runs on its own thread while the listener keeps reading the microphone; past it "
+        "the utterance goes on with the keywords of its free text only (counted as a timeout). "
+        "Above the slowest pass measured on the CM4 under load (0.76 s, SPEC 13)",
+        unit="s", ge=0.1, le=10,
+    )  # fmt: skip
+
+
+class ListenerConfig(Strict):
+    """Real-time budget and report of the voice listener (SPEC 8, 13)."""
+
+    budget_share: float = param(
+        0.5,
+        "Report only: the listener's work per second of audio (voice activity detection, "
+        "recognizer, barge-in check, waiting for a grammar pass, the hand-off; wall time on its "
+        "thread) should stay below this share of "
+        "the audio time, so a loaded CPU still leaves it room to keep up; the debug report "
+        "flags a report window over it (over_budget). At 1 or more the microphone queue grows "
+        "and audio is dropped (SPEC 13)",
+        ge=0.05, le=1,
+    )  # fmt: skip
+    report_window_s: float = param(
+        60.0,
+        "Report only: seconds of audio per window of the listener's cost and lag figures in the "
+        "debug report (the last full window is shown next to the totals since start)",
+        unit="s", ge=5, le=3600,
     )  # fmt: skip
 
 
@@ -2638,6 +2687,9 @@ class VoiceConfig(Strict):
         return v
 
     vad: VadConfig = param({}, "Voice activity detection and endpointing (SPEC 8 stage 2)")
+    listener: ListenerConfig = param(
+        {}, "Real-time budget and cost report of the voice listener (SPEC 8, 13)"
+    )
     models_dir: str = param(
         "",
         "Folder with the voice models (Silero VAD, Vosk, Piper); empty means voice-models/ in "
@@ -3438,6 +3490,19 @@ class CatalogueConfig(Strict):
     )
 
 
+# Threads that keep audio, voice and motion in real time (SPEC 8, 10, 13): never in
+# runtime.background_threads.
+REAL_TIME_THREADS = (
+    "MainThread",
+    "roboemot-audio",
+    "roboemot-listener",
+    "roboemot-grammar",
+    "roboemot-keywords",
+    "speech-output",
+    "motion-loop",
+)
+
+
 class RuntimeConfig(Strict):
     gc_freeze: bool = param(
         True,
@@ -3461,6 +3526,31 @@ class RuntimeConfig(Strict):
         "the effective shutdown budget is at most the supervisor's kill timeout minus this",
         unit="s", ge=3, le=30, restart=True, conservative="higher",
     )  # fmt: skip
+    background_nice: int = param(
+        5,
+        "Linux: added to the nice value of the threads in background_threads, so the kernel "
+        "favours audio, the voice listener, speech and motion when the CPU is short (SPEC 13); "
+        "they still use every idle cycle. 0 leaves them alone. An unprivileged process cannot "
+        "undo it, hence the restart",
+        ge=0, le=19, restart=True,
+    )  # fmt: skip
+    background_threads: list[str] = param(
+        ["roboemot-vision", "vision-models", "roboemot-camera", "roboemot-light"],
+        "Threads lowered by background_nice, by thread name; `vision-models` names the ONNX "
+        "Runtime pool threads the vision models start when they load. The real-time threads "
+        "(MainThread, roboemot-audio, roboemot-listener, roboemot-grammar, roboemot-keywords, "
+        "speech-output, motion-loop) are refused",
+        restart=True,
+    )
+
+    @field_validator("background_threads")
+    @classmethod
+    def _not_real_time(cls, v: list[str]) -> list[str]:
+        bad = sorted(set(v) & set(REAL_TIME_THREADS))
+        if bad:
+            raise ValueError(f"runtime.background_threads may not lower real-time threads: {bad}")
+        return v
+
     pause_when_asleep: bool = param(
         True,
         "While the platform holds the motors off (the robot is asleep), pause the camera "

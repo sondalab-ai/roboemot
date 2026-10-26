@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import threading
 
-from roboemot import shutdown
+from roboemot import priority, shutdown
 from roboemot.config import ConfigStack
 from roboemot.manifest import Manifest
 from roboemot.robot_platform import RobotPlatform, RobotSession
@@ -46,12 +46,13 @@ class Runtime:
         """Build the parts, start them, tick until ``stop_event`` is set, then stop them in
         reverse order within the shutdown budget."""
         stack, manifest, host = self.stack, self.manifest, self.host
+        runtime_cfg = stack.effective().runtime
+        priority.configure(runtime_cfg.background_nice, runtime_cfg.background_threads)
         p = assemble(host, stack, manifest, self.platform, self.session)
         host.diagnostics = build_diagnostics(host, stack, manifest, p)
         stack.subscribe(make_reload(host, p))
         stack.subscribe(p.worker.on_change)
         clock = LoopClock()  # idle breathing phase clock (SPEC 7A, Drowsy)
-        runtime_cfg = stack.effective().runtime
         stop_budget_s = shutdown.capped_budget_s(
             runtime_cfg.shutdown_budget_s,
             supervisor_stop_timeout_s(load_settings_plugin(manifest.robot.id)),
