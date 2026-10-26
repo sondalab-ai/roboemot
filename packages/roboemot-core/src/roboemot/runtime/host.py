@@ -31,6 +31,7 @@ from roboemot.reflex import ReflexEngine
 from roboemot.robot_platform import AudioHub, RobotSession, Speaker
 from roboemot.runtime.live_video import LiveVideo
 from roboemot.secret_store import SecretStore
+from roboemot.soothe import SootheRunner
 from roboemot.vision import FrameSource
 from roboemot.vision.service import Perception, default_stages
 from roboemot.voice.activity import SpeechActivity
@@ -71,6 +72,7 @@ class RuntimeHost:
     bargein: BargeIn | None = None  # user speech over the robot's voice (SPEC 8 stage 8)
     voice_listener: VoiceListener | None = None  # mic -> VAD -> ASR -> utterances; voice.enabled
     speech_output: SpeechOutput | None = None  # TTS queue onto the speaker; only when voice.enabled
+    soothe_runner: SootheRunner | None = None  # idle self-soothing sound (SPEC 7B); needs voice
     traits_worker: TraitsWorker | None = None  # rates persona traits when traits_source is llm
     name_source: NameSource | None = None  # registry names for pseudonyms outside the conversation
     router_hub: RouterHub | None = None  # the one router: traits, conversation, speech, checks

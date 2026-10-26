@@ -8,6 +8,7 @@ quiet before the robot link goes away.
 from __future__ import annotations
 
 import gc
+import random
 import time
 from contextlib import ExitStack
 from typing import Any
@@ -20,6 +21,7 @@ from roboemot.health.speech_cue import Delivery, SpeechCue
 from roboemot.persona import apply_to_register, effects
 from roboemot.skills.bridge import SkillBridge
 from roboemot.skills.defaults import default_skills
+from roboemot.soothe import SootheRunner
 from roboemot.voice.factory import build_speech
 
 from .assembly import Pipeline
@@ -50,6 +52,11 @@ def offline_cue(host: RuntimeHost, stack: ConfigStack, p: Pipeline) -> SpeechCue
     )
 
 
+def effects_now(host: RuntimeHost, stack: ConfigStack, p: Pipeline) -> Any:
+    """The circadian state's effects now (the awake ones while the rhythm is off)."""
+    return p.circ.model.effects() if host.circadian else stack.effective().circadian.states["awake"]
+
+
 def start_voice_output(
     host: RuntimeHost, stack: ConfigStack, p: Pipeline, cleanup: ExitStack
 ) -> None:
@@ -63,6 +70,14 @@ def start_voice_output(
     output = host.speech_output = build_speech(p.cfg, speaker, lambda: p.hub.router, p.bus)
     cleanup.callback(output.close)
     output.start()
+    soothe = host.soothe_runner = SootheRunner(
+        p.cfg.soothe,
+        output,
+        on_event=p.runner.on_event,
+        rng=random.Random(),  # noqa: S311 (a pick and a jitter, not security)
+        volume_db=lambda: effects_now(host, stack, p).volume_db,
+    )
+    cleanup.callback(soothe.close)  # before the output goes away
     p.responder.cue = offline_cue(host, stack, p)
     if listener is None:
         return
@@ -76,11 +91,7 @@ def start_voice_output(
         affect=p.runner.engine,
         responder=p.responder,
         register=lambda: p.tracker.active.params if p.tracker.active else None,
-        circadian=lambda: (
-            p.circ.model.effects()
-            if host.circadian
-            else stack.effective().circadian.states["awake"]
-        ),
+        circadian=lambda: effects_now(host, stack, p),
         profile=profile_source(p.selector, p.world, registry, p.value_cap),
         scene=scene_source(
             p.selector,

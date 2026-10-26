@@ -8,6 +8,7 @@ import threading
 import time
 
 import numpy as np
+from roboemot.affect.clips import load_clip_library
 from roboemot.circadian.motion import FX_SOURCE, REST_SOURCE
 from roboemot.circadian.replay import replay, synthetic_day
 from roboemot.config import ConfigStack
@@ -114,7 +115,12 @@ def test_a_replayed_24_hour_light_log_moves_the_robot_through_awake_drowsy_resti
     manifest = load_manifest(app_module.DATA / "reachy-mini-wireless.yaml",
                              allow_unmeasured_dynamics=True)  # fmt: skip
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw=None)
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour,
+        manifest.channels,
+        load_clip_library(manifest),
+        body_yaw=None,
+    )
     cfg = stack.effective()
     # the register scales the rest posture; half of it is well clear of idle
     min_pitch = 0.5 * math.radians(cfg.circadian_motion.rest_pose_deg["head.pitch"])

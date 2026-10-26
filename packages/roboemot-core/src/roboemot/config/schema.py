@@ -14,6 +14,7 @@ Every field carries a default, a unit and a range. Field metadata (``json_schema
 
 from __future__ import annotations
 
+import math
 import re
 import warnings
 from typing import Any, Literal
@@ -30,6 +31,7 @@ def param(
     description: str,
     *,
     unit: str | None = None,
+    gt: float | None = None,
     ge: float | None = None,
     le: float | None = None,
     restart: bool = False,
@@ -47,6 +49,8 @@ def param(
     if admin_only:
         extra["admin_only"] = True
     kwargs: dict[str, Any] = {"description": description, "json_schema_extra": extra}
+    if gt is not None:
+        kwargs["gt"] = gt
     if ge is not None:
         kwargs["ge"] = ge
     if le is not None:
@@ -123,6 +127,7 @@ APPRAISAL_EVENTS = frozenset(
         "speech.name_called",
         "speech.loud",
         "speech.fast",
+        "self.soothe",
     }
 )
 APPRAISAL_EVENT_PREFIXES = ("link.",)  # connectivity: link.<name>.lost / .restored (SPEC 12A)
@@ -269,6 +274,36 @@ class AppraisalConfig(Strict):
             {"event": "speech.keyword.no", "valence": -0.2, "arousal": 0.1, "cooldown_s": 3},
             {"event": "speech.loud", "arousal": 0.15, "cooldown_s": 10},
             {"event": "speech.fast", "arousal": 0.2, "cooldown_s": 10},
+            # Self-soothing sound (SPEC 7B): one rule per default variant label; the runner
+            # already spaces the sounds (soothe.cooldown_s), so the rules have no cooldown.
+            {
+                "event": "self.soothe",
+                "when": {"label": "calm"},
+                "valence": 0.1,
+                "label": "calm",
+                "cooldown_s": 0,
+            },
+            {
+                "event": "self.soothe",
+                "when": {"label": "joy"},
+                "valence": 0.15,
+                "label": "joy",
+                "cooldown_s": 0,
+            },
+            {
+                "event": "self.soothe",
+                "when": {"label": "curiosity"},
+                "valence": 0.1,
+                "label": "curiosity",
+                "cooldown_s": 0,
+            },
+            {
+                "event": "self.soothe",
+                "when": {"label": "sleepy"},
+                "valence": 0.1,
+                "label": "sleepy",
+                "cooldown_s": 0,
+            },
         ],
         "Event to impulse rules (SPEC 7, Affect state)",
     )
@@ -405,13 +440,76 @@ class ExpressionConfig(Strict):
     )
 
 
+def check_keyframes(channels: dict[str, list[tuple[float, float]]]) -> None:
+    """Raise ValueError unless ``channels`` follow the expression keyframe rules (SPEC 7).
+
+    At least one channel; each has two or more keyframes from t=0 with increasing times, starts
+    and ends at offset 0, is at most ``EXPRESSION_MAX_CYCLE_S`` long, and all end together.
+    Shared by :class:`ExpressionEntry` and the clip-library loader.
+    """
+    if not channels:
+        raise ValueError("an expression needs at least one channel")
+    ends = set()
+    for name, frames in channels.items():
+        if len(frames) < 2:
+            raise ValueError(f"channel {name}: needs at least two keyframes")
+        times = [t for t, _ in frames]
+        if times[-1] > EXPRESSION_MAX_CYCLE_S:
+            raise ValueError(f"channel {name}: longer than {EXPRESSION_MAX_CYCLE_S} s")
+        if times[0] != 0 or any(b <= a for a, b in zip(times, times[1:], strict=False)):
+            raise ValueError(f"channel {name}: times must start at 0 and increase")
+        if frames[0][1] != 0 or frames[-1][1] != 0:
+            raise ValueError(f"channel {name}: the first and last offsets must be 0")
+        ends.add(times[-1])
+    if len(ends) != 1:
+        raise ValueError("all channels must end at the same time")
+
+
+class ClipVariant(Strict):
+    """One recorded clip an entry may play, with the intensity band it suits (SPEC 7)."""
+
+    clip: str = param(..., "Name of a clip in the robot's clip library")
+    weight: float = param(1.0, "Relative chance among the variants eligible at the start", gt=0)
+    min_intensity: float = param(
+        0.0, "Lowest affect intensity at which this variant may play", ge=0, le=1
+    )
+    max_intensity: float = param(
+        1.0, "Highest affect intensity at which this variant may play", ge=0, le=1
+    )
+    gain: float = param(
+        1.0,
+        "Multiplies the amplitude factor before the expression.max_amplitude cap",
+        gt=0,
+        le=2,
+    )
+
+    @field_validator("weight", "gain", mode="before")
+    @classmethod
+    def _finite(cls, value: Any) -> Any:
+        """Runs before the range check, which would call a NaN "not less than or equal to 2"."""
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("must be a finite number")
+        return value
+
+    @model_validator(mode="after")
+    def _band(self) -> ClipVariant:
+        if self.min_intensity > self.max_intensity:
+            raise ValueError("variant min_intensity must not exceed max_intensity")
+        return self
+
+
 class ExpressionEntry(Strict):
-    """One affect label rendered as keyframes per channel (SPEC 7, Expression map)."""
+    """One affect label rendered as keyframes per channel or as recorded clips (SPEC 7)."""
 
     channels: dict[str, list[tuple[float, float]]] = param(
         {},
         "Channel name to [t_s, offset_deg] keyframes of one cycle; piecewise-linear in time. "
         "Every channel starts at t=0 and ends at the same time with offset 0",
+    )
+    variants: list[ClipVariant] = param(
+        [],
+        "Recorded clips to pick from when the entry starts (instead of channels); the "
+        "intensity bands must cover [0, 1]",
     )
     repeat: int = param(1, "How many times the cycle plays back to back (a wiggle)", ge=1, le=20)
     curve: Literal["linear", "minjerk", "ease_in_out"] = param(
@@ -421,26 +519,26 @@ class ExpressionEntry(Strict):
         True, "Layered on top of other motion; only additive expressions exist in M2"
     )
 
-    @field_validator("channels")
-    @classmethod
-    def _channels(cls, channels: dict[str, list[tuple[float, float]]]) -> dict:
-        if not channels:
-            raise ValueError("an expression needs at least one channel")
-        ends = set()
-        for name, frames in channels.items():
-            if len(frames) < 2:
-                raise ValueError(f"channel {name}: needs at least two keyframes")
-            times = [t for t, _ in frames]
-            if times[-1] > EXPRESSION_MAX_CYCLE_S:
-                raise ValueError(f"channel {name}: longer than {EXPRESSION_MAX_CYCLE_S} s")
-            if times[0] != 0 or any(b <= a for a, b in zip(times, times[1:], strict=False)):
-                raise ValueError(f"channel {name}: times must start at 0 and increase")
-            if frames[0][1] != 0 or frames[-1][1] != 0:
-                raise ValueError(f"channel {name}: the first and last offsets must be 0")
-            ends.add(times[-1])
-        if len(ends) != 1:
-            raise ValueError("all channels must end at the same time")
-        return channels
+    @model_validator(mode="after")
+    def _one_form(self) -> ExpressionEntry:
+        if bool(self.channels) == bool(self.variants):
+            raise ValueError("an expression needs either channels or variants, exactly one")
+        if self.channels:
+            check_keyframes(self.channels)
+            return self
+        clips = [v.clip for v in self.variants]
+        if len(set(clips)) != len(clips):
+            raise ValueError("variants name a clip more than once")
+        if self.repeat != 1 or self.curve != "linear":
+            raise ValueError("repeat and curve belong to the clip's keyframes, not to variants")
+        reach = 0.0
+        for v in sorted(self.variants, key=lambda v: v.min_intensity):
+            if v.min_intensity > reach:
+                break
+            reach = max(reach, v.max_intensity)
+        if reach < 1:
+            raise ValueError("variant intensity bands must cover [0, 1]")
+        return self
 
 
 # --------------------------------------------------------------------------- circadian (SPEC 7A)
@@ -591,6 +689,167 @@ class CircadianConfig(Strict):
             if not (h.isdigit() and m.isdigit() and int(h) < 24 and int(m) < 60):
                 raise ValueError(f"circadian.quiet_hours: bad time {t!r}, use HH:MM")
         return self
+
+
+# ---------------------------------------------------------------------- self-soothing (SPEC 7B)
+
+SOOTHE_RANGE_BOUNDS: dict[str, tuple[float, float]] = {
+    "tempo_bpm": (20.0, 240.0),
+    "pitch_hz": (80.0, 2000.0),
+    "length_s": (0.3, 10.0),
+}
+
+
+class SoundShape(Strict):
+    """Ranges a self-soothing sound draws its tempo, base pitch and length from (SPEC 7B)."""
+
+    tempo_bpm: tuple[float, float] = param(
+        (60.0, 90.0), "Tempo range of the hum (the blirp's pace follows it), [min, max] in bpm"
+    )
+    pitch_hz: tuple[float, float] = param(
+        (220.0, 330.0), "Base pitch range (the tonic of a hum, the centre of a blirp), [min, max]"
+    )
+    length_s: tuple[float, float] = param(
+        (3.0, 6.0), "Length range of the whole sound, [min, max] in seconds"
+    )
+    gain_db: float = param(
+        -12.0, "Peak level of the sound against full scale", unit="dB", ge=-60, le=0
+    )
+
+    @field_validator("tempo_bpm", "pitch_hz", "length_s", mode="after")
+    @classmethod
+    def _range(cls, value: tuple[float, float], info: Any) -> tuple[float, float]:
+        low, high = SOOTHE_RANGE_BOUNDS[info.field_name]
+        lo, hi = value
+        if not (math.isfinite(lo) and math.isfinite(hi)):
+            raise ValueError("range bounds must be finite numbers")
+        if lo > hi:
+            raise ValueError("range minimum must not exceed its maximum")
+        if lo < low or hi > high:
+            raise ValueError(f"range must lie within [{low}, {high}]")
+        return value
+
+
+class SootheVariant(Strict):
+    """One self-soothing sound with the emotion shown alongside it (SPEC 7B)."""
+
+    label: str = param(..., "Affect label shown with the sound; one of affect.labels")
+    sound: Literal["hum", "blirp"] = param(..., "Sound kind: a childish hum or machine blirps")
+    weight: float = param(1.0, "Relative chance among the variants eligible at the start", gt=0)
+    states: list[Literal["awake", "drowsy"]] = param(
+        ["awake", "drowsy"], "Circadian states in which the variant may play (never resting)"
+    )
+    shape: SoundShape = param({}, "Ranges the sound is drawn from")
+
+    @field_validator("weight", mode="before")
+    @classmethod
+    def _finite(cls, value: Any) -> Any:
+        """Runs before the range check, which would call a NaN "not greater than 0"."""
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("must be a finite number")
+        return value
+
+    @field_validator("states", mode="after")
+    @classmethod
+    def _some_states(cls, value: list[str]) -> list[str]:
+        if not value:
+            raise ValueError("a variant needs at least one state")
+        return value
+
+
+class SootheConfig(Strict):
+    enabled: bool = param(True, "Let the robot comfort itself with a sound while idle")
+    interval_s: float = param(
+        300.0, "Mean time between two sounds while idle", unit="s", ge=30, le=86400
+    )
+    jitter: float = param(
+        0.5, "Interval jitter as a share of the interval (0: regular)", ge=0, le=0.9
+    )
+    idle_min_s: float = param(
+        120.0, "Continuous idle time before the first sound", unit="s", ge=0, le=3600
+    )
+    cooldown_s: float = param(
+        120.0, "Least time after a sound that played or was cut", unit="s", ge=0, le=86400
+    )
+    speech_quiet_s: float = param(
+        10.0,
+        "A heard voice (a speaker hint or an utterance) keeps the robot from starting or "
+        "continuing a sound for this long",
+        unit="s",
+        ge=0,
+        le=600,
+    )
+    rate_hz: int = param(
+        16000, "Sample rate the sounds are synthesised at", unit="Hz", ge=8000, le=48000
+    )
+    variants: list[SootheVariant] = param(
+        [
+            {
+                "label": "calm",
+                "sound": "hum",
+                "weight": 1.0,
+                "shape": {
+                    "tempo_bpm": (56.0, 76.0),
+                    "pitch_hz": (200.0, 300.0),
+                    "length_s": (4.0, 7.0),
+                    "gain_db": -12.0,
+                },
+            },
+            {
+                "label": "joy",
+                "sound": "hum",
+                "weight": 1.0,
+                "shape": {
+                    "tempo_bpm": (96.0, 128.0),
+                    "pitch_hz": (300.0, 440.0),
+                    "length_s": (2.5, 5.0),
+                    "gain_db": -12.0,
+                },
+            },
+            {
+                "label": "joy",
+                "sound": "blirp",
+                "weight": 1.0,
+                "shape": {
+                    "tempo_bpm": (110.0, 160.0),
+                    "pitch_hz": (500.0, 900.0),
+                    "length_s": (1.0, 2.5),
+                    "gain_db": -14.0,
+                },
+            },
+            {
+                "label": "curiosity",
+                "sound": "blirp",
+                "weight": 1.0,
+                "shape": {
+                    "tempo_bpm": (80.0, 120.0),
+                    "pitch_hz": (400.0, 700.0),
+                    "length_s": (1.0, 2.5),
+                    "gain_db": -14.0,
+                },
+            },
+            {
+                "label": "sleepy",
+                "sound": "hum",
+                "weight": 1.0,
+                "states": ["drowsy"],
+                "shape": {
+                    "tempo_bpm": (44.0, 60.0),
+                    "pitch_hz": (160.0, 240.0),
+                    "length_s": (4.0, 7.0),
+                    "gain_db": -15.0,
+                },
+            },
+        ],
+        "Sounds to pick from (weighted random, never the previous one twice in a row)",
+    )
+
+    @field_validator("variants", mode="after")
+    @classmethod
+    def _some_variants(cls, value: list[SootheVariant]) -> list[SootheVariant]:
+        if not value:
+            raise ValueError("soothe.variants needs at least one variant")
+        return value
 
 
 class LightConfig(Strict):
@@ -3925,6 +4184,7 @@ with warnings.catch_warnings():
             {}, "SPEC 7A: yawn, stretch and rest posture; the robot manifest ships them"
         )
         light: LightConfig = param({}, "SPEC 7A")
+        soothe: SootheConfig = param({}, "SPEC 7B")
         motion: MotionConfig = param({}, "SPEC 10")
         reflexes: ReflexConfig = param({}, "SPEC 10")
         attention: AttentionConfig = param({}, "SPEC 4A, 5")
@@ -3971,6 +4231,16 @@ with warnings.catch_warnings():
             return self
 
         @model_validator(mode="after")
+        def _soothe_labels_exist(self) -> RoboEmotConfig:
+            unknown = sorted({v.label for v in self.soothe.variants} - set(self.affect.labels))
+            if unknown:
+                raise ValueError(
+                    f"soothe.variants use labels {unknown} that are not in affect.labels "
+                    f"{sorted(self.affect.labels)}"
+                )
+            return self
+
+        @model_validator(mode="after")
         def _expression_labels_exist(self) -> RoboEmotConfig:
             unknown = sorted(set(self.expression_map) - set(self.affect.labels))
             if unknown:
@@ -4007,6 +4277,13 @@ with warnings.catch_warnings():
                     f"gesture_map names {clash} are affect labels; "
                     "the play skill offers one flat list of names"
                 )
+            return self
+
+        @model_validator(mode="after")
+        def _gestures_are_channels(self) -> RoboEmotConfig:
+            variant = sorted(k for k, e in self.gesture_map.items() if e.variants)
+            if variant:
+                raise ValueError(f"gesture_map entries {variant} use variants; channels only")
             return self
 
         @model_validator(mode="after")

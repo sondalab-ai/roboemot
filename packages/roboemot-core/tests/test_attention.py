@@ -100,6 +100,14 @@ def test_nearest_face_without_distance_ranks_last_then_confidence():
     assert sel.update(0.0, [c, a]).entry_id == "p1"
 
 
+def test_speaker_active_follows_the_hint_and_its_hold_time():
+    sel = AttentionSelector(CFG)
+    assert not sel.speaker_active(0.0)
+    sel.hint_speaker(SpeakerHint(stamp=10.0, azimuth_rad=0.0))
+    assert sel.speaker_active(10.0 + CFG.speaker_hold_s)
+    assert not sel.speaker_active(10.0 + CFG.speaker_hold_s + 0.1)
+
+
 def test_speaker_bearing_matches_an_entry_or_stands_alone():
     sel = AttentionSelector(CFG)
     p = entry("p1", az=30.0)

@@ -11,6 +11,7 @@ from pathlib import Path
 import httpx
 import pytest
 from roboemot.affect import AffectEngine
+from roboemot.affect.clips import load_clip_library
 from roboemot.affect.expression import ExpressionRenderer
 from roboemot.config import ConfigStack
 from roboemot.config.schema import LinkPolicy, LLMRoute, SafetyConfig
@@ -625,7 +626,12 @@ def reachy():
     """The shipped Reachy Mini manifest and the configuration it installs (gesture_map included)."""
     manifest = load_manifest(REACHY_MANIFEST, allow_unmeasured_dynamics=True)
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw=None)
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour,
+        manifest.channels,
+        load_clip_library(manifest),
+        body_yaw=None,
+    )
     return manifest, stack.effective()
 
 
@@ -636,7 +642,13 @@ def responder(dofs=REACHY, language="it", gesture_map=None):
     robot = {n: d for n, d in manifest.dofs.items() if n in dofs}
     gestures = cfg.gesture_map if gesture_map is None else gesture_map
     renderer = ExpressionRenderer(
-        cfg.expression, cfg.expression_map, robot, 0.15, gestures, body_yaw="body_yaw"
+        cfg.expression,
+        cfg.expression_map,
+        robot,
+        0.15,
+        gestures,
+        body_yaw="body_yaw",
+        clips=load_clip_library(manifest),
     )
     cue, affect = Cue(), AffectEngine(CFG.affect, CFG.appraisal)
     return OfflineResponder(CFG.connectivity, renderer, language, affect, cue), cue, affect

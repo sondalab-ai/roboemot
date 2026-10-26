@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from roboemot.affect import AffectState
+from roboemot.affect.clips import load_clip_library
 from roboemot.affect.expression import ExpressionRenderer
 from roboemot.affect.register import Person, resolve_register
 from roboemot.config import ConfigStack
@@ -28,7 +29,12 @@ GESTURES = ("nod", "shake")
 def setup():
     manifest = load_manifest(MANIFEST, allow_unmeasured_dynamics=True)
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw=None)
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour,
+        manifest.channels,
+        load_clip_library(manifest),
+        body_yaw=None,
+    )
     return manifest, stack.effective()
 
 
@@ -44,6 +50,7 @@ class Rig:
             0.15,
             cfg.gesture_map,
             body_yaw="body_yaw",
+            clips=load_clip_library(manifest),
         )
         self.now = 10.0
         self.question_end: float | None = None

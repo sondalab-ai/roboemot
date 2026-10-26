@@ -28,19 +28,30 @@ from dataclasses import dataclass
 
 from roboemot.config.schema import RoboEmotConfig
 
-# A body_yaw channel on the labels the exit test provokes. The shipped expression map has no body
-# channel; with it, the body moves wherever the register allows approach (SPEC 7, 12), which the
-# one register does for everyone.
+# Hand-written entries with a body_yaw channel for the labels the exit test provokes. The shipped
+# map plays recorded clips, picked at random and not all of them turning the body, so without
+# these the body would not move reliably; with them the body moves wherever the register allows
+# approach (SPEC 7, 12), which the one register does for everyone. Each entry carries antenna
+# channels too, so it still plays when the gate drops the body.
 BODY_MAP_YAML = """\
 expression_map:
   calm:
     channels:
+      antenna_right: [[0.0, 0], [2.0, 4], [4.0, 0]]
+      antenna_left: [[0.0, 0], [2.0, -4], [4.0, 0]]
+      head.roll: [[0.0, 0], [2.0, 2], [4.0, 0]]
       body_yaw: [[0.0, 0], [2.0, 12], [4.0, 0]]
   joy:
+    repeat: 3
     channels:
+      antenna_right: [[0.0, 0], [0.15, 18], [0.3, -8], [0.45, 0]]
+      antenna_left: [[0.0, 0], [0.15, -18], [0.3, 8], [0.45, 0]]
       body_yaw: [[0.0, 0], [0.15, 12], [0.3, -12], [0.45, 0]]
   curiosity:
     channels:
+      antenna_right: [[0.0, 0], [0.5, 15], [1.8, 15], [2.4, 0]]
+      antenna_left: [[0.0, 0], [0.5, -15], [1.8, -15], [2.4, 0]]
+      head.roll: [[0.0, 0], [0.5, 6], [1.8, 6], [2.4, 0]]
       body_yaw: [[0.0, 0], [0.5, 12], [1.8, 12], [2.4, 0]]
 """
 

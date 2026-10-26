@@ -136,8 +136,10 @@ Cleaner = Callable[[FieldDescriptor, Any, RoboEmotConfig], Any]
 def _bounded(row: FieldDescriptor, number: float) -> None:
     if not math.isfinite(number):
         raise _fail("value_type")
-    if (row["ge"] is not None and number < row["ge"]) or (
-        row["le"] is not None and number > row["le"]
+    if (
+        (row.get("gt") is not None and number <= row["gt"])
+        or (row["ge"] is not None and number < row["ge"])
+        or (row["le"] is not None and number > row["le"])
     ):
         raise _fail("value_range")
 
@@ -241,7 +243,7 @@ def _string_dict(row: FieldDescriptor, value: Any, cfg: RoboEmotConfig) -> dict[
 
 
 def _number_dict(row: FieldDescriptor, value: Any, cfg: RoboEmotConfig) -> dict[str, float]:
-    plain = replace(row, ge=None, le=None)
+    plain = replace(row, gt=None, ge=None, le=None)
     return {k: _number(plain, v, cfg) for k, v in _mapping(value, cfg).items()}
 
 

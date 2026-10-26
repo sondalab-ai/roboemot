@@ -5,7 +5,8 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import replace
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from typing import Any
 
 from roboemot.attention import SOURCE as ATTENTION_SOURCE
@@ -14,6 +15,9 @@ from roboemot.circadian import CircadianModel, in_window
 from roboemot.conversation.phase import SPEAKING, THINKING, ConversationPhase
 from roboemot.motion import Command, MotionLoop, Priority
 from roboemot.persona import effects as persona_effects
+from roboemot.soothe import SootheRunner
+from roboemot.voice.activity import SpeechActivity
+from roboemot.voice.speech import SpeechOutput
 from roboemot.world import ScanContext, ScanController, WorldModel, camera_in_view
 from roboemot.world.scan import SOURCE as SCAN_SOURCE
 
@@ -188,3 +192,67 @@ def conversation_vision_scale(
     if full <= 0:
         return 1.0
     return min(1.0, max(scale, rates.listening_face_detections / full))
+
+
+@dataclass(frozen=True)
+class SootheContext:
+    """What the idle test of the self-soothing sound needs this tick (SPEC 7B)."""
+
+    in_session: bool  # a conversation session is open
+    voice_recent: bool  # someone spoke: a speaker hint or an utterance within the quiet window
+    other_queued: int  # speech jobs queued besides our own sound
+    speaking: bool  # the speaker is in its speaking window (our own sound included)
+    ours: bool  # our sound is queued or playing, or ended within the echo tail
+
+
+def soothe_context(
+    now: float,
+    *,
+    selector: AttentionSelector,
+    speech: SpeechActivity,
+    output: SpeechOutput,
+    soothe: SootheRunner,
+    in_session: bool,
+    last_voice: float,
+    echo_tail_s: float,
+) -> SootheContext:
+    """Gather the idle inputs: only interaction counts, a person who is merely in view does not
+    (``selector.target``, attention, presence and scans are deliberately not read). A voice is
+    recent when the selector holds an active speaker hint or an utterance was heard less than
+    ``soothe.speech_quiet_s`` ago; ``last_voice`` is that utterance's time."""
+    return SootheContext(
+        in_session=in_session,
+        voice_recent=selector.speaker_active(now) or now - last_voice < soothe.cfg.speech_quiet_s,
+        other_queued=output.waiting(exclude=soothe.job),
+        speaking=speech.speaking(now),
+        ours=soothe.sounding(now, echo_tail_s),
+    )
+
+
+def soothe_idle(ctx: SootheContext) -> bool:
+    """Whether nobody is interacting with the robot (SPEC 7B): no conversation session, no recent
+    voice, no other queued sentence and no audio but the sound's own. The sound opens the
+    speaker's speaking window and holds a place in the speech queue; both are ignored while it
+    plays and for the echo tail after it, so it never cancels itself."""
+    if ctx.in_session or ctx.voice_recent or ctx.other_queued > 0:
+        return False
+    return ctx.ours or not ctx.speaking
+
+
+def soothe_tick(
+    soothe: SootheRunner,
+    now: float,
+    context: Callable[[], SootheContext],
+    circadian_state: str,
+    quiet: bool,
+) -> None:
+    """One step of the self-soothing runner, run after ``scan_tick``. A failure (type and message
+    only, never audio) is logged, the sound is cut and the runtime keeps running."""
+    try:
+        soothe.tick(now, soothe_idle(context()), circadian_state, quiet)
+    except Exception as exc:
+        log.warning("soothe: %s: %s", type(exc).__name__, exc)
+        try:
+            soothe.close()
+        except Exception as close_exc:
+            log.warning("soothe: close: %s", type(close_exc).__name__)

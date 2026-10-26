@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
+from roboemot.affect.clips import load_clip_library
 from roboemot.config import ConfigError, ConfigStack
 from roboemot.config.schema import RoboEmotConfig, SpeechMotionConfig, SpeechMotionMap
 from roboemot.manifest import load_manifest
@@ -24,7 +25,9 @@ def manifest():
 def stack_with(manifest, smap: dict) -> ConfigStack:
     behaviour = {**manifest.model.behaviour, "speech_motion_map": smap}
     stack = ConfigStack()
-    stack.set_manifest_behaviour(behaviour, manifest.channels, body_yaw="body_yaw")
+    stack.set_manifest_behaviour(
+        behaviour, manifest.channels, load_clip_library(manifest), body_yaw="body_yaw"
+    )
     return stack
 
 
@@ -119,7 +122,12 @@ def test_a_runtime_override_naming_body_yaw_is_refused(manifest):
 
 def test_the_shipped_map_passes_and_names_no_body_yaw(manifest):
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw="body_yaw")
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour,
+        manifest.channels,
+        load_clip_library(manifest),
+        body_yaw="body_yaw",
+    )
     smap = stack.effective().speech_motion_map
     named = {c for names in smap.channels().values() for c in names}
     assert named and "body_yaw" not in named

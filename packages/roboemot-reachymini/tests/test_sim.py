@@ -18,6 +18,7 @@ pytestmark = pytest.mark.sim
 
 reachy_mini = pytest.importorskip("reachy_mini")
 
+from roboemot.affect.clips import load_clip_library  # noqa: E402
 from roboemot.config import ConfigStack  # noqa: E402
 from roboemot.manifest import load_manifest  # noqa: E402
 from roboemot.motion import Command, MotionLoop, Priority  # noqa: E402
@@ -222,31 +223,37 @@ def test_attention_turns_the_head_towards_a_world_entry(loop):
 
 
 def test_a_joy_expression_moves_the_antennas_on_the_simulated_robot(loop):
-    """SPEC 7, 10: the shipped joy expression flaps both antennas.
+    """SPEC 7, 10: a shipped joy clip swings both antennas.
 
     The robot first settles at the antenna home; the renderer then feeds additive EXPRESSION
     commands through the real loop. The fallback dynamics are slow, so the swing asserted is
-    far below the commanded one; what counts is that both antennas move and come back.
+    far below the commanded one; what counts is that both antennas move and come back. Joy is
+    pinned to one of its variants (success1, both antennas past 70 degrees) so the pick is fixed.
     """
     from roboemot.affect import AffectState
     from roboemot.affect.expression import ExpressionRenderer
     from roboemot.affect.register import Person, resolve_register
 
     manifest = loop.manifest
+    clips = load_clip_library(manifest)
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw=None)
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, clips, body_yaw=None)
     cfg = stack.effective()
+    joy = cfg.expression_map["joy"]
+    (variant,) = [v for v in joy.variants if v.clip == "success1"]
+    expression_map = {**cfg.expression_map, "joy": joy.model_copy(update={"variants": [variant]})}
+    duration = max(frames[-1][0] for frames in clips["success1"].channels.values())
     home = {n: manifest.dofs[n].home for n in ("antenna_right", "antenna_left")}
     _hold(loop, home, 8.0)
     settled = loop.driver.read_state()
     reg = resolve_register([Person({})], cfg.register, cfg.persona)
     renderer = ExpressionRenderer(
-        cfg.expression, cfg.expression_map, manifest.dofs, 0.15, body_yaw="body_yaw"
+        cfg.expression, expression_map, manifest.dofs, 0.15, body_yaw="body_yaw", clips=clips
     )
     renderer.update(AffectState(0.0, 0.0, "calm", 0.0), reg, time.monotonic())
     assert renderer.update(AffectState(0.7, 0.5, "joy", 1.0, 1), reg, time.monotonic())
     seen: dict[str, list[float]] = {n: [] for n in home}
-    end = time.monotonic() + 3.0
+    end = time.monotonic() + duration + 2.0
     while time.monotonic() < end:
         now = time.monotonic()
         for cmd in renderer.commands(now):
@@ -260,6 +267,62 @@ def test_a_joy_expression_moves_the_antennas_on_the_simulated_robot(loop):
         assert values[-1] == pytest.approx(settled[n], abs=0.1), n
 
 
+@pytest.mark.parametrize("label", sorted(ConfigStack().effective().affect.labels))
+def test_every_label_plays_a_recorded_clip_on_the_simulated_robot(loop, label):
+    """SPEC 7, Recorded clips: each label's clip moves its largest channel and comes back.
+
+    The label is pinned to its shortest full-intensity variant that swings a non-body channel by
+    at least 20 degrees, so the run stays short and the motion is large enough to see through
+    the slow fallback dynamics.
+    """
+    from roboemot.affect import AffectState
+    from roboemot.affect.expression import ExpressionRenderer
+    from roboemot.affect.register import Person, resolve_register
+
+    manifest = loop.manifest
+    clips = load_clip_library(manifest)
+    stack = ConfigStack()
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, clips, body_yaw=None)
+    cfg = stack.effective()
+
+    def peak(clip: str) -> tuple[str, float]:
+        frames = {n: f for n, f in clips[clip].channels.items() if n != "body_yaw"}
+        name = max(frames, key=lambda n: max(abs(v) for _, v in frames[n]))
+        return name, max(abs(v) for _, v in frames[name])
+
+    def length(clip: str) -> float:
+        return max(f[-1][0] for f in clips[clip].channels.values())
+
+    entry = cfg.expression_map[label]
+    eligible = [v for v in entry.variants if v.max_intensity >= 1.0 and peak(v.clip)[1] >= 20.0]
+    variant = min(eligible, key=lambda v: length(v.clip))
+    channel = peak(variant.clip)[0]
+    expression_map = {**cfg.expression_map, label: entry.model_copy(update={"variants": [variant]})}
+    home = {channel: manifest.dofs[channel].home}
+    _hold(loop, home, 8.0)
+    settled = loop.driver.read_state()[channel]
+    reg = resolve_register([Person({})], cfg.register, cfg.persona)
+    renderer = ExpressionRenderer(
+        cfg.expression, expression_map, manifest.dofs, 0.15, body_yaw="body_yaw", clips=clips
+    )
+    proto = cfg.affect.labels[label]
+    renderer.update(AffectState(0.0, 0.0, "", 0.0), reg, time.monotonic())
+    assert renderer.update(
+        AffectState(proto.valence, proto.arousal, label, 1.0, 1), reg, time.monotonic()
+    )
+    # the fallback rate limit lags a large swing, so the return gets the time it needs at that rate
+    lag_s = math.radians(peak(variant.clip)[1]) / cfg.safety.unmeasured_dynamics_fallback_vel
+    seen: list[float] = []
+    end = time.monotonic() + length(variant.clip) + lag_s + 2.0
+    while time.monotonic() < end:
+        for cmd in renderer.commands(time.monotonic()):
+            loop.feed(cmd)
+        seen.append(loop.driver.read_state()[channel])
+        time.sleep(0.02)
+    assert max(seen) - min(seen) > 0.03, (variant.clip, channel, max(seen) - min(seen))
+    assert seen[-1] == pytest.approx(settled, abs=0.1), (variant.clip, channel)
+
+
 def test_a_nod_gesture_moves_the_head_pitch_on_the_simulated_robot(loop):
     """SPEC 7, 11: the shipped nod, requested as the play skill does, dips the head and returns."""
     from roboemot.affect import AffectState
@@ -268,7 +331,12 @@ def test_a_nod_gesture_moves_the_head_pitch_on_the_simulated_robot(loop):
 
     manifest = loop.manifest
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw=None)
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour,
+        manifest.channels,
+        load_clip_library(manifest),
+        body_yaw=None,
+    )
     cfg = stack.effective()
     home = {"head.pitch": manifest.dofs["head.pitch"].home}
     _hold(loop, home, 8.0)
@@ -281,6 +349,7 @@ def test_a_nod_gesture_moves_the_head_pitch_on_the_simulated_robot(loop):
         0.15,
         cfg.gesture_map,
         body_yaw="body_yaw",
+        clips=load_clip_library(manifest),
     )
     assert renderer.request("nod")
     assert renderer.update(AffectState(0.0, 0.0, "calm", 0.5), reg, time.monotonic())
@@ -594,14 +663,24 @@ def test_the_rest_posture_lowers_the_head_and_droops_the_antennas_on_the_simulat
 
     manifest = loop.manifest
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw=None)
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour,
+        manifest.channels,
+        load_clip_library(manifest),
+        body_yaw=None,
+    )
     cfg = stack.effective()
     names = ("head.pitch", "antenna_right", "antenna_left")
     _hold(loop, {n: manifest.dofs[n].home for n in names}, 8.0)
     settled = loop.driver.read_state()
     loop.clear("test")  # the settle command is COMMANDED and never expires: it would win
     motion = CircadianMotion(
-        cfg.circadian, cfg.circadian_motion, manifest.dofs, body_yaw="body_yaw"
+        cfg.circadian,
+        cfg.circadian_motion,
+        manifest.dofs,
+        body_yaw="body_yaw",
+        affect_intensity=lambda: 0.0,
+        clips=load_clip_library(manifest),
     )
     end = time.monotonic() + 10.0
     while time.monotonic() < end:
@@ -662,7 +741,12 @@ def test_the_speaking_motion_moves_the_head_pitch_with_a_canned_reply(loop):
 
     manifest = loop.manifest
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw="body_yaw")
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour,
+        manifest.channels,
+        load_clip_library(manifest),
+        body_yaw="body_yaw",
+    )
     stack.set("speech_motion.levels.lively.nod_share", 1.0, source="test")  # not seed-dependent
     cfg = stack.effective()
     _hold(loop, {"head.pitch": manifest.dofs["head.pitch"].home}, 6.0)
@@ -778,7 +862,8 @@ def test_our_own_gestures_and_extreme_motion_never_look_like_external_control(lo
 
     manifest = loop.manifest
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw=None)
+    clips = load_clip_library(manifest)
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, clips, body_yaw=None)
     cfg = stack.effective()
     worst = _watch_tracking_error(loop)
     _hold(loop, {n: d.home for n, d in manifest.dofs.items() if d.measured}, 6.0)
@@ -790,7 +875,12 @@ def test_our_own_gestures_and_extreme_motion_never_look_like_external_control(lo
     loop.clear("test")
     reg = resolve_register([Person({})], cfg.register, cfg.persona)
     renderer = ExpressionRenderer(
-        cfg.expression, cfg.expression_map, manifest.dofs, 0.15, body_yaw="body_yaw"
+        cfg.expression,
+        cfg.expression_map,
+        manifest.dofs,
+        0.15,
+        body_yaw="body_yaw",
+        clips=clips,
     )
     now = time.monotonic()
     renderer.update(AffectState(0.0, 0.0, "calm", 0.0), reg, now)

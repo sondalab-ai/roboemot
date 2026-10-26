@@ -10,10 +10,12 @@ from __future__ import annotations
 import math
 import random
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 from roboemot.affect import AffectState
+from roboemot.affect.clips import load_clip_library
 from roboemot.affect.register import Person, resolve_register
 from roboemot.affect.speaking import SOURCE, SpeakingRenderer
 from roboemot.config import ConfigStack
@@ -56,7 +58,12 @@ def manifest():
 @pytest.fixture(scope="module")
 def cfg(manifest):
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw="body_yaw")
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour,
+        manifest.channels,
+        load_clip_library(manifest),
+        body_yaw="body_yaw",
+    )
     return stack.effective()
 
 
@@ -540,6 +547,48 @@ def test_channels_are_ducked_while_an_expression_plays(cfg, manifest):
     playing["channels"] = frozenset()
     back = run(r, clock, ticks[-1][0] + TICK, ticks[-1][0] + 0.5)
     assert abs(back[-1][1]["head.roll"]) > 0
+
+
+def test_channels_are_ducked_while_a_circadian_yawn_plays(cfg, manifest):
+    """SPEC 7: the speaking layer yields the channels of a playing yawn or stretch too."""
+    from roboemot.circadian.motion import CircadianMotion
+    from roboemot.runtime.assembly import ducked_channels
+
+    motion = CircadianMotion(
+        cfg.circadian,
+        cfg.circadian_motion,
+        manifest.dofs,
+        body_yaw="body_yaw",
+        clips=load_clip_library(manifest),
+        affect_intensity=lambda: 0.0,
+    )
+    runner = SimpleNamespace(motion=motion)
+    idle_expression = SimpleNamespace(channels=frozenset())
+    assert ducked_channels(idle_expression, runner) == frozenset()
+    assert motion.start_waking(0.0)
+    motion.commands(0.0, "drowsy")
+    channels = ducked_channels(idle_expression, runner)
+    assert channels and channels == motion.channels
+    assert "body_yaw" not in channels
+    assert ducked_channels(idle_expression, SimpleNamespace(motion=None)) == frozenset()
+    motion.commands(10.0, "awake")  # the stretch is over
+    assert ducked_channels(idle_expression, runner) == frozenset()
+
+    clock = Clock()
+    tl = SpeechTimeline(cfg.speech_motion, clock)
+    end = speak(tl, 1, 0.5, [(-26, 1.0)], question=True)
+    r = make(
+        cfg,
+        manifest,
+        tl,
+        only(cfg, "question_tilt"),
+        ducked=lambda: frozenset({"head.roll"}) if motion.playing else frozenset(),
+    )
+    run(r, clock, 0.0, end + 0.3)
+    assert motion.start_waking(end + 0.3)
+    motion.commands(end + 0.3, "drowsy")
+    ticks = run(r, clock, end + 0.3, end + 0.3 + cfg.speech_motion.fade_ms / 1000 + TICK)
+    assert ticks[-1][1]["head.roll"] == pytest.approx(0.0, abs=1e-9)
 
 
 def test_phrase_nods_are_seeded_and_follow_nod_share(cfg, manifest):

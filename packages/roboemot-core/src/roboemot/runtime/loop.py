@@ -6,6 +6,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
+from roboemot.circadian import in_window
 from roboemot.circadian.motion import REST_SOURCE
 from roboemot.config import ConfigStack
 from roboemot.persona import effects as persona_effects
@@ -20,7 +21,11 @@ from .ticks import (
     feed_idle,
     scan_context,
     scan_tick,
+    soothe_context,
+    soothe_tick,
 )
+
+MS_PER_S = 1000.0
 
 
 @dataclass
@@ -96,6 +101,23 @@ def run_loop(
                 circadian=host.circadian,
             )
             scan_tick(ctx, p.scan, p.loop, live)
+        if host.soothe_runner is not None and host.speech_output is not None:
+            soothe_tick(
+                host.soothe_runner,
+                now,
+                lambda now=now, live=live: soothe_context(
+                    now,
+                    selector=p.selector,
+                    speech=p.speech,
+                    output=host.speech_output,
+                    soothe=host.soothe_runner,
+                    in_session=host.conversation is not None and host.conversation.in_session(),
+                    last_voice=p.voice_heard[0],
+                    echo_tail_s=live.voice.echo_tail_ms / MS_PER_S,
+                ),
+                host.circadian.state if host.circadian else "awake",
+                live.circadian.enabled and in_window(p.clock.hour(), live.circadian.quiet_hours),
+            )
         state_fx = p.circ.model.effects() if host.circadian else live.circadian.states["awake"]
         clock.phase_s += (now - clock.last_s) / state_fx.idle_period_scale
         clock.last_s = now

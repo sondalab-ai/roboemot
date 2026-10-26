@@ -10,6 +10,10 @@
 - **Waking:** a stretch (``circadian_motion.stretch``, 3 s by default) when the robot leaves
   resting because lights came on, someone approached or the app woke it.
 
+A yawn or stretch given as ``variants`` of recorded clips picks its clip when it starts, like an
+affect expression (``affect.expression.pick_variant``); the variant's ``gain`` multiplies the
+amplitude before the ``expression.max_amplitude`` cap.
+
 Yawn and stretch are additive offsets at EXPRESSION priority, from the same keyframe format and
 renderer code as affect expressions. Nothing here bypasses the safety path: offsets are clamped
 to the manifest range about home, the arbiter clamps the sum to the range and the limiter
@@ -21,11 +25,12 @@ from __future__ import annotations
 
 import math
 import random
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 
-from ..affect.expression import build_primitive
-from ..config.schema import CircadianConfig
+from ..affect.clips import ClipLibrary
+from ..affect.expression import build_primitive, pick_variant
+from ..config.schema import CircadianConfig, ClipVariant, ExpressionEntry
 from ..config.schema import CircadianMotion as CircadianMotionConfig
 from ..manifest import Dof
 from ..motion.core import Command, Priority
@@ -46,9 +51,14 @@ class CircadianMotion:
         dofs: Mapping[str, Dof],
         *,
         body_yaw: str | None,
+        affect_intensity: Callable[[], float],
         rng: random.Random | None = None,
+        clips: ClipLibrary | None = None,
     ) -> None:
         self.dofs = dofs
+        self.clips: ClipLibrary = clips or {}
+        self.affect_intensity = affect_intensity  # the affect intensity now, for variant bands
+        self._last_clip: dict[str, str] = {}
         self.body_yaw = body_yaw
         self.rng = rng or random.Random()  # noqa: S311 (jitter, not security)
         self._scale_now = 1.0  # the register's motion amplitude now
@@ -61,21 +71,66 @@ class CircadianMotion:
 
     def apply_config(self, cfg: CircadianConfig, motion: CircadianMotionConfig) -> None:
         """Hot reload: new parameters and primitives; a primitive already playing finishes."""
+        for name, entry in (("yawn", motion.yawn), ("stretch", motion.stretch)):
+            for v in entry.variants if entry is not None else ():
+                if v.clip not in self.clips:
+                    raise ValueError(f"circadian {name}: unknown clip {v.clip!r}")
         self.cfg = cfg
         self.rest = {
             name: min(max(math.radians(deg), self.dofs[name].min), self.dofs[name].max)
             for name, deg in motion.rest_pose_deg.items()
             if name in self.dofs and self.dofs[name].kind == "angle"
         }
-        self._yawn = self._build("yawn", motion.yawn)
-        self._stretch = self._build("stretch", motion.stretch)
+        self._entries = {"yawn": motion.yawn, "stretch": motion.stretch}
+        self._prims: dict[tuple[str, str | None], Primitive | None] = {}
 
-    def _build(self, name: str, entry: object) -> Primitive | None:
-        return (
-            build_primitive(name, entry, self.dofs, body_yaw=self.body_yaw, body=False)  # type: ignore[arg-type]
-            if entry is not None
-            else None
+    def _primitive(self, name: str, clip: str | None) -> Primitive | None:
+        """The cached additive primitive of ``yawn`` or ``stretch``, built from library clip
+        ``clip`` when the entry has variants, else from its own channels."""
+        key = (name, clip)
+        if key not in self._prims:
+            entry = self.clips.get(clip) if clip else self._entries[name]
+            self._prims[key] = (
+                build_primitive(name, entry, self.dofs, body_yaw=self.body_yaw, body=False)
+                if entry is not None
+                else None
+            )
+        return self._prims[key]
+
+    def _can_play(self, name: str) -> bool:
+        """Whether the robot has a ``yawn`` or ``stretch`` it could play."""
+        entry = self._entries[name]
+        if entry is None:
+            return False
+        if entry.variants:
+            return bool(self._playable_variants(name, entry))
+        return self._primitive(name, None) is not None
+
+    def _playable_variants(self, name: str, entry: ExpressionEntry) -> list[ClipVariant]:
+        """The variants whose clip builds into a primitive over this robot's dofs (the body turn
+        never plays here), so ``_can_play`` and ``_choose`` agree on what a pick may land on."""
+        return [v for v in entry.variants if self._primitive(name, v.clip) is not None]
+
+    def _choose(self, name: str) -> tuple[Primitive, float] | None:
+        """The primitive to play for ``name`` and its variant gain (1.0 for channels). With
+        variants, picks one for the affect intensity now; None when none fits."""
+        entry = self._entries[name]
+        if entry is None:
+            return None
+        if not entry.variants:
+            prim = self._primitive(name, None)
+            return (prim, 1.0) if prim is not None else None
+        variant = pick_variant(
+            self._playable_variants(name, entry),
+            self.affect_intensity(),
+            self._last_clip.get(name),
+            self.rng,
         )
+        prim = self._primitive(name, variant.clip) if variant is not None else None
+        if variant is None or prim is None:
+            return None
+        self._last_clip[name] = variant.clip
+        return prim, variant.gain
 
     def set_register(self, motion_amplitude: float, max_amplitude: float) -> None:
         """The register's motion amplitude and ``expression.max_amplitude`` in effect now; call
@@ -95,15 +150,22 @@ class CircadianMotion:
         """The primitive playing now (``yawn`` or ``stretch``), or an empty string."""
         return self._playing if self._player is not None else ""
 
+    @property
+    def channels(self) -> frozenset[str]:
+        """The channels the yawn or stretch playing now drives (empty when none plays)."""
+        if self._player is None:
+            return frozenset()
+        return frozenset(self._player.prim.keyframes[0].values)
+
     def start_waking(self, now: float) -> bool:
         """Start the waking stretch (it cancels a yawn). False when the robot has no stretch."""
-        if self._stretch is None:
+        if (chosen := self._choose("stretch")) is None:
             return False
-        self._play("stretch", self._stretch, now)
+        self._play("stretch", *chosen, now)
         return True
 
-    def _play(self, name: str, prim: Primitive, now: float) -> None:
-        self._amp = max(0.0, min(self.max_amplitude, self._scale_now))
+    def _play(self, name: str, prim: Primitive, gain: float, now: float) -> None:
+        self._amp = max(0.0, min(self.max_amplitude, self._scale_now * gain))
         self._scale_start = self._scale_now
         self._player = Player(
             prim, now, source=FX_SOURCE, amplitude=self._amp, priority=Priority.EXPRESSION
@@ -124,12 +186,14 @@ class CircadianMotion:
         if self._player is not None and self._player.done(now):
             self._player = None
             self._playing = ""
-        if state == "drowsy" and not attending and self._player is None and self._yawn:
+        if state == "drowsy" and not attending and self._player is None and self._can_play("yawn"):
             if self._next_yawn is None:
                 self._schedule_yawn(now)
             elif now >= self._next_yawn:
-                self._play("yawn", self._yawn, now)
-                self._schedule_yawn(now + self._yawn.duration)
+                chosen = self._choose("yawn")  # None: no variant fits the affect intensity now
+                if chosen is not None:
+                    self._play("yawn", *chosen, now)
+                self._schedule_yawn(now + (chosen[0].duration if chosen else 0.0))
         elif state != "drowsy":
             self._next_yawn = None
         if state == "resting" and not attending and self.rest:

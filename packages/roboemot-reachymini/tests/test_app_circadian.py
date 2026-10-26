@@ -201,6 +201,7 @@ def test_circadian_settings_reload_without_a_restart(data):  # noqa: F811
     try:
         assert wait_for(lambda: app.circadian_runner is not None and app.diagnostics is not None)
         assert app.circadian_runner.cfg.circadian.yawn_interval_s == 120.0
+        assert app.soothe_runner is None  # voice is off: no speech output, no runner (SPEC 7B)
         (data / "app.yaml").write_text(
             (data / "app.yaml").read_text()
             + "circadian:\n  yawn_interval_s: 45\nlight:\n  sample_interval_s: 3\n"
@@ -338,6 +339,22 @@ def test_the_stretch_follows_the_register_amplitude(data, fed):  # noqa: F811
         assert wait_for(lambda: section(app)["waking"] is False, timeout=10)
         peak = max(c.targets["antenna_right"] for c in fed if c.source == FX_SOURCE)
         assert peak == pytest.approx(math.radians(25), rel=0.05)
+    finally:
+        stop.set()
+        thread.join(15)
+    assert not errors
+
+
+def test_the_app_feeds_the_affect_intensity_to_the_circadian_motion(data):  # noqa: F811
+    app = new_app(app_module.RoboEmotApp)
+    stop, thread, errors = start(app)
+    try:
+        assert wait_for(lambda: app.circadian_runner is not None and app.affect_runner is not None)
+        motion = app.circadian_runner.motion
+        app.affect_runner.engine.impulse(time.monotonic(), 0.6, 0.6, "joy")
+        expected = app.affect_runner.engine.state(time.monotonic()).intensity
+        assert expected > 0
+        assert motion.affect_intensity() == pytest.approx(expected, abs=0.05)
     finally:
         stop.set()
         thread.join(15)

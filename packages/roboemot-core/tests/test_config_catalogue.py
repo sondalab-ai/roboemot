@@ -31,7 +31,7 @@ def rows(stack: ConfigStack) -> dict:
 
 def test_the_descriptor_contract_is_pinned():
     assert set(DESCRIPTOR_KEYS) == {
-        "path", "kind", "nullable", "value", "default", "source", "ge", "le", "unit",
+        "path", "kind", "nullable", "value", "default", "source", "gt", "ge", "le", "unit",
         "restart", "admin_only", "opt_in", "conservative", "description", "choices",
         "item_kind", "length", "key", "entry", "secret", "private", "writable", "removable",
     }  # fmt: skip

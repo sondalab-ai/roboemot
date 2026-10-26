@@ -28,6 +28,7 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any, Protocol
 
+from ..affect.clips import ClipLibrary
 from ..bus import Bus, Message
 from ..config.schema import RoboEmotConfig, StateEffects
 from ..manifest import Dof
@@ -89,6 +90,8 @@ class CircadianRunner:
         clock: Clock | None = None,
         dofs: dict[str, Dof] | None = None,
         body_yaw: str | None,
+        affect_intensity: Callable[[], float],
+        clips: ClipLibrary | None = None,
         detection_period: Callable[[], float] = lambda: math.inf,
         engaged: Callable[[], bool] = lambda: False,
     ) -> None:
@@ -101,7 +104,14 @@ class CircadianRunner:
         self.model = CircadianModel(cfg.circadian)
         self.sampler = LightSampler(cfg.light, cfg.circadian, self.clock.monotonic)
         self.motion = (
-            CircadianMotion(cfg.circadian, cfg.circadian_motion, dofs, body_yaw=body_yaw)
+            CircadianMotion(
+                cfg.circadian,
+                cfg.circadian_motion,
+                dofs,
+                body_yaw=body_yaw,
+                affect_intensity=affect_intensity,
+                clips=clips,
+            )
             if dofs
             else None
         )

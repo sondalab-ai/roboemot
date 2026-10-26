@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 from roboemot.affect import AffectState
+from roboemot.affect.clips import load_clip_library
 from roboemot.affect.expression import ExpressionRenderer, build_primitive
 from roboemot.affect.register import Person, resolve_register
 from roboemot.config import ConfigStack
@@ -29,7 +30,12 @@ def manifest():
 @pytest.fixture(scope="module")
 def cfg(manifest):
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw=None)
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour,
+        manifest.channels,
+        load_clip_library(manifest),
+        body_yaw=None,
+    )
     return stack.effective()
 
 
@@ -41,6 +47,7 @@ def make_responder(cfg, manifest) -> OfflineResponder:
         0.15,
         cfg.gesture_map,
         body_yaw="body_yaw",
+        clips=load_clip_library(manifest),
     )
     return OfflineResponder(cfg.connectivity, renderer, "it")
 

@@ -23,8 +23,9 @@ Keys of every descriptor (all always present, ``None`` when not applicable):
   reset would give); plain JSON.
 - ``source``: layer that decides the value (``ConfigStack.source_of``): ``runtime``, ``derived``,
   ``app``, ``preset``, ``manifest``, ``defaults`` or ``schema``.
-- ``ge`` / ``le`` (numeric limits), ``unit``, ``restart``, ``admin_only``, ``opt_in``,
-  ``conservative``, ``description``: from the schema (``field_meta`` for the flags).
+- ``gt`` / ``ge`` / ``le`` (numeric limits; ``gt`` is exclusive), ``unit``, ``restart``,
+  ``admin_only``, ``opt_in``, ``conservative``, ``description``: from the schema
+  (``field_meta`` for the flags).
 - ``secret``: the value is a secret or secret-shaped (a field is fully secret if any element of
   its value or default is secret-shaped). ``value`` and ``default`` are then ``"***"`` (or null
   when absent) and the field is never writable from the web, except a route ``base_url`` (see
@@ -101,6 +102,7 @@ class FieldDescriptor(TypedDict):
     value: Any
     default: Any
     source: str
+    gt: float | None
     ge: float | None
     le: float | None
     unit: str | None
@@ -154,6 +156,7 @@ def descriptor(path: str, kind: str, value: Any = None, **fields: Any) -> FieldD
         "value": value,
         "default": None,
         "source": BLANK_SOURCE,
+        "gt": None,
         "ge": None,
         "le": None,
         "unit": None,
@@ -239,7 +242,7 @@ def classify(annotation: Any) -> tuple[str, dict[str, Any]]:
 
 
 def _limits(info: Any) -> dict[str, float | None]:
-    out: dict[str, float | None] = {"ge": None, "le": None}
+    out: dict[str, float | None] = {"gt": None, "ge": None, "le": None}
     for item in info.metadata:
         for name in out:
             if hasattr(item, name):

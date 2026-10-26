@@ -91,7 +91,7 @@ def test_expression_settings_reload_without_a_restart(data):  # noqa: F811
     try:
         assert wait_for(lambda: app.expression is not None and app.diagnostics is not None)
         assert app.expression.cfg.intensity_factor.high == 1.3
-        assert "joy" in app.expression.expression_map
+        assert app.expression.expression_map["joy"].variants  # recorded clips (SPEC 7)
         (data / "app.yaml").write_text(
             (data / "app.yaml").read_text()
             + "expression:\n  intensity_factor: {high: 0.9}\n"
@@ -99,10 +99,9 @@ def test_expression_settings_reload_without_a_restart(data):  # noqa: F811
             + "      antenna_right: [[0.0, 0], [0.225, 5], [0.45, 0]]\n"
         )
         assert wait_for(lambda: app.expression.cfg.intensity_factor.high == 0.9)
-        assert app.expression.expression_map["joy"].repeat == 3  # merged with the manifest's
         joy = app.expression.expression_map["joy"]
         assert joy.channels["antenna_right"][1] == (0.225, 5)
-        assert set(joy.channels) == {"antenna_right", "antenna_left"}
+        assert set(joy.channels) == {"antenna_right"} and not joy.variants  # channels drop clips
     finally:
         stop.set()
         thread.join(15)

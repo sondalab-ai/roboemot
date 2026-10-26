@@ -26,21 +26,33 @@ same code, but they are started by an explicit :meth:`request` (any caller, toda
 skill) and never by the affect state. The same interval, register, persona, circadian and
 clamping rules apply.
 
+Recorded clips (SPEC 7, Recorded clips): an entry may hold ``variants`` instead of ``channels``,
+each naming a clip of the robot's clip library (``affect.clips``) with an intensity band, a
+weight and a ``gain``. When the entry starts the renderer picks, at random by weight, among the
+variants whose band holds the affect intensity, never the clip the entry played last unless it
+is the only one eligible (the random source is injected). The chosen clip is then built and
+played exactly like a hand-written entry, with one difference in the formula above: the product
+is multiplied by the variant's ``gain`` before the ``expression.max_amplitude`` cap. The clamp,
+the body gate, the command lifetime and the cross-fade all apply unchanged.
+
 Not scaled by speed: expressions play at the keyframe times.
 """
 
 from __future__ import annotations
 
 import math
+import random
 import threading
+from bisect import bisect_left
 from collections.abc import Callable, Mapping
 
-from ..config.schema import ExpressionConfig, ExpressionEntry
+from ..config.schema import ClipVariant, ExpressionConfig, ExpressionEntry
 from ..manifest import Dof
 from ..motion.core import Command, Priority
 from ..motion.curves import min_jerk
 from ..motion.primitives import Keyframe, Player, Primitive
 from . import AffectState
+from .clips import ClipLibrary
 from .register import ActiveRegister
 
 SOURCE = "expression"
@@ -48,10 +60,23 @@ SOURCE = "expression"
 
 def _sample(frames: list[tuple[float, float]], t: float) -> float:
     """Piecewise-linear value of one channel's keyframes at ``t``."""
-    for (t0, v0), (t1, v1) in zip(frames, frames[1:], strict=False):
-        if t <= t1:
-            return v0 + (v1 - v0) * ((t - t0) / (t1 - t0))
-    return frames[-1][1]
+    i = max(1, bisect_left(frames, t, key=lambda f: f[0]))
+    if i >= len(frames):
+        return frames[-1][1]
+    (t0, v0), (t1, v1) = frames[i - 1], frames[i]
+    return v0 + (v1 - v0) * ((t - t0) / (t1 - t0))
+
+
+def pick_variant(
+    variants: list[ClipVariant], intensity: float, last: str | None, rng: random.Random
+) -> ClipVariant | None:
+    """The variant to play: among those whose band holds ``intensity``, one chosen by weight
+    that is not the clip played last, unless that is the only one eligible. ``intensity`` is
+    clamped to [0, 1] first, so float drift cannot leave every band empty."""
+    intensity = min(1.0, max(0.0, intensity))
+    eligible = [v for v in variants if v.min_intensity <= intensity <= v.max_intensity]
+    fresh = [v for v in eligible if v.clip != last] or eligible
+    return rng.choices(fresh, weights=[v.weight for v in fresh])[0] if fresh else None
 
 
 def build_primitive(
@@ -107,9 +132,14 @@ class ExpressionRenderer:
         gesture_map: Mapping[str, ExpressionEntry] | None = None,
         *,
         body_yaw: str | None,
+        clips: ClipLibrary | None = None,
+        rng: random.Random | None = None,
     ) -> None:
         self.dofs = dofs
         self.body_yaw = body_yaw
+        self.clips: ClipLibrary = clips or {}
+        self.rng = rng or random.Random()  # noqa: S311 (variety, not security)
+        self._last_clip: dict[str, str] = {}  # entry name -> the clip it played last
         self.circadian_factor: Callable[[], float] = lambda: 1.0
         self._request_lock = threading.Lock()
         self._requested: str | None = None  # a skill's label, from another thread (SPEC 11)
@@ -137,7 +167,13 @@ class ExpressionRenderer:
         gesture_map: Mapping[str, ExpressionEntry] | None = None,
     ) -> None:
         """Hot reload: new parameters and maps. An expression already playing finishes; a
-        requested name the new maps no longer have is dropped."""
+        requested name the new maps no longer have is dropped. ``ValueError`` when an entry has a
+        variant naming a clip the library lacks (the config stack refuses it too; this keeps a
+        mismatched caller from silently playing nothing)."""
+        for name, entry in (*expression_map.items(), *(gesture_map or {}).items()):
+            for v in entry.variants:
+                if v.clip not in self.clips:
+                    raise ValueError(f"expression {name!r}: unknown clip {v.clip!r}")
         self.cfg, self.expression_map, self.crossfade_s = cfg, dict(expression_map), crossfade_s
         self.gesture_map = dict(gesture_map or {})
         with self._request_lock:
@@ -145,14 +181,15 @@ class ExpressionRenderer:
                 self._requested = None
             if self._forced not in (None, *self.playable()):
                 self._forced = None
-        self._cache: dict[tuple[str, bool], Primitive | None] = {}
+        self._cache: dict[tuple[str, bool, str | None], Primitive | None] = {}
 
-    def amplitude(self, register: ActiveRegister, state: AffectState) -> float:
-        """The amplitude factor for ``state`` under ``register`` (see the module docstring)."""
+    def amplitude(self, register: ActiveRegister, state: AffectState, gain: float = 1.0) -> float:
+        """The amplitude factor for ``state`` under ``register`` (see the module docstring);
+        ``gain`` is the chosen variant's, applied before the ``max_amplitude`` cap."""
         c = self.cfg
         reaction = getattr(c.intensity_factor, register.params.reaction_intensity)
         affect = c.intensity_floor + (1 - c.intensity_floor) * min(1.0, max(0.0, state.intensity))
-        raw = register.params.motion_amplitude * reaction * affect * self.circadian_factor()
+        raw = register.params.motion_amplitude * reaction * affect * self.circadian_factor() * gain
         return max(0.0, min(c.max_amplitude, raw))
 
     def set_register(self, register: ActiveRegister) -> None:
@@ -179,7 +216,8 @@ class ExpressionRenderer:
         map has the name or the circadian factor is 0 (resting: the robot does not move).
         Given ``now`` (the clock ``update`` runs on), a request inside ``min_interval_s`` of
         the last start is refused instead of queued, for reactions that are worthless late."""
-        if label not in self.expression_map and label not in self.gesture_map:
+        entry = self.expression_map.get(label) or self.gesture_map.get(label)
+        if entry is None or (entry.variants and not self._playable_variants(label, entry, True)):
             return False
         if now is not None and now - self._last_start < self.cfg.min_interval_s:
             return False
@@ -229,10 +267,13 @@ class ExpressionRenderer:
             return None
         return build_primitive(name, entry, self.dofs, body_yaw=self.body_yaw, body=self._approach)
 
-    def _primitive(self, label: str, body: bool) -> Primitive | None:
-        key = (label, body)
+    def _primitive(self, label: str, body: bool, clip: str | None = None) -> Primitive | None:
+        """The cached primitive of entry ``label``; ``clip`` names the library clip chosen for
+        an entry with variants (the cache keys on it)."""
+        key = (label, body, clip)
         if key not in self._cache:
-            entry = self.expression_map.get(label) or self.gesture_map.get(label)
+            entry = self.clips.get(clip) if clip else None
+            entry = entry or self.expression_map.get(label) or self.gesture_map.get(label)
             self._cache[key] = (
                 build_primitive(label, entry, self.dofs, body_yaw=self.body_yaw, body=body)
                 if entry
@@ -240,16 +281,39 @@ class ExpressionRenderer:
             )
         return self._cache[key]
 
+    def _playable_variants(
+        self, label: str, entry: ExpressionEntry, body: bool
+    ) -> list[ClipVariant]:
+        """The variants of ``entry`` whose clip builds into something this robot can play (with
+        ``body`` false, without the body turn): a clip that moves only dofs the robot lacks, or
+        only the gated body, is not a choice."""
+        return [v for v in entry.variants if self._primitive(label, body, v.clip) is not None]
+
     def _register_scale(self, register: ActiveRegister) -> float:
         """The register's share of the amplitude: motion amplitude x reaction factor."""
         p = register.params
         return p.motion_amplitude * getattr(self.cfg.intensity_factor, p.reaction_intensity)
 
     def _start(self, label: str, state: AffectState, register: ActiveRegister, now: float) -> bool:
-        prim = self._primitive(label, register.params.approach_allowed)
-        amp = self.amplitude(register, state)
+        entry = self.expression_map.get(label) or self.gesture_map.get(label)
+        variant = None
+        if entry is not None and entry.variants:
+            variant = pick_variant(
+                self._playable_variants(label, entry, register.params.approach_allowed),
+                state.intensity,
+                self._last_clip.get(label),
+                self.rng,
+            )
+            if variant is None:
+                return False
+        prim = self._primitive(
+            label, register.params.approach_allowed, variant.clip if variant else None
+        )
+        amp = self.amplitude(register, state, variant.gain if variant else 1.0)
         if prim is None or amp <= 0:
             return False
+        if variant is not None:
+            self._last_clip[label] = variant.clip
         if self._last and self.crossfade_s > 0:
             self._blend = (now, dict(self._last))
         self._player = Player(prim, now, source=SOURCE, amplitude=amp, priority=Priority.EXPRESSION)

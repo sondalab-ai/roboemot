@@ -12,10 +12,11 @@ import logging
 import math
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from roboemot import paths, priority
+from roboemot.affect.clips import load_clip_library
 from roboemot.affect.expression import ExpressionRenderer
 from roboemot.affect.register import RegisterTracker
 from roboemot.affect.runner import AffectRunner
@@ -104,6 +105,9 @@ class Pipeline:
     value_cap: Callable[[], int]
     pitch_dof: str
     sleep: SleepGate
+    voice_heard: list[float] = field(
+        default_factory=lambda: [-math.inf]
+    )  # last utterance, monotonic
 
 
 def make_yes_no(
@@ -120,6 +124,12 @@ def make_yes_no(
     )
 
 
+def ducked_channels(expression: ExpressionRenderer, circ: CircadianRunner) -> frozenset[str]:
+    """Channels the speaking motion yields: those of the expression playing and of the circadian
+    yawn or stretch playing (SPEC 7, Speaking motion)."""
+    return expression.channels | (circ.motion.channels if circ.motion else frozenset())
+
+
 def assemble(
     host: RuntimeHost,
     stack: ConfigStack,
@@ -134,8 +144,9 @@ def assemble(
         platform.reflex_map(),
     )
     # the expression map and its channels (SPEC 11A); the speaking motion never turns the body
+    clips = load_clip_library(manifest)
     stack.set_manifest_behaviour(
-        manifest.model.behaviour, manifest.channels, body_yaw=gaze_map.body_yaw
+        manifest.model.behaviour, manifest.channels, clips, body_yaw=gaze_map.body_yaw
     )
     cfg = stack.effective()
     expression = host.expression = ExpressionRenderer(
@@ -145,6 +156,7 @@ def assemble(
         cfg.motion.arbiter.crossfade_ms / MS_PER_S,
         cfg.gesture_map,
         body_yaw=gaze_map.body_yaw,
+        clips=clips,
     )
     responder = OfflineResponder(cfg.connectivity, expression, cfg.conversation.language)
     loop = MotionLoop(
@@ -238,6 +250,8 @@ def assemble(
         clock=clock,
         dofs=manifest.dofs,
         body_yaw=gaze_map.body_yaw,
+        affect_intensity=lambda: runner.engine.state(time.monotonic()).intensity,
+        clips=clips,
         detection_period=host.detection_period,
         engaged=lambda: selector.engaged,
     )
@@ -252,7 +266,7 @@ def assemble(
         max_amplitude=cfg.expression.max_amplitude,
         timeline=lambda: out.timeline if (out := host.speech_output) is not None else None,
         listening=lambda: phase.listening,
-        ducked=lambda: expression.channels,
+        ducked=lambda: ducked_channels(expression, circ),
     )
     speaking.circadian_factor = circ.amplitude_factor
     host.circadian = circ.model if cfg.circadian.enabled else None
@@ -366,7 +380,11 @@ def assemble(
     def value_cap() -> int:
         return stack.effective().conversation.summary_value_max_chars
 
+    voice_heard = [-math.inf]  # monotonic time of the last utterance, addressed or not (SPEC 7B)
+    bus.subscribe("percept.utterance", lambda _msg: voice_heard.__setitem__(0, time.monotonic()))
+
     return Pipeline(
+        voice_heard=voice_heard,
         cfg=cfg,
         expression=expression,
         speaking=speaking,
