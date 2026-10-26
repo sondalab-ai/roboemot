@@ -18,11 +18,9 @@ class Clock:
         return self.t
 
 
-def fake(out_rate=16000, clear=True, audio="present"):
+def fake(out_rate=16000, audio="present"):
     log = SimpleNamespace(pushed=[], started=0, stopped=0, cleared=0)
     audio_obj = SimpleNamespace(clear_player=lambda: setattr(log, "cleared", log.cleared + 1))
-    if not clear:
-        audio_obj = object()
     media = SimpleNamespace(
         audio=None if audio is None else audio_obj,
         start_playing=lambda: setattr(log, "started", log.started + 1),
@@ -56,6 +54,7 @@ def test_audio_is_resampled_to_the_output_rate_the_sdk_reports():
     sp = ReachySpeaker(mini, 100, clock=Clock())
     sp.start_playing()
     sp.push_audio_sample(np.zeros(22050, np.float32), 22050)  # one second at Piper's rate
+    sp.end_stream()  # the converter's held-back tail
     assert sum(len(p) for p in log.pushed) == 48000
     assert all(p.dtype == np.float32 and p.ndim == 1 for p in log.pushed)
     assert sp.queued_s() == pytest.approx(1.0)
@@ -76,13 +75,15 @@ def test_stop_flushes_through_clear_player_and_resets_the_queue():
     assert act.speaking(clock.t + 0.1) and not act.speaking(clock.t + 0.3)  # only the tail
 
 
-def test_stop_falls_back_to_restarting_the_player_without_clear_player():
-    mini, log = fake(clear=False)
-    sp = ReachySpeaker(mini, 100, clock=Clock())
+def test_a_failing_clear_player_is_logged_and_the_queue_is_still_reset():
+    mini, log = fake()
+    mini.media.audio.clear_player = lambda: (_ for _ in ()).throw(RuntimeError("x"))
+    clock = Clock()
+    sp = ReachySpeaker(mini, 100, clock=clock)
     sp.start_playing()
     sp.push_audio_sample(np.zeros(1600, np.float32), 16000)
     sp.stop()
-    assert log.stopped == 1 and log.started == 2 and sp.queued_s() == 0.0
+    assert sp.queued_s() == 0.0 and log.stopped == 0
 
 
 def test_a_stop_during_a_push_abandons_the_chunks_not_yet_pushed():
@@ -179,16 +180,6 @@ def test_stop_and_pushes_from_two_threads_never_leave_the_gate_ahead_of_the_spea
     assert act.until() <= clock.t and sp.queued_s() == 0.0
 
 
-def test_a_failed_pipeline_restart_marks_the_speaker_not_playing():
-    mini, log = fake(clear=False)
-    sp = ReachySpeaker(mini, 100, clock=Clock())
-    sp.start_playing()
-    mini.media.start_playing = lambda: (_ for _ in ()).throw(RuntimeError("x"))
-    sp.stop()
-    assert not sp.snapshot()["playing"]
-    assert sp.push_audio_sample(np.zeros(100, np.float32), 16000) == 0.0
-
-
 def test_the_return_value_is_zero_when_nothing_was_queued_and_bad_rates_are_refused():
     mini, log = fake()
     sp = ReachySpeaker(mini, 100, clock=Clock())
@@ -210,6 +201,7 @@ def test_the_speaker_keeps_a_timestamped_reference_for_the_echo_check_and_cuts_i
     sp.start_playing()
     tone = np.sin(np.arange(22050) * 0.05).astype(np.float32)
     sp.push_audio_sample(tone, 22050)  # one second at Piper's rate, resampled twice on the way
+    sp.end_stream()
     start = clock.t
     w = ref.window(start, start + 1.0)
     assert w.size == 16000 and float(np.abs(w).max()) > 0.5  # at the reference rate
@@ -217,3 +209,88 @@ def test_the_speaker_keeps_a_timestamped_reference_for_the_echo_check_and_cuts_i
     sp.stop()
     assert float(np.abs(ref.window(start + 0.6, start + 1.0)).max()) == 0.0  # never played
     assert float(np.abs(ref.window(start + 0.1, start + 0.4)).max()) > 0.5
+
+
+# ------------------------------------------------- streamed resampling (SPEC 8)
+
+
+def sine(rate: int, seconds: float = 1.0) -> np.ndarray:
+    t = np.arange(int(rate * seconds)) / rate
+    return (0.5 * np.sin(2 * np.pi * 233.3 * t)).astype(np.float32)
+
+
+def push_in_pieces(sp, x, rate, piece_s=0.2):
+    step = int(rate * piece_s)
+    for i in range(0, x.size, step):
+        sp.push_audio_sample(x[i : i + step], rate)
+
+
+@pytest.mark.parametrize("out_rate", [16000, 48000])
+def test_chunked_playback_matches_the_whole_sentence_resampled_at_once(out_rate):
+    from roboemot_reachymini.resample import resample
+
+    mini, log = fake(out_rate=out_rate)
+    sp = ReachySpeaker(mini, 100, clock=Clock())
+    sp.start_playing()
+    x = sine(22050)
+    push_in_pieces(sp, x, 22050)
+    ref = resample(x, 22050, out_rate)
+    before = np.concatenate(log.pushed)
+    # no edge transient at the 200 ms boundaries: what is out so far is the whole's prefix
+    assert np.abs(before - ref[: before.size]).max() < 1e-5
+    sp.end_stream()
+    out = np.concatenate(log.pushed)
+    assert out.size == ref.size and np.abs(out - ref).max() < 1e-5
+    assert sp.snapshot()["pushed_samples"] == ref.size
+
+
+def test_a_pitch_shifted_rate_is_snapped_so_the_stream_starts_at_once():
+    from roboemot_reachymini.resample import resample
+    from roboemot_reachymini.speaker import RATE_GRID_HZ
+
+    mini, log = fake(out_rate=48000)
+    sp = ReachySpeaker(mini, 100, clock=Clock())
+    sp.start_playing()
+    rate = 23907  # Piper's 22050 Hz pitched up 1.4 semitones
+    x = sine(rate)
+    sp.push_audio_sample(x[: int(rate * 0.2)], rate)
+    first = sum(p.size for p in log.pushed)
+    assert first >= 48000 * (0.2 - 0.1)  # less than one playback chunk held back
+    sp.push_audio_sample(x[int(rate * 0.2) :], rate)
+    sp.end_stream()
+    snapped = round(rate / RATE_GRID_HZ) * RATE_GRID_HZ
+    ref = resample(x, snapped, 48000)
+    out = np.concatenate(log.pushed)
+    assert out.size == ref.size and np.abs(out - ref).max() < 1e-5
+
+
+def test_a_stop_starts_a_fresh_stream():
+    from roboemot_reachymini.resample import resample
+
+    mini, log = fake(out_rate=48000)
+    sp = ReachySpeaker(mini, 100, clock=Clock())
+    sp.start_playing()
+    x = sine(22050, 0.5)
+    sp.push_audio_sample(x, 22050)  # cut by a barge-in before its tail is flushed
+    sp.stop()
+    log.pushed.clear()
+    sp.push_audio_sample(x, 22050)
+    sp.end_stream()
+    out, ref = np.concatenate(log.pushed), resample(x, 22050, 48000)
+    assert out.size == ref.size and np.abs(out - ref).max() < 1e-5
+
+
+def test_a_rate_change_ends_the_previous_stream_first():
+    from roboemot_reachymini.resample import resample
+
+    mini, log = fake(out_rate=48000)
+    sp = ReachySpeaker(mini, 100, clock=Clock())
+    sp.start_playing()
+    a, b = sine(22050, 0.3), sine(16000, 0.3)
+    sp.push_audio_sample(a, 22050)
+    sp.push_audio_sample(b, 16000)
+    sp.end_stream()
+    ref = np.concatenate([resample(a, 22050, 48000), resample(b, 16000, 48000)])
+    out = np.concatenate(log.pushed)
+    assert out.size == ref.size and np.abs(out - ref).max() < 1e-5
+    assert sp.end_stream() == 0.0  # nothing left to flush

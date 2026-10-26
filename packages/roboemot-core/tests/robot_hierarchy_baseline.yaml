@@ -2,19 +2,4 @@
 # test_robot_hierarchy.py at audit commit 6e67f76. Slices delete the entries they fix; an entry is
 # never added. audit: 1-4 and D as numbered in the epic plan, B = borderline item of the plan,
 # U = found by the gate but not in the plan's audit list. The epic ends with an empty file.
-- {check: duck, file: packages/roboemot-reachymini/src/roboemot_reachymini/app.py, symbol: RoboEmotApp.run, term: "getattr:appearance_embedder", count: 2, audit: "D"}
-- {check: duck, file: packages/roboemot-reachymini/src/roboemot_reachymini/app.py, symbol: RoboEmotApp.run, term: "getattr:camera_model", count: 1, audit: "D"}
-- {check: duck, file: packages/roboemot-reachymini/src/roboemot_reachymini/app.py, symbol: RoboEmotApp.run, term: "hasattr:speaking", count: 1, audit: "D"}
-- {check: duck, file: packages/roboemot-reachymini/src/roboemot_reachymini/audio.py, symbol: ReachyAudio.start, term: "getattr:audio", count: 1, audit: "D"}
-- {check: duck, file: packages/roboemot-reachymini/src/roboemot_reachymini/audio.py, symbol: ReachyAudio.start, term: "getattr:media", count: 1, audit: "D"}
-- {check: duck, file: packages/roboemot-reachymini/src/roboemot_reachymini/camera.py, symbol: ReachyCamera.camera_model, term: "getattr:K", count: 1, audit: "D"}
-- {check: duck, file: packages/roboemot-reachymini/src/roboemot_reachymini/conversation.py, symbol: entry_name, term: "getattr:status", count: 1, audit: "D"}
-- {check: duck, file: packages/roboemot-reachymini/src/roboemot_reachymini/driver.py, symbol: ReachyMiniDriver.motors_enabled, term: "getattr:_last_status", count: 1, audit: "D"}
-- {check: duck, file: packages/roboemot-reachymini/src/roboemot_reachymini/driver.py, symbol: ReachyMiniDriver.read_state, term: "getattr:_is_alive", count: 1, audit: "D"}
-- {check: duck, file: packages/roboemot-reachymini/src/roboemot_reachymini/driver.py, symbol: ReachyMiniDriver.robot_name, term: "getattr:_last_status", count: 1, audit: "D"}
-- {check: duck, file: packages/roboemot-reachymini/src/roboemot_reachymini/speaker.py, symbol: ReachySpeaker._media, term: "getattr:media", count: 1, audit: "D"}
-- {check: duck, file: packages/roboemot-reachymini/src/roboemot_reachymini/speaker.py, symbol: ReachySpeaker.start_playing, term: "getattr:audio", count: 1, audit: "D"}
-- {check: duck, file: packages/roboemot-reachymini/src/roboemot_reachymini/speaker.py, symbol: ReachySpeaker.stop, term: "getattr:audio", count: 1, audit: "D"}
-- {check: duck, file: packages/roboemot-reachymini/src/roboemot_reachymini/speaker.py, symbol: ReachySpeaker.stop, term: "getattr:clear_player", count: 1, audit: "D"}
-- {check: duck, file: packages/roboemot-reachymini/src/roboemot_reachymini/voice.py, symbol: build_listener, term: "getattr:entry_id", count: 1, audit: "D"}
-- {check: duck, file: packages/roboemot-reachymini/src/roboemot_reachymini/voice.py, symbol: build_listener, term: "hasattr:missing_words", count: 1, audit: "D"}
+[]

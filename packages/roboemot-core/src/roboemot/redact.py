@@ -36,22 +36,7 @@ TOKEN_PREFIXES = (
 )  # fmt: skip
 
 
-PRIVATE_PATHS = (
-    "circadian.location",
-    "privacy",
-    "safety.minor_motion_factor",
-    "safety.minor_hold_s",
-    "safety.minor_hold_periods",
-    "safety.minors_allowed_llm",
-    "safety.minor_output_blocklist",
-    "safety.minor_lines",
-    "register.child.minor_content_policy",
-    "register.teen.minor_content_policy",
-    "register.adult.minor_content_policy",
-    "register.senior.minor_content_policy",
-    "register.unknown.minor_content_policy",
-    "reflexes.rules.*.suppress_with_minor",
-)
+PRIVATE_PATHS = ("circadian.location", "privacy")
 PATH_WILDCARD = "*"
 
 
@@ -187,7 +172,7 @@ def origin(url: str) -> str:
 
 def scrub(key: str, value: Any) -> Any:
     """``value`` with whatever is secret replaced by ``REDACTED``, for an audit entry or a message:
-    a secret-shaped value, any value at a private path (``is_private``: minors, privacy, location;
+    a secret-shaped value, any value at a private path (``is_private``: privacy, location;
     the audit file still says that the path changed), a string under a credential-named key (the
     last segment of ``key``, or an inner dict key). Anything else comes back unchanged, so a
     normal value stays comparable."""

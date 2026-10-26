@@ -118,6 +118,13 @@ class Rig:
         return self.engine.snapshot()["rules"][name]
 
 
+def test_the_noise_floor_is_readable_for_the_live_tab():
+    rig = Rig(cfg_with(rule()))
+    assert rig.engine.noise_floor is None
+    rig.settle_audio()
+    assert rig.engine.noise_floor == QUIET
+
+
 # --------------------------------------------------------------------------- config
 
 
@@ -143,7 +150,7 @@ def test_100_and_800_ms_are_accepted():
     "bad",
     [
         {"trigger": "proximity", "primitive": "startle", "threshold": 0.4},
-        {"trigger": "loud_onset", "primitive": "turn_toward", "suppress_with_minor": True},
+        {"trigger": "loud_onset", "primitive": "turn_toward"},
         {"trigger": "new_voice", "primitive": "withdraw", "threshold": 3},
         {"trigger": "proximity", "primitive": "withdraw", "threshold": 3.0},  # fraction > 1
         {"trigger": "loud_onset", "threshold": 1.0},  # onset ratio below 1.5
@@ -157,11 +164,10 @@ def test_invalid_rules_are_rejected(bad):
         ReflexRule(**rule(**bad))
 
 
-def test_a_turn_toward_rule_must_suppress_with_a_minor():
-    voice = rule(trigger="new_voice", primitive="turn_toward", threshold=3)
-    with pytest.raises(ValidationError, match="suppress_with_minor"):
-        ReflexRule(**voice)
-    ReflexRule(**voice, suppress_with_minor=True)
+def test_a_turn_toward_rule_needs_no_minor_condition():
+    """Owner decision 2026-10-23: the turn toward a voice is the same for everyone."""
+    ReflexRule(**rule(trigger="new_voice", primitive="turn_toward", threshold=3))
+    assert "suppress_with_minor" not in ReflexRule.model_fields
 
 
 def test_duplicate_names_and_a_shape_without_a_hold_are_rejected():
@@ -189,9 +195,6 @@ def test_runtime_overrides_may_tighten_never_loosen_a_reflex():
         assert [v.path for v in violations(approved, candidate(**loose))], loose
     loosened_cap = RoboEmotConfig.model_validate({"reflexes": {"max_amplitude_deg": 90}})
     assert violations(RoboEmotConfig(), loosened_cap)
-    off = RoboEmotConfig.model_validate({"reflexes": {"rules": [rule(suppress_with_minor=False)]}})
-    on = RoboEmotConfig.model_validate({"reflexes": {"rules": [rule(suppress_with_minor=True)]}})
-    assert violations(on, off) and not violations(off, on)
 
 
 def test_removing_a_rule_is_refused_and_does_not_shift_the_next_one():
@@ -229,7 +232,6 @@ RULE_CHANGES = {
     "amplitude_deg": [5, 20],
     "cooldown_s": [1, 9],
     "duration_ms": [300, 700],
-    "suppress_with_minor": True,
 }
 SHARED_CHANGES = {
     "max_amplitude_deg": [10, 90],
@@ -277,7 +279,10 @@ def test_a_new_reflex_setting_must_be_classified_as_shared_with_a_withdraw_or_no
     from roboemot.config.schema import WITHDRAW_RULE_FIELDS, WITHDRAW_SHARED_FIELDS
 
     assert set(WITHDRAW_RULE_FIELDS) == set(ReflexRule.model_fields) - {"name"}
-    not_read_by_a_withdraw = {"startle_lift_ratio", "latency_window", "audio", "rules"}
+    not_read_by_a_withdraw = {
+        "startle_lift_ratio", "latency_window", "audio", "rules", "onset_watch_ratio",
+        "onset_window",
+    }  # fmt: skip
     assert set(ReflexConfig.model_fields) == set(WITHDRAW_SHARED_FIELDS) | not_read_by_a_withdraw
 
 
@@ -377,6 +382,19 @@ def test_cooldown_blocks_a_second_firing_until_it_has_passed():
     assert stats["fired"] == 2 and stats["dropped_cooldown"] == 2
 
 
+def test_last_fired_names_the_rule_and_its_age_on_the_loops_clock():
+    rig = Rig(cfg_with(rule()))
+    assert rig.engine.last_fired(rig.t) is None
+    rig.settle_audio()
+    rig.engine.offer_audio_level(LOUD, rig.t)
+    rig.tick()
+    fired_at = rig.t
+    name, age = rig.engine.last_fired(fired_at)
+    assert name == "r" and age < 0.1
+    assert rig.engine.last_fired(fired_at + 7.0)[1] == pytest.approx(7.0 + age)
+    assert rig.engine.last_fired(0.0)[1] == 0.0  # never negative
+
+
 def test_a_trigger_older_than_max_age_is_dropped_not_played_late():
     rig = Rig(cfg_with(rule(), max_age_ms=150))
     rig.settle_audio()
@@ -457,9 +475,7 @@ def test_sound_loud_is_published_once_per_onset_and_reaches_appraisal():
 def face(stamp: float, height: float, y1: float = 0.2) -> FacePercept:
     return FacePercept(
         track_id=1, stamp=stamp, box=(0.3, y1, 0.6, y1 + height), score=0.9, azimuth_rad=0.0,
-        elevation_rad=0.0, owner_id=None, anonymous_id="a", age_group="adult", age_source="x",
-        gender="unknown", gender_source="none", attribute_confidence=0.9, possible_minor=False,
-        new_track=False,
+        elevation_rad=0.0, owner_id=None, anonymous_id="a", new_track=False,
     )  # fmt: skip
 
 
@@ -489,15 +505,12 @@ def test_the_tallest_face_of_a_frame_counts():
     assert rig.stats("w")["fired"] == 1
 
 
-@pytest.mark.parametrize("minor", [False, True])
-def test_withdraw_never_moves_the_head_forward_even_with_the_minor_band_on(minor):
-    # The head is tipped back at -0.5 rad. The arbiter scales an absolute target about home by the
-    # minor factor, which would pull a naive withdraw back towards home, i.e. forward.
+def test_withdraw_never_moves_the_head_forward():
+    # The head is tipped back at -0.5 rad: a withdraw starts from there and only tips it further.
     rig = Rig(cfg_with(PROXIMITY), hold={PITCH: -0.5})
-    rig.loop.set_minor_present(minor)
     rig.run(0.5)
     start = rig.pitch[-1]
-    assert start == pytest.approx(-0.5 * (0.6 if minor else 1.0), abs=0.01)
+    assert start == pytest.approx(-0.5, abs=0.01)
     rig.bus.publish("percept.face", face(rig.t, 0.6), rig.t)
     n = len(rig.pitch)
     rig.run(0.8)
@@ -517,7 +530,6 @@ VOICE = rule(
     amplitude_deg=40,
     cooldown_s=0,
     duration_ms=800,
-    suppress_with_minor=True,
 )
 
 
@@ -533,7 +545,6 @@ def doa(rig: Rig, azimuth: float, head_yaw: float = 0.0) -> None:
 
 def test_a_new_voice_turns_the_head_toward_it_within_the_amplitude_and_audio_budget():
     rig = Rig(cfg_with(VOICE))
-    rig.loop.set_minor_present(False)
     rig.tick(3)
     doa(rig, 0.4)
     rig.tick()
@@ -546,7 +557,6 @@ def test_a_new_voice_turns_the_head_toward_it_within_the_amplitude_and_audio_bud
 
 def test_the_turn_is_limited_to_the_amplitude_and_the_front_half_plane():
     rig = Rig(cfg_with(VOICE))
-    rig.loop.set_minor_present(False)
     rig.tick(3)
     doa(rig, 1.4)  # 80 degrees: past the 40 degree amplitude
     rig.run(1.2)
@@ -554,7 +564,6 @@ def test_the_turn_is_limited_to_the_amplitude_and_the_front_half_plane():
     # a bearing from the head's own turn (head at +60 deg, voice 50 deg left of it) is 110 deg in
     # the base frame: the target stays inside the front half-plane
     rig2 = Rig(cfg_with(replace_rule(VOICE, amplitude_deg=90)))
-    rig2.loop.set_minor_present(False)
     rig2.tick(3)
     doa(rig2, math.radians(50), head_yaw=math.radians(60))
     rig2.run(1.5)
@@ -568,38 +577,14 @@ def replace_rule(base: dict, **kw) -> dict:
 def test_the_turn_stays_inside_the_head_body_reach():
     rig = Rig(cfg_with(replace_rule(VOICE, amplitude_deg=90)))
     rig.engine.margin_rad = math.radians(60)  # 65 - 60 = 5 degrees of reach
-    rig.loop.set_minor_present(False)
     rig.tick(3)
     doa(rig, 1.2)
     rig.run(1.5)
     assert 0 < peak_yaw(rig) <= math.radians(5) + 1e-6
 
 
-def test_no_reflex_turns_toward_a_voice_while_a_minor_is_present():
-    rig = Rig(cfg_with(VOICE))
-    rig.loop.set_minor_present(True)
-    rig.tick(3)
-    doa(rig, 0.4)
-    rig.run(1.0)
-    stats = rig.stats("v")
-    assert stats["fired"] == 0 and stats["suppressed_minor"] == 1
-    assert rig.reflex_sources() == []
-    assert rig.driver.writes[-1][1][YAW] == pytest.approx(0.0, abs=1e-9)
-
-
-def test_the_minor_flag_gates_the_turn_even_if_a_rule_says_otherwise():
-    rig = Rig(cfg_with(VOICE))
-    object.__setattr__(rig.engine._rules[0], "suppress_with_minor", False)  # a bypassed validator
-    rig.loop.set_minor_present(True)
-    rig.tick(3)
-    doa(rig, 0.4)
-    rig.run(0.5)
-    assert rig.stats("v")["fired"] == 0
-
-
 def test_a_continuing_voice_is_not_new_but_one_after_a_silence_is():
     rig = Rig(cfg_with(VOICE))
-    rig.loop.set_minor_present(False)
     rig.tick(3)
     for _ in range(10):  # speech for 0.2 s, one bearing every tick
         doa(rig, 0.3)
@@ -612,23 +597,11 @@ def test_a_continuing_voice_is_not_new_but_one_after_a_silence_is():
 
 def test_other_observation_sources_do_not_trigger_the_voice_reflex():
     rig = Rig(cfg_with(VOICE))
-    rig.loop.set_minor_present(False)
     rig.tick()
     obs = Observation("person", rig.t, "camera", 0.3, 0.0)
     rig.bus.publish("percept.entity", obs, rig.t, joint_state={YAW: 0.0})
     rig.tick()
     assert rig.stats("v")["fired"] == 0
-
-
-def test_startle_is_allowed_with_a_minor_but_inside_the_scaled_band():
-    rig = Rig(cfg_with(rule(amplitude_deg=20)))
-    rig.loop.set_minor_present(True)
-    rig.settle_audio()
-    rig.engine.offer_audio_level(LOUD, rig.t)
-    rig.run(0.6)
-    assert rig.stats()["fired"] == 1
-    assert max(rig.pitch) <= 1e-9
-    assert -0.6 * math.radians(20) - 1e-6 <= min(rig.pitch) < -math.radians(3)
 
 
 def test_the_global_amplitude_cap_limits_every_rule():
@@ -701,33 +674,6 @@ def test_the_threshold_may_only_move_the_safe_way_per_trigger():
     voice = cfg_rules(dict(VOICE, name="a", threshold=3.0))
     assert "threshold" in flagged(voice, cfg_rules(dict(VOICE, name="a", threshold=1.0)))
     assert "threshold" not in flagged(voice, cfg_rules(dict(VOICE, name="a", threshold=8.0)))
-
-
-def test_a_minor_appearing_mid_turn_cuts_the_turn_off_on_the_next_tick():
-    rig = Rig(cfg_with(VOICE))
-    rig.loop.set_minor_present(False)
-    rig.tick(3)
-    doa(rig, 0.6)
-    rig.run(0.2)
-    assert rig.reflex_sources() == ["reflex.v"]
-    yaw_before = rig.driver.writes[-1][1][YAW]
-    rig.loop.set_minor_present(True)
-    rig.tick()
-    assert rig.reflex_sources() == [] and rig.engine.active() == []
-    assert rig.stats("v")["suppressed_minor"] == 1
-    rig.run(0.5)
-    assert max(w[YAW] for _, w in rig.driver.writes[-25:]) <= yaw_before + 1e-9  # no further turn
-
-
-def test_a_minor_appearing_cuts_off_a_suppressible_startle_but_not_a_plain_one():
-    rig = Rig(cfg_with(rule(name="s", suppress_with_minor=True), rule(name="p")))
-    rig.settle_audio()
-    rig.engine.offer_audio_level(LOUD, rig.t)
-    rig.tick(2)
-    assert sorted(rig.reflex_sources()) == ["reflex.p", "reflex.s"]
-    rig.loop.set_minor_present(True)
-    rig.tick()
-    assert rig.reflex_sources() == ["reflex.p"]
 
 
 def test_a_close_face_is_judged_against_the_vision_age_not_the_audio_age():
@@ -836,9 +782,9 @@ def test_a_close_face_dropped_as_stale_or_future_re_arms_the_rule():
     assert rig.engine._face_armed["w"] is True  # the next face frame can fire it
 
 
-def test_a_trigger_dropped_by_cooldown_or_a_minor_keeps_the_arm_consumed_until_the_face_leaves():
-    """SPEC 10: only a hold, a disabled engine or age give the arm back. A cooldown or a minor
-    suppression is an answer: the face must leave and return to fire again."""
+def test_a_trigger_dropped_by_cooldown_keeps_the_arm_consumed_until_the_face_leaves():
+    """SPEC 10: only a hold, a disabled engine or age give the arm back. A cooldown is an
+    answer: the face must leave and return to fire again."""
 
     def leave_and_return(rig):
         for _ in range(3):
@@ -863,18 +809,6 @@ def test_a_trigger_dropped_by_cooldown_or_a_minor_keeps_the_arm_consumed_until_t
     leave_and_return(rig)
     assert rig.stats("w")["fired"] == 2
 
-    rig = Rig(cfg_with(PROXIMITY | {"suppress_with_minor": True}))
-    rig.loop.set_minor_present(True)
-    rig.tick()
-    rig.bus.publish("percept.face", face(rig.t, 0.6), rig.t)
-    rig.tick()
-    assert rig.stats("w")["suppressed_minor"] == 1
-    rig.loop.set_minor_present(False)
-    stay_close(rig, 0.5)
-    assert rig.stats("w")["fired"] == 0
-    leave_and_return(rig)
-    assert rig.stats("w")["fired"] == 1
-
 
 def test_enabling_the_reflexes_with_a_face_already_close_withdraws_once():
     """SPEC 10: a disabled engine drops the close-face edge without consuming the arm, so the
@@ -895,9 +829,11 @@ def test_enabling_the_reflexes_with_a_face_already_close_withdraws_once():
 NEUTRAL = {
     ReflexConfig: {
         "release_fraction", "proximity_rearm_ratio", "latency_window", "rules",
-        "audio",
+        "audio", "onset_watch_ratio", "onset_window",
     },
-    ReflexAudioConfig: {"poll_hz", "loud_event_ratio", "loud_event_refractory_s"},
+    ReflexAudioConfig: {
+        "poll_hz", "loud_event_ratio", "loud_event_refractory_s", "level_block_s", "level_window",
+    },
     # trigger, primitive, threshold and enabled have per-trigger rules in reflex_violations
     ReflexRule: {"name", "trigger", "primitive", "threshold", "enabled"},
 }  # fmt: skip
@@ -934,20 +870,6 @@ def with_top(path: str, value) -> RoboEmotConfig:
 def test_shared_reflex_settings_move_only_the_safe_way_without_a_withdraw(path, safe, unsafe):
     assert violations(with_top(path, unsafe), with_top(path, safe)) == []
     assert violations(with_top(path, safe), with_top(path, unsafe))
-
-
-def test_a_pose_outside_the_minor_band_gets_no_withdraw_that_would_pull_it_forward():
-    rig = Rig(cfg_with(PROXIMITY))
-    rig.tick(3)
-    # tipped back past the band the minor factor will draw: the band would scale a withdraw target
-    # (-40 deg at most) to -0.42 rad, forward of this pose
-    rig.loop.core.limiter.pos[PITCH] = -0.65
-    rig.loop.set_minor_present(True)
-    rig.bus.publish("percept.face", face(rig.t, 0.6), rig.t)
-    rig.tick()
-    stats = rig.stats("w")
-    assert stats["fired"] == 0 and stats["no_motion"] == 1
-    assert rig.reflex_sources() == []
 
 
 def test_a_withdraw_that_cannot_move_the_head_is_no_motion_not_a_hold():
@@ -1057,3 +979,196 @@ def test_loud_then_speaking_then_one_quiet_chunk_then_loud_fires():
     rig.engine.offer_audio_level(LOUD, rig.t)
     rig.tick(2)
     assert rig.stats()["fired"] == 1
+
+
+# ------------------------------------------------------------------ startle tuning (SPEC 10, 12A)
+
+
+def speech_like(rig: Rig, peak_ratio: float) -> None:
+    """A speech onset: the level climbs to ``peak_ratio`` x the floor in a few chunks."""
+    for r in (2.0, peak_ratio / 2, peak_ratio, peak_ratio / 2, 1.5):
+        rig.engine.offer_audio_level(QUIET * r, rig.t)
+        rig.tick()
+    rig.settle_audio(0.3)
+
+
+def onset(rig: Rig, name: str = "startle-loud") -> dict:
+    return rig.stats(name)["onset"]
+
+
+def test_the_default_startle_threshold_is_12():
+    startle = next(r for r in ReflexConfig().rules if r.name == "startle-loud")
+    assert startle.threshold == 12.0
+
+
+def test_a_speech_like_onset_at_ratio_8_no_longer_fires_the_default_startle():
+    rig = Rig(ReflexConfig())
+    rig.settle_audio()
+    speech_like(rig, 8.0)
+    rig.run(0.3)
+    assert rig.stats("startle-loud")["fired"] == 0
+    assert rig.reflex_sources() == []
+
+
+def test_a_clap_like_onset_at_ratio_20_fires_the_default_startle():
+    rig = Rig(ReflexConfig())
+    rig.settle_audio()
+    rig.engine.offer_audio_level(LOUD, rig.t)
+    rig.tick()
+    assert rig.stats("startle-loud")["fired"] == 1
+
+
+def test_onset_stats_hold_the_peak_of_each_episode_fired_or_below_the_threshold():
+    rig = Rig(ReflexConfig())
+    rig.settle_audio()
+    speech_like(rig, 8.0)
+    speech_like(rig, 6.0)
+    rig.engine.offer_audio_level(LOUD, rig.t)
+    rig.tick()
+    rig.settle_audio(0.3)
+    stats = onset(rig)
+    assert stats["watch_ratio"] == ReflexConfig().onset_watch_ratio
+    assert stats["below_threshold"]["count"] == 2
+    assert stats["below_threshold"]["max"] == pytest.approx(8.0, rel=0.1)
+    assert stats["below_threshold"]["p50"] == pytest.approx(6.0, rel=0.1)
+    assert stats["fired"]["count"] == 1
+    assert stats["fired"]["max"] == pytest.approx(20.0, rel=0.1)
+    assert {"p50", "p90", "p99", "max"} <= set(stats["fired"])
+
+
+def test_onset_stats_carry_numbers_only():
+    rig = Rig(ReflexConfig())
+    rig.settle_audio()
+    speech_like(rig, 8.0)
+
+    def leaves(v):
+        if isinstance(v, dict):
+            for x in v.values():
+                yield from leaves(x)
+        else:
+            yield v
+
+    assert all(isinstance(x, int | float) for x in leaves(onset(rig)))
+
+
+def test_a_sound_that_has_not_ended_leaves_no_sample_until_it_does():
+    rig = Rig(ReflexConfig())
+    rig.settle_audio()
+    rig.engine.offer_audio_level(QUIET * 8, rig.t)
+    rig.tick()
+    assert onset(rig)["below_threshold"]["count"] == 0
+    rig.settle_audio(0.1)
+    assert onset(rig)["below_threshold"]["count"] == 1
+
+
+def test_onset_stats_are_bounded_by_the_window():
+    rig = Rig(ReflexConfig(onset_window=10))
+    rig.settle_audio()
+    for _ in range(25):
+        speech_like(rig, 8.0)
+    assert onset(rig)["below_threshold"]["count"] == 10
+    assert onset(rig)["window"] == 10
+
+
+def test_a_reload_keeps_the_stats_but_a_new_watch_level_or_a_removed_rule_resets_them():
+    rig = Rig(ReflexConfig())
+    rig.settle_audio()
+    speech_like(rig, 8.0)
+    rig.engine.apply_config(ReflexConfig(), math.radians(3))
+    assert onset(rig)["below_threshold"]["count"] == 1
+    rig.engine.apply_config(ReflexConfig(onset_window=20), math.radians(3))
+    assert onset(rig)["below_threshold"]["count"] == 1
+    assert onset(rig)["window"] == 20
+    rig.engine.apply_config(ReflexConfig(onset_watch_ratio=3.0), math.radians(3))
+    assert onset(rig)["below_threshold"]["count"] == 0
+    assert onset(rig)["watch_ratio"] == 3.0
+    speech_like(rig, 8.0)
+    rig.engine.apply_config(cfg_with(rule(name="other")), math.radians(3))
+    rig.engine.apply_config(ReflexConfig(), math.radians(3))
+    assert onset(rig)["below_threshold"]["count"] == 0
+
+
+def test_the_watch_level_never_sits_above_a_rules_own_threshold():
+    rig = Rig(cfg_with(rule(threshold=1.5), onset_watch_ratio=4.0))
+    rig.settle_audio()
+    rig.engine.offer_audio_level(QUIET * 2, rig.t)
+    rig.tick()
+    rig.settle_audio(0.1)
+    assert onset(rig, "r")["watch_ratio"] == 1.5
+    assert onset(rig, "r")["fired"]["count"] == 1
+
+
+def test_the_robots_own_voice_closes_the_open_episode():
+    rig = Rig(ReflexConfig())
+    rig.settle_audio()
+    rig.engine.offer_audio_level(QUIET * 8, rig.t)
+    rig.tick()
+    rig.engine.speaking = lambda stamp: True
+    rig.engine.offer_audio_level(QUIET * 8, rig.t)
+    assert onset(rig)["below_threshold"]["count"] == 1
+
+
+def test_only_loud_onset_rules_carry_onset_stats():
+    rig = Rig(cfg_with(rule(), PROXIMITY))
+    assert "onset" in rig.stats("r")
+    assert "onset" not in rig.stats("w")
+
+
+def test_an_app_layer_threshold_below_the_new_default_stays_the_installed_baseline():
+    from roboemot.config.stack import ConfigStack, GuardrailError
+
+    rules = [r.model_dump() for r in ReflexConfig().rules]
+    rules[0]["threshold"] = 6.0
+    stack = ConfigStack(app={"reflexes": {"rules": rules}})
+    assert stack.effective().reflexes.rules[0].threshold == 6.0
+    stack.set("reflexes.rules.startle-loud.threshold", 8.0)
+    with pytest.raises(GuardrailError):
+        stack.set("reflexes.rules.startle-loud.threshold", 4.0)
+
+
+def test_a_runtime_override_below_the_new_default_is_refused_and_one_above_is_allowed():
+    from roboemot.config.stack import ConfigStack, GuardrailError
+
+    stack = ConfigStack()
+    with pytest.raises(GuardrailError):
+        stack.set("reflexes.rules.startle-loud.threshold", 8.0)
+    stack.set("reflexes.rules.startle-loud.threshold", 15.0)
+    assert stack.effective().reflexes.rules[0].threshold == 15.0
+
+
+def test_turning_the_engine_off_at_runtime_stops_sound_loud_too():
+    """Sweep (SPEC 11A): ``reflexes.enabled`` is not a restart field. Off at runtime, the engine
+    publishes no ``sound.loud`` (as when it starts off); on again, it does."""
+    rig = Rig(cfg_with(rule(), enabled=False))
+    published = []
+    rig.bus.subscribe("sound.loud", lambda m: published.append(m.payload))
+    rig.settle_audio()
+    rig.engine.offer_audio_level(LOUD, rig.t)
+    rig.tick()
+    assert published == []
+    rig.engine.apply_config(cfg_with(rule()), 0.0)
+    rig.settle_audio()
+    rig.engine.offer_audio_level(LOUD, rig.t)
+    rig.tick()
+    assert len(published) == 1
+
+
+def test_turning_the_engine_back_on_does_not_fire_on_a_sound_that_went_on_while_it_was_off():
+    """A steady sound that started while the engine was off is not an onset when it comes back:
+    like after the robot's own speech, the first chunk cannot be a rising edge."""
+    rig = Rig(cfg_with(rule()))
+    published = []
+    rig.bus.subscribe("sound.loud", lambda m: published.append(m.payload))
+    rig.settle_audio()
+    rig.engine.apply_config(cfg_with(rule(), enabled=False), 0.0)
+    for _ in range(5):  # the television goes on while the engine is off
+        rig.engine.offer_audio_level(LOUD, rig.t)
+        rig.tick()
+    rig.engine.apply_config(cfg_with(rule()), 0.0)
+    rig.engine.offer_audio_level(LOUD, rig.t)
+    rig.tick(2)
+    assert published == [] and rig.reflex_sources() == []
+    rig.settle_audio()
+    rig.engine.offer_audio_level(LOUD, rig.t)
+    rig.tick()
+    assert len(published) == 1  # a real onset after it fires again

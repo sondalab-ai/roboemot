@@ -4,24 +4,25 @@
 deterministic; ``LatestFrameRunner`` drives it live. Per frame, when the governor allows:
 
 1. Faces are detected, filtered by ``face_min_px`` and tracked (stable ``track_id``). Tracks
-   unmatched for ``tracker.lost_s`` of capture time expire before association, so a face that
-   comes back after a long gap is a new track with no inherited identity or attributes.
-2. A new track gets ``embedding_burst`` face evaluations, at least ``burst_min_gap_s`` apart,
+   unmatched for the larger of ``tracker.lost_s`` and ``face_lost_periods`` detection periods
+   at the governor's rate (capture time) expire before association, so a face that comes back
+   after a long gap is a new track with no inherited identity.
+2. A new track gets ``embedding_burst`` face evaluations, at least ``burst_min_gap_s`` apart
+   (divided by the conversation scale only, so a thinking or speaking robot spends less on
+   bursts; the circadian and load scales slow bursts only through the detection rate),
    stopping early once it is recognised, then one per ``1 / embedding_hz``. Only confidently
    detected faces of at least ``embed_min_face_px`` are embedded. The burst (5 by default)
    lets one missed vote still fit the SPEC 13 identity budget of 2.5 s with the 3-of-5 votes
    of SPEC 6. The embedding goes straight to ``Matcher.observe`` and is dropped; it is never
    published.
-3. Per track, once, the first ``vision.attribute_crops`` face crops go to the attribute
-   worker (skipped when the recognised person has declared age and gender); until it answers,
-   age and gender are ``unknown`` (a possible minor).
-4. Published: ``percept.face`` (no embedding), ``person.recognized`` when a track turns into a
+3. Published: ``percept.face`` (no embedding), ``person.recognized`` when a track turns into a
    known person, ``percept.entity`` (kind person, with the camera-frame bearing; the joint state
    at capture travels in the message ``meta`` for the world model to rotate into the base
    frame). Optional object stage: same for animals and objects, whose DINOv2-class appearance
    embedding rides in the ``Observation`` (SPEC 5A) for world-model matching and the registry.
    ``vision.animal_categories`` and ``vision.object_categories`` map detector classes to the
-   kind; any other class, ``person`` included, is ignored.
+   kind; any other class, ``person`` included, is ignored. No age or gender is estimated (owner
+   decision 2026-10-23).
 
 ``light_tap`` (optional) receives each frame's image before anything else, for the circadian
 light sampler (SPEC 7A); it measures and keeps only numbers, never the image.
@@ -33,7 +34,19 @@ The world model is fed over the bus: ``world.feed_world(bus, world)`` subscribes
 ``percept.entity``. The bus keeps vision decoupled from the world model (they may live in
 separate processes later) and the in-process bus calls subscribers synchronously, so replay
 stays deterministic. A subscriber that raises is logged by type and skipped; it never aborts
-the frame. Frames and crops are never logged or written (SPEC 12).
+the frame. Frames are never logged or written (SPEC 12).
+
+For the debug report (SPEC 12A) ``stats`` adds face track churn (created, ended, the creation
+rate over ``vision.report_rate_window_s`` of capture time, the visible lifetime of the last
+``vision.report_window`` ended tracks).
+``tracks`` also explains the churn (``track_stats``): how confirmed face tracks ended
+(``ended_by``), the misses and effective ``lost_s`` behind each expiry, rebirths (a new track
+born near where one ended, with gap, IoU, distance and head pose change), and the scores of
+low-score detections the tracker refused or left unmatched, beside those that started tracks.
+The head pose comes from the frame's joint state through the robot's ``frame_spec``.
+``rate_scales`` lists the governor's multipliers by source (circadian, load, conversation)
+beside their product ``rate_scale``. Numbers only; the frame thread writes them and the report
+thread reads them under one lock.
 
 ``refresh`` lets the matcher add embeddings of confident matches to the registry (SPEC 6,
 online refresh). ``replay`` forces it off: refresh uses the registry's wall clock and mutates
@@ -45,8 +58,9 @@ from __future__ import annotations
 import itertools
 import logging
 import math
+import threading
+from collections import deque
 from collections.abc import Callable
-from concurrent.futures import Executor
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -54,27 +68,32 @@ import numpy as np
 
 from ..bus import Bus
 from ..config.schema import IdentityConfig, TrackerConfig, VisionConfig, WorldConfig
-from ..registry import Estimate, Matcher
-from ..registry.records import Attribute
-from ..world import Observation
-from .attributes import AttributeWorker
+from ..registry import Matcher
+from ..stats import SUMMARY_LEVELS, summarise
+from ..world import FrameSpec, Observation
 from .geometry import CameraModel
-from .governor import RateGovernor
+from .governor import CONVERSATION, EPSILON_S, RateGovernor
 from .stages import (
     AppearanceEmbedder,
-    AttributeEstimator,
     FaceDetector,
     FaceEmbedder,
     ObjectDetector,
 )
+from .track_stats import TrackDiagnostics, head_pose
 from .tracker import Track, Tracker
-from .types import Box, Detection, FacePercept, Frame, FrameReport, PersonRecognized
+from .types import (
+    Box,
+    Detection,
+    FacePercept,
+    Frame,
+    FrameReport,
+    PersonRecognized,
+)
 
 log = logging.getLogger(__name__)
 
 PERSON = "person"
-UNKNOWN = "unknown"
-NO_ESTIMATE = Estimate(UNKNOWN, "none")
+S_PER_MIN = 60.0
 CameraProvider = Callable[[int, int], CameraModel | None]
 FaceTap = Callable[[Frame, list[Track]], None]
 LightTap = Callable[[np.ndarray], object]
@@ -83,18 +102,14 @@ LightTap = Callable[[np.ndarray], object]
 @dataclass
 class _FaceState:
     generation: int
+    first_seen: float = 0.0  # capture stamp of the track's first detection
+    last_seen: float = 0.0  # capture stamp of its last visible frame
     evals: int = 0
     last_embed: float | None = None
     owner_id: str | None = None
     anonymous_id: str | None = None
     announced: str | None = None
     reported: bool = False
-    crops: list[tuple[float, np.ndarray]] = field(default_factory=list, repr=False)
-    last_crop: float | None = None
-    attr: Literal["collecting", "submitted", "skipped"] = "collecting"
-    age: Estimate = NO_ESTIMATE
-    gender: Estimate = NO_ESTIMATE
-    attr_stamp: float | None = None
 
 
 @dataclass
@@ -103,10 +118,6 @@ class _EntityState:
     last_embed: float | None = None
     owner_id: str | None = None
     embedding: np.ndarray | None = field(default=None, repr=False)
-
-
-def _declared(attr: Attribute | None) -> str | None:
-    return attr.value if attr is not None and attr.source == "declared" else None
 
 
 class VisionPipeline:
@@ -123,15 +134,14 @@ class VisionPipeline:
         *,
         face_detector: FaceDetector,
         face_embedder: FaceEmbedder,
-        attribute_estimator: AttributeEstimator | None = None,
         appearance_embedder: AppearanceEmbedder | None = None,
         object_detector: ObjectDetector | None = None,
         governor: RateGovernor | None = None,
-        executor: Executor | None = None,
         source: str = "vision",
         refresh: bool = True,
         camera_model: CameraProvider | None = None,
         world: WorldConfig | None = None,
+        frame_spec: FrameSpec | None = None,
     ):
         if cfg.embedding_burst < identity.votes_required:
             raise ValueError("vision.embedding_burst must be at least identity.votes_required")
@@ -144,6 +154,7 @@ class VisionPipeline:
         self.camera_model = camera_model
         self.world = world or WorldConfig()
         self.face_tap: FaceTap | None = None
+        self._visible: list[Track] = []
         self.light_tap: LightTap | None = None
         self.governor = governor or RateGovernor(cfg.rates)
         self.face_detector = face_detector
@@ -153,12 +164,10 @@ class VisionPipeline:
         self._lost_held = 0.0
         ids = itertools.count(1)
         self.face_tracker = Tracker(cfg.tracker, ids)
+        self.frame_spec = frame_spec
+        self.track_stats = TrackDiagnostics(cfg)
+        self.face_tracker.observer = self.track_stats
         self.object_tracker = Tracker(self._object_tracker_cfg(), ids)
-        self.worker = (
-            AttributeWorker(attribute_estimator, identity, cfg.attribute_queue_max, executor)
-            if attribute_estimator is not None
-            else None
-        )
         self._generations = itertools.count(1)
         self._cameras: dict[tuple[int, int], CameraModel] = {}
         self._faces: dict[int, _FaceState] = {}
@@ -166,6 +175,13 @@ class VisionPipeline:
         self._budget = 0
         self._entity_budget = 0
         self._entity_embeds = 0
+        self._report_lock = threading.Lock()
+        self._last_stamp: float | None = None
+        self._tracks_created = 0
+        self._tracks_ended = 0
+        self._created_stamps: deque[float] = deque()
+        self._lifetimes_s: deque[float] = deque(maxlen=cfg.report_window)
+        self._face_lost_held = 0.0
         matcher.registry.add_forget_listener(self._on_forget)
 
     def process(self, frame: Frame) -> FrameReport:
@@ -176,9 +192,11 @@ class VisionPipeline:
         even when the governor is off, so state never outlives its track. Raises whatever a
         stage raises: ``LatestFrameRunner`` catches it per frame.
         """
-        self._absorb_attributes()
-        self._tap_light(frame)
         stamp = frame.stamp
+        with self._report_lock:
+            self._last_stamp = stamp
+        self._tap_light(frame)
+        self.face_tracker.cfg = self._face_tracker_cfg()
         self.object_tracker.cfg = self._object_tracker_cfg()
         self._expire(stamp)
         if self.governor.scale <= 0:
@@ -215,33 +233,55 @@ class VisionPipeline:
     def reset(self) -> None:
         """Forget every track and its per-track state (start of a session or replay).
 
-        Releases the matcher's votes for each track, cancels attribute jobs that have not
-        started, restarts track IDs at 1 and resets the governor. A job already running
-        finishes but its result belongs to an old generation and is ignored.
+        Releases the matcher's votes for each track, restarts track IDs at 1 and resets the
+        governor.
         """
         for track_id in (*self._faces, *self._entities):
             self.matcher.release(track_id)
+        for state in self._faces.values():
+            self._end_face(state)
+        self.track_stats.reset(len(self._faces))
         self._faces.clear()
         self._entities.clear()
         ids = itertools.count(1)
         self.face_tracker.reset(ids)
         self.object_tracker.reset(ids)
         self._lost_held = 0.0
+        self._face_lost_held = 0.0
         self.governor.reset()
-        if self.worker is not None:
-            self.worker.cancel_pending()
 
-    def apply_config(self, vision: VisionConfig, identity: IdentityConfig) -> None:
-        """Hot reload (SPEC 11A): thresholds, rates and tracker settings take effect at once.
-
-        ``vision.attribute_queue_max``, the thread counts, the detector size and the models
-        folder are restart-only (the schema marks them).
+    def apply_config(
+        self, vision: VisionConfig, identity: IdentityConfig, world: WorldConfig | None = None
+    ) -> None:
+        """Hot reload (SPEC 11A): thresholds, rates and tracker settings take effect at once, and
+        so does, with ``world``, the camera field of view. The thread count, the detector size
+        and the models folder are restart-only (the schema marks them).
         """
         self.cfg, self.identity = vision, identity
+        self.track_stats.cfg = vision
+        if world is not None:
+            self.world = world
         self.governor.rates = vision.rates
-        self.face_tracker.cfg = vision.tracker
+        self.face_tracker.cfg = self._face_tracker_cfg()
         self.object_tracker.cfg = self._object_tracker_cfg()
         self.matcher.config = identity
+
+    def _face_lost_s(self) -> float:
+        """Lifetime of a face track at the rate the governor allows now: the larger of
+        ``tracker.lost_s`` and ``face_lost_periods`` face-detection periods."""
+        lost = self.cfg.tracker.lost_s
+        period = self.governor.period("detection")
+        if math.isfinite(period):
+            lost = max(lost, self.cfg.face_lost_periods * period)
+        return lost
+
+    def _face_tracker_cfg(self) -> TrackerConfig:
+        """Face tracker settings: ``vision.tracker`` with a lifetime that follows the detection
+        period (SPEC 5, 13), so a slower detector (conversation, circadian or load scale) does
+        not end tracks between two detections. As for objects, the longer lifetime is kept
+        until the next face frame has been folded in after the rate goes back up."""
+        lost = max(self._face_lost_s(), self._face_lost_held)
+        return self.cfg.tracker.model_copy(update={"lost_s": lost})
 
     def _object_lost_s(self) -> float:
         """Lifetime of an animal or object track at the rate the governor allows now."""
@@ -261,32 +301,47 @@ class VisionPipeline:
         now, so a slow object stage (circadian or load scale) does not expire tracks between
         two frames. When the rate goes back up the longer lifetime is kept until the next
         object frame has been folded in, so tracks do not expire just before it can match them.
+        Both centre-distance gates take ``object_match_distance_heights`` (off by default).
         """
         return self.cfg.tracker.model_copy(
             update={
                 "high_score": self.cfg.object_score_min,
                 "low_score": self.cfg.object_score_min,
                 "confirm_hits": self.cfg.object_confirm_hits,
+                "match_distance_heights": self.cfg.object_match_distance_heights,
+                "low_match_distance_heights": self.cfg.object_match_distance_heights,
                 "lost_s": max(self._object_lost_s(), self._lost_held),
             }
         )
 
     def stats(self) -> dict[str, Any]:
-        """Counts for the debug report (SPEC 12A): live tracks, governor scale and drops.
+        """Counts for the debug report (SPEC 12A): live tracks, governor scale and drops and face
+        track churn (see the module docstring).
 
         Numbers only; no identity, embedding or image.
         """
+        window_s = self.cfg.report_rate_window_s
+        with self._report_lock:
+            last = self._last_stamp
+            recent = sum(
+                1 for t in self._created_stamps if last is not None and t >= last - window_s
+            )
+            tracks = {
+                "created": self._tracks_created,
+                "ended": self._tracks_ended,
+                "created_per_min": recent * S_PER_MIN / window_s,
+                "rate_window_s": window_s,
+                "lifetime_s": summarise(list(self._lifetimes_s), SUMMARY_LEVELS),
+                **self.track_stats.snapshot(),  # report lock, then observer lock: one report
+            }
         return {
             "face_tracks": len(self._faces),
             "entity_tracks": len(self._entities),
             "rate_scale": self.governor.scale,
+            "rate_scales": self.governor.scales(),
             "stage_drops": dict(self.governor.dropped),
+            "tracks": tracks,
         }
-
-    def close(self) -> None:
-        """Stop the attribute worker: no new jobs, waiting ones cancelled, own pool shut down."""
-        if self.worker is not None:
-            self.worker.close()
 
     def _camera(self, width: int, height: int) -> CameraModel:
         key = (width, height)
@@ -327,8 +382,26 @@ class VisionPipeline:
             self._drop_entity(track_id)
 
     def _drop_face(self, track_id: int) -> None:
-        self._faces.pop(track_id, None)
+        state = self._faces.pop(track_id, None)
         self.matcher.release(track_id)
+        if state is not None:
+            self._end_face(state)
+
+    def _end_face(self, state: _FaceState) -> None:
+        """Count an ended face track and its visible lifetime."""
+        with self._report_lock:
+            self._tracks_ended += 1
+            self._lifetimes_s.append(state.last_seen - state.first_seen)
+
+    def _new_face(self, track: Track, stamp: float) -> _FaceState:
+        """Per-track state of a newly confirmed face track, counted for the churn report."""
+        window_s = self.cfg.report_rate_window_s
+        with self._report_lock:
+            self._tracks_created += 1
+            self._created_stamps.append(stamp)
+            while self._created_stamps and self._created_stamps[0] < stamp - window_s:
+                self._created_stamps.popleft()
+        return _FaceState(next(self._generations), first_seen=track.first_stamp)
 
     def _drop_entity(self, track_id: int) -> None:
         self._entities.pop(track_id, None)
@@ -338,16 +411,22 @@ class VisionPipeline:
 
     def _process_faces(self, frame: Frame, camera: CameraModel) -> None:
         min_px = self.cfg.face_min_px
-        dets = [d for d in self.face_detector.detect(frame.image) if d.min_side >= min_px]
+        found = self.face_detector.detect(frame.image)
+        dets = [d for d in found if d.min_side >= min_px]
+        if len(dets) < len(found):
+            self.track_stats.below_min_px(len(found) - len(dets))
+        self.track_stats.pose = head_pose(frame.joint_state, self.frame_spec)
         result = self.face_tracker.update(dets, frame.stamp)
+        self._face_lost_held = self._face_lost_s()
+        self._visible = result.visible
         for track_id in result.removed_ids:
             self._drop_face(track_id)
         for track in result.visible:
             state = self._faces.get(track.track_id)
             if state is None:
-                state = self._faces[track.track_id] = _FaceState(next(self._generations))
+                state = self._faces[track.track_id] = self._new_face(track, frame.stamp)
+            state.last_seen = frame.stamp
             self._evaluate_face(frame, track, state)
-            self._collect_crop(frame, track, state)
             self._publish_face(frame, camera, track, state)
         if self.face_tap is not None:
             try:
@@ -355,6 +434,32 @@ class VisionPipeline:
             except Exception as exc:
                 log.warning("face tap failed: %s", type(exc).__name__)
         self._publish("percept.face_frame", frame.stamp, frame.stamp)
+
+    def clear_overlay(self) -> None:
+        """Forget the visible tracks the live preview would draw (the robot fell asleep)."""
+        self._visible = []
+
+    def face_overlay(self) -> list[tuple[Box, str | None]]:
+        """The visible face tracks of the last processed frame as ``(box in pixels, owner_id or
+        None)``, for the web UI's live preview. Read on demand from another thread; no cost per
+        frame beyond one reference swap."""
+        visible = self._visible
+        out: list[tuple[Box, str | None]] = []
+        for track in visible:
+            state = self._faces.get(track.track_id)
+            out.append((track.box, state.owner_id if state is not None else None))
+        return out
+
+    def preview_overlay(self, report: FrameReport) -> list[tuple[Box, str | None]] | None:
+        """The live preview's boxes for the frame ``report`` is about: ``face_overlay`` when
+        face detection ran on it, ``[]`` while detection is off (governor scale 0: the picture
+        shows without boxes), else None (the boxes belong to an earlier frame; the runner keeps
+        that one for a poll period, then shows newer frames without boxes)."""
+        if report.faces_detected:
+            return self.face_overlay()
+        if math.isinf(self.governor.period("detection")):
+            return []
+        return None
 
     def _face_due(self, track: Track, state: _FaceState, stamp: float) -> bool:
         if track.score < self.cfg.tracker.high_score or track.detection is None:
@@ -365,7 +470,7 @@ class VisionPipeline:
             return True
         gap = stamp - state.last_embed
         if state.owner_id is None and state.evals < self.cfg.embedding_burst:
-            return gap >= self.cfg.burst_min_gap_s
+            return gap >= self.governor.stretch(self.cfg.burst_min_gap_s, CONVERSATION) - EPSILON_S
         return gap >= self.governor.period("embedding")
 
     def _evaluate_face(self, frame: Frame, track: Track, state: _FaceState) -> None:
@@ -385,75 +490,11 @@ class VisionPipeline:
         state.last_embed = frame.stamp
         state.owner_id, state.anonymous_id = identity.owner_id, identity.anonymous_id
 
-    def _declared_complete(self, owner_id: str | None) -> bool:
-        if owner_id is None:
-            return False
-        try:
-            person = self.matcher.registry.get_person(owner_id)
-        except KeyError:
-            return False
-        return _declared(person.age_group) is not None and _declared(person.gender) is not None
-
-    def _collect_crop(self, frame: Frame, track: Track, state: _FaceState) -> None:
-        if self.worker is None or state.attr != "collecting":
-            return
-        if self._declared_complete(state.owner_id):
-            state.attr, state.crops = "skipped", []
-            return
-        needed = self.cfg.attribute_crops
-        gap = self.cfg.attribute_crop_interval_s
-        if len(state.crops) < needed and (
-            state.last_crop is None or frame.stamp - state.last_crop >= gap
-        ):
-            crop = self._crop(frame.image, track.box)
-            if crop.size:
-                state.crops.append((frame.stamp, crop))
-                state.last_crop = frame.stamp
-        if len(state.crops) >= needed and self.worker.submit(
-            track.track_id, state.generation, state.crops
-        ):
-            state.crops = []
-            state.attr = "submitted"
-
-    def _crop(self, image: np.ndarray, box: Box) -> np.ndarray:
-        """Copy of a square around the box (longer side plus margin), clipped to the frame."""
-        height, width = image.shape[:2]
-        x1, y1, x2, y2 = box
-        half = max(x2 - x1, y2 - y1) * (1 + 2 * self.cfg.attribute_crop_margin) / 2
-        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-        left, right = max(0, int(cx - half)), min(width, int(cx + half))
-        top, bottom = max(0, int(cy - half)), min(height, int(cy + half))
-        return image[top:bottom, left:right].copy()
-
-    def _absorb_attributes(self) -> None:
-        if self.worker is None:
-            return
-        for result in self.worker.poll():
-            state = self._faces.get(result.track_id)
-            if state is not None and state.generation == result.generation:
-                state.age, state.gender, state.attr_stamp = result.age, result.gender, result.stamp
-
-    def _attributes(self, state: _FaceState) -> tuple[Estimate, Estimate]:
-        """Declared values of a recognised person override the estimates (SPEC 5)."""
-        age, gender = state.age, state.gender
-        if state.owner_id is not None:
-            try:
-                person = self.matcher.registry.get_person(state.owner_id)
-            except KeyError:
-                return age, gender
-            declared_age, declared_gender = _declared(person.age_group), _declared(person.gender)
-            if declared_age is not None:
-                age = Estimate(declared_age, "declared", 1.0)
-            if declared_gender is not None:
-                gender = Estimate(declared_gender, "declared", 1.0)
-        return age, gender
-
     def _publish_face(
         self, frame: Frame, camera: CameraModel, track: Track, state: _FaceState
     ) -> None:
         x1, y1, x2, y2 = track.box
         azimuth, elevation = camera.bearing((x1 + x2) / 2, (y1 + y2) / 2)
-        age, gender = self._attributes(state)
         percept = FacePercept(
             track_id=track.track_id,
             stamp=frame.stamp,
@@ -468,14 +509,7 @@ class VisionPipeline:
             elevation_rad=elevation,
             owner_id=state.owner_id,
             anonymous_id=None if state.owner_id else state.anonymous_id,
-            age_group=age.value,
-            age_source=age.source,
-            gender=gender.value,
-            gender_source=gender.source,
-            attribute_confidence=age.confidence,
-            possible_minor=age.possible_minor,
             new_track=not state.reported,
-            attributes_stamp=state.attr_stamp,
         )
         if self._publish("percept.face", percept, frame.stamp):
             state.reported = True
@@ -487,8 +521,6 @@ class VisionPipeline:
                 stamp=frame.stamp,
                 azimuth_rad=azimuth,
                 elevation_rad=elevation,
-                age_group=age.value,
-                possible_minor=age.possible_minor,
             )
             if self._publish("person.recognized", recognized, frame.stamp):
                 state.announced = owner
@@ -569,7 +601,8 @@ class VisionPipeline:
         else:
             gap = stamp - state.last_embed
             if state.owner_id is None and state.evals < self.cfg.embedding_burst:
-                due = gap >= self.cfg.entity_burst_min_gap_s
+                burst_gap = self.governor.stretch(self.cfg.entity_burst_min_gap_s, CONVERSATION)
+                due = gap >= burst_gap - EPSILON_S
             else:
                 due = gap >= self.governor.period("appearance")
         if not due:

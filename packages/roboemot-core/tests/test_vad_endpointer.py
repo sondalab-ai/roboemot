@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 from roboemot.config.schema import VadConfig
@@ -219,3 +221,228 @@ def test_mutating_the_input_after_feed_does_not_change_the_audio():
         events += ep.feed(buf[: len(chunk)], T0 + i / RATE)
         buf[:] = 0.0
     np.testing.assert_array_equal(kinds(events, SpeechEnd)[0].audio, ref)
+
+
+class ScriptedVAD:
+    """Backend that returns the scripted probabilities, one per frame (then 0)."""
+
+    rate_hz = RATE
+    frame_samples = FRAME
+
+    def __init__(self, probs):
+        self.probs = list(probs)
+        self.resets = 0
+
+    def speech_prob(self, frame):
+        return self.probs.pop(0) if self.probs else 0.0
+
+    def reset(self):
+        self.resets += 1
+
+
+def scripted(probs, config=None, extra_frames=0):
+    """An Endpointer over ``ScriptedVAD(probs)`` after feeding one frame per probability."""
+    ep = Endpointer(ScriptedVAD(probs), config or cfg())
+    silence = np.zeros(FRAME, np.float32)
+    for i in range(len(probs) + extra_frames):
+        ep.feed(silence, T0 + i * FRAME_S)
+    return ep
+
+
+def test_a_burst_that_starts_speech_is_recorded_as_started():
+    # min_speech_ms 100 = 5 frames; the burst is 2 frames at 0.3, then 6 frames at 0.8/0.9
+    ep = scripted([0.0, 0.3, 0.35, 0.8, 0.9, 0.8, 0.8, 0.8, 0.8])
+    snap = ep.snapshot()
+    assert snap["started"]["peak_prob"] == {
+        "count": 1,
+        "p50": 0.9,
+        "p90": 0.9,
+        "p99": 0.9,
+        "max": 0.9,
+    }
+    assert snap["started"]["longest_on_run_ms"]["max"] == pytest.approx(5 * FRAME_S * 1000)
+    assert snap["started"]["longest_watch_run_ms"]["max"] == pytest.approx(7 * FRAME_S * 1000)
+    assert snap["not_started"] == {
+        "peak_prob": {"count": 0},
+        "longest_on_run_ms": {"count": 0},
+        "longest_watch_run_ms": {"count": 0},
+    }
+    assert snap["starts"] == 1
+
+
+def test_a_burst_that_does_not_start_speech_keeps_its_peak_and_longest_run():
+    # frames at or above 0.5 form runs of 2 and 3 inside one burst (0.3 keeps it open)
+    ep = scripted([0.0, 0.6, 0.7, 0.3, 0.5, 0.55, 0.9, 0.3, 0.0, 0.1])
+    snap = ep.snapshot()
+    assert snap["starts"] == 0
+    peak = snap["not_started"]["peak_prob"]
+    assert peak["count"] == 1 and peak["max"] == 0.9
+    run = snap["not_started"]["longest_on_run_ms"]
+    assert run["max"] == pytest.approx(3 * FRAME_S * 1000) and run["p50"] == run["max"]
+    assert snap["started"]["peak_prob"] == {"count": 0}
+
+
+def test_a_burst_ends_at_the_first_frame_below_watch_prob():
+    ep = scripted([0.3, 0.3, 0.1, 0.4, 0.0])
+    peaks = ep.snapshot()["not_started"]["peak_prob"]
+    assert peaks["count"] == 2 and peaks["p50"] == 0.3 and peaks["max"] == 0.4
+    assert ep.snapshot()["not_started"]["longest_on_run_ms"]["max"] == 0.0
+
+
+def test_a_burst_below_threshold_still_reports_its_length_at_the_watch_level():
+    # never reaches threshold 0.5: longest_on_run_ms is 0, the watch run is the 4-frame burst
+    ep = scripted([0.0, 0.3, 0.4, 0.45, 0.3, 0.1, 0.25, 0.0])
+    not_started = ep.snapshot()["not_started"]
+    assert not_started["longest_on_run_ms"]["max"] == 0.0
+    watch = not_started["longest_watch_run_ms"]
+    assert watch["count"] == 2 and watch["max"] == pytest.approx(4 * FRAME_S * 1000)
+    assert watch["p50"] == pytest.approx(FRAME_S * 1000)
+
+
+def test_reset_in_the_middle_of_a_burst_records_nothing_and_keeps_counters():
+    ep = scripted([0.0, 0.6, 0.7])
+    ep.reset()
+    ep.feed(np.zeros(FRAME, np.float32), T0 + 10)  # the next frame (prob 0) must not close it
+    snap = ep.snapshot()
+    assert snap["not_started"]["peak_prob"] == {"count": 0}
+    assert snap["frames"] == 4 and snap["frames_on"] == 2
+
+
+def test_counters_follow_frames_starts_and_both_ways_to_end():
+    # 6 on frames start speech, 10 silent frames (200 ms) end it; 70 more (1.4 s) are cut at 1 s
+    probs = [0.9] * 6 + [0.0] * 10 + [0.9] * 70
+    ep = scripted(probs, cfg(max_utterance_s=1))
+    snap = ep.snapshot()
+    assert snap["frames"] == len(probs)
+    assert snap["frames_on"] == 76
+    assert snap["ends_silence"] == 1
+    assert snap["ends_max_length"] == 1
+    assert snap["starts"] == 3  # the first, the second, and the one the cut continues into
+
+
+def test_watch_prob_above_threshold_watches_from_threshold():
+    ep = scripted([0.55, 0.0, 0.2, 0.0], cfg(threshold=0.5, watch_prob=0.9))
+    snap = ep.snapshot()
+    assert snap["watch_prob"] == 0.5
+    assert snap["not_started"]["peak_prob"]["count"] == 1
+
+
+def test_watch_window_keeps_only_the_latest_bursts():
+    ep = scripted([0.3, 0.0] * 12, cfg(watch_window=10))
+    snap = ep.snapshot()
+    assert snap["window"] == 10 and snap["not_started"]["peak_prob"]["count"] == 10
+
+
+def test_snapshot_is_plain_json():
+    ep = scripted([np.float32(0.3), np.float32(0.0), np.float32(0.9)] * 4)
+    snap = ep.snapshot()
+    assert json.loads(json.dumps(snap)) == snap
+
+
+def test_a_nan_probability_closes_the_burst_and_keeps_the_report_valid_json():
+    ep = scripted([float("nan"), 0.0, 0.3, 0.0])
+    snap = ep.snapshot()
+    json.loads(json.dumps(snap, allow_nan=False))
+    assert snap["not_started"]["peak_prob"]["count"] == 1
+
+
+def test_watch_settings_have_defaults_and_ranges():
+    from pydantic import ValidationError
+    from roboemot.config.schema import ReflexAudioConfig
+
+    vad, audio = VadConfig(), ReflexAudioConfig()
+    assert (vad.watch_prob, vad.watch_window) == (0.2, 500)
+    assert (audio.level_block_s, audio.level_window) == (1.0, 300)
+    for model, field, bad in [
+        (VadConfig, "watch_prob", 0.0),
+        (VadConfig, "watch_prob", 0.96),
+        (VadConfig, "watch_window", 9),
+        (VadConfig, "watch_window", 10001),
+        (ReflexAudioConfig, "level_block_s", 0.05),
+        (ReflexAudioConfig, "level_block_s", 61),
+        (ReflexAudioConfig, "level_window", 9),
+        (ReflexAudioConfig, "level_window", 10001),
+    ]:
+        with pytest.raises(ValidationError):
+            model(**{field: bad})
+
+
+def feed_probs(ep, probs, start=0):
+    """Feed one silent frame per probability of ``ep``'s ScriptedVAD from frame ``start``;
+    returns the events and the next frame index."""
+    ep._vad.probs.extend(probs)
+    events = []
+    for i in range(start, start + len(probs)):
+        events += ep.feed(np.zeros(FRAME, np.float32), T0 + i * FRAME_S)
+    return events, start + len(probs)
+
+
+def test_a_hot_reload_changes_threshold_and_min_speech_ms_of_a_running_endpointer():
+    ep = Endpointer(ScriptedVAD([]), cfg(threshold=0.5, min_speech_ms=100))  # 5 frames
+    events, n = feed_probs(ep, [0.4] * 8)
+    assert kinds(events, SpeechStart) == []
+    ep.apply_config(cfg(threshold=0.35, min_speech_ms=40))  # 2 frames
+    events, n = feed_probs(ep, [0.0, 0.4, 0.4], n)
+    starts = kinds(events, SpeechStart)
+    assert len(starts) == 1 and starts[0].stamp == pytest.approx(T0 + 9 * FRAME_S)
+
+
+def test_a_reload_mid_utterance_keeps_it_and_applies_the_new_end_silence():
+    ep = Endpointer(ScriptedVAD([]), cfg(end_silence_ms=200))  # 10 frames
+    events, n = feed_probs(ep, [0.9] * 6 + [0.0] * 3)
+    assert ep.in_speech
+    ep.apply_config(cfg(end_silence_ms=100))  # 5 frames: 2 more silent frames end it
+    events, n = feed_probs(ep, [0.0, 0.0], n)
+    ends = kinds(events, SpeechEnd)
+    assert len(ends) == 1 and ends[0].reason == "silence"
+    assert ends[0].audio_stamp == pytest.approx(T0) and len(ends[0].audio) == n * FRAME
+
+
+def test_a_reload_while_a_run_is_counting_keeps_the_true_start_stamp():
+    for min_ms in (40, 200):  # shrink to 2 frames, grow to 10
+        ep = Endpointer(ScriptedVAD([]), cfg(min_speech_ms=100))
+        events, n = feed_probs(ep, [0.0, 0.9, 0.9, 0.9])
+        ep.apply_config(cfg(min_speech_ms=min_ms))
+        events, n = feed_probs(ep, [0.9] * 8, n)
+        starts = kinds(events, SpeechStart)
+        assert len(starts) == 1 and starts[0].stamp == pytest.approx(T0 + FRAME_S)
+
+
+def test_a_reload_with_no_pre_roll_and_a_shorter_run_never_misplaces_the_start():
+    ep = Endpointer(ScriptedVAD([]), cfg(pre_roll_ms=0, min_speech_ms=100))
+    events, n = feed_probs(ep, [0.9] * 4)
+    ep.apply_config(cfg(pre_roll_ms=0, min_speech_ms=40))
+    events, n = feed_probs(ep, [0.9], n)
+    start = kinds(events, SpeechStart)[0]
+    assert start.pre_roll_stamp <= start.stamp <= T0 + 4 * FRAME_S
+    assert start.pre_roll_stamp == pytest.approx(start.stamp)
+
+
+def test_a_reload_moves_the_watch_level_with_the_threshold_only():
+    ep = Endpointer(ScriptedVAD([]), cfg(threshold=0.5, watch_prob=0.9, watch_window=10))
+    ep.apply_config(cfg(threshold=0.35, watch_prob=0.1, watch_window=50))
+    feed_probs(ep, [0.0])
+    snap = ep.snapshot()
+    assert snap["watch_prob"] == 0.35 and snap["window"] == 10  # restart-only fields stay
+
+
+def test_a_shorter_min_speech_starts_a_run_that_already_qualifies_without_more_speech():
+    ep = Endpointer(ScriptedVAD([]), cfg(min_speech_ms=200))  # 10 frames
+    events, n = feed_probs(ep, [0.0] + [0.9] * 6)
+    ep.apply_config(cfg(min_speech_ms=40))  # 2 frames: the run of 6 already qualifies
+    events, n = feed_probs(ep, [0.0], n)
+    starts = kinds(events, SpeechStart)
+    assert len(starts) == 1 and starts[0].stamp == pytest.approx(T0 + FRAME_S)
+    assert ep.in_speech
+
+
+def test_a_reload_after_a_max_length_cut_keeps_the_continued_utterance():
+    ep = Endpointer(ScriptedVAD([]), cfg(max_utterance_s=1))
+    events, n = feed_probs(ep, [0.9] * 55)  # cut at 1 s, the speech goes on in a new utterance
+    assert kinds(events, SpeechEnd)[0].reason == "max_length" and ep.in_speech
+    ep.apply_config(cfg(max_utterance_s=1, min_speech_ms=200, pre_roll_ms=0, end_silence_ms=100))
+    events, n = feed_probs(ep, [0.9] * 3 + [0.0] * 5, n)
+    ends = kinds(events, SpeechEnd)
+    assert kinds(events, SpeechStart) == [] and len(ends) == 1 and ends[0].reason == "silence"
+    assert ends[0].start_stamp == pytest.approx(T0 + 49 * FRAME_S)
+    assert len(ends[0].audio) == (n - 49) * FRAME

@@ -6,7 +6,7 @@ import threading
 import time
 
 import numpy as np
-import roboemot_reachymini.app as app_module
+from roboemot.runtime import assembly
 from roboemot.world import Observation
 from test_app_perception import data, fake_mini, new_app, wait_for  # noqa: F401  (data: fixture)
 
@@ -88,27 +88,26 @@ def test_a_loud_sound_from_the_microphone_startles_through_the_motion_loop(data)
     assert scripted.mini.media.stop_recording.called
 
 
-def test_the_robot_does_not_turn_toward_a_voice_while_the_minor_flag_is_on(data):  # noqa: F811
+def test_the_robot_turns_toward_a_voice_from_its_first_ticks(data):  # noqa: F811
+    """Owner decision 2026-10-23: no possible-minor latch holds the turn back at start-up."""
     app = new_app()
     stop, thread, errors = run_app(app, fake_mini())
     try:
-        assert wait_for(lambda: app.minor_presence is not None and app.diagnostics is not None)
-        assert app.minor_present  # starts on, fails safe (SPEC 12) ...
-
-        def loop_flag() -> bool:
-            motion = app.diagnostics.report()["sections"]["roboemot.motion"]["data"]
-            return motion["minor_present"]
-
-        assert loop_flag()  # ... and so is the motion loop's, from its first tick
-        now = time.monotonic()
-        obs = Observation("unknown", now, "doa", 0.4, 0.0, confidence=0.5)
-        app.bus.publish("percept.entity", obs, now, joint_state={"head.yaw": 0.0})
+        assert wait_for(lambda: app.reflexes is not None and app.diagnostics is not None)
+        assert (
+            "minor_present" not in app.diagnostics.report()["sections"]["roboemot.motion"]["data"]
+        )
 
         def turn() -> dict:
             return app.reflexes.snapshot()["rules"]["turn-to-voice"]
 
-        assert wait_for(lambda: turn()["suppressed_minor"])
-        assert turn()["fired"] == 0
+        def voice() -> bool:
+            now = time.monotonic()
+            obs = Observation("unknown", now, "doa", 0.4, 0.0, confidence=0.5)
+            app.bus.publish("percept.entity", obs, now, joint_state={"head.yaw": 0.0})
+            return turn()["fired"] > 0
+
+        assert wait_for(voice)
     finally:
         stop.set()
         thread.join(timeout=10)
@@ -218,14 +217,14 @@ class GatedSource:
 def test_the_sound_direction_source_is_gated_by_the_speaking_window(data, monkeypatch):  # noqa: F811
     enable(data, VOICE_YAML)
     source = GatedSource()
-    real = app_module.load_world_plugin
+    real = assembly.load_world_plugin
 
     def with_source(*args):
         plugin = real(*args)
         plugin.sources.append(source)
         return plugin
 
-    monkeypatch.setattr(app_module, "load_world_plugin", with_source)
+    monkeypatch.setattr(assembly, "load_world_plugin", with_source)
     app = new_app()
     scripted = ScriptedMini()
     stop, thread, errors = run_app(app, scripted.mini)
@@ -248,16 +247,19 @@ def test_voice_builds_a_speech_output_that_plays_through_the_speaker(data):  # n
     class Tone:
         name, controls = "tone", frozenset()
 
-        def available(self, *, minor_present=False):
+        def available(self):
             return True
 
-        async def synthesize(self, text, delivery, *, language, voice, minor_present=False):
+        async def synthesize(self, text, delivery, *, language, voice):
             yield AudioChunk(np.full(1600, 0.1, np.float32), 16000)
 
         def cancel(self):
             pass
 
         async def warm(self, language, voice):
+            pass
+
+        def apply_config(self, voice):
             pass
 
         async def aclose(self):
@@ -278,7 +280,6 @@ def test_voice_builds_a_speech_output_that_plays_through_the_speaker(data):  # n
             circadian=StateEffects(),
             mood=None,
             intensity=0.0,
-            minor=True,  # no face frames: the minor signal is on, an adult sentence would drop
         )
         assert wait_for(lambda: pushed.called)
         assert wait_for(lambda: app.speech.speaking(time.monotonic()))

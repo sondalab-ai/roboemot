@@ -1,11 +1,11 @@
-"""M2 exit (SPEC 14), app level: a known adult, a known child and a stranger each walk up to the
-robot and it reacts distinctly, with no LLM. Mocked SDK client; the same probe as the simulated
-robot test (``test_sim.py``), reading the driver's commanded targets, not the robot's state."""
+"""M2 exit (SPEC 14), app level: a known person and a stranger each walk up to the robot; it
+reacts distinctly to them with one register for both (owner decision 2026-10-23), with no LLM.
+Mocked SDK client; the same probe as the simulated robot test (``test_sim.py``), reading the
+driver's commanded targets, not the robot's state."""
 
 from __future__ import annotations
 
 import math
-from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import numpy as np
@@ -13,7 +13,7 @@ import pytest
 from exit_support import BODY_MAP_YAML, Run, check_exit, format_run, react
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.manifest import load_manifest
-from roboemot.registry import Consent, FileStore, Registry
+from roboemot.registry import FileStore, Registry
 from roboemot.vision import CameraModel, Detection
 from roboemot_reachymini import app as app_module
 from roboemot_reachymini.driver import ReachyMiniDriver
@@ -29,8 +29,6 @@ from test_app_perception import (  # noqa: F401  (data is a fixture)
     start,
     wait_for,
 )
-
-GUARDIAN = Consent("Mum", datetime(2026, 1, 1, tzinfo=UTC), ("face", "refresh"), guardian="Mum")
 
 
 class Room:
@@ -54,7 +52,6 @@ class ExitApp(app_module.RoboEmotApp):
         return SimpleNamespace(
             face_detector=RoomDetector(),
             face_embedder=FakeEmbedder(),
-            attribute_estimator=None,
             appearance_embedder=None,
             object_detector=None,
             objects_unavailable=None,
@@ -76,7 +73,7 @@ def commanded(monkeypatch):
 
 
 def run_case(data, tmp_path, monkeypatch, commanded, case: str) -> Run:  # noqa: F811
-    """One fresh app and registry per person: Ada the adult, a child, or nobody enrolled."""
+    """One fresh app and registry per person: Ada, known, or nobody enrolled."""
     (data / "app.yaml").write_text(
         (ROOT / "configs/dev-unmeasured.yaml").read_text() + BODY_MAP_YAML
     )
@@ -86,13 +83,7 @@ def run_case(data, tmp_path, monkeypatch, commanded, case: str) -> Run:  # noqa:
         reg = Registry(
             FileStore(root / "registry", allow_plaintext=True), RoboEmotConfig().identity
         )
-        reg.enroll(
-            "Ada" if case == "adult" else "Kid",
-            [PLANTED * (1 + 0.01 * i) for i in range(5)],
-            MODEL,
-            consent=CONSENT if case == "adult" else GUARDIAN,
-            age_group=case,
-        )
+        reg.enroll("Ada", [PLANTED * (1 + 0.01 * i) for i in range(5)], MODEL, consent=CONSENT)
     manifest = load_manifest(
         app_module.DATA / "reachy-mini-wireless.yaml", allow_unmeasured_dynamics=True
     )
@@ -113,18 +104,15 @@ def run_case(data, tmp_path, monkeypatch, commanded, case: str) -> Run:  # noqa:
     return result
 
 
-def test_the_robot_reacts_distinctly_to_an_adult_a_child_and_a_stranger_without_an_llm(
+def test_the_robot_reacts_to_a_known_person_and_a_stranger_with_one_register(
     data,  # noqa: F811
     tmp_path,
     monkeypatch,
     commanded,
 ):
-    runs = {
-        c: run_case(data, tmp_path, monkeypatch, commanded, c)
-        for c in ("adult", "child", "stranger")
-    }
+    runs = {c: run_case(data, tmp_path, monkeypatch, commanded, c) for c in ("known", "stranger")}
     # the fake detector's face sits at pixel (140, 100): the commanded head yaw is its bearing,
     # so unlike the simulated servos there is nothing to overshoot with
     cfg = RoboEmotConfig()
     bearing = CameraModel(320, 240, cfg.world.camera_fov_h_deg).bearing(140, 100)[0]
-    check_exit(runs["adult"], runs["child"], runs["stranger"], abs(bearing) + math.radians(1))
+    check_exit(runs["known"], runs["stranger"], abs(bearing) + math.radians(1))

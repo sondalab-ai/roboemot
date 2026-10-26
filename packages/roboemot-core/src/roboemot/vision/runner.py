@@ -15,17 +15,19 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
-from typing import Protocol
+from typing import Any, NamedTuple, Protocol
 
 import numpy as np
 
-from .. import shutdown
+from .. import priority, shutdown
+from .geometry import CameraModel
 from .stages import PerceptionModule
 from .types import Frame
 
 log = logging.getLogger(__name__)
 
 IDLE_WAIT_S = 0.01
+PAUSED_WAIT_S = 0.25  # between checks of the pause flag while the camera is paused
 GRID = 8
 RATE_WINDOW_S = 10.0
 MAX_RATE_HZ = 120.0  # vision.rates.camera_hz upper bound: sizes the rate windows
@@ -38,11 +40,17 @@ class FrameSource(Protocol):
 
     def read(self) -> Frame | None: ...
 
+    def camera_model(self, width: int, height: int) -> CameraModel | None:
+        """The pinhole model for a ``width`` x ``height`` frame, or None when the camera does not
+        know its intrinsics (vision then falls back to ``world.camera_fov_*_deg``). Every
+        implementation declares this method; None means "not supported"."""
+        ...
+
 
 class LockedSource:
     """One lock around a ``FrameSource``, shared by every reader (the vision pump and the
     circadian idle light reader), so the SDK media is never read from two threads at once.
-    Other attributes (``camera_model``) pass through."""
+    ``camera_model`` passes through."""
 
     def __init__(self, source: FrameSource) -> None:
         self._source = source
@@ -52,8 +60,17 @@ class LockedSource:
         with self._lock:
             return self._source.read()
 
-    def __getattr__(self, name: str) -> object:
-        return getattr(self._source, name)
+    def camera_model(self, width: int, height: int) -> CameraModel | None:
+        return self._source.camera_model(width, height)
+
+
+class Kept(NamedTuple):
+    """The frame the live preview shows: the newest one the pipeline finished, its submit
+    sequence number and the overlay computed on it (None without an overlay hook)."""
+
+    frame: Frame
+    seq: int
+    overlay: Any
 
 
 class LatestFrameRunner:
@@ -64,8 +81,15 @@ class LatestFrameRunner:
         module: PerceptionModule,
         clock: Callable[[], float] = time.monotonic,
         max_hz: float = MAX_RATE_HZ,
+        overlay: Callable[[Any], Any] | None = None,
     ):
+        """``overlay`` gets what ``process`` returned, on the worker thread right after it and
+        only while watched, and returns the overlay to keep with that frame (the face boxes of
+        the live preview), or None when face detection did not run on it: the kept frame then
+        stays for ``hold_s`` (see ``watch``), after which this one is kept without boxes.
+        Without a hook every processed frame is kept, with no overlay."""
         self.module = module
+        self._overlay = overlay
         self.dropped = 0
         self.processed = 0
         self.errors = 0
@@ -77,6 +101,13 @@ class LatestFrameRunner:
         self._started: float | None = None
         self._cond = threading.Condition()
         self._frame: Frame | None = None
+        self._frame_seq = 0
+        self._frame_at = float("-inf")
+        self._watch_until = float("-inf")
+        self._hold_s = 0.0
+        self._latest: Kept | None = None
+        self._latest_at = float("-inf")
+        self._seq = 0
         self._stop = False
         self._thread: threading.Thread | None = None
 
@@ -90,8 +121,43 @@ class LatestFrameRunner:
             if self._frame is not None:
                 self.dropped += 1
             self._frame = frame
-            self._arrived.append(self._clock())
+            now = self._clock()
+            self._arrived.append(now)
+            self._seq += 1
+            self._frame_seq, self._frame_at = self._seq, now
+            if now >= self._watch_until:
+                self._latest = None
             self._cond.notify()
+
+    def watch(self, window_s: float, hold_s: float = 0.0) -> None:
+        """Keep a reference to the newest processed frame for the next ``window_s`` seconds (the
+        web UI's live preview, SPEC 11A). With nobody watching nothing is kept: one clock
+        comparison per frame, no copy. The window lapses on its own and the next frame after it
+        drops the reference. A frame with boxes stays kept for ``hold_s`` (the page's poll
+        period) before a newer frame without a detection replaces it, without boxes: rare
+        detection never turns the picture into a slideshow, and boxes always match it."""
+        with self._cond:
+            self._watch_until = self._clock() + window_s
+            self._hold_s = hold_s
+
+    def latest(self) -> Kept | None:
+        """The frame the live preview shows (see ``watch``), with its sequence number and the
+        overlay computed on it, or None. The boxes always belong to the picture. The frame is
+        shared with the pipeline: read it, never write to it."""
+        with self._cond:
+            return self._latest
+
+    def camera_age_s(self) -> float | None:
+        """Seconds (on the runner's clock) since the camera last handed a frame in, while a
+        frame is kept (None otherwise): camera liveness, whatever the detection cadence."""
+        with self._cond:
+            return None if self._latest is None else self._clock() - self._frame_at
+
+    def unwatch(self) -> None:
+        """Stop watching now and drop the kept frame (viewing stopped, flag off, robot asleep)."""
+        with self._cond:
+            self._watch_until = float("-inf")
+            self._latest = None
 
     def rates(self) -> dict[str, float]:
         """Frames per second handed in and processed over the last ``RATE_WINDOW_S`` seconds.
@@ -113,8 +179,9 @@ class LatestFrameRunner:
         """Start the worker thread."""
         self._stop = False
         self._started = self._clock()
-        self._thread = threading.Thread(target=self._loop, name="roboemot-vision", daemon=True)
-        self._thread.start()
+        thread = threading.Thread(target=self._loop, name="roboemot-vision", daemon=True)
+        thread.start()
+        self._thread = thread
 
     def stop(self) -> None:
         """Stop the worker and wait for the frame in flight.
@@ -132,23 +199,63 @@ class LatestFrameRunner:
                 log.warning("vision worker did not stop within %.0f s", JOIN_TIMEOUT_S)
 
     def _loop(self) -> None:
+        priority.lower_current()  # before the stages start OpenCV threads, which inherit it
         while True:
             with self._cond:
                 while self._frame is None and not self._stop:
                     self._cond.wait()
                 if self._stop:
                     return
-                frame, self._frame = self._frame, None
+            self.run_pending()
+
+    def run_pending(self) -> bool:
+        """Process the waiting frame on the calling thread, if there is one; returns whether
+        there was. The worker thread's step (tests drive the runner with it); never call it
+        while the worker thread runs."""
+        thread = self._thread
+        if thread is not None and thread.is_alive() and threading.current_thread() is not thread:
+            raise RuntimeError("run_pending() while the worker thread runs")
+        with self._cond:
+            if self._frame is None:
+                return False
+            frame, self._frame = self._frame, None
+            seq, arrived = self._frame_seq, self._frame_at
+        try:
+            report = self.module.process(frame)
+            self._keep(frame, seq, arrived, report)
+            with self._cond:
+                self.processed += 1
+                self._done.append(self._clock())
+        except Exception as exc:
+            with self._cond:
+                self.errors += 1
+                self.last_error = type(exc).__name__
+            log.warning("vision frame failed: %s", type(exc).__name__)
+        return True
+
+    def _keep(self, frame: Frame, seq: int, arrived: float, report: Any) -> None:
+        """While watched, keep ``frame`` with the overlay computed on it (worker thread, right
+        after ``process``, so nothing newer has touched the pipeline's state)."""
+        with self._cond:
+            if self._clock() >= self._watch_until:
+                return
+        overlay = None
+        if self._overlay is not None:
             try:
-                self.module.process(frame)
-                with self._cond:
-                    self.processed += 1
-                    self._done.append(self._clock())
-            except Exception as exc:
-                with self._cond:
-                    self.errors += 1
-                    self.last_error = type(exc).__name__
-                log.warning("vision frame failed: %s", type(exc).__name__)
+                overlay = self._overlay(report)
+            except Exception as exc:  # the preview loses this frame, vision goes on
+                log.warning("vision overlay failed: %s", type(exc).__name__)
+                return
+        with self._cond:
+            if self._clock() >= self._watch_until:  # unwatch() may have run meanwhile
+                return
+            if self._overlay is not None and overlay is None:
+                held = self._latest is not None and self._latest.overlay
+                if held and arrived - self._latest_at < self._hold_s:
+                    return  # the detection frame still shows, with its boxes
+                overlay = []  # a live picture without boxes rather than stale ones
+            self._latest = Kept(frame, seq, overlay)
+            self._latest_at = arrived
 
 
 def fingerprint(image: np.ndarray) -> int:
@@ -164,8 +271,10 @@ def pump(
     stop: threading.Event,
     max_hz: float,
     clock: Callable[[], float] = time.monotonic,
+    paused: threading.Event | None = None,
 ) -> None:
     """Feed ``runner`` from ``source`` until ``stop`` is set (run it in the camera thread).
+    While ``paused`` is set the camera is not read at all (the robot is asleep, SPEC 12A).
 
     Reads at most ``max_hz`` times per second (``vision.rates.camera_hz``) and sleeps on
     ``stop.wait`` between reads, so it never spins whether the SDK call blocks or returns at
@@ -175,6 +284,9 @@ def pump(
     period = 1.0 / max_hz
     last_key: int | None = None
     while not stop.is_set():
+        if paused is not None and paused.is_set():
+            stop.wait(PAUSED_WAIT_S)
+            continue
         started = clock()
         frame = source.read()
         pause = IDLE_WAIT_S

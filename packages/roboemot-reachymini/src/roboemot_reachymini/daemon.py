@@ -136,9 +136,11 @@ class DaemonClient:
         return current == name and status.get("state") == RUNNING
 
     def restart_current_app(self) -> None:
-        """``POST /api/apps/restart-current-app``. The daemon stops this process (SIGINT) before
-        it answers, so a dropped connection is the normal outcome and callers expect
-        ``DaemonError``."""
+        """``POST /api/apps/restart-current-app``: the daemon stops the app (SIGINT, kill after
+        ``STOP_TIMEOUT_S``, zero pose unless asleep), starts it again, then answers. Called from
+        inside the app (the web UI Restart) the caller is the process being stopped, so a
+        dropped connection is the normal outcome; called from a PC (``run --restart``) it
+        answers once the new start is under way, and an error may come after the stop."""
         self._send("POST", "/apps/restart-current-app", timeout_s=RESTART_TIMEOUT_S)
 
     def installed_apps(self) -> list[str]:
@@ -152,6 +154,12 @@ class DaemonClient:
         """``POST /api/apps/stop-current-app``. The daemon answers only after the app exited, so
         the request gets the stop sequence's time, not the short default."""
         self._send("POST", "/apps/stop-current-app", timeout_s=STOP_REQUEST_TIMEOUT_S)
+
+    def app_lock_status(self) -> dict[str, Any] | None:
+        """``GET /api/daemon/robot-app-lock-status``: who holds the robot's app slot
+        (``state`` free, local_app or remote_session, plus ``holder_name``). ``None`` on a
+        daemon that has no such endpoint."""
+        return self._send("GET", "/daemon/robot-app-lock-status", missing_ok=True)
 
     def wake_up(self) -> None:
         """``POST /api/move/play/wake_up``."""

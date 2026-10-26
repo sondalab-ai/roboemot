@@ -32,7 +32,10 @@ BASE = "robot.reachy-mini-wireless"
 def stack():
     stack = ConfigStack(app={"webui": {"bind": "127.0.0.1", "port": 0}})
     stack.set_manifest_behaviour(
-        MANIFEST.model.behaviour, MANIFEST.channels, load_clip_library(MANIFEST)
+        MANIFEST.model.behaviour,
+        MANIFEST.channels,
+        load_clip_library(MANIFEST),
+        body_yaw=None,
     )
     return stack
 
@@ -254,7 +257,10 @@ def test_the_status_answer_is_cached_briefly_and_the_port_follows_the_target():
 def test_core_offers_the_action_through_the_entry_point_only_while_running(tmp_path):
     stack = ConfigStack(app={"webui": {"bind": "127.0.0.1", "port": 0}})
     stack.set_manifest_behaviour(
-        MANIFEST.model.behaviour, MANIFEST.channels, load_clip_library(MANIFEST)
+        MANIFEST.model.behaviour,
+        MANIFEST.channels,
+        load_clip_library(MANIFEST),
+        body_yaw=None,
     )
     for status, expected in ((RUNNING, ["restart"]), (None, [])):
         editor = SettingsEditor(

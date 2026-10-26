@@ -5,8 +5,9 @@ file in the data folder, and shown next to the route; it does not gate the route
 its own thread, bounded by ``llm_check.deadline_s``, because it outlives the per-request
 deadline of the web server (``webui.request_deadline_s``): the POST returns at once and the
 page polls the list. Nothing secret leaves this module: a route is described by name, model,
-``host[:port]`` of its base URL and the minors flag, and a report holds statuses and short
-reasons only.
+``host[:port]`` of its base URL, its locality and the kind of its key, plus the
+full base URL only when it holds no credentials (the settings list shows the same value), and a
+report holds statuses and short reasons only.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ import httpx
 
 from .. import paths
 from ..config.schema import LLMRoute, RoboEmotConfig
+from ..config.stack import NO_KEY
 from ..llm.conformance import (
     RouteBudgetExhausted,
     RouteKeyUnavailable,
@@ -34,6 +36,7 @@ from ..llm.conformance import (
 )
 from ..llm.pseudonyms import NameSource
 from ..llm.router import SECRET, Router
+from ..redact import secret_shaped
 from ..secret_store import SecretStore
 
 log = logging.getLogger(__name__)
@@ -76,8 +79,9 @@ class RouteChecker:
     def list_routes(self) -> list[dict[str, Any]]:
         """Routes with their running flag and last report; a report made for another model or
         endpoint than the route has now is not shown. A route whose key is a ``${secret:name}``
-        reference shows ``secret`` (the name and whether it is set), never the value. ``api_key``,
-        credentials, path and query of the URL are never included."""
+        reference shows ``secret`` (the name and whether it is set), never the value; ``key`` says
+        which kind of key the route has (``none``, ``secret`` or ``literal``). ``api_key`` and the
+        credentials of the URL are never included, and ``base_url`` is null when it holds any."""
         with self._lock:
             running = self._running
             cfg = self.cfg()
@@ -87,7 +91,9 @@ class RouteChecker:
                     "name": r.name,
                     "model": r.model,
                     "endpoint": route_endpoint(r),
-                    "allowed_for_minors": r.allowed_for_minors,
+                    "base_url": None if secret_shaped(r.base_url) else r.base_url,
+                    "locality": r.locality,
+                    "key": _key_kind(r),
                     "running": r.name == running,
                     "secret": _secret_state(r, store),
                     "last_check": self._current_report(r),
@@ -147,6 +153,7 @@ class RouteChecker:
                         route,
                         cfg.safety,
                         settings=cfg.llm_check,
+                        config=cfg,
                         router=router,
                         pseudonyms=pseudonyms,
                         http_client_factory=self._factory,
@@ -213,6 +220,13 @@ class RouteChecker:
             log.warning("route checks: not written (%s)", type(exc).__name__)
             with contextlib.suppress(OSError):
                 tmp.unlink()
+
+
+def _key_kind(route: LLMRoute) -> str:
+    """``none``, ``secret`` (a ``${secret:name}`` reference) or ``literal`` (a key in the config)"""
+    if route.api_key in NO_KEY:
+        return "none"
+    return "secret" if SECRET.match(route.api_key) else "literal"
 
 
 def _secret_state(route: LLMRoute, store: SecretStore) -> dict[str, Any] | None:

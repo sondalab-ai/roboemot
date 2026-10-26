@@ -11,12 +11,9 @@ last utterance or the last time the app reported the person in view (``note_pres
 history of whole turns (RAM only, at most ``history_turns``) is dropped by a timer on the loop,
 not on the next utterance. Nothing is persisted.
 
-Children (user decision 2026-10-17): while a minor is present only routes cleared for minors are
-used (``Router.eligible``), the request carries the minor content rules and, when the active
-register is not already a minor one, the child register; replies are cut to the register's
-sentence cap; every sentence passes the output filter before TTS; with no cleared route a
-built-in child-safe line is spoken instead of silence; a minor appearing mid-answer stops the
-speech and cancels the stream. The minor signal is read through one fail-closed wrapper.
+One behaviour for everyone (owner decision 2026-10-23, SPEC 8, 12): no age or possible-minor
+signal changes the prompt, the register, the lines or what is spoken. Replies are cut to the
+register's sentence cap.
 
 Privacy (SPEC 12): neither logs nor the bus carry a transcript, prompt or reply, only ids,
 lengths and exception types.
@@ -60,8 +57,9 @@ from ..voice.prosody import resolve_tag
 from ..voice.robot_name import RobotName
 from ..voice.tts import Sentence, SentenceSplitter
 from .confirm import Pending, PreferenceStore, reply_kind, sanitise_preference
-from .lines import line_text, minor_line, pick
-from .output_filter import OutputFilter
+from .lines import pick
+from .phase import ConversationPhase
+from .transcript import NOT_RECORDED, TranscriptRing
 
 log = logging.getLogger(__name__)
 
@@ -88,7 +86,6 @@ class Speech(Protocol):
 class _Session:
     last_active: float
     speaker: str | None = None  # registry id of the person it belongs to; None: unknown
-    minor: bool = False  # the minor state of the latest turn (history is written under it)
 
 
 @dataclass
@@ -98,7 +95,6 @@ class _Turn:
     utterance: Utterance
     cfg: RoboEmotConfig
     language: str
-    minor: bool
     register: RegisterParams
     speech_id: int
     cap: int
@@ -108,6 +104,9 @@ class _Turn:
     speaker: str | None = None
     interrupted: bool = False  # a barge-in is under way: nothing more is said (set first)
     stopped: bool = False  # ... and the speech was stopped: history keeps what was heard
+    reply_seq: int | None = None  # this reply's entry in the live transcript
+    ring_gen: int = NOT_RECORDED  # the transcript generation of the utterance it answers
+    speech_stopped: bool = False  # the speech was stopped during the turn (barge-in, stop)
     done: bool = False  # the turn is over: a late skill callback does nothing
     exchange_spoken: int = 0  # queued sentences already in the exchange messages
     cut: bool = False  # stop_talking cut it
@@ -117,6 +116,7 @@ class _Turn:
     outcome: str = "ok"
     route: str | None = None
     tokens: int = 0
+    reasoning_chars: int = 0  # the route's non-standard reasoning deltas (a count, never text)
     out_chars: int = 0
     stamps: dict[str, float] = field(default_factory=dict)
     active: ActiveRoute = field(default_factory=ActiveRoute)
@@ -136,8 +136,8 @@ class ConversationWorker:
     """See the module docstring. Callables are injected so core stays robot-agnostic:
 
     ``register()`` the persona-shaped active register (None before the first tick),
-    ``circadian()`` the circadian state's effects, ``minor_present()`` the one minor signal,
-    ``profile(max_chars)`` and ``scene(max_chars)`` the summaries (None when empty).
+    ``circadian()`` the circadian state's effects, ``profile(max_chars)`` and
+    ``scene(max_chars)`` the summaries (None when empty).
     ``skills`` are the tools offered to the model (SPEC 11) and ``preferences`` where a
     confirmed preference is written (SPEC 6); without them the model gets no tools.
     ``known_names()`` gives the registry display names (every record), which
@@ -154,7 +154,6 @@ class ConversationWorker:
         responder: Any,
         register: Callable[[], RegisterParams | None],
         circadian: Callable[[], StateEffects],
-        minor_present: Callable[[], bool],
         profile: Callable[[int], str | None] = lambda cap: None,
         scene: Callable[[int], str | None] = lambda cap: None,
         speaker: Callable[[], str | None] = lambda: None,
@@ -164,11 +163,18 @@ class ConversationWorker:
         clock: Callable[[], float] = time.monotonic,
         names: RobotName | None = None,
         known_names: Callable[[], Iterable[str]] = lambda: (),
+        phase: ConversationPhase | None = None,
+        transcript: TranscriptRing | None = None,
     ) -> None:
+        self.phase = phase if phase is not None else ConversationPhase()
+        self.transcript = transcript  # the Live tab's opt-in ring of turns (SPEC 11A, 12)
+        self._reply: tuple[int, list[tuple[int, str]]] | None = (
+            None  # (ring seq, queued) of the last reply
+        )
         self.names = names if names is not None else RobotName()
         self.stack, self.hub, self.speech = stack, hub, speech
         self.affect, self.responder = affect, responder
-        self._register, self._circadian, self._minor_present = register, circadian, minor_present
+        self._register, self._circadian = register, circadian
         self._profile, self._scene, self._speaker = profile, scene, speaker
         self.skills, self.preferences = skills, preferences
         self.bus, self.clock = bus, clock
@@ -181,11 +187,11 @@ class ConversationWorker:
         self._tail: _Tail | None = None
         self._barge_at = -math.inf  # when the last barge-in or stop keyword cut the robot off
         self._lock = threading.Lock()
-        self._pending: collections.deque[Utterance] = collections.deque()
+        # (utterance, the live transcript's generation when it was recorded)
+        self._pending: collections.deque[tuple[Utterance, int]] = collections.deque()
         self._turns: collections.deque[list[dict[str, Any]]] = collections.deque()
         self._max_turns = 0
         self._session: _Session | None = None
-        self._filter = OutputFilter({})
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._main: asyncio.Task | None = None
@@ -221,14 +227,12 @@ class ConversationWorker:
             self._pending.clear()
 
     def apply_config(self, cfg: RoboEmotConfig) -> None:
-        """Hot reload: the history cap and the output filter follow the configuration (the rest
-        is read from the stack at each turn)."""
+        """Hot reload: the history cap follows the configuration (the rest is read from the stack
+        at each turn)."""
         with self._lock:
             self._max_turns = cfg.conversation.history_turns
             while len(self._turns) > self._max_turns:
                 self._turns.popleft()
-        if cfg.safety.minor_output_blocklist != self._filter.source:
-            self._filter = OutputFilter(cfg.safety.minor_output_blocklist)
 
     # ----------------------------------------------------------------- input
 
@@ -245,11 +249,16 @@ class ConversationWorker:
             self._counts["stop_consumed"] += 1  # the command that already stopped the robot
             return False
         limit = cfg.conversation.pending_utterances
+        gen = NOT_RECORDED
+        if self.transcript is not None:
+            _, gen = self.transcript.begin(
+                "user", utterance.text.strip(), utterance.language or cfg.conversation.language
+            )
         with self._lock:
             while len(self._pending) >= limit:
                 self._pending.popleft()
                 self._counts["replaced"] += 1
-            self._pending.append(utterance)
+            self._pending.append((utterance, gen))
         loop, wake = self._loop, self._wake
         if loop is not None and wake is not None:
             with contextlib.suppress(RuntimeError):
@@ -319,23 +328,20 @@ class ConversationWorker:
             log.warning("conversation: speaker unavailable (%s)", type(exc).__name__)
             return None
 
-    def _touch(self, now: float, speaker: str | None, minor: bool) -> None:
+    def _touch(self, now: float, speaker: str | None) -> None:
         """Start the session if none is open and stamp the activity. A session belongs to the
-        person who opened it and to one minor state: another speaker (a different known
-        person, or an unknown one taking over a known person's session, or the reverse), or a
-        turn whose minor state differs from the session's latest turn (either way), ends it
-        first, so nobody inherits someone else's history and a turn written without the minor
-        rules is never sent for a child. Two unknown speakers cannot be told apart and share a
-        session while the minor state stays the same."""
+        person who opened it: another speaker (a different known person, or an unknown one
+        taking over a known person's session, or the reverse) ends it first, so nobody inherits
+        someone else's history. Two unknown speakers cannot be told apart and share a session."""
         with self._lock:
             s = self._session
-            other = s is not None and (s.speaker != speaker or s.minor != minor)
+            other = s is not None and s.speaker != speaker
         if other:
             self._end_session("speaker changed")
             self._counts["speaker_changes"] += 1
         with self._lock:
             if self._session is None:
-                self._session = _Session(now, speaker, minor)
+                self._session = _Session(now, speaker)
                 self._counts["sessions"] += 1
             else:
                 self._session.last_active = now
@@ -375,13 +381,13 @@ class ConversationWorker:
         self._ready.set()
         while not self._closed:
             with self._lock:
-                utterance = self._pending.popleft() if self._pending else None
-            if utterance is None:
+                item = self._pending.popleft() if self._pending else None
+            if item is None:
                 await self._wake.wait()
                 self._wake.clear()
                 continue
             try:
-                await self._answer(utterance)
+                await self._answer(*item)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # one bad turn must not end the worker
@@ -390,31 +396,16 @@ class ConversationWorker:
 
     # ----------------------------------------------------------------- one turn
 
-    def _minor(self) -> bool:
-        """Whether a minor is present now; True (fail closed) when the signal cannot be read.
-        The one read of the signal: routes, prompt, filter and the mid-answer check use it."""
-        try:
-            return bool(self._minor_present())
-        except Exception as exc:
-            log.warning(
-                "conversation: minor signal failed, assuming a minor (%s)", type(exc).__name__
-            )
-            return True
-
-    def _register_for(self, cfg: RoboEmotConfig, minor: bool) -> RegisterParams:
-        """The persona-shaped active register. While a minor is present but the register is an
-        adult one (the minor hold outlasts the child leaving the view) the child register is
-        used, so wording and reply length stay child-appropriate."""
-        fx = effects(cfg.persona)
+    def _register_for(self, cfg: RoboEmotConfig) -> RegisterParams:
+        """The persona-shaped active register; the configured register, persona-shaped, before
+        the first tick or when it cannot be read."""
         try:
             active = self._register()
         except Exception as exc:
             log.warning("conversation: register unavailable (%s)", type(exc).__name__)
             active = None
         if active is None:
-            active = apply_to_register(cfg.register.unknown, fx)
-        if minor and not active.minor_content_policy:
-            return apply_to_register(cfg.register.child, fx)
+            return apply_to_register(cfg.register.params, effects(cfg.persona))
         return active
 
     def _summary(self, source: Callable[[int], str | None], cap: int) -> str | None:
@@ -452,9 +443,10 @@ class ConversationWorker:
             self._barge_at = self.clock()
             turn = self._active_turn
             if turn is not None:
-                turn.interrupted = turn.stopped = True
+                turn.interrupted = turn.stopped = turn.speech_stopped = True
             self._drop_unheard_question()
         if turn is None:
+            self._settle_reply()
             return self._trim_tail()
         self._counts["interrupts"] += 1
         loop = self._loop
@@ -462,6 +454,18 @@ class ConversationWorker:
             with contextlib.suppress(RuntimeError):
                 loop.call_soon_threadsafe(self._cancel_inner)
         return True
+
+    def _settle_reply(self) -> None:
+        """A barge-in after the stream ended: the last reply in the live transcript becomes the
+        sentences that played, marked interrupted (nothing played removes it)."""
+        with self._lock:
+            reply, self._reply = self._reply, None
+        if reply is None or self.transcript is None:
+            return
+        seq, queued = reply
+        heard = [text for job, text in queued if self.speech.played(job)]
+        if len(heard) < len(queued):
+            self.transcript.settle(seq, " ".join(heard), interrupted=True)
 
     def _drop_unheard_question(self) -> None:
         """Forget a pending confirmation unless its question finished playing before now
@@ -495,26 +499,25 @@ class ConversationWorker:
             self._counts["history_trimmed"] += 1
         return True
 
-    async def _answer(self, utterance: Utterance) -> None:
+    async def _answer(self, utterance: Utterance, ring_gen: int = NOT_RECORDED) -> None:
         now = self.clock()
         cfg = self.stack.effective()
         self.apply_config(cfg)
         router = self.hub.sync(cfg)
-        minor = self._minor()
         self.expire(now)
         speaker = self._who()
-        self._touch(now, speaker, minor)
-        register = self._register_for(cfg, minor)
+        self._touch(now, speaker)
+        register = self._register_for(cfg)
         turn = _Turn(
             utterance,
             cfg,
             utterance.language or cfg.conversation.language,
-            minor,
             register,
             self.speech.new_utterance(),
             max_reply_sentences(cfg, register),
             speaker=speaker,
         )
+        turn.ring_gen = ring_gen
         turn.stamps["heard"] = utterance.last_speech_stamp
         self.affect.new_turn()
         with self._lock:
@@ -524,13 +527,14 @@ class ConversationWorker:
                 await self._converse(turn, router)
         finally:
             self._inner = None
+            self.phase.end_thinking()
         self._finish(turn)
 
     async def _converse(self, turn: _Turn, router: Any) -> None:
         """Request, stream, run tool calls, repeat (see ``_rounds``); the errors that end a turn
         become the spoken fallbacks. The rounds run as an inner task, so ``interrupt`` can
         cancel the answer without touching the worker's own shutdown."""
-        cfg, conv, minor = turn.cfg, turn.cfg.conversation, turn.minor
+        cfg, conv = turn.cfg, turn.cfg.conversation
         state = self.affect.state(self.clock())
         try:
             protect = self._learn_names(turn)  # the summary caps must not cut a name
@@ -544,7 +548,6 @@ class ConversationWorker:
                 cfg,
                 turn.register,
                 language=turn.language,
-                minor_present=minor,
                 robot_name=self._prompt_name(cfg),
             ),
             profile_summary=self._summary(self._profile, conv.profile_summary_max_chars),
@@ -557,6 +560,7 @@ class ConversationWorker:
         )
         splitter = SentenceSplitter(cfg.voice.sentence_max_chars, strip_tags=True)
         turn.stamps["request"] = self.clock()
+        self.phase.begin_thinking()
         inner = self._inner = asyncio.ensure_future(self._rounds(turn, router, messages, splitter))
         if turn.interrupted:  # a barge-in landed before the task existed
             inner.cancel()
@@ -564,9 +568,7 @@ class ConversationWorker:
             await inner
         except Offline:
             turn.outcome = "offline"
-            self.responder.speech_while_offline(self.clock())
-            if turn.minor or self._minor():  # never silence for a child
-                self._say_minor_line(turn, "no_route")
+            self.responder.speech_while_offline(self.clock(), turn.language)
         except NoRouteAvailable:
             turn.outcome = "no_route"
             self._say_fallback(turn)
@@ -587,8 +589,7 @@ class ConversationWorker:
         """One request per round: the text is spoken as it streams, each tool call runs as soon
         as it is complete, and a round that called tools is followed by another request with
         the results, until the model answers in text, a skill ends the turn, or
-        ``conversation.max_tool_rounds`` rounds ran (the next request then has no tools). The
-        minor rules apply to every round: routes, the filter, the mid-answer switch."""
+        ``conversation.max_tool_rounds`` rounds ran (the next request then has no tools)."""
         conv = turn.cfg.conversation
         cap = conv.max_tool_calls_per_round
         while True:
@@ -605,38 +606,29 @@ class ConversationWorker:
             )
             round_from = len(turn.spoken)
             pseudonyms = self._learn_names(turn)
-            if turn.rounds and self._minor_appeared(turn, turn.active):
-                return
             active = turn.active = ActiveRoute()
-            stream = router.stream(
-                messages, tools, minor_present=turn.minor, active=active, pseudonyms=pseudonyms
-            )
+            stream = router.stream(messages, tools, active=active, pseudonyms=pseudonyms)
             calls: list[ToolCall] = []
             results: list[ToolOutcome] = []
             cut = False
             async with contextlib.aclosing(stream):
                 async for ev in stream:
+                    if active.route is not None:
+                        self.phase.set_route(active.route.name)
                     if isinstance(ev, TextDelta):
                         turn.stamps.setdefault("token", self.clock())
                         turn.out_chars += len(ev.text)
-                        if self._minor_appeared(turn, active):
-                            cut = True
-                        else:
-                            cut = not self._speak_all(turn, splitter.feed(ev.text))
+                        cut = not self._speak_all(turn, splitter.feed(ev.text))
                     elif isinstance(ev, ToolCall) and offered:  # (none offered: ignored)
-                        if self._minor_appeared(turn, active):
-                            cut = True
-                        else:
-                            # what the model said before the call is said before the skill acts
-                            cut = not self._speak_all(turn, splitter.flush())
-                            if not cut:
-                                calls.append(ev)
-                                results.append(
-                                    await self._call(turn, ev, choices, len(calls) > cap)
-                                )
-                                cut = turn.cut or results[-1].end_turn
+                        # what the model said before the call is said before the skill acts
+                        cut = not self._speak_all(turn, splitter.flush())
+                        if not cut:
+                            calls.append(ev)
+                            results.append(await self._call(turn, ev, choices, len(calls) > cap))
+                            cut = turn.cut or results[-1].end_turn
                     elif isinstance(ev, Done):
                         turn.route, turn.tokens = ev.route, turn.tokens + ev.tokens
+                        turn.reasoning_chars += ev.reasoning_chars
                     if cut:
                         break
             if not cut:
@@ -683,13 +675,10 @@ class ConversationWorker:
         return self._pseudonyms
 
     def _offer(self, turn: _Turn) -> list[Skill]:
-        """The skills the model may call in this request (visible, listed, allowed with a minor
-        present: asked again for every round)."""
+        """The skills the model may call in this request (visible and listed)."""
         if self.skills is None:
             return []
-        return self.skills.offered(
-            turn.cfg.conversation.llm_skills, minor=turn.minor or self._minor()
-        )
+        return self.skills.offered(turn.cfg.conversation.llm_skills)
 
     @staticmethod
     def _exchange(
@@ -734,7 +723,6 @@ class ConversationWorker:
         ctx = SkillContext(
             turn.speaker,
             turn.language,
-            turn.minor or self._minor(),
             self.clock(),
             stop_speech=lambda: self._stop_talking(turn),
             ask_confirmation=lambda key, value: self._ask(turn, key, value),
@@ -759,7 +747,7 @@ class ConversationWorker:
         if turn.done or turn.interrupted:
             return
         self.speech.stop()
-        turn.cut = True
+        turn.cut = turn.speech_stopped = True
         turn.outcome = "stopped"
 
     # ----------------------------------------------------------------- confirmation
@@ -784,8 +772,6 @@ class ConversationWorker:
         if not store.allowed(person, key) or not template:
             return "not_allowed"
         text = template.replace("{key}", key).replace("{value}", value)
-        if (turn.minor or self._minor()) and self._filter.blocked(text, " ".join(turn.spoken)):
-            return "not_allowed"
         mood, intensity = self._mood(turn.cfg, None)
         before = len(turn.queued)
         self._say(turn, text, mood, intensity)
@@ -855,45 +841,16 @@ class ConversationWorker:
         self._counts["confirm_saved" if stored else "confirm_declined"] += 1
         return True
 
-    def _cleared(self, active: ActiveRoute) -> bool:
-        """Whether the route answering is cleared for minors in the configuration as it is now
-        (not the router's, which may be stale): looked up by name, a missing route is not."""
-        if active.route is None:
-            return False
-        cfg = self.stack.effective()
-        route = next((r for r in cfg.llm_routes if r.name == active.route.name), None)
-        return route is not None and route.allowed_for_minors and cfg.safety.minors_allowed_llm
-
-    def _minor_appeared(self, turn: _Turn, active: ActiveRoute) -> bool:
-        """A minor showed up after the request was composed, or the route answering is not
-        cleared while one is present: stop the speech, drop the rest of the answer (it was
-        written without the minor rules). The caller cancels the stream, which charges it."""
-        if not self._minor():
-            return False
-        if not turn.minor or not self._cleared(active):
-            self.speech.stop()
-            turn.outcome = "minor_cut"
-            return True
-        return False
-
     def _speak_all(self, turn: _Turn, sentences: list[Sentence]) -> bool:
-        """Speak the sentences; False when the answer must stop (cap reached or filtered)."""
+        """Speak the sentences; False when the answer must stop (cap reached)."""
         return all(self._speak(turn, sentence) for sentence in sentences)
 
     def _speak(self, turn: _Turn, sentence: Sentence) -> bool:
         if turn.sentences >= turn.cap:
             turn.outcome = "capped"
             return False
-        if self._minor_appeared(turn, turn.active):
-            return False
-        if (turn.minor or self._minor()) and self._filter.blocked(
-            sentence.text, " ".join(turn.spoken)
-        ):
-            self._say_minor_line(turn, "filtered")
-            turn.outcome = "filtered"
-            return False
         mood, intensity = self._mood(turn.cfg, sentence.mood)
-        self._say(turn, sentence.text, mood, intensity)
+        self._say(turn, sentence.text, mood, intensity, continued=sentence.continued)
         turn.sentences += 1
         if turn.sentences >= turn.cap:
             turn.outcome = "capped"
@@ -918,7 +875,7 @@ class ConversationWorker:
         return label, state.intensity
 
     def _say(
-        self, turn: _Turn, text: str, mood: str | None, intensity: float, *, minor: bool = False
+        self, turn: _Turn, text: str, mood: str | None, intensity: float, continued: bool = False
     ) -> None:
         if not text or turn.interrupted:  # a barge-in is under way: nothing more is said
             return
@@ -930,61 +887,33 @@ class ConversationWorker:
             mood=mood,
             intensity=intensity,
             utterance=turn.speech_id,
-            minor=turn.minor or minor,
+            continued=continued,
         )
         if job is not None:
             turn.stamps.setdefault("say", self.clock())
             turn.spoken.append(text)
             turn.queued.append((job, text))
+            if self.transcript is not None:
+                self._note_reply(turn, text)
+
+    def _note_reply(self, turn: _Turn, text: str) -> None:
+        """Add a queued sentence to the live transcript's reply, if the ring still accepts the
+        turn's generation."""
+        ring = self.transcript
+        if ring is None:
+            return
+        if turn.reply_seq is None:
+            turn.reply_seq = ring.add("robot", text, turn.language, generation=turn.ring_gen)
+        else:
+            ring.extend(turn.reply_seq, text)
 
     def _prompt_name(self, cfg: RoboEmotConfig) -> str:
         """The robot's name as safe to say and to put in a prompt ('' without one)."""
         self.names.configure(cfg.voice)
         return self.names.prompt_name(cfg.voice.wake_word)
 
-    def _say_minor_line(self, turn: _Turn, which: str) -> None:
-        """A built-in child-safe line (``safety.minor_lines``), never asking a route."""
-        if which == "filtered":
-            text = line_text(
-                turn.cfg.safety.minor_lines,
-                turn.language,
-                turn.cfg.conversation.language,
-                "filtered",
-            )
-        else:
-            text = minor_line(
-                turn.cfg.safety.minor_lines,
-                turn.language,
-                turn.cfg.conversation.language,
-                turn.utterance.keywords,
-                self._prompt_name(turn.cfg),
-            )
-        text = self._unblocked_line(turn, text)
-        state = self.affect.state(self.clock())
-        self._say(turn, text, state.label, state.intensity, minor=True)
-        self._counts["minor_lines"] += 1
-
-    def _unblocked_line(self, turn: _Turn, text: str) -> str:
-        """``text`` unless the output filter blocks it (an edited line may name a blocked word,
-        or the robot's name may): then the nameless and general lines, then the library's own."""
-        if not self._filter.blocked(text):
-            return text
-        lines, language = turn.cfg.safety.minor_lines, turn.language
-        default = turn.cfg.conversation.language
-        shipped = RoboEmotConfig().safety.minor_lines
-        for table in (lines, shipped):
-            for which in ("robot_unnamed", "ask_grown_up"):
-                candidate = line_text(table, language, default, which)
-                if candidate and not self._filter.blocked(candidate):
-                    return candidate
-        return ""
-
     def _say_fallback(self, turn: _Turn) -> None:
-        """No route answered: while a minor is present a child-safe line (an uncleared route is
-        never asked), otherwise the register's "can't think right now" line."""
-        if turn.minor or self._minor():
-            self._say_minor_line(turn, "no_route")
-            return
+        """No route answered: the "can't think right now" line."""
         text = pick(
             turn.cfg.conversation.fallback_lines, turn.language, turn.cfg.conversation.language
         )
@@ -1021,10 +950,23 @@ class ConversationWorker:
             else:
                 self._tail = None
             self._active_turn = None
+            self._reply = None
+            if turn.reply_seq is not None and self.transcript is not None:
+                if cut or turn.speech_stopped:  # the transcript keeps what was heard
+                    heard = [t for job, t in turn.queued if self.speech.played(job)]
+                    self.transcript.settle(
+                        turn.reply_seq, " ".join(heard), interrupted=len(heard) < len(turn.queued)
+                    )
+                else:  # a barge-in while the last sentences still play settles it later
+                    self._reply = (turn.reply_seq, list(turn.queued))
         self._counts["turns"] += 1
         self._counts[turn.outcome] += 1
         with self._lock:
-            self._last = {"speech_id": turn.speech_id, **turn.stamps}
+            self._last = {
+                "speech_id": turn.speech_id,
+                "reasoning_chars": turn.reasoning_chars,
+                **turn.stamps,
+            }
         if self.bus is not None:
             self.bus.publish(
                 TOPIC,
@@ -1036,7 +978,7 @@ class ConversationWorker:
                     "sentences": turn.sentences,
                     "route": turn.route,
                     "tokens": turn.tokens,
-                    "minor": turn.minor,
+                    "reasoning_chars": turn.reasoning_chars,
                     "tool_calls": turn.tool_calls,
                     "rounds": turn.rounds,
                     "outcome": turn.outcome,
@@ -1064,6 +1006,7 @@ class ConversationWorker:
             def ms(stamp: float | None) -> float | None:
                 return None if stamp is None else (stamp - heard) * MS_PER_S
 
+            out["last_reasoning_chars"] = last["reasoning_chars"]
             out["latency_ms"] = {
                 "request": ms(last.get("request")),
                 "first_token": ms(last.get("token")),

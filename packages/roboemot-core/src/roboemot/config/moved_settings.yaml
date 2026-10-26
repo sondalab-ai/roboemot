@@ -1,6 +1,63 @@
 # Settings renamed or removed since an overrides file or app.yaml may have been written
 # (SPEC 11A, Renamed and removed settings). Data, not code: it records old names on purpose.
+# - `renamed`: moved in the web UI file; fails in app.yaml with a hint.
+# - `migrated`: moved wherever found, app.yaml included (the one register replaced the age
+#   groups on 2026-10-23, and an admin-confirmed adult value may sit in app.yaml).
+# - `removed`: has a replacement; dropped from the web UI file, fails in app.yaml.
+# - `dropped`: no replacement; ignored wherever found (`*` matches every entry of a list or value
+#   of a mapping).
+# - `dropped_entries`: entries of a keyed list, by identity, ignored wherever found.
+# - `dropped_when`: entries of a keyed list whose `when` names one of these keys (it could never
+#   match again), ignored wherever found.
 renamed:
   reflexes.antenna_ratio: reflexes.startle_lift_ratio
+migrated:
+  register.adult.speech_rate: register.speech_rate
+  register.adult.pitch_st: register.pitch_st
+  register.adult.vocabulary: register.vocabulary
+  register.adult.persona_fragment: register.persona_fragment
+  register.adult.motion_amplitude: register.motion_amplitude
+  register.adult.approach_allowed: register.approach_allowed
+  register.adult.reaction_intensity: register.reaction_intensity
+  register.adult.max_reply_sentences: register.max_reply_sentences
 removed:
   connectivity.gestures: the manifest gesture_map entries puzzled and perk_up (SPEC 12A)
+dropped:
+  safety.minors_allowed_llm: the LLM is used while a minor is present (SPEC 8, 2026-10-22)
+  llm_routes.*.allowed_for_minors: the LLM is used while a minor is present (SPEC 8, 2026-10-22)
+  safety.minor_motion_factor: one behaviour for everyone, no minor caps (SPEC 12, 2026-10-23)
+  safety.minor_hold_s: no possible-minor signal (SPEC 12, 2026-10-23)
+  safety.minor_hold_periods: no possible-minor signal (SPEC 12, 2026-10-23)
+  safety.minor_output_blocklist: no output filter for minors (SPEC 12, 2026-10-23)
+  safety.minor_lines: no child-only lines (SPEC 8, 12, 2026-10-23)
+  register.child: one register for everyone, no age groups (SPEC 7, 2026-10-23)
+  register.teen: one register for everyone, no age groups (SPEC 7, 2026-10-23)
+  register.senior: one register for everyone, no age groups (SPEC 7, 2026-10-23)
+  register.unknown: one register for everyone, no age groups (SPEC 7, 2026-10-23)
+  register.adult.minor_content_policy: no minor content policy (SPEC 7, 12, 2026-10-23)
+  register.minor_content_policy: no minor content policy (SPEC 7, 12, 2026-10-23)
+  reflexes.rules.*.suppress_with_minor: no possible-minor signal (SPEC 10, 2026-10-23)
+  conversation.transcript_settle_ms: no deferred live transcript (SPEC 11A, 2026-10-23)
+  vision.attribute_precision: no age model (SPEC 5, 13, 2026-10-23)
+  vision.attribute_threads: no age model (SPEC 5, 13, 2026-10-23)
+  vision.attribute_input_px: no age model (SPEC 5, 13, 2026-10-23)
+  vision.attribute_score_min: no age model (SPEC 5, 2026-10-23)
+  vision.attribute_crops: no age model (SPEC 5, 2026-10-23)
+  vision.attribute_crop_interval_s: no age model (SPEC 5, 2026-10-23)
+  vision.attribute_retry_s: no age model (SPEC 5, 2026-10-23)
+  vision.attribute_crop_margin: no age model (SPEC 5, 2026-10-23)
+  vision.attribute_queue_max: no age model (SPEC 5, 2026-10-23)
+  identity.estimate_confidence_min: no age or gender estimate (SPEC 5, 2026-10-23)
+  identity.estimate_frames_min: no age or gender estimate (SPEC 5, 2026-10-23)
+  register.gender_affects_params: no gender, declared or estimated (SPEC 7, 2026-10-23)
+dropped_entries:
+  appraisal.rules:
+    person.known_child: one person.known event for everyone (SPEC 7, 2026-10-23)
+    person.known_teen: one person.known event for everyone (SPEC 7, 2026-10-23)
+    person.known_adult: one person.known event for everyone (SPEC 7, 2026-10-23)
+    person.known_senior: one person.known event for everyone (SPEC 7, 2026-10-23)
+    person.known_unknown: one person.known event for everyone (SPEC 7, 2026-10-23)
+dropped_when:
+  appraisal.rules:
+    age_group: no behaviour reads an age; the payloads no longer carry it (SPEC 7, 2026-10-23)
+    possible_minor: no possible-minor signal (SPEC 7, 2026-10-23)

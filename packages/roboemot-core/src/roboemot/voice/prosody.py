@@ -3,13 +3,18 @@
 1. start from ``voice.base``;
 2. apply the persona traits, the register and the circadian state (multipliers for rate,
    offsets for pitch and volume);
-3. add the mood deltas scaled by affect intensity times ``expressivity``;
-4. clamp to ``voice.limits``, then render per backend.
+3. add the mood deltas scaled by ``intensity ** voice.intensity_exponent`` times
+   ``expressivity``;
+4. add the sentence's own offsets (``voice.variation``): a rate and a pitch offset drawn from the
+   reply's seed and the sentence's index, uniform within +-the configured bound times
+   ``expressivity``, and a pitch raise for a question;
+5. clamp to ``voice.limits``, then render per backend.
 """
 
 from __future__ import annotations
 
 import math
+import random
 import re
 from dataclasses import dataclass, field
 
@@ -19,6 +24,7 @@ from ..persona import PersonaEffects
 TAG = re.compile(r"\[mood=([a-z_]+)\]\s*")
 DB_PER_DECADE = 20.0
 DECADE = 10.0
+SEED_STRIDE = 1_000_003  # mixes (reply seed, sentence index) into one integer seed (a prime)
 
 
 @dataclass
@@ -31,6 +37,7 @@ class Delivery:
     instructions: str = ""
     sounds: list[str] = field(default_factory=list)
     mood: str | None = None
+    steady_rate: float | None = None  # rate before the sentence variation (clamped)
 
 
 def _clamp(x: float, rng: tuple[float, float]) -> float:
@@ -45,7 +52,13 @@ def compose_delivery(
     mood: str | None,
     intensity: float,
     persona: PersonaEffects | None = None,
+    seed: int | None = None,
+    index: int = 0,
+    question: bool = False,
 ) -> Delivery:
+    """The delivery of one sentence (module docstring). ``seed`` (one per reply, e.g. the
+    utterance id) and ``index`` (the sentence's position in it) pick the sentence's variation;
+    without a seed there is none. ``question`` adds ``voice.variation.question_pitch_st``."""
     b, fx = voice.base, persona or PersonaEffects()
     rate = b.rate * fx.voice_rate_x * register.speech_rate * circadian.speech_rate
     pitch = b.pitch_st + fx.voice_pitch_st_add + register.pitch_st
@@ -57,7 +70,7 @@ def compose_delivery(
         mood = voice.fixed_mood
     m = voice.moods.get(mood) if mood else None
     if m:
-        k = max(0.0, min(1.0, intensity)) * expressivity
+        k = max(0.0, min(1.0, intensity)) ** voice.intensity_exponent * expressivity
         rate += m.rate * k
         pitch += m.pitch_st * k
         volume += m.volume_db * k
@@ -65,6 +78,13 @@ def compose_delivery(
         pause = 1.0 + (m.pause_scale - 1.0) * k
         instructions = m.instructions if k > 0 else ""
         sounds = list(m.sounds) if k > 0 else []
+    var, steady_rate = voice.variation, rate
+    if seed is not None:
+        rng = random.Random(seed * SEED_STRIDE + index)  # noqa: S311 (prosody, not security)
+        rate += rng.uniform(-1.0, 1.0) * var.rate * expressivity
+        pitch += rng.uniform(-1.0, 1.0) * var.pitch_st * expressivity
+    if question:
+        pitch += var.question_pitch_st * expressivity
     lim = voice.limits
     return Delivery(
         _clamp(rate, lim.rate),
@@ -75,6 +95,7 @@ def compose_delivery(
         instructions,
         sounds,
         mood if m else None,
+        _clamp(steady_rate, lim.rate),
     )
 
 
@@ -93,11 +114,14 @@ def to_piper(d: Delivery, voice: VoiceConfig) -> dict[str, float]:
 
 
 def to_openai(d: Delivery) -> dict[str, str]:
-    """``/v1/audio/speech`` extras for instructable models: delivery as natural language."""
+    """``/v1/audio/speech`` extras for instructable models: delivery as natural language. The
+    rate words follow the rate before the sentence variation, so a neutral reply does not flip
+    between "faster" and "slower" from one sentence to the next."""
     parts = [d.instructions] if d.instructions else []
-    if d.rate < 1.0:
+    rate = d.rate if d.steady_rate is None else d.steady_rate
+    if rate < 1.0:
         parts.append("speak a little slower than usual")
-    elif d.rate > 1.0:
+    elif rate > 1.0:
         parts.append("speak a little faster than usual")
     if d.volume_db < 0:
         parts.append("keep the voice soft")

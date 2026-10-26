@@ -184,6 +184,20 @@ def test_monitor_without_routes_starts_and_stops():
     assert mon.online
 
 
+def test_monitor_stop_between_thread_creation_and_start_does_not_join_it(monkeypatch):
+    real_start = threading.Thread.start
+    mon = NetworkMonitor([], POLICY)
+
+    def start_after_stop(self):
+        if self.name == "network-monitor":
+            mon.stop()
+        real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", start_after_stop)
+    mon.start()
+    mon.stop()
+
+
 def test_set_routes_adds_probed_link_and_keeps_existing_state():
     ev, clock = Events(), Clock()
     up = {"cloud": False, "lan": True, "new": False}
@@ -484,6 +498,7 @@ class FlakyDriver(MockPoseDriver):
     def write_pose_targets(self, t, values):
         self._check()
         super().write_pose_targets(t, values)
+        self.home = {**self.home, **values}  # the robot follows its targets (until moved by hand)
 
     def read_state(self):
         self._check()
@@ -596,8 +611,9 @@ class Cue:
     def __init__(self) -> None:
         self.said: list[tuple[str, str]] = []
 
-    def say(self, text: str, language: str) -> None:
+    def say(self, text: str, language: str) -> bool:
         self.said.append((text, language))
+        return True
 
 
 REACHY_MANIFEST = (
@@ -611,7 +627,10 @@ def reachy():
     manifest = load_manifest(REACHY_MANIFEST, allow_unmeasured_dynamics=True)
     stack = ConfigStack()
     stack.set_manifest_behaviour(
-        manifest.model.behaviour, manifest.channels, load_clip_library(manifest)
+        manifest.model.behaviour,
+        manifest.channels,
+        load_clip_library(manifest),
+        body_yaw=None,
     )
     return manifest, stack.effective()
 
@@ -735,3 +754,26 @@ def test_motion_snapshot_reflects_link_loss():
     assert snap["mode"] == "active" and snap["errors"] >= CFG.connectivity.robot.failures_to_offline
     assert snap["robot_link"]["online"] is False
     assert "ConnectionError" in snap["last_error"]
+
+
+# ---------------------------------------------------------------- no route is not an outage
+
+
+def test_no_routes_is_not_an_outage_at_start_or_after_removing_the_last_route():
+    ev, clock = Events(), Clock()
+    mon = NetworkMonitor([], POLICY, ev, probe=lambda *a: False, clock=clock)
+    mon.check_due()
+    assert mon.online and ev == []
+    mon.set_routes([route("cloud")])
+    mon.report("cloud", True)
+    mon.set_routes([])
+    assert mon.online and "link.network.lost" not in ev
+
+
+async def test_router_without_routes_raises_no_route_available_not_offline():
+    mon = NetworkMonitor([], POLICY, Events(), clock=Clock())
+    r = Router([], SafetyConfig(), monitor=mon)
+    assert not r.offline
+    with pytest.raises(NoRouteAvailable) as err:
+        await collect(r)
+    assert not isinstance(err.value, Offline)

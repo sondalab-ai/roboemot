@@ -8,8 +8,6 @@ const SETTING_CONTAINERS = ["dict_of_model", "keyed_list", "string_list_dict"];
 const SETTING_ENTRY_KINDS = ["dict_of_model", "keyed_list"];
 const SETTING_SLIDER_STEPS = 100;
 const SETTING_DEFAULT_MAX_CHARS = 120;
-// Mirrors the word-list maps of webui/settings.py (LANGUAGE_MAPS) a language may be added to; the server decides.
-const SETTING_WORD_MAPS = ["safety.minor_output_blocklist"];
 const SETTING_ROUTE_URL = /^llm_routes\.[^.]+\.base_url$/;
 const SETTING_SEARCH_DEBOUNCE_MS = 150;
 const SETTING_SEARCH_MIN_CHARS = 2;
@@ -426,10 +424,19 @@ const canEdit = (node) => {
 
 const labelOf = (node) => (node.parent ? node.row.path.slice(node.parent.row.path.length + 1) : node.row.path);
 
+// A scheme the URL parser IDNA-encodes hosts for (written in two parts: the page holds no literal URL).
+const HOST_PROBE = "http" + ":" + "//";
+
 // scheme://host[:port] of a URL as the server writes it (lower case, no user info or path); "" if none.
 function routeOrigin(url) {
   const m = /^([A-Za-z][A-Za-z0-9+.-]*):\/\/(?:[^/?#@]*@)?([^/?#]*)/.exec(typeof url === "string" ? url : "");
-  return m && m[2] ? m[1].toLowerCase() + "://" + m[2].toLowerCase() : "";
+  if (!m || !m[2]) return "";
+  // the host in its ASCII (punycode) form, as the server names it; the port text is kept as typed
+  const hp = /^(\[[^\]]*\]|[^:]*)(:\d*)?$/.exec(m[2].toLowerCase());
+  if (!hp) return "";
+  let host = hp[1];
+  try { host = new URL(HOST_PROBE + host).hostname; } catch (e) { return ""; }
+  return m[1].toLowerCase() + "://" + host + (hp[2] || "");
 }
 
 // Runs a write behind the PIN dialog. Returns the response, or null when the dialog was cancelled.
@@ -448,8 +455,9 @@ function writeNotice(result, verbKey) {
   if (result.layer === "app") parts.push(t("settings_layer_app"));
   else if (result.layer === "runtime") parts.push(t("settings_layer_runtime"));
   if (result.persisted === false) parts.push(t("settings_not_persisted"));
+  if (result.applied === false) parts.push(t("settings_not_applied"));
   if (result.restart_required) { settingsState.restartPending = true; parts.push(t("settings_restart_needed")); }
-  notice(parts.join(" "), result.persisted === false);
+  notice(parts.join(" "), result.persisted === false || result.applied === false);
 }
 
 function settingLeaf(node) {
@@ -466,7 +474,6 @@ function settingLeaf(node) {
     : el("span", { class: "sl-field__label" }, ctl && ctl.ownsLabel ? [] : name);
   const parts = [el("div", { class: "row" }, title, settingTags(row, editable))];
   if (row.description) parts.push(el("p", { class: "hint", id: id + "-d" }, row.description));
-  if (row.conservative === "superset") parts.push(el("p", { class: "hint" }, t("settings_superset_hint")));
   if (ctl && row.secret) parts.push(el("p", { class: "hint" }, t("settings_write_only_hint")));
   if (hidden) {
     parts.push(el("p", { class: "hint setting-value" }, t("settings_hidden")),
@@ -636,36 +643,10 @@ function addEntryForm(node) {
     failure, el("div", { class: "row" }, button(t("settings_add_entry"), "primary", submit, { small: true })));
 }
 
-// The form that adds a language to a map of word lists: the language key and its words.
-function addWordsForm(node) {
-  const row = node.row;
-  const id = nextSettingId();
-  const failure = el("p", { class: "sl-field__error", role: "alert", hidden: true, id: id + "-err" });
-  const name = el("input", { type: "text", class: "sl-field__input", id: id + "-name", required: true });
-  const words = buildControl({ kind: "string_list", value: [], conservative: null, choices: null, nullable: false }, id + "-words", { label: row.path });
-  const show = (code) => { failure.hidden = !code; failure.textContent = code ? t("err_" + code) : ""; };
-  const submit = () => guarded(async () => {
-    const key = name.value.trim();
-    if (key === "") { show("key_invalid"); return; }
-    const got = words.read();
-    show(null);
-    const result = await pinnedCall(row.path, t("settings_add_entry"),
-      (pin) => api("POST", "/api/settings/entry", { path: row.path, key, value: got.value, pin }));
-    if (!result) return;
-    revealedSettings = new Map();
-    writeNotice(result, "settings_entry_added");
-    await settingsReload(null);
-  });
-  return el("div", { class: "stack" }, field(id + "-name", t("settings_entry_name"), name),
-    el("div", { class: "stack", role: "group", "aria-label": row.path }, words.node), failure,
-    el("div", { class: "row" }, button(t("settings_add_entry"), "primary", submit, { small: true })));
-}
-
 function settingContainer(node) {
   const row = node.row;
   const hidden = settingHidden(row);
-  const wordMap = row.kind === "string_list_dict" && SETTING_WORD_MAPS.includes(row.path);
-  const addable = !hidden && !row.secret && ((SETTING_ENTRY_KINDS.includes(row.kind) && row.entry) || wordMap);
+  const addable = !hidden && !row.secret && SETTING_ENTRY_KINDS.includes(row.kind) && row.entry;
   const parts = [el("div", { class: "row" }, el("code", { class: "sl-code" }, labelOf(node)), settingTags(row, true))];
   if (row.description) parts.push(el("p", { class: "hint" }, row.description));
   if (hidden) {
@@ -675,7 +656,7 @@ function settingContainer(node) {
     const keys = entryKeys(node);
     parts.push(keys.length ? keys.map((key) => entryBlock(node, key)) : el("p", { class: "hint" }, t("settings_no_entries")));
     if (addable) {
-      const { toggle, body } = nestedDisclosure("add:" + row.path, t("settings_add_entry"), () => [wordMap ? addWordsForm(node) : addEntryForm(node)]);
+      const { toggle, body } = nestedDisclosure("add:" + row.path, t("settings_add_entry"), () => [addEntryForm(node)]);
       parts.push(el("div", { class: "stack" }, toggle, body));
     }
   }

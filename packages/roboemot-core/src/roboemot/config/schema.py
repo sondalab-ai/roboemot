@@ -6,9 +6,7 @@ Every field carries a default, a unit and a range. Field metadata (``json_schema
 - ``restart``: True when a change needs a process restart instead of hot reload.
 - ``conservative``: for safety parameters, which direction is safer at runtime:
   ``"lower"`` (smaller values are safer), ``"higher"``, ``"false"`` / ``"true"`` for booleans
-  that are safer off / on, ``"superset"`` for lists where only adding entries is safer (compared
-  on the output filter's normalised forms). Changes in the other direction need admin approval
-  (stack.py).
+  that are safer off / on. Changes in the other direction need admin approval (stack.py).
 - ``opt_in``: privacy options; turning them on needs the admin confirmation.
 - ``admin_only``: prompt text, where no direction is safe; any change needs the admin
   confirmation.
@@ -25,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 ROUTE_NAME = re.compile(r"[A-Za-z0-9_-]+")
 ROUTE_NAME_MAX_CHARS = 64
+ROUTE_SCHEMES = ("http", "https")  # the OpenAI-compatible client speaks only these (SPEC 8)
 
 
 def param(
@@ -36,7 +35,7 @@ def param(
     ge: float | None = None,
     le: float | None = None,
     restart: bool = False,
-    conservative: Literal["lower", "higher", "false", "true", "superset"] | None = None,
+    conservative: Literal["lower", "higher", "false", "true"] | None = None,
     opt_in: bool = False,
     admin_only: bool = False,
 ) -> Any:
@@ -72,7 +71,9 @@ def _copy(value: Any) -> Any:
 class Strict(BaseModel):
     """Base model: unknown keys are rejected (SPEC 11A, Rules: Schema)."""
 
-    model_config = ConfigDict(extra="forbid", validate_assignment=True, validate_default=True)
+    model_config = ConfigDict(
+        extra="forbid", validate_assignment=True, validate_default=True, frozen=True
+    )
 
 
 # --------------------------------------------------------------------------- affect (SPEC 7)
@@ -110,11 +111,6 @@ class AffectConfig(Strict):
 APPRAISAL_EVENTS = frozenset(
     {
         "person.known",
-        "person.known_child",
-        "person.known_teen",
-        "person.known_adult",
-        "person.known_senior",
-        "person.known_unknown",
         "person.unknown_appears",
         "animal.appears",
         "idle.long",
@@ -198,20 +194,15 @@ class AppraisalConfig(Strict):
     )
     rules: list[AppraisalRule] = param(
         [
-            # Starting points (SPEC 7): an enrolled person gives +0.4/+0.2; a child adds joy, an
-            # adult stays calm, a stranger raises curiosity with almost no valence change.
-            {"event": "person.known", "valence": 0.4, "arousal": 0.2, "cooldown_s": 60},
+            # Starting points (SPEC 7): an enrolled person gives +0.5/+0.2 and calm, a stranger
+            # raises curiosity with almost no valence change.
             {
-                "event": "person.known_child",
-                "valence": 0.3,
-                "arousal": 0.3,
-                "label": "joy",
+                "event": "person.known",
+                "valence": 0.5,
+                "arousal": 0.2,
+                "label": "calm",
                 "cooldown_s": 60,
             },
-            # Teen and senior start with the adult values (SPEC 7).
-            {"event": "person.known_teen", "valence": 0.1, "label": "calm", "cooldown_s": 60},
-            {"event": "person.known_adult", "valence": 0.1, "label": "calm", "cooldown_s": 60},
-            {"event": "person.known_senior", "valence": 0.1, "label": "calm", "cooldown_s": 60},
             {
                 "event": "person.unknown_appears",
                 "valence": 0.05,
@@ -348,7 +339,6 @@ class RegisterParams(Strict):
         True, "Whether the robot may move toward the person", conservative="false"
     )
     reaction_intensity: Literal["low", "medium", "high"] = param("medium", "Reaction intensity")
-    minor_content_policy: bool = param(False, "Apply the minor content policy", conservative="true")
     max_reply_sentences: int | None = param(
         None,
         "Reply length cap in sentences for this register; unset uses "
@@ -359,51 +349,29 @@ class RegisterParams(Strict):
     )
 
 
-class RegisterConfig(Strict):
-    child: RegisterParams = param(
-        {
-            "speech_rate": 0.9,
-            "pitch_st": 2.0,
-            "vocabulary": "simple",
-            "persona_fragment": "Playful, encouraging, child-safe.",
-            "motion_amplitude": 1.2,
-            "approach_allowed": False,
-            "reaction_intensity": "high",
-            "minor_content_policy": True,
-            "max_reply_sentences": 2,
-        },
-        "Register for children",
-    )
-    teen: RegisterParams = param({"minor_content_policy": True}, "Register for teens")
-    adult: RegisterParams = param({}, "Register for adults")
-    senior: RegisterParams = param({}, "Register for seniors")
-    unknown: RegisterParams = param(
-        {
-            "vocabulary": "formal",
-            "persona_fragment": "Polite, reserved.",
-            "motion_amplitude": 0.7,
-            "approach_allowed": False,
-            "reaction_intensity": "low",
-            "minor_content_policy": True,
-        },
-        "Register for people of unknown age group (treated as possible minors)",
-    )
-    gender_affects_params: bool = param(
-        False, "If true, gender may change register parameters, not only forms of address"
-    )
+class RegisterConfig(RegisterParams):
+    """The one register the robot uses with everyone (SPEC 7; no age groups, owner decision
+    2026-10-23), plus the settings about registers."""
+
     persona_fragment_max_chars: int = param(
-        300, "Longest accepted persona_fragment, in every group", ge=20, le=2000
+        300, "Longest accepted persona_fragment", ge=20, le=2000
     )
 
+    @property
+    def params(self) -> RegisterParams:
+        """The register parameters alone, as a person's overrides and the persona shape them."""
+        return RegisterParams.model_validate(
+            self.model_dump(include=set(RegisterParams.model_fields))
+        )
+
     @model_validator(mode="after")
-    def _fragments_fit(self) -> RegisterConfig:
-        for group in ("child", "teen", "adult", "senior", "unknown"):
-            n = len(getattr(self, group).persona_fragment)
-            if n > self.persona_fragment_max_chars:
-                raise ValueError(
-                    f"register.{group}.persona_fragment has {n} characters, "
-                    f"max {self.persona_fragment_max_chars}"
-                )
+    def _fragment_fits(self) -> RegisterConfig:
+        n = len(self.persona_fragment)
+        if n > self.persona_fragment_max_chars:
+            raise ValueError(
+                f"register.persona_fragment has {n} characters, "
+                f"max {self.persona_fragment_max_chars}"
+            )
         return self
 
 
@@ -944,7 +912,7 @@ class LightConfig(Strict):
 
 
 class ArbiterConfig(Strict):
-    loop_hz: float = param(100.0, "Arbiter rate", unit="Hz", ge=10, le=500)
+    loop_hz: float = param(100.0, "Arbiter rate", unit="Hz", ge=10, le=500, restart=True)
     crossfade_ms: float = param(
         150.0, "Cross-fade when the winning source changes", unit="ms", ge=0, le=2000
     )
@@ -964,9 +932,101 @@ class IdleConfig(Strict):
     gaze_shift_amplitude: float = param(0.15, "Max gaze shift on head yaw", unit="rad", ge=0, le=1)
 
 
+class ExternalControlConfig(Strict):
+    """Divergence between the pose the loop commands and the pose the robot reports (SPEC 12A):
+    the platform dropping our targets (a move of its own is running) or a hand on the head."""
+
+    tolerance_rad: float = param(
+        0.15,
+        "An angular joint further than this outside the range of the poses commanded within "
+        "lag_window_s counts as diverging (tracking lag and sag of our own motion stay under it). "
+        "Behind the commands, on the side they came from, is lag however far, until they settle",
+        unit="rad", ge=0.01, le=1.0,
+    )  # fmt: skip
+    tolerance_m: float = param(
+        0.02,
+        "The same for translations",
+        unit="m", ge=0.002, le=0.1,
+    )  # fmt: skip
+    lag_window_s: float = param(
+        0.4,
+        "The measured pose is compared with the poses commanded this far back, so the "
+        "servos' tracking lag is not mistaken for external control. Counted in loop ticks "
+        "(lag_window_s x motion.arbiter.loop_hz commands), so late ticks do not shorten it",
+        unit="s", ge=0.05, le=2.0,
+    )  # fmt: skip
+    confirm_s: float = param(
+        0.2,
+        "Divergence must hold on confirm_s x motion.arbiter.loop_hz new state samples in a row "
+        "before the loop yields; a repeated sample does not count, a late tick starts again",
+        unit="s", ge=0.02, le=2.0,
+    )  # fmt: skip
+    late_tick_periods: float = param(
+        2.0,
+        "A loop tick that comes more than this many periods after the previous one is late "
+        "(an overloaded CPU): its sample does not count toward the confirmation (a stall cannot "
+        "bridge it), but the count goes on, so a push is still caught under steady overruns",
+        unit="periods", ge=1.0, le=10.0,
+    )  # fmt: skip
+    max_state_age_s: float = param(
+        0.8,
+        "The oldest a measured state sample may be (a platform's state queue, about 0.67 s on "
+        "the reference robot, plus client buffering): a joint where the commands were up to "
+        "this long before the lag window, or behind moving commands and moved within this time, "
+        "counts as lag. A push against a moving head is caught within about lag_window_s + "
+        "max_state_age_s + confirm_s; longer is more tolerant of old state, slower to catch it",
+        unit="s", ge=0.0, le=5.0,
+    )  # fmt: skip
+    solo_groups: list[str] = param(
+        [],
+        "Manifest groups that yield on their own when only they diverge (a hand on a light "
+        "part). Any other divergence yields every group: the platform's own moves (a "
+        "go-to-sleep) may show first on any group, and the groups not yet diverging would "
+        "otherwise keep streaming targets the platform accepts as its move ends. List a group "
+        "only if the platform's moves never move it first",
+    )
+    recent_events: int = param(
+        8,
+        "How many recent external-control events the debug report keeps (joint, group, error, "
+        "samples, largest tick gap, overruns)",
+        ge=1, le=100,
+    )  # fmt: skip
+    still_band_rad: float = param(
+        0.02,
+        "While yielding, the pose counts as still while every angular joint stays within this "
+        "band of the pose where the stillness count started (wider than encoder jitter)",
+        unit="rad", ge=0.002, le=0.5,
+    )  # fmt: skip
+    still_band_m: float = param(
+        0.003,
+        "The same for translations",
+        unit="m", ge=0.0005, le=0.05,
+    )  # fmt: skip
+
+
 class MotionConfig(Strict):
     arbiter: ArbiterConfig = param({}, "Arbiter parameters")
     idle: IdleConfig = param({}, "Idle motion parameters")
+    app_tick_hz: float = param(
+        20.0,
+        "Rate of the app's behaviour tick: affect, idle, circadian, scan, expression and "
+        "responder commands are recomputed and fed to the arbiter this often (the arbiter itself "
+        "runs at arbiter.loop_hz)",
+        unit="Hz", ge=1, le=100,
+    )  # fmt: skip
+    platform_move_grace_s: float = param(
+        5.0,
+        "After external control of the robot is detected (the platform runs a move of its own, "
+        "such as the owner's go-to-sleep, or a hand moves the head), the loop keeps following the "
+        "measured pose without writing until the pose has been still this long with the motors "
+        "on, then resumes from it. Must exceed the platform's delay between the end of a sleep "
+        "move and the motors being switched off (2.0 s on the reference robot, SPEC 4A) plus the "
+        "motor status latency (a 1 s status period plus the time to build it, and the state "
+        "queue's age), less the min-jerk tail in which the pose already reads as still, so the "
+        "motors-off is seen before any target is streamed again (SPEC 12A)",
+        unit="s", ge=0, le=30,
+    )  # fmt: skip
+    external: ExternalControlConfig = param({}, "Detection of external control of the robot")
 
 
 # --------------------------------------------------------------------------- reflexes (SPEC 10)
@@ -995,7 +1055,7 @@ REFLEX_DURATION_MS = (100.0, 800.0)  # SPEC 10: a reflex pre-empts lower sources
 # (or to the explicit "does not affect a withdraw" list in the tests).
 WITHDRAW_RULE_FIELDS = (
     "enabled", "trigger", "primitive", "threshold", "amplitude_deg", "cooldown_s",
-    "duration_ms", "suppress_with_minor",
+    "duration_ms",
 )  # fmt: skip
 WITHDRAW_SHARED_FIELDS = (
     "enabled", "max_amplitude_deg", "max_age_ms", "max_age_vision_ms", "max_future_ms",
@@ -1048,12 +1108,6 @@ class ReflexRule(Strict):
         le=REFLEX_DURATION_MS[1],
         conservative="lower",
     )
-    suppress_with_minor: bool = param(
-        False,
-        "Do not fire while a possible minor is present (always on for turn_toward: the robot "
-        "never moves towards a minor, SPEC 12)",
-        conservative="true",
-    )
 
     @model_validator(mode="after")
     def _consistent(self) -> ReflexRule:
@@ -1069,8 +1123,6 @@ class ReflexRule(Strict):
             raise ValueError(
                 f"reflex {self.name!r}: threshold for {self.trigger} must be within {lo} and {hi}"
             )
-        if self.primitive == "turn_toward" and not self.suppress_with_minor:
-            raise ValueError(f"reflex {self.name!r}: turn_toward must set suppress_with_minor")
         return self
 
 
@@ -1097,13 +1149,31 @@ class ReflexAudioConfig(Strict):
     loud_event_refractory_s: float = param(
         1.0, "Minimum time between two sound.loud events", unit="s", ge=0, le=60
     )
+    level_block_s: float = param(
+        1.0,
+        "Report only: length of one microphone level block (per-channel and mono dBFS, "
+        "channel correlation) in seconds of input audio",
+        unit="s",
+        ge=0.1,
+        le=60,
+        restart=True,
+    )
+    level_window: int = param(
+        300, "Report only: level blocks kept for the report", ge=10, le=10000, restart=True
+    )
 
 
 class ReflexConfig(Strict):
-    enabled: bool = param(True, "Run the reflex engine", conservative="false")
+    enabled: bool = param(
+        True,
+        "Run the reflex engine. Off, it stops at once; on after a start with it off, the "
+        "loud-onset reflexes need a restart (the microphone is opened at start only for a "
+        "consumer)",
+        conservative="false",
+    )
     max_amplitude_deg: float = param(
         45.0,
-        "Ceiling on every rule's amplitude (the manifest limits and the minor cap still apply)",
+        "Ceiling on every rule's amplitude (the manifest limits still apply)",
         unit="deg", ge=0, le=90, conservative="lower",
     )  # fmt: skip
     max_age_ms: float = param(
@@ -1148,6 +1218,16 @@ class ReflexConfig(Strict):
         conservative="higher",
     )  # fmt: skip
     latency_window: int = param(200, "Latency samples kept per trigger", ge=10, le=10000)
+    onset_watch_ratio: float = param(
+        2.0,
+        "Report only (SPEC 12A): a loud-onset sound that rises above this ratio over the floor "
+        "is recorded in the debug report with its peak ratio, fired or not, so the threshold can "
+        "be tuned from a real run. A rule with a lower threshold watches from its own threshold",
+        unit="ratio", ge=1.5, le=100,
+    )  # fmt: skip
+    onset_window: int = param(
+        500, "Onset peaks kept per loud-onset rule for the debug report", ge=10, le=10000
+    )
     audio: ReflexAudioConfig = param({}, "Microphone level source")
     rules: list[ReflexRule] = param(
         [
@@ -1155,7 +1235,7 @@ class ReflexConfig(Strict):
                 "name": "startle-loud",
                 "trigger": "loud_onset",
                 "primitive": "startle",
-                "threshold": 6.0,
+                "threshold": 12.0,
                 "amplitude_deg": 12,
                 "cooldown_s": 3,
                 "duration_ms": 400,
@@ -1177,7 +1257,6 @@ class ReflexConfig(Strict):
                 "amplitude_deg": 40,
                 "cooldown_s": 5,
                 "duration_ms": 800,
-                "suppress_with_minor": True,
             },
         ],
         "Reflex rules (SPEC 10)",
@@ -1197,62 +1276,11 @@ class ReflexConfig(Strict):
 # --------------------------------------------------------------------------- safety (SPEC 12)
 
 
-class MinorLines(Strict):
-    greeting: str = param("", "Said when the person greeted the robot")
-    robot_name: str = param(
-        "",
-        "Said when the robot's name was called and it has one; `{name}` is replaced by the name "
-        "(sanitised, see `voice.name_max_chars`)",
-    )
-    robot_unnamed: str = param(
-        "",
-        "Said instead of `robot_name` when the robot has no name; empty falls back to "
-        "`ask_grown_up`",
-    )
-    ask_grown_up: str = param("", "Said for anything else")
-    filtered: str = param("", "Said in place of a sentence the output filter removed")
-
-    @model_validator(mode="after")
-    def _spoken(self) -> MinorLines:
-        empty = [
-            n
-            for n in ("greeting", "robot_name", "ask_grown_up", "filtered")
-            if not getattr(self, n).strip()
-        ]
-        if empty:
-            raise ValueError(f"minor_lines: {', '.join(empty)} must not be empty (never silence)")
-        return self
-
-
 class SafetyConfig(Strict):
     extra_prompt_rules: list[str] = param(
         [],
         "Rules appended to the system prompt's safety block (SPEC 8); changes need the admin",
         admin_only=True,
-    )
-    minor_motion_factor: float = param(
-        0.6,
-        "Speed and amplitude factor while a minor is present",
-        ge=0.05,
-        le=1,
-        conservative="lower",
-    )
-    minor_hold_s: float = param(
-        5.0,
-        "Keep the minor-present caps this long after the last possible-minor face; also the "
-        "evidence the face stage must deliver before they release (see minor_hold_periods)",
-        unit="s",
-        ge=1,
-        le=600,
-        conservative="higher",
-    )
-    minor_hold_periods: float = param(
-        3.0,
-        "The minor-present hold is at least this many face-detection periods at the current "
-        "governor rate, so a throttled detector cannot make the caps flap",
-        ge=1,
-        le=100,
-        conservative="higher",
     )
     watchdog_ms: float = param(
         200.0,
@@ -1312,53 +1340,6 @@ class SafetyConfig(Strict):
         "Run with manifest dynamics still null (development only, SPEC 12)",
         conservative="false",
     )
-    minors_allowed_llm: bool = param(
-        False,
-        "Allow conversation while a minor is present on routes cleared for minors",
-        conservative="false",
-    )
-    minor_output_blocklist: dict[str, list[str]] = param(
-        {
-            "it": [
-                "cazz*", "merd*", "puttan*", "troia*", "stronz*", "vaffanculo*", "scopare*",
-                "porn*", "uccid*", "uccis*", "ammazz*", "suicid*", "cocain*", "eroin*", "drog*",
-                "pistol*", "fucil*", "sesso*",
-            ],
-            "en": [
-                "fuck*", "shit*", "bitch*", "asshole*", "cunt*", "porn*", "sex*", "kill*",
-                "murder*", "suicid*", "cocaine*", "heroin*", "drug*", "gun*", "rifle*",
-            ],
-        },
-        "Words (whole words, accents and case ignored; a trailing * makes an entry a prefix, so "
-        "kill* also blocks killing) that never reach the speaker while a "
-        "minor is present, per language; a sentence containing one is replaced by "
-        "minor_lines.filtered and the rest of the answer is dropped (SPEC 12). Starting values "
-        "to review with the deployment, not a validated list. Entries can be added at runtime, "
-        "never removed (only the app config with the admin PIN removes)",
-        admin_only=True,
-        conservative="superset",
-    )  # fmt: skip
-    minor_lines: dict[str, MinorLines] = param(
-        {
-            "it": {
-                "greeting": "Ciao! Che bello vederti.",
-                "robot_name": "Mi chiamo {name}.",
-                "robot_unnamed": "Sono un robot.",
-                "ask_grown_up": "Questa domanda falla a un grande, che ti sa rispondere meglio.",
-                "filtered": "Preferisco parlare d'altro. Chiedi a un grande.",
-            },
-            "en": {
-                "greeting": "Hello! Nice to see you.",
-                "robot_name": "My name is {name}.",
-                "robot_unnamed": "I am a robot.",
-                "ask_grown_up": "Please ask a grown-up about that, they will know better.",
-                "filtered": "I would rather talk about something else. Ask a grown-up.",
-            },
-        },
-        "Short child-safe lines per language, spoken when no route cleared for minors can answer "
-        "and when the output filter replaces a sentence (SPEC 8, 12)",
-        admin_only=True,
-    )  # fmt: skip
 
 
 PSEUDONYM_LABEL = "{label}"
@@ -1415,16 +1396,6 @@ class IdentityConfig(Strict):
     margin: float = param(0.1, "Required margin over the second best match", ge=0, le=1)
     votes_required: int = param(3, "Positive evaluations required", ge=1, le=20)
     votes_window: int = param(5, "Evaluations considered", ge=1, le=50)
-    estimate_confidence_min: float = param(
-        0.8, "Below this, age/gender estimates are unknown", ge=0, le=1
-    )
-    estimate_frames_min: int = param(
-        3,
-        "Frames aggregated before an estimate is used; vision.attribute_crops must be at "
-        "least this",
-        ge=1,
-        le=100,
-    )
     enroll_min_embeddings: int = param(5, "Face embeddings required at enrollment", ge=5, le=20)
     max_embeddings_per_person: int = param(
         20, "Cap on stored face embeddings per person, refresh included", ge=5, le=20
@@ -1635,6 +1606,35 @@ class VisionRates(Strict):
         le=120,
         restart=True,
     )
+    conversation_scale: float = param(
+        0.5,
+        "Vision rate multiplier while the robot thinks or speaks (SPEC 5, 8, 13), so the TTS "
+        "keeps its CPU; idle keeps 1, an utterance in progress uses listening_scale. It also "
+        "divides the new-track burst gaps. At least 0.5, so the 3-of-5 identity decision of a "
+        "track that starts while the robot speaks stays inside the 2.5 s budget of SPEC 13, "
+        "awake or drowsy, with one missed vote",
+        ge=0.5,
+        le=1,
+    )
+    listening_scale: float = param(
+        0.5,
+        "Vision rate multiplier while an utterance is in progress (from speech start to its "
+        "hand-off), so the voice listener keeps up with the microphone on a loaded CPU (SPEC 8, "
+        "13); the lower of this and conversation_scale while the robot also thinks or speaks. "
+        "Same 0.5 floor and burst-gap rule as conversation_scale. Raised as needed so that "
+        "listening_face_detections face detections still fall within the voice-at-face age",
+        ge=0.5,
+        le=1,
+    )
+    listening_face_detections: int = param(
+        2,
+        "While listening, vision runs at least fast enough for this many face detections within "
+        "voice.direction.face_max_age_s (else attention.stale_s), the age the voice-at-face "
+        "check and the enrolled-in-view rule accept, so one missed detection still leaves a "
+        "fresh face; when even the full rate cannot, the listening scale is 1",
+        ge=1,
+        le=10,
+    )
 
 
 class TrackerConfig(Strict):
@@ -1646,6 +1646,32 @@ class TrackerConfig(Strict):
     )
     match_iou: float = param(0.3, "Minimum IoU for the first association", ge=0, le=1)
     low_match_iou: float = param(0.5, "Minimum IoU for the low-score association", ge=0, le=1)
+    match_distance_heights: float = param(
+        0.6,
+        "A high-score detection that fails match_iou may still match a track (same label, height "
+        "within match_height_ratio) whose predicted box centre is at most this many of the "
+        "track's box heights away; IoU matches go first. A high-score detection this close to a "
+        "confirmed track matched in the same update is a duplicate of it and starts no track. 0 "
+        "turns both off. Must stay below vision.rebirth_distance_heights",
+        ge=0,
+        le=2,
+    )
+    low_match_distance_heights: float = param(
+        0.4,
+        "The same centre-distance gate for the low-score association (stricter: weaker "
+        "evidence); 0 turns it off. Must stay below vision.rebirth_distance_heights",
+        ge=0,
+        le=2,
+    )
+    match_height_ratio: float = param(
+        1.5,
+        "The centre-distance gates and the duplicate rule apply only when the larger of the "
+        "detection and track box heights is at most this many times the smaller: a face seen "
+        "side-on keeps its size (1.13x on the robot), a smaller face beside or behind it does "
+        "not (0.5x), so it starts its own track",
+        ge=1,
+        le=4,
+    )
     confirm_hits: int = param(2, "Matched detections before a track is reported", ge=1, le=10)
     lost_s: float = param(
         1.5, "A track unmatched for this long (capture stamps) is removed", unit="s", ge=0.1, le=60
@@ -1662,9 +1688,6 @@ class VisionConfig(Strict):
     rates: VisionRates = param({}, "Per-stage target rates, scaled by the circadian state")
     tracker: TrackerConfig = param({}, "ByteTrack-class tracker")
     threads: int = param(2, "CPU threads of the frame-path models", ge=1, le=8, restart=True)
-    attribute_threads: int = param(
-        1, "CPU threads of the age and gender models (background job)", ge=1, le=8, restart=True
-    )
     detector_width_px: int = param(
         320, "Face detector input width (SPEC 13: 320x240)", unit="px", ge=64, le=1280, restart=True
     )
@@ -1673,6 +1696,14 @@ class VisionConfig(Strict):
     )
     face_min_px: int = param(
         24, "Faces with a shorter box side are ignored", unit="px", ge=8, le=512
+    )
+    face_lost_periods: float = param(
+        3.0,
+        "A face track also survives this many face-detection periods at the rate the governor "
+        "allows now: the lifetime is the larger of this and tracker.lost_s, so a slower detector "
+        "(conversation, circadian or load scale) does not end tracks between two detections",
+        ge=1,
+        le=100,
     )
     embed_min_face_px: int = param(
         40, "Faces with a shorter box side are tracked but not embedded", unit="px", ge=8, le=512
@@ -1705,35 +1736,36 @@ class VisionConfig(Strict):
         ge=0,
         le=10,
     )
-    attribute_precision: Literal["auto", "int8", "fp32"] = param(
-        "auto",
-        "Age and gender model files: int8 (dynamic INT8, about 87 MB each), fp32 (343 MB each) "
-        "or auto (int8 when the robot manifest profile is cm4, fp32 otherwise)",
+    report_window: int = param(
+        200,
+        "Report only: ended face tracks kept for the lifetime summary",
+        ge=10,
+        le=10000,
         restart=True,
     )
-    attribute_crops: int = param(
-        3,
-        "Face crops per track for the age and gender job (SPEC 5); at least "
-        "identity.estimate_frames_min, and the 0.8 confidence rule applies at any count",
-        ge=1,
-        le=10,
-    )
-    attribute_crop_interval_s: float = param(
-        0.3,
-        "Minimum capture-time gap between the face crops kept for the age and gender job",
+    report_rate_window_s: float = param(
+        60.0,
+        "Report only: capture-time window of the face track creation rate (per minute), "
+        "ending at the last processed frame",
         unit="s",
-        ge=0,
+        ge=10,
+        le=3600,
+    )
+    rebirth_window_s: float = param(
+        5.0,
+        "Report only: a face track born at most this long (capture time) after another one "
+        "expired, near its last box, counts as a rebirth of it in the tracks report",
+        unit="s",
+        ge=0.1,
+        le=60,
+    )
+    rebirth_distance_heights: float = param(
+        1.0,
+        "Report only: largest distance between the new track's first box centre and the ended "
+        "track's last box centre, in heights of the ended box, for a rebirth. Must stay above "
+        "both vision.tracker distance gates, or an overlapped rebirth could never be counted",
+        ge=0.1,
         le=10,
-    )
-    attribute_crop_margin: float = param(
-        0.25, "Face box padding for the age and gender crop, per side", ge=0, le=1
-    )
-    attribute_queue_max: int = param(
-        4,
-        "Age and gender jobs waiting for the worker; further tracks wait",
-        ge=1,
-        le=64,
-        restart=True,
     )
     models_dir: str = param(
         "",
@@ -1778,6 +1810,15 @@ class VisionConfig(Strict):
         ge=1,
         le=10,
     )
+    object_match_distance_heights: float = param(
+        0.0,
+        "Replaces both tracker centre-distance gates (and the duplicate rule) for the animal and "
+        "object tracker. Off by default: the gate is in box heights, tuned on faces, and two tall "
+        "things side by side (bottles) are about 0.3 heights apart, so the second one would "
+        "never start a track",
+        ge=0,
+        le=2,
+    )
     object_nms_iou: float = param(
         0.6,
         "Detections of one class overlapping more than this IoU are merged (NanoDet's own value)",
@@ -1821,6 +1862,16 @@ class VisionConfig(Strict):
         both = set(self.animal_categories) & set(self.object_categories)
         if both:
             raise ValueError(f"vision categories are both animal and object: {sorted(both)}")
+        return self
+
+    @model_validator(mode="after")
+    def _association_below_rebirth(self) -> VisionConfig:
+        gate = max(self.tracker.match_distance_heights, self.tracker.low_match_distance_heights)
+        if gate >= self.rebirth_distance_heights:
+            raise ValueError(
+                "vision.tracker distance gates must stay below vision.rebirth_distance_heights, "
+                "or an overlapped rebirth could never be counted"
+            )
         return self
 
 
@@ -2067,9 +2118,41 @@ class VoiceLimits(Strict):
     variability: tuple[float, float] = param((0.0, 1.0), "Allowed variability range")
 
 
+class VoiceVariation(Strict):
+    """Within one reply each sentence gets its own rate and pitch offset, drawn from the reply's
+    seed and the sentence's index (deterministic, bounded), so a long answer is not monotone."""
+
+    rate: float = param(
+        0.05, "Largest rate offset of one sentence, times the expressivity", ge=0, le=0.3
+    )
+    pitch_st: float = param(
+        0.8,
+        "Largest pitch offset of one sentence, times the expressivity",
+        unit="semitones", ge=0, le=3,
+    )  # fmt: skip
+    question_pitch_st: float = param(
+        1.0,
+        "Pitch raise of a sentence that ends in a question mark, times the expressivity (the "
+        "DSP pitch shift moves the whole sentence, not only its end)",
+        unit="semitones", ge=0, le=4,
+    )  # fmt: skip
+
+
 class VadConfig(Strict):
     threshold: float = param(
         0.5, "Speech probability at or above which a frame counts as speech", ge=0.05, le=0.95
+    )
+    watch_prob: float = param(
+        0.2,
+        "Report only: a burst of frames at or above this probability is recorded with its peak "
+        "and its longest run above threshold, started or not, so the threshold can be tuned "
+        "from a real run. A value above threshold watches from threshold",
+        ge=0.01,
+        le=0.95,
+        restart=True,
+    )
+    watch_window: int = param(
+        500, "Report only: bursts kept for the report", ge=10, le=10000, restart=True
     )
     off_margin: float = param(
         0.15,
@@ -2211,7 +2294,8 @@ class FastpathConfig(Strict):
     )
     doa_max_age_ms: float = param(
         1500.0,
-        "A sound direction reading older than this does not point the head at the speaker",
+        "A sound direction reading older than this does not point the head at the speaker "
+        "(voice.direction.doa_max_age_ms is the stricter age for the voice-at-face check)",
         unit="ms", ge=0, le=10000,
     )  # fmt: skip
     loud_db: float = param(
@@ -2275,6 +2359,18 @@ class PiperConfig(Strict):
         (0.5, 30.0),
         "First and longest wait before a crashed worker is started again (doubles each time)",
     )
+    intra_op_threads: int = param(
+        2,
+        "ONNX Runtime threads the worker uses inside one operator; 0 keeps the runtime default "
+        "(one per core). On the CM4, 2 measured the best real-time factor (SPEC 13)",
+        ge=0, le=16, restart=True,
+    )  # fmt: skip
+    inter_op_threads: int = param(
+        1,
+        "ONNX Runtime threads the worker uses across operators (only used in the runtime's "
+        "parallel execution mode, not the default sequential one); 0 keeps the runtime default",
+        ge=0, le=16, restart=True,
+    )  # fmt: skip
 
     @field_validator("python")
     @classmethod
@@ -2289,8 +2385,8 @@ class OpenAISpeechConfig(Strict):
 
     route: str = param(
         "",
-        "Name of the llm_routes entry whose base_url, key, timeouts and minors flag the speech "
-        "requests use; empty disables the backend",
+        "Name of the llm_routes entry whose base_url, key and timeouts the speech requests "
+        "use; empty disables the backend",
         restart=True,
     )
     model: str = param("gpt-4o-mini-tts", "Speech model sent to /audio/speech", restart=True)
@@ -2451,6 +2547,159 @@ class BargeInConfig(Strict):
         return self
 
 
+class GrammarConfig(Strict):
+    """The grammar pass of wake and keyword spotting (SPEC 8 stage 3)."""
+
+    enabled: bool = param(
+        True,
+        "At the end of each utterance, decode its audio a second time with a recognizer limited "
+        "to a grammar: the voice.keywords phrases of its language (wake phrases, name templates "
+        "rendered with the robot's name, the name and its aliases, stop, yes, no, greetings), the "
+        "words of the free-text result as competitors, and the unknown-word filler. A phrase "
+        "it hears confidently counts like one found in the final text (it only adds: the "
+        "free-text match stays). Phrases with a word missing from the recognizer vocabulary are "
+        "left out and counted in the debug report",
+    )
+    wake_min_word_conf: float = param(
+        0.9,
+        "A wake phrase, the robot's name or a name alias heard by the grammar pass counts only "
+        "when every one of its words has at least this recognizer confidence",
+        ge=0, le=1,
+    )  # fmt: skip
+    keyword_min_word_conf: float = param(
+        0.9,
+        "A stop, yes, no or greeting phrase heard by the grammar pass counts only when every one "
+        "of its words has at least this recognizer confidence",
+        ge=0, le=1,
+    )  # fmt: skip
+    rescue_wake: bool = param(
+        True,
+        "Let the grammar pass add a wake phrase, the robot's name or a name alias the free text "
+        "missed. Only when the free text holds none of the phrase's words (it lost them, rather "
+        "than heard them next to another word: `i robot` is not `ehi robot`) and its words are "
+        "adjacent in the audio (max_word_gap_s). Off: the pass adds stop, yes, no and greetings "
+        "only",
+    )
+    max_word_gap_s: float = param(
+        0.15,
+        "Consecutive words of a phrase heard by the grammar pass must be at most this far apart "
+        "in the audio (Vosk word timings), so `hello [to the] robot` with the middle words lost "
+        "is not `hello robot`",
+        unit="s", ge=0, le=2,
+    )  # fmt: skip
+    max_competitor_words: int = param(
+        64,
+        "Most distinct free-text words added to the grammar as competitors; an utterance with "
+        "more gets no grammar pass (counted), since cutting the list would leave part of the "
+        "audio to the keywords alone. Without competitors the small Italian model forces "
+        "ordinary speech onto the keywords (its unknown-word filler is weak), so an utterance "
+        "without a usable free-text word gets no pass either",
+        ge=8, le=512,
+    )  # fmt: skip
+    max_audio_s: float = param(
+        8.0,
+        "Longest utterance the grammar pass decodes (pre-roll to the last speech frame); a longer "
+        "one gets no pass (counted). The pass runs off the listener thread, but the hand-off to "
+        "the conversation waits for it (at most handoff_timeout_s), so this bounds the work and "
+        "the latency it adds",
+        unit="s", ge=1, le=60,
+    )  # fmt: skip
+    handoff_timeout_s: float = param(
+        1.0,
+        "Longest the hand-off of an utterance to the conversation waits for its grammar pass, "
+        "which runs on its own thread while the listener keeps reading the microphone; past it "
+        "the utterance goes on with the keywords of its free text only (counted as a timeout). "
+        "Above the slowest pass measured on the CM4 under load (0.76 s, SPEC 13)",
+        unit="s", ge=0.1, le=10,
+    )  # fmt: skip
+
+
+class ListenerConfig(Strict):
+    """Real-time budget and report of the voice listener (SPEC 8, 13)."""
+
+    budget_share: float = param(
+        0.5,
+        "Report only: the listener's work per second of audio (voice activity detection, "
+        "recognizer, barge-in check, waiting for a grammar pass, the hand-off; wall time on its "
+        "thread) should stay below this share of "
+        "the audio time, so a loaded CPU still leaves it room to keep up; the debug report "
+        "flags a report window over it (over_budget). At 1 or more the microphone queue grows "
+        "and audio is dropped (SPEC 13)",
+        ge=0.05, le=1,
+    )  # fmt: skip
+    report_window_s: float = param(
+        60.0,
+        "Report only: seconds of audio per window of the listener's cost and lag figures in the "
+        "debug report (the last full window is shown next to the totals since start)",
+        unit="s", ge=5, le=3600,
+    )  # fmt: skip
+
+
+class VoiceDirectionConfig(Strict):
+    """Voice-at-face gate: without the wake word, answer only a voice that comes from a visible
+    face (SPEC 8 stage 2, 5A)."""
+
+    enabled: bool = param(
+        True,
+        "An utterance that would be addressed without the wake word (policy never, an enrolled "
+        "person in view, or a follow-up in the open window) is addressed only when its sound "
+        "direction matched a visible face during the utterance; otherwise it needs the wake "
+        "word. An utterance with the wake word always passes. Off: no check (music and TV in "
+        "the room can be answered)",
+    )
+    tolerance_deg: float = param(
+        25.0,
+        "A sound direction reading matches a face when it is at most this far from the face's "
+        "azimuth (both in the robot base frame, head turn compensated). Covers the microphone "
+        "array's direction error and the face position's own error, with margin to sound "
+        "coming from 60 deg off any face",
+        unit="deg", ge=1, le=90,
+    )  # fmt: skip
+    min_match_share: float = param(
+        0.5,
+        "Share of the utterance's sound direction readings that must match a face. Every reading "
+        "counts, however few: a reading off every face is evidence against the utterance",
+        ge=0, le=1,
+    )  # fmt: skip
+    min_doa_readings: int = param(
+        1,
+        "Fewest sound direction readings the utterance needs to be judged on them; with fewer, "
+        "the check runs degraded (degraded_rule) and is counted by reason",
+        ge=1, le=100,
+    )  # fmt: skip
+    doa_max_age_ms: float = param(
+        500.0,
+        "A sound direction reading further than this from the audio sample's time does not count "
+        "for the check (a robot's source may read only a few times a second, and only while its "
+        "own detector hears speech). Stricter than voice.fastpath.doa_max_age_ms, which only "
+        "turns the head",
+        unit="ms", ge=0, le=5000,
+    )  # fmt: skip
+    face_max_age_s: float | None = param(
+        None,
+        "A person counts as visible when the camera saw them (the vision source reports faces) "
+        "at most this long before the audio sample. Empty: follow attention.stale_s, the age the "
+        "wake-word policy uses for 'in view', so the two never disagree (face detection runs "
+        "slower under load, at night and while the robot speaks)",
+        unit="s", ge=0, le=10,
+    )  # fmt: skip
+    degraded_rule: Literal["auto", "engaged", "reject"] = param(
+        "auto",
+        "Without enough sound direction readings: engaged = addressed when attention is on a "
+        "visible person for degraded_engaged_share of the samples; reject = the wake word is "
+        "needed; auto = reject when the robot measures sound direction and gave none (its "
+        "detector did not take the sound for speech: music, TV, or a quiet voice, which then "
+        "repeats with the wake word), engaged when the robot has no sound direction or muted "
+        "it itself (its own voice and echo, a barge-in)",
+    )
+    degraded_engaged_share: float = param(
+        0.5,
+        "Degraded, engaged rule: share of the utterance's samples during which attention must be "
+        "on a visible person",
+        ge=0, le=1,
+    )  # fmt: skip
+
+
 class VoiceConfig(Strict):
     enabled: bool = param(
         False,
@@ -2482,7 +2731,9 @@ class VoiceConfig(Strict):
     backend: Literal["piper", "openai_speech", "kokoro"] = param(
         "piper", "TTS backend", restart=True
     )
-    fallback_backend: Literal["piper", "kokoro"] = param("piper", "Offline fallback backend")
+    fallback_backend: Literal["piper", "kokoro"] = param(
+        "piper", "Offline fallback backend", restart=True
+    )
     voices: dict[str, str] = param(
         {"it": "it_IT-paola-medium", "en": "en_US-amy-medium"}, "Voice per language", restart=True
     )
@@ -2493,40 +2744,85 @@ class VoiceConfig(Strict):
     llm_tag_max_deviation: float = param(
         0.3, "Max distance of an LLM mood tag from the affect state", ge=0, le=2
     )
+    intensity_exponent: float = param(
+        0.5,
+        "Mood weight = intensity ** exponent x expressivity: below 1 a mid-intensity mood is "
+        "heard (affect intensity, the distance from the baseline, decays and is expected to stay "
+        "low), 1 is linear; 0 stays 0",
+        ge=0.1, le=2,
+    )  # fmt: skip
     moods: dict[str, Prosody] = param(
         {
+            "calm": {
+                "rate": -0.06,
+                "pitch_st": -0.5,
+                "volume_db": -1,
+                "variability": -0.1,
+                "pause_scale": 1.2,
+                "instructions": "calm, warm, unhurried",
+            },
             "joy": {
-                "rate": 0.10,
-                "pitch_st": 2,
-                "volume_db": 1,
-                "variability": 0.2,
+                "rate": 0.15,
+                "pitch_st": 2.5,
+                "volume_db": 1.5,
+                "variability": 0.25,
                 "pause_scale": 0.8,
                 "instructions": "bright, warm, smiling",
                 "sounds": ["giggle"],
             },
+            "curiosity": {
+                "rate": 0.10,
+                "pitch_st": 1.5,
+                "variability": 0.15,
+                "pause_scale": 1.05,
+                "instructions": "intrigued, rising intonation",
+            },
+            "surprise": {
+                "rate": 0.20,
+                "pitch_st": 3,
+                "volume_db": 2,
+                "variability": 0.35,
+                "pause_scale": 0.75,
+                "instructions": "astonished, quick, wide-eyed",
+            },
             "sadness": {
-                "rate": -0.15,
-                "pitch_st": -2,
+                "rate": -0.18,
+                "pitch_st": -2.5,
                 "volume_db": -3,
-                "variability": -0.2,
+                "variability": -0.25,
                 "pause_scale": 1.4,
                 "instructions": "soft, slow, a little down",
             },
-            "curiosity": {
-                "rate": 0.05,
+            "fear": {
+                "rate": 0.15,
                 "pitch_st": 1,
-                "pause_scale": 1.1,
-                "instructions": "intrigued, rising intonation",
+                "volume_db": -3,
+                "variability": 0.2,
+                "pause_scale": 0.8,
+                "instructions": "tense, hushed, quick",
+            },
+            "annoyance": {
+                "rate": 0.06,
+                "pitch_st": -1,
+                "volume_db": 2,
+                "variability": -0.2,
+                "pause_scale": 0.7,
+                "instructions": "firm, clipped, a little curt",
             },
             "sleepy": {
-                "rate": -0.20,
+                "rate": -0.25,
+                "pitch_st": -1,
                 "volume_db": -6,
+                "variability": -0.2,
                 "pause_scale": 1.6,
                 "instructions": "drowsy, quiet, near a whisper",
                 "sounds": ["yawn"],
             },
         },
-        "Per-mood prosody deltas",
+        "Per-mood prosody deltas, at full weight; one per affect label",
+    )
+    variation: VoiceVariation = param(
+        {}, "Sentence-to-sentence variation within one reply, and the raise of a question"
     )
     limits: VoiceLimits = param({}, "Clamp for the final delivery")
     sentence_max_chars: int = param(
@@ -2541,6 +2837,14 @@ class VoiceConfig(Strict):
     )  # fmt: skip
     queue_max_sentences: int = param(
         16, "Sentences waiting for synthesis; a further one is dropped", ge=1, le=256
+    )
+    report_window: int = param(
+        200,
+        "Report only: TTS chunks kept for the real-time factor summary (synthesis time over "
+        "audio duration)",
+        ge=10,
+        le=10000,
+        restart=True,
     )
     piper: PiperConfig = param({}, "Piper subprocess backend", restart=True)
     openai_speech: OpenAISpeechConfig = param({}, "Remote speech backend")
@@ -2593,9 +2897,10 @@ class VoiceConfig(Strict):
     wake_word_policy: Literal["always", "never", "unless_enrolled_in_view"] = param(
         "unless_enrolled_in_view",
         "When the wake word is required: always; never; or unless an enrolled person is in view. "
-        "With unless_enrolled_in_view, anyone speaking while an enrolled person is in view "
-        "(a stranger, a television) is addressed without the wake word, and a stranger alone "
-        "must say it",
+        "With unless_enrolled_in_view, anyone speaking while an enrolled person is in view is "
+        "addressed without the wake word, and a stranger alone must say it. Without the wake "
+        "word, voice.direction then asks that the voice come from a visible face (music and TV "
+        "need the wake word)",
     )
     asr: AsrConfig = param({}, "Speech recognition (SPEC 8 stage 3)")
     keywords: dict[str, KeywordSet] = param(
@@ -2619,9 +2924,17 @@ class VoiceConfig(Strict):
         },
         "Fast-path keyword lists per language, matched on whole words in the ASR partials "
         "(case and accents ignored; a phrase may have several words; no stemming, so list "
-        "inflections you want)",
+        "inflections you want). The grammar pass (voice.grammar) also listens for them at the "
+        "end of an utterance: there accents count, and a phrase with a word missing from the "
+        "recognizer vocabulary is left out",
     )
     fastpath: FastpathConfig = param({}, "Speech fast path: keywords, wake word window, prosody")
+    grammar: GrammarConfig = param(
+        {}, "Grammar pass: wake phrases and keywords heard by a grammar recognizer (SPEC 8)"
+    )
+    direction: VoiceDirectionConfig = param(
+        {}, "Without the wake word, answer only a voice from a visible face (SPEC 8, 5A)"
+    )
     barge_in: BargeInConfig = param({}, "Barge-in: user speech over the robot's voice (SPEC 8)")
 
     @field_validator("voices")
@@ -2633,12 +2946,298 @@ class VoiceConfig(Strict):
         return v
 
     vad: VadConfig = param({}, "Voice activity detection and endpointing (SPEC 8 stage 2)")
+    listener: ListenerConfig = param(
+        {}, "Real-time budget and cost report of the voice listener (SPEC 8, 13)"
+    )
     models_dir: str = param(
         "",
         "Folder with the voice models (Silero VAD, Vosk, Piper); empty means voice-models/ in "
         "the app data folder (data_dir)",
         restart=True,
     )
+
+
+SPEECH_MOTION_PRESETS = ("subtle", "natural", "lively")
+SPEECH_MOOD_GAIN_MAX = 3.0  # range of one speech_motion.mood_gain value
+
+
+class SpeechMotionLevel(Strict):
+    """One liveliness preset of the speaking motion (SPEC 7, Speaking motion): the peak of each
+    role in degrees, before the register, circadian and arousal factors."""
+
+    beat_deg: float = param(
+        1.5, "Peak dip of the beat on stressed stretches of speech", unit="deg", ge=0, le=10
+    )
+    phrase_nod_deg: float = param(
+        3.0, "Peak of the nod in the pause after a phrase or a statement", unit="deg", ge=0, le=15
+    )
+    nod_share: float = param(
+        0.5,
+        "Share of the phrase ends and statement ends that get a nod (seeded per reply and phrase, "
+        "so the same reply moves the same way)",
+        ge=0,
+        le=1,
+    )
+    question_tilt_deg: float = param(
+        5.0,
+        "Peak of the tilt at the end of a question, held into the listening window",
+        unit="deg",
+        ge=0,
+        le=15,
+    )
+    accent_deg: float = param(
+        6.0, "Peak of the accent flick on emphasis peaks (0: off)", unit="deg", ge=0, le=20
+    )
+    emphasis_min_interval_s: float = param(
+        1.2,
+        "At most one accent per this interval (the timeline's emphasis_floor_interval_s is the "
+        "floor: a smaller value here changes nothing)",
+        unit="s",
+        ge=0.1,
+        le=10,
+    )
+    breath_deg: float = param(
+        1.5, "Peak of the inhale lift before each sentence", unit="deg", ge=0, le=10
+    )
+    sway_deg: float = param(
+        0.0,
+        "Peak of the very slow drift that changes side at each phrase (0: off)",
+        unit="deg",
+        ge=0,
+        le=5,
+    )
+    arousal_gain: float = param(
+        0.5,
+        "The amplitude is multiplied by (1 + arousal_gain x affect arousal)",
+        ge=0,
+        le=2,
+    )
+
+
+class SpeechMotionLevels(Strict):
+    """The three presets; ``speech_motion.liveliness`` picks one, every row stays tunable."""
+
+    subtle: SpeechMotionLevel = param(
+        {
+            "beat_deg": 1.0,
+            "phrase_nod_deg": 2.0,
+            "nod_share": 0.3,
+            "question_tilt_deg": 3.0,
+            "accent_deg": 0.0,
+            "emphasis_min_interval_s": 2.0,
+            "breath_deg": 1.0,
+            "sway_deg": 0.0,
+            "arousal_gain": 0.3,
+        },
+        "Small and sparse",
+    )
+    natural: SpeechMotionLevel = param({}, "The middle preset")
+    lively: SpeechMotionLevel = param(
+        {
+            "beat_deg": 2.5,
+            "phrase_nod_deg": 5.0,
+            "nod_share": 0.7,
+            "question_tilt_deg": 7.0,
+            "accent_deg": 10.0,
+            "emphasis_min_interval_s": 0.8,
+            "breath_deg": 2.0,
+            "sway_deg": 1.5,
+            "arousal_gain": 0.8,
+        },
+        "Larger and more frequent; clipped by the limiter's dev fallback dynamics until the "
+        "robot's dynamics are measured, so it then looks much like natural",
+    )
+
+
+class SpeechTiltEntry(ExpressionEntry):
+    """The question tilt: an expression entry that stops at ``hold_at_s`` until it is released."""
+
+    hold_at_s: float = param(
+        0.0,
+        "Time in the keyframes where the tilt holds until the listener hears an utterance, "
+        "speech_motion.question_hold_s passes or a barge-in",
+        unit="s",
+        ge=0,
+        le=EXPRESSION_MAX_CYCLE_S,
+    )
+
+    @model_validator(mode="after")
+    def _hold_inside(self) -> SpeechTiltEntry:
+        end = max(frames[-1][0] for frames in self.channels.values())
+        if not 0 < self.hold_at_s < end:
+            raise ValueError(f"hold_at_s must lie inside the keyframes (0 to {end} s, exclusive)")
+        return self
+
+
+class SpeechMotionMap(Strict):
+    """The robot's speaking motion channels and shapes (SPEC 4A, 7); the robot manifest ships it.
+
+    ``beat`` and ``sway`` map a channel to a sign. The gestures are expression entries whose
+    keyframes give the shape only: they are scaled so that their largest offset equals the
+    preset's degrees. Empty: the layer does not move anything.
+    """
+
+    beat: dict[str, Literal[-1, 1]] = param(
+        {}, "Channel to sign of the beat (the sign that dips the head)"
+    )
+    sway: dict[str, Literal[-1, 1]] = param({}, "Channel to sign of the slow sway")
+    phrase_nod: ExpressionEntry | None = param(None, "Shape of the phrase nod")
+    question_tilt: SpeechTiltEntry | None = param(None, "Shape of the question tilt")
+    accent: ExpressionEntry | None = param(None, "Shape of the accent flick")
+    breath: ExpressionEntry | None = param(None, "Shape of the inhale lift before a sentence")
+
+    def channels(self) -> dict[str, list[str]]:
+        """Every channel named, by role."""
+        out = {"beat": list(self.beat), "sway": list(self.sway)}
+        for role in ("phrase_nod", "question_tilt", "accent", "breath"):
+            entry = getattr(self, role)
+            out[role] = list(entry.channels) if entry is not None else []
+        return out
+
+
+class SpeechMotionConfig(Strict):
+    """Speech timeline built from the robot's own TTS output (SPEC 8): the energy envelope and
+    the phrase and emphasis events; and the speaking motion layer that reads it (SPEC 7,
+    Speaking motion)."""
+
+    envelope_frame_ms: int = param(
+        20, "Length of one energy frame of the spoken audio", unit="ms", ge=5, le=100
+    )
+    silence_dbfs: float = param(
+        -45.0,
+        "A frame quieter than this is silence (phrase gaps); louder frames are voiced",
+        unit="dBFS",
+        ge=-90,
+        le=-10,
+    )
+    phrase_gap_ms: int = param(
+        180,
+        "A silent run at least this long between two voiced frames of one sentence is a phrase gap",
+        unit="ms",
+        ge=40,
+        le=2000,
+    )
+    emphasis_db: float = param(
+        6.0,
+        "A local energy peak at least this far above the running median of the sentence's voiced "
+        "frames is an emphasis",
+        unit="dB",
+        ge=1,
+        le=30,
+    )
+    emphasis_floor_interval_s: float = param(
+        0.8,
+        "At most one emphasis per this interval on the timeline, across sentences (the motion "
+        "presets may thin them further)",
+        unit="s",
+        ge=0.1,
+        le=10,
+    )
+    emphasis_warmup_ms: int = param(
+        250,
+        "No emphasis until a sentence has this much voiced audio: its first frames only feed the "
+        "running median (a sentence onset is not an emphasis)",
+        unit="ms",
+        ge=0,
+        le=2000,
+    )
+    history_s: float = param(
+        5.0,
+        "Frames, events and sentences that ended this long ago are dropped from the timeline",
+        unit="s",
+        ge=1,
+        le=60,
+    )
+    enabled: bool = param(
+        True, "Move while speaking (off: the timeline is still written, nothing moves)"
+    )
+    liveliness: Literal["subtle", "natural", "lively"] = param(
+        "lively", "Which preset of speech_motion.levels the speaking motion uses"
+    )
+    levels: SpeechMotionLevels = param({}, "Peak degrees and shares per liveliness preset")
+    attack_ms: float = param(
+        150.0,
+        "Time constant of the rise of the two-pole smoother of the beat",
+        unit="ms",
+        ge=10,
+        le=2000,
+    )
+    release_ms: float = param(
+        300.0,
+        "Time constant of the fall of the two-pole smoother of the beat",
+        unit="ms",
+        ge=10,
+        le=5000,
+    )
+    sway_smoothing_ms: float = param(
+        800.0, "Time constant of the slow sway's change of side", unit="ms", ge=50, le=5000
+    )
+    question_hold_s: float = param(
+        2.5,
+        "Longest hold of the question tilt when nobody answers",
+        unit="s",
+        ge=0,
+        le=30,
+    )
+    latency_ms: float = param(
+        0.0,
+        "The motion samples the timeline at now + this (signed). A speaker that plays its audio "
+        "D ms after the timeline's stamp needs -D (the motion then waits for the sound); "
+        "measured on the robot",
+        unit="ms",
+        ge=-500,
+        le=500,
+    )
+    event_max_late_s: float = param(
+        0.5,
+        "A gesture whose event reaches the layer late (a streamed voice writes a phrase gap when "
+        "the voice resumes) still plays up to this long after its stamp",
+        unit="s",
+        ge=0,
+        le=5,
+    )
+    fade_ms: float = param(
+        150.0,
+        "Offsets ramp to zero over this at the end of speech or a barge-in, and back in at the "
+        "start (at most motion.arbiter.crossfade_ms; 0 switches them in one tick, a step, and "
+        "exists only so a crossfade of 0 stays valid)",
+        unit="ms",
+        ge=0,
+        le=2000,
+    )
+    command_ttl_s: float = param(
+        0.25,
+        "Lifetime of each speaking motion command in the arbiter: the offset drops by itself if "
+        "the app stops feeding it (it must exceed one app tick, 1 / motion.app_tick_hz)",
+        unit="s",
+        ge=0.05,
+        le=2,
+    )
+    mood_gain: dict[str, float] = param(
+        {
+            "joy": 1.3,
+            "surprise": 1.3,
+            "curiosity": 1.0,
+            "annoyance": 0.8,
+            "calm": 0.6,
+            "fear": 0.5,
+            "sadness": 0.3,
+            "sleepy": 0.2,
+        },
+        "Accent amplitude factor per mood of the sentence (affect labels; a label not listed: 1.0)",
+    )
+
+    @field_validator("mood_gain")
+    @classmethod
+    def _mood_gains(cls, v: dict[str, float]) -> dict[str, float]:
+        bad = sorted(k for k, g in v.items() if not 0 <= g <= SPEECH_MOOD_GAIN_MAX)
+        if bad:
+            raise ValueError(f"mood_gain must be within 0 and {SPEECH_MOOD_GAIN_MAX}: {bad}")
+        return v
+
+    def level(self) -> SpeechMotionLevel:
+        """The preset in effect."""
+        return getattr(self.levels, self.liveliness)
 
 
 # --------------------------------------------------------------------------- conversation, LLM
@@ -2650,7 +3249,9 @@ class ConversationConfig(Strict):
     )
     history_turns: int = param(12, "Short-term turns kept in RAM", ge=0, le=100)
     max_reply_sentences: int = param(3, "Reply length cap", ge=1, le=20)
-    language: str = param("it", "Default conversation language")
+    language: str = param(
+        "it", "Default conversation language (the web UI offers those with installed voice models)"
+    )
     profile_summary_max_chars: int = param(
         400, "Cap on the speaker's profile summary in the system prompt", ge=0, le=4000
     )
@@ -2809,7 +3410,7 @@ class PersonaTraits(Strict):
 
 class EnergyEffects(Strict):
     motion_amplitude_x: Curve = param(
-        [(0, 0.8), (0.5, 1.0), (1, 1.2)], "Multiplies register.*.motion_amplitude"
+        [(0, 0.8), (0.5, 1.0), (1, 1.2)], "Multiplies register.motion_amplitude"
     )
     idle_period_x: Curve = param(
         [(0, 1.25), (0.5, 1.0), (1, 0.8)],
@@ -2827,7 +3428,7 @@ class WarmthEffects(Strict):
 
 class PlayfulnessEffects(Strict):
     reaction_steps: Curve = param(
-        [(0, -1), (0.5, 0), (1, 1)], "Steps on register.*.reaction_intensity (low, medium, high)"
+        [(0, -1), (0.5, 0), (1, 1)], "Steps on register.reaction_intensity (low, medium, high)"
     )
     voice_variability_add: Curve = param(
         [(0, -0.1), (0.5, 0), (1, 0.1)], "Added to voice.base.variability"
@@ -2836,7 +3437,7 @@ class PlayfulnessEffects(Strict):
 
 class FormalityEffects(Strict):
     vocabulary_steps: Curve = param(
-        [(0, 0), (0.7, 0), (1, 1)], "Steps on register.*.vocabulary toward formal"
+        [(0, 0), (0.7, 0), (1, 1)], "Steps on register.vocabulary toward formal"
     )
 
 
@@ -2886,6 +3487,22 @@ class PersonaConfig(Strict):
         return self
 
 
+def route_url_ok(url: str) -> bool:
+    """Whether ``url`` is a route base URL the client can use as written (SPEC 8): parsed by
+    httpx, the library that sends the request, with an http(s) scheme and a host, and no space,
+    control character or backslash (parsers read a backslash differently). A query is accepted
+    here, for configs that carry one; the web UI refuses a query or fragment (``url_query``)."""
+    import httpx  # lazy: keeps the config package light
+
+    if any(c.isspace() or ord(c) < ord(" ") or c == "\\" for c in url):
+        return False
+    try:
+        parsed = httpx.URL(url)
+    except (httpx.InvalidURL, ValueError, TypeError):
+        return False
+    return parsed.scheme in ROUTE_SCHEMES and bool(parsed.host)
+
+
 class LLMRoute(Strict):
     @field_validator("api_key")
     @classmethod
@@ -2903,15 +3520,17 @@ class LLMRoute(Strict):
     api_key: str = param("none", "API key or ${secret:name}")
     model: str = param("", "Model id")
     first_token_timeout_s: float = param(
-        1.5, "Fallback to next route after this", unit="s", ge=0.1, le=30
+        3.0,
+        "Fallback to next route after this. 3 s fits cloud routes (Claude Haiku 0.8 to 1.8 s "
+        "from the robot, 2026-10-23); a LAN route can set less",
+        unit="s",
+        ge=0.1,
+        le=30,
     )
     stall_timeout_s: float = param(
         5.0, "Max gap between chunks once the answer started", unit="s", ge=0.1, le=60
     )
     max_tokens: int = param(300, "Reply token cap", ge=16, le=8192)
-    allowed_for_minors: bool = param(
-        False, "Route cleared for use while a minor is present", conservative="false"
-    )
     daily_token_budget: int = param(200_000, "Daily token cap", ge=0)
     context_budget_tokens: int = param(
         8192,
@@ -2941,6 +3560,11 @@ class LLMRoute(Strict):
             )
         if not self.base_url or not self.model:
             raise ValueError(f"route {self.name}: base_url and model are required")
+        if not route_url_ok(self.base_url):
+            raise ValueError(
+                f"route {self.name}: base_url must be an http(s) URL with a host, without "
+                "spaces, control characters or '\\'"
+            )
         return self
 
 
@@ -3072,7 +3696,7 @@ class ConnectivityConfig(Strict):
             "it": "Scusa, ora non riesco a pensare bene: sono senza rete.",
             "en": "Sorry, I can't think clearly right now: I'm offline.",
         },
-        "Spoken cue per language while offline (used once speech output is wired)",
+        "Spoken cue per language while offline (said through the speech output)",
     )
     cue_cooldown_s: float = param(
         120.0, "Minimum time between two spoken offline cues", unit="s", ge=0, le=3600
@@ -3125,6 +3749,19 @@ class CatalogueConfig(Strict):
     )
 
 
+# Threads that keep audio, voice and motion in real time (SPEC 8, 10, 13): never in
+# runtime.background_threads.
+REAL_TIME_THREADS = (
+    "MainThread",
+    "roboemot-audio",
+    "roboemot-listener",
+    "roboemot-grammar",
+    "roboemot-keywords",
+    "speech-output",
+    "motion-loop",
+)
+
+
 class RuntimeConfig(Strict):
     gc_freeze: bool = param(
         True,
@@ -3148,6 +3785,184 @@ class RuntimeConfig(Strict):
         "the effective shutdown budget is at most the supervisor's kill timeout minus this",
         unit="s", ge=3, le=30, restart=True, conservative="higher",
     )  # fmt: skip
+    background_nice: int = param(
+        5,
+        "Linux: added to the nice value of the threads in background_threads, so the kernel "
+        "favours audio, the voice listener, speech and motion when the CPU is short (SPEC 13); "
+        "they still use every idle cycle. 0 leaves them alone. An unprivileged process cannot "
+        "undo it, hence the restart",
+        ge=0, le=19, restart=True,
+    )  # fmt: skip
+    background_threads: list[str] = param(
+        ["roboemot-vision", "vision-models", "roboemot-camera", "roboemot-light"],
+        "Threads lowered by background_nice, by thread name; `vision-models` names the ONNX "
+        "Runtime pool threads the vision models start when they load. The real-time threads "
+        "(MainThread, roboemot-audio, roboemot-listener, roboemot-grammar, roboemot-keywords, "
+        "speech-output, motion-loop) are refused",
+        restart=True,
+    )
+
+    @field_validator("background_threads")
+    @classmethod
+    def _not_real_time(cls, v: list[str]) -> list[str]:
+        bad = sorted(set(v) & set(REAL_TIME_THREADS))
+        if bad:
+            raise ValueError(f"runtime.background_threads may not lower real-time threads: {bad}")
+        return v
+
+    pause_when_asleep: bool = param(
+        True,
+        "While the platform holds the motors off (the robot is asleep), pause the camera "
+        "perception, the idle light reading, the microphone listener and the behaviour tick, so "
+        "the robot idles cool and quiet; all of it resumes when the motors are on again "
+        "(SPEC 12A). Off keeps everything running while asleep",
+    )
+
+
+class LiveConfig(Strict):
+    """The web UI's Live tab: inner state, audio levels, an opt-in transcript and an opt-in video
+    preview (SPEC 11A, 12). No audio samples; video frames are never kept."""
+
+    enabled: bool = param(
+        False,
+        "Serve the Live tab's inner-state panel (mood, modes, conversation phase, who is in "
+        "view by display name, last reflex, motion state, CPU temperature); off by default "
+        "because it shows who the robot sees",
+        opt_in=True,
+    )
+    poll_ms: int = param(
+        1000,
+        "How often the open Live tab asks for the state",
+        unit="ms",
+        ge=250,
+        le=10000,
+    )
+    max_tracked: int = param(
+        8, "Most tracked people the Live tab lists (the count is always complete)", ge=1, le=32
+    )
+    system_cache_s: float = param(
+        5.0,
+        "How long the Live tab reuses one CPU temperature reading",
+        unit="s",
+        ge=1,
+        le=300,
+    )
+    audio_poll_ms: int = param(
+        500,
+        "How often the open Live tab asks for the audio levels and the new transcript turns",
+        unit="ms",
+        ge=200,
+        le=5000,
+    )
+    level_window_ms: int = param(
+        500,
+        "Length of the stretch of the robot's own playback its output level is measured over",
+        unit="ms",
+        ge=50,
+        le=2000,
+    )
+    level_max_age_s: float = param(
+        1.0,
+        "A microphone level older than this counts as no data",
+        unit="s",
+        ge=0.2,
+        le=10,
+    )
+    transcript: bool = param(
+        False,
+        "Keep the recent conversation (what was heard and said, text only) in memory for the "
+        "Live tab; off by default and then nothing at all is kept. Never saved, logged or put "
+        "in the debug report",
+        opt_in=True,
+    )
+    transcript_max_turns: int = param(
+        50, "Most turns the live transcript keeps; the oldest go first", ge=1, le=500
+    )
+    transcript_max_age_s: float = param(
+        1800.0,
+        "A turn older than this leaves the live transcript",
+        unit="s",
+        ge=30,
+        le=86400,
+    )
+    transcript_max_chars: int = param(
+        1000, "Longest text kept for one turn; more is cut", ge=80, le=8000
+    )
+    transcript_response_max_chars: int = param(
+        20000,
+        "Most text characters one Live poll carries; a longer list sends its newest turns",
+        ge=1000,
+        le=200000,
+    )
+    video: bool = param(
+        False,
+        "Serve a live camera preview (one JPEG at a time, with face boxes and names) to the Live "
+        "tab for a logged-in page; needs webui.live.enabled. Off by default because it shows the "
+        "room. Frames are never saved or logged; the page shows a banner while it is watched",
+        opt_in=True,
+    )
+    video_fps: float = param(
+        3.0,
+        "How often the open Live tab asks for a preview frame; a faster poll is served the "
+        "cached picture",
+        unit="hz",
+        ge=0.5,
+        le=10,
+    )
+    video_max_width: int = param(
+        320,
+        "Widest preview picture; a wider camera frame is scaled down before it is encoded",
+        unit="px",
+        ge=80,
+        le=1280,
+    )
+    video_jpeg_quality: int = param(
+        60, "JPEG quality of the preview (higher is bigger and slower)", ge=20, le=95
+    )
+    viewer_window_s: float = param(
+        6.0,
+        "A page counts as watching the video until this long after the last frame it was sent",
+        unit="s",
+        ge=1,
+        le=60,
+    )
+    banner_poll_ms: int = param(
+        3000,
+        "How often every open page asks whether someone is watching the video (the banner)",
+        unit="ms",
+        ge=1000,
+        le=5000,
+    )
+    video_stale_s: float = param(
+        10.0,
+        "A camera picture older than this is not served (the page says the camera stalled)",
+        unit="s",
+        ge=2,
+        le=120,
+    )
+    video_idle_stop_s: float = param(
+        600.0,
+        "The open Live tab stops polling the video after this long without a click, key or "
+        "touch on the page, and waits for Resume",
+        unit="s",
+        ge=60,
+        le=86400,
+    )
+
+    @model_validator(mode="after")
+    def _window_spans_two_polls(self) -> LiveConfig:
+        if self.banner_poll_ms / 1000 > self.viewer_window_s / 2:
+            raise ValueError(
+                f"webui.live.banner_poll_ms ({self.banner_poll_ms} ms) must be at most half of "
+                f"webui.live.viewer_window_s ({self.viewer_window_s} s), so every viewing spans "
+                "two banner polls"
+            )
+        if self.viewer_window_s * self.video_fps < 2:
+            raise ValueError(
+                f"webui.live.viewer_window_s ({self.viewer_window_s} s) must cover at least two "
+                f"polls at webui.live.video_fps ({self.video_fps} Hz)"
+            )
+        return self
 
 
 class WebUIConfig(Strict):
@@ -3169,7 +3984,12 @@ class WebUIConfig(Strict):
         admin_only=True,
     )
     max_connections: int = param(
-        32, "Simultaneous connections served; more are refused", ge=1, le=256, conservative="lower"
+        32,
+        "Simultaneous connections served; more are refused",
+        ge=1,
+        le=256,
+        conservative="lower",
+        restart=True,
     )
     request_deadline_s: float = param(
         15.0,
@@ -3266,16 +4086,23 @@ class WebUIConfig(Strict):
     name_max_chars: int = param(
         64, "Longest display name or consent name", ge=1, le=200, conservative="lower"
     )
+    secret_name_max_chars: int = param(
+        128,
+        "Longest secret name the web UI accepts (SPEC 8 Secrets, 11A)",
+        ge=1,
+        le=200,
+        conservative="lower",
+    )
     settings_phrase_max_chars: int = param(
         40,
-        "Longest wake phrase or blocklist entry the settings editor accepts (SPEC 11A)",
+        "Longest wake phrase or new entry key the settings editor accepts (SPEC 11A)",
         ge=1,
         le=200,
         conservative="lower",
     )
     settings_line_max_chars: int = param(
         200,
-        "Longest child-safe spoken line the settings editor accepts (SPEC 11A)",
+        "Longest item of a plain string list the settings editor accepts (SPEC 11A)",
         ge=1,
         le=500,
         conservative="lower",
@@ -3306,6 +4133,7 @@ class WebUIConfig(Strict):
     status_poll_ms: int = param(
         1000, "How often the page polls the enrollment status", unit="ms", ge=200, le=10000
     )
+    live: LiveConfig = param({}, "SPEC 11A, 12: the Live tab")
 
     @field_validator("frame_ancestors")
     @classmethod
@@ -3366,6 +4194,13 @@ with warnings.catch_warnings():
         world: WorldConfig = param({}, "SPEC 5A")
         mirror: MirrorConfig = param({}, "SPEC 9")
         voice: VoiceConfig = param({}, "SPEC 8")
+        speech_motion: SpeechMotionConfig = param(
+            {}, "SPEC 7, 8: speech timeline and speaking motion"
+        )
+        speech_motion_map: SpeechMotionMap = param(
+            {},
+            "SPEC 4A, 7: channels and shapes of the speaking motion; the robot manifest ships it",
+        )
         persona: PersonaConfig = param({}, "SPEC 11A")
         conversation: ConversationConfig = param({}, "SPEC 8")
         llm_routes: list[LLMRoute] = param([], "SPEC 8")
@@ -3416,6 +4251,25 @@ with warnings.catch_warnings():
             return self
 
         @model_validator(mode="after")
+        def _speech_motion_fits(self) -> RoboEmotConfig:
+            sm = self.speech_motion
+            unknown = sorted(set(sm.mood_gain) - set(self.affect.labels))
+            if unknown:
+                raise ValueError(
+                    f"speech_motion.mood_gain has labels {unknown} that are not in affect.labels"
+                )
+            if sm.command_ttl_s <= 1 / self.motion.app_tick_hz:
+                raise ValueError(
+                    "speech_motion.command_ttl_s must exceed one app tick (1 / "
+                    "motion.app_tick_hz), or the offset drops between two ticks"
+                )
+            if sm.fade_ms > self.motion.arbiter.crossfade_ms:
+                raise ValueError(
+                    "speech_motion.fade_ms must be at most motion.arbiter.crossfade_ms"
+                )
+            return self
+
+        @model_validator(mode="after")
         def _gesture_names_are_not_labels(self) -> RoboEmotConfig:
             clash = sorted(set(self.gesture_map) & set(self.affect.labels))
             if clash:
@@ -3459,10 +4313,6 @@ with warnings.catch_warnings():
         def _vision_fits_identity(self) -> RoboEmotConfig:
             if self.vision.embedding_burst < self.identity.votes_required:
                 raise ValueError("vision.embedding_burst must be at least identity.votes_required")
-            if self.vision.attribute_crops < self.identity.estimate_frames_min:
-                raise ValueError(
-                    "vision.attribute_crops must be at least identity.estimate_frames_min"
-                )
             if self.vision.embed_min_face_px < self.vision.face_min_px:
                 raise ValueError("vision.embed_min_face_px must be at least face_min_px")
             return self

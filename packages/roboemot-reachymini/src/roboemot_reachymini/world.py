@@ -17,7 +17,7 @@ import math
 import threading
 import time
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from roboemot import shutdown
 from roboemot.attention.gaze import look_at
@@ -26,6 +26,9 @@ from roboemot.manifest import Constraint, Dof, Manifest
 from roboemot.world import Observation, ObservationSink, ScanWaypoint, WorldPlugin
 
 from .gaze import GAZE
+
+if TYPE_CHECKING:
+    from .platform import ReachyMiniSession
 
 log = logging.getLogger(__name__)
 
@@ -212,10 +215,9 @@ class DoASource:
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop.clear()
-        self._thread = threading.Thread(
-            target=self._run, args=(sink,), name="roboemot-doa", daemon=True
-        )
-        self._thread.start()
+        thread = threading.Thread(target=self._run, args=(sink,), name="roboemot-doa", daemon=True)
+        thread.start()
+        self._thread = thread
 
     def stop(self) -> None:
         """Stop polling and wait briefly. A thread stuck in the SDK keeps its handle, so a later
@@ -239,17 +241,17 @@ class DoASource:
 def plugin(
     manifest: Manifest,
     cfg: RoboEmotConfig,
-    robot: Any,
+    session: ReachyMiniSession,
     joint_state: Callable[[], Mapping[str, float]],
 ) -> WorldPlugin:
     """Entry point ``roboemot.world``: the Reachy Mini planner and sound-direction source.
 
-    ``robot`` is the connected ``ReachyMini``; ``joint_state`` is the app driver's measured
-    state (no second driver is built here). Without a microphone capability no sound source
-    is offered.
+    ``session`` holds the connected ``ReachyMini`` (``session.client``); ``joint_state`` is the
+    app driver's measured state (no second driver is built here). Without a microphone
+    capability no sound source is offered.
     """
     planner = ReachyScanPlanner(manifest.dofs, manifest.constraints, cfg)
     sources: list[Any] = []
     if "doa" in manifest.capabilities():
-        sources.append(DoASource(robot, cfg.world.scan, joint_state))
+        sources.append(DoASource(session.client, cfg.world.scan, joint_state))
     return WorldPlugin(planner, sources)

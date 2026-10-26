@@ -4,16 +4,41 @@
 worker), so the caller, the conversation worker or the app tick, never blocks on synthesis.
 ``say`` composes the sentence's :class:`~roboemot.voice.prosody.Delivery` from the voice
 configuration, the persona effects, the register, the circadian state and the mood the caller
-passes, queues it, and the loop streams it through the backend into the sink, which resamples
-(``ReachySpeaker``). ``stop`` is the barge-in path: it cuts the sink first, then cancels the
-synthesis in flight and drops the queue; an epoch counter makes any chunk that was already on its
-way fall on the floor, so nothing plays after ``stop`` returns.
+passes, plus the sentence's variation (seeded by the utterance id and the sentence's index in it;
+a question is raised; the rest of a sentence the splitter cut keeps the delivery of its first
+piece), queues it, and the loop streams it through the backend into the sink,
+which resamples (the robot's speaker). ``stop`` is the barge-in path: it cuts the sink first,
+then cancels the synthesis in flight and drops the queue; an epoch counter makes any chunk that
+was already on its way fall on the floor, so nothing plays after ``stop`` returns.
 
 ``play`` queues raw samples (the self-soothing sounds, SPEC 7B) through the same queue, epoch and
 push path: a sound never interleaves with a sentence, ``stop`` cuts it, and it is not speech (it
-leaves ``ended_at``, ``question_end`` and the counters alone). ``cancel`` drops one such job only.
+leaves ``ended_at``, ``question_end``, the counters and the speech timeline alone, so speaking
+motion ignores it). ``cancel`` drops one such job only.
 
 The bus gets ``speech.say`` with ids, lengths, language and mood, never the text (SPEC 12).
+
+For the debug report (SPEC 12A) the output measures, for any backend:
+
+- the real-time factor of each chunk (time waited for it since the previous push, or since the
+  request, over its audio duration) and of each finished sentence (all its waits over all its
+  audio; a backend that synthesizes a sentence whole, like Piper, puts all of it on the first
+  chunk, so the per-sentence value is the one that says whether synthesis keeps up);
+- underruns: a push of a sentence that already pushed audio, arriving after the sink's
+  ``playing_until`` (the speaker ran dry in the middle of a sentence), with the gap in ms. Only
+  here is it known that a sentence has more audio to come;
+- late sentences: the next sentence of one answer arriving after the previous one ended by more
+  than its planned pause (the silence beyond the pause, in ms), and ``boundary_dry``, how often the
+  sink ran dry at all between two sentences of one answer;
+- ``push_ms``: the time spent in the sink's push (the speaker resamples there);
+- ``timeline_ms``: the time each push spends writing the speech timeline (wall time, under the
+  lock ``stop`` takes), so its cost is visible on the robot.
+
+A sink with no finite ``playing_until`` (its output never opened) counts no gaps. Numbers only.
+
+Every push also feeds :attr:`SpeechOutput.timeline` (:mod:`roboemot.voice.envelope`): energy
+frames, sentence bounds, phrase gaps and emphasis peaks on the playback clock, for the speaking
+motion. ``stop`` truncates it under the same lock, so nothing after a barge-in stays on it.
 """
 
 from __future__ import annotations
@@ -23,6 +48,7 @@ import collections
 import contextlib
 import itertools
 import logging
+import math
 import threading
 import time
 from collections.abc import Callable
@@ -36,8 +62,10 @@ from ..bus import Bus
 from ..config.schema import RegisterParams, RoboEmotConfig, StateEffects
 from ..persona import effects
 from ..soothe.synth import db_to_gain
+from ..stats import P50, P90, summarise
+from .envelope import SpeechTimeline
 from .prosody import Delivery, compose_delivery
-from .tts import TTSBackend, TTSError
+from .tts import AudioChunk, TTSBackend, TTSError
 
 log = logging.getLogger(__name__)
 
@@ -46,6 +74,8 @@ LATENCY_WINDOW = 20
 PLAYED_WINDOW = 64  # sentences whose playback start is remembered, for ``played``
 READY_TIMEOUT_S = 5.0
 JOIN_TIMEOUT_S = 2.0
+RTF_LEVELS = {"p50": P50, "p90": P90}
+SAID_UTTERANCES_MAX = 64  # answers whose sentence count and last delivery are remembered
 
 
 QUESTION_MARKS = ("?", "？")
@@ -59,9 +89,14 @@ def ends_with_question(text: str) -> bool:
 
 
 class AudioSink(Protocol):
-    """What plays the audio: ``ReachySpeaker`` (it resamples to the output rate itself)."""
+    """What plays the audio: the robot's speaker (it resamples to the output rate itself).
+    ``playing_until`` is the monotonic stamp at which everything pushed so far has played.
+    ``end_stream`` is called after each sentence (also a failed one, not one a stop cut): a sink
+    that resamples as a stream flushes its held-back tail (a no-op for one that does not)."""
 
     def push_audio_sample(self, samples: np.ndarray, rate_hz: int) -> float: ...
+    def playing_until(self) -> float: ...
+    def end_stream(self) -> float: ...
     def stop(self) -> None: ...
 
 
@@ -84,7 +119,8 @@ class _Job:
     delivery: Delivery
     epoch: int
     said_at: float
-    minor: bool = False  # a minor was present when the sentence was written (SPEC 12)
+    question: bool = False  # this piece's own text ends in a question mark
+    continued: bool = False  # the rest of a sentence the splitter cut
 
 
 class SpeechOutput:
@@ -96,7 +132,6 @@ class SpeechOutput:
         sink: AudioSink,
         backend: TTSBackend,
         bus: Bus | None = None,
-        minor_present: Callable[[], bool] = lambda: False,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.config, self.sink, self.backend, self.bus, self.clock = (
@@ -106,7 +141,6 @@ class SpeechOutput:
             bus,
             clock,
         )
-        self._minor_present = minor_present  # read when synthesis starts, never at enqueue
         self._lock = threading.Lock()
         self._jobs: collections.deque[_Job | _RawJob] = collections.deque()
         self._epoch = 0
@@ -133,9 +167,32 @@ class SpeechOutput:
         self._unplayed: set[int] = set()
         self._ended: collections.OrderedDict[int, float] = collections.OrderedDict()
         self._question_end: float | None = None  # end of the last spoken sentence, if a question
+        # utterance -> (index of its next sentence, delivery of its last one)
+        self._said: collections.OrderedDict[int, tuple[int, Delivery]] = collections.OrderedDict()
+        window = config.voice.report_window
+        self._rtf: collections.deque[float] = collections.deque(maxlen=window)
+        self._rtf_sentence: collections.deque[float] = collections.deque(maxlen=window)
+        self._push_ms: collections.deque[float] = collections.deque(maxlen=window)
+        self._timeline_ms: collections.deque[float] = collections.deque(maxlen=window)
+        self._late_sentences = 0
+        self._late_ms = 0.0
+        self._boundary_dry = 0
+        self._underruns = 0
+        self._underrun_ms = 0.0
+        self._underrun_sentences = 0
+        self._underrun_job = 0  # last sentence counted in _underrun_sentences
         self.sentences_spoken = 0
         self.sentences_dropped = 0
         self.failures = 0
+        # energy, phrase and emphasis stamps of what is pushed, for the speaking motion (SPEC 8)
+        self.timeline = SpeechTimeline(config.speech_motion, clock)
+
+    def apply_config(self, config: RoboEmotConfig) -> None:
+        """Hot reload: the next sentence reads ``config``; the backend gets ``config.voice`` for
+        the settings it keeps itself (Piper's timeouts)."""
+        self.config = config
+        self.backend.apply_config(config.voice)
+        self.timeline.apply_config(config.speech_motion)
 
     # ----------------------------------------------------------------- lifecycle
 
@@ -212,36 +269,53 @@ class SpeechOutput:
         mood: str | None,
         intensity: float,
         utterance: int | None = None,
-        minor: bool = False,
+        continued: bool = False,
     ) -> int | None:
         """Queue one sentence; returns its id, or ``None`` when it was dropped (queue full or
         closed). Safe from any thread. The caller resolves ``mood`` (affect label, or the LLM's
         tag through ``resolve_tag``) and passes the register and circadian state of this moment.
-        ``minor`` says a minor was present when the sentence was written: a sentence written
-        without minor rules is dropped, and the speech stopped, if one is present by the time
-        it would play (SPEC 12)."""
+        ``continued`` (the splitter's mark on the rest of a cut sentence) reuses the delivery of
+        the utterance's previous piece, so one sentence is spoken with one delivery."""
         cfg = self.config
-        delivery = compose_delivery(
-            cfg.voice,
-            register=register,
-            circadian=circadian,
-            mood=mood,
-            intensity=intensity,
-            persona=effects(cfg.persona),
-        )
+        if utterance is None:
+            utterance = self.new_utterance()
+        with self._lock:
+            previous = self._said.get(utterance)
+        if continued and previous is not None:
+            index, delivery = previous
+        else:
+            index = previous[0] if previous is not None else 0
+            delivery = compose_delivery(
+                cfg.voice,
+                register=register,
+                circadian=circadian,
+                mood=mood,
+                intensity=intensity,
+                persona=effects(cfg.persona),
+                seed=utterance,
+                index=index,
+                question=ends_with_question(text),
+            )
+            index += 1
+        with self._lock:
+            self._said.pop(utterance, None)
+            self._said[utterance] = (index, delivery)
+            while len(self._said) > SAID_UTTERANCES_MAX:
+                self._said.popitem(last=False)
         with self._lock:
             if self._closed or len(self._jobs) >= cfg.voice.queue_max_sentences:
                 self.sentences_dropped += 1
                 return None
             job = _Job(
                 next(self._ids),
-                utterance if utterance is not None else self.new_utterance(),
+                utterance,
                 text,
                 language,
                 delivery,
                 self._epoch,
                 self.clock(),
-                minor,
+                ends_with_question(text),
+                continued,
             )
             self._jobs.append(job)
         if self.bus is not None:
@@ -272,6 +346,7 @@ class SpeechOutput:
             self.sentences_dropped += sum(isinstance(j, _Job) for j in self._jobs)
             self._jobs.clear()
             now = self.clock()
+            self.timeline.truncate(now)
             self._unplayed.update(i for i, at in self._audible.items() if at > now)
             for job_id, end in self._ended.items():
                 self._ended[job_id] = min(end, now)
@@ -289,8 +364,9 @@ class SpeechOutput:
         never interleaves with it, and ``stop`` cuts it. It is not speech: nothing is synthesized
         and ``ended_at``, ``question_end`` and the counters stay as they are. ``volume_db`` is
         the circadian offset of the moment (``StateEffects.volume_db``). A raw job counts against
-        ``voice.queue_max_sentences`` like a sentence; minor gating does not apply to it (local
-        synth, no route, no text). Safe from any thread."""
+        ``voice.queue_max_sentences`` like a sentence. It writes no speech-timeline event (no
+        envelope, no accent, no breath), so speaking motion never reacts to it. Safe from any
+        thread."""
         gain = db_to_gain(volume_db)
         louder = np.clip(np.asarray(samples, np.float32) * np.float32(gain), -1.0, 1.0)
         with self._lock:
@@ -374,6 +450,20 @@ class SpeechOutput:
         """Counts and timings for the debug report; never text."""
         with self._lock:
             lat, queued = list(self._latencies), len(self._jobs)
+            rtf, rtf_sentence, push_ms, timeline_ms = (
+                list(self._rtf),
+                list(self._rtf_sentence),
+                list(self._push_ms),
+                list(self._timeline_ms),
+            )
+            gaps = {
+                "underruns": self._underruns,
+                "underrun_ms_total": self._underrun_ms,
+                "underrun_sentences": self._underrun_sentences,
+                "late_sentences": self._late_sentences,
+                "late_ms_total": self._late_ms,
+                "boundary_dry": self._boundary_dry,
+            }
         return {
             "queued": queued,
             "spoken": self.sentences_spoken,
@@ -382,6 +472,12 @@ class SpeechOutput:
             "first_audio_ms_last": lat[-1] if lat else None,
             "first_audio_ms_max": max(lat) if lat else None,
             "backend": self.backend.name,
+            "tts_rtf": summarise(rtf, RTF_LEVELS),
+            "tts_rtf_sentence": summarise(rtf_sentence, RTF_LEVELS),
+            "push_ms": summarise(push_ms, RTF_LEVELS),
+            "timeline_ms": summarise(timeline_ms, RTF_LEVELS),
+            **gaps,
+            "timeline": self.timeline.snapshot(),
         }
 
     # ----------------------------------------------------------------- loop thread
@@ -417,22 +513,6 @@ class SpeechOutput:
         if task is not None and not task.done() and self._raw_current == job_id:
             task.cancel()
 
-    def _minor(self) -> bool:
-        """Whether a minor is present now; fail closed (True) if the signal cannot be read."""
-        try:
-            return bool(self._minor_present())
-        except Exception as exc:
-            log.warning("speech: minor signal failed, assuming a minor: %s", type(exc).__name__)
-            return True
-
-    def _stale(self, job: _Job) -> bool:
-        """Whether ``job`` was written for adults and a minor is present now. The speech is
-        stopped (queue dropped, audio cut) and the caller abandons the sentence."""
-        if job.minor or not self._minor():
-            return False
-        self.stop()
-        return True
-
     def _push(
         self, job: _Job | _RawJob, samples: np.ndarray, rate_hz: int, *, speech: bool = False
     ) -> bool:
@@ -443,17 +523,36 @@ class SpeechOutput:
         with self._lock:
             if job.epoch != self._epoch or job.id in self._raw_cancelled:
                 return False
-            start = self._queue_end()
+            now, until = self.clock(), self.sink.playing_until()
+            start = max(now, until)
+            if speech and job.id in self._audible and math.isfinite(until) and now > until:
+                self._count_underrun(job, now - until)
             self.sink.push_audio_sample(samples, rate_hz)
             if isinstance(job, _RawJob):
                 self._raw_pushed = job.id
+            self._push_ms.append((self.clock() - now) * MS_PER_S)
+            if speech:
+                began = time.perf_counter()
+                self.timeline.push(
+                    job.id,
+                    samples,
+                    rate_hz,
+                    start,
+                    utterance=job.utterance,
+                    question=job.question,
+                    mood=job.delivery.mood,
+                    continued=job.continued,
+                )
+                self._timeline_ms.append((time.perf_counter() - began) * MS_PER_S)
+            elif not isinstance(job, _RawJob):
+                self.timeline.pad(job.id, start)
             if speech and job.id not in self._audible:
                 self._audible[job.id] = start
                 while len(self._audible) > PLAYED_WINDOW:
                     self._unplayed.discard(self._audible.popitem(last=False)[0])
             if speech:
                 self._ended[job.id] = self._queue_end()
-                self._question_end = self._ended[job.id] if ends_with_question(job.text) else None
+                self._question_end = self._ended[job.id] if job.question else None
                 while len(self._ended) > PLAYED_WINDOW:
                     self._ended.popitem(last=False)
             return True
@@ -480,20 +579,44 @@ class SpeechOutput:
             self.failures += 1
             log.warning("speech %d (raw) crashed: %s", job.id, type(exc).__name__)
 
+    def _count_underrun(self, job: _Job, gap_s: float) -> None:
+        """A push of ``job`` found the sink dry for ``gap_s``; the lock is held."""
+        self._underruns += 1
+        self._underrun_ms += gap_s * MS_PER_S
+        if self._underrun_job != job.id:
+            self._underrun_job = job.id
+            self._underrun_sentences += 1
+
+    def _note_rtf(self, chunk: AudioChunk, waited_s: float) -> float:
+        """Real-time factor of one chunk: the time waited for it over its audio duration.
+        Returns that duration in seconds (0 for an empty or rateless chunk, not recorded)."""
+        if chunk.rate_hz <= 0 or chunk.samples.size == 0:
+            return 0.0
+        audio_s = chunk.samples.size / chunk.rate_hz
+        with self._lock:
+            self._rtf.append(waited_s / audio_s)
+        return audio_s
+
+    def _note_sentence_rtf(self, waited_s: float, audio_s: float) -> None:
+        """Real-time factor of a finished sentence: all its waits over all its audio."""
+        if audio_s > 0:
+            with self._lock:
+                self._rtf_sentence.append(waited_s / audio_s)
+
     async def _speak(self, job: _Job) -> None:
         cfg, first = self.config, True
         try:
-            if self._stale(job):
-                return
+            asked = self.clock()
+            waited_s = audio_s = 0.0
             async for chunk in self.backend.synthesize(
                 job.text,
                 job.delivery,
                 language=job.language,
                 voice=cfg.voice,
-                minor_present=self._minor(),
             ):
-                if self._stale(job):
-                    return
+                waited = self.clock() - asked
+                waited_s += waited
+                audio_s += self._note_rtf(chunk, waited)
                 if first:
                     first = False
                     if not self._pad(job, chunk.rate_hz):
@@ -509,6 +632,8 @@ class SpeechOutput:
                 self._last_rate_hz = chunk.rate_hz
                 if not self._push(job, chunk.samples, chunk.rate_hz, speech=True):
                     return
+                asked = self.clock()
+            self._note_sentence_rtf(waited_s, audio_s)
             self.sentences_spoken += 1
         except asyncio.CancelledError:
             raise
@@ -519,14 +644,39 @@ class SpeechOutput:
             self.failures += 1
             log.warning("speech %d crashed: %s", job.id, type(exc).__name__)
         finally:
+            self._finish_stream(job)
             self._last_utterance = job.utterance
+
+    def _finish_stream(self, job: _Job) -> None:
+        """End the sink's stream after ``job`` (its tail extends where the sentence ends),
+        unless a stop since it was queued already reset the sink."""
+        with self._lock:
+            if job.epoch != self._epoch:
+                return
+            try:
+                self.sink.end_stream()
+            except Exception as exc:
+                log.warning("speech: end_stream: %s", type(exc).__name__)
+                return
+            if job.id in self._ended:
+                self._ended[job.id] = self._queue_end()
+                self.timeline.finish(job.id, self._ended[job.id])
+                self._question_end = self._ended[job.id] if job.question else None
 
     def _queue_end(self) -> float:
         """Where the sink's queue ends: when a sample pushed now would play (the clock when it
         has no timeline)."""
         now = self.clock()
-        playing_until = getattr(self.sink, "playing_until", None)
-        return max(now, playing_until()) if callable(playing_until) else now
+        return max(now, self.sink.playing_until())
+
+    def _note_boundary(self, idle_s: float, pause_s: float) -> None:
+        """Count a dry sink between two sentences of one answer, and a late sentence when the
+        silence already there is longer than the planned pause."""
+        with self._lock:
+            self._boundary_dry += idle_s > 0
+            if idle_s > pause_s:
+                self._late_sentences += 1
+                self._late_ms += (idle_s - pause_s) * MS_PER_S
 
     def _timeline(self) -> bool:
         """Whether the sink reports where its queue ends (``playing_until``)."""
@@ -538,9 +688,10 @@ class SpeechOutput:
         if job.utterance != self._last_utterance:
             return job.epoch == self._epoch
         pause_s = self.config.voice.sentence_pause_ms / MS_PER_S * job.delivery.pause_scale
-        playing_until = getattr(self.sink, "playing_until", None)
-        if callable(playing_until):
-            pause_s -= max(0.0, self.clock() - playing_until())
+        until = self.sink.playing_until()
+        idle_s = max(0.0, self.clock() - until) if math.isfinite(until) else 0.0
+        self._note_boundary(idle_s, pause_s)
+        pause_s -= idle_s
         if pause_s > 0:
             return self._push(job, np.zeros(round(pause_s * rate_hz), np.float32), rate_hz)
         return job.epoch == self._epoch

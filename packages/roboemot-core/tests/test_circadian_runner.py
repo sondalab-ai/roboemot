@@ -56,7 +56,10 @@ def manifest():
 def cfg(manifest) -> RoboEmotConfig:
     stack = ConfigStack()
     stack.set_manifest_behaviour(
-        manifest.model.behaviour, manifest.channels, load_clip_library(manifest)
+        manifest.model.behaviour,
+        manifest.channels,
+        load_clip_library(manifest),
+        body_yaw=None,
     )
     return stack.effective()
 
@@ -571,7 +574,7 @@ def test_waking_plays_a_three_second_stretch(cfg, manifest):
     assert peak > 0 and m.playing == ""
 
 
-def test_primitives_respect_the_minor_cap(cfg, manifest):
+def test_primitives_stay_inside_the_manifest_range(cfg, manifest):
     m = CircadianMotion(
         cfg.circadian,
         cfg.circadian_motion,
@@ -580,14 +583,13 @@ def test_primitives_respect_the_minor_cap(cfg, manifest):
         clips=CLIPS,
         affect_intensity=lambda: 0.0,
     )
-    m.set_minor_factor(0.001)
     m.start_waking(0.0)
     cmds = [c for _, cs in drive(m, 3.0, "drowsy") for c in cs]
     assert cmds
     for c in cmds:
         for name, v in c.targets.items():
             d = manifest.dofs[name]
-            assert (d.min - d.home) * 0.001 <= v <= (d.max - d.home) * 0.001
+            assert d.min - d.home <= v <= d.max - d.home
 
 
 def test_a_robot_without_primitives_just_skips_them(cfg, manifest):
@@ -801,7 +803,7 @@ def test_a_log_out_of_order_is_rejected():
 def test_circadian_config_validation_of_the_new_fields():
     stack = ConfigStack(app={"circadian_motion": {"rest_pose_deg": {"wheels": 1}}})
     with pytest.raises(ConfigError, match="unknown channel 'wheels'"):
-        stack.set_manifest_behaviour({}, {"head.yaw"})
+        stack.set_manifest_behaviour({}, {"head.yaw"}, body_yaw=None)
     with pytest.raises(ConfigError):
         ConfigStack(app={"circadian": {"yawn_jitter": 2.0}})
     assert {f.name for f in fields(LightSample)} >= {"when", "luma", "noise", "presence"}
@@ -941,7 +943,7 @@ def test_a_register_that_tightens_mid_play_scales_the_primitive_down_only(cfg, m
     m.set_register(1.0, 2.0)
     m.start_waking(0.0)
     mid = m.commands(1.0, "drowsy")[0].targets["antenna_right"]
-    m.set_register(0.5, 2.0)  # a child walks in
+    m.set_register(0.5, 2.0)  # a stricter register: someone with overrides walks in
     assert m.commands(1.0, "drowsy")[0].targets["antenna_right"] == pytest.approx(
         mid * 0.5, rel=0.01
     )
@@ -1026,7 +1028,8 @@ def test_the_frame_source_is_never_read_by_two_threads_at_once():
     overlaps = []
 
     class Camera:
-        camera_model = "intrinsics"
+        def camera_model(self, width, height):
+            return ("intrinsics", width, height)
 
         def read(self):
             inside.append(1)
@@ -1043,7 +1046,7 @@ def test_the_frame_source_is_never_read_by_two_threads_at_once():
         t.start()
     for t in threads:
         t.join()
-    assert overlaps == [] and shared.camera_model == "intrinsics"
+    assert overlaps == [] and shared.camera_model(4, 3) == ("intrinsics", 4, 3)
     with pytest.raises(AttributeError):
         shared.nothing  # noqa: B018
 

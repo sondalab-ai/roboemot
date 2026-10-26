@@ -16,9 +16,13 @@ import numpy as np
 import pytest
 from roboemot.circadian import CircadianModel
 from roboemot.config.schema import RoboEmotConfig
+from roboemot.conversation.phase import ConversationPhase
+from roboemot.motion import MotionLoop
 from roboemot.registry import Consent, FileStore, Registry
 from roboemot.registry.enrollment import EnrollmentError
-from roboemot.vision import CIRCADIAN, Detection, Frame
+from roboemot.runtime import ticks
+from roboemot.vision import CIRCADIAN, CONVERSATION, Detection, Frame
+from roboemot.vision.service import Perception
 from roboemot_reachymini import app as app_module
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -32,8 +36,24 @@ def fake_mini() -> MagicMock:
     mini = MagicMock()
     mini.client._is_alive = True
     mini.client._last_status = None
-    mini.get_current_head_pose.return_value = np.eye(4)
-    mini.get_current_joint_positions.return_value = ([0.0] * 7, [0.0, 0.0])
+    # a robot that tracks its targets perfectly: the motion loop yields to a pose that does not
+    # follow its commands (external control, SPEC 12A), so a static fake would silence it
+    pose: dict = {"head": np.eye(4), "antennas": [0.0, 0.0], "body_yaw": 0.0}
+
+    def set_target(head=None, antennas=None, body_yaw=None) -> None:
+        if head is not None:
+            pose["head"] = np.asarray(head)
+        if antennas is not None:
+            pose["antennas"] = [float(a) for a in antennas]
+        if body_yaw is not None:
+            pose["body_yaw"] = float(body_yaw)
+
+    mini.set_target.side_effect = set_target
+    mini.get_current_head_pose.side_effect = lambda: pose["head"]
+    mini.get_current_joint_positions.side_effect = lambda: (
+        [pose["body_yaw"], *[0.0] * 6],
+        list(pose["antennas"]),
+    )
     return mini
 
 
@@ -43,6 +63,7 @@ def data(tmp_path, monkeypatch):
     shutil.copytree(app_module.DATA, folder)
     shutil.copy2(ROOT / "configs/dev-unmeasured.yaml", folder / "app.yaml")
     monkeypatch.setattr(app_module, "DATA", folder)
+    monkeypatch.setattr(app_module, "app_config_path", lambda: folder / "app.yaml")
     return folder
 
 
@@ -68,6 +89,9 @@ class PlantedSource:
     def __init__(self):
         self.n = 0
 
+    def camera_model(self, width, height):
+        return None
+
     def read(self):
         self.n += 1
         img = np.zeros((240, 320, 3), np.uint8)
@@ -77,6 +101,9 @@ class PlantedSource:
 
 
 class EmptySource:
+    def camera_model(self, width, height):
+        return None
+
     def read(self):
         return None
 
@@ -92,7 +119,6 @@ class AppWithFakes(app_module.RoboEmotApp):
         return SimpleNamespace(
             face_detector=FakeDetector(),
             face_embedder=FakeEmbedder(),
-            attribute_estimator=None,
             appearance_embedder=None,
             object_detector=None,
             objects_unavailable=None,
@@ -149,7 +175,7 @@ def test_app_with_fake_stages_names_an_enrolled_person_and_reports(data, tmp_pat
     reg = Registry(FileStore(tmp_path / "roboemot-data" / "registry", allow_plaintext=True),
                    RoboEmotConfig().identity)  # fmt: skip
     person = reg.enroll("Ada", [PLANTED * (1 + 0.01 * i) for i in range(5)], MODEL,
-                        consent=CONSENT, age_group="adult")  # fmt: skip
+                        consent=CONSENT)  # fmt: skip
     app = new_app(AppWithFakes)
     stop, thread, errors = start(app)
     try:
@@ -266,11 +292,50 @@ def test_circadian_state_scales_the_vision_rate(data):
     assert not errors and CIRCADIAN == "circadian"
 
 
+def test_conversation_phase_scales_the_vision_rate(data):
+    """SPEC 5, 8, 13: thinking, speaking or listening lowers the vision rate (never below the
+    conversation floor when they overlap); idle brings it back to 1."""
+    app = new_app(AppWithFakes)
+    app.source_class = EmptySource
+    stop, thread, errors = start(app)
+    want = RoboEmotConfig().vision.rates.conversation_scale
+    listen = RoboEmotConfig().vision.rates.listening_scale
+    try:
+        assert wait_for(lambda: app.perception is not None and app.perception.pipeline is not None)
+        governor = app.perception.pipeline.governor
+        speaking = threading.Event()
+        # The tick reads host.phase each time, so a phase set here drives it whatever the fakes
+        # built (with or without a voice stack).
+        phase = app.phase = ConversationPhase(lambda now: speaking.is_set())
+
+        def scale() -> float | None:
+            return governor.scales().get(CONVERSATION)
+
+        phase.begin_thinking()
+        assert wait_for(lambda: scale() == want)
+        speaking.set()
+        phase.end_thinking()
+        assert wait_for(lambda: scale() == want and phase.current()[0] == "speaking")
+        phase.set_listening(True)  # barge-in while the robot speaks
+        assert wait_for(lambda: scale() == min(want, listen))
+        phase.set_listening(False)
+        assert wait_for(lambda: scale() == want)
+        speaking.clear()
+        assert wait_for(lambda: scale() == 1.0)
+        phase.set_listening(True)  # the user speaks to an idle robot
+        assert wait_for(lambda: scale() == listen)
+        phase.set_listening(False)
+        assert wait_for(lambda: scale() == 1.0)
+    finally:
+        stop.set()
+        thread.join(15)
+    assert not errors
+
+
 def test_circadian_scale_is_awake_while_no_model_runs():
     cfg = RoboEmotConfig()
     assert (
-        app_module.circadian_vision_scale(cfg, None)
-        == cfg.circadian.states["awake"].vision_rate_scale
+        ticks.circadian_vision_scale(cfg, None) == cfg.circadian.states["awake"].vision_rate_scale
     )
 
 
@@ -278,13 +343,13 @@ def test_circadian_scale_is_awake_while_no_model_runs():
 def stops(monkeypatch):
     """Record the order in which the app tears things down."""
     order: list[str] = []
-    real_loop_stop = app_module.MotionLoop.stop
+    real_loop_stop = MotionLoop.stop
 
     def loop_stop(self):
         order.append("loop")
         real_loop_stop(self)
 
-    monkeypatch.setattr(app_module.MotionLoop, "stop", loop_stop)
+    monkeypatch.setattr(MotionLoop, "stop", loop_stop)
     return order
 
 
@@ -293,7 +358,7 @@ def test_the_motion_loop_stops_even_when_perception_fails_to_stop(data, monkeypa
         stops.append("perception")
         raise RuntimeError("camera stuck")
 
-    monkeypatch.setattr(app_module.Perception, "stop", failing_stop)
+    monkeypatch.setattr(Perception, "stop", failing_stop)
     stop = threading.Event()
     stop.set()
     with pytest.raises(RuntimeError, match="camera stuck"):
@@ -305,7 +370,7 @@ def test_the_motion_loop_stops_when_perception_fails_to_start(data, monkeypatch,
     def failing_start(self):
         raise OSError("no camera")
 
-    monkeypatch.setattr(app_module.Perception, "start", failing_start)
+    monkeypatch.setattr(Perception, "start", failing_start)
     stop = threading.Event()
     stop.set()
     with pytest.raises(OSError, match="no camera"):
@@ -398,67 +463,28 @@ def test_a_missing_object_detector_leaves_the_rest_of_vision_running(data):
     assert "animal" not in kinds and "object" not in kinds
 
 
-def test_a_possible_minor_face_engages_the_motion_caps_and_releases_after_the_hold(data):
-    (data / "app.yaml").write_text(
-        "schema_version: 1\nsafety: {allow_unmeasured_dynamics: true, minor_hold_s: 1}\n"
-    )
+def test_a_face_in_view_engages_no_caps_and_keeps_the_one_register(data):
+    """Owner decision 2026-10-23: no age is estimated and a face changes nothing (SPEC 5, 12)."""
     FakeDetector.empty = False
-    app = new_app(AppWithFakes)  # no attribute model: the face's age stays unknown (SPEC 5)
-    stop, thread, errors = start(app)
-
-    def caps() -> bool:
-        return app.diagnostics.report()["sections"]["roboemot.motion"]["data"]["minor_present"]
-
-    try:
-        assert wait_for(lambda: app.diagnostics is not None)
-        assert wait_for(caps), "an unknown-age face did not engage the minor caps"
-        assert app.minor_present
-        FakeDetector.empty = True  # frames keep coming, with nobody in them: positive evidence
-        assert wait_for(lambda: not caps(), timeout=30), "the caps never released"
-        assert not app.minor_present
-    finally:
-        FakeDetector.empty = False
-        stop.set()
-        thread.join(15)
-    assert not errors and not thread.is_alive()
-
-
-def test_the_minor_caps_stay_on_without_vision_and_when_frames_stop(data):
-    (data / "app.yaml").write_text(
-        "schema_version: 1\nsafety: {allow_unmeasured_dynamics: true, minor_hold_s: 1}\n"
-    )
-    app = new_app()  # the real loader finds no models: perception.pipeline is None
-    stop, thread, errors = start(app)
-    try:
-        assert wait_for(lambda: app.perception is not None and app.diagnostics is not None)
-        assert app.perception.pipeline is None
-
-        def caps() -> bool:
-            sections = app.diagnostics.report()["sections"]
-            return sections["roboemot.motion"]["data"]["minor_present"]
-
-        assert wait_for(caps), "the caps were never engaged without vision"
-        time.sleep(2)  # longer than the hold
-        assert app.minor_present and caps()
-    finally:
-        stop.set()
-        thread.join(15)
-    assert not errors and not thread.is_alive()
-
     app = new_app(AppWithFakes)
-    app.source_class = EmptySource  # the camera gives no frames at all
     stop, thread, errors = start(app)
     try:
-        assert wait_for(lambda: app.perception is not None and app.perception.pipeline)
-        time.sleep(2)
-        assert app.minor_present
+        assert wait_for(lambda: app.diagnostics is not None and app.register_tracker is not None)
+        tracker = app.register_tracker
+        assert wait_for(lambda: tracker.active is not None and tracker.active.people > 0)
+        register = tracker.active.params
+        assert register.approach_allowed
+        assert register.motion_amplitude == RoboEmotConfig().register.motion_amplitude
+        sections = app.diagnostics.report()["sections"]
+        assert "roboemot.minor" not in sections
+        assert "minor_present" not in sections["roboemot.motion"]["data"]
     finally:
         stop.set()
         thread.join(15)
-    assert not errors
+    assert not errors and not thread.is_alive()
 
 
-def test_a_known_child_gives_joy_on_affect_state_and_in_the_debug_report(data):
+def test_a_known_person_gives_calm_on_affect_state_and_in_the_debug_report(data):
     from roboemot.vision.types import PersonRecognized
 
     app = new_app(app_module.RoboEmotApp)
@@ -471,11 +497,11 @@ def test_a_known_child_gives_joy_on_affect_state_and_in_the_debug_report(data):
         assert states[-1].valence == pytest.approx(0.0, abs=0.01)
         app.bus.publish(
             "person.recognized",
-            PersonRecognized(1, "p-1", time.monotonic(), 0.0, 0.0, "child", True),
+            PersonRecognized(1, "p-1", time.monotonic(), 0.0, 0.0),
             time.monotonic(),
         )
-        assert wait_for(lambda: states[-1].valence > 0.5), "no positive valence after the child"
-        assert states[-1].label == "joy"
+        assert wait_for(lambda: states[-1].valence > 0.4), "no positive valence after the person"
+        assert states[-1].label == "calm"  # one person.known rule for everyone (2026-10-23)
         report = app.diagnostics.report()["sections"]["roboemot.app"]["data"]
         assert report["valence"] > 0 and report["label"] in app.affect_runner.engine.cfg.labels
         assert "p-1" not in json.dumps(report)

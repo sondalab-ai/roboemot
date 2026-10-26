@@ -150,7 +150,7 @@ def test_gesture_map_is_channels_only_and_circadian_may_use_variants():
 
 def stack_with(manifest, behaviour, clips=("soft", "wide")) -> ConfigStack:
     stack = ConfigStack()
-    stack.set_manifest_behaviour(behaviour, manifest.channels, clips)
+    stack.set_manifest_behaviour(behaviour, manifest.channels, clips, body_yaw=None)
     return stack
 
 
@@ -211,7 +211,7 @@ def test_a_robot_without_a_library_refuses_any_variant(manifest):
 def test_a_refused_manifest_leaves_the_previous_clips_in_place(manifest):
     stack = stack_with(manifest, VARIANTS_JOY)
     with pytest.raises(ConfigError):
-        stack.set_manifest_behaviour(VARIANTS_JOY, manifest.channels, ())
+        stack.set_manifest_behaviour(VARIANTS_JOY, manifest.channels, (), body_yaw=None)
     assert stack.clips == {"soft", "wide"}
 
 
@@ -672,7 +672,7 @@ def test_a_reload_with_an_unknown_clip_keeps_the_last_valid_config(manifest, tmp
     app = tmp_path / "app.yaml"
     app.write_text("expression_map:\n  joy:\n    variants:\n      - clip: wide\n")
     stack = ConfigStack.from_files(app=app)
-    stack.set_manifest_behaviour(VARIANTS_JOY, manifest.channels, ("soft", "wide"))
+    stack.set_manifest_behaviour(VARIANTS_JOY, manifest.channels, ("soft", "wide"), body_yaw=None)
     assert stack.effective().expression_map["joy"].variants[0].clip == "wide"
     app.write_text("expression_map:\n  joy:\n    variants:\n      - clip: ghost\n")
     os.utime(app, (1e9, 2e9))

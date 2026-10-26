@@ -405,7 +405,7 @@ def test_forgetting_a_person_leaves_no_tombstone_and_the_name_can_be_imported(tm
     assert [i.created for i in svc.import_sidecar(PEOPLE_ONLY).items] == [True]
     consent = Consent("Carl", datetime(2026, 1, 1, tzinfo=UTC), ("face",))
     vec = [[1.0] + [0.01 * i] * (DIM - 1) for i in range(5)]
-    active = reg.enroll("Carl", vec, MODEL, consent=consent, age_group="adult")
+    active = reg.enroll("Carl", vec, MODEL, consent=consent)
     enrollment_for(reg).delete(active.person_id)
     assert reg.tombstones.count() == 0
 

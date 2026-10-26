@@ -35,3 +35,8 @@ def test_camera_model_from_intrinsics():
     assert model.bearing(320, 240) == (0.0, 0.0)
     assert cam.camera_model(100, 100) is None
     assert ReachyCamera(fake_mini(None, None)).camera_model(640, 480) is None
+
+
+def test_camera_model_is_none_without_a_camera_in_the_media():
+    mini = SimpleNamespace(media=SimpleNamespace(get_frame=lambda: None, camera=None))
+    assert ReachyCamera(mini).camera_model(640, 480) is None

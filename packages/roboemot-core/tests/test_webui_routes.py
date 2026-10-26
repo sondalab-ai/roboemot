@@ -94,10 +94,13 @@ def test_list_shows_endpoint_only_and_no_key(served):
             "name": "lan",
             "model": "m",
             "endpoint": "lan.local:8443",
-            "allowed_for_minors": False,
+            "base_url": None,  # it holds user info: never sent, only replaceable whole
+            "locality": "auto",
+            "key": "literal",
             "running": False,
             "secret": None,
             "last_check": None,
+            "removable": False,
         }
     ]
     for leaked in (SECRET_KEY, "user", "pw", "token=abc", "/v1"):
@@ -304,3 +307,37 @@ def test_a_route_check_whose_names_cannot_be_read_sends_nothing_and_reports_fail
     finally:
         srv.stop()
     assert fake.bodies == []
+
+
+def test_a_route_check_sends_the_configured_system_prompt(tmp_path):
+    cfg = RoboEmotConfig(
+        webui={"bind": "127.0.0.1", "port": 0},
+        llm_routes=[ROUTE],
+        persona={"prompt": "PERSONA-4c1d"},
+    )
+    fake = Fake()
+    srv, client = serve(tmp_path, cfg, checker_for(cfg, fake))
+    try:
+        assert client.request("POST", "/api/routes/lan/check", {}).status == 202
+        assert finish(client)["last_check"] is not None
+    finally:
+        srv.stop()
+    assert "PERSONA-4c1d" in fake.bodies[0]["messages"][0]["content"]
+
+
+def test_a_cloud_route_check_without_a_name_source_keeps_owner_text_out(tmp_path):
+    cloud = {**ROUTE, "base_url": "https://api.example.com/v1"}
+    cfg = RoboEmotConfig(
+        webui={"bind": "127.0.0.1", "port": 0},
+        llm_routes=[cloud],
+        privacy={"pseudonyms_to_cloud": True},
+        persona={"prompt": "PERSONA-4c1d lives with Marta."},
+    )
+    fake = Fake()
+    srv, client = serve(tmp_path, cfg, checker_for(cfg, fake))
+    try:
+        assert client.request("POST", "/api/routes/lan/check", {}).status == 202
+        assert finish(client)["last_check"] is not None
+    finally:
+        srv.stop()
+    assert fake.bodies and all("PERSONA-4c1d" not in json.dumps(b) for b in fake.bodies)

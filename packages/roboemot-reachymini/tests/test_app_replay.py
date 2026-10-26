@@ -72,6 +72,9 @@ class DayApp(AppWithFakes):
         class DaySource:
             n = 0
 
+            def camera_model(self, width, height):
+                return None
+
             def read(self):
                 self.n += 1
                 minute = int((app.clock.monotonic() - app.clock.origin) / SECONDS_PER_MINUTE)
@@ -113,12 +116,15 @@ def test_a_replayed_24_hour_light_log_moves_the_robot_through_awake_drowsy_resti
                              allow_unmeasured_dynamics=True)  # fmt: skip
     stack = ConfigStack()
     stack.set_manifest_behaviour(
-        manifest.model.behaviour, manifest.channels, load_clip_library(manifest)
+        manifest.model.behaviour,
+        manifest.channels,
+        load_clip_library(manifest),
+        body_yaw=None,
     )
     cfg = stack.effective()
-    # nobody in view: the unknown register scales the rest posture; half of it is well clear of idle
+    # the register scales the rest posture; half of it is well clear of idle
     min_pitch = 0.5 * math.radians(cfg.circadian_motion.rest_pose_deg["head.pitch"])
-    min_pitch *= cfg.register.unknown.motion_amplitude
+    min_pitch *= cfg.register.motion_amplitude
     offline = [t[1] for t in replay(DayApp.samples, cfg).transitions]  # hour of each change
     app = new_app(DayApp)
     spans: list[dict] = []  # per state: name, virtual hour of entry, range in the feed log

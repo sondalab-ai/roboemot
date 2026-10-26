@@ -11,12 +11,7 @@ import unicodedata
 from typing import Any
 
 from roboemot.config.schema import WebUIConfig
-from roboemot.registry.records import (
-    AGE_GROUPS,
-    CONSENT_SCOPES,
-    GENDERS,
-    possible_minor,
-)
+from roboemot.registry.records import CONSENT_SCOPES
 
 NAME_PATTERN = re.compile(r"[^\W_][\w .'’\-]*")
 ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,64}")
@@ -68,14 +63,6 @@ def quarantine_key(value: object) -> str:
     return value
 
 
-def choice(value: object, field: str, allowed: tuple[str, ...], default: str) -> str:
-    if value is None:
-        return default
-    if not isinstance(value, str) or value not in allowed:
-        raise ValidationError("choice_invalid", field)
-    return value
-
-
 def confirmed(body: dict[str, Any]) -> bool:
     return body.get("confirm") is True
 
@@ -92,50 +79,19 @@ def consent_scope(value: object) -> tuple[str, ...]:
 def enrollment_form(body: dict[str, Any], cfg: WebUIConfig) -> dict[str, Any]:
     """The complete-enrollment form as clean values.
 
-    A guardian is required unless the declared age group is adult or senior; this mirrors the
-    registry rule so the form fails early, the registry stays the authority. For a possible
-    minor the consenting party is the guardian, and the guardian is never the person enrolled.
+    The person consenting defaults to the person enrolled. No age group, gender or guardian is
+    asked (owner decision 2026-10-23); a body that still sends them is refused as unknown keys.
     """
-    only_keys(
-        body,
-        {
-            "display_name",
-            "consent_who",
-            "scope",
-            "age_group",
-            "gender",
-            "guardian",
-            "agreed",
-            "pending_id",
-        },
-    )
+    only_keys(body, {"display_name", "consent_who", "scope", "agreed", "pending_id"})
     if body.get("agreed") is not True:
         raise ValidationError("consent_not_agreed", "agreed")
     display = name(body.get("display_name"), "display_name", cfg)
-    age = choice(body.get("age_group"), "age_group", AGE_GROUPS, "unknown")
-    gender = choice(body.get("gender"), "gender", GENDERS, "unknown")
-    guardian_raw = body.get("guardian")
-    guardian = None
-    if guardian_raw not in (None, ""):
-        guardian = name(guardian_raw, "guardian", cfg)
     who_raw = body.get("consent_who")
-    if possible_minor(None if age == "unknown" else age):
-        if guardian is None:
-            raise ValidationError("guardian_required", "guardian")
-        if guardian.casefold() == display.casefold():
-            raise ValidationError("guardian_is_subject", "guardian")
-        who = guardian if who_raw in (None, "") else name(who_raw, "consent_who", cfg)
-        if who.casefold() != guardian.casefold():
-            raise ValidationError("consent_who_guardian", "consent_who")
-    else:
-        who = name(display if who_raw in (None, "") else who_raw, "consent_who", cfg)
+    who = name(display if who_raw in (None, "") else who_raw, "consent_who", cfg)
     return {
         "display_name": display,
         "who": who,
         "scope": consent_scope(body.get("scope")),
-        "age_group": None if age == "unknown" else age,
-        "gender": None if gender == "unknown" else gender,
-        "guardian": guardian,
         "pending_id": (
             None
             if body.get("pending_id") in (None, "")

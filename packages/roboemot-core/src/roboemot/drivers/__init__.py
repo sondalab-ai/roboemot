@@ -10,8 +10,8 @@ MotorMode = Literal["active", "limp", "teach"]
 
 
 class PoseGroupDriver(ABC):
-    """For vendor SDKs that take poses, not servo angles (Reachy Mini). Values in rad and m,
-    keyed by manifest dof name."""
+    """For vendor SDKs that take poses, not servo angles (a robot platform's own driver).
+    Values in rad and m, keyed by manifest dof name."""
 
     @abstractmethod
     def write_pose_targets(self, t: float, values: dict[str, float]) -> None: ...
@@ -21,6 +21,17 @@ class PoseGroupDriver(ABC):
 
     @abstractmethod
     def set_mode(self, mode: MotorMode) -> None: ...
+
+    status_period_s: float | None = None
+    """How often the platform refreshes what :meth:`motors_enabled` reports (a motor change is
+    seen up to this late); None when unknown."""
+
+    def state_seq(self) -> int | None:
+        """A number that changes whenever a new measured state has arrived, so a caller can tell
+        a new sample from a repeated one (SPEC 12A, External control); None when the driver
+        cannot tell, and every :meth:`read_state` then counts as new. It may raise like
+        :meth:`read_state` when the link is lost."""
+        return None
 
     def motors_enabled(self) -> bool | None:
         """Whether the motors hold position commands; None when the driver cannot tell."""

@@ -318,3 +318,40 @@ def test_vision_file_fetch_creates_root_privately(tmp_path):
     fetch_file(f, root, client(body))
     assert stat.S_IMODE(root.stat().st_mode) == 0o700
     assert stat.S_IMODE((root / "sub").stat().st_mode) == 0o700
+
+
+def dropping(body: bytes, drops: int) -> httpx.Client:
+    """Drops the connection mid-body for the first ``drops`` GETs, then honours ``Range``."""
+    calls = []
+
+    def cut(data: bytes):
+        yield data[: len(data) // 2]
+        raise httpx.RemoteProtocolError("peer closed connection")
+
+    def serve(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        start = int(request.headers.get("range", "bytes=0-").removeprefix("bytes=").rstrip("-"))
+        status, headers = 200, {}
+        if start:
+            status, headers = 206, {"content-range": f"bytes {start}-{len(body) - 1}/{len(body)}"}
+        data = body[start:]
+        return httpx.Response(
+            status, headers=headers, content=cut(data) if len(calls) <= drops else data
+        )
+
+    return httpx.Client(transport=httpx.MockTransport(serve))
+
+
+def test_archive_download_resumes_after_a_drop(tmp_path, monkeypatch):
+    monkeypatch.setattr("roboemot.vision.models.time.sleep", lambda s: None)
+    monkeypatch.setattr("roboemot.vision.models.CHUNK_BYTES", 16)
+    assert fetch_file(archive_file(GOOD), tmp_path, dropping(GOOD, drops=1)) == "downloaded"
+    assert (tmp_path / "vosk/model-x/am/final.mdl").read_bytes() == b"weights"
+    assert not list(tmp_path.rglob("*.part")) and not list(tmp_path.rglob("*.extract"))
+
+
+def test_archive_download_that_never_recovers_leaves_no_orphans(tmp_path, monkeypatch):
+    monkeypatch.setattr("roboemot.vision.models.time.sleep", lambda s: None)
+    with pytest.raises(ModelError, match="download failed"):
+        fetch_file(archive_file(GOOD), tmp_path, dropping(GOOD, drops=99))
+    assert list(tmp_path.rglob("*")) == [tmp_path / "vosk"]

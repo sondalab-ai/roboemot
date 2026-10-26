@@ -17,8 +17,8 @@ Arbitration (SPEC 10, Sources and priority):
 Limiting (SPEC 12, Physical safety), applied to the arbitrated target every tick:
 position clamp, coupled constraints (yaw_delta), then velocity and acceleration caps with a
 stopping-distance rule so motion decelerates before the target, then a hard position clamp
-and rate-limited constraint coupling. While a minor is present, the velocity cap and the
-amplitude around home are scaled by ``minor_factor``; acceleration (braking) never is.
+and rate-limited constraint coupling. While the watchdog holds, the velocity cap is scaled by
+``watchdog_return_factor``; acceleration (braking) never is.
 Non-finite targets and non-positive ``dt`` are rejected.
 """
 
@@ -113,7 +113,7 @@ class Arbiter:
             del self._cmds[src]
         return list(self._cmds.values())
 
-    def step(self, now: float, amplitude: float = 1.0) -> dict[str, float]:
+    def step(self, now: float) -> dict[str, float]:
         cmds = self.active(now)
         out: dict[str, float] = {}
         for name, dof in self.dofs.items():
@@ -126,10 +126,7 @@ class Arbiter:
             if prio >= Priority.COMMANDED:
                 target += sum(c.targets[name] for c in cmds if c.additive and name in c.targets)
             if prio != Priority.SAFETY:
-                # Clamp the summed target before the minor scaling, so an additive offset on a
-                # winner near a limit cannot leave the band as factor x overflow (SPEC 12).
                 target = min(max(target, dof.min), dof.max)
-                target = dof.home + (target - dof.home) * amplitude
             if winner != self._winner[name]:
                 self._fade[name] = (
                     None if prio == Priority.SAFETY else _Fade(now, self.last[name], winner or "")
@@ -177,7 +174,7 @@ class Limiter:
 
     def step(self, targets: dict[str, float], dt: float, factor: float = 1.0) -> dict[str, float]:
         """One tick. ``factor`` in (0, 1] scales the velocity cap only: braking always uses
-        the full acceleration, so lowering the factor mid-motion (a minor appears) can never
+        the full acceleration, so lowering the factor mid-motion (the watchdog engages) can never
         weaken deceleration."""
         if not (math.isfinite(dt) and dt > 0):
             raise ValueError(f"dt must be finite and > 0, got {dt}")
@@ -246,18 +243,16 @@ class MotionCore:
         *,
         crossfade_s: float,
         watchdog_s: float,
-        minor_factor: float,
         watchdog_return_factor: float,
         constraint_margin: float = 0.0,
     ) -> None:
         self.arbiter = Arbiter(dofs, crossfade_s)
         self.limiter = Limiter(dofs, constraints, constraint_margin)
         self.watchdog_s = watchdog_s
-        self.minor_factor = minor_factor
         self.watchdog_return_factor = watchdog_return_factor
-        self.minor_present = False
         self._last_feed: float | None = None
         self.holding = False
+        self.watchdog_engagements = 0
 
     def feed(self, cmd: Command, *, liveness: bool = True) -> None:
         """Submit a command. ``liveness=False`` is for sources inside the loop (reflexes): they
@@ -274,10 +269,10 @@ class MotionCore:
                 home = {n: d.home for n, d in self.arbiter.dofs.items()}
                 self.arbiter.submit(Command("watchdog", Priority.SAFETY, home, now))
                 self.holding = True
+                self.watchdog_engagements += 1
         elif self.holding:
             self.arbiter.clear("watchdog")
             self.holding = False
-        factor = self.minor_factor if self.minor_present else 1.0
-        targets = self.arbiter.step(now, amplitude=factor)
-        speed = min(factor, self.watchdog_return_factor) if self.holding else factor
+        targets = self.arbiter.step(now)
+        speed = self.watchdog_return_factor if self.holding else 1.0
         return self.limiter.step(targets, dt, speed)

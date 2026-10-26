@@ -1,5 +1,5 @@
 """SPEC 8 stage 6, Conversation state, 12: the conversation worker (sessions, history, request,
-streaming speech, children, errors, privacy)."""
+streaming speech, one behaviour for everyone, errors, privacy)."""
 
 from __future__ import annotations
 
@@ -20,14 +20,12 @@ from roboemot.conversation import ConversationWorker
 from roboemot.conversation import worker as worker_module
 from roboemot.llm import Router
 from roboemot.llm.hub import RouterHub
-from roboemot.llm.prompt import MINOR_RULE
 from roboemot.voice.listener import Utterance
 from roboemot.voice.speech_features import Prosody
 from test_llm_router import chunk
 
 LAN = {"name": "lan", "base_url": "http://lan.local/v1", "model": "m1"}
 CLOUD = {"name": "cloud", "base_url": "http://cloud.local/v1", "model": "m2"}
-CLEARED = {**LAN, "allowed_for_minors": True}
 GATE = object()  # in a script: hold the stream here until the test opens the gate
 FAIL = object()  # in a script: the stream breaks here
 
@@ -68,6 +66,8 @@ class Server:
                     raise httpx.ReadError("broken")
                 elif self.hang and piece == "HANG":
                     await asyncio.sleep(3600)
+                elif isinstance(piece, dict):  # a raw chunk (e.g. a reasoning delta)
+                    yield f"data: {json.dumps(piece)}\n\n".encode()
                 else:
                     yield sse_piece(piece)
             yield b"data: [DONE]\n\n"
@@ -138,9 +138,11 @@ class FakeAffect:
 class FakeResponder:
     def __init__(self) -> None:
         self.calls = 0
+        self.last: dict = {}
 
-    def speech_while_offline(self, now):
+    def speech_while_offline(self, now, language=None):
         self.calls += 1
+        self.last = {"language": language}
 
 
 class FakeMonitor:
@@ -166,7 +168,6 @@ class Rig:
     responder: FakeResponder
     bus: Bus
     worker: ConversationWorker
-    minor: list = field(default_factory=lambda: [False])
     register: list = field(default_factory=lambda: [None])
     clock: list = field(default_factory=lambda: [1000.0])
     profile: list = field(default_factory=lambda: [None])
@@ -228,7 +229,6 @@ def build(routes=(LAN,), safety=None, monitor=None, **app) -> Rig:
         responder=responder,
         register=lambda: rig.register[0],
         circadian=lambda: StateEffects(),
-        minor_present=lambda: _read(rig.minor),
         profile=lambda cap: rig.profile[0],
         scene=lambda cap: rig.scene[0],
         bus=bus,
@@ -237,13 +237,6 @@ def build(routes=(LAN,), safety=None, monitor=None, **app) -> Rig:
     bus.subscribe("conversation.turn", lambda m: rig.events.append(m.payload))
     rig.worker.start()
     return rig
-
-
-def _read(box):
-    value = box[0]
-    if isinstance(value, Exception):
-        raise value
-    return value
 
 
 @pytest.fixture()
@@ -329,6 +322,16 @@ def test_a_failing_summary_does_not_stop_the_answer(rigs):
     rig.worker._profile = lambda cap: 1 / 0
     rig.turn("ciao")
     assert rig.speech.texts() == ["Va bene."]
+
+
+def test_a_sentence_cut_by_the_splitter_is_said_as_a_continuation(rigs):
+    """Review S3: the speech output keeps one delivery for the pieces of one cut sentence."""
+    rig = rigs(voice={"sentence_max_chars": 40})
+    long = "Questa frase è lunga, molto lunga, davvero troppo lunga per una sola richiesta. "
+    rig.server.scripts["lan.local"] = [long]
+    rig.turn("ciao")
+    flags = [s["continued"] for s in rig.speech.said]
+    assert len(flags) >= 2 and flags == [False] + [True] * (len(flags) - 1)
 
 
 def test_mood_tags_are_stripped_and_used_when_close_to_the_affect_state(rigs):
@@ -454,98 +457,15 @@ def test_a_newer_utterance_replaces_the_one_waiting_while_a_turn_runs(rigs):
     assert texts == ["prima", "terza"] and rig.worker.snapshot()["replaced"] == 1
 
 
-# ------------------------------------------------------------------ children (SPEC 8, 12)
+# ------------------------------------------------------------------ one behaviour (SPEC 8, 12)
 
 
-def test_a_minor_with_a_cleared_route_gets_that_route_and_the_child_rules(rigs):
-    rig = rigs(
-        routes=(CLOUD, CLEARED),
-        safety={"minors_allowed_llm": True},
-    )
-    rig.minor[0] = True
-    rig.register[0] = rig.stack.effective().register.child
-    rig.turn("ciao")
-    assert rig.server.hosts() == ["lan.local"]  # the uncleared first route is never asked
-    system = rig.system()
-    assert MINOR_RULE in system and "at most 2 sentences" in system
-    assert "Use simple words" in system
-
-
-def test_the_child_register_is_used_while_a_minor_is_present_under_an_adult_register(rigs):
-    rig = rigs(routes=(CLEARED,), safety={"minors_allowed_llm": True})
-    rig.minor[0] = True
-    rig.register[0] = RegisterParams()  # the tracker resolved an adult (the child just left)
-    rig.turn("ciao")
-    system = rig.system()
-    assert "at most 2 sentences" in system and "Use simple words" in system and MINOR_RULE in system
-
-
-def test_an_adult_gets_the_conversation_sentence_cap_and_no_minor_rule(rigs):
+def test_the_default_register_gets_the_conversation_cap_and_no_child_rule(rigs):
+    """Owner decision 2026-10-23: no minor rules, no child register, no output filter."""
     rig = rigs()
-    rig.register[0] = RegisterParams()
     rig.turn("ciao")
-    assert "at most 3 sentences" in rig.system() and MINOR_RULE not in rig.system()
-
-
-def test_no_cleared_route_means_a_built_in_line_and_no_request(rigs):
-    rig = rigs(routes=(CLOUD, LAN), safety={"minors_allowed_llm": True})
-    rig.minor[0] = True
-    rig.turn("che cos'e' la guerra?", language="it")
-    assert rig.server.requests == []
-    assert rig.speech.texts() == ["Questa domanda falla a un grande, che ti sa rispondere meglio."]
-    rig.turn("ciao robot", language="en", keywords=("greeting", "wake"))
-    assert rig.speech.texts()[-1] == "Hello! Nice to see you."
-    rig.turn("reachy", language="en", keywords=("name",))
-    assert rig.speech.texts()[-1] == "I am a robot."  # no name: the nameless line
-    rig.worker.names.set_platform("Neve")
-    rig.turn("neve", language="en", keywords=("name",))
-    assert rig.speech.texts()[-1] == "My name is Neve."
-    assert rig.server.requests == []
-
-
-def test_the_master_switch_off_also_means_built_in_lines(rigs):
-    rig = rigs(routes=(CLEARED,))  # safety.minors_allowed_llm stays false
-    rig.minor[0] = True
-    rig.turn("ciao")
-    assert rig.server.requests == [] and len(rig.speech.said) == 1
-
-
-def test_a_cleared_route_that_fails_gives_a_child_line_not_an_uncleared_route(rigs):
-    rig = rigs(routes=(CLEARED, CLOUD), safety={"minors_allowed_llm": True})
-    rig.minor[0] = True
-    rig.server.status["lan.local"] = 500
-    rig.turn("ciao", language="en")
-    assert rig.server.hosts() == ["lan.local"]
-    assert rig.speech.texts() == ["Please ask a grown-up about that, they will know better."]
-
-
-def test_a_built_in_line_the_output_filter_blocks_is_replaced_by_a_safe_one(rigs):
-    lines = {
-        "greeting": "Hello!",
-        "robot_name": "I am {name}.",
-        "robot_unnamed": "I am a robot.",
-        "ask_grown_up": "Go and fetch a gun.",
-        "filtered": "Ask a grown-up.",
-    }
-    rig = rigs(
-        routes=(CLEARED,),
-        safety={"minors_allowed_llm": True, "minor_lines": {"en": lines}},
-    )
-    rig.minor[0] = True
-    rig.server.status["lan.local"] = 500
-    rig.turn("ciao", language="en")
-    assert rig.speech.texts() == ["I am a robot."]
-
-
-def test_the_child_register_cuts_the_reply_to_two_sentences_and_cancels_the_stream(rigs):
-    rig = rigs(routes=(CLEARED,), safety={"minors_allowed_llm": True})
-    rig.minor[0] = True
-    rig.register[0] = rig.stack.effective().register.child
-    rig.server.scripts["lan.local"] = ["Uno. Due. Tre. Quattro. ", GATE, "Cinque."]
-    rig.turn("ciao")
-    assert rig.speech.texts() == ["Uno.", "Due."]
-    assert rig.worker.snapshot()["capped"] == 1
-    assert rig.hub.router.used("lan") > 0  # the cut-short answer is still charged
+    system = rig.system()
+    assert "at most 3 sentences" in system and "child" not in system.lower()
 
 
 def test_a_register_cap_overrides_the_conversation_cap(rigs):
@@ -556,90 +476,20 @@ def test_a_register_cap_overrides_the_conversation_cap(rigs):
     assert rig.speech.texts() == ["Uno."] and "at most 1 sentences" in rig.system()
 
 
-def test_the_output_filter_replaces_a_sentence_and_drops_the_rest(rigs):
-    rig = rigs(routes=(CLEARED,), safety={"minors_allowed_llm": True})
-    rig.minor[0] = True
-    rig.register[0] = rig.stack.effective().register.child
-    rig.server.scripts["lan.local"] = ["Ciao. ", "Oggi voglio uccidere il tempo. ", "Poi gioco."]
-    rig.turn("ciao")
-    texts = rig.speech.texts()
-    assert texts[0] == "Ciao." and texts[1] == "Preferisco parlare d'altro. Chiedi a un grande."
-    assert len(texts) == 2 and "uccidere" not in " ".join(texts)
-    assert rig.worker.snapshot()["filtered"] == 1
-
-
-def test_the_output_filter_is_not_applied_for_adults(rigs):
+def test_every_sentence_is_spoken_as_written(rigs):
+    """No output filter: a word the removed minors' blocklist held reaches the speaker."""
     rig = rigs()
     rig.server.scripts["lan.local"] = ["Voglio uccidere il tempo."]
     rig.turn("ciao")
     assert rig.speech.texts() == ["Voglio uccidere il tempo."]
+    assert "minor" not in rig.speech.said[0]
 
 
-def test_the_filtered_text_is_not_kept_in_the_history(rigs):
-    rig = rigs(routes=(CLEARED,), safety={"minors_allowed_llm": True})
-    rig.minor[0] = True
-    rig.server.scripts["lan.local"] = ["Voglio uccidere il tempo."]
-    rig.turn("ciao")
-    rig.turn("ancora")
-    sent = json.dumps(rig.server.requests[1][1]["messages"])
-    assert "uccidere" not in sent and "Preferisco parlare d" in sent
-
-
-def test_a_minor_appearing_mid_answer_stops_the_speech_and_the_stream(rigs):
-    rig = rigs(routes=(CLOUD,))
-    rig.server.scripts["cloud.local"] = ["Prima frase. ", "Seconda", GATE, " frase. Terza."]
-    n = rig.say("ciao")
-    assert wait_for(lambda: rig.speech.texts() == ["Prima frase."])
-    rig.minor[0] = True
-    rig.server.gate.set()
-    assert rig.done(n)
-    assert rig.speech.stops == 1 and rig.speech.texts() == ["Prima frase."]
-    assert rig.worker.snapshot()["minor_cut"] == 1
-    assert rig.hub.router.used("cloud") > 0
-
-
-def test_the_next_turn_after_a_mid_answer_cut_runs_under_the_minor_rules(rigs):
-    rig = rigs(routes=(CLOUD, CLEARED), safety={"minors_allowed_llm": True})
-    rig.server.scripts["cloud.local"] = ["Prima. ", "Seconda", GATE, " frase."]
-    n = rig.say("ciao")
-    assert wait_for(lambda: rig.speech.texts() == ["Prima."])
-    rig.minor[0] = True
-    rig.server.gate.set()
-    assert rig.done(n)
-    rig.turn("e adesso?")
-    assert rig.server.hosts() == ["cloud.local", "lan.local"]
-    assert MINOR_RULE in rig.system()
-    # the adult session ended when the minor appeared: nothing of it is sent to the next route
-    assert "Prima." not in json.dumps(rig.server.requests[1][1]["messages"])
-
-
-def test_a_minor_appearing_mid_answer_on_a_cleared_route_also_stops_the_speech(rigs):
-    rig = rigs(routes=(CLEARED,), safety={"minors_allowed_llm": True})
-    rig.server.scripts["lan.local"] = ["Prima. ", "Seconda", GATE, " frase."]
-    n = rig.say("ciao")
-    assert wait_for(lambda: rig.speech.texts() == ["Prima."])
-    rig.minor[0] = True
-    rig.server.gate.set()
-    assert rig.done(n)
-    assert rig.speech.stops == 1 and rig.speech.texts() == ["Prima."]
-
-
-def test_a_failing_minor_signal_is_treated_as_a_minor(rigs):
-    rig = rigs(routes=(CLOUD,), safety={"minors_allowed_llm": True})
-    rig.minor[0] = RuntimeError("no signal")
-    rig.turn("ciao")
-    assert rig.server.requests == [] and len(rig.speech.said) == 1
-
-
-def test_a_signal_that_fails_mid_answer_cuts_it(rigs):
-    rig = rigs(routes=(CLOUD,))
-    rig.server.scripts["cloud.local"] = ["Prima. ", "Seconda", GATE, " frase."]
-    n = rig.say("ciao")
-    assert wait_for(lambda: rig.speech.texts() == ["Prima."])
-    rig.minor[0] = RuntimeError("no signal")
-    rig.server.gate.set()
-    assert rig.done(n)
-    assert rig.speech.texts() == ["Prima."] and rig.speech.stops == 1
+def test_no_route_left_speaks_the_fallback_line_whoever_asks(rigs):
+    rig = rigs(routes=({**LAN, "daily_token_budget": 0},))
+    rig.turn("ciao robot", language="en", keywords=("greeting", "wake"))
+    assert rig.server.requests == []
+    assert rig.speech.texts() == ["Sorry, I can't think right now."]
 
 
 # ------------------------------------------------------------------ errors
@@ -649,17 +499,16 @@ def test_offline_answers_nonverbally(rigs):
     rig = rigs(monitor=FakeMonitor())
     rig.turn("ciao")
     assert rig.responder.calls == 1 and rig.speech.said == [] and rig.server.requests == []
+    assert rig.responder.last == {"language": "it"}
     assert rig.worker.snapshot()["offline"] == 1
     assert rig.worker.snapshot()["history_turns"] == 0
 
 
-def test_offline_with_a_minor_adds_a_child_line_to_the_nonverbal_reaction(rigs):
-    rig = rigs(monitor=FakeMonitor())
-    rig.minor[0] = True
-    rig.turn("ciao", language="en")
-    assert rig.responder.calls == 1
-    assert rig.speech.texts() == ["Please ask a grown-up about that, they will know better."]
-    assert rig.speech.said[0]["minor"] is True
+def test_no_configured_route_is_the_fallback_line_not_the_offline_path(rigs):
+    rig = rigs(routes=())
+    rig.turn("hello", language="en")
+    assert rig.responder.calls == 0
+    assert rig.speech.texts() == ["Sorry, I can't think right now."]
 
 
 def test_no_route_available_speaks_the_fallback_line_in_the_utterance_language(rigs):
@@ -778,46 +627,25 @@ def test_the_turn_event_has_ids_and_lengths_only(rigs):
     rig.turn("ciao")
     event = rig.events[0]
     assert set(event) == {
-        "turn", "language", "chars_in", "chars_out", "sentences", "route", "tokens", "minor",
-        "tool_calls", "rounds", "outcome",
+        "turn", "language", "chars_in", "chars_out", "sentences", "route", "tokens",
+        "reasoning_chars", "tool_calls", "rounds", "outcome",
     }  # fmt: skip
-    assert event["route"] == "lan" and event["sentences"] == 1 and event["minor"] is False
+    assert event["route"] == "lan" and event["sentences"] == 1
+
+
+def test_reasoning_deltas_are_counted_for_the_report_never_spoken(rigs):
+    rig = rigs()
+    thought = chunk()
+    thought["choices"][0]["delta"]["reasoning"] = "THOUGHT-1f2a" * 3
+    rig.server.scripts["lan.local"] = [thought, "Ciao."]
+    rig.turn("ciao")
+    assert rig.speech.texts() == ["Ciao."]
+    assert rig.events[0]["reasoning_chars"] == len("THOUGHT-1f2a") * 3
+    assert rig.worker.snapshot()["last_reasoning_chars"] == len("THOUGHT-1f2a") * 3
+    assert "THOUGHT" not in json.dumps(rig.events) + json.dumps(rig.worker.snapshot())
 
 
 # ------------------------------------------------------------------ review fixes
-
-
-def test_the_flushed_tail_is_not_spoken_when_a_minor_appears_after_the_last_delta(rigs):
-    rig = rigs(routes=(CLOUD,))
-    rig.server.scripts["cloud.local"] = ["Prima frase. ", "Coda senza punto", GATE]
-    n = rig.say("ciao")
-    assert wait_for(lambda: rig.speech.texts() == ["Prima frase."])
-    rig.minor[0] = True
-    rig.server.gate.set()
-    assert rig.done(n)
-    assert rig.speech.texts() == ["Prima frase."] and rig.speech.stops == 1
-
-
-def test_the_flushed_tail_goes_through_the_output_filter(rigs):
-    rig = rigs(routes=(CLEARED,), safety={"minors_allowed_llm": True})
-    rig.minor[0] = True
-    rig.server.scripts["lan.local"] = ["Ciao. ", "voglio uccidere"]
-    rig.turn("ciao")
-    assert "uccidere" not in " ".join(rig.speech.texts())
-
-
-def test_a_phrase_split_across_two_sentences_is_filtered(rigs):
-    rig = rigs(
-        routes=(CLEARED,),
-        safety={"minors_allowed_llm": True, "minor_output_blocklist": {"it": ["cattiva parola"]}},
-    )
-    rig.minor[0] = True
-    rig.server.scripts["lan.local"] = ["Dico una cattiva. ", "Parola davvero. ", "Fine."]
-    rig.turn("ciao")
-    assert rig.speech.texts() == [
-        "Dico una cattiva.",
-        "Preferisco parlare d'altro. Chiedi a un grande.",
-    ]
 
 
 def test_a_different_known_speaker_does_not_inherit_the_history(rigs):
@@ -856,70 +684,6 @@ def test_the_same_speaker_keeps_the_history_and_presence_refreshes_only_that_per
     rig.worker.note_presence(rig.clock[0], "p-2")  # somebody else in view: no refresh
     rig.clock[0] += 2
     assert rig.worker.expire(rig.clock[0])
-
-
-def test_spoken_sentences_carry_the_minor_state_they_were_written_under(rigs):
-    rig = rigs()
-    rig.turn("ciao")
-    assert rig.speech.said[0]["minor"] is False
-    rig2 = rigs(routes=(CLEARED,), safety={"minors_allowed_llm": True})
-    rig2.minor[0] = True
-    rig2.turn("ciao")
-    assert rig2.speech.said[0]["minor"] is True
-
-
-def test_the_filter_runs_on_a_turn_that_started_under_minor_rules_even_if_the_signal_flaps(rigs):
-    rig = rigs(routes=(CLEARED,), safety={"minors_allowed_llm": True})
-    seq = iter([True, True, False, False, False, False])
-    rig.worker._minor_present = lambda: next(seq, False)
-    rig.server.scripts["lan.local"] = ["Voglio uccidere il tempo."]
-    rig.turn("ciao")
-    assert "uccidere" not in " ".join(rig.speech.texts())
-
-
-def test_a_stale_router_does_not_keep_a_revoked_route_cleared(rigs):
-    rig = rigs(routes=(CLEARED,), safety={"minors_allowed_llm": True})
-    rig.minor[0] = True
-    rig.server.scripts["lan.local"] = ["Prima. ", "Seconda", GATE, " frase."]
-
-    def broken(cfg):
-        raise RuntimeError("no router")
-
-    rig.hub.make_router = broken  # the router keeps the old routes after the change
-    n = rig.say("ciao")
-    assert wait_for(lambda: rig.speech.texts() == ["Prima."])
-    rig.stack.set("llm_routes", [LAN], layer="app")  # clearance revoked
-    rig.minor[0] = False  # the turn began as a minor turn; flap to force the route check
-    rig.minor[0] = True
-    rig.server.gate.set()
-    assert rig.done(n)
-    assert rig.worker.snapshot()["minor_cut"] == 1 and rig.speech.stops == 1
-
-
-def test_a_minor_after_an_adult_session_ends_it_and_unknown_speakers_share_otherwise(rigs):
-    rig = rigs(routes=(CLEARED,), safety={"minors_allowed_llm": True})
-    rig.turn("uno")
-    rig.turn("due")  # unknown adult, same unknown session: history kept
-    assert len(rig.server.requests[1][1]["messages"]) == 4
-    rig.minor[0] = True  # an unknown child takes over
-    rig.turn("tre")
-    assert len(rig.server.requests[2][1]["messages"]) == 2
-    assert rig.worker.snapshot()["speaker_changes"] == 1
-
-
-def test_history_written_without_minor_rules_is_never_sent_for_a_child_later(rigs):
-    rig = rigs(routes=(CLEARED,), safety={"minors_allowed_llm": True})
-    rig.minor[0] = True
-    rig.server.scripts["lan.local"] = ["Risposta per bambini."]
-    rig.turn("uno")
-    rig.minor[0] = False
-    rig.server.scripts["lan.local"] = ["ADULT-ONLY-MARK."]
-    rig.turn("due")  # a child session ends when the minor leaves: history is not carried over
-    assert len(rig.server.requests[1][1]["messages"]) == 2
-    rig.minor[0] = True
-    rig.turn("tre")  # and the adult turn is not kept for the child
-    sent = json.dumps(rig.server.requests[2][1]["messages"])
-    assert "ADULT-ONLY-MARK" not in sent and len(rig.server.requests[2][1]["messages"]) == 2
 
 
 def test_the_prompt_names_the_robot_by_config_or_platform_and_omits_it_without(rigs):

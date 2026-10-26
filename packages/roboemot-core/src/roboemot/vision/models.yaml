@@ -3,14 +3,15 @@
 # `path` mirrors the layout of the M1 spike cache (scripts/bench/fetch.py), so
 # `--cache-dir ~/.cache/roboemot-bench/models` works with models fetched there.
 # `labels` is the output order read from each classifier's config.json id2label (pinned by
-# labels_sha256); it matches the order the spike assumed.
+# labels_sha256) or from the pinned file's own metadata.
 # The sha256 values were computed on the files the spike measured; a mismatch deletes the
 # download. Licence fields are the weight licences checked in docs/spikes/2026-10-m1-models.md;
 # the ONNX conversion repositories (Hugging Face onnx-community, Xenova) carry no licence tag
 # of their own, and the licence of the training data was not verified.
-# Files with `quantize` are not downloaded: `roboemot models fetch` produces them from the
-# verified FP32 `source` file with ONNX Runtime dynamic quantization (SPEC 5, 13); their digest
-# depends on the ORT version, so it is recorded in the `.verified` marker, not pinned here.
+# Files with `quantize` (none since the FairFace INT8 pair was retired) are not downloaded:
+# `roboemot models fetch` produces them from the verified FP32 `source` file with ONNX Runtime
+# dynamic quantization (SPEC 5, 13); their digest depends on the ORT version, so it is recorded
+# in the `.verified` marker, not pinned here.
 models:
   - name: yunet
     role: face_detector
@@ -30,54 +31,6 @@ models:
         url: https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx
         sha256: 0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79
         size_bytes: 38696353
-  - name: fairface-age
-    role: attribute_estimator
-    licence: Apache-2.0
-    source: https://huggingface.co/dima806/fairface_age_image_detection
-    notes: ONNX export by onnx-community (no licence tag on the export repository)
-    labels: ["0-2", "3-9", "10-19", "20-29", "30-39", "40-49", "50-59", "60-69", "more than 70"]
-    labels_source: https://huggingface.co/onnx-community/fairface_age_image_detection-ONNX/resolve/main/config.json
-    labels_sha256: b7ebbfec7938cc4db21d972bd1aecdaf084204e24ddc1d6bde8ada64bb768652
-    files:
-      - path: fairface/age_model.onnx
-        url: https://huggingface.co/onnx-community/fairface_age_image_detection-ONNX/resolve/main/onnx/model.onnx
-        sha256: 7f28fc7e890b4c21bf48f65d9985cefaea3430c28df1391e4f91293c0d89555a
-        size_bytes: 343423222
-  - name: fairface-gender
-    role: attribute_estimator
-    licence: Apache-2.0
-    source: https://huggingface.co/dima806/fairface_gender_image_detection
-    notes: ONNX export by onnx-community (no licence tag on the export repository)
-    labels: ["Female", "Male"]
-    labels_source: https://huggingface.co/onnx-community/fairface_gender_image_detection-ONNX/resolve/main/config.json
-    labels_sha256: 91e6d6959687a9f84f488d9332213d8dc5cf0f3339f35e7cbbc5043d492bfb4f
-    files:
-      - path: fairface/gender_model.onnx
-        url: https://huggingface.co/onnx-community/fairface_gender_image_detection-ONNX/resolve/main/onnx/model.onnx
-        sha256: f9a361ef12ea495caf10c7ca1aff24b5fad21a4bd77f0e363597129779be836d
-        size_bytes: 343401688
-  - name: fairface-age-int8
-    role: attribute_estimator
-    licence: Apache-2.0
-    source: https://huggingface.co/dima806/fairface_age_image_detection
-    notes: INT8 (QInt8 dynamic) of fairface-age, produced locally; about 87 MB
-    labels: ["0-2", "3-9", "10-19", "20-29", "30-39", "40-49", "50-59", "60-69", "more than 70"]
-    labels_source: https://huggingface.co/onnx-community/fairface_age_image_detection-ONNX/resolve/main/config.json
-    labels_sha256: b7ebbfec7938cc4db21d972bd1aecdaf084204e24ddc1d6bde8ada64bb768652
-    files:
-      - path: fairface_int8/age_model.onnx
-        quantize: {source: fairface/age_model.onnx, weight_type: QInt8}
-  - name: fairface-gender-int8
-    role: attribute_estimator
-    licence: Apache-2.0
-    source: https://huggingface.co/dima806/fairface_gender_image_detection
-    notes: INT8 (QInt8 dynamic) of fairface-gender, produced locally; about 87 MB
-    labels: ["Female", "Male"]
-    labels_source: https://huggingface.co/onnx-community/fairface_gender_image_detection-ONNX/resolve/main/config.json
-    labels_sha256: 91e6d6959687a9f84f488d9332213d8dc5cf0f3339f35e7cbbc5043d492bfb4f
-    files:
-      - path: fairface_int8/gender_model.onnx
-        quantize: {source: fairface/gender_model.onnx, weight_type: QInt8}
   - name: dinov2-small
     role: appearance_embedder
     licence: Apache-2.0
@@ -106,3 +59,12 @@ models:
         url: https://github.com/RangiLyu/nanodet/releases/download/v1.0.0-alpha-1/nanodet-plus-m_320.onnx
         sha256: 4f12723cce3d48e47ca92cb925ba74d97a965c069208edca660bbb9f7ce2c610
         size_bytes: 4793615
+# Files of models that were replaced or removed (SPEC 5, 13; the yolo11n-face-age age model went
+# with the owner decision 2026-10-23 to estimate no age): `roboemot models prune` deletes them
+# and their markers from a models folder that still has them. Nothing loads them any more.
+retired:
+  - fairface/age_model.onnx
+  - fairface/gender_model.onnx
+  - fairface_int8/age_model.onnx
+  - fairface_int8/gender_model.onnx
+  - yolo11n_face_age/model.onnx

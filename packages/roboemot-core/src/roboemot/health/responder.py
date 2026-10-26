@@ -8,8 +8,9 @@ Everything local keeps running (idle, gaze, affect); connectivity only colours i
   down (:meth:`OfflineResponder.speech_while_offline`) it plays a puzzled, slightly apologetic
   one instead of waiting for a model that cannot answer;
 - an :class:`OfflineCue` says ``connectivity.offline_phrases[language]`` once per outage and on
-  speech while offline, at most every ``cue_cooldown_s``. Until speech output is wired the cue
-  is :class:`SilentCue`.
+  speech while offline, at most every ``cue_cooldown_s``. The runtime installs a
+  :class:`~roboemot.health.speech_cue.SpeechCue` once the speech output exists; without a
+  speaker the cue stays :class:`SilentCue`.
 
 The gestures are the manifest's ``gesture_map`` entries ``perk_up`` and ``puzzled`` (SPEC 7):
 additive primitives over whichever of their channels the robot has. A manifest without one of
@@ -35,14 +36,16 @@ UNAVAILABLE = "conversation.unavailable"
 
 
 class OfflineCue(Protocol):
-    def say(self, text: str, language: str) -> None: ...
+    def say(self, text: str, language: str) -> bool:
+        """Say ``text``; whether it was actually queued (muted or no output: ``False``)."""
+        ...
 
 
 class SilentCue:
-    """Placeholder until a TTS backend is wired (SPEC 8)."""
+    """The cue when there is no speech output (voice disabled, or before it is built)."""
 
-    def say(self, text: str, language: str) -> None:
-        pass
+    def say(self, text: str, language: str) -> bool:
+        return False
 
 
 PERK_UP, PUZZLED = "perk_up", "puzzled"
@@ -69,13 +72,14 @@ class OfflineResponder:
             elif event in (NETWORK_RESTORED, ROBOT_RESTORED):
                 self._play(self.expression.gesture(PERK_UP), now)
 
-    def speech_while_offline(self, now: float) -> None:
-        """Someone spoke and the router is :class:`~roboemot.llm.Offline`: reply nonverbally."""
+    def speech_while_offline(self, now: float, language: str | None = None) -> None:
+        """Someone spoke and the router is :class:`~roboemot.llm.Offline`: reply nonverbally and
+        with the cue in ``language`` (the utterance's; default the configured one)."""
         with self._lock:
             if self.affect:
                 self.affect.on_event(UNAVAILABLE, now)
             self._play(self.expression.gesture(PUZZLED), now)
-            self._say(now)
+            self._say(now, language)
 
     def commands(self, now: float) -> list[Command]:
         """Gesture commands for this tick; feed them to the motion loop with the idle ones."""
@@ -88,11 +92,14 @@ class OfflineResponder:
             self._players = [p for p in self._players if p.prim.name != prim.name]
             self._players.append(Player(prim, now, source=f"connectivity:{prim.name}"))
 
-    def _say(self, now: float) -> None:
-        text = self.cfg.offline_phrases.get(self.language)
-        if text and now - self._last_cue >= self.cfg.cue_cooldown_s:
+    def _say(self, now: float, language: str | None = None) -> None:
+        """The phrase of ``language`` (else of the configured one), at most every cooldown."""
+        phrases = self.cfg.offline_phrases
+        lang = language if language in phrases else self.language
+        text = phrases.get(lang)
+        due = now - self._last_cue >= self.cfg.cue_cooldown_s
+        if text and due and self.cue.say(text, lang):  # a muted cue leaves the cooldown free
             self._last_cue = now
-            self.cue.say(text, self.language)
 
 
 __all__ = ["PERK_UP", "PUZZLED", "OfflineCue", "OfflineResponder", "SilentCue"]

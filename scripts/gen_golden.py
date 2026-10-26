@@ -4,8 +4,8 @@
 Format (one record per line):
   dof <name> <min> <max> <max_vel> <max_acc> <home>
   yaw_delta <a> <b> <max_rad>
-  config <crossfade_s> <watchdog_s> <minor_factor> <watchdog_return_factor> <margin> <dt>
-  tick <now> <minor 0|1>
+  config <crossfade_s> <watchdog_s> <watchdog_return_factor> <margin> <dt>
+  tick <now>
   cmd <source> <priority> <additive 0|1> <stamp> <expires|-1> <n> (<dof> <value>)*n
   expect <n> (<dof> <value>)*n
 """
@@ -29,18 +29,17 @@ CONSTRAINTS = [Constraint(type="yaw_delta", a="head.yaw", b="body_yaw", max_deg=
 CFG = {
     "crossfade_s": 0.15,
     "watchdog_s": 0.2,
-    "minor_factor": 0.6,
     "watchdog_return_factor": 0.3,
     "constraint_margin": math.radians(3.0),
 }
 DT = 0.01
 
 
-def script(tick: int, now: float) -> tuple[list[Command], bool]:
+def script(tick: int, now: float) -> list[Command]:
     """Scenario: commanded move, expression on top, reflex pre-emption with cross-fade,
-    yaw-delta conflict, minor present, expiry, then silence to trigger the watchdog."""
+    yaw-delta conflict, an additive overflow at a limit, expiry, then silence to trigger the
+    watchdog."""
     cmds: list[Command] = []
-    minor = 150 <= tick < 250 or 300 <= tick < 400
     if tick < 300:
         cmds.append(Command("idle", Priority.IDLE, {"head.pitch": 0.02 * math.sin(now)}, now))
         cmds.append(
@@ -70,12 +69,12 @@ def script(tick: int, now: float) -> tuple[list[Command], bool]:
                 expires=now + 0.05,
             )
         )
-    if 300 <= tick < 400:  # winner near its limit plus an additive overflow, minor on (SPEC 12)
+    if 300 <= tick < 400:  # winner near its limit plus an additive overflow (SPEC 12)
         cmds.append(Command("hold", Priority.COMMANDED, {"head.pitch": 0.7}, now))
         cmds.append(Command("bump", Priority.EXPRESSION, {"head.pitch": 0.2}, now, additive=True))
     if tick == 200:
         cmds.append(Command("prim", Priority.COMMANDED, {"body_yaw": -1.0}, now, expires=now + 0.4))
-    return cmds, minor
+    return cmds
 
 
 def main(out: Path) -> None:
@@ -86,14 +85,13 @@ def main(out: Path) -> None:
     ]
     lines += [f"yaw_delta {c.a} {c.b} {math.radians(c.max_deg)!r}" for c in CONSTRAINTS]
     lines.append(
-        f"config {CFG['crossfade_s']!r} {CFG['watchdog_s']!r} {CFG['minor_factor']!r} "
+        f"config {CFG['crossfade_s']!r} {CFG['watchdog_s']!r} "
         f"{CFG['watchdog_return_factor']!r} {CFG['constraint_margin']!r} {DT!r}"
     )
     for tick in range(600):
         now = round(tick * DT, 10)
-        cmds, minor = script(tick, now)
-        lines.append(f"tick {now!r} {int(minor)}")
-        core.minor_present = minor
+        cmds = script(tick, now)
+        lines.append(f"tick {now!r}")
         for c in cmds:
             exp = c.expires if c.expires is not None else -1
             pairs = " ".join(f"{k} {v!r}" for k, v in c.targets.items())

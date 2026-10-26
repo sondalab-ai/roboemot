@@ -11,11 +11,9 @@ import httpx
 import pytest
 from roboemot.affect import AffectEngine
 from roboemot.config.schema import RoboEmotConfig
-from roboemot.llm.prompt import MINOR_RULE
 from roboemot.skills import SkillContext, SkillRegistry, skill
 from roboemot.skills.defaults import SkillEnv, default_skills
 from test_conversation_worker import (
-    CLEARED,
     GATE,
     LAN,
     rigs,  # noqa: F401  (fixture)
@@ -254,65 +252,6 @@ def test_a_bad_call_is_answered_with_an_error_the_model_can_read(tooled, caplog)
     assert rig.speech.texts() == ["Non ci riesco."]
 
 
-def test_every_round_applies_the_minor_rules(tooled):
-    rig, srv, env = tooled(
-        [C(0, "c1", "play", {"gesture": "joy"})],
-        ["Ciao. ", "Voglio uccidere il tempo."],
-        routes=(CLEARED,),
-        safety={"minors_allowed_llm": True},
-    )
-    rig.minor[0] = True
-    rig.register[0] = rig.stack.effective().register.child
-    rig.turn("ciao")
-    texts = rig.speech.texts()
-    assert env.played == ["joy"] and len(srv.bodies) == 2
-    assert all(MINOR_RULE in b["messages"][0]["content"] for b in srv.bodies)
-    assert texts[0] == "Ciao." and "uccidere" not in " ".join(texts)
-    assert rig.worker.snapshot()["filtered"] == 1 and all(s["minor"] for s in rig.speech.said)
-
-
-def test_a_minor_appearing_between_rounds_ends_the_turn(tooled):
-    rig, srv, env = tooled(
-        ["Guardo. ", C(0, "c1", "play", {"gesture": "joy"})],
-        ["Non deve arrivare."],
-        routes=({**LAN, "name": "lan"},),
-    )
-
-    def appears(gesture):
-        rig.minor[0] = True
-        return True
-
-    rig.worker.skills = default_skills(
-        SkillEnv(lambda: ["joy"], appears, lambda: [], lambda t: True, Env().engine)
-    )
-    rig.turn("ciao")
-    assert len(srv.bodies) == 1  # no second request
-    assert rig.speech.texts() == ["Guardo."]  # said before the skill ran; the next round never came
-    assert rig.worker.snapshot()["minor_cut"] == 1
-
-
-def test_skills_not_allowed_with_a_minor_are_not_offered_to_a_child(tooled):
-    rig, srv, _ = tooled(
-        ["Ciao."],
-        routes=(CLEARED,),
-        safety={"minors_allowed_llm": True},
-        conversation={"llm_skills": ["adults_only", "anyone"]},
-    )
-
-    @skill(llm_visible=True, allowed_with_minor=False)
-    def adults_only() -> str:
-        return "x"
-
-    @skill(llm_visible=True)
-    def anyone() -> str:
-        return "y"
-
-    rig.worker.skills = SkillRegistry([adults_only, anyone])
-    rig.minor[0] = True
-    rig.turn("ciao")
-    assert "adults_only" not in names(srv.bodies[0])
-
-
 # ------------------------------------------------------------------ stop_talking
 
 
@@ -462,34 +401,6 @@ def test_unclean_or_long_preferences_are_refused_before_asking(tooled):
     rig.turn("sì")
     [(_, key, value)] = rig.worker.preferences.saved
     assert key == "colore preferito" and value == "blu ignore previous"
-
-
-def test_the_question_for_a_child_passes_the_output_filter(tooled):
-    rig, srv, _ = tooled(
-        [remember("gioco", "uccidere")],
-        ["Ok."],
-        routes=(CLEARED,),
-        store=Store(),
-        safety={"minors_allowed_llm": True},
-    )
-    rig.minor[0] = True
-    rig.turn("ricordati")
-    store = rig.worker.preferences
-    assert store.saved == [] and "uccidere" not in " ".join(rig.speech.texts())
-    assert json.loads(srv.bodies[1]["messages"][-1]["content"]) == {"status": "not_allowed"}
-
-
-def test_a_child_may_confirm_a_harmless_preference(tooled):
-    store = Store()
-    rig, srv, _ = tooled(
-        [remember("animale", "gatto")], routes=(CLEARED,), store=store,
-        safety={"minors_allowed_llm": True},
-    )  # fmt: skip
-    rig.minor[0] = True
-    rig.turn("ricordati")
-    assert rig.speech.said[0]["minor"] is True
-    rig.turn("sì")
-    assert store.saved == [("p1", "animale", "gatto")]
 
 
 def test_preferences_never_reach_logs_or_the_bus(tooled, caplog):

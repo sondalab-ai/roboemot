@@ -52,7 +52,7 @@ function fields() {
     d("conversation.confirm_yes", "string_list_dict", { value: ["en"], writable: false }),
     d("conversation.confirm_yes.en", "string_list", { value: ["yes"], default: ["yes"] }),
     d("privacy.note", "text", { value: "***", default: "***", private: true, admin_only: true }),
-    d("safety.blocklist_word", "string_list", { value: ["bad"], default: ["bad"], conservative: "superset" }),
+    d("safety.word_list", "string_list", { value: ["bad"], default: ["bad"] }),
   ];
 }
 
@@ -359,18 +359,18 @@ test("the slider and the number input stay in step", async () => {
   assert.match(slider.style.getPropertyValue("--sl-slider-value"), /^75%$/);
 });
 
-test("a superset list can lose words (the server asks for the PIN) and is resettable from the runtime layer", async () => {
-  const flat = fields().map((f) => (f.path === "safety.blocklist_word" ? { ...f, source: "runtime" } : f));
+test("a string list can lose items (the server asks for the PIN) and is resettable from the runtime layer", async () => {
+  const flat = fields().map((f) => (f.path === "safety.word_list" ? { ...f, source: "runtime" } : f));
   const page = await settingsPage({ "POST /api/settings": { changed: true, layer: "app", persisted: true } }, { fields: flat, pin_required: true });
   await open(page, "core-safety");
-  const box = row(page, "safety.blocklist_word");
+  const box = row(page, "safety.word_list");
   assert.equal(box.querySelector(".sl-chip").disabled, false);
   assert.equal(buttons(box, "settings_reset_layer").length, 1);
   box.querySelector(".sl-chip").click();
   button(box, "settings_save").click();
   await settle();
   await answerPin(page);
-  assert.deepEqual(posts(page, "/api/settings")[0].body, { path: "safety.blocklist_word", value: [], pin: PIN });
+  assert.deepEqual(posts(page, "/api/settings")[0].body, { path: "safety.word_list", value: [], pin: PIN });
 });
 
 test("reset to the lower layer is offered for runtime values and goes through the PIN", async () => {
@@ -737,7 +737,7 @@ test("the debug tab works without a robot section", async () => {
 });
 
 const RESTARTABLE = { ...ROBOT, actions: ["restart"], restart_effects: [
-  { id: "zero_pose", params: {} }, { id: "webrtc_drop", params: {} }, { id: "kill_on_timeout", params: { timeout_s: 20 } },
+  { id: "zero_pose", params: {} }, { id: "remote_session_drop", params: {} }, { id: "kill_on_timeout", params: { timeout_s: 20 } },
 ] };
 const restartPage = (extra = {}) =>
   settingsPage({ "POST /api/robot/restart": { ok: true }, ...extra }, { fields: fields(), robot: RESTARTABLE, pin_required: true });
@@ -752,7 +752,7 @@ test("restart: the button exists only with the action, the dialog lists the side
   assert.ok(dialog, "confirm dialog");
   assert.equal(dialog.querySelector("#dialog-title").textContent, "settings_restart_title");
   assert.deepEqual([...dialog.querySelectorAll("li")].map((li) => li.textContent), [
-    "settings_restart_effect_zero_pose", "settings_restart_effect_webrtc_drop", "settings_restart_effect_kill_on_timeout",
+    "settings_restart_effect_zero_pose", "settings_restart_effect_remote_session_drop", "settings_restart_effect_kill_on_timeout",
   ]);
   assert.equal(posts(page, "/api/robot/restart").length, 0, "nothing is sent before the PIN");
   await answerPin(page);
@@ -835,15 +835,15 @@ test("restart: the button is rebuilt on refresh, so it appears and disappears wi
 });
 
 test("a revealed private container brings its removable list", async () => {
-  const hidden = d("safety.minor_lines", "dict_of_model", { value: [], private: true, admin_only: true, removable: [], writable: false });
-  const shown = d("safety.minor_lines", "dict_of_model", { value: ["xx"], private: true, admin_only: true, removable: ["xx"], entry: ENTRY, writable: false });
-  const page = await settingsPage({ "POST /api/settings/reveal": { fields: [shown, d("safety.minor_lines.xx.rate", "number", { value: 1, private: true, admin_only: true })] } },
+  const hidden = d("privacy.notes", "dict_of_model", { value: [], private: true, admin_only: true, removable: [], writable: false });
+  const shown = d("privacy.notes", "dict_of_model", { value: ["xx"], private: true, admin_only: true, removable: ["xx"], entry: ENTRY, writable: false });
+  const page = await settingsPage({ "POST /api/settings/reveal": { fields: [shown, d("privacy.notes.xx.rate", "number", { value: 1, private: true, admin_only: true })] } },
     { fields: [hidden], pin_required: true });
-  await open(page, "core-safety");
-  button(row(page, "safety.minor_lines"), "settings_reveal").click();
+  await open(page, "core-privacy");
+  button(row(page, "privacy.notes"), "settings_reveal").click();
   await settle();
   await answerPin(page);
-  const block = page.document.querySelector('[data-entry="safety.minor_lines.xx"]');
+  const block = page.document.querySelector('[data-entry="privacy.notes.xx"]');
   assert.equal(buttons(block, "settings_remove_entry").length, 1);
 });
 
@@ -957,32 +957,17 @@ test("the restart availability flipping updates the badge in place and keeps uns
   assert.equal(label().value, "draft");
 });
 
-test("a language can be added to the blocklist: key and words are posted with the PIN", async () => {
-  const lists = [
-    d("safety.minor_output_blocklist", "string_list_dict", { value: ["en"], private: true, admin_only: true, writable: false }),
-    d("safety.minor_output_blocklist.en", "string_list", { value: ["bad"], private: true, admin_only: true }),
-  ];
-  const revealed = lists.map((f) => ({ ...f }));
+test("save: a change the robot's parts did not take is announced as an error (R3 SF3)", async () => {
   const page = await settingsPage({
-    "POST /api/settings/reveal": { fields: revealed },
-    "POST /api/settings/entry": { path: lists[0].path, changed: true, layer: "runtime", persisted: true },
-  }, { fields: lists, pin_required: true });
-  await open(page, "core-safety");
-  button(row(page, lists[0].path), "settings_reveal").click();
+    "POST /api/settings": { path: "voice.flag", changed: true, value: false, layer: "runtime", restart_required: false, persisted: true, applied: false },
+  });
+  await open(page, "core-voice");
+  const box = row(page, "voice.flag");
+  box.querySelector("input").checked = false;
+  button(box, "settings_save").click();
   await settle();
   await answerPin(page);
-  const container = row(page, lists[0].path);
-  const toggles = container.querySelectorAll(".sl-disclosure");
-  toggles[toggles.length - 1].click();
-  const forms = container.querySelectorAll(".nested");
-  const form = forms[forms.length - 1];
-  form.querySelector('input[type="text"]').value = "de";
-  const words = form.querySelectorAll('input[type="text"]')[1];
-  words.value = "mist";
-  button(form, "settings_add").click();
-  button(form, "settings_add_entry").click();
-  await settle();
-  await answerPin(page);
-  assert.deepEqual(posts(page, "/api/settings/entry")[0].body, { path: lists[0].path, key: "de", value: ["mist"], pin: PIN });
+  const notice = page.document.querySelector("#notice");
+  assert.ok(notice.textContent.includes("settings_not_applied"));
+  assert.ok(notice.className.includes("sl-callout--danger"), notice.className);
 });
-

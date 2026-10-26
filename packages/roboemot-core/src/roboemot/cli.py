@@ -1,6 +1,6 @@
 """Command line: ``roboemot config {validate,schema,dump}``, ``roboemot manifest check``,
 ``roboemot discover``, ``roboemot debug``, ``roboemot models {list,fetch}`` and
-``roboemot llm check`` and ``roboemot secrets {set,remove,list}``."""
+``roboemot llm check``, ``roboemot secrets {set,remove,list}`` and ``roboemot voice sample``."""
 
 from __future__ import annotations
 
@@ -19,7 +19,10 @@ import yaml
 from .config import ConfigError, ConfigStack, GuardrailError, RoboEmotConfig
 from .redact import scrub_text
 
+MB = 1e6  # model sizes as the README and the manifests state them
+
 HTTP_CLIENT_FACTORY: Callable[[], httpx.AsyncClient] | None = None  # tests inject a transport
+PIPER_SCRIPT: Path | None = None  # tests inject a fake Piper worker
 
 
 def _stack(args: argparse.Namespace) -> ConfigStack:
@@ -112,6 +115,11 @@ def _models(args: argparse.Namespace) -> int:
             for name, role, licence, state in rows:
                 print(f"{name:{widths[0]}}  {role:{widths[1]}}  {licence:{widths[2]}}  {state}")
             print(f"folder: {root}")
+        for path, size in models.retired_on_disk(vision_root):
+            print(
+                f"retired, unused: {path} ({size / MB:.1f} MB); run `roboemot models prune` "
+                "to delete it"
+            )
         legacy = models.legacy_dir()
         if vision_root != legacy and legacy.is_dir() and any(legacy.iterdir()):
             print(
@@ -121,14 +129,12 @@ def _models(args: argparse.Namespace) -> int:
             )
         return 0
     if args.action == "prune":
-        if not args.sources:
-            raise ValueError(
-                "prune needs --sources (delete FP32 files whose INT8 files are verified)"
-            )
-        removed = models.prune_sources(vision_root)
+        removed = models.prune_retired(vision_root)
+        if args.sources:
+            removed += models.prune_sources(vision_root)
         for path in removed:
             print(f"deleted    {path}")
-        print(f"{len(removed)} source file(s) deleted")
+        print(f"{len(removed)} file(s) deleted from {vision_root}")
         return 0
     wanted = set(args.names)
     if args.all:
@@ -167,8 +173,10 @@ def _llm(args: argparse.Namespace) -> int:
 
     if cfg.privacy.pseudonyms_to_cloud:
         print(
-            "warning: pseudonyms are on, but the CLI does not read the registry; the synthetic "
-            "prompts are sent as they are (no registry names are in them)",
+            "warning: pseudonyms are on, but the CLI does not read the registry; on a route "
+            "that is not local the check sends a system prompt built from the library's default "
+            "config instead of yours (persona, register, rules, mood labels; no registry names "
+            "are in them)",
             file=sys.stderr,
         )
 
@@ -178,6 +186,7 @@ def _llm(args: argparse.Namespace) -> int:
                 route,
                 cfg.safety,
                 settings=cfg.llm_check,
+                config=cfg,
                 secrets=SecretStore.for_data_dir(cfg.data_dir).get,
                 http_client_factory=HTTP_CLIENT_FACTORY,
             ),
@@ -195,6 +204,57 @@ def _llm(args: argparse.Namespace) -> int:
             print(f"{c.status:5} {c.name:20} {c.reason}")
         print(f"route {report.route} ({report.model}): {'ok' if report.ok else 'FAILED'}")
     return 0 if report.ok else 1
+
+
+def _voice(args: argparse.Namespace) -> int:
+    """Render the sample reply in every mood with the local Piper voice (SPEC 8): no network,
+    whatever ``voice.backend`` says."""
+    from .voice import models as voice_models
+    from .voice.factory import piper_python
+    from .voice.piper_backend import WORKER_SCRIPT, PiperBackend, manifest_voice_files
+    from .voice.sample import render_samples
+    from .voice.tts import TTSError, TTSUnavailable
+
+    stack = _stack(args)
+    if args.manifest:
+        from .manifest import load_manifest
+
+        # only the behaviour block (config layer 2) is used: nothing moves, so no platform is
+        # loaded for its body yaw (the runtime refuses a body turn in the speaking map at start)
+        m = load_manifest(Path(args.manifest), allow_unmeasured_dynamics=args.dev)
+        stack.set_manifest_behaviour(m.model.behaviour, m.channels, body_yaw=None)
+    cfg = stack.effective()
+    root = voice_models.models_dir(args.voice_dir or cfg.voice.models_dir, cfg.data_dir)
+    backend = PiperBackend(
+        cfg.voice.piper,
+        args.python or piper_python(cfg),
+        manifest_voice_files(root),
+        script=PIPER_SCRIPT or WORKER_SCRIPT,
+    )
+
+    async def run():
+        try:
+            return await render_samples(
+                cfg, backend, Path(args.out), language=args.lang, intensity=args.intensity
+            )
+        finally:
+            await backend.aclose()
+
+    try:
+        samples = asyncio.run(run())
+    except TTSUnavailable as exc:
+        raise RuntimeError(
+            f"{exc}; fetch the voices with `roboemot models fetch --voice` or pass --voice-dir"
+        ) from exc
+    except TTSError as exc:
+        raise RuntimeError(
+            f"{exc}; pass --python <piper-venv>/bin/python (the interpreter that has piper-tts)"
+        ) from exc
+    for s in samples:
+        rates = " ".join(f"{d.rate:.2f}" for d in s.deliveries)
+        pitches = " ".join(f"{d.pitch_st:+.1f}" for d in s.deliveries)
+        print(f"{s.path}  {s.seconds:.1f} s  rate {rates}  pitch_st {pitches}")
+    return 0
 
 
 def read_secret_value(stdin=None) -> str | None:
@@ -268,24 +328,29 @@ def main(argv: list[str] | None = None) -> int:
     dbg.add_argument("--json", action="store_true")
 
     mod = sub.add_parser(
-        "models", help="vision and voice model files: list, fetch, prune (SPEC 5, 8, 13)"
+        "models",
+        help="vision and voice model files: list, fetch, prune (delete the files of replaced "
+        "models, such as the FairFace pair; on the bench cache that includes files the bench "
+        "scripts use) (SPEC 5, 8, 13)",
     )
     mod.add_argument("action", choices=["list", "fetch", "prune"])
     mod.add_argument("names", nargs="*", help="models to fetch (see `list`)")
     mod.add_argument(
         "--all",
         action="store_true",
-        help="fetch every vision and voice model (about 0.8 GB plus 0.17 GB of INT8 files made "
-        "from it, and about 0.3 GB of voice models)",
+        help="fetch every vision and voice model (about 0.13 GB of vision and 0.3 GB of voice "
+        "models)",
     )
     mod.add_argument("--voice", action="store_true", help="fetch every voice model (about 0.3 GB)")
     mod.add_argument(
-        "--requantize", action="store_true", help="fetch: rebuild INT8 files from the FP32 sources"
+        "--requantize",
+        action="store_true",
+        help="fetch: rebuild quantized files from their sources (none ship today)",
     )
     mod.add_argument(
         "--sources",
         action="store_true",
-        help="prune: delete FP32 files whose INT8 files are verified",
+        help="prune: also delete source files whose quantized files are verified (none ship today)",
     )
     mod.add_argument(
         "--cache-dir", help="models folder (default: vision.models_dir, else the app data folder)"
@@ -322,8 +387,44 @@ def main(argv: list[str] | None = None) -> int:
     sec.add_argument("--preset")
     sec.add_argument("--preset-dir", action="append", default=["configs/presets"])
 
+    voice = sub.add_parser(
+        "voice",
+        help="voice tools: `sample` renders one fixed reply, neutral and in every mood, to WAV "
+        "with the local Piper voice and the configured delivery (SPEC 8); needs the Piper "
+        "virtualenv and the voice models (`roboemot models fetch --voice`), no network",
+    )
+    voice.add_argument("action", choices=["sample"])
+    voice.add_argument("--out", required=True, help="folder for the WAV files")
+    voice.add_argument("--lang", default="it", choices=["it", "en"])
+    voice.add_argument(
+        "--intensity", type=float, default=0.5, help="affect intensity 0..1 (default 0.5)"
+    )
+    voice.add_argument(
+        "--manifest",
+        help="robot manifest whose behaviour layer applies (e.g. the robot's base pitch)",
+    )
+    voice.add_argument(
+        "--dev", action="store_true", help="accept a manifest with unmeasured dynamics"
+    )
+    voice.add_argument(
+        "--python", help="Piper virtualenv interpreter (default: voice.piper.python, else the "
+        "app data folder's piper-venv)",
+    )  # fmt: skip
+    voice.add_argument(
+        "--voice-dir",
+        help="voice models folder (default: voice.models_dir, else the app data folder)",
+    )
+    voice.add_argument("--app")
+    voice.add_argument("--defaults")
+    voice.add_argument("--preset")
+    voice.add_argument("--preset-dir", action="append", default=["configs/presets"])
+
     args = parser.parse_args(argv)
     try:
+        if args.cmd == "voice":
+            if not 0.0 <= args.intensity <= 1.0:
+                raise ValueError("--intensity must be within 0 and 1")
+            return _voice(args)
         if args.cmd == "secrets":
             return _secrets(args)
         if args.cmd == "config":

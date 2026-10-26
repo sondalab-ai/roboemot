@@ -3,8 +3,9 @@
 Convention (REP-103): x forward, y left, z up, right-handed rotations. Azimuth is measured
 from x toward y (positive left), elevation from the xy plane toward z (positive up). A
 positive pitch is a right-handed rotation about y, so it points the nose down; positive
-roll is about x, positive yaw about z (turn left). This matches the Reachy Mini driver,
-which reads head angles as scipy Euler ``xyz`` (extrinsic: roll, then pitch, then yaw).
+roll is about x, positive yaw about z (turn left). A robot driver converts its
+SDK's head angles to this convention
+(e.g. scipy Euler ``xyz``, extrinsic: roll, then pitch, then yaw).
 
 Bearings are captured in the sensor frame and rotated into the base frame with the joint
 state at capture time: ``R = Rz(yaw) Ry(pitch) Rx(roll)``. Which dofs count per axis is

@@ -24,11 +24,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .. import paths, shutdown
+from .. import paths, priority, shutdown
 from ..bus import Bus
 from ..config.schema import RoboEmotConfig
 from ..registry import FileStore, Matcher, Registry
 from ..registry.enrollment import EnrollmentService
+from ..world import FrameSpec
 from .geometry import CameraModel
 from .governor import RateGovernor
 from .pipeline import VisionPipeline
@@ -73,23 +74,37 @@ class VisionService:
         self.pipeline = pipeline
         self.cfg = cfg
         self.source = CountingSource(source)
-        self.runner = LatestFrameRunner(pipeline)
+        self.runner = LatestFrameRunner(pipeline, overlay=pipeline.preview_overlay)
         self._stop = threading.Event()
+        self._paused = threading.Event()
         self._thread: threading.Thread | None = None
+
+    def pause(self) -> None:
+        """Stop reading the camera until :meth:`resume` (the robot is asleep, SPEC 12A); the
+        threads stay, idle, so nothing is restarted or leaked."""
+        self._paused.set()
+
+    def resume(self) -> None:
+        self._paused.clear()
+
+    @property
+    def paused(self) -> bool:
+        return self._paused.is_set()
 
     def start(self) -> None:
         """Start the worker and the camera thread."""
         self._stop.clear()
         self.runner.start()
-        self._thread = threading.Thread(target=self._pump, name="roboemot-camera", daemon=True)
-        self._thread.start()
+        thread = threading.Thread(target=self._pump, name="roboemot-camera", daemon=True)
+        thread.start()
+        self._thread = thread
 
     def stop(self) -> None:
-        """Quiet the camera thread, then stop the worker and the attribute worker.
+        """Quiet the camera thread, then stop the worker.
 
         The camera thread is joined with a timeout and a timeout is logged: a read stuck in the
         SDK cannot be interrupted, so the caller must tear the SDK down knowing it may still be
-        inside it. The worker and the pipeline are stopped even then.
+        inside it. The worker is stopped even then.
         """
         self._stop.set()
         try:
@@ -98,17 +113,21 @@ class VisionService:
                 if self._thread.is_alive():
                     log.warning("camera thread did not stop within %.0f s", JOIN_TIMEOUT_S)
         finally:
-            try:
-                self.runner.stop()
-            finally:
-                self.pipeline.close()
+            self.runner.stop()
 
     def _pump(self) -> None:
         """Pump frames; a failing camera read is counted, logged once per type, and retried."""
+        priority.lower_current()
         reported: str | None = None
         while not self._stop.is_set():
             try:
-                pump(self.source, self.runner, self._stop, self.cfg.vision.rates.camera_hz)
+                pump(
+                    self.source,
+                    self.runner,
+                    self._stop,
+                    self.cfg.vision.rates.camera_hz,
+                    paused=self._paused,
+                )
             except Exception as exc:
                 name = type(exc).__name__
                 if name != reported:
@@ -119,7 +138,7 @@ class VisionService:
     def snapshot(self) -> dict[str, Any]:
         """Rates, drops, tracks and last error types for the debug report (SPEC 12A)."""
         return {
-            "state": "running",
+            "state": "paused" if self._paused.is_set() else "running",
             "camera": {
                 "reads": self.source.reads,
                 "frames": self.source.frames,
@@ -179,7 +198,7 @@ class Perception:
         if self.registry is not None:
             self.registry.identity = cfg.identity
         if self.pipeline is not None:
-            self.pipeline.apply_config(cfg.vision, cfg.identity)
+            self.pipeline.apply_config(cfg.vision, cfg.identity, cfg.world)
 
     def vision_snapshot(self) -> dict[str, Any]:
         """The ``roboemot.vision`` report section."""
@@ -189,7 +208,7 @@ class Perception:
         if self.objects_unavailable is not None:
             snapshot["objects"] = {"state": "unavailable", "reason": self.objects_unavailable}
         elif self.pipeline is not None:
-            on = self.pipeline.object_detector is not None
+            on = self.pipeline.object_detector is not None and self.pipeline.cfg.objects_enabled
             snapshot["objects"] = {"state": "running" if on else "off"}
         return snapshot
 
@@ -227,13 +246,15 @@ def open_perception(
     profile: str | None = None,
     camera_model: CameraProvider | None = None,
     load_stages: StagesLoader = default_stages,
+    frame_spec: FrameSpec | None = None,
 ) -> Perception:
     """Open the registry under the data folder and, if the models load, build the pipeline.
 
     ``source`` is the robot's camera; ``camera_model`` gives its intrinsics for a frame size
     (None: the field of view in ``world.camera_fov_*``); ``profile`` is the robot manifest's
-    profile (``cm4`` picks the INT8 attribute models); ``load_stages`` is a seam for tests and
-    other backends. Nothing here starts a thread: call ``Perception.start``.
+    profile, passed to ``load_stages``; ``load_stages`` is a seam for tests and
+    other backends; ``frame_spec`` names the dofs that turn the camera, for the head pose in the
+    track report. Nothing here starts a thread: call ``Perception.start``.
     """
     try:
         data = paths.data_dir(cfg.data_dir)
@@ -266,12 +287,12 @@ def open_perception(
         matcher,
         face_detector=stages.face_detector,
         face_embedder=stages.face_embedder,
-        attribute_estimator=stages.attribute_estimator,
         appearance_embedder=stages.appearance_embedder,
         object_detector=stages.object_detector,
         governor=RateGovernor(cfg.vision.rates),
         camera_model=camera_model,
         world=cfg.world,
+        frame_spec=frame_spec,
     )
     enrollment.attach(pipeline)
     return Perception(

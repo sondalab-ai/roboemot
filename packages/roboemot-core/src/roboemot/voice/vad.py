@@ -22,14 +22,16 @@ held in RAM for the consumer only and is never logged: events hide it from ``rep
 from __future__ import annotations
 
 import math
+import threading
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 import numpy as np
 
 from ..config.schema import VadConfig
+from ..stats import P50, P90, P99, summarise
 
 MS_PER_S = 1000.0
 SILERO_RATE_HZ = 16000
@@ -41,6 +43,9 @@ SILERO_STATE_SHAPE = (2, 1, 128)
 MIN_OFF_THRESHOLD = 0.01
 # Reference level of EnergyVAD (tests and fallback only): an RMS of 0.1 (-20 dBFS) scores 1.
 ENERGY_FULL_SCALE_RMS = 0.1
+PEAK_LEVELS = {"p50": P50, "p90": P90, "p99": P99}
+RUN_LEVELS = {"p50": P50, "p90": P90}
+WATCH_COUNTS = ("frames", "frames_on", "starts", "ends_silence", "ends_max_length")
 
 
 @runtime_checkable
@@ -171,17 +176,42 @@ class Endpointer:
         self._rate = backend.rate_hz
         self._size = backend.frame_samples
         self._frame_s = self._size / self._rate
-        frame_ms = self._frame_s * MS_PER_S
-        self._on = config.threshold
-        self._off = max(config.threshold - config.off_margin, MIN_OFF_THRESHOLD)
-        self._min_frames = max(1, math.ceil(config.min_speech_ms / frame_ms))
-        self._end_frames = max(1, math.ceil(config.end_silence_ms / frame_ms))
-        self._max_s = config.max_utterance_s
-        pre_frames = math.ceil(config.pre_roll_ms / frame_ms)
-        self._ring: deque[tuple[float, np.ndarray]] = deque(maxlen=pre_frames + self._min_frames)
+        self._frame_ms = self._frame_s * MS_PER_S
         self._pending = np.empty(0, dtype=np.float32)
         self._pending_stamp = 0.0
+        # Report-only watch (SPEC 12A): feed() runs on the listener thread, snapshot() on the
+        # report thread; the lock covers the counters, the deque of finished bursts and the
+        # config a hot reload leaves for the next feed().
+        self._watch_prob = config.watch_prob
+        self._watch_lock = threading.Lock()
+        self._counts = dict.fromkeys(WATCH_COUNTS, 0)
+        self._bursts: deque[tuple[float, float, float, bool]] = deque(maxlen=config.watch_window)
+        self._next_config: VadConfig | None = None
+        self._ring: deque[tuple[float, np.ndarray]] = deque()
+        self._run = 0
+        self._configure(config)
         self.reset()
+
+    def apply_config(self, config: VadConfig) -> None:
+        """Hot reload (SPEC 11A), from any thread: the new values apply from the next chunk fed,
+        on the feeding thread, and an utterance in progress goes on. ``watch_prob``,
+        ``watch_window`` and ``threads`` keep their start-up values (restart fields)."""
+        with self._watch_lock:
+            self._next_config = config
+
+    def _configure(self, config: VadConfig) -> None:
+        """Derive the frame counts and thresholds; the pre-roll ring keeps its newest frames.
+        A run being counted is capped so the frame that confirms it still finds its first
+        frame in the ring, wherever the new sizes put it."""
+        self._on = config.threshold
+        self._off = max(config.threshold - config.off_margin, MIN_OFF_THRESHOLD)
+        self._min_frames = max(1, math.ceil(config.min_speech_ms / self._frame_ms))
+        self._end_frames = max(1, math.ceil(config.end_silence_ms / self._frame_ms))
+        self._max_s = config.max_utterance_s
+        self._watch = min(self._watch_prob, config.threshold)
+        size = math.ceil(config.pre_roll_ms / self._frame_ms) + self._min_frames
+        self._ring = deque(self._ring, maxlen=size)
+        self._run = min(self._run, size - 1)
 
     @property
     def frame_s(self) -> float:
@@ -194,7 +224,8 @@ class Endpointer:
         return self._speaking
 
     def reset(self) -> None:
-        """Drop the utterance in progress, buffered audio and the backend state."""
+        """Drop the utterance in progress, buffered audio, the backend state and any speech
+        burst being watched (not recorded); the report counters and finished bursts stay."""
         self._vad.reset()
         self._ring.clear()
         self._pending = np.empty(0, dtype=np.float32)
@@ -205,15 +236,26 @@ class Endpointer:
         self._utterance_stamp = 0.0
         self._start_stamp = 0.0
         self._last_speech = 0.0
+        self._burst_peak: float | None = None
+        self._burst_run = 0
+        self._burst_longest = 0
+        self._burst_frames = 0
 
     def feed(self, samples: np.ndarray, stamp: float) -> list[VADEvent]:
         """Add a chunk (mono float32, any length) starting at ``stamp``; returns new events."""
         if samples.dtype != np.float32 or samples.ndim != 1:
             raise ValueError(f"expected mono float32 samples, got {samples.dtype} {samples.shape}")
+        with self._watch_lock:
+            config, self._next_config = self._next_config, None
+        events: list[VADEvent] = []
+        if config is not None:
+            self._configure(config)
+            # A run that already qualifies under a shorter min_speech_ms starts now.
+            if not self._speaking and self._run >= self._min_frames:
+                events.append(self._begin(self._ring[-1][0]))
         if len(self._pending) == 0:
             self._pending_stamp = stamp
         buf = np.concatenate([self._pending, samples]) if len(self._pending) else samples.copy()
-        events: list[VADEvent] = []
         pos = 0
         while len(buf) - pos >= self._size:
             frame = buf[pos : pos + self._size]
@@ -227,6 +269,7 @@ class Endpointer:
         """Advance the state machine by one frame starting at ``stamp``."""
         prob = self._vad.speech_prob(frame)
         frame_end = stamp + self._frame_s
+        self._watch_frame(prob)
         if not self._speaking:
             self._ring.append((stamp, frame))
             self._run = self._run + 1 if prob >= self._on else 0
@@ -250,8 +293,65 @@ class Endpointer:
                 events.append(self._begin(stamp))
         return events
 
+    def _watch_frame(self, prob: float) -> None:
+        """Count a scored frame and, while not speaking, grow or close the burst at or above the
+        watch level (report only; one short lock hold per frame)."""
+        on = bool(prob >= self._on)
+        with self._watch_lock:
+            self._counts["frames"] += 1
+            self._counts["frames_on"] += on
+            if self._speaking:
+                return
+            if not prob >= self._watch:  # NaN closes the burst too: no NaN peak in the report
+                self._close_burst(started=False)
+                return
+            self._burst_peak = prob if self._burst_peak is None else max(self._burst_peak, prob)
+            self._burst_frames += 1
+            self._burst_run = self._burst_run + 1 if on else 0
+            self._burst_longest = max(self._burst_longest, self._burst_run)
+
+    def _close_burst(self, *, started: bool) -> None:
+        """Record the open burst (peak, longest run above threshold in ms, its length at or above
+        the watch level in ms, started), if any; the watch lock is held."""
+        if self._burst_peak is not None:
+            self._bursts.append(
+                (
+                    float(self._burst_peak),
+                    self._burst_longest * self._frame_ms,
+                    self._burst_frames * self._frame_ms,
+                    started,
+                )
+            )
+        self._burst_peak, self._burst_run, self._burst_longest = None, 0, 0
+        self._burst_frames = 0
+
+    def snapshot(self) -> dict[str, Any]:
+        """Counters and burst summaries for the debug report: numbers only, no audio."""
+        with self._watch_lock:
+            counts = dict(self._counts)
+            bursts = list(self._bursts)
+
+        def part(started: bool) -> dict[str, Any]:
+            chosen = [(peak, on, watch) for peak, on, watch, s in bursts if s is started]
+            return {
+                "peak_prob": summarise([c[0] for c in chosen], PEAK_LEVELS),
+                "longest_on_run_ms": summarise([c[1] for c in chosen], RUN_LEVELS),
+                "longest_watch_run_ms": summarise([c[2] for c in chosen], RUN_LEVELS),
+            }
+
+        return {
+            **counts,
+            "watch_prob": self._watch,
+            "window": self._bursts.maxlen,
+            "started": part(True),
+            "not_started": part(False),
+        }
+
     def _begin(self, stamp: float) -> SpeechStart:
         """Start an utterance: the ring (pre-roll and the confirming frames) is its first audio."""
+        with self._watch_lock:
+            self._counts["starts"] += 1
+            self._close_burst(started=True)
         items = list(self._ring)
         self._ring.clear()
         self._speaking = True
@@ -277,6 +377,8 @@ class Endpointer:
         self._speaking = False
         self._utterance = []
         self._silence = 0
+        with self._watch_lock:
+            self._counts["ends_silence" if reason == "silence" else "ends_max_length"] += 1
         if reason == "silence":
             self._vad.reset()
         return end

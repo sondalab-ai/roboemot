@@ -1,11 +1,10 @@
 """ONNX backends for the vision stages (SPEC 5, 13): needs the ``vision`` extra.
 
-YuNet face detector (MIT), SFace face embedder (Apache-2.0), FairFace ViT-B age and gender
-(Apache-2.0), DINOv2-S appearance embedder (Apache-2.0) and NanoDet-Plus-m object detector
-(Apache-2.0), with the preprocessing verified
+YuNet face detector (MIT), SFace face embedder (Apache-2.0), DINOv2-S appearance embedder
+(Apache-2.0) and NanoDet-Plus-m object detector (Apache-2.0), with the preprocessing verified
 in the M1 spike (docs/spikes/2026-10-m1-models.md). Everything runs on CPU with two threads;
 the cm4 budget leaves two cores to vision, audio and core together (SPEC 13). All resizing,
-letterboxing, alignment and cropping happens here: crops live only inside a call (SPEC 12).
+alignment and cropping happens here: crops live only inside a call (SPEC 12).
 Weights are never downloaded here, see ``roboemot models fetch``.
 """
 
@@ -23,7 +22,7 @@ import onnxruntime as ort
 from ..config.schema import VisionConfig
 from . import models
 from .models import ModelError
-from .types import AttributeSample, Box, Detection
+from .types import Box, Detection
 
 log = logging.getLogger(__name__)
 
@@ -50,24 +49,7 @@ ARCFACE_TEMPLATE = np.array(
     dtype=np.float32,
 )
 
-VIT_SIZE = 224
-VIT_MEAN = 0.5
-VIT_STD = 0.5
 PIXEL_MAX = 255.0
-# FairFace age bins by label. The bin 10-19 cannot be split at 13, so it maps to teen (SPEC 5
-# groups: child, teen, adult, senior). The output index order comes from models.yaml.
-AGE_LABEL_GROUPS = {
-    "0-2": "child",
-    "3-9": "child",
-    "10-19": "teen",
-    "20-29": "adult",
-    "30-39": "adult",
-    "40-49": "adult",
-    "50-59": "adult",
-    "60-69": "senior",
-    "more than 70": "senior",
-}
-GENDER_LABEL_VALUES = {"Female": "female", "Male": "male"}
 
 # NanoDet-Plus-m 320 (config nanodet-plus-m_320.yml of the release): plain resize without
 # keeping the aspect ratio, BGR mean/std, four strides, distance distribution of 8 bins per side.
@@ -99,11 +81,6 @@ def _session(path: Path, threads: int) -> ort.InferenceSession:
     options.intra_op_num_threads = threads
     options.inter_op_num_threads = 1
     return ort.InferenceSession(str(path), options, providers=["CPUExecutionProvider"])
-
-
-def _softmax(x: np.ndarray) -> np.ndarray:
-    e = np.exp(x - x.max())
-    return e / e.sum()
 
 
 def _unit(x: np.ndarray) -> np.ndarray:
@@ -177,54 +154,6 @@ class SFaceEmbedder:
         if face.landmarks is None:
             raise ValueError("SFace needs the detector's landmarks")
         return _unit(self._rec.feature(align_face(image, face.landmarks))[0])
-
-
-class FairFaceEstimator:
-    """FairFace ViT-B age and gender classifiers on a padded face crop.
-
-    Per crop: the argmax age group (bins summed into child, teen, adult, senior) and gender
-    with their probabilities. Thresholding and aggregation over crops are done by the registry
-    estimate helpers, so the 0.8 rule is applied once.
-    """
-
-    def __init__(
-        self,
-        age_path: Path,
-        gender_path: Path,
-        age_labels: list[str],
-        gender_labels: list[str],
-        threads: int,
-    ):
-        unknown = [x for x in age_labels if x not in AGE_LABEL_GROUPS] + [
-            x for x in gender_labels if x not in GENDER_LABEL_VALUES
-        ]
-        if unknown:
-            raise ModelError(f"unexpected FairFace labels {unknown}")
-        self._age_groups = [AGE_LABEL_GROUPS[x] for x in age_labels]
-        self._genders = [GENDER_LABEL_VALUES[x] for x in gender_labels]
-        self._age = _session(age_path, threads)
-        self._gender = _session(gender_path, threads)
-
-    @staticmethod
-    def _input(crop: np.ndarray) -> np.ndarray:
-        rgb = cv2.cvtColor(cv2.resize(crop, (VIT_SIZE, VIT_SIZE)), cv2.COLOR_BGR2RGB)
-        return ((rgb.astype(np.float32) / PIXEL_MAX - VIT_MEAN) / VIT_STD).transpose(2, 0, 1)[None]
-
-    def estimate(self, crop: np.ndarray) -> AttributeSample:
-        """Age group and gender of one crop (BGR).
-
-        The crop is resized to 224x224 and normalised as the FairFace ViT expects. Returns the
-        most likely age group and gender with their probabilities, no thresholding.
-        """
-        x = self._input(crop)
-        age = _softmax(self._age.run(None, {self._age.get_inputs()[0].name: x})[0][0])
-        gender = _softmax(self._gender.run(None, {self._gender.get_inputs()[0].name: x})[0][0])
-        totals: dict[str, float] = {}
-        for group, p in zip(self._age_groups, age, strict=True):
-            totals[group] = totals.get(group, 0.0) + float(p)
-        age_group, age_conf = max(totals.items(), key=lambda kv: kv[1])
-        g = int(gender.argmax())
-        return AttributeSample(age_group, age_conf, self._genders[g], float(gender[g]))
 
 
 class DinoV2Embedder:
@@ -401,7 +330,6 @@ class Stages:
 
     face_detector: YuNetDetector
     face_embedder: SFaceEmbedder
-    attribute_estimator: FairFaceEstimator | None
     appearance_embedder: DinoV2Embedder | None
     object_detector: NanoDetDetector | None = None
     objects_unavailable: str | None = None  # why the animal and object stage was dropped
@@ -436,45 +364,25 @@ def load_stages(
     cfg: VisionConfig,
     *,
     profile: str | None = None,
-    attributes: bool = True,
     appearance: bool = True,
     objects: bool = True,
 ) -> Stages:
-    """Load the backends from ``root``; the ViTs, DINOv2 and the object detector can be left out.
+    """Load the backends from ``root``; DINOv2 and the object detector can be skipped.
 
-    The face stack (YuNet, SFace) and the age and gender models are required: a missing or
-    unverified file raises ``ModelError``. The animal and object stage is optional: the
-    NanoDet-Plus-m 320 detector (when ``objects`` is true and ``vision.objects_enabled`` is on;
-    it returns the ``vision.animal_categories`` and ``vision.object_categories`` classes only)
-    and the DINOv2-S embedder (when ``appearance``) are loaded together, and if either fails
-    both are dropped (no 88 MB embedder kept for nothing), ``Stages.objects_unavailable`` holds
-    the reason and faces keep working.
+    The face stack (YuNet, SFace) is required: a missing or unverified file raises
+    ``ModelError``. The animal and object stage is optional: the NanoDet-Plus-m 320 detector
+    (when ``objects`` is true and ``vision.objects_enabled`` is on; it returns the
+    ``vision.animal_categories`` and ``vision.object_categories`` classes only) and the DINOv2-S
+    embedder (when ``appearance``) are loaded together, and if either fails both are dropped
+    (no 88 MB embedder kept for nothing), ``Stages.objects_unavailable`` holds the reason and
+    faces keep working.
 
     Every file must carry a valid ``.verified`` marker (``roboemot models fetch`` writes it);
-    otherwise ``ModelError`` names the file. Frame-path sessions use ``vision.threads`` CPU
-    threads, the age and gender sessions ``vision.attribute_threads`` (SPEC 13: two cores are
-    shared by vision, audio and core). ``vision.attribute_precision`` picks the INT8 files or the
-    343 MB FP32 files of the age and gender models; ``auto`` follows ``profile``, the robot
-    manifest's profile (``cm4`` gives INT8, anything else FP32). Sets the OpenCV and ONNX
-    Runtime globals once.
+    otherwise ``ModelError`` names the file. Sessions use ``vision.threads`` CPU threads (SPEC 13:
+    two cores are shared by vision, audio and core). ``profile`` (the robot manifest's) is
+    accepted for callers and not used. Sets the OpenCV and ONNX Runtime globals once.
     """
     configure(cfg.threads)
-    specs = models.load_manifest()
-    estimator = None
-    if attributes:
-        precision = models.resolve_precision(cfg.attribute_precision, profile)
-        suffix = "-int8" if precision == "int8" else ""
-        age_name, gender_name = f"fairface-age{suffix}", f"fairface-gender{suffix}"
-        age, gender = specs[age_name], specs[gender_name]
-        if age.labels is None or gender.labels is None:
-            raise ModelError("models.yaml lacks the FairFace label order")
-        estimator = FairFaceEstimator(
-            _file(root, age_name),
-            _file(root, gender_name),
-            age.labels,
-            gender.labels,
-            cfg.attribute_threads,
-        )
     detector, embedder, unavailable = None, None, None
     wanted = objects and cfg.objects_enabled
     if wanted or appearance:
@@ -494,7 +402,6 @@ def load_stages(
             (cfg.detector_width_px, cfg.detector_height_px),
         ),
         SFaceEmbedder(_file(root, "sface")),
-        estimator,
         embedder,
         detector,
         unavailable,

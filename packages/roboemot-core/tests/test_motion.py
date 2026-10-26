@@ -1,4 +1,4 @@
-"""SPEC 10, 12: arbitration, cross-fade, limits, constraints, minors, watchdog, primitives."""
+"""SPEC 10, 12: arbitration, cross-fade, limits, constraints, watchdog, primitives."""
 
 from __future__ import annotations
 
@@ -106,39 +106,12 @@ def test_limiter_never_overshoots(reachy):
     assert peak <= 0.5 + 1e-9
 
 
-def test_minor_present_scales_speed_and_amplitude(reachy):
-    def run(minor):
-        core = MotionCore(
-            reachy.dofs,
-            reachy.constraints,
-            crossfade_s=0.0,
-            watchdog_s=10,
-            minor_factor=0.6,
-            watchdog_return_factor=0.3,
-        )
-        core.minor_present = minor
-        t, xs = 0.0, []
-        for _ in range(500):
-            core.feed(Command("app", Priority.COMMANDED, {"body_yaw": 1.0}, t))
-            xs.append(core.tick(t, DT)["body_yaw"])
-            t += DT
-        return xs
-
-    adult, child = run(False), run(True)
-    assert child[-1] == pytest.approx(0.6, abs=1e-6)  # amplitude around home scaled
-    assert max(abs(b - a) for a, b in zip(child, child[1:], strict=False)) / DT <= (
-        reachy.dofs["body_yaw"].max_vel * 0.6 + 1e-9
-    )
-    assert adult[-1] == pytest.approx(1.0, abs=1e-6)
-
-
 def test_watchdog_returns_home_slowly(reachy):
     core = MotionCore(
         reachy.dofs,
         reachy.constraints,
         crossfade_s=0.0,
         watchdog_s=0.2,
-        minor_factor=0.6,
         watchdog_return_factor=0.3,
     )
     t = 0.0
@@ -210,8 +183,9 @@ def test_constraint_correction_is_rate_limited(reachy):
 # ----------------------------------------------------------------------------- review fixes
 
 
-def test_minor_appearing_mid_motion_never_exceeds_limits(reachy):
-    """Review finding 2: lowering the factor while rushing toward a limit."""
+def test_speed_factor_drop_mid_motion_never_exceeds_limits(reachy):
+    """Review finding 2: lowering the factor (the watchdog engages) while rushing toward a
+    limit."""
     lim = Limiter(reachy.dofs, reachy.constraints)
     hi = reachy.dofs["body_yaw"].max
     for _ in range(400):
@@ -258,7 +232,7 @@ def test_constraint_coupling_respects_velocity_acceleration_and_limit(reachy):
 
 
 def test_fuzz_limits_hold_with_random_targets_and_factors(reachy):
-    """Random targets and minor-factor switches: position, velocity, acceleration and the
+    """Random targets and speed-factor switches: position, velocity, acceleration and the
     65 degree coupling hold on every tick (second review, N3/N5/N6)."""
     import random
 
@@ -281,8 +255,26 @@ def test_fuzz_limits_hold_with_random_targets_and_factors(reachy):
         prev = out
 
 
-def test_zero_minor_factor_refused_by_config():
+def test_a_winner_at_its_limit_plus_an_additive_overflow_is_clamped_to_the_range(reachy):
+    """SPEC 12: the arbiter clamps the summed target, additive offsets included."""
+    dof = reachy.dofs["head.pitch"]
+    core = MotionCore(
+        reachy.dofs,
+        reachy.constraints,
+        crossfade_s=0.0,
+        watchdog_s=100.0,
+        watchdog_return_factor=1.0,
+    )
+    for i in range(400):
+        t = i * DT
+        core.feed(Command("gaze", Priority.COMMANDED, {"head.pitch": dof.max}, t))
+        core.feed(Command("expr", Priority.EXPRESSION, {"head.pitch": 0.3}, t, additive=True))
+        out = core.tick(t, DT)["head.pitch"]
+    assert out == pytest.approx(dof.max)
+
+
+def test_zero_watchdog_return_factor_refused_by_config():
     from roboemot.config import ConfigError, ConfigStack
 
     with pytest.raises(ConfigError):
-        ConfigStack(app={"safety": {"minor_motion_factor": 0}})
+        ConfigStack(app={"safety": {"watchdog_return_factor": 0}})

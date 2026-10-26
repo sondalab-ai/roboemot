@@ -3,7 +3,8 @@ synthetic tone, so the backend's framing, cancel and restart paths are tested wi
 
 Behaviour is picked by words in the text: CRASH exits mid-sentence (every time), CRASHONCE does
 so only the first time for this voice, SLOW sends 6 pieces 0.15 s apart, FLOOD writes 3 MB to
-stderr first, BOOM raises. Otherwise a 0.1 s tone, scaled by ``length_scale`` and ``volume``.
+stderr first, BOOM raises. The thread counts it was started with are written to
+``<voice>.threads``. Otherwise a 0.1 s tone, scaled by ``length_scale`` and ``volume``.
 """
 
 import importlib.util
@@ -21,8 +22,9 @@ spec.loader.exec_module(piper_worker)
 
 
 class ToneEngine:
-    def __init__(self, voice_path: str) -> None:
+    def __init__(self, voice_path: str, intra_op_threads: int, inter_op_threads: int) -> None:
         self.voice_path = voice_path
+        Path(voice_path + ".threads").write_text(f"{intra_op_threads} {inter_op_threads}")
         self.sample_rate = piper_worker.read_sample_rate(voice_path)
 
     def tone(self, seconds: float, volume: float) -> bytes:

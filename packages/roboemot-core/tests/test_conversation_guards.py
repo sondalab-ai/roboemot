@@ -1,4 +1,4 @@
-"""SPEC 8, 11A, 12: guardrails on the child-safety settings, the shared router following the
+"""SPEC 8, 11A, 12: guardrails on the prompt and reply-cap settings, the shared router following the
 configuration, logging pins, the pseudonym option."""
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ import pytest
 from pydantic import ValidationError
 from roboemot.config import ConfigStack
 from roboemot.config.schema import PrivacyConfig, RoboEmotConfig
-from roboemot.config.stack import GuardrailError, field_meta, violations
+from roboemot.config.stack import GuardrailError, field_meta
 from roboemot.llm import Router
 from roboemot.llm.hub import RouterHub
 from roboemot.llm.prompt import max_reply_sentences, system_prompt
@@ -18,65 +18,47 @@ ROUTE = {"name": "lan", "base_url": "http://lan.local/v1", "model": "m1"}
 
 
 def test_admin_only_on_a_container_covers_every_leaf_inside_it():
-    assert field_meta("safety.minor_lines.it.filtered").get("admin_only")
-    assert field_meta("safety.minor_lines").get("admin_only")
-    assert field_meta("safety.minor_output_blocklist.it").get("admin_only")
-    assert not field_meta("safety.minor_motion_factor").get("admin_only")
+    assert field_meta("safety.extra_prompt_rules").get("admin_only")
+    assert field_meta("safety.extra_prompt_rules.0").get("admin_only")
+    assert not field_meta("safety.watchdog_ms").get("admin_only")
 
 
-def test_minor_lines_cannot_be_changed_at_runtime_without_admin():
+def test_extra_prompt_rules_cannot_be_changed_at_runtime_without_admin():
     stack = ConfigStack()
     with pytest.raises(GuardrailError):
-        stack.set("safety.minor_lines.it.filtered", "Altro.")
-    stack.set("safety.minor_lines.it.filtered", "Altro.", admin=True)
-    assert stack.get("safety.minor_lines.it.filtered") == "Altro."
-
-
-def test_emptying_or_removing_a_blocklist_needs_admin():
-    stack = ConfigStack()
-    with pytest.raises(GuardrailError):
-        stack.set("safety.minor_output_blocklist.en", [])
-    approved = RoboEmotConfig()
-    shorter = approved.model_copy(deep=True)
-    del shorter.safety.minor_output_blocklist["it"]  # a language's list removed outright
-    assert any(v.kind == "admin" for v in violations(approved, shorter))
-
-
-def test_empty_minor_lines_are_refused_even_with_admin():
-    stack = ConfigStack()
-    with pytest.raises(Exception, match="never silence"):
-        stack.set("safety.minor_lines.it.greeting", "", admin=True)
+        stack.set("safety.extra_prompt_rules", ["Be brief."])
+    stack.set("safety.extra_prompt_rules", ["Be brief."], admin=True)
+    assert stack.get("safety.extra_prompt_rules") == ["Be brief."]
 
 
 def test_a_reply_cap_can_only_go_down_at_runtime():
-    stack = ConfigStack()
-    assert stack.get("register.child.max_reply_sentences") == 2
+    stack = ConfigStack(app={"register": {"max_reply_sentences": 2}})
     with pytest.raises(GuardrailError):
-        stack.set("register.child.max_reply_sentences", 5)
-    stack.set("register.child.max_reply_sentences", 1)
-    assert stack.get("register.child.max_reply_sentences") == 1
+        stack.set("register.max_reply_sentences", 3)
+    stack.set("register.max_reply_sentences", 1)
+    assert stack.get("register.max_reply_sentences") == 1
 
 
 def test_an_unset_register_cap_counts_as_the_conversation_cap():
     stack = ConfigStack()
-    assert stack.get("register.adult.max_reply_sentences") is None
+    assert stack.get("register.max_reply_sentences") is None
     with pytest.raises(GuardrailError):
-        stack.set("register.adult.max_reply_sentences", 10)  # above the conversation's 3
-    stack.set("register.adult.max_reply_sentences", 2)
+        stack.set("register.max_reply_sentences", 10)  # above the conversation's 3
+    stack.set("register.max_reply_sentences", 2)
 
 
 def test_a_per_person_override_cannot_raise_the_cap_and_is_audited():
-    stack = ConfigStack()
-    cfg = stack.effective({"register": {"child": {"max_reply_sentences": 9}}})
-    assert cfg.register.child.max_reply_sentences == 2
+    stack = ConfigStack(app={"register": {"max_reply_sentences": 2}})
+    cfg = stack.effective({"register": {"max_reply_sentences": 9}})
+    assert cfg.register.max_reply_sentences == 2
     assert any(e.source == "person" and "max_reply_sentences" in str(e.new) for e in stack.audit)
 
 
 def test_a_register_cap_never_exceeds_the_conversation_cap_in_the_prompt():
-    cfg = RoboEmotConfig.model_validate({"register": {"adult": {"max_reply_sentences": 9}}})
-    assert max_reply_sentences(cfg, cfg.register.adult) == cfg.conversation.max_reply_sentences
-    assert "at most 2 sentences" in system_prompt(cfg, cfg.register.child)
-    assert max_reply_sentences(cfg, cfg.register.teen) == cfg.conversation.max_reply_sentences
+    cfg = RoboEmotConfig.model_validate({"register": {"max_reply_sentences": 9}})
+    assert max_reply_sentences(cfg, cfg.register.params) == cfg.conversation.max_reply_sentences
+    two = cfg.register.params.model_copy(update={"max_reply_sentences": 2})
+    assert "at most 2 sentences" in system_prompt(cfg, two)
 
 
 def test_pseudonyms_to_cloud_loads_and_is_off_by_default():

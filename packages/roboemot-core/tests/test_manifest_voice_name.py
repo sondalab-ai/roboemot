@@ -18,7 +18,7 @@ CHANNELS = ("head.yaw",)
 
 def stack_with(voice) -> ConfigStack:
     stack = ConfigStack()
-    stack.set_manifest_behaviour({"voice": voice}, CHANNELS)
+    stack.set_manifest_behaviour({"voice": voice}, CHANNELS, body_yaw=None)
     return stack
 
 
@@ -36,7 +36,10 @@ def test_the_reachy_manifest_supplies_its_name_and_spellings():
     assert voice["keywords"]["en"]["name_aliases"] == ["riyadh she"]
     stack = ConfigStack()
     stack.set_manifest_behaviour(
-        manifest.model.behaviour, manifest.channels, load_clip_library(manifest)
+        manifest.model.behaviour,
+        manifest.channels,
+        load_clip_library(manifest),
+        body_yaw=None,
     )
     cfg = stack.effective()
     assert cfg.voice.default_name == "Reachy"
@@ -92,7 +95,9 @@ def test_manifest_names_are_sanitised_and_capped_like_user_config(voice):
 def test_a_rejected_voice_block_leaves_the_stack_unchanged():
     stack = ConfigStack()
     with pytest.raises(ConfigError):
-        stack.set_manifest_behaviour({"voice": {"default_name": "A" * 101}}, CHANNELS)
+        stack.set_manifest_behaviour(
+            {"voice": {"default_name": "A" * 101}}, CHANNELS, body_yaw=None
+        )
     assert stack.effective().voice.default_name == ""
 
 
@@ -104,22 +109,27 @@ def test_manifest_names_are_checked_against_the_schema_maximum_not_the_user_knob
     limit = VoiceConfig.model_fields["name_max_chars"].metadata
     top = max(m.le for m in limit if hasattr(m, "le"))
     stack = ConfigStack(app={"voice": {"name_max_chars": 5}})
-    stack.set_manifest_behaviour({"voice": {"default_name": "Reachy"}}, CHANNELS)
+    stack.set_manifest_behaviour({"voice": {"default_name": "Reachy"}}, CHANNELS, body_yaw=None)
     stack.set_manifest_behaviour(
-        {"voice": {"keywords": {"en": {"name_aliases": ["riyadh she"]}}}}, CHANNELS
+        {"voice": {"keywords": {"en": {"name_aliases": ["riyadh she"]}}}}, CHANNELS, body_yaw=None
     )
     assert stack.effective().voice.name_max_chars == 5
     wide = ConfigStack()
-    wide.set_manifest_behaviour({"voice": {"default_name": "B" * top}}, CHANNELS)
+    wide.set_manifest_behaviour({"voice": {"default_name": "B" * top}}, CHANNELS, body_yaw=None)
     with pytest.raises(ConfigError, match=str(top)):
-        wide.set_manifest_behaviour({"voice": {"default_name": "B" * (top + 1)}}, CHANNELS)
+        wide.set_manifest_behaviour(
+            {"voice": {"default_name": "B" * (top + 1)}}, CHANNELS, body_yaw=None
+        )
 
 
 def test_the_reachy_manifest_starts_with_a_tiny_user_cap():
     manifest = load_manifest(REACHY, allow_unmeasured_dynamics=True)
     stack = ConfigStack(app={"voice": {"name_max_chars": 1}})
     stack.set_manifest_behaviour(
-        manifest.model.behaviour, manifest.channels, load_clip_library(manifest)
+        manifest.model.behaviour,
+        manifest.channels,
+        load_clip_library(manifest),
+        body_yaw=None,
     )
 
 
@@ -128,7 +138,10 @@ def test_a_tight_user_cap_does_not_change_which_platform_names_get_the_aliases(c
     manifest = load_manifest(REACHY, allow_unmeasured_dynamics=True)
     stack = ConfigStack(app={"voice": {"name_max_chars": cap}})
     stack.set_manifest_behaviour(
-        manifest.model.behaviour, manifest.channels, load_clip_library(manifest)
+        manifest.model.behaviour,
+        manifest.channels,
+        load_clip_library(manifest),
+        body_yaw=None,
     )
     names = RobotName()
     names.configure(stack.effective().voice)
@@ -136,3 +149,53 @@ def test_a_tight_user_cap_does_not_change_which_platform_names_get_the_aliases(c
     assert names.resolve(None, ("en",)).aliases_apply()
     names.set_platform("Bolt")
     assert not names.resolve(None, ("en",)).aliases_apply()
+
+
+def test_a_manifest_may_set_the_voice_pitch_and_its_limits():
+    stack = stack_with({"base": {"pitch_st": 5}, "limits": {"pitch_st": [-4, 8]}})
+    voice = stack.effective().voice
+    assert voice.base.pitch_st == 5
+    assert tuple(voice.limits.pitch_st) == (-4, 8)
+
+
+def test_the_owner_pitch_wins_over_the_manifest():
+    stack = stack_with({"base": {"pitch_st": 5}, "limits": {"pitch_st": [-4, 8]}})
+    stack.set("voice.base.pitch_st", 2, layer="runtime")
+    stack.set("voice.limits.pitch_st", [-3, 3], layer="runtime")
+    voice = stack.effective().voice
+    assert voice.base.pitch_st == 2
+    assert tuple(voice.limits.pitch_st) == (-3, 3)
+
+
+@pytest.mark.parametrize(
+    "voice",
+    [
+        {"base": {"rate": 1.1}},
+        {"base": {"pitch_st": 1, "volume_db": 2}},
+        {"limits": {"rate": [0.7, 1.3]}},
+        {"base": 5},
+        {"limits": [1, 2]},
+        {"base": {"pitch_st": 7}, "limits": {"pitch_st": [-4, 8]}},
+        {"base": {"pitch_st": 5}, "limits": {"pitch_st": [-4, 4]}},
+        {"base": {"pitch_st": 5}},
+        {"limits": {"pitch_st": [8, -4]}},
+        {"limits": {"pitch_st": [-4]}},
+        {"limits": {"pitch_st": "wide"}},
+        {"base": {"pitch_st": "high"}, "limits": {"pitch_st": [-4, 8]}},
+        {"base": {"pitch_st": 5}, "limits": {"pitch_st": [-4, 8]}, "pitch_shift_backend": "none"},
+    ],
+)
+def test_manifest_voice_pitch_is_checked(voice):
+    with pytest.raises(ConfigError):
+        stack_with(voice)
+
+
+def test_the_reachy_manifest_voice_is_child_like():
+    manifest = load_manifest(REACHY, allow_unmeasured_dynamics=True)
+    stack = ConfigStack()
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, body_yaw=None)
+    voice = stack.effective().voice
+    assert voice.base.pitch_st == 5
+    assert tuple(voice.limits.pitch_st) == (-4, 8)
+    packaged = REPO / "packages/roboemot-reachymini/src/roboemot_reachymini/data"
+    assert (packaged / REACHY.name).read_text() == REACHY.read_text()

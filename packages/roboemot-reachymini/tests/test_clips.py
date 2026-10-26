@@ -52,7 +52,7 @@ def test_every_variant_of_the_shipped_mapping_is_a_clip_and_the_stack_accepts_it
         assert len(set(names)) == len(names), entry  # no clip twice in one entry
         assert set(names) <= set(library), entry
     stack = ConfigStack()
-    stack.set_manifest_behaviour(MANIFEST.model.behaviour, MANIFEST.channels, library)
+    stack.set_manifest_behaviour(MANIFEST.model.behaviour, MANIFEST.channels, library, body_yaw=None)
     cfg = stack.effective()
     assert set(cfg.expression_map) == set(cfg.affect.labels)
     assert cfg.circadian_motion.yawn.variants and cfg.circadian_motion.stretch.channels
@@ -64,7 +64,7 @@ def test_a_clip_missing_from_the_library_is_refused():
     library = load_clip_library(MANIFEST)
     del library["cheerful1"]
     with pytest.raises(ConfigError, match="unknown clip 'cheerful1'"):
-        ConfigStack().set_manifest_behaviour(MANIFEST.model.behaviour, MANIFEST.channels, library)
+        ConfigStack().set_manifest_behaviour(MANIFEST.model.behaviour, MANIFEST.channels, library, body_yaw=None)
 
 
 def test_no_mapped_clip_overshoots_the_manifest_range_about_home():
@@ -96,7 +96,7 @@ def test_every_label_plays_each_of_its_clips_through_the_renderer():
 
     library = load_clip_library(MANIFEST)
     stack = ConfigStack()
-    stack.set_manifest_behaviour(MANIFEST.model.behaviour, MANIFEST.channels, library)
+    stack.set_manifest_behaviour(MANIFEST.model.behaviour, MANIFEST.channels, library, body_yaw=None)
     cfg = stack.effective()
     register = resolve_register([Person("adult", "declared", {})], cfg.register, cfg.persona)
     for label, entry in cfg.expression_map.items():

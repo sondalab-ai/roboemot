@@ -14,12 +14,13 @@ import roboemot_reachymini.app as app_module
 from roboemot.attention import AttentionSelector
 from roboemot.bus import Bus
 from roboemot.config.schema import RoboEmotConfig
+from roboemot.conversation import ConversationWorker
+from roboemot.conversation.sources import profile_source, scene_source, speaker_source
 from roboemot.llm import Router
-from roboemot.voice.listener import Utterance
+from roboemot.voice.listener import Utterance, VoiceListener
 from roboemot.voice.speech import SpeechOutput
 from roboemot.voice.speech_features import Prosody
 from roboemot.world import Observation, WorldModel
-from roboemot_reachymini.conversation import profile_source, scene_source, speaker_source
 from roboemot_reachymini.gaze import FRAME
 from test_app_perception import data, wait_for  # noqa: F401  (data: fixture)
 from test_app_reflex import ScriptedMini, enable, run_app
@@ -30,12 +31,7 @@ ROUTES = "llm_routes:\n  - {name: lan, base_url: 'http://lan.local/v1', model: m
 
 
 class ConvApp(app_module.RoboEmotApp):
-    minor_flag = False
     requests: list
-
-    @property
-    def minor_present(self) -> bool:
-        return self.minor_flag
 
     def make_router(self, cfg, monitor):
         def handler(request: httpx.Request) -> httpx.Response:
@@ -89,6 +85,7 @@ def test_an_addressed_utterance_is_answered_through_the_shared_router(data, fake
         assert app.traits_worker.router.used("lan") == app.router_hub.router.used("lan")
         section = app.diagnostics.report()["sections"]["roboemot.voice"]["data"]
         assert section["conversation"]["turns"] == 1 and "ciao robot" not in json.dumps(section)
+        assert section["speech"]["tts_rtf"] == {"count": 0} and section["speech"]["underruns"] == 0
     finally:
         stop.set()
         thread.join(timeout=10)
@@ -96,16 +93,29 @@ def test_an_addressed_utterance_is_answered_through_the_shared_router(data, fake
     assert not app.conversation._thread.is_alive()
 
 
-def test_a_minor_without_a_cleared_route_hears_a_built_in_line(data, fakes, said):  # noqa: F811
-    enable(data, VOICE_YAML + ROUTES)
+def test_an_app_config_with_the_removed_minor_keys_starts_and_answers_normally(data, fakes, said):  # noqa: F811
+    """SPEC 8, 12, 11A (owner decisions 2026-10-22 and 2026-10-23): the app config still holds the
+    removed minor keys, as on a robot set up before: the app starts, ignores them and answers
+    with the one behaviour for everyone."""
+    app_yaml = data / "app.yaml"
+    assert "safety:\n" in app_yaml.read_text()
+    old = "safety:\n  minors_allowed_llm: true\n  minor_motion_factor: 0.5\n  minor_hold_s: 9\n"
+    app_yaml.write_text(app_yaml.read_text().replace("safety:\n", old))
+    enable(
+        data,
+        VOICE_YAML
+        + ROUTES.replace("model: m1}", "model: m1, allowed_for_minors: true}")
+        + "register:\n  child: {minor_content_policy: true}\n  unknown: {speech_rate: 1}\n",
+    )
     app = ConvApp.__new__(ConvApp)
-    app.requests, app.minor_flag = [], True
+    app.requests = []
     stop, thread, errors = run_app(app, ScriptedMini().mini)
     try:
         assert wait_for(lambda: app.conversation is not None)
         app.voice_listener._on_utterance(utterance())
-        assert wait_for(lambda: len(said) == 1)
-        assert app.requests == [] and "grande" in said[0]
+        assert wait_for(lambda: said == ["Ciao a te.", "Come va?"])
+        assert len(app.requests) == 1
+        assert "child" not in app.requests[0]["messages"][0]["content"].lower()
     finally:
         stop.set()
         thread.join(timeout=10)
@@ -114,7 +124,7 @@ def test_a_minor_without_a_cleared_route_hears_a_built_in_line(data, fakes, said
 
 def test_shutdown_stops_the_listener_then_the_worker_then_the_speech(data, fakes, monkeypatch):  # noqa: F811
     order = []
-    for cls, name in ((app_module.ConversationWorker, "close"), (SpeechOutput, "close")):
+    for cls, name in ((ConversationWorker, "close"), (SpeechOutput, "close")):
         real = getattr(cls, name)
 
         def wrapped(self, _real=real, _name=cls.__name__):
@@ -122,9 +132,9 @@ def test_shutdown_stops_the_listener_then_the_worker_then_the_speech(data, fakes
             _real(self)
 
         monkeypatch.setattr(cls, name, wrapped)
-    real_stop = app_module.VoiceListener.stop
+    real_stop = VoiceListener.stop
     monkeypatch.setattr(
-        app_module.VoiceListener,
+        VoiceListener,
         "stop",
         lambda self: (order.append("VoiceListener"), real_stop(self))[1],
     )
@@ -159,7 +169,7 @@ class Registry:
         )
 
     def get_entity(self, entity_id):
-        return SimpleNamespace(display_name="Rex")
+        return SimpleNamespace(display_name="Rex", status="active")
 
 
 def world_with(*observations):
@@ -289,7 +299,7 @@ def test_the_app_offers_the_default_skills_and_wires_barge_in(data, fakes, said,
 def test_look_at_and_play_go_through_the_selector_and_the_renderer():
     from roboemot.affect.expression import ExpressionRenderer
     from roboemot.config.schema import ExpressionEntry
-    from roboemot_reachymini.skills import SkillBridge
+    from roboemot.skills.bridge import SkillBridge
 
     cfg = RoboEmotConfig()
     bus = Bus()
@@ -300,10 +310,10 @@ def test_look_at_and_play_go_through_the_selector_and_the_renderer():
 
     class Reg:
         def get_person(self, pid):
-            return SimpleNamespace(display_name="Marta")
+            return SimpleNamespace(display_name="Marta", status="active")
 
         def get_entity(self, eid):
-            return SimpleNamespace(display_name="Rex")
+            return SimpleNamespace(display_name="Rex", status="active")
 
     now = [10.0]
     bridge = SkillBridge(renderer, selector, world, Reg(), lambda: cfg, clock=lambda: now[0])
@@ -330,7 +340,7 @@ def test_look_at_and_play_go_through_the_selector_and_the_renderer():
 
 def test_look_at_names_are_confirmed_one_line_and_capped_like_the_scene_summary():
     from roboemot.affect.expression import ExpressionRenderer
-    from roboemot_reachymini.skills import SkillBridge
+    from roboemot.skills.bridge import SkillBridge
 
     cfg = RoboEmotConfig()
     cap = cfg.conversation.summary_value_max_chars

@@ -21,17 +21,15 @@ AP = CFG.appraisal
 PRESETS = Path(__file__).resolve().parents[3] / "configs" / "presets"
 
 
-def face(track=1, stamp=0.0, owner=None, new=True, age="unknown", minor=True) -> FacePercept:
+def face(track=1, stamp=0.0, owner=None, new=True) -> FacePercept:
     return FacePercept(
         track_id=track, stamp=stamp, box=(0, 0, 1, 1), score=0.9, azimuth_rad=0, elevation_rad=0,
-        owner_id=owner, anonymous_id=None if owner else "anon", age_group=age, age_source="x",
-        gender="unknown", gender_source="x", attribute_confidence=0.0, possible_minor=minor,
-        new_track=new,
+        owner_id=owner, anonymous_id=None if owner else "anon", new_track=new,
     )  # fmt: skip
 
 
-def recognized(age="adult", minor=False, track=1, stamp=0.0) -> PersonRecognized:
-    return PersonRecognized(track, "p-1", stamp, 0.0, 0.0, age, minor)
+def recognized(track=1, stamp=0.0) -> PersonRecognized:
+    return PersonRecognized(track, "p-1", stamp, 0.0, 0.0)
 
 
 def entry(kind="animal", category="cat") -> Entry:
@@ -49,21 +47,12 @@ def names(events) -> list[str]:
     return [e[0] for e in events]
 
 
-@pytest.mark.parametrize(
-    ("age", "specific"),
-    [
-        ("adult", "person.known_adult"),
-        ("child", "person.known_child"),
-        ("teen", "person.known_teen"),
-        ("senior", "person.known_senior"),
-        ("unknown", "person.known_unknown"),
-    ],
-)
-def test_person_recognized_maps_by_age_group(rig, age, specific):
+def test_person_recognized_is_one_event(rig):
+    """Owner decision 2026-10-23: no age groups; the payload carries the id alone."""
     bus, _, events = rig
-    bus.publish("person.recognized", recognized(age, age == "child"), 1.0)
-    assert names(events) == ["person.known", specific]
-    assert events[0][2] == {"person_id": "p-1", "age_group": age, "possible_minor": age == "child"}
+    bus.publish("person.recognized", recognized(), 1.0)
+    assert names(events) == ["person.known"]
+    assert events[0][2] == {"person_id": "p-1"}
 
 
 def test_animal_appearing_maps_and_other_kinds_do_not(rig):
@@ -98,7 +87,7 @@ def test_a_face_that_gets_recognized_never_fires_unknown(rig):
     bus.publish("person.recognized", recognized(stamp=1.0), 1.0)
     bus.publish("percept.face", face(stamp=2.0, owner="p-1", new=False), 2.0)
     adapter.tick(w + 1)
-    assert names(events) == ["person.known", "person.known_adult"]
+    assert names(events) == ["person.known"]
 
 
 def test_an_owner_on_the_face_percept_alone_cancels_the_pending_track(rig):
@@ -178,11 +167,10 @@ def test_announced_tracks_are_pruned_once_lost(rig):
     assert not adapter._announced
 
 
-def test_event_names_cover_every_age_group():
+def test_no_event_names_an_age_group():
     from roboemot.config.schema import APPRAISAL_EVENTS
-    from roboemot.registry.records import AGE_GROUPS
 
-    assert {f"person.known_{g}" for g in AGE_GROUPS} <= APPRAISAL_EVENTS
+    assert not [e for e in APPRAISAL_EVENTS if e.startswith("person.known_")]
 
 
 def test_close_detaches_from_the_bus(rig):
@@ -203,14 +191,12 @@ def cfg_with(*rules: dict) -> AppraisalConfig:
 def test_when_requires_every_field_to_equal():
     e = AffectEngine(
         CFG.affect,
-        cfg_with(
-            {"event": "x", "valence": 0.5, "when": {"age_group": "child", "possible_minor": True}}
-        ),
+        cfg_with({"event": "x", "valence": 0.5, "when": {"kind": "cat", "near": True}}),
     )
     assert not e.on_event("x", 0.0)
-    assert not e.on_event("x", 0.0, {"age_group": "child"})  # missing field
-    assert not e.on_event("x", 0.0, {"age_group": "adult", "possible_minor": True})
-    assert e.on_event("x", 0.0, {"age_group": "child", "possible_minor": True, "extra": 1})
+    assert not e.on_event("x", 0.0, {"kind": "cat"})  # missing field
+    assert not e.on_event("x", 0.0, {"kind": "dog", "near": True})
+    assert e.on_event("x", 0.0, {"kind": "cat", "near": True, "extra": 1})
     assert e.valence == pytest.approx(0.5)
 
 
@@ -248,12 +234,12 @@ def test_keyed_merge_keeps_conditional_rules_apart(tmp_path):
     app = tmp_path / "app.yaml"
     app.write_text(
         "schema_version: 1\nappraisal:\n  rules:\n"
-        "    - {event: person.known, when: {possible_minor: true}, valence: 0.9}\n"
+        "    - {event: person.known, when: {person_id: p-1}, valence: 0.9}\n"
         "    - {event: person.known, valence: 0.1}\n"
     )
     rules = ConfigStack.from_files(app=app).effective().appraisal.rules
     known = [r for r in rules if r.event == "person.known"]
-    assert [(r.when, r.valence) for r in known] == [({}, 0.1), ({"possible_minor": True}, 0.9)]
+    assert [(r.when, r.valence) for r in known] == [({}, 0.1), ({"person_id": "p-1"}, 0.9)]
 
 
 # ----------------------------------------------------------------------------- defaults
@@ -266,14 +252,11 @@ def react(*events: str):
     return e.state(0.0)
 
 
-def test_default_rules_separate_child_adult_and_stranger():
-    adult = react("person.known", "person.known_adult")
-    child = react("person.known", "person.known_child")
+def test_default_rules_separate_a_known_person_and_a_stranger():
+    known = react("person.known")
     stranger = react("person.unknown_appears")
-    assert react("person.known").valence == pytest.approx(0.4)  # SPEC 7 example
-    assert react("person.known").arousal == pytest.approx(0.2)
-    assert child.label == "joy" and adult.label == "calm"
-    assert child.valence > adult.valence and child.arousal > adult.arousal
+    assert known.valence == pytest.approx(0.5) and known.arousal == pytest.approx(0.2)
+    assert known.label == "calm"
     assert stranger.label == "curiosity" and 0 < stranger.valence < 0.1
 
 
@@ -313,9 +296,9 @@ def test_runner_routes_bus_events_into_the_one_engine_and_publishes_the_state():
     bus, got = Bus(), []
     bus.subscribe("affect.state", lambda m: got.append(m.payload))
     runner = AffectRunner(CFG.affect, AP, bus)
-    bus.publish("person.recognized", recognized("child", True), 1.0)
+    bus.publish("person.recognized", recognized(), 1.0)
     runner.tick(1.0)
-    assert got[-1].valence > 0.5 and got[-1].label == "joy"
+    assert got[-1].valence > 0.4 and got[-1].label == "calm"
     assert got[-1] is not runner.engine
 
 

@@ -30,10 +30,12 @@ from .api import (
     CataloguePort,
     DebugReport,
     EnrollmentPort,
+    LivePort,
     PseudonymsPort,
     Request,
     Response,
     RoutesPort,
+    SecretsPort,
     SettingsPort,
     WebApi,
 )
@@ -48,6 +50,7 @@ STATIC_FILES: dict[str, tuple[str, str]] = {
     "/index.html": ("index.html", "text/html; charset=utf-8"),
     "/static/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/static/settings.js": ("settings.js", "text/javascript; charset=utf-8"),
+    "/static/live.js": ("live.js", "text/javascript; charset=utf-8"),
     "/static/style.css": ("style.css", "text/css; charset=utf-8"),
     "/static/theme.js": ("theme.js", "text/javascript; charset=utf-8"),
     "/static/fx.js": ("fx.js", "text/javascript; charset=utf-8"),
@@ -70,7 +73,7 @@ SECURITY_HEADERS = {
     "Cache-Control": "no-store",
 }
 CSP = (
-    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; "
+    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; "
     "connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; "
     "frame-ancestors {ancestors}"
 )
@@ -150,10 +153,6 @@ class _Httpd(ThreadingHTTPServer):
     allow_reuse_address = True
     api: WebApi
     statics: dict[str, Static]
-    max_body: int
-    request_timeout_s: float
-    request_deadline_s: float
-    csp: str
     slots: threading.BoundedSemaphore
 
     def process_request(self, request: Any, client_address: Any) -> None:
@@ -190,12 +189,13 @@ class _Handler(BaseHTTPRequestHandler):
     sys_version = ""
 
     def setup(self) -> None:
-        self.timeout = self.server.request_timeout_s
+        web = self.server.api.web  # per connection: a runtime change applies to the next one
+        self.timeout = web.request_timeout_s
         super().setup()
         self.deadline = _DeadlineRaw(
             self.connection,
-            time.monotonic() + self.server.request_deadline_s,
-            self.server.request_timeout_s,
+            time.monotonic() + web.request_deadline_s,
+            web.request_timeout_s,
             time.monotonic,
         )
         self.rfile = io.BufferedReader(self.deadline)
@@ -254,7 +254,9 @@ class _Handler(BaseHTTPRequestHandler):
         if body is None:
             return
         resp = self.server.api.handle(
-            Request(self.command, path, headers, body, self.client_address[0])
+            Request(
+                self.command, path, headers, body, self.client_address[0], urlsplit(self.path).query
+            )
         )
         sent = self._send_response(resp)
         if sent and resp.after is not None:
@@ -280,6 +282,11 @@ class _Handler(BaseHTTPRequestHandler):
     def _send_response(self, resp: Response) -> bool:
         """Send ``resp``; False when it was replaced by an error (it was not JSON-serialisable).
         A failed socket write raises."""
+        if isinstance(resp.data, bytes):
+            self._send(
+                resp.status, resp.data, resp.content_type or "application/octet-stream", resp
+            )
+            return True
         try:
             payload = json.dumps(resp.data, allow_nan=False).encode()
         except (TypeError, ValueError):
@@ -305,7 +312,9 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         if status != HTTPStatus.NOT_MODIFIED:
             self.send_header("Content-Length", str(len(body)))
-        self.send_header("Content-Security-Policy", self.server.csp)
+        self.send_header(
+            "Content-Security-Policy", CSP.format(ancestors=self.server.api.web.frame_ancestors)
+        )
         for name, value in SECURITY_HEADERS.items():
             if etag is not None and name == "Cache-Control":
                 continue
@@ -326,11 +335,13 @@ class _Handler(BaseHTTPRequestHandler):
 class Server:
     """The running web UI. ``start()`` serves on a background thread, ``stop()`` ends it."""
 
-    def __init__(self, httpd: _Httpd, pins: PinStore, cfg: RoboEmotConfig) -> None:
+    def __init__(self, httpd: _Httpd, pins: PinStore) -> None:
         self._httpd = httpd
         self._pins = pins
-        self._cfg = cfg
         self._thread: threading.Thread | None = None
+        self._stopped = False
+        self._serving = threading.Event()  # serve_forever was entered
+        self._gate = threading.Lock()  # orders _serve's entry against stop()
 
     @property
     def host(self) -> str:
@@ -343,22 +354,38 @@ class Server:
 
     def set_pin(self, pin: str) -> None:
         """The admin path: store a new operator PIN after the format check (raises PinError)."""
-        self._pins.set(check_pin_format(pin, self._cfg.webui))
+        self._pins.set(check_pin_format(pin, self._httpd.api.web))
 
     def start(self) -> Server:
         if self._thread is None:
-            self._thread = threading.Thread(
-                target=lambda: self._httpd.serve_forever(poll_interval=SERVE_POLL_S),
+            with self._gate:
+                self._stopped = False
+                self._serving.clear()
+            thread = threading.Thread(
+                target=self._serve,
                 name="roboemot-webui",
                 daemon=True,
             )
-            self._thread.start()
+            thread.start()
+            self._thread = thread
         return self
+
+    def _serve(self) -> None:
+        """The serving thread; does nothing when ``stop`` ran before the thread got going."""
+        with self._gate:
+            if self._stopped:
+                return
+            self._serving.set()
+        self._httpd.serve_forever(poll_interval=SERVE_POLL_S)
 
     def stop(self) -> None:
         """Stop serving, close the socket and join the thread; safe to call twice."""
+        with self._gate:
+            self._stopped = True
+            entered = self._serving.is_set()
         if self._thread is not None:
-            self._httpd.shutdown()
+            if entered:  # shutdown() would wait for a serve_forever that never began
+                self._httpd.shutdown()
             shutdown.join(self._thread, None)
             self._thread = None
         self._httpd.server_close()
@@ -376,13 +403,16 @@ def make_server(
     routes: RoutesPort | None = None,
     settings: SettingsPort | None = None,
     pseudonyms: PseudonymsPort | None = None,
+    secrets: SecretsPort | None = None,
+    live: LivePort | None = None,
 ) -> Server:
     """Build the web UI on ``cfg.webui.bind:port``; nothing is served until ``start()``.
 
     The interface is ``webui.bind``; unset, it is every interface when ``robot_hosted`` (the
     manifest names a robot profile, the app runs on the robot and the LAN must reach it) and
     loopback otherwise (sim and dev). ``cfg`` may be a callable returning the effective config,
-    so the page follows ``conversation.language`` changes; bind, port and limits are read once here.
+    so the page and its limits follow runtime changes; bind, port and ``max_connections`` are read
+    once here (restart fields).
     """
     current = cfg() if callable(cfg) else cfg
     web = current.webui
@@ -397,18 +427,16 @@ def make_server(
         routes=routes,
         settings=settings,
         pseudonyms=pseudonyms,
+        secrets=secrets,
+        live=live,
     )
     bind = web.bind or (ANY_INTERFACE if robot_hosted else LOOPBACK_INTERFACE)
     httpd = _Httpd((bind, web.port), _Handler)
-    httpd.csp = CSP.format(ancestors=web.frame_ancestors)
-    httpd.request_deadline_s = web.request_deadline_s
-    httpd.slots = threading.BoundedSemaphore(web.max_connections)
+    httpd.slots = threading.BoundedSemaphore(web.max_connections)  # restart field
     httpd.api = api
-    httpd.max_body = web.max_body_bytes
-    httpd.request_timeout_s = web.request_timeout_s
     httpd.statics = {
         route: ((STATIC_DIR / name).read_bytes(), ctype, None)
         for route, (name, ctype) in STATIC_FILES.items()
     }
     httpd.statics.update(load_vendor())
-    return Server(httpd, pins, current)
+    return Server(httpd, pins)

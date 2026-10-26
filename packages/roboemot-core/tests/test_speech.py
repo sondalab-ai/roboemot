@@ -1,9 +1,11 @@
-"""SPEC 8, stage 7 / 13: SpeechOutput (queue, persona effects, stop latency, privacy, minors)."""
+"""SPEC 8, stage 7 / 13: SpeechOutput (queue, persona effects, stop latency, privacy)."""
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import math
 import random
 import threading
 import time
@@ -32,6 +34,12 @@ class FakeSink:
         self.pushed_at.append(time.monotonic())
         return 0.0
 
+    def playing_until(self):
+        return time.monotonic()
+
+    def end_stream(self):
+        return 0.0
+
     def stop(self):
         self.stopped_at.append(time.monotonic())
 
@@ -41,16 +49,15 @@ class FakeBackend:
 
     def __init__(self, pieces=1, delay=0.0, fail=False) -> None:
         self.pieces, self.delay, self.fail = pieces, delay, fail
-        self.deliveries, self.minors, self.cancelled = [], [], threading.Event()
+        self.deliveries, self.cancelled = [], threading.Event()
         self.texts: list[str] = []
         self.started = threading.Event()
 
-    def available(self, *, minor_present=False):
+    def available(self):
         return True
 
-    async def synthesize(self, text, delivery, *, language, voice, minor_present=False):
+    async def synthesize(self, text, delivery, *, language, voice):
         self.deliveries.append(delivery)
-        self.minors.append(minor_present)
         self.texts.append(text)
         self.started.set()
         if self.fail:
@@ -69,6 +76,9 @@ class FakeBackend:
     async def warm(self, language, voice):
         pass
 
+    def apply_config(self, voice):
+        pass
+
     async def aclose(self):
         pass
 
@@ -79,14 +89,12 @@ class HoldingBackend(FakeBackend):
 
     HOLD_S = 30.0
 
-    async def synthesize(self, text, delivery, *, language, voice, minor_present=False):
+    async def synthesize(self, text, delivery, *, language, voice):
         if self.texts:
             self.texts.append(text)
             await asyncio.sleep(self.HOLD_S)
             return
-        async for chunk in super().synthesize(
-            text, delivery, language=language, voice=voice, minor_present=minor_present
-        ):
+        async for chunk in super().synthesize(text, delivery, language=language, voice=voice):
             yield chunk
 
 
@@ -210,84 +218,8 @@ def test_bus_and_logs_carry_no_text(make, caplog):
     assert "riservata" not in repr(out.snapshot())
 
 
-def test_minor_appearing_after_enqueue_blocks_the_remote_route(make):
-    """The minors flag is read when synthesis starts, not when the sentence was queued."""
-    server = SpeechServer()
-    remote, _ = openai_backend(server)
-    local = FakeBackend()
-    local.name = "piper"
-    minor = {"present": False}
-    gate = threading.Event()
-
-    sink = FakeSink()
-    out = make(FallbackTTS(remote, local), sink=sink, minor_present=lambda: minor["present"])
-    # first sentence keeps the loop busy while the minor walks in
-    original = out.backend.synthesize
-
-    async def gated(*a, **k):
-        gate.wait(2)
-        async for c in original(*a, **k):
-            yield c
-
-    out.backend.synthesize = gated
-    say(out)  # queued while no minor is present
-    minor["present"] = True
-    gate.set()
-    assert wait_for(lambda: sink.stopped_at)
-    assert server.requests == [] and local.minors == []  # no route was contacted
-    assert out.sentences_spoken == 0 and sink.pushed == []
-
-
-def test_a_sentence_written_for_a_minor_uses_the_local_route(make):
-    server = SpeechServer()
-    remote, _ = openai_backend(server)
-    local = FakeBackend()
-    local.name = "piper"
-    out = make(FallbackTTS(remote, local), minor_present=lambda: True)
-    say(out, minor=True)
-    assert wait_for(lambda: out.sentences_spoken == 1)
-    assert server.requests == [] and local.minors == [True]
-
-
-def test_queued_sentences_are_dropped_when_a_minor_appears_after_the_stream_ended(make):
-    minor = {"present": False}
-    sink, backend = FakeSink(), FakeBackend(pieces=3, delay=0.05)
-    out = make(backend, sink=sink, minor_present=lambda: minor["present"])
-    u = out.new_utterance()
-    for text in ("Uno.", "Due.", "Tre."):
-        say(out, text, utterance=u)
-    assert wait_for(lambda: sink.pushed)  # the first sentence is playing, 2 and 3 are queued
-    minor["present"] = True
-    assert wait_for(lambda: sink.stopped_at)
-    time.sleep(0.4)
-    assert out.sentences_spoken == 0 and backend.texts == ["Uno."]
-    assert out.snapshot()["queued"] == 0
-
-
-def test_a_minor_appearing_during_a_stall_cuts_the_sentence_in_flight(make):
-    minor = {"present": False}
-    gate = threading.Event()
-    sink, backend = FakeSink(), FakeBackend(pieces=5, delay=0.02)
-    out = make(backend, sink=sink, minor_present=lambda: minor["present"])
-    original = backend.synthesize
-
-    async def stalled(*a, **k):
-        async for chunk in original(*a, **k):
-            yield chunk
-            while not gate.is_set() and len(sink.pushed) == 1:
-                await asyncio.sleep(0.01)  # the LLM side is stalled, the sentence is held
-
-    backend.synthesize = stalled
-    say(out, "Uno due tre.")
-    assert wait_for(lambda: len(sink.pushed) == 1)
-    minor["present"] = True
-    gate.set()
-    assert wait_for(lambda: sink.stopped_at)
-    time.sleep(0.2)
-    assert len(sink.pushed) == 1 and out.sentences_spoken == 0
-
-
-def test_adult_sentence_uses_the_remote_route(make):
+def test_every_sentence_may_use_the_remote_route(make):
+    """Owner decision 2026-10-23: no possible-minor rule keeps a sentence on Piper."""
     server = SpeechServer()
     remote, _ = openai_backend(server)
     out = make(FallbackTTS(remote, FakeBackend()))
@@ -384,20 +316,6 @@ def test_no_chunk_is_pushed_after_stop_returns(make):
     assert sink.stopped_at and sink.stopped_at[0] >= max(sink.pushed_at)
 
 
-def test_a_failing_minor_signal_fails_closed(make):
-    backend = FakeBackend()
-
-    def broken():
-        raise RuntimeError("no signal")
-
-    out = make(backend, minor_present=broken)
-    say(out, minor=True)
-    assert wait_for(lambda: backend.minors == [True])
-    say(out)  # written for adults, and the signal cannot be read: not spoken
-    time.sleep(0.2)
-    assert out.sentences_spoken == 1
-
-
 def test_a_failing_warm_up_does_not_kill_the_output(make):
     class Cold(FakeBackend):
         async def warm(self, language, voice):
@@ -455,11 +373,9 @@ def test_a_sentence_whose_first_push_lost_the_race_with_a_stop_never_counts_as_p
     holder = {}
 
     class Racing(FakeBackend):
-        async def synthesize(self, text, delivery, *, language, voice, minor_present=False):
+        async def synthesize(self, text, delivery, *, language, voice):
             holder["out"].stop()  # a barge-in lands after the sentence started, before its push
-            async for chunk in super().synthesize(
-                text, delivery, language=language, voice=voice, minor_present=minor_present
-            ):
+            async for chunk in super().synthesize(text, delivery, language=language, voice=voice):
                 yield chunk
 
     sink = TimelineSink()
@@ -734,3 +650,308 @@ def test_a_cancel_racing_the_natural_end_never_flushes_the_next_job(make):
         out.cancel(raw)
         assert wait_for(lambda i=i: out.sentences_spoken == i + 1)
     assert RATE // 10 not in sink.flushed  # a speech chunk was never in a flush
+
+
+def test_a_reload_reaches_the_backend(make):
+    class Configurable(FakeBackend):
+        def apply_config(self, voice):
+            self.applied = voice
+
+    backend = Configurable()
+    out = make(backend)
+    cfg = RoboEmotConfig(conversation={"language": "en"})
+    out.apply_config(cfg)
+    assert out.config is cfg and backend.applied is cfg.voice
+
+
+# ------------------------------------------------- report counters (SPEC 12A)
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class ClockedSink(FakeSink):
+    """Timeline on a fake clock, like the Reachy speaker's ``playing_until``."""
+
+    def __init__(self, clock: FakeClock) -> None:
+        super().__init__()
+        self.clock, self.until = clock, 0.0
+
+    def push_audio_sample(self, samples, rate_hz):
+        self.until = max(self.until, self.clock()) + samples.size / rate_hz
+        return super().push_audio_sample(samples, rate_hz)
+
+    def playing_until(self):
+        return self.until
+
+
+class ClockedBackend(FakeBackend):
+    """Request n yields one 100 ms chunk per value of ``synth_s[n]``, each taking that long to
+    synthesize on the fake clock."""
+
+    def __init__(self, clock: FakeClock, synth_s: list[list[float]]) -> None:
+        super().__init__()
+        self.clock, self.synth_s = clock, list(synth_s)
+
+    async def synthesize(self, text, delivery, *, language, voice):
+        for took in self.synth_s.pop(0):
+            self.clock.now += took
+            yield AudioChunk(np.ones(RATE // 10, np.float32), RATE)
+
+
+def test_speech_reports_tts_rtf_and_underruns_within_a_sentence(make):
+    clock = FakeClock()
+    sink = ClockedSink(clock)
+    # 100 ms chunks: the third takes 250 ms, so the speaker runs dry for 100 ms before it
+    out = make(ClockedBackend(clock, [[0.05, 0.05, 0.25, 0.05]]), sink=sink, clock=clock)
+    say(out)
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    snap = out.snapshot()
+    rtf = snap["tts_rtf"]
+    assert rtf["count"] == 4
+    assert rtf["p50"] == pytest.approx(0.5) and rtf["max"] == pytest.approx(2.5)
+    assert snap["underruns"] == 1 and snap["underrun_sentences"] == 1
+    assert snap["underrun_ms_total"] == pytest.approx(100.0)
+    # the sentence waited 0.4 s in all for 0.4 s of audio
+    sentence = snap["tts_rtf_sentence"]
+    assert sentence["count"] == 1 and sentence["max"] == pytest.approx(1.0)
+    json.dumps(snap)
+
+
+def test_the_gap_before_a_sentence_and_its_pause_is_not_an_underrun(make):
+    clock = FakeClock()
+    sink = ClockedSink(clock)
+    # two one-chunk sentences of one answer; the second arrives long after the first ended
+    out = make(ClockedBackend(clock, [[0.05], [0.5]]), sink=sink, clock=clock)
+    u = out.new_utterance()
+    say(out, "Uno.", utterance=u)
+    say(out, "Due.", utterance=u)
+    assert wait_for(lambda: out.sentences_spoken == 2)
+    snap = out.snapshot()
+    assert snap["underruns"] == 0 and snap["underrun_ms_total"] == 0.0
+    assert snap["tts_rtf"]["count"] == 2
+
+
+def test_report_window_bounds_the_rtf_summary(make):
+    clock = FakeClock()
+    cfg = RoboEmotConfig(voice={"report_window": 10})
+    out = make(ClockedBackend(clock, [[0.01] * 15]), cfg=cfg, sink=ClockedSink(clock), clock=clock)
+    say(out)
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    assert out.snapshot()["tts_rtf"]["count"] == 10
+    assert RoboEmotConfig().voice.report_window == 200
+
+
+class DeadSink(ClockedSink):
+    """A speaker whose output never opened: nothing is queued and ``playing_until`` stays -inf."""
+
+    def push_audio_sample(self, samples, rate_hz):
+        return 0.0
+
+    def playing_until(self):
+        return -math.inf
+
+
+def test_a_dead_sink_counts_no_underruns_and_no_late_sentences(make):
+    clock = FakeClock()
+    out = make(ClockedBackend(clock, [[0.05, 0.25], [0.5]]), sink=DeadSink(clock), clock=clock)
+    u = out.new_utterance()
+    say(out, "Uno.", utterance=u)
+    say(out, "Due.", utterance=u)
+    assert wait_for(lambda: out.sentences_spoken == 2)
+    snap = out.snapshot()
+    assert snap["underruns"] == 0 and snap["underrun_ms_total"] == 0.0
+    assert snap["late_sentences"] == 0 and snap["late_ms_total"] == 0.0
+    json.dumps(snap, allow_nan=False)
+
+
+def test_underrun_sentences_counts_each_sentence_that_ran_dry_once(make):
+    clock = FakeClock()
+    sink = ClockedSink(clock)
+    out = make(ClockedBackend(clock, [[0.05, 0.25, 0.3], [0.05, 0.25]]), sink=sink, clock=clock)
+    say(out, "Uno.")  # two answers: no pause between them
+    say(out, "Due.")
+    assert wait_for(lambda: out.sentences_spoken == 2)
+    snap = out.snapshot()
+    # first: dry 150 ms then 200 ms; second: queued behind the first, then dry 100 ms
+    assert snap["underruns"] == 3 and snap["underrun_sentences"] == 2
+    assert snap["underrun_ms_total"] == pytest.approx(450.0)
+
+
+def test_a_push_refused_after_a_stop_counts_no_underrun(make):
+    clock = FakeClock()
+    holder = {}
+
+    class Stopping(ClockedBackend):
+        async def synthesize(self, text, delivery, *, language, voice):
+            n = 0
+            async for chunk in super().synthesize(text, delivery, language=language, voice=voice):
+                if n == 1:
+                    holder["out"].stop()  # barge-in after the sink ran dry
+                n += 1
+                yield chunk
+
+    out = holder["out"] = make(Stopping(clock, [[0.05, 0.5]]), sink=ClockedSink(clock), clock=clock)
+    say(out)
+    assert wait_for(lambda: out._current is not None and out._current.done())
+    snap = out.snapshot()
+    assert snap["underruns"] == 0 and snap["tts_rtf_sentence"] == {"count": 0}
+
+
+def test_a_sentence_later_than_its_pause_is_counted_late(make):
+    clock = FakeClock()
+    cfg = RoboEmotConfig(voice={"sentence_pause_ms": 0})
+    sink = ClockedSink(clock)
+    out = make(ClockedBackend(clock, [[0.05], [0.5]]), cfg=cfg, sink=sink, clock=clock)
+    u = out.new_utterance()
+    say(out, "Uno.", utterance=u)
+    say(out, "Due.", utterance=u)
+    assert wait_for(lambda: out.sentences_spoken == 2)
+    snap = out.snapshot()
+    # the first ends at 0.15, the second arrives at 0.55 with no pause planned
+    assert snap["late_sentences"] == 1 and snap["late_ms_total"] == pytest.approx(400.0)
+    assert snap["boundary_dry"] == 1
+
+
+def test_a_sentence_inside_its_pause_is_not_late(make):
+    clock = FakeClock()
+    cfg = RoboEmotConfig(voice={"sentence_pause_ms": 500})
+    out = make(
+        ClockedBackend(clock, [[0.05], [0.1]]), cfg=cfg, sink=ClockedSink(clock), clock=clock
+    )
+    u = out.new_utterance()
+    say(out, "Uno.", utterance=u)
+    say(out, "Due.", utterance=u)
+    assert wait_for(lambda: out.sentences_spoken == 2)
+    snap = out.snapshot()
+    assert snap["late_sentences"] == 0 and snap["late_ms_total"] == 0.0
+    assert snap["boundary_dry"] == 0
+
+
+def test_push_ms_times_each_push_into_the_sink(make):
+    clock = FakeClock()
+
+    class SlowSink(ClockedSink):
+        def push_audio_sample(self, samples, rate_hz):
+            clock.now += 0.003
+            return super().push_audio_sample(samples, rate_hz)
+
+    out = make(ClockedBackend(clock, [[0.05, 0.05]]), sink=SlowSink(clock), clock=clock)
+    say(out)
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    push = out.snapshot()["push_ms"]
+    assert push["count"] == 2 and push["max"] == pytest.approx(3.0)
+
+
+class StreamSink(ClockedSink):
+    """A speaker that resamples as a stream: ``end_stream`` flushes a 10 ms tail."""
+
+    TAIL_S = 0.01
+
+    def __init__(self, clock: FakeClock) -> None:
+        super().__init__(clock)
+        self.ends = 0
+
+    def end_stream(self):
+        self.ends += 1
+        self.until = max(self.until, self.clock()) + self.TAIL_S
+        return self.until
+
+
+def test_each_finished_sentence_ends_the_sinks_stream_and_its_tail_counts(make):
+    clock = FakeClock()
+    sink = StreamSink(clock)
+    out = make(ClockedBackend(clock, [[0.05, 0.05], [0.05]]), sink=sink, clock=clock)
+    first = say(out, "Vero?")
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    assert sink.ends == 1
+    assert out.ended_at(first) == pytest.approx(sink.until)  # the flushed tail included
+    assert out.question_end() == pytest.approx(sink.until)
+
+
+def test_a_failing_sentence_still_ends_the_stream_but_a_stopped_one_does_not(make):
+    clock = FakeClock()
+    sink = StreamSink(clock)
+
+    class FailsMidway(ClockedBackend):
+        async def synthesize(self, text, delivery, *, language, voice):
+            async for chunk in super().synthesize(text, delivery, language=language, voice=voice):
+                yield chunk
+            raise TTSError("boom")
+
+    out = make(FailsMidway(clock, [[0.05]]), sink=sink, clock=clock)
+    say(out)
+    assert wait_for(lambda: out.failures == 1)
+    assert wait_for(lambda: sink.ends == 1)
+    holder = {}
+
+    class Stopping(ClockedBackend):
+        async def synthesize(self, text, delivery, *, language, voice):
+            async for chunk in super().synthesize(text, delivery, language=language, voice=voice):
+                yield chunk
+                holder["out"].stop()
+
+    sink2 = StreamSink(clock)
+    out2 = holder["out"] = make(Stopping(clock, [[0.05, 0.05]]), sink=sink2, clock=clock)
+    say(out2)
+    assert wait_for(lambda: out2._current is not None and out2._current.done())
+    assert sink2.ends == 0  # the stop already reset the sink's stream
+
+
+def test_sentences_of_one_reply_vary_by_index_and_a_question_is_raised(make):
+    """SPEC 8, variation: the reply's id seeds each sentence's offsets, so the same reply gets the
+    same delivery again; a question gets the configured raise on top."""
+    from roboemot.persona import effects
+    from roboemot.voice.prosody import compose_delivery
+
+    backend = FakeBackend()
+    out = make(backend)
+    u = out.new_utterance()
+    for text in ("Uno.", "Due.", "Tre?"):
+        say(out, text, utterance=u)
+    assert wait_for(lambda: len(backend.deliveries) == 3)
+    cfg = out.config
+
+    def expected(index, question):
+        return compose_delivery(
+            cfg.voice, register=REG, circadian=CIRC, mood=None, intensity=0.0,
+            persona=effects(cfg.persona), seed=u, index=index, question=question,
+        )  # fmt: skip
+
+    assert backend.deliveries == [expected(0, False), expected(1, False), expected(2, True)]
+    assert len({d.pitch_st for d in backend.deliveries}) == 3
+
+
+def test_the_pieces_of_a_cut_sentence_share_one_delivery(make):
+    """Review S3: a continuation reuses the first piece's delivery (index, variation and the
+    question raise, which only the full sentence could tell), and the next sentence goes on."""
+    backend = FakeBackend()
+    out = make(backend)
+    u = out.new_utterance()
+    say(out, "Una frase lunga, molto lunga,", utterance=u)
+    say(out, "che finisce con una domanda?", utterance=u, continued=True)
+    say(out, "Poi un'altra.", utterance=u)
+    assert wait_for(lambda: len(backend.deliveries) == 3)
+    head, tail, nxt = backend.deliveries
+    assert tail == head
+    assert nxt != head
+
+
+def test_a_dropped_sentence_does_not_repeat_a_delivery_of_its_reply(make):
+    backend = HoldingBackend()
+    cfg = RoboEmotConfig.model_validate({"voice": {"queue_max_sentences": 1}})
+    out = make(backend, cfg=cfg)
+    u = out.new_utterance()
+    say(out, "Uno.", utterance=u)
+    assert wait_for(lambda: backend.started.is_set())
+    assert say(out, "Due.", utterance=u) is not None  # queued
+    assert say(out, "Tre.", utterance=u) is None  # dropped: queue full
+    out.stop()
+    later = say(out, "Quattro.", utterance=u)
+    assert later is not None
+    assert out._said[u][0] == 4  # the drop consumed index 2, the sequence goes on

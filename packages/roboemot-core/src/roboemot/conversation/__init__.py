@@ -1,14 +1,15 @@
 """Conversation: sessions, request composition, spoken answers (SPEC 8 stage 6)."""
 
-from .lines import minor_line, pick
-from .output_filter import OutputFilter
+from .lines import pick
+from .phase import ConversationPhase
 from .summaries import profile_summary, scene_summary
+from .transcript import TranscriptRing
 from .worker import ConversationWorker
 
 __all__ = [
+    "ConversationPhase",
     "ConversationWorker",
-    "OutputFilter",
-    "minor_line",
+    "TranscriptRing",
     "pick",
     "profile_summary",
     "scene_summary",

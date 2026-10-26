@@ -53,6 +53,11 @@ RATE_RANGE_HZ = (8000, 192000)  # sane voice sample rates
 BYTES_PER_SAMPLE = 2
 MS_PER_S = 1000.0
 _DEAD, _CANCELLED, _PROTOCOL = b"-", b"~", b"!"  # queue markers, never sent by a worker
+RESTART_FIELDS = frozenset(
+    name
+    for name, info in PiperConfig.model_fields.items()
+    if (info.json_schema_extra or {}).get("restart")
+)
 
 
 class _ProtocolError(Exception):
@@ -192,9 +197,16 @@ class PiperBackend:
         self._retry_at: dict[str, float] = {}
         self.restarts = 0
 
+    def apply_config(self, voice: VoiceConfig) -> None:
+        """Hot reload (SPEC 11A): ``voice.piper``'s timeouts and restart backoff apply from the
+        next request or worker start; its restart fields (``python``, ``chunk_ms``, the thread
+        counts) stay."""
+        keep = {name: getattr(self.config, name) for name in RESTART_FIELDS}
+        self.config = voice.piper.model_copy(update=keep)
+
     # ----------------------------------------------------------------- availability
 
-    def available(self, *, minor_present: bool = False) -> bool:
+    def available(self) -> bool:
         """Local and offline: always eligible; a worker in restart backoff makes the request
         fail fast with :class:`TTSUnavailable`, which a fallback backend answers."""
         return True
@@ -260,6 +272,8 @@ class PiperBackend:
             proc = await asyncio.create_subprocess_exec(
                 self.python, "-I", self.script, "--voice", str(path),
                 "--chunk-ms", str(self.config.chunk_ms),
+                "--intra-op-threads", str(self.config.intra_op_threads),
+                "--inter-op-threads", str(self.config.inter_op_threads),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -295,7 +309,6 @@ class PiperBackend:
         *,
         language: str,
         voice: VoiceConfig,
-        minor_present: bool = False,
     ) -> AsyncIterator[AudioChunk]:
         params = to_piper(delivery, voice)
         factor = 2.0 ** (params["pitch_shift_st"] / SEMITONES_PER_OCTAVE)

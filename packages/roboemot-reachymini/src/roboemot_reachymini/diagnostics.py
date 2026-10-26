@@ -2,7 +2,7 @@
 
 Registered in the ``roboemot.diagnostics`` entry-point group under the manifest id. Each
 section is one read-only call to the daemon's REST API through ``DaemonClient`` (reachy_mini
-1.11, Wi-Fi 1.12):
+1.12):
 
 - ``robot.daemon``: ``GET /api/daemon/status`` (name, version, hardware id, backend state and
   control-loop stats, errors, Wi-Fi address);

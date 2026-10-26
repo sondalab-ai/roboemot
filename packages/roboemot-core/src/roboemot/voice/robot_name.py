@@ -1,7 +1,7 @@
 """The robot's name for the voice pipeline (SPEC 8 stage 3, Wake word).
 
 The name is ``voice.wake_word`` when set, else the one the robot platform reports (``source``,
-the driver's ``robot_name()``; Reachy Mini: the name its owner gave it in the daemon setup),
+the driver's ``robot_name()``; for example the name its owner gave it in the robot's setup),
 else none. (``voice.default_name``, the manifest's name, is never the effective name: it only
 gates the manifest's name aliases.) It is shown in the prompt
 and, per language, turned into wake phrases through the language's ``name_wake_templates``, but
@@ -57,7 +57,7 @@ class ResolvedName:
 
 def display_name(raw: str | None) -> str:
     """``raw`` as a person would say it: underscores and hyphens become spaces, edges trimmed,
-    and a name that is all lower case gets a capital per word ("reachy mini" -> "Reachy Mini")."""
+    and a name that is all lower case gets a capital per word ("desk head" -> "Desk Head")."""
     text = " ".join((raw or "").replace("_", " ").replace("-", " ").split())
     if text and text == text.lower():
         text = " ".join(w[:1].upper() + w[1:] for w in text.split())
@@ -95,6 +95,7 @@ class RobotName:
         self._missing = missing
         self._generation = 0
         self._warned: set[tuple[str, str]] = set()
+        self._oov_warned: set[tuple[str, int]] = set()  # (language, count) wake checks logged
         self._cache: tuple[tuple[Any, ...], ResolvedName] | None = None
         self._platform = display_name(platform) or display_name(self._poll())
         self._polled_at = clock()
@@ -188,6 +189,34 @@ class RobotName:
                 )
             self._cache = (key, resolved)
             return resolved
+
+    def out_of_vocab(self, language: str, phrases: list[str]) -> int | None:
+        """How many of ``phrases`` (normalised wake phrases) have a word the ``language``
+        recognizer can never output, so they can never wake the robot; None when it cannot tell
+        (no vocabulary, or that model is not loaded). A non-zero count is logged once per
+        language and count, without the phrases."""
+        with self._lock:
+            missing = self._missing
+        if missing is None:
+            return None
+        bad = 0
+        for phrase in phrases:
+            absent = missing(language, phrase.split())
+            if absent is None:
+                return None
+            bad += bool(absent)
+        with self._lock:
+            fresh = bad and (language, bad) not in self._oov_warned
+            if fresh:
+                self._oov_warned.add((language, bad))
+        if fresh:
+            log.warning(
+                "voice: %d %s wake phrase(s) have a word missing from the recognizer vocabulary "
+                "and can never wake the robot",
+                bad,
+                language,
+            )
+        return bad
 
     def _recognisable(
         self, missing: MissingWords, matching: str, languages: tuple[str, ...]

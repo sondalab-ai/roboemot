@@ -504,12 +504,15 @@ def open_autoenroll(
 
     It needs a registry (its store holds the candidates) and the appearance embedder (its
     ``model_id`` keys the candidates). Without the embedder, or when auto-enrollment is
-    disabled, any candidates left on disk are deleted at startup: nothing may keep them.
+    disabled, any candidates left on disk are deleted at startup: nothing may keep them. A
+    disabled enroller is still built (it observes nothing and keeps nothing), so turning
+    ``world.autoenroll.enabled`` on is a hot reload, not a restart (SPEC 11A).
     """
     if registry is None:
         return None
     if appearance is None or not cfg.enabled:
         purge_stored(registry.store)
+    if appearance is None:
         return None
     return AutoEnroller(
         registry, registry.store, cfg, appearance.model_id, world=world, language=language

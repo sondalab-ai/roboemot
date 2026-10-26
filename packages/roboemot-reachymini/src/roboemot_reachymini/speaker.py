@@ -3,10 +3,21 @@
 Coded against reachy-mini 1.12's documented interface, not exercised against a real robot:
 ``mini.media.start_playing()``, ``push_audio_sample(float32)`` (an appsrc push that does not wait
 for playback), ``get_output_audio_samplerate()`` and ``mini.media.audio.clear_player()``, which
-drops queued playback at once (older SDKs lack it; ``stop_playing`` then ``start_playing`` is the
-fallback). The SDK does not report how much is queued, so the speaker counts: every pushed
-sample extends ``playing_until()``, a monotonic stamp, and ``stop`` resets it. The stamp feeds
-``SpeechActivity`` (the echo gate) and tells barge-in what is still to be cut.
+drops queued playback at once (``media/audio_base.py:319``, abstract: every audio backend has it;
+the package pins reachy-mini>=1.12 for it). The SDK does not report how much is queued, so the
+speaker counts: every pushed sample extends ``playing_until()``, a monotonic stamp, and ``stop``
+resets it. The stamp feeds ``SpeechActivity`` (the echo gate) and tells barge-in what is still to
+be cut.
+
+Playback is resampled as a stream (:class:`~.resample.StreamResampler`): the speech output pushes
+a sentence in pieces (Piper: ``voice.piper.chunk_ms``), and converting each piece on its own put an
+edge transient, a click, at every piece boundary. The converter keeps its filter state across the
+pushes of one stream and holds back a few ms of lookahead; ``end_stream`` (called by the speech
+output after each sentence) flushes that tail and starts a fresh stream, and so do ``stop`` and a
+change of input rate. Input rates off a ``RATE_GRID_HZ`` grid (Piper pitch-shifted by the DSP
+backend, e.g. 23907 Hz) are snapped to it: a near-coprime rate would make the converter hold back
+up to a second of input, and the snap costs at most half the grid in rate (about 0.1 %, under 2
+cents of pitch).
 
 With a ``reference`` (:class:`~roboemot.voice.bargein.PlaybackReference`) the speaker also keeps
 the last seconds of what it played, resampled to the reference rate and stamped with the time each
@@ -29,10 +40,12 @@ import numpy as np
 from roboemot.voice.activity import SpeechActivity
 from roboemot.voice.bargein import PlaybackReference
 
-from .resample import resample
+from .resample import StreamResampler, resample
+from .sdk import MiniPort
 
 log = logging.getLogger(__name__)
 MS_PER_S = 1000.0
+RATE_GRID_HZ = 50  # stream input rates are snapped to it; 22050, 16000 and 48000 are on it
 
 
 class ReachySpeaker:
@@ -40,7 +53,7 @@ class ReachySpeaker:
 
     def __init__(
         self,
-        mini: Any,
+        mini: MiniPort,
         chunk_ms: float,
         activity: SpeechActivity | None = None,
         clock: Callable[[], float] = time.monotonic,
@@ -59,15 +72,14 @@ class ReachySpeaker:
         self._out_hz: int | None = None
         self._playing = False
         self._pushed = 0
-
-    def _media(self) -> Any:
-        return getattr(self._mini, "media", None)
+        self._stream: StreamResampler | None = None  # the playback stream's converter
+        self._stream_hz = 0  # its input rate as given (before snapping)
 
     def start_playing(self) -> bool:
         """Start the playback pipeline and read the output rate. False (and silent) when the
         robot has no audio system or the SDK reports no usable rate."""
-        media = self._media()
-        if media is None or getattr(media, "audio", True) is None:
+        media = self._mini.media
+        if media.audio is None:
             log.warning("speaker: the SDK reports no audio system")
             return False
         try:
@@ -89,7 +101,7 @@ class ReachySpeaker:
             return
         self._playing = False
         try:
-            self._media().stop_playing()
+            self._mini.media.stop_playing()
         except Exception as exc:
             log.warning("speaker: stop_playing: %s", type(exc).__name__)
 
@@ -99,10 +111,45 @@ class ReachySpeaker:
         until which everything queued has played; 0.0 if this call queued nothing."""
         if not self._playing or self._out_hz is None or samples.size == 0 or rate_hz <= 0:
             return 0.0
-        out = resample(samples.astype(np.float32, copy=False).reshape(-1), rate_hz, self._out_hz)
-        step = max(1, int(self._chunk_s * self._out_hz))
+        x = samples.astype(np.float32, copy=False).reshape(-1)
         with self._lock:
             generation = self._generation
+            tail = self._take_stream() if self._stream_hz != rate_hz else None
+            if self._stream is None and rate_hz != self._out_hz:
+                snapped = max(RATE_GRID_HZ, round(rate_hz / RATE_GRID_HZ) * RATE_GRID_HZ)
+                self._stream = StreamResampler(snapped, self._out_hz)
+            self._stream_hz, stream = rate_hz, self._stream
+        # converted outside the lock; a stop meanwhile orphans ``stream`` and the pieces are
+        # abandoned below, so old audio never reaches a new stream
+        out = x if stream is None else stream.process(x)
+        if tail is not None and tail.size:
+            out = np.concatenate([tail, out])
+        queued = self._push_pieces(out, generation)
+        return self.playing_until() if queued else 0.0
+
+    def end_stream(self) -> float:
+        """End the playback stream (a sentence is complete): push the converter's held-back
+        tail and start a fresh stream with the next push. Returns the stamp until which
+        everything queued has played; 0.0 if there was nothing to flush."""
+        with self._lock:
+            generation = self._generation
+            tail = self._take_stream()
+        if tail is None or not tail.size or not self._playing:
+            return 0.0
+        return self.playing_until() if self._push_pieces(tail, generation) else 0.0
+
+    def _take_stream(self) -> np.ndarray | None:
+        """Detach the current stream and return its flushed tail (None without one); the lock
+        is held."""
+        stream, self._stream, self._stream_hz = self._stream, None, 0
+        return None if stream is None else stream.flush()
+
+    def _push_pieces(self, out: np.ndarray, generation: int) -> bool:
+        """Push ``out`` (at the output rate) in pieces of ``chunk_ms``, extending the timeline,
+        the reference and the speech gate; stops at a stop or a failing push. True if any piece
+        was queued."""
+        assert self._out_hz is not None
+        step = max(1, int(self._chunk_s * self._out_hz))
         queued = False
         for i in range(0, out.size, step):
             piece = np.ascontiguousarray(out[i : i + step])
@@ -110,7 +157,7 @@ class ReachySpeaker:
                 if generation != self._generation:
                     break
                 try:
-                    self._media().push_audio_sample(piece)
+                    self._mini.media.push_audio_sample(piece)
                 except Exception as exc:
                     log.warning("speaker: push_audio_sample: %s", type(exc).__name__)
                     break
@@ -126,7 +173,7 @@ class ReachySpeaker:
                 queued = True
                 if self._activity is not None:  # under the lock: a stop cannot interleave
                     self._activity.extend(self._until)
-        return self.playing_until() if queued else 0.0
+        return queued
 
     def playing_until(self) -> float:
         """Monotonic stamp at which everything pushed so far has played (past if idle)."""
@@ -138,26 +185,21 @@ class ReachySpeaker:
         return max(0.0, self.playing_until() - self._clock())
 
     def stop(self) -> None:
-        """Barge-in: drop the queued audio now (``clear_player``, else restart the pipeline),
+        """Barge-in: drop the queued audio now (``clear_player``),
         abandon the pieces of a push in flight and reset the queued duration."""
         with self._lock:  # held throughout: no push lands between the flush and the reset
             self._generation += 1
+            self._stream, self._stream_hz = None, 0  # the next push starts a fresh stream
             self._until = now = self._clock()
             if self._reference is not None:
                 self._reference.truncate(now)
             if self._playing:
-                audio = getattr(self._media(), "audio", None)
-                clear = getattr(audio, "clear_player", None)
+                audio = self._mini.media.audio
                 try:
-                    if callable(clear):
-                        clear()
-                    else:
-                        self._media().stop_playing()
-                        self._media().start_playing()
+                    if audio is not None:
+                        audio.clear_player()
                 except Exception as exc:
                     log.warning("speaker: flush: %s", type(exc).__name__)
-                    if not callable(clear):
-                        self._playing = False  # the pipeline did not come back
             if self._activity is not None:
                 self._activity.reset(now)
 

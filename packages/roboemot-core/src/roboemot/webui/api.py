@@ -28,31 +28,45 @@ from datetime import UTC, datetime
 from http import HTTPStatus
 from http.cookies import CookieError, SimpleCookie
 from typing import Any, NoReturn, Protocol
+from urllib.parse import parse_qsl
 
 from roboemot.config.catalogue import FieldDescriptor
 from roboemot.config.schema import ROUTE_NAME_MAX_CHARS, RoboEmotConfig, WebUIConfig
 from roboemot.config.stack import ConfigError, GuardrailError
 from roboemot.llm.conformance import RouteBudgetExhausted, RouteKeyUnavailable
 from roboemot.registry.records import Consent, ConsentError
+from roboemot.secret_store import MAX_VALUE_CHARS, SecretUnavailable
 
 from . import validation as v
 from .auth import LoginLimiter, PinStore, Sessions
 from .guard import same_origin
 from .routes import RouteBusy
+from .secrets_admin import SecretInUse, secret_name, secret_value
 from .settings import SettingNotAllowed
 from .strings import STRINGS, language_for
 
 log = logging.getLogger(__name__)
 
 COOKIE = "roboemot_session"
+LIVE_VIEWERS = "/api/live/viewers"  # polled by every page
+# Polls that never extend the idle session on their own (SPEC 11A, 12): an unattended Live tab
+# still times out after ``webui.session_ttl_s``. The page marks a poll with ``ACTIVE_HEADER``
+# when it saw a click, key or touch since its previous poll; only that poll counts as activity.
+PASSIVE_POLLS = frozenset(
+    {"/api/live/state", "/api/live/audio", "/api/live/frame.jpg", LIVE_VIEWERS}
+)
+ACTIVE_HEADER = "x-roboemot-active"
 CSRF_HEADER = "x-csrf-token"
 VECTOR_GUARD_LEN = 32
 MAX_PIN_CHARS = 64
 ENROLLMENT_ID_BYTES = 8
 STATE_PATTERN = re.compile(r"[a-z_]{1,32}")
 ENTITY_KINDS = frozenset({"animal", "object"})
+ROUTE_FIELDS = frozenset({"name", "base_url", "model", "locality"})
+ROUTE_NAME = re.compile(rf"[A-Za-z0-9_-]{{1,{ROUTE_NAME_MAX_CHARS}}}")
 JSON_TYPE = "application/json; charset=utf-8"
 CATALOGUE_IMPORT = "/api/catalogue/import"
+LIVE_CURSOR_DIGITS = 15  # digits of the transcript cursor a client may send
 BASE64_GROUP_IN = 3
 BASE64_GROUP_OUT = 4
 CATALOGUE_STATUS = {
@@ -80,8 +94,6 @@ class EnrollmentPort(Protocol):
         self,
         name: str,
         consent: Consent,
-        declared_age_group: str | None,
-        declared_gender: str | None,
         pending_id: str | None = None,
     ) -> Any: ...
     def cancel(self) -> Any: ...
@@ -121,6 +133,22 @@ class SettingsPort(Protocol):
     ) -> dict[str, Any]: ...
     def remove_entry(self, path: object, source: str) -> dict[str, Any]: ...
     def reset(self, path: object, source: str) -> dict[str, Any]: ...
+    def add_route(
+        self, value: object, secret: object, ack: object, source: str
+    ) -> dict[str, Any]: ...
+    def set_route_key(
+        self, name: object, secret: object, ack: object, source: str
+    ) -> dict[str, Any]: ...
+    def removable_routes(self) -> list[str]: ...
+
+
+class SecretsPort(Protocol):
+    """``roboemot.webui.secrets_admin.SecretsAdmin`` (SPEC 8 Secrets): secret names with the
+    routes that use them, and write-only set/remove. Nothing here returns a value."""
+
+    def listing(self) -> list[dict[str, Any]]: ...
+    def set(self, name: str, value: str) -> tuple[bool, list[str]]: ...
+    def remove(self, name: str) -> bool: ...
 
 
 class CataloguePort(Protocol):
@@ -147,6 +175,24 @@ class PseudonymsPort(Protocol):
     def refused_names(self, cfg: RoboEmotConfig) -> list[str]: ...
 
 
+class LivePort(Protocol):
+    """``roboemot.runtime.live.LiveState`` (SPEC 11A, 12): ``state()`` is the Live tab's payload,
+    or None while ``webui.live.enabled`` is off, and holds no media, text, ids or positions.
+    ``audio()`` adds the levels and the opt-in transcript text; ``video_frame()`` is one opt-in
+    preview JPEG."""
+
+    def state(self) -> dict[str, Any] | None: ...
+    def audio(self, after: int, epoch: str = "") -> dict[str, Any] | None: ...
+    def clear_transcript(self) -> bool: ...
+    def video_frame(self, client: str) -> tuple[bytes | None, str | None]:
+        """One preview JPEG, or ``(None, code)``; the code is a stable error name."""
+        ...
+
+    def video_viewers(self) -> dict[str, Any]:
+        """``{"video_viewers_active", "count", "poll_ms"}``: is a page watching (the banner)."""
+        ...
+
+
 class DebugReport(Protocol):
     """``roboemot.diagnostics.Diagnostics``: ``report()`` is the SPEC 12A JSON."""
 
@@ -160,6 +206,7 @@ class Request:
     headers: dict[str, str]
     body: bytes
     client_ip: str
+    query: str = ""  # the raw query string (only the Live audio cursor reads it)
 
 
 @dataclass
@@ -171,6 +218,23 @@ class Response:
     # Run by the server only after the response was written and flushed (not after a failed
     # write), on the connection's thread: it must return quickly; start a thread for real work.
     after: Callable[[], None] | None = None
+    # Set with ``bytes`` data (a JPEG): the body is sent as is with this media type.
+    content_type: str | None = None
+
+
+def live_cursor(query: str) -> tuple[int, str]:
+    """The ``after`` and ``epoch`` of the Live audio poll. ``after`` absent is 0, otherwise one
+    plain unsigned integer; ``epoch`` absent is "", otherwise the ring's ``<hex>.<number>`` token.
+    Anything else, or a repeated key, is ``bad_request``."""
+    pairs = parse_qsl(query, keep_blank_values=True)
+    after, epoch = [v for k, v in pairs if k == "after"], [v for k, v in pairs if k == "epoch"]
+    if len(after) > 1 or len(epoch) > 1:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
+    if after and not re.fullmatch(rf"[0-9]{{1,{LIVE_CURSOR_DIGITS}}}", after[0]):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
+    if epoch and not re.fullmatch(r"[0-9a-f]{1,16}\.[0-9]{1,12}", epoch[0]):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
+    return (int(after[0]) if after else 0), (epoch[0] if epoch else "")
 
 
 class ApiError(Exception):
@@ -226,9 +290,13 @@ class WebApi:
         routes: RoutesPort | None = None,
         settings: SettingsPort | None = None,
         pseudonyms: PseudonymsPort | None = None,
+        secrets: SecretsPort | None = None,
+        live: LivePort | None = None,
     ) -> None:
+        self.live = live
         self.service = service
         self.settings = settings
+        self.secrets = secrets
         self.pseudonyms = pseudonyms
         self.catalogue = catalogue
         self.routes = routes
@@ -237,9 +305,8 @@ class WebApi:
         self.pins = pin_store
         self.clock = clock
         self.now = now
-        web = self.config.webui
-        self.sessions = Sessions(web)
-        self.limiter = LoginLimiter(web, pin_store.version())
+        self.sessions = Sessions(lambda: self.web)
+        self.limiter = LoginLimiter(lambda: self.web, pin_store.version())
         self._hashing = threading.Semaphore(1)
 
     @property
@@ -304,7 +371,10 @@ class WebApi:
         if (method, path) in public:
             return public[(method, path)](req)
         token = parse_cookie(req.headers.get("cookie"))
-        session = self.sessions.get(token, self.clock(), self.pins.version())
+        passive = (
+            method == "GET" and path in PASSIVE_POLLS and req.headers.get(ACTIVE_HEADER) != "1"
+        )
+        session = self.sessions.get(token, self.clock(), self.pins.version(), refresh=not passive)
         if session is None:
             if not path.startswith("/api/"):
                 raise ApiError(HTTPStatus.NOT_FOUND, "not_found")
@@ -330,7 +400,18 @@ class WebApi:
             ("GET", "/api/registry/quarantined"): self._quarantined,
             ("POST", "/api/registry/quarantined/purge"): self._purge,
             ("GET", "/api/debug"): self._debug,
+            ("GET", "/api/live/state"): self._live_state,
+            ("GET", "/api/live/audio"): self._live_audio,
+            ("GET", "/api/live/frame.jpg"): self._live_frame,
+            ("GET", LIVE_VIEWERS): self._live_viewers,
+            ("POST", "/api/live/transcript/clear"): self._live_transcript_clear,
             ("GET", "/api/routes"): self._routes,
+            ("POST", "/api/routes/add"): self._route_add,
+            ("POST", "/api/routes/key"): self._route_key,
+            ("POST", "/api/routes/remove"): self._route_remove,
+            ("GET", "/api/secrets"): self._secrets_list,
+            ("POST", "/api/secrets/set"): self._secret_set,
+            ("POST", "/api/secrets/remove"): self._secret_remove,
             ("GET", "/api/settings"): self._settings_list,
             ("POST", "/api/settings"): self._settings_change,
             ("POST", "/api/settings/reveal"): self._settings_reveal,
@@ -507,15 +588,8 @@ class WebApi:
                 who=form["who"],
                 when=self.now(),
                 scope=form["scope"],
-                guardian=form["guardian"],
             )
-            self.service.complete(
-                form["display_name"],
-                consent,
-                form["age_group"],
-                form["gender"],
-                form["pending_id"],
-            )
+            self.service.complete(form["display_name"], consent, form["pending_id"])
         except ConsentError as exc:
             raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, "consent_refused") from exc
         except (RuntimeError, ValueError) as exc:
@@ -537,7 +611,6 @@ class WebApi:
                 "status": str(r.status),
                 "kind": str(r.kind),
                 "last_seen": None if r.last_seen is None else r.last_seen.isoformat(),
-                "age_group": getattr(r, "age_group", None),
             }
             for r in self.service.list_records()
         ]
@@ -638,6 +711,67 @@ class WebApi:
                     }
         return Response(HTTPStatus.OK, report)
 
+    def _live_state(self, req: Request) -> Response:
+        """The Live tab's inner state. ``live_disabled`` (404) while ``webui.live.enabled`` is off,
+        ``live_unavailable`` (503) when the host built no source. Read-only, nothing stored."""
+        if self.live is None:
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "live_unavailable")
+        data = self.live.state()
+        if data is None:
+            raise ApiError(HTTPStatus.NOT_FOUND, "live_disabled")
+        return Response(HTTPStatus.OK, data)
+
+    def _live_source(self) -> LivePort:
+        if self.live is None:
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "live_unavailable")
+        return self.live
+
+    def _live_audio(self, req: Request) -> Response:
+        """Audio levels in dBFS and the live transcript turns added or changed after
+        ``?after=<rev>`` (``&epoch=`` is the ring's, so a cursor from another life starts over).
+        Same disabled codes as the state; levels and text only, never samples; nothing stored."""
+        data = self._live_source().audio(*live_cursor(req.query))
+        if data is None:
+            raise ApiError(HTTPStatus.NOT_FOUND, "live_disabled")
+        return Response(HTTPStatus.OK, data)
+
+    def _live_frame(self, req: Request) -> Response:
+        """One preview JPEG (the vision pump's newest frame, faces drawn), or a JSON error with no
+        picture: ``live_disabled`` / ``video_off`` (404), ``video_asleep`` / ``video_no_vision`` /
+        ``video_no_frame`` (503). Never wakes the robot or the pump; nothing is stored."""
+        site = req.headers.get("sec-fetch-site", "same-origin")
+        if site not in ("same-origin", "none"):  # an <img> or fetch from another origin or port
+            raise ApiError(HTTPStatus.FORBIDDEN, "cross_site")
+        jpeg, code = self._live_source().video_frame(req.client_ip)
+        if jpeg is None:
+            status = (
+                HTTPStatus.NOT_FOUND
+                if code in ("live_disabled", "video_off")
+                else HTTPStatus.SERVICE_UNAVAILABLE
+            )
+            raise ApiError(status, code or "generic")
+        return Response(HTTPStatus.OK, jpeg, content_type="image/jpeg")
+
+    def _live_viewers(self, req: Request) -> Response:
+        """The banner poll every open page makes: is anyone watching the video. Cheap; answers
+        ``video_viewers_active: false`` when there is no live source."""
+        if self.live is None:
+            return Response(
+                HTTPStatus.OK,
+                {
+                    "video_viewers_active": False,
+                    "count": 0,
+                    "poll_ms": self.web.live.banner_poll_ms,
+                },
+            )
+        return Response(HTTPStatus.OK, self.live.video_viewers())
+
+    def _live_transcript_clear(self, req: Request) -> Response:
+        """The Clear button: forget the live transcript (PIN session and CSRF were checked)."""
+        if not self._live_source().clear_transcript():
+            raise ApiError(HTTPStatus.NOT_FOUND, "live_disabled")
+        return Response(HTTPStatus.OK, {"ok": True})
+
     # ------------------------------------------------------------------ settings
 
     def _settings_port(self) -> SettingsPort:
@@ -655,7 +789,7 @@ class WebApi:
         return Response(HTTPStatus.OK, {"fields": fields, "robot": robot, "pin_required": True})
 
     def _settings_reveal(self, req: Request) -> Response:
-        """The private fields (minors, privacy, location) with their real values. Admin only: the
+        """The private fields (privacy, location) with their real values. Admin only: the
         PIN is re-entered under the login limits, so it is a POST (every response is no-store).
         Secrets stay redacted."""
         port = self._settings_port()
@@ -791,8 +925,64 @@ class WebApi:
         return self.routes
 
     def _routes(self, req: Request) -> Response:
-        """Routes by name, model, host and minors flag, with the last conformance report."""
-        return Response(HTTPStatus.OK, {"routes": self._routes_port().list_routes()})
+        """Routes by name, model and host, with the last conformance report and ``removable``
+        (only the runtime layer holds the route, so the page may remove it)."""
+        rows = self._routes_port().list_routes()
+        removable = set(self.settings.removable_routes()) if self.settings else set()
+        return Response(
+            HTTPStatus.OK, {"routes": [{**r, "removable": r["name"] in removable} for r in rows]}
+        )
+
+    def _route_add(self, req: Request) -> Response:
+        """Add a route (SPEC 8, 11A). Body: ``name``, ``base_url``, ``model`` and optionally
+        ``locality``, ``secret`` (a name in the secret store; omitted or null for no key),
+        ``ack_endpoint`` (required with a key: the endpoint the server names in
+        ``endpoint_ack_required``) and ``pin``. A key typed into any field is refused."""
+        port = self._settings_port()
+        body = self._json_body(req)
+        v.only_keys(body, ROUTE_FIELDS | {"secret", "ack_endpoint", "pin"})
+        if not {"name", "base_url", "model"} <= set(body):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
+        self._check_pin(req, body.get("pin"))
+        value = {k: body[k] for k in ROUTE_FIELDS if k in body}
+        return self._route_call(
+            lambda: port.add_route(
+                value, body.get("secret"), body.get("ack_endpoint"), self._who(req)
+            )
+        )
+
+    def _route_key(self, req: Request) -> Response:
+        """Choose the key of a route. Body: ``name``, ``secret`` (a stored name, or null for no
+        key), ``ack_endpoint`` (required unless null) and ``pin``."""
+        port = self._settings_port()
+        body = self._json_body(req)
+        v.only_keys(body, {"name", "secret", "ack_endpoint", "pin"})
+        if "name" not in body or "secret" not in body:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
+        self._check_pin(req, body.get("pin"))
+        return self._route_call(
+            lambda: port.set_route_key(
+                body["name"], body["secret"], body.get("ack_endpoint"), self._who(req)
+            )
+        )
+
+    def _route_remove(self, req: Request) -> Response:
+        """Remove a route that only the runtime layer holds. Body: ``name``, ``pin``."""
+        port = self._settings_port()
+        body = self._json_body(req)
+        v.only_keys(body, {"name", "pin"})
+        name = body.get("name")
+        if not isinstance(name, str) or ROUTE_NAME.fullmatch(name) is None:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
+        self._check_pin(req, body.get("pin"))
+        return self._route_call(lambda: port.remove_entry(f"llm_routes.{name}", self._who(req)))
+
+    def _route_call(self, call: Callable[[], dict[str, Any]]) -> Response:
+        """A route write: the settings refusals, plus an unusable secret store as a bare code."""
+        try:
+            return self._settings_call(call)
+        except SecretUnavailable as exc:
+            raise ApiError(HTTPStatus.CONFLICT, "secret_store") from exc
 
     def _route_check(self, name: str) -> Response:
         """Start the conformance test of one route in the background (it outlives the request
@@ -809,6 +999,80 @@ class WebApi:
         except RouteKeyUnavailable as exc:
             raise ApiError(HTTPStatus.CONFLICT, "route_secret") from exc
         return Response(HTTPStatus.ACCEPTED, {"running": True})
+
+    # ------------------------------------------------------------------ secrets
+
+    def _secrets_port(self) -> SecretsPort:
+        if self.secrets is None:
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "secrets_unavailable")
+        return self.secrets
+
+    def _secrets_list(self, req: Request) -> Response:
+        """Secret names with the routes that use each. Never a value, length or prefix."""
+        port = self._secrets_port()
+        try:
+            rows = port.listing()
+        except SecretUnavailable as exc:
+            raise ApiError(HTTPStatus.CONFLICT, "secret_store") from exc
+        return Response(
+            HTTPStatus.OK,
+            {
+                "secrets": rows,
+                "max_value_chars": MAX_VALUE_CHARS,
+                "max_name_chars": self.web.secret_name_max_chars,
+            },
+        )
+
+    def _secret_set(self, req: Request) -> Response:
+        """Add or replace a secret (SPEC 8 Secrets). Body: ``name``, ``value``, ``pin``. The PIN is
+        checked first; the value is validated, stored and never echoed, logged or kept (not even
+        its length is returned)."""
+        port = self._secrets_port()
+        body = self._json_body(req)
+        v.only_keys(body, {"name", "value", "pin"})
+        if "name" not in body or "value" not in body:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
+        self._check_pin(req, body.get("pin"))
+        name = secret_name(body["name"], self.web.secret_name_max_chars)
+        value = secret_value(body["value"])
+        replaced, users = self._secret_call(lambda: port.set(name, value), name)
+        log.info(
+            "secret %r %s from the web UI by %s%s",
+            name,
+            "replaced" if replaced else "added",
+            self._who(req),
+            f"; used by routes {users}" if replaced and users else "",
+        )
+        return Response(HTTPStatus.OK, {"name": name, "set": True})
+
+    def _secret_remove(self, req: Request) -> Response:
+        """Delete a secret no route uses. Body: ``name``, ``pin``."""
+        port = self._secrets_port()
+        body = self._json_body(req)
+        v.only_keys(body, {"name", "pin"})
+        if "name" not in body:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "bad_request")
+        self._check_pin(req, body.get("pin"))
+        name = secret_name(body["name"], self.web.secret_name_max_chars)
+        gone = self._secret_call(lambda: port.remove(name), name)
+        if not gone:
+            raise ApiError(HTTPStatus.NOT_FOUND, "secret_unknown")
+        log.info("secret %r removed from the web UI by %s", name, self._who(req))
+        return Response(HTTPStatus.OK, {"name": name, "set": False})
+
+    @staticmethod
+    def _secret_call(call: Callable[[], Any], name: str) -> Any:
+        """Run a store write; refusals become bare codes (no value, no path, no store message)."""
+        try:
+            return call()
+        except SecretInUse as exc:
+            raise ApiError(HTTPStatus.CONFLICT, "secret_in_use") from exc
+        except SecretUnavailable as exc:
+            log.warning("secret %r: store not usable", name)
+            raise ApiError(HTTPStatus.CONFLICT, "secret_store") from exc
+        except OSError as exc:
+            log.error("secret store write failed (%s)", type(exc).__name__)
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "persist_failed") from exc
 
     # ------------------------------------------------------------------ catalogue
 

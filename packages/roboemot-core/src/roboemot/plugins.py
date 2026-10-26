@@ -17,6 +17,8 @@ from .affect.clips import ENTRY_POINT_GROUP as CLIPS_GROUP
 from .diagnostics import ENTRY_POINT_GROUP as DIAGNOSTICS_GROUP
 from .install import ENTRY_POINT_GROUP as INSTALLERS_GROUP
 from .install import Platform
+from .robot_platform import ENTRY_POINT_GROUP as ROBOTS_GROUP
+from .robot_platform import RobotPlatform
 from .webui.robot_section import ENTRY_POINT_GROUP as SETTINGS_GROUP
 from .webui.robot_section import SettingsPlugin
 from .world.sources import ENTRY_POINT_GROUP as WORLD_GROUP
@@ -49,8 +51,13 @@ GROUPS: dict[str, GroupContract] = {
         instantiate=True,
     ),
     WORLD_GROUP: GroupContract(
-        "factory (manifest, cfg, robot, joint_state) -> WorldPlugin (SPEC 5A)",
+        "factory (manifest, cfg, session, joint_state) -> WorldPlugin (SPEC 5A)",
         factory_args=4,
+    ),
+    ROBOTS_GROUP: GroupContract(
+        "class implementing RobotPlatform: the factories core builds the robot from (SPEC 4A)",
+        protocol=RobotPlatform,
+        instantiate=True,
     ),
     SETTINGS_GROUP: GroupContract(
         "object implementing SettingsPlugin: section(stack, manifest) (SPEC 12)",

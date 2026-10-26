@@ -31,7 +31,10 @@ def manifest():
 def cfg(manifest):
     stack = ConfigStack()
     stack.set_manifest_behaviour(
-        manifest.model.behaviour, manifest.channels, load_clip_library(manifest)
+        manifest.model.behaviour,
+        manifest.channels,
+        load_clip_library(manifest),
+        body_yaw=None,
     )
     return stack.effective()
 
@@ -96,8 +99,9 @@ BODY_SWEEP = ExpressionEntry(
 )
 
 
-def play_sweep(cfg, manifest, group: str, **kw):
-    reg = resolve_register([Person(group, "declared", {})], cfg.register, cfg.persona)
+def play_sweep(cfg, manifest, approach: bool, **kw):
+    person = Person({"approach_allowed": approach})
+    reg = resolve_register([person], cfg.register, cfg.persona)
     r = ExpressionRenderer(cfg.expression, {"joy": BODY_SWEEP}, manifest.dofs, 0.15, **kw)
     r.update(AffectState(0.0, 0.0, "calm", 0.5, 0), reg, 0.0)
     r.request("joy")
@@ -106,17 +110,17 @@ def play_sweep(cfg, manifest, group: str, **kw):
 
 
 def test_reachy_body_yaw_expression_is_unchanged_when_approach_is_allowed(cfg, manifest):
-    reg, out = play_sweep(cfg, manifest, "adult", body_yaw="body_yaw")
+    reg, out = play_sweep(cfg, manifest, True, body_yaw="body_yaw")
     assert reg.params.approach_allowed
     assert [o["body_yaw"] for o in out] == pytest.approx([0.19634954, 0.39269908, 0.19634954])
     assert [o["head.yaw"] for o in out] == pytest.approx([0.06544985, 0.13089969, 0.06544985])
 
 
 def test_reachy_body_yaw_is_dropped_when_approach_is_not_allowed(cfg, manifest):
-    reg, out = play_sweep(cfg, manifest, "child", body_yaw="body_yaw")
+    reg, out = play_sweep(cfg, manifest, False, body_yaw="body_yaw")
     assert not reg.params.approach_allowed
     assert all("body_yaw" not in o for o in out)
-    assert [o["head.yaw"] for o in out] == pytest.approx([0.10210176, 0.20420352, 0.10210176])
+    assert [o["head.yaw"] for o in out] == pytest.approx([0.06544985, 0.13089969, 0.06544985])
 
 
 # ------------------------------------------------------------------ channels come from the manifest
@@ -127,7 +131,7 @@ DESK = ["neck_pan", "neck_tilt"]
 
 def desk_stack(behaviour: dict, **layers) -> ConfigStack:
     stack = ConfigStack(**layers)
-    stack.set_manifest_behaviour(behaviour, DESK)
+    stack.set_manifest_behaviour(behaviour, DESK, body_yaw=None)
     return stack
 
 
@@ -162,17 +166,17 @@ def test_translation_dofs_are_not_channels(manifest):
     stack = ConfigStack()
     behaviour = {"expression_map": {"joy": {"channels": {"head.x": SWEEP}}}}
     with pytest.raises(ConfigError, match="unknown channel 'head.x'"):
-        stack.set_manifest_behaviour(behaviour, manifest.channels)
+        stack.set_manifest_behaviour(behaviour, manifest.channels, body_yaw=None)
 
 
 def test_a_later_layer_cannot_name_a_missing_channel():
     app = {"expression_map": {"joy": {"channels": {"antenna_left": SWEEP}}}}
     stack = ConfigStack(app=app)
     with pytest.raises(ConfigError, match="unknown channel 'antenna_left'"):
-        stack.set_manifest_behaviour({}, DESK)
+        stack.set_manifest_behaviour({}, DESK, body_yaw=None)
     assert stack.channels is None
     stack.app = {}
-    stack.set_manifest_behaviour({}, DESK)
+    stack.set_manifest_behaviour({}, DESK, body_yaw=None)
     stack.app = app
     with pytest.raises(ConfigError, match="unknown channel 'antenna_left'"):
         stack.effective()

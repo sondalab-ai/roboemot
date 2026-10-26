@@ -1,4 +1,4 @@
-"""Vision robustness: track expiry, workers, replay safety, logging, fetcher (SPEC 5, 12)."""
+"""Vision robustness: track expiry, replay safety, logging, fetcher (SPEC 5, 12)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import json
 import logging
 import sys
 import threading
-from concurrent.futures import Future
 from pathlib import Path
 
 import httpx
@@ -17,15 +16,13 @@ from roboemot import cli
 from roboemot.bus import Bus
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.vision import (
-    AttributeWorker,
     Detection,
     Frame,
-    InlineExecutor,
     LatestFrameRunner,
     Tracker,
     VisionPipeline,
 )
-from roboemot.vision.models import ModelError, ModelFile, check_file, fetch_file, load_manifest
+from roboemot.vision.models import ModelError, ModelFile, check_file, fetch_file
 from roboemot.vision.replay import ReplayError, load_session, replay, summarize
 from roboemot.vision.runner import pump
 from roboemot.world import Observation
@@ -33,8 +30,6 @@ from test_vision import (
     CFG,
     CONSENT,
     FACE_MODEL,
-    CountingEstimator,
-    CountingExecutor,
     FixedFaceEmbedder,
     ScriptedDetector,
     axis,
@@ -48,24 +43,6 @@ from test_vision import (
 
 SECRET = "SECRETARRAYDATA"
 LOST = CFG.vision.tracker.lost_s
-
-
-class ManualExecutor(InlineExecutor):
-    """Queues jobs; ``drain`` runs them later, like a busy worker thread."""
-
-    def __init__(self):
-        self.queue: list[tuple[Future, tuple]] = []
-
-    def submit(self, fn, /, *args, **kwargs):
-        future: Future = Future()
-        self.queue.append((future, (fn, args, kwargs)))
-        return future
-
-    def drain(self):
-        for future, (fn, args, kwargs) in self.queue:
-            if future.set_running_or_notify_cancel():
-                future.set_result(fn(*args, **kwargs))
-        self.queue.clear()
 
 
 # --------------------------------------------------------------------- track expiry
@@ -101,17 +78,16 @@ def test_tracker_crossing_faces_keep_their_ids():
     assert all(len(v) == 1 for v in ids.values()) and len(ids) == 2
 
 
-def test_returning_face_is_a_new_track_without_old_identity_or_attributes(tmp_path):
+def test_returning_face_is_a_new_track_without_old_identity(tmp_path):
     present = lambda i: [face(100)] if (i < 20 or i >= 60) else []  # noqa: E731
-    reg, _, pipe, _, got = rig(tmp_path, present, estimator=CountingEstimator())
-    reg.enroll("Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT, age_group="senior")
+    reg, _, pipe, _, got = rig(tmp_path, present)
+    reg.enroll("Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT)
     run(pipe, 100)
     faces = [m.payload for m in got["percept.face"]]
     old, new = faces[0].track_id, faces[-1].track_id
     first_new = next(f for f in faces if f.track_id == new)
     assert new != old and first_new.new_track
     assert first_new.owner_id is None or first_new.stamp > 60 * 0.125
-    assert first_new.age_source == "none" and first_new.age_group == "unknown"
     assert old not in pipe._faces
 
 
@@ -141,9 +117,7 @@ def test_small_and_weak_faces_are_tracked_but_not_embedded(tmp_path):
 
 def test_identity_within_budget_with_one_missed_vote_at_5_hz(tmp_path):
     reg, _, pipe, emb, got = rig(tmp_path, lambda i: [face(100)])
-    person = reg.enroll(
-        "Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT, age_group="adult"
-    )
+    person = reg.enroll("Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT)
     vectors = iter([axis(0), axis(5), axis(0), axis(0)] + [axis(0)] * 20)
     emb.embed = lambda img, det: next(vectors).copy()
     run(pipe, 25, dt=0.2)
@@ -172,91 +146,9 @@ def test_config_ties_burst_to_votes_and_embed_size_to_detection_size(tmp_path):
         )
 
 
-# ------------------------------------------------------------------ attribute worker
-
-
-def test_estimator_failure_leaves_the_track_unknown_and_frees_the_slot(tmp_path, caplog):
-    class Boom(CountingEstimator):
-        def estimate(self, crop):
-            raise ValueError(f"{SECRET} {crop[:1]}")
-
-    caplog.set_level(logging.DEBUG)
-    _, _, pipe, _, got = rig(tmp_path, lambda i: [face(100)], estimator=Boom())
-    run(pipe, 30)
-    assert pipe.worker.pending == 0
-    last = got["percept.face"][-1].payload
-    assert last.age_group == "unknown" and last.possible_minor
-    assert SECRET not in caplog.text and "array(" not in caplog.text
-
-
-def test_submit_after_close_is_refused_and_a_refusing_executor_frees_the_slot():
-    class Refusing:
-        def submit(self, *a, **k):
-            raise RuntimeError("pool gone")
-
-    worker = AttributeWorker(CountingEstimator(), CFG.identity, 2, Refusing())
-    with pytest.raises(RuntimeError):
-        worker.submit(1, 1, [(0.0, np.zeros((4, 4, 3), np.uint8))])
-    assert worker.pending == 0
-    worker.close()
-    assert worker.submit(1, 1, [(0.0, np.zeros((4, 4, 3), np.uint8))]) is False
-
-
-def test_cancelled_jobs_do_not_leak_a_slot_or_a_result():
-    ex = ManualExecutor()
-    worker = AttributeWorker(CountingEstimator(), CFG.identity, 2, ex)
-    crop = [(0.0, np.zeros((4, 4, 3), np.uint8))]
-    assert worker.submit(1, 1, crop)
-    worker.cancel_pending()
-    ex.drain()
-    assert worker.pending == 0 and worker.poll() == []
-
-
-def test_late_result_after_track_id_reuse_is_ignored(tmp_path):
-    ex = ManualExecutor()
-    est = CountingEstimator(age="adult")
-    _, _, pipe, _, got = rig(tmp_path, lambda i: [face(100)], estimator=est, executor=ex)
-    run(pipe, 20)
-    assert len(ex.queue) == 1
-    ex.queue[0][0].set_running_or_notify_cancel()
-    old_id = got["percept.face"][0].payload.track_id
-    pipe.reset()
-    run(pipe, 3, start=100.0)
-    new_id = got["percept.face"][-1].payload.track_id
-    assert new_id == old_id
-    for future, (fn, args, kwargs) in ex.queue:
-        future.set_result(fn(*args, **kwargs))
-    ex.queue.clear()
-    pipe.process(Frame(image(), 100.5))
-    assert got["percept.face"][-1].payload.age_group == "unknown"
-
-
-def test_declared_person_needs_no_attribute_job(tmp_path):
-    ex = CountingExecutor()
-    reg, _, pipe, _, _ = rig(
-        tmp_path, lambda i: [face(100)], estimator=CountingEstimator(), executor=ex
-    )
-    reg.enroll(
-        "Ada",
-        np.stack([axis(0)] * 5),
-        FACE_MODEL,
-        consent=CONSENT,
-        age_group="adult",
-        gender="female",
-    )
-    run(pipe, 40)
-    assert ex.jobs <= 1
-    state = next(iter(pipe._faces.values()))
-    assert state.attr in {"skipped", "submitted"}
-    if state.attr == "skipped":
-        assert ex.jobs == 0
-
-
 def test_forgotten_person_stops_being_announced_or_reported(tmp_path):
     reg, _, pipe, _, got = rig(tmp_path, lambda i: [face(100)])
-    person = reg.enroll(
-        "Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT, age_group="adult"
-    )
+    person = reg.enroll("Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT)
     run(pipe, 10)
     state = next(iter(pipe._faces.values()))
     assert state.owner_id == person.person_id and state.announced == person.person_id
@@ -323,10 +215,9 @@ def test_nothing_with_array_data_is_logged_or_shown_in_reprs(tmp_path, caplog):
     runner.stop()
     assert SECRET not in caplog.text
 
-    _, _, pipe, _, _ = rig(tmp_path, lambda i: [face(100)], estimator=CountingEstimator())
+    _, _, pipe, _, _ = rig(tmp_path, lambda i: [face(100)])
     run(pipe, 3)
     state = next(iter(pipe._faces.values()))
-    state.crops.append((0.0, np.ones((4, 4, 3), np.uint8)))
     obs = Observation("animal", 0.0, "v", 0.0, 0.0, embedding=np.ones(4))
     for obj in (Frame(image(), 0.0), state, obs, face(1)):
         assert "array(" not in repr(obj) and "[[" not in repr(obj)
@@ -342,7 +233,7 @@ def test_replay_forces_refresh_off_and_restores_it(tmp_path):
     session = load_session(root)
     near = (axis(0) + 0.3 * axis(1)) / np.linalg.norm(axis(0) + 0.3 * axis(1))
     reg, bus, pipe, _, _ = rig(tmp_path / "a", lambda i: [face(100)], vector=near)
-    reg.enroll("Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT, age_group="adult")
+    reg.enroll("Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT)
     before = reg.gallery("face", FACE_MODEL)
     replay(session, pipe, bus)
     assert pipe.refresh is True
@@ -352,23 +243,6 @@ def test_replay_forces_refresh_off_and_restores_it(tmp_path):
     run(pipe, 12, start=100.0)
     grown = {k: v.shape for k, v in reg.gallery("face", FACE_MODEL).items()}
     assert grown != {k: v.shape for k, v in before.items()}
-
-
-def test_replay_needs_an_inline_attribute_executor(tmp_path):
-    from concurrent.futures import ThreadPoolExecutor
-
-    root = tmp_path / "s"
-    root.mkdir()
-    write_session(root, 3)
-    pool = ThreadPoolExecutor(1)
-    try:
-        _, bus, pipe, _, _ = rig(
-            tmp_path / "p", lambda i: [], estimator=CountingEstimator(), executor=pool
-        )
-        with pytest.raises(ReplayError, match="InlineExecutor"):
-            replay(load_session(root), pipe, bus)
-    finally:
-        pool.shutdown()
 
 
 def test_session_frames_cannot_escape_the_session_folder(tmp_path):
@@ -387,7 +261,7 @@ def test_second_replay_needs_no_manual_reset(tmp_path):
     root.mkdir()
     write_session(root, 30)
     session = load_session(root)
-    _, bus, pipe, _, _ = rig(tmp_path / "r", lambda i: [face(100)], estimator=CountingEstimator())
+    _, bus, pipe, _, _ = rig(tmp_path / "r", lambda i: [face(100)])
     first = summarize(replay(session, pipe, bus).messages)
     second = summarize(replay(session, pipe, bus).messages)
     assert first and first == second
@@ -502,16 +376,6 @@ def test_os_errors_become_model_errors(tmp_path):
     (tmp_path / "d").write_text("a file where the folder should go")
     with pytest.raises(ModelError):
         fetch_file(FILE, tmp_path, mock(lambda r: httpx.Response(200, content=BODY)))
-
-
-def test_manifest_pins_the_fairface_label_order():
-    specs = load_manifest()
-    assert specs["fairface-gender"].labels == ["Female", "Male"]
-    assert specs["fairface-age"].labels[0] == "0-2" and specs["fairface-age"].labels[-1].startswith(
-        "more"
-    )
-    assert len(specs["fairface-age"].labels) == 9
-    assert specs["fairface-age"].labels_sha256
 
 
 def test_cli_honours_vision_models_dir(tmp_path, capsys):

@@ -41,8 +41,6 @@ def build_speech(
     sink: AudioSink,
     router: Callable[[], Router],
     bus: Bus | None = None,
-    minor_present: Callable[[], bool] = lambda: False,
 ) -> SpeechOutput:
-    """The speech output over ``sink``; ``router`` is a getter (the app rebuilds its router) and
-    ``minor_present`` is read when each sentence starts."""
-    return SpeechOutput(cfg, sink, build_backend(cfg, router), bus, minor_present)
+    """The speech output over ``sink``; ``router`` is a getter (the app rebuilds its router)."""
+    return SpeechOutput(cfg, sink, build_backend(cfg, router), bus)

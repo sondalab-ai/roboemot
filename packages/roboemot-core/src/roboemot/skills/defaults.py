@@ -5,15 +5,12 @@ They take their effects from a :class:`SkillEnv` of callables the app provides, 
 knows no robot. All five run inline on the conversation's event loop (they only post a request),
 so none can outlive its turn. None of them can address a joint: ``play`` names an
 expression of the manifest's
-map (rendered by the expression renderer under the register, persona, circadian and minor
-caps), ``look_at`` a category or a name in view (a hint to the attention selector, so the gaze
+map (rendered by the expression renderer under the register, persona and circadian scaling),
+``look_at`` a category or a name in view (a hint to the attention selector, so the gaze
 controller and the limiter still decide), ``express_emotion`` a label and a strength (an affect
 impulse inside the engine's per-turn budget).
 
-Minors (decision 2026-10-18): all five are allowed. ``play``, ``look_at`` and ``express_emotion``
-go through the paths that already apply the minor motion caps and the no-approach rule;
-``remember_preference`` stays allowed because it only ever acts after the person's spoken
-confirmation, and its question passes the minor output filter.
+``remember_preference`` only ever acts after the person's spoken confirmation.
 """
 
 from __future__ import annotations

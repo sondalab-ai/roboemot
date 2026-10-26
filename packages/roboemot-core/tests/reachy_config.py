@@ -16,6 +16,9 @@ def reachy_config() -> RoboEmotConfig:
     manifest = load_manifest(MANIFEST, allow_unmeasured_dynamics=True)
     stack = ConfigStack()
     stack.set_manifest_behaviour(
-        manifest.model.behaviour, manifest.channels, load_clip_library(manifest)
+        manifest.model.behaviour,
+        manifest.channels,
+        load_clip_library(manifest),
+        body_yaw=None,
     )
     return stack.effective()

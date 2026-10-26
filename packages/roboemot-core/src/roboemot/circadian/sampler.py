@@ -26,7 +26,7 @@ from typing import Any, NamedTuple
 
 import numpy as np
 
-from .. import shutdown
+from .. import priority, shutdown
 from ..config.schema import CircadianConfig, LightConfig
 from .light import COLOR_NDIM, Level, LightEstimator, LightReading
 from .model import MINUTES_PER_HOUR, SECONDS_PER_MINUTE
@@ -245,8 +245,20 @@ class IdleLightReader:
         self.sampler = sampler
         self.source = source
         self._stop = threading.Event()
+        self._paused = threading.Event()
         self._thread: threading.Thread | None = None
         self.reads = 0
+
+    def pause(self) -> None:
+        """Read no frame until :meth:`resume` (the robot is asleep, SPEC 12A); the thread idles."""
+        self._paused.set()
+
+    def resume(self) -> None:
+        self._paused.clear()
+
+    @property
+    def paused(self) -> bool:
+        return self._paused.is_set()
 
     @property
     def running(self) -> bool:
@@ -254,8 +266,9 @@ class IdleLightReader:
 
     def start(self) -> None:
         self._stop.clear()
-        self._thread = threading.Thread(target=self._run, name="roboemot-light", daemon=True)
-        self._thread.start()
+        thread = threading.Thread(target=self._run, name="roboemot-light", daemon=True)
+        thread.start()
+        self._thread = thread
 
     def stop(self) -> None:
         self._stop.set()
@@ -284,6 +297,8 @@ class IdleLightReader:
             return False
 
     def _run(self) -> None:
+        priority.lower_current()
         while not self._stop.is_set():
-            self.step()
+            if not self._paused.is_set():
+                self.step()
             self._stop.wait(self.sampler.circadian.idle_poll_s)

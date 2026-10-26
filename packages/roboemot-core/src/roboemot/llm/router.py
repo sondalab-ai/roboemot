@@ -2,9 +2,9 @@
 
 Uses only the common subset of Chat Completions: messages with system/user/assistant/tool
 roles, ``stream=True``, ``tools`` with ``tool_choice="auto"``, ``max_tokens``. Routes are tried
-in order; a route is skipped when it is not cleared for minors (while a minor is present) or
-its daily token budget is spent, and abandoned for the next one on error or when the first
-token arrives later than ``first_token_timeout_s``, as long as nothing was yielded yet.
+in order; a route is skipped when its daily token budget is spent, and abandoned for the next
+one on error or when the first token arrives later than ``first_token_timeout_s``, as long as
+nothing was yielded yet.
 
 With a :class:`~roboemot.health.network.NetworkMonitor` (SPEC 12A), routes known to be
 unreachable are skipped without waiting for their timeouts, every request reports whether its
@@ -76,6 +76,8 @@ class Done:
     route: str
     tokens: int
     estimated: bool
+    finish_reason: str | None = None
+    reasoning_chars: int = 0  # non-standard reasoning deltas seen (never yielded, never asked for)
 
 
 Event = TextDelta | ToolCall | Done
@@ -94,17 +96,26 @@ SLOW = (TimeoutError, APITimeoutError)
 UNREACHABLE = (APIConnectionError, OSError)  # checked after SLOW (both contain timeouts)
 
 
+# Non-standard delta fields some servers stream before the answer. Never requested or yielded:
+# only their length is counted, a hint for the debug report and the route check.
+REASONING_FIELDS = ("reasoning", "reasoning_content")
+
+
 @dataclass
 class FirstToken:
-    """Seconds from the request to the first real content, filled in by ``stream_route``."""
+    """What ``stream_route`` saw, filled in while it streams (so it survives a timeout):
+    seconds from the request to the first real content, characters of reasoning deltas, and
+    the last ``finish_reason``."""
 
     seconds: float | None = None
+    reasoning_chars: int = 0
+    finish_reason: str | None = None
 
 
 @dataclass
 class ActiveRoute:
-    """The route a ``stream`` call is on, set before its first event. A caller that must cut
-    the answer when the situation changes (a minor appears mid-answer, SPEC 8) reads it."""
+    """The route a ``stream`` call is on, set before its first event (the conversation phase
+    reads it to show which route is answering)."""
 
     route: LLMRoute | None = None
 
@@ -201,14 +212,12 @@ class Router:
     def offline(self) -> bool:
         return self.monitor is not None and not self.monitor.online
 
-    def eligible(self, minor_present: bool) -> list[LLMRoute]:
+    def eligible(self) -> list[LLMRoute]:
         out = []
         for r in self.routes:
             if r.name in self._unavailable:
                 continue
             if self.monitor and not self.monitor.is_online(r.name):
-                continue
-            if minor_present and not (r.allowed_for_minors and self.safety.minors_allowed_llm):
                 continue
             if self.used(r.name) >= r.daily_token_budget:
                 continue
@@ -260,7 +269,6 @@ class Router:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         *,
-        minor_present: bool = False,
         active: ActiveRoute | None = None,
         pseudonyms: Pseudonyms | None = None,
     ) -> AsyncIterator[Event]:
@@ -271,10 +279,10 @@ class Router:
         from a local to a cloud route never carries the real names."""
         if self.offline:
             raise Offline("no route reachable")
-        routes = self.eligible(minor_present)
+        routes = self.eligible()
         if not routes:
             raise NoRouteAvailable(
-                "no eligible route (minor present, budgets spent or unreachable)"
+                "no eligible route (budgets spent, key unavailable or unreachable)"
             )
         for route in routes:
             yielded = False
@@ -371,6 +379,7 @@ class Router:
             kwargs["tool_choice"] = "auto"
         stream = None
         out_chars, usage_tokens = 0, None
+        reasoning_chars, finish_reason = 0, None
         prompt_chars = sum(len(str(m.get("content", ""))) for m in messages)
         try:
             create = client.chat.completions.create  # untimed: the first access imports lazily
@@ -393,6 +402,10 @@ class Router:
                     usage_tokens = chunk.usage.total_tokens
                 for choice in chunk.choices or []:
                     delta = choice.delta
+                    if thought := _reasoning_chars(delta):
+                        reasoning_chars += thought
+                        if timing is not None:
+                            timing.reasoning_chars = reasoning_chars
                     first = delta.content or delta.tool_calls
                     if first and timing is not None and timing.seconds is None:
                         timing.seconds = loop.time() - started
@@ -415,15 +428,20 @@ class Router:
                             slot["args"] += tc.function.arguments
                             out_chars += len(tc.function.arguments)
                     if choice.finish_reason:  # nothing more comes for this choice
+                        finish_reason = choice.finish_reason
+                        if timing is not None:
+                            timing.finish_reason = finish_reason
                         for done in self._complete(calls, sent):
                             yield done
             for done in self._complete(calls, sent):
                 yield done
-            tokens = self._tokens(usage_tokens, prompt_chars, out_chars)
-            yield Done(route.name, tokens, usage_tokens is None)
+            tokens = self._tokens(usage_tokens, prompt_chars, out_chars + reasoning_chars)
+            yield Done(route.name, tokens, usage_tokens is None, finish_reason, reasoning_chars)
         finally:
             # Charged once, also on barge-in / timeout / error (review finding 9).
-            self._charge(route.name, self._tokens(usage_tokens, prompt_chars, out_chars))
+            # Reasoning is billed by the provider: it counts in the estimate like the answer.
+            estimate = self._tokens(usage_tokens, prompt_chars, out_chars + reasoning_chars)
+            self._charge(route.name, estimate)
             if stream is not None:
                 with contextlib.suppress(Exception):
                     await stream.close()
@@ -470,6 +488,15 @@ class Router:
     @staticmethod
     def _tokens(usage: int | None, prompt_chars: int, out_chars: int) -> int:
         return usage if usage is not None else (prompt_chars + out_chars) // CHARS_PER_TOKEN
+
+
+def _reasoning_chars(delta: Any) -> int:
+    """Characters in a delta's non-standard reasoning fields, the longer one when both are
+    present (some servers stream the same text in both); 0 when the server sends none."""
+    return max(
+        (len(v) for f in REASONING_FIELDS if isinstance(v := getattr(delta, f, None), str)),
+        default=0,
+    )
 
 
 def _outgoing(

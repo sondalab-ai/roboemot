@@ -12,6 +12,7 @@ import httpx
 import pytest
 from roboemot.config.schema import LLMRoute, SafetyConfig
 from roboemot.llm import Done, NoRouteAvailable, Router, TextDelta, ToolCall, build_messages
+from roboemot.llm.router import FirstToken
 
 
 def sse(chunks: list[dict]) -> bytes:
@@ -194,15 +195,6 @@ async def test_no_route_raises_for_fallback_phrase():
     r = router(Server(), [route("down", "down.local")])
     with pytest.raises(NoRouteAvailable):
         await collect(r)
-
-
-async def test_minor_present_requires_route_and_safety_clearance():
-    srv = Server()
-    routes = [route("cloud", "lan.local", allowed_for_minors=True)]
-    with pytest.raises(NoRouteAvailable):
-        await collect(router(srv, routes), minor_present=True)  # safety default: not cleared
-    ok = router(srv, routes, safety=SafetyConfig(minors_allowed_llm=True))
-    assert isinstance((await collect(ok, minor_present=True))[-1], Done)
 
 
 async def test_daily_budget_skips_route_and_resets_next_day():
@@ -516,3 +508,98 @@ async def test_deep_arguments_from_a_cloud_route_with_pseudonyms_come_back_raw()
     evs = [ev async for ev in r.stream(messages, [{"type": "function"}], pseudonyms=names)]
     call = next(e for e in evs if isinstance(e, ToolCall))
     assert call.arguments == {"_raw": text} and r.failures == []
+
+
+def test_first_token_timeout_default_fits_cloud_routes():
+    # robot 2026-10-23: Claude Haiku answered in 0.8 to 1.8 s, so 1.5 s failed 5 turns of 8
+    assert (
+        LLMRoute(name="c", base_url="https://api.example.com/v1", model="m").first_token_timeout_s
+        == 3.0
+    )
+
+
+def _canned(chunks: list[dict]):
+    """A server that answers every request with ``chunks`` and records the request bodies."""
+    bodies: list[dict] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, content=sse(chunks)
+        )
+
+    return handler, bodies
+
+
+def _reasoning(text: str, field: str = "reasoning") -> dict:
+    c = chunk()
+    c["choices"][0]["delta"][field] = text
+    return c
+
+
+def _ended(c: dict, reason: str) -> dict:
+    c["choices"][0]["finish_reason"] = reason
+    return c
+
+
+async def test_reasoning_deltas_are_counted_never_yielded_or_requested():
+    handler, bodies = _canned(
+        [_reasoning("let me think"), _reasoning("... ok", "reasoning_content"), chunk("Ciao")]
+    )
+    r = Router(
+        [route("lan", "lan.local", max_tokens=300)],
+        SafetyConfig(),
+        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    timing = FirstToken()
+    msgs = [{"role": "user", "content": "x"}]
+    evs = [ev async for ev in r.stream_route(r.routes[0], msgs, None, timing)]
+    assert [e.text for e in evs if isinstance(e, TextDelta)] == ["Ciao"]
+    assert timing.reasoning_chars == len("let me think") + len("... ok")
+    assert evs[-1].reasoning_chars == timing.reasoning_chars
+    body = bodies[0]
+    assert body["max_tokens"] == 300
+    assert not [k for k in body if "reason" in k or k == "include_reasoning"]
+
+
+async def test_length_finish_with_only_reasoning_is_recorded():
+    handler, _ = _canned([_reasoning("x" * 40), _ended(chunk(), "length")])
+    r = Router(
+        [route("lan", "lan.local")],
+        SafetyConfig(),
+        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    timing = FirstToken()
+    msgs = [{"role": "user", "content": "x"}]
+    evs = [ev async for ev in r.stream_route(r.routes[0], msgs, None, timing)]
+    assert [type(e) for e in evs] == [Done]
+    assert timing.seconds is None  # reasoning is not a first token
+    assert timing.reasoning_chars == 40 and timing.finish_reason == "length"
+    assert evs[0].finish_reason == "length"
+
+
+async def test_reasoning_counts_in_the_estimated_charge_without_usage():
+    handler, _ = _canned([_reasoning("x" * 400), _ended(chunk(), "length")])
+    r = Router(
+        [route("lan", "lan.local")],
+        SafetyConfig(),
+        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    msgs = [{"role": "user", "content": "x"}]
+    evs = [ev async for ev in r.stream_route(r.routes[0], msgs, None, FirstToken())]
+    assert r.used("lan") == (1 + 400) // 4 == evs[-1].tokens and evs[-1].estimated
+
+
+async def test_reasoning_streamed_in_both_fields_counts_once():
+    both = _reasoning("abcdef")
+    both["choices"][0]["delta"]["reasoning_content"] = "abcdef"
+    handler, _ = _canned([both, chunk("Ciao")])
+    r = Router(
+        [route("lan", "lan.local")],
+        SafetyConfig(),
+        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    timing = FirstToken()
+    msgs = [{"role": "user", "content": "x"}]
+    _ = [ev async for ev in r.stream_route(r.routes[0], msgs, None, timing)]
+    assert timing.reasoning_chars == 6
