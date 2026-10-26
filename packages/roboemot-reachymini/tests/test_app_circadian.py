@@ -196,6 +196,7 @@ def test_circadian_settings_reload_without_a_restart(data):  # noqa: F811
     try:
         assert wait_for(lambda: app.circadian_runner is not None and app.diagnostics is not None)
         assert app.circadian_runner.cfg.circadian.yawn_interval_s == 120.0
+        assert app.soothe_runner is None  # voice is off: no speech output, no runner (SPEC 7B)
         (data / "app.yaml").write_text(
             (data / "app.yaml").read_text()
             + "circadian:\n  yawn_interval_s: 45\nlight:\n  sample_interval_s: 3\n"

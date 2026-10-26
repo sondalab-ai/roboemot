@@ -404,6 +404,16 @@ def test_a_session_ends_after_the_timeout_and_its_history_is_dropped(rigs):
     assert rig.worker.snapshot()["sessions"] == 2
 
 
+def test_in_session_follows_the_open_session(rigs):
+    rig = rigs()
+    assert not rig.worker.in_session()
+    rig.turn("uno")
+    assert rig.worker.in_session()
+    rig.clock[0] += rig.stack.effective().conversation.session_timeout_min * 60 + 1
+    rig.worker.expire(rig.clock[0])
+    assert not rig.worker.in_session()
+
+
 def test_the_person_in_view_keeps_the_session_alive(rigs):
     rig = rigs()
     rig.turn("uno")

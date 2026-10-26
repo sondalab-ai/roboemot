@@ -322,6 +322,21 @@ class SpeechOutput:
             with contextlib.suppress(RuntimeError):
                 loop.call_soon_threadsafe(self._cancel_raw, job_id)
 
+    def live(self, job_id: int) -> bool:
+        """Whether raw job ``job_id`` is still queued or is the one playing. False once it has
+        played to its end, was cancelled, or a ``stop`` (barge-in) dropped it, so the caller
+        can tell its sound is over without a clock of its own. Safe from any thread."""
+        with self._lock:
+            return self._raw_current == job_id or any(
+                isinstance(job, _RawJob) and job.id == job_id for job in self._jobs
+            )
+
+    def waiting(self, exclude: int | None = None) -> int:
+        """Jobs still queued (sentences and raw sounds), not counting job ``exclude``. The idle
+        runner passes its own sound, so only somebody else's audio counts (SPEC 7B)."""
+        with self._lock:
+            return sum(job.id != exclude for job in self._jobs)
+
     def played(self, job_id: int) -> bool:
         """Whether sentence ``job_id`` began to play: its audio reached the sink and was not
         cut before its first sample. A sentence a ``stop`` interrupted halfway counts (it was

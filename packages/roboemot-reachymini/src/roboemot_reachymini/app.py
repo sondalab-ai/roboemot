@@ -15,10 +15,12 @@ import gc
 import logging
 import math
 import os
+import random
 import threading
 import time
+from collections.abc import Callable
 from contextlib import ExitStack
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +58,7 @@ from roboemot.persona.llm_traits import TraitCache, TraitsWorker
 from roboemot.reflex import ReflexEngine
 from roboemot.secret_store import SecretStore
 from roboemot.skills.defaults import default_skills
+from roboemot.soothe import SootheRunner
 from roboemot.vision import CIRCADIAN, FrameSource, LockedSource
 from roboemot.vision.minor import MinorPresence
 from roboemot.vision.service import Perception, default_stages, open_perception, world_snapshot
@@ -205,6 +208,70 @@ def scan_context(
     )
 
 
+@dataclass(frozen=True)
+class SootheContext:
+    """What the idle test of the self-soothing sound needs this tick (SPEC 7B)."""
+
+    in_session: bool  # a conversation session is open
+    voice_recent: bool  # someone spoke: a speaker hint or an utterance within the quiet window
+    other_queued: int  # speech jobs queued besides our own sound
+    speaking: bool  # the speaker is in its speaking window (our own sound included)
+    ours: bool  # our sound is queued or playing, or ended within the echo tail
+
+
+def soothe_context(
+    now: float,
+    *,
+    selector: AttentionSelector,
+    speech: SpeechActivity,
+    output: SpeechOutput,
+    soothe: SootheRunner,
+    in_session: bool,
+    last_voice: float,
+    echo_tail_s: float,
+) -> SootheContext:
+    """Gather the idle inputs: only interaction counts, a person who is merely in view does not
+    (``selector.target``, attention, presence and scans are deliberately not read). A voice is
+    recent when the selector holds an active speaker hint or an utterance was heard less than
+    ``soothe.speech_quiet_s`` ago; ``last_voice`` is that utterance's time."""
+    return SootheContext(
+        in_session=in_session,
+        voice_recent=selector.speaker_active(now) or now - last_voice < soothe.cfg.speech_quiet_s,
+        other_queued=output.waiting(exclude=soothe.job),
+        speaking=speech.speaking(now),
+        ours=soothe.sounding(now, echo_tail_s),
+    )
+
+
+def soothe_idle(ctx: SootheContext) -> bool:
+    """Whether nobody is interacting with the robot (SPEC 7B): no conversation session, no recent
+    voice, no other queued sentence and no audio but the sound's own. The sound opens the
+    speaker's speaking window and holds a place in the speech queue; both are ignored while it
+    plays and for the echo tail after it, so it never cancels itself."""
+    if ctx.in_session or ctx.voice_recent or ctx.other_queued > 0:
+        return False
+    return ctx.ours or not ctx.speaking
+
+
+def soothe_tick(
+    soothe: SootheRunner,
+    now: float,
+    context: Callable[[], SootheContext],
+    circadian_state: str,
+    quiet: bool,
+) -> None:
+    """One step of the self-soothing runner, run after ``scan_tick``. A failure (type and message
+    only, never audio) is logged, the sound is cut and the app keeps running."""
+    try:
+        soothe.tick(now, soothe_idle(context()), circadian_state, quiet)
+    except Exception as exc:
+        log.warning("soothe: %s: %s", type(exc).__name__, exc)
+        try:
+            soothe.close()
+        except Exception as close_exc:
+            log.warning("soothe: close: %s", type(close_exc).__name__)
+
+
 def scan_tick(ctx: ScanContext, scan: ScanController, loop: MotionLoop, cfg: Any) -> bool:
     """One scan step, run right after ``attention_tick``: feed the sweep command or release it.
 
@@ -317,6 +384,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
     name_source: NameSource | None = None  # registry names for pseudonyms outside the conversation
     router_hub: RouterHub | None = None  # the one router: traits, conversation, speech, checks
     conversation: ConversationWorker | None = None  # answers addressed utterances (voice.enabled)
+    soothe_runner: SootheRunner | None = None  # idle self-soothing sound (SPEC 7B); needs voice
 
     def make_router(self, cfg: Any, monitor: NetworkMonitor) -> Router:
         """The app's LLM router over the configured routes (overridable: tests inject fakes)."""
@@ -653,6 +721,19 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         if cfg.voice.enabled and listener is None:
             audio.set_voice(False)  # no consumer: the hub must not queue audio for nobody
         affect = runner.engine
+
+        def effects_now() -> Any:
+            """The circadian state's effects now (the awake ones while the rhythm is off)."""
+            return (
+                circ.model.effects()
+                if self.circadian
+                else stack.effective().circadian.states["awake"]
+            )
+
+        voice_heard = [-math.inf]  # monotonic time of the last utterance, addressed or not
+        bus.subscribe(
+            "percept.utterance", lambda _msg: voice_heard.__setitem__(0, time.monotonic())
+        )
         conv_speaker = speaker_source(selector, world)
 
         def value_cap() -> int:
@@ -707,6 +788,8 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 self.catalogue.cfg = change.config.catalogue
             runner.apply_config(change.config.affect, change.config.appraisal)
             circ.apply_config(change.config)
+            if soothe is not None:
+                soothe.apply_config(change.config.soothe)
             speech.set_echo_tail_ms(change.config.voice.echo_tail_ms)
             yes_no.apply_config(change.config.voice.fastpath)
             if listener is not None:
@@ -734,6 +817,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         stack.subscribe(reload)
         stack.subscribe(worker.on_change)
         fx_for, fx = None, None
+        soothe: SootheRunner | None = None  # built with the speech output, when voice is enabled
         idle_last = idle_t = time.monotonic()  # idle breathing phase clock (SPEC 7A, Drowsy)
         # Everything started below is stopped in reverse order whatever fails: the stack runs
         # every callback even when one raises, so the motion loop always stops and the camera
@@ -773,6 +857,14 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 )
                 cleanup.callback(output.close)
                 output.start()
+                soothe = self.soothe_runner = SootheRunner(
+                    cfg.soothe,
+                    output,
+                    on_event=runner.on_event,
+                    rng=random.Random(),  # noqa: S311 (a pick and a jitter, not security)
+                    volume_db=lambda: effects_now().volume_db,
+                )
+                cleanup.callback(soothe.close)  # before the output goes away
                 if listener is not None:
                     # Shutdown order: listener (no new utterances), conversation (cancels the
                     # stream in flight), speech output, speaker.
@@ -783,11 +875,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                         affect=runner.engine,
                         responder=responder,
                         register=lambda: tracker.active.params if tracker.active else None,
-                        circadian=lambda: (
-                            circ.model.effects()
-                            if self.circadian
-                            else stack.effective().circadian.states["awake"]
-                        ),
+                        circadian=effects_now,
                         minor_present=lambda: self.minor_present,
                         profile=profile_source(selector, world, perception.registry, value_cap),
                         scene=scene_source(
@@ -880,6 +968,25 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                         minor_present=minor,
                     )
                     scan_tick(ctx, scan, loop, live)
+                if soothe is not None and self.speech_output is not None:
+                    soothe_tick(
+                        soothe,
+                        now,
+                        lambda now=now, live=live: soothe_context(
+                            now,
+                            selector=selector,
+                            speech=speech,
+                            output=self.speech_output,
+                            soothe=soothe,
+                            in_session=self.conversation is not None
+                            and self.conversation.in_session(),
+                            last_voice=voice_heard[0],
+                            echo_tail_s=live.voice.echo_tail_ms / MS_PER_S,
+                        ),
+                        self.circadian.state if self.circadian else "awake",
+                        live.circadian.enabled
+                        and in_window(clock.hour(), live.circadian.quiet_hours),
+                    )
                 state_fx = (
                     circ.model.effects() if self.circadian else live.circadian.states["awake"]
                 )

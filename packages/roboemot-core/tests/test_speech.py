@@ -566,6 +566,29 @@ def test_stop_cuts_a_raw_job_playing_and_drops_the_queued_ones(make):
     assert len(sink.pushed) == 1  # the queued one never played
 
 
+def test_live_is_true_while_a_raw_job_is_queued_or_playing_and_false_after_cancel_or_stop(make):
+    sink = TimelineSink()
+    out = make(sink=sink)
+    first = out.play(sound(20), RATE)
+    assert wait_for(lambda: len(sink.pushed) == 1)
+    second = out.play(sound(1), RATE)  # queued behind the first
+    assert out.live(first) and out.live(second) and not out.live(999)
+    out.cancel(second)
+    assert not out.live(second)
+    out.stop()
+    assert wait_for(lambda: not out.live(first))
+
+
+def test_waiting_counts_the_queued_jobs_except_the_excluded_one(make):
+    sink = TimelineSink()
+    out = make(sink=sink)
+    first = out.play(sound(20), RATE)
+    assert wait_for(lambda: len(sink.pushed) == 1)  # taken off the queue: it holds the output
+    assert out.waiting() == 0
+    second = out.play(sound(1), RATE)
+    assert out.waiting() == 1 and out.waiting(exclude=second) == 0 and out.waiting(first) == 1
+
+
 def test_cancel_removes_only_its_own_job(make):
     sink = TimelineSink()
     out = make(sink=sink)

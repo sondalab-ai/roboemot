@@ -105,6 +105,12 @@ class AttentionSelector:
         """Inject the active speaker; it stays valid for ``speaker_hold_s`` after its stamp."""
         self._hint = hint
 
+    def speaker_active(self, now: float) -> bool:
+        """Whether a speaker hint is still valid at ``now`` (someone spoke within
+        ``speaker_hold_s``), whether or not the speaker is in view."""
+        h = self._hint
+        return h is not None and now - h.stamp <= self.cfg.speaker_hold_s
+
     @property
     def target(self) -> AttentionTarget | None:
         """The target chosen by the last ``update`` (None: no target)."""

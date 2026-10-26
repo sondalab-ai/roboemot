@@ -222,6 +222,20 @@ def test_a_repeated_labelled_impulse_starts_again_but_not_within_the_min_interva
     assert r.update(state("joy", 0.4, impulse=3), reg, 5.2 + cfg.expression.min_interval_s)
 
 
+@pytest.mark.parametrize("label", ["calm", "joy", "curiosity", "sleepy"])
+def test_a_self_soothe_event_starts_the_clip_of_its_label_through_engine_and_renderer(
+    cfg, manifest, label
+):
+    engine = AffectEngine(cfg.affect, cfg.appraisal)
+    r = renderer(cfg, manifest)
+    reg = active("adult")
+    r.update(engine.state(0.0), reg, 0.0)  # the first state is only noted
+    assert engine.on_event("self.soothe", 10.0, {"label": label, "sound": "hum"})
+    assert r.update(engine.state(10.0), reg, 10.0)
+    assert r.last_label == label
+    assert r.commands(10.0)  # the clip is playing
+
+
 def test_a_label_without_a_map_entry_or_a_usable_channel_plays_nothing(cfg, manifest):
     sparse = {"joy": entry(antenna_right=[(0, 0), (0.5, 10), (1, 0)])}
     r = renderer(cfg, manifest, sparse)

@@ -55,6 +55,7 @@ BEHAVIOUR_MODULES = [
     "conversation/preferences.py",
     "soothe/__init__.py",
     "soothe/synth.py",
+    "soothe/runner.py",
     "persona/__init__.py",
     "persona/llm_traits.py",
     "motion/loop.py",

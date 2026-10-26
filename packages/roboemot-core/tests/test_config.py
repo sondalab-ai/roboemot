@@ -455,7 +455,7 @@ def test_clear_and_set_validate_the_configuration_no_more_than_before(monkeypatc
 
 def test_soothe_defaults_validate():
     cfg = RoboEmotConfig()
-    assert cfg.soothe.enabled and (cfg.soothe.interval_s, cfg.soothe.jitter) == (900, 0.5)
+    assert cfg.soothe.enabled and (cfg.soothe.interval_s, cfg.soothe.jitter) == (300, 0.5)
     pairs = [(v.label, v.sound) for v in cfg.soothe.variants]
     assert pairs == [
         ("calm", "hum"),
