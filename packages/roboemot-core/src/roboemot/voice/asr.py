@@ -6,11 +6,17 @@ to drop an utterance. The VAD endpointer decides where an utterance ends, so a b
 finds a pause by itself (Vosk does) must keep accumulating: its text is everything since
 ``start``. Text is the user's speech: it is hidden from ``repr`` and never logged.
 
-``VoskASR`` keeps one Vosk model per language, loaded by ``load`` (the app does this at start so
-the first utterance does not pay for it) and one recognizer at a time, created by ``start``.
-``grammar_words`` decodes a finished piece of audio with a throwaway recognizer limited to a
-grammar (the grammar pass, ``roboemot.voice.grammar``); it shares the loaded model, not the
-streaming recognizer.
+``VoskASR`` keeps one Vosk model and one free-text recognizer per language, both built by
+``load`` (the app does this at start, so no utterance pays for them). Building a recognizer
+took 50 ms on a Mac and was 13 % of the listener's samples on the CM4 when ``start`` did it at
+every utterance, and a new recognizer decodes about three times slower while its graph cache
+fills (SPEC 13); ``start`` now reuses the language's recognizer. Vosk's ``Reset`` alone keeps the
+audio of an unfinished utterance (the next one then decodes it as a prefix), so ``finish`` and
+``reset`` end the decode with ``FinalResult`` before the ``Reset``: a reused recognizer then
+decodes like a new one (checked on the test clips with the real models). ``grammar_words`` decodes a
+finished piece of audio with a throwaway recognizer limited to a grammar (the grammar pass,
+``roboemot.voice.grammar``): its grammar holds the words of each utterance's free text, so it
+cannot be reused, and building it is cheap (the grammar is compiled during the decode).
 """
 
 from __future__ import annotations
@@ -125,9 +131,13 @@ class VoskASR:
         self._paths = dict(model_paths)
         self._models: dict[str, Any] = {}
         self._grammar_graph: dict[str, bool] = {}
-        self._rec: Any = None
+        self._recs: dict[str, Any] = {}  # the free-text recognizer of each loaded language
+        self._rec: Any = None  # the one of the utterance in progress
+        self._dirty = False  # it has audio not yet ended with FinalResult
         self._committed: list[str] = []
         self._last = ""
+        self.recognizers_built = 0
+        self.built_on_start = 0  # recognizers ``start`` had to build (none after a load)
 
     @property
     def languages(self) -> list[str]:
@@ -140,6 +150,17 @@ class VoskASR:
                 root = Path(self._paths[language])
                 self._models[language] = self._vosk.Model(str(root))
                 self._grammar_graph[language] = all((root / f).is_file() for f in RUNTIME_GRAPH)
+            if language not in self._recs:
+                self._recs[language] = self._build(language)
+
+    def _build(self, language: str) -> Any:
+        """A new free-text recognizer for the loaded ``language`` (counted)."""
+        self.recognizers_built += 1
+        return self._vosk.KaldiRecognizer(self._models[language], self.rate_hz)
+
+    def stats(self) -> dict[str, int]:
+        """Recognizer builds for the debug report: all of them, and those on ``start``."""
+        return {"recognizers_built": self.recognizers_built, "built_on_start": self.built_on_start}
 
     def missing_words(self, language: str, words: list[str]) -> list[str] | None:
         """The ``words`` the ``language`` model's vocabulary lacks (it can never output them);
@@ -172,13 +193,21 @@ class VoskASR:
         ]
 
     def start(self, language: str) -> None:
-        self.load([language])
-        self._rec = self._vosk.KaldiRecognizer(self._models[language], self.rate_hz)
-        self._committed, self._last = [], ""
+        """Begin an utterance on the language's recognizer, built by ``load``; one that is
+        missing (a model loaded before, a failed decode dropped it) is built here, counted."""
+        self.reset()
+        if language not in self._models:
+            self.load([language])
+        rec = self._recs.get(language)
+        if rec is None:
+            self.built_on_start += 1
+            rec = self._recs[language] = self._build(language)
+        self._rec, self._committed, self._last = rec, [], ""
 
     def accept(self, samples: np.ndarray) -> ASREvent | None:
         if self._rec is None:
             raise RuntimeError("accept() before start()")
+        self._dirty = True
         if self._rec.AcceptWaveform(to_int16(samples)):
             text = json.loads(self._rec.Result()).get("text", "")
             if text:
@@ -199,9 +228,24 @@ class VoskASR:
         if self._rec is None:
             return ""
         tail = json.loads(self._rec.FinalResult()).get("text", "")
+        self._dirty = False
         text = " ".join([*self._committed, tail] if tail else self._committed)
         self.reset()
         return text
 
     def reset(self) -> None:
-        self._rec, self._committed, self._last = None, [], ""
+        """Drop the utterance in progress; the recognizer is kept for the next one. Audio not
+        yet ended is ended (and its result dropped) first, since ``Reset`` alone keeps it. A
+        recognizer that fails here is dropped, so the next ``start`` builds a new one."""
+        rec, self._rec, self._committed, self._last = self._rec, None, [], ""
+        if rec is None:
+            return
+        try:
+            if self._dirty:
+                rec.FinalResult()
+            rec.Reset()
+        except Exception:
+            self._recs = {k: v for k, v in self._recs.items() if v is not rec}
+            raise
+        finally:
+            self._dirty = False

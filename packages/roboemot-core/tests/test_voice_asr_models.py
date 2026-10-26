@@ -7,6 +7,7 @@ are what a real-time stream would see, not the speed of a file read.
 
 from __future__ import annotations
 
+import json
 import time
 import wave
 from pathlib import Path
@@ -459,3 +460,38 @@ def test_short_noises_over_the_robot_do_not_cut_it_off_on_real_models(
     )
     assert state.stops == [], f"{name} stopped the robot"
     assert bi.snapshot()["triggers"] == 0
+
+
+FRESH_RUNS = 3  # Vosk itself varies run to run on a few clips: compare against every variant
+
+
+def test_reused_recognizer_decodes_like_a_new_one(models):
+    """One recognizer per language, reused across utterances and after an abort (half a clip
+    then ``reset``), gives a text a new recognizer gives (SPEC 8 stage 3, 13)."""
+    import vosk
+
+    asr = VoskASR(models[1], RATE)
+    asr.load(models[1])
+    built = asr.stats()["recognizers_built"]
+    for language, path in models[1].items():
+        model = vosk.Model(str(path))
+        clips = sorted(p.stem for p in DATA.glob(f"*{language}_*.wav"))
+        assert clips
+        for clip in clips:
+            audio = load(clip)
+            pcm = (np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes()
+            fresh = set()
+            for _ in range(FRESH_RUNS):
+                rec = vosk.KaldiRecognizer(model, RATE)
+                rec.AcceptWaveform(pcm)
+                fresh.add(json.loads(rec.FinalResult())["text"])
+            asr.start(language)
+            asr.accept(audio)
+            assert asr.finish() in fresh, clip
+            asr.start(language)
+            asr.accept(audio[: audio.size // 2])
+            asr.reset()  # an abort: the half must not leak into the next utterance
+            asr.start(language)
+            asr.accept(audio)
+            assert asr.finish() in fresh, clip
+    assert asr.stats() == {"recognizers_built": built, "built_on_start": 0}
