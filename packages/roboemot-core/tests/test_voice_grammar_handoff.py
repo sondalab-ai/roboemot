@@ -117,7 +117,7 @@ def test_the_next_utterance_waits_for_the_pending_pass_within_its_deadline():
 
 def test_the_wait_at_the_next_utterance_is_bounded_by_the_deadline():
     dec = SlowDecoder(WAKE)
-    r = rig(dec, handoff_timeout_s=0.1)
+    r = rig(dec, handoff_timeout_s=0.5)  # above the 0.2 s of tail fed after the end
     try:
         r.say(1.0)
         assert dec.started.wait(2.0)
@@ -271,3 +271,49 @@ def test_stop_with_a_pending_hand_off_counts_the_drop():
         assert snap["dropped_on_stop"] == 1 and not snap["pending"]
     finally:
         dec.release.set()
+
+
+def test_a_pass_queued_behind_a_stale_one_is_skipped_once_its_deadline_passed():
+    """Item 5: a timed-out pass still runs (a Vosk decode cannot be stopped); the next
+    utterance's pass waits behind it. If its own deadline passes before the worker picks it up,
+    it is skipped (counted), not decoded for nothing; its utterance went on as a timeout."""
+    dec = SlowDecoder(WAKE)
+    r = rig(dec)
+    try:
+        timeout = r.cfg.voice.grammar.handoff_timeout_s
+        r.say(1.0)
+        assert dec.started.wait(2.0)
+        r.now += timeout * 2
+        r.listener.poll_handoff()  # the first one times out; its pass keeps running
+        r.say(1.0)  # the second pass waits behind it
+        r.now += timeout * 2
+        r.listener.poll_handoff()
+        assert len(r.utterances) == 2
+        dec.release.set()
+        worker = r.listener._grammar
+        assert wait_for(lambda: worker.skipped_stale == 1)
+        assert len(dec.grammars) == 1  # only the first pass decoded
+        snap = r.listener.snapshot()["grammar_handoff"]
+        assert snap["timeouts"] == 2 and snap["skipped_stale"] == 1
+    finally:
+        dec.release.set()
+        r.listener.stop()
+
+
+def test_worker_skips_a_job_whose_deadline_passed_while_it_waited():
+    now = [0.0]
+    gate = threading.Event()
+    worker = GrammarWorker(background=True, clock=lambda: now[0])
+    try:
+        worker.submit(lambda: (gate.wait(5.0), frozenset())[1])
+        assert wait_for(lambda: worker._next is None)
+        late = worker.submit(lambda: frozenset({"stop"}), deadline=1.0)
+        now[0] = 2.0
+        gate.set()
+        assert late._done.wait(2.0)
+        assert not late.ran and late.result == frozenset() and worker.skipped_stale == 1
+        ok = worker.submit(lambda: frozenset({"yes"}), deadline=10.0)
+        assert ok._done.wait(2.0) and ok.ran and ok.result == {"yes"}
+    finally:
+        gate.set()
+        worker.close()

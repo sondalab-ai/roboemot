@@ -171,6 +171,7 @@ class VoiceListener:
             background=grammar_background,
             on_spent=lambda seconds: self.load.stage("grammar", seconds),
             timer=timer,
+            clock=clock,
         )
         self._pending: _Handoff | None = None
         self._handoff = {"waits": 0, "timeouts": 0, "superseded": 0, "dropped_on_stop": 0}
@@ -277,6 +278,7 @@ class VoiceListener:
                 **self._handoff,
                 "pending": self._pending is not None,
                 "replaced": self._grammar.replaced,
+                "skipped_stale": self._grammar.skipped_stale,
                 "wait_ms": {
                     "last": self._wait_last_s * MS_PER_S,
                     "max": self._wait_max_s * MS_PER_S,
@@ -508,10 +510,10 @@ class VoiceListener:
             self._set_active(False)
             return
         grammar_pass = self._fast.grammar_pass(text, ev.audio[: self._last_sample(ev)])
-        job = self._grammar.submit(grammar_pass.run) if grammar_pass is not None else None
         now = self._clock()
-        timeout = self._cfg.voice.grammar.handoff_timeout_s
-        self._pending = _Handoff(ev, text, self._language, grammar_pass, job, now, now + timeout)
+        deadline = now + self._cfg.voice.grammar.handoff_timeout_s
+        job = None if grammar_pass is None else self._grammar.submit(grammar_pass.run, deadline)
+        self._pending = _Handoff(ev, text, self._language, grammar_pass, job, now, deadline)
         self.poll_handoff()
 
     def _last_sample(self, ev: SpeechEnd) -> int:
@@ -525,9 +527,9 @@ class VoiceListener:
         p = self._pending
         if p is None:
             return
-        if p.job is None or p.job.done:
+        if p.job is None or (p.job.done and p.job.ran):
             self._hand_off(p.job.result if p.job is not None else frozenset())
-        elif self._clock() >= p.deadline:
+        elif p.job.done or self._clock() >= p.deadline:  # skipped as stale, or out of time
             self._count_handoff("timeouts")
             self._hand_off(frozenset())
 

@@ -6,7 +6,9 @@ pass of a finished utterance and keeps reading audio; it hands the utterance off
 :class:`GrammarJob` is done or its wait (``voice.grammar.handoff_timeout_s``) is over.
 
 One pass runs at a time and one waits: a new submission replaces a waiting one that never
-started (its utterance was already handed off without it, counted ``replaced``). A pass that is
+started (its utterance was already handed off without it, counted ``replaced``), and a waiting
+one whose ``deadline`` (the listener's clock) passed before the thread got to it is skipped
+(its utterance went on as a timeout; counted ``skipped_stale``). A pass that is
 running is never interrupted (a Vosk decode cannot be); a result that comes after its utterance
 was handed off is dropped by the listener. ``background=False`` runs each pass inline in
 ``submit`` (unit tests, deterministic). No text or audio is logged: exception types only.
@@ -15,6 +17,7 @@ was handed off is dropped by the listener. ``background=False`` runs each pass i
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from collections.abc import Callable
@@ -31,8 +34,8 @@ class GrammarJob:
     """One submitted pass: ``done`` once it ran (``result``, empty on an error) or was
     replaced unrun; ``spent_s`` is its run time."""
 
-    def __init__(self, task: Task, timer: Callable[[], float]) -> None:
-        self._task, self._timer = task, timer
+    def __init__(self, task: Task, timer: Callable[[], float], deadline: float) -> None:
+        self._task, self._timer, self.deadline = task, timer, deadline
         self._done = threading.Event()
         self.result: frozenset[str] = frozenset()
         self.ran = False
@@ -70,17 +73,21 @@ class GrammarWorker:
         background: bool,
         on_spent: Callable[[float], None] = lambda seconds: None,
         timer: Callable[[], float] = time.perf_counter,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._background, self._on_spent, self._timer = background, on_spent, timer
+        self._clock = clock
         self._cond = threading.Condition()
         self._next: GrammarJob | None = None
         self._closed = False
         self._thread: threading.Thread | None = None
         self.replaced = 0
+        self.skipped_stale = 0
 
-    def submit(self, task: Task) -> GrammarJob:
-        """Queue ``task`` (inline without ``background``); returns its job."""
-        job = GrammarJob(task, self._timer)
+    def submit(self, task: Task, deadline: float = math.inf) -> GrammarJob:
+        """Queue ``task``, useless after ``deadline`` (``clock`` time; inline without
+        ``background``); returns its job."""
+        job = GrammarJob(task, self._timer, deadline)
         if not self._background:
             self._run(job)
             return job
@@ -117,6 +124,10 @@ class GrammarWorker:
                 if self._closed:
                     return
                 job, self._next = self._next, None
+                if self._clock() >= job.deadline:
+                    job.drop()
+                    self.skipped_stale += 1
+                    continue
             self._run(job)
 
     def _run(self, job: GrammarJob) -> None:
