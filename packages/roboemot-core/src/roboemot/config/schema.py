@@ -3512,6 +3512,22 @@ class RuntimeConfig(Strict):
         "the effective shutdown budget is at most the supervisor's kill timeout minus this",
         unit="s", ge=3, le=30, restart=True, conservative="higher",
     )  # fmt: skip
+    background_nice: int = param(
+        5,
+        "Linux: added to the nice value of the threads in background_threads, so the kernel "
+        "favours audio, the voice listener, speech and motion when the CPU is short (SPEC 13); "
+        "they still use every idle cycle. 0 leaves them alone. An unprivileged process cannot "
+        "undo it, hence the restart",
+        ge=0, le=19, restart=True,
+    )  # fmt: skip
+    background_threads: list[str] = param(
+        ["roboemot-vision", "vision-models", "roboemot-camera", "roboemot-light"],
+        "Threads lowered by background_nice, by thread name; `vision-models` names the ONNX "
+        "Runtime pool threads the vision models start when they load. Real-time threads "
+        "(roboemot-audio, roboemot-listener, roboemot-grammar, speech-output, motion-loop) "
+        "do not belong here",
+        restart=True,
+    )
     pause_when_asleep: bool = param(
         True,
         "While the platform holds the motors off (the robot is asleep), pause the camera "

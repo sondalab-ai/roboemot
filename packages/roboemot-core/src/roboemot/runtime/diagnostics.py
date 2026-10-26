@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import time
 
+from roboemot import priority
 from roboemot.config import ConfigStack
 from roboemot.diagnostics import Diagnostics, FnSource, Target, platform_sources
 from roboemot.diagnostics.system import local_sources
@@ -53,6 +54,7 @@ def build_diagnostics(
             lambda: {
                 "manifest": manifest.robot.id,
                 "language": stack.effective().conversation.language,
+                "thread_priority": priority.snapshot(),
                 **affect_report(affect, time.monotonic()),
             },
         ),

@@ -26,7 +26,7 @@ from typing import Any, NamedTuple
 
 import numpy as np
 
-from .. import shutdown
+from .. import priority, shutdown
 from ..config.schema import CircadianConfig, LightConfig
 from .light import COLOR_NDIM, Level, LightEstimator, LightReading
 from .model import MINUTES_PER_HOUR, SECONDS_PER_MINUTE
@@ -297,6 +297,7 @@ class IdleLightReader:
             return False
 
     def _run(self) -> None:
+        priority.lower_current()
         while not self._stop.is_set():
             if not self._paused.is_set():
                 self.step()

@@ -19,7 +19,7 @@ from typing import Any, NamedTuple, Protocol
 
 import numpy as np
 
-from .. import shutdown
+from .. import priority, shutdown
 from .geometry import CameraModel
 from .stages import PerceptionModule
 from .types import Frame
@@ -199,6 +199,7 @@ class LatestFrameRunner:
                 log.warning("vision worker did not stop within %.0f s", JOIN_TIMEOUT_S)
 
     def _loop(self) -> None:
+        priority.lower_current()  # before the stages start OpenCV threads, which inherit it
         while True:
             with self._cond:
                 while self._frame is None and not self._stop:
