@@ -293,12 +293,13 @@ def test_circadian_state_scales_the_vision_rate(data):
 
 
 def test_conversation_phase_scales_the_vision_rate(data):
-    """SPEC 5, 8, 13: thinking or speaking lowers the vision rate; a barge-in and idle bring
-    it back to 1."""
+    """SPEC 5, 8, 13: thinking, speaking or listening lowers the vision rate (never below the
+    conversation floor when they overlap); idle brings it back to 1."""
     app = new_app(AppWithFakes)
     app.source_class = EmptySource
     stop, thread, errors = start(app)
     want = RoboEmotConfig().vision.rates.conversation_scale
+    listen = RoboEmotConfig().vision.rates.listening_scale
     try:
         assert wait_for(lambda: app.perception is not None and app.perception.pipeline is not None)
         governor = app.perception.pipeline.governor
@@ -316,10 +317,14 @@ def test_conversation_phase_scales_the_vision_rate(data):
         phase.end_thinking()
         assert wait_for(lambda: scale() == want and phase.current()[0] == "speaking")
         phase.set_listening(True)  # barge-in while the robot speaks
-        assert wait_for(lambda: scale() == 1.0)
+        assert wait_for(lambda: scale() == min(want, listen))
         phase.set_listening(False)
         assert wait_for(lambda: scale() == want)
         speaking.clear()
+        assert wait_for(lambda: scale() == 1.0)
+        phase.set_listening(True)  # the user speaks to an idle robot
+        assert wait_for(lambda: scale() == listen)
+        phase.set_listening(False)
         assert wait_for(lambda: scale() == 1.0)
     finally:
         stop.set()
