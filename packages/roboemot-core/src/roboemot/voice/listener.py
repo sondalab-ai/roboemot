@@ -173,7 +173,7 @@ class VoiceListener:
             timer=timer,
         )
         self._pending: _Handoff | None = None
-        self._handoff = {"waits": 0, "timeouts": 0, "superseded": 0}
+        self._handoff = {"waits": 0, "timeouts": 0, "superseded": 0, "dropped_on_stop": 0}
         self._wait_last_s = 0.0
         self._wait_max_s = 0.0
         self.apply_config(cfg)
@@ -233,7 +233,11 @@ class VoiceListener:
         self._stop.set()
         if self._thread is not None:
             shutdown.join(self._thread, JOIN_S)
+            if not self._thread.is_alive():
+                self._drop_pending()
             self._thread = None
+        else:
+            self._drop_pending()
         self._grammar.close()
 
     def pause_listening(self) -> None:
@@ -535,12 +539,33 @@ class VoiceListener:
         if p is None:
             return
         if wait and p.job is not None and not p.job.done:
-            self._timed("grammar_wait", p.job.wait, max(0.0, p.deadline - self._clock()))
+            self._timed("grammar_wait", self._wait_for, p)
+            if self._stop.is_set() and not p.job.done:
+                self._drop_pending()
+                return
         if p.job is not None and not p.job.done:
             self._count_handoff("timeouts" if wait else "superseded")
             self._hand_off(frozenset())
         else:
             self.poll_handoff()
+
+    def _wait_for(self, p: _Handoff) -> None:
+        """Wait for ``p``'s pass until its deadline (as wall time from now), or ``stop``."""
+        assert p.job is not None
+        end = self._timer() + max(0.0, p.deadline - self._clock())
+        while not p.job.done and not self._stop.is_set():
+            left = end - self._timer()
+            if left <= 0:
+                return
+            p.job.wait(min(POLL_S, left))
+
+    def _drop_pending(self) -> None:
+        """The listener stops with an utterance still waiting: drop it, counted."""
+        if self._pending is None:
+            return
+        self._pending = None
+        self._count_handoff("dropped_on_stop")
+        self._set_active(False)
 
     def _count_handoff(self, key: str) -> None:
         with self._lock:

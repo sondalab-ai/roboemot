@@ -9,7 +9,7 @@ from roboemot.voice.grammar import GrammarSpotter
 from roboemot.voice.grammar_worker import GrammarWorker
 from roboemot.voice.robot_name import RobotName
 from test_voice_grammar import RATE, Decoder, config, vocab
-from test_voice_listener import Rig, silence
+from test_voice_listener import T0, Rig, silence, voice
 
 WAKE = [("ciao", 1.0), ("neve", 1.0)]  # the grammar pass rescues "ciao neve" from "cadeva"
 
@@ -228,3 +228,46 @@ def test_voice_kept_flowing_through_the_endpointer_during_the_pass():
     finally:
         dec.release.set()
         r.listener.stop()
+
+
+def test_stop_while_waiting_for_a_pass_returns_and_counts_the_dropped_utterance():
+    """Item 4: the wait at the next utterance returns on stop (handoff_timeout_s may be far
+    above the stop's join), and the utterance it held is counted, not silently lost."""
+    from test_voice_listener import QueueSource, until
+
+    dec = SlowDecoder(WAKE, hold_s=20.0)
+    r = rig(dec, handoff_timeout_s=10.0)
+    source = QueueSource()
+    r.listener._source = source
+    r.listener.start()
+    try:
+        t = source.push(voice(seconds=1.0), T0)
+        t = source.push(silence(r.cfg.voice.vad.end_silence_ms / 1000 + 0.2), t)
+        assert dec.started.wait(5.0)
+        source.push(voice(seconds=1.0), t)  # the next utterance: the listener waits for the pass
+        assert until(lambda: r.listener.snapshot()["vad"]["starts"] == 2)
+        time.sleep(0.2)
+        thread = r.listener._thread
+        t0 = time.perf_counter()
+        r.listener.stop()  # the listener's join, then the grammar worker's (its pass still runs)
+        assert not thread.is_alive()
+        assert time.perf_counter() - t0 < r.cfg.voice.grammar.handoff_timeout_s / 2
+        assert r.utterances == []
+        snap = r.listener.snapshot()["grammar_handoff"]
+        assert snap["dropped_on_stop"] == 1 and not snap["pending"]
+    finally:
+        dec.release.set()
+        r.listener.stop()
+
+
+def test_stop_with_a_pending_hand_off_counts_the_drop():
+    dec = SlowDecoder(WAKE)
+    r = rig(dec)
+    try:
+        r.say(1.0)
+        assert dec.started.wait(2.0)
+        r.listener.stop()
+        snap = r.listener.snapshot()["grammar_handoff"]
+        assert snap["dropped_on_stop"] == 1 and not snap["pending"]
+    finally:
+        dec.release.set()
