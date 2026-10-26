@@ -2,7 +2,8 @@
 
 Per second of audio read, the wall time the listener thread spent on each stage (voice activity
 detection, recognizer accept, start and finish, the barge-in check while the robot speaks) and
-in total, the grammar pass time on its own thread, how far behind real time each chunk was when
+in total (``grammar_wait``: the listener waiting for a pass before the next utterance starts),
+the grammar pass time on its own thread, how far behind real time each chunk was when
 read (``lag_s``: the age of its end, about the depth of the microphone queue) and the audio lost
 before the listener read it (``dropped_s``: the holes in the chunk stamps after a gap).
 
@@ -20,8 +21,7 @@ from typing import Any
 from ..config.schema import ListenerConfig
 
 MS_PER_S = 1000.0
-STAGES = ("vad", "asr_accept", "asr_start", "asr_finish", "bargein", "grammar")
-LISTENER_STAGES = STAGES[:-1]  # the grammar pass runs on its own thread
+STAGES = ("vad", "asr_accept", "asr_start", "asr_finish", "bargein", "grammar_wait", "grammar")
 
 
 @dataclass

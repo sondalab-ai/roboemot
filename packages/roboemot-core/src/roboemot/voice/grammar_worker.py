@@ -42,6 +42,10 @@ class GrammarJob:
     def done(self) -> bool:
         return self._done.is_set()
 
+    def wait(self, timeout_s: float) -> bool:
+        """Wait at most ``timeout_s`` for the pass; whether it is done."""
+        return self._done.wait(timeout_s)
+
     def run(self) -> None:
         t0 = self._timer()
         try:

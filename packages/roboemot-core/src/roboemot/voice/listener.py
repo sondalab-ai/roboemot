@@ -13,9 +13,10 @@ One thread reads ``source(timeout)`` (the audio hub's voice queue), and for each
 4. on speech end finishes the ASR and submits the utterance's grammar pass to the grammar
    worker (its own thread, ``roboemot.voice.grammar_worker``), then keeps reading audio;
 5. hands the utterance off once the pass is done, its wait (``voice.grammar.handoff_timeout_s``)
-   is over (free-text keywords only, counted ``timeouts``), or anything else needs the
-   per-utterance state first (the next utterance starts, a gap, the robot speaks, a barge-in, a
-   pause: the result so far, counted ``superseded``; a finished utterance is never dropped). The
+   is over (free-text keywords only, counted ``timeouts``). The next utterance starting, or a
+   gap, waits for the pass within the same deadline first (on a lagging listener the next
+   utterance is already queued); the robot speaking, a barge-in or a pause hand off at once with
+   the result so far (counted ``superseded``). A finished utterance is never dropped. The
    hand-off runs the wake gate (with the voice-at-face check, whose ``direction`` samples are
    taken on speech start and on each piece of utterance audio) and builds an ``Utterance``:
    handed to ``on_utterance`` (the conversation, in-process) and announced on the bus as
@@ -307,8 +308,8 @@ class VoiceListener:
                         self._abort()
                     except Exception as exc:
                         log.warning("voice listener: pause: %s", type(exc).__name__)
-                while self._source(0.0) is not None:
-                    pass
+                while (chunk := self._source(0.0)) is not None:
+                    self._last_end = chunk.stamp  # a pause is not lost audio
                 self._stop.wait(POLL_S)
                 continue
             was_paused = False
@@ -354,11 +355,11 @@ class VoiceListener:
 
     # ---- one chunk
 
-    def _abort(self) -> None:
+    def _abort(self, wait: bool = False) -> None:
         """Drop the utterance in progress and every buffered sample; one that already ended is
-        handed off first. The barge-in gives the recognizer back first (``before_asr_reset``):
-        its keyword worker may be using it."""
-        self._settle()
+        handed off first (``wait``: for its grammar pass, within its deadline). The barge-in gives
+        the recognizer back first (``before_asr_reset``): its keyword worker may be using it."""
+        self._settle(wait)
         self._recording = False
         if self._before_asr_reset is not None:
             try:
@@ -395,7 +396,7 @@ class VoiceListener:
     def _process(self, chunk: VoiceChunkLike, start: float) -> None:
         if chunk.gap:
             self._count("gaps")
-            self._abort()
+            self._abort(wait=True)
         speaking = self._speech.speaking(start) or self._speech.speaking(chunk.stamp)
         if speaking and start >= self._open_until:
             if not self._muted:
@@ -460,7 +461,7 @@ class VoiceListener:
     # ---- utterance edges
 
     def _begin(self, ev: SpeechStart, audio_end: float) -> None:
-        self._settle()  # the per-utterance state below belongs to the pending one until then
+        self._settle(wait=True)  # the per-utterance state below is the pending one's until then
         try:
             speaker = self._speaker_language()
         except Exception:
@@ -518,13 +519,17 @@ class VoiceListener:
             self._count_handoff("timeouts")
             self._hand_off(frozenset())
 
-    def _settle(self) -> None:
-        """Hand the waiting utterance off now, with its grammar result if it is in."""
+    def _settle(self, wait: bool) -> None:
+        """Hand the waiting utterance off now; with ``wait``, after waiting for its grammar
+        pass up to its deadline (else a timeout), without, with its result only if it is in
+        (else superseded)."""
         p = self._pending
         if p is None:
             return
+        if wait and p.job is not None and not p.job.done:
+            self._timed("grammar_wait", p.job.wait, max(0.0, p.deadline - self._clock()))
         if p.job is not None and not p.job.done:
-            self._count_handoff("superseded")
+            self._count_handoff("timeouts" if wait else "superseded")
             self._hand_off(frozenset())
         else:
             self.poll_handoff()

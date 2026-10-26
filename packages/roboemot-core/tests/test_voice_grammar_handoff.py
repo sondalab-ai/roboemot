@@ -94,16 +94,39 @@ def test_a_pass_past_its_timeout_hands_off_the_free_text_only():
         r.listener.stop()
 
 
-def test_a_new_utterance_hands_off_the_pending_one_first():
+def test_the_next_utterance_waits_for_the_pending_pass_within_its_deadline():
+    """A lagging listener reads the next utterance right after the last: the first one still
+    gets its grammar result (identical to the inline pass), it is not superseded."""
     dec = SlowDecoder(WAKE)
     r = rig(dec)
     try:
         r.say(1.0)
         assert dec.started.wait(2.0)
+        threading.Timer(0.1, dec.release.set).start()
         r.say(1.0, tail=False)  # the next utterance starts while the pass still runs
-        assert len(r.utterances) == 1
-        assert r.listener.snapshot()["grammar_handoff"]["superseded"] == 1
-        assert r.listener.snapshot()["state"] != "unavailable"
+        (first,) = r.utterances
+        assert first.wake_word and first.addressed
+        snap = r.listener.snapshot()
+        assert snap["grammar_handoff"]["superseded"] == 0
+        assert snap["grammar_handoff"]["timeouts"] == 0
+        assert snap["realtime"]["total"]["ms_per_audio_s"]["grammar_wait"] > 0
+    finally:
+        dec.release.set()
+        r.listener.stop()
+
+
+def test_the_wait_at_the_next_utterance_is_bounded_by_the_deadline():
+    dec = SlowDecoder(WAKE)
+    r = rig(dec, handoff_timeout_s=0.1)
+    try:
+        r.say(1.0)
+        assert dec.started.wait(2.0)
+        t0 = time.perf_counter()
+        r.say(1.0, tail=False)
+        assert time.perf_counter() - t0 < dec.hold_s / 2
+        (first,) = r.utterances
+        assert not first.wake_word  # free text only
+        assert r.listener.snapshot()["grammar_handoff"]["timeouts"] == 1
     finally:
         dec.release.set()
         r.listener.stop()
@@ -115,8 +138,27 @@ def test_a_gap_while_waiting_hands_the_utterance_off_never_drops_it():
     try:
         r.say(1.0)
         assert dec.started.wait(2.0)
+        threading.Timer(0.1, dec.release.set).start()
         r.feed(silence(0.1), gap=True)
+        (u,) = r.utterances
+        assert u.wake_word
+    finally:
+        dec.release.set()
+        r.listener.stop()
+
+
+def test_the_robot_starting_to_speak_supersedes_without_waiting():
+    dec = SlowDecoder(WAKE)
+    r = rig(dec)
+    try:
+        r.say(1.0)
+        assert dec.started.wait(2.0)
+        r.speech.extend(r.t + 5.0)
+        t0 = time.perf_counter()
+        r.feed(silence(0.1))
+        assert time.perf_counter() - t0 < dec.hold_s / 2
         assert len(r.utterances) == 1
+        assert r.listener.snapshot()["grammar_handoff"]["superseded"] == 1
     finally:
         dec.release.set()
         r.listener.stop()
