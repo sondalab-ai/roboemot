@@ -105,3 +105,19 @@ def test_a_failing_recognizer_is_dropped_and_rebuilt_on_start(fake):
         asr.reset()
     asr.start("it")
     assert asr.stats() == {"recognizers_built": 2, "built_on_start": 1}
+
+
+def test_the_barge_in_keyword_worker_hands_the_reused_recognizer_back(fake):
+    from roboemot.voice.keyword_worker import KeywordWorker
+
+    vosk, asr = fake
+    asr.load(["it"])
+    worker = KeywordWorker(asr, lambda text, lang: False, 0.032)
+    worker.start("it", [(0.0, AUDIO)])
+    worker.feed(0.1, AUDIO)
+    worker.end(block=True)  # the half-heard session is ended before the Vosk reset
+    assert vosk.log == ["accept", "accept", "final", "reset"]
+    asr.start("it")
+    asr.accept(AUDIO)
+    assert asr.finish() == "ciao"
+    assert asr.stats() == {"recognizers_built": 1, "built_on_start": 0}

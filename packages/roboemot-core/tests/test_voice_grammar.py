@@ -81,8 +81,10 @@ def build(cfg, decoder, platform=None, oov=()):
 
 def end(fast, text, language="it", audio=AUDIO):
     fast.begin(0.0, 0.0, language)
+    gp = fast.grammar_pass(text, audio)
+    heard = gp.run() if gp is not None else frozenset()
     return fast.end(
-        text, AUDIO, RATE, last_speech_stamp=1.0, endpoint_stamp=1.5, grammar_audio=audio
+        text, AUDIO, RATE, last_speech_stamp=1.0, endpoint_stamp=1.5, grammar_pass=gp, heard=heard
     )
 
 

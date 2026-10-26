@@ -5,7 +5,8 @@ hub's voice queue, with the app-side lookups they need: the robot's sound bearin
 frame (a ``BearingSource``), the attended person, whether an enrolled person is in view, the
 sound direction and visible faces for the voice-at-face check, and the speaker's language
 preference.
-The fast path gets the grammar pass (SPEC 8 stage 3) over the same Vosk models.
+The fast path gets the grammar pass (SPEC 8 stage 3) over the same Vosk models; the listener runs it
+on its grammar worker thread, so the microphone keeps being read meanwhile.
 The barge-in detector (SPEC 8 stage 8) is built with the listener, on its own Silero instance, and
 hooked to the listener's speaking chunks; the app binds its actions (stop the speech, interrupt the
 conversation, resume the listener) once the speech output and the conversation exist. It returns
@@ -172,6 +173,7 @@ def build_listener(
         before_asr_reset=bargein.handback_asr,
         on_activity=on_activity,
         enrolled_in_view=enrolled_in_view,
+        grammar_background=True,
         direction=VoiceDirection(
             cfg.voice.direction, direction_sample, doa_available=doa_available
         ),
