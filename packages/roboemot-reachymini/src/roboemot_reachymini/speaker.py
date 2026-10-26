@@ -24,17 +24,24 @@ the last seconds of what it played, resampled to the reference rate and stamped 
 piece starts to play, for the barge-in echo check (SPEC 8 stage 8); ``stop`` cuts it at the stop.
 
 Pacing (SPEC 8 stage 8, 13): with ``lead_ms`` > 0 (``voice.playback_lead_ms``, 200 ms) the
-speaker hands the SDK player at most that much audio ahead of playback and keeps the rest pending;
-a pacer thread hands the next piece as the player drains. That bounds what barge-in ducking cannot
+speaker keeps the audio pending and hands the SDK player the next piece while the player holds
+less than the lead (so at most the lead plus one piece; a lead shorter than a piece never leaves
+gaps); a pacer thread hands pieces as the player drains. One predicate (``_due_in``) decides both
+whether a piece goes now and when the thread wakes. That bounds what barge-in ducking cannot
 reach: the duck (:class:`~roboemot.voice.duck.DuckGain`, given by the speech output through
 ``take_duck``) is applied at the hand-off, per piece, keyed to the piece's play time. The SDK's
 appsrc is not capped (``set_max_output_buffers`` is leaky and would drop speech), and its sink
-buffers about 50 ms, so the pacer counts an *underrun* when it hands a piece after the player ran
-dry, and a *late* hand-off when the gap passed the SDK's 200 ms gap reset (the buffer is restamped
-with DISCONT). ``playing_until`` still reports the end of everything accepted; the echo reference
-and the speech gate are stamped at the hand-off, with the audio as played (after the gain).
-``stop`` drops the pending pieces too (``pending_at_stop_*_ms``), so the SDK flush is at most the
-lead. A lead of 0 hands everything over at once, as before pacing.
+buffers about 50 ms. When the pacer hands a piece after the player ran dry (an *underrun*), the
+SDK decides where it plays: up to its 200 ms gap reset it places the buffer right after the
+previous one on its own timeline (*late*: the piece is stamped there and the gap is lost), past
+it the buffer is restamped at the running time with DISCONT (*restamped*: the piece and the rest
+play that much later). ``playing_until`` reports the end of everything accepted, and the speech
+gate is extended to it when audio is accepted (a pacer stall does not close the speaking window
+mid-answer); the echo reference is stamped at the hand-off, with the audio as played (after the
+gain). ``stop`` drops the pending pieces too (``pending_at_stop_*_ms``), so the SDK flush is at
+most the lead plus a piece. A failed SDK push abandons the rest of that push, as before pacing.
+``close`` joins the pacer; a later ``start_playing`` reuses a pacer that did not exit in time
+instead of starting a second one. A lead of 0 hands everything over at once, as before pacing.
 
 Privacy (SPEC 12): audio passes through; the reference is a RAM ring of a few seconds that is
 never logged or published.
@@ -64,6 +71,8 @@ RATE_GRID_HZ = 50  # stream input rates are snapped to it; 22050, 16000 and 4800
 # reachy-mini 1.12 ``AudioBase.GAP_RESET_NS``: a buffer this late is restamped (DISCONT)
 SDK_GAP_RESET_S = 0.2
 PACER_JOIN_S = 1.0
+# Float slack on the hand-off predicate: a pacer woken exactly at the due time hands the piece.
+TIME_EPS_S = 1e-6
 
 
 class ReachySpeaker:
@@ -103,8 +112,8 @@ class ReachySpeaker:
         self._duck: DuckGain | None = None
         self._pacer: threading.Thread | None = None
         self._closing = False
-        self._counts = {"pieces": 0, "underruns": 0, "late": 0}
-        self._underrun_ms = 0.0
+        self._counts = {"pieces": 0, "underruns": 0, "late": 0, "restamped": 0, "pacer_reused": 0}
+        self._gap_ms = {"underrun_ms": 0.0, "late_ms": 0.0, "restamped_ms": 0.0}
         self._at_stop_ms: list[float] = []  # last and max pending audio dropped by a stop
 
     def start_playing(self) -> bool:
@@ -124,11 +133,22 @@ class ReachySpeaker:
             log.warning("speaker: the SDK reports no output rate")
             return False
         self._out_hz, self._playing = rate, True
-        if self._lead_s > 0 and self._pace_thread and self._pacer is None:
+        if self._lead_s > 0 and self._pace_thread:
+            self._start_pacer()
+        return True
+
+    def _start_pacer(self) -> None:
+        """Start the pacer thread, or reuse the previous one if it is still alive (a ``close``
+        whose join timed out): never two pacers on one speaker."""
+        with self._cv:
             self._closing = False
+            pacer = self._pacer
+            if pacer is not None and pacer.is_alive():
+                self._counts["pacer_reused"] += 1
+                self._cv.notify_all()
+                return
             self._pacer = threading.Thread(target=self._pace, name="speaker-pacer", daemon=True)
             self._pacer.start()
-        return True
 
     def close(self) -> None:
         """Flush anything queued, join the pacer and stop the playback pipeline."""
@@ -136,9 +156,11 @@ class ReachySpeaker:
         with self._cv:
             self._closing = True
             self._cv.notify_all()
-        pacer, self._pacer = self._pacer, None
+        pacer = self._pacer
         if pacer is not None:
             pacer.join(PACER_JOIN_S)
+            if not pacer.is_alive():
+                self._pacer = None
         if not self._playing:
             return
         self._playing = False
@@ -201,6 +223,8 @@ class ReachySpeaker:
                 self._pending.append((piece, self._clock()))
                 self._pending_n += piece.size
                 queued = True
+                if self._activity is not None:  # the whole answer, not only what was handed
+                    self._activity.extend(self.playing_until())
                 if not self._feed_locked():
                     break
                 if generation != self._generation:  # stopped from inside the push
@@ -227,16 +251,22 @@ class ReachySpeaker:
         lead); the lock is held. False when a push failed (the pending audio is dropped)."""
         while self._pending:
             now = self._clock()
-            piece, accepted = self._pending[0]
-            held = self._handed - now
-            if self._lead_s > 0 and held > 0 and held + piece.size / self._out_hz > self._lead_s:
+            if self._due_in(now) > TIME_EPS_S:
                 return True
-            self._pending.popleft()
+            piece, accepted = self._pending.popleft()
             self._pending_n -= piece.size
             if not self._hand(piece, accepted, now):
                 self._drop_pending()
+                self._generation += 1  # the rest of that push is abandoned, as before pacing
                 return False
         return True
+
+    def _due_in(self, now: float) -> float:
+        """Seconds until the next piece may be handed: the player holds ``_handed - now``, and
+        a piece goes while that is under the lead (always with no lead)."""
+        if self._lead_s <= 0:
+            return 0.0
+        return self._handed - self._lead_s - now
 
     def _hand(self, piece: np.ndarray, accepted: float, now: float) -> bool:
         """Push one piece to the player with the duck's gain, keyed to when it plays; stamp the
@@ -245,9 +275,13 @@ class ReachySpeaker:
         begins = max(self._handed, now)
         if math.isfinite(self._handed) and now > self._handed and accepted <= self._handed:
             gap = now - self._handed  # it was pending in time: the player ran dry waiting
+            kind = "restamped" if gap > SDK_GAP_RESET_S else "late"
+            if kind == "late":  # the SDK keeps its timeline: the piece follows the last one
+                begins = self._handed
             self._counts["underruns"] += 1
-            self._counts["late"] += gap > SDK_GAP_RESET_S
-            self._underrun_ms += gap * MS_PER_S
+            self._counts[kind] += 1
+            self._gap_ms["underrun_ms"] += gap * MS_PER_S
+            self._gap_ms[f"{kind}_ms"] += gap * MS_PER_S
         duck = self._duck
         played = piece if duck is None else duck.apply(piece, self._out_hz, begins)
         generation = self._generation
@@ -263,8 +297,8 @@ class ReachySpeaker:
         self._handed = begins + piece.size / self._out_hz
         self._pushed += piece.size
         self._counts["pieces"] += 1
-        if self._activity is not None:  # under the lock: a stop cannot interleave
-            self._activity.extend(self._handed)
+        if self._activity is not None:  # under the lock; a restamp moved the end later
+            self._activity.extend(self.playing_until())
         return True
 
     def _drop_pending(self) -> None:
@@ -275,8 +309,7 @@ class ReachySpeaker:
         """Seconds until the next pending piece may be handed; the lock is held."""
         if not self._pending or self._out_hz is None:
             return None
-        piece = self._pending[0][0]
-        return max(0.0, self._handed + piece.size / self._out_hz - self._lead_s - self._clock())
+        return max(0.0, self._due_in(self._clock()))
 
     def _pace(self) -> None:
         """The pacer thread: hand pieces as the player drains, until ``close``."""
@@ -296,8 +329,9 @@ class ReachySpeaker:
 
     def pacing(self) -> dict[str, Any]:
         """Pacing figures for the debug report: lead, pending audio, hand-offs, underruns (the
-        player ran dry while a piece waited), late hand-offs (past the SDK gap reset) and the
-        pending audio a stop dropped (last, max). Numbers only."""
+        player ran dry while a piece waited), split into late (within the SDK gap reset: the
+        gap is lost) and restamped (past it: the rest plays later), with their ms, pacer
+        reuses, and the pending audio a stop dropped (last, max). Numbers only."""
         with self._lock:
             pending_ms = self._pending_s() * MS_PER_S
             at_stop = self._at_stop_ms
@@ -305,7 +339,7 @@ class ReachySpeaker:
                 "lead_ms": self._lead_s * MS_PER_S,
                 "pending_ms": pending_ms,
                 **self._counts,
-                "underrun_ms": self._underrun_ms,
+                **self._gap_ms,
                 "pending_at_stop_last_ms": at_stop[0] if at_stop else None,
                 "pending_at_stop_max_ms": at_stop[1] if at_stop else None,
             }

@@ -336,7 +336,7 @@ def test_the_echo_reference_holds_the_ducked_audio_the_speaker_really_played():
     sp.start_playing()
     out = SpeechOutput(RoboEmotConfig(), sp, ToneBackend())
     out.duck = DuckGain(BargeInDuckConfig(gain=0.25))
-    out.duck.duck(0.0)
+    out.duck.duck(time.monotonic())  # open: within max_episode_s of now
     out.start()
     try:
         out.say(
