@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import threading
 import time
 
@@ -615,12 +616,98 @@ def test_nothing_is_pushed_after_cancel_returns(make):
     sink = SlowSink()
     out = make(sink=sink)
     job = out.play(sound(20), RATE)
-    time.sleep(0.01)  # the loop is somewhere around the slow push
+    assert wait_for(lambda: out._raw_current == job)  # the loop took it, around the slow push
     out.cancel(job)
     returned = time.monotonic()
     pushed = len(sink.pushed_at)
+    assert pushed == 1  # the cancel waited for the push under the lock, then flushed it
     time.sleep(0.3)
     assert len(sink.pushed_at) == pushed and all(at <= returned for at in sink.pushed_at)
-    assert not pushed or sink.stopped_at[0] >= sink.pushed_at[-1]
+    assert sink.stopped_at[0] >= sink.pushed_at[-1]
     assert out.play(sound(0.1), RATE) is not None  # the output is still usable
     assert wait_for(lambda: len(sink.pushed) == pushed + 1)
+
+
+def test_cancel_before_the_push_does_not_flush_the_speech_still_in_the_sink(make):
+    sink = TimelineSink()
+    out = make(FakeBackend(pieces=10), sink=sink)  # 1 s of speech audio
+    say(out, "Ciao.")
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    spoken = len(sink.pushed)
+    raw = out.play(sound(5), RATE)
+    assert wait_for(lambda: out._raw_current == raw)  # waiting for the speech to play out
+    out.cancel(raw)
+    assert not sink.stopped_at
+    time.sleep(0.2)
+    assert len(sink.pushed) == spoken  # the cancelled sound never reached the sink
+    out.play(sound(0.1), RATE)
+    assert wait_for(lambda: len(sink.pushed) == spoken + 1, timeout=3)  # after the speech played
+
+
+def test_a_raw_job_starts_only_after_earlier_audio_has_played(make):
+    sink = TimelineSink()
+    out = make(FakeBackend(pieces=10), sink=sink)
+    say(out, "Ciao.")
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    start = time.monotonic()
+    out.play(sound(0.1), RATE)
+    assert wait_for(lambda: len(sink.pushed) == 11, timeout=3)
+    assert time.monotonic() - start > 0.5
+
+
+def test_a_stale_or_finished_id_is_a_no_op_while_the_sink_is_mid_play(make):
+    sink = TimelineSink()
+    out = make(sink=sink)
+    done = out.play(sound(0.05), RATE)
+    assert wait_for(lambda: out._raw_current is None and len(sink.pushed) == 1)
+    live = out.play(sound(20), RATE)
+    assert wait_for(lambda: len(sink.pushed) == 2)
+    out.cancel(done)
+    out.cancel(live + 100)
+    assert not sink.stopped_at
+    out.cancel(live)
+    assert len(sink.stopped_at) == 1
+
+
+@pytest.mark.parametrize("ahead", [False, True])
+def test_close_returns_promptly_while_a_raw_job_waits_or_plays(make, ahead):
+    sink = TimelineSink()
+    out = make(FakeBackend(pieces=30), sink=sink)  # 3 s of speech audio
+    if ahead:
+        say(out, "Ciao.")
+        assert wait_for(lambda: out.sentences_spoken == 1)
+    out.play(sound(20), RATE)
+    assert wait_for(lambda: out._raw_current is not None)
+    start = time.monotonic()
+    out.close()
+    assert time.monotonic() - start < 1.0
+
+
+def test_a_cancel_racing_the_natural_end_never_flushes_the_next_job(make):
+    class Sink(TimelineSink):
+        def __init__(self) -> None:
+            super().__init__()
+            self.queue: list[tuple[float, int]] = []
+            self.flushed: list[int] = []
+
+        def push_audio_sample(self, samples, rate_hz):
+            super().push_audio_sample(samples, rate_hz)
+            self.queue.append((self.until, samples.size))
+            return 0.0
+
+        def stop(self):
+            now = time.monotonic()
+            self.flushed += [size for end, size in self.queue if end > now]
+            self.queue = []
+            super().stop()
+
+    sink, backend = Sink(), FakeBackend()
+    out = make(backend, sink=sink)
+    rng = random.Random(0)
+    for i in range(25):
+        raw = out.play(sound(0.03), RATE)
+        say(out, "Ciao.")
+        time.sleep(rng.uniform(0.0, 0.05))
+        out.cancel(raw)
+        assert wait_for(lambda i=i: out.sentences_spoken == i + 1)
+    assert RATE // 10 not in sink.flushed  # a speech chunk was never in a flush

@@ -8,7 +8,14 @@ import random
 import numpy as np
 import pytest
 from roboemot.config.schema import RoboEmotConfig, SoundShape
-from roboemot.soothe.synth import BLIRP_COUNT, PENTATONIC_ST, plan_blirp, plan_hum, synthesize
+from roboemot.soothe.synth import (
+    BLIRP_COUNT,
+    PENTATONIC_ST,
+    hum_breakpoints,
+    plan_blirp,
+    plan_hum,
+    synthesize,
+)
 
 RATE = 16000
 SHAPES = {f"{v.sound}:{v.label}": v.shape for v in RoboEmotConfig().soothe.variants}
@@ -16,8 +23,12 @@ DEFAULT = SoundShape()
 SEEDS = range(12)
 
 
-def make(kind: str, seed: int, shape: SoundShape = DEFAULT) -> np.ndarray:
-    return synthesize(kind, shape, random.Random(seed), RATE)
+EXTREME = SoundShape(tempo_bpm=(240, 240), pitch_hz=(2000, 2000), length_s=(0.3, 0.3), gain_db=0)
+EXTREME_SLOW = SoundShape(tempo_bpm=(20, 20), pitch_hz=(80, 80), length_s=(10, 10), gain_db=-60)
+
+
+def make(kind: str, seed: int, shape: SoundShape = DEFAULT, rate_hz: int = RATE) -> np.ndarray:
+    return synthesize(kind, shape, random.Random(seed), rate_hz)
 
 
 @pytest.mark.parametrize("kind", ["hum", "blirp"])
@@ -104,3 +115,48 @@ def test_the_synth_reads_no_global_random_state():
     a = make("hum", 5)
     random.seed(456)
     assert np.array_equal(a, make("hum", 5))
+
+
+@pytest.mark.parametrize("rate_hz", [8000, 16000, 48000])
+@pytest.mark.parametrize("shape", [EXTREME, EXTREME_SLOW], ids=["short-fast-high", "long-slow-low"])
+@pytest.mark.parametrize("kind", ["hum", "blirp"])
+def test_extreme_shapes_stay_finite_bounded_and_click_free(kind, shape, rate_hz):
+    gain = 10 ** (shape.gain_db / 20)
+    for seed in range(6):
+        wave = make(kind, seed, shape, rate_hz)
+        assert np.isfinite(wave).all() and 0 < np.max(np.abs(wave)) <= gain
+        assert wave[0] == 0.0 and wave[-1] == 0.0
+        assert wave.size / rate_hz == pytest.approx(shape.length_s[0], abs=2 / rate_hz)
+
+
+def test_no_click_in_a_hum_the_sample_to_sample_jump_stays_small():
+    for seed in range(20):
+        wave = make("hum", seed, DEFAULT)
+        assert float(np.max(np.abs(np.diff(wave)))) < 0.5 * float(np.max(np.abs(wave)))
+
+
+def test_no_click_in_a_blirp_at_the_joins_of_sound_and_silence():
+    for seed in range(20):
+        wave = make("blirp", seed, DEFAULT)
+        edges = np.abs(np.diff(wave))
+        assert (
+            edges[:8].max() < 0.01 * np.abs(wave).max()
+            and edges[-8:].max() < 0.01 * np.abs(wave).max()
+        )
+
+
+def test_hum_envelope_and_glide_times_strictly_increase_even_for_short_notes():
+    for shape in (DEFAULT, EXTREME):
+        for seed in SEEDS:
+            plan = plan_hum(shape, random.Random(seed))
+            pitch_x, _, env_x, env_y = hum_breakpoints(plan)
+            assert all(b > a for a, b in zip(env_x, env_x[1:], strict=False))
+            assert all(b > a for a, b in zip(pitch_x, pitch_x[1:], strict=False))
+            assert env_y[0] == 0.0 and env_y[-1] == 0.0
+
+
+def test_a_hum_drops_the_harmonics_that_would_pass_the_frequency_cap():
+    wave = make("hum", 2, SoundShape(pitch_hz=(2000, 2000), gain_db=0), 8000)
+    spectrum = np.abs(np.fft.rfft(wave))
+    freqs = np.fft.rfftfreq(wave.size, 1 / 8000)
+    assert spectrum[freqs > 0.35 * 8000 * 1.2].max() < 0.05 * spectrum.max()

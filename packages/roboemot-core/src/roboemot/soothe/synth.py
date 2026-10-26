@@ -29,7 +29,11 @@ SEMITONES_PER_OCTAVE = 12.0
 DB_BASE = 10.0
 DB_PER_AMPLITUDE_DECADE = 20.0
 PEAK_MARGIN = 0.999  # the float32 cast must never push the peak over the gain
-MAX_FREQ_SHARE = 0.35  # of the sample rate: partials above stay clear of the Nyquist alias
+MAX_FREQ_SHARE = 0.35  # of the sample rate: cap of every oscillator's frequency; a hum drops the
+# harmonics of a note that would pass it; FM sidebands (index <= FM_INDEX max) are not limited
+COIN_FLIP = 0.5
+QUARTER_TURN = np.pi / 2
+ENV_PEAK = 1.0
 FADE_S = 0.04  # raised-cosine fade at both ends of every sound: starts and ends at 0, no click
 
 # --- hum: major pentatonic over the base pitch, nursery-rhyme rhythm cells
@@ -39,6 +43,7 @@ HUM_DEGREE_RANGE = (-2, 7)  # scale degrees the walk stays in (about a ninth and
 HUM_START_DEGREES = (0, 2, 4)  # tonic, third, fifth
 HUM_LEAP_PROB = 0.15  # the rest of the moves are one scale degree
 HUM_LEAP_DEGREES = (2, 3)
+LEAP_ROLL_FLOOR = 1.0 - HUM_LEAP_PROB
 HUM_REPEAT_PROB = 0.12  # a note sung again (nursery rhymes do it a lot)
 HUM_CELLS = (  # note lengths in beats
     (1.0, 1.0, 2.0),
@@ -59,6 +64,7 @@ NOTE_ATTACK_S = 0.04
 NOTE_DECAY_S = 0.08
 NOTE_RELEASE_S = 0.08
 NOTE_SUSTAIN = 0.8
+NOTE_ENV_MAX_SHARE = 0.9  # of a short note that its attack, decay and release may fill
 NOTE_DIP = 0.35  # level between two notes: sung, not played legato
 
 # --- blirp: a small friendly droid
@@ -135,9 +141,14 @@ def degree_freq_hz(base_hz: float, degree: int) -> float:
     return base_hz * 2.0 ** (semitones / SEMITONES_PER_OCTAVE)
 
 
+def db_to_gain(db: float) -> float:
+    """Linear amplitude factor of ``db`` decibels."""
+    return DB_BASE ** (db / DB_PER_AMPLITUDE_DECADE)
+
+
 def _gain(shape: SoundShape) -> float:
     """Linear peak amplitude of the sound."""
-    return DB_BASE ** (shape.gain_db / DB_PER_AMPLITUDE_DECADE)
+    return db_to_gain(shape.gain_db)
 
 
 def _draw(rng: random.Random, bounds: tuple[float, float]) -> float:
@@ -156,8 +167,8 @@ def _next_degree(rng: random.Random, degree: int) -> int:
     roll = rng.random()
     if roll < HUM_REPEAT_PROB:
         return degree
-    size = rng.choice(HUM_LEAP_DEGREES) if roll > 1.0 - HUM_LEAP_PROB else 1
-    up = rng.random() < 0.5
+    size = rng.choice(HUM_LEAP_DEGREES) if roll > LEAP_ROLL_FLOOR else 1
+    up = rng.random() < COIN_FLIP
     if degree + size > high:
         up = False
     elif degree - size < low:
@@ -179,7 +190,7 @@ def plan_hum(shape: SoundShape, rng: random.Random) -> HumPlan:
     want_beats = max(HUM_FINAL_BEATS, length_s * tempo_bpm / SECONDS_PER_MINUTE)
     lengths: list[float] = []
     total = HUM_FINAL_BEATS
-    while True:
+    while True:  # add rhythm cells until the next one would overshoot more than it helps
         cell = rng.choice(HUM_CELLS)
         if lengths and total + sum(cell) - want_beats > want_beats - total:
             break
@@ -242,7 +253,7 @@ def _fade(n: int, fade_n: int) -> np.ndarray:
     out = np.ones(n)
     fade_n = min(fade_n, n // 2)
     if fade_n > 1:
-        ramp = np.sin(np.linspace(0.0, np.pi / 2, fade_n)) ** 2
+        ramp = np.sin(np.linspace(0.0, QUARTER_TURN, fade_n)) ** 2
         out[:fade_n] = ramp
         out[n - fade_n :] = ramp[::-1]
     out[0] = out[-1] = 0.0
@@ -263,36 +274,56 @@ def _phase(freq_hz: np.ndarray, rate_hz: int) -> np.ndarray:
     return 2.0 * np.pi * np.cumsum(np.minimum(freq_hz, MAX_FREQ_SHARE * rate_hz)) / rate_hz
 
 
-def render_hum(plan: HumPlan, rate_hz: int) -> np.ndarray:
-    """Sing ``plan``: one phase-continuous voice (sine plus two weak harmonics, light vibrato)
-    that glides between notes, with an attack/decay/release envelope per note."""
-    n = max(1, round(plan.length_s * rate_hz))
-    t = np.arange(n) / rate_hz
-    xs: list[float] = []
-    st: list[float] = []
+def hum_breakpoints(
+    plan: HumPlan,
+) -> tuple[list[float], list[float], list[float], list[float]]:
+    """Breakpoints of a hum: the glide points and pitch (semitones), then the envelope times and
+    levels. A note too short for its attack,
+    decay and release gets them scaled down, so the envelope times always increase."""
+    pitch_x: list[float] = []
+    pitch_y: list[float] = []
     env_x: list[float] = []
     env_y: list[float] = []
     for i, note in enumerate(plan.notes):
         end = note.start_s + note.dur_s
         glide = min(GLIDE_S, GLIDE_MAX_SHARE * note.dur_s)
-        pitch = math.log2(note.freq_hz) * SEMITONES_PER_OCTAVE
-        xs += [note.start_s, end - glide]
-        st += [pitch, pitch]
+        pitch_x += [note.start_s, end - glide]
+        pitch_y += [math.log2(note.freq_hz) * SEMITONES_PER_OCTAVE] * 2
+        shape_s = NOTE_ATTACK_S + NOTE_DECAY_S + NOTE_RELEASE_S
+        k = min(1.0, NOTE_ENV_MAX_SHARE * note.dur_s / shape_s)
         edge_in = 0.0 if i == 0 else NOTE_DIP
         edge_out = 0.0 if i == len(plan.notes) - 1 else NOTE_DIP
+        if i == 0:  # a later note starts where the one before ended, at the same dip level
+            env_x.append(note.start_s)
+            env_y.append(edge_in)
         env_x += [
-            note.start_s,
-            note.start_s + NOTE_ATTACK_S,
-            note.start_s + NOTE_ATTACK_S + NOTE_DECAY_S,
-            end - NOTE_RELEASE_S,
+            note.start_s + k * NOTE_ATTACK_S,
+            note.start_s + k * (NOTE_ATTACK_S + NOTE_DECAY_S),
+            end - k * NOTE_RELEASE_S,
             end,
         ]
-        env_y += [edge_in, 1.0, NOTE_SUSTAIN, NOTE_SUSTAIN, edge_out]
-    pitch_st = np.interp(t, xs, st)
+        env_y += [ENV_PEAK, NOTE_SUSTAIN, NOTE_SUSTAIN, edge_out]
+    return pitch_x, pitch_y, env_x, env_y
+
+
+def render_hum(plan: HumPlan, rate_hz: int) -> np.ndarray:
+    """Sing ``plan``: one phase-continuous voice (sine plus two weak harmonics, light vibrato)
+    that glides between notes, with an attack/decay/release envelope per note. A harmonic that
+    would pass the frequency cap on a note fades out in the glide before it; the fundamental
+    stays (clipped by the cap)."""
+    n = max(1, round(plan.length_s * rate_hz))
+    t = np.arange(n) / rate_hz
+    pitch_x, pitch_y, env_x, env_y = hum_breakpoints(plan)
+    pitch_st = np.interp(t, pitch_x, pitch_y)
     onset = np.minimum(1.0, t / VIBRATO_ONSET_S)
     pitch_st = pitch_st + VIBRATO_DEPTH_ST * onset * np.sin(2.0 * np.pi * plan.vibrato_hz * t)
     phase = _phase(2.0 ** (pitch_st / SEMITONES_PER_OCTAVE), rate_hz)
-    voice = sum(g * np.sin((k + 1) * phase) for k, g in enumerate(HARMONIC_GAINS))
+    cap_st = math.log2(MAX_FREQ_SHARE * rate_hz) * SEMITONES_PER_OCTAVE
+    voice = np.zeros(n)
+    for k, gain in enumerate(HARMONIC_GAINS):
+        up_st = math.log2(k + 1) * SEMITONES_PER_OCTAVE
+        on = [ENV_PEAK if not k or y + up_st <= cap_st else 0.0 for y in pitch_y]
+        voice += gain * np.interp(t, pitch_x, on) * np.sin((k + 1) * phase)
     return _finish(voice * np.interp(t, env_x, env_y), plan.gain, rate_hz)
 
 

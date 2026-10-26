@@ -697,7 +697,7 @@ class CircadianConfig(Strict):
 SOOTHE_RANGE_BOUNDS: dict[str, tuple[float, float]] = {
     "tempo_bpm": (20.0, 240.0),
     "pitch_hz": (80.0, 2000.0),
-    "length_s": (0.3, 20.0),
+    "length_s": (0.3, 10.0),
 }
 
 
