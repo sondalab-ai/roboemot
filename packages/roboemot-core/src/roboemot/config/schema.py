@@ -2428,6 +2428,13 @@ class BargeInDuckConfig(Strict):
         "Ramp from gain back up to full gain after a release (never 0: a hard step clicks)",
         unit="ms", ge=1, le=500,
     )  # fmt: skip
+    max_episode_s: float = param(
+        3.0,
+        "Safety cap: a duck episode with no candidate frame for this long releases (with the "
+        "ramp) on its own, in case barge-in stops getting frames with an episode open; counted "
+        "as capped. Longer than any hesitant phrase that never reaches the cut-off",
+        unit="s", ge=0.5, le=30,
+    )  # fmt: skip
 
 
 class BargeInConfig(Strict):

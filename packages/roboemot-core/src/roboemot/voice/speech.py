@@ -206,6 +206,7 @@ class SpeechOutput:
         self.timeline = SpeechTimeline(config.speech_motion, clock)
         self._duck: DuckGain | None = None  # barge-in ducking, set by the runtime with barge-in
         self._sink_ducks = False  # the sink applies the duck itself (DuckingSink)
+        self._duck_utterance: int | None = None  # utterance of the last speech push
 
     @property
     def duck(self) -> DuckGain | None:
@@ -561,6 +562,10 @@ class SpeechOutput:
             start = max(now, until)
             if speech and job.id in self._audible and math.isfinite(until) and now > until:
                 self._count_underrun(job, now - until)
+            if speech and job.utterance != self._duck_utterance:
+                if self._duck_utterance is not None and self._duck is not None:
+                    self._duck.clear()  # a new answer starts at full gain
+                self._duck_utterance = job.utterance
             duck = None if self._sink_ducks else self._duck
             played = samples if duck is None else duck.apply(samples, rate_hz, start)
             self.sink.push_audio_sample(played, rate_hz)

@@ -52,7 +52,9 @@ episode counts ``duck.cut``), and the end of the robot's speech ends it as relea
 the gain. A gap in the microphone audio ramps the voice back up but keeps the episode: candidates
 after it reopen the gain and the episode is counted once. The cut-off rules are unchanged:
 ducking never stops or flushes anything, and the 200 ms of SPEC 13 still count from the first
-speech frame. The snapshot counts episodes, their durations (frame-stamp clock) and the audio
+speech frame. If the frames stop with an episode open, the gain closes on its own
+``max_episode_s`` after the last candidate (``capped``), and a new answer clears it. The snapshot
+counts episodes, their durations (frame-stamp clock) and the audio
 already handed to the player beyond the moment each started (``handed_at_start_*_ms``): it was
 out of the duck's reach and plays at full gain.
 
@@ -324,7 +326,7 @@ class BargeIn:
             "keyword_seconds": self._keyword_s,
             "last_echo_corr": self._last_corr,
             "latency": self.stats.snapshot(),
-            "duck": {**self._duck_counts, **self._duck_ms},
+            "duck": {**self._duck_counts, "capped": self.duck.capped, **self._duck_ms},
         }
 
     # ----------------------------------------------------------------- chunks

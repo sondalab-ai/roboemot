@@ -45,7 +45,22 @@ def test_an_open_episode_ducks_a_push_longer_than_it_for_its_whole_length():
     duck.duck(10.0)
     g = gain_curve(duck, 10.0, 1000)  # a one-second push (a Piper message is 200 ms)
     assert g == pytest.approx(0.25)
-    assert duck.ducking(10.999) and duck.ducking(1e9)
+    assert duck.ducking(10.999)
+
+
+def test_an_episode_no_candidate_extends_releases_at_the_cap_with_the_ramp_and_is_counted():
+    """Barge-in stopped getting frames: the episode must not duck every later answer."""
+    duck = DuckGain(BargeInDuckConfig(gain=0.25, attack_ms=1, ramp_ms=50, max_episode_s=2.0))
+    duck.duck(10.0)
+    duck.duck(10.5)  # the last candidate: the cap counts from it
+    assert duck.ducking(12.49) and not duck.ducking(12.5)
+    g = gain_curve(duck, 12.4, 300)
+    assert g[:100] == pytest.approx(0.25)
+    assert g[100] == pytest.approx(0.25) and g[150:] == pytest.approx(1.0)  # the ramp, no step
+    gain_curve(duck, 12.7, 10)  # the first push wholly after the cap counts it
+    assert duck.capped == 1
+    duck.duck(20.0)  # a new episode later: the capped one is counted once
+    assert duck.capped == 1
 
 
 def test_the_level_is_continuous_across_pushes_already_past_the_duck_start():

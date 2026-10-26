@@ -597,7 +597,7 @@ def test_a_cough_ducks_then_releases_without_a_cut():
     stops, bi = onset_run(probs, user_voice(8 * FRAME / RATE, 0.1), keyword_enabled=False)
     assert stops == []
     snap = duck_snap(bi)
-    assert (snap["started"], snap["released"], snap["cut"]) == (1, 1, 0)
+    assert (snap["started"], snap["released"], snap["cut"], snap["capped"]) == (1, 1, 0, 0)
     # from the cough frame to the end of release_ms (64 ms: two frames) of non-speech
     assert snap["last_ms"] == pytest.approx(3 * FRAME_MS) and snap["max_ms"] == snap["last_ms"]
     cough = 2 * FRAME / RATE

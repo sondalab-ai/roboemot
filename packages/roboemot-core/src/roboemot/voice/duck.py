@@ -3,8 +3,10 @@
 :class:`~roboemot.voice.bargein.BargeIn` marks an *episode* on the monotonic clock: the robot's
 voice should be at ``voice.barge_in.duck.gain`` for every sample that plays from ``start`` on,
 and at full gain before it. The episode stays open while candidate frames continue (the user may
-still be talking, so nothing comes back up early) and closes only when barge-in decides the
-release (``release(at)``: ``release_ms`` of non-candidate frames) or the cut-off clears it. The
+still be talking, so nothing comes back up early) and closes when barge-in decides the release
+(``release(at)``: ``release_ms`` of non-candidate frames) or the cut-off clears it. As a safety
+net it also closes ``max_episode_s`` after the last candidate (barge-in stopped getting frames),
+with the ramp; ``capped`` counts those. The
 gain is applied (:meth:`DuckGain.apply`) where audio leaves for the player, keyed to the time
 each sample will *play*, not the time it is handed over: by the speaker at its paced hand-off
 when it takes the duck (only a bounded lead is then out of reach), else by the speech output
@@ -44,6 +46,8 @@ class DuckGain:
         self._start = self._until = -math.inf
         self._level = 1.0
         self._level_at = -math.inf  # play time just after the last sample ``apply`` saw
+        self._open = False  # an episode that no release, clear or cap has closed yet
+        self.capped = 0  # episodes closed by ``max_episode_s``
         self.apply_config(cfg)
 
     def apply_config(self, cfg: BargeInDuckConfig) -> None:
@@ -51,25 +55,39 @@ class DuckGain:
         span = max(1.0 - cfg.gain, MIN_SPAN)
         with self._lock:
             self._gain = cfg.gain
+            self._cap_s = cfg.max_episode_s
             self._down = span / (cfg.attack_ms / MS_PER_S)
             self._up = span / (cfg.ramp_ms / MS_PER_S)
 
     def duck(self, start: float) -> None:
-        """A candidate: duck from ``start`` on, until ``release``. An open episode keeps its
-        start; one already released is replaced."""
+        """A candidate (the frame starting at ``start``): duck from ``start`` on, until
+        ``release`` or ``max_episode_s`` after the last candidate. An open episode keeps its
+        start; one already closed is replaced."""
         with self._lock:
             if start >= self._until:
+                self._note_cap()
                 self._start = start
-            self._until = math.inf
+            self._until = max(self._until, start + self._cap_s)
+            self._open = True
+
+    def _note_cap(self) -> None:
+        """An open episode that reached its cap is over: count it once. The lock is held."""
+        if self._open:
+            self._open = False
+            self.capped += 1
 
     def release(self, at: float) -> None:
         """Close the episode at ``at``: later samples ramp back to full gain."""
         with self._lock:
+            if at < self._until:
+                self._open = False
             self._until = min(self._until, at)
 
     def clear(self) -> None:
-        """No episode and full gain at once: the player was flushed or is idle."""
+        """No episode and full gain at once: the player was flushed or is idle, or a new
+        answer starts."""
         with self._lock:
+            self._open = False
             self._start = self._until = -math.inf
             self._level, self._level_at = 1.0, -math.inf
 
@@ -92,6 +110,8 @@ class DuckGain:
             return samples
         end = start + n / rate_hz
         with self._lock:
+            if start >= self._until:
+                self._note_cap()
             ep_start, until, gain = self._start, self._until, self._gain
             down, up, level = self._down, self._up, self._level
             if self._level_at < start:  # silence since the last push: the level kept moving
