@@ -1024,3 +1024,70 @@ def test_stop_clears_the_duck_so_the_next_answer_plays_at_full_gain(make):
     say(out, "Ciao.")
     assert wait_for(lambda: out.sentences_spoken == 1)
     assert np.concatenate(sink.samples) == pytest.approx(1.0)
+
+
+def test_a_soothe_sound_through_play_is_ducked_too(make):
+    """SPEC 7B, 8 stage 8: a raw sound goes through the same push, so a candidate ducks it."""
+    sink = PlayingSink()
+    out = make(FakeBackend(), sink=sink)
+    out.duck = DuckGain(BargeInDuckConfig(gain=0.25))
+    out.duck.duck(0.0)
+    assert out.play(np.full(RATE // 10, 0.5, np.float32), RATE) is not None
+    assert wait_for(lambda: sink.samples)
+    assert np.concatenate(sink.samples) == pytest.approx(0.125)
+
+
+def test_a_cut_off_during_a_large_ducked_push_waits_only_for_that_push(make, monkeypatch):
+    """The duck runs under the output lock with the push: a stop from another thread waits at
+    most for the push in flight, and nothing is pushed after it returns."""
+    sink = PlayingSink()
+    out = make(FakeBackend(pieces=3), sink=sink)
+    duck = DuckGain(BargeInDuckConfig(gain=0.25))
+    out.duck = duck
+    duck.duck(0.0)
+    inside, hold_s = threading.Event(), 0.1
+    real = duck.apply
+
+    def slow_apply(samples, rate_hz, start):
+        inside.set()
+        time.sleep(hold_s)
+        return real(samples, rate_hz, start)
+
+    monkeypatch.setattr(duck, "apply", slow_apply)
+    say(out, "Ciao.")
+    assert inside.wait(2.0)
+    began = time.monotonic()
+    out.stop()
+    waited = time.monotonic() - began
+    pushed = len(sink.samples)
+    time.sleep(0.3)
+    assert waited < hold_s + 0.1  # one push in flight, not the sentence
+    assert len(sink.samples) == pushed  # nothing after the stop
+
+
+class TakingSink(PlayingSink):
+    """A sink that applies the duck itself (a pacing speaker)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.taken = None
+
+    def take_duck(self, duck):
+        self.taken = duck
+        return True
+
+    def pacing(self):
+        return {"lead_ms": 200.0}
+
+
+def test_a_sink_that_takes_the_duck_gets_the_samples_unscaled_and_reports_its_pacing(make):
+    sink = TakingSink()
+    out = make(FakeBackend(), sink=sink)
+    duck = DuckGain(BargeInDuckConfig(gain=0.25))
+    out.duck = duck
+    duck.duck(0.0)
+    assert sink.taken is duck
+    say(out, "Ciao.")
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    assert np.concatenate(sink.samples) == pytest.approx(1.0)  # never applied twice
+    assert out.snapshot()["pacing"] == {"lead_ms": 200.0}

@@ -232,7 +232,8 @@ def test_the_sound_direction_source_is_gated_by_the_speaking_window(data, monkey
         assert wait_for(lambda: app.speaker is not None and source.speaking is not None)
         assert not source.speaking(time.monotonic())  # nothing spoken yet
         until = app.speaker.push_audio_sample(np.zeros(8000, np.float32), 16000)
-        assert source.speaking(until - 0.1) and source.speaking(until + 0.1)
+        # the paced speaker extends the window as it hands audio to the player (its lead ahead)
+        assert wait_for(lambda: source.speaking(until - 0.1) and source.speaking(until + 0.1))
         assert not source.speaking(until + 0.2)  # 150 ms tail
     finally:
         stop.set()

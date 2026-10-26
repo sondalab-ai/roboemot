@@ -2765,6 +2765,14 @@ class VoiceConfig(Strict):
         "Size of each piece pushed to the speaker; a barge-in abandons the pieces not yet pushed",
         unit="ms", ge=10, le=1000, restart=True,
     )  # fmt: skip
+    playback_lead_ms: float = param(
+        200.0,
+        "Audio a pacing speaker hands its player ahead of playback; the rest waits and is handed "
+        "over as the player drains, so barge-in ducking reaches it and a stop flushes less. "
+        "Read by speakers that pace (the robot plugin's); 0 hands everything over at once. Too "
+        "low and a late pacer lets the player run dry (counted as underruns)",
+        unit="ms", ge=0, le=2000, restart=True,
+    )  # fmt: skip
     backend: Literal["piper", "openai_speech", "kokoro"] = param(
         "piper", "TTS backend", restart=True
     )
