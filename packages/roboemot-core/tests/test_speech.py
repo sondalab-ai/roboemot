@@ -531,3 +531,96 @@ def test_dropped_sentences_neither_replace_nor_extend_the_question_end(make):
     out.stop()  # drops the queue (barge-in, the stop keyword)
     after = out.question_end()
     assert after is not None and after <= before and after <= time.monotonic()
+
+
+def sound(seconds: float, level: float = 0.5) -> np.ndarray:
+    return np.full(round(seconds * RATE), level, np.float32)
+
+
+def test_play_pushes_the_samples_and_applies_the_circadian_volume(make):
+    seen = []
+
+    class RecordingSink(FakeSink):
+        def push_audio_sample(self, samples, rate_hz):
+            seen.append((float(samples.max()), rate_hz))
+            return super().push_audio_sample(samples, rate_hz)
+
+    out = make(sink=RecordingSink())
+    assert out.play(sound(0.1), RATE) is not None
+    assert out.play(sound(0.1), RATE, volume_db=-6.0) is not None
+    assert wait_for(lambda: len(seen) == 2)
+    assert seen[0] == (0.5, RATE)
+    assert seen[1][0] == pytest.approx(0.5 * 10 ** (-6 / 20), rel=1e-4)
+
+
+def test_stop_cuts_a_raw_job_playing_and_drops_the_queued_ones(make):
+    sink = TimelineSink()
+    out = make(sink=sink)
+    out.play(sound(20), RATE)
+    assert wait_for(lambda: len(sink.pushed) == 1)
+    out.play(sound(1), RATE)  # queued behind the first, which holds the queue while it plays
+    out.stop()
+    assert sink.stopped_at
+    time.sleep(0.2)
+    assert len(sink.pushed) == 1  # the queued one never played
+
+
+def test_cancel_removes_only_its_own_job(make):
+    sink = TimelineSink()
+    out = make(sink=sink)
+    first = out.play(sound(20), RATE)
+    assert wait_for(lambda: len(sink.pushed) == 1)
+    second, third = out.play(sound(1), RATE), out.play(sound(2), RATE)
+    out.cancel(second)  # still queued: removed, the sink is not touched
+    assert not sink.stopped_at
+    out.cancel(first)  # playing now: the sink is flushed and the queue moves on
+    assert sink.stopped_at
+    assert wait_for(lambda: len(sink.pushed) == 2)
+    assert sink.pushed[1][0] == 2 * RATE  # the third; the second was never pushed
+    out.cancel(third)  # whatever its state, cancelling must not raise
+    out.cancel(9999)
+
+
+def test_a_queued_sentence_still_plays_after_a_raw_job_is_cancelled(make):
+    sink, backend = TimelineSink(), FakeBackend()
+    out = make(backend, sink=sink)
+    raw = out.play(sound(20), RATE)
+    assert wait_for(lambda: len(sink.pushed) == 1)
+    say(out, "Ciao.")
+    assert not wait_for(lambda: backend.texts, timeout=0.2)  # held behind the sound
+    out.cancel(raw)
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    assert backend.texts == ["Ciao."]
+
+
+def test_a_raw_job_is_not_speech(make):
+    sink = TimelineSink()
+    out = make(FakeBackend(pieces=10), sink=sink)
+    say(out, "Vuoi un caffe?")
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    before = out.question_end()
+    assert before is not None
+    job = out.play(sound(0.2), RATE)
+    assert wait_for(lambda: len(sink.pushed) == 11)
+    assert out.question_end() == before
+    assert out.sentences_spoken == 1 and out.ended_at(job) is None and not out.played(job)
+
+
+def test_nothing_is_pushed_after_cancel_returns(make):
+    class SlowSink(TimelineSink):
+        def push_audio_sample(self, samples, rate_hz):
+            time.sleep(0.05)
+            return super().push_audio_sample(samples, rate_hz)
+
+    sink = SlowSink()
+    out = make(sink=sink)
+    job = out.play(sound(20), RATE)
+    time.sleep(0.01)  # the loop is somewhere around the slow push
+    out.cancel(job)
+    returned = time.monotonic()
+    pushed = len(sink.pushed_at)
+    time.sleep(0.3)
+    assert len(sink.pushed_at) == pushed and all(at <= returned for at in sink.pushed_at)
+    assert not pushed or sink.stopped_at[0] >= sink.pushed_at[-1]
+    assert out.play(sound(0.1), RATE) is not None  # the output is still usable
+    assert wait_for(lambda: len(sink.pushed) == pushed + 1)
