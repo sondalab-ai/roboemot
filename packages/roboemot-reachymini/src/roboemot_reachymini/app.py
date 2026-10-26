@@ -18,6 +18,7 @@ import os
 import random
 import threading
 import time
+from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -250,6 +251,25 @@ def soothe_idle(ctx: SootheContext) -> bool:
     if ctx.in_session or ctx.voice_recent or ctx.other_queued > 0:
         return False
     return ctx.ours or not ctx.speaking
+
+
+def soothe_tick(
+    soothe: SootheRunner,
+    now: float,
+    context: Callable[[], SootheContext],
+    circadian_state: str,
+    quiet: bool,
+) -> None:
+    """One step of the self-soothing runner, run after ``scan_tick``. A failure (type and message
+    only, never audio) is logged, the sound is cut and the app keeps running."""
+    try:
+        soothe.tick(now, soothe_idle(context()), circadian_state, quiet)
+    except Exception as exc:
+        log.warning("soothe: %s: %s", type(exc).__name__, exc)
+        try:
+            soothe.close()
+        except Exception as close_exc:
+            log.warning("soothe: close: %s", type(close_exc).__name__)
 
 
 def scan_tick(ctx: ScanContext, scan: ScanController, loop: MotionLoop, cfg: Any) -> bool:
@@ -949,20 +969,19 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                     )
                     scan_tick(ctx, scan, loop, live)
                 if soothe is not None and self.speech_output is not None:
-                    soothe.tick(
+                    soothe_tick(
+                        soothe,
                         now,
-                        soothe_idle(
-                            soothe_context(
-                                now,
-                                selector=selector,
-                                speech=speech,
-                                output=self.speech_output,
-                                soothe=soothe,
-                                in_session=self.conversation is not None
-                                and self.conversation.in_session(),
-                                last_voice=voice_heard[0],
-                                echo_tail_s=live.voice.echo_tail_ms / MS_PER_S,
-                            )
+                        lambda now=now, live=live: soothe_context(
+                            now,
+                            selector=selector,
+                            speech=speech,
+                            output=self.speech_output,
+                            soothe=soothe,
+                            in_session=self.conversation is not None
+                            and self.conversation.in_session(),
+                            last_voice=voice_heard[0],
+                            echo_tail_s=live.voice.echo_tail_ms / MS_PER_S,
                         ),
                         self.circadian.state if self.circadian else "awake",
                         live.circadian.enabled

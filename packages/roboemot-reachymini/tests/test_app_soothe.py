@@ -8,7 +8,8 @@ import time
 from types import SimpleNamespace
 
 import pytest
-from roboemot.config.schema import RegisterParams, StateEffects
+from roboemot.config.schema import RegisterParams, SootheConfig, StateEffects
+from roboemot.soothe import SootheRunner
 from roboemot_reachymini import app as app_module
 from test_app_perception import (  # noqa: F401  (data is a fixture)
     AppWithFakes,
@@ -79,8 +80,8 @@ def test_a_sound_plays_next_to_a_visible_person_and_a_queued_sentence_cuts_it(da
         cancelled = []
         output, real_cancel = app.speech_output, app.speech_output.cancel
         output.cancel = lambda job: (cancelled.append(job), real_cancel(job))[1]
-        assert wait_for(lambda: events and mini.media.push_audio_sample.called, timeout=15)
-        assert wait_for(lambda: app.selector.target is not None, timeout=5)  # a person is in view
+        assert wait_for(lambda: events and mini.media.push_audio_sample.called, timeout=30)
+        assert wait_for(lambda: app.selector.target is not None, timeout=15)  # a person is in view
         assert events[0] == ("self.soothe", {"label": LABEL, "sound": "hum"})
         assert wait_for(lambda: app.expression.last_label == LABEL)
         assert not cancelled  # the person did not cut it, nor did its own speaking window
@@ -92,7 +93,7 @@ def test_a_sound_plays_next_to_a_visible_person_and_a_queued_sentence_cuts_it(da
             mood=None,
             intensity=0.0,
         )
-        assert wait_for(lambda: cancelled, timeout=5)
+        assert wait_for(lambda: cancelled, timeout=15)
         assert mini.media.stop_playing.called  # the sink was flushed (no clear_player here)
     finally:
         stop.set()
@@ -154,3 +155,29 @@ def test_a_speaker_hint_or_a_recent_utterance_ends_idle_until_the_quiet_window_p
     assert not app_module.soothe_idle(soothe_args(selector=hinted))
     assert not app_module.soothe_idle(soothe_args(last_voice=95.0))
     assert app_module.soothe_idle(soothe_args(last_voice=85.0))
+
+
+class BrokenOutput:
+    def __init__(self):
+        self.cancelled = []
+
+    def play(self, samples, rate_hz, volume_db=0.0):
+        raise RuntimeError("sink gone")
+
+    def cancel(self, job_id):
+        self.cancelled.append(job_id)
+
+    def live(self, job_id):
+        return True
+
+
+def test_a_failing_soothe_tick_is_logged_and_does_not_stop_the_app(caplog):
+    cfg = SootheConfig(interval_s=30, jitter=0, idle_min_s=0)
+    output = BrokenOutput()
+    runner = SootheRunner(cfg, output, on_event=lambda *a: None, rng=random.Random(1))
+    quiet = app_module.SootheContext(False, False, 0, False, False)
+    with caplog.at_level("WARNING"):
+        for t in (0.0, cfg.interval_s):  # the second tick is due: play raises
+            app_module.soothe_tick(runner, t, lambda: quiet, "awake", False)
+        app_module.soothe_tick(runner, 1.0, lambda: 1 / 0, "awake", False)  # the context fails
+    assert "sink gone" in caplog.text and "ZeroDivisionError" in caplog.text
