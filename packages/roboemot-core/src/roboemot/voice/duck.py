@@ -87,14 +87,16 @@ class DuckGain:
         """``samples`` (mono, ``rate_hz``) that start to play at ``start``, with the gain on
         them. Returned unchanged (the same array) when they play at full gain throughout."""
         n = samples.size
+        if n == 0 or rate_hz <= 0:
+            return samples
         with self._lock:
             ep_start, until, gain = self._start, self._until, self._gain
             down, up, generation = self._down, self._up, self._generation
             level, level_at = self._level, self._level_at
-        end = start + n / rate_hz if rate_hz > 0 else start
+        end = start + n / rate_hz
         if level_at < start:  # silence since the last push: the level kept moving
             level = self._slew(level, level_at, start, ep_start, until, gain, down, up)
-        if level >= 1.0 and (n == 0 or end <= ep_start or start >= until):
+        if level >= 1.0 and (end <= ep_start or start >= until):
             out, last = samples, 1.0
         else:
             gains = self._curve(level, start, n, rate_hz, ep_start, until, gain, down, up)

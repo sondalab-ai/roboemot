@@ -93,3 +93,10 @@ def test_the_output_is_float32_and_the_input_is_not_modified():
     y = duck.apply(x, RATE, 0.0)
     assert y.dtype == np.float32 and y == pytest.approx(0.2)
     assert x == pytest.approx(0.8)
+
+
+def test_a_rateless_or_empty_chunk_passes_unchanged():
+    duck = DuckGain(BargeInDuckConfig())
+    duck.duck(0.0, 1.0)
+    x = np.ones(10, np.float32)
+    assert duck.apply(x, 0, 0.5) is x
