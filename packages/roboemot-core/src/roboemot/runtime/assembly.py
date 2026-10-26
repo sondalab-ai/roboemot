@@ -124,6 +124,12 @@ def make_yes_no(
     )
 
 
+def ducked_channels(expression: ExpressionRenderer, circ: CircadianRunner) -> frozenset[str]:
+    """Channels the speaking motion yields: those of the expression playing and of the circadian
+    yawn or stretch playing (SPEC 7, Speaking motion)."""
+    return expression.channels | (circ.motion.channels if circ.motion else frozenset())
+
+
 def assemble(
     host: RuntimeHost,
     stack: ConfigStack,
@@ -260,7 +266,7 @@ def assemble(
         max_amplitude=cfg.expression.max_amplitude,
         timeline=lambda: out.timeline if (out := host.speech_output) is not None else None,
         listening=lambda: phase.listening,
-        ducked=lambda: expression.channels,
+        ducked=lambda: ducked_channels(expression, circ),
     )
     speaking.circadian_factor = circ.amplitude_factor
     host.circadian = circ.model if cfg.circadian.enabled else None

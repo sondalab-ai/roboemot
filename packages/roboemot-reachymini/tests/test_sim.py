@@ -301,7 +301,7 @@ def test_every_label_plays_a_recorded_clip_on_the_simulated_robot(loop, label):
     home = {channel: manifest.dofs[channel].home}
     _hold(loop, home, 8.0)
     settled = loop.driver.read_state()[channel]
-    reg = resolve_register([Person("adult", "declared", {})], cfg.register, cfg.persona)
+    reg = resolve_register([Person({})], cfg.register, cfg.persona)
     renderer = ExpressionRenderer(
         cfg.expression, expression_map, manifest.dofs, 0.15, body_yaw="body_yaw", clips=clips
     )
@@ -862,9 +862,8 @@ def test_our_own_gestures_and_extreme_motion_never_look_like_external_control(lo
 
     manifest = loop.manifest
     stack = ConfigStack()
-    stack.set_manifest_behaviour(
-        manifest.model.behaviour, manifest.channels, load_clip_library(manifest), body_yaw=None
-    )
+    clips = load_clip_library(manifest)
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, clips, body_yaw=None)
     cfg = stack.effective()
     worst = _watch_tracking_error(loop)
     _hold(loop, {n: d.home for n, d in manifest.dofs.items() if d.measured}, 6.0)
@@ -876,7 +875,12 @@ def test_our_own_gestures_and_extreme_motion_never_look_like_external_control(lo
     loop.clear("test")
     reg = resolve_register([Person({})], cfg.register, cfg.persona)
     renderer = ExpressionRenderer(
-        cfg.expression, cfg.expression_map, manifest.dofs, 0.15, body_yaw="body_yaw"
+        cfg.expression,
+        cfg.expression_map,
+        manifest.dofs,
+        0.15,
+        body_yaw="body_yaw",
+        clips=clips,
     )
     now = time.monotonic()
     renderer.update(AffectState(0.0, 0.0, "calm", 0.0), reg, now)

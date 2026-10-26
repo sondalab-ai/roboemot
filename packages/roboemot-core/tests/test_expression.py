@@ -268,15 +268,15 @@ def test_a_label_without_a_map_entry_or_a_usable_channel_plays_nothing(cfg, mani
 def test_amplitude_scales_by_the_register(cfg, manifest):
     r = renderer(cfg, manifest)
     st = state("joy", 0.5)
-    child, adult = r.amplitude(active("lively"), st), r.amplitude(active("plain"), st)
-    unknown = r.amplitude(active("reserved"), st)
-    assert child > adult > unknown > 0
+    lively_amp, plain_amp = r.amplitude(active("lively"), st), r.amplitude(active("plain"), st)
+    reserved_amp = r.amplitude(active("reserved"), st)
+    assert lively_amp > plain_amp > reserved_amp > 0
     f = cfg.expression.intensity_factor
     floor = cfg.expression.intensity_floor
     affect = floor + (1 - floor) * 0.5
-    assert child == pytest.approx(1.2 * f.high * affect)
-    assert adult == pytest.approx(1.0 * f.medium * affect)
-    assert unknown == pytest.approx(0.7 * f.low * affect)
+    assert lively_amp == pytest.approx(1.2 * f.high * affect)
+    assert plain_amp == pytest.approx(1.0 * f.medium * affect)
+    assert reserved_amp == pytest.approx(0.7 * f.low * affect)
 
 
 def test_amplitude_follows_affect_intensity_circadian_and_the_ceiling(cfg, manifest):
@@ -296,7 +296,7 @@ def test_persona_is_in_the_register_and_not_applied_again(cfg, manifest):
     shaped = resolve_register([Person({})], lively.register, lively.persona)
     r = renderer(cfg, manifest)
     st = state("joy", 1.0)
-    # 1.2 (persona energy) x 1.0 (adult) x 1.0 (medium) x 1.0 (full intensity), once
+    # 1.2 (persona energy) x 1.0 (plain) x 1.0 (medium) x 1.0 (full intensity), once
     assert r.amplitude(shaped, st) == pytest.approx(1.2)
 
 
@@ -380,10 +380,10 @@ def test_no_body_yaw_for_a_register_that_must_not_approach(cfg, manifest):
         assert r.update(state("joy", 0.5), reg, 1.0)
         seen = {n for _, cmds in drain(r, 1.0, 1.2) for c in cmds for n in c.targets}
         assert "antenna_right" in seen and "body_yaw" not in seen
-    adult = active("plain")
+    reg = active("plain")
     r = renderer(cfg, manifest, {"joy": BODY})
-    r.update(state("calm", 0.5), adult, 0.0)
-    r.update(state("joy", 0.5), adult, 1.0)
+    r.update(state("calm", 0.5), reg, 0.0)
+    r.update(state("joy", 0.5), reg, 1.0)
     assert any("body_yaw" in c.targets for _, cmds in drain(r, 1.0, 1.2) for c in cmds)
 
 
@@ -437,9 +437,9 @@ def test_set_register_acts_within_one_tick_even_when_the_affect_updates_are_rare
     """Regression: update_hz = 1 means no update() for a second; the register still lands."""
     slow = cfg.model_copy(update={"affect": cfg.affect.model_copy(update={"update_hz": 1.0})})
     r = renderer(slow, manifest, {"joy": BODY})
-    adult = active("plain")
-    r.update(state("calm", 0.5), adult, 0.0)
-    assert r.update(state("joy", 0.5), adult, 1.0)
+    reg = active("plain")
+    r.update(state("calm", 0.5), reg, 0.0)
+    assert r.update(state("joy", 0.5), reg, 1.0)
     assert "body_yaw" in r.commands(1.25)[0].targets
     r.set_register(active("reserved"))  # no update() call: the next state is a second away
     assert "body_yaw" not in r.commands(1.27)[0].targets
@@ -493,9 +493,9 @@ def test_manifest_behaviour_may_only_set_known_keys_and_is_audited(manifest):
 def test_a_stricter_register_mid_expression_drops_the_body_and_the_amplitude_at_once(cfg, manifest):
     """Regression: the approach and amplitude decisions are re-checked every tick."""
     r = renderer(cfg, manifest, {"joy": BODY})
-    adult, stranger = active("plain"), active("reserved")
-    r.update(state("calm", 0.5), adult, 0.0)
-    assert r.update(state("joy", 0.5), adult, 1.0)
+    reg, stranger = active("plain"), active("reserved")
+    r.update(state("calm", 0.5), reg, 0.0)
+    assert r.update(state("joy", 0.5), reg, 1.0)
     assert "body_yaw" in r.commands(1.25)[0].targets
     r.update(state("joy", 0.5), stranger, 1.26)  # someone arrives: tighter on both counts
     after = r.commands(1.27)[0].targets

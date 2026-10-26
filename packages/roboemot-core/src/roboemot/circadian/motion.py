@@ -150,6 +150,13 @@ class CircadianMotion:
         """The primitive playing now (``yawn`` or ``stretch``), or an empty string."""
         return self._playing if self._player is not None else ""
 
+    @property
+    def channels(self) -> frozenset[str]:
+        """The channels the yawn or stretch playing now drives (empty when none plays)."""
+        if self._player is None:
+            return frozenset()
+        return frozenset(self._player.prim.keyframes[0].values)
+
     def start_waking(self, now: float) -> bool:
         """Start the waking stretch (it cancels a yawn). False when the robot has no stretch."""
         if (chosen := self._choose("stretch")) is None:

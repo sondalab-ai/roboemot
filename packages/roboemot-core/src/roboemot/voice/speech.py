@@ -530,8 +530,8 @@ class SpeechOutput:
             self.sink.push_audio_sample(samples, rate_hz)
             if isinstance(job, _RawJob):
                 self._raw_pushed = job.id
-            self._push_ms.append((self.clock() - now) * MS_PER_S)
             if speech:
+                self._push_ms.append((self.clock() - now) * MS_PER_S)
                 began = time.perf_counter()
                 self.timeline.push(
                     job.id,

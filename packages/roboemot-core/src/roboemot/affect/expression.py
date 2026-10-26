@@ -33,7 +33,7 @@ variants whose band holds the affect intensity, never the clip the entry played 
 is the only one eligible (the random source is injected). The chosen clip is then built and
 played exactly like a hand-written entry, with one difference in the formula above: the product
 is multiplied by the variant's ``gain`` before the ``expression.max_amplitude`` cap. The clamp,
-the minor cap, the body gate, the command lifetime and the cross-fade all apply unchanged.
+the body gate, the command lifetime and the cross-fade all apply unchanged.
 
 Not scaled by speed: expressions play at the keyframe times.
 """

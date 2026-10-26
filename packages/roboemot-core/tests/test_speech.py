@@ -557,6 +557,7 @@ def test_a_raw_job_writes_nothing_on_the_speech_timeline(make):
     assert out.timeline.snapshot().get("frames", 0) == 0
     assert out.timeline.snapshot().get("sentences", 0) == 0
     assert not out.timeline._pads
+    assert out.snapshot()["push_ms"] == {"count": 0}  # push latency covers speech only
     say(out, "Ciao.")
     assert wait_for(lambda: out.sentences_spoken == 1)
     assert out.timeline.snapshot().get("sentences", 0) == 1

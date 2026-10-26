@@ -131,3 +131,48 @@ def test_the_app_starts_with_the_library_and_offers_every_label(data):  # noqa: 
         stop.set()
         thread.join(15)
     assert not errors
+
+
+WORST = {
+    "expression": {
+        "intensity_factor": {"low": 2, "medium": 2, "high": 2},
+        "max_amplitude": 3,
+    }
+}
+
+
+@pytest.mark.parametrize("clip", sorted(load_clip_library(MANIFEST)))
+def test_every_vendored_clip_stays_inside_the_range_at_the_schema_worst_case(clip):
+    """SPEC 7, 12: at the register's top amplitude and the schema's upper bounds for the factors
+    and ``max_amplitude``, no rendered target leaves a dof's ``min..max`` about home."""
+    from roboemot.affect import AffectState
+    from roboemot.affect.expression import ExpressionRenderer
+    from roboemot.affect.register import Person, resolve_register
+    from roboemot.config.schema import ExpressionEntry, RoboEmotConfig
+
+    library = load_clip_library(MANIFEST)
+    worst = RoboEmotConfig.model_validate(WORST)
+    register = resolve_register(
+        [Person({"motion_amplitude": 2, "reaction_intensity": "high"})],
+        worst.register,
+        worst.persona,
+    )
+    assert register.params.motion_amplitude == 2
+    only = {"joy": ExpressionEntry(variants=[{"clip": clip}])}
+    r = ExpressionRenderer(
+        worst.expression, only, MANIFEST.dofs, 0.15, body_yaw="body_yaw", clips=library
+    )
+    r.update(AffectState(0.0, 0.0, "calm", 0.0, 0), register, 0.0)
+    assert r.update(AffectState(0.0, 0.0, "joy", 1.0, 1), register, 1.0)
+    moved = False
+    for k in range(int(32 / 0.05)):  # a clip is at most 30 s
+        for cmd in r.commands(1.0 + k * 0.05):
+            for name, value in cmd.targets.items():
+                dof = MANIFEST.dofs[name]
+                assert dof.min - dof.home - 1e-9 <= value <= dof.max - dof.home + 1e-9, (
+                    clip,
+                    name,
+                    value,
+                )
+                moved = moved or abs(value) > 1e-6
+    assert moved
