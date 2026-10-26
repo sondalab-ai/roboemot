@@ -2,7 +2,8 @@
 
 Per second of audio read, the wall time the listener thread spent on each stage (voice activity
 detection, recognizer accept, start and finish, the barge-in check while the robot speaks) and
-in total (``grammar_wait``: the listener waiting for a pass before the next utterance starts),
+in total (``grammar_wait``: the listener waiting for a pass before the next utterance starts;
+``handoff``: wake gate, prosody and delivery of an utterance, also when it runs between chunks),
 the grammar pass time on its own thread, how far behind real time each chunk was when
 read (``lag_s``: the age of its end, about the depth of the microphone queue) and the audio lost
 before the listener read it (``dropped_s``: the holes in the chunk stamps after a gap).
@@ -21,7 +22,16 @@ from typing import Any
 from ..config.schema import ListenerConfig
 
 MS_PER_S = 1000.0
-STAGES = ("vad", "asr_accept", "asr_start", "asr_finish", "bargein", "grammar_wait", "grammar")
+STAGES = (
+    "vad",
+    "asr_accept",
+    "asr_start",
+    "asr_finish",
+    "bargein",
+    "grammar_wait",
+    "handoff",
+    "grammar",
+)
 
 
 @dataclass
@@ -66,6 +76,12 @@ class ListenerLoad:
         with self._lock:
             self._total.stages[name] += seconds
             self._window.stages[name] += seconds
+
+    def busy(self, seconds: float) -> None:
+        """Listener work outside a chunk (a hand-off between two reads)."""
+        with self._lock:
+            self._total.busy_s += seconds
+            self._window.busy_s += seconds
 
     def chunk(self, audio_s: float, busy_s: float, lag_s: float, dropped_s: float) -> None:
         """One chunk read: its length, the listener's time on it, its lag when read and the

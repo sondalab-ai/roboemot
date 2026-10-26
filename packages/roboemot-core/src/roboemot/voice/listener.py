@@ -319,7 +319,9 @@ class VoiceListener:
             try:
                 if chunk is not None:
                     self.process(chunk)
-                self.poll_handoff()
+                t0 = self._timer()
+                self.poll_handoff()  # a hand-off here is listener work outside ``process``
+                self.load.busy(self._timer() - t0)
             except Exception as exc:  # one bad chunk must not end the listener
                 self._count("errors")
                 name = type(exc).__name__
@@ -554,7 +556,7 @@ class VoiceListener:
             self._wait_last_s = waited
             self._wait_max_s = max(self._wait_max_s, waited)
         try:
-            self._deliver(p, heard)
+            self._timed("handoff", self._deliver, p, heard)
         finally:
             self._set_active(False)
 

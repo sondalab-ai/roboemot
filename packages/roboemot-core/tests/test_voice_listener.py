@@ -800,6 +800,7 @@ def test_realtime_block_has_stage_costs_lag_and_dropped_audio():
         "asr_finish",
         "bargein",
         "grammar_wait",
+        "handoff",
         "grammar",
         "listener_total",
     }
@@ -894,5 +895,42 @@ def test_a_recognizer_failing_in_accept_and_reset_does_not_end_the_listener_thre
         assert until(lambda: source.q.empty())
         assert r.listener._thread is not None and r.listener._thread.is_alive()
         assert r.listener.snapshot()["state"] == "running"
+    finally:
+        r.listener.stop()
+
+
+def test_a_hand_off_on_the_listener_thread_counts_in_the_realtime_total():
+    """The hand-off (prosody, wake gate, publish, on_utterance) is listener work: it runs from
+    the read loop once the background pass is done, and must be in listener_total."""
+    from roboemot.voice.grammar import GrammarSpotter
+    from test_voice_grammar import Decoder, config, vocab
+
+    hold_s, deliver_s = 0.05, 0.3
+
+    class SlowDecoder(Decoder):
+        def __call__(self, language, audio, phrases):
+            time.sleep(hold_s)
+            return super().__call__(language, audio, phrases)
+
+    cfg = config()
+    r = Rig(
+        ["ciao"],
+        cfg=cfg,
+        grammar=GrammarSpotter(cfg.voice.grammar, SlowDecoder([("ciao", 1.0)]), vocab(), RATE),
+        grammar_background=True,
+    )
+    r.listener._on_utterance = lambda u: (time.sleep(deliver_s), r.utterances.append(u))
+    source = QueueSource()
+    r.listener._source = source
+    r.listener.start()
+    try:
+        t = source.push(voice(seconds=1.0), T0)
+        source.push(silence(r.cfg.voice.vad.end_silence_ms / 1000 + 0.2), t)
+        assert until(lambda: len(r.utterances) == 1)
+        total = r.listener.snapshot()["realtime"]["total"]
+        busy_s = total["ms_per_audio_s"]["listener_total"] * total["audio_s"] / 1000
+        assert busy_s >= deliver_s
+        handoff_s = total["ms_per_audio_s"]["handoff"] * total["audio_s"] / 1000
+        assert handoff_s >= deliver_s
     finally:
         r.listener.stop()
