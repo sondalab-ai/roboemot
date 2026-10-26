@@ -1007,7 +1007,7 @@ def spoken_with(make, duck):
 
 def test_a_duck_lowers_what_the_sink_gets_but_not_the_speech_timeline(make):
     duck = DuckGain(BargeInDuckConfig(gain=0.25))
-    duck.duck(0.0, math.inf)  # every sample plays inside the episode
+    duck.duck(0.0)  # every sample plays inside the episode
     ducked, ducked_frames = spoken_with(make, duck)
     plain, plain_frames = spoken_with(make, None)
     assert ducked == pytest.approx(0.25 * plain)
@@ -1019,7 +1019,7 @@ def test_stop_clears_the_duck_so_the_next_answer_plays_at_full_gain(make):
     sink = PlayingSink()
     out = make(FakeBackend(), sink=sink)
     out.duck = DuckGain(BargeInDuckConfig(gain=0.25))
-    out.duck.duck(0.0, math.inf)
+    out.duck.duck(0.0)
     out.stop()
     say(out, "Ciao.")
     assert wait_for(lambda: out.sentences_spoken == 1)

@@ -665,7 +665,7 @@ def test_the_end_of_the_robots_speech_releases_the_duck_and_clears_the_gain():
     assert duck_snap(bi)["released"] == 1
 
 
-def test_the_snapshot_reports_how_much_audio_was_queued_when_the_duck_started():
+def test_the_snapshot_reports_the_audio_out_of_reach_when_the_duck_started():
     now = [0.0]
     bi = BargeIn(
         RoboEmotConfig.model_validate({"voice": {"barge_in": {"keyword_enabled": False}}}),
@@ -684,7 +684,91 @@ def test_the_snapshot_reports_how_much_audio_was_queued_when_the_duck_started():
             SimpleNamespace(samples=audio[i : i + CHUNK], rate_hz=RATE, stamp=now[0], gap=False)
         )
     snap = duck_snap(bi)
-    # the duck starts on the first frame, decided when the first chunk arrives (now = 64 ms)
-    assert snap["queued_last_ms"] == pytest.approx(3000 - 64)
-    assert snap["queued_max_ms"] == snap["queued_last_ms"]
+    # the duck starts on the first frame, decided when the first chunk arrives (now = 64 ms):
+    # what was already handed to the player beyond that moment is out of the duck's reach
+    assert snap["handed_at_start_last_ms"] == pytest.approx(3000 - 64)
+    assert snap["handed_at_start_max_ms"] == snap["handed_at_start_last_ms"]
     assert all(isinstance(v, (int, float)) or v is None for v in snap.values())
+
+
+def test_the_duck_stays_open_while_candidates_continue_and_closes_at_the_release():
+    """SPEC 8 stage 8: a long push lands while the user is still talking (candidates under the
+    cut-off, e.g. the main path's run broken every other frame): it stays ducked throughout."""
+    probs = [0.9, 0.0] * 10 + [0.0] * 4  # 20 frames of on-and-off speech, then quiet
+    stops, bi = onset_run(probs, user_voice(len(probs) * FRAME / RATE, 0.1), keyword_enabled=False)
+    assert stops == []
+    snap = duck_snap(bi)
+    assert (snap["started"], snap["released"], snap["cut"]) == (1, 1, 0)
+    frame_s = FRAME / RATE
+    # the release is decided after two quiet frames following the last candidate (frame 18)
+    assert snap["last_ms"] == pytest.approx(21 * FRAME_MS)
+    assert all(bi.duck.ducking(i * frame_s) for i in range(21))
+    assert not bi.duck.ducking(21 * frame_s)
+
+
+def test_while_candidates_continue_a_one_second_push_is_ducked_for_its_whole_length():
+    probs = [0.9, 0.0] * 4
+    _, bi = onset_run(probs, user_voice(len(probs) * FRAME / RATE, 0.1), keyword_enabled=False)
+    # the episode is open (frame 7 is the first quiet frame after the last candidate)
+    assert duck_snap(bi)["released"] == 0
+    out = bi.duck.apply(np.ones(RATE, np.float32), RATE, 0.3)  # plays from 0.3 s for 1 s
+    assert out[RATE // 100 :] == pytest.approx(0.25)
+
+
+def test_a_gap_mid_episode_ramps_the_voice_back_but_keeps_one_episode():
+    """A gap in the microphone audio loses track of the user: the voice ramps back up, and the
+    candidates after it continue the same episode (counted once)."""
+    now = [0.0]
+    bi = BargeIn(
+        RoboEmotConfig.model_validate({"voice": {"barge_in": {"keyword_enabled": False}}}),
+        ScriptedVAD([0.9, 0.0, 0.9, 0.0, 0.0, 0.0]),
+        SimpleNamespace(start=lambda *a: None, accept=lambda a: None, reset=lambda: None),
+        None,
+        language=lambda: "en",
+        clock=lambda: now[0],
+    )
+    bi.bind(lambda: None, lambda: None, None)
+    audio = user_voice(6 * FRAME / RATE, 0.1)
+    frame_s = FRAME / RATE
+    for i in range(6):  # the chunk of frame 2 comes after a gap
+        now[0] = (i + 1) * frame_s
+        bi.on_chunk(
+            SimpleNamespace(
+                samples=audio[i * FRAME : (i + 1) * FRAME], rate_hz=RATE, stamp=now[0], gap=i == 2
+            )
+        )
+    snap = duck_snap(bi)
+    assert (snap["started"], snap["released"], snap["cut"]) == (1, 1, 0)
+    assert snap["last_ms"] == pytest.approx(5 * FRAME_MS)
+
+
+def test_a_gap_releases_the_gain_with_the_ramp_not_a_step():
+    now = [0.0]
+    bi = BargeIn(
+        RoboEmotConfig.model_validate({"voice": {"barge_in": {"keyword_enabled": False}}}),
+        ScriptedVAD([0.9, 0.0]),
+        SimpleNamespace(start=lambda *a: None, accept=lambda a: None, reset=lambda: None),
+        None,
+        language=lambda: "en",
+        clock=lambda: now[0],
+    )
+    bi.bind(lambda: None, lambda: None, None)
+    frame_s = FRAME / RATE
+    bi.duck.apply(np.ones(FRAME, np.float32), RATE, 0.0)  # playing up to the first frame's end
+    now[0] = frame_s
+    bi.on_chunk(
+        SimpleNamespace(samples=user_voice(frame_s, 0.1), rate_hz=RATE, stamp=now[0], gap=False)
+    )
+    assert duck_snap(bi)["started"] == 1
+    played = bi.duck.apply(np.ones(FRAME, np.float32), RATE, frame_s)
+    assert played[-1] == pytest.approx(0.25)
+    now[0] = 2 * frame_s
+    bi.on_chunk(
+        SimpleNamespace(samples=user_voice(frame_s, 0.1), rate_hz=RATE, stamp=now[0], gap=True)
+    )
+    after = bi.duck.apply(np.ones(RATE // 10, np.float32), RATE, 2 * frame_s)
+    ramp = round(0.05 * RATE)  # ramp_ms 50: from 0.25 back to 1 without a step
+    assert after[0] == pytest.approx(0.25, abs=0.01)
+    assert np.all(np.diff(after) >= -1e-6) and np.max(np.diff(after)) < 0.01
+    assert after[ramp:] == pytest.approx(1.0)
+    assert duck_snap(bi)["released"] == 0  # the episode itself goes on

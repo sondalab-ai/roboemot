@@ -43,16 +43,18 @@ every cut-off itself, so the barge-in state has a single thread. It hands the re
 (``reset``) before the listener restarts on the barge-in audio.
 
 Ducking (SPEC 8 stage 8): a frame that starts or continues a run towards the cut-off (the main or
-the onset path, after the echo guard) is a *candidate*. The first one starts a duck episode on
-:class:`~roboemot.voice.duck.DuckGain` (``duck``): the speech output lowers the robot's voice to
-``voice.barge_in.duck.gain`` for the audio it has not yet handed to the speaker. Each candidate
-moves the end of the episode to ``release_ms`` after it; a candidate that does not reach the
-cut-off ends with ``release_ms`` of non-candidate frames (released), the cut-off ends it as cut,
-and the end of the robot's speech ends it as released. The cut-off rules are unchanged: ducking
-never stops or flushes anything, and the 200 ms of SPEC 13 still count from the first speech
-frame. The snapshot counts episodes and their durations (frame-stamp clock) and how much audio
-had been handed to the speaker beyond the moment each started (``queued_*_ms``, from what the
-speech output pushed through the duck): that audio plays at full gain.
+the onset path, after the echo guard) is a *candidate*. The first one opens a duck episode on
+:class:`~roboemot.voice.duck.DuckGain` (``duck``): the robot's voice drops to
+``voice.barge_in.duck.gain`` for the audio not yet handed to the player. The episode stays open
+while candidates continue; ``release_ms`` of non-candidate frames close it (released, the voice
+ramps back up from there), a cut-off ends it as cut (the keyword stop too: a stop heard during an
+episode counts ``duck.cut``), and the end of the robot's speech ends it as released and clears
+the gain. A gap in the microphone audio ramps the voice back up but keeps the episode: candidates
+after it reopen the gain and the episode is counted once. The cut-off rules are unchanged:
+ducking never stops or flushes anything, and the 200 ms of SPEC 13 still count from the first
+speech frame. The snapshot counts episodes, their durations (frame-stamp clock) and the audio
+already handed to the player beyond the moment each started (``handed_at_start_*_ms``): it was
+out of the duck's reach and plays at full gain.
 
 Audio and text are never logged or published.
 """
@@ -212,8 +214,8 @@ class BargeIn:
         self._duck_ms: dict[str, float | None] = {
             "last_ms": None,
             "max_ms": None,
-            "queued_last_ms": None,
-            "queued_max_ms": None,
+            "handed_at_start_last_ms": None,
+            "handed_at_start_max_ms": None,
         }
         self.stats = LatencyStats()
         self._counts = {
@@ -294,13 +296,13 @@ class BargeIn:
 
     def reset(self, *, gap: bool = False) -> None:
         """Forget the stretch in progress (the robot stopped speaking, or the audio has a
-        ``gap``). A duck in progress ends as released: at once (full gain for the next answer)
-        when the robot stopped, with the release ramp on a gap (the robot may still speak)."""
-        if self._duck_start is not None:
+        ``gap``). The robot stopped: a duck in progress ends as released and the gain is
+        cleared (full gain for the next answer). A gap: the voice ramps back up from the last
+        frame seen, but the episode goes on (one count; later candidates reopen the gain)."""
+        if gap:
+            self.duck.release(self._last_end)
+        else:
             self._end_duck("released", self._last_end)
-            if gap:
-                self.duck.release(self._last_end)
-        if not gap:
             self.duck.clear()
         self.handback_asr()
         self._vad.reset()
@@ -419,21 +421,23 @@ class BargeIn:
                 self._duck_counts["started"] += 1
                 self._note_queued()
             self._duck_quiet = 0
-            self.duck.duck(self._duck_start, end + self._release_frames * self._frame_s)
+            self.duck.duck(end - self._frame_s)  # open until the release is decided
         elif self._duck_start is not None:
             self._duck_quiet += 1
-            if self._duck_quiet >= self._release_frames:  # the duck's own ``until`` is here
+            if self._duck_quiet >= self._release_frames:
                 self._end_duck("released", end)
+                self.duck.release(end)
 
     def _note_queued(self) -> None:
-        """Audio already handed to the speaker when the duck started: it plays at full gain."""
+        """Audio already handed to the player beyond the moment the duck started: out of its
+        reach, it plays at full gain (with a paced speaker, at most its lead)."""
         until = self.duck.pushed_until()
         if not math.isfinite(until):
             return
         ms = max(0.0, until - self._clock()) * MS_PER_S
-        top = self._duck_ms["queued_max_ms"]
-        self._duck_ms["queued_last_ms"] = ms
-        self._duck_ms["queued_max_ms"] = ms if top is None else max(top, ms)
+        top = self._duck_ms["handed_at_start_max_ms"]
+        self._duck_ms["handed_at_start_last_ms"] = ms
+        self._duck_ms["handed_at_start_max_ms"] = ms if top is None else max(top, ms)
 
     def _end_duck(self, kind: str, end: float) -> None:
         """Count the episode in progress as ``kind`` (released or cut), lasting until ``end``."""

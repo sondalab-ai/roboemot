@@ -2412,19 +2412,21 @@ class BargeInDuckConfig(Strict):
     )  # fmt: skip
     attack_ms: float = param(
         10.0,
-        "Ramp from full gain down to gain, so the step does not click",
-        unit="ms", ge=0, le=100,
+        "Ramp from full gain down to gain, so the step does not click (never 0: a hard step "
+        "clicks)",
+        unit="ms", ge=1, le=100,
     )  # fmt: skip
     release_ms: float = param(
         64.0,
-        "Non-speech after the last candidate frame before the voice comes back; rounded up to "
-        "whole VAD frames",
+        "Non-candidate audio after the last candidate frame before the voice comes back; "
+        "rounded up to whole VAD frames, so the floor is one frame (512 samples at 16 kHz, "
+        "32 ms): anything lower would round up to it anyway",
         unit="ms", ge=32, le=1000,
     )  # fmt: skip
     ramp_ms: float = param(
         50.0,
-        "Ramp from gain back up to full gain after a release",
-        unit="ms", ge=0, le=500,
+        "Ramp from gain back up to full gain after a release (never 0: a hard step clicks)",
+        unit="ms", ge=1, le=500,
     )  # fmt: skip
 
 

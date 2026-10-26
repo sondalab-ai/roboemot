@@ -1,21 +1,25 @@
 """Barge-in ducking: the robot's voice gain while it may be hearing the user (SPEC 8 stage 8).
 
 :class:`~roboemot.voice.bargein.BargeIn` marks an *episode* on the monotonic clock: the robot's
-voice should be at ``voice.barge_in.duck.gain`` for every sample that plays in
-``[start, until)`` and at full gain outside it. Each candidate frame pushes ``until`` forward to
-the moment the release would start if no other candidate came, so audio queued while ducked
-already carries the release. The speech output applies the gain on the samples it hands to the
-sink (:meth:`DuckGain.apply`), keyed to the time each sample will *play*, not the time it is
-pushed: the sink queues ahead of playback, and audio already handed over cannot be changed.
+voice should be at ``voice.barge_in.duck.gain`` for every sample that plays from ``start`` on,
+and at full gain before it. The episode stays open while candidate frames continue (the user may
+still be talking, so nothing comes back up early) and closes only when barge-in decides the
+release (``release(at)``: ``release_ms`` of non-candidate frames) or the cut-off clears it. The
+gain is applied (:meth:`DuckGain.apply`) where audio leaves for the player, keyed to the time
+each sample will *play*, not the time it is handed over: by the speaker at its paced hand-off
+when it takes the duck (only a bounded lead is then out of reach), else by the speech output
+before the sink. Audio already in the player cannot be changed.
 
 The applied level never steps: it moves towards the target at ``(1 - gain) / attack_ms`` going
-down and ``(1 - gain) / ramp_ms`` going up, continuously across pushes (the level of the last
-pushed sample is kept, and moves during silence between pushes). ``clear`` (a stop flushed the
-player, or the robot stopped speaking) forgets the episode and the level: the next push plays at
-full gain.
+down and ``(1 - gain) / ramp_ms`` going up (both at least 1 ms), continuously across pushes (the
+level of the last sample is kept, and moves during silence between pushes). ``clear`` (a stop
+flushed the player, or the robot stopped speaking) forgets the episode and the level: the next
+push plays at full gain.
 
-Thread-safe: the listener thread writes the episode, the speech output thread applies it, and the
-work on samples runs outside the lock so the listener never waits for it.
+Thread-safe: the listener thread writes the episode, the output thread applies it. ``apply``
+holds the lock while it computes (a 100 ms piece is a few microseconds), so a ``clear`` from
+the listener lands either before an apply, which then plays at full gain, or after it, never in
+the middle with a stale gain written back.
 """
 
 from __future__ import annotations
@@ -39,29 +43,27 @@ class DuckGain:
         self._lock = threading.Lock()
         self._start = self._until = -math.inf
         self._level = 1.0
-        self._level_at = -math.inf  # play time just after the last pushed sample
-        self._generation = 0  # bumped by ``clear``: an ``apply`` in flight does not write back
+        self._level_at = -math.inf  # play time just after the last sample ``apply`` saw
         self.apply_config(cfg)
 
     def apply_config(self, cfg: BargeInDuckConfig) -> None:
         """Hot reload: the gain and the two ramps (the episode in progress keeps going)."""
         span = max(1.0 - cfg.gain, MIN_SPAN)
-        attack_s, ramp_s = cfg.attack_ms / MS_PER_S, cfg.ramp_ms / MS_PER_S
         with self._lock:
             self._gain = cfg.gain
-            self._down = span / attack_s if attack_s > 0 else math.inf
-            self._up = span / ramp_s if ramp_s > 0 else math.inf
+            self._down = span / (cfg.attack_ms / MS_PER_S)
+            self._up = span / (cfg.ramp_ms / MS_PER_S)
 
-    def duck(self, start: float, until: float) -> None:
-        """Duck the samples that play in ``[start, until)``. An episode still running at
-        ``start`` is extended to ``until``; one already over is replaced."""
+    def duck(self, start: float) -> None:
+        """A candidate: duck from ``start`` on, until ``release``. An open episode keeps its
+        start; one already released is replaced."""
         with self._lock:
             if start >= self._until:
                 self._start = start
-            self._until = max(self._until, until)
+            self._until = math.inf
 
     def release(self, at: float) -> None:
-        """End the episode at ``at``: later samples ramp back to full gain."""
+        """Close the episode at ``at``: later samples ramp back to full gain."""
         with self._lock:
             self._until = min(self._until, at)
 
@@ -70,11 +72,10 @@ class DuckGain:
         with self._lock:
             self._start = self._until = -math.inf
             self._level, self._level_at = 1.0, -math.inf
-            self._generation += 1
 
     def pushed_until(self) -> float:
-        """Play time just after the last sample ``apply`` saw (-inf after ``clear``): what the
-        sink has queued up to, read without touching the sink's lock."""
+        """Play time just after the last sample ``apply`` saw (-inf after ``clear``): the end of
+        the audio handed to the player, read without touching the sink's lock."""
         with self._lock:
             return self._level_at
 
@@ -89,22 +90,19 @@ class DuckGain:
         n = samples.size
         if n == 0 or rate_hz <= 0:
             return samples
+        end = start + n / rate_hz
         with self._lock:
             ep_start, until, gain = self._start, self._until, self._gain
-            down, up, generation = self._down, self._up, self._generation
-            level, level_at = self._level, self._level_at
-        end = start + n / rate_hz
-        if level_at < start:  # silence since the last push: the level kept moving
-            level = self._slew(level, level_at, start, ep_start, until, gain, down, up)
-        if level >= 1.0 and (end <= ep_start or start >= until):
-            out, last = samples, 1.0
-        else:
-            gains = self._curve(level, start, n, rate_hz, ep_start, until, gain, down, up)
-            out = (np.asarray(samples, np.float32) * gains).astype(np.float32, copy=False)
-            last = self._slew(level, start, end, ep_start, until, gain, down, up)
-        with self._lock:
-            if generation == self._generation:
-                self._level, self._level_at = last, max(self._level_at, end)
+            down, up, level = self._down, self._up, self._level
+            if self._level_at < start:  # silence since the last push: the level kept moving
+                level = self._slew(level, self._level_at, start, ep_start, until, gain, down, up)
+            if level >= 1.0 and (gain >= 1.0 or end <= ep_start or start >= until):
+                out, last = samples, 1.0
+            else:
+                gains = self._curve(level, start, n, rate_hz, ep_start, until, gain, down, up)
+                out = (np.asarray(samples, np.float32) * gains).astype(np.float32, copy=False)
+                last = self._slew(level, start, end, ep_start, until, gain, down, up)
+            self._level, self._level_at = last, max(self._level_at, end)
         return out
 
     @staticmethod
@@ -152,10 +150,9 @@ class DuckGain:
             target = gain if ep_start <= t[a] < until else 1.0
             dt = t[a:b] - t[a]
             if target < level:
-                seg = np.maximum(target, level - down * dt) if math.isfinite(down) else target
+                out[a:b] = np.maximum(target, level - down * dt)
             else:
-                seg = np.minimum(target, level + up * dt) if math.isfinite(up) else target
-            out[a:b] = seg
+                out[a:b] = np.minimum(target, level + up * dt)
             # the level where the next segment starts (its first sample's play time)
             nxt = t[b] if b < n else t[-1] + 1.0 / rate_hz
             gap = nxt - t[a]
