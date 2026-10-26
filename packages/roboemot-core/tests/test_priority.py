@@ -183,3 +183,15 @@ def test_linux_threads_started_by_a_lowered_thread_inherit_its_nice():
         )
     finally:
         priority.configure(0, ())
+
+
+def test_real_time_threads_cannot_be_lowered():
+    from pydantic import ValidationError
+    from roboemot.config.schema import REAL_TIME_THREADS
+
+    for name in REAL_TIME_THREADS:
+        with pytest.raises(ValidationError, match="real-time"):
+            RoboEmotConfig.model_validate({"runtime": {"background_threads": [name]}})
+    assert RoboEmotConfig.model_validate(
+        {"runtime": {"background_threads": ["roboemot-vision"]}}
+    ).runtime.background_threads == ["roboemot-vision"]

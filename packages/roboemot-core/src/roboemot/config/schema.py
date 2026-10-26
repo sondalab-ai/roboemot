@@ -3489,6 +3489,19 @@ class CatalogueConfig(Strict):
     )
 
 
+# Threads that keep audio, voice and motion in real time (SPEC 8, 10, 13): never in
+# runtime.background_threads.
+REAL_TIME_THREADS = (
+    "MainThread",
+    "roboemot-audio",
+    "roboemot-listener",
+    "roboemot-grammar",
+    "roboemot-keywords",
+    "speech-output",
+    "motion-loop",
+)
+
+
 class RuntimeConfig(Strict):
     gc_freeze: bool = param(
         True,
@@ -3523,11 +3536,20 @@ class RuntimeConfig(Strict):
     background_threads: list[str] = param(
         ["roboemot-vision", "vision-models", "roboemot-camera", "roboemot-light"],
         "Threads lowered by background_nice, by thread name; `vision-models` names the ONNX "
-        "Runtime pool threads the vision models start when they load. Real-time threads "
-        "(roboemot-audio, roboemot-listener, roboemot-grammar, speech-output, motion-loop) "
-        "do not belong here",
+        "Runtime pool threads the vision models start when they load. The real-time threads "
+        "(MainThread, roboemot-audio, roboemot-listener, roboemot-grammar, roboemot-keywords, "
+        "speech-output, motion-loop) are refused",
         restart=True,
     )
+
+    @field_validator("background_threads")
+    @classmethod
+    def _not_real_time(cls, v: list[str]) -> list[str]:
+        bad = sorted(set(v) & set(REAL_TIME_THREADS))
+        if bad:
+            raise ValueError(f"runtime.background_threads may not lower real-time threads: {bad}")
+        return v
+
     pause_when_asleep: bool = param(
         True,
         "While the platform holds the motors off (the robot is asleep), pause the camera "
