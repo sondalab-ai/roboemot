@@ -481,7 +481,7 @@ An adapter in the affect module (`roboemot.affect.appraisal`) turns bus messages
 | `light.on` | the confirmed light level rises from `dark` (section 7A) | none | 0, +0.3, `surprise`, 30 s |
 | `light.off` | the confirmed light level falls to `dark` (section 7A) | none | 0, -0.2, `sleepy`, 60 s (a mild drift to sleepy) |
 | `circadian.woken_at_night` | the robot leaves `resting` inside the quiet hours because a person appeared or `wake()` was called, not because of light or an app `hold` (section 7A, Waking) | none | -0.3, +0.1, none, 300 s (a brief dip in valence; the robot still answers) |
-| `self.soothe` | (added with the idle runner) the robot starts a self-soothing sound (section 7B) | `label`, `sound` | +0.1 to +0.15, the variant's label, 0 s (one rule per label, `when: {label: X}`) |
+| `self.soothe` | the robot starts a self-soothing sound (section 7B) | `label`, `sound` | +0.1 to +0.15, the variant's label, 0 s (one rule per label, `when: {label: X}`) |
 | `link.*`, `conversation.unavailable` | connectivity (section 12A) | none | section 12A |
 
 Rule events are validated when the configuration loads: an unknown name (for example the retired `person.recognized`) or a `label` outside `affect.labels` is rejected; `link.*` events and names listed in `appraisal.extra_events` (for plugins) are accepted. Cooldowns are kept per rule and, when the payload names a person, entity or track, per subject. In a loop-driven tick a long track gap is tolerated: an unnamed face is dropped after the larger of `appraisal.track_lost_s` and `appraisal.track_lost_periods` face-detection periods.
@@ -623,6 +623,8 @@ Every sound starts and ends exactly at zero with a fade, so it never clicks, and
 - A sound is due `soothe.interval_s` (900 s) times `1 + soothe.jitter * u` after the idle clock starts, with `u` drawn uniformly in [-1, 1] from the injected generator; the schedule is lazy (drawn at the first idle tick) and cleared when idle ends.
 - **Idle** means all of: no attended person, no attention target, no person present (section 7A), the robot is not speaking and its speech queue is empty, no conversation session, no scan in progress. The sound waits for `soothe.idle_min_s` (120 s) of continuous idle time, and after a sound that was played or cut at least `soothe.cooldown_s` (300 s) pass before the next.
 - Never in `resting`, never in the quiet hours, never when `soothe.enabled` is false.
+- When the sound is due and the state is `resting`, the quiet hours apply or no variant is eligible in the state, nothing plays and the next sound is scheduled as after a played one. When the speech queue is full (`play` returns nothing) no event is published and the next try is the next scheduled time. The next sound is `soothe.interval_s` with jitter after the end of the previous one and never inside `soothe.cooldown_s`.
+- The app tick (section 10) feeds the runner. The robot's own sound opens the speaker's speaking window (echo gating, section 8), so while the sound plays, and for `voice.echo_tail_ms` after it, the speaking and queue conditions of idle ignore it; any other queued sentence or audio ends idle. `ConversationWorker.in_session()` tells whether a session is open. Without voice (no speech output) the runner is not built. A hot reload of `soothe` redraws the schedule; a sound already playing finishes.
 
 ### Cancellation
 
@@ -630,7 +632,7 @@ The sound goes through the speech output queue (section 8), so a barge-in stops 
 
 ### Emotion
 
-The idle runner (added with the runner slice) publishes the appraisal event `self.soothe` with the payload `{label, sound}` when the sound starts. The library default rules for it, added with the runner, one per label with `when: {label: X}`, give a small positive valence (+0.1 to +0.15), the label `X` and cooldown 0, so the emotion shows through the label's expression and clip variants (section 7) and the mood lifts a little. They are ordinary appraisal rules: a layer can change or remove them. There is no separate head motion; the expression carries it.
+The idle runner (`roboemot.soothe.runner.SootheRunner`) publishes the appraisal event `self.soothe` with the payload `{label, sound}` when the sound has been queued (not when the queue was full and nothing was queued). The payload reaches the rules unchanged. The library default rules for it, one per label with `when: {label: X}`, give a small positive valence (+0.1 to +0.15), the label `X` and cooldown 0, so the emotion shows through the label's expression and clip variants (section 7) and the mood lifts a little. They are ordinary appraisal rules: a layer can change or remove them. There is no separate head motion; the expression carries it.
 
 ### Configuration
 

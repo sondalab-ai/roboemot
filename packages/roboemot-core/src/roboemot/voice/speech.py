@@ -322,6 +322,12 @@ class SpeechOutput:
             with contextlib.suppress(RuntimeError):
                 loop.call_soon_threadsafe(self._cancel_raw, job_id)
 
+    def waiting(self, exclude: int | None = None) -> int:
+        """Jobs still queued (sentences and raw sounds), not counting job ``exclude``. The idle
+        runner passes its own sound, so only somebody else's audio counts (SPEC 7B)."""
+        with self._lock:
+            return sum(job.id != exclude for job in self._jobs)
+
     def played(self, job_id: int) -> bool:
         """Whether sentence ``job_id`` began to play: its audio reached the sink and was not
         cut before its first sample. A sentence a ``stop`` interrupted halfway counts (it was

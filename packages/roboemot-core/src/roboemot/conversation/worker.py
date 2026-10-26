@@ -283,6 +283,11 @@ class ConversationWorker:
 
     # ----------------------------------------------------------------- session
 
+    def in_session(self) -> bool:
+        """Whether a conversation session is open (the idle runner waits while it is)."""
+        with self._lock:
+            return self._session is not None
+
     def expire(self, now: float) -> bool:
         """End the session when it has been idle for ``session_timeout_min``; returns whether it
         ended. The loop's timer calls it; tests call it with their own clock."""

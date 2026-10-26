@@ -15,6 +15,7 @@ import gc
 import logging
 import math
 import os
+import random
 import threading
 import time
 from contextlib import ExitStack
@@ -56,6 +57,7 @@ from roboemot.persona.llm_traits import TraitCache, TraitsWorker
 from roboemot.reflex import ReflexEngine
 from roboemot.secret_store import SecretStore
 from roboemot.skills.defaults import default_skills
+from roboemot.soothe import SootheRunner
 from roboemot.vision import CIRCADIAN, FrameSource, LockedSource
 from roboemot.vision.minor import MinorPresence
 from roboemot.vision.service import Perception, default_stages, open_perception, world_snapshot
@@ -205,6 +207,31 @@ def scan_context(
     )
 
 
+def soothe_idle(
+    now: float,
+    *,
+    attending: bool,
+    selector: AttentionSelector,
+    present: bool,
+    speech: SpeechActivity,
+    output: SpeechOutput,
+    soothe: SootheRunner,
+    echo_tail_s: float,
+    in_session: bool,
+    scanning: bool,
+) -> bool:
+    """Whether the robot is idle for the self-soothing sound (SPEC 7B): nobody attended, no
+    attention target, nobody present, no conversation session, no scan, and no audio but the
+    sound's own. The sound opens the speaker's speaking window and holds a place in the speech
+    queue; both are ignored while it plays and for the echo tail after it, so it never cancels
+    itself, while any other queued sentence or speaking ends idle."""
+    if attending or selector.target is not None or present or in_session or scanning:
+        return False
+    if output.waiting(exclude=soothe.job) > 0:
+        return False
+    return soothe.sounding(now, echo_tail_s) or not speech.speaking(now)
+
+
 def scan_tick(ctx: ScanContext, scan: ScanController, loop: MotionLoop, cfg: Any) -> bool:
     """One scan step, run right after ``attention_tick``: feed the sweep command or release it.
 
@@ -317,6 +344,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
     name_source: NameSource | None = None  # registry names for pseudonyms outside the conversation
     router_hub: RouterHub | None = None  # the one router: traits, conversation, speech, checks
     conversation: ConversationWorker | None = None  # answers addressed utterances (voice.enabled)
+    soothe_runner: SootheRunner | None = None  # idle self-soothing sound (SPEC 7B); needs voice
 
     def make_router(self, cfg: Any, monitor: NetworkMonitor) -> Router:
         """The app's LLM router over the configured routes (overridable: tests inject fakes)."""
@@ -707,6 +735,8 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 self.catalogue.cfg = change.config.catalogue
             runner.apply_config(change.config.affect, change.config.appraisal)
             circ.apply_config(change.config)
+            if soothe is not None:
+                soothe.apply_config(change.config.soothe)
             speech.set_echo_tail_ms(change.config.voice.echo_tail_ms)
             yes_no.apply_config(change.config.voice.fastpath)
             if listener is not None:
@@ -734,6 +764,7 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
         stack.subscribe(reload)
         stack.subscribe(worker.on_change)
         fx_for, fx = None, None
+        soothe: SootheRunner | None = None  # built with the speech output, when voice is enabled
         idle_last = idle_t = time.monotonic()  # idle breathing phase clock (SPEC 7A, Drowsy)
         # Everything started below is stopped in reverse order whatever fails: the stack runs
         # every callback even when one raises, so the motion loop always stops and the camera
@@ -773,6 +804,20 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                 )
                 cleanup.callback(output.close)
                 output.start()
+                soothe = self.soothe_runner = SootheRunner(
+                    cfg.soothe,
+                    output,
+                    on_event=runner.on_event,
+                    rng=random.Random(),  # noqa: S311 (a pick and a jitter, not security)
+                    volume_db=lambda: (
+                        (
+                            circ.model.effects()
+                            if self.circadian
+                            else stack.effective().circadian.states["awake"]
+                        ).volume_db
+                    ),
+                )
+                cleanup.callback(soothe.close)  # before the output goes away
                 if listener is not None:
                     # Shutdown order: listener (no new utterances), conversation (cancels the
                     # stream in flight), speech output, speaker.
@@ -880,6 +925,26 @@ class RoboEmotApp(ReachyMiniApp):  # type: ignore[misc,valid-type]
                         minor_present=minor,
                     )
                     scan_tick(ctx, scan, loop, live)
+                if soothe is not None and self.speech_output is not None:
+                    soothe.tick(
+                        now,
+                        soothe_idle(
+                            now,
+                            attending=attending,
+                            selector=selector,
+                            present=circ.present() if self.circadian else False,
+                            speech=speech,
+                            output=self.speech_output,
+                            soothe=soothe,
+                            echo_tail_s=live.voice.echo_tail_ms / MS_PER_S,
+                            in_session=self.conversation is not None
+                            and self.conversation.in_session(),
+                            scanning=scan is not None and scan.active,
+                        ),
+                        self.circadian.state if self.circadian else "awake",
+                        live.circadian.enabled
+                        and in_window(clock.hour(), live.circadian.quiet_hours),
+                    )
                 state_fx = (
                     circ.model.effects() if self.circadian else live.circadian.states["awake"]
                 )

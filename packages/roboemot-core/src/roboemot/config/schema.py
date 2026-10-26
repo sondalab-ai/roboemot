@@ -131,6 +131,7 @@ APPRAISAL_EVENTS = frozenset(
         "speech.name_called",
         "speech.loud",
         "speech.fast",
+        "self.soothe",
     }
 )
 APPRAISAL_EVENT_PREFIXES = ("link.",)  # connectivity: link.<name>.lost / .restored (SPEC 12A)
@@ -282,6 +283,36 @@ class AppraisalConfig(Strict):
             {"event": "speech.keyword.no", "valence": -0.2, "arousal": 0.1, "cooldown_s": 3},
             {"event": "speech.loud", "arousal": 0.15, "cooldown_s": 10},
             {"event": "speech.fast", "arousal": 0.2, "cooldown_s": 10},
+            # Self-soothing sound (SPEC 7B): one rule per default variant label; the runner
+            # already spaces the sounds (soothe.cooldown_s), so the rules have no cooldown.
+            {
+                "event": "self.soothe",
+                "when": {"label": "calm"},
+                "valence": 0.1,
+                "label": "calm",
+                "cooldown_s": 0,
+            },
+            {
+                "event": "self.soothe",
+                "when": {"label": "joy"},
+                "valence": 0.15,
+                "label": "joy",
+                "cooldown_s": 0,
+            },
+            {
+                "event": "self.soothe",
+                "when": {"label": "curiosity"},
+                "valence": 0.1,
+                "label": "curiosity",
+                "cooldown_s": 0,
+            },
+            {
+                "event": "self.soothe",
+                "when": {"label": "sleepy"},
+                "valence": 0.1,
+                "label": "sleepy",
+                "cooldown_s": 0,
+            },
         ],
         "Event to impulse rules (SPEC 7, Affect state)",
     )
