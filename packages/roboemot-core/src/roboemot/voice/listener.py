@@ -321,12 +321,15 @@ class VoiceListener:
                     self.process(chunk)
                 self.poll_handoff()
             except Exception as exc:  # one bad chunk must not end the listener
-                self._abort()
                 self._count("errors")
                 name = type(exc).__name__
                 if name != self._last_error:
                     self._last_error = name
                     log.warning("voice listener: %s", name)
+                try:
+                    self._abort()
+                except Exception as again:  # nor a recognizer that fails to reset
+                    log.warning("voice listener: abort: %s", type(again).__name__)
 
     def _name_vocabulary(self) -> None:
         """A model loaded: check the robot's name against its vocabulary now (logs once)."""
@@ -367,7 +370,10 @@ class VoiceListener:
             except Exception as exc:
                 log.warning("voice listener: asr hand-back: %s", type(exc).__name__)
         self._endpointer.reset()
-        self._asr.reset()
+        try:
+            self._asr.reset()
+        except Exception as exc:
+            log.warning("voice listener: asr reset: %s", type(exc).__name__)
         self._fast.reset()
         self._set_active(False)
 

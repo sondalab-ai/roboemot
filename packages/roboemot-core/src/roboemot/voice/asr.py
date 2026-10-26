@@ -142,6 +142,7 @@ class VoskASR:
         self._last = ""
         self.recognizers_built = 0
         self.built_on_start = 0  # recognizers ``start`` had to build (none after a load)
+        self.reset_failures = 0  # recognizers dropped because ending their decode raised
 
     @property
     def languages(self) -> list[str]:
@@ -152,8 +153,8 @@ class VoskASR:
         for language in languages:
             if language not in self._models:
                 root = Path(self._paths[language])
-                self._models[language] = self._vosk.Model(str(root))
                 self._grammar_graph[language] = all((root / f).is_file() for f in RUNTIME_GRAPH)
+                self._models[language] = self._vosk.Model(str(root))
             if language not in self._recs:
                 self._recs[language] = self._build(language)
 
@@ -164,7 +165,11 @@ class VoskASR:
 
     def stats(self) -> dict[str, int]:
         """Recognizer builds for the debug report: all of them, and those on ``start``."""
-        return {"recognizers_built": self.recognizers_built, "built_on_start": self.built_on_start}
+        return {
+            "recognizers_built": self.recognizers_built,
+            "built_on_start": self.built_on_start,
+            "reset_failures": self.reset_failures,
+        }
 
     def missing_words(self, language: str, words: list[str]) -> list[str] | None:
         """The ``words`` the ``language`` model's vocabulary lacks (it can never output them);
@@ -203,7 +208,7 @@ class VoskASR:
         if language not in self._models:
             self.load([language])
         rec = self._recs.get(language)
-        if rec is None:
+        if rec is None:  # never loaded, or dropped by a failed reset (just above, too)
             self.built_on_start += 1
             rec = self._recs[language] = self._build(language)
         self._rec, self._committed, self._last = rec, [], ""
@@ -240,16 +245,16 @@ class VoskASR:
     def reset(self) -> None:
         """Drop the utterance in progress; the recognizer is kept for the next one. Audio not
         yet ended is ended (and its result dropped) first, since ``Reset`` alone keeps it. A
-        recognizer that fails here is dropped, so the next ``start`` builds a new one."""
+        recognizer that fails here is dropped and counted (``reset_failures``), never raised:
+        the next ``start`` builds a new one."""
         rec, self._rec, self._committed, self._last = self._rec, None, [], ""
+        dirty, self._dirty = self._dirty, False
         if rec is None:
             return
         try:
-            if self._dirty:
+            if dirty:
                 rec.FinalResult()
             rec.Reset()
         except Exception:
             self._recs = {k: v for k, v in self._recs.items() if v is not rec}
-            raise
-        finally:
-            self._dirty = False
+            self.reset_failures += 1

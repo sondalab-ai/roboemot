@@ -837,3 +837,62 @@ def test_realtime_window_rolls_and_flags_over_budget():
     assert snap["last_window"]["share"] == pytest.approx(0.1) and not snap["over_budget"]
     assert snap["total"]["share"] == pytest.approx(0.45)
     assert snap["total"]["ms_per_audio_s"]["grammar"] == pytest.approx(20.0)
+
+
+# ---- fix round 1 (SPEC 8, 13)
+
+
+class QueueSource:
+    """The hub's voice queue for a running listener thread."""
+
+    def __init__(self):
+        self.q: queue.Queue = queue.Queue()
+
+    def __call__(self, timeout):
+        try:
+            return self.q.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    def push(self, samples, start):
+        for i in range(0, samples.size, CHUNK):
+            part = samples[i : i + CHUNK]
+            start += part.size / RATE
+            self.q.put(SimpleNamespace(samples=part, rate_hz=RATE, stamp=start, gap=False))
+        return start
+
+
+def until(cond, timeout_s=5.0):
+    deadline = time.monotonic() + timeout_s
+    while not cond() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return cond()
+
+
+class BrokenASR(FakeASR):
+    """A recognizer whose accept and reset both raise (a broken Vosk decoder)."""
+
+    def accept(self, samples):
+        raise RuntimeError("decoder")
+
+    def reset(self):
+        raise RuntimeError("decoder")
+
+
+def test_a_recognizer_failing_in_accept_and_reset_does_not_end_the_listener_thread():
+    r = Rig(["ciao"])
+    r.asr = BrokenASR(["ciao"])
+    r.asr.loaded = list(r.cfg.voice.asr.models)
+    r.listener._asr = r.asr
+    source = QueueSource()
+    r.listener._source = source
+    r.listener.start()
+    try:
+        t = source.push(voice(seconds=1.0), T0)
+        assert until(lambda: r.listener.snapshot()["errors"] >= 1)
+        t = source.push(voice(seconds=0.5), t)
+        assert until(lambda: source.q.empty())
+        assert r.listener._thread is not None and r.listener._thread.is_alive()
+        assert r.listener.snapshot()["state"] == "running"
+    finally:
+        r.listener.stop()

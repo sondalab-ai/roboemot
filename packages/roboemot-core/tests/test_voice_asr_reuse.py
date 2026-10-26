@@ -69,7 +69,7 @@ def test_load_builds_the_recognizer_and_start_reuses_it(fake):
         asr.accept(AUDIO)
         assert asr.finish() == "ciao"
     assert vosk.built == 2
-    assert asr.stats() == {"recognizers_built": 2, "built_on_start": 0}
+    assert asr.stats() == {"recognizers_built": 2, "built_on_start": 0, "reset_failures": 0}
 
 
 def test_finish_and_reset_end_the_decode_before_the_vosk_reset(fake):
@@ -90,7 +90,7 @@ def test_finish_and_reset_end_the_decode_before_the_vosk_reset(fake):
     assert vosk.log == ["accept", "final", "reset"]
 
 
-def test_a_failing_recognizer_is_dropped_and_rebuilt_on_start(fake):
+def test_a_failing_recognizer_is_dropped_counted_and_rebuilt_on_start(fake):
     vosk, asr = fake
     asr.load(["it"])
     asr.start("it")
@@ -101,10 +101,28 @@ def test_a_failing_recognizer_is_dropped_and_rebuilt_on_start(fake):
         raise RuntimeError("decoder")
 
     rec.FinalResult = boom
-    with pytest.raises(RuntimeError):
-        asr.reset()
+    asr.reset()  # never raises: the listener thread must survive a broken decoder
+    assert asr.stats() == {"recognizers_built": 1, "built_on_start": 0, "reset_failures": 1}
     asr.start("it")
-    assert asr.stats() == {"recognizers_built": 2, "built_on_start": 1}
+    assert asr.stats() == {"recognizers_built": 2, "built_on_start": 1, "reset_failures": 1}
+
+
+def test_start_survives_a_failing_reset_of_the_previous_utterance(fake):
+    """Item 3: ``start`` resets first; a recognizer that fails there must not lose the new
+    utterance: it is rebuilt inline (counted) and the utterance decodes."""
+    vosk, asr = fake
+    asr.load(["it"])
+    asr.start("it")
+    asr.accept(AUDIO)
+
+    def boom():
+        raise RuntimeError("decoder")
+
+    asr._recs["it"].Reset = boom
+    asr.start("it")  # the previous utterance was never finished
+    asr.accept(AUDIO)
+    assert asr.finish() == "ciao"
+    assert asr.stats()["built_on_start"] == 1 and asr.stats()["reset_failures"] == 1
 
 
 def test_the_barge_in_keyword_worker_hands_the_reused_recognizer_back(fake):
@@ -120,4 +138,4 @@ def test_the_barge_in_keyword_worker_hands_the_reused_recognizer_back(fake):
     asr.start("it")
     asr.accept(AUDIO)
     assert asr.finish() == "ciao"
-    assert asr.stats() == {"recognizers_built": 1, "built_on_start": 0}
+    assert asr.stats() == {"recognizers_built": 1, "built_on_start": 0, "reset_failures": 0}
