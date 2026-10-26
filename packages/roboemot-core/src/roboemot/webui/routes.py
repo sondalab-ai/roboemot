@@ -5,7 +5,7 @@ file in the data folder, and shown next to the route; it does not gate the route
 its own thread, bounded by ``llm_check.deadline_s``, because it outlives the per-request
 deadline of the web server (``webui.request_deadline_s``): the POST returns at once and the
 page polls the list. Nothing secret leaves this module: a route is described by name, model,
-``host[:port]`` of its base URL, its locality and the kind of its key, plus the
+``host[:port]`` of its base URL, its locality, its kind and the kind of its key, plus the
 full base URL only when it holds no credentials (the settings list shows the same value), and a
 report holds statuses and short reasons only.
 """
@@ -30,6 +30,7 @@ from ..config.stack import NO_KEY
 from ..llm.conformance import (
     RouteBudgetExhausted,
     RouteKeyUnavailable,
+    RouteKindUnsupported,
     RouteReport,
     check_route,
     route_endpoint,
@@ -93,6 +94,7 @@ class RouteChecker:
                     "endpoint": route_endpoint(r),
                     "base_url": None if secret_shaped(r.base_url) else r.base_url,
                     "locality": r.locality,
+                    "kind": r.kind,
                     "key": _key_kind(r),
                     "running": r.name == running,
                     "secret": _secret_state(r, store),
@@ -104,14 +106,17 @@ class RouteChecker:
     def start(self, name: str) -> None:
         """Start the test of route ``name`` on a thread and return at once.
 
-        Raises ``KeyError`` (unknown route), ``RouteKeyUnavailable`` (its secret cannot be read)
-        and ``RouteBudgetExhausted`` (nothing is sent in either case) and ``RouteBusy`` (a check
+        Raises ``KeyError`` (unknown route), ``RouteKindUnsupported`` (a realtime route: the chat
+        checks do not apply), ``RouteKeyUnavailable`` (its secret cannot be read) and
+        ``RouteBudgetExhausted`` (nothing is sent in any of these cases) and ``RouteBusy`` (a check
         is running).
         """
         cfg = self.cfg()
         route = next((r for r in cfg.llm_routes if r.name == name), None)
         if route is None:
             raise KeyError(name)
+        if route.kind != "chat":
+            raise RouteKindUnsupported(f"route {name} is a {route.kind} route")
         with self._lock:
             if self._running is not None:
                 raise RouteBusy(name)

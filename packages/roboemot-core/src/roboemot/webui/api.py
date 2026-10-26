@@ -33,7 +33,11 @@ from urllib.parse import parse_qsl
 from roboemot.config.catalogue import FieldDescriptor
 from roboemot.config.schema import ROUTE_NAME_MAX_CHARS, RoboEmotConfig, WebUIConfig
 from roboemot.config.stack import ConfigError, GuardrailError
-from roboemot.llm.conformance import RouteBudgetExhausted, RouteKeyUnavailable
+from roboemot.llm.conformance import (
+    RouteBudgetExhausted,
+    RouteKeyUnavailable,
+    RouteKindUnsupported,
+)
 from roboemot.registry.records import Consent, ConsentError
 from roboemot.secret_store import MAX_VALUE_CHARS, SecretUnavailable
 
@@ -62,7 +66,7 @@ MAX_PIN_CHARS = 64
 ENROLLMENT_ID_BYTES = 8
 STATE_PATTERN = re.compile(r"[a-z_]{1,32}")
 ENTITY_KINDS = frozenset({"animal", "object"})
-ROUTE_FIELDS = frozenset({"name", "base_url", "model", "locality"})
+ROUTE_FIELDS = frozenset({"name", "base_url", "model", "locality", "kind"})
 ROUTE_NAME = re.compile(rf"[A-Za-z0-9_-]{{1,{ROUTE_NAME_MAX_CHARS}}}")
 JSON_TYPE = "application/json; charset=utf-8"
 CATALOGUE_IMPORT = "/api/catalogue/import"
@@ -107,9 +111,10 @@ class EnrollmentPort(Protocol):
 class RoutesPort(Protocol):
     """What the web UI needs from ``roboemot.webui.routes.RouteChecker`` (SPEC 8).
 
-    ``start`` returns at once and raises ``KeyError`` for an unknown route, ``RouteBusy`` or
-    ``RouteBudgetExhausted``; the outcome shows up in ``list_routes``. The UI copies what
-    these return as is: they hold no key, prompt or reply text.
+    ``start`` returns at once and raises ``KeyError`` for an unknown route, ``RouteBusy``,
+    ``RouteKindUnsupported`` or ``RouteBudgetExhausted``; the outcome shows up in
+    ``list_routes``. The UI copies what these return as is: they hold no key, prompt or reply
+    text.
     """
 
     def list_routes(self) -> list[dict[str, Any]]: ...
@@ -935,8 +940,9 @@ class WebApi:
 
     def _route_add(self, req: Request) -> Response:
         """Add a route (SPEC 8, 11A). Body: ``name``, ``base_url``, ``model`` and optionally
-        ``locality``, ``secret`` (a name in the secret store; omitted or null for no key),
-        ``ack_endpoint`` (required with a key: the endpoint the server names in
+        ``locality``, ``kind`` (``chat`` or ``realtime``), ``secret`` (a name in the secret
+        store; omitted or null for no key), ``ack_endpoint`` (required with a key: the endpoint
+        the server names in
         ``endpoint_ack_required``) and ``pin``. A key typed into any field is refused."""
         port = self._settings_port()
         body = self._json_body(req)
@@ -994,6 +1000,8 @@ class WebApi:
             raise ApiError(HTTPStatus.NOT_FOUND, "route_unknown") from exc
         except RouteBusy as exc:
             raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "route_busy") from exc
+        except RouteKindUnsupported as exc:
+            raise ApiError(HTTPStatus.CONFLICT, "route_kind") from exc
         except RouteBudgetExhausted as exc:
             raise ApiError(HTTPStatus.CONFLICT, "route_budget") from exc
         except RouteKeyUnavailable as exc:

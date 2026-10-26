@@ -603,3 +603,31 @@ async def test_reasoning_streamed_in_both_fields_counts_once():
     msgs = [{"role": "user", "content": "x"}]
     _ = [ev async for ev in r.stream_route(r.routes[0], msgs, None, timing)]
     assert timing.reasoning_chars == 6
+
+
+async def test_a_realtime_route_never_serves_chat():
+    """SPEC 8, Realtime speech route: chat eligibility skips ``kind: realtime``."""
+    srv = Server()
+    rt = route("rt", "lan.local", kind="realtime")
+    r = router(srv, [rt, route("lan", "lan.local")])
+    assert [x.name for x in r.eligible()] == ["lan"]
+    assert (await collect(r))[-1].route == "lan"
+    only = router(srv, [rt])
+    with pytest.raises(NoRouteAvailable):
+        await collect(only)
+    with pytest.raises(ValueError):
+        async for _ in only.stream_route(rt, [{"role": "user", "content": "x"}]):
+            pass
+
+
+def test_realtime_route_lookup():
+    day = [dt.date(2026, 10, 26)]
+    rt = route("rt", "lan.local", kind="realtime", daily_token_budget=10)
+    r = router(Server(), [rt, route("lan", "lan.local")], today=lambda: day[0])
+    assert r.realtime_route("rt") == rt
+    assert r.realtime_route("lan") is None  # a chat route
+    assert r.realtime_route("nope") is None
+    r.charge("rt", 10)
+    assert r.realtime_route("rt") is None  # budget spent
+    keyed = LLMRoute(**{**rt.model_dump(), "api_key": "${secret:missing}"})
+    assert Router([keyed], SafetyConfig()).realtime_route("rt") is None  # key unavailable

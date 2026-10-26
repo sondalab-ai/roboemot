@@ -2700,6 +2700,37 @@ class VoiceDirectionConfig(Strict):
     )  # fmt: skip
 
 
+# ------------------------------------------------------------------- realtime route (SPEC 8)
+
+
+class RealtimeRouteConfig(Strict):
+    """The realtime speech route's client (SPEC 8, Realtime speech route): the transport limits.
+    Which route and whether it is used are decided elsewhere; off by default."""
+
+    connect_timeout_s: float = param(
+        5.0,
+        "Longest the session allocation, the WebSocket handshake and the session.updated reply "
+        "may take together before the route counts as failed",
+        unit="s",
+        ge=1,
+        le=30,
+    )
+    send_timeout_s: float = param(
+        5.0,
+        "A send stuck this long aborts the socket; also the keepalive ping interval and timeout",
+        unit="s",
+        ge=1,
+        le=30,
+    )
+    max_message_bytes: int = param(
+        1_048_576,
+        "Largest server message accepted; a bigger one closes the socket",
+        unit="bytes",
+        ge=65_536,
+        le=16_777_216,
+    )
+
+
 class VoiceConfig(Strict):
     enabled: bool = param(
         False,
@@ -2954,6 +2985,9 @@ class VoiceConfig(Strict):
         "Folder with the voice models (Silero VAD, Vosk, Piper); empty means voice-models/ in "
         "the app data folder (data_dir)",
         restart=True,
+    )
+    realtime_route: RealtimeRouteConfig = param(
+        {}, "Realtime speech route client: connect, send and size limits (SPEC 8)"
     )
 
 
@@ -3541,6 +3575,13 @@ class LLMRoute(Strict):
         le=2_000_000,
     )
     supports_images: bool = param(False, "Route accepts image_url parts")
+    kind: Literal["chat", "realtime"] = param(
+        "chat",
+        "chat: an OpenAI Chat Completions route (the conversation and the speech backend). "
+        "realtime: a realtime speech route (OpenAI realtime protocol over a WebSocket at "
+        "base_url + /realtime, http becomes ws and https wss); chat requests never use it. "
+        "A change on a route with a key needs the admin",
+    )
     locality: Literal["auto", "local", "cloud"] = param(
         "auto",
         "Whether the route may see real names. auto: local for this machine and the home "

@@ -96,6 +96,7 @@ def test_list_shows_endpoint_only_and_no_key(served):
             "endpoint": "lan.local:8443",
             "base_url": None,  # it holds user info: never sent, only replaceable whole
             "locality": "auto",
+            "kind": "chat",
             "key": "literal",
             "running": False,
             "secret": None,
@@ -183,6 +184,20 @@ def test_a_second_check_while_one_runs_is_busy(tmp_path):
         resp = client.request("POST", "/api/routes/lan/check", {})
         assert resp.status == 503 and resp.json == {"error": "route_busy"}
         finish(client)
+    finally:
+        srv.stop()
+
+
+def test_a_realtime_route_check_is_409_route_kind_and_sends_nothing(tmp_path):
+    """SPEC 8, Realtime speech route: the chat checks do not apply to ``kind: realtime``."""
+    cfg = make_cfg(route=ROUTE | {"kind": "realtime"})
+    fake = Fake()
+    srv, client = serve(tmp_path, cfg, checker_for(cfg, fake))
+    try:
+        assert client.request("GET", "/api/routes").json["routes"][0]["kind"] == "realtime"
+        resp = client.request("POST", "/api/routes/lan/check", {})
+        assert resp.status == 409 and resp.json == {"error": "route_kind"}
+        assert fake.bodies == []
     finally:
         srv.stop()
 

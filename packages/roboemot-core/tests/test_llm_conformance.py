@@ -19,6 +19,7 @@ from roboemot.llm.conformance import (
     SKIP,
     USER_TURN,
     RouteBudgetExhausted,
+    RouteKindUnsupported,
     _why,
     check_route,
     italian_ratio,
@@ -683,3 +684,11 @@ async def test_an_echo_of_the_aliased_body_is_withheld():
     assert ECHO_WITHHELD in dumped
     for word in ("Marta", "Person-", "small flat", "cat"):
         assert word not in dumped
+
+
+async def test_a_realtime_route_is_refused_before_any_request():
+    """SPEC 8: the chat checks do not apply to ``kind: realtime``; nothing is sent."""
+    fake = Fake()
+    with pytest.raises(RouteKindUnsupported):
+        await run(fake, route(kind="realtime"))
+    assert fake.bodies == []

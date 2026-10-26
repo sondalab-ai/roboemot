@@ -65,6 +65,15 @@ def test_unknown_route_is_an_error(app_yaml, capsys):
     assert "no route named 'nope'" in capsys.readouterr().err
 
 
+def test_a_realtime_route_is_refused(app_yaml, monkeypatch, capsys):
+    """SPEC 8, Realtime speech route: the chat check does not apply; nothing is sent."""
+    app_yaml.write_text(app_yaml.read_text().replace("model: m", "model: m\n  kind: realtime"))
+    fake = Fake()
+    serve(monkeypatch, fake)
+    assert cli.main(argv(app_yaml)) == 1
+    assert "realtime route" in capsys.readouterr().err and fake.bodies == []
+
+
 def test_spent_budget_is_refused(app_yaml, monkeypatch, capsys):
     app_yaml.write_text(app_yaml.read_text().replace("1000", "0"))
     fake = Fake()

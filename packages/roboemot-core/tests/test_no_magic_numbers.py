@@ -136,6 +136,10 @@ BEHAVIOUR_MODULES = [
     "webui/setting_clean.py",
     "config/catalogue.py",
     "webui/validation.py",
+    "realtime/__init__.py",
+    "realtime/protocol.py",
+    "realtime/session.py",
+    "realtime/client.py",
 ]
 ALLOWED = {0, 1, -1, 2, 0.5, -1.0}
 

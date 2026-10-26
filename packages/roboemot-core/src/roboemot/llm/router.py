@@ -213,16 +213,25 @@ class Router:
         return self.monitor is not None and not self.monitor.online
 
     def eligible(self) -> list[LLMRoute]:
-        out = []
-        for r in self.routes:
-            if r.name in self._unavailable:
-                continue
-            if self.monitor and not self.monitor.is_online(r.name):
-                continue
-            if self.used(r.name) >= r.daily_token_budget:
-                continue
-            out.append(r)
-        return out
+        """The chat routes a request may use now, in order: a ``kind: realtime`` route never
+        serves chat, and a route is skipped when its key is unavailable, it is known to be
+        unreachable or its daily budget is spent."""
+        return [r for r in self.routes if r.kind == "chat" and self._usable(r)]
+
+    def realtime_route(self, name: str) -> LLMRoute | None:
+        """The ``kind: realtime`` route ``name`` when it is usable now (key available, not known
+        to be unreachable, budget left), else None (SPEC 8, Realtime speech route)."""
+        route = next((r for r in self.routes if r.name == name), None)
+        if route is None or route.kind != "realtime" or not self._usable(route):
+            return None
+        return route
+
+    def _usable(self, r: LLMRoute) -> bool:
+        if r.name in self._unavailable:
+            return False
+        if self.monitor and not self.monitor.is_online(r.name):
+            return False
+        return self.used(r.name) < r.daily_token_budget
 
     def used(self, name: str) -> int:
         b = self._budgets.get(name)
@@ -339,6 +348,8 @@ class Router:
         propagate; the budget is charged as for any request. With ``pseudonyms`` a route that is
         not local gets the same aliasing, leak check and restoring as ``stream``; a request that
         still holds a name raises :class:`PseudonymLeak` before anything is sent."""
+        if route.kind != "chat":
+            raise ValueError(f"route {route.name} is a {route.kind} route, not a chat route")
         out = _outgoing(route, messages, tools, pseudonyms)
         gen = self._stream_route(
             route, out.messages if out else messages, out.tools if out else tools, timing

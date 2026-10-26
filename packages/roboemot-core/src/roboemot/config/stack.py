@@ -929,10 +929,12 @@ def endpoint_key(url: str) -> tuple[Any, ...]:
 def secret_violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Violation]:
     """Routes that would send a key somewhere the approval did not trust (SPEC 8, 11A, 12). A
     route with a key (a ``${secret:name}`` reference or a literal; not empty or ``none``) is
-    trusted with exactly its approved endpoint (scheme, host, port) and ``api_key``. A candidate
-    route with a key that is new, has another endpoint (an ``http`` downgrade included) or
-    another ``api_key`` needs the admin: otherwise a runtime change could point a key at a host
-    of its choosing. The values are exact; ``Violation.__str__`` redacts them."""
+    trusted with exactly its approved endpoint (scheme, host, port), ``api_key`` and ``kind``. A
+    candidate route with a key that is new, has another endpoint (an ``http`` downgrade
+    included), another ``api_key`` or another ``kind`` needs the admin: otherwise a runtime
+    change could point a key at a host of its choosing (a realtime route sends it to the host a
+    session provider allocates, SPEC 8 Realtime speech route). The values are exact;
+    ``Violation.__str__`` redacts them."""
     trusted = {r.name: r for r in approved.llm_routes if r.api_key not in NO_KEY}
 
     def same(r: Any) -> bool:
@@ -941,16 +943,20 @@ def secret_violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> li
             ref is not None
             and endpoint_key(ref.base_url) == endpoint_key(r.base_url)
             and ref.api_key == r.api_key
+            and ref.kind == r.kind
         )
+
+    def trust(r: Any) -> str:
+        """The trusted values as one string (an approval matches on it); a realtime route adds
+        its kind, so approving a route of one kind never approves the other."""
+        return f"{r.base_url} {r.api_key}" + ("" if r.kind == "chat" else f" {r.kind}")
 
     return [
         Violation(
             "admin",
             f"llm_routes.{r.name}.api_key",
-            f"{trusted[r.name].base_url} {trusted[r.name].api_key}"
-            if r.name in trusted
-            else "absent",
-            f"{r.base_url} {r.api_key}",
+            trust(trusted[r.name]) if r.name in trusted else "absent",
+            trust(r),
             "secret",
         )
         for r in candidate.llm_routes

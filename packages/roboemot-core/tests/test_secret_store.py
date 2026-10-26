@@ -339,6 +339,7 @@ def secret_stack() -> ConfigStack:
         [SECRET_ROUTE, {**SECRET_ROUTE, "name": "extra", "base_url": "https://evil.net/v1"}],
         [SECRET_ROUTE, {**SECRET_ROUTE, "name": "extra"}],  # a new route reusing the secret
         [{**SECRET_ROUTE, "api_key": "${secret:other}"}],
+        [{**SECRET_ROUTE, "kind": "realtime"}],  # a realtime provider may pick the host (SPEC 8)
     ],
 )
 def test_pointing_a_secret_somewhere_new_needs_admin(routes):
