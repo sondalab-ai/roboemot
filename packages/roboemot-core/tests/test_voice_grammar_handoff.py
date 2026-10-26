@@ -160,7 +160,9 @@ def test_worker_replaces_a_waiting_job_and_runs_one_at_a_time():
     spent: list[float] = []
     worker = GrammarWorker(background=True, on_spent=spent.append)
     try:
-        first = worker.submit(lambda: (gate.wait(5.0), frozenset({"stop"}))[1])
+        running = threading.Event()
+        first = worker.submit(lambda: (running.set(), gate.wait(5.0), frozenset({"stop"}))[2])
+        assert running.wait(2.0)  # the first pass is in flight before the next ones come
         second = worker.submit(lambda: frozenset({"yes"}))
         third = worker.submit(lambda: frozenset({"no"}))
         assert second.done and not second.ran and worker.replaced == 1
