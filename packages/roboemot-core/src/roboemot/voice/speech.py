@@ -572,7 +572,7 @@ class SpeechOutput:
                 return
             with self._lock:
                 hold_s = self._queue_end() - self.clock()
-            await asyncio.sleep(hold_s if self._timeline() else job.samples.size / job.rate_hz)
+            await asyncio.sleep(hold_s)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # a sink bug must not end the output thread
@@ -677,10 +677,6 @@ class SpeechOutput:
             if idle_s > pause_s:
                 self._late_sentences += 1
                 self._late_ms += (idle_s - pause_s) * MS_PER_S
-
-    def _timeline(self) -> bool:
-        """Whether the sink reports where its queue ends (``playing_until``)."""
-        return callable(getattr(self.sink, "playing_until", None))
 
     def _pad(self, job: _Job, rate_hz: int) -> bool:
         """Silence between two sentences of one answer, less the idle gap already there.

@@ -546,6 +546,22 @@ def test_a_raw_job_is_not_speech(make):
     assert out.sentences_spoken == 1 and out.ended_at(job) is None and not out.played(job)
 
 
+def test_a_raw_job_writes_nothing_on_the_speech_timeline(make):
+    """SPEC 7, 7B: a soothe sound is not speech, so the speaking motion has no frame, sentence,
+    pad or event to react to; a spoken sentence after it still lands on the timeline."""
+    sink = TimelineSink()
+    out = make(FakeBackend(pieces=10), sink=sink)
+    out.play(sound(0.5, level=0.9), RATE)
+    assert wait_for(lambda: len(sink.pushed) == 1)
+    time.sleep(0.1)
+    assert out.timeline.snapshot().get("frames", 0) == 0
+    assert out.timeline.snapshot().get("sentences", 0) == 0
+    assert not out.timeline._pads
+    say(out, "Ciao.")
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    assert out.timeline.snapshot().get("sentences", 0) == 1
+
+
 def test_nothing_is_pushed_after_cancel_returns(make):
     class SlowSink(TimelineSink):
         def push_audio_sample(self, samples, rate_hz):
