@@ -1350,12 +1350,31 @@ class VisionRates(Strict):
     conversation_scale: float = param(
         0.5,
         "Vision rate multiplier while the robot thinks or speaks (SPEC 5, 8, 13), so the TTS "
-        "keeps its CPU; an utterance in progress and idle keep 1. It also divides the new-track "
-        "burst gaps. At least 0.5, so the 3-of-5 identity decision of a track that starts while "
-        "the robot speaks stays inside the 2.5 s budget of SPEC 13, awake or drowsy, with one "
-        "missed vote",
+        "keeps its CPU; idle keeps 1, an utterance in progress uses listening_scale. It also "
+        "divides the new-track burst gaps. At least 0.5, so the 3-of-5 identity decision of a "
+        "track that starts while the robot speaks stays inside the 2.5 s budget of SPEC 13, "
+        "awake or drowsy, with one missed vote",
         ge=0.5,
         le=1,
+    )
+    listening_scale: float = param(
+        0.5,
+        "Vision rate multiplier while an utterance is in progress (from speech start to its "
+        "hand-off), so the voice listener keeps up with the microphone on a loaded CPU (SPEC 8, "
+        "13); the lower of this and conversation_scale while the robot also thinks or speaks. "
+        "Same 0.5 floor and burst-gap rule as conversation_scale. Raised as needed so that "
+        "listening_face_detections face detections still fall within the voice-at-face age",
+        ge=0.5,
+        le=1,
+    )
+    listening_face_detections: int = param(
+        2,
+        "While listening, vision runs at least fast enough for this many face detections within "
+        "voice.direction.face_max_age_s (else attention.stale_s), the age the voice-at-face "
+        "check and the enrolled-in-view rule accept, so one missed detection still leaves a "
+        "fresh face; when even the full rate cannot, the listening scale is 1",
+        ge=1,
+        le=10,
     )
 
 
