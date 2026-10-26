@@ -75,6 +75,9 @@ class FakeASR:
     def reset(self):
         pass
 
+    def stats(self):
+        return {}
+
 
 @pytest.fixture()
 def fakes(monkeypatch):

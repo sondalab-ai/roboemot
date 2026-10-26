@@ -32,6 +32,7 @@ BEHAVIOUR_MODULES = [
     "voice/speech_features.py",
     "voice/fastpath.py",
     "voice/listener.py",
+    "voice/listener_load.py",
     "voice/vad.py",
     "voice/models.py",
     "voice/activity.py",

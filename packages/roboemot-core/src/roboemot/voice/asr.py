@@ -96,6 +96,10 @@ class ASRBackend(Protocol):
         """Drop the utterance in progress without a result."""
         ...
 
+    def stats(self) -> dict[str, int]:
+        """Recognizer counts for the debug report (SPEC 13); empty when the backend has none."""
+        ...
+
 
 def resolve_language(
     available: Iterable[str], speaker_language: str | None, default_language: str

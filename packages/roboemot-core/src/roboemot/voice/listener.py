@@ -16,7 +16,10 @@ One thread reads ``source(timeout)`` (the audio hub's voice queue), and for each
    announced on the bus as ``percept.utterance`` without its text.
 
 Chunk stamps are the monotonic time the chunk *ends*; the endpointer wants its start. The work
-per utterance is bounded by ``voice.vad.max_utterance_s``. Audio and text are never logged.
+per utterance is bounded by ``voice.vad.max_utterance_s``. The ``realtime`` block of the report
+(``ListenerLoad``) says whether the listener keeps up: its time per second of audio by stage, its
+lag behind the microphone and the audio lost before it read it (SPEC 13). Audio and text are
+never logged.
 """
 
 from __future__ import annotations
@@ -38,6 +41,7 @@ from .activity import SpeechActivity
 from .asr import ASRBackend, ASREvent, resolve_language
 from .direction import VoiceDirection
 from .fastpath import FastPath
+from .listener_load import ListenerLoad
 from .speech_features import Prosody
 from .vad import Endpointer, SpeechAudio, SpeechEnd, SpeechStart
 from .wake import WakeGate
@@ -115,6 +119,7 @@ class VoiceListener:
         enrolled_in_view: Callable[[float], bool] = lambda now: False,
         direction: VoiceDirection | None = None,
         clock: Callable[[], float] = time.monotonic,
+        timer: Callable[[], float] = time.perf_counter,
     ) -> None:
         self._source = source
         self._endpointer = endpointer
@@ -131,8 +136,11 @@ class VoiceListener:
         self._on_activity = on_activity
         self._enrolled_in_view = enrolled_in_view
         self._clock = clock
+        self._timer = timer
         self._direction = direction
         self._gate = WakeGate("always", 0.0)  # configured by apply_config
+        self.load = ListenerLoad(cfg.voice.listener)
+        self._last_end: float | None = None  # stamp of the end of the last chunk read
         self.apply_config(cfg)
         self._stop = threading.Event()
         self._paused = threading.Event()
@@ -162,6 +170,7 @@ class VoiceListener:
         self._fast.apply_config(cfg.voice)
         fp = cfg.voice.fastpath
         self._gate.apply(cfg.voice.wake_word_policy, fp.addressed_window_s, fp.window_max_s)
+        self.load.apply_config(cfg.voice.listener)
         if self._direction is not None:
             self._direction.apply_config(cfg.voice.direction)
 
@@ -221,6 +230,7 @@ class VoiceListener:
         if grammar is not None:
             snap["grammar"] = grammar
         snap["vad"] = self._endpointer.snapshot()
+        snap["realtime"] = {**self.load.snapshot(), "recognizers": self._asr.stats()}
         return snap
 
     def _run(self) -> None:
@@ -310,8 +320,28 @@ class VoiceListener:
         self._set_active(False)
 
     def process(self, chunk: VoiceChunkLike) -> None:
-        """Handle one chunk (see the module docstring)."""
-        start = chunk.stamp - chunk.samples.size / chunk.rate_hz
+        """Handle one chunk (see the module docstring) and account for it (``realtime``)."""
+        t0 = self._timer()
+        lag = self._clock() - chunk.stamp
+        duration = chunk.samples.size / chunk.rate_hz
+        lost = 0.0
+        if chunk.gap and self._last_end is not None:
+            lost = max(0.0, chunk.stamp - duration - self._last_end)
+        self._last_end = chunk.stamp
+        try:
+            self._process(chunk, chunk.stamp - duration)
+        finally:
+            self.load.chunk(duration, self._timer() - t0, lag, lost)
+
+    def _timed(self, stage: str, fn: Callable[..., Any], *args: Any) -> Any:
+        """``fn(*args)``, its wall time added to ``stage`` of the realtime account."""
+        t0 = self._timer()
+        try:
+            return fn(*args)
+        finally:
+            self.load.stage(stage, self._timer() - t0)
+
+    def _process(self, chunk: VoiceChunkLike, start: float) -> None:
         if chunk.gap:
             self._count("gaps")
             self._abort()
@@ -322,8 +352,8 @@ class VoiceListener:
                 self._abort()
             self._count("dropped_speaking")
             if self._on_speaking_chunk is not None:
-                try:
-                    self._on_speaking_chunk(chunk)
+                try:  # its hand-back (resume) replays audio: counted here and in its stages
+                    self._timed("bargein", self._on_speaking_chunk, chunk)
                 except Exception as exc:
                     log.warning("voice listener: speaking-chunk hook: %s", type(exc).__name__)
             return
@@ -353,7 +383,7 @@ class VoiceListener:
     def _ingest(self, samples: np.ndarray, start: float, audio_end: float) -> None:
         """Run ``samples`` (starting at ``start``) through the endpointer and the recognizer."""
         buffered: list[np.ndarray] = []
-        for ev in self._endpointer.feed(samples, start):
+        for ev in self._timed("vad", self._endpointer.feed, samples, start):
             if isinstance(ev, SpeechAudio):
                 buffered.append(ev.samples)
                 continue
@@ -367,7 +397,9 @@ class VoiceListener:
 
     def _feed(self, parts: list[np.ndarray], audio_end: float) -> None:
         if parts and self._active:
-            self._partial(self._asr.accept(np.concatenate(parts)), audio_end)
+            self._partial(
+                self._timed("asr_accept", self._asr.accept, np.concatenate(parts)), audio_end
+            )
             self._sample_direction(audio_end)
 
     def _partial(self, event: ASREvent | None, audio_end: float) -> None:
@@ -385,12 +417,12 @@ class VoiceListener:
             self._asr.languages, speaker, self._cfg.conversation.language
         )
         self._fast.begin(ev.stamp, audio_end, self._language)
-        self._asr.start(self._language)
+        self._timed("asr_start", self._asr.start, self._language)
         self._set_active(True)
         if self._direction is not None:
             self._direction.begin()
         self._sample_direction(audio_end)
-        self._partial(self._asr.accept(ev.pre_roll), audio_end)
+        self._partial(self._timed("asr_accept", self._asr.accept, ev.pre_roll), audio_end)
 
     def _end(self, ev: SpeechEnd) -> None:
         """The utterance ended: the recognizer's final (seconds on a loaded robot), the gate and
@@ -403,7 +435,7 @@ class VoiceListener:
             self._set_active(False)
 
     def _finish_utterance(self, ev: SpeechEnd) -> None:
-        text = self._asr.finish().strip()
+        text = self._timed("asr_finish", self._asr.finish).strip()
         if not text:
             self._count("empty")
             self._fast.reset()

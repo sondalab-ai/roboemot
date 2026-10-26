@@ -2321,9 +2321,38 @@ class GrammarConfig(Strict):
     max_audio_s: float = param(
         8.0,
         "Longest utterance the grammar pass decodes (pre-roll to the last speech frame); a longer "
-        "one gets no pass (counted). The pass runs on the listener thread before the hand-off "
-        "to the conversation, so this bounds the latency it adds",
+        "one gets no pass (counted). The pass runs off the listener thread, but the hand-off to "
+        "the conversation waits for it (at most handoff_timeout_s), so this bounds the work and "
+        "the latency it adds",
         unit="s", ge=1, le=60,
+    )  # fmt: skip
+    handoff_timeout_s: float = param(
+        1.0,
+        "Longest the hand-off of an utterance to the conversation waits for its grammar pass, "
+        "which runs on its own thread while the listener keeps reading the microphone; past it "
+        "the utterance goes on with the keywords of its free text only (counted as a timeout). "
+        "Above the slowest pass measured on the CM4 under load (0.76 s, SPEC 13)",
+        unit="s", ge=0.1, le=10,
+    )  # fmt: skip
+
+
+class ListenerConfig(Strict):
+    """Real-time budget and report of the voice listener (SPEC 8, 13)."""
+
+    budget_share: float = param(
+        0.5,
+        "Report only: the listener's work per second of audio (voice activity detection, "
+        "recognizer, barge-in check; wall time on its thread) should stay below this share of "
+        "the audio time, so a loaded CPU still leaves it room to keep up; the debug report "
+        "flags a report window over it (over_budget). At 1 or more the microphone queue grows "
+        "and audio is dropped (SPEC 13)",
+        ge=0.05, le=1,
+    )  # fmt: skip
+    report_window_s: float = param(
+        60.0,
+        "Report only: seconds of audio per window of the listener's cost and lag figures in the "
+        "debug report (the last full window is shown next to the totals since start)",
+        unit="s", ge=5, le=3600,
     )  # fmt: skip
 
 
@@ -2638,6 +2667,9 @@ class VoiceConfig(Strict):
         return v
 
     vad: VadConfig = param({}, "Voice activity detection and endpointing (SPEC 8 stage 2)")
+    listener: ListenerConfig = param(
+        {}, "Real-time budget and cost report of the voice listener (SPEC 8, 13)"
+    )
     models_dir: str = param(
         "",
         "Folder with the voice models (Silero VAD, Vosk, Piper); empty means voice-models/ in "

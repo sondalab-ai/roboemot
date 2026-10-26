@@ -74,6 +74,9 @@ class FakeASR:
     def reset(self):
         self.resets += 1
 
+    def stats(self):
+        return {}
+
 
 class Selector:
     def __init__(self):
@@ -759,3 +762,77 @@ def test_no_reading_on_a_robot_with_a_sound_direction_needs_the_wake_word():
     r.say()
     assert not r.utterances[0].addressed
     assert r.listener.snapshot()["direction"]["degraded"]["silent"] == 1
+
+
+# ---- realtime account (SPEC 8, 13)
+
+
+class SlowASR(FakeASR):
+    """Each accept costs ``delay_s`` of wall time."""
+
+    def __init__(self, *a, delay_s=0.002, **kw):
+        super().__init__(*a, **kw)
+        self.delay_s = delay_s
+
+    def accept(self, samples):
+        time.sleep(self.delay_s)
+        return super().accept(samples)
+
+
+def test_realtime_block_has_stage_costs_lag_and_dropped_audio():
+    r = Rig(["ciao"])
+    r.asr = SlowASR(["ciao"])
+    r.asr.loaded = list(r.cfg.voice.asr.models)
+    r.listener._asr = r.asr
+    r.say(1.0)
+    r.t += 0.5  # half a second lost in the hub before the next chunk
+    r.feed(silence(0.2), gap=True)
+    rt = r.listener.snapshot()["realtime"]
+    total = rt["total"]
+    fed = 1.0 + r.cfg.voice.vad.end_silence_ms / 1000 + 0.2 + 0.2
+    assert total["audio_s"] == pytest.approx(fed, abs=CHUNK / RATE)
+    assert total["dropped_s"] == pytest.approx(0.5, abs=1e-6)
+    cost = total["ms_per_audio_s"]
+    assert set(cost) == {
+        "vad",
+        "asr_accept",
+        "asr_start",
+        "asr_finish",
+        "bargein",
+        "grammar",
+        "listener_total",
+    }
+    assert cost["asr_accept"] > 0 and cost["vad"] > 0
+    assert cost["listener_total"] >= cost["asr_accept"] + cost["vad"]
+    assert total["share"] == pytest.approx(cost["listener_total"] / 1000)
+    assert rt["lag_s"] == 0.0 and rt["last_window"] is None and not rt["over_budget"]
+    assert json.loads(json.dumps(rt)) == rt
+
+
+def test_realtime_lag_is_the_age_of_the_chunk_when_read():
+    r = Rig(["ciao"])
+    r.listener.process(
+        SimpleNamespace(samples=silence(0.1), rate_hz=RATE, stamp=T0 - 3.0, gap=False)
+    )
+    rt = r.listener.snapshot()["realtime"]
+    assert rt["lag_s"] == pytest.approx(3.0) and rt["total"]["lag_max_s"] == pytest.approx(3.0)
+
+
+def test_realtime_window_rolls_and_flags_over_budget():
+    from roboemot.voice.listener_load import ListenerLoad
+
+    cfg = reachy_config().voice.listener.model_copy(
+        update={"report_window_s": 5.0, "budget_share": 0.5}
+    )
+    load = ListenerLoad(cfg)
+    for _ in range(5):
+        load.chunk(1.0, 0.8, 0.1, 0.0)  # 80 % of real time
+    load.stage("grammar", 0.2)
+    snap = load.snapshot()
+    assert snap["last_window"]["share"] == pytest.approx(0.8) and snap["over_budget"]
+    for _ in range(5):
+        load.chunk(1.0, 0.1, 0.1, 0.0)
+    snap = load.snapshot()
+    assert snap["last_window"]["share"] == pytest.approx(0.1) and not snap["over_budget"]
+    assert snap["total"]["share"] == pytest.approx(0.45)
+    assert snap["total"]["ms_per_audio_s"]["grammar"] == pytest.approx(20.0)
