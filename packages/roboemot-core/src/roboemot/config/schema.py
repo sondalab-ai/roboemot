@@ -2361,7 +2361,8 @@ class ListenerConfig(Strict):
     budget_share: float = param(
         0.5,
         "Report only: the listener's work per second of audio (voice activity detection, "
-        "recognizer, barge-in check; wall time on its thread) should stay below this share of "
+        "recognizer, barge-in check, waiting for a grammar pass, the hand-off; wall time on its "
+        "thread) should stay below this share of "
         "the audio time, so a loaded CPU still leaves it room to keep up; the debug report "
         "flags a report window over it (over_budget). At 1 or more the microphone queue grows "
         "and audio is dropped (SPEC 13)",
