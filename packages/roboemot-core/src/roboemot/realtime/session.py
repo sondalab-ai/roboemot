@@ -9,7 +9,8 @@ register a provider in the ``roboemot.realtime`` entry-point group under the man
 ``connect_target`` applies the URL rules to whatever URL a provider returns, in both modes:
 
 - ``ws`` or ``wss`` only, and ``wss`` unless the route and the connect host are both local
-  (``url_is_local``, the route's effective locality);
+  (``url_is_local``: the route's effective locality; a connect host other than the route's own
+  is judged by its address, whatever ``locality`` says);
 - no user info, no fragment, no whitespace, control character or backslash, an ASCII host, and
   at most ``URL_MAX_CHARS`` characters; the host and port read by httpx and by the WebSocket
   library must agree;
@@ -205,13 +206,16 @@ def connect_target(
         raise UrlRefused("userinfo")
     if split.fragment or url.endswith("#"):
         raise UrlRefused("fragment")
-    local = url_is_local(route.base_url, route.locality) and url_is_local(url, route.locality)
+    own = _host_port_of_route(route)
+    # The route's locality speaks for its own host only: another host (one a provider chose) is
+    # judged by its address (auto), so an explicit ``local`` cannot cover a cloud host.
+    there = route.locality if host == own else "auto"
+    local = url_is_local(route.base_url, route.locality) and url_is_local(url, there)
     if scheme != "wss" and not local:
         raise UrlRefused("insecure")
     if this_machine(url) and not local:
         raise UrlRefused("this_machine")
     keyed = route.api_key not in NO_KEY
-    own = _host_port_of_route(route)
     send_key = keyed and (host == own or host_matches(host, allocation.key_hosts))
     if keyed and not send_key:
         raise UrlRefused("key_host")

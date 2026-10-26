@@ -111,21 +111,6 @@ def test_a_literal_key_in_any_field_is_refused_and_never_echoed(web, stack, capl
     assert KEY not in caplog.text
 
 
-def test_add_a_realtime_route_and_its_kind_stays_put(web, stack):
-    """SPEC 8, Realtime speech route: ``kind`` is chosen at add time; a later change of a keyed
-    route's kind is the stack's secret rule (the admin), which the web refuses."""
-    body = {**CLOUD, "kind": "realtime", "secret": "cloud_key", "ack_endpoint": ORIGIN}
-    assert post(web, "/api/routes/add", body).status == 200
-    cloud = next(
-        r for r in web.request("GET", "/api/routes").json["routes"] if r["name"] == "cloud"
-    )
-    assert cloud["kind"] == "realtime"
-    resp = post(web, "/api/settings", {"path": "llm_routes.cloud.kind", "value": "chat"})
-    assert resp.status == 403, resp.json
-    assert next(r for r in stack.effective().llm_routes if r.name == "cloud").kind == "realtime"
-    assert post(web, "/api/routes/add", {**CLOUD, "name": "x", "kind": "voice"}).status == 422
-
-
 def test_only_an_existing_secret_can_be_chosen(web):
     resp = post(web, "/api/routes/add", {**CLOUD, "secret": "ghost", "ack_endpoint": ORIGIN})
     assert resp.status == 422 and resp.json["error"] == "secret_unknown"

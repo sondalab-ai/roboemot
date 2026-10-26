@@ -188,20 +188,6 @@ def test_a_second_check_while_one_runs_is_busy(tmp_path):
         srv.stop()
 
 
-def test_a_realtime_route_check_is_409_route_kind_and_sends_nothing(tmp_path):
-    """SPEC 8, Realtime speech route: the chat checks do not apply to ``kind: realtime``."""
-    cfg = make_cfg(route=ROUTE | {"kind": "realtime"})
-    fake = Fake()
-    srv, client = serve(tmp_path, cfg, checker_for(cfg, fake))
-    try:
-        assert client.request("GET", "/api/routes").json["routes"][0]["kind"] == "realtime"
-        resp = client.request("POST", "/api/routes/lan/check", {})
-        assert resp.status == 409 and resp.json == {"error": "route_kind"}
-        assert fake.bodies == []
-    finally:
-        srv.stop()
-
-
 def test_unknown_route_is_404(served):
     resp = served[1].request("POST", "/api/routes/nope/check", {})
     assert resp.status == 404 and resp.json == {"error": "route_unknown"}

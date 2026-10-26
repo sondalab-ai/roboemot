@@ -89,6 +89,12 @@ def test_ws_is_allowed_only_when_the_route_and_the_host_are_local():
     # an auto route on a LAN allocator cannot hand out a plain ws:// cloud host
     with pytest.raises(UrlRefused, match="insecure"):
         target("ws://rt.example.org/realtime", locality="auto", base=lan)
+    # an explicit local route speaks for its own host only, not for one a provider chose
+    with pytest.raises(UrlRefused, match="insecure"):
+        target("ws://rt.example.org/realtime", locality="local", base=lan)
+    assert target(
+        "ws://box.example.org/v1/realtime", locality="local", base="http://box.example.org/v1"
+    ).local
     # loopback only when local
     assert target(
         "ws://127.0.0.1:8765/realtime", locality="local", base="http://127.0.0.1/v1"

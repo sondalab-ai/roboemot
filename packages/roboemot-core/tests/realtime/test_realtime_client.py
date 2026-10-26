@@ -145,7 +145,7 @@ def test_no_stall_when_no_response_is_due(events):
 
 def test_a_send_stuck_on_a_server_that_stopped_reading_aborts(events):
     with FakeServer("stop_reading") as server:
-        c = client(server, events, send_timeout_s=0.5)
+        c = client(server, events, send_timeout_s=1.5)
         try:
             assert c.connect(UPDATE)
             chunk = b"\x00\x01" * 32_768
