@@ -9,6 +9,10 @@ passes, queues it, and the loop streams it through the backend into the sink, wh
 synthesis in flight and drops the queue; an epoch counter makes any chunk that was already on its
 way fall on the floor, so nothing plays after ``stop`` returns.
 
+``play`` queues raw samples (the self-soothing sounds, SPEC 7B) through the same queue, epoch and
+push path: a sound never interleaves with a sentence, ``stop`` cuts it, and it is not speech (it
+leaves ``ended_at``, ``question_end`` and the counters alone). ``cancel`` drops one such job only.
+
 The bus gets ``speech.say`` with ids, lengths, language and mood, never the text (SPEC 12).
 """
 
@@ -31,6 +35,7 @@ from .. import shutdown
 from ..bus import Bus
 from ..config.schema import RegisterParams, RoboEmotConfig, StateEffects
 from ..persona import effects
+from ..soothe.synth import db_to_gain
 from .prosody import Delivery, compose_delivery
 from .tts import TTSBackend, TTSError
 
@@ -58,6 +63,16 @@ class AudioSink(Protocol):
 
     def push_audio_sample(self, samples: np.ndarray, rate_hz: int) -> float: ...
     def stop(self) -> None: ...
+
+
+@dataclass
+class _RawJob:
+    """Samples to play as they are (``SpeechOutput.play``); never synthesized, not speech."""
+
+    id: int
+    epoch: int
+    samples: np.ndarray
+    rate_hz: int
 
 
 @dataclass
@@ -93,7 +108,7 @@ class SpeechOutput:
         )
         self._minor_present = minor_present  # read when synthesis starts, never at enqueue
         self._lock = threading.Lock()
-        self._jobs: collections.deque[_Job] = collections.deque()
+        self._jobs: collections.deque[_Job | _RawJob] = collections.deque()
         self._epoch = 0
         self._ids = itertools.count(1)
         self._utterances = itertools.count(1)
@@ -103,6 +118,9 @@ class SpeechOutput:
         self._main: asyncio.Task | None = None
         self._current: asyncio.Task | None = None
         self._current_epoch = -1
+        self._raw_current: int | None = None  # id of the raw job taken off the queue, if any
+        self._raw_cancelled: set[int] = set()
+        self._raw_pushed: int | None = None  # id of the raw job whose samples are in the sink
         self._ready = threading.Event()
         self._closed = False
         self._last_utterance = 0
@@ -162,15 +180,21 @@ class SpeechOutput:
         while True:
             with self._lock:
                 job = self._jobs.popleft() if self._jobs else None
+                if isinstance(job, _RawJob):
+                    self._raw_current = job.id
             if job is None:
                 await self._wake.wait()
                 self._wake.clear()
                 continue
             if job.epoch != self._epoch:
+                self._release_raw(job)
                 continue
             self._current_epoch = job.epoch
-            self._current = asyncio.ensure_future(self._speak(job))
+            self._current = asyncio.ensure_future(
+                self._play_raw(job) if isinstance(job, _RawJob) else self._speak(job)
+            )
             await asyncio.wait({self._current})
+            self._release_raw(job)
 
     # ----------------------------------------------------------------- API
 
@@ -245,7 +269,7 @@ class SpeechOutput:
         with self._lock:
             self._epoch += 1
             epoch = self._epoch
-            self.sentences_dropped += len(self._jobs)
+            self.sentences_dropped += sum(isinstance(j, _Job) for j in self._jobs)
             self._jobs.clear()
             now = self.clock()
             self._unplayed.update(i for i, at in self._audible.items() if at > now)
@@ -258,6 +282,45 @@ class SpeechOutput:
         if loop is not None:
             with contextlib.suppress(RuntimeError):
                 loop.call_soon_threadsafe(self._cancel_before, epoch)
+
+    def play(self, samples: np.ndarray, rate_hz: int, volume_db: float = 0.0) -> int | None:
+        """Queue raw mono ``samples`` behind whatever is queued; returns the job id, or ``None``
+        when the queue is full or closed. The job holds the queue while it plays, so a sentence
+        never interleaves with it, and ``stop`` cuts it. It is not speech: nothing is synthesized
+        and ``ended_at``, ``question_end`` and the counters stay as they are. ``volume_db`` is
+        the circadian offset of the moment (``StateEffects.volume_db``). A raw job counts against
+        ``voice.queue_max_sentences`` like a sentence; minor gating does not apply to it (local
+        synth, no route, no text). Safe from any thread."""
+        gain = db_to_gain(volume_db)
+        louder = np.clip(np.asarray(samples, np.float32) * np.float32(gain), -1.0, 1.0)
+        with self._lock:
+            if self._closed or len(self._jobs) >= self.config.voice.queue_max_sentences:
+                return None
+            job = _RawJob(next(self._ids), self._epoch, louder, rate_hz)
+            self._jobs.append(job)
+        self._poke()
+        return job.id
+
+    def cancel(self, job_id: int) -> None:
+        """Drop raw job ``job_id`` only: removed if still queued; if it is the one in flight,
+        nothing more is pushed for it and, once it has pushed, the sink is flushed. The job
+        starts only after earlier audio has played, so the flush cuts nothing else. Other jobs
+        and an id that already finished are untouched. The check, the flush and the push share
+        the lock, so a finished job is never followed by a flush of the next one."""
+        with self._lock:
+            for job in self._jobs:
+                if isinstance(job, _RawJob) and job.id == job_id:
+                    self._jobs.remove(job)
+                    return
+            if self._raw_current != job_id:
+                return
+            self._raw_cancelled.add(job_id)
+            if self._raw_pushed == job_id:
+                self.sink.stop()
+        loop = self._loop
+        if loop is not None:
+            with contextlib.suppress(RuntimeError):
+                loop.call_soon_threadsafe(self._cancel_raw, job_id)
 
     def played(self, job_id: int) -> bool:
         """Whether sentence ``job_id`` began to play: its audio reached the sink and was not
@@ -322,6 +385,23 @@ class SpeechOutput:
         if task is not None and not task.done() and self._current_epoch < epoch:
             task.cancel()
 
+    def _release_raw(self, job: _Job | _RawJob) -> None:
+        """The loop is done with ``job``: if it was a raw job, it is no longer the one playing
+        (done on the loop thread, so a task cancelled before it ran is released too)."""
+        if isinstance(job, _RawJob):
+            with self._lock:
+                self._raw_cancelled.discard(job.id)
+                if self._raw_current == job.id:
+                    self._raw_current = None
+                if self._raw_pushed == job.id:
+                    self._raw_pushed = None
+
+    def _cancel_raw(self, job_id: int) -> None:
+        """Cancel the task of raw job ``job_id`` if it is the one in flight (loop thread)."""
+        task = self._current
+        if task is not None and not task.done() and self._raw_current == job_id:
+            task.cancel()
+
     def _minor(self) -> bool:
         """Whether a minor is present now; fail closed (True) if the signal cannot be read."""
         try:
@@ -338,16 +418,20 @@ class SpeechOutput:
         self.stop()
         return True
 
-    def _push(self, job: _Job, samples: np.ndarray, rate_hz: int, *, speech: bool = False) -> bool:
+    def _push(
+        self, job: _Job | _RawJob, samples: np.ndarray, rate_hz: int, *, speech: bool = False
+    ) -> bool:
         """Push unless a stop happened since ``job`` was queued. The check, the push and the
         notes about it (when the sentence starts to play, where its audio ends) are one step
         under the lock ``stop`` takes to move the epoch, so a sentence never counts as played
         when a stop beat its first push."""
         with self._lock:
-            if job.epoch != self._epoch:
+            if job.epoch != self._epoch or job.id in self._raw_cancelled:
                 return False
             start = self._queue_end()
             self.sink.push_audio_sample(samples, rate_hz)
+            if isinstance(job, _RawJob):
+                self._raw_pushed = job.id
             if speech and job.id not in self._audible:
                 self._audible[job.id] = start
                 while len(self._audible) > PLAYED_WINDOW:
@@ -358,6 +442,28 @@ class SpeechOutput:
                 while len(self._ended) > PLAYED_WINDOW:
                     self._ended.popitem(last=False)
             return True
+
+    async def _play_raw(self, job: _RawJob) -> None:
+        """Wait until the audio already in the sink has played (cancellable, so a stop or a
+        close never hangs), push the samples in one piece and hold the queue until they have
+        played, so the next job starts behind them and a cancel reaches them while audible."""
+        try:
+            while True:
+                with self._lock:
+                    wait_s = self._queue_end() - self.clock()
+                if wait_s <= 0:
+                    break
+                await asyncio.sleep(wait_s)
+            if not self._push(job, job.samples, job.rate_hz):
+                return
+            with self._lock:
+                hold_s = self._queue_end() - self.clock()
+            await asyncio.sleep(hold_s if self._timeline() else job.samples.size / job.rate_hz)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # a sink bug must not end the output thread
+            self.failures += 1
+            log.warning("speech %d (raw) crashed: %s", job.id, type(exc).__name__)
 
     async def _speak(self, job: _Job) -> None:
         cfg, first = self.config, True
@@ -406,6 +512,10 @@ class SpeechOutput:
         now = self.clock()
         playing_until = getattr(self.sink, "playing_until", None)
         return max(now, playing_until()) if callable(playing_until) else now
+
+    def _timeline(self) -> bool:
+        """Whether the sink reports where its queue ends (``playing_until``)."""
+        return callable(getattr(self.sink, "playing_until", None))
 
     def _pad(self, job: _Job, rate_hz: int) -> bool:
         """Silence between two sentences of one answer, less the idle gap already there.

@@ -692,6 +692,159 @@ class CircadianConfig(Strict):
         return self
 
 
+# ---------------------------------------------------------------------- self-soothing (SPEC 7B)
+
+SOOTHE_RANGE_BOUNDS: dict[str, tuple[float, float]] = {
+    "tempo_bpm": (20.0, 240.0),
+    "pitch_hz": (80.0, 2000.0),
+    "length_s": (0.3, 10.0),
+}
+
+
+class SoundShape(Strict):
+    """Ranges a self-soothing sound draws its tempo, base pitch and length from (SPEC 7B)."""
+
+    tempo_bpm: tuple[float, float] = param(
+        (60.0, 90.0), "Tempo range of the hum (the blirp's pace follows it), [min, max] in bpm"
+    )
+    pitch_hz: tuple[float, float] = param(
+        (220.0, 330.0), "Base pitch range (the tonic of a hum, the centre of a blirp), [min, max]"
+    )
+    length_s: tuple[float, float] = param(
+        (3.0, 6.0), "Length range of the whole sound, [min, max] in seconds"
+    )
+    gain_db: float = param(
+        -12.0, "Peak level of the sound against full scale", unit="dB", ge=-60, le=0
+    )
+
+    @field_validator("tempo_bpm", "pitch_hz", "length_s", mode="after")
+    @classmethod
+    def _range(cls, value: tuple[float, float], info: Any) -> tuple[float, float]:
+        low, high = SOOTHE_RANGE_BOUNDS[info.field_name]
+        lo, hi = value
+        if not (math.isfinite(lo) and math.isfinite(hi)):
+            raise ValueError("range bounds must be finite numbers")
+        if lo > hi:
+            raise ValueError("range minimum must not exceed its maximum")
+        if lo < low or hi > high:
+            raise ValueError(f"range must lie within [{low}, {high}]")
+        return value
+
+
+class SootheVariant(Strict):
+    """One self-soothing sound with the emotion shown alongside it (SPEC 7B)."""
+
+    label: str = param(..., "Affect label shown with the sound; one of affect.labels")
+    sound: Literal["hum", "blirp"] = param(..., "Sound kind: a childish hum or machine blirps")
+    weight: float = param(1.0, "Relative chance among the variants eligible at the start", gt=0)
+    states: list[Literal["awake", "drowsy"]] = param(
+        ["awake", "drowsy"], "Circadian states in which the variant may play (never resting)"
+    )
+    shape: SoundShape = param({}, "Ranges the sound is drawn from")
+
+    @field_validator("weight", mode="before")
+    @classmethod
+    def _finite(cls, value: Any) -> Any:
+        """Runs before the range check, which would call a NaN "not greater than 0"."""
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("must be a finite number")
+        return value
+
+    @field_validator("states", mode="after")
+    @classmethod
+    def _some_states(cls, value: list[str]) -> list[str]:
+        if not value:
+            raise ValueError("a variant needs at least one state")
+        return value
+
+
+class SootheConfig(Strict):
+    enabled: bool = param(True, "Let the robot comfort itself with a sound while idle")
+    interval_s: float = param(
+        900.0, "Mean time between two sounds while idle", unit="s", ge=30, le=86400
+    )
+    jitter: float = param(
+        0.5, "Interval jitter as a share of the interval (0: regular)", ge=0, le=0.9
+    )
+    idle_min_s: float = param(
+        120.0, "Continuous idle time before the first sound", unit="s", ge=0, le=3600
+    )
+    cooldown_s: float = param(
+        300.0, "Least time after a sound that played or was cut", unit="s", ge=0, le=86400
+    )
+    rate_hz: int = param(
+        16000, "Sample rate the sounds are synthesised at", unit="Hz", ge=8000, le=48000
+    )
+    variants: list[SootheVariant] = param(
+        [
+            {
+                "label": "calm",
+                "sound": "hum",
+                "weight": 1.0,
+                "shape": {
+                    "tempo_bpm": (56.0, 76.0),
+                    "pitch_hz": (200.0, 300.0),
+                    "length_s": (4.0, 7.0),
+                    "gain_db": -12.0,
+                },
+            },
+            {
+                "label": "joy",
+                "sound": "hum",
+                "weight": 1.0,
+                "shape": {
+                    "tempo_bpm": (96.0, 128.0),
+                    "pitch_hz": (300.0, 440.0),
+                    "length_s": (2.5, 5.0),
+                    "gain_db": -12.0,
+                },
+            },
+            {
+                "label": "joy",
+                "sound": "blirp",
+                "weight": 1.0,
+                "shape": {
+                    "tempo_bpm": (110.0, 160.0),
+                    "pitch_hz": (500.0, 900.0),
+                    "length_s": (1.0, 2.5),
+                    "gain_db": -14.0,
+                },
+            },
+            {
+                "label": "curiosity",
+                "sound": "blirp",
+                "weight": 1.0,
+                "shape": {
+                    "tempo_bpm": (80.0, 120.0),
+                    "pitch_hz": (400.0, 700.0),
+                    "length_s": (1.0, 2.5),
+                    "gain_db": -14.0,
+                },
+            },
+            {
+                "label": "sleepy",
+                "sound": "hum",
+                "weight": 1.0,
+                "states": ["drowsy"],
+                "shape": {
+                    "tempo_bpm": (44.0, 60.0),
+                    "pitch_hz": (160.0, 240.0),
+                    "length_s": (4.0, 7.0),
+                    "gain_db": -15.0,
+                },
+            },
+        ],
+        "Sounds to pick from (weighted random, never the previous one twice in a row)",
+    )
+
+    @field_validator("variants", mode="after")
+    @classmethod
+    def _some_variants(cls, value: list[SootheVariant]) -> list[SootheVariant]:
+        if not value:
+            raise ValueError("soothe.variants needs at least one variant")
+        return value
+
+
 class LightConfig(Strict):
     dark_luma: float = param(0.12, "Normalised luminance below which the room is dark", ge=0, le=1)
     bright_luma: float = param(
@@ -3164,6 +3317,7 @@ with warnings.catch_warnings():
             {}, "SPEC 7A: yawn, stretch and rest posture; the robot manifest ships them"
         )
         light: LightConfig = param({}, "SPEC 7A")
+        soothe: SootheConfig = param({}, "SPEC 7B")
         motion: MotionConfig = param({}, "SPEC 10")
         reflexes: ReflexConfig = param({}, "SPEC 10")
         attention: AttentionConfig = param({}, "SPEC 4A, 5")
@@ -3200,6 +3354,16 @@ with warnings.catch_warnings():
                         f"appraisal rule for {rule.event!r} uses label {rule.label!r}, "
                         f"not one of affect.labels {sorted(self.affect.labels)}"
                     )
+            return self
+
+        @model_validator(mode="after")
+        def _soothe_labels_exist(self) -> RoboEmotConfig:
+            unknown = sorted({v.label for v in self.soothe.variants} - set(self.affect.labels))
+            if unknown:
+                raise ValueError(
+                    f"soothe.variants use labels {unknown} that are not in affect.labels "
+                    f"{sorted(self.affect.labels)}"
+                )
             return self
 
         @model_validator(mode="after")

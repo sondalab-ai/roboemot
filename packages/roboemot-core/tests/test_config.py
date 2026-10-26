@@ -451,3 +451,53 @@ def test_clear_and_set_validate_the_configuration_no_more_than_before(monkeypatc
     calls["n"] = 0
     stack.set("persona.traits", traits, source="t", layer="derived")
     assert calls["n"] <= 3
+
+
+def test_soothe_defaults_validate():
+    cfg = RoboEmotConfig()
+    assert cfg.soothe.enabled and (cfg.soothe.interval_s, cfg.soothe.jitter) == (900, 0.5)
+    pairs = [(v.label, v.sound) for v in cfg.soothe.variants]
+    assert pairs == [
+        ("calm", "hum"),
+        ("joy", "hum"),
+        ("joy", "blirp"),
+        ("curiosity", "blirp"),
+        ("sleepy", "hum"),
+    ]
+    assert cfg.soothe.variants[-1].states == ["drowsy"]
+    assert all("resting" not in v.states for v in cfg.soothe.variants)
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        {"label": "calm", "sound": "hum", "states": ["awake", "resting"]},
+        {"label": "calm", "sound": "hum", "states": []},
+        {"label": "calm", "sound": "whistle"},
+        {"label": "calm", "sound": "hum", "weight": 0},
+        {"label": "calm", "sound": "hum", "weight": -1},
+        {"label": "calm", "sound": "hum", "weight": float("nan")},
+        {"label": "calm", "sound": "hum", "shape": {"gain_db": 3}},
+        {"label": "calm", "sound": "hum", "shape": {"tempo_bpm": [90, 60]}},
+        {"label": "calm", "sound": "hum", "shape": {"pitch_hz": [10, 300]}},
+    ],
+)
+def test_soothe_rejects_bad_variants(variant):
+    with pytest.raises(ValueError):
+        RoboEmotConfig(soothe={"variants": [variant]})
+
+
+def test_soothe_rejects_an_unknown_label_and_empty_variants():
+    with pytest.raises(ValueError, match="affect.labels"):
+        RoboEmotConfig(soothe={"variants": [{"label": "euphoria", "sound": "hum"}]})
+    with pytest.raises(ValueError, match="at least one"):
+        RoboEmotConfig(soothe={"variants": []})
+
+
+def test_a_layer_replaces_soothe_variants_whole():
+    from roboemot.config.stack import deep_merge
+
+    base = RoboEmotConfig().model_dump(mode="json")
+    over = {"soothe": {"variants": [{"label": "joy", "sound": "blirp"}]}}
+    merged = RoboEmotConfig(**deep_merge(base, over))
+    assert [(v.label, v.sound) for v in merged.soothe.variants] == [("joy", "blirp")]
