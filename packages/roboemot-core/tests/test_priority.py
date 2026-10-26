@@ -195,3 +195,20 @@ def test_real_time_threads_cannot_be_lowered():
     assert RoboEmotConfig.model_validate(
         {"runtime": {"background_threads": ["roboemot-vision"]}}
     ).runtime.background_threads == ["roboemot-vision"]
+
+
+def test_renice_is_idempotent(monkeypatch):
+    """Item 7: lowering a thread twice leaves it at the process value plus the increment."""
+    nice = {"main": 0, 42: 0}
+    monkeypatch.setattr(priority.os, "getpid", lambda: "main")
+    monkeypatch.setattr(priority.os, "getpriority", lambda which, who: nice[who])
+    monkeypatch.setattr(priority.os, "setpriority", lambda which, who, v: nice.__setitem__(who, v))
+    priority._renice(42, 5)
+    priority._renice(42, 5)
+    assert nice[42] == 5
+    nice[42] = 9  # already lower than the target: left alone
+    priority._renice(42, 5)
+    assert nice[42] == 9
+    nice["main"] = 17
+    priority._renice(42, 5)
+    assert nice[42] == priority.NICE_MAX

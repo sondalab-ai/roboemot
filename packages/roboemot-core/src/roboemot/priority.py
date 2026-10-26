@@ -46,8 +46,11 @@ def supported() -> bool:
 
 
 def _renice(tid: int, increment: int) -> None:
-    current = os.getpriority(os.PRIO_PROCESS, tid)
-    os.setpriority(os.PRIO_PROCESS, tid, min(NICE_MAX, current + increment))
+    """Set ``tid`` to the process's nice value (its main thread's) plus ``increment``, unless
+    it already runs at that or lower: idempotent, a second call adds nothing."""
+    target = min(NICE_MAX, os.getpriority(os.PRIO_PROCESS, os.getpid()) + increment)
+    if os.getpriority(os.PRIO_PROCESS, tid) < target:
+        os.setpriority(os.PRIO_PROCESS, tid, target)
 
 
 # Seams for tests (the real calls need Linux).
