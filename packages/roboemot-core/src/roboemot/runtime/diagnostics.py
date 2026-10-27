@@ -29,6 +29,10 @@ def build_diagnostics(
         FnSource("roboemot.motion", p.loop.snapshot),
         FnSource("roboemot.sleep", lambda: p.sleep.snapshot(time.monotonic())),
         FnSource("roboemot.network", p.network.snapshot),
+        FnSource(
+            "roboemot.realtime_route",
+            lambda: r.snapshot() if (r := host.realtime_route) is not None else {"state": "off"},
+        ),
         FnSource("roboemot.vision", p.perception.vision_snapshot),
         FnSource("roboemot.world", lambda: world_snapshot(p.world.entries, time.monotonic())),
         FnSource("roboemot.registry", p.perception.registry_snapshot),

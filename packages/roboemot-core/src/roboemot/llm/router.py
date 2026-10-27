@@ -482,23 +482,28 @@ class Router:
                 continue
             sent.add(index)
             slot = calls[index]
-            text = slot["args"] or "{}"
-            if len(text) > TOOL_ARGS_MAX_CHARS:
-                args: Any = {"_raw": ""}  # not parsed, not kept
-            else:
-                try:
-                    args = json.loads(text)
-                except (ValueError, RecursionError):  # bad JSON, a huge integer, nesting too deep
-                    args = {"_raw": text}
-                else:
-                    if not isinstance(args, dict) or _nesting(args) > TOOL_ARGS_MAX_DEPTH:
-                        args = {"_raw": text}
-            out.append(ToolCall(slot["id"], slot["name"], args))
+            out.append(ToolCall(slot["id"], slot["name"], tool_arguments(slot["args"])))
         return out
 
     @staticmethod
     def _tokens(usage: int | None, prompt_chars: int, out_chars: int) -> int:
         return usage if usage is not None else (prompt_chars + out_chars) // CHARS_PER_TOKEN
+
+
+def tool_arguments(text: str) -> Any:
+    """A tool call's arguments from the model's JSON text. Arguments that are not a JSON object,
+    too long or nested too deep come back as ``{"_raw": ...}``, which no skill accepts (the
+    realtime route parses its calls with this too)."""
+    text = text or "{}"
+    if len(text) > TOOL_ARGS_MAX_CHARS:
+        return {"_raw": ""}  # not parsed, not kept
+    try:
+        args = json.loads(text)
+    except (ValueError, RecursionError):  # bad JSON, a huge integer, nesting too deep
+        return {"_raw": text}
+    if not isinstance(args, dict) or _nesting(args) > TOOL_ARGS_MAX_DEPTH:
+        return {"_raw": text}
+    return args
 
 
 def _reasoning_chars(delta: Any) -> int:

@@ -105,7 +105,9 @@ def test_the_payload_shape():
         "motion",
         "system",
         "video",
+        "audio_egress",
     }
+    assert s["audio_egress"] is False  # no realtime route: no audio leaves
     assert s["poll_ms"] == 750
     assert s["mood"] == {
         "label": "calm", "valence": 0.25, "arousal": -0.1, "intensity": 0.4,

@@ -94,7 +94,8 @@ function liveModesCard(d) {
   return card(t("tab_live"), t("live_modes"),
     el("div", { class: "row" },
       badge(t(m.asleep ? "live_asleep" : "live_awake"), m.asleep ? "warning" : "success"),
-      badge(t(m.online ? "live_online" : "live_offline"), m.online ? "success" : "danger")),
+      badge(t(m.online ? "live_online" : "live_offline"), m.online ? "success" : "danger"),
+      d.audio_egress ? [badge(t("live_audio_egress"), "warning")] : []),
     liveRow(t("live_paused"), paused || t("live_paused_none")),
     liveRow(t("live_in_view"), String(m.people)),
     liveRow(t("live_persona"), m.persona));

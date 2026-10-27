@@ -52,9 +52,11 @@ class LiveState:
         *,
         clock: Callable[[], float] = time.monotonic,
         temperature: Callable[[], float | None] = cpu_temperature_c,
+        audio_egress: Callable[[], bool] = lambda: False,
     ) -> None:
         self._host, self._p, self._clock, self._read_temp = host, p, clock, temperature
         self._cfg = cfg
+        self._egress = audio_egress  # microphone audio may leave for the realtime route
         self._temp: tuple[float, float | None] | None = None  # (read at, value)
         self.video = LiveVideo(host, p, cfg, clock=clock)
 
@@ -87,6 +89,7 @@ class LiveState:
             "mood": self._mood(now),
             "modes": self._modes(cfg),
             "conversation": self._host.phase.snapshot(),
+            "audio_egress": bool(self._egress()),
             "attention": self._attention(cfg, now),
             "reflexes": self._reflexes(now),
             "motion": self._motion(),

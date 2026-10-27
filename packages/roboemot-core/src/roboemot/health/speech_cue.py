@@ -19,15 +19,19 @@ class SpeechCue:
     output with the register, circadian state and affect of this moment.
 
     Nothing is said (and nothing raised) when ``muted()`` (asleep or paused), or when
-    ``output()`` is ``None``. The text is never logged here (SPEC 12)."""
+    ``output()`` is ``None``. ``line(text, language)`` is the realtime speech route's fixed-line
+    seam (SPEC 8, owner decision: the server's voice while the route is up): when it takes the
+    phrase, Piper does not say it. The text is never logged here (SPEC 12)."""
 
     def __init__(
         self,
         output: Callable[[], Any | None],
         delivery: Callable[[], Delivery],
         muted: Callable[[], bool],
+        line: Callable[[str, str], bool] = lambda text, language: False,
     ) -> None:
         self._output, self._delivery, self._muted = output, delivery, muted
+        self._line = line
 
     def say(self, text: str, language: str) -> bool:
         """Queue ``text``; True if the output took it. Called under the responder's lock, from
@@ -36,6 +40,8 @@ class SpeechCue:
             out = self._output()
             if out is None or self._muted():
                 return False
+            if self._line(text, language):
+                return True
             register, circadian, mood, intensity = self._delivery()
             job = out.say(
                 text,

@@ -35,6 +35,7 @@ import collections
 import concurrent.futures
 import contextlib
 import inspect
+import itertools
 import logging
 import threading
 from collections.abc import Callable
@@ -73,6 +74,16 @@ NO_PROXY: dict[str, Any] = (
 AUTH_HEADER = "Authorization"
 BEARER = "Bearer "
 CLOSE_TOO_BIG = 1009  # RFC 6455: message too big
+EVENT_PREFIX = "ev_"  # the client's own event ids (a refusal echoes the one it refuses)
+# the server events of a response (they move the response watchdog)
+RESPONSE_EVENTS = (
+    protocol.ResponseCreated,
+    protocol.AudioDelta,
+    protocol.AudioDone,
+    protocol.ReplyTranscript,
+    protocol.FunctionCall,
+    protocol.ResponseDone,
+)
 STATES = ("idle", "connecting", "connected", "closed")
 
 
@@ -92,6 +103,13 @@ class RealtimeClient:
     (``key_unavailable``); the header is sent only when the URL rules allow it. ``on_event``
     runs on the client thread for every server event of the subset, ``Malformed`` included;
     ``Unknown`` events are only counted. An exception it raises is counted and logged by type.
+    ``on_close(reason)`` runs when a session fails or closes (a connect that fails, a socket
+    lost, a stall, a stuck send, ``close``), on whichever thread saw it. ``may_send()`` is the
+    owner's gate, asked right before ``session.update`` (the first data) is sent after the
+    handshake; False refuses the session (``reconfigured``). While
+    ``local_only()`` is true (``privacy.pseudonyms_to_cloud``: real names may not reach a cloud
+    host) a connect host that is not local is refused (``pseudonyms``) before the socket opens:
+    a provider may allocate a cloud host for a local ``base_url`` (SPEC 12).
     """
 
     def __init__(
@@ -102,12 +120,18 @@ class RealtimeClient:
         *,
         auth_headers: Callable[[], dict[str, str]],
         on_event: Callable[[protocol.ServerEvent], None] = lambda _ev: None,
+        on_close: Callable[[str], None] = lambda _reason: None,
+        local_only: Callable[[], bool] = lambda: False,
+        may_send: Callable[[], bool] = lambda: True,
         platform_id: bool = False,
         http_client_factory: Callable[[], httpx.AsyncClient] | None = None,
     ) -> None:
         self.route, self.settings, self.provider = route, settings, provider
         self._auth_headers = auth_headers
         self._on_event = on_event
+        self._on_close = on_close
+        self._local_only = local_only
+        self._may_send = may_send
         self._platform_id = platform_id
         self._http_client_factory = http_client_factory
         self._lock = threading.Lock()
@@ -118,6 +142,8 @@ class RealtimeClient:
         self._send_lock: asyncio.Lock | None = None
         self._receiver: asyncio.Task[None] | None = None
         self._awaiting = False  # a response.create was sent and its response.done not seen
+        self._awaiting_id: str | None = None  # event_id of that response.create
+        self._event_ids = itertools.count(1)
         self._watchdog: asyncio.TimerHandle | None = None
         self._dropping: asyncio.Future[None] | None = None
         self._sending = False  # a write is in flight (a socket lost meanwhile is a stuck send)
@@ -173,9 +199,24 @@ class RealtimeClient:
 
     def connect(self, session_update: dict[str, Any]) -> bool:
         """Open a session and wait for ``session.updated`` (blocking; never call it from the
-        client thread). False on any failure, with ``reason`` set to a code."""
+        client thread). False on any failure, with ``reason`` set to a code. The wait is bounded
+        by ``connect_timeout_s`` (plus ``send_timeout_s`` for the socket's own close): a close
+        from another thread stops the loop, and the connect's future would never resolve."""
         self.start()
-        return bool(self._submit(self._connect(session_update)).result())
+        future = self._submit(self._connect(session_update))
+        s = self.settings
+        try:
+            return bool(future.result(s.connect_timeout_s + s.send_timeout_s))
+        except (concurrent.futures.TimeoutError, concurrent.futures.CancelledError):
+            future.cancel()
+            with self._lock:
+                fire = self.state != "closed"
+                if fire:
+                    self._failures["connect_timeout"] += 1
+                    self.state, self.reason = "closed", "connect_timeout"
+            if fire:
+                self._closed_cb("connect_timeout")
+            return False
 
     def send(self, event: dict[str, Any]) -> concurrent.futures.Future[bool]:
         """Queue a client event (thread-safe). The future is True once it is written, False when
@@ -226,6 +267,14 @@ class RealtimeClient:
             self._failures[reason] += 1
             self.reason = reason
             self.state = "closed"
+        self._closed_cb(reason)
+
+    def _closed_cb(self, reason: str) -> None:
+        try:
+            self._on_close(reason)
+        except Exception as exc:
+            self._count("callback_errors")
+            log.warning("realtime route %s: close handler: %s", self.route.name, type(exc).__name__)
 
     def _count(self, key: str, n: int = 1) -> None:
         with self._lock:
@@ -247,7 +296,14 @@ class RealtimeClient:
             async with asyncio.timeout_at(deadline):
                 ws = await self._open(loop, deadline)
                 self._ws = ws
-                await ws.send(protocol.encode(session_update))
+                # the owner's gate right before the first data leaves (after the handshake): a
+                # reload meanwhile (pseudonyms on, the route changed) sends nothing (SPEC 12)
+                if self._local_only() and not ws_target_local(self._target):
+                    raise _SessionRefused("pseudonyms")
+                if not await asyncio.get_running_loop().run_in_executor(None, self._may_send):
+                    raise _SessionRefused("reconfigured")
+                update = {"event_id": f"{EVENT_PREFIX}{next(self._event_ids)}", **session_update}
+                await ws.send(protocol.encode(update))
                 self._count("sent")
                 await self._await_session(ws)
         except _KeyUnavailable:
@@ -298,6 +354,8 @@ class RealtimeClient:
         target = connect_target(self.route, allocation, tuple(self.provider.key_hosts))
         with self._lock:
             self._target = target
+        if self._local_only() and not target.local:
+            raise _SessionRefused("pseudonyms")  # nothing is sent to the cloud host
         s = self.settings
         return await _NoRedirect(
             target.url,
@@ -371,10 +429,8 @@ class RealtimeClient:
                 event = self._parse(await ws.recv())
                 if isinstance(event, protocol.Unknown):
                     continue  # counted only: no progress, not handed out
-                if self._awaiting and not isinstance(event, protocol.Malformed):
-                    done = event.type == protocol.RESPONSE_DONE
-                    self._awaiting = not done
-                    self._arm(None if done else self.route.stall_timeout_s)
+                if self._awaiting:
+                    self._watch(event)
                 self._deliver(event)
         except ConnectionClosed as exc:
             sent = exc.sent.code if exc.sent is not None else None
@@ -405,6 +461,21 @@ class RealtimeClient:
             self._receiver = None  # ending on its own: nothing to cancel
             await self._drop_socket()
 
+    def _watch(self, event: protocol.ServerEvent) -> None:
+        """The response watchdog while a response is due: only events of a response move it
+        (``response.done`` ends it, others re-arm it with ``stall_timeout_s``); an ``error``
+        ends it only when it echoes that ``response.create``'s ``event_id`` (a refusal: no
+        response is coming). Other events (``session.updated``, other errors) leave it."""
+        if isinstance(event, protocol.ServerError):
+            if event.event_id is not None and event.event_id == self._awaiting_id:
+                self._awaiting = False
+                self._arm(None)
+            return
+        if isinstance(event, RESPONSE_EVENTS):
+            done = event.type == protocol.RESPONSE_DONE
+            self._awaiting = not done
+            self._arm(None if done else self.route.stall_timeout_s)
+
     async def _send(self, event: dict[str, Any], audio_bytes: int = 0) -> bool:
         assert self._send_lock is not None
         async with self._send_lock:
@@ -412,9 +483,11 @@ class RealtimeClient:
             if ws is None or self.state != "connected":
                 self._count("dropped")
                 return False
+            if "event_id" not in event:  # every client event carries one
+                event = {**event, "event_id": f"{EVENT_PREFIX}{next(self._event_ids)}"}
             if event.get("type") == protocol.RESPONSE_CREATE:
                 # armed before the write: a fast server may answer while the send still drains
-                self._awaiting = True
+                self._awaiting, self._awaiting_id = True, event["event_id"]
                 self._arm(self.route.first_token_timeout_s)
             self._sending = True
             try:
@@ -486,8 +559,15 @@ class RealtimeClient:
         self._awaiting = False
         if reason is not None:
             with self._lock:
-                if self.state != "closed":
+                closing = self.state != "closed"
+                if closing:
                     self.state, self.reason = "closed", reason
+            if closing:
+                self._closed_cb(reason)
+
+
+def ws_target_local(target: ConnectTarget | None) -> bool:
+    return target is not None and target.local
 
 
 def _lost_while_writing(ws: ClientConnection) -> bool:

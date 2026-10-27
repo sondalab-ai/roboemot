@@ -3,8 +3,13 @@
 Each route gets a :class:`~roboemot.health.Link`. Real requests report their outcome
 (``report``), or ask for a prompt check after a timeout (``recheck``). A background thread
 checks due routes with a TCP connect to the route's host and port, which needs no API feature
-beyond the OpenAI-compatible subset and no credentials. The aggregate ``network`` link is
-online while any route is: it emits ``link.network.lost`` when the last route goes down and
+beyond the OpenAI-compatible subset and no credentials.
+
+The aggregate ``network`` link is online while any route that can answer a turn is: the chat
+routes, plus the ``realtime`` link (the realtime speech route's session, reported by
+``RealtimeRoute``) while realtime mode is on (``set_realtime``). A ``kind: realtime`` route's own
+``route.<name>`` link never counts, so a live realtime route cannot mask dead chat routes in local
+mode. It emits ``link.network.lost`` when the last counted link goes down and
 ``link.network.restored`` when one comes back.
 """
 
@@ -23,6 +28,7 @@ from ..config.schema import LinkPolicy, LLMRoute
 from . import Link, OnChange
 
 DEFAULT_PORTS = {"https": 443, "http": 80}
+REALTIME_LINK = "realtime"  # the realtime speech route's session (SPEC 12A, Links)
 
 Probe = Callable[[str, int, float], bool]  # (host, port, timeout_s) -> reachable
 
@@ -61,6 +67,40 @@ class NetworkMonitor:
             r.name: Link(f"route.{r.name}", self.policy, self._route_changed) for r in self.routes
         }
         self.network = Link("network", self.policy, self.on_change)
+        self.realtime = Link(REALTIME_LINK, self.policy, self._route_changed)
+        self._realtime_active = False
+        self._realtime_confirmed = False  # counts once a session opened, or once offline
+        self._realtime_endpoint: tuple[str, int] | None = None
+
+    def set_realtime(self, active: bool, endpoint: tuple[str, int] | None = None) -> None:
+        """Realtime mode is on (the realtime route may answer a turn) or off: the ``realtime``
+        link counts for the ``network`` aggregate only while it is on. A new ``endpoint``
+        (host, port) starts the link afresh, unconfirmed, as ``set_routes`` does for a chat
+        route. Any thread."""
+        with self._lock:
+            changed, self._realtime_active = self._realtime_active != active, active
+            if endpoint != self._realtime_endpoint:  # also through None: a fresh link
+                self.realtime = Link(REALTIME_LINK, self.policy, self._route_changed)
+                self._realtime_confirmed = False
+                self._realtime_endpoint = endpoint
+                changed = True
+        if changed:
+            self._sync_network(self.clock())
+
+    def report_realtime(self, ok: bool, now: float | None = None) -> None:
+        """Outcome of a realtime session (connected, or failed to connect or dropped)."""
+        now = self.clock() if now is None else now
+        confirms = False
+        if ok:
+            with self._lock:
+                confirms, self._realtime_confirmed = not self._realtime_confirmed, True
+        self.realtime.report(ok, now)
+        if confirms:
+            self._sync_network(now)
+
+    def realtime_due(self, now: float | None = None) -> bool:
+        """Whether a new realtime connect may be tried (``connectivity.network`` backoff)."""
+        return self.realtime.due(self.clock() if now is None else now)
 
     def set_routes(self, routes: list[LLMRoute]) -> None:
         """Hot reload (SPEC 11A): follow a changed route list. Removed names lose their link;
@@ -92,7 +132,7 @@ class NetworkMonitor:
     def set_policy(self, policy: LinkPolicy) -> None:
         """Hot reload (SPEC 11A): new thresholds apply from the next report or check."""
         self.policy = policy
-        for link in (*self._links(), self.network):
+        for link in (*self._links(), self.network, self.realtime):
             link.policy = policy
 
     @property
@@ -122,7 +162,10 @@ class NetworkMonitor:
         for route, link in self._pairs():
             host, port = route_endpoint(route)
             routes[route.name] = {"endpoint": f"{host}:{port}"} | link.snapshot(now)
-        return {"online": self.online, "routes": routes}
+        with self._lock:
+            active = self._realtime_active
+        realtime = {"counted": active} | self.realtime.snapshot(now)
+        return {"online": self.online, "routes": routes, "realtime": realtime}
 
     def check_due(self, now: float | None = None) -> None:
         """Run the checks that are due (blocking up to ``probe_timeout_s`` each)."""
@@ -153,19 +196,27 @@ class NetworkMonitor:
         self._sync_network(now)
 
     def _sync_network(self, now: float) -> None:
-        """The one place the ``network`` aggregate is computed: online while a counted route is
-        (no routes at all counts as online). Links not yet confirmed count only once offline; if
-        none counts, the aggregate keeps its state."""
+        """The one place the ``network`` aggregate is computed: online while a counted link is
+        (none that could count counts as online). The candidates are the chat routes' links and,
+        in realtime mode, the ``realtime`` link. Links not yet confirmed count only once
+        offline; if none counts, the aggregate keeps its state."""
         with self._net_lock:
             with self._lock:
-                counted = [
-                    link
+                kinds = {r.name: r.kind for r in self.routes}
+                chat = [
+                    (name, link)
                     for name, link in self.links.items()
-                    if name not in self._unconfirmed or not link.online
+                    if kinds.get(name, "chat") != "realtime"
                 ]
-                keep = bool(self.links) and not counted
+                counted = [
+                    link for name, link in chat if name not in self._unconfirmed or not link.online
+                ]
+                if self._realtime_active and (self._realtime_confirmed or not self.realtime.online):
+                    counted.append(self.realtime)  # the chat links' unconfirmed rule
+                candidates = bool(chat) or self._realtime_active
+                keep = candidates and not counted
             if not keep:
-                self.network.set(not self.links or any(link.online for link in counted), now)
+                self.network.set(not candidates or any(link.online for link in counted), now)
 
     def _links_map(self) -> dict[str, Link]:
         # The dict is replaced wholesale by set_routes and never mutated, so the caller may use

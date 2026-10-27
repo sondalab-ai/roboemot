@@ -42,8 +42,10 @@ class SleepGate:
         gaze: Any,
         scan: Any,
         enabled: Callable[[], bool],
+        realtime: Callable[[], Any] = lambda: None,
     ) -> None:
         self._host, self._bus, self._loop = host, bus, loop
+        self._realtime = realtime  # the realtime speech route, when there is one
         self._perception, self._light, self._listener = perception, light_reader, listener
         self._gaze, self._scan, self._enabled = gaze, scan, enabled
         self.asleep = False
@@ -113,6 +115,9 @@ class SleepGate:
             self._each("speech", output.stop)
         if conv is not None:
             self._each("conversation", conv.interrupt)
+        realtime = self._realtime()
+        if realtime is not None:  # the server session closes while asleep, reopens on wake
+            self._each("realtime route", lambda: realtime.close_soon("asleep"))
         self._each("gaze", self._gaze.release)
         self._each("attention command", lambda: self._loop.clear(ATTENTION_SOURCE))
         if self._scan is not None:
@@ -125,6 +130,9 @@ class SleepGate:
             self._each("listener", self._listener.pause_listening)
 
     def _resume(self) -> None:
+        realtime = self._realtime()
+        if realtime is not None:
+            self._each("realtime route", realtime.start)
         if self._listener is not None:
             self._each("listener", self._listener.resume_listening)
         self._each("light reader", self._light.resume)

@@ -51,6 +51,30 @@ def system_prompt(
     shapes it (``roboemot.persona.apply_to_register``); ``language`` defaults to the
     conversation language; ``robot_name`` (``RobotName.prompt_name``, already sanitised) is told to
     the model when the robot has one."""
+    return _prompt(cfg, register, language, robot_name, cfg.voice.mood_source == "llm_tagged")
+
+
+def realtime_instructions(
+    cfg: RoboEmotConfig,
+    register: RegisterParams,
+    *,
+    language: str | None = None,
+    robot_name: str = "",
+) -> str:
+    """Parts 1 to 4 for the realtime speech route (SPEC 8, Realtime speech route): the same
+    prompt without the mood-tag rule, because the server's voice would speak the tags. The
+    sentence cap stays a rule in the prompt only (the reply's audio cannot be cut on a sentence
+    boundary)."""
+    return _prompt(cfg, register, language, robot_name, False)
+
+
+def _prompt(
+    cfg: RoboEmotConfig,
+    register: RegisterParams,
+    language: str | None,
+    robot_name: str,
+    mood_tags: bool,
+) -> str:
     lang = language or cfg.conversation.language
     rules = [
         f'Your name is "{robot_name}".' if robot_name else "",
@@ -58,7 +82,7 @@ def system_prompt(
         f"Reply in at most {max_reply_sentences(cfg, register)} sentences.",
         f"Always reply in {LANGUAGE_NAMES.get(lang, lang)}.",
     ]
-    if cfg.voice.mood_source == "llm_tagged":
+    if mood_tags:
         labels = ", ".join(cfg.affect.labels)
         rules.append(
             f"Start each sentence with a mood tag such as [mood=joy], choosing from: {labels}. "

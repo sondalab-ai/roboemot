@@ -115,6 +115,8 @@ def test_the_robot_turns_toward_a_voice_from_its_first_ticks(data):  # noqa: F81
 
 
 VOICE_YAML = "voice:\n  enabled: true\n  echo_tail_ms: 150\n"
+ECHO_TAIL_S = 0.15  # VOICE_YAML's echo_tail_ms
+TONE_S = 0.1  # the Tone backend's one chunk: 1600 samples at 16 kHz
 
 
 def enable(folder, extra: str) -> None:
@@ -273,6 +275,7 @@ def test_voice_builds_a_speech_output_that_plays_through_the_speaker(data):  # n
         assert wait_for(lambda: app.speech_output is not None)
         app.speech_output.backend = Tone()
         pushed = scripted.mini.media.push_audio_sample
+        said_at = time.monotonic()
         app.speech_output.say(
             "Ciao.",
             language="it",
@@ -282,7 +285,9 @@ def test_voice_builds_a_speech_output_that_plays_through_the_speaker(data):  # n
             intensity=0.0,
         )
         assert wait_for(lambda: pushed.called)
-        assert wait_for(lambda: app.speech.speaking(time.monotonic()))
+        # the robot counts as speaking for the pushed audio plus the echo tail: read as the end
+        # of that window, not by polling inside it (a stalled runner can miss a 250 ms window)
+        assert wait_for(lambda: app.speech.until() >= said_at + TONE_S + ECHO_TAIL_S)
     finally:
         stop.set()
         thread.join(timeout=10)

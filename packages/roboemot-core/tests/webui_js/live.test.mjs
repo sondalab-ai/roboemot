@@ -73,6 +73,24 @@ test("the Live tab sits next to the others and draws one card per group", async 
   assert.equal(page.document.querySelector("#notice").hidden, true);
 });
 
+test("the modes card shows a warning while microphone audio may leave the robot", async (t) => {
+  const page = await livePage(t, {
+    "GET /api/live/state": { ...STATE, audio_egress: true },
+    "GET /api/strings": { language: "en", strings: { ...STRINGS, live_audio_egress: "AUDIO OUT" } },
+  });
+  await openLive(page);
+  assert.ok(page.document.querySelector("#live-cards").textContent.includes("AUDIO OUT"));
+});
+
+test("no audio warning in text mode", async (t) => {
+  const page = await livePage(t, {
+    "GET /api/live/state": { ...STATE, audio_egress: false },
+    "GET /api/strings": { language: "en", strings: { ...STRINGS, live_audio_egress: "AUDIO OUT" } },
+  });
+  await openLive(page);
+  assert.ok(!page.document.querySelector("#live-cards").textContent.includes("AUDIO OUT"));
+});
+
 test("it polls at the interval the server names, and not before the tab is opened", async (t) => {
   const page = await livePage(t);
   await sleep(WAIT_MS);

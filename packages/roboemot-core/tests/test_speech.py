@@ -1083,6 +1083,64 @@ def test_a_cut_off_during_a_large_ducked_push_waits_only_for_that_push(make, mon
     assert len(sink.samples) == pushed  # nothing after the stop
 
 
+class LateWakeLock:
+    """A lock whose blocked acquirer notices a release only at its next poll, as a thread woken
+    late by a busy scheduler. CPython locks are not fair: a holder that re-takes the lock at once
+    wins every time against such a waiter."""
+
+    POLL_S = 0.005
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        while not self._lock.acquire(blocking=False):
+            time.sleep(self.POLL_S)
+        return True
+
+    def release(self) -> None:
+        self._lock.release()
+
+    def __enter__(self) -> bool:
+        return self.acquire()
+
+    def __exit__(self, *exc) -> None:
+        self.release()
+
+
+class HoldingSink(PlayingSink):
+    """Each push takes ``hold_s`` and notes when it began."""
+
+    def __init__(self, hold_s: float) -> None:
+        super().__init__()
+        self.hold_s, self.began_at = hold_s, []
+        self.inside = threading.Event()
+
+    def push_audio_sample(self, samples, rate_hz):
+        self.began_at.append(time.monotonic())
+        self.inside.set()
+        time.sleep(self.hold_s)
+        return super().push_audio_sample(samples, rate_hz)
+
+
+def test_a_stop_is_not_starved_by_pushes_that_retake_the_output_lock_first(make):
+    """SPEC 8, 13: a cut-off waits for the push in flight only. The output thread pushes the
+    pieces of a sentence back to back and re-takes the lock before a late-woken ``stop`` gets it;
+    no push may begin once ``stop`` was called."""
+    sink = HoldingSink(hold_s=0.02)
+    out = make(FakeBackend(pieces=10), sink=sink)
+    out._lock = LateWakeLock()
+    say(out, "Ciao.")
+    assert sink.inside.wait(2.0)
+    began = time.monotonic()
+    out.stop()
+    after = [t for t in sink.began_at if t > began]
+    pushed = len(sink.samples)
+    time.sleep(0.1)
+    assert after == []  # the push in flight finished; none began after the stop was called
+    assert len(sink.samples) == pushed  # nothing after the stop
+
+
 class TakingSink(PlayingSink):
     """A sink that applies the duck itself (a pacing speaker)."""
 

@@ -19,6 +19,7 @@ from roboemot.conversation.preferences import RegistryPreferences
 from roboemot.conversation.sources import profile_source, registry_names, scene_source
 from roboemot.health.speech_cue import Delivery, SpeechCue
 from roboemot.persona import apply_to_register, effects
+from roboemot.realtime.route import RealtimeRoute
 from roboemot.skills.bridge import SkillBridge
 from roboemot.skills.defaults import default_skills
 from roboemot.soothe import SootheRunner
@@ -45,10 +46,15 @@ def offline_cue(host: RuntimeHost, stack: ConfigStack, p: Pipeline) -> SpeechCue
         state = p.runner.engine.state(time.monotonic())
         return register, circadian, state.label, state.intensity
 
+    def line(text: str, language: str) -> bool:
+        conv = host.conversation
+        return conv is not None and conv.say_line(text, language)
+
     return SpeechCue(
         lambda: host.speech_output,
         delivery,
         lambda: p.sleep.asleep or p.sleep.paused,
+        line,
     )
 
 
@@ -81,6 +87,11 @@ def start_voice_output(
     p.responder.cue = offline_cue(host, stack, p)
     if listener is None:
         return
+    realtime = host.realtime_route = (
+        RealtimeRoute(stack, lambda: p.hub.router, p.network, p.realtime_provider)
+        if p.cfg.voice.realtime_route.enabled
+        else None
+    )
     # Shutdown order: listener (no new utterances), conversation (cancels the
     # stream in flight), speech output, speaker.
     registry = p.perception.registry
@@ -119,9 +130,14 @@ def start_voice_output(
         bus=p.bus,
         phase=host.phase,
         transcript=host.transcript,
+        realtime=realtime,
     )
+    if realtime is not None:  # closed after the conversation (no turn uses it any more)
+        cleanup.callback(realtime.close)
     cleanup.callback(conv.close)
     conv.start()
+    if realtime is not None:
+        realtime.start()
     if bargein is not None:
         bind_barge_in(bargein, output, conv, listener)
 
