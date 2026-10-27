@@ -95,6 +95,7 @@ class AllocationRequest:
         default=None, repr=False, compare=False
     )
     on_platform_id: Callable[[], None] = field(default=lambda: None, repr=False, compare=False)
+    max_reply_bytes: int = 0  # the reply's size cap (0: none); the client's max_message_bytes
 
 
 @dataclass(frozen=True)
@@ -166,12 +167,27 @@ async def post_allocation(
     """POST an allocation request to ``url``, which must be at the route's own origin (scheme,
     host and port of its ``base_url``: the origin the key was approved for, SPEC 8, 12). A
     redirect is returned as it is, never followed. Raises :class:`UrlRefused`
-    (``allocator_origin``) before anything is sent when ``url`` is elsewhere."""
+    (``allocator_origin``) before anything is sent when ``url`` is elsewhere. A reply body over
+    ``request.max_reply_bytes`` is not read further: :class:`ProviderRefused`
+    (``provider_reply``)."""
     target = _http_origin(url)
     if target is None or target != _http_origin(request.route.base_url):
         raise UrlRefused("allocator_origin")
+    cap = request.max_reply_bytes
     async with allocation_client(request) as client:
-        return await client.post(url, json=json, headers=headers, follow_redirects=False)
+        req = client.build_request("POST", url, json=json, headers=headers)
+        resp = await client.send(req, stream=True, follow_redirects=False)
+        try:
+            body = bytearray()
+            async for chunk in resp.aiter_bytes():
+                body += chunk
+                if cap > 0 and len(body) > cap:
+                    raise ProviderRefused("provider_reply")
+        finally:
+            await resp.aclose()
+        return httpx.Response(
+            resp.status_code, headers=resp.headers, content=bytes(body), request=req
+        )
 
 
 def provider_endpoint(route: LLMRoute, path: str) -> str:
@@ -185,12 +201,14 @@ def provider_endpoint(route: LLMRoute, path: str) -> str:
         parts.port  # noqa: B018 - raises on a bad port
     except ValueError:
         raise ProviderRefused("provider_url") from None
+    host = parts.hostname or ""
     if (
         parts.path != path
         or parts.query
         or parts.fragment
         or "@" in parts.netloc
         or url.endswith(("?", "#"))
+        or not _plain_host(host)
     ):
         raise ProviderRefused("provider_url")
     local = url_is_local(url, route.locality)
@@ -211,7 +229,7 @@ def allocated_url(url: object) -> str:
         parts = urlsplit(url)
     except ValueError:
         raise UrlRefused("unparsable") from None
-    if not parts.path.rstrip("/").endswith(REALTIME_PATH):
+    if not parts.path.endswith(REALTIME_PATH):
         raise UrlRefused("path")
     scheme = WS_SCHEMES.get(parts.scheme.lower())
     return url if scheme is None else urlunsplit((scheme, *parts[1:]))
@@ -251,7 +269,7 @@ def _host_port(url: str) -> tuple[str, str, int]:
     host = parsed.host.lower().rstrip(".")
     if not host:
         raise UrlRefused("unparsable")
-    if not host.isascii():
+    if not _plain_host(host):
         raise UrlRefused("host")
     port = parsed.port or DEFAULT_PORTS[scheme]
     try:
@@ -263,6 +281,17 @@ def _host_port(url: str) -> tuple[str, str, int]:
     if (other_host, other_port) != (host, port):
         raise UrlRefused("unparsable")
     return scheme, host, port
+
+
+def _plain_host(host: str) -> bool:
+    """A non-empty ASCII host with no escape (``%``) and no internationalised label (``xn--``):
+    URL parsers can disagree on the others, and they allow look-alikes."""
+    return (
+        bool(host)
+        and host.isascii()
+        and "%" not in host
+        and not any(label.startswith("xn--") for label in host.lower().split("."))
+    )
 
 
 def _suffix_ok(suffix: str) -> str | None:
@@ -330,7 +359,12 @@ def connect_target(
     # The approval trusts the route's scheme, host and port (``secret_violations``): the key goes
     # to that exact origin, or over wss to a host the provider declared.
     at_route = (scheme, host, port) == own
-    declared = scheme == "wss" and host_matches(host, allocation.key_hosts)
+    # a declared host gets the key on the wss port only, never on a port the allocator names
+    declared = (
+        scheme == "wss"
+        and port == DEFAULT_PORTS["wss"]
+        and host_matches(host, allocation.key_hosts)
+    )
     send_key = keyed and (at_route or declared)
     if keyed and not send_key:
         raise UrlRefused("key_host", host)

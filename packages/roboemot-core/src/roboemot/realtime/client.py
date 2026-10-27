@@ -52,6 +52,7 @@ from websockets.exceptions import ConnectionClosed
 
 from .. import shutdown
 from ..config.schema import LLMRoute, RealtimeRouteConfig
+from ..llm.pseudonyms import url_is_local
 from . import protocol
 from .session import (
     NO_KEY,
@@ -362,6 +363,8 @@ class RealtimeClient:
         key = headers.get(AUTH_HEADER, "")
         if self.route.api_key not in NO_KEY and not key.removeprefix(BEARER).strip():
             raise _KeyUnavailable  # never connect a keyed route without its key
+        if self._local_only() and not url_is_local(self.route.base_url, self.route.locality):
+            raise _SessionRefused("pseudonyms")  # the provider's endpoint gets nothing either
         with self._lock:
             self._platform_id_sent = False
         request = AllocationRequest(
@@ -371,6 +374,7 @@ class RealtimeClient:
             max(0.0, deadline - loop.time()),
             self._http_client_factory,
             self._note_platform_id,
+            self.settings.max_message_bytes,
         )
         allocation = await self.provider.allocate(request)
         target = connect_target(self.route, allocation, tuple(self.provider.key_hosts))
