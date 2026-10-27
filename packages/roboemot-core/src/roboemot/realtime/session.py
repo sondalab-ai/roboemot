@@ -18,7 +18,8 @@ register a provider in the ``roboemot.realtime`` entry-point group under the man
   ``url_local_refused`` rule) unless local;
 - the query is kept for the connection, never logged or reported (``ConnectTarget`` hides the
   URL from ``repr``; ``origin`` is ``scheme://host:port`` only);
-- the key is sent only to the route's own host, or to a host matching one of the provider's
+- the key is sent only to the route's own origin (scheme, host and port of its ``base_url``,
+  ``https`` read as ``wss``), or over ``wss`` to a host matching one of the provider's
   ``key_hosts`` suffixes, declared in code (shown in the report). A keyed route whose connect
   host is neither is refused, nothing is sent.
 
@@ -91,7 +92,9 @@ class Allocation:
 @runtime_checkable
 class SessionProvider(Protocol):
     """Allocates realtime sessions. ``key_hosts`` is static: host suffixes (``.example.org``)
-    or exact hosts that may receive the route's key, declared in code, shown in the report."""
+    or exact hosts that may receive the route's key, declared in code, shown in the report.
+    A provider makes its allocation request with :func:`post_allocation` (never its own HTTP
+    client): it holds the request to the route's own origin, without redirects or proxies."""
 
     key_hosts: tuple[str, ...]
 
@@ -108,6 +111,50 @@ class ConnectTarget:
     origin: str
     local: bool
     send_key: bool
+
+
+def _http_origin(url: str) -> tuple[str, str, int] | None:
+    """Scheme, host and port of an http(s) URL as httpx reads it (the default port when none is
+    written), or None when it is not one, holds user info, a fragment or odd characters."""
+    if any(c.isspace() or ord(c) < ord(" ") or c in "\\\x7f" for c in url):
+        return None
+    try:
+        parsed = httpx.URL(url)
+    except (httpx.InvalidURL, ValueError, TypeError):
+        return None
+    scheme = parsed.scheme.lower()
+    if scheme not in WS_SCHEMES or not parsed.host or parsed.userinfo or parsed.fragment:
+        return None
+    port = parsed.port or (DEFAULT_PORTS["wss"] if scheme == "https" else DEFAULT_PORTS["ws"])
+    return scheme, parsed.host.lower().rstrip("."), port
+
+
+def allocation_client(request: AllocationRequest) -> httpx.AsyncClient:
+    """The HTTP client of an allocation request: the request's factory (tests), else one that
+    reads no proxy or certificate settings from the environment and follows no redirect."""
+    if request.http_client_factory is not None:
+        return request.http_client_factory()
+    return httpx.AsyncClient(
+        trust_env=False, follow_redirects=False, timeout=max(request.timeout_s, 0.0) or None
+    )
+
+
+async def post_allocation(
+    request: AllocationRequest,
+    url: str,
+    *,
+    json: Any = None,
+    headers: dict[str, str] | None = None,
+) -> httpx.Response:
+    """POST an allocation request to ``url``, which must be at the route's own origin (scheme,
+    host and port of its ``base_url``: the origin the key was approved for, SPEC 8, 12). A
+    redirect is returned as it is, never followed. Raises :class:`UrlRefused`
+    (``allocator_origin``) before anything is sent when ``url`` is elsewhere."""
+    target = _http_origin(url)
+    if target is None or target != _http_origin(request.route.base_url):
+        raise UrlRefused("allocator_origin")
+    async with allocation_client(request) as client:
+        return await client.post(url, json=json, headers=headers, follow_redirects=False)
 
 
 def realtime_url(base_url: str) -> str:
@@ -160,10 +207,14 @@ def _host_port(url: str) -> tuple[str, str, int]:
 
 def _suffix_ok(suffix: str) -> str | None:
     """A key-host entry normalised (lower case, no trailing dot), or None when it is unusable:
-    empty, a bare dot, or a single label (it would match a whole top-level domain)."""
+    empty, a bare dot, a single label (it would match a whole top-level domain), or an
+    internationalised name, in Unicode or punycode (``xn--`` labels): such entries are dropped,
+    so a look-alike host can never be declared."""
     s = suffix.strip().lower().rstrip(".")
     bare = s.lstrip(".")
     if not bare or "." not in bare or not bare.isascii():
+        return None
+    if any(label.startswith("xn--") for label in bare.split(".")):
         return None
     return s
 
@@ -206,29 +257,35 @@ def connect_target(
         raise UrlRefused("userinfo")
     if split.fragment or url.endswith("#"):
         raise UrlRefused("fragment")
-    own = _host_port_of_route(route)
+    own = route_origin(route)
     # The route's locality speaks for its own host only: another host (one a provider chose) is
     # judged by its address (auto), so an explicit ``local`` cannot cover a cloud host.
-    there = route.locality if host == own else "auto"
+    there = route.locality if own is not None and host == own[1] else "auto"
     local = url_is_local(route.base_url, route.locality) and url_is_local(url, there)
     if scheme != "wss" and not local:
         raise UrlRefused("insecure")
     if this_machine(url) and not local:
         raise UrlRefused("this_machine")
     keyed = route.api_key not in NO_KEY
-    send_key = keyed and (host == own or host_matches(host, allocation.key_hosts))
+    # The approval trusts the route's scheme, host and port (``secret_violations``): the key goes
+    # to that exact origin, or over wss to a host the provider declared.
+    at_route = (scheme, host, port) == own
+    declared = scheme == "wss" and host_matches(host, allocation.key_hosts)
+    send_key = keyed and (at_route or declared)
     if keyed and not send_key:
         raise UrlRefused("key_host")
     bracket = f"[{host}]" if ":" in host else host
     return ConnectTarget(url, f"{scheme}://{bracket}:{port}", local, send_key)
 
 
-def _host_port_of_route(route: LLMRoute) -> str:
-    """The host of the route's ``base_url`` (httpx), lower case, no trailing dot."""
+def route_origin(route: LLMRoute) -> tuple[str, str, int] | None:
+    """Scheme, host and port of the route's own WebSocket origin (``realtime_url`` of its
+    ``base_url``: https gives wss, http ws, the default port when none is written), or None
+    when the base URL cannot give one."""
     try:
-        return httpx.URL(route.base_url).host.lower().rstrip(".")
-    except (httpx.InvalidURL, ValueError, TypeError):
-        return ""
+        return _host_port(realtime_url(route.base_url))
+    except UrlRefused:
+        return None
 
 
 def load_session_provider(robot_id: str) -> Callable[[Any], SessionProvider] | None:

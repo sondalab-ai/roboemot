@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from fake_server import FakeServer
 from realtime_helpers import KEY, UPDATE, bearer, route, settings
@@ -115,6 +116,40 @@ def test_the_key_goes_to_the_route_host_or_a_declared_suffix():
 
 
 @pytest.mark.parametrize(
+    ("url", "locality"),
+    [
+        ("wss://api.example.org:9999/realtime", "cloud"),  # same host, another port
+        ("ws://api.example.org/realtime", "local"),  # ws for an https base
+        ("ws://api.example.org:443/realtime", "local"),  # ws on the https port
+    ],
+)
+def test_the_key_needs_the_route_origin_not_only_its_host(url, locality):
+    """Fix round 1, item 3: the approval trusts scheme, host and port (SPEC 8, 12)."""
+    with pytest.raises(UrlRefused, match="key_host"):
+        target(url, locality=locality, keyed=True)
+    assert target(url, locality=locality).send_key is False  # keyless: allowed, no key
+
+
+def test_the_route_origin_uses_default_and_explicit_ports():
+    assert target("wss://api.example.org:443/v1/realtime", keyed=True).send_key
+    base = "http://192.168.1.20:8765/v1"
+    assert target("ws://192.168.1.20:8765/r", locality="local", keyed=True, base=base).send_key
+    with pytest.raises(UrlRefused, match="key_host"):
+        target("ws://192.168.1.20:8766/r", locality="local", keyed=True, base=base)
+
+
+def test_key_hosts_receive_the_key_over_wss_only():
+    with pytest.raises(UrlRefused, match="key_host"):
+        target(
+            "ws://node.rt.local/realtime",  # local by address, so only the key rule refuses
+            locality="local",
+            keyed=True,
+            base="http://box.local/v1",
+            key_hosts=(".rt.local",),
+        )
+
+
+@pytest.mark.parametrize(
     ("host", "hosts", "ok"),
     [
         ("a.hf.example", (".hf.example",), True),
@@ -125,6 +160,8 @@ def test_the_key_goes_to_the_route_host_or_a_declared_suffix():
         ("x.hf.example", ("hf.example",), False),
         ("anything.example", (".",), False),
         ("anything.example", ("",), False),
+        ("xn--e1afmkfd.example", (".xn--e1afmkfd.example",), False),  # punycode entries drop
+        ("a.xn--e1afmkfd.example", (".xn--e1afmkfd.example",), False),
         ("a.example", (".example",), False),  # a single label would cover a whole TLD
     ],
 )
@@ -243,6 +280,7 @@ def test_failures_never_log_the_query_or_the_key(caplog):
         route(f"http://rt.example.org/v1?token={QUERY_SECRET}", locality="cloud"),
         settings(),
         DirectSession(),
+        auth_headers=dict,
     )
     try:
         assert cloud.connect(UPDATE) is False and cloud.reason == "url_insecure"
@@ -305,3 +343,59 @@ def test_a_broken_provider_fails_closed(monkeypatch, eps):
 def test_the_group_contract_is_a_factory_of_the_manifest():
     assert contract_violation(sess.ENTRY_POINT_GROUP, lambda manifest: DirectSession()) is None
     assert contract_violation(sess.ENTRY_POINT_GROUP, lambda: DirectSession()) is not None
+
+
+# ------------------------------------------------------------------- the allocation helper
+
+
+def recording_request(base: str, responses: dict[str, httpx.Response]):
+    seen: list[httpx.Request] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(req)
+        return responses.get(str(req.url), httpx.Response(404))
+
+    request = AllocationRequest(
+        route(base, keyed=True),
+        key=KEY,
+        timeout_s=2.0,
+        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    return request, seen
+
+
+async def test_post_allocation_goes_to_the_route_origin_only():
+    """Fix round 1, item 5: providers allocate through a core helper (SPEC 8, 12)."""
+    ok = "https://alloc.example.org/session"
+    request, seen = recording_request(
+        "https://alloc.example.org", {ok: httpx.Response(200, json={"connect_url": "x"})}
+    )
+    resp = await sess.post_allocation(request, ok, json={}, headers={"X-Auth": KEY})
+    assert resp.status_code == 200 and len(seen) == 1
+    for elsewhere in (
+        "https://alloc.example.org:8443/session",  # another port
+        "http://alloc.example.org/session",  # another scheme
+        "https://evil.example.org/session",  # another host
+        "https://u:p@alloc.example.org/session",  # user info
+    ):
+        with pytest.raises(UrlRefused, match="allocator_origin"):
+            await sess.post_allocation(request, elsewhere, json={})
+    assert len(seen) == 1  # nothing else was sent
+
+
+async def test_post_allocation_never_follows_a_redirect():
+    url = "https://alloc.example.org/session"
+    moved = httpx.Response(307, headers={"Location": "https://evil.example.org/session"})
+    request, seen = recording_request("https://alloc.example.org/v1", {url: moved})
+    resp = await sess.post_allocation(request, url, json={})
+    assert resp.status_code == 307
+    assert [str(r.url) for r in seen] == [url]
+
+
+async def test_the_default_allocation_client_ignores_the_environment():
+    request = AllocationRequest(route("https://alloc.example.org"), timeout_s=1.0)
+    client = sess.allocation_client(request)
+    try:
+        assert client.trust_env is False and client.follow_redirects is False
+    finally:
+        await client.aclose()

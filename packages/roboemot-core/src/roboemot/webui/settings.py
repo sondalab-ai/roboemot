@@ -361,8 +361,10 @@ class SettingsEditor:
         plugin: SettingsPlugin | None = None,
         known_secrets: Callable[[], Iterable[str]] | None = None,
         installed: Callable[[RoboEmotConfig], Iterable[str]] = installed_languages,
+        realtime_key_hosts: Callable[[], Iterable[str]] | None = None,
     ):
         self.stack = stack
+        self._realtime_key_hosts = realtime_key_hosts
         self._installed = installed
         self.manifest = manifest
         self._known_secrets = known_secrets
@@ -496,7 +498,7 @@ class SettingsEditor:
         else:
             target, stored, written = self._list_add(box, entry, tree, cfg)
             if bind is not None and bind[0] != NO_KEY_REF:
-                self._check_endpoint_ack(entry.get("base_url"), bind[1])
+                self._check_endpoint_ack(entry.get("base_url"), bind[1], entry.get("kind"))
                 written = [{**entry, "api_key": bind[0]}]
                 exempt = frozenset({f"llm_routes.{entry['name']}.api_key"})
         self.stack.set(
@@ -590,7 +592,7 @@ class SettingsEditor:
                 return {"name": route.name, "changed": False}
             path = f"llm_routes.{route.name}.api_key"
             if ref != NO_KEY_REF:
-                self._check_endpoint_ack(route.base_url, ack)
+                self._check_endpoint_ack(route.base_url, ack, route.kind)
             before = self._failures()
             self.stack.set(
                 path,
@@ -609,6 +611,23 @@ class SettingsEditor:
             result = {"name": route.name, "changed": True, "persisted": self._persist()}
             return self._applied(result, before)
 
+    def realtime_key_hosts(self) -> list[str]:
+        """The host suffixes the robot's realtime session provider declares (SPEC 8, Realtime
+        speech route): a realtime route's key may also go there, so the key confirmation names
+        them. Empty in direct mode or when the provider cannot be built (the route is then
+        unavailable anyway)."""
+        if self._realtime_key_hosts is not None:
+            return list(self._realtime_key_hosts())
+        if self.manifest is None:
+            return []
+        from ..realtime.session import ProviderUnavailable, build_session_provider
+
+        try:
+            provider = build_session_provider(self.manifest.robot.id, self.manifest)
+        except ProviderUnavailable:
+            return []
+        return list(provider.key_hosts)
+
     def removable_routes(self) -> list[str]:
         """Names of the routes only the runtime layer holds (``remove_entry`` accepts them)."""
         row = self._rows().get("llm_routes")
@@ -626,14 +645,18 @@ class SettingsEditor:
             raise ValidationError("secret_unknown", "secret")
         return f"${{secret:{secret}}}"
 
-    @staticmethod
-    def _check_endpoint_ack(base_url: object, ack: object) -> None:
-        """The key goes to the origin of ``base_url``; ``ack`` must be exactly that origin."""
+    def _check_endpoint_ack(self, base_url: object, ack: object, kind: object = None) -> None:
+        """The key goes to the origin of ``base_url``; ``ack`` must be exactly that origin. For a
+        realtime route the refusal also names the provider's ``key_hosts``, where the key may
+        go too."""
         target = origin(base_url) if isinstance(base_url, str) else ""
         if not target:
             raise ValidationError("value_type", "value")
         if ack != target:
-            raise ValidationError("endpoint_ack_required", "value", {"endpoint": target})
+            detail: dict[str, Any] = {"endpoint": target}
+            if kind == "realtime" and (hosts := self.realtime_key_hosts()):
+                detail["key_hosts"] = hosts
+            raise ValidationError("endpoint_ack_required", "value", detail)
 
     def _remember_key(self, name: str, ref: str) -> None:
         """Keep the key bound to route ``name`` for the next start, with the acknowledged origin and

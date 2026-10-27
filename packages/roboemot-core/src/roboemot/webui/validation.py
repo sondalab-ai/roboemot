@@ -22,7 +22,7 @@ class ValidationError(ValueError):
     """A request field is missing or invalid; the message is a stable error code."""
 
     def __init__(
-        self, code: str, field: str | None = None, extra: dict[str, str] | None = None
+        self, code: str, field: str | None = None, extra: dict[str, Any] | None = None
     ) -> None:
         super().__init__(code)
         self.code = code

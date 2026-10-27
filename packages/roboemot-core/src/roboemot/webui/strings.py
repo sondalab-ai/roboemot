@@ -281,6 +281,7 @@ EN: dict[str, str] = {
         "needs the configuration file."
     ),
     "route_check_realtime": "The check is for chat routes only.",
+    "route_key_hosts": "As a realtime route, it may also go to the hosts under: {hosts}.",
     "route_key": "Key",
     "route_key_none": "No key",
     "route_key_literal": "A key written in the configuration file",
@@ -838,6 +839,9 @@ IT: dict[str, str] = {
         "chiave, richiede il file di configurazione."
     ),
     "route_check_realtime": "Il controllo vale solo per i modelli di chat.",
+    "route_key_hosts": (
+        "Essendo un modello in tempo reale, può andare anche agli host sotto: {hosts}."
+    ),
     "route_key": "Chiave",
     "route_key_none": "Nessuna chiave",
     "route_key_literal": "Una chiave scritta nel file di configurazione",

@@ -699,7 +699,10 @@ async function saveRoute(route, v) {
     if (!steps.length) { notice(t("settings_unchanged")); return; }
   }
   const sends = keyed || (moved && current !== "" && !keyChanged);
-  const ackMessage = (host) => t("route_key_message", { host }) + (insecureHost(host) ? " " + t("route_key_insecure") : "");
+  const realtime = (route ? route.kind : v.kind) === "realtime";
+  const extraHosts = realtime ? (state.realtimeKeyHosts || []) : [];
+  const ackMessage = (host) => t("route_key_message", { host }) + (insecureHost(host) ? " " + t("route_key_insecure") : "") +
+    (extraHosts.length ? " " + t("route_key_hosts", { hosts: extraHosts.join(", ") }) : "");
   const message = sends && target ? ackMessage(target) : (route ? route.name : v.name);
   let next = 0; // steps before this index are saved: a retry of the dialog resumes here
   let notApplied = false;
@@ -730,6 +733,7 @@ async function saveRoute(route, v) {
 async function routesView() {
   const view = document.getElementById("view");
   const data = await api("GET", "/api/routes");
+  state.realtimeKeyHosts = data.realtime_key_hosts || [];
   let secrets = null;
   try {
     secrets = await api("GET", "/api/secrets");

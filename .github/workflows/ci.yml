@@ -40,6 +40,9 @@ jobs:
           python-version: "3.12"
       - run: pip install -e "packages/roboemot-core[dev,vision,voice]" -e "packages/roboemot-reachymini[dev]"
       - run: pytest -rs
+      # The realtime extra allows websockets>=13,<16 and the installer keeps the robot's version:
+      # the realtime tests run again on the lowest allowed release (SPEC 8, Realtime speech route).
+      - run: pip install "websockets==13.*" && pytest -rs packages/roboemot-core/tests/realtime
 
   # SPEC 14, M3 exit: the tests that load the real Silero VAD, Vosk and Piper models (`-m models`,
   # deselected by default), including `test_m3_exit.py` with its latency budgets. The vision models

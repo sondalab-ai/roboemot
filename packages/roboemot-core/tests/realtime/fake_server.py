@@ -9,6 +9,7 @@
 - ``error_first``: an ``error`` (its message quotes the request) instead of ``session.updated``;
 - ``no_session``: never answers ``session.update``;
 - ``stall``: ``response.created`` then nothing; ``silent``: nothing after ``response.create``;
+- ``unknown_only``: after ``response.create``, an unknown event every 0.05 s for 1 s;
 - ``close_mid``: ``response.created``, one audio delta, then the socket is closed;
 - ``oversize``: after ``session.updated``, one message of ``oversize_bytes``;
 - ``stop_reading``: after ``session.updated`` the server stops reading the socket;
@@ -23,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import threading
 from http import HTTPStatus
 from typing import Any
@@ -35,6 +37,13 @@ PCM = b"\x01\x00\x02\x00\x03\x00\x04\x00"
 REPLY_TEXT = "reply words"
 ERROR_MESSAGE = "you said: the secret request text"
 CLOSE_TIMEOUT_S = 0.5
+UNKNOWN_EVENTS = 20
+UNKNOWN_GAP_S = 0.05
+# The fake's own wire log (it sees the key and the text it is sent) stays out of caplog, so the
+# leak tests check what the client logs.
+SERVER_LOG = logging.getLogger("tests.realtime.fake_server")
+SERVER_LOG.setLevel(logging.CRITICAL + 1)
+SERVER_LOG.propagate = False
 
 
 class FakeServer:
@@ -89,6 +98,7 @@ class FakeServer:
             max_queue=1,
             compression=None,
             close_timeout=CLOSE_TIMEOUT_S,
+            logger=SERVER_LOG,
         ) as server:
             self.port = server.sockets[0].getsockname()[1]
             self._ready.set()
@@ -148,6 +158,11 @@ class FakeServer:
 
     async def _on_response(self, ws: ServerConnection) -> None:
         if self.mode == "silent":
+            return
+        if self.mode == "unknown_only":
+            for _ in range(UNKNOWN_EVENTS):
+                await self._send(ws, {"type": "rate_limits.updated", "rate_limits": []})
+                await asyncio.sleep(UNKNOWN_GAP_S)
             return
         await self._send(ws, {"type": "response.created", "response": {"id": "resp_1"}})
         if self.mode == "stall":

@@ -5,17 +5,20 @@
 checks the URL (``connect_target``), opens the socket and sends ``session.update``; it returns
 once the server answered ``session.updated``, within ``voice.realtime_route.connect_timeout_s``
 for the whole sequence. Server events are parsed (``protocol.parse``) and handed to
-``on_event`` on the client thread.
+``on_event`` on the client thread; unknown ones are only counted.
 
 Transport rules:
 
-- the only credential is an ``Authorization`` header, sent only when the URL rules allow it;
+- the only credential is an ``Authorization`` header, sent only when the URL rules allow it; a
+  route with a key whose header resolves empty never connects (``key_unavailable``);
 - no redirect is followed (the library would re-send the header to the new host), no proxy is
-  used (the system's would see the key and the audio), no compression, ``max_size`` is
+  used (websockets 15 would read the system's, which would see the key and the audio; 13 and
+  14 have no proxy support), no compression, ``max_size`` is
   ``voice.realtime_route.max_message_bytes`` (a bigger message closes the socket, counted as
   ``oversize``);
 - keepalive pings every ``send_timeout_s``, answered within ``send_timeout_s``;
-- a send stuck longer than ``send_timeout_s`` aborts the socket (``send_stuck``);
+- a send stuck longer than ``send_timeout_s`` aborts the socket (``send_stuck``); a socket lost
+  while a write is blocked (the keepalive gave up first) is ``send_stuck`` too;
 - after ``response.create`` the first server event must come within the route's
   ``first_token_timeout_s``, and every later one, until ``response.done``, within its
   ``stall_timeout_s``; otherwise the socket is closed (``stall``).
@@ -31,6 +34,7 @@ import asyncio
 import collections
 import concurrent.futures
 import contextlib
+import inspect
 import logging
 import threading
 from collections.abc import Callable
@@ -45,6 +49,7 @@ from .. import shutdown
 from ..config.schema import LLMRoute, RealtimeRouteConfig
 from . import protocol
 from .session import (
+    NO_KEY,
     AllocationRequest,
     ConnectTarget,
     SessionProvider,
@@ -58,7 +63,12 @@ log = logging.getLogger(__name__)
 WIRE_LOG = logging.getLogger("roboemot.realtime.wire")
 WIRE_LOG.setLevel(logging.CRITICAL + 1)
 WIRE_LOG.propagate = False
-logging.getLogger("websockets").setLevel(logging.WARNING)
+# websockets 15 uses the system's proxy settings unless told not to; 13 and 14 have no proxy
+# support (and would hand an unknown ``proxy`` argument to the socket layer), so there is
+# nothing to turn off there. The realtime extra allows >=13,<16 (the robot's version is kept).
+NO_PROXY: dict[str, Any] = (
+    {"proxy": None} if "proxy" in inspect.signature(ws_connect.__init__).parameters else {}
+)
 
 AUTH_HEADER = "Authorization"
 BEARER = "Bearer "
@@ -76,10 +86,12 @@ class _NoRedirect(ws_connect):
 class RealtimeClient:
     """One realtime session at a time over one WebSocket (see the module docstring).
 
-    ``auth_headers`` returns the route's ``Authorization`` header (``Router.auth_headers``),
-    called only when the URL rules allow the key; anything but that header is dropped.
-    ``on_event`` runs on the client thread for every server event, ``Malformed`` and
-    ``Unknown`` included; an exception it raises is counted and logged by type.
+    ``auth_headers`` (required) returns the route's ``Authorization`` header
+    (``Router.auth_headers``); anything but that header is dropped. A route with a key whose
+    header resolves empty (or cannot be read) is refused before anything is allocated or sent
+    (``key_unavailable``); the header is sent only when the URL rules allow it. ``on_event``
+    runs on the client thread for every server event of the subset, ``Malformed`` included;
+    ``Unknown`` events are only counted. An exception it raises is counted and logged by type.
     """
 
     def __init__(
@@ -88,7 +100,7 @@ class RealtimeClient:
         settings: RealtimeRouteConfig,
         provider: SessionProvider,
         *,
-        auth_headers: Callable[[], dict[str, str]] = dict,
+        auth_headers: Callable[[], dict[str, str]],
         on_event: Callable[[protocol.ServerEvent], None] = lambda _ev: None,
         platform_id: bool = False,
         http_client_factory: Callable[[], httpx.AsyncClient] | None = None,
@@ -108,6 +120,7 @@ class RealtimeClient:
         self._awaiting = False  # a response.create was sent and its response.done not seen
         self._watchdog: asyncio.TimerHandle | None = None
         self._dropping: asyncio.Future[None] | None = None
+        self._sending = False  # a write is in flight (a socket lost meanwhile is a stuck send)
         self._target: ConnectTarget | None = None
         self.state = "idle"
         self.reason: str | None = None
@@ -147,6 +160,17 @@ class RealtimeClient:
             raise RuntimeError("realtime client not started")
         return asyncio.run_coroutine_threadsafe(coro, self._loop)
 
+    def _submit_send(self, coro: Any) -> concurrent.futures.Future[bool]:
+        """``_submit`` for a send: without a running loop (never started, or closed) the future
+        is already resolved to False and the send is counted as dropped."""
+        try:
+            return self._submit(coro)
+        except RuntimeError:
+            self._count("dropped")
+            done: concurrent.futures.Future[bool] = concurrent.futures.Future()
+            done.set_result(False)
+            return done
+
     def connect(self, session_update: dict[str, Any]) -> bool:
         """Open a session and wait for ``session.updated`` (blocking; never call it from the
         client thread). False on any failure, with ``reason`` set to a code."""
@@ -156,12 +180,12 @@ class RealtimeClient:
     def send(self, event: dict[str, Any]) -> concurrent.futures.Future[bool]:
         """Queue a client event (thread-safe). The future is True once it is written, False when
         there is no open socket or the send failed (a stuck send aborts the socket)."""
-        return self._submit(self._send(event))
+        return self._submit_send(self._send(event))
 
     def send_audio(self, pcm: bytes) -> concurrent.futures.Future[bool]:
         """Queue ``input_audio_buffer.append`` with PCM16 bytes (thread-safe)."""
         event = protocol.audio_append(pcm)
-        return self._submit(self._send(event, audio_bytes=len(pcm)))
+        return self._submit_send(self._send(event, audio_bytes=len(pcm)))
 
     def close(self) -> None:
         """Close the socket and stop the thread (bounded by ``send_timeout_s`` each)."""
@@ -226,6 +250,9 @@ class RealtimeClient:
                 await ws.send(protocol.encode(session_update))
                 self._count("sent")
                 await self._await_session(ws)
+        except _KeyUnavailable:
+            log.warning("realtime route %s: its key is not available", self.route.name)
+            self._fail("key_unavailable")
         except UrlRefused as exc:
             log.warning("realtime route %s: connect URL refused (%s)", self.route.name, exc.reason)
             self._fail(f"url_{exc.reason}")
@@ -253,8 +280,13 @@ class RealtimeClient:
         return self._target.origin if self._target else ""
 
     async def _open(self, loop: asyncio.AbstractEventLoop, deadline: float) -> ClientConnection:
-        headers = self._key()
+        try:
+            headers = self._key()
+        except Exception:
+            headers = {}
         key = headers.get(AUTH_HEADER, "")
+        if self.route.api_key not in NO_KEY and not key.removeprefix(BEARER).strip():
+            raise _KeyUnavailable  # never connect a keyed route without its key
         request = AllocationRequest(
             self.route,
             key.removeprefix(BEARER) or None,
@@ -272,7 +304,7 @@ class RealtimeClient:
             additional_headers=headers if target.send_key else None,
             user_agent_header=None,
             compression=None,
-            proxy=None,
+            **NO_PROXY,
             open_timeout=max(0.0, deadline - loop.time()),
             ping_interval=s.send_timeout_s,
             ping_timeout=s.send_timeout_s,
@@ -337,6 +369,8 @@ class RealtimeClient:
         try:
             while True:
                 event = self._parse(await ws.recv())
+                if isinstance(event, protocol.Unknown):
+                    continue  # counted only: no progress, not handed out
                 if self._awaiting and not isinstance(event, protocol.Malformed):
                     done = event.type == protocol.RESPONSE_DONE
                     self._awaiting = not done
@@ -348,6 +382,14 @@ class RealtimeClient:
                 reason = "oversize"
                 self._count("oversize")
                 log.warning("realtime route %s: server message over the size cap", self.route.name)
+            elif self._sending and exc.rcvd is None:
+                # Lost while a write was blocked (the keepalive gave up first): a stuck send,
+                # whichever timer fired first. Counted here only when the send's own timeout
+                # has not already dropped this socket.
+                reason = "send_stuck"
+                if self._ws is ws:
+                    self._count("send_stuck")
+                    log.warning("realtime route %s: send stuck, socket lost", self.route.name)
             else:
                 reason = "closed_by_server" if exc.rcvd is not None else "connection_lost"
                 log.info("realtime route %s: socket closed (%s)", self.route.name, reason)
@@ -374,6 +416,7 @@ class RealtimeClient:
                 # armed before the write: a fast server may answer while the send still drains
                 self._awaiting = True
                 self._arm(self.route.first_token_timeout_s)
+            self._sending = True
             try:
                 await asyncio.wait_for(
                     ws.send(protocol.encode(event)), self.settings.send_timeout_s
@@ -391,6 +434,18 @@ class RealtimeClient:
                 log.warning("realtime route %s: send: %s", self.route.name, type(exc).__name__)
                 self._fail("send_failed")
                 await self._drop_socket()
+                return False
+            finally:
+                self._sending = False
+            if _lost_while_writing(ws):
+                # The library wakes a blocked write when the socket is lost (the keepalive gave
+                # up while the send waited): the data never left, so this is a stuck send,
+                # recorded here unless the receive loop already did.
+                if self._ws is ws:
+                    self._count("send_stuck")
+                    log.warning("realtime route %s: send stuck, socket lost", self.route.name)
+                    self._fail("send_stuck")
+                    await self._drop_socket()
                 return False
         self._count("sent")
         if audio_bytes:
@@ -433,6 +488,16 @@ class RealtimeClient:
             with self._lock:
                 if self.state != "closed":
                     self.state, self.reason = "closed", reason
+
+
+def _lost_while_writing(ws: ClientConnection) -> bool:
+    """Whether the socket went down without a close frame from the server while a write was
+    waiting: an aborted transport (keepalive timeout, network loss), not a server close."""
+    return ws.transport.is_closing() and ws.protocol.close_rcvd is None
+
+
+class _KeyUnavailable(Exception):
+    """A route with a key whose header resolved empty (internal)."""
 
 
 class _SessionRefused(Exception):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 
 import pytest
@@ -18,6 +19,7 @@ def client(server: FakeServer, events: list, **kw) -> RealtimeClient:
         route(server.http_base(), **rkw),
         settings(**kw),
         DirectSession(),
+        auth_headers=dict,
         on_event=events.append,
     )
 
@@ -97,7 +99,9 @@ def test_no_session_updated_within_the_connect_timeout(events):
 def test_nothing_listening_fails_to_connect(events):
     with FakeServer() as server:
         base = server.http_base()
-    c = RealtimeClient(route(base), settings(), DirectSession(), on_event=events.append)
+    c = RealtimeClient(
+        route(base), settings(), DirectSession(), auth_headers=dict, on_event=events.append
+    )
     try:
         assert c.connect(UPDATE) is False
         assert c.reason == "connect_failed"
@@ -145,7 +149,7 @@ def test_no_stall_when_no_response_is_due(events):
 
 def test_a_send_stuck_on_a_server_that_stopped_reading_aborts(events):
     with FakeServer("stop_reading") as server:
-        c = client(server, events, send_timeout_s=1.5)
+        c = client(server, events, send_timeout_s=0.5)
         try:
             assert c.connect(UPDATE)
             chunk = b"\x00\x01" * 32_768
@@ -156,6 +160,34 @@ def test_a_send_stuck_on_a_server_that_stopped_reading_aborts(events):
                     break
             assert stuck
             assert c.state == "closed" and c.reason == "send_stuck"
+            assert c.snapshot()["send_stuck"] == 1
+        finally:
+            c.close()
+
+
+def test_a_socket_lost_while_a_send_is_blocked_is_a_stuck_send(events):
+    """Fix round 1, item 4: whatever ends the socket while a write is blocked (here an abort,
+    as the keepalive does when the pong never comes) is ``send_stuck``, not a race between
+    timers. The send timeout is long, so it cannot be what fires."""
+    with FakeServer("stop_reading") as server:
+        c = client(server, events, send_timeout_s=30.0)
+        try:
+            assert c.connect(UPDATE)
+            chunk = b"\x00\x01" * 32_768
+            pending = None
+            for _ in range(2000):
+                future = c.send_audio(chunk)
+                try:
+                    future.result(0.3)
+                except concurrent.futures.TimeoutError:
+                    pending = future  # the write is blocked: the server reads nothing
+                    break
+            assert pending is not None
+            ws = c._ws
+            c._loop.call_soon_threadsafe(ws.transport.abort)
+            assert pending.result(5) is False
+            assert wait_until(lambda: c.state == "closed")
+            assert c.reason == "send_stuck"
             assert c.snapshot()["send_stuck"] == 1
         finally:
             c.close()
@@ -178,7 +210,9 @@ def test_a_failing_event_handler_is_counted(events):
         raise RuntimeError("handler text")
 
     with FakeServer() as server:
-        c = RealtimeClient(route(server.http_base()), settings(), DirectSession(), on_event=boom)
+        c = RealtimeClient(
+            route(server.http_base()), settings(), DirectSession(), auth_headers=dict, on_event=boom
+        )
         try:
             assert c.connect(UPDATE)
             assert c.snapshot()["callback_errors"] >= 2
@@ -190,3 +224,66 @@ def test_repr_names_the_route_and_state_only(events):
     with FakeServer() as server:
         c = client(server, events)
         assert repr(c) == "RealtimeClient(route='rt', state='idle')"
+
+
+class Counting(DirectSession):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def allocate(self, request):
+        self.calls += 1
+        return await super().allocate(request)
+
+
+def no_key() -> dict[str, str]:
+    raise RuntimeError("secret store unreadable")
+
+
+@pytest.mark.parametrize("headers", [dict, lambda: {"Authorization": ""}, no_key])
+def test_a_keyed_route_without_a_resolved_key_does_not_connect(events, headers):
+    """Fix round 1, item 2: the key decision follows the resolved header, not the config."""
+    with FakeServer() as server:
+        provider = Counting()
+        c = RealtimeClient(
+            route(server.http_base(), keyed=True),
+            settings(),
+            provider,
+            auth_headers=headers,
+            on_event=events.append,
+        )
+        try:
+            assert c.connect(UPDATE) is False
+            assert c.reason == "key_unavailable"
+            assert provider.calls == 0 and server.requests == []
+            assert c.snapshot()["key_sent"] is False
+        finally:
+            c.close()
+
+
+def test_auth_headers_is_required():
+    with pytest.raises(TypeError):
+        RealtimeClient(route("http://127.0.0.1:1/v1"), settings(), DirectSession())  # type: ignore[call-arg]
+
+
+def test_send_after_close_resolves_false(events):
+    with FakeServer() as server:
+        c = client(server, events)
+        assert c.connect(UPDATE)
+        c.close()
+        assert c.send(protocol.response_cancel()).result(1) is False
+        assert c.send_audio(PCM).result(1) is False
+
+
+def test_unknown_events_neither_reach_the_handler_nor_keep_a_response_alive(events):
+    """Fix round 1, item 7: only events of the subset count as progress."""
+    with FakeServer("unknown_only") as server:
+        c = client(server, events, first_token_timeout_s=0.3, stall_timeout_s=0.3)
+        try:
+            assert c.connect(UPDATE)
+            c.send(protocol.response_create()).result(2)
+            assert wait_until(lambda: c.state == "closed")
+            assert c.reason == "stall"
+            assert c.snapshot()["unknown"] >= 2
+            assert not any(isinstance(e, protocol.Unknown) for e in events)
+        finally:
+            c.close()

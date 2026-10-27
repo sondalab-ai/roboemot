@@ -146,6 +146,8 @@ class SettingsPort(Protocol):
     ) -> dict[str, Any]: ...
     def removable_routes(self) -> list[str]: ...
 
+    def realtime_key_hosts(self) -> list[str]: ...
+
 
 class SecretsPort(Protocol):
     """``roboemot.webui.secrets_admin.SecretsAdmin`` (SPEC 8 Secrets): secret names with the
@@ -931,11 +933,17 @@ class WebApi:
 
     def _routes(self, req: Request) -> Response:
         """Routes by name, model and host, with the last conformance report and ``removable``
-        (only the runtime layer holds the route, so the page may remove it)."""
+        (only the runtime layer holds the route, so the page may remove it), and the host
+        suffixes the realtime session provider declares (``realtime_key_hosts``)."""
         rows = self._routes_port().list_routes()
         removable = set(self.settings.removable_routes()) if self.settings else set()
+        hosts = self.settings.realtime_key_hosts() if self.settings else []
         return Response(
-            HTTPStatus.OK, {"routes": [{**r, "removable": r["name"] in removable} for r in rows]}
+            HTTPStatus.OK,
+            {
+                "routes": [{**r, "removable": r["name"] in removable} for r in rows],
+                "realtime_key_hosts": hosts,  # where a realtime route's key may also go
+            },
         )
 
     def _route_add(self, req: Request) -> Response:

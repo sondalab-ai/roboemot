@@ -18,6 +18,8 @@ from roboemot.config import GuardrailError
 from roboemot.config.schema import LLMRoute, SafetyConfig
 from roboemot.llm import NoRouteAvailable, Router
 from roboemot.llm.conformance import RouteKindUnsupported
+from roboemot.webui.settings import SettingsEditor
+from roboemot.webui.validation import ValidationError
 from test_cli_llm_check import app_yaml  # noqa: F401  (fixture)
 from test_webui_route_api import stack, store, web  # noqa: F401  (fixtures)
 
@@ -107,3 +109,30 @@ def test_a_kind_change_of_a_keyed_route_needs_the_admin():
     assert guarded.effective().llm_routes[0].kind == "chat"
     guarded.set("llm_routes", routes, admin=True)
     assert guarded.effective().llm_routes[0].kind == "realtime"
+
+
+def test_a_keyed_chat_route_switched_to_realtime_from_the_web_is_refused(web, stack):  # noqa: F811
+    """Fix round 1: the other direction of the kind guard (chat -> realtime)."""
+    post, cloud = route_api.post, route_api.CLOUD
+    body = {**cloud, "secret": "cloud_key", "ack_endpoint": route_api.ORIGIN}
+    assert post(web, "/api/routes/add", body).status == 200
+    resp = post(web, "/api/settings", {"path": "llm_routes.cloud.kind", "value": "realtime"})
+    assert resp.status == 403, resp.json
+    assert next(r for r in stack.effective().llm_routes if r.name == "cloud").kind == "chat"
+    assert web.request("GET", "/api/routes").json["realtime_key_hosts"] == []
+
+
+@pytest.mark.parametrize(("kind", "named"), [("realtime", True), ("chat", False)])
+def test_the_key_confirmation_names_the_provider_key_hosts(stack, kind, named):  # noqa: F811
+    """Fix round 1, item 6: a realtime route's key may also go to the provider's key_hosts."""
+    editor = SettingsEditor(
+        stack, known_secrets=lambda: ["cloud_key"], realtime_key_hosts=lambda: [".rt.example.net"]
+    )
+    with pytest.raises(ValidationError) as exc:
+        editor.add_route({**route_api.CLOUD, "kind": kind}, "cloud_key", None)
+    assert exc.value.code == "endpoint_ack_required"
+    assert exc.value.extra["endpoint"] == route_api.ORIGIN
+    assert ("key_hosts" in exc.value.extra) is named
+    if named:
+        assert exc.value.extra["key_hosts"] == [".rt.example.net"]
+    assert editor.realtime_key_hosts() == [".rt.example.net"]
