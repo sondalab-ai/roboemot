@@ -58,6 +58,17 @@ class UrlRefused(ValueError):
         self.reason = reason
 
 
+class ProviderRefused(RuntimeError):
+    """A provider could not allocate a session: its endpoint answered with an error status
+    (``provider_http_<code>``), an unusable reply, or the route does not fit it. ``reason`` (also
+    the message) is a code only, never a URL, body, key or identifier; the client closes with it
+    and the local pipeline answers."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 class ProviderUnavailable(RuntimeError):
     """The provider registered for this robot cannot be loaded or built. The realtime route is
     then unavailable: there is no fallback to direct mode (it would send the key to the
@@ -82,11 +93,13 @@ class AllocationRequest:
 
 @dataclass(frozen=True)
 class Allocation:
-    """Where to connect (not in ``repr``: its query can carry a token) and the key-host suffixes
-    that apply to it (a subset of the provider's ``key_hosts``)."""
+    """Where to connect (not in ``repr``: its query can carry a token), the key-host suffixes
+    that apply to it (a subset of the provider's ``key_hosts``) and whether the request carried
+    the platform identifier (the report's ``platform_id_sent``; never the value)."""
 
     connect_url: str = field(repr=False)
     key_hosts: tuple[str, ...] = ()
+    platform_id_sent: bool = False
 
 
 @runtime_checkable

@@ -11,6 +11,9 @@ Transport rules:
 
 - the only credential is an ``Authorization`` header, sent only when the URL rules allow it; a
   route with a key whose header resolves empty never connects (``key_unavailable``);
+- a provider that cannot allocate raises ``ProviderRefused``: the client closes with its reason
+  code (``provider_http_<code>``, ...), and the snapshot keeps whether the allocation carried
+  the platform identifier (``platform_id_sent``), never its value;
 - no redirect is followed (the library would re-send the header to the new host), no proxy is
   used (websockets 15 would read the system's, which would see the key and the audio; 13 and
   14 have no proxy support), no compression, ``max_size`` is
@@ -53,6 +56,7 @@ from .session import (
     NO_KEY,
     AllocationRequest,
     ConnectTarget,
+    ProviderRefused,
     SessionProvider,
     UrlRefused,
     connect_target,
@@ -150,6 +154,7 @@ class RealtimeClient:
         self._dropping: asyncio.Future[None] | None = None
         self._sending = False  # a write is in flight (a socket lost meanwhile is a stuck send)
         self._target: ConnectTarget | None = None
+        self._platform_id_sent = False  # the last allocation carried the platform identifier
         self.state = "idle"
         self.reason: str | None = None
         self._counts: collections.Counter[str] = collections.Counter()
@@ -253,6 +258,7 @@ class RealtimeClient:
                 "endpoint": target.origin if target else None,
                 "local": target.local if target else None,
                 "key_sent": target.send_key if target else False,
+                "platform_id_sent": self._platform_id_sent,
                 "key_hosts": list(self.provider.key_hosts),
                 "failures": dict(self._failures),
                 "malformed": dict(self._malformed),
@@ -311,6 +317,9 @@ class RealtimeClient:
         except UrlRefused as exc:
             log.warning("realtime route %s: connect URL refused (%s)", self.route.name, exc.reason)
             self._fail(f"url_{exc.reason}")
+        except ProviderRefused as exc:
+            log.warning("realtime route %s: no session allocated (%s)", self.route.name, exc.reason)
+            self._fail(exc.reason)
         except TimeoutError:
             log.warning("realtime route %s: no session within the connect timeout", self.route.name)
             self._fail("connect_timeout")
@@ -350,6 +359,8 @@ class RealtimeClient:
             self._http_client_factory,
         )
         allocation = await self.provider.allocate(request)
+        with self._lock:
+            self._platform_id_sent = allocation.platform_id_sent is True
         target = connect_target(self.route, allocation, tuple(self.provider.key_hosts))
         with self._lock:
             self._target = target

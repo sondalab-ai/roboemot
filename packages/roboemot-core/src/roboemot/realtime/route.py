@@ -556,6 +556,7 @@ class RealtimeRoute:
             on_event=lambda event: self._on_event(event, token),
             on_close=lambda reason: self._on_close(reason, token),
             local_only=lambda: self.stack.effective().privacy.pseudonyms_to_cloud,
+            platform_id=cfg.privacy.realtime_platform_id,
             may_send=lambda: bool(box) and self._may_send_update(token, closes, box[0]),
         )
         box.append(client)
@@ -1130,7 +1131,7 @@ class RealtimeRoute:
                 "endpoint": snap.get("endpoint"),
                 "audio_egress": self._egress,
                 "audio_blocked": self._audio_blocked,  # why the last burst was refused
-                "platform_id_sent": False,
+                "platform_id_sent": bool(snap.get("platform_id_sent", False)),
                 "provider_hosts": self.key_hosts,  # report keys must avoid "key"
                 "generation": self.generation,  # server sessions opened so far
                 "responses": dict(self._statuses),

@@ -399,3 +399,75 @@ async def test_the_default_allocation_client_ignores_the_environment():
         assert client.trust_env is False and client.follow_redirects is False
     finally:
         await client.aclose()
+
+
+# ------------------------------------------------------------------ SR-4: provider refusals
+
+
+class Refusing:
+    """A provider whose allocator answered with an error status."""
+
+    key_hosts: tuple[str, ...] = ()
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        self.requests: list[AllocationRequest] = []
+
+    async def allocate(self, request: AllocationRequest) -> Allocation:
+        self.requests.append(request)
+        raise sess.ProviderRefused(self.reason)
+
+
+def test_a_provider_refusal_is_the_close_reason_and_nothing_connects(caplog):
+    """SR-4: a provider names why it cannot allocate (``provider_http_<code>`` and the like);
+    the client fails with that code, never ``connect_failed`` (SPEC 8, Session providers)."""
+    caplog.set_level(logging.DEBUG)
+    with FakeServer() as server:
+        provider = Refusing("provider_http_503")
+        closes: list[str] = []
+        c = RealtimeClient(
+            route(server.http_base(), keyed=True),
+            settings(),
+            provider,
+            auth_headers=bearer,
+            on_close=closes.append,
+        )
+        try:
+            assert c.connect(UPDATE) is False
+            assert c.reason == "provider_http_503" and closes == ["provider_http_503"]
+            assert c.snapshot()["failures"] == {"provider_http_503": 1}
+            assert server.requests == []
+        finally:
+            c.close()
+    assert KEY not in caplog.text
+
+
+def test_provider_refused_carries_a_reason_code_only():
+    exc = sess.ProviderRefused("provider_url")
+    assert exc.reason == "provider_url" and str(exc) == "provider_url"
+
+
+def test_the_client_reports_whether_the_platform_identifier_was_sent():
+    """SR-4: the opt-in reaches the provider, and the client's snapshot says whether the
+    allocation actually carried the identifier (SPEC 12A, ``platform_id_sent``)."""
+
+    class Sending(OtherHost):
+        async def allocate(self, request: AllocationRequest) -> Allocation:
+            self.requests.append(request)
+            return Allocation(self.url, platform_id_sent=request.platform_id)
+
+    with FakeServer() as server:
+        url = f"ws://localhost:{server.port}/realtime"
+        for opted in (False, True):
+            provider = Sending(url)
+            c = RealtimeClient(
+                route(server.http_base()), settings(), provider, auth_headers=bearer,
+                platform_id=opted,
+            )  # fmt: skip
+            try:
+                assert c.snapshot()["platform_id_sent"] is False  # nothing allocated yet
+                assert c.connect(UPDATE)
+                assert provider.requests[0].platform_id is opted
+                assert c.snapshot()["platform_id_sent"] is opted
+            finally:
+                c.close()

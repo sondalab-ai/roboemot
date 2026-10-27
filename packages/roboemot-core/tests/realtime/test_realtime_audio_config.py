@@ -58,3 +58,14 @@ def test_server_silence_must_cover_the_local_end_silence():
         {"voice": {"vad": {"end_silence_ms": 600}, "realtime_route": {"server_silence_ms": 600}}}
     )
     assert cfg.voice.realtime_route.server_silence_ms == 600
+
+
+def test_the_platform_identifier_is_an_off_by_default_opt_in():
+    """SR-4: the session provider may send the robot's platform identifier only with this
+    opt-in (SPEC 12, Data); the help text names no robot or vendor (SPEC 4A, Hierarchy gate)."""
+    assert PrivacyConfig().realtime_platform_id is False
+    field = PrivacyConfig.model_fields["realtime_platform_id"]
+    assert field.json_schema_extra["opt_in"] is True
+    assert field.description.startswith(
+        "Let the platform's session provider send the robot's platform identifier"
+    )
