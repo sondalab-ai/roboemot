@@ -160,13 +160,18 @@ def test_startup_binds_the_input_to_the_listener_and_closes_it_before_the_route(
     bound = []
     route = SimpleNamespace(input=None)
     host = SimpleNamespace(speech=SpeechActivity(0.0))
+    sleep = SimpleNamespace(asleep=False)
     with ExitStack() as cleanup:
-        bind_realtime_input(host, route, SimpleNamespace(bind_realtime=bound.append), cleanup)
+        bind_realtime_input(
+            host, route, SimpleNamespace(bind_realtime=bound.append), cleanup, sleep
+        )
         (audio_in,) = bound
         assert route.input is audio_in
-        assert not audio_in._speaking()
+        assert not audio_in._speaking() and not audio_in._asleep()
         host.speech.extend(10**9)
         assert audio_in._speaking()  # nothing goes while the robot speaks
+        sleep.asleep = True
+        assert audio_in._asleep()  # nor while it sleeps (SleepGate.asleep, B-1)
     job = audio_in.submit(speech(0.1), RATE)
     assert job.done and job.refused == "closed"
 
@@ -345,3 +350,9 @@ def test_the_burst_and_its_items_never_show_in_repr(rig_for):
     burst.order["in_secret"] = None
     burst.open.add("in_secret")
     assert "in_secret" not in repr(burst)
+
+
+def test_the_upload_count_lives_in_the_data_folder(tmp_path):
+    from roboemot import paths
+
+    assert paths.realtime_upload_path(str(tmp_path)) == tmp_path / "realtime_upload.json"

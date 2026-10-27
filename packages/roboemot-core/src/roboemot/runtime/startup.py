@@ -13,6 +13,7 @@ import time
 from contextlib import ExitStack
 from typing import Any
 
+from roboemot import paths
 from roboemot.config import ConfigStack
 from roboemot.conversation import ConversationWorker
 from roboemot.conversation.preferences import RegistryPreferences
@@ -89,7 +90,13 @@ def start_voice_output(
     if listener is None:
         return
     realtime = host.realtime_route = (
-        RealtimeRoute(stack, lambda: p.hub.router, p.network, p.realtime_provider)
+        RealtimeRoute(
+            stack,
+            lambda: p.hub.router,
+            p.network,
+            p.realtime_provider,
+            upload_path=paths.realtime_upload_path(p.cfg.data_dir),
+        )
         if p.cfg.voice.realtime_route.enabled
         else None
     )
@@ -135,7 +142,7 @@ def start_voice_output(
     )
     if realtime is not None:  # closed after the conversation (no turn uses it any more)
         cleanup.callback(realtime.close)
-        bind_realtime_input(host, realtime, listener, cleanup)
+        bind_realtime_input(host, realtime, listener, cleanup, p.sleep)
     cleanup.callback(conv.close)
     conv.start()
     if realtime is not None:
@@ -145,13 +152,18 @@ def start_voice_output(
 
 
 def bind_realtime_input(
-    host: RuntimeHost, realtime: RealtimeRoute, listener: Any, cleanup: ExitStack
+    host: RuntimeHost, realtime: RealtimeRoute, listener: Any, cleanup: ExitStack, sleep: Any
 ) -> None:
     """Addressed utterances' audio to the realtime route (SPEC 8, Realtime speech route): the
-    listener hands it to a ``RealtimeInput``, which sends nothing while the robot speaks and
-    only through the route's send gate (``input: audio`` with ``privacy.realtime_audio``).
-    Closed before the route."""
-    audio_in = RealtimeInput(realtime, speaking=lambda: host.speech.speaking(time.monotonic()))
+    listener hands it to a ``RealtimeInput``, which sends nothing while the robot speaks or
+    sleeps (``sleep`` is the ``SleepGate``: asleep counts whatever
+    ``runtime.pause_when_asleep`` says) and only through the route's send gate
+    (``input: audio`` with ``privacy.realtime_audio``). Closed before the route."""
+    audio_in = RealtimeInput(
+        realtime,
+        speaking=lambda: host.speech.speaking(time.monotonic()),
+        asleep=lambda: bool(sleep.asleep),
+    )
     listener.bind_realtime(audio_in)
     cleanup.callback(audio_in.close)
 

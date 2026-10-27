@@ -58,6 +58,7 @@ class Ear:
         to_worker=False,
         decode_s=0.0,
         background=False,
+        asleep=lambda: False,
     ):
         self.rt = rt
         cfg = rt.stack.effective()
@@ -73,7 +74,7 @@ class Ear:
         self.r.asr = DecodeASR(script, final, decoded, decode_s)
         self.r.asr.loaded = list(cfg.voice.asr.models)
         self.r.listener._asr = self.r.asr
-        self.input = RealtimeInput(rt.route)
+        self.input = RealtimeInput(rt.route, asleep=lambda: asleep())
         self.r.listener.bind_realtime(self.input)
         if to_worker:
             sink = self.r.listener._on_utterance
@@ -439,3 +440,57 @@ def test_a_transcript_timeout_is_decoded_off_the_listener_thread(ears):
         assert ear.r.asr.decode_threads == ["roboemot-decode"]
         assert total["lag_max_s"] < slow / 2
         assert total["share"] * total["audio_s"] < slow / 4
+
+
+def sleep_gate(ear, pause):
+    """The runtime's own SleepGate over the rig's listener and route (the other parts empty)."""
+    from roboemot.runtime.sleep import SleepGate
+
+    loop = SimpleNamespace(
+        motors_off=False, link=SimpleNamespace(online=True), clear=lambda source: None
+    )
+    gate = SleepGate(
+        SimpleNamespace(conversation=ear.rt.worker, speech_output=ear.rt.speech),
+        SimpleNamespace(publish=lambda *a, **k: None),
+        loop,
+        SimpleNamespace(service=None),
+        SimpleNamespace(pause=lambda: None, resume=lambda: None, paused=False),
+        ear.r.listener,
+        SimpleNamespace(release=lambda: None),
+        None,
+        lambda: pause,
+        lambda: ear.rt.route,
+    )
+    return gate, loop
+
+
+@pytest.mark.parametrize("pause", [False, True])
+def test_a_sleeping_robot_sends_no_audio_whatever_the_pause(ears, pause):
+    """B-1: with runtime.pause_when_asleep off nothing is paused or closed, and asleep is
+    still a send condition; with it on, an utterance queued behind a burst in flight is not
+    sent after sleep began."""
+    box = {}
+    with TurnServer(heard=[["primo"]], speech_delay_s=[2.0]) as server:
+        ear = ears(
+            server,
+            script=["x"],
+            decoded="secondo",
+            bearing=FACE_RAD,
+            asleep=lambda: box["gate"].asleep,
+        )
+        gate, loop = sleep_gate(ear, pause)
+        box["gate"] = gate
+        ear.say()  # the first burst goes; its transcript is late
+        assert ear.settle(lambda: len(server.of("input_audio_buffer.commit")) == 1)
+        ear.say()  # the second waits behind it in the input
+        assert ear.r.listener.snapshot()["realtime_audio"]["sent"] == 2
+        loop.motors_off = True
+        gate.tick(time.monotonic())
+        assert gate.asleep and gate.paused == pause
+        ear.r.now += ear.rt.stack.effective().voice.realtime_route.transcript_timeout_s
+        assert ear.settle(lambda: len(ear.utterances) == 2)
+        assert ear.rt.route.snapshot()["audio_refused"] >= 1  # recorded: the gate said no
+        ear.say()  # an utterance while asleep: the Vosk way, never sent
+        assert ear.settle(lambda: len(ear.utterances) == 3)
+        assert len(server.of("input_audio_buffer.commit")) == 1
+        assert ear.utterances[2].realtime is None
