@@ -231,8 +231,15 @@ def test_close_ends_every_queued_job_and_sends_nothing_more(rig_for):
         rig.input.close()
         assert first.done and second.done
         rig.route.release_input()
-        assert server.of("input_audio_buffer.append") == []
         assert not rig.input._thread_alive()
+        later = RealtimeInput(rig.route)  # a later burst: its commit comes after any late send
+        try:
+            job = later.submit(speech(0.5), RATE)
+            assert wait_for(lambda: job.done)
+            assert len(server.of("input_audio_buffer.commit")) == 1
+            assert len(server.of("session.update")) == 2  # the connect's and the later burst's
+        finally:
+            later.close()
 
 
 def test_a_turn_in_flight_holds_the_burst_until_it_ends(rig_for):
@@ -246,6 +253,9 @@ def test_a_turn_in_flight_holds_the_burst_until_it_ends(rig_for):
         rig.route.release_input()
         assert wait_for(lambda: job.done)
         assert job.result is not None and job.result.text == "dopo"
+        snap = rig.route.snapshot()
+        assert snap["audio_held"] == 1  # once per burst, however long the hold
+        assert snap["audio_refused"] == 0  # a hold is not a refusal
 
 
 def test_a_server_without_item_ids_still_joins_and_counts_what_it_cannot_delete(rig_for):
@@ -261,12 +271,14 @@ def test_a_server_without_item_ids_still_joins_and_counts_what_it_cannot_delete(
 
 
 def test_an_item_without_id_that_must_go_is_counted_as_undeletable(rig_for):
-    with TurnServer(heard=[["tardi"]], ids=False, speech_delay_s=[0.3]) as server:
+    with TurnServer(heard=[["tardi"]], ids=False, speech_delay_s=[1.0]) as server:
         rig = rig_for(server)
         job = rig.input.submit(speech(0.5), RATE)
         assert wait_for(lambda: len(server.of("input_audio_buffer.commit")) == 1)
-        rig.input.cancel(job)
+        rig.input.cancel(job)  # well before the server's VAD speaks: the late path
+        assert rig.input._dead_anon == 0  # nothing of it heard yet
         assert wait_for(lambda: rig.route.snapshot()["audio_items_undeletable"] == 1)
+        assert rig.input._dead_anon == 0  # its late speech_started, then its transcript
         assert server.of("conversation.item.delete") == []
 
 
@@ -433,3 +445,15 @@ def test_an_id_less_burst_with_nothing_pending_still_joins():
         assert "audio_items_ambiguous" not in counts
     finally:
         inp.close()
+
+
+def test_a_decode_job_keeps_no_audio_once_it_ran_or_was_dropped():
+    """Minor (M-N5): the task closure holds a view of the utterance's audio."""
+    from roboemot.voice.decode_worker import DecodeJob
+
+    ran = DecodeJob(lambda: "ciao", 1.0)
+    ran.run()
+    assert ran.result == "ciao" and ran._task is None
+    dropped = DecodeJob(lambda: "ciao", 1.0)
+    dropped.drop()
+    assert dropped._task is None

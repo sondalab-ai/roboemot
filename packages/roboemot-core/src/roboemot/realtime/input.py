@@ -332,10 +332,11 @@ class RealtimeInput:
             )
             if why != "turn":
                 break
-            if not waited:
+            if not waited:  # counted once per burst, however long the hold
                 waited = True
                 with self._lock:
                     self.held += 1
+                self.route.count("audio_held")
             if job.wait(HOLD_POLL_S) or self._closed:
                 why = "cancelled"
                 break

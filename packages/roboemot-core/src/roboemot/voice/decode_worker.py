@@ -29,7 +29,8 @@ class DecodeJob:
     skipped; ``ran`` only after it ran."""
 
     def __init__(self, task: Callable[[], str], deadline: float) -> None:
-        self._task, self.deadline = task, deadline
+        self._task: Callable[[], str] | None = task  # holds the utterance's audio until run
+        self.deadline = deadline
         self._done = threading.Event()
         self.result = ""
         self.ran = False
@@ -45,8 +46,10 @@ class DecodeJob:
         return self._done.wait(timeout_s)
 
     def run(self) -> None:
+        task, self._task = self._task, None  # no audio kept once it ran
         try:
-            self.result = self._task()
+            if task is not None:
+                self.result = task()
         except Exception as exc:
             log.warning("voice: decode: %s", type(exc).__name__)
         finally:
@@ -54,6 +57,7 @@ class DecodeJob:
             self._done.set()
 
     def drop(self) -> None:
+        self._task = None  # nor once it was dropped
         self._done.set()
 
 

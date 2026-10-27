@@ -977,7 +977,8 @@ class RealtimeRoute:
             self._settle(orphans, "reconfigured")
             if client is not None:
                 self._close_client(client, "reconfigured")
-        self._count("audio_refused" if why is not None else "audio_sent")
+        if why != "turn":  # a hold is not a refusal: the input counts it once (audio_held)
+            self._count("audio_refused" if why is not None else "audio_sent")
         return why
 
     def _uploaded(self) -> float:
@@ -1161,6 +1162,7 @@ COUNTERS = (
     "utterances_sent",
     "audio_sent",
     "audio_refused",
+    "audio_held",
     "audio_items",
     "audio_items_deleted",
     "audio_items_unnamed",
