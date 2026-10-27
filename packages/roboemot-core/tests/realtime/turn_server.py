@@ -130,6 +130,8 @@ class TurnServer(FakeServer):
         for item in items:
             await self._send(ws, {"type": "input_audio_buffer.speech_started", "item_id": item})
             await self._send(ws, {"type": "input_audio_buffer.speech_stopped", "item_id": item})
+        if self.vad_answers and items:  # its VAD ended the turn: it answers by itself
+            await self._send(ws, {"type": "response.created", "response": {"id": f"auto_{burst}"}})
         if self.transcript_delay_s:
             await asyncio.sleep(self.transcript_delay_s)
         for item, text in zip(items, texts, strict=True):
@@ -141,8 +143,6 @@ class TurnServer(FakeServer):
                     "transcript": text,
                 },
             )
-        if self.vad_answers and items:
-            await self._send(ws, {"type": "response.created", "response": {"id": f"auto_{burst}"}})
 
     async def _respond(
         self, ws: ServerConnection, script: str, cancel: asyncio.Event, event_id: str | None

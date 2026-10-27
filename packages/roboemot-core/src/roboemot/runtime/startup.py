@@ -19,6 +19,7 @@ from roboemot.conversation.preferences import RegistryPreferences
 from roboemot.conversation.sources import profile_source, registry_names, scene_source
 from roboemot.health.speech_cue import Delivery, SpeechCue
 from roboemot.persona import apply_to_register, effects
+from roboemot.realtime.input import RealtimeInput
 from roboemot.realtime.route import RealtimeRoute
 from roboemot.skills.bridge import SkillBridge
 from roboemot.skills.defaults import default_skills
@@ -134,12 +135,25 @@ def start_voice_output(
     )
     if realtime is not None:  # closed after the conversation (no turn uses it any more)
         cleanup.callback(realtime.close)
+        bind_realtime_input(host, realtime, listener, cleanup)
     cleanup.callback(conv.close)
     conv.start()
     if realtime is not None:
         realtime.start()
     if bargein is not None:
         bind_barge_in(bargein, output, conv, listener)
+
+
+def bind_realtime_input(
+    host: RuntimeHost, realtime: RealtimeRoute, listener: Any, cleanup: ExitStack
+) -> None:
+    """Addressed utterances' audio to the realtime route (SPEC 8, Realtime speech route): the
+    listener hands it to a ``RealtimeInput``, which sends nothing while the robot speaks and
+    only through the route's send gate (``input: audio`` with ``privacy.realtime_audio``).
+    Closed before the route."""
+    audio_in = RealtimeInput(realtime, speaking=lambda: host.speech.speaking(time.monotonic()))
+    listener.bind_realtime(audio_in)
+    cleanup.callback(audio_in.close)
 
 
 def bind_barge_in(bargein: Any, output: Any, conv: Any, listener: Any) -> None:

@@ -148,3 +148,24 @@ def test_the_job_never_shows_the_transcript(rig_for):
         assert wait_for(lambda: job.done)
         assert "segreto" not in repr(job) and "segreto" not in repr(job.result)
         assert "in_1_0" not in repr(job.result)
+
+
+def test_startup_binds_the_input_to_the_listener_and_closes_it_before_the_route():
+    from contextlib import ExitStack
+    from types import SimpleNamespace
+
+    from roboemot.runtime.startup import bind_realtime_input
+    from roboemot.voice.activity import SpeechActivity
+
+    bound = []
+    route = SimpleNamespace(input=None)
+    host = SimpleNamespace(speech=SpeechActivity(0.0))
+    with ExitStack() as cleanup:
+        bind_realtime_input(host, route, SimpleNamespace(bind_realtime=bound.append), cleanup)
+        (audio_in,) = bound
+        assert route.input is audio_in
+        assert not audio_in._speaking()
+        host.speech.extend(10**9)
+        assert audio_in._speaking()  # nothing goes while the robot speaks
+    job = audio_in.submit(speech(0.1), RATE)
+    assert job.done and job.refused == "closed"
