@@ -38,7 +38,13 @@ def start_webui(
     """
     unsubscribe = None
     try:
-        live = LiveState(host, p, stack.effective(), clock=p.loop.clock)
+        live = LiveState(
+            host,
+            p,
+            stack.effective(),
+            clock=p.loop.clock,
+            audio_egress=lambda: (r := host.realtime_route) is not None and r.audio_egress,
+        )
         unsubscribe = stack.subscribe(live.apply_config)
         live.apply_config(
             SimpleNamespace(config=stack.effective())
@@ -53,6 +59,9 @@ def start_webui(
             store=paths.settings_overrides_path(cfg.data_dir),
             manifest=manifest,
             known_secrets=secrets.names,
+            realtime_key_hosts=lambda: (
+                list(provider.key_hosts) if (provider := p.realtime_provider) is not None else []
+            ),
         )
         settings.restore()
         server = make_server(

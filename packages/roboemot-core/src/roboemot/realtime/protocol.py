@@ -55,6 +55,8 @@ FUNCTION_CALL_DONE = "response.function_call_arguments.done"
 RESPONSE_DONE = "response.done"
 
 AUDIO_FORMAT = "audio/pcm"  # PCM16 little endian, mono
+# The rate of the reply's PCM when the server does not say (the OpenAI realtime PCM default).
+DEFAULT_OUTPUT_RATE_HZ = 24000
 PCM_SAMPLE_BYTES = 2
 TOOL_CHOICES = ("auto", "none")  # "none" only after the tool-round cap: it forbids no tool
 RESPONSE_STATUSES = ("completed", "cancelled", "incomplete", "failed")
@@ -74,7 +76,7 @@ def session_update(
     instructions: str,
     input_rate_hz: int,
     output_rate_hz: int | None,
-    voice: str,
+    voice: str | None,
     vad_threshold: float,
     silence_ms: int,
     create_response: bool,
@@ -82,9 +84,12 @@ def session_update(
     tools: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """``session.update``: instructions, PCM16 in and out (``output_rate_hz`` None asks for the
-    server's native rate, a speech-to-speech extension), server VAD with its threshold and end
-    silence, and the function tools (realtime format, ``function_tools``) with
-    ``tool_choice: "auto"``."""
+    server's native rate, a speech-to-speech extension), the voice (left out when empty: the
+    server's default), server VAD with its threshold and end silence, and the function tools
+    (realtime format, ``function_tools``) with ``tool_choice: "auto"``."""
+    output: dict[str, Any] = {"format": {"type": AUDIO_FORMAT, "rate": output_rate_hz}}
+    if voice:
+        output["voice"] = voice
     session: dict[str, Any] = {
         "type": "realtime",
         "instructions": instructions,
@@ -99,7 +104,7 @@ def session_update(
                     "interrupt_response": interrupt_response,
                 },
             },
-            "output": {"format": {"type": AUDIO_FORMAT, "rate": output_rate_hz}, "voice": voice},
+            "output": output,
         },
     }
     if tools:
@@ -136,24 +141,26 @@ def audio_commit() -> dict[str, Any]:
     return {"type": AUDIO_COMMIT}
 
 
-def text_item(text: str) -> dict[str, Any]:
-    """A user message as ``input_text`` (the only message content the servers take)."""
-    return {
-        "type": ITEM_CREATE,
-        "item": {
-            "type": "message",
-            "role": "user",
-            "content": [{"type": "input_text", "text": text}],
-        },
+def text_item(text: str, item_id: str | None = None) -> dict[str, Any]:
+    """A user message as ``input_text`` (the only message content the servers take).
+    ``item_id`` is the client's own id for it, so it can be deleted later."""
+    item: dict[str, Any] = {
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": text}],
     }
+    if item_id is not None:
+        item["id"] = item_id
+    return {"type": ITEM_CREATE, "item": item}
 
 
-def function_output(call_id: str, output: str) -> dict[str, Any]:
-    """The result of a tool call, as a ``function_call_output`` item."""
-    return {
-        "type": ITEM_CREATE,
-        "item": {"type": "function_call_output", "call_id": call_id, "output": output},
-    }
+def function_output(call_id: str, output: str, item_id: str | None = None) -> dict[str, Any]:
+    """The result of a tool call, as a ``function_call_output`` item (``item_id``: the
+    client's own id for it)."""
+    item: dict[str, Any] = {"type": "function_call_output", "call_id": call_id, "output": output}
+    if item_id is not None:
+        item["id"] = item_id
+    return {"type": ITEM_CREATE, "item": item}
 
 
 def item_delete(item_id: str) -> dict[str, Any]:
@@ -274,6 +281,7 @@ class FunctionCall(ServerEvent):
     call_id: str = field(default="", repr=False)
     name: str = ""
     arguments: str = field(default="", repr=False)
+    item_id: str | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -424,7 +432,12 @@ def _event(kind: str, data: dict[str, Any]) -> ServerEvent:
         if not name or not call_id:
             raise _Bad("field")
         return FunctionCall(
-            kind, _opt_str(data, "response_id"), call_id, name, _text(data, "arguments")
+            kind,
+            _opt_str(data, "response_id"),
+            call_id,
+            name,
+            _text(data, "arguments"),
+            _opt_str(data, "item_id"),
         )
     if kind == RESPONSE_DONE:
         return _response_done(data)

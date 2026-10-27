@@ -2748,8 +2748,46 @@ class VoiceDirectionConfig(Strict):
 
 
 class RealtimeRouteConfig(Strict):
-    """The realtime speech route's client (SPEC 8, Realtime speech route): the transport limits.
-    Which route and whether it is used are decided elsewhere; off by default."""
+    """The realtime speech route (SPEC 8, Realtime speech route): whether and how the robot
+    answers through a ``kind: realtime`` route, and the client's transport limits. Off by
+    default; the local pipeline is the fallback."""
+
+    enabled: bool = param(
+        False,
+        "Answer through the realtime route: the local transcript goes to it as text and its "
+        "voice speaks the reply; the local pipeline answers whenever it is unavailable",
+        restart=True,
+    )
+    route: str = param(
+        "",
+        "Name of the llm_routes entry (kind: realtime) the robot answers through",
+        restart=True,
+    )
+    # Not called "session": field names with it are redacted as secrets (``redact``).
+    mode: Literal["direct", "platform"] = param(
+        "direct",
+        "direct: connect to the route's own URL; platform: the robot's session provider "
+        "allocates the session (the route's base_url is the provider's endpoint)",
+        restart=True,
+    )
+    input: Literal["text", "audio"] = param(
+        "text",
+        "What leaves the robot for an addressed utterance: text (the local transcript) or "
+        "audio (needs its own opt-in; not available yet, the local pipeline answers)",
+    )
+    voice: str = param("", "Server voice name; empty uses the server's default")
+    prebuffer_ms: float = param(
+        200.0,
+        "Reply audio held before playback starts, against network jitter",
+        unit="ms",
+        ge=0,
+        le=2000,
+    )
+    mood_instructions: bool = param(
+        True,
+        "Add the mood's voice instructions to each request (shapes the wording; the server's "
+        "voice ignores rate, pitch and pauses)",
+    )
 
     connect_timeout_s: float = param(
         5.0,
@@ -4311,6 +4349,25 @@ with warnings.catch_warnings():
             dupes = sorted({n for n in names if names.count(n) > 1})
             if dupes:
                 raise ValueError(f"duplicate llm route names: {dupes}")
+            return self
+
+        @model_validator(mode="after")
+        def _route_kinds_fit(self) -> RoboEmotConfig:
+            """The realtime route must be a ``kind: realtime`` route, and the speech backend's
+            route a chat one (SPEC 8, Realtime speech route)."""
+            kinds = {r.name: r.kind for r in self.llm_routes}
+            realtime = self.voice.realtime_route.route
+            if realtime and kinds.get(realtime) != "realtime":
+                raise ValueError(
+                    f"voice.realtime_route.route {realtime!r} must name an llm_routes entry "
+                    "with kind: realtime"
+                )
+            speech = self.voice.openai_speech.route
+            if speech and kinds.get(speech) == "realtime":
+                raise ValueError(
+                    f"voice.openai_speech.route {speech!r} names a kind: realtime route; "
+                    "the speech backend needs a chat route"
+                )
             return self
 
         @model_validator(mode="after")

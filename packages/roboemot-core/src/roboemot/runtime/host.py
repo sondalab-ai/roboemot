@@ -27,6 +27,7 @@ from roboemot.llm import Router
 from roboemot.llm.hub import RouterHub
 from roboemot.llm.pseudonyms import NameSource
 from roboemot.persona.llm_traits import TraitsWorker
+from roboemot.realtime.route import RealtimeRoute
 from roboemot.reflex import ReflexEngine
 from roboemot.robot_platform import AudioHub, RobotSession, Speaker
 from roboemot.runtime.live_video import LiveVideo
@@ -77,6 +78,7 @@ class RuntimeHost:
     name_source: NameSource | None = None  # registry names for pseudonyms outside the conversation
     router_hub: RouterHub | None = None  # the one router: traits, conversation, speech, checks
     conversation: ConversationWorker | None = None  # answers addressed utterances (voice.enabled)
+    realtime_route: RealtimeRoute | None = None  # the realtime speech route, when enabled
     phase: ConversationPhase | None = None  # idle / listening / thinking / speaking (Live tab)
     live_video: LiveVideo | None = None  # the Live tab's preview (set when the web UI starts)
     transcript: TranscriptRing | None = None  # opt-in in-memory turns (Live tab, SPEC 12)

@@ -42,6 +42,16 @@ push starts to play, so the speaker's echo reference records the audio as it rea
 speech timeline gets the samples *before* the gain: the speaking motion follows the sentence as
 spoken, not the duck, so a duck neither stops nor shrinks it. ``stop`` clears the duck.
 
+``stream`` plays audio that arrives already synthesized, in pieces, from another thread (the
+realtime speech route's reply, SPEC 8, Realtime speech route): a :class:`StreamFeed` the caller
+fills. The stream job sits in the same queue, under the same epoch, and pushes through the same
+``_push(..., speech=True)`` path as a sentence, so the duck, the speech timeline, the echo
+reference (the sink's), underruns, ``played``, ``ended_at`` and ``question_end`` work unchanged.
+It holds ``voice.realtime_route.prebuffer_ms`` of audio before its first push (network jitter),
+applies the caller's volume as gain, and counts as one sentence. Its question flag can come late
+(``mark_question``: the reply's transcript arrives while its audio plays). ``stop`` cuts it like a
+sentence, and its feed then refuses more audio.
+
 Every push also feeds :attr:`SpeechOutput.timeline` (:mod:`roboemot.voice.envelope`): energy
 frames, sentence bounds, phrase gaps and emphasis peaks on the playback clock, for the speaking
 motion. ``stop`` truncates it under the same lock, so nothing after a barge-in stays on it.
@@ -58,7 +68,7 @@ import math
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
@@ -85,6 +95,7 @@ RTF_LEVELS = {"p50": P50, "p90": P90}
 SAID_UTTERANCES_MAX = 64  # answers whose sentence count and last delivery are remembered
 
 
+PCM16_FULL_SCALE = 32768.0  # int16 sample to float in [-1, 1)
 QUESTION_MARKS = ("?", "？")
 CLOSERS = "\"')]}»”’›"
 
@@ -139,6 +150,81 @@ class _Job:
     said_at: float
     question: bool = False  # this piece's own text ends in a question mark
     continued: bool = False  # the rest of a sentence the splitter cut
+
+
+class StreamFeed:
+    """Audio for one stream job, filled from any thread (``put``, then ``end``). PCM16 bytes
+    (little endian, mono) or float samples. Once the job is cut by a stop or has finished, the
+    feed is closed and ``put`` returns False: nothing more will play."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._chunks: collections.deque[tuple[np.ndarray, int]] = collections.deque()
+        self._ended = False
+        self._closed = False
+        self._buffered_s = 0.0
+        self._wake: Callable[[], None] | None = None
+
+    @property
+    def closed(self) -> bool:
+        with self._lock:
+            return self._closed
+
+    def put(self, samples: bytes | np.ndarray, rate_hz: int) -> bool:
+        """Queue a piece of audio; False when the feed no longer takes any."""
+        if isinstance(samples, bytes | bytearray | memoryview):
+            pcm = np.frombuffer(samples, "<i2").astype(np.float32) / np.float32(PCM16_FULL_SCALE)
+        else:
+            pcm = np.asarray(samples, np.float32)
+        with self._lock:
+            if self._closed or self._ended:
+                return False
+            if pcm.size and rate_hz > 0:
+                self._chunks.append((pcm, rate_hz))
+                self._buffered_s += pcm.size / rate_hz
+            wake = self._wake
+        if wake is not None:
+            wake()
+        return True
+
+    def end(self) -> None:
+        """No more audio: the job plays what it holds and finishes."""
+        with self._lock:
+            self._ended = True
+            wake = self._wake
+        if wake is not None:
+            wake()
+
+    def close(self) -> None:
+        """Refuse more audio and drop what is held (the job is over or was cut)."""
+        with self._lock:
+            self._closed = True
+            self._chunks.clear()
+
+    def _bind(self, wake: Callable[[], None]) -> None:
+        with self._lock:
+            self._wake = wake
+
+    def _ready(self, prebuffer_s: float) -> bool:
+        with self._lock:
+            return self._ended or self._closed or self._buffered_s >= prebuffer_s
+
+    def _take(self) -> tuple[list[tuple[np.ndarray, int]], bool]:
+        """Everything held, and whether the feed has ended (or was closed)."""
+        with self._lock:
+            chunks = list(self._chunks)
+            self._chunks.clear()
+            return chunks, self._ended or self._closed
+
+
+@dataclass
+class _StreamJob(_Job):
+    """Audio from a :class:`StreamFeed`, played as one sentence (``SpeechOutput.stream``)."""
+
+    feed: StreamFeed = field(default_factory=StreamFeed)
+    gain: float = 1.0
+    prebuffer_s: float = 0.0
+    pushed_s: float = 0.0
 
 
 class SpeechOutput:
@@ -207,6 +293,9 @@ class SpeechOutput:
         self._duck: DuckGain | None = None  # barge-in ducking, set by the runtime with barge-in
         self._sink_ducks = False  # the sink applies the duck itself (DuckingSink)
         self._duck_utterance: int | None = None  # utterance of the last speech push
+        self._last_speech: int | None = None  # job id of the last speech push
+        # stream jobs by id (``mark_question``, ``stream_progress``), the last PLAYED_WINDOW
+        self._streams: collections.OrderedDict[int, _StreamJob] = collections.OrderedDict()
 
     @property
     def duck(self) -> DuckGain | None:
@@ -279,11 +368,16 @@ class SpeechOutput:
                 self._release_raw(job)
                 continue
             self._current_epoch = job.epoch
-            self._current = asyncio.ensure_future(
-                self._play_raw(job) if isinstance(job, _RawJob) else self._speak(job)
-            )
+            self._current = asyncio.ensure_future(self._run_job(job))
             await asyncio.wait({self._current})
             self._release_raw(job)
+
+    def _run_job(self, job: _Job | _RawJob) -> Any:
+        if isinstance(job, _RawJob):
+            return self._play_raw(job)
+        if isinstance(job, _StreamJob):
+            return self._stream(job)
+        return self._speak(job)
 
     # ----------------------------------------------------------------- API
 
@@ -365,6 +459,83 @@ class SpeechOutput:
         self._poke()
         return job.id
 
+    def stream(
+        self,
+        chunks: StreamFeed,
+        *,
+        utterance: int,
+        mood: str | None,
+        volume_db: float,
+        language: str = "",
+    ) -> int | None:
+        """Queue audio that arrives in ``chunks`` (filled from any thread) as one sentence of
+        answer ``utterance``; returns its job id, or ``None`` when the queue is full or closed
+        (the feed is then closed). ``volume_db`` is applied as gain (the delivery's volume:
+        base, register, circadian and mood); ``mood`` is the timeline's. Safe from any thread."""
+        cfg = self.config
+        delivery = Delivery(1.0, 0.0, volume_db, 0.0, 1.0, mood=mood)
+        with self._lock:
+            if self._closed or len(self._jobs) >= cfg.voice.queue_max_sentences:
+                self.sentences_dropped += 1
+                chunks.close()
+                return None
+            job = _StreamJob(
+                next(self._ids),
+                utterance,
+                "",
+                language,
+                delivery,
+                self._epoch,
+                self.clock(),
+                feed=chunks,
+                gain=db_to_gain(volume_db),
+                prebuffer_s=cfg.voice.realtime_route.prebuffer_ms / MS_PER_S,
+            )
+            self._jobs.append(job)
+            self._streams[job.id] = job
+            while len(self._streams) > PLAYED_WINDOW:
+                self._streams.popitem(last=False)
+        if self.bus is not None:
+            self.bus.publish(
+                "speech.say",
+                {
+                    "id": job.id,
+                    "utterance": utterance,
+                    "chars": 0,
+                    "language": language,
+                    "mood": mood,
+                    "stream": True,
+                },
+                job.said_at,
+            )
+        self._poke()
+        return job.id
+
+    def mark_question(self, job_id: int) -> None:
+        """Stream job ``job_id`` ends in a question (its transcript came while it played): the
+        timeline and ``question_end`` learn it, also after its audio was pushed whole."""
+        with self._lock:
+            job = self._streams.get(job_id)
+            if job is None or job.question:
+                return
+            job.question = True
+            self.timeline.set_question(job_id)
+            if self._last_speech == job_id and job_id in self._ended:
+                self._question_end = self._ended[job_id]
+
+    def stream_progress(self, job_id: int) -> tuple[int, int] | None:
+        """``(played_ms, pushed_ms)`` of stream job ``job_id``: how much of its audio has played
+        (up to now, or to the stop that cut it) and how much was pushed. None when it never
+        began to play or is no longer remembered."""
+        with self._lock:
+            job = self._streams.get(job_id)
+            start = self._audible.get(job_id)
+            end = self._ended.get(job_id)
+            if job is None or start is None or end is None or job_id in self._unplayed:
+                return None
+            played_s = max(0.0, min(end, self.clock()) - start)
+            return round(played_s * MS_PER_S), round(job.pushed_s * MS_PER_S)
+
     def stop(self) -> None:
         """Barge-in: cut the audio now, drop the queue, cancel the synthesis in flight.
 
@@ -376,6 +547,9 @@ class SpeechOutput:
             self._epoch += 1
             epoch = self._epoch
             self.sentences_dropped += sum(isinstance(j, _Job) for j in self._jobs)
+            for queued in self._jobs:
+                if isinstance(queued, _StreamJob):
+                    queued.feed.close()
             self._jobs.clear()
             now = self.clock()
             self.timeline.truncate(now)
@@ -572,6 +746,7 @@ class SpeechOutput:
             if isinstance(job, _RawJob):
                 self._raw_pushed = job.id
             if speech:
+                self._last_speech = job.id
                 self._push_ms.append((self.clock() - now) * MS_PER_S)
                 began = time.perf_counter()
                 self.timeline.push(
@@ -662,13 +837,7 @@ class SpeechOutput:
                     first = False
                     if not self._pad(job, chunk.rate_hz):
                         return
-                    with self._lock:
-                        now = self.clock()
-                        self._latencies.append((now - job.said_at) * MS_PER_S)
-                        if job.utterance not in self._first_audio:
-                            self._first_audio[job.utterance] = now
-                            while len(self._first_audio) > LATENCY_WINDOW:
-                                self._first_audio.popitem(last=False)
+                    self._note_first_audio(job)
                     log.debug("speech %d: first audio after %.0f ms", job.id, self._latencies[-1])
                 self._last_rate_hz = chunk.rate_hz
                 if not self._push(job, chunk.samples, chunk.rate_hz, speech=True):
@@ -687,6 +856,60 @@ class SpeechOutput:
         finally:
             self._finish_stream(job)
             self._last_utterance = job.utterance
+
+    async def _stream(self, job: _StreamJob) -> None:
+        """Play a stream job: wait for ``prebuffer_s`` of audio (or the feed's end), then push
+        each piece as it arrives, with the gain, until the feed ends. One sentence."""
+        feed, first = job.feed, True
+        loop = asyncio.get_running_loop()
+        wake = asyncio.Event()
+        feed._bind(lambda: loop.call_soon_threadsafe(wake.set))
+        try:
+            while not feed._ready(job.prebuffer_s):
+                wake.clear()
+                if feed._ready(job.prebuffer_s):
+                    break
+                await wake.wait()
+            while True:
+                wake.clear()
+                chunks, ended = feed._take()
+                for samples, rate_hz in chunks:
+                    if first:
+                        first = False
+                        if not self._pad(job, rate_hz):
+                            return
+                        self._note_first_audio(job)
+                    self._last_rate_hz = rate_hz
+                    played = np.clip(samples * np.float32(job.gain), -1.0, 1.0)
+                    if not self._push(job, played, rate_hz, speech=True):
+                        return
+                    job.pushed_s += samples.size / rate_hz
+                if ended:
+                    break
+                if not chunks:
+                    await wake.wait()
+            if not first:
+                self.sentences_spoken += 1
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # a sink bug must not end the output thread
+            self.failures += 1
+            log.warning("speech %d (stream) crashed: %s", job.id, type(exc).__name__)
+        finally:
+            feed.close()
+            self._finish_stream(job)
+            self._last_utterance = job.utterance
+
+    def _note_first_audio(self, job: _Job) -> None:
+        """The first audio of ``job``: its latency and, once per answer, the answer's first
+        audio stamp."""
+        with self._lock:
+            now = self.clock()
+            self._latencies.append((now - job.said_at) * MS_PER_S)
+            if job.utterance not in self._first_audio:
+                self._first_audio[job.utterance] = now
+                while len(self._first_audio) > LATENCY_WINDOW:
+                    self._first_audio.popitem(last=False)
 
     def _finish_stream(self, job: _Job) -> None:
         """End the sink's stream after ``job`` (its tail extends where the sentence ends),

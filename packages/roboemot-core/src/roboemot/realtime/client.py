@@ -92,6 +92,8 @@ class RealtimeClient:
     (``key_unavailable``); the header is sent only when the URL rules allow it. ``on_event``
     runs on the client thread for every server event of the subset, ``Malformed`` included;
     ``Unknown`` events are only counted. An exception it raises is counted and logged by type.
+    ``on_close(reason)`` runs when a session fails or closes (a connect that fails, a socket
+    lost, a stall, a stuck send, ``close``), on whichever thread saw it.
     """
 
     def __init__(
@@ -102,12 +104,14 @@ class RealtimeClient:
         *,
         auth_headers: Callable[[], dict[str, str]],
         on_event: Callable[[protocol.ServerEvent], None] = lambda _ev: None,
+        on_close: Callable[[str], None] = lambda _reason: None,
         platform_id: bool = False,
         http_client_factory: Callable[[], httpx.AsyncClient] | None = None,
     ) -> None:
         self.route, self.settings, self.provider = route, settings, provider
         self._auth_headers = auth_headers
         self._on_event = on_event
+        self._on_close = on_close
         self._platform_id = platform_id
         self._http_client_factory = http_client_factory
         self._lock = threading.Lock()
@@ -226,6 +230,14 @@ class RealtimeClient:
             self._failures[reason] += 1
             self.reason = reason
             self.state = "closed"
+        self._closed_cb(reason)
+
+    def _closed_cb(self, reason: str) -> None:
+        try:
+            self._on_close(reason)
+        except Exception as exc:
+            self._count("callback_errors")
+            log.warning("realtime route %s: close handler: %s", self.route.name, type(exc).__name__)
 
     def _count(self, key: str, n: int = 1) -> None:
         with self._lock:
@@ -486,8 +498,11 @@ class RealtimeClient:
         self._awaiting = False
         if reason is not None:
             with self._lock:
-                if self.state != "closed":
+                closing = self.state != "closed"
+                if closing:
                     self.state, self.reason = "closed", reason
+            if closing:
+                self._closed_cb(reason)
 
 
 def _lost_while_writing(ws: ClientConnection) -> bool:

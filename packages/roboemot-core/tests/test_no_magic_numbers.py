@@ -141,6 +141,8 @@ BEHAVIOUR_MODULES = [
     "realtime/protocol.py",
     "realtime/session.py",
     "realtime/client.py",
+    "realtime/route.py",
+    "realtime/turn.py",
 ]
 ALLOWED = {0, 1, -1, 2, 0.5, -1.0}
 

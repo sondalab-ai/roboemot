@@ -188,6 +188,14 @@ class SpeechTimeline:
             w.sentence.end_s = w.carry_t0 + w.carry_n / w.rate_hz
             self._prune()
 
+    def set_question(self, sentence: int) -> None:
+        """``sentence`` turned out to end in a question after its audio began (a streamed reply
+        whose transcript came late); unknown sentences are ignored."""
+        with self._lock:
+            for s in self._sentences:
+                if s.id == sentence:
+                    s.question = True
+
     def finish(self, sentence: int, end_s: float) -> None:
         """``sentence`` was pushed whole; its audio (with the sink's flushed tail) ends at
         ``end_s``. Unknown or already finished sentences are ignored."""

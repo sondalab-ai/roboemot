@@ -15,6 +15,17 @@ One behaviour for everyone (owner decision 2026-10-23, SPEC 8, 12): no age or po
 signal changes the prompt, the register, the lines or what is spoken. Replies are cut to the
 register's sentence cap.
 
+Realtime speech route (SPEC 8, Realtime speech route): with a ready ``RealtimeRoute`` the turn
+goes to the server instead. The transcript is sent as ``input_text``, ``session.update`` carries
+parts 1 to 4 (without the mood-tag rule) and the tools, and each ``response.create`` carries parts
+1 to 5, the mood's voice instructions and, after a reconnect, the turns the server's session does
+not hold (data, not instructions). The server's voice plays through ``SpeechOutput.stream``; tool
+calls run through the same executor; the history mirror keeps what was heard and deletes the
+server's items of turns beyond ``history_turns``. A failure before any audio played answers the
+turn through the chat routes; after audio played the reply is cut like a barge-in. Fixed lines
+(the confirmation question and replies, the fallback, the offline cue) use the server's voice
+while the route is up and Piper only when it is down. The session end closes the server session.
+
 Privacy (SPEC 12): neither logs nor the bus carry a transcript, prompt or reply, only ids,
 lengths and exception types.
 """
@@ -29,7 +40,7 @@ import logging
 import math
 import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -38,7 +49,13 @@ from ..bus import Bus
 from ..config.schema import RegisterParams, RoboEmotConfig, StateEffects
 from ..config.stack import ConfigStack
 from ..llm.hub import RouterHub
-from ..llm.prompt import max_reply_sentences, system_prompt
+from ..llm.prompt import (
+    CHARS_PER_TOKEN,
+    LANGUAGE_NAMES,
+    max_reply_sentences,
+    realtime_instructions,
+    system_prompt,
+)
 from ..llm.pseudonyms import Pseudonyms
 from ..llm.router import (
     ActiveRoute,
@@ -48,13 +65,24 @@ from ..llm.router import (
     TextDelta,
     ToolCall,
     build_messages,
+    tool_arguments,
 )
 from ..persona import apply_to_register, effects
+from ..realtime import protocol as rt_protocol
+from ..realtime.turn import (
+    Reply,
+    ResponseRun,
+    heard_words,
+    line_instructions,
+    replay_block,
+    truncate_played,
+)
 from ..skills import Skill, SkillContext, SkillRegistry, ToolOutcome, execute
 from ..voice.keywords import normalise
 from ..voice.listener import Utterance
-from ..voice.prosody import resolve_tag
+from ..voice.prosody import Delivery, compose_delivery, resolve_tag
 from ..voice.robot_name import RobotName
+from ..voice.speech_features import Prosody
 from ..voice.tts import Sentence, SentenceSplitter
 from .confirm import Pending, PreferenceStore, reply_kind, sanitise_preference
 from .lines import pick
@@ -69,6 +97,7 @@ MS_PER_S = 1000.0
 JOIN_TIMEOUT_S = 2.0
 READY_TIMEOUT_S = 5.0
 INTERRUPTED_MARK = " …"  # ends an assistant message the person cut off (history, SPEC 8)
+TOO_MANY_ROUNDS = '{"error": "too_many_rounds"}'  # a tool call after the realtime round cap
 
 
 class Speech(Protocol):
@@ -120,6 +149,12 @@ class _Turn:
     out_chars: int = 0
     stamps: dict[str, float] = field(default_factory=dict)
     active: ActiveRoute = field(default_factory=ActiveRoute)
+    voice: str = "local"  # "realtime": the server's voice speaks this turn
+    lines: list[tuple[str, tuple[str, str, str] | None]] = field(default_factory=list)
+    rt_gen: int = 0  # the realtime session generation this turn's items belong to
+    rt_items: list[str] = field(default_factory=list)  # server item ids of this turn
+    rt_jobs: list[tuple[int, str | None]] = field(default_factory=list)  # (speech job, item)
+    rt_partial: bool = False  # a realtime reply was cut part way (history: interrupted)
 
 
 @dataclass
@@ -130,6 +165,15 @@ class _Tail:
     messages: list[dict[str, Any]]
     queued: list[tuple[int, str]]
     cut: bool = False
+    rt: list[tuple[int, str | None]] | None = None  # realtime: (speech job, server item)
+    rt_gen: int = 0
+
+
+class _NoSend:
+    """A route stand-in that sends nothing (the server session the items belonged to is gone)."""
+
+    def send(self, event: dict[str, Any]) -> bool:
+        return False
 
 
 class ConversationWorker:
@@ -165,6 +209,7 @@ class ConversationWorker:
         known_names: Callable[[], Iterable[str]] = lambda: (),
         phase: ConversationPhase | None = None,
         transcript: TranscriptRing | None = None,
+        realtime: Any = None,
     ) -> None:
         self.phase = phase if phase is not None else ConversationPhase()
         self.transcript = transcript  # the Live tab's opt-in ring of turns (SPEC 11A, 12)
@@ -201,6 +246,11 @@ class ConversationWorker:
         self._closed = False
         self._counts: collections.Counter[str] = collections.Counter()
         self._last: dict[str, Any] | None = None
+        self.realtime = realtime  # the realtime speech route (SPEC 8), or None
+        self._rt_lock: asyncio.Lock | None = None  # one realtime response at a time
+        self._tagged_noted = False
+        if realtime is not None:
+            realtime.base_instructions = self._base_instructions
         self.apply_config(stack.effective())
 
     # ----------------------------------------------------------------- lifecycle
@@ -231,8 +281,26 @@ class ConversationWorker:
         at each turn)."""
         with self._lock:
             self._max_turns = cfg.conversation.history_turns
-            while len(self._turns) > self._max_turns:
-                self._turns.popleft()
+            dropped = self._cap_history()
+        self._delete_items(dropped)
+
+    def _cap_history(self) -> list[list[dict[str, Any]]]:
+        """Drop the oldest turns beyond the cap (lock held); returns them."""
+        dropped = []
+        while len(self._turns) > self._max_turns:
+            dropped.append(self._turns.popleft())
+        return dropped
+
+    def _delete_items(self, turns: list[list[dict[str, Any]]]) -> None:
+        """Delete the realtime server's items of turns that left the history (SPEC 8,
+        Conversation state): only those of the server session still open."""
+        route = self.realtime
+        if route is None:
+            return
+        for turn in turns:
+            mark = turn[0].get("rt") if turn else None
+            if mark:
+                route.delete_items(*mark)
 
     # ----------------------------------------------------------------- input
 
@@ -320,6 +388,8 @@ class ConversationWorker:
             self._tail = None
         if had:
             log.debug("conversation: session ended (%s)", why)
+            if self.realtime is not None and why != "closed":
+                self.realtime.close_soon("conversation_end")  # the server session ends with it
 
     def _who(self) -> str | None:
         try:
@@ -378,6 +448,7 @@ class ConversationWorker:
     async def _serve(self) -> None:
         self._loop, self._main = asyncio.get_running_loop(), asyncio.current_task()
         self._wake = asyncio.Event()
+        self._rt_lock = asyncio.Lock()
         self._ready.set()
         while not self._closed:
             with self._lock:
@@ -489,6 +560,8 @@ class ConversationWorker:
             if tail is None or tail.cut or not any(tail.messages is m for m in self._turns):
                 return False
             tail.cut = True
+            if tail.rt is not None:
+                return self._trim_realtime_tail(tail)
             played = [text for job, text in tail.queued if self.speech.played(job)]
             if len(played) == len(tail.queued):
                 return False
@@ -497,6 +570,33 @@ class ConversationWorker:
             else:
                 tail.messages.pop()
             self._counts["history_trimmed"] += 1
+        return True
+
+    def _trim_realtime_tail(self, tail: _Tail) -> bool:
+        """``_trim_tail`` for a realtime reply still playing after its response ended: the
+        server's items are truncated at what played (when its session is still the same) and
+        the history keeps the words heard (lock held)."""
+        route = self.realtime
+        assert tail.rt is not None
+        same = route is not None and route.generation == tail.rt_gen
+        heard = truncate_played(route if same else _NoSend(), self.speech, tail.rt)
+        kept, partial = [], False
+        for job, text in tail.queued:
+            fraction = heard.get(job)
+            if fraction is None:
+                partial = True
+                continue
+            if fraction < 1.0:
+                text, partial = heard_words(text, fraction), True
+            if text:
+                kept.append(text)
+        if not partial:
+            return False
+        if kept:
+            tail.messages[-1].update(content=" ".join(kept), interrupted=True)
+        else:
+            tail.messages.pop()
+        self._counts["history_trimmed"] += 1
         return True
 
     async def _answer(self, utterance: Utterance, ring_gen: int = NOT_RECORDED) -> None:
@@ -523,12 +623,363 @@ class ConversationWorker:
         with self._lock:
             self._active_turn = turn
         try:
-            if not self._confirmation_reply(turn, now):
+            if await self._realtime_ready(turn):
+                turn.voice = "realtime"
+            answered = self._confirmation_reply(turn, now)
+            if not answered and turn.voice == "realtime":
+                answered = await self._realtime_turn(turn)
+            if not answered:
+                turn.voice = "local"
                 await self._converse(turn, router)
+            await self._speak_lines(turn)
         finally:
             self._inner = None
             self.phase.end_thinking()
         self._finish(turn)
+
+    # ----------------------------------------------------------------- realtime route
+
+    async def _realtime_ready(self, turn: _Turn) -> bool:
+        """Whether this turn goes to the realtime route: it is configured, may answer and is
+        connected (a connect runs off the loop, within ``connect_timeout_s``). A route in
+        realtime mode that is not ready is a fallback at start (the local pipeline answers)."""
+        route = self.realtime
+        if route is None or not turn.cfg.voice.realtime_route.enabled:
+            return False
+        loop = asyncio.get_running_loop()
+        try:
+            ready = await loop.run_in_executor(None, route.ready, turn.cfg)
+        except Exception as exc:
+            log.warning("conversation: realtime route: %s", type(exc).__name__)
+            ready = False
+        if not ready:
+            route.count("fallbacks_start")
+        elif turn.cfg.voice.mood_source == "llm_tagged" and not self._tagged_noted:
+            self._tagged_noted = True
+            log.info("conversation: realtime route: mood_source llm_tagged acts as auto")
+        return bool(ready) and not turn.interrupted
+
+    def _base_instructions(self) -> str:
+        """Parts 1 to 4 for the realtime route's ``session.update`` (no mood-tag rule)."""
+        cfg = self.stack.effective()
+        return realtime_instructions(
+            cfg, self._register_for(cfg), robot_name=self._prompt_name(cfg)
+        )
+
+    def _delivery(self, turn: _Turn) -> Delivery:
+        """The delivery of a realtime reply: the volume (applied as gain) and the mood's
+        voice instructions; rate, pitch and pauses are lost (SPEC 8)."""
+        cfg = turn.cfg
+        state = self.affect.state(self.clock())
+        return compose_delivery(
+            cfg.voice,
+            register=turn.register,
+            circadian=self._circadian(),
+            mood=state.label,
+            intensity=state.intensity,
+            persona=effects(cfg.persona),
+            seed=turn.speech_id,
+        )
+
+    def _rt_instructions(self, turn: _Turn, delivery: Delivery) -> str:
+        """``response.create`` instructions: parts 1 to 5, the turns the server's session does
+        not hold (after a reconnect), and the mood's voice instructions."""
+        cfg, conv = turn.cfg, turn.cfg.conversation
+        state = self.affect.state(self.clock())
+        system = build_messages(
+            system=realtime_instructions(
+                cfg, turn.register, language=turn.language, robot_name=self._prompt_name(cfg)
+            ),
+            profile_summary=self._summary(self._profile, conv.profile_summary_max_chars),
+            scene_summary=self._summary(self._scene, conv.scene_summary_max_chars),
+            history=[],
+            user_text="",
+            affect=f"{state.label}, intensity {state.intensity:.1f}",
+            summary_max_chars=(conv.profile_summary_max_chars, conv.scene_summary_max_chars),
+        )[0]["content"]
+        generation = self.realtime.generation
+        with self._lock:
+            missing = [t for t in self._turns if not t or t[0].get("rt", (None,))[0] != generation]
+        mood = delivery.instructions if cfg.voice.realtime_route.mood_instructions else ""
+        return "\n".join(p for p in (system, replay_block(missing), mood) if p)
+
+    async def _realtime_turn(self, turn: _Turn) -> bool:
+        """Answer through the realtime route; False when nothing played and the session was
+        lost (or refused the response): the chat routes then answer this turn."""
+        inner = self._inner = asyncio.ensure_future(self._realtime_rounds(turn))
+        if turn.interrupted:
+            inner.cancel()
+        try:
+            return bool(await inner)
+        except asyncio.CancelledError:
+            if not ((turn.interrupted or turn.stopped) and inner.cancelled()):
+                inner.cancel()
+                raise
+            turn.outcome = "interrupted"
+            return True
+        except Exception as exc:
+            turn.outcome = "error"
+            log.warning("conversation: realtime turn failed (%s)", type(exc).__name__)
+            return bool(turn.rt_jobs)
+
+    async def _realtime_rounds(self, turn: _Turn) -> bool:
+        """The transcript as ``input_text``, then one response per round: tool calls run as
+        they arrive, their results go back as ``function_call_output`` and one more response
+        is asked, until the reply has no call, a skill ends the turn or
+        ``conversation.max_tool_rounds`` rounds ran (the next request has ``tool_choice:
+        none``; a call after that gets an error result and ends the turn)."""
+        route, conv = self.realtime, turn.cfg.conversation
+        assert self._rt_lock is not None
+        async with self._rt_lock:
+            turn.rt_gen = route.generation
+            turn.route = route.settings(turn.cfg).route
+            offered = self._offer(turn)
+            choices = SkillRegistry.snapshot_choices(offered, conv.tool_enum_max_items)
+            tools = SkillRegistry.tools(
+                offered,
+                enum_max=conv.tool_enum_max_items,
+                max_chars=conv.tool_arg_max_chars,
+                choices=choices,
+            )
+            route.send(
+                route.session_update(
+                    turn.cfg,
+                    self._base_instructions(),
+                    rt_protocol.function_tools(tools) if tools else None,
+                )
+            )
+            item = route.new_item_id()
+            if not route.send(rt_protocol.text_item(turn.utterance.text, item)):
+                return False
+            turn.rt_items.append(item)
+            route.count("utterances_sent")
+            turn.stamps["request"] = self.clock()
+            self.phase.begin_thinking()
+            self.phase.set_route(turn.route)
+            delivery = self._delivery(turn)
+            while True:
+                in_cap = turn.rounds < conv.max_tool_rounds and bool(offered)
+                calls: list[ToolCall] = []
+                results: list[ToolOutcome] = []
+                on_call = self._rt_caller(turn, choices, in_cap, calls, results)
+                instructions = self._rt_instructions(turn, delivery)
+                run = ResponseRun(
+                    route,
+                    self.speech,
+                    utterance=turn.speech_id,
+                    mood=delivery.mood,
+                    volume_db=delivery.volume_db,
+                    language=turn.language,
+                    clock=self.clock,
+                    on_call=on_call,
+                )
+                round_from = len(turn.spoken)
+                try:
+                    choice = "auto" if in_cap else "none" if offered else None
+                    reply = await run.run(instructions, choice)
+                except asyncio.CancelledError:
+                    self._absorb(turn, run.reply, instructions)
+                    self._cut_realtime(turn)
+                    raise
+                self._absorb(turn, reply, instructions)
+                if reply.closed or reply.status == "error":
+                    return self._realtime_lost(turn)
+                if turn.cut:
+                    self._cut_realtime(turn)
+                for call, result in zip(calls, results, strict=True):
+                    out_id = route.new_item_id()
+                    route.send(rt_protocol.function_output(call.id, result.content, out_id))
+                    turn.rt_items.append(out_id)
+                ended = turn.cut or any(r.end_turn for r in results)
+                if ended or not calls:
+                    if turn.rounds and not (ended or turn.spoken):
+                        turn.outcome = "no_text"
+                        self._say_fallback(turn)
+                    return True
+                turn.rounds += 1
+                said = " ".join(turn.spoken[round_from:]) or None
+                turn.exchange += self._exchange(calls, results, turn.rounds, said)
+                turn.exchange_spoken = len(turn.queued)
+
+    def _realtime_lost(self, turn: _Turn) -> bool:
+        """The session was lost (or refused the response) during the turn. Audio that arrived
+        but did not play yet is dropped; if nothing played, False: the chat routes answer the
+        turn. Otherwise the reply is cut like a barge-in and not repeated."""
+        route = self.realtime
+        if turn.rt_jobs:
+            self.speech.stop()  # first: whether anything played is then settled
+        if not any(self.speech.played(job) for job, _ in turn.rt_jobs):
+            route.count("fallbacks_mid_turn")
+            turn.spoken.clear()
+            turn.queued.clear()
+            turn.rt_jobs.clear()
+            turn.sentences = turn.exchange_spoken = 0
+            if self.transcript is not None and turn.reply_seq is not None:
+                self.transcript.settle(turn.reply_seq, "", interrupted=False)
+                turn.reply_seq = None
+            return False
+        route.count("cut_mid_turn")
+        turn.speech_stopped = turn.stopped = True
+        turn.outcome = "realtime_lost"
+        self._cut_realtime(turn)
+        return True
+
+    def _rt_caller(
+        self,
+        turn: _Turn,
+        choices: dict[str, Any],
+        in_cap: bool,
+        calls: list[ToolCall],
+        results: list[ToolOutcome],
+    ) -> Callable[[rt_protocol.FunctionCall], Awaitable[bool]]:
+        """The tool-call handler of one realtime round: runs the call through the executor
+        (the per-round cap applies) and says whether it ends the turn. After the round cap a
+        call gets an error result and ends the turn."""
+        cap = turn.cfg.conversation.max_tool_calls_per_round
+
+        async def on_call(ev: rt_protocol.FunctionCall) -> bool:
+            call = ToolCall(ev.call_id, ev.name, tool_arguments(ev.arguments))
+            calls.append(call)
+            if not in_cap:
+                self._counts["tool_errors"] += 1
+                results.append(ToolOutcome(TOO_MANY_ROUNDS, False, True, ev.name, "rounds"))
+                return True
+            results.append(await self._call(turn, call, choices, len(calls) > cap))
+            self.realtime.count("tool_calls")
+            return turn.cut or results[-1].end_turn
+
+        return on_call
+
+    def _absorb(self, turn: _Turn, reply: Reply, instructions: str) -> None:
+        """Book a response into the turn: its audio items (history, live transcript), its
+        server items, the latency and the budget (usage, or the chars/4 estimate)."""
+        route = self.realtime
+        for job, item in reply.jobs:
+            turn.rt_jobs.append((job, item))
+            text = reply.texts.get(item, "").strip()
+            if text:
+                turn.spoken.append(text)
+                turn.queued.append((job, text))
+                self._note_reply(turn, text)
+            turn.sentences += 1
+        turn.rt_items += reply.item_ids()
+        if reply.first_audio is not None:
+            turn.stamps.setdefault("token", reply.first_audio)
+            turn.stamps.setdefault("say", reply.first_audio)
+            heard = turn.utterance.last_speech_stamp
+            route.note_first_audio((reply.first_audio - heard) * MS_PER_S)
+        if reply.status is None and reply.closed is None and not reply.cancelled:
+            return
+        text = reply.text()
+        turn.out_chars += len(text)
+        if reply.tokens is not None:
+            tokens = reply.tokens
+        else:
+            chars = len(instructions) + len(turn.utterance.text) + len(text)
+            tokens = chars // CHARS_PER_TOKEN
+        route.charge(tokens)
+        turn.tokens += tokens
+        if reply.status is None:
+            route.note_response(None)
+
+    def _cut_realtime(self, turn: _Turn) -> None:
+        """After a stop: truncate the server's audio items at what played and keep, in the
+        history and the live transcript, the words heard (an estimate by played time)."""
+        route = self.realtime
+        heard = truncate_played(route, self.speech, turn.rt_jobs)
+        for i, (job, text) in enumerate(turn.queued):
+            fraction = heard.get(job)
+            if fraction is not None and fraction < 1.0:
+                cut = heard_words(text, fraction)
+                turn.queued[i] = (job, cut)
+                if i < len(turn.spoken) and turn.spoken[i] == text:
+                    turn.spoken[i] = cut
+                turn.rt_partial = True
+        turn.speech_stopped = True
+        route.count("cuts")
+
+    async def _speak_lines(self, turn: _Turn) -> None:
+        """Say the fixed lines the turn left for the server's voice (the confirmation question
+        and replies, the fallback): one response each while the route is up, Piper once it is
+        down. A question that played leaves the confirmation pending."""
+        while turn.lines and not turn.interrupted:
+            text, ask = turn.lines.pop(0)
+            job = None
+            if turn.voice == "realtime" and self.realtime.connected:
+                inner = self._inner = asyncio.ensure_future(self._rt_line(turn, text))
+                try:
+                    job = await inner
+                except asyncio.CancelledError:
+                    if not (turn.interrupted and inner.cancelled()):
+                        raise
+                    return
+            if job is None:
+                if turn.voice == "realtime" and self.realtime.connected:
+                    continue  # the server spoke nothing: the line is not said twice
+                before = len(turn.queued)
+                mood, intensity = self._mood(turn.cfg, None)
+                self._say_local(turn, text, mood, intensity)
+                job = turn.queued[-1][0] if len(turn.queued) > before else None
+            if ask is not None and job is not None:
+                with self._lock:
+                    if not (turn.done or turn.interrupted):
+                        expires = self.clock() + turn.cfg.conversation.confirm_timeout_s
+                        self._confirm = Pending(*ask, expires, job)
+
+    async def _rt_line(self, turn: _Turn, text: str) -> int | None:
+        """One fixed line in the server's voice; returns its first speech job (None when no
+        audio came)."""
+        route = self.realtime
+        assert self._rt_lock is not None
+        async with self._rt_lock:
+            delivery = self._delivery(turn)
+            language = LANGUAGE_NAMES.get(turn.language, turn.language)
+            instructions = line_instructions(self._rt_instructions(turn, delivery), text, language)
+            run = ResponseRun(
+                route,
+                self.speech,
+                utterance=turn.speech_id,
+                mood=delivery.mood,
+                volume_db=delivery.volume_db,
+                language=turn.language,
+                clock=self.clock,
+            )
+            try:
+                reply = await run.run(instructions, "none")
+            except asyncio.CancelledError:
+                self._absorb(turn, run.reply, instructions)
+                self._cut_realtime(turn)
+                raise
+            self._absorb(turn, reply, instructions)
+            route.count("lines")
+            return reply.jobs[0][0] if reply.jobs else None
+
+    def say_line(self, text: str, language: str) -> bool:
+        """A fixed line from outside a turn (the offline cue) in the server's voice while the
+        route is up; False when it is not (the caller then says it with Piper). Any thread."""
+        route, loop = self.realtime, self._loop
+        if route is None or loop is None or self._closed or not route.connected:
+            return False
+        asyncio.run_coroutine_threadsafe(self._cue_line(text, language), loop)
+        return True
+
+    async def _cue_line(self, text: str, language: str) -> None:
+        cfg, now = self.stack.effective(), self.clock()
+        quiet = Prosody(0.0, None, None, 0.0)
+        utterance = Utterance("", language, now, now, now, False, False, frozenset(), quiet)
+        turn = _Turn(
+            utterance,
+            cfg,
+            language,
+            self._register_for(cfg),
+            self.speech.new_utterance(),
+            0,
+            voice="realtime",
+        )
+        try:
+            await self._rt_line(turn, text)
+        except Exception as exc:
+            log.warning("conversation: realtime line failed (%s)", type(exc).__name__)
 
     async def _converse(self, turn: _Turn, router: Any) -> None:
         """Request, stream, run tool calls, repeat (see ``_rounds``); the errors that end a turn
@@ -772,6 +1223,10 @@ class ConversationWorker:
         if not store.allowed(person, key) or not template:
             return "not_allowed"
         text = template.replace("{key}", key).replace("{value}", value)
+        if turn.voice == "realtime":  # asked in the server's voice once the response is over
+            turn.lines.append((text, (person, key, value)))
+            self._counts["confirm_asked"] += 1
+            return "asked"
         mood, intensity = self._mood(turn.cfg, None)
         before = len(turn.queued)
         self._say(turn, text, mood, intensity)
@@ -877,6 +1332,16 @@ class ConversationWorker:
     def _say(
         self, turn: _Turn, text: str, mood: str | None, intensity: float, continued: bool = False
     ) -> None:
+        """Say a sentence or a fixed line: in a realtime turn it waits for the server's voice
+        (``_speak_lines``), else Piper says it now."""
+        if text and not turn.interrupted and turn.voice == "realtime":
+            turn.lines.append((text, None))
+            return
+        self._say_local(turn, text, mood, intensity, continued)
+
+    def _say_local(
+        self, turn: _Turn, text: str, mood: str | None, intensity: float, continued: bool = False
+    ) -> None:
         if not text or turn.interrupted:  # a barge-in is under way: nothing more is said
             return
         job = self.speech.say(
@@ -933,20 +1398,30 @@ class ConversationWorker:
             items = turn.queued[turn.exchange_spoken :]
             texts = turn.spoken[turn.exchange_spoken :]
             kept = [t for job, t in items if self.speech.played(job)] if cut else texts
-            spoken = " ".join(kept)
+            spoken = " ".join(t for t in kept if t)
+            dropped: list[list[dict[str, Any]]] = []
             if (spoken or turn.exchange) and self._max_turns > 0:
                 messages: list[dict[str, Any]] = [
                     {"role": "user", "content": turn.utterance.text},
                     *turn.exchange,
                 ]
+                if turn.rt_items:  # the server's items of this turn (deleted with it)
+                    messages[0]["rt"] = (turn.rt_gen, list(turn.rt_items))
                 if spoken:
                     messages.append({"role": "assistant", "content": spoken})
-                    if len(kept) < len(texts):
+                    if len(kept) < len(texts) or turn.rt_partial:
                         messages[-1]["interrupted"] = True
                 self._turns.append(messages)
-                while len(self._turns) > self._max_turns:
-                    self._turns.popleft()
-                self._tail = _Tail(messages, list(items), cut=cut) if spoken else None
+                dropped = self._cap_history()
+                rt = list(turn.rt_jobs) if turn.voice == "realtime" else None
+                self._tail = (
+                    _Tail(messages, list(items), cut=cut, rt=rt, rt_gen=turn.rt_gen)
+                    if spoken
+                    else None
+                )
+            elif turn.rt_items and self.realtime is not None:
+                dropped = [[{"role": "user", "rt": (turn.rt_gen, list(turn.rt_items))}]]
+                self._tail = None
             else:
                 self._tail = None
             self._active_turn = None
@@ -959,6 +1434,7 @@ class ConversationWorker:
                     )
                 else:  # a barge-in while the last sentences still play settles it later
                     self._reply = (turn.reply_seq, list(turn.queued))
+        self._delete_items(dropped)
         self._counts["turns"] += 1
         self._counts[turn.outcome] += 1
         with self._lock:

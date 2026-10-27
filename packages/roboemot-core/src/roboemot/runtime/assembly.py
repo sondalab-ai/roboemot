@@ -34,6 +34,7 @@ from roboemot.llm.pseudonyms import NameSource
 from roboemot.manifest import Manifest
 from roboemot.motion import MotionLoop
 from roboemot.persona.llm_traits import TraitCache, TraitsWorker
+from roboemot.realtime.route import select_provider
 from roboemot.reflex import ReflexEngine
 from roboemot.robot_platform import AudioHub, RobotPlatform, RobotSession, Speaker
 from roboemot.vision import LockedSource
@@ -105,6 +106,7 @@ class Pipeline:
     value_cap: Callable[[], int]
     pitch_dof: str
     sleep: SleepGate
+    realtime_provider: Any = None  # the realtime route's session provider (None: unavailable)
     voice_heard: list[float] = field(
         default_factory=lambda: [-math.inf]
     )  # last utterance, monotonic
@@ -314,8 +316,12 @@ def assemble(
     def publish(obs: Observation, joint_state: Any) -> None:
         bus.publish("percept.entity", obs, obs.stamp, joint_state=joint_state)
 
-    # The one router (traits, conversation, speech, route checks) reports to this monitor.
+    # The one router (traits, conversation, speech, route checks) reports to this monitor. A
+    # kind: realtime route counts for the network aggregate only through the realtime link,
+    # while realtime mode is on (SPEC 12A, Links).
     network = NetworkMonitor(cfg.llm_routes, cfg.connectivity.network, on_change=responder.on_event)
+    # Built once: the realtime route and the web UI's key confirmation use the same one.
+    realtime_provider = select_provider(cfg, manifest.robot.id, manifest)
 
     # Trait rating (SPEC 11A, Persona) runs on its own thread; its cache is in the data folder.
     try:
@@ -385,6 +391,7 @@ def assemble(
 
     return Pipeline(
         voice_heard=voice_heard,
+        realtime_provider=realtime_provider,
         cfg=cfg,
         expression=expression,
         speaking=speaking,
@@ -430,5 +437,6 @@ def assemble(
             gaze,
             scan,
             lambda: stack.effective().runtime.pause_when_asleep,
+            lambda: host.realtime_route,
         ),
     )
