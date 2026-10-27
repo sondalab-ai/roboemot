@@ -1,6 +1,7 @@
 """Command line: ``roboemot config {validate,schema,dump}``, ``roboemot manifest check``,
 ``roboemot discover``, ``roboemot debug``, ``roboemot models {list,fetch}`` and
-``roboemot llm check``, ``roboemot secrets {set,remove,list}`` and ``roboemot voice sample``."""
+``roboemot llm check``, ``roboemot realtime check``, ``roboemot secrets {set,remove,list}`` and
+``roboemot voice sample``."""
 
 from __future__ import annotations
 
@@ -170,6 +171,11 @@ def _llm(args: argparse.Namespace) -> int:
     if route is None:
         known = ", ".join(r.name for r in cfg.llm_routes) or "none configured"
         raise ValueError(f"no route named {args.route!r} (llm_routes: {known})")
+    if route.kind == "realtime":
+        raise ValueError(
+            f"route {route.name} is a realtime route: the chat checks do not apply; run "
+            f"`roboemot realtime check {route.name}`"
+        )
 
     if cfg.privacy.pseudonyms_to_cloud:
         print(
@@ -203,6 +209,63 @@ def _llm(args: argparse.Namespace) -> int:
         for c in report.checks:
             print(f"{c.status:5} {c.name:20} {c.reason}")
         print(f"route {report.route} ({report.model}): {'ok' if report.ok else 'FAILED'}")
+    return 0 if report.ok else 1
+
+
+REPORT_FIELDS = (
+    "mode",
+    "allocator_host",
+    "connect_host",
+    "header_to_connect_host",
+    "platform_id_sent",
+    "update_seen",
+    "first_audio_ms",
+    "item_delete",
+    "charged",
+    "failure",
+)
+
+
+def _realtime_robot(args: argparse.Namespace) -> str:
+    """``--robot``, else the only robot that registers a realtime session provider, else ""."""
+    if args.robot:
+        return str(args.robot)
+    from importlib.metadata import entry_points
+
+    from .realtime.session import ENTRY_POINT_GROUP
+
+    names = {ep.name for ep in entry_points(group=ENTRY_POINT_GROUP)}
+    return names.pop() if len(names) == 1 else ""
+
+
+def _realtime(args: argparse.Namespace) -> int:
+    """Check one ``kind: realtime`` route (SPEC 8, Realtime speech route): connect,
+    ``session.updated``, one text turn's first audio, the item delete; exit 1 on any failure."""
+    from .llm.router import Router
+    from .realtime.check import check_realtime_route
+    from .realtime.route import select_provider
+    from .secret_store import SecretStore
+
+    cfg = _stack(args).effective()
+    route = next((r for r in cfg.llm_routes if r.name == args.route), None)
+    if route is None:
+        known = ", ".join(r.name for r in cfg.llm_routes) or "none configured"
+        raise ValueError(f"no route named {args.route!r} (llm_routes: {known})")
+    router = Router([route], cfg.safety, secrets=SecretStore.for_data_dir(cfg.data_dir).get)
+    provider = select_provider(cfg, _realtime_robot(args), None)
+    report = check_realtime_route(route, cfg, router=router, provider=provider)
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2))
+        return 0 if report.ok else 1
+    data = report.to_dict()
+    for name in REPORT_FIELDS:
+        value = data[name]
+        shown = "-" if value is None else (str(value).lower() if isinstance(value, bool) else value)
+        print(f"{name:23} {shown}")
+    for c in report.checks:
+        print(f"{c.status:5} {c.name:22} {c.reason}")
+    verdict = report.error or ("ok" if report.ok else "FAILED")
+    print(f"route {report.route} ({report.model}): {verdict}")
     return 0 if report.ok else 1
 
 
@@ -377,6 +440,25 @@ def main(argv: list[str] | None = None) -> int:
     llm.add_argument("--preset")
     llm.add_argument("--preset-dir", action="append", default=["configs/presets"])
 
+    rtc = sub.add_parser(
+        "realtime",
+        help="realtime speech route tools: `check` connects, waits for session.updated, sends "
+        "one text turn (no microphone audio, charged to the route's budget) and deletes its "
+        "item; prints the allocator and connect hosts, never a key or URL path (SPEC 8)",
+    )
+    rtc.add_argument("action", choices=["check"])
+    rtc.add_argument("route", help="a kind: realtime route from llm_routes")
+    rtc.add_argument(
+        "--robot",
+        help="manifest robot.id whose session provider platform mode uses (default: the only "
+        "robot that registers one)",
+    )
+    rtc.add_argument("--json", action="store_true")
+    rtc.add_argument("--app")
+    rtc.add_argument("--defaults")
+    rtc.add_argument("--preset")
+    rtc.add_argument("--preset-dir", action="append", default=["configs/presets"])
+
     sec = sub.add_parser(
         "secrets",
         help="API keys for ${secret:name} routes: set (value read from the terminal or stdin, "
@@ -454,6 +536,8 @@ def main(argv: list[str] | None = None) -> int:
             return _models(args)
         if args.cmd == "llm":
             return _llm(args)
+        if args.cmd == "realtime":
+            return _realtime(args)
     except (ConfigError, GuardrailError, ValueError, RuntimeError) as exc:
         print(f"error: {scrub_text(str(exc))}", file=sys.stderr)
         return 1

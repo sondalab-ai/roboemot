@@ -270,3 +270,70 @@ def test_a_chat_route_is_not_a_realtime_check():
     cfg = RoboEmotConfig(llm_routes=[route])
     with pytest.raises(RouteKindUnsupported):
         check.check_realtime_route(route, cfg, router=make_router(cfg), provider=DirectSession())
+
+
+# ----------------------------------------------------------------- CLI
+
+
+def app_file(tmp_path, base_url: str, *, mode: str = "direct") -> str:
+    import yaml
+
+    route = {"name": "rt", "base_url": base_url, "model": "s2s", "kind": "realtime"}
+    route |= {"locality": "local", "api_key": "none"}
+    path = tmp_path / "app.yaml"
+    body = {"llm_routes": [route], "voice": {"realtime_route": {"mode": mode}}}
+    path.write_text(yaml.safe_dump(body))
+    return str(path)
+
+
+def test_the_cli_prints_the_hosts_and_the_outcome(tmp_path, capsys):
+    from roboemot import cli
+
+    with FakeServer(delete_reply="deleted") as server:
+        app = app_file(tmp_path, server.http_base())
+        assert cli.main(["realtime", "check", "rt", "--app", app]) == 0
+    out = capsys.readouterr().out
+    assert "connect_host            127.0.0.1" in out
+    assert "header_to_connect_host  none" in out
+    assert "item_delete             accepted" in out
+    assert "pass  realtime_first_audio" in out
+    assert "route rt (s2s): ok" in out
+    assert "/v1" not in out and REPLY_TEXT not in out
+
+
+def test_the_cli_json_report_and_exit_one_on_a_failure(tmp_path, capsys):
+    from roboemot import cli
+
+    with FakeServer(mode="error_first") as server:
+        app = app_file(tmp_path, server.http_base())
+        assert cli.main(["realtime", "check", "rt", "--app", app, "--json"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["ok"] is False and report["failure"] == "server_error"
+    assert report["update_seen"] is False and ERROR_MESSAGE not in json.dumps(report)
+
+
+def test_the_cli_in_platform_mode_without_a_provider_says_so(tmp_path, capsys):
+    from roboemot import cli
+
+    app = app_file(tmp_path, "https://alloc.example.org/session", mode="platform")
+    assert cli.main(["realtime", "check", "rt", "--app", app, "--robot", "no-such-robot"]) == 1
+    assert "route rt (s2s): provider" in capsys.readouterr().out
+
+
+def test_the_cli_refuses_a_chat_route(tmp_path, capsys):
+    import yaml
+    from roboemot import cli
+
+    path = tmp_path / "app.yaml"
+    chat = {"name": "lan", "base_url": "http://127.0.0.1:9/v1", "model": "m", "api_key": "none"}
+    path.write_text(yaml.safe_dump({"llm_routes": [chat]}))
+    assert cli.main(["realtime", "check", "lan", "--app", str(path)]) == 1
+    assert "is a chat route" in capsys.readouterr().err
+
+
+def test_the_chat_check_of_a_realtime_route_points_to_the_realtime_check(tmp_path, capsys):
+    from roboemot import cli
+
+    app = app_file(tmp_path, "http://127.0.0.1:9/v1")
+    assert cli.main(["llm", "check", "rt", "--app", app]) == 1
+    assert "roboemot realtime check rt" in capsys.readouterr().err
