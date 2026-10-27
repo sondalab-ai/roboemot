@@ -1375,6 +1375,13 @@ class PrivacyConfig(Strict):
         "visible face, but with it off or no sound direction a television can be addressed",
         opt_in=True,
     )
+    realtime_platform_id: bool = param(
+        False,
+        "Let the platform's session provider send the robot's platform identifier with each "
+        "realtime session request (platform mode only). The identifier is stable for the robot, "
+        "so the session service can link every session of this robot (SPEC 12)",
+        opt_in=True,
+    )
 
     @field_validator("pseudonym_templates")
     @classmethod

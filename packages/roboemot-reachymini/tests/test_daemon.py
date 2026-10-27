@@ -281,3 +281,24 @@ def test_startup_app_wraps_malformed_bodies(body):
 def test_installed_apps_wraps_malformed_bodies(body):
     with pytest.raises(DaemonError):
         client(lambda r: httpx.Response(200, json=body)).installed_apps()
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "expected"),
+    [
+        (200, {"hardware_id": "c0ffee5e171e1d42"}, "c0ffee5e171e1d42"),
+        (200, {"hardware_id": None}, None),
+        (200, {"hardware_id": 7}, None),
+        (200, ["x"], None),
+        (404, {"detail": "Not Found"}, None),  # a daemon without the route
+    ],
+)
+def test_hardware_id_reads_the_daemon_route(status, body, expected):
+    seen = []
+
+    def handler(req):
+        seen.append(req.url.path)
+        return httpx.Response(status, json=body)
+
+    assert client(handler).hardware_id() == expected
+    assert seen == ["/api/daemon/hardware-id"]

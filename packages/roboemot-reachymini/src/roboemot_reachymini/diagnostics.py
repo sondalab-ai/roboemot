@@ -4,8 +4,9 @@ Registered in the ``roboemot.diagnostics`` entry-point group under the manifest 
 section is one read-only call to the daemon's REST API through ``DaemonClient`` (reachy_mini
 1.12):
 
-- ``robot.daemon``: ``GET /api/daemon/status`` (name, version, hardware id, backend state and
-  control-loop stats, errors, Wi-Fi address);
+- ``robot.daemon``: ``GET /api/daemon/status`` (name, version, backend state and control-loop
+  stats, errors, Wi-Fi address). The hardware id is replaced by ``hardware_id_present``: it is
+  a stable identifier that leaves the robot only with ``privacy.realtime_platform_id`` (SPEC 12);
 - ``robot.motors``: ``GET /api/motors/status`` (enabled, disabled, gravity_compensation);
 - ``robot.state``: ``GET /api/state/full`` with joints, direction of arrival and the IMU
   (accelerometer, gyroscope, orientation, board temperature; ``null`` on Lite and simulation);
@@ -28,6 +29,8 @@ from roboemot.diagnostics import FnSource, Source, Target
 
 from .daemon import DaemonClient
 
+ID_FIELD = "hardware_id"
+
 
 def sources(target: Target, daemon: DaemonClient | None = None) -> list[Source]:
     """Daemon sections for ``target`` (``host=None``: the daemon on this machine)."""
@@ -40,12 +43,22 @@ def sources(target: Target, daemon: DaemonClient | None = None) -> list[Source]:
         return wifi_summary(status)
 
     return [
-        FnSource("robot.daemon", api.status, "robot"),
+        FnSource("robot.daemon", lambda: daemon_summary(api.status()), "robot"),
         FnSource("robot.motors", api.motors, "robot"),
         FnSource("robot.state", api.state, "robot"),
         FnSource("robot.app", api.current_app, "robot"),
         FnSource("robot.wifi", wifi, "robot"),
     ]
+
+
+def daemon_summary(status: Any) -> Any:
+    """``GET /api/daemon/status`` without the hardware id's value: only whether there is one
+    (not a hash either, which would still link reports of one robot)."""
+    if not isinstance(status, dict):
+        return status
+    out = {k: v for k, v in status.items() if k != ID_FIELD}
+    out[f"{ID_FIELD}_present"] = isinstance(status.get(ID_FIELD), str) and bool(status[ID_FIELD])
+    return out
 
 
 def wifi_summary(status: Any) -> dict[str, Any]:

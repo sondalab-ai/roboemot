@@ -106,7 +106,7 @@ class ReachyMiniWireless:
     space_paths = ("/tmp", APPS_VENV)
     distributions = PACKAGES
     modules = ("roboemot", "roboemot_reachymini")
-    extras = ("voice",)
+    extras = ("voice", "realtime")  # realtime: websockets, already in the apps venv
     clearable_caches = ("~/.cache/uv",)  # the uv download cache left by the robot image's setup
 
     def __init__(self, port: int = DEFAULT_PORT) -> None:

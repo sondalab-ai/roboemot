@@ -265,7 +265,7 @@ def test_diagnostics_sources_read_the_daemon_api():
     client = DaemonClient(Target("robot"), transport=httpx.MockTransport(handler))
     report = collect(diagnostics.sources(Target("robot"), client))
     s = report["sections"]
-    assert s["robot.daemon"]["data"] == {"path": "/api/daemon/status"}
+    assert s["robot.daemon"]["data"] == {"path": "/api/daemon/status", "hardware_id_present": False}
     assert s["robot.motors"]["ok"] and s["robot.state"]["ok"]
     assert s["robot.app"]["ok"] is False and "500" in s["robot.app"]["error"]
     state_params = dict(seen)["/api/state/full"]

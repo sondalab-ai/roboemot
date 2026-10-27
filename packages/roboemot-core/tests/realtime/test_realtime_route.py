@@ -835,3 +835,41 @@ def test_consecutive_resets_back_off_the_reopen():
     r.finish(req)
     reset()
     assert len(starts) == 2  # at once again
+
+
+# ------------------------------------------------------------------ SR-4: platform identifier
+
+
+def test_the_route_passes_the_identifier_opt_in_and_reports_what_was_sent():
+    """SR-4: the client gets ``privacy.realtime_platform_id`` as a reader of the committed
+    config (each allocation reads it anew, security review), and the report's
+    ``platform_id_sent`` is the client's (SPEC 12, Data; SPEC 12A)."""
+    seen = []
+
+    class Sent(StubClient):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.platform_id = kw["platform_id"]
+            seen.append(self)
+
+        def snapshot(self):
+            return {**super().snapshot(), "platform_id_sent": self.platform_id()}
+
+    stack = rt_stack(privacy={"realtime_platform_id": True})
+    r = RealtimeRoute(
+        stack,
+        lambda: FakeRouter(),
+        NetworkMonitor(stack.effective().llm_routes, POLICY, probe=lambda *a: True),
+        DIRECT,
+        extra=lambda: True,
+        client_factory=Sent,
+    )
+    try:
+        assert r.ready()
+        assert seen[-1].platform_id() is True
+        assert r.snapshot()["platform_id_sent"] is True
+        stack.set("privacy.realtime_platform_id", False, source="test", admin=True)
+        assert seen[-1].platform_id() is False  # the same client reads the new value
+        assert r.snapshot()["platform_id_sent"] is False
+    finally:
+        r.close()

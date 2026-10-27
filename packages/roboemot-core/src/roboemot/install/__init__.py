@@ -18,7 +18,8 @@ reinstalls): ``voice.enabled: true`` unless ``--no-voice`` (which also makes Pip
 default to off) and the dev content with ``--dev``; every other key stays. Unless declined
 (`--no-piper`) it also creates a Piper virtualenv in the data folder (`piper-tts` is GPL-3.0 and
 runs as its own process, SPEC 8), recorded for uninstall.
-The platform's ``extras`` (``voice`` for a robot that listens, so vosk) are installed with
+The platform's ``extras`` (``voice`` for a robot that listens, so vosk; ``realtime``, websockets,
+for the realtime speech route) are installed with
 ``roboemot-core``; the ``vision`` extra and the vision weights come too unless declined
 (``--no-vision``, SPEC 4A Installer). The voice models (``roboemot models fetch --voice``) are
 downloaded on the robot after Piper unless declined (``--no-models``), when the manifests'
@@ -47,6 +48,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import operator
 import os
 import posixpath
 import re
@@ -83,9 +85,20 @@ ENTRY_POINT_GROUP = "roboemot.installers"
 # files pip compiles. The app with its dependencies: scipy, numpy, openai, pydantic (52 MiB
 # downloaded, 184 MiB unpacked). Extras: voice is onnxruntime and vosk (24, 66); vision is
 # opencv-python-headless and onnx (43, 105) plus onnxruntime (20, 53), counted again so that
-# vision alone also fits.
+# vision alone also fits. Realtime is websockets 15.0.1 (0.18 MB downloaded, 0.83 MB unpacked,
+# measured 2026-10-27), rounded up to whole MB; a robot that already has it keeps its version.
 APP_DISK_MB = (60, 230)
-EXTRA_DISK_MB = {"voice": (30, 85), "vision": (70, 200)}
+EXTRA_DISK_MB = {"voice": (30, 85), "vision": (70, 200), "realtime": (1, 2)}
+REALTIME_EXTRA = "realtime"
+REALTIME_PACKAGE = "websockets"  # what the realtime extra brings (roboemot-core's pyproject)
+VERSION_OPS = {  # two-character operators first: ">=" must not read as ">"
+    ">=": operator.ge,
+    "<=": operator.le,
+    "==": operator.eq,
+    "!=": operator.ne,
+    ">": operator.gt,
+    "<": operator.lt,
+}
 ENV_DOWNLOAD_SHARE = 0.5  # downloads next to a created environment's tree (measured 0.3-0.4)
 ENV_FALLBACK_MB = 1500  # that tree when `du` on the creating environment answers nothing
 REMOTE_TMP_PREFIX = "/tmp/roboemot-install"
@@ -448,6 +461,50 @@ def check_ssh(
                 )
             ui.ok(f"{free_kb // 1024} MB free on {path} (need {want} MB)")
     return py
+
+
+def realtime_extra_line(dirs: list[Path], have: str | None) -> str:
+    """The dry run's line for the realtime extra: ``have`` is the robot's websockets version.
+    "already present" only when it meets the extra's requirement (``reachy-mini`` allows an
+    older one than the extra needs); otherwise what the extra needs."""
+    spec = next(
+        (
+            r[len(REALTIME_PACKAGE) :].strip()
+            for r in third_party_requirements(dirs, (REALTIME_EXTRA,))
+            if canonical(r).startswith(REALTIME_PACKAGE)
+            and not r[len(REALTIME_PACKAGE) :][:1].isalnum()
+        ),
+        "",
+    )
+    head = f"would install the realtime extra ({REALTIME_PACKAGE}"
+    if not have:
+        return f"{head}, not present yet)"
+    if version_meets(have, spec):
+        return f"{head} {have}, already present)"
+    return f"{head} {have} present, needs {spec})"
+
+
+def version_meets(version: str, spec: str) -> bool:
+    """Whether a plain dotted ``version`` meets ``spec`` (comma-separated ``>=``, ``>``, ``<=``,
+    ``<``, ``==``, ``!=`` clauses on dotted numbers). Anything it cannot read counts as no."""
+
+    def parts(text: str) -> tuple[int, ...] | None:
+        nums = text.strip().split(".")
+        return tuple(int(n) for n in nums) if all(n.isdigit() for n in nums) else None
+
+    have = parts(version)
+    if have is None:
+        return False
+    for clause in filter(None, (c.strip() for c in spec.split(","))):
+        op = next((o for o in VERSION_OPS if clause.startswith(o)), None)
+        want = parts(clause[len(op) :]) if op else None
+        if op is None or want is None:
+            return False
+        width = max(len(have), len(want))
+        a, b = have + (0,) * (width - len(have)), want + (0,) * (width - len(want))
+        if not VERSION_OPS[op](a, b):
+            return False
+    return True
 
 
 def install_need_mb(
@@ -1316,6 +1373,8 @@ def install_packages(
         record.merge(record.pending_before, before)
     pins = py.constraints(before, set(own))
     if dry_run:
+        if REALTIME_EXTRA in extras:
+            ui.info(realtime_extra_line(dirs, before.get(REALTIME_PACKAGE)))
         reqs = third_party_requirements(dirs, extras)
         plan = py.plan_install(reqs, pins)
         if plan.ok:

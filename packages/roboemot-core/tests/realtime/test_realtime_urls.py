@@ -106,11 +106,11 @@ def test_the_key_goes_to_the_route_host_or_a_declared_suffix():
     own = target("wss://api.example.org/realtime", keyed=True)
     assert own.send_key and own.origin == "wss://api.example.org:443"
     alloc = target(
-        "wss://node7.rt.example.net:8443/realtime?session=s",
+        "wss://node7.rt.example.net/realtime?session=s",
         keyed=True,
         key_hosts=(".rt.example.net",),
     )
-    assert alloc.send_key and alloc.origin == "wss://node7.rt.example.net:8443"
+    assert alloc.send_key and alloc.origin == "wss://node7.rt.example.net:443"
     keyless = target("wss://other.example.net/realtime")
     assert keyless.send_key is False
 
@@ -399,3 +399,317 @@ async def test_the_default_allocation_client_ignores_the_environment():
         assert client.trust_env is False and client.follow_redirects is False
     finally:
         await client.aclose()
+
+
+# ------------------------------------------------------------------ SR-4: provider refusals
+
+
+class Refusing:
+    """A provider whose allocator answered with an error status."""
+
+    key_hosts: tuple[str, ...] = ()
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        self.requests: list[AllocationRequest] = []
+
+    async def allocate(self, request: AllocationRequest) -> Allocation:
+        self.requests.append(request)
+        raise sess.ProviderRefused(self.reason)
+
+
+def test_a_provider_refusal_is_the_close_reason_and_nothing_connects(caplog):
+    """SR-4: a provider names why it cannot allocate (``provider_http_<code>`` and the like);
+    the client fails with that code, never ``connect_failed`` (SPEC 8, Session providers)."""
+    caplog.set_level(logging.DEBUG)
+    with FakeServer() as server:
+        provider = Refusing("provider_http_503")
+        closes: list[str] = []
+        c = RealtimeClient(
+            route(server.http_base(), keyed=True),
+            settings(),
+            provider,
+            auth_headers=bearer,
+            on_close=closes.append,
+        )
+        try:
+            assert c.connect(UPDATE) is False
+            assert c.reason == "provider_http_503" and closes == ["provider_http_503"]
+            assert c.snapshot()["failures"] == {"provider_http_503": 1}
+            assert server.requests == []
+        finally:
+            c.close()
+    assert KEY not in caplog.text
+
+
+def test_provider_refused_carries_a_reason_code_only():
+    exc = sess.ProviderRefused("provider_url")
+    assert exc.reason == "provider_url" and str(exc) == "provider_url"
+
+
+def test_the_client_reports_whether_the_platform_identifier_was_sent():
+    """SR-4: the opt-in reaches the provider, and the client's snapshot says whether the last
+    allocation request carried the identifier (SPEC 12A, ``platform_id_sent``)."""
+
+    class Sending(OtherHost):
+        async def allocate(self, request: AllocationRequest) -> Allocation:
+            self.requests.append(request)
+            if request.platform_id:
+                request.on_platform_id()  # right before the request with it is sent
+            return Allocation(self.url)
+
+    with FakeServer() as server:
+        url = f"ws://localhost:{server.port}/realtime"
+        for opted in (False, True):
+            provider = Sending(url)
+            c = RealtimeClient(
+                route(server.http_base()), settings(), provider, auth_headers=bearer,
+                platform_id=lambda opted=opted: opted,
+            )  # fmt: skip
+            try:
+                assert c.snapshot()["platform_id_sent"] is False  # nothing allocated yet
+                assert c.connect(UPDATE)
+                assert provider.requests[0].platform_id is opted
+                assert c.snapshot()["platform_id_sent"] is opted
+            finally:
+                c.close()
+
+
+def test_the_identifier_opt_in_is_read_at_each_allocation():
+    """Security review of SR-4: an opt-in turned off after the client was built is honoured at
+    its next allocation (a reconnect), and the report follows (SPEC 12, Data)."""
+    opted = [True]
+
+    class Sending(Refusing):
+        async def allocate(self, request: AllocationRequest) -> Allocation:
+            if request.platform_id:
+                request.on_platform_id()
+            return await super().allocate(request)
+
+    provider = Sending("provider_http_503")
+    c = RealtimeClient(
+        route("http://127.0.0.1:9/v1"), settings(), provider, auth_headers=bearer,
+        platform_id=lambda: opted[0],
+    )  # fmt: skip
+    try:
+        assert c.connect(UPDATE) is False
+        assert provider.requests[-1].platform_id is True
+        assert c.snapshot()["platform_id_sent"] is True  # sent, even though the allocator failed
+        opted[0] = False
+        assert c.connect(UPDATE) is False
+        assert provider.requests[-1].platform_id is False
+        assert c.snapshot()["platform_id_sent"] is False
+    finally:
+        c.close()
+
+
+@pytest.mark.parametrize(
+    ("base", "locality", "reason"),
+    [
+        ("https://alloc.example.org/session", "cloud", None),
+        ("http://box.local:8000/session", "auto", None),  # local: plain http allowed
+        ("https://alloc.example.org/session/", "cloud", "provider_url"),
+        ("https://alloc.example.org/session?x=1", "cloud", "provider_url"),
+        ("https://u@alloc.example.org/session", "cloud", "provider_url"),
+        ("https://alloc.example.org:99999/session", "cloud", "provider_url"),
+        ("http://alloc.example.org/session", "cloud", "provider_insecure"),
+        ("https://localhost/session", "cloud", "provider_this_machine"),
+    ],
+)
+def test_a_provider_endpoint_is_checked_before_anything_is_sent(base, locality, reason):
+    r = route(base, locality=locality)
+    if reason is None:
+        assert sess.provider_endpoint(r, "/session") == base
+    else:
+        with pytest.raises(sess.ProviderRefused) as refused:
+            sess.provider_endpoint(r, "/session")
+        assert refused.value.reason == reason
+
+
+def test_an_allocated_url_needs_the_realtime_path_and_is_read_as_ws():
+    assert sess.allocated_url("https://h.example.org/v1/realtime?q=1") == (
+        "wss://h.example.org/v1/realtime?q=1"
+    )
+    with pytest.raises(UrlRefused, match="path"):  # fix round 1, M7: no trailing slash
+        sess.allocated_url("ws://h.local/realtime/")
+    with pytest.raises(UrlRefused, match="path"):
+        sess.allocated_url("wss://h.example.org/v1?x=/realtime")
+    for bad in (None, "", 42):
+        with pytest.raises(sess.ProviderRefused, match="provider_reply"):
+            sess.allocated_url(bad)
+
+
+def test_a_key_host_refusal_logs_the_host_never_the_query(caplog):
+    """Fix round 1 of SR-4: the refused connect host is logged so it can be recorded and
+    declared; its path and query never are (SPEC 8, 12)."""
+    caplog.set_level(logging.DEBUG)
+    provider = OtherHost(f"wss://rt.example.net/secret-path/realtime?t={QUERY_SECRET}")
+    c = RealtimeClient(
+        route("https://alloc.example.org/v1", locality="cloud", keyed=True),
+        settings(),
+        provider,
+        auth_headers=bearer,
+    )
+    try:
+        assert c.connect(UPDATE) is False and c.reason == "url_key_host"
+    finally:
+        c.close()
+    assert "rt.example.net" in caplog.text
+    for secret in (QUERY_SECRET, "secret-path", KEY):
+        assert secret not in caplog.text
+
+
+# ------------------------------------------------------------------ SR-4 fix round 1 (minors)
+
+
+def test_a_declared_key_host_gets_the_key_on_the_wss_port_only():
+    """M2: a declared host matches on 443 only, never on another port the allocator names."""
+    hosts = (".example.net",)
+    for url in ("wss://a.example.net/realtime", "wss://a.example.net:443/realtime"):
+        assert target(url, keyed=True, key_hosts=hosts).send_key is True
+    with pytest.raises(UrlRefused, match="key_host"):
+        target("wss://a.example.net:22/realtime", keyed=True, key_hosts=hosts)
+
+
+def test_a_percent_in_the_host_is_refused():
+    """M3: parsers can disagree on an escaped host."""
+    with pytest.raises(UrlRefused, match="host"):
+        target("wss://rt%2eevil.com.example.net/realtime", key_hosts=(".example.net",))
+
+
+@pytest.mark.parametrize(
+    "base",
+    [
+        "https://xn--80ak6aa92e.com/session",
+        "https://exämple.org/session",
+        "https://a%2eb.org/session",
+    ],
+)
+def test_a_provider_endpoint_needs_a_plain_ascii_host(base):
+    """M4: the SR-1 rule against look-alike hosts also holds for a provider's endpoint."""
+    with pytest.raises(sess.ProviderRefused, match="provider_url"):
+        sess.provider_endpoint(route(base, locality="cloud"), "/session")
+
+
+def test_with_pseudonyms_a_cloud_allocator_is_not_even_asked():
+    """M6: the pseudonym gate runs before the allocation, so a cloud allocator gets neither
+    the key nor the identifier while real names may not reach a cloud host."""
+    provider = OtherHost("wss://rt.example.org/realtime")
+    c = RealtimeClient(
+        route("https://alloc.example.org/v1", locality="cloud", keyed=True),
+        settings(),
+        provider,
+        auth_headers=bearer,
+        local_only=lambda: True,
+    )
+    try:
+        assert c.connect(UPDATE) is False and c.reason == "pseudonyms"
+        assert provider.requests == []
+    finally:
+        c.close()
+
+
+async def test_an_allocation_reply_over_the_cap_is_refused():
+    """M10: a reply larger than ``max_reply_bytes`` (the route's ``max_message_bytes``) is not
+    read whole: ``provider_reply``."""
+    url = "https://alloc.example.org/session"
+    big = httpx.Response(200, content=b"x" * 100)
+    request, _ = recording_request("https://alloc.example.org", {url: big})
+    capped = AllocationRequest(
+        request.route, None, False, 1.0, request.http_client_factory, max_reply_bytes=10
+    )
+    with pytest.raises(sess.ProviderRefused, match="provider_reply"):
+        await sess.post_allocation(capped, url, json={})
+    small = AllocationRequest(
+        request.route, None, False, 1.0, request.http_client_factory, max_reply_bytes=100
+    )
+    resp = await sess.post_allocation(small, url, json={})
+    assert resp.status_code == 200 and resp.content == b"x" * 100
+
+
+def test_the_client_caps_the_allocation_reply_at_its_message_size():
+    provider = OtherHost("ws://localhost:9/realtime")
+    c = RealtimeClient(
+        route("http://127.0.0.1:9/v1"), settings(), provider, auth_headers=bearer,
+        local_only=lambda: False,
+    )  # fmt: skip
+    try:
+        c.connect(UPDATE)
+        assert provider.requests[0].max_reply_bytes == settings().max_message_bytes
+    finally:
+        c.close()
+
+
+def _capped(handler, cap: int = 64) -> AllocationRequest:
+    return AllocationRequest(
+        route("https://alloc.example.org"),
+        None,
+        False,
+        1.0,
+        lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        max_reply_bytes=cap,
+    )
+
+
+ALLOC_URL = "https://alloc.example.org/session"
+
+
+async def test_a_compressed_allocation_reply_is_refused_and_identity_is_asked():
+    """Security review of M10: a compressed body would be expanded before the cap counts it."""
+    import gzip
+
+    seen = []
+
+    def handler(req):
+        seen.append(req.headers.get("accept-encoding"))
+        body = gzip.compress(b'{"connect_url": "' + b"x" * 10_000 + b'"}')
+        return httpx.Response(200, content=body, headers={"Content-Encoding": "gzip"})
+
+    with pytest.raises(sess.ProviderRefused, match="provider_reply"):
+        await sess.post_allocation(_capped(handler, cap=100_000), ALLOC_URL, json={})
+    assert seen == ["identity"]
+
+
+async def test_a_content_length_over_the_cap_is_refused_before_the_body_is_read():
+    read = []
+
+    class Body(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            read.append(True)
+            yield b"x" * 10
+
+    def handler(req):
+        return httpx.Response(200, headers={"Content-Length": "1000"}, stream=Body())
+
+    with pytest.raises(sess.ProviderRefused, match="provider_reply"):
+        await sess.post_allocation(_capped(handler, cap=64), ALLOC_URL, json={})
+    assert read == []
+
+
+async def test_an_identity_reply_under_the_cap_parses_once():
+    def handler(req):
+        return httpx.Response(
+            200, json={"connect_url": "wss://h.example.org/realtime"},
+            headers={"Content-Encoding": "identity"},
+        )  # fmt: skip
+
+    resp = await sess.post_allocation(_capped(handler), ALLOC_URL, json={})
+    assert resp.json() == {"connect_url": "wss://h.example.org/realtime"}
+    assert "content-encoding" not in resp.headers
+
+
+async def test_a_streamed_reply_stops_being_read_at_the_cap():
+    sent = []
+
+    class Body(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            for _ in range(10):
+                sent.append(40)
+                yield b"x" * 40
+
+    def handler(req):
+        return httpx.Response(200, stream=Body())  # no Content-Length
+
+    with pytest.raises(sess.ProviderRefused, match="provider_reply"):
+        await sess.post_allocation(_capped(handler, cap=64), ALLOC_URL, json={})
+    assert len(sent) == 2  # stopped once past the cap, not read whole
