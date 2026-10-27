@@ -73,3 +73,29 @@ def test_wifi_summary_tolerates_unexpected_shapes():
         "connected_network": None,
         "known_networks": 0,
     }
+
+
+def test_the_daemon_section_says_whether_there_is_a_hardware_id_never_its_value():
+    """SR-4 fix round 1, I2: the identifier is data behind privacy.realtime_platform_id, so the
+    debug report shows only that the daemon has one (not the value, not a hash; SPEC 12, 12A)."""
+    hw = "c0ffee5e171e1d42"
+
+    def handler(req):
+        if req.url.path == "/api/daemon/status":
+            return httpx.Response(200, json={"version": "1.12.0", "hardware_id": hw})
+        return httpx.Response(404, json={"detail": "Not Found"})
+
+    sections = _sections(handler)
+    daemon_section = sections["robot.daemon"]
+    data = daemon_section.get("data", daemon_section)
+    assert "hardware_id" not in data and data["hardware_id_present"] is True
+    assert data["version"] == "1.12.0"
+    assert hw not in repr(sections)
+
+
+def test_without_a_hardware_id_the_daemon_section_says_so():
+    def handler(req):
+        return httpx.Response(200, json={"version": "1.12.0", "hardware_id": None})
+
+    section = _sections(handler)["robot.daemon"]
+    assert section.get("data", section)["hardware_id_present"] is False

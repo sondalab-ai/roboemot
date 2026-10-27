@@ -17,7 +17,7 @@ import httpx
 import pytest
 from roboemot.config import ConfigStack
 from roboemot.config.schema import LinkPolicy, LLMRoute, RealtimeRouteConfig
-from roboemot.diagnostics import Diagnostics, FnSource
+from roboemot.diagnostics import Diagnostics, FnSource, Target
 from roboemot.health.network import NetworkMonitor
 from roboemot.plugins import contract_violation
 from roboemot.realtime import protocol
@@ -34,6 +34,7 @@ from roboemot.realtime.session import (
 )
 from roboemot_reachymini import realtime as rm_realtime
 from roboemot_reachymini.daemon import DaemonClient
+from roboemot_reachymini.diagnostics import sources as reachy_sources
 from roboemot_reachymini.realtime import KEY_HOSTS, PlatformSession
 
 KEY = "hf_SENTINELKEY0123456789"
@@ -107,6 +108,10 @@ class Daemon:
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
+        if request.url.path == "/api/daemon/status":  # the debug report's robot.daemon
+            return httpx.Response(200, json={"version": "1.12.0", "hardware_id": HW_ID})
+        if request.url.path != "/api/daemon/hardware-id":
+            return httpx.Response(200, json={})
         return self.answer
 
     def client(self, timeout_s: float) -> DaemonClient:
@@ -241,7 +246,10 @@ def test_the_identifier_and_the_key_are_never_logged_or_reported(caplog):
             assert rt.ready() is False
             assert allocator.bodies() == [{"hardware_id": HW_ID}]
             assert allocator.requests[0].headers[rm_realtime.AUTH_HEADER] == f"Bearer {KEY}"
-            report = Diagnostics().add(FnSource("roboemot.realtime_route", rt.snapshot)).report()
+            diag = Diagnostics().add(FnSource("roboemot.realtime_route", rt.snapshot))
+            for source in reachy_sources(Target("robot"), Daemon().client(2.0)):
+                diag.add(source)  # a real Reachy report: robot.daemon carries the id (I2)
+            report = diag.report()
             texts = (caplog.text, json.dumps(report), repr(made[0].snapshot()), repr(rt))
             assert made[0].snapshot()["platform_id_sent"] is True
             section = report["sections"]["roboemot.realtime_route"]
