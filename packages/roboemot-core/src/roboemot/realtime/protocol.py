@@ -53,6 +53,7 @@ REPLY_TRANSCRIPT_DELTA = "response.output_audio_transcript.delta"
 REPLY_TRANSCRIPT_DONE = "response.output_audio_transcript.done"
 FUNCTION_CALL_DONE = "response.function_call_arguments.done"
 RESPONSE_DONE = "response.done"
+ITEM_DELETED = "conversation.item.deleted"
 
 AUDIO_FORMAT = "audio/pcm"  # PCM16 little endian, mono
 # The rate of the reply's PCM when the server does not say (the OpenAI realtime PCM default).
@@ -305,6 +306,13 @@ class ResponseDone(ServerEvent):
 
 
 @dataclass(frozen=True)
+class ItemDeleted(ServerEvent):
+    """The server deleted a conversation item (the reply to ``conversation.item.delete``)."""
+
+    item_id: str | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True)
 class Unknown(ServerEvent):
     """An event outside the subset: counted, ignored."""
 
@@ -452,6 +460,8 @@ def _event(kind: str, data: dict[str, Any]) -> ServerEvent:
         )
     if kind == RESPONSE_DONE:
         return _response_done(data)
+    if kind == ITEM_DELETED:
+        return ItemDeleted(kind, _opt_str(data, "item_id"))
     return Unknown(kind)
 
 

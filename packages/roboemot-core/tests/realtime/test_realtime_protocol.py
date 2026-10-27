@@ -198,3 +198,12 @@ def test_content_never_reaches_repr():
     call = p.FunctionCall("t", "r", "CALLID", "f", "ARGS")
     assert "ARGS" not in repr(call) and "CALLID" not in repr(call)
     assert "\\x01" not in repr(p.AudioDelta("t", pcm=b"\x01\x00"))
+
+
+def test_an_item_delete_is_confirmed_by_its_item_id():
+    """SR-5: the realtime check reads whether a client-chosen item id was deleted."""
+    ev = p.parse(frame({"type": "conversation.item.deleted", "item_id": "re_check_1"}), MAX)
+    assert isinstance(ev, p.ItemDeleted) and ev.item_id == "re_check_1"
+    assert "re_check_1" not in repr(ev)
+    bad = p.parse(frame({"type": "conversation.item.deleted", "item_id": 7}), MAX)
+    assert isinstance(bad, p.Malformed)
