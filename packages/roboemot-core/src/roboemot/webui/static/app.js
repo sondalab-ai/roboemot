@@ -63,8 +63,9 @@ function markedEyebrow(tag, text) {
   return el(tag, { class: "sl-eyebrow sl-eyebrow--mark" }, text);
 }
 
-// Gives every eyebrow under root its glyph by document position, so a view that re-renders (the
-// routes poll) keeps each head's glyph, and a head never repeats the one just before it.
+// Gives every eyebrow under root its glyph by document position, so a head never repeats the one
+// just before it. A view that re-renders (the routes poll) keeps each head's glyph only while its
+// number of heads stays the same; a head added or removed shifts the glyphs of the ones after it.
 function assignMarks(root) {
   root.querySelectorAll(".sl-eyebrow--mark").forEach((node, i) => {
     const glyph = MARK_GLYPHS[i % MARK_GLYPHS.length];

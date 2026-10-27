@@ -40,6 +40,8 @@ MANIFEST = "VENDORED.json"
 # effects.js still imports the glass, goo and halftone modules when it mounts, so they are vendored
 # (an unused module costs a request, a missing one a console error); no class here activates them.
 # effects.js imports dither-core.js statically (the 0.39 button hover): without it nothing mounts.
+# fonts.css declares Geist Pixel Square, but its woff2 is not vendored: only .sl-stat__value,
+# .sl-lockup and .sl-px use it, and the page has none of them, so the browser never requests it.
 FILES = (
     "package.json",
     "tokens.css",
