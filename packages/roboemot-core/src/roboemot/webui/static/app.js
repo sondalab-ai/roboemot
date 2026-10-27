@@ -54,9 +54,27 @@ function submitButton(label) {
   return el("button", { type: "submit", class: BUTTONS.primary }, label);
 }
 
+// The kit's eyebrow glyphs (ui-kit 0.42), in the order the heads of a view cycle through them.
+// "" is the bare sl-eyebrow--mark; the others name the modifier worn with it. Six glyphs, so two
+// neighbouring heads never share one. High contrast paints none of them and leaves no gap.
+const MARK_GLYPHS = ["", "square", "tri", "circle", "half", "stair"];
+
+function markedEyebrow(tag, text) {
+  return el(tag, { class: "sl-eyebrow sl-eyebrow--mark" }, text);
+}
+
+// Gives every eyebrow under root its glyph by document position, so a view that re-renders (the
+// routes poll) keeps each head's glyph, and a head never repeats the one just before it.
+function assignMarks(root) {
+  root.querySelectorAll(".sl-eyebrow--mark").forEach((node, i) => {
+    const glyph = MARK_GLYPHS[i % MARK_GLYPHS.length];
+    for (const g of MARK_GLYPHS.slice(1)) node.classList.toggle("sl-eyebrow--mark-" + g, g === glyph);
+  });
+}
+
 function card(eyebrow, title, ...children) {
   return el("section", { class: "sl-card" },
-    eyebrow ? el("p", { class: "sl-eyebrow" }, eyebrow) : [],
+    eyebrow ? markedEyebrow("p", eyebrow) : [],
     el("h2", { class: "sl-card__title" }, title),
     el("div", { class: "sl-card__body stack" }, children));
 }
@@ -95,7 +113,7 @@ function progress(label, value, max) {
 }
 
 function empty(eyebrow, body) {
-  return el("div", { class: "sl-empty" }, el("span", { class: "sl-eyebrow" }, eyebrow), el("p", { class: "sl-empty__body" }, body));
+  return el("div", { class: "sl-empty" }, markedEyebrow("span", eyebrow), el("p", { class: "sl-empty__body" }, body));
 }
 
 function table(head, rows) {
@@ -236,11 +254,19 @@ function ask(opts) {
 
 // ---------------------------------------------------------------- login and setup
 
+// The login card is alone on its screen, so it carries the page's one art piece: a corner of
+// quarter discs behind the title's far end. Decorative; high contrast paints nothing there.
+function loginCard(body) {
+  const box = card(null, t("login_title"), body);
+  box.classList.add("sl-art-corner");
+  return box;
+}
+
 function loginView() {
   const view = document.getElementById("view");
   view.replaceChildren();
   if (!state.session.pin_set) {
-    view.append(card(null, t("login_title"), el("p", {}, t("no_pin"))));
+    view.append(loginCard(el("p", {}, t("no_pin"))));
     return;
   }
   const pin = textInput("pin", { type: "password", autocomplete: "off", inputmode: "numeric" });
@@ -257,7 +283,7 @@ function loginView() {
       });
     },
   }, field("pin", t("pin"), pin), el("div", { class: "row" }, submitButton(t("login"))));
-  view.append(card(null, t("login_title"), form));
+  view.append(loginCard(form));
   pin.focus();
 }
 
@@ -606,9 +632,9 @@ async function debugView() {
   const hasRobot = Object.keys(robotOnly).length > 0;
   view.append(card(t("tab_debug"), t("debug_title"),
     el("div", { class: "row" }, button(t("debug_refresh"), "plain", () => guarded(debugView))),
-    el("h3", { class: "sl-eyebrow" }, t("settings_core")),
+    markedEyebrow("h3", t("settings_core")),
     block("GET /api/debug", hasRobot ? { ...report, sections: coreOnly } : report),
-    hasRobot ? [el("h3", { class: "sl-eyebrow" }, t("settings_robot")), block("GET /api/debug (robot)", robotOnly)] : []));
+    hasRobot ? [markedEyebrow("h3", t("settings_robot")), block("GET /api/debug (robot)", robotOnly)] : []));
 }
 
 // ---------------------------------------------------------------- shell
@@ -699,5 +725,10 @@ async function boot() {
     loginView();
   }
 }
+
+// Views render asynchronously and in parts, so the glyphs follow the DOM rather than the code
+// that builds it. Mutation callbacks run before the next paint: a head never shows the wrong one.
+const viewRoot = document.getElementById("view");
+new MutationObserver(() => assignMarks(viewRoot)).observe(viewRoot, { childList: true, subtree: true });
 
 boot().catch(() => notice("Cannot reach the robot.", true));

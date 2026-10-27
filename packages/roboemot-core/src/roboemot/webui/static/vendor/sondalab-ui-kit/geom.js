@@ -1,15 +1,14 @@
 /* @sondalab/ui-kit — geom.js
-   What the effects layer's two gooey families share: resolving a computed
+   What the effects layer's goo field is built from: resolving a computed
    radius the way the browser paints it, tracing a rounded box, the goo filter
    chain's own constants, and the arithmetic of the weld. No DOM, no colour, no
    state — every export here is a value in and a value out, which is what lets
    the tests assert the shapes directly instead of scraping them out of a
    module's source.
 
-   The liquid (effects.js) and the goo (goo-field.js) both weld silhouettes
-   with the same chain, and the weld constant below is DERIVED from the slope
-   that chain applies. Keeping the two apart let one be changed without the
-   other, which is the whole reason they live together here.
+   The goo (goo-field.js) welds silhouettes with a chain whose slope the weld
+   constant below is DERIVED from; keeping them together here is what stops
+   one being changed without the other.
 
    Contract: docs/specs/2026-09-08-effects-layer-design.md */
 
@@ -107,9 +106,8 @@ export function memberShape(rect, origin, radii, reach) {
 }
 
 /** The goo: the alpha slope's steepness, and the intercept that puts its
- *  midpoint at alpha 0.5. libraries.dev/gooey's own numbers, and the pair both
- *  families use — one house goo, so a round button that is a liquid host and a
- *  field member necks the same way in both.
+ *  midpoint at alpha 0.5. libraries.dev/gooey's own numbers, and the pair the
+ *  field's filter chain uses.
  *
  *  WELD_K below is derived from this pair. Change either and the weld distance
  *  an author binds stops meaning what it says. */
@@ -156,7 +154,7 @@ export function weldGap(sigma) {
  *  `filterUnits="userSpaceOnUse"` means this is an explicit box, not a
  *  percentage of the bounding box, and a blur clipped by its own region shows
  *  as a straight cut through the goo. Three sigma holds >99.7% of a Gaussian,
- *  which is the same budget the liquid's skin uses.
+ *  which is the budget the field's filter uses.
  *  @param {{x: number, y: number, w: number, h: number}[]} shapes
  *  @param {number} sigma the blur's stdDeviation
  *  @returns {{x: number, y: number, width: number, height: number}} */

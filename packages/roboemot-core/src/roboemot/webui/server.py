@@ -69,8 +69,10 @@ SECURITY_HEADERS = {
     "Cross-Origin-Resource-Policy": "same-origin",
     "Cache-Control": "no-store",
 }
+# img-src allows data: for the kit's art (ui-kit 0.41+): its glyphs and the corner are inline SVG
+# masks in components.css. Scripts, styles and fetches stay same-origin only.
 CSP = (
-    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; "
+    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
     "connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; "
     "frame-ancestors {ancestors}"
 )

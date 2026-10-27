@@ -237,9 +237,26 @@ def test_only_a_saved_change_fires_the_glitch_burst():
     assert "result.changed ? row.path : null" in js
 
 
-def test_vendored_javascript_is_the_only_place_for_effect_internals():
-    server_text = Path(server_module.__file__).read_text()
-    assert "img-src 'self';" in server_text  # CSP unchanged: no data: images, so no glass lens
+def test_csp_allows_data_images_for_the_art_and_nothing_else_widens():
+    # data: carries the kit's art masks; the glass lens stays off through the class bans above
+    csp = server_module.CSP
+    assert "img-src 'self' data:;" in csp
+    for directive in ("default-src", "script-src", "style-src", "connect-src"):
+        assert f"{directive} 'self';" in csp, directive
+
+
+def test_every_eyebrow_wears_a_mark_and_the_glyphs_cycle_by_position():
+    js = (STATIC / "app.js").read_text()
+    for source in (js, (STATIC / "settings.js").read_text()):
+        assert '"sl-eyebrow"' not in source  # every eyebrow goes through markedEyebrow()
+    assert 'const MARK_GLYPHS = ["", "square", "tri", "circle", "half", "stair"];' in js
+    assert 'class: "sl-eyebrow sl-eyebrow--mark"' in js
+    body = js[js.index("function assignMarks(") :].split("\n}\n", 1)[0]
+    assert "(node, i)" in body and "MARK_GLYPHS[i % MARK_GLYPHS.length]" in body
+    assert "new MutationObserver(() => assignMarks(viewRoot))" in js
+    components = (server_module.VENDOR_DIR / "components.css").read_text()
+    for glyph in ("square", "tri", "circle", "half", "stair"):
+        assert f".sl-eyebrow--mark-{glyph}" in components, glyph
 
 
 def test_dialogs_cover_merge_and_guard_the_pending_request():
