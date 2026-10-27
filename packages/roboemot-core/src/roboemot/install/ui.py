@@ -7,13 +7,19 @@ and only when stdout is a terminal. Non-interactive runs take each prompt's defa
 
 from __future__ import annotations
 
+import argparse
 import getpass
 import sys
+from importlib.metadata import PackageNotFoundError, version
 
 try:
     import sondalab_palette as _palette
+    from sondalab_palette import term as _term
 except ImportError:  # pragma: no cover - plain output
-    _palette = None
+    _palette = _term = None
+
+TAGLINE = "Social and emotional behaviour for robots."
+"""The header's description line (the README's first sentence)."""
 
 
 class WizardError(Exception):
@@ -23,6 +29,34 @@ class WizardError(Exception):
 def paint(text: str, role: str) -> str:
     """Colour ``text`` with a Sondalab role, only when stdout is a terminal."""
     return _palette.paint(text, role) if _palette and sys.stdout.isatty() else text
+
+
+def header() -> str:
+    """The full Sondalab header for the installer's stdout, or "" when nothing should print:
+    without the palette, in accessible mode, or when stdout is not a terminal (so piped and
+    captured output stays byte-identical). On a terminal it still falls back to the one-line
+    lockup with ``TERM=dumb``, in ASCII mode or when the terminal is too narrow."""
+    if _term is None or _term.accessible() or not sys.stdout.isatty():
+        return ""
+    try:
+        ver = version("roboemot-core")
+    except PackageNotFoundError:  # a source tree that was never installed
+        ver = "unknown"
+    return str(_term.header("roboemot", ver, TAGLINE, isatty=True))
+
+
+def print_header() -> None:
+    """Print :func:`header` (nothing when it is empty)."""
+    print(header(), end="", flush=True)
+
+
+class HeaderParser(argparse.ArgumentParser):
+    """``argparse``'s parser with the header before the ``--help`` text."""
+
+    def print_help(self, file=None) -> None:
+        if file is None or file is sys.stdout:
+            print_header()
+        super().print_help(file)
 
 
 class Ui:
@@ -95,4 +129,4 @@ class Ui:
         return default if not answer else answer in ("y", "yes")
 
 
-__all__ = ["Ui", "WizardError", "paint"]
+__all__ = ["HeaderParser", "Ui", "WizardError", "header", "paint", "print_header"]

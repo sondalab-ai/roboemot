@@ -46,7 +46,7 @@ from .piper_lock import lock_path
 from .pyenv import RemotePython, report_changes
 from .record import InstallRecord, canonical, plan_uninstall
 from .remote import Remote
-from .ui import Ui, WizardError, paint
+from .ui import HeaderParser, Ui, WizardError, paint, print_header
 
 ENTRY_POINT_GROUP = "roboemot.installers"
 MIN_FREE_MB = 300  # wheels plus numpy/scipy/openai if the target environment lacks them
@@ -903,7 +903,7 @@ def _json(output: str) -> dict:
 
 
 def parse_args(argv: list[str] | None = None) -> Options:
-    p = argparse.ArgumentParser(description="Install or uninstall RoboEmot on a robot (SPEC 4A).")
+    p = HeaderParser(description="Install or uninstall RoboEmot on a robot (SPEC 4A).")
     p.add_argument("--host", help="robot hostname or IP (default: pick from robots found by mDNS)")
     p.add_argument("--user", help="SSH user (default: ask, the platform's usual user)")
     p.add_argument(
@@ -957,6 +957,7 @@ def parse_args(argv: list[str] | None = None) -> Options:
 
 def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     opts = parse_args(argv)
+    print_header()
     ui = Ui(interactive=sys.stdin.isatty() and not os.environ.get("CI"), assume_yes=opts.yes)
     root = root or Path.cwd()
     try:
