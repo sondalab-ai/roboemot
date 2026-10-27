@@ -35,6 +35,7 @@ def test_realtime_audio_is_an_off_by_default_opt_in():
         "Allow addressed microphone audio to leave the robot to the realtime route."
     )
     assert "a child included" in field.description  # the consent text says so (SPEC 12)
+    assert "voice-at-face" in field.description  # what "addressed" covers (review M-9)
 
 
 def test_close_silence_must_exceed_the_server_silence():

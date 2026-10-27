@@ -67,13 +67,15 @@ def test_a_split_burst_gives_every_transcript_joined_in_order(rig_for):
 
 
 def test_no_transcript_leaves_the_job_open_and_a_cancel_sends_nothing_more(rig_for):
-    with TurnServer(heard=[[]]) as server:
+    with TurnServer(heard=[[], ["dopo"]]) as server:
         rig = rig_for(server)
         job = rig.input.submit(speech(0.5), RATE)
         assert wait_for(lambda: len(server.of("input_audio_buffer.commit")) == 1)
         assert not job.done
         rig.input.cancel(job)
         assert job.done and job.result is None
+        later = rig.input.submit(speech(0.5), RATE)  # its events come after any late delete
+        assert wait_for(lambda: later.done) and later.result.text == "dopo"
         assert server.of("conversation.item.delete") == []
 
 

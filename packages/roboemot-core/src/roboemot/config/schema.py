@@ -1369,7 +1369,10 @@ class PrivacyConfig(Strict):
         False,
         "Allow addressed microphone audio to leave the robot to the realtime route. It is the "
         "audio of whoever speaks to the robot, a child included, and the route's server "
-        "transcribes it (SPEC 12)",
+        "transcribes it (SPEC 12). Addressed is what the wake gate accepts: the wake word, or "
+        "without it (voice.wake_word_policy) anyone speaking while an enrolled person is in "
+        "view and follow-ups; the voice-at-face check then rejects a voice that is not at a "
+        "visible face, but with it off or no sound direction a television can be addressed",
         opt_in=True,
     )
 

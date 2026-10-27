@@ -204,6 +204,9 @@ def test_nothing_is_sent_once_the_opt_in_is_off_even_before_the_listener_reloads
         assert u.addressed and u.text == "come stai" and u.realtime is None
         assert not u.local_only  # nothing left the robot: the text path as usual
         assert appended(server) == []
+        assert ear.r.listener.snapshot()["realtime_audio"]["vosk_skipped"] == 1  # it tried
+        snap = ear.rt.route.snapshot()
+        assert snap["audio_refused"] == 1 and snap["sends_refused"] == 1  # the gate said no
         ear.r.listener.apply_config(ear.rt.stack.effective())
         ear.say()
         assert ear.settle(lambda: len(ear.utterances) == 2)
