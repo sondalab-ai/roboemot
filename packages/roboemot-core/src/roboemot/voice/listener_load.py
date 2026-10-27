@@ -27,11 +27,11 @@ STAGES = (
     "asr_accept",
     "asr_start",
     "asr_finish",
-    "asr_decode",
     "bargein",
     "grammar_wait",
     "handoff",
     "grammar",
+    "decode",
 )
 
 

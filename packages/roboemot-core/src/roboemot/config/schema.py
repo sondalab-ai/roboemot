@@ -2812,6 +2812,15 @@ class RealtimeRouteConfig(Strict):
         ge=100,
         le=5000,
     )
+    local_decode_timeout_s: float = param(
+        10.0,
+        "Longest wait for the local decode of an utterance that skipped Vosk and still needs a "
+        "local final (a voice-at-face reject, no transcript from the server, a refused burst); "
+        "it runs off the listener thread. Past it the utterance is dropped (counted)",
+        unit="s",
+        ge=1,
+        le=60,
+    )
     transcript_max_items: int = param(
         8,
         "Most server items one utterance's audio may produce; past it the transcript is "

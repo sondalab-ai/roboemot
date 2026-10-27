@@ -49,6 +49,7 @@ BEHAVIOUR_MODULES = [
     "voice/pipeline.py",
     "voice/keyword_worker.py",
     "voice/grammar_worker.py",
+    "voice/decode_worker.py",
     "priority.py",
     "voice/sample.py",
     "llm/router.py",

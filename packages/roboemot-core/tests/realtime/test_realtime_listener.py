@@ -26,13 +26,20 @@ OFF_FACE_RAD = 1.3
 class DecodeASR(FakeASR):
     """The fake recognizer, plus the whole-utterance decode of the realtime fallback."""
 
-    def __init__(self, script, final=None, decoded=None):
+    def __init__(self, script, final=None, decoded=None, decode_s=0.0):
         super().__init__(script, final)
         self.decoded = decoded
         self.decodes = 0
+        self.decode_s = decode_s  # a slow decode (a long utterance on the CM4)
+        self.decode_threads: list[str] = []
 
     def decode(self, language, samples):
+        import threading
+
         self.decodes += 1
+        self.decode_threads.append(threading.current_thread().name)
+        if self.decode_s:
+            time.sleep(self.decode_s)
         return self.decoded if self.decoded is not None else self.finish()
 
 
@@ -40,7 +47,18 @@ class Ear:
     """One listener (fake ASR, energy VAD, fake clock) bound to a real realtime input, route,
     client and worker against the fake server."""
 
-    def __init__(self, rt, *, script, final=None, decoded=None, bearing=None, to_worker=False):
+    def __init__(
+        self,
+        rt,
+        *,
+        script,
+        final=None,
+        decoded=None,
+        bearing=None,
+        to_worker=False,
+        decode_s=0.0,
+        background=False,
+    ):
         self.rt = rt
         cfg = rt.stack.effective()
         direction = None
@@ -51,8 +69,8 @@ class Ear:
                 return DirectionSample(self.bearing, (FACE_RAD,), True)
 
             direction = VoiceDirection(cfg.voice.direction, lookup, doa_available=True)
-        self.r = Rig(script, final, cfg=cfg, direction=direction)
-        self.r.asr = DecodeASR(script, final, decoded)
+        self.r = Rig(script, final, cfg=cfg, direction=direction, grammar_background=background)
+        self.r.asr = DecodeASR(script, final, decoded, decode_s)
         self.r.asr.loaded = list(cfg.voice.asr.models)
         self.r.listener._asr = self.r.asr
         self.input = RealtimeInput(rt.route)
@@ -350,3 +368,74 @@ def test_the_server_text_hears_the_name_the_vosk_vocabulary_lacks():
     assert not fast.end("ciao neve", audio, RATE, **ends).wake_word
     fast.begin(0.0, 0.0, "it")
     assert fast.end("ciao neve", audio, RATE, **ends, server=True).wake_word
+
+
+def paced(ear, until, max_s):
+    """Run the listener's own thread on microphone-paced audio (one utterance, then silence)
+    until ``until()`` or ``max_s``; returns the listener's realtime account."""
+    r, listener = ear.r, ear.r.listener
+    chunks: queue.Queue = queue.Queue()
+
+    def source(timeout):
+        try:
+            return chunks.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    listener._source = source
+    listener.start()
+    assert wait_until(lambda: listener.snapshot()["state"] == "running")
+    audio = np.concatenate([voice(seconds=1.0), silence(0.6)])
+    t0 = time.monotonic()
+    i = 0
+    while not until() and time.monotonic() - t0 < max_s:
+        part = audio[i : i + CHUNK] if i < audio.size else silence(CHUNK / RATE)
+        i += CHUNK
+        r.t += part.size / RATE
+        r.now = r.t
+        chunks.put(SimpleNamespace(samples=part, rate_hz=RATE, stamp=r.t, gap=False))
+        time.sleep(part.size / RATE)
+    listener.stop()
+    return listener.snapshot()["realtime"]["total"]
+
+
+def test_a_voice_at_face_reject_is_decoded_off_the_listener_thread(ears):
+    """I-5: the whole-utterance decode of a reject never stalls the microphone."""
+    slow = 1.5
+    with TurnServer() as server:
+        ear = ears(
+            server,
+            script=["x"],
+            decoded="la la la",
+            bearing=OFF_FACE_RAD,
+            decode_s=slow,
+            background=True,
+        )
+        total = paced(ear, lambda: bool(ear.utterances), slow + 4.0)
+        assert len(ear.utterances) == 1 and not ear.utterances[0].addressed
+        assert ear.r.asr.decode_threads == ["roboemot-decode"]
+        assert total["lag_max_s"] < slow / 2
+        assert total["share"] * total["audio_s"] < slow / 4  # listener busy time
+        assert total["ms_per_audio_s"]["decode"] > 0  # spent, on its own thread
+        assert appended(server) == []
+
+
+def test_a_transcript_timeout_is_decoded_off_the_listener_thread(ears):
+    slow = 1.5
+    with TurnServer(heard=[[]]) as server:
+        ear = ears(
+            server,
+            script=["x"],
+            decoded="che ore sono",
+            bearing=FACE_RAD,
+            decode_s=slow,
+            background=True,
+            rt={"transcript_timeout_s": 0.5},
+        )
+        total = paced(ear, lambda: bool(ear.utterances), slow + 5.0)
+        assert len(ear.utterances) == 1
+        u = ear.utterances[0]
+        assert u.text == "che ore sono" and u.local_only
+        assert ear.r.asr.decode_threads == ["roboemot-decode"]
+        assert total["lag_max_s"] < slow / 2
+        assert total["share"] * total["audio_s"] < slow / 4

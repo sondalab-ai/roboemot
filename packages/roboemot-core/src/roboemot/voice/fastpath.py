@@ -236,13 +236,16 @@ class FastPath:
         if before is None and u.keyword_at is not None:
             self.stats.record("keyword_lag", u.keyword_at - audio_stamp)
 
-    def grammar_pass(self, text: str, audio: np.ndarray) -> GrammarPass | None:
+    def grammar_pass(
+        self, text: str, audio: np.ndarray, language: str | None = None
+    ) -> GrammarPass | None:
         """The grammar pass of the utterance that ended with final ``text``, on ``audio``
-        (pre-roll to the last speech frame); None without a grammar spotter."""
+        (pre-roll to the last speech frame), in ``language`` (default: the utterance in
+        progress's); None without a grammar spotter."""
         if self._grammar is None:
             return None
         spotter = self._spotter  # one spotter for the utterance, whatever a reload does meanwhile
-        language = self._u.language
+        language = self._u.language if language is None else language
         found = frozenset(spotter.spot(text, language))
         return GrammarPass(self._grammar, spotter, language, audio, text, found)
 

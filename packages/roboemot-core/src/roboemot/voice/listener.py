@@ -62,6 +62,7 @@ from ..bus import Bus
 from ..config.schema import RoboEmotConfig
 from .activity import SpeechActivity
 from .asr import ASRBackend, ASREvent, resolve_language
+from .decode_worker import DecodeJob, DecodeWorker
 from .direction import VoiceDirection
 from .fastpath import FastPath, GrammarPass, UtteranceState
 from .grammar_worker import GrammarJob, GrammarWorker
@@ -128,8 +129,9 @@ class UtteranceInfo:
 
 @dataclass
 class _Handoff:
-    """A finished utterance waiting until ``deadline`` for its grammar pass (``job``) or for
-    the realtime route's transcript of its audio (``rt``). ``state`` is the fast path's state
+    """A finished utterance waiting until ``deadline`` for its grammar pass (``job``), for
+    the realtime route's transcript of its audio (``rt``) or for its local decode (``decode``,
+    then its grammar pass). ``state`` is the fast path's state
     of the utterance (held at its end); ``addressed`` the wake decision once made (None
     before); ``face`` the voice-at-face check's answer once asked (None: not asked);
     ``heard`` what its grammar pass heard."""
@@ -145,7 +147,9 @@ class _Handoff:
     rt: Any = None  # the RealtimeInput job (realtime.input.InputJob)
     addressed: bool | None = None
     face: bool | None = None
-    heard: frozenset[str] = frozenset()
+    heard: frozenset[str] = field(default=frozenset(), repr=False)
+    decode: DecodeJob | None = None  # its local decode, off the listener thread
+    local_only: bool = False  # its audio left without a transcript: the chat routes answer
 
 
 class VoiceListener:
@@ -202,6 +206,12 @@ class VoiceListener:
             timer=timer,
             clock=clock,
         )
+        self._decoder = DecodeWorker(
+            background=grammar_background,
+            on_spent=lambda seconds: self.load.stage("decode", seconds),
+            timer=timer,
+            clock=clock,
+        )
         # finished utterances waiting for their final, in order (the head goes first)
         self._queue: collections.deque[_Handoff] = collections.deque()
         self._handoff = {"waits": 0, "timeouts": 0, "superseded": 0, "dropped_on_stop": 0}
@@ -212,6 +222,8 @@ class VoiceListener:
             "transcribed": 0,
             "transcript_timeouts": 0,
             "local_fallbacks": 0,
+            "decodes": 0,
+            "decode_timeouts": 0,
         }
         self._vosk = True  # the utterance in progress runs the recognizer
         self._wait_last_s = 0.0
@@ -284,6 +296,7 @@ class VoiceListener:
         else:
             self._drop_pending()
         self._grammar.close()
+        self._decoder.close()
 
     def pause_listening(self) -> None:
         """Run no VAD or recognizer until :meth:`resume_listening` (the robot is asleep, SPEC
@@ -579,18 +592,19 @@ class VoiceListener:
         if not self._recording:
             return
         self._recording = False
-        face: bool | None = None
         if not self._vosk:  # buffered only: addressed now, or decoded from the buffer
             face = self._face()
-            if self._send_unheard(ev, face):
-                return
-            text = self._decode(self._language, ev)
-        else:
-            try:
-                text = self._timed("asr_finish", self._asr.finish).strip()
-            except BaseException:
-                self._set_active(bool(self._queue))
-                raise
+            if not self._send_unheard(ev, face):
+                p = self._handoff_for(ev, face)
+                self._decode(p)
+                self._queue.append(p)
+                self.poll_handoff()
+            return
+        try:
+            text = self._timed("asr_finish", self._asr.finish).strip()
+        except BaseException:
+            self._set_active(bool(self._queue))
+            raise
         if not text:
             self._count("empty")
             self._fast.reset()
@@ -602,9 +616,15 @@ class VoiceListener:
         job = None if grammar_pass is None else self._grammar.submit(grammar_pass.run, deadline)
         held = self._fast.hold()
         self._queue.append(
-            _Handoff(ev, text, self._language, grammar_pass, job, now, deadline, held, face=face)
+            _Handoff(ev, text, self._language, grammar_pass, job, now, deadline, held)
         )
         self.poll_handoff()
+
+    def _handoff_for(self, ev: SpeechEnd, face: bool | None) -> _Handoff:
+        """The hand-off of an utterance that skipped Vosk, its final still to come."""
+        now = self._clock()
+        held = self._fast.hold()
+        return _Handoff(ev, "", self._language, None, None, now, now, held, face=face)
 
     def _face(self) -> bool | None:
         """The voice-at-face check, asked once for an utterance; None without one."""
@@ -631,15 +651,12 @@ class VoiceListener:
             speaker=speaker,
             at_face=None if face is None else (lambda: face),
         )
-        now = self._clock()
-        held = self._fast.hold()
-        p = _Handoff(ev, "", self._language, None, None, now, now, held, face=face)
+        p = self._handoff_for(ev, face)
         p.addressed = addressed
         if addressed:
             self._send(p)
         else:  # decided already (a reload changed the policy meanwhile): decoded, not re-decided
-            p.text = self._decode(self._language, ev)
-            p.deadline = now
+            self._decode(p)
         self._queue.append(p)
         self.poll_handoff()
         return True
@@ -659,15 +676,33 @@ class VoiceListener:
         """The utterance's audio from its first to its last speech frame, pre-roll included."""
         return ev.audio[: self._last_sample(ev)]
 
-    def _decode(self, language: str, ev: SpeechEnd) -> str:
-        """The local final of an utterance whose recognizer did not run: a whole-utterance
-        decode on a recognizer of its own (the one in progress is not disturbed)."""
-        try:
-            text = self._timed("asr_decode", self._asr.decode, language, self._speech_audio(ev))
-        except Exception as exc:
-            log.warning("voice listener: decode: %s", type(exc).__name__)
-            return ""
-        return str(text).strip()
+    def _decode(self, p: _Handoff) -> None:
+        """Decode ``p``'s buffer for its local final, off this thread (the decode worker): a
+        whole-utterance decode on a recognizer of its own, waited for until
+        ``local_decode_timeout_s``; its grammar pass follows (``poll_handoff``)."""
+        language, audio = p.language, self._speech_audio(p.ev)
+        p.deadline = self._clock() + self._cfg.voice.realtime_route.local_decode_timeout_s
+        p.decode = self._decoder.submit(
+            lambda: str(self._asr.decode(language, audio)).strip(), p.deadline
+        )
+        self._count_audio("decodes")
+
+    def _decoded(self, p: _Handoff) -> None:
+        """``p``'s local decode is over (or out of time): its text, then its grammar pass
+        (submitted like any utterance's, under ``voice.grammar.handoff_timeout_s``)."""
+        job, p.decode = p.decode, None
+        if job is None or not job.ran:
+            self._count_audio("decode_timeouts")
+            return
+        p.text = job.result
+        if not p.text:
+            return
+        audio = p.ev.audio[: self._last_sample(p.ev)]
+        p.grammar_pass = self._fast.grammar_pass(p.text, audio, p.language)
+        now = self._clock()
+        p.deadline = now + self._cfg.voice.grammar.handoff_timeout_s
+        if p.grammar_pass is not None:
+            p.job = self._grammar.submit(p.grammar_pass.run, p.deadline)
 
     def _last_sample(self, ev: SpeechEnd) -> int:
         """Index in ``ev.audio`` just past the last speech frame (the end silence off)."""
@@ -681,6 +716,15 @@ class VoiceListener:
         read)."""
         while self._queue:
             p = self._queue[0]
+            if p.decode is not None:
+                if not p.decode.done and self._clock() < p.deadline:
+                    return
+                self._decoded(p)
+                if not p.text:  # nothing heard, or out of time
+                    self._queue.popleft()
+                    self._count("empty")
+                    self._set_active(self._recording or bool(self._queue))
+                    continue
             if p.rt is not None:
                 if not self._rt_settled(p):
                     if self._clock() < p.deadline:
@@ -809,10 +853,10 @@ class VoiceListener:
         if not text:  # decoded to nothing after the decision
             self._count("empty")
             return None
-        self._finish(p, text, p.grammar_pass, heard)
+        self._finish(p, text, p.grammar_pass, heard, local_only=p.local_only)
         return None
 
-    def _deliver_heard(self, p: _Handoff) -> None:
+    def _deliver_heard(self, p: _Handoff) -> _Handoff | None:
         """``p``'s audio went to the realtime route: its final is the server's transcript
         (keywords, the wake word and the speaking rate come from it), else a local decode of
         its buffer, which the chat routes answer when the audio did leave."""
@@ -824,11 +868,11 @@ class VoiceListener:
             self._finish(p, result.text, None, frozenset(), heard, server=True)
             return None
         self._count_audio("local_fallbacks")
-        text = p.text or self._decode(p.language, p.ev)
-        if not text:
-            self._count("empty")
-            return None
-        self._finish(p, text, p.grammar_pass, p.heard, local_only=job.sent)
+        p.rt, p.local_only = None, job.sent
+        if not p.text:  # Vosk never ran: decoded off this thread, then handed off
+            self._decode(p)
+            return p
+        self._finish(p, p.text, p.grammar_pass, p.heard, local_only=p.local_only)
         return None
 
     def _finish(
