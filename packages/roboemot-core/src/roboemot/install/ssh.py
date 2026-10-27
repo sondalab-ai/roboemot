@@ -25,8 +25,14 @@ from . import Options, Platform, installed_platforms, select_robot
 from .remote import CONNECT_TIMEOUT_S
 from .ui import Ui, WizardError
 
+try:
+    from sondalab_palette.term import TermError
+except ImportError:  # pragma: no cover - plain errors without the palette
+    TermError = WizardError
+
 NOT_INSTALLED_EXIT = 127
 CLI_NAME = "roboemot"
+COMMAND = "python scripts/robot_ssh.py"
 
 USER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9._-]*")
 HOST_LABEL = re.compile(r"(?!-)[A-Za-z0-9-]{1,63}(?<!-)")
@@ -147,13 +153,17 @@ def main(
     ui: Ui | None = None,
 ) -> int:
     opts, command, copy_id, debug = parse_args(argv)
-    ui = ui or Ui(interactive=sys.stdin.isatty() and not os.environ.get("CI"), assume_yes=False)
+    ui = ui or Ui(
+        interactive=sys.stdin.isatty() and not os.environ.get("CI"),
+        assume_yes=False,
+        command=COMMAND,
+    )
     try:
         # Prompts and discovery messages go to stderr: stdout stays the command's own output.
         with contextlib.redirect_stdout(sys.stderr):
             cmd = build_argv(opts, command, copy_id, debug, ui, root or Path.cwd())
-    except WizardError as e:
-        ui.fail(str(e))
+    except TermError as e:
+        print(e.block(), file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         ui.fail("interrupted")
@@ -164,7 +174,8 @@ def main(
     try:
         execvp(cmd[0], cmd)
     except OSError as e:
-        ui.fail(f"cannot run {cmd[0]}: {e}")
+        error = WizardError(f"Could not run {cmd[0]}", str(e), f"which {cmd[0]}")
+        print(error.block(), file=sys.stderr)
         return 1
     return 0  # only reached when execvp is replaced (tests); a real exec never returns
 

@@ -48,6 +48,11 @@ from .record import InstallRecord, canonical, plan_uninstall
 from .remote import Remote
 from .ui import HeaderParser, Ui, WizardError, paint, print_header
 
+try:
+    from sondalab_palette.term import TermError
+except ImportError:  # pragma: no cover - the robot imports this package and has no palette
+    TermError = WizardError
+
 ENTRY_POINT_GROUP = "roboemot.installers"
 MIN_FREE_MB = 300  # wheels plus numpy/scipy/openai if the target environment lacks them
 REMOTE_TMP_PREFIX = "/tmp/roboemot-install"
@@ -142,13 +147,28 @@ def find_robots(root: Path) -> list[tuple[str, str, str]]:
     ]
 
 
+def _robot_model(ui: Ui, robot: str | None) -> str:
+    """``--robot``, else the only installed platform, else ask which one."""
+    if robot is not None:
+        return robot
+    options = installed_platforms()
+    if not options:
+        raise WizardError("no robot installer is installed")
+    if len(options) == 1:
+        return options[0]
+    return options[ui.choose("Which robot model?", options, flag="--robot")]
+
+
 def select_robot(ui: Ui, opts: Options, root: Path) -> tuple[str, Platform]:
-    """Host and platform from the flags, else from mDNS, else by asking."""
+    """Host and platform from the flags, else from mDNS, else by asking.
+
+    A given ``--host`` skips discovery. Without one and without a terminal nothing is looked
+    up or picked: the run stops naming ``--host`` (never the first robot found).
+    """
+    if opts.host:
+        return opts.host, load_platform(_robot_model(ui, opts.robot))
+    ui.require("--host", False)
     robot = opts.robot
-    if opts.host and robot is None and len(installed_platforms()) == 1:
-        robot = installed_platforms()[0]
-    if opts.host and robot:
-        return opts.host, load_platform(robot)
     ui.info("looking for robots on the network (mDNS)")
     try:
         found = [f for f in find_robots(root) if robot in (None, f[2])]
@@ -156,19 +176,13 @@ def select_robot(ui: Ui, opts: Options, root: Path) -> tuple[str, Platform]:
         ui.warn(f"discovery unavailable: {e}")
         found = []
     if found:
-        i = ui.choose("Which robot?", [label for label, _, _ in found] + ["another host or IP"])
+        labels = [label for label, _, _ in found] + ["another host or IP"]
+        i = ui.choose("Which robot?", labels, flag="--host")
         if i < len(found):
             return found[i][1], load_platform(found[i][2])
-    if robot is None:
-        options = installed_platforms()
-        if not options:
-            raise WizardError("no robot installer is installed")
-        robot = (
-            options[ui.choose("Which robot model?", options)] if len(options) > 1 else options[0]
-        )
-    platform = load_platform(robot)
+    platform = load_platform(_robot_model(ui, robot))
     prompt = "No robot found. Robot hostname or IP" if not found else "Robot hostname or IP"
-    return opts.host or ui.ask(prompt, platform.default_host), platform
+    return ui.ask(prompt, platform.default_host, flag="--host"), platform
 
 
 # ---------------------------------------------------------------- shared steps
@@ -227,7 +241,7 @@ def write_record(remote: Remote, path: str, record: InstallRecord) -> None:
 
 
 def _with_remote(opts: Options, ui: Ui, platform: Platform, host: str, body) -> None:
-    user = opts.user or ui.ask("SSH user", platform.default_user)
+    user = opts.user or ui.ask("SSH user", platform.default_user, flag="--user")
     # The ssh control socket path must stay under 104 bytes: macOS $TMPDIR is too long.
     with tempfile.TemporaryDirectory(prefix="re-ssh-", dir="/tmp") as sock_dir:
         remote = Remote(user, host, Path(sock_dir))
@@ -446,7 +460,13 @@ def wanted_secrets(ui: Ui, opts: Options) -> list[str]:
     if names is None and ui.interactive and not ui.assume_yes:
         if not ui.confirm("Store an API key for a cloud LLM route on the robot?", False):
             return []
-        names = [ui.ask("Secret name (the ${secret:name} in the route)", DEFAULT_SECRET_NAME)]
+        names = [
+            ui.ask(
+                "Secret name (the ${secret:name} in the route)",
+                DEFAULT_SECRET_NAME,
+                flag="--secret",
+            )
+        ]
     check_secret_names(names or [])
     return names or []
 
@@ -678,9 +698,31 @@ def install_packages(
     return record
 
 
+def preflight(opts: Options, ui: Ui) -> None:
+    """Without a terminal, stop before anything runs unless every question has its flag.
+
+    Host and user are never defaulted; the confirmations are answered by their own flag or
+    by ``--yes``. Questions that depend on what the robot says (shared packages, a running
+    app, an existing PIN or secret) are checked when they come up and name ``--yes``.
+    """
+    ui.require("--host", opts.host is not None)
+    if len(installed_platforms()) > 1:
+        ui.require("--robot", opts.robot is not None)
+    ui.require("--user", opts.user is not None)
+    if opts.uninstall:
+        return
+    answered = [("--dev", opts.dev), ("--piper", opts.piper)]
+    if not opts.dry_run:
+        answered += [("--start", opts.start), ("--startup-app", opts.startup)]
+    for flag, value in answered:
+        given = value is not None or opts.yes or ui.assume_yes
+        ui.require(flag, given, f"Missing {flag} or --no-{flag[2:]}")
+
+
 def run_install(opts: Options, ui: Ui, root: Path) -> None:
     ui.steps = INSTALL_STEPS
     check_secret_names(opts.secrets or [])
+    preflight(opts, ui)
     ui.title("installer", "dry run: the robot is not modified" if opts.dry_run else "")
     ui.step("Robot")
     host, platform = select_robot(ui, opts, root)
@@ -696,7 +738,7 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
                 ui.info(
                     "with conservative fallback limits (SPEC 12); without it, it refuses to start"
                 )
-                dev = ui.confirm("Install in dev mode?", True)
+                dev = ui.confirm("Install in dev mode?", False, flag="--dev")
             ui.ok("dev mode (configs/dev-unmeasured.yaml)" if dev else "production config")
             dirs = platform.stage(root, Path(tmp) / "src", dev)
 
@@ -712,7 +754,9 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
             if not opts.dry_run:
                 platform.verify(ui, py, dev)
             if opts.piper is None:
-                opts.piper = ui.confirm("Install Piper for on-board speech (own virtualenv)?", True)
+                opts.piper = ui.confirm(
+                    "Install Piper for on-board speech (own virtualenv)?", False, flag="--piper"
+                )
             if opts.piper:
                 install_piper(ui, platform, remote, record, opts.dry_run)
             set_operator_pin(ui, py, remote, opts.dry_run)
@@ -730,13 +774,15 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
             if (
                 opts.start
                 if opts.start is not None
-                else ui.confirm(f"Start {platform.app_name} now?", True)
+                else ui.confirm(f"Start {platform.app_name} now?", False, flag="--start")
             ):
                 platform.start(ui)
             startup = opts.startup
             if startup is None:
                 startup = ui.confirm(
-                    f"Start {platform.app_name} automatically when the robot wakes up?", False
+                    f"Start {platform.app_name} automatically when the robot wakes up?",
+                    False,
+                    flag="--startup-app",
                 )
             if startup:
                 if not record.autostart_recorded:
@@ -755,6 +801,7 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
 
 def run_uninstall(opts: Options, ui: Ui, root: Path) -> None:
     ui.steps = UNINSTALL_STEPS
+    preflight(opts, ui)
     ui.title("uninstaller", "dry run: the robot is not modified" if opts.dry_run else "")
     ui.step("Robot")
     host, platform = select_robot(ui, opts, root)
@@ -962,8 +1009,8 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     root = root or Path.cwd()
     try:
         (run_uninstall if opts.uninstall else run_install)(opts, ui, root)
-    except WizardError as e:
-        ui.fail(str(e))
+    except TermError as e:
+        print(e.block(), file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         ui.fail("interrupted")

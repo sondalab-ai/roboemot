@@ -16,6 +16,12 @@ class FakePlatform:
     python = "/venvs/apps/bin/python"
 
 
+def typed(*lines: str) -> Ui:
+    """An interactive Ui whose prompts read ``lines`` in order."""
+    it = iter(lines)
+    return Ui(interactive=True, assume_yes=False, read=lambda: next(it))
+
+
 @pytest.fixture
 def env(monkeypatch):
     calls: list[tuple[str, list[str]]] = []
@@ -44,12 +50,21 @@ def test_user_flag_and_command_after_double_dash(env):
 
 
 def test_discovery_picks_the_found_robot(env, monkeypatch):
+    _, calls = env
+    monkeypatch.setattr(
+        inst, "find_robots", lambda root: [("Neve 10.0.0.7", "10.0.0.7", "fake-v1")]
+    )
+    ssh.main([], execvp=lambda f, a: calls.append((f, a)), ui=typed("1\n"))
+    assert calls[0][1][-1] == "pi@10.0.0.7"
+
+
+def test_without_a_terminal_the_host_flag_is_required(env, monkeypatch, capsys):
     run, calls = env
     monkeypatch.setattr(
         inst, "find_robots", lambda root: [("Neve 10.0.0.7", "10.0.0.7", "fake-v1")]
     )
-    run([])
-    assert calls[0][1][-1] == "pi@10.0.0.7"
+    assert run([]) == 1 and calls == []
+    assert "Missing --host" in capsys.readouterr().err
 
 
 def test_copy_id_runs_ssh_copy_id(env):
@@ -90,17 +105,17 @@ def test_a_missing_ssh_binary_is_reported_not_raised(env, capsys):
 
     ui = Ui(interactive=False, assume_yes=False)
     assert ssh.main(["--host", "h"], execvp=boom, ui=ui) == 1
-    assert "cannot run ssh" in capsys.readouterr().out
+    assert "Could not run ssh" in capsys.readouterr().err
 
 
 def test_stdout_stays_clean_for_redirecting_the_report(env, monkeypatch, capsys):
-    run, calls = env
+    _, calls = env
     monkeypatch.setattr(
         inst, "find_robots", lambda root: [("Neve 10.0.0.7", "10.0.0.7", "fake-v1")]
     )
-    run(["--debug"])
+    ssh.main(["--debug"], execvp=lambda f, a: calls.append((f, a)), ui=typed("1\n"))
     captured = capsys.readouterr()
-    assert captured.out == "" and "looking for robots" in captured.err
+    assert captured.out == "" and "Which robot?" in captured.err
     assert calls[0][1][-3:-1] == ["--", "pi@10.0.0.7"]
 
 
@@ -125,7 +140,8 @@ def test_option_looking_user_and_host_are_refused_before_any_exec(env, flags, ca
 def test_an_option_looking_discovered_or_typed_host_is_refused(env, monkeypatch):
     run, calls = env
     monkeypatch.setattr(inst, "find_robots", lambda root: [("x", "-oProxyCommand=y", "fake-v1")])
-    assert run([]) == 1 and calls == []
+    ui = typed("1\n")
+    assert ssh.main([], execvp=lambda f, a: calls.append((f, a)), ui=ui) == 1 and calls == []
 
 
 def test_valid_hosts_and_users_pass():

@@ -214,7 +214,7 @@ class ReachyMiniWireless:
         api = self._api()
         other = self.running_app()
         if other:
-            if not ui.confirm(f"{other} is running; stop it (only one app runs at a time)?", True):
+            if not ui.confirm(f"{other} is running; stop it (only one app runs at a time)?", False):
                 raise WizardError(f"{other} is still running; RoboEmot not started")
             api.stop_current_app()
             ui.ok(f"stopped {other}")
