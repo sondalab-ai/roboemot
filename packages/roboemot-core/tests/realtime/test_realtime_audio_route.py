@@ -348,3 +348,14 @@ def test_a_request_for_another_session_is_refused():
     assert r.request(None, "x", generation=gen + 1) is None
     assert made[0].sent == []
     assert r.request(None, "x", generation=gen) is not None
+
+
+def test_a_reconnect_keeps_the_day_upload_count():
+    """M-13: the count lives on the route, not on a session."""
+    stack = audio_stack({"daily_upload_budget_s": 2.5})
+    r, _ = audio_route(stack)
+    assert r.ready()
+    assert r.send_audio(SECOND * 2, gate="addressed", instructions="") is None
+    r.close_soon("conversation_end")
+    assert r.ready()
+    assert r.send_audio(SECOND, gate="addressed", instructions="") == "upload_budget"
