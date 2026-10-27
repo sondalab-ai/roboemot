@@ -9,7 +9,7 @@ import pytest
 from fake_server import ERROR_MESSAGE, PCM, REPLY_TEXT, FakeServer
 from realtime_helpers import UPDATE, route, settings, wait_until
 from roboemot.realtime import protocol
-from roboemot.realtime.client import RealtimeClient
+from roboemot.realtime.client import RealtimeClient, audio_bytes
 from roboemot.realtime.session import DirectSession
 
 
@@ -39,7 +39,7 @@ def test_connect_session_update_and_a_response(events, caplog):
             assert server.received[0]["type"] == "session.update"
             assert server.requests[0]["path"] == "/v1/realtime"
             assert [e.type for e in events[:2]] == ["session.created", "session.updated"]
-            assert c.send_audio(PCM).result(2)
+            assert c.send(protocol.audio_append(PCM)).result(2)
             assert c.send(protocol.response_create()).result(2)
             assert wait_until(lambda: any(isinstance(e, protocol.ResponseDone) for e in events))
             audio = [e for e in events if isinstance(e, protocol.AudioDelta)]
@@ -155,7 +155,7 @@ def test_a_send_stuck_on_a_server_that_stopped_reading_aborts(events):
             chunk = b"\x00\x01" * 32_768
             stuck = False
             for _ in range(2000):
-                if not c.send_audio(chunk).result(5):
+                if not c.send(protocol.audio_append(chunk)).result(5):
                     stuck = True
                     break
             assert stuck
@@ -176,7 +176,7 @@ def test_a_socket_lost_while_a_send_is_blocked_is_a_stuck_send(events):
             chunk = b"\x00\x01" * 32_768
             pending = None
             for _ in range(2000):
-                future = c.send_audio(chunk)
+                future = c.send(protocol.audio_append(chunk))
                 try:
                     future.result(0.3)
                 except concurrent.futures.TimeoutError:
@@ -271,7 +271,7 @@ def test_send_after_close_resolves_false(events):
         assert c.connect(UPDATE)
         c.close()
         assert c.send(protocol.response_cancel()).result(1) is False
-        assert c.send_audio(PCM).result(1) is False
+        assert c.send(protocol.audio_append(PCM)).result(1) is False
 
 
 def test_unknown_events_neither_reach_the_handler_nor_keep_a_response_alive(events):
@@ -316,3 +316,15 @@ def test_closing_a_connecting_client_never_hangs_the_connect():
     thread.join(5)
     assert result == [False] and time.monotonic() - started < 2
     assert client.state == "closed" and client.reason == "closed"  # its close, reported once
+
+
+def test_the_client_has_no_ungated_audio_send():
+    """SR-3: audio leaves only through the route's send gate (SPEC 12)."""
+    assert not hasattr(RealtimeClient, "send_audio")
+
+
+def test_audio_bytes_are_counted_from_the_append_event():
+    for n in (0, 2, 4, 6, 1000, 1002):
+        event = protocol.audio_append(b"\x01\x00" * (n // 2))
+        assert audio_bytes(event) == n
+    assert audio_bytes(protocol.response_cancel()) == 0
