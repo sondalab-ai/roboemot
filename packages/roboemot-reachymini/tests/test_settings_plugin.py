@@ -62,7 +62,8 @@ def test_hardware_rows_are_read_only_manifest_rows_with_every_key(split):
     assert own
     for row in own:
         assert set(row) == DESCRIPTOR_KEYS
-        assert row["writable"] is False and row["source"] == "manifest"
+        session = row["path"].startswith(f"{BASE}.realtime_session.")
+        assert row["writable"] is False and row["source"] == ("config" if session else "manifest")
 
 
 def test_angles_are_shown_in_degrees_translations_in_mm(split):
@@ -284,3 +285,51 @@ def test_restart_log_omits_the_status_for_a_transport_error(caplog):
     with caplog.at_level("INFO", logger="roboemot_reachymini.settings"):
         daemon(RUNNING, restart_reply=httpx.ReadError("dropped")).restart()
     assert "restart request ended (ReadError)" in caplog.text and "None" not in caplog.text
+
+
+# ------------------------------------------------------------------ realtime session (SR-4)
+
+SESSION = f"{BASE}.realtime_session"
+ALLOCATOR_ROUTE = {
+    "name": "platform",
+    "base_url": "https://allocator.hf.space/session",
+    "model": "s2s",
+    "kind": "realtime",
+    "api_key": "${secret:hf_token}",
+}
+
+
+def session_rows(tmp_path, mode="platform", platform_id=False):
+    app = {
+        "llm_routes": [ALLOCATOR_ROUTE],
+        "voice": {"realtime_route": {"enabled": True, "route": "platform", "mode": mode}},
+        "privacy": {"realtime_platform_id": platform_id},
+    }
+    stack = ConfigStack(app=app)
+    editor = SettingsEditor(stack, store=tmp_path / "s.json", manifest=MANIFEST)
+    _, robot = editor.robot_split(editor.fields())
+    return {f["path"]: f for f in robot["fields"] if f["path"].startswith(SESSION + ".")}
+
+
+@pytest.mark.parametrize("platform_id", [False, True])
+def test_the_realtime_session_rows_show_the_allocator_host_and_the_identifier(
+    tmp_path, platform_id
+):
+    """SPEC 4A, 12: what the platform's allocator receives, read-only and not redacted (the
+    ``session`` word redacts a text leaf named after it, so the rows are leaves below it)."""
+    rows = session_rows(tmp_path, platform_id=platform_id)
+    host, sent = rows[f"{SESSION}.allocator_host"], rows[f"{SESSION}.platform_id_sent"]
+    assert host["value"] == "allocator.hf.space" and host["secret"] is False
+    assert sent["kind"] == "bool" and sent["value"] is platform_id and sent["secret"] is False
+    assert not host["writable"] and not sent["writable"]
+
+
+def test_in_direct_mode_no_allocator_is_used_and_no_identifier_is_sent(tmp_path):
+    rows = session_rows(tmp_path, mode="direct", platform_id=True)
+    assert rows[f"{SESSION}.allocator_host"]["value"] is None
+    assert rows[f"{SESSION}.platform_id_sent"]["value"] is False
+
+
+def test_without_a_stack_there_are_no_session_rows():
+    section = ReachySettings().section(None, MANIFEST)
+    assert not [r for r in section.fields if r["path"].startswith(SESSION)]

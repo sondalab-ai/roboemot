@@ -5,6 +5,11 @@ claims the config paths the manifest ``behaviour`` block fills (expression map, 
 circadian motion), so they are edited as ordinary settings but listed under the robot, and adds
 the manifest's hardware limits as read-only rows: pose limits, dynamics, yaw-delta constraints and
 safety. Angles are radians inside ``Manifest.dofs`` and shown in degrees; translations in mm.
+With a stack it also shows what the realtime session provider (``realtime.py``) uses, read from
+the configuration: ``realtime_session.allocator_host`` (the route's host in platform mode, else
+empty) and ``realtime_session.platform_id_sent`` (whether the platform identifier goes with each
+session request). The rows are leaves below ``realtime_session``: a text field named after a
+redacted word (``session``) would show as a secret.
 
 It also implements ``Restartable``: RoboEmot is restarted by the daemon
 (``DaemonClient.restart_current_app``: SIGINT to the app, kill after ``STOP_TIMEOUT_S``, then
@@ -21,7 +26,9 @@ from collections.abc import Callable
 from typing import Any
 
 from roboemot.config.catalogue import FieldDescriptor, descriptor
+from roboemot.config.schema import RoboEmotConfig
 from roboemot.manifest import Manifest
+from roboemot.realtime.session import route_origin
 from roboemot.webui.robot_section import PATH_ROOT, RobotSection
 from roboemot.webui.settings import StackPort
 
@@ -33,6 +40,8 @@ TITLE = "Reachy Mini"
 CLAIMS = ("expression_map", "gesture_map", "circadian_motion")
 MM_PER_M = 1000.0
 SOURCE = "manifest"
+CONFIG_SOURCE = "config"
+PLATFORM_MODE = "platform"
 WATCHDOG_CEILING = "safety.watchdog_ms"
 AVAILABLE_TTL_S = 3.0  # how long a status answer is reused; listings call it on every request
 RESTART_EFFECTS = (
@@ -103,7 +112,7 @@ class ReachySettings:
 
     def section(self, stack: StackPort, manifest: Manifest) -> RobotSection:
         """The title, the claimed behaviour paths and the read-only hardware rows of
-        ``manifest``; ``stack`` is unused (the hardware does not change at runtime)."""
+        ``manifest``, plus the realtime session rows read from ``stack`` when there is one."""
         base = f"{PATH_ROOT}.{manifest.robot.id}"
         rows = [
             *self._limits(base, manifest),
@@ -111,6 +120,8 @@ class ReachySettings:
             *self._constraints(base, manifest),
             *self._safety(base, manifest),
         ]
+        if stack is not None:
+            rows += self._realtime_session(base, stack.effective())
         return RobotSection(TITLE, rows, CLAIMS)
 
     @staticmethod
@@ -183,6 +194,34 @@ class ReachySettings:
                 )
             )
         return rows
+
+    @staticmethod
+    def _realtime_session(base: str, cfg: RoboEmotConfig) -> list[FieldDescriptor]:
+        """The allocator host and whether the identifier is sent, in platform mode (SPEC 12,
+        Data); in direct mode the provider is not used: no host, nothing sent."""
+        rt = cfg.voice.realtime_route
+        platform = rt.mode == PLATFORM_MODE
+        route = next((r for r in cfg.llm_routes if r.name == rt.route), None) if platform else None
+        origin = route_origin(route) if route is not None else None
+        prefix = f"{base}.realtime_session"
+        return [
+            descriptor(
+                f"{prefix}.allocator_host",
+                "text",
+                origin[1] if origin else None,
+                nullable=True,
+                source=CONFIG_SOURCE,
+                description="Host of the realtime route's session allocator (platform mode).",
+            ),
+            descriptor(
+                f"{prefix}.platform_id_sent",
+                "bool",
+                platform and cfg.privacy.realtime_platform_id,
+                source=CONFIG_SOURCE,
+                description="Whether the robot's platform identifier goes with each session "
+                "request (privacy.realtime_platform_id, platform mode).",
+            ),
+        ]
 
     @staticmethod
     def _safety(base: str, manifest: Manifest) -> list[FieldDescriptor]:
