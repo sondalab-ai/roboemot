@@ -48,6 +48,9 @@ REALTIME_PATH = "/realtime"
 WS_SCHEMES = {"http": "ws", "https": "wss"}
 DEFAULT_PORTS = {"ws": 80, "wss": 443}
 NO_KEY = ("", "none")
+IDENTITY = "identity"
+# headers that describe the body as received; the rebuilt reply holds it decoded and whole
+BODY_HEADERS = {"content-encoding", "content-length", "transfer-encoding"}
 
 
 class UrlRefused(ValueError):
@@ -169,25 +172,45 @@ async def post_allocation(
     redirect is returned as it is, never followed. Raises :class:`UrlRefused`
     (``allocator_origin``) before anything is sent when ``url`` is elsewhere. A reply body over
     ``request.max_reply_bytes`` is not read further: :class:`ProviderRefused`
-    (``provider_reply``)."""
+    (``provider_reply``). The request asks for ``identity`` and a compressed reply is refused
+    (it would expand before the cap counts it), as is a ``Content-Length`` over the cap, before
+    the body is read; bytes are counted as received."""
     target = _http_origin(url)
     if target is None or target != _http_origin(request.route.base_url):
         raise UrlRefused("allocator_origin")
     cap = request.max_reply_bytes
+    sent = {**(headers or {}), "Accept-Encoding": IDENTITY}  # the cap counts what is sent
     async with allocation_client(request) as client:
-        req = client.build_request("POST", url, json=json, headers=headers)
+        req = client.build_request("POST", url, json=json, headers=sent)
         resp = await client.send(req, stream=True, follow_redirects=False)
         try:
-            body = bytearray()
-            async for chunk in resp.aiter_bytes():
-                body += chunk
-                if cap > 0 and len(body) > cap:
-                    raise ProviderRefused("provider_reply")
+            if resp.headers.get("content-encoding", IDENTITY).strip().lower() != IDENTITY:
+                raise ProviderRefused("provider_reply")  # it would expand before the cap counts
+            length = resp.headers.get("content-length")
+            if length is not None and (not length.isdigit() or (cap > 0 and int(length) > cap)):
+                raise ProviderRefused("provider_reply")
+            body = await _raw_body(resp, cap)
         finally:
             await resp.aclose()
-        return httpx.Response(
-            resp.status_code, headers=resp.headers, content=bytes(body), request=req
-        )
+        kept = {k: v for k, v in resp.headers.items() if k.lower() not in BODY_HEADERS}
+        return httpx.Response(resp.status_code, headers=kept, content=bytes(body), request=req)
+
+
+async def _raw_body(resp: httpx.Response, cap: int) -> bytes:
+    """The reply's body as received, refused (``provider_reply``) once it passes ``cap`` (0:
+    no cap). A reply whose body was already loaded (a test transport) is checked whole; its
+    encoding is identity, so it is the same bytes."""
+    body = bytearray()
+    try:
+        async for chunk in resp.aiter_raw():
+            body += chunk
+            if cap > 0 and len(body) > cap:
+                raise ProviderRefused("provider_reply")
+    except httpx.StreamConsumed:
+        body = bytearray(resp.content)
+        if cap > 0 and len(body) > cap:
+            raise ProviderRefused("provider_reply") from None
+    return bytes(body)
 
 
 def provider_endpoint(route: LLMRoute, path: str) -> str:

@@ -638,3 +638,78 @@ def test_the_client_caps_the_allocation_reply_at_its_message_size():
         assert provider.requests[0].max_reply_bytes == settings().max_message_bytes
     finally:
         c.close()
+
+
+def _capped(handler, cap: int = 64) -> AllocationRequest:
+    return AllocationRequest(
+        route("https://alloc.example.org"),
+        None,
+        False,
+        1.0,
+        lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        max_reply_bytes=cap,
+    )
+
+
+ALLOC_URL = "https://alloc.example.org/session"
+
+
+async def test_a_compressed_allocation_reply_is_refused_and_identity_is_asked():
+    """Security review of M10: a compressed body would be expanded before the cap counts it."""
+    import gzip
+
+    seen = []
+
+    def handler(req):
+        seen.append(req.headers.get("accept-encoding"))
+        body = gzip.compress(b'{"connect_url": "' + b"x" * 10_000 + b'"}')
+        return httpx.Response(200, content=body, headers={"Content-Encoding": "gzip"})
+
+    with pytest.raises(sess.ProviderRefused, match="provider_reply"):
+        await sess.post_allocation(_capped(handler, cap=100_000), ALLOC_URL, json={})
+    assert seen == ["identity"]
+
+
+async def test_a_content_length_over_the_cap_is_refused_before_the_body_is_read():
+    read = []
+
+    class Body(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            read.append(True)
+            yield b"x" * 10
+
+    def handler(req):
+        return httpx.Response(200, headers={"Content-Length": "1000"}, stream=Body())
+
+    with pytest.raises(sess.ProviderRefused, match="provider_reply"):
+        await sess.post_allocation(_capped(handler, cap=64), ALLOC_URL, json={})
+    assert read == []
+
+
+async def test_an_identity_reply_under_the_cap_parses_once():
+    def handler(req):
+        return httpx.Response(
+            200, json={"connect_url": "wss://h.example.org/realtime"},
+            headers={"Content-Encoding": "identity"},
+        )  # fmt: skip
+
+    resp = await sess.post_allocation(_capped(handler), ALLOC_URL, json={})
+    assert resp.json() == {"connect_url": "wss://h.example.org/realtime"}
+    assert "content-encoding" not in resp.headers
+
+
+async def test_a_streamed_reply_stops_being_read_at_the_cap():
+    sent = []
+
+    class Body(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            for _ in range(10):
+                sent.append(40)
+                yield b"x" * 40
+
+    def handler(req):
+        return httpx.Response(200, stream=Body())  # no Content-Length
+
+    with pytest.raises(sess.ProviderRefused, match="provider_reply"):
+        await sess.post_allocation(_capped(handler, cap=64), ALLOC_URL, json={})
+    assert len(sent) == 2  # stopped once past the cap, not read whole
