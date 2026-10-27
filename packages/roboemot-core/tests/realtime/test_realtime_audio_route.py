@@ -60,7 +60,7 @@ class Day:
         return self.day
 
 
-def audio_route(stack, today=None):
+def audio_route(stack, today=None, upload_path=None):
     made: list[LocalStub] = []
 
     def factory(*a, **kw):
@@ -75,6 +75,7 @@ def audio_route(stack, today=None):
         extra=lambda: True,
         client_factory=factory,
         today=today or Day(),
+        upload_path=upload_path,
     )
     return r, made
 
@@ -233,3 +234,117 @@ def test_audio_egress_never_reads_the_configuration_stack():
     stack.set("privacy.realtime_audio", False, source="test", admin=True)
     r.apply_config(stack.effective())
     assert not r.audio_egress
+
+
+# ------------------------------------------------------------------ fix round 1
+
+
+def test_a_hold_evaluated_with_the_send_refuses_the_burst():
+    """B-1, M-1, I-1: asleep, speaking or a cancelled job are decided inside the gate."""
+    stack = audio_stack()
+    r, made = audio_route(stack)
+    assert r.ready()
+    for why in ("asleep", "speaking", "cancelled"):
+        assert r.send_audio(SECOND, gate="addressed", instructions="", hold=lambda w=why: w) == why
+    assert made[0].sent == []
+    assert r.snapshot()["upload_s_today"] == 0.0  # nothing reserved
+    assert r.snapshot()["audio_blocked"] == "cancelled"
+
+
+def test_a_realtime_turn_holds_audio_until_it_ends():
+    """M-7: no burst between a turn's response.create calls (its tool rounds)."""
+    stack = audio_stack()
+    r, made = audio_route(stack)
+    assert r.ready()
+    r.hold_input()
+    assert r.send_audio(SECOND, gate="addressed", instructions="") == "turn"
+    r.release_input()
+    assert r.send_audio(SECOND, gate="addressed", instructions="") is None
+
+
+def test_the_burst_reports_its_generation_and_span_of_the_server_buffer():
+    """M-3, I-7: under the gate, the session and where the burst lies in its input buffer."""
+    stack = audio_stack()
+    r, _ = audio_route(stack)
+    assert r.ready()
+    spans = []
+    assert (
+        r.send_audio(SECOND, gate="addressed", instructions="", track=lambda *a: spans.append(a))
+        is None
+    )
+    assert (
+        r.send_audio(
+            SECOND * 2, gate="addressed", instructions="", track=lambda *a: spans.append(a)
+        )
+        is None
+    )
+    gen = r.generation
+    assert spans == [(gen, 0.0, 1000.0), (gen, 1000.0, 3000.0)]
+    r.close_soon("conversation_end")
+    assert r.ready()
+    assert (
+        r.send_audio(SECOND, gate="addressed", instructions="", track=lambda *a: spans.append(a))
+        is None
+    )
+    assert spans[-1] == (r.generation, 0.0, 1000.0)  # a new session's buffer starts at zero
+
+
+def test_the_upload_budget_resets_only_when_the_date_moves_forward():
+    """I-4: a clock that jumps back (no RTC, an NTP fix, a time zone) is not a new day."""
+    stack = audio_stack({"daily_upload_budget_s": 2.5})
+    today = Day()
+    r, _ = audio_route(stack, today)
+    assert r.ready()
+    assert r.send_audio(SECOND * 2, gate="addressed", instructions="") is None
+    today.day -= dt.timedelta(days=1)
+    assert r.send_audio(SECOND, gate="addressed", instructions="") == "upload_budget"
+    today.day += dt.timedelta(days=1)
+    assert r.send_audio(SECOND, gate="addressed", instructions="") == "upload_budget"
+    today.day += dt.timedelta(days=1)
+    assert r.send_audio(SECOND, gate="addressed", instructions="") is None
+
+
+def test_the_upload_budget_survives_a_restart(tmp_path):
+    """I-4: the day's seconds are kept in the data folder (0600, written atomically)."""
+    import json
+    import stat
+
+    path = tmp_path / "realtime_upload.json"
+    stack = audio_stack({"daily_upload_budget_s": 2.5})
+    today = Day()
+    r, _ = audio_route(stack, today, upload_path=path)
+    assert r.ready()
+    assert r.send_audio(SECOND * 2, gate="addressed", instructions="") is None
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert json.loads(path.read_text()) == {"day": "2026-10-27", "seconds": 2.0}
+    again, _ = audio_route(stack, today, upload_path=path)
+    assert again.ready()
+    assert again.send_audio(SECOND, gate="addressed", instructions="") == "upload_budget"
+    path.write_text("not json")
+    third, _ = audio_route(stack, today, upload_path=path)  # unreadable: counted as spent
+    assert third.ready()
+    assert third.send_audio(SECOND, gate="addressed", instructions="") == "upload_budget"
+    assert third.snapshot()["upload_s_today"] == 2.5  # JSON: the budget, never infinity
+
+
+def test_a_ready_with_an_older_turn_config_does_not_hide_the_egress():
+    """M-8: the flag follows the committed configuration, not a turn's copy."""
+    stack = audio_stack(privacy={"realtime_audio": False})
+    old = stack.effective()
+    r, _ = audio_route(stack)
+    stack.set("privacy.realtime_audio", True, source="test", admin=True)
+    r.apply_config(stack.effective())
+    assert r.audio_egress
+    r.ready(old)
+    assert r.audio_egress
+
+
+def test_a_request_for_another_session_is_refused():
+    """M-6: the response.create of a turn whose words are on an older session is not sent."""
+    stack = audio_stack()
+    r, made = audio_route(stack)
+    assert r.ready()
+    gen = r.generation
+    assert r.request(None, "x", generation=gen + 1) is None
+    assert made[0].sent == []
+    assert r.request(None, "x", generation=gen) is not None
