@@ -19,7 +19,7 @@ import threading
 import time
 import unicodedata
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from .keywords import normalise
@@ -167,6 +167,11 @@ class RobotName:
             limit = self._max_chars
         return sanitise_name(shown, limit) if limit > 0 else ""
 
+    def unchecked(self) -> UncheckedName:
+        """This name as a server's speech recognition hears it: in every language, with no
+        recognizer vocabulary check (the realtime route's transcript, SPEC 8)."""
+        return UncheckedName(self)
+
     def resolve(self, configured: str | None, languages: tuple[str, ...]) -> ResolvedName:
         """The effective name and the ``languages`` (those with keyword lists) it works in.
         Cached until the configuration, the platform name or the loaded models change."""
@@ -241,3 +246,17 @@ class RobotName:
                     language,
                 )
         return frozenset(ok)
+
+
+class UncheckedName:
+    """A :class:`RobotName` resolved without the vocabulary check (``RobotName.unchecked``):
+    the same name, usable in every language; nothing is out of vocabulary."""
+
+    def __init__(self, names: RobotName) -> None:
+        self._names = names
+
+    def resolve(self, configured: str | None, languages: tuple[str, ...]) -> ResolvedName:
+        return replace(self._names.resolve(configured, languages), languages=None)
+
+    def out_of_vocab(self, language: str, phrases: list[str]) -> int | None:
+        return None

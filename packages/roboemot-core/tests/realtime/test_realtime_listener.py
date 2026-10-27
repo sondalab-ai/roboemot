@@ -331,3 +331,21 @@ def test_the_listener_never_waits_on_the_network(ears):
         assert total["share"] < budget
         assert total["ms_per_audio_s"]["grammar_wait"] == 0.0
         assert total["ms_per_audio_s"]["asr_accept"] == 0.0  # Vosk skipped
+
+
+def test_the_server_text_hears_the_name_the_vosk_vocabulary_lacks():
+    """The name's words missing from the Vosk vocabulary: the local text cannot wake with it,
+    the server's transcript can (its recognizer has no such limit)."""
+    from roboemot.config.schema import RoboEmotConfig
+    from roboemot.voice.fastpath import FastPath
+    from roboemot.voice.robot_name import RobotName
+
+    cfg = RoboEmotConfig.model_validate({"voice": {"wake_word": "Neve"}})
+    names = RobotName(missing=lambda language, words: list(words))  # nothing is in vocabulary
+    fast = FastPath(cfg.voice, lambda *a: None, names=names)
+    audio = voice(seconds=0.5)
+    ends = {"last_speech_stamp": 0.0, "endpoint_stamp": 0.0}
+    fast.begin(0.0, 0.0, "it")
+    assert not fast.end("ciao neve", audio, RATE, **ends).wake_word
+    fast.begin(0.0, 0.0, "it")
+    assert fast.end("ciao neve", audio, RATE, **ends, server=True).wake_word

@@ -164,6 +164,8 @@ class FastPath:
         self.cfg = cfg
         self.names.configure(cfg)
         self._spotter = KeywordSpotter(cfg.keywords, cfg.wake_word, self.names)
+        # the realtime route's transcript: a server's recognizer has no Vosk vocabulary limit
+        self._server_spotter = KeywordSpotter(cfg.keywords, cfg.wake_word, self.names.unchecked())  # type: ignore[arg-type]
         if self._grammar is not None:
             self._grammar.apply_config(cfg.grammar)
 
@@ -273,6 +275,7 @@ class FastPath:
         grammar_pass: GrammarPass | None = None,
         heard: frozenset[str] = frozenset(),
         state: UtteranceState | None = None,
+        server: bool = False,
     ) -> FastResult:
         """The utterance ended with final ``text``; ``speech_audio`` spans its speech frames.
         ``heard`` is what its ``grammar_pass`` heard (empty when it was not run or not waited
@@ -281,11 +284,16 @@ class FastPath:
 
         Keywords only the final text has are emitted now. Records the first reaction (hint or
         keyword) and the first keyword against ``last_speech_stamp``. Call ``impulses`` next.
-        ``state`` is a held utterance's (``hold``), else the one in progress.
+        ``state`` is a held utterance's (``hold``), else the one in progress. ``server``: the
+        text is the realtime route's transcript, so the robot's name counts in every language
+        (no recognizer vocabulary limits it).
         """
         u = state if state is not None else self._u
         words = len(text.split())
-        spotter = grammar_pass.spotter if grammar_pass is not None else self._spotter
+        if grammar_pass is not None:
+            spotter = grammar_pass.spotter
+        else:
+            spotter = self._server_spotter if server else self._spotter
         cats = spotter.spot(text, u.language) | heard
         before = u.keyword_at
         self._fire(cats, u)

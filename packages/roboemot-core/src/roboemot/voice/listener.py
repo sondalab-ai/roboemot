@@ -817,7 +817,8 @@ class VoiceListener:
         result = job.result
         if result is not None:
             self._count_audio("transcribed")
-            self._finish(p, result.text, None, frozenset(), (result.generation, result.items))
+            heard = (result.generation, result.items)
+            self._finish(p, result.text, None, frozenset(), heard, server=True)
             return None
         self._count_audio("local_fallbacks")
         text = p.text or self._decode(p.language, p.ev)
@@ -836,6 +837,7 @@ class VoiceListener:
         realtime: tuple[int, tuple[str, ...]] | None = None,
         *,
         local_only: bool = False,
+        server: bool = False,
     ) -> None:
         """The utterance with its final ``text`` (its wake decision made): keywords, prosody
         and impulses, then the hand-off to the conversation and the bus."""
@@ -851,6 +853,7 @@ class VoiceListener:
             grammar_pass=grammar_pass,
             heard=heard,
             state=p.state,
+            server=server,
         )
         addressed = bool(p.addressed)
         self._fast.impulses(fast, addressed, state=p.state)
