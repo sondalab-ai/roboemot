@@ -7,6 +7,8 @@ import copy
 import io
 import json
 import shlex
+import subprocess
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -997,6 +999,45 @@ def test_start_over_a_running_app_without_a_terminal_needs_yes_before_installing
     with pytest.raises(MissingFlag, match="--yes"):
         inst.run_install(Options(**FULL, start=True, startup=False), quiet_ui(), ROOT)
     assert robot.commands == [] and daemon.mutations == []
+
+
+@pytest.mark.parametrize(("missing", "flag"), [("dev", "--dev"), ("piper", "--piper")])
+def test_a_dry_run_without_a_terminal_still_needs_dev_and_piper(
+    offline, robot, daemon, missing, flag
+):
+    with pytest.raises(MissingFlag) as e:
+        inst.run_install(Options(**{**FULL, missing: None}, dry_run=True), quiet_ui(), ROOT)
+    assert e.value.flag == flag and robot.commands == []
+
+
+class _TtyStdin(io.StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
+def test_a_prompt_with_no_answer_fails_with_a_try_line(offline, robot, daemon, monkeypatch, capsys):
+    monkeypatch.setattr("sys.stdin", _TtyStdin(""))  # a terminal whose input ends at once
+    monkeypatch.delenv("CI", raising=False)
+    argv = ["--dry-run", "--host", "127.0.0.1", "--user", "pollen", "--robot", RID]
+    assert inst.main(argv, root=ROOT) == 1
+    err = capsys.readouterr().err
+    assert "✗ No valid answer to: Install in dev mode?" in err
+    assert f"Try: python scripts/install_on_robot.py {' '.join(argv)} --dev" in err
+
+
+def test_the_dry_run_next_line_repeats_the_answered_dev_choice(offline, robot, daemon, capsys):
+    opts = Options(host="127.0.0.1", user="pollen", robot=RID, piper=False, dry_run=True)
+    inst.run_install(opts, typed("y\n", "\n"), ROOT)  # dev: yes; store an API key: no
+    assert f"--robot {RID} --dev --no-piper" in capsys.readouterr().out
+
+
+def test_the_installer_modules_import_without_the_palette():
+    code = (
+        "import sys; sys.modules['sondalab_palette'] = None; "
+        "import roboemot.install, roboemot_reachymini.settings, roboemot_reachymini.install"
+    )
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
 
 
 def test_a_dry_run_without_a_terminal_needs_no_start_flags(offline, robot, daemon):

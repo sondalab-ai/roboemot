@@ -28,7 +28,7 @@ def env(monkeypatch):
     monkeypatch.setattr(inst, "load_platform", lambda rid: FakePlatform())
     monkeypatch.setattr(inst, "installed_platforms", lambda: ["fake-v1"])
     monkeypatch.setattr(inst, "find_robots", lambda root: [])
-    ui = Ui(interactive=False, assume_yes=False)
+    ui = typed()  # a terminal (no answers typed): the platform's user is the default
 
     def run(argv):
         return ssh.main(argv, execvp=lambda f, a: calls.append((f, a)), ui=ui)
@@ -63,8 +63,18 @@ def test_without_a_terminal_the_host_flag_is_required(env, monkeypatch, capsys):
     monkeypatch.setattr(
         inst, "find_robots", lambda root: [("Neve 10.0.0.7", "10.0.0.7", "fake-v1")]
     )
-    assert run([]) == 1 and calls == []
-    assert "Missing --host" in capsys.readouterr().err
+    quiet = Ui(interactive=False, assume_yes=False)
+    assert ssh.main([], execvp=lambda f, a: calls.append((f, a)), ui=quiet) == 1
+    assert calls == [] and "Missing --host" in capsys.readouterr().err
+
+
+def test_without_a_terminal_the_user_flag_is_required(env, capsys):
+    _, calls = env
+    quiet = Ui(interactive=False, assume_yes=False)
+    assert ssh.main(["--host", "h"], execvp=lambda f, a: calls.append((f, a)), ui=quiet) == 1
+    assert calls == [] and "Missing --user" in capsys.readouterr().err
+    ssh.main(["--host", "h", "--user", "pi"], execvp=lambda f, a: calls.append((f, a)), ui=quiet)
+    assert calls[0][1][-1] == "pi@h"
 
 
 def test_copy_id_runs_ssh_copy_id(env):
@@ -104,7 +114,7 @@ def test_a_missing_ssh_binary_is_reported_not_raised(env, capsys):
         raise FileNotFoundError(f)
 
     ui = Ui(interactive=False, assume_yes=False)
-    assert ssh.main(["--host", "h"], execvp=boom, ui=ui) == 1
+    assert ssh.main(["--host", "h", "--user", "pi"], execvp=boom, ui=ui) == 1
     assert "Could not run ssh" in capsys.readouterr().err
 
 

@@ -4,12 +4,16 @@ error blocks with raw output only under ``--debug``, the spinner's running line,
 
 from __future__ import annotations
 
+import copy
 import io
+import pickle
+import subprocess
 import threading
 
 import pytest
 import roboemot.install as inst
 from roboemot.install import ui as ui_mod
+from roboemot.install.remote import Remote
 from roboemot.install.ui import Ui, WizardError
 
 
@@ -162,3 +166,114 @@ def test_prompts_and_running_lines_go_to_stderr(capsys: pytest.CaptureFixture[st
     assert captured.out == ""
     assert "? Start roboemot now? [y/N]" in captured.err
     assert "● Connecting over SSH…" in captured.err
+
+
+class _Tty(io.StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
+def tty_stderr(monkeypatch: pytest.MonkeyPatch) -> _Tty:
+    """stderr as a terminal with motion allowed, frames every 10ms. Called in the test body:
+    pytest re-installs its own capture after fixture setup."""
+    err = _Tty()
+    monkeypatch.setattr("sys.stderr", err)
+    for name in ("CI", "SONDALAB_REDUCED_MOTION"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setitem(ui_mod.SPINNER, "intervalMs", 10)
+    return err
+
+
+def test_the_spinner_draws_frames_on_stderr_then_clears(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    err = tty_stderr(monkeypatch)
+    monkeypatch.setitem(ui_mod.SPINNER, "delayMs", 0)
+    with quiet().running("Building the wheels…"):
+        threading.Event().wait(0.1)
+    drawn = err.getvalue()
+    frames = drawn.count("\x1b[?2026h\r\x1b[K")
+    assert frames >= 3 and drawn.count("Building the wheels…") == frames
+    assert drawn.endswith("\r\x1b[J")  # nothing animated stays on screen
+    assert capsys.readouterr().out == ""
+
+
+def test_the_spinner_draws_nothing_when_the_step_ends_before_the_delay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    err = tty_stderr(monkeypatch)
+    with quiet().running("Building the wheels…"):
+        pass
+    assert err.getvalue() == ""
+
+
+def test_a_spinner_error_leaves_the_terminal_clean(monkeypatch: pytest.MonkeyPatch) -> None:
+    err = tty_stderr(monkeypatch)
+    monkeypatch.setitem(ui_mod.SPINNER, "delayMs", 0)
+
+    def broken(*a, **kw):
+        raise RuntimeError("draw")
+
+    monkeypatch.setattr(ui_mod._term, "spinner_frame", broken)
+    with quiet().running("Building the wheels…"):
+        threading.Event().wait(0.05)
+    assert err.getvalue() == "\x1b[?2026l\r\x1b[J"
+
+
+def test_a_wizard_error_keeps_its_output_through_copy_and_pickle() -> None:
+    error = WizardError("Could not build", "pip exited 1", "try", output="raw")
+    for clone in (copy.copy(error), pickle.loads(pickle.dumps(error))):
+        assert (clone.what, clone.why, clone.fix, clone.output) == (
+            "Could not build",
+            "pip exited 1",
+            "try",
+            "raw",
+        )
+
+
+class _Ssh:
+    """subprocess.run for Remote: records argv, answers with ``rc`` and ``stderr``."""
+
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+        self.rc, self.stderr = 0, ""
+
+    def __call__(self, argv, **kw):
+        self.calls.append(argv)
+        return subprocess.CompletedProcess(argv, self.rc, "", self.stderr)
+
+
+@pytest.fixture
+def ssh_run(monkeypatch: pytest.MonkeyPatch, tmp_path) -> tuple[_Ssh, Remote]:
+    fake = _Ssh()
+    monkeypatch.setattr("roboemot.install.remote.subprocess.run", fake)
+    return fake, Remote("pollen", "robot", tmp_path)
+
+
+def test_after_the_login_ssh_never_prompts(ssh_run: tuple[_Ssh, Remote]) -> None:
+    fake, remote = ssh_run
+    remote.run("true")
+    assert "BatchMode=yes" not in fake.calls[-1]
+    remote.connect()
+    assert "BatchMode=yes" not in fake.calls[-1]  # the login itself may ask for the password
+    remote.run("uptime")
+    remote.copy([], "/tmp/x")
+    assert all("BatchMode=yes" in argv for argv in fake.calls[-2:])
+    fake.rc, fake.stderr = 255, "Permission denied (publickey,password)."
+    with pytest.raises(WizardError, match="Lost the SSH connection to pollen@robot"):
+        remote.run("uptime")
+
+
+@pytest.mark.parametrize("debug", [False, True])
+def test_a_failing_command_never_echoes_its_stdin(
+    ssh_run: tuple[_Ssh, Remote], capsys: pytest.CaptureFixture[str], debug: bool
+) -> None:
+    fake, remote = ssh_run
+    fake.rc, fake.stderr = 1, "set-pin: store is readable by group or others"
+    with pytest.raises(WizardError) as e:
+        remote.run("python -m roboemot.webui set-pin --data-dir /d", stdin="246810\n")
+    assert e.value.why == "a command given a value on stdin exited 1"
+    assert "246810" not in str(e.value) and "246810" not in e.value.output
+    Ui(interactive=False, assume_yes=False, debug=debug).error(e.value)
+    err = capsys.readouterr().err
+    assert "246810" not in err and ("readable by group" in err) is debug

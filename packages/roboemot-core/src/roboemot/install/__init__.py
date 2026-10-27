@@ -47,14 +47,21 @@ from .piper_lock import lock_path
 from .pyenv import RemotePython, report_changes
 from .record import InstallRecord, canonical, plan_uninstall
 from .remote import Remote
-from .ui import COMMAND, HeaderParser, Ui, WizardError, app_version, last_line, print_header
+from .ui import (
+    COMMAND,
+    HeaderParser,
+    TermError,
+    Ui,
+    WizardError,
+    app_version,
+    last_line,
+    print_header,
+)
 
 try:
     from sondalab_palette import term
-    from sondalab_palette.term import TermError
 except ImportError:  # pragma: no cover - the robot imports this package and has no palette
     term = None
-    TermError = WizardError
 
 ENTRY_POINT_GROUP = "roboemot.installers"
 MIN_FREE_MB = 300  # wheels plus numpy/scipy/openai if the target environment lacks them
@@ -823,6 +830,7 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
                     "conservative fallback limits (SPEC 12); without it, the app refuses to start."
                 )
                 dev = ui.confirm("Install in dev mode?", False, flag="--dev")
+                opts.dev = dev  # the dry run's Next: line repeats the answer
             if dev:
                 ui.ok("Chose dev mode", "configs/dev-unmeasured.yaml")
             else:
@@ -1093,7 +1101,13 @@ def parse_args(argv: list[str] | None = None, plain: bool = False) -> Options:
         help="store the secret NAME (an API key for ${secret:NAME}) on the robot; the value is "
         "asked on this PC without echo and never appears on a command line",
     )
-    p.add_argument("-y", "--yes", action="store_true", help="answer yes to every confirmation")
+    p.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="answer yes to every confirmation: dev mode, Piper, start, autostart, stopping "
+        "another app, changing shared packages, replacing a PIN or secret",
+    )
     p.add_argument(
         "--debug", action="store_true", help="show raw tool output and tracebacks on errors"
     )

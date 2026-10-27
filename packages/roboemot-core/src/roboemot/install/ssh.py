@@ -23,12 +23,7 @@ from pathlib import Path
 
 from . import Options, Platform, installed_platforms, select_robot
 from .remote import CONNECT_TIMEOUT_S
-from .ui import Ui, WizardError
-
-try:
-    from sondalab_palette.term import TermError
-except ImportError:  # pragma: no cover - plain errors without the palette
-    TermError = WizardError
+from .ui import TermError, Ui, WizardError
 
 NOT_INSTALLED_EXIT = 127
 CLI_NAME = "roboemot"
@@ -99,13 +94,15 @@ def build_argv(
 ) -> list[str]:
     """The ``ssh`` / ``ssh-copy-id`` command line for these options.
 
-    The robot comes from ``--host``/``--robot`` or mDNS, the user from ``--user`` or the
-    platform's usual one.
+    The robot comes from ``--host``/``--robot`` or mDNS, the user from ``--user`` or, on a
+    terminal, the platform's usual one. Without a terminal both flags are required.
     """
     if opts.host:
         valid_host(opts.host)
     if opts.user:
         valid_user(opts.user)
+    ui.require("--host", bool(opts.host))
+    ui.require("--user", bool(opts.user))
     host, platform = select_robot(ui, opts, root)
     target = f"{valid_user(opts.user or platform.default_user)}@{valid_host(host)}"
     if copy_id:

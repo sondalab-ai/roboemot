@@ -72,9 +72,14 @@ class WizardError(_ErrorBase):
     ``--debug``, never in the three-line error block.
     """
 
-    def __init__(self, what: str, why: str = "", fix: str = "", *, output: str = "") -> None:
+    def __init__(self, what: str, why: str = "", fix: str = "", output: str = "") -> None:
         super().__init__(what, why, fix)
         self.output = output
+        self.args = (what, why, fix, output)  # copy and pickle rebuild it with the output
+
+
+TermError = _ErrorBase
+"""The palette's ``TermError`` (a plain fallback on the robot): what ``main`` catches."""
 
 
 def last_line(text: str) -> str:
@@ -164,13 +169,19 @@ class Ui:
     # ------------------------------------------------------------ rendering
 
     def mode(self, stream: TextIO) -> str:
-        """The colour mode for ``stream`` (palette ``color_mode``), "none" without VT."""
+        """The colour mode for ``stream`` (palette ``color_mode``), "none" without VT.
+
+        Read per call, so ``NO_COLOR``/``FORCE_COLOR`` and a redirected stream count.
+        """
         return _term.color_mode(isatty=_isatty(stream)) if self.vt else "none"
 
     def ascii(self) -> bool:
+        """Whether glyphs take their ASCII form: no VT, ``TERM=dumb``, ``SONDALAB_ASCII=1`` or
+        a non-UTF-8 locale (palette ``ascii_mode``)."""
         return not self.vt or _term.ascii_mode()
 
     def paint(self, text: str, role: str, stream: TextIO | None = None) -> str:
+        """``text`` in ``role`` for ``stream`` (stdout by default)."""
         return _term.paint(text, role, self.mode(stream or sys.stdout))
 
     def _step_text(self, name: str, label: str, detail: str, stream: TextIO) -> str:
@@ -321,8 +332,14 @@ class Ui:
         line = self._readline()
         if line == "":
             sys.stderr.write("\n")
-            raise _term.NoValidAnswer(question, "input ended before an answer")
+            ended = _term.NoValidAnswer(question, "input ended before an answer")
+            raise self._with_fix(ended, flag)
         return line.strip() or default
+
+    def _with_fix(self, error: Exception, flag: str) -> Exception:
+        """``error`` (a NoValidAnswer) with the ``Try:`` line that answers without a prompt."""
+        error.fix = f"{self.command} {flag}"
+        return error
 
     def ask_secret(self, question: str) -> str | None:
         """A hidden answer from the terminal; None when not interactive."""
@@ -337,7 +354,10 @@ class Ui:
         """Numbered pick list on stderr; the 0-based index typed. No default: three
         unrecognised answers or end of input raise :class:`NoValidAnswer`."""
         self.require(flag, False)
-        return _term.choose(question, options, read=self._readline, mode=self.mode(sys.stderr))
+        try:
+            return _term.choose(question, options, read=self._readline, mode=self.mode(sys.stderr))
+        except _term.NoValidAnswer as e:
+            raise self._with_fix(e, flag) from None
 
     def confirm(self, question: str, default: bool, *, flag: str = "--yes") -> bool:
         """``? question [y/N]``; ``--yes`` answers yes. Without a terminal it raises
@@ -345,9 +365,12 @@ class Ui:
         if self.assume_yes:
             return True
         self.require(flag, False)
-        return _term.confirm(
-            question, default=default, read=self._readline, mode=self.mode(sys.stderr)
-        )
+        try:
+            return _term.confirm(
+                question, default=default, read=self._readline, mode=self.mode(sys.stderr)
+            )
+        except _term.NoValidAnswer as e:
+            raise self._with_fix(e, flag) from None
 
 
 class _Spinner:
@@ -378,19 +401,26 @@ class _Spinner:
             self.ui.active(self.label)
             return
         ascii, tick = self.ui.ascii(), 0
-        while True:
-            frame = _term.spinner_frame(tick, ascii=ascii)
-            line = _term.step_line(frame, self.label, "", ascii, mode=self.ui.mode(self.stream))
-            self.stream.write(f"\x1b[?2026h\r\x1b[K{line}\x1b[?2026l")
+        try:
+            while True:
+                frame = _term.spinner_frame(tick, ascii=ascii)
+                mode = self.ui.mode(self.stream)
+                line = _term.step_line(frame, self.label, "", ascii, mode=mode)
+                self.stream.write(f"\x1b[?2026h\r\x1b[K{line}\x1b[?2026l")
+                self.stream.flush()
+                tick += 1
+                if self._stop.wait(SPINNER["intervalMs"] / 1000):
+                    return
+        except Exception:  # a drawing error ends the animation, never the step
+            self.stream.write("\x1b[?2026l\r\x1b[J")
             self.stream.flush()
-            tick += 1
-            if self._stop.wait(SPINNER["intervalMs"] / 1000):
-                return
+            self.drawn = False
 
 
 __all__ = [
     "COMMAND",
     "HeaderParser",
+    "TermError",
     "Ui",
     "WizardError",
     "app_version",
