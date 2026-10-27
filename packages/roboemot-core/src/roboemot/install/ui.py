@@ -309,11 +309,10 @@ class Ui:
 
     # ------------------------------------------------------------ stderr
 
-    def error(self, error: Exception) -> None:
+    def error(self, error: TermError) -> None:
         """The three-line error block on stderr; raw output above it only with ``--debug``."""
-        what = getattr(error, "what", str(error))
-        why, fix = getattr(error, "why", ""), getattr(error, "fix", "")
-        output = getattr(error, "output", "")
+        what, why, fix = error.what, error.why, error.fix
+        output = error.output if isinstance(error, WizardError) else ""
         if output and self.debug:
             print(output.rstrip(), file=sys.stderr)
         elif output and not fix and self.debug_flag:

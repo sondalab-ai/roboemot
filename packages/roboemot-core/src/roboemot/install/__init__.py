@@ -381,7 +381,7 @@ def _robot_model(ui: Ui, robot: str | None) -> str:
         raise WizardError(
             "No robot installer is installed",
             "no package registers one in the roboemot.installers entry-point group",
-            'pip install -e "packages/roboemot-reachymini"',
+            "pip install -e <the robot's package>",
         )
     if len(options) == 1:
         return options[0]
