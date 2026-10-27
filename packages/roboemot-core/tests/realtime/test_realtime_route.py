@@ -289,9 +289,13 @@ class StubClient:
         self.route, self.state, self.closed, self.reason = route, "idle", 0, None
         self.local_only = kw.get("local_only", lambda: False)
         self.may_send = kw.get("may_send", lambda: True)
+        self.on_close = kw.get("on_close", lambda reason: None)
+        self.on_event = kw.get("on_event", lambda event: None)
         self.updates_sent = 0
+        self.started = False
 
     def connect(self, update):
+        self.started = True
         if self.local_only():  # the real client refuses a cloud host here
             self.state, self.reason = "closed", "pseudonyms"
             return False
@@ -309,8 +313,13 @@ class StubClient:
         return None
 
     def close(self):
+        """Like the real client: ``on_close("closed")`` once, for a client that was started
+        and is not closed already."""
         self.closed += 1
+        fire = self.started and self.state != "closed"
         self.state = "closed"
+        if fire:
+            self.on_close("closed")
 
 
 def stub_route(stack):
@@ -672,13 +681,15 @@ def test_a_reload_during_a_connect_sends_nothing_after_the_handshake():
 
 
 def test_a_late_close_from_an_old_client_does_not_touch_the_new_session():
-    """probe_r3_stale_close."""
-    hooks = []
+    """probe_r3_stale_close. The detached client's close is expected (not counted); its late
+    events are dropped and counted."""
+    hooks, events = [], []
 
     class Hooked(StubClient):
         def __init__(self, *a, **kw):
             super().__init__(*a, **kw)
             hooks.append(kw["on_close"])
+            events.append(kw["on_event"])
 
     stack = rt_stack()
     made = []
@@ -716,6 +727,7 @@ def test_a_late_close_from_an_old_client_does_not_touch_the_new_session():
         task = asyncio.ensure_future(run.run("hello"))
         await asyncio.sleep(0.02)
         hooks[0]("closed")  # the old client's late close
+        events[0](P.ResponseCreated(P.RESPONSE_CREATED, "A"))  # and a late event of it
         await asyncio.sleep(0.02)
         r._on_event(P.ResponseCreated(P.RESPONSE_CREATED, "B"))
         r._on_event(P.AudioDelta(P.AUDIO_DELTA, "B", "iB", b"\x01\x00" * 160))
@@ -726,3 +738,100 @@ def test_a_late_close_from_an_old_client_does_not_touch_the_new_session():
     assert reply.closed is None and reply.status == "completed" and len(sp.streams) == 1
     snap = r.snapshot()
     assert snap["unrequested"] == 0 and snap["stale_callbacks"] == 1 and r.connected
+
+
+# ------------------------------------------------------------------ fix round 4: detached clients
+
+
+def test_the_close_of_a_detached_client_is_not_a_stale_callback():
+    from rt_rig import wait_for
+
+    stack = rt_stack()
+    r, made = stub_route(stack)
+    assert r.ready()
+    r.close_soon("conversation_end")
+    assert wait_for(lambda: made[0].closed == 1)
+    made[0].on_close("closed")  # a second, late close: still expected
+    assert r.snapshot()["stale_callbacks"] == 0
+
+
+class Dummy:
+    """A run that records what the route tells it."""
+
+    def __init__(self):
+        self.events, self.closes = [], []
+
+    def deliver(self, event):
+        self.events.append(event)
+
+    def closed(self, reason):
+        self.closes.append(reason)
+
+
+def test_a_request_is_abandoned_on_its_own_client_only():
+    from roboemot.realtime import protocol as P
+
+    stack = rt_stack()
+    r, made = stub_route(stack)
+    assert r.ready()
+    sent = {0: [], 1: []}
+    made[0].send = sent[0].append
+    run = Dummy()
+    req = r.request(run, "x")
+    r.close("conversation_end")  # the session goes: its request is settled now
+    assert run.closes == ["conversation_end"]
+    assert r.ready() and len(made) == 2
+    made[1].send = sent[1].append
+    r.abandon(req, 0)
+    assert [e["type"] for e in sent[1]] == []  # never cancelled on the new session
+    req2 = r.request(Dummy(), "y")
+    r.abandon(req2, 0)
+    assert [e["type"] for e in sent[1]] == ["response.create", "response.cancel"]
+    r._on_event(P.ResponseCreated(P.RESPONSE_CREATED, None))
+    r._on_event(P.ResponseDone(P.RESPONSE_DONE, None, "cancelled", None))
+    assert not r.busy()
+
+
+def test_consecutive_resets_back_off_the_reopen():
+    """A server that never answers: the first reset reopens at once, the next ones wait the
+    connectivity.network backoff (no reconnect per turn); real traffic ends the streak."""
+    from roboemot.realtime import protocol as P
+
+    stack = rt_stack(
+        connectivity={"network": {"probe_initial_s": 2.0, "probe_backoff": 2.0, "probe_max_s": 60}}
+    )
+    r, made = stub_route(stack)
+    now = [100.0]
+    r.clock = lambda: now[0]
+    r.timeouts = lambda: (1.0, 1.0)
+    starts = []
+    r.start = lambda: starts.append(now[0])
+
+    def reset():
+        req = r.request(Dummy(), "x")
+        assert req is not None
+        r.abandon(req, 0)
+        now[0] += 1.0
+        r.expire()
+
+    assert r.ready()
+    reset()
+    assert r.snapshot()["resets"] == 1 and starts == [101.0]  # reopened at once
+    assert r.ready() and len(made) == 2
+    reset()
+    assert r.snapshot()["resets"] == 2 and starts == [101.0]  # not at once
+    assert r.ready() is False and len(made) == 2
+    now[0] += 1.9
+    assert r.ready() is False
+    now[0] += 0.2
+    assert r.ready() and len(made) == 3
+    reset()
+    assert r.ready() is False  # 4 s now
+    now[0] += 4.1
+    assert r.ready() and len(made) == 4
+    req = r.request(Dummy(), "y")  # the server answers: the streak ends
+    r._on_event(P.ResponseCreated(P.RESPONSE_CREATED, "R"))
+    r._on_event(P.ResponseDone(P.RESPONSE_DONE, "R", "completed", 3))
+    r.finish(req)
+    reset()
+    assert len(starts) == 2  # at once again

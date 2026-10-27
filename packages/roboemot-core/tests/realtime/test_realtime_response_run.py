@@ -219,3 +219,58 @@ async def test_a_usage_less_done_is_charged_once_even_if_the_run_is_cut_right_af
     await asyncio.gather(task, return_exceptions=True)
     route.expire()
     assert charged == [100]  # its estimate (400 chars / 4), charged by the route, once
+
+
+async def test_a_request_pending_on_a_closed_session_is_settled_at_once():
+    """probe_r4_orphan: turn A is cut before its response.created; the conversation ends
+    (the session is detached, its close comes later). Turn B on the new session is sent at
+    once and completes: no wait, no reset; A is charged once."""
+    route, sent = connected_route()
+    charged = []
+    route.charge = charged.append
+    route.timeouts = lambda: (1.0, 0.3)
+    a = make_run(route, Speech())
+    task_a = asyncio.ensure_future(a.run("a" * 400))
+    await until(lambda: creates(sent))
+    task_a.cancel()
+    await asyncio.gather(task_a, return_exceptions=True)
+    old = route._client
+    route.close_soon("conversation_end")
+    assert not route.busy() and charged == [100]
+    await until(lambda: old.closed == 1)
+    assert await asyncio.to_thread(route.ready)
+    sent2 = []
+    route._client.send = sent2.append
+    b = make_run(route, Speech())
+    t0 = asyncio.get_running_loop().time()
+    task_b = asyncio.ensure_future(b.run("b"))
+    await until(lambda: creates(sent2), 0.2)
+    assert asyncio.get_running_loop().time() - t0 < 0.2
+    route._on_event(created("B"))
+    route._on_event(delta("B"))
+    route._on_event(done("B"))
+    reply = await asyncio.wait_for(task_b, 2)
+    assert reply.status == "completed"
+    snap = route.snapshot()
+    assert snap["resets"] == 0 and snap["stale_callbacks"] == 0 and charged == [100, 5]
+
+
+async def test_a_run_on_a_session_closed_by_a_reload_falls_back_at_once():
+    """probe_r4_midrun: pseudonyms come on mid-stream; the run ends now (closed), its
+    response is charged once, and nothing stays in flight."""
+    route, sent = connected_route()
+    charged = []
+    route.charge = charged.append
+    route.timeouts = lambda: (1.0, 1.0)
+    run = make_run(route, Speech())
+    task = asyncio.ensure_future(run.run("x" * 40))
+    await until(lambda: creates(sent))
+    route._on_event(created("R"), route._token)
+    route._on_event(delta("R"), route._token)
+    t0 = asyncio.get_running_loop().time()
+    route.stack.set("privacy.pseudonyms_to_cloud", True, source="test", admin=True)
+    route.apply_config(route.stack.effective())
+    reply = await asyncio.wait_for(task, 0.5)
+    assert asyncio.get_running_loop().time() - t0 < 0.2
+    assert reply.closed == "reconfigured"
+    assert route._live == {} and not route.busy() and charged == [10]
