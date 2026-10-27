@@ -214,9 +214,18 @@ def test_package_data_lists_the_static_tree():
 
 
 def test_effects_follow_the_agreed_families_only():
+    # with img-src allowing data:, this ban is what keeps the glass lens off the page
     js = (STATIC / "app.js").read_text()
-    for banned in ("sl-fx-glass", "sl-fx-liquid", "sl-fx-goo", "data-sl-halftone", "sl-fx-glitch"):
-        assert banned not in js, banned
+    for name in ("app.js", "settings.js", "index.html"):
+        text = (STATIC / name).read_text()
+        for banned in (
+            "sl-fx-glass",
+            "sl-fx-liquid",
+            "sl-fx-goo",
+            "data-sl-halftone",
+            "sl-fx-glitch",
+        ):
+            assert banned not in text, (name, banned)
     for used in (
         "sl-fx-press",
         "sl-fx-aurora--field",
@@ -240,9 +249,44 @@ def test_only_a_saved_change_fires_the_glitch_burst():
 
 def test_vendored_javascript_is_the_only_place_for_effect_internals():
     server_text = Path(server_module.__file__).read_text()
-    assert (
-        "img-src 'self' blob:;" in server_text
-    )  # blob: for the live preview only; no data: images
+    # blob: for the live preview, data: for the kit's art; images only
+    assert "img-src 'self' data: blob:;" in server_text
+
+
+def test_csp_allows_data_images_for_the_art_and_nothing_else_widens():
+    # data: carries the kit's art masks; the glass lens stays off through the class bans above.
+    # blob: carries the Live video preview's object URLs.
+    assert server_module.CSP == (
+        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; "
+        "connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; "
+        "frame-ancestors {ancestors}"
+    )
+
+
+def test_the_art_corner_sits_on_the_login_card_only():
+    js = (STATIC / "app.js").read_text()
+    assert js.count("sl-art-corner") == 1
+    body = js[js.index("function loginCard(") :].split("\n}\n", 1)[0]
+    assert "sl-art-corner" in body
+    for name in ("settings.js", "index.html"):
+        assert "sl-art-corner" not in (STATIC / name).read_text(), name
+
+
+def test_every_eyebrow_wears_a_mark_and_the_glyphs_cycle_by_position():
+    js = (STATIC / "app.js").read_text()
+    for name in ("app.js", "settings.js", "index.html"):
+        # every class string naming the eyebrow also names the mark: markedEyebrow() is the way in
+        text = (STATIC / name).read_text()
+        for value in re.findall(r"""["']([^"'\n]*\bsl-eyebrow(?![\w-])[^"'\n]*)["']""", text):
+            assert "sl-eyebrow--mark" in value.split(), (name, value)
+    assert 'const MARK_GLYPHS = ["", "square", "tri", "circle", "half", "stair"];' in js
+    assert 'class: "sl-eyebrow sl-eyebrow--mark"' in js
+    body = js[js.index("function assignMarks(") :].split("\n}\n", 1)[0]
+    assert "(node, i)" in body and "MARK_GLYPHS[i % MARK_GLYPHS.length]" in body
+    assert "new MutationObserver(() => assignMarks(viewRoot))" in js
+    components = (server_module.VENDOR_DIR / "components.css").read_text()
+    for glyph in ("square", "tri", "circle", "half", "stair"):
+        assert f".sl-eyebrow--mark-{glyph}" in components, glyph
 
 
 def test_dialogs_cover_merge_and_guard_the_pending_request():

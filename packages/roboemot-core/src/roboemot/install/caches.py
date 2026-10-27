@@ -23,7 +23,9 @@ def cache_path(home: str, spec: str) -> str:
     """The absolute path of a ``~/...`` cache spec, strictly below ``home``."""
     path = posixpath.normpath(posixpath.join(home, spec.removeprefix(HOME_PREFIX)))
     if not spec.startswith(HOME_PREFIX) or not path.startswith(home + "/"):
-        raise WizardError(f"cache {spec!r} must be a folder below the robot user's home")
+        raise WizardError(
+            "Invalid cache path", f"{spec!r} must be a folder below the robot user's home"
+        )
     return path
 
 
@@ -50,28 +52,29 @@ def clear_caches(
     guard_dirs: tuple[str, ...] = (),
 ) -> list[str]:
     """Show the size of each existing cache and delete it when asked (``wanted`` None: ask on a
-    terminal, default yes; unattended or with ``-y`` it is kept, only ``wanted`` True deletes
-    without asking). The folder is deleted only if its ``realpath`` is the expanded path itself,
-    so a symlink never redirects the delete, and only if no symlink under ``guard_dirs`` points
-    into it (``linked_from``). The dry run only reports, with the same decisions as the real run.
-    Returns the caches left in place, with their size, for the free-space error."""
+    terminal, default no as it changes the robot; unattended or with ``-y`` it is kept, only
+    ``wanted`` True deletes without asking). The folder is deleted only if its ``realpath`` is
+    the expanded path itself, so a symlink never redirects the delete, and only if no symlink
+    under ``guard_dirs`` points into it (``linked_from``). The dry run only reports, with the
+    same decisions as the real run. Returns the caches left in place, with their size, for the
+    free-space error."""
     kept: list[str] = []
     for spec in specs:
         path = cache_path(home, spec)
         if remote.run(f"test -e {shlex.quote(path)} && echo yes || echo no").strip() != "yes":
             continue
-        ui.info(f"measuring {path}")
-        size = remote.run(f"du -sh {shlex.quote(path)} 2>/dev/null | cut -f1").strip() or "?"
+        with ui.running(f"Measuring {path}…"):
+            size = remote.run(f"du -sh {shlex.quote(path)} 2>/dev/null | cut -f1").strip() or "?"
         label = f"{path} ({size}; uninstall cannot restore it, whatever filled it fills it again)"
         if not _clearable(ui, remote, path, label, wanted, dry_run, guard_dirs):
             kept.append(f"{path} ({size})")
             continue
         if dry_run:
-            ui.info(f"would clear {label}")
+            ui.would("Clear a cache", label)
             continue
         with ui.progress(f"clearing {path} ({size}), can take a minute", report=False, slow=False):
             remote.run(f"rm -rf {shlex.quote(path)}")
-        ui.ok(f"cleared {path} ({size})")
+        ui.ok("Cleared a cache", f"{path} ({size})")
     return kept
 
 
@@ -88,28 +91,28 @@ def _clearable(
     when declined, with ``-y`` alone, when an environment links into it or when it resolves
     elsewhere; else asked (a dry run says it would ask) unless ``wanted`` is True."""
     if wanted is False:
-        ui.info(f"{label} kept")
+        ui.ok("Kept a cache", label)
         return False
     if wanted is None and ui.assume_yes:
-        ui.info(f"{label} kept: -y does not clear it, --clear-caches does")
+        ui.ok("Kept a cache", f"{label}; -y does not clear it, --clear-caches does")
         return False
     if wanted is None and not ui.interactive:
-        ui.info(f"{label} kept: unattended runs clear it only with --clear-caches")
+        ui.ok("Kept a cache", f"{label}; unattended runs clear it only with --clear-caches")
         return False
     link = linked_from(remote, path, guard_dirs)
     if link:
-        ui.warn(f"{path} kept: {link} links into it (an environment depends on it)")
+        ui.warn("Kept a cache", f"{path}: {link} links into it (an environment depends on it)")
         return False
     real = remote.run(f"realpath {shlex.quote(path)} 2>/dev/null || true").strip()
     if real != path:
-        ui.warn(f"{path} resolves to {real or 'nothing'}: symlink? left as it is")
+        ui.warn("Kept a cache", f"{path} resolves to {real or 'nothing'}: symlink?")
         return False
     if wanted is None:
         if dry_run:
-            ui.info(f"would ask whether to clear {label} (default yes)")
+            ui.would("Ask to clear a cache", f"{label} (default no)")
             return False
-        if not ui.confirm(f"{label}: clear it to free space?", True):
-            ui.info(f"{path} kept")
+        if not ui.confirm(f"{label}: clear it to free space?", False, flag="--clear-caches"):
+            ui.ok("Kept a cache", path)
             return False
     return True
 

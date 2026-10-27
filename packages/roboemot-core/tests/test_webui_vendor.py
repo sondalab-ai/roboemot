@@ -48,7 +48,7 @@ def client(tmp_path_factory):
 
 
 def test_pin_is_the_released_kit_version():
-    assert SYNC.UI_KIT_VERSION == "0.37.1"
+    assert SYNC.UI_KIT_VERSION == "0.42.0"
     assert MANIFEST["version"] == SYNC.UI_KIT_VERSION
     assert MANIFEST["integrity"] == SYNC.UI_KIT_INTEGRITY
     assert json.loads((VENDOR / "package.json").read_text())["version"] == SYNC.UI_KIT_VERSION
@@ -86,6 +86,20 @@ def test_vendored_javascript_has_no_remote_imports():
         if name.endswith(".js"):
             text = (VENDOR / name).read_text()
             assert not re.search(r"""(from|import\()\s*["']https?:""", text), name
+
+
+def test_every_relative_import_in_the_vendored_javascript_is_vendored():
+    # 0.39 added a static import of dither-core.js; a missing target stops effects.js from loading
+    pattern = re.compile(r"""(?:\bfrom\s*|\bimport\s*\(\s*)["'](\./[^"']+)["']""")
+    seen = set()
+    for name in MANIFEST["files"]:
+        if name.endswith(".js"):
+            base = Path(name).parent
+            for target in pattern.findall((VENDOR / name).read_text()):
+                resolved = (base / target).as_posix().removeprefix("./")
+                seen.add(resolved)
+                assert resolved in MANIFEST["files"], (name, target)
+    assert "dither-core.js" in seen
 
 
 # ------------------------------------------------------------------ serving and caching

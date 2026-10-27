@@ -23,16 +23,26 @@ from pathlib import Path
 
 from . import Options, Platform, installed_platforms, select_robot
 from .remote import CONNECT_TIMEOUT_S
-from .ui import Ui, WizardError
+from .ui import TermError, Ui, WizardError
 
 NOT_INSTALLED_EXIT = 127
 CLI_NAME = "roboemot"
+COMMAND = "python scripts/robot_ssh.py"
 
 USER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9._-]*")
 HOST_LABEL = re.compile(r"(?!-)[A-Za-z0-9-]{1,63}(?<!-)")
 HOST_MAX_CHARS = 253
 
 Exec = Callable[[str, list[str]], None]
+
+
+def _vt() -> bool:
+    """VT processing on both streams (Windows); False means plain text."""
+    try:
+        from sondalab_palette import term
+    except ImportError:  # pragma: no cover
+        return False
+    return all([term.enable_vt(sys.stdout), term.enable_vt(sys.stderr)])
 
 
 def robot_cli(platform: Platform) -> str:
@@ -43,7 +53,7 @@ def robot_cli(platform: Platform) -> str:
 def valid_user(user: str) -> str:
     """``user`` if it is a plain login name; it ends up in an ssh argument."""
     if not USER_PATTERN.fullmatch(user):
-        raise WizardError(f"not a valid SSH user name: {user!r}")
+        raise WizardError("Invalid SSH user", f"{user!r} is not a plain login name")
     return user
 
 
@@ -62,7 +72,7 @@ def valid_host(host: str) -> str:
             and all(HOST_LABEL.fullmatch(label) for label in name.split("."))
         ):
             return host
-    raise WizardError(f"not a valid robot host name or IP address: {host!r}")
+    raise WizardError("Invalid robot host", f"{host!r} is not a host name or IP address")
 
 
 def debug_command(platform: Platform) -> str:
@@ -84,13 +94,15 @@ def build_argv(
 ) -> list[str]:
     """The ``ssh`` / ``ssh-copy-id`` command line for these options.
 
-    The robot comes from ``--host``/``--robot`` or mDNS, the user from ``--user`` or the
-    platform's usual one.
+    The robot comes from ``--host``/``--robot`` or mDNS, the user from ``--user`` or, on a
+    terminal, the platform's usual one. Without a terminal both flags are required.
     """
     if opts.host:
         valid_host(opts.host)
     if opts.user:
         valid_user(opts.user)
+    ui.require("--host", bool(opts.host))
+    ui.require("--user", bool(opts.user))
     host, platform = select_robot(ui, opts, root)
     target = f"{valid_user(opts.user or platform.default_user)}@{valid_host(host)}"
     if copy_id:
@@ -147,16 +159,22 @@ def main(
     ui: Ui | None = None,
 ) -> int:
     opts, command, copy_id, debug = parse_args(argv)
-    ui = ui or Ui(interactive=sys.stdin.isatty() and not os.environ.get("CI"), assume_yes=False)
+    ui = ui or Ui(
+        interactive=sys.stdin.isatty() and not os.environ.get("CI"),
+        assume_yes=False,
+        command=COMMAND,
+        vt=_vt(),
+        debug_flag=None,  # this script's --debug fetches the robot's report instead
+    )
     try:
         # Prompts and discovery messages go to stderr: stdout stays the command's own output.
         with contextlib.redirect_stdout(sys.stderr):
             cmd = build_argv(opts, command, copy_id, debug, ui, root or Path.cwd())
-    except WizardError as e:
-        ui.fail(str(e))
+    except TermError as e:
+        ui.error(e)
         return 1
     except KeyboardInterrupt:
-        ui.fail("interrupted")
+        ui.error(WizardError("Interrupted", "stopped with Ctrl-C"))
         return 130
     if opts.dry_run:
         print(shlex.join(cmd))
@@ -164,7 +182,7 @@ def main(
     try:
         execvp(cmd[0], cmd)
     except OSError as e:
-        ui.fail(f"cannot run {cmd[0]}: {e}")
+        ui.error(WizardError(f"Could not run {cmd[0]}", str(e), f"which {cmd[0]}"))
         return 1
     return 0  # only reached when execvp is replaced (tests); a real exec never returns
 

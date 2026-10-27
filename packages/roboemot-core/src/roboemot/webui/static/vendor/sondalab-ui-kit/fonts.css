@@ -8,13 +8,15 @@
    Since 0.30 the UI is Geist and Geist Mono (--sl-font-sans, --sl-font-display,
    --sl-font-mono). Fraunces is the brand face only (--sl-font-brand: the
    wordmark and the monogram).
+   Geist Pixel Square is the display accent (--sl-font-pixel: display
+   numerals, the lockup, a single display word); a static face, one weight.
 
    DEPRECATED, kept for one release window: Instrument Sans and Martian Mono.
    No token names them any more; they stay declared so a product that still
    names them by hand keeps rendering while it moves to the tokens. They go in
    1.0.0.
 
-   All are VARIABLE and latin-subset: one file per family covers every weight
+   All but the pixel face are VARIABLE; all are latin-subset: one file per family covers every weight
    the kit uses. Every face shares one latin range; Geist and Geist Mono add
    the IDE glyphs they actually have (arrows, math operators, keys, box
    drawing, blocks, shapes) and claim nothing they lack, so a glyph outside
@@ -66,6 +68,25 @@
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
     U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
     U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "Geist Pixel Square";
+  src: url("./assets/fonts/geist-pixel-square-latin.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+  /* STATIC and PROPORTIONAL (advances at 100px: i 38, W 91, 1 49, 8 65; Geist
+     Mono is 60 for all), with no wght axis and no tnum. One pixel cell is
+     0.08em: size it in multiples of 12.5px (--sl-text-px-*) to keep the
+     cells whole. */
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD,
+    /* IDE glyphs the face has: arrows, math operators, two shapes */
+    U+2190, U+2192, U+2194-2199, U+21A9-21AA, U+21B0-21B1, U+21B4-21B5,
+    U+21E4-21E5, U+21E7, U+2202, U+2206, U+220F, U+2211, U+221A, U+221E, U+222B,
+    U+2248, U+2260, U+2264-2265, U+25B2, U+25CA;
 }
 
 /* Deprecated (see the header): no token names it since 0.30. */

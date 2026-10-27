@@ -34,6 +34,7 @@ from roboemot.diagnostics import Target
 from roboemot.install import Ui, WizardError
 from roboemot.install.pyenv import RemotePython
 from roboemot.install.remote import Remote
+from roboemot.install.ui import last_line
 
 from .daemon import APP_NAME, DEFAULT_PORT, INSTALL_TIMEOUT_S, DaemonClient, DaemonError
 
@@ -67,7 +68,7 @@ def _wizard_errors() -> Iterator[None]:
     try:
         yield
     except DaemonError as exc:
-        raise WizardError(str(exc)) from exc
+        raise WizardError("Daemon call failed", str(exc)) from exc
 
 
 def stage_packages(root: Path, dest: Path) -> list[Path]:
@@ -122,19 +123,22 @@ class ReachyMiniWireless:
         try:
             addr = socket.getaddrinfo(host, self.port, proto=socket.IPPROTO_TCP)[0][4][0]
         except socket.gaierror as e:
-            raise WizardError(f"cannot resolve {host} ({e}); try the robot's IP address") from e
-        ui.ok(f"{host} -> {addr}")
+            raise WizardError(
+                f"Could not resolve {host}", f"{e}; the robot's IP address avoids mDNS names"
+            ) from e
+        ui.ok("Resolved the host", f"{host} -> {addr}")
         self.api = DaemonClient(Target(host, self.port), timeout_s=INSTALL_TIMEOUT_S)
         with _wizard_errors():
             status = self.api.status()
         version, name = status.get("version") or "?", status.get("robot_name")
-        ui.ok(f"daemon {version} on {name}, state {status['state']}")
+        ui.ok("Reached the daemon", f"{version} on {name}, state {status['state']}")
         if status["state"] != "running":
             raise WizardError(
-                f"daemon state is {status['state']}; start it from Reachy Mini Control"
+                "Daemon not running",
+                f"state is {status['state']}; start it from Reachy Mini Control",
             )
         if not status.get("wireless_version"):
-            ui.warn("this daemon is not a Wireless one: the apps venv layout may differ")
+            ui.warn("Not a Wireless daemon", "the apps venv layout may differ")
 
     def plan_env(self, remote: Remote) -> str:
         """The requirement the new apps venv gets: ``reachy-mini`` at the daemon's own version.
@@ -142,7 +146,8 @@ class ReachyMiniWireless:
         version = RemotePython(remote, DAEMON_PYTHON).py(PROBE).strip()
         if not VERSION_PATTERN.fullmatch(version):
             raise WizardError(
-                f"cannot read the reachy_mini version of {DAEMON_PYTHON}: {version!r}"
+                "Could not read the daemon's reachy_mini version",
+                f"{DAEMON_PYTHON} answered {version!r}",
             )
         return f"reachy-mini=={version}"
 
@@ -150,12 +155,16 @@ class ReachyMiniWireless:
         """Create the apps venv the way the daemon does and install ``plan`` (from
         ``plan_env``) into it. Also finishes a venv whose earlier creation stopped: ``venv`` over
         an existing one keeps it, and pip installs what is missing."""
-        with ui.progress(f"creating the apps venv {APPS_VENV}", report=False):
+        with ui.progress("Creating the apps venv", report=False):
             remote.run(f"{shlex.quote(DAEMON_PYTHON)} -m venv {shlex.quote(APPS_VENV)}")
         result = RemotePython(remote, self.python, ui).install([plan], None, report=False)
         if not result.ok:
-            raise WizardError(f"pip install failed in the new {APPS_VENV}:\n{result.output}")
-        ui.ok(f"created {APPS_VENV} with {plan}")
+            raise WizardError(
+                f"Could not install {plan} in the new {APPS_VENV}",
+                f"pip install failed: {last_line(result.output)}",
+                output=result.output,
+            )
+        ui.ok("Created the apps venv", f"{APPS_VENV} with {plan}")
 
     def env_users(self, py: RemotePython) -> list[str]:
         """Apps other than ours that the daemon would list from this environment."""
@@ -168,7 +177,7 @@ class ReachyMiniWireless:
         return VERSION_PATTERN.fullmatch(py.remote.run(cmd).strip()) is not None
 
     def probe(self, ui: Ui, py: RemotePython) -> None:
-        ui.ok(f"reachy_mini {py.py(PROBE)} in the apps venv")
+        ui.ok("Found reachy_mini", f"{py.py(PROBE)} in the apps venv")
 
     def stage(self, root: Path, dest: Path) -> list[Path]:
         return stage_packages(root, dest)
@@ -178,14 +187,16 @@ class ReachyMiniWireless:
         app config is the core's to check)."""
         lines = py.py(VERIFY).splitlines()
         if not lines:
-            raise WizardError(f"no answer checking the {APP_NAME} entry point")
+            raise WizardError("Could not check the entry point", f"no answer for {APP_NAME}")
         module = lines[-1]  # a stray line printed while importing the app comes before it
-        ui.ok(f"entry point {APP_NAME} -> {module}")
+        ui.ok("Checked the entry point", f"{APP_NAME} -> {module}")
         with _wizard_errors():
             installed = self._api().installed_apps()
         if APP_NAME not in installed:
-            raise WizardError(f"the daemon does not list {APP_NAME} among installed apps")
-        ui.ok(f"daemon lists {APP_NAME} as installed")
+            raise WizardError(
+                "App not listed", f"the daemon does not list {APP_NAME} among installed apps"
+            )
+        ui.ok("Daemon lists the app", APP_NAME)
 
     def running_app(self) -> str | None:
         with _wizard_errors():
@@ -223,21 +234,21 @@ class ReachyMiniWireless:
         api = self._api()
         blocker = self.start_blocker()
         if blocker:
-            raise WizardError(blocker)
+            raise WizardError(f"Cannot start {APP_NAME}", blocker)
         self._clear_errored_app(ui)
         other = self.running_app()
         if other == APP_NAME:
             self._await_own(ui, f"{APP_NAME} is already running")
             return
         if other:
-            if not ui.confirm(f"{other} is running; stop it (only one app runs at a time)?", True):
-                raise WizardError(f"{other} is still running; RoboEmot not started")
+            if not ui.confirm(f"{other} is running; stop it (only one app runs at a time)?", False):
+                raise WizardError(f"{other} is still running", "RoboEmot not started")
             with _wizard_errors():
                 api.stop_current_app()
-            ui.ok(f"stopped {other}")
+            ui.ok(f"Stopped {other}")
         with _wizard_errors():
             api.wake_up()
-        ui.ok("wake-up requested")
+        ui.ok("Requested the wake-up")
         time.sleep(WAKE_SETTLE_S)
         if self.running_app() == APP_NAME:
             self._await_own(ui, f"{APP_NAME} started by the daemon on wake-up")
@@ -258,19 +269,19 @@ class ReachyMiniWireless:
         to its zero pose. A failed request says what state it left the app in."""
         blocker = self.start_blocker()
         if blocker:
-            raise WizardError(blocker)
+            raise WizardError(f"Cannot start {APP_NAME}", blocker)
         question = (
-            f"restart {APP_NAME}? The head may move to its zero pose (unless asleep) while the "
+            f"Restart {APP_NAME}? The head may move to its zero pose (unless asleep) while the "
             "app stops, then the app starts again"
         )
         if not ui.confirm(question, False):
-            raise WizardError(f"{APP_NAME} not restarted")
+            raise WizardError(f"{APP_NAME} not restarted", "the restart was declined")
         try:
             self._api().restart_current_app()
         except DaemonError as exc:
             self._after_failed_restart(ui, exc)
             return
-        ui.ok("restart requested")
+        ui.ok("Requested the restart")
         self._await_own(ui)
 
     def _after_failed_restart(self, ui: Ui, error: DaemonError) -> None:
@@ -278,12 +289,13 @@ class ReachyMiniWireless:
         Still ours, the daemon is finishing the restart and the wait goes on; otherwise the
         stop ran and the start did not, so RoboEmot is stopped."""
         if self._current_is_own():
-            ui.warn(f"the restart request ended ({error}); {APP_NAME} is still restarting")
+            ui.warn("Restart request ended", f"{error}; {APP_NAME} is still restarting")
             self._await_own(ui)
             return
         raise WizardError(
-            f"restart failed ({error}); {APP_NAME} is stopped: start it with "
-            "python scripts/run_on_robot.py (without --restart)"
+            "Restart failed",
+            f"{error}; {APP_NAME} is stopped: start it without --restart",
+            "python scripts/run_on_robot.py",
         )
 
     def _clear_errored_app(self, ui: Ui) -> None:
@@ -294,10 +306,10 @@ class ReachyMiniWireless:
         if not current or current["state"] != "error":
             return
         name = current["info"]["name"]
-        ui.warn(f"{name} ended with an error earlier ({current.get('error') or 'no detail'})")
+        ui.warn(f"{name} had an error", current.get("error") or "no detail")
         with _wizard_errors():
             self._api().stop_current_app()
-        ui.ok(f"cleared {name}")
+        ui.ok(f"Cleared {name}", "stopped its errored run")
 
     def _current_is_own(self) -> bool:
         """Whether RoboEmot is the daemon's current app, in any state (an errored start counts:
@@ -309,14 +321,15 @@ class ReachyMiniWireless:
     def _await_own(self, ui: Ui, note: str | None = None) -> None:
         """Wait until RoboEmot is the current app and running, or raise with its error."""
         if note:
-            ui.ok(note)
-        with _wizard_errors():
+            ui.ok(f"Found {APP_NAME}", note)
+        with ui.running(f"Starting {APP_NAME}…"), _wizard_errors():
             status = self._api().wait_app(APP_NAME)
         if status["state"] != "running":
             raise WizardError(
-                f"{APP_NAME} state {status['state']}: {status.get('error') or 'no detail'}"
+                f"{APP_NAME} did not start",
+                f"{APP_NAME} state {status['state']}: {status.get('error') or 'no detail'}",
             )
-        ui.ok(f"{APP_NAME} is running")
+        ui.ok(f"Started {APP_NAME}", "running")
 
     def autostart(self) -> str | None:
         with _wizard_errors():
@@ -332,14 +345,14 @@ class ReachyMiniWireless:
         if py.remote.run(f"test -e {shlex.quote(path)} && echo yes || echo no") == "yes":
             if not dry_run:
                 py.remote.run(f"rm -f {shlex.quote(path)}")
-            ui.ok(f"{'would delete' if dry_run else 'deleted'} {path}")
+            ui.change(dry_run, "Delete the app metadata", "Deleted the app metadata", path)
 
     def verify_removed(self, ui: Ui) -> None:
         with _wizard_errors():
             installed = self._api().installed_apps()
         if APP_NAME in installed:
-            raise WizardError(f"the daemon still lists {APP_NAME}")
-        ui.ok(f"daemon no longer lists {APP_NAME}")
+            raise WizardError("App still listed", f"the daemon still lists {APP_NAME}")
+        ui.ok("Daemon dropped the app", f"{APP_NAME} no longer listed")
 
 
 __all__ = ["ReachyMiniWireless", "stage_packages"]

@@ -1,39 +1,147 @@
 """Wizard output and prompts for the robot installer (SPEC 4A, Packaging).
 
-Colours come from the Sondalab palette (``sondalab-palette``, optional: plain text without it)
-and only when stdout is a terminal. Non-interactive runs take each prompt's default;
-``assume_yes`` accepts every confirmation.
+Follows the Sondalab Term spec (sondalab-ui docs/tui-patterns.md) through ``sondalab_palette``:
+
+- Results are step lines on stdout: glyph, label padded to the label column, detail. Work a dry
+  run only describes is ``pending``, never ``done``. The run ends with ``Summary``.
+- A long remote step (pip, a model fetch) shows live progress: on a terminal that allows motion,
+  one line on stderr rewritten in place (spinner, elapsed time, the latest output line);
+  otherwise each output line as prose under the step on stdout. It ends with a step line that
+  carries the total time.
+- Prompts, spinners and running lines go to stderr. An unrecognised answer asks again at most
+  three times. Without a terminal on stdin nothing is asked and no default is taken: the run
+  stops with an error naming the flag that answers the question (``--yes`` answers every
+  confirmation).
+- Errors are the three-line block (what, why, ``Try:``) on stderr; raw tool output only with
+  ``--debug``.
+
+The palette import is optional: the robot imports this module (through
+``roboemot_reachymini.settings``) and has no palette. The installer itself requires it.
 """
 
 from __future__ import annotations
 
+import argparse
 import getpass
+import os
 import re
 import shutil
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
+from importlib.metadata import PackageNotFoundError, version
+from typing import TextIO
 
 try:
-    import sondalab_palette as _palette
-except ImportError:  # pragma: no cover - plain output
-    _palette = None
+    from sondalab_palette import LAYOUT, SPINNER
+    from sondalab_palette import term as _term
+except ImportError:  # pragma: no cover - the robot, which never runs the installer
+    _term = None
+    LAYOUT = SPINNER = {}
+
+NAME = "roboemot"
+TAGLINE = "Social and emotional behaviour for robots."
+"""The header's description line (the README's first sentence)."""
+
+COMMAND = "python scripts/install_on_robot.py"
+"""How the installer is run; the ``Try:`` lines of its errors start with it."""
+
+STATE_WORDS = {
+    "done": "done",
+    "fixed": "fixed",
+    "failed": "failed",
+    "warn": "warning",
+    "active": "running",
+    "pending": "pending",
+    "skipped": "skipped",
+}
+"""Accessible mode writes each state as a word next to its glyph."""
+
+if _term is not None:
+    _ErrorBase = _term.TermError
+else:  # pragma: no cover - the robot, which never runs the installer
+
+    class _ErrorBase(Exception):
+        def __init__(self, what: str, why: str = "", fix: str = "") -> None:
+            super().__init__(what, why, fix)
+            self.what, self.why, self.fix = what, why, fix
+
+        def __str__(self) -> str:
+            return f"{self.what}: {self.why}" if self.why else self.what
 
 
-class WizardError(Exception):
-    """A step failed; the message says what to do about it."""
+class WizardError(_ErrorBase):
+    """A step failed: ``what`` failed, ``why`` (the cause), ``fix`` (a command to try).
+
+    ``output`` is the raw tool output (pip, ssh, the wheel build): printed only under
+    ``--debug``, never in the three-line error block.
+    """
+
+    def __init__(self, what: str, why: str = "", fix: str = "", output: str = "") -> None:
+        super().__init__(what, why, fix)
+        self.output = output
+        self.args = (what, why, fix, output)  # copy and pickle rebuild it with the output
 
 
-def paint(text: str, role: str) -> str:
-    """Colour ``text`` with a Sondalab role, only when stdout is a terminal."""
-    return _palette.paint(text, role) if _palette and sys.stdout.isatty() else text
+TermError = _ErrorBase
+"""The palette's ``TermError`` (a plain fallback on the robot): what ``main`` catches."""
+
+
+def last_line(text: str) -> str:
+    """The one-line cause in tool output: pip's last ``ERROR:`` line (a trailing ``[notice]``
+    is not the cause), else the last non-empty line."""
+    lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
+    errors = [line for line in lines if line.startswith("ERROR:")]
+    return (errors or lines or [""])[-1]
+
+
+def app_version() -> str:
+    """The installed ``roboemot-core`` version, ``unknown`` in a never-installed source tree."""
+    try:
+        return version("roboemot-core")
+    except PackageNotFoundError:
+        return "unknown"
+
+
+def header(plain: bool = False) -> str:
+    """The Sondalab header for stdout; "" without the palette, off a terminal and in accessible
+    mode (the palette decides since 0.9.0). ``plain`` (no VT processing on Windows) gives the
+    uncoloured ASCII lockup."""
+    if _term is None:
+        return ""
+    if plain:
+        env = {**os.environ, "NO_COLOR": "1", "SONDALAB_ASCII": "1"}
+        return str(_term.header(NAME, app_version(), TAGLINE, env=env))
+    return str(_term.header(NAME, app_version(), TAGLINE))
+
+
+def print_header(plain: bool = False) -> None:
+    """Print :func:`header` (nothing when it is empty)."""
+    print(header(plain), end="", flush=True)
+
+
+class HeaderParser(argparse.ArgumentParser):
+    """``argparse``'s parser with the header before the ``--help`` text."""
+
+    plain = False
+
+    def print_help(self, file=None) -> None:
+        if file is None or file is sys.stdout:
+            print_header(self.plain)
+        super().print_help(file)
+
+
+def _isatty(stream: TextIO) -> bool:
+    try:
+        return stream.isatty()
+    except (AttributeError, ValueError):
+        return False
 
 
 CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
-SPINNER = "|/-\\"
-TICK_S = 1.0
+TICK_S = 1.0  # how often the live progress line redraws while the command is silent
 
 
 def format_elapsed(seconds: float) -> str:
@@ -48,7 +156,7 @@ def format_elapsed(seconds: float) -> str:
 
 class Progress:
     """One long remote step: call it with each output line; set ``failed`` for a soft failure
-    (pip exited non-zero without raising), so the closing ``✓`` line is skipped."""
+    (pip exited non-zero without raising), so the closing ``done`` line is skipped."""
 
     def __init__(self) -> None:
         self.last = ""
@@ -60,35 +168,174 @@ class Progress:
 
 
 class Ui:
-    def __init__(self, interactive: bool, assume_yes: bool) -> None:
+    """Installer output and prompts.
+
+    ``interactive`` is whether stdin is a terminal a person can answer on; ``assume_yes``
+    (``--yes``) answers every confirmation. ``read`` returns one typed line (``""`` at end of
+    input); None reads stdin. ``command`` starts the ``Try:`` line of an error. ``vt`` False
+    (Windows without VT processing) means plain text: no colour, no motion, ASCII glyphs.
+    ``debug`` prints raw tool output; ``debug_flag`` is the flag an error suggests for it.
+    Streams are looked up at write time, so redirecting ``sys.stdout`` works.
+    """
+
+    def __init__(
+        self,
+        interactive: bool,
+        assume_yes: bool,
+        *,
+        read: Callable[[], str] | None = None,
+        command: str = COMMAND,
+        vt: bool = True,
+        debug: bool = False,
+        debug_flag: str | None = "--debug",
+    ) -> None:
         self.interactive = interactive
         self.assume_yes = assume_yes
+        self.read = read
+        self.command = command
+        self.vt = vt
+        self.debug = debug
+        self.debug_flag = debug_flag
         self.step_no = 0
         self.steps = 0
+        self.counts = {"ok": 0, "warn": 0, "failed": 0}
         self.tick_s = TICK_S
         self.clock: Callable[[], float] = time.monotonic
         self._out_lock = threading.Lock()
 
+    # ------------------------------------------------------------ rendering
+
+    def mode(self, stream: TextIO) -> str:
+        """The colour mode for ``stream`` (palette ``color_mode``), "none" without VT.
+
+        Read per call, so ``NO_COLOR``/``FORCE_COLOR`` and a redirected stream count.
+        """
+        return _term.color_mode(isatty=_isatty(stream)) if self.vt else "none"
+
+    def ascii(self) -> bool:
+        """Whether glyphs take their ASCII form: no VT, ``TERM=dumb``, ``SONDALAB_ASCII=1`` or
+        a non-UTF-8 locale (palette ``ascii_mode``)."""
+        return not self.vt or _term.ascii_mode()
+
+    def paint(self, text: str, role: str, stream: TextIO | None = None) -> str:
+        """``text`` in ``role`` for ``stream`` (stdout by default)."""
+        return _term.paint(text, role, self.mode(stream or sys.stdout))
+
+    def _step_text(self, name: str, label: str, detail: str, stream: TextIO) -> str:
+        """A step line; a detail too long for the width wraps under the detail column."""
+        ascii, mode = self.ascii(), self.mode(stream)
+        col = LAYOUT["indent"] + 2 + LAYOUT["labelWidth"]
+        more: list[str] = []
+        if detail and col + len(detail) > _term.width():
+            first, *more = _term.wrap(detail, indent=col).split("\n")
+            detail = first.lstrip()
+        line = _term.step_line(name, label, detail, ascii, mode=mode)
+        if _term.accessible():
+            head = LAYOUT["indent"] + 2
+            line = (
+                _term.step_line(name, "", ascii=ascii, mode=mode)
+                + STATE_WORDS.get(name, "running")
+                + " "
+                + _term.step_line(name, label, detail, ascii)[head:]
+            )
+        return "\n".join([line, *more])
+
+    def _emit(self, name: str, label: str, detail: str = "", count: str | None = None) -> None:
+        print(self._step_text(name, label, detail, sys.stdout), flush=True)
+        if count:
+            self.counts[count] += 1
+
+    def _cont(self, text: str) -> str:
+        return " " * (LAYOUT["indent"] + 2) + text
+
+    # ------------------------------------------------------------ results (stdout)
+
     def title(self, text: str, note: str = "") -> None:
-        print(
-            f"\n{paint('RoboEmot', 'accent')} {text}" + (f"  {paint(note, 'warn')}" if note else "")
-        )
+        """The run's first line: what runs, and a note (the dry run) in ``warn``."""
+        line = f"{self.paint('RoboEmot', 'accent')} {text}"
+        print(line + (f"  {self.paint(note, 'warn')}" if note else ""), flush=True)
 
     def step(self, name: str) -> None:
+        """A numbered section heading over the step lines that follow."""
         self.step_no += 1
-        print(f"\n{paint(f'[{self.step_no}/{self.steps}]', 'dim')} {paint(name, 'prompt')}")
+        heading = _term.heading(f"{self.step_no}/{self.steps} {name}", mode=self.mode(sys.stdout))
+        print(f"\n{heading}", flush=True)
 
-    def ok(self, msg: str) -> None:
-        print(f"  {paint('✓', 'ok')} {msg}")
+    def ok(self, label: str, detail: str = "") -> None:
+        """A finished step (``done``): what changed or was checked."""
+        self._emit("done", label, detail, "ok")
 
-    def info(self, msg: str) -> None:
-        print(f"  {paint('·', 'dim')} {paint(msg, 'dim')}")
+    def warn(self, label: str, detail: str = "") -> None:
+        self._emit("warn", label, detail, "warn")
 
-    def warn(self, msg: str) -> None:
-        print(f"  {paint('!', 'warn')} {msg}")
+    def fail(self, label: str, detail: str = "") -> None:
+        self._emit("failed", label, detail, "failed")
 
-    def fail(self, msg: str) -> None:
-        print(f"  {paint('✗', 'err')} {msg}")
+    def would(self, label: str, detail: str = "") -> None:
+        """Work a dry run only describes (``pending``): never a success glyph."""
+        self._emit("pending", label, detail)
+
+    def change(self, dry_run: bool, todo: str, done: str, detail: str = "") -> None:
+        """``todo`` as pending in a dry run, else ``done`` as a finished step."""
+        if dry_run:
+            self.would(todo, detail)
+        else:
+            self.ok(done, detail)
+
+    def info(self, text: str) -> None:
+        """Prose under a step, in ``dim``, wrapped from the label column."""
+        col = LAYOUT["indent"] + 2
+        lines = _term.wrap(text, indent=col).split("\n")
+        print("\n".join(self._cont(self.paint(ln[col:], "dim")) for ln in lines), flush=True)
+
+    def kv(self, key: str, value: str) -> None:
+        """A fact, not a check: key in the label column, no glyph."""
+        print(_term.kv_line(key, value), flush=True)
+
+    def hint(self, label: str, command: str) -> None:
+        """A command under a step (``label:`` in ``dim``), never wrapped: it is copied."""
+        print(self._cont(f"{self.paint(label + ':', 'dim')} {command}"), flush=True)
+
+    def next(self, command: str) -> None:
+        print(_term.next_line(command, mode=self.mode(sys.stdout)), flush=True)
+
+    def summary(self) -> None:
+        """One blank line, then the four counts."""
+        c = self.counts
+        line = _term.summary(
+            c["ok"], 0, c["warn"], c["failed"], mode=self.mode(sys.stdout), ascii=self.ascii()
+        )
+        print(f"\n{line}", flush=True)
+
+    # ------------------------------------------------------------ stderr
+
+    def error(self, error: TermError) -> None:
+        """The three-line error block on stderr; raw output above it only with ``--debug``."""
+        what, why, fix = error.what, error.why, error.fix
+        output = error.output if isinstance(error, WizardError) else ""
+        if output and self.debug:
+            print(output.rstrip(), file=sys.stderr)
+        elif output and not fix and self.debug_flag:
+            fix = f"{self.command} {self.debug_flag}"
+        block = _term.error_block(what, why, fix, ascii=self.ascii(), mode=self.mode(sys.stderr))
+        print(block, file=sys.stderr, flush=True)
+
+    def active(self, label: str, detail: str = "") -> None:
+        """A running line on stderr, at once: for a step that may prompt (ssh's password)."""
+        print(self._step_text("active", label, detail, sys.stderr), file=sys.stderr, flush=True)
+
+    @contextmanager
+    def running(self, label: str) -> Iterator[None]:
+        """A step that waits: after ``SPINNER["delayMs"]`` a spinner on stderr (a static
+        running line when motion is off); cleared on exit. The caller prints the result."""
+        stream = sys.stderr
+        motion = self.vt and _term.motion_enabled(isatty=_isatty(stream))
+        spinner = _Spinner(self, label, stream, motion)
+        spinner.start()
+        try:
+            yield
+        finally:
+            spinner.stop()
 
     @contextmanager
     def progress(
@@ -101,15 +348,18 @@ class Ui:
     ) -> Iterator[Progress]:
         """Announce a long remote step and show it running; yields a ``Progress`` to call per line.
 
-        On a terminal one status line is rewritten in place (spinner, elapsed time, latest
-        line) and a ticker keeps the time moving while the command is silent. Otherwise each
-        line is printed plainly. ``on_line`` maps a raw output line to the text worth showing
-        (None drops it). On success the step ends with a ``✓`` line carrying the total time, unless
-        ``report`` is False (the caller prints its own). ``slow`` adds the "can take minutes"
-        note to the announcement. Control characters are stripped from shown lines.
+        On a terminal that allows motion one running line on stderr is rewritten in place
+        (spinner, elapsed time, latest line) and a ticker keeps the time moving while the
+        command is silent. Otherwise each line is printed as prose on stdout. ``on_line`` maps a
+        raw output line to the text worth showing (None drops it). On success the step ends with
+        a ``done`` line whose detail is the total time, unless ``report`` is False (the caller
+        prints its own). ``slow`` adds the "can take minutes" note to the announcement. Control
+        characters are stripped from shown lines.
         """
         keep = on_line or (lambda text: text)
-        live = sys.stdout.isatty()
+        stream = sys.stderr
+        live = self.vt and _term.motion_enabled(isatty=_isatty(stream))
+        ascii = self.ascii()
         state = Progress()
         start = self.clock()
         self.info(f"{label} (can take minutes on the robot)" if slow else label)
@@ -118,19 +368,20 @@ class Ui:
 
         def draw() -> None:
             width = max(shutil.get_terminal_size().columns - 1, 20)
-            spin = SPINNER[frame[0] % len(SPINNER)]
-            head = f"  {spin} {label} {format_elapsed(self.clock() - start)}"
+            spin = _term.spinner_frame(frame[0], ascii=ascii)
+            elapsed = format_elapsed(self.clock() - start)
+            head = f"{' ' * LAYOUT['indent']}{spin} {label} {elapsed}"
             text = f"{head}  {state.last}" if state.last else head
             if len(text) > width:
-                text = text[: width - 1] + "…"
+                text = text[: width - 1] + ("." if ascii else "…")
             with self._out_lock:
-                sys.stdout.write(f"\r{text}\x1b[K")
-                sys.stdout.flush()
+                stream.write(f"\r{text}\x1b[K")
+                stream.flush()
 
         def clear() -> None:
             with self._out_lock:
-                sys.stdout.write("\r\x1b[K")
-                sys.stdout.flush()
+                stream.write("\r\x1b[K")
+                stream.flush()
 
         def feed(raw: str) -> None:
             shown = keep(CONTROL.sub("", raw))
@@ -163,48 +414,134 @@ class Ui:
                 ticker.join()
                 clear()
         if report and not state.failed:
-            self.ok(f"{done or label} ({format_elapsed(self.clock() - start)})")
+            self.ok(done or label, format_elapsed(self.clock() - start))
 
-    def ask(self, question: str, default: str) -> str:
-        if not self.interactive:
-            return default
+    # ------------------------------------------------------------ prompts (stderr)
+
+    def require(self, flag: str, given: bool, what: str = "") -> None:
+        """Stop with :class:`MissingFlag` when ``flag`` was not given and nobody can be asked.
+
+        Runs before the robot is touched, so an unattended run fails up front instead of
+        half way through. A terminal on stdin means the question will be asked later.
+        """
+        _term.needs_prompt(
+            flag, given=given, what=what, command=self.command, isatty=self.interactive
+        )
+
+    def _readline(self) -> str:
         try:
-            answer = input(f"  {paint('?', 'prompt')} {question} {paint(f'[{default}]', 'dim')} ")
+            return (self.read or sys.stdin.readline)()
         except EOFError:
-            return default
-        return answer.strip() or default
+            return ""
+
+    def ask(self, question: str, default: str, *, flag: str) -> str:
+        """A free-text answer on stderr; Enter takes ``default``, which the prompt shows.
+
+        Without a terminal it raises :class:`MissingFlag` naming ``flag``; end of input is
+        not an answer (:class:`NoValidAnswer`).
+        """
+        self.require(flag, False)
+        q = self.paint("?", "prompt", sys.stderr)
+        sys.stderr.write(f"{q} {question} {self.paint(f'[{default}]', 'dim', sys.stderr)} ")
+        sys.stderr.flush()
+        line = self._readline()
+        if line == "":
+            sys.stderr.write("\n")
+            ended = _term.NoValidAnswer(question, "input ended before an answer")
+            raise self._with_fix(ended, flag)
+        return line.strip() or default
+
+    def _with_fix(self, error: Exception, flag: str) -> Exception:
+        """``error`` (a NoValidAnswer) with the ``Try:`` line that answers without a prompt."""
+        error.fix = f"{self.command} {flag}"
+        return error
 
     def ask_secret(self, question: str) -> str | None:
         """A hidden answer from the terminal; None when not interactive."""
         if not self.interactive:
             return None
         try:
-            return getpass.getpass(f"  {paint('?', 'prompt')} {question}: ")
+            return getpass.getpass(f"{self.paint('?', 'prompt', sys.stderr)} {question}: ")
         except EOFError:
             return None
 
-    def choose(self, question: str, options: list[str]) -> int:
-        """Numbered pick list; returns the chosen index (the first one by default)."""
-        for n, label in enumerate(options, 1):
-            print(f"    {paint(str(n), 'accent')}  {label}")
-        while True:
-            answer = self.ask(question, "1")
-            if answer.isdigit() and 1 <= int(answer) <= len(options):
-                return int(answer) - 1
-            self.warn(f"pick a number from 1 to {len(options)}")
+    def choose(self, question: str, options: Sequence[str], *, flag: str) -> int:
+        """Numbered pick list on stderr; the 0-based index typed. No default: three
+        unrecognised answers or end of input raise :class:`NoValidAnswer`."""
+        self.require(flag, False)
+        try:
+            return _term.choose(question, options, read=self._readline, mode=self.mode(sys.stderr))
+        except _term.NoValidAnswer as e:
+            raise self._with_fix(e, flag) from None
 
-    def confirm(self, question: str, default: bool) -> bool:
+    def confirm(self, question: str, default: bool, *, flag: str = "--yes") -> bool:
+        """``? question [y/N]``; ``--yes`` answers yes. Without a terminal it raises
+        :class:`MissingFlag` naming ``flag``. Default no for anything that changes the robot."""
         if self.assume_yes:
             return True
-        if not self.interactive:
-            return default
-        hint = "Y/n" if default else "y/N"
+        self.require(flag, False)
         try:
-            answer = input(f"  {paint('?', 'prompt')} {question} {paint(f'[{hint}]', 'dim')} ")
-        except EOFError:
-            return default
-        answer = answer.strip().lower()
-        return default if not answer else answer in ("y", "yes")
+            return _term.confirm(
+                question, default=default, read=self._readline, mode=self.mode(sys.stderr)
+            )
+        except _term.NoValidAnswer as e:
+            raise self._with_fix(e, flag) from None
 
 
-__all__ = ["Progress", "Ui", "WizardError", "format_elapsed", "paint"]
+class _Spinner:
+    """The thread behind :meth:`Ui.running`: nothing for the delay, then either the burst
+    spinner redrawn in place every interval or, with motion off, the running line once."""
+
+    def __init__(self, ui: Ui, label: str, stream: TextIO, motion: bool) -> None:
+        self.ui, self.label, self.stream, self.motion = ui, label, stream, motion
+        self.drawn = False
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join()
+        if self.drawn and self.motion:
+            self.stream.write("\r\x1b[J")
+            self.stream.flush()
+
+    def _run(self) -> None:
+        if self._stop.wait(SPINNER["delayMs"] / 1000):
+            return
+        self.drawn = True
+        if not self.motion:
+            self.ui.active(self.label)
+            return
+        ascii, tick = self.ui.ascii(), 0
+        try:
+            while True:
+                frame = _term.spinner_frame(tick, ascii=ascii)
+                mode = self.ui.mode(self.stream)
+                line = _term.step_line(frame, self.label, "", ascii, mode=mode)
+                self.stream.write(f"\x1b[?2026h\r\x1b[K{line}\x1b[?2026l")
+                self.stream.flush()
+                tick += 1
+                if self._stop.wait(SPINNER["intervalMs"] / 1000):
+                    return
+        except Exception:  # a drawing error ends the animation, never the step
+            self.stream.write("\x1b[?2026l\r\x1b[J")
+            self.stream.flush()
+            self.drawn = False
+
+
+__all__ = [
+    "COMMAND",
+    "HeaderParser",
+    "Progress",
+    "TermError",
+    "Ui",
+    "WizardError",
+    "app_version",
+    "format_elapsed",
+    "header",
+    "last_line",
+    "print_header",
+]

@@ -22,8 +22,8 @@ dependencies = [
 [project.optional-dependencies]
 # Finding robots on the LAN by mDNS (roboemot discover, the install wizard); not needed on the robot.
 discovery = ["zeroconf>=0.132"]
-# The robot installer (runs on the PC): mDNS plus sondalab-palette's terminal colour roles.
-install = ["zeroconf>=0.132", "sondalab-palette>=0.3.8"]
+# The robot installer (runs on the PC): mDNS plus sondalab-palette's Term helpers (0.9: prompts, errors).
+install = ["zeroconf>=0.132", "sondalab-palette>=0.9"]
 # ONNX vision backends (YuNet, SFace, DINOv2, NanoDet): `roboemot models fetch`
 # gets the weights.
 vision = ["onnxruntime>=1.18", "onnx>=1.16", "opencv-python-headless>=4.9"]
@@ -38,7 +38,7 @@ dev = [
   "pytest-asyncio>=0.23",
   "ruff>=0.6",
   "zeroconf>=0.132",
-  "sondalab-palette>=0.3.8",
+  "sondalab-palette>=0.9",
   "websockets>=13,<16",
 ]
 

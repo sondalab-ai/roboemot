@@ -4,6 +4,7 @@
   --sl-font-sans: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif;
   --sl-font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
   --sl-font-brand: "Fraunces", Georgia, serif;
+  --sl-font-pixel: "Geist Pixel Square", "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
   --sl-space-0: 0;
   --sl-space-1: 0.25rem;
   --sl-space-2: 0.5rem;
@@ -26,6 +27,10 @@
   --sl-text-2xl: 2rem;
   --sl-text-3xl: 2.75rem;
   --sl-text-display: clamp(3.5rem, 2rem + 5vw, 6rem);
+  --sl-text-px-1: 12.5px;
+  --sl-text-px-2: 25px;
+  --sl-text-px-3: 37.5px;
+  --sl-text-px-4: 50px;
   --sl-line-tight: 1.2;
   --sl-line-normal: 1.5;
   --sl-line-relaxed: 1.6;
@@ -39,6 +44,11 @@
   --sl-motion-slow: 360ms;
   --sl-motion-ease: cubic-bezier(0.25, 1, 0.5, 1);
   --sl-motion-enter: cubic-bezier(0.22, 1, 0.36, 1);
+  --sl-motion-dither-in: 260ms;
+  --sl-motion-dither-out: 320ms;
+  --sl-motion-check: 180ms;
+  --sl-motion-radio: 150ms;
+  --sl-motion-switch: 260ms;
   --sl-motion-spring: linear(0, 0.024, 0.087, 0.174, 0.275, 0.382, 0.488, 0.588, 0.68, 0.761, 0.831, 0.89, 0.937, 0.975, 1.003, 1.023, 1.037, 1.045, 1.049, 1.05, 1.048, 1.044, 1.04, 1.035, 1.029, 1.024, 1.019, 1.015, 1.011, 1.007, 1.005, 1.003, 1);
   --sl-shadow-sm: 0 1px 2px rgba(0,0,0,0.09), 0 4px 10px -4px rgba(0,0,0,0.15);
   --sl-shadow-md: 0 1px 2px rgba(0,0,0,0.06), 0 8px 20px -8px rgba(0,0,0,0.18);

@@ -36,7 +36,8 @@ def lock_path(arch: str, python: str) -> Path:
     if (arch, python) not in TARGETS:
         known = ", ".join(f"{a} Python {p}" for a, p in sorted(TARGETS))
         raise WizardError(
-            f"no hash-pinned Piper lock for {arch} Python {python} (locked: {known}); "
-            "add the target to roboemot.install.piper_lock.TARGETS and run scripts/lock_piper.py"
+            f"No hash-pinned Piper lock for {arch} Python {python}",
+            f"locked: {known}; add the target to roboemot.install.piper_lock.TARGETS",
+            "python scripts/lock_piper.py",
         )
     return LOCK_DIR / lock_name(arch, python)

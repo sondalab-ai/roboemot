@@ -3,16 +3,12 @@
 
    Contract: docs/specs/2026-09-08-effects-layer-design.md
 
-   WHY THIS IS NOT sl-fx-liquid. The liquid parents one <svg> INTO its host,
-   aligned to that host's border box, and deforms it under the pointer — "you
-   are recognised". It is structurally incapable of merging with a neighbour,
-   because two silhouettes can only weld if they are in the SAME filter
-   coordinate space. So this family inverts the ownership: a declared
-   CONTAINER owns one field, every member contributes its silhouette to it in
-   the container's coordinates, and one goo filter runs over the group. The
-   meaning is different too — not "you are recognised" but "these belong to
-   one another" — which is why it is a family and not a looser gate on the
-   liquid.
+   WHY A CONTAINER OWNS THE FIELD. Two silhouettes can only weld if they are
+   in the SAME filter coordinate space, so an <svg> parented into each member
+   could never merge with its neighbour. A declared CONTAINER owns one field,
+   every member contributes its silhouette to it in the container's
+   coordinates, and one goo filter runs over the group. The meaning is
+   "these belong to one another".
 
    WHAT IS UNCHANGED. The goo is on a SILHOUETTE LAYER BELOW THE CONTENT, the
    way libraries.dev/gooey does it and the way the spec has required twice:
@@ -38,8 +34,8 @@ import {
 const NS = "http://www.w3.org/2000/svg";
 
 /** What contributes a silhouette. A member is MARKED IN THE MARKUP, never
- *  inferred from "every child of the container": the same ruling that made the
- *  liquid's --drop a class rather than a measured radius. A heuristic — every
+ *  inferred from "every child of the container": the same ruling that keeps
+ *  every gate a class rather than a measured radius. A heuristic — every
  *  child, or every child above some size — misfires the moment a consumer
  *  wraps two members in a layout div, and the author loses the ability to keep
  *  one control out of the substance. */
@@ -57,7 +53,7 @@ const MEMBERS = ".sl-fx-goo__member";
  *
  *  The owner's ruling (2026-09-12) is to remove the case rather than paper
  *  over it: the goo is for standard elements, and a control keeps its own
- *  affordance. Excluding by TAG is not the heuristic the liquid's `--drop`
+ *  affordance. Excluding by TAG is not the measured-radius heuristic the
  *  gate exists to avoid — a tag name is a stable semantic fact, where a
  *  measured `border-radius` is a value a component may re-parametrise at any
  *  time. A `div[role="button"][tabindex="0"]` is deliberately still eligible:
@@ -243,7 +239,7 @@ export function gooField(container) {
 
   /** The members this field will draw: marked in the markup, minus the ones a
    *  field may never hold. A skipped element is left completely alone — no
-   *  class, no silhouette — the way a bare `.sl-fx-liquid` is inert.
+   *  class, no silhouette — the way an unmarked element is inert.
    *  @returns {Element[]} */
   function collect() {
     return [...container.querySelectorAll(MEMBERS)].filter((el) => !el.matches(EXCLUDED));
@@ -474,7 +470,7 @@ export function gooField(container) {
   const onLeave = (e) => {
     // Delegated: pointerleave fires for every descendant as the pointer moves
     // between members. Only the container's own leave ends the loop — the same
-    // guard the liquid and the pane both carry — and not while a drag is live.
+    // guard the pane carries — and not while a drag is live.
     if (e.target !== container || held) return;
     stop();
   };
