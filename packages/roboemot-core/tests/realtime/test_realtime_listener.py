@@ -490,9 +490,14 @@ def test_a_sleeping_robot_sends_no_audio_whatever_the_pause(ears, pause):
         loop.motors_off = True
         gate.tick(time.monotonic())
         assert gate.asleep and gate.paused == pause
+        if pause:  # the pause closed the session: a queued worker turn reopens it (path 2)
+            assert ear.rt.route.ready()
+        # the queued burst reaches the gate with a session open: asleep is what refuses it
+        assert ear.settle(lambda: ear.rt.route.snapshot()["audio_blocked"] is not None)
+        assert ear.rt.route.snapshot()["audio_blocked"] == "asleep"
+        assert len(server.of("input_audio_buffer.commit")) == 1
         ear.r.now += ear.rt.stack.effective().voice.realtime_route.transcript_timeout_s
         assert ear.settle(lambda: len(ear.utterances) == 2)
-        assert ear.rt.route.snapshot()["audio_refused"] >= 1  # recorded: the gate said no
         ear.say()  # an utterance while asleep: the Vosk way, never sent
         assert ear.settle(lambda: len(ear.utterances) == 3)
         assert len(server.of("input_audio_buffer.commit")) == 1
