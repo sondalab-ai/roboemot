@@ -277,9 +277,13 @@ def test_history_beyond_the_cap_deletes_the_server_items(rigs):
         rig.turn()
         first = srv.of("conversation.item.create")[0]["item"]["id"]
         rig.turn()
-        assert wait_for(lambda: srv.of("conversation.item.delete"))
-        deleted = {e["item_id"] for e in srv.of("conversation.item.delete")}
-        assert deleted == {first, "item_1"}
+
+        def deleted() -> set[str]:
+            return {e["item_id"] for e in srv.of("conversation.item.delete")}
+
+        # the two deletes are sent back to back; the server may hold only the first one yet
+        assert wait_for(lambda: len(deleted()) == 2)
+        assert deleted() == {first, "item_1"}
         assert rig.route.snapshot()["items_deleted"] == 2
 
 
