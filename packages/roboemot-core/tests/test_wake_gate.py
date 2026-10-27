@@ -125,3 +125,20 @@ def test_other_speaker_and_no_window_are_decided_before_the_check():
     decide(gate, wake_word=True, speaker="ann")
     assert not decide(gate, start=1.5, last=2.0, speaker="bob", at_face=check)
     assert check.calls == 0
+
+
+def test_addressable_asks_without_counting_or_moving_the_window():
+    """SR-3: the listener asks at speech start whether the utterance needs the wake word
+    (SPEC 8, Realtime speech route); the answer changes nothing."""
+    g = WakeGate("always", 3.0)
+    assert not g.addressable(enrolled_in_view=True, start=1.0)
+    assert g.decide(wake_word=True, enrolled_in_view=False, start=0.0, last_speech=1.0, speaker="a")
+    before = g.snapshot(1.5)
+    assert g.addressable(enrolled_in_view=False, start=2.0, speaker="a")
+    assert not g.addressable(enrolled_in_view=False, start=2.0, speaker="b")
+    assert not g.addressable(enrolled_in_view=False, start=5.0, speaker="a")
+    assert g.snapshot(1.5) == before
+    assert WakeGate("never", 0.0).addressable(enrolled_in_view=False, start=0.0)
+    enrolled = WakeGate("unless_enrolled_in_view", 0.0)
+    assert enrolled.addressable(enrolled_in_view=True, start=0.0)
+    assert not enrolled.addressable(enrolled_in_view=False, start=0.0)

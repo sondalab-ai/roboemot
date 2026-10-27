@@ -498,4 +498,9 @@ def test_reused_recognizer_decodes_like_a_new_one(models):
                 aborted.add(asr.finish())
             assert reused & fresh, clip
             assert aborted & fresh, clip
-    assert asr.stats() == {"recognizers_built": built, "built_on_start": 0, "reset_failures": 0}
+    assert asr.stats() == {
+        "recognizers_built": built,
+        "built_on_start": 0,
+        "reset_failures": 0,
+        "decodes": 0,
+    }

@@ -87,6 +87,19 @@ class WakeGate:
             self._until = min(last_speech + self._window, self._opened + self._max)
             return True
 
+    def addressable(
+        self, *, enrolled_in_view: bool, start: float, speaker: str | None = None
+    ) -> bool:
+        """Whether an utterance starting at ``start`` would be addressed without the wake word,
+        its voice-at-face check aside: the wake word is not required, or it falls in the open
+        window (the same person if both are known). Nothing is counted or changed: the listener
+        asks it when speech starts (SPEC 8, Realtime speech route), ``decide`` still decides."""
+        with self._lock:
+            required = self._policy == "always" or (
+                self._policy == "unless_enrolled_in_view" and not enrolled_in_view
+            )
+            return not required or self._follow(start, speaker) == "window"
+
     def _follow(self, start: float, speaker: str | None) -> str:
         """Outcome of an utterance without the wake word: ``window`` when it falls in the open
         window (same person if both are known), else the ``rejected_*`` reason (lock held)."""
