@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 import io
 import json
+import re
 import shlex
 import subprocess
 import sys
@@ -647,13 +648,15 @@ def test_the_dry_run_says_vision_will_be_installed(offline, robot, daemon, capsy
         quiet_ui(yes=True),
         ROOT,
     )
-    out = capsys.readouterr().out
-    assert "would install the vision extra" in out and "voice and vision models" in out
+    out = flat(capsys.readouterr().out)
+    assert "○ Install the vision extra" in out and "voice and vision models" in out
 
 
 def test_the_dry_run_with_no_vision_does_not_mention_vision(offline, robot, daemon, capsys):
     inst.run_install(options(dry_run=True), quiet_ui(yes=True), ROOT)
-    assert "vision" not in capsys.readouterr().out
+    out = capsys.readouterr().out
+    # the Next: line repeats --no-vision; no step mentions vision
+    assert not [ln for ln in out.splitlines() if "vision" in ln and "Next:" not in ln]
 
 
 def test_not_enough_space_for_the_vision_weights_suggests_no_vision(offline, robot, daemon, capsys):
@@ -762,11 +765,11 @@ def test_an_app_config_the_owner_had_is_recorded_and_uninstall_removes_it_whole(
     robot.files[APP_YAML] = yaml.safe_dump({"schema_version": 1, "webui": {"port": 8080}})
     install()
     assert json.loads(robot.files[RECORD])["app_config"] == APP_YAML
-    assert "uninstall removes it whole" in capsys.readouterr().out
+    assert "uninstall removes it whole" in flat(capsys.readouterr().out)
     uninstall()
     assert APP_YAML not in robot.files
-    assert f"removed {APP_YAML}, including settings saved from the web UI" in (
-        capsys.readouterr().out
+    assert f"✓ Removed the app config {APP_YAML}, settings saved from the web UI included" in (
+        flat(capsys.readouterr().out)
     )
 
 
@@ -775,8 +778,8 @@ def test_the_uninstall_dry_run_names_the_app_config_it_would_remove(offline, rob
     install()
     capsys.readouterr()
     uninstall(dry_run=True)
-    assert f"would remove {APP_YAML}, including settings saved from the web UI" in (
-        capsys.readouterr().out
+    assert f"○ Remove the app config {APP_YAML}, settings saved from the web UI included" in (
+        flat(capsys.readouterr().out)
     )
     assert APP_YAML in robot.files
 
@@ -809,9 +812,10 @@ def test_an_install_dry_run_over_an_owner_app_config_names_the_keys_and_writes_n
     owner = yaml.safe_dump({"schema_version": 1, "webui": {"port": 8080}})
     robot.files[APP_YAML] = owner
     install(dry_run=True)
-    out = capsys.readouterr().out
+    out = flat(capsys.readouterr().out)
     assert (
-        f"would write {APP_YAML} (safety.allow_unmeasured_dynamics=true, voice.enabled=true" in out
+        f"○ Write the app config {APP_YAML} (safety.allow_unmeasured_dynamics=true, "
+        "voice.enabled=true" in out
     )
     assert robot.files[APP_YAML] == owner and RECORD not in robot.files
 
@@ -966,11 +970,20 @@ def test_models_can_be_declined_with_the_flag(offline, robot, daemon):
     assert robot.fetches == [] and VOICE_MODELS not in robot.dirs
 
 
-def test_the_models_question_defaults_to_yes(offline, robot, daemon, monkeypatch):
+def test_the_models_question_defaults_to_no(offline, robot, daemon, monkeypatch):
+    # main's Term rule: a confirmation that changes the robot defaults to no (it was yes)
     asked = []
-    monkeypatch.setattr(Ui, "confirm", lambda self, q, default: asked.append((q, default)) or True)
-    inst.run_install(options(start=False, startup=False, yes=False), quiet_ui(), ROOT)
-    assert [d for q, d in asked if q.startswith("Download the voice models")] == [True]
+    monkeypatch.setattr(
+        Ui,
+        "confirm",
+        lambda self, q, default, **kw: asked.append((q, default, kw)) or q.startswith("Download"),
+    )
+    monkeypatch.setattr(Ui, "ask_secret", lambda self, question: None)
+    # interactive: off a terminal the question is not asked at all (--models is required)
+    ui = Ui(interactive=True, assume_yes=False)
+    inst.run_install(options(start=False, startup=False, yes=False), ui, ROOT)
+    models = [(d, kw) for q, d, kw in asked if q.startswith("Download the voice models")]
+    assert models == [(False, {"flag": "--models"})]
 
 
 def test_not_enough_space_warns_and_skips_the_models_without_failing(
@@ -978,8 +991,8 @@ def test_not_enough_space_warns_and_skips_the_models_without_failing(
 ):
     robot.home_free_kb = (needed_mib() - 100) * 1024
     install()
-    out = capsys.readouterr().out
-    assert robot.fetches == [] and "skipped" in out and "MB free" in out
+    out = flat(capsys.readouterr().out)
+    assert robot.fetches == [] and "Skipped the models" in out and "MiB free" in out
     assert reachy.APPS_VENV and "roboemot-core" in robot.env
 
 
@@ -993,7 +1006,7 @@ def test_the_space_check_counts_the_extras(offline, robot, capsys):
     """R4 S3: the free-space floor comes from what is installed: vision adds its share."""
     robot.free_kb = (app_need_mb() + 1) * 1024
     with pytest.raises(
-        WizardError, match=f"need {app_need_mb((*ReachyMiniWireless.extras, 'vision'))} MB"
+        WizardError, match=f"{app_need_mb((*ReachyMiniWireless.extras, 'vision'))} MB needed"
     ):
         install(vision=True)
     assert "roboemot-core" not in robot.env
@@ -1006,7 +1019,7 @@ def test_a_new_apps_venv_counts_the_daemon_venv_tree(offline, robot, capsys):
     robot.daemon_venv_kb = 1_000 * 1024
     tree = 1_000 + int(1_000 * inst.ENV_DOWNLOAD_SHARE)
     robot.free_kb = (app_need_mb() + tree - 1) * 1024
-    with pytest.raises(WizardError, match=f"need {app_need_mb() + tree} MB"):
+    with pytest.raises(WizardError, match=f"{app_need_mb() + tree} MB needed"):
         install()
     assert robot.files == {} and not robot.apps_venv
 
@@ -1015,7 +1028,7 @@ def test_a_too_old_python_is_refused_before_the_running_app_is_stopped(offline, 
     """R4 S5: the interpreter, architecture and Python checks come before the auto-stop."""
     daemon.current = {"info": {"name": "roboemot"}, "state": "running"}
     robot.machine = "aarch64\n3.9"
-    with pytest.raises(WizardError, match="target Python is 3.9"):
+    with pytest.raises(WizardError, match="Target Python too old: Python 3.9"):
         install()
     assert STOP not in mutation_paths(daemon) and daemon.current["state"] == "running"
 
@@ -1059,7 +1072,7 @@ def test_unreadable_free_space_skips_the_models_and_the_install_goes_on(
 def test_a_failed_download_warns_and_the_install_goes_on(offline, robot, daemon, capsys):
     robot.fetch_fails = True
     install()
-    assert "were not downloaded" in capsys.readouterr().out
+    assert "Skipped the models voice models: the download failed" in flat(capsys.readouterr().out)
     assert "roboemot-core" in robot.env
 
 
@@ -1114,8 +1127,8 @@ def test_retired_model_files_are_reported_never_deleted(offline, robot, daemon, 
     robot.verified_models = voice_files(robot, 1.0)
     robot.retired_bytes = 10_513_214
     install()
-    out = capsys.readouterr().out
-    assert "11 MiB of retired model files" in out and "roboemot models prune" in out
+    out = flat(capsys.readouterr().out)
+    assert "Retired model files 11 MiB still on the robot" in out and "roboemot models prune" in out
     assert not any("prune" in f for f in robot.fetches)
 
 
@@ -1130,7 +1143,7 @@ def test_a_failed_download_is_tried_once_more(offline, robot, daemon, capsys):
 def test_dry_run_reports_the_model_sizes_and_downloads_nothing(offline, robot, daemon, capsys):
     install(dry_run=True)
     assert robot.fetches == [] and VOICE_MODELS not in robot.dirs
-    assert "would download the voice models" in capsys.readouterr().out
+    assert "○ Download the models voice models:" in flat(capsys.readouterr().out)
     assert robot.files == {}
 
 
@@ -1176,8 +1189,8 @@ def test_install_clears_the_uv_cache_before_installing(offline, robot, capsys):
     assert robot.commands.index(f"rm -rf {UV_CACHE}") < robot.commands.index(
         "mktemp -d /tmp/roboemot-install.XXXXXX"
     )
-    out = capsys.readouterr().out
-    assert "5.6G" in out and "cleared" in out
+    out = flat(capsys.readouterr().out)
+    assert f"✓ Cleared a cache {UV_CACHE} (5.6G)" in out
     assert UV_CACHE not in json.loads(robot.files[RECORD]).values()
 
 
@@ -1204,26 +1217,34 @@ def test_install_keeps_the_uv_cache_when_declined(offline, robot):
 
 
 @pytest.mark.parametrize("interactive", [True, False])
-def test_the_cache_prompt_defaults_to_yes_only_on_a_terminal(robot, monkeypatch, interactive):
+def test_the_cache_prompt_is_asked_only_on_a_terminal_and_defaults_to_no(
+    robot, monkeypatch, interactive
+):
+    # main's Term rule: a confirmation that changes the robot defaults to no (it was yes)
     robot.dirs.add(UV_CACHE)
     asked = []
-    monkeypatch.setattr(Ui, "confirm", lambda self, q, default: asked.append((q, default)) or False)
+    monkeypatch.setattr(
+        Ui, "confirm", lambda self, q, default, **kw: asked.append((q, default, kw)) or False
+    )
     ui = Ui(interactive=interactive, assume_yes=False)
     clear_caches(ui, robot, HOME, ReachyMiniWireless.clearable_caches, None, False)
     assert UV_CACHE in robot.dirs
-    assert [d for q, d in asked if UV_CACHE in q] == ([True] if interactive else [])
+    expected = [(False, {"flag": "--clear-caches"})] if interactive else []
+    assert [(d, kw) for q, d, kw in asked if UV_CACHE in q] == expected
 
 
 def test_an_unattended_run_without_consent_keeps_the_cache(offline, robot):
     robot.dirs.add(UV_CACHE)
-    inst.run_install(options(start=False, startup=False, yes=False), quiet_ui(), ROOT)
+    opts = options(start=False, startup=False, yes=False, piper=False, models=False)
+    inst.run_install(opts, quiet_ui(), ROOT)
     assert UV_CACHE in robot.dirs
 
 
 def test_the_flag_clears_the_cache_without_yes(offline, robot):
     robot.dirs.add(UV_CACHE)
+    opts = options(start=False, startup=False, yes=False, clear_caches=True)
     inst.run_install(
-        options(start=False, startup=False, yes=False, clear_caches=True), quiet_ui(), ROOT
+        Options(**{**opts.__dict__, "piper": False, "models": False}), quiet_ui(), ROOT
     )
     assert UV_CACHE not in robot.dirs
 
@@ -1249,7 +1270,7 @@ def test_install_dry_run_reports_the_uv_cache_and_clears_nothing(offline, robot,
     install(dry_run=True, clear_caches=True)
     assert UV_CACHE in robot.dirs
     assert not any(c.startswith("rm -rf " + UV_CACHE) for c in robot.commands)
-    assert f"would clear {UV_CACHE} (5.6G" in capsys.readouterr().out
+    assert f"○ Clear a cache {UV_CACHE} (5.6G" in flat(capsys.readouterr().out)
 
 
 @pytest.mark.parametrize(
@@ -1330,7 +1351,7 @@ def test_start_clears_an_earlier_error_then_starts(daemon, capsys):
         ("POST", "/api/apps/start-app/roboemot"),
     ]
     assert daemon.current["state"] == "running"
-    assert "ended with an error earlier (boom)" in capsys.readouterr().out
+    assert "roboemot had an error boom" in flat(capsys.readouterr().out)
 
 
 def test_start_reports_app_error(daemon):
@@ -1377,7 +1398,7 @@ def test_install_dry_run_touches_nothing(offline, robot, daemon, capsys):
     assert "✓ Dry run passed" in out and "Summary  " in out
     assert (
         "Next: python scripts/install_on_robot.py --host 127.0.0.1 --user pollen "
-        "--robot reachy-mini-wireless --dev --piper --yes"
+        "--robot reachy-mini-wireless --dev --piper --no-vision --models --yes"
     ) in out
     assert not [ln for ln in out.splitlines() if "✓" in ln and ("Create" in ln or "Add " in ln)]
 
@@ -1434,12 +1455,15 @@ def test_main_returns_1_and_prints_reason(offline, robot, capsys, monkeypatch):
     monkeypatch.setattr(inst, "app_config_text", lambda config: "voice: {enabled: true}\n")
     rc = inst.main(
         ["--host", "127.0.0.1", "--user", "pollen", "--robot", "reachy-mini-wireless", "--dev",
-         "--no-start", "--no-startup-app", "--no-piper"],
+         "--no-start", "--no-startup-app", "--no-piper", "--no-models"],
         root=ROOT,
     )  # fmt: skip
     assert rc == 1
-    assert "expected safety.allow_unmeasured_dynamics=True" in capsys.readouterr().out
-    assert "expected dev=True" in capsys.readouterr().err
+    # the error block is on stderr; the epic's app-config check replaces main's data/app.yaml
+    # check (expected dev=True), which went with the package-data config
+    err = flat(capsys.readouterr().err)
+    assert "App config not as asked" in err
+    assert "expected safety.allow_unmeasured_dynamics=True" in err
 
 
 # ---------------------------------------------------------------- uninstall
@@ -1848,7 +1872,14 @@ def typed(*lines: str) -> Ui:
     return Ui(interactive=True, assume_yes=False, read=answers(*lines))
 
 
-FULL = dict(host="127.0.0.1", user="pollen", robot="reachy-mini-wireless", dev=True, piper=False)
+FULL = dict(
+    host="127.0.0.1",
+    user="pollen",
+    robot="reachy-mini-wireless",
+    dev=True,
+    piper=False,
+    models=False,  # the epic's models step: its own flag, like --piper
+)
 
 
 @pytest.mark.parametrize(
@@ -1858,6 +1889,7 @@ FULL = dict(host="127.0.0.1", user="pollen", robot="reachy-mini-wireless", dev=T
         ("user", "--user"),
         ("dev", "--dev"),
         ("piper", "--piper"),
+        ("models", "--models"),
         ("start", "--start"),
         ("startup", "--startup-app"),
     ],
@@ -1947,7 +1979,7 @@ def test_a_prompt_with_no_answer_fails_with_a_try_line(offline, robot, daemon, m
 
 def test_the_dry_run_next_line_repeats_the_answered_dev_choice(offline, robot, daemon, capsys):
     opts = Options(host="127.0.0.1", user="pollen", robot=RID, piper=False, dry_run=True)
-    inst.run_install(opts, typed("y\n", "\n"), ROOT)  # dev: yes; store an API key: no
+    inst.run_install(opts, typed("y\n", "\n", "\n"), ROOT)  # dev: yes; models: no; API key: no
     assert f"--robot {RID} --dev --no-piper" in capsys.readouterr().out
 
 
@@ -1982,6 +2014,22 @@ def test_a_shared_package_change_without_a_terminal_stops_before_any_write(offli
     assert robot.copies == [] and robot.files == {} and robot.tmp_dirs == set()
     writes = ("rm ", "rmdir", "mkdir", "mktemp", "mv ")
     assert not [c for c in robot.commands if c.startswith(writes) or "&& mv" in c]
+
+
+def test_a_shared_package_change_stops_before_the_auto_stop_and_the_cache_step(
+    offline, robot, daemon
+):
+    """Merge of main into the epic: main's "shared packages checked before any write" also holds
+    for the epic's writes before pip (stopping its own running app, clearing a cache)."""
+    daemon.current = {"info": {"name": "roboemot"}, "state": "running"}
+    robot.dirs.add(UV_CACHE)
+    robot.conflict = {"numpy": "2.1.0"}
+    opts = Options(**FULL, start=False, startup=False, clear_caches=True)
+    with pytest.raises(MissingFlag, match="--yes"):
+        inst.run_install(opts, quiet_ui(), ROOT)
+    assert ("POST", "/api/apps/stop-current-app") not in mutation_paths(daemon)
+    assert daemon.current["state"] == "running" and UV_CACHE in robot.dirs
+    assert not [c for c in robot.commands if c.startswith("rm ")]
 
 
 @pytest.mark.parametrize("empty", ["host", "user"])
@@ -2451,12 +2499,10 @@ def test_install_dry_run_with_a_missing_apps_venv_reports_and_writes_nothing(
 ):
     fresh_robot(robot)
     inst.run_install(options(dry_run=True), quiet_ui(yes=True), ROOT)
-    out = capsys.readouterr().out
-    assert (
-        f"would create the environment {reachy.APPS_VENV}" in out and "reachy-mini==1.11.0" in out
-    )
-    assert "dependency check skipped" in out
-    assert "dry run passed" in out
+    out = flat(capsys.readouterr().out)
+    assert f"○ Create the environment {reachy.APPS_VENV} (reachy-mini==1.11.0)" in out
+    assert "Dependency check skipped" in out
+    assert "Dry run passed" in out
     assert not robot.apps_venv and robot.files == {} and robot.tmp_dirs == set()
     writes = ("rm ", "rmdir", "mkdir", "mktemp", "mv ")
     assert not [c for c in robot.commands if c.startswith(writes) or "&& mv" in c]
@@ -2480,7 +2526,7 @@ def test_install_stops_when_the_daemon_interpreter_is_missing_too(offline, robot
         "run",
         lambda c, **kw: "no" if c.startswith(f"test -x {DAEMON_PY}") else run(c, **kw),
     )
-    with pytest.raises(WizardError, match=f"neither is {DAEMON_PY}"):
+    with pytest.raises(WizardError, match=f"neither does {DAEMON_PY}"):
         install()
     assert robot.files == {}
 
@@ -2526,7 +2572,7 @@ def test_a_rerun_after_a_failed_pip_in_the_new_venv_finishes_it(offline, robot, 
     offline_pip[0] = False
     install()
     assert robot.env["reachy-mini"] == "1.11.0" and "roboemot-core" in robot.env
-    assert "finishing it" in capsys.readouterr().out
+    assert "Finishing the environment" in capsys.readouterr().out
     assert "reachy-mini" in json.loads(robot.files[RECORD])["env_baseline"]
     uninstall()
     assert snapshot(robot, daemon) == before and not robot.apps_venv
@@ -2579,7 +2625,7 @@ def test_the_dry_run_says_it_would_finish_the_venv_and_writes_nothing(
     capsys.readouterr()
     install(dry_run=True)
     out = capsys.readouterr().out
-    assert f"would finish the environment {reachy.APPS_VENV}" in out
+    assert f"○ Finish the environment {reachy.APPS_VENV}" in flat(out)
     assert robot.files == files and robot.env == env
 
 
@@ -2609,7 +2655,7 @@ def test_uninstall_dry_run_says_it_would_remove_the_created_venv(offline, robot,
     state = copy.deepcopy(snapshot(robot, daemon))
     uninstall(dry_run=True)
     assert snapshot(robot, daemon) == state
-    assert f"would delete the environment {reachy.APPS_VENV}" in capsys.readouterr().out
+    assert f"○ Delete the environment {reachy.APPS_VENV}" in flat(capsys.readouterr().out)
 
 
 def test_uninstall_leaves_a_venv_it_did_not_create(offline, robot, daemon):
@@ -2626,7 +2672,7 @@ def test_uninstall_with_the_venv_already_gone_still_cleans_up(offline, robot, da
     uninstall()
     assert RECORD not in robot.files and DATA not in robot.dirs
     assert not any(c.startswith(APPS_PY) for c in robot.commands[seen:])
-    assert "uninstalled" in capsys.readouterr().out
+    assert "✓ Uninstalled" in capsys.readouterr().out
 
 
 def test_uninstall_twice_after_removing_a_created_venv_is_harmless(offline, robot, daemon):
@@ -2711,7 +2757,8 @@ def test_uninstall_of_a_created_venv_with_replaced_packages_needs_no_internet(
     uninstall()
     assert snapshot(robot, daemon) == before
     assert not any(" -m pip uninstall" in c for c in robot.commands[start:])
-    assert "removed with the environment" in capsys.readouterr().out
+    out = flat(capsys.readouterr().out)
+    assert f"✓ Removed the app's packages with {reachy.APPS_VENV}" in out
 
 
 def test_uninstall_with_the_venv_gone_reports_no_drift(offline, robot, daemon, capsys):
@@ -2732,7 +2779,7 @@ def half_made(robot) -> None:
 
 def test_install_refuses_a_venv_folder_without_an_interpreter(offline, robot):
     half_made(robot)
-    with pytest.raises(WizardError, match="exists without an interpreter"):
+    with pytest.raises(WizardError, match="Environment without an interpreter"):
         install()
     assert robot.files == {} and not any(" -m venv " in c for c in robot.commands)
 
@@ -2775,10 +2822,10 @@ def test_long_steps_are_announced_and_pip_is_streamed(offline, robot, daemon, ca
     install()
     out = capsys.readouterr().out
     for step in (
-        "creating the apps venv",
-        "creating the Piper virtualenv",
-        "installing Python packages",
-        "reinstalling the app wheels",
+        "Creating the apps venv",
+        "Creating the Piper venv",
+        "Installing Python packages",
+        "Reinstalling the app wheels",
     ):
         assert f"{step}" in out
     assert out.count("can take minutes on the robot") >= 5
@@ -2792,8 +2839,8 @@ def test_uninstall_announces_the_pip_steps_it_streams(offline, robot, daemon, ca
     capsys.readouterr()
     uninstall()
     out = capsys.readouterr().out
-    assert "uninstalling Python packages\n" in out
-    assert "✓ uninstalling Python packages (" in out
+    assert "Uninstalling packages\n" in out
+    assert re.search(r"✓ Uninstalling packages +\d+s\n", out)
 
 
 def test_the_dry_run_streams_nothing(offline, robot, daemon):
@@ -2831,8 +2878,8 @@ def test_app_url_uses_the_configured_web_ui_port():
 
 def test_install_start_prints_the_web_ui_address(offline, robot, daemon, capsys):
     inst.run_install(options(start=True, startup=False), quiet_ui(yes=True), ROOT)
-    out = capsys.readouterr().out
-    assert f"web UI: http://127.0.0.1:{RoboEmotConfig().webui.port}" in out
+    out = flat(capsys.readouterr().out)
+    assert f"✓ Web UI http://127.0.0.1:{RoboEmotConfig().webui.port}" in out
     assert "python scripts/run_on_robot.py" in out
 
 
@@ -2846,16 +2893,17 @@ def test_run_starts_the_installed_app_without_ssh(offline, robot, daemon, capsys
     robot.commands.clear()
     robot.streamed.clear()
     assert run_mod.main(run_args()) == 0
-    out = capsys.readouterr().out
+    out = flat(capsys.readouterr().out)
     assert "RoboEmot run" in out and "RoboEmot installer" not in out
     assert daemon.current["state"] == "running"
-    assert f"web UI: http://127.0.0.1:{RoboEmotConfig().webui.port}" in out
+    assert f"✓ Web UI http://127.0.0.1:{RoboEmotConfig().webui.port}" in out
     assert robot.commands == [] and robot.streamed == []
 
 
 def test_run_says_to_install_first_when_the_app_is_missing(offline, robot, daemon, capsys):
     assert run_mod.main(run_args()) == 1
-    assert "not installed: run the installer first" in capsys.readouterr().out
+    err = flat(capsys.readouterr().err)  # the Term error block
+    assert "roboemot is not installed run the installer first" in err
     assert daemon.mutations == []
 
 
@@ -2864,8 +2912,8 @@ def test_run_dry_run_changes_nothing(offline, robot, daemon, capsys):
     daemon.current = {"info": {"name": "conversation"}, "state": "running"}
     before = list(daemon.mutations)
     assert run_mod.main(run_args("--dry-run")) == 0
-    out = capsys.readouterr().out
-    assert "would stop conversation" in out and "dry run passed" in out
+    out = flat(capsys.readouterr().out)
+    assert "○ Stop conversation" in out and "✓ Dry run passed" in out
     assert daemon.mutations == before
 
 
@@ -2873,7 +2921,7 @@ def test_run_reports_the_mobile_app_holding_the_robot(offline, robot, daemon, ca
     install()
     daemon.lock = {"state": "remote_session", "holder_name": "phone"}
     assert run_mod.main(run_args()) == 1
-    assert "mobile app holds the robot (phone); close it first" in capsys.readouterr().out
+    assert "mobile app holds the robot (phone); close it first" in flat(capsys.readouterr().err)
 
 
 # ---------------------------------------------------------------- fix round 1
@@ -2907,15 +2955,16 @@ def test_run_dry_run_reports_that_it_would_refuse(offline, robot, daemon, capsys
     hold_slot(daemon)
     capsys.readouterr()
     assert run_mod.main(run_args("--dry-run")) == 0
-    out = capsys.readouterr().out
-    assert "would refuse: the Reachy mobile app holds the robot" in out
+    out = flat(capsys.readouterr().out)
+    assert "Would refuse the Reachy mobile app holds the robot" in out
     assert daemon.current is None
 
 
 def test_installer_dry_run_reports_that_it_would_refuse(offline, robot, daemon, capsys):
     hold_slot(daemon)
     inst.run_install(options(dry_run=True), quiet_ui(yes=True), ROOT)
-    assert "would refuse: the Reachy mobile app holds the robot" in capsys.readouterr().out
+    out = flat(capsys.readouterr().out)
+    assert "Start would be refused the Reachy mobile app holds the robot" in out
 
 
 def test_install_with_a_held_slot_finishes_warns_and_points_to_the_run_script(
@@ -2923,10 +2972,10 @@ def test_install_with_a_held_slot_finishes_warns_and_points_to_the_run_script(
 ):
     hold_slot(daemon)
     inst.run_install(options(start=True, startup=False), quiet_ui(yes=True), ROOT)
-    out = capsys.readouterr().out
-    assert "roboemot not started: the Reachy mobile app holds the robot" in out
+    out = flat(capsys.readouterr().out)
+    assert "Did not start roboemot the Reachy mobile app holds the robot" in out
     assert "python scripts/run_on_robot.py" in out
-    assert "installed" in out and "RoboEmot" in out
+    assert "✓ Installed roboemot" in out and "RoboEmot" in out
     assert daemon.current is None and RECORD in robot.files
 
 
@@ -2934,10 +2983,10 @@ def test_a_new_apps_venv_prints_one_check_line(offline, robot, daemon, capsys):
     fresh_robot(robot)
     install()
     out = capsys.readouterr().out
-    assert f"created {reachy.APPS_VENV} with reachy-mini==1.11.0" in out
-    assert "✓ creating the apps venv" not in out
-    first = out.index("installing Python packages")
-    assert "✓ installing Python packages" not in out[first : out.index("created /venvs")]
+    assert f"✓ Created the apps venv {reachy.APPS_VENV} with reachy-mini==1.11.0" in flat(out)
+    assert "✓ Creating the apps venv" not in out
+    first = out.index("Installing Python packages")
+    assert "✓ Installing Python packages" not in out[first : out.index("Created the apps venv")]
 
 
 def test_uninstall_pip_is_announced_without_the_minutes_note(offline, robot, daemon, capsys):
@@ -2945,8 +2994,8 @@ def test_uninstall_pip_is_announced_without_the_minutes_note(offline, robot, dae
     capsys.readouterr()
     uninstall()
     out = capsys.readouterr().out
-    assert "uninstalling Python packages\n" in out
-    assert "uninstalling Python packages (can take" not in out
+    assert "Uninstalling packages\n" in out
+    assert "Uninstalling packages (can take" not in out
 
 
 # ------------------------------------------------------- auto-stop of our own running app
@@ -2963,8 +3012,8 @@ def test_install_stops_its_own_running_app_before_changing_packages(offline, rob
     daemon.current = {"info": {"name": "roboemot"}, "state": "running"}
     install()
     assert STOP in mutation_paths(daemon)
-    assert "stopped roboemot before installing: a running process keeps the old code" in (
-        capsys.readouterr().out
+    assert "✓ Stopped roboemot before installing: a running process keeps the old code" in (
+        flat(capsys.readouterr().out)
     )
     pip_at = next(i for i, c in enumerate(robot.commands) if " -m pip install" in c)
     assert pip_at > 0 and daemon.current is None
@@ -2985,36 +3034,38 @@ def test_install_with_no_app_running_stops_nothing(offline, robot, daemon):
 def test_dry_run_reports_that_it_would_stop_its_own_app(offline, robot, daemon, capsys):
     daemon.current = {"info": {"name": "roboemot"}, "state": "running"}
     inst.run_install(options(dry_run=True), quiet_ui(yes=True), ROOT)
-    assert "would stop roboemot before installing" in capsys.readouterr().out
+    assert "○ Stop roboemot before installing" in flat(capsys.readouterr().out)
     assert daemon.mutations == [] and daemon.current["info"]["name"] == "roboemot"
 
 
-def test_start_prompt_defaults_to_yes_after_the_auto_stop(offline, robot, daemon):
+def test_start_prompt_keeps_its_default_after_the_auto_stop(offline, robot, daemon):
+    # the auto-stop does not answer the start question; main's Term rule makes its default no
     daemon.current = {"info": {"name": "roboemot"}, "state": "running"}
     asked: list[tuple[str, bool]] = []
     ui = quiet_ui(yes=True)
-    ui.confirm = lambda question, default: asked.append((question, default)) or True
+    ui.confirm = lambda question, default, **kw: asked.append((question, default)) or True
     inst.run_install(options(startup=False, yes=True), ui, ROOT)
-    assert ("Start roboemot now?", True) in asked
+    assert ("Start roboemot now?", False) in asked
     assert daemon.current["info"]["name"] == "roboemot"
 
 
 def test_a_failure_after_the_auto_stop_says_how_to_start_it_again(offline, robot, daemon, capsys):
     daemon.current = {"info": {"name": "roboemot"}, "state": "running"}
     robot.conflict = {"numpy": "2.1.0"}
-    ui = quiet_ui()
-    ui.confirm = lambda question, default: "shared packages" not in question
+    # interactive: off a terminal a shared-package change stops before the auto-stop (main)
+    ui = Ui(interactive=True, assume_yes=False)
+    ui.confirm = lambda question, default, **kw: "shared packages" not in question
     with pytest.raises(WizardError, match="shared packages left as they were"):
         inst.run_install(options(start=False, startup=False, yes=False), ui, ROOT)
-    out = capsys.readouterr().out
-    assert "roboemot was stopped before installing" in out
+    out = flat(capsys.readouterr().out)
+    assert "roboemot is stopped it was stopped before installing" in out
     assert "python scripts/run_on_robot.py" in out
 
 
 def test_a_failure_without_an_auto_stop_prints_no_start_hint(offline, robot, daemon, capsys):
     robot.conflict = {"numpy": "2.1.0"}
-    ui = quiet_ui()
-    ui.confirm = lambda question, default: "shared packages" not in question
+    ui = Ui(interactive=True, assume_yes=False)
+    ui.confirm = lambda question, default, **kw: "shared packages" not in question
     with pytest.raises(WizardError):
         inst.run_install(options(start=False, startup=False, yes=False), ui, ROOT)
     assert "was stopped before installing" not in capsys.readouterr().out
@@ -3042,7 +3093,7 @@ def test_dry_run_counts_the_stop_once(offline, robot, daemon, capsys):
     daemon.current = {"info": {"name": "roboemot"}, "state": "running"}
     inst.run_install(options(dry_run=True), quiet_ui(yes=True), ROOT)
     out = capsys.readouterr().out
-    assert out.count("would stop roboemot") == 1
+    assert out.count("○ Stop roboemot") == 1
 
 
 # ---------------------------------------------------------------- run --restart
@@ -3064,7 +3115,7 @@ def test_run_restart_restarts_a_running_roboemot_and_prints_the_web_ui(
     out = capsys.readouterr().out
     assert RESTART in daemon.mutations
     assert daemon.current == {"info": {"name": "roboemot"}, "state": "running"}
-    assert f"web UI: http://127.0.0.1:{RoboEmotConfig().webui.port}" in out
+    assert f"✓ Web UI http://127.0.0.1:{RoboEmotConfig().webui.port}" in flat(out)
     assert not any(m[1].startswith("/api/apps/start-app/") for m in daemon.mutations)
 
 
@@ -3111,8 +3162,8 @@ def test_run_dry_run_restart_reports_and_changes_nothing(offline, robot, daemon,
     before = list(daemon.mutations)
     capsys.readouterr()
     assert run_mod.main(run_args("--dry-run", "--restart")) == 0
-    out = capsys.readouterr().out
-    assert "would restart roboemot" in out and "dry run passed" in out
+    out = flat(capsys.readouterr().out)
+    assert "○ Restart roboemot" in out and "✓ Dry run passed" in out
     assert daemon.mutations == before
 
 
@@ -3124,9 +3175,9 @@ def test_run_restart_whose_start_fails_after_the_stop_says_roboemot_is_stopped(
     daemon.restart_start_fails = True
     capsys.readouterr()
     assert run_mod.main(run_args("--restart")) == 1
-    out = capsys.readouterr().out
-    assert "roboemot is stopped" in out and "without --restart" in out
-    assert "Another app holds the robot" in out
+    err = flat(capsys.readouterr().err)  # the Term error block
+    assert "roboemot is stopped" in err and "without --restart" in err
+    assert "Another app holds the robot" in err
 
 
 def test_run_restart_that_times_out_waits_for_the_new_start(
@@ -3138,8 +3189,8 @@ def test_run_restart_that_times_out_waits_for_the_new_start(
     daemon.restart_answer_s = 1.0
     capsys.readouterr()
     assert run_mod.main(run_args("--restart")) == 0
-    out = capsys.readouterr().out
-    assert "still restarting" in out and "roboemot is running" in out
+    out = flat(capsys.readouterr().out)
+    assert "still restarting" in out and "✓ Started roboemot running" in out
     assert daemon.current == {"info": {"name": "roboemot"}, "state": "running"}
 
 
@@ -3149,7 +3200,7 @@ def test_run_restart_refuses_while_the_mobile_app_holds_the_robot(offline, robot
     hold_slot(daemon)
     before = list(daemon.mutations)
     assert run_mod.main(run_args("--restart")) == 1
-    assert "mobile app holds the robot (phone)" in capsys.readouterr().out
+    assert "mobile app holds the robot (phone)" in flat(capsys.readouterr().err)
     assert daemon.mutations == before
 
 
@@ -3160,12 +3211,13 @@ def test_the_installer_prints_the_web_ui_address_with_the_configured_port(
     robot.dirs |= {f"{HOME}/.local", f"{HOME}/.local/share", DATA}
     robot.files[APP_YAML] = yaml.safe_dump({"schema_version": 1, "webui": {"port": 8080}})
     inst.run_install(options(start=True, startup=False), quiet_ui(yes=True), ROOT)
-    assert "web UI: http://127.0.0.1:8080" in capsys.readouterr().out
+    assert "✓ Web UI http://127.0.0.1:8080" in flat(capsys.readouterr().out)
 
 
 def test_without_a_port_in_the_app_config_the_default_is_printed(offline, robot, daemon, capsys):
     inst.run_install(options(start=True, startup=False), quiet_ui(yes=True), ROOT)
-    assert f"web UI: http://127.0.0.1:{RoboEmotConfig().webui.port}" in capsys.readouterr().out
+    port = RoboEmotConfig().webui.port
+    assert f"✓ Web UI http://127.0.0.1:{port}" in flat(capsys.readouterr().out)
 
 
 # ------------------------------------------------------------------ realtime extra (SR-4)
@@ -3184,8 +3236,8 @@ def test_the_dry_run_adds_no_package_when_websockets_is_already_there(
     assert robot.env["websockets"] == "14.2"  # reachy-mini requires it
     inst.run_install(options(dry_run=True), quiet_ui(yes=True), ROOT)
     out = capsys.readouterr().out
-    assert "would install the realtime extra (websockets 14.2, already present)" in out
-    added = [line for line in out.splitlines() if "would add" in line]
+    assert "○ Install the realtime extra websockets 14.2, already present" in flat(out)
+    added = [line for line in out.splitlines() if "○ Add dependencies" in line]
     assert added and not any("websockets" in line for line in added)
     assert robot.env["websockets"] == "14.2" and "roboemot-core" not in robot.env
 
@@ -3194,8 +3246,8 @@ def test_the_dry_run_names_websockets_when_it_would_be_added(offline, robot, dae
     del robot.env["websockets"]
     inst.run_install(options(dry_run=True), quiet_ui(yes=True), ROOT)
     out = capsys.readouterr().out
-    assert "would install the realtime extra (websockets, not present yet)" in out
-    assert any("websockets 15.0.1" in line for line in out.splitlines() if "would add" in line)
+    assert "○ Install the realtime extra websockets, not present yet" in flat(out)
+    assert "websockets 15.0.1" in flat(out).split("○ Add dependencies", 1)[1]
 
 
 def test_the_dry_run_flags_a_websockets_too_old_for_the_extra(offline, robot, daemon, capsys):
@@ -3205,7 +3257,7 @@ def test_the_dry_run_flags_a_websockets_too_old_for_the_extra(offline, robot, da
     inst.run_install(options(dry_run=True), quiet_ui(yes=True), ROOT)
     out = capsys.readouterr().out
     assert "already present" not in out
-    assert "would install the realtime extra (websockets 12.0 present, needs >=13,<16)" in out
+    assert "○ Install the realtime extra websockets 12.0 present, needs >=13,<16" in flat(out)
 
 
 @pytest.mark.parametrize(

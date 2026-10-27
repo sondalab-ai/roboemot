@@ -722,7 +722,7 @@ def install_piper(
         remote.copy([lock], tmp)
         if recreate:
             remote.run(f"mkdir -p -m 700 {shlex.quote(posixpath.dirname(venv))}")
-            with ui.progress("Creating the Piper venv", report=False, slow=False):
+            with ui.progress("Creating the Piper venv", report=False):
                 remote.run(f"{shlex.quote(platform.python)} -m venv {shlex.quote(venv)}")
             ui.ok("Created the Piper venv", venv)
         result = RemotePython(remote, python, ui).install_locked(f"{tmp}/{lock.name}", report=False)

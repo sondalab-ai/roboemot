@@ -155,7 +155,7 @@ class ReachyMiniWireless:
         """Create the apps venv the way the daemon does and install ``plan`` (from
         ``plan_env``) into it. Also finishes a venv whose earlier creation stopped: ``venv`` over
         an existing one keeps it, and pip installs what is missing."""
-        with ui.progress("Creating the apps venv", report=False, slow=False):
+        with ui.progress("Creating the apps venv", report=False):
             remote.run(f"{shlex.quote(DAEMON_PYTHON)} -m venv {shlex.quote(APPS_VENV)}")
         result = RemotePython(remote, self.python, ui).install([plan], None, report=False)
         if not result.ok:
@@ -293,7 +293,9 @@ class ReachyMiniWireless:
             self._await_own(ui)
             return
         raise WizardError(
-            "Restart failed", f"{error}; {APP_NAME} is stopped", "python scripts/run_on_robot.py"
+            "Restart failed",
+            f"{error}; {APP_NAME} is stopped: start it without --restart",
+            "python scripts/run_on_robot.py",
         )
 
     def _clear_errored_app(self, ui: Ui) -> None:
@@ -304,7 +306,7 @@ class ReachyMiniWireless:
         if not current or current["state"] != "error":
             return
         name = current["info"]["name"]
-        ui.warn(f"{name} ended with an error", current.get("error") or "no detail")
+        ui.warn(f"{name} had an error", current.get("error") or "no detail")
         with _wizard_errors():
             self._api().stop_current_app()
         ui.ok(f"Cleared {name}", "stopped its errored run")
