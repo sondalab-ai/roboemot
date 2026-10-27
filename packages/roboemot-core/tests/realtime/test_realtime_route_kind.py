@@ -12,7 +12,6 @@ import test_llm_conformance as conformance
 import test_llm_router as lr
 import test_secret_store as guard
 import test_webui_route_api as route_api
-import test_webui_routes as web_routes
 from roboemot import cli
 from roboemot.config import GuardrailError
 from roboemot.config.schema import LLMRoute, SafetyConfig
@@ -69,19 +68,6 @@ def test_the_cli_check_refuses_a_realtime_route(app_yaml, monkeypatch, capsys): 
     cli_check.serve(monkeypatch, fake)
     assert cli.main(cli_check.argv(app_yaml)) == 1
     assert "realtime route" in capsys.readouterr().err and fake.bodies == []
-
-
-def test_the_web_check_of_a_realtime_route_is_409_route_kind(tmp_path):
-    cfg = web_routes.make_cfg(route=web_routes.ROUTE | {"kind": "realtime"})
-    fake = conformance.Fake()
-    srv, client = web_routes.serve(tmp_path, cfg, web_routes.checker_for(cfg, fake))
-    try:
-        assert client.request("GET", "/api/routes").json["routes"][0]["kind"] == "realtime"
-        resp = client.request("POST", "/api/routes/lan/check", {})
-        assert resp.status == 409 and resp.json == {"error": "route_kind"}
-        assert fake.bodies == []
-    finally:
-        srv.stop()
 
 
 # ------------------------------------------------------------------- web UI and the secret guard

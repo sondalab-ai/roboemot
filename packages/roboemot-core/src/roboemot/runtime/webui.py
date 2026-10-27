@@ -79,6 +79,7 @@ def start_webui(
                 paths.route_checks_path(cfg.data_dir),
                 router=host.route_check_router,
                 names=host.name_source,
+                realtime_provider=lambda: p.realtime_provider,  # the runtime's own (SPEC 8)
             ),
             live=live,
         )

@@ -1,4 +1,5 @@
-"""LLM routes for the web UI: list them and run the conformance test (SPEC 8, 12).
+"""LLM routes for the web UI: list them and run the conformance test of a chat route or the
+realtime check of a ``kind: realtime`` route (``realtime.check``) (SPEC 8, 12).
 
 The check is advisory in v1: the last report per route is kept in memory and in a small JSON
 file in the data folder, and shown next to the route; it does not gate the route. It runs on
@@ -37,6 +38,8 @@ from ..llm.conformance import (
 )
 from ..llm.pseudonyms import NameSource
 from ..llm.router import SECRET, Router
+from ..realtime.check import check_realtime_route
+from ..realtime.session import DirectSession, SessionProvider
 from ..redact import secret_shaped
 from ..secret_store import SecretStore
 
@@ -56,7 +59,8 @@ class RouteChecker:
     without one, a private router is kept for the life of this object, so budgets still add up
     across checks. ``names`` (a :class:`NameSource`) gives a route that is not local the same
     aliases as the conversation does (SPEC 8, Pseudonyms) when ``privacy.pseudonyms_to_cloud``
-    is on.
+    is on. ``realtime_provider`` returns the robot's session provider (the one the runtime
+    built); without it, direct mode uses :class:`DirectSession` and platform mode has none.
     """
 
     def __init__(
@@ -67,8 +71,10 @@ class RouteChecker:
         router: Callable[[], Router | None] = lambda: None,
         http_client_factory: Callable[[], httpx.AsyncClient] | None = None,
         names: NameSource | None = None,
+        realtime_provider: Callable[[], SessionProvider | None] | None = None,
     ) -> None:
         self.cfg, self.store, self._router = cfg, store, router
+        self._realtime_provider = realtime_provider
         self._names = names
         self._factory = http_client_factory
         self._private: Router | None = None
@@ -106,8 +112,9 @@ class RouteChecker:
     def start(self, name: str) -> None:
         """Start the test of route ``name`` on a thread and return at once.
 
-        Raises ``KeyError`` (unknown route), ``RouteKindUnsupported`` (a realtime route: the chat
-        checks do not apply), ``RouteKeyUnavailable`` (its secret cannot be read) and
+        A chat route gets the conformance test, a realtime route the realtime check. Raises
+        ``KeyError`` (unknown route), ``RouteKindUnsupported`` (another kind),
+        ``RouteKeyUnavailable`` (its secret cannot be read) and
         ``RouteBudgetExhausted`` (nothing is sent in any of these cases) and ``RouteBusy`` (a check
         is running).
         """
@@ -115,7 +122,7 @@ class RouteChecker:
         route = next((r for r in cfg.llm_routes if r.name == name), None)
         if route is None:
             raise KeyError(name)
-        if route.kind != "chat":
+        if route.kind not in ("chat", "realtime"):
             raise RouteKindUnsupported(f"route {name} is a {route.kind} route")
         with self._lock:
             if self._running is not None:
@@ -149,6 +156,12 @@ class RouteChecker:
         """Thread body: run the check under the deadline and keep the outcome, whatever it is."""
         error = ""
         try:
+            if route.kind == "realtime":
+                realtime = check_realtime_route(
+                    route, cfg, router=router, provider=self._provider(cfg)
+                )
+                self._keep(route, realtime.to_dict())
+                return
             if self._names is None and cfg.privacy.pseudonyms_to_cloud:
                 log.warning("route check: pseudonyms are on but no name source is wired")
             pseudonyms = self._names.for_config(cfg) if self._names else None
@@ -179,10 +192,20 @@ class RouteChecker:
             report = RouteReport(
                 route.name, route.model, route_endpoint(route), _now_iso(), error=error
             )
+        self._keep(route, report.to_dict())
+
+    def _keep(self, route: LLMRoute, report: dict[str, Any]) -> None:
+        """Store ``report`` as the route's last one; the check is over."""
         with self._lock:
-            self._reports[route.name] = report.to_dict()
+            self._reports[route.name] = report
             self._save()
             self._running = None
+
+    def _provider(self, cfg: RoboEmotConfig) -> SessionProvider | None:
+        """The session provider of the realtime check (see the class docstring)."""
+        if self._realtime_provider is not None:
+            return self._realtime_provider()
+        return DirectSession() if cfg.voice.realtime_route.mode == "direct" else None
 
     def _current_report(self, route: LLMRoute) -> dict[str, Any] | None:
         report = self._reports.get(route.name)

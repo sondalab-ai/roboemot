@@ -337,3 +337,91 @@ def test_the_chat_check_of_a_realtime_route_points_to_the_realtime_check(tmp_pat
     app = app_file(tmp_path, "http://127.0.0.1:9/v1")
     assert cli.main(["llm", "check", "rt", "--app", app]) == 1
     assert "roboemot realtime check rt" in capsys.readouterr().err
+
+
+# ----------------------------------------------------------------- web UI Routes tab
+
+
+def web_checker(cfg: RoboEmotConfig, store=None, **kw):
+    from roboemot.webui.routes import RouteChecker
+
+    return RouteChecker(lambda: cfg, store, **kw)
+
+
+def served(tmp_path, cfg, checker):
+    import test_webui_routes as web_routes
+
+    return web_routes.serve(tmp_path, cfg, checker)
+
+
+def test_the_routes_tab_runs_the_realtime_check_and_lists_its_report(tmp_path):
+    """SR-5 replaces the 409 route_kind: the same admin-only endpoint runs the realtime check."""
+    import test_webui_routes as web_routes
+
+    with FakeServer(delete_reply="deleted") as server:
+        cfg = make_cfg(make_route(server.http_base()), webui={"bind": "127.0.0.1", "port": 0})
+        checker = web_checker(cfg, tmp_path / "route_checks.json")
+        srv, client = served(tmp_path, cfg, checker)
+        try:
+            resp = client.request("POST", "/api/routes/rt/check", {})
+            assert resp.status == 202 and resp.json == {"running": True}
+            entry = web_routes.finish(client)
+        finally:
+            srv.stop()
+        kinds = [e["type"] for e in server.received]
+    report = entry["last_check"]
+    assert report["kind"] == "realtime" and report["ok"] is True
+    assert report["connect_host"] == "127.0.0.1" and report["item_delete"] == "accepted"
+    assert report["update_seen"] is True and report["first_audio_ms"] is not None
+    names = {c["name"] for c in report["checks"]}
+    assert names == {check.CONNECT, check.FIRST_AUDIO, check.ITEM_DELETE}
+    assert "input_audio_buffer.append" not in kinds
+    saved = (tmp_path / "route_checks.json").read_text()
+    for leaked in ("/v1", REPLY_TEXT):
+        assert leaked not in json.dumps(report) and leaked not in saved
+
+
+def test_the_routes_tab_realtime_check_needs_the_admin_session(tmp_path):
+    from test_webui import Client
+
+    with FakeServer() as server:
+        cfg = make_cfg(make_route(server.http_base()), webui={"bind": "127.0.0.1", "port": 0})
+        srv, _ = served(tmp_path, cfg, web_checker(cfg))
+        try:
+            resp = Client(srv.port).request("POST", "/api/routes/rt/check", {})
+            assert resp.status == 401
+        finally:
+            srv.stop()
+        assert server.requests == []
+
+
+def test_the_routes_tab_uses_the_robots_session_provider_in_platform_mode(tmp_path):
+    import test_webui_routes as web_routes
+
+    with FakeServer(delete_reply="deleted") as server:
+        provider = Allocator(f"ws://127.0.0.1:{server.port}/v1/realtime?{QUERY}")
+        route = make_route(f"http://localhost:{server.port}/session")
+        cfg = make_cfg(route, mode="platform", webui={"bind": "127.0.0.1", "port": 0})
+        srv, client = served(tmp_path, cfg, web_checker(cfg, realtime_provider=lambda: provider))
+        try:
+            assert client.request("POST", "/api/routes/rt/check", {}).status == 202
+            report = web_routes.finish(client)["last_check"]
+        finally:
+            srv.stop()
+    assert provider.asked == 1
+    assert report["allocator_host"] == "localhost" and report["connect_host"] == "127.0.0.1"
+    assert QUERY not in json.dumps(report)
+
+
+def test_the_routes_tab_in_platform_mode_without_a_provider_reports_it(tmp_path):
+    import test_webui_routes as web_routes
+
+    route = make_route("https://alloc.example.org/session", locality="cloud")
+    cfg = make_cfg(route, mode="platform", webui={"bind": "127.0.0.1", "port": 0})
+    srv, client = served(tmp_path, cfg, web_checker(cfg))
+    try:
+        assert client.request("POST", "/api/routes/rt/check", {}).status == 202
+        report = web_routes.finish(client)["last_check"]
+    finally:
+        srv.stop()
+    assert report["error"] == "provider" and report["ok"] is False
