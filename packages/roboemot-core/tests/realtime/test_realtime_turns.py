@@ -121,12 +121,18 @@ def test_the_tool_round_cap(rigs):
         rig.turn()
         creates = response_creates(srv)
         assert [c["response"]["tool_choice"] for c in creates] == ["auto", "none"]
-        outputs = [
-            e["item"]["output"]
-            for e in srv.of("conversation.item.create")
-            if e["item"]["type"] == "function_call_output"
-        ]
-        assert "too_many_rounds" in outputs[-1]
+
+        def outputs() -> list[str]:
+            return [
+                e["item"]["output"]
+                for e in srv.of("conversation.item.create")
+                if e["item"]["type"] == "function_call_output"
+            ]
+
+        # The turn ends once the capped call's output is queued on the client; the server may
+        # not have received it yet.
+        assert wait_for(lambda: len(outputs()) == 2)
+        assert "too_many_rounds" in outputs()[-1]
         assert env.played == ["joy"]  # the first call ran, the one past the cap did not
 
 
