@@ -45,7 +45,12 @@ def test_close_silence_must_exceed_the_server_silence():
 def test_server_silence_must_cover_the_local_end_silence():
     with pytest.raises(ValidationError, match="server_silence_ms"):
         RoboEmotConfig.model_validate(
-            {"voice": {"vad": {"end_silence_ms": 700}, "realtime_route": {"server_silence_ms": 600}}}
+            {
+                "voice": {
+                    "vad": {"end_silence_ms": 700},
+                    "realtime_route": {"server_silence_ms": 600},
+                }
+            }
         )
     cfg = RoboEmotConfig.model_validate(
         {"voice": {"vad": {"end_silence_ms": 600}, "realtime_route": {"server_silence_ms": 600}}}

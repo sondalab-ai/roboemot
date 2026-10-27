@@ -74,7 +74,8 @@ NO_PROXY: dict[str, Any] = (
 AUTH_HEADER = "Authorization"
 BEARER = "Bearer "
 CLOSE_TOO_BIG = 1009  # RFC 6455: message too big
-BASE64_CHARS, BASE64_BYTES = 4, 3  # every 4 base64 characters carry 3 bytes
+BASE64_CHARS = 4  # every 4 base64 characters
+BASE64_BYTES = 3  # carry 3 bytes
 EVENT_PREFIX = "ev_"  # the client's own event ids (a refusal echoes the one it refuses)
 # the server events of a response (they move the response watchdog)
 RESPONSE_EVENTS = (

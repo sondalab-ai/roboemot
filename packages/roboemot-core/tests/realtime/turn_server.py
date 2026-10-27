@@ -19,6 +19,13 @@ Scripts (``scripts``, used in order; the last one repeats):
 
 ``unrequested`` sends a ``response.created`` nobody asked for right after ``session.updated``.
 A ``response.cancel`` stops the reply in progress with ``response.done`` ``cancelled``.
+
+The server's VAD (``heard``, one list of transcripts per committed burst, the last one
+repeats) answers each ``input_audio_buffer.commit``: one ``speech_started`` and
+``speech_stopped`` per transcript (a split when there are several), then their
+``transcription.completed`` after ``transcript_delay_s``; an empty list hears nothing.
+``vad_answers`` (when set) makes it answer by itself, as a backend that ignores
+``create_response: false`` would.
 """
 
 from __future__ import annotations
@@ -57,6 +64,9 @@ class TurnServer(FakeServer):
         tool_name: str = "stop_talking",
         tool_args: str = "{}",
         unrequested: bool = False,
+        heard: list[list[str]] | None = None,
+        transcript_delay_s: float = 0.0,
+        vad_answers: bool = False,
         **kw: Any,
     ) -> None:
         super().__init__("normal", **kw)
@@ -65,6 +75,10 @@ class TurnServer(FakeServer):
         self.transcript, self.usage = transcript, usage
         self.tool_name, self.tool_args = tool_name, tool_args
         self.unrequested = unrequested
+        self.heard = heard if heard is not None else [["ciao Neve come stai"]]
+        self.transcript_delay_s = transcript_delay_s
+        self.vad_answers = vad_answers
+        self.bursts = 0
         self.responses = 0
         self._cancel: asyncio.Event | None = None
         self._tasks: set[asyncio.Task] = set()
@@ -74,6 +88,10 @@ class TurnServer(FakeServer):
 
     def of(self, kind: str) -> list[dict[str, Any]]:
         return [e for e in self.received if e.get("type") == kind]
+
+    def audio(self) -> bytes:
+        """Every PCM byte appended so far."""
+        return b"".join(base64.b64decode(e["audio"]) for e in self.of("input_audio_buffer.append"))
 
     async def _handler(self, ws: ServerConnection) -> None:
         self.connections.append(ws)
@@ -100,6 +118,31 @@ class TurnServer(FakeServer):
                 task.add_done_callback(self._tasks.discard)
             elif kind == "response.cancel" and self._cancel is not None:
                 self._cancel.set()
+            elif kind == "input_audio_buffer.commit":
+                texts = self.heard[min(self.bursts, len(self.heard) - 1)]
+                self.bursts += 1
+                task = asyncio.ensure_future(self._hear(ws, self.bursts, texts))
+                self._tasks.add(task)
+                task.add_done_callback(self._tasks.discard)
+
+    async def _hear(self, ws: ServerConnection, burst: int, texts: list[str]) -> None:
+        items = [f"in_{burst}_{i}" for i in range(len(texts))]
+        for item in items:
+            await self._send(ws, {"type": "input_audio_buffer.speech_started", "item_id": item})
+            await self._send(ws, {"type": "input_audio_buffer.speech_stopped", "item_id": item})
+        if self.transcript_delay_s:
+            await asyncio.sleep(self.transcript_delay_s)
+        for item, text in zip(items, texts, strict=True):
+            await self._send(
+                ws,
+                {
+                    "type": "conversation.item.input_audio_transcription.completed",
+                    "item_id": item,
+                    "transcript": text,
+                },
+            )
+        if self.vad_answers and items:
+            await self._send(ws, {"type": "response.created", "response": {"id": f"auto_{burst}"}})
 
     async def _respond(
         self, ws: ServerConnection, script: str, cancel: asyncio.Event, event_id: str | None
