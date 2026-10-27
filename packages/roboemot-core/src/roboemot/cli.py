@@ -252,6 +252,7 @@ def _realtime(args: argparse.Namespace) -> int:
         known = ", ".join(r.name for r in cfg.llm_routes) or "none configured"
         raise ValueError(f"no route named {args.route!r} (llm_routes: {known})")
     router = Router([route], cfg.safety, secrets=SecretStore.for_data_dir(cfg.data_dir).get)
+    # no manifest is loaded here: a provider factory must accept None (SPEC 8, Session providers)
     provider = select_provider(cfg, _realtime_robot(args), None)
     report = check_realtime_route(route, cfg, router=router, provider=provider)
     if args.json:

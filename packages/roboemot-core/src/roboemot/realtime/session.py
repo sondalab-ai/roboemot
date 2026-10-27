@@ -407,9 +407,10 @@ def route_origin(route: LLMRoute) -> tuple[str, str, int] | None:
 
 def load_session_provider(robot_id: str) -> Callable[[Any], SessionProvider] | None:
     """The provider factory registered for ``robot_id`` in ``roboemot.realtime`` (call it with the
-    manifest), or None when no package registers one (direct mode). Fails closed: an entry point
-    that cannot be loaded, or two of them for one robot, raise :class:`ProviderUnavailable`
-    (logged by type only)."""
+    manifest; a factory must also accept None, which ``roboemot realtime check`` passes), or
+    None when no package registers one (direct mode). Fails closed: an entry point that cannot
+    be loaded, or two of them for one robot, raise :class:`ProviderUnavailable` (logged by type
+    only)."""
     found = [ep for ep in entry_points(group=ENTRY_POINT_GROUP) if ep.name == robot_id]
     if not found:
         return None
