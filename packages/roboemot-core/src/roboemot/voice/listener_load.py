@@ -31,6 +31,7 @@ STAGES = (
     "grammar_wait",
     "handoff",
     "grammar",
+    "decode",
 )
 
 

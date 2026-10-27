@@ -96,6 +96,12 @@ class ASRBackend(Protocol):
         """Drop the utterance in progress without a result."""
         ...
 
+    def decode(self, language: str, samples: np.ndarray) -> str:
+        """``samples`` (a whole utterance) decoded on a recognizer of its own, so the
+        utterance in progress is not disturbed: the text, empty when nothing was recognised or
+        the language is not loaded (the realtime route's fallback, SPEC 8)."""
+        ...
+
     def stats(self) -> dict[str, int]:
         """Recognizer counts for the debug report (SPEC 13); empty when the backend has none."""
         ...
@@ -143,6 +149,7 @@ class VoskASR:
         self.recognizers_built = 0
         self.built_on_start = 0  # recognizers ``start`` had to build (none after a load)
         self.reset_failures = 0  # recognizers dropped because ending their decode raised
+        self.decodes = 0  # whole utterances decoded on their own recognizer (``decode``)
 
     @property
     def languages(self) -> list[str]:
@@ -169,6 +176,7 @@ class VoskASR:
             "recognizers_built": self.recognizers_built,
             "built_on_start": self.built_on_start,
             "reset_failures": self.reset_failures,
+            "decodes": self.decodes,
         }
 
     def missing_words(self, language: str, words: list[str]) -> list[str] | None:
@@ -200,6 +208,16 @@ class VoskASR:
             HeardWord(w["word"], float(w["conf"]), float(w["start"]), float(w["end"]))
             for w in words
         ]
+
+    def decode(self, language: str, samples: np.ndarray) -> str:
+        """See ``ASRBackend.decode``: a recognizer built for this call (counted ``decodes``)."""
+        model = self._models.get(language)
+        if model is None:
+            return ""
+        self.decodes += 1
+        rec = self._vosk.KaldiRecognizer(model, self.rate_hz)
+        rec.AcceptWaveform(to_int16(samples))
+        return str(json.loads(rec.FinalResult()).get("text", ""))
 
     def start(self, language: str) -> None:
         """Begin an utterance on the language's recognizer, built by ``load``; one that is

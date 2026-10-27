@@ -50,13 +50,20 @@ here logs or reports a key, a URL's path or query, text, audio or an identifier 
 from __future__ import annotations
 
 import collections
+import contextlib
+import datetime as dt
 import importlib.util
 import itertools
+import json
 import logging
+import math
+import os
+import tempfile
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from ..config.schema import LLMRoute, RoboEmotConfig
@@ -87,6 +94,13 @@ MS_PER_S = 1000.0
 LATENCY_WINDOW = 50  # turns whose latencies the report summarises
 ITEM_PREFIX = "re_"  # the client's own item ids (user text, tool results)
 EVENT_PREFIX = "rq_"  # the event ids of the robot's response.create events
+PCM_SAMPLE_BYTES = 2  # PCM16 mono
+APPEND_SHARE_OF_CAP = (
+    2  # an append carries at most 1/2 of max_message_bytes of PCM (base64 grows it)
+)
+UPLOAD_FILE_MODE = 0o600  # the day's upload seconds (data folder)
+# events that carry no data (send_control): everything else goes through the send gate
+CONTROL_EVENTS = (protocol.RESPONSE_CANCEL, protocol.ITEM_DELETE, protocol.ITEM_TRUNCATE)
 
 
 class _Token:
@@ -156,8 +170,21 @@ class RealtimeRoute:
         client_factory: Callable[..., Any] | None = None,
         extra: Callable[[], bool] = realtime_extra,
         clock: Callable[[], float] = time.monotonic,
+        today: Callable[[], dt.date] = dt.date.today,
+        upload_path: Path | None = None,
     ) -> None:
         self.stack, self._router, self.network, self.provider = stack, router, network, provider
+        self._today = today
+        self._upload_path = upload_path  # where the day's upload seconds survive a restart
+        self._upload_day: dt.date | None = None
+        self._upload_s = 0.0  # microphone audio sent on _upload_day (the closing silence too)
+        self._load_upload()
+        self._buffer_gen = -1  # the session whose input buffer _buffer_ms measures
+        self._buffer_ms = 0.0  # audio appended to that session's input buffer so far
+        self._input_holds = 0  # realtime turns in flight: no burst meanwhile (their tool rounds)
+        self._audio_blocked: str | None = None  # why the last burst was refused, if it was
+        self.input: Any = None  # the audio input (``on_event``) the input events go to
+        self._egress = False  # audio may leave now (kept current: the Live tab reads it often)
         self._client_factory = client_factory
         self._extra = extra
         self._extra_ok = False  # the extra is installed (read outside _lock, used under it)
@@ -211,7 +238,9 @@ class RealtimeRoute:
         route = self.route(cfg)
         self._extra_ok = self._extra()  # find_spec takes the import lock: never under _lock
         endpoint = route_endpoint(route) if route is not None else None
-        self.network.set_realtime(self.blocked(cfg, self._extra_ok) is None, endpoint)
+        reason = self.blocked(cfg, self._extra_ok)
+        self._note_egress(cfg, reason)
+        self.network.set_realtime(reason is None, endpoint)
         with self._lock:
             self._rev += 1
             stale = self._client is not None and not self._fits(cfg, self._client)
@@ -258,8 +287,8 @@ class RealtimeRoute:
         route = self.route(cfg)
         if route is None:
             return "no_route"
-        if rt.input == "audio":
-            return "no_opt_in"  # audio input has its own opt-in (not built yet): fail closed
+        if rt.input == "audio" and not cfg.privacy.realtime_audio:
+            return "no_opt_in"  # audio input needs its own admin opt-in: fail closed
         if not (self._extra() if extra is None else extra):
             return "no_extra"
         if self.provider is None:
@@ -307,6 +336,8 @@ class RealtimeRoute:
         cfg = cfg or self.stack.effective()
         self._extra_ok = self._extra()
         reason = self.blocked(cfg, self._extra_ok)
+        committed = self.stack.effective()  # a turn's cfg may be older than the last reload
+        self._note_egress(committed, self.blocked(committed, self._extra_ok))
         route = self.route(cfg)
         self.network.set_realtime(
             reason is None, route_endpoint(route) if route is not None else None
@@ -531,9 +562,10 @@ class RealtimeRoute:
         return client
 
     def session_update(self, cfg: RoboEmotConfig, instructions: str, tools: Any = None) -> Any:
-        """``session.update`` for a text-input session: the instructions (parts 1 to 4), PCM in
-        at the robot's rate and out at the server's own, the voice, server VAD that never answers
-        or interrupts on its own, and the tools."""
+        """``session.update``: the instructions (parts 1 to 4), PCM in at the robot's rate and
+        out at the server's own, the voice, server VAD that never answers or interrupts on its
+        own and ends a turn after ``server_silence_ms``, and the tools (left as they are when
+        None)."""
         rt, vad = cfg.voice.realtime_route, cfg.voice.vad
         return protocol.session_update(
             instructions=instructions,
@@ -541,7 +573,7 @@ class RealtimeRoute:
             output_rate_hz=None,
             voice=rt.voice or None,
             vad_threshold=vad.threshold,
-            silence_ms=round(vad.end_silence_ms),
+            silence_ms=round(rt.server_silence_ms),
             create_response=False,
             interrupt_response=False,
             tools=tools,
@@ -561,11 +593,18 @@ class RealtimeRoute:
     # ----------------------------------------------------------------- responses
 
     def request(
-        self, run: Any, instructions: str, tool_choice: str | None = None, *, input_chars: int = 0
+        self,
+        run: Any,
+        instructions: str,
+        tool_choice: str | None = None,
+        *,
+        input_chars: int = 0,
+        generation: int | None = None,
     ) -> Request | None:
         """Send ``response.create`` for ``run`` (its ``deliver``/``closed`` get the response's
         events) through the send gate; None when there is no session or the gate refuses it
-        (nothing is sent). ``input_chars`` (the utterance) counts in its first estimate."""
+        (nothing is sent). ``input_chars`` (the utterance) counts in its first estimate.
+        ``generation``: the session that holds the turn's words; another one is refused."""
         now = self.clock()
         event_id = f"{EVENT_PREFIX}{next(self._events)}"
         estimate = (len(instructions) + input_chars) // CHARS_PER_TOKEN
@@ -576,7 +615,7 @@ class RealtimeRoute:
             req.token = self._token
             self._pending.append(req)
 
-        return req if self._gated(event, track) else None
+        return req if self._gated(event, track, generation) else None
 
     def busy(self) -> bool:
         """An abandoned request is still in flight: a new one waits (correlation by order)."""
@@ -685,6 +724,14 @@ class RealtimeRoute:
             self._error(event, token)
         elif isinstance(event, OF_A_RESPONSE):
             self._response_event(event, token)
+        elif isinstance(event, OF_THE_INPUT):
+            with self._lock:
+                current = self._current(token)
+                sink = self.input
+            if not current:
+                self._count("stale_callbacks")
+            elif sink is not None:
+                sink.on_event(event)
         else:
             with self._lock:
                 current = self._current(token)
@@ -814,11 +861,18 @@ class RealtimeRoute:
         with the send (SPEC 12). Refused: nothing is sent and the session is closed."""
         return self._gated(event)
 
-    def _gated(self, event: dict[str, Any], track: Callable[[], None] | None = None) -> bool:
+    def _gated(
+        self,
+        event: dict[str, Any],
+        track: Callable[[], None] | None = None,
+        generation: int | None = None,
+    ) -> bool:
         def gate(cfg: RoboEmotConfig) -> tuple[bool, Any]:
             client = self._client
             if client is None or client.state != "connected":
                 return False, None
+            if generation is not None and generation != self.generation:
+                return False, None  # the session that holds the turn's words is gone
             if not self._fits(cfg, client):
                 self._counts["sends_refused"] += 1
                 return False, self._detach()
@@ -835,9 +889,162 @@ class RealtimeRoute:
                 self._close_client(client, "reconfigured")
         return bool(ok)
 
+    def hold_input(self) -> None:
+        """A realtime turn begins: no audio burst until it ends (``release_input``), so another
+        utterance's words never land between its ``response.create`` calls (a tool round)."""
+        with self._lock:
+            self._input_holds += 1
+
+    def release_input(self) -> None:
+        with self._lock:
+            self._input_holds = max(0, self._input_holds - 1)
+
+    def input_held(self) -> bool:
+        with self._lock:
+            return self._input_holds > 0
+
+    def send_audio(
+        self,
+        pcm: bytes,
+        *,
+        gate: str,
+        instructions: str,
+        hold: Callable[[], str | None] = lambda: None,
+        track: Callable[[int, float, float], None] | None = None,
+    ) -> str | None:
+        """Send one utterance's audio (PCM16 at ``voice.sample_rate_hz``, the closing silence
+        included) as one burst: ``session.update`` with fresh ``instructions`` (a server that
+        answers on its own then answers with them), the appends (each under half the message
+        cap) and the commit. One gate decides the whole burst atomically with the send, on the
+        committed configuration: the session fits (as ``send``), ``input: audio`` with the
+        ``privacy.realtime_audio`` opt-in, ``gate`` is the configured ``audio_gate``, and the
+        burst fits today's upload budget, which it then uses. None when it was queued, else the
+        reason it was refused (nothing was sent): ``no_session``, ``input``, ``no_opt_in``,
+        ``gate``, ``upload_budget``, ``turn`` (a realtime turn is in flight), what ``hold()``
+        returns (``asleep``, ``speaking``, ``cancelled``: evaluated with the send, it may take
+        only leaf locks) or ``refused`` (the session no longer fits: closed). ``track(generation,
+        start_ms, end_ms)`` runs with the send: the session and where the burst lies in its input
+        buffer (the server's ``audio_start_ms`` counts from that buffer's start)."""
+
+        def burst(cfg: RoboEmotConfig) -> tuple[str | None, Any]:
+            rt = cfg.voice.realtime_route
+            client = self._client
+            if client is None or client.state != "connected":
+                return "no_session", None
+            if not self._fits(cfg, client):
+                self._counts["sends_refused"] += 1
+                return "refused", self._detach()
+            seconds = len(pcm) / PCM_SAMPLE_BYTES / cfg.voice.sample_rate_hz
+            if rt.input != "audio":
+                why = "input"
+            elif (held := hold()) is not None:
+                why = held
+            elif self._input_holds > 0:
+                why = "turn"
+            elif not cfg.privacy.realtime_audio:
+                why = "no_opt_in"
+            elif rt.audio_gate != gate:
+                why = "gate"
+            elif self._uploaded() + seconds > rt.daily_upload_budget_s:
+                why = "upload_budget"
+            else:
+                why = None
+            self._audio_blocked = why
+            if why is not None:
+                return why, None
+            self._upload_s += seconds
+            if self._buffer_gen != self.generation:
+                self._buffer_gen, self._buffer_ms = self.generation, 0.0
+            start_ms = self._buffer_ms
+            self._buffer_ms += seconds * MS_PER_S
+            if track is not None:
+                track(self.generation, start_ms, self._buffer_ms)
+            client.send(self.session_update(cfg, instructions))  # only queued: never blocks
+            step = (
+                rt.max_message_bytes // APPEND_SHARE_OF_CAP // PCM_SAMPLE_BYTES * PCM_SAMPLE_BYTES
+            )
+            for start in range(0, len(pcm), step):
+                client.send(protocol.audio_append(pcm[start : start + step]))
+            client.send(protocol.audio_commit())
+            return None, (self._upload_day, self._upload_s)
+
+        why, stale = self._with_config(burst)
+        if why is None:
+            self._save_upload(*stale)
+            stale = None
+        if stale is not None:
+            client, orphans = stale
+            self._settle(orphans, "reconfigured")
+            if client is not None:
+                self._close_client(client, "reconfigured")
+        if why != "turn":  # a hold is not a refusal: the input counts it once (audio_held)
+            self._count("audio_refused" if why is not None else "audio_sent")
+        return why
+
+    def _uploaded(self) -> float:
+        """Seconds of audio sent today (``_lock`` held). Only a later date starts from zero: a
+        clock that jumps back (no RTC, an NTP fix, a time zone) keeps the day's count."""
+        today = self._today()
+        if self._upload_day is None or today > self._upload_day:
+            self._upload_day, self._upload_s = today, 0.0
+        return self._upload_s
+
+    def _load_upload(self) -> None:
+        """The day's upload seconds from the data folder, so a restart keeps the cap. A file
+        that cannot be read counts today as spent (fail closed); none is a fresh day."""
+        path = self._upload_path
+        if path is None or not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text())
+            day = dt.date.fromisoformat(data["day"])
+            seconds = data["seconds"]
+            number = isinstance(seconds, int | float) and not isinstance(seconds, bool)
+            if not number or not math.isfinite(seconds) or seconds < 0:
+                raise ValueError("upload seconds")  # a value that would open the cap
+            # a stored day after today (a clock that jumped forward, then back) is today: its
+            # seconds count until the date really moves forward
+            self._upload_day, self._upload_s = min(day, self._today()), float(seconds)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            log.warning("realtime route: upload count unreadable (%s): today counts as spent",
+                        type(exc).__name__)  # fmt: skip
+            self._upload_day, self._upload_s = self._today(), float("inf")
+
+    def _save_upload(self, day: dt.date | None, seconds: float) -> None:
+        """Write ``(day, seconds)`` atomically, mode 0600 (outside ``_lock``: disk, not the
+        network). A failure is logged by type; the count in memory still holds."""
+        path = self._upload_path
+        if path is None or day is None:
+            return
+        try:
+            fd, name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".")
+            tmp = Path(name)
+            try:
+                with os.fdopen(fd, "w") as handle:
+                    os.fchmod(handle.fileno(), UPLOAD_FILE_MODE)
+                    record = {"day": day.isoformat(), "seconds": seconds}
+                    handle.write(json.dumps(record, allow_nan=False))
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(tmp, path)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    tmp.unlink()
+                raise
+        except (OSError, ValueError) as exc:  # ValueError: a count that is not finite
+            log.warning("realtime route: upload count not saved (%s)", type(exc).__name__)
+
+    def upload_left_s(self, cfg: RoboEmotConfig) -> float:
+        """Seconds of audio today's upload budget still allows."""
+        with self._lock:
+            used = self._uploaded()
+        return max(0.0, cfg.voice.realtime_route.daily_upload_budget_s - used)
+
     def send_control(self, event: dict[str, Any]) -> bool:
         """Send an event that carries no data (``response.cancel``, ``conversation.item.delete``
-        and ``.truncate``): ungated, also on a client still connecting."""
+        and ``.truncate``; any other is refused): ungated, also on a client still connecting."""
+        if event.get("type") not in CONTROL_EVENTS:
+            return False
         with self._lock:
             client = self._client or self._connecting
         if client is None:
@@ -865,6 +1072,7 @@ class RealtimeRoute:
         if route is not None and router is not None and tokens > 0:
             router.charge(route.name, tokens)
             if router.used(route.name) >= route.daily_token_budget:
+                self._egress = False  # blocked (budget) until a new day's ready()
                 self.close_soon("budget")  # spent: nothing more goes to the route today
 
     def note_response(self, done: protocol.ResponseDone | None) -> None:
@@ -889,8 +1097,15 @@ class RealtimeRoute:
 
     @property
     def audio_egress(self) -> bool:
-        """Whether microphone audio may leave the robot now: never in text mode."""
-        return False
+        """Whether microphone audio may leave the robot now: ``input: audio`` with its opt-in
+        and the route not blocked (never in text mode). Kept current by ``apply_config``,
+        ``ready`` and a spent budget, so reading it never reads the configuration stack (the
+        Live tab polls it)."""
+        return self._egress
+
+    def _note_egress(self, cfg: RoboEmotConfig, reason: str | None) -> None:
+        rt = cfg.voice.realtime_route
+        self._egress = rt.input == "audio" and cfg.privacy.realtime_audio and reason is None
 
     def snapshot(self) -> dict[str, Any]:
         """The ``roboemot.realtime_route`` debug section (SPEC 12A): states, reason codes,
@@ -905,20 +1120,24 @@ class RealtimeRoute:
                 self._client_snapshot = snap
             snap = dict(self._client_snapshot)
             counts = dict(self._counts)
+            audio = rt.input == "audio"
             out = {
                 "state": self.state,
                 "reason": self.reason,
                 "mode": rt.mode,
                 "input": rt.input,
-                "gate": None,  # text input: no audio gate
+                "gate": rt.audio_gate if audio else None,  # text input: no audio gate
                 "endpoint": snap.get("endpoint"),
-                "audio_egress": self.audio_egress,
+                "audio_egress": self._egress,
+                "audio_blocked": self._audio_blocked,  # why the last burst was refused
                 "platform_id_sent": False,
                 "provider_hosts": self.key_hosts,  # report keys must avoid "key"
                 "generation": self.generation,  # server sessions opened so far
                 "responses": dict(self._statuses),
                 "failures": dict(self._failures),
-                "upload_s_today": 0.0,
+                # an unreadable count is "spent": shown as the budget (the report is JSON)
+                "upload_s_today": min(self._uploaded(), rt.daily_upload_budget_s),
+                "upload_budget_s": rt.daily_upload_budget_s,
                 "latency_ms": {
                     "first_audio": summarise(list(self._first_audio_ms), LATENCY_LEVELS),
                     "server": {
@@ -941,6 +1160,14 @@ COUNTERS = (
     "reconnects",
     "connect_failures",
     "utterances_sent",
+    "audio_sent",
+    "audio_refused",
+    "audio_held",
+    "audio_items",
+    "audio_items_deleted",
+    "audio_items_unnamed",
+    "audio_items_undeletable",
+    "audio_items_ambiguous",
     "items_deleted",
     "transcripts",
     "transcript_timeouts",
@@ -958,6 +1185,9 @@ COUNTERS = (
     "sends_refused",
     "resets",
 )
+
+# the server events about the input audio (the audio input collects them)
+OF_THE_INPUT = (protocol.SpeechBoundary, protocol.InputTranscript)
 
 # the server events that name the response they belong to
 OF_A_RESPONSE = (

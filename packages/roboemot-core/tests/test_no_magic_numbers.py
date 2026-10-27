@@ -49,6 +49,7 @@ BEHAVIOUR_MODULES = [
     "voice/pipeline.py",
     "voice/keyword_worker.py",
     "voice/grammar_worker.py",
+    "voice/decode_worker.py",
     "priority.py",
     "voice/sample.py",
     "llm/router.py",
@@ -143,6 +144,7 @@ BEHAVIOUR_MODULES = [
     "realtime/client.py",
     "realtime/route.py",
     "realtime/turn.py",
+    "realtime/input.py",
 ]
 ALLOWED = {0, 1, -1, 2, 0.5, -1.0}
 

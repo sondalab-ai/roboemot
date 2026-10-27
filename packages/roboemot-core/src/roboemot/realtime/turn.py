@@ -102,8 +102,10 @@ class ResponseRun:
         clock: Callable[[], float],
         on_call: Callable[[protocol.FunctionCall], Awaitable[bool]] | None = None,
         input_chars: int = 0,
+        generation: int | None = None,
     ) -> None:
         self.route, self.speech = route, speech
+        self.generation = generation  # the session that must hold the turn's words
         self.utterance, self.mood, self.volume_db, self.language = (
             utterance,
             mood,
@@ -137,7 +139,11 @@ class ResponseRun:
         first, stall = self.route.timeouts()
         await wait_in_order(self.route, self.clock)
         req = self._request = self.route.request(
-            self, instructions, tool_choice, input_chars=self.input_chars
+            self,
+            instructions,
+            tool_choice,
+            input_chars=self.input_chars,
+            generation=self.generation,
         )
         if req is None:
             self.reply.closed = "no_session"

@@ -802,6 +802,7 @@ def test_realtime_block_has_stage_costs_lag_and_dropped_audio():
         "grammar_wait",
         "handoff",
         "grammar",
+        "decode",
         "listener_total",
     }
     assert cost["asr_accept"] > 0 and cost["vad"] > 0

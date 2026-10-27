@@ -29,6 +29,7 @@ VOICE_MODELS_SUBDIR = "voice-models"
 TRAITS_CACHE_FILE = "llm_traits.json"
 ROUTE_CHECKS_FILE = "route_checks.json"
 SECRETS_FILE = "secrets.json"
+REALTIME_UPLOAD_FILE = "realtime_upload.json"
 SETTINGS_OVERRIDES_FILE = "webui_settings.json"
 APP_CONFIG_FILE = "app.yaml"
 
@@ -92,6 +93,12 @@ def route_checks_path(configured: str = "") -> Path:
     """``<data folder>/route_checks.json``, the last conformance report per LLM route (SPEC 8;
     not created here). Inside the data folder, so uninstall removes it with the folder."""
     return data_path(configured) / ROUTE_CHECKS_FILE
+
+
+def realtime_upload_path(configured: str = "") -> Path:
+    """``<data folder>/realtime_upload.json``, the realtime route's audio seconds sent today
+    (SPEC 8, 12; not created here). Mode 0o600; kept so a restart does not reset the cap."""
+    return data_path(configured) / REALTIME_UPLOAD_FILE
 
 
 def secrets_path(configured: str = "") -> Path:

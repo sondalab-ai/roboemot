@@ -74,6 +74,8 @@ NO_PROXY: dict[str, Any] = (
 AUTH_HEADER = "Authorization"
 BEARER = "Bearer "
 CLOSE_TOO_BIG = 1009  # RFC 6455: message too big
+BASE64_CHARS = 4  # every 4 base64 characters
+BASE64_BYTES = 3  # carry 3 bytes
 EVENT_PREFIX = "ev_"  # the client's own event ids (a refusal echoes the one it refuses)
 # the server events of a response (they move the response watchdog)
 RESPONSE_EVENTS = (
@@ -220,13 +222,10 @@ class RealtimeClient:
 
     def send(self, event: dict[str, Any]) -> concurrent.futures.Future[bool]:
         """Queue a client event (thread-safe). The future is True once it is written, False when
-        there is no open socket or the send failed (a stuck send aborts the socket)."""
+        there is no open socket or the send failed (a stuck send aborts the socket). The client
+        does not judge what it sends: audio, like any data, leaves only through the owner's
+        send gate (``RealtimeRoute``, SPEC 12)."""
         return self._submit_send(self._send(event))
-
-    def send_audio(self, pcm: bytes) -> concurrent.futures.Future[bool]:
-        """Queue ``input_audio_buffer.append`` with PCM16 bytes (thread-safe)."""
-        event = protocol.audio_append(pcm)
-        return self._submit_send(self._send(event, audio_bytes=len(pcm)))
 
     def close(self) -> None:
         """Close the socket and stop the thread (bounded by ``send_timeout_s`` each)."""
@@ -476,7 +475,7 @@ class RealtimeClient:
             self._awaiting = not done
             self._arm(None if done else self.route.stall_timeout_s)
 
-    async def _send(self, event: dict[str, Any], audio_bytes: int = 0) -> bool:
+    async def _send(self, event: dict[str, Any]) -> bool:
         assert self._send_lock is not None
         async with self._send_lock:
             ws = self._ws
@@ -521,8 +520,9 @@ class RealtimeClient:
                     await self._drop_socket()
                 return False
         self._count("sent")
-        if audio_bytes:
-            self._count("audio_bytes_sent", audio_bytes)
+        sent_audio = audio_bytes(event)
+        if sent_audio:
+            self._count("audio_bytes_sent", sent_audio)
         return True
 
     async def _drop_socket(self) -> None:
@@ -564,6 +564,16 @@ class RealtimeClient:
                     self.state, self.reason = "closed", reason
             if closing:
                 self._closed_cb(reason)
+
+
+def audio_bytes(event: dict[str, Any]) -> int:
+    """The PCM bytes an ``input_audio_buffer.append`` carries (0 for any other event), read
+    from the length of its base64 text without decoding it."""
+    if event.get("type") != protocol.AUDIO_APPEND:
+        return 0
+    text = event.get("audio", "")
+    padding = len(text) - len(text.rstrip("="))
+    return len(text) // BASE64_CHARS * BASE64_BYTES - padding
 
 
 def ws_target_local(target: ConnectTarget | None) -> bool:

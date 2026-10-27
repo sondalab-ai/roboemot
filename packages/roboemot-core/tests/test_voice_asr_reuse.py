@@ -69,7 +69,12 @@ def test_load_builds_the_recognizer_and_start_reuses_it(fake):
         asr.accept(AUDIO)
         assert asr.finish() == "ciao"
     assert vosk.built == 2
-    assert asr.stats() == {"recognizers_built": 2, "built_on_start": 0, "reset_failures": 0}
+    assert asr.stats() == {
+        "recognizers_built": 2,
+        "built_on_start": 0,
+        "reset_failures": 0,
+        "decodes": 0,
+    }
 
 
 def test_finish_and_reset_end_the_decode_before_the_vosk_reset(fake):
@@ -102,9 +107,19 @@ def test_a_failing_recognizer_is_dropped_counted_and_rebuilt_on_start(fake):
 
     rec.FinalResult = boom
     asr.reset()  # never raises: the listener thread must survive a broken decoder
-    assert asr.stats() == {"recognizers_built": 1, "built_on_start": 0, "reset_failures": 1}
+    assert asr.stats() == {
+        "recognizers_built": 1,
+        "built_on_start": 0,
+        "reset_failures": 1,
+        "decodes": 0,
+    }
     asr.start("it")
-    assert asr.stats() == {"recognizers_built": 2, "built_on_start": 1, "reset_failures": 1}
+    assert asr.stats() == {
+        "recognizers_built": 2,
+        "built_on_start": 1,
+        "reset_failures": 1,
+        "decodes": 0,
+    }
 
 
 def test_start_survives_a_failing_reset_of_the_previous_utterance(fake):
@@ -138,4 +153,24 @@ def test_the_barge_in_keyword_worker_hands_the_reused_recognizer_back(fake):
     asr.start("it")
     asr.accept(AUDIO)
     assert asr.finish() == "ciao"
-    assert asr.stats() == {"recognizers_built": 1, "built_on_start": 0, "reset_failures": 0}
+    assert asr.stats() == {
+        "recognizers_built": 1,
+        "built_on_start": 0,
+        "reset_failures": 0,
+        "decodes": 0,
+    }
+
+
+def test_decode_uses_a_recognizer_of_its_own_and_leaves_the_utterance_alone(fake):
+    """SR-3: the realtime fallback decodes a whole utterance without touching the one in
+    progress (SPEC 8, Realtime speech route)."""
+    vosk, asr = fake
+    asr.load(["it"])
+    asr.start("it")
+    asr.accept(AUDIO)
+    built = vosk.built
+    assert asr.decode("it", AUDIO) == "ciao"
+    assert vosk.built == built + 1
+    assert asr.finish() == "ciao"  # the streaming utterance is intact
+    assert asr.decode("en", AUDIO) == ""  # not loaded
+    assert asr.stats()["decodes"] == 1
