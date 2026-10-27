@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -58,7 +59,7 @@ def test_dry_run_restart_without_the_hook_says_it_would_refuse(platform, capsys)
         Options(restart=True, dry_run=True), Ui(interactive=False, assume_yes=False), Path()
     )
     out = capsys.readouterr().out
-    assert "would refuse: Bare robot cannot restart bare" in out
+    assert re.search(r"Would refuse +Bare robot cannot restart bare", out)
     assert platform.calls == []
 
 

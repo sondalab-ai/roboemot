@@ -1,7 +1,7 @@
 """SPEC 11A, 12: ``GET /api/live/frame.jpg`` and ``GET /api/live/viewers``. PIN session like every
 page API; one JPEG with the security headers; a stable JSON code and no image for every state the
-picture cannot be served; the banner flag; img-src allows blob: and nothing more; no image bytes
-in the logs."""
+picture cannot be served; the banner flag; img-src allows blob: (and data: for the kit's art) and
+nothing more; no image bytes in the logs."""
 
 from __future__ import annotations
 
@@ -142,8 +142,10 @@ def test_it_serves_one_jpeg_with_the_security_headers(served):
     assert r.headers["X-Content-Type-Options"] == "nosniff"
     assert int(r.headers["Content-Length"]) == len(r.body)
     csp = r.headers["Content-Security-Policy"]
-    assert "img-src 'self' blob:;" in csp and "data:" not in csp
-    assert "script-src 'self';" in csp and "blob:" not in csp.replace("img-src 'self' blob:", "")
+    # blob: for the preview and data: for the kit's art, both for images only
+    assert "img-src 'self' data: blob:;" in csp
+    rest = csp.replace("img-src 'self' data: blob:", "")
+    assert "script-src 'self';" in csp and "blob:" not in rest and "data:" not in rest
 
 
 def test_post_is_not_served(served):

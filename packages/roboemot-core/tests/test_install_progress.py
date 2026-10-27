@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import stat
 import subprocess
 import time
@@ -123,12 +124,17 @@ def test_progress_without_a_terminal_prints_plain_lines(monkeypatch, capsys):
     assert "installing (can take minutes on the robot)" in out
     assert "Collecting a" in out and "Installing collected packages: a" in out
     assert "Requirement already" not in out
-    assert "✓ installed (0s)" in out
+    assert re.search(r"✓ installed +0s\n", out)  # a done step line, the total time as detail
 
 
 def test_progress_on_a_terminal_rewrites_one_line_then_clears_it(monkeypatch):
-    out = Tty()
+    # the running line is transient, so it goes to stderr (Term spec); the result to stdout
+    out, err = Tty(), Tty()
     monkeypatch.setattr("sys.stdout", out)
+    monkeypatch.setattr("sys.stderr", err)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.delenv("SONDALAB_REDUCED_MOTION", raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color")
     monkeypatch.setattr("shutil.get_terminal_size", lambda *a, **k: os.terminal_size((60, 24)))
     clock = Clock()
     ui = Ui(interactive=False, assume_yes=True)
@@ -137,15 +143,16 @@ def test_progress_on_a_terminal_rewrites_one_line_then_clears_it(monkeypatch):
         clock.now = 102
         p("Collecting " + "x" * 200)
         deadline = time.monotonic() + 5
-        while out.getvalue().count("1m42s") < 3 and time.monotonic() < deadline:
+        while err.getvalue().count("1m42s") < 3 and time.monotonic() < deadline:
             time.sleep(0.001)
-    text = out.getvalue()
+    text = err.getvalue()
     assert "\r" in text and "\x1b[K" in text
-    assert "1m42s  Collecting x" in text and "…" in text
+    assert "1m42s  Collecting x" in text and ("." if ui.ascii() else "…") + "\x1b[K" in text
     frames = [r.removesuffix("\x1b[K") for r in text.split("\r") if r.endswith("\x1b[K")]
     assert frames and max(map(len, frames)) <= 60
-    assert "installing (1m42s)\n" in text.split("✓")[-1]
-    assert text.rindex("\r\x1b[K") < text.index("✓")
+    assert text.endswith("\r\x1b[K")  # cleared before the result line
+    assert "✓" not in text and "\r" not in out.getvalue()
+    assert re.search(r"installing +1m42s\n", out.getvalue())
 
 
 def test_progress_skips_the_check_mark_on_a_failure(capsys):
@@ -176,8 +183,11 @@ def test_a_failed_pip_keeps_its_full_output_in_the_error(capsys):
     ui = Ui(interactive=False, assume_yes=True)
     remote = StreamRemote("Collecting a\nERROR: no network\n__rc=1")
     py = RemotePython(remote, "/v/bin/python", ui)
-    with pytest.raises(WizardError, match="pip install failed on the robot:\nCollecting a\nERROR"):
+    # the cause is the error block's why; the full output stays on the error (--debug prints it)
+    with pytest.raises(WizardError, match="pip install failed on the robot") as e:
         py._pip("install a", announce="installing")
+    assert e.value.why == "ERROR: no network"
+    assert e.value.output.startswith("Collecting a\nERROR: no network")
     assert "✓" not in capsys.readouterr().out
 
 
