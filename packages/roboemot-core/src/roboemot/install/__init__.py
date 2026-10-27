@@ -436,6 +436,9 @@ def set_operator_pin(ui: Ui, py: RemotePython, remote: Remote, dry_run: bool) ->
     if dry_run:
         ui.would("Replace the operator PIN" if exists else "Ask for the operator PIN", path)
         return
+    if exists and not ui.interactive:
+        ui.ok("Kept the operator PIN", f"{path}; no terminal to type a new one")
+        return
     if exists and not ui.confirm("An operator PIN is already set. Replace it?", False):
         ui.ok("Kept the operator PIN", path)
         return
@@ -521,6 +524,9 @@ def set_secrets(
             ui.would("Ask for a secret", f"{name!r}, stored in {folder}/secrets.json")
             continue
         have = remote.run(robot_cli(py, folder, "list")).split()
+        if name in have and not ui.interactive:
+            ui.ok("Kept the secret", f"{name}; no terminal to type a new value")
+            continue
         if name in have and not ui.confirm(f"Secret {name!r} is already set. Replace it?", False):
             ui.ok("Kept the secret", name)
             continue
@@ -758,11 +764,34 @@ def _resolve_error(output: str) -> WizardError:
 
 
 def _rerun(opts: Options) -> str:
-    """The installer command line for ``opts`` without ``--dry-run``: the dry run's next step."""
-    args = [f"--host {shlex.quote(opts.host)}"] if opts.host else []
-    args += [f"--user {shlex.quote(opts.user)}"] if opts.user else []
-    args += ["--uninstall"] if opts.uninstall else []
-    return " ".join([COMMAND, *args])
+    """The installer command line for ``opts`` without ``--dry-run``: every flag that was set,
+    so the dry run's ``Next:`` line runs the same choices for real."""
+    args = []
+    for flag, value in (("--host", opts.host), ("--user", opts.user), ("--robot", opts.robot)):
+        if value:
+            args += [flag, value]
+    for flag, value in (
+        ("dev", opts.dev),
+        ("piper", opts.piper),
+        ("start", opts.start),
+        ("startup-app", opts.startup),
+    ):
+        if value is not None:
+            args.append(f"--{flag}" if value else f"--no-{flag}")
+    for name in opts.secrets or []:
+        args += ["--secret", name]
+    args += ["--uninstall"] * opts.uninstall + ["--yes"] * opts.yes
+    return shlex.join([*COMMAND.split(), *args])
+
+
+def _check_running_app(opts: Options, ui: Ui, platform: Platform) -> None:
+    """Off a terminal, ask the read-only question "is another app running?" before anything
+    is installed: starting would have to stop it, and only ``--yes`` can say so."""
+    if opts.dry_run or not opts.start or ui.assume_yes or ui.interactive:
+        return
+    other = platform.running_app()
+    if other and other != platform.app_name:
+        ui.require("--yes", False, f"{other} is running and --start would stop it")
 
 
 def run_install(opts: Options, ui: Ui, root: Path) -> None:
@@ -774,6 +803,7 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
     host, platform = select_robot(ui, opts, root)
     ui.ok("Selected the robot", f"{platform.display_name} at {host}")
     platform.connect(ui, host)
+    _check_running_app(opts, ui, platform)
 
     def body(remote: Remote) -> None:
         with tempfile.TemporaryDirectory(prefix="roboemot-") as tmp:
@@ -844,7 +874,8 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
                 platform.set_autostart(platform.app_name)
                 ui.ok("Set the autostart app", f"{platform.app_name} starts on wake-up")
             ui.ok("Installed", f"{platform.app_name} on {host}")
-            ui.hint("Undo", _rerun(Options(host=opts.host, user=opts.user, uninstall=True)))
+            ui.next(shlex.join(["python", "scripts/robot_ssh.py", "--host", host, "--debug"]))
+            ui.hint("Undo", _rerun(Options(host=host, user=opts.user, uninstall=True)))
             ui.summary()
 
     _with_remote(opts, ui, platform, host, body)
@@ -1017,8 +1048,9 @@ def _json(output: str) -> dict:
 # ---------------------------------------------------------------- command line
 
 
-def parse_args(argv: list[str] | None = None) -> Options:
+def parse_args(argv: list[str] | None = None, plain: bool = False) -> Options:
     p = HeaderParser(description="Install or uninstall RoboEmot on a robot (SPEC 4A).")
+    p.plain = plain
     p.add_argument("--host", help="robot hostname or IP (default: pick from robots found by mDNS)")
     p.add_argument("--user", help="SSH user (default: ask, the platform's usual user)")
     p.add_argument(
@@ -1083,7 +1115,8 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     ``Try:`` line names ``--debug``; with ``--debug`` the traceback and raw tool output print.
     """
     args = sys.argv[1:] if argv is None else list(argv)
-    opts = parse_args(args)
+    vt = term is not None and all([term.enable_vt(sys.stdout), term.enable_vt(sys.stderr)])
+    opts = parse_args(args, plain=not vt)
     if term is None:
         print(
             "The installer needs sondalab-palette: "
@@ -1091,12 +1124,11 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
             file=sys.stderr,
         )
         return 1
-    vt = all([term.enable_vt(sys.stdout), term.enable_vt(sys.stderr)])
     if opts.version:
         mode = term.color_mode(isatty=sys.stdout.isatty()) if vt else "none"
         print(term.lockup("roboemot", app_version(), mode))
         return 0
-    print_header()
+    print_header(plain=not vt)
     ui = Ui(
         interactive=sys.stdin.isatty() and not os.environ.get("CI"),
         assume_yes=opts.yes,

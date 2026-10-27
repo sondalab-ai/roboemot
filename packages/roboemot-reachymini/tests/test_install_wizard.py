@@ -466,7 +466,10 @@ def test_install_dry_run_touches_nothing(offline, robot, daemon, capsys):
     assert f"○ Create the data folder {DATA}" in flat(out)
     assert "○ Stop conversation" in out and "○ Start roboemot" in out
     assert "✓ Dry run passed" in out and "Summary  " in out
-    assert "Next: python scripts/install_on_robot.py --host 127.0.0.1 --user pollen" in out
+    assert (
+        "Next: python scripts/install_on_robot.py --host 127.0.0.1 --user pollen "
+        "--robot reachy-mini-wireless --dev --piper --yes"
+    ) in out
     assert not [ln for ln in out.splitlines() if "✓" in ln and ("Create" in ln or "Add " in ln)]
 
 
@@ -967,6 +970,33 @@ def test_yes_answers_the_confirmations_but_not_host_or_user(offline, robot, daem
         inst.run_install(Options(host="127.0.0.1", robot=RID, yes=True), quiet_ui(yes=True), ROOT)
     install(dev=None, piper=None)  # yes=True answers dev, piper, start, startup
     assert json.loads(robot.files[RECORD])["pending_before"] is None
+
+
+def test_with_several_platforms_a_missing_robot_flag_stops_first(offline, robot, monkeypatch):
+    monkeypatch.setattr(inst, "installed_platforms", lambda: [RID, "desk-head-v1"])
+    given = {**FULL, "robot": None, "start": False, "startup": False}
+    with pytest.raises(MissingFlag, match="--robot"):
+        inst.run_install(Options(**given), quiet_ui(), ROOT)
+    assert robot.commands == []
+
+
+def test_an_existing_pin_and_secret_are_kept_without_a_terminal(offline, robot, daemon, capsys):
+    robot.dirs |= {DATA, PIN_PATH}
+    robot.secrets = {"cloud_key": "theirs"}
+    opts = Options(**FULL, start=False, startup=False, secrets=["cloud_key"])
+    inst.run_install(opts, quiet_ui(), ROOT)  # no --yes: nothing to answer, nothing raised
+    out = flat(capsys.readouterr().out)
+    assert "✓ Kept the operator PIN" in out and "✓ Kept the secret cloud_key" in out
+    assert robot.secrets == {"cloud_key": "theirs"} and robot.stdins == []
+
+
+def test_start_over_a_running_app_without_a_terminal_needs_yes_before_installing(
+    offline, robot, daemon
+):
+    daemon.current = {"info": {"name": "conversation"}, "state": "running"}
+    with pytest.raises(MissingFlag, match="--yes"):
+        inst.run_install(Options(**FULL, start=True, startup=False), quiet_ui(), ROOT)
+    assert robot.commands == [] and daemon.mutations == []
 
 
 def test_a_dry_run_without_a_terminal_needs_no_start_flags(offline, robot, daemon):

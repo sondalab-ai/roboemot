@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import os
 import sys
 import threading
 from collections.abc import Callable, Iterator, Sequence
@@ -77,9 +78,11 @@ class WizardError(_ErrorBase):
 
 
 def last_line(text: str) -> str:
-    """The last non-empty line of tool output: the usual one-line cause of a failure."""
+    """The one-line cause in tool output: pip's last ``ERROR:`` line (a trailing ``[notice]``
+    is not the cause), else the last non-empty line."""
     lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
-    return lines[-1] if lines else ""
+    errors = [line for line in lines if line.startswith("ERROR:")]
+    return (errors or lines or [""])[-1]
 
 
 def app_version() -> str:
@@ -90,23 +93,31 @@ def app_version() -> str:
         return "unknown"
 
 
-def header() -> str:
+def header(plain: bool = False) -> str:
     """The Sondalab header for stdout; "" without the palette, off a terminal and in accessible
-    mode (the palette decides since 0.9.0)."""
-    return "" if _term is None else str(_term.header(NAME, app_version(), TAGLINE))
+    mode (the palette decides since 0.9.0). ``plain`` (no VT processing on Windows) gives the
+    uncoloured ASCII lockup."""
+    if _term is None:
+        return ""
+    if plain:
+        env = {**os.environ, "NO_COLOR": "1", "SONDALAB_ASCII": "1"}
+        return str(_term.header(NAME, app_version(), TAGLINE, env=env))
+    return str(_term.header(NAME, app_version(), TAGLINE))
 
 
-def print_header() -> None:
+def print_header(plain: bool = False) -> None:
     """Print :func:`header` (nothing when it is empty)."""
-    print(header(), end="", flush=True)
+    print(header(plain), end="", flush=True)
 
 
 class HeaderParser(argparse.ArgumentParser):
     """``argparse``'s parser with the header before the ``--help`` text."""
 
+    plain = False
+
     def print_help(self, file=None) -> None:
         if file is None or file is sys.stdout:
-            print_header()
+            print_header(self.plain)
         super().print_help(file)
 
 

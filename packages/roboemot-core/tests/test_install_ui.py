@@ -142,6 +142,18 @@ def test_a_slow_step_without_motion_prints_its_running_line_once(
     assert capsys.readouterr().err == "  ● Building the wheels…\n"
 
 
+def test_the_cause_is_pips_error_line_not_its_notice() -> None:
+    output = "Collecting x\nERROR: No matching distribution for x\n[notice] upgrade pip"
+    assert ui_mod.last_line(output) == "ERROR: No matching distribution for x"
+    assert ui_mod.last_line("a\nb\n") == "b" and ui_mod.last_line("") == ""
+
+
+def test_without_vt_the_header_is_the_plain_lockup(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("sys.stdout", type("Tty", (io.StringIO,), {"isatty": lambda s: True})())
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    assert ui_mod.header(plain=True) == f"sonda/lab roboemot {ui_mod.app_version()}\n"
+
+
 def test_prompts_and_running_lines_go_to_stderr(capsys: pytest.CaptureFixture[str]) -> None:
     ui = Ui(interactive=True, assume_yes=False, read=lambda: "y\n")
     assert ui.confirm("Start roboemot now?", False) is True
