@@ -127,6 +127,7 @@ class RealtimeClient:
         self._send_lock: asyncio.Lock | None = None
         self._receiver: asyncio.Task[None] | None = None
         self._awaiting = False  # a response.create was sent and its response.done not seen
+        self._began = False  # an event of the awaited response arrived
         self._watchdog: asyncio.TimerHandle | None = None
         self._dropping: asyncio.Future[None] | None = None
         self._sending = False  # a write is in flight (a socket lost meanwhile is a stuck send)
@@ -391,7 +392,10 @@ class RealtimeClient:
                 if isinstance(event, protocol.Unknown):
                     continue  # counted only: no progress, not handed out
                 if self._awaiting and not isinstance(event, protocol.Malformed):
-                    done = event.type == protocol.RESPONSE_DONE
+                    # a server error before the response began refuses it: none is coming
+                    refused = isinstance(event, protocol.ServerError) and not self._began
+                    done = event.type == protocol.RESPONSE_DONE or refused
+                    self._began = True
                     self._awaiting = not done
                     self._arm(None if done else self.route.stall_timeout_s)
                 self._deliver(event)
@@ -433,7 +437,7 @@ class RealtimeClient:
                 return False
             if event.get("type") == protocol.RESPONSE_CREATE:
                 # armed before the write: a fast server may answer while the send still drains
-                self._awaiting = True
+                self._awaiting, self._began = True, False
                 self._arm(self.route.first_token_timeout_s)
             self._sending = True
             try:

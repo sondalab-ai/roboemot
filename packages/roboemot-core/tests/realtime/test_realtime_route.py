@@ -5,6 +5,7 @@ Realtime speech route; SPEC 12A, Links and Diagnostics)."""
 from __future__ import annotations
 
 import json
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -42,6 +43,7 @@ def test_a_live_realtime_route_never_masks_dead_chat_routes_in_local_mode():
 def test_in_realtime_mode_the_realtime_link_keeps_the_network_online():
     mon = monitor(CHAT, RT)
     mon.set_realtime(True)
+    mon.report_realtime(True, 0.0)  # a session opened: the link is confirmed
     mon.report("lan", False, 0.0)
     assert mon.online  # the realtime session can answer
     mon.report_realtime(False, 1.0)
@@ -283,9 +285,13 @@ class StubClient:
     """A connected client on a host that is not local (a provider's cloud host)."""
 
     def __init__(self, route, settings, provider, **kw):
-        self.route, self.state, self.closed = route, "idle", 0
+        self.route, self.state, self.closed, self.reason = route, "idle", 0, None
+        self.local_only = kw.get("local_only", lambda: False)
 
     def connect(self, update):
+        if self.local_only():  # the real client refuses a cloud host here
+            self.state, self.reason = "closed", "pseudonyms"
+            return False
         self.state = "connected"
         return True
 
@@ -350,3 +356,118 @@ def test_an_unchanged_config_keeps_the_session():
     assert r.ready()
     r.apply_config(stack.effective())
     assert r.connected and made[0].closed == 0
+
+
+# ------------------------------------------------------------------ fix round 1: B2
+
+
+class SlowClient(StubClient):
+    """A connect that waits for the test (a connect in flight)."""
+
+    gate: threading.Event
+
+    def connect(self, update):
+        SlowClient.entered.set()
+        assert SlowClient.gate.wait(5)
+        return super().connect(update)
+
+
+def slow_route(stack):
+    SlowClient.gate, SlowClient.entered = threading.Event(), threading.Event()
+    made = []
+
+    def factory(*a, **kw):
+        made.append(SlowClient(*a, **kw))
+        return made[-1]
+
+    r = RealtimeRoute(
+        stack,
+        lambda: FakeRouter(),
+        NetworkMonitor(stack.effective().llm_routes, POLICY, probe=lambda *a: True),
+        DIRECT,
+        extra=lambda: True,
+        client_factory=factory,
+    )
+    return r, made
+
+
+def connect_while(stack, change):
+    """Start a connect, run ``change`` while it is in flight, let it finish."""
+    r, made = slow_route(stack)
+    result = []
+    thread = threading.Thread(target=lambda: result.append(r.ready()))
+    thread.start()
+    assert SlowClient.entered.wait(5)
+    change(r)
+    SlowClient.gate.set()
+    thread.join(5)
+    return r, made, result[0]
+
+
+def test_pseudonyms_switched_on_during_a_connect_close_the_new_session():
+    stack = rt_stack()
+
+    def change(r):
+        stack.set("privacy.pseudonyms_to_cloud", True, source="test", admin=True)
+        r.apply_config(stack.effective())
+
+    r, made, ok = connect_while(stack, change)
+    assert ok is False and not r.connected and made[0].closed == 1
+
+
+def test_a_route_edit_during_a_connect_closes_the_new_session():
+    stack = rt_stack()
+
+    def change(r):
+        routes = [CHAT, {**RT, "base_url": "http://other.local:8765/v1"}]
+        stack.set("llm_routes", routes, source="test", admin=True)
+        r.apply_config(stack.effective())
+
+    r, made, ok = connect_while(stack, change)
+    assert ok is False and not r.connected and made[0].closed == 1
+
+
+@pytest.mark.parametrize("reason", ["asleep", "shutdown"])
+def test_sleep_or_shutdown_during_a_connect_close_the_new_session(reason):
+    stack = rt_stack()
+
+    def change(r):
+        if reason == "shutdown":
+            r.close("shutdown")
+        else:
+            r.close_soon("asleep")
+
+    r, made, ok = connect_while(stack, change)
+    assert ok is False and not r.connected and made[0].closed == 1
+
+
+def test_ready_refuses_a_session_the_current_config_would_not_open():
+    stack = rt_stack()
+    r, made = stub_route(stack)
+    assert r.ready()
+    stack.set("privacy.pseudonyms_to_cloud", True, source="test", admin=True)  # reload missed
+    assert r.ready() is False
+    assert made[0].closed == 1 and r.snapshot()["reason"] == "pseudonyms"
+
+
+def test_an_unconfirmed_realtime_link_does_not_hold_the_network_up():
+    """I3: boot with no internet, realtime mode on, the chat route down: offline at once."""
+    mon = monitor(CHAT, RT)
+    mon.set_realtime(True)
+    mon.report("lan", False, 0.0)
+    assert not mon.online
+    mon.report_realtime(True, 1.0)
+    assert mon.online
+
+
+def test_every_response_done_is_charged_once_by_id():
+    """M2: an unrequested or abandoned response's usage is charged too, and only once."""
+    from roboemot.realtime import protocol
+
+    router = FakeRouter()
+    r = make_route(rt_stack(), router=router)
+    done = protocol.ResponseDone(protocol.RESPONSE_DONE, "x1", "cancelled", 10)
+    r._on_event(done)
+    r._on_event(done)
+    assert router.used("rt") == 10
+    assert r.snapshot()["responses"] == {"cancelled": 1}

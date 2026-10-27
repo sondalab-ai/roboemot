@@ -157,6 +157,8 @@ class _Turn:
     rt_items: list[str] = field(default_factory=list)  # server item ids of this turn
     rt_jobs: list[tuple[int, str | None]] = field(default_factory=list)  # (speech job, item)
     rt_partial: bool = False  # a realtime reply was cut part way (history: interrupted)
+    rt_tools: bool = False  # a skill ran in this realtime turn: it is never answered again
+    rt_round: tuple[list[ToolCall], list[ToolOutcome], int] | None = None  # round in flight
 
 
 @dataclass
@@ -720,9 +722,11 @@ class ConversationWorker:
             turn.outcome = "interrupted"
             return True
         except Exception as exc:
-            turn.outcome = "error"
             log.warning("conversation: realtime turn failed (%s)", type(exc).__name__)
-            return bool(turn.rt_jobs)
+            self.realtime.send(rt_protocol.response_cancel())
+            answered = self._realtime_lost(turn)
+            turn.outcome = "error"
+            return answered
 
     async def _realtime_rounds(self, turn: _Turn) -> bool:
         """The transcript as ``input_text``, then one response per round: tool calls run as
@@ -747,7 +751,7 @@ class ConversationWorker:
                 route.session_update(
                     turn.cfg,
                     self._base_instructions(),
-                    rt_protocol.function_tools(tools) if tools else None,
+                    rt_protocol.function_tools(tools) if tools else [],
                 )
             )
             item = route.new_item_id()
@@ -776,6 +780,7 @@ class ConversationWorker:
                     on_call=on_call,
                 )
                 round_from = len(turn.spoken)
+                turn.rt_round = (calls, results, round_from)
                 try:
                     choice = "auto" if in_cap else "none" if offered else None
                     reply = await run.run(instructions, choice)
@@ -802,16 +807,19 @@ class ConversationWorker:
                 said = " ".join(turn.spoken[round_from:]) or None
                 turn.exchange += self._exchange(calls, results, turn.rounds, said)
                 turn.exchange_spoken = len(turn.queued)
+                turn.rt_round = None
 
     def _realtime_lost(self, turn: _Turn) -> bool:
-        """The session was lost (or refused the response) during the turn. Audio that arrived
-        but did not play yet is dropped; if nothing played, False: the chat routes answer the
-        turn. Otherwise the reply is cut like a barge-in and not repeated."""
+        """The session was lost (or refused the response, or the turn failed) during the turn.
+        Audio that arrived but did not play yet is dropped. If nothing played and no skill ran,
+        False: the chat routes answer the turn. Otherwise it is never answered again (a skill
+        would run twice): the reply is cut like a barge-in, the history is marked interrupted
+        and, when a skill ran, the fallback line is said with Piper."""
         route = self.realtime
         if turn.rt_jobs:
             self.speech.stop()  # first: whether anything played is then settled
-        if not any(self.speech.played(job) for job, _ in turn.rt_jobs):
-            route.count("fallbacks_mid_turn")
+        played = any(self.speech.played(job) for job, _ in turn.rt_jobs)
+        if not played:
             turn.spoken.clear()
             turn.queued.clear()
             turn.rt_jobs.clear()
@@ -819,12 +827,35 @@ class ConversationWorker:
             if self.transcript is not None and turn.reply_seq is not None:
                 self.transcript.settle(turn.reply_seq, "", interrupted=False)
                 turn.reply_seq = None
-            return False
+            if not turn.rt_tools:
+                route.count("fallbacks_mid_turn")
+                # the server must not keep a question the chat routes answer: its items go,
+                # and the turn (no server items) is replayed like a local one
+                route.delete_items(turn.rt_gen, turn.rt_items)
+                turn.rt_items.clear()
+                return False
         route.count("cut_mid_turn")
-        turn.speech_stopped = turn.stopped = True
         turn.outcome = "realtime_lost"
-        self._cut_realtime(turn)
+        self._keep_round(turn)
+        if played:
+            turn.speech_stopped = turn.stopped = True
+            self._cut_realtime(turn)
+        else:
+            turn.rt_partial = True  # the fallback line below closes an unfinished turn
+        if turn.rt_tools:
+            turn.voice = "local"  # the route is down: Piper (owner decision 4)
+            self._say_fallback(turn)
         return True
+
+    def _keep_round(self, turn: _Turn) -> None:
+        """The tool calls of the round the loss interrupted go into the history."""
+        if turn.rt_round is None or not turn.rt_round[0]:
+            return
+        calls, results, _ = turn.rt_round
+        n = min(len(calls), len(results))
+        if n:
+            turn.exchange += self._exchange(calls[:n], results[:n], turn.rounds + 1, None)
+        turn.rt_round = None
 
     def _rt_caller(
         self,
@@ -846,6 +877,7 @@ class ConversationWorker:
                 self._counts["tool_errors"] += 1
                 results.append(ToolOutcome(TOO_MANY_ROUNDS, False, True, ev.name, "rounds"))
                 return True
+            turn.rt_tools = True
             results.append(await self._call(turn, call, choices, len(calls) > cap))
             self.realtime.count("tool_calls")
             return turn.cut or results[-1].end_turn
@@ -882,7 +914,8 @@ class ConversationWorker:
         if reply.status is None and reply.closed is None:
             route.owe(reply.response_id, tokens)  # its response.done comes later: charged then
             return
-        route.charge(tokens)
+        if reply.tokens is None:  # usage, when given, was charged by the route at response.done
+            route.charge(tokens)
         if reply.status is None:
             route.note_response(None)
 
@@ -909,7 +942,7 @@ class ConversationWorker:
         while turn.lines and not turn.interrupted:
             text, ask = turn.lines.pop(0)
             job = None
-            if turn.voice == "realtime" and self.realtime.connected:
+            if turn.voice == "realtime" and self.realtime.up():
                 inner = self._inner = asyncio.ensure_future(self._rt_line(turn, text))
                 try:
                     job = await inner
@@ -918,8 +951,9 @@ class ConversationWorker:
                         raise
                     return
             if job is None:
-                if turn.voice == "realtime" and self.realtime.connected:
+                if turn.voice == "realtime" and self.realtime.up() and ask is None:
                     continue  # the server spoke nothing: the line is not said twice
+                # (a confirmation question is retried with Piper: Pending needs its audio)
                 before = len(turn.queued)
                 mood, intensity = self._mood(turn.cfg, None)
                 self._say_local(turn, text, mood, intensity)
@@ -936,6 +970,8 @@ class ConversationWorker:
         route = self.realtime
         assert self._rt_lock is not None
         async with self._rt_lock:
+            if not route.up():
+                return None  # went down (or spent its budget) while the line waited
             delivery = self._delivery(turn)
             language = LANGUAGE_NAMES.get(turn.language, turn.language)
             instructions = line_instructions(self._rt_instructions(turn, delivery), text, language)
@@ -962,7 +998,7 @@ class ConversationWorker:
         """A fixed line from outside a turn (the offline cue) in the server's voice while the
         route is up; False when it is not (the caller then says it with Piper). Any thread."""
         route, loop = self.realtime, self._loop
-        if route is None or loop is None or self._closed or not route.connected:
+        if route is None or loop is None or self._closed or not route.up():
             return False
         asyncio.run_coroutine_threadsafe(self._cue_line(text, language), loop)
         return True
@@ -981,9 +1017,13 @@ class ConversationWorker:
             voice="realtime",
         )
         try:
-            await self._rt_line(turn, text)
+            job = await self._rt_line(turn, text)
         except Exception as exc:
             log.warning("conversation: realtime line failed (%s)", type(exc).__name__)
+            job = None
+        if job is None and not self.realtime.up():  # the route went down: Piper says it
+            mood, intensity = self._mood(cfg, None)
+            self._say_local(turn, text, mood, intensity)
 
     async def _converse(self, turn: _Turn, router: Any) -> None:
         """Request, stream, run tool calls, repeat (see ``_rounds``); the errors that end a turn
@@ -1409,7 +1449,9 @@ class ConversationWorker:
                     {"role": "user", "content": turn.utterance.text},
                     *turn.exchange,
                 ]
-                if turn.rt_items:  # the server's items of this turn (deleted with it)
+                # the server's items of this turn (deleted with it); _history_message sends a
+                # chat route only the chat fields, so this mark never leaves the robot
+                if turn.rt_items:
                     messages[0]["rt"] = (turn.rt_gen, list(turn.rt_items))
                 if spoken:
                     messages.append({"role": "assistant", "content": spoken})

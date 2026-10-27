@@ -69,6 +69,7 @@ class NetworkMonitor:
         self.network = Link("network", self.policy, self.on_change)
         self.realtime = Link(REALTIME_LINK, self.policy, self._route_changed)
         self._realtime_active = False
+        self._realtime_confirmed = False  # counts once a session opened, or once offline
 
     def set_realtime(self, active: bool) -> None:
         """Realtime mode is on (the realtime route may answer a turn) or off: the ``realtime``
@@ -80,7 +81,14 @@ class NetworkMonitor:
 
     def report_realtime(self, ok: bool, now: float | None = None) -> None:
         """Outcome of a realtime session (connected, or failed to connect or dropped)."""
-        self.realtime.report(ok, self.clock() if now is None else now)
+        now = self.clock() if now is None else now
+        confirms = False
+        if ok:
+            with self._lock:
+                confirms, self._realtime_confirmed = not self._realtime_confirmed, True
+        self.realtime.report(ok, now)
+        if confirms:
+            self._sync_network(now)
 
     def realtime_due(self, now: float | None = None) -> bool:
         """Whether a new realtime connect may be tried (``connectivity.network`` backoff)."""
@@ -195,8 +203,8 @@ class NetworkMonitor:
                 counted = [
                     link for name, link in chat if name not in self._unconfirmed or not link.online
                 ]
-                if self._realtime_active:
-                    counted.append(self.realtime)
+                if self._realtime_active and (self._realtime_confirmed or not self.realtime.online):
+                    counted.append(self.realtime)  # the chat links' unconfirmed rule
                 candidates = bool(chat) or self._realtime_active
                 keep = candidates and not counted
             if not keep:

@@ -11,6 +11,8 @@ Scripts (``scripts``, used in order; the last one repeats):
   ``tool_args``) and ``response.done``;
 - ``close_before``: the socket is closed on ``response.create``;
 - ``close_mid``: ``response.created``, one audio delta, then the socket is closed;
+- ``error``: an ``error`` instead of ``response.created``;
+- ``empty``: ``response.created`` and ``response.done``, no audio;
 - ``silent``: nothing at all.
 
 ``unrequested`` sends a ``response.created`` nobody asked for right after ``session.updated``.
@@ -100,7 +102,13 @@ class TurnServer(FakeServer):
         item = f"item_{self.responses}"
         if script == "silent":
             return
+        if script == "error":  # refused before it began
+            await self._send(ws, {"type": "error", "error": {"code": "refused"}})
+            return
         await self._send(ws, {"type": "response.created", "response": {"id": rid}})
+        if script == "empty":  # a response with no audio
+            await self._done(ws, rid, "completed")
+            return
         if script == "tool":
             await self._send(
                 ws,

@@ -39,7 +39,13 @@ STATES = ("off", "blocked", "connecting", "connected", "closed", "fallback_local
 # Reasons a route is blocked; the first ones hold until a restart or a config change.
 BLOCKS = ("off", "no_route", "no_opt_in", "no_extra", "provider", "pseudonyms", "budget",
           "unavailable")  # fmt: skip
-OWN_CLOSES = ("conversation_end", "asleep", "shutdown", "reconfigured")  # our closes, not failures
+OWN_CLOSES = (
+    "conversation_end",
+    "asleep",
+    "shutdown",
+    "reconfigured",
+    "budget",
+)  # our closes, not failures
 LATENCY_LEVELS = {"p50": P50, "p95": P95}
 MS_PER_S = 1000.0
 LATENCY_WINDOW = 50  # turns whose latencies the report summarises
@@ -99,6 +105,7 @@ class RealtimeRoute:
         self._connect_lock = threading.Lock()
         self._client: Any = None
         self._connecting: Any = None  # the client of a connect in progress
+        self._abort = False  # a close came while a connect was in flight
         self.generation = 0  # one per server session: item ids belong to one generation
         self.output_rate_hz: int | None = None
         self._listener: Callable[[protocol.ServerEvent], None] | None = None
@@ -107,6 +114,8 @@ class RealtimeRoute:
         # responses the robot cancelled whose response.done no turn waits for any more:
         # (response id or None, the estimate charged if it never comes)
         self._owed: collections.deque[tuple[str | None, int]] = collections.deque()
+        # ids of the responses whose response.done was counted (and its usage charged)
+        self._charged: collections.deque[str] = collections.deque(maxlen=LATENCY_WINDOW)
         self.current_response: str | None = None  # the id of the response a turn follows
         self._ids = itertools.count(1)
         self.state = "off"
@@ -135,18 +144,21 @@ class RealtimeRoute:
         that the new config would not open is closed now, and the local pipeline answers: the
         route changed, the route is blocked, or ``privacy.pseudonyms_to_cloud`` came on while
         the session is on a cloud host (SPEC 12)."""
-        reason = self.blocked(cfg)
-        self.network.set_realtime(reason is None)
+        self.network.set_realtime(self.blocked(cfg) is None)
         client = self._client
-        if client is None:
-            return
-        cloud = client.snapshot().get("local") is not True
-        if (
-            reason is not None
-            or client.route != self.route(cfg)
-            or (cfg.privacy.pseudonyms_to_cloud and cloud)
-        ):
+        if client is not None and not self._fits(cfg, client):
             self.close_soon("reconfigured")
+        # a connect in flight checks the config again before its session is used (_connect)
+
+    def _fits(self, cfg: RoboEmotConfig, client: Any) -> bool:
+        """Whether ``cfg`` would open ``client``'s session: the route is not blocked, it is the
+        same route, and with ``privacy.pseudonyms_to_cloud`` the connected host is local."""
+        cloud = client.snapshot().get("local") is not True
+        return (
+            self.blocked(cfg) is None
+            and client.route == self.route(cfg)
+            and not (cfg.privacy.pseudonyms_to_cloud and cloud)
+        )
 
     def settings(self, cfg: RoboEmotConfig | None = None) -> Any:
         return (cfg or self.stack.effective()).voice.realtime_route
@@ -200,8 +212,11 @@ class RealtimeRoute:
         if reason is not None:
             self._set_state("off" if reason == "off" else "blocked", reason)
             return False
-        if self.connected:
-            return True
+        client = self._client
+        if client is not None and client.state == "connected":
+            if self._fits(cfg, client):
+                return True
+            self.close_soon("reconfigured")  # a reload this session missed
         if self._closed:
             return False
         retry = self.state == "fallback_local" or self.reason == "pseudonyms"
@@ -219,6 +234,7 @@ class RealtimeRoute:
     def close(self, reason: str = "shutdown") -> None:
         """Close the server session (blocking, bounded by the client's own timeouts)."""
         with self._lock:
+            self._abort = True
             client, self._client = self._client, None
             if reason == "shutdown":
                 self._closed = True
@@ -232,6 +248,7 @@ class RealtimeRoute:
         server's history) and close its socket on a thread of its own (the caller is an event
         loop)."""
         with self._lock:
+            self._abort = True  # a connect in flight does not keep its session
             client, self._client = self._client, None
         if client is None:
             return
@@ -251,6 +268,7 @@ class RealtimeRoute:
             if old is not None:
                 old.close()
             self._set_state("connecting", None)
+            self._abort = False
             client = self._connecting = self._make_client(cfg, route, router)
             update = self.session_update(cfg, self.base_instructions())
             try:
@@ -267,6 +285,11 @@ class RealtimeRoute:
                     self._set_state("blocked", "pseudonyms")
                 else:
                     self._set_state("fallback_local", client.reason)
+                return False
+            now = self.stack.effective()  # a reload, sleep or shutdown during the connect
+            if self._abort or self._closed or not self._fits(now, client):
+                client.close()
+                self._set_state("closed", "reconfigured")
                 return False
             with self._lock:
                 self._client = client
@@ -344,10 +367,17 @@ class RealtimeRoute:
                 self._count("unrequested")
                 self.send(protocol.response_cancel())
                 return
-            if listener is None:  # its turn was cut before it began: cancel it again
+            with self._lock:  # the oldest abandoned request answers first (in order)
+                index = next((i for i, e in enumerate(self._owed) if e[0] is None), None)
+                if index is not None:
+                    self._owed[index] = (event.response_id, self._owed[index][1])
+            if listener is None or index is not None:
+                # its turn was cut before it began: cancel it again, never hand it to a turn
                 self.send(protocol.response_cancel())
+                return
         if isinstance(event, protocol.ResponseDone):
             self.network.report_realtime(True)  # real traffic: the session works
+            self._account(event)
             if self._settle_owed(event):
                 return
         with self._lock:
@@ -361,6 +391,20 @@ class RealtimeRoute:
         with self._lock:
             self._owed.append((response_id, estimate))
 
+    def _account(self, done: protocol.ResponseDone) -> None:
+        """Every ``response.done`` is counted, and its usage charged, once (keyed by response
+        id): the turn's, an abandoned one and an unrequested one alike. Without usage the turn
+        (or the owed entry) charges its estimate."""
+        with self._lock:
+            seen = done.response_id is not None and done.response_id in self._charged
+            if done.response_id is not None and not seen:
+                self._charged.append(done.response_id)
+        if seen:
+            return
+        self.note_response(done)
+        if done.total_tokens is not None:
+            self.charge(done.total_tokens)
+
     def _settle_owed(self, done: protocol.ResponseDone) -> bool:
         """Charge and count a ``response.done`` owed by a cut turn; False when it is not one."""
         with self._lock:
@@ -370,8 +414,8 @@ class RealtimeRoute:
             if entry is None:
                 return False
             self._owed.remove(entry)
-        self.charge(done.total_tokens if done.total_tokens is not None else entry[1])
-        self.note_response(done)
+        if done.total_tokens is None:  # usage was charged by _account when given
+            self.charge(entry[1])
         return True
 
     def _settle_lost(self) -> None:
@@ -436,6 +480,12 @@ class RealtimeRoute:
         route, router = self.route(), self._router()
         if route is not None and router is not None and tokens > 0:
             router.charge(route.name, tokens)
+            if router.used(route.name) >= route.daily_token_budget:
+                self.close_soon("budget")  # spent: nothing more goes to the route today
+
+    def up(self) -> bool:
+        """Connected and allowed to answer now (not blocked: e.g. a budget spent meanwhile)."""
+        return self.connected and self.blocked(self.stack.effective()) is None
 
     def note_response(self, done: protocol.ResponseDone | None) -> None:
         with self._lock:

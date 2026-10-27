@@ -14,7 +14,9 @@ and mood; Conversation state).
   played (``truncate_played``);
 - a session lost meanwhile ends the run with ``closed`` set.
 
-``request_text`` holds the instructions builders. Nothing here logs text, audio or identifiers.
+Events of another response (stale, or unrequested) are dropped once this run's response id
+is known. ``replay_block`` and ``line_instructions`` build instruction parts. Nothing here logs
+text, audio or identifiers.
 """
 
 from __future__ import annotations
@@ -67,6 +69,16 @@ class Reply:
         return ids + [c.item_id for c in self.calls if c.item_id]
 
 
+# the server events that name the response they belong to
+_OF_A_RESPONSE = (
+    protocol.AudioDelta,
+    protocol.AudioDone,
+    protocol.ReplyTranscript,
+    protocol.FunctionCall,
+    protocol.ResponseDone,
+)
+
+
 @dataclass
 class _Closed:
     reason: str
@@ -103,6 +115,8 @@ class ResponseRun:
         self._feeds: dict[str | None, StreamFeed] = {}
         self._questions: set[str | None] = set()
         self._cut = False
+        self._finished = False
+        self._own_id: str | None = None  # this run's response id, from response.created
         self.response_id: str | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._queue: asyncio.Queue[Any] | None = None
@@ -137,8 +151,8 @@ class ResponseRun:
                     elif isinstance(event, protocol.ResponseDone):
                         if self.response_id and event.response_id not in (None, self.response_id):
                             continue  # another response's end
+                        # counted and its usage charged by the route (once per response)
                         self.reply.status, self.reply.tokens = event.status, event.total_tokens
-                        self.route.note_response(event)
                         break
             except asyncio.CancelledError:
                 self._cancel_response()
@@ -154,13 +168,27 @@ class ResponseRun:
 
     def _end_feeds(self) -> None:
         with self._lock:
+            self._finished = True  # no feed is created after this one: it would never end
             feeds = list(self._feeds.values())
         for feed in feeds:
             feed.end()
 
+    def _foreign(self, response_id: str | None) -> bool:
+        """An event of another response (stale, or one the robot never asked for), once this
+        run's id is known."""
+        with self._lock:
+            own = self._own_id
+        return response_id is not None and own is not None and response_id != own
+
     # ----------------------------------------------------------------- client thread
 
     def _on_event(self, event: protocol.ServerEvent) -> None:
+        if isinstance(event, protocol.ResponseCreated):
+            with self._lock:
+                if self._own_id is None:
+                    self._own_id = event.response_id
+        elif isinstance(event, _OF_A_RESPONSE) and self._foreign(event.response_id):
+            return
         if isinstance(event, protocol.AudioDelta):
             self._audio(event)
             return
@@ -196,7 +224,7 @@ class ResponseRun:
     def _audio(self, event: protocol.AudioDelta) -> None:
         rate = self.route.output_rate_hz or protocol.DEFAULT_OUTPUT_RATE_HZ
         with self._lock:
-            if self._cut or self.reply.cancelled:
+            if self._cut or self.reply.cancelled or self._finished:
                 return
             feed = self._feeds.get(event.item_id)
             if feed is None:

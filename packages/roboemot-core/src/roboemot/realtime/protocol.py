@@ -107,9 +107,10 @@ def session_update(
             "output": output,
         },
     }
-    if tools:
+    if tools is not None:  # [] clears the tools a previous turn left on the server
         session["tools"] = tools
-        session["tool_choice"] = "auto"
+        if tools:
+            session["tool_choice"] = "auto"
     return {"type": SESSION_UPDATE, "session": session}
 
 

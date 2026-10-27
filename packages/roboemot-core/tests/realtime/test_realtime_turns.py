@@ -49,6 +49,7 @@ def test_a_whole_turn_text_in_and_the_server_voice_out(rigs):
         update = server.of("session.update")[-1]["session"]
         assert "voice" not in update["audio"]["output"]  # empty: the server's default
         assert update["audio"]["input"]["turn_detection"]["create_response"] is False
+        assert update["tools"] == [] and "tool_choice" not in update  # none left over (M5)
         # the audio played through the speech output: timeline, echo reference, question flag
         assert wait_for(lambda: rig.speech.snapshot()["spoken"] == 1)
         assert rig.sink.pushed and rig.sink.peak() > 0
@@ -410,3 +411,87 @@ def test_repr_holds_no_reply_text_or_ids():
     reply = Reply(texts={"item_9": "Quintavalle"}, jobs=[(1, "item_9")], response_id="resp_9")
     assert "Quintavalle" not in repr(reply) and "item_9" not in repr(reply)
     assert "resp_9" not in repr(reply)
+
+
+# ------------------------------------------------------------------ fix round 1
+
+
+def test_a_loss_after_a_tool_ran_is_not_answered_again(rigs):
+    """B1: the tool ran through the realtime route; the session drops before any audio. The
+    turn is cut and the fallback line is said with Piper; the chat routes do not answer it
+    again (the gesture would run twice)."""
+    play = '{"gesture": "joy"}'
+    with TurnServer(["tool", "close_before"], tool_name="play", tool_args=play) as srv:
+        rig, env = tooled(rigs, srv)
+        rig.turn()
+        assert env.played == ["joy"]
+        assert rig.chat_hosts() == []
+        assert wait_for(lambda: len(rig.speech.backend.texts) == 1)  # the fallback line
+        history = rig.history()[0]
+        assert [m["role"] for m in history] == ["user", "assistant", "tool", "assistant"]
+        assert history[-1]["interrupted"] is True
+        assert rig.route.snapshot()["cut_mid_turn"] == 1
+
+
+def test_a_failure_after_a_tool_ran_cancels_and_is_not_answered_again(rigs, monkeypatch):
+    play = '{"gesture": "joy"}'
+    with TurnServer(["tool", "reply"], tool_name="play", tool_args=play) as srv:
+        rig, env = tooled(rigs, srv)
+
+        ids = rig.route.new_item_id
+
+        def broken():
+            if srv.of("conversation.item.create"):  # the text item went: the tool result fails
+                raise RuntimeError("boom")
+            return ids()
+
+        monkeypatch.setattr(rig.route, "new_item_id", broken)
+        rig.turn()
+        assert env.played == ["joy"]
+        assert rig.chat_hosts() == []
+        assert wait_for(lambda: srv.of("response.cancel"))
+        assert wait_for(lambda: len(rig.speech.backend.texts) == 1)
+
+
+def test_a_spent_budget_closes_the_session_and_lines_go_to_piper(rigs):
+    with TurnServer() as srv:
+        rig = rigs(srv, route=rt_route(srv, daily_token_budget=50))
+        rig.turn()
+        assert rig.route.connected
+        rig.turn()  # 84 of 50 tokens: spent
+        assert wait_for(lambda: not rig.route.connected)
+        assert rig.route.snapshot()["reason"] == "budget"
+        assert rig.worker.say_line("Sono senza rete.", "it") is False  # the cue goes to Piper
+
+
+def test_a_cue_line_is_said_by_piper_when_the_session_drops_before_it(rigs):
+    with TurnServer(["close_before"]) as srv:
+        rig = rigs(srv)
+        assert rig.route.ready()
+        assert rig.worker.say_line("Sono senza rete.", "it")
+        assert wait_for(lambda: rig.speech.backend.texts == ["Sono senza rete."])
+
+
+def test_a_question_the_server_did_not_voice_is_asked_by_piper(rigs):
+    """M4: a confirmation question that got no audio is retried with Piper and stays pending."""
+    args = '{"key": "colore", "value": "blu"}'
+    with TurnServer(["tool", "empty"], tool_name="remember_preference", tool_args=args) as srv:
+        rig, _ = tooled(rigs, srv, store=Store())
+        rig.turn()
+        assert any("blu" in t for t in rig.speech.backend.texts)
+        assert rig.worker._confirm is not None
+
+
+def test_a_refused_response_leaves_no_item_and_the_turn_is_replayed(rigs):
+    """M3: the chat routes answered; the server must not keep the question, and the next
+    realtime request replays the turn it does not hold."""
+    with TurnServer(["error", "reply"]) as srv:
+        rig = rigs(srv)
+        rig.turn("prima domanda")
+        assert rig.chat_hosts() == ["lan.local"]
+        first = srv.of("conversation.item.create")[0]["item"]["id"]
+        assert wait_for(lambda: srv.of("conversation.item.delete"))
+        assert srv.of("conversation.item.delete")[0]["item_id"] == first
+        rig.turn("seconda domanda")
+        assert "prima domanda" in response_creates(srv)[-1]["response"]["instructions"]
+        assert len(srv.connections) == 1  # the refusal did not stall and drop the session

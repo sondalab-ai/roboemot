@@ -245,6 +245,7 @@ SR-5. **Robot validation (HIL) and realtime check.**
      - barge-in ≤ 200 ms;
      - nod-to-phrase sync on the returned audio;
      - "Neve" recognition;
+     - client-chosen item ids (`input_text`, `function_call_output`): `conversation.item.delete` of them works against Pollen's server (SR-2 sets `item.id`; unverified until now), and `conversation.item.truncate` is honoured;
      - TV with nobody engaged sends nothing.
    - Tests `@pytest.mark.hil`. SPEC 13 table rows with the figures, SPEC 15 open questions, owner A/B listen.
 
