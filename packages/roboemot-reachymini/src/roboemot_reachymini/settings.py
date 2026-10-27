@@ -198,9 +198,10 @@ class ReachySettings:
     @staticmethod
     def _realtime_session(base: str, cfg: RoboEmotConfig) -> list[FieldDescriptor]:
         """The allocator host and whether the identifier is sent, in platform mode (SPEC 12,
-        Data); in direct mode the provider is not used: no host, nothing sent."""
+        Data); with the route off or in direct mode the provider is not used: no host, nothing
+        sent."""
         rt = cfg.voice.realtime_route
-        platform = rt.mode == PLATFORM_MODE
+        platform = rt.enabled and rt.mode == PLATFORM_MODE
         route = next((r for r in cfg.llm_routes if r.name == rt.route), None) if platform else None
         origin = route_origin(route) if route is not None else None
         prefix = f"{base}.realtime_session"

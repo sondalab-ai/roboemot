@@ -299,10 +299,10 @@ ALLOCATOR_ROUTE = {
 }
 
 
-def session_rows(tmp_path, mode="platform", platform_id=False):
+def session_rows(tmp_path, mode="platform", platform_id=False, enabled=True):
     app = {
         "llm_routes": [ALLOCATOR_ROUTE],
-        "voice": {"realtime_route": {"enabled": True, "route": "platform", "mode": mode}},
+        "voice": {"realtime_route": {"enabled": enabled, "route": "platform", "mode": mode}},
         "privacy": {"realtime_platform_id": platform_id},
     }
     stack = ConfigStack(app=app)
@@ -333,3 +333,10 @@ def test_in_direct_mode_no_allocator_is_used_and_no_identifier_is_sent(tmp_path)
 def test_without_a_stack_there_are_no_session_rows():
     section = ReachySettings().section(None, MANIFEST)
     assert not [r for r in section.fields if r["path"].startswith(SESSION)]
+
+
+def test_with_the_route_off_no_allocator_is_used_and_no_identifier_is_sent(tmp_path):
+    """Fix round 1, M8: the rows follow voice.realtime_route.enabled too."""
+    rows = session_rows(tmp_path, platform_id=True, enabled=False)
+    assert rows[f"{SESSION}.allocator_host"]["value"] is None
+    assert rows[f"{SESSION}.sends_platform_id"]["value"] is False

@@ -92,7 +92,9 @@ class Allocator:
         return self.reply
 
     def factory(self) -> httpx.AsyncClient:
-        return httpx.AsyncClient(transport=httpx.MockTransport(self.handler))
+        # follow_redirects on: only post_allocation's per-request override keeps a redirect
+        # from being followed (fix round 1, M1)
+        return httpx.AsyncClient(transport=httpx.MockTransport(self.handler), follow_redirects=True)
 
     def bodies(self) -> list[object]:
         return [json.loads(r.content) for r in self.requests]
@@ -131,10 +133,11 @@ def allocate(
     key: str | None = KEY,
     platform_id: bool = False,
     noted: list[bool] | None = None,
+    timeout_s: float = 2.0,
 ) -> Allocation:
     notes = noted if noted is not None else []
     request = AllocationRequest(
-        r or route(), key, platform_id, 2.0, allocator.factory, lambda: notes.append(True)
+        r or route(), key, platform_id, timeout_s, allocator.factory, lambda: notes.append(True)
     )
     return asyncio.run(provider(daemon).allocate(request))
 
@@ -445,6 +448,7 @@ def test_an_unreachable_allocator_is_its_own_reason():
     [
         ("wss://rt-7.hf.space/v1/chat", "url_path"),  # not /realtime
         ("wss://rt-7.hf.space/realtime/x", "url_path"),
+        ("wss://allocator.hf.space/realtime/", "url_path"),  # exactly /realtime (M7)
         ("wss://rt-7.hf.space/v1?next=/realtime", "url_path"),  # the query does not count
         ("ws://rt-7.hf.space/realtime", "url_insecure"),  # ws to a cloud host
         ("wss://user:pw@rt-7.hf.space/realtime", "url_userinfo"),
@@ -547,3 +551,11 @@ def test_turning_the_opt_in_off_keeps_the_identifier_out_of_the_next_allocation(
         assert c.snapshot()["platform_id_sent"] is False
     finally:
         c.close()
+
+
+def test_with_no_time_left_the_daemon_is_not_asked():
+    """Fix round 1, M9: a daemon call that could not finish before the connect deadline is not
+    started (its thread would outlive the connect)."""
+    allocator, daemon, noted = Allocator(), Daemon(), []
+    allocate(allocator, daemon, platform_id=True, noted=noted, timeout_s=0.0)
+    assert daemon.requests == [] and allocator.bodies() == [{}] and noted == []

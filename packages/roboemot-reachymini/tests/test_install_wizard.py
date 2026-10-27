@@ -2961,3 +2961,29 @@ def test_the_dry_run_names_websockets_when_it_would_be_added(offline, robot, dae
     out = capsys.readouterr().out
     assert "would install the realtime extra (websockets, not present yet)" in out
     assert any("websockets 15.0.1" in line for line in out.splitlines() if "would add" in line)
+
+
+def test_the_dry_run_flags_a_websockets_too_old_for_the_extra(offline, robot, daemon, capsys):
+    """Fix round 1, M12: reachy-mini allows websockets 12, the extra needs 13 or later, so an
+    old version is not reported as enough."""
+    robot.env["websockets"] = "12.0"
+    inst.run_install(options(dry_run=True), quiet_ui(yes=True), ROOT)
+    out = capsys.readouterr().out
+    assert "already present" not in out
+    assert "would install the realtime extra (websockets 12.0 present, needs >=13,<16)" in out
+
+
+@pytest.mark.parametrize(
+    ("version", "spec", "ok"),
+    [
+        ("15.0.1", ">=13,<16", True),
+        ("13", ">=13,<16", True),
+        ("12.0", ">=13,<16", False),
+        ("16.0", ">=13,<16", False),
+        ("15.0rc1", ">=13,<16", False),  # unreadable counts as no
+        ("14.2", "", True),
+        ("14.2", "~=14.0", False),  # an operator it does not read counts as no
+    ],
+)
+def test_version_meets_reads_plain_specifiers(version, spec, ok):
+    assert inst.version_meets(version, spec) is ok

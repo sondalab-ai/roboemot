@@ -102,7 +102,9 @@ class PlatformSession:
     async def _hardware_id(self, timeout_s: float) -> str | None:
         """The daemon's identifier when it is well formed, else None (logged by type only);
         the daemon gets at most the connect's time left."""
-        wait_s = min(REQUEST_TIMEOUT_S, timeout_s) if timeout_s > 0 else REQUEST_TIMEOUT_S
+        if timeout_s <= 0:
+            return None  # no time left: a daemon call would outlive the connect
+        wait_s = min(REQUEST_TIMEOUT_S, timeout_s)
         try:
             value = await asyncio.to_thread(self._daemon_client(wait_s).hardware_id)
         except DaemonError as exc:
