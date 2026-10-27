@@ -236,6 +236,7 @@ class RealtimeRoute:
         self._statuses: collections.Counter[str] = collections.Counter()
         self._failures: collections.Counter[str] = collections.Counter()
         self._first_audio_ms: collections.deque[float] = collections.deque(maxlen=LATENCY_WINDOW)
+        self._transcript_ms: collections.deque[float] = collections.deque(maxlen=LATENCY_WINDOW)
         self._stages: dict[str, collections.deque[float]] = {
             stage: collections.deque(maxlen=LATENCY_WINDOW) for stage in protocol.LATENCY_STAGES
         }
@@ -1093,6 +1094,11 @@ class RealtimeRoute:
         with self._lock:
             self._first_audio_ms.append(ms)
 
+    def note_transcript(self, ms: float) -> None:
+        """End of the user's speech to the server's transcript of it (SPEC 13, the HIL)."""
+        with self._lock:
+            self._transcript_ms.append(ms)
+
     def count(self, key: str, n: int = 1) -> None:
         self._count(key, n)
 
@@ -1147,6 +1153,7 @@ class RealtimeRoute:
                 "upload_budget_s": rt.daily_upload_budget_s,
                 "latency_ms": {
                     "first_audio": summarise(list(self._first_audio_ms), LATENCY_LEVELS),
+                    "transcript": summarise(list(self._transcript_ms), LATENCY_LEVELS),
                     "server": {
                         stage: summarise([v * MS_PER_S for v in values], LATENCY_LEVELS)
                         for stage, values in self._stages.items()

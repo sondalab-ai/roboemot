@@ -864,6 +864,9 @@ class VoiceListener:
         result = job.result
         if result is not None:
             self._count_audio("transcribed")
+            self._realtime.route.note_transcript(
+                (self._clock() - p.ev.last_speech_stamp) * MS_PER_S
+            )
             heard = (result.generation, result.items)
             self._finish(p, result.text, None, frozenset(), heard, server=True)
             return None
