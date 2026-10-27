@@ -556,7 +556,8 @@ class RealtimeRoute:
             on_event=lambda event: self._on_event(event, token),
             on_close=lambda reason: self._on_close(reason, token),
             local_only=lambda: self.stack.effective().privacy.pseudonyms_to_cloud,
-            platform_id=cfg.privacy.realtime_platform_id,
+            # read at each allocation (a reconnect after the opt-in went off sends no identifier)
+            platform_id=lambda: self.stack.effective().privacy.realtime_platform_id,
             may_send=lambda: bool(box) and self._may_send_update(token, closes, box[0]),
         )
         box.append(client)

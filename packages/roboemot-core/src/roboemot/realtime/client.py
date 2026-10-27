@@ -12,8 +12,9 @@ Transport rules:
 - the only credential is an ``Authorization`` header, sent only when the URL rules allow it; a
   route with a key whose header resolves empty never connects (``key_unavailable``);
 - a provider that cannot allocate raises ``ProviderRefused``: the client closes with its reason
-  code (``provider_http_<code>``, ...), and the snapshot keeps whether the allocation carried
-  the platform identifier (``platform_id_sent``), never its value;
+  code (``provider_http_<code>``, ...). ``platform_id()`` (the opt-in) is read at each
+  allocation, and the snapshot keeps whether the last allocation request carried the platform
+  identifier (``platform_id_sent``, also when the allocator then failed), never its value;
 - no redirect is followed (the library would re-send the header to the new host), no proxy is
   used (websockets 15 would read the system's, which would see the key and the audio; 13 and
   14 have no proxy support), no compression, ``max_size`` is
@@ -129,7 +130,7 @@ class RealtimeClient:
         on_close: Callable[[str], None] = lambda _reason: None,
         local_only: Callable[[], bool] = lambda: False,
         may_send: Callable[[], bool] = lambda: True,
-        platform_id: bool = False,
+        platform_id: Callable[[], bool] = lambda: False,
         http_client_factory: Callable[[], httpx.AsyncClient] | None = None,
     ) -> None:
         self.route, self.settings, self.provider = route, settings, provider
@@ -154,7 +155,7 @@ class RealtimeClient:
         self._dropping: asyncio.Future[None] | None = None
         self._sending = False  # a write is in flight (a socket lost meanwhile is a stuck send)
         self._target: ConnectTarget | None = None
-        self._platform_id_sent = False  # the last allocation carried the platform identifier
+        self._platform_id_sent = False  # the last allocation request carried the identifier
         self.state = "idle"
         self.reason: str | None = None
         self._counts: collections.Counter[str] = collections.Counter()
@@ -285,6 +286,11 @@ class RealtimeClient:
         with self._lock:
             self._counts[key] += n
 
+    def _note_platform_id(self) -> None:
+        """The provider is about to send the platform identifier (the report says so)."""
+        with self._lock:
+            self._platform_id_sent = True
+
     def _key(self) -> dict[str, str]:
         """Only the ``Authorization`` header of the route's key, or nothing."""
         value = self._auth_headers().get(AUTH_HEADER)
@@ -351,16 +357,17 @@ class RealtimeClient:
         key = headers.get(AUTH_HEADER, "")
         if self.route.api_key not in NO_KEY and not key.removeprefix(BEARER).strip():
             raise _KeyUnavailable  # never connect a keyed route without its key
+        with self._lock:
+            self._platform_id_sent = False
         request = AllocationRequest(
             self.route,
             key.removeprefix(BEARER) or None,
-            self._platform_id,
+            self._platform_id() is True,  # the opt-in now, not when the client was built
             max(0.0, deadline - loop.time()),
             self._http_client_factory,
+            self._note_platform_id,
         )
         allocation = await self.provider.allocate(request)
-        with self._lock:
-            self._platform_id_sent = allocation.platform_id_sent is True
         target = connect_target(self.route, allocation, tuple(self.provider.key_hosts))
         with self._lock:
             self._target = target

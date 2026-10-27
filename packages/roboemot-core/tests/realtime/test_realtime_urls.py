@@ -448,13 +448,15 @@ def test_provider_refused_carries_a_reason_code_only():
 
 
 def test_the_client_reports_whether_the_platform_identifier_was_sent():
-    """SR-4: the opt-in reaches the provider, and the client's snapshot says whether the
-    allocation actually carried the identifier (SPEC 12A, ``platform_id_sent``)."""
+    """SR-4: the opt-in reaches the provider, and the client's snapshot says whether the last
+    allocation request carried the identifier (SPEC 12A, ``platform_id_sent``)."""
 
     class Sending(OtherHost):
         async def allocate(self, request: AllocationRequest) -> Allocation:
             self.requests.append(request)
-            return Allocation(self.url, platform_id_sent=request.platform_id)
+            if request.platform_id:
+                request.on_platform_id()  # right before the request with it is sent
+            return Allocation(self.url)
 
     with FakeServer() as server:
         url = f"ws://localhost:{server.port}/realtime"
@@ -462,7 +464,7 @@ def test_the_client_reports_whether_the_platform_identifier_was_sent():
             provider = Sending(url)
             c = RealtimeClient(
                 route(server.http_base()), settings(), provider, auth_headers=bearer,
-                platform_id=opted,
+                platform_id=lambda opted=opted: opted,
             )  # fmt: skip
             try:
                 assert c.snapshot()["platform_id_sent"] is False  # nothing allocated yet
@@ -471,3 +473,66 @@ def test_the_client_reports_whether_the_platform_identifier_was_sent():
                 assert c.snapshot()["platform_id_sent"] is opted
             finally:
                 c.close()
+
+
+def test_the_identifier_opt_in_is_read_at_each_allocation():
+    """Security review of SR-4: an opt-in turned off after the client was built is honoured at
+    its next allocation (a reconnect), and the report follows (SPEC 12, Data)."""
+    opted = [True]
+
+    class Sending(Refusing):
+        async def allocate(self, request: AllocationRequest) -> Allocation:
+            if request.platform_id:
+                request.on_platform_id()
+            return await super().allocate(request)
+
+    provider = Sending("provider_http_503")
+    c = RealtimeClient(
+        route("http://127.0.0.1:9/v1"), settings(), provider, auth_headers=bearer,
+        platform_id=lambda: opted[0],
+    )  # fmt: skip
+    try:
+        assert c.connect(UPDATE) is False
+        assert provider.requests[-1].platform_id is True
+        assert c.snapshot()["platform_id_sent"] is True  # sent, even though the allocator failed
+        opted[0] = False
+        assert c.connect(UPDATE) is False
+        assert provider.requests[-1].platform_id is False
+        assert c.snapshot()["platform_id_sent"] is False
+    finally:
+        c.close()
+
+
+@pytest.mark.parametrize(
+    ("base", "locality", "reason"),
+    [
+        ("https://alloc.example.org/session", "cloud", None),
+        ("http://box.local:8000/session", "auto", None),  # local: plain http allowed
+        ("https://alloc.example.org/session/", "cloud", "provider_url"),
+        ("https://alloc.example.org/session?x=1", "cloud", "provider_url"),
+        ("https://u@alloc.example.org/session", "cloud", "provider_url"),
+        ("https://alloc.example.org:99999/session", "cloud", "provider_url"),
+        ("http://alloc.example.org/session", "cloud", "provider_insecure"),
+        ("https://localhost/session", "cloud", "provider_this_machine"),
+    ],
+)
+def test_a_provider_endpoint_is_checked_before_anything_is_sent(base, locality, reason):
+    r = route(base, locality=locality)
+    if reason is None:
+        assert sess.provider_endpoint(r, "/session") == base
+    else:
+        with pytest.raises(sess.ProviderRefused) as refused:
+            sess.provider_endpoint(r, "/session")
+        assert refused.value.reason == reason
+
+
+def test_an_allocated_url_needs_the_realtime_path_and_is_read_as_ws():
+    assert sess.allocated_url("https://h.example.org/v1/realtime?q=1") == (
+        "wss://h.example.org/v1/realtime?q=1"
+    )
+    assert sess.allocated_url("ws://h.local/realtime/") == "ws://h.local/realtime/"
+    with pytest.raises(UrlRefused, match="path"):
+        sess.allocated_url("wss://h.example.org/v1?x=/realtime")
+    for bad in (None, "", 42):
+        with pytest.raises(sess.ProviderRefused, match="provider_reply"):
+            sess.allocated_url(bad)

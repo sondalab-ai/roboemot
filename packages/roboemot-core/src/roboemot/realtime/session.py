@@ -79,8 +79,10 @@ class ProviderUnavailable(RuntimeError):
 class AllocationRequest:
     """What a provider gets to allocate a session: the route (its ``base_url`` is the provider's
     own endpoint), the route's key (None for none; never logged, not in ``repr``), whether the
-    platform identifier may be sent (an opt-in), the time it may take, and an optional httpx
-    client factory (tests)."""
+    platform identifier may be sent (the opt-in, read for this allocation), the time it may take,
+    an optional httpx client factory (tests), and ``on_platform_id``, which the provider calls
+    right before it sends a request that carries the identifier (the report's
+    ``platform_id_sent``; never the value)."""
 
     route: LLMRoute
     key: str | None = field(default=None, repr=False)
@@ -89,17 +91,16 @@ class AllocationRequest:
     http_client_factory: Callable[[], httpx.AsyncClient] | None = field(
         default=None, repr=False, compare=False
     )
+    on_platform_id: Callable[[], None] = field(default=lambda: None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
 class Allocation:
-    """Where to connect (not in ``repr``: its query can carry a token), the key-host suffixes
-    that apply to it (a subset of the provider's ``key_hosts``) and whether the request carried
-    the platform identifier (the report's ``platform_id_sent``; never the value)."""
+    """Where to connect (not in ``repr``: its query can carry a token) and the key-host suffixes
+    that apply to it (a subset of the provider's ``key_hosts``)."""
 
     connect_url: str = field(repr=False)
     key_hosts: tuple[str, ...] = ()
-    platform_id_sent: bool = False
 
 
 @runtime_checkable
@@ -168,6 +169,49 @@ async def post_allocation(
         raise UrlRefused("allocator_origin")
     async with allocation_client(request) as client:
         return await client.post(url, json=json, headers=headers, follow_redirects=False)
+
+
+def provider_endpoint(route: LLMRoute, path: str) -> str:
+    """The route's ``base_url`` when it can be a provider's endpoint at ``path``: exactly that
+    path, no query, fragment or user info (``provider_url``), ``https`` unless the route is local
+    (``provider_insecure``), and not this machine unless local (``provider_this_machine``).
+    Otherwise :class:`ProviderRefused` with the reason, before anything is sent."""
+    url = route.base_url
+    try:
+        parts = urlsplit(url)
+        parts.port  # noqa: B018 - raises on a bad port
+    except ValueError:
+        raise ProviderRefused("provider_url") from None
+    if (
+        parts.path != path
+        or parts.query
+        or parts.fragment
+        or "@" in parts.netloc
+        or url.endswith(("?", "#"))
+    ):
+        raise ProviderRefused("provider_url")
+    local = url_is_local(url, route.locality)
+    if parts.scheme.lower() != "https" and not local:
+        raise ProviderRefused("provider_insecure")
+    if this_machine(url) and not local:
+        raise ProviderRefused("provider_this_machine")
+    return url
+
+
+def allocated_url(url: object) -> str:
+    """A connect URL a provider was handed: a non-empty string (else ``provider_reply``) whose
+    path ends in ``/realtime`` (else :class:`UrlRefused` ``path``); ``http`` and ``https`` are
+    read as ``ws`` and ``wss``, the rest is kept. :func:`connect_target` applies the other rules."""
+    if not isinstance(url, str) or not url:
+        raise ProviderRefused("provider_reply")
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        raise UrlRefused("unparsable") from None
+    if not parts.path.rstrip("/").endswith(REALTIME_PATH):
+        raise UrlRefused("path")
+    scheme = WS_SCHEMES.get(parts.scheme.lower())
+    return url if scheme is None else urlunsplit((scheme, *parts[1:]))
 
 
 def realtime_url(base_url: str) -> str:
