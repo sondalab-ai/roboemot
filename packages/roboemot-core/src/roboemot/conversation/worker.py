@@ -316,12 +316,14 @@ class ConversationWorker:
         turn runs, at most ``conversation.pending_utterances`` wait and a newer one replaces the
         oldest. Safe from any thread (the listener's). Returns whether it was taken."""
         if self._closed or not (utterance.final and utterance.addressed and utterance.text.strip()):
+            self._drop_audio(utterance)  # not answered: the server must not answer it either
             return False
         cfg = self.stack.effective()
         if self.clock() - self._barge_at <= cfg.conversation.stop_drop_window_s and (
             self._only_stop(utterance, cfg)
         ):
             self._counts["stop_consumed"] += 1  # the command that already stopped the robot
+            self._drop_audio(utterance)
             return False
         limit = cfg.conversation.pending_utterances
         gen = NOT_RECORDED
@@ -756,101 +758,112 @@ class ConversationWorker:
         is asked, until the reply has no call, a skill ends the turn or
         ``conversation.max_tool_rounds`` rounds ran (the next request has ``tool_choice:
         none``; a call after that gets an error result and ends the turn)."""
-        route, conv = self.realtime, turn.cfg.conversation
+        route = self.realtime
         assert self._rt_lock is not None
         async with self._rt_lock:
-            # nothing goes to a session an abandoned request still holds: wait it out first
-            # (an expiry resets it), then make sure a session is up for this turn
-            await wait_in_order(route, self.clock)
-            loop = asyncio.get_running_loop()
-            if not route.up() and not await loop.run_in_executor(None, route.ready, turn.cfg):
-                return False
-            turn.rt_gen = route.generation
-            turn.route = route.settings(turn.cfg).route
-            offered = self._offer(turn)
-            choices = SkillRegistry.snapshot_choices(offered, conv.tool_enum_max_items)
-            tools = SkillRegistry.tools(
-                offered,
-                enum_max=conv.tool_enum_max_items,
-                max_chars=conv.tool_arg_max_chars,
-                choices=choices,
+            # no other utterance's audio lands between this turn's response.create calls
+            route.hold_input()
+            try:
+                return await self._realtime_rounds_held(turn)
+            finally:
+                route.release_input()
+
+    async def _realtime_rounds_held(self, turn: _Turn) -> bool:
+        """``_realtime_rounds`` with ``_rt_lock`` held and the audio input held."""
+        route, conv = self.realtime, turn.cfg.conversation
+        # nothing goes to a session an abandoned request still holds: wait it out first
+        # (an expiry resets it), then make sure a session is up for this turn
+        await wait_in_order(route, self.clock)
+        loop = asyncio.get_running_loop()
+        if not route.up() and not await loop.run_in_executor(None, route.ready, turn.cfg):
+            return False
+        turn.rt_gen = route.generation
+        turn.route = route.settings(turn.cfg).route
+        offered = self._offer(turn)
+        choices = SkillRegistry.snapshot_choices(offered, conv.tool_enum_max_items)
+        tools = SkillRegistry.tools(
+            offered,
+            enum_max=conv.tool_enum_max_items,
+            max_chars=conv.tool_arg_max_chars,
+            choices=choices,
+        )
+        sent = route.send(
+            route.session_update(
+                turn.cfg,
+                self._base_instructions(),
+                rt_protocol.function_tools(tools) if tools else [],
             )
-            sent = route.send(
-                route.session_update(
-                    turn.cfg,
-                    self._base_instructions(),
-                    rt_protocol.function_tools(tools) if tools else [],
-                )
-            )
-            if not sent:
+        )
+        if not sent:
+            return False
+        audio = turn.utterance.realtime
+        if audio is not None and audio[0] == route.generation:
+            # the server heard the audio: its own user items hold the words, answered by
+            # the response below (no input_text: the words would be there twice)
+            turn.rt_items += list(audio[1])
+            turn.rt_audio = True
+        else:  # text input, or the session that heard the audio is gone: the words as text
+            item = route.new_item_id()
+            if not route.send(rt_protocol.text_item(turn.utterance.text, item)):
                 return False
-            audio = turn.utterance.realtime
-            if audio is not None and audio[0] == route.generation:
-                # the server heard the audio: its own user items hold the words, answered by
-                # the response below (no input_text: the words would be there twice)
-                turn.rt_items += list(audio[1])
-                turn.rt_audio = True
-            else:  # text input, or the session that heard the audio is gone: the words as text
-                item = route.new_item_id()
-                if not route.send(rt_protocol.text_item(turn.utterance.text, item)):
-                    return False
-                turn.rt_items.append(item)
-            route.count("utterances_sent")
-            turn.stamps["request"] = self.clock()
-            self.phase.begin_thinking()
-            self.phase.set_route(turn.route)
-            delivery = self._delivery(turn)
-            while True:
-                in_cap = turn.rounds < conv.max_tool_rounds and bool(offered)
-                calls: list[ToolCall] = []
-                results: list[ToolOutcome] = []
-                on_call = self._rt_caller(turn, choices, in_cap, calls, results)
-                instructions = self._rt_instructions(turn, delivery)
-                run = ResponseRun(
-                    route,
-                    self.speech,
-                    utterance=turn.speech_id,
-                    mood=delivery.mood,
-                    volume_db=delivery.volume_db,
-                    language=turn.language,
-                    clock=self.clock,
-                    on_call=on_call,
-                    input_chars=len(turn.utterance.text),
-                )
-                round_from = len(turn.spoken)
-                turn.rt_round = (calls, results, round_from)
-                turn.rt_run = run
-                try:
-                    choice = "auto" if in_cap else "none" if offered else None
-                    reply = await run.run(instructions, choice)
-                except asyncio.CancelledError:
-                    self._absorb(turn, run.reply, instructions)
-                    self._cut_realtime(turn)
-                    self._keep_round(turn)  # a skill that ran stays in the history
-                    raise
-                self._absorb(turn, reply, instructions)
-                if reply.closed or reply.status == "error":
-                    return self._realtime_lost(turn)
-                if turn.cut:
-                    self._cut_realtime(turn)
-                ended = turn.cut or any(r.end_turn for r in results)
-                for call, result in zip(calls, results, strict=True):
-                    out_id = route.new_item_id()
-                    if not route.send(rt_protocol.function_output(call.id, result.content, out_id)):
-                        if ended:
-                            break  # no response follows: nothing is lost
-                        return self._realtime_lost(turn)  # a skill ran: B1 (cut, Piper line)
-                    turn.rt_items.append(out_id)
-                if ended or not calls:
-                    if turn.rounds and not (ended or turn.spoken):
-                        turn.outcome = "no_text"
-                        self._say_fallback(turn)
-                    return True
-                turn.rounds += 1
-                said = " ".join(turn.spoken[round_from:]) or None
-                turn.exchange += self._exchange(calls, results, turn.rounds, said)
-                turn.exchange_spoken = len(turn.queued)
-                turn.rt_round = None
+            turn.rt_items.append(item)
+        route.count("utterances_sent")
+        turn.stamps["request"] = self.clock()
+        self.phase.begin_thinking()
+        self.phase.set_route(turn.route)
+        delivery = self._delivery(turn)
+        while True:
+            in_cap = turn.rounds < conv.max_tool_rounds and bool(offered)
+            calls: list[ToolCall] = []
+            results: list[ToolOutcome] = []
+            on_call = self._rt_caller(turn, choices, in_cap, calls, results)
+            instructions = self._rt_instructions(turn, delivery)
+            run = ResponseRun(
+                route,
+                self.speech,
+                utterance=turn.speech_id,
+                mood=delivery.mood,
+                volume_db=delivery.volume_db,
+                language=turn.language,
+                clock=self.clock,
+                on_call=on_call,
+                input_chars=len(turn.utterance.text),
+                generation=turn.rt_gen,  # the session that holds the turn's words
+            )
+            round_from = len(turn.spoken)
+            turn.rt_round = (calls, results, round_from)
+            turn.rt_run = run
+            try:
+                choice = "auto" if in_cap else "none" if offered else None
+                reply = await run.run(instructions, choice)
+            except asyncio.CancelledError:
+                self._absorb(turn, run.reply, instructions)
+                self._cut_realtime(turn)
+                self._keep_round(turn)  # a skill that ran stays in the history
+                raise
+            self._absorb(turn, reply, instructions)
+            if reply.closed or reply.status == "error":
+                return self._realtime_lost(turn)
+            if turn.cut:
+                self._cut_realtime(turn)
+            ended = turn.cut or any(r.end_turn for r in results)
+            for call, result in zip(calls, results, strict=True):
+                out_id = route.new_item_id()
+                if not route.send(rt_protocol.function_output(call.id, result.content, out_id)):
+                    if ended:
+                        break  # no response follows: nothing is lost
+                    return self._realtime_lost(turn)  # a skill ran: B1 (cut, Piper line)
+                turn.rt_items.append(out_id)
+            if ended or not calls:
+                if turn.rounds and not (ended or turn.spoken):
+                    turn.outcome = "no_text"
+                    self._say_fallback(turn)
+                return True
+            turn.rounds += 1
+            said = " ".join(turn.spoken[round_from:]) or None
+            turn.exchange += self._exchange(calls, results, turn.rounds, said)
+            turn.exchange_spoken = len(turn.queued)
+            turn.rt_round = None
 
     def _realtime_lost(self, turn: _Turn) -> bool:
         """The session was lost (or refused the response, or the turn failed) during the turn.

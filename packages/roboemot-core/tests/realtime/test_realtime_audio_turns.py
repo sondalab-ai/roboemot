@@ -75,3 +75,60 @@ def test_the_words_go_as_text_when_the_session_that_heard_them_is_gone():
             assert server.of("conversation.item.delete") == []  # nothing of the old session
         finally:
             rig.close()
+
+
+# ------------------------------------------------------------------ fix round 1
+
+
+def test_an_audio_utterance_the_worker_refuses_has_its_items_deleted():
+    """I-3: "stop" consumed after a barge-in: the server must not answer it later."""
+    with TurnServer() as server:
+        rig = build_rt(server, rt={"input": "audio"}, app=OPT_IN)
+        try:
+            assert rig.route.ready()
+            gen = rig.route.generation
+            rig.worker.interrupt()  # a barge-in just cut the robot off
+            stop = dataclasses.replace(utt("stop"), realtime=(gen, ("in_stop",)))
+            assert not rig.worker.submit(stop)
+            assert wait_until(lambda: len(server.of("conversation.item.delete")) == 1)
+            assert server.of("conversation.item.delete")[0]["item_id"] == "in_stop"
+            rig.worker.close()
+            late = dataclasses.replace(utt("ancora"), realtime=(gen, ("in_late",)))
+            assert not rig.worker.submit(late)  # closed
+            assert wait_until(lambda: len(server.of("conversation.item.delete")) == 2)
+        finally:
+            rig.close()
+
+
+def test_a_realtime_turn_holds_the_audio_input_while_it_runs():
+    """M-7: the worker holds bursts from the turn's first send to its end."""
+    with TurnServer(gap_s=0.1, deltas=5) as server:
+        rig = build_rt(server, rt={"input": "audio"}, app=OPT_IN)
+        try:
+            assert rig.route.ready()
+            held = []
+            hold, release = rig.route.hold_input, rig.route.release_input
+            rig.route.hold_input = lambda: (held.append("hold"), hold())[1]
+            rig.route.release_input = lambda: (held.append("release"), release())[1]
+            rig.turn("ciao")
+            assert held == ["hold", "release"]
+            assert not rig.route.input_held()
+        finally:
+            rig.close()
+
+
+def test_a_turn_sends_its_response_create_only_on_the_session_that_holds_its_words():
+    """M-6: the response.create names the turn's session."""
+    with TurnServer() as server:
+        rig = build_rt(server, rt={"input": "audio"}, app=OPT_IN)
+        try:
+            asked = []
+            request = rig.route.request
+            rig.route.request = lambda *a, **kw: (
+                asked.append(kw.get("generation")),
+                request(*a, **kw),
+            )[1]
+            rig.turn("ciao")
+            assert asked and asked[0] == rig.route.generation
+        finally:
+            rig.close()
