@@ -107,6 +107,14 @@ class DaemonClient:
         """``GET /api/daemon/status``: name, version, backend state, errors."""
         return self._send("GET", "/daemon/status")
 
+    def hardware_id(self) -> str | None:
+        """``GET /api/daemon/hardware-id``: the robot's platform identifier (a hash of a
+        hardware serial), or ``None`` (no robot attached, an older daemon without the route, or
+        an answer of another shape). Never log the value (SPEC 12)."""
+        answer = self._send("GET", "/daemon/hardware-id", missing_ok=True)
+        value = answer.get("hardware_id") if isinstance(answer, dict) else None
+        return value if isinstance(value, str) else None
+
     def motors(self) -> dict[str, Any]:
         """``GET /api/motors/status``: enabled, disabled, gravity compensation."""
         return self._send("GET", "/motors/status")

@@ -47,5 +47,9 @@ reachy-mini-wireless = "roboemot_reachymini.settings:plugin"
 [project.entry-points."roboemot.expression_clips"]
 reachy-mini-wireless = "roboemot_reachymini.clips:library"
 
+# Realtime session provider (the platform's allocator), keyed by manifest robot.id (SPEC 4A, 8).
+[project.entry-points."roboemot.realtime"]
+reachy-mini-wireless = "roboemot_reachymini.realtime:provider"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/roboemot_reachymini"]
