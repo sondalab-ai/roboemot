@@ -10,8 +10,8 @@ reachability probe checks it and locality reads it; nothing here names that URL.
 
 - refuses a ``base_url`` whose path is not exactly ``/session``, or that has a query, fragment or
   user info (``provider_url``), that is ``http`` while the route is not local
-  (``provider_insecure``), or that is this machine while not local (``provider_this_machine``);
-  nothing is sent then;
+  (``provider_insecure``), or that is this machine while not local (``provider_this_machine``):
+  core's ``provider_endpoint``; nothing is sent then;
 - POSTs a JSON object to the ``base_url`` through core's ``post_allocation`` (the route's own
   origin, no redirect, no proxy): ``{}``, or ``{"hardware_id": ...}`` only with the opt-in
   ``privacy.realtime_platform_id`` and when the daemon reports a well-formed one (read through
@@ -20,7 +20,7 @@ reachability probe checks it and locality reads it; nothing here names that URL.
 - refuses any answer but 2xx (a redirect included) as ``provider_http_<code>``, a reply without
   a string ``connect_url`` as ``provider_reply``, an allocator it cannot reach as
   ``provider_unreachable``, and a ``connect_url`` whose path does not end in ``/realtime``
-  (``url_path``). ``http``/``https`` connect URLs are read as ``ws``/``wss``; core's
+  (``url_path``, core's ``allocated_url``, which reads ``http``/``https`` as ``ws``/``wss``); core's
   ``connect_target`` then applies the URL and key rules, on both the allocator and the connect
   host.
 
