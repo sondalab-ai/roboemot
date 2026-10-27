@@ -248,6 +248,10 @@ class SpeechOutput:
         self._lock = threading.Lock()
         self._jobs: collections.deque[_Job | _RawJob] = collections.deque()
         self._epoch = 0
+        # stops waiting for ``_lock``: the output thread refuses to push meanwhile, so it cannot
+        # re-take the lock push after push (CPython locks are not fair) and starve the stop
+        self._stopping = 0
+        self._stopping_lock = threading.Lock()
         self._ids = itertools.count(1)
         self._utterances = itertools.count(1)
         self._thread: threading.Thread | None = None
@@ -356,8 +360,8 @@ class SpeechOutput:
         except Exception as exc:  # a failed warm-up must not end the output thread
             log.warning("speech: warm-up failed: %s", type(exc).__name__)
         while True:
-            with self._lock:
-                job = self._jobs.popleft() if self._jobs else None
+            with self._lock:  # a pending stop drops the queue: take nothing from it
+                job = self._jobs.popleft() if self._jobs and not self._stopping else None
                 if isinstance(job, _RawJob):
                     self._raw_current = job.id
             if job is None:
@@ -542,8 +546,14 @@ class SpeechOutput:
         The epoch moves under the lock that guards every push, so a chunk already on its way
         either was pushed before (and the sink flush below drops it) or sees the new epoch and
         is discarded: nothing plays after ``stop`` returns. Only a sentence from before this
-        stop is cancelled; one said right after it is left alone."""
+        stop is cancelled; one said right after it is left alone. While it waits for the lock,
+        the output thread pushes nothing more (``_stopping``): it waits for the push in flight
+        only, never for the rest of the sentence (SPEC 13 cut-off)."""
+        with self._stopping_lock:
+            self._stopping += 1
         with self._lock:
+            with self._stopping_lock:
+                self._stopping -= 1
             self._epoch += 1
             epoch = self._epoch
             self.sentences_dropped += sum(isinstance(j, _Job) for j in self._jobs)
@@ -730,7 +740,7 @@ class SpeechOutput:
         under the lock ``stop`` takes to move the epoch, so a sentence never counts as played
         when a stop beat its first push."""
         with self._lock:
-            if job.epoch != self._epoch or job.id in self._raw_cancelled:
+            if self._stale(job) or job.id in self._raw_cancelled:
                 return False
             now, until = self.clock(), self.sink.playing_until()
             start = max(now, until)
@@ -794,6 +804,11 @@ class SpeechOutput:
         except Exception as exc:  # a sink bug must not end the output thread
             self.failures += 1
             log.warning("speech %d (raw) crashed: %s", job.id, type(exc).__name__)
+
+    def _stale(self, job: _Job | _RawJob) -> bool:
+        """Whether ``job`` must not reach the sink: a stop since it was queued, or one waiting
+        for the lock (it moves the epoch next); the lock is held."""
+        return self._stopping > 0 or job.epoch != self._epoch
 
     def _count_underrun(self, job: _Job, gap_s: float) -> None:
         """A push of ``job`` found the sink dry for ``gap_s``; the lock is held."""
@@ -915,7 +930,7 @@ class SpeechOutput:
         """End the sink's stream after ``job`` (its tail extends where the sentence ends),
         unless a stop since it was queued already reset the sink."""
         with self._lock:
-            if job.epoch != self._epoch:
+            if self._stale(job):
                 return
             try:
                 self.sink.end_stream()
