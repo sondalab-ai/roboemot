@@ -92,6 +92,11 @@ class RouteBudgetExhausted(RuntimeError):
     """The route's daily token budget is spent: the check would exceed it, so it is refused."""
 
 
+class RouteKindUnsupported(RuntimeError):
+    """The route is not a chat route (``kind: realtime``): the chat checks do not apply, so
+    nothing is sent."""
+
+
 class RouteKeyUnavailable(RuntimeError):
     """The route's ``${secret:name}`` key cannot be read: nothing is sent. The message names
     the secret and the reason, never a value."""
@@ -369,11 +374,14 @@ async def check_route(
     from ``config`` (the library defaults when omitted, and on a route that is not local when
     ``config`` turns pseudonyms on but no ``pseudonyms`` are given). Pass the app's ``router``
     to share its daily budgets; otherwise a private one is built from ``safety``, ``secrets``
-    and the client factory. Raises :class:`RouteKeyUnavailable` when the route's secret cannot
+    and the client factory. Raises :class:`RouteKindUnsupported` for a route that is not a chat
+    route, :class:`RouteKeyUnavailable` when the route's secret cannot
     be read and :class:`RouteBudgetExhausted` when the budget is spent, both before anything is
     sent. With ``pseudonyms`` a route that is not local gets the requests aliased like any
     cloud request.
     Failures of the route become ``fail`` results, never exceptions."""
+    if route.kind != "chat":
+        raise RouteKindUnsupported(f"route {route.name} is a {route.kind} route")
     settings = settings or LLMCheckConfig()
     router = router or Router(
         [route], safety, secrets=secrets, http_client_factory=http_client_factory

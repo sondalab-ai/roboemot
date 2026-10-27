@@ -10,7 +10,7 @@ section number in commit messages that implement or change behaviour.
 | Path | What |
 | --- | --- |
 | `docs/specs/kickoff.md` | Engineering spec (SPEC), the source of truth |
-| `packages/roboemot-core/` | Python package `roboemot`: config, manifest, discovery, health (connectivity), diagnostics (debug report), vision (detect, track, embed, replay, model fetcher; ONNX backends need the `vision` extra), motion reference, affect (engine, appraisal, runner, register resolver, expression renderer), circadian, soothe (idle self-soothing synth and runner), persona (traits), LLM router and system prompt, runtime (`runtime/`: `Runtime` pipeline assembly, hot reload, main loop, debug-report wiring; `RuntimeHost` seams), conversation sources and skill bridge, web UI robot section (`webui/robot_section.py`, `roboemot.settings` plugins), secret store (`secret_store.py`: `${secret:name}` route keys, 0600 file), bus |
+| `packages/roboemot-core/` | Python package `roboemot`: config, manifest, discovery, health (connectivity), diagnostics (debug report), vision (detect, track, embed, replay, model fetcher; ONNX backends need the `vision` extra), motion reference, affect (engine, appraisal, runner, register resolver, expression renderer), circadian, soothe (idle self-soothing synth and runner), persona (traits), LLM router and system prompt, runtime (`runtime/`: `Runtime` pipeline assembly, hot reload, main loop, debug-report wiring; `RuntimeHost` seams), conversation sources and skill bridge, web UI robot section (`webui/robot_section.py`, `roboemot.settings` plugins), realtime speech route (`realtime/`: protocol subset, session providers in `roboemot.realtime`, WebSocket client; needs the `realtime` extra), secret store (`secret_store.py`: `${secret:name}` route keys, 0600 file), bus |
 | `packages/roboemot-reachymini/` | Python package `roboemot_reachymini`: Reachy Mini driver and SDK bridge; `app.py` is a thin adapter (config + manifest, platform by `robot.id`, then core `Runtime.run`); vendored recorded expression clips (Pollen emotions library, Apache-2.0) in `data/emotions/` |
 | `packages/roboemot-core/src/roboemot/webui/static/vendor/sondalab-ui-kit/` | Vendored, pinned `@sondalab/ui-kit` (offline web UI). Never edit by hand: change the pin in `scripts/sync_ui_kit.py` and run it; `scripts/audit_webui.sh` runs `sl-audit` on the page (SPEC 12) |
 | `rt/` | C++ real-time core (`roboemot-rt`): arbiter and safety limiter, CMake + ctest |
@@ -40,7 +40,10 @@ section number in commit messages that implement or change behaviour.
   listener and the behaviour tick (`runtime.pause_when_asleep`).
 - **LLM routes are OpenAI-compatible only (SPEC 8).** Use the common subset: streaming,
   `tools` with `tool_choice="auto"`, `max_tokens`. Do not rely on `response_format`,
-  forced tool choice, `seed` or non-default sampling.
+  forced tool choice, `seed` or non-default sampling. A `kind: realtime` route speaks the realtime
+  subset of SPEC 8 (Realtime speech route) over a WebSocket (`roboemot.realtime`), never chat; its one
+  exception to `tool_choice="auto"` is `tool_choice: "none"` on the request after the tool-round
+  cap, which forbids no tool, so it is not forced tool choice.
 - **Privacy (SPEC 12):** never write frames, audio or embeddings to logs.
 - **Secrets (SPEC 8, 12):** API keys come only from the secret store (`roboemot secrets set`, value never an argument). Never log, repr, report or return a key; a route whose `${secret:name}` cannot be resolved is unavailable, never sent with an empty key.
 - **Robot hierarchy (SPEC 4A, 11, 12A):** robot-specific behaviour only through a core protocol plus a

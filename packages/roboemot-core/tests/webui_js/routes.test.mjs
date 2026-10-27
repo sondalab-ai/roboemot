@@ -162,7 +162,7 @@ test("route form: adding with a key names the host in the PIN dialog and sends t
   assert.match(dialog.textContent, /Key to https:\/\/api\.cloudco\.example/);
   await answerPin(page);
   assert.deepEqual(seen, {
-    name: "cloud2", base_url: "https://API.Cloudco.example/v1", model: "big", locality: "cloud",
+    name: "cloud2", base_url: "https://API.Cloudco.example/v1", model: "big", locality: "cloud", kind: "chat",
     secret: "cloud_key", pin: PIN, ack_endpoint: "https://api.cloudco.example",
   });
   noTrace(page, PIN);
@@ -179,6 +179,62 @@ test("route form: adding without a key sends no acknowledgement and no secret", 
   await answerPin(page);
   assert.equal(seen.secret, null);
   assert.ok(!("ack_endpoint" in seen));
+});
+
+test("route form: the kind is chosen when a route is added, chat by default", async () => {
+  let seen = null;
+  const page = await formsPage([], { "POST /api/routes/add": (b) => { seen = b; return { changed: true }; } });
+  assert.equal(sel(page, "route-new-kind").value, "chat");
+  sel(page, "route-new-name").value = "voice";
+  sel(page, "route-new-url").value = "https://rt.example/v1";
+  sel(page, "route-new-model").value = "s2s";
+  sel(page, "route-new-kind").value = "realtime";
+  submit(page.window, sel(page, "route-new-name").closest("form"));
+  await settle();
+  await answerPin(page);
+  assert.equal(seen.kind, "realtime");
+});
+
+test("route form: a keyed realtime route names the provider's key hosts in the PIN dialog", async () => {
+  const page = await routesPage({
+    "GET /api/strings": { language: "en", strings: { route_key_message: "Key to {host}", route_key_hosts: "Also {hosts}" } },
+    "GET /api/routes": { routes: [], name_max_chars: 32, realtime_key_hosts: [".rt.example.net"] },
+    "POST /api/routes/add": () => ({ changed: true }),
+  });
+  sel(page, "route-new-name").value = "voice";
+  sel(page, "route-new-url").value = "https://alloc.example/v1";
+  sel(page, "route-new-model").value = "s2s";
+  sel(page, "route-new-kind").value = "realtime";
+  sel(page, "route-new-key").value = "cloud_key";
+  submit(page.window, sel(page, "route-new-name").closest("form"));
+  await settle();
+  assert.match(page.document.querySelector("dialog").textContent, /Key to https:\/\/alloc\.example Also \.rt\.example\.net/);
+});
+
+test("route form: a keyed chat route does not name the realtime key hosts", async () => {
+  const page = await routesPage({
+    "GET /api/strings": { language: "en", strings: { route_key_message: "Key to {host}", route_key_hosts: "Also {hosts}" } },
+    "GET /api/routes": { routes: [], name_max_chars: 32, realtime_key_hosts: [".rt.example.net"] },
+  });
+  sel(page, "route-new-name").value = "chat2";
+  sel(page, "route-new-url").value = "https://alloc.example/v1";
+  sel(page, "route-new-model").value = "m";
+  sel(page, "route-new-key").value = "cloud_key";
+  submit(page.window, sel(page, "route-new-name").closest("form"));
+  await settle();
+  assert.doesNotMatch(page.document.querySelector("dialog").textContent, /Also/);
+});
+
+test("route form: a realtime route shows its kind, cannot be checked and its kind is not editable", async () => {
+  const RT = { ...ADDED, name: "voice", kind: "realtime" };
+  const page = await formsPage([ROUTE, RT]);
+  const card = [...page.document.querySelectorAll("section.sl-card")].find((c) => c.querySelector("h2").textContent === "voice");
+  assert.match(card.textContent, /route_kind_realtime/);
+  const check = [...card.querySelectorAll("button")].find((b) => b.textContent === "route_check");
+  assert.equal(check.disabled, true);
+  assert.equal(sel(page, "route-voice-kind"), null);
+  const lan = [...page.document.querySelectorAll("section.sl-card")].find((c) => c.querySelector("h2").textContent === "lan");
+  assert.equal([...lan.querySelectorAll("button")].find((b) => b.textContent === "route_check").disabled, false);
 });
 
 test("route form: only a route added here can be removed", async () => {

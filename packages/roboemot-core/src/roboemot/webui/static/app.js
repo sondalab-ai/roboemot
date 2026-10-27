@@ -592,6 +592,7 @@ function secretsCard(data, reload) {
 // ---------------------------------------------------------------- route form (add and edit)
 
 const ROUTE_LOCALITIES = ["auto", "local", "cloud"];
+const ROUTE_KINDS = ["chat", "realtime"]; // chosen when a route is added; shown read-only after
 const ROUTE_KEY_LITERAL = "@literal"; // not a valid secret name: a key written in the config file
 
 // One form for a new route (`route` null) and for an existing one. A key is chosen from the stored
@@ -604,6 +605,9 @@ function routeForm(route, secrets, nameMax, save) {
   const locality = el("select", { id: id("locality"), class: "sl-field__input" },
     ROUTE_LOCALITIES.map((l) => el("option", { value: l }, t("route_locality_" + l))));
   locality.value = route ? route.locality : "cloud";
+  const kind = route ? null : el("select", { id: id("kind"), class: "sl-field__input" },
+    ROUTE_KINDS.map((k) => el("option", { value: k }, t("route_kind_" + k))));
+  if (kind) kind.value = "chat";
   const current = !route || route.key === "none" ? "" : (route.key === "secret" ? route.secret.name : ROUTE_KEY_LITERAL);
   const names = secrets.filter((s) => s.set).map((s) => s.name);
   const keys = [["", t("route_key_none")]];
@@ -618,7 +622,7 @@ function routeForm(route, secrets, nameMax, save) {
       ev.preventDefault();
       guarded(() => save({
         name: name ? name.value.trim() : route.name, base_url: url.value.trim(), model: model.value.trim(),
-        locality: locality.value, key: key.value,
+        locality: locality.value, key: key.value, ...(kind ? { kind: kind.value } : {}),
       }));
     },
   },
@@ -626,6 +630,7 @@ function routeForm(route, secrets, nameMax, save) {
   field(id("url"), t("route_url"), url, route ? t("route_url_hint_edit") : null),
   field(id("model"), t("route_model"), model),
   field(id("locality"), t("route_locality"), locality, t("route_locality_hint")),
+  kind ? field(id("kind"), t("route_kind"), kind, t("route_kind_hint")) : [],
   field(id("key"), t("route_key"), key, t("route_key_hint")),
   el("div", { class: "row" }, submitButton(t(route ? "route_save" : "route_add"))));
   return form;
@@ -674,7 +679,7 @@ async function saveRoute(route, v) {
   }));
   if (!route) {
     steps.push([v.name, (pin) => mapAck(() => api("POST", "/api/routes/add", {
-      name: v.name, base_url: v.base_url, model: v.model, locality: v.locality,
+      name: v.name, base_url: v.base_url, model: v.model, locality: v.locality, kind: v.kind || "chat",
       secret: keyed ? v.key : null, pin,
       ...(keyed && (ack || origin) ? { ack_endpoint: ack || origin } : {}),
     }))]);
@@ -694,7 +699,10 @@ async function saveRoute(route, v) {
     if (!steps.length) { notice(t("settings_unchanged")); return; }
   }
   const sends = keyed || (moved && current !== "" && !keyChanged);
-  const ackMessage = (host) => t("route_key_message", { host }) + (insecureHost(host) ? " " + t("route_key_insecure") : "");
+  const realtime = (route ? route.kind : v.kind) === "realtime";
+  const extraHosts = realtime ? (state.realtimeKeyHosts || []) : [];
+  const ackMessage = (host) => t("route_key_message", { host }) + (insecureHost(host) ? " " + t("route_key_insecure") : "") +
+    (extraHosts.length ? " " + t("route_key_hosts", { hosts: extraHosts.join(", ") }) : "");
   const message = sends && target ? ackMessage(target) : (route ? route.name : v.name);
   let next = 0; // steps before this index are saved: a retry of the dialog resumes here
   let notApplied = false;
@@ -725,6 +733,7 @@ async function saveRoute(route, v) {
 async function routesView() {
   const view = document.getElementById("view");
   const data = await api("GET", "/api/routes");
+  state.realtimeKeyHosts = data.realtime_key_hosts || [];
   let secrets = null;
   try {
     secrets = await api("GET", "/api/secrets");
@@ -749,7 +758,7 @@ async function routesView() {
     const run = button(t("route_check"), "plain", () => guarded(async () => {
       await api("POST", "/api/routes/" + encodeURIComponent(r.name) + "/check", {});
       await routesView();
-    }), { attrs: { disabled: r.running } });
+    }), { attrs: { disabled: r.running || r.kind === "realtime", title: r.kind === "realtime" ? t("route_check_realtime") : null } });
     const edit = el("div", { hidden: true }, routeForm(r, secretList, data.name_max_chars, (v) => saveRoute(r, v)));
     const toggle = button(t("route_edit"), "plain", () => { edit.hidden = !edit.hidden; });
     const remove = button(t("route_remove"), "danger", () => guarded(async () => {
@@ -761,7 +770,7 @@ async function routesView() {
       if (done) { notice(t("route_removed", { name: r.name })); await routesView(); }
     }));
     return busy(card(t("tab_routes"), r.name,
-      el("p", { class: "hint" }, r.model + " @ " + r.endpoint + ", " + t("route_locality_" + r.locality)),
+      el("p", { class: "hint" }, r.model + " @ " + r.endpoint + ", " + t("route_locality_" + r.locality) + ", " + t("route_kind_" + (r.kind || "chat"))),
       r.secret ? el("p", { class: "hint" }, t(r.secret.set ? "route_secret_set" : "route_secret_missing", { name: r.secret.name })) :
         (r.key === "literal" ? el("p", { class: "hint" }, t("route_key_literal")) : []),
       el("div", { class: "row" }, run, toggle, r.removable ? remove : []), box, edit), r.running);

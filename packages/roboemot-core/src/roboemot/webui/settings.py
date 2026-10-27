@@ -22,12 +22,10 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
-import ipaddress
 import json
 import logging
 import os
 import secrets
-import socket
 import stat
 import tempfile
 import threading
@@ -70,6 +68,7 @@ from roboemot.config.stack import (
     set_path,
     without_dropped,
 )
+from roboemot.llm.pseudonyms import this_machine
 from roboemot.redact import REDACTED, secret_shaped
 from roboemot.redact import origin as plain_origin
 from roboemot.secret_store import NAME as SECRET_NAME
@@ -300,43 +299,6 @@ def origin(url: str) -> str:
         return ""
 
 
-# IPv6 forms that carry an IPv4 address in their low 32 bits: IPv4-compatible (``::a.b.c.d``),
-# IPv4-mapped, IPv4-translated (``::ffff:0:a.b.c.d``) and the NAT64 well-known prefix
-EMBEDS_IPV4 = tuple(
-    ipaddress.IPv6Network(net)
-    for net in ("::/96", "::ffff:0:0/96", "::ffff:0:0:0/96", "64:ff9b::/96")
-)
-IPV4_BITS = 0xFFFFFFFF
-
-
-def this_machine(url: object) -> bool:
-    """Whether ``url`` points at this machine or a link-local address (SPEC 8, 12): loopback,
-    ``localhost`` and ``*.localhost``, the unspecified address (it reaches loopback on Linux),
-    169.254/16 and fe80::/10, in any spelling (``127.1``, ``0x7f000001``, ``2130706433``, an IPv6
-    address that carries one of them, ``EMBEDS_IPV4``). The host is read by httpx, the client
-    that connects. Names are not resolved: a public name that resolves to loopback is not caught
-    here. Private LAN addresses stay allowed, a LAN model server is the usual local route."""
-    try:
-        host = httpx.URL(str(url)).host.lower().rstrip(".")
-    except (httpx.InvalidURL, ValueError, TypeError):
-        return False  # unparsable: ``LLMRoute`` refuses it (``route_url_ok``, same parser)
-    if host == "localhost" or host.endswith(".localhost"):
-        return True
-    try:
-        ip: ipaddress.IPv4Address | ipaddress.IPv6Address = ipaddress.ip_address(host)
-    except ValueError:
-        try:  # the shorthand IPv4 forms the socket layer accepts
-            ip = ipaddress.IPv4Address(socket.inet_aton(host))
-        except OSError:
-            return False
-    if ip.is_loopback or ip.is_link_local or ip.is_unspecified:
-        return True
-    if isinstance(ip, ipaddress.IPv6Address) and any(ip in net for net in EMBEDS_IPV4):
-        carried = ipaddress.IPv4Address(int(ip) & IPV4_BITS)
-        return carried.is_loopback or carried.is_link_local or carried.is_unspecified
-    return False
-
-
 def check_web_route_url(url: object, old: object = None) -> None:
     """The web UI's rules for a route ``base_url`` it writes (SPEC 8, 12), on top of the schema's:
     no query or fragment (``url_query``: the SDK appends its path, so either would sit inside the
@@ -399,8 +361,10 @@ class SettingsEditor:
         plugin: SettingsPlugin | None = None,
         known_secrets: Callable[[], Iterable[str]] | None = None,
         installed: Callable[[RoboEmotConfig], Iterable[str]] = installed_languages,
+        realtime_key_hosts: Callable[[], Iterable[str]] | None = None,
     ):
         self.stack = stack
+        self._realtime_key_hosts = realtime_key_hosts
         self._installed = installed
         self.manifest = manifest
         self._known_secrets = known_secrets
@@ -534,7 +498,7 @@ class SettingsEditor:
         else:
             target, stored, written = self._list_add(box, entry, tree, cfg)
             if bind is not None and bind[0] != NO_KEY_REF:
-                self._check_endpoint_ack(entry.get("base_url"), bind[1])
+                self._check_endpoint_ack(entry.get("base_url"), bind[1], entry.get("kind"))
                 written = [{**entry, "api_key": bind[0]}]
                 exempt = frozenset({f"llm_routes.{entry['name']}.api_key"})
         self.stack.set(
@@ -596,7 +560,7 @@ class SettingsEditor:
     def add_route(
         self, value: object, secret: object = None, ack: object = None, source: str = SOURCE
     ) -> dict[str, Any]:
-        """Add an LLM route (``value``: name, base_url, model, locality, ...) on
+        """Add an LLM route (``value``: name, base_url, model, locality, kind, ...) on
         the runtime layer, with the key ``secret`` (a name in the secret store) or none. A route
         with a key needs ``ack`` equal to the origin of its ``base_url`` (``endpoint_ack_required``
         carries it): the stack's ``secret`` rule is passed for that one ``api_key`` only, the
@@ -628,7 +592,7 @@ class SettingsEditor:
                 return {"name": route.name, "changed": False}
             path = f"llm_routes.{route.name}.api_key"
             if ref != NO_KEY_REF:
-                self._check_endpoint_ack(route.base_url, ack)
+                self._check_endpoint_ack(route.base_url, ack, route.kind)
             before = self._failures()
             self.stack.set(
                 path,
@@ -647,6 +611,23 @@ class SettingsEditor:
             result = {"name": route.name, "changed": True, "persisted": self._persist()}
             return self._applied(result, before)
 
+    def realtime_key_hosts(self) -> list[str]:
+        """The host suffixes the robot's realtime session provider declares (SPEC 8, Realtime
+        speech route): a realtime route's key may also go there, so the key confirmation names
+        them. Empty in direct mode or when the provider cannot be built (the route is then
+        unavailable anyway)."""
+        if self._realtime_key_hosts is not None:
+            return list(self._realtime_key_hosts())
+        if self.manifest is None:
+            return []
+        from ..realtime.session import ProviderUnavailable, build_session_provider
+
+        try:
+            provider = build_session_provider(self.manifest.robot.id, self.manifest)
+        except ProviderUnavailable:
+            return []
+        return list(provider.key_hosts)
+
     def removable_routes(self) -> list[str]:
         """Names of the routes only the runtime layer holds (``remove_entry`` accepts them)."""
         row = self._rows().get("llm_routes")
@@ -664,14 +645,18 @@ class SettingsEditor:
             raise ValidationError("secret_unknown", "secret")
         return f"${{secret:{secret}}}"
 
-    @staticmethod
-    def _check_endpoint_ack(base_url: object, ack: object) -> None:
-        """The key goes to the origin of ``base_url``; ``ack`` must be exactly that origin."""
+    def _check_endpoint_ack(self, base_url: object, ack: object, kind: object = None) -> None:
+        """The key goes to the origin of ``base_url``; ``ack`` must be exactly that origin. For a
+        realtime route the refusal also names the provider's ``key_hosts``, where the key may
+        go too."""
         target = origin(base_url) if isinstance(base_url, str) else ""
         if not target:
             raise ValidationError("value_type", "value")
         if ack != target:
-            raise ValidationError("endpoint_ack_required", "value", {"endpoint": target})
+            detail: dict[str, Any] = {"endpoint": target}
+            if kind == "realtime" and (hosts := self.realtime_key_hosts()):
+                detail["key_hosts"] = hosts
+            raise ValidationError("endpoint_ack_required", "value", detail)
 
     def _remember_key(self, name: str, ref: str) -> None:
         """Keep the key bound to route ``name`` for the next start, with the acknowledged origin and

@@ -96,6 +96,7 @@ def test_list_shows_endpoint_only_and_no_key(served):
             "endpoint": "lan.local:8443",
             "base_url": None,  # it holds user info: never sent, only replaceable whole
             "locality": "auto",
+            "kind": "chat",
             "key": "literal",
             "running": False,
             "secret": None,

@@ -237,6 +237,7 @@ EN: dict[str, str] = {
     "err_route_unknown": "No such route.",
     "err_route_busy": "Another check is running. Try again in a moment.",
     "err_route_budget": "The daily token budget of the route is spent.",
+    "err_route_kind": "A realtime speech route cannot run the chat check.",
     "err_route_secret": "The route key is not available. Set it on the robot: roboemot secrets set",
     "route_error_secret": "The key of the route is not available.",
     "route_secret_set": "key {name}: set",
@@ -271,6 +272,16 @@ EN: dict[str, str] = {
         "A route on this machine or the home network sees real names. Setting one up needs the "
         "configuration file; from here only cloud routes are accepted."
     ),
+    "route_kind": "Kind",
+    "route_kind_chat": "Chat (text)",
+    "route_kind_realtime": "Realtime speech",
+    "route_kind_hint": (
+        "A realtime speech route streams audio over a WebSocket at its address + /realtime; "
+        "conversations do not use it as a chat model. Changing it later on a route with a key "
+        "needs the configuration file."
+    ),
+    "route_check_realtime": "The check is for chat routes only.",
+    "route_key_hosts": "As a realtime route, it may also go to the hosts under: {hosts}.",
     "route_key": "Key",
     "route_key_none": "No key",
     "route_key_literal": "A key written in the configuration file",
@@ -784,6 +795,7 @@ IT: dict[str, str] = {
     "err_route_unknown": "Modello sconosciuto.",
     "err_route_busy": "Un altro controllo è in corso. Riprova tra poco.",
     "err_route_budget": "Il budget giornaliero di token del modello è esaurito.",
+    "err_route_kind": "Un modello voce in tempo reale non può fare il controllo di chat.",
     "err_route_secret": "La chiave non è disponibile. Impostala sul robot: roboemot secrets set.",
     "route_error_secret": "La chiave del modello non è disponibile.",
     "route_secret_set": "chiave {name}: impostata",
@@ -817,6 +829,18 @@ IT: dict[str, str] = {
     "route_locality_hint": (
         "Un modello su questa macchina o sulla rete di casa vede i nomi veri. Configurarne uno "
         "richiede il file di configurazione; da qui si accettano solo modelli cloud."
+    ),
+    "route_kind": "Tipo",
+    "route_kind_chat": "Chat (testo)",
+    "route_kind_realtime": "Voce in tempo reale",
+    "route_kind_hint": (
+        "Un modello voce in tempo reale riceve audio via WebSocket al suo indirizzo + /realtime; "
+        "le conversazioni non lo usano come modello di chat. Cambiarlo dopo, su un modello con "
+        "chiave, richiede il file di configurazione."
+    ),
+    "route_check_realtime": "Il controllo vale solo per i modelli di chat.",
+    "route_key_hosts": (
+        "Essendo un modello in tempo reale, può andare anche agli host sotto: {hosts}."
     ),
     "route_key": "Chiave",
     "route_key_none": "Nessuna chiave",

@@ -17,6 +17,7 @@ from .affect.clips import ENTRY_POINT_GROUP as CLIPS_GROUP
 from .diagnostics import ENTRY_POINT_GROUP as DIAGNOSTICS_GROUP
 from .install import ENTRY_POINT_GROUP as INSTALLERS_GROUP
 from .install import Platform
+from .realtime.session import ENTRY_POINT_GROUP as REALTIME_GROUP
 from .robot_platform import ENTRY_POINT_GROUP as ROBOTS_GROUP
 from .robot_platform import RobotPlatform
 from .webui.robot_section import ENTRY_POINT_GROUP as SETTINGS_GROUP
@@ -66,6 +67,10 @@ GROUPS: dict[str, GroupContract] = {
     CLIPS_GROUP: GroupContract(
         "factory () or (manifest) -> read-only mapping of clip name to keyframe entry (SPEC 7)",
         factory_args=(0, 1),
+    ),
+    REALTIME_GROUP: GroupContract(
+        "factory (manifest) -> SessionProvider: realtime speech sessions (SPEC 8)",
+        factory_args=1,
     ),
 }
 

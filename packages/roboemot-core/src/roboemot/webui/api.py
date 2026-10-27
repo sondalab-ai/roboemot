@@ -33,7 +33,11 @@ from urllib.parse import parse_qsl
 from roboemot.config.catalogue import FieldDescriptor
 from roboemot.config.schema import ROUTE_NAME_MAX_CHARS, RoboEmotConfig, WebUIConfig
 from roboemot.config.stack import ConfigError, GuardrailError
-from roboemot.llm.conformance import RouteBudgetExhausted, RouteKeyUnavailable
+from roboemot.llm.conformance import (
+    RouteBudgetExhausted,
+    RouteKeyUnavailable,
+    RouteKindUnsupported,
+)
 from roboemot.registry.records import Consent, ConsentError
 from roboemot.secret_store import MAX_VALUE_CHARS, SecretUnavailable
 
@@ -62,7 +66,7 @@ MAX_PIN_CHARS = 64
 ENROLLMENT_ID_BYTES = 8
 STATE_PATTERN = re.compile(r"[a-z_]{1,32}")
 ENTITY_KINDS = frozenset({"animal", "object"})
-ROUTE_FIELDS = frozenset({"name", "base_url", "model", "locality"})
+ROUTE_FIELDS = frozenset({"name", "base_url", "model", "locality", "kind"})
 ROUTE_NAME = re.compile(rf"[A-Za-z0-9_-]{{1,{ROUTE_NAME_MAX_CHARS}}}")
 JSON_TYPE = "application/json; charset=utf-8"
 CATALOGUE_IMPORT = "/api/catalogue/import"
@@ -107,9 +111,10 @@ class EnrollmentPort(Protocol):
 class RoutesPort(Protocol):
     """What the web UI needs from ``roboemot.webui.routes.RouteChecker`` (SPEC 8).
 
-    ``start`` returns at once and raises ``KeyError`` for an unknown route, ``RouteBusy`` or
-    ``RouteBudgetExhausted``; the outcome shows up in ``list_routes``. The UI copies what
-    these return as is: they hold no key, prompt or reply text.
+    ``start`` returns at once and raises ``KeyError`` for an unknown route, ``RouteBusy``,
+    ``RouteKindUnsupported`` or ``RouteBudgetExhausted``; the outcome shows up in
+    ``list_routes``. The UI copies what these return as is: they hold no key, prompt or reply
+    text.
     """
 
     def list_routes(self) -> list[dict[str, Any]]: ...
@@ -140,6 +145,8 @@ class SettingsPort(Protocol):
         self, name: object, secret: object, ack: object, source: str
     ) -> dict[str, Any]: ...
     def removable_routes(self) -> list[str]: ...
+
+    def realtime_key_hosts(self) -> list[str]: ...
 
 
 class SecretsPort(Protocol):
@@ -926,17 +933,24 @@ class WebApi:
 
     def _routes(self, req: Request) -> Response:
         """Routes by name, model and host, with the last conformance report and ``removable``
-        (only the runtime layer holds the route, so the page may remove it)."""
+        (only the runtime layer holds the route, so the page may remove it), and the host
+        suffixes the realtime session provider declares (``realtime_key_hosts``)."""
         rows = self._routes_port().list_routes()
         removable = set(self.settings.removable_routes()) if self.settings else set()
+        hosts = self.settings.realtime_key_hosts() if self.settings else []
         return Response(
-            HTTPStatus.OK, {"routes": [{**r, "removable": r["name"] in removable} for r in rows]}
+            HTTPStatus.OK,
+            {
+                "routes": [{**r, "removable": r["name"] in removable} for r in rows],
+                "realtime_key_hosts": hosts,  # where a realtime route's key may also go
+            },
         )
 
     def _route_add(self, req: Request) -> Response:
         """Add a route (SPEC 8, 11A). Body: ``name``, ``base_url``, ``model`` and optionally
-        ``locality``, ``secret`` (a name in the secret store; omitted or null for no key),
-        ``ack_endpoint`` (required with a key: the endpoint the server names in
+        ``locality``, ``kind`` (``chat`` or ``realtime``), ``secret`` (a name in the secret
+        store; omitted or null for no key), ``ack_endpoint`` (required with a key: the endpoint
+        the server names in
         ``endpoint_ack_required``) and ``pin``. A key typed into any field is refused."""
         port = self._settings_port()
         body = self._json_body(req)
@@ -994,6 +1008,8 @@ class WebApi:
             raise ApiError(HTTPStatus.NOT_FOUND, "route_unknown") from exc
         except RouteBusy as exc:
             raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "route_busy") from exc
+        except RouteKindUnsupported as exc:
+            raise ApiError(HTTPStatus.CONFLICT, "route_kind") from exc
         except RouteBudgetExhausted as exc:
             raise ApiError(HTTPStatus.CONFLICT, "route_budget") from exc
         except RouteKeyUnavailable as exc:
