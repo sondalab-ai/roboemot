@@ -7,7 +7,7 @@ the manifest's hardware limits as read-only rows: pose limits, dynamics, yaw-del
 safety. Angles are radians inside ``Manifest.dofs`` and shown in degrees; translations in mm.
 With a stack it also shows what the realtime session provider (``realtime.py``) uses, read from
 the configuration: ``realtime_session.allocator_host`` (the route's host in platform mode, else
-empty) and ``realtime_session.platform_id_sent`` (whether the platform identifier goes with each
+empty) and ``realtime_session.sends_platform_id`` (whether the platform identifier goes with each
 session request). The rows are leaves below ``realtime_session``: a text field named after a
 redacted word (``session``) would show as a secret.
 
@@ -214,7 +214,7 @@ class ReachySettings:
                 description="Host of the realtime route's session allocator (platform mode).",
             ),
             descriptor(
-                f"{prefix}.platform_id_sent",
+                f"{prefix}.sends_platform_id",
                 "bool",
                 platform and cfg.privacy.realtime_platform_id,
                 source=CONFIG_SOURCE,

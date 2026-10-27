@@ -318,7 +318,7 @@ def test_the_realtime_session_rows_show_the_allocator_host_and_the_identifier(
     """SPEC 4A, 12: what the platform's allocator receives, read-only and not redacted (the
     ``session`` word redacts a text leaf named after it, so the rows are leaves below it)."""
     rows = session_rows(tmp_path, platform_id=platform_id)
-    host, sent = rows[f"{SESSION}.allocator_host"], rows[f"{SESSION}.platform_id_sent"]
+    host, sent = rows[f"{SESSION}.allocator_host"], rows[f"{SESSION}.sends_platform_id"]
     assert host["value"] == "allocator.hf.space" and host["secret"] is False
     assert sent["kind"] == "bool" and sent["value"] is platform_id and sent["secret"] is False
     assert not host["writable"] and not sent["writable"]
@@ -327,7 +327,7 @@ def test_the_realtime_session_rows_show_the_allocator_host_and_the_identifier(
 def test_in_direct_mode_no_allocator_is_used_and_no_identifier_is_sent(tmp_path):
     rows = session_rows(tmp_path, mode="direct", platform_id=True)
     assert rows[f"{SESSION}.allocator_host"]["value"] is None
-    assert rows[f"{SESSION}.platform_id_sent"]["value"] is False
+    assert rows[f"{SESSION}.sends_platform_id"]["value"] is False
 
 
 def test_without_a_stack_there_are_no_session_rows():

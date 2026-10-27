@@ -488,3 +488,22 @@ def test_with_pseudonyms_a_cloud_allocator_blocks_the_route():
         extra=lambda: True,
     )
     assert rt.blocked(stack.effective()) == "pseudonyms"
+
+
+def test_turning_the_opt_in_off_keeps_the_identifier_out_of_the_next_allocation():
+    """Security review of SR-4: the client reads the opt-in from the committed config at each
+    allocation, so a reconnect after the admin turned it off sends ``{}`` (SPEC 12, Data)."""
+    stack = ConfigStack(app={"privacy": {"realtime_platform_id": True}})
+    allocator, daemon = Allocator(httpx.Response(503)), Daemon()
+    c = client(
+        allocator, daemon, platform_id=lambda: stack.effective().privacy.realtime_platform_id
+    )
+    try:
+        assert c.connect(UPDATE) is False and c.snapshot()["platform_id_sent"] is True
+        stack.set("privacy.realtime_platform_id", False, source="test", admin=True)
+        assert c.connect(UPDATE) is False
+        assert allocator.bodies() == [{"hardware_id": HW_ID}, {}]
+        assert len(daemon.requests) == 1  # the daemon is not asked again
+        assert c.snapshot()["platform_id_sent"] is False
+    finally:
+        c.close()

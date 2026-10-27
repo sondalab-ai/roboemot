@@ -18,7 +18,8 @@ reinstalls): ``voice.enabled: true`` unless ``--no-voice`` (which also makes Pip
 default to off) and the dev content with ``--dev``; every other key stays. Unless declined
 (`--no-piper`) it also creates a Piper virtualenv in the data folder (`piper-tts` is GPL-3.0 and
 runs as its own process, SPEC 8), recorded for uninstall.
-The platform's ``extras`` (``voice`` for a robot that listens, so vosk) are installed with
+The platform's ``extras`` (``voice`` for a robot that listens, so vosk; ``realtime``, websockets,
+for the realtime speech route) are installed with
 ``roboemot-core``; the ``vision`` extra and the vision weights come too unless declined
 (``--no-vision``, SPEC 4A Installer). The voice models (``roboemot models fetch --voice``) are
 downloaded on the robot after Piper unless declined (``--no-models``), when the manifests'
