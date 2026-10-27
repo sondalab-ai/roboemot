@@ -220,6 +220,7 @@ class VoiceListener:
             "vosk_skipped": 0,
             "sent": 0,
             "transcribed": 0,
+            "wake_word_heard": 0,  # the server's transcript held a wake phrase or the name
             "transcript_timeouts": 0,
             "local_fallbacks": 0,
             "decodes": 0,
@@ -864,6 +865,9 @@ class VoiceListener:
         result = job.result
         if result is not None:
             self._count_audio("transcribed")
+            self._realtime.route.note_transcript(
+                (self._clock() - p.ev.last_speech_stamp) * MS_PER_S
+            )
             heard = (result.generation, result.items)
             self._finish(p, result.text, None, frozenset(), heard, server=True)
             return None
@@ -903,6 +907,8 @@ class VoiceListener:
             server=server,
         )
         addressed = bool(p.addressed)
+        if server and fast.wake_word:
+            self._count_audio("wake_word_heard")
         self._fast.impulses(fast, addressed, state=p.state)
         utterance = Utterance(
             text,

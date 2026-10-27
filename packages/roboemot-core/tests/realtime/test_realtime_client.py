@@ -328,3 +328,35 @@ def test_audio_bytes_are_counted_from_the_append_event():
         event = protocol.audio_append(b"\x01\x00" * (n // 2))
         assert audio_bytes(event) == n
     assert audio_bytes(protocol.response_cancel()) == 0
+
+
+class _ElsewhereProvider:
+    """Allocates a host other than the route's own (the key may not go there)."""
+
+    key_hosts: tuple[str, ...] = ()
+
+    async def allocate(self, request):
+        from roboemot.realtime.session import Allocation
+
+        return Allocation("wss://connect.example.net/v1/realtime?ticket=QUERYSECRET")
+
+
+def test_a_key_host_refusal_keeps_the_refused_host_in_the_snapshot():
+    """SR-5: the realtime check names the connect host the key was refused for (host only)."""
+    from realtime_helpers import bearer
+
+    c = RealtimeClient(
+        route("https://alloc.example.org/session", locality="cloud", keyed=True),
+        settings(),
+        _ElsewhereProvider(),
+        auth_headers=bearer,
+    )
+    try:
+        assert not c.connect(UPDATE)
+        snap = c.snapshot()
+        assert snap["reason"] == "url_key_host"
+        assert snap["refused_host"] == "connect.example.net"
+        assert snap["key_sent"] is False and snap["endpoint"] is None
+        assert "QUERYSECRET" not in repr(snap) and "/v1" not in repr(snap)
+    finally:
+        c.close()

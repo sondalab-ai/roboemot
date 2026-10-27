@@ -502,3 +502,28 @@ def test_a_sleeping_robot_sends_no_audio_whatever_the_pause(ears, pause):
         assert ear.settle(lambda: len(ear.utterances) == 3)
         assert len(server.of("input_audio_buffer.commit")) == 1
         assert ear.utterances[2].realtime is None
+
+
+def test_the_end_of_speech_to_transcript_latency_is_measured(ears):
+    """SR-5 (SPEC 13): the HIL session reads end of speech to the server's transcript, p50/p95."""
+    with TurnServer(heard=[["ciao Neve come stai"]]) as server:
+        ear = ears(server, script=["vosk text"], bearing=FACE_RAD)
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        latency = ear.rt.route.snapshot()["latency_ms"]["transcript"]
+        assert latency["count"] == 1 and latency["p50"] >= 0
+
+
+def test_a_wake_word_in_the_servers_transcript_is_counted(ears):
+    """SR-5 fix round 1, I3: the HIL reads whether the server heard the name ("Neve")."""
+    with TurnServer(heard=[["ciao Neve come stai"], ["come stai"]]) as server:
+        ear = ears(
+            server,
+            script=["vosk text"],
+            bearing=FACE_RAD,
+            app={"voice": {"wake_word_policy": "never", "wake_word": "Neve"}},
+        )
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        assert ear.utterances[0].wake_word
+        assert ear.r.listener.snapshot()["realtime_audio"]["wake_word_heard"] == 1

@@ -15,6 +15,10 @@
 - ``stop_reading``: after ``session.updated`` the server stops reading the socket;
 - ``redirect``: the handshake is answered with 302 to ``redirect_to``.
 
+``delete_reply`` answers ``conversation.item.delete``: ``none`` (the default: nothing),
+``deleted`` (``conversation.item.deleted`` naming the item) or ``error`` (an ``error`` echoing
+the delete's ``event_id``, its message quoting the request).
+
 Every handshake is recorded (path with its query, headers) in ``requests``; client events in
 ``received``.
 """
@@ -54,8 +58,10 @@ class FakeServer:
         host: str = "127.0.0.1",
         redirect_to: str = "",
         oversize_bytes: int = 0,
+        delete_reply: str = "none",
     ) -> None:
         self.mode, self.host, self.redirect_to = mode, host, redirect_to
+        self.delete_reply = delete_reply
         self.oversize_bytes = oversize_bytes
         self.requests: list[dict[str, Any]] = []
         self.received: list[dict[str, Any]] = []
@@ -129,6 +135,16 @@ class FakeServer:
                     return
             elif kind == "response.create":
                 await self._on_response(ws)
+            elif kind == "conversation.item.delete":
+                await self._on_delete(ws, event)
+
+    async def _on_delete(self, ws: ServerConnection, event: dict[str, Any]) -> None:
+        if self.delete_reply == "deleted":
+            await self._send(ws, {"type": "conversation.item.deleted", "item_id": event["item_id"]})
+        elif self.delete_reply == "error":
+            error = {"code": "item_not_found", "message": ERROR_MESSAGE}
+            error["event_id"] = event["event_id"]
+            await self._send(ws, {"type": "error", "error": error})
 
     async def _on_session_update(self, ws: ServerConnection) -> None:
         if self.mode == "no_session":

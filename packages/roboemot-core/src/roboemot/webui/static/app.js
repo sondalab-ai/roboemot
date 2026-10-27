@@ -730,6 +730,11 @@ async function saveRoute(route, v) {
   await routesView();
 }
 
+const REALTIME_FACTS = [
+  "mode", "allocator_host", "connect_host", "header_to_connect_host", "platform_id_sent",
+  "update_seen", "first_audio_ms", "item_delete", "charged", "failure",
+];
+
 async function routesView() {
   const view = document.getElementById("view");
   const data = await api("GET", "/api/routes");
@@ -744,11 +749,16 @@ async function routesView() {
   const secretList = secrets ? secrets.secrets : [];
   view.replaceChildren();
   const verdict = (c) => el("li", {}, t("check_" + c.name) + ": ", badge(t("status_" + c.status), c.status === "pass" ? "success" : (c.status === "fail" ? "danger" : "info")), " " + c.reason);
+  // A realtime check names hosts and outcome codes only (SPEC 8, 12): shown as they come.
+  const shown = (v) => (v === null || v === undefined ? "-" : String(v));
+  const realtimeFacts = (report) => report.kind !== "realtime" ? [] :
+    [el("ul", {}, REALTIME_FACTS.map((f) => el("li", {}, t("rt_" + f) + ": " + shown(report[f]))))];
   const show = (box, report) => {
     const head = report.error ? t("route_error_" + report.error) : t(report.ok ? "route_ok" : "route_failed");
     box.replaceChildren(
       el("p", {}, head + " " + t("route_at", { at: report.checked_at })),
-      el("ul", {}, report.checks.map(verdict)));
+      el("ul", {}, report.checks.map(verdict)),
+      ...realtimeFacts(report));
   };
   const cards = data.routes.map((r) => {
     const box = el("div", { role: "status" });
@@ -758,7 +768,7 @@ async function routesView() {
     const run = button(t("route_check"), "plain", () => guarded(async () => {
       await api("POST", "/api/routes/" + encodeURIComponent(r.name) + "/check", {});
       await routesView();
-    }), { attrs: { disabled: r.running || r.kind === "realtime", title: r.kind === "realtime" ? t("route_check_realtime") : null } });
+    }), { attrs: { disabled: r.running } });
     const edit = el("div", { hidden: true }, routeForm(r, secretList, data.name_max_chars, (v) => saveRoute(r, v)));
     const toggle = button(t("route_edit"), "plain", () => { edit.hidden = !edit.hidden; });
     const remove = button(t("route_remove"), "danger", () => guarded(async () => {

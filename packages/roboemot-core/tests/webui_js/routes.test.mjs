@@ -225,16 +225,41 @@ test("route form: a keyed chat route does not name the realtime key hosts", asyn
   assert.doesNotMatch(page.document.querySelector("dialog").textContent, /Also/);
 });
 
-test("route form: a realtime route shows its kind, cannot be checked and its kind is not editable", async () => {
+test("route form: a realtime route shows its kind, can be checked and its kind is not editable", async () => {
   const RT = { ...ADDED, name: "voice", kind: "realtime" };
-  const page = await formsPage([ROUTE, RT]);
+  let checked = null;
+  const page = await formsPage([ROUTE, RT], {
+    "POST /api/routes/voice/check": () => { checked = "voice"; return { running: true }; },
+  });
   const card = [...page.document.querySelectorAll("section.sl-card")].find((c) => c.querySelector("h2").textContent === "voice");
   assert.match(card.textContent, /route_kind_realtime/);
   const check = [...card.querySelectorAll("button")].find((b) => b.textContent === "route_check");
-  assert.equal(check.disabled, true);
+  assert.equal(check.disabled, false, "SR-5: the Routes tab runs the realtime check");
+  check.click();
+  await settle();
+  assert.equal(checked, "voice");
   assert.equal(sel(page, "route-voice-kind"), null);
-  const lan = [...page.document.querySelectorAll("section.sl-card")].find((c) => c.querySelector("h2").textContent === "lan");
-  assert.equal([...lan.querySelectorAll("button")].find((b) => b.textContent === "route_check").disabled, false);
+});
+
+test("routes: a realtime check report shows the hosts and the outcomes, never a URL path", async () => {
+  const report = {
+    kind: "realtime", ok: false, error: "", checked_at: "2026-10-27T10:00:00+00:00",
+    mode: "platform", allocator_host: "alloc.example.org", connect_host: "connect.example.net",
+    header_to_connect_host: "refused", platform_id_sent: false, update_seen: false,
+    first_audio_ms: null, item_delete: "not_run", charged: 0, failure: "url_key_host",
+    checks: [{ name: "realtime_connect", status: "fail", reason: "url_key_host" }],
+  };
+  const RT = { ...ADDED, name: "voice", kind: "realtime", last_check: report };
+  const page = await formsPage([RT]);
+  const card = [...page.document.querySelectorAll("section.sl-card")].find((c) => c.querySelector("h2").textContent === "voice");
+  const text = card.textContent;
+  assert.match(text, /check_realtime_connect/);
+  assert.match(text, /rt_connect_host: connect\.example\.net/);
+  assert.match(text, /rt_allocator_host: alloc\.example\.org/);
+  assert.match(text, /rt_header_to_connect_host: refused/);
+  assert.match(text, /rt_item_delete: not_run/);
+  assert.match(text, /rt_failure: url_key_host/);
+  assert.doesNotMatch(text, /\/session|\/realtime/);
 });
 
 test("route form: only a route added here can be removed", async () => {
@@ -462,4 +487,12 @@ test("route edit: a refused locality step unbinds nothing", async () => {
   await settle();
   await answerPin(page);
   assert.deepEqual(rec.order.map((s) => s.label), ["locality"]);
+});
+
+test("routes: a chat check report adds no realtime list and no empty node", async () => {
+  const report = { ok: true, error: "", checked_at: "2026-10-27T10:00:00+00:00", checks: [{ name: "streaming", status: "pass", reason: "" }] };
+  const page = await formsPage([{ ...ROUTE, last_check: report }]);
+  const card = [...page.document.querySelectorAll("section.sl-card")].find((c) => c.querySelector("h2").textContent === "lan");
+  const box = card.querySelector("[role=status]");
+  assert.equal(box.childNodes.length, 2, "the verdict line and the check list only");
 });

@@ -238,7 +238,7 @@ EN: dict[str, str] = {
     "err_route_unknown": "No such route.",
     "err_route_busy": "Another check is running. Try again in a moment.",
     "err_route_budget": "The daily token budget of the route is spent.",
-    "err_route_kind": "A realtime speech route cannot run the chat check.",
+    "err_route_kind": "This kind of route cannot be checked.",
     "err_route_secret": "The route key is not available. Set it on the robot: roboemot secrets set",
     "route_error_secret": "The key of the route is not available.",
     "route_secret_set": "key {name}: set",
@@ -246,6 +246,8 @@ EN: dict[str, str] = {
     "route_error_timeout": "The check took too long and was stopped.",
     "route_error_budget": "The daily token budget ran out during the check.",
     "route_error_failed": "The check could not be completed.",
+    "route_error_provider": "No realtime session provider for this robot (platform mode).",
+    "route_error_no_extra": "The realtime extra (websockets) is not installed.",
     "route_running": "Check running...",
     "routes_intro": (
         "Conformance check of each LLM route: streaming, tool call, first-token latency and "
@@ -281,7 +283,6 @@ EN: dict[str, str] = {
         "conversations do not use it as a chat model. Changing it later on a route with a key "
         "needs the configuration file."
     ),
-    "route_check_realtime": "The check is for chat routes only.",
     "route_key_hosts": "As a realtime route, it may also go to the hosts under: {hosts}.",
     "route_key": "Key",
     "route_key_none": "No key",
@@ -353,6 +354,19 @@ EN: dict[str, str] = {
     "check_tool_round_trip": "Tool call round trip",
     "check_first_token_latency": "First-token latency",
     "check_italian": "Italian output",
+    "check_realtime_connect": "Connect and session.updated",
+    "check_realtime_first_audio": "First audio of a text turn",
+    "check_realtime_item_delete": "Delete of an item the robot named",
+    "rt_mode": "Mode",
+    "rt_allocator_host": "Allocator host",
+    "rt_connect_host": "Connect host",
+    "rt_header_to_connect_host": "Key to the connect host",
+    "rt_platform_id_sent": "Platform identifier sent",
+    "rt_update_seen": "session.updated seen",
+    "rt_first_audio_ms": "First audio (ms)",
+    "rt_item_delete": "Item delete",
+    "rt_charged": "Tokens charged",
+    "rt_failure": "Failure",
     "status_pass": "pass",
     "status_fail": "fail",
     "status_skip": "skipped",
@@ -797,7 +811,7 @@ IT: dict[str, str] = {
     "err_route_unknown": "Modello sconosciuto.",
     "err_route_busy": "Un altro controllo è in corso. Riprova tra poco.",
     "err_route_budget": "Il budget giornaliero di token del modello è esaurito.",
-    "err_route_kind": "Un modello voce in tempo reale non può fare il controllo di chat.",
+    "err_route_kind": "Questo tipo di modello non si può controllare.",
     "err_route_secret": "La chiave non è disponibile. Impostala sul robot: roboemot secrets set.",
     "route_error_secret": "La chiave del modello non è disponibile.",
     "route_secret_set": "chiave {name}: impostata",
@@ -805,6 +819,10 @@ IT: dict[str, str] = {
     "route_error_timeout": "Il controllo ha richiesto troppo tempo ed è stato fermato.",
     "route_error_budget": "Il budget giornaliero di token è finito durante il controllo.",
     "route_error_failed": "Non è stato possibile completare il controllo.",
+    "route_error_provider": (
+        "Nessun fornitore di sessioni in tempo reale per questo robot (modalità platform)."
+    ),
+    "route_error_no_extra": "L'extra realtime (websockets) non è installato.",
     "route_running": "Controllo in corso...",
     "routes_intro": (
         "Controllo di conformità di ogni modello LLM: streaming, chiamata di strumenti, latenza "
@@ -840,7 +858,6 @@ IT: dict[str, str] = {
         "le conversazioni non lo usano come modello di chat. Cambiarlo dopo, su un modello con "
         "chiave, richiede il file di configurazione."
     ),
-    "route_check_realtime": "Il controllo vale solo per i modelli di chat.",
     "route_key_hosts": (
         "Essendo un modello in tempo reale, può andare anche agli host sotto: {hosts}."
     ),
@@ -924,6 +941,19 @@ IT: dict[str, str] = {
     "check_tool_round_trip": "Chiamata di strumenti",
     "check_first_token_latency": "Latenza del primo token",
     "check_italian": "Risposta in italiano",
+    "check_realtime_connect": "Connessione e session.updated",
+    "check_realtime_first_audio": "Primo audio di un turno di testo",
+    "check_realtime_item_delete": "Cancellazione di un elemento con id scelto dal robot",
+    "rt_mode": "Modalità",
+    "rt_allocator_host": "Host dell'allocatore",
+    "rt_connect_host": "Host di connessione",
+    "rt_header_to_connect_host": "Chiave all'host di connessione",
+    "rt_platform_id_sent": "Identificativo della piattaforma inviato",
+    "rt_update_seen": "session.updated ricevuto",
+    "rt_first_audio_ms": "Primo audio (ms)",
+    "rt_item_delete": "Cancellazione dell'elemento",
+    "rt_charged": "Token addebitati",
+    "rt_failure": "Errore",
     "status_pass": "ok",
     "status_fail": "errore",
     "status_skip": "saltato",

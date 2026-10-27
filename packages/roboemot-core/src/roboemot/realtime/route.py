@@ -150,6 +150,25 @@ def select_provider(cfg: RoboEmotConfig, robot_id: str, manifest: Any) -> Sessio
     return provider
 
 
+def session_update(cfg: RoboEmotConfig, instructions: str, tools: Any = None) -> dict[str, Any]:
+    """``session.update``: the instructions (parts 1 to 4), PCM in at the robot's rate and out
+    at the server's own, the voice, server VAD that never answers or interrupts on its own and
+    ends a turn after ``server_silence_ms``, and the tools (left as they are when None). The
+    route and the realtime check (``realtime.check``) send the same one."""
+    rt, vad = cfg.voice.realtime_route, cfg.voice.vad
+    return protocol.session_update(
+        instructions=instructions,
+        input_rate_hz=cfg.voice.sample_rate_hz,
+        output_rate_hz=None,
+        voice=rt.voice or None,
+        vad_threshold=vad.threshold,
+        silence_ms=round(rt.server_silence_ms),
+        create_response=False,
+        interrupt_response=False,
+        tools=tools,
+    )
+
+
 def realtime_extra() -> bool:
     """Whether the ``realtime`` extra (``websockets``) is installed."""
     return importlib.util.find_spec("websockets") is not None
@@ -217,6 +236,7 @@ class RealtimeRoute:
         self._statuses: collections.Counter[str] = collections.Counter()
         self._failures: collections.Counter[str] = collections.Counter()
         self._first_audio_ms: collections.deque[float] = collections.deque(maxlen=LATENCY_WINDOW)
+        self._transcript_ms: collections.deque[float] = collections.deque(maxlen=LATENCY_WINDOW)
         self._stages: dict[str, collections.deque[float]] = {
             stage: collections.deque(maxlen=LATENCY_WINDOW) for stage in protocol.LATENCY_STAGES
         }
@@ -564,22 +584,8 @@ class RealtimeRoute:
         return client
 
     def session_update(self, cfg: RoboEmotConfig, instructions: str, tools: Any = None) -> Any:
-        """``session.update``: the instructions (parts 1 to 4), PCM in at the robot's rate and
-        out at the server's own, the voice, server VAD that never answers or interrupts on its
-        own and ends a turn after ``server_silence_ms``, and the tools (left as they are when
-        None)."""
-        rt, vad = cfg.voice.realtime_route, cfg.voice.vad
-        return protocol.session_update(
-            instructions=instructions,
-            input_rate_hz=cfg.voice.sample_rate_hz,
-            output_rate_hz=None,
-            voice=rt.voice or None,
-            vad_threshold=vad.threshold,
-            silence_ms=round(rt.server_silence_ms),
-            create_response=False,
-            interrupt_response=False,
-            tools=tools,
-        )
+        """``session.update`` for this route (:func:`session_update`)."""
+        return session_update(cfg, instructions, tools)
 
     def _set_state(self, state: str, reason: str | None) -> None:
         with self._lock:
@@ -726,6 +732,13 @@ class RealtimeRoute:
             self._error(event, token)
         elif isinstance(event, OF_A_RESPONSE):
             self._response_event(event, token)
+        elif isinstance(event, tuple(CONFIRMATIONS)):
+            with self._lock:
+                current = self._current(token)
+                if current:  # the server confirmed a delete or a truncate (the HIL reads them)
+                    self._counts[CONFIRMATIONS[type(event)]] += 1
+            if not current:
+                self._count("stale_callbacks")
         elif isinstance(event, OF_THE_INPUT):
             with self._lock:
                 current = self._current(token)
@@ -1052,6 +1065,8 @@ class RealtimeRoute:
         if client is None:
             return False
         client.send(event)
+        if event["type"] == protocol.ITEM_TRUNCATE:
+            self._count("items_truncated")
         return True
 
     def new_item_id(self) -> str:
@@ -1087,6 +1102,11 @@ class RealtimeRoute:
     def note_first_audio(self, ms: float) -> None:
         with self._lock:
             self._first_audio_ms.append(ms)
+
+    def note_transcript(self, ms: float) -> None:
+        """End of the user's speech to the server's transcript of it (SPEC 13, the HIL)."""
+        with self._lock:
+            self._transcript_ms.append(ms)
 
     def count(self, key: str, n: int = 1) -> None:
         self._count(key, n)
@@ -1142,6 +1162,7 @@ class RealtimeRoute:
                 "upload_budget_s": rt.daily_upload_budget_s,
                 "latency_ms": {
                     "first_audio": summarise(list(self._first_audio_ms), LATENCY_LEVELS),
+                    "transcript": summarise(list(self._transcript_ms), LATENCY_LEVELS),
                     "server": {
                         stage: summarise([v * MS_PER_S for v in values], LATENCY_LEVELS)
                         for stage, values in self._stages.items()
@@ -1171,6 +1192,9 @@ COUNTERS = (
     "audio_items_undeletable",
     "audio_items_ambiguous",
     "items_deleted",
+    "items_delete_confirmed",
+    "items_truncated",
+    "items_truncate_confirmed",
     "transcripts",
     "transcript_timeouts",
     "unrequested",
@@ -1187,6 +1211,12 @@ COUNTERS = (
     "sends_refused",
     "resets",
 )
+
+# the server's confirmations of a delete and a truncate, and the counter each one moves
+CONFIRMATIONS: dict[type, str] = {
+    protocol.ItemDeleted: "items_delete_confirmed",
+    protocol.ItemTruncated: "items_truncate_confirmed",
+}
 
 # the server events about the input audio (the audio input collects them)
 OF_THE_INPUT = (protocol.SpeechBoundary, protocol.InputTranscript)
