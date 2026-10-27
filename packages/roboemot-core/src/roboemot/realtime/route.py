@@ -19,8 +19,19 @@ holding it, and the configuration stack is never read while holding it (the stac
 subscribers, ``apply_config`` among them, under its own lock).
 
 Lock order: the worker's ``_rt_lock`` (asyncio) -> ``_connect_lock`` (one connect at a time,
-held across the network) -> ``_lock`` -> the client's own lock. The client never calls the route
-while holding its lock.
+held across the network) -> ``_lock`` -> the client's own lock, the router's and the network
+monitor's locks (``_fits`` calls the router, whose reachability check reads the monitor, under
+``_lock``). None of those calls back into the route; the client never calls the route while
+holding its lock, and its callbacks carry a per-client token (an old client's late callback is
+dropped).
+
+Privacy is enforced at the send point (SPEC 12): every data-carrying send (``session.update``,
+text items, tool results, ``response.create``) passes one gate that reads the committed
+configuration and runs ``_fits`` atomically with the send under ``_lock``; refused, nothing is
+sent and the session is closed. The stack commits before it notifies ``apply_config``, so the
+gate, not the lifecycle, is what closes that window. The client asks the same gate right before
+it sends ``session.update`` after the handshake. ``response.cancel`` and item deletes and
+truncations carry no data and are not gated.
 
 Responses are correlated explicitly (SPEC 8, Realtime speech route). Each ``response.create``
 carries an ``event_id``; an ``error`` that echoes it refuses that request, any other ``error``
@@ -47,6 +58,7 @@ from typing import Any
 
 from ..config.schema import LLMRoute, RoboEmotConfig
 from ..health.network import route_endpoint
+from ..llm.prompt import CHARS_PER_TOKEN
 from ..llm.pseudonyms import url_is_local
 from ..stats import P50, P95, summarise
 from . import protocol
@@ -65,12 +77,18 @@ OWN_CLOSES = (
     "shutdown",
     "reconfigured",
     "budget",
+    "expired",
 )  # our closes, not failures
 LATENCY_LEVELS = {"p50": P50, "p95": P95}
 MS_PER_S = 1000.0
 LATENCY_WINDOW = 50  # turns whose latencies the report summarises
 ITEM_PREFIX = "re_"  # the client's own item ids (user text, tool results)
 EVENT_PREFIX = "rq_"  # the event ids of the robot's response.create events
+
+
+class _Token:
+    """Identifies one client's callbacks: those of a client that is not the current (or the
+    connecting) one are dropped, so a late close of an old session never touches a new one."""
 
 
 @dataclass
@@ -81,8 +99,10 @@ class Request:
     event_id: str
     run: Any | None
     sent_at: float
-    estimate: int = 0
+    estimate: int = 0  # tokens charged when no usage comes (the run keeps it current)
     response_id: str | None = None
+    token: _Token | None = None  # the client it was sent on
+    last_event: float = 0.0  # when its last event came (expiry ages from it)
 
 
 def select_provider(cfg: RoboEmotConfig, robot_id: str, manifest: Any) -> SessionProvider | None:
@@ -138,6 +158,9 @@ class RealtimeRoute:
         self._connect_lock = threading.Lock()  # one connect at a time, held across the network
         self._client: Any = None
         self._connecting: Any = None  # the client of a connect in flight
+        self._token: _Token | None = None  # the current client's callback token
+        self._connecting_token: _Token | None = None  # the connecting client's
+        self._close_reason = "closed"  # the reason of the last close (the report)
         self._rev = 0  # bumped by apply_config: a check made with an older config is redone
         self._closes = 0  # bumped by close/close_soon: a connect begun before never stores
         self.generation = 0  # one per server session: item ids belong to one generation
@@ -311,6 +334,7 @@ class RealtimeRoute:
         in flight, or a ``ready`` waiting for one, never stores its session after this."""
         with self._lock:
             self._closes += 1
+            self._close_reason = reason
             if reason == "shutdown":
                 self._closed = True
             client = self._detach()
@@ -324,13 +348,15 @@ class RealtimeRoute:
         (the caller is an event loop)."""
         with self._lock:
             self._closes += 1
+            self._close_reason = reason
             client = self._detach()
         if client is not None:
             self._close_client(client, reason)
 
     def _detach(self) -> Any:
-        """Take the client out of the state (``_lock`` held); the caller closes it."""
-        client, self._client = self._client, None
+        """Take the client out of the state (``_lock`` held); the caller closes it. Its
+        callbacks no longer count (its token is no longer current)."""
+        client, self._client, self._token = self._client, None, None
         return client
 
     def _close_client(self, client: Any, reason: str) -> None:
@@ -350,26 +376,35 @@ class RealtimeRoute:
             route, router = self.route(cfg), self._router()
             if route is None or router is None or self.provider is None:
                 return False
-            with self._lock:
+
+            def precheck(now: RoboEmotConfig) -> tuple[str, Any]:
                 if self._closes != closes or self._closed:
-                    return False  # closed (asleep, shutdown) while this call waited
-            client = self._make_client(cfg, route, router)
-            with self._lock:
-                if self._closes != closes or self._closed:
-                    return False  # closed (asleep, shutdown) while this call waited
-                if self._client is not None and self._client.state == "connected":
-                    return True  # another call connected meanwhile (it was checked then)
-                old, self._client = self._client, None
-                self._connecting = client
-                self.state, self.reason = "connecting", None
+                    return "closed", None  # closed (asleep, shutdown) while this call waited
+                current = self._client
+                if current is not None and current.state == "connected":
+                    if self._fits(now, current):
+                        return "ok", None  # another call connected meanwhile
+                    return "connect", self._detach()
+                return "connect", self._detach()
+
+            verdict, old = self._with_config(precheck)
             if old is not None:
                 old.close()
+            if verdict != "connect":
+                return verdict == "ok"
+            token = _Token()  # the callbacks of this client, and nothing else's
+            client = self._make_client(cfg, route, router, token)
+            with self._lock:
+                if self._closes != closes or self._closed:
+                    return False
+                self._connecting, self._connecting_token = client, token
+                self.state, self.reason = "connecting", None
             update = self.session_update(cfg, self.base_instructions())
             try:
                 ok = client.connect(update)
             finally:
                 with self._lock:
-                    self._connecting = None
+                    self._connecting = self._connecting_token = None
             snap = client.snapshot()
             if not ok:  # the client's close hook already reported the failure
                 with self._lock:
@@ -378,16 +413,23 @@ class RealtimeRoute:
                 client.close()
                 if client.reason == "pseudonyms":  # the allocated host is a cloud one
                     self._set_state("blocked", "pseudonyms")
+                elif client.reason == "reconfigured":  # the gate before session.update
+                    with self._lock:
+                        why = self._close_reason if self._closes != closes else "reconfigured"
+                    self._set_state("closed", why)
                 else:
                     self._set_state("fallback_local", client.reason)
                 return False
 
             def store(now: RoboEmotConfig) -> bool:
                 self._client_snapshot = snap
-                if self._closes != closes or self._closed or not self._fits(now, client):
+                if self._closes != closes or self._closed:
+                    self.state, self.reason = "closed", self._close_reason
+                    return False
+                if not self._fits(now, client):
                     self.state, self.reason = "closed", "reconfigured"
                     return False
-                self._client = client
+                self._client, self._token = client, token
                 self.generation += 1
                 self._counts["opened"] += 1
                 if self._lost:  # the last session was lost, not closed by the robot
@@ -402,22 +444,39 @@ class RealtimeRoute:
             self.network.report_realtime(True)
             return True
 
-    def _make_client(self, cfg: RoboEmotConfig, route: LLMRoute, router: Any) -> Any:
+    def _may_send_update(self, token: _Token, closes: int, client: Any) -> bool:
+        """The client's gate right before it sends ``session.update`` (after the handshake):
+        the committed config still fits and nothing closed or reloaded the route meanwhile."""
+
+        def check(cfg: RoboEmotConfig) -> bool:
+            if self._closes != closes or self._closed or self._connecting_token is not token:
+                return False
+            return self._fits(cfg, client)
+
+        return bool(self._with_config(check))
+
+    def _make_client(self, cfg: RoboEmotConfig, route: LLMRoute, router: Any, token: _Token) -> Any:
         if self._client_factory is not None:
             factory = self._client_factory
         else:
             from .client import RealtimeClient  # needs the realtime extra
 
             factory = RealtimeClient
-        return factory(
+        with self._lock:
+            closes = self._closes
+        box: list[Any] = []
+        client = factory(
             route,
             cfg.voice.realtime_route,
             self.provider,
             auth_headers=lambda: self._router().auth_headers(route),
-            on_event=self._on_event,
-            on_close=self._on_close,
+            on_event=lambda event: self._on_event(event, token),
+            on_close=lambda reason: self._on_close(reason, token),
             local_only=lambda: self.stack.effective().privacy.pseudonyms_to_cloud,
+            may_send=lambda: bool(box) and self._may_send_update(token, closes, box[0]),
         )
+        box.append(client)
+        return client
 
     def session_update(self, cfg: RoboEmotConfig, instructions: str, tools: Any = None) -> Any:
         """``session.update`` for a text-input session: the instructions (parts 1 to 4), PCM in
@@ -453,18 +512,18 @@ class RealtimeRoute:
         self, run: Any, instructions: str, tool_choice: str | None = None
     ) -> Request | None:
         """Send ``response.create`` for ``run`` (its ``deliver``/``closed`` get the response's
-        events); None when there is no session (nothing is sent)."""
+        events) through the send gate; None when there is no session or the gate refuses it
+        (nothing is sent)."""
+        now = self.clock()
         event_id = f"{EVENT_PREFIX}{next(self._events)}"
-        req = Request(event_id, run, self.clock())
-        with self._lock:
-            self._pending.append(req)
+        req = Request(event_id, run, now, len(instructions) // CHARS_PER_TOKEN, last_event=now)
         event = protocol.response_create(instructions, tool_choice, event_id=event_id)  # type: ignore[arg-type]
-        if not self.send(event):
-            with self._lock:
-                if req in self._pending:
-                    self._pending.remove(req)
-            return None
-        return req
+
+        def track() -> None:  # under _lock, with the send
+            req.token = self._token
+            self._pending.append(req)
+
+        return req if self._gated(event, track) else None
 
     def busy(self) -> bool:
         """An abandoned request is still in flight: a new one waits (correlation by order)."""
@@ -472,26 +531,34 @@ class RealtimeRoute:
             return any(r.run is None for r in (*self._pending, *self._live.values()))
 
     def expire(self) -> None:
-        """Abandoned requests older than the route's ``stall_timeout_s`` are given up: charged
-        their estimate, counted, and their late events dropped."""
+        """Abandoned requests with no event for the route's ``stall_timeout_s`` are given up:
+        charged once (their estimate), counted, their late events dropped. One that never got
+        its ``response.created`` resets the session: its late ``response.created`` could
+        otherwise take the next request's place (no order guessing)."""
         _, stall = self.timeouts()
         now = self.clock()
         with self._lock:
-            old = [r for r in self._pending if r.run is None and now - r.sent_at >= stall]
-            old += [r for r in self._live.values() if r.run is None and now - r.sent_at >= stall]
-            for r in old:
+            never = [r for r in self._pending if r.run is None and now - r.last_event >= stall]
+            live = [r for r in self._live.values() if r.run is None and now - r.last_event >= stall]
+            for r in (*never, *live):
                 self._forget(r)
-        self._give_up(old)
+        self._give_up([*never, *live])
+        if never:
+            self._count("resets")
+            self.close_soon("expired")
+            self.start()  # a new session, in the background
 
     def abandon(self, req: Request, estimate: int) -> None:
         """``req``'s run stops following it (barge-in, a failure, its own timeout): the
-        response is cancelled when it is still in flight, and its ``response.done`` is charged
-        when it comes (``estimate`` without usage, or if it never comes)."""
+        response is cancelled when it is still in flight, and charged once when its
+        ``response.done`` comes, when it expires, or when the session closes."""
         with self._lock:
-            req.run, req.estimate = None, estimate
-            in_flight = req in self._pending or req.response_id in self._live
+            req.run, req.estimate = None, max(req.estimate, estimate)
+            in_flight = req in self._pending or (
+                req.response_id is not None and self._live.get(req.response_id) is req
+            )
         if in_flight:
-            self.send(protocol.response_cancel())
+            self.send_control(protocol.response_cancel())
 
     def finish(self, req: Request) -> None:
         """``req``'s run is over (its ``response.done`` came, or the session is gone)."""
@@ -506,46 +573,75 @@ class RealtimeRoute:
             del self._live[req.response_id]
 
     def _give_up(self, reqs: list[Request]) -> None:
+        """Requests that will get no ``response.done``: their estimate, once each."""
         for r in reqs:
-            self.charge(r.estimate)
-            self.note_response(None)
+            if self._first_charge(r.response_id):
+                self.charge(r.estimate)
+                self.note_response(None)
 
-    def _on_event(self, event: protocol.ServerEvent) -> None:
-        """Route one server event (client thread) to the run that owns it."""
+    def _first_charge(self, response_id: str | None) -> bool:
+        """Whether this response is charged now (False when it already was)."""
+        with self._lock:
+            if response_id is None:
+                return True
+            if response_id in self._charged:
+                return False
+            self._charged.append(response_id)
+            return True
+
+    def _current(self, token: _Token | None) -> bool:
+        """Whether a callback comes from the current or the connecting client (``_lock`` held);
+        None (a direct call) counts as current."""
+        return token is None or token is self._token or token is self._connecting_token
+
+    def _on_event(self, event: protocol.ServerEvent, token: _Token | None = None) -> None:
+        """Route one server event (client thread) to the run that owns it; an event of a
+        client that is no longer current is dropped and counted."""
+        with self._lock:
+            current = self._current(token)
+            tok = token or self._token
+        if not current:
+            self._count("stale_callbacks")
+            return
         if isinstance(event, protocol.SessionEvent) and event.output_rate_hz:
             self.output_rate_hz = event.output_rate_hz
             return
         if isinstance(event, protocol.ResponseCreated):
-            self._created(event)
+            self._created(event, tok)
         elif isinstance(event, protocol.ServerError):
-            self._error(event)
+            self._error(event, tok)
         elif isinstance(event, OF_A_RESPONSE):
             self._response_event(event)
 
-    def _created(self, event: protocol.ResponseCreated) -> None:
+    def _created(self, event: protocol.ResponseCreated, token: _Token | None) -> None:
         rid = event.response_id or f"anon_{next(self._ids)}"
+        now = self.clock()
         with self._lock:
-            req = self._pending.pop(0) if self._pending else None
-            if req is None:  # the server answered on its own
-                req = Request("", None, self.clock())
-                unrequested = True
-            else:
+            req = next((r for r in self._pending if r.token is token), None)
+            if req is not None:
+                self._pending.remove(req)
                 unrequested = False
-            req.response_id = rid
+            else:  # the server answered on its own
+                req = Request("", None, now, token=token)
+                unrequested = True
+            req.response_id, req.last_event = rid, now
             self._live[rid] = req
             run = req.run
         if unrequested:
             self._count("unrequested")
         if run is None:  # unrequested, or its run was cut before it began: cancelled
-            self.send(protocol.response_cancel())
+            self.send_control(protocol.response_cancel())
         else:
             run.deliver(event)
 
-    def _error(self, event: protocol.ServerError) -> None:
+    def _error(self, event: protocol.ServerError, token: _Token | None) -> None:
         """An ``error`` refuses the request whose ``event_id`` it echoes; others are only
         counted (by the client)."""
         with self._lock:
-            req = next((r for r in self._pending if r.event_id == event.event_id), None)
+            req = next(
+                (r for r in self._pending if r.event_id == event.event_id and r.token is token),
+                None,
+            )
             if req is not None:
                 self._pending.remove(req)
             run = req.run if req is not None else None
@@ -553,10 +649,9 @@ class RealtimeRoute:
             self._count("errors_unrelated")
             return
         self._count("refused")
+        self._give_up([req])
         if run is not None:
             run.deliver(event)
-        else:
-            self._give_up([req])
 
     def _response_event(self, event: Any) -> None:
         done = isinstance(event, protocol.ResponseDone)
@@ -565,44 +660,44 @@ class RealtimeRoute:
             if rid is None and len(self._live) == 1:
                 rid = next(iter(self._live))
             req = self._live.get(rid) if rid is not None else None
-            if done and req is not None:
-                del self._live[rid]
-            expired: list[Request] = []
-            if done:  # an abandoned request never created by now never will be
-                expired = [r for r in self._pending if r.run is None]
-                for r in expired:
-                    self._pending.remove(r)
+            if req is not None:
+                req.last_event = self.clock()
+                if done:
+                    del self._live[rid]
             run = req.run if req is not None else None
         if done:
             self.network.report_realtime(True)  # real traffic: the session works
-            self._account(event)
-            self._give_up(expired)
-            if req is not None and run is None and event.total_tokens is None:
-                self.charge(req.estimate)  # abandoned, no usage: its estimate
+            self._account(event, req)
         if req is None:
             self._count("foreign_events")
             return
         if run is not None:
             run.deliver(event)
 
-    def _account(self, done: protocol.ResponseDone) -> None:
-        """Every ``response.done`` is counted, and its usage charged, once (keyed by response
-        id): the turn's, an abandoned one and an unrequested one alike."""
-        with self._lock:
-            seen = done.response_id is not None and done.response_id in self._charged
-            if done.response_id is not None and not seen:
-                self._charged.append(done.response_id)
-        if seen:
+    def _account(self, done: protocol.ResponseDone, req: Request | None) -> None:
+        """Every ``response.done`` is counted and charged once (keyed by response id): its
+        usage, or its request's estimate without one. The route is the one place that charges
+        a response: the turn's, an abandoned one and an unrequested one alike."""
+        if not self._first_charge(done.response_id):
             return
         self.note_response(done)
         if done.total_tokens is not None:
             self.charge(done.total_tokens)
+        elif req is not None:
+            self.charge(req.estimate)
 
-    def _on_close(self, reason: str) -> None:
+    def _on_close(self, reason: str, token: _Token | None = None) -> None:
         with self._lock:
-            reqs = [*self._pending, *self._live.values()]
-            self._pending, self._live = [], {}
-        self._give_up([r for r in reqs if r.run is None])
+            current = self._current(token)
+            if current:
+                tok = token or self._token
+                reqs = [r for r in (*self._pending, *self._live.values()) if r.token is tok]
+                self._pending = [r for r in self._pending if r not in reqs]
+                self._live = {k: r for k, r in self._live.items() if r not in reqs}
+        if not current:  # an old client's late close: the current session is not touched
+            self._count("stale_callbacks")
+            return
+        self._give_up(reqs)
         if reason not in OWN_CLOSES and reason != "closed":
             self.network.report_realtime(False)
             with self._lock:
@@ -616,8 +711,32 @@ class RealtimeRoute:
     # ----------------------------------------------------------------- sending
 
     def send(self, event: dict[str, Any]) -> bool:
-        """Queue a client event; False when there is no session (nothing is sent). While a
-        connect completes, its client (a cancel of an unrequested response)."""
+        """Send a data-carrying event (text items, tool results, ``session.update``) through the
+        send gate: the committed configuration must still fit the session, checked atomically
+        with the send (SPEC 12). Refused: nothing is sent and the session is closed."""
+        return self._gated(event)
+
+    def _gated(self, event: dict[str, Any], track: Callable[[], None] | None = None) -> bool:
+        def gate(cfg: RoboEmotConfig) -> tuple[bool, Any]:
+            client = self._client
+            if client is None or client.state != "connected":
+                return False, None
+            if not self._fits(cfg, client):
+                self._counts["sends_refused"] += 1
+                return False, self._detach()
+            if track is not None:
+                track()
+            client.send(event)  # only queued on the client's loop: never blocks
+            return True, None
+
+        ok, stale = self._with_config(gate)
+        if stale is not None:
+            self._close_client(stale, "reconfigured")
+        return bool(ok)
+
+    def send_control(self, event: dict[str, Any]) -> bool:
+        """Send an event that carries no data (``response.cancel``, ``conversation.item.delete``
+        and ``.truncate``): ungated, also on a client still connecting."""
         with self._lock:
             client = self._client or self._connecting
         if client is None:
@@ -633,7 +752,7 @@ class RealtimeRoute:
         """Delete items of the current server session (older ones died with theirs)."""
         if generation != self.generation or not self.connected:
             return 0
-        sent = sum(self.send(protocol.item_delete(item)) for item in item_ids)
+        sent = sum(self.send_control(protocol.item_delete(item)) for item in item_ids)
         self._count("items_deleted", sent)
         return sent
 
@@ -734,6 +853,9 @@ COUNTERS = (
     "refused",
     "errors_unrelated",
     "foreign_events",
+    "stale_callbacks",
+    "sends_refused",
+    "resets",
 )
 
 # the server events that name the response they belong to

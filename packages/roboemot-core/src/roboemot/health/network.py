@@ -79,12 +79,11 @@ class NetworkMonitor:
         route. Any thread."""
         with self._lock:
             changed, self._realtime_active = self._realtime_active != active, active
-            if endpoint != self._realtime_endpoint:
-                if self._realtime_endpoint is not None:
-                    self.realtime = Link(REALTIME_LINK, self.policy, self._route_changed)
-                    self._realtime_confirmed = False
-                    changed = True
+            if endpoint != self._realtime_endpoint:  # also through None: a fresh link
+                self.realtime = Link(REALTIME_LINK, self.policy, self._route_changed)
+                self._realtime_confirmed = False
                 self._realtime_endpoint = endpoint
+                changed = True
         if changed:
             self._sync_network(self.clock())
 

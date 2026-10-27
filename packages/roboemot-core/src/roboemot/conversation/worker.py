@@ -177,7 +177,7 @@ class _Tail:
 class _NoSend:
     """A route stand-in that sends nothing (the server session the items belonged to is gone)."""
 
-    def send(self, event: dict[str, Any]) -> bool:
+    def send_control(self, event: dict[str, Any]) -> bool:
         return False
 
 
@@ -752,7 +752,7 @@ class ConversationWorker:
                 max_chars=conv.tool_arg_max_chars,
                 choices=choices,
             )
-            route.send(
+            sent = route.send(
                 route.session_update(
                     turn.cfg,
                     self._base_instructions(),
@@ -760,7 +760,7 @@ class ConversationWorker:
                 )
             )
             item = route.new_item_id()
-            if not route.send(rt_protocol.text_item(turn.utterance.text, item)):
+            if not sent or not route.send(rt_protocol.text_item(turn.utterance.text, item)):
                 return False
             turn.rt_items.append(item)
             route.count("utterances_sent")
@@ -917,13 +917,7 @@ class ConversationWorker:
         else:
             chars = len(instructions) + len(turn.utterance.text) + len(text)
             tokens = chars // CHARS_PER_TOKEN
-        turn.tokens += tokens
-        if reply.abandoned:  # the route charges it (usage at its response.done, or estimate)
-            return
-        if reply.tokens is None:  # usage, when given, was charged by the route at response.done
-            route.charge(tokens)
-        if reply.status is None:
-            route.note_response(None)
+        turn.tokens += tokens  # the report; the route charges every response once itself
 
     def _cut_realtime(self, turn: _Turn) -> None:
         """After a stop: truncate the server's audio items at what played and keep, in the

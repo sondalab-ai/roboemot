@@ -4,6 +4,7 @@ Realtime speech route; SPEC 12A, Links and Diagnostics)."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 from types import SimpleNamespace
@@ -287,11 +288,17 @@ class StubClient:
     def __init__(self, route, settings, provider, **kw):
         self.route, self.state, self.closed, self.reason = route, "idle", 0, None
         self.local_only = kw.get("local_only", lambda: False)
+        self.may_send = kw.get("may_send", lambda: True)
+        self.updates_sent = 0
 
     def connect(self, update):
         if self.local_only():  # the real client refuses a cloud host here
             self.state, self.reason = "closed", "pseudonyms"
             return False
+        if not self.may_send():  # and asks its owner right before session.update
+            self.state, self.reason = "closed", "reconfigured"
+            return False
+        self.updates_sent += 1
         self.state = "connected"
         return True
 
@@ -439,6 +446,7 @@ def test_sleep_or_shutdown_during_a_connect_close_the_new_session(reason):
 
     r, made, ok = connect_while(stack, change)
     assert ok is False and not r.connected and made[0].closed == 1
+    assert r.snapshot()["reason"] == reason  # not "reconfigured"
 
 
 def test_ready_refuses_a_session_the_current_config_would_not_open():
@@ -608,3 +616,113 @@ def test_an_unrelated_error_does_not_end_the_wait():
     finally:
         client.close()
         server.__exit__(None, None, None)
+
+
+# ------------------------------------------------------------------ fix round 3: send gate
+
+
+def test_a_send_between_the_config_commit_and_apply_config_is_refused():
+    """probe_r3_send_window: the stack has committed pseudonyms on and is still running its
+    earlier listeners; the route's apply_config has not run. A text send is refused at the
+    gate and nothing reaches the client."""
+    stack = rt_stack()
+    r, made = stub_route(stack)
+    assert r.ready()
+    sent = []
+    made[0].send = lambda ev: sent.append(ev["type"])
+    gate, entered = threading.Event(), threading.Event()
+    stack.subscribe(lambda change: (entered.set(), gate.wait(5)))
+    setter = threading.Thread(
+        target=lambda: stack.set("privacy.pseudonyms_to_cloud", True, source="test", admin=True)
+    )
+    setter.start()
+    assert entered.wait(5)
+    from roboemot.realtime import protocol as P
+
+    result = []
+    sender = threading.Thread(target=lambda: result.append(r.send(P.text_item("Mario", "x"))))
+    sender.start()
+    import time as _t
+
+    _t.sleep(0.1)
+    gate.set()
+    setter.join(5)
+    sender.join(5)
+    assert result == [False] and sent == []
+    assert not r.connected
+
+
+def test_a_reload_during_a_connect_sends_nothing_after_the_handshake():
+    """probe_r3_connect_reload: the client asks the gate right before session.update."""
+    stack = rt_stack()
+    r, made = slow_route(stack)
+    result = []
+    thread = threading.Thread(target=lambda: result.append(r.ready()))
+    thread.start()
+    assert SlowClient.entered.wait(5)
+    routes = [CHAT, {**RT, "base_url": "http://other.local:8765/v1"}]
+    stack.set("llm_routes", routes, source="test", admin=True)  # not a pseudonym refusal
+    r.apply_config(stack.effective())
+    from roboemot.realtime import protocol as P
+
+    assert r.send(P.text_item("Mario", "x")) is False  # nothing goes to a connecting client
+    SlowClient.gate.set()
+    thread.join(5)
+    assert result == [False] and made[0].updates_sent == 0 and not r.connected
+
+
+def test_a_late_close_from_an_old_client_does_not_touch_the_new_session():
+    """probe_r3_stale_close."""
+    hooks = []
+
+    class Hooked(StubClient):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            hooks.append(kw["on_close"])
+
+    stack = rt_stack()
+    made = []
+    r = RealtimeRoute(
+        stack,
+        lambda: FakeRouter(),
+        NetworkMonitor(stack.effective().llm_routes, POLICY, probe=lambda *a: True),
+        DIRECT,
+        extra=lambda: True,
+        client_factory=lambda *a, **kw: made.append(Hooked(*a, **kw)) or made[-1],
+    )
+    assert r.ready()
+    r.close_soon("conversation_end")
+    assert r.ready() and len(made) == 2
+    from roboemot.realtime import protocol as P
+    from roboemot.realtime.turn import ResponseRun
+
+    class Speech:
+        def __init__(self):
+            self.streams = []
+
+        def stream(self, feed, **kw):
+            self.streams.append(feed)
+            return len(self.streams)
+
+        def mark_question(self, job):
+            pass
+
+    async def main():
+        sp = Speech()
+        loop = asyncio.get_running_loop()
+        run = ResponseRun(
+            r, sp, utterance=1, mood=None, volume_db=0.0, language="it", clock=loop.time
+        )
+        task = asyncio.ensure_future(run.run("hello"))
+        await asyncio.sleep(0.02)
+        hooks[0]("closed")  # the old client's late close
+        await asyncio.sleep(0.02)
+        r._on_event(P.ResponseCreated(P.RESPONSE_CREATED, "B"))
+        r._on_event(P.AudioDelta(P.AUDIO_DELTA, "B", "iB", b"\x01\x00" * 160))
+        r._on_event(P.ResponseDone(P.RESPONSE_DONE, "B", "completed", 50))
+        return await asyncio.wait_for(task, 2), sp
+
+    reply, sp = asyncio.run(main())
+    assert reply.closed is None and reply.status == "completed" and len(sp.streams) == 1
+    snap = r.snapshot()
+    assert snap["unrequested"] == 0 and snap["stale_callbacks"] == 1 and r.connected

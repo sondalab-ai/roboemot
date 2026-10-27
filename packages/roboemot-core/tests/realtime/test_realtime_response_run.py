@@ -110,9 +110,10 @@ async def test_no_stream_starts_after_the_run_ended_its_feeds():
     assert len(speech.streams) == 1
 
 
-async def test_an_abandoned_request_never_created_does_not_capture_the_next_turn():
-    """probe_owed: turn A is cut before its response.created and the server never creates it;
-    turn B's response is B's, and B completes."""
+async def test_a_never_created_request_that_expires_resets_the_session(monkeypatch):
+    """probe_owed / probe_r3_misbind: turn A is cut before its response.created. Once it has
+    had no event for the stall timeout the session is reset (closed and reopened): A's late
+    response.created can never take B's place, and the next turn completes."""
     route, sent = connected_route()
     a = make_run(route, Speech())
     task_a = asyncio.ensure_future(a.run("a"))
@@ -120,35 +121,65 @@ async def test_an_abandoned_request_never_created_does_not_capture_the_next_turn
     task_a.cancel()  # barge-in before response.created
     await asyncio.gather(task_a, return_exceptions=True)
     assert route.busy()
+    monkeypatch.setattr(route, "timeouts", lambda: (2.0, 0.1))
+    first_client = route._client
+    reopen = route.start
+    monkeypatch.setattr(route, "start", lambda: None)  # reopened below, deterministically
+    b = make_run(route, Speech())
+    reply_b = await asyncio.wait_for(b.run("b"), 2)
+    assert len(creates(sent)) == 1  # B was never sent on the old session
+    assert reply_b.closed == "no_session"  # B falls back locally (the B1 rules)
+    route._on_event(created("A"), None)  # A's late created: no run takes it
+    assert route.snapshot()["resets"] == 1 and not route.connected
+    reopen()
+    await until(lambda: route.connected and route._client is not first_client)
+    sent2 = []
+    route._client.send = sent2.append
     speech = Speech()
-    b = make_run(route, speech)
-    task_b = asyncio.ensure_future(b.run("b"))
-    await asyncio.sleep(0.01)
-    assert len(creates(sent)) == 1  # B waits while A is in flight (correlation by order)
-    route._on_event(done("unrelated"))  # any response.done expires a never-created request
-    await until(lambda: len(creates(sent)) == 2)
-    route._on_event(created("B"))
-    route._on_event(delta("B"))
-    route._on_event(done("B"))
-    reply = await asyncio.wait_for(task_b, 2)
+    c = make_run(route, speech)
+    task_c = asyncio.ensure_future(c.run("c"))
+    await until(lambda: creates(sent2))
+    route._on_event(created("C"))
+    route._on_event(delta("C"))
+    route._on_event(done("C"))
+    reply = await asyncio.wait_for(task_c, 2)
     assert reply.status == "completed" and len(speech.streams) == 1
 
 
-async def test_an_abandoned_request_expires_after_the_stall_timeout(monkeypatch):
+async def test_a_late_done_after_expiry_is_charged_once(monkeypatch):
+    """probe_r3_double_charge: an abandoned live response expires (charged its estimate);
+    its late response.done is not charged again. A response still streaming does not expire
+    (the expiry ages from its last event)."""
     route, sent = connected_route()
+    charged = []
+    monkeypatch.setattr(route, "charge", charged.append)
+    monkeypatch.setattr(route, "timeouts", lambda: (2.0, 0.2))
     a = make_run(route, Speech())
-    task_a = asyncio.ensure_future(a.run("a"))
+    task_a = asyncio.ensure_future(a.run("a" * 400))
     await until(lambda: creates(sent))
-    task_a.cancel()
+    route._on_event(created("A"))
+    await asyncio.sleep(0.01)
+    task_a.cancel()  # barge-in after created
     await asyncio.gather(task_a, return_exceptions=True)
-    monkeypatch.setattr(route, "timeouts", lambda: (2.0, 0.1))  # a short stall timeout
+    for _ in range(4):  # still streaming, gaps under the stall timeout: not expired
+        await asyncio.sleep(0.08)
+        route._on_event(delta("A", "iA"))
+        route.expire()
+    assert charged == []
+    route._on_event(P.ResponseDone(P.RESPONSE_DONE, "A", "cancelled", 77))
+    assert charged == [77]
+    # and once expired, a late done is not charged again
     b = make_run(route, Speech())
-    task_b = asyncio.ensure_future(b.run("b"))
-    await until(lambda: len(creates(sent)) == 2)  # expired: B goes on
-    assert not route.busy()
-    route._on_event(created("B"))
-    route._on_event(done("B"))
-    assert (await asyncio.wait_for(task_b, 2)).status == "completed"
+    task_b = asyncio.ensure_future(b.run("b" * 400))
+    await until(lambda: len(creates(sent)) == 2)
+    route._on_event(created("B2"))
+    task_b.cancel()
+    await asyncio.gather(task_b, return_exceptions=True)
+    await asyncio.sleep(0.25)
+    route.expire()
+    assert len(charged) == 2  # its estimate
+    route._on_event(P.ResponseDone(P.RESPONSE_DONE, "B2", "cancelled", 99))
+    assert len(charged) == 2 and 99 not in charged
 
 
 async def test_a_refusal_echoes_the_request_and_an_unrelated_error_is_not_one():
@@ -173,3 +204,18 @@ async def test_a_run_never_hangs_without_its_created():
     reply = await asyncio.wait_for(run.run("x"), 2)
     assert reply.closed == "stall" and reply.abandoned
     assert any(e["type"] == "response.cancel" for e in sent)
+
+
+async def test_a_usage_less_done_is_charged_once_even_if_the_run_is_cut_right_after(monkeypatch):
+    route, sent = connected_route()
+    charged = []
+    monkeypatch.setattr(route, "charge", charged.append)
+    run = make_run(route, Speech())
+    task = asyncio.ensure_future(run.run("x" * 400))
+    await until(lambda: creates(sent))
+    route._on_event(created("R"))
+    route._on_event(P.ResponseDone(P.RESPONSE_DONE, "R", "completed", None))
+    task.cancel()  # cut before the run read its done
+    await asyncio.gather(task, return_exceptions=True)
+    route.expire()
+    assert charged == [100]  # its estimate (400 chars / 4), charged by the route, once

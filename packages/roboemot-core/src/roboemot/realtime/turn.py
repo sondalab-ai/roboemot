@@ -189,7 +189,7 @@ class ResponseRun:
         """A call ended the turn: cancel, and keep following the response to its end."""
         if self.reply.status is None and not self.reply.cancelled:
             self.reply.cancelled = True
-            self.route.send(protocol.response_cancel())
+            self.route.send_control(protocol.response_cancel())
 
     def _end_feeds(self) -> None:
         with self._lock:
@@ -258,6 +258,9 @@ class ResponseRun:
             texts[event.item_id] = (
                 event.text if event.final else texts.get(event.item_id, "") + event.text
             )
+            request = self._request
+            if request is not None:  # what the route charges if no usage comes
+                request.estimate = max(request.estimate, self._estimate())
             if not (event.final and ends_with_question(event.text)):
                 return
             self._questions.add(event.item_id)
@@ -283,7 +286,7 @@ def truncate_played(
         fraction = min(1.0, played_ms / pushed_ms)
         heard[job] = fraction
         if fraction < 1.0 and item:
-            route.send(protocol.item_truncate(item, played_ms))
+            route.send_control(protocol.item_truncate(item, played_ms))
     return heard
 
 

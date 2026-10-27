@@ -104,7 +104,9 @@ class RealtimeClient:
     runs on the client thread for every server event of the subset, ``Malformed`` included;
     ``Unknown`` events are only counted. An exception it raises is counted and logged by type.
     ``on_close(reason)`` runs when a session fails or closes (a connect that fails, a socket
-    lost, a stall, a stuck send, ``close``), on whichever thread saw it. While
+    lost, a stall, a stuck send, ``close``), on whichever thread saw it. ``may_send()`` is the
+    owner's gate, asked right before ``session.update`` (the first data) is sent after the
+    handshake; False refuses the session (``reconfigured``). While
     ``local_only()`` is true (``privacy.pseudonyms_to_cloud``: real names may not reach a cloud
     host) a connect host that is not local is refused (``pseudonyms``) before the socket opens:
     a provider may allocate a cloud host for a local ``base_url`` (SPEC 12).
@@ -120,6 +122,7 @@ class RealtimeClient:
         on_event: Callable[[protocol.ServerEvent], None] = lambda _ev: None,
         on_close: Callable[[str], None] = lambda _reason: None,
         local_only: Callable[[], bool] = lambda: False,
+        may_send: Callable[[], bool] = lambda: True,
         platform_id: bool = False,
         http_client_factory: Callable[[], httpx.AsyncClient] | None = None,
     ) -> None:
@@ -128,6 +131,7 @@ class RealtimeClient:
         self._on_event = on_event
         self._on_close = on_close
         self._local_only = local_only
+        self._may_send = may_send
         self._platform_id = platform_id
         self._http_client_factory = http_client_factory
         self._lock = threading.Lock()
@@ -277,6 +281,12 @@ class RealtimeClient:
             async with asyncio.timeout_at(deadline):
                 ws = await self._open(loop, deadline)
                 self._ws = ws
+                # the owner's gate right before the first data leaves (after the handshake): a
+                # reload meanwhile (pseudonyms on, the route changed) sends nothing (SPEC 12)
+                if self._local_only() and not ws_target_local(self._target):
+                    raise _SessionRefused("pseudonyms")
+                if not await asyncio.get_running_loop().run_in_executor(None, self._may_send):
+                    raise _SessionRefused("reconfigured")
                 update = {"event_id": f"{EVENT_PREFIX}{next(self._event_ids)}", **session_update}
                 await ws.send(protocol.encode(update))
                 self._count("sent")
@@ -539,6 +549,10 @@ class RealtimeClient:
                     self.state, self.reason = "closed", reason
             if closing:
                 self._closed_cb(reason)
+
+
+def ws_target_local(target: ConnectTarget | None) -> bool:
+    return target is not None and target.local
 
 
 def _lost_while_writing(ws: ClientConnection) -> bool:
