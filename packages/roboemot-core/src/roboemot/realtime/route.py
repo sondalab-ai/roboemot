@@ -168,6 +168,7 @@ class RealtimeRoute:
         self._upload_s = 0.0  # microphone audio sent on _upload_day (the closing silence too)
         self._audio_blocked: str | None = None  # why the last burst was refused, if it was
         self.input: Any = None  # the audio input (``on_event``) the input events go to
+        self._egress = False  # audio may leave now (kept current: the Live tab reads it often)
         self._client_factory = client_factory
         self._extra = extra
         self._extra_ok = False  # the extra is installed (read outside _lock, used under it)
@@ -221,7 +222,9 @@ class RealtimeRoute:
         route = self.route(cfg)
         self._extra_ok = self._extra()  # find_spec takes the import lock: never under _lock
         endpoint = route_endpoint(route) if route is not None else None
-        self.network.set_realtime(self.blocked(cfg, self._extra_ok) is None, endpoint)
+        reason = self.blocked(cfg, self._extra_ok)
+        self._note_egress(cfg, reason)
+        self.network.set_realtime(reason is None, endpoint)
         with self._lock:
             self._rev += 1
             stale = self._client is not None and not self._fits(cfg, self._client)
@@ -317,6 +320,7 @@ class RealtimeRoute:
         cfg = cfg or self.stack.effective()
         self._extra_ok = self._extra()
         reason = self.blocked(cfg, self._extra_ok)
+        self._note_egress(cfg, reason)
         route = self.route(cfg)
         self.network.set_realtime(
             reason is None, route_endpoint(route) if route is not None else None
@@ -949,6 +953,7 @@ class RealtimeRoute:
         if route is not None and router is not None and tokens > 0:
             router.charge(route.name, tokens)
             if router.used(route.name) >= route.daily_token_budget:
+                self._egress = False  # blocked (budget) until a new day's ready()
                 self.close_soon("budget")  # spent: nothing more goes to the route today
 
     def note_response(self, done: protocol.ResponseDone | None) -> None:
@@ -974,12 +979,14 @@ class RealtimeRoute:
     @property
     def audio_egress(self) -> bool:
         """Whether microphone audio may leave the robot now: ``input: audio`` with its opt-in
-        and the route not blocked (never in text mode)."""
-        cfg = self.stack.effective()
+        and the route not blocked (never in text mode). Kept current by ``apply_config``,
+        ``ready`` and a spent budget, so reading it never reads the configuration stack (the
+        Live tab polls it)."""
+        return self._egress
+
+    def _note_egress(self, cfg: RoboEmotConfig, reason: str | None) -> None:
         rt = cfg.voice.realtime_route
-        if rt.input != "audio" or not cfg.privacy.realtime_audio:
-            return False
-        return self.blocked(cfg, self._extra_ok) is None
+        self._egress = rt.input == "audio" and cfg.privacy.realtime_audio and reason is None
 
     def snapshot(self) -> dict[str, Any]:
         """The ``roboemot.realtime_route`` debug section (SPEC 12A): states, reason codes,
@@ -989,7 +996,6 @@ class RealtimeRoute:
         with self._lock:
             client = self._client
         snap = client.snapshot() if client is not None else None
-        egress = self.audio_egress
         with self._lock:
             if snap is not None:
                 self._client_snapshot = snap
@@ -1003,7 +1009,7 @@ class RealtimeRoute:
                 "input": rt.input,
                 "gate": rt.audio_gate if audio else None,  # text input: no audio gate
                 "endpoint": snap.get("endpoint"),
-                "audio_egress": egress,
+                "audio_egress": self._egress,
                 "audio_blocked": self._audio_blocked,  # why the last burst was refused
                 "platform_id_sent": False,
                 "provider_hosts": self.key_hosts,  # report keys must avoid "key"

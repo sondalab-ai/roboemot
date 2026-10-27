@@ -825,7 +825,7 @@ class VoiceListener:
         if not text:
             self._count("empty")
             return None
-        self._finish(p, text, p.grammar_pass, p.heard, local_only=job.refused is None)
+        self._finish(p, text, p.grammar_pass, p.heard, local_only=job.sent)
         return None
 
     def _finish(

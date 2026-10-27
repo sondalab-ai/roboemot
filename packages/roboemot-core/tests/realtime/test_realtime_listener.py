@@ -329,6 +329,7 @@ def test_the_listener_never_waits_on_the_network(ears):
         assert total["lag_max_s"] < delay / 2
         budget = ear.rt.stack.effective().voice.listener.budget_share
         assert total["share"] < budget
+        assert total["share"] * total["audio_s"] < delay / 4  # busy time, not the delay
         assert total["ms_per_audio_s"]["grammar_wait"] == 0.0
         assert total["ms_per_audio_s"]["asr_accept"] == 0.0  # Vosk skipped
 

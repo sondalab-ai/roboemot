@@ -59,7 +59,7 @@ class InputJob:
     """One utterance's audio on its way to the server, read like a ``GrammarJob``: ``done``
     once it has a result (``result``, the :class:`Heard`), was refused before anything was
     sent (``refused``, a reason code) or ended without a transcript (cancelled, the session
-    lost). ``ran`` is True only with a result."""
+    lost). ``ran`` is True only with a result; ``sent`` once its burst left the robot."""
 
     def __init__(self, samples: np.ndarray, rate_hz: int) -> None:
         self._samples: np.ndarray | None = samples
@@ -68,6 +68,7 @@ class InputJob:
         self.result: Heard | None = None
         self.refused: str | None = None
         self.generation: int | None = None  # the session it was sent on
+        self.sent = False  # its burst left the robot
         self.cancelled = False
 
     def __repr__(self) -> str:
@@ -215,12 +216,13 @@ class RealtimeInput:
         with self._lock:
             self._burst = burst  # before the send: its first event may come at once
         job.generation = burst.generation
+        job.sent = True  # before the send: a cancel meanwhile must count it as gone
         why = self.route.send_audio(pcm, gate=GATE, instructions=instructions)
         if why is not None:
             with self._lock:
                 if self._burst is burst:
                     self._burst = None
-            job.generation = None
+            job.generation, job.sent = None, False
             job._end(refused=why)
             return
         # one burst at a time: the next waits until this one is over (the listener cancels it

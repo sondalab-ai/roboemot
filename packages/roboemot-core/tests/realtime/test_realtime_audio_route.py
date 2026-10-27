@@ -216,3 +216,20 @@ def test_the_session_update_uses_the_server_silence():
     update = r.session_update(stack.effective(), "x")
     vad = update["session"]["audio"]["input"]["turn_detection"]
     assert vad["silence_duration_ms"] == 800
+
+
+def test_audio_egress_never_reads_the_configuration_stack():
+    """The Live tab polls it: it is kept current by the route's own config steps (SPEC 11A)."""
+    stack = audio_stack()
+    r, _ = audio_route(stack)
+    assert r.ready() and r.audio_egress
+    reads = []
+    effective = stack.effective
+    stack.effective = lambda *a, **kw: (reads.append(1), effective(*a, **kw))[1]
+    for _ in range(5):
+        assert r.audio_egress
+    assert reads == []
+    stack.effective = effective
+    stack.set("privacy.realtime_audio", False, source="test", admin=True)
+    r.apply_config(stack.effective())
+    assert not r.audio_egress
