@@ -11,7 +11,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from .ui import WizardError
+from .ui import WizardError, last_line
 
 CONTROL_PERSIST_S = 120
 CONNECT_TIMEOUT_S = 10
@@ -48,7 +48,13 @@ class Remote:
             input=stdin,
         )
         if check and proc.returncode != 0:
-            raise WizardError(f"on robot: {command}\n{proc.stderr.strip() or proc.stdout.strip()}")
+            output = proc.stderr.strip() or proc.stdout.strip()
+            shown = command if len(command) <= 60 else command[:59] + "…"
+            raise WizardError(
+                "Command failed on the robot",
+                f"`{shown}` exited {proc.returncode}: {last_line(output) or 'no output'}",
+                output=f"$ {command}\n{output}",
+            )
         return proc.stdout.strip()
 
     def connect(self) -> None:
@@ -58,9 +64,10 @@ class Remote:
         )
         if proc.returncode != 0:
             raise WizardError(
-                f"ssh {self.target} failed. Check host and user. On a first connection run "
-                f"`ssh {self.target}` once to accept the host key; "
-                f"`ssh-copy-id {self.target}` then avoids the password."
+                f"Could not connect to {self.target}",
+                f"ssh exited {proc.returncode}. Check host and user; on a first connection, "
+                f"accept the host key once, and ssh-copy-id {self.target} avoids the password",
+                f"ssh {self.target}",
             )
 
     def copy(self, files: list[Path], dest: str) -> None:
@@ -70,7 +77,11 @@ class Remote:
             text=True,
         )
         if proc.returncode != 0:
-            raise WizardError(f"scp failed: {proc.stderr.strip()}")
+            raise WizardError(
+                "Could not copy files to the robot",
+                f"scp failed: {last_line(proc.stderr)}",
+                output=proc.stderr,
+            )
 
     def close(self) -> None:
         subprocess.run(

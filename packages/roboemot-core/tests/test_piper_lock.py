@@ -42,7 +42,7 @@ def test_robot_and_ci_targets_exist():
 
 
 def test_a_target_without_a_lock_is_refused():
-    with pytest.raises(WizardError, match="no hash-pinned Piper lock"):
+    with pytest.raises(WizardError, match="No hash-pinned Piper lock"):
         lock_path("armv7l", "3.12")
 
 

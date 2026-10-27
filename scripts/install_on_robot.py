@@ -3,11 +3,12 @@
 
 Runs on a PC on the robot's LAN. The flow is robot-agnostic (``roboemot.install``); the robot
 model's specifics come from the installer its platform package registers (Reachy Mini Wireless:
-``roboemot_reachymini.install``). Every prompt has a flag, so it also runs unattended.
+``roboemot_reachymini.install``). Every prompt has a flag, so it also runs unattended; without a
+terminal, a missing flag stops the run before anything changes (no default is ever taken).
 
     python scripts/install_on_robot.py                         # interactive wizard
     python scripts/install_on_robot.py --dry-run               # read-only checks
-    python scripts/install_on_robot.py --host 192.168.1.20 --dev --start --yes
+    python scripts/install_on_robot.py --host 192.168.1.20 --user pollen --dev --start --yes
     python scripts/install_on_robot.py --uninstall --dry-run   # what uninstall would undo
     python scripts/install_on_robot.py --uninstall             # leave the robot as it was
 

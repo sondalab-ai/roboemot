@@ -41,6 +41,15 @@ HOST_MAX_CHARS = 253
 Exec = Callable[[str, list[str]], None]
 
 
+def _vt() -> bool:
+    """VT processing on both streams (Windows); False means plain text."""
+    try:
+        from sondalab_palette import term
+    except ImportError:  # pragma: no cover
+        return False
+    return all([term.enable_vt(sys.stdout), term.enable_vt(sys.stderr)])
+
+
 def robot_cli(platform: Platform) -> str:
     """Path of the ``roboemot`` script on the robot: next to the target environment's Python."""
     return posixpath.join(posixpath.dirname(platform.python), CLI_NAME)
@@ -49,7 +58,7 @@ def robot_cli(platform: Platform) -> str:
 def valid_user(user: str) -> str:
     """``user`` if it is a plain login name; it ends up in an ssh argument."""
     if not USER_PATTERN.fullmatch(user):
-        raise WizardError(f"not a valid SSH user name: {user!r}")
+        raise WizardError("Invalid SSH user", f"{user!r} is not a plain login name")
     return user
 
 
@@ -68,7 +77,7 @@ def valid_host(host: str) -> str:
             and all(HOST_LABEL.fullmatch(label) for label in name.split("."))
         ):
             return host
-    raise WizardError(f"not a valid robot host name or IP address: {host!r}")
+    raise WizardError("Invalid robot host", f"{host!r} is not a host name or IP address")
 
 
 def debug_command(platform: Platform) -> str:
@@ -157,16 +166,18 @@ def main(
         interactive=sys.stdin.isatty() and not os.environ.get("CI"),
         assume_yes=False,
         command=COMMAND,
+        vt=_vt(),
+        debug_flag=None,  # this script's --debug fetches the robot's report instead
     )
     try:
         # Prompts and discovery messages go to stderr: stdout stays the command's own output.
         with contextlib.redirect_stdout(sys.stderr):
             cmd = build_argv(opts, command, copy_id, debug, ui, root or Path.cwd())
     except TermError as e:
-        print(e.block(), file=sys.stderr)
+        ui.error(e)
         return 1
     except KeyboardInterrupt:
-        ui.fail("interrupted")
+        ui.error(WizardError("Interrupted", "stopped with Ctrl-C"))
         return 130
     if opts.dry_run:
         print(shlex.join(cmd))
@@ -174,8 +185,7 @@ def main(
     try:
         execvp(cmd[0], cmd)
     except OSError as e:
-        error = WizardError(f"Could not run {cmd[0]}", str(e), f"which {cmd[0]}")
-        print(error.block(), file=sys.stderr)
+        ui.error(WizardError(f"Could not run {cmd[0]}", str(e), f"which {cmd[0]}"))
         return 1
     return 0  # only reached when execvp is replaced (tests); a real exec never returns
 

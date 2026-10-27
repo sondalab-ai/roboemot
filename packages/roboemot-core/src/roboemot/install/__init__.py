@@ -32,6 +32,7 @@ import re
 import shlex
 import sys
 import tempfile
+import traceback
 from dataclasses import dataclass
 from importlib.metadata import entry_points
 from pathlib import Path
@@ -46,11 +47,13 @@ from .piper_lock import lock_path
 from .pyenv import RemotePython, report_changes
 from .record import InstallRecord, canonical, plan_uninstall
 from .remote import Remote
-from .ui import HeaderParser, Ui, WizardError, paint, print_header
+from .ui import COMMAND, HeaderParser, Ui, WizardError, app_version, last_line, print_header
 
 try:
+    from sondalab_palette import term
     from sondalab_palette.term import TermError
 except ImportError:  # pragma: no cover - the robot imports this package and has no palette
+    term = None
     TermError = WizardError
 
 ENTRY_POINT_GROUP = "roboemot.installers"
@@ -110,6 +113,8 @@ class Options:
     uninstall: bool = False
     piper: bool | None = None
     secrets: list[str] | None = None
+    debug: bool = False
+    version: bool = False
 
 
 # ---------------------------------------------------------------- platforms
@@ -125,9 +130,9 @@ def load_platform(manifest_id: str) -> Platform:
             try:
                 return ep.load()()
             except Exception as e:
-                raise WizardError(f"installer for {manifest_id} failed to load: {e}") from e
+                raise WizardError(f"Could not load the {manifest_id} installer", str(e)) from e
     have = ", ".join(installed_platforms()) or "none"
-    raise WizardError(f"no installer for {manifest_id} (installed: {have})")
+    raise WizardError(f"No installer for {manifest_id}", f"installed: {have}")
 
 
 def find_robots(root: Path) -> list[tuple[str, str, str]]:
@@ -153,7 +158,11 @@ def _robot_model(ui: Ui, robot: str | None) -> str:
         return robot
     options = installed_platforms()
     if not options:
-        raise WizardError("no robot installer is installed")
+        raise WizardError(
+            "No robot installer is installed",
+            "no package registers one in the roboemot.installers entry-point group",
+            'pip install -e "packages/roboemot-reachymini"',
+        )
     if len(options) == 1:
         return options[0]
     return options[ui.choose("Which robot model?", options, flag="--robot")]
@@ -169,11 +178,12 @@ def select_robot(ui: Ui, opts: Options, root: Path) -> tuple[str, Platform]:
         return opts.host, load_platform(_robot_model(ui, opts.robot))
     ui.require("--host", False)
     robot = opts.robot
-    ui.info("looking for robots on the network (mDNS)")
     try:
-        found = [f for f in find_robots(root) if robot in (None, f[2])]
+        with ui.running("Looking for robots (mDNS)…"):
+            found = [f for f in find_robots(root) if robot in (None, f[2])]
+        ui.ok("Looked for robots (mDNS)", f"{len(found)} found")
     except (ImportError, RuntimeError, OSError) as e:
-        ui.warn(f"discovery unavailable: {e}")
+        ui.warn("Discovery unavailable", str(e))
         found = []
     if found:
         labels = [label for label, _, _ in found] + ["another host or IP"]
@@ -193,7 +203,8 @@ def probe_platform(remote: Remote, python: str) -> tuple[str, str]:
     out = RemotePython(remote, python).py(PLATFORM_PROBE).strip()
     if not PROBE_PATTERN.fullmatch(out):
         raise WizardError(
-            f"unexpected answer probing {python} for architecture and version: {out!r}"
+            "Could not probe the target Python",
+            f"unexpected answer from {python} for architecture and version: {out!r}",
         )
     arch, version = out.split("\n")
     return arch, version
@@ -203,26 +214,34 @@ def check_ssh(
     ui: Ui, platform: Platform, remote: Remote, need: tuple[int, int] | None
 ) -> RemotePython:
     """Log in once; check the target interpreter, architecture, Python and free space."""
-    ui.info(f"connecting to {remote.target} (ssh may ask for the password)")
+    ui.active("Connecting over SSH…", f"{remote.target}; ssh may ask for the password")
     remote.connect()
-    ui.ok(f"ssh {remote.target}")
+    ui.ok("Connected over SSH", remote.target)
     py = RemotePython(remote, platform.python)
     if not py.exists():
-        raise WizardError(f"{platform.python} not found: is this a {platform.display_name}?")
+        raise WizardError(
+            "Target interpreter not found",
+            f"{platform.python} does not exist: is this a {platform.display_name}?",
+        )
     arch, version = probe_platform(remote, platform.python)
     if arch != platform.arch:
-        raise WizardError(f"robot architecture is {arch}, expected {platform.arch}")
+        raise WizardError(
+            "Wrong robot architecture", f"the robot is {arch}, the app needs {platform.arch}"
+        )
     if need and tuple(map(int, version.split("."))) < need:
-        raise WizardError(f"target Python is {version}; the app needs {need[0]}.{need[1]}+")
-    ui.ok(f"{arch}, Python {version} at {platform.python}")
+        raise WizardError(
+            "Target Python too old", f"Python {version}; the app needs {need[0]}.{need[1]}+"
+        )
+    ui.ok("Checked the interpreter", f"{arch}, Python {version}, {platform.python}")
     if need:
         for path in platform.space_paths:
             free_kb = int(remote.run(f"df -Pk {shlex.quote(path)} | tail -1").split()[3])
             if free_kb < MIN_FREE_MB * 1024:
                 raise WizardError(
-                    f"only {free_kb // 1024} MB free on {path}, need {MIN_FREE_MB} MB"
+                    f"Not enough free space on {path}",
+                    f"{free_kb // 1024} MB free, {MIN_FREE_MB} MB needed",
                 )
-            ui.ok(f"{free_kb // 1024} MB free on {path}")
+            ui.ok("Checked free space", f"{free_kb // 1024} MB on {path}")
     platform.probe(ui, py)
     return py
 
@@ -258,7 +277,9 @@ def remote_data_dir(remote: Remote) -> tuple[str, str]:
     """The robot user's home and the app data folder below it (``roboemot.paths`` default)."""
     home = posixpath.normpath(remote.run('printf %s "$HOME"').strip())
     if not posixpath.isabs(home) or home == "/":
-        raise WizardError(f"cannot work out the robot user's home folder (got {home!r})")
+        raise WizardError(
+            "Could not find the robot user's home folder", f"$HOME is {home!r} on the robot"
+        )
     return home, posixpath.join(home, paths.DEFAULT_REL.as_posix())
 
 
@@ -278,10 +299,10 @@ def claim_data_dir(
     """
     home, path = remote_data_dir(remote)
     if record.data_dir:
-        ui.ok(f"data folder {record.data_dir} already recorded")
+        ui.ok("Kept the data folder", f"{record.data_dir}, already recorded")
         return
     if _exists(remote, path):
-        ui.warn(f"data folder {path} already exists: not recorded, uninstall will leave it")
+        ui.warn("Data folder not recorded", f"{path} was already there; uninstall leaves it")
         return
     parents = []
     parent = posixpath.dirname(path)
@@ -290,12 +311,12 @@ def claim_data_dir(
         parent = posixpath.dirname(parent)
     parents.reverse()
     if dry_run:
-        ui.info(f"would create the data folder {path} (0700) and record it for uninstall")
+        ui.would("Create the data folder", f"{path} (0700), recorded for uninstall")
         return
     record.data_dir, record.data_dir_parents = path, parents
     write_record(remote, platform.record_path, record)
     remote.run(f"mkdir -p -m 700 {shlex.quote(path)}")
-    ui.ok(f"created the data folder {path} (registry, models and trait cache live here)")
+    ui.ok("Created the data folder", f"{path} (registry, models, trait cache)")
 
 
 # ---------------------------------------------------------------- Piper virtualenv
@@ -324,18 +345,18 @@ def install_piper(
     if record.piper_venv == venv and _exists(remote, python):
         probe = remote.run(f"{shlex.quote(python)} -I -c 'import piper' && echo yes || echo no")
         if probe.strip().endswith("yes"):
-            ui.ok(f"Piper virtualenv {venv} already installed")
+            ui.ok("Piper already installed", venv)
             return
-        ui.warn(f"Piper virtualenv {venv} cannot import piper: installing piper-tts again")
+        ui.warn("Piper venv is broken", f"{venv} cannot import piper; installing it again")
         recreate = False
     if record.piper_venv != venv and _exists(remote, venv):
-        ui.warn(f"{venv} exists but is not in the install record: left alone")
+        ui.warn("Piper folder not recorded", f"{venv} was already there; left alone")
         return
     lock = lock_path(*probe_platform(remote, platform.python))
     if dry_run:
-        ui.info(
-            f"would create the Piper virtualenv {venv} and install piper-tts=={PIPER_TTS_VERSION} "
-            f"with hashes from {lock.name} (recorded for uninstall)"
+        ui.would(
+            "Create the Piper venv",
+            f"{venv} with piper-tts=={PIPER_TTS_VERSION}, hashes from {lock.name}",
         )
         return
     record.piper_venv = venv
@@ -346,13 +367,19 @@ def install_piper(
         if recreate:
             remote.run(f"mkdir -p -m 700 {shlex.quote(posixpath.dirname(venv))}")
             remote.run(f"{shlex.quote(platform.python)} -m venv {shlex.quote(venv)}")
-            ui.ok(f"created the Piper virtualenv {venv}")
-        result = RemotePython(remote, python).install_locked(f"{tmp}/{lock.name}")
+            ui.ok("Created the Piper venv", venv)
+        with ui.running("Installing piper-tts…"):
+            result = RemotePython(remote, python).install_locked(f"{tmp}/{lock.name}")
     finally:
         remote.run(f"rm -rf {shlex.quote(tmp)}", check=False)
     if not result.ok:
-        raise WizardError(f"pip install piper-tts failed on the robot:\n{result.output}")
-    ui.ok(f"installed piper-tts {PIPER_TTS_VERSION} (voice files: roboemot models fetch --voice)")
+        raise WizardError(
+            "Could not install piper-tts on the robot",
+            f"pip install piper-tts failed: {last_line(result.output)}",
+            output=result.output,
+        )
+    ui.ok("Installed piper-tts", PIPER_TTS_VERSION)
+    ui.hint("Voice files, on the robot", "roboemot models fetch --voice")
 
 
 def remove_piper_venv(ui: Ui, remote: Remote, record: InstallRecord, dry_run: bool) -> None:
@@ -361,18 +388,18 @@ def remove_piper_venv(ui: Ui, remote: Remote, record: InstallRecord, dry_run: bo
         return
     venv, _ = piper_paths(remote)
     if record.piper_venv != venv:
-        ui.warn(f"recorded Piper virtualenv {record.piper_venv!r} is not {venv}: left as it is")
+        ui.warn("Piper venv left", f"recorded {record.piper_venv!r} is not {venv}")
         return
     if not _exists(remote, venv):
-        ui.ok(f"Piper virtualenv {venv} is not there")
+        ui.ok("Piper venv gone", f"{venv} is not there")
         return
     real = remote.run(f"realpath {shlex.quote(venv)} 2>/dev/null || true").strip()
     if real != venv:
-        ui.warn(f"{venv} resolves to {real or 'nothing'}: symlink? left as it is")
+        ui.warn("Piper venv left", f"{venv} resolves to {real or 'nothing'}: symlink?")
         return
     if not dry_run:
         remote.run(f"rm -rf {shlex.quote(venv)}")
-    ui.ok(f"{'would delete' if dry_run else 'deleted'} the Piper virtualenv {venv}")
+    ui.change(dry_run, "Delete the Piper venv", "Deleted the Piper venv", venv)
 
 
 def ask_new_pin(ui: Ui) -> str | None:
@@ -388,11 +415,11 @@ def ask_new_pin(ui: Ui) -> str | None:
         try:
             check_pin_format(pin, rules)
         except PinError as e:
-            ui.warn(f"PIN rejected: {e}")
+            ui.warn("PIN rejected", str(e))
             continue
         if ui.ask_secret("Repeat the PIN") == pin:
             return pin
-        ui.warn("the two entries differ")
+        ui.warn("PIN not confirmed", "the two entries differ")
     return None
 
 
@@ -407,21 +434,19 @@ def set_operator_pin(ui: Ui, py: RemotePython, remote: Remote, dry_run: bool) ->
     path = posixpath.join(folder, PIN_FILE)
     exists = _exists(remote, path)
     if dry_run:
-        ui.info(f"would {'offer to replace' if exists else 'ask for'} the operator PIN ({path})")
+        ui.would("Replace the operator PIN" if exists else "Ask for the operator PIN", path)
         return
     if exists and not ui.confirm("An operator PIN is already set. Replace it?", False):
-        ui.ok("operator PIN kept")
+        ui.ok("Kept the operator PIN", path)
         return
     pin = ask_new_pin(ui)
     command = f"{shlex.quote(py.python)} -m roboemot.webui set-pin --data-dir {shlex.quote(folder)}"
     if pin is None:
-        ui.warn(
-            "operator PIN not set; the web UI will not let anyone in. Set it later by running "
-            f"on the robot: {command}"
-        )
+        ui.warn("Operator PIN not set", "the web UI lets nobody in until it is")
+        ui.hint("Set it on the robot", command)
         return
     remote.run(command, stdin=pin + "\n")
-    ui.ok("operator PIN set")
+    ui.ok("Set the operator PIN", path)
 
 
 def robot_cli(py: RemotePython, folder: str, *args: str) -> str:
@@ -442,7 +467,7 @@ def ask_secret_value(ui: Ui, name: str) -> str | None:
         return None
     if ui.ask_secret("Repeat the value") == value:
         return value
-    ui.warn("the two entries differ")
+    ui.warn("Secret not confirmed", "the two entries differ")
     return None
 
 
@@ -450,7 +475,9 @@ def check_secret_names(names: list[str]) -> None:
     """Reject a name that is not a valid secret name, before anything runs on the robot."""
     for name in names:
         if not SECRET_NAME.match(name):
-            raise WizardError(f"secret name {name!r} must use letters, numbers, '_', '.' or '-'")
+            raise WizardError(
+                f"Invalid secret name {name!r}", "use letters, numbers, '_', '.' or '-'"
+            )
 
 
 def wanted_secrets(ui: Ui, opts: Options) -> list[str]:
@@ -491,24 +518,22 @@ def set_secrets(
     _, folder = remote_data_dir(remote)
     for name in names:
         if dry_run:
-            ui.info(f"would ask for the secret {name!r} and store it in {folder}/secrets.json")
+            ui.would("Ask for a secret", f"{name!r}, stored in {folder}/secrets.json")
             continue
         have = remote.run(robot_cli(py, folder, "list")).split()
         if name in have and not ui.confirm(f"Secret {name!r} is already set. Replace it?", False):
-            ui.ok(f"secret {name} kept")
+            ui.ok("Kept the secret", name)
             continue
         value = ask_secret_value(ui, name)
         if value is None:
-            ui.warn(
-                f"secret {name} not set; set it later on the robot with: "
-                f"{robot_cli(py, folder, 'set', name)}"
-            )
+            ui.warn("Secret not set", name)
+            ui.hint("Set it on the robot", robot_cli(py, folder, "set", name))
             continue
         if name not in have and name not in record.secrets:
             record.secrets.append(name)
             write_record(remote, platform.record_path, record)
         remote.run(robot_cli(py, folder, "set", name), stdin=value + "\n")
-        ui.ok(f"secret {name} stored")
+        ui.ok("Stored the secret", name)
 
 
 def remove_secrets(
@@ -526,12 +551,12 @@ def remove_secrets(
     _, folder = remote_data_dir(remote)
     names = [n for n in record.secrets if SECRET_NAME.match(n)]  # the record came from the robot
     if dry_run:
-        ui.ok(f"would remove the secrets {', '.join(names)}")
+        ui.would("Remove the secrets", ", ".join(names))
         return
     remote.run(robot_cli(py, folder, "remove", *names))
     record.secrets = []
     write_record(remote, platform.record_path, record)
-    ui.ok(f"removed the secrets {', '.join(names)}")
+    ui.ok("Removed the secrets", ", ".join(names))
 
 
 def checked_data_dir(remote: Remote, record: InstallRecord) -> tuple[str | None, str | None]:
@@ -570,22 +595,22 @@ def remove_data_dir(ui: Ui, remote: Remote, record: InstallRecord, dry_run: bool
     parents the installer created if they are empty. Without a record nothing is deleted; a
     record that fails ``checked_data_dir`` is reported and left (``verify_uninstall`` then
     fails)."""
-    would = "would " if dry_run else ""
     if record.data_dir is None:
         _, path = remote_data_dir(remote)
         if _exists(remote, path):
-            ui.warn(f"no record of the data folder: {path} left as it is (delete it by hand)")
+            ui.warn("Data folder not recorded", f"{path} left as it is; delete it by hand")
         return
     path, problem = checked_data_dir(remote, record)
     if path is None:
-        ui.warn(f"{problem}: left as it is")
+        ui.warn("Data folder left as it is", problem or "")
         return
     if _exists(remote, path):
         if not dry_run:
             remote.run(f"rm -rf {shlex.quote(path)}")
-        ui.ok(f"{would}delete the data folder {path} (registry, models and trait cache included)")
+        detail = f"{path} (registry, models, trait cache)"
+        ui.change(dry_run, "Delete the data folder", "Deleted the data folder", detail)
     else:
-        ui.ok(f"data folder {path} is not there")
+        ui.ok("Data folder gone", f"{path} is not there")
     home, _ = remote_data_dir(remote)
     for parent in _created_parents(record, home, path):
         if not dry_run:
@@ -600,9 +625,7 @@ def warn_data_dir_overrides(ui: Ui, remote: Remote, dirs: list[Path]) -> None:
     """
     env = remote.run('printf %s "${ROBOEMOT_DATA_DIR:-}"').strip()
     if env:
-        ui.warn(
-            f"ROBOEMOT_DATA_DIR={env} is set for the SSH user: data may land outside the record"
-        )
+        ui.warn("Data may land elsewhere", f"ROBOEMOT_DATA_DIR={env} is set for the SSH user")
     for root in dirs:
         for cfg in root.rglob("app.yaml"):
             try:
@@ -610,7 +633,10 @@ def warn_data_dir_overrides(ui: Ui, remote: Remote, dirs: list[Path]) -> None:
             except (OSError, yaml.YAMLError, AttributeError):
                 continue
             if value:
-                ui.warn(f"{cfg.name} sets data_dir={value}: uninstall will not remove that folder")
+                ui.warn(
+                    "Data may land elsewhere",
+                    f"{cfg.name} sets data_dir={value}; uninstall leaves that folder",
+                )
 
 
 # ---------------------------------------------------------------- install
@@ -632,67 +658,69 @@ def install_packages(
         platform.app_name, platform.manifest_id, own
     )
     if record.pending_before is not None:
-        ui.warn("an earlier install was interrupted; folding its changes into the record")
+        ui.warn("Earlier install interrupted", "its changes are folded into the record")
         record.merge(record.pending_before, before)
     record.packages = sorted(set(record.packages) | set(own))
     pins = py.constraints(before, set(own))
     if dry_run:
         reqs = third_party_requirements(dirs)
-        plan = py.plan_install(reqs, pins)
-        if plan.ok:
+        with ui.running("Resolving dependencies…"):
+            plan = py.plan_install(reqs, pins)
+            free = None if plan.ok else py.plan_install(reqs, None)
+        if free is None:
             added, _ = report_changes(_json(plan.output), before)
-            ui.ok(
-                f"would add {', '.join(f'{n} {v}' for n, v in sorted(added.items()))}"
-                if added
-                else "dependencies already satisfied"
-            )
-        else:
-            free = py.plan_install(reqs, None)
-            if not free.ok:
-                raise WizardError(f"dependencies cannot be resolved on the robot:\n{free.output}")
-            added, changed = report_changes(_json(free.output), before)
-            ui.warn(
-                "would need to change shared packages: "
-                f"{', '.join(f'{n} {c}' for n, c in changed.items())} (asks first)"
-            )
             if added:
-                ui.ok(f"would add {', '.join(f'{n} {v}' for n, v in sorted(added.items()))}")
+                ui.would("Add dependencies", _versions(added))
+            else:
+                ui.ok("Checked dependencies", "already satisfied")
+        else:
+            if not free.ok:
+                raise _resolve_error(free.output)
+            added, changed = report_changes(_json(free.output), before)
+            ui.warn("Shared packages must change", f"{_versions(changed)} (asks first)")
+            if added:
+                ui.would("Add dependencies", _versions(added))
         claim_data_dir(ui, platform, remote, record, dry_run=True)
-        ui.info(f"would record the changes in {platform.record_path}; nothing copied or installed")
+        ui.would("Record the changes", f"{platform.record_path}; nothing copied or installed")
         return record
     tmp = remote.run(f"mktemp -d {REMOTE_TMP_PREFIX}.XXXXXX")
     try:
         remote.copy(wheels, tmp)
-        ui.ok(f"copied {', '.join(w.name for w in wheels)}")
+        ui.ok("Copied the wheels", ", ".join(w.name for w in wheels))
         files = [f"{tmp}/{w.name}" for w in wheels]
         record.pending_before = before
         write_record(remote, platform.record_path, record)
-        ui.info("installing (first time: numpy/scipy may take minutes)")
-        result = py.install(files, pins)
+        ui.info("The first install builds numpy and scipy and may take minutes.")
+        with ui.running("Installing the app…"):
+            result = py.install(files, pins)
         if not result.ok:
-            ui.warn("the app does not fit the package versions already on the robot")
-            free = py.plan_install(files, None)
+            ui.warn("Shared packages conflict", "the app does not fit the versions on the robot")
+            with ui.running("Resolving dependencies…"):
+                free = py.plan_install(files, None)
             if not free.ok:
-                raise WizardError(f"pip cannot resolve the dependencies:\n{free.output}")
+                raise _resolve_error(free.output)
             _, changed = report_changes(_json(free.output), before)
             for n, c in changed.items():
-                ui.info(f"{n} {c}")
+                ui.kv(n, c)
             question = "Change these shared packages? Uninstall restores them (needs internet)"
             if not ui.confirm(question, False):
-                raise WizardError("install cancelled: shared packages left as they were")
-            result = py.install(files, None)
+                raise WizardError("Install cancelled", "shared packages left as they were")
+            with ui.running("Installing the app…"):
+                result = py.install(files, None)
             if not result.ok:
-                raise WizardError(f"pip install failed on the robot:\n{result.output}")
-        py.reinstall_own(files)
+                raise WizardError(
+                    "Could not install the app on the robot",
+                    f"pip install failed: {last_line(result.output)}",
+                    output=result.output,
+                )
+        with ui.running("Reinstalling own packages…"):
+            py.reinstall_own(files)
         after = py.installed()
         record.merge(before, after)
         claim_data_dir(ui, platform, remote, record, dry_run=False)
         write_record(remote, platform.record_path, record)
-        added = ", ".join(record.added) or "none"
-        ui.ok(
-            f"installed; recorded in {platform.record_path} "
-            f"(dependencies added by this installer: {added})"
-        )
+        ui.ok("Installed the app", f"dependencies added: {', '.join(record.added) or 'none'}")
+        ui.ok("Recorded the changes", platform.record_path)
     finally:
         remote.run(f"rm -rf {shlex.quote(tmp)}", check=False)
     return record
@@ -719,14 +747,32 @@ def preflight(opts: Options, ui: Ui) -> None:
         ui.require(flag, given, f"Missing {flag} or --no-{flag[2:]}")
 
 
+def _versions(items: dict[str, str]) -> str:
+    return ", ".join(f"{n} {v}" for n, v in sorted(items.items()))
+
+
+def _resolve_error(output: str) -> WizardError:
+    return WizardError(
+        "Could not resolve the dependencies on the robot", last_line(output), output=output
+    )
+
+
+def _rerun(opts: Options) -> str:
+    """The installer command line for ``opts`` without ``--dry-run``: the dry run's next step."""
+    args = [f"--host {shlex.quote(opts.host)}"] if opts.host else []
+    args += [f"--user {shlex.quote(opts.user)}"] if opts.user else []
+    args += ["--uninstall"] if opts.uninstall else []
+    return " ".join([COMMAND, *args])
+
+
 def run_install(opts: Options, ui: Ui, root: Path) -> None:
     ui.steps = INSTALL_STEPS
     check_secret_names(opts.secrets or [])
     preflight(opts, ui)
-    ui.title("installer", "dry run: the robot is not modified" if opts.dry_run else "")
+    ui.title("installer", "dry run, the robot is not modified" if opts.dry_run else "")
     ui.step("Robot")
     host, platform = select_robot(ui, opts, root)
-    ui.ok(platform.display_name)
+    ui.ok("Selected the robot", f"{platform.display_name} at {host}")
     platform.connect(ui, host)
 
     def body(remote: Remote) -> None:
@@ -734,20 +780,24 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
             ui.step("Configuration")
             dev = opts.dev
             if dev is None:
-                ui.info("manifest dynamics are not measured yet: dev mode lets the app run")
                 ui.info(
-                    "with conservative fallback limits (SPEC 12); without it, it refuses to start"
+                    "The manifest dynamics are not measured yet. Dev mode lets the app run with "
+                    "conservative fallback limits (SPEC 12); without it, the app refuses to start."
                 )
                 dev = ui.confirm("Install in dev mode?", False, flag="--dev")
-            ui.ok("dev mode (configs/dev-unmeasured.yaml)" if dev else "production config")
+            if dev:
+                ui.ok("Chose dev mode", "configs/dev-unmeasured.yaml")
+            else:
+                ui.ok("Chose the production config")
             dirs = platform.stage(root, Path(tmp) / "src", dev)
 
             ui.step("SSH access")
             py = check_ssh(ui, platform, remote, min_python(dirs))
 
             ui.step("Build")
-            wheels = build_wheels(dirs, Path(tmp) / "wheels")
-            ui.ok(f"built {', '.join(w.name for w in wheels)}")
+            with ui.running("Building the wheels…"):
+                wheels = build_wheels(dirs, Path(tmp) / "wheels")
+            ui.ok("Built the wheels", ", ".join(w.name for w in wheels))
 
             ui.step("Install (dependency check only)" if opts.dry_run else "Install")
             record = install_packages(ui, platform, py, remote, dirs, wheels, opts.dry_run)
@@ -766,10 +816,13 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
             ui.step("Start")
             if opts.dry_run:
                 running = platform.running_app()
-                action = f"would stop {running}, " if running else "no app running; would "
-                ui.info(f"{action}wake the robot and start {platform.app_name}")
-                ui.info(f"autostart app now: {platform.autostart() or 'none'}")
-                ui.title("dry run passed")
+                if running:
+                    ui.would(f"Stop {running}", "only one app runs at a time")
+                ui.would(f"Start {platform.app_name}", "after waking the robot")
+                ui.kv("Autostart app", platform.autostart() or "none")
+                ui.ok("Dry run passed", "the robot was not modified")
+                ui.next(_rerun(opts))
+                ui.summary()
                 return
             if (
                 opts.start
@@ -789,9 +842,10 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
                     record.autostart_before, record.autostart_recorded = platform.autostart(), True
                     write_record(remote, platform.record_path, record)
                 platform.set_autostart(platform.app_name)
-                ui.ok(f"{platform.app_name} starts automatically on wake-up")
-            ui.title("installed")
-            ui.info("remove everything it changed: python scripts/install_on_robot.py --uninstall")
+                ui.ok("Set the autostart app", f"{platform.app_name} starts on wake-up")
+            ui.ok("Installed", f"{platform.app_name} on {host}")
+            ui.hint("Undo", _rerun(Options(host=opts.host, user=opts.user, uninstall=True)))
+            ui.summary()
 
     _with_remote(opts, ui, platform, host, body)
 
@@ -802,12 +856,12 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
 def run_uninstall(opts: Options, ui: Ui, root: Path) -> None:
     ui.steps = UNINSTALL_STEPS
     preflight(opts, ui)
-    ui.title("uninstaller", "dry run: the robot is not modified" if opts.dry_run else "")
+    ui.title("uninstaller", "dry run, the robot is not modified" if opts.dry_run else "")
     ui.step("Robot")
     host, platform = select_robot(ui, opts, root)
-    ui.ok(platform.display_name)
+    ui.ok("Selected the robot", f"{platform.display_name} at {host}")
     platform.connect(ui, host)
-    would = "would " if opts.dry_run else ""
+    dry = opts.dry_run
 
     def body(remote: Remote) -> None:
         ui.step("SSH access")
@@ -817,9 +871,10 @@ def run_uninstall(opts: Options, ui: Ui, root: Path) -> None:
         installed = py.installed()
         record = read_record(remote, platform.record_path)
         if record is None:
-            ui.warn(
-                f"no install record at {platform.record_path}: only the app's own packages "
-                "are removed; dependencies an earlier install added cannot be told apart"
+            ui.warn("No install record", f"{platform.record_path} is not there")
+            ui.info(
+                "Only the app's own packages are removed: dependencies an earlier install "
+                "added cannot be told apart."
             )
             record = InstallRecord(
                 platform.app_name,
@@ -827,73 +882,79 @@ def run_uninstall(opts: Options, ui: Ui, root: Path) -> None:
                 [canonical(d) for d in platform.distributions],
             )
         else:
-            ui.ok(
-                f"record found: added {', '.join(record.added) or 'nothing'}; "
-                f"replaced {', '.join(record.replaced) or 'nothing'}"
-            )
+            added = ", ".join(record.added) or "nothing"
+            replaced = ", ".join(record.replaced) or "nothing"
+            ui.ok("Read the install record", f"added {added}; replaced {replaced}")
             if record.pending_before is not None:
-                ui.warn("the last install was interrupted; its changes are included")
+                ui.warn("Last install interrupted", "its changes are included")
                 record.merge(record.pending_before, installed)
 
         ui.step("App")
-        if platform.running_app() == platform.app_name:
-            if not opts.dry_run:
+        app = platform.app_name
+        if platform.running_app() == app:
+            if not dry:
                 platform.stop_app()
-            ui.ok(f"{would}stop {platform.app_name}")
+            ui.change(dry, f"Stop {app}", f"Stopped {app}")
         else:
-            ui.ok(f"{platform.app_name} is not running")
+            ui.ok("App not running", app)
         current = platform.autostart()
-        if current == platform.app_name:
-            if not opts.dry_run:
+        if current == app:
+            if not dry:
                 platform.set_autostart(record.autostart_before)
-            ui.ok(f"{would}set the autostart app back to {record.autostart_before or 'none'}")
+            before = record.autostart_before or "none"
+            ui.change(dry, "Restore the autostart app", "Restored the autostart app", before)
         else:
-            ui.ok(f"autostart app is {current or 'none'}: left as it is")
+            ui.ok("Kept the autostart app", f"{current or 'none'}, not {app}")
 
-        remove_secrets(ui, platform, py, remote, record, opts.dry_run)
+        remove_secrets(ui, platform, py, remote, record, dry)
 
         ui.step("Packages")
         plan = plan_uninstall(record, installed, py.requires())
         for name, users in plan.kept.items():
-            ui.warn(f"keeping {name}: needed by {', '.join(users)}")
+            ui.warn("Kept a shared package", f"{name}: needed by {', '.join(users)}")
         for name, version in plan.drifted.items():
-            ui.warn(f"{name} changed since the install (now {version}): left as it is")
+            ui.warn("Kept a changed package", f"{name} is now {version}, changed since the install")
         if plan.remove:
-            ui.ok(f"{would}remove {', '.join(f'{n} {installed[n]}' for n in plan.remove)}")
+            removed = ", ".join(f"{n} {installed[n]}" for n in plan.remove)
+            ui.change(dry, "Remove packages", "Removed packages", removed)
         if plan.restore:
-            ui.ok(
-                f"{would}reinstall "
-                f"{', '.join(f'{n} {v}' for n, v in plan.restore.items())} (needs internet)"
-            )
+            restored = f"{_versions(plan.restore)} (needs internet)"
+            ui.change(dry, "Reinstall packages", "Reinstalled packages", restored)
         if plan.empty:
-            ui.ok("no package to remove or restore")
-        if not opts.dry_run:
-            py.uninstall(plan.remove)
-            py.install_exact(plan.restore)
-        if not (opts.dry_run and plan.remove):  # before removal, the modules are expected
+            ui.ok("Packages unchanged", "nothing to remove or restore")
+        if not dry:
+            with ui.running("Removing packages…"):
+                py.uninstall(plan.remove)
+                py.install_exact(plan.restore)
+        if not (dry and plan.remove):  # before removal, the modules are expected
             for module, path in leftovers(py, platform):
-                if not opts.dry_run:
+                if dry:
+                    ui.would("Delete a leftover module", f"{path} ({module})")
+                else:
                     remote.run(f"rm -rf {shlex.quote(path)}")
-                ui.warn(f"{would}delete leftover {path} ({module})")
+                    ui.warn("Deleted a leftover module", f"{path} ({module})")
 
         ui.step("Clean up and verify")
-        remove_piper_venv(ui, remote, record, opts.dry_run)
-        remove_data_dir(ui, remote, record, opts.dry_run)
-        platform.cleanup(ui, py, opts.dry_run)
+        remove_piper_venv(ui, remote, record, dry)
+        remove_data_dir(ui, remote, record, dry)
+        platform.cleanup(ui, py, dry)
         listed = remote.run(f"ls -d {REMOTE_TMP_PREFIX}.* 2>/dev/null || true").split()
         tmp_dirs = [d for d in listed if TMP_DIR_PATTERN.fullmatch(d)]
         for d in tmp_dirs:
-            if not opts.dry_run:
+            if not dry:
                 remote.run(f"rm -rf {shlex.quote(d)}")
-            ui.ok(f"{would}delete {d}")
-        if opts.dry_run:
-            ui.info(f"{would}delete {platform.record_path} once verified")
-            ui.title("dry run passed")
+            ui.change(dry, "Delete a temporary folder", "Deleted a temporary folder", d)
+        if dry:
+            ui.would("Delete the install record", f"{platform.record_path}, once verified")
+            ui.ok("Dry run passed", "the robot was not modified")
+            ui.next(_rerun(opts))
+            ui.summary()
             return
         verify_uninstall(ui, platform, py, record, plan.restore)
         remote.run(f"rm -f {shlex.quote(platform.record_path)}")
-        ui.ok(f"deleted {platform.record_path}")
-        ui.title("uninstalled")
+        ui.ok("Deleted the install record", platform.record_path)
+        ui.ok("Uninstalled", f"{app} from {host}")
+        ui.summary()
 
     _with_remote(opts, ui, platform, host, body)
 
@@ -919,8 +980,15 @@ def verify_uninstall(
     elif data_dir and _exists(py.remote, data_dir):
         problems.append(f"data folder {data_dir} still present")
     if problems:
-        raise WizardError("uninstall incomplete (record kept, run again): " + "; ".join(problems))
-    ui.ok("app packages gone, original versions back" + (", data folder gone" if data_dir else ""))
+        raise WizardError(
+            "Uninstall incomplete, record kept",
+            "; ".join(problems),
+            f"{COMMAND} --uninstall",
+        )
+    ui.ok(
+        "Verified the removal",
+        "app packages gone, original versions back" + (", data folder gone" if data_dir else ""),
+    )
     platform.verify_removed(ui)
 
 
@@ -942,7 +1010,7 @@ def _json(output: str) -> dict:
     """pip's ``--report -`` JSON, skipping any warning lines before it."""
     start = output.find("{")
     if start < 0:
-        raise WizardError(f"no report from pip:\n{output}")
+        raise WizardError("No report from pip", last_line(output), output=output)
     return json.JSONDecoder().raw_decode(output[start:])[0]
 
 
@@ -986,6 +1054,10 @@ def parse_args(argv: list[str] | None = None) -> Options:
         "asked on this PC without echo and never appears on a command line",
     )
     p.add_argument("-y", "--yes", action="store_true", help="answer yes to every confirmation")
+    p.add_argument(
+        "--debug", action="store_true", help="show raw tool output and tracebacks on errors"
+    )
+    p.add_argument("--version", action="store_true", help="print the version and exit")
     a = p.parse_args(argv)
     return Options(
         a.host,
@@ -999,22 +1071,54 @@ def parse_args(argv: list[str] | None = None) -> Options:
         a.uninstall,
         a.piper,
         a.secret,
+        a.debug,
+        a.version,
     )
 
 
 def main(argv: list[str] | None = None, root: Path | None = None) -> int:
-    opts = parse_args(argv)
+    """Run the installer; 0 on success, 1 on an error block, 130 on Ctrl-C.
+
+    Errors are the Term three-line block on stderr. An unexpected exception is one too, whose
+    ``Try:`` line names ``--debug``; with ``--debug`` the traceback and raw tool output print.
+    """
+    args = sys.argv[1:] if argv is None else list(argv)
+    opts = parse_args(args)
+    if term is None:
+        print(
+            "The installer needs sondalab-palette: "
+            'pip install -e "packages/roboemot-core[install]"',
+            file=sys.stderr,
+        )
+        return 1
+    vt = all([term.enable_vt(sys.stdout), term.enable_vt(sys.stderr)])
+    if opts.version:
+        mode = term.color_mode(isatty=sys.stdout.isatty()) if vt else "none"
+        print(term.lockup("roboemot", app_version(), mode))
+        return 0
     print_header()
-    ui = Ui(interactive=sys.stdin.isatty() and not os.environ.get("CI"), assume_yes=opts.yes)
+    ui = Ui(
+        interactive=sys.stdin.isatty() and not os.environ.get("CI"),
+        assume_yes=opts.yes,
+        command=shlex.join(["python", "scripts/install_on_robot.py", *args]),
+        vt=vt,
+        debug=opts.debug,
+    )
     root = root or Path.cwd()
     try:
         (run_uninstall if opts.uninstall else run_install)(opts, ui, root)
     except TermError as e:
-        print(e.block(), file=sys.stderr)
+        ui.error(e)
         return 1
     except KeyboardInterrupt:
-        ui.fail("interrupted")
+        ui.error(WizardError("Interrupted", "stopped with Ctrl-C"))
         return 130
+    except Exception as e:
+        if opts.debug:
+            traceback.print_exc()
+        fix = "" if opts.debug else f"{ui.command} --debug"
+        ui.error(WizardError(f"Unexpected error: {type(e).__name__}", str(e), fix))
+        return 1
     return 0
 
 
@@ -1026,7 +1130,6 @@ __all__ = [
     "WizardError",
     "load_platform",
     "main",
-    "paint",
     "run_install",
     "run_uninstall",
 ]

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 from .record import Versions, canonical, versions
 from .remote import Remote
-from .ui import WizardError
+from .ui import WizardError, last_line
 
 PIP_FLAGS = "--disable-pip-version-check --no-cache-dir --no-input"
 
@@ -65,7 +65,11 @@ class RemotePython:
         body, _, rc = out.rpartition("__rc=")
         result = PipResult(rc.strip() == "0", body.strip())
         if check and not result.ok:
-            raise WizardError(f"pip {args.split()[0]} failed on the robot:\n{result.output}")
+            raise WizardError(
+                f"pip {args.split()[0]} failed on the robot",
+                last_line(result.output),
+                output=result.output,
+            )
         return result
 
     def exists(self) -> bool:

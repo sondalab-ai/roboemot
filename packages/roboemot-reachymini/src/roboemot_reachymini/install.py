@@ -72,9 +72,11 @@ class DaemonApi:
             detail = e.read().decode(errors="replace")
             if detail.startswith("{"):
                 detail = json.loads(detail).get("detail", detail)
-            raise WizardError(f"{method} {path} -> HTTP {e.code}: {detail}") from e
+            raise WizardError(f"Daemon refused {method} {path}", f"HTTP {e.code}: {detail}") from e
         except (urllib.error.URLError, OSError) as e:
-            raise WizardError(f"{method} {path} -> {getattr(e, 'reason', e)}") from e
+            raise WizardError(
+                "Could not reach the daemon", f"{method} {path}: {getattr(e, 'reason', e)}"
+            ) from e
         return json.loads(raw) if raw.strip() else None
 
     def daemon_status(self) -> dict[str, Any]:
@@ -115,7 +117,9 @@ class DaemonApi:
         while clock() < deadline:
             status = self.current_app()
             if status is None or status["info"]["name"] != name:
-                raise WizardError(f"{name} is no longer the current app (status: {status})")
+                raise WizardError(
+                    f"{name} is no longer the current app", f"daemon status: {status}"
+                )
             if status["state"] in ("running", "error", "done"):
                 return status
             sleep(poll_s)
@@ -171,21 +175,24 @@ class ReachyMiniWireless:
         try:
             addr = socket.getaddrinfo(host, self.port, proto=socket.IPPROTO_TCP)[0][4][0]
         except socket.gaierror as e:
-            raise WizardError(f"cannot resolve {host} ({e}); try the robot's IP address") from e
-        ui.ok(f"{host} -> {addr}")
+            raise WizardError(
+                f"Could not resolve {host}", f"{e}; the robot's IP address avoids mDNS names"
+            ) from e
+        ui.ok("Resolved the host", f"{host} -> {addr}")
         self.api = DaemonApi(f"http://{host}:{self.port}")
         status = self.api.daemon_status()
         version, name = status.get("version") or "?", status.get("robot_name")
-        ui.ok(f"daemon {version} on {name}, state {status['state']}")
+        ui.ok("Reached the daemon", f"{version} on {name}, state {status['state']}")
         if status["state"] != "running":
             raise WizardError(
-                f"daemon state is {status['state']}; start it from Reachy Mini Control"
+                "Daemon not running",
+                f"state is {status['state']}; start it from Reachy Mini Control",
             )
         if not status.get("wireless_version"):
-            ui.warn("this daemon is not a Wireless one: the apps venv layout may differ")
+            ui.warn("Not a Wireless daemon", "the apps venv layout may differ")
 
     def probe(self, ui: Ui, py: RemotePython) -> None:
-        ui.ok(f"reachy_mini {py.py(PROBE)} in the apps venv")
+        ui.ok("Found reachy_mini", f"{py.py(PROBE)} in the apps venv")
 
     def stage(self, root: Path, dest: Path, dev: bool) -> list[Path]:
         return stage_packages(root, dest, dev)
@@ -193,12 +200,17 @@ class ReachyMiniWireless:
     def verify(self, ui: Ui, py: RemotePython, dev: bool) -> None:
         """The app loads in the apps venv, runs as a module, and the daemon lists it."""
         module, has_dev_cfg = py.py(VERIFY).splitlines()
-        ui.ok(f"entry point {APP_NAME} -> {module}")
+        ui.ok("Checked the entry point", f"{APP_NAME} -> {module}")
         if (has_dev_cfg == "True") != dev:
-            raise WizardError(f"data/app.yaml present={has_dev_cfg}, expected dev={dev}")
+            raise WizardError(
+                "Installed config does not match",
+                f"data/app.yaml present={has_dev_cfg}, expected dev={dev}",
+            )
         if APP_NAME not in self._api().installed_apps():
-            raise WizardError(f"the daemon does not list {APP_NAME} among installed apps")
-        ui.ok(f"daemon lists {APP_NAME} as installed")
+            raise WizardError(
+                "App not listed", f"the daemon does not list {APP_NAME} among installed apps"
+            )
+        ui.ok("Daemon lists the app", APP_NAME)
 
     def running_app(self) -> str | None:
         current = self._api().current_app()
@@ -215,19 +227,21 @@ class ReachyMiniWireless:
         other = self.running_app()
         if other:
             if not ui.confirm(f"{other} is running; stop it (only one app runs at a time)?", False):
-                raise WizardError(f"{other} is still running; RoboEmot not started")
+                raise WizardError(f"{other} is still running", "RoboEmot not started")
             api.stop_current_app()
-            ui.ok(f"stopped {other}")
+            ui.ok(f"Stopped {other}")
         api.wake_up()
-        ui.ok("wake-up requested")
-        time.sleep(WAKE_SETTLE_S)
-        api.start_app(APP_NAME)
-        status = api.wait_app(APP_NAME)
+        ui.ok("Requested the wake-up")
+        with ui.running(f"Starting {APP_NAME}…"):
+            time.sleep(WAKE_SETTLE_S)
+            api.start_app(APP_NAME)
+            status = api.wait_app(APP_NAME)
         if status["state"] != "running":
             raise WizardError(
-                f"{APP_NAME} state {status['state']}: {status.get('error') or 'no detail'}"
+                f"{APP_NAME} did not start",
+                f"{APP_NAME} state {status['state']}: {status.get('error') or 'no detail'}",
             )
-        ui.ok(f"{APP_NAME} is running")
+        ui.ok(f"Started {APP_NAME}", "running")
 
     def autostart(self) -> str | None:
         return self._api().startup_app()
@@ -241,12 +255,12 @@ class ReachyMiniWireless:
         if py.remote.run(f"test -e {shlex.quote(path)} && echo yes || echo no") == "yes":
             if not dry_run:
                 py.remote.run(f"rm -f {shlex.quote(path)}")
-            ui.ok(f"{'would delete' if dry_run else 'deleted'} {path}")
+            ui.change(dry_run, "Delete the app metadata", "Deleted the app metadata", path)
 
     def verify_removed(self, ui: Ui) -> None:
         if APP_NAME in self._api().installed_apps():
-            raise WizardError(f"the daemon still lists {APP_NAME}")
-        ui.ok(f"daemon no longer lists {APP_NAME}")
+            raise WizardError("App still listed", f"the daemon still lists {APP_NAME}")
+        ui.ok("Daemon dropped the app", f"{APP_NAME} no longer listed")
 
 
 __all__ = ["DaemonApi", "ReachyMiniWireless", "stage_packages"]

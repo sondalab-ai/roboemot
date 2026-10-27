@@ -312,6 +312,22 @@ def no_settle(monkeypatch):
     monkeypatch.setattr(reachy.time, "sleep", lambda s: None)
 
 
+@pytest.fixture(autouse=True)
+def plain_terminal(monkeypatch):
+    """Unicode glyphs, no colour, 100 columns, whatever the shell running the tests says."""
+    monkeypatch.setenv("LC_ALL", "en_US.UTF-8")
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setenv("COLUMNS", "100")
+    for name in ("TERM", "SONDALAB_ASCII", "SONDALAB_ACCESSIBLE", "ACCESSIBLE", "FORCE_COLOR"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def flat(text: str) -> str:
+    """Output with every whitespace run folded to one space: a step line reads
+    ``label detail`` and a wrapped detail reads as one line."""
+    return " ".join(text.split())
+
+
 @pytest.fixture()
 def offline(monkeypatch, robot, daemon):
     monkeypatch.setattr(inst, "load_platform", lambda rid: ReachyMiniWireless(port=daemon.port))
@@ -429,7 +445,7 @@ def test_stage_packages_leaves_checkout_untouched(tmp_path, dev):
 def test_installer_registered_under_the_manifest_id():
     assert "reachy-mini-wireless" in inst.installed_platforms()
     assert isinstance(inst.load_platform("reachy-mini-wireless"), ReachyMiniWireless)
-    with pytest.raises(WizardError, match="no installer for desk-head-v1"):
+    with pytest.raises(WizardError, match="No installer for desk-head-v1"):
         inst.load_platform("desk-head-v1")
 
 
@@ -446,9 +462,12 @@ def test_install_dry_run_touches_nothing(offline, robot, daemon, capsys):
     assert not [c for c in robot.commands if c.startswith(writes) or "&& mv" in c]
     assert robot.dirs == {HOME}
     out = capsys.readouterr().out
-    assert "would add scipy 1.18.1" in out
-    assert f"would create the data folder {DATA}" in out
-    assert "would stop conversation" in out and "dry run passed" in out
+    assert "○ Add dependencies scipy 1.18.1" in flat(out)
+    assert f"○ Create the data folder {DATA}" in flat(out)
+    assert "○ Stop conversation" in out and "○ Start roboemot" in out
+    assert "✓ Dry run passed" in out and "Summary  " in out
+    assert "Next: python scripts/install_on_robot.py --host 127.0.0.1 --user pollen" in out
+    assert not [ln for ln in out.splitlines() if "✓" in ln and ("Create" in ln or "Add " in ln)]
 
 
 def test_install_records_changes_and_cleans_tmp(offline, robot, daemon):
@@ -543,9 +562,10 @@ def test_uninstall_dry_run_touches_nothing(offline, robot, daemon, capsys):
     uninstall(dry_run=True)
     assert snapshot(robot, daemon) == state and len(daemon.mutations) == n
     out = capsys.readouterr().out
-    assert "would stop roboemot" in out and "would set the autostart app back to none" in out
+    assert "○ Stop roboemot" in out and "○ Restore the autostart app none" in flat(out)
     assert (
-        "would remove roboemot-core 0.1.0.dev0, roboemot-reachymini 0.1.0.dev0, scipy 1.18.1" in out
+        "○ Remove packages roboemot-core 0.1.0.dev0, roboemot-reachymini 0.1.0.dev0, scipy 1.18.1"
+        in flat(out)
     )
 
 
@@ -603,7 +623,7 @@ def test_uninstall_never_deletes_outside_site_packages_or_tmp(offline, robot, da
 def test_uninstall_keeps_the_record_when_verification_fails(offline, robot, daemon, monkeypatch):
     install()
     monkeypatch.setattr(robot, "_pip", _pip_ignoring_uninstall(robot._pip))
-    with pytest.raises(WizardError, match="uninstall incomplete"):
+    with pytest.raises(WizardError, match="Uninstall incomplete"):
         uninstall()
     assert RECORD in robot.files
 
@@ -704,14 +724,14 @@ def test_uninstall_without_a_record_leaves_the_data_folder_and_says_so(
     robot.dirs.add(DATA)
     uninstall()
     assert DATA in robot.dirs
-    assert "no record of the data folder" in capsys.readouterr().out
+    assert "! Data folder not recorded" in capsys.readouterr().out
 
 
 def test_uninstall_dry_run_shows_the_data_folder_and_keeps_it(offline, robot, daemon, capsys):
     install()
     capsys.readouterr()
     uninstall(dry_run=True)
-    assert f"would delete the data folder {DATA}" in capsys.readouterr().out
+    assert f"○ Delete the data folder {DATA}" in flat(capsys.readouterr().out)
     assert DATA in robot.dirs
     assert not [c for c in robot.commands[-30:] if c.startswith(("rmdir", "rm -rf /home"))]
 
@@ -1070,7 +1090,7 @@ def test_install_dry_run_only_says_it_would_set_the_pin(offline, robot, monkeypa
     monkeypatch.setattr(Ui, "ask_secret", lambda self, question: PIN)
     inst.run_install(options(dry_run=True), quiet_ui(yes=True), ROOT)
     assert robot.stdins == [] and PIN_PATH not in robot.dirs
-    assert "would ask for the operator PIN" in capsys.readouterr().out
+    assert "○ Ask for the operator PIN" in capsys.readouterr().out
 
 
 def test_install_rejects_a_weak_pin_then_accepts_a_good_one(offline, robot, monkeypatch):
@@ -1135,7 +1155,7 @@ def test_install_dry_run_never_touches_the_secret_store(offline, robot, monkeypa
     assert not any("roboemot.cli secrets" in c for c in robot.commands)
     assert robot.secrets == {} and robot.stdins == []
     assert f"{DATA}/secrets.json" not in robot.dirs
-    assert "would ask for the secret 'cloud_key'" in capsys.readouterr().out
+    assert "○ Ask for a secret 'cloud_key'" in flat(capsys.readouterr().out)
 
 
 def test_install_without_a_terminal_sets_no_secret_unless_asked(offline, robot):
@@ -1214,7 +1234,7 @@ def test_uninstall_dry_run_keeps_the_secrets_and_the_record(offline, robot, monk
     uninstall(dry_run=True)
     assert robot.secrets == {"cloud_key": API_KEY}
     assert json.loads(robot.files[RECORD])["secrets"] == ["cloud_key"]
-    assert "would remove the secrets cloud_key" in capsys.readouterr().out
+    assert "○ Remove the secrets cloud_key" in flat(capsys.readouterr().out)
 
 
 def test_uninstall_ignores_a_tampered_secret_name_in_the_record(offline, robot, monkeypatch):
@@ -1249,7 +1269,7 @@ def test_install_without_a_lock_for_the_robot_python_fails_before_touching_it(
     offline, robot, daemon
 ):
     robot.machine = "aarch64\n3.9"
-    with pytest.raises(WizardError, match="no hash-pinned Piper lock"):
+    with pytest.raises(WizardError, match="No hash-pinned Piper lock"):
         inst.install_piper(
             Ui(False, True),
             ReachyMiniWireless(),
@@ -1271,7 +1291,7 @@ def test_install_dry_run_only_says_it_would_create_the_piper_venv(offline, robot
     inst.run_install(options(dry_run=True, start=False, startup=False), quiet_ui(yes=True), ROOT)
     assert (dict(robot.files), set(robot.dirs)) == before
     assert robot.piper_pips == [] and not any(" -m venv " in c for c in robot.commands)
-    assert f"would create the Piper virtualenv {PIPER_VENV}" in capsys.readouterr().out
+    assert f"○ Create the Piper venv {PIPER_VENV}" in flat(capsys.readouterr().out)
 
 
 def piper_args(robot, dry_run):
@@ -1285,7 +1305,7 @@ def test_piper_dry_run_runs_no_mktemp_copy_or_venv_and_still_rejects_an_unlocked
     assert not any(c.startswith("mktemp") or " -m venv " in c for c in robot.commands)
     assert robot.copies == [] and robot.piper_pips == []
     robot.machine = "aarch64\n3.9"
-    with pytest.raises(WizardError, match="no hash-pinned Piper lock"):
+    with pytest.raises(WizardError, match="No hash-pinned Piper lock"):
         inst.install_piper(*piper_args(robot, True))
 
 
@@ -1340,7 +1360,7 @@ def test_uninstall_dry_run_keeps_the_piper_venv(offline, robot, daemon, capsys):
     capsys.readouterr()
     uninstall(dry_run=True)
     assert PIPER_VENV in robot.dirs
-    assert "would delete the Piper virtualenv" in capsys.readouterr().out
+    assert "○ Delete the Piper venv" in capsys.readouterr().out
 
 
 def test_uninstall_refuses_a_piper_venv_outside_the_data_folder(offline, robot, daemon):

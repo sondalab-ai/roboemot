@@ -1,5 +1,7 @@
 """The installer opens with the Sondalab header (sondalab-ui docs/tui-patterns.md, Header):
-full on a terminal and before ``--help``, nothing on a pipe or in accessible mode."""
+full on a terminal and before ``--help``, nothing on a pipe or in accessible mode (the palette
+decides since 0.9.0, the installer has no guard of its own), and ``--version`` prints the
+one-line lockup."""
 
 from __future__ import annotations
 
@@ -59,7 +61,25 @@ def test_no_header_when_stdout_is_not_a_terminal(
 ) -> None:
     _skip_the_run(monkeypatch)
     assert inst.main(["--dry-run"]) == 0
-    assert "sonda" not in capsys.readouterr().out
+    assert capsys.readouterr().out == ""  # piped output is the result alone
+
+
+def test_the_header_is_the_palettes_own(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = []
+    monkeypatch.setattr(ui._term, "header", lambda *a, **kw: seen.append((a, kw)) or "H\n")
+    assert ui.header() == "H\n"
+    assert seen == [(("roboemot", ui.app_version(), ui.TAGLINE), {})]
+
+
+@pytest.mark.parametrize("tty", [True, False])
+def test_version_prints_the_lockup(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tty: bool
+) -> None:
+    out = _tty_stdout(monkeypatch) if tty else None
+    _skip_the_run(monkeypatch)
+    assert inst.main(["--version"]) == 0
+    text = out.getvalue() if out else capsys.readouterr().out
+    assert text == f"sonda/lab roboemot {ui.app_version()}\n"
 
 
 def test_no_header_in_accessible_mode(monkeypatch: pytest.MonkeyPatch) -> None:

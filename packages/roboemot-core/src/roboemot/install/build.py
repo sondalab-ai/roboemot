@@ -9,7 +9,7 @@ import tomllib
 from pathlib import Path
 
 from .record import canonical
-from .ui import WizardError
+from .ui import WizardError, last_line
 
 
 def _meta(package_dir: Path) -> dict:
@@ -25,7 +25,11 @@ def build_wheels(package_dirs: list[Path], out: Path) -> list[Path]:
         text=True,
     )  # fmt: skip
     if proc.returncode != 0:
-        raise WizardError(f"wheel build failed:\n{proc.stderr.strip()}")
+        raise WizardError(
+            "Could not build the wheels",
+            f"pip wheel exited {proc.returncode}: {last_line(proc.stderr)}",
+            output=proc.stderr,
+        )
     names = [_meta(d)["name"].replace("-", "_") for d in package_dirs]
     return [next(out.glob(f"{n}-*.whl")) for n in names]
 
