@@ -735,10 +735,10 @@ class SpeechOutput:
     def _push(
         self, job: _Job | _RawJob, samples: np.ndarray, rate_hz: int, *, speech: bool = False
     ) -> bool:
-        """Push unless a stop happened since ``job`` was queued. The check, the push and the
-        notes about it (when the sentence starts to play, where its audio ends) are one step
-        under the lock ``stop`` takes to move the epoch, so a sentence never counts as played
-        when a stop beat its first push."""
+        """Push unless a stop happened since ``job`` was queued, or one is waiting for the lock.
+        The check, the push and the notes about it (when the sentence starts to play, where its
+        audio ends) are one step under the lock ``stop`` takes to move the epoch, so a sentence
+        never counts as played when a stop beat its first push."""
         with self._lock:
             if self._stale(job) or job.id in self._raw_cancelled:
                 return False
@@ -928,7 +928,7 @@ class SpeechOutput:
 
     def _finish_stream(self, job: _Job) -> None:
         """End the sink's stream after ``job`` (its tail extends where the sentence ends),
-        unless a stop since it was queued already reset the sink."""
+        unless a stop since it was queued already reset the sink, or one is waiting for the lock."""
         with self._lock:
             if self._stale(job):
                 return
