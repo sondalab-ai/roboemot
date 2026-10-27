@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 from roboemot.config import ConfigStack
 from roboemot.runtime import RuntimeHost
-from roboemot.runtime.startup import offline_cue, start_all
+from roboemot.runtime.startup import bind_barge_in, offline_cue, start_all
 
 
 class Part:
@@ -81,3 +81,15 @@ def test_offline_cue_speaks_on_the_host_output_and_is_muted_asleep():
     p.sleep.asleep, p.sleep.paused = False, True
     cue.say("paused", "it")
     assert len(said) == 1
+
+
+def test_barge_in_ducks_the_speech_output_and_its_cut_stops_it_first():
+    """SPEC 8 stage 8: the speech output applies barge-in's duck; the cut is bound in order."""
+    bound = []
+    bargein = SimpleNamespace(duck=object(), bind=lambda *actions: bound.append(actions))
+    output = SimpleNamespace(duck=None, stop=lambda: None)
+    conv = SimpleNamespace(interrupt=lambda: None, mark_interrupting=lambda: None)
+    listener = SimpleNamespace(resume=lambda samples, stamp: None)
+    bind_barge_in(bargein, output, conv, listener)
+    assert output.duck is bargein.duck
+    assert bound == [(output.stop, conv.interrupt, listener.resume, conv.mark_interrupting)]

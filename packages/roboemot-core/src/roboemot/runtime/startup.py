@@ -122,8 +122,16 @@ def start_voice_output(
     )
     cleanup.callback(conv.close)
     conv.start()
-    if bargein is not None:  # stop the speech first, then the stream, then listen
-        bargein.bind(output.stop, conv.interrupt, listener.resume, conv.mark_interrupting)
+    if bargein is not None:
+        bind_barge_in(bargein, output, conv, listener)
+
+
+def bind_barge_in(bargein: Any, output: Any, conv: Any, listener: Any) -> None:
+    """Connect barge-in (SPEC 8 stage 8): its candidate frames duck the speech output's voice,
+    and a cut-off stops the speech first, then the stream, then the listener restarts on the
+    user's audio."""
+    output.duck = bargein.duck
+    bargein.bind(output.stop, conv.interrupt, listener.resume, conv.mark_interrupting)
 
 
 def start_all(

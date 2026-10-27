@@ -36,6 +36,12 @@ For the debug report (SPEC 12A) the output measures, for any backend:
 
 A sink with no finite ``playing_until`` (its output never opened) counts no gaps. Numbers only.
 
+Barge-in ducking (SPEC 8 stage 8): with a :class:`~roboemot.voice.duck.DuckGain` (``duck``, set
+when barge-in runs) every push goes to the sink with the duck's gain on it, keyed to the time the
+push starts to play, so the speaker's echo reference records the audio as it really plays. The
+speech timeline gets the samples *before* the gain: the speaking motion follows the sentence as
+spoken, not the duck, so a duck neither stops nor shrinks it. ``stop`` clears the duck.
+
 Every push also feeds :attr:`SpeechOutput.timeline` (:mod:`roboemot.voice.envelope`): energy
 frames, sentence bounds, phrase gaps and emphasis peaks on the playback clock, for the speaking
 motion. ``stop`` truncates it under the same lock, so nothing after a barge-in stays on it.
@@ -53,7 +59,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 
@@ -63,6 +69,7 @@ from ..config.schema import RegisterParams, RoboEmotConfig, StateEffects
 from ..persona import effects
 from ..soothe.synth import db_to_gain
 from ..stats import P50, P90, summarise
+from .duck import DuckGain
 from .envelope import SpeechTimeline
 from .prosody import Delivery, compose_delivery
 from .tts import AudioChunk, TTSBackend, TTSError
@@ -98,6 +105,17 @@ class AudioSink(Protocol):
     def playing_until(self) -> float: ...
     def end_stream(self) -> float: ...
     def stop(self) -> None: ...
+
+
+@runtime_checkable
+class DuckingSink(Protocol):
+    """An ``AudioSink`` that applies barge-in's duck itself, where audio leaves for the player
+    (a pacing speaker, at its hand-off: the duck then reaches all but its lead). ``take_duck``
+    returns True when it does; the speech output then never applies the gain a second time.
+    ``pacing`` is its report section (numbers only)."""
+
+    def take_duck(self, duck: DuckGain | None) -> bool: ...
+    def pacing(self) -> dict[str, Any]: ...
 
 
 @dataclass
@@ -186,6 +204,20 @@ class SpeechOutput:
         self.failures = 0
         # energy, phrase and emphasis stamps of what is pushed, for the speaking motion (SPEC 8)
         self.timeline = SpeechTimeline(config.speech_motion, clock)
+        self._duck: DuckGain | None = None  # barge-in ducking, set by the runtime with barge-in
+        self._sink_ducks = False  # the sink applies the duck itself (DuckingSink)
+        self._duck_utterance: int | None = None  # utterance of the last speech push
+
+    @property
+    def duck(self) -> DuckGain | None:
+        """Barge-in's duck gain (None: no ducking)."""
+        return self._duck
+
+    @duck.setter
+    def duck(self, duck: DuckGain | None) -> None:
+        """Hand the duck to a sink that applies it at its own hand-off, else apply it here."""
+        self._duck = duck
+        self._sink_ducks = isinstance(self.sink, DuckingSink) and self.sink.take_duck(duck)
 
     def apply_config(self, config: RoboEmotConfig) -> None:
         """Hot reload: the next sentence reads ``config``; the backend gets ``config.voice`` for
@@ -352,6 +384,8 @@ class SpeechOutput:
                 self._ended[job_id] = min(end, now)
             if self._question_end is not None:
                 self._question_end = min(self._question_end, now)
+            if self._duck is not None:  # under the lock: no push applies the old episode after
+                self._duck.clear()
         self.sink.stop()
         loop = self._loop
         if loop is not None:
@@ -478,6 +512,7 @@ class SpeechOutput:
             "timeline_ms": summarise(timeline_ms, RTF_LEVELS),
             **gaps,
             "timeline": self.timeline.snapshot(),
+            **({"pacing": self.sink.pacing()} if isinstance(self.sink, DuckingSink) else {}),
         }
 
     # ----------------------------------------------------------------- loop thread
@@ -527,7 +562,13 @@ class SpeechOutput:
             start = max(now, until)
             if speech and job.id in self._audible and math.isfinite(until) and now > until:
                 self._count_underrun(job, now - until)
-            self.sink.push_audio_sample(samples, rate_hz)
+            if speech and job.utterance != self._duck_utterance:
+                if self._duck_utterance is not None and self._duck is not None:
+                    self._duck.clear()  # a new answer starts at full gain
+                self._duck_utterance = job.utterance
+            duck = None if self._sink_ducks else self._duck
+            played = samples if duck is None else duck.apply(samples, rate_hz, start)
+            self.sink.push_audio_sample(played, rate_hz)
             if isinstance(job, _RawJob):
                 self._raw_pushed = job.id
             if speech:

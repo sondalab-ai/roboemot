@@ -2396,6 +2396,47 @@ class OpenAISpeechConfig(Strict):
     )
 
 
+class BargeInDuckConfig(Strict):
+    """Ducking: the robot lowers its voice while barge-in may be hearing the user (SPEC 8)."""
+
+    enabled: bool = param(
+        True,
+        "A frame that starts counting towards a barge-in cut-off (main or onset path, after the "
+        "echo guard) lowers the robot's voice to gain; only the cut-off stops it. Audio already "
+        "handed to the robot's player keeps its volume",
+    )
+    gain: float = param(
+        0.25,
+        "Amplitude factor of the robot's voice while ducked (0.25 is about -12 dB)",
+        ge=0.0, le=1.0,
+    )  # fmt: skip
+    attack_ms: float = param(
+        10.0,
+        "Ramp from full gain down to gain, so the step does not click (never 0: a hard step "
+        "clicks)",
+        unit="ms", ge=1, le=100,
+    )  # fmt: skip
+    release_ms: float = param(
+        64.0,
+        "Non-candidate audio after the last candidate frame before the voice comes back; "
+        "rounded up to whole VAD frames, so the floor is one frame (512 samples at 16 kHz, "
+        "32 ms): anything lower would round up to it anyway",
+        unit="ms", ge=32, le=1000,
+    )  # fmt: skip
+    ramp_ms: float = param(
+        50.0,
+        "Ramp from gain back up to full gain after a release (never 0: a hard step clicks)",
+        unit="ms", ge=1, le=500,
+    )  # fmt: skip
+    max_episode_s: float = param(
+        3.0,
+        "Safety cap: a duck episode with no candidate frame for this long releases (with the "
+        "ramp) on its own, in case barge-in stops getting frames with an episode open; counted "
+        "as capped. Longer than any hesitant phrase that never reaches the cut-off",
+        unit="s", ge=0.5, le=30,
+    )  # fmt: skip
+
+
 class BargeInConfig(Strict):
     enabled: bool = param(
         True,
@@ -2528,6 +2569,9 @@ class BargeInConfig(Strict):
         "The keyword recognizer stops after this much audio without a candidate frame",
         unit="ms", ge=64, le=2000,
     )  # fmt: skip
+    duck: BargeInDuckConfig = param(
+        {}, "Ducking: a lower voice while a barge-in is a candidate, not yet confirmed"
+    )
 
     @model_validator(mode="after")
     def _onset_is_not_stricter_than_the_main_path(self) -> BargeInConfig:
@@ -2727,6 +2771,14 @@ class VoiceConfig(Strict):
         100.0,
         "Size of each piece pushed to the speaker; a barge-in abandons the pieces not yet pushed",
         unit="ms", ge=10, le=1000, restart=True,
+    )  # fmt: skip
+    playback_lead_ms: float = param(
+        200.0,
+        "Audio a pacing speaker hands its player ahead of playback; the rest waits and is handed "
+        "over as the player drains, so barge-in ducking reaches it and a stop flushes less. "
+        "Read by speakers that pace (the robot plugin's); 0 hands everything over at once. Too "
+        "low and a late pacer lets the player run dry (counted as underruns)",
+        unit="ms", ge=0, le=2000, restart=True,
     )  # fmt: skip
     backend: Literal["piper", "openai_speech", "kokoro"] = param(
         "piper", "TTS backend", restart=True
