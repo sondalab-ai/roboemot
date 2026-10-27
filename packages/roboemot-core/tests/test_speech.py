@@ -14,7 +14,8 @@ import httpx
 import numpy as np
 import pytest
 from roboemot.bus import Bus
-from roboemot.config.schema import RegisterParams, RoboEmotConfig, StateEffects
+from roboemot.config.schema import BargeInDuckConfig, RegisterParams, RoboEmotConfig, StateEffects
+from roboemot.voice.duck import DuckGain
 from roboemot.voice.speech import SpeechOutput, ends_with_question
 from roboemot.voice.tts import AudioChunk, FallbackTTS, TTSError
 from test_tts import SpeechServer, openai_backend
@@ -972,3 +973,139 @@ def test_a_dropped_sentence_does_not_repeat_a_delivery_of_its_reply(make):
     later = say(out, "Quattro.", utterance=u)
     assert later is not None
     assert out._said[u][0] == 4  # the drop consumed index 2, the sequence goes on
+
+
+# ------------------------------------------------------------------ barge-in ducking (SPEC 8)
+
+
+class PlayingSink(FakeSink):
+    """Keeps the samples and a playback timeline, as the robot's speaker does."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.samples: list[np.ndarray] = []
+        self.until = -math.inf
+
+    def push_audio_sample(self, samples, rate_hz):
+        self.samples.append(np.array(samples, np.float32))
+        self.until = max(self.until, time.monotonic()) + samples.size / rate_hz
+        return super().push_audio_sample(samples, rate_hz)
+
+    def playing_until(self):
+        return self.until
+
+
+def spoken_with(make, duck):
+    sink = PlayingSink()
+    out = make(FakeBackend(pieces=3), sink=sink)
+    out.duck = duck
+    say(out, "Ciao.")
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    frames = [db for _, db in out.timeline.frames_between(-math.inf, math.inf)]
+    return np.concatenate(sink.samples), frames
+
+
+def test_a_duck_lowers_what_the_sink_gets_but_not_the_speech_timeline(make):
+    duck = DuckGain(BargeInDuckConfig(gain=0.25))
+    duck.duck(time.monotonic())  # every sample plays inside the episode (max_episode_s)
+    ducked, ducked_frames = spoken_with(make, duck)
+    plain, plain_frames = spoken_with(make, None)
+    assert ducked == pytest.approx(0.25 * plain)
+    # the speaking motion reads the timeline: it sees the sentence as spoken, not the duck
+    assert ducked_frames and ducked_frames == pytest.approx(plain_frames)
+
+
+def test_a_new_answer_starts_at_full_gain_even_if_a_duck_was_left_open(make):
+    """SPEC 8 stage 8: barge-in may stop getting frames with an episode open; the next
+    utterance clears it, while the rest of the same answer stays ducked."""
+    sink = PlayingSink()
+    out = make(FakeBackend(), sink=sink)
+    out.duck = DuckGain(BargeInDuckConfig(gain=0.25))
+    first = out.new_utterance()
+    say(out, "Uno.", utterance=first)
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    out.duck.duck(time.monotonic())  # open: within max_episode_s of now
+    say(out, "Due.", utterance=first)  # the same answer: ducked
+    assert wait_for(lambda: out.sentences_spoken == 2)
+    assert sink.samples[-1][sink.samples[-1].size // 2 :] == pytest.approx(0.25)
+    say(out, "Tre.", utterance=out.new_utterance())  # a new answer
+    assert wait_for(lambda: out.sentences_spoken == 3)
+    assert sink.samples[-1] == pytest.approx(1.0)
+
+
+def test_stop_clears_the_duck_so_the_next_answer_plays_at_full_gain(make):
+    sink = PlayingSink()
+    out = make(FakeBackend(), sink=sink)
+    out.duck = DuckGain(BargeInDuckConfig(gain=0.25))
+    out.duck.duck(time.monotonic())  # open: within max_episode_s of now
+    out.stop()
+    say(out, "Ciao.")
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    assert np.concatenate(sink.samples) == pytest.approx(1.0)
+
+
+def test_a_soothe_sound_through_play_is_ducked_too(make):
+    """SPEC 7B, 8 stage 8: a raw sound goes through the same push, so a candidate ducks it."""
+    sink = PlayingSink()
+    out = make(FakeBackend(), sink=sink)
+    out.duck = DuckGain(BargeInDuckConfig(gain=0.25))
+    out.duck.duck(time.monotonic())  # open: within max_episode_s of now
+    assert out.play(np.full(RATE // 10, 0.5, np.float32), RATE) is not None
+    assert wait_for(lambda: sink.samples)
+    assert np.concatenate(sink.samples) == pytest.approx(0.125)
+
+
+def test_a_cut_off_during_a_large_ducked_push_waits_only_for_that_push(make, monkeypatch):
+    """The duck runs under the output lock with the push: a stop from another thread waits at
+    most for the push in flight, and nothing is pushed after it returns."""
+    sink = PlayingSink()
+    out = make(FakeBackend(pieces=3), sink=sink)
+    duck = DuckGain(BargeInDuckConfig(gain=0.25))
+    out.duck = duck
+    duck.duck(time.monotonic())  # open: within max_episode_s of now
+    inside, hold_s = threading.Event(), 0.1
+    real = duck.apply
+
+    def slow_apply(samples, rate_hz, start):
+        inside.set()
+        time.sleep(hold_s)
+        return real(samples, rate_hz, start)
+
+    monkeypatch.setattr(duck, "apply", slow_apply)
+    say(out, "Ciao.")
+    assert inside.wait(2.0)
+    began = time.monotonic()
+    out.stop()
+    waited = time.monotonic() - began
+    pushed = len(sink.samples)
+    time.sleep(0.3)
+    assert waited < hold_s + 0.1  # one push in flight, not the sentence
+    assert len(sink.samples) == pushed  # nothing after the stop
+
+
+class TakingSink(PlayingSink):
+    """A sink that applies the duck itself (a pacing speaker)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.taken = None
+
+    def take_duck(self, duck):
+        self.taken = duck
+        return True
+
+    def pacing(self):
+        return {"lead_ms": 200.0}
+
+
+def test_a_sink_that_takes_the_duck_gets_the_samples_unscaled_and_reports_its_pacing(make):
+    sink = TakingSink()
+    out = make(FakeBackend(), sink=sink)
+    duck = DuckGain(BargeInDuckConfig(gain=0.25))
+    out.duck = duck
+    duck.duck(time.monotonic())  # open: within max_episode_s of now
+    assert sink.taken is duck
+    say(out, "Ciao.")
+    assert wait_for(lambda: out.sentences_spoken == 1)
+    assert np.concatenate(sink.samples) == pytest.approx(1.0)  # never applied twice
+    assert out.snapshot()["pacing"] == {"lead_ms": 200.0}

@@ -68,9 +68,14 @@ class ReachyMiniSession:
     def speaker(
         self, cfg: RoboEmotConfig, activity: SpeechActivity, reference: PlaybackReference | None
     ) -> ReachySpeaker:
-        """The SDK media player, chunked at ``voice.playback_chunk_ms``."""
+        """The SDK media player, chunked at ``voice.playback_chunk_ms`` and paced to
+        ``voice.playback_lead_ms`` ahead of playback."""
         return ReachySpeaker(
-            self.client, cfg.voice.playback_chunk_ms, activity, reference=reference
+            self.client,
+            cfg.voice.playback_chunk_ms,
+            activity,
+            reference=reference,
+            lead_ms=cfg.voice.playback_lead_ms,
         )
 
     def bearing_source(self, bus: Bus) -> LatestBearing:

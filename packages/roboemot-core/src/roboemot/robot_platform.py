@@ -63,7 +63,9 @@ class Speaker(Protocol):
     stamp when idle); ``start_playing`` opens the output and is False when the robot has no usable
     audio output; ``close`` flushes and releases it before the robot link goes away.
     ``end_stream`` is called after each sentence: a speaker that resamples as a stream pushes its
-    held-back tail and starts a fresh stream (a no-op for one that does not)."""
+    held-back tail and starts a fresh stream (a no-op for one that does not). A speaker that
+    paces its player may also implement :class:`~roboemot.voice.speech.DuckingSink` (barge-in's
+    duck applied at its hand-off, and a ``pacing`` report)."""
 
     def push_audio_sample(self, samples: Any, rate_hz: int) -> float: ...
     def playing_until(self) -> float: ...
