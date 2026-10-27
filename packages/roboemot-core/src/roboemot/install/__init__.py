@@ -83,9 +83,12 @@ ENTRY_POINT_GROUP = "roboemot.installers"
 # files pip compiles. The app with its dependencies: scipy, numpy, openai, pydantic (52 MiB
 # downloaded, 184 MiB unpacked). Extras: voice is onnxruntime and vosk (24, 66); vision is
 # opencv-python-headless and onnx (43, 105) plus onnxruntime (20, 53), counted again so that
-# vision alone also fits.
+# vision alone also fits. Realtime is websockets 15.0.1 (0.18 MB downloaded, 0.83 MB unpacked,
+# measured 2026-10-27), rounded up to whole MB; a robot that already has it keeps its version.
 APP_DISK_MB = (60, 230)
-EXTRA_DISK_MB = {"voice": (30, 85), "vision": (70, 200)}
+EXTRA_DISK_MB = {"voice": (30, 85), "vision": (70, 200), "realtime": (1, 2)}
+REALTIME_EXTRA = "realtime"
+REALTIME_PACKAGE = "websockets"  # what the realtime extra brings (roboemot-core's pyproject)
 ENV_DOWNLOAD_SHARE = 0.5  # downloads next to a created environment's tree (measured 0.3-0.4)
 ENV_FALLBACK_MB = 1500  # that tree when `du` on the creating environment answers nothing
 REMOTE_TMP_PREFIX = "/tmp/roboemot-install"
@@ -1316,6 +1319,13 @@ def install_packages(
         record.merge(record.pending_before, before)
     pins = py.constraints(before, set(own))
     if dry_run:
+        if REALTIME_EXTRA in extras:
+            have = before.get(REALTIME_PACKAGE)
+            ui.info(
+                f"would install the realtime extra ({REALTIME_PACKAGE} {have}, already present)"
+                if have
+                else f"would install the realtime extra ({REALTIME_PACKAGE}, not present yet)"
+            )
         reqs = third_party_requirements(dirs, extras)
         plan = py.plan_install(reqs, pins)
         if plan.ok:

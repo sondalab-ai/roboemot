@@ -49,8 +49,14 @@ class FakeRobot:
     temporary directories, and the Python probes."""
 
     def __init__(self) -> None:
-        self.env = {"pip": "26.2.1", "numpy": "2.0.0", "httpx": "0.28.1", "reachy-mini": "1.11.0"}
-        self.requires: dict[str, list[str]] = {"reachy-mini": ["numpy", "httpx"]}
+        self.env = {
+            "pip": "26.2.1",
+            "numpy": "2.0.0",
+            "httpx": "0.28.1",
+            "websockets": "14.2",
+            "reachy-mini": "1.11.0",
+        }
+        self.requires: dict[str, list[str]] = {"reachy-mini": ["numpy", "httpx", "websockets"]}
         self.deps = {"scipy": "1.18.1"}  # what installing the app adds
         self.conflict: dict[str, str] = {}  # upgrades the app needs (fails while pinned)
         self.files: dict[str, str] = {}
@@ -306,6 +312,11 @@ class FakeRobot:
             changes["vosk"] = "0.3.45"
         if any("vision" in t.partition("[")[2] for t in targets):
             changes["opencv-python-headless"] = "4.10.0"
+        realtime = any(
+            "realtime" in t.partition("[")[2] or t.startswith("websockets") for t in targets
+        )  # the core wheel with the extra, or the dry run's requirement list
+        if realtime and "websockets" not in self.env:
+            changes["websockets"] = "15.0.1"
         if "--dry-run" in args:
             items = [{"metadata": {"name": n, "version": v}} for n, v in changes.items()]
             if any(t.endswith(".whl") for t in targets):
@@ -574,7 +585,7 @@ def core_targets(robot) -> list[str]:
 
 def test_install_adds_the_voice_extra_and_records_what_it_brings(offline, robot, daemon):
     install()
-    assert [t.partition("[")[2] for t in core_targets(robot)] == ["voice]"]
+    assert [t.partition("[")[2] for t in core_targets(robot)] == ["voice,realtime]"]
     assert {"vosk", "scipy"} <= set(json.loads(robot.files[RECORD])["added"])
 
 
@@ -598,7 +609,7 @@ def test_the_default_install_adds_the_vision_extra_and_the_vision_weights(offlin
         quiet_ui(yes=True),
         ROOT,
     )
-    assert [t.partition("[")[2] for t in core_targets(robot)] == ["voice,vision]"]
+    assert [t.partition("[")[2] for t in core_targets(robot)] == ["voice,realtime,vision]"]
     assert robot.fetches == ["models fetch --all"]
 
 
@@ -633,7 +644,7 @@ def test_not_enough_space_for_the_vision_weights_suggests_no_vision(offline, rob
 
 def test_vision_flag_adds_the_vision_extra_and_the_vision_weights(offline, robot, daemon):
     install(vision=True)
-    assert [t.partition("[")[2] for t in core_targets(robot)] == ["voice,vision]"]
+    assert [t.partition("[")[2] for t in core_targets(robot)] == ["voice,realtime,vision]"]
     assert robot.fetches == ["models fetch --all"]
     assert "opencv-python-headless" in json.loads(robot.files[RECORD])["added"]
 
@@ -951,7 +962,7 @@ def test_not_enough_space_warns_and_skips_the_models_without_failing(
     assert reachy.APPS_VENV and "roboemot-core" in robot.env
 
 
-def app_need_mb(extras: tuple[str, ...] = ("voice",)) -> int:
+def app_need_mb(extras: tuple[str, ...] = ReachyMiniWireless.extras) -> int:
     """MB the app install needs on the apps venv's filesystem (downloads and unpacked), with the
     venv already there."""
     return sum(inst.install_need_mb(ReachyMiniWireless(), None, extras, creating=False))
@@ -960,7 +971,9 @@ def app_need_mb(extras: tuple[str, ...] = ("voice",)) -> int:
 def test_the_space_check_counts_the_extras(offline, robot, capsys):
     """R4 S3: the free-space floor comes from what is installed: vision adds its share."""
     robot.free_kb = (app_need_mb() + 1) * 1024
-    with pytest.raises(WizardError, match=f"need {app_need_mb(('voice', 'vision'))} MB"):
+    with pytest.raises(
+        WizardError, match=f"need {app_need_mb((*ReachyMiniWireless.extras, 'vision'))} MB"
+    ):
         install(vision=True)
     assert "roboemot-core" not in robot.env
 
@@ -2918,3 +2931,33 @@ def test_the_installer_prints_the_web_ui_address_with_the_configured_port(
 def test_without_a_port_in_the_app_config_the_default_is_printed(offline, robot, daemon, capsys):
     inst.run_install(options(start=True, startup=False), quiet_ui(yes=True), ROOT)
     assert f"web UI: http://127.0.0.1:{RoboEmotConfig().webui.port}" in capsys.readouterr().out
+
+
+# ------------------------------------------------------------------ realtime extra (SR-4)
+
+
+def test_the_realtime_extra_is_installed_with_voice():
+    """SPEC 4A, Installer: the realtime route's extra (websockets) comes with the voice one."""
+    assert ReachyMiniWireless.extras == ("voice", "realtime")
+    assert inst.EXTRA_DISK_MB["realtime"] == (1, 2)
+
+
+def test_the_dry_run_adds_no_package_when_websockets_is_already_there(
+    offline, robot, daemon, capsys
+):
+    """reachy-mini requires websockets, so the robot's apps venv has it: it stays pinned."""
+    assert robot.env["websockets"] == "14.2"  # reachy-mini requires it
+    inst.run_install(options(dry_run=True), quiet_ui(yes=True), ROOT)
+    out = capsys.readouterr().out
+    assert "would install the realtime extra (websockets 14.2, already present)" in out
+    added = [line for line in out.splitlines() if "would add" in line]
+    assert added and not any("websockets" in line for line in added)
+    assert robot.env["websockets"] == "14.2" and "roboemot-core" not in robot.env
+
+
+def test_the_dry_run_names_websockets_when_it_would_be_added(offline, robot, daemon, capsys):
+    del robot.env["websockets"]
+    inst.run_install(options(dry_run=True), quiet_ui(yes=True), ROOT)
+    out = capsys.readouterr().out
+    assert "would install the realtime extra (websockets, not present yet)" in out
+    assert any("websockets 15.0.1" in line for line in out.splitlines() if "would add" in line)
