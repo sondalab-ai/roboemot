@@ -12,6 +12,8 @@ Scripts (``scripts``, used in order; the last one repeats):
 - ``close_before``: the socket is closed on ``response.create``;
 - ``close_mid``: ``response.created``, one audio delta, then the socket is closed;
 - ``error``: an ``error`` instead of ``response.created``;
+- ``updated_then_refused``: ``session.updated``, then the ``error`` that echoes the request;
+- ``unrelated_error``: ``session.updated``, then an ``error`` about another event;
 - ``empty``: ``response.created`` and ``response.done``, no audio;
 - ``silent``: nothing at all.
 
@@ -91,19 +93,30 @@ class TurnServer(FakeServer):
                     await ws.close()
                     return
                 self._cancel = asyncio.Event()
-                task = asyncio.ensure_future(self._respond(ws, script, self._cancel))
+                task = asyncio.ensure_future(
+                    self._respond(ws, script, self._cancel, event.get("event_id"))
+                )
                 self._tasks.add(task)
                 task.add_done_callback(self._tasks.discard)
             elif kind == "response.cancel" and self._cancel is not None:
                 self._cancel.set()
 
-    async def _respond(self, ws: ServerConnection, script: str, cancel: asyncio.Event) -> None:
+    async def _respond(
+        self, ws: ServerConnection, script: str, cancel: asyncio.Event, event_id: str | None
+    ) -> None:
         rid = f"resp_{self.responses}"
         item = f"item_{self.responses}"
         if script == "silent":
             return
+        if script in ("updated_then_refused", "unrelated_error"):
+            session = {"audio": {"output": {"format": {"type": "audio/pcm", "rate": 16000}}}}
+            await self._send(ws, {"type": "session.updated", "session": session})
+            about = event_id if script == "updated_then_refused" else "ev_someone_else"
+            await self._send(ws, {"type": "error", "error": {"code": "x", "event_id": about}})
+            return
         if script == "error":  # refused before it began
-            await self._send(ws, {"type": "error", "error": {"code": "refused"}})
+            error = {"code": "refused", "event_id": event_id}  # echoes the request
+            await self._send(ws, {"type": "error", "error": error})
             return
         await self._send(ws, {"type": "response.created", "response": {"id": rid}})
         if script == "empty":  # a response with no audio

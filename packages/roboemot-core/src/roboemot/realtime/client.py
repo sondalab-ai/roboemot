@@ -35,6 +35,7 @@ import collections
 import concurrent.futures
 import contextlib
 import inspect
+import itertools
 import logging
 import threading
 from collections.abc import Callable
@@ -73,6 +74,16 @@ NO_PROXY: dict[str, Any] = (
 AUTH_HEADER = "Authorization"
 BEARER = "Bearer "
 CLOSE_TOO_BIG = 1009  # RFC 6455: message too big
+EVENT_PREFIX = "ev_"  # the client's own event ids (a refusal echoes the one it refuses)
+# the server events of a response (they move the response watchdog)
+RESPONSE_EVENTS = (
+    protocol.ResponseCreated,
+    protocol.AudioDelta,
+    protocol.AudioDone,
+    protocol.ReplyTranscript,
+    protocol.FunctionCall,
+    protocol.ResponseDone,
+)
 STATES = ("idle", "connecting", "connected", "closed")
 
 
@@ -127,7 +138,8 @@ class RealtimeClient:
         self._send_lock: asyncio.Lock | None = None
         self._receiver: asyncio.Task[None] | None = None
         self._awaiting = False  # a response.create was sent and its response.done not seen
-        self._began = False  # an event of the awaited response arrived
+        self._awaiting_id: str | None = None  # event_id of that response.create
+        self._event_ids = itertools.count(1)
         self._watchdog: asyncio.TimerHandle | None = None
         self._dropping: asyncio.Future[None] | None = None
         self._sending = False  # a write is in flight (a socket lost meanwhile is a stuck send)
@@ -265,7 +277,8 @@ class RealtimeClient:
             async with asyncio.timeout_at(deadline):
                 ws = await self._open(loop, deadline)
                 self._ws = ws
-                await ws.send(protocol.encode(session_update))
+                update = {"event_id": f"{EVENT_PREFIX}{next(self._event_ids)}", **session_update}
+                await ws.send(protocol.encode(update))
                 self._count("sent")
                 await self._await_session(ws)
         except _KeyUnavailable:
@@ -391,13 +404,8 @@ class RealtimeClient:
                 event = self._parse(await ws.recv())
                 if isinstance(event, protocol.Unknown):
                     continue  # counted only: no progress, not handed out
-                if self._awaiting and not isinstance(event, protocol.Malformed):
-                    # a server error before the response began refuses it: none is coming
-                    refused = isinstance(event, protocol.ServerError) and not self._began
-                    done = event.type == protocol.RESPONSE_DONE or refused
-                    self._began = True
-                    self._awaiting = not done
-                    self._arm(None if done else self.route.stall_timeout_s)
+                if self._awaiting:
+                    self._watch(event)
                 self._deliver(event)
         except ConnectionClosed as exc:
             sent = exc.sent.code if exc.sent is not None else None
@@ -428,6 +436,21 @@ class RealtimeClient:
             self._receiver = None  # ending on its own: nothing to cancel
             await self._drop_socket()
 
+    def _watch(self, event: protocol.ServerEvent) -> None:
+        """The response watchdog while a response is due: only events of a response move it
+        (``response.done`` ends it, others re-arm it with ``stall_timeout_s``); an ``error``
+        ends it only when it echoes that ``response.create``'s ``event_id`` (a refusal: no
+        response is coming). Other events (``session.updated``, other errors) leave it."""
+        if isinstance(event, protocol.ServerError):
+            if event.event_id is not None and event.event_id == self._awaiting_id:
+                self._awaiting = False
+                self._arm(None)
+            return
+        if isinstance(event, RESPONSE_EVENTS):
+            done = event.type == protocol.RESPONSE_DONE
+            self._awaiting = not done
+            self._arm(None if done else self.route.stall_timeout_s)
+
     async def _send(self, event: dict[str, Any], audio_bytes: int = 0) -> bool:
         assert self._send_lock is not None
         async with self._send_lock:
@@ -435,9 +458,11 @@ class RealtimeClient:
             if ws is None or self.state != "connected":
                 self._count("dropped")
                 return False
+            if "event_id" not in event:  # every client event carries one
+                event = {**event, "event_id": f"{EVENT_PREFIX}{next(self._event_ids)}"}
             if event.get("type") == protocol.RESPONSE_CREATE:
                 # armed before the write: a fast server may answer while the send still drains
-                self._awaiting, self._began = True, False
+                self._awaiting, self._awaiting_id = True, event["event_id"]
                 self._arm(self.route.first_token_timeout_s)
             self._sending = True
             try:

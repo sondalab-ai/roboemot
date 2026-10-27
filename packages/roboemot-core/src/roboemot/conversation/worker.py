@@ -159,6 +159,7 @@ class _Turn:
     rt_partial: bool = False  # a realtime reply was cut part way (history: interrupted)
     rt_tools: bool = False  # a skill ran in this realtime turn: it is never answered again
     rt_round: tuple[list[ToolCall], list[ToolOutcome], int] | None = None  # round in flight
+    rt_run: Any = None  # the ResponseRun of that round
 
 
 @dataclass
@@ -723,7 +724,11 @@ class ConversationWorker:
             return True
         except Exception as exc:
             log.warning("conversation: realtime turn failed (%s)", type(exc).__name__)
-            self.realtime.send(rt_protocol.response_cancel())
+            # a response in flight was already abandoned (cancelled) by its run; the failing
+            # round's audio is stopped with the rest
+            run = turn.rt_run
+            if run is not None:
+                turn.rt_jobs += [j for j in run.reply.jobs if j not in turn.rt_jobs]
             answered = self._realtime_lost(turn)
             turn.outcome = "error"
             return answered
@@ -781,12 +786,14 @@ class ConversationWorker:
                 )
                 round_from = len(turn.spoken)
                 turn.rt_round = (calls, results, round_from)
+                turn.rt_run = run
                 try:
                     choice = "auto" if in_cap else "none" if offered else None
                     reply = await run.run(instructions, choice)
                 except asyncio.CancelledError:
                     self._absorb(turn, run.reply, instructions)
                     self._cut_realtime(turn)
+                    self._keep_round(turn)  # a skill that ran stays in the history
                     raise
                 self._absorb(turn, reply, instructions)
                 if reply.closed or reply.status == "error":
@@ -911,8 +918,7 @@ class ConversationWorker:
             chars = len(instructions) + len(turn.utterance.text) + len(text)
             tokens = chars // CHARS_PER_TOKEN
         turn.tokens += tokens
-        if reply.status is None and reply.closed is None:
-            route.owe(reply.response_id, tokens)  # its response.done comes later: charged then
+        if reply.abandoned:  # the route charges it (usage at its response.done, or estimate)
             return
         if reply.tokens is None:  # usage, when given, was charged by the route at response.done
             route.charge(tokens)

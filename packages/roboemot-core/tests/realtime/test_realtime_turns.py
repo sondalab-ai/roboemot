@@ -433,7 +433,7 @@ def test_a_loss_after_a_tool_ran_is_not_answered_again(rigs):
         assert rig.route.snapshot()["cut_mid_turn"] == 1
 
 
-def test_a_failure_after_a_tool_ran_cancels_and_is_not_answered_again(rigs, monkeypatch):
+def test_a_failure_after_a_tool_ran_is_not_answered_again(rigs, monkeypatch):
     play = '{"gesture": "joy"}'
     with TurnServer(["tool", "reply"], tool_name="play", tool_args=play) as srv:
         rig, env = tooled(rigs, srv)
@@ -449,8 +449,8 @@ def test_a_failure_after_a_tool_ran_cancels_and_is_not_answered_again(rigs, monk
         rig.turn()
         assert env.played == ["joy"]
         assert rig.chat_hosts() == []
-        assert wait_for(lambda: srv.of("response.cancel"))
         assert wait_for(lambda: len(rig.speech.backend.texts) == 1)
+        assert srv.of("response.cancel") == []  # no response was in flight when it failed
 
 
 def test_a_spent_budget_closes_the_session_and_lines_go_to_piper(rigs):

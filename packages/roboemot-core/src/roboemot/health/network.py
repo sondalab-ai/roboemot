@@ -70,12 +70,21 @@ class NetworkMonitor:
         self.realtime = Link(REALTIME_LINK, self.policy, self._route_changed)
         self._realtime_active = False
         self._realtime_confirmed = False  # counts once a session opened, or once offline
+        self._realtime_endpoint: tuple[str, int] | None = None
 
-    def set_realtime(self, active: bool) -> None:
+    def set_realtime(self, active: bool, endpoint: tuple[str, int] | None = None) -> None:
         """Realtime mode is on (the realtime route may answer a turn) or off: the ``realtime``
-        link counts for the ``network`` aggregate only while it is on. Any thread."""
+        link counts for the ``network`` aggregate only while it is on. A new ``endpoint``
+        (host, port) starts the link afresh, unconfirmed, as ``set_routes`` does for a chat
+        route. Any thread."""
         with self._lock:
             changed, self._realtime_active = self._realtime_active != active, active
+            if endpoint != self._realtime_endpoint:
+                if self._realtime_endpoint is not None:
+                    self.realtime = Link(REALTIME_LINK, self.policy, self._route_changed)
+                    self._realtime_confirmed = False
+                    changed = True
+                self._realtime_endpoint = endpoint
         if changed:
             self._sync_network(self.clock())
 

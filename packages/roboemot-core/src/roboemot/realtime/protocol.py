@@ -179,10 +179,14 @@ def item_truncate(item_id: str, audio_end_ms: int, content_index: int = 0) -> di
 
 
 def response_create(
-    instructions: str | None = None, tool_choice: Literal["auto", "none"] | None = None
+    instructions: str | None = None,
+    tool_choice: Literal["auto", "none"] | None = None,
+    *,
+    event_id: str | None = None,
 ) -> dict[str, Any]:
     """``response.create``, with per-response ``instructions`` and ``tool_choice`` when given.
-    ``tool_choice`` is ``auto`` or ``none`` only (never a forced tool, SPEC 8)."""
+    ``tool_choice`` is ``auto`` or ``none`` only (never a forced tool, SPEC 8). ``event_id``
+    (the client's own) is echoed by a server ``error`` that refuses it."""
     response: dict[str, Any] = {}
     if instructions is not None:
         response["instructions"] = instructions
@@ -191,6 +195,8 @@ def response_create(
             raise ValueError("tool_choice is auto or none")
         response["tool_choice"] = tool_choice
     event: dict[str, Any] = {"type": RESPONSE_CREATE}
+    if event_id is not None:
+        event["event_id"] = event_id
     if response:
         event["response"] = response
     return event
@@ -222,9 +228,11 @@ class SessionEvent(ServerEvent):
 
 @dataclass(frozen=True)
 class ServerError(ServerEvent):
-    """A server ``error``: its ``code`` only (None when absent or not an identifier)."""
+    """A server ``error``: its ``code`` only (None when absent or not an identifier), and the
+    ``event_id`` of the client event it is about, when the server says (never its message)."""
 
     code: str | None = None
+    event_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -372,7 +380,9 @@ def _error(data: dict[str, Any]) -> ServerError:
     error = data.get("error")
     code = error.get("code") if isinstance(error, dict) else None
     ok = isinstance(code, str) and ERROR_CODE.fullmatch(code) is not None
-    return ServerError(ERROR, code if ok else None)
+    about = error.get("event_id") if isinstance(error, dict) else None
+    known = isinstance(about, str) and len(about) <= ID_MAX_CHARS
+    return ServerError(ERROR, code if ok else None, about if known else None)
 
 
 def _response_done(data: dict[str, Any]) -> ResponseDone:

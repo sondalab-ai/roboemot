@@ -471,3 +471,140 @@ def test_every_response_done_is_charged_once_by_id():
     r._on_event(done)
     assert router.used("rt") == 10
     assert r.snapshot()["responses"] == {"cancelled": 1}
+
+
+# ------------------------------------------------------------------ fix round 2: state machine
+
+
+def test_a_reload_between_the_final_check_and_the_store_never_leaves_a_cloud_session():
+    """probe_b2: the client's snapshot blocks inside the connect's final check; the reload
+    that turns pseudonyms on waits for the state lock and then closes the stored session."""
+    gate, entered = threading.Event(), threading.Event()
+
+    class Gated(StubClient):
+        calls = 0
+
+        def snapshot(self):
+            Gated.calls += 1
+            if Gated.calls == 2:
+                entered.set()
+                gate.wait(5)
+            return super().snapshot()
+
+    stack = rt_stack()
+    made = []
+    r = RealtimeRoute(
+        stack,
+        lambda: FakeRouter(),
+        NetworkMonitor(stack.effective().llm_routes, POLICY, probe=lambda *a: True),
+        DIRECT,
+        extra=lambda: True,
+        client_factory=lambda *a, **kw: made.append(Gated(*a, **kw)) or made[-1],
+    )
+    result = []
+    thread = threading.Thread(target=lambda: result.append(r.ready()))
+    thread.start()
+    assert entered.wait(5)
+    stack.set("privacy.pseudonyms_to_cloud", True, source="test", admin=True)
+    reload = threading.Thread(target=lambda: r.apply_config(stack.effective()))
+    reload.start()
+    gate.set()
+    thread.join(5)
+    reload.join(5)
+    assert not r.up() and not r.connected
+
+
+def test_up_refuses_a_session_the_config_would_not_open():
+    stack = rt_stack()
+    r, made = stub_route(stack)
+    assert r.ready() and r.up()
+    stack.set("privacy.pseudonyms_to_cloud", True, source="test", admin=True)  # reload missed
+    assert r.connected and not r.up()
+
+
+def test_a_ready_queued_behind_a_connect_does_not_reopen_after_sleep():
+    """probe_abort: a turn's ready() waits for the background connect; the robot falls
+    asleep meanwhile: neither stores a session."""
+    stack = rt_stack()
+    r, made = slow_route(stack)
+    results = []
+    first = threading.Thread(target=lambda: results.append(r.ready()))
+    first.start()
+    assert SlowClient.entered.wait(5)
+    second = threading.Thread(target=lambda: results.append(r.ready()))
+    second.start()
+    import time as _t
+
+    _t.sleep(0.1)  # the second ready waits for the connect lock
+    r.close_soon("asleep")
+    SlowClient.gate.set()
+    first.join(5)
+    second.join(5)
+    assert results == [False, False] and not r.connected
+    assert all(c.closed == 1 for c in made) and len(made) == 1
+
+
+def test_a_new_ready_after_sleep_reopens():
+    stack = rt_stack()
+    r, made = stub_route(stack)
+    assert r.ready()
+    r.close_soon("asleep")
+    assert not r.connected
+    assert r.ready() and len(made) == 2  # wake (or a turn after it) opens a new session
+
+
+def test_a_new_realtime_endpoint_starts_its_link_unconfirmed():
+    mon = monitor(CHAT, RT)
+    mon.set_realtime(True, ("s2s.local", 8765))
+    mon.report_realtime(True, 0.0)
+    mon.report("lan", False, 0.0)
+    assert mon.online
+    mon.set_realtime(True, ("other.local", 8765))  # the route moved: not confirmed yet
+    assert not mon.online
+
+
+def _client_against(script):
+    from realtime_helpers import route, settings
+    from roboemot.realtime.client import RealtimeClient
+    from turn_server import TurnServer
+
+    server = TurnServer([script])
+    server.__enter__()
+    client = RealtimeClient(
+        route(server.http_base(), first_token_timeout_s=0.3, stall_timeout_s=0.3),
+        settings(),
+        DirectSession(),
+        auth_headers=dict,
+    )
+    return server, client
+
+
+def test_a_refusal_after_session_updated_is_a_refusal_not_a_stall():
+    import time as _t
+
+    from realtime_helpers import UPDATE
+    from roboemot.realtime import protocol as P
+
+    server, client = _client_against("updated_then_refused")
+    try:
+        assert client.connect(UPDATE)
+        client.send(P.response_create(event_id="rq_7"))
+        _t.sleep(0.8)  # well past first_token and stall timeouts
+        assert client.state == "connected" and client.snapshot()["stalls"] == 0
+    finally:
+        client.close()
+        server.__exit__(None, None, None)
+
+
+def test_an_unrelated_error_does_not_end_the_wait():
+    from realtime_helpers import UPDATE, wait_until
+    from roboemot.realtime import protocol as P
+
+    server, client = _client_against("unrelated_error")
+    try:
+        assert client.connect(UPDATE)
+        client.send(P.response_create(event_id="rq_7"))
+        assert wait_until(lambda: client.snapshot()["stalls"] == 1, 3.0)  # still awaited
+    finally:
+        client.close()
+        server.__exit__(None, None, None)
