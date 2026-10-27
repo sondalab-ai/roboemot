@@ -497,7 +497,7 @@ def test_install_starts_and_sets_autostart_recording_the_previous_one(offline, r
 
 def test_install_upgrades_shared_packages_only_when_allowed(offline, robot, daemon):
     robot.conflict = {"numpy": "2.1.0"}
-    ui = quiet_ui()
+    ui = typed()  # a terminal: the question is asked, after the wheels are copied
     ui.confirm = lambda question, default, **kw: "shared packages" not in question
     with pytest.raises(WizardError, match="shared packages left as they were"):
         inst.run_install(options(start=False, startup=False, piper=False, yes=False), ui, ROOT)
@@ -1013,11 +1013,22 @@ def test_uninstall_without_a_terminal_needs_only_host_and_user(offline, robot, d
     )
 
 
-def test_a_runtime_question_without_a_terminal_names_yes(offline, robot, daemon):
+def test_a_shared_package_change_without_a_terminal_stops_before_any_write(offline, robot, daemon):
     robot.conflict = {"numpy": "2.1.0"}
     with pytest.raises(MissingFlag, match="--yes"):
         inst.run_install(Options(**FULL, start=False, startup=False), quiet_ui(), ROOT)
     assert robot.env["numpy"] == "2.0.0"
+    assert robot.copies == [] and robot.files == {} and robot.tmp_dirs == set()
+    writes = ("rm ", "rmdir", "mkdir", "mktemp", "mv ")
+    assert not [c for c in robot.commands if c.startswith(writes) or "&& mv" in c]
+
+
+@pytest.mark.parametrize("empty", ["host", "user"])
+def test_an_empty_host_or_user_counts_as_missing(offline, robot, daemon, empty):
+    given = {**FULL, "start": False, "startup": False, empty: ""}
+    with pytest.raises(MissingFlag, match=f"--{empty}"):
+        inst.run_install(Options(**given), quiet_ui(), ROOT)
+    assert robot.commands == [] and daemon.requests == []
 
 
 def test_non_interactive_ui_never_takes_a_default():

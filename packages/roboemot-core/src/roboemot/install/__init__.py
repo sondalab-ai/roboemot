@@ -668,6 +668,13 @@ def install_packages(
         record.merge(record.pending_before, before)
     record.packages = sorted(set(record.packages) | set(own))
     pins = py.constraints(before, set(own))
+    if not dry_run and not ui.interactive and not ui.assume_yes:
+        # Read-only, before anything is copied or recorded: a shared-package change needs a
+        # yes that nobody can type, so stop now rather than after the wheels are on the robot.
+        with ui.running("Resolving dependencies…"):
+            plan = py.plan_install(third_party_requirements(dirs), pins)
+        if not plan.ok:
+            ui.require("--yes", False, "Shared packages must change, and only --yes allows it")
     if dry_run:
         reqs = third_party_requirements(dirs)
         with ui.running("Resolving dependencies…"):
@@ -737,12 +744,13 @@ def preflight(opts: Options, ui: Ui) -> None:
 
     Host and user are never defaulted; the confirmations are answered by their own flag or
     by ``--yes``. Questions that depend on what the robot says (shared packages, a running
-    app, an existing PIN or secret) are checked when they come up and name ``--yes``.
+    app, an existing PIN or secret) are checked when they come up and name ``--yes``. An empty
+    value (``--user ""``) counts as missing.
     """
-    ui.require("--host", opts.host is not None)
+    ui.require("--host", bool(opts.host))
     if len(installed_platforms()) > 1:
-        ui.require("--robot", opts.robot is not None)
-    ui.require("--user", opts.user is not None)
+        ui.require("--robot", bool(opts.robot))
+    ui.require("--user", bool(opts.user))
     if opts.uninstall:
         return
     answered = [("--dev", opts.dev), ("--piper", opts.piper)]
