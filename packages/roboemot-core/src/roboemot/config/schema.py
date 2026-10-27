@@ -2812,6 +2812,20 @@ class RealtimeRouteConfig(Strict):
         ge=100,
         le=5000,
     )
+    transcript_max_items: int = param(
+        8,
+        "Most server items one utterance's audio may produce; past it the transcript is "
+        "dropped (and the items deleted): a server cannot grow the robot's state without bound",
+        ge=1,
+        le=64,
+    )
+    transcript_max_chars: int = param(
+        2000,
+        "Longest server transcript of one utterance; past it the transcript is dropped (and "
+        "its items deleted)",
+        ge=100,
+        le=20000,
+    )
     daily_upload_budget_s: float = param(
         1800.0,
         "Microphone audio (the closing silence included) the robot may send per day; past it "

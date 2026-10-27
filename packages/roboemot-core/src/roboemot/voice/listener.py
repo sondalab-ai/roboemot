@@ -648,8 +648,11 @@ class VoiceListener:
         """Hand ``p``'s audio to the realtime input (never blocks); its final now waits for the
         server's transcript until ``transcript_timeout_s``."""
         rate = self._cfg.voice.sample_rate_hz
-        p.rt = self._realtime.submit(self._speech_audio(p.ev), rate)
         p.deadline = self._clock() + self._cfg.voice.realtime_route.transcript_timeout_s
+        # past its deadline it is never sent: the listener has decoded it locally by then
+        p.rt = self._realtime.submit(
+            self._speech_audio(p.ev), rate, deadline=p.deadline, clock=self._clock
+        )
         self._count_audio("sent")
 
     def _speech_audio(self, ev: SpeechEnd) -> np.ndarray:
