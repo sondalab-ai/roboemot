@@ -1157,6 +1157,7 @@ COUNTERS = (
     "audio_items_deleted",
     "audio_items_unnamed",
     "audio_items_undeletable",
+    "audio_items_ambiguous",
     "items_deleted",
     "transcripts",
     "transcript_timeouts",

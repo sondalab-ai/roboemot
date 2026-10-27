@@ -18,7 +18,10 @@ lies inside the burst's span opens an item of the burst; one outside it belongs 
 ``transcription.completed`` and none is still open; a server that splits the utterance gives
 several items, joined in the order the server heard them. A server that leaves ``item_id``
 out still gives its text (the items are matched in order), but such items cannot be deleted:
-they are counted (``audio_items_unnamed``, ``audio_items_undeletable``). More items than
+they are counted (``audio_items_unnamed``, ``audio_items_undeletable``). While a cancelled
+burst's id-less item may still come, an id-less transcript cannot be told apart from it: the
+burst in flight then ends without a result (``audio_items_ambiguous``, a local decode), so a
+late transcript is never joined into another burst. More items than
 ``transcript_max_items`` or text longer than ``transcript_max_chars`` drops the transcript.
 The listener waits for the job with its own deadline (``transcript_timeout_s``) and
 ``cancel``s it past that.
@@ -355,6 +358,7 @@ class RealtimeInput:
         burst's span; a transcript of no burst is deleted."""
         delete: list[tuple[str, int]] = []
         undeletable = 0
+        ambiguous = False
         finished: tuple[InputJob, Heard | None] | None = None
         with self._lock:
             burst = self._burst
@@ -371,9 +375,19 @@ class RealtimeInput:
                     else:
                         undeletable += 1
                         self._dead_anon = max(0, self._dead_anon - 1)
+                elif item is None and self._dead_anon > 0:
+                    # it may be a cancelled burst's late words: never joined into this one;
+                    # this burst ends without a result (the listener decodes it locally)
+                    self._dead_anon -= 1
+                    ambiguous = True
+                    finished = (live.job, None)
+                    gone, lost = self._retire(live)
+                    delete, undeletable = delete + gone, undeletable + lost + 1
                 else:
                     self._transcript(live, item, event.text)
-            if live is not None and live.over():
+            if finished is not None:
+                pass  # ended above (ambiguous)
+            elif live is not None and live.over():
                 finished = (live.job, None)
                 gone, lost = self._retire(live)
                 delete, undeletable = delete + gone, undeletable + lost
@@ -384,6 +398,8 @@ class RealtimeInput:
                     delete, undeletable = delete + gone, undeletable + lost
                 else:
                     live.closed = True
+        if ambiguous:
+            self.route.count("audio_items_ambiguous")
         if undeletable:
             self.route.count("audio_items_undeletable", undeletable)
         self._delete(delete)

@@ -358,3 +358,78 @@ def test_the_upload_count_lives_in_the_data_folder(tmp_path):
     from roboemot import paths
 
     assert paths.realtime_upload_path(str(tmp_path)) == tmp_path / "realtime_upload.json"
+
+
+# ------------------------------------------------------------------ fix round 2
+
+
+def stub_input(spans):
+    """A RealtimeInput over a stub route whose gate always sends: ``spans`` gives each burst's
+    (generation, start_ms, end_ms); counts go to the returned dict."""
+    import threading
+    from types import SimpleNamespace
+
+    from roboemot.config.schema import RoboEmotConfig
+
+    cfg = RoboEmotConfig.model_validate(
+        {"voice": {"realtime_route": {"input": "audio"}}, "privacy": {"realtime_audio": True}}
+    )
+    counts: dict[str, int] = {}
+    sent = threading.Semaphore(0)
+    order = iter(spans)
+
+    def send_audio(pcm, *, gate, instructions, hold, track):
+        track(*next(order))
+        sent.release()
+
+    route = SimpleNamespace(
+        generation=1,
+        connected=True,
+        stack=SimpleNamespace(effective=lambda: cfg),
+        base_instructions=lambda: "",
+        send_audio=send_audio,
+        delete_items=lambda gen, items: len(items),
+        count=lambda key, n=1: counts.__setitem__(key, counts.get(key, 0) + n),
+        input_held=lambda: False,
+    )
+    return RealtimeInput(route), sent, counts
+
+
+def test_an_id_less_transcript_that_may_be_a_cancelled_bursts_is_never_joined():
+    """I-N2: no ids, burst A cancelled with an item still to come, burst B live: the next
+    id-less transcript could be A's. B ends without a result (a local decode), never with
+    A's words."""
+    from roboemot.realtime import protocol
+
+    inp, sent, counts = stub_input([(1, 0.0, 1000.0), (1, 1000.0, 2000.0)])
+    started, done = protocol.SPEECH_STARTED, protocol.TRANSCRIPTION_COMPLETED
+    try:
+        a = inp.submit(speech(0.5), RATE)
+        assert sent.acquire(timeout=5)
+        inp.on_event(protocol.SpeechBoundary(started, None, 100))
+        inp.cancel(a)
+        b = inp.submit(speech(0.5), RATE)
+        assert sent.acquire(timeout=5)
+        inp.on_event(protocol.SpeechBoundary(started, None, 1100))
+        inp.on_event(protocol.InputTranscript(done, None, "LATE-A", True))
+        inp.on_event(protocol.InputTranscript(done, None, "B words", True))
+        assert b.done and b.result is None
+        assert counts["audio_items_ambiguous"] == 1
+    finally:
+        inp.close()
+
+
+def test_an_id_less_burst_with_nothing_pending_still_joins():
+    """The fail-safe applies only while a cancelled burst's id-less item may still come."""
+    from roboemot.realtime import protocol
+
+    inp, sent, counts = stub_input([(1, 0.0, 1000.0)])
+    try:
+        job = inp.submit(speech(0.5), RATE)
+        assert sent.acquire(timeout=5)
+        inp.on_event(protocol.SpeechBoundary(protocol.SPEECH_STARTED, None, 100))
+        inp.on_event(protocol.InputTranscript(protocol.TRANSCRIPTION_COMPLETED, None, "ciao", True))
+        assert job.done and job.result.text == "ciao"
+        assert "audio_items_ambiguous" not in counts
+    finally:
+        inp.close()
