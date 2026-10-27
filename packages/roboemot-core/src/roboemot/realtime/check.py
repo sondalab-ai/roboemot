@@ -27,6 +27,7 @@ the words the debug report redacts (``redact.SECRET_WORDS``).
 
 from __future__ import annotations
 
+import concurrent.futures
 import datetime as dt
 import logging
 import queue
@@ -52,7 +53,7 @@ from ..llm.prompt import CHARS_PER_TOKEN
 from ..llm.pseudonyms import route_is_local
 from . import protocol
 from .route import EVENT_PREFIX, ITEM_PREFIX, MS_PER_S, realtime_extra, session_update
-from .session import NO_KEY, SessionProvider
+from .session import NO_KEY, DirectSession, SessionProvider
 
 log = logging.getLogger(__name__)
 
@@ -64,6 +65,10 @@ CREATE_EVENT = "ev_check_item"
 RESPONSE_EVENT = f"{EVENT_PREFIX}check_1"
 DELETE_EVENT = "ev_check_delete"
 STALL = "stall"  # as the client's own watchdog names a response that stopped
+SEND_FAILED = "send_failed"
+# client failures that stop the connect before the handshake: no key left the robot then
+BEFORE_HANDSHAKE = ("pseudonyms", "reconfigured")
+SEND_WAITS = 2  # a send's write waits at most this many send_timeout_s (the client's own bound)
 
 
 @dataclass
@@ -134,6 +139,7 @@ def check_realtime_route(
     client_factory: Callable[..., Any] | None = None,
     extra: Callable[[], bool] = realtime_extra,
     deadline_s: float | None = None,
+    config: Callable[[], RoboEmotConfig] | None = None,
     clock: Callable[[], float] = time.monotonic,
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
 ) -> RealtimeReport:
@@ -143,7 +149,12 @@ def check_realtime_route(
     (None in platform mode without one: ``error: provider``). Raises
     :class:`RouteKindUnsupported`, :class:`RouteKeyUnavailable` and
     :class:`RouteBudgetExhausted` before anything is sent. ``deadline_s`` defaults to
-    ``llm_check.deadline_s``; the connect itself is bounded by the client's own timeouts."""
+    ``llm_check.deadline_s`` and bounds the waits after the connect; the connect is bounded
+    by the client's own ``connect_timeout_s + send_timeout_s``, and its close by about three
+    ``send_timeout_s`` after that. ``config`` returns the committed configuration: the
+    privacy gates (pseudonyms, the platform identifier) are read from it at each use, as the
+    route reads them (``cfg`` when omitted). ``mode`` is the provider's (direct when it is a
+    :class:`DirectSession`), not the configuration's: ``mode`` takes effect at a restart."""
     if route.kind != "realtime":
         raise RouteKindUnsupported(f"route {route.name} is a {route.kind} route")
     problem = router.key_problem(route)
@@ -155,13 +166,14 @@ def check_realtime_route(
     report = RealtimeReport(
         route.name, route.model, route_endpoint(route), now().isoformat(timespec="seconds")
     )
-    report.mode = rt.mode
-    report.allocator_host = _host(route.base_url) if rt.mode == "platform" else None
     if route.api_key in NO_KEY:
         report.header_to_connect_host = "none"
+    report.mode = "direct" if isinstance(provider, DirectSession) else "platform"
+    report.allocator_host = _host(route.base_url) if report.mode == "platform" else None
     if provider is None:
         report.error = "provider"
         return report
+    live = config or (lambda: cfg)
     if client_factory is None:
         if not extra():
             report.error = "no_extra"
@@ -178,8 +190,8 @@ def check_realtime_route(
         auth_headers=lambda: router.auth_headers(route),
         on_event=run.events.put,
         on_close=lambda reason: run.events.put(_Closed(reason)),
-        local_only=lambda: cfg.privacy.pseudonyms_to_cloud,
-        platform_id=lambda: cfg.privacy.realtime_platform_id,
+        local_only=lambda: live().privacy.pseudonyms_to_cloud,
+        platform_id=lambda: live().privacy.realtime_platform_id,
     )
     try:
         run.go(client)
@@ -222,14 +234,29 @@ class _Run:
             r.checks.append(CheckResult(CONNECT, FAIL, client.reason or "closed"))
             return
         r.checks.append(CheckResult(CONNECT, PASS, ""))
-        client.send({**protocol.text_item(text, ITEM_ID), "event_id": CREATE_EVENT})
+        if not self._sent(client, {**protocol.text_item(text, ITEM_ID), "event_id": CREATE_EVENT}):
+            return
         sent_at = self.clock()
-        client.send(protocol.response_create(event_id=RESPONSE_EVENT))
+        if not self._sent(client, protocol.response_create(event_id=RESPONSE_EVENT)):
+            return
         done = self._response(sent_at)
         self._charge(done, len(instructions) + len(text))
         if r.error or r.failure is not None:
             return  # the response did not complete: the session is not trusted further
         self._delete(client)
+
+    def _sent(self, client: Any, event: dict[str, Any]) -> bool:
+        """Send ``event`` and wait for the write (bounded by the client's ``send_timeout_s``);
+        a failed write ends the check at once (``send_failed``), not at a stall."""
+        wait_s = self.cfg.voice.realtime_route.send_timeout_s * SEND_WAITS
+        try:
+            ok = bool(client.send(event).result(wait_s))
+        except (concurrent.futures.TimeoutError, concurrent.futures.CancelledError):
+            ok = False
+        if not ok:
+            self.report.failure = SEND_FAILED
+            self.report.checks.append(CheckResult(FIRST_AUDIO, FAIL, SEND_FAILED))
+        return ok
 
     def _hosts(self, snap: dict[str, Any], reason: str | None) -> None:
         r = self.report
@@ -237,22 +264,23 @@ class _Run:
         r.platform_id_sent = bool(snap.get("platform_id_sent"))
         if r.header_to_connect_host == "none":
             return
-        if snap.get("key_sent"):
+        if snap.get("key_sent") and reason not in BEFORE_HANDSHAKE:
             r.header_to_connect_host = "sent"
         elif reason == "url_key_host":
             r.header_to_connect_host = "refused"
 
-    def _next(self, wait_s: float) -> Any:
+    def _next(self, wait_s: float, *, deadline_is_error: bool = True) -> Any:
         """The next event within ``wait_s`` and the deadline; None past either (``error:
-        timeout`` when it was the deadline)."""
+        timeout`` when it was the deadline, unless ``deadline_is_error`` is False)."""
         left = self.end - self.clock()
         if left <= 0:
-            self.report.error = "timeout"
+            if deadline_is_error:
+                self.report.error = "timeout"
             return None
         try:
             return self.events.get(timeout=min(wait_s, left))
         except queue.Empty:
-            if self.clock() >= self.end:
+            if deadline_is_error and self.clock() >= self.end:
                 self.report.error = "timeout"
             return None
 
@@ -315,7 +343,8 @@ class _Run:
         client.send({**protocol.item_delete(ITEM_ID), "event_id": DELETE_EVENT})
         verdict = "unconfirmed"
         while True:
-            event = self._next(self.route.stall_timeout_s)
+            # the deadline here is like no answer: the route answered, the delete is unconfirmed
+            event = self._next(self.route.stall_timeout_s, deadline_is_error=False)
             if event is None or isinstance(event, _Closed):
                 break
             if isinstance(event, protocol.ItemDeleted) and event.item_id == ITEM_ID:

@@ -158,7 +158,7 @@ class RouteChecker:
         try:
             if route.kind == "realtime":
                 realtime = check_realtime_route(
-                    route, cfg, router=router, provider=self._provider(cfg)
+                    route, cfg, router=router, provider=self._provider(cfg), config=self.cfg
                 )
                 self._keep(route, realtime.to_dict())
                 return

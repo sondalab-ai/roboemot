@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 
 import pytest
 from fake_server import ERROR_MESSAGE, REPLY_TEXT, FakeServer
@@ -57,6 +58,7 @@ class Allocator:
     """A platform provider: hands out ``url`` and says whether the identifier went with it."""
 
     key_hosts: tuple[str, ...] = ()
+    declared: tuple[str, ...] = ()  # the key hosts this allocation names
 
     def __init__(self, url: str) -> None:
         self.url = url
@@ -66,7 +68,7 @@ class Allocator:
         self.asked += 1
         if request.platform_id:
             request.on_platform_id()  # a real provider would send PLATFORM_ID now
-        return Allocation(self.url)
+        return Allocation(self.url, self.declared)
 
 
 def run(cfg: RoboEmotConfig, router: Router | None = None, provider=None, **kw):
@@ -131,7 +133,7 @@ def test_the_check_sends_no_microphone_audio_and_charges_the_budget():
 
 def test_without_usage_the_estimate_is_charged(monkeypatch):
     with FakeServer(mode="stall") as server:
-        cfg = make_cfg(make_route(server.http_base(), stall_timeout_s=0.5))
+        cfg = make_cfg(make_route(server.http_base(), stall_timeout_s=1.5))
         router = make_router(cfg)
         report = run(cfg, router)
     assert report.failure == "stall" and report.first_audio_ms is None
@@ -203,7 +205,7 @@ def test_an_item_delete_the_server_refuses_is_reported_refused_without_its_text(
 
 def test_an_item_delete_with_no_answer_is_unconfirmed():
     with FakeServer(delete_reply="none") as server:
-        route = make_route(server.http_base(), stall_timeout_s=0.5)
+        route = make_route(server.http_base(), stall_timeout_s=1.5)
         report = run(make_cfg(route))
     assert report.item_delete == "unconfirmed"
     assert {c.name: c.status for c in report.checks}[check.ITEM_DELETE] == "skip"
@@ -425,3 +427,110 @@ def test_the_routes_tab_in_platform_mode_without_a_provider_reports_it(tmp_path)
     finally:
         srv.stop()
     assert report["error"] == "provider" and report["ok"] is False
+
+
+# ----------------------------------------------------------------- fix round 1
+
+
+class SendFails:
+    """A client whose connect succeeds and whose every send fails (the socket is gone)."""
+
+    reason = None
+
+    def __init__(self, route, settings, provider, **kw) -> None:
+        self.sent: list[dict] = []
+
+    def connect(self, update) -> bool:
+        return True
+
+    def snapshot(self) -> dict:
+        return {"endpoint": "ws://127.0.0.1:9", "key_sent": False}
+
+    def send(self, event):
+        import concurrent.futures
+
+        self.sent.append(event)
+        done: concurrent.futures.Future = concurrent.futures.Future()
+        done.set_result(False)
+        return done
+
+    def close(self) -> None:
+        pass
+
+
+def test_a_send_that_fails_is_reported_at_once_not_as_a_stall():
+    """Review M6: a failed send of the turn is send_failed, without waiting for the route's
+    first_token_timeout_s."""
+    route = make_route("http://127.0.0.1:9/v1", first_token_timeout_s=30)
+    cfg = make_cfg(route)
+    started = time.monotonic()
+    report = run(cfg, client_factory=SendFails)
+    assert time.monotonic() - started < 5
+    assert report.failure == "send_failed" and report.item_delete == "not_run"
+    assert report.charged == 0  # nothing reached the server
+
+
+def test_the_deadline_during_the_item_delete_leaves_it_unconfirmed():
+    """Review M7: a route that answered, whose delete got no answer by the deadline, is not
+    a check that took too long."""
+    with FakeServer(delete_reply="none") as server:
+        route = make_route(server.http_base(), stall_timeout_s=30)
+        report = run(make_cfg(route), deadline_s=3.0)
+    assert report.error == "" and report.item_delete == "unconfirmed"
+    assert report.first_audio_ms is not None and report.ok
+
+
+def test_the_mode_comes_from_the_provider_the_check_used():
+    """Review M4: before the restart a mode edit is live in the config, the provider is not."""
+    with FakeServer(delete_reply="deleted") as server:
+        route = make_route(server.http_base())
+        report = run(make_cfg(route, mode="platform"), provider=DirectSession())
+    assert report.mode == "direct" and report.allocator_host is None
+
+
+def test_a_pseudonym_refusal_before_the_handshake_does_not_read_as_key_sent():
+    """Review M5: the key host is declared, but pseudonyms stop the connect before any socket."""
+    provider = Allocator("wss://rt.connect.example.net/realtime")
+    provider.key_hosts = (".connect.example.net",)
+    provider.declared = (".connect.example.net",)
+    with FakeServer() as server:
+        route = make_route(f"http://127.0.0.1:{server.port}/session", keyed=True)
+        cfg = make_cfg(route, mode="platform", privacy={"pseudonyms_to_cloud": True})
+        report = run(cfg, provider=provider)
+        assert server.requests == []
+    assert report.failure == "pseudonyms"
+    assert report.header_to_connect_host == "not_sent"
+
+
+def test_the_privacy_gates_follow_the_live_config():
+    """Review M3: pseudonyms turned on during a check refuse the cloud connect host."""
+    provider = Allocator("wss://connect.example.net/v1/realtime")
+    with FakeServer() as server:
+        route = make_route(f"http://127.0.0.1:{server.port}/session")
+        cfg = make_cfg(route, mode="platform")
+        live = make_cfg(route, mode="platform", privacy={"pseudonyms_to_cloud": True})
+        report = run(cfg, provider=provider, config=lambda: live)
+        assert server.received == []
+    assert report.failure == "pseudonyms"
+
+
+def test_the_routes_tab_check_reads_the_privacy_gates_from_the_live_config(tmp_path):
+    """Review M3: the web check passes the committed config, not the snapshot at its start."""
+    from roboemot.webui.routes import RouteChecker
+
+    provider = Allocator("wss://connect.example.net/v1/realtime")
+    with FakeServer() as server:
+        route = make_route(f"http://127.0.0.1:{server.port}/session")
+        off = make_cfg(route, mode="platform")
+        on = make_cfg(route, mode="platform", privacy={"pseudonyms_to_cloud": True})
+        calls = []
+
+        def cfg():
+            calls.append(1)
+            return off if len(calls) == 1 else on  # turned on right after the check started
+
+        checker = RouteChecker(cfg, None, realtime_provider=lambda: provider)
+        checker.start("rt")
+        checker.thread.join(10)
+        assert server.received == []
+    assert checker.list_routes()[0]["last_check"]["failure"] == "pseudonyms"
