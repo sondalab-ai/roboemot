@@ -25,10 +25,10 @@ import tarfile
 import urllib.request
 from pathlib import Path
 
-UI_KIT_VERSION = "0.37.1"
+UI_KIT_VERSION = "0.42.0"
 UI_KIT_INTEGRITY = (
-    "sha512-TtrjW23zBeGCKXemt9MLUx8+o+akv0tga2m2KrHcXD9cKehoO3Q5WTmExbmQE5QL/"
-    "zDob/WymH8ANo0eP+PgIQ=="
+    "sha512-p+bCDWDZV86DE9NGRNjXOJZL9GiV4rcK3ntgUP1KWIkUieF3GgN7+"
+    "YchtPaARTN7Ej3Y3QCzAOFiz6IadbOKsA=="
 )
 TARBALL_URL = f"https://registry.npmjs.org/@sondalab/ui-kit/-/ui-kit-{UI_KIT_VERSION}.tgz"
 VENDOR_DIR = (
@@ -39,6 +39,9 @@ MANIFEST = "VENDORED.json"
 # The page uses the aurora, press and glitch families only (no glass.css, no compositions.css).
 # effects.js still imports the glass, goo and halftone modules when it mounts, so they are vendored
 # (an unused module costs a request, a missing one a console error); no class here activates them.
+# effects.js imports dither-core.js statically (the 0.39 button hover): without it nothing mounts.
+# fonts.css declares Geist Pixel Square, but its woff2 is not vendored: only .sl-stat__value,
+# .sl-lockup and .sl-px use it, and the page has none of them, so the browser never requests it.
 FILES = (
     "package.json",
     "tokens.css",
@@ -54,6 +57,7 @@ FILES = (
     "assets/fonts/OFL-Geist.txt",
     "assets/fonts/OFL-GeistMono.txt",
     "effects.js",
+    "dither-core.js",
     "geom.js",
     "colour.js",
     "live-light.js",

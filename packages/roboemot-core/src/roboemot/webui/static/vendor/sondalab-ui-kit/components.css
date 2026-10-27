@@ -125,7 +125,8 @@
      and buttons have darker ones -- they should all be consistent"). Every
      neutral control -- field, select, checkbox, radio, switch, secondary,
      ghost and icon buttons, chip, segmented -- is outlined in
-     --slc-edge-control; a filled one (the primary, a checked box) keeps its
+     --slc-edge-control on hover (at rest, since the owner's 2026-10-26
+     amendment, in the translucent --slc-edge-hairline below); a filled one (the primary, a checked box) keeps its
      fill in shade, because the fill is what finds it. Hover is two steps
      further. */
   --slc-edge-control-hover: oklch(from var(--slc-surface) calc(l + var(--slc-shade-step) * (var(--slc-edge-control-steps) + 0.5 * clamp(0, (l - 0.5) * 1000, 1) + 2) * clamp(-1, (0.5 - l) * 1000, 1)) c h);
@@ -138,6 +139,17 @@
      a deeper wash, a darker light canvas or a weaker control edge tips it
      under 3:1 (lumen-controls.test.mjs holds it). */
   --slc-edge-pressed:  var(--slc-edge-control);
+  /* EVERY CONTROL'S REST EDGE (owner amendment, 2026-10-26): a translucent
+     hairline, the ink at a share (21% when the ink is light, 30% when it is
+     dark, read off its lightness: no theme branch), so the ground and a glass
+     pane show through it. 1.5-2.2:1 on the canvas, the surface and the raised fill the secondary
+     paints, on every product (scripts/lumen-controls.test.mjs holds it). The
+     label identifies the control (WCAG 1.4.11); hover restores the 3:1 control
+     edge. Every neutral control rests on it (owner amendment, 2026-10-26),
+     and the switch knob and the pressed state keep --slc-edge-control. The
+     ink is --slc-text, read on :root: a band re-derives this role from its own
+     ink, and high contrast aliases it to the strong edge. */
+  --slc-edge-hairline:   oklch(from var(--slc-text) l c h / calc(0.21 + 0.09 * clamp(0, (0.5 - l) * 1000, 1)));
   --slc-on-accent:     var(--sl-text-on-accent, #FFFFFF);
   /* THE ACCENT AS A FILL THAT CARRIES A LABEL (0.32): the primary, a checked
      check, radio or switch, a count badge. --slc-accent-fill is UNSET by
@@ -329,8 +341,8 @@
 :where(.sl-btn--primary)::selection,
 :where(.sl-btn--primary) ::selection { color: var(--_sl-on-fill, var(--slc-on-accent)); }
 
-/* Scrollbars: thin, a neutral thumb in the one control edge (>= 3.4:1 on
-   every ground of the light and dark themes), no track -- on the PAGE's own
+/* Scrollbars: thin, a neutral thumb on the hairline (1.5-2.2:1; was the control
+   edge, >= 3.4:1, until the owner's 2026-10-26 amendment), no track -- on the PAGE's own
    scrollbar only. The viewport takes scrollbar-color from the root element;
    <body> hands `auto` back to everything inside it by inheritance. Without
    that reset the value would inherit into every scroller, and Chromium 121+
@@ -341,7 +353,7 @@
    Zero specificity, so any product value wins. High contrast keeps the
    system's scrollbars, and forced colours resets this by itself. */
 :where(:root:not([data-sl-theme="high-contrast"])) {
-  scrollbar-color: var(--slc-edge-control) transparent;
+  scrollbar-color: var(--slc-edge-hairline) transparent;
   scrollbar-width: thin;
 }
 :where(:root:not([data-sl-theme="high-contrast"]) > body) { scrollbar-color: auto; }
@@ -438,6 +450,38 @@
   text-transform: uppercase;
   color: var(--slc-text-muted);
 }
+/* --mark: the Bauhaus glyph (ART, below) before the text, an accent quarter
+   disc and a bar on the dither cell. The text moves right by the glyph; the
+   content the eyebrow heads does not move. The glyph is 6 × 4 cells, and every
+   length below is a count of --sl-art-mark-cell (3px, the dither cell), so a
+   larger label sets 4px and the glyph grows by whole cells. A whole-px cell
+   renders crisp; the offset is rounded to the px for the same reason. Read,
+   never declared here: a value set on the eyebrow or above it reaches the
+   pseudo-element. */
+.sl-eyebrow--mark::before {
+  --_sl-art-paint: var(--slc-text);
+  --_sl-art-accent: var(--slc-accent-text);
+  --_sl-art-cell: var(--sl-art-mark-cell, 3px);
+  content: "";
+  display: inline-block;
+  width: calc(6 * var(--_sl-art-cell));
+  height: calc(4 * var(--_sl-art-cell));
+  margin-inline-end: calc(3 * var(--_sl-art-cell));
+  vertical-align: -1px;
+  vertical-align: round(calc(var(--_sl-art-cell) / -3), 1px);
+  background: linear-gradient(90deg, var(--_sl-art-accent) calc(4 * var(--_sl-art-cell)), var(--_sl-art-paint) 0);
+  -webkit-mask: var(--_sl-art-glyph, var(--sl-art-mark)) 0 0 / calc(6 * var(--_sl-art-cell)) calc(4 * var(--_sl-art-cell)) no-repeat;
+  mask: var(--_sl-art-glyph, var(--sl-art-mark)) 0 0 / calc(6 * var(--_sl-art-cell)) calc(4 * var(--_sl-art-cell)) no-repeat;
+  pointer-events: none;
+}
+/* The other glyphs, on the same frame and the same split: worn WITH --mark,
+   which keeps the box, the paint and the high-contrast and forced-colours
+   removal. A modifier only names its mask. */
+.sl-eyebrow--mark-square::before { --_sl-art-glyph: var(--sl-art-mark-square); }
+.sl-eyebrow--mark-tri::before { --_sl-art-glyph: var(--sl-art-mark-tri); }
+.sl-eyebrow--mark-circle::before { --_sl-art-glyph: var(--sl-art-mark-circle); }
+.sl-eyebrow--mark-half::before { --_sl-art-glyph: var(--sl-art-mark-half); }
+.sl-eyebrow--mark-stair::before { --_sl-art-glyph: var(--sl-art-mark-stair); }
 
 /* Tag — accent-tinted mark with a dot glyph. Category / tier marker. Mono, as
    an identifier is, but in sentence case and barely tracked (0.30).
@@ -502,7 +546,7 @@
   line-height: 0.875rem;
   color: var(--slc-text-muted);
   background-color: transparent;
-  border: 1px solid var(--slc-edge-control);
+  border: 1px solid var(--slc-edge-hairline);
   border-radius: var(--sl-radius-sm, 6px);
   padding: var(--sl-space-1, 0.25rem) var(--sl-space-2, 0.5rem);
   cursor: pointer;
@@ -761,7 +805,7 @@
   --_sl-fill-edge: oklch(from var(--_sl-fill-active) min(calc(l - var(--slc-shade-step)), var(--slc-edge-accent-lmax, 1)) c h);
 }
 .sl-btn--primary:focus-visible { --_sl-foot-color: var(--slc-focus); }
-/* THE SECONDARY KEY (Lumen, 0.32): the raised rung in the one control edge,
+/* THE SECONDARY KEY (Lumen, 0.32): the raised rung on the hairline,
    lit along its top inside the edge and standing on a short cast -- the
    tile's recipe without its ring, since the edge is the ring. Hover lifts
    it to the tile rung with the edge's hover step. */
@@ -769,7 +813,7 @@
   --_sl-depth: inset 0 1px 0 var(--slc-lit), var(--slc-shadow-sm);
   background: var(--slc-raised);
   color: var(--slc-text);
-  border-color: var(--slc-edge-control);
+  border-color: var(--slc-edge-hairline);
 }
 .sl-btn--ghost:hover:not(:disabled)  { background: var(--slc-tile); border-color: var(--slc-edge-control-hover); }
 /* 24px: the 14px line + 2 x 4px + 2px border (was 12 + 2 x 5 + 2). Lumen's
@@ -898,7 +942,7 @@
   color: var(--slc-text-secondary);
 }
 /* A field is SUNKEN (Lumen, 0.32): a well on the sunken rung, its inset cast
-   the sunk recipe, inside the one control edge (it was a 4% wash of the ink
+   the sunk recipe, inside the hairline (it was a 4% wash of the ink
    over the raised rung). Glass owns the well on a glass field (effects.css). */
 .sl-field__input {
   --_sl-depth: var(--slc-depth-sunk);
@@ -908,7 +952,7 @@
   background: var(--slc-sunken);
   /* The control edge, not the raised hairline: a field's fill is 1.01-1.26:1
      on the canvas, so its border is what finds it (>= 3:1, WCAG 1.4.11). */
-  border: 1px solid var(--slc-edge-control);
+  border: 1px solid var(--slc-edge-hairline);
   border-radius: var(--sl-radius-md, 8px);
   /* 32px, the button's height: a 20px line + 2 x 5px + 2px border. The line
      is explicit because an <input> and a <select> resolve "normal" apart
@@ -1092,6 +1136,36 @@ textarea.sl-field__input { resize: vertical; min-height: 4.5rem; line-height: va
 }
 .sl-rule--labeled::before,
 .sl-rule--labeled::after { content: ""; flex: 1; border-top: 1px solid var(--slc-border); }
+/* --shapes and --weave: the hairline gives way to a strip of the Bauhaus art
+   (ART, below), centred on it and drawn into the rule's margin, so the rule
+   keeps its 1px box. An <hr> clips its overflow in the UA sheet; the strip
+   needs it back. Not with --labeled, which owns both pseudo-elements. */
+:where(.sl-rule--shapes, .sl-rule--weave) { position: relative; isolation: isolate; overflow: visible; }
+.sl-rule--shapes, .sl-rule--weave { border-top-color: transparent; }
+.sl-rule--shapes::before,
+.sl-rule--weave::before {
+  --_sl-art-paint: var(--slc-text);
+  --_sl-art-accent: var(--slc-accent-text);
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  pointer-events: none;
+}
+.sl-rule--shapes::before {
+  top: -7px;
+  height: 12px;
+  background: linear-gradient(90deg, var(--_sl-art-accent) 12px, var(--_sl-art-paint) 0);
+  -webkit-mask: var(--sl-art-shapes) 0 0 / 288px 12px no-repeat;
+  mask: var(--sl-art-shapes) 0 0 / 288px 12px no-repeat;
+}
+.sl-rule--weave::before {
+  --_sl-art-paint: color-mix(in srgb, var(--slc-text) 45%, transparent);
+  top: -13px;
+  height: 24px;
+  background: linear-gradient(90deg, var(--_sl-art-accent) 72px, var(--_sl-art-paint) 0);
+  -webkit-mask: var(--sl-art-weave) 0 0 / 288px 24px repeat-x;
+  mask: var(--sl-art-weave) 0 0 / 288px 24px repeat-x;
+}
 
 /* ══ FORM CONTROLS ═══════════════════════════════════════════════════════════ */
 
@@ -1135,10 +1209,16 @@ textarea.sl-field__input { resize: vertical; min-height: 4.5rem; line-height: va
 .sl-radio__box {
   position: relative;
   flex: none;
-  width: 1rem;
-  height: 1rem;
+  /* 16px of padding box, 18px outer, as it was before pixel direction D. The
+     tick, the dash and the dot below are 6 x 6 cells of 2px (12px) centred in
+     it, 2px in on every side (S11, owner 2026-10-26: S10's 18px box was a tad
+     large). content-box, said out loud: the 16px is the padding box the cells
+     live in, whatever reset the page carries (border-box would leave 14). */
+  box-sizing: content-box;
+  width: 16px;
+  height: 16px;
   background: var(--slc-canvas);
-  border: 1px solid var(--slc-edge-control);
+  border: 1px solid var(--slc-edge-hairline);
   transition:
     background-color var(--sl-motion-fast, 120ms) var(--sl-motion-ease, ease),
     border-color var(--sl-motion-fast, 120ms) var(--sl-motion-ease, ease),
@@ -1153,6 +1233,11 @@ textarea.sl-field__input { resize: vertical; min-height: 4.5rem; line-height: va
    (0,2,0) it is below every checked rule (0,3,0), which still fills it. */
 .sl-check__box { border-radius: 5px; }
 .sl-radio__box { border-radius: 50%; }
+/* Hover restores the 3:1 control edge (the label is the target too). Not
+   when checked or mixed (the fill's edge stays), disabled, or focused (the
+   ring's border stays). */
+:is(.sl-check, .sl-radio):hover .sl-check__input:not(:checked, :indeterminate, :disabled, :focus-visible) + .sl-check__box,
+:is(.sl-check, .sl-radio):hover .sl-radio__input:not(:checked, :disabled, :focus-visible) + .sl-radio__box { border-color: var(--slc-edge-control-hover); }
 .sl-invert :is(.sl-check__box, .sl-radio__box) { background: var(--slc-sunken); }
 
 .sl-check__input:checked + .sl-check__box,
@@ -1162,29 +1247,54 @@ textarea.sl-field__input { resize: vertical; min-height: 4.5rem; line-height: va
   border-color: var(--_sl-fill-edge);
 }
 
-/* The tick is a rotated border corner — no asset, no data URI, nothing to
-   audit. The radio's dot is a filled circle for the same reason. */
+/* THE PIXEL MARKS (owner, 2026-10-26, pixel direction D). The tick, the
+   dash and the dot are crisp 2px cells (dither-core.js CONTROL_CELL_PX) on a 6 x 6
+   lattice centred in the box, a 2px margin all round, drawn here
+   with no script: the pseudo-element is the first cell and a box-shadow sprite
+   is the rest, in the fill's label colour, so a role var rebinds them. Which
+   cells is dither-core.js's TICK_CELLS, DASH_CELLS and DOT_FRAMES, and
+   scripts/pixel-controls.test.mjs pins these offsets to those lists: the
+   canvas effects.js plots on the way in ends on this very frame. No cell is a
+   corner one (the canvas layer clips at the box radius, this does not).
+   Tick, a V: (0,2) (1,3) (2,4) (3,3) (4,2) (5,1). Dot, centred on the even
+   grid (a 5-cell plus cannot be): the 2 x 2 core (2..3, 2..3) and a one-cell
+   arm on each of its eight sides, 12 cells. Dash: 4 x 2 cells (1..4, 2..3). */
 .sl-check__box::after {
   content: "";
   position: absolute;
-  inset: 0;
-  margin: auto;
-  width: 0.3rem;
-  height: 0.55rem;
-  border: solid var(--_sl-on-fill);
-  border-width: 0 1.5px 1.5px 0;
-  transform: translateY(-1px) rotate(45deg);
+  left: 2px;
+  top: 6px;
+  width: 2px;
+  height: 2px;
+  background: var(--_sl-on-fill);
+  box-shadow:
+    2px 2px 0 var(--_sl-on-fill),
+    4px 4px 0 var(--_sl-on-fill),
+    6px 2px 0 var(--_sl-on-fill),
+    8px 0 0 var(--_sl-on-fill),
+    10px -2px 0 var(--_sl-on-fill);
   opacity: 0;
 }
 .sl-radio__box::after {
   content: "";
   position: absolute;
-  inset: 0;
-  margin: auto;
-  width: 0.375rem;
-  height: 0.375rem;
-  border-radius: 50%;
+  left: 6px;
+  top: 4px;
+  width: 2px;
+  height: 2px;
   background: var(--_sl-on-fill);
+  box-shadow:
+    2px 0 0 var(--_sl-on-fill),
+    -2px 2px 0 var(--_sl-on-fill),
+    0 2px 0 var(--_sl-on-fill),
+    2px 2px 0 var(--_sl-on-fill),
+    4px 2px 0 var(--_sl-on-fill),
+    -2px 4px 0 var(--_sl-on-fill),
+    0 4px 0 var(--_sl-on-fill),
+    2px 4px 0 var(--_sl-on-fill),
+    4px 4px 0 var(--_sl-on-fill),
+    0 6px 0 var(--_sl-on-fill),
+    2px 6px 0 var(--_sl-on-fill);
   opacity: 0;
 }
 .sl-check__input:checked + .sl-check__box::after,
@@ -1203,10 +1313,11 @@ textarea.sl-field__input { resize: vertical; min-height: 4.5rem; line-height: va
   border-color: var(--_sl-fill-edge);
 }
 .sl-check__input:indeterminate + .sl-check__box::after {
-  width: 0.5rem;
-  height: 0;
-  border-width: 0 0 1.5px 0;
-  transform: none;
+  left: 4px;
+  top: 6px;
+  width: 8px;
+  height: 4px;
+  box-shadow: none;
   opacity: 1;
 }
 
@@ -1221,23 +1332,24 @@ textarea.sl-field__input { resize: vertical; min-height: 4.5rem; line-height: va
 }
 
 /* The switch is a sunk track (Lumen, 0.32): the sunken rung and the sunk
-   recipe inside the control edge, 2.1 x 1.25rem with a 0.85rem knob (it was
-   1.9 x 1.05 with 0.75, and a 14% wash of the ink). border-box, so the size
-   is the whole control on a content-box page too, and the knob's travel is
-   exact: 2px in from the left off, 2px in from the right on (33.6 - 2 - 2 -
-   13.6 - 2 = 14px, 0.875rem). On, it is the accent fill on a foot with a
-   soft glow of the fill, like a checked box. */
+   recipe inside the control edge. Pixel direction D (owner, 2026-10-26) puts
+   it on the 3px lattice: 35 x 20px border-box, so a 33 x 18px padding box of
+   11 x 6 cells (it was 2.1 x 1.25rem = 33.6 x 20), a 12px knob (4 cells; it was
+   0.85rem) seated one cell in, and a travel of 15px, 5 cells: 3 + 12 + 15 + 3
+   = 33. border-box, so the size is the whole control on a content-box page
+   too. On, it is the accent fill on a foot with a soft glow of the fill, like
+   a checked box. */
 .sl-switch__track {
   --_sl-depth: var(--slc-depth-sunk);
   position: relative;
   flex: none;
   box-sizing: border-box;
-  width: 2.1rem;
-  height: 1.25rem;
+  width: 35px;
+  height: 20px;
   background: var(--slc-sunken);
-  /* The control edge: the off track's fill is about 1:1 on the canvas, so
-     the border is what finds it (owner, 2026-10-01). */
-  border: 1px solid var(--slc-edge-control);
+  /* The rest edge is the hairline (owner, 2026-10-26); the knob, drawn in
+     the control edge below, is what states "off" at 3:1. */
+  border: 1px solid var(--slc-edge-hairline);
   border-radius: 999px;
   transition:
     background-color var(--sl-motion-fast, 120ms) var(--sl-motion-ease, ease),
@@ -1248,21 +1360,35 @@ textarea.sl-field__input { resize: vertical; min-height: 4.5rem; line-height: va
   content: "";
   position: absolute;
   top: 50%;
-  left: 2px;
-  width: 0.85rem;
-  height: 0.85rem;
+  left: 3px;
+  width: 12px;
+  height: 12px;
   border-radius: 999px;
-  /* Off, the knob is the control edge's colour: the raised ground it was read
-     1.17:1 on the track on ink. On, it takes the fill's label (below). */
+  /* Off, the knob is the control edge's colour, not the hairline: it is the
+     switch's state mark, held at 3:1 (the raised ground it was read 1.17:1
+     on the track on ink). On, it takes the fill's label (below). */
   background: var(--slc-edge-control);
   transform: translateY(-50%);
-  /* The knob travels on the spring (--sl-motion-spring): one small overshoot
-     past its seat, then settled. */
+  /* The knob travels on --sl-motion-mid (zeroed under reduced motion); with
+     motion allowed it steps instead, one cell at a time (below). */
   transition:
-    transform var(--sl-motion-mid, 220ms) var(--sl-motion-spring, var(--sl-motion-ease, ease)),
+    transform var(--sl-motion-mid, 220ms) var(--sl-motion-ease, ease),
     width var(--sl-motion-slow, 360ms) var(--sl-motion-spring, var(--sl-motion-ease, ease)),
     background-color var(--sl-motion-fast, 120ms) var(--sl-motion-ease, ease);
 }
+/* The knob travels in 3px steps: steps(5) over --sl-motion-switch, the time
+   effects.js runs the fill by, so the fill's origin follows the knob in. Only
+   where motion is allowed: with a preference to reduce it, the knob is just
+   there, and with no mount() the steps are still the CSS's own. */
+@media (prefers-reduced-motion: no-preference) {
+  .sl-switch__track::after {
+    transition:
+      transform var(--sl-motion-switch, 260ms) steps(5),
+      width var(--sl-motion-slow, 360ms) var(--sl-motion-spring, var(--sl-motion-ease, ease)),
+      background-color var(--sl-motion-fast, 120ms) var(--sl-motion-ease, ease);
+  }
+}
+.sl-switch:hover .sl-switch__input:not(:checked, :disabled, :focus-visible) + .sl-switch__track { border-color: var(--slc-edge-control-hover); }
 .sl-switch__input:checked + .sl-switch__track {
   --_sl-depth: inset 0 -1.5px 0 var(--_sl-fill-edge), 0 0 12px -2px color-mix(in srgb, var(--_sl-fill) calc(var(--slc-glow) * 120%), transparent);
   background: var(--_sl-fill);
@@ -1270,7 +1396,7 @@ textarea.sl-field__input { resize: vertical; min-height: 4.5rem; line-height: va
 }
 .sl-switch__input:checked + .sl-switch__track::after {
   background: var(--_sl-on-fill);
-  transform: translateY(-50%) translateX(0.875rem);
+  transform: translateY(-50%) translateX(15px);
 }
 /* Focused while checked, the border is the ring's: the checked rules above
    outrank the shared focus rule, and the fill's edge left inside the ring
@@ -1303,6 +1429,45 @@ textarea.sl-field__input { resize: vertical; min-height: 4.5rem; line-height: va
 .sl-check:has(.sl-check__input:disabled),
 .sl-radio:has(.sl-radio__input:disabled),
 .sl-switch:has(.sl-switch__input:disabled) { opacity: 0.5; cursor: not-allowed; }
+.sl-segmented__item:is(:disabled, [aria-disabled="true"]) { opacity: 0.5; cursor: not-allowed; }
+
+/* DISABLED (owner, 2026-10-26, pixel direction D): the classic Mac grey-out.
+   Every disabled control is covered by a 50% checkerboard of 1px cells through
+   a mask, instead of half opacity: button, icon button, field, chip, segmented
+   item, check, radio and switch (the label goes with its control). The mask is
+   on the control itself, never on a pseudo-element: ::before and ::after belong
+   to the effects layer on a button host. The slider keeps half opacity (its
+   track and thumb are engine pseudo-elements a mask on the host would not
+   reach cleanly). A mask makes its host a backdrop root, so the frost of a
+   disabled glass button goes flat; that is accepted, the control is
+   unavailable. A mask also clips whatever paints outside the box (an outset
+   shadow, a glow, the depth foot) on a disabled control: accepted too. A
+   disabled control that has focus-visible (an aria-disabled segmented item
+   stays focusable) keeps the half-opacity fallback, so its focus ring is not
+   cut by the checker. The rules above are the fallback and stay for high contrast and
+   forced colours, which keep their current treatment (half opacity, and
+   GrayText from the engine); no ratio is owed, WCAG exempts a disabled
+   control. */
+@media not (forced-colors: active) {
+  :root:not([data-sl-theme="high-contrast"]) :is(
+    .sl-btn:disabled,
+    .sl-icon-btn:disabled,
+    .sl-field__input:disabled,
+    .sl-chip:disabled,
+    .sl-segmented__item:is(:disabled, [aria-disabled="true"]),
+    .sl-check:has(.sl-check__input:disabled),
+    .sl-radio:has(.sl-radio__input:disabled),
+    .sl-switch:has(.sl-switch__input:disabled)
+  ):not(:focus-visible) {
+    opacity: 1;
+    -webkit-mask-image: repeating-conic-gradient(#000 0 25%, transparent 0 50%);
+    -webkit-mask-size: 2px 2px;
+    -webkit-mask-position: 0 0;
+    mask-image: repeating-conic-gradient(#000 0 25%, transparent 0 50%);
+    mask-size: 2px 2px;
+    mask-position: 0 0;
+  }
+}
 
 /* ══ COMPLEX (composed shells — no behaviour JS) ═════════════════════════════ */
 
@@ -1933,6 +2098,10 @@ textarea.sl-field__input { resize: vertical; min-height: 4.5rem; line-height: va
   /* A pressed toggle keeps the band's control edge, as on the page (0.36.2;
      35% of the accent until then, 1.04-1.41:1 on the band). */
   --slc-edge-pressed:  var(--slc-edge-control);
+  /* A text button's rest edge in a band: the band's ink at a share, the same
+     intent as on the page (a hairline, 1.5-2.2:1), read off the ink's own
+     lightness so there is no theme branch. */
+  --slc-edge-hairline:   oklch(from var(--slc-canvas) l c h / calc(0.21 + 0.09 * clamp(0, (0.5 - l) * 1000, 1)));
   /* THE ACCENT FILL'S EDGE IN A BAND (0.36.2). The fill itself cannot find
      a primary or a checked box here: on the dark and high-contrast themes'
      light bands a bright fill reads 1.07-2.4:1 (high contrast's yellow,
@@ -2030,6 +2199,195 @@ textarea.sl-field__input { resize: vertical; min-height: 4.5rem; line-height: va
   .sl-spectral { background-image: none; -webkit-text-fill-color: currentColor; }
 }
 
+/* ART — Bauhaus shapes on the dither cell (0.41; more glyphs, fields, fades
+   and the poster in 0.42). Every piece is a mask the generator draws on
+   CELL_PX through the Bayer matrix (the block below), and a pseudo-element
+   painted from role vars, the ink and the accent text. The pieces that can
+   sit under text (field, corner, void) take the ink at a share that keeps
+   secondary text 4.5:1 on a solid cell of it, on the canvas and the
+   surface, both themes, every Tier A product (scripts/art.test.mjs). The
+   marks beside text (eyebrow mark, rules, the empty-state composition, the
+   poster) are not bound by it and keep their own paint. Both roles are
+   re-derived in a band, so a piece follows .sl-invert. Static, inert,
+   opt-in by class; nothing in the kit adds one. High contrast and forced
+   colours paint none of them. The element pieces live beside their
+   element: .sl-eyebrow--mark and its five glyph modifiers, .sl-rule--shapes
+   and --weave, .sl-empty--void and --shapes. */
+/* @gen-art:start */
+/* GENERATED by scripts/gen-art.mjs from dither-core.js -- do not edit. Run `npm run gen:art`. */
+:root {
+  --sl-art-mark: url('data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 6 4" shape-rendering="crispEdges"%3E%3Cpath d="M0 0h2v1h-2zM5 0h1v4h-1zM0 1h3v1h-3zM0 2h4v2h-4z"/%3E%3C/svg%3E');
+  --sl-art-mark-square: url('data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 6 4" shape-rendering="crispEdges"%3E%3Cpath d="M0 0h4v4h-4zM5 3h1v1h-1z"/%3E%3C/svg%3E');
+  --sl-art-mark-tri: url('data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 6 4" shape-rendering="crispEdges"%3E%3Cpath d="M0 0h4v1h-4zM5 0h1v4h-1zM1 1h3v1h-3zM2 2h2v1h-2zM3 3h1v1h-1z"/%3E%3C/svg%3E');
+  --sl-art-mark-circle: url('data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 6 4" shape-rendering="crispEdges"%3E%3Cpath d="M1 0h2v1h-2zM0 1h4v2h-4zM5 1h1v2h-1zM1 3h2v1h-2z"/%3E%3C/svg%3E');
+  --sl-art-mark-half: url('data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 6 4" shape-rendering="crispEdges"%3E%3Cpath d="M1 0h2v1h-2zM5 0h1v4h-1zM0 1h4v1h-4zM1 2h2v1h-2zM0 3h4v1h-4z"/%3E%3C/svg%3E');
+  --sl-art-mark-stair: url('data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 6 4" shape-rendering="crispEdges"%3E%3Cpath d="M2 0h2v2h-2zM0 2h4v2h-4zM5 2h1v2h-1z"/%3E%3C/svg%3E');
+  --sl-art-shapes: url('data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 4" shape-rendering="crispEdges"%3E%3Cpath d="M0 0h2v1h-2zM8 0h1v1h-1zM10 0h1v1h-1zM24 0h1v1h-1zM32 0h1v1h-1zM34 0h1v1h-1zM48 0h1v1h-1zM56 0h1v1h-1zM58 0h1v1h-1zM72 0h1v1h-1zM80 0h1v1h-1zM82 0h1v1h-1zM0 1h3v1h-3zM9 1h1v1h-1zM11 1h1v1h-1zM19 1h1v1h-1zM25 1h1v1h-1zM33 1h1v1h-1zM49 1h1v1h-1zM57 1h1v1h-1zM0 2h4v2h-4zM8 2h1v1h-1zM10 2h1v1h-1zM18 2h1v1h-1zM24 2h1v1h-1zM26 2h1v1h-1zM32 2h1v1h-1zM34 2h1v1h-1zM42 2h1v1h-1zM48 2h1v1h-1zM50 2h1v1h-1zM56 2h1v1h-1zM58 2h1v1h-1zM66 2h1v1h-1zM72 2h1v1h-1zM74 2h1v1h-1zM82 2h1v1h-1zM90 2h1v1h-1zM9 3h1v1h-1zM11 3h1v1h-1zM19 3h1v1h-1zM27 3h1v1h-1zM35 3h1v1h-1zM43 3h1v1h-1z"/%3E%3C/svg%3E');
+  --sl-art-weave: url('data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 8" shape-rendering="crispEdges"%3E%3Cpath d="M0 0h4v1h-4zM8 0h4v1h-4zM16 0h4v1h-4zM24 0h1v1h-1zM26 0h1v1h-1zM32 0h1v1h-1zM34 0h1v1h-1zM40 0h1v1h-1zM42 0h1v1h-1zM48 0h1v1h-1zM50 0h1v1h-1zM56 0h1v1h-1zM58 0h1v1h-1zM64 0h1v1h-1zM66 0h1v1h-1zM72 0h1v1h-1zM74 0h1v1h-1zM80 0h1v1h-1zM82 0h1v1h-1zM88 0h1v1h-1zM90 0h1v1h-1zM1 1h1v1h-1zM7 1h1v1h-1zM9 1h1v1h-1zM15 1h1v1h-1zM17 1h1v1h-1zM23 1h1v1h-1zM25 1h1v1h-1zM31 1h1v1h-1zM33 1h1v1h-1zM39 1h1v1h-1zM41 1h1v1h-1zM47 1h1v1h-1zM73 1h1v1h-1zM79 1h1v1h-1zM81 1h1v1h-1zM87 1h1v1h-1zM89 1h1v1h-1zM95 1h1v1h-1zM0 2h2v1h-2zM6 2h4v1h-4zM14 2h4v1h-4zM22 2h3v1h-3zM30 2h1v1h-1zM32 2h1v1h-1zM38 2h1v1h-1zM40 2h1v1h-1zM46 2h1v1h-1zM48 2h1v1h-1zM54 2h1v1h-1zM56 2h1v1h-1zM62 2h1v1h-1zM64 2h1v1h-1zM70 2h1v1h-1zM72 2h1v1h-1zM78 2h1v1h-1zM80 2h1v1h-1zM86 2h1v1h-1zM88 2h1v1h-1zM94 2h1v1h-1zM5 3h1v1h-1zM7 3h1v1h-1zM13 3h1v1h-1zM15 3h1v1h-1zM21 3h1v1h-1zM23 3h1v1h-1zM31 3h1v1h-1zM39 3h1v1h-1zM47 3h1v1h-1zM79 3h1v1h-1zM87 3h1v1h-1zM95 3h1v1h-1zM4 4h4v1h-4zM12 4h4v1h-4zM20 4h4v1h-4zM28 4h1v1h-1zM30 4h1v1h-1zM36 4h1v1h-1zM38 4h1v1h-1zM44 4h1v1h-1zM46 4h1v1h-1zM52 4h1v1h-1zM54 4h1v1h-1zM60 4h1v1h-1zM62 4h1v1h-1zM68 4h1v1h-1zM70 4h1v1h-1zM76 4h1v1h-1zM78 4h1v1h-1zM84 4h1v1h-1zM86 4h1v1h-1zM92 4h1v1h-1zM94 4h1v1h-1zM3 5h1v1h-1zM5 5h1v1h-1zM11 5h1v1h-1zM13 5h1v1h-1zM19 5h1v1h-1zM21 5h1v1h-1zM27 5h1v1h-1zM29 5h1v1h-1zM35 5h1v1h-1zM37 5h1v1h-1zM43 5h1v1h-1zM45 5h1v1h-1zM75 5h1v1h-1zM77 5h1v1h-1zM83 5h1v1h-1zM85 5h1v1h-1zM91 5h1v1h-1zM93 5h1v1h-1zM2 6h4v1h-4zM10 6h4v1h-4zM18 6h4v1h-4zM26 6h1v1h-1zM28 6h1v1h-1zM34 6h1v1h-1zM36 6h1v1h-1zM42 6h1v1h-1zM44 6h1v1h-1zM50 6h1v1h-1zM58 6h1v1h-1zM66 6h1v1h-1zM74 6h1v1h-1zM76 6h1v1h-1zM82 6h1v1h-1zM84 6h1v1h-1zM90 6h1v1h-1zM92 6h1v1h-1zM1 7h1v1h-1zM3 7h1v1h-1zM9 7h1v1h-1zM11 7h1v1h-1zM17 7h1v1h-1zM19 7h1v1h-1zM27 7h1v1h-1zM35 7h1v1h-1zM43 7h1v1h-1zM75 7h1v1h-1zM83 7h1v1h-1zM91 7h1v1h-1z"/%3E%3C/svg%3E');
+  --sl-art-corner: url('data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 34 34" shape-rendering="crispEdges"%3E%3Cpath d="M0 0h1v1h-1zM4 0h1v1h-1zM6 0h1v1h-1zM8 0h1v1h-1zM10 0h1v1h-1zM12 0h3v1h-3zM16 0h18v1h-18zM13 1h1v1h-1zM15 1h1v1h-1zM17 1h1v1h-1zM19 1h3v1h-3zM23 1h11v1h-11zM6 2h1v1h-1zM8 2h1v1h-1zM10 2h1v1h-1zM12 2h1v1h-1zM14 2h3v1h-3zM18 2h16v1h-16zM13 3h1v1h-1zM15 3h1v1h-1zM17 3h1v1h-1zM19 3h1v1h-1zM21 3h13v1h-13zM4 4h1v1h-1zM6 4h1v1h-1zM8 4h1v1h-1zM10 4h1v1h-1zM12 4h1v1h-1zM14 4h1v1h-1zM16 4h18v1h-18zM13 5h1v1h-1zM15 5h1v1h-1zM17 5h1v1h-1zM19 5h3v1h-3zM23 5h11v1h-11zM6 6h1v1h-1zM10 6h1v1h-1zM12 6h1v1h-1zM14 6h1v1h-1zM16 6h1v1h-1zM18 6h16v1h-16zM13 7h1v1h-1zM15 7h1v1h-1zM17 7h1v1h-1zM19 7h1v1h-1zM21 7h1v1h-1zM23 7h1v1h-1zM25 7h9v1h-9zM4 8h1v1h-1zM8 8h1v1h-1zM10 8h1v1h-1zM12 8h1v1h-1zM14 8h1v1h-1zM16 8h18v1h-18zM13 9h1v1h-1zM15 9h1v1h-1zM17 9h1v1h-1zM19 9h1v1h-1zM21 9h1v1h-1zM23 9h3v1h-3zM27 9h7v1h-7zM6 10h1v1h-1zM10 10h1v1h-1zM12 10h1v1h-1zM14 10h1v1h-1zM16 10h1v1h-1zM18 10h3v1h-3zM22 10h12v1h-12zM15 11h1v1h-1zM17 11h1v1h-1zM19 11h1v1h-1zM21 11h1v1h-1zM23 11h1v1h-1zM25 11h1v1h-1zM27 11h1v1h-1zM29 11h3v1h-3zM33 11h1v1h-1zM4 12h1v1h-1zM8 12h1v1h-1zM10 12h1v1h-1zM12 12h1v1h-1zM14 12h1v1h-1zM16 12h1v1h-1zM18 12h1v1h-1zM20 12h14v1h-14zM17 13h1v1h-1zM19 13h1v1h-1zM21 13h1v1h-1zM23 13h1v1h-1zM25 13h1v1h-1zM27 13h3v1h-3zM31 13h3v1h-3zM10 14h1v1h-1zM14 14h1v1h-1zM16 14h1v1h-1zM18 14h1v1h-1zM20 14h1v1h-1zM22 14h3v1h-3zM26 14h8v1h-8zM19 15h1v1h-1zM21 15h1v1h-1zM23 15h1v1h-1zM25 15h1v1h-1zM27 15h1v1h-1zM29 15h1v1h-1zM31 15h1v1h-1zM33 15h1v1h-1zM8 16h1v1h-1zM10 16h1v1h-1zM12 16h1v1h-1zM14 16h1v1h-1zM16 16h1v1h-1zM18 16h1v1h-1zM20 16h1v1h-1zM22 16h1v1h-1zM24 16h10v1h-10zM21 17h1v1h-1zM23 17h1v1h-1zM25 17h1v1h-1zM27 17h1v1h-1zM29 17h1v1h-1zM31 17h1v1h-1zM33 17h1v1h-1zM10 18h1v1h-1zM14 18h1v1h-1zM16 18h1v1h-1zM18 18h1v1h-1zM20 18h1v1h-1zM22 18h1v1h-1zM24 18h1v1h-1zM26 18h3v1h-3zM30 18h3v1h-3zM23 19h1v1h-1zM25 19h1v1h-1zM27 19h1v1h-1zM29 19h1v1h-1zM31 19h1v1h-1zM33 19h1v1h-1zM12 20h1v1h-1zM16 20h1v1h-1zM18 20h1v1h-1zM20 20h1v1h-1zM22 20h1v1h-1zM24 20h1v1h-1zM26 20h1v1h-1zM28 20h1v1h-1zM30 20h1v1h-1zM32 20h1v1h-1zM29 21h1v1h-1zM31 21h1v1h-1zM33 21h1v1h-1zM14 22h1v1h-1zM18 22h1v1h-1zM22 22h1v1h-1zM24 22h1v1h-1zM26 22h1v1h-1zM28 22h1v1h-1zM30 22h1v1h-1zM32 22h1v1h-1zM16 24h1v1h-1zM20 24h1v1h-1zM22 24h1v1h-1zM24 24h1v1h-1zM26 24h1v1h-1zM28 24h1v1h-1zM30 24h1v1h-1zM32 24h1v1h-1zM18 26h1v1h-1zM22 26h1v1h-1zM26 26h1v1h-1zM30 26h1v1h-1zM20 28h1v1h-1zM24 28h1v1h-1zM28 28h1v1h-1zM32 28h1v1h-1zM32 32h1v1h-1z"/%3E%3C/svg%3E');
+  --sl-art-truchet: url('data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" shape-rendering="crispEdges"%3E%3Cpath d="M3 0h2v2h-2zM11 0h2v2h-2zM19 0h2v2h-2zM27 0h2v2h-2zM35 0h2v2h-2zM43 0h2v2h-2zM4 2h2v1h-2zM12 2h2v1h-2zM18 2h2v1h-2zM28 2h2v1h-2zM36 2h2v1h-2zM44 2h2v1h-2zM0 3h2v1h-2zM5 3h5v1h-5zM13 3h6v1h-6zM22 3h4v1h-4zM29 3h5v1h-5zM37 3h5v1h-5zM45 3h3v1h-3zM0 4h3v1h-3zM6 4h5v1h-5zM14 4h4v1h-4zM21 4h6v1h-6zM30 4h5v1h-5zM38 4h5v1h-5zM46 4h2v1h-2zM2 5h2v1h-2zM10 5h2v1h-2zM20 5h2v1h-2zM26 5h2v1h-2zM34 5h2v1h-2zM42 5h2v1h-2zM3 6h2v4h-2zM11 6h2v4h-2zM19 6h2v4h-2zM27 6h2v4h-2zM35 6h2v4h-2zM43 6h2v4h-2zM4 10h2v1h-2zM12 10h2v1h-2zM18 10h2v1h-2zM28 10h2v1h-2zM34 10h2v1h-2zM42 10h2v1h-2zM0 11h2v1h-2zM5 11h5v1h-5zM13 11h6v1h-6zM22 11h4v1h-4zM29 11h6v1h-6zM38 11h5v1h-5zM46 11h2v1h-2zM0 12h3v1h-3zM6 12h5v1h-5zM14 12h4v1h-4zM21 12h6v1h-6zM30 12h4v1h-4zM37 12h5v1h-5zM45 12h3v1h-3zM2 13h2v1h-2zM10 13h2v1h-2zM20 13h2v1h-2zM26 13h2v1h-2zM36 13h2v1h-2zM44 13h2v1h-2zM3 14h2v4h-2zM11 14h2v4h-2zM19 14h2v4h-2zM27 14h2v4h-2zM35 14h2v4h-2zM43 14h2v4h-2zM4 18h2v1h-2zM12 18h2v1h-2zM18 18h2v1h-2zM28 18h2v1h-2zM36 18h2v1h-2zM42 18h2v1h-2zM0 19h2v1h-2zM5 19h5v1h-5zM13 19h6v1h-6zM22 19h4v1h-4zM29 19h5v1h-5zM37 19h6v1h-6zM46 19h2v1h-2zM0 20h3v1h-3zM6 20h5v1h-5zM14 20h4v1h-4zM21 20h6v1h-6zM30 20h5v1h-5zM38 20h4v1h-4zM45 20h3v1h-3zM2 21h2v1h-2zM10 21h2v1h-2zM20 21h2v1h-2zM26 21h2v1h-2zM34 21h2v1h-2zM44 21h2v1h-2zM3 22h2v4h-2zM11 22h2v4h-2zM19 22h2v4h-2zM27 22h2v4h-2zM35 22h2v4h-2zM43 22h2v4h-2zM4 26h2v1h-2zM10 26h2v1h-2zM18 26h2v1h-2zM26 26h2v1h-2zM36 26h2v1h-2zM44 26h2v1h-2zM0 27h2v1h-2zM5 27h6v1h-6zM14 27h5v1h-5zM22 27h5v1h-5zM30 27h4v1h-4zM37 27h5v1h-5zM45 27h3v1h-3zM0 28h3v1h-3zM6 28h4v1h-4zM13 28h5v1h-5zM21 28h5v1h-5zM29 28h6v1h-6zM38 28h5v1h-5zM46 28h2v1h-2zM2 29h2v1h-2zM12 29h2v1h-2zM20 29h2v1h-2zM28 29h2v1h-2zM34 29h2v1h-2zM42 29h2v1h-2zM3 30h2v4h-2zM11 30h2v4h-2zM19 30h2v4h-2zM27 30h2v4h-2zM35 30h2v4h-2zM43 30h2v4h-2zM2 34h2v1h-2zM10 34h2v1h-2zM20 34h2v1h-2zM26 34h2v1h-2zM34 34h2v1h-2zM44 34h2v1h-2zM0 35h3v1h-3zM6 35h5v1h-5zM14 35h4v1h-4zM21 35h6v1h-6zM30 35h5v1h-5zM38 35h4v1h-4zM45 35h3v1h-3zM0 36h2v1h-2zM5 36h5v1h-5zM13 36h6v1h-6zM22 36h4v1h-4zM29 36h5v1h-5zM37 36h6v1h-6zM46 36h2v1h-2zM4 37h2v1h-2zM12 37h2v1h-2zM18 37h2v1h-2zM28 37h2v1h-2zM36 37h2v1h-2zM42 37h2v1h-2zM3 38h2v4h-2zM11 38h2v4h-2zM19 38h2v4h-2zM27 38h2v4h-2zM35 38h2v4h-2zM43 38h2v4h-2zM2 42h2v1h-2zM10 42h2v1h-2zM20 42h2v1h-2zM26 42h2v1h-2zM34 42h2v1h-2zM44 42h2v1h-2zM0 43h3v1h-3zM6 43h5v1h-5zM14 43h4v1h-4zM21 43h6v1h-6zM30 43h5v1h-5zM38 43h4v1h-4zM45 43h3v1h-3zM0 44h2v1h-2zM5 44h5v1h-5zM13 44h6v1h-6zM22 44h4v1h-4zM29 44h5v1h-5zM37 44h6v1h-6zM46 44h2v1h-2zM4 45h2v1h-2zM12 45h2v1h-2zM18 45h2v1h-2zM28 45h2v1h-2zM36 45h2v1h-2zM42 45h2v1h-2zM3 46h2v2h-2zM11 46h2v2h-2zM19 46h2v2h-2zM27 46h2v2h-2zM35 46h2v2h-2zM43 46h2v2h-2z"/%3E%3C/svg%3E');
+  --sl-art-field-grid: url('data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" shape-rendering="crispEdges"%3E%3Cpath d="M1 1h6v1h-6zM14 1h1v1h-1zM17 1h2v1h-2zM34 1h4v1h-4zM41 1h6v1h-6zM2 2h5v1h-5zM13 2h2v1h-2zM17 2h4v1h-4zM33 2h6v4h-6zM41 2h1v4h-1zM46 2h1v4h-1zM3 3h4v1h-4zM12 3h3v1h-3zM17 3h5v2h-5zM4 4h3v1h-3zM11 4h4v1h-4zM5 5h2v1h-2zM10 5h5v1h-5zM17 5h6v2h-6zM6 6h1v1h-1zM9 6h6v1h-6zM34 6h4v1h-4zM41 6h6v1h-6zM9 9h6v2h-6zM25 9h6v2h-6zM34 9h4v1h-4zM46 9h1v1h-1zM33 10h6v4h-6zM45 10h2v1h-2zM9 11h5v2h-5zM26 11h5v2h-5zM44 11h3v1h-3zM43 12h4v1h-4zM9 13h4v1h-4zM27 13h4v1h-4zM42 13h5v1h-5zM9 14h2v1h-2zM29 14h2v1h-2zM34 14h4v1h-4zM41 14h6v1h-6zM1 17h2v1h-2zM9 17h6v2h-6zM17 17h6v6h-6zM25 17h6v1h-6zM33 17h6v6h-6zM1 18h4v1h-4zM25 18h1v4h-1zM30 18h1v4h-1zM1 19h5v2h-5zM9 19h5v2h-5zM1 21h6v2h-6zM9 21h4v1h-4zM9 22h2v1h-2zM25 22h6v1h-6zM5 25h2v1h-2zM10 25h4v1h-4zM18 25h4v1h-4zM25 25h6v2h-6zM33 25h6v1h-6zM41 25h6v1h-6zM3 26h4v1h-4zM9 26h6v4h-6zM17 26h6v4h-6zM33 26h1v4h-1zM38 26h1v4h-1zM41 26h1v4h-1zM46 26h1v4h-1zM2 27h5v2h-5zM25 27h5v2h-5zM1 29h6v2h-6zM25 29h4v1h-4zM10 30h4v1h-4zM18 30h4v1h-4zM25 30h2v1h-2zM33 30h6v1h-6zM41 30h6v1h-6zM1 33h2v1h-2zM10 33h4v1h-4zM17 33h6v2h-6zM33 33h6v2h-6zM41 33h6v6h-6zM1 34h4v1h-4zM9 34h6v4h-6zM1 35h5v2h-5zM17 35h5v2h-5zM33 35h5v2h-5zM1 37h6v2h-6zM17 37h4v1h-4zM33 37h4v1h-4zM10 38h4v1h-4zM17 38h2v1h-2zM33 38h2v1h-2zM6 41h1v1h-1zM9 41h6v1h-6zM17 41h6v2h-6zM25 41h6v1h-6zM41 41h6v2h-6zM5 42h2v1h-2zM9 42h1v4h-1zM14 42h1v4h-1zM26 42h5v1h-5zM4 43h3v1h-3zM18 43h5v2h-5zM27 43h4v1h-4zM42 43h5v2h-5zM3 44h4v1h-4zM28 44h3v1h-3zM2 45h5v1h-5zM19 45h4v1h-4zM29 45h2v1h-2zM43 45h4v1h-4zM1 46h6v1h-6zM9 46h6v1h-6zM21 46h2v1h-2zM30 46h1v1h-1zM45 46h2v1h-2z"/%3E%3C/svg%3E');
+  --sl-art-field-albers: url('data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" shape-rendering="crispEdges"%3E%3Cpath d="M4 6h1v1h-1zM6 6h1v1h-1zM8 6h1v1h-1zM10 6h1v1h-1zM12 6h1v1h-1zM14 6h1v1h-1zM16 6h1v1h-1zM18 6h1v1h-1zM20 6h1v1h-1zM22 6h1v1h-1zM24 6h1v1h-1zM26 6h1v1h-1zM4 8h1v1h-1zM6 8h1v1h-1zM8 8h1v1h-1zM10 8h1v1h-1zM12 8h1v1h-1zM14 8h1v1h-1zM16 8h1v1h-1zM18 8h1v1h-1zM20 8h1v1h-1zM22 8h1v1h-1zM24 8h1v1h-1zM26 8h1v1h-1zM4 10h1v1h-1zM6 10h1v1h-1zM8 10h1v1h-1zM10 10h1v1h-1zM12 10h1v1h-1zM14 10h1v1h-1zM16 10h1v1h-1zM18 10h1v1h-1zM20 10h1v1h-1zM22 10h1v1h-1zM24 10h1v1h-1zM26 10h1v1h-1zM4 12h1v1h-1zM6 12h1v1h-1zM8 12h1v1h-1zM10 12h1v1h-1zM12 12h1v1h-1zM14 12h1v1h-1zM16 12h1v1h-1zM18 12h1v1h-1zM20 12h1v1h-1zM22 12h1v1h-1zM24 12h1v1h-1zM26 12h1v1h-1zM9 13h1v1h-1zM11 13h1v1h-1zM13 13h1v1h-1zM15 13h1v1h-1zM17 13h1v1h-1zM19 13h1v1h-1zM21 13h1v1h-1zM23 13h1v1h-1zM4 14h1v1h-1zM6 14h1v1h-1zM8 14h1v1h-1zM10 14h1v1h-1zM12 14h1v1h-1zM14 14h1v1h-1zM16 14h1v1h-1zM18 14h1v1h-1zM20 14h1v1h-1zM22 14h1v1h-1zM24 14h1v1h-1zM26 14h1v1h-1zM9 15h1v1h-1zM11 15h1v1h-1zM13 15h1v1h-1zM15 15h1v1h-1zM17 15h1v1h-1zM19 15h1v1h-1zM21 15h1v1h-1zM23 15h1v1h-1zM4 16h1v1h-1zM6 16h1v1h-1zM8 16h1v1h-1zM10 16h1v1h-1zM12 16h1v1h-1zM14 16h1v1h-1zM16 16h1v1h-1zM18 16h1v1h-1zM20 16h1v1h-1zM22 16h1v1h-1zM24 16h1v1h-1zM26 16h1v1h-1zM9 17h1v1h-1zM11 17h1v1h-1zM13 17h1v1h-1zM15 17h1v1h-1zM17 17h1v1h-1zM19 17h1v1h-1zM21 17h1v1h-1zM23 17h1v1h-1zM4 18h1v1h-1zM6 18h1v1h-1zM8 18h1v1h-1zM10 18h1v1h-1zM12 18h9v1h-9zM22 18h1v1h-1zM24 18h1v1h-1zM26 18h1v1h-1zM9 19h1v1h-1zM11 19h9v1h-9zM21 19h1v1h-1zM23 19h1v1h-1zM4 20h1v1h-1zM6 20h1v1h-1zM8 20h1v1h-1zM10 20h1v1h-1zM12 20h9v1h-9zM22 20h1v1h-1zM24 20h1v1h-1zM26 20h1v1h-1zM9 21h1v1h-1zM11 21h9v1h-9zM21 21h1v1h-1zM23 21h1v1h-1zM4 22h1v1h-1zM6 22h1v1h-1zM8 22h1v1h-1zM10 22h1v1h-1zM12 22h9v1h-9zM22 22h1v1h-1zM24 22h1v1h-1zM26 22h1v1h-1zM9 23h1v1h-1zM11 23h9v1h-9zM21 23h1v1h-1zM23 23h1v1h-1zM4 24h1v1h-1zM6 24h1v1h-1zM8 24h1v1h-1zM10 24h1v1h-1zM12 24h9v1h-9zM22 24h1v1h-1zM24 24h1v1h-1zM26 24h1v1h-1zM9 25h1v1h-1zM11 25h9v1h-9zM21 25h1v1h-1zM23 25h1v1h-1zM4 26h1v1h-1zM6 26h1v1h-1zM8 26h1v1h-1zM10 26h1v1h-1zM12 26h1v1h-1zM14 26h1v1h-1zM16 26h1v1h-1zM18 26h1v1h-1zM20 26h1v1h-1zM22 26h1v1h-1zM24 26h1v1h-1zM26 26h1v1h-1zM9 27h1v1h-1zM11 27h1v1h-1zM13 27h1v1h-1zM15 27h1v1h-1zM17 27h1v1h-1zM19 27h1v1h-1zM21 27h1v1h-1zM23 27h1v1h-1zM4 28h1v1h-1zM6 28h1v1h-1zM8 28h1v1h-1zM10 28h1v1h-1zM12 28h1v1h-1zM14 28h1v1h-1zM16 28h1v1h-1zM18 28h1v1h-1zM20 28h1v1h-1zM22 28h1v1h-1zM24 28h1v1h-1zM26 28h1v1h-1z"/%3E%3C/svg%3E');
+  --sl-art-field-stripes: url('data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" shape-rendering="crispEdges"%3E%3Cpath d="M0 0h7v1h-7zM8 0h1v1h-1zM10 0h1v1h-1zM12 0h1v1h-1zM0 1h2v1h-2zM3 1h1v1h-1zM5 1h1v1h-1zM7 1h1v1h-1zM9 1h1v1h-1zM31 1h1v1h-1zM0 2h5v1h-5zM6 2h1v1h-1zM8 2h1v1h-1zM10 2h1v1h-1zM30 2h2v1h-2zM1 3h1v1h-1zM3 3h1v1h-1zM5 3h1v1h-1zM7 3h1v1h-1zM29 3h3v1h-3zM0 4h3v1h-3zM4 4h1v1h-1zM6 4h1v1h-1zM8 4h1v1h-1zM28 4h4v1h-4zM1 5h1v1h-1zM3 5h1v1h-1zM5 5h1v1h-1zM27 5h3v1h-3zM31 5h1v1h-1zM0 6h1v1h-1zM2 6h1v1h-1zM4 6h1v1h-1zM6 6h1v1h-1zM26 6h6v1h-6zM1 7h1v1h-1zM3 7h1v1h-1zM25 7h3v1h-3zM29 7h1v1h-1zM31 7h1v1h-1zM0 8h1v1h-1zM2 8h1v1h-1zM4 8h1v1h-1zM24 8h7v1h-7zM1 9h1v1h-1zM23 9h3v1h-3zM27 9h1v1h-1zM29 9h1v1h-1zM31 9h1v1h-1zM0 10h1v1h-1zM2 10h1v1h-1zM22 10h7v1h-7zM30 10h1v1h-1zM21 11h3v1h-3zM25 11h1v1h-1zM27 11h1v1h-1zM29 11h1v1h-1zM31 11h1v1h-1zM0 12h1v1h-1zM20 12h7v1h-7zM28 12h1v1h-1zM30 12h1v1h-1zM19 13h3v1h-3zM23 13h1v1h-1zM25 13h1v1h-1zM27 13h1v1h-1zM29 13h1v1h-1zM18 14h7v1h-7zM26 14h1v1h-1zM28 14h1v1h-1zM30 14h1v1h-1zM17 15h3v1h-3zM21 15h1v1h-1zM23 15h1v1h-1zM25 15h1v1h-1zM27 15h1v1h-1zM16 16h7v1h-7zM24 16h1v1h-1zM26 16h1v1h-1zM28 16h1v1h-1zM15 17h3v1h-3zM19 17h1v1h-1zM21 17h1v1h-1zM23 17h1v1h-1zM25 17h1v1h-1zM14 18h7v1h-7zM22 18h1v1h-1zM24 18h1v1h-1zM26 18h1v1h-1zM13 19h3v1h-3zM17 19h1v1h-1zM19 19h1v1h-1zM21 19h1v1h-1zM23 19h1v1h-1zM12 20h7v1h-7zM20 20h1v1h-1zM22 20h1v1h-1zM24 20h1v1h-1zM11 21h3v1h-3zM15 21h1v1h-1zM17 21h1v1h-1zM19 21h1v1h-1zM21 21h1v1h-1zM10 22h7v1h-7zM18 22h1v1h-1zM20 22h1v1h-1zM22 22h1v1h-1zM9 23h3v1h-3zM13 23h1v1h-1zM15 23h1v1h-1zM17 23h1v1h-1zM19 23h1v1h-1zM8 24h7v1h-7zM16 24h1v1h-1zM18 24h1v1h-1zM20 24h1v1h-1zM7 25h3v1h-3zM11 25h1v1h-1zM13 25h1v1h-1zM15 25h1v1h-1zM17 25h1v1h-1zM6 26h7v1h-7zM14 26h1v1h-1zM16 26h1v1h-1zM18 26h1v1h-1zM5 27h3v1h-3zM9 27h1v1h-1zM11 27h1v1h-1zM13 27h1v1h-1zM15 27h1v1h-1zM4 28h7v1h-7zM12 28h1v1h-1zM14 28h1v1h-1zM16 28h1v1h-1zM3 29h3v1h-3zM7 29h1v1h-1zM9 29h1v1h-1zM11 29h1v1h-1zM13 29h1v1h-1zM2 30h7v1h-7zM10 30h1v1h-1zM12 30h1v1h-1zM14 30h1v1h-1zM1 31h3v1h-3zM5 31h1v1h-1zM7 31h1v1h-1zM9 31h1v1h-1zM11 31h1v1h-1z"/%3E%3C/svg%3E');
+  --sl-art-molnar: url('data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 60 60" shape-rendering="crispEdges"%3E%3Cpath d="M3 1h1v1h-1zM7 1h1v3h-1zM12 1h1v3h-1zM16 1h1v1h-1zM23 1h1v1h-1zM31 1h1v1h-1zM37 1h1v3h-1zM42 1h1v3h-1zM47 1h1v3h-1zM57 1h1v3h-1zM2 2h1v1h-1zM17 2h1v1h-1zM22 2h1v1h-1zM26 2h3v1h-3zM32 2h1v1h-1zM51 2h3v1h-3zM1 3h1v1h-1zM18 3h1v1h-1zM21 3h1v1h-1zM33 3h1v1h-1zM1 6h1v1h-1zM11 6h1v1h-1zM16 6h1v1h-1zM21 6h1v1h-1zM26 6h1v1h-1zM31 6h1v1h-1zM37 6h1v3h-1zM46 6h1v1h-1zM52 6h1v3h-1zM57 6h1v3h-1zM2 7h1v1h-1zM6 7h3v1h-3zM12 7h1v1h-1zM17 7h1v1h-1zM22 7h1v1h-1zM27 7h1v1h-1zM32 7h1v1h-1zM41 7h3v1h-3zM47 7h1v1h-1zM3 8h1v1h-1zM13 8h1v1h-1zM18 8h1v1h-1zM23 8h1v1h-1zM28 8h1v1h-1zM33 8h1v1h-1zM48 8h1v1h-1zM6 11h1v1h-1zM11 11h1v1h-1zM18 11h1v1h-1zM23 11h1v1h-1zM28 11h1v1h-1zM38 11h1v1h-1zM47 11h1v3h-1zM53 11h1v1h-1zM57 11h1v3h-1zM1 12h3v1h-3zM7 12h1v1h-1zM12 12h1v1h-1zM17 12h1v1h-1zM22 12h1v1h-1zM27 12h1v1h-1zM31 12h3v1h-3zM37 12h1v1h-1zM52 12h1v1h-1zM8 13h1v1h-1zM13 13h1v1h-1zM16 13h1v1h-1zM21 13h1v1h-1zM26 13h1v1h-1zM36 13h1v1h-1zM51 13h1v1h-1zM3 16h1v1h-1zM6 16h1v1h-1zM13 16h1v1h-1zM18 16h1v1h-1zM21 16h1v1h-1zM28 16h1v1h-1zM31 16h1v1h-1zM36 16h1v1h-1zM51 16h1v1h-1zM56 16h1v1h-1zM2 17h1v1h-1zM7 17h1v1h-1zM12 17h1v1h-1zM17 17h1v1h-1zM22 17h1v1h-1zM27 17h1v1h-1zM32 17h1v1h-1zM37 17h1v1h-1zM41 17h3v1h-3zM52 17h1v1h-1zM57 17h1v1h-1zM1 18h1v1h-1zM8 18h1v1h-1zM11 18h1v1h-1zM16 18h1v1h-1zM23 18h1v1h-1zM26 18h1v1h-1zM33 18h1v1h-1zM38 18h1v1h-1zM53 18h1v1h-1zM58 18h1v1h-1zM7 21h1v3h-1zM12 21h1v3h-1zM18 21h1v1h-1zM21 21h1v1h-1zM26 21h1v1h-1zM31 21h1v1h-1zM37 21h1v3h-1zM48 21h1v1h-1zM52 21h1v3h-1zM1 22h3v1h-3zM17 22h1v1h-1zM22 22h1v1h-1zM27 22h1v1h-1zM32 22h1v1h-1zM41 22h3v1h-3zM47 22h1v1h-1zM56 22h3v1h-3zM16 23h1v1h-1zM23 23h1v1h-1zM28 23h1v1h-1zM33 23h1v1h-1zM46 23h1v1h-1zM8 26h1v1h-1zM12 26h1v3h-1zM16 26h1v1h-1zM21 26h1v1h-1zM36 26h1v1h-1zM42 26h1v3h-1zM48 26h1v1h-1zM52 26h1v3h-1zM56 26h1v1h-1zM1 27h3v1h-3zM7 27h1v1h-1zM17 27h1v1h-1zM22 27h1v1h-1zM26 27h3v1h-3zM31 27h3v1h-3zM37 27h1v1h-1zM47 27h1v1h-1zM57 27h1v1h-1zM6 28h1v1h-1zM18 28h1v1h-1zM23 28h1v1h-1zM38 28h1v1h-1zM46 28h1v1h-1zM58 28h1v1h-1zM2 31h1v3h-1zM6 31h1v1h-1zM11 31h1v1h-1zM18 31h1v1h-1zM31 31h1v1h-1zM36 31h1v1h-1zM41 31h1v1h-1zM46 31h1v1h-1zM56 31h1v1h-1zM7 32h1v1h-1zM12 32h1v1h-1zM17 32h1v1h-1zM21 32h3v1h-3zM26 32h3v1h-3zM32 32h1v1h-1zM37 32h1v1h-1zM42 32h1v1h-1zM47 32h1v1h-1zM51 32h3v1h-3zM57 32h1v1h-1zM8 33h1v1h-1zM13 33h1v1h-1zM16 33h1v1h-1zM33 33h1v1h-1zM38 33h1v1h-1zM43 33h1v1h-1zM48 33h1v1h-1zM58 33h1v1h-1zM3 36h1v1h-1zM8 36h1v1h-1zM13 36h1v1h-1zM16 36h1v1h-1zM21 36h1v1h-1zM26 36h1v1h-1zM33 36h1v1h-1zM37 36h1v3h-1zM41 36h1v1h-1zM51 36h1v1h-1zM2 37h1v1h-1zM7 37h1v1h-1zM12 37h1v1h-1zM17 37h1v1h-1zM22 37h1v1h-1zM27 37h1v1h-1zM32 37h1v1h-1zM42 37h1v1h-1zM46 37h3v1h-3zM52 37h1v1h-1zM56 37h3v1h-3zM1 38h1v1h-1zM6 38h1v1h-1zM11 38h1v1h-1zM18 38h1v1h-1zM23 38h1v1h-1zM28 38h1v1h-1zM31 38h1v1h-1zM43 38h1v1h-1zM53 38h1v1h-1zM7 41h1v3h-1zM22 41h1v3h-1zM28 41h1v1h-1zM31 41h1v1h-1zM38 41h1v1h-1zM43 41h1v1h-1zM48 41h1v1h-1zM53 41h1v1h-1zM1 42h3v1h-3zM11 42h3v1h-3zM16 42h3v1h-3zM27 42h1v1h-1zM32 42h1v1h-1zM37 42h1v1h-1zM42 42h1v1h-1zM47 42h1v1h-1zM52 42h1v1h-1zM56 42h3v1h-3zM26 43h1v1h-1zM33 43h1v1h-1zM36 43h1v1h-1zM41 43h1v1h-1zM46 43h1v1h-1zM51 43h1v1h-1zM2 46h1v3h-1zM7 46h1v3h-1zM11 46h1v1h-1zM17 46h1v3h-1zM23 46h1v1h-1zM28 46h1v1h-1zM32 46h1v3h-1zM36 46h1v1h-1zM47 46h1v3h-1zM53 46h1v1h-1zM58 46h1v1h-1zM12 47h1v1h-1zM22 47h1v1h-1zM27 47h1v1h-1zM37 47h1v1h-1zM41 47h3v1h-3zM52 47h1v1h-1zM57 47h1v1h-1zM13 48h1v1h-1zM21 48h1v1h-1zM26 48h1v1h-1zM38 48h1v1h-1zM51 48h1v1h-1zM56 48h1v1h-1zM1 51h1v1h-1zM6 51h1v1h-1zM12 51h1v3h-1zM23 51h1v1h-1zM26 51h1v1h-1zM38 51h1v1h-1zM42 51h1v3h-1zM48 51h1v1h-1zM53 51h1v1h-1zM58 51h1v1h-1zM2 52h1v1h-1zM7 52h1v1h-1zM22 52h1v1h-1zM27 52h1v1h-1zM31 52h3v1h-3zM37 52h1v1h-1zM47 52h1v1h-1zM52 52h1v1h-1zM57 52h1v1h-1zM3 53h1v1h-1zM8 53h1v1h-1zM21 53h1v1h-1zM28 53h1v1h-1zM36 53h1v1h-1zM46 53h1v1h-1zM51 53h1v1h-1zM56 53h1v1h-1zM3 56h1v1h-1zM8 56h1v1h-1zM13 56h1v1h-1zM16 56h1v1h-1zM28 56h1v1h-1zM43 56h1v1h-1zM46 56h1v1h-1zM56 56h1v1h-1zM2 57h1v1h-1zM7 57h1v1h-1zM12 57h1v1h-1zM17 57h1v1h-1zM21 57h3v1h-3zM27 57h1v1h-1zM36 57h3v1h-3zM42 57h1v1h-1zM47 57h1v1h-1zM57 57h1v1h-1zM1 58h1v1h-1zM6 58h1v1h-1zM11 58h1v1h-1zM18 58h1v1h-1zM26 58h1v1h-1zM41 58h1v1h-1zM48 58h1v1h-1zM58 58h1v1h-1z"/%3E%3C/svg%3E');
+  --sl-art-void-s: url('data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 90 70" shape-rendering="crispEdges"%3E%3Cpath d="M20 5h5v5h-5zM30 5h15v5h-15zM50 5h5v5h-5zM60 5h5v5h-5zM70 5h5v5h-5zM15 10h55v5h-55zM10 15h75v5h-75zM5 20h75v5h-75zM10 25h75v5h-75zM5 30h75v5h-75zM0 35h85v5h-85zM5 40h75v5h-75zM10 45h75v5h-75zM5 50h5v5h-5zM15 50h65v5h-65zM10 55h65v5h-65zM35 60h5v5h-5zM45 60h5v5h-5zM55 60h5v5h-5z"/%3E%3C/svg%3E');
+  --sl-art-void-m: url('data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 50" shape-rendering="crispEdges"%3E%3Cpath d="M35 0h5v5h-5zM55 0h5v5h-5zM65 0h5v5h-5zM75 0h5v5h-5zM10 5h5v5h-5zM20 5h85v5h-85zM5 10h5v5h-5zM15 10h95v5h-95zM0 15h5v5h-5zM10 15h105v5h-105zM5 20h105v5h-105zM10 25h105v5h-105zM5 30h105v5h-105zM10 35h105v5h-105zM15 40h5v5h-5zM25 40h75v5h-75zM30 45h5v5h-5zM40 45h5v5h-5zM50 45h5v5h-5zM60 45h5v5h-5zM70 45h5v5h-5zM80 45h5v5h-5zM90 45h5v5h-5z"/%3E%3C/svg%3E');
+  --sl-art-void-l: url('data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 150 50" shape-rendering="crispEdges"%3E%3Cpath d="M55 0h5v5h-5zM65 0h5v5h-5zM75 0h5v5h-5zM95 0h5v5h-5zM10 5h5v5h-5zM20 5h105v5h-105zM130 5h5v5h-5zM15 10h115v5h-115zM135 10h5v5h-5zM0 15h5v5h-5zM10 15h135v5h-135zM5 20h135v5h-135zM10 25h135v5h-135zM5 30h5v5h-5zM15 30h125v5h-125zM10 35h125v5h-125zM140 35h5v5h-5zM15 40h5v5h-5zM25 40h95v5h-95zM125 40h5v5h-5zM30 45h5v5h-5zM40 45h5v5h-5zM50 45h5v5h-5zM60 45h5v5h-5zM70 45h5v5h-5zM80 45h5v5h-5zM90 45h5v5h-5zM100 45h5v5h-5zM110 45h5v5h-5z"/%3E%3C/svg%3E');
+  --sl-art-empty: url('data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 24" shape-rendering="crispEdges"%3E%3Cpath d="M8 2h1v1h-1zM10 2h1v1h-1zM12 2h1v1h-1zM7 3h1v1h-1zM9 3h1v1h-1zM11 3h1v1h-1zM13 3h1v1h-1zM15 3h1v1h-1zM4 4h1v1h-1zM6 4h1v1h-1zM8 4h1v1h-1zM10 4h1v1h-1zM12 4h1v1h-1zM14 4h1v1h-1zM16 4h1v1h-1zM22 4h16v1h-16zM3 5h1v1h-1zM5 5h1v1h-1zM7 5h1v1h-1zM9 5h1v1h-1zM11 5h1v1h-1zM13 5h1v1h-1zM15 5h1v1h-1zM17 5h1v1h-1zM22 5h1v14h-1zM37 5h1v14h-1zM4 6h1v1h-1zM6 6h1v1h-1zM8 6h1v1h-1zM10 6h1v1h-1zM12 6h1v1h-1zM14 6h1v1h-1zM16 6h1v1h-1zM18 6h1v1h-1zM3 7h1v1h-1zM5 7h1v1h-1zM7 7h1v1h-1zM9 7h1v1h-1zM11 7h1v1h-1zM13 7h1v1h-1zM15 7h1v1h-1zM17 7h1v1h-1zM19 7h1v1h-1zM2 8h1v1h-1zM4 8h1v1h-1zM6 8h1v1h-1zM8 8h1v1h-1zM10 8h1v1h-1zM12 8h1v1h-1zM14 8h1v1h-1zM16 8h1v1h-1zM18 8h1v1h-1zM34 8h1v1h-1zM1 9h1v1h-1zM3 9h1v1h-1zM5 9h1v1h-1zM7 9h1v1h-1zM9 9h1v1h-1zM11 9h1v1h-1zM13 9h1v1h-1zM15 9h1v1h-1zM17 9h1v1h-1zM19 9h1v1h-1zM2 10h1v1h-1zM4 10h1v1h-1zM6 10h1v1h-1zM8 10h1v1h-1zM10 10h1v1h-1zM12 10h1v1h-1zM14 10h1v1h-1zM16 10h1v1h-1zM18 10h1v1h-1zM20 10h1v1h-1zM32 10h1v1h-1zM34 10h1v1h-1zM1 11h1v1h-1zM3 11h1v1h-1zM5 11h1v1h-1zM7 11h1v1h-1zM9 11h1v1h-1zM11 11h1v1h-1zM13 11h1v1h-1zM15 11h1v1h-1zM17 11h1v1h-1zM19 11h1v1h-1zM2 12h1v1h-1zM4 12h1v1h-1zM6 12h1v1h-1zM8 12h1v1h-1zM10 12h1v1h-1zM12 12h1v1h-1zM14 12h1v1h-1zM16 12h1v1h-1zM18 12h1v1h-1zM20 12h1v1h-1zM30 12h1v1h-1zM32 12h1v1h-1zM34 12h1v1h-1zM1 13h1v1h-1zM3 13h1v1h-1zM5 13h1v1h-1zM7 13h1v1h-1zM9 13h1v1h-1zM11 13h1v1h-1zM13 13h1v1h-1zM15 13h1v1h-1zM17 13h1v1h-1zM19 13h1v1h-1zM2 14h1v1h-1zM4 14h1v1h-1zM6 14h1v1h-1zM8 14h1v1h-1zM10 14h1v1h-1zM12 14h1v1h-1zM14 14h1v1h-1zM16 14h1v1h-1zM18 14h1v1h-1zM20 14h1v1h-1zM28 14h1v1h-1zM30 14h1v1h-1zM32 14h1v1h-1zM34 14h1v1h-1zM3 15h1v1h-1zM5 15h1v1h-1zM7 15h1v1h-1zM9 15h1v1h-1zM11 15h1v1h-1zM13 15h1v1h-1zM15 15h1v1h-1zM17 15h1v1h-1zM19 15h1v1h-1zM2 16h1v1h-1zM4 16h1v1h-1zM6 16h1v1h-1zM8 16h1v1h-1zM10 16h1v1h-1zM12 16h1v1h-1zM14 16h1v1h-1zM16 16h1v1h-1zM18 16h1v1h-1zM26 16h1v1h-1zM28 16h1v1h-1zM30 16h1v1h-1zM32 16h1v1h-1zM34 16h1v1h-1zM3 17h1v1h-1zM5 17h1v1h-1zM7 17h1v1h-1zM9 17h1v1h-1zM11 17h1v1h-1zM13 17h1v1h-1zM15 17h1v1h-1zM17 17h1v1h-1zM4 18h1v1h-1zM6 18h1v1h-1zM8 18h1v1h-1zM10 18h1v1h-1zM12 18h1v1h-1zM14 18h1v1h-1zM16 18h1v1h-1zM18 18h1v1h-1zM5 19h1v1h-1zM7 19h1v1h-1zM9 19h1v1h-1zM11 19h1v1h-1zM13 19h1v1h-1zM15 19h1v1h-1zM17 19h1v1h-1zM22 19h16v1h-16zM6 20h1v1h-1zM8 20h1v1h-1zM10 20h1v1h-1zM12 20h1v1h-1zM14 20h1v1h-1zM9 21h1v1h-1zM11 21h1v1h-1zM13 21h1v1h-1z"/%3E%3C/svg%3E');
+  --sl-art-poster-disc: url('data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" shape-rendering="crispEdges"%3E%3Cpath d="M9 0h6v1h-6zM6 1h12v1h-12zM5 2h14v1h-14zM4 3h16v1h-16zM3 4h18v1h-18zM2 5h20v1h-20zM1 6h22v3h-22zM0 9h24v6h-24zM1 15h22v3h-22zM2 18h20v1h-20zM3 19h18v1h-18zM4 20h16v1h-16zM5 21h14v1h-14zM6 22h12v1h-12zM9 23h6v1h-6z"/%3E%3C/svg%3E');
+  --sl-art-poster-dot: url('data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12" shape-rendering="crispEdges"%3E%3Cpath d="M4 0h4v1h-4zM2 1h8v1h-8zM1 2h10v2h-10zM0 4h12v4h-12zM1 8h10v2h-10zM2 10h8v1h-8zM4 11h4v1h-4z"/%3E%3C/svg%3E');
+  --sl-art-poster-quarter: url('data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" shape-rendering="crispEdges"%3E%3Cpath d="M0 0h5v1h-5zM0 1h8v1h-8zM0 2h11v1h-11zM0 3h12v1h-12zM0 4h14v1h-14zM0 5h15v1h-15zM0 6h16v1h-16zM0 7h17v1h-17zM0 8h18v1h-18zM0 9h19v1h-19zM0 10h20v2h-20zM0 12h21v1h-21zM0 13h22v3h-22zM0 16h23v3h-23zM0 19h24v5h-24z"/%3E%3C/svg%3E');
+  --sl-art-poster-tri: url('data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" shape-rendering="crispEdges"%3E%3Cpath d="M23 0h1v1h-1zM22 1h2v1h-2zM21 2h3v1h-3zM20 3h4v1h-4zM19 4h5v1h-5zM18 5h6v1h-6zM17 6h7v1h-7zM16 7h8v1h-8zM15 8h9v1h-9zM14 9h10v1h-10zM13 10h11v1h-11zM12 11h12v1h-12zM11 12h13v1h-13zM10 13h14v1h-14zM9 14h15v1h-15zM8 15h16v1h-16zM7 16h17v1h-17zM6 17h18v1h-18zM5 18h19v1h-19zM4 19h20v1h-20zM3 20h21v1h-21zM2 21h22v1h-22zM1 22h23v1h-23zM0 23h24v1h-24z"/%3E%3C/svg%3E');
+  --sl-art-poster-tone: url('data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2 2" shape-rendering="crispEdges"%3E%3Cpath d="M0 0h1v1h-1zM1 1h1v1h-1z"/%3E%3C/svg%3E');
+  --sl-art-poster-tone-light: url('data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2 2" shape-rendering="crispEdges"%3E%3Cpath d="M0 0h1v1h-1z"/%3E%3C/svg%3E');
+}
+/* @gen-art:end */
+/* Corner: nested quarter discs fading into a panel's top-right corner. On
+   ::after, so a field (::before) can share the host. Capped at the host's
+   box, so a short panel clips the corner instead of growing it out. */
+:where(.sl-art-corner, .sl-art-field) { position: relative; isolation: isolate; }
+.sl-art-corner::after {
+  --_sl-art-paint: color-mix(in srgb, var(--slc-text) 22%, transparent);
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: min(102px, 100%);
+  height: min(102px, 100%);
+  z-index: -1;
+  border-top-right-radius: inherit;
+  background: var(--_sl-art-paint);
+  -webkit-mask: var(--sl-art-corner) 100% 0 / 102px 102px no-repeat;
+  mask: var(--sl-art-corner) 100% 0 / 102px 102px no-repeat;
+  pointer-events: none;
+}
+/* Field: a tile repeated behind the element's content, one tone. The
+   truchet of quarter arcs by default; a field modifier only names another
+   tile and its size (--_sl-art-tile, --_sl-art-size), so the paint, the box
+   and the high-contrast and forced-colours removal stay here. The second
+   layer is the fade, intersected with the tile: solid by default, so a bare
+   field paints exactly the tile; a fade modifier names a ramp instead
+   (--_sl-art-fade), and it composes with every field. */
+.sl-art-field::before {
+  --_sl-art-paint: color-mix(in srgb, var(--slc-text) 7%, transparent);
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: var(--_sl-art-paint);
+  -webkit-mask: var(--_sl-art-tile, var(--sl-art-truchet)) 0 0 / var(--_sl-art-size, 144px 144px) repeat, var(--_sl-art-fade, linear-gradient(black 0 0));
+  -webkit-mask-composite: source-in;
+  mask: var(--_sl-art-tile, var(--sl-art-truchet)) 0 0 / var(--_sl-art-size, 144px 144px) repeat, var(--_sl-art-fade, linear-gradient(black 0 0));
+  mask-composite: intersect;
+  pointer-events: none;
+}
+/* The fields, each a whole number of Bayer periods: a Bauhaus grid of
+   primitives, Albers' nested squares, dithered diagonal stripes. */
+.sl-art-field--grid::before { --_sl-art-tile: var(--sl-art-field-grid); --_sl-art-size: 144px 144px; }
+.sl-art-field--albers::before { --_sl-art-tile: var(--sl-art-field-albers); --_sl-art-size: 96px 96px; }
+.sl-art-field--stripes::before { --_sl-art-tile: var(--sl-art-field-stripes); --_sl-art-size: 96px 96px; }
+/* The fades: the field is strongest at one edge and gone at the other, so
+   it can recede toward the text. Start and end are logical, so the ramp's
+   direction flips in a right-to-left box. */
+.sl-art-field--fade-start::before { --_sl-art-fade: linear-gradient(to var(--_sl-art-end, right), black, transparent); }
+.sl-art-field--fade-end::before { --_sl-art-fade: linear-gradient(to var(--_sl-art-end, right), transparent, black); }
+.sl-art-field--fade-down::before { --_sl-art-fade: linear-gradient(black, transparent); }
+.sl-art-field:dir(rtl)::before { --_sl-art-end: left; }
+/* Poster (0.42): a Bauhaus composition for a page head, on a box the
+   consumer sizes (3:2 by default; give it a width where it is a
+   shrink-to-fit item, as it is a size container). It sits BESIDE the head's
+   text, in a column of its own, never under it: the hero-field (large faint
+   shapes behind display type) was rejected by the owner on 2026-10-26. So
+   it is a mark beside text, not an underlay: the accent at full paint, the
+   ink at 75%, unbound by the underlay contrast test. The accent shapes are
+   on ::before, the ink shapes on ::after, each a list of mask layers over
+   the generated primitives (--sl-art-poster-*): a disc, a dot, a quarter
+   disc, a triangle, and the matrix's 50% and 25% tones as 2 × 2 tiles; a
+   bar, a block or a hatch is a gradient. A tone is the one layer
+   composited by intersect, with the region under it, so the shorthand
+   carries the operator and there is no -webkit-mask. The design is 48 × 32
+   poster cells: a cell is the box's width over 48, rounded down to a whole
+   px and never under the dither's 3px, so every layer lands on whole px,
+   the composition grows by whole cells and is centred on a whole px in
+   what is left. Below 144px it is clipped; below the round() floor (Chrome
+   125) the cell is invalid and nothing paints. A variant only names its
+   two layer lists (--_sl-art-poster-accent, --_sl-art-poster-ink); the
+   base reads them with the bare composition as the fallback. */
+:where(.sl-art-poster) {
+  position: relative;
+  isolation: isolate;
+  container-type: inline-size;
+  aspect-ratio: 3 / 2;
+  overflow: clip;
+  pointer-events: none;
+}
+.sl-art-poster::before,
+.sl-art-poster::after {
+  --_sl-art-u: max(3px, round(down, 100cqi / 48, 1px));
+  content: "";
+  position: absolute;
+  top: round(down, (100% - 32 * var(--_sl-art-u)) / 2, 1px);
+  left: round(down, (100% - 48 * var(--_sl-art-u)) / 2, 1px);
+  width: calc(48 * var(--_sl-art-u));
+  height: calc(32 * var(--_sl-art-u));
+  pointer-events: none;
+}
+.sl-art-poster::before {
+  --_sl-art-accent: var(--slc-accent-text);
+  background: var(--_sl-art-accent);
+  mask: var(--_sl-art-poster-accent,
+    var(--sl-art-poster-disc) calc(4 * var(--_sl-art-u)) calc(2 * var(--_sl-art-u)) / calc(24 * var(--_sl-art-u)) calc(24 * var(--_sl-art-u)) no-repeat);
+}
+.sl-art-poster::after {
+  --_sl-art-paint: color-mix(in srgb, var(--slc-text) 75%, transparent);
+  background: var(--_sl-art-paint);
+  mask: var(--_sl-art-poster-ink,
+    linear-gradient(black 0 0) 0 calc(26 * var(--_sl-art-u)) / calc(48 * var(--_sl-art-u)) calc(2 * var(--_sl-art-u)) no-repeat,
+    linear-gradient(black 0 0) calc(31 * var(--_sl-art-u)) calc(2 * var(--_sl-art-u)) / calc(1 * var(--_sl-art-u)) calc(24 * var(--_sl-art-u)) no-repeat,
+    var(--sl-art-poster-tone) 0 0 / calc(2 * var(--_sl-art-u)) calc(2 * var(--_sl-art-u)) repeat intersect,
+    linear-gradient(black 0 0) calc(34 * var(--_sl-art-u)) calc(8 * var(--_sl-art-u)) / calc(14 * var(--_sl-art-u)) calc(18 * var(--_sl-art-u)) no-repeat);
+}
+/* The bare poster is a horizon: an accent disc, a post and a dithered
+   block standing on a bar. The variants, each asymmetric and each with one
+   accent shape: --orbit (circles: a dithered disc, a solid dot, the accent
+   dot, crossed lines), --stair (an accent quarter disc against a stair of
+   blocks under a sparse tone), --bleed (a large accent arc cut by the top
+   corner, a triangle, a hatch and a dithered dot). */
+.sl-art-poster--orbit::before,
+.sl-art-poster--orbit::after {
+  --_sl-art-poster-accent:
+    var(--sl-art-poster-dot) calc(30 * var(--_sl-art-u)) calc(4 * var(--_sl-art-u)) / calc(12 * var(--_sl-art-u)) calc(12 * var(--_sl-art-u)) no-repeat;
+  --_sl-art-poster-ink:
+    var(--sl-art-poster-dot) calc(22 * var(--_sl-art-u)) calc(16 * var(--_sl-art-u)) / calc(12 * var(--_sl-art-u)) calc(12 * var(--_sl-art-u)) no-repeat,
+    linear-gradient(black 0 0) 0 calc(29 * var(--_sl-art-u)) / calc(48 * var(--_sl-art-u)) calc(1 * var(--_sl-art-u)) no-repeat,
+    linear-gradient(black 0 0) calc(44 * var(--_sl-art-u)) 0 / calc(1 * var(--_sl-art-u)) calc(32 * var(--_sl-art-u)) no-repeat,
+    var(--sl-art-poster-tone) 0 0 / calc(2 * var(--_sl-art-u)) calc(2 * var(--_sl-art-u)) repeat intersect,
+    var(--sl-art-poster-disc) calc(4 * var(--_sl-art-u)) calc(3 * var(--_sl-art-u)) / calc(24 * var(--_sl-art-u)) calc(24 * var(--_sl-art-u)) no-repeat;
+}
+.sl-art-poster--stair::before,
+.sl-art-poster--stair::after {
+  --_sl-art-poster-accent:
+    var(--sl-art-poster-quarter) 0 calc(8 * var(--_sl-art-u)) / calc(24 * var(--_sl-art-u)) calc(24 * var(--_sl-art-u)) no-repeat;
+  --_sl-art-poster-ink:
+    linear-gradient(black 0 0) calc(24 * var(--_sl-art-u)) calc(24 * var(--_sl-art-u)) / calc(8 * var(--_sl-art-u)) calc(8 * var(--_sl-art-u)) no-repeat,
+    linear-gradient(black 0 0) calc(32 * var(--_sl-art-u)) calc(16 * var(--_sl-art-u)) / calc(8 * var(--_sl-art-u)) calc(8 * var(--_sl-art-u)) no-repeat,
+    linear-gradient(black 0 0) calc(40 * var(--_sl-art-u)) calc(8 * var(--_sl-art-u)) / calc(8 * var(--_sl-art-u)) calc(8 * var(--_sl-art-u)) no-repeat,
+    linear-gradient(black 0 0) calc(24 * var(--_sl-art-u)) 0 / calc(2 * var(--_sl-art-u)) calc(24 * var(--_sl-art-u)) no-repeat,
+    var(--sl-art-poster-tone-light) 0 0 / calc(2 * var(--_sl-art-u)) calc(2 * var(--_sl-art-u)) repeat intersect,
+    linear-gradient(black 0 0) calc(28 * var(--_sl-art-u)) 0 / calc(20 * var(--_sl-art-u)) calc(6 * var(--_sl-art-u)) no-repeat;
+}
+.sl-art-poster--bleed::before,
+.sl-art-poster--bleed::after {
+  --_sl-art-poster-accent:
+    var(--sl-art-poster-disc) calc(-20 * var(--_sl-art-u)) calc(-24 * var(--_sl-art-u)) / calc(48 * var(--_sl-art-u)) calc(48 * var(--_sl-art-u)) no-repeat;
+  --_sl-art-poster-ink:
+    var(--sl-art-poster-tri) calc(24 * var(--_sl-art-u)) calc(8 * var(--_sl-art-u)) / calc(24 * var(--_sl-art-u)) calc(24 * var(--_sl-art-u)) no-repeat,
+    repeating-linear-gradient(black 0 var(--_sl-art-u), transparent 0 calc(2 * var(--_sl-art-u))) 0 calc(25 * var(--_sl-art-u)) / calc(20 * var(--_sl-art-u)) calc(7 * var(--_sl-art-u)) no-repeat,
+    var(--sl-art-poster-tone) 0 0 / calc(2 * var(--_sl-art-u)) calc(2 * var(--_sl-art-u)) repeat intersect,
+    var(--sl-art-poster-dot) calc(34 * var(--_sl-art-u)) calc(2 * var(--_sl-art-u)) / calc(12 * var(--_sl-art-u)) calc(12 * var(--_sl-art-u)) no-repeat;
+}
+
 /* ══ NAVIGATION & STATE ══════════════════════════════════════════════════════ */
 
 .sl-breadcrumb {
@@ -2061,10 +2419,15 @@ a.sl-breadcrumb__item:hover { color: var(--slc-accent-text); }
   width: fit-content;
   gap: 1px;
   /* The group is one control, so it wears the one control edge (owner,
-     2026-10-01) -- outline and the rules between its buttons alike. On the
-     neutral line it was 1.4:1 on paper beside a lone ghost at 3.5. */
-  background: var(--slc-edge-control);
-  border: 1px solid var(--slc-edge-control);
+     2026-10-01) -- outline and the rules between its buttons alike -- and
+     since 2026-10-26 that edge is the rest hairline; hover restores the 3:1
+     edge on both (below). */
+  background: var(--slc-edge-hairline);
+  border: 1px solid var(--slc-edge-hairline);
+  /* The ground is the rule between cells, so it stops at the padding box:
+     under the border it would stack two translucent hairlines into a
+     stronger outline than the rule. */
+  background-clip: padding-box;
   border-radius: var(--sl-radius-md, 8px);
   overflow: hidden;
   /* Its members never move under the finger (0.36): a member that sinks to
@@ -2092,12 +2455,18 @@ a.sl-breadcrumb__item:hover { color: var(--slc-accent-text); }
    property, with no `dir` attribute, draws its rules on the wrong side. A
    glass member owns its box-shadow and draws no rule (a known gap: only its
    soft inner line separates it, about 2:1). */
+.sl-btn-group:hover {
+  background-color: var(--slc-edge-control-hover);
+  border-color: var(--slc-edge-control-hover);
+}
 .sl-invert .sl-btn-group { background: transparent; }
-.sl-invert .sl-btn-group > .sl-btn + .sl-btn { --_sl-depth: -1px 0 0 var(--slc-edge-control); }
-.sl-invert .sl-btn-group > .sl-btn + .sl-btn:dir(rtl) { --_sl-depth: 1px 0 0 var(--slc-edge-control); }
+.sl-invert .sl-btn-group > .sl-btn + .sl-btn { --_sl-depth: -1px 0 0 var(--slc-edge-hairline); }
+.sl-invert .sl-btn-group > .sl-btn + .sl-btn:dir(rtl) { --_sl-depth: 1px 0 0 var(--slc-edge-hairline); }
+.sl-invert .sl-btn-group:hover > .sl-btn + .sl-btn { --_sl-depth: -1px 0 0 var(--slc-edge-control-hover); }
+.sl-invert .sl-btn-group:hover > .sl-btn + .sl-btn:dir(rtl) { --_sl-depth: 1px 0 0 var(--slc-edge-control-hover); }
 
 /* The track is sunk (Lumen, 0.32): the sunken rung and the sunk recipe
-   inside the one control edge (it was a 6% wash of the ink), so the chosen
+   inside the hairline (it was a 6% wash of the ink), so the chosen
    segment, a raised tile, stands out of a well. The track is not
    focusable, so it paints its well directly. */
 .sl-segmented {
@@ -2106,10 +2475,11 @@ a.sl-breadcrumb__item:hover { color: var(--slc-accent-text); }
   gap: 1px;
   padding: 2px;
   background: var(--slc-sunken);
-  border: 1px solid var(--slc-edge-control);
+  border: 1px solid var(--slc-edge-hairline);
   border-radius: var(--sl-radius-md, 8px);
   box-shadow: var(--slc-depth-sunk);
 }
+.sl-segmented:hover { border-color: var(--slc-edge-control-hover); }
 .sl-segmented__item {
   appearance: none;
   border: none;
@@ -2157,14 +2527,14 @@ a.sl-breadcrumb__item:hover { color: var(--slc-accent-text); }
   height: 2rem;
   padding: 0;
   cursor: pointer;
-  /* Transparent at rest, in the one control edge (owner's ruling: every
+  /* Transparent at rest, on the hairline (owner's ruling: every
      neutral control, icon buttons included), the glyph in the secondary
      ink; hover brings the surface rung up under it (Lumen, 0.32; it was a
      6% wash of the ink). Only a chrome glyph inside a workbench primitive
      may drop the edge (0.33). */
   color: var(--slc-text-secondary);
   background: transparent;
-  border: 1px solid var(--slc-edge-control);
+  border: 1px solid var(--slc-edge-hairline);
   border-radius: var(--sl-radius-md, 8px);
   transition:
     color var(--sl-motion-fast, 120ms) var(--sl-motion-ease, ease),
@@ -2179,9 +2549,8 @@ a.sl-breadcrumb__item:hover { color: var(--slc-accent-text); }
   border-color: var(--slc-edge-control-hover);
 }
 .sl-icon-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-/* The round silhouette the liquid's --drop is allowed on. It does NOT apply
-   the effect: L6 makes the modifier written in the markup the contract, and
-   forbids anything from measuring a radius to decide. */
+/* A round icon button. The effects layer's hover follows its
+   inherited radius. */
 .sl-icon-btn--round { border-radius: 50%; }
 
 /* DANGER (0.32) — a tone, not a variant: it composes with the variant it
@@ -2301,6 +2670,68 @@ a.sl-breadcrumb__item:hover { color: var(--slc-accent-text); }
   background: color-mix(in srgb, var(--slc-text) 4%, transparent);
   border-radius: var(--sl-radius-md, 8px);
 }
+/* --void: a Molnár field of strokes (ART, below) around the message, with an
+   erased zone centred on the box, so strokes frame the message on all four
+   sides; the message is centred in it. The zone comes in three steps (the
+   generator's VOID), picked by the box's width; a message longer than the
+   zone may touch strokes at its edge. Both mask layers are centred, and the
+   stroke tile and every void image are an even number of slots, so the zone
+   erases whole strokes. The box becomes a size container: give it a width
+   where it is a shrink-to-fit item. */
+:where(.sl-empty--void) { position: relative; isolation: isolate; }
+.sl-empty--void { container-type: inline-size; align-items: center; justify-content: center; text-align: center; }
+.sl-empty--void::after {
+  --_sl-art-paint: color-mix(in srgb, var(--slc-text) 22%, transparent);
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: var(--_sl-art-paint);
+  -webkit-mask-image: var(--sl-art-molnar), var(--sl-art-void-s);
+  mask-image: var(--sl-art-molnar), var(--sl-art-void-s);
+  -webkit-mask-size: 180px 180px, 270px 210px;
+  mask-size: 180px 180px, 270px 210px;
+  -webkit-mask-repeat: repeat, no-repeat;
+  mask-repeat: repeat, no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-composite: source-out;
+  mask-composite: subtract;
+  pointer-events: none;
+}
+@container (width >= 390px) {
+  .sl-empty--void::after {
+    -webkit-mask-image: var(--sl-art-molnar), var(--sl-art-void-m);
+    mask-image: var(--sl-art-molnar), var(--sl-art-void-m);
+    -webkit-mask-size: 180px 180px, 360px 150px;
+    mask-size: 180px 180px, 360px 150px;
+  }
+}
+@container (width >= 480px) {
+  .sl-empty--void::after {
+    -webkit-mask-image: var(--sl-art-molnar), var(--sl-art-void-l);
+    mask-image: var(--sl-art-molnar), var(--sl-art-void-l);
+    -webkit-mask-size: 180px 180px, 450px 150px;
+    mask-size: 180px 180px, 450px 150px;
+  }
+}
+/* --shapes: the composition (ART, below) above the title, a disc in the
+   accent, a square outline and a dithered triangle. It is the box's first
+   item, so the message sits below it. */
+.sl-empty--shapes::before {
+  --_sl-art-paint: var(--slc-text);
+  --_sl-art-accent: var(--slc-accent-text);
+  content: "";
+  display: block;
+  flex: none;
+  width: 120px;
+  height: 72px;
+  background: linear-gradient(90deg, var(--_sl-art-accent) 63px, var(--_sl-art-paint) 0);
+  -webkit-mask: var(--sl-art-empty) 0 0 / 120px 72px no-repeat;
+  mask: var(--sl-art-empty) 0 0 / 120px 72px no-repeat;
+  pointer-events: none;
+}
 .sl-empty__title {
   margin: 0;
   font-family: var(--sl-font-sans, system-ui, sans-serif);
@@ -2330,12 +2761,16 @@ a.sl-breadcrumb__item:hover { color: var(--slc-accent-text); }
   flex-direction: column;
   gap: var(--sl-space-1, 0.25rem);
 }
-/* Mono at every size: a display-scale numeral is a structural label (L1). */
+/* Geist Pixel Square at a whole-cell size (L1, owner 2026-10-26). The face is
+   proportional and has no tnum, so a figure that changes in place should keep
+   Geist Mono: set font-family on it to var(--sl-font-mono). The role's chain
+   falls back to Geist Mono while the face loads. */
 .sl-stat__value {
-  font-family: var(--sl-font-mono, ui-monospace, monospace);
-  font-size: var(--sl-text-3xl, 2.75rem);
-  font-variant-numeric: tabular-nums;
-  letter-spacing: -0.01em;
+  font-family: var(--sl-font-pixel, var(--sl-font-mono, ui-monospace, monospace));
+  font-size: var(--sl-text-px-4, 50px);
+  font-weight: 400;
+  line-height: var(--sl-line-tight, 1.2);
+  letter-spacing: 0;
   color: var(--slc-text);
 }
 .sl-stat__label {
@@ -2347,13 +2782,29 @@ a.sl-breadcrumb__item:hover { color: var(--slc-accent-text); }
   color: var(--slc-text-muted);
 }
 
+/* ══ SIGNAL STRIP ════════════════════════════════════════════════════════════ */
+
+/* A dithered ramp on a canvas (signal.js, 3px cells), decorative: the markup
+   carries aria-hidden. 12px is four cells. The ink is the element's own
+   `color`, which signal.js reads; the off cells are transparent, so there is
+   no ground here. Without the script the canvas is empty. Under forced
+   colours the script draws nothing and the strip is a solid CanvasText bar. */
+.sl-signal {
+  display: block;
+  width: 100%;
+  height: 12px;
+  color: var(--slc-accent-text);
+}
+.sl-signal--muted { color: var(--slc-text-muted); }
+
 /* ══ IDENTITY & MEDIA ════════════════════════════════════════════════════════ */
 
 /* The brand is typographic — there is no pictorial mark. These three classes
    must render as packages/ui-kit/assets/sondalab-*.svg does; where they
    disagree, the asset is right and the CSS is the defect. Since 0.30 the
-   lockup is Geist Mono 300 tracked 0.2em, in the asset (scripts/gen-logo.py)
-   and here alike. */
+   lockup was Geist Mono 300 tracked 0.2em; since 0.39 (pixel D) it is the
+   lowercase Geist Pixel Square wordmark, untracked, at a whole-cell size, and
+   the asset (scripts/gen-logo.py) draws the same one. */
 .sl-wordmark {
   /* The brand face, not the display role: since 0.30 display is Geist and
      Fraunces is the wordmark's and the monogram's alone. */
@@ -2365,14 +2816,30 @@ a.sl-breadcrumb__item:hover { color: var(--slc-accent-text); }
 .sl-wordmark__dot { color: var(--slc-accent); }
 
 .sl-lockup {
-  font-family: var(--sl-font-mono, ui-monospace, monospace);
-  font-size: var(--sl-text-xs, 0.75rem);
-  font-weight: 300;
-  letter-spacing: 0.2em;
-  text-transform: uppercase;
+  font-family: var(--sl-font-pixel, var(--sl-font-mono, ui-monospace, monospace));
+  font-size: var(--sl-text-px-1, 12.5px);
+  font-weight: 400;
+  letter-spacing: 0;
   color: var(--slc-text);
 }
+/* The "/" is a child b or .sl-lockup__sep, in the accent ink; the b is not
+   bold, the face has one weight. */
+.sl-lockup b,
+.sl-lockup__sep {
+  font-weight: 400;
+  color: var(--slc-accent-text);
+}
 .sl-lockup__dot { color: var(--slc-accent-text); }
+
+/* One display word in the pixel face, inside running text or a heading: it
+   inherits the size, so set it on a whole cell (--sl-text-px-*) to keep the
+   cells crisp. Accent ink; never a paragraph. */
+.sl-px {
+  font-family: var(--sl-font-pixel, var(--sl-font-mono, ui-monospace, monospace));
+  font-weight: 400;
+  letter-spacing: 0;
+  color: var(--slc-accent-text);
+}
 
 /* Three corrections, all for the small end of the scale (design-language L3):
    the mark is sized to the INSCRIBED CROP CIRCLE (~60% of the canvas wide),
@@ -2849,16 +3316,15 @@ a.sl-breadcrumb__item:hover { color: var(--slc-accent-text); }
 }
 
 /* The switch knob stretches toward the side it will travel to while held —
-   rightward from off, leftward from on (it sits at 0.875rem and grows by a
-   tenth, 0.085rem, since the 0.32 knob) — then springs across on release,
-   as it always has. */
+   rightward from off, leftward from on (a 12px knob grows by one pixel,
+   to 13) — then steps across on release. */
 .sl-switch:active:not(:has(:disabled)) .sl-switch__track::after {
-  width: 0.935rem;
+  width: 13px;
   transition-duration: var(--sl-motion-fast, 120ms);
   transition-timing-function: var(--sl-motion-ease, ease);
 }
 .sl-switch:active:not(:has(:disabled)) .sl-switch__input:checked + .sl-switch__track::after {
-  transform: translateY(-50%) translateX(0.79rem);
+  transform: translateY(-50%) translateX(14px);
   transition-duration: var(--sl-motion-fast, 120ms);
   transition-timing-function: var(--sl-motion-ease, ease);
 }
@@ -2892,6 +3358,7 @@ a.sl-breadcrumb__item:hover { color: var(--slc-accent-text); }
   --slc-edge-raised:  var(--slc-border);
   --slc-edge-wash:    var(--slc-border);
   --slc-edge-control: var(--slc-border);
+  --slc-edge-hairline:  var(--slc-edge-control);
   /* Hover too: left on :root's derivation it is a mid grey, WEAKER than the
      drawn border at rest, so a hovered field lost its edge. */
   --slc-edge-control-hover: var(--slc-border-strong);
@@ -2948,6 +3415,7 @@ a.sl-breadcrumb__item:hover { color: var(--slc-accent-text); }
   --slc-lit-wash: none;
   --slc-lit-tint: none;
   --slc-lit-drop: 0 0 transparent;
+  --slc-edge-hairline: var(--slc-edge-control);
 }
 /* The in-button key draws its own base line instead of the key depth, so it
    is ringed here, in its label's colour: white on a neutral button, black on
@@ -2989,6 +3457,13 @@ a.sl-breadcrumb__item:hover { color: var(--slc-accent-text); }
 /* A 12% wash vanishes on black: the slider track gets the theme's line. */
 :root[data-sl-theme="high-contrast"] .sl-slider::-webkit-slider-runnable-track { box-shadow: inset 0 0 0 1px var(--slc-border); }
 :root[data-sl-theme="high-contrast"] .sl-slider::-moz-range-track { box-shadow: inset 0 0 0 1px var(--slc-border); }
+/* The art paints nothing here (bauhaus-art spec): its tones are set for the
+   page's grounds, and on black they are noise next to drawn edges. The two
+   in-flow marks leave no blank box, and a rule gets its hairline back. */
+:root[data-sl-theme="high-contrast"] :is(.sl-rule--shapes, .sl-rule--weave, .sl-art-field, .sl-art-poster)::before,
+:root[data-sl-theme="high-contrast"] :is(.sl-art-corner, .sl-empty--void, .sl-art-poster)::after { background: none; }
+:root[data-sl-theme="high-contrast"] :is(.sl-eyebrow--mark, .sl-empty--shapes)::before { display: none; }
+:root[data-sl-theme="high-contrast"] :is(.sl-rule--shapes, .sl-rule--weave) { border-top-color: var(--slc-border); }
 
 /* ══ FORCED COLOURS (Windows High Contrast, and any user palette) ════════════
    Distinct from the kit's own high-contrast theme: here the USER's palette
@@ -3013,11 +3488,18 @@ a.sl-breadcrumb__item:hover { color: var(--slc-accent-text); }
     background: Highlight !important;
     border-color: Highlight !important;
   }
-  .sl-check__box::after { forced-color-adjust: none; border-color: HighlightText !important; }
-  .sl-radio__box::after { forced-color-adjust: none; background: HighlightText !important; }
+  .sl-check__box::after,
+  .sl-radio__box::after { forced-color-adjust: none; --_sl-on-fill: HighlightText !important; background: HighlightText !important; }
   .sl-switch__track::after { forced-color-adjust: none; background: CanvasText !important; }
   .sl-switch__input:checked + .sl-switch__track::after { background: HighlightText !important; }
   .sl-progress { border: 1px solid CanvasText !important; }
+  /* The art is decoration, so it goes, as every other ornament does; the
+     in-flow marks leave no blank box, and a rule gets its hairline back. */
+  :is(.sl-rule--shapes, .sl-rule--weave, .sl-art-field, .sl-art-poster)::before,
+  :is(.sl-art-corner, .sl-empty--void, .sl-art-poster)::after { background: none !important; }
+  :is(.sl-eyebrow--mark, .sl-empty--shapes)::before { display: none !important; }
+  :is(.sl-rule--shapes, .sl-rule--weave) { border-top-color: CanvasText !important; }
+  .sl-signal { forced-color-adjust: none; background: CanvasText !important; }
   .sl-progress__bar { forced-color-adjust: none; background: Highlight !important; }
   :is(.sl-segmented__item[aria-selected="true"], .sl-segmented__item[aria-pressed="true"],
       .sl-btn:not(.sl-btn--primary)[aria-pressed="true"], .sl-icon-btn[aria-pressed="true"],

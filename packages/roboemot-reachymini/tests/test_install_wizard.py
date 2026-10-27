@@ -4,8 +4,11 @@ platform, against a fake daemon and a fake robot that emulates SSH, pip and the 
 from __future__ import annotations
 
 import copy
+import io
 import json
 import shlex
+import subprocess
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -25,6 +28,7 @@ from roboemot_reachymini import daemon as daemon_mod
 from roboemot_reachymini import install as reachy
 from roboemot_reachymini.daemon import INSTALL_TIMEOUT_S, DaemonClient, DaemonError
 from roboemot_reachymini.install import ReachyMiniWireless
+from sondalab_palette.term import MissingFlag, NoValidAnswer
 
 ROOT = Path(__file__).resolve().parents[3]
 RECORD = ReachyMiniWireless.record_path
@@ -39,6 +43,7 @@ APP_YAML = f"{DATA}/app.yaml"
 PIPER_VENV = f"{DATA}/piper-venv"
 PIPER_PYTHON = f"{PIPER_VENV}/bin/python"
 PIN = "246810"
+RID = "reachy-mini-wireless"
 
 
 # ---------------------------------------------------------------- fakes
@@ -449,6 +454,22 @@ def no_settle(monkeypatch):
     monkeypatch.setattr(reachy.time, "sleep", lambda s: None)
 
 
+@pytest.fixture(autouse=True)
+def plain_terminal(monkeypatch):
+    """Unicode glyphs, no colour, 100 columns, whatever the shell running the tests says."""
+    monkeypatch.setenv("LC_ALL", "en_US.UTF-8")
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setenv("COLUMNS", "100")
+    for name in ("TERM", "SONDALAB_ASCII", "SONDALAB_ACCESSIBLE", "ACCESSIBLE", "FORCE_COLOR"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def flat(text: str) -> str:
+    """Output with every whitespace run folded to one space: a step line reads
+    ``label detail`` and a wrapped detail reads as one line."""
+    return " ".join(text.split())
+
+
 @pytest.fixture()
 def offline(monkeypatch, robot, daemon):
     monkeypatch.setattr(inst, "load_platform", lambda rid: ReachyMiniWireless(port=daemon.port))
@@ -550,7 +571,7 @@ def test_start_stops_other_app_then_wakes_and_starts(daemon):
 def test_start_declined_leaves_running_app_alone(daemon):
     daemon.current = {"info": {"name": "conversation"}, "state": "running"}
     ui = quiet_ui()
-    ui.confirm = lambda question, default: False
+    ui.confirm = lambda question, default, **kw: False
     with pytest.raises(WizardError, match="conversation is still running"):
         platform_for(daemon).start(ui)
     assert daemon.mutations == []
@@ -1330,17 +1351,10 @@ def test_stage_packages_leaves_checkout_untouched(tmp_path):
     assert repo_app_yaml.exists() is existed
 
 
-def test_non_interactive_ui_takes_defaults():
-    ui = quiet_ui()
-    assert ui.ask("host?", "reachy-mini.local") == "reachy-mini.local"
-    assert ui.confirm("stop?", False) is False
-    assert quiet_ui(yes=True).confirm("stop?", False) is True
-
-
 def test_installer_registered_under_the_manifest_id():
     assert "reachy-mini-wireless" in inst.installed_platforms()
     assert isinstance(inst.load_platform("reachy-mini-wireless"), ReachyMiniWireless)
-    with pytest.raises(WizardError, match="no installer for desk-head-v1"):
+    with pytest.raises(WizardError, match="No installer for desk-head-v1"):
         inst.load_platform("desk-head-v1")
 
 
@@ -1357,9 +1371,15 @@ def test_install_dry_run_touches_nothing(offline, robot, daemon, capsys):
     assert not [c for c in robot.commands if c.startswith(writes) or "&& mv" in c]
     assert robot.dirs == {HOME}
     out = capsys.readouterr().out
-    assert "would add scipy 1.18.1" in out
-    assert f"would create the data folder {DATA}" in out
-    assert "would stop conversation" in out and "dry run passed" in out
+    assert "○ Add dependencies scipy 1.18.1" in flat(out)
+    assert f"○ Create the data folder {DATA}" in flat(out)
+    assert "○ Stop conversation" in out and "○ Start roboemot" in out
+    assert "✓ Dry run passed" in out and "Summary  " in out
+    assert (
+        "Next: python scripts/install_on_robot.py --host 127.0.0.1 --user pollen "
+        "--robot reachy-mini-wireless --dev --piper --yes"
+    ) in out
+    assert not [ln for ln in out.splitlines() if "✓" in ln and ("Create" in ln or "Add " in ln)]
 
 
 def test_install_records_changes_and_cleans_tmp(offline, robot, daemon):
@@ -1386,10 +1406,10 @@ def test_install_starts_and_sets_autostart_recording_the_previous_one(offline, r
 
 def test_install_upgrades_shared_packages_only_when_allowed(offline, robot, daemon):
     robot.conflict = {"numpy": "2.1.0"}
-    ui = quiet_ui()
-    ui.confirm = lambda question, default: "shared packages" not in question
+    ui = typed()  # a terminal: the question is asked, after the wheels are copied
+    ui.confirm = lambda question, default, **kw: "shared packages" not in question
     with pytest.raises(WizardError, match="shared packages left as they were"):
-        inst.run_install(options(start=False, startup=False, yes=False), ui, ROOT)
+        inst.run_install(options(start=False, startup=False, piper=False, yes=False), ui, ROOT)
     assert robot.env["numpy"] == "2.0.0" and "roboemot-core" not in robot.env
     install()
     assert robot.env["numpy"] == "2.1.0"
@@ -1414,11 +1434,12 @@ def test_main_returns_1_and_prints_reason(offline, robot, capsys, monkeypatch):
     monkeypatch.setattr(inst, "app_config_text", lambda config: "voice: {enabled: true}\n")
     rc = inst.main(
         ["--host", "127.0.0.1", "--user", "pollen", "--robot", "reachy-mini-wireless", "--dev",
-         "--no-start", "--no-startup-app"],
+         "--no-start", "--no-startup-app", "--no-piper"],
         root=ROOT,
     )  # fmt: skip
     assert rc == 1
     assert "expected safety.allow_unmeasured_dynamics=True" in capsys.readouterr().out
+    assert "expected dev=True" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------- uninstall
@@ -1455,9 +1476,10 @@ def test_uninstall_dry_run_touches_nothing(offline, robot, daemon, capsys):
     uninstall(dry_run=True)
     assert snapshot(robot, daemon) == state and len(daemon.mutations) == n
     out = capsys.readouterr().out
-    assert "would stop roboemot" in out and "would set the autostart app back to none" in out
+    assert "○ Stop roboemot" in out and "○ Restore the autostart app none" in flat(out)
     assert (
-        "would remove roboemot-core 0.1.0.dev0, roboemot-reachymini 0.1.0.dev0, scipy 1.18.1" in out
+        "○ Remove packages roboemot-core 0.1.0.dev0, roboemot-reachymini 0.1.0.dev0, scipy 1.18.1"
+        in flat(out)
     )
 
 
@@ -1515,7 +1537,7 @@ def test_uninstall_never_deletes_outside_site_packages_or_tmp(offline, robot, da
 def test_uninstall_keeps_the_record_when_verification_fails(offline, robot, daemon, monkeypatch):
     install()
     monkeypatch.setattr(robot, "_pip", _pip_ignoring_uninstall(robot._pip))
-    with pytest.raises(WizardError, match="uninstall incomplete"):
+    with pytest.raises(WizardError, match="Uninstall incomplete"):
         uninstall()
     assert RECORD in robot.files
 
@@ -1629,14 +1651,14 @@ def test_uninstall_without_a_record_leaves_the_data_folder_and_says_so(
     robot.dirs.add(DATA)
     uninstall()
     assert DATA in robot.dirs
-    assert "no record of the data folder" in capsys.readouterr().out
+    assert "! Data folder not recorded" in capsys.readouterr().out
 
 
 def test_uninstall_dry_run_shows_the_data_folder_and_keeps_it(offline, robot, daemon, capsys):
     install()
     capsys.readouterr()
     uninstall(dry_run=True)
-    assert f"would delete the data folder {DATA}" in capsys.readouterr().out
+    assert f"○ Delete the data folder {DATA}" in flat(capsys.readouterr().out)
     assert DATA in robot.dirs
     assert not [c for c in robot.commands[-30:] if c.startswith(("rmdir", "rm -rf /home"))]
 
@@ -1773,7 +1795,7 @@ def test_install_warns_about_a_data_dir_in_the_app_config(offline, robot, daemon
 def test_select_robot_takes_first_robot_found(monkeypatch):
     found = [("Neve  192.168.88.198", "192.168.88.198", "reachy-mini-wireless")]
     monkeypatch.setattr(inst, "find_robots", lambda root: found)
-    host, platform = inst.select_robot(quiet_ui(), Options(), ROOT)
+    host, platform = inst.select_robot(typed("1\n"), Options(), ROOT)
     assert host == "192.168.88.198" and platform.manifest_id == "reachy-mini-wireless"
 
 
@@ -1781,9 +1803,7 @@ def test_select_robot_other_asks_for_host(monkeypatch):
     monkeypatch.setattr(
         inst, "find_robots", lambda root: [("Neve", "1.2.3.4", "reachy-mini-wireless")]
     )
-    ui = quiet_ui()
-    ui.choose = lambda question, options: len(options) - 1
-    host, _ = inst.select_robot(ui, Options(), ROOT)
+    host, _ = inst.select_robot(typed("2\n", "\n"), Options(), ROOT)  # another host, Enter
     assert host == ReachyMiniWireless.default_host
 
 
@@ -1795,15 +1815,230 @@ def test_select_robot_falls_back_to_default(monkeypatch, found):
         return found
 
     monkeypatch.setattr(inst, "find_robots", fake)
-    host, _ = inst.select_robot(quiet_ui(), Options(), ROOT)
+    host, _ = inst.select_robot(typed("\n"), Options(), ROOT)  # Enter takes the shown default
     assert host == ReachyMiniWireless.default_host
 
 
-def test_choose_reprompts_until_valid(monkeypatch):
-    ui = Ui(interactive=True, assume_yes=False)
-    answers = iter(["9", "x", "2"])
-    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
-    assert ui.choose("Which robot?", ["a", "b"]) == 1
+def test_choose_reprompts_until_valid():
+    assert typed("9\n", "x\n", "2\n").choose("Which robot?", ["a", "b"], flag="--host") == 1
+    with pytest.raises(NoValidAnswer):
+        typed("9\n", "x\n", "0\n").choose("Which robot?", ["a", "b"], flag="--host")
+
+
+def test_select_robot_without_a_terminal_needs_host_before_mdns(monkeypatch):
+    looked = []
+    monkeypatch.setattr(inst, "find_robots", lambda root: looked.append(root) or [])
+    with pytest.raises(MissingFlag, match="--host"):
+        inst.select_robot(quiet_ui(), Options(), ROOT)
+    assert looked == []
+    host, _ = inst.select_robot(quiet_ui(), Options(host="10.0.0.9"), ROOT)
+    assert host == "10.0.0.9" and looked == []  # a given host skips discovery
+
+
+# ---------------------------------------------------------------- no terminal, no defaults (TP:253)
+
+
+def answers(*lines: str):
+    """A ``read`` for an interactive Ui: each call returns the next typed line."""
+    it = iter(lines)
+    return lambda: next(it)
+
+
+def typed(*lines: str) -> Ui:
+    return Ui(interactive=True, assume_yes=False, read=answers(*lines))
+
+
+FULL = dict(host="127.0.0.1", user="pollen", robot="reachy-mini-wireless", dev=True, piper=False)
+
+
+@pytest.mark.parametrize(
+    ("missing", "flag"),
+    [
+        ("host", "--host"),
+        ("user", "--user"),
+        ("dev", "--dev"),
+        ("piper", "--piper"),
+        ("start", "--start"),
+        ("startup", "--startup-app"),
+    ],
+)
+def test_without_a_terminal_a_missing_flag_stops_before_the_robot_is_touched(
+    offline, robot, daemon, monkeypatch, missing, flag
+):
+    looked = []
+    monkeypatch.setattr(inst, "find_robots", lambda root: looked.append(root) or [])
+    given = {**FULL, "start": False, "startup": False}
+    given[missing] = None
+    with pytest.raises(MissingFlag) as e:
+        inst.run_install(Options(**given), quiet_ui(), ROOT)
+    assert e.value.flag == flag
+    assert robot.commands == [] and robot.copies == [] and daemon.mutations == []
+    assert looked == []  # not even mDNS
+
+
+def test_without_a_terminal_main_names_the_missing_flag_and_installs_nothing(
+    offline, robot, daemon, monkeypatch, capsys
+):
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    monkeypatch.setattr(inst, "find_robots", lambda root: [("Neve", "1.2.3.4", RID)])
+    assert inst.main([], root=ROOT) == 1
+    err = capsys.readouterr().err
+    assert "Missing --host" in err and "Try: python scripts/install_on_robot.py --host" in err
+    assert robot.commands == [] and daemon.mutations == []
+
+
+def test_yes_answers_the_confirmations_but_not_host_or_user(offline, robot, daemon):
+    with pytest.raises(MissingFlag, match="--user"):
+        inst.run_install(Options(host="127.0.0.1", robot=RID, yes=True), quiet_ui(yes=True), ROOT)
+    install(dev=None, piper=None)  # yes=True answers dev, piper, start, startup
+    assert json.loads(robot.files[RECORD])["pending_before"] is None
+
+
+def test_with_several_platforms_a_missing_robot_flag_stops_first(offline, robot, monkeypatch):
+    monkeypatch.setattr(inst, "installed_platforms", lambda: [RID, "desk-head-v1"])
+    given = {**FULL, "robot": None, "start": False, "startup": False}
+    with pytest.raises(MissingFlag, match="--robot"):
+        inst.run_install(Options(**given), quiet_ui(), ROOT)
+    assert robot.commands == []
+
+
+def test_an_existing_pin_and_secret_are_kept_without_a_terminal(offline, robot, daemon, capsys):
+    robot.dirs |= {DATA, PIN_PATH}
+    robot.secrets = {"cloud_key": "theirs"}
+    opts = Options(**FULL, start=False, startup=False, secrets=["cloud_key"])
+    inst.run_install(opts, quiet_ui(), ROOT)  # no --yes: nothing to answer, nothing raised
+    out = flat(capsys.readouterr().out)
+    assert "✓ Kept the operator PIN" in out and "✓ Kept the secret cloud_key" in out
+    assert robot.secrets == {"cloud_key": "theirs"} and robot.stdins == []
+
+
+def test_start_over_a_running_app_without_a_terminal_needs_yes_before_installing(
+    offline, robot, daemon
+):
+    daemon.current = {"info": {"name": "conversation"}, "state": "running"}
+    with pytest.raises(MissingFlag, match="--yes"):
+        inst.run_install(Options(**FULL, start=True, startup=False), quiet_ui(), ROOT)
+    assert robot.commands == [] and daemon.mutations == []
+
+
+@pytest.mark.parametrize(("missing", "flag"), [("dev", "--dev"), ("piper", "--piper")])
+def test_a_dry_run_without_a_terminal_still_needs_dev_and_piper(
+    offline, robot, daemon, missing, flag
+):
+    with pytest.raises(MissingFlag) as e:
+        inst.run_install(Options(**{**FULL, missing: None}, dry_run=True), quiet_ui(), ROOT)
+    assert e.value.flag == flag and robot.commands == []
+
+
+class _TtyStdin(io.StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
+def test_a_prompt_with_no_answer_fails_with_a_try_line(offline, robot, daemon, monkeypatch, capsys):
+    monkeypatch.setattr("sys.stdin", _TtyStdin(""))  # a terminal whose input ends at once
+    monkeypatch.delenv("CI", raising=False)
+    argv = ["--dry-run", "--host", "127.0.0.1", "--user", "pollen", "--robot", RID]
+    assert inst.main(argv, root=ROOT) == 1
+    err = capsys.readouterr().err
+    assert "✗ No valid answer to: Install in dev mode?" in err
+    assert f"Try: python scripts/install_on_robot.py {' '.join(argv)} --dev" in err
+
+
+def test_the_dry_run_next_line_repeats_the_answered_dev_choice(offline, robot, daemon, capsys):
+    opts = Options(host="127.0.0.1", user="pollen", robot=RID, piper=False, dry_run=True)
+    inst.run_install(opts, typed("y\n", "\n"), ROOT)  # dev: yes; store an API key: no
+    assert f"--robot {RID} --dev --no-piper" in capsys.readouterr().out
+
+
+def test_the_installer_modules_import_without_the_palette():
+    code = (
+        "import sys; sys.modules['sondalab_palette'] = None; "
+        "import roboemot.install, roboemot_reachymini.settings, roboemot_reachymini.install"
+    )
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_a_dry_run_without_a_terminal_needs_no_start_flags(offline, robot, daemon):
+    inst.run_install(Options(**FULL, dry_run=True), quiet_ui(), ROOT)
+    assert daemon.mutations == []
+
+
+def test_uninstall_without_a_terminal_needs_only_host_and_user(offline, robot, daemon):
+    with pytest.raises(MissingFlag, match="--user"):
+        inst.run_uninstall(Options(host="127.0.0.1", robot=RID, uninstall=True), quiet_ui(), ROOT)
+    assert robot.commands == []
+    inst.run_uninstall(
+        Options(host="127.0.0.1", user="pollen", robot=RID, uninstall=True), quiet_ui(), ROOT
+    )
+
+
+def test_a_shared_package_change_without_a_terminal_stops_before_any_write(offline, robot, daemon):
+    robot.conflict = {"numpy": "2.1.0"}
+    with pytest.raises(MissingFlag, match="--yes"):
+        inst.run_install(Options(**FULL, start=False, startup=False), quiet_ui(), ROOT)
+    assert robot.env["numpy"] == "2.0.0"
+    assert robot.copies == [] and robot.files == {} and robot.tmp_dirs == set()
+    writes = ("rm ", "rmdir", "mkdir", "mktemp", "mv ")
+    assert not [c for c in robot.commands if c.startswith(writes) or "&& mv" in c]
+
+
+@pytest.mark.parametrize("empty", ["host", "user"])
+def test_an_empty_host_or_user_counts_as_missing(offline, robot, daemon, empty):
+    given = {**FULL, "start": False, "startup": False, empty: ""}
+    with pytest.raises(MissingFlag, match=f"--{empty}"):
+        inst.run_install(Options(**given), quiet_ui(), ROOT)
+    assert robot.commands == [] and daemon.requests == []
+
+
+def test_non_interactive_ui_never_takes_a_default():
+    ui = quiet_ui()
+    with pytest.raises(MissingFlag, match="--host"):
+        ui.ask("host?", "reachy-mini.local", flag="--host")
+    with pytest.raises(MissingFlag, match="--yes"):
+        ui.confirm("stop?", False)
+    with pytest.raises(MissingFlag, match="--robot"):
+        ui.choose("Which?", ["a", "b"], flag="--robot")
+    assert quiet_ui(yes=True).confirm("stop?", False) is True
+
+
+# ---------------------------------------------------------------- defaults and answers (TP:181)
+
+
+def test_actions_that_change_the_robot_default_to_no(offline, robot, daemon, monkeypatch, capsys):
+    monkeypatch.setattr(Ui, "ask_secret", lambda self, question: None)
+    robot.dev_cfg = False  # Enter at the dev question: production config
+    ui = typed(*["\n"] * 6)  # Enter at every question
+    inst.run_install(Options(host="127.0.0.1", user="pollen", robot=RID), ui, ROOT)
+    err = capsys.readouterr().err
+    for question in (
+        "Install in dev mode? [y/N]",
+        "Install Piper for on-board speech (own virtualenv)? [y/N]",
+        "Start roboemot now? [y/N]",
+    ):
+        assert question in err
+    assert daemon.current is None and robot.piper_pips == []
+
+
+def test_stopping_another_app_defaults_to_no(daemon, capsys):
+    daemon.current = {"info": {"name": "conversation"}, "state": "running"}
+    with pytest.raises(WizardError, match="conversation is still running"):
+        platform_for(daemon).start(typed("\n"))
+    assert "[y/N]" in capsys.readouterr().err and daemon.mutations == []
+
+
+def test_confirm_asks_again_then_gives_up(capsys):
+    with pytest.raises(NoValidAnswer):
+        typed("maybe\n", "sure\n", "ok\n").confirm("Start?", False)
+    assert capsys.readouterr().err.count("? Start? [y/N]") == 3
+
+
+def test_end_of_input_is_not_an_answer():
+    with pytest.raises(NoValidAnswer, match="input ended"):
+        typed("").confirm("Start?", True)
+    with pytest.raises(NoValidAnswer, match="input ended"):
+        typed("").ask("SSH user", "pollen", flag="--user")
 
 
 @pytest.mark.sim
@@ -1859,7 +2094,7 @@ def test_install_dry_run_only_says_it_would_set_the_pin(offline, robot, monkeypa
     monkeypatch.setattr(Ui, "ask_secret", lambda self, question: PIN)
     inst.run_install(options(dry_run=True), quiet_ui(yes=True), ROOT)
     assert robot.stdins == [] and PIN_PATH not in robot.dirs
-    assert "would ask for the operator PIN" in capsys.readouterr().out
+    assert "○ Ask for the operator PIN" in capsys.readouterr().out
 
 
 def test_install_rejects_a_weak_pin_then_accepts_a_good_one(offline, robot, monkeypatch):
@@ -1924,7 +2159,7 @@ def test_install_dry_run_never_touches_the_secret_store(offline, robot, monkeypa
     assert not any("roboemot.cli secrets" in c for c in robot.commands)
     assert robot.secrets == {} and robot.stdins == []
     assert f"{DATA}/secrets.json" not in robot.dirs
-    assert "would ask for the secret 'cloud_key'" in capsys.readouterr().out
+    assert "○ Ask for a secret 'cloud_key'" in flat(capsys.readouterr().out)
 
 
 def test_install_without_a_terminal_sets_no_secret_unless_asked(offline, robot):
@@ -1952,7 +2187,7 @@ def test_uninstall_removes_only_the_secrets_the_installer_added(
     robot.dirs.add(DATA)  # a data folder that was there before: the installer leaves it
     robot.secrets = {"mine": "keep-me", "cloud_key": "theirs"}
     key_prompts(monkeypatch)
-    monkeypatch.setattr(Ui, "confirm", lambda self, question, default: False)
+    monkeypatch.setattr(Ui, "confirm", lambda self, question, default, **kw: False)
     install(secrets=["cloud_key", "extra"])
     assert robot.secrets == {"mine": "keep-me", "cloud_key": "theirs", "extra": API_KEY}
     assert json.loads(robot.files[RECORD])["secrets"] == ["extra"]  # cloud_key was not ours
@@ -2003,7 +2238,7 @@ def test_uninstall_dry_run_keeps_the_secrets_and_the_record(offline, robot, monk
     uninstall(dry_run=True)
     assert robot.secrets == {"cloud_key": API_KEY}
     assert json.loads(robot.files[RECORD])["secrets"] == ["cloud_key"]
-    assert "would remove the secrets cloud_key" in capsys.readouterr().out
+    assert "○ Remove the secrets cloud_key" in flat(capsys.readouterr().out)
 
 
 def test_uninstall_ignores_a_tampered_secret_name_in_the_record(offline, robot, monkeypatch):
@@ -2038,7 +2273,7 @@ def test_install_without_a_lock_for_the_robot_python_fails_before_touching_it(
     offline, robot, daemon
 ):
     robot.machine = "aarch64\n3.9"
-    with pytest.raises(WizardError, match="no hash-pinned Piper lock"):
+    with pytest.raises(WizardError, match="No hash-pinned Piper lock"):
         inst.install_piper(
             Ui(False, True),
             ReachyMiniWireless(),
@@ -2060,7 +2295,7 @@ def test_install_dry_run_only_says_it_would_create_the_piper_venv(offline, robot
     inst.run_install(options(dry_run=True, start=False, startup=False), quiet_ui(yes=True), ROOT)
     assert (dict(robot.files), set(robot.dirs)) == before
     assert robot.piper_pips == [] and not any(" -m venv " in c for c in robot.commands)
-    assert f"would create the Piper virtualenv {PIPER_VENV}" in capsys.readouterr().out
+    assert f"○ Create the Piper venv {PIPER_VENV}" in flat(capsys.readouterr().out)
 
 
 def piper_args(robot, dry_run):
@@ -2074,7 +2309,7 @@ def test_piper_dry_run_runs_no_mktemp_copy_or_venv_and_still_rejects_an_unlocked
     assert not any(c.startswith("mktemp") or " -m venv " in c for c in robot.commands)
     assert robot.copies == [] and robot.piper_pips == []
     robot.machine = "aarch64\n3.9"
-    with pytest.raises(WizardError, match="no hash-pinned Piper lock"):
+    with pytest.raises(WizardError, match="No hash-pinned Piper lock"):
         inst.install_piper(*piper_args(robot, True))
 
 
@@ -2129,7 +2364,7 @@ def test_uninstall_dry_run_keeps_the_piper_venv(offline, robot, daemon, capsys):
     capsys.readouterr()
     uninstall(dry_run=True)
     assert PIPER_VENV in robot.dirs
-    assert "would delete the Piper virtualenv" in capsys.readouterr().out
+    assert "○ Delete the Piper venv" in capsys.readouterr().out
 
 
 def test_uninstall_refuses_a_piper_venv_outside_the_data_folder(offline, robot, daemon):

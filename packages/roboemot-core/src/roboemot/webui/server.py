@@ -72,8 +72,12 @@ SECURITY_HEADERS = {
     "Cross-Origin-Resource-Policy": "same-origin",
     "Cache-Control": "no-store",
 }
+# img-src allows data: for the kit's art (ui-kit 0.41+): its glyphs and the corner are inline SVG
+# masks in components.css, and a blocked mask paints nothing. It allows blob: for the Live video
+# preview, which shows each JPEG as an object URL. Scripts, styles and fetches stay same-origin
+# only.
 CSP = (
-    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; "
+    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; "
     "connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; "
     "frame-ancestors {ancestors}"
 )

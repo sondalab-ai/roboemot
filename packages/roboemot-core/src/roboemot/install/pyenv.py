@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 from .record import Versions, canonical, versions
 from .remote import Remote
-from .ui import Ui, WizardError
+from .ui import Ui, WizardError, last_line
 
 PIP_FLAGS = "--disable-pip-version-check --no-cache-dir --no-input"
 LONG_FLAGS = "--progress-bar off"
@@ -85,7 +85,11 @@ class RemotePython:
             cmd = f"printf %s {shlex.quote(stdin)} | {cmd}"
         result = self._shell(cmd, announce, pip_progress_line, slow, report)
         if check and not result.ok:
-            raise WizardError(f"pip {args.split()[0]} failed on the robot:\n{result.output}")
+            raise WizardError(
+                f"pip {args.split()[0]} failed on the robot",
+                last_line(result.output),
+                output=result.output,
+            )
         return result
 
     def _shell(
@@ -154,7 +158,7 @@ class RemotePython:
             f"install {LONG_FLAGS} {PIP_FLAGS} {c}{_join(targets)}",
             stdin=constraints,
             check=False,
-            announce="installing Python packages",
+            announce="Installing Python packages",
             report=report,
         )
 
@@ -164,7 +168,7 @@ class RemotePython:
         return self._pip(
             f"{args} {shlex.quote(lock_file)}",
             check=False,
-            announce="installing Python packages",
+            announce="Installing Python packages",
             report=report,
         )
 
@@ -172,14 +176,14 @@ class RemotePython:
         """Same version numbers on a reinstall: force our wheels in, dependencies untouched."""
         self._pip(
             f"install {LONG_FLAGS} --no-deps --force-reinstall {PIP_FLAGS} {_join(files)}",
-            announce="reinstalling the app wheels",
+            announce="Reinstalling the app wheels",
         )
 
     def uninstall(self, names: list[str]) -> None:
         if names:
             self._pip(
                 f"uninstall --yes {LONG_FLAGS} {PIP_FLAGS} {_join(names)}",
-                announce="uninstalling Python packages",
+                announce="Uninstalling packages",
                 slow=False,
             )
 
@@ -189,7 +193,7 @@ class RemotePython:
             reqs = [f"{n}=={v}" for n, v in sorted(pins.items())]
             self._pip(
                 f"install {LONG_FLAGS} --no-deps {PIP_FLAGS} {_join(reqs)}",
-                announce="restoring the original package versions (needs internet)",
+                announce="Restoring package versions",
             )
 
     def find_modules(self, modules: list[str]) -> dict[str, list[str]]:

@@ -5,7 +5,7 @@
    function, and reading its numbers as bytes gave black (spexr, 0.15.0). So
    it is painted on a one-pixel 2D canvas, which converts any CSS colour to
    sRGB, and the pixel is read back. One canvas per document. isChromatic()
-   below is the exception, and says why; effects.js uses it for ink. */
+   below is the exception, and says why. */
 
 const swatches = new WeakMap();
 
