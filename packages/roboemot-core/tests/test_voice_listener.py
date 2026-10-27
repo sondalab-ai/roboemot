@@ -798,6 +798,7 @@ def test_realtime_block_has_stage_costs_lag_and_dropped_audio():
         "asr_accept",
         "asr_start",
         "asr_finish",
+        "asr_decode",
         "bargein",
         "grammar_wait",
         "handoff",

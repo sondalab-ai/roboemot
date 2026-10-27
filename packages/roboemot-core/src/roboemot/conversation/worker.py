@@ -161,6 +161,7 @@ class _Turn:
     rt_tools: bool = False  # a skill ran in this realtime turn: it is never answered again
     rt_round: tuple[list[ToolCall], list[ToolOutcome], int] | None = None  # round in flight
     rt_run: Any = None  # the ResponseRun of that round
+    rt_audio: bool = False  # the server's own items of the utterance's audio were answered
 
 
 @dataclass
@@ -328,16 +329,27 @@ class ConversationWorker:
             _, gen = self.transcript.begin(
                 "user", utterance.text.strip(), utterance.language or cfg.conversation.language
             )
+        replaced = []
         with self._lock:
             while len(self._pending) >= limit:
-                self._pending.popleft()
+                replaced.append(self._pending.popleft()[0])
                 self._counts["replaced"] += 1
             self._pending.append((utterance, gen))
+        for old in replaced:
+            self._drop_audio(old)  # never answered: the server must not answer it either
         loop, wake = self._loop, self._wake
         if loop is not None and wake is not None:
             with contextlib.suppress(RuntimeError):
                 loop.call_soon_threadsafe(wake.set)
         return True
+
+    def _drop_audio(self, utterance: Utterance) -> None:
+        """Delete the server's user items of an utterance's audio (the realtime route's audio
+        input) that no realtime response answered: otherwise the next ``response.create``
+        would answer it (SPEC 8, Realtime speech route)."""
+        if utterance.realtime is not None and self.realtime is not None:
+            generation, items = utterance.realtime
+            self.realtime.delete_items(generation, list(items))
 
     @staticmethod
     def _only_stop(utterance: Utterance, cfg: RoboEmotConfig) -> bool:
@@ -641,6 +653,8 @@ class ConversationWorker:
         finally:
             self._inner = None
             self.phase.end_thinking()
+            if not turn.rt_audio:
+                self._drop_audio(utterance)
         self._finish(turn)
 
     # ----------------------------------------------------------------- realtime route
@@ -651,6 +665,8 @@ class ConversationWorker:
         realtime mode that is not ready is a fallback at start (the local pipeline answers)."""
         route = self.realtime
         if route is None or not turn.cfg.voice.realtime_route.enabled:
+            return False
+        if turn.utterance.local_only:  # its audio went, no transcript came: the chat routes
             return False
         loop = asyncio.get_running_loop()
         try:
@@ -766,10 +782,19 @@ class ConversationWorker:
                     rt_protocol.function_tools(tools) if tools else [],
                 )
             )
-            item = route.new_item_id()
-            if not sent or not route.send(rt_protocol.text_item(turn.utterance.text, item)):
+            if not sent:
                 return False
-            turn.rt_items.append(item)
+            audio = turn.utterance.realtime
+            if audio is not None and audio[0] == route.generation:
+                # the server heard the audio: its own user items hold the words, answered by
+                # the response below (no input_text: the words would be there twice)
+                turn.rt_items += list(audio[1])
+                turn.rt_audio = True
+            else:  # text input, or the session that heard the audio is gone: the words as text
+                item = route.new_item_id()
+                if not route.send(rt_protocol.text_item(turn.utterance.text, item)):
+                    return False
+                turn.rt_items.append(item)
             route.count("utterances_sent")
             turn.stamps["request"] = self.clock()
             self.phase.begin_thinking()
