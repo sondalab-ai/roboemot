@@ -56,6 +56,7 @@ import importlib.util
 import itertools
 import json
 import logging
+import math
 import os
 import tempfile
 import threading
@@ -995,8 +996,14 @@ class RealtimeRoute:
             return
         try:
             data = json.loads(path.read_text())
-            self._upload_day = dt.date.fromisoformat(data["day"])
-            self._upload_s = float(data["seconds"])
+            day = dt.date.fromisoformat(data["day"])
+            seconds = data["seconds"]
+            number = isinstance(seconds, int | float) and not isinstance(seconds, bool)
+            if not number or not math.isfinite(seconds) or seconds < 0:
+                raise ValueError("upload seconds")  # a value that would open the cap
+            # a stored day after today (a clock that jumped forward, then back) is today: its
+            # seconds count until the date really moves forward
+            self._upload_day, self._upload_s = min(day, self._today()), float(seconds)
         except (OSError, ValueError, KeyError, TypeError) as exc:
             log.warning("realtime route: upload count unreadable (%s): today counts as spent",
                         type(exc).__name__)  # fmt: skip
@@ -1014,7 +1021,8 @@ class RealtimeRoute:
             try:
                 with os.fdopen(fd, "w") as handle:
                     os.fchmod(handle.fileno(), UPLOAD_FILE_MODE)
-                    handle.write(json.dumps({"day": day.isoformat(), "seconds": seconds}))
+                    record = {"day": day.isoformat(), "seconds": seconds}
+                    handle.write(json.dumps(record, allow_nan=False))
                     handle.flush()
                     os.fsync(handle.fileno())
                 os.replace(tmp, path)
@@ -1022,7 +1030,7 @@ class RealtimeRoute:
                 with contextlib.suppress(OSError):
                     tmp.unlink()
                 raise
-        except OSError as exc:
+        except (OSError, ValueError) as exc:  # ValueError: a count that is not finite
             log.warning("realtime route: upload count not saved (%s)", type(exc).__name__)
 
     def upload_left_s(self, cfg: RoboEmotConfig) -> float:

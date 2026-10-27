@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import datetime as dt
 
+import pytest
 from roboemot.config import ConfigStack
 from roboemot.health.network import NetworkMonitor
 from roboemot.realtime import protocol
@@ -359,3 +360,53 @@ def test_a_reconnect_keeps_the_day_upload_count():
     r.close_soon("conversation_end")
     assert r.ready()
     assert r.send_audio(SECOND, gate="addressed", instructions="") == "upload_budget"
+
+
+# ------------------------------------------------------------------ fix round 2
+
+
+@pytest.mark.parametrize(
+    "seconds", ["-1e9", "NaN", "Infinity", "-Infinity", '"two"', "[1]", "true", "null"]
+)
+def test_a_count_that_is_not_a_finite_non_negative_number_counts_the_day_as_spent(
+    tmp_path, seconds
+):
+    """I-N3: a stored value that would open the cap fails closed."""
+    import json
+
+    path = tmp_path / "realtime_upload.json"
+    path.write_text('{"day": "2026-10-27", "seconds": ' + seconds + "}")
+    stack = audio_stack({"daily_upload_budget_s": 2.5})
+    r, _ = audio_route(stack, Day(), upload_path=path)
+    assert r.ready()
+    assert r.send_audio(SECOND, gate="addressed", instructions="") == "upload_budget"
+    snap = r.snapshot()
+    assert snap["upload_s_today"] == 2.5
+    json.dumps(snap, allow_nan=False)  # strict JSON
+
+
+def test_the_count_is_written_as_strict_json(tmp_path):
+    import json
+
+    path = tmp_path / "realtime_upload.json"
+    stack = audio_stack()
+    r, _ = audio_route(stack, Day(), upload_path=path)
+    assert r.ready()
+    assert r.send_audio(SECOND, gate="addressed", instructions="") is None
+    json.loads(path.read_text(), parse_constant=lambda c: pytest.fail(f"non-strict {c}"))
+    r._save_upload(dt.date(2026, 10, 27), float("nan"))  # never written
+    assert json.loads(path.read_text())["seconds"] == 1.0
+
+
+def test_a_future_dated_count_is_today_with_its_seconds(tmp_path):
+    """A stored day after today (a clock that jumped forward, then back) is taken as today:
+    its seconds still count, but only until the date really moves forward."""
+    path = tmp_path / "realtime_upload.json"
+    path.write_text('{"day": "2099-01-01", "seconds": 2.0}')
+    stack = audio_stack({"daily_upload_budget_s": 2.5})
+    today = Day()
+    r, _ = audio_route(stack, today, upload_path=path)
+    assert r.ready()
+    assert r.send_audio(SECOND, gate="addressed", instructions="") == "upload_budget"
+    today.day += dt.timedelta(days=1)
+    assert r.send_audio(SECOND, gate="addressed", instructions="") is None
