@@ -199,9 +199,24 @@ class RealtimeClient:
 
     def connect(self, session_update: dict[str, Any]) -> bool:
         """Open a session and wait for ``session.updated`` (blocking; never call it from the
-        client thread). False on any failure, with ``reason`` set to a code."""
+        client thread). False on any failure, with ``reason`` set to a code. The wait is bounded
+        by ``connect_timeout_s`` (plus ``send_timeout_s`` for the socket's own close): a close
+        from another thread stops the loop, and the connect's future would never resolve."""
         self.start()
-        return bool(self._submit(self._connect(session_update)).result())
+        future = self._submit(self._connect(session_update))
+        s = self.settings
+        try:
+            return bool(future.result(s.connect_timeout_s + s.send_timeout_s))
+        except (concurrent.futures.TimeoutError, concurrent.futures.CancelledError):
+            future.cancel()
+            with self._lock:
+                fire = self.state != "closed"
+                if fire:
+                    self._failures["connect_timeout"] += 1
+                    self.state, self.reason = "closed", "connect_timeout"
+            if fire:
+                self._closed_cb("connect_timeout")
+            return False
 
     def send(self, event: dict[str, Any]) -> concurrent.futures.Future[bool]:
         """Queue a client event (thread-safe). The future is True once it is written, False when

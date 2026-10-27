@@ -76,6 +76,7 @@ from ..realtime.turn import (
     line_instructions,
     replay_block,
     truncate_played,
+    wait_in_order,
 )
 from ..skills import Skill, SkillContext, SkillRegistry, ToolOutcome, execute
 from ..voice.keywords import normalise
@@ -742,6 +743,12 @@ class ConversationWorker:
         route, conv = self.realtime, turn.cfg.conversation
         assert self._rt_lock is not None
         async with self._rt_lock:
+            # nothing goes to a session an abandoned request still holds: wait it out first
+            # (an expiry resets it), then make sure a session is up for this turn
+            await wait_in_order(route, self.clock)
+            loop = asyncio.get_running_loop()
+            if not route.up() and not await loop.run_in_executor(None, route.ready, turn.cfg):
+                return False
             turn.rt_gen = route.generation
             turn.route = route.settings(turn.cfg).route
             offered = self._offer(turn)
@@ -783,6 +790,7 @@ class ConversationWorker:
                     language=turn.language,
                     clock=self.clock,
                     on_call=on_call,
+                    input_chars=len(turn.utterance.text),
                 )
                 round_from = len(turn.spoken)
                 turn.rt_round = (calls, results, round_from)
@@ -800,11 +808,14 @@ class ConversationWorker:
                     return self._realtime_lost(turn)
                 if turn.cut:
                     self._cut_realtime(turn)
+                ended = turn.cut or any(r.end_turn for r in results)
                 for call, result in zip(calls, results, strict=True):
                     out_id = route.new_item_id()
-                    route.send(rt_protocol.function_output(call.id, result.content, out_id))
+                    if not route.send(rt_protocol.function_output(call.id, result.content, out_id)):
+                        if ended:
+                            break  # no response follows: nothing is lost
+                        return self._realtime_lost(turn)  # a skill ran: B1 (cut, Piper line)
                     turn.rt_items.append(out_id)
-                ended = turn.cut or any(r.end_turn for r in results)
                 if ended or not calls:
                     if turn.rounds and not (ended or turn.spoken):
                         turn.outcome = "no_text"

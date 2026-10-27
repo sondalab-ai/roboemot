@@ -287,3 +287,32 @@ def test_unknown_events_neither_reach_the_handler_nor_keep_a_response_alive(even
             assert not any(isinstance(e, protocol.Unknown) for e in events)
         finally:
             c.close()
+
+
+def test_closing_a_connecting_client_never_hangs_the_connect():
+    """The loop stops under a connect in flight (a close from another thread): ``connect``
+    returns False within its bound instead of waiting forever."""
+    import asyncio
+    import threading
+    import time
+
+    client = RealtimeClient(
+        route("http://127.0.0.1:9/v1"),
+        settings(connect_timeout_s=0.3, send_timeout_s=0.1),
+        DirectSession(),
+        auth_headers=dict,
+    )
+
+    async def hang(update):
+        await asyncio.Event().wait()
+
+    client._connect = hang  # type: ignore[method-assign]
+    result = []
+    thread = threading.Thread(target=lambda: result.append(client.connect(UPDATE)), daemon=True)
+    started = time.monotonic()
+    thread.start()
+    time.sleep(0.05)
+    client.close()  # stops the loop: the connect's future never resolves
+    thread.join(5)
+    assert result == [False] and time.monotonic() - started < 2
+    assert client.state == "closed" and client.reason == "closed"  # its close, reported once

@@ -274,3 +274,19 @@ async def test_a_run_on_a_session_closed_by_a_reload_falls_back_at_once():
     assert asyncio.get_running_loop().time() - t0 < 0.2
     assert reply.closed == "reconfigured"
     assert route._live == {} and not route.busy() and charged == [10]
+
+
+async def test_the_estimate_counts_the_utterance_too(monkeypatch):
+    """As the old worker estimate did: instructions + utterance + reply, chars / 4."""
+    route, sent = connected_route()
+    charged = []
+    monkeypatch.setattr(route, "charge", charged.append)
+    monkeypatch.setattr(route, "timeouts", lambda: (2.0, 0.05))
+    run = make_run(route, Speech(), input_chars=40)
+    task = asyncio.ensure_future(run.run("x" * 400))
+    await until(lambda: creates(sent))
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    await asyncio.sleep(0.06)
+    route.expire()
+    assert charged == [110]

@@ -39,9 +39,12 @@ is only counted. ``response.created`` binds the oldest request in flight (the se
 order, and a new request waits until no abandoned one is in flight, ``busy``); every later
 event goes to the run that owns its ``response_id`` and is dropped (counted) otherwise. A run cut
 by a barge-in abandons its request: its response is cancelled and its ``response.done`` charged
-then; an abandoned request that never gets its ``response.created`` expires on the next
-``response.done`` or after the route's ``stall_timeout_s``. Nothing here logs or reports a key, a
-URL's path or query, text, audio or an identifier (SPEC 12).
+then. A new request waits while an abandoned one is in flight (``turn.wait_in_order``, before
+the turn's first send and before each ``response.create``); past the route's
+``stall_timeout_s`` with no event it calls ``expire``, and one that never got its
+``response.created`` resets the session. A detached session's requests are settled at the
+detach (charged once, their runs ended ``closed``): its close comes later, or never. Nothing
+here logs or reports a key, a URL's path or query, text, audio or an identifier (SPEC 12).
 """
 
 from __future__ import annotations
@@ -157,6 +160,7 @@ class RealtimeRoute:
         self.stack, self._router, self.network, self.provider = stack, router, network, provider
         self._client_factory = client_factory
         self._extra = extra
+        self._extra_ok = False  # the extra is installed (read outside _lock, used under it)
         self.clock = clock
         self._lock = threading.Lock()  # the session state machine (see the module docstring)
         self._connect_lock = threading.Lock()  # one connect at a time, held across the network
@@ -205,9 +209,9 @@ class RealtimeRoute:
         the session is on a cloud host (SPEC 12). A connect in flight sees the new revision and
         checks again before it stores its session."""
         route = self.route(cfg)
-        self.network.set_realtime(
-            self.blocked(cfg) is None, route_endpoint(route) if route is not None else None
-        )
+        self._extra_ok = self._extra()  # find_spec takes the import lock: never under _lock
+        endpoint = route_endpoint(route) if route is not None else None
+        self.network.set_realtime(self.blocked(cfg, self._extra_ok) is None, endpoint)
         with self._lock:
             self._rev += 1
             stale = self._client is not None and not self._fits(cfg, self._client)
@@ -222,7 +226,7 @@ class RealtimeRoute:
         host is local."""
         cloud = client.snapshot().get("local") is not True
         return (
-            self.blocked(cfg) is None
+            self.blocked(cfg, self._extra_ok) is None
             and client.route == self.route(cfg)
             and not (cfg.privacy.pseudonyms_to_cloud and cloud)
         )
@@ -245,8 +249,9 @@ class RealtimeRoute:
         name = self.settings(cfg).route
         return next((r for r in (cfg or self.stack.effective()).llm_routes if r.name == name), None)
 
-    def blocked(self, cfg: RoboEmotConfig) -> str | None:
-        """Why the route cannot answer now (a ``BLOCKS`` code), or None when it may."""
+    def blocked(self, cfg: RoboEmotConfig, extra: bool | None = None) -> str | None:
+        """Why the route cannot answer now (a ``BLOCKS`` code), or None when it may; ``extra``
+        is whether the realtime extra is installed (looked up when None)."""
         rt = cfg.voice.realtime_route
         if not rt.enabled:
             return "off"
@@ -255,7 +260,7 @@ class RealtimeRoute:
             return "no_route"
         if rt.input == "audio":
             return "no_opt_in"  # audio input has its own opt-in (not built yet): fail closed
-        if not self._extra():
+        if not (self._extra() if extra is None else extra):
             return "no_extra"
         if self.provider is None:
             return "provider"
@@ -300,7 +305,8 @@ class RealtimeRoute:
         with self._lock:
             closes = self._closes  # a close from now on means no session for this call
         cfg = cfg or self.stack.effective()
-        reason = self.blocked(cfg)
+        self._extra_ok = self._extra()
+        reason = self.blocked(cfg, self._extra_ok)
         route = self.route(cfg)
         self.network.set_realtime(
             reason is None, route_endpoint(route) if route is not None else None
@@ -555,14 +561,15 @@ class RealtimeRoute:
     # ----------------------------------------------------------------- responses
 
     def request(
-        self, run: Any, instructions: str, tool_choice: str | None = None
+        self, run: Any, instructions: str, tool_choice: str | None = None, *, input_chars: int = 0
     ) -> Request | None:
         """Send ``response.create`` for ``run`` (its ``deliver``/``closed`` get the response's
         events) through the send gate; None when there is no session or the gate refuses it
-        (nothing is sent)."""
+        (nothing is sent). ``input_chars`` (the utterance) counts in its first estimate."""
         now = self.clock()
         event_id = f"{EVENT_PREFIX}{next(self._events)}"
-        req = Request(event_id, run, now, len(instructions) // CHARS_PER_TOKEN, last_event=now)
+        estimate = (len(instructions) + input_chars) // CHARS_PER_TOKEN
+        req = Request(event_id, run, now, estimate, last_event=now)
         event = protocol.response_create(instructions, tool_choice, event_id=event_id)  # type: ignore[arg-type]
 
         def track() -> None:  # under _lock, with the send

@@ -495,3 +495,54 @@ def test_a_refused_response_leaves_no_item_and_the_turn_is_replayed(rigs):
         rig.turn("seconda domanda")
         assert "prima domanda" in response_creates(srv)[-1]["response"]["instructions"]
         assert len(srv.connections) == 1  # the refusal did not stall and drop the session
+
+
+# ------------------------------------------------------------------ fix round 4
+
+
+def test_a_function_output_that_cannot_be_sent_ends_the_turn_per_b1(rigs, monkeypatch):
+    """The tool ran; its result cannot be sent (the gate refused it, the session went): no
+    further response is asked, the turn is cut and Piper says the fallback line."""
+    play = '{"gesture": "joy"}'
+    with TurnServer(["tool", "reply"], tool_name="play", tool_args=play) as srv:
+        rig, env = tooled(rigs, srv)
+        send = rig.route.send
+
+        def refusing(event):
+            if event.get("item", {}).get("type") == "function_call_output":
+                return False
+            return send(event)
+
+        monkeypatch.setattr(rig.route, "send", refusing)
+        rig.turn()
+        assert env.played == ["joy"]
+        assert len(response_creates(srv)) == 1  # no response on a result never sent
+        assert rig.chat_hosts() == []
+        assert wait_for(lambda: len(rig.speech.backend.texts) == 1)  # the fallback line
+        assert rig.route.snapshot()["cut_mid_turn"] == 1
+
+
+def test_a_turn_waits_out_an_abandoned_request_before_it_sends_anything(rigs):
+    """An abandoned request is still in flight (no response.created yet): the turn waits for
+    it before session.update and its text, the expiry resets the session, and the turn is
+    answered on the new one (not spent on the old session)."""
+    route = {"first_token_timeout_s": 10, "stall_timeout_s": 0.3}
+    with TurnServer(["silent", "reply"]) as srv:
+        rig = rigs(srv, route=rt_route(srv, **route))
+        assert rig.route.ready()
+
+        class Dummy:
+            def deliver(self, event):
+                pass
+
+            def closed(self, reason):
+                pass
+
+        req = rig.route.request(Dummy(), "x")
+        rig.route.abandon(req, 0)
+        assert wait_for(lambda: len(response_creates(srv)) == 1)
+        rig.turn()
+        assert rig.route.snapshot()["resets"] == 1 and len(srv.connections) == 2
+        assert rig.chat_hosts() == []  # answered through the route
+        assert rig.events[-1]["route"] == "rt"
+        assert len(srv.of("conversation.item.create")) == 1  # the text went once, on the new one

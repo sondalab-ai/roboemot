@@ -80,7 +80,8 @@ class _Closed:
 class ResponseRun:
     """One response (see the module docstring). ``speech`` is the ``SpeechOutput``;
     ``utterance``, ``mood``, ``volume_db`` and ``language`` are the answer's speech job group
-    and delivery; ``on_call`` runs a tool call and returns whether it ends the turn.
+    and delivery; ``on_call`` runs a tool call and returns whether it ends the turn;
+    ``input_chars`` is the rest of what the response reads (the utterance), for its estimate.
 
     The route correlates the events (``RealtimeRoute.request``): this run gets only its own
     response's events, starting with its ``response.created``, and a refusal (an ``error``
@@ -100,6 +101,7 @@ class ResponseRun:
         language: str,
         clock: Callable[[], float],
         on_call: Callable[[protocol.FunctionCall], Awaitable[bool]] | None = None,
+        input_chars: int = 0,
     ) -> None:
         self.route, self.speech = route, speech
         self.utterance, self.mood, self.volume_db, self.language = (
@@ -110,6 +112,7 @@ class ResponseRun:
         )
         self.clock = clock
         self.on_call = on_call
+        self.input_chars = input_chars
         self.reply = Reply()
         self._lock = threading.Lock()
         self._feeds: dict[str | None, StreamFeed] = {}
@@ -132,13 +135,10 @@ class ResponseRun:
         self._queue = asyncio.Queue()
         self._instructions = instructions
         first, stall = self.route.timeouts()
-        waited = self.clock()
-        while self.route.busy():  # an abandoned request is still in flight: order matters
-            if self.clock() - waited >= stall:
-                self.route.expire()
-                break
-            await asyncio.sleep(BUSY_POLL_S)
-        req = self._request = self.route.request(self, instructions, tool_choice)
+        await wait_in_order(self.route, self.clock)
+        req = self._request = self.route.request(
+            self, instructions, tool_choice, input_chars=self.input_chars
+        )
         if req is None:
             self.reply.closed = "no_session"
             return self.reply
@@ -178,7 +178,8 @@ class ResponseRun:
         return self.reply
 
     def _estimate(self) -> int:
-        return (len(self._instructions) + len(self.reply.text())) // CHARS_PER_TOKEN
+        chars = len(self._instructions) + self.input_chars + len(self.reply.text())
+        return chars // CHARS_PER_TOKEN
 
     def _abandon(self) -> None:
         if self._request is not None and not self.reply.abandoned and self.reply.status is None:
@@ -267,6 +268,19 @@ class ResponseRun:
             job = next((j for j, item in self.reply.jobs if item == event.item_id), None)
         if job is not None:
             self.speech.mark_question(job)
+
+
+async def wait_in_order(route: Any, clock: Callable[[], float]) -> None:
+    """Wait while an abandoned request is still in flight (correlation is by order), at most
+    the route's ``stall_timeout_s``; past it the route expires it (and may reset the session:
+    the caller then needs ``ready()``)."""
+    _, stall = route.timeouts()
+    waited = clock()
+    while route.busy():
+        if clock() - waited >= stall:
+            route.expire()
+            return
+        await asyncio.sleep(BUSY_POLL_S)
 
 
 def truncate_played(
