@@ -156,6 +156,7 @@ class RealtimeClient:
         self._dropping: asyncio.Future[None] | None = None
         self._sending = False  # a write is in flight (a socket lost meanwhile is a stuck send)
         self._target: ConnectTarget | None = None
+        self._refused_host: str | None = None  # the connect host the key was refused for
         self._platform_id_sent = False  # the last allocation request carried the identifier
         self.state = "idle"
         self.reason: str | None = None
@@ -258,6 +259,7 @@ class RealtimeClient:
                 "state": self.state,
                 "reason": self.reason,
                 "endpoint": target.origin if target else None,
+                "refused_host": self._refused_host,  # url_key_host: a host only, never a path
                 "local": target.local if target else None,
                 "key_sent": target.send_key if target else False,
                 "platform_id_sent": self._platform_id_sent,
@@ -301,6 +303,7 @@ class RealtimeClient:
         await self._close(None)
         with self._lock:
             self.state, self.reason, self._target = "connecting", None, None
+            self._refused_host = None
             self._counts["connects"] += 1
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.settings.connect_timeout_s
@@ -322,6 +325,8 @@ class RealtimeClient:
             log.warning("realtime route %s: its key is not available", self.route.name)
             self._fail("key_unavailable")
         except UrlRefused as exc:
+            with self._lock:
+                self._refused_host = exc.host
             log.warning(
                 "realtime route %s: connect URL refused (%s)%s",
                 self.route.name,

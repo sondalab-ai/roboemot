@@ -150,6 +150,25 @@ def select_provider(cfg: RoboEmotConfig, robot_id: str, manifest: Any) -> Sessio
     return provider
 
 
+def session_update(cfg: RoboEmotConfig, instructions: str, tools: Any = None) -> dict[str, Any]:
+    """``session.update``: the instructions (parts 1 to 4), PCM in at the robot's rate and out
+    at the server's own, the voice, server VAD that never answers or interrupts on its own and
+    ends a turn after ``server_silence_ms``, and the tools (left as they are when None). The
+    route and the realtime check (``realtime.check``) send the same one."""
+    rt, vad = cfg.voice.realtime_route, cfg.voice.vad
+    return protocol.session_update(
+        instructions=instructions,
+        input_rate_hz=cfg.voice.sample_rate_hz,
+        output_rate_hz=None,
+        voice=rt.voice or None,
+        vad_threshold=vad.threshold,
+        silence_ms=round(rt.server_silence_ms),
+        create_response=False,
+        interrupt_response=False,
+        tools=tools,
+    )
+
+
 def realtime_extra() -> bool:
     """Whether the ``realtime`` extra (``websockets``) is installed."""
     return importlib.util.find_spec("websockets") is not None
@@ -564,22 +583,8 @@ class RealtimeRoute:
         return client
 
     def session_update(self, cfg: RoboEmotConfig, instructions: str, tools: Any = None) -> Any:
-        """``session.update``: the instructions (parts 1 to 4), PCM in at the robot's rate and
-        out at the server's own, the voice, server VAD that never answers or interrupts on its
-        own and ends a turn after ``server_silence_ms``, and the tools (left as they are when
-        None)."""
-        rt, vad = cfg.voice.realtime_route, cfg.voice.vad
-        return protocol.session_update(
-            instructions=instructions,
-            input_rate_hz=cfg.voice.sample_rate_hz,
-            output_rate_hz=None,
-            voice=rt.voice or None,
-            vad_threshold=vad.threshold,
-            silence_ms=round(rt.server_silence_ms),
-            create_response=False,
-            interrupt_response=False,
-            tools=tools,
-        )
+        """``session.update`` for this route (:func:`session_update`)."""
+        return session_update(cfg, instructions, tools)
 
     def _set_state(self, state: str, reason: str | None) -> None:
         with self._lock:
