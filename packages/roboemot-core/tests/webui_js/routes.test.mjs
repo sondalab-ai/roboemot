@@ -488,3 +488,11 @@ test("route edit: a refused locality step unbinds nothing", async () => {
   await answerPin(page);
   assert.deepEqual(rec.order.map((s) => s.label), ["locality"]);
 });
+
+test("routes: a chat check report adds no realtime list and no empty node", async () => {
+  const report = { ok: true, error: "", checked_at: "2026-10-27T10:00:00+00:00", checks: [{ name: "streaming", status: "pass", reason: "" }] };
+  const page = await formsPage([{ ...ROUTE, last_check: report }]);
+  const card = [...page.document.querySelectorAll("section.sl-card")].find((c) => c.querySelector("h2").textContent === "lan");
+  const box = card.querySelector("[role=status]");
+  assert.equal(box.childNodes.length, 2, "the verdict line and the check list only");
+});

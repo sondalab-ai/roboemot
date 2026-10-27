@@ -752,13 +752,13 @@ async function routesView() {
   // A realtime check names hosts and outcome codes only (SPEC 8, 12): shown as they come.
   const shown = (v) => (v === null || v === undefined ? "-" : String(v));
   const realtimeFacts = (report) => report.kind !== "realtime" ? [] :
-    el("ul", {}, REALTIME_FACTS.map((f) => el("li", {}, t("rt_" + f) + ": " + shown(report[f]))));
+    [el("ul", {}, REALTIME_FACTS.map((f) => el("li", {}, t("rt_" + f) + ": " + shown(report[f]))))];
   const show = (box, report) => {
     const head = report.error ? t("route_error_" + report.error) : t(report.ok ? "route_ok" : "route_failed");
     box.replaceChildren(
       el("p", {}, head + " " + t("route_at", { at: report.checked_at })),
       el("ul", {}, report.checks.map(verdict)),
-      realtimeFacts(report));
+      ...realtimeFacts(report));
   };
   const cards = data.routes.map((r) => {
     const box = el("div", { role: "status" });
