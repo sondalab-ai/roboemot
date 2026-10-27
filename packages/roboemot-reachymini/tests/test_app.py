@@ -65,7 +65,9 @@ def test_run_fills_a_json_ready_diagnostics_registry(tmp_path, monkeypatch):
     for name in ("system", "temperatures", "battery", "process", "roboemot.motion"):
         assert sections[name]["ok"], (name, sections[name])
     assert {"robot.daemon", "robot.motors", "robot.state", "robot.app"} <= set(sections)
-    assert sections["roboemot.network"]["data"] == {"online": True, "routes": {}}
+    network = sections["roboemot.network"]["data"]
+    assert network["online"] is True and network["routes"] == {}
+    assert network["realtime"]["counted"] is False  # realtime mode is off (SPEC 12A, Links)
     assert sections["roboemot.app"]["data"]["manifest"] == "reachy-mini-wireless"
     assert sections["process"]["data"]["processes"][0]["pid"] > 0
 

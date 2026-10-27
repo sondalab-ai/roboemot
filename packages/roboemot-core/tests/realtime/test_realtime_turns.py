@@ -282,3 +282,131 @@ def test_an_unrequested_response_is_cancelled_and_counted(rigs):
         assert rig.route.ready()
         assert wait_for(lambda: rig.route.snapshot()["unrequested"] == 1)
         assert wait_for(lambda: srv.of("response.cancel"))
+
+
+# ------------------------------------------------------------------ review round 1
+
+
+def test_a_barge_in_charges_the_cancelled_responses_usage(rigs):
+    with TurnServer(deltas=30, delta_ms=100, gap_s=0.05) as srv:
+        rig = rigs(srv)
+        n = rig.say()
+        assert wait_for(lambda: rig.sink.pushed and rig.speech.stream_progress(1) is not None)
+        barge_in(rig)
+        assert wait_for(lambda: rig.worker.snapshot().get("turns", 0) >= n)
+        assert wait_for(lambda: rig.route.snapshot()["responses"].get("cancelled") == 1)
+        assert rig.hub.router.used("rt") == 42  # the usage of response.done, not an estimate
+
+
+def test_the_realtime_link_recovers_with_the_default_policy(rigs):
+    with TurnServer() as srv:
+        rig = rigs(srv)
+        rig.network.set_routes([r for r in rig.stack.effective().llm_routes if r.name == "rt"])
+        for _ in range(rig.network.policy.failures_to_offline):
+            rig.network.report_realtime(False)
+        assert not rig.network.online
+        rig.turn()  # one connect and one finished response: two successes
+        assert rig.network.online
+
+
+# ------------------------------------------------------------------ fixed lines
+
+
+def test_the_offline_cue_uses_the_server_voice_while_the_route_is_up(rigs):
+    from roboemot.config.schema import RegisterParams
+    from roboemot.health.speech_cue import SpeechCue
+
+    with TurnServer() as srv:
+        rig = rigs(srv)
+        assert rig.route.ready()
+        cue = SpeechCue(
+            lambda: rig.speech,
+            lambda: (RegisterParams(), StateEffects(), "joy", 0.5),
+            lambda: False,
+            rig.worker.say_line,
+        )
+        assert cue.say("Sono senza rete.", "it")
+        assert wait_for(lambda: response_creates(srv))
+        assert "Sono senza rete." in response_creates(srv)[0]["response"]["instructions"]
+        assert rig.speech.backend.texts == []  # Piper said nothing
+
+
+def test_the_offline_cue_uses_piper_while_the_route_is_down(rigs):
+    from roboemot.config.schema import RegisterParams
+    from roboemot.health.speech_cue import SpeechCue
+
+    with TurnServer() as srv:
+        rig = rigs(srv, extra=False)
+        cue = SpeechCue(
+            lambda: rig.speech,
+            lambda: (RegisterParams(), StateEffects(), "joy", 0.5),
+            lambda: False,
+            rig.worker.say_line,
+        )
+        assert cue.say("Sono senza rete.", "it")
+        assert wait_for(lambda: rig.speech.backend.texts == ["Sono senza rete."])
+
+
+def test_a_confirmation_reply_line_is_spoken_in_the_server_voice(rigs):
+    args = '{"key": "colore", "value": "blu"}'
+    script = ["tool", "reply", "reply"]
+    with TurnServer(script, tool_name="remember_preference", tool_args=args, deltas=1) as srv:
+        store = Store()
+        rig, _ = tooled(rigs, srv, store=store)
+        rig.turn()
+        pending = rig.worker._confirm
+        assert pending is not None
+        assert wait_for(lambda: (rig.speech.ended_at(pending.job) or 1e18) < time.monotonic())
+        rig.turn("sì", stamp=time.monotonic() + 1.0)
+        assert store.saved == [("p1", "colore", "blu")]
+        creates = response_creates(srv)
+        assert len(creates) == 3 and creates[2]["response"]["tool_choice"] == "none"
+        assert rig.speech.backend.texts == []  # every line in the server voice
+
+
+def test_a_line_falls_back_to_piper_when_the_session_drops_before_it(rigs):
+    args = '{"key": "colore", "value": "blu"}'
+    script = ["tool", "close_before"]
+    with TurnServer(script, tool_name="remember_preference", tool_args=args) as srv:
+        rig, _ = tooled(rigs, srv, store=Store())
+        rig.turn()
+        assert wait_for(lambda: any("blu" in t for t in rig.speech.backend.texts))
+        assert rig.worker._confirm is not None  # pending on the Piper sentence
+
+
+# ------------------------------------------------------------------ pseudonyms (SPEC 12)
+
+
+class CloudAllocator:
+    """A provider that allocates a cloud host for a local base_url."""
+
+    key_hosts = ()
+
+    def __init__(self):
+        self.calls = 0
+
+    async def allocate(self, request):
+        from roboemot.realtime.session import Allocation
+
+        self.calls += 1
+        return Allocation("wss://rt.example.com/v1/realtime")
+
+
+def test_pseudonyms_refuse_a_cloud_host_a_provider_allocated(rigs):
+    with TurnServer() as srv:
+        provider = CloudAllocator()
+        rig = rigs(srv, provider=provider, app={"privacy": {"pseudonyms_to_cloud": True}})
+        rig.turn()
+        assert provider.calls == 1
+        assert rig.chat_hosts() == ["lan.local"]  # the local pipeline answered
+        snap = rig.route.snapshot()
+        assert snap["state"] == "blocked" and snap["reason"] == "pseudonyms"
+        assert srv.requests == []
+
+
+def test_repr_holds_no_reply_text_or_ids():
+    from roboemot.realtime.turn import Reply
+
+    reply = Reply(texts={"item_9": "Quintavalle"}, jobs=[(1, "item_9")], response_id="resp_9")
+    assert "Quintavalle" not in repr(reply) and "item_9" not in repr(reply)
+    assert "resp_9" not in repr(reply)

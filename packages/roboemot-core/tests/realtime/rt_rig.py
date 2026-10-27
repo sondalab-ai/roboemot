@@ -74,7 +74,8 @@ class RtRig:
 
     def say(self, text: str = "ciao", **kw: Any) -> int:
         n = self.worker.snapshot().get("turns", 0)
-        assert self.worker.submit(utt(text, stamp=time.monotonic(), **kw))
+        kw.setdefault("stamp", time.monotonic())
+        assert self.worker.submit(utt(text, **kw))
         return n + 1
 
     def turn(self, text: str = "ciao", **kw: Any) -> None:

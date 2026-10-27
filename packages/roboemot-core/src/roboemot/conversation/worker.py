@@ -150,7 +150,9 @@ class _Turn:
     stamps: dict[str, float] = field(default_factory=dict)
     active: ActiveRoute = field(default_factory=ActiveRoute)
     voice: str = "local"  # "realtime": the server's voice speaks this turn
-    lines: list[tuple[str, tuple[str, str, str] | None]] = field(default_factory=list)
+    lines: list[tuple[str, tuple[str, str, str] | None]] = field(
+        default_factory=list, repr=False
+    )  # fixed lines to say; a question carries the preference (person's data)
     rt_gen: int = 0  # the realtime session generation this turn's items belong to
     rt_items: list[str] = field(default_factory=list)  # server item ids of this turn
     rt_jobs: list[tuple[int, str | None]] = field(default_factory=list)  # (speech job, item)
@@ -863,9 +865,8 @@ class ConversationWorker:
                 self._note_reply(turn, text)
             turn.sentences += 1
         turn.rt_items += reply.item_ids()
-        if reply.first_audio is not None:
-            turn.stamps.setdefault("token", reply.first_audio)
-            turn.stamps.setdefault("say", reply.first_audio)
+        if reply.first_audio is not None and "token" not in turn.stamps:
+            turn.stamps["token"] = turn.stamps.setdefault("say", reply.first_audio)
             heard = turn.utterance.last_speech_stamp
             route.note_first_audio((reply.first_audio - heard) * MS_PER_S)
         if reply.status is None and reply.closed is None and not reply.cancelled:
@@ -877,8 +878,11 @@ class ConversationWorker:
         else:
             chars = len(instructions) + len(turn.utterance.text) + len(text)
             tokens = chars // CHARS_PER_TOKEN
-        route.charge(tokens)
         turn.tokens += tokens
+        if reply.status is None and reply.closed is None:
+            route.owe(reply.response_id, tokens)  # its response.done comes later: charged then
+            return
+        route.charge(tokens)
         if reply.status is None:
             route.note_response(None)
 

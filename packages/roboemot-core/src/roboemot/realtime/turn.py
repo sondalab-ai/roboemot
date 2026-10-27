@@ -43,11 +43,13 @@ class Reply:
     status: str | None = None  # response.done status; "error" for a server error before it
     tokens: int | None = None  # usage from response.done
     closed: str | None = None  # the session was lost during the response (a reason code)
-    jobs: list[tuple[int, str | None]] = field(default_factory=list)  # (speech job, item id)
-    texts: dict[str | None, str] = field(default_factory=dict)  # item id -> its transcript
-    calls: list[protocol.FunctionCall] = field(default_factory=list)
+    # (speech job, item id), item id -> its transcript, the calls: never in repr (SPEC 12)
+    jobs: list[tuple[int, str | None]] = field(default_factory=list, repr=False)
+    texts: dict[str | None, str] = field(default_factory=dict, repr=False)
+    calls: list[protocol.FunctionCall] = field(default_factory=list, repr=False)
     first_audio: float | None = None  # clock stamp of the first audio delta
     cancelled: bool = False  # the robot cancelled it (barge-in, a call that ends the turn)
+    response_id: str | None = field(default=None, repr=False)
 
     @property
     def audio(self) -> bool:
@@ -101,6 +103,7 @@ class ResponseRun:
         self._feeds: dict[str | None, StreamFeed] = {}
         self._questions: set[str | None] = set()
         self._cut = False
+        self.response_id: str | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._queue: asyncio.Queue[Any] | None = None
 
@@ -122,6 +125,8 @@ class ResponseRun:
                         break
                     if isinstance(event, protocol.ResponseCreated):
                         created = True
+                        self.response_id = self.reply.response_id = event.response_id
+                        self.route.current_response = event.response_id
                     elif isinstance(event, protocol.ServerError) and not created:
                         self.reply.status = "error"  # refused before it began
                         break
@@ -130,6 +135,8 @@ class ResponseRun:
                         if self.on_call is not None and await self.on_call(event):
                             self._cancel_response()
                     elif isinstance(event, protocol.ResponseDone):
+                        if self.response_id and event.response_id not in (None, self.response_id):
+                            continue  # another response's end
                         self.reply.status, self.reply.tokens = event.status, event.total_tokens
                         self.route.note_response(event)
                         break

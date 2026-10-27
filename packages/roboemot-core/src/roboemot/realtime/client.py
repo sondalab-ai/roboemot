@@ -93,7 +93,10 @@ class RealtimeClient:
     runs on the client thread for every server event of the subset, ``Malformed`` included;
     ``Unknown`` events are only counted. An exception it raises is counted and logged by type.
     ``on_close(reason)`` runs when a session fails or closes (a connect that fails, a socket
-    lost, a stall, a stuck send, ``close``), on whichever thread saw it.
+    lost, a stall, a stuck send, ``close``), on whichever thread saw it. While
+    ``local_only()`` is true (``privacy.pseudonyms_to_cloud``: real names may not reach a cloud
+    host) a connect host that is not local is refused (``pseudonyms``) before the socket opens:
+    a provider may allocate a cloud host for a local ``base_url`` (SPEC 12).
     """
 
     def __init__(
@@ -105,6 +108,7 @@ class RealtimeClient:
         auth_headers: Callable[[], dict[str, str]],
         on_event: Callable[[protocol.ServerEvent], None] = lambda _ev: None,
         on_close: Callable[[str], None] = lambda _reason: None,
+        local_only: Callable[[], bool] = lambda: False,
         platform_id: bool = False,
         http_client_factory: Callable[[], httpx.AsyncClient] | None = None,
     ) -> None:
@@ -112,6 +116,7 @@ class RealtimeClient:
         self._auth_headers = auth_headers
         self._on_event = on_event
         self._on_close = on_close
+        self._local_only = local_only
         self._platform_id = platform_id
         self._http_client_factory = http_client_factory
         self._lock = threading.Lock()
@@ -310,6 +315,8 @@ class RealtimeClient:
         target = connect_target(self.route, allocation, tuple(self.provider.key_hosts))
         with self._lock:
             self._target = target
+        if self._local_only() and not target.local:
+            raise _SessionRefused("pseudonyms")  # nothing is sent to the cloud host
         s = self.settings
         return await _NoRedirect(
             target.url,

@@ -274,3 +274,79 @@ def test_the_client_reports_a_lost_session_and_its_own_close():
         finally:
             client.close()
     assert closes == ["closed_by_server"]  # a close after a failure is not reported twice
+
+
+# ------------------------------------------------------------------ hot reload (SPEC 12)
+
+
+class StubClient:
+    """A connected client on a host that is not local (a provider's cloud host)."""
+
+    def __init__(self, route, settings, provider, **kw):
+        self.route, self.state, self.closed = route, "idle", 0
+
+    def connect(self, update):
+        self.state = "connected"
+        return True
+
+    def snapshot(self):
+        return {"local": False, "endpoint": "wss://rt.example.com:443"}
+
+    def send(self, event):
+        return None
+
+    def close(self):
+        self.closed += 1
+        self.state = "closed"
+
+
+def stub_route(stack):
+    made = []
+
+    def factory(*a, **kw):
+        made.append(StubClient(*a, **kw))
+        return made[-1]
+
+    r = RealtimeRoute(
+        stack,
+        lambda: FakeRouter(),
+        NetworkMonitor(stack.effective().llm_routes, POLICY, probe=lambda *a: True),
+        DIRECT,
+        extra=lambda: True,
+        client_factory=factory,
+    )
+    return r, made
+
+
+def test_turning_pseudonyms_on_closes_a_cloud_session():
+    from rt_rig import wait_for
+
+    stack = rt_stack()
+    r, made = stub_route(stack)
+    assert r.ready() and r.connected
+    stack.set("privacy.pseudonyms_to_cloud", True, source="test", admin=True)
+    r.apply_config(stack.effective())
+    assert not r.connected  # detached at once: no later turn uses it
+    assert wait_for(lambda: made[0].closed == 1)
+    assert r.snapshot()["state"] == "closed" and r.snapshot()["reason"] == "reconfigured"
+
+
+def test_changing_the_route_closes_the_session():
+    from rt_rig import wait_for
+
+    stack = rt_stack()
+    r, made = stub_route(stack)
+    assert r.ready()
+    routes = [CHAT, {**RT, "base_url": "http://other.local:8765/v1"}]
+    stack.set("llm_routes", routes, source="test", admin=True)
+    r.apply_config(stack.effective())
+    assert not r.connected
+    assert wait_for(lambda: made[0].closed == 1)
+
+
+def test_an_unchanged_config_keeps_the_session():
+    stack = rt_stack()
+    r, made = stub_route(stack)
+    assert r.ready()
+    r.apply_config(stack.effective())
+    assert r.connected and made[0].closed == 0

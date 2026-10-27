@@ -39,7 +39,7 @@ STATES = ("off", "blocked", "connecting", "connected", "closed", "fallback_local
 # Reasons a route is blocked; the first ones hold until a restart or a config change.
 BLOCKS = ("off", "no_route", "no_opt_in", "no_extra", "provider", "pseudonyms", "budget",
           "unavailable")  # fmt: skip
-OWN_CLOSES = ("conversation_end", "asleep", "shutdown")  # our closes, not failures
+OWN_CLOSES = ("conversation_end", "asleep", "shutdown", "reconfigured")  # our closes, not failures
 LATENCY_LEVELS = {"p50": P50, "p95": P95}
 MS_PER_S = 1000.0
 LATENCY_WINDOW = 50  # turns whose latencies the report summarises
@@ -104,6 +104,10 @@ class RealtimeRoute:
         self._listener: Callable[[protocol.ServerEvent], None] | None = None
         self._close_listener: Callable[[str], None] | None = None
         self._expected = 0  # response.create sent, response.created not yet seen
+        # responses the robot cancelled whose response.done no turn waits for any more:
+        # (response id or None, the estimate charged if it never comes)
+        self._owed: collections.deque[tuple[str | None, int]] = collections.deque()
+        self.current_response: str | None = None  # the id of the response a turn follows
         self._ids = itertools.count(1)
         self.state = "off"
         self.reason: str | None = None
@@ -127,8 +131,22 @@ class RealtimeRoute:
 
     def apply_config(self, cfg: RoboEmotConfig) -> None:
         """Hot reload: whether realtime mode counts for the network aggregate follows the
-        blocking state (a block makes the chat routes the only ones that answer)."""
-        self.network.set_realtime(self.blocked(cfg) is None)
+        blocking state (a block makes the chat routes the only ones that answer). A session
+        that the new config would not open is closed now, and the local pipeline answers: the
+        route changed, the route is blocked, or ``privacy.pseudonyms_to_cloud`` came on while
+        the session is on a cloud host (SPEC 12)."""
+        reason = self.blocked(cfg)
+        self.network.set_realtime(reason is None)
+        client = self._client
+        if client is None:
+            return
+        cloud = client.snapshot().get("local") is not True
+        if (
+            reason is not None
+            or client.route != self.route(cfg)
+            or (cfg.privacy.pseudonyms_to_cloud and cloud)
+        ):
+            self.close_soon("reconfigured")
 
     def settings(self, cfg: RoboEmotConfig | None = None) -> Any:
         return (cfg or self.stack.effective()).voice.realtime_route
@@ -186,7 +204,8 @@ class RealtimeRoute:
             return True
         if self._closed:
             return False
-        if self.state == "fallback_local" and not self.network.realtime_due():
+        retry = self.state == "fallback_local" or self.reason == "pseudonyms"
+        if retry and not self.network.realtime_due():
             return False  # the last connect failed: retried with the network backoff
         return self._connect(cfg)
 
@@ -244,7 +263,10 @@ class RealtimeRoute:
             if not ok:  # the client's close hook already reported the failure
                 self._count("connect_failures")
                 client.close()
-                self._set_state("fallback_local", client.reason)
+                if client.reason == "pseudonyms":  # the allocated host is a cloud one
+                    self._set_state("blocked", "pseudonyms")
+                else:
+                    self._set_state("fallback_local", client.reason)
                 return False
             with self._lock:
                 self._client = client
@@ -271,6 +293,7 @@ class RealtimeRoute:
             auth_headers=lambda: self._router().auth_headers(route),
             on_event=self._on_event,
             on_close=self._on_close,
+            local_only=lambda: self.stack.effective().privacy.pseudonyms_to_cloud,
         )
 
     def session_update(self, cfg: RoboEmotConfig, instructions: str, tools: Any = None) -> Any:
@@ -316,16 +339,51 @@ class RealtimeRoute:
             with self._lock:
                 requested = self._expected > 0
                 self._expected = max(0, self._expected - 1)
+                listener = self._listener
             if not requested:  # the server answered on its own: cancelled, counted
                 self._count("unrequested")
                 self.send(protocol.response_cancel())
+                return
+            if listener is None:  # its turn was cut before it began: cancel it again
+                self.send(protocol.response_cancel())
+        if isinstance(event, protocol.ResponseDone):
+            self.network.report_realtime(True)  # real traffic: the session works
+            if self._settle_owed(event):
                 return
         with self._lock:
             listener = self._listener
         if listener is not None:
             listener(event)
 
+    def owe(self, response_id: str | None, estimate: int) -> None:
+        """A cancelled response whose ``response.done`` will come after its turn stopped
+        listening: its usage (else ``estimate``) is charged and its status counted then."""
+        with self._lock:
+            self._owed.append((response_id, estimate))
+
+    def _settle_owed(self, done: protocol.ResponseDone) -> bool:
+        """Charge and count a ``response.done`` owed by a cut turn; False when it is not one."""
+        with self._lock:
+            entry = next((e for e in self._owed if e[0] and e[0] == done.response_id), None)
+            if entry is None and done.response_id != self.current_response:
+                entry = next((e for e in self._owed if e[0] is None), None)
+            if entry is None:
+                return False
+            self._owed.remove(entry)
+        self.charge(done.total_tokens if done.total_tokens is not None else entry[1])
+        self.note_response(done)
+        return True
+
+    def _settle_lost(self) -> None:
+        """The session is gone: the owed responses are charged their estimates."""
+        with self._lock:
+            owed, self._owed = list(self._owed), collections.deque()
+        for _, estimate in owed:
+            self.charge(estimate)
+            self.note_response(None)
+
     def _on_close(self, reason: str) -> None:
+        self._settle_lost()
         if reason not in OWN_CLOSES and reason != "closed":
             self.network.report_realtime(False)
             with self._lock:
