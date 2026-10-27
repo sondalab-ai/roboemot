@@ -27,8 +27,9 @@ llm_routes:
   #   locality: local
   #
   # mode: platform -- the robot's session provider; base_url is its allocator (path /session).
-  # Reachy Mini: Pollen's allocator, keyed with a Hugging Face token. The allocator then gets
-  # the token, and the robot's hardware_id only with privacy.realtime_platform_id (off).
+  # Reachy Mini: Pollen's allocator, keyed with a Hugging Face token: use a read-only
+  # (fine-grained, no write scope) token. The token goes to the allocator only; the robot's
+  # hardware_id only with privacy.realtime_platform_id (off).
   # - name: pollen
   #   kind: realtime
   #   base_url: https://pollen-robotics-reachy-mini-realtime-url.hf.space/session

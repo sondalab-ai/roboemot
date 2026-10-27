@@ -536,3 +536,23 @@ def test_an_allocated_url_needs_the_realtime_path_and_is_read_as_ws():
     for bad in (None, "", 42):
         with pytest.raises(sess.ProviderRefused, match="provider_reply"):
             sess.allocated_url(bad)
+
+
+def test_a_key_host_refusal_logs_the_host_never_the_query(caplog):
+    """Fix round 1 of SR-4: the refused connect host is logged so it can be recorded and
+    declared; its path and query never are (SPEC 8, 12)."""
+    caplog.set_level(logging.DEBUG)
+    provider = OtherHost(f"wss://rt.example.net/secret-path/realtime?t={QUERY_SECRET}")
+    c = RealtimeClient(
+        route("https://alloc.example.org/v1", locality="cloud", keyed=True),
+        settings(),
+        provider,
+        auth_headers=bearer,
+    )
+    try:
+        assert c.connect(UPDATE) is False and c.reason == "url_key_host"
+    finally:
+        c.close()
+    assert "rt.example.net" in caplog.text
+    for secret in (QUERY_SECRET, "secret-path", KEY):
+        assert secret not in caplog.text

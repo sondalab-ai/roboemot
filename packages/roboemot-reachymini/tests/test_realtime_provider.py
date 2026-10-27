@@ -164,7 +164,7 @@ def test_the_provider_is_registered_under_the_robot_id_and_meets_the_contract():
     assert contract_violation(ENTRY_POINT_GROUP, factory) is None
     built = factory(object())
     assert isinstance(built, PlatformSession) and isinstance(built, SessionProvider)
-    assert built.key_hosts == KEY_HOSTS == (".hf.space",)
+    assert built.key_hosts == KEY_HOSTS == ()  # only the allocator's own origin (fix round 1, I1)
 
 
 # ------------------------------------------------------------------ the identifier (opt-in)
@@ -286,25 +286,57 @@ def test_a_route_without_a_key_sends_no_key_header():
 
 
 @pytest.mark.parametrize(
-    ("connect_url", "send_key", "reason"),
+    ("connect_url", "reason"),
     [
-        (CLOUD_RT, True, None),  # a declared host over wss
-        ("wss://hf.space/realtime", False, "key_host"),  # the bare suffix is not below it
-        ("wss://rt.hf.space.evil.example/realtime", False, "key_host"),
-        ("wss://evil.example.com/realtime", False, "key_host"),
-        ("ws://rt-7.hf.space/realtime", False, "insecure"),  # never over plain ws
+        ("wss://allocator.hf.space/v1/realtime?t=1", None),  # the allocator's own origin
+        ("wss://allocator.hf.space:8443/realtime", "key_host"),  # another port
+        (CLOUD_RT, "key_host"),  # another Space: anyone can create one (fix round 1, I1)
+        ("wss://hf.space/realtime", "key_host"),
+        ("wss://rt.hf.space.evil.example/realtime", "key_host"),
+        ("wss://evil.example.com/realtime", "key_host"),
+        ("ws://allocator.hf.space/realtime", "insecure"),  # never over plain ws
     ],
 )
-def test_the_key_reaches_only_the_declared_hosts_over_wss(connect_url, send_key, reason):
+def test_the_key_reaches_only_the_allocators_own_origin_over_wss(connect_url, reason):
     got = allocate(Allocator(httpx.Response(200, json={"connect_url": connect_url})))
-    assert got.key_hosts == KEY_HOSTS
+    assert got.key_hosts == ()
     if reason is None:
         target = connect_target(route(), got, KEY_HOSTS)
-        assert target.send_key is send_key and target.origin == "wss://rt-7.hf.space:443"
+        assert target.send_key is True and target.origin == "wss://allocator.hf.space:443"
     else:
         with pytest.raises(UrlRefused) as refused:
             connect_target(route(), got, KEY_HOSTS)
         assert refused.value.reason == reason
+
+
+def test_another_space_gets_no_key_and_the_route_falls_back(caplog):
+    """Fix round 1, I1: an allocated host other than the allocator's origin never gets the
+    token; the local pipeline answers, and the refused host (never its query) is logged so the
+    real connect host can be recorded on the robot (SPEC 8, 12, 13)."""
+    caplog.set_level(logging.DEBUG)
+    allocator = Allocator()  # answers CLOUD_RT, on rt-7.hf.space
+    stack = ConfigStack(
+        app={"llm_routes": [route().model_dump(mode="json")], "voice": PLATFORM_MODE}
+    )
+    rt = RealtimeRoute(
+        stack,
+        lambda: Router(),
+        NetworkMonitor(stack.effective().llm_routes, POLICY, probe=lambda *a: True),
+        provider(),
+        extra=lambda: True,
+        client_factory=lambda *a, **kw: RealtimeClient(
+            *a, http_client_factory=allocator.factory, **kw
+        ),
+    )
+    try:
+        assert rt.ready() is False
+        snap = rt.snapshot()
+        assert snap["state"] == "fallback_local" and snap["reason"] == "url_key_host"
+        assert snap["client"]["key_sent"] is False
+    finally:
+        rt.close()
+    assert "rt-7.hf.space" in caplog.text
+    assert QUERY_SECRET not in caplog.text and KEY not in caplog.text
 
 
 def test_a_keyed_route_sends_nothing_to_an_undeclared_host(caplog):
@@ -317,10 +349,10 @@ def test_a_keyed_route_sends_nothing_to_an_undeclared_host(caplog):
 
 
 def test_an_https_connect_url_is_read_as_wss():
-    url = "https://rt-7.hf.space/v1/realtime?x=1"
+    url = "https://allocator.hf.space/v1/realtime?x=1"
     got = allocate(Allocator(httpx.Response(200, json={"connect_url": url})))
     target = connect_target(route(), got, KEY_HOSTS)
-    assert target.url == "wss://rt-7.hf.space/v1/realtime?x=1" and target.send_key
+    assert target.url == "wss://allocator.hf.space/v1/realtime?x=1" and target.send_key
 
 
 # ------------------------------------------------------------------ allocator answers

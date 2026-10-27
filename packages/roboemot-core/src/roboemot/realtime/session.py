@@ -51,11 +51,14 @@ NO_KEY = ("", "none")
 
 
 class UrlRefused(ValueError):
-    """A connect URL broke a rule; ``reason`` (also the message) is a code, never the URL."""
+    """A connect URL broke a rule; ``reason`` (also the message) is a code, never the URL.
+    ``host`` is the refused host for ``key_host`` (a host only, never a path or query), so the
+    host a provider allocated can be recorded and declared."""
 
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, host: str | None = None) -> None:
         super().__init__(reason)
         self.reason = reason
+        self.host = host
 
 
 class ProviderRefused(RuntimeError):
@@ -330,7 +333,7 @@ def connect_target(
     declared = scheme == "wss" and host_matches(host, allocation.key_hosts)
     send_key = keyed and (at_route or declared)
     if keyed and not send_key:
-        raise UrlRefused("key_host")
+        raise UrlRefused("key_host", host)
     bracket = f"[{host}]" if ":" in host else host
     return ConnectTarget(url, f"{scheme}://{bracket}:{port}", local, send_key)
 

@@ -321,7 +321,12 @@ class RealtimeClient:
             log.warning("realtime route %s: its key is not available", self.route.name)
             self._fail("key_unavailable")
         except UrlRefused as exc:
-            log.warning("realtime route %s: connect URL refused (%s)", self.route.name, exc.reason)
+            log.warning(
+                "realtime route %s: connect URL refused (%s)%s",
+                self.route.name,
+                exc.reason,
+                f": host {exc.host} may not get the key" if exc.host else "",
+            )
             self._fail(f"url_{exc.reason}")
         except ProviderRefused as exc:
             log.warning("realtime route %s: no session allocated (%s)", self.route.name, exc.reason)

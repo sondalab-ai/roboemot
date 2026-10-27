@@ -24,7 +24,8 @@ reachability probe checks it and locality reads it; nothing here names that URL.
   ``connect_target`` then applies the URL and key rules, on both the allocator and the connect
   host.
 
-The key may reach only the allocator and, over ``wss``, hosts below ``KEY_HOSTS``. Nothing here
+The key may reach only the allocator's own origin (``KEY_HOSTS`` is empty): a keyed connect to
+any other host is refused (``url_key_host``) and the local pipeline answers. Nothing here
 logs the key, the identifier, the allocator's reply or a URL's query.
 """
 
@@ -50,10 +51,11 @@ from .daemon import REQUEST_TIMEOUT_S, DaemonClient, DaemonError
 
 log = logging.getLogger(__name__)
 
-# Hosts that may receive the route's key over wss (SPEC 8, URL and key rules). The allocator is
-# a Hugging Face Space and hands out a host it chooses; which one is not documented, so this is
-# the narrowest suffix the platform's own client implies (checked on the robot in SR-5).
-KEY_HOSTS = (".hf.space",)
+# Hosts besides the allocator's own origin that may receive the route's key over wss (SPEC 8,
+# URL and key rules): none. The allocator hands out a host of its choice, and anyone can create
+# a Space under hf.space, so a suffix would let the allocator alone pick who gets the token. The
+# real connect host is recorded on the robot (SR-5) and then allowed exactly.
+KEY_HOSTS: tuple[str, ...] = ()
 SESSION_PATH = "/session"
 AUTH_HEADER = "X-Reachy-Mini-Authorization"
 BEARER = "Bearer "
