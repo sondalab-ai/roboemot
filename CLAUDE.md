@@ -10,12 +10,12 @@ section number in commit messages that implement or change behaviour.
 | Path | What |
 | --- | --- |
 | `docs/specs/kickoff.md` | Engineering spec (SPEC), the source of truth |
-| `packages/roboemot-core/` | Python package `roboemot`: config, manifest, discovery, health (connectivity), diagnostics (debug report), vision (detect, track, embed, replay, model fetcher; ONNX backends need the `vision` extra), motion reference, affect (engine, appraisal, runner, register resolver, expression renderer), circadian, persona (traits), LLM router and system prompt, web UI robot section (`webui/robot_section.py`, `roboemot.settings` plugins), secret store (`secret_store.py`: `${secret:name}` route keys, 0600 file), bus |
-| `packages/roboemot-reachymini/` | Python package `roboemot_reachymini`: Reachy Mini driver and SDK bridge |
+| `packages/roboemot-core/` | Python package `roboemot`: config, manifest, discovery, health (connectivity), diagnostics (debug report), vision (detect, track, embed, replay, model fetcher; ONNX backends need the `vision` extra), motion reference, affect (engine, appraisal, runner, register resolver, expression renderer), circadian, soothe (idle self-soothing synth and runner), persona (traits), LLM router and system prompt, runtime (`runtime/`: `Runtime` pipeline assembly, hot reload, main loop, debug-report wiring; `RuntimeHost` seams), conversation sources and skill bridge, web UI robot section (`webui/robot_section.py`, `roboemot.settings` plugins), realtime speech route (`realtime/`: protocol subset, session providers in `roboemot.realtime`, WebSocket client; needs the `realtime` extra), secret store (`secret_store.py`: `${secret:name}` route keys, 0600 file), bus |
+| `packages/roboemot-reachymini/` | Python package `roboemot_reachymini`: Reachy Mini driver and SDK bridge; `app.py` is a thin adapter (config + manifest, platform by `robot.id`, then core `Runtime.run`); vendored recorded expression clips (Pollen emotions library, Apache-2.0) in `data/emotions/` |
 | `packages/roboemot-core/src/roboemot/webui/static/vendor/sondalab-ui-kit/` | Vendored, pinned `@sondalab/ui-kit` (offline web UI). Never edit by hand: change the pin in `scripts/sync_ui_kit.py` and run it; `scripts/audit_webui.sh` runs `sl-audit` on the page (SPEC 12) |
 | `rt/` | C++ real-time core (`roboemot-rt`): arbiter and safety limiter, CMake + ctest |
 | `configs/` | Library defaults, robot manifests, personality presets |
-| `scripts/` | Dev helpers (simulation daemon, `install_on_robot.py`: wrapper over the robot-agnostic installer `roboemot.install`; `robot_ssh.py`: wrapper over `roboemot.install.ssh`) |
+| `scripts/` | Dev helpers (simulation daemon, `import_pollen_emotions.py`: pinned conversion of the emotions library, `--check` offline, `install_on_robot.py`: wrapper over the robot-agnostic installer `roboemot.install`; `robot_ssh.py`: wrapper over `roboemot.install.ssh`; `run_on_robot.py`: wrapper over `roboemot.install.run`) |
 
 ## Rules that come from the spec
 
@@ -28,14 +28,32 @@ section number in commit messages that implement or change behaviour.
   with `allow_unmeasured_dynamics: true` in dev, and the limiter then uses conservative
   fallbacks.
 - **Reachy Mini (SPEC 4A):** stream with `set_target` only; never call `goto_target` in a
-  session (it blocks). Connect with `automatic_body_yaw=False`. Call `set_target` only after
+  session (it blocks). The daemon's runner connects; the driver calls
+  `set_automatic_body_yaw(False)` on start and after a reconnect. Call `set_target` only after
   `enable_motors()`. Antenna order in the SDK is `[right, left]`. One process owns the SDK
   client and its media.
+- **External control and sleep (SPEC 4A, 12A):** the motion loop yields (no write, follows the measured
+  pose) when the measured pose stops following its commands (`motion.external.*`: a platform move of
+  its own, a hand) until the pose has been still for `motion.platform_move_grace_s`. No driver signal
+  and no daemon polling for it (the daemon journals every REST call). While the platform does not hold
+  the motors enabled the robot is asleep (`robot.asleep` on the bus) and the runtime pauses perception,
+  listener and the behaviour tick (`runtime.pause_when_asleep`).
 - **LLM routes are OpenAI-compatible only (SPEC 8).** Use the common subset: streaming,
   `tools` with `tool_choice="auto"`, `max_tokens`. Do not rely on `response_format`,
-  forced tool choice, `seed` or non-default sampling.
+  forced tool choice, `seed` or non-default sampling. A `kind: realtime` route speaks the realtime
+  subset of SPEC 8 (Realtime speech route) over a WebSocket (`roboemot.realtime`), never chat; its one
+  exception to `tool_choice="auto"` is `tool_choice: "none"` on the request after the tool-round
+  cap, which forbids no tool, so it is not forced tool choice.
 - **Privacy (SPEC 12):** never write frames, audio or embeddings to logs.
 - **Secrets (SPEC 8, 12):** API keys come only from the secret store (`roboemot secrets set`, value never an argument). Never log, repr, report or return a key; a route whose `${secret:name}` cannot be resolved is unavailable, never sent with an empty key.
+- **Robot hierarchy (SPEC 4A, 11, 12A):** robot-specific behaviour only through a core protocol plus a
+  `roboemot.*` entry point keyed by `robot.id`, registered in `roboemot.plugins.GROUPS`. Core never
+  names a robot, its DOFs or its SDK. `tests/test_robot_hierarchy.py` enforces it; the baseline
+  `tests/robot_hierarchy_baseline.yaml` may only shrink, never grow.
+- **Robot platform (SPEC 4A, 11, 12A):** entry-point group `roboemot.robots`, keyed by `robot.id`: a stateless
+  `RobotPlatform` class (`roboemot.robot_platform`) with gaze/frame/reflex maps; `bind(client)` gives the per-run
+  `RobotSession` that builds the driver, camera, audio hub, speaker and bearing source as core protocols. `load_robot_platform` fails loud (no platform, no run); the app builds the robot
+  only through it and core's `roboemot.runtime.Runtime` runs it; the Reachy app only adapts (SPEC 4A rules stay in the driver/session).
 - **Diagnostics (SPEC 12A):** robot-specific debug sources are registered in the
   `roboemot.diagnostics` entry-point group under the manifest `robot.id`; core stays robot-agnostic.
 - **Web UI robot section (SPEC 11A, 12):** entry-point group `roboemot.settings`, keyed by `robot.id`; the plugin's
@@ -53,14 +71,18 @@ pip install -e "packages/roboemot-core[dev]" -e "packages/roboemot-reachymini[de
 # `python -c "import roboemot; print(roboemot.__file__)"` is inside the worktree before trusting a test run
 pytest                                   # unit tests (no robot, no simulator)
 scripts/sim-daemon.sh &                  # MuJoCo Reachy Mini daemon, headless, port 8000
-roboemot models fetch --all              # vision weights (~0.8 GB) into the app data folder (~/.local/share/roboemot/models), sha256-verified
+roboemot models fetch --all              # vision weights (~0.13 GB, voice models too) into the app data folder (~/.local/share/roboemot/models), sha256-verified
 roboemot models fetch --voice            # Silero VAD, Vosk it/en, Piper it/en (~0.3 GB) into ~/.local/share/roboemot/voice-models
+roboemot voice sample --out DIR --manifest configs/manifests/reachy-mini-wireless.yaml --dev --python <piper-venv>/bin/python   # one WAV per mood (SPEC 8)
 pytest -m models                         # real ONNX models, needs the vision extra and fetched weights
 pytest -m sim                            # integration tests against the simulated robot
 cmake -S rt -B rt/build && cmake --build rt/build && ctest --test-dir rt/build
 ruff check . && ruff format --check .
 python scripts/install_on_robot.py --dry-run   # read-only checks against the real robot
 python scripts/install_on_robot.py --uninstall --dry-run   # what uninstall would undo
+python scripts/install_on_robot.py --no-vision --no-voice --no-clear-caches   # skip the vision extra and weights; leave voice off (no voice.enabled, Piper and models default off); keep ~/.cache/uv (default: ask)
+python scripts/run_on_robot.py   # start RoboEmot on the robot and print the web UI address
+python scripts/run_on_robot.py --restart   # restart a running RoboEmot via the daemon (asks; -y skips; the head moves)
 python scripts/robot_ssh.py [--host H] [--user U]   # shell on the robot (mDNS pick); `-- cmd` runs one command
 roboemot secrets set cloud_key           # API key for ${secret:cloud_key} (read from the prompt/stdin); list/remove too
 python scripts/robot_ssh.py --copy-id    # install your SSH key; --debug: roboemot debug --json built on the robot; --dry-run prints the ssh line (discovery still runs, no exec)

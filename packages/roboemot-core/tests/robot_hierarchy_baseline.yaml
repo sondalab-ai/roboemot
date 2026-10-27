@@ -1,0 +1,5 @@
+# Ratchet baseline of the robot hierarchy gate (SPEC 4A, 12A). One entry per finding key (count = occurrences) of
+# test_robot_hierarchy.py at audit commit 6e67f76. Slices delete the entries they fix; an entry is
+# never added. audit: 1-4 and D as numbered in the epic plan, B = borderline item of the plan,
+# U = found by the gate but not in the plan's audit list. The epic ends with an empty file.
+[]

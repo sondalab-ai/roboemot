@@ -44,24 +44,12 @@ class Detection:
 
 
 @dataclass(frozen=True)
-class AttributeSample:
-    """Age group and gender of one face crop with the probability of each argmax value."""
-
-    age_group: str
-    age_confidence: float
-    gender: str
-    gender_confidence: float
-
-
-@dataclass(frozen=True)
 class FacePercept:
     """Published on ``percept.face`` for each confirmed face track in a processed frame.
 
-    ``box`` is normalised to the frame (0..1). ``age_group`` and ``gender`` are ``unknown``
-    until the track's attribute job returns (and stay so below the confidence threshold);
-    ``possible_minor`` follows SPEC 5 (unknown counts as a minor). ``owner_id`` is a registry
-    ID once the track is recognised, else ``anonymous_id`` (session-only) is set.
-    ``attributes_stamp`` is the capture stamp of the last crop behind the estimate.
+    ``box`` is normalised to the frame (0..1). ``owner_id`` is a registry ID once the track is
+    recognised, else ``anonymous_id`` (session-only) is set. No age or gender is estimated
+    (owner decision 2026-10-23).
     """
 
     track_id: int
@@ -72,14 +60,7 @@ class FacePercept:
     elevation_rad: float
     owner_id: str | None
     anonymous_id: str | None
-    age_group: str
-    age_source: str
-    gender: str
-    gender_source: str
-    attribute_confidence: float
-    possible_minor: bool
     new_track: bool
-    attributes_stamp: float | None = None
 
 
 @dataclass(frozen=True)
@@ -91,8 +72,6 @@ class PersonRecognized:
     stamp: float
     azimuth_rad: float
     elevation_rad: float
-    age_group: str
-    possible_minor: bool
 
 
 @dataclass(frozen=True)

@@ -45,6 +45,7 @@ import ipaddress
 import json
 import random
 import re
+import socket
 import threading
 import unicodedata
 from collections.abc import Callable, Iterable, Iterator, Mapping
@@ -94,6 +95,43 @@ LAN_NETWORKS = tuple(
 )
 
 
+# IPv6 forms that carry an IPv4 address in their low 32 bits: IPv4-compatible (``::a.b.c.d``),
+# IPv4-mapped, IPv4-translated (``::ffff:0:a.b.c.d``) and the NAT64 well-known prefix
+EMBEDS_IPV4 = tuple(
+    ipaddress.IPv6Network(net)
+    for net in ("::/96", "::ffff:0:0/96", "::ffff:0:0:0/96", "64:ff9b::/96")
+)
+IPV4_BITS = 0xFFFFFFFF
+
+
+def this_machine(url: object) -> bool:
+    """Whether ``url`` points at this machine or a link-local address (SPEC 8, 12): loopback,
+    ``localhost`` and ``*.localhost``, the unspecified address (it reaches loopback on Linux),
+    169.254/16 and fe80::/10, in any spelling (``127.1``, ``0x7f000001``, ``2130706433``, an IPv6
+    address that carries one of them, ``EMBEDS_IPV4``). The host is read by httpx, the client
+    that connects. Names are not resolved: a public name that resolves to loopback is not caught
+    here. Private LAN addresses stay allowed, a LAN model server is the usual local route."""
+    try:
+        host = httpx.URL(str(url)).host.lower().rstrip(".")
+    except (httpx.InvalidURL, ValueError, TypeError):
+        return False  # unparsable: ``LLMRoute`` refuses it (``route_url_ok``, same parser)
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        ip: ipaddress.IPv4Address | ipaddress.IPv6Address = ipaddress.ip_address(host)
+    except ValueError:
+        try:  # the shorthand IPv4 forms the socket layer accepts
+            ip = ipaddress.IPv4Address(socket.inet_aton(host))
+        except OSError:
+            return False
+    if ip.is_loopback or ip.is_link_local or ip.is_unspecified:
+        return True
+    if isinstance(ip, ipaddress.IPv6Address) and any(ip in net for net in EMBEDS_IPV4):
+        carried = ipaddress.IPv4Address(int(ip) & IPV4_BITS)
+        return carried.is_loopback or carried.is_link_local or carried.is_unspecified
+    return False
+
+
 class PseudonymLeak(RuntimeError):
     """A request for a route that is not local still held a registry name after aliasing (or
     aliasing did not settle); it was not sent. The message never names anyone."""
@@ -110,7 +148,12 @@ def route_is_local(route: LLMRoute) -> bool:
     ``0x7f.1``) or a URL whose parts parsers read differently (backslash, user info) is cloud
     whatever ``locality`` says. A fully qualified name with a trailing dot (``ai.``) does not
     count as a name without a dot. The host is parsed by httpx, the library that connects."""
-    url = route.base_url
+    return url_is_local(route.base_url, route.locality)
+
+
+def url_is_local(url: str, locality: str) -> bool:
+    """``route_is_local`` for a URL and a ``locality`` value (``auto``, ``local``, ``cloud``): the
+    same rules, for an address that is not a route's ``base_url`` (a realtime connect URL)."""
     if "\\" in url or any(c.isspace() or ord(c) < ord(" ") for c in url):
         return False
     try:
@@ -124,8 +167,8 @@ def route_is_local(route: LLMRoute) -> bool:
         return False
     if NUMERIC_HOST.match(host) and not DOTTED_QUAD.match(host):
         return False
-    if route.locality != "auto":
-        return route.locality == "local"
+    if locality != "auto":
+        return locality == "local"
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:

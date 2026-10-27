@@ -30,7 +30,7 @@ ENTRY_POINT_GROUP = "roboemot.settings"
 PATH_ROOT = "robot"
 RESTART = "restart"
 EFFECT_PAIR = 2
-RESTART_EFFECTS = ("zero_pose", "webrtc_drop", "kill_on_timeout")
+RESTART_EFFECTS = ("zero_pose", "remote_session_drop", "kill_on_timeout")
 PROTECTED_CLAIMS = ("safety", "webui", "privacy", "llm_routes")
 
 
@@ -67,6 +67,7 @@ class RobotSection:
     restart_effects: tuple[RestartEffect, ...] = ()
 
 
+@runtime_checkable
 class SettingsPlugin(Protocol):
     """The object behind a ``roboemot.settings`` entry point."""
 
@@ -82,7 +83,8 @@ class Restartable(Protocol):
     holds, lists ``restart_effects()`` in the dialog in its own words and calls ``restart()`` only
     after the web response has been sent, because the restart ends this very process.
     ``restart_available()`` runs on every settings listing, in the request thread: keep it cheap
-    (a short cache, a short timeout)."""
+    (a short cache, a short timeout). ``stop_timeout_s()`` is required: a plugin without it is not
+    ``Restartable`` and gets no Restart action."""
 
     def restart_available(self) -> bool:
         """Whether a restart can be done now (checked on every listing and again on the call)."""
@@ -92,6 +94,12 @@ class Restartable(Protocol):
         """What the owner should know first, as ``(id, params)`` pairs: ids from
         ``RESTART_EFFECTS``, params plain numbers (e.g. ``("kill_on_timeout", {"timeout_s": 20})``).
         An effect with an unknown id or a non-numeric param is dropped."""
+        ...
+
+    def stop_timeout_s(self) -> float:
+        """Seconds the supervisor waits after asking RoboEmot to stop before it kills the
+        process. Core keeps the stop sequence's time budget below it (``runtime.shutdown_budget_s``,
+        ``runtime.shutdown_margin_s``)."""
         ...
 
     def restart(self) -> None:
@@ -123,6 +131,23 @@ def restart_hook(plugin: SettingsPlugin | None) -> Callable[[], None] | None:
     except Exception as exc:
         log.warning("settings plugin restart check: %s", type(exc).__name__)
         return None
+
+
+def supervisor_stop_timeout_s(plugin: SettingsPlugin | None) -> float | None:
+    """The plugin's ``stop_timeout_s`` when it is ``Restartable``, else ``None`` (no known kill
+    deadline). A plugin that raises, or gives a value that is not a positive finite number, counts
+    as having none (logged, never the value)."""
+    if not isinstance(plugin, Restartable):
+        return None
+    try:
+        timeout_s = float(plugin.stop_timeout_s())
+    except Exception as exc:
+        log.warning("settings plugin stop timeout: %s", type(exc).__name__)
+        return None
+    if not math.isfinite(timeout_s) or timeout_s <= 0:
+        log.warning("settings plugin stop timeout: not a positive finite number, ignored")
+        return None
+    return timeout_s
 
 
 def _restart_effects(plugin: Restartable) -> tuple[RestartEffect, ...]:

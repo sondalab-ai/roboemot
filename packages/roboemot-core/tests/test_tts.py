@@ -8,6 +8,7 @@ import logging
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import numpy as np
@@ -96,6 +97,14 @@ def test_splitter_strips_mood_tags_even_when_split_across_deltas():
         ("addio", "sadness"),
     ]
     assert split(["[mood=joy] Ciao"], strip_tags=False) == [("[mood=joy] Ciao", None)]
+
+
+def test_splitter_marks_the_pieces_after_a_forced_cut_as_continued():
+    s = SentenceSplitter(40)
+    out = s.feed("Una frase lunga, molto lunga, che supera di gran lunga il limite? Poi. ")
+    out += s.flush()
+    assert [x.continued for x in out] == [False] + [True] * (len(out) - 2) + [False]
+    assert out[-1].text == "Poi."
 
 
 def test_splitter_drops_fragments_without_letters():
@@ -358,24 +367,6 @@ async def test_openai_instructions_only_on_instructable_models():
     assert backend.controls == frozenset()
 
 
-async def test_openai_is_refused_while_a_minor_is_present_unless_the_route_is_cleared():
-    server = SpeechServer()
-    backend, _ = openai_backend(server)
-    assert backend.available(minor_present=False)
-    assert not backend.available(minor_present=True)
-    with pytest.raises(TTSUnavailable):
-        async for _ in backend.synthesize(
-            "x", delivery(), language="it", voice=VOICE, minor_present=True
-        ):
-            pass
-    assert server.requests == []
-    allowed = SafetyConfig(minors_allowed_llm=True)
-    cleared, _ = openai_backend(server, route(allowed_for_minors=True), safety=allowed)
-    assert cleared.available(minor_present=True)
-    uncleared, _ = openai_backend(server, safety=allowed)
-    assert not uncleared.available(minor_present=True)
-
-
 async def test_openai_unknown_route_and_spent_budget_are_unavailable():
     backend, _ = openai_backend(SpeechServer(), route(daily_token_budget=0))
     assert not backend.available()
@@ -419,18 +410,11 @@ async def test_fallback_to_piper_when_the_remote_route_fails_or_is_not_eligible(
         tts = FallbackTTS(failing, local)
         chunks = await collect(tts, "ciao")
         assert chunks[0].rate_hz == RATE and tts.last_used == "piper"
-        # minor present, route not cleared: the remote is never contacted
+        # budget spent, so not eligible: the remote is never contacted
         server = SpeechServer()
-        remote, _ = openai_backend(server)
-        chunks = await collect(FallbackTTS(remote, local), "ciao", language="it")
-        assert chunks and chunks[0].rate_hz == OPENAI_PCM_RATE_HZ  # adult: remote is used
-        tts = FallbackTTS(remote, local)
-        got = []
-        async for c in tts.synthesize(
-            "ciao", delivery(), language="it", voice=voice_cfg(), minor_present=True
-        ):
-            got.append(c)
-        assert got[0].rate_hz == RATE and len(server.requests) == 1
+        spent, _ = openai_backend(server, route(daily_token_budget=0))
+        chunks = await collect(FallbackTTS(spent, local), "ciao", language="it")
+        assert chunks[0].rate_hz == RATE and server.requests == []
     finally:
         await local.aclose()
 
@@ -458,10 +442,10 @@ async def test_fallback_does_not_switch_voice_after_audio_started(tmp_path):
 
 
 async def test_fallback_with_nothing_available_raises_unavailable():
-    remote, _ = openai_backend(SpeechServer())
+    remote, _ = openai_backend(SpeechServer(), route(daily_token_budget=0))
     with pytest.raises(TTSUnavailable):
         async for _ in FallbackTTS(remote, None).synthesize(
-            "x", delivery(), language="it", voice=VOICE, minor_present=True
+            "x", delivery(), language="it", voice=VOICE
         ):
             pass
 
@@ -578,3 +562,148 @@ def test_router_does_not_hand_out_the_key():
 )
 def test_splitter_abbreviations_do_not_swallow_ordinary_words(text, expected):
     assert [t for t, _ in split([text])] == expected
+
+
+def test_a_reload_takes_the_piper_timeouts_and_keeps_its_restart_fields(tmp_path):
+    local = piper(tmp_path)
+    before = local.config
+    hot = {"startup_timeout_s": 7.0, "request_timeout_s": 9.0, "restart_backoff_s": (0.5, 2.0)}
+    new = PiperConfig(
+        **hot, chunk_ms=40.0, python="/elsewhere/python", intra_op_threads=4, inter_op_threads=3
+    )
+    remote = SimpleNamespace(name="remote", controls=frozenset(), apply_config=lambda voice: None)
+    FallbackTTS(remote, local).apply_config(VOICE.model_copy(update={"piper": new}))
+    assert local.config.model_dump(include=set(hot)) == new.model_dump(include=set(hot))
+    assert (local.config.chunk_ms, local.config.python) == (before.chunk_ms, before.python)
+    kept = (local.config.intra_op_threads, local.config.inter_op_threads)
+    assert kept == (before.intra_op_threads, before.inter_op_threads)
+
+
+def test_the_backend_choice_is_a_restart_field_like_the_backend():
+    fields = type(VOICE).model_fields
+    for name in ("backend", "fallback_backend"):
+        assert fields[name].json_schema_extra["restart"], name
+
+
+async def test_piper_worker_gets_the_onnx_thread_counts_on_its_command_line(tmp_path):
+    b = piper(tmp_path)
+    try:
+        await collect(b, "ciao")
+        assert (tmp_path / "voices" / "v.onnx.threads").read_text() == "2 1"
+    finally:
+        await b.aclose()
+    (tmp_path / "custom").mkdir()
+    custom = piper(tmp_path / "custom", intra_op_threads=3, inter_op_threads=0)
+    try:
+        await collect(custom, "ciao")
+        assert (tmp_path / "custom" / "voices" / "v.onnx.threads").read_text() == "3 0"
+    finally:
+        await custom.aclose()
+
+
+def _load_worker():
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[1] / "src/roboemot/voice/piper_worker.py"
+    spec = importlib.util.spec_from_file_location("piper_worker_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize(("intra", "inter", "rebuilt"), [(2, 1, True), (0, 0, False)])
+def test_piper_engine_rebuilds_the_session_with_the_thread_counts(
+    tmp_path, monkeypatch, intra, inter, rebuilt
+):
+    """The worker replaces PiperVoice.load's session (which takes no options) by its own."""
+    voice = make_voice(tmp_path) / "v.onnx"
+
+    class Options:
+        intra_op_num_threads = 0
+        inter_op_num_threads = 0
+
+    sessions = []
+
+    def session(path, sess_options, providers):
+        sessions.append((path, sess_options, providers))
+        return "rebuilt"
+
+    loaded = SimpleNamespace(session="default")
+    fake_ort = SimpleNamespace(SessionOptions=Options, InferenceSession=session)
+    fake_piper = SimpleNamespace(
+        PiperVoice=SimpleNamespace(load=lambda path: loaded), SynthesisConfig=object
+    )
+    monkeypatch.setitem(sys.modules, "onnxruntime", fake_ort)
+    monkeypatch.setitem(sys.modules, "piper", fake_piper)
+    engine = _load_worker().PiperEngine(str(voice), intra, inter)
+    assert engine.sample_rate == RATE
+    if rebuilt:
+        ((path, options, providers),) = sessions
+        assert path == str(voice) and providers == ["CPUExecutionProvider"]
+        assert (options.intra_op_num_threads, options.inter_op_num_threads) == (intra, inter)
+        assert loaded.session == "rebuilt"
+    else:
+        assert sessions == [] and loaded.session == "default"
+
+
+def test_piper_engine_volume_never_clips_and_keeps_quiet_sentences_as_asked(monkeypatch, tmp_path):
+    """Regression (review S1): a positive volume pushed loud sentences into Piper's hard clip.
+    Piper is asked for the pre-gain only and the worker caps the rest at the peak limit."""
+    worker = _load_worker()
+    voice = make_voice(tmp_path) / "v.onnx"
+    asked = []
+    t = np.arange(2205) / RATE
+
+    def synthesize(text, config):
+        asked.append(config.volume)
+        model = np.sin(2 * np.pi * 440 * t) * (0.95 if "loud" in text else 0.2)
+        yield SimpleNamespace(audio_float_array=(model * config.volume).astype(np.float32))
+
+    loaded = SimpleNamespace(session="default", synthesize=synthesize)
+    monkeypatch.setitem(sys.modules, "onnxruntime", SimpleNamespace())
+    monkeypatch.setitem(
+        sys.modules,
+        "piper",
+        SimpleNamespace(
+            PiperVoice=SimpleNamespace(load=lambda path: loaded),
+            SynthesisConfig=lambda **kw: SimpleNamespace(**kw),
+        ),
+    )
+    engine = worker.PiperEngine(str(voice))
+
+    def peak(text, volume):
+        (pcm,) = engine.synthesize({"text": text, "volume": volume})
+        return np.abs(np.frombuffer(pcm, "<i2")).max() / worker.INT16_FULL_SCALE
+
+    loud_db3 = 10 ** (3 / 20)
+    assert peak("loud", loud_db3) == pytest.approx(worker.PEAK_LIMIT, abs=1e-3)  # capped, no clip
+    assert peak("quiet", loud_db3) == pytest.approx(0.2 * loud_db3, abs=1e-3)  # gain as asked
+    assert peak("quiet", 0.5) == pytest.approx(0.1, abs=1e-3)
+    assert set(asked) == {worker.PIPER_PRE_GAIN}
+
+
+def test_piper_engine_keeps_the_loaded_session_when_the_rebuild_fails(
+    tmp_path, monkeypatch, capsys
+):
+    voice = make_voice(tmp_path) / "v.onnx"
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("bad option")
+
+    class Options:
+        pass
+
+    loaded = SimpleNamespace(session="default")
+    monkeypatch.setitem(
+        sys.modules, "onnxruntime", SimpleNamespace(SessionOptions=Options, InferenceSession=broken)
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "piper",
+        SimpleNamespace(
+            PiperVoice=SimpleNamespace(load=lambda path: loaded), SynthesisConfig=object
+        ),
+    )
+    _load_worker().PiperEngine(str(voice), 2, 1)
+    assert loaded.session == "default"
+    assert "RuntimeError" in capsys.readouterr().err

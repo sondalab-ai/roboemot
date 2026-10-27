@@ -56,17 +56,17 @@ def test_unknown_keys_and_out_of_range_are_rejected():
 
 def test_safety_only_tightens_at_runtime():
     stack = ConfigStack()
-    stack.set("safety.minor_motion_factor", 0.4)  # more conservative: allowed
+    stack.set("safety.watchdog_return_factor", 0.2)  # more conservative: allowed
     with pytest.raises(GuardrailError):
-        stack.set("safety.minor_motion_factor", 0.9)  # looser: refused
+        stack.set("safety.watchdog_return_factor", 0.9)  # looser: refused
     with pytest.raises(GuardrailError):
-        stack.set("safety.minors_allowed_llm", True)
+        stack.set("safety.allow_unmeasured_dynamics", True)
     # loosening is possible only by editing the app layer with admin confirmation
     with pytest.raises(GuardrailError):
-        stack.set("safety.minor_motion_factor", 0.9, layer="app")
-    stack.clear("safety.minor_motion_factor")
-    stack.set("safety.minor_motion_factor", 0.9, layer="app", admin=True)
-    assert stack.get("safety.minor_motion_factor") == 0.9
+        stack.set("safety.watchdog_return_factor", 0.9, layer="app")
+    stack.clear("safety.watchdog_return_factor")
+    stack.set("safety.watchdog_return_factor", 0.9, layer="app", admin=True)
+    assert stack.get("safety.watchdog_return_factor") == 0.9
 
 
 def test_privacy_opt_in_needs_admin():
@@ -160,13 +160,13 @@ def test_schema_version_mismatch():
 def test_section_level_override_cannot_bypass_guardrails():
     stack = ConfigStack()
     with pytest.raises(GuardrailError):
-        stack.set("safety", {"minor_motion_factor": 1.0, "watchdog_ms": 2000})
+        stack.set("safety", {"watchdog_return_factor": 1.0, "watchdog_ms": 2000})
     with pytest.raises(GuardrailError):
         stack.set("privacy", {"debug_recording": True, "multimodal_frames": True})
     with pytest.raises(GuardrailError):
         stack.set(
             "llm_routes",
-            [{"name": "x", "base_url": "http://a/v1", "model": "m", "allowed_for_minors": True}],
+            [{"name": "x", "base_url": "http://a/v1", "model": "m", "locality": "local"}],
         )
     assert stack.get("safety.watchdog_ms") == 200
 
@@ -183,25 +183,24 @@ def test_privacy_opt_in_with_integer_one_still_needs_admin():
         stack.set("privacy.debug_recording", 1)
 
 
-def test_minors_policy_is_guarded():
-    stack = ConfigStack()
+def test_the_register_approach_is_guarded():
+    stack = ConfigStack(app={"register": {"approach_allowed": False}})
     with pytest.raises(GuardrailError):
-        stack.set("register.child.minor_content_policy", False)
-    with pytest.raises(GuardrailError):
-        stack.set("register.unknown.approach_allowed", True)
+        stack.set("register.approach_allowed", True)
 
 
 def test_loosening_preset_needs_admin(tmp_path):
     (tmp_path / "default.yaml").write_text("schema_version: 1\n")
     (tmp_path / "evil.yaml").write_text(
-        "extends: default\nsafety: {minor_motion_factor: 1.0}\nprivacy: {debug_recording: true}\n"
+        "extends: default\nsafety: {watchdog_return_factor: 1.0}\n"
+        "privacy: {debug_recording: true}\n"
     )
     stack = ConfigStack(preset_dirs=[tmp_path])
     with pytest.raises(GuardrailError):
         stack.apply_preset("evil")
-    assert stack.get("safety.minor_motion_factor") == 0.6
+    assert stack.get("safety.watchdog_return_factor") == 0.3
     stack.apply_preset("evil", admin=True)
-    assert stack.get("safety.minor_motion_factor") == 1.0
+    assert stack.get("safety.watchdog_return_factor") == 1.0
 
 
 def test_invalid_preset_is_rolled_back(tmp_path):
@@ -212,16 +211,16 @@ def test_invalid_preset_is_rolled_back(tmp_path):
     assert stack.get("affect.half_life_s") == 8.0  # still usable
 
 
-def test_person_layer_cannot_touch_safety_or_minors():
-    stack = ConfigStack()
+def test_person_layer_cannot_touch_safety():
+    stack = ConfigStack(app={"register": {"approach_allowed": False}})
     person = {
-        "safety": {"minor_motion_factor": 1.0},
-        "register": {"child": {"minor_content_policy": False, "speech_rate": 1.1}},
+        "safety": {"watchdog_return_factor": 1.0},
+        "register": {"approach_allowed": True, "speech_rate": 1.1},
     }
     cfg = stack.effective(person)
-    assert cfg.safety.minor_motion_factor == 0.6
-    assert cfg.register.child.minor_content_policy is True
-    assert cfg.register.child.speech_rate == 1.1  # allowed part kept
+    assert cfg.safety.watchdog_return_factor == 0.3
+    assert cfg.register.approach_allowed is False
+    assert cfg.register.speech_rate == 1.1  # allowed part kept
     assert any(e.source == "person" for e in stack.audit)
 
 
@@ -234,9 +233,9 @@ def test_hot_reload_refuses_loosening_and_invalid_files(tmp_path):
         app.write_text(text)
         os.utime(app, (time.time() + bump, time.time() + bump))
 
-    write("safety: {minor_motion_factor: 1.0}\n", 5)
+    write("safety: {watchdog_return_factor: 1.0}\n", 5)
     assert stack.poll() is None and "loosen" in stack.last_error
-    assert stack.get("safety.minor_motion_factor") == 0.6
+    assert stack.get("safety.watchdog_return_factor") == 0.3
     write("affect: {half_life_s: -1}\n", 10)
     assert stack.poll() is None and stack.last_error
     assert stack.get("affect.half_life_s") == 7  # last valid config kept
@@ -248,8 +247,8 @@ def test_admin_app_edit_is_persisted(tmp_path):
     app = tmp_path / "app.yaml"
     app.write_text("schema_version: 1\n")
     stack = ConfigStack.from_files(app=app)
-    stack.set("safety.minor_motion_factor", 0.9, layer="app", admin=True)
-    assert "minor_motion_factor: 0.9" in app.read_text()
+    stack.set("safety.watchdog_return_factor", 0.9, layer="app", admin=True)
+    assert "watchdog_return_factor: 0.9" in app.read_text()
     assert stack.poll() is None  # own write is not a reload
 
 
@@ -271,7 +270,7 @@ def test_baseline_never_absorbs_runtime_values():
     """N1: a runtime tightening + an admin approval must not lock the stack afterwards."""
     clock = Clock()
     stack = ConfigStack(clock=clock)
-    stack.set("safety.minor_motion_factor", 0.3, ttl_s=60)
+    stack.set("safety.watchdog_return_factor", 0.1, ttl_s=60)
     stack.set("privacy.multimodal_frames", True, admin=True)
     clock.t += 61
     stack.poll()  # tightening expired
@@ -293,7 +292,7 @@ def test_runtime_privacy_approval_lapses_with_the_override():
 
 
 def test_route_names_validated_and_unique():
-    """N4: names with dots or duplicates could bypass the minors guardrail."""
+    """N4: names with dots or duplicates could bypass a route guardrail."""
     with pytest.raises(ConfigError):
         ConfigStack(
             app={"llm_routes": [{"name": "cloud.v2", "base_url": "http://a/v1", "model": "m"}]}
@@ -322,7 +321,7 @@ def test_single_route_field_addressable_at_runtime():
     routes = {r.name: r for r in stack.effective().llm_routes}
     assert set(routes) == {"lan", "cloud"} and routes["cloud"].max_tokens == 120
     with pytest.raises(GuardrailError):
-        stack.set("llm_routes.cloud.allowed_for_minors", True)
+        stack.set("llm_routes.cloud.locality", "local")
 
 
 # ------------------------------------------------------------------ batch, preview, clear
@@ -451,3 +450,135 @@ def test_clear_and_set_validate_the_configuration_no_more_than_before(monkeypatc
     calls["n"] = 0
     stack.set("persona.traits", traits, source="t", layer="derived")
     assert calls["n"] <= 3
+
+
+def test_soothe_defaults_validate():
+    cfg = RoboEmotConfig()
+    assert cfg.soothe.enabled and (cfg.soothe.interval_s, cfg.soothe.jitter) == (300, 0.5)
+    pairs = [(v.label, v.sound) for v in cfg.soothe.variants]
+    assert pairs == [
+        ("calm", "hum"),
+        ("joy", "hum"),
+        ("joy", "blirp"),
+        ("curiosity", "blirp"),
+        ("sleepy", "hum"),
+    ]
+    assert cfg.soothe.variants[-1].states == ["drowsy"]
+    assert all("resting" not in v.states for v in cfg.soothe.variants)
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        {"label": "calm", "sound": "hum", "states": ["awake", "resting"]},
+        {"label": "calm", "sound": "hum", "states": []},
+        {"label": "calm", "sound": "whistle"},
+        {"label": "calm", "sound": "hum", "weight": 0},
+        {"label": "calm", "sound": "hum", "weight": -1},
+        {"label": "calm", "sound": "hum", "weight": float("nan")},
+        {"label": "calm", "sound": "hum", "shape": {"gain_db": 3}},
+        {"label": "calm", "sound": "hum", "shape": {"tempo_bpm": [90, 60]}},
+        {"label": "calm", "sound": "hum", "shape": {"pitch_hz": [10, 300]}},
+    ],
+)
+def test_soothe_rejects_bad_variants(variant):
+    with pytest.raises(ValueError):
+        RoboEmotConfig(soothe={"variants": [variant]})
+
+
+def test_soothe_rejects_an_unknown_label_and_empty_variants():
+    with pytest.raises(ValueError, match="affect.labels"):
+        RoboEmotConfig(soothe={"variants": [{"label": "euphoria", "sound": "hum"}]})
+    with pytest.raises(ValueError, match="at least one"):
+        RoboEmotConfig(soothe={"variants": []})
+
+
+def test_a_layer_replaces_soothe_variants_whole():
+    from roboemot.config.stack import deep_merge
+
+    base = RoboEmotConfig().model_dump(mode="json")
+    over = {"soothe": {"variants": [{"label": "joy", "sound": "blirp"}]}}
+    merged = RoboEmotConfig(**deep_merge(base, over))
+    assert [(v.label, v.sound) for v in merged.soothe.variants] == [("joy", "blirp")]
+
+
+# ----------------------------------------------------------------------------- app.yaml writes
+
+
+def test_app_write_interrupted_keeps_the_old_file_whole(tmp_path, monkeypatch):
+    """SPEC 11A, 12: a kill mid-write must leave the old app.yaml, never a truncated one."""
+    app = tmp_path / "app.yaml"
+    app.write_text("schema_version: 1\naffect: {half_life_s: 7}\n")
+    before = app.read_bytes()
+    stack = ConfigStack.from_files(app=app)
+
+    def crash(src: object, dst: object) -> None:
+        raise OSError("killed")
+
+    monkeypatch.setattr(os, "replace", crash)
+    with pytest.raises(OSError):
+        stack.set("safety.watchdog_return_factor", 0.9, layer="app", admin=True)
+    assert app.read_bytes() == before
+    assert [p.name for p in tmp_path.iterdir()] == ["app.yaml"]  # no temp file left behind
+    assert stack.get("safety.watchdog_return_factor") == 0.3  # undone with the file
+
+
+def test_app_write_is_owner_only_and_keeps_a_symlink(tmp_path):
+    real = tmp_path / "real.yaml"
+    real.write_text("schema_version: 1\n")
+    real.chmod(0o644)  # as the installer leaves it
+    link = tmp_path / "app.yaml"
+    link.symlink_to(real)
+    stack = ConfigStack.from_files(app=link)
+    stack.set("safety.watchdog_return_factor", 0.9, layer="app", admin=True)
+    assert link.is_symlink()
+    assert "watchdog_return_factor: 0.9" in real.read_text()
+    assert real.stat().st_mode & 0o777 == 0o600  # owner only, whatever it was (review ZG)
+    assert stack.poll() is None  # own write is not a reload
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ftp://x.example/v1",
+        "file:///etc/passwd",
+        "javascript:alert(1)",
+        "x.example/v1",
+        "http:///v1",
+        # the parser that sends the request (httpx) cannot use these (review ZG)
+        " http://127.0.0.1:8000/v1",
+        "\thttp://127.0.0.1:8000/v1",
+        "http://\t127.0.0.1:8000/v1",
+        "http://127.0.0.1\t:8000/v1",
+        "http://0177.0.0.1:8000/v1",
+        "http://\uff11\uff12\uff17.0.0.1/v1",
+        "http://127.0.0.1:8000/v1\n",
+        "http://x.example\\v1",
+    ],
+)
+def test_a_route_base_url_must_be_http_or_https_with_a_host(url):
+    """SPEC 8: routes speak HTTP(S) to a host; any other scheme fails at load, not at first use."""
+    with pytest.raises(ConfigError):
+        ConfigStack(app={"llm_routes": [{"name": "r", "base_url": url, "model": "m"}]})
+
+
+def test_a_failing_listener_is_audited_and_kept_in_last_error(tmp_path):
+    """R3 SF3: listener failures stay isolated but leave a trace (audit, last_error, counter)."""
+    audit = tmp_path / "audit.jsonl"
+    stack = ConfigStack(audit_path=audit)
+    seen = []
+
+    def broken(change):
+        raise RuntimeError("secret detail never shown")
+
+    stack.subscribe(broken)
+    stack.subscribe(seen.append)
+    assert stack.listener_failures == 0
+    stack.set("voice.expressivity", 0.2)
+    assert len(seen) == 1  # the others still ran
+    assert stack.listener_failures == 1
+    assert stack.last_error == "config listener failed: RuntimeError"
+    entry = stack.audit[-1]
+    assert (entry.source, entry.key, entry.new) == ("listener", "listener_failed", "RuntimeError")
+    assert "listener_failed" in audit.read_text()
+    assert "secret detail" not in audit.read_text()

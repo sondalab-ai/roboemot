@@ -1,8 +1,10 @@
 """Registry records for people, animals and objects (SPEC 6, Person record).
 
 Embeddings are model-specific, so every record names the embedding model that produced them
-and the matcher ignores records from another model. Animal and object records have no consent,
-age or register fields.
+and the matcher ignores records from another model. Animal and object records have no consent
+or register fields. People carry no age group or gender (owner decision 2026-10-23); a record
+stored before that still loads, and ``Registry`` drops its ``age_group``, ``gender`` and consent
+``guardian`` from disk at load.
 """
 
 from __future__ import annotations
@@ -16,33 +18,13 @@ from pydantic import ValidationError
 
 from ..config.schema import RegisterParams
 
-AGE_GROUPS: tuple[str, ...] = ("child", "teen", "adult", "senior", "unknown")
-ADULT_AGE_GROUPS = frozenset({"adult", "senior"})
-GENDERS: tuple[str, ...] = ("female", "male", "unknown")
 CONSENT_SCOPES: tuple[str, ...] = ("face", "voice", "refresh")
 ENTITY_KINDS: tuple[str, ...] = ("animal", "object")
 SCHEMA_VERSION = 1
 
 Status = Literal["active", "pending"]
-Source = Literal["declared", "estimated"]
 Origin = Literal["enrolled", "xmp", "auto"]
 EntityKind = Literal["animal", "object"]
-
-
-def possible_minor(age_group: str | None) -> bool:
-    """True unless the group is exactly adult or senior; unknown or invalid counts as a minor.
-
-    Fails closed (SPEC 5, Rules for estimated attributes): only an explicit adult or senior
-    value lifts the minor policy.
-    """
-    return age_group not in ADULT_AGE_GROUPS
-
-
-def check_age_group(value: str) -> str:
-    """Return ``value`` if it is a known age group, else raise ``ValueError``."""
-    if value not in AGE_GROUPS:
-        raise ValueError(f"age_group must be one of {AGE_GROUPS}")
-    return value
 
 
 def check_register_overrides(value: dict[str, Any] | None) -> dict[str, Any]:
@@ -56,13 +38,6 @@ def check_register_overrides(value: dict[str, Any] | None) -> dict[str, Any]:
             f"register_overrides is not a valid partial register: {exc.error_count()} error(s)"
         ) from None
     return overrides
-
-
-def check_gender(value: str) -> str:
-    """Return ``value`` if it is a known gender, else raise ``ValueError``."""
-    if value not in GENDERS:
-        raise ValueError(f"gender must be one of {GENDERS}")
-    return value
 
 
 def check_entity_kind(value: str) -> str:
@@ -98,15 +73,6 @@ class RecordSummary:
     status: Status
     kind: Literal["person", "animal", "object"]
     last_seen: datetime | None
-    age_group: str | None = None
-
-
-@dataclass(frozen=True)
-class Attribute:
-    """An age group or gender value and whether it was declared or estimated."""
-
-    value: str
-    source: Source
 
 
 class ConsentError(ValueError):
@@ -115,7 +81,7 @@ class ConsentError(ValueError):
 
 @dataclass(frozen=True)
 class Consent:
-    """Who consented, when and to what; the guardian is required for possible minors.
+    """Who consented, when and to what.
 
     ``scope`` is a non-empty subset of ``CONSENT_SCOPES``: ``face`` and ``voice`` allow storing
     those embeddings, ``refresh`` allows adding embeddings after enrollment (SPEC 12, Data).
@@ -124,14 +90,11 @@ class Consent:
     who: str
     when: datetime
     scope: tuple[str, ...]
-    guardian: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "scope", tuple(self.scope))
         if not self.who.strip():
             raise ConsentError("consent needs the name of who consented")
-        if self.guardian is not None and not self.guardian.strip():
-            raise ConsentError("guardian must not be blank")
         if self.when.tzinfo is None or self.when.utcoffset() is None:
             raise ConsentError("consent time must be timezone-aware")
         if not self.scope or not set(self.scope) <= set(CONSENT_SCOPES):
@@ -142,21 +105,14 @@ class Consent:
             "who": self.who,
             "when": self.when.isoformat(),
             "scope": list(self.scope),
-            "guardian": self.guardian,
         }
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> Consent:
+        """Read a stored consent; a ``guardian`` key written before 2026-10-23 is not read (the
+        registry drops it from disk at load)."""
         when = datetime.fromisoformat(data["when"])
-        return cls(data["who"], when, tuple(data["scope"]), data["guardian"])
-
-
-def _attr(data: dict[str, str] | None) -> Attribute | None:
-    return None if data is None else Attribute(data["value"], data["source"])  # type: ignore[arg-type]
-
-
-def _attr_json(attr: Attribute | None) -> dict[str, str] | None:
-    return None if attr is None else {"value": attr.value, "source": attr.source}
+        return cls(data["who"], when, tuple(data["scope"]))
 
 
 @dataclass
@@ -171,16 +127,10 @@ class PersonRecord:
     n_enrolled: int = 0
     voice_embedding: np.ndarray | None = field(default=None, repr=False)
     voice_model_id: str | None = None
-    age_group: Attribute | None = None
-    gender: Attribute | None = None
     register_overrides: dict[str, Any] = field(default_factory=dict)
     preferences: dict[str, Any] = field(default_factory=dict, repr=False)
     consent: Consent | None = field(default=None, repr=False)
     last_seen: datetime | None = None
-
-    @property
-    def possible_minor(self) -> bool:
-        return possible_minor(None if self.age_group is None else self.age_group.value)
 
     def meta(self) -> dict[str, Any]:
         """JSON-safe metadata; the embeddings are stored as arrays beside it."""
@@ -192,8 +142,6 @@ class PersonRecord:
             "embedding_model_id": self.embedding_model_id,
             "n_enrolled": self.n_enrolled,
             "voice_model_id": self.voice_model_id,
-            "age_group": _attr_json(self.age_group),
-            "gender": _attr_json(self.gender),
             "register_overrides": self.register_overrides,
             "preferences": self.preferences,
             "consent": None if self.consent is None else self.consent.to_json(),
@@ -210,6 +158,8 @@ class PersonRecord:
 
     @classmethod
     def from_stored(cls, meta: dict[str, Any], arrays: dict[str, np.ndarray]) -> PersonRecord:
+        """Rebuild a stored person; the ``age_group`` and ``gender`` of an older record are not
+        read (the registry drops them from disk at load)."""
         consent = meta["consent"]
         _check_version(meta)
         return cls(
@@ -221,8 +171,6 @@ class PersonRecord:
             n_enrolled=meta["n_enrolled"],
             voice_embedding=arrays.get("voice"),
             voice_model_id=meta["voice_model_id"],
-            age_group=_attr(meta["age_group"]),
-            gender=_attr(meta["gender"]),
             register_overrides=meta["register_overrides"],
             preferences=meta["preferences"],
             consent=None if consent is None else Consent.from_json(consent),

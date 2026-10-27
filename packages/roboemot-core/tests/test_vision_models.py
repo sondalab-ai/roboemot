@@ -45,10 +45,6 @@ def test_manifest_is_complete_and_pinned():
     assert set(specs) == {
         "yunet",
         "sface",
-        "fairface-age",
-        "fairface-gender",
-        "fairface-age-int8",
-        "fairface-gender-int8",
         "dinov2-small",
         "nanodet-plus-m-320",
     }
@@ -63,12 +59,60 @@ def test_manifest_is_complete_and_pinned():
                 assert f.url.startswith("https://")
             else:
                 assert f.sha256 is None and f.url is None
-    for fp32, int8 in (
-        ("fairface-age", "fairface-age-int8"),
-        ("fairface-gender", "fairface-gender-int8"),
-    ):
-        assert specs[int8].labels == specs[fp32].labels
-        assert specs[int8].files[0].quantize.source == specs[fp32].files[0].path
+    assert not [n for n in specs if "fairface" in n]
+    retired = models.retired_paths()
+    assert sorted(retired) == [
+        "fairface/age_model.onnx",
+        "fairface/gender_model.onnx",
+        "fairface_int8/age_model.onnx",
+        "fairface_int8/gender_model.onnx",
+        "yolo11n_face_age/model.onnx",
+    ]
+    assert not set(retired) & set(paths)
+    assert not [n for n in specs if "age" in n.split("-")]
+
+
+def test_prune_deletes_only_the_retired_files_and_their_empty_folders(tmp_path):
+    for rel in [*models.retired_paths(), "fairface/notes.txt", "clip_b32/model.onnx"]:
+        target = tmp_path / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"x")
+        (tmp_path / (rel + ".verified")).write_text("{}")
+    deleted = models.prune_retired(tmp_path)
+    assert sorted(deleted) == sorted(tmp_path / r for r in models.retired_paths())
+    assert not (tmp_path / "fairface_int8").exists()  # emptied, so removed
+    assert not (tmp_path / "yolo11n_face_age").exists()  # the age model (2026-10-23) too
+    assert (tmp_path / "fairface/notes.txt").exists()  # not listed: kept, folder kept
+    assert not (tmp_path / "fairface/age_model.onnx.verified").exists()
+    assert (tmp_path / "clip_b32/model.onnx").exists()
+    assert models.prune_retired(tmp_path) == []
+    assert models.prune_retired(tmp_path / "absent") == []
+
+
+def test_cli_list_names_retired_files_on_disk_and_prune_deletes_them(tmp_path, capsys):
+    """Review ZN S2: `models list` shows each retired file still in the folder (the age model
+    included) and points at `models prune`, which then deletes it."""
+    age = tmp_path / "yolo11n_face_age/model.onnx"
+    age.parent.mkdir()
+    age.write_bytes(b"x" * 2_000_000)
+    assert models.retired_on_disk(tmp_path) == [(age, 2_000_000)]
+    assert cli.main(["models", "list", "--cache-dir", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert f"retired, unused: {age} (2.0 MB); run `roboemot models prune`" in out
+    assert cli.main(["models", "prune", "--cache-dir", str(tmp_path)]) == 0
+    assert str(age) in capsys.readouterr().out and not age.exists()
+    assert cli.main(["models", "list", "--cache-dir", str(tmp_path)]) == 0
+    assert "retired, unused" not in capsys.readouterr().out
+
+
+def test_prune_does_not_follow_a_symlink_out_of_the_folder(tmp_path):
+    outside = tmp_path / "outside.onnx"
+    outside.write_bytes(b"keep")
+    root = tmp_path / "models"
+    (root / "fairface").mkdir(parents=True)
+    (root / "fairface/age_model.onnx").symlink_to(outside)
+    assert models.prune_retired(root) == []
+    assert outside.read_bytes() == b"keep"
 
 
 SOURCE_BODY = b"fp32-weights" * 50
@@ -175,13 +219,20 @@ def test_prune_keeps_a_source_whose_derived_file_is_not_verified(tmp_path, deriv
     assert (tmp_path / "fp/m.onnx").exists()
 
 
-def test_cli_prune_needs_sources_flag(tmp_path, derived_manifest, capsys):
+def test_cli_prune_deletes_retired_files_and_sources_only_on_request(
+    tmp_path, derived_manifest, capsys, monkeypatch
+):
     produced(tmp_path)
-    assert cli.main(["models", "prune", "--cache-dir", str(tmp_path)]) == 1
-    assert (tmp_path / "fp/m.onnx").exists()
+    old = tmp_path / "fairface/age_model.onnx"
+    old.parent.mkdir()
+    old.write_bytes(b"old")
+    retired = ["fairface/age_model.onnx"]
+    monkeypatch.setattr(models, "retired_paths", lambda path=models.MANIFEST: retired)
+    assert cli.main(["models", "prune", "--cache-dir", str(tmp_path)]) == 0
+    assert not old.exists() and (tmp_path / "fp/m.onnx").exists()
+    assert "1 file(s) deleted" in capsys.readouterr().out
     assert cli.main(["models", "prune", "--sources", "--cache-dir", str(tmp_path)]) == 0
     assert not (tmp_path / "fp/m.onnx").exists()
-    assert "1 source file(s) deleted" in capsys.readouterr().out
 
 
 def test_derived_marker_must_match_the_manifest_and_the_file(tmp_path, derived_manifest):
@@ -283,53 +334,6 @@ def test_quantize_weight_type_is_required_and_restricted():
         ModelFile(path="a.onnx", quantize={"source": "b", "weight_type": "int4"})
 
 
-@pytest.mark.parametrize(
-    ("configured", "profile", "expected"),
-    [
-        ("auto", "cm4", "int8"),
-        ("auto", "npu", "fp32"),
-        ("auto", None, "fp32"),
-        ("int8", "npu", "int8"),
-        ("fp32", "cm4", "fp32"),
-    ],
-)
-def test_resolve_precision(configured, profile, expected):
-    assert models.resolve_precision(configured, profile) == expected
-
-
-def test_auto_precision_follows_the_manifest_profile(monkeypatch, tmp_path):
-    pytest.importorskip("cv2")
-    pytest.importorskip("onnxruntime")
-    from roboemot.manifest import load_manifest as load_robot
-    from roboemot.vision import onnx
-
-    asked: list[str] = []
-    monkeypatch.setattr(onnx, "configure", lambda threads: None)
-    monkeypatch.setattr(onnx, "_file", lambda root, name, index=0: asked.append(name) or tmp_path)
-    monkeypatch.setattr(onnx, "FairFaceEstimator", lambda *a: "estimator")
-    monkeypatch.setattr(onnx, "YuNetDetector", lambda *a: None)
-    monkeypatch.setattr(onnx, "SFaceEmbedder", lambda *a: None)
-    cfg = RoboEmotConfig().vision
-    assert cfg.attribute_precision == "auto"
-    manifest_dir = Path(__file__).resolve().parents[3] / "configs" / "manifests"
-    cm4 = load_robot(manifest_dir / "reachy-mini-wireless.yaml", allow_unmeasured_dynamics=True)
-    assert cm4.robot.profile == "cm4"
-    onnx.load_stages(tmp_path, cfg, profile=cm4.robot.profile, appearance=False, objects=False)
-    assert "fairface-age-int8" in asked and "fairface-gender-int8" in asked
-    asked.clear()
-    onnx.load_stages(tmp_path, cfg, profile="npu", appearance=False, objects=False)
-    assert "fairface-age" in asked and not [n for n in asked if n.endswith("int8")]
-    asked.clear()
-    onnx.load_stages(tmp_path, cfg, appearance=False, objects=False)
-    assert "fairface-age" in asked
-    asked.clear()
-    forced = cfg.model_copy(update={"attribute_precision": "int8"})
-    onnx.load_stages(tmp_path, forced, profile="npu", appearance=False, objects=False)
-    assert "fairface-age-int8" in asked
-    with pytest.raises(ValueError):
-        RoboEmotConfig(vision={"attribute_precision": "int4"})
-
-
 def test_nanodet_manifest_pins_the_class_order_and_covers_the_default_mapping():
     spec = load_manifest()["nanodet-plus-m-320"]
     cfg = RoboEmotConfig().vision
@@ -354,22 +358,15 @@ def test_load_stages_builds_the_object_detector_from_the_class_mapping(monkeypat
     monkeypatch.setattr(onnx, "SFaceEmbedder", lambda *a: None)
     monkeypatch.setattr(onnx, "NanoDetDetector", lambda *a: built.append(a) or "detector")
     cfg = RoboEmotConfig().vision
-    stages = onnx.load_stages(tmp_path, cfg, attributes=False, appearance=False)
+    stages = onnx.load_stages(tmp_path, cfg, appearance=False)
     path, labels, classes, score_min, nms_iou, threads = built[0]
     assert stages.object_detector == "detector" and path.name == "nanodet-plus-m-320"
     assert len(labels) == 80 and classes == [*cfg.animal_categories, *cfg.object_categories]
     assert (score_min, nms_iou, threads) == (cfg.object_score_min, cfg.object_nms_iou, cfg.threads)
     built.clear()
     off = cfg.model_copy(update={"objects_enabled": False})
-    assert (
-        onnx.load_stages(tmp_path, off, attributes=False, appearance=False).object_detector is None
-    )
-    assert (
-        onnx.load_stages(
-            tmp_path, cfg, attributes=False, appearance=False, objects=False
-        ).object_detector
-        is None
-    )
+    assert onnx.load_stages(tmp_path, off, appearance=False).object_detector is None
+    assert onnx.load_stages(tmp_path, cfg, appearance=False, objects=False).object_detector is None
     assert built == []
 
 
@@ -396,7 +393,7 @@ def test_missing_dinov2_keeps_faces_and_drops_the_object_stage(monkeypatch, tmp_
     pytest.importorskip("cv2")
     pytest.importorskip("onnxruntime")
     onnx, built = _optional_stage_rig(monkeypatch, tmp_path, "dinov2-small")
-    stages = onnx.load_stages(tmp_path, RoboEmotConfig().vision, attributes=False)
+    stages = onnx.load_stages(tmp_path, RoboEmotConfig().vision)
     assert stages.face_detector == "yunet" and stages.face_embedder == "sface"
     assert stages.appearance_embedder is None and stages.object_detector is None
     assert (
@@ -409,7 +406,7 @@ def test_a_failing_detector_drops_dinov2_too_and_never_loads_it(monkeypatch, tmp
     pytest.importorskip("cv2")
     pytest.importorskip("onnxruntime")
     onnx, built = _optional_stage_rig(monkeypatch, tmp_path, "nanodet-plus-m-320")
-    stages = onnx.load_stages(tmp_path, RoboEmotConfig().vision, attributes=False)
+    stages = onnx.load_stages(tmp_path, RoboEmotConfig().vision)
     assert stages.face_detector == "yunet"
     assert stages.appearance_embedder is None and stages.object_detector is None
     assert "nanodet-plus-m-320" in stages.objects_unavailable
@@ -421,7 +418,7 @@ def test_the_object_stage_loads_whole_or_not_at_all_and_can_be_off(monkeypatch, 
     pytest.importorskip("onnxruntime")
     onnx, built = _optional_stage_rig(monkeypatch, tmp_path, None)
     cfg = RoboEmotConfig().vision
-    ok = onnx.load_stages(tmp_path, cfg, attributes=False)
+    ok = onnx.load_stages(tmp_path, cfg)
     assert (ok.object_detector, ok.appearance_embedder, ok.objects_unavailable) == (
         "nanodet",
         "dino",
@@ -429,50 +426,37 @@ def test_the_object_stage_loads_whole_or_not_at_all_and_can_be_off(monkeypatch, 
     )
     built.clear()
     off = cfg.model_copy(update={"objects_enabled": False})
-    stages = onnx.load_stages(tmp_path, off, attributes=False, appearance=False)
+    stages = onnx.load_stages(tmp_path, off, appearance=False)
     assert stages.object_detector is None and stages.appearance_embedder is None and built == []
 
 
-def test_load_stages_int8_pair_uses_the_real_marker_check(monkeypatch, tmp_path):
+def test_load_stages_needs_only_the_face_stack_and_uses_the_real_marker_check(
+    monkeypatch, tmp_path
+):
+    """No age model since 2026-10-23: YuNet and SFace alone make the required stages."""
     pytest.importorskip("cv2")
     pytest.importorskip("onnxruntime")
     from roboemot.vision import onnx
 
     specs = load_manifest()
+    built: list[tuple] = []
     for name in ("yunet", "sface"):
         f = specs[name].files[0]
         target = tmp_path / f.path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(b"x")
         models._write_marker(target, f.sha256)
-    for name in ("fairface-age-int8", "fairface-gender-int8"):
-        f = specs[name].files[0]
-        target = tmp_path / f.path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(b"int8")
-        models._write_marker(
-            target,
-            hashlib.sha256(b"int8").hexdigest(),
-            {
-                "source_sha256": models._source_of(f).sha256,
-                "weight_type": "QInt8",
-                "ort_version": "1.0",
-            },
-        )
-    opened: list[str] = []
     monkeypatch.setattr(onnx, "configure", lambda threads: None)
-    monkeypatch.setattr(onnx, "_session", lambda path, threads: opened.append(path.name))
-    monkeypatch.setattr(onnx, "YuNetDetector", lambda *a: None)
-    monkeypatch.setattr(onnx, "SFaceEmbedder", lambda *a: None)
+    monkeypatch.setattr(onnx, "YuNetDetector", lambda *a: built.append(a) or "detector")
+    monkeypatch.setattr(onnx, "SFaceEmbedder", lambda *a: "embedder")
     cfg = RoboEmotConfig().vision
     stages = onnx.load_stages(tmp_path, cfg, profile="cm4", appearance=False, objects=False)
-    assert stages.attribute_estimator is not None
-    assert opened == ["age_model.onnx", "gender_model.onnx"]
-    (tmp_path / "fairface_int8/age_model.onnx").write_bytes(b"swapped")
+    assert (stages.face_detector, stages.face_embedder) == ("detector", "embedder")
+    assert not hasattr(stages, "attribute_estimator")
+    assert built[0][0] == tmp_path / specs["yunet"].files[0].path
+    (tmp_path / specs["sface"].files[0].path).write_bytes(b"swapped")
     with pytest.raises(ModelError, match="changed since"):
-        onnx.load_stages(tmp_path, cfg, profile="cm4", appearance=False, objects=False)
-    with pytest.raises(ModelError, match="not verified"):
-        onnx.load_stages(tmp_path, cfg, profile="npu", appearance=False, objects=False)
+        onnx.load_stages(tmp_path, cfg, appearance=False, objects=False)
 
 
 def test_fetch_downloads_verifies_and_is_idempotent(tmp_path):
@@ -509,6 +493,135 @@ def test_fetch_refuses_http_traversal_and_http_errors(tmp_path):
     with pytest.raises(ModelError, match="download failed"):
         fetch_file(GOOD, tmp_path, client(status=404))
     assert not list(tmp_path.rglob("*.part"))
+
+
+class Flaky:
+    """Serves ``BODY``, dropping the connection after ``cut`` bytes for the first ``drops`` GETs."""
+
+    def __init__(self, drops: int, cut: int = 300, honour_range: bool = True, offset_bug: int = 0):
+        self.drops, self.cut, self.honour_range, self.offset_bug = (
+            drops,
+            cut,
+            honour_range,
+            offset_bug,
+        )
+        self.ranges: list[str | None] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.ranges.append(request.headers.get("range"))
+        start = 0
+        if request.headers.get("range") and self.honour_range:
+            start = int(request.headers["range"].removeprefix("bytes=").rstrip("-"))
+        body = BODY[start:]
+        status, headers = 200, {}
+        if start:
+            status = 206
+            shown = start + self.offset_bug
+            headers = {"content-range": f"bytes {shown}-{len(BODY) - 1}/{len(BODY)}"}
+        if len(self.ranges) <= self.drops:
+            return httpx.Response(status, headers=headers, content=self._cut(body))
+        return httpx.Response(status, headers=headers, content=body)
+
+    def _cut(self, body: bytes):
+        yield body[: self.cut]
+        raise httpx.RemoteProtocolError("peer closed connection")
+
+
+@pytest.fixture
+def waits(monkeypatch):
+    """Records retry waits; small chunks so bytes before a drop reach the file."""
+    monkeypatch.setattr(models, "CHUNK_BYTES", 100)
+    slept: list[float] = []
+    monkeypatch.setattr(models.time, "sleep", slept.append)
+    return slept
+
+
+def flaky(server: Flaky) -> httpx.Client:
+    return httpx.Client(transport=httpx.MockTransport(server))
+
+
+def test_fetch_resumes_a_dropped_download_from_the_bytes_written(tmp_path, waits):
+    server = Flaky(drops=2)
+    assert fetch_file(GOOD, tmp_path, flaky(server)) == "downloaded"
+    assert (tmp_path / "sub/model.onnx").read_bytes() == BODY
+    assert server.ranges == [None, "bytes=300-", "bytes=600-"]
+    assert waits == [models.RETRY_WAIT_S, models.RETRY_WAIT_S * 2]
+    assert not list(tmp_path.rglob("*.part"))
+
+
+def test_fetch_restarts_when_the_server_ignores_the_range(tmp_path, waits):
+    sized = GOOD.model_copy(update={"size_bytes": len(BODY)})
+    server = Flaky(drops=1, honour_range=False)
+    assert fetch_file(sized, tmp_path, flaky(server)) == "downloaded"
+    assert (tmp_path / "sub/model.onnx").read_bytes() == BODY
+
+
+def test_fetch_gives_up_after_the_last_attempt_and_leaves_no_orphans(tmp_path, waits):
+    server = Flaky(drops=models.DOWNLOAD_ATTEMPTS)
+    with pytest.raises(ModelError, match=r"download failed \(RemoteProtocolError\)"):
+        fetch_file(GOOD, tmp_path, flaky(server))
+    assert len(server.ranges) == models.DOWNLOAD_ATTEMPTS
+    assert len(waits) == models.DOWNLOAD_ATTEMPTS - 1
+    assert list(tmp_path.rglob("*")) == [tmp_path / "sub"]
+
+
+def test_fetch_refuses_a_resume_at_the_wrong_offset(tmp_path, waits):
+    with pytest.raises(ModelError, match="wrong offset"):
+        fetch_file(GOOD, tmp_path, flaky(Flaky(drops=1, offset_bug=1)))
+    assert list(tmp_path.rglob("*")) == [tmp_path / "sub"]
+
+
+def test_a_resume_resends_the_range_on_every_redirect_hop(tmp_path, waits):
+    origin = Flaky(drops=1)
+    hops: list[tuple[str, str | None]] = []
+
+    def serve(request: httpx.Request) -> httpx.Response:
+        hops.append((request.url.host, request.headers.get("range")))
+        if request.url.host == "example.test":  # the manifest host redirects to a CDN
+            return httpx.Response(302, headers={"location": "https://cdn.example.test/m.onnx"})
+        return origin(request)
+
+    client = httpx.Client(transport=httpx.MockTransport(serve))
+    assert fetch_file(GOOD, tmp_path, client) == "downloaded"
+    assert (tmp_path / "sub/model.onnx").read_bytes() == BODY
+    assert hops == [
+        ("example.test", None),
+        ("cdn.example.test", None),
+        ("example.test", "bytes=300-"),
+        ("cdn.example.test", "bytes=300-"),
+    ]
+
+
+def test_a_drop_after_the_last_byte_is_not_resumed_into_a_416(tmp_path, waits):
+    sized = GOOD.model_copy(update={"size_bytes": len(BODY)})
+
+    class AtEof(Flaky):
+        def __call__(self, request):
+            if request.headers.get("range") == f"bytes={len(BODY)}-":
+                self.ranges.append(request.headers["range"])
+                return httpx.Response(416)  # a compliant server: nothing left to send
+            return super().__call__(request)
+
+    server = AtEof(drops=1, cut=len(BODY))  # the whole body arrived, then the close failed
+    assert fetch_file(sized, tmp_path, flaky(server)) == "downloaded"
+    assert (tmp_path / "sub/model.onnx").read_bytes() == BODY
+    assert server.ranges == [None]  # the digest decides; no resume was asked
+
+
+def test_fetch_does_not_retry_http_errors(tmp_path, waits):
+    seen: list[httpx.Request] = []
+    transport = httpx.MockTransport(lambda req: seen.append(req) or httpx.Response(503))
+    with pytest.raises(ModelError, match="download failed"):
+        fetch_file(GOOD, tmp_path, httpx.Client(transport=transport))
+    assert len(seen) == 1 and waits == []
+
+
+def test_fetch_replaces_a_part_file_left_by_a_killed_run(tmp_path):
+    part = tmp_path / "sub/model.onnx.part"
+    part.parent.mkdir()
+    part.write_bytes(b"left over")
+    assert fetch_file(GOOD, tmp_path, client()) == "downloaded"
+    assert not part.exists()
 
 
 def test_fetch_unknown_name_and_status(tmp_path):
@@ -553,8 +666,6 @@ CACHE = models.default_dir()
 NEEDED = [
     "yunet",
     "sface",
-    "fairface-age-int8",
-    "fairface-gender-int8",
     "dinov2-small",
     "nanodet-plus-m-320",
 ]
@@ -581,10 +692,6 @@ def textured_scene() -> np.ndarray:
 def test_real_backends_run_end_to_end_on_a_synthetic_image(stages):
     img = textured_scene()
     assert stages.face_detector.detect(img) == []
-    crop = img[100:300, 100:300]
-    sample = stages.attribute_estimator.estimate(crop)
-    assert sample.age_group in {"child", "teen", "adult", "senior"}
-    assert 0 < sample.age_confidence <= 1 and sample.gender in {"female", "male"}
     app = stages.appearance_embedder.embed(img, (100.0, 100.0, 300.0, 300.0))
     assert app.shape == (384,) and np.linalg.norm(app) == pytest.approx(1.0, abs=1e-4)
     same = stages.appearance_embedder.embed(img, (100.0, 100.0, 300.0, 300.0))

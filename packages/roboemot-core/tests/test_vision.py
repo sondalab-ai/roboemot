@@ -16,17 +16,16 @@ from roboemot.config.schema import RoboEmotConfig, TrackerConfig
 from roboemot.registry import Consent, FileStore, Matcher, Registry
 from roboemot.vision import (
     CIRCADIAN,
-    AttributeSample,
     CameraModel,
     Detection,
     Frame,
-    InlineExecutor,
     LatestFrameRunner,
     RateGovernor,
     Tracker,
     VisionPipeline,
 )
 from roboemot.vision.replay import ReplayError, load_session, replay, summarize
+from roboemot.vision.tracker import distance_matrix, gated_distance, iou_matrix
 from roboemot.world import FrameSpec, WorldModel, feed_world
 
 CFG = RoboEmotConfig()
@@ -78,25 +77,6 @@ class FixedFaceEmbedder:
         return self.vector.copy()
 
 
-class CountingEstimator:
-    def __init__(self, age="adult", gender="female", conf=0.95):
-        self.sample = AttributeSample(age, conf, gender, conf)
-        self.crops: list[tuple[int, ...]] = []
-
-    def estimate(self, crop):
-        self.crops.append(crop.shape)
-        return self.sample
-
-
-class CountingExecutor(InlineExecutor):
-    def __init__(self):
-        self.jobs = 0
-
-    def submit(self, fn, /, *args, **kwargs):
-        self.jobs += 1
-        return super().submit(fn, *args, **kwargs)
-
-
 class AppearanceMock:
     model_id = APP_MODEL
 
@@ -121,7 +101,7 @@ def registry(tmp_path) -> Registry:
     return Registry(FileStore(tmp_path / "reg", allow_plaintext=True), CFG.identity)
 
 
-def rig(tmp_path, script, *, vector=None, estimator=None, executor=None, vision=None, **kw):
+def rig(tmp_path, script, *, vector=None, vision=None, **kw):
     reg = registry(tmp_path)
     bus = Bus()
     matcher = Matcher(reg, CFG.identity)
@@ -133,8 +113,6 @@ def rig(tmp_path, script, *, vector=None, estimator=None, executor=None, vision=
         matcher,
         face_detector=ScriptedDetector(script),
         face_embedder=embedder,
-        attribute_estimator=estimator,
-        executor=executor or InlineExecutor(),
         **kw,
     )
     got: dict[str, list] = {}
@@ -227,6 +205,129 @@ def test_tracker_low_score_alone_never_starts_a_track():
     assert t.update([face(50, score=0.3)], 0.0).visible == []
 
 
+SIDE_ON = Detection((144, 76, 164, 144), 0.9, landmarks=np.zeros((5, 2)))  # narrow, taller box
+
+
+def test_tracker_side_on_box_below_match_iou_keeps_its_track_by_centre_distance():
+    # robot 2026-10-23: rebirth IoU p50 0.24, centre distance p50 0.39 heights (face side-on)
+    t = Tracker(CFG.vision.tracker)
+    t.update([face(100)], 0.0)
+    tid = t.update([face(100)], 0.125).visible[0].track_id
+    predicted = np.array([t._tracks[0].box])
+    side = np.array([SIDE_ON.box])
+    assert iou_matrix(predicted, side)[0, 0] == pytest.approx(0.24, abs=0.005)
+    assert distance_matrix(predicted, side)[0, 0] == pytest.approx(0.4, abs=0.005)
+    assert iou_matrix(predicted, side)[0, 0] < CFG.vision.tracker.match_iou
+    res = t.update([SIDE_ON], 0.25)
+    assert [tr.track_id for tr in res.visible] == [tid] and len(t._tracks) == 1
+
+
+def test_tracker_without_the_distance_gate_splits_the_side_on_face():
+    cfg = CFG.vision.tracker.model_copy(
+        update={"match_distance_heights": 0.0, "low_match_distance_heights": 0.0}
+    )
+    t = Tracker(cfg)
+    t.update([face(100)], 0.0)
+    t.update([face(100)], 0.125)
+    t.update([SIDE_ON], 0.25)
+    assert len(t._tracks) == 2
+
+
+def test_tracker_two_faces_one_and_a_half_heights_apart_never_merge():
+    t = Tracker(CFG.vision.tracker)
+    t.update([face(100), face(190)], 0.0)
+    both = t.update([face(100), face(190)], 0.125).visible
+    assert len(both) == 2
+    first = t.update([face(100)], 0.25).visible[0].track_id  # the other one looks away
+    alone = [t.update([face(190)], 0.375 + i * 0.125) for i in range(3)]
+    ids = {tr.track_id for res in alone for tr in res.visible}
+    assert first not in ids
+    assert ids == {both[1].track_id}  # it keeps its own track while it lives
+
+
+def test_tracker_a_new_face_beside_an_unmatched_track_starts_its_own():
+    t = Tracker(TrackerConfig(confirm_hits=1))
+    old = t.update([face(100)], 0.0).visible[0].track_id
+    new = t.update([face(190)], 0.125).visible  # 1.5 heights from the unmatched track
+    assert len(new) == 1 and new[0].track_id != old
+
+
+def test_tracker_iou_matches_win_over_nearer_centres():
+    t = Tracker(TrackerConfig(confirm_hits=1))
+    tid = t.update([face(100)], 0.0).visible[0].track_id
+    sliver = Detection((125, 70, 135, 150), 0.9)  # centre on the track, IoU 0.16, 1.33x tall
+    res = t.update([sliver, face(115)], 0.125)  # IoU 0.6, 0.25 heights away
+    assert [tr.track_id for tr in res.visible] == [tid]
+    assert res.visible[0].detection.box == face(115).box
+    assert len(t._tracks) == 1  # the sliver is a duplicate: no track
+
+
+def test_tracker_low_score_pass_uses_its_own_distance_gate():
+    t = Tracker(CFG.vision.tracker)
+    t.update([face(100)], 0.0)
+    tid = t.update([face(100)], 0.125).visible[0].track_id
+    weak_near = Detection((122, 80, 182, 140), 0.3)  # IoU 0.46, 0.37 heights
+    assert t.update([weak_near], 0.25).visible[0].track_id == tid
+    t2 = Tracker(CFG.vision.tracker)
+    t2.update([face(100)], 0.0)
+    t2.update([face(100)], 0.125)
+    weak_far = Detection((130, 80, 190, 140), 0.3)  # IoU 0.33, 0.5 heights: past both
+    assert t2.update([weak_far], 0.25).visible == []
+
+
+HALF = Detection((145.6, 95, 175.6, 125), 0.9)  # 30 px face, centre 0.51 heights right of face(100)
+
+
+def test_tracker_half_size_face_beside_a_matched_face_starts_its_own_track():
+    # a child beside or behind an adult: close centres, half the height, so not a duplicate
+    assert gated_distance(np.array([face(100).box]), np.array([HALF.box]), 1.5)[0, 0] == np.inf
+    t = Tracker(CFG.vision.tracker)
+    for i in range(4):
+        res = t.update([face(100), HALF], i * 0.125)
+    assert len(res.visible) == 2 and len(t._tracks) == 2
+
+
+def test_tracker_half_size_face_does_not_take_over_a_track_that_missed():
+    t = Tracker(CFG.vision.tracker)
+    t.update([face(100)], 0.0)
+    tid = t.update([face(100)], 0.125).visible[0].track_id
+    t.update([HALF], 0.25)  # the adult looks away; the child's face is near its track
+    res = t.update([HALF], 0.375)
+    assert len(res.visible) == 1 and res.visible[0].track_id != tid
+
+
+def test_tracker_another_label_within_the_gate_does_not_take_over_a_missed_track():
+    t = Tracker(TrackerConfig(confirm_hits=1))
+    tid = t.update([face(100)], 0.0).visible[0].track_id
+    cat = Detection((124, 80, 184, 140), 0.9, "cat")  # same size, 0.4 heights, IoU 0.43
+    res = t.update([cat], 0.125)
+    assert [(tr.label, tr.track_id != tid) for tr in res.visible] == [("cat", True)]
+
+
+def test_tracker_another_label_within_the_gate_of_a_matched_track_is_not_a_duplicate():
+    t = Tracker(TrackerConfig(confirm_hits=1))
+    t.update([face(100)], 0.0)
+    cat = Detection((124, 80, 184, 140), 0.9, "cat")
+    res = t.update([face(100), cat], 0.125)
+    assert sorted(tr.label for tr in res.visible) == ["cat", "face"]
+
+
+@pytest.mark.parametrize(("gap_px", "tracks"), [(39, 2), (33, 1)])
+def test_tracker_duplicate_boundary_pins_the_default_gate(gap_px, tracks):
+    # 0.65 heights apart: two faces; 0.55: the second box is a duplicate of the first
+    t = Tracker(CFG.vision.tracker)
+    t.update([face(100)], 0.0)
+    t.update([face(100)], 0.125)
+    for i in range(2, 6):
+        t.update([face(100), face(100 + gap_px)], i * 0.125)
+    assert len(t._tracks) == tracks
+
+
+def test_tracker_distance_gates_must_stay_below_the_rebirth_gate():
+    with pytest.raises(ValidationError):
+        CFG.vision.model_validate({**CFG.vision.model_dump(), "rebirth_distance_heights": 0.5})
+
+
 def test_tracker_config_rejects_inverted_scores():
     with pytest.raises(ValidationError):
         TrackerConfig(low_score=0.9, high_score=0.5)
@@ -285,9 +386,7 @@ def test_new_track_gets_a_burst_then_the_steady_rate(tmp_path):
 
 def test_identity_decision_inside_the_cm4_budget(tmp_path):
     reg, _, pipe, emb, got = rig(tmp_path, lambda i: [face(100)])
-    person = reg.enroll(
-        "Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT, age_group="adult"
-    )
+    person = reg.enroll("Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT)
     run(pipe, 24)
     rec = got["person.recognized"]
     assert len(rec) == 1
@@ -297,8 +396,8 @@ def test_identity_decision_inside_the_cm4_budget(tmp_path):
 
 
 def test_published_payloads_carry_no_embeddings(tmp_path):
-    reg, _, pipe, _, got = rig(tmp_path, lambda i: [face(100)], estimator=CountingEstimator())
-    reg.enroll("Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT, age_group="adult")
+    reg, _, pipe, _, got = rig(tmp_path, lambda i: [face(100)])
+    reg.enroll("Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT)
     run(pipe, 24)
 
     def arrays(obj):
@@ -324,159 +423,12 @@ def test_face_percept_has_bearing_and_anonymous_id_until_recognised(tmp_path):
     assert p.azimuth_rad < 0 and p.elevation_rad > 0
     assert p.new_track and not got["percept.face"][-1].payload.new_track
     assert got["person.recognized"] == []
-    assert p.age_group == "unknown" and p.possible_minor
 
 
 def test_small_faces_are_ignored(tmp_path):
     _, _, pipe, emb, got = rig(tmp_path, lambda i: [face(100, size=CFG.vision.face_min_px - 1)])
     run(pipe, 8)
     assert got["percept.face"] == [] and emb.stamps == []
-
-
-def test_attribute_job_runs_once_per_track_on_n_crops(tmp_path):
-    est, ex = CountingEstimator(), CountingExecutor()
-    _, _, pipe, _, got = rig(tmp_path, lambda i: [face(100)], estimator=est, executor=ex)
-    run(pipe, 40)
-    needed = CFG.vision.attribute_crops
-    assert needed == 3
-    assert ex.jobs == 1
-    assert len(est.crops) == needed
-    state = next(iter(pipe._faces.values()))
-    assert state.crops == []
-    early, late = got["percept.face"][0].payload, got["percept.face"][-1].payload
-    assert early.age_group == "unknown" and early.possible_minor
-    assert late.age_group == "adult" and not late.possible_minor
-    assert late.gender == "female" and late.attributes_stamp is not None
-
-
-@pytest.mark.parametrize("crops", [3, 5])
-def test_attribute_crops_sets_the_crops_per_track(tmp_path, crops):
-    vision = CFG.vision.model_copy(update={"attribute_crops": crops})
-    est, ex = CountingEstimator(), CountingExecutor()
-    _, _, pipe, _, got = rig(
-        tmp_path, lambda i: [face(100)], estimator=est, executor=ex, vision=vision
-    )
-    run(pipe, 60)
-    assert ex.jobs == 1 and len(est.crops) == crops
-    assert pipe.worker.config is pipe.identity
-    late = got["percept.face"][-1].payload
-    assert (late.age_group, late.gender) == ("adult", "female")
-
-
-def test_single_crop_with_frames_min_one_gives_a_confident_value(tmp_path):
-    cfg = RoboEmotConfig(vision={"attribute_crops": 1}, identity={"estimate_frames_min": 1})
-    est, ex = CountingEstimator(conf=0.9), CountingExecutor()
-    reg = registry(tmp_path)
-    pipe = VisionPipeline(
-        cfg.vision,
-        cfg.identity,
-        Bus(),
-        Matcher(reg, cfg.identity),
-        face_detector=ScriptedDetector(lambda i: [face(100)]),
-        face_embedder=FixedFaceEmbedder(axis(0)),
-        attribute_estimator=est,
-        executor=ex,
-    )
-    got = []
-    pipe.bus.subscribe("percept.face", got.append)
-    run(pipe, 20)
-    assert ex.jobs == 1 and len(est.crops) == 1
-    last = got[-1].payload
-    assert (last.age_group, last.gender, last.possible_minor) == ("adult", "female", False)
-
-
-def test_single_crop_still_applies_the_confidence_rule(tmp_path):
-    cfg = RoboEmotConfig(vision={"attribute_crops": 1}, identity={"estimate_frames_min": 1})
-    pipe = VisionPipeline(
-        cfg.vision,
-        cfg.identity,
-        Bus(),
-        Matcher(registry(tmp_path), cfg.identity),
-        face_detector=ScriptedDetector(lambda i: [face(100)]),
-        face_embedder=FixedFaceEmbedder(axis(0)),
-        attribute_estimator=CountingEstimator(conf=0.5),
-        executor=InlineExecutor(),
-    )
-    got = []
-    pipe.bus.subscribe("percept.face", got.append)
-    run(pipe, 20)
-    assert got[-1].payload.age_group == "unknown" and got[-1].payload.possible_minor
-
-
-def test_track_shorter_than_the_crops_needed_runs_no_job(tmp_path):
-    est, ex = CountingEstimator(), CountingExecutor()
-    _, _, pipe, _, got = rig(
-        tmp_path, lambda i: [face(100)] if i < 3 else [], estimator=est, executor=ex
-    )
-    run(pipe, 60)
-    assert ex.jobs == 0 and est.crops == []
-    assert all(m.payload.age_group == "unknown" for m in got["percept.face"])
-
-
-def test_attribute_crops_and_frames_min_validation():
-    assert CFG.vision.attribute_crops == 3 and CFG.identity.estimate_frames_min == 3
-    for bad in (0, 11):
-        with pytest.raises(ValueError):
-            RoboEmotConfig(vision={"attribute_crops": bad})
-    with pytest.raises(ValueError, match="attribute_crops must be at least"):
-        RoboEmotConfig(vision={"attribute_crops": 2})
-    with pytest.raises(ValueError, match="attribute_crops must be at least"):
-        RoboEmotConfig(identity={"estimate_frames_min": 5})
-    RoboEmotConfig(vision={"attribute_crops": 5}, identity={"estimate_frames_min": 5})
-
-
-def test_second_track_gets_its_own_job(tmp_path):
-    est, ex = CountingEstimator(), CountingExecutor()
-
-    def script(i):
-        return [face(20)] + ([face(200)] if i >= 10 else [])
-
-    _, _, pipe, _, _ = rig(tmp_path, script, estimator=est, executor=ex)
-    run(pipe, 50)
-    assert ex.jobs == 2
-
-
-def test_low_confidence_attributes_stay_unknown_and_minor(tmp_path):
-    _, _, pipe, _, got = rig(tmp_path, lambda i: [face(100)], estimator=CountingEstimator(conf=0.5))
-    run(pipe, 40)
-    last = got["percept.face"][-1].payload
-    assert last.age_group == "unknown" and last.possible_minor
-
-
-def test_declared_age_overrides_the_estimate(tmp_path):
-    reg, _, pipe, _, got = rig(
-        tmp_path, lambda i: [face(100)], estimator=CountingEstimator(age="child")
-    )
-    reg.enroll("Kid", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT, age_group="senior")
-    run(pipe, 40)
-    last = got["percept.face"][-1].payload
-    assert (last.age_group, last.age_source, last.possible_minor) == ("senior", "declared", False)
-
-
-def test_worker_queue_is_bounded(tmp_path):
-    release = threading.Event()
-
-    class Slow(CountingEstimator):
-        def estimate(self, crop):
-            release.wait(5)
-            return super().estimate(crop)
-
-    from concurrent.futures import ThreadPoolExecutor
-
-    pool = ThreadPoolExecutor(1)
-    est = Slow()
-    try:
-
-        def script(i):
-            return [face(20 + 60 * k) for k in range(4)]
-
-        _, _, pipe, _, _ = rig(tmp_path, script, estimator=est, executor=pool)
-        pipe.worker.queue_max = 2
-        run(pipe, 30)
-        assert pipe.worker._pending == 2
-    finally:
-        release.set()
-        pool.shutdown(wait=True)
 
 
 def test_ended_tracks_release_matcher_state(tmp_path):
@@ -645,7 +597,7 @@ def script(i):
 
 
 def run_replay(tmp_path, session, name):
-    _, bus, pipe, _, _ = rig(tmp_path / name, script, estimator=CountingEstimator())
+    _, bus, pipe, _, _ = rig(tmp_path / name, script)
     return replay(session, pipe, bus)
 
 
@@ -687,7 +639,7 @@ def test_replay_against_one_registry_does_not_change_it(tmp_path):
     write_session(root, 40)
     session = load_session(root)
     reg, bus, pipe, _, _ = rig(tmp_path / "r", script)
-    reg.enroll("Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT, age_group="adult")
+    reg.enroll("Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT)
     before = reg.gallery("face", FACE_MODEL)
     first = summarize(replay(session, pipe, bus).messages)
     second = summarize(replay(session, pipe, bus).messages)
@@ -733,6 +685,24 @@ def test_the_object_tracker_has_no_low_score_pass(tmp_path):
     _, _, pipe, _, _ = rig(tmp_path, lambda i: [], object_detector=ObjectMock([]))
     cfg = pipe.object_tracker.cfg
     assert cfg.low_score == cfg.high_score == CFG.vision.object_score_min
+
+
+def test_two_bottles_side_by_side_both_get_object_tracks(tmp_path):
+    # tall boxes 0.3 heights apart: a face-tuned distance gate would call the second a duplicate
+    bottles = [
+        Detection((100, 40, 130, 140), 0.8, "bottle"),
+        Detection((130, 40, 160, 140), 0.8, "bottle"),
+    ]
+    _, _, pipe, _, _ = rig(tmp_path, lambda i: [], object_detector=ObjectMock(bottles))
+    cfg = pipe.object_tracker.cfg
+    assert cfg.match_distance_heights == cfg.low_match_distance_heights == 0
+    t = Tracker(cfg)
+    t.update(bottles, 0.0)
+    assert len(t.update(bottles, 1.0).visible) == 2
+    t_face = Tracker(cfg.model_copy(update={"match_distance_heights": 0.6}))
+    t_face.update(bottles[:1], 0.0)
+    t_face.update(bottles, 1.0)
+    assert len(t_face._tracks) == 1  # why the object tracker keeps the gate off
 
 
 def test_categories_are_readable_names(tmp_path):
@@ -868,3 +838,74 @@ def test_a_track_survives_the_return_to_full_rate_for_one_frame(tmp_path):
     pipe.process(Frame(image(26), 26.0))
     assert pipe.object_tracker.cfg.lost_s == CFG.vision.object_lost_s
     assert list(pipe._entities) == [track_id]
+
+
+# ------------------------------------------------- report counters (SPEC 12A)
+
+
+def test_track_churn_counts_created_ended_lifetime_and_rate(tmp_path):
+    # a face for frames 0-9, gone until it expires, back as a new track at frames 30-39
+    _, _, pipe, _, _ = rig(tmp_path, lambda i: [face(100)] if i < 10 or 30 <= i < 40 else [])
+    run(pipe, 45)
+    tracks = pipe.stats()["tracks"]
+    assert tracks["created"] == 2 and tracks["ended"] == 1
+    assert tracks["rate_window_s"] == CFG.vision.report_rate_window_s
+    assert tracks["created_per_min"] == pytest.approx(2 * 60 / CFG.vision.report_rate_window_s)
+    # first stamp 0 (tentative), last matched at frame 9 (1.125 s); the expiry tail is excluded
+    assert tracks["lifetime_s"] == {"count": 1, "p50": 1.125, "p90": 1.125, "max": 1.125}
+    json.dumps(pipe.stats())
+
+
+def test_no_age_or_gender_anywhere_in_the_pipeline(tmp_path):
+    """Owner decision 2026-10-23: no age model, no attribute worker, nothing estimated."""
+    reg, _, pipe, _, got = rig(tmp_path, lambda i: [face(100)])
+    reg.enroll("Ada", np.stack([axis(0)] * 5), FACE_MODEL, consent=CONSENT)
+    run(pipe, 24)
+    removed = {"age_group", "age_source", "gender", "gender_source", "attribute_confidence"}
+    for topic in ("percept.face", "person.recognized"):
+        assert got[topic], topic
+        payload_fields = {f.name for m in got[topic] for f in fields(m.payload)}
+        assert not removed & payload_fields, topic
+    assert "attributes" not in pipe.stats() and not hasattr(pipe, "worker")
+
+
+def test_track_rate_counts_only_the_window_before_the_last_frame(tmp_path):
+    vision = CFG.vision.model_copy(update={"report_rate_window_s": 10.0})
+    on = [True]
+    _, _, pipe, _, _ = rig(tmp_path, lambda i: [face(100)] if on[0] else [], vision=vision)
+    run(pipe, 6)
+    assert pipe.stats()["tracks"]["created_per_min"] == pytest.approx(6.0)
+    on[0] = False
+    run(pipe, 2, start=20.0)
+    tracks = pipe.stats()["tracks"]
+    assert tracks["created_per_min"] == 0.0 and tracks["created"] == 1 and tracks["ended"] == 1
+
+
+def test_reset_ends_the_live_tracks_in_the_report(tmp_path):
+    _, _, pipe, _, _ = rig(tmp_path, lambda i: [face(20), face(200)])
+    run(pipe, 4)
+    pipe.reset()
+    tracks = pipe.stats()["tracks"]
+    assert tracks["created"] == 2 and tracks["ended"] == 2
+    assert tracks["lifetime_s"]["count"] == 2
+
+
+def test_lifetime_summary_keeps_the_last_report_window_tracks(tmp_path):
+    vision = CFG.vision.model_copy(update={"report_window": 10})
+    on = [True]
+    _, _, pipe, _, _ = rig(tmp_path, lambda i: [face(100)] if on[0] else [], vision=vision)
+    for k in range(13):  # 3 frames with the face, then 2.5 s without: 12 tracks end
+        on[0] = True
+        run(pipe, 3, start=k * 3.0)
+        on[0] = False
+        run(pipe, 2, start=k * 3.0 + 0.5, dt=1.25)
+    tracks = pipe.stats()["tracks"]
+    assert tracks["ended"] == 12 and tracks["lifetime_s"]["count"] == 10
+
+
+def test_report_window_settings_have_defaults_and_ranges():
+    v = CFG.vision
+    assert v.report_window == 200 and v.report_rate_window_s == 60.0
+    for bad in ({"report_window": 5}, {"report_rate_window_s": 1.0}):
+        with pytest.raises(ValidationError):
+            RoboEmotConfig(vision=bad)

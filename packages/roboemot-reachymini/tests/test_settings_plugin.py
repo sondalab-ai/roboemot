@@ -9,6 +9,7 @@ from importlib.metadata import entry_points
 import httpx
 import pytest
 import yaml
+from roboemot.affect.clips import load_clip_library
 from roboemot.config.catalogue import DESCRIPTOR_KEYS
 from roboemot.config.stack import ConfigStack
 from roboemot.diagnostics import Target
@@ -16,8 +17,9 @@ from roboemot.manifest import load_manifest
 from roboemot.webui.robot_section import claimed
 from roboemot.webui.settings import SettingsEditor
 from roboemot_reachymini import app as app_module
+from roboemot_reachymini import daemon as daemon_module
 from roboemot_reachymini import settings as settings_module
-from roboemot_reachymini.install import APP_NAME
+from roboemot_reachymini.daemon import APP_NAME, DaemonClient
 from roboemot_reachymini.settings import CLAIMS, ReachySettings, plugin
 
 MANIFEST = load_manifest(
@@ -29,7 +31,12 @@ BASE = "robot.reachy-mini-wireless"
 @pytest.fixture
 def stack():
     stack = ConfigStack(app={"webui": {"bind": "127.0.0.1", "port": 0}})
-    stack.set_manifest_behaviour(MANIFEST.model.behaviour)
+    stack.set_manifest_behaviour(
+        MANIFEST.model.behaviour,
+        MANIFEST.channels,
+        load_clip_library(MANIFEST),
+        body_yaw=None,
+    )
     return stack
 
 
@@ -55,7 +62,8 @@ def test_hardware_rows_are_read_only_manifest_rows_with_every_key(split):
     assert own
     for row in own:
         assert set(row) == DESCRIPTOR_KEYS
-        assert row["writable"] is False and row["source"] == "manifest"
+        session = row["path"].startswith(f"{BASE}.realtime_session.")
+        assert row["writable"] is False and row["source"] == ("config" if session else "manifest")
 
 
 def test_angles_are_shown_in_degrees_translations_in_mm(split):
@@ -97,10 +105,10 @@ def test_claims_resolve_in_the_catalogue_and_leave_the_core_list(split):
 
 def test_behaviour_paths_stay_writable_by_path(split, stack):
     editor, _, robot = split
-    row = next(f for f in robot["fields"] if f["path"] == "expression_map.joy.repeat")
+    row = next(f for f in robot["fields"] if f["path"] == "gesture_map.nod.repeat")
     assert row["writable"] is True and row["source"] == "manifest"
-    editor.change("expression_map.joy.repeat", 2)
-    assert stack.effective().expression_map["joy"].repeat == 2
+    editor.change("gesture_map.nod.repeat", 3)
+    assert stack.effective().gesture_map["nod"].repeat == 3
 
 
 def test_hardware_rows_cannot_be_written(split):
@@ -183,7 +191,9 @@ def daemon(app_status, calls=None, restart_reply=None, **kw):
             return httpx.Response(200, json=restart_reply or {})
         return httpx.Response(404)
 
-    return ReachySettings(httpx.MockTransport(handle), **kw)
+    target = kw.pop("target", None)
+    client = DaemonClient(target, transport=httpx.MockTransport(handle))
+    return ReachySettings(client, **kw)
 
 
 RUNNING = {"info": {"name": APP_NAME}, "state": "running", "error": None}
@@ -219,8 +229,15 @@ def test_restart_effects_are_ids_with_numeric_params_and_the_timeout_is_the_stop
 
     effects = dict(plugin.restart_effects())
     assert set(effects) == set(RESTART_EFFECTS)
-    assert effects["kill_on_timeout"] == {"timeout_s": settings_module.STOP_TIMEOUT_S}
-    assert settings_module.RESTART_TIMEOUT_S > settings_module.STOP_TIMEOUT_S
+    assert effects["kill_on_timeout"] == {"timeout_s": daemon_module.STOP_TIMEOUT_S}
+
+
+def test_the_plugin_declares_the_daemons_kill_timeout_through_restartable():
+    from roboemot.webui.robot_section import Restartable, supervisor_stop_timeout_s
+
+    assert isinstance(plugin, Restartable)
+    assert plugin.stop_timeout_s() == daemon_module.STOP_TIMEOUT_S
+    assert supervisor_stop_timeout_s(plugin) == daemon_module.STOP_TIMEOUT_S
 
 
 def test_the_status_answer_is_cached_briefly_and_the_port_follows_the_target():
@@ -234,13 +251,18 @@ def test_the_status_answer_is_cached_briefly_and_the_port_follows_the_target():
     now[0] += settings_module.AVAILABLE_TTL_S + 0.1
     assert status.restart_available()
     assert len(calls) == 2
-    assert status._base == "http://robot.local:9000"
-    assert ReachySettings()._base == "http://localhost:8000"
+    assert status._daemon.base_url == "http://robot.local:9000"
+    assert ReachySettings()._daemon.base_url == "http://localhost:8000"
 
 
 def test_core_offers_the_action_through_the_entry_point_only_while_running(tmp_path):
     stack = ConfigStack(app={"webui": {"bind": "127.0.0.1", "port": 0}})
-    stack.set_manifest_behaviour(MANIFEST.model.behaviour)
+    stack.set_manifest_behaviour(
+        MANIFEST.model.behaviour,
+        MANIFEST.channels,
+        load_clip_library(MANIFEST),
+        body_yaw=None,
+    )
     for status, expected in ((RUNNING, ["restart"]), (None, [])):
         editor = SettingsEditor(
             stack, store=tmp_path / "s.json", manifest=MANIFEST, plugin=daemon(status)
@@ -250,3 +272,71 @@ def test_core_offers_the_action_through_the_entry_point_only_while_running(tmp_p
         assert [e["id"] for e in block["restart_effects"]] == (
             [i for i, _ in plugin.restart_effects()] if expected else []
         )
+
+
+def test_restart_logs_the_error_type_not_the_daemon_body(caplog):
+    with caplog.at_level("INFO", logger="roboemot_reachymini.settings"):
+        daemon(RUNNING, restart_reply=500).restart()
+    assert "DaemonError" in caplog.text and "HTTP 500" in caplog.text
+    assert "No app is currently running" not in caplog.text
+
+
+def test_restart_log_omits_the_status_for_a_transport_error(caplog):
+    with caplog.at_level("INFO", logger="roboemot_reachymini.settings"):
+        daemon(RUNNING, restart_reply=httpx.ReadError("dropped")).restart()
+    assert "restart request ended (ReadError)" in caplog.text and "None" not in caplog.text
+
+
+# ------------------------------------------------------------------ realtime session (SR-4)
+
+SESSION = f"{BASE}.realtime_session"
+ALLOCATOR_ROUTE = {
+    "name": "platform",
+    "base_url": "https://allocator.hf.space/session",
+    "model": "s2s",
+    "kind": "realtime",
+    "api_key": "${secret:hf_token}",
+}
+
+
+def session_rows(tmp_path, mode="platform", platform_id=False, enabled=True):
+    app = {
+        "llm_routes": [ALLOCATOR_ROUTE],
+        "voice": {"realtime_route": {"enabled": enabled, "route": "platform", "mode": mode}},
+        "privacy": {"realtime_platform_id": platform_id},
+    }
+    stack = ConfigStack(app=app)
+    editor = SettingsEditor(stack, store=tmp_path / "s.json", manifest=MANIFEST)
+    _, robot = editor.robot_split(editor.fields())
+    return {f["path"]: f for f in robot["fields"] if f["path"].startswith(SESSION + ".")}
+
+
+@pytest.mark.parametrize("platform_id", [False, True])
+def test_the_realtime_session_rows_show_the_allocator_host_and_the_identifier(
+    tmp_path, platform_id
+):
+    """SPEC 4A, 12: what the platform's allocator receives, read-only and not redacted (the
+    ``session`` word redacts a text leaf named after it, so the rows are leaves below it)."""
+    rows = session_rows(tmp_path, platform_id=platform_id)
+    host, sent = rows[f"{SESSION}.allocator_host"], rows[f"{SESSION}.sends_platform_id"]
+    assert host["value"] == "allocator.hf.space" and host["secret"] is False
+    assert sent["kind"] == "bool" and sent["value"] is platform_id and sent["secret"] is False
+    assert not host["writable"] and not sent["writable"]
+
+
+def test_in_direct_mode_no_allocator_is_used_and_no_identifier_is_sent(tmp_path):
+    rows = session_rows(tmp_path, mode="direct", platform_id=True)
+    assert rows[f"{SESSION}.allocator_host"]["value"] is None
+    assert rows[f"{SESSION}.sends_platform_id"]["value"] is False
+
+
+def test_without_a_stack_there_are_no_session_rows():
+    section = ReachySettings().section(None, MANIFEST)
+    assert not [r for r in section.fields if r["path"].startswith(SESSION)]
+
+
+def test_with_the_route_off_no_allocator_is_used_and_no_identifier_is_sent(tmp_path):
+    """Fix round 1, M8: the rows follow voice.realtime_route.enabled too."""
+    rows = session_rows(tmp_path, platform_id=True, enabled=False)
+    assert rows[f"{SESSION}.allocator_host"]["value"] is None
+    assert rows[f"{SESSION}.sends_platform_id"]["value"] is False

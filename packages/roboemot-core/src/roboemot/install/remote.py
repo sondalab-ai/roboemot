@@ -8,6 +8,7 @@ under 104 bytes, and the macOS ``$TMPDIR`` is too long.
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -54,21 +55,61 @@ class Remote:
             input=stdin,
         )
         if check and proc.returncode != 0:
-            output = proc.stderr.strip() or proc.stdout.strip()
-            raw = f"$ {command}\n{output}"
-            if proc.returncode == LOST_CONNECTION and self.connected:
-                raise WizardError(
-                    f"Lost the SSH connection to {self.target}",
-                    f"ssh exited {LOST_CONNECTION}: {last_line(output) or 'no output'}",
-                    output=raw,
-                )
-            if stdin is not None:
-                why = f"a command given a value on stdin exited {proc.returncode}"
-            else:
-                shown = command if len(command) <= 60 else command[:59] + "…"
-                why = f"`{shown}` exited {proc.returncode}: {last_line(output) or 'no output'}"
-            raise WizardError("Command failed on the robot", why, output=raw)
+            self._raise(command, proc.returncode, proc.stderr.strip() or proc.stdout.strip(), stdin)
         return proc.stdout.strip()
+
+    def _raise(self, command: str, rc: int, output: str, stdin: str | None) -> None:
+        """Raise the :class:`WizardError` for ``command`` that exited ``rc``: a lost connection,
+        or a failed command whose ``why`` hides a value given on stdin; the command and its
+        output stay in ``.output`` (``--debug`` only)."""
+        raw = f"$ {command}\n{output}"
+        if rc == LOST_CONNECTION and self.connected:
+            raise WizardError(
+                f"Lost the SSH connection to {self.target}",
+                f"ssh exited {LOST_CONNECTION}: {last_line(output) or 'no output'}",
+                output=raw,
+            )
+        if stdin is not None:
+            why = f"a command given a value on stdin exited {rc}"
+        else:
+            shown = command if len(command) <= 60 else command[:59] + "…"
+            why = f"`{shown}` exited {rc}: {last_line(output) or 'no output'}"
+        raise WizardError("Command failed on the robot", why, output=raw)
+
+    def stream(self, command: str, on_line: Callable[[str], None], check: bool = True) -> str:
+        """Like ``run``, but hand each output line to ``on_line`` as it arrives.
+
+        stderr is merged into stdout. Returns the whole output (stripped); a non-zero exit
+        raises with that output, as ``run`` does. Whatever interrupts the read (``on_line``
+        raising, Ctrl-C) kills the ssh process before the error propagates.
+        """
+        proc = subprocess.Popen(
+            ["ssh", *self._opts(), self.target, command],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+        )
+        lines: list[str] = []
+        try:
+            assert proc.stdout is not None
+            for raw in proc.stdout:
+                line = raw.rstrip("\r\n")
+                lines.append(line)
+                on_line(line)
+            proc.wait()
+        except BaseException:
+            proc.kill()
+            proc.wait()
+            raise
+        finally:
+            if proc.stdout is not None:
+                proc.stdout.close()
+        output = "\n".join(lines).strip()
+        if check and proc.returncode != 0:
+            self._raise(command, proc.returncode, output, None)
+        return output
 
     def connect(self) -> None:
         """Open the master connection interactively, so a password prompt reaches the user."""

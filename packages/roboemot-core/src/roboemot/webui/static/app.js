@@ -133,8 +133,8 @@ function notice(message, isError) {
 
 // ---------------------------------------------------------------- api
 
-async function api(method, path, body) {
-  const headers = {};
+async function api(method, path, body, extra) {
+  const headers = { ...extra };
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (method !== "GET" && state.csrf) headers["X-CSRF-Token"] = state.csrf;
   const resp = await fetch(path, {
@@ -161,6 +161,7 @@ function explain(err) {
   let text = known || t("err_generic");
   if (err.message === "consent_refused" && err.detail) text += " " + err.detail;
   if (err.endpoint) text = text.replace("{host}", () => err.endpoint);
+  if (err.saved) text += " " + err.saved;
   const wait = err.retryAfter;
   if (err.status === 429 && wait > 0 && wait <= 60) text += " " + t("dialog_retry_in", { n: wait });
   return text;
@@ -178,6 +179,8 @@ async function guarded(fn) {
 function stopPolling() {
   if (state.timer) clearTimeout(state.timer);
   state.timer = null;
+  liveStopAudio(true);
+  liveStopVideo(true);
 }
 
 // ---------------------------------------------------------------- dialogs
@@ -347,18 +350,10 @@ async function renderEnrollment(box, s) {
   box.replaceChildren(...cards);
 }
 
-function selectInput(id, values, prefix) {
-  return el("select", { id, class: "sl-field__input" }, values.map((v) => el("option", { value: v }, t(prefix + v))));
-}
-
 function consentForm(pendingPeople) {
   const max = String(state.session.name_max_chars || 64);
   const name = textInput("display_name", { maxlength: max, required: true });
   const who = textInput("consent_who", { maxlength: max, required: true });
-  const guardian = textInput("guardian", { maxlength: max });
-  const age = selectInput("age_group", ["unknown", "child", "teen", "adult", "senior"], "age_");
-  const gender = selectInput("gender", ["unknown", "female", "male"], "gender_");
-  const minor = () => !["adult", "senior"].includes(age.value);
   const scopes = ["face", "voice", "refresh"].map((s) =>
     check(t("scope_" + s), el("input", { type: "checkbox", value: s, checked: s !== "voice" })));
   const agreed = el("input", { type: "checkbox", id: "agreed" });
@@ -372,10 +367,7 @@ function consentForm(pendingPeople) {
       guarded(async () => {
         await api("POST", "/api/enrollment/complete", {
           display_name: name.value,
-          consent_who: minor() ? guardian.value : who.value,
-          guardian: guardian.value,
-          age_group: age.value,
-          gender: gender.value,
+          consent_who: who.value,
           scope: scopes.map((l) => l.firstChild).filter((c) => c.checked).map((c) => c.value),
           agreed: agreed.checked,
           pending_id: link.value || null,
@@ -390,9 +382,6 @@ function consentForm(pendingPeople) {
   pendingPeople.length ? field("pending_id", t("pending_link"), link) : [],
   field("display_name", t("display_name"), name),
   field("consent_who", t("consent_who"), who),
-  field("age_group", t("age_group"), age),
-  field("gender", t("gender"), gender),
-  field("guardian", t("guardian"), guardian, t("guardian_hint")),
   el("fieldset", { class: "stack" }, el("legend", { class: "sl-field__label" }, t("scope_title")), el("div", { class: "check-list" }, scopes)),
   check(t("agree"), agreed),
   el("div", { class: "row" }, submitButton(t("enroll_complete"))));
@@ -573,16 +562,230 @@ async function catalogueView() {
         async () => { if (await clearTombstones()) await guarded(catalogueView); }) : [])));
 }
 
+// ---------------------------------------------------------------- secrets (write-only)
+
+// The key is typed once: it is read from the field and the field is emptied before the request is
+// sent, and the PIN likewise, so a failure never leaves either in the page. The page never holds a
+// stored value: the list has names and the routes that use them.
+function secretsCard(data, reload) {
+  const name = textInput("secret-name", { required: true, maxlength: String(data.max_name_chars), autocomplete: "off", autocapitalize: "off", spellcheck: "false" });
+  const value = textInput("secret-value", {
+    type: "password", required: true, autocomplete: "off", autocapitalize: "off", spellcheck: "false",
+    maxlength: String(data.max_value_chars),
+  });
+  const pin = textInput("secret-pin", { type: "password", autocomplete: "off", inputmode: "numeric", required: true, maxlength: "64" });
+  const form = el("form", {
+    class: "stack", autocomplete: "off",
+    onsubmit: (ev) => {
+      ev.preventDefault();
+      const body = { name: name.value.trim(), value: value.value, pin: pin.value };
+      value.value = "";
+      pin.value = "";
+      guarded(async () => {
+        try {
+          await api("POST", "/api/secrets/set", body);
+        } finally {
+          body.value = "";
+          body.pin = "";
+        }
+        name.value = "";
+        notice(t("secret_saved", { name: body.name }));
+        await reload();
+      });
+    },
+  },
+  field("secret-name", t("secret_name"), name, t("secret_name_hint")),
+  field("secret-value", t("secret_value"), value, t("secret_value_hint")),
+  field("secret-pin", t("pin"), pin),
+  el("div", { class: "row" }, submitButton(t("secret_save"))));
+  const remove = (s) => guarded(async () => {
+    const done = await ask({
+      title: t("secret_remove_title", { name: s.name }), message: t("secret_remove_message"),
+      pin: true, danger: true, confirm: t("secret_remove"),
+      run: async ({ pin: entered }) => { await api("POST", "/api/secrets/remove", { name: s.name, pin: entered }); },
+    });
+    if (done) { notice(t("secret_removed", { name: s.name })); await reload(); }
+  });
+  const rows = data.secrets.map((s) => el("tr", {},
+    el("td", {}, s.name),
+    el("td", {}, badge(t(s.set ? "secret_set" : "secret_unset"), s.set ? "success" : "warning")),
+    el("td", {}, s.used_by.length ? t("secret_used_by", { routes: s.used_by.join(", ") }) : t("secret_unused")),
+    el("td", {}, button(t("secret_remove"), "danger", () => remove(s), { small: true, attrs: { disabled: s.used_by.length > 0, title: s.used_by.length ? t("secret_in_use_hint") : null } }))));
+  return card(t("tab_routes"), t("secrets_title"), el("p", { class: "hint" }, t("secrets_intro")),
+    rows.length ? table([t("secret_name"), "", "", ""], rows) : el("p", { class: "hint" }, t("secrets_none")),
+    form);
+}
+
+// ---------------------------------------------------------------- route form (add and edit)
+
+const ROUTE_LOCALITIES = ["auto", "local", "cloud"];
+const ROUTE_KINDS = ["chat", "realtime"]; // chosen when a route is added; shown read-only after
+const ROUTE_KEY_LITERAL = "@literal"; // not a valid secret name: a key written in the config file
+
+// One form for a new route (`route` null) and for an existing one. A key is chosen from the stored
+// names, never typed. `save(values, form)` runs the PIN dialog and the calls.
+function routeForm(route, secrets, nameMax, save) {
+  const id = (k) => "route-" + (route ? route.name : "new") + "-" + k;
+  const name = route ? null : textInput(id("name"), { required: true, maxlength: String(nameMax), autocomplete: "off", spellcheck: "false" });
+  const url = textInput(id("url"), { type: "url", required: !route, autocomplete: "off", spellcheck: "false", placeholder: t(route ? "route_url_keep" : "route_url_placeholder") });
+  const model = textInput(id("model"), { required: true, autocomplete: "off", spellcheck: "false", value: route ? route.model : "" });
+  const locality = el("select", { id: id("locality"), class: "sl-field__input" },
+    ROUTE_LOCALITIES.map((l) => el("option", { value: l }, t("route_locality_" + l))));
+  locality.value = route ? route.locality : "cloud";
+  const kind = route ? null : el("select", { id: id("kind"), class: "sl-field__input" },
+    ROUTE_KINDS.map((k) => el("option", { value: k }, t("route_kind_" + k))));
+  if (kind) kind.value = "chat";
+  const current = !route || route.key === "none" ? "" : (route.key === "secret" ? route.secret.name : ROUTE_KEY_LITERAL);
+  const names = secrets.filter((s) => s.set).map((s) => s.name);
+  const keys = [["", t("route_key_none")]];
+  if (current === ROUTE_KEY_LITERAL) keys.push([ROUTE_KEY_LITERAL, t("route_key_literal")]);
+  else if (current && !names.includes(current)) keys.push([current, current + " (" + t("secret_unset") + ")"]);
+  for (const n of names) keys.push([n, n]);
+  const key = el("select", { id: id("key"), class: "sl-field__input" }, keys.map(([v, label]) => el("option", { value: v }, label)));
+  key.value = current;
+  const form = el("form", {
+    class: "stack", autocomplete: "off",
+    onsubmit: (ev) => {
+      ev.preventDefault();
+      guarded(() => save({
+        name: name ? name.value.trim() : route.name, base_url: url.value.trim(), model: model.value.trim(),
+        locality: locality.value, key: key.value, ...(kind ? { kind: kind.value } : {}),
+      }));
+    },
+  },
+  name ? field(id("name"), t("route_name"), name) : [],
+  field(id("url"), t("route_url"), url, route ? t("route_url_hint_edit") : null),
+  field(id("model"), t("route_model"), model),
+  field(id("locality"), t("route_locality"), locality, t("route_locality_hint")),
+  kind ? field(id("kind"), t("route_kind"), kind, t("route_kind_hint")) : [],
+  field(id("key"), t("route_key"), key, t("route_key_hint")),
+  el("div", { class: "row" }, submitButton(t(route ? "route_save" : "route_add"))));
+  return form;
+}
+
+// A key sent over http to a host that is not this machine crosses the network unencrypted.
+function insecureHost(origin) {
+  const m = /^http:[/][/](\[[^\]]*\]|[^:/]*)/.exec(origin);
+  return Boolean(m) && !(m[1] === "localhost" || m[1] === "[::1]" || /^127\./.test(m[1]));
+}
+
+// Calls for a new route or for the changed fields of an existing one, behind one PIN dialog. A route
+// with a key sends it to the host of its URL: the dialog names that host and the call carries it as
+// the acknowledgement (the server names the one it expects when it differs).
+// An edit is several calls (R3 SF4), ordered so a key never reaches a host the owner did not mean:
+// a locality change to cloud first (stricter; a local route refuses a new URL), then a key that
+// changes is unbound when it goes away or the route moves, then the URL moves (with no key bound,
+// no acknowledgement), then the new key is bound to the new host, then the rest. The
+// first failure stops the rest; the error names what was already saved, and a retry resumes there.
+async function saveRoute(route, v) {
+  let ack = null;
+  const origin = routeOrigin(v.base_url || (route && route.base_url) || "");
+  const keyed = v.key !== "" && v.key !== ROUTE_KEY_LITERAL;
+  const current = !route || route.key === "none" ? "" : (route.key === "secret" ? route.secret.name : ROUTE_KEY_LITERAL);
+  const keyChanged = route && v.key !== current;
+  const urlChanged = route && v.base_url && v.base_url !== (route.base_url || "");
+  const moved = urlChanged && routeOrigin(v.base_url) !== routeOrigin(route.base_url || "");
+  const unbind = keyChanged && current !== "" && (!keyed || moved);
+  const target = origin || ack;
+  const steps = []; // [label, call(pin)]
+  const mapAck = async (call) => {
+    try {
+      return await call();
+    } catch (err) {
+      if (err.message === "endpoint_ack_required" && err.endpoint) {
+        ack = err.endpoint;
+        const text = document.querySelector("dialog .sl-dialog__body p");
+        if (text) text.textContent = ackMessage(ack);
+      }
+      throw err;
+    }
+  };
+  const bindKey = (secret) => (pin) => mapAck(() => api("POST", "/api/routes/key", {
+    name: route.name, secret, pin,
+    ...(secret !== null && (ack || origin) ? { ack_endpoint: ack || origin } : {}),
+  }));
+  if (!route) {
+    steps.push([v.name, (pin) => mapAck(() => api("POST", "/api/routes/add", {
+      name: v.name, base_url: v.base_url, model: v.model, locality: v.locality, kind: v.kind || "chat",
+      secret: keyed ? v.key : null, pin,
+      ...(keyed && (ack || origin) ? { ack_endpoint: ack || origin } : {}),
+    }))]);
+  } else {
+    const keyAtMove = current !== "" && !unbind; // the key still bound when the URL moves
+    const path = (f) => "llm_routes." + route.name + "." + f;
+    const set = (f, value) => (pin) => mapAck(() => api("POST", "/api/settings", { path: path(f), value, pin,
+      ...(f === "base_url" && keyAtMove && (ack || routeOrigin(value)) ? { ack_endpoint: ack || routeOrigin(value) } : {}) }));
+    // To cloud is stricter and goes first: a local route refuses a new URL while it is local.
+    const toCloud = v.locality !== route.locality && v.locality === "cloud";
+    if (toCloud) steps.push([t("route_locality"), set("locality", v.locality)]);
+    if (unbind) steps.push([t("route_key"), bindKey(null)]);
+    if (urlChanged) steps.push([t("route_url"), set("base_url", v.base_url)]);
+    if (keyChanged && keyed) steps.push([t("route_key"), bindKey(v.key)]);
+    if (v.locality !== route.locality && !toCloud) steps.push([t("route_locality"), set("locality", v.locality)]);
+    if (v.model !== route.model) steps.push([t("route_model"), set("model", v.model)]);
+    if (!steps.length) { notice(t("settings_unchanged")); return; }
+  }
+  const sends = keyed || (moved && current !== "" && !keyChanged);
+  const realtime = (route ? route.kind : v.kind) === "realtime";
+  const extraHosts = realtime ? (state.realtimeKeyHosts || []) : [];
+  const ackMessage = (host) => t("route_key_message", { host }) + (insecureHost(host) ? " " + t("route_key_insecure") : "") +
+    (extraHosts.length ? " " + t("route_key_hosts", { hosts: extraHosts.join(", ") }) : "");
+  const message = sends && target ? ackMessage(target) : (route ? route.name : v.name);
+  let next = 0; // steps before this index are saved: a retry of the dialog resumes here
+  let notApplied = false;
+  let ran = false;
+  await pinnedCall(message, t(route ? "route_save" : "route_add"), async (pin) => {
+    for (; next < steps.length; next++) {
+      try {
+        const result = await steps[next][1](pin);
+        if (result && result.applied === false) notApplied = true;
+      } catch (err) {
+        if (route && next > 0) {
+          const saved = [...new Set(steps.slice(0, next).map(([label]) => label))].join(", ");
+          err.saved = t("route_partial", { items: saved });
+        }
+        throw err;
+      }
+    }
+    ran = true;
+    return {};
+  });
+  if (ran) {
+    const done = t(route ? "route_saved" : "route_added", { name: route ? route.name : v.name });
+    notice(notApplied ? done + " " + t("settings_not_applied") : done, notApplied);
+  }
+  await routesView();
+}
+
+const REALTIME_FACTS = [
+  "mode", "allocator_host", "connect_host", "header_to_connect_host", "platform_id_sent",
+  "update_seen", "first_audio_ms", "item_delete", "charged", "failure",
+];
+
 async function routesView() {
   const view = document.getElementById("view");
   const data = await api("GET", "/api/routes");
+  state.realtimeKeyHosts = data.realtime_key_hosts || [];
+  let secrets = null;
+  try {
+    secrets = await api("GET", "/api/secrets");
+  } catch (err) {
+    if (err.message === "secret_store") notice(explain(err), true);
+    else if (err.message !== "secrets_unavailable") throw err;
+  }
+  const secretList = secrets ? secrets.secrets : [];
   view.replaceChildren();
   const verdict = (c) => el("li", {}, t("check_" + c.name) + ": ", badge(t("status_" + c.status), c.status === "pass" ? "success" : (c.status === "fail" ? "danger" : "info")), " " + c.reason);
+  // A realtime check names hosts and outcome codes only (SPEC 8, 12): shown as they come.
+  const shown = (v) => (v === null || v === undefined ? "-" : String(v));
+  const realtimeFacts = (report) => report.kind !== "realtime" ? [] :
+    [el("ul", {}, REALTIME_FACTS.map((f) => el("li", {}, t("rt_" + f) + ": " + shown(report[f]))))];
   const show = (box, report) => {
     const head = report.error ? t("route_error_" + report.error) : t(report.ok ? "route_ok" : "route_failed");
     box.replaceChildren(
       el("p", {}, head + " " + t("route_at", { at: report.checked_at })),
-      el("ul", {}, report.checks.map(verdict)));
+      el("ul", {}, report.checks.map(verdict)),
+      ...realtimeFacts(report));
   };
   const cards = data.routes.map((r) => {
     const box = el("div", { role: "status" });
@@ -593,11 +796,24 @@ async function routesView() {
       await api("POST", "/api/routes/" + encodeURIComponent(r.name) + "/check", {});
       await routesView();
     }), { attrs: { disabled: r.running } });
+    const edit = el("div", { hidden: true }, routeForm(r, secretList, data.name_max_chars, (v) => saveRoute(r, v)));
+    const toggle = button(t("route_edit"), "plain", () => { edit.hidden = !edit.hidden; });
+    const remove = button(t("route_remove"), "danger", () => guarded(async () => {
+      const done = await ask({
+        title: t("route_remove_title", { name: r.name }), message: t("route_remove_message"), pin: true, danger: true,
+        confirm: t("route_remove"),
+        run: async ({ pin }) => { await api("POST", "/api/routes/remove", { name: r.name, pin }); },
+      });
+      if (done) { notice(t("route_removed", { name: r.name })); await routesView(); }
+    }));
     return busy(card(t("tab_routes"), r.name,
-      el("p", { class: "hint" }, r.model + " @ " + r.endpoint + (r.allowed_for_minors ? ", " + t("route_minors") : "")),
-      r.secret ? el("p", { class: "hint" }, t(r.secret.set ? "route_secret_set" : "route_secret_missing", { name: r.secret.name })) : [],
-      el("div", { class: "row" }, run), box), r.running);
+      el("p", { class: "hint" }, r.model + " @ " + r.endpoint + ", " + t("route_locality_" + r.locality) + ", " + t("route_kind_" + (r.kind || "chat"))),
+      r.secret ? el("p", { class: "hint" }, t(r.secret.set ? "route_secret_set" : "route_secret_missing", { name: r.secret.name })) :
+        (r.key === "literal" ? el("p", { class: "hint" }, t("route_key_literal")) : []),
+      el("div", { class: "row" }, run, toggle, r.removable ? remove : []), box, edit), r.running);
   });
+  const addCard = card(t("tab_routes"), t("route_add_title"), el("p", { class: "hint" }, t("route_add_intro")),
+    routeForm(null, secretList, data.name_max_chars, (v) => saveRoute(null, v)));
   // Names kept as typed (admin PIN, one request): shown here only until the view is redrawn.
   const refusedBox = el("div", { role: "status" });
   const showRefused = async () => {
@@ -612,11 +828,21 @@ async function routesView() {
   };
   view.append(card(t("tab_routes"), t("tab_routes"), el("p", { class: "hint" }, t("routes_intro"))),
     ...(cards.length ? cards : [empty(t("tab_routes"), t("routes_none"))]),
+    addCard,
+    ...(secrets ? [secretsCard(secrets, routesView)] : []),
     card(t("tab_routes"), t("refused_title"), el("p", { class: "hint" }, t("refused_hint")),
       el("div", { class: "row" }, button(t("refused_show"), "plain", () => guarded(showRefused))), refusedBox));
   if (state.tab === "routes" && data.routes.some((r) => r.running)) {
-    state.timer = setTimeout(() => guarded(routesView), ROUTES_POLL_MS);
+    state.timer = setTimeout(() => guarded(refreshRoutes), ROUTES_POLL_MS);
   }
+}
+
+// The poll redraws the page; it waits while a form field has the focus so typing is not lost.
+async function refreshRoutes() {
+  const focus = document.activeElement;
+  const typing = focus && document.getElementById("view").contains(focus) && ["INPUT", "SELECT", "TEXTAREA"].includes(focus.tagName);
+  if (!typing) { await routesView(); return; }
+  if (state.tab === "routes") state.timer = setTimeout(() => guarded(refreshRoutes), ROUTES_POLL_MS);
 }
 
 async function debugView() {
@@ -646,6 +872,7 @@ const TABS = {
   catalogue: catalogueView,
   routes: routesView,
   settings: settingsView,
+  live: liveView,
   debug: debugView,
 };
 
@@ -703,11 +930,13 @@ function shell() {
     state.csrf = null;
     await boot();
   });
+  liveBannerStart();
   showTab(state.tab);
 }
 
 async function boot() {
   stopPolling();
+  liveBannerStop();
   const [strings, session] = await Promise.all([api("GET", "/api/strings"), api("GET", "/api/session")]);
   state.strings = strings.strings;
   state.session = session;

@@ -12,8 +12,17 @@ Everything here is cheap and runs on the listener thread, ahead of the conversat
   revises away does not count), and, for addressed utterances only, the ``speech.loud`` /
   ``speech.fast`` impulses (a television is not shouting at the robot).
 
+An utterance whose final text comes later (the realtime route's transcript of its audio, SPEC 8,
+Realtime speech route) is ``hold``-ed at its end: ``end`` and ``impulses`` then take that held
+state, so a newer utterance can begin meanwhile; its keywords, wake word and speaking rate come
+from that text.
+
 A short final text with exactly one yes or no keyword, in an addressed utterance, also goes to
 ``on_answer(category, now)`` (the nod / shake handler, ``roboemot.voice.yes_no``); partials do not.
+
+With a ``grammar`` (``roboemot.voice.grammar``), the end of an utterance also gets a grammar pass
+on its audio (``grammar_pass``, run on the grammar worker thread): the categories it hears
+confidently join those of the final text in ``end``, before the wake and answer decisions.
 
 Events go to ``emit(event, now, payload)`` (the affect runner). Payloads carry the language only:
 never audio or text. Latencies (SPEC 13) are counted from the start of the last speech frame:
@@ -32,6 +41,7 @@ import numpy as np
 
 from ..attention import SpeakerHint
 from ..config.schema import VoiceConfig
+from .grammar import GrammarSpotter
 from .keywords import KeywordSpotter
 from .robot_name import RobotName
 from .speech_features import Prosody, analyse
@@ -82,6 +92,23 @@ class LatencyStats:
 
 
 @dataclass(frozen=True)
+class GrammarPass:
+    """The grammar pass of one finished utterance, fixed on the listener thread with the
+    utterance's spotter and language (``found``: the free text's categories); ``run`` it on any
+    thread. Text and audio are hidden from repr."""
+
+    grammar: GrammarSpotter
+    spotter: KeywordSpotter
+    language: str
+    audio: np.ndarray = field(repr=False)
+    text: str = field(repr=False)
+    found: frozenset[str]
+
+    def run(self) -> frozenset[str]:
+        return self.grammar.check(self.spotter, self.language, self.audio, self.text, self.found)
+
+
+@dataclass(frozen=True)
 class FastResult:
     """What the end of an utterance adds, from the final text: keyword categories, whether it
     wakes the robot, and prosody."""
@@ -92,8 +119,20 @@ class FastResult:
     answer: str | None = None  # "yes" or "no": the one such keyword of a short final text
 
 
+@dataclass
+class UtteranceState:
+    """The fast path's state of one utterance: its language, the events already sent (dedupe
+    only), and when the hint and the first keyword came."""
+
+    language: str = ""
+    emitted: set[str] = field(default_factory=set)
+    hint_at: float | None = None
+    keyword_at: float | None = None
+
+
 class FastPath:
-    """Per-utterance state machine: ``begin``, ``partial``\\*, ``end``, ``impulses`` / ``reset``."""
+    """Per-utterance state machine: ``begin``, ``partial``\\*, ``end``, ``impulses`` / ``reset``
+    (``hold`` keeps an ended utterance's state for a later ``end``)."""
 
     def __init__(
         self,
@@ -106,8 +145,10 @@ class FastPath:
         clock: Callable[[], float] = time.monotonic,
         names: RobotName | None = None,
         on_answer: Callable[[str, float], None] | None = None,
+        grammar: GrammarSpotter | None = None,
     ) -> None:
         self._on_answer = on_answer
+        self._grammar = grammar
         self.names = names if names is not None else RobotName()
         self._emit = emit
         self._selector = selector
@@ -123,13 +164,28 @@ class FastPath:
         self.cfg = cfg
         self.names.configure(cfg)
         self._spotter = KeywordSpotter(cfg.keywords, cfg.wake_word, self.names)
+        # the realtime route's transcript: a server's recognizer has no Vosk vocabulary limit
+        self._server_spotter = KeywordSpotter(cfg.keywords, cfg.wake_word, self.names.unchecked())  # type: ignore[arg-type]
+        if self._grammar is not None:
+            self._grammar.apply_config(cfg.grammar)
+
+    def wake_out_of_vocab(self) -> dict[str, int]:
+        """Per language, the wake phrases the recognizer can never produce (report only)."""
+        return self._spotter.wake_out_of_vocab()
+
+    def grammar_snapshot(self) -> dict[str, Any] | None:
+        """The grammar pass report (counts only), None without one."""
+        return None if self._grammar is None else self._grammar.snapshot()
 
     def reset(self) -> None:
         """Forget the utterance in progress."""
-        self._language = ""
-        self._emitted: set[str] = set()  # events already sent this utterance (dedupe only)
-        self._hint_at: float | None = None
-        self._keyword_at: float | None = None
+        self._u = UtteranceState()
+
+    def hold(self) -> UtteranceState:
+        """The ended utterance's state, for an ``end`` and ``impulses`` that come later (its
+        final text is still to come); the fast path starts afresh."""
+        held, self._u = self._u, UtteranceState()
+        return held
 
     def begin(self, start_stamp: float, audio_stamp: float, language: str) -> None:
         """Speech started (``start_stamp``: first speech frame; ``audio_stamp``: end of the audio
@@ -139,10 +195,10 @@ class FastPath:
         adds the ``voice.vad.min_speech_ms`` the VAD needed to be sure.
         """
         self.reset()
-        self._language = language
+        self._u.language = language
         now = self._clock()
         if self._hint(now):
-            self._hint_at = now
+            self._u.hint_at = now
             self.stats.record("hint_lag", now - audio_stamp)
             self.stats.record("hint_vs_speech_start", now - start_stamp)
         self._emit("speech.heard", now, {"language": language})
@@ -159,25 +215,57 @@ class FastPath:
         self._selector.hint_speaker(SpeakerHint(now, entry_id=entry, azimuth_rad=az))
         return True
 
-    def _fire(self, categories: set[str]) -> None:
-        """Emit the events of ``categories`` not yet sent this utterance."""
-        events = sorted({EVENT_FOR[c] for c in categories} - self._emitted)
+    def _fire(self, categories: set[str], u: UtteranceState) -> None:
+        """Emit the events of ``categories`` not yet sent for utterance ``u``."""
+        events = sorted({EVENT_FOR[c] for c in categories} - u.emitted)
         if not events:
             return
         now = self._clock()
         for event in events:
-            self._emit(event, now, {"language": self._language})
-        self._emitted.update(events)
-        if self._keyword_at is None:
-            self._keyword_at = now
+            self._emit(event, now, {"language": u.language})
+        u.emitted.update(events)
+        if u.keyword_at is None:
+            u.keyword_at = now
 
     def partial(self, text: str, audio_stamp: float) -> None:
         """React to keywords in the text so far, once per event per utterance. Only the final
         text decides the utterance's keywords and wake word (``end``)."""
-        before = self._keyword_at
-        self._fire(self._spotter.spot(text, self._language))
-        if before is None and self._keyword_at is not None:
-            self.stats.record("keyword_lag", self._keyword_at - audio_stamp)
+        u = self._u
+        before = u.keyword_at
+        self._fire(self._spotter.spot(text, u.language), u)
+        if before is None and u.keyword_at is not None:
+            self.stats.record("keyword_lag", u.keyword_at - audio_stamp)
+
+    def grammar_pass(
+        self, text: str, audio: np.ndarray, language: str | None = None
+    ) -> GrammarPass | None:
+        """The grammar pass of the utterance that ended with final ``text``, on ``audio``
+        (pre-roll to the last speech frame), in ``language`` (default: the utterance in
+        progress's); None without a grammar spotter."""
+        if self._grammar is None:
+            return None
+        spotter = self._spotter  # one spotter for the utterance, whatever a reload does meanwhile
+        language = self._u.language if language is None else language
+        found = frozenset(spotter.spot(text, language))
+        return GrammarPass(self._grammar, spotter, language, audio, text, found)
+
+    def wakes(
+        self,
+        text: str,
+        *,
+        grammar_pass: GrammarPass | None = None,
+        heard: frozenset[str] = frozenset(),
+        state: UtteranceState | None = None,
+    ) -> bool:
+        """Whether final ``text`` (with what the grammar pass ``heard``) wakes the robot, as
+        ``end`` decides it, with no event sent and nothing recorded."""
+        u = state if state is not None else self._u
+        spotter = grammar_pass.spotter if grammar_pass is not None else self._spotter
+        cats = spotter.spot(text, u.language) | heard
+        words = len(text.split())
+        return "wake" in cats or (
+            "name" in cats and words <= self.cfg.fastpath.alias_wake_max_words
+        )
 
     def end(
         self,
@@ -187,41 +275,61 @@ class FastPath:
         *,
         last_speech_stamp: float,
         endpoint_stamp: float,
+        grammar_pass: GrammarPass | None = None,
+        heard: frozenset[str] = frozenset(),
+        state: UtteranceState | None = None,
+        server: bool = False,
     ) -> FastResult:
         """The utterance ended with final ``text``; ``speech_audio`` spans its speech frames.
+        ``heard`` is what its ``grammar_pass`` heard (empty when it was not run or not waited
+        for); they join the final text's categories. A yes or no only the grammar pass heard can
+        make the answer: today that drives the nod or shake gesture only (SPEC 8 stage 3).
 
         Keywords only the final text has are emitted now. Records the first reaction (hint or
         keyword) and the first keyword against ``last_speech_stamp``. Call ``impulses`` next.
+        ``state`` is a held utterance's (``hold``), else the one in progress. ``server``: the
+        text is the realtime route's transcript, so the robot's name counts in every language
+        (no recognizer vocabulary limits it).
         """
+        u = state if state is not None else self._u
         words = len(text.split())
-        cats = self._spotter.spot(text, self._language)
-        before = self._keyword_at
-        self._fire(cats)
-        if before is None and self._keyword_at is not None:
-            self.stats.record("keyword_lag", self._keyword_at - endpoint_stamp)
+        if grammar_pass is not None:
+            spotter = grammar_pass.spotter
+        else:
+            spotter = self._server_spotter if server else self._spotter
+        cats = spotter.spot(text, u.language) | heard
+        before = u.keyword_at
+        self._fire(cats, u)
+        if before is None and u.keyword_at is not None:
+            self.stats.record("keyword_lag", u.keyword_at - endpoint_stamp)
         fp = self.cfg.fastpath
         prosody = analyse(speech_audio, rate_hz, words, fp)
-        reactions = [t for t in (self._hint_at, self._keyword_at) if t is not None]
+        reactions = [t for t in (u.hint_at, u.keyword_at) if t is not None]
         if reactions:
             self.stats.record("reaction_vs_last_speech", min(reactions) - last_speech_stamp)
-        if self._keyword_at is not None:
-            self.stats.record("keyword_vs_last_speech", self._keyword_at - last_speech_stamp)
+        if u.keyword_at is not None:
+            self.stats.record("keyword_vs_last_speech", u.keyword_at - last_speech_stamp)
         wake = "wake" in cats or ("name" in cats and words <= fp.alias_wake_max_words)
         said = cats & {"yes", "no"}
         answer = next(iter(said)) if len(said) == 1 and words <= fp.gesture_max_words else None
         return FastResult(frozenset(cats), wake, prosody, answer)
 
-    def impulses(self, result: FastResult, addressed: bool) -> None:
-        """Emit ``speech.loud`` / ``speech.fast`` for an addressed utterance; ends the utterance."""
+    def impulses(
+        self, result: FastResult, addressed: bool, state: UtteranceState | None = None
+    ) -> None:
+        """Emit ``speech.loud`` / ``speech.fast`` for an addressed utterance; ends the utterance
+        (``state``: a held one, which leaves the one in progress alone)."""
         fp = self.cfg.fastpath
         p = result.prosody
+        u = state if state is not None else self._u
         if addressed:
             now = self._clock()
             if result.answer is not None and self._on_answer is not None:
                 self._on_answer(result.answer, now)
-            payload = {"language": self._language}
+            payload = {"language": u.language}
             if p.rms_db >= fp.loud_db:
                 self._emit("speech.loud", now, payload)
             if p.words_per_s is not None and p.words_per_s >= fp.fast_words_per_s:
                 self._emit("speech.fast", now, payload)
-        self.reset()
+        if state is None:
+            self.reset()

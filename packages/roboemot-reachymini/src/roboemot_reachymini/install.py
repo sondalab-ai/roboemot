@@ -1,136 +1,82 @@
 """Reachy Mini Wireless installer platform (SPEC 4A, Packaging; flow in ``roboemot.install``).
 
-Facts from the daemon source (reachy_mini 1.11, checked on the robot):
+Facts from the daemon source (reachy_mini 1.12, checked on the robot):
 
-- Every app shares one environment, ``/venvs/apps_venv``; the daemon runs an app as
+- Every app shares one environment, ``/venvs/apps_venv``. A freshly flashed robot has only
+  ``/venvs/mini_daemon``: the daemon creates the apps venv lazily on the first app install
+  (``<daemon python> -m venv``, then ``pip install reachy-mini``, unpinned, then the app). The
+  installer does the same when it is missing, pinned to the daemon's own ``reachy_mini``
+  version, and records it so uninstall can remove it. The daemon runs an app as
   ``<apps_venv>/bin/python -u -m <entry point module>`` and lists apps from the
   ``reachy_mini_apps`` entry points found there.
 - ``/venvs/.app_metadata/<app>.json`` exists only for apps the daemon installed itself (from
   Hugging Face); the uninstaller removes ours if one ever appears.
-- REST API under ``/api``: daemon status, installed apps, current app, stop, wake-up, start,
-  and the startup app (``PUT /api/apps/startup-app``), which the daemon starts on wake-up.
+- REST API under ``/api`` (client: ``roboemot_reachymini.daemon``): daemon status, installed
+  apps, current app, stop, wake-up, start, and the startup app (``PUT /api/apps/startup-app``),
+  which the daemon starts on wake-up.
 - The change record lives at ``/venvs/.roboemot-install.json``: writable by ``pollen``,
   outside the shared environment (pip would not touch it) and outside ``/tmp``.
 """
 
 from __future__ import annotations
 
-import json
+import re
 import shlex
 import shutil
 import socket
 import time
-import urllib.error
-import urllib.request
-from collections.abc import Callable
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
 
+from roboemot.config.schema import RoboEmotConfig
+from roboemot.diagnostics import Target
 from roboemot.install import Ui, WizardError
 from roboemot.install.pyenv import RemotePython
+from roboemot.install.remote import Remote
+from roboemot.install.ui import last_line
 
-APP_NAME = "roboemot"
+from .daemon import APP_NAME, DEFAULT_PORT, INSTALL_TIMEOUT_S, DaemonClient, DaemonError
+
 APPS_VENV = "/venvs/apps_venv"
-DAEMON_PORT = 8000
-HTTP_TIMEOUT_S = 5.0
-APP_START_TIMEOUT_S = 60.0
+DAEMON_PYTHON = "/venvs/mini_daemon/bin/python"
+VERSION_PATTERN = re.compile(r"[0-9][0-9A-Za-z.+!-]*")
 WAKE_SETTLE_S = 3.0
 PACKAGES = ("roboemot-core", "roboemot-reachymini")
 PKG_DATA = "roboemot-reachymini/src/roboemot_reachymini/data"
 DAEMON_METADATA = "/venvs/.app_metadata"
 
 PROBE = "from importlib.metadata import version; print(version('reachy_mini'))"
+OTHER_APPS = (
+    "from importlib.metadata import entry_points; "
+    f"print(*[e.name for e in entry_points(group='reachy_mini_apps') if e.name != '{APP_NAME}'],"
+    " sep='\\n')"
+)
 VERIFY = (
     "from importlib.metadata import entry_points; "
     "from reachy_mini import ReachyMiniApp; "
     f"ep = [e for e in entry_points(group='reachy_mini_apps') if e.name == '{APP_NAME}']; "
     f"assert ep, 'no reachy_mini_apps entry point named {APP_NAME}'; "
     "cls = ep[0].load(); assert issubclass(cls, ReachyMiniApp), cls; "
-    "import roboemot_reachymini, pathlib; "
-    "print(ep[0].module); "
-    "print((pathlib.Path(roboemot_reachymini.__file__).parent / 'data' / 'app.yaml').exists())"
+    "print(ep[0].module)"
 )
 
 
-class DaemonApi:
-    """The Reachy Mini daemon REST API (FastAPI, prefix ``/api``), reachy_mini 1.11+."""
-
-    def __init__(self, base_url: str, timeout_s: float = HTTP_TIMEOUT_S) -> None:
-        self.base_url = base_url.rstrip("/")
-        self.timeout_s = timeout_s
-
-    def _call(self, method: str, path: str, body: Any = None) -> Any:
-        """Send one request and return the decoded JSON (None for an empty body)."""
-        data = None if body is None else json.dumps(body).encode()
-        req = urllib.request.Request(f"{self.base_url}/api{path}", data=data, method=method)
-        if data is not None:
-            req.add_header("Content-Type", "application/json")
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
-                raw = resp.read()
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode(errors="replace")
-            if detail.startswith("{"):
-                detail = json.loads(detail).get("detail", detail)
-            raise WizardError(f"Daemon refused {method} {path}", f"HTTP {e.code}: {detail}") from e
-        except (urllib.error.URLError, OSError) as e:
-            raise WizardError(
-                "Could not reach the daemon", f"{method} {path}: {getattr(e, 'reason', e)}"
-            ) from e
-        return json.loads(raw) if raw.strip() else None
-
-    def daemon_status(self) -> dict[str, Any]:
-        return self._call("GET", "/daemon/status")
-
-    def installed_apps(self) -> list[str]:
-        return [a["name"] for a in self._call("GET", "/apps/list-available/installed")]
-
-    def current_app(self) -> dict[str, Any] | None:
-        return self._call("GET", "/apps/current-app-status")
-
-    def stop_current_app(self) -> None:
-        self._call("POST", "/apps/stop-current-app")
-
-    def wake_up(self) -> None:
-        self._call("POST", "/move/play/wake_up")
-
-    def start_app(self, name: str) -> dict[str, Any]:
-        return self._call("POST", f"/apps/start-app/{name}")
-
-    def startup_app(self) -> str | None:
-        return self._call("GET", "/apps/startup-app").get("startup_app")
-
-    def set_startup_app(self, name: str | None) -> None:
-        self._call("PUT", "/apps/startup-app", {"startup_app": name})
-
-    def wait_app(
-        self,
-        name: str,
-        timeout_s: float = APP_START_TIMEOUT_S,
-        poll_s: float = 0.5,
-        clock: Callable[[], float] = time.monotonic,
-        sleep: Callable[[float], None] = time.sleep,
-    ) -> dict[str, Any]:
-        """Poll until ``name`` is running, or return its last status (error, done, timeout)."""
-        deadline = clock() + timeout_s
-        status: dict[str, Any] | None = None
-        while clock() < deadline:
-            status = self.current_app()
-            if status is None or status["info"]["name"] != name:
-                raise WizardError(
-                    f"{name} is no longer the current app", f"daemon status: {status}"
-                )
-            if status["state"] in ("running", "error", "done"):
-                return status
-            sleep(poll_s)
-        assert status is not None
-        return status
+@contextmanager
+def _wizard_errors() -> Iterator[None]:
+    """Daemon failures as the wizard's own error type, so the flow reports them and stops."""
+    try:
+        yield
+    except DaemonError as exc:
+        raise WizardError("Daemon call failed", str(exc)) from exc
 
 
-def stage_packages(root: Path, dest: Path, dev: bool) -> list[Path]:
+def stage_packages(root: Path, dest: Path) -> list[Path]:
     """Copy both packages into ``dest`` with the app's package data, leaving the checkout alone.
 
-    Mirrors scripts/sync-package-data.sh, plus data/app.yaml from dev-unmeasured.yaml in dev.
+    Mirrors scripts/sync-package-data.sh. The app config is not package data any more: it lives
+    in the data folder (``roboemot.paths.app_config_path``, written by the core installer), so
+    no ``data/app.yaml`` ships, and one left by an older install goes with the old package.
     """
     for pkg in PACKAGES:
         shutil.copytree(
@@ -144,8 +90,6 @@ def stage_packages(root: Path, dest: Path, dev: bool) -> list[Path]:
     for preset in (root / "configs/presets").glob("*.yaml"):
         shutil.copy2(preset, data / "presets")
     (data / "app.yaml").unlink(missing_ok=True)
-    if dev:
-        shutil.copy2(root / "configs/dev-unmeasured.yaml", data / "app.yaml")
     return [dest / pkg for pkg in PACKAGES]
 
 
@@ -157,16 +101,20 @@ class ReachyMiniWireless:
     default_user = "pollen"
     arch = "aarch64"
     python = f"{APPS_VENV}/bin/python"
+    env_dir = APPS_VENV
+    base_python = DAEMON_PYTHON
     record_path = "/venvs/.roboemot-install.json"
     space_paths = ("/tmp", APPS_VENV)
     distributions = PACKAGES
     modules = ("roboemot", "roboemot_reachymini")
+    extras = ("voice", "realtime")  # realtime: websockets, already in the apps venv
+    clearable_caches = ("~/.cache/uv",)  # the uv download cache left by the robot image's setup
 
-    def __init__(self, port: int = DAEMON_PORT) -> None:
+    def __init__(self, port: int = DEFAULT_PORT) -> None:
         self.port = port
-        self.api: DaemonApi | None = None
+        self.api: DaemonClient | None = None
 
-    def _api(self) -> DaemonApi:
+    def _api(self) -> DaemonClient:
         assert self.api is not None, "connect() first"
         return self.api
 
@@ -179,8 +127,9 @@ class ReachyMiniWireless:
                 f"Could not resolve {host}", f"{e}; the robot's IP address avoids mDNS names"
             ) from e
         ui.ok("Resolved the host", f"{host} -> {addr}")
-        self.api = DaemonApi(f"http://{host}:{self.port}")
-        status = self.api.daemon_status()
+        self.api = DaemonClient(Target(host, self.port), timeout_s=INSTALL_TIMEOUT_S)
+        with _wizard_errors():
+            status = self.api.status()
         version, name = status.get("version") or "?", status.get("robot_name")
         ui.ok("Reached the daemon", f"{version} on {name}, state {status['state']}")
         if status["state"] != "running":
@@ -191,51 +140,190 @@ class ReachyMiniWireless:
         if not status.get("wireless_version"):
             ui.warn("Not a Wireless daemon", "the apps venv layout may differ")
 
+    def plan_env(self, remote: Remote) -> str:
+        """The requirement the new apps venv gets: ``reachy-mini`` at the daemon's own version.
+        Read-only, so it runs before anything is recorded."""
+        version = RemotePython(remote, DAEMON_PYTHON).py(PROBE).strip()
+        if not VERSION_PATTERN.fullmatch(version):
+            raise WizardError(
+                "Could not read the daemon's reachy_mini version",
+                f"{DAEMON_PYTHON} answered {version!r}",
+            )
+        return f"reachy-mini=={version}"
+
+    def create_env(self, ui: Ui, remote: Remote, plan: str) -> None:
+        """Create the apps venv the way the daemon does and install ``plan`` (from
+        ``plan_env``) into it. Also finishes a venv whose earlier creation stopped: ``venv`` over
+        an existing one keeps it, and pip installs what is missing."""
+        with ui.progress("Creating the apps venv", report=False):
+            remote.run(f"{shlex.quote(DAEMON_PYTHON)} -m venv {shlex.quote(APPS_VENV)}")
+        result = RemotePython(remote, self.python, ui).install([plan], None, report=False)
+        if not result.ok:
+            raise WizardError(
+                f"Could not install {plan} in the new {APPS_VENV}",
+                f"pip install failed: {last_line(result.output)}",
+                output=result.output,
+            )
+        ui.ok("Created the apps venv", f"{APPS_VENV} with {plan}")
+
+    def env_users(self, py: RemotePython) -> list[str]:
+        """Apps other than ours that the daemon would list from this environment."""
+        return py.py(OTHER_APPS).split()
+
+    def env_ready(self, py: RemotePython) -> bool:
+        """Whether the apps venv holds ``reachy_mini`` (read-only; False for a venv whose
+        creation stopped before ``pip install reachy-mini``)."""
+        cmd = f"{shlex.quote(py.python)} -c {shlex.quote(PROBE)} 2>/dev/null || true"
+        return VERSION_PATTERN.fullmatch(py.remote.run(cmd).strip()) is not None
+
     def probe(self, ui: Ui, py: RemotePython) -> None:
         ui.ok("Found reachy_mini", f"{py.py(PROBE)} in the apps venv")
 
-    def stage(self, root: Path, dest: Path, dev: bool) -> list[Path]:
-        return stage_packages(root, dest, dev)
+    def stage(self, root: Path, dest: Path) -> list[Path]:
+        return stage_packages(root, dest)
 
-    def verify(self, ui: Ui, py: RemotePython, dev: bool) -> None:
-        """The app loads in the apps venv, runs as a module, and the daemon lists it."""
-        module, has_dev_cfg = py.py(VERIFY).splitlines()
+    def verify(self, ui: Ui, py: RemotePython) -> None:
+        """The app loads in the apps venv and runs as a module, and the daemon lists it (the
+        app config is the core's to check)."""
+        lines = py.py(VERIFY).splitlines()
+        if not lines:
+            raise WizardError("Could not check the entry point", f"no answer for {APP_NAME}")
+        module = lines[-1]  # a stray line printed while importing the app comes before it
         ui.ok("Checked the entry point", f"{APP_NAME} -> {module}")
-        if (has_dev_cfg == "True") != dev:
-            raise WizardError(
-                "Installed config does not match",
-                f"data/app.yaml present={has_dev_cfg}, expected dev={dev}",
-            )
-        if APP_NAME not in self._api().installed_apps():
+        with _wizard_errors():
+            installed = self._api().installed_apps()
+        if APP_NAME not in installed:
             raise WizardError(
                 "App not listed", f"the daemon does not list {APP_NAME} among installed apps"
             )
         ui.ok("Daemon lists the app", APP_NAME)
 
     def running_app(self) -> str | None:
-        current = self._api().current_app()
+        with _wizard_errors():
+            current = self._api().current_app()
         if current and current["state"] in ("starting", "running"):
             return current["info"]["name"]
         return None
 
     def stop_app(self) -> None:
-        self._api().stop_current_app()
+        with _wizard_errors():
+            self._api().stop_current_app()
+
+    def app_installed(self) -> bool:
+        """Whether the daemon lists RoboEmot among its installed apps."""
+        with _wizard_errors():
+            return APP_NAME in self._api().installed_apps()
+
+    def app_url(self, host: str, port: int | None = None) -> str | None:
+        """The app's web UI address: ``port`` (the app config's ``webui.port``, which the app
+        also puts in ``custom_app_url``) when the caller read it, else the default."""
+        return f"http://{host}:{port or RoboEmotConfig().webui.port}"
+
+    def start_blocker(self) -> str | None:
+        """Why the app cannot start now, read-only: the Reachy mobile app holds the robot's
+        app slot through a remote session, and the daemon then refuses to start local apps."""
+        with _wizard_errors():
+            lock = self._api().app_lock_status()
+        if lock and lock.get("state") == "remote_session":
+            holder = lock.get("holder_name") or "a remote session"
+            return f"the Reachy mobile app holds the robot ({holder}); close it first"
+        return None
 
     def start(self, ui: Ui) -> None:
         """Stop the running app if any, wake the robot, start RoboEmot and wait for it."""
         api = self._api()
+        blocker = self.start_blocker()
+        if blocker:
+            raise WizardError(f"Cannot start {APP_NAME}", blocker)
+        self._clear_errored_app(ui)
         other = self.running_app()
+        if other == APP_NAME:
+            self._await_own(ui, f"{APP_NAME} is already running")
+            return
         if other:
             if not ui.confirm(f"{other} is running; stop it (only one app runs at a time)?", False):
                 raise WizardError(f"{other} is still running", "RoboEmot not started")
-            api.stop_current_app()
+            with _wizard_errors():
+                api.stop_current_app()
             ui.ok(f"Stopped {other}")
-        api.wake_up()
+        with _wizard_errors():
+            api.wake_up()
         ui.ok("Requested the wake-up")
-        with ui.running(f"Starting {APP_NAME}…"):
-            time.sleep(WAKE_SETTLE_S)
-            api.start_app(APP_NAME)
-            status = api.wait_app(APP_NAME)
+        time.sleep(WAKE_SETTLE_S)
+        if self.running_app() == APP_NAME:
+            self._await_own(ui, f"{APP_NAME} started by the daemon on wake-up")
+            return
+        try:
+            with _wizard_errors():
+                api.start_app(APP_NAME)
+        except WizardError:
+            if not self._current_is_own():
+                raise
+            self._await_own(ui, f"{APP_NAME} started by the daemon on wake-up")
+            return
+        self._await_own(ui)
+
+    def restart(self, ui: Ui) -> None:
+        """Restart the running RoboEmot through the daemon and wait until it runs again. It asks
+        first, and a no is the default (scripts pass ``-y``): the daemon's stop may move the head
+        to its zero pose. A failed request says what state it left the app in."""
+        blocker = self.start_blocker()
+        if blocker:
+            raise WizardError(f"Cannot start {APP_NAME}", blocker)
+        question = (
+            f"Restart {APP_NAME}? The head may move to its zero pose (unless asleep) while the "
+            "app stops, then the app starts again"
+        )
+        if not ui.confirm(question, False):
+            raise WizardError(f"{APP_NAME} not restarted", "the restart was declined")
+        try:
+            self._api().restart_current_app()
+        except DaemonError as exc:
+            self._after_failed_restart(ui, exc)
+            return
+        ui.ok("Requested the restart")
+        self._await_own(ui)
+
+    def _after_failed_restart(self, ui: Ui, error: DaemonError) -> None:
+        """The restart request failed (an error answer, a timeout): read the current app once.
+        Still ours, the daemon is finishing the restart and the wait goes on; otherwise the
+        stop ran and the start did not, so RoboEmot is stopped."""
+        if self._current_is_own():
+            ui.warn("Restart request ended", f"{error}; {APP_NAME} is still restarting")
+            self._await_own(ui)
+            return
+        raise WizardError(
+            "Restart failed",
+            f"{error}; {APP_NAME} is stopped: start it without --restart",
+            "python scripts/run_on_robot.py",
+        )
+
+    def _clear_errored_app(self, ui: Ui) -> None:
+        """The daemon refuses every start while the current app is in ``error`` (it counts as
+        running); clear such a leftover with a stop so a new start can go through."""
+        with _wizard_errors():
+            current = self._api().current_app()
+        if not current or current["state"] != "error":
+            return
+        name = current["info"]["name"]
+        ui.warn(f"{name} had an error", current.get("error") or "no detail")
+        with _wizard_errors():
+            self._api().stop_current_app()
+        ui.ok(f"Cleared {name}", "stopped its errored run")
+
+    def _current_is_own(self) -> bool:
+        """Whether RoboEmot is the daemon's current app, in any state (an errored start counts:
+        it is reported, not started again)."""
+        with _wizard_errors():
+            current = self._api().current_app()
+        return bool(current) and current["info"]["name"] == APP_NAME
+
+    def _await_own(self, ui: Ui, note: str | None = None) -> None:
+        """Wait until RoboEmot is the current app and running, or raise with its error."""
+        if note:
+            ui.ok(f"Found {APP_NAME}", note)
+        with ui.running(f"Starting {APP_NAME}…"), _wizard_errors():
+            status = self._api().wait_app(APP_NAME)
         if status["state"] != "running":
             raise WizardError(
                 f"{APP_NAME} did not start",
@@ -244,10 +332,12 @@ class ReachyMiniWireless:
         ui.ok(f"Started {APP_NAME}", "running")
 
     def autostart(self) -> str | None:
-        return self._api().startup_app()
+        with _wizard_errors():
+            return self._api().startup_app()
 
     def set_autostart(self, name: str | None) -> None:
-        self._api().set_startup_app(name)
+        with _wizard_errors():
+            self._api().set_startup_app(name)
 
     def cleanup(self, ui: Ui, py: RemotePython, dry_run: bool) -> None:
         """Daemon-side leftovers: the app metadata file, if the daemon ever wrote one."""
@@ -258,9 +348,11 @@ class ReachyMiniWireless:
             ui.change(dry_run, "Delete the app metadata", "Deleted the app metadata", path)
 
     def verify_removed(self, ui: Ui) -> None:
-        if APP_NAME in self._api().installed_apps():
+        with _wizard_errors():
+            installed = self._api().installed_apps()
+        if APP_NAME in installed:
             raise WizardError("App still listed", f"the daemon still lists {APP_NAME}")
         ui.ok("Daemon dropped the app", f"{APP_NAME} no longer listed")
 
 
-__all__ = ["DaemonApi", "ReachyMiniWireless", "stage_packages"]
+__all__ = ["ReachyMiniWireless", "stage_packages"]

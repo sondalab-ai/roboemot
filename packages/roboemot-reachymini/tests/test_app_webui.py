@@ -10,6 +10,7 @@ import threading
 
 import pytest
 import yaml
+from roboemot.realtime.session import DirectSession
 from roboemot.webui.__main__ import main as set_pin
 from roboemot_reachymini import app as app_module
 from test_app_perception import (
@@ -25,8 +26,6 @@ FORM = {
     "display_name": "Ada",
     "consent_who": "Ada",
     "scope": ["face", "refresh"],
-    "age_group": "adult",
-    "gender": "female",
     "agreed": True,
 }
 
@@ -87,6 +86,9 @@ def test_enroll_through_the_web_ui_against_the_real_service(webui_data):
         assert app.webui.host == "0.0.0.0"  # the cm4 profile: reachable on the LAN
         page = Browser(port)
         assert page.call("GET", "/")[0] == 200
+        # the realtime check of the Routes tab uses the runtime's session provider (SPEC 8)
+        checker = app.webui._httpd.api.routes
+        assert isinstance(checker._realtime_provider(), DirectSession)  # direct mode default
         assert page.call("GET", "/api/registry")[0] == 401
         assert page.login() == 200
 
@@ -166,3 +168,14 @@ def test_exceptions_in_server_stop_do_not_skip_the_rest_of_the_shutdown(webui_da
     ]
     monkeypatch.undo()
     app.webui.stop()
+
+
+def test_the_declared_page_follows_a_port_set_in_the_app_config(tmp_path):
+    """R4 S4 port point: an owner's webui.port in the data-folder app.yaml reaches the URL."""
+    path = tmp_path / "app.yaml"
+    path.write_text("schema_version: 1\nwebui:\n  port: 8080\n")
+    assert app_module.webui_port(path) == 8080
+    for text in ("webui:\n  port: 0\n", "webui: [1\n", "- x\n"):
+        path.write_text(text)
+        assert app_module.webui_port(path) == 8042
+    assert app_module.webui_port(tmp_path / "missing.yaml") == 8042

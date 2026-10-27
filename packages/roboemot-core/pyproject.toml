@@ -24,13 +24,23 @@ dependencies = [
 discovery = ["zeroconf>=0.132"]
 # The robot installer (runs on the PC): mDNS plus sondalab-palette's Term helpers (0.9: prompts, errors).
 install = ["zeroconf>=0.132", "sondalab-palette>=0.9"]
-# ONNX vision backends (YuNet, SFace, FairFace, DINOv2): `roboemot models fetch` gets the weights
-# and, with onnx, quantizes the INT8 FairFace files.
+# ONNX vision backends (YuNet, SFace, DINOv2, NanoDet): `roboemot models fetch`
+# gets the weights.
 vision = ["onnxruntime>=1.18", "onnx>=1.16", "opencv-python-headless>=4.9"]
 # Voice (SPEC 8): Silero VAD on ONNX Runtime and Vosk streaming ASR. Piper is not a dependency: it
 # is GPL-3.0 and runs as a separate process.
 voice = ["onnxruntime>=1.18", "vosk>=0.3.44"]
-dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6", "zeroconf>=0.132", "sondalab-palette>=0.9"]
+# Realtime speech route (SPEC 8): the WebSocket client. Off by default; on Reachy Mini the SDK
+# already requires websockets>=12,<16, so the robot's version is kept.
+realtime = ["websockets>=13,<16"]
+dev = [
+  "pytest>=8",
+  "pytest-asyncio>=0.23",
+  "ruff>=0.6",
+  "zeroconf>=0.132",
+  "sondalab-palette>=0.9",
+  "websockets>=13,<16",
+]
 
 [project.scripts]
 roboemot = "roboemot.cli:main"

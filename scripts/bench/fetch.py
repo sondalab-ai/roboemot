@@ -81,6 +81,13 @@ FILES: dict[str, list[tuple[str, str, str]]] = {
             f"{HF}/onnx-community/fairface_gender_image_detection-ONNX/resolve/main/onnx/model.onnx",
         ),
     ],
+    "yolo11n-face-age": [
+        (
+            "yolo11n_face_age",
+            "model.onnx",
+            f"{HF}/AdamCodd/yolo11n-face-age/resolve/410bdd84fa762b6aa550ef73bd57865a2d30be37/model.onnx",
+        ),
+    ],
     "yolox-nano": [
         (
             "yolox_nano",
@@ -166,6 +173,7 @@ FLAT = {
     "fairface_gender_vit.onnx": "fairface/gender_model.onnx",
     "fairface_age_vit_int8.onnx": "fairface_int8/age_model.onnx",  # from quantize.py
     "fairface_gender_vit_int8.onnx": "fairface_int8/gender_model.onnx",
+    "yolo11n_face_age.onnx": "yolo11n_face_age/model.onnx",
     "dinov2_s.onnx": "dinov2_small/model.onnx",
     "clip_b32_vision.onnx": "clip_b32/vision_model.onnx",
     "mobileclip_s0_vision.onnx": "mobileclip_s0/vision_model.onnx",

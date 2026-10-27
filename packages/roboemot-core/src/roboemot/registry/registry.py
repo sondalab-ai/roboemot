@@ -1,10 +1,9 @@
 """The registry of known people, animals and objects (SPEC 6, 11, 12).
 
-People are enrolled only with a recorded consent whose scope covers what is stored, and a
-possible minor (anything not declared adult or senior) needs a guardian. Nothing here enrolls a
-person automatically; ``create_pending_person`` makes a name-only record with no biometrics.
-Records are replaced, never edited in place, and memory changes only after the store write
-succeeded. ``forget`` is synchronous and complete. One re-entrant lock guards all state; the
+People are enrolled only with a recorded consent whose scope covers what is stored. Nothing
+here enrolls a person automatically; ``create_pending_person`` makes a name-only record with no
+biometrics. Records are replaced, never edited in place, and memory changes only after the store
+write succeeded. ``forget`` is synchronous and complete. One re-entrant lock guards all state; the
 matcher shares it. Never log embeddings or crops (SPEC 12, Privacy).
 """
 
@@ -22,7 +21,6 @@ import numpy as np
 
 from ..config.schema import IdentityConfig
 from .records import (
-    Attribute,
     Consent,
     ConsentError,
     EntityKind,
@@ -30,11 +28,8 @@ from .records import (
     Origin,
     PersonRecord,
     RecordSummary,
-    check_age_group,
     check_entity_kind,
-    check_gender,
     check_register_overrides,
-    possible_minor,
 )
 from .store import RegistryStore
 from .tombstones import TombstoneSet
@@ -42,6 +37,9 @@ from .tombstones import TombstoneSet
 log = logging.getLogger(__name__)
 
 PEOPLE = "people"
+# Fields of a person stored before the owner decision of 2026-10-23 (no age, gender or guardian).
+LEGACY_PERSON_KEYS = ("age_group", "gender")
+LEGACY_CONSENT_KEY = "guardian"
 ENTITIES = "entities"
 GalleryKind = Literal["face", "voice", "entity"]
 Vectors = Sequence[Sequence[float]] | np.ndarray
@@ -104,16 +102,44 @@ class Registry:
         self._load(ENTITIES, EntityRecord, self._entities, "entity_id")
 
     def _load(self, collection: str, cls: Any, target: dict[str, Any], id_field: str) -> None:
-        """Read every item; one that fails to parse is quarantined and logged by key only."""
+        """Read every item; one that fails to parse is quarantined and logged by key only.
+
+        A person stored before 2026-10-23 with ``age_group``, ``gender`` or a consent
+        ``guardian`` is rewritten at once without them (SPEC 5, 6, 12: the registry stores none,
+        and an access request shows everything stored); see ``_strip_legacy``."""
         for key in self.store.keys(collection):
             try:
-                record = cls.from_stored(*self.store.get(collection, key))
+                meta, arrays = self.store.get(collection, key)
+                record = cls.from_stored(meta, arrays)
                 if getattr(record, id_field) != key:
                     raise ValueError("key does not match the stored id")
                 target[key] = record
             except Exception as exc:
                 log.error("quarantined %s item %s (%s)", collection, key, type(exc).__name__)
                 self.store.quarantine(collection, key)
+                continue
+            self._strip_legacy(collection, key, meta, record)
+
+    def _strip_legacy(self, collection: str, key: str, meta: dict[str, Any], record: Any) -> None:
+        """Atomically rewrite a record whose raw ``meta`` still holds a legacy personal field.
+
+        A failed rewrite is logged by key only (never a value) and the loaded record is kept: a
+        readable person is never quarantined for it; the next load tries again."""
+        consent = meta.get("consent")
+        legacy = any(k in meta for k in LEGACY_PERSON_KEYS) or (
+            isinstance(consent, dict) and LEGACY_CONSENT_KEY in consent
+        )
+        if not legacy:
+            return
+        try:
+            self.store.put(collection, key, record.meta(), record.arrays())
+        except Exception as exc:
+            log.error(
+                "could not drop legacy fields of %s item %s (%s)",
+                collection,
+                key,
+                type(exc).__name__,
+            )
 
     def attach_history(self, link: HistoryLink) -> None:
         """Include ``link`` in ``export`` and ``forget`` (the world history, SPEC 5A)."""
@@ -148,13 +174,9 @@ class Registry:
 
     # ------------------------------------------------------------------ people
 
-    def _require_consent(
-        self, consent: Consent | None, age_group: str | None, needs: tuple[str, ...]
-    ) -> Consent:
+    def _require_consent(self, consent: Consent | None, needs: tuple[str, ...]) -> Consent:
         if consent is None:
             raise ConsentError("a consent record is required")
-        if possible_minor(age_group) and not consent.guardian:
-            raise ConsentError("a guardian is required unless the person is declared adult")
         missing = [scope for scope in needs if scope not in consent.scope]
         if missing:
             raise ConsentError(f"consent scope lacks {missing}")
@@ -170,9 +192,8 @@ class Registry:
         voice_model_id: str | None,
     ) -> PersonRecord:
         """A copy of ``record`` that is active and holds the checked biometrics."""
-        age = None if record.age_group is None else record.age_group.value
         needs = ("face",) if voice is None else ("face", "voice")
-        granted = self._require_consent(consent, age, needs)
+        granted = self._require_consent(consent, needs)
         matrix = _matrix(faces)
         low, high = self.identity.enroll_min_embeddings, self.identity.max_embeddings_per_person
         if not low <= len(matrix) <= high:
@@ -199,25 +220,17 @@ class Registry:
         consent: Consent | None = None,
         voice_embedding: Sequence[float] | np.ndarray | None = None,
         voice_model_id: str | None = None,
-        age_group: str | None = None,
-        gender: str | None = None,
         register_overrides: dict[str, Any] | None = None,
         preferences: dict[str, Any] | None = None,
     ) -> PersonRecord:
         """Enroll a person with consent; raises ``ConsentError`` without a valid one.
 
-        The consent scope must include ``face`` (and ``voice`` when a voice embedding is given);
-        a guardian is required unless ``age_group`` is declared adult or senior. Age group and
-        gender passed here are declared values. For a name-only record use
-        ``create_pending_person``.
+        The consent scope must include ``face`` (and ``voice`` when a voice embedding is given).
+        For a name-only record use ``create_pending_person``.
         """
-        declared_age = None if age_group is None else check_age_group(age_group)
-        declared_gender = None if gender is None else check_gender(gender)
         base = PersonRecord(
             person_id=str(uuid.uuid4()),
             display_name=display_name,
-            age_group=None if declared_age is None else Attribute(declared_age, "declared"),
-            gender=None if declared_gender is None else Attribute(declared_gender, "declared"),
             register_overrides=check_register_overrides(register_overrides),
             preferences=dict(preferences or {}),
         )
@@ -243,14 +256,10 @@ class Registry:
         voice_embedding: Sequence[float] | np.ndarray | None = None,
         voice_model_id: str | None = None,
         display_name: str | None = None,
-        age_group: str | None = None,
-        gender: str | None = None,
     ) -> PersonRecord:
         """Turn a pending person active once consent exists and the faces are captured.
 
-        The same consent rules as ``enroll`` apply; a pending person has no declared age group
-        unless one is passed here (declared values, like ``enroll``), so a guardian is normally
-        required. ``display_name`` replaces the imported name.
+        The same consent rules as ``enroll`` apply. ``display_name`` replaces the imported name.
         """
         with self.lock:
             pending = self._people[person_id]
@@ -258,12 +267,6 @@ class Registry:
                 raise ValueError(f"{person_id} is already enrolled")
             if display_name is not None:
                 pending = replace(pending, display_name=display_name)
-            if age_group is not None:
-                pending = replace(
-                    pending, age_group=Attribute(check_age_group(age_group), "declared")
-                )
-            if gender is not None:
-                pending = replace(pending, gender=Attribute(check_gender(gender), "declared"))
             record = self._with_biometrics(
                 pending,
                 face_embeddings,
@@ -373,7 +376,6 @@ class Registry:
                     p.status,
                     "person",
                     p.last_seen,
-                    None if p.age_group is None else p.age_group.value,
                 )
                 for p in people
             ]

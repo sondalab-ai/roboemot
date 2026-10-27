@@ -14,6 +14,7 @@ import os
 import secrets
 import threading
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -119,13 +120,18 @@ class Sessions:
     """Sessions keyed by the hash of an unguessable cookie token.
 
     A session ends after ``session_ttl_s`` idle, after ``session_max_s`` in all, and when the
-    PIN file it was created under has been replaced.
+    PIN file it was created under has been replaced. ``web`` returns the current web UI config,
+    read on every call, so a value changed at runtime applies at once (SPEC 11A, 12).
     """
 
-    def __init__(self, cfg: WebUIConfig) -> None:
-        self.cfg = cfg
+    def __init__(self, web: Callable[[], WebUIConfig]) -> None:
+        self._web = web
         self._items: OrderedDict[str, Session] = OrderedDict()
         self._lock = threading.Lock()
+
+    @property
+    def cfg(self) -> WebUIConfig:
+        return self._web()
 
     @staticmethod
     def _key(token: str) -> str:
@@ -140,8 +146,11 @@ class Sessions:
                 self._items.popitem(last=False)
         return token, session
 
-    def get(self, token: str | None, now: float, pin_version: int) -> Session | None:
-        """The live session for ``token``, refreshed; an expired or stale one is dropped."""
+    def get(
+        self, token: str | None, now: float, pin_version: int, *, refresh: bool = True
+    ) -> Session | None:
+        """The live session for ``token``, refreshed unless ``refresh`` is False (a passive poll
+        must not keep an idle session alive); an expired or stale one is dropped."""
         if not token:
             return None
         key = self._key(token)
@@ -149,15 +158,17 @@ class Sessions:
             session = self._items.get(key)
             if session is None:
                 return None
+            cfg = self.cfg  # one read: a reload in between cannot mix two configs
             if (
-                now - session.last_seen > self.cfg.session_ttl_s
-                or now - session.created > self.cfg.session_max_s
+                now - session.last_seen > cfg.session_ttl_s
+                or now - session.created > cfg.session_max_s
                 or session.pin_version != pin_version
             ):
                 del self._items[key]
                 return None
-            session.last_seen = now
-            self._items.move_to_end(key)
+            if refresh:
+                session.last_seen = now
+                self._items.move_to_end(key)
             return session
 
     def drop(self, token: str | None) -> None:
@@ -192,17 +203,22 @@ class LoginLimiter:
     Loopback (another process on the robot's own host) has its own finite budget,
     ``loopback_max_attempts``, with its own back-off and lockout. The two budgets are
     independent: loopback failures never lock LAN clients and a LAN lockout never blocks
-    loopback. A new PIN file (``sync``) or an app restart clears everything.
+    loopback. A new PIN file (``sync``) or an app restart clears everything. ``web`` returns the
+    current web UI config, read on every attempt, so a tighter budget applies at once.
     """
 
-    def __init__(self, cfg: WebUIConfig, pin_version: int = 0) -> None:
-        self.cfg = cfg
+    def __init__(self, web: Callable[[], WebUIConfig], pin_version: int = 0) -> None:
+        self._web = web
         self._lan = _Pool()
         self._local = _Pool()
         self._local_client = _Client()
         self._clients: OrderedDict[str, _Client] = OrderedDict()
         self._version = pin_version
         self._lock = threading.Lock()
+
+    @property
+    def cfg(self) -> WebUIConfig:
+        return self._web()
 
     def sync(self, pin_version: int) -> None:
         """Forget all limits when the PIN file changed (the CLI ``set-pin`` clears a lockout)."""
@@ -213,23 +229,25 @@ class LoginLimiter:
                 self._local_client = _Client()
                 self._clients.clear()
 
-    def _slot(self, ip: str) -> tuple[_Pool, _Client | None, int]:
+    def _slot(self, ip: str, cfg: WebUIConfig | None = None) -> tuple[_Pool, _Client | None, int]:
         """The pool, the client record (None if unknown) and the budget that apply to ``ip``."""
+        cfg = cfg or self.cfg
         if ip in LOOPBACK:
-            return self._local, self._local_client, self.cfg.loopback_max_attempts
-        return self._lan, self._clients.get(ip), self.cfg.pin_max_attempts
+            return self._local, self._local_client, cfg.loopback_max_attempts
+        return self._lan, self._clients.get(ip), cfg.pin_max_attempts
 
     def reserve(self, ip: str, now: float) -> float:
         """0 if the attempt may go ahead (and is now counted), else seconds to wait."""
+        cfg = self.cfg  # one read: a reload in between cannot mix two configs
         with self._lock:
-            pool, client, budget = self._slot(ip)
+            pool, client, budget = self._slot(ip, cfg)
             client = client or _Client()
             wait = max(pool.locked_until - now, client.blocked_until - now, 0.0)
             if wait > 0:
                 return wait
             client.failures += 1
-            step = self.cfg.client_backoff_s * 2 ** (client.failures - 1)
-            client.blocked_until = now + min(step, self.cfg.client_backoff_max_s)
+            step = cfg.client_backoff_s * 2 ** (client.failures - 1)
+            client.blocked_until = now + min(step, cfg.client_backoff_max_s)
             if ip not in LOOPBACK:
                 self._clients[ip] = client
                 self._clients.move_to_end(ip)
@@ -237,7 +255,7 @@ class LoginLimiter:
                     self._clients.popitem(last=False)
             pool.failures += 1
             if pool.failures >= budget:
-                pool.locked_until = now + self.cfg.pin_lockout_s
+                pool.locked_until = now + cfg.pin_lockout_s
                 pool.failures = 0
             return 0.0
 

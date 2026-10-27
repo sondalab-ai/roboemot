@@ -100,6 +100,14 @@ def test_nearest_face_without_distance_ranks_last_then_confidence():
     assert sel.update(0.0, [c, a]).entry_id == "p1"
 
 
+def test_speaker_active_follows_the_hint_and_its_hold_time():
+    sel = AttentionSelector(CFG)
+    assert not sel.speaker_active(0.0)
+    sel.hint_speaker(SpeakerHint(stamp=10.0, azimuth_rad=0.0))
+    assert sel.speaker_active(10.0 + CFG.speaker_hold_s)
+    assert not sel.speaker_active(10.0 + CFG.speaker_hold_s + 0.1)
+
+
 def test_speaker_bearing_matches_an_entry_or_stands_alone():
     sel = AttentionSelector(CFG)
     p = entry("p1", az=30.0)
@@ -359,7 +367,6 @@ def test_idle_wins_again_once_the_attention_command_is_cleared(reachy):
         reachy.constraints,
         crossfade_s=0.0,
         watchdog_s=10.0,
-        minor_factor=1.0,
         watchdog_return_factor=1.0,
     )
     g = controller(reachy)
@@ -538,36 +545,12 @@ def test_gaze_dt_is_clamped_to_the_command_ttl(reachy):
     assert cmd.targets["head.yaw"] <= math.radians(CFG.max_rate_dps) * CFG.command_ttl_s + 1e-9
 
 
-def test_minor_present_shrinks_attention_motion(reachy):
-    def settle(minor: bool) -> float:
-        core = MotionCore(
-            reachy.dofs,
-            reachy.constraints,
-            crossfade_s=0.0,
-            watchdog_s=10.0,
-            minor_factor=0.5,
-            watchdog_return_factor=1.0,
-        )
-        core.minor_present = minor
-        g = controller(reachy)
-        t = 0.0
-        for _ in range(300):
-            t += 0.02
-            core.feed(g.step(t, target(60.0, 0.0, now=t)))
-            core.tick(t, 0.02)
-        return core.limiter.pos["head.yaw"]
-
-    assert settle(False) == pytest.approx(60 * DEG, abs=0.02)
-    assert settle(True) == pytest.approx(60 * DEG * 0.5, abs=0.02)  # amplitude around home
-
-
 def test_released_attention_returns_the_head_towards_home(reachy):
     core = MotionCore(
         reachy.dofs,
         reachy.constraints,
         crossfade_s=0.0,
         watchdog_s=10.0,
-        minor_factor=1.0,
         watchdog_return_factor=1.0,
     )
     g = controller(reachy)

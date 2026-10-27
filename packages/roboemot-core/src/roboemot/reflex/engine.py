@@ -11,17 +11,14 @@ bearing and a face size, the last two read off the bus (``attach``). Nothing but
 its threshold; the trigger waits in a small inbox. ``on_tick`` runs inside ``MotionLoop.step_once``
 (the loop's lock is held, so it feeds ``core`` directly and never calls the loop's methods): it
 drops triggers older than ``reflexes.max_age_ms`` (``max_age_vision_ms`` for faces: the frame
-stamp is the capture time), applies each rule's cooldown and minor
-suppression, and starts a ``Player`` at ``Priority.REFLEX`` that expires after the rule's duration.
+stamp is the capture time), applies each rule's cooldown, and starts a ``Player`` at
+``Priority.REFLEX`` that expires after the rule's duration.
 
-Safety. The commands go through the arbiter and the limiter like every other source: the minor
-band and the manifest ranges still apply, and REFLEX is not additive. Nothing tips the head forward:
+Safety. The commands go through the arbiter and the limiter like every other source: the
+manifest ranges still apply, and REFLEX is not additive. Nothing tips the head forward:
 ``startle`` and ``withdraw`` only deflect the head away (``ReflexMap.pitch_away_sign``);
 ``turn_toward`` answers a voice, stays in the front half-plane, within ``amplitude_deg`` of where
-the head points, inside the manifest range and the head-body ``yaw_delta`` reach, is never started
-while a possible minor is present, and is cut off on the first tick after one appears. The pose a
-reflex starts from is un-scaled by the minor factor, because the arbiter scales the absolute target
-about home: otherwise a head already tipped back would be pulled forward by the band.
+the head points, and inside the manifest range and the head-body ``yaw_delta`` reach.
 
 Latency. Each firing records the time from the producer's stamp to the command being fed (the
 SPEC 13 budget) and to the first pose change of the commanded output. Producers stamp at read
@@ -42,11 +39,11 @@ from ..bus import Bus, Message
 from ..config.schema import ReflexConfig, ReflexRule
 from ..manifest import Constraint, Dof
 from ..motion import Keyframe, MotionCore, Player, Primitive, Priority
+from ..stats import P50, P90, P95, P99, quantile, summarise
 from ..world.types import Observation
 
 MS_PER_S = 1000.0
-P50 = 0.5
-P95 = 0.95
+ONSET_LEVELS = {"p50": P50, "p90": P90, "p99": P99}
 INBOX_MAX = 64
 HALF_PLANE = math.pi / 2
 SOURCE_PREFIX = "reflex."
@@ -64,16 +61,17 @@ class SoundLoud:
 class ReflexMap:
     """Which manifest dofs the primitives move; supplied by the robot plugin.
 
-    ``antennas`` maps a dof to the sign of a lift (the startle raises each by that sign).
+    ``startle_lift`` maps a dof to the sign of its lift (the startle moves each by that sign, scaled
+    by ``reflexes.startle_lift_ratio``).
     ``pitch_away_sign`` is the sign of a head pitch that tips the head back, away from what is
-    in front (negative on Reachy Mini: a positive pitch points the nose down).
+    in front (negative where a positive pitch points the nose down).
     ``voice_sources`` names the ``Observation.source`` values that are speech directions.
     """
 
     head_yaw: str
     head_pitch: str
     body_yaw: str | None = None
-    antennas: Mapping[str, float] = field(default_factory=dict)
+    startle_lift: Mapping[str, float] = field(default_factory=dict)
     pitch_away_sign: float = -1.0
     voice_sources: tuple[str, ...] = ()
 
@@ -90,16 +88,24 @@ class _RuleStats:
     fired: int = 0
     stale: int = 0
     cooldown: int = 0
-    minor: int = 0
     no_motion: int = 0
+
+
+@dataclass
+class _OnsetTrack:
+    """Onset peaks of one loud-onset rule: scalars only, bounded (SPEC 12A).
+
+    An episode starts at the rising edge of ``watch`` and ends when the ratio falls below it (or
+    the robot starts to speak); its peak is kept with whether it reached the rule's threshold.
+    """
+
+    watch: float
+    peaks: deque[tuple[float, bool]]
+    open_peak: float | None = None
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
     return min(max(v, lo), hi)
-
-
-def _quantile(sorted_ms: list[float], q: float) -> float:
-    return sorted_ms[max(0, math.ceil(q * len(sorted_ms)) - 1)]
 
 
 class ReflexEngine:
@@ -115,7 +121,7 @@ class ReflexEngine:
         margin_rad: float = 0.0,
         bus: Bus | None = None,
     ) -> None:
-        names = [rmap.head_yaw, rmap.head_pitch, *rmap.antennas]
+        names = [rmap.head_yaw, rmap.head_pitch, *rmap.startle_lift]
         names += [rmap.body_yaw] if rmap.body_yaw else []
         if missing := [n for n in names if n not in dofs]:
             raise KeyError(f"reflex dofs not in the manifest: {missing}")
@@ -141,8 +147,10 @@ class ReflexEngine:
         # playback (loop thread only)
         self._players: dict[str, Player] = {}
         self._last_fire: dict[str, float] = {}
+        self._last_fired: tuple[str, float] | None = None  # (rule, stamp): one atomic store
         self._moving: dict[str, tuple[float, str, dict[str, float]]] = {}
         self._stats: dict[str, _RuleStats] = {}
+        self._onset: dict[str, _OnsetTrack] = {}
         self._lat: dict[str, dict[str, deque[float]]] = {}
         self.cfg = cfg
         self.margin_rad = margin_rad
@@ -151,17 +159,60 @@ class ReflexEngine:
     # ---- configuration
 
     def apply_config(self, cfg: ReflexConfig, margin_rad: float) -> None:
-        """Hot reload (SPEC 11A): new rules and limits; running reflexes finish as started."""
+        """Hot reload (SPEC 11A): new rules and limits; running reflexes finish as started.
+
+        Onset peaks (SPEC 12A) survive a reload like the counters do, except that a new watch
+        level starts a rule's record afresh (the peaks are not comparable) and a rule that is no
+        longer a loud-onset rule loses it; a new window resizes the record.
+        """
         with self._lock:
             self.cfg, self.margin_rad, self._rules = cfg, margin_rad, list(cfg.rules)
+            names = {r.name for r in self._rules if r.trigger == "loud_onset"}
+            for name in set(self._onset) - names:
+                del self._onset[name]
+            for rule in self._rules:
+                track = self._onset.get(rule.name)
+                if track is None:
+                    continue
+                if track.watch != self._watch(rule):
+                    del self._onset[rule.name]
+                elif track.peaks.maxlen != cfg.onset_window:
+                    track.peaks = deque(track.peaks, maxlen=cfg.onset_window)
+
+    def _watch(self, rule: ReflexRule) -> float:
+        return min(self.cfg.onset_watch_ratio, rule.threshold)
+
+    def _track_onset(self, rule: ReflexRule, ratio: float, prev: float) -> None:
+        """Follow one loud-onset rule's episode above its watch level (caller holds the lock)."""
+        watch = self._watch(rule)
+        track = self._onset.get(rule.name)
+        if track is None:
+            track = self._onset[rule.name] = _OnsetTrack(watch, deque(maxlen=self.cfg.onset_window))
+        if track.open_peak is None:
+            if ratio >= watch > prev:
+                track.open_peak = ratio
+        elif ratio >= watch:
+            track.open_peak = max(track.open_peak, ratio)
+        else:
+            self._close_onset(rule, track)
+
+    def _close_onset(self, rule: ReflexRule, track: _OnsetTrack) -> None:
+        if track.open_peak is not None:
+            track.peaks.append((track.open_peak, track.open_peak >= rule.threshold))
+            track.open_peak = None
+
+    def _close_onsets(self) -> None:
+        for rule in self._rules:
+            track = self._onset.get(rule.name)
+            if track is not None:
+                self._close_onset(rule, track)
 
     # ---- inputs (any thread; scalars only)
 
     def attach(self, bus: Bus) -> None:
         """Listen for voice bearings (``percept.entity``) and faces (``percept.face``, and
         ``percept.face_frame``: a processed frame without a face is a height of 0, which re-arms
-        a close-face rule). Attach after ``MinorPresence``, so a failure here can never come
-        before the minor latch in the bus's subscriber order."""
+        a close-face rule)."""
         self._unsubscribe += [
             bus.subscribe("percept.entity", self._on_entity),
             bus.subscribe("percept.face", self._on_face),
@@ -173,6 +224,12 @@ class ReflexEngine:
         for fn in self._unsubscribe:
             fn()
         self._unsubscribe.clear()
+
+    @property
+    def noise_floor(self) -> float | None:
+        """The running room level (RMS, full scale 1.0) the onsets are measured against, or None
+        before the first chunk. One float read without the lock: a display, not a decision."""
+        return self._floor
 
     def offer_audio_level(self, rms: float, stamp: float) -> None:
         """One microphone chunk's RMS (full scale 1.0) captured at ``stamp``.
@@ -193,9 +250,15 @@ class ReflexEngine:
         """
         if not (math.isfinite(rms) and math.isfinite(stamp)) or rms < 0:
             return
+        if not self.cfg.enabled:  # off at runtime as at start: no onset, no sound.loud
+            with self._lock:  # and, as after speech, the first chunk once on is not an edge
+                self._close_onsets()
+                self._prev_ratio = math.inf
+            return
         speaking = self.speaking
         if speaking is not None and speaking(stamp):
             with self._lock:
+                self._close_onsets()
                 self._audio_stamp, self._prev_ratio = stamp, math.inf
             return
         event: SoundLoud | None = None
@@ -205,7 +268,10 @@ class ReflexEngine:
             ratio = rms / floor
             prev = self._prev_ratio
             for rule in self._rules:
-                if rule.enabled and rule.trigger == "loud_onset" and ratio >= rule.threshold > prev:
+                if not (rule.enabled and rule.trigger == "loud_onset"):
+                    continue
+                self._track_onset(rule, ratio, prev)
+                if ratio >= rule.threshold > prev:
                     self._inbox.append(_Pending(rule.name, stamp, ratio))
             edge = ratio >= audio.loud_event_ratio > prev
             if edge and stamp - self._last_event >= audio.loud_event_refractory_s:
@@ -285,8 +351,6 @@ class ReflexEngine:
             self._rearm(triggers)
             self._stop_all(core)
             return
-        if core.minor_present:
-            self._stop_minor_sensitive(core)
         for p in triggers:
             self._start(p, now, core, cfg)
         self._advance(now, core, cfg)
@@ -347,9 +411,6 @@ class ReflexEngine:
         if last is not None and now - last < rule.cooldown_s:
             stats.cooldown += 1
             return
-        if (rule.suppress_with_minor or rule.primitive == "turn_toward") and core.minor_present:
-            stats.minor += 1
-            return
         seed = self._seed(core)
         peak = self._peak(rule, p.value, seed, core, cfg)
         if not peak:
@@ -369,23 +430,17 @@ class ReflexEngine:
         prim = Primitive(source, tuple(frames))
         self._players[rule.name] = Player(prim, now, source=source, priority=Priority.REFLEX)
         self._last_fire[rule.name] = now
+        self._last_fired = (rule.name, now)
         stats.fired += 1
         self._record(rule.trigger, "command", max(0.0, now - p.stamp))
         self._moving[rule.name] = (p.stamp, rule.trigger, start)
 
     def _seed(self, core: MotionCore) -> dict[str, float]:
-        """The pose a reflex starts from, un-scaled by the minor factor.
-
-        The arbiter scales an absolute target about home by the factor, and the limiter's pose
-        is already scaled, so seeding from the pose would pull it back to home (forward, for a
-        head tipped back) on every reflex while a minor is present.
-        """
-        factor = core.minor_factor if core.minor_present else 1.0
-        out = {}
-        for name, dof in self.dofs.items():
-            pos = core.limiter.pos.get(name, dof.home)
-            out[name] = _clamp(dof.home + (pos - dof.home) / factor, dof.min, dof.max)
-        return out
+        """The pose a reflex starts from: the limiter's pose, inside the manifest range."""
+        return {
+            name: _clamp(core.limiter.pos.get(name, dof.home), dof.min, dof.max)
+            for name, dof in self.dofs.items()
+        }
 
     def _peak(
         self,
@@ -407,18 +462,16 @@ class ReflexEngine:
         out: dict[str, float] = {}
         eps = math.radians(cfg.motion_eps_deg)  # less than this is not a movement
         target = _clamp(seed[rmap.head_pitch] + away * amp, pitch.min, pitch.max)
-        # The arbiter scales the target about home by the minor factor. If that lands the head
-        # forward of where it is now (a pose still outside the band), the pitch is left alone:
-        # a reflex never tips the head forward, and one that cannot move it is no_motion.
-        factor = core.minor_factor if core.minor_present else 1.0
-        scaled = pitch.home + (target - pitch.home) * factor
+        # If the target lands the head forward of where it is now (a pose outside the manifest
+        # range), the pitch is left alone: a reflex never tips the head forward, and one that
+        # cannot move it is no_motion.
         now_pitch = core.limiter.pos.get(rmap.head_pitch, pitch.home)
-        if abs(target - seed[rmap.head_pitch]) > eps and (scaled - now_pitch) * away >= 0:
+        if abs(target - seed[rmap.head_pitch]) > eps and (target - now_pitch) * away >= 0:
             out[rmap.head_pitch] = target
         if rule.primitive == "startle":
-            for name, sign in rmap.antennas.items():
+            for name, sign in rmap.startle_lift.items():
                 d = self.dofs[name]
-                lift = _clamp(seed[name] + sign * amp * cfg.antenna_ratio, d.min, d.max)
+                lift = _clamp(seed[name] + sign * amp * cfg.startle_lift_ratio, d.min, d.max)
                 if abs(lift - seed[name]) > eps:
                     out[name] = lift
         return out
@@ -458,16 +511,6 @@ class ReflexEngine:
                     self._record(trigger, "motion", max(0.0, now - stamp))
                     del self._moving[name]
 
-    def _stop_minor_sensitive(self, core: MotionCore) -> None:
-        """A minor appeared while a reflex that must not play near one is running: end it now."""
-        for name, player in list(self._players.items()):
-            rule = self._rule(name)
-            if rule is None or rule.suppress_with_minor or rule.primitive == "turn_toward":
-                core.arbiter.clear(player.source)
-                del self._players[name]
-                self._moving.pop(name, None)
-                self._stat(name).minor += 1
-
     def _stop_all(self, core: MotionCore) -> None:
         for player in self._players.values():
             core.arbiter.clear(player.source)
@@ -487,6 +530,28 @@ class ReflexEngine:
         """Rules whose reflex is playing now."""
         return sorted(self._players)
 
+    @staticmethod
+    def _onset_report(track: _OnsetTrack) -> dict[str, Any]:
+        """Peak ratios of the sounds that rose above the watch level, split by whether they
+        reached the rule's threshold; numbers only (SPEC 12A)."""
+
+        def summary(values: list[float]) -> dict[str, Any]:
+            return summarise(values, ONSET_LEVELS)
+
+        peaks = list(track.peaks)
+        return {
+            "watch_ratio": track.watch,
+            "window": track.peaks.maxlen,
+            "fired": summary([p for p, hit in peaks if hit]),
+            "below_threshold": summary([p for p, hit in peaks if not hit]),
+        }
+
+    def last_fired(self, now: float) -> tuple[str, float] | None:
+        """The rule that fired last and its age in seconds at ``now`` (the loop's clock), or None
+        before any fired. Safe from any thread: the pair is stored in one assignment."""
+        last = self._last_fired
+        return None if last is None else (last[0], max(0.0, now - last[1]))
+
     def snapshot(self) -> dict[str, Any]:
         """Debug-report section: counts, latencies and the audio source's state; scalars only."""
         latency: dict[str, dict[str, Any]] = {}
@@ -497,23 +562,30 @@ class ReflexEngine:
                 if ms:
                     latency[trigger][f"{kind}_ms"] = {
                         "count": len(ms),
-                        "p50": _quantile(ms, P50),
-                        "p95": _quantile(ms, P95),
+                        "p50": quantile(ms, P50),
+                        "p95": quantile(ms, P95),
                         "max": ms[-1],
                     }
         rules = {}
         for r in list(self._rules):
             s = self._stats.get(r.name) or _RuleStats()
-            rules[r.name] = {
+            entry: dict[str, Any] = {
                 "trigger": r.trigger,
                 "primitive": r.primitive,
                 "enabled": r.enabled,
                 "fired": s.fired,
                 "dropped_stale": s.stale,
                 "dropped_cooldown": s.cooldown,
-                "suppressed_minor": s.minor,
                 "no_motion": s.no_motion,
             }
+            track = self._onset.get(r.name)
+            if r.trigger == "loud_onset" and track is not None:
+                entry["onset"] = self._onset_report(track)
+            elif r.trigger == "loud_onset":
+                entry["onset"] = self._onset_report(
+                    _OnsetTrack(self._watch(r), deque(maxlen=self.cfg.onset_window))
+                )
+            rules[r.name] = entry
         audio = self.audio_status() if self.audio_status is not None else {"state": "off"}
         return {
             "enabled": self.cfg.enabled,

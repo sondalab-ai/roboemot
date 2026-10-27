@@ -9,17 +9,21 @@ into the models folder only when asked (``roboemot models fetch``), never at imp
   size and digest match; any failure deletes the ``.part`` file.
 - A verified file gets a ``<file>.verified`` marker (sha256, size, mtime). The backends refuse
   files whose size or mtime no longer match the marker (``check_file``), so a swapped file is
-  caught without rehashing 343 MB at every start. ``roboemot models fetch`` on a folder that
+  caught without rehashing every file at every start. ``roboemot models fetch`` on a folder that
   already holds the right files (for example the spike cache) writes the markers after hashing.
 - Folders created by the fetcher are private (0o700), markers 0o600.
 
-- Derived files (INT8 FairFace, SPEC 5, 13) are not downloaded: ``fetch`` first downloads and
+- Derived files (``quantize``; none in the shipped manifests since the FairFace INT8 pair was
+  retired, SPEC 5, 13) are not downloaded: ``fetch`` first downloads and
   verifies the FP32 source, then quantizes it with ONNX Runtime ``quantize_dynamic`` (the same
   call and settings as ``scripts/bench/quantize.py``; needs the ``vision`` extra). Their marker
   records the source sha256, the weight type, the ORT version and the produced file's sha256,
   size and mtime, and stands alone: ``check_file`` accepts a produced file without its source
   present, and ``prune_sources`` (``roboemot models prune --sources``) deletes the FP32 sources
-  once every file derived from them is verified (about 690 MB freed; only about 174 MB stay).
+  once every file derived from them is verified.
+- Retired files (``retired`` in the manifest: files of replaced or removed models, such as the
+  FairFace pair and the yolo11n-face-age age model) are deleted by ``prune_retired``
+  (``roboemot models prune``), and nothing else is.
 - ORT version policy: the quantized ops are stable across ONNX Runtime versions, so a file made
   by another ORT version still loads. ``status`` reports it as ``stale-ort`` and ``fetch``
   re-quantizes only on ``requantize=True`` (``--requantize``), which needs the FP32 source again;
@@ -42,10 +46,12 @@ The folder is ``--cache-dir``,
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import shutil
 import stat
+import time
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -64,6 +70,10 @@ ENV_DIR = "ROBOEMOT_MODELS_DIR"
 CHUNK_BYTES = 1 << 20
 TIMEOUT_S = 60.0
 MAX_REDIRECTS = 5
+# A dropped connection resumes from the bytes already written; waits double from RETRY_WAIT_S.
+DOWNLOAD_ATTEMPTS = 5
+RETRY_WAIT_S = 2.0
+RETRIED = (httpx.NetworkError, httpx.TimeoutException, httpx.RemoteProtocolError)
 PRIVATE_DIR_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
 MARKER_SUFFIX = ".verified"
@@ -125,9 +135,9 @@ class ModelSpec(_Strict):
     """A model: role, weight licence, source page, files and (classifiers) the label order.
 
     ``labels`` is the output order of a classifier or detector, read from the ``id2label`` of the
-    model's ``config.json`` or the class list of its training config (``labels_source``, pinned
-    by ``labels_sha256``), so index meaning is part of the pinned manifest and not assumed in
-    code.
+    model's ``config.json``, the class list of its training config (``labels_source``, pinned
+    by ``labels_sha256``) or the metadata of the pinned file itself, so index meaning is part of
+    the pinned manifest and not assumed in code.
     """
 
     name: str
@@ -142,9 +152,24 @@ class ModelSpec(_Strict):
 
 
 class Manifest(_Strict):
-    """The parsed ``models.yaml``."""
+    """The parsed ``models.yaml``; ``retired`` lists files earlier versions fetched."""
 
     models: list[ModelSpec]
+    retired: list[str] = []
+
+
+@cache
+def _parse(path: Path) -> Manifest:
+    manifest = Manifest.model_validate(yaml.safe_load(path.read_text()))
+    sources = {f.path for m in manifest.models for f in m.files if f.quantize is None}
+    for m in manifest.models:
+        for f in m.files:
+            if f.quantize is not None and f.quantize.source not in sources:
+                raise ValueError(f"{f.path}: quantize source {f.quantize.source} is not a file")
+    current = {f.path for m in manifest.models for f in m.files}
+    if current & set(manifest.retired):
+        raise ValueError(f"retired paths still in use: {sorted(current & set(manifest.retired))}")
+    return manifest
 
 
 @cache
@@ -155,24 +180,12 @@ def load_manifest(path: Path = MANIFEST) -> dict[str, ModelSpec]:
     are rejected, so a typo in a digest or URL field fails loudly. The result is cached per
     path (treat it as read-only), so the manifest is parsed once per process.
     """
-    manifest = Manifest.model_validate(yaml.safe_load(path.read_text()))
-    sources = {f.path for m in manifest.models for f in m.files if f.quantize is None}
-    for m in manifest.models:
-        for f in m.files:
-            if f.quantize is not None and f.quantize.source not in sources:
-                raise ValueError(f"{f.path}: quantize source {f.quantize.source} is not a file")
-    return {m.name: m for m in manifest.models}
+    return {m.name: m for m in _parse(path).models}
 
 
-def resolve_precision(configured: str, profile: str | None) -> str:
-    """``int8`` or ``fp32`` for the age and gender models.
-
-    ``vision.attribute_precision`` is ``auto`` by default: INT8 on the ``cm4`` profile of the
-    robot manifest, FP32 on ``npu`` or when the profile is not known. ``int8``/``fp32`` force it.
-    """
-    if configured == "auto":
-        return "int8" if profile == "cm4" else "fp32"
-    return configured
+def retired_paths(path: Path = MANIFEST) -> list[str]:
+    """Files (relative to the models folder) that earlier manifests fetched and nothing loads."""
+    return list(_parse(path).retired)
 
 
 def default_dir(data_dir: str = "") -> Path:
@@ -218,6 +231,47 @@ def _target(root: Path, file: ModelFile) -> Path:
     if not target.is_relative_to(root.resolve()):
         raise ModelError(f"{file.path}: path leaves the models folder")
     return target
+
+
+def retired_on_disk(root: Path, manifest: Path = MANIFEST) -> list[tuple[Path, int]]:
+    """The manifest's ``retired`` files still in ``root``, with their sizes in bytes: what
+    ``prune_retired`` would delete (same rule: a path resolving outside ``root`` is not counted).
+    Read-only."""
+    base = root.resolve()
+    found = []
+    for rel in retired_paths(manifest):
+        path = root / rel
+        if path.is_file() and path.resolve().is_relative_to(base):
+            found.append((path, path.stat().st_size))
+    return found
+
+
+def prune_retired(root: Path, manifest: Path = MANIFEST) -> list[Path]:
+    """Delete the manifest's ``retired`` files and their markers; returns the files deleted.
+
+    Only the listed paths are touched, never other files in the folder. A listed path that
+    resolves outside ``root`` (for example a symlink pointing out) is left alone with its
+    marker; an in-root symlink is unlinked, not followed. Folders left empty by a deletion are
+    removed up to ``root``. On the bench cache (``--cache-dir ~/.cache/roboemot-bench/models``)
+    this deletes the FairFace files that ``scripts/bench`` and ``scripts/eval`` still use, and the
+    yolo11n-face-age file that ``scripts/bench`` can still time.
+    """
+    base = root.resolve()
+    deleted = []
+    for rel in retired_paths(manifest):
+        path = root / rel
+        if not path.resolve().is_relative_to(base):
+            continue
+        for suffix in (MARKER_SUFFIX, PART_SUFFIX):
+            path.with_name(path.name + suffix).unlink(missing_ok=True)
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+            deleted.append(path)
+        parent = path.parent
+        while parent.resolve() != base and parent.is_dir() and not any(parent.iterdir()):
+            parent.rmdir()
+            parent = parent.parent
+    return deleted
 
 
 def _marker(target: Path) -> Path:
@@ -300,7 +354,7 @@ def status(spec: ModelSpec, root: Path, *, verify: bool = False) -> str:
     ``fetch --requantize`` rebuilds it.
 
     ``missing`` means none of the files exists. By default a file is trusted when its marker
-    matches (cheap); ``verify=True`` rehashes every file (slow for the 343 MB models), and for an
+    matches (cheap); ``verify=True`` rehashes every file (slow for the large models), and for an
     unpacked archive every file recorded in its marker.
     """
     targets = [_target(root, f) for f in spec.files]
@@ -372,33 +426,67 @@ def _make_dirs(root: Path, target: Path) -> None:
         raise ModelError(f"cannot create {d}: {exc.strerror}") from exc
 
 
+@dataclass
+class _Progress:
+    done: int = 0
+    digest: hashlib._Hash = field(default_factory=hashlib.sha256)
+
+
 def _stream(client: httpx.Client, url: str, file: ModelFile, part: Path) -> str:
-    """Download ``url`` (https hops only) into ``part``; returns the hex digest."""
+    """Download ``url`` (https hops only) into a fresh ``part``; returns the hex digest.
+
+    A connection dropped mid-body is retried up to ``DOWNLOAD_ATTEMPTS`` times with doubling
+    waits, resuming with a ``Range`` request from the bytes already written; a server that
+    answers the range with the whole file restarts it. HTTP status, size and redirect errors
+    are not retried. The caller owns ``part`` and deletes it on any failure.
+    """
+    fd = os.open(part, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, PRIVATE_FILE_MODE)
+    state = _Progress()
+    with os.fdopen(fd, "wb") as out:
+        for attempt in range(DOWNLOAD_ATTEMPTS):
+            try:
+                _get_into(client, url, file, out, state)
+                break
+            except RETRIED:
+                if file.size_bytes is not None and state.done == file.size_bytes:
+                    break  # dropped after the last byte: a resume gets a 416; the digest decides
+                if attempt == DOWNLOAD_ATTEMPTS - 1:
+                    raise
+                time.sleep(RETRY_WAIT_S * 2**attempt)
+        out.flush()
+        os.fsync(out.fileno())
+    if file.size_bytes is not None and state.done != file.size_bytes:
+        raise ModelError(f"{file.path}: size {state.done} differs from the manifest")
+    return state.digest.hexdigest()
+
+
+def _get_into(
+    client: httpx.Client, url: str, file: ModelFile, out: io.BufferedWriter, state: _Progress
+) -> None:
+    """One GET of ``url`` appended to ``out`` from ``state.done`` (each redirect re-checked)."""
+    headers = {"Range": f"bytes={state.done}-"} if state.done else {}
     for _ in range(MAX_REDIRECTS + 1):
         if not url.startswith("https://"):
             raise ModelError(f"{file.path}: only https URLs are fetched")
-        with client.stream("GET", url, follow_redirects=False) as response:
+        with client.stream("GET", url, headers=headers, follow_redirects=False) as response:
             if response.is_redirect:
                 url = str(response.url.join(response.headers.get("location", "")))
                 continue
             response.raise_for_status()
-            digest = hashlib.sha256()
-            done = 0
-            fd = os.open(
-                part, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, PRIVATE_FILE_MODE
-            )
-            with os.fdopen(fd, "wb") as out:
-                for chunk in response.iter_bytes(CHUNK_BYTES):
-                    done += len(chunk)
-                    if file.size_bytes is not None and done > file.size_bytes:
-                        raise ModelError(f"{file.path}: larger than the manifest size")
-                    out.write(chunk)
-                    digest.update(chunk)
-                out.flush()
-                os.fsync(out.fileno())
-            if file.size_bytes is not None and done != file.size_bytes:
-                raise ModelError(f"{file.path}: size {done} differs from the manifest")
-            return digest.hexdigest()
+            if state.done and response.status_code == httpx.codes.PARTIAL_CONTENT:
+                if not response.headers.get("content-range", "").startswith(f"bytes {state.done}-"):
+                    raise ModelError(f"{file.path}: resumed at the wrong offset")
+            elif state.done:
+                out.seek(0)
+                out.truncate()
+                state.done, state.digest = 0, hashlib.sha256()
+            for chunk in response.iter_bytes(CHUNK_BYTES):
+                if file.size_bytes is not None and state.done + len(chunk) > file.size_bytes:
+                    raise ModelError(f"{file.path}: larger than the manifest size")
+                out.write(chunk)
+                state.digest.update(chunk)
+                state.done += len(chunk)
+            return
     raise ModelError(f"{file.path}: too many redirects")
 
 

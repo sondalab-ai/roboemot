@@ -5,18 +5,22 @@ from __future__ import annotations
 import math
 import threading
 import time
+from functools import cache
+from pathlib import Path
 
 import httpx
 import pytest
 from roboemot.affect import AffectEngine
+from roboemot.affect.clips import load_clip_library
+from roboemot.affect.expression import ExpressionRenderer
 from roboemot.config import ConfigStack
 from roboemot.config.schema import LinkPolicy, LLMRoute, SafetyConfig
 from roboemot.drivers import MockPoseDriver
 from roboemot.health import Link
 from roboemot.health.network import NetworkMonitor, route_endpoint
-from roboemot.health.responder import OfflineResponder, perk_up, puzzled
+from roboemot.health.responder import OfflineResponder
 from roboemot.llm import Done, NoRouteAvailable, Offline, Router
-from roboemot.manifest import Constraint, Dof, Manifest, ManifestModel, RobotInfo
+from roboemot.manifest import Constraint, Dof, Manifest, ManifestModel, RobotInfo, load_manifest
 from roboemot.motion import Command, MotionLoop, Priority
 
 CFG = ConfigStack().effective()
@@ -178,6 +182,20 @@ def test_monitor_without_routes_starts_and_stops():
     mon.start()
     mon.stop()
     assert mon.online
+
+
+def test_monitor_stop_between_thread_creation_and_start_does_not_join_it(monkeypatch):
+    real_start = threading.Thread.start
+    mon = NetworkMonitor([], POLICY)
+
+    def start_after_stop(self):
+        if self.name == "network-monitor":
+            mon.stop()
+        real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", start_after_stop)
+    mon.start()
+    mon.stop()
 
 
 def test_set_routes_adds_probed_link_and_keeps_existing_state():
@@ -480,6 +498,7 @@ class FlakyDriver(MockPoseDriver):
     def write_pose_targets(self, t, values):
         self._check()
         super().write_pose_targets(t, values)
+        self.home = {**self.home, **values}  # the robot follows its targets (until moved by hand)
 
     def read_state(self):
         self._check()
@@ -592,13 +611,52 @@ class Cue:
     def __init__(self) -> None:
         self.said: list[tuple[str, str]] = []
 
-    def say(self, text: str, language: str) -> None:
+    def say(self, text: str, language: str) -> bool:
         self.said.append((text, language))
+        return True
 
 
-def responder(dofs=REACHY, language="it") -> tuple[OfflineResponder, Cue, AffectEngine]:
+REACHY_MANIFEST = (
+    Path(__file__).resolve().parents[3] / "configs" / "manifests" / "reachy-mini-wireless.yaml"
+)
+
+
+@cache
+def reachy():
+    """The shipped Reachy Mini manifest and the configuration it installs (gesture_map included)."""
+    manifest = load_manifest(REACHY_MANIFEST, allow_unmeasured_dynamics=True)
+    stack = ConfigStack()
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour,
+        manifest.channels,
+        load_clip_library(manifest),
+        body_yaw=None,
+    )
+    return manifest, stack.effective()
+
+
+def responder(dofs=REACHY, language="it", gesture_map=None):
+    """A responder over the dofs of the Reachy manifest named in ``dofs`` and its gesture_map
+    (or ``gesture_map``)."""
+    manifest, cfg = reachy()
+    robot = {n: d for n, d in manifest.dofs.items() if n in dofs}
+    gestures = cfg.gesture_map if gesture_map is None else gesture_map
+    renderer = ExpressionRenderer(
+        cfg.expression,
+        cfg.expression_map,
+        robot,
+        0.15,
+        gestures,
+        body_yaw="body_yaw",
+        clips=load_clip_library(manifest),
+    )
     cue, affect = Cue(), AffectEngine(CFG.affect, CFG.appraisal)
-    return OfflineResponder(CFG.connectivity, set(dofs), language, affect, cue), cue, affect
+    return OfflineResponder(CFG.connectivity, renderer, language, affect, cue), cue, affect
+
+
+def gesture_s() -> float:
+    """Length of the Reachy connectivity gestures: the end time of their keyframes."""
+    return reachy()[1].gesture_map["perk_up"].channels["head.pitch"][-1][0]
 
 
 def test_network_lost_is_subdued_and_cued_once_per_cooldown():
@@ -616,27 +674,40 @@ def test_restored_perks_up_and_gesture_ends():
     r, _, affect = responder()
     r.on_event("link.network.restored", 0.0)
     assert affect.state(0.0).label == "joy"
-    mid = r.commands(CFG.connectivity.gestures.duration_s / 2)
+    mid = r.commands(gesture_s() / 2)
     assert len(mid) == 1 and mid[0].additive and mid[0].priority == Priority.EXPRESSION
     assert mid[0].targets["head.pitch"] < 0 and mid[0].targets["antenna_right"] > 0
-    assert r.commands(CFG.connectivity.gestures.duration_s + 0.01) == []
+    assert r.commands(gesture_s() + 0.01) == []
 
 
 def test_speech_while_offline_is_puzzled():
     r, _, affect = responder()
     r.speech_while_offline(0.0)
     assert affect.state(0.0).label == "curiosity"
-    cmd = r.commands(CFG.connectivity.gestures.duration_s / 2)[0]
+    cmd = r.commands(gesture_s() / 2)[0]
     assert cmd.targets["head.roll"] > 0 and cmd.targets["antenna_left"] > 0
 
 
 def test_gestures_use_only_the_robots_dofs():
-    g = CFG.connectivity.gestures
-    assert set(puzzled(g, {"head.roll", "head.pitch"}).keyframes[1].values) == {"head.roll"}
-    assert set(perk_up(g, {"neck_pan"}).keyframes[1].values) == set()
+    r, _, _ = responder(dofs={"head.roll", "head.pitch"})
+    r.speech_while_offline(0.0)
+    assert set(r.commands(0.5)[0].targets) == {"head.roll"}
     r, _, _ = responder(dofs={"neck_pan", "neck_tilt"})
     r.on_event("link.robot.restored", 0.0)
     assert r.commands(0.5) == []
+
+
+@pytest.mark.parametrize("missing", [{"puzzled"}, {"perk_up"}, {"puzzled", "perk_up"}])
+def test_a_manifest_without_a_gesture_skips_the_motion_and_keeps_the_rest(missing):
+    gestures = {k: v for k, v in reachy()[1].gesture_map.items() if k not in missing}
+    r, cue, affect = responder(gesture_map=gestures)
+    r.on_event("link.network.lost", 0.0)
+    r.on_event("link.network.restored", 1.0)
+    sources = {c.source for c in r.commands(1.5)}
+    r.speech_while_offline(3.0)
+    sources |= {c.source for c in r.commands(3.5)}
+    assert affect.state(3.0).label == "curiosity" and len(cue.said) == 1
+    assert sources == {f"connectivity:{n}" for n in ("puzzled", "perk_up") if n not in missing}
 
 
 def test_no_phrase_for_unknown_language_is_silent():
@@ -683,3 +754,26 @@ def test_motion_snapshot_reflects_link_loss():
     assert snap["mode"] == "active" and snap["errors"] >= CFG.connectivity.robot.failures_to_offline
     assert snap["robot_link"]["online"] is False
     assert "ConnectionError" in snap["last_error"]
+
+
+# ---------------------------------------------------------------- no route is not an outage
+
+
+def test_no_routes_is_not_an_outage_at_start_or_after_removing_the_last_route():
+    ev, clock = Events(), Clock()
+    mon = NetworkMonitor([], POLICY, ev, probe=lambda *a: False, clock=clock)
+    mon.check_due()
+    assert mon.online and ev == []
+    mon.set_routes([route("cloud")])
+    mon.report("cloud", True)
+    mon.set_routes([])
+    assert mon.online and "link.network.lost" not in ev
+
+
+async def test_router_without_routes_raises_no_route_available_not_offline():
+    mon = NetworkMonitor([], POLICY, Events(), clock=Clock())
+    r = Router([], SafetyConfig(), monitor=mon)
+    assert not r.offline
+    with pytest.raises(NoRouteAvailable) as err:
+        await collect(r)
+    assert not isinstance(err.value, Offline)

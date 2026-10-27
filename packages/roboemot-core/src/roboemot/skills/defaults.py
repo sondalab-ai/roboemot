@@ -5,15 +5,12 @@ They take their effects from a :class:`SkillEnv` of callables the app provides, 
 knows no robot. All five run inline on the conversation's event loop (they only post a request),
 so none can outlive its turn. None of them can address a joint: ``play`` names an
 expression of the manifest's
-map (rendered by the expression renderer under the register, persona, circadian and minor
-caps), ``look_at`` a category or a name in view (a hint to the attention selector, so the gaze
+map (rendered by the expression renderer under the register, persona and circadian scaling),
+``look_at`` a category or a name in view (a hint to the attention selector, so the gaze
 controller and the limiter still decide), ``express_emotion`` a label and a strength (an affect
 impulse inside the engine's per-turn budget).
 
-Minors (decision 2026-10-18): all five are allowed. ``play``, ``look_at`` and ``express_emotion``
-go through the paths that already apply the minor motion caps and the no-approach rule;
-``remember_preference`` stays allowed because it only ever acts after the person's spoken
-confirmation, and its question passes the minor output filter.
+``remember_preference`` only ever acts after the person's spoken confirmation.
 """
 
 from __future__ import annotations
@@ -28,7 +25,12 @@ from .schema import Desc, Range
 
 LOOK_CATEGORIES = ("speaker", "person", "animal", "object", "away")
 OK = {"ok": True}
-GESTURE_MEANING = {"nod": "yes", "shake": "no"}  # what the model is told a gesture means
+GESTURE_MEANING = {
+    "nod": "yes",
+    "shake": "no",
+    "puzzled": "confusion or an apology for not understanding",
+    "perk_up": "relief or renewed attention",
+}  # what the model is told a gesture means
 
 
 @dataclass
@@ -53,10 +55,7 @@ def default_skills(env: SkillEnv) -> SkillRegistry:
         gestures = [n for n in names if n not in labels]
         text = "Play one of the robot's named motions."
         if emotions:
-            text += (
-                f" An emotion name ({', '.join(emotions)}) shows that feeling with antennas "
-                "and head."
-            )
+            text += f" An emotion name ({', '.join(emotions)}) shows that feeling with its body."
         if gestures:
             listed = ", ".join(
                 f"'{g}' means {GESTURE_MEANING[g]}" if g in GESTURE_MEANING else f"'{g}'"

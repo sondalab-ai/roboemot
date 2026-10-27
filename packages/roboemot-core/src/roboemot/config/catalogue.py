@@ -23,20 +23,21 @@ Keys of every descriptor (all always present, ``None`` when not applicable):
   reset would give); plain JSON.
 - ``source``: layer that decides the value (``ConfigStack.source_of``): ``runtime``, ``derived``,
   ``app``, ``preset``, ``manifest``, ``defaults`` or ``schema``.
-- ``ge`` / ``le`` (numeric limits), ``unit``, ``restart``, ``admin_only``, ``opt_in``,
-  ``conservative``, ``description``: from the schema (``field_meta`` for the flags).
+- ``gt`` / ``ge`` / ``le`` (numeric limits; ``gt`` is exclusive), ``unit``, ``restart``,
+  ``admin_only``, ``opt_in``, ``conservative``, ``description``: from the schema
+  (``field_meta`` for the flags).
 - ``secret``: the value is a secret or secret-shaped (a field is fully secret if any element of
   its value or default is secret-shaped). ``value`` and ``default`` are then ``"***"`` (or null
   when absent) and the field is never writable from the web, except a route ``base_url`` (see
   ``write_only``): it is replaced whole, never shown.
-- ``private``: minors, privacy and location settings (``PRIVATE_PATHS``), admin only (the PIN).
-  Unless the catalogue is built with ``reveal_private``, ``value`` and ``default`` are ``"***"``
-  and a private container lists no entry keys and no ``entry``; the field itself stays writable.
+- ``private``: privacy and location settings (``PRIVATE_PATHS``), admin only (the PIN).
+  Unless the catalogue is built with ``reveal_private``, ``value`` and ``default`` are ``"***"``;
+  the field itself stays writable. No private path is a container.
   ``admin_only`` is true on every private field. A secret stays redacted even when revealed.
 - ``writable``: the web UI may write it today.
 - ``removable``: for ``dict_of_model`` and ``keyed_list`` only (else ``None``): the entry keys the
   web UI may remove, i.e. those no layer below the runtime one holds (a merge cannot mask them).
-  Empty for a private container that is not revealed. The page shows Remove from this list only.
+  The page shows Remove from this list only.
 """
 
 from __future__ import annotations
@@ -101,6 +102,7 @@ class FieldDescriptor(TypedDict):
     value: Any
     default: Any
     source: str
+    gt: float | None
     ge: float | None
     le: float | None
     unit: str | None
@@ -154,6 +156,7 @@ def descriptor(path: str, kind: str, value: Any = None, **fields: Any) -> FieldD
         "value": value,
         "default": None,
         "source": BLANK_SOURCE,
+        "gt": None,
         "ge": None,
         "le": None,
         "unit": None,
@@ -239,7 +242,7 @@ def classify(annotation: Any) -> tuple[str, dict[str, Any]]:
 
 
 def _limits(info: Any) -> dict[str, float | None]:
-    out: dict[str, float | None] = {"ge": None, "le": None}
+    out: dict[str, float | None] = {"gt": None, "ge": None, "le": None}
     for item in info.metadata:
         for name in out:
             if hasattr(item, name):
@@ -381,14 +384,10 @@ class _Walker:
         row["admin_only"] = row["admin_only"] or row["private"]
         row["key"] = key
         if kind in ENTRY_KINDS:
-            row["removable"] = []
-        if not row["private"] or self.reveal:
-            row["value"] = list(keys)
-            if kind in ENTRY_KINDS and model is not None:
-                row["entry"] = self.entry(path, model)
-                row["removable"] = removable or []
-        else:
-            row["value"] = []
+            row["removable"] = removable or []
+        row["value"] = list(keys)
+        if kind in ENTRY_KINDS and model is not None:
+            row["entry"] = self.entry(path, model)
         self.out.append(row)
 
     def entry(self, path: str, model: type[BaseModel]) -> list[FieldDescriptor]:

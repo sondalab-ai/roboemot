@@ -12,11 +12,14 @@ import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from importlib.metadata import entry_points
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from ..config.schema import RoboEmotConfig
 from ..manifest import Manifest
 from .types import Observation
+
+if TYPE_CHECKING:
+    from ..robot_platform import RobotSession
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +33,10 @@ class WorldSource(Protocol):
     """Produces observations until stopped; the sink is the bus (``percept.entity``)."""
 
     name: str
+    speaking: Callable[[float], bool] | None
+    """Mandatory member, value may be None. The host sets it before ``start`` to "is the robot
+    speaking at this stamp", so a source does not turn towards the robot's own voice. Every
+    implementation declares it; None means the source does not use it (or not set yet)."""
 
     def start(self, sink: ObservationSink) -> None:
         """Begin producing; ``sink`` may be called from the source's own thread."""
@@ -87,14 +94,15 @@ class WorldPlugin:
 
 
 JointStateFn = Callable[[], Mapping[str, float]]
-WorldFactory = Callable[[Manifest, RoboEmotConfig, Any, JointStateFn], WorldPlugin]
+WorldFactory = Callable[[Manifest, RoboEmotConfig, "RobotSession", JointStateFn], WorldPlugin]
 
 
 def load_world_plugin(
-    manifest: Manifest, cfg: RoboEmotConfig, robot: Any, joint_state: JointStateFn
+    manifest: Manifest, cfg: RoboEmotConfig, session: RobotSession, joint_state: JointStateFn
 ) -> WorldPlugin:
-    """The plugin registered for ``manifest.robot.id``, built with the robot handle and the
-    app's measured-joint-state provider (plugins never open a second driver).
+    """The plugin registered for ``manifest.robot.id``, built with the run's ``RobotSession``
+    (the plugin takes the robot handle it needs from it) and the app's measured-joint-state
+    provider (plugins never open a second driver).
 
     A missing or broken plugin is logged (type and message only) and yields an empty plugin:
     the robot then has no scanning and no extra sources, and the app keeps running.
@@ -103,7 +111,7 @@ def load_world_plugin(
     for ep in entry_points(group=ENTRY_POINT_GROUP):
         if ep.name == robot_id:
             try:
-                return ep.load()(manifest, cfg, robot, joint_state)  # type: ignore[no-any-return]
+                return ep.load()(manifest, cfg, session, joint_state)  # type: ignore[no-any-return]
             except Exception as exc:
                 log.warning("world plugin %s: %s: %s", robot_id, type(exc).__name__, exc)
                 return WorldPlugin()

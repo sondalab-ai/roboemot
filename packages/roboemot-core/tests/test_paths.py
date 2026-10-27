@@ -60,3 +60,11 @@ def test_old_install_records_load_without_the_data_folder_fields():
     record = InstallRecord.from_json(old)
     assert record.data_dir is None and record.data_dir_parents == []
     assert InstallRecord.from_json(record.to_json()) == record
+
+
+def test_the_app_config_lives_in_the_data_folder_and_ignores_data_dir(tmp_path, monkeypatch):
+    """R4 S4: app.yaml is read from the data folder ($ROBOEMOT_DATA_DIR or the default), never
+    from a ``data_dir`` value, which lives inside that file."""
+    monkeypatch.setenv(paths.ENV_DIR, str(tmp_path / "d"))
+    assert paths.app_config_path() == tmp_path / "d" / paths.APP_CONFIG_FILE
+    assert not (tmp_path / "d").exists()

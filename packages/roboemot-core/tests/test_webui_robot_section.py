@@ -197,7 +197,9 @@ def test_plugin_rows_with_secret_shaped_values_are_redacted(tmp_path):
 class Restarting(FakePlugin):
     """A plugin with the restart hook; ``up`` is whether the supervisor can restart now."""
 
-    def __init__(self, up=True, effects=(("zero_pose", {}), ("webrtc_drop", {})), on_restart=None):
+    def __init__(
+        self, up=True, effects=(("zero_pose", {}), ("remote_session_drop", {})), on_restart=None
+    ):
         super().__init__()
         self.up, self.effects, self.on_restart = up, effects, on_restart
 
@@ -206,6 +208,9 @@ class Restarting(FakePlugin):
 
     def restart_effects(self):
         return self.effects
+
+    def stop_timeout_s(self):
+        return 20.0
 
     def restart(self):
         if self.on_restart:
@@ -221,7 +226,7 @@ def test_restartable_plugin_gets_the_restart_action_and_known_effects_only(tmp_p
         ("kill_on_timeout", {"timeout_s": True}),
         ("kill_on_timeout", {"timeout_s": float("nan")}),
         ("kill_on_timeout", {"timeout_s": [20]}),
-        ("webrtc_drop", "params"),
+        ("remote_session_drop", "params"),
         "zero_pose",
     )
     ed, _ = editor(tmp_path, [ep(Restarting(effects=effects))])
@@ -438,7 +443,7 @@ def test_protected_and_admin_claims_are_refused(tmp_path, caplog, claim):
 
 
 def test_a_parent_of_private_rows_is_refused(tmp_path):
-    ed, _ = editor(tmp_path, [ep(FakePlugin(claims=("circadian", "register")))])
+    ed, _ = editor(tmp_path, [ep(FakePlugin(claims=("circadian", "privacy")))])
     fields = ed.fields()
     assert ed.robot_split(fields)[0] == fields
 
@@ -464,3 +469,29 @@ def test_a_plugin_without_section_is_fail_soft(tmp_path):
     ed, _ = editor(tmp_path, [ep(object())])
     fields = ed.fields()
     assert ed.robot_split(fields) == (fields, None)
+
+
+def test_supervisor_stop_timeout_is_read_from_a_restartable_plugin_only():
+    from roboemot.webui.robot_section import supervisor_stop_timeout_s
+
+    class Broken(Restarting):
+        def stop_timeout_s(self):
+            raise RuntimeError("x")
+
+    assert supervisor_stop_timeout_s(Restarting()) == 20.0
+    assert supervisor_stop_timeout_s(FakePlugin()) is None
+    assert supervisor_stop_timeout_s(None) is None
+    assert supervisor_stop_timeout_s(Broken()) is None
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -float("inf"), 0.0, -3.0, "soon"])
+def test_a_supervisor_stop_timeout_that_is_not_a_positive_finite_number_counts_as_none(bad, caplog):
+    from roboemot.webui.robot_section import supervisor_stop_timeout_s
+
+    class Odd(Restarting):
+        def stop_timeout_s(self):
+            return bad
+
+    with caplog.at_level(logging.WARNING):
+        assert supervisor_stop_timeout_s(Odd()) is None
+    assert "stop timeout" in caplog.text

@@ -18,6 +18,7 @@ pytestmark = pytest.mark.sim
 
 reachy_mini = pytest.importorskip("reachy_mini")
 
+from roboemot.affect.clips import load_clip_library  # noqa: E402
 from roboemot.config import ConfigStack  # noqa: E402
 from roboemot.manifest import load_manifest  # noqa: E402
 from roboemot.motion import Command, MotionLoop, Priority  # noqa: E402
@@ -34,11 +35,27 @@ def mini():
     yield m
 
 
+def _wait_until_still(
+    driver: ReachyMiniDriver, still_s: float = 1.5, limit_s: float = 20.0
+) -> None:
+    """A move a previous test left running in the daemon (a wake-up) would, rightly, be read as
+    external control and delay the loop under test by the grace: start from a settled robot."""
+    end, since, last = time.monotonic() + limit_s, time.monotonic(), driver.read_state()
+    while time.monotonic() < end and time.monotonic() - since < still_s:
+        time.sleep(0.05)
+        now = driver.read_state()
+        if any(abs(now[k] - last[k]) > 0.002 for k in now):
+            since = time.monotonic()
+        last = now
+
+
 @pytest.fixture()
 def loop(mini):
     cfg = ConfigStack().effective()
     manifest = load_manifest(DATA / "reachy-mini-wireless.yaml", allow_unmeasured_dynamics=True)
-    lp = MotionLoop(manifest, ReachyMiniDriver(mini), cfg, rate_hz=50)
+    driver = ReachyMiniDriver(mini)
+    _wait_until_still(driver)
+    lp = MotionLoop(manifest, driver, cfg, rate_hz=50)
     lp.start()
     yield lp
     lp.stop()
@@ -112,7 +129,8 @@ def _daemon_post(path: str) -> None:
 
 def test_robot_link_recovers_after_daemon_backend_restart(mini):
     """SPEC 12A: backend stop -> link.robot.lost; restart -> reconnect, link.robot.restored."""
-    from roboemot_reachymini.app import idle_command
+    from roboemot.runtime.ticks import idle_command
+    from roboemot_reachymini.gaze import GAZE
 
     events: list[str] = []
     cfg = ConfigStack().effective()
@@ -128,7 +146,7 @@ def test_robot_link_recovers_after_daemon_backend_restart(mini):
 
     def feed() -> None:
         while not stop.is_set():
-            loop.feed(idle_command(cfg, time.monotonic()))
+            loop.feed(idle_command(cfg, time.monotonic(), dof=GAZE.head_pitch))
             stop.wait(0.05)
 
     loop.start()
@@ -180,8 +198,8 @@ def test_attention_turns_the_head_towards_a_world_entry(loop):
     slow, so the timeout is generous.
     """
     from roboemot.attention import AttentionSelector, GazeController
+    from roboemot.runtime.ticks import attention_tick
     from roboemot.world import Observation, WorldModel
-    from roboemot_reachymini.app import attention_tick
     from roboemot_reachymini.gaze import FRAME, GAZE
 
     cfg = ConfigStack().effective()
@@ -205,29 +223,37 @@ def test_attention_turns_the_head_towards_a_world_entry(loop):
 
 
 def test_a_joy_expression_moves_the_antennas_on_the_simulated_robot(loop):
-    """SPEC 7, 10: the shipped joy expression, rendered for an adult, flaps both antennas.
+    """SPEC 7, 10: a shipped joy clip swings both antennas.
 
     The robot first settles at the antenna home; the renderer then feeds additive EXPRESSION
     commands through the real loop. The fallback dynamics are slow, so the swing asserted is
-    far below the commanded one; what counts is that both antennas move and come back.
+    far below the commanded one; what counts is that both antennas move and come back. Joy is
+    pinned to one of its variants (success1, both antennas past 70 degrees) so the pick is fixed.
     """
     from roboemot.affect import AffectState
     from roboemot.affect.expression import ExpressionRenderer
     from roboemot.affect.register import Person, resolve_register
 
     manifest = loop.manifest
+    clips = load_clip_library(manifest)
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour)
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, clips, body_yaw=None)
     cfg = stack.effective()
+    joy = cfg.expression_map["joy"]
+    (variant,) = [v for v in joy.variants if v.clip == "success1"]
+    expression_map = {**cfg.expression_map, "joy": joy.model_copy(update={"variants": [variant]})}
+    duration = max(frames[-1][0] for frames in clips["success1"].channels.values())
     home = {n: manifest.dofs[n].home for n in ("antenna_right", "antenna_left")}
     _hold(loop, home, 8.0)
     settled = loop.driver.read_state()
-    reg = resolve_register([Person("adult", "declared", {})], cfg.register, cfg.persona)
-    renderer = ExpressionRenderer(cfg.expression, cfg.expression_map, manifest.dofs, 0.15)
+    reg = resolve_register([Person({})], cfg.register, cfg.persona)
+    renderer = ExpressionRenderer(
+        cfg.expression, expression_map, manifest.dofs, 0.15, body_yaw="body_yaw", clips=clips
+    )
     renderer.update(AffectState(0.0, 0.0, "calm", 0.0), reg, time.monotonic())
     assert renderer.update(AffectState(0.7, 0.5, "joy", 1.0, 1), reg, time.monotonic())
     seen: dict[str, list[float]] = {n: [] for n in home}
-    end = time.monotonic() + 3.0
+    end = time.monotonic() + duration + 2.0
     while time.monotonic() < end:
         now = time.monotonic()
         for cmd in renderer.commands(now):
@@ -241,6 +267,62 @@ def test_a_joy_expression_moves_the_antennas_on_the_simulated_robot(loop):
         assert values[-1] == pytest.approx(settled[n], abs=0.1), n
 
 
+@pytest.mark.parametrize("label", sorted(ConfigStack().effective().affect.labels))
+def test_every_label_plays_a_recorded_clip_on_the_simulated_robot(loop, label):
+    """SPEC 7, Recorded clips: each label's clip moves its largest channel and comes back.
+
+    The label is pinned to its shortest full-intensity variant that swings a non-body channel by
+    at least 20 degrees, so the run stays short and the motion is large enough to see through
+    the slow fallback dynamics.
+    """
+    from roboemot.affect import AffectState
+    from roboemot.affect.expression import ExpressionRenderer
+    from roboemot.affect.register import Person, resolve_register
+
+    manifest = loop.manifest
+    clips = load_clip_library(manifest)
+    stack = ConfigStack()
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, clips, body_yaw=None)
+    cfg = stack.effective()
+
+    def peak(clip: str) -> tuple[str, float]:
+        frames = {n: f for n, f in clips[clip].channels.items() if n != "body_yaw"}
+        name = max(frames, key=lambda n: max(abs(v) for _, v in frames[n]))
+        return name, max(abs(v) for _, v in frames[name])
+
+    def length(clip: str) -> float:
+        return max(f[-1][0] for f in clips[clip].channels.values())
+
+    entry = cfg.expression_map[label]
+    eligible = [v for v in entry.variants if v.max_intensity >= 1.0 and peak(v.clip)[1] >= 20.0]
+    variant = min(eligible, key=lambda v: length(v.clip))
+    channel = peak(variant.clip)[0]
+    expression_map = {**cfg.expression_map, label: entry.model_copy(update={"variants": [variant]})}
+    home = {channel: manifest.dofs[channel].home}
+    _hold(loop, home, 8.0)
+    settled = loop.driver.read_state()[channel]
+    reg = resolve_register([Person({})], cfg.register, cfg.persona)
+    renderer = ExpressionRenderer(
+        cfg.expression, expression_map, manifest.dofs, 0.15, body_yaw="body_yaw", clips=clips
+    )
+    proto = cfg.affect.labels[label]
+    renderer.update(AffectState(0.0, 0.0, "", 0.0), reg, time.monotonic())
+    assert renderer.update(
+        AffectState(proto.valence, proto.arousal, label, 1.0, 1), reg, time.monotonic()
+    )
+    # the fallback rate limit lags a large swing, so the return gets the time it needs at that rate
+    lag_s = math.radians(peak(variant.clip)[1]) / cfg.safety.unmeasured_dynamics_fallback_vel
+    seen: list[float] = []
+    end = time.monotonic() + length(variant.clip) + lag_s + 2.0
+    while time.monotonic() < end:
+        for cmd in renderer.commands(time.monotonic()):
+            loop.feed(cmd)
+        seen.append(loop.driver.read_state()[channel])
+        time.sleep(0.02)
+    assert max(seen) - min(seen) > 0.03, (variant.clip, channel, max(seen) - min(seen))
+    assert seen[-1] == pytest.approx(settled, abs=0.1), (variant.clip, channel)
+
+
 def test_a_nod_gesture_moves_the_head_pitch_on_the_simulated_robot(loop):
     """SPEC 7, 11: the shipped nod, requested as the play skill does, dips the head and returns."""
     from roboemot.affect import AffectState
@@ -249,14 +331,25 @@ def test_a_nod_gesture_moves_the_head_pitch_on_the_simulated_robot(loop):
 
     manifest = loop.manifest
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour)
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour,
+        manifest.channels,
+        load_clip_library(manifest),
+        body_yaw=None,
+    )
     cfg = stack.effective()
     home = {"head.pitch": manifest.dofs["head.pitch"].home}
     _hold(loop, home, 8.0)
     settled = loop.driver.read_state()
-    reg = resolve_register([Person("adult", "declared", {})], cfg.register, cfg.persona)
+    reg = resolve_register([Person({})], cfg.register, cfg.persona)
     renderer = ExpressionRenderer(
-        cfg.expression, cfg.expression_map, manifest.dofs, 0.15, cfg.gesture_map
+        cfg.expression,
+        cfg.expression_map,
+        manifest.dofs,
+        0.15,
+        cfg.gesture_map,
+        body_yaw="body_yaw",
+        clips=load_clip_library(manifest),
     )
     assert renderer.request("nod")
     assert renderer.update(AffectState(0.0, 0.0, "calm", 0.5), reg, time.monotonic())
@@ -292,6 +385,7 @@ def test_full_sweep_keeps_the_world_map_correct(loop):
 
     from roboemot.attention import AttentionSelector, GazeController
     from roboemot.config.schema import RoboEmotConfig
+    from roboemot.runtime.ticks import attention_tick, scan_context, scan_tick
     from roboemot.world import (
         Observation,
         ScanController,
@@ -299,7 +393,6 @@ def test_full_sweep_keeps_the_world_map_correct(loop):
         angular_distance,
         from_base_frame,
     )
-    from roboemot_reachymini.app import attention_tick, scan_context, scan_tick
     from roboemot_reachymini.gaze import FRAME, GAZE
     from roboemot_reachymini.world import ReachyScanPlanner
 
@@ -371,7 +464,6 @@ class Scene:
         *,
         enroll: bool,
         plant: bool,
-        age_group: str = "adult",
         extra_config: str = "",
     ):
         import shutil
@@ -392,6 +484,7 @@ class Scene:
         shutil.copy2(root / "configs/dev-unmeasured.yaml", data / "app.yaml")
         (data / "app.yaml").write_text((data / "app.yaml").read_text() + extra_config)
         monkeypatch.setattr(app_module, "DATA", data)
+        monkeypatch.setattr(app_module, "app_config_path", lambda: data / "app.yaml")
         self.plant = plant  # a test may set it later: the person walks into view
         cfg = RoboEmotConfig()
         face_vec = np.eye(8, dtype=np.float32)[0]
@@ -405,13 +498,7 @@ class Scene:
                 "Ada",
                 [face_vec * (1 + 0.01 * i) for i in range(5)],
                 "sim-face",
-                consent=Consent(
-                    "Ada",
-                    datetime(2026, 1, 1, tzinfo=UTC),
-                    ("face", "refresh"),
-                    guardian=None if age_group in ("adult", "senior") else "Mum",
-                ),
-                age_group=age_group,
+                consent=Consent("Ada", datetime(2026, 1, 1, tzinfo=UTC), ("face", "refresh")),
             ).person_id
         width, height, box = 320, 240, 80
         camera = CameraModel(
@@ -425,6 +512,9 @@ class Scene:
         class PlantedCamera:
             def __init__(self, joint_state):
                 self.joint_state, self.n = joint_state, 0
+
+            def camera_model(self, width, height):
+                return None
 
             def read(self):
                 self.n += 1
@@ -464,7 +554,6 @@ class Scene:
                 return SimpleNamespace(
                     face_detector=PlantedDetector(),
                     face_embedder=PlantedEmbedder(),
-                    attribute_estimator=None,
                     appearance_embedder=None,
                     object_detector=None,
                     objects_unavailable=None,
@@ -553,16 +642,18 @@ def test_an_unenrolled_face_is_followed_but_never_named(mini, tmp_path, monkeypa
     assert scene.recognized == []
 
 
-def test_an_unknown_age_face_engages_the_minor_caps(mini, tmp_path, monkeypatch):
-    """SPEC 5, 12: no attribute model, so the planted face's age is unknown (a possible minor);
-    the motion loop's minor caps engage."""
+def test_an_unknown_age_face_keeps_the_one_register(mini, tmp_path, monkeypatch):
+    """SPEC 5, 7, 12 (owner decision 2026-10-23): no attribute model, so the planted face's age
+    is unknown; the register is the one the robot uses with everyone and no cap engages."""
     with Scene(mini, tmp_path, monkeypatch, enroll=False, plant=True) as scene:
-        deadline, engaged = time.monotonic() + 30, False
-        while time.monotonic() < deadline and not engaged:
-            motion = scene.app.diagnostics.report()["sections"]["roboemot.motion"]["data"]
-            engaged = motion["minor_present"]
+        tracker = scene.app.register_tracker
+        deadline, seen = time.monotonic() + 30, False
+        while time.monotonic() < deadline and not seen:
+            seen = tracker.active is not None and tracker.active.people > 0
             time.sleep(0.1)
-    assert engaged
+        assert seen and tracker.active.params.approach_allowed
+        motion = scene.app.diagnostics.report()["sections"]["roboemot.motion"]["data"]
+        assert "minor_present" not in motion
 
 
 def test_the_rest_posture_lowers_the_head_and_droops_the_antennas_on_the_simulated_robot(loop):
@@ -572,13 +663,25 @@ def test_the_rest_posture_lowers_the_head_and_droops_the_antennas_on_the_simulat
 
     manifest = loop.manifest
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour)
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour,
+        manifest.channels,
+        load_clip_library(manifest),
+        body_yaw=None,
+    )
     cfg = stack.effective()
     names = ("head.pitch", "antenna_right", "antenna_left")
     _hold(loop, {n: manifest.dofs[n].home for n in names}, 8.0)
     settled = loop.driver.read_state()
     loop.clear("test")  # the settle command is COMMANDED and never expires: it would win
-    motion = CircadianMotion(cfg.circadian, cfg.circadian_motion, manifest.dofs)
+    motion = CircadianMotion(
+        cfg.circadian,
+        cfg.circadian_motion,
+        manifest.dofs,
+        body_yaw="body_yaw",
+        affect_intensity=lambda: 0.0,
+        clips=load_clip_library(manifest),
+    )
     end = time.monotonic() + 10.0
     while time.monotonic() < end:
         for cmd in motion.commands(time.monotonic(), "resting"):
@@ -590,27 +693,24 @@ def test_the_rest_posture_lowers_the_head_and_droops_the_antennas_on_the_simulat
     assert state["antenna_left"] > settled["antenna_left"] + 0.05
 
 
-def test_the_robot_reacts_distinctly_to_an_adult_a_child_and_a_stranger_without_an_llm(
+def test_the_robot_reacts_to_a_known_person_and_a_stranger_with_one_register(
     mini, tmp_path, monkeypatch
 ):
-    """SPEC 14 (M2 exit, first half), on the simulated robot: the same planted face is a known
-    adult, a known child (declared age) or nobody enrolled, and walks into view of a settled
-    robot. Only ONNX is faked (see ``Scene``); no LLM. See ``exit_support`` for what is
-    measured and ``docs/eval/m2.md`` for the numbers."""
+    """SPEC 14 (M2 exit, first half; owner decision 2026-10-23), on the simulated robot: the same
+    planted face is a known person or nobody enrolled, and walks into view of a settled robot.
+    Only ONNX is faked (see ``Scene``); no LLM. See ``exit_support`` for what is measured and
+    ``docs/eval/m2.md`` for the numbers."""
     from exit_support import BODY_MAP_YAML, check_exit, format_run, react
-    from roboemot.config.schema import RoboEmotConfig
 
     manifest = load_manifest(DATA / "reachy-mini-wireless.yaml", allow_unmeasured_dynamics=True)
     home = {n: d.home for n, d in manifest.dofs.items()}
     runs = {}
-    for case, enroll, age in (("adult", True, "adult"), ("child", True, "child"),
-                              ("stranger", False, "adult")):  # fmt: skip
+    for case, enroll in (("known", True), ("stranger", False)):
         root = tmp_path / case
         root.mkdir()
         monkeypatch.setenv("ROBOEMOT_DATA_DIR", str(root / "roboemot-data"))
         with Scene(
-            mini, root, monkeypatch, enroll=enroll, plant=False, age_group=age,
-            extra_config=BODY_MAP_YAML,
+            mini, root, monkeypatch, enroll=enroll, plant=False, extra_config=BODY_MAP_YAML,
         ) as scene:  # fmt: skip
             runs[case] = react(
                 scene.app,
@@ -621,12 +721,237 @@ def test_the_robot_reacts_distinctly_to_an_adult_a_child_and_a_stranger_without_
             )
         print(format_run(runs[case]))
     # the simulated servos overshoot the planted bearing by a few degrees (28.6 against 25 once)
-    check_exit(runs["adult"], runs["child"], runs["stranger"], PLANTED_AZ + math.radians(5))
+    check_exit(runs["known"], runs["stranger"], PLANTED_AZ + math.radians(5))
     yaw = {c: max(r.arrival.head_yaw_peak, r.provoked.head_yaw_peak) for c, r in runs.items()}
-    cap = RoboEmotConfig().safety.minor_motion_factor
-    # all three are looked at (attention is not gated by the register); the adult is followed all
-    # the way, while the minor caps scale the child's and the stranger's head to the cap's share
-    assert yaw["adult"] > 0.9 * PLANTED_AZ
-    for case in ("child", "stranger"):
-        assert 0.5 * cap * PLANTED_AZ < yaw[case] <= cap * PLANTED_AZ + math.radians(2), yaw
-        assert yaw[case] < yaw["adult"]
+    # both are looked at and followed all the way: no cap scales anyone's head
+    for case in runs:
+        assert yaw[case] > 0.9 * PLANTED_AZ, yaw
+
+
+def test_the_speaking_motion_moves_the_head_pitch_with_a_canned_reply(loop):
+    """SPEC 7 (Speaking motion), 12A: a canned speech timeline (phrases, a loud stretch, a
+    question) through the shipped speech_motion_map and the real loop: the measured head pitch
+    follows the commanded offsets (dip, nod, breath, tilt lift) and comes back, and the robot's
+    own speaking motion never looks like external control."""
+    import numpy as np
+    from roboemot.affect import AffectState
+    from roboemot.affect.register import Person, resolve_register
+    from roboemot.affect.speaking import SpeakingRenderer
+    from roboemot.voice.envelope import SpeechTimeline
+
+    manifest = loop.manifest
+    stack = ConfigStack()
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour,
+        manifest.channels,
+        load_clip_library(manifest),
+        body_yaw="body_yaw",
+    )
+    stack.set("speech_motion.levels.lively.nod_share", 1.0, source="test")  # not seed-dependent
+    cfg = stack.effective()
+    _hold(loop, {"head.pitch": manifest.dofs["head.pitch"].home}, 6.0)
+    settled = loop.driver.read_state()["head.pitch"]
+    rate = 16000
+
+    def seg(db, s):
+        n = int(rate * s)
+        if db is None:
+            return np.zeros(n, np.float32)
+        amp = 10 ** (db / 20) * math.sqrt(2)
+        return (amp * np.sin(2 * math.pi * 220 * np.arange(n) / rate)).astype(np.float32)
+
+    tl = SpeechTimeline(cfg.speech_motion)
+    start = time.monotonic() + 1.0
+    parts = [(-26, 0.8), (None, 0.4), (-26, 0.5), (-14, 0.5), (-26, 0.8), (None, 0.4), (-26, 0.8)]
+    x = np.concatenate([seg(db, s) for db, s in parts])
+    tl.push(1, x, rate, start, utterance=1, question=False, mood="joy", continued=False)
+    tl.finish(1, start + x.size / rate)
+    q = seg(-26, 1.0)
+    tl.push(2, q, rate, start + x.size / rate + 0.5, utterance=1, question=True, mood="joy",
+            continued=False)  # fmt: skip
+    tl.finish(2, start + x.size / rate + 0.5 + q.size / rate)
+    renderer = SpeakingRenderer(
+        cfg.speech_motion,
+        cfg.speech_motion_map,
+        manifest.dofs,
+        body_yaw="body_yaw",
+        max_amplitude=cfg.expression.max_amplitude,
+        timeline=lambda: tl,
+    )
+    renderer.set_register(resolve_register([Person({})], cfg.register, cfg.persona))
+    renderer.set_affect(AffectState(0.5, 0.0, "joy", 0.5))
+    commanded, measured = [], []
+    others = ("head.roll", "antenna_left")  # the tilt and the accent: a sim baseline for signs
+    start_pose = loop.driver.read_state()
+    other_cmd: dict[str, list[float]] = {n: [] for n in others}
+    other_meas: dict[str, list[float]] = {n: [] for n in others}
+    end = time.monotonic() + 12.0
+    while time.monotonic() < end:
+        now = time.monotonic()
+        targets: dict[str, float] = {}
+        for cmd in renderer.commands(now):
+            loop.feed(cmd)
+            targets = cmd.targets
+        commanded.append(targets.get("head.pitch", 0.0))
+        state = loop.driver.read_state()
+        measured.append(state["head.pitch"] - settled)
+        for n in others:
+            other_cmd[n].append(targets.get(n, 0.0))
+            other_meas[n].append(state[n] - start_pose[n])
+        time.sleep(0.05)
+    for n in others:
+        peak_cmd = max(other_cmd[n], key=abs)
+        peak_meas = max((m * math.copysign(1, peak_cmd) for m in other_meas[n]), default=0.0)
+        print(f"\n{n}: commanded peak {peak_cmd:+.4f} rad, measured {peak_meas:+.4f} rad that way")
+        assert peak_cmd != 0 and peak_meas >= 0.3 * abs(peak_cmd), n
+    snap = renderer.snapshot()
+    assert snap["phrase_nod"] >= 1 and snap["question_tilt"] == 1 and snap["breath"] >= 1
+    down, up = max(commanded), min(commanded)
+    assert max(measured) >= 0.5 * down and min(measured) <= 0.5 * up, (down, up)
+
+    def agreement(lag: int) -> float:
+        """Share of the clearly moving samples where the measured pitch has the commanded sign
+        ``lag`` samples later (the limiter and the daemon trail the command)."""
+        pairs = [(c, m) for c, m in zip(commanded, measured[lag:], strict=False) if abs(c) > 0.02]
+        return sum(1 for c, m in pairs if c * m > 0) / max(1, len(pairs))
+
+    best = max(range(11), key=agreement)  # up to 0.5 s at the 20 Hz sampling here
+    print(
+        f"\nspeaking motion: commanded {down:.4f} / {up:.4f} rad, measured {max(measured):.4f} / "
+        f"{min(measured):.4f} rad, best lag {best * 50} ms, sign agreement {agreement(best):.2f}"
+    )
+    assert agreement(best) >= 0.8
+    assert measured[-1] == pytest.approx(0.0, abs=0.02)
+    assert loop.external_events == 0 and not loop.external
+
+
+def _watch_tracking_error(lp: MotionLoop) -> dict[str, float]:
+    """Record the worst divergence the loop's own detector sees: per kind, the largest distance
+    of a new measured sample from the range of the poses commanded within the lag window (what
+    ``motion.external.ExternalControl.judge`` compares, before any lag rule), and from the
+    latest command only."""
+    worst = {"angle": 0.0, "translation": 0.0, "raw_angle": 0.0, "raw_translation": 0.0}
+    ext = lp.external_ctl
+    real = ext.judge
+
+    def spy(now: float, measured: dict[str, float], overruns: int) -> list:
+        for name, value in measured.items():
+            dof = lp.core.limiter.dofs.get(name)
+            window = ext._windows.get(name)
+            if dof is None or window is None or not window.values:
+                continue
+            lo, hi = min(window.values), max(window.values)
+            worst[dof.kind] = max(worst[dof.kind], value - hi, lo - value)
+            raw = f"raw_{dof.kind}"
+            worst[raw] = max(worst[raw], abs(value - window.values[-1]))
+        return real(now, measured, overruns)
+
+    ext.judge = spy  # type: ignore[method-assign]
+    return worst
+
+
+def test_our_own_gestures_and_extreme_motion_never_look_like_external_control(loop):
+    """SPEC 12A: the divergence detector must not fire on the robot's own motion. Every motion
+    passes the limiter, so full-range reversals of every joint at once, at the limiter's speed
+    and acceleration limits, are the worst tracking error; the shipped gestures and expressions
+    are played on top. Records the worst error (printed with ``-s``) and asserts the loop never
+    yielded and stayed under half the tolerance."""
+    from roboemot.affect import AffectState
+    from roboemot.affect.expression import ExpressionRenderer
+    from roboemot.affect.register import Person, resolve_register
+
+    manifest = loop.manifest
+    stack = ConfigStack()
+    clips = load_clip_library(manifest)
+    stack.set_manifest_behaviour(manifest.model.behaviour, manifest.channels, clips, body_yaw=None)
+    cfg = stack.effective()
+    worst = _watch_tracking_error(loop)
+    _hold(loop, {n: d.home for n, d in manifest.dofs.items() if d.measured}, 6.0)
+    extremes = {n: 0.9 * d.max for n, d in manifest.dofs.items() if d.measured}
+    opposite = {n: 0.9 * d.min for n, d in manifest.dofs.items() if d.measured}
+    for _ in range(4):
+        _hold(loop, extremes, 1.5)
+        _hold(loop, opposite, 1.5)
+    loop.clear("test")
+    reg = resolve_register([Person({})], cfg.register, cfg.persona)
+    renderer = ExpressionRenderer(
+        cfg.expression,
+        cfg.expression_map,
+        manifest.dofs,
+        0.15,
+        body_yaw="body_yaw",
+        clips=clips,
+    )
+    now = time.monotonic()
+    renderer.update(AffectState(0.0, 0.0, "calm", 0.0), reg, now)
+    for label in renderer.playable():
+        renderer.request(label, time.monotonic())
+        end = time.monotonic() + 4.0
+        while time.monotonic() < end:
+            for cmd in renderer.commands(time.monotonic()):
+                loop.feed(cmd)
+            time.sleep(0.02)
+    print(
+        f"\nworst tracking error vs commands within {cfg.motion.external.lag_window_s} s: "
+        f"{worst['angle']:.4f} rad, {worst['translation']:.5f} m "
+        f"(against the latest command only: {worst['raw_angle']:.4f} rad, "
+        f"{worst['raw_translation']:.5f} m)"
+    )
+    assert loop.external_events == 0 and not loop.external
+    assert worst["angle"] < cfg.motion.external.tolerance_rad / 2
+    assert worst["translation"] < cfg.motion.external.tolerance_m / 2
+
+
+def test_loop_detects_the_daemons_own_goto_sleep_move(mini):
+    """SPEC 4A, 12A: ``goto_sleep`` runs in the daemon and drops our targets; the loop sees the
+    pose leave its commands, stops writing, writes nothing until the pose has been still for
+    the grace, and nothing pulls the robot back from the sleep pose. (MuJoCo ignores motor-mode
+    changes, so the motors-off half is covered by unit tests.)"""
+    from roboemot.diagnostics import Target
+    from roboemot_reachymini.daemon import DaemonClient
+
+    cfg = ConfigStack().effective()
+    manifest = load_manifest(DATA / "reachy-mini-wireless.yaml", allow_unmeasured_dynamics=True)
+    driver = ReachyMiniDriver(mini)
+    writes: list[float] = []
+    real_write = driver.write_pose_targets
+
+    def counting(t: float, values: dict[str, float]) -> None:
+        writes.append(time.monotonic())
+        real_write(t, values)
+
+    driver.write_pose_targets = counting  # type: ignore[method-assign]
+    loop = MotionLoop(manifest, driver, cfg, rate_hz=50)
+    loop.start()
+    stop = threading.Event()
+
+    def feeder() -> None:  # a source that keeps asking for the awake pose throughout
+        while not stop.is_set():
+            loop.feed(Command("test", Priority.COMMANDED, {"head.pitch": 0.0}, time.monotonic()))
+            stop.wait(0.02)
+
+    th = threading.Thread(target=feeder, daemon=True)
+    daemon = DaemonClient(Target())
+    try:
+        _hold(loop, {"head.yaw": 0.0, "head.pitch": 0.0}, 3.0)
+        daemon.wake_up()
+        time.sleep(3.0)
+        th.start()
+        _daemon_post("/move/play/goto_sleep")
+        detected = None
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and detected is None:
+            if loop.external:
+                detected = time.monotonic()
+            time.sleep(0.02)
+        assert detected is not None, "the loop never noticed the daemon's move"
+        n = len(writes)
+        time.sleep(cfg.motion.platform_move_grace_s - 1.0)
+        assert len(writes) == n and loop.external  # not writing while the move runs and settles
+        time.sleep(cfg.motion.platform_move_grace_s + 2.0)
+        assert not loop.external and len(writes) > n  # resumed after the pose stayed still
+    finally:
+        stop.set()
+        loop.stop()
+        daemon.wake_up()
+        time.sleep(3.0)

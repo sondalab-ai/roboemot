@@ -9,11 +9,14 @@ terminal, a missing flag stops the run before anything changes (no default is ev
     python scripts/install_on_robot.py                         # interactive wizard
     python scripts/install_on_robot.py --dry-run               # read-only checks
     python scripts/install_on_robot.py --host 192.168.1.20 --user pollen --dev --start --yes
+                                    # --yes keeps ~/.cache/uv; add --clear-caches to free it
     python scripts/install_on_robot.py --uninstall --dry-run   # what uninstall would undo
     python scripts/install_on_robot.py --uninstall             # leave the robot as it was
 
---dev installs configs/dev-unmeasured.yaml as the app config, so the app runs before the
-manifest dynamics are measured (SPEC 12). Without it the app refuses to start.
+--dev sets the keys of configs/dev-unmeasured.yaml in the app config (app.yaml in the robot's data
+folder), so the app runs before the manifest dynamics are measured (SPEC 12). Without it the app
+refuses to start. Voice is enabled in the same file (voice.enabled) unless --no-voice; other keys
+in the file are kept (SPEC 4A, Installer).
 """
 
 import sys

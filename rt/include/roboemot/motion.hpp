@@ -49,7 +49,7 @@ class Arbiter {
   Arbiter(std::vector<Dof> dofs, double crossfade_s);
   void submit(const Command& cmd);  // throws std::out_of_range on unknown dofs
   void clear(const std::string& source);
-  Values step(double now, double amplitude = 1.0);
+  Values step(double now);
   const std::vector<Dof>& dofs() const { return dofs_; }
 
  private:
@@ -84,18 +84,17 @@ class Limiter {
 class MotionCore {
  public:
   MotionCore(std::vector<Dof> dofs, std::vector<YawDelta> constraints, double crossfade_s,
-             double watchdog_s, double minor_factor, double watchdog_return_factor,
+             double watchdog_s, double watchdog_return_factor,
              double constraint_margin = 0.0);
   void feed(const Command& cmd);
   Values tick(double now, double dt);
-  void set_minor_present(bool v) { minor_present_ = v; }
   bool holding() const { return holding_; }
 
  private:
   Arbiter arbiter_;
   Limiter limiter_;
-  double watchdog_s_, minor_factor_, watchdog_return_factor_;
-  bool minor_present_ = false, holding_ = false;
+  double watchdog_s_, watchdog_return_factor_;
+  bool holding_ = false;
   std::optional<double> last_feed_;
 };
 

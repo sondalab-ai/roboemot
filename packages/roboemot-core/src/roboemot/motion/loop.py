@@ -26,6 +26,18 @@ Motors (SPEC 4A, 12A): the loop never turns the motors on after start-up. It pol
 asleep, stopped by its owner, a backend restarted without wake-up) it follows the measured pose
 without writing, and resumes from that pose once they are on again. Sources keep feeding the
 arbiter meanwhile. A robot unreachable at ``start`` begins lost.
+
+External control (SPEC 4A, 12A): a platform that runs a move of its own (the owner's go-to-sleep)
+drops every target streamed meanwhile and accepts them again the moment it ends, which pulled the
+robot back from the pose the move had reached. The loop sees this without any platform signal:
+the measured pose stops following what it commands (``external.ExternalControl`` has the rules).
+The diverging yield unit (a manifest group, with the groups a constraint ties to it) is no longer
+written and follows the measured pose; the motor status is read at the platform's own status
+period meanwhile (``driver.status_period_s``) and once more before resuming. A unit resumes, from
+the measured pose, once its pose has been still for ``motion.platform_move_grace_s`` with the
+motors on (that grace must outlast the platform's delay before it switches the motors off after a
+sleep move, plus one status period); motors off at any point means asleep. A hand pushing the
+head is the same: the loop yields and resumes after it settles.
 """
 
 from __future__ import annotations
@@ -43,6 +55,7 @@ from ..drivers import MotorMode, PoseGroupDriver
 from ..health import Link, OnChange
 from ..manifest import Manifest
 from .core import Command, MotionCore
+from .external import ExternalControl
 
 MS_PER_S = 1000.0
 log = logging.getLogger(__name__)
@@ -73,10 +86,12 @@ class MotionLoop:
             manifest.constraints,
             crossfade_s=0.0,
             watchdog_s=0.0,
-            minor_factor=1.0,
             watchdog_return_factor=1.0,
         )
         self._lock = threading.Lock()
+        self.external_ctl = ExternalControl(
+            manifest.dofs, manifest.constraints, cfg.motion.external, self.rate_hz
+        )
         self.apply_config(cfg)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -87,6 +102,7 @@ class MotionLoop:
         self.last_error: str | None = None
         self.max_jitter_s = 0.0
         self.motors_off = False  # the platform holds the motors off: track, do not write
+        self._seen_seq: int | None = None  # the driver's state_seq at the last judged sample
         self._next_motor_check = -math.inf
         # Called every active tick with ``(now, core)``, under the loop's lock and before the
         # arbiter runs: they may feed or clear ``core`` directly (never ``feed`` or ``clear`` of
@@ -104,10 +120,20 @@ class MotionLoop:
         watchdog_ms = min(cfg.safety.watchdog_ms, self.manifest.model.safety.watchdog_ms)
         self.core.arbiter.crossfade_s = cfg.motion.arbiter.crossfade_ms / MS_PER_S
         self.core.watchdog_s = watchdog_ms / MS_PER_S
-        self.core.minor_factor = cfg.safety.minor_motion_factor
         self.core.watchdog_return_factor = cfg.safety.watchdog_return_factor
         self.core.limiter.constraint_margin = math.radians(cfg.safety.constraint_margin_deg)
         self.link.policy = cfg.connectivity.robot
+        self.platform_move_grace_s = cfg.motion.platform_move_grace_s
+        self.external_ctl.configure(cfg.motion.external)
+
+    @property
+    def external(self) -> bool:
+        """Something else controls part of the robot: those dofs are followed, not written."""
+        return self.external_ctl.yielding
+
+    @property
+    def external_events(self) -> int:
+        return self.external_ctl.events
 
     # ---- inputs
 
@@ -125,11 +151,6 @@ class MotionLoop:
         with self._lock:
             return dict(self.core.limiter.pos)
 
-    def set_minor_present(self, present: bool) -> None:
-        """Engage or release the minor motion caps (SPEC 12); fed by ``MinorPresence``."""
-        with self._lock:
-            self.core.minor_present = present
-
     def set_mode(self, mode: MotorMode) -> None:
         with self._lock:
             self.driver.set_mode(mode)
@@ -139,11 +160,15 @@ class MotionLoop:
 
     def snapshot(self) -> dict[str, object]:
         """Loop health for diagnostics (SPEC 12A); safe to call from any thread."""
+        now = self.clock()
         with self._lock:
             out: dict[str, object] = {
                 "mode": self.mode,
                 "motors_off": self.motors_off,
-                "minor_present": self.core.minor_present,
+                "asleep": self.motors_off and self.link.online,
+                **self.external_ctl.snapshot(now),
+                "holding": self.core.holding,
+                "watchdog_engagements": self.core.watchdog_engagements,
                 "rate_hz": self.rate_hz,
                 "ticks": self.ticks,
                 "overruns": self.overruns,
@@ -163,8 +188,9 @@ class MotionLoop:
             self.mode = "active"
             self._note_error(exc)
             self.link.set(False, self.clock())
-        self._thread = threading.Thread(target=self._run, name="motion-loop", daemon=True)
-        self._thread.start()
+        thread = threading.Thread(target=self._run, name="motion-loop", daemon=True)
+        thread.start()
+        self._thread = thread
 
     def stop(self) -> None:
         self._stop.set()
@@ -179,6 +205,8 @@ class MotionLoop:
                 state = self._resync()
                 self.ticks += 1
                 return state
+            ext = self.external_ctl
+            ext.tick(now)
             failed = False
             for hook in self.tick_hooks:
                 try:
@@ -189,15 +217,67 @@ class MotionLoop:
             if not failed:
                 self._hook_error = None
             out = self.core.tick(now, dt)
-            self._call(self.driver.write_pose_targets, now, out)
+            held = ext.held
+            targets = {k: v for k, v in out.items() if k not in held} if held else out
+            if targets:
+                self._call(self.driver.write_pose_targets, now, targets)
+            measured = self._read_fresh()
+            if measured is not None:
+                if held:
+                    self._follow(measured, held)
+                    self._watch_external(now, measured)
+                started = ext.judge(now, measured, self.overruns)
+                if started:
+                    self._follow(measured, ext.held)
+                    names = ", ".join(u.name for u in started)
+                    log.info("motion: external control of the robot detected (%s), yielding", names)
+            ext.push(out)
             self.ticks += 1
             return out
+
+    def _read_fresh(self) -> dict[str, float] | None:
+        """The measured pose if a new sample arrived since the last call (always, for a driver
+        that cannot tell), else None: a repeated sample is no evidence and costs a read."""
+        seq = self._call(self.driver.state_seq)
+        if seq is not None and seq == self._seen_seq:
+            return None
+        self._seen_seq = seq
+        return self._call(self.driver.read_state)
+
+    def _follow(self, measured: dict[str, float], names: frozenset[str]) -> None:
+        """The limiter and the arbiter of the dofs not written take the measured pose."""
+        state = {k: measured[k] for k in names if k in measured and k in self.core.limiter.pos}
+        self.core.limiter.reset(state)
+        self.core.arbiter.last = {**self.core.arbiter.last, **state}
+
+    def _watch_external(self, now: float, measured: dict[str, float]) -> None:
+        """Resume the yield units that have been still for the grace, after one more look at
+        the motor status (the cached one: the platform may have switched them off since)."""
+        ready = self.external_ctl.watch(now, measured, self.platform_move_grace_s)
+        if not ready:
+            return
+        if self._call(self.driver.motors_enabled) is False:
+            self._motors_now(False)
+            return
+        for unit in ready:
+            self.external_ctl.resume(unit, measured)
+            self._follow(measured, frozenset(unit.dofs))
+            log.info("motion: %s still, resuming control", unit.name)
+
+    def _motors_now(self, enabled: bool) -> None:
+        """Track the motor state the platform reports (caller holds the lock)."""
+        if enabled and self.motors_off:
+            self._resync()  # resume from wherever the platform's wake-up left the robot
+        if not enabled:
+            self.external_ctl.clear()
+        self.motors_off = not enabled
 
     def _resync(self) -> dict[str, float]:
         measured = self._call(self.driver.read_state)
         state = {k: v for k, v in measured.items() if k in self.core.limiter.pos}
         self.core.limiter.reset(state)
         self.core.arbiter.last = {**self.core.arbiter.last, **state}
+        self.external_ctl.reset(state)
         return state
 
     @staticmethod
@@ -225,17 +305,21 @@ class MotionLoop:
 
     def _check_motors(self, now: float) -> None:
         """Track whether the platform keeps the motors off (asleep, stopped by its owner).
-        The loop never turns them on itself (SPEC 4A, 12A); it resumes when they are on."""
+        The loop never turns them on itself (SPEC 4A, 12A); it resumes when they are on. While
+        external control is detected the status is read as often as the platform refreshes it
+        (``driver.status_period_s``), no more: a faster read sees nothing new."""
         if self.mode != "active" or now < self._next_motor_check:
             return
-        self._next_motor_check = now + self.link.policy.probe_initial_s
+        period = self.link.policy.probe_initial_s
+        status_period = self.driver.status_period_s
+        if self.external and status_period is not None:
+            period = status_period
+        self._next_motor_check = now + period
         enabled = self._call(self.driver.motors_enabled)
         if enabled is None:
             return
-        if enabled and self.motors_off:
-            with self._lock:
-                self._resync()  # resume from wherever the platform's wake-up left the robot
-        self.motors_off = not enabled
+        with self._lock:
+            self._motors_now(enabled)
 
     def _note_hook_error(self, exc: Exception) -> None:
         """Count a failing hook every tick but log it once per distinct message until a clean tick

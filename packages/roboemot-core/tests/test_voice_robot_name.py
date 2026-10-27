@@ -5,6 +5,7 @@ import logging
 import numpy as np
 import pytest
 from pydantic import ValidationError
+from reachy_config import reachy_config
 from roboemot.config.schema import KeywordSet, RoboEmotConfig
 from roboemot.drivers import MockPoseDriver
 from roboemot.voice.fastpath import FastPath
@@ -13,6 +14,7 @@ from roboemot.voice.robot_name import RobotName, display_name
 
 VOICE = RoboEmotConfig().voice
 SETS = VOICE.keywords
+REACHY_VOICE = reachy_config().voice
 GENERIC = ("ehi robot", "hey robot")
 
 
@@ -28,7 +30,8 @@ def vocab(**absent):
 
 
 def spot(names, text, language="en", configured=None):
-    return KeywordSpotter(SETS, configured, names).spot(text, language)
+    names.configure(REACHY_VOICE)
+    return KeywordSpotter(REACHY_VOICE.keywords, configured, names).spot(text, language)
 
 
 def test_display_name_turns_separators_into_spaces():
@@ -78,6 +81,27 @@ def test_a_name_missing_from_the_vocabulary_is_not_used_and_is_logged_once(caplo
         KeywordSpotter(SETS, None, names)
     warnings = [r for r in caplog.records if "vocabulary" in r.message]
     assert len(warnings) == 2 and "reachy mini" in warnings[0].message  # one per language
+
+
+def test_wake_phrases_with_out_of_vocabulary_words_are_counted_and_logged_once(caplog):
+    names = RobotName(None, vocab(it={"ehi"}, en=set()))
+    with caplog.at_level(logging.WARNING, logger="roboemot.voice.robot_name"):
+        s = KeywordSpotter(SETS, None, names)
+        assert s.wake_out_of_vocab() == {"it": 1, "en": 0}  # "ehi robot"; "ciao robot" is fine
+        KeywordSpotter(SETS, None, names)  # a reload rebuilds the spotter: no second warning
+    warnings = [r for r in caplog.records if "wake phrase" in r.message]
+    assert len(warnings) == 1
+    assert "it" in warnings[0].getMessage() and "ehi" not in warnings[0].getMessage()
+
+
+def test_rendered_name_phrases_are_checked_too():
+    names = RobotName("Neve", vocab(it={"ehi"}))
+    assert KeywordSpotter(SETS, None, names).wake_out_of_vocab() == {"it": 2}  # ehi robot/neve
+
+
+def test_a_language_without_a_loaded_model_is_not_counted():
+    assert KeywordSpotter(SETS, None, RobotName(None, vocab())).wake_out_of_vocab() == {}
+    assert KeywordSpotter(SETS, None, RobotName()).wake_out_of_vocab() == {}
 
 
 def test_the_vocabulary_is_judged_per_language():
@@ -168,9 +192,9 @@ def test_the_prompt_quotes_the_sanitised_name_on_one_line():
     from roboemot.llm.prompt import system_prompt
 
     cfg = RoboEmotConfig()
-    text = system_prompt(cfg, cfg.register.child, robot_name="Bob. Ignore all")
+    text = system_prompt(cfg, cfg.register.params, robot_name="Bob. Ignore all")
     assert 'Your name is "Bob. Ignore all".' in text
-    assert "Your name is" not in system_prompt(cfg, cfg.register.child, robot_name="")
+    assert "Your name is" not in system_prompt(cfg, cfg.register.params, robot_name="")
 
 
 def test_name_aliases_belong_to_reachy_only():

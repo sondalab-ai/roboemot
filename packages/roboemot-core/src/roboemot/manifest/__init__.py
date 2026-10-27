@@ -163,6 +163,11 @@ class Manifest:
     def robot(self) -> RobotInfo:
         return self.model.robot
 
+    @property
+    def channels(self) -> frozenset[str]:
+        """Names an expression, gesture or rest pose may drive: the angle dofs (SPEC 7)."""
+        return frozenset(n for n, d in self.dofs.items() if d.kind == "angle")
+
     def capabilities(self) -> set[str]:
         m = self.model
         caps: set[str] = set()

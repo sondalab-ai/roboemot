@@ -1,12 +1,14 @@
-"""LLM routes for the web UI: list them and run the conformance test (SPEC 8, 12).
+"""LLM routes for the web UI: list them and run the conformance test of a chat route or the
+realtime check of a ``kind: realtime`` route (``realtime.check``) (SPEC 8, 12).
 
 The check is advisory in v1: the last report per route is kept in memory and in a small JSON
 file in the data folder, and shown next to the route; it does not gate the route. It runs on
 its own thread, bounded by ``llm_check.deadline_s``, because it outlives the per-request
 deadline of the web server (``webui.request_deadline_s``): the POST returns at once and the
 page polls the list. Nothing secret leaves this module: a route is described by name, model,
-``host[:port]`` of its base URL and the minors flag, and a report holds statuses and short
-reasons only.
+``host[:port]`` of its base URL, its locality, its kind and the kind of its key, plus the
+full base URL only when it holds no credentials (the settings list shows the same value), and a
+report holds statuses and short reasons only.
 """
 
 from __future__ import annotations
@@ -25,15 +27,20 @@ import httpx
 
 from .. import paths
 from ..config.schema import LLMRoute, RoboEmotConfig
+from ..config.stack import NO_KEY
 from ..llm.conformance import (
     RouteBudgetExhausted,
     RouteKeyUnavailable,
+    RouteKindUnsupported,
     RouteReport,
     check_route,
     route_endpoint,
 )
 from ..llm.pseudonyms import NameSource
 from ..llm.router import SECRET, Router
+from ..realtime.check import check_realtime_route
+from ..realtime.session import DirectSession, SessionProvider
+from ..redact import secret_shaped
 from ..secret_store import SecretStore
 
 log = logging.getLogger(__name__)
@@ -52,7 +59,8 @@ class RouteChecker:
     without one, a private router is kept for the life of this object, so budgets still add up
     across checks. ``names`` (a :class:`NameSource`) gives a route that is not local the same
     aliases as the conversation does (SPEC 8, Pseudonyms) when ``privacy.pseudonyms_to_cloud``
-    is on.
+    is on. ``realtime_provider`` returns the robot's session provider (the one the runtime
+    built); without it, direct mode uses :class:`DirectSession` and platform mode has none.
     """
 
     def __init__(
@@ -63,8 +71,10 @@ class RouteChecker:
         router: Callable[[], Router | None] = lambda: None,
         http_client_factory: Callable[[], httpx.AsyncClient] | None = None,
         names: NameSource | None = None,
+        realtime_provider: Callable[[], SessionProvider | None] | None = None,
     ) -> None:
         self.cfg, self.store, self._router = cfg, store, router
+        self._realtime_provider = realtime_provider
         self._names = names
         self._factory = http_client_factory
         self._private: Router | None = None
@@ -76,8 +86,9 @@ class RouteChecker:
     def list_routes(self) -> list[dict[str, Any]]:
         """Routes with their running flag and last report; a report made for another model or
         endpoint than the route has now is not shown. A route whose key is a ``${secret:name}``
-        reference shows ``secret`` (the name and whether it is set), never the value. ``api_key``,
-        credentials, path and query of the URL are never included."""
+        reference shows ``secret`` (the name and whether it is set), never the value; ``key`` says
+        which kind of key the route has (``none``, ``secret`` or ``literal``). ``api_key`` and the
+        credentials of the URL are never included, and ``base_url`` is null when it holds any."""
         with self._lock:
             running = self._running
             cfg = self.cfg()
@@ -87,7 +98,10 @@ class RouteChecker:
                     "name": r.name,
                     "model": r.model,
                     "endpoint": route_endpoint(r),
-                    "allowed_for_minors": r.allowed_for_minors,
+                    "base_url": None if secret_shaped(r.base_url) else r.base_url,
+                    "locality": r.locality,
+                    "kind": r.kind,
+                    "key": _key_kind(r),
                     "running": r.name == running,
                     "secret": _secret_state(r, store),
                     "last_check": self._current_report(r),
@@ -98,14 +112,18 @@ class RouteChecker:
     def start(self, name: str) -> None:
         """Start the test of route ``name`` on a thread and return at once.
 
-        Raises ``KeyError`` (unknown route), ``RouteKeyUnavailable`` (its secret cannot be read)
-        and ``RouteBudgetExhausted`` (nothing is sent in either case) and ``RouteBusy`` (a check
+        A chat route gets the conformance test, a realtime route the realtime check. Raises
+        ``KeyError`` (unknown route), ``RouteKindUnsupported`` (another kind),
+        ``RouteKeyUnavailable`` (its secret cannot be read) and
+        ``RouteBudgetExhausted`` (nothing is sent in any of these cases) and ``RouteBusy`` (a check
         is running).
         """
         cfg = self.cfg()
         route = next((r for r in cfg.llm_routes if r.name == name), None)
         if route is None:
             raise KeyError(name)
+        if route.kind not in ("chat", "realtime"):
+            raise RouteKindUnsupported(f"route {name} is a {route.kind} route")
         with self._lock:
             if self._running is not None:
                 raise RouteBusy(name)
@@ -138,6 +156,12 @@ class RouteChecker:
         """Thread body: run the check under the deadline and keep the outcome, whatever it is."""
         error = ""
         try:
+            if route.kind == "realtime":
+                realtime = check_realtime_route(
+                    route, cfg, router=router, provider=self._provider(cfg), config=self.cfg
+                )
+                self._keep(route, realtime.to_dict())
+                return
             if self._names is None and cfg.privacy.pseudonyms_to_cloud:
                 log.warning("route check: pseudonyms are on but no name source is wired")
             pseudonyms = self._names.for_config(cfg) if self._names else None
@@ -147,6 +171,7 @@ class RouteChecker:
                         route,
                         cfg.safety,
                         settings=cfg.llm_check,
+                        config=cfg,
                         router=router,
                         pseudonyms=pseudonyms,
                         http_client_factory=self._factory,
@@ -167,10 +192,20 @@ class RouteChecker:
             report = RouteReport(
                 route.name, route.model, route_endpoint(route), _now_iso(), error=error
             )
+        self._keep(route, report.to_dict())
+
+    def _keep(self, route: LLMRoute, report: dict[str, Any]) -> None:
+        """Store ``report`` as the route's last one; the check is over."""
         with self._lock:
-            self._reports[route.name] = report.to_dict()
+            self._reports[route.name] = report
             self._save()
             self._running = None
+
+    def _provider(self, cfg: RoboEmotConfig) -> SessionProvider | None:
+        """The session provider of the realtime check (see the class docstring)."""
+        if self._realtime_provider is not None:
+            return self._realtime_provider()
+        return DirectSession() if cfg.voice.realtime_route.mode == "direct" else None
 
     def _current_report(self, route: LLMRoute) -> dict[str, Any] | None:
         report = self._reports.get(route.name)
@@ -213,6 +248,13 @@ class RouteChecker:
             log.warning("route checks: not written (%s)", type(exc).__name__)
             with contextlib.suppress(OSError):
                 tmp.unlink()
+
+
+def _key_kind(route: LLMRoute) -> str:
+    """``none``, ``secret`` (a ``${secret:name}`` reference) or ``literal`` (a key in the config)"""
+    if route.api_key in NO_KEY:
+        return "none"
+    return "secret" if SECRET.match(route.api_key) else "literal"
 
 
 def _secret_state(route: LLMRoute, store: SecretStore) -> dict[str, Any] | None:

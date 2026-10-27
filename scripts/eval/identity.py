@@ -134,7 +134,6 @@ class Draw:
                 [emb[self.offset[person] + i] for i in chosen],
                 stages.face_embedder.model_id,
                 consent=consent,
-                age_group="adult",
             )
             self.owner[record.person_id] = person
         self.owner_of_person = {v: k for k, v in self.owner.items()}
@@ -152,7 +151,6 @@ class Draw:
             face_detector=stages.face_detector,
             face_embedder=stages.face_embedder,
             refresh=False,
-            executor=None,
         )
 
     def per_evaluation(self) -> dict:
@@ -317,7 +315,7 @@ def main() -> None:
     args = ap.parse_args()
 
     cfg = common.config()
-    stages = common.load_stages(cfg, attributes=False, appearance=False, objects=False)
+    stages = common.load_stages(cfg, appearance=False, objects=False)
     paths = image_paths()
     emb, ok, multi = extract(stages, cfg, paths)
     common.log(
@@ -332,7 +330,6 @@ def main() -> None:
         per_draw.append(summarize(ev, tr))
         far = per_draw[-1]["per_evaluation"]["far"]["rate"]
         common.log(f"draw {d}: eval FAR {far:.5f}, track {per_draw[-1]['per_track_3_of_5']}")
-        draw.pipeline.close()
         shutil.rmtree(common.SCRATCH / f"registry-{d}", ignore_errors=True)
     spike = json.loads(LFW_BENCH.read_text())["pipelines"]["yunet+sface"]
     result = {

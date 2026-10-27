@@ -84,6 +84,7 @@ def test_scripts_are_external_and_only_the_effects_loader_is_a_module(client):
     assert scripts == {
         "/static/theme.js": None,
         "/static/settings.js": None,
+        "/static/live.js": None,
         "/static/app.js": None,
         "/static/fx.js": "module",
     }
@@ -110,7 +111,7 @@ def test_local_stylesheet_has_only_the_registered_product_accent():
 
 
 def test_first_party_scripts_have_no_inline_style_or_html_injection():
-    for name in ("app.js", "settings.js", "theme.js", "fx.js"):
+    for name in ("app.js", "settings.js", "live.js", "theme.js", "fx.js"):
         text = (STATIC / name).read_text()
         for banned in (
             'setAttribute("style"',
@@ -131,7 +132,7 @@ def test_no_native_confirm_prompt_or_page_level_pin_field_is_left():
 
 
 def _page_js() -> str:
-    return (STATIC / "app.js").read_text() + (STATIC / "settings.js").read_text()
+    return "".join((STATIC / n).read_text() for n in ("app.js", "settings.js", "live.js"))
 
 
 def _keys_used_by_app() -> set[str]:
@@ -152,7 +153,7 @@ def test_every_string_key_the_page_reads_exists_in_both_languages():
     "prefix",
     [
         "tab_", "state_", "kind_", "status_", "origin_", "theme_", "settings_source_", "check_",
-        "route_error_", "scope_", "age_", "gender_", "conflict_", "photo_", "hint_",
+        "route_error_", "scope_", "conflict_", "photo_", "hint_",
     ],
 )  # fmt: skip
 def test_dynamic_string_families_are_complete(prefix):
@@ -177,7 +178,7 @@ def test_tabs_are_the_strings_that_exist():
     js = (STATIC / "app.js").read_text()
     block = js[js.index("const TABS = {") :]
     names = re.findall(r"^\s+([a-z]+): [a-zA-Z]+View,", block, re.M)
-    assert names == ["enroll", "registry", "catalogue", "routes", "settings", "debug"]
+    assert names == ["enroll", "registry", "catalogue", "routes", "settings", "live", "debug"]
     for name in names:
         assert EN["tab_" + name] and IT["tab_" + name]
 
@@ -246,10 +247,17 @@ def test_only_a_saved_change_fires_the_glitch_burst():
     assert "result.changed ? row.path : null" in js
 
 
+def test_vendored_javascript_is_the_only_place_for_effect_internals():
+    server_text = Path(server_module.__file__).read_text()
+    # blob: for the live preview, data: for the kit's art; images only
+    assert "img-src 'self' data: blob:;" in server_text
+
+
 def test_csp_allows_data_images_for_the_art_and_nothing_else_widens():
-    # data: carries the kit's art masks; the glass lens stays off through the class bans above
+    # data: carries the kit's art masks; the glass lens stays off through the class bans above.
+    # blob: carries the Live video preview's object URLs.
     assert server_module.CSP == (
-        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; "
         "connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; "
         "frame-ancestors {ancestors}"
     )

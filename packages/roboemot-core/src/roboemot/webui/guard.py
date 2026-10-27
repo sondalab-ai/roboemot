@@ -1,9 +1,8 @@
 """Host and Origin checks against DNS rebinding and cross-site requests (SPEC 12).
 
-Same rule as the Reachy Mini daemon (``reachy_mini.daemon.app.middleware``,
-``is_trusted_host``): a Host header must name an IP literal, ``localhost``, a ``.local`` mDNS
-name, or a name in ``webui.allowed_hosts``. A rebinding attack arrives under the attacker's
-public DNS name, which is none of these.
+Same rule as a robot daemon's trusted-host middleware: a Host header must name an IP literal,
+``localhost``, a ``.local`` mDNS name, or a name in ``webui.allowed_hosts``. A rebinding
+attack arrives under the attacker's public DNS name, which is none of these.
 """
 
 from __future__ import annotations

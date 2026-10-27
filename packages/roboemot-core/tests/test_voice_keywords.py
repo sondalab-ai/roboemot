@@ -1,15 +1,19 @@
 """Keyword spotting on ASR text and the wake-word policy (SPEC 8 stage 3)."""
 
 import pytest
-from roboemot.config.schema import KeywordSet, RoboEmotConfig
+from reachy_config import reachy_config
+from roboemot.config.schema import KeywordSet
 from roboemot.voice.keywords import KeywordSpotter, normalise
+from roboemot.voice.robot_name import RobotName
 from roboemot.voice.wake import WakeGate
 
-V = RoboEmotConfig().voice
+V = reachy_config().voice
 
 
 def spotter(**kw) -> KeywordSpotter:
-    return KeywordSpotter(kw.get("sets", V.keywords), kw.get("wake", "reachy"))
+    names = RobotName()
+    names.configure(V)
+    return KeywordSpotter(kw.get("sets", V.keywords), kw.get("wake", "reachy"), names)
 
 
 @pytest.mark.parametrize(
@@ -186,5 +190,11 @@ def test_followup_by_a_different_known_person_is_not_addressed():
 def test_gate_snapshot_has_no_content():
     g = WakeGate("always", 10.0)
     g.decide(wake_word=True, enrolled_in_view=False, start=0, last_speech=1)
-    assert g.snapshot(5.0) == {"policy": "always", "window_open": True, "window_left_s": 6.0}
+    snap = g.snapshot(5.0)
+    assert {k: snap[k] for k in ("policy", "window_open", "window_left_s")} == {
+        "policy": "always",
+        "window_open": True,
+        "window_left_s": 6.0,
+    }
+    assert snap["decisions"]["wake_word"] == 1
     assert g.snapshot(50.0)["window_open"] is False

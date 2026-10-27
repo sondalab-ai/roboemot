@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -112,7 +113,9 @@ def test_a_failing_sink_does_not_end_the_thread_and_logs_once(caplog):
         audio.start()
         assert wait_for(lambda: len(seen) == 5)
         audio.stop()
-    warnings = [r for r in caplog.records if r.name.endswith("audio")]
+    warnings = [
+        r for r in caplog.records if r.name.endswith("audio") and r.levelno >= logging.WARNING
+    ]
     assert len(warnings) == 1 and warnings[0].getMessage() == "audio: ValueError"
 
 
@@ -141,7 +144,14 @@ def test_no_buffer_is_kept_or_logged(caplog):
 
     assert list(arrays(audio)) == []
     assert all(str(marker) not in r.getMessage() for r in caplog.records)
-    assert set(audio.snapshot()) == {"state", "reason", "chunks", "dropped_stale", "voice"}
+    assert set(audio.snapshot()) == {
+        "state",
+        "reason",
+        "chunks",
+        "dropped_stale",
+        "voice",
+        "levels",
+    }
     assert audio.snapshot()["voice"] is None  # no voice queue, so no audio is kept
 
 
@@ -384,3 +394,104 @@ def test_stop_closes_the_capture_even_when_the_thread_did_not_end_in_time(monkey
         assert audio._thread is not None  # a stuck thread keeps its handle
     finally:
         release.set()
+
+
+# ------------------------------------------------------------------ channel levels (SPEC 12A)
+
+BLOCK = 1600  # 0.1 s at 16 kHz: one chunk closes a block of level_block_s=0.1
+
+
+def levels_of(columns, blocks=3, channels=None, **kw):
+    """The ``levels`` report after ``blocks`` chunks of the given channel columns."""
+    rng = np.random.default_rng(1)
+    base = (0.2 * rng.standard_normal(BLOCK)).astype(np.float32)
+    chunk = np.stack([f(base) for f in columns], axis=1) if columns else base
+    mini, _ = voice_media([chunk] * blocks, channels=channels or max(1, len(columns)))
+    audio = ReachyAudio(mini, None, 50, voice=True, level_block_s=0.1, **kw)
+    manual(audio, mini)
+    for _ in range(blocks):
+        audio.poll_once()
+    snap = audio.snapshot()["levels"]
+    audio.stop()
+    return snap
+
+
+def test_identical_channels_correlate_and_have_equal_levels():
+    lv = levels_of([lambda x: x, lambda x: x])
+    assert lv["block_s"] == 0.1 and lv["blocks"] == 3
+    assert lv["corr"]["min"] == pytest.approx(1.0) and lv["corr"]["max"] == pytest.approx(1.0)
+    assert lv["ch0_dbfs"] == pytest.approx(lv["ch1_dbfs"])
+    assert lv["ch0_dbfs"] == pytest.approx(lv["mono_dbfs"])
+    assert -20 < lv["ch0_dbfs"]["p50"] < -10  # rms 0.2 is -14 dBFS
+
+
+def test_anti_phase_channels_cancel_in_the_mono_mix():
+    lv = levels_of([lambda x: x, lambda x: -x])
+    assert lv["corr"]["max"] == pytest.approx(-1.0)
+    assert lv["mono_dbfs"]["max"] == -120.0
+    assert lv["ch0_dbfs"]["p50"] == pytest.approx(lv["ch1_dbfs"]["p50"])
+
+
+def test_a_silent_channel_has_zero_correlation_and_the_floor_level():
+    lv = levels_of([lambda x: x, lambda x: x * 0])
+    assert lv["corr"]["min"] == 0.0 and lv["corr"]["max"] == 0.0
+    assert lv["ch1_dbfs"]["max"] == -120.0 and lv["ch0_dbfs"]["p50"] > -20
+    assert lv["mono_dbfs"]["p50"] == pytest.approx(lv["ch0_dbfs"]["p50"] - 6.02, abs=0.01)
+
+
+def test_mono_input_has_no_levels():
+    assert levels_of([], channels=1) is None
+
+
+def test_a_block_closes_only_after_level_block_s_of_input_and_the_window_is_bounded():
+    half = np.full((BLOCK // 2, 2), 0.1, np.float32)
+    mini, _ = voice_media([half] * 30)
+    audio = ReachyAudio(mini, None, 50, voice=True, level_block_s=0.1, level_window=10)
+    manual(audio, mini)
+    audio.poll_once()
+    assert audio.snapshot()["levels"] is None
+    for _ in range(29):
+        audio.poll_once()
+    assert audio.snapshot()["levels"]["blocks"] == 10
+    audio.stop()
+
+
+def test_levels_are_plain_json_and_the_chunk_is_not_kept():
+    lv = levels_of([lambda x: x, lambda x: 0.5 * x])
+    assert json.loads(json.dumps(lv)) == lv
+    assert all(type(v) is float for k in ("ch0_dbfs", "corr") for v in lv[k].values())
+
+
+def test_a_reload_takes_the_new_stall_limit():
+    """Sweep (SPEC 11A): the catch-up limit follows ``reflexes.max_age_ms`` without a restart."""
+    from roboemot.config.schema import RoboEmotConfig
+
+    mini, _ = media([])
+    audio = ReachyAudio(mini, None, 50, max_gap_s=0.15)
+    audio.apply_config(RoboEmotConfig(reflexes={"max_age_ms": 400}))
+    assert audio.max_gap_s == 0.4
+
+
+def test_the_levels_are_kept_without_the_voice_pipeline():
+    """R4 S8/T6: with no listener (voice off) the reflex path still reads every chunk, and the
+    channel levels are reported from it: that setup is where the question comes up."""
+    rng = np.random.default_rng(2)
+    base = (0.2 * rng.standard_normal(BLOCK)).astype(np.float32)
+    mini, _ = voice_media([np.stack([base, base], axis=1)] * 3)
+    audio = ReachyAudio(mini, lambda rms, stamp: None, 200, voice=False, level_block_s=0.1)
+    audio.start()
+    try:
+        assert wait_for(lambda: (audio.snapshot()["levels"] or {}).get("blocks") == 3)
+    finally:
+        audio.stop()
+    snap = audio.snapshot()
+    assert snap["voice"] is None and snap["levels"]["corr"]["min"] == pytest.approx(1.0)
+
+
+def test_drained_chunks_count_for_the_levels():
+    chunk = np.full((BLOCK, 2), 0.1, np.float32)
+    mini, _ = voice_media([chunk] * 4)
+    audio = ReachyAudio(mini, lambda rms, stamp: None, 50, voice=False, level_block_s=0.1)
+    audio._read_format(mini.media)
+    assert audio.poll_once(drain=True)
+    assert audio.snapshot()["dropped_stale"] == 3 and audio.snapshot()["levels"]["blocks"] == 4

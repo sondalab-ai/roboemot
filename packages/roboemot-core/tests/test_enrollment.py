@@ -32,7 +32,7 @@ W, H = 320, 240
 DIM = 8
 MODEL = "mock-face"
 NAME = "Ada Lovelace Secret"
-ADULT = Consent(NAME, datetime(2026, 1, 1, tzinfo=UTC), ("face", "refresh"))
+CONSENT = Consent(NAME, datetime(2026, 1, 1, tzinfo=UTC), ("face", "refresh"))
 TARGET = CFG.enrollment.target_samples
 
 
@@ -143,7 +143,7 @@ def test_frontal_only_samples_keep_collecting_up_to_the_cap(rig):
     assert st["collected"] == 12 and st["state"] == COLLECTING
     assert not st["can_complete"] and st["hint"]
     with pytest.raises(EnrollmentError, match="too little change of head angle"):
-        rig.svc.complete(NAME, ADULT, "adult")
+        rig.svc.complete(NAME, CONSENT)
     feed(rig, 20, varied=False, start=100.0)
     st = rig.svc.status()
     assert st["state"] == READY and st["collected"] == CFG.identity.max_embeddings_per_person
@@ -213,12 +213,12 @@ def test_complete_enrolls_with_consent_and_zeroes_the_samples(rig):
     rig.svc.start("s1")
     feed(rig, 40)
     samples = list(rig.svc._samples)
-    person_id = rig.svc.complete(NAME, ADULT, "adult", "female")
+    person_id = rig.svc.complete(NAME, CONSENT)
     person = rig.reg.get_person(person_id)
     assert person.display_name == NAME and person.status == "active"
     assert len(person.face_embeddings) == len(samples)
     assert person.embedding_model_id == MODEL
-    assert person.age_group.value == "adult" and person.age_group.source == "declared"
+    assert not hasattr(person, "age_group") and not hasattr(person, "gender")
     assert not any(s.any() for s in samples)
     st = rig.svc.status()
     assert st["state"] == COMPLETED and st["collected"] == 0
@@ -229,7 +229,7 @@ def test_complete_without_a_choice_touches_no_pending_record(rig):
     two = rig.reg.create_pending_person(NAME.upper())
     rig.svc.start("s1")
     feed(rig, 40)
-    person_id = rig.svc.complete(NAME, ADULT, "adult", "female")
+    person_id = rig.svc.complete(NAME, CONSENT)
     ids = {r.id: r.status for r in rig.reg.list()}
     assert ids[one.person_id] == "pending" and ids[two.person_id] == "pending"
     assert ids[person_id] == "active" and len(ids) == 3
@@ -240,11 +240,10 @@ def test_complete_with_a_chosen_pending_record_completes_that_one_only(rig):
     two = rig.reg.create_pending_person(NAME)  # same name, not chosen
     rig.svc.start("s1")
     feed(rig, 40)
-    person_id = rig.svc.complete("Ada L.", ADULT, "adult", "female", pending_id=two.person_id)
+    person_id = rig.svc.complete("Ada L.", CONSENT, pending_id=two.person_id)
     assert person_id == two.person_id
     done = rig.reg.get_person(two.person_id)
     assert done.status == "active" and done.display_name == "Ada L."
-    assert done.age_group.value == "adult" and done.age_group.source == "declared"
     assert len(done.face_embeddings) >= 5 and done.consent is not None
     assert rig.reg.get_person(one.person_id).status == "pending"
     assert len(rig.reg.list()) == 2
@@ -254,35 +253,34 @@ def test_complete_with_an_unknown_or_already_active_pending_id_is_refused(rig):
     rig.svc.start("s1")
     feed(rig, 40)
     with pytest.raises(KeyError):
-        rig.svc.complete(NAME, ADULT, "adult", None, pending_id="nope")
-    active = rig.reg.enroll(
-        "Bob", [axis(i, 0.01, i) for i in range(5)], MODEL, consent=ADULT, age_group="adult"
-    )
+        rig.svc.complete(NAME, CONSENT, pending_id="nope")
+    active = rig.reg.enroll("Bob", [axis(i, 0.01, i) for i in range(5)], MODEL, consent=CONSENT)
     with pytest.raises(ValueError, match="already enrolled"):
-        rig.svc.complete(NAME, ADULT, "adult", None, pending_id=active.person_id)
+        rig.svc.complete(NAME, CONSENT, pending_id=active.person_id)
     assert rig.svc.status()["state"] != COMPLETED  # the session survives for a retry
-    assert rig.svc.complete(NAME, ADULT, "adult", None)  # and still completes without a choice
+    assert rig.svc.complete(NAME, CONSENT)  # and still completes without a choice
 
 
 def test_complete_with_too_few_samples_or_no_session_raises(rig):
     with pytest.raises(EnrollmentError, match="no enrollment session"):
-        rig.svc.complete(NAME, ADULT, "adult")
+        rig.svc.complete(NAME, CONSENT)
     rig.svc.start("s1")
     feed(rig, 2)
     with pytest.raises(EnrollmentError, match="only 2 of 5"):
-        rig.svc.complete(NAME, ADULT, "adult")
+        rig.svc.complete(NAME, CONSENT)
 
 
 def test_a_refused_consent_keeps_the_samples_for_a_retry(rig):
     rig.svc.start("s1")
     feed(rig, 40)
     n = rig.svc.status()["collected"]
-    with pytest.raises(ConsentError, match="guardian"):  # age not declared: possible minor
-        rig.svc.complete(NAME, ADULT)
+    no_face = Consent(NAME, datetime(2026, 1, 1, tzinfo=UTC), ("voice",))
+    with pytest.raises(ConsentError, match="scope"):
+        rig.svc.complete(NAME, no_face)
     st = rig.svc.status()
     assert st["collected"] == n and st["state"] == READY
     assert rig.reg.list() == []
-    rig.svc.complete(NAME, ADULT, "adult")
+    rig.svc.complete(NAME, CONSENT)
     assert len(rig.reg.list()) == 1
 
 
@@ -340,7 +338,7 @@ def test_two_threads_completing_at_once_enroll_one_person(rig, monkeypatch):
     def go():
         barrier.wait()
         try:
-            outcomes.append(rig.svc.complete(NAME, ADULT, "adult"))
+            outcomes.append(rig.svc.complete(NAME, CONSENT))
         except EnrollmentError as exc:
             outcomes.append(str(exc))
 
@@ -384,7 +382,7 @@ def test_a_session_times_out_on_the_next_call(rig):
     st = rig.svc.status()
     assert st["state"] == TIMED_OUT and st["collected"] == 0
     with pytest.raises(EnrollmentError):
-        rig.svc.complete(NAME, ADULT, "adult")
+        rig.svc.complete(NAME, CONSENT)
 
 
 def test_expire_ends_a_session_without_any_frame_or_call(rig):
@@ -421,7 +419,7 @@ def test_nothing_secret_is_logged(rig, caplog):
         rig.svc.start("s1")
         feed(rig, 40)
         rig.svc.status()
-        rig.svc.complete(NAME, ADULT, "adult", "male")
+        rig.svc.complete(NAME, CONSENT)
         rig.svc.start("s2")
         rig.svc.cancel()
     assert NAME not in caplog.text
@@ -439,9 +437,7 @@ def test_status_holds_only_plain_values_never_embeddings_or_names(rig):
 
 def test_passthroughs_list_rename_merge_delete(rig):
     reg, svc = rig.reg, rig.svc
-    pid = reg.enroll(
-        NAME, [axis(0, 0.01, i) for i in range(5)], MODEL, consent=ADULT, age_group="adult"
-    ).person_id
+    pid = reg.enroll(NAME, [axis(0, 0.01, i) for i in range(5)], MODEL, consent=CONSENT).person_id
     cat_a = reg.enroll_entity("animal", "Tom", [axis(1), axis(1, 0.01)], "dino", category="cat")
     cat_b = reg.enroll_entity("animal", "Tommy", [axis(1, 0.02, 3)], "dino", category="cat")
     assert {r.kind for r in svc.list_records()} == {"person", "animal"}
@@ -465,9 +461,7 @@ def test_passthroughs_list_rename_merge_delete(rig):
 def test_rename_person_persists_and_refuses_unknown_or_forgotten_ids(tmp_path):
     store_dir = tmp_path / "reg"
     reg = Registry(FileStore(store_dir, allow_plaintext=True), CFG.identity)
-    pid = reg.enroll(
-        NAME, [axis(0, 0.01, i) for i in range(5)], MODEL, consent=ADULT, age_group="adult"
-    ).person_id
+    pid = reg.enroll(NAME, [axis(0, 0.01, i) for i in range(5)], MODEL, consent=CONSENT).person_id
     reg.rename_person(pid, "Ada")
     reloaded = Registry(FileStore(store_dir, allow_plaintext=True), CFG.identity)
     assert reloaded.get_person(pid).display_name == "Ada"

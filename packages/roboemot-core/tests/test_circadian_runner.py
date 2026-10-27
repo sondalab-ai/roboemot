@@ -12,6 +12,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from roboemot.affect.clips import load_clip_library
 from roboemot.affect.runner import AffectRunner
 from roboemot.bus import Bus
 from roboemot.circadian import (
@@ -43,6 +44,7 @@ MANIFEST = (
     Path(__file__).resolve().parents[3] / "configs" / "manifests" / "reachy-mini-wireless.yaml"
 )
 DAY_S = 24 * 3600
+CLIPS = load_clip_library(load_manifest(MANIFEST, allow_unmeasured_dynamics=True))
 
 
 @pytest.fixture(scope="module")
@@ -53,7 +55,12 @@ def manifest():
 @pytest.fixture(scope="module")
 def cfg(manifest) -> RoboEmotConfig:
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour)
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour,
+        manifest.channels,
+        load_clip_library(manifest),
+        body_yaw=None,
+    )
     return stack.effective()
 
 
@@ -253,7 +260,10 @@ def runner_for(cfg, manifest=None, *, hour=12.0, affect=None, **kw):
         affect or RecordingSink(),
         clock=clock,
         dofs=manifest.dofs if manifest else None,
+        clips=CLIPS,
         **kw,
+        body_yaw=None,
+        affect_intensity=lambda: 0.0,
     )
     return r, clock
 
@@ -318,7 +328,9 @@ def test_the_runner_publishes_on_change_and_periodically(cfg):
     bus.subscribe("circadian.state", lambda m: got.append((m.stamp, m.payload.state)))
     clock = FakeClock()
     clock.set(0.0, 12.0)
-    r = CircadianRunner(cfg, bus, RecordingSink(), clock=clock)
+    r = CircadianRunner(
+        cfg, bus, RecordingSink(), clock=clock, body_yaw=None, affect_intensity=lambda: 0.0
+    )
     run_for(r, clock, 10)
     assert len(got) == 1  # the first state
     run_for(r, clock, cfg.circadian.publish_period_s * 3, step=10)
@@ -380,7 +392,9 @@ def test_presence_is_the_weak_second_cue(cfg):
     bus = Bus()
     clock = FakeClock()
     clock.set(0.0, 23.0)
-    r = CircadianRunner(cfg, bus, RecordingSink(), clock=clock)
+    r = CircadianRunner(
+        cfg, bus, RecordingSink(), clock=clock, body_yaw=None, affect_intensity=lambda: 0.0
+    )
     run_for(r, clock, 60)
     assert r.model.state == "resting"
     bus.publish("percept.face", object(), clock.t)
@@ -388,17 +402,33 @@ def test_presence_is_the_weak_second_cue(cfg):
     assert r.present() and r.model.state != "resting"
     run_for(r, clock, cfg.circadian.presence_window_s + 20)
     assert not r.present() and r.model.state == "resting"
-    r2 = CircadianRunner(cfg, bus, RecordingSink(), clock=clock, engaged=lambda: True)
+    r2 = CircadianRunner(
+        cfg,
+        bus,
+        RecordingSink(),
+        clock=clock,
+        engaged=lambda: True,
+        body_yaw=None,
+        affect_intensity=lambda: 0.0,
+    )
     assert r2.present()
     bus.publish("attention.target", None, clock.t)  # a cleared target is not presence
-    r3 = CircadianRunner(cfg, Bus(), None, clock=clock)
+    r3 = CircadianRunner(cfg, Bus(), None, clock=clock, body_yaw=None, affect_intensity=lambda: 0.0)
     r3.bus.publish("attention.target", None, 0.0)
     assert not r3.present()
 
 
 def test_presence_window_follows_the_detection_period(cfg):
     clock = FakeClock()
-    r = CircadianRunner(cfg, Bus(), None, clock=clock, detection_period=lambda: 60.0)
+    r = CircadianRunner(
+        cfg,
+        Bus(),
+        None,
+        clock=clock,
+        detection_period=lambda: 60.0,
+        body_yaw=None,
+        affect_intensity=lambda: 0.0,
+    )
     r.note_presence()
     clock.advance(cfg.circadian.presence_window_s + 30)
     assert r.present()  # three slow detection periods outlast the base window
@@ -411,7 +441,7 @@ def test_the_arousal_baseline_follows_the_state_through_the_affect_runner(cfg):
     affect = AffectRunner(cfg.affect, cfg.appraisal, bus, 0.0)
     clock = FakeClock()
     clock.set(0.0, 12.0)
-    r = CircadianRunner(cfg, bus, affect, clock=clock)
+    r = CircadianRunner(cfg, bus, affect, clock=clock, body_yaw=None, affect_intensity=lambda: 0.0)
     run_for(r, clock, 10)
     states = cfg.circadian.states
     assert affect.engine.baseline_arousal == states["awake"].arousal_baseline
@@ -468,7 +498,15 @@ def drive(motion, seconds, state, step=0.05, start=0.0, attending=False):
 
 
 def test_drowsy_yawns_now_and_then_additive_at_expression_priority(cfg, manifest):
-    m = CircadianMotion(cfg.circadian, cfg.circadian_motion, manifest.dofs, random.Random(3))
+    m = CircadianMotion(
+        cfg.circadian,
+        cfg.circadian_motion,
+        manifest.dofs,
+        rng=random.Random(3),
+        body_yaw="body_yaw",
+        clips=CLIPS,
+        affect_intensity=lambda: 0.0,
+    )
     run = drive(m, 1200, "drowsy")
     yawns = [t for (t, cmds), (_, prev) in zip(run[1:], run, strict=False) if cmds and not prev]
     interval = cfg.circadian.yawn_interval_s
@@ -483,14 +521,29 @@ def test_drowsy_yawns_now_and_then_additive_at_expression_priority(cfg, manifest
 
 
 def test_no_yawn_while_awake_resting_or_attending(cfg, manifest):
-    m = CircadianMotion(cfg.circadian, cfg.circadian_motion, manifest.dofs, random.Random(3))
+    m = CircadianMotion(
+        cfg.circadian,
+        cfg.circadian_motion,
+        manifest.dofs,
+        rng=random.Random(3),
+        body_yaw="body_yaw",
+        clips=CLIPS,
+        affect_intensity=lambda: 0.0,
+    )
     for state, attending in (("awake", False), ("resting", False), ("drowsy", True)):
         run = drive(m, 600, state, attending=attending)
         assert not any(c.source == FX_SOURCE for _, cmds in run for c in cmds), state
 
 
 def test_resting_commands_the_rest_posture_at_idle_priority(cfg, manifest):
-    m = CircadianMotion(cfg.circadian, cfg.circadian_motion, manifest.dofs)
+    m = CircadianMotion(
+        cfg.circadian,
+        cfg.circadian_motion,
+        manifest.dofs,
+        body_yaw="body_yaw",
+        clips=CLIPS,
+        affect_intensity=lambda: 0.0,
+    )
     cmds = m.commands(1.0, "resting")
     assert [c.source for c in cmds] == [REST_SOURCE]
     rest = cmds[0]
@@ -505,7 +558,14 @@ def test_resting_commands_the_rest_posture_at_idle_priority(cfg, manifest):
 
 
 def test_waking_plays_a_three_second_stretch(cfg, manifest):
-    m = CircadianMotion(cfg.circadian, cfg.circadian_motion, manifest.dofs)
+    m = CircadianMotion(
+        cfg.circadian,
+        cfg.circadian_motion,
+        manifest.dofs,
+        body_yaw="body_yaw",
+        clips=CLIPS,
+        affect_intensity=lambda: 0.0,
+    )
     assert m.start_waking(10.0)
     run = drive(m, 4.0, "drowsy", start=10.0)
     active = [t for t, cmds in run if cmds]
@@ -514,23 +574,36 @@ def test_waking_plays_a_three_second_stretch(cfg, manifest):
     assert peak > 0 and m.playing == ""
 
 
-def test_primitives_respect_the_minor_cap(cfg, manifest):
-    m = CircadianMotion(cfg.circadian, cfg.circadian_motion, manifest.dofs)
-    m.set_minor_factor(0.001)
+def test_primitives_stay_inside_the_manifest_range(cfg, manifest):
+    m = CircadianMotion(
+        cfg.circadian,
+        cfg.circadian_motion,
+        manifest.dofs,
+        body_yaw="body_yaw",
+        clips=CLIPS,
+        affect_intensity=lambda: 0.0,
+    )
     m.start_waking(0.0)
     cmds = [c for _, cs in drive(m, 3.0, "drowsy") for c in cs]
     assert cmds
     for c in cmds:
         for name, v in c.targets.items():
             d = manifest.dofs[name]
-            assert (d.min - d.home) * 0.001 <= v <= (d.max - d.home) * 0.001
+            assert d.min - d.home <= v <= d.max - d.home
 
 
 def test_a_robot_without_primitives_just_skips_them(cfg, manifest):
     bare = cfg.circadian_motion.model_copy(
         update={"yawn": None, "stretch": None, "rest_pose_deg": {}}
     )
-    m = CircadianMotion(cfg.circadian, bare, manifest.dofs)
+    m = CircadianMotion(
+        cfg.circadian,
+        bare,
+        manifest.dofs,
+        body_yaw="body_yaw",
+        affect_intensity=lambda: 0.0,
+        clips=CLIPS,
+    )
     assert m.start_waking(0.0) is False
     assert drive(m, 600, "drowsy") and m.commands(1.0, "resting") == []
 
@@ -564,7 +637,7 @@ def test_being_woken_at_night_dips_valence_briefly_and_never_refuses(cfg):
     affect = AffectRunner(cfg.affect, cfg.appraisal, bus, 0.0)
     clock = FakeClock()
     clock.set(0.0, 3.0)
-    r = CircadianRunner(cfg, bus, affect, clock=clock)
+    r = CircadianRunner(cfg, bus, affect, clock=clock, body_yaw=None, affect_intensity=lambda: 0.0)
     run_for(r, clock, 120)
     r.wake()
     run_for(r, clock, 10)
@@ -728,8 +801,9 @@ def test_a_log_out_of_order_is_rejected():
 
 
 def test_circadian_config_validation_of_the_new_fields():
-    with pytest.raises(ConfigError):
-        ConfigStack(app={"circadian_motion": {"rest_pose_deg": {"wheels": 1}}})
+    stack = ConfigStack(app={"circadian_motion": {"rest_pose_deg": {"wheels": 1}}})
+    with pytest.raises(ConfigError, match="unknown channel 'wheels'"):
+        stack.set_manifest_behaviour({}, {"head.yaw"}, body_yaw=None)
     with pytest.raises(ConfigError):
         ConfigStack(app={"circadian": {"yawn_jitter": 2.0}})
     assert {f.name for f in fields(LightSample)} >= {"when", "luma", "noise", "presence"}
@@ -838,7 +912,14 @@ def test_disabling_stops_a_stretch_in_progress(cfg, manifest):
 
 def test_stretch_follows_the_register_and_the_ceiling(cfg, manifest):
     def stretch(amplitude, ceiling=2.0):
-        m = CircadianMotion(cfg.circadian, cfg.circadian_motion, manifest.dofs)
+        m = CircadianMotion(
+            cfg.circadian,
+            cfg.circadian_motion,
+            manifest.dofs,
+            body_yaw="body_yaw",
+            clips=CLIPS,
+            affect_intensity=lambda: 0.0,
+        )
         m.set_register(amplitude, ceiling)
         m.start_waking(0.0)
         cmds = [c for _, cs in drive(m, 3.0, "drowsy") for c in cs]
@@ -851,11 +932,18 @@ def test_stretch_follows_the_register_and_the_ceiling(cfg, manifest):
 
 
 def test_a_register_that_tightens_mid_play_scales_the_primitive_down_only(cfg, manifest):
-    m = CircadianMotion(cfg.circadian, cfg.circadian_motion, manifest.dofs)
+    m = CircadianMotion(
+        cfg.circadian,
+        cfg.circadian_motion,
+        manifest.dofs,
+        body_yaw="body_yaw",
+        clips=CLIPS,
+        affect_intensity=lambda: 0.0,
+    )
     m.set_register(1.0, 2.0)
     m.start_waking(0.0)
     mid = m.commands(1.0, "drowsy")[0].targets["antenna_right"]
-    m.set_register(0.5, 2.0)  # a child walks in
+    m.set_register(0.5, 2.0)  # a stricter register: someone with overrides walks in
     assert m.commands(1.0, "drowsy")[0].targets["antenna_right"] == pytest.approx(
         mid * 0.5, rel=0.01
     )
@@ -924,7 +1012,7 @@ def test_a_rest_pose_the_robot_cannot_hold_fails_at_manifest_load():
     for edit in (
         lambda m: m.__setitem__("rest_pose_deg", {"head.pitch": 80}),
         lambda m: m.__setitem__("rest_pose_deg", {"wheels": 1}),
-        lambda m: m["yawn"]["channels"].__setitem__("tail", [[0, 0], [1, 5], [3, 0]]),
+        lambda m: m["stretch"]["channels"].__setitem__("tail", [[0, 0], [1, 5], [3, 0]]),
         lambda m: m.__setitem__("stretch", {"channels": {"head.pitch": [[0, 1], [1, 0]]}}),
     ):
         bad = copy.deepcopy(raw)
@@ -940,7 +1028,8 @@ def test_the_frame_source_is_never_read_by_two_threads_at_once():
     overlaps = []
 
     class Camera:
-        camera_model = "intrinsics"
+        def camera_model(self, width, height):
+            return ("intrinsics", width, height)
 
         def read(self):
             inside.append(1)
@@ -957,7 +1046,7 @@ def test_the_frame_source_is_never_read_by_two_threads_at_once():
         t.start()
     for t in threads:
         t.join()
-    assert overlaps == [] and shared.camera_model == "intrinsics"
+    assert overlaps == [] and shared.camera_model(4, 3) == ("intrinsics", 4, 3)
     with pytest.raises(AttributeError):
         shared.nothing  # noqa: B018
 
@@ -968,7 +1057,9 @@ def test_speech_is_presence_and_the_wake_word_wakes(cfg):
     bus = Bus()
     clock = FakeClock()
     clock.set(0.0, 23.0)
-    r = CircadianRunner(cfg, bus, RecordingSink(), clock=clock)
+    r = CircadianRunner(
+        cfg, bus, RecordingSink(), clock=clock, body_yaw=None, affect_intensity=lambda: 0.0
+    )
     run_for(r, clock, 60)
     assert r.model.state == "resting" and not r.present()
     bus.publish("percept.utterance", SimpleNamespace(addressed=True, wake_word=False), clock.t)
@@ -986,7 +1077,9 @@ def test_unaddressed_speech_neither_shows_presence_nor_wakes(cfg):
     bus = Bus()
     clock = FakeClock()
     clock.set(0.0, 23.0)
-    r = CircadianRunner(cfg, bus, RecordingSink(), clock=clock)
+    r = CircadianRunner(
+        cfg, bus, RecordingSink(), clock=clock, body_yaw=None, affect_intensity=lambda: 0.0
+    )
     run_for(r, clock, 60)
     tv = SimpleNamespace(addressed=False, wake_word=True)  # even a mis-heard wake word
     bus.publish("percept.utterance", tv, clock.t)

@@ -32,6 +32,7 @@ import roboemot_reachymini.app as app_module
 from roboemot import paths
 from roboemot.config.schema import RoboEmotConfig, VoiceConfig
 from roboemot.llm import Router
+from roboemot.runtime import assembly
 from roboemot.vision.models import ModelError
 from roboemot.voice import factory
 from roboemot.voice import models as voice_models
@@ -120,6 +121,9 @@ class LiveMic:
             self._overlays.append((start, samples))
             return self._t0 + start / RATE
 
+    def camera_model(self, width, height):
+        return None
+
     def read(self):
         with self._lock:
             if self._t0 is None:
@@ -161,10 +165,10 @@ class DelayedTTS:
     def __init__(self, spoken: list[tuple[str, str]]) -> None:
         self.spoken = spoken
 
-    def available(self, *, minor_present=False) -> bool:
+    def available(self) -> bool:
         return True
 
-    async def synthesize(self, text, delivery, *, language, voice, minor_present=False):
+    async def synthesize(self, text, delivery, *, language, voice):
         self.spoken.append((language, text))
         await asyncio.sleep(FAKE_TTS_FIRST_CHUNK_S)
         n = round(22050 * 0.3 * max(1, len(text.split())))
@@ -174,6 +178,9 @@ class DelayedTTS:
         pass
 
     async def warm(self, language: str, voice: VoiceConfig) -> None:
+        pass
+
+    def apply_config(self, voice: VoiceConfig) -> None:
         pass
 
     async def aclose(self) -> None:
@@ -191,13 +198,8 @@ def sse(text: str) -> bytes:
 class ExitApp(app_module.RoboEmotApp):
     """The real app with the LLM route mocked in-process and the utterances collected."""
 
-    minor_flag = False
     requests: list
     utterances: list
-
-    @property
-    def minor_present(self) -> bool:
-        return self.minor_flag
 
     def on_utterance(self, utterance) -> None:
         self.utterances.append((time.monotonic(), utterance))
@@ -262,15 +264,15 @@ def yaml_for(language: str, piper: Path | None) -> str:
     return "\n".join(lines) + "\n"
 
 
-def start_app(data, monkeypatch, language, piper, minor=False, minors_llm=False):  # noqa: F811
+def start_app(data, monkeypatch, language, piper):  # noqa: F811
     spoken: list[tuple[str, str]] = []
     # The route is an in-process mock, but the app's network monitor probes "lan.local" over TCP.
     # Where that name fails fast (CI) the link goes offline after three probes and the robot
     # replies nonverbally; where it hangs (macOS mDNS) it does not, which hid the dependency.
     monkeypatch.setattr(
-        app_module,
+        assembly,
         "NetworkMonitor",
-        functools.partial(app_module.NetworkMonitor, probe=lambda host, port, timeout_s: True),
+        functools.partial(assembly.NetworkMonitor, probe=lambda host, port, timeout_s: True),
     )
     if piper is None:
         monkeypatch.setattr(factory, "build_backend", lambda cfg, router: DelayedTTS(spoken))
@@ -284,14 +286,9 @@ def start_app(data, monkeypatch, language, piper, minor=False, minors_llm=False)
             return real(self, text, delivery, language=language, **kw)
 
         monkeypatch.setattr(piper_backend.PiperBackend, "synthesize", spy)
-    if minors_llm:  # the master switch on, the route still not cleared for minors
-        text = (data / "app.yaml").read_text()
-        (data / "app.yaml").write_text(
-            text.replace("safety:\n", "safety:\n  minors_allowed_llm: true\n")
-        )
     enable(data, yaml_for(language, piper))
     app = ExitApp.__new__(ExitApp)
-    app.requests, app.utterances, app.minor_flag = [], [], minor
+    app.requests, app.utterances = [], []
     mini = ExitMini()
     stop, thread, errors = run_app(app, mini.mini)
     try:
@@ -437,40 +434,6 @@ def test_conversation_inside_the_latency_budgets_then_a_barge_in(
         )
     finally:
         gc.callbacks.remove(pauses)
-        finish(stop, thread, errors)
-
-
-@pytest.mark.parametrize("minors_llm", [False, True], ids=["master_switch_off", "master_switch_on"])
-def test_a_minor_without_a_cleared_route_gets_a_built_in_line_and_no_request(
-    models_ready,
-    data,  # noqa: F811
-    monkeypatch,
-    capsys,
-    minors_llm,
-):
-    """No route has ``allowed_for_minors``: with ``safety.minors_allowed_llm`` off (the default) or
-    on, a minor hears the built-in line and no request goes out (SPEC 8, 12)."""
-    app, mini, spoken, stop, thread, errors = start_app(
-        data, monkeypatch, "it", None, minor=True, minors_llm=minors_llm
-    )
-    try:
-        assert app.conversation is not None
-        clip = load("it_greeting_name")
-        _, last = speech_span_s(clip)
-        t_clip = mini.mic.play(np.concatenate([np.zeros(round(LEAD_S * RATE), np.float32), clip]))
-        end_wall = t_clip + LEAD_S + last
-        assert wait_for(lambda: bool(mini.pushes), 20), "no built-in line was spoken"
-        ms = (mini.pushes[0][0] - end_wall) * 1000
-        assert app.requests == [], "a request went out while a minor was present"
-        assert spoken == [("it", RoboEmotConfig().safety.minor_lines["it"].greeting)]
-        assert ms <= FIRST_AUDIO_BUDGET_MS
-        report(
-            f"child_it_minors_llm_{minors_llm}",
-            {"tts": f"fake, {FAKE_TTS_FIRST_CHUNK_S} s first chunk", "requests": 0,
-             "first_audio_push_vs_mic_last_speech_ms": round(ms)},
-            capsys,
-        )  # fmt: skip
-    finally:
         finish(stop, thread, errors)
 
 

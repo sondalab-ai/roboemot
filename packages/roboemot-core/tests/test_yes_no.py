@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from roboemot.affect import AffectState
+from roboemot.affect.clips import load_clip_library
 from roboemot.affect.expression import ExpressionRenderer
 from roboemot.affect.register import Person, resolve_register
 from roboemot.config import ConfigStack
@@ -28,7 +29,12 @@ GESTURES = ("nod", "shake")
 def setup():
     manifest = load_manifest(MANIFEST, allow_unmeasured_dynamics=True)
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour)
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour,
+        manifest.channels,
+        load_clip_library(manifest),
+        body_yaw=None,
+    )
     return manifest, stack.effective()
 
 
@@ -38,7 +44,13 @@ class Rig:
     def __init__(self, manifest, cfg) -> None:
         self.cfg = cfg
         self.renderer = ExpressionRenderer(
-            cfg.expression, cfg.expression_map, manifest.dofs, 0.15, cfg.gesture_map
+            cfg.expression,
+            cfg.expression_map,
+            manifest.dofs,
+            0.15,
+            cfg.gesture_map,
+            body_yaw="body_yaw",
+            clips=load_clip_library(manifest),
         )
         self.now = 10.0
         self.question_end: float | None = None
@@ -59,9 +71,7 @@ class Rig:
             on_answer=self.handler,
         )
         base = RoboEmotConfig()
-        self.register = resolve_register(
-            [Person("adult", "declared", {})], base.register, base.persona
-        )
+        self.register = resolve_register([Person({})], base.register, base.persona)
         self.state = AffectState(0.0, 0.0, "calm", 0.5, 0)
         self.renderer.update(self.state, self.register, 0.0)  # the first state only sets the label
 

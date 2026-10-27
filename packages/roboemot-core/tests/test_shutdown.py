@@ -117,3 +117,60 @@ def test_the_budget_is_a_restart_field_with_a_range_under_the_daemons_kill_windo
         RoboEmotConfig.model_validate({"runtime": {"shutdown_budget_s": 1.0}})
     with pytest.raises(ValueError):
         RoboEmotConfig.model_validate({"runtime": {"shutdown_budget_s": 61.0}})
+
+
+def test_the_margin_is_a_restart_field_with_a_default_unit_and_range():
+    cfg = RoboEmotConfig()
+    assert cfg.runtime.shutdown_margin_s == 6.0
+    for bad in (-1.0, 2.9, 31.0):
+        with pytest.raises(ValueError):
+            RoboEmotConfig.model_validate({"runtime": {"shutdown_margin_s": bad}})
+    field = type(cfg.runtime).model_fields["shutdown_budget_s"]
+    assert "reachy" not in (field.description or "").lower()
+
+
+@pytest.mark.parametrize(
+    ("configured", "stop_timeout", "margin", "expected"),
+    [
+        (14.0, None, 6.0, 14.0),
+        (14.0, 20.0, 6.0, 14.0),
+        (30.0, 20.0, 6.0, 14.0),
+        (10.0, 20.0, 6.0, 10.0),
+        (14.0, 5.0, 6.0, 0.0),
+    ],
+)
+def test_the_budget_is_capped_below_the_supervisors_kill_timeout(
+    configured, stop_timeout, margin, expected
+):
+    assert shutdown.capped_budget_s(configured, stop_timeout, margin) == expected
+
+
+def test_the_margin_may_only_be_raised_at_runtime():
+    from roboemot.config import ConfigStack
+    from roboemot.config.stack import GuardrailError
+
+    stack = ConfigStack()
+    stack.set("runtime.shutdown_margin_s", 9.0)
+    assert stack.effective().runtime.shutdown_margin_s == 9.0
+    with pytest.raises(GuardrailError):
+        stack.set("runtime.shutdown_margin_s", 4.0)
+    assert stack.effective().runtime.shutdown_margin_s == 9.0
+
+
+def test_a_cap_that_bites_is_warned(caplog):
+    with caplog.at_level("WARNING", logger="roboemot.shutdown"):
+        assert shutdown.capped_budget_s(30.0, 20.0, 6.0) == 14.0
+    assert "capped" in caplog.text and "30" in caplog.text and "14" in caplog.text
+
+
+def test_no_warning_when_the_budget_fits(caplog):
+    with caplog.at_level("WARNING", logger="roboemot.shutdown"):
+        shutdown.capped_budget_s(14.0, 20.0, 6.0)
+        shutdown.capped_budget_s(14.0, None, 6.0)
+    assert caplog.text == ""
+
+
+def test_a_kill_timeout_below_the_margin_is_warned_not_silent(caplog):
+    with caplog.at_level("WARNING", logger="roboemot.shutdown"):
+        assert shutdown.capped_budget_s(14.0, 5.0, 6.0) == 0.0
+    assert "no time" in caplog.text or "0 s" in caplog.text

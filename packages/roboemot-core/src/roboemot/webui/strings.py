@@ -7,8 +7,6 @@ DEFAULT_LANGUAGE = "en"
 EN: dict[str, str] = {
     "no_pin": "No operator PIN is set. Set the PIN with the installer or the CLI.",
     "err_busy": "Busy checking another PIN. Try again in a moment.",
-    "err_consent_who_guardian": "For a minor, the person consenting is the parent or guardian.",
-    "err_guardian_is_subject": "The guardian cannot be the person being enrolled.",
     "err_bad_host": "Host not accepted.",
     "title": "RoboEmot",
     "dialog_cancel": "Cancel",
@@ -29,6 +27,115 @@ EN: dict[str, str] = {
     "tab_registry": "Registry",
     "tab_catalogue": "Catalogue",
     "tab_debug": "Diagnostics",
+    "tab_live": "Live",
+    "live_title": "Inner state",
+    "live_intro": (
+        "What the robot is doing right now. This tab updates while it is open and in "
+        "view; nothing is stored."
+    ),
+    "live_disabled_title": "The Live tab is off",
+    "live_disabled_body": (
+        "It shows who the robot sees, so it is off by default. To turn it on, open "
+        "Settings, find webui.live.enabled and switch it on. It applies at once, with "
+        "no restart."
+    ),
+    "live_mood": "Mood",
+    "live_valence": "Valence",
+    "live_arousal": "Arousal",
+    "live_intensity": "Intensity",
+    "live_energy": "Energy",
+    "live_circ_awake": "awake",
+    "live_circ_drowsy": "drowsy",
+    "live_circ_resting": "resting",
+    "live_circ_off": "Circadian rhythm is off.",
+    "live_modes": "Modes",
+    "live_awake": "Awake",
+    "live_asleep": "Asleep",
+    "live_online": "Online",
+    "live_offline": "Offline",
+    "live_audio_egress": "Microphone audio may leave the robot (realtime route)",
+    "live_paused": "Paused while asleep",
+    "live_paused_none": "Nothing paused",
+    "live_part_app_tick": "behaviour",
+    "live_part_vision": "vision",
+    "live_part_light_reader": "light reader",
+    "live_part_listener": "listening",
+    "live_in_view": "People in view",
+    "live_persona": "Personality",
+    "live_conversation": "Conversation",
+    "live_phase_idle": "Idle",
+    "live_phase_listening": "Listening",
+    "live_phase_thinking": "Thinking",
+    "live_phase_speaking": "Speaking",
+    "live_route": "Route",
+    "live_route_pending": "connecting",
+    "live_elapsed": "Waiting for {n} s",
+    "live_attention": "In view",
+    "live_people": "People: {n}",
+    "live_nobody": "Nobody in view.",
+    "live_unknown": "Unknown",
+    "live_gaze": "gaze target",
+    "live_more": "and {n} more",
+    "live_reflexes": "Reflexes",
+    "live_reflex_last": "Last: {name}, {n} s ago",
+    "live_reflex_none": "None fired yet.",
+    "live_motion": "Motion",
+    "live_motion_writing": "Writing poses",
+    "live_motion_external": "External control",
+    "live_motion_motors_off": "Motors off",
+    "live_system": "System",
+    "live_cpu_temp": "CPU temperature: {n} °C",
+    "live_cpu_temp_none": "CPU temperature: not available",
+    "live_levels": "Audio levels",
+    "live_levels_note": "Levels only: no sound leaves the robot and none is kept.",
+    "live_mic": "Microphone",
+    "live_out": "Robot voice",
+    "live_db": "{n} dBFS",
+    "live_floor": "Noise floor: {n} dBFS",
+    "live_level_paused": "paused while asleep",
+    "live_level_no_data": "no signal",
+    "live_level_unavailable": "not available",
+    "live_transcript": "Conversation",
+    "live_transcript_note": (
+        "Kept in the robot's memory only, never saved. Names appear as the conversation has them."
+    ),
+    "live_transcript_off": (
+        "The transcript is off, so nothing is kept. To turn it on, open Settings, find "
+        "webui.live.transcript and switch it on. It applies at once; switching it off "
+        "forgets what was kept."
+    ),
+    "live_transcript_empty": "Nothing said yet.",
+    "live_transcript_user": "Heard",
+    "live_transcript_robot": "Said",
+    "live_transcript_cut": "cut off",
+    "live_transcript_clear": "Clear",
+    "err_live_disabled": "The Live tab is off.",
+    "err_live_unavailable": "The Live tab is not available on this robot.",
+    "live_video": "Camera",
+    "live_video_alt": "Live camera picture",
+    "live_video_pause": "Pause",
+    "live_video_resume": "Resume",
+    "live_video_paused": "Paused.",
+    "live_video_note": (
+        "A still picture refreshed a few times a second, with face boxes and the names of "
+        "people the robot knows. Shown only on this page, never saved. The robot does not "
+        "wake or move for it."
+    ),
+    "live_video_off": (
+        "The camera preview is off. To turn it on, open Settings, find webui.live.video and "
+        "switch it on. It applies at once. While anyone watches it, every open page shows a "
+        "banner."
+    ),
+    "live_video_banner": "Live video view active",
+    "err_video_off": "The camera preview is off.",
+    "err_video_asleep": "The robot is asleep, so the camera is off.",
+    "err_video_no_vision": "Vision is not running on this robot, so there is no picture.",
+    "err_video_no_frame": "Waiting for the next camera picture.",
+    "err_video_stale": "The camera has not sent a new picture for a while.",
+    "err_cross_site": "The camera picture is only served to this page.",
+    "live_video_idle": (
+        "The preview stopped after a while without activity on this page. Press Resume."
+    ),
     "tab_routes": "Routes",
     "tab_settings": "Settings",
     "settings_intro": (
@@ -65,7 +172,7 @@ EN: dict[str, str] = {
     "settings_restart_effect_zero_pose": (
         "The robot goes to its zero pose once the app has stopped."
     ),
-    "settings_restart_effect_webrtc_drop": "A remote WebRTC session may drop.",
+    "settings_restart_effect_remote_session_drop": "A remote video or audio session may drop.",
     "settings_restart_effect_kill_on_timeout": (
         "If RoboEmot has not stopped after {timeout_s} s, it is killed."
     ),
@@ -79,10 +186,6 @@ EN: dict[str, str] = {
     "settings_secret": "Secret",
     "settings_readonly": "Read-only",
     "settings_json_readonly": "Structured value: edit it in the configuration file.",
-    "settings_superset_hint": (
-        "Removing a word loosens the child-safe filter: it is saved to the app config and needs "
-        "the PIN."
-    ),
     "settings_null": "No value (null)",
     "settings_route_move_message": (
         "If this route has an API key, saving sends that key to {host}. Enter the PIN to allow it."
@@ -103,7 +206,7 @@ EN: dict[str, str] = {
     "settings_remove_entry": "Remove entry",
     "settings_no_entries": "No entries.",
     "settings_reveal_message": (
-        "Show the private settings (minors, privacy, location). They stay in this page until you "
+        "Show the private settings (privacy, location). They stay in this page until you "
         "log out or reload."
     ),
     "settings_reset_layer": "Reset to lower layer",
@@ -122,16 +225,20 @@ EN: dict[str, str] = {
     "settings_remove": "Remove",
     "settings_admin": "Admin",
     "settings_reveal": "Show with PIN",
-    "settings_hidden": "Hidden: minors, privacy and location settings need the PIN to be shown.",
+    "settings_hidden": "Hidden: privacy and location settings need the PIN to be shown.",
     "settings_admin_hint": "Safety-relevant. The operator PIN doubles as the admin PIN.",
     "settings_pin_title": "Confirm the change",
     "settings_not_persisted": "It is live but was not saved to disk: it ends at the next restart.",
+    "settings_not_applied": (
+        "Saved, but a part of the robot did not take the new value: restart the app to apply it."
+    ),
     "settings_unchanged": "Nothing changed.",
     "settings_none": "No setting can be changed from the web UI.",
     "err_routes_unavailable": "Routes are not available.",
     "err_route_unknown": "No such route.",
     "err_route_busy": "Another check is running. Try again in a moment.",
     "err_route_budget": "The daily token budget of the route is spent.",
+    "err_route_kind": "This kind of route cannot be checked.",
     "err_route_secret": "The route key is not available. Set it on the robot: roboemot secrets set",
     "route_error_secret": "The key of the route is not available.",
     "route_secret_set": "key {name}: set",
@@ -139,6 +246,8 @@ EN: dict[str, str] = {
     "route_error_timeout": "The check took too long and was stopped.",
     "route_error_budget": "The daily token budget ran out during the check.",
     "route_error_failed": "The check could not be completed.",
+    "route_error_provider": "No realtime session provider for this robot (platform mode).",
+    "route_error_no_extra": "The realtime extra (websockets) is not installed.",
     "route_running": "Check running...",
     "routes_intro": (
         "Conformance check of each LLM route: streaming, tool call, first-token latency and "
@@ -146,6 +255,85 @@ EN: dict[str, str] = {
         "the daily budget of the route."
     ),
     "routes_none": "No LLM route is configured.",
+    "route_add_title": "Add a route",
+    "route_add_intro": (
+        "A route is an OpenAI-compatible model the robot can talk to. Pick its key from the "
+        "stored keys below; a key is never typed here. Changes ask for the operator PIN and apply "
+        "at once."
+    ),
+    "route_name": "Name",
+    "route_url": "Base URL",
+    "route_url_keep": "Leave empty to keep it",
+    "route_url_placeholder": "https://api.example.com/v1",
+    "route_url_hint_edit": "The stored address is not shown if it holds credentials.",
+    "route_model": "Model",
+    "route_locality": "Where the model runs",
+    "route_locality_auto": "Automatic",
+    "route_locality_local": "Local (home network)",
+    "route_locality_cloud": "Cloud",
+    "route_locality_hint": (
+        "A route on this machine or the home network sees real names. Setting one up needs the "
+        "configuration file; from here only cloud routes are accepted."
+    ),
+    "route_kind": "Kind",
+    "route_kind_chat": "Chat (text)",
+    "route_kind_realtime": "Realtime speech",
+    "route_kind_hint": (
+        "A realtime speech route streams audio over a WebSocket at its address + /realtime; "
+        "conversations do not use it as a chat model. Changing it later on a route with a key "
+        "needs the configuration file."
+    ),
+    "route_key_hosts": "As a realtime route, it may also go to the hosts under: {hosts}.",
+    "route_key": "Key",
+    "route_key_none": "No key",
+    "route_key_literal": "A key written in the configuration file",
+    "route_key_hint": "Only stored keys can be chosen. Add one in the API keys card below.",
+    "route_key_message": "The key will be sent to {host}. Enter the PIN to allow it.",
+    "route_key_insecure": (
+        "This address is not encrypted (http): the key will cross the network in clear."
+    ),
+    "route_add": "Add route",
+    "route_save": "Save route",
+    "route_edit": "Edit",
+    "route_remove": "Remove",
+    "route_remove_title": "Remove route {name}?",
+    "route_remove_message": "The route is deleted. Its key stays in the store.",
+    "route_added": "Route {name} added.",
+    "route_saved": "Route {name} saved.",
+    "route_partial": "Already saved: {items}. The rest was not sent.",
+    "route_removed": "Route {name} removed.",
+    "secrets_title": "API keys",
+    "secrets_intro": (
+        "API keys are stored on the robot and can only be written here, never read back: the "
+        "page shows the name of a key and whether a route uses it, not its value. A route "
+        "refers to a key by its name."
+    ),
+    "secrets_none": "No key is stored yet.",
+    "secret_name": "Name",
+    "secret_name_hint": (
+        "Letters, digits, dot, dash or underscore; it starts with a letter or digit."
+    ),
+    "secret_value": "Key",
+    "secret_value_hint": "Pasted once and cleared on save. The page never shows it again.",
+    "secret_save": "Save key",
+    "secret_saved": "Key {name} saved.",
+    "secret_removed": "Key {name} removed.",
+    "secret_remove": "Remove",
+    "secret_remove_title": "Remove key {name}?",
+    "secret_remove_message": "The key is deleted from the robot. This cannot be undone.",
+    "secret_used_by": "used by {routes}",
+    "secret_unused": "not used by a route",
+    "secret_set": "set",
+    "secret_unset": "not set",
+    "secret_in_use_hint": "Choose another key or no key on those routes first.",
+    "err_secrets_unavailable": "API keys are not available.",
+    "err_secret_name_invalid": "The key name is not valid.",
+    "err_secret_value_invalid": (
+        "The key must be visible ASCII characters without spaces, and not too long."
+    ),
+    "err_secret_in_use": "A route uses this key. Choose another key on that route first.",
+    "err_secret_unknown": "No such key.",
+    "err_secret_store": "The key store cannot be used. Check its file permissions on the robot.",
     "err_pseudonyms_unavailable": "The list of names is not available.",
     "refused_title": "Names not replaced by aliases",
     "refused_hint": (
@@ -156,7 +344,6 @@ EN: dict[str, str] = {
     "refused_show": "Show names",
     "refused_none": "No name is sent as typed.",
     "refused_off": "Pseudonyms for cloud routes are off.",
-    "route_minors": "cleared for minors",
     "route_check": "Check",
     "route_checking": "Checking...",
     "route_never": "Not checked yet",
@@ -167,6 +354,19 @@ EN: dict[str, str] = {
     "check_tool_round_trip": "Tool call round trip",
     "check_first_token_latency": "First-token latency",
     "check_italian": "Italian output",
+    "check_realtime_connect": "Connect and session.updated",
+    "check_realtime_first_audio": "First audio of a text turn",
+    "check_realtime_item_delete": "Delete of an item the robot named",
+    "rt_mode": "Mode",
+    "rt_allocator_host": "Allocator host",
+    "rt_connect_host": "Connect host",
+    "rt_header_to_connect_host": "Key to the connect host",
+    "rt_platform_id_sent": "Platform identifier sent",
+    "rt_update_seen": "session.updated seen",
+    "rt_first_audio_ms": "First audio (ms)",
+    "rt_item_delete": "Item delete",
+    "rt_charged": "Tokens charged",
+    "rt_failure": "Failure",
     "status_pass": "pass",
     "status_fail": "fail",
     "status_skip": "skipped",
@@ -194,29 +394,17 @@ EN: dict[str, str] = {
     "hint_turn_head": "Turn your head slightly left and right",
     "display_name": "Display name",
     "consent_who": "Name of the person who consents",
-    "guardian": "Parent or guardian name",
-    "guardian_hint": "Required unless the person is declared adult or senior.",
-    "age_group": "Age group",
-    "gender": "Gender",
-    "age_unknown": "Not declared",
-    "age_child": "Child",
-    "age_teen": "Teenager",
-    "age_adult": "Adult",
-    "age_senior": "Senior",
-    "gender_unknown": "Not declared",
-    "gender_female": "Female",
-    "gender_male": "Male",
     "scope_title": "Consent covers",
     "scope_face": "Face recognition",
     "scope_voice": "Speaker recognition (voice)",
     "scope_refresh": "Adding new samples over time",
-    "agree": "The person (or guardian) has read the text above and agrees.",
+    "agree": "The person consenting has read the text above and agrees.",
     "consent_title": "Consent",
     "consent_biometric": (
         "The robot stores face (and, if chosen, voice) embeddings of this person to recognise "
         "them. These are biometric data, a special category under GDPR Art. 9. Camera images "
-        "are discarded after enrollment. For a minor, a parent or guardian must consent. The "
-        "person can ask to see or erase their data at any time."
+        "are discarded after enrollment. The person can ask to see or erase their data at any "
+        "time."
     ),
     "consent_cloud_names": (
         "Names, preferences and conversation text may be sent to the cloud language-model "
@@ -343,6 +531,11 @@ EN: dict[str, str] = {
         "This route has an API key. Saving sends that key to {host}. Enter the PIN and press "
         "the button again to allow it."
     ),
+    "err_url_local_refused": (
+        "From this page a route cannot point at this robot or at a link-local address. Write "
+        "such a route in the app config."
+    ),
+    "err_url_query": "The address of a route cannot hold a query (?) or a fragment (#).",
     "err_url_credentials": (
         "The address must not hold a user name, password, token or ${secret:...} reference. "
         "Store the key with `roboemot secrets set NAME` and use ${secret:NAME} as the api_key."
@@ -355,11 +548,6 @@ EN: dict[str, str] = {
     "err_list_too_long": "The list has too many entries.",
     "err_phrase_too_long": "An entry is too long.",
     "err_phrase_invalid": "An entry has characters that are not allowed.",
-    "err_line_empty": "This line cannot be empty.",
-    "err_line_too_long": "The line is too long.",
-    "err_line_invalid": "The line has characters or placeholders that are not allowed.",
-    "err_line_blocked": "The line contains a word the child-safety word list blocks.",
-    "err_name_blocked": "The name is blocked by the child-safety word list.",
     "err_locked": (
         "Too many attempts. Try again later, or restart the app or run set-pin on the robot."
     ),
@@ -369,10 +557,8 @@ EN: dict[str, str] = {
     "err_name_required": "A name is required.",
     "err_name_invalid": "The name has characters that are not allowed.",
     "err_name_too_long": "The name is too long.",
-    "err_guardian_required": "A parent or guardian name is required unless the person is adult.",
     "err_consent_not_agreed": "Consent has to be confirmed.",
     "err_scope_invalid": "Pick at least one consent scope.",
-    "err_choice_invalid": "Invalid choice.",
     "err_id_invalid": "Invalid identifier.",
     "err_unknown_field": "Unexpected field.",
     "err_confirm_required": "Confirmation required.",
@@ -391,8 +577,6 @@ EN: dict[str, str] = {
 IT: dict[str, str] = {
     "no_pin": "Nessun PIN operatore impostato. Impostalo con l'installer o con la CLI.",
     "err_busy": "Sto controllando un altro PIN. Riprova tra un momento.",
-    "err_consent_who_guardian": "Per un minore dà il consenso il genitore o tutore.",
-    "err_guardian_is_subject": "Il tutore non può essere la persona registrata.",
     "err_bad_host": "Host non accettato.",
     "dialog_cancel": "Annulla",
     "dialog_confirm": "Conferma",
@@ -413,6 +597,115 @@ IT: dict[str, str] = {
     "tab_registry": "Anagrafica",
     "tab_catalogue": "Catalogo",
     "tab_debug": "Diagnostica",
+    "tab_live": "Live",
+    "live_title": "Stato interno",
+    "live_intro": (
+        "Che cosa sta facendo il robot adesso. La scheda si aggiorna finché è aperta e "
+        "visibile; non viene salvato nulla."
+    ),
+    "live_disabled_title": "La scheda Live è spenta",
+    "live_disabled_body": (
+        "Mostra chi vede il robot, quindi è spenta di default. Per accenderla apri "
+        "Impostazioni, cerca webui.live.enabled e attivala. Vale subito, senza riavvio."
+    ),
+    "live_mood": "Umore",
+    "live_valence": "Valenza",
+    "live_arousal": "Attivazione",
+    "live_intensity": "Intensità",
+    "live_energy": "Energia",
+    "live_circ_awake": "sveglio",
+    "live_circ_drowsy": "assonnato",
+    "live_circ_resting": "a riposo",
+    "live_circ_off": "Il ritmo circadiano è spento.",
+    "live_modes": "Modalità",
+    "live_awake": "Sveglio",
+    "live_asleep": "Dorme",
+    "live_online": "In linea",
+    "live_offline": "Fuori linea",
+    "live_audio_egress": "L'audio del microfono può uscire dal robot (percorso realtime)",
+    "live_paused": "In pausa durante il sonno",
+    "live_paused_none": "Niente in pausa",
+    "live_part_app_tick": "comportamento",
+    "live_part_vision": "visione",
+    "live_part_light_reader": "lettura della luce",
+    "live_part_listener": "ascolto",
+    "live_in_view": "Persone in vista",
+    "live_persona": "Personalità",
+    "live_conversation": "Conversazione",
+    "live_phase_idle": "A riposo",
+    "live_phase_listening": "In ascolto",
+    "live_phase_thinking": "Sta pensando",
+    "live_phase_speaking": "Sta parlando",
+    "live_route": "Rotta",
+    "live_route_pending": "in connessione",
+    "live_elapsed": "In attesa da {n} s",
+    "live_attention": "In vista",
+    "live_people": "Persone: {n}",
+    "live_nobody": "Nessuno in vista.",
+    "live_unknown": "Sconosciuto",
+    "live_gaze": "sguardo su di lui",
+    "live_more": "e altri {n}",
+    "live_reflexes": "Riflessi",
+    "live_reflex_last": "Ultimo: {name}, {n} s fa",
+    "live_reflex_none": "Nessuno finora.",
+    "live_motion": "Movimento",
+    "live_motion_writing": "Scrive le pose",
+    "live_motion_external": "Controllo esterno",
+    "live_motion_motors_off": "Motori spenti",
+    "live_system": "Sistema",
+    "live_cpu_temp": "Temperatura CPU: {n} °C",
+    "live_cpu_temp_none": "Temperatura CPU: non disponibile",
+    "live_levels": "Livelli audio",
+    "live_levels_note": "Solo livelli: nessun suono lascia il robot e nessuno viene conservato.",
+    "live_mic": "Microfono",
+    "live_out": "Voce del robot",
+    "live_db": "{n} dBFS",
+    "live_floor": "Rumore di fondo: {n} dBFS",
+    "live_level_paused": "in pausa mentre dorme",
+    "live_level_no_data": "nessun segnale",
+    "live_level_unavailable": "non disponibile",
+    "live_transcript": "Conversazione",
+    "live_transcript_note": (
+        "Resta solo nella memoria del robot, non viene mai salvata. I nomi compaiono come "
+        "li ha la conversazione."
+    ),
+    "live_transcript_off": (
+        "La trascrizione è spenta, quindi non si conserva nulla. Per attivarla apri "
+        "Impostazioni, cerca webui.live.transcript e attivala. Vale subito; spegnerla "
+        "cancella quanto conservato."
+    ),
+    "live_transcript_empty": "Ancora nulla di detto.",
+    "live_transcript_user": "Sentito",
+    "live_transcript_robot": "Detto",
+    "live_transcript_cut": "interrotto",
+    "live_transcript_clear": "Cancella",
+    "err_live_disabled": "La scheda Live è spenta.",
+    "err_live_unavailable": "La scheda Live non è disponibile su questo robot.",
+    "live_video": "Camera",
+    "live_video_alt": "Immagine dal vivo della telecamera",
+    "live_video_pause": "Pausa",
+    "live_video_resume": "Riprendi",
+    "live_video_paused": "In pausa.",
+    "live_video_note": (
+        "Un'immagine ferma aggiornata alcune volte al secondo, con i riquadri dei volti e i "
+        "nomi delle persone che il robot conosce. Si vede solo in questa pagina e non viene "
+        "mai salvata. Il robot non si sveglia e non si muove per questo."
+    ),
+    "live_video_off": (
+        "L'anteprima della telecamera è spenta. Per accenderla apri Impostazioni, cerca "
+        "webui.live.video e attivala. Vale subito. Finché qualcuno la guarda, ogni pagina "
+        "aperta mostra un avviso."
+    ),
+    "live_video_banner": "Visione video in diretta attiva",
+    "err_video_off": "L'anteprima della telecamera è spenta.",
+    "err_video_asleep": "Il robot dorme, quindi la telecamera è spenta.",
+    "err_video_no_vision": "La visione non è attiva su questo robot, quindi non c'è immagine.",
+    "err_video_no_frame": "In attesa della prossima immagine della telecamera.",
+    "err_video_stale": "La telecamera non invia una nuova immagine da un po'.",
+    "err_cross_site": "L'immagine della telecamera è servita solo a questa pagina.",
+    "live_video_idle": (
+        "L'anteprima si è fermata dopo un po' senza attività su questa pagina. Premi Riprendi."
+    ),
     "tab_routes": "Modelli",
     "tab_settings": "Impostazioni",
     "settings_intro": (
@@ -450,7 +743,7 @@ IT: dict[str, str] = {
         "Riavvio in corso. Attendi qualche secondo, poi ricarica la pagina e accedi di nuovo."
     ),
     "settings_restart_effect_zero_pose": "Il robot va in posa zero quando l'app si è fermata.",
-    "settings_restart_effect_webrtc_drop": "Una sessione WebRTC remota può cadere.",
+    "settings_restart_effect_remote_session_drop": "Una sessione video o audio remota può cadere.",
     "settings_restart_effect_kill_on_timeout": (
         "Se RoboEmot non si ferma entro {timeout_s} s, viene terminato."
     ),
@@ -464,10 +757,6 @@ IT: dict[str, str] = {
     "settings_secret": "Segreta",
     "settings_readonly": "Sola lettura",
     "settings_json_readonly": "Valore strutturato: si modifica nel file di configurazione.",
-    "settings_superset_hint": (
-        "Togliere una parola allenta il filtro per i minori: viene salvato nella "
-        "configurazione dell'app e richiede il PIN."
-    ),
     "settings_null": "Nessun valore (null)",
     "settings_route_move_message": (
         "Se questa route ha una chiave API, salvando la chiave viene inviata a {host}. "
@@ -489,7 +778,7 @@ IT: dict[str, str] = {
     "settings_remove_entry": "Rimuovi voce",
     "settings_no_entries": "Nessuna voce.",
     "settings_reveal_message": (
-        "Mostra le impostazioni private (minori, privacy, posizione). Restano in questa pagina "
+        "Mostra le impostazioni private (privacy, posizione). Restano in questa pagina "
         "finché non esci o ricarichi."
     ),
     "settings_reset_layer": "Torna al livello inferiore",
@@ -508,18 +797,21 @@ IT: dict[str, str] = {
     "settings_remove": "Rimuovi",
     "settings_admin": "Admin",
     "settings_reveal": "Mostra con il PIN",
-    "settings_hidden": (
-        "Nascosto: le impostazioni su minori, privacy e posizione si mostrano con il PIN."
-    ),
+    "settings_hidden": ("Nascosto: le impostazioni su privacy e posizione si mostrano con il PIN."),
     "settings_admin_hint": "Rilevante per la sicurezza. Il PIN operatore vale come PIN admin.",
     "settings_pin_title": "Conferma la modifica",
     "settings_not_persisted": "È attiva ma non salvata su disco: termina al prossimo riavvio.",
+    "settings_not_applied": (
+        "Salvata, ma una parte del robot non ha preso il nuovo valore: riavvia l'app per "
+        "applicarla."
+    ),
     "settings_unchanged": "Nessuna modifica.",
     "settings_none": "Nessuna impostazione si può modificare dalla web UI.",
     "err_routes_unavailable": "I modelli non sono disponibili.",
     "err_route_unknown": "Modello sconosciuto.",
     "err_route_busy": "Un altro controllo è in corso. Riprova tra poco.",
     "err_route_budget": "Il budget giornaliero di token del modello è esaurito.",
+    "err_route_kind": "Questo tipo di modello non si può controllare.",
     "err_route_secret": "La chiave non è disponibile. Impostala sul robot: roboemot secrets set.",
     "route_error_secret": "La chiave del modello non è disponibile.",
     "route_secret_set": "chiave {name}: impostata",
@@ -527,6 +819,10 @@ IT: dict[str, str] = {
     "route_error_timeout": "Il controllo ha richiesto troppo tempo ed è stato fermato.",
     "route_error_budget": "Il budget giornaliero di token è finito durante il controllo.",
     "route_error_failed": "Non è stato possibile completare il controllo.",
+    "route_error_provider": (
+        "Nessun fornitore di sessioni in tempo reale per questo robot (modalità platform)."
+    ),
+    "route_error_no_extra": "L'extra realtime (websockets) non è installato.",
     "route_running": "Controllo in corso...",
     "routes_intro": (
         "Controllo di conformità di ogni modello LLM: streaming, chiamata di strumenti, latenza "
@@ -534,6 +830,96 @@ IT: dict[str, str] = {
         "token dal budget giornaliero del modello."
     ),
     "routes_none": "Nessun modello LLM configurato.",
+    "route_add_title": "Aggiungi un modello",
+    "route_add_intro": (
+        "Un modello è un servizio compatibile OpenAI con cui il robot può parlare. La chiave si "
+        "sceglie tra quelle salvate qui sotto; non si scrive mai in questo modulo. Le modifiche "
+        "chiedono il PIN operatore e valgono subito."
+    ),
+    "route_name": "Nome",
+    "route_url": "Indirizzo base",
+    "route_url_keep": "Lascia vuoto per non cambiarlo",
+    "route_url_placeholder": "https://api.example.com/v1",
+    "route_url_hint_edit": "L'indirizzo salvato non viene mostrato se contiene credenziali.",
+    "route_model": "Modello",
+    "route_locality": "Dove gira il modello",
+    "route_locality_auto": "Automatico",
+    "route_locality_local": "Locale (rete di casa)",
+    "route_locality_cloud": "Cloud",
+    "route_locality_hint": (
+        "Un modello su questa macchina o sulla rete di casa vede i nomi veri. Configurarne uno "
+        "richiede il file di configurazione; da qui si accettano solo modelli cloud."
+    ),
+    "route_kind": "Tipo",
+    "route_kind_chat": "Chat (testo)",
+    "route_kind_realtime": "Voce in tempo reale",
+    "route_kind_hint": (
+        "Un modello voce in tempo reale riceve audio via WebSocket al suo indirizzo + /realtime; "
+        "le conversazioni non lo usano come modello di chat. Cambiarlo dopo, su un modello con "
+        "chiave, richiede il file di configurazione."
+    ),
+    "route_key_hosts": (
+        "Essendo un modello in tempo reale, può andare anche agli host sotto: {hosts}."
+    ),
+    "route_key": "Chiave",
+    "route_key_none": "Nessuna chiave",
+    "route_key_literal": "Una chiave scritta nel file di configurazione",
+    "route_key_hint": (
+        "Si possono scegliere solo chiavi salvate. Aggiungila nella scheda Chiavi API."
+    ),
+    "route_key_message": "La chiave verrà inviata a {host}. Inserisci il PIN per consentirlo.",
+    "route_key_insecure": (
+        "Questo indirizzo non è cifrato (http): la chiave attraverserà la rete in chiaro."
+    ),
+    "route_add": "Aggiungi modello",
+    "route_save": "Salva modello",
+    "route_edit": "Modifica",
+    "route_remove": "Rimuovi",
+    "route_remove_title": "Rimuovere il modello {name}?",
+    "route_remove_message": "Il modello viene eliminato. La sua chiave resta nell'archivio.",
+    "route_added": "Modello {name} aggiunto.",
+    "route_saved": "Modello {name} salvato.",
+    "route_partial": "Già salvato: {items}. Il resto non è stato inviato.",
+    "route_removed": "Modello {name} rimosso.",
+    "secrets_title": "Chiavi API",
+    "secrets_intro": (
+        "Le chiavi API sono salvate sul robot e qui si possono solo scrivere, mai rileggere: la "
+        "pagina mostra il nome di una chiave e se un modello la usa, non il suo valore. Un "
+        "modello si riferisce a una chiave con il suo nome."
+    ),
+    "secrets_none": "Nessuna chiave salvata.",
+    "secret_name": "Nome",
+    "secret_name_hint": (
+        "Lettere, cifre, punto, trattino o underscore; inizia con una lettera o una cifra."
+    ),
+    "secret_value": "Chiave",
+    "secret_value_hint": (
+        "Si incolla una volta e il campo viene svuotato al "
+        "salvataggio. La pagina non la mostra più."
+    ),
+    "secret_save": "Salva chiave",
+    "secret_saved": "Chiave {name} salvata.",
+    "secret_removed": "Chiave {name} rimossa.",
+    "secret_remove": "Rimuovi",
+    "secret_remove_title": "Rimuovere la chiave {name}?",
+    "secret_remove_message": "La chiave viene cancellata dal robot. Non si può annullare.",
+    "secret_used_by": "usata da {routes}",
+    "secret_unused": "non usata da nessun modello",
+    "secret_set": "impostata",
+    "secret_unset": "non impostata",
+    "secret_in_use_hint": "Prima scegli un'altra chiave, o nessuna chiave, su quei modelli.",
+    "err_secrets_unavailable": "Le chiavi API non sono disponibili.",
+    "err_secret_name_invalid": "Il nome della chiave non è valido.",
+    "err_secret_value_invalid": (
+        "La chiave deve avere caratteri ASCII visibili, senza spazi, e non essere troppo lunga."
+    ),
+    "err_secret_in_use": (
+        "Un modello usa questa chiave. Prima scegli un'altra chiave su quel modello."
+    ),
+    "err_secret_unknown": "Chiave sconosciuta.",
+    "err_secret_store": (
+        "L'archivio delle chiavi non è utilizzabile. Controlla i permessi del file sul robot."
+    ),
     "err_pseudonyms_unavailable": "L'elenco dei nomi non è disponibile.",
     "refused_title": "Nomi non sostituiti da alias",
     "refused_hint": (
@@ -545,7 +931,6 @@ IT: dict[str, str] = {
     "refused_show": "Mostra i nomi",
     "refused_none": "Nessun nome viene inviato così com'è.",
     "refused_off": "Gli pseudonimi per i modelli cloud sono disattivati.",
-    "route_minors": "adatto ai minori",
     "route_check": "Controlla",
     "route_checking": "Controllo in corso...",
     "route_never": "Mai controllato",
@@ -556,6 +941,19 @@ IT: dict[str, str] = {
     "check_tool_round_trip": "Chiamata di strumenti",
     "check_first_token_latency": "Latenza del primo token",
     "check_italian": "Risposta in italiano",
+    "check_realtime_connect": "Connessione e session.updated",
+    "check_realtime_first_audio": "Primo audio di un turno di testo",
+    "check_realtime_item_delete": "Cancellazione di un elemento con id scelto dal robot",
+    "rt_mode": "Modalità",
+    "rt_allocator_host": "Host dell'allocatore",
+    "rt_connect_host": "Host di connessione",
+    "rt_header_to_connect_host": "Chiave all'host di connessione",
+    "rt_platform_id_sent": "Identificativo della piattaforma inviato",
+    "rt_update_seen": "session.updated ricevuto",
+    "rt_first_audio_ms": "Primo audio (ms)",
+    "rt_item_delete": "Cancellazione dell'elemento",
+    "rt_charged": "Token addebitati",
+    "rt_failure": "Errore",
     "status_pass": "ok",
     "status_fail": "errore",
     "status_skip": "saltato",
@@ -585,30 +983,17 @@ IT: dict[str, str] = {
     "hint_turn_head": "Gira leggermente la testa a sinistra e a destra",
     "display_name": "Nome da mostrare",
     "consent_who": "Nome di chi dà il consenso",
-    "guardian": "Nome del genitore o tutore",
-    "guardian_hint": "Obbligatorio salvo che la persona sia dichiarata adulta o anziana.",
-    "age_group": "Fascia d'età",
-    "gender": "Genere",
-    "age_unknown": "Non dichiarata",
-    "age_child": "Bambino",
-    "age_teen": "Adolescente",
-    "age_adult": "Adulto",
-    "age_senior": "Anziano",
-    "gender_unknown": "Non dichiarato",
-    "gender_female": "Femmina",
-    "gender_male": "Maschio",
     "scope_title": "Il consenso copre",
     "scope_face": "Riconoscimento del volto",
     "scope_voice": "Riconoscimento di chi parla (voce)",
     "scope_refresh": "Aggiunta di nuovi campioni nel tempo",
-    "agree": "La persona (o il tutore) ha letto il testo sopra ed è d'accordo.",
+    "agree": "Chi dà il consenso ha letto il testo sopra ed è d'accordo.",
     "consent_title": "Consenso",
     "consent_biometric": (
         "Il robot conserva i vettori del volto (e, se scelto, della voce) di questa persona per "
         "riconoscerla. Sono dati biometrici, categoria particolare ai sensi dell'art. 9 GDPR. "
-        "Le immagini della camera vengono scartate dopo la registrazione. Per un minore serve "
-        "il consenso di un genitore o tutore. La persona può chiedere in ogni momento di "
-        "vedere o cancellare i propri dati."
+        "Le immagini della camera vengono scartate dopo la registrazione. La persona può "
+        "chiedere in ogni momento di vedere o cancellare i propri dati."
     ),
     "consent_cloud_names": (
         "Nomi, preferenze e testo delle conversazioni possono essere inviati al fornitore cloud "
@@ -739,6 +1124,11 @@ IT: dict[str, str] = {
         "Questa route ha una chiave API. Salvando, la chiave viene inviata a {host}. Inserisci il "
         "PIN e premi di nuovo il pulsante per consentirlo."
     ),
+    "err_url_local_refused": (
+        "Da questa pagina una route non può puntare a questo robot né a un indirizzo "
+        "link-local. Scrivi una route così nella configurazione dell'app."
+    ),
+    "err_url_query": "L'indirizzo di una route non può contenere una query (?) o un frammento (#).",
     "err_url_credentials": (
         "L'indirizzo non deve contenere utente, password, token o riferimenti ${secret:...}. "
         "Salva la chiave con `roboemot secrets set NOME` e usa ${secret:NOME} come api_key."
@@ -751,11 +1141,6 @@ IT: dict[str, str] = {
     "err_list_too_long": "La lista ha troppe voci.",
     "err_phrase_too_long": "Una voce è troppo lunga.",
     "err_phrase_invalid": "Una voce contiene caratteri non ammessi.",
-    "err_line_empty": "Questa frase non può essere vuota.",
-    "err_line_too_long": "La frase è troppo lunga.",
-    "err_line_invalid": "La frase contiene caratteri o segnaposto non ammessi.",
-    "err_line_blocked": "La frase contiene una parola bloccata dalla lista per i bambini.",
-    "err_name_blocked": "Il nome è bloccato dalla lista di parole per i bambini.",
     "err_locked": (
         "Troppi tentativi. Riprova più tardi, oppure riavvia l'app o esegui set-pin sul robot."
     ),
@@ -765,12 +1150,8 @@ IT: dict[str, str] = {
     "err_name_required": "Il nome è obbligatorio.",
     "err_name_invalid": "Il nome contiene caratteri non ammessi.",
     "err_name_too_long": "Il nome è troppo lungo.",
-    "err_guardian_required": (
-        "Serve il nome di un genitore o tutore, salvo che la persona sia adulta."
-    ),
     "err_consent_not_agreed": "Il consenso va confermato.",
     "err_scope_invalid": "Scegli almeno un ambito di consenso.",
-    "err_choice_invalid": "Scelta non valida.",
     "err_id_invalid": "Identificativo non valido.",
     "err_unknown_field": "Campo inatteso.",
     "err_confirm_required": "Serve la conferma.",

@@ -274,7 +274,10 @@ def replay(
     cfg = cfg or RoboEmotConfig()
     sink = sink or RecordingSink()
     clock = ReplayClock()
-    runner = CircadianRunner(cfg, Bus(), sink, clock=clock)
+    # no dofs: the runner has no motion, so nothing reads the affect intensity
+    runner = CircadianRunner(
+        cfg, Bus(), sink, clock=clock, body_yaw=None, affect_intensity=lambda: 0.0
+    )
     timeline: list[Point] = []
     transitions: list[tuple[float, float, str, str]] = []
     first: datetime | None = None

@@ -25,7 +25,7 @@ class FakeService:
     def __init__(self) -> None:
         self.calls: list[tuple] = []
         self.rows = [
-            RecordSummary("p1", "Anna", "active", "person", OLD, "adult"),
+            RecordSummary("p1", "Anna", "active", "person", OLD),
             RecordSummary("a1", "Micio", "active", "animal", None),
             RecordSummary("a2", "Micio 2", "active", "animal", None),
             RecordSummary("o1", "Tazza", "active", "object", None),
@@ -58,11 +58,11 @@ class FakeService:
             "image": b"\xff\xd8",
         }
 
-    def complete(self, name, consent, declared_age_group, declared_gender, pending_id=None):
-        if declared_age_group == "child" and consent.guardian == "Refused":
+    def complete(self, name, consent, pending_id=None):
+        if consent.who == "Refused":
             raise ConsentError("registry says no")
         self.pending_seen = pending_id
-        self.calls.append(("complete", name, consent, declared_age_group, declared_gender))
+        self.calls.append(("complete", name, consent))
 
     def cancel(self):
         self.calls.append(("cancel",))
@@ -173,8 +173,6 @@ FORM = {
     "display_name": "Anna",
     "consent_who": "Anna",
     "scope": ["face", "refresh"],
-    "age_group": "adult",
-    "gender": "female",
     "agreed": True,
 }
 
@@ -434,61 +432,35 @@ def test_enrollment_status_is_whitelisted(authed):
 def test_complete_builds_server_side_consent(authed, service):
     before = datetime.now(UTC)
     assert authed.request("POST", "/api/enrollment/complete", FORM).status == 200
-    _, name, consent, age, gender = service.calls[-1]
-    assert (name, age, gender) == ("Anna", "adult", "female")
+    _, name, consent = service.calls[-1]
+    assert name == "Anna"
     assert isinstance(consent, Consent)
     assert consent.who == "Anna"
     assert consent.scope == ("face", "refresh")
-    assert consent.guardian is None
     assert before <= consent.when <= datetime.now(UTC)
+
+
+def test_consent_defaults_to_the_person_enrolled(authed, service):
+    form = {k: v for k, v in FORM.items() if k != "consent_who"}
+    assert authed.request("POST", "/api/enrollment/complete", form).status == 200
+    assert service.calls[-1][2].who == "Anna"
+
+
+@pytest.mark.parametrize(
+    "removed", [{"age_group": "adult"}, {"gender": "female"}, {"guardian": "Maria Rossi"}]
+)
+def test_age_gender_and_guardian_are_no_longer_fields(authed, service, removed):
+    """Owner decision 2026-10-23: the form asks for none of them; an old client is refused."""
+    resp = authed.request("POST", "/api/enrollment/complete", FORM | removed)
+    assert resp.status == 422
+    assert resp.json["error"] == "unknown_field"
+    assert not service.calls
 
 
 def test_client_cannot_set_consent_time(authed):
     resp = authed.request("POST", "/api/enrollment/complete", FORM | {"when": "2000-01-01"})
     assert resp.status == 422
     assert resp.json["error"] == "unknown_field"
-
-
-@pytest.mark.parametrize("age", ["child", "teen", "unknown", None])
-def test_guardian_required_unless_adult_or_senior(authed, service, age):
-    form = FORM | {"age_group": age}
-    resp = authed.request("POST", "/api/enrollment/complete", form)
-    assert resp.status == 422
-    assert resp.json == {"error": "guardian_required", "field": "guardian"}
-    assert not service.calls
-
-
-def test_guardian_accepted_for_minor(authed, service):
-    form = {k: v for k, v in FORM.items() if k != "consent_who"}
-    form |= {"age_group": "child", "guardian": "Maria Rossi"}
-    assert authed.request("POST", "/api/enrollment/complete", form).status == 200
-    consent = service.calls[-1][2]
-    assert (consent.guardian, consent.who) == ("Maria Rossi", "Maria Rossi")
-
-
-def test_minor_consent_must_come_from_the_guardian(authed, service):
-    base = FORM | {"age_group": "teen", "guardian": "Maria Rossi"}
-    mismatch = authed.request("POST", "/api/enrollment/complete", base | {"consent_who": "Anna"})
-    assert mismatch.status == 422
-    assert mismatch.json["error"] == "consent_who_guardian"
-    same = authed.request("POST", "/api/enrollment/complete", base | {"consent_who": "maria rossi"})
-    assert same.status == 200
-    assert service.calls[-1][2].who == "Maria Rossi" or service.calls[-1][2].who == "maria rossi"
-
-
-def test_guardian_cannot_be_the_person_enrolled(authed, service):
-    form = FORM | {"age_group": "child", "guardian": "anna", "consent_who": "anna"}
-    resp = authed.request("POST", "/api/enrollment/complete", form)
-    assert resp.status == 422
-    assert resp.json["error"] == "guardian_is_subject"
-    assert not service.calls
-
-
-def test_senior_needs_no_guardian(authed):
-    assert (
-        authed.request("POST", "/api/enrollment/complete", FORM | {"age_group": "senior"}).status
-        == 200
-    )
 
 
 @pytest.mark.parametrize(
@@ -505,8 +477,6 @@ def test_senior_needs_no_guardian(authed):
         ({"display_name": "<b>Anna</b>"}, "name_invalid"),
         ({"display_name": "Anna\nRoss"}, "name_invalid"),
         ({"display_name": 7}, "name_invalid"),
-        ({"age_group": "ancient"}, "choice_invalid"),
-        ({"gender": "robot"}, "choice_invalid"),
     ],
 )
 def test_form_validation(authed, service, patch, code):
@@ -522,9 +492,7 @@ def test_unicode_names_accepted(authed):
 
 
 def test_registry_remains_the_authority_on_consent(authed):
-    form = {k: v for k, v in FORM.items() if k != "consent_who"}
-    form |= {"age_group": "child", "guardian": "Refused"}
-    resp = authed.request("POST", "/api/enrollment/complete", form)
+    resp = authed.request("POST", "/api/enrollment/complete", FORM | {"consent_who": "Refused"})
     assert resp.status == 422
     assert resp.json["error"] == "consent_refused"
 
@@ -535,7 +503,7 @@ def test_registry_remains_the_authority_on_consent(authed):
 def test_registry_list_has_summaries_only(authed):
     rows = authed.request("GET", "/api/registry").json["records"]
     assert [r["id"] for r in rows] == ["p1", "a1", "a2", "o1", "p9"]
-    assert set(rows[0]) == {"id", "display_name", "status", "kind", "last_seen", "age_group"}
+    assert set(rows[0]) == {"id", "display_name", "status", "kind", "last_seen"}
     assert rows[0]["last_seen"].startswith("2026-01-01")
 
 

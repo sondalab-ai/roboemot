@@ -12,8 +12,10 @@ from roboemot.config.schema import RoboEmotConfig
 from roboemot.drivers import MockPoseDriver
 from roboemot.manifest import load_manifest
 from roboemot.motion import MotionLoop, Priority
+from roboemot.runtime import ticks
 from roboemot.vision import Frame
 from roboemot_reachymini import app as app_module
+from roboemot_reachymini.gaze import GAZE
 from test_app_perception import (  # noqa: F401  (data is a fixture)
     AppWithFakes,
     FakeDetector,
@@ -44,6 +46,9 @@ class DarkSource:
     """A camera in a dark room: a new, nearly black frame on every read."""
 
     reads = 0
+
+    def camera_model(self, width, height):
+        return None
 
     def read(self):
         type(self).reads += 1
@@ -196,6 +201,7 @@ def test_circadian_settings_reload_without_a_restart(data):  # noqa: F811
     try:
         assert wait_for(lambda: app.circadian_runner is not None and app.diagnostics is not None)
         assert app.circadian_runner.cfg.circadian.yawn_interval_s == 120.0
+        assert app.soothe_runner is None  # voice is off: no speech output, no runner (SPEC 7B)
         (data / "app.yaml").write_text(
             (data / "app.yaml").read_text()
             + "circadian:\n  yawn_interval_s: 45\nlight:\n  sample_interval_s: 3\n"
@@ -222,9 +228,9 @@ def crossings(cfg, name, seconds=240.0, dt=0.05):
     n = 0
     while t < seconds:
         phase += dt / state.idle_period_scale
-        pitch = app_module.idle_command(cfg, t, state.idle_motion_scale, phase).targets[
-            "head.pitch"
-        ]
+        pitch = ticks.idle_command(
+            cfg, t, state.idle_motion_scale, phase, dof=GAZE.head_pitch
+        ).targets["head.pitch"]
         n += prev * pitch < 0
         peak = max(peak, abs(pitch))
         prev = pitch
@@ -247,7 +253,7 @@ def test_the_breathing_phase_does_not_jump_when_the_pace_changes():
     t, phase, last = 0.0, 0.0, None
     for scale in (1.0,) * 200 + (1.5,) * 200:
         phase += 0.05 / scale
-        pitch = app_module.idle_command(cfg, t, 1.0, phase).targets["head.pitch"]
+        pitch = ticks.idle_command(cfg, t, 1.0, phase, dof=GAZE.head_pitch).targets["head.pitch"]
         if last is not None:
             assert abs(pitch - last) < 0.2 * cfg.motion.idle.breathing_amplitude
         last, t = pitch, t + 0.05
@@ -266,13 +272,15 @@ def test_resting_feeds_no_idle_motion_and_clears_it():
         clock=lambda: 0.0,
     )
     loop.set_mode("active")
-    app_module.feed_idle(loop, cfg, 1.0, False)
+    ticks.feed_idle(loop, cfg, 1.0, False, dof=GAZE.head_pitch)
     assert "idle" in {c.source for c in loop.core.arbiter.active(1.0)}
-    app_module.feed_idle(loop, cfg, 1.1, False, 0.0)  # circadian resting: scale 0
+    ticks.feed_idle(loop, cfg, 1.1, False, 0.0, dof=GAZE.head_pitch)  # circadian resting: scale 0
     assert not {c.source for c in loop.core.arbiter.active(1.1)} & {"idle", "idle-additive"}
-    app_module.feed_idle(loop, cfg, 1.2, True, 0.0)
+    ticks.feed_idle(loop, cfg, 1.2, True, 0.0, dof=GAZE.head_pitch)
     assert not {c.source for c in loop.core.arbiter.active(1.2)} & {"idle", "idle-additive"}
-    assert math.isfinite(app_module.idle_command(cfg, 1.0, 0.6).targets["head.pitch"])
+    assert math.isfinite(
+        ticks.idle_command(cfg, 1.0, 0.6, dof=GAZE.head_pitch).targets["head.pitch"]
+    )
 
 
 def test_the_hold_and_wake_calls_refuse_after_the_app_stopped(data):  # noqa: F811
@@ -317,9 +325,9 @@ def test_the_default_clock_reads_the_local_hour(data, monkeypatch):  # noqa: F81
     assert not errors
 
 
-def test_the_stretch_follows_the_register_amplitude_and_the_minor_cap(data, fed):  # noqa: F811
-    """Nobody is in view: the fail-closed ``unknown`` register (0.7x) and the minor caps are on,
-    so the 25 degree antenna stretch peaks at 0.7 x 25 degrees."""
+def test_the_stretch_follows_the_register_amplitude(data, fed):  # noqa: F811
+    """Nobody is in view: the one register (1.0x, owner decision 2026-10-23) and no minor cap,
+    so the 25 degree antenna stretch peaks at 25 degrees."""
     app = new_app(app_module.RoboEmotApp)
     stop, thread, errors = start(app)
     try:
@@ -330,7 +338,23 @@ def test_the_stretch_follows_the_register_amplitude_and_the_minor_cap(data, fed)
         assert wait_for(lambda: any(c.source == FX_SOURCE for c in fed))
         assert wait_for(lambda: section(app)["waking"] is False, timeout=10)
         peak = max(c.targets["antenna_right"] for c in fed if c.source == FX_SOURCE)
-        assert peak == pytest.approx(math.radians(25) * 0.7, rel=0.05)
+        assert peak == pytest.approx(math.radians(25), rel=0.05)
+    finally:
+        stop.set()
+        thread.join(15)
+    assert not errors
+
+
+def test_the_app_feeds_the_affect_intensity_to_the_circadian_motion(data):  # noqa: F811
+    app = new_app(app_module.RoboEmotApp)
+    stop, thread, errors = start(app)
+    try:
+        assert wait_for(lambda: app.circadian_runner is not None and app.affect_runner is not None)
+        motion = app.circadian_runner.motion
+        app.affect_runner.engine.impulse(time.monotonic(), 0.6, 0.6, "joy")
+        expected = app.affect_runner.engine.state(time.monotonic()).intensity
+        assert expected > 0
+        assert motion.affect_intensity() == pytest.approx(expected, abs=0.05)
     finally:
         stop.set()
         thread.join(15)

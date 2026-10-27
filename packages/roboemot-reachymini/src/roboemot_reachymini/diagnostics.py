@@ -1,14 +1,16 @@
 """Reachy Mini sources for the debug report (SPEC 12A, Diagnostics; daemon API in SPEC 4A).
 
 Registered in the ``roboemot.diagnostics`` entry-point group under the manifest id. Each
-section is one read-only call to the daemon's REST API (reachy_mini 1.11, Wi-Fi 1.12):
+section is one read-only call to the daemon's REST API through ``DaemonClient`` (reachy_mini
+1.12):
 
-- ``robot.daemon``: ``GET /api/daemon/status`` (name, version, hardware id, backend state and
-  control-loop stats, errors, Wi-Fi address);
+- ``robot.daemon``: ``GET /api/daemon/status`` (name, version, backend state and control-loop
+  stats, errors, Wi-Fi address). The hardware id is replaced by ``hardware_id_present``: it is
+  a stable identifier that leaves the robot only with ``privacy.realtime_platform_id`` (SPEC 12);
 - ``robot.motors``: ``GET /api/motors/status`` (enabled, disabled, gravity_compensation);
 - ``robot.state``: ``GET /api/state/full`` with joints, direction of arrival and the IMU
   (accelerometer, gyroscope, orientation, board temperature; ``null`` on Lite and simulation);
-- ``robot.app``: ``GET /api/apps/current-app-status``;
+- ``robot.app``: the daemon's current app status;
 - ``robot.wifi``: ``GET /wifi/status`` (reachy_mini 1.12; mode ``hotspot``, ``wlan``,
   ``disconnected`` or ``busy``, the connected network, and the number of saved networks, never
   their names). Unlike the others this router has no ``/api`` prefix and exists only on the
@@ -23,44 +25,40 @@ from __future__ import annotations
 
 from typing import Any
 
-import httpx
 from roboemot.diagnostics import FnSource, Source, Target
 
-DEFAULT_PORT = 8000
-REQUEST_TIMEOUT_S = 2.0
-WIFI_STATUS_PATH = "/wifi/status"
-STATE_QUERY = {
-    "with_head_joints": "true",
-    "with_passive_joints": "true",
-    "with_doa": "true",
-    "with_imu": "true",
-}
+from .daemon import DaemonClient
+
+ID_FIELD = "hardware_id"
 
 
-def sources(target: Target, client: httpx.Client | None = None) -> list[Source]:
+def sources(target: Target, daemon: DaemonClient | None = None) -> list[Source]:
     """Daemon sections for ``target`` (``host=None``: the daemon on this machine)."""
-    base = f"http://{target.host or 'localhost'}:{target.port or DEFAULT_PORT}"
-    http = client or httpx.Client(base_url=base, timeout=REQUEST_TIMEOUT_S)
-
-    def get(path: str, params: dict[str, str] | None = None) -> Any:
-        resp = http.get(path, params=params)
-        resp.raise_for_status()
-        return resp.json()
+    api = daemon or DaemonClient(target)
 
     def wifi() -> dict[str, Any]:
-        resp = http.get(WIFI_STATUS_PATH)
-        if resp.status_code == 404:
+        status = api.wifi()
+        if status is None:
             return {"available": False, "reason": "no Wi-Fi router on this daemon (not a Wireless)"}
-        resp.raise_for_status()
-        return wifi_summary(resp.json())
+        return wifi_summary(status)
 
     return [
-        FnSource("robot.daemon", lambda: get("/api/daemon/status"), "robot"),
-        FnSource("robot.motors", lambda: get("/api/motors/status"), "robot"),
-        FnSource("robot.state", lambda: get("/api/state/full", STATE_QUERY), "robot"),
-        FnSource("robot.app", lambda: get("/api/apps/current-app-status"), "robot"),
+        FnSource("robot.daemon", lambda: daemon_summary(api.status()), "robot"),
+        FnSource("robot.motors", api.motors, "robot"),
+        FnSource("robot.state", api.state, "robot"),
+        FnSource("robot.app", api.current_app, "robot"),
         FnSource("robot.wifi", wifi, "robot"),
     ]
+
+
+def daemon_summary(status: Any) -> Any:
+    """``GET /api/daemon/status`` without the hardware id's value: only whether there is one
+    (not a hash either, which would still link reports of one robot)."""
+    if not isinstance(status, dict):
+        return status
+    out = {k: v for k, v in status.items() if k != ID_FIELD}
+    out[f"{ID_FIELD}_present"] = isinstance(status.get(ID_FIELD), str) and bool(status[ID_FIELD])
+    return out
 
 
 def wifi_summary(status: Any) -> dict[str, Any]:
@@ -78,4 +76,4 @@ def wifi_summary(status: Any) -> dict[str, Any]:
     }
 
 
-__all__ = ["DEFAULT_PORT", "sources"]
+__all__ = ["sources"]

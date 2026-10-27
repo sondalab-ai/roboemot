@@ -66,9 +66,9 @@ def rule(stack, event):
     [
         ("affect.update_hz", 25.5),  # number
         ("affect.update_hz", 30),  # int accepted for a number
-        ("register.child.max_reply_sentences", 1),  # int
-        ("register.teen.approach_allowed", False),  # bool
-        ("register.child.vocabulary", "normal"),  # enum
+        ("register.max_reply_sentences", 1),  # int
+        ("register.approach_allowed", False),  # bool
+        ("register.vocabulary", "simple"),  # enum
         ("personality", "calm"),  # text
         ("circadian.quiet_hours", ["23:00", "06:30"]),  # tuple
         ("vision.animal_categories", ["cat", "dog"]),  # string_list
@@ -94,11 +94,11 @@ def test_each_kind_is_written(editor, stack, path, value):
         ("affect.update_hz", True, "value_type"),
         ("affect.update_hz", "20", "value_type"),
         ("affect.update_hz", None, "value_type"),
-        ("register.child.max_reply_sentences", 2.5, "value_type"),
-        ("register.child.max_reply_sentences", 21, "value_range"),
-        ("register.teen.approach_allowed", 1, "value_type"),
-        ("register.child.vocabulary", "loud", "value_choice"),
-        ("register.child.vocabulary", True, "value_choice"),
+        ("register.max_reply_sentences", 2.5, "value_type"),
+        ("register.max_reply_sentences", 21, "value_range"),
+        ("register.approach_allowed", 1, "value_type"),
+        ("register.vocabulary", "loud", "value_choice"),
+        ("register.vocabulary", True, "value_choice"),
         ("personality", 5, "value_type"),
         ("personality", "a\x00b", "text_invalid"),
         ("personality", "x" * 4001, "text_too_long"),
@@ -168,14 +168,14 @@ def test_the_identity_of_an_entry_with_a_dotted_event_cannot_be_renamed(editor, 
 def test_private_paths_are_writable_and_shown_only_with_the_pin(tmp_path, stack):
     srv, client = serve(tmp_path, SettingsEditor(stack, store=tmp_path / FILE), stack)
     try:
-        path = "safety.minor_hold_s"
-        before = client.request("POST", "/api/settings", {"path": path, "value": 99.0})
+        path = "privacy.pseudonyms_to_cloud"
+        before = client.request("POST", "/api/settings", {"path": path, "value": True})
         assert before.status == 400  # no PIN
         wrong = client.request(
-            "POST", "/api/settings", {"path": path, "value": 99.0, "pin": "111111"}
+            "POST", "/api/settings", {"path": path, "value": True, "pin": "111111"}
         )
         assert wrong.status == 401
-        assert get_path(stack.effective(), path) != 99.0
+        assert get_path(stack.effective(), path) is False
     finally:
         srv.stop()
 
@@ -272,14 +272,6 @@ def test_an_unknown_field_in_an_entry_is_refused(editor):
     assert caught.value.code == "entry_invalid"
 
 
-LINES = {
-    "greeting": "Hallo!",
-    "robot_name": "Ich heisse {name}.",
-    "ask_grown_up": "Frag einen Erwachsenen.",
-    "filtered": "Das sage ich nicht.",
-}
-
-
 @pytest.fixture
 def german(monkeypatch):
     monkeypatch.setattr("roboemot.webui.settings.supported_languages", lambda: {"it", "en", "de"})
@@ -292,15 +284,13 @@ def test_the_supported_languages_come_from_the_voice_models():
 
 
 def test_a_language_the_voice_stack_lacks_cannot_be_added(editor, stack):
-    for path in ("voice.keywords", "safety.minor_lines"):
-        with pytest.raises(ValidationError) as caught:
-            editor.add_entry(path, "fr", {})
-        assert caught.value.code == "language_unsupported"
+    with pytest.raises(ValidationError) as caught:
+        editor.add_entry("voice.keywords", "fr", {})
+    assert caught.value.code == "language_unsupported"
     with pytest.raises(SettingNotAllowed):
         editor.add_entry("conversation.confirm_yes", "fr", {})
     for path in (
         "voice.keywords.fr.wake_phrases",
-        "safety.minor_lines.fr.greeting",
         "conversation.confirm_yes.fr",
     ):
         with pytest.raises(SettingNotAllowed):
@@ -309,22 +299,18 @@ def test_a_language_the_voice_stack_lacks_cannot_be_added(editor, stack):
 
 
 def test_a_supported_language_can_be_added_removed_and_restored(german, editor, stack, tmp_path):
-    editor.add_entry("safety.minor_lines", "de", LINES)
     editor.add_entry("voice.keywords", "de", {"wake_phrases": ["hallo robo"]})
-    assert stack.effective().safety.minor_lines["de"].greeting == "Hallo!"
+    assert stack.effective().voice.keywords["de"].wake_phrases == ["hallo robo"]
     rows = {r["path"]: r for r in editor.fields()}
     assert rows["voice.keywords"]["removable"] == ["de"]
     fresh = make_stack(tmp_path, llm_routes=[ROUTE], appraisal=appraisal([RULE_B, RULE_A]))
     SettingsEditor(fresh, store=tmp_path / FILE).restore()
-    assert "de" in fresh.effective().voice.keywords and "de" in fresh.effective().safety.minor_lines
+    assert "de" in fresh.effective().voice.keywords
     assert editor.remove_entry("voice.keywords.de")["changed"]
     assert "de" not in stack.effective().voice.keywords
 
 
-def test_a_new_language_gets_the_same_line_checks_as_an_existing_one(german, editor):
-    with pytest.raises(ValidationError) as caught:
-        editor.add_entry("safety.minor_lines", "de", {**LINES, "greeting": "Hi {oops}"})
-    assert caught.value.code == "line_invalid"
+def test_a_new_language_gets_the_same_phrase_checks_as_an_existing_one(german, editor):
     with pytest.raises(ValidationError) as caught:
         editor.add_entry("voice.keywords", "de", {"wake_phrases": ["bad!!"]})
     assert caught.value.code == "phrase_invalid"
@@ -575,29 +561,6 @@ def test_clear_that_would_invalidate_the_config_is_rolled_back(tmp_path):
 # ------------------------------------------------------------------ batch restore
 
 
-def test_restore_is_one_batch_so_cross_field_rules_do_not_depend_on_order(tmp_path):
-    """A line that names the robot is blocked by a blocklist entry stored later in the file; the
-    batch cleans the line against the whole file, so it is refused whatever the order."""
-    first = {
-        "safety.minor_output_blocklist.en": [
-            *ConfigStack().effective().safety.minor_output_blocklist["en"],
-            "zork",
-        ],
-        "safety.minor_lines.en.greeting": "Hello zork",
-    }
-    for order in (first, dict(reversed(list(first.items())))):
-        path = tmp_path / FILE
-        path.write_text(json.dumps({"v": 1, "overrides": order}))
-        path.chmod(0o600)
-        stack = ConfigStack()
-        SettingsEditor(stack, store=path).restore()
-        assert "zork" in stack.effective().safety.minor_output_blocklist["en"]
-        assert stack.effective().safety.minor_lines["en"].greeting == "Hello! Nice to see you."
-        assert set(json.loads(path.read_text())["overrides"]) == {
-            "safety.minor_output_blocklist.en"
-        }
-
-
 def test_restore_applies_the_whole_file_with_one_notification(tmp_path):
     path = tmp_path / FILE
     path.write_text(
@@ -619,7 +582,7 @@ def test_restore_skips_a_bad_entry_and_keeps_the_rest(tmp_path, caplog):
                 "v": 1,
                 "overrides": {
                     "affect.update_hz": 33.0,
-                    "register.child.max_reply_sentences": 999,
+                    "register.max_reply_sentences": 999,
                     "circadian.quiet_hours": ["25:99", "07:00"],
                     "llm_routes.gone.model": "x",
                     'appraisal.rules[{"event":"vanished"}].valence': 0.5,
@@ -635,6 +598,57 @@ def test_restore_skips_a_bad_entry_and_keeps_the_rest(tmp_path, caplog):
     assert set(json.loads(path.read_text())["overrides"]) == {"affect.update_hz"}
     assert "vanished" not in caplog.text and "25:99" not in caplog.text
     assert "circadian.quiet_hours" in caplog.text
+
+
+def test_restore_carries_a_renamed_tightening_over_and_logs_removed_keys(tmp_path, caplog):
+    path = tmp_path / FILE
+    path.write_text(
+        json.dumps(
+            {
+                "v": 1,
+                "overrides": {
+                    "reflexes.antenna_ratio": 0.5,
+                    "connectivity.gestures.antenna_rad": 0.2,
+                },
+            }
+        )
+    )
+    path.chmod(0o600)
+    stack = ConfigStack()
+    with caplog.at_level("WARNING"):
+        SettingsEditor(stack, store=path).restore()
+    assert stack.effective().reflexes.startle_lift_ratio == 0.5
+    assert set(json.loads(path.read_text())["overrides"]) == {"reflexes.startle_lift_ratio"}
+    assert "connectivity.gestures.antenna_rad" in caplog.text and "removed" in caplog.text
+
+
+def test_restore_prefers_the_new_key_when_both_are_stored(tmp_path):
+    path = tmp_path / FILE
+    path.write_text(
+        json.dumps(
+            {
+                "v": 1,
+                "overrides": {"reflexes.antenna_ratio": 0.5, "reflexes.startle_lift_ratio": 1.0},
+            }
+        )
+    )
+    path.chmod(0o600)
+    stack = ConfigStack()
+    SettingsEditor(stack, store=path).restore()
+    assert stack.effective().reflexes.startle_lift_ratio == 1.0
+
+
+@pytest.mark.parametrize(
+    ("app", "named", "hint"),
+    [
+        ({"reflexes": {"antenna_ratio": 1.0}}, "reflexes.antenna_ratio", "reflexes.startle_lift"),
+        ({"connectivity": {"gestures": {"duration_s": 1}}}, "connectivity.gestures", "gesture_map"),
+    ],
+)
+def test_a_removed_key_in_app_yaml_names_the_key_and_its_replacement(app, named, hint):
+    with pytest.raises(ConfigError) as caught:
+        ConfigStack(app=app)
+    assert named in str(caught.value) and hint in str(caught.value)
 
 
 def test_restore_never_applies_a_secret_or_a_reflex_loosening(tmp_path):
@@ -691,6 +705,7 @@ def test_endpoints_write_entries_and_reset_with_the_pin(web, stack):
         "layer": "runtime",
         "restart_required": False,
         "persisted": True,
+        "applied": True,
     }
     assert stack.effective().voice.moods["tender"].rate == -0.1
     assert post(web, "/api/settings/entry/remove", path="voice.moods.tender").status == 200
@@ -959,10 +974,10 @@ def test_two_added_entries_both_stay(editor, stack, tmp_path):
     assert rule(fresh, "custom.thing").valence == 0.4 and rule(fresh, "zz.third").valence == 0.5
 
 
-def test_the_blocklist_and_other_tightenings_reset(editor, stack):
-    path = "safety.minor_output_blocklist.en"
+def test_tightenings_reset(editor, stack):
+    path = "safety.watchdog_ms"
     base = get_path(stack.effective(), path)
-    editor.change(path, [*base, "extra*"])
+    editor.change(path, base / 2)
     assert editor.reset(path)["changed"]
     assert get_path(stack.effective(), path) == base
     editor.change("webui.name_max_chars", 32)
@@ -1047,14 +1062,6 @@ def test_persist_failure_is_a_bare_code_over_http(tmp_path):
         srv.stop()
 
 
-def test_no_app_retry_for_a_field_inside_an_entry_added_here(editor, stack):
-    editor.add_entry("llm_routes", None, {**ROUTE, "name": "n2"})
-    with pytest.raises(GuardrailError):
-        editor.change("llm_routes.n2.allowed_for_minors", True)
-    assert "llm_routes" in stack.app and [r["name"] for r in stack.app["llm_routes"]] == ["lan"]
-    assert editor.change("llm_routes.lan.allowed_for_minors", True)["layer"] == "app"
-
-
 def test_reset_with_nothing_to_clear_keeps_file_and_memory_consistent(editor, stack, tmp_path):
     editor.change("affect.update_hz", 33.0)
     stack.clear("affect.update_hz")  # the runtime value goes, the file entry stays: stale
@@ -1093,6 +1100,7 @@ def test_a_clear_that_does_not_make_an_invalid_state_worse_is_allowed(tmp_path):
 
     stack = make_stack(tmp_path)
     stack._runtime["affect.update_hz"] = _RuntimeValue(9999.0, None)  # out of range
+    stack._invalidate()  # an in-place edit of the store is invisible to the effective() cache
     with pytest.raises(ConfigError):
         stack.effective()
     assert stack.clear("affect.update_hz") is True
@@ -1351,34 +1359,6 @@ def test_exempting_one_routes_secret_finding_leaves_the_others_refused(tmp_path)
     )
 
 
-def test_a_new_blocklist_language_is_added_cleaned_and_restored(german, editor, stack, tmp_path):
-    path = "safety.minor_output_blocklist"
-    with pytest.raises(ValidationError) as caught:
-        editor.add_entry(path, "fr", ["mot"])
-    assert caught.value.code == "language_unsupported"
-    with pytest.raises(ValidationError) as caught:
-        editor.add_entry(path, "de", ["bad!!"])
-    assert caught.value.code == "phrase_invalid"
-    with pytest.raises(ValidationError) as caught:
-        editor.add_entry(path, "en", ["mot"])
-    assert caught.value.code == "entry_exists"
-    editor.add_entry(path, "de", ["scheisse*", "mist"])
-    assert stack.effective().safety.minor_output_blocklist["de"] == ["scheisse*", "mist"]
-    fresh = make_stack(tmp_path, llm_routes=[ROUTE], appraisal=appraisal([RULE_B, RULE_A]))
-    SettingsEditor(fresh, store=tmp_path / FILE).restore()
-    assert fresh.effective().safety.minor_output_blocklist["de"] == ["scheisse*", "mist"]
-    assert "en" in fresh.effective().safety.minor_output_blocklist  # existing edits still replay
-
-
-def test_a_new_minor_lines_language_is_still_filtered_by_every_blocklist(german, editor, stack):
-    from roboemot.conversation.output_filter import OutputFilter
-
-    editor.add_entry("safety.minor_lines", "de", LINES)
-    lists = stack.effective().safety.minor_output_blocklist
-    assert "de" not in lists  # no list of its own
-    assert OutputFilter(lists).blocked("I will kill you")  # every language's list applies
-
-
 def test_an_unreadable_voice_manifest_is_a_clean_refusal(editor, monkeypatch):
     from roboemot.voice.models import ModelError
 
@@ -1395,3 +1375,33 @@ def test_the_supported_languages_are_cached():
     from roboemot.voice.models import supported_languages
 
     assert supported_languages() is supported_languages()
+
+
+def test_a_change_the_parts_did_not_take_is_reported_as_not_applied():
+    """R3 SF3: the stack kept the value but a reload listener failed: the response says so."""
+    from roboemot.config.stack import ConfigStack
+    from roboemot.webui.settings import SettingsEditor
+
+    stack = ConfigStack()
+    editor = SettingsEditor(stack)
+    assert editor.change("voice.expressivity", 0.3)["applied"] is True
+
+    def broken(change):
+        raise RuntimeError
+
+    stack.subscribe(broken)
+    result = editor.change("voice.expressivity", 0.4)
+    assert result["changed"] is True and result["applied"] is False
+    assert editor.reset("voice.expressivity")["applied"] is False
+
+
+def test_the_web_ui_cannot_turn_the_reflexes_on():
+    """Review ZG should-fix 2 context: turning the reflex engine on is a new motion the web never
+    grants (the ``reflex`` check), so only the app config file can; the reload then reports the
+    restart its microphone part needs (tests/runtime/test_reload.py)."""
+    from roboemot.config.stack import ConfigStack, GuardrailError
+    from roboemot.webui.settings import SettingsEditor
+
+    stack = ConfigStack(app={"reflexes": {"enabled": False}})
+    with pytest.raises(GuardrailError):
+        SettingsEditor(stack).change("reflexes.enabled", True)

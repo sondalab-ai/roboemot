@@ -7,3 +7,5 @@ metadata:
   scope: repo
   created: 2026-10-17
 ---
+
+Superseded 2026-10-22 (owner decision, SPEC 8, 12): the route gate is gone (`allowed_for_minors` and `safety.minors_allowed_llm` removed); every route is used while a minor is present. The child register, the minor content rules and the output filter stay; child-safe lines only when no route can answer.

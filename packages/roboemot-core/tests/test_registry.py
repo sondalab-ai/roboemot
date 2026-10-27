@@ -1,4 +1,4 @@
-"""Registry, matcher, store and estimates (SPEC 6, 12 Data, 5 Rules for estimated attributes)."""
+"""Registry, matcher and store (SPEC 6, 12 Data)."""
 
 import json
 import logging
@@ -16,11 +16,9 @@ from roboemot.registry import (
     Matcher,
     NullCipher,
     Registry,
-    estimate_age_group,
-    estimate_gender,
-    possible_minor,
 )
 from roboemot.registry.records import RecordSummary
+from roboemot.registry.registry import PEOPLE
 
 DIM = 8
 MODEL = "face-v1"
@@ -28,7 +26,6 @@ VOICE_MODEL = "voice-v1"
 WHEN = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
 SCOPE = ("face", "voice", "refresh")
 CONSENT = Consent("Marcello", WHEN, SCOPE)
-GUARDIAN = Consent("Parent", WHEN, SCOPE, guardian="Parent")
 
 
 class Clock:
@@ -76,7 +73,6 @@ def matcher(reg: Registry) -> Matcher:
 
 
 def enroll(reg: Registry, axis_i: int, name: str = "A", **kw):
-    kw.setdefault("age_group", "adult")
     kw.setdefault("consent", CONSENT)
     return reg.enroll(name, cluster(axis_i), MODEL, **kw)
 
@@ -111,7 +107,7 @@ def test_old_votes_leave_the_window(tmp_path):
 def test_margin_over_second_best_is_required(tmp_path):
     reg = make(tmp_path)
     a = enroll(reg, 0, "A")
-    b = reg.enroll("B", np.stack([blend(0, 1, 0.3)] * 5), MODEL, consent=CONSENT, age_group="adult")
+    b = reg.enroll("B", np.stack([blend(0, 1, 0.3)] * 5), MODEL, consent=CONSENT)
     m = matcher(reg)
     assert not any(m.observe(1, axis(0), MODEL, 0.0, refresh=False).known for _ in range(5))
     reg.forget(b.person_id)
@@ -364,39 +360,70 @@ def test_refresh_ignores_non_finite_embeddings(tmp_path):
 def test_enroll_without_consent_raises_and_stores_nothing(tmp_path):
     reg = make(tmp_path)
     with pytest.raises(ConsentError):
-        reg.enroll("Nobody", cluster(0), MODEL, age_group="adult")
+        reg.enroll("Nobody", cluster(0), MODEL)
     assert reg.list() == [] and not list((tmp_path / "reg" / "people").glob("*"))
 
 
-def test_possible_minors_need_a_guardian(tmp_path):
+def test_anyone_enrolls_with_a_consent_and_no_age_gender_or_guardian(tmp_path):
+    """Owner decision 2026-10-23: no adult/minor split, so no age, gender or guardian."""
     reg = make(tmp_path)
-    for age in (None, "unknown", "child", "teen"):
-        with pytest.raises(ConsentError):
-            reg.enroll("Kid", cluster(0), MODEL, consent=CONSENT, age_group=age)
-    kid = reg.enroll("Kid", cluster(0), MODEL, consent=GUARDIAN, age_group="child")
-    assert kid.status == "active" and kid.age_group.source == "declared"
-    assert reg.enroll("Gran", cluster(1), MODEL, consent=CONSENT, age_group="senior").status == (
-        "active"
-    )
-    unknown = reg.enroll("Anon", cluster(2), MODEL, consent=GUARDIAN)
-    assert unknown.possible_minor
+    p = reg.enroll("Kid", cluster(0), MODEL, consent=CONSENT)
+    assert p.status == "active" and reg.list()[0].id == p.person_id
+    for removed in ("age_group", "gender", "possible_minor"):
+        assert not hasattr(p, removed) and not hasattr(reg.list()[0], removed)
+    assert not hasattr(CONSENT, "guardian") and "guardian" not in CONSENT.to_json()
+    with pytest.raises(TypeError):
+        reg.enroll("A", cluster(1), MODEL, consent=CONSENT, age_group="adult")
+    with pytest.raises(TypeError):
+        Consent("M", WHEN, SCOPE, guardian="P")
 
 
-def test_possible_minor_is_true_for_anything_not_adult_or_senior():
-    assert [possible_minor(a) for a in ("adult", "senior")] == [False, False]
-    assert all(possible_minor(a) for a in (None, "unknown", "child", "teen", "bogus", ""))
-
-
-def test_age_group_and_gender_are_validated(tmp_path):
+def plant_legacy(tmp_path):
+    """A person stored as before 2026-10-23: age group, gender and a guardian in the consent."""
     reg = make(tmp_path)
-    with pytest.raises(ValueError):
-        reg.enroll("A", cluster(0), MODEL, consent=CONSENT, age_group="grown-up")
-    for gender in ("other", "x"):
-        with pytest.raises(ValueError):
-            reg.enroll("A", cluster(0), MODEL, consent=CONSENT, age_group="adult", gender=gender)
-    ok = reg.enroll("A", cluster(0), MODEL, consent=CONSENT, age_group="adult", gender="female")
-    assert ok.gender.value == "female"
-    assert reg.list()[0].id == ok.person_id and len(reg.list()) == 1
+    p = enroll(reg, 0)
+    old = p.meta()
+    old["age_group"] = {"value": "child", "source": "declared"}
+    old["gender"] = {"value": "female", "source": "estimated"}
+    old["consent"]["guardian"] = "Parent-Secret"
+    reg.store.put(PEOPLE, p.person_id, old, p.arrays())
+    return p
+
+
+def raw_meta(tmp_path, person_id):
+    return json.loads((tmp_path / "reg" / "people" / f"{person_id}.json").read_bytes()[1:])
+
+
+def test_a_record_stored_with_age_gender_and_guardian_loads_and_is_cleaned_at_once(tmp_path):
+    """SPEC 5, 6, 12: the registry stores no age, gender or guardian, and an access request shows
+    everything stored, so a pre-2026-10-23 record is rewritten without them at load."""
+    p = plant_legacy(tmp_path)
+    again = reopen(tmp_path)
+    back = again.get_person(p.person_id)
+    assert back.consent == CONSENT and back.meta() == p.meta()
+    raw = raw_meta(tmp_path, p.person_id)
+    assert not {"age_group", "gender"} & set(raw) and "guardian" not in raw["consent"]
+    exported = again.export(p.person_id)
+    assert not {"age_group", "gender"} & set(exported) and "guardian" not in exported["consent"]
+    assert "Parent-Secret" not in json.dumps(exported)
+
+
+def test_a_failed_legacy_rewrite_keeps_the_record_loaded_and_logs_the_key_only(
+    tmp_path, monkeypatch, caplog
+):
+    p = plant_legacy(tmp_path)
+
+    def refuse(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(FileStore, "put", refuse)
+    with caplog.at_level(logging.ERROR):
+        again = reopen(tmp_path)
+    assert again.get_person(p.person_id).meta() == p.meta()  # loaded, not quarantined
+    assert raw_meta(tmp_path, p.person_id)["consent"]["guardian"] == "Parent-Secret"  # next load
+    assert p.person_id in caplog.text and "OSError" in caplog.text
+    assert "quarantined" not in caplog.text and "Parent-Secret" not in caplog.text
+    assert "disk full" not in caplog.text
 
 
 def test_consent_contents_are_validated():
@@ -408,14 +435,6 @@ def test_consent_contents_are_validated():
         Consent("M", WHEN, ("face", "everything"))
     with pytest.raises(ConsentError):
         Consent("M", datetime(2026, 1, 1), SCOPE)
-    with pytest.raises(ConsentError):
-        Consent("M", WHEN, SCOPE, guardian=" ")
-
-
-def test_blank_guardian_does_not_satisfy_a_minor(tmp_path):
-    reg = make(tmp_path)
-    with pytest.raises(ConsentError):
-        reg.enroll("K", cluster(0), MODEL, consent=Consent("P", WHEN, SCOPE), age_group="child")
 
 
 def test_voice_and_face_are_stored_only_within_scope(tmp_path):
@@ -427,13 +446,11 @@ def test_voice_and_face_are_stored_only_within_scope(tmp_path):
     assert reg.list() == []
 
 
-def test_pending_person_needs_a_guardian_unless_declared_adult(tmp_path):
+def test_pending_person_completes_with_a_consent(tmp_path):
     reg = make(tmp_path)
     p = reg.create_pending_person("From catalogue")
     assert p.status == "pending" and not len(p.face_embeddings)
-    with pytest.raises(ConsentError):
-        reg.complete_enrollment(p.person_id, cluster(0), MODEL, CONSENT)
-    done = reg.complete_enrollment(p.person_id, cluster(0), MODEL, GUARDIAN)
+    done = reg.complete_enrollment(p.person_id, cluster(0), MODEL, CONSENT)
     assert done.status == "active" and done.n_enrolled == 5
     assert sorted(f.suffix for f in people_files(tmp_path, p.person_id)) == [".json", ".npy"]
 
@@ -442,18 +459,18 @@ def test_complete_enrollment_validates_inputs(tmp_path):
     reg = make(tmp_path)
     p = reg.create_pending_person("X")
     with pytest.raises(ValueError):
-        reg.complete_enrollment(p.person_id, cluster(0, 4), MODEL, GUARDIAN)
+        reg.complete_enrollment(p.person_id, cluster(0, 4), MODEL, CONSENT)
     with pytest.raises(ValueError):
-        reg.complete_enrollment(p.person_id, np.full((5, DIM), np.nan), MODEL, GUARDIAN)
+        reg.complete_enrollment(p.person_id, np.full((5, DIM), np.nan), MODEL, CONSENT)
     assert reg.get_person(p.person_id).status == "pending"
 
 
 def test_enrollment_embedding_count_is_bounded(tmp_path):
     reg = make(tmp_path)
     with pytest.raises(ValueError):
-        reg.enroll("A", cluster(0, 4), MODEL, consent=CONSENT, age_group="adult")
+        reg.enroll("A", cluster(0, 4), MODEL, consent=CONSENT)
     with pytest.raises(ValueError):
-        reg.enroll("A", cluster(0, 21), MODEL, consent=CONSENT, age_group="adult")
+        reg.enroll("A", cluster(0, 21), MODEL, consent=CONSENT)
 
 
 def test_non_finite_and_zero_embeddings_are_rejected_at_enrollment(tmp_path):
@@ -462,11 +479,11 @@ def test_non_finite_and_zero_embeddings_are_rejected_at_enrollment(tmp_path):
         faces = cluster(0).copy()
         faces[2, 3] = bad
         with pytest.raises(ValueError):
-            reg.enroll("A", faces, MODEL, consent=CONSENT, age_group="adult")
+            reg.enroll("A", faces, MODEL, consent=CONSENT)
     zero = cluster(0).copy()
     zero[1] = 0
     with pytest.raises(ValueError):
-        reg.enroll("A", zero, MODEL, consent=CONSENT, age_group="adult")
+        reg.enroll("A", zero, MODEL, consent=CONSENT)
     with pytest.raises(ValueError):
         enroll(reg, 0, voice_embedding=np.full(DIM, np.nan), voice_model_id=VOICE_MODEL)
     assert reg.list() == []
@@ -587,7 +604,7 @@ def test_export_has_the_whole_record(tmp_path):
     data = reg.export(p.person_id)
     assert data["display_name"] == "A" and data["embedding_model_id"] == MODEL
     assert len(data["face_embeddings"]) == 5 and len(data["voice_embedding"]) == DIM
-    assert data["age_group"] == {"value": "adult", "source": "declared"}
+    assert "age_group" not in data and "gender" not in data
     assert data["consent"]["who"] == "Marcello" and data["preferences"] == {"language": "it"}
     assert data["history"] == [{"events": 3}]
 
@@ -601,7 +618,7 @@ def test_list_returns_summaries_without_embeddings(tmp_path):
     assert all(isinstance(r, RecordSummary) for r in rows)
     assert [r.id for r in rows] == [q.person_id, p.person_id, e.entity_id]
     assert [r.kind for r in rows] == ["person", "person", "animal"]
-    assert rows[1].age_group == "adult" and rows[0].status == "pending"
+    assert rows[0].status == "pending"
     assert not hasattr(rows[1], "face_embeddings")
 
 
@@ -612,7 +629,6 @@ def test_records_do_not_show_biometrics_or_consent_in_repr(tmp_path):
         np.full((5, DIM), 0.123456),
         MODEL,
         consent=CONSENT,
-        age_group="adult",
         voice_embedding=np.full(DIM, 0.654321),
         voice_model_id=VOICE_MODEL,
         preferences={"topic": "secret-topic"},
@@ -707,14 +723,12 @@ def test_corrupt_item_is_quarantined_not_fatal(tmp_path, caplog):
 
 def test_store_round_trip_keeps_everything(tmp_path):
     reg = make(tmp_path)
-    p = enroll_with_voice(
-        reg, 0, age_group="senior", gender="female", register_overrides={"vocabulary": "simple"}
-    )
+    p = enroll_with_voice(reg, 0, register_overrides={"vocabulary": "simple"})
     back = reopen(tmp_path).get_person(p.person_id)
     np.testing.assert_array_equal(back.face_embeddings, p.face_embeddings)
     np.testing.assert_array_equal(back.voice_embedding, p.voice_embedding)
     assert back.meta() == p.meta()
-    assert back.consent == CONSENT and back.possible_minor is False
+    assert back.consent == CONSENT
 
 
 def test_stored_json_carries_a_schema_version(tmp_path):
@@ -861,71 +875,6 @@ def test_identity_config_rejects_inconsistent_values():
         IdentityConfig(enroll_min_embeddings=10, max_embeddings_per_person=6)
     with pytest.raises(ValidationError):
         IdentityConfig(match_threshold=0.7, refresh_min_similarity=0.6)
-
-
-# ------------------------------------------------------------------------------ estimates
-
-
-def test_age_estimate_is_the_median_over_enough_frames():
-    cfg = IdentityConfig()
-    frames = [("adult", 0.9), ("adult", 0.95), ("teen", 0.9), ("adult", 0.9), ("senior", 0.85)]
-    est = estimate_age_group(frames, cfg)
-    assert (est.value, est.source) == ("adult", "estimated")
-    assert est.possible_minor is False
-
-
-def test_estimate_below_frame_or_confidence_floor_is_unknown_and_possibly_minor():
-    cfg = IdentityConfig()
-    few = estimate_age_group([("adult", 0.99)] * (cfg.estimate_frames_min - 1), cfg)
-    weak = estimate_age_group([("adult", 0.5)] * 6, cfg)
-    for est in (few, weak):
-        assert est.value == "unknown" and est.source == "none" and est.possible_minor
-
-
-def test_unknown_frames_count_toward_unknown():
-    cfg = IdentityConfig()
-    mostly_unknown = [("adult", 0.9)] * 5 + [("unknown", 0.9)] * 6
-    assert estimate_age_group(mostly_unknown, cfg).value == "unknown"
-    mostly_adult = [("adult", 0.9)] * 6 + [("unknown", 0.9)] * 2
-    assert estimate_age_group(mostly_adult, cfg).value == "adult"
-    assert estimate_gender([("female", 0.9)] * 3 + [("unknown", 0.9)] * 4, cfg).value == "unknown"
-
-
-def test_even_frame_count_takes_the_younger_median():
-    frames = [("teen", 0.9)] * 3 + [("adult", 0.9)] * 3
-    assert estimate_age_group(frames, IdentityConfig()).value == "teen"
-
-
-def test_declared_value_always_overrides_the_estimate():
-    cfg = IdentityConfig()
-    est = estimate_age_group([("child", 0.99)] * 9, cfg, declared="adult")
-    assert (est.value, est.source) == ("adult", "declared")
-    assert estimate_gender([], cfg, declared="female").source == "declared"
-
-
-def test_declared_and_sample_values_are_validated():
-    cfg = IdentityConfig()
-    with pytest.raises(ValueError):
-        estimate_age_group([], cfg, declared="grown-up")
-    with pytest.raises(ValueError):
-        estimate_gender([], cfg, declared="other")
-    with pytest.raises(ValueError):
-        estimate_age_group([("ancient", 0.9)] * 6, cfg)
-
-
-def test_gender_estimate_uses_the_most_frequent_value_and_rejects_ties():
-    cfg = IdentityConfig()
-    assert estimate_gender([("female", 0.9)] * 5 + [("male", 0.9)], cfg).value == "female"
-    tie = [("female", 0.9)] * 3 + [("male", 0.9)] * 3
-    assert estimate_gender(tie, cfg).value == "unknown"
-    assert estimate_gender([("female", 0.7)] * 6, cfg).value == "unknown"
-
-
-def test_person_without_age_group_is_a_possible_minor(tmp_path):
-    reg = make(tmp_path)
-    p = reg.create_pending_person("X")
-    assert p.possible_minor is True
-    assert enroll(reg, 1, age_group="adult").possible_minor is False
 
 
 def test_forget_purges_quarantined_files_too(tmp_path):

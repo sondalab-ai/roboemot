@@ -1,25 +1,28 @@
-"""SPEC 7, 10, 11A, 12: the expression map, the renderer and the minor cap over it."""
+"""SPEC 7, 10, 11A, 12: the expression map and the renderer."""
 
 from __future__ import annotations
 
 import json
 import math
+import random
 from pathlib import Path
 
 import pytest
 import yaml
 from pydantic import ValidationError
 from roboemot.affect import AffectEngine, AffectState
+from roboemot.affect.clips import load_clip_library
 from roboemot.affect.expression import SOURCE, ExpressionRenderer, build_primitive
 from roboemot.affect.register import Person, resolve_register
 from roboemot.config import ConfigStack
-from roboemot.config.schema import ExpressionEntry, RegisterParams, RoboEmotConfig
+from roboemot.config.schema import ExpressionEntry, RoboEmotConfig
 from roboemot.manifest import load_manifest
 from roboemot.motion import MotionCore, Priority
 
 MANIFEST = (
     Path(__file__).resolve().parents[3] / "configs" / "manifests" / "reachy-mini-wireless.yaml"
 )
+CLIPS = load_clip_library(load_manifest(MANIFEST, allow_unmeasured_dynamics=True))
 LABELS = ("calm", "joy", "curiosity", "surprise", "sadness", "fear", "annoyance", "sleepy")
 DT = 0.02
 
@@ -32,7 +35,12 @@ def manifest():
 @pytest.fixture(scope="module")
 def cfg(manifest) -> RoboEmotConfig:
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour)
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour,
+        manifest.channels,
+        load_clip_library(manifest),
+        body_yaw=None,
+    )
     return stack.effective()
 
 
@@ -43,18 +51,46 @@ def state(label="joy", intensity=0.5, impulse=0) -> AffectState:
 DEFAULTS = RoboEmotConfig()
 
 
-def active(group="adult", cfg=DEFAULTS, **params):
-    people = [Person(group, "declared", params)]
+# A person's register overrides (SPEC 7): the one register, or one made livelier or more reserved.
+STYLES = {
+    "plain": {},
+    "lively": {"motion_amplitude": 1.2, "reaction_intensity": "high", "approach_allowed": False},
+    "reserved": {"motion_amplitude": 0.7, "reaction_intensity": "low", "approach_allowed": False},
+}
+
+
+def active(style="plain", cfg=DEFAULTS, **params):
+    people = [Person({**STYLES[style], **params})]
     return resolve_register(people, cfg.register, cfg.persona)
 
 
 def renderer(cfg, manifest, expression_map=None, **expr) -> ExpressionRenderer:
     ecfg = cfg.expression.model_copy(update=expr)
-    return ExpressionRenderer(ecfg, expression_map or cfg.expression_map, manifest.dofs, 0.15)
+    return ExpressionRenderer(
+        ecfg,
+        expression_map or cfg.expression_map,
+        manifest.dofs,
+        0.15,
+        body_yaw="body_yaw",
+        clips=CLIPS,
+        rng=random.Random(0),
+    )
 
 
 def entry(**channels) -> ExpressionEntry:
     return ExpressionEntry(channels=channels)
+
+
+SURPRISE = entry(
+    antenna_right=[(0, 0), (0.2, 25), (0.6, 25), (1.2, 0)],
+    antenna_left=[(0, 0), (0.2, -25), (0.6, -25), (1.2, 0)],
+    **{"head.pitch": [(0, 0), (0.2, -6), (0.6, -6), (1.2, 0)]},
+)
+SADNESS = entry(
+    antenna_right=[(0, 0), (1.2, -20), (2.8, -20), (4.0, 0)],
+    antenna_left=[(0, 0), (1.2, 20), (2.8, 20), (4.0, 0)],
+    **{"head.pitch": [(0, 0), (1.2, 6), (2.8, 6), (4.0, 0)]},
+)
 
 
 # ------------------------------------------------------------------ the map
@@ -62,19 +98,22 @@ def entry(**channels) -> ExpressionEntry:
 
 def test_the_reachy_default_map_covers_all_labels(cfg, manifest):
     assert set(cfg.expression_map) == set(LABELS) == set(cfg.affect.labels)
+    angles = {n for n, d in manifest.dofs.items() if d.kind == "angle"}
     for label, e in cfg.expression_map.items():
-        prim = build_primitive(label, e, manifest.dofs)
-        assert prim is not None and prim.additive
-        assert prim.keyframes[0].values == dict.fromkeys(prim.keyframes[0].values, 0.0)
-        assert prim.keyframes[-1].values == dict.fromkeys(prim.keyframes[-1].values, 0.0)
-        assert prim.duration == pytest.approx(e.repeat * max(f[-1][0] for f in e.channels.values()))
-    # antennas carry the affect; no LED and no translation anywhere
-    assert all(set(e.channels) <= {"antenna_right", "antenna_left", "head.pitch", "head.roll"}
-               for e in cfg.expression_map.values())  # fmt: skip
+        assert e.variants and not e.channels, label  # every label is a set of recorded clips
+        for v in e.variants:
+            assert v.clip in CLIPS, (label, v.clip)
+            clip = CLIPS[v.clip]
+            prim = build_primitive(v.clip, clip, manifest.dofs, body_yaw="body_yaw")
+            assert prim is not None and prim.additive
+            assert prim.keyframes[0].values == dict.fromkeys(prim.keyframes[0].values, 0.0)
+            assert prim.keyframes[-1].values == dict.fromkeys(prim.keyframes[-1].values, 0.0)
+            assert prim.duration == pytest.approx(max(f[-1][0] for f in clip.channels.values()))
+            assert set(clip.channels) <= angles  # no LED and no translation anywhere
 
 
-def test_degrees_in_the_file_are_radians_in_the_primitive(cfg, manifest):
-    prim = build_primitive("surprise", cfg.expression_map["surprise"], manifest.dofs)
+def test_degrees_in_the_file_are_radians_in_the_primitive(manifest):
+    prim = build_primitive("surprise", SURPRISE, manifest.dofs, body_yaw="body_yaw")
     peak = max(prim.keyframes, key=lambda k: k.values["antenna_right"])
     assert peak.values["antenna_right"] == pytest.approx(math.radians(25))
     assert peak.values["antenna_left"] == pytest.approx(math.radians(-25))
@@ -82,9 +121,11 @@ def test_degrees_in_the_file_are_radians_in_the_primitive(cfg, manifest):
 
 
 def test_antenna_signs_follow_the_connectivity_gestures(cfg, manifest):
-    """Raise toward vertical is right +, left -; droop is the other way (health/responder)."""
-    for label, sign in (("curiosity", 1), ("surprise", 1), ("sadness", -1), ("sleepy", -1)):
-        prim = build_primitive(label, cfg.expression_map[label], manifest.dofs)
+    """Spread outward is right -, left +; lifted toward vertical is the other way (health)."""
+    for gesture, sign in (("puzzled", -1), ("perk_up", 1)):
+        prim = build_primitive(
+            gesture, cfg.gesture_map[gesture], manifest.dofs, body_yaw="body_yaw"
+        )
         mid = prim.sample(prim.duration / 2)
         assert mid["antenna_right"] * sign > 0 and mid["antenna_left"] * sign < 0
 
@@ -92,7 +133,7 @@ def test_antenna_signs_follow_the_connectivity_gestures(cfg, manifest):
 def test_repeat_unrolls_the_cycle_and_merges_the_seams():
     e = ExpressionEntry(channels={"antenna_right": [(0, 0), (0.1, 10), (0.2, 0)]}, repeat=3)
     dofs = load_manifest(MANIFEST, allow_unmeasured_dynamics=True).dofs
-    prim = build_primitive("joy", e, dofs)
+    prim = build_primitive("joy", e, dofs, body_yaw="body_yaw")
     assert [round(k.t, 3) for k in prim.keyframes] == [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
     assert prim.duration == pytest.approx(0.6)
 
@@ -101,7 +142,7 @@ def test_channels_are_merged_onto_one_time_grid(manifest):
     e = entry(
         **{"antenna_right": [(0, 0), (1, 10), (2, 0)], "head.pitch": [(0, 0), (0.5, 4), (2, 0)]}
     )
-    prim = build_primitive("joy", e, manifest.dofs)
+    prim = build_primitive("joy", e, manifest.dofs, body_yaw="body_yaw")
     assert [k.t for k in prim.keyframes] == [0, 0.5, 1, 2]
     assert prim.sample(1.0)["head.pitch"] == pytest.approx(math.radians(4) * (1.0 / 1.5))
     assert prim.sample(0.5)["antenna_right"] == pytest.approx(math.radians(5))
@@ -110,17 +151,20 @@ def test_channels_are_merged_onto_one_time_grid(manifest):
 def test_channels_the_robot_lacks_are_skipped(manifest):
     e = entry(**{"antenna_right": [(0, 0), (1, 10), (2, 0)], "head.roll": [(0, 0), (1, 5), (2, 0)]})
     head_only = {n: d for n, d in manifest.dofs.items() if n.startswith("head")}
-    prim = build_primitive("joy", e, head_only)
+    prim = build_primitive("joy", e, head_only, body_yaw="body_yaw")
     assert set(prim.keyframes[0].values) == {"head.roll"}
-    assert build_primitive("joy", entry(antenna_right=[(0, 0), (1, 0)]), head_only) is None
-    assert build_primitive("joy", e, {}) is None
+    assert (
+        build_primitive(
+            "joy", entry(antenna_right=[(0, 0), (1, 0)]), head_only, body_yaw="body_yaw"
+        )
+        is None
+    )
+    assert build_primitive("joy", e, {}, body_yaw="body_yaw") is None
 
 
 def test_schema_rejects_bad_maps(cfg):
     ok = [(0, 0), (1, 10), (2, 0)]
     bad = (
-        {"channels": {"antenna_up": ok}},  # not a channel
-        {"channels": {"head.x": ok}},  # translations are not expression channels
         {"channels": {"antenna_right": ok}, "speed": 2},  # unknown key
         {"channels": {"antenna_right": [(0, 0), (1, 10), (2, 5)]}},  # does not return to zero
         {"channels": {"antenna_right": [(0.1, 0), (1, 0)]}},  # does not start at t=0
@@ -144,7 +188,8 @@ def test_schema_rejects_bad_maps(cfg):
 def test_the_manifest_ships_the_map_and_yaml_loads_it(cfg):
     raw = yaml.safe_load(MANIFEST.read_text())["behaviour"]["expression_map"]
     assert set(raw) == set(LABELS)
-    assert cfg.expression_map["joy"].repeat == 3
+    assert all(set(e) == {"variants"} for e in raw.values())
+    assert {v.clip for v in cfg.expression_map["joy"].variants} >= {"cheerful1", "laughing1"}
 
 
 # ------------------------------------------------------------------ triggers
@@ -161,7 +206,7 @@ def play_for(r, st, reg, t0, seconds, step=0.05):
 
 def test_a_label_change_starts_an_expression_and_a_held_label_does_not_spam(cfg, manifest):
     r = renderer(cfg, manifest)
-    reg = active("adult")
+    reg = active("plain")
     assert not r.update(state("calm", 0.0), reg, 0.0)  # the first state is only noted
     assert r.update(state("joy", 0.4), reg, 1.0)
     assert r.last_label == "joy" and r.playing is False  # commands() not yet called
@@ -174,28 +219,44 @@ def test_a_label_change_starts_an_expression_and_a_held_label_does_not_spam(cfg,
 
 def test_a_faint_held_label_is_not_replayed(cfg, manifest):
     r = renderer(cfg, manifest)
-    reg = active("adult")
+    reg = active("plain")
     r.update(state("calm", 0.0), reg, 0.0)
     assert play_for(r, state("calm", 0.01), reg, 1.0, 100) == 0
 
 
 def test_a_repeated_labelled_impulse_starts_again_but_not_within_the_min_interval(cfg, manifest):
     r = renderer(cfg, manifest)
-    reg = active("adult")
+    reg = active("plain")
     r.update(state("joy", 0.4, impulse=1), reg, 0.0)
     assert r.update(state("joy", 0.4, impulse=2), reg, 5.0)  # a new impulse, same label
     assert not r.update(state("joy", 0.4, impulse=3), reg, 5.2)  # too soon: held back
     assert r.update(state("joy", 0.4, impulse=3), reg, 5.2 + cfg.expression.min_interval_s)
 
 
+@pytest.mark.parametrize("label", ["calm", "joy", "curiosity", "sleepy"])
+def test_a_self_soothe_event_starts_the_clip_of_its_label_through_engine_and_renderer(
+    cfg, manifest, label
+):
+    engine = AffectEngine(cfg.affect, cfg.appraisal)
+    r = renderer(cfg, manifest)
+    reg = active("plain")
+    r.update(engine.state(0.0), reg, 0.0)  # the first state is only noted
+    assert engine.on_event("self.soothe", 10.0, {"label": label, "sound": "hum"})
+    assert r.update(engine.state(10.0), reg, 10.0)
+    assert r.last_label == label
+    assert r.commands(10.0)  # the clip is playing
+
+
 def test_a_label_without_a_map_entry_or_a_usable_channel_plays_nothing(cfg, manifest):
-    sparse = {"joy": cfg.expression_map["joy"]}
+    sparse = {"joy": entry(antenna_right=[(0, 0), (0.5, 10), (1, 0)])}
     r = renderer(cfg, manifest, sparse)
-    reg = active("adult")
+    reg = active("plain")
     r.update(state("calm", 0.4), reg, 0.0)
     assert not r.update(state("sadness", 0.4), reg, 2.0)
     head_only = {n: d for n, d in manifest.dofs.items() if n.startswith("head")}
-    r2 = ExpressionRenderer(cfg.expression, sparse, head_only, 0.15)
+    r2 = ExpressionRenderer(
+        cfg.expression, sparse, head_only, 0.15, body_yaw="body_yaw", clips=CLIPS
+    )
     r2.update(state("calm", 0.4), reg, 0.0)
     assert not r2.update(state("joy", 0.4), reg, 2.0)
     assert r2.commands(2.0) == []
@@ -204,27 +265,23 @@ def test_a_label_without_a_map_entry_or_a_usable_channel_plays_nothing(cfg, mani
 # ------------------------------------------------------------------ amplitude
 
 
-def test_amplitude_scales_by_register_child_adult_unknown(cfg, manifest):
+def test_amplitude_scales_by_the_register(cfg, manifest):
     r = renderer(cfg, manifest)
     st = state("joy", 0.5)
-    child, adult = r.amplitude(active("child"), st), r.amplitude(active("adult"), st)
-    unknown = r.amplitude(resolve_unknown(cfg), st)
-    assert child > adult > unknown > 0
+    lively_amp, plain_amp = r.amplitude(active("lively"), st), r.amplitude(active("plain"), st)
+    reserved_amp = r.amplitude(active("reserved"), st)
+    assert lively_amp > plain_amp > reserved_amp > 0
     f = cfg.expression.intensity_factor
     floor = cfg.expression.intensity_floor
     affect = floor + (1 - floor) * 0.5
-    assert child == pytest.approx(1.2 * f.high * affect)
-    assert adult == pytest.approx(1.0 * f.medium * affect)
-    assert unknown == pytest.approx(0.7 * f.low * affect)
-
-
-def resolve_unknown(cfg):
-    return resolve_register([Person("unknown", "none", {})], cfg.register, cfg.persona)
+    assert lively_amp == pytest.approx(1.2 * f.high * affect)
+    assert plain_amp == pytest.approx(1.0 * f.medium * affect)
+    assert reserved_amp == pytest.approx(0.7 * f.low * affect)
 
 
 def test_amplitude_follows_affect_intensity_circadian_and_the_ceiling(cfg, manifest):
     r = renderer(cfg, manifest)
-    reg = active("adult")
+    reg = active("plain")
     floor = cfg.expression.intensity_floor
     assert r.amplitude(reg, state(intensity=0.0)) == pytest.approx(floor)
     assert r.amplitude(reg, state(intensity=1.0)) == pytest.approx(1.0)
@@ -236,21 +293,21 @@ def test_amplitude_follows_affect_intensity_circadian_and_the_ceiling(cfg, manif
 
 def test_persona_is_in_the_register_and_not_applied_again(cfg, manifest):
     lively = RoboEmotConfig.model_validate({"persona": {"traits": {"energy": 1.0}}})
-    shaped = resolve_register([Person("adult", "declared", {})], lively.register, lively.persona)
+    shaped = resolve_register([Person({})], lively.register, lively.persona)
     r = renderer(cfg, manifest)
     st = state("joy", 1.0)
-    # 1.2 (persona energy) x 1.0 (adult) x 1.0 (medium) x 1.0 (full intensity), once
+    # 1.2 (persona energy) x 1.0 (plain) x 1.0 (medium) x 1.0 (full intensity), once
     assert r.amplitude(shaped, st) == pytest.approx(1.2)
 
 
 def test_the_started_player_carries_the_amplitude_at_expression_priority(cfg, manifest):
     r = renderer(cfg, manifest)
-    r.update(state("calm", 0.0), active("child"), 0.0)
-    assert r.update(state("joy", 0.5), active("child"), 1.0)
+    r.update(state("calm", 0.0), active("lively"), 0.0)
+    assert r.update(state("joy", 0.5), active("lively"), 1.0)
     cmd = r.commands(1.2)[0]
     assert cmd.source == SOURCE and cmd.priority == Priority.EXPRESSION and cmd.additive
     assert cmd.expires == pytest.approx(1.2 + cfg.expression.command_ttl_s)
-    assert r.last_amplitude == pytest.approx(r.amplitude(active("child"), state("joy", 0.5)))
+    assert r.last_amplitude == pytest.approx(r.amplitude(active("lively"), state("joy", 0.5)))
 
 
 # ------------------------------------------------------------------ playing
@@ -265,8 +322,8 @@ def drain(r, t0, seconds):
 
 
 def test_an_expression_ends_at_zero_and_stops_feeding(cfg, manifest):
-    r = renderer(cfg, manifest)
-    reg = active("adult")
+    r = renderer(cfg, manifest, {"surprise": SURPRISE})
+    reg = active("plain")
     r.update(state("calm", 0.0), reg, 0.0)
     r.update(state("surprise", 0.5), reg, 1.0)
     frames = drain(r, 1.0, 2.0)
@@ -277,8 +334,8 @@ def test_an_expression_ends_at_zero_and_stops_feeding(cfg, manifest):
 
 
 def test_a_new_expression_blends_in_from_the_current_offset(cfg, manifest):
-    r = renderer(cfg, manifest)
-    reg = active("adult")
+    r = renderer(cfg, manifest, {"sadness": SADNESS, "surprise": SURPRISE})
+    reg = active("plain")
     r.update(state("calm", 0.0), reg, 0.0)
     r.update(state("sadness", 0.5), reg, 1.0)
     drain(r, 1.0, 1.6)  # mid-droop
@@ -296,7 +353,7 @@ def test_offsets_are_clamped_to_the_manifest_range_about_home(cfg, manifest):
         **{"antenna_right": [(0, 0), (0.5, 170), (1, 0)], "head.pitch": [(0, 0), (0.5, 90), (1, 0)]}
     )
     r = renderer(cfg, manifest, {"joy": huge}, max_amplitude=3)
-    reg = active("child")
+    reg = active("lively")
     r.update(state("calm", 1.0), reg, 0.0)
     r.update(state("joy", 1.0), reg, 1.0)
     for _, cmds in drain(r, 1.0, 1.0):
@@ -316,17 +373,17 @@ BODY = entry(
 
 def test_no_body_yaw_for_a_register_that_must_not_approach(cfg, manifest):
     """SPEC 7, 12: a register with approach not allowed never gets a body turn."""
-    for reg in (active("child"), resolve_unknown(cfg), active("teen", approach_allowed=False)):
+    for reg in (active("lively"), active("reserved"), active("plain", approach_allowed=False)):
         assert not reg.params.approach_allowed
         r = renderer(cfg, manifest, {"joy": BODY})
         r.update(state("calm", 0.5), reg, 0.0)
         assert r.update(state("joy", 0.5), reg, 1.0)
         seen = {n for _, cmds in drain(r, 1.0, 1.2) for c in cmds for n in c.targets}
         assert "antenna_right" in seen and "body_yaw" not in seen
-    adult = active("adult")
+    reg = active("plain")
     r = renderer(cfg, manifest, {"joy": BODY})
-    r.update(state("calm", 0.5), adult, 0.0)
-    r.update(state("joy", 0.5), adult, 1.0)
+    r.update(state("calm", 0.5), reg, 0.0)
+    r.update(state("joy", 0.5), reg, 1.0)
     assert any("body_yaw" in c.targets for _, cmds in drain(r, 1.0, 1.2) for c in cmds)
 
 
@@ -335,92 +392,16 @@ def test_expressions_never_translate_the_robot(cfg, manifest):
     assert angle < set(manifest.dofs)  # the manifest does have translations
     for label in LABELS:
         r = renderer(cfg, manifest)
-        reg = active("adult")
+        reg = active("plain")
         r.update(state("calm", 0.0), reg, 0.0)
         r.update(state(label if label != "calm" else "joy", 0.5), reg, 1.0)
         for _, cmds in drain(r, 1.0, 6.0):
             assert all(set(c.targets) <= angle for c in cmds)
 
 
-def run_core(manifest, cfg, reg, st, minor, entry_map=None):
-    """Play ``st`` through the arbiter and limiter; return the largest deviation per dof."""
-    core = MotionCore(
-        manifest.dofs,
-        manifest.constraints,
-        crossfade_s=cfg.motion.arbiter.crossfade_ms / 1000,
-        watchdog_s=10.0,
-        minor_factor=cfg.safety.minor_motion_factor,
-        watchdog_return_factor=cfg.safety.watchdog_return_factor,
-    )
-    core.minor_present = minor
-    r = renderer(cfg, manifest, entry_map, max_amplitude=3)
-    r.update(state("calm", 0.0), reg, 0.0)
-    r.update(st, reg, 1.0)
-    up = dict.fromkeys(manifest.dofs, 0.0)
-    down = dict.fromkeys(manifest.dofs, 0.0)
-    t = 1.0
-    while t < 9.0:
-        for cmd in r.commands(t):
-            core.feed(cmd)
-        pos = core.tick(t, DT)
-        for n, d in manifest.dofs.items():
-            up[n] = max(up[n], pos[n] - d.home)
-            down[n] = max(down[n], d.home - pos[n])
-        t += DT
-    return up, down
-
-
-def within_band(manifest, factor, up, down, names=None):
-    """Each side of home stays inside ``factor`` x that side's range (signed, not the wider)."""
-    for n in names or manifest.dofs:
-        d = manifest.dofs[n]
-        assert up[n] <= factor * (d.max - d.home) + 1e-9, (n, "up")
-        assert down[n] <= factor * (d.home - d.min) + 1e-9, (n, "down")
-
-
-def test_the_minor_cap_wins_over_the_child_register(cfg, manifest):
-    """SPEC 7, 12: the register scales first; the minor cap, applied after, always wins."""
-    factor = cfg.safety.minor_motion_factor
-    assert factor < 1
-    reg = active("child")
-    assert reg.params.motion_amplitude > 1  # the child's 1.2x
-    for label in LABELS:
-        st = state(label, 1.0, impulse=1)
-        up, down = run_core(manifest, cfg, reg, st, minor=True)
-        free_up, free_down = run_core(manifest, cfg, reg, st, minor=False)
-        within_band(manifest, factor, up, down)
-        moved = {n for n in up if max(up[n], down[n]) > 1e-4}
-        assert moved, label
-        assert all(up[n] <= free_up[n] + 1e-9 and down[n] <= free_down[n] + 1e-9 for n in moved)
-
-
-def test_the_minor_cap_holds_at_the_worst_case_the_schema_allows(cfg, manifest):
-    factor = cfg.safety.minor_motion_factor
-    worst = RoboEmotConfig.model_validate(
-        {"expression": {"intensity_factor": {"low": 2, "medium": 2, "high": 2}, "max_amplitude": 3}}
-    )
-    reg = resolve_register(
-        [Person("child", "declared", {"motion_amplitude": 2, "reaction_intensity": "high"})],
-        worst.register,
-        worst.persona,
-    )
-    assert reg.params.motion_amplitude == 2
-    huge = entry(**{
-        "antenna_right": [(0, 0), (0.5, 170), (1, 0)],
-        "antenna_left": [(0, 0), (0.5, -170), (1, 0)],
-        "head.pitch": [(0, 0), (0.5, 90), (1, 0)],
-        "head.roll": [(0, 0), (0.5, -90), (1, 0)],
-    })  # fmt: skip
-    up, down = run_core(manifest, worst, reg, state("joy", 1.0), True, {"joy": huge})
-    names = ("antenna_right", "antenna_left", "head.pitch", "head.roll")
-    within_band(manifest, factor, up, down, names)
-    assert all(max(up[n], down[n]) > 0 for n in names)
-    assert RegisterParams(motion_amplitude=2).motion_amplitude == 2
-
-
 def test_a_reload_swaps_the_map_and_parameters(cfg, manifest):
     r = renderer(cfg, manifest)
-    reg = active("adult")
+    reg = active("plain")
     r.update(state("calm", 0.0), reg, 0.0)
     r.update(state("joy", 0.5), reg, 1.0)
     first = r.last_amplitude
@@ -439,30 +420,35 @@ def test_a_reload_swaps_the_map_and_parameters(cfg, manifest):
 def test_the_manifest_behaviour_becomes_part_of_the_installed_config(manifest):
     stack = ConfigStack()
     assert stack.effective().expression_map == {}
-    stack.set_manifest_behaviour(manifest.model.behaviour)
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour,
+        manifest.channels,
+        load_clip_library(manifest),
+        body_yaw=None,
+    )
     assert set(stack.effective().expression_map) == set(LABELS)
     # an app layer merges channel by channel into the manifest's entry
     stack.app = {"expression_map": {"joy": {"channels": {"head.roll": [[0, 0], [0.45, 0]]}}}}
     joy = stack.effective().expression_map["joy"]
-    assert set(joy.channels) == {"antenna_right", "antenna_left", "head.roll"}
+    assert set(joy.channels) == {"head.roll"} and not joy.variants  # channels drop the clips
 
 
 def test_set_register_acts_within_one_tick_even_when_the_affect_updates_are_rare(cfg, manifest):
     """Regression: update_hz = 1 means no update() for a second; the register still lands."""
     slow = cfg.model_copy(update={"affect": cfg.affect.model_copy(update={"update_hz": 1.0})})
     r = renderer(slow, manifest, {"joy": BODY})
-    adult = active("adult")
-    r.update(state("calm", 0.5), adult, 0.0)
-    assert r.update(state("joy", 0.5), adult, 1.0)
+    reg = active("plain")
+    r.update(state("calm", 0.5), reg, 0.0)
+    assert r.update(state("joy", 0.5), reg, 1.0)
     assert "body_yaw" in r.commands(1.25)[0].targets
-    r.set_register(resolve_unknown(cfg))  # no update() call: the next state is a second away
+    r.set_register(active("reserved"))  # no update() call: the next state is a second away
     assert "body_yaw" not in r.commands(1.27)[0].targets
 
 
 def test_a_lowered_ceiling_applies_to_the_expression_already_playing(cfg, manifest):
     r = renderer(cfg, manifest)
-    r.update(state("calm", 0.5), active("child"), 0.0)
-    r.update(state("surprise", 1.0), active("child"), 1.0)
+    r.update(state("calm", 0.5), active("lively"), 0.0)
+    r.update(state("surprise", 1.0), active("lively"), 1.0)
     full = r.commands(1.3)[0].targets["antenna_right"]
     assert r.last_amplitude > 1.0
     r.apply_config(
@@ -470,19 +456,6 @@ def test_a_lowered_ceiling_applies_to_the_expression_already_playing(cfg, manife
     )
     capped = r.commands(1.3)[0].targets["antenna_right"]
     assert capped == pytest.approx(full * 0.5 / r.last_amplitude)
-
-
-def test_the_renderer_keeps_its_offsets_inside_the_minor_share_of_the_range(cfg, manifest):
-    huge = entry(**{"antenna_right": [(0, 0), (0.5, 170), (1, 0)]})
-    r = renderer(cfg, manifest, {"joy": huge}, max_amplitude=3)
-    reg = active("child")
-    r.update(state("calm", 1.0), reg, 0.0)
-    r.update(state("joy", 1.0), reg, 1.0)
-    r.set_register(reg, 0.6)
-    d = manifest.dofs["antenna_right"]
-    assert r.commands(1.5)[0].targets["antenna_right"] <= 0.6 * (d.max - d.home) + 1e-9
-    r.set_register(reg, 1.0)
-    assert r.commands(1.5)[0].targets["antenna_right"] > 0.6 * (d.max - d.home)
 
 
 def test_keyframe_times_are_bounded():
@@ -497,25 +470,32 @@ def test_manifest_behaviour_may_only_set_known_keys_and_is_audited(manifest):
 
     stack = ConfigStack()
     with pytest.raises(ConfigError, match="may set"):
-        stack.set_manifest_behaviour({"safety": {"minor_motion_factor": 1.0}})
-    assert stack.manifest == {} and stack.effective().safety.minor_motion_factor == 0.6
-    with pytest.raises(ConfigError):
-        stack.set_manifest_behaviour({"expression_map": {"rage": {"channels": {}}}})
+        stack.set_manifest_behaviour(
+            {"safety": {"watchdog_ms": 50}}, manifest.channels, body_yaw=None
+        )
     assert stack.manifest == {}
-    stack.set_manifest_behaviour(manifest.model.behaviour)
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour,
+        manifest.channels,
+        load_clip_library(manifest),
+        body_yaw=None,
+    )
     assert stack.audit[-1].source == "manifest" and stack.audit[-1].new == [
         "circadian_motion",
         "expression_map",
         "gesture_map",
+        "motion",
+        "speech_motion_map",
+        "voice",
     ]
 
 
 def test_a_stricter_register_mid_expression_drops_the_body_and_the_amplitude_at_once(cfg, manifest):
     """Regression: the approach and amplitude decisions are re-checked every tick."""
     r = renderer(cfg, manifest, {"joy": BODY})
-    adult, stranger = active("adult"), resolve_unknown(cfg)
-    r.update(state("calm", 0.5), adult, 0.0)
-    assert r.update(state("joy", 0.5), adult, 1.0)
+    reg, stranger = active("plain"), active("reserved")
+    r.update(state("calm", 0.5), reg, 0.0)
+    assert r.update(state("joy", 0.5), reg, 1.0)
     assert "body_yaw" in r.commands(1.25)[0].targets
     r.update(state("joy", 0.5), stranger, 1.26)  # someone arrives: tighter on both counts
     after = r.commands(1.27)[0].targets
@@ -546,9 +526,9 @@ def test_started_counts_every_expression_the_renderer_starts(cfg, manifest):
 
 
 def test_a_requested_gesture_plays_through_the_same_path_as_an_affect_one(cfg, manifest):
-    """SPEC 11: the play skill picks the label; the interval, register and minor cap still rule."""
+    """SPEC 11: the play skill picks the label; the interval and the register still rule."""
     r = renderer(cfg, manifest)
-    reg = active("adult")
+    reg = active("plain")
     assert r.request("nonsense") is False and r.request("joy") is True
     assert r.update(state("calm", 0.5), reg, 0.0) is True
     assert r.last_label == "joy" and r.started == 1
@@ -556,18 +536,6 @@ def test_a_requested_gesture_plays_through_the_same_path_as_an_affect_one(cfg, m
     assert r.update(state("calm", 0.5), reg, 0.2) is False  # min_interval_s not over
     assert r.update(state("calm", 0.5), reg, 1.5) is True and r.last_label == "curiosity"
     assert r.update(state("calm", 0.5), reg, 3.0) is False  # one request, one play
-
-
-def test_a_requested_gesture_respects_the_minor_cap_and_the_register(cfg, manifest):
-    factor = cfg.safety.minor_motion_factor
-    huge = entry(**{"antenna_right": [(0, 0), (0.5, 170), (1, 0)]})
-    r = renderer(cfg, manifest, {"joy": huge}, max_amplitude=3)
-    reg = active("child")
-    r.set_register(reg, factor)
-    r.request("joy")
-    assert r.update(state("calm", 1.0), reg, 0.0)
-    d = manifest.dofs["antenna_right"]
-    assert r.commands(0.5)[0].targets["antenna_right"] <= factor * (d.max - d.home) + 1e-9
 
 
 # ------------------------------------------------------------------ named gestures (SPEC 7, 11)
@@ -591,8 +559,6 @@ def test_the_schema_rejects_bad_gestures():
     with pytest.raises(ValidationError, match="affect labels"):
         RoboEmotConfig.model_validate({"gesture_map": {"joy": {"channels": {"head.yaw": ok}}}})
     with pytest.raises(ValidationError):
-        RoboEmotConfig.model_validate({"gesture_map": {"nod": {"channels": {"head.x": ok}}}})
-    with pytest.raises(ValidationError):
         RoboEmotConfig.model_validate(
             {"gesture_map": {"nod": {"channels": {"head.yaw": [(0, 0), (1, 10)]}}}}
         )
@@ -600,29 +566,49 @@ def test_the_schema_rejects_bad_gestures():
 
 def test_the_manifest_may_set_gesture_map_and_it_is_audited(manifest):
     stack = ConfigStack()
-    stack.set_manifest_behaviour(manifest.model.behaviour)
+    stack.set_manifest_behaviour(
+        manifest.model.behaviour,
+        manifest.channels,
+        load_clip_library(manifest),
+        body_yaw=None,
+    )
     assert "gesture_map" in stack.audit[-1].new
     assert set(stack.effective().gesture_map) >= {"nod", "shake"}
 
 
 def gesture_renderer(cfg, manifest, **expr):
     ecfg = cfg.expression.model_copy(update=expr)
-    return ExpressionRenderer(ecfg, cfg.expression_map, manifest.dofs, 0.15, cfg.gesture_map)
+    return ExpressionRenderer(
+        ecfg,
+        cfg.expression_map,
+        manifest.dofs,
+        0.15,
+        cfg.gesture_map,
+        body_yaw="body_yaw",
+        clips=CLIPS,
+    )
 
 
 def test_play_offers_affect_labels_and_gestures_and_refuses_unknown_names(cfg, manifest):
     r = gesture_renderer(cfg, manifest)
-    assert r.playable() == [*cfg.expression_map, "nod", "shake"]
+    assert r.playable() == [*cfg.expression_map, "nod", "shake", "puzzled", "perk_up"]
     assert r.request("nod") and not r.request("wave")
     assert (
-        ExpressionRenderer(cfg.expression, cfg.expression_map, manifest.dofs, 0.15).request("nod")
+        ExpressionRenderer(
+            cfg.expression,
+            cfg.expression_map,
+            manifest.dofs,
+            0.15,
+            body_yaw="body_yaw",
+            clips=CLIPS,
+        ).request("nod")
         is False
     )  # a robot without a gesture_map offers none
 
 
 def test_a_nod_oscillates_head_pitch_within_limits_and_returns_to_zero(cfg, manifest):
     r = gesture_renderer(cfg, manifest)
-    reg = active("adult")
+    reg = active("plain")
     r.request("nod")
     assert r.update(state("calm", 0.5), reg, 0.0) and r.last_label == "nod"
     d = manifest.dofs["head.pitch"]
@@ -640,7 +626,7 @@ def test_a_nod_oscillates_head_pitch_within_limits_and_returns_to_zero(cfg, mani
 
 def test_a_shake_oscillates_head_yaw_and_a_stricter_register_scales_it(cfg, manifest):
     peaks = {}
-    for group in ("adult", "child"):
+    for group in ("plain", "lively"):
         r = gesture_renderer(cfg, manifest, max_amplitude=3)
         r.request("shake")
         reg = active(group)
@@ -648,12 +634,12 @@ def test_a_shake_oscillates_head_yaw_and_a_stricter_register_scales_it(cfg, mani
         ys = [c.targets["head.yaw"] for _, cmds in drain(r, 0.0, 3.0) for c in cmds]
         assert min(ys) < -0.05 and max(ys) > 0.05  # both sides
         peaks[group] = max(ys)
-    assert peaks["child"] > peaks["adult"]  # the register's 1.2x applies, as for expressions
+    assert peaks["lively"] > peaks["plain"]  # the register's 1.2x applies, as for expressions
 
 
 def test_gestures_respect_the_interval_and_the_cap_on_amplitude(cfg, manifest):
     r = gesture_renderer(cfg, manifest)
-    reg = active("adult")
+    reg = active("plain")
     assert r.update(state("joy", 0.5), reg, 0.0) is False  # first state sets the label
     r.request("nod")
     assert r.update(state("joy", 0.5), reg, 0.1) is True
@@ -663,49 +649,21 @@ def test_gestures_respect_the_interval_and_the_cap_on_amplitude(cfg, manifest):
     assert r.last_amplitude <= cfg.expression.max_amplitude
 
 
-def test_an_oversized_gesture_is_clamped_to_the_range_and_the_minor_cap(cfg, manifest):
-    factor = cfg.safety.minor_motion_factor
+def test_an_oversized_gesture_is_clamped_to_the_range(cfg, manifest):
     huge = entry(**{"head.pitch": [(0, 0), (0.5, 90), (1, 0)]})
-    gestures = {"nod": huge}
     d = manifest.dofs["head.pitch"]
-    # renderer alone: clamped to the range about home
     r = ExpressionRenderer(
         cfg.expression.model_copy(update={"max_amplitude": 3}),
         cfg.expression_map,
         manifest.dofs,
         0.15,
-        gestures,
+        {"nod": huge},
+        body_yaw="body_yaw",
+        clips=CLIPS,
     )
     r.request("nod")
-    assert r.update(state("calm", 1.0), active("child"), 0.0)
+    assert r.update(state("calm", 1.0), active(), 0.0)
     assert r.commands(0.5)[0].targets["head.pitch"] <= d.max - d.home + 1e-9
-    # through the arbiter and limiter, with a minor present
-    core = MotionCore(
-        manifest.dofs,
-        manifest.constraints,
-        crossfade_s=cfg.motion.arbiter.crossfade_ms / 1000,
-        watchdog_s=10.0,
-        minor_factor=factor,
-        watchdog_return_factor=cfg.safety.watchdog_return_factor,
-    )
-    core.minor_present = True
-    r = ExpressionRenderer(
-        cfg.expression.model_copy(update={"max_amplitude": 3}),
-        cfg.expression_map,
-        manifest.dofs,
-        0.15,
-        gestures,
-    )
-    r.set_register(active("child"), factor)
-    r.request("nod")
-    r.update(state("calm", 1.0), active("child"), 1.0)
-    up, t = 0.0, 1.0
-    while t < 3.0:
-        for cmd in r.commands(t):
-            core.feed(cmd)
-        up = max(up, core.tick(t, DT)["head.pitch"] - d.home)
-        t += DT
-    assert 0 < up <= factor * (d.max - d.home) + 1e-9
 
 
 async def test_play_nod_through_the_skill_executor_reaches_the_renderer(cfg, manifest):
@@ -722,12 +680,12 @@ async def test_play_nod_through_the_skill_executor_reaches_the_renderer(cfg, man
             affect=AffectEngine(cfg.affect, cfg.appraisal),
         )
     )
-    enum = reg.tools(reg.offered(RoboEmotConfig().conversation.llm_skills, minor=True))[0]
+    enum = reg.tools(reg.offered(RoboEmotConfig().conversation.llm_skills))[0]
     assert {"nod", "shake", "joy"} <= set(
         enum["function"]["parameters"]["properties"]["gesture"]["enum"]
     )
     assert "nod" in enum["function"]["description"]
-    ctx = SkillContext(speaker="p1", language="en", minor=False, now=0.0)
+    ctx = SkillContext(speaker="p1", language="en", now=0.0)
     exec_kw = {"timeout_s": 1.0, "max_chars": 200, "enum_max": 100}
     out = await execute(reg, reg.names(), "play", {"gesture": "nod"}, ctx, **exec_kw)
     assert out.ok
@@ -744,12 +702,11 @@ def through_core(cfg, manifest, name, dof, reflex=None):
         manifest.constraints,
         crossfade_s=cfg.motion.arbiter.crossfade_ms / 1000,
         watchdog_s=10.0,
-        minor_factor=cfg.safety.minor_motion_factor,
         watchdog_return_factor=cfg.safety.watchdog_return_factor,
     )
     r = gesture_renderer(cfg, manifest)
     r.request(name)
-    assert r.update(state("calm", 0.5), active("adult"), 0.0)
+    assert r.update(state("calm", 0.5), active("plain"), 0.0)
     home, out, t = manifest.dofs[dof].home, [], 0.0
     while t < 6.0:
         for cmd in r.commands(t):
@@ -805,7 +762,7 @@ async def test_play_tells_the_model_when_nothing_was_played(cfg, manifest):
             affect=AffectEngine(cfg.affect, cfg.appraisal),
         )
     )
-    ctx = SkillContext(speaker="p1", language="en", minor=False, now=0.0)
+    ctx = SkillContext(speaker="p1", language="en", now=0.0)
     kw = {"timeout_s": 1.0, "max_chars": 200, "enum_max": 100}
     out = await execute(reg, reg.names(), "play", {"gesture": "nod"}, ctx, **kw)
     body = json.loads(out.content)
@@ -838,3 +795,42 @@ def test_a_reflex_keeps_the_head_while_a_gesture_plays(cfg, manifest):
     out, _ = through_core(cfg, manifest, "nod", "head.pitch", reflex)
     assert out[len(out) // 2] == pytest.approx(target, abs=1e-6)
     assert all(v == pytest.approx(target, abs=0.02) for v in out[len(out) // 3 :])
+
+
+def test_the_connectivity_gestures_keep_the_old_literals_and_the_minjerk_easing(cfg, manifest):
+    """puzzled and perk_up were GestureConfig literals (1.2 s, pose at 30% and left at 70%,
+    minjerk) before they moved into the manifest; the move must not change the motion."""
+    r = gesture_renderer(cfg, manifest)
+    expected = {
+        "puzzled": {"head.roll": 0.15, "antenna_right": -0.4, "antenna_left": 0.4},
+        "perk_up": {"head.pitch": -0.08, "antenna_right": 0.4, "antenna_left": -0.4},
+    }
+    for name, pose in expected.items():
+        prim = r.gesture(name)
+        assert prim.method == "minjerk" and prim.additive
+        assert [round(k.t, 2) for k in prim.keyframes] == [0.0, 0.36, 0.84, 1.2]
+        for key in (prim.keyframes[1], prim.keyframes[2]):
+            assert key.values == pytest.approx(pose, abs=1e-6)
+        for key in (prim.keyframes[0], prim.keyframes[3]):
+            assert set(key.values) == set(pose) and not any(key.values.values())
+
+
+def test_a_gesture_for_a_robot_that_may_not_approach_keeps_the_body_still(cfg, manifest):
+    gestures = {
+        "turn": entry(
+            **{"body_yaw": [(0, 0), (0.5, 20), (1, 0)], "head.yaw": [(0, 0), (0.5, 5), (1, 0)]}
+        )
+    }
+    r = ExpressionRenderer(
+        cfg.expression,
+        cfg.expression_map,
+        manifest.dofs,
+        0.15,
+        gestures,
+        body_yaw="body_yaw",
+        clips=CLIPS,
+    )
+    r.set_register(active("plain", approach_allowed=False))
+    assert "body_yaw" not in r.gesture("turn").keyframes[1].values
+    r.set_register(active("plain", approach_allowed=True))
+    assert "body_yaw" in r.gesture("turn").keyframes[1].values

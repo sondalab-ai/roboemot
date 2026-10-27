@@ -3,10 +3,8 @@
 Two layers. ``clean_value`` validates any catalogue leaf from its descriptor (kind, nullable,
 ``ge``/``le``, choices, tuple length) and the ``webui.settings_*`` caps; the stack's pydantic
 validation stays the final check. ``HOOKS`` attach the per-path rules that need more than the
-kind: the wake word sanitiser, the child-safe lines, the wake phrases and the output blocklist.
-Blocklist words can be removed: the stack refuses it on the runtime layer and the settings editor
-retries it on the app layer (admin PIN). Every refusal is a ``ValidationError`` with a stable code
-and never echoes the value.
+kind: the wake word sanitiser and the wake phrases. Every refusal is a ``ValidationError`` with a
+stable code and never echoes the value.
 """
 
 from __future__ import annotations
@@ -21,21 +19,17 @@ from typing import Any, cast
 
 from roboemot.config.catalogue import FieldDescriptor
 from roboemot.config.schema import RoboEmotConfig
-from roboemot.conversation.output_filter import OutputFilter
 from roboemot.redact import PATH_WILDCARD
 from roboemot.voice.keywords import normalise
 from roboemot.voice.robot_name import sanitise_name
 
 from .validation import ValidationError
 
-NAME_PLACEHOLDER = "{name}"
 PHRASE_PATTERN = re.compile(r"[^\W_]+(?: [^\W_]+)*")
-WORD_PATTERN = re.compile(r"[^\W_]+(?: [^\W_]+)*\*?")
 KEY_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
 EVENT_PATTERN = re.compile(r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*")
-LINE_BREAKS = "  "  # categories Zl and Zp: line breaks the C* check does not cover
 TEXT_CONTROLS = "\n\t"  # the only control characters a free text may hold
-LIST_KIND, NAME_KIND, LINE_KIND, WORDS_KIND = "phrases", "name", "line", "words"
+LIST_KIND, NAME_KIND = "phrases", "name"
 
 
 def replace(row: FieldDescriptor, **fields: Any) -> FieldDescriptor:
@@ -55,11 +49,6 @@ def _text(value: object) -> str:
 
 def _has_control(text: str, allowed: str = "") -> bool:
     return any(unicodedata.category(c).startswith("C") and c not in allowed for c in text)
-
-
-def _blocked_by_filter(cfg: RoboEmotConfig, text: str) -> bool:
-    """Whether the minors output filter (the effective blocklist) blocks ``text``."""
-    return OutputFilter(cfg.safety.minor_output_blocklist).blocked(text)
 
 
 def _string_list(value: object) -> list[str]:
@@ -84,8 +73,6 @@ class Hook:
 HOOKS: tuple[Hook, ...] = (
     Hook("voice.keywords.*.wake_phrases", LIST_KIND),
     Hook("voice.wake_word", NAME_KIND),
-    Hook("safety.minor_lines.*.*", LINE_KIND),
-    Hook("safety.minor_output_blocklist.*", WORDS_KIND),
 )
 
 
@@ -101,7 +88,7 @@ def hook_for(path: str) -> Hook | None:
     return None
 
 
-def _items(value: object, cfg: RoboEmotConfig, pattern: re.Pattern[str]) -> list[str]:
+def _items(value: object, cfg: RoboEmotConfig) -> list[str]:
     """Distinct, whitespace-normalised items of a list within the count, length and character
     limits."""
     web = cfg.webui
@@ -113,7 +100,7 @@ def _items(value: object, cfg: RoboEmotConfig, pattern: re.Pattern[str]) -> list
     for item in items:
         if len(item) > web.settings_phrase_max_chars:
             raise _fail("phrase_too_long")
-        if pattern.fullmatch(item) is None or not normalise(item.rstrip("*")):
+        if PHRASE_PATTERN.fullmatch(item) is None or not normalise(item):
             raise _fail("phrase_invalid")
     return items
 
@@ -131,40 +118,14 @@ def _name(value: object, cfg: RoboEmotConfig) -> str | None:
         raise _fail("name_too_long")
     if sanitise_name(text, cfg.voice.name_max_chars) != text:
         raise _fail("name_invalid")
-    if _blocked_by_filter(cfg, text):
-        raise _fail("name_blocked")
-    return text
-
-
-def _line(path: str, value: object, cfg: RoboEmotConfig) -> str:
-    """A spoken line: one line of printable text; ``{name}`` only where the field has it."""
-    text = _text(value)
-    if not text:
-        if path.endswith(".robot_unnamed"):
-            return ""
-        raise _fail("line_empty")
-    if len(text) > cfg.webui.settings_line_max_chars:
-        raise _fail("line_too_long")
-    if _has_control(text) or any(c in LINE_BREAKS for c in text):
-        raise _fail("line_invalid")
-    allowed = NAME_PLACEHOLDER if path.endswith(".robot_name") else ""
-    if "{" in text.replace(allowed, "") or "}" in text.replace(allowed, ""):
-        raise _fail("line_invalid")
-    name = sanitise_name(cfg.voice.wake_word or "", cfg.voice.name_max_chars)
-    if _blocked_by_filter(cfg, text.replace(NAME_PLACEHOLDER, name)):
-        raise _fail("line_blocked")
     return text
 
 
 def clean_hooked(hook: Hook, path: str, value: object, cfg: RoboEmotConfig) -> Any:
     """Apply a hook's cleaner to ``value``."""
     if hook.kind == LIST_KIND:
-        return _items(value, cfg, PHRASE_PATTERN)
-    if hook.kind == WORDS_KIND:
-        return _items(value, cfg, WORD_PATTERN)
-    if hook.kind == NAME_KIND:
-        return _name(value, cfg)
-    return _line(path, value, cfg)
+        return _items(value, cfg)
+    return _name(value, cfg)
 
 
 # ------------------------------------------------------------------ generic, by kind
@@ -175,8 +136,10 @@ Cleaner = Callable[[FieldDescriptor, Any, RoboEmotConfig], Any]
 def _bounded(row: FieldDescriptor, number: float) -> None:
     if not math.isfinite(number):
         raise _fail("value_type")
-    if (row["ge"] is not None and number < row["ge"]) or (
-        row["le"] is not None and number > row["le"]
+    if (
+        (row.get("gt") is not None and number <= row["gt"])
+        or (row["ge"] is not None and number < row["ge"])
+        or (row["le"] is not None and number > row["le"])
     ):
         raise _fail("value_range")
 
@@ -280,7 +243,7 @@ def _string_dict(row: FieldDescriptor, value: Any, cfg: RoboEmotConfig) -> dict[
 
 
 def _number_dict(row: FieldDescriptor, value: Any, cfg: RoboEmotConfig) -> dict[str, float]:
-    plain = replace(row, ge=None, le=None)
+    plain = replace(row, gt=None, ge=None, le=None)
     return {k: _number(plain, v, cfg) for k, v in _mapping(value, cfg).items()}
 
 

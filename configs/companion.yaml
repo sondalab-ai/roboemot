@@ -13,6 +13,25 @@ llm_routes:
     base_url: https://api.openai.com/v1       # or OpenRouter, Anthropic, any compatible provider
     api_key: ${secret:cloud_key}
     model: <model-id>
-    allowed_for_minors: false
     daily_token_budget: 200000
     context_budget_tokens: 32000
+  # Realtime speech route (SPEC 8), off by default: a server does ASR, the LLM and TTS.
+  # Turn it on with voice.realtime_route: {enabled: true, route: <name>, mode: ...}.
+  #
+  # mode: direct -- the route's own URL + /realtime, e.g. a speech-to-speech server on the LAN:
+  # - name: s2s
+  #   kind: realtime
+  #   base_url: http://192.168.1.20:8765/v1   # connects to ws://192.168.1.20:8765/v1/realtime
+  #   api_key: none
+  #   model: s2s
+  #   locality: local
+  #
+  # mode: platform -- the robot's session provider; base_url is its allocator (path /session).
+  # Reachy Mini: Pollen's allocator, keyed with a Hugging Face token: use a read-only
+  # (fine-grained, no write scope) token. The token goes to the allocator only; the robot's
+  # hardware_id only with privacy.realtime_platform_id (off).
+  # - name: pollen
+  #   kind: realtime
+  #   base_url: https://pollen-robotics-reachy-mini-realtime-url.hf.space/session
+  #   api_key: ${secret:hf_token}             # roboemot secrets set hf_token
+  #   model: s2s

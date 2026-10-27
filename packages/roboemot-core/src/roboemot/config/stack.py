@@ -18,11 +18,14 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import functools
 import json
+import logging
 import os
+import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import UnionType
@@ -38,12 +41,75 @@ from .schema import (
     WITHDRAW_RULE_FIELDS,
     WITHDRAW_SHARED_FIELDS,
     RoboEmotConfig,
+    VoiceConfig,
     rule_identity,
 )
 
+log = logging.getLogger(__name__)
+
 LAYER_ORDER = ("defaults", "manifest", "preset", "app", "derived", "person", "runtime")
-KEYED_LISTS = {"appraisal.rules": "event", "llm_routes": "name"}
+
+
+class _KeyedLists(dict):
+    """List path to the field that identifies its entries. A ``*`` segment in a key stands for any
+    one segment (``expression_map.*.variants``: the label is part of the path), and lookups by a
+    concrete path resolve through it."""
+
+    def _pattern(self, path: object) -> str | None:
+        if not isinstance(path, str):
+            return None
+        if dict.__contains__(self, path):
+            return path
+        parts = path.split(".")
+        for pattern in self:
+            want = pattern.split(".")
+            if len(want) == len(parts) and all(
+                w in ("*", p) for w, p in zip(want, parts, strict=True)
+            ):
+                return pattern
+        return None
+
+    def __contains__(self, path: object) -> bool:
+        return self._pattern(path) is not None
+
+    def __getitem__(self, path: str) -> str:
+        pattern = self._pattern(path)
+        if pattern is None:
+            raise KeyError(path)
+        return dict.__getitem__(self, pattern)
+
+    def get(self, path: str, default: Any = None) -> Any:
+        pattern = self._pattern(path)
+        return default if pattern is None else dict.__getitem__(self, pattern)
+
+
+KEYED_LISTS = _KeyedLists(
+    {
+        "appraisal.rules": "event",
+        "llm_routes": "name",
+        "expression_map.*.variants": "clip",
+        "circadian_motion.yawn.variants": "clip",
+        "circadian_motion.stretch.variants": "clip",
+    }
+)
+CHANNEL_ONLY = ("repeat", "curve")  # entry fields that only make sense with channels
+# A layer that sets a ``variants`` list replaces the one below it whole (SPEC 7); the clip key only
+# addresses entries, so a runtime edit or an added entry follows the clip, not the index.
+REPLACED_BY_LAYER = "variants"
+FORM_MOTION = ("yawn", "stretch")  # circadian_motion entries that may be channels or variants
 AUDIT_FILE_MODE = 0o600
+APP_FILE_MODE = 0o600  # app.yaml: owner only, it may hold a literal api_key (SPEC 12)
+_MOVED = yaml.safe_load(Path(__file__).with_name("moved_settings.yaml").read_text())
+RENAMED_SETTINGS: dict[str, str] = _MOVED["renamed"]  # old path -> new path (web UI file only)
+MIGRATED_SETTINGS: dict[str, str] = _MOVED["migrated"]  # old path -> new path (everywhere)
+REMOVED_SETTINGS: dict[str, str] = _MOVED["removed"]  # old path (or prefix) -> what replaces it
+DROPPED_SETTINGS: dict[str, str] = _MOVED["dropped"]  # old path (``*``: any entry) -> why
+# keyed list path -> {identity of an entry that no longer exists: why}
+DROPPED_ENTRIES: dict[str, dict[str, str]] = _MOVED["dropped_entries"]
+# keyed list path -> {a ``when`` key no event payload carries any more: why}
+DROPPED_WHEN: dict[str, dict[str, str]] = _MOVED["dropped_when"]
+DROP = object()  # ``without_dropped``: the value is a dropped setting as a whole
+_dropped_logged: set[tuple[str, str]] = set()  # (source, path) pairs already logged
 NO_KEY = ("", "none")  # api_key values that carry no key
 PATCH = "#patch"  # runtime slot suffix: edits of existing entries of a merged list, by identity
 
@@ -93,6 +159,10 @@ class _RuntimeValue:
     expires_at: float | None
     # Guarded values an admin approved for this runtime override only; they lapse with it.
     approved: dict[str, Any] = field(default_factory=dict)
+    # A ``variants`` list written to an entry that had none: it switches the entry's form and
+    # stays whatever the layers below do. Without it the list extends the entry's own variants and
+    # waits while the effective form is ``channels``.
+    switch: bool = False
 
 
 @dataclass
@@ -105,13 +175,52 @@ class ConfigChange:
 # ----------------------------------------------------------------------------- dict helpers
 
 
-def deep_merge(base: dict, over: dict, path: str = "") -> dict:
+def is_form_entry(location: str) -> bool:
+    """Whether ``location`` is an entry that is either ``channels`` or ``variants`` (SPEC 7)."""
+    head, _, label = location.partition(".")
+    return (
+        bool(label)
+        and "." not in label
+        and (head == "expression_map" or (head == "circadian_motion" and label in FORM_MOTION))
+    )
+
+
+def switch_form(base: dict, over: dict) -> dict:
+    """``base`` without the form (channels or variants) that ``over`` replaces with the other.
+    ``repeat`` and ``curve`` belong to hand-written keyframes, so they go with the channels."""
+    if over.get("variants") and not over.get("channels"):
+        return {
+            k: v
+            for k, v in base.items()
+            if k != "channels" and (k not in CHANNEL_ONLY or k in over)
+        }
+    if over.get("channels") and not over.get("variants"):
+        return {k: v for k, v in base.items() if k != "variants"}
+    return base
+
+
+def deep_merge(base: dict, over: dict, path: str = "", *, at: str | None = None) -> dict:
+    """``over`` on ``base``, dicts key by key, lists replaced (keyed lists by identity).
+
+    A layer that sets an entry's ``variants`` drops the ``channels`` below it and vice versa
+    (SPEC 7, Rendering). ``at`` is where ``base`` sits in the tree when that differs from ``path``
+    (a runtime override merged into a section).
+    """
     out = copy.deepcopy(base)
+    where = path if at is None else at
+    if is_form_entry(where):
+        out = switch_form(out, over)
     for key, value in over.items():
         p = f"{path}.{key}" if path else key
+        sub = f"{where}.{key}" if where else key
         if isinstance(value, dict) and isinstance(out.get(key), dict):
-            out[key] = deep_merge(out[key], value, p)
-        elif p in KEYED_LISTS and isinstance(value, list) and isinstance(out.get(key), list):
+            out[key] = deep_merge(out[key], value, p, at=sub)
+        elif (
+            p in KEYED_LISTS
+            and key != REPLACED_BY_LAYER
+            and isinstance(value, list)
+            and isinstance(out.get(key), list)
+        ):
             out[key] = _merge_keyed(out[key], value, KEYED_LISTS[p])
         else:
             out[key] = copy.deepcopy(value)
@@ -164,7 +273,7 @@ def _list_item(items: list, part: str, dotted: str) -> Any:
         return items[int(part)]
     for item in items:
         key = item if isinstance(item, dict) else getattr(item, "__dict__", {})
-        if part in (key.get("name"), key.get("event")):
+        if part in (key.get("name"), key.get("event"), key.get("clip")):
             return item
     raise KeyError(f"{dotted}: no list entry named {part!r}")
 
@@ -426,7 +535,133 @@ def load_yaml(path: Path) -> dict:
         raise ConfigError(f"{path}: {exc}") from exc
     if not isinstance(data, dict):
         raise ConfigError(f"{path}: top level must be a mapping")
+    data, found = without_dropped("", data)
+    log_dropped(str(path), found)
+    for old, moved in migrate_paths(data):
+        log_migrated(str(path), old, moved=moved)
     return data
+
+
+def migrate_paths(data: dict[str, Any]) -> list[tuple[str, bool]]:
+    """Move, in place, every ``MIGRATED_SETTINGS`` path found in the nested ``data`` to its new
+    path and drop the sections it leaves empty. A value already at the new path wins: the old
+    one is then dropped. Returns ``(old path, moved)`` for each old path found."""
+    found: list[tuple[str, bool]] = []
+    for old, new in MIGRATED_SETTINGS.items():
+        *parents, leaf = old.split(".")
+        node: Any = data
+        for part in parents:
+            node = node.get(part) if isinstance(node, dict) else None
+        if not isinstance(node, dict) or leaf not in node:
+            continue
+        value = node.pop(leaf)
+        try:
+            get_path(data, new)
+            found.append((old, False))
+        except (KeyError, AttributeError, IndexError, TypeError):
+            set_path(data, new, value)
+            found.append((old, True))
+        _prune(data, parents)
+    return found
+
+
+def _prune(data: dict[str, Any], parents: list[str]) -> None:
+    """Remove the empty mappings along ``parents``, deepest first."""
+    for depth in range(len(parents), 0, -1):
+        node: Any = data
+        for part in parents[: depth - 1]:
+            node = node.get(part) if isinstance(node, dict) else None
+        key = parents[depth - 1]
+        if isinstance(node, dict) and node.get(key) == {}:
+            del node[key]
+
+
+def log_migrated(source: str, path: str, *, moved: bool) -> None:
+    """One warning per ``source`` and migrated ``path``, naming the paths and never the value:
+    moved to its new path, or ignored because a value was already set there."""
+    if (source, path) not in _dropped_logged:
+        _dropped_logged.add((source, path))
+        new = MIGRATED_SETTINGS[path]
+        if moved:
+            log.warning("%s: setting %s moved to %s", source, path, new)
+        else:
+            log.warning("%s: setting %s ignored: %s already set", source, path, new)
+
+
+def without_dropped(path: str, value: Any) -> tuple[Any, list[str]]:
+    """``value`` stored at ``path`` (``""`` for a whole file) without the dropped settings it
+    holds (``DROPPED_SETTINGS``), removed in place, and their paths as found. ``DROP`` when
+    ``path`` is itself a dropped setting or lies under one; a ``*`` in ``path`` stands for any
+    list entry (the identity of a web UI file key). Entries of a keyed list whose identity is in
+    ``DROPPED_ENTRIES`` are removed too, found as ``list[identity]``."""
+    here = [p for p in path.split(".") if p]
+    found: list[str] = []
+    for pattern in DROPPED_SETTINGS:
+        parts = pattern.split(".")
+        if not all(p in ("*", h) for p, h in zip(parts, here, strict=False)):
+            continue
+        if len(here) >= len(parts):
+            return DROP, [path]
+        _strip(value, parts[len(here) :], here, found)
+    for list_path in sorted(DROPPED_ENTRIES.keys() | DROPPED_WHEN.keys()):
+        parts = list_path.split(".")
+        if here == parts[: len(here)]:
+            _strip_entries(value, parts[len(here) :], list_path, found)
+    return value, found
+
+
+def dropped_entry(list_path: str, ident: dict[str, Any]) -> bool:
+    """Whether the keyed-list entry ``ident`` of ``list_path`` no longer exists: its identity is
+    in ``DROPPED_ENTRIES``, or its ``when`` names a key in ``DROPPED_WHEN`` (a rule that could
+    never match again)."""
+    if list_path not in KEYED_LISTS:
+        return False
+    when = ident.get("when")
+    gone = DROPPED_WHEN.get(list_path, {})
+    return ident.get(KEYED_LISTS[list_path]) in DROPPED_ENTRIES.get(list_path, {}) or (
+        isinstance(when, dict) and any(k in gone for k in when)
+    )
+
+
+def _strip_entries(node: Any, parts: list[str], list_path: str, found: list[str]) -> None:
+    """Delete, in place, the entries of the keyed list ``parts`` names under ``node`` that
+    ``dropped_entry`` matches, appending ``list_path[identity]`` for each to ``found``."""
+    for part in parts:
+        node = node.get(part) if isinstance(node, dict) else None
+    if not isinstance(node, list):
+        return
+    key = KEYED_LISTS[list_path]
+    gone = [e for e in node if isinstance(e, dict) and dropped_entry(list_path, e)]
+    node[:] = [e for e in node if not any(e is g for g in gone)]
+    found += [f"{list_path}[{e[key]}]" for e in gone]
+
+
+def _strip(node: Any, parts: list[str], trail: list[str], found: list[str]) -> None:
+    """Delete the keys ``parts`` names under ``node`` (``*``: every list entry or mapping
+    value), appending the full path of each deleted key (``trail`` is ``node``'s) to ``found``."""
+    head, rest = parts[0], parts[1:]
+    if head == "*":
+        items: list[tuple[Any, Any]] = list(enumerate(node)) if isinstance(node, list) else []
+        items += list(node.items()) if isinstance(node, dict) else []
+    else:
+        items = [(head, node[head])] if isinstance(node, dict) and head in node else []
+    for key, child in items:
+        if rest:
+            before = len(found)
+            _strip(child, rest, [*trail, str(key)], found)
+            if len(found) > before and child == {} and isinstance(node, dict):
+                del node[key]  # a section that held only dropped settings goes with them
+        elif isinstance(node, dict):
+            del node[key]
+            found.append(".".join([*trail, str(key)]))
+
+
+def log_dropped(source: str, paths: Iterable[str]) -> None:
+    """One warning per ``source`` and dropped ``path``, naming the path and never its value."""
+    for path in paths:
+        if (source, path) not in _dropped_logged:
+            _dropped_logged.add((source, path))
+            log.warning("%s: setting %s ignored: removed from the configuration", source, path)
 
 
 def resolve_preset(name: str, preset_dirs: Iterable[Path], _seen: tuple[str, ...] = ()) -> dict:
@@ -450,8 +685,17 @@ def resolve_preset(name: str, preset_dirs: Iterable[Path], _seen: tuple[str, ...
 # ----------------------------------------------------------------------------- guardrails
 
 MANIFEST_BEHAVIOUR_KEYS = frozenset(
-    {"expression_map", "gesture_map", "circadian_motion"}
+    {"expression_map", "gesture_map", "circadian_motion", "speech_motion_map", "voice", "motion"}
 )  # what a robot manifest may set
+MANIFEST_MOTION_KEYS = frozenset({"app_tick_hz", "arbiter"})  # the rates of ``motion``
+MANIFEST_ARBITER_KEYS = frozenset({"loop_hz"})  # the rate of ``motion.arbiter``
+MANIFEST_VOICE_KEYS = frozenset(
+    {"default_name", "keywords", "base", "limits"}
+)  # the name fields and the pitch of ``voice``
+MANIFEST_VOICE_PITCH_KEYS = frozenset(
+    {"pitch_st"}
+)  # all that ``voice.base`` / ``voice.limits`` take
+MANIFEST_KEYWORD_KEYS = frozenset({"name_aliases"})  # per language under ``voice.keywords``
 PERSON_SECTIONS = ("register", "voice", "conversation", "persona.traits")
 
 
@@ -496,22 +740,113 @@ def guarded_leaves(cfg: RoboEmotConfig) -> dict[str, tuple[Any, dict[str, Any]]]
 NEW_RULE_REFUSED = "reflexes.rules."
 
 
-def _filter_keys(entries: Any) -> set[tuple[str, bool]]:
-    """Entries of an output-filter list as (normalised text, is prefix), the forms the matcher
-    compares, so an accent, case or invisible-character swap is a different entry."""
-    from ..conversation.output_filter import PREFIX, clean  # lazy: conversation imports config
+def _name_chars_ceiling() -> int:
+    """The schema's upper bound of ``voice.name_max_chars``: the longest name any valid
+    configuration can allow."""
+    meta = VoiceConfig.model_fields["name_max_chars"].metadata
+    return max(m.le for m in meta if hasattr(m, "le"))
+
+
+def check_manifest_motion(motion: Any) -> None:
+    """A manifest may set the loop rates of its hardware (``motion.app_tick_hz`` and
+    ``motion.arbiter.loop_hz``) and nothing else under ``motion``: limits and blending stay
+    with the schema and the owner."""
+    if motion is None:
+        return
+    if not isinstance(motion, dict) or set(motion) - MANIFEST_MOTION_KEYS:
+        extra = sorted(set(motion) - MANIFEST_MOTION_KEYS) if isinstance(motion, dict) else motion
+        raise ConfigError(
+            f"manifest behaviour motion may set {sorted(MANIFEST_MOTION_KEYS)}, not {extra}"
+        )
+    arbiter = motion.get("arbiter", {})
+    if not isinstance(arbiter, dict) or set(arbiter) - MANIFEST_ARBITER_KEYS:
+        extra = (
+            sorted(set(arbiter) - MANIFEST_ARBITER_KEYS) if isinstance(arbiter, dict) else arbiter
+        )
+        raise ConfigError(
+            f"manifest behaviour motion.arbiter may set {sorted(MANIFEST_ARBITER_KEYS)}, "
+            f"not {extra}"
+        )
+
+
+def check_manifest_voice(voice: Any) -> None:
+    """A manifest may name the robot (``voice.default_name``, per-language
+    ``voice.keywords.<lang>.name_aliases``) and give it a voice pitch (``voice.base.pitch_st``,
+    ``voice.limits.pitch_st`` as a [lo, hi] pair holding the base) and nothing else under
+    ``voice``. Each name must
+    survive ``sanitise_name`` unchanged and fit the schema's maximum of ``voice.name_max_chars``,
+    not the owner's own setting: a tight owner cap must not make the shipped manifest unloadable
+    (the names are only matched, never shown, so the cap has nothing to cut)."""
     from ..voice.keywords import normalise
+    from ..voice.robot_name import sanitise_name
 
-    keys = set()
-    for entry in entries if isinstance(entries, list) else []:
-        text = clean(str(entry)).strip()
-        keys.add((normalise(text.rstrip(PREFIX + " ")), text.endswith(PREFIX)))
-    return keys
+    if voice is None:
+        return
+    cap = _name_chars_ceiling()
+
+    def check_name(where: str, value: Any) -> None:
+        if not isinstance(value, str) or sanitise_name(value, cap) != value:
+            raise ConfigError(
+                f"manifest behaviour voice.{where}: {value!r} must be letters, digits, spaces "
+                f"and '.- only, at most {cap} characters"
+            )
+
+    if not isinstance(voice, dict) or set(voice) - MANIFEST_VOICE_KEYS:
+        extra = sorted(set(voice) - MANIFEST_VOICE_KEYS) if isinstance(voice, dict) else voice
+        raise ConfigError(
+            f"manifest behaviour voice may set {sorted(MANIFEST_VOICE_KEYS)}, not {extra}"
+        )
+    if "default_name" in voice:
+        check_name("default_name", voice["default_name"])
+    check_manifest_voice_pitch(voice)
+    keywords = voice.get("keywords", {})
+    if not isinstance(keywords, dict):
+        raise ConfigError("manifest behaviour voice.keywords must map languages to name_aliases")
+    for language, entry in keywords.items():
+        where = f"keywords.{language}"
+        if not isinstance(entry, dict) or set(entry) - MANIFEST_KEYWORD_KEYS:
+            raise ConfigError(
+                f"manifest behaviour voice.{where} may set {sorted(MANIFEST_KEYWORD_KEYS)} only"
+            )
+        aliases = entry.get("name_aliases", [])
+        if not isinstance(aliases, list):
+            raise ConfigError(f"manifest behaviour voice.{where}.name_aliases must be a list")
+        for alias in aliases:
+            check_name(f"{where}.name_aliases", alias)
+            if not normalise(alias):
+                raise ConfigError(f"manifest behaviour voice.{where}.name_aliases: empty alias")
 
 
-def keeps_every_entry(candidate: Any, approved: Any) -> bool:
-    """``superset`` direction: the candidate list has every approved entry (normalised)."""
-    return _filter_keys(approved) <= _filter_keys(candidate)
+def check_manifest_voice_pitch(voice: dict) -> None:
+    """``voice.base`` and ``voice.limits`` take ``pitch_st`` only; the limits are a [lo, hi] pair
+    and must hold the base (each side falls back to the schema default when the manifest sets
+    only the other)."""
+    for block in ("base", "limits"):
+        entry = voice.get(block, {})
+        if not isinstance(entry, dict) or set(entry) - MANIFEST_VOICE_PITCH_KEYS:
+            extra = (
+                sorted(set(entry) - MANIFEST_VOICE_PITCH_KEYS) if isinstance(entry, dict) else entry
+            )
+            raise ConfigError(
+                f"manifest behaviour voice.{block} may set {sorted(MANIFEST_VOICE_PITCH_KEYS)}, "
+                f"not {extra}"
+            )
+    if not voice.get("base") and not voice.get("limits"):
+        return
+    limits = voice.get("limits", {}).get("pitch_st", VoiceConfig().limits.pitch_st)
+    if (
+        not isinstance(limits, (list, tuple))
+        or len(limits) != 2
+        or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in limits)
+    ):
+        raise ConfigError("manifest behaviour voice.limits.pitch_st must be a [lo, hi] pair")
+    lo, hi = limits
+    base = voice.get("base", {}).get("pitch_st", VoiceConfig().base.pitch_st)
+    if not isinstance(base, (int, float)) or isinstance(base, bool) or not lo <= base <= hi:
+        raise ConfigError(
+            f"manifest behaviour voice.limits.pitch_st {[lo, hi]} must hold "
+            f"voice.base.pitch_st {base!r}"
+        )
 
 
 def violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Violation]:
@@ -536,7 +871,6 @@ def violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Viol
             "higher": lambda v, r: v >= r,
             "false": lambda v, r: (not v) or v == r,
             "true": lambda v, r: bool(v) or v == r,
-            "superset": keeps_every_entry,
             None: lambda v, r: True,
         }[direction](value, ref)
         if meta.get("admin_only") and value != ref:
@@ -551,8 +885,6 @@ def violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Viol
     for path, (ref, meta) in base.items():  # an admin-only entry (a language's list) removed
         if meta.get("admin_only") and path not in cand and not path.startswith(NEW_RULE_REFUSED):
             found.append(Violation("admin", path, ref, None))
-        if meta.get("conservative") == "superset" and path not in cand:
-            found.append(Violation("safety", path, ref, None))  # a whole list removed
     return (
         found
         + reflex_violations(approved, candidate)
@@ -597,10 +929,12 @@ def endpoint_key(url: str) -> tuple[Any, ...]:
 def secret_violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> list[Violation]:
     """Routes that would send a key somewhere the approval did not trust (SPEC 8, 11A, 12). A
     route with a key (a ``${secret:name}`` reference or a literal; not empty or ``none``) is
-    trusted with exactly its approved endpoint (scheme, host, port) and ``api_key``. A candidate
-    route with a key that is new, has another endpoint (an ``http`` downgrade included) or
-    another ``api_key`` needs the admin: otherwise a runtime change could point a key at a host
-    of its choosing. The values are exact; ``Violation.__str__`` redacts them."""
+    trusted with exactly its approved endpoint (scheme, host, port), ``api_key`` and ``kind``. A
+    candidate route with a key that is new, has another endpoint (an ``http`` downgrade
+    included), another ``api_key`` or another ``kind`` needs the admin: otherwise a runtime
+    change could point a key at a host of its choosing (a realtime route sends it to the host a
+    session provider allocates, SPEC 8 Realtime speech route). The values are exact;
+    ``Violation.__str__`` redacts them."""
     trusted = {r.name: r for r in approved.llm_routes if r.api_key not in NO_KEY}
 
     def same(r: Any) -> bool:
@@ -609,16 +943,20 @@ def secret_violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> li
             ref is not None
             and endpoint_key(ref.base_url) == endpoint_key(r.base_url)
             and ref.api_key == r.api_key
+            and ref.kind == r.kind
         )
+
+    def trust(r: Any) -> str:
+        """The trusted values as one string (an approval matches on it); a realtime route adds
+        its kind, so approving a route of one kind never approves the other."""
+        return f"{r.base_url} {r.api_key}" + ("" if r.kind == "chat" else f" {r.kind}")
 
     return [
         Violation(
             "admin",
             f"llm_routes.{r.name}.api_key",
-            f"{trusted[r.name].base_url} {trusted[r.name].api_key}"
-            if r.name in trusted
-            else "absent",
-            f"{r.base_url} {r.api_key}",
+            trust(trusted[r.name]) if r.name in trusted else "absent",
+            trust(r),
             "secret",
         )
         for r in candidate.llm_routes
@@ -682,6 +1020,27 @@ def reflex_violations(approved: RoboEmotConfig, candidate: RoboEmotConfig) -> li
 # ----------------------------------------------------------------------------- the stack
 
 
+def _mutator(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """A method that edits the stack: whatever happens inside, the cached effective configuration
+    is dropped on the way out (a safety net over the targeted invalidations)."""
+
+    @functools.wraps(fn)
+    def wrapper(self: ConfigStack, *args: Any, **kwargs: Any) -> Any:
+        try:
+            return fn(self, *args, **kwargs)
+        finally:
+            with self._lock:
+                self._invalidate()
+
+    return wrapper
+
+
+# Attributes whose rebinding changes the merged result: they drop the cached effective config.
+_CACHE_INPUTS = frozenset(
+    {"defaults", "manifest", "preset", "app", "derived", "channels", "clock", "_runtime"}
+)
+
+
 @dataclass
 class ConfigStack:
     defaults: dict = field(default_factory=dict)
@@ -695,16 +1054,36 @@ class ConfigStack:
     preset_dirs: list[Path] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        self._cached: RoboEmotConfig | None = None
+        self._cached_until: float | None = None
         self._runtime: dict[str, _RuntimeValue] = {}
+        self.channels: frozenset[str] | None = None
+        self.clips: frozenset[str] = frozenset()  # clip names of the robot's library (SPEC 7)
+        self.body_yaw: str | None = None  # refused in speech_motion_map (set with the channels)
         self._listeners: list[Callable[[ConfigChange], None]] = []
         self._lock = threading.RLock()
         self._mtimes: dict[str, float] = {}
         self.audit: list[AuditEntry] = []
         self.last_error: str | None = None
+        # Listener calls that raised; a writer compares it before and after (R3 SF3)
+        self.listener_failures = 0
         self._last = self.effective()
         self._check_route_budgets(self._last)
         # The configuration installed by the owner is the initial approved baseline.
         self._approved = self._last
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Rebinding a layer, the runtime store, the channels or the clock drops the cached
+        effective configuration (in-place edits call :meth:`_invalidate` themselves)."""
+        object.__setattr__(self, name, value)
+        if name in _CACHE_INPUTS:
+            self._invalidate()
+
+    def _invalidate(self) -> None:
+        """Drop the cached effective configuration: the next ``effective()`` rebuilds it."""
+        if "_cached" in self.__dict__:
+            self._cached = None
+            self._cached_until = None
 
     # ---- construction from files
 
@@ -737,10 +1116,26 @@ class ConfigStack:
         stack._remember_mtimes()
         return stack
 
-    def set_manifest_behaviour(self, behaviour: dict) -> None:
+    @_mutator
+    def set_manifest_behaviour(
+        self,
+        behaviour: dict,
+        channels: Collection[str],
+        clips: Collection[str] = (),
+        *,
+        body_yaw: str | None,
+    ) -> None:
         """Install the robot manifest's ``behaviour`` block (layer 2) once the manifest is loaded.
 
-        It becomes part of the installed configuration, so it also resets the approved baseline.
+        ``channels`` are the dof names expressions may drive (``Manifest.channels``): from now on
+        every configuration this stack builds is refused when a map or pose names another one.
+        ``clips`` are the names in the robot's clip library (empty for a robot without one): a
+        variant naming any other clip is refused too (SPEC 7, Recorded clips).
+        ``body_yaw`` (``GazeMap.body_yaw``, None when the robot cannot turn its body) is refused
+        in ``speech_motion_map`` on top of that: the speaking motion never turns the body. It is
+        required (keyword), so a caller cannot forget it and silently accept a body turn.
+        The block becomes part of the installed configuration, so it also resets the approved
+        baseline.
         """
         unknown = sorted(set(behaviour) - MANIFEST_BEHAVIOUR_KEYS)
         if unknown:
@@ -748,8 +1143,12 @@ class ConfigStack:
                 f"manifest behaviour may set {sorted(MANIFEST_BEHAVIOUR_KEYS)}, not {unknown}"
             )
         with self._lock:
-            saved = self.manifest
-            self.manifest = behaviour
+            check_manifest_voice(behaviour.get("voice"))
+            check_manifest_motion(behaviour.get("motion"))
+            saved = self.manifest, self.channels, self.clips, self.body_yaw
+            self.manifest, self.channels = behaviour, frozenset(channels)
+            self.clips = frozenset(clips)
+            self.body_yaw = body_yaw
             try:
                 defaults = RoboEmotConfig()
                 layer = RoboEmotConfig.model_validate(
@@ -761,11 +1160,13 @@ class ConfigStack:
                         "manifest behaviour would loosen: " + "; ".join(map(str, found))
                     )
                 baseline = RoboEmotConfig.model_validate(self.merged_tree(include_runtime=False))
+                self._check_channels(baseline)
+                self._check_clips(baseline)
                 self._check_route_budgets(baseline)
             except (ValidationError, GuardrailError, ConfigError) as exc:
-                self.manifest = saved
+                self.manifest, self.channels, self.clips, self.body_yaw = saved
                 if isinstance(exc, ValidationError):
-                    raise ConfigError(_explain(exc)) from exc
+                    raise ConfigError(f"manifest behaviour: {_explain(exc)}") from exc
                 raise
             self._last, self._approved = self.effective(), baseline
             self._record("manifest", "behaviour", None, sorted(behaviour))
@@ -796,7 +1197,7 @@ class ConfigStack:
                         try:
                             current = get_path(tree, slot_base(key))
                         except (KeyError, IndexError, ValueError, TypeError):
-                            continue
+                            continue  # e.g. the entry switched to channels: per-clip edits wait
                         if isinstance(current, list):
                             patched = _patch_keyed(current, value, KEYED_LISTS[slot_base(key)])
                             set_path(tree, slot_base(key), patched)
@@ -805,16 +1206,69 @@ class ConfigStack:
                         current = get_path(tree, key)
                     except (KeyError, IndexError, ValueError, TypeError):
                         current = None
+                    if (
+                        current is None
+                        and key in KEYED_LISTS
+                        and not rv.switch
+                        and (key.rpartition(".")[2] == REPLACED_BY_LAYER)
+                    ):
+                        continue  # added variants wait while the entry is channels
                     if isinstance(value, dict) and isinstance(current, dict):
-                        value = deep_merge(current, value)  # a section override keeps the rest
+                        # a section override keeps the rest
+                        value = deep_merge(current, value, at=key)
                     elif (
                         key in KEYED_LISTS and isinstance(value, list) and isinstance(current, list)
                     ):
                         value = _merge_keyed(current, value, KEYED_LISTS[key])
                     set_path(tree, key, value)
+                    self._drop_other_form(tree, key)
             return tree
 
+    @staticmethod
+    def _safe_tree_get(tree: dict, key: str) -> Any:
+        try:
+            return get_path(tree, key)
+        except (KeyError, IndexError, ValueError, TypeError):
+            return None
+
+    @staticmethod
+    def _drop_other_form(tree: dict, key: str) -> None:
+        """A runtime write to ``<entry>.variants`` or ``<entry>.channels`` drops the other form."""
+        entry_key, _, leaf = key.rpartition(".")
+        if leaf not in ("channels", "variants") or not is_form_entry(entry_key):
+            return
+        try:
+            entry = get_path(tree, entry_key)
+        except (KeyError, IndexError, ValueError, TypeError):
+            return
+        if isinstance(entry, dict):
+            entry.pop("channels" if leaf == "variants" else "variants", None)
+            if leaf == "variants":
+                for name in CHANNEL_ONLY:
+                    entry.pop(name, None)
+
     def effective(self, person: dict | None = None) -> RoboEmotConfig:
+        """The merged, validated configuration. Without ``person`` it is cached until a layer,
+        the runtime store, the channels change or the earliest runtime TTL lapses (SPEC 11A), so
+        callers get the same read-only object: never mutate it. A ``person`` call is rebuilt every
+        time and never cached."""
+        if person:
+            return self._build(person)
+        with self._lock:
+            until = self._cached_until
+            if self._cached is not None and (until is None or self.clock() < until):
+                return self._cached
+            now = self.clock()
+            cfg = self._build(None)
+            pending = [
+                rv.expires_at
+                for rv in self._runtime.values()
+                if rv.expires_at is not None and rv.expires_at > now
+            ]
+            self._cached, self._cached_until = cfg, min(pending, default=None)
+            return cfg
+
+    def _build(self, person: dict | None) -> RoboEmotConfig:
         tree = self.merged_tree(person)
         version = tree.get("schema_version", SCHEMA_VERSION)
         if version != SCHEMA_VERSION:
@@ -823,9 +1277,53 @@ class ConfigStack:
                 f"{SCHEMA_VERSION}); run the migration"
             )
         try:
-            return RoboEmotConfig.model_validate(tree)
+            cfg = RoboEmotConfig.model_validate(tree)
         except ValidationError as exc:
             raise ConfigError(_explain(exc)) from exc
+        self._check_channels(cfg)
+        self._check_clips(cfg)
+        return cfg
+
+    def _check_channels(self, cfg: RoboEmotConfig) -> None:
+        """Refuse a channel the loaded manifest has no dof for (SPEC 7, 7A, 11A). Unchecked until
+        :meth:`set_manifest_behaviour` has told the stack which dofs the robot has."""
+        if self.channels is None:
+            return
+        named = {f"expression_map.{k}": e.channels for k, e in cfg.expression_map.items()}
+        named |= {f"gesture_map.{k}": e.channels for k, e in cfg.gesture_map.items()}
+        motion = cfg.circadian_motion
+        for label in ("yawn", "stretch"):
+            if (entry := getattr(motion, label)) is not None:
+                named[f"circadian_motion.{label}"] = entry.channels
+        named["circadian_motion.rest_pose_deg"] = motion.rest_pose_deg
+        for role, names in cfg.speech_motion_map.channels().items():
+            named[f"speech_motion_map.{role}"] = names
+            if self.body_yaw is not None and self.body_yaw in names:
+                raise ConfigError(
+                    f"speech_motion_map.{role}: {self.body_yaw!r} turns the body; the speaking "
+                    "motion never does"
+                )
+        for where, names in named.items():
+            for name in names:
+                if name not in self.channels:
+                    raise ConfigError(
+                        f"{where}: unknown channel {name!r}, expected one of "
+                        f"{sorted(self.channels)}"
+                    )
+
+    def _check_clips(self, cfg: RoboEmotConfig) -> None:
+        """Refuse a variant naming a clip the robot's library lacks (SPEC 7, Recorded clips).
+        Unchecked until :meth:`set_manifest_behaviour`; a robot without a library has no clips."""
+        if self.channels is None:
+            return
+        entries = {f"expression_map.{k}": e for k, e in cfg.expression_map.items()}
+        for label in FORM_MOTION:
+            if (entry := getattr(cfg.circadian_motion, label)) is not None:
+                entries[f"circadian_motion.{label}"] = entry
+        for where, entry in entries.items():
+            for variant in entry.variants:
+                if variant.clip not in self.clips:
+                    raise ConfigError(f"{where}: unknown clip {variant.clip!r}")
 
     def get(self, key: str, person: dict | None = None) -> Any:
         return get_path(self.effective(person), key)
@@ -868,6 +1366,7 @@ class ConfigStack:
 
     # ---- writing
 
+    @_mutator
     def set(
         self,
         key: str,
@@ -909,6 +1408,7 @@ class ConfigStack:
             elif layer == "app":
                 saved_app, saved_rt = copy.deepcopy(self.app), copy.deepcopy(self._runtime)
                 set_in_layer(self.app, self.merged_tree(), key, copy.deepcopy(value))
+                self._invalidate()
                 if drop_runtime:
                     self._take_runtime(key, False)
                 persist = self._persist_app
@@ -921,6 +1421,7 @@ class ConfigStack:
             elif layer == "derived":
                 saved_derived = copy.deepcopy(self.derived)
                 set_in_layer(self.derived, self.merged_tree(), key, copy.deepcopy(value))
+                self._invalidate()
 
                 def undo() -> None:
                     self.derived = saved_derived
@@ -933,6 +1434,7 @@ class ConfigStack:
             self._notify(cfg)
             return cfg
 
+    @_mutator
     def set_many(
         self,
         changes: dict[str, Any],
@@ -972,6 +1474,7 @@ class ConfigStack:
             self._notify(cfg)
             return cfg
 
+    @_mutator
     def preview(self, changes: dict[str, Any]) -> RoboEmotConfig:
         """The effective configuration with ``changes`` laid over the runtime layer, nothing kept
         (no guardrail, no event). ``ConfigError`` when the result is invalid."""
@@ -984,6 +1487,7 @@ class ConfigStack:
             finally:
                 self._runtime = saved
 
+    @_mutator
     def clear(
         self,
         key: str,
@@ -1042,6 +1546,7 @@ class ConfigStack:
             parent, _, leaf = key.rpartition(".")
             saved_derived = copy.deepcopy(self.derived)
             (get_path(self.derived, parent) if parent else self.derived).pop(leaf)
+            self._invalidate()
 
             def undo_derived() -> None:
                 self.derived = saved_derived
@@ -1054,6 +1559,7 @@ class ConfigStack:
         with self._lock:
             self._record(source, key, old, new)
 
+    @_mutator
     def apply_preset(self, name: str, *, source: str = "api", admin: bool = False) -> None:
         """Switch personality. A preset that loosens safety or privacy needs ``admin=True``."""
         with self._lock:
@@ -1173,8 +1679,17 @@ class ConfigStack:
         except ValueError as exc:
             raise ConfigError(str(exc)) from exc
 
-    def subscribe(self, fn: Callable[[ConfigChange], None]) -> None:
-        self._listeners.append(fn)
+    def subscribe(self, fn: Callable[[ConfigChange], None]) -> Callable[[], None]:
+        """Call ``fn`` on every change; subscribing the same ``fn`` twice keeps one entry.
+        Returns a function that removes it again (safe to call twice)."""
+        if fn not in self._listeners:
+            self._listeners.append(fn)
+
+        def unsubscribe() -> None:
+            if fn in self._listeners:
+                self._listeners.remove(fn)
+
+        return unsubscribe
 
     # ---- hot reload (SPEC 11A: applies within 1 s)
 
@@ -1276,8 +1791,14 @@ class ConfigStack:
         A list of entries written to the list itself is merged into the list's own slot (added
         entries). Neither can expire (``ttl_s`` is refused)."""
         expires = self.clock() + ttl_s if ttl_s else None
-        ref = keyed_ref(self.merged_tree(), key, named=True)
-        if ref is not None or (key in KEYED_LISTS and isinstance(value, list)):
+        tree = self.merged_tree()
+        ref = keyed_ref(tree, key, named=True)
+        switching = (
+            ref is None
+            and key.rpartition(".")[2] == REPLACED_BY_LAYER
+            and not isinstance(self._safe_tree_get(tree, key), list)
+        )
+        if ref is not None or (key in KEYED_LISTS and isinstance(value, list) and not switching):
             if ttl_s:
                 raise ConfigError(f"{key}: a list entry cannot expire")
             if ref is not None:
@@ -1300,16 +1821,20 @@ class ConfigStack:
                 list_path, slot, items = key, key, copy.deepcopy(value)
             held = self._runtime.get(slot)
             merged = _merge_keyed(held.value if held else [], items, KEYED_LISTS[list_path])
-            new = _RuntimeValue(merged, None, dict(held.approved) if held else {})
+            new = _RuntimeValue(
+                merged, None, dict(held.approved) if held else {}, held.switch if held else False
+            )
         else:
-            slot, new = key, _RuntimeValue(copy.deepcopy(value), expires)
+            slot, new = key, _RuntimeValue(copy.deepcopy(value), expires, switch=switching)
         before = dict(self._runtime)
         self._runtime.pop(slot, None)
         self._runtime[slot] = new  # last in order: the latest write wins
+        self._invalidate()
 
         def undo() -> None:
             self._runtime.clear()
             self._runtime.update(before)
+            self._invalidate()
 
         return slot, undo
 
@@ -1344,6 +1869,7 @@ class ConfigStack:
             old = self._runtime[key].value if key in self._runtime else old
             for k in gone:
                 self._runtime.pop(k)
+        self._invalidate()
         return found or bool(gone), old
 
     def _known_path(self, key: str) -> bool:
@@ -1355,7 +1881,7 @@ class ConfigStack:
 
     def _sanitize_person(self, person: dict) -> dict:
         """Per-person overrides may shape register, voice, conversation and persona traits only
-        (never the persona prompt), and never a guarded (safety / minors / privacy) value;
+        (never the persona prompt), and never a guarded (safety / privacy) value;
         anything else is dropped and audited."""
         clean: dict = {}
         dropped: list[str] = []
@@ -1381,7 +1907,7 @@ class ConfigStack:
     def _persist_app(self) -> None:
         path = self.files.get("app")
         if path and not str(path).startswith("preset:"):
-            path.write_text(yaml.safe_dump(self.app, sort_keys=False))
+            _replace_file(Path(path), yaml.safe_dump(self.app, sort_keys=False))
             self._mtimes["app"] = _mtime(path)
 
     def _expire(self) -> bool:
@@ -1389,6 +1915,7 @@ class ConfigStack:
         expired = [k for k, v in self._runtime.items() if v.expires_at and v.expires_at <= now]
         for key in expired:
             old = self._runtime.pop(key).value
+            self._invalidate()
             self.audit.append(AuditEntry(now, "ttl", key, scrub(key, _plain(old)), None))
         return bool(expired)
 
@@ -1414,13 +1941,50 @@ class ConfigStack:
         restart = [k for k in keys if field_meta(k).get("restart")]
         change = ConfigChange(keys, restart, new)
         for fn in list(self._listeners):
-            fn(change)
+            try:
+                fn(change)
+            except Exception as exc:  # one failing listener must not starve the others
+                # visible, not silent: the value is in effect() but a part may hold the old one
+                kind = type(exc).__name__
+                log.warning("config listener failed: %s", kind)
+                self.listener_failures += 1
+                self.last_error = f"config listener failed: {kind}"
+                self._record("listener", "listener_failed", None, kind)
         return change
 
     def _remember_mtimes(self) -> None:
         for layer, path in self.files.items():
             if not str(path).startswith("preset:"):
                 self._mtimes[layer] = _mtime(path)
+
+
+def _replace_file(path: Path, text: str) -> None:
+    """Write ``text`` over ``path`` atomically (SPEC 11A, 12): a temp file in the same folder,
+    owner-only (``APP_FILE_MODE``: the file may hold a literal ``api_key``) whatever the old mode
+    was, synced, renamed over the target, then the folder synced as a best effort. A kill at any
+    point leaves the old file or the new one, never a truncated one. A symlink keeps pointing at
+    its target, which is the file replaced: planting one needs write access to the data folder,
+    which is already the app user's, so following it grants nothing new."""
+    target = path.resolve()
+    fd, name = tempfile.mkstemp(dir=target.parent, prefix=target.name + ".")
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            os.fchmod(handle.fileno(), APP_FILE_MODE)
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+    with contextlib.suppress(OSError):  # the new file is in place: durability is best effort
+        dir_fd = os.open(target.parent, os.O_RDONLY | os.O_CLOEXEC)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
 
 
 def _mtime(path: Path) -> float:
@@ -1430,9 +1994,19 @@ def _mtime(path: Path) -> float:
         return -1.0
 
 
+def _moved_hint(path: str) -> str:
+    """ " (renamed to X)" or " (removed: use Y)" when ``path`` is a setting that moved."""
+    if path in RENAMED_SETTINGS:
+        return f" (renamed to {RENAMED_SETTINGS[path]})"
+    for old, instead in REMOVED_SETTINGS.items():
+        if path == old or path.startswith(old + "."):
+            return f" (removed: use {instead})"
+    return ""
+
+
 def _explain(exc: ValidationError) -> str:
     lines = []
     for err in exc.errors():
         loc = ".".join(str(p) for p in err["loc"])
-        lines.append(f"{loc}: {err['msg']}")
+        lines.append(f"{loc}: {err['msg']}{_moved_hint(loc)}")
     return "invalid configuration:\n  " + "\n  ".join(lines)

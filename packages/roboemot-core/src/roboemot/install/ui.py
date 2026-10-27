@@ -4,6 +4,10 @@ Follows the Sondalab Term spec (sondalab-ui docs/tui-patterns.md) through ``sond
 
 - Results are step lines on stdout: glyph, label padded to the label column, detail. Work a dry
   run only describes is ``pending``, never ``done``. The run ends with ``Summary``.
+- A long remote step (pip, a model fetch) shows live progress: on a terminal that allows motion,
+  one line on stderr rewritten in place (spinner, elapsed time, the latest output line);
+  otherwise each output line as prose under the step on stdout. It ends with a step line that
+  carries the total time.
 - Prompts, spinners and running lines go to stderr. An unrecognised answer asks again at most
   three times. Without a terminal on stdin nothing is asked and no default is taken: the run
   stops with an error naming the flag that answers the question (``--yes`` answers every
@@ -20,8 +24,11 @@ from __future__ import annotations
 import argparse
 import getpass
 import os
+import re
+import shutil
 import sys
 import threading
+import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from importlib.metadata import PackageNotFoundError, version
@@ -133,6 +140,33 @@ def _isatty(stream: TextIO) -> bool:
         return False
 
 
+CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+TICK_S = 1.0  # how often the live progress line redraws while the command is silent
+
+
+def format_elapsed(seconds: float) -> str:
+    """``42s``, ``1m42s``, ``1h02m05s``."""
+    total = int(seconds)
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m{secs:02d}s"
+    return f"{minutes}m{secs:02d}s" if minutes else f"{secs}s"
+
+
+class Progress:
+    """One long remote step: call it with each output line; set ``failed`` for a soft failure
+    (pip exited non-zero without raising), so the closing ``done`` line is skipped."""
+
+    def __init__(self) -> None:
+        self.last = ""
+        self.failed = False
+        self.feed: Callable[[str], None] = lambda raw: None
+
+    def __call__(self, raw: str) -> None:
+        self.feed(raw)
+
+
 class Ui:
     """Installer output and prompts.
 
@@ -165,6 +199,9 @@ class Ui:
         self.step_no = 0
         self.steps = 0
         self.counts = {"ok": 0, "warn": 0, "failed": 0}
+        self.tick_s = TICK_S
+        self.clock: Callable[[], float] = time.monotonic
+        self._out_lock = threading.Lock()
 
     # ------------------------------------------------------------ rendering
 
@@ -272,11 +309,10 @@ class Ui:
 
     # ------------------------------------------------------------ stderr
 
-    def error(self, error: Exception) -> None:
+    def error(self, error: TermError) -> None:
         """The three-line error block on stderr; raw output above it only with ``--debug``."""
-        what = getattr(error, "what", str(error))
-        why, fix = getattr(error, "why", ""), getattr(error, "fix", "")
-        output = getattr(error, "output", "")
+        what, why, fix = error.what, error.why, error.fix
+        output = error.output if isinstance(error, WizardError) else ""
         if output and self.debug:
             print(output.rstrip(), file=sys.stderr)
         elif output and not fix and self.debug_flag:
@@ -300,6 +336,85 @@ class Ui:
             yield
         finally:
             spinner.stop()
+
+    @contextmanager
+    def progress(
+        self,
+        label: str,
+        on_line: Callable[[str], str | None] | None = None,
+        done: str | None = None,
+        report: bool = True,
+        slow: bool = True,
+    ) -> Iterator[Progress]:
+        """Announce a long remote step and show it running; yields a ``Progress`` to call per line.
+
+        On a terminal that allows motion one running line on stderr is rewritten in place
+        (spinner, elapsed time, latest line) and a ticker keeps the time moving while the
+        command is silent. Otherwise each line is printed as prose on stdout. ``on_line`` maps a
+        raw output line to the text worth showing (None drops it). On success the step ends with
+        a ``done`` line whose detail is the total time, unless ``report`` is False (the caller
+        prints its own). ``slow`` adds the "can take minutes" note to the announcement. Control
+        characters are stripped from shown lines.
+        """
+        keep = on_line or (lambda text: text)
+        stream = sys.stderr
+        live = self.vt and _term.motion_enabled(isatty=_isatty(stream))
+        ascii = self.ascii()
+        state = Progress()
+        start = self.clock()
+        self.info(f"{label} (can take minutes on the robot)" if slow else label)
+        stop = threading.Event()
+        frame = [0]
+
+        def draw() -> None:
+            width = max(shutil.get_terminal_size().columns - 1, 20)
+            spin = _term.spinner_frame(frame[0], ascii=ascii)
+            elapsed = format_elapsed(self.clock() - start)
+            head = f"{' ' * LAYOUT['indent']}{spin} {label} {elapsed}"
+            text = f"{head}  {state.last}" if state.last else head
+            if len(text) > width:
+                text = text[: width - 1] + ("." if ascii else "…")
+            with self._out_lock:
+                stream.write(f"\r{text}\x1b[K")
+                stream.flush()
+
+        def clear() -> None:
+            with self._out_lock:
+                stream.write("\r\x1b[K")
+                stream.flush()
+
+        def feed(raw: str) -> None:
+            shown = keep(CONTROL.sub("", raw))
+            if not shown:
+                return
+            state.last = shown
+            if live:
+                draw()
+            else:
+                self.info(shown)
+
+        def tick() -> None:
+            while not stop.wait(self.tick_s):
+                frame[0] += 1
+                draw()
+
+        state.feed = feed
+        ticker = threading.Thread(target=tick, daemon=True)
+        if live:
+            draw()
+            ticker.start()
+        try:
+            yield state
+        except BaseException:
+            state.failed = True
+            raise
+        finally:
+            stop.set()
+            if live:
+                ticker.join()
+                clear()
+        if report and not state.failed:
+            self.ok(done or label, format_elapsed(self.clock() - start))
 
     # ------------------------------------------------------------ prompts (stderr)
 
@@ -420,10 +535,12 @@ class _Spinner:
 __all__ = [
     "COMMAND",
     "HeaderParser",
+    "Progress",
     "TermError",
     "Ui",
     "WizardError",
     "app_version",
+    "format_elapsed",
     "header",
     "last_line",
     "print_header",

@@ -36,6 +36,8 @@ TOPICS = (
     "conversation.turn",
     "safety.event",
     "circadian.state",
+    "robot.asleep",
+    "robot.awake",
     "config.changed",
     "frames.camera",
     "frames.audio_in",

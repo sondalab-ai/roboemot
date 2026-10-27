@@ -123,6 +123,7 @@ The persona pieces exist and are tested; these callers wait for the pillars they
 - [ ] The robot, owner and licence items of the M3 report are in SPEC 15 (exit on the robot, barge-in,
       CM4 load, Piper on the robot and its voice licences, wake phrases, OpenAI speech in Italian,
       children's lines). Not repeated here.
+- [ ] Investigate if Phonon 40m can run on reachy mini and if it's worth
 
 ## CI and tests
 
@@ -147,3 +148,7 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       The openai SDK client followed redirects (the prompt went to the target, without the key); LLM routes
       now do not follow them, like the speech client (SPEC 8, 12).
 - [ ] Barge-in keyword worker on the CM4 (SPEC 8 stage 8): the ring is now fed to Vosk one VAD frame at a time (more partials and JSON calls than the old single `accept`), on a second thread; measure the CPU (`keyword_seconds`, load) and the keyword-stop latency on the robot, and the grace of `runtime.shutdown_budget_s` against a real SIGINT.
+- [ ] Runtime section override of `appraisal` (a dict write of the whole section) may replace `appraisal.rules`
+      instead of merging them by key: the runtime merge in `config/stack.py` passes `path=""` to `deep_merge`, so
+      the `KEYED_LISTS` lookup sees `rules`, not `appraisal.rules`. Seen in review, not reproduced yet: write a
+      failing test first, then fix off `main` (SPEC 11A).
