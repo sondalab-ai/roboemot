@@ -1365,6 +1365,11 @@ class PrivacyConfig(Strict):
     )
     keep_enrollment_images: bool = param(False, "Keep enrollment face crops", opt_in=True)
     debug_recording: bool = param(False, "Allow time-limited debug recording", opt_in=True)
+    realtime_audio: bool = param(
+        False,
+        "Allow addressed microphone audio to leave the robot to the realtime route",
+        opt_in=True,
+    )
 
     @field_validator("pseudonym_templates")
     @classmethod
@@ -2773,7 +2778,45 @@ class RealtimeRouteConfig(Strict):
     input: Literal["text", "audio"] = param(
         "text",
         "What leaves the robot for an addressed utterance: text (the local transcript) or "
-        "audio (needs its own opt-in; not available yet, the local pipeline answers)",
+        "audio (the utterance's audio, transcribed by the server; needs the "
+        "privacy.realtime_audio opt-in, else the local pipeline answers)",
+    )
+    audio_gate: Literal["addressed"] = param(
+        "addressed",
+        "Which utterances' audio may leave the robot with input: audio. addressed: only an "
+        "utterance the local wake gate and voice-at-face check accepted, sent once it ended",
+    )
+    transcript_timeout_s: float = param(
+        4.0,
+        "Longest wait for the server's transcript of an utterance's audio; past it the "
+        "utterance is decoded locally and the chat routes answer it",
+        unit="s",
+        ge=0.5,
+        le=15,
+    )
+    server_silence_ms: float = param(
+        600.0,
+        "Silence that ends a turn for the server's VAD. At least voice.vad.end_silence_ms, so "
+        "the server never splits an utterance the robot heard as one",
+        unit="ms",
+        ge=64,
+        le=3000,
+    )
+    close_silence_ms: float = param(
+        900.0,
+        "Silence sent after an utterance's audio, in the same burst, so the server's VAD ends "
+        "the turn at once. More than server_silence_ms; it costs upload, not wall time",
+        unit="ms",
+        ge=100,
+        le=5000,
+    )
+    daily_upload_budget_s: float = param(
+        1800.0,
+        "Microphone audio (the closing silence included) the robot may send per day; past it "
+        "utterances go as text",
+        unit="s",
+        ge=0,
+        le=86400,
     )
     voice: str = param("", "Server voice name; empty uses the server's default")
     prebuffer_ms: float = param(
@@ -2811,6 +2854,15 @@ class RealtimeRouteConfig(Strict):
         ge=65_536,
         le=16_777_216,
     )
+
+    @model_validator(mode="after")
+    def _close_after_server_silence(self) -> RealtimeRouteConfig:
+        if self.close_silence_ms <= self.server_silence_ms:
+            raise ValueError(
+                "voice.realtime_route.close_silence_ms must exceed server_silence_ms, so the "
+                "server's VAD ends the turn within the burst"
+            )
+        return self
 
 
 class VoiceConfig(Strict):
@@ -4367,6 +4419,18 @@ with warnings.catch_warnings():
                 raise ValueError(
                     f"voice.openai_speech.route {speech!r} names a kind: realtime route; "
                     "the speech backend needs a chat route"
+                )
+            return self
+
+        @model_validator(mode="after")
+        def _server_silence_covers_end_silence(self) -> RoboEmotConfig:
+            """The server's VAD must not end a turn on a pause the local endpointer keeps
+            inside one utterance: it would answer the first part, and the second would collide
+            with that response (SPEC 8, Realtime speech route)."""
+            if self.voice.realtime_route.server_silence_ms < self.voice.vad.end_silence_ms:
+                raise ValueError(
+                    "voice.realtime_route.server_silence_ms must be at least "
+                    "voice.vad.end_silence_ms"
                 )
             return self
 
