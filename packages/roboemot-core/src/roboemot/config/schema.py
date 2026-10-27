@@ -1367,7 +1367,9 @@ class PrivacyConfig(Strict):
     debug_recording: bool = param(False, "Allow time-limited debug recording", opt_in=True)
     realtime_audio: bool = param(
         False,
-        "Allow addressed microphone audio to leave the robot to the realtime route",
+        "Allow addressed microphone audio to leave the robot to the realtime route. It is the "
+        "audio of whoever speaks to the robot, a child included, and the route's server "
+        "transcribes it (SPEC 12)",
         opt_in=True,
     )
 

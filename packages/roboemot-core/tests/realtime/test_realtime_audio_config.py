@@ -31,9 +31,10 @@ def test_realtime_audio_is_an_off_by_default_opt_in():
     assert PrivacyConfig().realtime_audio is False
     field = PrivacyConfig.model_fields["realtime_audio"]
     assert field.json_schema_extra["opt_in"] is True
-    assert field.description == (
-        "Allow addressed microphone audio to leave the robot to the realtime route"
+    assert field.description.startswith(
+        "Allow addressed microphone audio to leave the robot to the realtime route."
     )
+    assert "a child included" in field.description  # the consent text says so (SPEC 12)
 
 
 def test_close_silence_must_exceed_the_server_silence():
