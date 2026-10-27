@@ -145,6 +145,7 @@ BEHAVIOUR_MODULES = [
     "realtime/route.py",
     "realtime/turn.py",
     "realtime/input.py",
+    "realtime/check.py",
 ]
 ALLOWED = {0, 1, -1, 2, 0.5, -1.0}
 
