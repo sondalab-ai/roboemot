@@ -732,6 +732,13 @@ class RealtimeRoute:
             self._error(event, token)
         elif isinstance(event, OF_A_RESPONSE):
             self._response_event(event, token)
+        elif isinstance(event, tuple(CONFIRMATIONS)):
+            with self._lock:
+                current = self._current(token)
+                if current:  # the server confirmed a delete or a truncate (the HIL reads them)
+                    self._counts[CONFIRMATIONS[type(event)]] += 1
+            if not current:
+                self._count("stale_callbacks")
         elif isinstance(event, OF_THE_INPUT):
             with self._lock:
                 current = self._current(token)
@@ -1058,6 +1065,8 @@ class RealtimeRoute:
         if client is None:
             return False
         client.send(event)
+        if event["type"] == protocol.ITEM_TRUNCATE:
+            self._count("items_truncated")
         return True
 
     def new_item_id(self) -> str:
@@ -1183,6 +1192,9 @@ COUNTERS = (
     "audio_items_undeletable",
     "audio_items_ambiguous",
     "items_deleted",
+    "items_delete_confirmed",
+    "items_truncated",
+    "items_truncate_confirmed",
     "transcripts",
     "transcript_timeouts",
     "unrequested",
@@ -1199,6 +1211,12 @@ COUNTERS = (
     "sends_refused",
     "resets",
 )
+
+# the server's confirmations of a delete and a truncate, and the counter each one moves
+CONFIRMATIONS: dict[type, str] = {
+    protocol.ItemDeleted: "items_delete_confirmed",
+    protocol.ItemTruncated: "items_truncate_confirmed",
+}
 
 # the server events about the input audio (the audio input collects them)
 OF_THE_INPUT = (protocol.SpeechBoundary, protocol.InputTranscript)

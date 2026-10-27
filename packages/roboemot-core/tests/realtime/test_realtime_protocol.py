@@ -207,3 +207,10 @@ def test_an_item_delete_is_confirmed_by_its_item_id():
     assert "re_check_1" not in repr(ev)
     bad = p.parse(frame({"type": "conversation.item.deleted", "item_id": 7}), MAX)
     assert isinstance(bad, p.Malformed)
+
+
+def test_an_item_truncate_is_confirmed_by_its_item_id():
+    """SR-5 fix round 1, I2: the HIL asserts the server confirmed a truncate."""
+    ev = p.parse(frame({"type": "conversation.item.truncated", "item_id": "item_9"}), MAX)
+    assert isinstance(ev, p.ItemTruncated) and ev.item_id == "item_9"
+    assert "item_9" not in repr(ev)

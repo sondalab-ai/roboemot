@@ -410,3 +410,17 @@ def test_a_future_dated_count_is_today_with_its_seconds(tmp_path):
     assert r.send_audio(SECOND, gate="addressed", instructions="") == "upload_budget"
     today.day += dt.timedelta(days=1)
     assert r.send_audio(SECOND, gate="addressed", instructions="") is None
+
+
+def test_confirmed_deletes_and_truncates_are_counted():
+    """SR-5 fix round 1, I2: sent truncates, and the server's confirmations of deletes and
+    truncates, are counted (the HIL asserts confirmed >= sent)."""
+    stack = audio_stack()
+    r, _ = audio_route(stack)
+    assert r.ready()
+    assert r.send_control(protocol.item_truncate("i", 10))
+    r._on_event(protocol.ItemDeleted(protocol.ITEM_DELETED, "i"))
+    r._on_event(protocol.ItemTruncated(protocol.ITEM_TRUNCATED, "i"))
+    snap = r.snapshot()
+    assert snap["items_truncated"] == 1
+    assert snap["items_delete_confirmed"] == 1 and snap["items_truncate_confirmed"] == 1
