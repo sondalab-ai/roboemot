@@ -8,11 +8,12 @@ The server is reached in two hops:
 
 1. The robot asks Pollen's allocator for a session:
    `https://pollen-robotics-reachy-mini-realtime-url.hf.space/session`.
-2. The allocator answers with the WebSocket address of the session, on the connect host
-   `llgpsjdk3p4ayeud.endpoints.huggingface.cloud`.
+2. The allocator answers with the WebSocket address of the session, on a connect host under
+   `endpoints.huggingface.cloud` (the host changes: the robot saw two different ones in one day).
 
-The robot sends your Hugging Face token to these two hosts only. The connect host is declared
-exactly in `KEY_HOSTS` (`packages/roboemot-reachymini/src/roboemot_reachymini/realtime.py`).
+The robot sends your Hugging Face token only to the allocator and to hosts under
+`.endpoints.huggingface.cloud`, over wss on port 443 (`KEY_HOSTS` in
+`packages/roboemot-reachymini/src/roboemot_reachymini/realtime.py`).
 
 ## Before you start
 
@@ -90,7 +91,7 @@ python scripts/run_on_robot.py --restart   # asks first; the head moves
 | --- | --- |
 | Mode | `platform` |
 | Allocator host | `pollen-robotics-reachy-mini-realtime-url.hf.space` |
-| Connect host | `llgpsjdk3p4ayeud.endpoints.huggingface.cloud` |
+| Connect host | a host under `endpoints.huggingface.cloud` |
 | Key to the connect host | `sent` |
 | session.updated seen | `true` |
 | First audio (ms) | a figure |
@@ -110,7 +111,7 @@ The CLI does not see the settings saved from the web UI. Prefer the web UI check
 | Result | Cause and fix |
 | --- | --- |
 | Mode `direct` | The app did not restart after the `mode` edit, or runs a version before PR #131. Update the robot and restart. |
-| `url_key_host` with a new connect host | Pollen moved the endpoint. The robot does not send the token to an undeclared host, and the local pipeline answers. Declare the new host exactly in `KEY_HOSTS` and update the robot. |
+| `url_key_host` | The allocator handed out a host outside `.endpoints.huggingface.cloud`. The robot does not send the token there, and the local pipeline answers. Check the connect host, then decide whether to add it to `KEY_HOSTS`. |
 | `provider_http_401` or `provider_http_403` | The allocator refused the request. The token may be wrong or expired: store a new one (step 2). |
 | `provider_unreachable` | The robot cannot reach the allocator. Check the robot's internet access. |
 | "The realtime extra (websockets) is not installed." | Run the installer again. |
