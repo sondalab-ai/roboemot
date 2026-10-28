@@ -191,6 +191,9 @@ motors stay off pauses the camera perception, the microphone listener and the be
 (`runtime.pause_when_asleep`). The microphone read loop and the web UI keep running, so this lowers
 CPU use but does not stop it. There is no automatic nap on inactivity yet.
 
+To answer through Pollen's realtime voice server on Hugging Face (off by default), follow
+[Realtime voice through Hugging Face](docs/realtime-voice-setup.md).
+
 Debug report with the robot's own system, temperature and battery data (SPEC 12A):
 
 ```bash
