@@ -424,3 +424,18 @@ def test_confirmed_deletes_and_truncates_are_counted():
     snap = r.snapshot()
     assert snap["items_truncated"] == 1
     assert snap["items_delete_confirmed"] == 1 and snap["items_truncate_confirmed"] == 1
+
+
+@pytest.mark.parametrize(("capture_hz", "sent"), [(16000, None), (24000, 24000)])
+def test_the_input_rate_is_the_servers_native_one_at_16_khz(capture_hz, sent):
+    """Robot run 2026-10-28: Pollen's server refused session.update with input rate 16000
+    (unknown_or_invalid_event) and accepted rate null, its native 16 kHz (as Pollen's app sends
+    it); another capture rate stays explicit."""
+    stack = audio_stack()
+    r, _ = audio_route(stack)
+    cfg = stack.effective()
+    cfg = cfg.model_copy(
+        update={"voice": cfg.voice.model_copy(update={"sample_rate_hz": capture_hz})}
+    )
+    update = r.session_update(cfg, "x")
+    assert update["session"]["audio"]["input"]["format"] == {"type": "audio/pcm", "rate": sent}

@@ -214,3 +214,12 @@ def test_an_item_truncate_is_confirmed_by_its_item_id():
     ev = p.parse(frame({"type": "conversation.item.truncated", "item_id": "item_9"}), MAX)
     assert isinstance(ev, p.ItemTruncated) and ev.item_id == "item_9"
     assert "item_9" not in repr(ev)
+
+
+def test_an_error_without_a_code_keeps_its_type():
+    """Pollen's server sends code null and type unknown_or_invalid_event (2026-10-28)."""
+    raw = {"type": "unknown_or_invalid_event", "code": None, "message": "secret", "param": None}
+    ev = p.parse(frame({"type": "error", "error": raw}), MAX)
+    assert ev.code == "unknown_or_invalid_event" and "secret" not in repr(ev)
+    both = p.parse(frame({"type": "error", "error": {"type": "t", "code": "c"}}), MAX)
+    assert both.code == "c"
