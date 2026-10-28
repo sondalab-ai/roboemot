@@ -173,7 +173,7 @@ def test_the_provider_is_registered_under_the_robot_id_and_meets_the_contract():
     built = factory(object())
     assert isinstance(built, PlatformSession) and isinstance(built, SessionProvider)
     # the allocator's own origin plus the connect host recorded on the robot, exactly (SPEC 13)
-    assert built.key_hosts == KEY_HOSTS == ("llgpsjdk3p4ayeud.endpoints.huggingface.cloud",)
+    assert built.key_hosts == KEY_HOSTS == (".endpoints.huggingface.cloud",)
 
 
 # ------------------------------------------------------------------ the identifier (opt-in)
@@ -321,33 +321,43 @@ def test_the_key_reaches_only_the_allocators_own_origin_over_wss(connect_url, re
         assert refused.value.reason == reason
 
 
-RECORDED = "llgpsjdk3p4ayeud.endpoints.huggingface.cloud"
+@pytest.mark.parametrize(
+    "host",
+    [
+        "llgpsjdk3p4ayeud.endpoints.huggingface.cloud",  # both seen on the robot, 2026-10-28
+        "m3eem4nge00q77w1.endpoints.huggingface.cloud",
+        "M3EEM4NGE00Q77W1.ENDPOINTS.HUGGINGFACE.CLOUD",
+        "a.b.endpoints.huggingface.cloud",
+    ],
+)
+def test_an_inference_endpoint_host_gets_the_key_on_wss_443(host):
+    """SPEC 8: the allocator rotates endpoints under endpoints.huggingface.cloud (owner decision
+    2026-10-28: a suffix, not an exact list)."""
+    got = allocate(
+        Allocator(httpx.Response(200, json={"connect_url": f"wss://{host}/v1/realtime"}))
+    )
+    target = connect_target(route(), got, KEY_HOSTS)
+    assert target.send_key is True and target.origin == f"wss://{host.lower()}:443"
 
 
 @pytest.mark.parametrize(
     ("connect_url", "reason"),
     [
-        (f"wss://{RECORDED}/v1/realtime?t=1", None),
-        (f"wss://{RECORDED}:443/realtime", None),
-        (f"wss://{RECORDED.upper()}/realtime", None),
-        (f"wss://{RECORDED}:8443/realtime", "key_host"),  # only the wss port
-        (f"ws://{RECORDED}/realtime", "insecure"),
-        ("wss://other.endpoints.huggingface.cloud/realtime", "key_host"),  # no suffix match
-        (f"wss://x.{RECORDED}/realtime", "key_host"),
-        (f"wss://{RECORDED}.evil.example/realtime", "key_host"),
+        ("wss://m3eem4nge00q77w1.endpoints.huggingface.cloud:8443/realtime", "key_host"),
+        ("ws://m3eem4nge00q77w1.endpoints.huggingface.cloud/realtime", "insecure"),
+        ("wss://endpoints.huggingface.cloud/realtime", "key_host"),  # the bare suffix
+        ("wss://xendpoints.huggingface.cloud/realtime", "key_host"),  # not a label boundary
+        ("wss://a.endpoints.huggingface.cloud.evil.example/realtime", "key_host"),
+        ("wss://huggingface.cloud/realtime", "key_host"),
+        ("wss://rt-7.hf.space/realtime", "key_host"),  # Spaces stay refused
     ],
 )
-def test_the_recorded_connect_host_gets_the_key_exactly(connect_url, reason):
-    """SPEC 8, 13: the connect host recorded on the robot is declared exactly; a look-alike,
-    another endpoint or another port gets no key."""
+def test_no_key_off_the_inference_endpoints_suffix(connect_url, reason):
+    """SPEC 8: another port, plain ws, the bare domain, a look-alike or a Space gets no key."""
     got = allocate(Allocator(httpx.Response(200, json={"connect_url": connect_url})))
-    if reason is None:
-        target = connect_target(route(), got, KEY_HOSTS)
-        assert target.send_key is True and target.origin == f"wss://{RECORDED}:443"
-    else:
-        with pytest.raises(UrlRefused) as refused:
-            connect_target(route(), got, KEY_HOSTS)
-        assert refused.value.reason == reason
+    with pytest.raises(UrlRefused) as refused:
+        connect_target(route(), got, KEY_HOSTS)
+    assert refused.value.reason == reason
 
 
 def test_another_space_gets_no_key_and_the_route_falls_back(caplog):

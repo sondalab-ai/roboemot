@@ -36,12 +36,29 @@ from roboemot.install.pyenv import RemotePython
 from roboemot.install.remote import Remote
 from roboemot.install.ui import last_line
 
-from .daemon import APP_NAME, DEFAULT_PORT, INSTALL_TIMEOUT_S, DaemonClient, DaemonError
+from .daemon import (
+    APP_NAME,
+    APP_START_TIMEOUT_S,
+    DEFAULT_PORT,
+    INSTALL_TIMEOUT_S,
+    RESTART_TIMEOUT_S,
+    DaemonClient,
+    DaemonError,
+)
 
 APPS_VENV = "/venvs/apps_venv"
 DAEMON_PYTHON = "/venvs/mini_daemon/bin/python"
 VERSION_PATTERN = re.compile(r"[0-9][0-9A-Za-z.+!-]*")
 WAKE_SETTLE_S = 3.0
+STOPPING_POLL_S = 1.0
+# Daemon 1.13.0 (robot, 2026-10-28) can keep an app that already exited in ``stopping``: start
+# answers "An app is already running", stop and restart answer "No app is currently running",
+# and a daemon restart does not clear it. Only a reboot does.
+STUCK_STOPPING = (
+    "the daemon still reports {name} as stopping after {wait_s:.0f} s; its app state is stuck "
+    "and only a reboot of the robot clears it"
+)
+REBOOT_HINT = "python scripts/robot_ssh.py, then: sudo reboot"
 PACKAGES = ("roboemot-core", "roboemot-reachymini")
 PKG_DATA = "roboemot-reachymini/src/roboemot_reachymini/data"
 DAEMON_METADATA = "/venvs/.app_metadata"
@@ -236,6 +253,7 @@ class ReachyMiniWireless:
         if blocker:
             raise WizardError(f"Cannot start {APP_NAME}", blocker)
         self._clear_errored_app(ui)
+        self._await_stopped(ui)
         other = self.running_app()
         if other == APP_NAME:
             self._await_own(ui, f"{APP_NAME} is already running")
@@ -311,6 +329,26 @@ class ReachyMiniWireless:
             self._api().stop_current_app()
         ui.ok(f"Cleared {name}", "stopped its errored run")
 
+    def _await_stopped(self, ui: Ui) -> None:
+        """Wait while the daemon's current app is ``stopping`` (a stop takes up to
+        ``STOP_TIMEOUT_S``); one still stopping after ``RESTART_TIMEOUT_S`` is the daemon's stuck
+        state (``STUCK_STOPPING``): raise with the reboot hint instead of a start it refuses."""
+        polls = round(RESTART_TIMEOUT_S / STOPPING_POLL_S)
+        for i in range(polls + 1):
+            with _wizard_errors():
+                current = self._api().current_app()
+            if not current or current["state"] != "stopping":
+                return
+            if i == 0:
+                ui.warn(f"{current['info']['name']} is stopping", "waiting for the daemon")
+            if i < polls:
+                time.sleep(STOPPING_POLL_S)
+        raise WizardError(
+            f"Cannot start {APP_NAME}",
+            STUCK_STOPPING.format(name=current["info"]["name"], wait_s=RESTART_TIMEOUT_S),
+            REBOOT_HINT,
+        )
+
     def _current_is_own(self) -> bool:
         """Whether RoboEmot is the daemon's current app, in any state (an errored start counts:
         it is reported, not started again)."""
@@ -324,6 +362,12 @@ class ReachyMiniWireless:
             ui.ok(f"Found {APP_NAME}", note)
         with ui.running(f"Starting {APP_NAME}…"), _wizard_errors():
             status = self._api().wait_app(APP_NAME)
+        if status["state"] == "stopping":
+            raise WizardError(
+                f"{APP_NAME} did not start",
+                STUCK_STOPPING.format(name=APP_NAME, wait_s=APP_START_TIMEOUT_S),
+                REBOOT_HINT,
+            )
         if status["state"] != "running":
             raise WizardError(
                 f"{APP_NAME} did not start",

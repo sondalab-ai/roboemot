@@ -353,6 +353,7 @@ class FakeDaemon:
         self.lock: dict | None = {"state": "free", "holder_name": None}  # None: no endpoint
         self.restart_start_fails = False  # the stop runs, then the start raises (HTTP 400)
         self.restart_answer_s = 0.0  # the restart answers this late (the new start is under way)
+        self.stopping_reads = 0  # the app reads stopping this many times, then is gone
 
     @property
     def installed(self) -> list[str]:
@@ -372,10 +373,17 @@ class FakeDaemon:
             case "GET", "/api/apps/list-available/installed":
                 return 200, [{"name": n, "source_kind": "installed"} for n in self.installed]
             case "GET", "/api/apps/current-app-status":
+                if self.current and self.current["state"] == "stopping" and self.stopping_reads:
+                    self.stopping_reads -= 1
+                    if not self.stopping_reads:
+                        self.current = None
+                        return 200, None
                 if self.current and self.current["state"] == "starting" and self.start_states:
                     self.current["state"] = self.start_states.pop(0)
                 return 200, self.current
             case "POST", "/api/apps/stop-current-app":
+                if self.current and self.current["state"] == "stopping":  # daemon 1.13 stuck
+                    return 400, {"detail": "No app is currently running"}
                 self.current = None
                 return 200, None
             case "POST", "/api/apps/restart-current-app":
@@ -3274,3 +3282,28 @@ def test_the_dry_run_flags_a_websockets_too_old_for_the_extra(offline, robot, da
 )
 def test_version_meets_reads_plain_specifiers(version, spec, ok):
     assert inst.version_meets(version, spec) is ok
+
+
+STOPPING = {"info": {"name": "roboemot", "source_kind": "installed"}, "state": "stopping"}
+
+
+def test_start_waits_out_an_app_that_is_still_stopping(daemon, capsys):
+    daemon.current = dict(STOPPING)
+    daemon.stopping_reads = 3
+    platform_for(daemon).start(quiet_ui())
+    assert [(m, p) for m, p, _ in daemon.mutations] == [
+        ("POST", "/api/move/play/wake_up"),
+        ("POST", "/api/apps/start-app/roboemot"),
+    ]
+    assert daemon.current["state"] == "running"
+    assert "roboemot is stopping" in flat(capsys.readouterr().out)
+
+
+def test_start_names_the_stuck_stopping_state_and_the_reboot(daemon):
+    """Robot run 2026-10-28 (daemon 1.13.0): an app that exited stays stopping; start says an
+    app runs, stop says none runs. The start says so and sends nothing the daemon would refuse."""
+    daemon.current = dict(STOPPING)
+    with pytest.raises(WizardError, match="stuck") as err:
+        platform_for(daemon).start(quiet_ui())
+    assert "reboot" in str(err.value)
+    assert daemon.mutations == []

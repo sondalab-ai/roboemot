@@ -182,6 +182,12 @@ curl -X POST http://reachy-mini.local:8000/api/apps/stop-current-app
 curl -X POST http://reachy-mini.local:8000/api/apps/restart-current-app
 ```
 
+Daemon 1.13.0 can keep an app that already exited in the `stopping` state: `current-app-status`
+says `stopping`, a start answers "An app is already running" and a stop answers "No app is
+currently running". `/api/daemon/restart` does not clear it, only a reboot of the robot does
+(`python scripts/robot_ssh.py`, then `sudo reboot`). `run_on_robot.py` waits out a normal stop and
+says so when the state is stuck.
+
 While RoboEmot runs, the robot stays awake: idle motion keeps the motors powered, and the
 daemon only puts the robot to sleep once the app stops. RoboEmot never wakes the robot itself,
 and if the motors are turned off from outside it follows the pose without moving. When the

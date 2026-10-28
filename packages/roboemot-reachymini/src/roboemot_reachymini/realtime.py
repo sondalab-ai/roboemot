@@ -24,8 +24,8 @@ reachability probe checks it and locality reads it; nothing here names that URL.
   ``connect_target`` then applies the URL and key rules, on both the allocator and the connect
   host.
 
-The key may reach only the allocator's own origin and the connect host recorded on the robot
-(``KEY_HOSTS``, exact): a keyed connect to any other host is refused (``url_key_host``) and the
+The key may reach only the allocator's own origin and hosts under Hugging Face Inference
+Endpoints (``KEY_HOSTS``): a keyed connect to any other host is refused (``url_key_host``) and the
 local pipeline answers. Nothing here
 logs the key, the identifier, the allocator's reply or a URL's query.
 """
@@ -52,12 +52,12 @@ from .daemon import REQUEST_TIMEOUT_S, DaemonClient, DaemonError
 
 log = logging.getLogger(__name__)
 
-# Hosts besides the allocator's own origin that may receive the route's key over wss (SPEC 8,
-# URL and key rules): the connect host recorded on the robot (2026-10-28), exactly. The allocator
-# hands out a host of its choice, and anyone can create a Space under hf.space or an endpoint
-# under endpoints.huggingface.cloud, so a suffix would let the allocator alone pick who gets the
-# token. If Pollen moves the endpoint, the route falls back (url_key_host) until it is recorded.
-KEY_HOSTS: tuple[str, ...] = ("llgpsjdk3p4ayeud.endpoints.huggingface.cloud",)
+# Hosts besides the allocator's own origin that may receive the route's key over wss on port 443
+# (SPEC 8, URL and key rules): any host under Hugging Face Inference Endpoints. The robot saw the
+# allocator hand out two endpoints in one day (2026-10-28), so an exact list breaks at each
+# rotation (owner decision 2026-10-28). The allocator already receives the token itself, so the
+# suffix lets no new party choose who gets it; hf.space Spaces stay refused.
+KEY_HOSTS: tuple[str, ...] = (".endpoints.huggingface.cloud",)
 SESSION_PATH = "/session"
 AUTH_HEADER = "X-Reachy-Mini-Authorization"
 BEARER = "Bearer "
