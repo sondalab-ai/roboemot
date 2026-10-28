@@ -59,6 +59,9 @@ ITEM_TRUNCATED = "conversation.item.truncated"
 AUDIO_FORMAT = "audio/pcm"  # PCM16 little endian, mono
 # The rate of the reply's PCM when the server does not say (the OpenAI realtime PCM default).
 DEFAULT_OUTPUT_RATE_HZ = 24000
+# A speech-to-speech server's native input rate, asked for with rate null (Pollen's server refuses
+# an explicit 16000 with unknown_or_invalid_event, robot run 2026-10-28; its own app sends null).
+NATIVE_INPUT_RATE_HZ = 16000
 PCM_SAMPLE_BYTES = 2
 TOOL_CHOICES = ("auto", "none")  # "none" only after the tool-round cap: it forbids no tool
 RESPONSE_STATUSES = ("completed", "cancelled", "incomplete", "failed")
@@ -76,7 +79,7 @@ EVENT_TYPE = re.compile(r"[a-z0-9_.]{1,128}")
 def session_update(
     *,
     instructions: str,
-    input_rate_hz: int,
+    input_rate_hz: int | None,
     output_rate_hz: int | None,
     voice: str | None,
     vad_threshold: float,
@@ -85,8 +88,8 @@ def session_update(
     interrupt_response: bool,
     tools: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """``session.update``: instructions, PCM16 in and out (``output_rate_hz`` None asks for the
-    server's native rate, a speech-to-speech extension), the voice (left out when empty: the
+    """``session.update``: instructions, PCM16 in and out (a rate of None asks for the server's
+    native rate, a speech-to-speech extension), the voice (left out when empty: the
     server's default), server VAD with its threshold and end silence, and the function tools
     (realtime format, ``function_tools``) with ``tool_choice: "auto"``."""
     output: dict[str, Any] = {"format": {"type": AUDIO_FORMAT, "rate": output_rate_hz}}
@@ -230,8 +233,9 @@ class SessionEvent(ServerEvent):
 
 @dataclass(frozen=True)
 class ServerError(ServerEvent):
-    """A server ``error``: its ``code`` only (None when absent or not an identifier), and the
-    ``event_id`` of the client event it is about, when the server says (never its message)."""
+    """A server ``error``: its ``code`` (its ``type`` when the code is null; None when absent or
+    not an identifier), and the ``event_id`` of the client event it is about, when the server
+    says; never its message."""
 
     code: str | None = None
     event_id: str | None = None
@@ -395,6 +399,8 @@ def _session(kind: str, data: dict[str, Any]) -> SessionEvent:
 def _error(data: dict[str, Any]) -> ServerError:
     error = data.get("error")
     code = error.get("code") if isinstance(error, dict) else None
+    if code is None and isinstance(error, dict):
+        code = error.get("type")  # a server that sends no code still names the kind of error
     ok = isinstance(code, str) and ERROR_CODE.fullmatch(code) is not None
     about = error.get("event_id") if isinstance(error, dict) else None
     known = isinstance(about, str) and len(about) <= ID_MAX_CHARS
