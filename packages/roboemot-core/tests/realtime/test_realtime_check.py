@@ -218,6 +218,10 @@ def test_a_server_error_before_session_updated_drops_its_message(caplog):
         report = run(make_cfg(make_route(server.http_base())))
         kinds = [e["type"] for e in server.received]
     assert report.failure == "server_error" and report.update_seen is False
+    assert (report.server_error_code, report.server_error_about) == (
+        "bad_session",
+        "session.update",
+    )
     assert kinds == ["session.update"]  # no turn after a refused session
     assert leaks(report, caplog) == []
 

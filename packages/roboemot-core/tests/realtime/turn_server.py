@@ -112,7 +112,7 @@ class TurnServer(FakeServer):
             self.received.append(event)
             kind = event.get("type")
             if kind == "session.update":
-                await self._on_session_update(ws)
+                await self._on_session_update(ws, event)
                 if self.unrequested and len(self.of("session.update")) == 1:
                     await self._send(ws, {"type": "response.created", "response": {"id": "x"}})
             elif kind == "response.create":

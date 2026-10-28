@@ -247,6 +247,7 @@ test("routes: a realtime check report shows the hosts and the outcomes, never a 
     mode: "platform", allocator_host: "alloc.example.org", connect_host: "connect.example.net",
     header_to_connect_host: "refused", platform_id_sent: false, update_seen: false,
     first_audio_ms: null, item_delete: "not_run", charged: 0, failure: "url_key_host",
+    server_error_code: "invalid_value", server_error_about: "session.update",
     checks: [{ name: "realtime_connect", status: "fail", reason: "url_key_host" }],
   };
   const RT = { ...ADDED, name: "voice", kind: "realtime", last_check: report };
@@ -259,6 +260,8 @@ test("routes: a realtime check report shows the hosts and the outcomes, never a 
   assert.match(text, /rt_header_to_connect_host: refused/);
   assert.match(text, /rt_item_delete: not_run/);
   assert.match(text, /rt_failure: url_key_host/);
+  assert.match(text, /rt_server_error_code: invalid_value/);
+  assert.match(text, /rt_server_error_about: session\.update/);
   assert.doesNotMatch(text, /\/session|\/realtime/);
 });
 

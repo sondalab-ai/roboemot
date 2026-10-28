@@ -79,9 +79,13 @@ def test_a_server_error_before_session_updated_refuses_the_session(events, caplo
             assert c.reason == "server_error"
             err = next(e for e in events if isinstance(e, protocol.ServerError))
             assert err.code == "bad_session"
+            snap = c.snapshot()
+            assert snap["server_error_code"] == "bad_session"
+            assert snap["server_error_about"] == "session.update"
         finally:
             c.close()
     assert ERROR_MESSAGE not in caplog.text
+    assert "server error bad_session about session.update" in caplog.text
     assert "secret request" not in repr(c.snapshot())
 
 

@@ -81,8 +81,10 @@ class RealtimeReport:
     """One check of a realtime route; see the module docstring for what each field holds.
     ``header_to_connect_host``: ``sent``, ``refused`` (``url_key_host``), ``not_sent`` (the
     connect failed before) or ``none`` (the route has no key). ``failure``: the client's reason
-    code when the session failed. ``error``: the check did not complete (``timeout``,
-    ``budget``, ``secret``, ``provider``, ``no_extra``, ``failed``)."""
+    code when the session failed. ``server_error_code`` / ``server_error_about``: the last server
+    error's code and the type of our event it names (never its message). ``error``: the check
+    did not complete (``timeout``, ``budget``, ``secret``, ``provider``, ``no_extra``,
+    ``failed``)."""
 
     route: str
     model: str
@@ -99,6 +101,8 @@ class RealtimeReport:
     item_delete: str = "not_run"
     charged: int = 0
     failure: str | None = None
+    server_error_code: str | None = None
+    server_error_about: str | None = None
     checks: list[CheckResult] = field(default_factory=list)
     error: str = ""
 
@@ -262,6 +266,8 @@ class _Run:
         r = self.report
         r.connect_host = _host(snap.get("endpoint")) or snap.get("refused_host")
         r.platform_id_sent = bool(snap.get("platform_id_sent"))
+        r.server_error_code = snap.get("server_error_code")
+        r.server_error_about = snap.get("server_error_about")
         if r.header_to_connect_host == "none":
             return
         if snap.get("key_sent") and reason not in BEFORE_HANDSHAKE:

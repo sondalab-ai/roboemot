@@ -6,7 +6,8 @@
 - ``normal``: ``session.created`` on connect, ``session.updated`` after ``session.update``, and
   for ``response.create``: ``response.created``, one audio delta, the reply transcript and
   ``response.done``;
-- ``error_first``: an ``error`` (its message quotes the request) instead of ``session.updated``;
+- ``error_first``: an ``error`` (its message quotes the request, its ``event_id`` names the
+  ``session.update``) instead of ``session.updated``;
 - ``no_session``: never answers ``session.update``;
 - ``stall``: ``response.created`` then nothing; ``silent``: nothing after ``response.create``;
 - ``unknown_only``: after ``response.create``, an unknown event every 0.05 s for 1 s;
@@ -128,7 +129,7 @@ class FakeServer:
             self.received.append(event)
             kind = event.get("type")
             if kind == "session.update":
-                await self._on_session_update(ws)
+                await self._on_session_update(ws, event)
                 if self.mode == "stop_reading":
                     ws.transport.pause_reading()
                     await ws.wait_closed()
@@ -146,7 +147,7 @@ class FakeServer:
             error["event_id"] = event["event_id"]
             await self._send(ws, {"type": "error", "error": error})
 
-    async def _on_session_update(self, ws: ServerConnection) -> None:
+    async def _on_session_update(self, ws: ServerConnection, event: dict[str, Any]) -> None:
         if self.mode == "no_session":
             return
         if self.mode == "error_first":
@@ -158,6 +159,7 @@ class FakeServer:
                         "type": "invalid_request_error",
                         "code": "bad_session",
                         "message": ERROR_MESSAGE,
+                        "event_id": event.get("event_id"),
                     },
                 },
             )
