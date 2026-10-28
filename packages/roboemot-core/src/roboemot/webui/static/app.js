@@ -760,6 +760,7 @@ async function saveRoute(route, v) {
 const REALTIME_FACTS = [
   "mode", "allocator_host", "connect_host", "header_to_connect_host", "platform_id_sent",
   "update_seen", "first_audio_ms", "item_delete", "charged", "failure",
+  "server_error_code", "server_error_about",
 ];
 
 async function routesView() {

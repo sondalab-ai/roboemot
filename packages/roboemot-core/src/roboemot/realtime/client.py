@@ -78,6 +78,8 @@ NO_PROXY: dict[str, Any] = (
 )
 
 AUTH_HEADER = "Authorization"
+# Sent events whose type a server error can name by event_id (the client sends few per turn).
+SENT_TYPES_KEPT = 64
 BEARER = "Bearer "
 CLOSE_TOO_BIG = 1009  # RFC 6455: message too big
 BASE64_CHARS = 4  # every 4 base64 characters
@@ -157,6 +159,9 @@ class RealtimeClient:
         self._sending = False  # a write is in flight (a socket lost meanwhile is a stuck send)
         self._target: ConnectTarget | None = None
         self._refused_host: str | None = None  # the connect host the key was refused for
+        # the last server error: its code and the type of our event it names (never its text)
+        self._server_error: tuple[str | None, str | None] = (None, None)
+        self._sent_types: collections.OrderedDict[str, str] = collections.OrderedDict()
         self._platform_id_sent = False  # the last allocation request carried the identifier
         self.state = "idle"
         self.reason: str | None = None
@@ -260,6 +265,8 @@ class RealtimeClient:
                 "reason": self.reason,
                 "endpoint": target.origin if target else None,
                 "refused_host": self._refused_host,  # url_key_host: a host only, never a path
+                "server_error_code": self._server_error[0],
+                "server_error_about": self._server_error[1],
                 "local": target.local if target else None,
                 "key_sent": target.send_key if target else False,
                 "platform_id_sent": self._platform_id_sent,
@@ -294,6 +301,14 @@ class RealtimeClient:
         with self._lock:
             self._platform_id_sent = True
 
+    def _note_sent(self, event: dict[str, Any]) -> None:
+        """Remember the type of a client event by its ``event_id``, so a server error that names
+        it can say which of our events it is about (the last ``SENT_TYPES_KEPT``)."""
+        with self._lock:
+            self._sent_types[event["event_id"]] = str(event.get("type"))
+            while len(self._sent_types) > SENT_TYPES_KEPT:
+                self._sent_types.popitem(last=False)
+
     def _key(self) -> dict[str, str]:
         """Only the ``Authorization`` header of the route's key, or nothing."""
         value = self._auth_headers().get(AUTH_HEADER)
@@ -304,6 +319,8 @@ class RealtimeClient:
         with self._lock:
             self.state, self.reason, self._target = "connecting", None, None
             self._refused_host = None
+            self._server_error = (None, None)
+            self._sent_types.clear()
             self._counts["connects"] += 1
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.settings.connect_timeout_s
@@ -318,6 +335,7 @@ class RealtimeClient:
                 if not await asyncio.get_running_loop().run_in_executor(None, self._may_send):
                     raise _SessionRefused("reconfigured")
                 update = {"event_id": f"{EVENT_PREFIX}{next(self._event_ids)}", **session_update}
+                self._note_sent(update)
                 await ws.send(protocol.encode(update))
                 self._count("sent")
                 await self._await_session(ws)
@@ -410,6 +428,12 @@ class RealtimeClient:
             if event.type == protocol.SESSION_UPDATED:
                 return
             if isinstance(event, protocol.ServerError):
+                log.warning(
+                    "realtime route %s: server error %s about %s",
+                    self.route.name,
+                    event.code,
+                    self._server_error[1],
+                )
                 raise _SessionRefused("server_error")
 
     def _parse(self, frame: str | bytes) -> protocol.ServerEvent:
@@ -422,6 +446,7 @@ class RealtimeClient:
                 self._malformed[event.reason] += 1
             elif isinstance(event, protocol.ServerError):
                 self._counts["server_errors"] += 1
+                self._server_error = (event.code, self._sent_types.get(event.event_id or ""))
             elif isinstance(event, protocol.AudioDelta):
                 self._counts["audio_bytes_received"] += len(event.pcm)
         return event
@@ -516,6 +541,7 @@ class RealtimeClient:
                 return False
             if "event_id" not in event:  # every client event carries one
                 event = {**event, "event_id": f"{EVENT_PREFIX}{next(self._event_ids)}"}
+            self._note_sent(event)
             if event.get("type") == protocol.RESPONSE_CREATE:
                 # armed before the write: a fast server may answer while the send still drains
                 self._awaiting, self._awaiting_id = True, event["event_id"]
