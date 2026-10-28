@@ -112,6 +112,12 @@ class ReachyMiniDriver(PoseGroupDriver):
         state = head_values(self.mini.get_current_head_pose())
         head_joints, antennas = self.mini.get_current_joint_positions()
         state["body_yaw"] = float(head_joints[0])  # first head joint is the body rotation
+        # The pose's yaw wraps at +-pi, but a head behind the robot is commanded past it (body
+        # +-160 deg, head within 65 deg of the body): read it within pi of the body, so command
+        # and measure agree there (a 2*pi jump read as a hand on the head, robot run 2026-10-28).
+        delta = state["head.yaw"] - state["body_yaw"]
+        if abs(delta) > math.pi:
+            state["head.yaw"] -= math.copysign(math.tau, delta)
         state.update(zip(ANTENNAS, (float(a) for a in antennas), strict=True))
         return state
 

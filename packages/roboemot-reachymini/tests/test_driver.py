@@ -123,6 +123,20 @@ def test_read_state_maps_joints():
     assert st["body_yaw"] == 0.1 and st["antenna_right"] == -0.17 and st["head.yaw"] == 0
 
 
+@pytest.mark.parametrize("head_yaw", [-3.1435, -math.pi, 3.1435, math.pi, -2.6, 2.9])
+def test_read_state_head_yaw_stays_next_to_the_body_at_the_back(head_yaw):
+    """Robot run 2026-10-28: with the body at -130 deg and the head at -180 deg, the pose's yaw
+    read +pi; the 2*pi jump looked like a hand on the head and froze the motion loop. The head
+    yaw is read within pi of the body yaw, where the head always is (head-body delta 65 deg)."""
+    mini = FakeMini()
+    body = math.copysign(2.267, head_yaw)
+    mini.pose = head_matrix({"head.yaw": head_yaw})
+    mini.joints = ([body, 0, 0, 0, 0, 0, 0], [-0.17, 0.17])
+    st = ReachyMiniDriver(mini).read_state()
+    assert st["head.yaw"] == pytest.approx(head_yaw, abs=1e-9)
+    assert abs(st["head.yaw"] - st["body_yaw"]) <= math.pi
+
+
 def test_motion_loop_streams_limited_targets_from_measured_pose():
     mini = FakeMini()
     cfg = ConfigStack().effective()

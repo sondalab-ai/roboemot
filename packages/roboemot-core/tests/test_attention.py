@@ -590,3 +590,54 @@ def test_selector_engaged_only_for_a_person_or_the_speaker():
     assert sel.engaged  # a bare speaker bearing counts
     sel.update(30.0, [])
     assert not sel.engaged  # the hint expired
+
+
+# ---- habituation (a photo or a poster does not hold the gaze)
+
+HAB = CFG.habituation_s
+
+
+def test_a_still_face_stops_drawing_the_gaze_and_a_move_brings_it_back():
+    sel = AttentionSelector(CFG)
+    photo = entry("p1", az=30.0)
+    assert sel.update(0.0, [photo]).entry_id == "p1"
+    assert sel.update(HAB - 0.1, [entry("p1", az=31.0, seen=HAB - 0.1)]).entry_id == "p1"
+    assert sel.update(HAB, [entry("p1", az=30.5, seen=HAB)]) is None
+    assert sel.engaged is False  # the scan may run again
+    moved = 30.0 + CFG.habituation_move_deg + 1.0
+    assert sel.update(HAB + 1.0, [entry("p1", az=moved, seen=HAB + 1.0)]).entry_id == "p1"
+
+
+def test_a_habituated_face_hands_the_gaze_to_another_one():
+    sel = AttentionSelector(CFG)
+    photo = entry("p1", distance_m=1.0)
+    assert sel.update(0.0, [photo]).entry_id == "p1"
+    person = entry("p2", az=-40.0, distance_m=2.0, seen=HAB)
+    target = sel.update(HAB, [dataclasses.replace(photo, last_seen=HAB), person])
+    assert target.entry_id == "p2"
+
+
+def test_a_speaking_face_is_never_habituated():
+    sel = AttentionSelector(CFG)
+    assert sel.update(0.0, [entry("p1")]).entry_id == "p1"
+    sel.hint_speaker(SpeakerHint(stamp=HAB - 1.0, entry_id="p1"))
+    assert sel.update(HAB - 1.0, [entry("p1", seen=HAB - 1.0)]).entry_id == "p1"
+    after_hint = HAB - 1.0 + CFG.speaker_hold_s + 0.5
+    assert (
+        sel.update(after_hint, [entry("p1", seen=after_hint)]).entry_id == "p1"
+    )  # clock restarted
+
+
+def test_no_habituation_while_a_conversation_is_in_progress():
+    sel = AttentionSelector(CFG)
+    assert sel.update(0.0, [entry("p1")], conversing=True).entry_id == "p1"
+    t = 2 * HAB
+    assert sel.update(t, [entry("p1", seen=t)], conversing=True).entry_id == "p1"
+    assert sel.update(t + HAB - 0.1, [entry("p1", seen=t + HAB - 0.1)]).entry_id == "p1"
+    assert sel.update(t + HAB, [entry("p1", seen=t + HAB)]) is None
+
+
+def test_habituation_zero_keeps_a_still_face():
+    sel = AttentionSelector(AttentionConfig(habituation_s=0))
+    assert sel.update(0.0, [entry("p1")]).entry_id == "p1"
+    assert sel.update(10 * HAB, [entry("p1", seen=10 * HAB)]).entry_id == "p1"

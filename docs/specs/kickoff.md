@@ -177,6 +177,7 @@ v1 must ship a driver for Pollen Robotics' Reachy Mini, Lite and Wireless, built
 - **Lite**: the daemon runs on the PC the robot is plugged into. **Wireless**: the daemon runs on the robot's Raspberry Pi CM4, reachable at `reachy-mini.local`.
 - Degrees of freedom exposed by the SDK: head pose (position + roll/pitch/yaw, built with `create_head_pose`), `body_yaw`, and two `antennas`. Joints are not addressed one servo at a time.
 - Limits enforced by the SDK (values are clamped): head pitch and roll ±40°, head yaw ±180°, body yaw ±160°, head-to-body yaw difference at most 65°.
+- The head pose's yaw wraps at ±180°, but a head behind the robot is commanded up to that limit: the driver reads head yaw within 180° of the body yaw (where the head always is), so command and measurement agree at the back. Read raw, the 2π jump looked like a hand on the head, and the external-control check froze the robot (2026-10-28).
 
 Reachy Mini Wireless hardware, from the Seeed Studio hardware page and Pollen's store page:
 
@@ -371,7 +372,7 @@ Vision is a set of small models scheduled on the NPU (npu profile) or the CPU (c
 
 ### Connection to the motor layer
 
-Vision publishes three motor-relevant signals on the bus, consumed directly by the reflex engine in roboemot-rt without passing through the Python core: `attention.target` (the face or object to look at, with priority), `proximity.approach` (a person or object entering the near zone), and `gesture.detected` (wave, point, raised hand). Attention selection prefers, in order: the active speaker, an enrolled person, the nearest face, the most salient moving object.
+Vision publishes three motor-relevant signals on the bus, consumed directly by the reflex engine in roboemot-rt without passing through the Python core: `attention.target` (the face or object to look at, with priority), `proximity.approach` (a person or object entering the near zone), and `gesture.detected` (wave, point, raised hand). Attention selection prefers, in order: the active speaker, an enrolled person, the nearest face, the most salient moving object. **Habituation** (a photo or a poster held the gaze on the robot, 2026-10-28): a face whose bearing stays within `attention.habituation_move_deg` (3°) of where it settled for `attention.habituation_s` (20 s; 0 turns it off) no longer counts as an enrolled person or a nearest face, so the gaze moves on and the scan may run. A larger move, a speaker hint on the face, or a conversation in progress (an utterance being heard, or the robot thinking or speaking) restarts its clock; a habituated face can still be the active speaker. A real person who sits still and silent for that long is dropped too, until they move or speak.
 
 ## 5A. World model and scanning
 

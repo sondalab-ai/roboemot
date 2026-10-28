@@ -75,8 +75,10 @@ def attention_tick(
     selector: AttentionSelector,
     gaze: GazeController,
     loop: MotionLoop,
+    conversing: bool = False,
 ) -> bool:
     """One attention step: decay the world, pick the target, feed or release the gaze command.
+    ``conversing`` (a conversation is in progress) holds off face habituation.
 
     Returns whether attention owns the head. A failure inside is logged (type and message
     only), the attention command is dropped and idle motion takes over; the app keeps running.
@@ -90,7 +92,7 @@ def attention_tick(
             math.radians(wc.camera_fov_v_deg),
         )
         world.tick(now, in_view)
-        target = selector.update(now, world.entries)
+        target = selector.update(now, world.entries, conversing=conversing)
         was_active = gaze.active
         cmd = gaze.step(now, target, None if gaze.active else loop.pose())
         if cmd is not None:
@@ -164,6 +166,15 @@ def circadian_vision_scale(cfg: Any, circadian: CircadianModel | None) -> float:
     or ``awake`` while no model is attached (circadian disabled)."""
     effects = circadian.effects() if circadian is not None else cfg.circadian.states["awake"]
     return effects.vision_rate_scale
+
+
+def conversing(phase: ConversationPhase | None) -> bool:
+    """Whether a conversation is in progress: an utterance being heard, or the robot thinking
+    or speaking (False with no conversation)."""
+    if phase is None:
+        return False
+    name, listening = phase.current()
+    return listening or name in (THINKING, SPEAKING)
 
 
 def conversation_vision_scale(
