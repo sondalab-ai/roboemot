@@ -5,16 +5,20 @@ gaze map), and it stops inside the shutdown budget."""
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+from roboemot import paths
 from roboemot.config import ConfigStack
 from roboemot.drivers import MockPoseDriver
 from roboemot.manifest import load_manifest
 from roboemot.robot_platform import RobotPlatform, RobotSession
 from roboemot.runtime import Runtime, RuntimeHost
+from roboemot.runtime import runtime as runtime_module
 from test_robot_platform import DeskPlatform, DeskSession
 
 CONFIGS = Path(__file__).resolve().parents[3].parent / "configs"
@@ -100,3 +104,35 @@ def test_the_runtime_runs_a_non_reachy_robot_and_stops_within_the_budget():
     assert report["roboemot.motion"]["ok"]
     assert breathing()
     assert host.circadian_runner is None  # stopped: hold and wake report it
+
+
+def test_web_ui_settings_are_replayed_before_the_pipeline_is_built(tmp_path, monkeypatch):
+    """Regression (robot QA 2026-10-28): a restart-only edit saved from the web UI (here
+    ``voice.realtime_route.mode``) is in the config the pipeline is built from, so it takes
+    effect at the next start. The overrides file was replayed only when the web UI started,
+    after the realtime provider had been chosen from the config without it."""
+    data = tmp_path / "data"
+    data.mkdir(mode=0o700)
+    store = paths.settings_overrides_path(str(data))
+    store.write_text(json.dumps({"v": 1, "overrides": {"voice.realtime_route.mode": "platform"}}))
+    store.chmod(0o600)
+    stack = ConfigStack(app={"data_dir": str(data)}, audit_path=tmp_path / "audit.jsonl")
+    manifest = load_manifest(
+        CONFIGS / "manifests" / "desk-head-v1.yaml",
+        allow_unmeasured_dynamics=True,
+        safety=stack.effective().safety,
+    )
+    platform = RecordingPlatform()
+    seen: list[str] = []
+
+    class Assembled(Exception):
+        """Stops the run once the pipeline would be built."""
+
+    def assemble(host, stack, *args):
+        seen.append(stack.effective().voice.realtime_route.mode)
+        raise Assembled
+
+    monkeypatch.setattr(runtime_module, "assemble", assemble)
+    with pytest.raises(Assembled):
+        Runtime(stack, manifest, platform, platform.bind(object())).run(threading.Event())
+    assert seen == ["platform"]

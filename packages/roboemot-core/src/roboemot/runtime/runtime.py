@@ -10,6 +10,7 @@ platform and the session (``roboemot.robot_platform``).
 from __future__ import annotations
 
 import threading
+from typing import Any
 
 from roboemot import priority, shutdown
 from roboemot.config import ConfigStack
@@ -23,6 +24,7 @@ from .host import RuntimeHost
 from .loop import LoopClock, run_loop
 from .reload import make_reload
 from .startup import start_all
+from .webui import realtime_key_hosts, restore_settings
 
 
 class Runtime:
@@ -46,9 +48,15 @@ class Runtime:
         """Build the parts, start them, tick until ``stop_event`` is set, then stop them in
         reverse order within the shutdown budget."""
         stack, manifest, host = self.stack, self.manifest, self.host
+        built: list[Any] = []  # the pipeline, once assembled
+        # The page's saved edits first: a restart-only edit must reach the parts built below.
+        admin = restore_settings(
+            stack, manifest, lambda: realtime_key_hosts(built[0]) if built else []
+        )
         runtime_cfg = stack.effective().runtime
         priority.configure(runtime_cfg.background_nice, runtime_cfg.background_threads)
         p = assemble(host, stack, manifest, self.platform, self.session)
+        built.append(p)
         host.diagnostics = build_diagnostics(host, stack, manifest, p)
         stack.subscribe(make_reload(host, p))
         stack.subscribe(p.worker.on_change)
@@ -59,5 +67,5 @@ class Runtime:
             runtime_cfg.shutdown_margin_s,
         )
         with shutdown.BudgetedExitStack(stop_budget_s) as cleanup:
-            start_all(host, stack, manifest, p, cleanup)
+            start_all(host, stack, manifest, p, cleanup, admin)
             run_loop(host, stack, p, clock, p.pitch_dof, stop_event)

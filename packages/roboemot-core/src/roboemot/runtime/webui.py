@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Iterable
 from contextlib import ExitStack
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
@@ -21,6 +23,44 @@ from .live import LiveState
 log = logging.getLogger(__name__)
 
 
+@dataclass
+class WebAdmin:
+    """The web UI's settings editor and secrets admin, built before the pipeline."""
+
+    secrets: SecretsAdmin
+    settings: SettingsEditor
+
+
+def restore_settings(
+    stack: ConfigStack, manifest: Any, key_hosts: Callable[[], Iterable[str]]
+) -> WebAdmin | None:
+    """Build the web UI's settings editor and replay the edits saved from the page into
+    ``stack`` (SPEC 11A). The runtime calls it before it builds the pipeline, so an edit that
+    takes effect at a restart is in the config the parts are built from. ``key_hosts`` gives the
+    realtime provider's key hosts; it is read only by page requests, after the pipeline exists.
+    A failure is logged by type and the runtime starts without the edits."""
+    try:
+        data_dir = stack.effective().data_dir
+        secrets = SecretsAdmin(stack.effective, store=SecretStore.for_data_dir(data_dir))
+        settings = SettingsEditor(
+            stack,
+            store=paths.settings_overrides_path(data_dir),
+            manifest=manifest,
+            known_secrets=secrets.names,
+            realtime_key_hosts=key_hosts,
+        )
+        settings.restore()
+    except Exception as exc:
+        log.error("web UI settings not restored: %s", type(exc).__name__)
+        return None
+    return WebAdmin(secrets, settings)
+
+
+def realtime_key_hosts(p: Any) -> list[str]:
+    """The key hosts of the pipeline's realtime session provider (none without a provider)."""
+    return list(provider.key_hosts) if (provider := p.realtime_provider) is not None else []
+
+
 def start_webui(
     host: RuntimeHost,
     stack: ConfigStack,
@@ -28,14 +68,21 @@ def start_webui(
     manifest: Any,
     cleanup: ExitStack,
     p: Any,
+    admin: WebAdmin | None = None,
 ) -> Server | None:
     """Serve the web UI over the runtime's enrollment service and diagnostics registry.
 
     The server is stopped by ``cleanup`` (registered before it starts). A port that is
     taken or an unusable data folder is logged (type only) and the runtime goes on without the
     page: enrollment is a side channel, not a reason to stop the robot. ``p`` is the pipeline the
-    Live tab reads its inner state from (SPEC 11A).
+    Live tab reads its inner state from (SPEC 11A). ``admin`` is the editor the runtime restored
+    before it built ``p``; without one it is built and restored here.
     """
+    if admin is None:
+        admin = restore_settings(stack, manifest, lambda: realtime_key_hosts(p))
+        if admin is None:
+            return None
+    secrets, settings = admin.secrets, admin.settings
     unsubscribe = None
     try:
         live = LiveState(
@@ -53,17 +100,6 @@ def start_webui(
             host.bus.subscribe("robot.asleep", lambda msg: live.video.sleep())
         cleanup.callback(live.video.drop)
         host.live_video = live.video
-        secrets = SecretsAdmin(stack.effective, store=SecretStore.for_data_dir(cfg.data_dir))
-        settings = SettingsEditor(
-            stack,
-            store=paths.settings_overrides_path(cfg.data_dir),
-            manifest=manifest,
-            known_secrets=secrets.names,
-            realtime_key_hosts=lambda: (
-                list(provider.key_hosts) if (provider := p.realtime_provider) is not None else []
-            ),
-        )
-        settings.restore()
         server = make_server(
             host.perception.enrollment,
             host.diagnostics,
