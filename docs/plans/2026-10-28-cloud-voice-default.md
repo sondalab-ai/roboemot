@@ -66,6 +66,13 @@ phone calls included. The skip decides only whether the robot answers; the audio
 
 ## Step 0: the route works on the robot (gate for every slice)
 
+**Status 2026-10-28 evening:** steps 1-4 done. Route check on the robot passes: `session.updated`, first audio
+1038 ms (one text turn), item delete `accepted`, 517 tokens. Fixes on `main`: settings replay before build (#131),
+`KEY_HOSTS` as the `.endpoints.huggingface.cloud` suffix (#132, #135; the allocator rotates hosts), server error code
+in the check (#134), input `rate: null` at 16 kHz (#136; Pollen's server refuses 16000). Also on `main`: Reachy head
+yaw unwrap (freeze at the back) and face habituation (#133), stuck daemon `stopping` detection (#135).
+**Next:** step 5 (HIL tests) on the robot, then the gate decision.
+
 Owner on the robot, no SSH needed:
 1. Routes tab: API key `hf_token` (fine-grained, read-only), route `pollen` (kind `realtime`, base URL
    `https://pollen-robotics-reachy-mini-realtime-url.hf.space/session`, key `hf_token`, model `s2s`).
@@ -129,6 +136,7 @@ CV-2 and CV-3 touch privacy: their reviews run on Opus.
 
 ## Open items (not in this epic)
 
+- QA on the robot of #133: no freeze with a person behind the robot; a photo stops holding the gaze after ~20 s.
 - False barge-in at 09:43 (`triggers` 1, cause unknown). Next step: per-path trigger diagnostics in
   `core/voice/bargein.py`.
 - Barge-in onset-to-stop 313 ms against the 200 ms budget (SPEC 13).
