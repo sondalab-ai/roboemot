@@ -172,7 +172,8 @@ def test_the_provider_is_registered_under_the_robot_id_and_meets_the_contract():
     assert contract_violation(ENTRY_POINT_GROUP, factory) is None
     built = factory(object())
     assert isinstance(built, PlatformSession) and isinstance(built, SessionProvider)
-    assert built.key_hosts == KEY_HOSTS == ()  # only the allocator's own origin (fix round 1, I1)
+    # the allocator's own origin plus the connect host recorded on the robot, exactly (SPEC 13)
+    assert built.key_hosts == KEY_HOSTS == ("llgpsjdk3p4ayeud.endpoints.huggingface.cloud",)
 
 
 # ------------------------------------------------------------------ the identifier (opt-in)
@@ -310,10 +311,39 @@ def test_a_route_without_a_key_sends_no_key_header():
 )
 def test_the_key_reaches_only_the_allocators_own_origin_over_wss(connect_url, reason):
     got = allocate(Allocator(httpx.Response(200, json={"connect_url": connect_url})))
-    assert got.key_hosts == ()
+    assert got.key_hosts == KEY_HOSTS
     if reason is None:
         target = connect_target(route(), got, KEY_HOSTS)
         assert target.send_key is True and target.origin == "wss://allocator.hf.space:443"
+    else:
+        with pytest.raises(UrlRefused) as refused:
+            connect_target(route(), got, KEY_HOSTS)
+        assert refused.value.reason == reason
+
+
+RECORDED = "llgpsjdk3p4ayeud.endpoints.huggingface.cloud"
+
+
+@pytest.mark.parametrize(
+    ("connect_url", "reason"),
+    [
+        (f"wss://{RECORDED}/v1/realtime?t=1", None),
+        (f"wss://{RECORDED}:443/realtime", None),
+        (f"wss://{RECORDED.upper()}/realtime", None),
+        (f"wss://{RECORDED}:8443/realtime", "key_host"),  # only the wss port
+        (f"ws://{RECORDED}/realtime", "insecure"),
+        ("wss://other.endpoints.huggingface.cloud/realtime", "key_host"),  # no suffix match
+        (f"wss://x.{RECORDED}/realtime", "key_host"),
+        (f"wss://{RECORDED}.evil.example/realtime", "key_host"),
+    ],
+)
+def test_the_recorded_connect_host_gets_the_key_exactly(connect_url, reason):
+    """SPEC 8, 13: the connect host recorded on the robot is declared exactly; a look-alike,
+    another endpoint or another port gets no key."""
+    got = allocate(Allocator(httpx.Response(200, json={"connect_url": connect_url})))
+    if reason is None:
+        target = connect_target(route(), got, KEY_HOSTS)
+        assert target.send_key is True and target.origin == f"wss://{RECORDED}:443"
     else:
         with pytest.raises(UrlRefused) as refused:
             connect_target(route(), got, KEY_HOSTS)
