@@ -29,7 +29,7 @@ from roboemot.voice.factory import build_speech
 
 from .assembly import Pipeline
 from .host import RuntimeHost
-from .webui import start_webui
+from .webui import WebAdmin, start_webui
 
 
 def offline_cue(host: RuntimeHost, stack: ConfigStack, p: Pipeline) -> SpeechCue:
@@ -182,8 +182,10 @@ def start_all(
     manifest: Any,
     p: Pipeline,
     cleanup: ExitStack,
+    admin: WebAdmin | None = None,
 ) -> None:
-    """Start every part in the order that lets the reverse order stop them safely."""
+    """Start every part in the order that lets the reverse order stop them safely. ``admin`` is
+    the web UI's settings editor, restored before the pipeline was built."""
     if (
         host.transcript is not None
     ):  # registered first, so it runs last: a late sentence is wiped too
@@ -214,7 +216,7 @@ def start_all(
         p.listener.start()
     cleanup.callback(p.light_reader.stop)  # stopped before the camera thread
     cleanup.callback(host.forget_circadian)
-    start_webui(host, stack, p.cfg, manifest, cleanup, p)
+    start_webui(host, stack, p.cfg, manifest, cleanup, p, admin)
     for world_source in p.plugin.sources:
         world_source.speaking = p.speech.speaking  # no turning towards its own voice
         cleanup.callback(world_source.stop)
