@@ -10,6 +10,12 @@ Salient motion has no field on ``Entry``; the proxy is the angular speed of an e
 over ``motion_window_s``, compared with ``motion_min_dps``. Only animals and objects count: a
 moving person is already covered by the face categories.
 
+Habituation: a face whose bearing stays within ``habituation_move_deg`` of where it settled for
+``habituation_s`` stops qualifying as an enrolled person or a nearest face (a photo or a poster
+holds the gaze otherwise). A larger move, a speaker hint on the face, or a conversation in
+progress (``update(conversing=True)``) restarts its clock. A habituated face can still be the
+active speaker.
+
 ``attention.target`` carries no embeddings (SPEC 12). It is published when the target changes
 (or its bearing moves by ``publish_move_deg``) and otherwise at ``publish_hz``; ``None`` is
 published once when the target is lost.
@@ -81,6 +87,13 @@ class _Cand:
 
 
 @dataclass
+class _Settled:
+    az: float
+    el: float
+    since: float
+
+
+@dataclass
 class _Motion:
     az: float
     el: float
@@ -96,6 +109,7 @@ class AttentionSelector:
         self.bus = bus
         self._hint: SpeakerHint | None = None
         self._motion: dict[str, _Motion] = {}
+        self._settled: dict[str, _Settled] = {}
         self._current: AttentionTarget | None = None
         self._since = 0.0
         self._published: AttentionTarget | None = None
@@ -122,12 +136,19 @@ class AttentionSelector:
         t = self._current
         return t is not None and (t.kind == "person" or t.priority == "active_speaker")
 
-    def update(self, now: float, entries: Sequence[Entry]) -> AttentionTarget | None:
-        """Choose the target at ``now``, publish it when due and return it (None: no target)."""
+    def update(
+        self, now: float, entries: Sequence[Entry], *, conversing: bool = False
+    ) -> AttentionTarget | None:
+        """Choose the target at ``now``, publish it when due and return it (None: no target).
+        ``conversing``: a conversation is in progress, so no face habituates."""
         fresh = [e for e in entries if now - e.last_seen <= self.cfg.stale_s]
         by_id = {e.entry_id: e for e in fresh}
         self._track_motion(now, fresh)
+        self._track_settled(now, fresh, conversing)
         ranked = self._ranked(now, fresh, by_id)
+        speaker = dict(ranked).get("active_speaker")
+        if speaker and (s := self._settled.get(speaker[0].key)) is not None:
+            s.since = now  # a face that speaks is not a photo
         qualified: dict[str, str] = {}
         cands_by_key: dict[str, _Cand] = {}
         for category, cands in ranked:
@@ -189,12 +210,33 @@ class AttentionSelector:
         for gone in set(self._motion) - {e.entry_id for e in entries}:
             del self._motion[gone]
 
+    def _track_settled(self, now: float, entries: Sequence[Entry], conversing: bool) -> None:
+        """Restart a face's habituation clock when it moved past ``habituation_move_deg`` from
+        where it settled, or while ``conversing``; forget faces that vanished."""
+        limit = math.radians(self.cfg.habituation_move_deg)
+        persons = [e for e in entries if e.kind == "person"]
+        for e in persons:
+            s = self._settled.get(e.entry_id)
+            if s is None:
+                self._settled[e.entry_id] = _Settled(e.azimuth_rad, e.elevation_rad, now)
+            elif conversing or angular_distance(s.az, s.el, e.azimuth_rad, e.elevation_rad) > limit:
+                s.az, s.el, s.since = e.azimuth_rad, e.elevation_rad, now
+        for gone in set(self._settled) - {e.entry_id for e in persons}:
+            del self._settled[gone]
+
+    def _habituated(self, now: float, e: Entry) -> bool:
+        """Whether face ``e`` has been still for ``habituation_s`` (never when it is 0)."""
+        after = self.cfg.habituation_s
+        s = self._settled.get(e.entry_id)
+        return after > 0 and s is not None and now - s.since >= after
+
     def _ranked(
         self, now: float, fresh: Sequence[Entry], by_id: dict[str, Entry]
     ) -> list[tuple[str, list[_Cand]]]:
         """Candidates per category, best first, in ``priority_order``."""
         persons = [e for e in fresh if e.kind == "person"]
-        enrolled = [e for e in persons if e.identity and e.identity != UNKNOWN_IDENTITY]
+        watched = [e for e in persons if not self._habituated(now, e)]
+        enrolled = [e for e in watched if e.identity and e.identity != UNKNOWN_IDENTITY]
         moving = [
             e
             for e in fresh
@@ -208,7 +250,7 @@ class AttentionSelector:
                 lambda e: e.confidence,
             ),
             "nearest_face": _cands(
-                sorted(persons, key=_nearest_key),
+                sorted(watched, key=_nearest_key),
                 lambda e: 1.0 / e.distance_m if e.distance_m else None,
             ),
             "salient_motion": _cands(

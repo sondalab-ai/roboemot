@@ -18,6 +18,7 @@ from .ticks import (
     attention_tick,
     circadian_vision_scale,
     conversation_vision_scale,
+    conversing,
     feed_idle,
     scan_context,
     scan_tick,
@@ -62,7 +63,7 @@ def run_loop(
             continue
         p.circ.tick(now)  # before the affect tick: its events and baseline apply to it
         state = p.runner.tick(now)
-        attending = attention_tick(now, p.world, p.selector, p.gaze, p.loop)
+        attending = attention_tick(now, p.world, p.selector, p.gaze, p.loop, conversing(host.phase))
         if host.conversation is not None and p.selector.engaged:
             host.conversation.note_presence(
                 now, p.conv_speaker()

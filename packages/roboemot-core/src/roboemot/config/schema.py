@@ -1563,6 +1563,22 @@ class AttentionConfig(Strict):
         ge=1,
         le=600,
     )
+    habituation_s: float = param(
+        20.0,
+        "A face that stays still this long stops drawing the gaze until it moves or speaks (a "
+        "photo or a poster); no habituation while a conversation is in progress; 0 turns it off",
+        unit="s",
+        ge=0,
+        le=600,
+    )
+    habituation_move_deg: float = param(
+        3.0,
+        "Bearing change of a face, from where it settled, that counts as a move and ends its "
+        "habituation",
+        unit="deg",
+        ge=0.1,
+        le=45,
+    )
     switch_margin: float = param(
         0.25,
         "Relative advantage a same-category candidate needs to replace the current target",

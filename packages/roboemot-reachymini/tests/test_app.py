@@ -151,7 +151,7 @@ def test_attention_tick_failure_is_logged_and_falls_back_to_idle(caplog):
     assert ticks.attention_tick(0.0, world, selector, gaze, loop)
     assert SOURCE in {c.source for c in loop.core.arbiter.active(0.0)}
 
-    def boom(now, entries):
+    def boom(now, entries, **kw):
         raise RuntimeError("selector exploded")
 
     selector.update = boom
