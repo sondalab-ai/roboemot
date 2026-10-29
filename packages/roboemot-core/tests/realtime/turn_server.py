@@ -27,8 +27,15 @@ repeats) answers each ``input_audio_buffer.commit``: one ``speech_started`` and
 ``vad_answers`` (when set) makes it answer by itself, as a backend that ignores
 ``create_response: false`` would. ``speech_delay_s`` (one per burst, the last repeats) holds
 everything a burst's VAD says; ``speech_started`` carries ``audio_start_ms``, its position in
-the session's input buffer (the appended audio so far), unless ``positions`` is off.
-``ids`` off leaves every ``item_id`` out (a server that does not send them).
+the session's input buffer (from where the previous burst's speech ended), unless
+``positions`` is off, and ``speech_stopped`` its ``audio_end_ms``. ``trim_ms`` makes it
+count like Pollen's server (2026-10-29): a burst's last ``trim_ms`` (its closing silence) is
+dropped, so the next burst starts at the previous speech end, not at the end of the appended
+audio. ``end_positions`` off leaves ``audio_end_ms`` out (start positions only).
+``segment_gap_s`` (when set) sends a burst's items one at a time, each with its transcript,
+that long apart: a late second segment. ``ids`` off leaves every ``item_id`` out (a server
+that does not send them); ``ids_per_session`` numbers the items per connection, so an id
+repeats across sessions. ``sent`` records every event the server sent.
 """
 
 from __future__ import annotations
@@ -73,6 +80,10 @@ class TurnServer(FakeServer):
         speech_delay_s: list[float] | None = None,
         positions: bool = True,
         ids: bool = True,
+        trim_ms: float = 0.0,
+        end_positions: bool = True,
+        segment_gap_s: float = 0.0,
+        ids_per_session: bool = False,
         **kw: Any,
     ) -> None:
         super().__init__("normal", **kw)
@@ -86,12 +97,24 @@ class TurnServer(FakeServer):
         self.vad_answers = vad_answers
         self.speech_delay_s = speech_delay_s or [0.0]
         self.positions, self.ids = positions, ids
+        self.trim_ms = trim_ms
+        self.end_positions, self.segment_gap_s = end_positions, segment_gap_s
+        self.ids_per_session = ids_per_session
+        self.session_bursts = 0  # bursts committed on the current connection
+        self.sent: list[dict[str, Any]] = []
         self.buffer_ms = 0.0  # audio appended in this session so far
         self.bursts = 0
         self._burst_start = 0.0
         self.responses = 0
         self._cancel: asyncio.Event | None = None
         self._tasks: set[asyncio.Task] = set()
+
+    async def _send(self, ws: ServerConnection, event: dict[str, Any]) -> None:
+        self.sent.append(event)
+        await super()._send(ws, event)
+
+    def sent_of(self, kind: str) -> list[dict[str, Any]]:
+        return [e for e in self.sent if e.get("type") == kind]
 
     def kinds(self) -> list[str]:
         return [e.get("type") for e in self.received]
@@ -106,6 +129,7 @@ class TurnServer(FakeServer):
     async def _handler(self, ws: ServerConnection) -> None:
         self.connections.append(ws)
         self.buffer_ms = self._burst_start = 0.0  # a new session's input buffer
+        self.session_bursts = 0
         await self._send(ws, {"type": "session.created", "session": {}})
         async for frame in ws:
             event = json.loads(frame)
@@ -135,36 +159,62 @@ class TurnServer(FakeServer):
                 texts = self.heard[min(self.bursts, len(self.heard) - 1)]
                 delay = self.speech_delay_s[min(self.bursts, len(self.speech_delay_s) - 1)]
                 self.bursts += 1
+                self.session_bursts += 1
+                number = self.session_bursts if self.ids_per_session else self.bursts
                 start = self._burst_start
-                self._burst_start = self.buffer_ms
-                task = asyncio.ensure_future(self._hear(ws, self.bursts, texts, delay, start))
+                end = max(start, self.buffer_ms - self.trim_ms)  # where its speech ends
+                self.buffer_ms = self._burst_start = end
+                task = asyncio.ensure_future(self._hear(ws, number, texts, delay, start, end))
                 self._tasks.add(task)
                 task.add_done_callback(self._tasks.discard)
 
     async def _hear(
-        self, ws: ServerConnection, burst: int, texts: list[str], delay: float, start: float
+        self,
+        ws: ServerConnection,
+        burst: int,
+        texts: list[str],
+        delay: float,
+        start: float,
+        end: float,
     ) -> None:
         items = [f"in_{burst}_{i}" for i in range(len(texts))]
         if delay:
             await asyncio.sleep(delay)
+        events = []
         for i, item in enumerate(items):
             started: dict[str, Any] = {"type": "input_audio_buffer.speech_started"}
             stopped: dict[str, Any] = {"type": "input_audio_buffer.speech_stopped"}
+            done: dict[str, Any] = {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "transcript": texts[i],
+            }
             if self.ids:
-                started["item_id"] = stopped["item_id"] = item
+                started["item_id"] = stopped["item_id"] = done["item_id"] = item
             if self.positions:
                 started["audio_start_ms"] = int(start + 10 * i)
+                if self.end_positions:
+                    last = i == len(items) - 1
+                    stopped["audio_end_ms"] = int(end) if last else int(start + 10 * i + 5)
+            events.append((started, stopped, done))
+        if self.segment_gap_s:  # one segment at a time, each with its transcript
+            for i, (started, stopped, done) in enumerate(events):
+                if i:
+                    await asyncio.sleep(self.segment_gap_s)
+                await self._send(ws, started)
+                await self._send(ws, stopped)
+                if self.transcript_delay_s:
+                    await asyncio.sleep(self.transcript_delay_s)
+                await self._send(ws, done)
+            return
+        for started, stopped, _ in events:
             await self._send(ws, started)
             await self._send(ws, stopped)
         if self.vad_answers and items:  # its VAD ended the turn: it answers by itself
             await self._send(ws, {"type": "response.created", "response": {"id": f"auto_{burst}"}})
         if self.transcript_delay_s:
             await asyncio.sleep(self.transcript_delay_s)
-        for item, text in zip(items, texts, strict=True):
-            done = {"type": "conversation.item.input_audio_transcription.completed"}
-            if self.ids:
-                done["item_id"] = item
-            await self._send(ws, {**done, "transcript": text})
+        for _, _, done in events:
+            await self._send(ws, done)
 
     async def _respond(
         self, ws: ServerConnection, script: str, cancel: asyncio.Event, event_id: str | None

@@ -11,20 +11,34 @@ listener deadline not past), that the robot is neither asleep nor speaking, and 
 realtime turn is in flight (the burst then waits: another utterance's words never land inside
 a turn's tool round). One burst is in flight at a time.
 
-The burst's transcript is collected from the server's events (client thread, ``on_event``):
-every ``speech_started`` whose position in the session's input buffer (``audio_start_ms``)
-lies inside the burst's span opens an item of the burst; one outside it belongs to an earlier
-(cancelled) burst and is deleted, never joined. The job is done once each item has its
-``transcription.completed`` and none is still open; a server that splits the utterance gives
-several items, joined in the order the server heard them. A server that leaves ``item_id``
-out still gives its text (the items are matched in order), but such items cannot be deleted:
-they are counted (``audio_items_unnamed``, ``audio_items_undeletable``). While a cancelled
-burst's id-less item may still come, an id-less transcript cannot be told apart from it: the
-burst in flight then ends without a result (``audio_items_ambiguous``, a local decode), so a
-late transcript is never joined into another burst. More items than
-``transcript_max_items`` or text longer than ``transcript_max_chars`` drops the transcript.
-The listener waits for the job with its own deadline (``transcript_timeout_s``) and
-``cancel``s it past that.
+The burst's transcript is collected from the server's events (client thread, ``on_event``,
+with the session they are of): every ``speech_started`` whose position in the session's input
+buffer (``audio_start_ms``) is at or after the burst's start opens an item of the burst; one
+before it belongs to an earlier burst and is deleted, never joined. The burst's start is where
+the server says its buffer ends (the session's last ``speech_stopped`` ``audio_end_ms``), read
+under this input's lock with the send (``track``): the server keeps no silence after the
+speech, so a count of the appended audio runs ahead of it (Pollen's server, 2026-10-29).
+
+A burst is covered once every item it opened has stopped and the last one ended within
+``server_silence_ms`` of the utterance's end (``audio_end_ms`` at or after its start plus the
+utterance's length, closing silence excluded, less ``server_silence_ms``): any later segment
+would need that much silence inside the utterance before it, so the server would have reported
+its start already. The job is done once the burst is covered and each item has its
+``transcription.completed``; a server that splits the utterance gives several items, joined in
+the order the server heard them. A server that sends no ``audio_end_ms`` never covers a burst:
+its utterances are decoded locally. A burst that ends without its result and is not covered
+resets the session (``RealtimeRoute.reset_session``), so its late items are stale and never
+reach the next burst; the next burst waits for the new session while the reset's reconnect is
+in flight (``audio_reopen_wait``), within its listener deadline, else it is decoded locally.
+
+A server that leaves ``item_id`` out still gives its text (the items are matched in order), but
+such items cannot be deleted: they are counted (``audio_items_unnamed``,
+``audio_items_undeletable``). While a cancelled burst's id-less item may still come, an id-less
+transcript cannot be told apart from it: the burst in flight then ends without a result
+(``audio_items_ambiguous``, a local decode), so a late transcript is never joined into another
+burst. More items than ``transcript_max_items`` or text longer than ``transcript_max_chars``
+drops the transcript. The listener waits for the job with its own deadline
+(``transcript_timeout_s``) and ``cancel``s it past that.
 
 The server keeps the words as a user item of its conversation, which the next
 ``response.create`` answers. An item of an utterance the robot does not answer through the
@@ -53,7 +67,7 @@ log = logging.getLogger(__name__)
 GATE = "addressed"  # the gate this input sends under (voice.realtime_route.audio_gate)
 MS_PER_S = 1000.0
 JOIN_S = 2.0
-HOLD_POLL_S = 0.05  # how often a burst held by a realtime turn looks again
+HOLD_POLL_S = 0.05  # how often a held burst looks again (a realtime turn, a reconnect)
 ANON = "anon"  # the key of an item the server sent without an id: (ANON, n)
 
 Key = str | tuple[str, int]
@@ -127,14 +141,18 @@ class InputJob:
 
 @dataclass
 class _Burst:
-    """The burst in flight: its session and span of that session's input buffer, the server's
-    items in the order heard, those still open, and the transcripts in (``closed``: the job
-    ended, later transcripts are deleted). Ids and texts are never in repr."""
+    """The burst in flight: its session, its start in that session's input buffer, the
+    utterance's length (``utt_ms``, the closing silence excluded) and the server VAD's end
+    silence (``silence_ms``), the server's items in the order heard, those still open, the
+    last end the server reported for them, and the transcripts in (``closed``: the job ended,
+    later transcripts are deleted). Ids and texts are never in repr."""
 
     job: Any
     generation: int
     start_ms: float = 0.0
-    end_ms: float = 0.0
+    utt_ms: float = 0.0
+    silence_ms: float = 0.0
+    last_end_ms: float | None = None
     max_items: int = 0
     max_chars: int = 0
     order: dict[Key, None] = field(default_factory=dict, repr=False)
@@ -142,11 +160,27 @@ class _Burst:
     texts: dict[Key, str] = field(default_factory=dict, repr=False)
     anon: int = 0
     closed: bool = False
+    overflow: bool = False  # more late items after it ended than the cap: never covered
 
     def holds(self, position: int | None) -> bool:
         """Whether an item that starts at ``position`` of the input buffer is this burst's
-        (no position: the burst in flight is the only candidate)."""
-        return position is None or self.start_ms <= position < self.end_ms
+        (no position: the burst in flight is the only candidate). Only earlier bursts can lie
+        before its start, and a burst that is not covered resets the session, so any later
+        position is its own."""
+        return position is None or position >= self.start_ms
+
+    def covered(self) -> bool:
+        """Whether the server reported all of it (module docstring): an item started, every
+        one stopped, and the last end lies within ``silence_ms`` of the utterance's end."""
+        if not self.order or self.open or self.overflow or self.last_end_ms is None:
+            return False
+        return self.last_end_ms >= self.start_ms + self.utt_ms - self.silence_ms
+
+    def stopped(self, key: Key, end_ms: int | None) -> None:
+        """Item ``key`` of this burst stopped at ``end_ms`` of the input buffer (if given)."""
+        self.open.discard(key)
+        if end_ms is not None:
+            self.last_end_ms = max(self.last_end_ms or 0.0, float(end_ms))
 
     def add(self, key: Key) -> None:
         self.order.setdefault(key, None)
@@ -166,7 +200,7 @@ class _Burst:
         return len(self.order) > self.max_items or chars > self.max_chars
 
     def complete(self) -> bool:
-        return bool(self.texts) and not self.open and all(k in self.texts for k in self.order)
+        return bool(self.texts) and all(k in self.texts for k in self.order) and self.covered()
 
 
 class RealtimeInput:
@@ -187,13 +221,17 @@ class RealtimeInput:
         self._lock = threading.Lock()
         self._queue: queue.Queue[InputJob | None] = queue.Queue()
         self._burst: _Burst | None = None
-        # items of ended bursts still to come: id -> its session (deleted on arrival)
-        self._dead: dict[str, int] = {}
+        # items of ended bursts still to come, as (session, id): deleted on arrival
+        self._dead: dict[tuple[int, str], None] = {}
         self._dead_anon = 0  # items without id of ended bursts still to come
         # how many ended items are remembered (transcript_max_items, set by each burst's send)
         self._dead_limit = 0
         self._thread: threading.Thread | None = None
         self._closed = False
+        self._reopening = False  # this input reset the session: a burst waits for the new one
+        # where the server's input buffer ends, as (session, its last audio_end_ms)
+        self._end: tuple[int, float] = (-1, 0.0)
+        self._reset_gen = -1  # the last session this input reset: its late events are dropped
         self.held = 0  # bursts that waited for a realtime turn to end
         route.input = self
 
@@ -307,7 +345,12 @@ class RealtimeInput:
         pcm = to_int16(np.concatenate([samples, zeros]))
         instructions = self.route.base_instructions()
         burst = _Burst(
-            job, -1, max_items=rt.transcript_max_items, max_chars=rt.transcript_max_chars
+            job,
+            -1,
+            utt_ms=len(samples) / job.rate_hz * MS_PER_S,
+            silence_ms=rt.server_silence_ms,
+            max_items=rt.transcript_max_items,
+            max_chars=rt.transcript_max_chars,
         )
 
         def hold() -> str | None:  # under the route's lock, with the send
@@ -319,27 +362,34 @@ class RealtimeInput:
                 return "speaking"
             return None
 
-        def track(generation: int, start_ms: float, end_ms: float) -> None:  # with the send
-            burst.generation, burst.start_ms, burst.end_ms = generation, start_ms, end_ms
+        def track(generation: int) -> None:  # under the route's lock, with the send
             job.generation, job.sent = generation, True
-            with self._lock:
+            with self._lock:  # the start and the server's end in one step (on_event moves it)
+                session, end_ms = self._end
+                burst.generation = generation
+                burst.start_ms = end_ms if session == generation else 0.0  # a new session: 0
                 self._burst = burst  # before the send: its first event may come at once
 
-        waited = False
+        waited: set[str] = set()
         while True:
-            why = self.route.send_audio(
-                pcm, gate=GATE, instructions=instructions, hold=hold, track=track
-            )
-            if why != "turn":
+            if self._reopening and not self.route.connected and self.route.opening():
+                why: str | None = "reopening"  # this input's reset reconnects: not a refusal
+            else:
+                why = self.route.send_audio(
+                    pcm, gate=GATE, instructions=instructions, hold=hold, track=track
+                )
+            if why not in ("turn", "reopening"):
                 break
-            if not waited:  # counted once per burst, however long the hold
-                waited = True
-                with self._lock:
-                    self.held += 1
-                self.route.count("audio_held")
-            if job.wait(HOLD_POLL_S) or self._closed:
+            if why not in waited:  # counted once per burst, however long the wait
+                waited.add(why)
+                if why == "turn":
+                    with self._lock:
+                        self.held += 1
+                self.route.count("audio_held" if why == "turn" else "audio_reopen_wait")
+            if job.wait(HOLD_POLL_S) or self._closed or job.expired():
                 why = "cancelled"
                 break
+        self._reopening = False  # only the first burst after a reset waits for the new session
         if why is not None:
             job._end(refused=why)
             return
@@ -348,31 +398,45 @@ class RealtimeInput:
         if not job.wait(rt.transcript_timeout_s):
             self._close(job)
         with self._lock:
+            reset = job.result is None and not burst.covered()
+        if reset and self.route.reset_session(burst.generation):
+            self._reopening = True  # the next burst waits for the new session (its deadline)
+            with self._lock:  # the old session's items die with it
+                self._reset_gen = max(self._reset_gen, burst.generation)
+                self._dead = {k: None for k in self._dead if k[0] > burst.generation}
+                self._dead_anon = 0
+        with self._lock:
             if self._burst is burst:
                 self._burst = None
 
     # ----------------------------------------------------------------- client thread
 
-    def on_event(self, event: protocol.ServerEvent) -> None:
-        """An input event of the current session (``speech_started``/``stopped``, input
-        transcripts): it belongs to the burst in flight when its position is inside the
-        burst's span; a transcript of no burst is deleted."""
+    def on_event(self, event: protocol.ServerEvent, generation: int | None = None) -> None:
+        """An input event (``speech_started``/``stopped``, input transcripts) of ``generation``'s
+        session (None: the current one): it belongs to the burst in flight on that session when
+        its position is at or after the burst's start; a transcript of no burst is deleted."""
+        gen = self.route.generation if generation is None else generation
         delete: list[tuple[str, int]] = []
         undeletable = 0
         ambiguous = False
         finished: tuple[InputJob, Heard | None] | None = None
         with self._lock:
-            burst = self._burst
+            if gen <= self._reset_gen:
+                return  # a reset session's event still in flight: it ended with the session
+            burst = (
+                self._burst if self._burst is not None and self._burst.generation == gen else None
+            )
             live = burst if burst is not None and not burst.closed else None
             if isinstance(event, protocol.SpeechBoundary):
-                self._boundary(event, live)
+                self._boundary(event, gen, burst, live)
             elif isinstance(event, protocol.InputTranscript) and event.final:
                 item = event.item_id
-                if item is not None and item in self._dead:
-                    delete.append((item, self._dead.pop(item)))
+                if item is not None and (gen, item) in self._dead:
+                    del self._dead[(gen, item)]
+                    delete.append((item, gen))
                 elif live is None:
                     if item is not None:
-                        delete.append((item, self.route.generation))
+                        delete.append((item, gen))
                     else:
                         undeletable += 1
                         self._dead_anon = max(0, self._dead_anon - 1)
@@ -413,28 +477,44 @@ class RealtimeInput:
                     self.route.count("audio_items_unnamed", heard.unnamed)
             job._end(heard)
 
-    def _boundary(self, event: protocol.SpeechBoundary, live: _Burst | None) -> None:
-        """A ``speech_started``/``stopped`` (lock held): credited to the burst in flight when
-        its position is inside the burst's span, else the item is an ended burst's."""
+    def _boundary(
+        self, event: protocol.SpeechBoundary, gen: int, burst: _Burst | None, live: _Burst | None
+    ) -> None:
+        """A ``speech_started``/``stopped`` of session ``gen`` (lock held). A start at or after
+        the burst's start is the burst's item (still counted for its coverage once the burst
+        ended, and then to be deleted); any other is an ended burst's. A stop moves where the
+        server's buffer ends and, for an item of the burst, its last end."""
         item = event.item_id
         if event.type == protocol.SPEECH_STARTED:
-            if live is not None and live.holds(event.audio_ms):
-                key: Key = item if item is not None else live.new_anon()
-                live.add(key)
-                live.open.add(key)
-            elif item is not None:
-                self._bury(item, self.route.generation if live is None else live.generation)
+            if burst is not None and burst.holds(event.audio_ms):
+                if live is None and len(burst.order) > burst.max_items:
+                    burst.overflow = True  # bounded: an ended burst's items are not kept
+                else:
+                    key: Key = item if item is not None else burst.new_anon()
+                    burst.add(key)
+                    burst.open.add(key)
+                if live is not None:
+                    return
+            if item is not None:
+                self._bury(item, gen)
             else:
                 self._dead_anon += 1
             return
-        if live is None:
+        if event.audio_ms is not None:
+            session, end_ms = self._end
+            if gen > session:
+                self._end = (gen, float(event.audio_ms))
+            elif gen == session:
+                self._end = (gen, max(end_ms, float(event.audio_ms)))
+        if burst is None:
             return
         if item is not None:
-            live.open.discard(item)
+            if item in burst.order:
+                burst.stopped(item, event.audio_ms)
             return
-        oldest = next((k for k in live.order if isinstance(k, tuple) and k in live.open), None)
+        oldest = next((k for k in burst.order if isinstance(k, tuple) and k in burst.open), None)
         if oldest is not None:  # the oldest open item without an id
-            live.open.discard(oldest)
+            burst.stopped(oldest, event.audio_ms)
 
     def _transcript(self, live: _Burst, item: str | None, text: str) -> None:
         """A transcript for the burst in flight (lock held); one without an id goes to the
@@ -447,7 +527,7 @@ class RealtimeInput:
     def _bury(self, item: str, generation: int) -> None:
         """An ended burst's item, deleted when its transcript comes (lock held; bounded: no
         configuration read here, the stack's lock must never be taken under this one)."""
-        self._dead[item] = generation
+        self._dead[(generation, item)] = None
         while len(self._dead) > self._dead_limit:
             self._dead.pop(next(iter(self._dead)))
 

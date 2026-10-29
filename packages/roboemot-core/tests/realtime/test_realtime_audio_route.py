@@ -199,17 +199,18 @@ def test_input_events_of_the_current_session_reach_the_audio_input_only():
     stack = audio_stack()
     r, made = audio_route(stack)
     seen = []
-    r.input = type("Sink", (), {"on_event": lambda self, ev: seen.append(ev)})()
+    r.input = type("Sink", (), {"on_event": lambda self, ev, gen: seen.append((ev, gen))})()
     assert r.ready()
     started = protocol.SpeechBoundary(protocol.SPEECH_STARTED, "a", 0)
     done = protocol.InputTranscript(protocol.TRANSCRIPTION_COMPLETED, "a", "ciao", True)
     made[0].on_event(started)
     made[0].on_event(done)
-    assert seen == [started, done]
+    gen = r.generation  # each event names the session it is of
+    assert seen == [(started, gen), (done, gen)]
     old = made[0]
     r.close_soon("conversation_end")
     old.on_event(done)  # a late event of a detached session
-    assert seen == [started, done]
+    assert seen == [(started, gen), (done, gen)]
 
 
 def test_the_session_update_uses_the_server_silence():
@@ -263,8 +264,9 @@ def test_a_realtime_turn_holds_audio_until_it_ends():
     assert r.send_audio(SECOND, gate="addressed", instructions="") is None
 
 
-def test_the_burst_reports_its_generation_and_span_of_the_server_buffer():
-    """M-3, I-7: under the gate, the session and where the burst lies in its input buffer."""
+def test_the_burst_reports_the_session_it_went_to():
+    """M-3, I-7: under the gate, with the send, the session the burst goes to (the input reads
+    where that session's buffer ends in the same step)."""
     stack = audio_stack()
     r, _ = audio_route(stack)
     assert r.ready()
@@ -273,21 +275,14 @@ def test_the_burst_reports_its_generation_and_span_of_the_server_buffer():
         r.send_audio(SECOND, gate="addressed", instructions="", track=lambda *a: spans.append(a))
         is None
     )
-    assert (
-        r.send_audio(
-            SECOND * 2, gate="addressed", instructions="", track=lambda *a: spans.append(a)
-        )
-        is None
-    )
     gen = r.generation
-    assert spans == [(gen, 0.0, 1000.0), (gen, 1000.0, 3000.0)]
     r.close_soon("conversation_end")
     assert r.ready()
     assert (
         r.send_audio(SECOND, gate="addressed", instructions="", track=lambda *a: spans.append(a))
         is None
     )
-    assert spans[-1] == (r.generation, 0.0, 1000.0)  # a new session's buffer starts at zero
+    assert spans == [(gen,), (r.generation,)] and r.generation == gen + 1
 
 
 def test_the_upload_budget_resets_only_when_the_date_moves_forward():
@@ -439,3 +434,45 @@ def test_the_input_rate_is_the_servers_native_one_at_16_khz(capture_hz, sent):
     )
     update = r.session_update(cfg, "x")
     assert update["session"]["audio"]["input"]["format"] == {"type": "audio/pcm", "rate": sent}
+
+
+# ------------------------------------------------------------------ input resets
+
+
+def test_reset_session_resets_only_the_current_session():
+    """An audio burst the server may still report on resets its session: never a stale
+    generation, never with no session; counted, and the new session has a new generation."""
+    from rt_rig import wait_for
+
+    r, made = audio_route(audio_stack())
+    assert r.reset_session(r.generation) is False  # no session yet
+    assert r.ready()
+    gen = r.generation
+    assert r.reset_session(gen - 1) is False  # an older session: nothing done
+    assert r.snapshot()["input_resets"] == 0 and len(made) == 1
+    assert r.reset_session(gen) is True
+    assert wait_for(lambda: r.connected and not r.opening())
+    assert r.generation == gen + 1 and len(made) == 2
+    assert r.reset_session(gen) is False  # already reset: that session is gone
+    snap = r.snapshot()
+    assert snap["input_resets"] == 1 and snap["resets"] == 0
+
+
+def test_a_reset_never_reopens_a_session_closed_for_sleep():
+    """SPEC 12A: the robot falls asleep between the reset's detach and its reconnect; the
+    reconnect is refused (the close came after the reset), the session stays closed."""
+    from rt_rig import wait_for
+
+    r, made = audio_route(audio_stack())
+    assert r.ready()
+    gen = r.generation
+    ready = r.ready
+
+    def asleep_first(*a, **kw):
+        r.close_soon("asleep")
+        return ready(*a, **kw)
+
+    r.ready = asleep_first
+    assert r.reset_session(gen)
+    assert wait_for(lambda: not r.opening())
+    assert len(made) == 1 and r.generation == gen and not r.connected
