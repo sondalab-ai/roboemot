@@ -71,6 +71,15 @@ The page asks you to confirm the hosts that receive the key. In a file, the same
 2. Search `realtime_audio`. The field is private: select **Show with PIN** (**Mostra con il PIN**),
    then turn on `privacy.realtime_audio`.
 
+Optional:
+- `voice.realtime_route.voice`: the server's voice. Empty uses the server's default, `Aiden`
+  (male). Pollen's server (Qwen3-TTS) lists `Aiden`, `Ryan`, `Dylan`, `Eric`, `Ono_Anna`,
+  `Serena`, `Sohee`, `Uncle_Fu` and `Vivian` (from Pollen's conversation app); `Serena` and
+  `Vivian` are female voices. Their Italian has not been tried on the robot.
+- `voice.realtime_route.transcript_timeout_s`: how long the robot waits for the server's
+  transcript before it decodes the utterance locally (default 4 s). The server took about 3 s on
+  2026-10-29; a larger value avoids falling back to the local pipeline on a slow transcript.
+
 `privacy.realtime_audio` sends the audio of every addressed utterance to the server, whoever
 speaks, a child included. Leave `privacy.realtime_platform_id` off unless the allocator refuses
 anonymous sessions: with it on, the allocator can link every session of this robot.

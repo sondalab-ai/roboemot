@@ -57,8 +57,10 @@ ITEM_DELETED = "conversation.item.deleted"
 ITEM_TRUNCATED = "conversation.item.truncated"
 
 AUDIO_FORMAT = "audio/pcm"  # PCM16 little endian, mono
-# The rate of the reply's PCM when the server does not say (the OpenAI realtime PCM default).
-DEFAULT_OUTPUT_RATE_HZ = 24000
+# The rate of the reply's PCM when the server does not say. The session asks for the server's
+# native rate (rate null); Pollen's speech-to-speech server sends 16 kHz and reports no rate
+# (robot run 2026-10-29: played as 24 kHz, the OpenAI default, the voice was 1.5x too fast).
+NATIVE_OUTPUT_RATE_HZ = 16000
 # A speech-to-speech server's native input rate, asked for with rate null (Pollen's server refuses
 # an explicit 16000 with unknown_or_invalid_event, robot run 2026-10-28; its own app sends null).
 NATIVE_INPUT_RATE_HZ = 16000

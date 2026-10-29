@@ -236,7 +236,7 @@ class ResponseRun:
             loop.call_soon_threadsafe(queue.put_nowait, item)
 
     def _audio(self, event: protocol.AudioDelta) -> None:
-        rate = self.route.output_rate_hz or protocol.DEFAULT_OUTPUT_RATE_HZ
+        rate = self.route.output_rate_hz or protocol.NATIVE_OUTPUT_RATE_HZ
         with self._lock:
             if self.reply.abandoned or self._finished:
                 return

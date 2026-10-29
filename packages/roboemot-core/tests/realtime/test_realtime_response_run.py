@@ -290,3 +290,20 @@ async def test_the_estimate_counts_the_utterance_too(monkeypatch):
     await asyncio.sleep(0.06)
     route.expire()
     assert charged == [110]
+
+
+async def test_a_reply_without_a_reported_rate_plays_at_the_native_16_khz():
+    """Robot run 2026-10-29: Pollen's server sends its native 16 kHz and reports no rate; played
+    as 24 kHz the voice was 1.5x too fast (squeaky). A probe confirmed 16 kHz by ear."""
+    route, sent = connected_route()
+    route.output_rate_hz = None  # session.updated said nothing about the rate
+    speech = Speech()
+    run = make_run(route, speech)
+    task = asyncio.ensure_future(run.run("x"))
+    await until(lambda: creates(sent))
+    route._on_event(created("r1"))
+    route._on_event(delta("r1"))
+    route._on_event(done("r1"))
+    await asyncio.wait_for(task, 2)
+    assert [rate for _, rate in speech.streams[0]._chunks] == [P.NATIVE_OUTPUT_RATE_HZ]
+    assert P.NATIVE_OUTPUT_RATE_HZ == 16000
