@@ -39,7 +39,11 @@ Robot QA, 2026-10-28, on `41eee34` (debug reports at 09:43, 09:56 and 09:59, loc
 4. **Which LLM answers: Pollen's** (confirms owner decision 1 of 2026-10-26). The persona reaches it only as
    instructions; the chat routes answer only while the route is down, and then without voice (decision 3).
 5. **Wake policy `never`**, with an instruction for the server LLM to skip an utterance that is out of context
-   (design A below: a skip tool).
+   (design A below: a skip tool). **Amended 2026-10-30 (owner):** a video near the robot passed the voice-at-face
+   check (debug report 08:33 UTC: `not_required` 44 of 45, `passed` 29, `degraded_passed` 15 via `muted`) and the robot
+   commented on it. Without the wake word, an utterance is addressed only while the speaker's face looks at the robot
+   (CV-6). Above a CPU threshold the facing check is not required and the gate falls back to `never` plus a strict skip
+   instruction (CV-3).
 6. **Opt-in only with `--cloud-voice`** (or a yes on the terminal prompt). `-y` alone does not turn on
    `privacy.realtime_audio`.
 7. **A cloud-voice install removes the recorded `piper-venv`.** Switching back to local voice needs a reinstall.
@@ -72,7 +76,8 @@ phone calls included. The skip decides only whether the robot answers; the audio
 
 ## Status (handoff, 2026-10-30)
 
-Step 0 is done; the epic has not started (no `epic/cloud-voice-default` branch yet). Merged on `main`:
+Step 0 is done. The epic started 2026-10-30: branch `epic/cloud-voice-default`; CV-1 is
+https://github.com/sondalab-ai/roboemot/pull/139; CV-0 and CV-6 authors running. Merged on `main`:
 
 | PR | What |
 | --- | --- |
@@ -115,10 +120,15 @@ main cause. The server does call tools (9 calls in 8 turns).
 
 ## Slices (integration branch `epic/cloud-voice-default`, one PR each)
 
-Estimate (owner OK 2026-10-30): 6 slices, about 12-13 agents. Opus authors; Sonnet reviews; Opus reviews for the
+Estimate (owner OK 2026-10-30): 6 slices, about 12-13 agents; with CV-6, 7 slices and about 14-15 agents. Opus authors; Sonnet reviews; Opus reviews for the
 privacy slices (CV-3, CV-4) and for CV-0 if it touches the listener's audio path.
 
-CV-0. **Listener lag on the CM4 (root cause first).** The listener falls up to 16 s behind and drops audio, which is
+CV-0. **Listener lag on the CM4 (root cause found 2026-10-30, owner OK for the fix).** Cause: the Reachy audio hub
+   drain (`rm/audio.py` `poll_once`/`_run`). After a poll gap over `max_gap_s` (150 ms) it reads up to `DRAIN_MAX`
+   (1000 chunks of 16 ms = 16 s) of live audio before it pushes the batch, and `last` is taken before the poll, so
+   drains chain. Hub `dropped_samples` equals the listener's `dropped_s` (35.6 s, 151.9 s); listener stages use only
+   12-14 % of real time. Fix: push each chunk at once, bound the drain to the stall, time the gap after the poll.
+   Original scope: The listener falls up to 16 s behind and drops audio, which is
    most of the transcript latency. Measure before changing: per-stage `ms_per_audio_s` (vad 68-92, bargein up to 49 in
    the last window), `lag_max_s`, `dropped_s`, CPU per thread, Vision at full rate while listening
    (`rate_scales.conversation` 1 while listening), the Reachy audio hub. Memory note: a similar lag was fixed in slice
@@ -170,6 +180,12 @@ CV-4. **Installer `--cloud-voice` profile.** (was CV-3)
    - Skips the Piper step and the Piper voice models; still fetches Silero and Vosk. Removes the recorded
      `piper-venv`. Uninstall removes only the keys it wrote. The dry run never writes.
    - Tests: dry run plan, merge of own keys, uninstall, `-y` without the flag leaves the opt-in off.
+
+CV-6. **Facing gate (owner, 2026-10-30).** An utterance addressed without the wake word (policy `never`, enrolled
+   in view, follow-up window) needs the matched face (or, in degraded paths, the attended face) to look at the robot,
+   from a head-yaw proxy on the 5 YuNet landmarks (no new model). CPU above a threshold for a hold time, or no facing
+   data: the check is not required (counted). Config `voice.facing.*`, library default off; CV-4 turns it on.
+   Opus review (privacy: it decides audio egress).
 
 CV-5. **Docs.** SPEC 8 (backend `none`, skip tool, transcription language, listening cue), SPEC 12 (installer opt-in
    text, decision 5 egress), SPEC 13 rows from the robot runs, README status, `CLAUDE.md` installer line,
