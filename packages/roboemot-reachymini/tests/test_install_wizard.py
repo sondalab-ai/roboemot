@@ -3324,7 +3324,7 @@ CLOUD_KEYS = [
     "voice.realtime_route.mode=platform",
     "voice.realtime_route.input=audio",
     "voice.realtime_route.skip_tool=true",
-    "voice.realtime_route.transcript_timeout_s=4.0",
+    "voice.realtime_route.transcript_timeout_s=10.0",
     "privacy.realtime_audio=true",
     "voice.backend=none",
     "voice.fallback_backend=none",
@@ -3369,8 +3369,7 @@ def test_the_reachy_platform_supplies_the_pollen_route():
 def test_the_profile_keys_are_listed_in_full():
     keys = inst.cloud_voice_config(ReachyMiniWireless.cloud_voice)
     assert sorted(inst.key_text(k, v) for k, v in keys.items()) == sorted(CLOUD_KEYS)
-    default = RoboEmotConfig().voice.realtime_route.transcript_timeout_s
-    assert keys[("voice", "realtime_route", "transcript_timeout_s")] == default
+    assert keys[("voice", "realtime_route", "transcript_timeout_s")] == 10.0  # the owner's
 
 
 def cloud_app_config(existing: dict | None = None) -> dict:
@@ -3478,12 +3477,13 @@ def test_the_cloud_voice_dry_run_lists_every_key_and_the_piper_removal_and_write
     for key in CLOUD_KEYS:
         assert key in out, key
     assert f"○ Delete the Piper venv {PIPER_VENV}" in out
-    assert "○ Ask for a secret 'hf_token' if the store has none" in out
+    assert f"○ Ask for a secret 'hf_token', stored in {DATA}/secrets.json" in out
+    assert "! Cloud voice needs its key without a terminal the real run stops" in out
     assert "--cloud-voice" in out and "--piper" not in out.split("Next:")[1]
     assert robot.files == files and robot.dirs == dirs and robot.files[RECORD] == record
     writes = ("rm ", "rmdir", "mkdir", "mktemp", "mv ", "umask")
     assert not [c for c in robot.commands if c.startswith(writes) or "&& mv" in c]
-    assert not any("secrets" in c for c in robot.commands)
+    assert not any("secrets set" in c for c in robot.commands)
 
 
 def test_cloud_voice_removes_the_recorded_piper_venv_and_skips_piper_and_its_voices(
@@ -3592,14 +3592,17 @@ def test_a_token_already_in_the_store_is_kept_without_asking(
     assert json.loads(robot.files[RECORD])["secrets"] == []
 
 
-def test_without_a_token_the_install_warns_the_robot_will_not_answer_by_voice(
-    offline, robot, daemon, monkeypatch, capsys
+def test_no_token_at_the_end_of_the_checks_stops_with_nothing_changed(
+    offline, robot, daemon, monkeypatch
 ):
     monkeypatch.setattr(Ui, "ask_secret", lambda self, question: None)
-    cloud_install()
-    out = flat(capsys.readouterr().out)
-    assert "! Cloud voice without its key the pollen route is unavailable" in out
-    assert robot.secrets == {}
+    install()  # local voice: Piper venv and app.yaml
+    before = snapshot(robot, daemon)
+    record = robot.files[RECORD]
+    with pytest.raises(WizardError, match="Cloud voice needs the 'hf_token' key"):
+        cloud_install()
+    assert snapshot(robot, daemon) == before and robot.files[RECORD] == record
+    assert PIPER_VENV in robot.dirs and "privacy" not in yaml.safe_load(robot.app_yaml)
 
 
 @pytest.mark.parametrize(
@@ -3674,3 +3677,164 @@ def test_web_ui_settings_that_override_the_profile_are_named_without_values(
         "voice.wake_word_policy, which win over app.yaml"
     ) in out
     assert "unless_enrolled_in_view" not in out and "webui.port" not in out
+
+
+SETTINGS = f"{DATA}/webui_settings.json"
+
+
+def saved_settings(robot, **overrides) -> None:
+    robot.dirs |= {f"{HOME}/.local", f"{HOME}/.local/share", DATA}
+    robot.files[SETTINGS] = json.dumps({"v": 1, "overrides": overrides})
+
+
+@pytest.mark.parametrize(
+    ("saved", "cloud", "key"),
+    [
+        ({"privacy.realtime_audio": True}, False, "privacy.realtime_audio"),
+        ({"voice.realtime_route.input": "audio"}, False, "voice.realtime_route.input"),
+        ({"voice.facing.enabled": False}, True, "voice.facing.enabled"),
+        ({"voice.direction.enabled": False}, True, "voice.direction.enabled"),
+        ({"voice.realtime_route.route": "other"}, True, "voice.realtime_route.route"),
+        ({"llm_routes.pollen.base_url": "https://x.example"}, True, "llm_routes.pollen.base_url"),
+    ],
+)
+def test_saved_web_ui_settings_against_the_privacy_choice_stop_the_install_unchanged(
+    offline, robot, daemon, monkeypatch, capsys, saved, cloud, key
+):
+    key_prompts(monkeypatch, HF_TOKEN)
+    saved_settings(robot, **saved)
+    files = dict(robot.files)
+    with pytest.raises(WizardError, match="Web UI settings") as err:
+        install(cloud_voice=cloud, piper=None if cloud else False)
+    assert key in str(err.value) and "nothing was changed" in str(err.value)
+    for value in saved.values():
+        if isinstance(value, str) and "." in value:  # a distinctive value, not a common word
+            assert value not in str(err.value)
+    assert robot.files == files and robot.env.get("roboemot-core") is None
+
+
+def test_saved_settings_that_agree_with_the_choice_pass(offline, robot, daemon, monkeypatch):
+    key_prompts(monkeypatch, HF_TOKEN)
+    saved_settings(robot, **{"privacy.realtime_audio": False})
+    install(cloud_voice=False, piper=False)
+    saved_settings(robot, **{"voice.facing.enabled": True, "llm_routes.cloud.model": "m"})
+    install(cloud_voice=True, piper=None)
+    assert yaml.safe_load(robot.app_yaml)["privacy"] == {"realtime_audio": True}
+
+
+def test_yes_without_the_flag_over_a_recorded_profile_turns_it_off_and_says_so(
+    offline, robot, daemon, monkeypatch, capsys
+):
+    key_prompts(monkeypatch, HF_TOKEN)
+    cloud_install()
+    capsys.readouterr()
+    ui = Ui(interactive=True, assume_yes=True, read=answers())
+    inst.run_install(options(cloud_voice=None, start=False, startup=False, secrets=[]), ui, ROOT)
+    out = flat(capsys.readouterr().out)
+    assert "✓ Turned cloud voice off (it was on): removes llm_routes[pollen], privacy." in out
+    assert "local voice needs Piper (--piper)" in out
+    cfg = yaml.safe_load(robot.app_yaml)
+    assert "privacy" not in cfg and "llm_routes" not in cfg
+    assert json.loads(robot.files[RECORD])["app_config_keys"] == []
+
+
+def test_an_install_interrupted_before_the_app_config_move_still_removes_the_keys_later(
+    offline, robot, daemon, monkeypatch
+):
+    key_prompts(monkeypatch, HF_TOKEN)
+    install()
+    real = robot.run
+
+    def broken(command, check=True, stdin=None):
+        if command.startswith("umask 077 && mkdir -p ") and "&& mv" in command:
+            raise WizardError("connection lost")
+        return real(command, check=check, stdin=stdin)
+
+    monkeypatch.setattr(robot, "run", broken)
+    with pytest.raises(WizardError, match="connection lost"):
+        cloud_install()
+    keys = json.loads(robot.files[RECORD])["app_config_keys"]
+    assert ["privacy", "realtime_audio"] in keys and len(keys) == len(CLOUD_KEYS)
+    monkeypatch.setattr(robot, "run", real)
+    cfg = yaml.safe_load(robot.app_yaml)
+    cfg["privacy"] = {"realtime_audio": True}  # as if the write had landed after all
+    robot.files[APP_YAML] = yaml.safe_dump(cfg)
+    install(cloud_voice=False, piper=False)
+    assert "privacy" not in yaml.safe_load(robot.app_yaml)
+    assert json.loads(robot.files[RECORD])["app_config_keys"] == []
+
+
+def test_secret_hf_token_with_cloud_voice_asks_before_replacing_the_stored_token(
+    offline, robot, daemon, monkeypatch, capsys
+):
+    asked: list[str] = []
+
+    def answer(self, question):
+        asked.append(question)
+        return "hf_new_token_2" if "secret" in question or question == "Repeat the value" else None
+
+    monkeypatch.setattr(Ui, "ask_secret", answer)
+    robot.secrets = {"hf_token": "hf_old_token_1"}
+    opts = Options(
+        **{**FULL, "cloud_voice": True, "piper": None},
+        start=False,
+        startup=False,
+        secrets=["hf_token"],
+    )
+    inst.run_install(opts, typed("y\n"), ROOT)  # replace it: yes
+    err = capsys.readouterr().err
+    assert "Secret 'hf_token' is already set. Replace it? [y/N]" in err
+    assert asked.count("Value of the secret 'hf_token'") == 1
+    assert robot.secrets == {"hf_token": "hf_new_token_2"}
+    assert json.loads(robot.files[RECORD])["secrets"] == []  # it was the owner's before
+
+
+def test_a_hand_written_pollen_route_is_replaced_with_a_warning_naming_the_fields(
+    offline, robot, daemon, monkeypatch, capsys
+):
+    key_prompts(monkeypatch, HF_TOKEN)
+    robot.dirs |= {f"{HOME}/.local", f"{HOME}/.local/share", DATA}
+    hand = {**ReachyMiniWireless.cloud_voice.entry(), "model": "s2s-beta", "timeout_s": 30}
+    robot.files[APP_YAML] = yaml.safe_dump({"llm_routes": [hand]})
+    cloud_install()
+    out = flat(capsys.readouterr().out)
+    assert (
+        "! Replaced a route llm_routes[pollen] as written by hand: changed model; lost timeout_s"
+        in out
+    )
+    assert "s2s-beta" not in out
+    assert written_route(yaml.safe_load(robot.app_yaml)) == ReachyMiniWireless.cloud_voice.entry()
+
+
+def test_cloud_voice_deletes_the_tts_voice_files_and_the_dry_run_lists_them(
+    offline, robot, daemon, monkeypatch, capsys
+):
+    key_prompts(monkeypatch, HF_TOKEN)
+    install()
+    voices = f"{DATA}/voice-models"
+    tts = [
+        f"{voices}/piper/it_IT-paola-medium.onnx",
+        f"{voices}/piper/it_IT-paola-medium.onnx.verified",
+        f"{voices}/piper/en_US-amy-medium.onnx.json",
+    ]
+    vad = f"{voices}/silero/silero_vad_v5.1.2.onnx"
+    for f in [*tts, vad]:
+        robot.files[f] = "x"
+    robot.dirs.add(f"{voices}/piper")
+    capsys.readouterr()
+    install(cloud_voice=True, piper=None, dry_run=True)
+    out = flat(capsys.readouterr().out)
+    assert f"○ Delete the TTS voices {voices}: piper/it_IT-paola-medium.onnx," in out
+    assert all(f in robot.files for f in tts)
+    cloud_install()
+    assert not [f for f in tts if f in robot.files] and vad in robot.files
+    assert f"✓ Deleted the TTS voices {voices}" in flat(capsys.readouterr().out)
+
+
+def test_a_record_with_unreadable_profile_keys_is_refused():
+    from roboemot.install.record import InstallRecord
+
+    base = {"app": "a", "platform": "p", "packages": ["x"]}
+    for bad in ("voice", [["voice", 1]], [[]], [["voice", ""]]):
+        with pytest.raises(WizardError, match="app_config_keys"):
+            InstallRecord.from_json({**base, "app_config_keys": bad})

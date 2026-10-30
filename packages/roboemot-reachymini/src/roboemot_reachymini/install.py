@@ -121,6 +121,9 @@ CLOUD_VOICE = CloudVoiceRoute(
     model="s2s",
     mode="platform",
     provider="Pollen's server (Hugging Face)",
+    # The owner's hand-set value (robot, 2026-10-30): the transcript p50 was 8.3 s before CV-0;
+    # lower it to the measured p95 plus about 1 s once CV-0 is measured on the robot.
+    transcript_timeout_s=10.0,
 )
 
 

@@ -98,6 +98,12 @@ class InstallRecord:
         known = {f.name for f in fields(cls)}
         data = {k: v for k, v in data.items() if k in known}
         data["replaced"] = {k: Replaced(**v) for k, v in data.get("replaced", {}).items()}
+        keys = data.get("app_config_keys", [])
+        if not isinstance(keys, list) or not all(
+            isinstance(k, list) and k and all(isinstance(part, str) and part for part in k)
+            for k in keys
+        ):
+            raise WizardError("the install record has unreadable app_config_keys")
         data["version"] = RECORD_VERSION
         return cls(**data)
 
