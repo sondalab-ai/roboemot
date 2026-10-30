@@ -316,7 +316,8 @@ def test_a_pause_inside_one_utterance_and_a_server_that_splits_it_give_one_answe
         assert history[0][0]["rt"][1][:2] == ["in_1_0", "in_1_1"]  # then the reply item
 
 
-def test_a_transcript_timeout_goes_to_the_local_decode_and_the_chat_path(ears):
+def test_a_transcript_timeout_goes_to_the_local_decode_and_is_not_answered(ears):
+    """CV-2 (SPEC 8, Non-verbal cues): the did-not-get-it cue, never a chat answer."""
     with TurnServer(heard=[[]]) as server:
         ear = ears(server, script=["x"], decoded="che tempo fa", bearing=FACE_RAD, to_worker=True)
         ear.say()
@@ -330,7 +331,8 @@ def test_a_transcript_timeout_goes_to_the_local_decode_and_the_chat_path(ears):
         assert ear.r.listener.snapshot()["realtime_audio"]["transcript_timeouts"] == 1
         assert ear.rt.route.snapshot()["transcript_timeouts"] == 1
         assert ear.settle(lambda: len(ear.rt.events) == 1, 10.0)
-        assert ear.rt.chat_hosts()  # the chat routes answered
+        assert ear.rt.events[0]["outcome"] == "not_heard"
+        assert ear.rt.chat_hosts() == []  # the chat routes did not answer
         assert server.of("response.create") == []
 
 

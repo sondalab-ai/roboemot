@@ -41,6 +41,7 @@ from roboemot.vision import LockedSource
 from roboemot.vision.service import Perception, open_perception
 from roboemot.voice.activity import SpeechActivity
 from roboemot.voice.bargein import BargeIn, PlaybackReference
+from roboemot.voice.cues import CueSound, load_cue_sounds
 from roboemot.voice.listener import VoiceListener
 from roboemot.voice.pipeline import build_listener
 from roboemot.voice.robot_name import RobotName
@@ -107,6 +108,7 @@ class Pipeline:
     pitch_dof: str
     sleep: SleepGate
     realtime_provider: Any = None  # the realtime route's session provider (None: unavailable)
+    cue_sounds: dict[str, CueSound] = field(default_factory=dict)  # the robot's (SPEC 8)
     voice_heard: list[float] = field(
         default_factory=lambda: [-math.inf]
     )  # last utterance, monotonic
@@ -147,6 +149,7 @@ def assemble(
     )
     # the expression map and its channels (SPEC 11A); the speaking motion never turns the body
     clips = load_clip_library(manifest)
+    cue_sounds = load_cue_sounds(manifest)  # refused with the manifest when broken
     stack.set_manifest_behaviour(
         manifest.model.behaviour, manifest.channels, clips, body_yaw=gaze_map.body_yaw
     )
@@ -391,6 +394,7 @@ def assemble(
 
     return Pipeline(
         voice_heard=voice_heard,
+        cue_sounds=cue_sounds,
         realtime_provider=realtime_provider,
         cfg=cfg,
         expression=expression,

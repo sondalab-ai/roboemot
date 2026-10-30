@@ -33,7 +33,9 @@ Speech that is not addressable runs Vosk as before; if the wake decision address
 buffered audio goes. The final of an utterance whose audio went is the server's transcript: it
 waits in the same hand-off queue with the deadline ``transcript_timeout_s``, so this thread
 never waits on the network. Past the deadline (or when the audio was refused) the utterance is
-decoded locally from its buffer and handed off for the chat routes. Hand-offs keep the order
+decoded locally from its buffer and handed off: a refused one for the chat routes, one whose
+audio left marked ``local_only`` (the did-not-get-it cue shows at once, through ``on_audio``,
+and the conversation does not answer it; its keywords still count). Hand-offs keep the order
 of the utterances; each carries the fast path's state of its utterance, so a newer utterance
 can begin while an older one waits.
 
@@ -76,6 +78,8 @@ TOPIC = "percept.utterance"
 POLL_S = 0.1
 JOIN_S = 2.0
 MS_PER_S = 1000.0
+# what became of an utterance's audio (``bind_realtime``'s ``on_audio``, the listening cue)
+AUDIO_SENT, AUDIO_UNSENT, AUDIO_NOT_HEARD = "sent", "unsent", "not_heard"
 
 
 class VoiceChunkLike(Protocol):
@@ -105,7 +109,8 @@ class Utterance:
     final: bool = True
     # The realtime route's audio input (SPEC 8, Realtime speech route): the server session
     # (generation) and its user items that hold this utterance's words; None when its audio
-    # did not go. ``local_only``: its audio went but no transcript came, the chat routes answer.
+    # did not go. ``local_only``: its audio went but no transcript came; it is not answered
+    # (the did-not-get-it cue showed, SPEC 8, Non-verbal cues).
     realtime: tuple[int, tuple[str, ...]] | None = field(default=None, repr=False)
     local_only: bool = False
 
@@ -149,7 +154,7 @@ class _Handoff:
     face: str | None = None
     heard: frozenset[str] = field(default=frozenset(), repr=False)
     decode: DecodeJob | None = None  # its local decode, off the listener thread
-    local_only: bool = False  # its audio left without a transcript: the chat routes answer
+    local_only: bool = False  # its audio left without a transcript: not answered (not_heard)
 
 
 class VoiceListener:
@@ -216,6 +221,7 @@ class VoiceListener:
         self._queue: collections.deque[_Handoff] = collections.deque()
         self._handoff = {"waits": 0, "timeouts": 0, "superseded": 0, "dropped_on_stop": 0}
         self._realtime: Any = None  # the realtime route's audio input (bind_realtime)
+        self._on_audio: Callable[[str, float], None] = lambda event, key: None  # bind_realtime
         self._audio = {
             "vosk_skipped": 0,
             "sent": 0,
@@ -263,10 +269,24 @@ class VoiceListener:
         if self._direction is not None:
             self._direction.apply_config(cfg.voice.direction, cfg.voice.facing)
 
-    def bind_realtime(self, realtime: Any) -> None:
+    def bind_realtime(
+        self, realtime: Any, on_audio: Callable[[str, float], None] | None = None
+    ) -> None:
         """Send addressed utterances' audio to the realtime route through ``realtime`` (a
-        ``RealtimeInput``; None stops it). Bound after the route exists (start-up)."""
+        ``RealtimeInput``; None stops it). Bound after the route exists (start-up).
+        ``on_audio(event, key)`` hears what became of an utterance's audio (``key``: its start
+        stamp, the ``Utterance.start_stamp`` it is handed off with), for the listening cue
+        (SPEC 8, Non-verbal cues): ``AUDIO_SENT`` when it is handed off to leave,
+        ``AUDIO_UNSENT`` when it did not leave after all (refused, or dropped on stop) and
+        ``AUDIO_NOT_HEARD`` when it left and no transcript came (timeout or failure)."""
         self._realtime = realtime
+        self._on_audio = on_audio or (lambda event, key: None)
+
+    def _audio_event(self, event: str, p: _Handoff) -> None:
+        try:
+            self._on_audio(event, p.ev.start_stamp)
+        except Exception as exc:  # a cue must not stop the listener
+            log.warning("voice listener: audio event consumer raised %s", type(exc).__name__)
 
     @property
     def config(self) -> RoboEmotConfig:
@@ -672,6 +692,7 @@ class VoiceListener:
             self._speech_audio(p.ev), rate, deadline=p.deadline, clock=self._clock
         )
         self._count_audio("sent")
+        self._audio_event(AUDIO_SENT, p)
 
     def _speech_audio(self, ev: SpeechEnd) -> np.ndarray:
         """The utterance's audio from its first to its last speech frame, pre-roll included."""
@@ -805,6 +826,7 @@ class VoiceListener:
                     self._realtime.cancel(p.rt)
                 except Exception as exc:
                     log.warning("voice listener: realtime input: %s", type(exc).__name__)
+                self._audio_event(AUDIO_UNSENT, p)
             self._count_handoff("dropped_on_stop")
         self._set_active(False)
 
@@ -860,7 +882,8 @@ class VoiceListener:
     def _deliver_heard(self, p: _Handoff) -> _Handoff | None:
         """``p``'s audio went to the realtime route: its final is the server's transcript
         (keywords, the wake word and the speaking rate come from it), else a local decode of
-        its buffer, which the chat routes answer when the audio did leave."""
+        its buffer: handed off ``local_only`` when the audio did leave (not answered, the
+        did-not-get-it cue shows now), for the chat routes when it did not."""
         job = p.rt
         result = job.result
         if result is not None:
@@ -873,6 +896,7 @@ class VoiceListener:
             return None
         self._count_audio("local_fallbacks")
         p.rt, p.local_only = None, job.sent
+        self._audio_event(AUDIO_NOT_HEARD if job.sent else AUDIO_UNSENT, p)
         if not p.text:  # Vosk never ran: decoded off this thread, then handed off
             self._decode(p)
             return p

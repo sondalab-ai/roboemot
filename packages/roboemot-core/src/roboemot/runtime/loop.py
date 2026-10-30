@@ -56,6 +56,8 @@ def run_loop(
         if host.live_video is not None:
             host.live_video.expire()  # the same for the preview's frame and JPEG
         if p.sleep.tick(now):  # asleep (SPEC 12A): only the clocks run; the work waits for the wake
+            if host.cues is not None:  # no listening cue is held through the sleep (SPEC 8)
+                host.cues.release_listening("asleep")
             p.circ.tick(now)
             p.runner.tick(now)
             clock.last_s = now
@@ -142,6 +144,9 @@ def run_loop(
             p.loop.feed(cmd)
         for cmd in p.responder.commands(now):
             p.loop.feed(cmd)
+        if host.cues is not None:  # the non-verbal cues' gestures (SPEC 8)
+            for cmd in host.cues.commands(now):
+                p.loop.feed(cmd)
         for cmd in p.expression.commands(now):
             p.loop.feed(cmd)
         for cmd in p.speaking.commands(now):  # after the expression: it ducks under it

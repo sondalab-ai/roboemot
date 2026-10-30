@@ -82,7 +82,7 @@ from ..stats import P50, P90, summarise
 from .duck import DuckGain
 from .envelope import SpeechTimeline
 from .prosody import Delivery, compose_delivery
-from .tts import AudioChunk, TTSBackend, TTSError
+from .tts import NO_VOICE, AudioChunk, TTSBackend, TTSError
 
 log = logging.getLogger(__name__)
 
@@ -291,6 +291,7 @@ class SpeechOutput:
         self._underrun_job = 0  # last sentence counted in _underrun_sentences
         self.sentences_spoken = 0
         self.sentences_dropped = 0
+        self.no_voice = 0  # sentences refused because there is no local voice (backend none)
         self.failures = 0
         # energy, phrase and emphasis stamps of what is pushed, for the speaking motion (SPEC 8)
         self.timeline = SpeechTimeline(config.speech_motion, clock)
@@ -407,6 +408,10 @@ class SpeechOutput:
         ``continued`` (the splitter's mark on the rest of a cut sentence) reuses the delivery of
         the utterance's previous piece, so one sentence is spoken with one delivery."""
         cfg = self.config
+        if self.backend.name == NO_VOICE:  # voice.backend none: nothing speaks a sentence
+            with self._lock:
+                self.no_voice += 1
+            return None
         if utterance is None:
             utterance = self.new_utterance()
         with self._lock:
@@ -686,6 +691,7 @@ class SpeechOutput:
             "queued": queued,
             "spoken": self.sentences_spoken,
             "dropped": self.sentences_dropped,
+            "no_voice": self.no_voice,
             "failures": self.failures,
             "first_audio_ms_last": lat[-1] if lat else None,
             "first_audio_ms_max": max(lat) if lat else None,

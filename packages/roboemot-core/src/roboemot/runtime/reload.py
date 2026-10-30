@@ -60,6 +60,7 @@ def make_reload(host: RuntimeHost, p: Pipeline) -> Callable[[Any], None]:
             ("bargein", p.bargein, lambda part: part.apply_config(cfg)),
             ("speech_output", host.speech_output, lambda part: part.apply_config(cfg)),
             ("soothe", host.soothe_runner, lambda part: part.apply_config(cfg.soothe)),
+            ("cues", host.cues, lambda part: part.apply_config(cfg.voice.cues)),
             ("conversation", host.conversation, lambda part: part.apply_config(cfg)),
             ("realtime_route", host.realtime_route, lambda part: part.apply_config(cfg)),
             ("transcript", host.transcript, lambda part: part.apply_config(cfg.webui.live)),

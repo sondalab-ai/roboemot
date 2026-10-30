@@ -72,7 +72,10 @@ def test_offline_cue_speaks_on_the_host_output_and_is_muted_asleep():
     )
     cue = offline_cue(host, stack, p)
     cue.say("no output yet", "it")  # the output does not exist: silent, no exception
-    host.speech_output = SimpleNamespace(say=lambda text, **kw: said.append({"text": text, **kw}))
+    host.speech_output = SimpleNamespace(
+        say=lambda text, **kw: said.append({"text": text, **kw}),
+        backend=SimpleNamespace(name="piper"),
+    )
     cue.say("ciao", "it")
     assert [s["text"] for s in said] == ["ciao"] and said[0]["mood"] == "joy"
     assert said[0]["register"] == stack.effective().register.params

@@ -182,6 +182,30 @@ behaviour:                      # config layer 2 (SPEC 11A): this robot's defaul
         head.pitch:    [[0.0, 0], [0.36, -4.583662], [0.84, -4.583662], [1.2, 0]]
         antenna_right: [[0.0, 0], [0.36, 22.918312], [0.84, 22.918312], [1.2, 0]]
         antenna_left:  [[0.0, 0], [0.36, -22.918312], [0.84, -22.918312], [1.2, 0]]
+    # Non-verbal cues (SPEC 8, Non-verbal cues): core plays cue_<kind> with the cue's sound
+    # (data/cues). cue_listening holds at its largest offset (0.4 s) until the answer's first
+    # audio, then returns. No cue_offline: the offline cue goes with the responder's puzzled
+    # (speech while offline) or with nothing but the sound (network lost). Signs as above.
+    # 0.3 rad = 17.188734 deg, 0.1 rad = 5.729578 deg, 0.05 rad = 2.864789 deg.
+    cue_listening:              # antennas up, a small tilt and lift: "I heard you"
+      curve: minjerk
+      channels:
+        antenna_right: [[0.0, 0], [0.4, 17.188734], [0.8, 0]]
+        antenna_left:  [[0.0, 0], [0.4, -17.188734], [0.8, 0]]
+        head.roll:     [[0.0, 0], [0.4, 5.729578], [0.8, 0]]
+        head.pitch:    [[0.0, 0], [0.4, -2.864789], [0.8, 0]]
+    cue_not_heard:              # tilt the other way, one antenna up and one out: "hm?", 1.2 s
+      curve: minjerk
+      channels:
+        head.roll:     [[0.0, 0], [0.36, -8.594367], [0.84, -8.594367], [1.2, 0]]
+        antenna_right: [[0.0, 0], [0.36, 17.188734], [0.84, 17.188734], [1.2, 0]]
+        antenna_left:  [[0.0, 0], [0.36, 17.188734], [0.84, 17.188734], [1.2, 0]]
+    cue_fallback:               # antennas droop out, the head dips: "I can't right now", 1.6 s
+      curve: minjerk
+      channels:
+        antenna_right: [[0.0, 0], [0.5, -22.918312], [1.1, -22.918312], [1.6, 0]]
+        antenna_left:  [[0.0, 0], [0.5, 22.918312], [1.1, 22.918312], [1.6, 0]]
+        head.pitch:    [[0.0, 0], [0.5, 4.583662], [1.1, 4.583662], [1.6, 0]]
   # Circadian motion (SPEC 7A, Effects by state): same entry format as above (keyframes or recorded clips).
   # `yawn` plays now and then while drowsy, `stretch` for 3 s when the robot wakes from resting,
   # `rest_pose_deg` is the absolute rest posture (head.pitch positive is down; antennas droop

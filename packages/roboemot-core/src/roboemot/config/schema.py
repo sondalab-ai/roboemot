@@ -2912,8 +2912,9 @@ class RealtimeRouteConfig(Strict):
     )
     transcript_timeout_s: float = param(
         4.0,
-        "Longest wait for the server's transcript of an utterance's audio; past it the "
-        "utterance is decoded locally and the chat routes answer it",
+        "Longest wait for the server's transcript of an utterance's audio; past it the robot "
+        "shows the did-not-get-it cue and the utterance is not answered (its local decode "
+        "still feeds keywords)",
         unit="s",
         ge=0.5,
         le=15,
@@ -3032,6 +3033,44 @@ class RealtimeRouteConfig(Strict):
         return self
 
 
+class CueConfig(Strict):
+    """Non-verbal cues: a gesture of the manifest's ``gesture_map`` plus a short sound of the
+    robot's cue library (SPEC 8, Non-verbal cues)."""
+
+    enabled: bool = param(
+        True,
+        "Show the non-verbal cues: listening while an utterance's audio waits for the realtime "
+        "route, and the offline, did-not-get-it and fallback cues where no voice can speak",
+    )
+    listening_onset_s: float = param(
+        0.3,
+        "Delay from the moment an utterance's audio leaves the robot to the listening gesture; "
+        "an answer that starts sooner shows none",
+        unit="s",
+        ge=0,
+        le=3,
+    )
+    listening_hold_max_s: float = param(
+        10.0,
+        "Longest the listening gesture is held without an answer, whatever else happens",
+        unit="s",
+        ge=1,
+        le=60,
+    )
+    listening_sound: bool = param(
+        False,
+        "Play the listening sound with the gesture. Off by default: it is robot audio, so it "
+        "queues ahead of the answer and holds the next utterance's audio while it plays",
+    )
+    volume_db: float = param(
+        -6.0,
+        "Level of a cue sound against its recorded level (the circadian offset adds to it)",
+        unit="dB",
+        ge=-40,
+        le=0,
+    )
+
+
 class VoiceConfig(Strict):
     enabled: bool = param(
         False,
@@ -3068,11 +3107,14 @@ class VoiceConfig(Strict):
         "low and a late pacer lets the player run dry (counted as underruns)",
         unit="ms", ge=0, le=2000, restart=True,
     )  # fmt: skip
-    backend: Literal["piper", "openai_speech", "kokoro"] = param(
-        "piper", "TTS backend", restart=True
+    backend: Literal["piper", "openai_speech", "kokoro", "none"] = param(
+        "piper",
+        "TTS backend. none: no local speech synthesis (no Piper, no voice files); only the "
+        "realtime route's voice speaks, and a line it cannot say becomes a non-verbal cue",
+        restart=True,
     )
-    fallback_backend: Literal["piper", "kokoro"] = param(
-        "piper", "Offline fallback backend", restart=True
+    fallback_backend: Literal["piper", "kokoro", "none"] = param(
+        "piper", "Offline fallback backend (none: no fallback voice)", restart=True
     )
     voices: dict[str, str] = param(
         {"it": "it_IT-paola-medium", "en": "en_US-amy-medium"}, "Voice per language", restart=True
@@ -3310,6 +3352,9 @@ class VoiceConfig(Strict):
     )
     realtime_route: RealtimeRouteConfig = param(
         {}, "Realtime speech route client: connect, send and size limits (SPEC 8)"
+    )
+    cues: CueConfig = param(
+        {}, "Non-verbal cues: listening, offline, did not get it, fallback (SPEC 8)"
     )
 
 

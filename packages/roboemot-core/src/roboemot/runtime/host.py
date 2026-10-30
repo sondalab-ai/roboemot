@@ -37,6 +37,7 @@ from roboemot.vision import FrameSource
 from roboemot.vision.service import Perception, default_stages
 from roboemot.voice.activity import SpeechActivity
 from roboemot.voice.bargein import BargeIn
+from roboemot.voice.cues import Cues
 from roboemot.voice.listener import Utterance, VoiceListener
 from roboemot.voice.robot_name import RobotName
 from roboemot.voice.speech import SpeechOutput
@@ -74,6 +75,7 @@ class RuntimeHost:
     voice_listener: VoiceListener | None = None  # mic -> VAD -> ASR -> utterances; voice.enabled
     speech_output: SpeechOutput | None = None  # TTS queue onto the speaker; only when voice.enabled
     soothe_runner: SootheRunner | None = None  # idle self-soothing sound (SPEC 7B); needs voice
+    cues: Cues | None = None  # non-verbal cues: listening, offline, not heard (SPEC 8); needs voice
     traits_worker: TraitsWorker | None = None  # rates persona traits when traits_source is llm
     name_source: NameSource | None = None  # registry names for pseudonyms outside the conversation
     router_hub: RouterHub | None = None  # the one router: traits, conversation, speech, checks

@@ -13,7 +13,7 @@ from . import models as voice_models
 from .openai_speech import OpenAISpeechBackend
 from .piper_backend import PiperBackend, manifest_voice_files
 from .speech import AudioSink, SpeechOutput
-from .tts import FallbackTTS, TTSBackend
+from .tts import NO_VOICE, FallbackTTS, NoVoice, TTSBackend
 
 
 def piper_python(cfg: RoboEmotConfig) -> Path:
@@ -25,15 +25,22 @@ def piper_python(cfg: RoboEmotConfig) -> Path:
 
 def build_backend(cfg: RoboEmotConfig, router: Callable[[], Router]) -> TTSBackend:
     """``voice.backend`` with ``voice.fallback_backend`` behind it (Piper is the only local one).
-    Voice files come from the voice model registry, so only verified files are loaded."""
-    chosen = {cfg.voice.backend, cfg.voice.fallback_backend}
-    if "kokoro" in chosen:
+    Voice files come from the voice model registry, so only verified files are loaded.
+    ``none`` builds no Piper and reads no voice file: as the backend, a :class:`NoVoice` (the
+    output refuses sentences); as the fallback, a remote backend without one (SPEC 8, CV-2)."""
+    voice = cfg.voice
+    if "kokoro" in {voice.backend, voice.fallback_backend}:
         raise ValueError("the kokoro TTS backend is not implemented")
-    root = voice_models.models_dir(cfg.voice.models_dir, cfg.data_dir)
-    local = PiperBackend(cfg.voice.piper, piper_python(cfg), manifest_voice_files(root))
-    if cfg.voice.backend == "piper":
+    if voice.backend == NO_VOICE:
+        return NoVoice()
+    local: TTSBackend | None = None
+    if voice.backend == "piper" or voice.fallback_backend == "piper":
+        root = voice_models.models_dir(voice.models_dir, cfg.data_dir)
+        local = PiperBackend(voice.piper, piper_python(cfg), manifest_voice_files(root))
+    if voice.backend == "piper":
+        assert local is not None
         return local
-    return FallbackTTS(OpenAISpeechBackend(cfg.voice.openai_speech, router), local)
+    return FallbackTTS(OpenAISpeechBackend(voice.openai_speech, router), local)
 
 
 def build_speech(
