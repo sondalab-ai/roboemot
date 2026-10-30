@@ -88,6 +88,7 @@ OWN_CLOSES = (
     "reconfigured",
     "budget",
     "expired",
+    "input_reset",
 )  # our closes, not failures
 LATENCY_LEVELS = {"p50": P50, "p95": P95}
 MS_PER_S = 1000.0
@@ -201,8 +202,6 @@ class RealtimeRoute:
         self._upload_day: dt.date | None = None
         self._upload_s = 0.0  # microphone audio sent on _upload_day (the closing silence too)
         self._load_upload()
-        self._buffer_gen = -1  # the session whose input buffer _buffer_ms measures
-        self._buffer_ms = 0.0  # audio appended to that session's input buffer so far
         self._input_holds = 0  # realtime turns in flight: no burst meanwhile (their tool rounds)
         self._audio_blocked: str | None = None  # why the last burst was refused, if it was
         self.input: Any = None  # the audio input (``on_event``) the input events go to
@@ -232,8 +231,9 @@ class RealtimeRoute:
         self.reason: str | None = None
         self._closed = False
         self._lost = False
-        self._resets_in_row = 0  # resets since the server last answered a response
+        self._resets_in_row = 0  # resets since the server last answered (a response, a transcript)
         self._reopen_at = 0.0  # no reconnect before (clock) after a repeated reset
+        self._reopens = 0  # reconnects a reset started that have not returned yet
         self.base_instructions: Callable[[], str] = lambda: ""
         self._counts: collections.Counter[str] = collections.Counter()
         self._statuses: collections.Counter[str] = collections.Counter()
@@ -349,13 +349,15 @@ class RealtimeRoute:
 
         return bool(self._with_config(check))
 
-    def ready(self, cfg: RoboEmotConfig | None = None) -> bool:
+    def ready(self, cfg: RoboEmotConfig | None = None, *, closes: int | None = None) -> bool:
         """Whether a turn can be answered through the route, connecting if needed (blocking up
         to ``connect_timeout_s``: never call it on an event loop). A blocked route, one closed
-        since this call began, or one whose last connect failed and whose retry is not due, is
-        not ready. A session the newest configuration would not open is closed, not used."""
+        since this call began (or since ``closes``, the close count a reset saw), or one whose
+        last connect failed and whose retry is not due, is not ready. A session the newest
+        configuration would not open is closed, not used."""
         with self._lock:
-            closes = self._closes  # a close from now on means no session for this call
+            if closes is None:
+                closes = self._closes  # a close from now on means no session for this call
         cfg = cfg or self.stack.effective()
         self._extra_ok = self._extra()
         reason = self.blocked(cfg, self._extra_ok)
@@ -641,7 +643,6 @@ class RealtimeRoute:
         guessing). The first reset reopens at once; while the server answers nothing, each
         further one waits the ``connectivity.network`` backoff before the next connect."""
         _, stall = self.timeouts()
-        policy = self.stack.effective().connectivity.network
         now = self.clock()
         with self._lock:
             never = [r for r in self._pending if r.run is None and now - r.last_event >= stall]
@@ -649,11 +650,25 @@ class RealtimeRoute:
             for r in (*never, *live):
                 self._forget(r)
             reset = any(r.token is not None and r.token is self._token for r in never)
+            generation = self.generation
         self._give_up([*never, *live])
-        if not reset:
-            return
+        if reset:
+            self._reset("expired", "resets", generation)
+
+    def _reset(self, reason: str, counter: str, generation: int) -> bool:
+        """Close ``generation``'s session and open a new one in the background, when it is
+        still the current one (False otherwise: nothing done). The check, the count and the
+        detach are one critical section, and the reconnect is refused if any close came after
+        it (``ready(closes=...)``): a session the robot closed meanwhile (asleep, the
+        conversation over) is never reopened. The first reset in a row reopens at once; while
+        the server answers nothing (no response, no transcript), each further one waits the
+        ``connectivity.network`` backoff before the next connect (``ready`` then reopens)."""
+        policy = self.stack.effective().connectivity.network
+        now = self.clock()
         with self._lock:
-            self._counts["resets"] += 1
+            if generation != self.generation or self._client is None:
+                return False
+            self._counts[counter] += 1
             self._resets_in_row += 1
             n = self._resets_in_row
             delay = 0.0
@@ -661,9 +676,33 @@ class RealtimeRoute:
                 grown = policy.probe_initial_s * policy.probe_backoff ** (n - 2)
                 delay = min(policy.probe_max_s, grown)
             self._reopen_at = now + delay
-        self.close_soon("expired")
+            self._closes += 1
+            self._close_reason = reason
+            client, orphans = self._detach()
+            closes = self._closes
+            if delay == 0.0:
+                self._reopens += 1
+        self._settle(orphans, reason)
+        if client is not None:
+            self._close_client(client, reason)
         if delay == 0.0:
-            self.start()  # a new session, in the background
+            threading.Thread(
+                target=self._reopen, args=(closes,), name="realtime-connect", daemon=True
+            ).start()
+        return True
+
+    def _reopen(self, closes: int) -> None:
+        """A reset's reconnect (its own thread): refused if a close came after the reset."""
+        try:
+            self.ready(closes=closes)
+        finally:
+            with self._lock:
+                self._reopens -= 1
+
+    def opening(self) -> bool:
+        """A reset's reconnect, or any connect, is in flight: a session may come soon."""
+        with self._lock:
+            return self._reopens > 0 or self._connecting is not None
 
     def abandon(self, req: Request, estimate: int) -> None:
         """``req``'s run stops following it (barge-in, a failure, its own timeout): the
@@ -746,10 +785,15 @@ class RealtimeRoute:
             with self._lock:
                 current = self._current(token)
                 sink = self.input
+                # the session the event is of, read with the check (a reset may follow at once)
+                connecting = token is not None and token is self._connecting_token
+                generation = self.generation + 1 if connecting else self.generation
+                if current and isinstance(event, protocol.InputTranscript):
+                    self._resets_in_row = 0  # the server answers: the reset streak ends
             if not current:
                 self._count("stale_callbacks")
             elif sink is not None:
-                sink.on_event(event)
+                sink.on_event(event, generation)
         else:
             with self._lock:
                 current = self._current(token)
@@ -928,7 +972,7 @@ class RealtimeRoute:
         gate: str,
         instructions: str,
         hold: Callable[[], str | None] = lambda: None,
-        track: Callable[[int, float, float], None] | None = None,
+        track: Callable[[int], None] | None = None,
     ) -> str | None:
         """Send one utterance's audio (PCM16 at ``voice.sample_rate_hz``, the closing silence
         included) as one burst: ``session.update`` with fresh ``instructions`` (a server that
@@ -940,9 +984,9 @@ class RealtimeRoute:
         reason it was refused (nothing was sent): ``no_session``, ``input``, ``no_opt_in``,
         ``gate``, ``upload_budget``, ``turn`` (a realtime turn is in flight), what ``hold()``
         returns (``asleep``, ``speaking``, ``cancelled``: evaluated with the send, it may take
-        only leaf locks) or ``refused`` (the session no longer fits: closed). ``track(generation,
-        start_ms, end_ms)`` runs with the send: the session and where the burst lies in its input
-        buffer (the server's ``audio_start_ms`` counts from that buffer's start)."""
+        only leaf locks) or ``refused`` (the session no longer fits: closed). ``track(generation)``
+        runs with the send, under this lock: the session the burst goes to (the audio input
+        reads where that session's input buffer ends in the same step, under its own lock)."""
 
         def burst(cfg: RoboEmotConfig) -> tuple[str | None, Any]:
             rt = cfg.voice.realtime_route
@@ -971,12 +1015,8 @@ class RealtimeRoute:
             if why is not None:
                 return why, None
             self._upload_s += seconds
-            if self._buffer_gen != self.generation:
-                self._buffer_gen, self._buffer_ms = self.generation, 0.0
-            start_ms = self._buffer_ms
-            self._buffer_ms += seconds * MS_PER_S
             if track is not None:
-                track(self.generation, start_ms, self._buffer_ms)
+                track(self.generation)
             client.send(self.session_update(cfg, instructions))  # only queued: never blocks
             step = (
                 rt.max_message_bytes // APPEND_SHARE_OF_CAP // PCM_SAMPLE_BYTES * PCM_SAMPLE_BYTES
@@ -1111,6 +1151,13 @@ class RealtimeRoute:
         with self._lock:
             self._transcript_ms.append(ms)
 
+    def reset_session(self, generation: int) -> bool:
+        """Reset ``generation``'s session (``_reset``, counted ``input_resets``): an audio burst
+        ended without its result while the server may still report on it, and its late items
+        must never be taken for the next burst's (their callbacks are stale once the session is
+        detached). False when that session is no longer the current one: nothing done."""
+        return self._reset("input_reset", "input_resets", generation)
+
     def count(self, key: str, n: int = 1) -> None:
         self._count(key, n)
 
@@ -1189,6 +1236,7 @@ COUNTERS = (
     "audio_sent",
     "audio_refused",
     "audio_held",
+    "audio_reopen_wait",
     "audio_items",
     "audio_items_deleted",
     "audio_items_unnamed",
@@ -1213,6 +1261,7 @@ COUNTERS = (
     "stale_callbacks",
     "sends_refused",
     "resets",
+    "input_resets",
 )
 
 # the server's confirmations of a delete and a truncate, and the counter each one moves

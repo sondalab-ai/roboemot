@@ -124,7 +124,7 @@ async def test_a_never_created_request_that_expires_resets_the_session(monkeypat
     monkeypatch.setattr(route, "timeouts", lambda: (2.0, 0.1))
     first_client = route._client
     reopen = route.start
-    monkeypatch.setattr(route, "start", lambda: None)  # reopened below, deterministically
+    monkeypatch.setattr(route, "_reopen", lambda closes: None)  # reopened below
     b = make_run(route, Speech())
     reply_b = await asyncio.wait_for(b.run("b"), 2)
     assert len(creates(sent)) == 1  # B was never sent on the old session

@@ -805,7 +805,7 @@ def test_consecutive_resets_back_off_the_reopen():
     r.clock = lambda: now[0]
     r.timeouts = lambda: (1.0, 1.0)
     starts = []
-    r.start = lambda: starts.append(now[0])
+    r._reopen = lambda closes: starts.append(now[0])
 
     def reset():
         req = r.request(Dummy(), "x")
@@ -873,3 +873,34 @@ def test_the_route_passes_the_identifier_opt_in_and_reports_what_was_sent():
         assert r.snapshot()["platform_id_sent"] is False
     finally:
         r.close()
+
+
+def test_an_expiry_reset_never_reopens_a_session_closed_for_sleep():
+    """SPEC 12A: the robot falls asleep between the expiry's reset and its reconnect: the
+    reconnect is refused, the session stays closed."""
+    import time
+
+    stack = rt_stack()
+    r, made = stub_route(stack)
+    now = [100.0]
+    r.clock = lambda: now[0]
+    r.timeouts = lambda: (1.0, 1.0)
+    assert r.ready()
+    gen = r.generation
+    ready = r.ready
+
+    def asleep_first(*a, **kw):
+        r.close_soon("asleep")
+        return ready(*a, **kw)
+
+    r.ready = asleep_first
+    req = r.request(Dummy(), "x")
+    r.abandon(req, 0)
+    now[0] += 1.0
+    r.expire()
+    deadline = time.monotonic() + 5
+    while r.opening() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not r.opening()
+    assert r.snapshot()["resets"] == 1
+    assert len(made) == 1 and r.generation == gen and not r.connected
