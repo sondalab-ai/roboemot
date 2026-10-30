@@ -267,3 +267,37 @@ def test_closing_ends_the_listening_cue_of_the_utterances_still_waiting(rigs):
             rig.worker._pending.append((heard(stamp=2.0), 0))
         rig.worker.close()
         assert rig.cues.ended == 2
+
+
+def test_a_skipped_audio_turn_ends_the_listening_cue_and_shows_no_other_cue():
+    """CV-3 with CV-2: the real listener, worker and cues; the server calls the skip tool."""
+    from roboemot.config.schema import CueConfig
+    from roboemot.realtime.turn import SKIP_TOOL
+    from roboemot.runtime.startup import audio_cues
+    from roboemot.voice.cues import Cues
+    from test_cues import prim
+
+    app = {"privacy": {"realtime_audio": True}, "voice": {"wake_word_policy": "never"}}
+    with TurnServer(["tool"], tool_name=SKIP_TOOL, heard=[["la TV parla"]]) as srv:
+        rig = build_rt(srv, rt={"input": "audio", "skip_tool": True}, app=app)
+        cues = Cues(
+            CueConfig(listening_onset_s=0.0),
+            gesture=lambda name: prim(name),
+            sounds={},
+        )
+        rig.worker.cues = cues
+        ear = Ear(rig, script=["x"], bearing=FACE_RAD, to_worker=True)
+        ear.r.listener.bind_realtime(ear.input, audio_cues(cues))
+        try:
+            ear.say()
+            assert ear.settle(lambda: cues.snapshot()["listening"]["outstanding"] == 1)
+            cues.commands(time.monotonic())  # the onset passed: the gesture shows
+            assert ear.settle(lambda: len(rig.events) == 1, 10.0)
+            assert rig.events[0]["outcome"] == "skipped"
+            snap = cues.snapshot()
+            assert snap["listening"] == {"holding": False, "outstanding": 0, "generation": 0}
+            assert snap["counts"]["listening"] == {"shown": 1, "released_ended": 1}
+            assert not any(snap["counts"][k] for k in ("fallback", "not_heard", "offline"))
+        finally:
+            ear.close()
+            rig.close()
