@@ -154,8 +154,10 @@ def test_the_world_keeps_the_last_yaw_and_a_bearing_without_one_leaves_it():
     assert e.facing_yaw_rad == -0.1 and e.facing_stamp == 3.0
 
 
-@pytest.mark.parametrize("stamp,expected", [(None, None), (9.5, 0.2), (10.8, 0.2), (8.0, None)])
-def test_fresh_yaw_is_measured_close_enough_on_either_side(stamp, expected):
+@pytest.mark.parametrize(
+    "stamp,expected", [(None, None), (9.5, 0.2), (10.8, 0.2), (30.0, 0.2), (8.0, None)]
+)
+def test_fresh_yaw_is_recent_enough_and_a_later_one_always_counts(stamp, expected):
     e = Entry("person-1", "person", "person", "unknown", 0.0, 0.0, None, 0.1, 1.0, 0.0, 10.0)
     e.facing_yaw_rad, e.facing_stamp = 0.2, stamp
     assert fresh_yaw(e, 10.0, 1.0) == expected

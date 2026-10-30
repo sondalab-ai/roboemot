@@ -2814,8 +2814,9 @@ class VoiceFacingConfig(Strict):
     )  # fmt: skip
     max_sample_age_s: float | None = param(
         None,
-        "A face's head yaw counts for a sample when the camera measured it at most this far from "
-        "the sample's time. Empty: the voice-at-face age (voice.direction.face_max_age_s, else "
+        "A face's head yaw counts for a sample when the camera measured it at most this long "
+        "before the sample's time, or after it (a listener behind real time). Empty: the "
+        "voice-at-face age (voice.direction.face_max_age_s, else "
         "attention.stale_s), so a face that counts as visible counts with its yaw. With no yaw "
         "at all the check falls back (counted fallback_no_data) and the utterance is decided as "
         "if this check were off",

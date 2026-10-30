@@ -48,10 +48,11 @@ MS_PER_S = 1000.0
 
 
 def fresh_yaw(entry: Entry, now: float, max_age_s: float) -> float | None:
-    """The entry's head yaw when it was measured at most ``max_age_s`` from ``now``, on either
-    side (the listener may run behind real time); else None."""
+    """The entry's head yaw when it was measured at most ``max_age_s`` before ``now``, or after
+    it (a listener behind real time judges the latest yaw, as it does the faces' azimuths, so a
+    face that counts as visible counts with its yaw); else None."""
     stamp = entry.facing_stamp
-    if stamp is None or abs(now - stamp) > max_age_s:
+    if stamp is None or now - stamp > max_age_s:
         return None
     return entry.facing_yaw_rad
 
@@ -134,8 +135,7 @@ def build_listener(
     def direction_sample(now: float) -> DirectionSample:
         """The sound direction and the visible faces (base frame) at ``now`` for the
         voice-at-face check, whether attention is on one of those faces and, with the facing
-        check on, their head yaw measured close enough to ``now`` (on either side: the listener
-        may run behind real time)."""
+        check on, their head yaw measured recently enough (``fresh_yaw``)."""
         live = listener.config
         dcfg, fcfg = live.voice.direction, live.voice.facing
         max_age = dcfg.face_max_age_s if dcfg.face_max_age_s is not None else live.attention.stale_s
