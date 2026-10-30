@@ -89,14 +89,22 @@ def session_update(
     create_response: bool,
     interrupt_response: bool,
     tools: list[dict[str, Any]] | None = None,
+    transcription_language: str | None = None,
+    transcription_model: str | None = None,
 ) -> dict[str, Any]:
     """``session.update``: instructions, PCM16 in and out (a rate of None asks for the server's
     native rate, a speech-to-speech extension), the voice (left out when empty: the
-    server's default), server VAD with its threshold and end silence, and the function tools
-    (realtime format, ``function_tools``) with ``tool_choice: "auto"``."""
+    server's default), server VAD with its threshold and end silence, the input transcription's
+    language and model (each left out when empty, the object too when both are), and the
+    function tools (realtime format, ``function_tools``) with ``tool_choice: "auto"``."""
     output: dict[str, Any] = {"format": {"type": AUDIO_FORMAT, "rate": output_rate_hz}}
     if voice:
         output["voice"] = voice
+    transcription: dict[str, Any] = {}
+    if transcription_language:
+        transcription["language"] = transcription_language
+    if transcription_model:
+        transcription["model"] = transcription_model
     session: dict[str, Any] = {
         "type": "realtime",
         "instructions": instructions,
@@ -114,6 +122,8 @@ def session_update(
             "output": output,
         },
     }
+    if transcription:
+        session["audio"]["input"]["transcription"] = transcription
     if tools is not None:  # [] clears the tools a previous turn left on the server
         session["tools"] = tools
         if tools:

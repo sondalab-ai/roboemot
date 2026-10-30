@@ -46,6 +46,31 @@ def test_session_update_carries_the_format_vad_and_tools():
     assert json.loads(p.encode(ev)) == ev
 
 
+def _update(**kw):
+    return p.session_update(
+        instructions="",
+        input_rate_hz=None,
+        output_rate_hz=None,
+        voice=None,
+        vad_threshold=0.5,
+        silence_ms=500,
+        create_response=False,
+        interrupt_response=False,
+        **kw,
+    )["session"]["audio"]["input"]
+
+
+def test_session_update_sends_the_transcription_language_and_model_only_when_set():
+    assert "transcription" not in _update()
+    assert "transcription" not in _update(transcription_language="", transcription_model="")
+    assert _update(transcription_language="it")["transcription"] == {"language": "it"}
+    assert _update(transcription_language="en", transcription_model="m")["transcription"] == {
+        "language": "en",
+        "model": "m",
+    }
+    assert _update(transcription_model="m")["transcription"] == {"model": "m"}
+
+
 def test_client_builders():
     assert p.audio_append(b"\x01\x00") == {
         "type": "input_audio_buffer.append",
