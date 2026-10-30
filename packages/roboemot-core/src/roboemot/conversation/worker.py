@@ -101,6 +101,8 @@ JOIN_TIMEOUT_S = 2.0
 READY_TIMEOUT_S = 5.0
 INTERRUPTED_MARK = " …"  # ends an assistant message the person cut off (history, SPEC 8)
 TOO_MANY_ROUNDS = '{"error": "too_many_rounds"}'  # a tool call after the realtime round cap
+# ignore_utterance after a skill acted in the turn: refused, the exchange stays (SPEC 8)
+SKIP_REFUSED = '{"error": "skip_unavailable_after_an_action"}'
 
 
 class Speech(Protocol):
@@ -747,10 +749,12 @@ class ConversationWorker:
             if not ((turn.interrupted or turn.stopped) and inner.cancelled()):
                 inner.cancel()
                 raise
-            turn.outcome = "interrupted"
+            turn.outcome = "skipped" if turn.skipped else "interrupted"  # the skip came first
             return True
         except Exception as exc:
             log.warning("conversation: realtime turn failed (%s)", type(exc).__name__)
+            if turn.skipped:  # never answered by the chat routes
+                return self._skip(turn)
             # a response in flight was already abandoned (cancelled) by its run; the failing
             # round's audio is stopped with the rest
             run = turn.rt_run
@@ -796,7 +800,9 @@ class ConversationWorker:
             choices=choices,
         )
         skip = turn.cfg.voice.realtime_route.skip_tool
-        functions = rt_protocol.function_tools(tools) if tools else []
+        # with max_tool_rounds 0 and the skip tool, the skip tool is the only one offered
+        skills = bool(tools) and not (skip and conv.max_tool_rounds == 0)
+        functions = rt_protocol.function_tools(tools) if skills else []
         functions += [skip_tool()] if skip else []
         sent = route.send(route.session_update(turn.cfg, self._base_instructions(), functions))
         if not sent:
@@ -834,13 +840,14 @@ class ConversationWorker:
                 on_call=on_call,
                 input_chars=len(turn.utterance.text),
                 generation=turn.rt_gen,  # the session that holds the turn's words
-                mute_on=SKIP_TOOL if skip else None,
+                mute_on=SKIP_TOOL if skip and not turn.rounds else None,
             )
             round_from = len(turn.spoken)
             turn.rt_round = (calls, results, round_from)
             turn.rt_run = run
             try:
-                ask = in_cap or (skip and not turn.rounds)  # the skip tool: first round only
+                # the skip tool is honoured in the first round only, as its first call
+                ask = in_cap or (skip and not turn.rounds)
                 choice = "auto" if ask else "none" if offered or skip else None
                 reply = await run.run(instructions, choice)
             except asyncio.CancelledError:
@@ -939,9 +946,16 @@ class ConversationWorker:
         cap = turn.cfg.conversation.max_tool_calls_per_round
 
         async def on_call(ev: rt_protocol.FunctionCall) -> bool:
-            if turn.skipped or (ev.name == SKIP_TOOL and turn.cfg.voice.realtime_route.skip_tool):
-                self._skip_call(turn)  # nothing runs after a skip, in this response either
-                return True
+            if turn.skipped:
+                return True  # the skip came first: no later call of its response runs
+            if ev.name == SKIP_TOOL and turn.cfg.voice.realtime_route.skip_tool:
+                if not (turn.rounds or calls):  # nothing acted in the turn yet
+                    self._skip_call(turn)
+                    return True
+                calls.append(ToolCall(ev.call_id, ev.name, {}))
+                results.append(ToolOutcome(SKIP_REFUSED, False, not in_cap, ev.name, "skip"))
+                self.realtime.count("skips_refused")
+                return not in_cap
             call = ToolCall(ev.call_id, ev.name, tool_arguments(ev.arguments))
             calls.append(call)
             if not in_cap:
@@ -973,7 +987,10 @@ class ConversationWorker:
     def _skip(self, turn: _Turn) -> bool:
         """End a skipped turn: no tool result and no further response (the call item is deleted
         with the rest), the user's and the response's items deleted on the server, nothing kept
-        in the history mirror or the live transcript (it is not a turn of ``history_turns``)."""
+        in the history mirror or the live transcript (it is not a turn of ``history_turns``).
+        Only once per turn."""
+        if turn.outcome == "skipped":
+            return True
         route = self.realtime
         route.delete_items(turn.rt_gen, turn.rt_items)
         turn.rt_items.clear()

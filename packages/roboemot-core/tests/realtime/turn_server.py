@@ -11,6 +11,9 @@ Scripts (``scripts``, used in order; the last one repeats):
   ``tool_args``) and ``response.done``;
 - ``audio_then_tool``: the ``reply`` audio, then the ``tool`` call, then ``response.done``;
 - ``tool_then_audio``: the ``tool`` call, then the ``reply`` audio (both stop at a cancel);
+- ``tools``: one call per name of ``tool_names`` in one response, then ``response.done``;
+- ``tool_close``: the ``tool`` call, then the socket is closed;
+- ``tool_stall``: the ``tool`` call, then ``response.done`` only after ``stall_s``;
 - ``close_before``: the socket is closed on ``response.create``;
 - ``close_mid``: ``response.created``, one audio delta, then the socket is closed;
 - ``error``: an ``error`` instead of ``response.created``;
@@ -37,7 +40,8 @@ audio. ``end_positions`` off leaves ``audio_end_ms`` out (start positions only).
 ``segment_gap_s`` (when set) sends a burst's items one at a time, each with its transcript,
 that long apart: a late second segment. ``ids`` off leaves every ``item_id`` out (a server
 that does not send them); ``ids_per_session`` numbers the items per connection, so an id
-repeats across sessions. ``sent`` records every event the server sent.
+repeats across sessions. ``tool_names`` (when set) names the call of each response in turn
+(the last repeats) instead of ``tool_name``. ``sent`` records every event the server sent.
 """
 
 from __future__ import annotations
@@ -86,6 +90,8 @@ class TurnServer(FakeServer):
         end_positions: bool = True,
         segment_gap_s: float = 0.0,
         ids_per_session: bool = False,
+        tool_names: list[str] | None = None,
+        stall_s: float = 1.5,
         **kw: Any,
     ) -> None:
         super().__init__("normal", **kw)
@@ -93,6 +99,7 @@ class TurnServer(FakeServer):
         self.deltas, self.delta_ms, self.gap_s = deltas, delta_ms, gap_s
         self.transcript, self.usage = transcript, usage
         self.tool_name, self.tool_args = tool_name, tool_args
+        self.tool_names, self.stall_s = tool_names, stall_s
         self.unrequested = unrequested
         self.heard = heard if heard is not None else [["ciao Neve come stai"]]
         self.transcript_delay_s = transcript_delay_s
@@ -243,6 +250,20 @@ class TurnServer(FakeServer):
             await self._call(ws, rid)
             await self._done(ws, rid, "completed")
             return
+        if script == "tools":
+            for i, name in enumerate(self.tool_names or [self.tool_name]):
+                await self._call(ws, rid, name, i)
+            await self._done(ws, rid, "completed")
+            return
+        if script == "tool_close":
+            await self._call(ws, rid)
+            await ws.close()
+            return
+        if script == "tool_stall":
+            await self._call(ws, rid)
+            await asyncio.sleep(self.stall_s)
+            await self._done(ws, rid, "cancelled" if cancel.is_set() else "completed")
+            return
         if script == "tool_then_audio":
             await self._call(ws, rid)
         delta = base64.b64encode(pcm(self.delta_ms)).decode()
@@ -281,15 +302,20 @@ class TurnServer(FakeServer):
         )
         await self._done(ws, rid, "cancelled" if cancel.is_set() else "completed")
 
-    async def _call(self, ws: ServerConnection, rid: str) -> None:
+    async def _call(
+        self, ws: ServerConnection, rid: str, name: str | None = None, index: int = 0
+    ) -> None:
+        if name is None and self.tool_names:
+            name = self.tool_names[min(self.responses - 1, len(self.tool_names) - 1)]
+        suffix = f"_{index}" if index else ""
         await self._send(
             ws,
             {
                 "type": "response.function_call_arguments.done",
                 "response_id": rid,
-                "item_id": f"fc_{self.responses}",
-                "call_id": f"call_{self.responses}",
-                "name": self.tool_name,
+                "item_id": f"fc_{self.responses}{suffix}",
+                "call_id": f"call_{self.responses}{suffix}",
+                "name": name or self.tool_name,
                 "arguments": self.tool_args,
             },
         )

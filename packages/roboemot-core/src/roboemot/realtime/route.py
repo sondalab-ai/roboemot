@@ -1259,6 +1259,7 @@ COUNTERS = (
     "tool_calls",
     "skipped",  # the model called ignore_utterance before any of its audio played
     "skipped_late",  # ... after some played: cut like a barge-in
+    "skips_refused",  # ignore_utterance after a skill acted in the turn: an error result
     "lines",
     "fallbacks_start",
     "fallbacks_mid_turn",

@@ -212,6 +212,19 @@ def system_tokens_worst_case(cfg: RoboEmotConfig) -> int:
     return _ceil_tokens(chars) + SUMMARY_LABEL_TOKENS
 
 
+def check_skip_prompt(cfg: RoboEmotConfig) -> None:
+    """Load-time check (SPEC 8, Skip tool): with ``voice.realtime_route.skip_tool`` the
+    conversation language needs its ``ignore_utterance`` prompt file, so the tool is never
+    offered without its rule. Raises ``ValueError``."""
+    lang = cfg.conversation.language
+    if cfg.voice.realtime_route.skip_tool and not skip_prompts().get(lang):
+        raise ValueError(
+            f"voice.realtime_route.skip_tool: no {SKIP_PROMPT}.{lang}.txt prompt file (or it is "
+            f"empty) for conversation.language {lang!r}; available: "
+            f"{', '.join(sorted(skip_prompts())) or 'none'}"
+        )
+
+
 def check_route_budgets(cfg: RoboEmotConfig) -> None:
     """Load-time check (SPEC 8, Conversation state): on every route the worst-case system
     message plus ``conversation.turn_reserve_tokens`` must fit ``context_budget_tokens``.

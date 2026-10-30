@@ -91,7 +91,8 @@ class ResponseRun:
     ``utterance``, ``mood``, ``volume_db`` and ``language`` are the answer's speech job group
     and delivery; ``on_call`` runs a tool call and returns whether it ends the turn;
     ``input_chars`` is the rest of what the response reads (the utterance), for its estimate;
-    a call named ``mute_on`` mutes the run on the client's thread, before any later audio.
+    a call named ``mute_on``, as the response's first call, mutes the run on the client's
+    thread, before any later audio.
 
     The route correlates the events (``RealtimeRoute.request``): this run gets only its own
     response's events, starting with its ``response.created``, and a refusal (an ``error``
@@ -116,7 +117,8 @@ class ResponseRun:
         mute_on: str | None = None,
     ) -> None:
         self.route, self.speech = route, speech
-        self.mute_on = mute_on  # a call of this tool mutes the run as it arrives (the skip)
+        self.mute_on = mute_on  # this tool as the response's first call mutes it (the skip)
+        self._called = False  # a call of this response arrived (client thread)
         self.generation = generation  # the session that must hold the turn's words
         self.utterance, self.mood, self.volume_db, self.language = (
             utterance,
@@ -242,8 +244,10 @@ class ResponseRun:
             return
         if isinstance(event, protocol.ResponseDone):
             self._end_feeds()
-        elif isinstance(event, protocol.FunctionCall) and event.name == self.mute_on:
-            self.mute()  # here, not on the loop: audio that follows the call never plays
+        elif isinstance(event, protocol.FunctionCall):
+            if event.name == self.mute_on and not self._called:
+                self.mute()  # here, not on the loop: audio that follows the call never plays
+            self._called = True
         self._post(event)
 
     def closed(self, reason: str) -> None:
