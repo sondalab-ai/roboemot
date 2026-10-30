@@ -152,3 +152,11 @@ The persona pieces exist and are tested; these callers wait for the pillars they
       instead of merging them by key: the runtime merge in `config/stack.py` passes `path=""` to `deep_merge`, so
       the `KEYED_LISTS` lookup sees `rules`, not `appraisal.rules`. Seen in review, not reproduced yet: write a
       failing test first, then fix off `main` (SPEC 11A).
+- [ ] R&D: use motion flow to predict where the locked face went
+- [ ] Add page to debug and test emotions to the dashboard
+- [ ] Document critical configurations (e.g. cloud voice)
+- [ ] Simplify configurations
+- [ ] No mixed language on the dashboard
+- [ ] The bot should sleep during the day after long inactivity (keep it accurate)
+- [ ] When the robot is alone, it should stop moving around, only if there is someone on the. view field or a sound should resume (subtle movement are expected though)
+- [ ] Test mirror neural net
