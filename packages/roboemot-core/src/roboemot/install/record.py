@@ -11,7 +11,8 @@ did not exist before the install: a folder that was already there is not the ins
 remove. The Piper virtualenv (SPEC 8, TTS backends) is recorded on its own, so it is removed
 even when the data folder predates the install; so are the model folders (voice, vision) the
 installer created inside a data folder that was not its own, and the app config (``app.yaml``)
-it wrote, which uninstall removes whole. Secrets (SPEC 8, 12 Data) are
+it wrote, which uninstall removes whole, and the app config keys of a profile (``--cloud-voice``)
+it set, so a reinstall without the profile removes exactly those. Secrets (SPEC 8, 12 Data) are
 recorded by name, never by value, and only the ones that were not in the store before;
 uninstall removes those names and leaves the others. When the robot has no app environment
 yet, the installer creates it the way the robot's own software would and records its path
@@ -33,7 +34,7 @@ from typing import Any
 
 from .ui import WizardError
 
-RECORD_VERSION = 2  # 2: models_dirs, env_created, env_baseline, app_config
+RECORD_VERSION = 3  # 2: models_dirs, env_created, env_baseline, app_config; 3: app_config_keys
 
 Versions = dict[str, str]  # canonical distribution name -> version
 
@@ -74,6 +75,9 @@ class InstallRecord:
     env_baseline: list[str] = field(default_factory=list)  # distributions it held once created
     # app config (app.yaml) it wrote, created or edited: uninstall removes it whole
     app_config: str | None = None
+    # app config keys a profile set (``--cloud-voice``), each a key path; ``["llm_routes",
+    # name]`` is the route entry of that name: a reinstall without the profile removes them
+    app_config_keys: list[list[str]] = field(default_factory=list)
     version: int = RECORD_VERSION
 
     def to_json(self) -> dict[str, Any]:

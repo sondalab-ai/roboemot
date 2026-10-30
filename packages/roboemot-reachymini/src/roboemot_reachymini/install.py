@@ -16,6 +16,9 @@ Facts from the daemon source (reachy_mini 1.12, checked on the robot):
   which the daemon starts on wake-up.
 - The change record lives at ``/venvs/.roboemot-install.json``: writable by ``pollen``,
   outside the shared environment (pip would not touch it) and outside ``/tmp``.
+- Cloud voice (``--cloud-voice``, SPEC 4A Installer, SPEC 8): Pollen's realtime server, reached
+  through its allocator on Hugging Face in platform mode (``roboemot_reachymini.realtime``); the
+  key is a Hugging Face token stored as ``hf_token`` (``docs/realtime-voice-setup.md``).
 """
 
 from __future__ import annotations
@@ -31,7 +34,7 @@ from pathlib import Path
 
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.diagnostics import Target
-from roboemot.install import Ui, WizardError
+from roboemot.install import CloudVoiceRoute, Ui, WizardError
 from roboemot.install.pyenv import RemotePython
 from roboemot.install.remote import Remote
 from roboemot.install.ui import last_line
@@ -110,6 +113,17 @@ def stage_packages(root: Path, dest: Path) -> list[Path]:
     return [dest / pkg for pkg in PACKAGES]
 
 
+CLOUD_VOICE = CloudVoiceRoute(
+    name="pollen",
+    kind="realtime",
+    base_url="https://pollen-robotics-reachy-mini-realtime-url.hf.space/session",
+    secret="hf_token",
+    model="s2s",
+    mode="platform",
+    provider="Pollen's server (Hugging Face)",
+)
+
+
 class ReachyMiniWireless:
     manifest_id = "reachy-mini-wireless"
     display_name = "Reachy Mini Wireless"
@@ -126,6 +140,7 @@ class ReachyMiniWireless:
     modules = ("roboemot", "roboemot_reachymini")
     extras = ("voice", "realtime")  # realtime: websockets, already in the apps venv
     clearable_caches = ("~/.cache/uv",)  # the uv download cache left by the robot image's setup
+    cloud_voice = CLOUD_VOICE
 
     def __init__(self, port: int = DEFAULT_PORT) -> None:
         self.port = port

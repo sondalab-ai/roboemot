@@ -2826,7 +2826,7 @@ class VoiceFacingConfig(Strict):
         "for min_share of its samples; otherwise it needs the wake word. A person watching a "
         "screen near the robot looks at the screen, not at the robot. Needs voice.direction "
         "(on with it off is rejected). Off: the voice-at-face check alone. Library default off; "
-        "the installer's --cloud-voice profile (slice CV-4, not built yet) turns it on",
+        "the installer's --cloud-voice profile turns it on",
     )
     max_yaw_deg: float = param(
         20.0,

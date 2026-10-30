@@ -231,6 +231,7 @@ class BarePlatform:
     extras = ()
     clearable_caches = ()
     restart = None
+    cloud_voice = None
 
     def __init__(self, tmp: Path) -> None:
         self.tmp = tmp
@@ -323,7 +324,7 @@ def test_unknown_keys_of_the_same_version_are_dropped_and_named():
 
 def test_an_old_record_is_written_back_at_the_current_version():
     old = {"app": "a", "platform": "p", "packages": ["x"], "version": 1}
-    assert InstallRecord.from_json(old).to_json()["version"] == RECORD_VERSION == 2
+    assert InstallRecord.from_json(old).to_json()["version"] == RECORD_VERSION == 3
 
 
 @pytest.mark.parametrize("version", ["2", None, True, 1.5])

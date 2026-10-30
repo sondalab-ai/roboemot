@@ -503,6 +503,7 @@ def options(**kw) -> Options:
         dev=True,
         yes=True,
         vision=False,
+        cloud_voice=False,
     )
     return Options(**{**base, **kw})
 
@@ -635,6 +636,7 @@ def test_the_default_install_adds_the_vision_extra_and_the_vision_weights(offlin
             yes=True,
             start=False,
             startup=False,
+            cloud_voice=False,
         ),
         quiet_ui(yes=True),
         ROOT,
@@ -652,6 +654,7 @@ def test_the_dry_run_says_vision_will_be_installed(offline, robot, daemon, capsy
             dev=True,
             yes=True,
             dry_run=True,
+            cloud_voice=False,
         ),
         quiet_ui(yes=True),
         ROOT,
@@ -1406,7 +1409,7 @@ def test_install_dry_run_touches_nothing(offline, robot, daemon, capsys):
     assert "✓ Dry run passed" in out and "Summary  " in out
     assert (
         "Next: python scripts/install_on_robot.py --host 127.0.0.1 --user pollen "
-        "--robot reachy-mini-wireless --dev --piper --no-vision --models --yes"
+        "--robot reachy-mini-wireless --dev --piper --no-cloud-voice --no-vision --models --yes"
     ) in out
     assert not [ln for ln in out.splitlines() if "✓" in ln and ("Create" in ln or "Add " in ln)]
 
@@ -1463,7 +1466,7 @@ def test_main_returns_1_and_prints_reason(offline, robot, capsys, monkeypatch):
     monkeypatch.setattr(inst, "app_config_text", lambda config: "voice: {enabled: true}\n")
     rc = inst.main(
         ["--host", "127.0.0.1", "--user", "pollen", "--robot", "reachy-mini-wireless", "--dev",
-         "--no-start", "--no-startup-app", "--no-piper", "--no-models"],
+         "--no-start", "--no-startup-app", "--no-piper", "--no-models", "--no-cloud-voice"],
         root=ROOT,
     )  # fmt: skip
     assert rc == 1
@@ -1887,6 +1890,7 @@ FULL = dict(
     dev=True,
     piper=False,
     models=False,  # the epic's models step: its own flag, like --piper
+    cloud_voice=False,
 )
 
 
@@ -1987,8 +1991,8 @@ def test_a_prompt_with_no_answer_fails_with_a_try_line(offline, robot, daemon, m
 
 def test_the_dry_run_next_line_repeats_the_answered_dev_choice(offline, robot, daemon, capsys):
     opts = Options(host="127.0.0.1", user="pollen", robot=RID, piper=False, dry_run=True)
-    inst.run_install(opts, typed("y\n", "\n", "\n"), ROOT)  # dev: yes; models: no; API key: no
-    assert f"--robot {RID} --dev --no-piper" in capsys.readouterr().out
+    inst.run_install(opts, typed("y\n", "\n", "\n", "\n"), ROOT)  # dev; cloud, models, key: no
+    assert f"--robot {RID} --dev --no-piper --no-cloud-voice" in capsys.readouterr().out
 
 
 def test_the_installer_modules_import_without_the_palette():
@@ -2065,11 +2069,12 @@ def test_non_interactive_ui_never_takes_a_default():
 def test_actions_that_change_the_robot_default_to_no(offline, robot, daemon, monkeypatch, capsys):
     monkeypatch.setattr(Ui, "ask_secret", lambda self, question: None)
     robot.dev_cfg = False  # Enter at the dev question: production config
-    ui = typed(*["\n"] * 6)  # Enter at every question
+    ui = typed(*["\n"] * 7)  # Enter at every question
     inst.run_install(Options(host="127.0.0.1", user="pollen", robot=RID), ui, ROOT)
     err = capsys.readouterr().err
     for question in (
         "Install in dev mode? [y/N]",
+        "Turn on cloud voice (audio leaves the robot)? [y/N]",
         "Install Piper for on-board speech (own virtualenv)? [y/N]",
         "Start roboemot now? [y/N]",
     ):
@@ -3307,3 +3312,317 @@ def test_start_names_the_stuck_stopping_state_and_the_reboot(daemon):
         platform_for(daemon).start(quiet_ui())
     assert "reboot" in str(err.value)
     assert daemon.mutations == []
+
+
+# ---------------------------------------------------------------- cloud voice (SPEC 4A, 8, 12)
+
+HF_TOKEN = "hf_installer_7c1a"
+CLOUD_KEYS = [
+    "llm_routes[pollen]",
+    "voice.realtime_route.enabled=true",
+    "voice.realtime_route.route=pollen",
+    "voice.realtime_route.mode=platform",
+    "voice.realtime_route.input=audio",
+    "voice.realtime_route.skip_tool=true",
+    "voice.realtime_route.transcript_timeout_s=4.0",
+    "privacy.realtime_audio=true",
+    "voice.backend=none",
+    "voice.fallback_backend=none",
+    "voice.wake_word_policy=never",
+    "voice.direction.enabled=true",
+    "voice.facing.enabled=true",
+]
+OWNER_ROUTE = {
+    "name": "cloud",
+    "base_url": "https://llm.example/v1",
+    "api_key": "none",
+    "model": "chat-small",
+}
+
+
+def cloud_install(**kw) -> None:
+    install(cloud_voice=True, piper=None, **kw)
+
+
+def written_route(cfg: dict) -> dict:
+    return next(r for r in cfg["llm_routes"] if r["name"] == "pollen")
+
+
+def test_the_cloud_voice_flag_parses_both_ways_and_defaults_to_unanswered():
+    assert inst.parse_args(["--yes"]).cloud_voice is None
+    assert inst.parse_args(["--cloud-voice"]).cloud_voice is True
+    assert inst.parse_args(["--no-cloud-voice"]).cloud_voice is False
+
+
+def test_the_reachy_platform_supplies_the_pollen_route():
+    route = ReachyMiniWireless.cloud_voice
+    assert route.entry() == {
+        "name": "pollen",
+        "kind": "realtime",
+        "base_url": "https://pollen-robotics-reachy-mini-realtime-url.hf.space/session",
+        "api_key": "${secret:hf_token}",
+        "model": "s2s",
+    }
+    assert route.mode == "platform" and route.secret == "hf_token"
+
+
+def test_the_profile_keys_are_listed_in_full():
+    keys = inst.cloud_voice_config(ReachyMiniWireless.cloud_voice)
+    assert sorted(inst.key_text(k, v) for k, v in keys.items()) == sorted(CLOUD_KEYS)
+    default = RoboEmotConfig().voice.realtime_route.transcript_timeout_s
+    assert keys[("voice", "realtime_route", "transcript_timeout_s")] == default
+
+
+def cloud_app_config(existing: dict | None = None) -> dict:
+    wanted, owned = inst.owned_app_config(ROOT, dev=False, voice=True)
+    cloud = inst.cloud_voice_config(ReachyMiniWireless.cloud_voice)
+    return inst.merge_app_config(existing or {}, {**wanted, **cloud}, owned | set(cloud))
+
+
+def test_the_merged_cloud_voice_app_config_validates_against_the_schema():
+    from roboemot.config import ConfigStack
+
+    cfg = ConfigStack(app=cloud_app_config({"llm_routes": [OWNER_ROUTE]})).effective()
+    assert cfg.voice.realtime_route.enabled and cfg.voice.realtime_route.route == "pollen"
+    assert cfg.voice.realtime_route.input == "audio" and cfg.privacy.realtime_audio
+    assert cfg.voice.backend == "none" and cfg.voice.fallback_backend == "none"
+    assert cfg.voice.wake_word_policy == "never"
+    assert cfg.voice.facing.enabled and cfg.voice.direction.enabled
+    assert [r.name for r in cfg.llm_routes] == ["cloud", "pollen"]
+    broken = cloud_app_config()
+    broken["voice"]["direction"]["enabled"] = False  # facing needs direction
+    with pytest.raises(Exception, match="voice.facing.enabled needs voice.direction.enabled"):
+        ConfigStack(app=broken).effective()
+
+
+def test_a_cloud_voice_install_writes_its_keys_and_keeps_the_owners(
+    offline, robot, daemon, monkeypatch
+):
+    key_prompts(monkeypatch, HF_TOKEN)
+    robot.dirs |= {f"{HOME}/.local", f"{HOME}/.local/share", DATA}
+    owner = {
+        "schema_version": 1,
+        "webui": {"port": 8080},
+        "voice": {"language": "en", "realtime_route": {"voice": "Serena"}},
+        "llm_routes": [OWNER_ROUTE],
+    }
+    robot.files[APP_YAML] = yaml.safe_dump(owner)
+    cloud_install()
+    cfg = yaml.safe_load(robot.app_yaml)
+    assert cfg["webui"] == {"port": 8080} and cfg["voice"]["language"] == "en"
+    assert cfg["voice"]["realtime_route"]["voice"] == "Serena"
+    assert cfg["llm_routes"][0] == OWNER_ROUTE
+    assert written_route(cfg) == ReachyMiniWireless.cloud_voice.entry()
+    assert cfg["privacy"] == {"realtime_audio": True}
+    assert cfg["voice"]["wake_word_policy"] == "never" and cfg["voice"]["enabled"] is True
+    keys = json.loads(robot.files[RECORD])["app_config_keys"]
+    assert ["llm_routes", "pollen"] in keys and ["privacy", "realtime_audio"] in keys
+    assert len(keys) == len(CLOUD_KEYS)
+
+
+def test_a_reinstall_without_cloud_voice_removes_only_the_keys_it_wrote(
+    offline, robot, daemon, monkeypatch, capsys
+):
+    key_prompts(monkeypatch, HF_TOKEN)
+    cloud_install()
+    cfg = yaml.safe_load(robot.app_yaml)
+    cfg["webui"] = {"port": 8080}
+    cfg["llm_routes"].append(OWNER_ROUTE)
+    cfg["voice"]["language"] = "en"
+    robot.files[APP_YAML] = yaml.safe_dump(cfg)
+    capsys.readouterr()
+    install(cloud_voice=False, piper=False)
+    cfg = yaml.safe_load(robot.app_yaml)
+    assert cfg == {
+        "schema_version": 1,
+        "safety": {"allow_unmeasured_dynamics": True},
+        "voice": {"enabled": True, "language": "en"},
+        "webui": {"port": 8080},
+        "llm_routes": [OWNER_ROUTE],
+    }
+    assert json.loads(robot.files[RECORD])["app_config_keys"] == []
+    assert "✓ Removed app config keys llm_routes[pollen]" in flat(capsys.readouterr().out)
+
+
+def test_a_plain_install_leaves_hand_set_cloud_settings_alone(offline, robot, daemon):
+    """Keys the owner set by hand (docs/realtime-voice-setup.md) are not the installer's."""
+    robot.dirs |= {f"{HOME}/.local", f"{HOME}/.local/share", DATA}
+    hand = {"privacy": {"realtime_audio": True}, "voice": {"wake_word_policy": "never"}}
+    robot.files[APP_YAML] = yaml.safe_dump(hand)
+    install()
+    cfg = yaml.safe_load(robot.app_yaml)
+    assert cfg["privacy"] == {"realtime_audio": True}
+    assert cfg["voice"] == {"enabled": True, "wake_word_policy": "never"}
+
+
+def test_uninstall_after_a_cloud_voice_install_leaves_the_robot_as_it_was(
+    offline, robot, daemon, monkeypatch
+):
+    key_prompts(monkeypatch, HF_TOKEN)
+    before = snapshot(robot, daemon)
+    cloud_install()
+    assert robot.secrets == {"hf_token": HF_TOKEN}
+    uninstall()
+    assert snapshot(robot, daemon) == before
+
+
+def test_the_cloud_voice_dry_run_lists_every_key_and_the_piper_removal_and_writes_nothing(
+    offline, robot, daemon, capsys
+):
+    install()  # local voice: Piper venv recorded
+    files, dirs, record = dict(robot.files), set(robot.dirs), robot.files[RECORD]
+    robot.commands.clear()
+    capsys.readouterr()
+    inst.run_install(options(dry_run=True, cloud_voice=True, piper=None), quiet_ui(yes=True), ROOT)
+    out = flat(capsys.readouterr().out)
+    for key in CLOUD_KEYS:
+        assert key in out, key
+    assert f"○ Delete the Piper venv {PIPER_VENV}" in out
+    assert "○ Ask for a secret 'hf_token' if the store has none" in out
+    assert "--cloud-voice" in out and "--piper" not in out.split("Next:")[1]
+    assert robot.files == files and robot.dirs == dirs and robot.files[RECORD] == record
+    writes = ("rm ", "rmdir", "mkdir", "mktemp", "mv ", "umask")
+    assert not [c for c in robot.commands if c.startswith(writes) or "&& mv" in c]
+    assert not any("secrets" in c for c in robot.commands)
+
+
+def test_cloud_voice_removes_the_recorded_piper_venv_and_skips_piper_and_its_voices(
+    offline, robot, daemon, monkeypatch, capsys
+):
+    key_prompts(monkeypatch, HF_TOKEN)
+    install()
+    assert PIPER_PYTHON in robot.dirs and robot.fetches == ["models fetch --voice"]
+    pips = len(robot.piper_pips)
+    capsys.readouterr()
+    cloud_install()
+    assert PIPER_VENV not in robot.dirs and len(robot.piper_pips) == pips
+    assert json.loads(robot.files[RECORD])["piper_venv"] is None
+    out = flat(capsys.readouterr().out)
+    assert f"✓ Deleted the Piper venv {PIPER_VENV}; the server speaks" in out
+    assert "Voice without Piper" not in out
+    fetch = robot.fetches[-1].split()
+    assert "silero-vad" in fetch and "vosk-small-it" in fetch
+    assert not [n for n in fetch if n.startswith("piper")] and "--voice" not in fetch
+    uninstall()  # the record agrees with the robot: nothing left to do for Piper
+    assert PIPER_VENV not in robot.dirs
+
+
+def test_cloud_voice_counts_no_tts_voices_in_the_model_sizes():
+    assert inst.models_bytes(False, tts=False) < inst.models_bytes(False)
+    assert inst.models_bytes(True, tts=False) < inst.models_bytes(True)
+
+
+def test_yes_without_the_flag_on_a_terminal_leaves_the_opt_in_off(
+    offline, robot, daemon, monkeypatch, capsys
+):
+    monkeypatch.setattr(Ui, "ask_secret", lambda self, question: None)
+    ui = Ui(interactive=True, assume_yes=True, read=answers())
+    opts = options(cloud_voice=None, start=False, startup=False, secrets=[])
+    inst.run_install(opts, ui, ROOT)
+    captured = capsys.readouterr()
+    assert "Turn on cloud voice" not in captured.err
+    assert "✓ Cloud voice off -y does not turn it on, --cloud-voice does" in flat(captured.out)
+    cfg = yaml.safe_load(robot.app_yaml)
+    assert "privacy" not in cfg and "llm_routes" not in cfg
+    assert json.loads(robot.files[RECORD])["app_config_keys"] == []
+
+
+@pytest.mark.parametrize("yes", [False, True])
+def test_a_run_without_a_terminal_needs_a_cloud_voice_flag(offline, robot, daemon, yes):
+    opts = options(cloud_voice=None, start=False, startup=False, yes=yes, piper=False, models=False)
+    with pytest.raises(MissingFlag, match="--cloud-voice or --no-cloud-voice"):
+        inst.run_install(opts, quiet_ui(yes=yes), ROOT)
+    assert robot.commands == [] and daemon.requests == []
+
+
+def test_the_terminal_question_shows_the_privacy_text_and_defaults_to_no(
+    offline, robot, daemon, monkeypatch, capsys
+):
+    monkeypatch.setattr(Ui, "ask_secret", lambda self, question: None)
+    opts = Options(**{**FULL, "cloud_voice": None}, start=False, startup=False, secrets=[])
+    inst.run_install(opts, typed("\n"), ROOT)
+    captured = capsys.readouterr()
+    text = flat(captured.out)
+    assert (
+        "the audio of every utterance spoken while a person faces the robot and looks at it "
+        "leaves the robot for Pollen's server (Hugging Face), phone calls included" in text
+    )
+    assert (
+        "The skip tool only decides whether the robot answers: the audio is already at the server"
+        in text
+    )  # noqa: E501
+    assert "Turn on cloud voice (audio leaves the robot)? [y/N]" in captured.err
+    assert "privacy" not in yaml.safe_load(robot.app_yaml)
+
+
+def test_a_yes_on_the_terminal_turns_cloud_voice_on_and_asks_for_the_token(
+    offline, robot, daemon, monkeypatch, capsys
+):
+    asked: list[str] = []
+
+    def answer(self, question):
+        asked.append(question)
+        return HF_TOKEN if "secret" in question or question == "Repeat the value" else None
+
+    monkeypatch.setattr(Ui, "ask_secret", answer)
+    opts = Options(**{**FULL, "cloud_voice": None, "piper": None}, start=False, startup=False)
+    inst.run_install(opts, typed("y\n", "\n"), ROOT)  # cloud voice: yes; other API key: no
+    assert "Value of the secret 'hf_token'" in asked
+    assert robot.secrets == {"hf_token": HF_TOKEN} and HF_TOKEN + "\n" in robot.stdins
+    captured = capsys.readouterr()
+    assert HF_TOKEN not in captured.out + captured.err
+    assert not any(HF_TOKEN in c for c in robot.commands)
+    assert HF_TOKEN not in robot.files[RECORD] and HF_TOKEN not in robot.app_yaml
+    assert json.loads(robot.files[RECORD])["secrets"] == ["hf_token"]
+    assert yaml.safe_load(robot.app_yaml)["privacy"] == {"realtime_audio": True}
+    assert robot.piper_pips == []
+
+
+def test_a_token_already_in_the_store_is_kept_without_asking(
+    offline, robot, daemon, monkeypatch, capsys
+):
+    def answer(self, question):
+        assert "secret" not in question, question
+
+    monkeypatch.setattr(Ui, "ask_secret", answer)
+    robot.secrets = {"hf_token": "theirs"}
+    cloud_install(secrets=[])
+    assert robot.secrets == {"hf_token": "theirs"} and robot.stdins == []
+    assert "✓ Kept the secret hf_token: already in the store" in flat(capsys.readouterr().out)
+    assert json.loads(robot.files[RECORD])["secrets"] == []
+
+
+def test_without_a_token_the_install_warns_the_robot_will_not_answer_by_voice(
+    offline, robot, daemon, monkeypatch, capsys
+):
+    monkeypatch.setattr(Ui, "ask_secret", lambda self, question: None)
+    cloud_install()
+    out = flat(capsys.readouterr().out)
+    assert "! Cloud voice without its key the pollen route is unavailable" in out
+    assert robot.secrets == {}
+
+
+@pytest.mark.parametrize(
+    ("kw", "what"),
+    [
+        (dict(piper=True), "--cloud-voice and --piper together"),
+        (dict(voice=False), "--cloud-voice needs voice"),
+    ],
+)
+def test_cloud_voice_refuses_flags_it_cannot_honour(offline, robot, daemon, kw, what):
+    with pytest.raises(WizardError, match=what):
+        install(cloud_voice=True, **kw)
+    assert robot.commands == []
+
+
+def test_a_platform_without_a_cloud_voice_route_refuses_the_flag_and_needs_no_answer(
+    offline, robot, daemon, monkeypatch
+):
+    bare = ReachyMiniWireless(port=daemon.port)
+    bare.cloud_voice = None
+    monkeypatch.setattr(inst, "load_platform", lambda rid: bare)
+    with pytest.raises(WizardError, match="No cloud voice for Reachy Mini Wireless"):
+        install(cloud_voice=True)
+    assert robot.commands == []
+    inst.run_install(options(cloud_voice=None, start=False, startup=False), quiet_ui(True), ROOT)
+    assert "privacy" not in yaml.safe_load(robot.app_yaml)
