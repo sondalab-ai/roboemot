@@ -2873,12 +2873,15 @@ class RealtimeRouteConfig(Strict):
     transcription_language: str = param(
         "",
         "Language the server transcribes an utterance's audio in (session.update "
-        "audio.input.transcription.language); empty follows conversation.language",
+        "audio.input.transcription.language, sent with input: audio only). Empty (the default): "
+        "the route always sends conversation.language. It does not follow a speaker's "
+        "preferences.language, which the local Vosk recognizer uses per speaker",
     )
     transcription_model: str = param(
         "",
         "Model the server transcribes an utterance's audio with (session.update "
-        "audio.input.transcription.model); empty leaves it out, so the server's default applies",
+        "audio.input.transcription.model, sent with input: audio only); empty leaves it out, so "
+        "the server's default applies. Sent as given, not validated",
     )
     prebuffer_ms: float = param(
         200.0,

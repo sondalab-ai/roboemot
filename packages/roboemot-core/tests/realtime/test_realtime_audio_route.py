@@ -10,7 +10,7 @@ import pytest
 from roboemot.config import ConfigStack
 from roboemot.health.network import NetworkMonitor
 from roboemot.realtime import protocol
-from roboemot.realtime.route import RealtimeRoute
+from roboemot.realtime.route import RealtimeRoute, session_update
 from test_realtime_route import CHAT, DIRECT, POLICY, RT, FakeRouter
 
 RATE = 16000
@@ -166,6 +166,15 @@ def test_a_hot_reload_of_the_language_reaches_the_next_session_update():
     assert r.send_audio(SECOND, gate="addressed", instructions="") is None
     assert transcription(made[0]) == {"language": "de", "model": "m"}
     assert len(made) == 1  # the same session: a language change needs no reconnect
+
+
+def test_only_an_audio_route_sends_the_transcription_object():
+    audio = audio_stack().effective()
+    text = audio_stack({"input": "text"}).effective()
+    assert session_update(audio, "")["session"]["audio"]["input"]["transcription"] == {
+        "language": "it"
+    }
+    assert "transcription" not in session_update(text, "")["session"]["audio"]["input"]
 
 
 def test_a_burst_is_cut_into_appends_under_the_message_cap():
