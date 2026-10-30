@@ -26,6 +26,14 @@ turn through the chat routes; after audio played the reply is cut like a barge-i
 (the confirmation question and replies, the fallback, the offline cue) use the server's voice
 while the route is up and Piper only when it is down. The session end closes the server session.
 
+Without a local voice (``voice.backend: none``, SPEC 8, Non-verbal cues) nothing is said with
+Piper: a turn the route cannot answer sends no chat request (nobody would hear the answer) and
+shows a non-verbal cue instead (the offline reaction while the network is down, else
+``fallback``); a fixed line the route cannot say becomes its cue, and a confirmation question that
+cannot be spoken fails closed (``confirm_unspoken``). An utterance whose audio left but whose
+transcript never came (``local_only``) is never answered: the listener already showed the
+``not_heard`` cue. Every utterance whose audio went ends the listening cue once it is over.
+
 Privacy (SPEC 12): neither logs nor the bus carry a transcript, prompt or reply, only ids,
 lengths and exception types.
 """
@@ -79,12 +87,13 @@ from ..realtime.turn import (
     wait_in_order,
 )
 from ..skills import Skill, SkillContext, SkillRegistry, ToolOutcome, execute
+from ..voice.cues import CueKind, CueSink, NoCues
 from ..voice.keywords import normalise
 from ..voice.listener import Utterance
 from ..voice.prosody import Delivery, compose_delivery, resolve_tag
 from ..voice.robot_name import RobotName
 from ..voice.speech_features import Prosody
-from ..voice.tts import Sentence, SentenceSplitter
+from ..voice.tts import NO_VOICE, Sentence, SentenceSplitter
 from .confirm import Pending, PreferenceStore, reply_kind, sanitise_preference
 from .lines import pick
 from .phase import ConversationPhase
@@ -151,9 +160,10 @@ class _Turn:
     stamps: dict[str, float] = field(default_factory=dict)
     active: ActiveRoute = field(default_factory=ActiveRoute)
     voice: str = "local"  # "realtime": the server's voice speaks this turn
-    lines: list[tuple[str, tuple[str, str, str] | None]] = field(
+    lines: list[tuple[str, tuple[str, str, str] | None, CueKind | None]] = field(
         default_factory=list, repr=False
-    )  # fixed lines to say; a question carries the preference (person's data)
+    )  # fixed lines to say; a question carries the preference (person's data); the cue shown
+    # when no voice can say it
     rt_gen: int = 0  # the realtime session generation this turn's items belong to
     rt_items: list[str] = field(default_factory=list)  # server item ids of this turn
     rt_jobs: list[tuple[int, str | None]] = field(default_factory=list)  # (speech job, item)
@@ -217,8 +227,10 @@ class ConversationWorker:
         phase: ConversationPhase | None = None,
         transcript: TranscriptRing | None = None,
         realtime: Any = None,
+        cues: CueSink | None = None,
     ) -> None:
         self.phase = phase if phase is not None else ConversationPhase()
+        self.cues: CueSink = cues if cues is not None else NoCues()  # SPEC 8, Non-verbal cues
         self.transcript = transcript  # the Live tab's opt-in ring of turns (SPEC 11A, 12)
         self._reply: tuple[int, list[tuple[int, str]]] | None = (
             None  # (ring seq, queued) of the last reply
@@ -317,6 +329,7 @@ class ConversationWorker:
         oldest. Safe from any thread (the listener's). Returns whether it was taken."""
         if self._closed or not (utterance.final and utterance.addressed and utterance.text.strip()):
             self._drop_audio(utterance)  # not answered: the server must not answer it either
+            self._heard_done(utterance)
             return False
         cfg = self.stack.effective()
         if self.clock() - self._barge_at <= cfg.conversation.stop_drop_window_s and (
@@ -324,6 +337,7 @@ class ConversationWorker:
         ):
             self._counts["stop_consumed"] += 1  # the command that already stopped the robot
             self._drop_audio(utterance)
+            self._heard_done(utterance)
             return False
         limit = cfg.conversation.pending_utterances
         gen = NOT_RECORDED
@@ -339,6 +353,7 @@ class ConversationWorker:
             self._pending.append((utterance, gen))
         for old in replaced:
             self._drop_audio(old)  # never answered: the server must not answer it either
+            self._heard_done(old)
         loop, wake = self._loop, self._wake
         if loop is not None and wake is not None:
             with contextlib.suppress(RuntimeError):
@@ -352,6 +367,17 @@ class ConversationWorker:
         if utterance.realtime is not None and self.realtime is not None:
             generation, items = utterance.realtime
             self.realtime.delete_items(generation, list(items))
+
+    def _heard_done(self, utterance: Utterance) -> None:
+        """An utterance whose audio the server transcribed is over (answered or not): it no
+        longer holds the listening cue (one call per such utterance)."""
+        if utterance.realtime is not None:
+            self.cues.listening_end()
+
+    @staticmethod
+    def _no_voice(cfg: RoboEmotConfig) -> bool:
+        """Whether there is no local voice (``voice.backend: none``): Piper never speaks."""
+        return cfg.voice.backend == NO_VOICE
 
     @staticmethod
     def _only_stop(utterance: Utterance, cfg: RoboEmotConfig) -> bool:
@@ -643,21 +669,44 @@ class ConversationWorker:
         with self._lock:
             self._active_turn = turn
         try:
-            if await self._realtime_ready(turn):
-                turn.voice = "realtime"
-            answered = self._confirmation_reply(turn, now)
-            if not answered and turn.voice == "realtime":
-                answered = await self._realtime_turn(turn)
-            if not answered:
-                turn.voice = "local"
-                await self._converse(turn, router)
-            await self._speak_lines(turn)
+            if utterance.local_only:  # its audio left, no transcript came: not_heard showed
+                turn.outcome = "not_heard"
+            else:
+                await self._respond(turn, router, now)
         finally:
             self._inner = None
             self.phase.end_thinking()
             if not turn.rt_audio:
                 self._drop_audio(utterance)
+            self._heard_done(utterance)
         self._finish(turn)
+
+    async def _respond(self, turn: _Turn, router: Any, now: float) -> None:
+        """The answer: the pending confirmation, the realtime route, else the chat routes (or,
+        without a local voice, the cue in their place); then the fixed lines it left."""
+        if await self._realtime_ready(turn):
+            turn.voice = "realtime"
+        answered = self._confirmation_reply(turn, now)
+        if not answered and turn.voice == "realtime":
+            answered = await self._realtime_turn(turn)
+        if not answered:
+            turn.voice = "local"
+            if self._no_voice(turn.cfg):
+                self._unvoiced(turn, router)
+            else:
+                await self._converse(turn, router)
+        await self._speak_lines(turn)
+
+    def _unvoiced(self, turn: _Turn, router: Any) -> None:
+        """The realtime route cannot answer and there is no local voice (SPEC 8, Non-verbal
+        cues): no chat request, since nobody would hear its answer. While the network is down,
+        the offline reaction (the puzzled gesture and the offline cue); else the fallback cue."""
+        if router.offline:
+            turn.outcome = "offline"
+            self.responder.speech_while_offline(self.clock(), turn.language)
+            return
+        turn.outcome = "no_voice"
+        self._say_fallback(turn)
 
     # ----------------------------------------------------------------- realtime route
 
@@ -989,7 +1038,7 @@ class ConversationWorker:
         and replies, the fallback): one response each while the route is up, Piper once it is
         down. A question that played leaves the confirmation pending."""
         while turn.lines and not turn.interrupted:
-            text, ask = turn.lines.pop(0)
+            text, ask, cue = turn.lines.pop(0)
             job = None
             if turn.voice == "realtime" and self.realtime.up():
                 inner = self._inner = asyncio.ensure_future(self._rt_line(turn, text))
@@ -1007,6 +1056,10 @@ class ConversationWorker:
                 mood, intensity = self._mood(turn.cfg, None)
                 self._say_local(turn, text, mood, intensity)
                 job = turn.queued[-1][0] if len(turn.queued) > before else None
+                if job is None and ask is not None:  # fails closed: nothing is pending
+                    self._counts["confirm_unspoken"] += 1
+                elif job is None and cue is not None and not turn.interrupted:
+                    self.cues.play(cue)
             if ask is not None and job is not None:
                 with self._lock:
                     if not (turn.done or turn.interrupted):
@@ -1071,6 +1124,9 @@ class ConversationWorker:
             log.warning("conversation: realtime line failed (%s)", type(exc).__name__)
             job = None
         if job is None and not self.realtime.up():  # the route went down: Piper says it
+            if self._no_voice(cfg):
+                self.cues.play("offline")
+                return
             mood, intensity = self._mood(cfg, None)
             self._say_local(turn, text, mood, intensity)
 
@@ -1317,13 +1373,14 @@ class ConversationWorker:
             return "not_allowed"
         text = template.replace("{key}", key).replace("{value}", value)
         if turn.voice == "realtime":  # asked in the server's voice once the response is over
-            turn.lines.append((text, (person, key, value)))
+            turn.lines.append((text, (person, key, value), None))
             self._counts["confirm_asked"] += 1
             return "asked"
         mood, intensity = self._mood(turn.cfg, None)
         before = len(turn.queued)
         self._say(turn, text, mood, intensity)
-        if len(turn.queued) == before:
+        if len(turn.queued) == before:  # fails closed: nothing is pending
+            self._counts["confirm_unspoken"] += 1
             return "unavailable"
         with self._lock:
             if turn.done or turn.interrupted:
@@ -1423,20 +1480,33 @@ class ConversationWorker:
         return label, state.intensity
 
     def _say(
-        self, turn: _Turn, text: str, mood: str | None, intensity: float, continued: bool = False
+        self,
+        turn: _Turn,
+        text: str,
+        mood: str | None,
+        intensity: float,
+        continued: bool = False,
+        cue: CueKind | None = None,
     ) -> None:
         """Say a sentence or a fixed line: in a realtime turn it waits for the server's voice
-        (``_speak_lines``), else Piper says it now."""
+        (``_speak_lines``), else Piper says it now. ``cue`` shows when no voice can say it."""
         if text and not turn.interrupted and turn.voice == "realtime":
-            turn.lines.append((text, None))
+            turn.lines.append((text, None, cue))
             return
-        self._say_local(turn, text, mood, intensity, continued)
+        spoken = self._say_local(turn, text, mood, intensity, continued)
+        if not spoken and cue is not None and not turn.interrupted:
+            self.cues.play(cue)
 
     def _say_local(
         self, turn: _Turn, text: str, mood: str | None, intensity: float, continued: bool = False
-    ) -> None:
+    ) -> bool:
+        """Say ``text`` with the local voice now; whether it was queued. Without a local voice
+        (``voice.backend: none``) nothing is (counted ``lines_unspoken``)."""
         if not text or turn.interrupted:  # a barge-in is under way: nothing more is said
-            return
+            return False
+        if self._no_voice(turn.cfg):
+            self._counts["lines_unspoken"] += 1
+            return False
         job = self.speech.say(
             text,
             language=turn.language,
@@ -1453,6 +1523,7 @@ class ConversationWorker:
             turn.queued.append((job, text))
             if self.transcript is not None:
                 self._note_reply(turn, text)
+        return job is not None
 
     def _note_reply(self, turn: _Turn, text: str) -> None:
         """Add a queued sentence to the live transcript's reply, if the ring still accepts the
@@ -1471,12 +1542,13 @@ class ConversationWorker:
         return self.names.prompt_name(cfg.voice.wake_word)
 
     def _say_fallback(self, turn: _Turn) -> None:
-        """No route answered: the "can't think right now" line."""
+        """No route answered: the "can't think right now" line, or its cue where no voice can
+        say it (SPEC 8, Non-verbal cues)."""
         text = pick(
             turn.cfg.conversation.fallback_lines, turn.language, turn.cfg.conversation.language
         )
         state = self.affect.state(self.clock())
-        self._say(turn, text or "", state.label, state.intensity)
+        self._say(turn, text or "", state.label, state.intensity, cue="fallback")
         self._counts["fallbacks"] += 1
 
     def _finish(self, turn: _Turn) -> None:

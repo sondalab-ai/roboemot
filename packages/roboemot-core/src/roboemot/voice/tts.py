@@ -100,6 +100,40 @@ class TTSBackend(Protocol):
     async def aclose(self) -> None: ...
 
 
+NO_VOICE = "none"
+
+
+class NoVoice:
+    """``voice.backend: none`` (SPEC 8, CV-2): no local speech synthesis. Never available, so
+    the speech output refuses sentences (``say`` returns None) and builds nothing; raw sounds
+    (``SpeechOutput.play``) and the realtime route's streams play as usual."""
+
+    name = NO_VOICE
+    controls: frozenset[str] = frozenset()
+
+    def available(self) -> bool:
+        return False
+
+    async def synthesize(
+        self, text: str, delivery: Delivery, *, language: str, voice: VoiceConfig
+    ) -> AsyncIterator[AudioChunk]:
+        """Raises: there is no voice (the output refuses sentences before this)."""
+        raise TTSUnavailable("no local voice")
+        yield  # pragma: no cover (makes this an async generator)
+
+    def cancel(self) -> None:
+        """Nothing in flight."""
+
+    async def warm(self, language: str, voice: VoiceConfig) -> None:
+        """Nothing to load."""
+
+    def apply_config(self, voice: VoiceConfig) -> None:
+        """Nothing to reload."""
+
+    async def aclose(self) -> None:
+        """Nothing to close."""
+
+
 class FallbackTTS:
     """Primary backend with an offline fallback (SPEC 8: remote speech falls back to Piper).
 

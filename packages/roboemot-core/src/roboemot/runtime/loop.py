@@ -142,6 +142,9 @@ def run_loop(
             p.loop.feed(cmd)
         for cmd in p.responder.commands(now):
             p.loop.feed(cmd)
+        if host.cues is not None:  # the non-verbal cues' gestures (SPEC 8)
+            for cmd in host.cues.commands(now):
+                p.loop.feed(cmd)
         for cmd in p.expression.commands(now):
             p.loop.feed(cmd)
         for cmd in p.speaking.commands(now):  # after the expression: it ducks under it

@@ -20,6 +20,7 @@ from .install import Platform
 from .realtime.session import ENTRY_POINT_GROUP as REALTIME_GROUP
 from .robot_platform import ENTRY_POINT_GROUP as ROBOTS_GROUP
 from .robot_platform import RobotPlatform
+from .voice.cues import ENTRY_POINT_GROUP as CUES_GROUP
 from .webui.robot_section import ENTRY_POINT_GROUP as SETTINGS_GROUP
 from .webui.robot_section import SettingsPlugin
 from .world.sources import ENTRY_POINT_GROUP as WORLD_GROUP
@@ -71,6 +72,11 @@ GROUPS: dict[str, GroupContract] = {
     REALTIME_GROUP: GroupContract(
         "factory (manifest) -> SessionProvider: realtime speech sessions (SPEC 8)",
         factory_args=1,
+    ),
+    CUES_GROUP: GroupContract(
+        "factory () or (manifest) -> mapping of cue kind to CueSound: the non-verbal cues' "
+        "sounds (SPEC 8, Non-verbal cues)",
+        factory_args=(0, 1),
     ),
 }
 

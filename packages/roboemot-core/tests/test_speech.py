@@ -1167,3 +1167,36 @@ def test_a_sink_that_takes_the_duck_gets_the_samples_unscaled_and_reports_its_pa
     assert wait_for(lambda: out.sentences_spoken == 1)
     assert np.concatenate(sink.samples) == pytest.approx(1.0)  # never applied twice
     assert out.snapshot()["pacing"] == {"lead_ms": 200.0}
+
+
+def test_backend_none_builds_no_piper_and_needs_no_piper_files(tmp_path, monkeypatch):
+    """SPEC 8 (CV-2): ``voice.backend: none`` is no local speech synthesis at all."""
+    from roboemot.llm import Router
+    from roboemot.voice import factory
+
+    def no_piper(*args, **kwargs):
+        raise AssertionError("Piper must not be built with backend none")
+
+    monkeypatch.setattr(factory, "PiperBackend", no_piper)
+    monkeypatch.setattr(factory, "manifest_voice_files", no_piper)
+    empty = {"data_dir": str(tmp_path), "voice": {"models_dir": str(tmp_path / "nothing")}}
+    cfg = RoboEmotConfig.model_validate(
+        {**empty, "voice": {**empty["voice"], "backend": "none", "fallback_backend": "none"}}
+    )
+    router = Router([], cfg.safety)
+    backend = factory.build_backend(cfg, lambda: router)
+    assert backend.name == "none" and not backend.available()
+    remote_voice = {**empty["voice"], "backend": "openai_speech", "fallback_backend": "none"}
+    remote = RoboEmotConfig.model_validate({**empty, "voice": remote_voice})
+    chain = factory.build_backend(remote, lambda: router)
+    assert isinstance(chain, FallbackTTS) and chain.fallback is None
+
+
+def test_speech_output_without_a_local_voice_refuses_sentences_but_plays_raw_sound(make):
+    from roboemot.voice.tts import NoVoice
+
+    out = make(NoVoice())
+    assert say(out) is None
+    assert out.snapshot()["backend"] == "none"
+    assert out.snapshot()["no_voice"] == 1 and out.sentences_dropped == 0
+    assert out.play(np.zeros(160, np.float32), 16000) is not None
