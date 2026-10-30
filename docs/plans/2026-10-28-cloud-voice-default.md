@@ -76,8 +76,24 @@ phone calls included. The skip decides only whether the robot answers; the audio
 
 ## Status (handoff, 2026-10-30)
 
-Step 0 is done. The epic started 2026-10-30: branch `epic/cloud-voice-default`; CV-1 is
-https://github.com/sondalab-ai/roboemot/pull/139; CV-0 and CV-6 authors running. Merged on `main`:
+**Epic status (2026-10-30, end of the build):** every slice is merged into `epic/cloud-voice-default`; the epic is
+not on `main` yet. It waits for the owner's robot run (see "QA handoff" below).
+
+| Slice | PR |
+| --- | --- |
+| CV-1 transcription language | https://github.com/sondalab-ai/roboemot/pull/139 |
+| CV-0 audio hub catch-up | https://github.com/sondalab-ai/roboemot/pull/140 |
+| CV-6 facing gate | https://github.com/sondalab-ai/roboemot/pull/141 |
+| CV-3 skip tool | https://github.com/sondalab-ai/roboemot/pull/142 |
+| CV-2 no local voice, cues, listening cue | https://github.com/sondalab-ai/roboemot/pull/143 |
+| CV-4 installer `--cloud-voice` | https://github.com/sondalab-ai/roboemot/pull/144 |
+| CV-5 docs | this PR |
+
+Owner decisions taken during the build (2026-10-30): `muted` utterances pass when the attended face looks at the
+robot; with no local voice and the route down, the robot plays the fallback cue and sends no chat request; the
+profile writes `transcript_timeout_s` 10 s until the robot run measures the transcript p95.
+
+Before the epic (step 0), merged on `main`:
 
 | PR | What |
 | --- | --- |
@@ -195,12 +211,21 @@ CV-5. **Docs.** SPEC 8 (backend `none`, skip tool, transcription language, liste
 for the robot's transcript round-trip, as Pollen's app does (`create_response`); it affects the wake-word check and
 the skip tool (CV-3), which need the text.
 
-## How to start the next session
+## QA handoff (owner, on the robot)
 
-1. Read this file, `CLAUDE.md`, SPEC 8 "Realtime speech route" and `docs/realtime-voice-setup.md`.
-2. Create `epic/cloud-voice-default` from `main`; slice PRs into it; the epic lands with one merge.
-3. Start with CV-0 (needs the owner on the robot for before/after figures) and CV-1 (small, independent) in parallel.
-4. Report agent count and what is left after each slice (owner's budget check-ins).
+1. Install the epic branch: `python scripts/install_on_robot.py --dry-run --cloud-voice --host 192.168.88.198`, then
+   the same without `--dry-run`. The installer asks for `hf_token` if the store has none and stops before any change
+   if saved web UI settings contradict the privacy choice.
+2. Start with `python scripts/run_on_robot.py --host 192.168.88.198` and wait about 2 minutes.
+3. Run the SPEC 15 item "Cloud-voice install on the Wireless" and fill the SPEC 13 "after" figures.
+4. Watch the facing yaw: `direction.facing.yaw_deg` in the debug report. Real landmark noise was -15 to +9 degrees on
+   a frontal test portrait; if the owner is rejected while looking at the robot, raise `voice.facing.max_yaw_deg`.
+5. If the figures hold, merge `epic/cloud-voice-default` into `main` (one merge, full CI).
+
+Not verified: the SDK 1.13 read behaviour on the robot (CV-0 handles both an immediate `None` and a waiting read),
+and the facing yaw on real faces at the robot's distance.
+
+Build cost: 14 agents (Opus authors, Sonnet/Opus reviews), within the 14-15 estimate.
 
 ## Open items (not in this epic)
 
