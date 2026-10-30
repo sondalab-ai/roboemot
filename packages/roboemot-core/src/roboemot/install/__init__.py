@@ -28,6 +28,12 @@ clear the platform's ``clearable_caches`` (``--clear-caches``; ``-y`` alone keep
 uninstall cannot restore.
 Optionally (``--secret NAME``, or asked on a terminal) it stores an API key in the robot's secret
 store (SPEC 8, 12 Data), recorded by name; uninstall removes only the names it added.
+The cloud-voice profile (``--cloud-voice``, an admin opt-in: SPEC 12) answers by voice through
+the platform's realtime speech route (``Platform.cloud_voice``, SPEC 8): it writes that route and
+the settings that use it into ``app.yaml`` (keys recorded, so ``--no-cloud-voice`` on a reinstall
+removes exactly them), asks for the route's key when the store has none, skips Piper and its
+voices and removes a recorded Piper virtualenv. ``-y`` does not turn it on; an unattended run
+names ``--cloud-voice`` or ``--no-cloud-voice``.
 
 Later, ``scripts/run_on_robot.py`` (``roboemot.install.run``) starts the installed app and
 prints its web UI address.
@@ -57,7 +63,7 @@ import sys
 import tempfile
 import traceback
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib.metadata import entry_points
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -162,12 +168,43 @@ INSTALL_STEPS = 6
 DEV_CONFIG = "configs/dev-unmeasured.yaml"
 APP_CONFIG_SCHEMA = 1
 APP_CONFIG_HEADER = (
-    "# RoboEmot app config (SPEC 4A, Installer). The installer sets only voice.enabled and, in\n"
-    "# dev mode, safety.allow_unmeasured_dynamics; every other key is kept on reinstall (comments\n"
-    "# are not). Uninstall removes this whole file, settings saved from the web UI included.\n"
+    "# RoboEmot app config (SPEC 4A, Installer). The installer sets only voice.enabled, in dev\n"
+    "# mode safety.allow_unmeasured_dynamics and, with --cloud-voice, the cloud-voice route and\n"
+    "# settings; every other key is kept on reinstall (comments are not). Uninstall removes this\n"
+    "# whole file, settings saved from the web UI included.\n"
 )
+ROUTES_KEY = "llm_routes"  # a list keyed by route name: merged per entry, never whole
+CLOUD_VOICE_FLAG = "--cloud-voice"
 UNINSTALL_STEPS = 6
 SHARED_NEEDS_YES = "Shared packages must change, and only --yes allows it"
+
+
+@dataclass(frozen=True)
+class CloudVoiceRoute:
+    """The realtime speech route a platform offers for the cloud-voice profile (SPEC 4A,
+    Installer; SPEC 8, Realtime speech route): the ``llm_routes`` entry (``name``, ``kind``,
+    ``base_url``, ``model``; its key is ``${secret:<secret>}`` from the secret store), the
+    ``voice.realtime_route.mode`` it needs, ``provider``, who receives the audio, as the
+    opt-in question names it, and the transcript timeout that suits that server."""
+
+    name: str
+    kind: str
+    base_url: str
+    secret: str
+    model: str
+    mode: str
+    provider: str
+    transcript_timeout_s: float  # voice.realtime_route.transcript_timeout_s the profile writes
+
+    def entry(self) -> dict[str, str]:
+        """The ``llm_routes`` entry as the installer writes it into ``app.yaml``."""
+        return {
+            "name": self.name,
+            "kind": self.kind,
+            "base_url": self.base_url,
+            "api_key": f"${{secret:{self.secret}}}",
+            "model": self.model,
+        }
 
 
 @runtime_checkable
@@ -192,6 +229,8 @@ class Platform(Protocol):
     # Restart the running app, asking first, and wait until it runs (``run --restart``); None: the
     # platform cannot restart it.
     restart: Callable[[Ui], None] | None
+    # The route of the cloud-voice profile (``--cloud-voice``); None: the platform has none.
+    cloud_voice: CloudVoiceRoute | None
 
     def connect(self, ui: Ui, host: str) -> None: ...
     def plan_env(self, remote: Remote) -> str: ...
@@ -233,6 +272,7 @@ class Options:
     restart: bool = False
     debug: bool = False
     version: bool = False
+    cloud_voice: bool | None = None  # the cloud-voice profile; None: not answered yet
 
 
 # ---------------------------------------------------------------- app config
@@ -280,13 +320,86 @@ def owned_app_config(
     return wanted, set(dev_leaves) | set(voice_leaves)
 
 
+def cloud_voice_config(route: CloudVoiceRoute) -> dict[tuple[str, ...], object]:
+    """The keys the cloud-voice profile sets in ``app.yaml`` (SPEC 4A, Installer; SPEC 8, 12):
+    the platform's route entry; the realtime route through it, with the utterance's audio as its
+    input (``privacy.realtime_audio``, the admin opt-in) and the skip tool; no local voice; wake
+    policy ``never`` with the voice-at-face and facing checks (facing needs direction). The
+    transcript timeout is the platform's (``CloudVoiceRoute.transcript_timeout_s``)."""
+    rt = ("voice", "realtime_route")
+    return {
+        (ROUTES_KEY, route.name): route.entry(),
+        (*rt, "enabled"): True,
+        (*rt, "route"): route.name,
+        (*rt, "mode"): route.mode,
+        (*rt, "input"): "audio",
+        (*rt, "skip_tool"): True,
+        (*rt, "transcript_timeout_s"): route.transcript_timeout_s,
+        ("privacy", "realtime_audio"): True,
+        ("voice", "backend"): "none",
+        ("voice", "fallback_backend"): "none",
+        ("voice", "wake_word_policy"): "never",
+        ("voice", "direction", "enabled"): True,
+        ("voice", "facing", "enabled"): True,
+    }
+
+
+def key_name(path: tuple[str, ...]) -> str:
+    """One app config key's name as the installer prints it: ``a.b``, or ``llm_routes[name]``
+    for a route entry."""
+    return f"{ROUTES_KEY}[{path[1]}]" if path[0] == ROUTES_KEY else ".".join(path)
+
+
+def key_text(path: tuple[str, ...], value: object) -> str:
+    """One app config key with its value: ``a.b=value`` (a route entry: its name only)."""
+    if path[0] == ROUTES_KEY:
+        return key_name(path)
+    return f"{key_name(path)}={str(value).lower()}"
+
+
+def config_value(config: dict, path: tuple[str, ...]) -> object:
+    """The value at ``path`` in ``config`` (a route entry by name for ``llm_routes``), or None."""
+    if path[0] == ROUTES_KEY:
+        routes = config.get(ROUTES_KEY)
+        entries = routes if isinstance(routes, list) else []
+        return next((r for r in entries if isinstance(r, dict) and r.get("name") == path[1]), None)
+    node: object = config
+    for key in path:
+        if not isinstance(node, dict):
+            return None
+        node = node.get(key)
+    return node
+
+
+def _merge_route(config: dict, name: str, entry: object, keep: bool) -> None:
+    """Set (``keep``) or remove the ``llm_routes`` entry called ``name`` in place, at its own
+    position; the owner's other routes stay, and a list left empty goes."""
+    routes = config.get(ROUTES_KEY)
+    if not isinstance(routes, list):
+        if not keep:
+            return
+        routes = []
+    named = [isinstance(r, dict) and r.get("name") == name for r in routes]
+    others = [r for r, same in zip(routes, named, strict=True) if not same]
+    if keep:
+        others.insert(named.index(True) if True in named else len(others), copy.deepcopy(entry))
+    if others:
+        config[ROUTES_KEY] = others
+    else:
+        config.pop(ROUTES_KEY, None)
+
+
 def merge_app_config(
     existing: dict, wanted: dict[tuple[str, ...], object], owned: set[tuple[str, ...]]
 ) -> dict:
     """``existing`` with every owned key set to its wanted value or removed (and a mapping left
-    empty by that removed too); every other key is kept as it is."""
+    empty by that removed too); every other key is kept as it is. A ``llm_routes`` key names
+    one route entry, merged by name."""
     merged = copy.deepcopy(existing)
     for path in sorted(owned):
+        if path[0] == ROUTES_KEY:
+            _merge_route(merged, path[1], wanted.get(path), path in wanted)
+            continue
         parents, node = [], merged
         for key in path[:-1]:
             child = node.get(key)
@@ -328,10 +441,11 @@ def describe_app_config(dev: bool, app_config: dict[str, object]) -> str:
 
 def warn_voice_gaps(ui: Ui, opts: Options) -> None:
     """With voice on, say what a declined Piper or voice-models step costs: no speech, no
-    listening. Called once both answers are known."""
+    listening (with cloud voice the server speaks: no Piper warning). Called once both answers
+    are known."""
     if not opts.voice:
         return
-    if not opts.piper:
+    if not opts.piper and not opts.cloud_voice:
         ui.warn("Voice without Piper", "Piper is not installed: the robot will not speak")
     if not opts.models:
         ui.warn("Voice without models", "they are not downloaded: the robot will not listen")
@@ -738,24 +852,77 @@ def install_piper(
     ui.hint("Voice files, on the robot", "roboemot models fetch --voice")
 
 
-def remove_piper_venv(ui: Ui, remote: Remote, record: InstallRecord, dry_run: bool) -> None:
-    """Delete the recorded Piper virtualenv, only at exactly the path this installer would pick."""
+def remove_piper_venv(
+    ui: Ui, remote: Remote, record: InstallRecord, dry_run: bool, why: str = ""
+) -> bool:
+    """Delete the recorded Piper virtualenv, only at exactly the path this installer would pick.
+    True when it is gone (or would be, in the dry run); ``why`` ends the done line."""
     if record.piper_venv is None:
-        return
+        return False
     venv, _ = piper_paths(remote)
     if record.piper_venv != venv:
         ui.warn("Piper venv left", f"recorded {record.piper_venv!r} is not {venv}")
-        return
+        return False
     if not _exists(remote, venv):
         ui.ok("Piper venv gone", f"{venv} is not there")
-        return
+        return True
     real = remote.run(f"realpath {shlex.quote(venv)} 2>/dev/null || true").strip()
     if real != venv:
         ui.warn("Piper venv left", f"{venv} resolves to {real or 'nothing'}: symlink?")
-        return
+        return False
     if not dry_run:
         remote.run(f"rm -rf {shlex.quote(venv)}")
-    ui.change(dry_run, "Delete the Piper venv", "Deleted the Piper venv", venv)
+    detail = f"{venv}{'; ' + why if why else ''}"
+    ui.change(dry_run, "Delete the Piper venv", "Deleted the Piper venv", detail)
+    return True
+
+
+def drop_local_voice(
+    ui: Ui, platform: Platform, remote: Remote, record: InstallRecord, dry_run: bool
+) -> None:
+    """Cloud voice (owner decision 7): delete the recorded Piper virtualenv and take it off the
+    record, so uninstall and a later reinstall agree with the robot (a folder that is not in the
+    record is not this installer's and stays), then the TTS voice files (``tts_`` roles of the
+    voice manifest, with their markers) in the default voice models folder. Those files are in
+    no record (the models folder or the data folder covers them), so nothing else is written;
+    a reinstall with ``--no-cloud-voice`` fetches them again with the models step."""
+    why = "the server speaks; a reinstall with --no-cloud-voice brings Piper back"
+    if remove_piper_venv(ui, remote, record, dry_run, why) and not dry_run:
+        record.piper_venv = None
+        write_record(remote, platform.record_path, record)
+    remove_tts_voices(ui, remote, dry_run)
+
+
+def remove_tts_voices(ui: Ui, remote: Remote, dry_run: bool) -> None:
+    """Delete the TTS voice files and their markers from the voice models folder this installer
+    fetches into, only when that folder's ``realpath`` is itself; then their empty folders."""
+    from ..vision.models import MARKER_SUFFIX, PART_SUFFIX
+
+    folder = model_dirs(remote, vision=False)[0]
+    if not _exists(remote, folder):
+        return
+    if remote.run(f"realpath {shlex.quote(folder)} 2>/dev/null || true").strip() != folder:
+        ui.warn("TTS voices left", f"{folder} resolves elsewhere: symlink?")
+        return
+    rels = [
+        f.path for spec in voice_specs(True) if spec not in voice_specs(False) for f in spec.files
+    ]
+    found = [
+        path
+        for rel in rels
+        for path in (posixpath.join(folder, rel + sfx) for sfx in ("", MARKER_SUFFIX, PART_SUFFIX))
+        if _exists(remote, path)
+    ]
+    if not found:
+        return
+    if not dry_run:
+        for path in found:
+            remote.run(f"rm -f {shlex.quote(path)}")
+        for sub in sorted({posixpath.dirname(posixpath.join(folder, r)) for r in rels}):
+            if sub != folder:
+                remote.run(f"rmdir {shlex.quote(sub)} 2>/dev/null || true", check=False)
+    names = ", ".join(posixpath.relpath(p, folder) for p in found)
+    ui.change(dry_run, "Delete the TTS voices", "Deleted the TTS voices", f"{folder}: {names}")
 
 
 # ---------------------------------------------------------------- models on the robot
@@ -769,8 +936,31 @@ def model_dirs(remote: Remote, vision: bool) -> list[str]:
     return [posixpath.join(data, d) for d in subdirs]
 
 
-def models_label(vision: bool) -> str:
-    return "voice and vision models" if vision else "voice models"
+def models_label(vision: bool, tts: bool = True) -> str:
+    label = "voice and vision models" if vision else "voice models"
+    return label if tts else f"{label} (no TTS voices: cloud voice)"
+
+
+def voice_specs(tts: bool) -> list:
+    """The voice manifest's models; without ``tts``, not the TTS voices (``tts_`` roles: Piper),
+    which the cloud-voice profile does not need (the listener still needs VAD and ASR)."""
+    from ..voice import models as voice_models
+
+    specs = voice_models.load_manifest().values()
+    return [s for s in specs if tts or not s.role.startswith(voice_models.TTS_ROLE)]
+
+
+def fetch_args(vision: bool, tts: bool) -> str:
+    """The ``roboemot models fetch`` arguments: ``--all`` / ``--voice``, or without ``tts`` the
+    names of the voice models it keeps (and every vision model with ``vision``)."""
+    if tts:
+        return f"models fetch {'--all' if vision else '--voice'}"
+    from ..vision import models as vision_models
+
+    names = [s.name for s in voice_specs(tts)]
+    if vision:
+        names += list(vision_models.load_manifest())
+    return "models fetch " + " ".join(map(shlex.quote, names))
 
 
 def models_bytes(
@@ -778,16 +968,17 @@ def models_bytes(
     peak: bool = True,
     done: frozenset[str] = frozenset(),
     on_disk: dict[str, int] | None = None,
+    tts: bool = True,
 ) -> int:
     """Disk the fetch needs, from the pinned manifests: each file's download size plus, for a
     zip archive, its unpacked size (both exist while it unpacks; ``peak=False`` counts only what
-    stays). Files in ``done`` (``"voice:<path>"``, ``"vision:<path>"``: already verified on the
-    robot) need nothing. ``on_disk`` (same keys) are bytes a file already holds on the robot (a
-    stale partial download, a complete file not yet marked), taken off that file's download size."""
+    stays). Without ``tts`` the TTS voices are left out. Files in ``done`` (``"voice:<path>"``,
+    ``"vision:<path>"``: already verified on the robot) need nothing. ``on_disk`` (same keys) are
+    bytes a file already holds on the robot (a stale partial download, a complete file not yet
+    marked), taken off that file's download size."""
     from ..vision import models as vision_models
-    from ..voice import models as voice_models
 
-    groups = [("voice", voice_models.load_manifest().values())]
+    groups = [("voice", voice_specs(tts))]
     if vision:
         groups.append(("vision", vision_models.load_manifest().values()))
     total = 0
@@ -836,9 +1027,11 @@ def fetch_models(
     record: InstallRecord,
     vision: bool,
     dry_run: bool,
+    tts: bool = True,
 ) -> None:
     """Download the voice models (and the vision weights with ``vision``) on the robot by running
-    the installed CLI, so they land where the app reads them (``roboemot.paths``).
+    the installed CLI, so they land where the app reads them (``roboemot.paths``). Without
+    ``tts`` (cloud voice) the TTS voices are neither counted nor fetched.
 
     The space needed is what the pinned manifests state for the files not yet verified on the
     robot (a rerun after a partial fetch needs only the rest); with every file verified there is
@@ -850,12 +1043,12 @@ def fetch_models(
     go with it. The dry run only reports sizes and free space. Retired model files still on the
     robot are reported with a hint to run ``roboemot models prune``; the installer deletes none.
     """
-    label = models_label(vision)
+    label = models_label(vision, tts)
     done, on_disk, retired = verified_models(py)
     if retired:
         ui.warn("Retired model files", f"{-(-retired // MIB)} MiB still on the robot")
         ui.hint("Delete them, on the robot", "roboemot models prune")
-    need_mib = -(-models_bytes(vision, done=done, on_disk=on_disk) // MIB)
+    need_mib = -(-models_bytes(vision, done=done, on_disk=on_disk, tts=tts) // MIB)
     folders = model_dirs(remote, vision)
     if need_mib == 0:
         ui.ok("Checked the models", f"the {label} are there and verified: nothing to download")
@@ -883,7 +1076,7 @@ def fetch_models(
         if new:
             record.models_dirs += new
             write_record(remote, platform.record_path, record)
-    args = f"models fetch {'--all' if vision else '--voice'}"
+    args = fetch_args(vision, tts)
     result = py.cli(args, "Downloading the models")
     for _ in range(FETCH_ATTEMPTS - 1):
         if result.ok:
@@ -996,10 +1189,11 @@ def check_secret_names(names: list[str]) -> None:
 
 
 def wanted_secrets(ui: Ui, opts: Options) -> list[str]:
-    """Names to store: from ``--secret``, else (interactive, not ``-y``) ask once for a cloud
-    route key. Names that are not valid are rejected before anything runs."""
+    """Names to store: from ``--secret``, else (interactive, not ``-y``, and not in a cloud-voice
+    run, which asks for its own key) ask once for a cloud route key. Names that are not valid
+    are rejected before anything runs."""
     names = opts.secrets
-    if names is None and ui.interactive and not ui.assume_yes:
+    if names is None and ui.interactive and not ui.assume_yes and not opts.cloud_voice:
         if not ui.confirm("Store an API key for a cloud LLM route on the robot?", False):
             return []
         names = [
@@ -1021,8 +1215,9 @@ def set_secrets(
     record: InstallRecord,
     names: list[str],
     dry_run: bool,
-) -> None:
-    """Store the secrets ``names`` in the robot's secret store (SPEC 8, 12 Data).
+) -> list[str]:
+    """Store the secrets ``names`` in the robot's secret store (SPEC 8, 12 Data); the names
+    stored by this call.
 
     Each value is typed on this PC and travels only on the SSH channel's standard input, so it
     is in no command line, log or message. A name that the store did not have is recorded (by
@@ -1031,6 +1226,7 @@ def set_secrets(
     and runs nothing on the robot.
     """
     _, folder = remote_data_dir(remote)
+    stored: list[str] = []
     for name in names:
         if dry_run:
             ui.would("Ask for a secret", f"{name!r}, stored in {folder}/secrets.json")
@@ -1052,6 +1248,74 @@ def set_secrets(
             write_record(remote, platform.record_path, record)
         remote.run(robot_cli(py, folder, "set", name), stdin=value + "\n")
         ui.ok("Stored the secret", name)
+        stored.append(name)
+    return stored
+
+
+def ask_cloud_voice_key(
+    ui: Ui, opts: Options, platform: Platform, remote: Remote, route: CloudVoiceRoute
+) -> str | None:
+    """Settle the cloud-voice route's key before anything on the robot changes (SPEC 8, 12
+    Data): one already in the robot's store is kept, unless ``--secret <name>`` asks to replace
+    it (then asked first, as ``set_secrets`` does); none there is asked for on this PC (hidden,
+    never an argument). Returns the value to store once the app is installed, or None to keep
+    the stored one. No key at all stops the install with nothing changed: the robot would have
+    no local voice and no route. The dry run asks nothing and runs only the read-only list."""
+    name = route.secret
+    py = RemotePython(remote, platform.python, ui)
+    _, folder = remote_data_dir(remote)
+    have = False
+    if py.exists():
+        try:
+            have = name in remote.run(robot_cli(py, folder, "list")).split()
+        except WizardError:
+            have = False
+    replace_it = name in (opts.secrets or [])
+    if have and not replace_it:
+        ui.ok("Kept the secret", f"{name}: already in the store")
+        return None
+    if opts.dry_run:
+        ui.would("Ask for a secret", f"{name!r}, stored in {folder}/secrets.json")
+        if not have and not ui.interactive:
+            ui.warn(
+                "Cloud voice needs its key", f"without a terminal the real run stops: no {name!r}"
+            )
+        return None
+    if have and (
+        not ui.interactive or not ui.confirm(f"Secret {name!r} is already set. Replace it?", False)
+    ):
+        ui.ok("Kept the secret", name)
+        return None
+    value = ask_secret_value(ui, name)
+    if value is None and have:
+        ui.ok("Kept the secret", name)
+    elif value is None:
+        raise WizardError(
+            f"Cloud voice needs the {name!r} key",
+            "the robot's secret store has none and none was typed; nothing was changed",
+            f"{_rerun(replace(opts, yes=False))} on a terminal, or --no-cloud-voice",
+        )
+    return value
+
+
+def store_secret(
+    ui: Ui,
+    platform: Platform,
+    py: RemotePython,
+    remote: Remote,
+    record: InstallRecord,
+    name: str,
+    value: str,
+) -> None:
+    """Store ``value`` as secret ``name`` over the SSH channel's standard input; a name the
+    store did not have is recorded before the write."""
+    _, folder = remote_data_dir(remote)
+    have = remote.run(robot_cli(py, folder, "list")).split()
+    if name not in have and name not in record.secrets:
+        record.secrets.append(name)
+        write_record(remote, platform.record_path, record)
+    remote.run(robot_cli(py, folder, "set", name), stdin=value + "\n")
+    ui.ok("Stored the secret", name)
 
 
 def remove_secrets(
@@ -1179,6 +1443,7 @@ def apply_app_config(
     wanted: dict[tuple[str, ...], object],
     owned: set[tuple[str, ...]],
     dry_run: bool,
+    profile: frozenset[tuple[str, ...]] = frozenset(),
 ) -> None:
     """Write the installer's keys into ``app.yaml`` in the data folder and keep every other key
     (SPEC 4A, Installer): owner edits survive a reinstall. Comments are not kept. Every file the
@@ -1186,7 +1451,9 @@ def apply_app_config(
     whole, including the settings saved from the web UI (owner decision 2026-10-22; no per-key
     restore); editing a file the owner already had says so. A ``data_dir`` in the file is warned
     about. The dry run only says what it would write. The content travels on the SSH channel's
-    standard input, never on a command line."""
+    standard input, never on a command line. ``profile`` are the keys of a profile this run
+    sets (``--cloud-voice``): recorded (``app_config_keys``) together with the earlier ones
+    before the write and alone after it, so a reinstall without the profile removes them."""
     path = app_config_remote_path(remote)
     existing = read_app_config(remote, path)
     merged = merge_app_config(existing or {}, wanted, owned)
@@ -1195,9 +1462,15 @@ def apply_app_config(
             "Data may land elsewhere",
             f"{path} sets data_dir={existing['data_dir']}; uninstall leaves that folder",
         )
-    keys = ", ".join(".".join(k) + f"={str(v).lower()}" for k, v in sorted(wanted.items()))
+    warn_replaced_routes(ui, existing or {}, wanted)
+    keys = ", ".join(key_text(k, v) for k, v in sorted(wanted.items()))
+    removed = sorted(k for k in owned - set(wanted) if config_value(existing or {}, k) is not None)
+    if removed and dry_run:
+        ui.would("Remove app config keys", ", ".join(map(key_name, removed)))
     if merged == (existing or {}) and (existing is not None or not merged):
         ui.ok("App config already as asked", f"{path} ({keys or 'no installer keys'})")
+        if not dry_run:
+            _record_profile_keys(remote, platform, record, profile)
         return
     adopted = existing is not None and record.app_config != path
     if adopted:
@@ -1215,13 +1488,42 @@ def apply_app_config(
     if record.app_config != path:
         record.app_config = path
         write_record(remote, platform.record_path, record)
+    earlier = {tuple(k) for k in record.app_config_keys}
+    _record_profile_keys(remote, platform, record, profile | earlier)
     tmp = f"{path}.tmp"
     remote.run(
         f"umask 077 && mkdir -p {shlex.quote(posixpath.dirname(path))} && "
         f"cat > {shlex.quote(tmp)} && mv {shlex.quote(tmp)} {shlex.quote(path)}",
         stdin=app_config_text(merged),
     )
+    _record_profile_keys(remote, platform, record, profile)
     ui.ok("Wrote the app config", f"{path}: {keys or 'installer keys removed'}; other keys kept")
+    if removed:
+        ui.ok("Removed app config keys", ", ".join(map(key_name, removed)))
+
+
+def warn_replaced_routes(ui: Ui, existing: dict, wanted: dict[tuple[str, ...], object]) -> None:
+    """Warn when a route entry the installer writes replaces a different one already in the
+    file: the entry goes whole, so name the fields that change or are lost (never a value)."""
+    for path, new in sorted(wanted.items()):
+        old = config_value(existing, path) if path[0] == ROUTES_KEY else None
+        if not isinstance(old, dict) or not isinstance(new, dict) or old == new:
+            continue
+        changed = sorted(k for k in old.keys() & new.keys() if old[k] != new[k])
+        lost = sorted(old.keys() - new.keys())
+        parts = [f"changed {', '.join(changed)}"] * bool(changed)
+        parts += [f"lost {', '.join(lost)}"] * bool(lost)
+        ui.warn("Replaced a route", f"{key_text(path, new)} as written by hand: {'; '.join(parts)}")
+
+
+def _record_profile_keys(
+    remote: Remote, platform: Platform, record: InstallRecord, keys: frozenset[tuple[str, ...]]
+) -> None:
+    """Record ``keys`` as the profile keys the installer set (written only when they change)."""
+    listed = sorted(list(k) for k in keys)
+    if record.app_config_keys != listed:
+        record.app_config_keys = listed
+        write_record(remote, platform.record_path, record)
 
 
 def configured_webui_port(remote: Remote) -> int | None:
@@ -1240,13 +1542,14 @@ def verify_app_config(
 ) -> None:
     """The app config on the robot has every owned key as asked (set or absent)."""
     path = app_config_remote_path(remote)
-    found = leaves(read_app_config(remote, path) or {})
+    found = read_app_config(remote, path) or {}
     for key in sorted(owned):
-        if found.get(key) != wanted.get(key):
+        value = config_value(found, key)
+        if value != wanted.get(key):
             name = ".".join(key)
             raise WizardError(
                 "App config not as asked",
-                f"{path} has {name}={found.get(key)}, expected {name}={wanted.get(key)}",
+                f"{path} has {name}={value}, expected {name}={wanted.get(key)}",
             )
 
 
@@ -1513,7 +1816,7 @@ def preflight(opts: Options, ui: Ui) -> None:
     if opts.uninstall:
         return
     answered = [("--dev", opts.dev)]
-    if opts.voice:  # without voice, Piper is off without asking
+    if opts.voice and not opts.cloud_voice:  # without voice or with cloud voice, no Piper
         answered.append(("--piper", opts.piper))
     if opts.voice or opts.vision:  # without both, the models are off without asking
         answered.append(("--models", opts.models))
@@ -1567,7 +1870,8 @@ def _rerun(opts: Options) -> str:
             args += [flag, value]
     for flag, value in (
         ("dev", opts.dev),
-        ("piper", opts.piper if opts.voice else None),
+        ("piper", opts.piper if opts.voice and not opts.cloud_voice else None),
+        ("cloud-voice", opts.cloud_voice),
         ("start", opts.start),
         ("startup-app", opts.startup),
     ):
@@ -1595,6 +1899,159 @@ def _check_running_app(opts: Options, ui: Ui, platform: Platform) -> None:
         ui.require("--yes", False, f"{other} is running and --start would stop it")
 
 
+def check_cloud_voice(ui: Ui, opts: Options, platform: Platform) -> None:
+    """Refuse a cloud-voice choice that cannot work, before the robot is touched: the flag on a
+    platform without a cloud-voice route, or with ``--no-voice`` or ``--piper``. A platform
+    without the route, ``--no-voice`` or ``--piper`` without the flag need no answer (cloud
+    voice is off); otherwise off a terminal it needs ``--cloud-voice`` or ``--no-cloud-voice``
+    (``-y`` is not an answer: the opt-in sends audio off the robot)."""
+    if platform.cloud_voice is None:
+        if opts.cloud_voice:
+            raise WizardError(
+                f"No cloud voice for {platform.display_name}",
+                "its installer offers no cloud-voice route",
+                _rerun(replace(opts, cloud_voice=None)),
+            )
+        opts.cloud_voice = False
+        return
+    if opts.cloud_voice is None and (not opts.voice or opts.piper):
+        opts.cloud_voice = False
+        return
+    if opts.cloud_voice and not opts.voice:
+        raise WizardError(f"{CLOUD_VOICE_FLAG} needs voice", "--no-voice turns voice off")
+    if opts.cloud_voice and opts.piper:
+        raise WizardError(
+            f"{CLOUD_VOICE_FLAG} and --piper together",
+            "with cloud voice the server speaks and Piper is removed",
+        )
+    ui.require(
+        "--no-cloud-voice",
+        opts.cloud_voice is not None,
+        f"Missing {CLOUD_VOICE_FLAG} or --no-cloud-voice (-y does not answer it)",
+    )
+
+
+def saved_overrides(ui: Ui, remote: Remote) -> tuple[str, dict | None]:
+    """The web UI's saved settings (``webui_settings.json`` in the data folder: the runtime
+    layer, which wins over ``app.yaml``) as ``{dotted path: value}``; {} without the file, None
+    when it cannot be read. Read-only."""
+    _, data = remote_data_dir(remote)
+    path = posixpath.join(data, paths.SETTINGS_OVERRIDES_FILE)
+    if not _exists(remote, path):
+        return path, {}
+    try:
+        saved = json.loads(remote.run(f"cat {shlex.quote(path)}")).get("overrides", {})
+    except (WizardError, ValueError, AttributeError):
+        return path, None
+    return path, saved if isinstance(saved, dict) else None
+
+
+def privacy_conflicts(saved: dict, route: CloudVoiceRoute, on: bool) -> list[str]:
+    """Saved web UI settings that would make the cloud-voice choice untrue for privacy (SPEC 12).
+    On: a check off that the opt-in text relies on (facing, voice-at-face), another realtime
+    route, or an edit of the profile's route entry (it could move the audio to another host).
+    Off: audio still leaving the robot (``privacy.realtime_audio``, the realtime route on, audio
+    input). Overrides of a keyed list are addressed by name (``llm_routes.<name>.<field>``)."""
+    rt = "voice.realtime_route"
+    if on:
+        own = f"{ROUTES_KEY}.{route.name}"
+        bad = {
+            "voice.facing.enabled": lambda v: v is not True,
+            "voice.direction.enabled": lambda v: v is not True,
+            f"{rt}.route": lambda v: v != route.name,
+            f"{rt}.enabled": lambda v: v is not True,
+        }
+        hits = [k for k, test in bad.items() if k in saved and test(saved[k])]
+        hits += [k for k in saved if k == own or k.startswith(own + ".")]
+    else:
+        bad = {
+            "privacy.realtime_audio": lambda v: v is True,
+            f"{rt}.enabled": lambda v: v is True,
+            f"{rt}.input": lambda v: v == "audio",
+        }
+        hits = [k for k, test in bad.items() if k in saved and test(saved[k])]
+    return sorted(set(hits))
+
+
+def check_saved_overrides(ui: Ui, opts: Options, platform: Platform, remote: Remote) -> None:
+    """Before anything on the robot changes: saved web UI settings that contradict the
+    cloud-voice choice for privacy stop the install, naming the keys (never a value) and how to
+    clear them; other saved profile keys (they win over ``app.yaml``) are a warning."""
+    route = platform.cloud_voice
+    if route is None:
+        return
+    path, saved = saved_overrides(ui, remote)
+    if saved is None:
+        ui.warn("Web UI settings not read", f"{path}: they may override app.yaml")
+        return
+    on = bool(opts.cloud_voice)
+    conflicts = privacy_conflicts(saved, route, on)
+    if conflicts:
+        what = "contradict cloud voice" if on else "keep audio leaving the robot"
+        raise WizardError(
+            f"Web UI settings {what}",
+            f"{path} sets {', '.join(conflicts)}, which win over app.yaml; nothing was changed",
+            "reset them in the web UI (Settings, with the PIN), then run the installer again",
+        )
+    if not on:
+        return
+    dotted = [".".join(k) for k in cloud_voice_config(route) if k[0] != ROUTES_KEY]
+    hit = sorted(key for key in saved if any(key == d or key.startswith(d + ".") for d in dotted))
+    if hit:
+        ui.warn(
+            "Web UI overrides",
+            f"{path} sets {', '.join(hit)}, which win over app.yaml; reset them in the web UI",
+        )
+
+
+def say_cloud_voice_off(ui: Ui, opts: Options, platform: Platform, remote: Remote) -> None:
+    """Over an install that recorded the cloud-voice profile, say that this run turns it off
+    and what that changes (read-only: the record)."""
+    if opts.cloud_voice:
+        return
+    record = read_record(remote, platform.record_path)
+    keys = record.app_config_keys if record else []
+    if keys:
+        ui.ok(
+            "Turned cloud voice off",
+            f"(it was on): removes {', '.join(key_name(tuple(k)) for k in keys)} from app.yaml; "
+            "local voice needs Piper (--piper) and the TTS voices (the models step)",
+        )
+
+
+def cloud_voice_text(route: CloudVoiceRoute) -> str:
+    """The opt-in text of the cloud-voice profile (SPEC 12: audio leaving the robot is an admin
+    opt-in), in plain words."""
+    return (
+        "Cloud voice: the robot listens without a wake word, and the audio of every utterance "
+        f"spoken while a person faces the robot and looks at it leaves the robot for "
+        f"{route.provider}, phone calls included. The skip tool only decides whether the robot "
+        "answers: the audio is already at the server. The robot has no local voice (Piper is "
+        "removed); going back needs a reinstall with --no-cloud-voice."
+    )
+
+
+def choose_cloud_voice(ui: Ui, opts: Options, platform: Platform) -> None:
+    """Settle the cloud-voice opt-in (after ``check_cloud_voice``): the flag, else off with
+    ``-y`` (it does not imply the opt-in), else the question on the terminal after the privacy
+    text, default no."""
+    route = platform.cloud_voice
+    if route is None or opts.cloud_voice is False:
+        return
+    if opts.cloud_voice is None and ui.assume_yes:
+        opts.cloud_voice = False
+        ui.ok("Cloud voice off", f"-y does not turn it on, {CLOUD_VOICE_FLAG} does")
+        return
+    if opts.cloud_voice is None:
+        ui.info(cloud_voice_text(route))
+        opts.cloud_voice = ui.confirm_opt_in(
+            "Turn on cloud voice (audio leaves the robot)?", False, flag=CLOUD_VOICE_FLAG
+        )
+    if opts.cloud_voice:
+        opts.piper = False
+        ui.ok("Chose cloud voice", f"{route.name} route to {route.provider}; no Piper")
+
+
 def run_install(opts: Options, ui: Ui, root: Path) -> None:
     ui.steps = INSTALL_STEPS
     check_secret_names(opts.secrets or [])
@@ -1602,6 +2059,7 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
     ui.title("installer", "dry run, the robot is not modified" if opts.dry_run else "")
     ui.step("Robot")
     host, platform = select_robot(ui, opts, root)
+    check_cloud_voice(ui, opts, platform)
     ui.ok("Selected the robot", f"{platform.display_name} at {host}")
     platform.connect(ui, host)
     _check_running_app(opts, ui, platform)
@@ -1623,7 +2081,17 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
                 ui.ok("Chose dev mode", "configs/dev-unmeasured.yaml")
             else:
                 ui.ok("Chose the production config")
-            content = describe_app_config(dev, app_config_overrides(opts.voice))
+            choose_cloud_voice(ui, opts, platform)
+            cloud = cloud_voice_config(platform.cloud_voice) if opts.cloud_voice else {}
+            content = ", ".join(
+                filter(
+                    None,
+                    [
+                        describe_app_config(dev, app_config_overrides(opts.voice)),
+                        ", ".join(key_text(k, v) for k, v in cloud.items()),
+                    ],
+                )
+            )
             ui.ok(
                 "Chose the app config",
                 f"app.yaml in the data folder: {content or 'no installer keys'}",
@@ -1635,6 +2103,12 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
 
             def free_space() -> str | None:
                 read_app_config(remote, app_config_remote_path(remote))  # refuse a broken one now
+                check_saved_overrides(ui, opts, platform, remote)
+                say_cloud_voice_off(ui, opts, platform, remote)
+                if cloud and platform.cloud_voice is not None:
+                    key.append(
+                        ask_cloud_voice_key(ui, opts, platform, remote, platform.cloud_voice)
+                    )
                 check_shared_packages(ui, platform, remote, dirs, extras, opts.dry_run)
                 stopped.append(stop_own_app(ui, platform, opts.dry_run) and not opts.dry_run)
                 home, _ = remote_data_dir(remote)
@@ -1651,6 +2125,7 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
                     return None
                 return f"kept {', '.join(kept)}: --clear-caches frees it"
 
+            key: list[str | None] = []  # the cloud-voice key typed before any change, to store
             extras = (*platform.extras, *(("vision",) if opts.vision else ()))
             py = check_ssh(ui, platform, remote, min_python(dirs), free_space, extras)
 
@@ -1663,7 +2138,14 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
             if opts.vision and opts.dry_run:
                 ui.would("Install the vision extra", "OpenCV, ONNX; --no-vision skips it")
             record = install_packages(ui, platform, py, remote, dirs, wheels, opts.dry_run, extras)
-            apply_app_config(ui, platform, remote, record, wanted, owned, opts.dry_run)
+            route = platform.cloud_voice
+            if route is not None and any(key) and not opts.dry_run:
+                store_secret(ui, platform, py, remote, record, route.secret, key[0])
+            wanted = {**wanted, **cloud}
+            owned = owned | set(cloud) | {tuple(k) for k in record.app_config_keys}
+            apply_app_config(
+                ui, platform, remote, record, wanted, owned, opts.dry_run, frozenset(cloud)
+            )
             if not opts.dry_run:
                 platform.verify(ui, py)
                 verify_app_config(remote, wanted, owned)
@@ -1673,20 +2155,25 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
                 )
             if opts.piper:
                 install_piper(ui, platform, remote, record, opts.dry_run)
+            if opts.cloud_voice:
+                drop_local_voice(ui, platform, remote, record, opts.dry_run)
+            tts = not opts.cloud_voice
             if opts.models is None:
                 opts.models = (opts.voice or opts.vision) and ui.confirm(
-                    f"Download the {models_label(opts.vision)} "
-                    f"(~{models_bytes(opts.vision) / 1e9:.1f} GB at peak while unpacking, "
-                    f"~{models_bytes(opts.vision, peak=False) / 1e9:.1f} GB once installed) "
-                    "on the robot?",
+                    f"Download the {models_label(opts.vision, tts)} "
+                    f"(~{models_bytes(opts.vision, tts=tts) / 1e9:.1f} GB at peak while "
+                    f"unpacking, ~{models_bytes(opts.vision, peak=False, tts=tts) / 1e9:.1f} GB "
+                    "once installed) on the robot?",
                     False,
                     flag="--models",
                 )
             warn_voice_gaps(ui, opts)
             if opts.models:
-                fetch_models(ui, platform, py, remote, record, opts.vision, opts.dry_run)
+                fetch_models(ui, platform, py, remote, record, opts.vision, opts.dry_run, tts)
             set_operator_pin(ui, py, remote, opts.dry_run)
             names = wanted_secrets(ui, opts)
+            if opts.cloud_voice and route is not None:
+                names = [n for n in names if n != route.secret]  # settled before any change
             set_secrets(ui, platform, py, remote, record, names, opts.dry_run)
 
             ui.step("Start")
@@ -2031,6 +2518,16 @@ def parse_args(argv: list[str] | None = None, plain: bool = False) -> Options:
         "asked on this PC without echo and never appears on a command line",
     )
     p.add_argument(
+        CLOUD_VOICE_FLAG,
+        dest="cloud_voice",
+        action=argparse.BooleanOptionalAction,
+        help="cloud-voice profile: the robot answers by voice through the platform's realtime "
+        "route; the audio of every utterance spoken while a person faces the robot and looks at "
+        "it leaves the robot (SPEC 12 opt-in). Writes the route and its settings into app.yaml, "
+        "asks for the route's key when the store has none, skips Piper and its voices and "
+        "removes a recorded Piper venv (default: ask on a terminal; -y does not turn it on)",
+    )
+    p.add_argument(
         "--clear-caches",
         action=argparse.BooleanOptionalAction,
         help="delete the robot's download caches the platform names (e.g. a uv cache) to "
@@ -2068,6 +2565,7 @@ def parse_args(argv: list[str] | None = None, plain: bool = False) -> Options:
         a.voice,
         debug=a.debug,
         version=a.version,
+        cloud_voice=a.cloud_voice,
     )
 
 
@@ -2119,6 +2617,7 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
 
 __all__ = [
     "ENTRY_POINT_GROUP",
+    "CloudVoiceRoute",
     "Options",
     "Platform",
     "Ui",
