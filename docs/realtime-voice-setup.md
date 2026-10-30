@@ -4,6 +4,24 @@ This guide sets up the realtime speech route on the robot. With it, Pollen's ser
 transcription, the answer and the voice (SPEC 8, Realtime speech route). The robot sends the
 audio of addressed utterances to the server. The route is off by default (SPEC 12).
 
+## With the installer: one flag
+
+From the repo checkout, one flag replaces steps 2 to 4 below:
+
+```bash
+python scripts/install_on_robot.py --host 192.168.88.198 --cloud-voice --dry-run   # the plan, writes nothing
+python scripts/install_on_robot.py --host 192.168.88.198 --cloud-voice
+```
+
+The installer writes the `pollen` route and its settings into `app.yaml` (route on with audio
+input, `privacy.realtime_audio`, the skip tool, no local voice, wake policy `never`, the
+voice-at-face and facing checks), asks for `hf_token` when the robot has none, and removes Piper
+(SPEC 4A, Installer). Read its privacy text before you answer: the audio of every utterance
+spoken while a person faces the robot and looks at it leaves the robot for Pollen's server,
+phone calls included. `-y` does not turn it on. A reinstall with `--no-cloud-voice` removes
+exactly these keys; local voice then needs Piper again (`--piper`). Then start RoboEmot (step 5)
+and check the route (step 6). The manual steps below stay for a robot set up by hand.
+
 The server is reached in two hops:
 
 1. The robot asks Pollen's allocator for a session:

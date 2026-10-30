@@ -81,6 +81,7 @@ ruff check . && ruff format --check .
 python scripts/install_on_robot.py --dry-run   # read-only checks against the real robot
 python scripts/install_on_robot.py --uninstall --dry-run   # what uninstall would undo
 python scripts/install_on_robot.py --no-vision --no-voice --no-clear-caches   # skip the vision extra and weights; leave voice off (no voice.enabled, Piper and models default off); keep ~/.cache/uv (default: ask)
+python scripts/install_on_robot.py --cloud-voice --host <robot>   # cloud-voice profile (SPEC 4A, 12): the platform's realtime route answers by voice, audio leaves the robot (opt-in; -y does not imply it; unattended runs need --cloud-voice or --no-cloud-voice); asks for hf_token, no Piper
 python scripts/run_on_robot.py   # start RoboEmot on the robot and print the web UI address
 python scripts/run_on_robot.py --restart   # restart a running RoboEmot via the daemon (asks; -y skips; the head moves)
 python scripts/robot_ssh.py [--host H] [--user U]   # shell on the robot (mDNS pick); `-- cmd` runs one command
