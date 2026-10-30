@@ -2870,6 +2870,16 @@ class RealtimeRouteConfig(Strict):
         le=86400,
     )
     voice: str = param("", "Server voice name; empty uses the server's default")
+    transcription_language: str = param(
+        "",
+        "Language the server transcribes an utterance's audio in (session.update "
+        "audio.input.transcription.language); empty follows conversation.language",
+    )
+    transcription_model: str = param(
+        "",
+        "Model the server transcribes an utterance's audio with (session.update "
+        "audio.input.transcription.model); empty leaves it out, so the server's default applies",
+    )
     prebuffer_ms: float = param(
         200.0,
         "Reply audio held before playback starts, against network jitter",

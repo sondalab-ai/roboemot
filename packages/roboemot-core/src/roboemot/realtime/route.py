@@ -155,8 +155,9 @@ def session_update(cfg: RoboEmotConfig, instructions: str, tools: Any = None) ->
     """``session.update``: the instructions (parts 1 to 4), PCM in at the robot's rate (null at
     the native 16 kHz, which Pollen's server requires) and out at the server's own, the voice,
     server VAD that never answers or interrupts on its own and ends a turn after
-    ``server_silence_ms``, and the tools (left as they are when None). The route and the realtime
-    check (``realtime.check``) send the same one."""
+    ``server_silence_ms``, the input transcription's language (``transcription_language``, else
+    ``conversation.language``) and model (left out when empty), and the tools (left as they are
+    when None). The route and the realtime check (``realtime.check``) send the same one."""
     rt, vad = cfg.voice.realtime_route, cfg.voice.vad
     return protocol.session_update(
         instructions=instructions,
@@ -170,6 +171,8 @@ def session_update(cfg: RoboEmotConfig, instructions: str, tools: Any = None) ->
         create_response=False,
         interrupt_response=False,
         tools=tools,
+        transcription_language=rt.transcription_language or cfg.conversation.language,
+        transcription_model=rt.transcription_model or None,
     )
 
 
