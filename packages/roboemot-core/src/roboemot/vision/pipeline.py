@@ -468,7 +468,9 @@ class VisionPipeline:
         """Add this frame's head yaw (from the matched detection's landmarks) to the track's
         history; a frame without usable landmarks adds nothing."""
         det = track.detection
-        yaw = head_yaw(det.landmarks if det is not None else None)
+        cfg = self.cfg
+        lm = det.landmarks if det is not None else None
+        yaw = head_yaw(lm, cfg.facing_nose_depth_ratio, cfg.facing_min_eye_px)
         if yaw is not None:
             state.yaws.append((stamp, yaw))
 

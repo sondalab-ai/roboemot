@@ -720,15 +720,17 @@ def test_real_face_pipeline_on_a_face_image(stages):
 
 
 @pytest.mark.models
-def test_real_landmarks_give_a_head_yaw_that_flips_with_the_image(stages):
+def test_real_landmarks_of_a_frontal_portrait_look_at_the_camera(stages):
     path = os.environ.get("ROBOEMOT_TEST_FACE")
     if not path:
-        pytest.skip("set ROBOEMOT_TEST_FACE to a portrait image to run the face path")
+        pytest.skip("set ROBOEMOT_TEST_FACE to a frontal portrait image to run the face path")
     import cv2
     from roboemot.vision.facing import head_yaw
 
+    cfg = RoboEmotConfig()
+    v = cfg.vision
     img = cv2.imread(path)
-    yaw = head_yaw(stages.face_detector.detect(img)[0].landmarks)
-    mirrored = head_yaw(stages.face_detector.detect(cv2.flip(img, 1))[0].landmarks)
-    assert yaw is not None and mirrored is not None
-    assert abs(yaw + mirrored) < math.radians(5.0)  # a mirrored face turns the other way
+    for im in (img, cv2.flip(img, 1)):  # YuNet is not mirror-exact: both must pass on their own
+        lm = stages.face_detector.detect(im)[0].landmarks
+        yaw = head_yaw(lm, v.facing_nose_depth_ratio, v.facing_min_eye_px)
+        assert yaw is not None and abs(yaw) < math.radians(cfg.voice.facing.max_yaw_deg)

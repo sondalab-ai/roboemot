@@ -18,7 +18,7 @@ from roboemot.runtime import assembly
 from roboemot.voice.activity import SpeechActivity
 from roboemot.voice.asr import ASREvent
 from roboemot.voice.vad import EnergyVAD
-from roboemot.voice.wake import AT_FACE, NOT_FACING
+from roboemot.voice.wake import AT_FACE, NO_FACING_DATA, NOT_FACING
 from roboemot.world import Observation, WorldModel
 from roboemot_reachymini.gaze import FRAME
 from roboemot_reachymini.platform import ReachyMiniSession
@@ -258,15 +258,18 @@ def test_the_face_at_the_voice_must_look_at_the_robot_through_the_real_wiring(fa
         {"head.yaw": HEAD_YAW},
     )
     assert check(listener, now=10.2)
-    stale = RoboEmotConfig().attention.stale_s  # its yaw ages like the face (max_sample_age_s)
-    hear(bus, math.pi / 2, HEAD_YAW, now=10.2 + stale + 1)
-    world.observe(
-        Observation("person", 10.2 + stale + 1, "vision", 0.0, 0.0), {"head.yaw": HEAD_YAW}
-    )
-    assert check(listener, now=10.2 + stale + 1)  # no fresh yaw: falls back, counted
+    later = 10.2 + cfg.voice.facing.yaw_max_age_ms / 1000 + 1  # the face still visible
+    hear(bus, math.pi / 2, HEAD_YAW, now=later)
+    world.observe(Observation("person", later, "vision", 0.0, 0.0), {"head.yaw": HEAD_YAW})
+    d.begin()
+    d.sample(later)
+    assert d.check() == NO_FACING_DATA  # no yaw near the voice: not looking at the robot
+    hear(bus, math.pi / 2, HEAD_YAW, now=10.0)  # a listener behind: the yaw at its time
+    d.begin()
+    d.sample(10.0)
+    assert d.check() == NOT_FACING
     facing = listener.snapshot()["direction"]["facing"]["checks"]
-    assert facing["rejected_not_facing"] == 1 and facing["passed"] == 1
-    assert facing["fallback_no_data"] == 1
+    assert facing["not_facing"] == 2 and facing["passed"] == 1 and facing["no_data"] == 1
 
 
 def test_a_voice_from_a_face_behind_is_mirrored_to_the_front_and_rejected(fakes):

@@ -2,23 +2,33 @@
 
 from __future__ import annotations
 
+import json
 import math
+import statistics
 from collections import deque
+from pathlib import Path
 
 import numpy as np
 import pytest
 from roboemot.bus import Bus
 from roboemot.config.schema import RoboEmotConfig, WorldConfig
 from roboemot.registry import FileStore, Matcher, Registry
-from roboemot.vision.facing import NOSE_DEPTH_PER_EYE_SPAN, head_yaw, smoothed
+from roboemot.vision.facing import head_yaw, smoothed
 from roboemot.vision.pipeline import VisionPipeline
 from roboemot.vision.types import Detection, Frame
-from roboemot.voice.pipeline import fresh_yaw
+from roboemot.voice.pipeline import yaw_at
 from roboemot.world import Entry, Observation, WorldModel
 
+VISION = RoboEmotConfig().vision
+RATIO = VISION.facing_nose_depth_ratio
 # The ArcFace alignment template (112 px): a frontal face, the person's right eye on the left.
 FRONTAL = np.array([[38.29, 51.70], [73.53, 51.50], [56.03, 71.74], [41.55, 92.37], [70.73, 92.20]])
-EYE_SPAN_MM, NOSE_DEPTH_MM = 63.0, NOSE_DEPTH_PER_EYE_SPAN * 63.0
+EYE_SPAN_MM, NOSE_DEPTH_MM = 63.0, RATIO * 63.0
+REAL = Path(__file__).parent / "data" / "facing" / "astronaut_yunet_landmarks.json"
+
+
+def yaw(lm, min_eye_px=1.0, ratio=RATIO):
+    return head_yaw(lm, ratio, min_eye_px)
 
 
 def turned(yaw_deg: float, roll_deg: float = 0.0) -> np.ndarray:
@@ -40,23 +50,23 @@ def turned(yaw_deg: float, roll_deg: float = 0.0) -> np.ndarray:
 
 
 def test_a_frontal_face_reads_about_zero():
-    assert abs(math.degrees(head_yaw(FRONTAL))) < 2.0
-    assert head_yaw(turned(0.0)) == pytest.approx(0.0)
+    assert abs(math.degrees(yaw(FRONTAL))) < 2.0
+    assert yaw(turned(0.0)) == pytest.approx(0.0)
 
 
 @pytest.mark.parametrize("deg", [15.0, 30.0, 50.0, -15.0, -40.0])
 def test_a_turned_face_reads_its_angle_with_the_sign(deg):
-    assert math.degrees(head_yaw(turned(deg))) == pytest.approx(deg, abs=0.5)
+    assert math.degrees(yaw(turned(deg))) == pytest.approx(deg, abs=0.5)
 
 
 def test_turning_to_the_image_left_is_positive():
     lm = FRONTAL.copy()
     lm[2, 0] -= 8.0  # nose toward the image left: the face turned toward the robot's left
-    assert head_yaw(lm) > math.radians(10.0)
+    assert yaw(lm) > math.radians(10.0)
 
 
 def test_a_tilted_head_reads_the_same_yaw():
-    assert math.degrees(head_yaw(turned(30.0, roll_deg=25.0))) == pytest.approx(30.0, abs=0.5)
+    assert math.degrees(yaw(turned(30.0, roll_deg=25.0))) == pytest.approx(30.0, abs=0.5)
 
 
 @pytest.mark.parametrize(
@@ -70,7 +80,33 @@ def test_a_tilted_head_reads_the_same_yaw():
     ],
 )
 def test_degenerate_landmarks_give_no_estimate(lm):
-    assert head_yaw(lm) is None
+    assert yaw(lm) is None
+
+
+def test_a_face_whose_eyes_are_closer_than_the_minimum_gives_no_estimate():
+    small = turned(20.0) * 0.2 + 50  # eyes about 12 px apart
+    assert yaw(small, min_eye_px=VISION.facing_min_eye_px) is None
+    assert yaw(small, min_eye_px=10.0) is not None
+
+
+def test_the_nose_depth_ratio_scales_the_yaw():
+    assert math.degrees(yaw(turned(30.0), ratio=RATIO / 2)) > 45.0
+
+
+def test_real_yunet_landmarks_of_a_near_frontal_portrait_read_within_the_default_limit():
+    """Real detector output (numbers only, see the fixture's ``source``): a near-frontal face,
+    mirrored, rolled by up to 20 deg and down to a 10 px eye span. Its true yaw is not
+    measured, so this bounds the size, not the exact value: the landmark noise seen here
+    (-15 to +9 deg) stays inside voice.facing.max_yaw_deg, so a face looking at the robot
+    passes."""
+    views = json.loads(REAL.read_text())["views"]
+    limit = RoboEmotConfig().voice.facing.max_yaw_deg
+    yaws = {v["view"]: yaw(np.array(v["landmarks"])) for v in views}
+    assert len(yaws) == 14 and all(y is not None for y in yaws.values())
+    assert all(abs(math.degrees(y)) < limit for y in yaws.values()), yaws
+    eye_px = [np.hypot(*np.subtract(v["landmarks"][1], v["landmarks"][0])) for v in views]
+    big = [y for y, px in zip(yaws.values(), eye_px, strict=True) if px >= 16.0]
+    assert statistics.median(abs(math.degrees(y)) for y in big) < 8.0
 
 
 def test_smoothed_is_the_median_over_the_window_and_drops_older_values():
@@ -142,22 +178,41 @@ def test_degenerate_landmarks_publish_no_yaw(tmp_path):
     assert seen and all(o.facing_yaw_rad is None for o in seen)
 
 
-def test_the_world_keeps_the_last_yaw_and_a_bearing_without_one_leaves_it():
-    world = WorldModel(WorldConfig())
+def test_the_world_keeps_a_bounded_yaw_history_and_a_bearing_without_one_adds_nothing():
+    world = WorldModel(WorldConfig(facing_history_s=5.0))
     person = dict(kind="person", source="vision", azimuth_rad=0.1, elevation_rad=0.0)
     world.observe(Observation(stamp=1.0, facing_yaw_rad=0.3, **person))
     world.observe(Observation(stamp=2.0, **person))  # a frame with no usable landmarks
-    (e,) = world.entries
-    assert e.facing_yaw_rad == 0.3 and e.facing_stamp == 1.0
     world.observe(Observation(stamp=3.0, facing_yaw_rad=-0.1, **person))
+    world.observe(Observation(stamp=2.5, facing_yaw_rad=0.9, **person))  # out of order: dropped
     (e,) = world.entries
-    assert e.facing_yaw_rad == -0.1 and e.facing_stamp == 3.0
+    assert e.facing == ((1.0, 0.3), (3.0, -0.1))
+    world.observe(Observation(stamp=7.0, facing_yaw_rad=0.0, **person))
+    (e,) = world.entries
+    assert e.facing == ((3.0, -0.1), (7.0, 0.0))  # 1.0 is older than 5 s
+
+
+HISTORY = ((5.0, 0.5), (9.6, 0.2), (10.7, -0.3), (30.0, 0.4))
 
 
 @pytest.mark.parametrize(
-    "stamp,expected", [(None, None), (9.5, 0.2), (10.8, 0.2), (30.0, 0.2), (8.0, None)]
+    "now,expected",
+    [
+        (10.0, 0.2),  # nearest, 0.4 s before
+        (10.4, -0.3),  # nearest, 0.3 s after
+        (12.0, None),  # 1.3 s after the last before it, 18 s before the next
+        (11.0, -0.3),
+        (20.0, None),  # a yaw 10 s later is not this sample's
+        (4.5, 0.5),
+        (40.0, None),
+    ],
 )
-def test_fresh_yaw_is_recent_enough_and_a_later_one_always_counts(stamp, expected):
+def test_yaw_at_takes_the_nearest_reading_within_the_age_on_both_sides(now, expected):
     e = Entry("person-1", "person", "person", "unknown", 0.0, 0.0, None, 0.1, 1.0, 0.0, 10.0)
-    e.facing_yaw_rad, e.facing_stamp = 0.2, stamp
-    assert fresh_yaw(e, 10.0, 1.0) == expected
+    e.facing = HISTORY
+    assert yaw_at(e, now, 1.0) == expected
+
+
+def test_yaw_at_without_a_history_is_none():
+    e = Entry("person-1", "person", "person", "unknown", 0.0, 0.0, None, 0.1, 1.0, 0.0, 10.0)
+    assert yaw_at(e, 10.0, 1.0) is None

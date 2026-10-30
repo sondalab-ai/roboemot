@@ -22,6 +22,7 @@ from turn_server import TurnServer
 
 FACE_RAD = 0.2
 OFF_FACE_RAD = 1.3
+NO_YAW = object()  # the facing check on, the face with no head yaw
 
 
 class DecodeASR(FakeASR):
@@ -68,8 +69,10 @@ class Ear:
         if bearing is not None:
             self.bearing = bearing
 
+            y = None if yaw is NO_YAW else yaw
+
             def lookup(now):
-                return DirectionSample(self.bearing, (FACE_RAD,), True, False, (yaw,), yaw)
+                return DirectionSample(self.bearing, (FACE_RAD,), True, False, (y,), y)
 
             facing = None
             if yaw is not None:  # the faces' head yaw for the facing check; the CPU never busy
@@ -181,7 +184,19 @@ def test_a_face_looking_away_is_never_sent(ears):
         snap = ear.r.listener.snapshot()
         assert snap["wake"]["decisions"]["rejected_not_facing"] == 1
         assert sum(snap["wake"]["decisions"].values()) == 1  # decided once
-        assert snap["direction"]["facing"]["checks"]["rejected_not_facing"] == 1  # checked once
+        assert snap["direction"]["facing"]["checks"]["not_facing"] == 1  # checked once
+        assert appended(server) == []
+
+
+def test_a_face_without_a_yaw_is_never_sent(ears):
+    with TurnServer() as server:
+        on = {"voice": {"wake_word_policy": "never", "facing": {"enabled": True}}}
+        ear = ears(server, script=["che bel video"], bearing=FACE_RAD, yaw=NO_YAW, app=on)
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        assert not ear.utterances[0].addressed
+        decisions = ear.r.listener.snapshot()["wake"]["decisions"]
+        assert decisions["rejected_no_facing_data"] == 1 and sum(decisions.values()) == 1
         assert appended(server) == []
 
 

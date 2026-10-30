@@ -16,6 +16,7 @@ without voice.
 
 from __future__ import annotations
 
+import bisect
 import logging
 from collections.abc import Callable
 from dataclasses import replace
@@ -47,14 +48,14 @@ LANGUAGE_PREFERENCE = "language"
 MS_PER_S = 1000.0
 
 
-def fresh_yaw(entry: Entry, now: float, max_age_s: float) -> float | None:
-    """The entry's head yaw when it was measured at most ``max_age_s`` before ``now``, or after
-    it (a listener behind real time judges the latest yaw, as it does the faces' azimuths, so a
-    face that counts as visible counts with its yaw); else None."""
-    stamp = entry.facing_stamp
-    if stamp is None or now - stamp > max_age_s:
-        return None
-    return entry.facing_yaw_rad
+def yaw_at(entry: Entry, now: float, max_age_s: float) -> float | None:
+    """The entry's head yaw measured nearest ``now``, at most ``max_age_s`` from it on either
+    side (its ``facing`` history, oldest first); None when there is none that close."""
+    history = entry.facing
+    i = bisect.bisect_left(history, now, key=lambda r: r[0])
+    near = [history[k] for k in (i - 1, i) if 0 <= k < len(history)]
+    best = min(near, key=lambda r: abs(r[0] - now), default=None)
+    return best[1] if best is not None and abs(best[0] - now) <= max_age_s else None
 
 
 def build_listener(
@@ -135,7 +136,7 @@ def build_listener(
     def direction_sample(now: float) -> DirectionSample:
         """The sound direction and the visible faces (base frame) at ``now`` for the
         voice-at-face check, whether attention is on one of those faces and, with the facing
-        check on, their head yaw measured recently enough (``fresh_yaw``)."""
+        check on, their head yaw measured nearest ``now`` (``yaw_at``)."""
         live = listener.config
         dcfg, fcfg = live.voice.direction, live.voice.facing
         max_age = dcfg.face_max_age_s if dcfg.face_max_age_s is not None else live.attention.stale_s
@@ -146,9 +147,9 @@ def build_listener(
         sample = DirectionSample(heard, tuple(e.azimuth_rad for e in faces), engaged)
         if not fcfg.enabled:
             return sample
-        age = fcfg.max_sample_age_s if fcfg.max_sample_age_s is not None else max_age
-        mine = fresh_yaw(attended, now, age) if engaged and attended is not None else None
-        yaws = tuple(fresh_yaw(e, now, age) for e in faces)
+        age = fcfg.yaw_max_age_ms / MS_PER_S
+        mine = yaw_at(attended, now, age) if engaged and attended is not None else None
+        yaws = tuple(yaw_at(e, now, age) for e in faces)
         return replace(sample, faces_yaw_rad=yaws, engaged_yaw_rad=mine)
 
     fast = FastPath(

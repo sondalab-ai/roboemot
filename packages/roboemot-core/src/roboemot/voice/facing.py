@@ -6,13 +6,13 @@ Someone watching a screen looks at the screen, not at the robot, so an utterance
 addressed without the wake word must also come from a face looking at the robot: its head yaw
 (``roboemot.vision.facing``, 0 looking into the camera) within ``voice.facing.max_yaw_deg`` for
 at least ``min_share`` of the samples that have one. ``VoiceDirection`` picks the samples (the
-face matched at the voice, or, degraded, the face attention is on) and asks ``decide`` once per
-utterance.
+face matched at the voice, or, degraded, the face attention is on), asks ``decide`` once per
+utterance and turns its outcome into the gate's verdict (``direction.FACING_VERDICTS``).
 
-Two fallbacks decide the utterance as if this check were off, each counted: ``fallback_cpu``
-while the whole CPU has stayed above ``cpu_max_percent`` for ``cpu_hold_s`` (face detection
-then runs late), and ``fallback_no_data`` when no sample has a fresh yaw (vision paused, no
-usable landmarks). The CPU is read from ``psutil.cpu_times`` deltas of its own, at most every
+``decide`` gives one of ``OUTCOMES``: ``passed``, ``not_facing``, ``cpu_high`` (the whole CPU
+has stayed above ``cpu_max_percent`` for ``cpu_hold_s``: face detection runs late and the yaw
+is not trusted) or ``no_data`` (no sample has a yaw: vision paused, no usable landmarks, a face
+too small). The CPU is read from ``psutil.cpu_times`` deltas of its own, at most every
 ``cpu_sample_s`` and only while an utterance is heard; nothing blocks.
 """
 
@@ -31,7 +31,7 @@ import psutil
 from ..config.schema import VoiceFacingConfig
 from ..stats import P90, quantile
 
-OUTCOMES = ("passed", "rejected_not_facing", "fallback_cpu", "fallback_no_data")
+OUTCOMES = ("passed", "not_facing", "cpu_high", "no_data")
 SUMMARY_SIZE = 64  # utterances kept for the yaw summary of the debug report
 PERCENT = 100.0
 IDLE_FIELDS = ("idle", "iowait")
@@ -50,7 +50,9 @@ def cpu_times() -> tuple[float, float]:
 class CpuLoad:
     """Whether the CPU has stayed busy for a while: each ``poll`` (throttled) measures the busy
     share since the previous one; above the threshold, the high stretch starts at that
-    previous poll, and one poll at or below it ends the stretch. Listener thread only."""
+    previous poll, and one poll at or below it ends the stretch. A previous poll more than
+    ``cpu_hold_s`` old is no evidence of a stretch (samples are taken only while an utterance
+    is heard): the stretch then restarts at this poll. Listener thread only."""
 
     def __init__(
         self, reader: CpuReader = cpu_times, clock: Callable[[], float] = time.monotonic
@@ -74,12 +76,16 @@ class CpuLoad:
             self.percent = PERCENT * (busy - self._prev[0]) / (total - self._prev[1])
             if self.percent <= cfg.cpu_max_percent:
                 self._above_since = None
+            elif now - self._at > cfg.cpu_hold_s:
+                self._above_since = now
             elif self._above_since is None:
                 self._above_since = self._at
         self._prev, self._at = (busy, total), now
 
     def high(self, cfg: VoiceFacingConfig) -> bool:
-        """The CPU has been above ``cpu_max_percent`` for at least ``cpu_hold_s``."""
+        """The CPU has been above ``cpu_max_percent`` for at least ``cpu_hold_s``. Polls first,
+        so it may read the CPU times (``/proc/stat`` on Linux) on the listener thread inside
+        the wake gate's lock: one cheap read, at most every ``cpu_sample_s``."""
         self.poll(cfg)
         since = self._above_since
         return since is not None and self._clock() - since >= cfg.cpu_hold_s
@@ -112,26 +118,26 @@ class FacingCheck:
         """A CPU sample when one is due (called on each piece of utterance audio)."""
         self._cpu.poll(self._cfg)
 
-    def decide(self, yaws: Sequence[float | None]) -> bool:
-        """Whether the utterance passes, from the head yaw (radians, None: none fresh) of the
-        checked face in each sample; a fallback passes. Counts the outcome."""
+    def decide(self, yaws: Sequence[float | None]) -> str:
+        """The outcome (one of ``OUTCOMES``) from the head yaw (radians, None: none near the
+        sample's time) of the checked face in each sample; counts it."""
         cfg = self._cfg
         if self._cpu.high(cfg):
-            return self._record("fallback_cpu")
+            return self._record("cpu_high")
         known = [abs(y) for y in yaws if y is not None]
         if not known:
-            return self._record("fallback_no_data")
+            return self._record("no_data")
         limit = math.radians(cfg.max_yaw_deg)
         facing = sum(1 for y in known if y <= limit)
         passed = facing >= cfg.min_share * len(known)
-        return self._record("passed" if passed else "rejected_not_facing", known)
+        return self._record("passed" if passed else "not_facing", known)
 
-    def _record(self, outcome: str, yaws: list[float] | None = None) -> bool:
+    def _record(self, outcome: str, yaws: list[float] | None = None) -> str:
         with self._lock:
             self._outcomes[outcome] += 1
             if yaws:
                 self._yaws_deg.append(math.degrees(statistics.median(yaws)))
-        return outcome != "rejected_not_facing"
+        return outcome
 
     def snapshot(self) -> dict[str, Any]:
         """Outcome counts, the last CPU sample and the summary of each judged utterance's median

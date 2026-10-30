@@ -15,6 +15,7 @@ KEYS = {
     "rejected_other_speaker",
     "rejected_no_face_at_voice",
     "rejected_not_facing",
+    "rejected_no_facing_data",
 }
 WINDOW_S = 5.0
 
@@ -66,6 +67,7 @@ def test_wake_word_window_and_rejections_when_required(policy):
         "rejected_other_speaker": 1,
         "rejected_no_face_at_voice": 0,
         "rejected_not_facing": 0,
+        "rejected_no_facing_data": 0,
     }
 
 

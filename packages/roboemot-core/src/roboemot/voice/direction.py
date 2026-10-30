@@ -21,8 +21,10 @@ its detector did not take the sound for speech). ``degraded_rule`` decides; ``au
 
 An utterance that passes then runs the facing check (``roboemot.voice.facing``, when on): the
 face matched at the voice in each reading, or, degraded, the face attention is on, must look at
-the robot. ``check`` returns the verdict the wake gate counts: ``AT_FACE``, ``NO_FACE_AT_VOICE``
-or ``NOT_FACING``.
+the robot. ``check`` returns the verdict the wake gate counts: ``AT_FACE``, ``NO_FACE_AT_VOICE``,
+``NOT_FACING`` or ``NO_FACING_DATA``; ``FACING_VERDICTS`` maps the facing outcome to it per
+path. The snapshot's ``facing.checks`` break down ``checks.passed`` plus
+``checks.degraded_passed`` (each utterance that passed here runs the facing check once).
 """
 
 from __future__ import annotations
@@ -38,12 +40,34 @@ from typing import Any
 from ..config.schema import VoiceDirectionConfig, VoiceFacingConfig
 from ..world.frame import wrap_angle
 from .facing import FacingCheck
-from .wake import AT_FACE, NO_FACE_AT_VOICE, NOT_FACING
+from .wake import AT_FACE, NO_FACE_AT_VOICE, NO_FACING_DATA, NOT_FACING
 
 OUTCOMES = ("passed", "rejected", "degraded_passed", "degraded_rejected")
 DEGRADED_REASONS = ("no_source", "silent", "muted")
 SUMMARY_SIZE = 64  # utterances kept for the angle-difference summary of the debug report
 P90 = 0.9
+HEARD = "heard"  # judged on sound direction readings; else on a degraded reason
+# The gate's verdict for each facing outcome, per path (SPEC 8, facing check). Heard at a face,
+# a busy CPU leaves the voice-at-face check alone to decide; degraded (muted, no_source, an
+# explicit engaged rule on silent) there is no other evidence, so any fallback rejects, as
+# degraded_rule reject does. A face with no yaw is not one looking at the robot.
+FACING_VERDICTS = {
+    HEARD: {
+        "passed": AT_FACE,
+        "not_facing": NOT_FACING,
+        "cpu_high": AT_FACE,
+        "no_data": NO_FACING_DATA,
+    },
+    **{
+        reason: {
+            "passed": AT_FACE,
+            "not_facing": NOT_FACING,
+            "cpu_high": NOT_FACING,
+            "no_data": NOT_FACING,
+        }
+        for reason in DEGRADED_REASONS
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -154,20 +178,22 @@ class VoiceDirection:
             self._record("passed" if passed else "rejected", [d for d in offsets if d is not None])
             if not passed:
                 return NO_FACE_AT_VOICE
-            return self._facing_verdict([matched_yaw(s, tol) for s in heard])
+            return self._facing_verdict(HEARD, [matched_yaw(s, tol) for s in heard])
         reason = self._reason()
         passed = self._rule(reason) == "engaged" and self._engaged()
         self._record("degraded_passed" if passed else "degraded_rejected", None, reason)
         if not passed:
             return NO_FACE_AT_VOICE
-        return self._facing_verdict([s.engaged_yaw_rad for s in self._samples if s.engaged])
+        engaged = [s.engaged_yaw_rad for s in self._samples if s.engaged]
+        return self._facing_verdict(reason, engaged)
 
-    def _facing_verdict(self, yaws: list[float | None]) -> str:
-        """The facing check over the checked face's yaw per sample, when it is on."""
+    def _facing_verdict(self, path: str, yaws: list[float | None]) -> str:
+        """The facing check over the checked face's yaw per sample, when it is on, as the
+        gate's verdict for ``path`` (``HEARD`` or the degraded reason)."""
         facing = self._facing
         if facing is None or not facing.enabled:
             return AT_FACE
-        return AT_FACE if facing.decide(yaws) else NOT_FACING
+        return FACING_VERDICTS[path][facing.decide(yaws)]
 
     def _reason(self) -> str:
         """Why the utterance has too few readings (see the module docstring)."""

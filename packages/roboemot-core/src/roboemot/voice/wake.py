@@ -6,7 +6,8 @@ The wake word is *required* with policy ``always``, never with ``never``, and wi
 Every utterance that would be addressed *without* the wake word (not required, or a follow-up in
 the open window) must also pass ``at_face``, the voice-at-face check (``voice.direction``): its
 sound direction pointed at a visible face (else ``rejected_no_face_at_voice``) and, with
-``voice.facing`` on, that face looked at the robot (else ``rejected_not_facing``). A rejected
+``voice.facing`` on, that face looked at the robot (else ``rejected_not_facing``, or
+``rejected_no_facing_data`` when the face had no head yaw). A rejected
 utterance needs the wake word, so music, a television or a video is not answered. An utterance
 with the wake word never runs the check.
 
@@ -31,11 +32,13 @@ DECISIONS = (
     "rejected_other_speaker",
     "rejected_no_face_at_voice",
     "rejected_not_facing",
+    "rejected_no_facing_data",
 )
 # The voice-at-face check's verdicts (``at_face``); a rejection is counted ``rejected_<verdict>``.
 AT_FACE = "at_face"
 NO_FACE_AT_VOICE = "no_face_at_voice"
 NOT_FACING = "not_facing"
+NO_FACING_DATA = "no_facing_data"
 AtFace = Callable[[], str]
 
 

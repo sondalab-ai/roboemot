@@ -761,19 +761,35 @@ def test_barge_in_samples_are_muted_and_fall_back_to_the_engaged_face():
 # ---- facing check (voice.facing, SPEC 8 stage 2)
 
 
-def facing_rig(final, yaw_rad, policy="never"):
+class BusyCpu:
+    """A CPU always at 99 %, on a clock that moves 5 s per read: past the 10 s hold quickly."""
+
+    def __init__(self):
+        self.t, self.busy = 0.0, 0.0
+
+    def clock(self):
+        self.t += 5.0
+        return self.t
+
+    def read(self):
+        self.busy += 0.99
+        return self.busy, self.busy / 0.99
+
+
+def facing_rig(final, yaw_rad, policy="never", bearing=FACE_RAD, cpu=None):
     """``direction_rig`` with the facing check on: the face at the voice has head yaw
-    ``where["yaw"]``; the CPU reads idle."""
+    ``where["yaw"]``; the CPU reads idle unless ``cpu`` (a ``BusyCpu``) is given."""
     cfg = RoboEmotConfig.model_validate(
         {"voice": {"wake_word_policy": policy, "facing": {"enabled": True}}}
     )
-    where = {"bearing": FACE_RAD, "yaw": yaw_rad}
+    where = {"bearing": bearing, "yaw": yaw_rad}
 
     def lookup(now):
         y = where["yaw"]
         return DirectionSample(where["bearing"], (FACE_RAD,), True, False, (y,), y)
 
-    check = FacingCheck(cfg.voice.facing, CpuLoad(reader=lambda: (0.0, 1.0)))  # never busy
+    load = CpuLoad(cpu.read, cpu.clock) if cpu else CpuLoad(reader=lambda: (0.0, 1.0))
+    check = FacingCheck(cfg.voice.facing, load)
     direction = VoiceDirection(cfg.voice.direction, lookup, doa_available=True, facing=check)
     return Rig([final], final=final, cfg=cfg, direction=direction), where
 
@@ -784,7 +800,7 @@ def test_a_voice_from_a_face_looking_away_needs_the_wake_word():
     assert not r.utterances[0].addressed
     snap = r.listener.snapshot()
     assert snap["wake"]["decisions"]["rejected_not_facing"] == 1
-    assert snap["direction"]["facing"]["checks"]["rejected_not_facing"] == 1
+    assert snap["direction"]["facing"]["checks"]["not_facing"] == 1
     where["yaw"] = math.radians(5.0)
     say_text(r, "come stai")
     assert r.utterances[1].addressed
@@ -805,6 +821,51 @@ def test_facing_check_off_by_hot_reload_keeps_the_voice_at_face_check_alone():
     assert r.utterances[0].addressed
     snap = r.listener.snapshot()["direction"]
     assert snap["checks"]["passed"] == 1 and sum(snap["facing"]["checks"].values()) == 0
+
+
+def test_a_face_at_the_voice_without_a_yaw_needs_the_wake_word():
+    r, _ = facing_rig("che bel video", None)
+    r.say()
+    assert not r.utterances[0].addressed
+    snap = r.listener.snapshot()
+    assert snap["wake"]["decisions"]["rejected_no_facing_data"] == 1
+    assert snap["direction"]["facing"]["checks"]["no_data"] == 1
+
+
+def test_a_barge_in_on_a_busy_cpu_is_rejected():
+    """The muted path has no sound direction to fall back on: a busy CPU rejects it."""
+    r, _ = facing_rig("aspetta", math.radians(5.0), bearing=None, cpu=BusyCpu())
+    r.speech.extend(r.t + 2.0)  # the robot is speaking; the barge-in detector cut in
+    r.listener.resume(voice(seconds=1.0), r.t)
+    r.t += 1.0
+    r.feed(silence(r.cfg.voice.vad.end_silence_ms / 1000 + 2.0))
+    assert r.utterances and not r.utterances[0].addressed
+    snap = r.listener.snapshot()
+    assert snap["direction"]["degraded"]["muted"] == 1
+    assert snap["direction"]["facing"]["checks"]["cpu_high"] == 1
+    assert snap["wake"]["decisions"]["rejected_not_facing"] == 1
+
+
+def test_facing_counts_break_down_the_passed_checks_and_each_utterance_is_decided_once():
+    r, where = facing_rig("ciao", math.radians(5.0))
+    plan = [
+        (FACE_RAD, math.radians(5.0)),  # passed
+        (FACE_RAD, math.radians(40.0)),  # not facing
+        (FACE_RAD, None),  # no data
+        (OFF_FACE_RAD, math.radians(5.0)),  # off the face: no facing check
+    ]
+    for bearing, y in plan:
+        where["bearing"], where["yaw"] = bearing, y
+        say_text(r, "ciao")
+    snap = r.listener.snapshot()
+    direction, decisions = snap["direction"], snap["wake"]["decisions"]
+    checks = direction["checks"]
+    assert sum(direction["facing"]["checks"].values()) == (
+        checks["passed"] + checks["degraded_passed"]
+    )
+    assert sum(decisions.values()) == len(r.utterances) == len(plan)
+    assert decisions["not_required"] == 1
+    assert decisions["rejected_not_facing"] == decisions["rejected_no_facing_data"] == 1
 
 
 def test_no_reading_on_a_robot_with_a_sound_direction_needs_the_wake_word():

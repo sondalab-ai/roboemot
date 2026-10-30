@@ -59,8 +59,8 @@ class Entry:
     last_seen: float
     sources: set[str] = field(default_factory=set)
     embedding: np.ndarray | None = field(default=None, repr=False, compare=False)
-    facing_yaw_rad: float | None = None  # last head yaw a face observation gave (SPEC 8)
-    facing_stamp: float | None = None  # its capture stamp
+    # (capture stamp, head yaw) of the face observations, oldest first (SPEC 8, facing check)
+    facing: tuple[tuple[float, float], ...] = ()
 
     def public(self) -> Entry:
         """A copy safe to publish: no embedding, own ``sources`` set."""
