@@ -12,9 +12,14 @@ when nothing is queued, and ``mini.media.audio`` is ``None`` when the robot has 
 and nothing else may read the SDK. Two consumers:
 
 * the reflex sink gets each chunk's RMS. Chunks carry no capture timestamp in the SDK, so the
-  stamp is the read time. After a stall of the reading thread (a gap longer than ``max_gap_s``)
-  the queue holds old audio: it is drained and only the newest chunk counts for the reflex, so a
-  startle is never played from sound that is already old.
+  stamp is the read time. After a stall of the reading thread (a gap longer than ``max_gap_s``
+  from the end of one pass to the start of the next) the queue holds old audio: it is drained
+  and only the newest chunk counts for the reflex (the others are ``dropped_stale``), so a
+  startle is never played from sound that is already old. The drain reads only the backlog of
+  that stall: it stops at an empty queue (``None``), at a read that had to wait for the
+  microphone (SDK 1.12 blocks for the next chunk instead of returning ``None``), once it has
+  read as much audio as the stall lasted, or at ``DRAIN_MAX`` chunks. Without a known input rate
+  only the first and the last apply.
 * the voice pipeline (``voice=True``) gets every chunk, lossless unless the bound overflows: mono
   float32 at ``voice_rate_hz``, from the input rate and channel count the SDK reports (not
   assumed; channels are averaged). ``read`` pops them from a queue bounded in seconds of audio.
@@ -28,9 +33,11 @@ live microphones from one silent or anti-phase channel (SPEC 12A). Every chunk r
 drained ones included, with or without the voice pipeline (the input rate is read at start
 either way); only running sums leave a chunk, never samples.
 
-Voice stamps are approximate, monotone and not capture times: the newest chunk of a read ends
-at the read time, earlier chunks of one drained batch end one chunk duration before the next,
-and the resampler's lookahead is subtracted.
+Every chunk goes to the voice queue as soon as it is read, drained ones included, so the
+consumer never waits for a drain to end. Voice stamps are approximate and monotone: a chunk read
+in a normal pass ends at the read time; a queued chunk read in a drain ends one chunk duration
+after the previous chunk (its capture time when the SDK lost nothing), never after its read
+time; the resampler's lookahead is subtracted.
 
 Privacy (SPEC 12): without ``voice`` a chunk is only held while its RMS and the level sums are
 taken, and only those scalars leave this module. With ``voice`` the queue holds audio for the voice
@@ -61,6 +68,10 @@ JOIN_TIMEOUT_S = 2.0
 MS_PER_S = 1000.0
 IDLE_WAIT_S = 0.01
 DRAIN_MAX = 1000  # most chunks thrown away in one catch-up
+# A read that takes this share of the chunk's own duration waited for the microphone: the SDK
+# queue was empty. A queued chunk is handed over without blocking; a waiting read blocks until
+# the capture of the next chunk (SDK 1.12), so this classifies the SDK's read, not a behaviour.
+WAITED_READ_FRACTION = 0.5
 LEVEL_FLOOR_DB = -120.0  # silence, and the lowest level reported
 DB_PER_DECADE = 20.0  # amplitude ratio to dB
 LEVEL_QUANTILES = {"p10": P10, "p50": P50, "p90": P90}
@@ -145,6 +156,7 @@ class ReachyAudio:
         self._state, self._reason = "off", None
         self._chunks = 0
         self._last_error: str | None = None
+        self._last_end: float | None = None  # end stamp of the last chunk read, before lookahead
 
     def apply_config(self, cfg: RoboEmotConfig) -> None:
         """Hot reload (SPEC 11A): the stall limit follows ``reflexes.max_age_ms``. The read rate,
@@ -283,6 +295,7 @@ class ReachyAudio:
             self._set("unavailable", f"start_recording failed: {type(exc).__name__}")
             return
         self._level_reset()
+        self._last_end = None
         if self._voice:
             with self._voice_cond:
                 self._voice_q.clear()
@@ -320,15 +333,24 @@ class ReachyAudio:
         elif self._in_rate != self._voice_rate:
             self._resampler = StreamResampler(self._in_rate, self._voice_rate)
 
-    def _chunk_ends(self, batch: list[Any], read_at: float) -> list[float]:
-        """End stamp of each chunk of one read: the newest ends at ``read_at``, each earlier one
-        a chunk duration before the next."""
-        rate = self._in_rate or 1
-        ends, t = [], read_at
-        for raw in reversed(batch):
-            ends.append(t)
-            t -= (raw.shape[0] if isinstance(raw, np.ndarray) and raw.ndim else 0) / rate
-        return ends[::-1]
+    def _duration(self, chunk: Any) -> float:
+        """Seconds of input in ``chunk``; 0 when the input rate is unknown or it is no array."""
+        if self._in_rate is None or not isinstance(chunk, np.ndarray) or chunk.ndim == 0:
+            return 0.0
+        return chunk.shape[0] / self._in_rate
+
+    def _take(self, chunk: Any, read_at: float, queued: bool) -> bool:
+        """Count one chunk read at ``read_at`` for the levels and queue it for the voice side at
+        once. A ``queued`` chunk (read from a drain's backlog) ends a chunk after the previous
+        one, never after ``read_at``; any other ends at ``read_at``. Returns whether the voice
+        side used it."""
+        self._accumulate_levels(chunk)
+        end = read_at
+        if queued and self._last_end is not None:
+            end = min(read_at, self._last_end + self._duration(chunk))
+        if chunk is not None:
+            self._last_end = end
+        return self._voice and self._push_voice(chunk, end)
 
     def _push_voice(self, chunk: Any, end_stamp: float) -> bool:
         """Queue one raw chunk (ending at ``end_stamp``) for the voice consumer; the oldest
@@ -385,41 +407,47 @@ class ReachyAudio:
                 return
         self._set("off")
 
-    def poll_once(self, drain: bool = False) -> bool:
+    def _read(self, media: Any) -> tuple[Any, float, bool]:
+        """One SDK read: the chunk, its read time, and whether the read waited for the
+        microphone (it took ``WAITED_READ_FRACTION`` of the chunk's duration or more)."""
+        before = self._clock()
+        chunk = media.get_audio_sample()
+        read_at = self._clock()
+        limit = WAITED_READ_FRACTION * self._duration(chunk)
+        return chunk, read_at, limit > 0 and read_at - before >= limit
+
+    def poll_once(self, drain: bool = False, stall_s: float = math.inf) -> bool:
         """Read one chunk; hand it to the voice queue and its RMS to the reflex sink. Returns
-        whether a chunk was used. With ``drain`` (and a sink) everything queued is read: the
-        voice side keeps all of it, the reflex only the newest chunk (the rest is counted)."""
+        whether a chunk was used. With ``drain`` (and a sink) the backlog of a stall of
+        ``stall_s`` is read (module docstring): every chunk goes to the voice queue as it is
+        read, the reflex gets only the newest one and the rest is counted as ``dropped_stale``."""
         try:
             media = self._mini.media
-            chunk = media.get_audio_sample()
-            self._accumulate_levels(chunk)
-            batch = [chunk] if self._voice and chunk is not None else []
-            skipped = 0
             drain = drain and self._sink is not None
-            while drain and chunk is not None and skipped < DRAIN_MAX:
-                newer = media.get_audio_sample()
+            chunk, read_at, waited = self._read(media)
+            used = self._take(chunk, read_at, drain and not waited)
+            covered, skipped = self._duration(chunk), 0
+            while drain and chunk is not None and not waited and covered < stall_s:
+                if skipped >= DRAIN_MAX:
+                    break
+                newer, read_at, waited = self._read(media)
                 if newer is None:
                     break
                 chunk, skipped = newer, skipped + 1
-                self._accumulate_levels(newer)
-                if self._voice:
-                    batch.append(newer)
+                used = self._take(newer, read_at, not waited) or used
+                covered += self._duration(newer)
             if skipped:
                 with self._lock:
                     self._dropped += skipped
-            used = False
-            ends = self._chunk_ends(batch, self._clock())
-            for raw, end in zip(batch, ends, strict=True):
-                used = self._push_voice(raw, end) or used
             if self._sink is not None:
                 rms = chunk_rms(chunk)
-                del chunk, batch
+                del chunk
                 if rms is None:
                     return False
                 self._sink(rms, self._clock())
                 used = True
             else:
-                del chunk, batch
+                del chunk
             if not used:
                 return False
         except Exception as exc:
@@ -435,10 +463,11 @@ class ReachyAudio:
         return True
 
     def _run(self) -> None:
-        last = self._clock()
+        ended = self._clock()
         while not self._stop.is_set():
-            now = self._clock()
             # Read what is queued, then wait out the rest of the period; after a stall, catch up.
-            used = self.poll_once(drain=now - last > self.max_gap_s)
-            last = now
+            # The gap runs from the end of the last pass, so a long pass (a drain) is no stall.
+            gap = self._clock() - ended
+            used = self.poll_once(drain=gap > self.max_gap_s, stall_s=gap)
+            ended = self._clock()
             self._stop.wait(IDLE_WAIT_S if used else self._period)
