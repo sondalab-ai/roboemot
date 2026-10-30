@@ -78,11 +78,13 @@ from ..llm.router import (
 from ..persona import apply_to_register, effects
 from ..realtime import protocol as rt_protocol
 from ..realtime.turn import (
+    SKIP_TOOL,
     Reply,
     ResponseRun,
     heard_words,
     line_instructions,
     replay_block,
+    skip_tool,
     truncate_played,
     wait_in_order,
 )
@@ -108,6 +110,8 @@ JOIN_TIMEOUT_S = 2.0
 READY_TIMEOUT_S = 5.0
 INTERRUPTED_MARK = " …"  # ends an assistant message the person cut off (history, SPEC 8)
 TOO_MANY_ROUNDS = '{"error": "too_many_rounds"}'  # a tool call after the realtime round cap
+# ignore_utterance after a skill acted in the turn: refused, the exchange stays (SPEC 8)
+SKIP_REFUSED = '{"error": "skip_unavailable_after_an_action"}'
 
 
 class Speech(Protocol):
@@ -177,6 +181,7 @@ class _Turn:
     rt_round: tuple[list[ToolCall], list[ToolOutcome], int] | None = None  # round in flight
     rt_run: Any = None  # the ResponseRun of that round
     rt_audio: bool = False  # the server's own items of the utterance's audio were answered
+    skipped: str | None = None  # the model called ignore_utterance: the route counter to move
 
 
 @dataclass
@@ -771,14 +776,19 @@ class ConversationWorker:
             seed=turn.speech_id,
         )
 
-    def _rt_instructions(self, turn: _Turn, delivery: Delivery) -> str:
+    def _rt_instructions(self, turn: _Turn, delivery: Delivery, *, line: bool = False) -> str:
         """``response.create`` instructions: parts 1 to 5, the turns the server's session does
-        not hold (after a reconnect), and the mood's voice instructions."""
+        not hold (after a reconnect), and the mood's voice instructions. A fixed ``line`` leaves
+        out the skip rule (the server must say it, not judge it)."""
         cfg, conv = turn.cfg, turn.cfg.conversation
         state = self.affect.state(self.clock())
         system = build_messages(
             system=realtime_instructions(
-                cfg, turn.register, language=turn.language, robot_name=self._prompt_name(cfg)
+                cfg,
+                turn.register,
+                language=turn.language,
+                robot_name=self._prompt_name(cfg),
+                skip_rule=not line,
             ),
             profile_summary=self._summary(self._profile, conv.profile_summary_max_chars),
             scene_summary=self._summary(self._scene, conv.scene_summary_max_chars),
@@ -805,10 +815,12 @@ class ConversationWorker:
             if not ((turn.interrupted or turn.stopped) and inner.cancelled()):
                 inner.cancel()
                 raise
-            turn.outcome = "interrupted"
+            turn.outcome = "skipped" if turn.skipped else "interrupted"  # the skip came first
             return True
         except Exception as exc:
             log.warning("conversation: realtime turn failed (%s)", type(exc).__name__)
+            if turn.skipped:  # never answered by the chat routes
+                return self._skip(turn)
             # a response in flight was already abandoned (cancelled) by its run; the failing
             # round's audio is stopped with the rest
             run = turn.rt_run
@@ -853,13 +865,12 @@ class ConversationWorker:
             max_chars=conv.tool_arg_max_chars,
             choices=choices,
         )
-        sent = route.send(
-            route.session_update(
-                turn.cfg,
-                self._base_instructions(),
-                rt_protocol.function_tools(tools) if tools else [],
-            )
-        )
+        skip = turn.cfg.voice.realtime_route.skip_tool
+        # with max_tool_rounds 0 and the skip tool, the skip tool is the only one offered
+        skills = bool(tools) and not (skip and conv.max_tool_rounds == 0)
+        functions = rt_protocol.function_tools(tools) if skills else []
+        functions += [skip_tool()] if skip else []
+        sent = route.send(route.session_update(turn.cfg, self._base_instructions(), functions))
         if not sent:
             return False
         audio = turn.utterance.realtime
@@ -895,19 +906,27 @@ class ConversationWorker:
                 on_call=on_call,
                 input_chars=len(turn.utterance.text),
                 generation=turn.rt_gen,  # the session that holds the turn's words
+                mute_on=SKIP_TOOL if skip and not turn.rounds else None,
             )
             round_from = len(turn.spoken)
             turn.rt_round = (calls, results, round_from)
             turn.rt_run = run
             try:
-                choice = "auto" if in_cap else "none" if offered else None
+                # the skip tool is honoured in the first round only, as its first call
+                ask = in_cap or (skip and not turn.rounds)
+                choice = "auto" if ask else "none" if offered or skip else None
                 reply = await run.run(instructions, choice)
             except asyncio.CancelledError:
                 self._absorb(turn, run.reply, instructions)
+                if turn.skipped:
+                    self._skip(turn)
+                    raise
                 self._cut_realtime(turn)
                 self._keep_round(turn)  # a skill that ran stays in the history
                 raise
             self._absorb(turn, reply, instructions)
+            if turn.skipped:  # before a loss: the chat routes must not answer it either
+                return self._skip(turn)
             if reply.closed or reply.status == "error":
                 return self._realtime_lost(turn)
             if turn.cut:
@@ -993,6 +1012,16 @@ class ConversationWorker:
         cap = turn.cfg.conversation.max_tool_calls_per_round
 
         async def on_call(ev: rt_protocol.FunctionCall) -> bool:
+            if turn.skipped:
+                return True  # the skip came first: no later call of its response runs
+            if ev.name == SKIP_TOOL and turn.cfg.voice.realtime_route.skip_tool:
+                if not (turn.rounds or calls):  # nothing acted in the turn yet
+                    self._skip_call(turn)
+                    return True
+                calls.append(ToolCall(ev.call_id, ev.name, {}))
+                results.append(ToolOutcome(SKIP_REFUSED, False, not in_cap, ev.name, "skip"))
+                self.realtime.count("skips_refused")
+                return not in_cap
             call = ToolCall(ev.call_id, ev.name, tool_arguments(ev.arguments))
             calls.append(call)
             if not in_cap:
@@ -1005,6 +1034,45 @@ class ConversationWorker:
             return turn.cut or results[-1].end_turn
 
         return on_call
+
+    def _skip_call(self, turn: _Turn) -> None:
+        """``ignore_utterance`` (SPEC 8, skip tool): the response plays nothing more (muted, then
+        the speech is stopped like a barge-in); ``skipped_late`` once any of its audio played,
+        else ``skipped``. Its items go when the response ends (``_skip``)."""
+        if turn.skipped:
+            return
+        run = turn.rt_run
+        if run is not None:
+            run.mute()
+        jobs = turn.rt_jobs + (run.reply.jobs if run is not None else [])
+        if jobs:
+            self.speech.stop()  # first: whether anything played is then settled
+        late = any(self.speech.played(job) for job, _ in jobs)
+        turn.skipped = "skipped_late" if late else "skipped"
+
+    def _skip(self, turn: _Turn) -> bool:
+        """End a skipped turn: no tool result and no further response (the call item is deleted
+        with the rest), the user's and the response's items deleted on the server, nothing kept
+        in the history mirror or the live transcript (it is not a turn of ``history_turns``).
+        Only once per turn."""
+        if turn.outcome == "skipped":
+            return True
+        route = self.realtime
+        route.delete_items(turn.rt_gen, turn.rt_items)
+        turn.rt_items.clear()
+        turn.spoken.clear()
+        turn.queued.clear()
+        turn.rt_jobs.clear()
+        turn.exchange.clear()
+        turn.lines.clear()
+        turn.rt_round = None
+        turn.sentences = turn.exchange_spoken = 0
+        if self.transcript is not None and turn.reply_seq is not None:
+            self.transcript.settle(turn.reply_seq, "", interrupted=False)
+            turn.reply_seq = None
+        route.count(turn.skipped or "skipped")
+        turn.outcome = "skipped"
+        return True
 
     def _absorb(self, turn: _Turn, reply: Reply, instructions: str) -> None:
         """Book a response into the turn: its audio items (history, live transcript), its
@@ -1093,7 +1161,9 @@ class ConversationWorker:
                 return None  # went down (or spent its budget) while the line waited
             delivery = self._delivery(turn)
             language = LANGUAGE_NAMES.get(turn.language, turn.language)
-            instructions = line_instructions(self._rt_instructions(turn, delivery), text, language)
+            instructions = line_instructions(
+                self._rt_instructions(turn, delivery, line=True), text, language
+            )
             run = ResponseRun(
                 route,
                 self.speech,
