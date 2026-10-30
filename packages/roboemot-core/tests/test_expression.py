@@ -834,3 +834,22 @@ def test_a_gesture_for_a_robot_that_may_not_approach_keeps_the_body_still(cfg, m
     assert "body_yaw" not in r.gesture("turn").keyframes[1].values
     r.set_register(active("plain", approach_allowed=True))
     assert "body_yaw" in r.gesture("turn").keyframes[1].values
+
+
+def test_the_cue_gestures_are_not_offered_to_the_play_skill(cfg, manifest):
+    """SPEC 8, Non-verbal cues: core plays cue_<kind>; the model may not."""
+    r = gesture_renderer(cfg, manifest)
+    assert not [g for g in r.playable() if g.startswith("cue_")]
+    assert {"cue_listening", "cue_not_heard", "cue_fallback"} <= set(r.gesture_map)
+    assert r.gesture("cue_listening") is not None
+
+
+def test_the_cue_gestures_lift_or_droop_the_antennas_as_meant(cfg, manifest):
+    """cue_listening lifts the antennas toward vertical (as perk_up); cue_fallback droops them
+    outward (as puzzled), with the head dipping."""
+    r = gesture_renderer(cfg, manifest)
+    for gesture, sign in (("cue_listening", 1), ("cue_fallback", -1)):
+        prim = r.gesture(gesture)
+        mid = prim.sample(prim.duration / 2)
+        assert mid["antenna_right"] * sign > 0 and mid["antenna_left"] * sign < 0
+    assert r.gesture("cue_fallback").sample(0.8)["head.pitch"] > 0  # positive pitch is down

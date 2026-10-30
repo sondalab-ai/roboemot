@@ -51,5 +51,10 @@ reachy-mini-wireless = "roboemot_reachymini.clips:library"
 [project.entry-points."roboemot.realtime"]
 reachy-mini-wireless = "roboemot_reachymini.realtime:provider"
 
+# Non-verbal cue sounds (synthesized blirps, data/cues), keyed by manifest robot.id
+# (SPEC 4A, Hierarchy gate; SPEC 8, Non-verbal cues).
+[project.entry-points."roboemot.cue_sounds"]
+reachy-mini-wireless = "roboemot_reachymini.cues:library"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/roboemot_reachymini"]

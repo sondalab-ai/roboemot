@@ -51,6 +51,7 @@ from ..manifest import Dof
 from ..motion.core import Command, Priority
 from ..motion.curves import min_jerk
 from ..motion.primitives import Keyframe, Player, Primitive
+from ..voice.cues import GESTURE_PREFIX as CUE_GESTURE_PREFIX
 from . import AffectState
 from .clips import ClipLibrary
 from .register import ActiveRegister
@@ -202,10 +203,15 @@ class ExpressionRenderer:
         self._scale_now = self._register_scale(register)
 
     def playable(self) -> list[str]:
-        """Every name ``request`` accepts: the affect labels, then the named gestures."""
+        """The names the ``play`` skill offers: the affect labels, then the named gestures,
+        without the non-verbal cues' ``cue_<kind>`` gestures (core plays those, SPEC 8)."""
         return [
             *self.expression_map,
-            *(g for g in self.gesture_map if g not in self.expression_map),
+            *(
+                g
+                for g in self.gesture_map
+                if g not in self.expression_map and not g.startswith(CUE_GESTURE_PREFIX)
+            ),
         ]
 
     def request(self, label: str, now: float | None = None) -> bool:
