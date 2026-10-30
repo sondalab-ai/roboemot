@@ -71,6 +71,7 @@ from ..config.schema import IdentityConfig, TrackerConfig, VisionConfig, WorldCo
 from ..registry import Matcher
 from ..stats import SUMMARY_LEVELS, summarise
 from ..world import FrameSpec, Observation
+from .facing import head_yaw, smoothed
 from .geometry import CameraModel
 from .governor import CONVERSATION, EPSILON_S, RateGovernor
 from .stages import (
@@ -110,6 +111,7 @@ class _FaceState:
     anonymous_id: str | None = None
     announced: str | None = None
     reported: bool = False
+    yaws: deque[tuple[float, float]] = field(default_factory=deque)  # (capture stamp, yaw)
 
 
 @dataclass
@@ -426,6 +428,7 @@ class VisionPipeline:
             if state is None:
                 state = self._faces[track.track_id] = self._new_face(track, frame.stamp)
             state.last_seen = frame.stamp
+            self._track_yaw(track, state, frame.stamp)
             self._evaluate_face(frame, track, state)
             self._publish_face(frame, camera, track, state)
         if self.face_tap is not None:
@@ -460,6 +463,16 @@ class VisionPipeline:
         if math.isinf(self.governor.period("detection")):
             return []
         return None
+
+    def _track_yaw(self, track: Track, state: _FaceState, stamp: float) -> None:
+        """Add this frame's head yaw (from the matched detection's landmarks) to the track's
+        history; a frame without usable landmarks adds nothing."""
+        det = track.detection
+        cfg = self.cfg
+        lm = det.landmarks if det is not None else None
+        yaw = head_yaw(lm, cfg.facing_nose_depth_ratio, cfg.facing_min_eye_px)
+        if yaw is not None:
+            state.yaws.append((stamp, yaw))
 
     def _face_due(self, track: Track, state: _FaceState, stamp: float) -> bool:
         if track.score < self.cfg.tracker.high_score or track.detection is None:
@@ -534,6 +547,7 @@ class VisionPipeline:
             category=PERSON,
             identity=owner,
             confidence=min(1.0, max(0.0, track.score)),
+            facing_yaw_rad=smoothed(state.yaws, frame.stamp, self.cfg.facing_window_s),
         )
         self._publish("percept.entity", obs, frame.stamp, joint_state=frame.joint_state)
 

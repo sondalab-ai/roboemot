@@ -3,8 +3,8 @@
 ``build_listener`` assembles Silero VAD, Vosk, the fast path and the listener over the audio
 hub's voice queue, with the app-side lookups they need: the robot's sound bearing in the base
 frame (a ``BearingSource``), the attended person, whether an enrolled person is in view, the
-sound direction and visible faces for the voice-at-face check, and the speaker's language
-preference.
+sound direction, visible faces and their head yaw for the voice-at-face and facing checks, and
+the speaker's language preference.
 The fast path gets the grammar pass (SPEC 8 stage 3) over the same Vosk models; the listener runs it
 on its grammar worker thread, so the microphone keeps being read meanwhile.
 The barge-in detector (SPEC 8 stage 8) is built with the listener, on its own Silero instance, and
@@ -16,8 +16,10 @@ without voice.
 
 from __future__ import annotations
 
+import bisect
 import logging
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +33,7 @@ from roboemot.voice.activity import SpeechActivity
 from roboemot.voice.asr import VoskASR, resolve_language
 from roboemot.voice.bargein import BargeIn, PlaybackReference
 from roboemot.voice.direction import DirectionSample, VoiceDirection
+from roboemot.voice.facing import FacingCheck
 from roboemot.voice.fastpath import Emit, FastPath
 from roboemot.voice.grammar import GrammarSpotter
 from roboemot.voice.listener import Utterance, VoiceListener
@@ -43,6 +46,16 @@ log = logging.getLogger(__name__)
 
 LANGUAGE_PREFERENCE = "language"
 MS_PER_S = 1000.0
+
+
+def yaw_at(entry: Entry, now: float, max_age_s: float) -> float | None:
+    """The entry's head yaw measured nearest ``now``, at most ``max_age_s`` from it on either
+    side (its ``facing`` history, oldest first); None when there is none that close."""
+    history = entry.facing
+    i = bisect.bisect_left(history, now, key=lambda r: r[0])
+    near = [history[k] for k in (i - 1, i) if 0 <= k < len(history)]
+    best = min(near, key=lambda r: abs(r[0] - now), default=None)
+    return best[1] if best is not None and abs(best[0] - now) <= max_age_s else None
 
 
 def build_listener(
@@ -122,15 +135,22 @@ def build_listener(
 
     def direction_sample(now: float) -> DirectionSample:
         """The sound direction and the visible faces (base frame) at ``now`` for the
-        voice-at-face check, and whether attention is on one of those faces."""
+        voice-at-face check, whether attention is on one of those faces and, with the facing
+        check on, their head yaw measured nearest ``now`` (``yaw_at``)."""
         live = listener.config
-        dcfg = live.voice.direction
+        dcfg, fcfg = live.voice.direction, live.voice.facing
         max_age = dcfg.face_max_age_s if dcfg.face_max_age_s is not None else live.attention.stale_s
         heard = bearing.get(now, dcfg.doa_max_age_ms / MS_PER_S)
         faces = [e for e in world.entries if e.kind == "person" and now - e.last_seen <= max_age]
         attended = attended_person()
         engaged = attended is not None and any(e.entry_id == attended.entry_id for e in faces)
-        return DirectionSample(heard, tuple(e.azimuth_rad for e in faces), engaged)
+        sample = DirectionSample(heard, tuple(e.azimuth_rad for e in faces), engaged)
+        if not fcfg.enabled:
+            return sample
+        age = fcfg.yaw_max_age_ms / MS_PER_S
+        mine = yaw_at(attended, now, age) if engaged and attended is not None else None
+        yaws = tuple(yaw_at(e, now, age) for e in faces)
+        return replace(sample, faces_yaw_rad=yaws, engaged_yaw_rad=mine)
 
     fast = FastPath(
         cfg.voice,
@@ -175,7 +195,10 @@ def build_listener(
         enrolled_in_view=enrolled_in_view,
         grammar_background=True,
         direction=VoiceDirection(
-            cfg.voice.direction, direction_sample, doa_available=doa_available
+            cfg.voice.direction,
+            direction_sample,
+            doa_available=doa_available,
+            facing=FacingCheck(cfg.voice.facing),
         ),
     )
 

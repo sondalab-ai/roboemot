@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -716,3 +717,20 @@ def test_real_face_pipeline_on_a_face_image(stages):
     )
     assert e1.shape == (128,) and float(e1 @ e2) > 0.45
     assert time.perf_counter() - start < 5
+
+
+@pytest.mark.models
+def test_real_landmarks_of_a_frontal_portrait_look_at_the_camera(stages):
+    path = os.environ.get("ROBOEMOT_TEST_FACE")
+    if not path:
+        pytest.skip("set ROBOEMOT_TEST_FACE to a frontal portrait image to run the face path")
+    import cv2
+    from roboemot.vision.facing import head_yaw
+
+    cfg = RoboEmotConfig()
+    v = cfg.vision
+    img = cv2.imread(path)
+    for im in (img, cv2.flip(img, 1)):  # YuNet is not mirror-exact: both must pass on their own
+        lm = stages.face_detector.detect(im)[0].landmarks
+        yaw = head_yaw(lm, v.facing_nose_depth_ratio, v.facing_min_eye_px)
+        assert yaw is not None and abs(yaw) < math.radians(cfg.voice.facing.max_yaw_deg)

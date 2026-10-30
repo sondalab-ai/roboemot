@@ -69,7 +69,7 @@ from .grammar_worker import GrammarJob, GrammarWorker
 from .listener_load import ListenerLoad
 from .speech_features import Prosody
 from .vad import Endpointer, SpeechAudio, SpeechEnd, SpeechStart
-from .wake import WakeGate
+from .wake import AT_FACE, AtFace, WakeGate
 
 log = logging.getLogger(__name__)
 TOPIC = "percept.utterance"
@@ -133,7 +133,7 @@ class _Handoff:
     the realtime route's transcript of its audio (``rt``) or for its local decode (``decode``,
     then its grammar pass). ``state`` is the fast path's state
     of the utterance (held at its end); ``addressed`` the wake decision once made (None
-    before); ``face`` the voice-at-face check's answer once asked (None: not asked);
+    before); ``face`` the voice-at-face check's verdict once asked (None: not asked);
     ``heard`` what its grammar pass heard."""
 
     ev: SpeechEnd
@@ -146,7 +146,7 @@ class _Handoff:
     state: UtteranceState | None = None
     rt: Any = None  # the RealtimeInput job (realtime.input.InputJob)
     addressed: bool | None = None
-    face: bool | None = None
+    face: str | None = None
     heard: frozenset[str] = field(default=frozenset(), repr=False)
     decode: DecodeJob | None = None  # its local decode, off the listener thread
     local_only: bool = False  # its audio left without a transcript: the chat routes answer
@@ -261,7 +261,7 @@ class VoiceListener:
         self._gate.apply(cfg.voice.wake_word_policy, fp.addressed_window_s, fp.window_max_s)
         self.load.apply_config(cfg.voice.listener)
         if self._direction is not None:
-            self._direction.apply_config(cfg.voice.direction)
+            self._direction.apply_config(cfg.voice.direction, cfg.voice.facing)
 
     def bind_realtime(self, realtime: Any) -> None:
         """Send addressed utterances' audio to the realtime route through ``realtime`` (a
@@ -621,18 +621,18 @@ class VoiceListener:
         )
         self.poll_handoff()
 
-    def _handoff_for(self, ev: SpeechEnd, face: bool | None) -> _Handoff:
+    def _handoff_for(self, ev: SpeechEnd, face: str | None) -> _Handoff:
         """The hand-off of an utterance that skipped Vosk, its final still to come."""
         now = self._clock()
         held = self._fast.hold()
         return _Handoff(ev, "", self._language, None, None, now, now, held, face=face)
 
-    def _face(self) -> bool | None:
-        """The voice-at-face check, asked once for an utterance; None without one."""
+    def _face(self) -> str | None:
+        """The voice-at-face check's verdict, asked once for an utterance; None without one."""
         check = self._at_face()
-        return None if check is None else bool(check())
+        return None if check is None else check()
 
-    def _send_unheard(self, ev: SpeechEnd, face: bool | None) -> bool:
+    def _send_unheard(self, ev: SpeechEnd, face: str | None) -> bool:
         """An utterance that skipped Vosk ended: if the wake gate addresses it without the
         wake word (its voice-at-face check passed) its audio goes and its final waits for the
         server. False: it is decoded locally (the check rejected it, or the window closed)."""
@@ -640,7 +640,7 @@ class VoiceListener:
             return False
         start, speaker = ev.start_stamp, self._speaker()
         enrolled = self._enrolled(start)
-        if face is False or not self._gate.addressable(
+        if face not in (None, AT_FACE) or not self._gate.addressable(
             enrolled_in_view=enrolled, start=start, speaker=speaker
         ):
             return False
@@ -938,7 +938,7 @@ class VoiceListener:
         if d is not None and d.enabled:
             d.sample(stamp, muted=self._speech.speaking(stamp))
 
-    def _at_face(self) -> Callable[[], bool] | None:
+    def _at_face(self) -> AtFace | None:
         """The voice-at-face check for the wake gate, None when there is none or it is off."""
         d = self._direction
         return d.check if d is not None and d.enabled else None

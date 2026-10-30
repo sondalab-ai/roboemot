@@ -242,6 +242,7 @@ class WorldModel:
             sources={obs.source},
             embedding=None if obs.embedding is None else np.array(obs.embedding, dtype=float),
         )
+        self._facing(entry, obs)
         eid = entry.entry_id
         self._entries[eid] = entry
         self._updated[eid] = obs.stamp
@@ -265,6 +266,7 @@ class WorldModel:
         entry.uncertainty_rad = max(floor, (1.0 - w) * entry.uncertainty_rad + w * offset)
         if _known(obs.identity):
             entry.identity = obs.identity  # type: ignore[assignment]
+        self._facing(entry, obs)
         if obs.embedding is not None:
             emb = np.array(obs.embedding, dtype=float)
             old_emb = entry.embedding
@@ -277,6 +279,17 @@ class WorldModel:
         if moved > math.radians(self.cfg.moved_threshold_deg):
             self._announced[entry.entry_id] = (entry.azimuth_rad, entry.elevation_rad)
             events.append(("world.entity_moved", entry.public(), obs.stamp))
+
+    def _facing(self, entry: Entry, obs: Observation) -> None:
+        """Add a face observation's head yaw to the entry's history, dropping readings older
+        than ``world.facing_history_s``; one without a yaw (a sound bearing, no usable
+        landmarks) or older than the last reading adds nothing. A new tuple each time, so
+        published copies never change under their readers."""
+        if obs.facing_yaw_rad is None or (entry.facing and obs.stamp <= entry.facing[-1][0]):
+            return
+        oldest = obs.stamp - self.cfg.facing_history_s
+        kept = tuple(r for r in entry.facing if r[0] >= oldest)
+        entry.facing = (*kept, (obs.stamp, obs.facing_yaw_rad))
 
     def _remove(self, entry: Entry) -> None:
         eid = entry.entry_id
