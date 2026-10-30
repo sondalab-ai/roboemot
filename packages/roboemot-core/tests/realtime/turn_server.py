@@ -9,6 +9,8 @@ Scripts (``scripts``, used in order; the last one repeats):
   with usage ``usage`` (None leaves usage out);
 - ``tool``: ``response.created``, one ``response.function_call_arguments.done`` (``tool_name``,
   ``tool_args``) and ``response.done``;
+- ``audio_then_tool``: the ``reply`` audio, then the ``tool`` call, then ``response.done``;
+- ``tool_then_audio``: the ``tool`` call, then the ``reply`` audio (both stop at a cancel);
 - ``close_before``: the socket is closed on ``response.create``;
 - ``close_mid``: ``response.created``, one audio delta, then the socket is closed;
 - ``error``: an ``error`` instead of ``response.created``;
@@ -238,19 +240,11 @@ class TurnServer(FakeServer):
             await self._done(ws, rid, "completed")
             return
         if script == "tool":
-            await self._send(
-                ws,
-                {
-                    "type": "response.function_call_arguments.done",
-                    "response_id": rid,
-                    "item_id": f"fc_{self.responses}",
-                    "call_id": f"call_{self.responses}",
-                    "name": self.tool_name,
-                    "arguments": self.tool_args,
-                },
-            )
+            await self._call(ws, rid)
             await self._done(ws, rid, "completed")
             return
+        if script == "tool_then_audio":
+            await self._call(ws, rid)
         delta = base64.b64encode(pcm(self.delta_ms)).decode()
         for i in range(1 if script == "close_mid" else self.deltas):
             if cancel.is_set():
@@ -280,10 +274,25 @@ class TurnServer(FakeServer):
         if script == "close_mid":
             await ws.close()
             return
+        if script == "audio_then_tool":
+            await self._call(ws, rid)
         await self._send(
             ws, {"type": "response.output_audio.done", "response_id": rid, "item_id": item}
         )
         await self._done(ws, rid, "cancelled" if cancel.is_set() else "completed")
+
+    async def _call(self, ws: ServerConnection, rid: str) -> None:
+        await self._send(
+            ws,
+            {
+                "type": "response.function_call_arguments.done",
+                "response_id": rid,
+                "item_id": f"fc_{self.responses}",
+                "call_id": f"call_{self.responses}",
+                "name": self.tool_name,
+                "arguments": self.tool_args,
+            },
+        )
 
     async def _done(self, ws: ServerConnection, rid: str, status: str) -> None:
         response: dict[str, Any] = {"id": rid, "status": status}

@@ -12,7 +12,9 @@ parts 1 to 4 leave room for a turn on every route.
 
 from __future__ import annotations
 
+import functools
 import json
+from pathlib import Path
 from typing import Any
 
 from ..config.schema import RegisterParams, RoboEmotConfig
@@ -31,6 +33,9 @@ VOCABULARY_RULES = {
     "formal": "Use polite, formal wording.",
 }
 LANGUAGE_NAMES = {"it": "Italian", "en": "English"}
+PROMPTS_DIR = Path(__file__).with_name("prompts")
+SKIP_PROMPT = "ignore_utterance"  # prompts/ignore_utterance.<language>.txt (the skip tool)
+SKIP_PROMPT_FALLBACK = "en"  # the rule's language when neither the turn's nor the default has one
 
 
 def max_reply_sentences(cfg: RoboEmotConfig, register: RegisterParams) -> int:
@@ -60,12 +65,34 @@ def realtime_instructions(
     *,
     language: str | None = None,
     robot_name: str = "",
+    skip_rule: bool = True,
 ) -> str:
     """Parts 1 to 4 for the realtime speech route (SPEC 8, Realtime speech route): the same
     prompt without the mood-tag rule, because the server's voice would speak the tags. The
     sentence cap stays a rule in the prompt only (the reply's audio cannot be cut on a sentence
-    boundary)."""
-    return _prompt(cfg, register, language, robot_name, False)
+    boundary). With ``voice.realtime_route.skip_tool`` (and ``skip_rule``: a fixed line leaves
+    it out) the ``ignore_utterance`` rule from the prompt files follows, in the turn's language."""
+    prompt = _prompt(cfg, register, language, robot_name, False)
+    if not (skip_rule and cfg.voice.realtime_route.skip_tool):
+        return prompt
+    lang = language or cfg.conversation.language
+    rules = skip_prompts()
+    rule = (
+        rules.get(lang) or rules.get(cfg.conversation.language) or rules.get(SKIP_PROMPT_FALLBACK)
+    )
+    return f"{prompt}\n{rule}" if rule else prompt
+
+
+@functools.cache
+def skip_prompts() -> dict[str, str]:
+    """The skip tool's instruction per language, from ``prompts/ignore_utterance.<lang>.txt``
+    (shipped with the package; cached). Prompt text is data, not code (SPEC 8, 11A)."""
+    out = {}
+    for path in sorted(PROMPTS_DIR.glob(f"{SKIP_PROMPT}.*.txt")):
+        text = path.read_text(encoding="utf-8").strip()
+        if text:
+            out[path.name.removeprefix(f"{SKIP_PROMPT}.").removesuffix(".txt")] = text
+    return out
 
 
 def _prompt(

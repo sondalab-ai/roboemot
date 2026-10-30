@@ -2991,6 +2991,13 @@ class RealtimeRouteConfig(Strict):
         "Add the mood's voice instructions to each request (shapes the wording; the server's "
         "voice ignores rate, pitch and pauses)",
     )
+    skip_tool: bool = param(
+        False,
+        "Offer the server's LLM the ignore_utterance tool, with the instruction to call it and "
+        "say nothing for speech not meant for the robot (a phone call, people talking to each "
+        "other, a video, TV or radio). A skipped utterance gets no answer and its items are "
+        "deleted; its audio still reached the server",
+    )
 
     connect_timeout_s: float = param(
         5.0,
