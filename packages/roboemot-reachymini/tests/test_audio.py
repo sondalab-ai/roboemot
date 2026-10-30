@@ -169,10 +169,10 @@ def test_after_a_stall_of_the_reading_thread_the_backlog_is_dropped_not_played_l
     chunks = [np.full(8, v, np.float32) for v in (0.1, 0.2, 0.3)]
     mini, _ = media(chunks)
     got = []
-    ticks = iter(range(1000))
-    # every clock read is 1 s after the last: each loop pass looks like a stall (gap > max_gap_s)
+    ticks = iter([0.0])
+    # the clock jumps 1 s after the thread's first read of it: the first pass follows a stall
     audio = ReachyAudio(
-        mini, lambda rms, stamp: got.append(rms), 500, lambda: float(next(ticks)), max_gap_s=0.15
+        mini, lambda rms, stamp: got.append(rms), 500, lambda: next(ticks, 1.0), max_gap_s=0.15
     )
     audio.start()
     assert wait_for(lambda: len(got) >= 1)
@@ -311,13 +311,16 @@ def test_voice_frames_are_never_logged(caplog):
     assert all(not isinstance(v, np.ndarray) for v in audio.snapshot()["voice"].values())
 
 
-def test_stamps_of_a_drained_batch_are_monotone_and_end_at_the_read_time():
-    chunks = [np.full(1600, v, np.float32) for v in (0.1, 0.2, 0.3)]  # 0.1 s each
+def test_drained_chunks_end_one_chunk_after_another_from_the_last_chunk_before_the_stall():
+    chunks = [np.full(1600, v, np.float32) for v in (0.1, 0.2, 0.3, 0.4)]  # 0.1 s each
     mini, _ = voice_media(chunks, channels=1)
-    audio = manual(ReachyAudio(mini, lambda *_: None, 50, clock=lambda: 50.0, voice=True), mini)
-    assert audio.poll_once(drain=True)
-    stamps = [audio.read().stamp for _ in range(3)]
-    assert stamps == pytest.approx([49.8, 49.9, 50.0])
+    now = [49.7]
+    audio = manual(ReachyAudio(mini, lambda *_: None, 50, clock=lambda: now[0], voice=True), mini)
+    assert audio.poll_once()
+    now[0] = 50.05  # the queued chunks were captured during the stall, not at the read
+    assert audio.poll_once(drain=True, stall_s=0.3)
+    stamps = [audio.read().stamp for _ in range(4)]
+    assert stamps == pytest.approx([49.7, 49.8, 49.9, 50.0])
 
 
 def test_the_resampler_lookahead_is_subtracted_from_the_stamp():
@@ -495,3 +498,212 @@ def test_drained_chunks_count_for_the_levels():
     audio._read_format(mini.media)
     assert audio.poll_once(drain=True)
     assert audio.snapshot()["dropped_stale"] == 3 and audio.snapshot()["levels"]["blocks"] == 4
+
+
+# ------------------------------------------------- stalls of the reading thread (SPEC 4A, 8, 10)
+
+CHUNK = 256  # 16 ms at 16 kHz, the chunk the robot's microphone gives
+CHUNK_S = CHUNK / 16000
+MAX_GAP_S = 0.15
+
+
+class FakeMic:
+    """A microphone on a fake clock: one chunk ends every ``CHUNK_S``, and each chunk's samples
+    hold its capture end time (the ground truth for order and stamps).
+
+    ``get_audio_sample`` returns the oldest chunk already captured at once. With none ready,
+    ``mode="wait"`` (SDK 1.12) moves the clock to the next chunk's end and returns it, and
+    ``mode="none"`` (SDK 1.13, not verified) returns ``None`` at once. The hub's stop event is
+    replaced so that each wait of the reading thread advances the clock, ``stall_s`` is added to
+    the wait of pass ``stall_at``, and the thread ends after ``passes`` passes. ``on_read`` runs
+    before every read (a consumer that keeps up)."""
+
+    def __init__(
+        self, mode="wait", passes=200, stall_at=None, stall_s=0.0, read_cost_s=0.0, lost_s=0.0
+    ):
+        self.t, self.mode, self.read_cost_s, self.lost_s = 1.0, mode, read_cost_s, lost_s
+        self.next_end = self.t + CHUNK_S  # end time of the next chunk to hand out
+        self.passes, self.stall_at, self.stall_s = passes, stall_at, stall_s
+        self.pass_n = 0
+        self.on_read = lambda: None
+        self.handed = []  # capture end of every chunk handed out, in order
+
+    def clock(self):
+        return self.t
+
+    def get(self):
+        self.on_read()
+        if self.next_end > self.t + 1e-9:
+            if self.mode == "none":
+                return None
+            self.t = self.next_end
+        self.t += self.read_cost_s
+        end, self.next_end = self.next_end, self.next_end + CHUNK_S
+        self.handed.append(end)
+        return np.full(CHUNK, end, np.float32)
+
+    def is_set(self):
+        return self.pass_n >= self.passes
+
+    def wait(self, timeout):
+        self.pass_n += 1
+        self.t += timeout
+        if self.pass_n == self.stall_at:
+            self.t += self.stall_s
+            self.next_end += round(self.lost_s / CHUNK_S) * CHUNK_S  # the SDK lost these
+        return self.is_set()
+
+    def hub(self, sink, voice=True):
+        mini = SimpleNamespace(
+            media=SimpleNamespace(
+                audio=object(),
+                get_audio_sample=self.get,
+                get_input_audio_samplerate=lambda: 16000,
+                get_input_channels=lambda: 1,
+            )
+        )
+        audio = ReachyAudio(
+            mini, sink, 50, clock=self.clock, max_gap_s=MAX_GAP_S, voice=voice, voice_queue_s=10.0
+        )
+        audio._open_voice(mini.media)
+        audio._stop = self
+        return audio
+
+
+def run_stalled(mode="wait", stall_s=0.5, passes=200, read_cost_s=0.0, lost_s=0.0):
+    """Run the hub's reading loop on a ``FakeMic`` with one stall; a consumer that keeps up
+    reads the voice queue before every SDK read. Returns the mic, the hub, the reflex stamps
+    and the voice chunks as (chunk, time received). A ``FakeMic`` chunk holds its capture end,
+    so the RMS the reflex sink gets is the capture end of its chunk."""
+    mic = FakeMic(
+        mode, passes=passes, stall_at=20, stall_s=stall_s, read_cost_s=read_cost_s, lost_s=lost_s
+    )
+    reflex = []  # (capture end of the chunk the sink got, its stamp)
+    audio = mic.hub(lambda rms, stamp: reflex.append((rms, stamp)))
+    heard = []
+
+    def consume():
+        while (c := audio.read()) is not None:
+            heard.append((c, mic.t))
+
+    mic.on_read = consume
+    audio._run()
+    consume()
+    return mic, audio, reflex, heard
+
+
+@pytest.mark.parametrize("mode", ["wait", "none"])
+def test_one_stall_drains_once_and_the_next_pass_does_not(mode):
+    mic, audio, reflex, _ = run_stalled(mode)
+    backlog = round(0.5 / CHUNK_S)
+    assert audio.snapshot()["dropped_stale"] >= backlog - 1  # the stall's backlog, not the reflex's
+    if mode == "wait":  # in step, a pass reads one chunk: only the stall's backlog is dropped
+        assert audio.snapshot()["dropped_stale"] <= backlog + 1
+    # not a chain of drains: the reflex only ever gets a fresh chunk, and the thread kept up
+    assert max(stamp - end for end, stamp in reflex) < CHUNK_S + 1 / 50
+    assert mic.t - mic.handed[-1] < MAX_GAP_S
+
+
+@pytest.mark.parametrize("mode", ["wait", "none"])
+def test_the_reflex_fires_at_least_every_max_gap_after_a_stall(mode):
+    mic, _, reflex, _ = run_stalled(mode)
+    gaps = np.diff([stamp for _, stamp in reflex])
+    stall = int(np.argmax(gaps))
+    assert gaps[stall] <= 0.5 + MAX_GAP_S  # the stall itself, then at once a fresh chunk
+    assert max(np.delete(gaps, stall)) <= MAX_GAP_S
+
+
+@pytest.mark.parametrize("mode", ["wait", "none"])
+def test_the_voice_consumer_gets_every_chunk_in_order_as_soon_as_it_is_read(mode):
+    mic, audio, _, heard = run_stalled(mode)
+    ends = [float(c.samples[0]) for c, _ in heard]
+    assert ends == pytest.approx(mic.handed)  # every chunk read, in order, none lost
+    snap = audio.snapshot()["voice"]
+    assert snap["dropped"] == 0 and snap["dropped_samples"] == 0
+    assert not any(c.gap for c, _ in heard)
+    # nothing waits for a drain to end: the longest delay is the stall, not a batch
+    delays = [got - end for (c, got), end in zip(heard, ends, strict=True)]
+    assert max(delays) <= 0.5 + MAX_GAP_S
+
+
+@pytest.mark.parametrize("mode", ["wait", "none"])
+def test_a_backlog_is_stamped_with_its_capture_times(mode):
+    _, _, _, heard = run_stalled(mode)
+    stamps = [c.stamp for c, _ in heard]
+    ends = [float(c.samples[0]) for c, _ in heard]
+    assert all(b > a for a, b in zip(stamps, stamps[1:], strict=False))  # strictly monotone
+    backlog = [(c.stamp, end) for (c, got), end in zip(heard, ends, strict=True) if got - end > 0.1]
+    assert len(backlog) >= round(0.4 / CHUNK_S)
+    assert [s for s, _ in backlog] == pytest.approx([e for _, e in backlog], abs=1e-6)
+    # a read in a normal pass is stamped at the read time: it trails the capture by at most
+    # one poll period
+    assert max(abs(s - e) for s, e in zip(stamps, ends, strict=True)) <= 1 / 50 + 1e-6
+
+
+@pytest.mark.parametrize("mode", ["wait", "none"])
+@pytest.mark.parametrize("read_cost_s", [0.004, 0.009])
+def test_slow_reads_still_catch_up_and_never_feed_the_reflex_old_sound(mode, read_cost_s):
+    """A loaded CPU (vision on the CM4) makes every read slow, queued ones too. A pass still
+    reads until it is in step with the microphone, so the backlog is not left for later passes
+    to feed to the reflex as if it were new, and the voice lag stays bounded. At 9 ms a pass of
+    one chunk plus the idle wait takes longer than a chunk, so this also needs a catch-up outside
+    a stall. The reflex is held off while the backlog is read (about 0.64 s at 9 ms)."""
+    mic, audio, reflex, heard = run_stalled(mode, read_cost_s=read_cost_s)
+    assert audio.snapshot()["dropped_stale"] >= round(0.5 / CHUNK_S) - 1  # the drain ran
+    assert max(stamp - end for end, stamp in reflex) <= CHUNK_S + 1 / 50 + read_cost_s
+    assert [float(c.samples[0]) for c, _ in heard] == pytest.approx(mic.handed)
+    assert mic.t - mic.handed[-1] < MAX_GAP_S
+    assert max(got - float(c.samples[0]) for c, got in heard) < 0.5 + 0.7
+
+
+def test_without_an_input_rate_a_drain_lasts_no_longer_than_the_stall():
+    """No rate, no chain: on SDK 1.12 every read waits for live audio, so only the wall clock
+    can end the drain (it once ran 1000 reads, 16 s)."""
+    mic = FakeMic("wait")
+    mini = SimpleNamespace(media=SimpleNamespace(audio=object(), get_audio_sample=mic.get))
+    got = []
+    audio = ReachyAudio(mini, lambda r, s: got.append(r), 50, clock=mic.clock, max_gap_s=0.15)
+    assert audio._in_rate is None
+    t0 = mic.t
+    assert audio.poll_once(drain=True, stall_s=0.1)
+    assert mic.t - t0 <= 0.1 + CHUNK_S and len(mic.handed) <= round(0.1 / CHUNK_S) + 1
+    assert len(got) == 1
+
+
+def test_a_chained_stamp_never_ends_after_its_read_time():
+    """Chunks handed over faster than they last (a burst) end at the read time, not later, so
+    stamps stay monotone; a batch back-dated from the read time ran backwards."""
+    mini, _ = voice_media([np.full(1600, 0.1, np.float32)] * 3, channels=1)  # 0.1 s each
+    now = [49.7]
+    audio = manual(ReachyAudio(mini, lambda *_: None, 50, clock=lambda: now[0], voice=True), mini)
+    assert audio.poll_once()
+    now[0] = 49.75
+    while audio.poll_once(drain=True):
+        pass
+    stamps = [audio.read().stamp for _ in range(3)]
+    assert stamps == pytest.approx([49.7, 49.75, 49.75])
+
+
+def test_start_restarts_the_chain():
+    mini, _ = voice_media([np.full(CHUNK, 0.1, np.float32)], channels=1)
+    audio = manual(ReachyAudio(mini, None, 50, clock=lambda: 3.0, voice=True), mini)
+    assert audio.poll_once() and audio._last_end == 3.0
+    audio.start()
+    try:
+        assert audio._last_end is None
+    finally:
+        audio.stop()
+
+
+@pytest.mark.parametrize("mode", ["wait", "none"])
+def test_audio_lost_in_a_stall_restarts_the_stamps_instead_of_reading_live_audio_forever(mode):
+    """The SDK dropped 0.3 s during the stall, so the chained stamps trail the capture by 0.3 s
+    and can never catch up: the reader restarts them within a window instead of reading live
+    audio until ``DRAIN_MAX`` in every pass."""
+    mic, _, reflex, heard = run_stalled(mode, lost_s=0.3)
+    stamps = [stamp for _, stamp in reflex]
+    # one window that gains (the backlog), one that does not (live reads), then the restart
+    assert max(np.diff(stamps)) <= 0.5 + 2 * MAX_GAP_S + 3 * CHUNK_S
+    assert max(stamp - end for end, stamp in reflex) <= MAX_GAP_S
+    late = [(c.stamp, float(c.samples[0])) for c, got in heard[-20:]]
+    assert [st for st, _ in late] == pytest.approx([e for _, e in late], abs=1 / 50 + 1e-6)
