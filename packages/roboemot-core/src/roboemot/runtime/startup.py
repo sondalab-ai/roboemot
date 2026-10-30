@@ -66,7 +66,7 @@ def offline_cue(host: RuntimeHost, stack: ConfigStack, p: Pipeline) -> SpeechCue
         delivery,
         lambda: p.sleep.asleep or p.sleep.paused,
         line,
-        no_voice=lambda: stack.effective().voice.backend == NO_VOICE,
+        no_voice=lambda: (out := host.speech_output) is not None and out.backend.name == NO_VOICE,
         cue=cue,
     )
 
@@ -202,15 +202,16 @@ def bind_realtime_input(
     cleanup.callback(audio_in.close)
 
 
-def audio_cues(cues: CueSink) -> Callable[[str], None]:
-    """The listener's audio events as cues: audio sent begins the listening cue; audio that did
-    not leave ends it; audio without a transcript ends it and shows ``not_heard``."""
+def audio_cues(cues: CueSink) -> Callable[[str, float], None]:
+    """The listener's audio events as cues, keyed by the utterance's start stamp: audio sent
+    begins the listening cue; audio that did not leave ends it; audio without a transcript ends
+    it and shows ``not_heard``."""
 
-    def on_audio(event: str) -> None:
+    def on_audio(event: str, key: float) -> None:
         if event == AUDIO_SENT:
-            cues.listening_begin()
+            cues.listening_begin(key)
             return
-        cues.listening_end()
+        cues.listening_end(key)
         if event == AUDIO_NOT_HEARD:
             cues.play("not_heard")
 

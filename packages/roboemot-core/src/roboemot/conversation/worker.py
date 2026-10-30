@@ -120,6 +120,11 @@ class Speech(Protocol):
     def played(self, job_id: int) -> bool: ...
     def ended_at(self, job_id: int) -> float | None: ...
 
+    @property
+    def backend(self) -> Any:
+        """The TTS backend it was built with (``name``: ``none`` without a local voice)."""
+        ...
+
 
 @dataclass
 class _Session:
@@ -293,7 +298,10 @@ class ConversationWorker:
             shutdown.join(self._thread, JOIN_TIMEOUT_S)
         self._end_session("closed")
         with self._lock:
+            dropped = [u for u, _ in self._pending]
             self._pending.clear()
+        for utterance in dropped:  # never answered: they no longer hold the listening cue
+            self._heard_done(utterance)
 
     def apply_config(self, cfg: RoboEmotConfig) -> None:
         """Hot reload: the history cap follows the configuration (the rest is read from the stack
@@ -370,14 +378,15 @@ class ConversationWorker:
 
     def _heard_done(self, utterance: Utterance) -> None:
         """An utterance whose audio the server transcribed is over (answered or not): it no
-        longer holds the listening cue (one call per such utterance)."""
+        longer holds the listening cue (keyed by its start stamp, as the listener began it; a
+        second end is ignored by the cues)."""
         if utterance.realtime is not None:
-            self.cues.listening_end()
+            self.cues.listening_end(utterance.start_stamp)
 
-    @staticmethod
-    def _no_voice(cfg: RoboEmotConfig) -> bool:
-        """Whether there is no local voice (``voice.backend: none``): Piper never speaks."""
-        return cfg.voice.backend == NO_VOICE
+    def _no_voice(self) -> bool:
+        """Whether there is no local voice: the speech output was built with ``voice.backend:
+        none`` (a restart field, so the built backend, not the live config, decides)."""
+        return bool(self.speech.backend.name == NO_VOICE)
 
     @staticmethod
     def _only_stop(utterance: Utterance, cfg: RoboEmotConfig) -> bool:
@@ -646,6 +655,13 @@ class ConversationWorker:
         return True
 
     async def _answer(self, utterance: Utterance, ring_gen: int = NOT_RECORDED) -> None:
+        """Answer one utterance; whatever fails, it no longer holds the listening cue."""
+        try:
+            await self._answer_turn(utterance, ring_gen)
+        finally:
+            self._heard_done(utterance)
+
+    async def _answer_turn(self, utterance: Utterance, ring_gen: int) -> None:
         now = self.clock()
         cfg = self.stack.effective()
         self.apply_config(cfg)
@@ -678,7 +694,6 @@ class ConversationWorker:
             self.phase.end_thinking()
             if not turn.rt_audio:
                 self._drop_audio(utterance)
-            self._heard_done(utterance)
         self._finish(turn)
 
     async def _respond(self, turn: _Turn, router: Any, now: float) -> None:
@@ -691,7 +706,9 @@ class ConversationWorker:
             answered = await self._realtime_turn(turn)
         if not answered:
             turn.voice = "local"
-            if self._no_voice(turn.cfg):
+            if self._no_voice():
+                # owner decision pending: to run the chat turn silently instead (skills run,
+                # sentences dropped by _say_local), call _converse here as below
                 self._unvoiced(turn, router)
             else:
                 await self._converse(turn, router)
@@ -1124,7 +1141,7 @@ class ConversationWorker:
             log.warning("conversation: realtime line failed (%s)", type(exc).__name__)
             job = None
         if job is None and not self.realtime.up():  # the route went down: Piper says it
-            if self._no_voice(cfg):
+            if self._no_voice():
                 self.cues.play("offline")
                 return
             mood, intensity = self._mood(cfg, None)
@@ -1504,7 +1521,7 @@ class ConversationWorker:
         (``voice.backend: none``) nothing is (counted ``lines_unspoken``)."""
         if not text or turn.interrupted:  # a barge-in is under way: nothing more is said
             return False
-        if self._no_voice(turn.cfg):
+        if self._no_voice():
             self._counts["lines_unspoken"] += 1
             return False
         job = self.speech.say(

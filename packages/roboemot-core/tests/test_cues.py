@@ -54,12 +54,26 @@ class Output:
         self.cancelled.append(job_id)
 
 
+class LockCheckingOutput(Output):
+    """Fails if the cues call the speech output with their lock held (lock order)."""
+
+    cues = None
+
+    def play(self, samples, rate_hz, volume_db=0.0):
+        assert not self.cues._lock.locked()
+        return super().play(samples, rate_hz, volume_db)
+
+    def cancel(self, job_id):
+        assert not self.cues._lock.locked()
+        super().cancel(job_id)
+
+
 def sound(seconds: float = 0.2) -> CueSound:
     return CueSound(np.full(int(seconds * RATE), 0.1, np.float32), RATE)
 
 
 def make(gestures=("cue_listening", "cue_fallback", "cue_not_heard"), sounds=None, **cfg):
-    clock, out, speaking = Clock(), Output(), SimpleNamespace(on=False, muted=False)
+    clock, out, speaking = Clock(), LockCheckingOutput(), SimpleNamespace(on=False, muted=False)
     cues = Cues(
         CueConfig(**cfg),
         gesture=lambda name: prim(name) if name in gestures else None,
@@ -70,6 +84,7 @@ def make(gestures=("cue_listening", "cue_fallback", "cue_not_heard"), sounds=Non
         speaking=lambda now: speaking.on,
         clock=clock,
     )
+    out.cues = cues
     return cues, clock, out, speaking
 
 
@@ -106,7 +121,7 @@ def test_cues_are_silent_while_muted_or_disabled():
 
 def test_listening_shows_after_the_onset_holds_at_its_peak_and_ends_on_first_audio():
     cues, clock, out, state = make(listening_onset_s=0.3)
-    cues.listening_begin()
+    cues.listening_begin(1)
     assert cues.commands(clock.t + 0.1) == []  # before the onset
     clock.t += 0.3
     assert cues.commands(clock.t)[0].targets["antenna_left"] == pytest.approx(0.0)
@@ -124,10 +139,10 @@ def test_listening_shows_after_the_onset_holds_at_its_peak_and_ends_on_first_aud
 
 def test_listening_ends_when_the_turn_ends_without_audio():
     cues, clock, _, _ = make(listening_onset_s=0.0)
-    cues.listening_begin()
+    cues.listening_begin(1)
     cues.commands(clock.t + 1.0)
     clock.t += 1.0
-    cues.listening_end()  # a timeout, a skip, an error: no audio came
+    cues.listening_end(1)  # a timeout, a skip, an error: no audio came
     assert not cues.snapshot()["listening"]["holding"]
     assert cues.commands(clock.t + 1.0) == []
     assert cues.snapshot()["counts"]["listening"] == {"shown": 1, "released_ended": 1}
@@ -135,7 +150,7 @@ def test_listening_ends_when_the_turn_ends_without_audio():
 
 def test_an_answer_before_the_onset_shows_no_listening_cue():
     cues, clock, _, state = make(listening_onset_s=0.5)
-    cues.listening_begin()
+    cues.listening_begin(1)
     state.on = True
     assert cues.commands(clock.t + 0.6) == []
     assert cues.snapshot()["counts"]["listening"] == {"skipped_speech": 1}
@@ -143,18 +158,18 @@ def test_an_answer_before_the_onset_shows_no_listening_cue():
 
 def test_listening_waits_for_every_utterance_that_began_it():
     cues, clock, _, _ = make(listening_onset_s=0.0)
-    cues.listening_begin()
-    cues.listening_begin()
+    cues.listening_begin(1)
+    cues.listening_begin(2)
     cues.commands(clock.t + 0.5)
-    cues.listening_end()
+    cues.listening_end(1)
     assert cues.snapshot()["listening"]["holding"]
-    cues.listening_end()
+    cues.listening_end(2)
     assert not cues.snapshot()["listening"]["holding"]
 
 
 def test_the_hold_limit_always_releases_listening():
     cues, clock, _, _ = make(listening_onset_s=0.0, listening_hold_max_s=2.0)
-    cues.listening_begin()
+    cues.listening_begin(1)
     cues.commands(clock.t)
     cues.commands(clock.t + 2.5)
     snap = cues.snapshot()
@@ -164,10 +179,10 @@ def test_the_hold_limit_always_releases_listening():
 
 def test_the_listening_sound_is_opt_in_and_cut_on_release():
     cues, clock, out, _ = make(listening_onset_s=0.0, listening_sound=True)
-    cues.listening_begin()
+    cues.listening_begin(1)
     cues.commands(clock.t)
     assert len(out.played) == 1
-    cues.listening_end()
+    cues.listening_end(1)
     assert out.cancelled == [1]
 
 
@@ -191,3 +206,53 @@ def test_cue_sounds_are_validated():
 def test_a_robot_without_a_cue_library_gets_an_empty_one():
     manifest = SimpleNamespace(robot=SimpleNamespace(id="no-such-robot"))
     assert load_cue_sounds(manifest) == {}
+
+
+def test_a_late_end_after_the_hold_limit_does_not_release_the_next_turns_cue():
+    """A hold limit starts a new generation: the timed-out utterance's end is ignored."""
+    cues, clock, _, _ = make(listening_onset_s=0.0, listening_hold_max_s=2.0)
+    cues.listening_begin("old")
+    cues.commands(clock.t)
+    clock.t += 2.5
+    cues.commands(clock.t)  # hold limit: released, "old" forgotten
+    cues.listening_begin("new")
+    cues.commands(clock.t)
+    assert cues.snapshot()["listening"]["holding"]
+    cues.listening_end("old")  # the timed-out turn ends late
+    snap = cues.snapshot()
+    assert snap["listening"]["holding"] and snap["listening"]["outstanding"] == 1
+    assert snap["counts"]["listening"]["late_end"] == 1
+    cues.listening_end("new")
+    assert not cues.snapshot()["listening"]["holding"]
+
+
+def test_sleep_releases_a_shown_hold_and_forgets_the_open_utterances():
+    cues, clock, out, state = make(listening_onset_s=0.0, listening_sound=True)
+    cues.listening_begin(1)
+    cues.commands(clock.t)
+    assert cues.snapshot()["listening"]["holding"]
+    cues.release_listening("asleep")  # the app loop, on every tick while asleep
+    snap = cues.snapshot()
+    assert not snap["listening"]["holding"] and snap["listening"]["outstanding"] == 0
+    assert snap["counts"]["listening"]["released_asleep"] == 1 and out.cancelled == [1]
+    cues.release_listening("asleep")  # nothing left: no new generation per tick
+    assert cues.snapshot()["listening"]["generation"] == snap["listening"]["generation"]
+
+
+def test_muted_with_a_hold_up_releases_it_on_the_next_tick():
+    cues, clock, _, state = make(listening_onset_s=0.0)
+    cues.listening_begin(1)
+    cues.commands(clock.t)
+    state.muted = True  # asleep without the pause: the tick still runs
+    cues.commands(clock.t + 0.1)
+    assert cues.snapshot()["counts"]["listening"]["released_asleep"] == 1
+
+
+def test_a_second_end_of_the_same_utterance_is_ignored():
+    cues, clock, _, _ = make(listening_onset_s=0.0)
+    cues.listening_begin(1)
+    cues.listening_begin(2)
+    cues.commands(clock.t)
+    cues.listening_end(1)
+    cues.listening_end(1)
+    assert cues.snapshot()["listening"]["holding"]

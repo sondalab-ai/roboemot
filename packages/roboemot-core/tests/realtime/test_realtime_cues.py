@@ -43,6 +43,8 @@ def spoke_nothing(rig) -> bool:
 
 
 def test_the_route_down_at_start_shows_the_fallback_cue_and_asks_no_chat_route(rigs):
+    """Pins the current choice (owner decision pending): a chat route is configured (lan) and
+    reachable, yet no chat request is sent; the fallback cue shows."""
     with TurnServer() as srv:
         rig = rigs(srv, extra=False)
         rig.turn()
@@ -159,7 +161,7 @@ def ears():
         rig = build_rt(server, rt={"input": "audio"}, app=cfg)
         ear = Ear(rig, bearing=FACE_RAD, to_worker=True, **kw)
         events: list[str] = []
-        ear.r.listener.bind_realtime(ear.input, events.append)
+        ear.r.listener.bind_realtime(ear.input, lambda event, key: events.append(event))
         made.append(ear)
         return ear, events
 
@@ -201,9 +203,67 @@ def test_the_listeners_audio_events_drive_the_cues():
 
     cues = FakeCues()
     on_audio = audio_cues(cues)
-    on_audio(AUDIO_SENT)
-    on_audio(AUDIO_UNSENT)
+    on_audio(AUDIO_SENT, 1.0)
+    on_audio(AUDIO_UNSENT, 1.0)
     assert (cues.begun, cues.ended, cues.played) == (1, 1, [])
-    on_audio(AUDIO_SENT)
-    on_audio(AUDIO_NOT_HEARD)
+    on_audio(AUDIO_SENT, 2.0)
+    on_audio(AUDIO_NOT_HEARD, 2.0)
     assert (cues.begun, cues.ended, cues.played) == (2, 2, ["not_heard"])
+
+
+# ------------------------------------------------------------------ fix round 1
+
+
+def heard(text="ciao", items=("in_1",), **kw):
+    """An utterance whose audio the server transcribed (it holds the listening cue)."""
+    from dataclasses import replace
+
+    from test_conversation_worker import utt
+
+    kw.setdefault("stamp", time.monotonic())
+    return replace(utt(text, **kw), realtime=(1, items))
+
+
+def test_a_turn_that_fails_before_it_starts_still_ends_the_listening_cue(rigs, monkeypatch):
+    with TurnServer() as srv:
+        rig = rigs(srv)
+
+        def broken(cfg):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(rig.hub, "sync", broken)
+        assert rig.worker.submit(heard())
+        assert wait_for(lambda: rig.worker.snapshot().get("errors", 0) == 1)
+        assert rig.cues.ended == 1
+
+
+def test_no_voice_follows_the_built_backend_not_a_hot_override(rigs):
+    with TurnServer() as srv:
+        rig = rigs(srv, extra=False)
+        rig.stack.set("voice.backend", "piper", source="test", admin=True)
+        assert rig.stack.effective().voice.backend == "piper"
+        assert rig.worker._no_voice()  # built with none: still no voice
+        rig.turn()
+        assert rig.cues.played == ["fallback"] and rig.chat_hosts() == []
+
+
+def test_a_hot_override_to_none_keeps_the_built_local_voice():
+    with TurnServer() as srv:
+        rig = build_rt(srv, extra=False)
+        try:
+            rig.stack.set("voice.backend", "none", source="test", admin=True)
+            assert not rig.worker._no_voice()
+            rig.turn()
+            assert rig.chat_hosts() == ["lan.local"] and rig.cues.played == []
+        finally:
+            rig.close()
+
+
+def test_closing_ends_the_listening_cue_of_the_utterances_still_waiting(rigs):
+    with TurnServer() as srv:
+        rig = rigs(srv)
+        with rig.worker._lock:
+            rig.worker._pending.append((heard(stamp=1.0), 0))
+            rig.worker._pending.append((heard(stamp=2.0), 0))
+        rig.worker.close()
+        assert rig.cues.ended == 2

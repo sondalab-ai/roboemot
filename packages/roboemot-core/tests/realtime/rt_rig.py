@@ -70,10 +70,10 @@ class FakeCues:
         self.played.append(kind)
         return True
 
-    def listening_begin(self) -> None:
+    def listening_begin(self, key) -> None:
         self.begun += 1
 
-    def listening_end(self) -> None:
+    def listening_end(self, key) -> None:
         self.ended += 1
 
 

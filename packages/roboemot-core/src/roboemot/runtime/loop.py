@@ -56,6 +56,8 @@ def run_loop(
         if host.live_video is not None:
             host.live_video.expire()  # the same for the preview's frame and JPEG
         if p.sleep.tick(now):  # asleep (SPEC 12A): only the clocks run; the work waits for the wake
+            if host.cues is not None:  # no listening cue is held through the sleep (SPEC 8)
+                host.cues.release_listening("asleep")
             p.circ.tick(now)
             p.runner.tick(now)
             clock.last_s = now
