@@ -1811,8 +1811,9 @@ def _check_running_app(opts: Options, ui: Ui, platform: Platform) -> None:
 def check_cloud_voice(ui: Ui, opts: Options, platform: Platform) -> None:
     """Refuse a cloud-voice choice that cannot work, before the robot is touched: the flag on a
     platform without a cloud-voice route, or with ``--no-voice`` or ``--piper``. A platform
-    without the route needs no answer; off a terminal one with it needs ``--cloud-voice`` or
-    ``--no-cloud-voice`` (``-y`` is not an answer: the opt-in sends audio off the robot)."""
+    without the route, ``--no-voice`` or ``--piper`` without the flag need no answer (cloud
+    voice is off); otherwise off a terminal it needs ``--cloud-voice`` or ``--no-cloud-voice``
+    (``-y`` is not an answer: the opt-in sends audio off the robot)."""
     if platform.cloud_voice is None:
         if opts.cloud_voice:
             raise WizardError(
@@ -1820,6 +1821,9 @@ def check_cloud_voice(ui: Ui, opts: Options, platform: Platform) -> None:
                 "its installer offers no cloud-voice route",
                 _rerun(replace(opts, cloud_voice=None)),
             )
+        opts.cloud_voice = False
+        return
+    if opts.cloud_voice is None and (not opts.voice or opts.piper):
         opts.cloud_voice = False
         return
     if opts.cloud_voice and not opts.voice:
@@ -1834,6 +1838,28 @@ def check_cloud_voice(ui: Ui, opts: Options, platform: Platform) -> None:
         opts.cloud_voice is not None,
         f"Missing {CLOUD_VOICE_FLAG} or --no-cloud-voice (-y does not answer it)",
     )
+
+
+def warn_shadowed_profile(ui: Ui, remote: Remote, profile: set[tuple[str, ...]]) -> None:
+    """Warn when the web UI's saved settings (``webui_settings.json`` in the data folder, the
+    runtime layer, which wins over ``app.yaml``) hold one of the profile's keys: the robot would
+    not run as the profile says. Read-only; key names only, never a value."""
+    _, data = remote_data_dir(remote)
+    path = posixpath.join(data, paths.SETTINGS_OVERRIDES_FILE)
+    if not _exists(remote, path):
+        return
+    try:
+        saved = json.loads(remote.run(f"cat {shlex.quote(path)}")).get("overrides", {})
+    except (WizardError, ValueError, AttributeError):
+        ui.warn("Web UI settings not read", f"{path}: they may override the profile")
+        return
+    dotted = [".".join(k) for k in profile if k[0] != ROUTES_KEY]
+    hit = sorted(key for key in saved if any(key == d or key.startswith(d + ".") for d in dotted))
+    if hit:
+        ui.warn(
+            "Web UI overrides",
+            f"{path} sets {', '.join(hit)}, which win over app.yaml; reset them in the web UI",
+        )
 
 
 def cloud_voice_text(route: CloudVoiceRoute) -> str:
@@ -1953,6 +1979,8 @@ def run_install(opts: Options, ui: Ui, root: Path) -> None:
             apply_app_config(
                 ui, platform, remote, record, wanted, owned, opts.dry_run, frozenset(cloud)
             )
+            if cloud:
+                warn_shadowed_profile(ui, remote, set(cloud))
             if not opts.dry_run:
                 platform.verify(ui, py)
                 verify_app_config(remote, wanted, owned)

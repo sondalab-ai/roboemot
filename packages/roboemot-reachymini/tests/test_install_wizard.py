@@ -3626,3 +3626,51 @@ def test_a_platform_without_a_cloud_voice_route_refuses_the_flag_and_needs_no_an
     assert robot.commands == []
     inst.run_install(options(cloud_voice=None, start=False, startup=False), quiet_ui(True), ROOT)
     assert "privacy" not in yaml.safe_load(robot.app_yaml)
+
+
+def test_fetch_args_without_tts_name_the_listener_and_vision_models_only():
+    args = inst.fetch_args(vision=True, tts=False).split()
+    assert args[:2] == ["models", "fetch"] and "--all" not in args and "--voice" not in args
+    assert "silero-vad" in args and "vosk-small-it" in args and "vosk-small-en" in args
+    assert not [a for a in args if a.startswith("piper")]
+    from roboemot.vision import models as vision_models
+
+    assert set(vision_models.load_manifest()) <= set(args)
+
+
+def test_no_voice_on_a_terminal_is_never_asked_about_cloud_voice(
+    offline, robot, daemon, monkeypatch, capsys
+):
+    monkeypatch.setattr(Ui, "ask_secret", lambda self, question: None)
+    opts = Options(**{**FULL, "cloud_voice": None}, voice=False, start=False, startup=False)
+    inst.run_install(opts, typed("\n"), ROOT)  # the API key question only
+    assert "cloud voice" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("kw", [dict(voice=False), dict(piper=True)])
+def test_an_unattended_run_that_rules_cloud_voice_out_needs_no_cloud_flag(
+    offline, robot, daemon, kw
+):
+    install(cloud_voice=None, **kw)
+    assert "privacy" not in (yaml.safe_load(robot.app_yaml or "{}") or {})
+
+
+def test_web_ui_settings_that_override_the_profile_are_named_without_values(
+    offline, robot, daemon, monkeypatch, capsys
+):
+    key_prompts(monkeypatch, HF_TOKEN)
+    robot.dirs |= {f"{HOME}/.local", f"{HOME}/.local/share", DATA}
+    saved = {
+        "voice.wake_word_policy": "unless_enrolled_in_view",
+        "voice.realtime_route.transcript_timeout_s": 10,
+        "webui.port": 8080,
+    }
+    robot.files[f"{DATA}/webui_settings.json"] = json.dumps({"v": 1, "overrides": saved})
+    install(cloud_voice=True, piper=None, dry_run=True)
+    out = flat(capsys.readouterr().out)
+    assert (
+        "! Web UI overrides "
+        f"{DATA}/webui_settings.json sets voice.realtime_route.transcript_timeout_s, "
+        "voice.wake_word_policy, which win over app.yaml"
+    ) in out
+    assert "unless_enrolled_in_view" not in out and "webui.port" not in out
