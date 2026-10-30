@@ -707,8 +707,8 @@ class ConversationWorker:
         if not answered:
             turn.voice = "local"
             if self._no_voice():
-                # owner decision pending: to run the chat turn silently instead (skills run,
-                # sentences dropped by _say_local), call _converse here as below
+                # owner decision 2026-10-30: the cue only, no chat request (a silent chat turn
+                # would be _converse here: _say_local already drops every sentence)
                 self._unvoiced(turn, router)
             else:
                 await self._converse(turn, router)
