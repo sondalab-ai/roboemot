@@ -19,6 +19,7 @@ from roboemot.config.schema import APPRAISAL_EVENTS, RoboEmotConfig
 from roboemot.voice.activity import SpeechActivity
 from roboemot.voice.asr import ASREvent, resolve_language
 from roboemot.voice.direction import DirectionSample, VoiceDirection
+from roboemot.voice.facing import CpuLoad, FacingCheck
 from roboemot.voice.fastpath import EVENT_FOR, FastPath
 from roboemot.voice.listener import UtteranceInfo, VoiceListener
 from roboemot.voice.vad import Endpointer, EnergyVAD
@@ -755,6 +756,55 @@ def test_barge_in_samples_are_muted_and_fall_back_to_the_engaged_face():
     assert r.utterances and r.utterances[0].addressed
     snap = r.listener.snapshot()["direction"]
     assert snap["degraded"]["muted"] == 1 and snap["checks"]["degraded_passed"] == 1
+
+
+# ---- facing check (voice.facing, SPEC 8 stage 2)
+
+
+def facing_rig(final, yaw_rad, policy="never"):
+    """``direction_rig`` with the facing check on: the face at the voice has head yaw
+    ``where["yaw"]``; the CPU reads idle."""
+    cfg = RoboEmotConfig.model_validate(
+        {"voice": {"wake_word_policy": policy, "facing": {"enabled": True}}}
+    )
+    where = {"bearing": FACE_RAD, "yaw": yaw_rad}
+
+    def lookup(now):
+        y = where["yaw"]
+        return DirectionSample(where["bearing"], (FACE_RAD,), True, False, (y,), y)
+
+    check = FacingCheck(cfg.voice.facing, CpuLoad(reader=lambda: (0.0, 1.0)))  # never busy
+    direction = VoiceDirection(cfg.voice.direction, lookup, doa_available=True, facing=check)
+    return Rig([final], final=final, cfg=cfg, direction=direction), where
+
+
+def test_a_voice_from_a_face_looking_away_needs_the_wake_word():
+    r, where = facing_rig("che bel video", math.radians(40.0))
+    r.say()
+    assert not r.utterances[0].addressed
+    snap = r.listener.snapshot()
+    assert snap["wake"]["decisions"]["rejected_not_facing"] == 1
+    assert snap["direction"]["facing"]["checks"]["rejected_not_facing"] == 1
+    where["yaw"] = math.radians(5.0)
+    say_text(r, "come stai")
+    assert r.utterances[1].addressed
+    say_text(r, "ehi robot guarda")  # the wake word never runs the check
+    assert r.utterances[2].addressed
+    facing = r.listener.snapshot()["direction"]["facing"]["checks"]
+    assert facing["passed"] == 1 and sum(facing.values()) == 2
+
+
+def test_facing_check_off_by_hot_reload_keeps_the_voice_at_face_check_alone():
+    r, _ = facing_rig("che bel video", math.radians(40.0))
+    r.listener.apply_config(
+        RoboEmotConfig.model_validate(
+            {"voice": {"wake_word_policy": "never", "facing": {"enabled": False}}}
+        )
+    )
+    r.say()
+    assert r.utterances[0].addressed
+    snap = r.listener.snapshot()["direction"]
+    assert snap["checks"]["passed"] == 1 and sum(snap["facing"]["checks"].values()) == 0
 
 
 def test_no_reading_on_a_robot_with_a_sound_direction_needs_the_wake_word():

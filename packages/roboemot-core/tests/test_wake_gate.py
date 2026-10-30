@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from roboemot.voice.wake import WakeGate
+from roboemot.voice.wake import AT_FACE, NO_FACE_AT_VOICE, WakeGate
 
 KEYS = {
     "not_required",
@@ -14,6 +14,7 @@ KEYS = {
     "rejected_no_window",
     "rejected_other_speaker",
     "rejected_no_face_at_voice",
+    "rejected_not_facing",
 }
 WINDOW_S = 5.0
 
@@ -64,6 +65,7 @@ def test_wake_word_window_and_rejections_when_required(policy):
         "rejected_no_window": 2,
         "rejected_other_speaker": 1,
         "rejected_no_face_at_voice": 0,
+        "rejected_not_facing": 0,
     }
 
 
@@ -78,8 +80,8 @@ def test_snapshot_is_json_and_keeps_its_other_fields():
 class Check:
     """A scripted voice-at-face check that counts its calls."""
 
-    def __init__(self, result):
-        self.result, self.calls = result, 0
+    def __init__(self, passed):
+        self.result, self.calls = AT_FACE if passed else NO_FACE_AT_VOICE, 0
 
     def __call__(self):
         self.calls += 1

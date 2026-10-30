@@ -18,6 +18,11 @@ With fewer than ``min_doa_readings`` readings the check runs degraded, for one o
 spoke: its own voice and echo tail, as in a barge-in) or ``silent`` (it has one and gave none:
 its detector did not take the sound for speech). ``degraded_rule`` decides; ``auto`` rejects
 ``silent`` and falls back to an engaged face for the other two.
+
+An utterance that passes then runs the facing check (``roboemot.voice.facing``, when on): the
+face matched at the voice in each reading, or, degraded, the face attention is on, must look at
+the robot. ``check`` returns the verdict the wake gate counts: ``AT_FACE``, ``NO_FACE_AT_VOICE``
+or ``NOT_FACING``.
 """
 
 from __future__ import annotations
@@ -30,8 +35,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
-from ..config.schema import VoiceDirectionConfig
+from ..config.schema import VoiceDirectionConfig, VoiceFacingConfig
 from ..world.frame import wrap_angle
+from .facing import FacingCheck
+from .wake import AT_FACE, NO_FACE_AT_VOICE, NOT_FACING
 
 OUTCOMES = ("passed", "rejected", "degraded_passed", "degraded_rejected")
 DEGRADED_REASONS = ("no_source", "silent", "muted")
@@ -43,12 +50,16 @@ P90 = 0.9
 class DirectionSample:
     """What the robot hears and sees at one instant: the sound direction (None when no fresh
     reading), the azimuths of the visible faces, whether attention is on one of them, and whether
-    the robot had muted its own sound direction (it was speaking)."""
+    the robot had muted its own sound direction (it was speaking). For the facing check: each
+    visible face's head yaw (in ``faces_rad`` order) and the attended face's, None when not
+    measured recently enough."""
 
     bearing_rad: float | None
     faces_rad: tuple[float, ...]
     engaged: bool
     muted: bool = False
+    faces_yaw_rad: tuple[float | None, ...] = ()
+    engaged_yaw_rad: float | None = None
 
 
 EMPTY = DirectionSample(None, (), False)
@@ -63,6 +74,18 @@ def face_offset(sample: DirectionSample) -> float | None:
     return min(abs(wrap_angle(sample.bearing_rad - f)) for f in sample.faces_rad)
 
 
+def matched_yaw(sample: DirectionSample, tolerance_rad: float) -> float | None:
+    """Head yaw of the face nearest the sound direction when it is within ``tolerance_rad``
+    (the face the reading matched); None when none matched or its yaw is unknown."""
+    if sample.bearing_rad is None or not sample.faces_rad:
+        return None
+    offsets = [abs(wrap_angle(sample.bearing_rad - f)) for f in sample.faces_rad]
+    nearest = min(range(len(offsets)), key=offsets.__getitem__)
+    if offsets[nearest] > tolerance_rad or nearest >= len(sample.faces_yaw_rad):
+        return None
+    return sample.faces_yaw_rad[nearest]
+
+
 class VoiceDirection:
     """See the module docstring. ``doa_available``: the robot declares a sound direction (its
     manifest's ``doa`` capability). ``begin``/``sample``/``check`` run on the listener thread;
@@ -70,11 +93,17 @@ class VoiceDirection:
     gate's lock, and nothing else is called while it is held."""
 
     def __init__(
-        self, cfg: VoiceDirectionConfig, lookup: DirectionLookup, *, doa_available: bool
+        self,
+        cfg: VoiceDirectionConfig,
+        lookup: DirectionLookup,
+        *,
+        doa_available: bool,
+        facing: FacingCheck | None = None,
     ) -> None:
         self._cfg = cfg
         self._lookup = lookup
         self._doa = doa_available
+        self._facing = facing
         self._samples: list[DirectionSample] = []
         self._lock = threading.Lock()
         self._outcomes = dict.fromkeys(OUTCOMES, 0)
@@ -82,9 +111,14 @@ class VoiceDirection:
         self._no_face = 0
         self._offsets_deg: deque[float] = deque(maxlen=SUMMARY_SIZE)
 
-    def apply_config(self, cfg: VoiceDirectionConfig) -> None:
-        """Hot reload: tolerance, shares, ages and the degraded rule."""
+    def apply_config(
+        self, cfg: VoiceDirectionConfig, facing: VoiceFacingConfig | None = None
+    ) -> None:
+        """Hot reload: tolerance, shares, ages and the degraded rule; the facing check's
+        settings with ``facing``."""
         self._cfg = cfg
+        if facing is not None and self._facing is not None:
+            self._facing.apply_config(facing)
 
     @property
     def enabled(self) -> bool:
@@ -103,9 +137,13 @@ class VoiceDirection:
         except Exception:
             found = EMPTY
         self._samples.append(replace(found, muted=True) if muted else found)
+        if self._facing is not None and self._facing.enabled:
+            self._facing.poll()
 
-    def check(self) -> bool:
-        """Whether the utterance's voice came from a visible face; counts the outcome."""
+    def check(self) -> str:
+        """Whether the utterance's voice came from a visible face (and, with the facing check
+        on, that face looked at the robot): ``AT_FACE``, ``NO_FACE_AT_VOICE`` or ``NOT_FACING``.
+        Counts the outcome; call it once per utterance."""
         cfg = self._cfg
         heard = [s for s in self._samples if s.bearing_rad is not None]
         if len(heard) >= cfg.min_doa_readings:
@@ -114,11 +152,22 @@ class VoiceDirection:
             matched = sum(1 for d in offsets if d is not None and d <= tol)
             passed = matched >= cfg.min_match_share * len(heard)
             self._record("passed" if passed else "rejected", [d for d in offsets if d is not None])
-            return passed
+            if not passed:
+                return NO_FACE_AT_VOICE
+            return self._facing_verdict([matched_yaw(s, tol) for s in heard])
         reason = self._reason()
         passed = self._rule(reason) == "engaged" and self._engaged()
         self._record("degraded_passed" if passed else "degraded_rejected", None, reason)
-        return passed
+        if not passed:
+            return NO_FACE_AT_VOICE
+        return self._facing_verdict([s.engaged_yaw_rad for s in self._samples if s.engaged])
+
+    def _facing_verdict(self, yaws: list[float | None]) -> str:
+        """The facing check over the checked face's yaw per sample, when it is on."""
+        facing = self._facing
+        if facing is None or not facing.enabled:
+            return AT_FACE
+        return AT_FACE if facing.decide(yaws) else NOT_FACING
 
     def _reason(self) -> str:
         """Why the utterance has too few readings (see the module docstring)."""
@@ -169,7 +218,7 @@ class VoiceDirection:
                 "max": round(ordered[-1], 1),
                 "last": round(offsets[-1], 1),
             }
-        return {
+        snap = {
             "enabled": self._cfg.enabled,
             "doa_available": self._doa,
             "checks": outcomes,
@@ -177,3 +226,6 @@ class VoiceDirection:
             "no_face": no_face,
             "face_offset_deg": summary,
         }
+        if self._facing is not None:
+            snap["facing"] = self._facing.snapshot()
+        return snap

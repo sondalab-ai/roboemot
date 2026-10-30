@@ -1754,6 +1754,15 @@ class VisionConfig(Strict):
     max_embeds_per_frame: int = param(
         2, "Cap on face embeddings computed for one frame, to bound its latency", ge=1, le=16
     )
+    facing_window_s: float = param(
+        0.5,
+        "A face track's head yaw (the facing check of voice.facing, from the detector's "
+        "landmarks) is the median of its detections over this capture-time window, so one noisy "
+        "frame does not flip it",
+        unit="s",
+        ge=0,
+        le=5,
+    )
     max_entity_embeds_per_frame: int = param(
         1,
         "Cap on animal and object appearance embeddings (DINOv2-S, the costly part of the "
@@ -2777,6 +2786,62 @@ class VoiceDirectionConfig(Strict):
     )  # fmt: skip
 
 
+class VoiceFacingConfig(Strict):
+    """Facing check: without the wake word, answer only a face that looks at the robot (SPEC 8
+    stage 2). Part of the voice-at-face check (voice.direction), off when that is off."""
+
+    enabled: bool = param(
+        False,
+        "An utterance that would be addressed without the wake word is addressed only when the "
+        "face its voice came from (or, degraded, the face attention is on) looked at the robot "
+        "for min_share of its samples; otherwise it needs the wake word. A person watching a "
+        "screen near the robot looks at the screen, not at the robot. Needs voice.direction. "
+        "Off: the voice-at-face check alone (the cloud-voice installer profile turns it on)",
+    )
+    max_yaw_deg: float = param(
+        20.0,
+        "A face looks at the robot when its head yaw (from the face detector's landmarks, "
+        "relative to the line to the camera) is at most this. A screen 40 cm beside the robot, "
+        "seen from 1 m, is about 22 deg away; the estimate is rough (one head shape for every "
+        "face), so lower values reject the owner too",
+        unit="deg", ge=1, le=90,
+    )  # fmt: skip
+    min_share: float = param(
+        0.5,
+        "Share of the utterance's samples with a head yaw for the matched face (at the voice, "
+        "measured at most max_sample_age_s from the sample) in which it must look at the robot",
+        ge=0, le=1,
+    )  # fmt: skip
+    max_sample_age_s: float | None = param(
+        None,
+        "A face's head yaw counts for a sample when the camera measured it at most this far from "
+        "the sample's time. Empty: the voice-at-face age (voice.direction.face_max_age_s, else "
+        "attention.stale_s), so a face that counts as visible counts with its yaw. With no yaw "
+        "at all the check falls back (counted fallback_no_data) and the utterance is decided as "
+        "if this check were off",
+        unit="s", ge=0, le=10,
+    )  # fmt: skip
+    cpu_max_percent: float = param(
+        90.0,
+        "When the whole CPU stays busier than this for cpu_hold_s, the facing check is not "
+        "required (counted fallback_cpu): face detection then runs late and its yaw is not "
+        "trusted, and the utterance is decided as if this check were off",
+        unit="%", ge=1, le=100,
+    )  # fmt: skip
+    cpu_hold_s: float = param(
+        10.0,
+        "How long the CPU must stay above cpu_max_percent before the facing check falls back; "
+        "one sample at or below it ends the fallback",
+        unit="s", ge=0, le=600,
+    )  # fmt: skip
+    cpu_sample_s: float = param(
+        1.0,
+        "Shortest time between two CPU usage samples, taken only while an utterance is heard; a "
+        "sample covers the whole time since the previous one",
+        unit="s", ge=0.1, le=60,
+    )  # fmt: skip
+
+
 # ------------------------------------------------------------------- realtime route (SPEC 8)
 
 
@@ -3158,6 +3223,9 @@ class VoiceConfig(Strict):
     )
     direction: VoiceDirectionConfig = param(
         {}, "Without the wake word, answer only a voice from a visible face (SPEC 8, 5A)"
+    )
+    facing: VoiceFacingConfig = param(
+        {}, "Without the wake word, answer only a face that looks at the robot (SPEC 8)"
     )
     barge_in: BargeInConfig = param({}, "Barge-in: user speech over the robot's voice (SPEC 8)")
 

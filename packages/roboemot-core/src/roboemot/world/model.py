@@ -242,6 +242,7 @@ class WorldModel:
             sources={obs.source},
             embedding=None if obs.embedding is None else np.array(obs.embedding, dtype=float),
         )
+        self._facing(entry, obs)
         eid = entry.entry_id
         self._entries[eid] = entry
         self._updated[eid] = obs.stamp
@@ -265,6 +266,7 @@ class WorldModel:
         entry.uncertainty_rad = max(floor, (1.0 - w) * entry.uncertainty_rad + w * offset)
         if _known(obs.identity):
             entry.identity = obs.identity  # type: ignore[assignment]
+        self._facing(entry, obs)
         if obs.embedding is not None:
             emb = np.array(obs.embedding, dtype=float)
             old_emb = entry.embedding
@@ -277,6 +279,15 @@ class WorldModel:
         if moved > math.radians(self.cfg.moved_threshold_deg):
             self._announced[entry.entry_id] = (entry.azimuth_rad, entry.elevation_rad)
             events.append(("world.entity_moved", entry.public(), obs.stamp))
+
+    @staticmethod
+    def _facing(entry: Entry, obs: Observation) -> None:
+        """Keep the head yaw of a face observation; one without (a sound bearing, a frame with
+        no usable landmarks) leaves the last one, whose stamp then ages."""
+        if obs.facing_yaw_rad is None:
+            return
+        if entry.facing_stamp is None or obs.stamp >= entry.facing_stamp:
+            entry.facing_yaw_rad, entry.facing_stamp = obs.facing_yaw_rad, obs.stamp
 
     def _remove(self, entry: Entry) -> None:
         eid = entry.entry_id

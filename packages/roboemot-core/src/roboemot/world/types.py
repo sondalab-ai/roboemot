@@ -33,6 +33,7 @@ class Observation:
     distance_m: float | None = None
     confidence: float = 1.0
     embedding: np.ndarray | None = field(default=None, repr=False, compare=False)
+    facing_yaw_rad: float | None = None  # a face's head yaw, 0 looking at the camera (SPEC 8)
 
     def __post_init__(self) -> None:
         if self.kind not in get_args(ObservationKind):
@@ -58,6 +59,8 @@ class Entry:
     last_seen: float
     sources: set[str] = field(default_factory=set)
     embedding: np.ndarray | None = field(default=None, repr=False, compare=False)
+    facing_yaw_rad: float | None = None  # last head yaw a face observation gave (SPEC 8)
+    facing_stamp: float | None = None  # its capture stamp
 
     def public(self) -> Entry:
         """A copy safe to publish: no embedding, own ``sources`` set."""

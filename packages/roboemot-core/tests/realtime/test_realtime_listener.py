@@ -15,6 +15,7 @@ import pytest
 from realtime_helpers import wait_until
 from roboemot.realtime.input import RealtimeInput
 from roboemot.voice.direction import DirectionSample, VoiceDirection
+from roboemot.voice.facing import CpuLoad, FacingCheck
 from rt_rig import build_rt
 from test_voice_listener import CHUNK, RATE, FakeASR, Rig, silence, voice
 from turn_server import TurnServer
@@ -55,6 +56,7 @@ class Ear:
         final=None,
         decoded=None,
         bearing=None,
+        yaw=None,
         to_worker=False,
         decode_s=0.0,
         background=False,
@@ -67,9 +69,14 @@ class Ear:
             self.bearing = bearing
 
             def lookup(now):
-                return DirectionSample(self.bearing, (FACE_RAD,), True)
+                return DirectionSample(self.bearing, (FACE_RAD,), True, False, (yaw,), yaw)
 
-            direction = VoiceDirection(cfg.voice.direction, lookup, doa_available=True)
+            facing = None
+            if yaw is not None:  # the faces' head yaw for the facing check; the CPU never busy
+                facing = FacingCheck(cfg.voice.facing, CpuLoad(reader=lambda: (0.0, 1.0)))
+            direction = VoiceDirection(
+                cfg.voice.direction, lookup, doa_available=True, facing=facing
+            )
         self.r = Rig(script, final, cfg=cfg, direction=direction, grammar_background=background)
         self.r.asr = DecodeASR(script, final, decoded, decode_s)
         self.r.asr.loaded = list(cfg.voice.asr.models)
@@ -158,6 +165,23 @@ def test_a_voice_at_face_reject_is_never_sent(ears):
         assert snap["wake"]["decisions"]["rejected_no_face_at_voice"] == 1
         assert sum(snap["wake"]["decisions"].values()) == 1  # decided once
         assert snap["direction"]["checks"]["rejected"] == 1  # checked once
+        assert appended(server) == []
+
+
+def test_a_face_looking_away_is_never_sent(ears):
+    with TurnServer() as server:
+        on = {"voice": {"wake_word_policy": "never", "facing": {"enabled": True}}}
+        ear = ears(
+            server, script=["che bel video"], bearing=FACE_RAD, yaw=0.7, app=on
+        )  # 40 deg away
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        assert not ear.utterances[0].addressed
+        assert ear.r.asr.decodes == 1  # decoded locally for a wake word, never sent
+        snap = ear.r.listener.snapshot()
+        assert snap["wake"]["decisions"]["rejected_not_facing"] == 1
+        assert sum(snap["wake"]["decisions"].values()) == 1  # decided once
+        assert snap["direction"]["facing"]["checks"]["rejected_not_facing"] == 1  # checked once
         assert appended(server) == []
 
 

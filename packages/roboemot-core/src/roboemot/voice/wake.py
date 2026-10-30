@@ -5,9 +5,10 @@ The wake word is *required* with policy ``always``, never with ``never``, and wi
 
 Every utterance that would be addressed *without* the wake word (not required, or a follow-up in
 the open window) must also pass ``at_face``, the voice-at-face check (``voice.direction``): its
-sound direction pointed at a visible face. Otherwise it is ``rejected_no_face_at_voice`` and needs
-the wake word, so music or a television is not answered. An utterance with the wake word never
-runs the check.
+sound direction pointed at a visible face (else ``rejected_no_face_at_voice``) and, with
+``voice.facing`` on, that face looked at the robot (else ``rejected_not_facing``). A rejected
+utterance needs the wake word, so music, a television or a video is not answered. An utterance
+with the wake word never runs the check.
 
 When required, an utterance is addressed if it contains the wake word, or it starts within
 ``voice.fastpath.addressed_window_s`` after the last speech of an addressed one. A follow-up
@@ -29,7 +30,13 @@ DECISIONS = (
     "rejected_no_window",
     "rejected_other_speaker",
     "rejected_no_face_at_voice",
+    "rejected_not_facing",
 )
+# The voice-at-face check's verdicts (``at_face``); a rejection is counted ``rejected_<verdict>``.
+AT_FACE = "at_face"
+NO_FACE_AT_VOICE = "no_face_at_voice"
+NOT_FACING = "not_facing"
+AtFace = Callable[[], str]
 
 
 class WakeGate:
@@ -58,20 +65,20 @@ class WakeGate:
         start: float,
         last_speech: float,
         speaker: str | None = None,
-        at_face: Callable[[], bool] | None = None,
+        at_face: AtFace | None = None,
     ) -> bool:
         """Whether the utterance (first and last speech stamps, speaker id if known) is addressed.
-        ``at_face`` is the voice-at-face check, called only when the utterance would be addressed
-        without the wake word (None: no check). It runs under this gate's lock, so it may take
-        only leaf locks (``VoiceDirection`` does)."""
+        ``at_face`` is the voice-at-face check (its verdict, ``AT_FACE`` to pass), called only
+        when the utterance would be addressed without the wake word (None: no check). It runs
+        under this gate's lock, so it may take only leaf locks (``VoiceDirection`` does)."""
         with self._lock:
             required = self._policy == "always" or (
                 self._policy == "unless_enrolled_in_view" and not enrolled_in_view
             )
             if not required:
                 outcome = "not_required"
-                if not wake_word and at_face is not None and not at_face():
-                    outcome = "rejected_no_face_at_voice"
+                if not wake_word:
+                    outcome = _face_outcome(outcome, at_face)
                 self._decisions[outcome] += 1
                 return outcome == "not_required"
             if wake_word:
@@ -79,8 +86,8 @@ class WakeGate:
                 outcome = "wake_word"
             else:
                 outcome = self._follow(start, speaker)
-                if outcome == "window" and at_face is not None and not at_face():
-                    outcome = "rejected_no_face_at_voice"
+                if outcome == "window":
+                    outcome = _face_outcome(outcome, at_face)
             self._decisions[outcome] += 1
             if outcome.startswith("rejected"):
                 return False
@@ -118,3 +125,11 @@ class WakeGate:
                 "window_left_s": max(0.0, self._until - now) if math.isfinite(self._until) else 0.0,
                 "decisions": dict(self._decisions),
             }
+
+
+def _face_outcome(outcome: str, at_face: AtFace | None) -> str:
+    """``outcome`` when there is no voice-at-face check or it passes, else its rejection."""
+    if at_face is None:
+        return outcome
+    verdict = at_face()
+    return outcome if verdict == AT_FACE else f"rejected_{verdict}"
