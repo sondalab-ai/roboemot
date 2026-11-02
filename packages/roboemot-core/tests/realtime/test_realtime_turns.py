@@ -489,7 +489,8 @@ def test_a_question_the_server_did_not_voice_is_asked_by_piper(rigs):
     with TurnServer(["tool", "empty"], tool_name="remember_preference", tool_args=args) as srv:
         rig, _ = tooled(rigs, srv, store=Store())
         rig.turn()
-        assert any("blu" in t for t in rig.speech.backend.texts)
+        # the Piper retry is synthesised on the speech output's thread, after the turn counts
+        assert wait_for(lambda: any("blu" in t for t in rig.speech.backend.texts))
         assert rig.worker._confirm is not None
 
 

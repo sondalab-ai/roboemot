@@ -2640,6 +2640,26 @@ class BargeInConfig(Strict):
         "The keyword recognizer stops after this much audio without a candidate frame",
         unit="ms", ge=64, le=2000,
     )  # fmt: skip
+    recent_triggers: int = param(
+        20,
+        "Report only (SPEC 12A): how many recent barge-in trigger records the debug report keeps "
+        "(bargein.recent: path, outcome, levels, echo, motion at the trigger; numbers and short "
+        "labels only)",
+        ge=1, le=200,
+    )  # fmt: skip
+    moving_min_speed_dps: float = param(
+        5.0,
+        "Report only (SPEC 12A): a trigger record marks the robot as moving when moving_group "
+        "turned at least this fast at the first candidate frame (measured when two fresh poses "
+        "are known, else commanded), or when it yielded to external control",
+        unit="deg/s", ge=0.1, le=720,
+    )  # fmt: skip
+    moving_group: str | None = param(
+        "head",
+        "Report only (SPEC 12A): the manifest pose group whose speed decides a trigger record's "
+        "moving (the one that carries the microphones and turns toward faces); null: the "
+        "fastest group",
+    )
     duck: BargeInDuckConfig = param(
         {}, "Ducking: a lower voice while a barge-in is a candidate, not yet confirmed"
     )

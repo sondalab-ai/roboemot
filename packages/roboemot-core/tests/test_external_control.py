@@ -862,3 +862,16 @@ def test_a_platform_move_seen_first_on_the_antennas_stops_every_write():
     assert loop.snapshot()["external_groups"] == ["antennas", "body_yaw+head"]
     event = loop.snapshot()["external_last_event"]
     assert event["group"] == "antennas"  # the record names the unit that diverged
+
+
+def test_the_motion_sample_reports_external_control_and_the_measured_speed():
+    """SPEC 12A (barge-in trigger records): a platform move shows as external, with the measured
+    speed of the moving group while the commanded one stays still."""
+    loop, driver = make()
+    t = drive(loop, driver, 0.0, 1.0)
+    driver.external, driver.goal, driver.speed = True, {"head.pitch": 0.5, "head.yaw": -1.0}, 1.0
+    drive(loop, driver, t, 0.5)
+    assert loop.external
+    state = loop.motion_state(loop.motion_sample())
+    assert state.external and state.commanded_dps["head"] < 1.0
+    assert state.measured_dps["head"] == pytest.approx(math.degrees(driver.speed), rel=0.1)

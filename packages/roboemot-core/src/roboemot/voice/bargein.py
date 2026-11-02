@@ -58,6 +58,20 @@ counts episodes, their durations (frame-stamp clock) and the audio
 already handed to the player beyond the moment each started (``handed_at_start_*_ms``): it was
 out of the duck's reach and plays at full gain.
 
+Trigger records (SPEC 8, 12A): each candidate episode (it opens and closes with the duck
+episode above, and is kept when ducking is off) leaves one record in a ring of
+``recent_triggers``, shown as ``bargein.recent``: the path that fired (``vad``, ``onset``) and the
+one that confirmed the cut (``vad``, ``onset``, ``keyword``; a keyword stop with no episode open
+gets a record of its own) and the outcome (``open``, ``cut``, ``released``). The first candidate
+frame gives cheap values only: level, the onset test's own high-band share, VAD score, echo
+correlation, speaking time, listener lag and a raw ``MotionProbe`` sample. The close fills the
+rest: the motion derived from that sample (per-group commanded and measured speed, external
+control, a reflex, ``moving``), the robot's own audio in the echo reference over the episode, the
+face offset at its start, the peak VAD score and the candidate audio. A cut is recorded after
+``interrupt``, ``reset`` and the hand-off, and every recording step runs guarded: a failure is
+counted (``record_errors``) and never changes or delays a decision. ``cuts_by_path`` counts cuts
+per confirming path. Numbers, short labels and two group-to-speed maps only.
+
 Audio and text are never logged or published.
 """
 
@@ -74,6 +88,7 @@ from typing import Any, Protocol
 import numpy as np
 
 from ..config.schema import RoboEmotConfig
+from ..motion.state import MotionProbe, MotionSample
 from .asr import ASRBackend
 from .duck import DuckGain
 from .fastpath import Emit, LatencyStats
@@ -90,6 +105,20 @@ DB_PER_DECADE = 10.0
 LOG_FLOOR = 1e-12
 # Float slack when comparing frame stamps with the pre-roll boundary.
 EDGE_S = 1e-9
+# Trigger records: decimals kept per value, and the longest label (a manifest group name).
+DIGITS = 3
+LABEL_MAX = 24
+PATHS = ("vad", "onset", "keyword")
+MOTION_FIELDS = (
+    "moving",
+    "external",
+    "reflex",
+    "commanded_dps",
+    "measured_dps",
+    "motion_offset_ms",
+)
+# Face offset lookup: radians from the sound direction to the nearest face at a stamp, or None.
+FaceOffset = Callable[[float], float | None]
 
 
 class VoiceChunkLike(Protocol):
@@ -198,6 +227,8 @@ class BargeIn:
         emit: Emit | None = None,
         clock: Callable[[], float] = time.monotonic,
         keyword_background: bool = False,
+        motion: MotionProbe | None = None,
+        face_offset: FaceOffset | None = None,
     ) -> None:
         self._vad, self._asr, self._reference = vad, asr, reference
         self._language, self._emit, self._clock = language, emit, clock
@@ -226,6 +257,7 @@ class BargeIn:
             "echo_frames": 0,
             "onset_echo_frames": 0,
             "errors": 0,
+            "record_errors": 0,
         }
         self._keyword_s = 0.0  # audio fed to the keyword recognizer, a CPU proxy for the cm4
         self._last_corr: float | None = None
@@ -233,6 +265,17 @@ class BargeIn:
         self._deaf_until = -math.inf
         self._session: _Session | None = None
         self._errors_seen = 0
+        self._motion, self._face_offset = motion, face_offset
+        self._recent_lock = threading.Lock()  # leaf: the report reads the ring from its thread
+        self._recent: collections.deque[dict[str, Any]] = collections.deque(
+            maxlen=cfg.voice.barge_in.recent_triggers
+        )
+        self._rec: dict[str, Any] | None = None  # the open trigger record
+        self._rec_quiet = 0
+        self._speaking_since: float | None = None  # first chunk stamp of this speaking window
+        self._cuts_by_path = dict.fromkeys(PATHS, 0)
+        self._record_errors_seen: set[str] = set()
+        self._hf: float | None = None
         self._worker = KeywordWorker(
             asr,
             lambda text, lang: "stop" in self._spotter.spot(text, lang),
@@ -276,6 +319,9 @@ class BargeIn:
             self._ring: collections.deque[tuple[float, np.ndarray]] = collections.deque(maxlen=ring)
         if self._reference is not None:
             self._reference.set_keep_s(b.echo_reference_s)
+        with self._recent_lock:
+            if self._recent.maxlen != b.recent_triggers:
+                self._recent = collections.deque(self._recent, maxlen=b.recent_triggers)
 
     def bind(
         self,
@@ -306,6 +352,8 @@ class BargeIn:
         else:
             self._end_duck("released", self._last_end)
             self.duck.clear()
+            self._safe(self._close_record, "released", None, self._last_end, "speech_end")
+            self._speaking_since = None
         self.handback_asr()
         self._vad.reset()
         self._ring.clear()
@@ -327,7 +375,21 @@ class BargeIn:
             "last_echo_corr": self._last_corr,
             "latency": self.stats.snapshot(),
             "duck": {**self._duck_counts, "capped": self.duck.capped, **self._duck_ms},
+            "cuts_by_path": dict(self._cuts_by_path),
+            "recent": self.recent(),
         }
+
+    def recent(self) -> list[dict[str, Any]]:
+        """The trigger records, oldest first, with ``ago_s`` (since the episode's last frame)
+        instead of the internal stamp. Scalars and short labels only."""
+        now = self._clock()
+        with self._recent_lock:
+            rows = [dict(r) for r in self._recent]
+        for row in rows:
+            row.pop("_start", None)
+            row.pop("_sample", None)
+            row["ago_s"] = round(now - row.pop("_end"), DIGITS)
+        return rows
 
     # ----------------------------------------------------------------- chunks
 
@@ -349,6 +411,8 @@ class BargeIn:
             return
         if start < self._deaf_until:  # the cut-off just happened: this is its echo tail
             return
+        if self._speaking_since is None:
+            self._speaking_since = start
         if self._pending.size == 0:
             self._pending_stamp = start
         buf = (
@@ -370,6 +434,7 @@ class BargeIn:
         prob = self._vad.speech_prob(frame)
         self._ring.append((stamp, frame))
         speech = b.enabled and prob >= b.threshold
+        self._hf = None  # the onset test's high-band share, kept for the trigger record
         fricative = b.enabled and b.onset_enabled and self._fricative(frame, prob)
         candidate = b.keyword_enabled and prob >= b.keyword_threshold
         corr = self._echo(stamp + self._frame_s) if (speech or fricative or candidate) else 0.0
@@ -386,12 +451,13 @@ class BargeIn:
             self._counts["onset_echo_frames"] += 1
         candidate = candidate and corr < b.keyword_echo_corr_max
         self._duck_frame(speech or weak, stamp + self._frame_s)
+        self._safe(self._record_frame, frame, prob, corr, speech, weak, stamp + self._frame_s)
         if speech:
             if self._run == 0:
                 self._onset = stamp
             self._run += 1
             if self._run >= self._min_frames:
-                self._trigger("speech", self._onset, stamp + self._frame_s, rest)
+                self._trigger("speech", self._onset, stamp + self._frame_s, rest, path="vad")
                 return True
         else:
             self._run = 0
@@ -400,7 +466,7 @@ class BargeIn:
                 self._weak_onset = stamp
             self._weak_run += 1
             if self._weak_run >= self._onset_frames:
-                self._trigger("speech", self._weak_onset, stamp + self._frame_s, rest)
+                self._trigger("speech", self._weak_onset, stamp + self._frame_s, rest, path="onset")
                 return True
         else:
             self._weak_run = 0
@@ -453,13 +519,194 @@ class BargeIn:
         self._duck_ms["last_ms"] = ms
         self._duck_ms["max_ms"] = ms if top is None else max(top, ms)
 
+    # ----------------------------------------------------------------- trigger records
+
+    def _safe(self, fn: Callable[..., Any], *args: Any) -> None:
+        """Run a recording step: a failure is counted (``record_errors``) and logged once per
+        exception type, and never reaches the barge-in decision or the cut."""
+        try:
+            fn(*args)
+        except Exception as exc:
+            self._counts["record_errors"] += 1
+            name = type(exc).__name__
+            if name not in self._record_errors_seen:
+                self._record_errors_seen.add(name)
+                log.warning("barge-in: trigger record: %s", name)
+
+    def _record_frame(
+        self, frame: np.ndarray, prob: float, corr: float, speech: bool, weak: bool, end: float
+    ) -> None:
+        """Advance the trigger record by one frame ending at ``end``, with the values the frame
+        decision computed. Opens and releases as the duck episode does (``release_ms``)."""
+        rec = self._rec
+        if speech or weak:
+            if rec is None:
+                rec = self._open_record("vad" if speech else "onset", end, frame, prob, corr)
+            with self._recent_lock:
+                rec["candidate_frames"] += 1
+                rec["vad_peak"] = round(max(rec["vad_peak"], prob), DIGITS)
+                rec["_end"] = end
+            self._rec_quiet = 0
+        elif rec is not None:
+            self._rec_quiet += 1
+            if self._rec_quiet >= self._release_frames:
+                self._close_record("released", None, end, "quiet")
+
+    def _open_record(
+        self,
+        fired: str,
+        end: float,
+        frame: np.ndarray | None = None,
+        prob: float | None = None,
+        corr: float | None = None,
+    ) -> dict[str, Any]:
+        """Start a record at the first candidate frame (``frame`` None: a keyword stop with no
+        episode open) with cheap scalars only, and put it in the ring at once, so a report taken
+        mid-episode shows it. The high-band share is the one the onset test computed (None when
+        it did not run); the motion is a raw sample, derived at close."""
+        start = end - self._frame_s
+        since = self._speaking_since
+        sample = None
+        if self._motion is not None:
+            try:
+                sample = self._motion.motion_sample()
+            except Exception as exc:
+                self._counts["record_errors"] += 1
+                log.warning("barge-in: motion sample: %s", type(exc).__name__)
+        hf = self._hf if frame is not None else None
+        rec: dict[str, Any] = {
+            "outcome": "open",
+            "released_by": None,
+            "fired": fired,
+            "confirmed": None,
+            "speaking_ms": None if since is None else self._ms(max(0.0, start - since)),
+            "level_db": None if frame is None else round(self._level_db(frame), DIGITS),
+            "hf_ratio": None if hf is None else round(hf, DIGITS),
+            "vad_prob": None if prob is None else round(prob, DIGITS),
+            "vad_peak": 0.0 if prob is None else round(prob, DIGITS),
+            "echo_corr": None if corr is None else round(corr, DIGITS),
+            "candidate_frames": 0,
+            "speech_ms": None,
+            "episode_ms": None,
+            "lag_ms": self._ms(self._clock() - end),
+            "robot_playing": None,
+            "robot_level_db": None,
+            "face_offset_deg": None,
+            **dict.fromkeys(MOTION_FIELDS),
+            "_start": start,
+            "_end": end,
+            "_sample": sample,
+        }
+        self._rec, self._rec_quiet = rec, 0
+        with self._recent_lock:
+            self._recent.append(rec)
+        return rec
+
+    def _close_record(
+        self, outcome: str, confirmed: str | None, end: float, by: str | None = None
+    ) -> None:
+        """End the open record as ``released`` (``by``: ``quiet`` after release_ms,
+        ``speech_end`` when the robot stopped speaking); a cut ends through ``_record_cut``."""
+        rec = self._rec
+        if rec is None:
+            return
+        self._rec, self._rec_quiet = None, 0
+        self._finish(rec, outcome, confirmed, end, by)
+
+    def _record_cut(self, rec: dict[str, Any] | None, path: str, detected: float) -> None:
+        """After a cut (``interrupt``, ``reset`` and the hand-off are done): end the episode's
+        record as cut by ``path``, or make one for a keyword stop with no episode open."""
+        if rec is None:
+            rec = self._open_record(path, detected)
+            self._rec = None
+        self._finish(rec, "cut", path, detected, None)
+
+    def _finish(
+        self,
+        rec: dict[str, Any],
+        outcome: str,
+        confirmed: str | None,
+        end: float,
+        by: str | None,
+    ) -> None:
+        """Fill the closing fields, and the lookups deferred from the first frame: the robot's
+        own audio over the episode, the face offset at its start and the motion sample."""
+        start = rec["_start"]
+        later = {
+            **self._reference_level(start, max(end, start + self._frame_s)),
+            "face_offset_deg": self._face_offset_deg(start),
+            **self._motion_fields(rec["_sample"], start + self._frame_s),
+        }
+        with self._recent_lock:
+            rec.update(later)
+            rec["outcome"] = outcome
+            rec["confirmed"] = confirmed
+            rec["released_by"] = by if outcome == "released" else None
+            rec["speech_ms"] = self._ms(rec["candidate_frames"] * self._frame_s)
+            rec["episode_ms"] = self._ms(max(0.0, end - start))
+            rec["_end"] = max(rec["_end"], end)
+            rec["_sample"] = None
+
+    def _reference_level(self, start: float, end: float) -> dict[str, Any]:
+        """Whether the robot's own audio was in the echo reference over the episode, and its
+        level (dBFS); None without a reference."""
+        if self._reference is None:
+            return {"robot_playing": None, "robot_level_db": None}
+        ref = self._reference.window(start, end)
+        power = float(np.mean(ref * ref)) if ref.size else 0.0
+        return {
+            "robot_playing": power >= SILENT_POWER,
+            "robot_level_db": round(DB_PER_DECADE * math.log10(power + LOG_FLOOR), DIGITS),
+        }
+
+    def _motion_fields(self, sample: MotionSample | None, end: float) -> dict[str, Any]:
+        """The motion at the first candidate frame, derived from its raw sample: commanded and
+        measured speed per manifest group, external control, an active reflex, ``moving`` (the
+        configured group, measured when known, at least ``moving_min_speed_dps``, or external)
+        and ``motion_offset_ms`` (the sample's tick minus the frame's end)."""
+        if sample is None or self._motion is None:
+            return dict.fromkeys(MOTION_FIELDS)
+        state = self._motion.motion_state(sample)
+        b = self._b
+        speeds = state.measured_dps or state.commanded_dps
+        if b.moving_group is None:
+            speed = max(speeds.values(), default=None)
+        else:
+            speed = speeds.get(b.moving_group, state.commanded_dps.get(b.moving_group))
+        moving = state.external or (None if speed is None else speed >= b.moving_min_speed_dps)
+        return {
+            "moving": moving,
+            "external": state.external,
+            "reflex": state.reflex,
+            "commanded_dps": self._by_group(state.commanded_dps),
+            "measured_dps": self._by_group(state.measured_dps),
+            "motion_offset_ms": self._ms(state.stamp - end),
+        }
+
+    @staticmethod
+    def _by_group(speeds: dict[str, float]) -> dict[str, float]:
+        return {g[:LABEL_MAX]: round(v, DIGITS) for g, v in speeds.items()}
+
+    def _face_offset_deg(self, stamp: float) -> float | None:
+        """Angle from the sound direction to the nearest visible face at ``stamp`` (None: no
+        reading, no face, or no lookup; the robot may mute its sound direction while it speaks)."""
+        if self._face_offset is None:
+            return None
+        offset = self._face_offset(stamp)
+        return None if offset is None else round(math.degrees(offset), DIGITS)
+
+    @staticmethod
+    def _ms(seconds: float) -> float:
+        return round(seconds * MS_PER_S, DIGITS)
+
     def _fricative(self, frame: np.ndarray, prob: float) -> bool:
         """A frame the main path does not count but the onset path may: scored from
         ``onset_threshold`` up to ``threshold`` and mostly high-frequency energy (an /s/)."""
         b = self._b
         if prob < b.onset_threshold:
             return False
-        return self._hf_ratio(frame) >= b.onset_hf_min_ratio
+        self._hf = self._hf_ratio(frame)
+        return self._hf >= b.onset_hf_min_ratio
 
     def _fricative_is_echo(self, frame: np.ndarray, corr: float, end: float) -> bool:
         """Whether a fricative-like frame is dropped: too quiet to tell from the echo of the
@@ -529,7 +776,7 @@ class BargeIn:
         detected = self._worker.take_hit()
         if detected is None:
             return False
-        self._trigger("keyword", detected, detected, np.empty(0, np.float32))
+        self._trigger("keyword", detected, detected, np.empty(0, np.float32), path="keyword")
         return True
 
     def _keywords(self, frame: np.ndarray, stamp: float, candidate: bool) -> bool:
@@ -577,9 +824,12 @@ class BargeIn:
 
     # ----------------------------------------------------------------- the cut
 
-    def _trigger(self, kind: str, onset: float, detected: float, rest: np.ndarray) -> None:
+    def _trigger(
+        self, kind: str, onset: float, detected: float, rest: np.ndarray, *, path: str
+    ) -> None:
         """Cut the robot off. ``stop`` comes first (it is the budgeted step), then the
-        conversation, then the listener's handoff."""
+        conversation, then the listener's handoff. ``path`` (``vad``, ``onset``, ``keyword``)
+        is the one that confirmed the cut, for the trigger record."""
         audio_from = onset - self._pre_frames * self._frame_s
         audio = [f for t, f in self._ring if t >= audio_from - EDGE_S]
         audio_stamp = min((t for t, _ in self._ring if t >= audio_from - EDGE_S), default=onset)
@@ -587,6 +837,7 @@ class BargeIn:
         samples = np.concatenate(audio)
         self._end_session()  # not blocking: the stop is the budgeted step; ``reset`` waits later
         self._end_duck("cut", detected)
+        rec, self._rec = self._rec, None  # recorded after the cut: ``reset`` must not release it
         t0 = time.perf_counter()
         stop = self._stop
         if stop is None:  # unbound: on_chunk never gets here, but a caller may
@@ -602,6 +853,7 @@ class BargeIn:
         self.stats.record("onset_to_stop", stopped - onset)  # until ``stop()`` returned
         self.stats.record("detect_to_stop", stopped - detected)
         self._counts["keyword_triggers" if kind == "keyword" else "triggers"] += 1
+        self._cuts_by_path[path] += 1
         if kind == "keyword" and self._emit is not None:
             try:
                 self._emit("speech.keyword.stop", stopped, {"language": self._lang})
@@ -614,3 +866,4 @@ class BargeIn:
         self.reset()
         if kind == "speech" and self._resume is not None:
             self._resume(samples, audio_stamp)
+        self._safe(self._record_cut, rec, path, detected)
