@@ -907,6 +907,7 @@ class ConversationWorker:
                 input_chars=len(turn.utterance.text),
                 generation=turn.rt_gen,  # the session that holds the turn's words
                 mute_on=SKIP_TOOL if skip and not turn.rounds else None,
+                on_late=lambda items, t=turn: self._late_items(t, items),
             )
             round_from = len(turn.spoken)
             turn.rt_round = (calls, results, round_from)
@@ -937,6 +938,7 @@ class ConversationWorker:
                 out_id = route.new_item_id()
                 if not route.send(rt_protocol.function_output(call.id, result.content, out_id)):
                     if ended:
+                        self._settle_calls(turn)  # the rest still need a result, if it holds
                         break  # no response follows: nothing is lost
                     return self._realtime_lost(turn)  # a skill ran: B1 (cut, Piper line)
                 run.answered(call.id)
@@ -1004,6 +1006,19 @@ class ConversationWorker:
             calls, outcomes, _ = turn.rt_round
             results = {c.id: r.content for c, r in zip(calls, outcomes, strict=False)}
         turn.rt_items += [i for i in run.settle(results) if i not in turn.rt_items]
+
+    def _late_items(self, turn: _Turn, items: list[str]) -> None:
+        """Server items of a call answered after its turn was cut (client thread): they join
+        the turn's items, also once the turn is in the history (its mark shares the list), so
+        they are deleted with it; a turn no longer held deletes them now (SPEC 8, 12)."""
+        with self._lock:
+            held = not turn.done or any(
+                t and t[0].get("rt", (None, None))[1] is turn.rt_items for t in self._turns
+            )
+            if held:
+                turn.rt_items.extend(items)
+        if not held:
+            self.realtime.delete_items(turn.rt_gen, items)
 
     def _keep_round(self, turn: _Turn) -> None:
         """The tool calls of the round the loss interrupted go into the history."""
@@ -1677,7 +1692,8 @@ class ConversationWorker:
                 # the server's items of this turn (deleted with it); _history_message sends a
                 # chat route only the chat fields, so this mark never leaves the robot
                 if turn.rt_items:
-                    messages[0]["rt"] = (turn.rt_gen, list(turn.rt_items))
+                    # the turn's own list: items of a late call join it (_late_items)
+                    messages[0]["rt"] = (turn.rt_gen, turn.rt_items)
                 if spoken:
                     messages.append({"role": "assistant", "content": spoken})
                     if len(kept) < len(texts) or turn.rt_partial:

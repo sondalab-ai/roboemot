@@ -28,6 +28,8 @@ Scripts (``scripts``, used in order; the last one repeats):
 ``strict_calls`` refuses a ``response.create`` with ``function_call_output_pending`` (echoing it,
 no script used) while a call it sent has neither a ``function_call_output`` nor a delete of its
 item, as the platform's server does (robot run 2026-11-02); each connection starts with none.
+``reject_outputs`` answers every ``function_call_output`` with an ``error`` echoing it and
+keeps its call open (a call item the cancel left missing, or a response still active).
 
 ``unrequested`` sends a ``response.created`` nobody asked for right after ``session.updated``.
 A ``response.cancel`` stops the reply in progress with ``response.done`` ``cancelled``.
@@ -101,6 +103,7 @@ class TurnServer(FakeServer):
         tool_names: list[str] | None = None,
         stall_s: float = 1.5,
         strict_calls: bool = False,
+        reject_outputs: bool = False,
         **kw: Any,
     ) -> None:
         super().__init__("normal", **kw)
@@ -110,6 +113,7 @@ class TurnServer(FakeServer):
         self.tool_name, self.tool_args = tool_name, tool_args
         self.tool_names, self.stall_s = tool_names, stall_s
         self.strict_calls = strict_calls
+        self.reject_outputs = reject_outputs
         self.open_calls: dict[str, str] = {}  # call id -> its item id, on this connection
         self.pending_refusals = 0  # response.create refused for an open call (strict_calls)
         self.unrequested = unrequested
@@ -163,7 +167,10 @@ class TurnServer(FakeServer):
                     await self._send(ws, {"type": "response.created", "response": {"id": "x"}})
             elif kind == "conversation.item.create":
                 item = event.get("item", {})
-                if item.get("type") == "function_call_output":
+                if item.get("type") == "function_call_output" and self.reject_outputs:
+                    error = {"code": "invalid_value", "event_id": event.get("event_id")}
+                    await self._send(ws, {"type": "error", "error": error})
+                elif item.get("type") == "function_call_output":
                     self.open_calls.pop(item.get("call_id"), None)
             elif kind == "conversation.item.delete":
                 gone = event.get("item_id")

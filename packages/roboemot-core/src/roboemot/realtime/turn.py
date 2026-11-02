@@ -123,6 +123,7 @@ class ResponseRun:
         input_chars: int = 0,
         generation: int | None = None,
         mute_on: str | None = None,
+        on_late: Callable[[list[str]], None] | None = None,
     ) -> None:
         self.route, self.speech = route, speech
         self.mute_on = mute_on  # this tool as the response's first call mutes it (the skip)
@@ -151,6 +152,7 @@ class ResponseRun:
         self._calls: dict[str, str | None] = {}
         self._answered: set[str] = set()
         self._settled = False  # settle ran: a later call is answered at once
+        self.on_late = on_late  # gets the server items of a call answered after settle
 
     @property
     def in_flight(self) -> bool:
@@ -265,7 +267,9 @@ class ResponseRun:
 
     def note_call(self, event: protocol.FunctionCall) -> None:
         """Record a call of this response (client thread); the route also hands over one that
-        comes after the run abandoned it. Once settled, it is answered ``INTERRUPTED`` at once."""
+        comes after the run abandoned it. Once settled, it is answered ``INTERRUPTED`` at once
+        and its items (the call's, the output's) go to ``on_late``, so they leave with the turn.
+        Idempotent per call id: both ``deliver`` and the route's recorder may reach it."""
         if not event.call_id:
             return
         with self._lock:
@@ -273,8 +277,12 @@ class ResponseRun:
             self._calls.setdefault(event.call_id, event.item_id)
             if late:
                 self._answered.add(event.call_id)
-        if late:
-            self._answer(event.call_id, INTERRUPTED)
+        if not late:
+            return
+        out_id = self._answer(event.call_id, INTERRUPTED)
+        items = [i for i in (event.item_id, out_id) if i]
+        if items and self.on_late is not None:
+            self.on_late(items)
 
     def answered(self, call_id: str) -> None:
         """The caller sent this call's ``function_call_output`` itself (a round that ended)."""
@@ -302,8 +310,7 @@ class ResponseRun:
         was not sent. Never raises: it runs while a turn is cut or fails."""
         try:
             out_id = self.route.new_item_id()
-            event = protocol.function_output(call_id, output, out_id)
-            sent = self.route.send(event, generation=self.generation)
+            sent = self.route.send_output(call_id, output, out_id, self.generation)
         except Exception as exc:
             log.warning("realtime: a tool result could not be sent (%s)", type(exc).__name__)
             return None

@@ -718,3 +718,108 @@ def test_a_barge_in_while_a_skill_runs_answers_the_queued_calls(rigs):
         assert srv.of("response.cancel") == []
         rig.worker._call = call
         answered_twice(rig, srv, 1)
+
+
+# ------------------------------------------------------------------ open tool calls, review round
+
+
+def test_a_settling_result_the_server_rejects_resets_the_session_once(rigs):
+    """The server refuses the cut turn's tool result (the call stays open): the session is
+    reset at once, the next turns answer on the new one, and no reset loop starts."""
+    script = ["tool_then_audio", "reply", "reply"]
+    with TurnServer(
+        script,
+        tool_name="play",
+        tool_args=PLAY,
+        deltas=30,
+        gap_s=0.05,
+        strict_calls=True,
+        reject_outputs=True,
+    ) as srv:
+        rig, env = tooled(rigs, srv)
+        n = rig.say()
+        assert wait_for(lambda: env.played == ["joy"] and bool(rig.sink.pushed))
+        assert barge_in(rig)
+        assert wait_for(lambda: rig.worker.snapshot().get("turns", 0) >= n)
+        assert wait_for(lambda: rig.route.snapshot()["pending_call_resets"] == 1)
+        assert rig.route.snapshot()["outputs_refused"] == 1
+        for i in range(2):
+            rig.turn(f"ancora {i}", stamp=time.monotonic() + 1.0)
+        assert srv.pending_refusals == 0 and rig.chat_hosts() == []
+        assert rig.events[-1]["route"] == "rt" and rig.events[-2]["route"] == "rt"
+        assert len(srv.connections) == 2 and rig.route.snapshot()["pending_call_resets"] == 1
+
+
+def test_a_late_calls_items_are_deleted_with_its_turn(rigs):
+    with TurnServer(
+        ["cancel_then_tool", "reply", "reply"],
+        tool_name="play",
+        tool_args=PLAY,
+        deltas=30,
+        gap_s=0.05,
+        strict_calls=True,
+    ) as srv:
+        rig, env = tooled(rigs, srv, app={"conversation": {"history_turns": 1}})
+        n = rig.say()
+        assert wait_for(lambda: bool(rig.sink.pushed) and rig.speech.stream_progress(1))
+        assert barge_in(rig)
+        assert wait_for(lambda: rig.worker.snapshot().get("turns", 0) >= n)
+        assert wait_for(lambda: "call_1" in outputs_by_call(srv))
+        out = next(
+            e["item"]["id"]
+            for e in srv.of("conversation.item.create")
+            if e["item"]["type"] == "function_call_output"
+        )
+        rig.turn("ancora", stamp=time.monotonic() + 1.0)  # the cut turn leaves the history
+
+        def deleted() -> set[str]:
+            return {e["item_id"] for e in srv.of("conversation.item.delete")}
+
+        assert wait_for(lambda: {"fc_1", out} <= deleted())
+
+
+def test_a_pending_refusal_with_no_request_still_resets(rigs):
+    """A ``function_call_output_pending`` whose request is no longer tracked (expired, given
+    up, or an error that echoes nothing) resets the session too."""
+    from roboemot.realtime import protocol
+
+    with TurnServer() as srv:
+        rig = rigs(srv)
+        assert rig.route.ready()
+        rig.route._on_event(
+            protocol.ServerError(protocol.ERROR, "function_call_output_pending", "ev_gone")
+        )
+        snap = rig.route.snapshot()
+        assert snap["pending_call_resets"] == 1 and snap["errors_unrelated"] == 1
+        rig.turn()
+        assert len(srv.connections) == 2 and rig.events[-1]["route"] == "rt"
+
+
+def test_a_skip_with_a_second_call_leaves_no_call_open(rigs):
+    with TurnServer(
+        ["tools", "reply"],
+        tool_names=["ignore_utterance", "play"],
+        tool_args=PLAY,
+        strict_calls=True,
+    ) as srv:
+        rig, env = tooled(rigs, srv, rt={"skip_tool": True})
+        rig.turn()
+        assert rig.route.snapshot()["skipped"] == 1 and env.played == []
+        assert wait_for(lambda: not srv.open_calls)
+        rig.turn("ancora", stamp=time.monotonic() + 1.0)
+        assert srv.pending_refusals == 0 and rig.events[-1]["route"] == "rt"
+
+
+def test_a_second_pending_reset_in_a_row_waits_the_backoff(rigs):
+    with TurnServer(["pending", "pending", "reply"]) as srv:
+        rig = rigs(srv)
+        rig.turn()
+        assert wait_for(lambda: rig.route.snapshot()["pending_call_resets"] == 1)
+        assert wait_for(lambda: rig.route.connected)
+        rig.turn("ancora", stamp=time.monotonic() + 1.0)
+        assert wait_for(lambda: rig.route.snapshot()["pending_call_resets"] == 2)
+        policy = rig.stack.effective().connectivity.network
+        with rig.route._lock:
+            wait = rig.route._reopen_at - rig.route.clock()
+        assert 0 < wait <= policy.probe_initial_s
+        assert len(srv.connections) == 2  # no reconnect before the backoff
