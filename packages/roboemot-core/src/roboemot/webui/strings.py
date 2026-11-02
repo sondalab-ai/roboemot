@@ -67,6 +67,112 @@ EN: dict[str, str] = {
     "live_phase_listening": "Listening",
     "live_phase_thinking": "Thinking",
     "live_phase_speaking": "Speaking",
+    "live_activity": "What's happening",
+    "live_activity_now": "Now",
+    "live_activity_recent": "Last decisions, newest first",
+    "live_activity_empty": "Nothing to explain yet.",
+    "live_activity_note": "Reasons and numbers only, kept in memory while this tab is on.",
+    "live_activity_count": "x{n}",
+    "live_status_asleep": "Asleep",
+    "live_status_answering": "Answering",
+    "live_status_cut": "Cut off by a barge-in",
+    "live_status_waiting": "Waiting for the answer",
+    "live_status_sending": "Sending what you said to the cloud",
+    "live_status_listening": "Listening",
+    "live_status_offline": "Offline: the network is down",
+    "live_status_cloud_down": "Cloud voice down",
+    "live_status_idle": "Idle",
+    "live_note_offline": "The network is down.",
+    "live_note_cloud_down": "The cloud voice is down ({reason}).",
+    "live_yes": "yes",
+    "live_no": "no",
+    "live_none": "-",
+    "live_ev_unknown": "{kind}: {reason}",
+    "live_ev_cue_fallback": "Fallback sound: {why}",
+    "live_ev_cue_not_heard": "Did-not-get-it sound: {why}",
+    "live_ev_cue_offline": "Offline sound: {why}",
+    "live_ev_cue_listening": "Listening blip: {why}",
+    "live_why_offline": "the network is down",
+    "live_why_no_transcript": "the cloud did not send back what you said",
+    "live_why_audio_sent": "what you said went to the cloud",
+    "live_why_no_voice": "the cloud voice could not answer and there is no local voice",
+    "live_why_no_route": "no route could answer",
+    "live_why_error": "the turn failed",
+    "live_why_no_text": "the answer had no words",
+    "live_why_realtime_lost": "the cloud session was lost during the answer",
+    "live_fail_refused": "the cloud refused the answer ({detail})",
+    "live_fail_closed": "the cloud session closed ({detail})",
+    "live_fail_no_session": "no cloud session ({detail})",
+    "live_fail_not_ready": "the cloud voice was not ready ({detail})",
+    "live_fail_exception": "the turn failed ({detail})",
+    "live_ev_reset_after": "session reset ({reset})",
+    "live_res_disabled": "not played: cues are off",
+    "live_res_muted": "not played: asleep or paused",
+    "live_res_unsupported": "not played: this robot has no such cue",
+    "live_res_sound_dropped": "gesture only: the speaker dropped the sound",
+    "live_res_skipped": "not played: someone was speaking",
+    "live_res_dropped": "not played: the speaker was busy",
+    "live_ev_unanswered_no_window": "Not answered: no wake word",
+    "live_ev_unanswered_other_speaker": "Not answered: someone else spoke after the wake word",
+    "live_ev_unanswered_no_face_at_voice": "Not answered: the voice did not come from a face",
+    "live_ev_unanswered_not_facing": (
+        "Not answered: not facing the robot (head turned {yaw_deg} deg, limit {limit_deg} deg)"
+    ),
+    "live_ev_unanswered_not_facing_busy": "Not answered: CPU busy, the head turn was not trusted",
+    "live_ev_unanswered_not_facing_none": (
+        "Not answered: not facing the robot (no head turn measured)"
+    ),
+    "live_ev_unanswered_no_facing_data": "Not answered: no facing data (no head turn measured)",
+    "live_ev_unanswered_skipped": (
+        "Not answered: the cloud model skipped it (conversation: {conversation})"
+    ),
+    "live_ev_unanswered_skipped_late": (
+        "Cut: the cloud model skipped it after it began to answer (conversation: {conversation})"
+    ),
+    "live_ev_unanswered_stop_consumed": (
+        "Not answered: it was the stop that already stopped the robot"
+    ),
+    "live_ev_unanswered_replaced": "Not answered: newer speech took its place",
+    "live_conv_none": "none",
+    "live_conv_in_progress": "in progress",
+    "live_conv_addressed": "addressed",
+    "live_ev_bargein_cut": (
+        "Cut by a barge-in (confirmed by {confirmed}): level {level_db} dB, robot playing "
+        "{robot_playing}, head moving {moving}, echo {echo_corr}"
+    ),
+    "live_ev_bargein_released": (
+        "Voice lowered, then released ({released_by}): level {level_db} dB, robot playing "
+        "{robot_playing}, echo {echo_corr}"
+    ),
+    "live_ev_session_reset": "Cloud session reset: {why}",
+    "live_reset_pending_calls": "a tool call was left open (function_call_output_pending)",
+    "live_reset_expired": "an old answer never started",
+    "live_reset_input_reset": "the audio input fell out of step",
+    "live_ev_session_reconnected": "Cloud session reconnected",
+    "live_ev_session_connect_failed": "Cloud connection failed ({why})",
+    "live_ev_session_lost": "Cloud session lost ({why})",
+    "live_ev_session_server_error": "Cloud server error: {code}",
+    "live_ev_audio_transcript_timeout": "No transcript from the cloud within {timeout_s} s",
+    "live_ev_facing_cpu_high": (
+        "Facing check skipped: CPU at {cpu_percent}% (limit {cpu_max_percent}%)"
+    ),
+    "live_ev_turn_ok": "Answered ({voice})",
+    "live_voice_realtime": "cloud voice",
+    "live_voice_local": "local voice",
+    "live_ev_turn_skip_refused": "Skip refused: a skill already acted in this turn",
+    "live_ev_turn_not_heard": "Not answered: what you said did not come back",
+    "live_ev_turn_offline": "Not answered: offline",
+    "live_ev_turn_no_voice": "Not answered: no voice could say it",
+    "live_ev_turn_no_route": "Not answered: no route could answer",
+    "live_ev_turn_error": "The turn failed",
+    "live_ev_turn_no_text": "The answer had no words",
+    "live_ev_turn_realtime_lost": "Cloud session lost during the answer",
+    "live_ev_turn_interrupted": "Answer cut off",
+    "live_ev_turn_skipped": "Skipped by the cloud model",
+    "live_ev_turn_stopped": "Stopped on request",
+    "live_ev_turn_confirmed": "Preference saved",
+    "live_ev_turn_declined": "Preference not saved",
+    "live_ev_turn_capped": "Answered, tool rounds capped",
     "live_route": "Route",
     "live_route_pending": "connecting",
     "live_elapsed": "Waiting for {n} s",
@@ -638,6 +744,122 @@ IT: dict[str, str] = {
     "live_phase_listening": "In ascolto",
     "live_phase_thinking": "Sta pensando",
     "live_phase_speaking": "Sta parlando",
+    "live_activity": "Cosa succede",
+    "live_activity_now": "Adesso",
+    "live_activity_recent": "Ultime decisioni, dalla più recente",
+    "live_activity_empty": "Ancora niente da spiegare.",
+    "live_activity_note": "Solo motivi e numeri, tenuti in memoria finché questa scheda è attiva.",
+    "live_activity_count": "x{n}",
+    "live_status_asleep": "Dorme",
+    "live_status_answering": "Sta rispondendo",
+    "live_status_cut": "Interrotto da chi parlava",
+    "live_status_waiting": "Aspetta la risposta",
+    "live_status_sending": "Sta mandando al cloud quello che hai detto",
+    "live_status_listening": "In ascolto",
+    "live_status_offline": "Offline: la rete non c'è",
+    "live_status_cloud_down": "Voce cloud non disponibile",
+    "live_status_idle": "A riposo",
+    "live_note_offline": "La rete non c'è.",
+    "live_note_cloud_down": "La voce cloud non è disponibile ({reason}).",
+    "live_yes": "sì",
+    "live_no": "no",
+    "live_none": "-",
+    "live_ev_unknown": "{kind}: {reason}",
+    "live_ev_cue_fallback": "Suono di ripiego: {why}",
+    "live_ev_cue_not_heard": "Suono di non capito: {why}",
+    "live_ev_cue_offline": "Suono di offline: {why}",
+    "live_ev_cue_listening": "Segnale di ascolto: {why}",
+    "live_why_offline": "la rete non c'è",
+    "live_why_no_transcript": "il cloud non ha rimandato quello che hai detto",
+    "live_why_audio_sent": "quello che hai detto è andato al cloud",
+    "live_why_no_voice": "la voce cloud non poteva rispondere e non c'è una voce locale",
+    "live_why_no_route": "nessuna rotta poteva rispondere",
+    "live_why_error": "il turno è fallito",
+    "live_why_no_text": "la risposta non aveva parole",
+    "live_why_realtime_lost": "la sessione cloud si è persa durante la risposta",
+    "live_fail_refused": "il cloud ha rifiutato la risposta ({detail})",
+    "live_fail_closed": "la sessione cloud si è chiusa ({detail})",
+    "live_fail_no_session": "nessuna sessione cloud ({detail})",
+    "live_fail_not_ready": "la voce cloud non era pronta ({detail})",
+    "live_fail_exception": "il turno è fallito ({detail})",
+    "live_ev_reset_after": "sessione azzerata ({reset})",
+    "live_res_disabled": "non suonato: i segnali sono spenti",
+    "live_res_muted": "non suonato: dorme o è in pausa",
+    "live_res_unsupported": "non suonato: questo robot non ha il segnale",
+    "live_res_sound_dropped": "solo il gesto: l'altoparlante ha scartato il suono",
+    "live_res_skipped": "non suonato: qualcuno stava parlando",
+    "live_res_dropped": "non suonato: l'altoparlante era occupato",
+    "live_ev_unanswered_no_window": "Senza risposta: manca la parola di attivazione",
+    "live_ev_unanswered_other_speaker": (
+        "Senza risposta: dopo la parola di attivazione ha parlato un altro"
+    ),
+    "live_ev_unanswered_no_face_at_voice": "Senza risposta: la voce non veniva da un volto",
+    "live_ev_unanswered_not_facing": (
+        "Senza risposta: non guardavi il robot (testa girata di {yaw_deg} gradi, limite "
+        "{limit_deg} gradi)"
+    ),
+    "live_ev_unanswered_not_facing_busy": (
+        "Senza risposta: CPU occupata, la rotazione della testa non era affidabile"
+    ),
+    "live_ev_unanswered_not_facing_none": (
+        "Senza risposta: non guardavi il robot (nessuna rotazione della testa misurata)"
+    ),
+    "live_ev_unanswered_no_facing_data": (
+        "Senza risposta: nessun dato sullo sguardo (nessuna rotazione della testa misurata)"
+    ),
+    "live_ev_unanswered_skipped": (
+        "Senza risposta: il modello cloud l'ha ignorata (conversazione: {conversation})"
+    ),
+    "live_ev_unanswered_skipped_late": (
+        "Interrotto: il modello cloud l'ha ignorata dopo aver iniziato a rispondere "
+        "(conversazione: {conversation})"
+    ),
+    "live_ev_unanswered_stop_consumed": (
+        "Senza risposta: era lo stop che aveva già fermato il robot"
+    ),
+    "live_ev_unanswered_replaced": "Senza risposta: una frase più recente ha preso il suo posto",
+    "live_conv_none": "nessuna",
+    "live_conv_in_progress": "in corso",
+    "live_conv_addressed": "rivolta al robot",
+    "live_ev_bargein_cut": (
+        "Interrotto da chi parlava (confermato da {confirmed}): livello {level_db} dB, robot "
+        "in riproduzione {robot_playing}, testa in movimento {moving}, eco {echo_corr}"
+    ),
+    "live_ev_bargein_released": (
+        "Voce abbassata, poi ripristinata ({released_by}): livello {level_db} dB, robot in "
+        "riproduzione {robot_playing}, eco {echo_corr}"
+    ),
+    "live_ev_session_reset": "Sessione cloud azzerata: {why}",
+    "live_reset_pending_calls": (
+        "una chiamata a uno strumento è rimasta aperta (function_call_output_pending)"
+    ),
+    "live_reset_expired": "una risposta vecchia non è mai partita",
+    "live_reset_input_reset": "l'audio in ingresso è andato fuori passo",
+    "live_ev_session_reconnected": "Sessione cloud ricollegata",
+    "live_ev_session_connect_failed": "Collegamento al cloud fallito ({why})",
+    "live_ev_session_lost": "Sessione cloud persa ({why})",
+    "live_ev_session_server_error": "Errore del server cloud: {code}",
+    "live_ev_audio_transcript_timeout": "Nessuna trascrizione dal cloud entro {timeout_s} s",
+    "live_ev_facing_cpu_high": (
+        "Controllo dello sguardo saltato: CPU al {cpu_percent}% (limite {cpu_max_percent}%)"
+    ),
+    "live_ev_turn_ok": "Ha risposto ({voice})",
+    "live_voice_realtime": "voce cloud",
+    "live_voice_local": "voce locale",
+    "live_ev_turn_skip_refused": "Salto rifiutato: uno strumento aveva già agito in questo turno",
+    "live_ev_turn_not_heard": "Senza risposta: quello che hai detto non è tornato",
+    "live_ev_turn_offline": "Senza risposta: offline",
+    "live_ev_turn_no_voice": "Senza risposta: nessuna voce poteva dirlo",
+    "live_ev_turn_no_route": "Senza risposta: nessuna rotta poteva rispondere",
+    "live_ev_turn_error": "Il turno è fallito",
+    "live_ev_turn_no_text": "La risposta non aveva parole",
+    "live_ev_turn_realtime_lost": "Sessione cloud persa durante la risposta",
+    "live_ev_turn_interrupted": "Risposta interrotta",
+    "live_ev_turn_skipped": "Ignorata dal modello cloud",
+    "live_ev_turn_stopped": "Fermato su richiesta",
+    "live_ev_turn_confirmed": "Preferenza salvata",
+    "live_ev_turn_declined": "Preferenza non salvata",
+    "live_ev_turn_capped": "Ha risposto, giri di strumenti limitati",
     "live_route": "Rotta",
     "live_route_pending": "in connessione",
     "live_elapsed": "In attesa da {n} s",

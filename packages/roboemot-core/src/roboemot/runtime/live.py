@@ -7,6 +7,12 @@ It never calls the heavy debug sources and never reads the configuration stack: 
 needs come from a copy kept up to date by ``apply_config`` (a stack subscriber), because the stack
 validates the whole configuration on every read. State only: no audio, text, embeddings, registry
 ids, bearings or positions, and nothing is logged or stored. The preview frame is ``LiveVideo``'s.
+
+``activity`` is the "What's happening" panel (``webui.live.activity``): a status code for what the
+robot is doing now, the conditions that hold (offline, the cloud route down with its reason code)
+and the last decision events of the runtime's ``EventRing`` (``roboemot.diag``), newest first.
+Codes and numbers only: the page builds the sentences in its language. A host without voice has
+no ring, route or listener to read (None): the status then comes from the other parts.
 """
 
 from __future__ import annotations
@@ -19,12 +25,19 @@ import psutil
 
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.conversation.sources import entry_name
+from roboemot.diag import code
 
 from .levels import AudioLevels
 from .live_video import LiveVideo
 
 MS_PER_S = 1000
 ROUND_DIGITS = 3  # decimals kept in the numbers sent to the page
+# what the robot is doing, most telling first ("What's happening" status line)
+STATUSES = (
+    "asleep", "answering", "cut", "waiting", "sending", "listening", "offline", "cloud_down", "idle"
+)  # fmt: skip
+ROUTE_DOWN = ("fallback_local", "blocked")  # realtime route states that mean it cannot answer
+ROUTE_UP_REASONS = (None, "off")  # a blocked route with these reasons is just not in use
 NO_TRANSCRIPT = {
     "enabled": False, "epoch": "", "rev": 0, "min_seq": 0, "max_turns": 0, "turns": []
 }  # fmt: skip
@@ -94,6 +107,7 @@ class LiveState:
             "reflexes": self._reflexes(now),
             "motion": self._motion(),
             "system": self._system(cfg, now),
+            "activity": self._activity(cfg) if cfg.webui.live.activity else None,
             "video": {
                 "enabled": cfg.webui.live.video,
                 "poll_ms": round(MS_PER_S / cfg.webui.live.video_fps),
@@ -136,6 +150,49 @@ class LiveState:
         if ring is not None:
             ring.clear()
         return True
+
+    def _activity(self, cfg: RoboEmotConfig) -> dict[str, Any]:
+        """The status code, the conditions that hold and the decision events (newest first)."""
+        notes = self._notes(cfg)
+        ring = getattr(self._host, "activity", None)
+        return {
+            "status": self._status(cfg, notes),
+            "notes": notes,
+            "events": ring.events() if ring is not None else [],
+        }
+
+    def _notes(self, cfg: RoboEmotConfig) -> list[dict[str, Any]]:
+        """The conditions that hold now: the network down, the realtime route down (its
+        reason code)."""
+        notes: list[dict[str, Any]] = []
+        if not self._p.network.online:
+            notes.append({"code": "offline", "reason": None})
+        route = getattr(self._host, "realtime_route", None)
+        if route is not None and cfg.voice.realtime_route.enabled:
+            state, reason = route.state, route.reason
+            if state in ROUTE_DOWN and reason not in ROUTE_UP_REASONS:
+                notes.append({"code": "cloud_down", "reason": code(reason)})
+        return notes
+
+    def _status(self, cfg: RoboEmotConfig, notes: list[dict[str, Any]]) -> str:
+        """One of ``STATUSES``, from the parts' own state (the first that holds)."""
+        if self._p.sleep.asleep:
+            return "asleep"
+        phase = self._host.phase.snapshot()["phase"]
+        if phase == "speaking":
+            return "answering"
+        ring = getattr(self._host, "activity", None)
+        age = ring.age_of("bargein", "cut") if ring is not None else None
+        if age is not None and age <= cfg.webui.live.activity_cut_hold_s:
+            return "cut"
+        if phase == "thinking":
+            return "waiting"
+        listener = getattr(self._host, "voice_listener", None)
+        if listener is not None and listener.awaiting_transcript():
+            return "sending"
+        if phase == "listening":
+            return "listening"
+        return notes[0]["code"] if notes else "idle"
 
     def _mood(self, now: float) -> dict[str, Any]:
         s = self._p.runner.engine.state(now)

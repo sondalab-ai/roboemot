@@ -4402,6 +4402,23 @@ class LiveConfig(Strict):
         ge=60,
         le=86400,
     )
+    activity: bool = param(
+        True,
+        'Show the "What\'s happening" panel on the Live tab: one line for what the robot is '
+        "doing and its last decisions with their reasons (a cue played, an utterance not "
+        "answered, a barge-in, a session reset). Codes and numbers only, kept in memory while "
+        "webui.live.enabled is on; off forgets them",
+    )
+    activity_events: int = param(
+        20, 'Most decisions the "What\'s happening" panel keeps; the oldest go first', ge=5, le=200
+    )
+    activity_cut_hold_s: float = param(
+        3.0,
+        "How long the status line says the robot was cut off by a barge-in",
+        unit="s",
+        ge=0.5,
+        le=30,
+    )
 
     @model_validator(mode="after")
     def _window_spans_two_polls(self) -> LiveConfig:

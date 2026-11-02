@@ -106,6 +106,7 @@ def test_the_payload_shape():
         "system",
         "video",
         "audio_egress",
+        "activity",
     }
     assert s["audio_egress"] is False  # no realtime route: no audio leaves
     assert s["poll_ms"] == 750

@@ -113,7 +113,7 @@ def test_switching_it_on_from_the_settings_page_needs_no_restart_and_off_again(s
     assert resp.json["poll_ms"] == 1000
     assert set(resp.json) == {
         "poll_ms", "mood", "modes", "conversation", "attention", "reflexes", "motion", "system",
-        "video", "audio_egress",
+        "video", "audio_egress", "activity",
     }  # fmt: skip
     assert resp.json["mood"]["label"] == "joy"
     assert resp.json["attention"]["faces"] == [{"name": "Mia", "target": True}]
