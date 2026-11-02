@@ -39,6 +39,7 @@ TOPICS = (
     "robot.asleep",
     "robot.awake",
     "config.changed",
+    "diag.event",
     "frames.camera",
     "frames.audio_in",
     "frames.audio_out",

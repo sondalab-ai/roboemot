@@ -62,6 +62,7 @@ class Reply:
     status: str | None = None  # response.done status; "error" for a server error before it
     tokens: int | None = None  # usage from response.done
     closed: str | None = None  # the session was lost during the response (a reason code)
+    error: str | None = None  # the server's error code when it refused the response
     # (speech job, item id), item id -> its transcript, the calls: never in repr (SPEC 12)
     jobs: list[tuple[int, str | None]] = field(default_factory=list, repr=False)
     texts: dict[str | None, str] = field(default_factory=dict, repr=False)
@@ -194,6 +195,7 @@ class ResponseRun:
                     self.reply.response_id = event.response_id
                 elif isinstance(event, protocol.ServerError):
                     self.reply.status = "error"  # refused: it echoed this request's event id
+                    self.reply.error = event.code
                     break
                 elif isinstance(event, protocol.FunctionCall):
                     self.reply.calls.append(event)

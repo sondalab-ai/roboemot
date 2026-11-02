@@ -14,6 +14,8 @@ from roboemot.bus import Bus
 from roboemot.config import ConfigStack
 from roboemot.config.schema import LinkPolicy, StateEffects
 from roboemot.conversation import ConversationWorker
+from roboemot.diag import TOPIC as DIAG_TOPIC
+from roboemot.diag import BusEvents
 from roboemot.health.network import NetworkMonitor
 from roboemot.llm.hub import RouterHub
 from roboemot.realtime.route import RealtimeRoute
@@ -63,11 +65,13 @@ class FakeCues:
 
     def __init__(self) -> None:
         self.played: list[str] = []
+        self.reasons: list[tuple[str, str, dict]] = []  # (kind, reason, detail) of each play
         self.begun = 0
         self.ended = 0
 
-    def play(self, kind: str) -> bool:
+    def play(self, kind: str, reason: str = "", **detail) -> bool:
         self.played.append(kind)
+        self.reasons.append((kind, reason, detail))
         return True
 
     def listening_begin(self, key) -> None:
@@ -92,6 +96,7 @@ class RtRig:
     circadian: list = field(default_factory=lambda: [StateEffects()])
     events: list = field(default_factory=list)
     cues: FakeCues = field(default_factory=FakeCues)
+    diag: list = field(default_factory=list)  # the decision events (diag.event payloads)
 
     def say(self, text: str = "ciao", **kw: Any) -> int:
         n = self.worker.snapshot().get("turns", 0)
@@ -190,6 +195,8 @@ def build_rt(
         cues=rig.cues,
     )
     bus.subscribe("conversation.turn", lambda m: rig.events.append(m.payload))
+    bus.subscribe(DIAG_TOPIC, lambda m: rig.diag.append(m.payload))
+    route_part.events = rig.worker.events = BusEvents(bus)
     rig.worker.start()
     return rig
 

@@ -36,6 +36,11 @@ whatever else happens. Sleep and the hold limit start a new generation: the utte
 are forgotten, so their late ends cannot release the next turn's cue. It shows only after
 ``listening_onset_s``, so a quick answer shows none.
 
+Every one-shot cue asked for, and every listening blip, publishes a ``cue`` decision event
+(``roboemot.diag``, SPEC 12A) after the lock is released: the caller's reason code and what
+happened (``played``, ``disabled``, ``muted``, ``unsupported``, ``sound_dropped``; the blip:
+``played``, ``skipped``, ``dropped``).
+
 Threads: ``play``, ``listening_begin`` and ``listening_end`` come from any thread (the listener,
 the conversation, the offline responder); ``commands`` runs on the app tick. One lock.
 """
@@ -55,6 +60,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, get_args
 import numpy as np
 
 from ..config.schema import CueConfig
+from ..diag import EventSink, no_events
 from ..motion.core import Command, Priority
 from ..motion.primitives import Player, Primitive
 
@@ -92,8 +98,9 @@ class CueSoundError(ValueError):
 class CueSink(Protocol):
     """What the listener, the conversation and the offline cue need of the cues."""
 
-    def play(self, kind: CueKind) -> bool:
-        """Show the one-shot cue ``kind``; whether anything played."""
+    def play(self, kind: CueKind, reason: str = "", **detail: Any) -> bool:
+        """Show the one-shot cue ``kind``; whether anything played. ``reason`` (a code) and
+        ``detail`` (scalars) say why, for the Live tab's decision event."""
         ...
 
     def listening_begin(self, key: Hashable) -> None:
@@ -224,6 +231,7 @@ class Cues:
         self._began = math.inf  # when the oldest outstanding utterance began it
         self._hold: _Hold | None = None
         self._counts: collections.Counter[str] = collections.Counter()
+        self.events: EventSink = no_events  # the Live tab's decision events (wired at start)
 
     def apply_config(self, cfg: CueConfig) -> None:
         """Hot reload: the next cue reads ``cfg``."""
@@ -232,36 +240,43 @@ class Cues:
 
     # ----------------------------------------------------------------- one-shot cues
 
-    def play(self, kind: CueKind) -> bool:
+    def play(self, kind: CueKind, reason: str = "", **detail: Any) -> bool:
         """Show ``kind`` now: its gesture (replacing one of the same kind still playing) and its
-        sound. False when off, muted, or the robot has neither (counted)."""
+        sound. False when off, muted, or the robot has neither (counted). ``reason`` and
+        ``detail`` go into the ``cue`` decision event with what happened."""
         with self._lock:
-            if not self._allowed(kind):
-                return False
-            prim = self._gesture(GESTURE_PREFIX + kind)
-            sound = self._sounds.get(kind)
-            if prim is None and sound is None:
-                self._counts[f"{kind}.unsupported"] += 1
-                return False
-            now = self.clock()
-            if prim is not None:
-                source = SOURCE_PREFIX + kind
-                self._players = [p for p in self._players if p.source != source]
-                self._players.append(Player(prim, now, source=source))
-            self._counts[f"{kind}.played"] += 1
-            volume = self.cfg.volume_db
-        self._play_sound(kind, sound, volume)
+            blocked = self._blocked(kind)
+            if blocked is None:
+                prim = self._gesture(GESTURE_PREFIX + kind)
+                sound = self._sounds.get(kind)
+                if prim is None and sound is None:
+                    self._counts[f"{kind}.unsupported"] += 1
+                    blocked = "unsupported"
+            if blocked is None:
+                now = self.clock()
+                if prim is not None:
+                    source = SOURCE_PREFIX + kind
+                    self._players = [p for p in self._players if p.source != source]
+                    self._players.append(Player(prim, now, source=source))
+                self._counts[f"{kind}.played"] += 1
+                volume = self.cfg.volume_db
+        if blocked is not None:
+            self.events("cue", reason, cue=kind, result=blocked, **detail)
+            return False
+        job = self._play_sound(kind, sound, volume)
+        result = "sound_dropped" if sound is not None and job is None else "played"
+        self.events("cue", reason, cue=kind, result=result, **detail)
         return True
 
-    def _allowed(self, kind: str) -> bool:
-        """Whether a cue may show now (lock held); counts why not."""
+    def _blocked(self, kind: str) -> str | None:
+        """Why a cue may not show now (lock held), counted; None when it may."""
         if not self.cfg.enabled:
             self._counts[f"{kind}.disabled"] += 1
-            return False
+            return "disabled"
         if self._muted():
             self._counts[f"{kind}.muted"] += 1
-            return False
-        return True
+            return "muted"
+        return None
 
     def _play_sound(self, kind: str, sound: CueSound | None, volume_db: float) -> int | None:
         """Queue ``sound`` on the speech output (lock not held); its job id, None when not
@@ -291,6 +306,7 @@ class Cues:
             played = False
         with self._lock:
             self._counts[f"{LISTENING}.{'sound' if played else 'sound_dropped'}"] += 1
+        self.events("cue", "audio_sent", cue=LISTENING, result="played" if played else "dropped")
 
     # ----------------------------------------------------------------- listening
 
@@ -313,6 +329,7 @@ class Cues:
         if not self._quiet():
             with self._lock:
                 self._counts[f"{LISTENING}.sound_skipped"] += 1
+            self.events("cue", "audio_sent", cue=LISTENING, result="skipped")
             return
         self._play_blip(sound, volume)
 
@@ -357,7 +374,7 @@ class Cues:
         """The onset passed (lock held): show the listening gesture."""
         self._due = math.inf
         began, self._began = self._began, math.inf
-        if not self._allowed(LISTENING):
+        if self._blocked(LISTENING) is not None:
             return
         prim = self._gesture(GESTURE_PREFIX + LISTENING)
         if prim is None:
@@ -429,7 +446,7 @@ class Cues:
 class NoCues:
     """The cues when there is nothing to show them with (tests, no runtime wiring)."""
 
-    def play(self, kind: CueKind) -> bool:
+    def play(self, kind: CueKind, reason: str = "", **detail: Any) -> bool:
         return False
 
     def listening_begin(self, key: Hashable) -> None:

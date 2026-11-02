@@ -21,6 +21,7 @@ from roboemot.attention import AttentionSelector
 from roboemot.bus import Bus
 from roboemot.circadian import CircadianModel, CircadianRunner, IdleLightReader, SystemClock
 from roboemot.conversation import ConversationPhase, ConversationWorker, TranscriptRing
+from roboemot.diag import EventRing, EventSink, no_events
 from roboemot.diagnostics import Diagnostics
 from roboemot.health.network import NetworkMonitor
 from roboemot.llm import Router
@@ -85,6 +86,8 @@ class RuntimeHost:
     live_video: LiveVideo | None = None  # the Live tab's preview (set when the web UI starts)
     transcript: TranscriptRing | None = None  # opt-in in-memory turns (Live tab, SPEC 12)
     levels: AudioLevels | None = None  # microphone and output levels in dBFS (Live tab)
+    events: EventSink = staticmethod(no_events)  # decision events onto the bus (diag.event)
+    activity: EventRing | None = None  # the last decision events ("What's happening", Live tab)
     names: RobotName | None = None  # the robot's name for the wake word and addressing
     perception: Perception | None = None
     enrollment: Any = None  # EnrollmentService: the web UI enrolls through it (SPEC 6)

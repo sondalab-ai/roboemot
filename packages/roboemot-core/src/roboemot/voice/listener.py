@@ -39,6 +39,12 @@ and the conversation does not answer it; its keywords still count). Hand-offs ke
 of the utterances; each carries the fast path's state of its utterance, so a newer utterance
 can begin while an older one waits.
 
+Decision events (``roboemot.diag``, SPEC 12A): an utterance with words that the wake gate does
+not address publishes ``unanswered`` with the rule that rejected it and the voice-at-face
+check's numbers (the facing check's median head yaw and its limit); a facing check that did not
+trust the yaw on a busy CPU publishes ``facing``/``cpu_high``; a transcript that did not come
+publishes ``audio``/``transcript_timeout``. No speaker id, no text.
+
 Chunk stamps are the monotonic time the chunk *ends*; the endpointer wants its start. The work
 per utterance is bounded by ``voice.vad.max_utterance_s``. The ``realtime`` block of the report
 (``ListenerLoad``) says whether the listener keeps up: its time per second of audio by stage, its
@@ -62,6 +68,7 @@ import numpy as np
 from .. import shutdown
 from ..bus import Bus
 from ..config.schema import RoboEmotConfig
+from ..diag import EventSink, no_events
 from .activity import SpeechActivity
 from .asr import ASRBackend, ASREvent, resolve_language
 from .decode_worker import DecodeJob, DecodeWorker
@@ -152,6 +159,7 @@ class _Handoff:
     rt: Any = None  # the RealtimeInput job (realtime.input.InputJob)
     addressed: bool | None = None
     face: str | None = None
+    face_info: dict[str, Any] = field(default_factory=dict)  # that check's numbers
     heard: frozenset[str] = field(default=frozenset(), repr=False)
     decode: DecodeJob | None = None  # its local decode, off the listener thread
     local_only: bool = False  # its audio left without a transcript: not answered (not_heard)
@@ -215,6 +223,8 @@ class VoiceListener:
         self._timer = timer
         self._direction = direction
         self._gate = WakeGate("always", 0.0)  # configured by apply_config
+        self.events: EventSink = no_events  # the Live tab's decision events (wired at start)
+        self._face_info: dict[str, Any] = {}  # the last voice-at-face check's numbers
         self.load = ListenerLoad(cfg.voice.listener)
         self._last_end: float | None = None  # stamp of the end of the last chunk read
         self._grammar = GrammarWorker(
@@ -577,6 +587,15 @@ class VoiceListener:
 
     # ---- utterance edges
 
+    def awaiting_transcript(self) -> bool:
+        """Whether an utterance's audio went to the realtime route and its transcript has not
+        come yet (the Live tab's "sending to the cloud"). Safe from any thread: a copy of the
+        queue, nothing waits."""
+        try:
+            return any(p.rt is not None for p in tuple(self._queue))
+        except RuntimeError:  # the queue changed during the copy: ask again at the next poll
+            return False
+
     def hearing(self) -> bool:
         """Whether someone's speech is in progress now (from its start to its end): the
         listening blip waits for a quiet moment (SPEC 8, Non-verbal cues). Safe from any thread
@@ -667,12 +686,38 @@ class VoiceListener:
         """The hand-off of an utterance that skipped Vosk, its final still to come."""
         now = self._clock()
         held = self._fast.hold()
-        return _Handoff(ev, "", self._language, None, None, now, now, held, face=face)
+        info = self._face_info if face is not None else {}
+        return _Handoff(
+            ev, "", self._language, None, None, now, now, held, face=face, face_info=info
+        )
 
     def _face(self) -> str | None:
         """The voice-at-face check's verdict, asked once for an utterance; None without one."""
         check = self._at_face()
         return None if check is None else check()
+
+    def _decided(self, p: _Handoff, outcome: str, text: str) -> None:
+        """Publish the wake decision of an utterance with words: ``unanswered`` with the rule
+        when it was rejected, and the facing check's CPU fallback when it took one."""
+        info = p.face_info
+        if info.get("facing") == "cpu_high":
+            self.events(
+                "facing",
+                "cpu_high",
+                path=info.get("path"),
+                cpu_percent=info.get("cpu_percent"),
+                cpu_max_percent=info.get("cpu_max_percent"),
+            )
+        if not text.strip() or not outcome.startswith("rejected_"):
+            return
+        self.events(
+            "unanswered",
+            outcome.removeprefix("rejected_"),
+            policy=self._cfg.voice.wake_word_policy,
+            facing=info.get("facing"),
+            yaw_deg=info.get("yaw_deg"),
+            limit_deg=info.get("limit_deg"),
+        )
 
     def _send_unheard(self, ev: SpeechEnd, face: str | None) -> bool:
         """An utterance that skipped Vosk ended: if the wake gate addresses it without the
@@ -686,7 +731,7 @@ class VoiceListener:
             enrolled_in_view=enrolled, start=start, speaker=speaker
         ):
             return False
-        addressed = self._gate.decide(
+        outcome = self._gate.outcome(
             wake_word=False,
             enrolled_in_view=enrolled,
             start=start,
@@ -694,8 +739,11 @@ class VoiceListener:
             speaker=speaker,
             at_face=None if face is None else (lambda: face),
         )
+        addressed = not outcome.startswith("rejected")
         p = self._handoff_for(ev, face)
         p.addressed = addressed
+        if addressed:
+            self._decided(p, outcome, "")  # its CPU fallback; words come with its final
         if addressed:
             self._send(p)
         else:  # decided already (a reload changed the policy meanwhile): decoded, not re-decided
@@ -827,6 +875,11 @@ class VoiceListener:
     def _rt_timeout(self, p: _Handoff) -> None:
         """No transcript within ``transcript_timeout_s``: the job is cancelled (its server
         items are deleted) and the utterance is decoded locally."""
+        self.events(
+            "audio",
+            "transcript_timeout",
+            timeout_s=self._cfg.voice.realtime_route.transcript_timeout_s,
+        )
         try:
             self._realtime.cancel(p.rt)
             self._realtime.route.count("transcript_timeouts")
@@ -916,14 +969,16 @@ class VoiceListener:
         if p.addressed is None:
             wake = self._fast.wakes(text, grammar_pass=p.grammar_pass, heard=heard, state=p.state)
             face = p.face
-            p.addressed = self._gate.decide(
+            outcome = self._gate.outcome(
                 wake_word=wake,
                 enrolled_in_view=self._enrolled(ev.start_stamp),
                 start=ev.start_stamp,
                 last_speech=ev.last_speech_stamp,
                 speaker=self._speaker(),
-                at_face=self._at_face() if face is None else (lambda: face),
+                at_face=self._checked(p) if face is None else (lambda: face),
             )
+            p.addressed = not outcome.startswith("rejected")
+            self._decided(p, outcome, text)
             if p.addressed and self._wants_audio():
                 p.heard = heard
                 self._send(p)
@@ -1021,9 +1076,31 @@ class VoiceListener:
             d.sample(stamp, muted=self._speech.speaking(stamp))
 
     def _at_face(self) -> AtFace | None:
-        """The voice-at-face check for the wake gate, None when there is none or it is off."""
+        """The voice-at-face check for the wake gate, None when there is none or it is off.
+        Each check keeps its numbers in ``_face_info`` (listener thread only)."""
         d = self._direction
-        return d.check if d is not None and d.enabled else None
+        if d is None or not d.enabled:
+            return None
+
+        def check() -> str:
+            verdict = d.check()
+            self._face_info = dict(d.last)
+            return verdict
+
+        return check
+
+    def _checked(self, p: _Handoff) -> AtFace | None:
+        """The voice-at-face check for ``p``'s decision: its numbers land in ``p.face_info``."""
+        check = self._at_face()
+        if check is None:
+            return None
+
+        def run() -> str:
+            verdict = check()
+            p.face_info = self._face_info
+            return verdict
+
+        return run
 
     def _speaker(self) -> str | None:
         try:

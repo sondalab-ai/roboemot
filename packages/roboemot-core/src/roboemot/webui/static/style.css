@@ -48,6 +48,8 @@ ul.row { list-style: none; padding: 0; margin: 0; }
 .row input[type="number"] { max-width: 10rem; }
 .live-transcript { max-height: 20rem; overflow-y: auto; display: flex; flex-direction: column; gap: var(--sl-space-2); }
 .live-turn { margin: 0; overflow-wrap: anywhere; }
+.live-event { margin: 0; overflow-wrap: anywhere; }
+.live-note { margin: 0; }
 .live-meter { display: grid; gap: var(--sl-space-1); }
 #live-audio { margin-top: var(--sl-space-4); }
 .live-video { display: block; width: 100%; height: auto; border-radius: var(--sl-radius-2, 0.5rem); }
