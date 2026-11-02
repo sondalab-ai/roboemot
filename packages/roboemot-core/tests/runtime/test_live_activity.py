@@ -41,6 +41,9 @@ def rig(**live_cfg):
     return SimpleNamespace(state=state, host=host, p=p, events=events, clock=clock, ring=ring)
 
 
+DOWN = SimpleNamespace(state="fallback_local", reason="connection_lost")
+
+
 def realtime_on(r):
     """The realtime route switched on in the view's config copy (no route needs to exist)."""
     c = r.state._cfg
@@ -79,9 +82,7 @@ def test_the_panel_switch_off_sends_no_block_and_the_live_tab_off_sends_nothing(
         (lambda r: setattr(r.host.voice_listener, "waiting", True), "sending"),
         (lambda r: setattr(r.p.network, "online", False), "offline"),
         (
-            lambda r: setattr(
-                r.host, "realtime_route", SimpleNamespace(state="fallback_local", reason="network")
-            ),
+            lambda r: setattr(r.host, "realtime_route", DOWN),
             "cloud_down",
         ),  # fmt: skip
         (lambda r: r.events("bargein", "cut"), "cut"),
@@ -113,11 +114,11 @@ def test_a_cut_shows_only_for_its_hold_time():
 def test_the_cloud_route_down_is_a_note_with_its_reason_while_the_robot_listens():
     r = rig()
     realtime_on(r)
-    r.host.realtime_route = SimpleNamespace(state="fallback_local", reason="network")
+    r.host.realtime_route = SimpleNamespace(state="fallback_local", reason="connection_lost")
     r.host.phase.set_listening(True)
     a = activity(r)
     assert a["status"] == "listening"
-    assert a["notes"] == [{"code": "cloud_down", "reason": "network"}]
+    assert a["notes"] == [{"code": "cloud_down", "reason": "connection_lost"}]
     r.host.realtime_route = SimpleNamespace(state="closed", reason="conversation_end")
     assert activity(r)["notes"] == []  # the robot closed it: not down
 

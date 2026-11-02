@@ -884,6 +884,9 @@ class RealtimeRoute:
             generation = self.generation
             output = req is None and event.event_id in self._outputs
             self._outputs.discard(event.event_id or "")
+            if event.code == PENDING_CALLS or output:
+                # marked before the run hears the error: its fallback cue then names the reset
+                self.last_reset = ("pending_calls", self.clock())
         self.events("session", "server_error", code=event.code, request=req is not None)
         if req is None:
             self._count("outputs_refused" if output else "errors_unrelated")

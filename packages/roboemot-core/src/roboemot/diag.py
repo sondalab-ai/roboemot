@@ -11,9 +11,10 @@ runtime wires :class:`BusEvents`), so publishing costs one small dict and never 
 I/O: the bus calls its subscribers in the publisher's thread and the ring holds a leaf lock only
 for a compare and a deque append.
 
-Privacy (SPEC 12): an event holds codes and numbers only. :func:`clean` keeps a field only when
-it is a bool, an int, a finite float (rounded), None or a short lower-case code; anything else
-(text, audio, an embedding, a key, a name) is dropped before the event leaves the producer.
+Privacy (SPEC 12): an event holds codes and numbers only, by allow-list. ``kind`` and ``reason``
+must be in ``REASONS``; :func:`clean` keeps only the declared fields (``FIELDS``): a number field
+a finite number, a flag a bool, a code field one of its enumerated values (any other string
+becomes ``OTHER``). A word, a name, a key, audio or an embedding never leaves the producer.
 """
 
 from __future__ import annotations
@@ -22,7 +23,6 @@ import collections
 import itertools
 import logging
 import math
-import re
 import threading
 import time
 from collections.abc import Callable
@@ -31,8 +31,7 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 TOPIC = "diag.event"
-CODE = re.compile(r"[a-z][a-z0-9_.]{0,47}")  # a code: never a sentence, a name or a key
-OTHER = "other"  # a kind or reason that is not a code
+OTHER = "other"  # a kind, reason or field value outside its allowed set
 DIGITS = 2  # decimals kept in a float field
 
 # The kinds and the reasons each one is published with (the page has a sentence for each).
@@ -83,6 +82,81 @@ REASONS: dict[str, tuple[str, ...]] = {
     ),
 }
 
+# Values a free-valued field may carry: the closed sets that feed it today. Anything else becomes
+# ``OTHER``, so no future producer can put a word, a name or a key in an event by mistake.
+ROUTE_REASONS = (
+    # route states and blocks (roboemot.realtime.route STATES, BLOCKS)
+    "off", "blocked", "connecting", "connected", "closed", "fallback_local", "no_route",
+    "no_opt_in", "no_extra", "provider", "pseudonyms", "budget", "unavailable",
+    # the robot's own closes and resets (OWN_CLOSES, the reset reasons)
+    "conversation_end", "asleep", "shutdown", "reconfigured", "expired", "input_reset",
+    "pending_calls",
+    # the client's close and connect reasons (roboemot.realtime.client)
+    "closed_by_server", "connect_failed", "connect_timeout", "connection_lost",
+    "key_unavailable", "oversize", "receive_failed", "send_failed", "send_stuck", "stall",
+    # a response run's own (roboemot.realtime.turn)
+    "no_session",
+)  # fmt: skip
+SERVER_CODES = (  # server error codes of the realtime subset the page can name
+    "function_call_output_pending", "invalid_request_error", "invalid_value", "server_error",
+    "rate_limit_exceeded", "session_expired", "conversation_already_has_active_response",
+    "response_cancel_not_active", "item_not_found", "input_audio_buffer_commit_empty",
+)  # fmt: skip
+EXCEPTIONS = {  # exception class name -> the code a turn failure carries
+    "TimeoutError": "timeout",
+    "ConnectionError": "connection",
+    "OSError": "os_error",
+    "RuntimeError": "runtime_error",
+    "ValueError": "value_error",
+    "KeyError": "key_error",
+    "TypeError": "type_error",
+    "CancelledError": "cancelled",
+}
+CUE_KINDS = ("listening", "offline", "not_heard", "fallback")
+CUE_RESULTS = (
+    "played", "disabled", "muted", "unsupported", "sound_dropped", "skipped", "dropped"
+)  # fmt: skip
+FAILURES = ("not_ready", "no_session", "refused", "closed", "exception")
+PATHS = ("vad", "onset", "keyword")
+NUMBER, FLAG = "number", "flag"  # a field that holds a number, a field that holds a bool
+
+FIELDS: dict[str, tuple[str, ...] | str] = {
+    "cue": CUE_KINDS,
+    "result": CUE_RESULTS,
+    "failure": FAILURES,
+    "detail": (*ROUTE_REASONS, *SERVER_CODES, *EXCEPTIONS.values()),
+    "reset": ROUTE_REASONS,
+    "policy": ("always", "never", "unless_enrolled_in_view"),
+    "facing": ("passed", "not_facing", "cpu_high", "no_data"),
+    "conversation": ("none", "in_progress", "addressed"),
+    "path": ("heard", "no_source", "silent", "muted"),
+    "voice": ("realtime", "local"),
+    "fired": PATHS,
+    "confirmed": PATHS,
+    "released_by": ("quiet", "speech_end"),
+    "why": ROUTE_REASONS,
+    "after": ROUTE_REASONS,
+    "counter": ("resets", "input_resets", "pending_call_resets"),
+    "code": SERVER_CODES,
+    "yaw_deg": NUMBER,
+    "limit_deg": NUMBER,
+    "limit": NUMBER,
+    "cpu_percent": NUMBER,
+    "cpu_max_percent": NUMBER,
+    "timeout_s": NUMBER,
+    "level_db": NUMBER,
+    "vad_peak": NUMBER,
+    "echo_corr": NUMBER,
+    "speech_ms": NUMBER,
+    "in_row": NUMBER,
+    "delay_s": NUMBER,
+    "rounds": NUMBER,
+    "robot_playing": FLAG,
+    "moving": FLAG,
+    "ducking": FLAG,
+    "request": FLAG,
+}
+
 EventSink = Callable[..., None]
 
 
@@ -90,26 +164,44 @@ def no_events(kind: str, reason: str, **fields: Any) -> None:
     """The sink of a producer the runtime did not wire: nothing happens."""
 
 
-def code(value: Any) -> str:
-    """``value`` when it is a code, else ``OTHER``."""
-    return value if isinstance(value, str) and CODE.fullmatch(value) else OTHER
+def code(value: Any, allowed: tuple[str, ...]) -> str:
+    """``value`` when it is one of ``allowed``, else ``OTHER``."""
+    return value if isinstance(value, str) and value in allowed else OTHER
+
+
+def exception_code(exc: BaseException) -> str:
+    """The code of an exception's class (``EXCEPTIONS``), ``OTHER`` for any other."""
+    return EXCEPTIONS.get(type(exc).__name__, OTHER)
 
 
 def clean(fields: dict[str, Any]) -> dict[str, Any]:
-    """The fields that may leave a producer: code keys with a bool, int, finite float, None or
-    code value. Everything else is dropped (SPEC 12)."""
+    """The fields that may leave a producer (SPEC 12): only the declared ones (``FIELDS``), a
+    number field with a finite number, a flag with a bool, a code field with one of its values
+    (``OTHER`` for any other string); None for any of them. Everything else is dropped."""
     out: dict[str, Any] = {}
     for key, value in fields.items():
-        if not (isinstance(key, str) and CODE.fullmatch(key)):
+        spec = FIELDS.get(key) if isinstance(key, str) else None
+        if spec is None:
             continue
-        if value is None or isinstance(value, bool | int):
-            out[key] = value
-        elif isinstance(value, float):
-            if math.isfinite(value):
-                out[key] = round(value, DIGITS)
-        elif isinstance(value, str) and CODE.fullmatch(value):
-            out[key] = value
+        if value is None:
+            out[key] = None
+        elif spec == FLAG:
+            if isinstance(value, bool):
+                out[key] = value
+        elif spec == NUMBER:
+            number = isinstance(value, int | float) and not isinstance(value, bool)
+            if number and math.isfinite(value):
+                out[key] = round(value, DIGITS) if isinstance(value, float) else value
+        elif isinstance(value, str):
+            out[key] = code(value, spec)  # type: ignore[arg-type]
     return out
+
+
+def event_kind(kind: Any, reason: Any) -> tuple[str, str]:
+    """``kind`` and ``reason`` when the catalogue (``REASONS``) has them, else ``OTHER``."""
+    if not (isinstance(kind, str) and kind in REASONS):
+        return OTHER, OTHER
+    return kind, code(reason, REASONS[kind])
 
 
 class BusEvents:
@@ -126,7 +218,8 @@ class BusEvents:
 
     def __call__(self, kind: str, reason: str, **fields: Any) -> None:
         try:
-            event = {**clean(fields), "kind": code(kind), "reason": code(reason), "t": self._wall()}
+            kind, reason = event_kind(kind, reason)
+            event = {**clean(fields), "kind": kind, "reason": reason, "t": self._wall()}
             self._bus.publish(TOPIC, event, self._clock())
         except Exception as exc:
             log.warning("diag: event not published (%s)", type(exc).__name__)
@@ -141,7 +234,7 @@ class EventRing:
     def __init__(self, live_cfg: Any, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
         self._seq = itertools.count(1)
-        self._lock = threading.Lock()  # resize and clear only
+        self._lock = threading.Lock()  # leaf: every read and write of the ring
         self._events: collections.deque[dict[str, Any]] = collections.deque(
             maxlen=live_cfg.activity_events
         )
@@ -166,10 +259,10 @@ class EventRing:
         """Keep one event. One that repeats the newest one (the same kind, reason and labels;
         its numbers may differ) replaces it with ``count`` one higher, so a run of the same
         rejection (a television) cannot push the rest out."""
-        event = {**msg.payload, "seq": next(self._seq), "_at": msg.stamp, "count": 1}
         with self._lock:  # a leaf lock held for a compare and an append
             if not self._on:
                 return
+            event = {**msg.payload, "seq": next(self._seq), "_at": msg.stamp, "count": 1}
             events = self._events
             last = events[-1] if events else None
             if last is not None and _labels(last) == _labels(event):
@@ -206,12 +299,18 @@ def _labels(event: dict[str, Any]) -> dict[str, Any]:
 
 
 __all__ = [
+    "FIELDS",
+    "OTHER",
     "REASONS",
+    "ROUTE_REASONS",
+    "SERVER_CODES",
     "TOPIC",
     "BusEvents",
     "EventRing",
     "EventSink",
     "clean",
     "code",
+    "event_kind",
+    "exception_code",
     "no_events",
 ]

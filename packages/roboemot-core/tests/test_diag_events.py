@@ -11,7 +11,18 @@ import pytest
 import test_cues
 from roboemot.bus import TOPICS, Bus
 from roboemot.config.schema import CueConfig, LiveConfig
-from roboemot.diag import REASONS, TOPIC, BusEvents, EventRing, clean
+from roboemot.diag import (
+    FIELDS,
+    REASONS,
+    ROUTE_REASONS,
+    SERVER_CODES,
+    TOPIC,
+    BusEvents,
+    EventRing,
+    clean,
+    event_kind,
+    exception_code,
+)
 from roboemot.motion.primitives import Primitive
 from roboemot.voice.cues import Cues, CueSound
 from test_voice_listener import BusyCpu, facing_rig
@@ -50,38 +61,74 @@ def test_the_topic_is_a_bus_topic():
     assert TOPIC in TOPICS
 
 
-def test_an_event_keeps_codes_and_numbers_and_drops_everything_else():
+def test_an_event_keeps_only_declared_fields_with_allowed_values():
     bus = Bus()
     got = published(bus)
     BusEvents(bus, wall=lambda: 1000.0)(
         "cue",
         "no_voice",
-        code="function_call_output_pending",
-        yaw=12.3456,
-        ok=True,
-        n=3,
-        none=None,
+        cue="fallback",
+        failure="refused",
+        detail="function_call_output_pending",
+        yaw_deg=12.3456,
+        robot_playing=True,
+        rounds=3,
+        reset=None,
         text=TEXT,
         key=SECRET,
-        Name="Mia",
+        name="mia",
         audio=np.zeros(4, np.float32),
         embedding=[0.1, 0.2],
-        nan=math.nan,
+        limit_deg=math.nan,
     )
     assert got == [
         {
-            "kind": "cue", "reason": "no_voice", "t": 1000.0,
-            "code": "function_call_output_pending",
-            "yaw": 12.35, "ok": True, "n": 3, "none": None,
+            "kind": "cue", "reason": "no_voice", "t": 1000.0, "cue": "fallback",
+            "failure": "refused", "detail": "function_call_output_pending", "yaw_deg": 12.35,
+            "robot_playing": True, "rounds": 3, "reset": None,
         }
     ]  # fmt: skip
 
 
-def test_a_kind_or_reason_that_is_not_a_code_becomes_other():
+LOWERCASE_LEAKS = ("sk0123456789abcdef", "ciao", "mia", "telefono")  # a key, a word, a name
+
+
+@pytest.mark.parametrize("leak", LOWERCASE_LEAKS)
+def test_a_lowercase_word_name_or_key_never_passes_a_code_field(leak):
     bus = Bus()
     got = published(bus)
-    BusEvents(bus)("cue", TEXT)
-    assert got[0]["reason"] == "other"
+    fields = {name: leak for name, spec in FIELDS.items() if isinstance(spec, tuple)}
+    BusEvents(bus)("session", "lost", **fields, cue_text=leak)
+    BusEvents(bus)("turn", leak, detail=leak)
+    BusEvents(bus)(leak, "reset")
+    for ev in got:
+        assert leak not in ev.values()
+    assert {v for k, v in got[0].items() if k in fields} == {"other"}
+    assert (got[1]["reason"], got[1]["detail"]) == ("other", "other")
+    assert (got[2]["kind"], got[2]["reason"]) == ("other", "other")
+
+
+def test_a_number_or_flag_field_takes_nothing_else():
+    assert clean({"yaw_deg": "40", "moving": 1, "rounds": True, "level_db": math.inf}) == {}
+
+
+def test_every_kind_and_reason_of_the_catalogue_passes_and_nothing_else():
+    for kind, reasons in REASONS.items():
+        for reason in reasons:
+            assert event_kind(kind, reason) == (kind, reason)
+        assert event_kind(kind, "not_a_reason") == (kind, "other")
+
+
+def test_the_route_reasons_cover_the_routes_own_sets():
+    from roboemot.realtime import route
+
+    assert set(route.STATES) | set(route.BLOCKS) | set(route.OWN_CLOSES) <= set(ROUTE_REASONS)
+    assert route.PENDING_CALLS in SERVER_CODES
+
+
+def test_an_exception_maps_to_a_fixed_code():
+    assert exception_code(TimeoutError()) == "timeout"
+    assert exception_code(type("SecretNameError", (Exception,), {})()) == "other"
 
 
 def test_a_failing_subscriber_never_reaches_the_producer(caplog):
@@ -91,28 +138,31 @@ def test_a_failing_subscriber_never_reaches_the_producer(caplog):
     assert "ZeroDivisionError" in caplog.text
 
 
-def ring_with(cfg: LiveConfig, n: int, *, kind="cue", reasons=None) -> EventRing:
+TURNS = REASONS["turn"]
+
+
+def ring_with(cfg: LiveConfig, n: int, *, reasons=TURNS) -> EventRing:
     bus = Bus()
     ring = EventRing(cfg)
     ring.attach(bus)
     events = BusEvents(bus)
     for i in range(n):
-        events(kind, reasons[i] if reasons else f"r{i}")
+        events("turn", reasons[i])
     return ring
 
 
 def test_the_ring_keeps_the_last_n_newest_first():
     ring = ring_with(live(activity_events=5), 8)
     rows = ring.events()
-    assert [r["reason"] for r in rows] == ["r7", "r6", "r5", "r4", "r3"]
+    assert [r["reason"] for r in rows] == list(reversed(TURNS[3:8]))
     assert [r["seq"] for r in rows] == sorted((r["seq"] for r in rows), reverse=True)
     assert all("_at" not in r for r in rows)
 
 
 def test_a_repeated_decision_is_one_row_with_a_count():
-    ring = ring_with(live(activity_events=5), 4, reasons=["a", "b", "b", "b"])
+    ring = ring_with(live(activity_events=5), 4, reasons=["ok", "error", "error", "error"])
     rows = ring.events()
-    assert [(r["reason"], r["count"]) for r in rows] == [("b", 3), ("a", 1)]
+    assert [(r["reason"], r["count"]) for r in rows] == [("error", 3), ("ok", 1)]
 
 
 def test_a_repeat_with_other_labels_is_its_own_row_and_numbers_may_differ():
@@ -145,6 +195,40 @@ def test_the_ring_collects_only_while_the_live_tab_and_the_panel_are_on_and_resi
     assert len(ring.events()) == 5
     ring.apply_config(live(activity=False))
     assert ring.events() == []  # off forgets them
+
+
+def test_the_ring_takes_publishers_on_many_threads_while_it_resizes_and_clears():
+    import threading
+
+    bus = Bus()
+    ring = EventRing(live(activity_events=50))
+    ring.attach(bus)
+    events = BusEvents(bus)
+    stop = threading.Event()
+
+    def publish(reason):
+        while not stop.is_set():
+            events("turn", reason)
+
+    def reload():
+        for k in range(200):
+            ring.apply_config(live(activity_events=5 + k % 40, activity=k % 7 != 0))
+
+    threads = [threading.Thread(target=publish, args=(r,)) for r in TURNS[:6]]
+    for t in threads:
+        t.start()
+    reload()
+    stop.set()
+    for t in threads:
+        t.join()
+    rows = ring.events()
+    assert len(rows) <= ring._events.maxlen
+    seqs = [r["seq"] for r in rows]
+    assert seqs == sorted(seqs, reverse=True) and len(set(seqs)) == len(seqs)
+    assert all(r["count"] >= 1 and r["reason"] in TURNS for r in rows)
+    ring.apply_config(live(activity=False))
+    events("turn", "ok")
+    assert ring.events() == []  # off after the last reload: nothing is kept
 
 
 def test_age_of_finds_the_newest_event_of_a_kind():
@@ -368,4 +452,4 @@ def test_every_event_of_these_scenarios_is_codes_and_numbers_only():
             assert isinstance(value, bool | int | float | str | type(None)), key
             if isinstance(value, str):
                 assert value not in words and " " not in value and SECRET not in value
-    assert clean({"detail": SECRET}) == {}
+    assert clean({"detail": SECRET}) == {"detail": "other"}

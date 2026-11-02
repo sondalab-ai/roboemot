@@ -25,7 +25,7 @@ import psutil
 
 from roboemot.config.schema import RoboEmotConfig
 from roboemot.conversation.sources import entry_name
-from roboemot.diag import code
+from roboemot.diag import ROUTE_REASONS, code
 
 from .levels import AudioLevels
 from .live_video import LiveVideo
@@ -171,7 +171,7 @@ class LiveState:
         if route is not None and cfg.voice.realtime_route.enabled:
             state, reason = route.state, route.reason
             if state in ROUTE_DOWN and reason not in ROUTE_UP_REASONS:
-                notes.append({"code": "cloud_down", "reason": code(reason)})
+                notes.append({"code": "cloud_down", "reason": code(reason, ROUTE_REASONS)})
         return notes
 
     def _status(self, cfg: RoboEmotConfig, notes: list[dict[str, Any]]) -> str:

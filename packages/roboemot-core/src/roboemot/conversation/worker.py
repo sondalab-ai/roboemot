@@ -63,7 +63,7 @@ from .. import shutdown
 from ..bus import Bus
 from ..config.schema import RegisterParams, RoboEmotConfig, StateEffects
 from ..config.stack import ConfigStack
-from ..diag import EventSink, no_events
+from ..diag import EventSink, exception_code, no_events
 from ..llm.hub import RouterHub
 from ..llm.prompt import (
     ADDRESSED,
@@ -858,7 +858,7 @@ class ConversationWorker:
             return True
         except Exception as exc:
             log.warning("conversation: realtime turn failed (%s)", type(exc).__name__)
-            turn.rt_failure, turn.rt_detail = "exception", type(exc).__name__.lower()
+            turn.rt_failure, turn.rt_detail = "exception", exception_code(exc)
             if turn.skipped:  # never answered by the chat routes
                 return self._skip(turn)
             # a response in flight was already abandoned (cancelled) by its run; the failing

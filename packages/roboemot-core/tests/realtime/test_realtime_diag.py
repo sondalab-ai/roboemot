@@ -42,7 +42,7 @@ def test_a_refused_answer_shows_the_fallback_cue_with_the_servers_code(rigs):
         kind, reason, detail = rig.cues.reasons[-1]
         assert (kind, reason) == ("fallback", "no_voice")
         assert detail["failure"] == "refused" and detail["detail"] == PENDING
-        assert detail["reset"] in ("pending_calls", None)  # the reset races the cue
+        assert detail["reset"] == "pending_calls"  # marked before the run hears the error
         assert wait_for(lambda: of(rig, "session", "reset"))
         reset = of(rig, "session", "reset")[0]
         assert reset["why"] == "pending_calls" and reset["counter"] == "pending_call_resets"
