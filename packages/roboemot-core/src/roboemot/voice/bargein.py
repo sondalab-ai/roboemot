@@ -66,8 +66,9 @@ gets a record of its own), the outcome (``open``, ``cut``, ``released``), the mi
 high-band share and the VAD score of the first candidate frame, the peak VAD score and the
 candidate audio, the echo correlation, whether the robot's own audio was in the echo reference
 then and how loud, how long the robot had been speaking, how far the listener lagged, the motion
-loop's last reading (``MotionProbe``: fastest commanded joint speed and its manifest group,
-external control, an active reflex) and the sound direction's offset from the nearest face.
+loop's last reading (``MotionProbe``: fastest commanded joint speed and its manifest group, the
+fastest speed per group, external control, an active reflex) and the sound direction's offset
+from the nearest face.
 ``cuts_by_path`` counts cuts per confirming path. Recording reads what the frame decision already
 computed and never changes it. Numbers and short labels only.
 
@@ -602,13 +603,24 @@ class BargeIn:
                 log.warning("barge-in: motion state: %s", type(exc).__name__)
         if state is None:
             return dict.fromkeys(
-                ("moving", "speed_dps", "moving_group", "external", "reflex", "motion_offset_ms")
+                (
+                    "moving",
+                    "speed_dps",
+                    "moving_group",
+                    "speed_by_group_dps",
+                    "external",
+                    "reflex",
+                    "motion_offset_ms",
+                )
             )
         moving = state.external or state.speed_dps >= self._b.moving_min_speed_dps
         return {
             "moving": moving,
             "speed_dps": round(state.speed_dps, DIGITS),
             "moving_group": None if state.group is None else state.group[:LABEL_MAX],
+            "speed_by_group_dps": {
+                g[:LABEL_MAX]: round(v, DIGITS) for g, v in state.group_speed_dps.items()
+            },
             "external": state.external,
             "reflex": state.reflex,
             "motion_offset_ms": self._ms(state.stamp - end),

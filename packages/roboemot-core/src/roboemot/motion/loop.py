@@ -251,12 +251,17 @@ class MotionLoop:
         vel = self.core.limiter.vel
         fastest = max(self._angle_dofs, key=lambda n: abs(vel.get(n, 0.0)), default=None)
         speed = abs(vel.get(fastest, 0.0)) if fastest is not None else 0.0
+        groups: dict[str, float] = {}
+        for name in self._angle_dofs:
+            group = self.manifest.dofs[name].group
+            groups[group] = max(groups.get(group, 0.0), math.degrees(abs(vel.get(name, 0.0))))
         self._motion_state = MotionState(
             stamp=now,
             speed_dps=math.degrees(speed),
             group=self.manifest.dofs[fastest].group if fastest is not None and speed > 0 else None,
             external=self.external_ctl.yielding,
             reflex=any(c.priority == Priority.REFLEX for c in self.core.arbiter.active(now)),
+            group_speed_dps=groups,
         )
 
     def _read_fresh(self) -> dict[str, float] | None:

@@ -780,13 +780,16 @@ def test_a_gap_releases_the_gain_with_the_ramp_not_a_step():
 # ------------------------------------------------------------------ trigger records (SPEC 8, 12A)
 
 SCALARS = (bool, int, float, type(None))
+GROUP_SPEEDS = "speed_by_group_dps"  # the one mapping: manifest group label -> deg/s
 
 
 class FakeMotion:
     """A ``MotionProbe`` with a fixed reading."""
 
-    def __init__(self, speed_dps=0.0, group=None, external=False, reflex=False, stamp=0.0):
-        self.state = MotionState(stamp, speed_dps, group, external, reflex)
+    def __init__(
+        self, speed_dps=0.0, group=None, external=False, reflex=False, stamp=0.0, groups=None
+    ):
+        self.state = MotionState(stamp, speed_dps, group, external, reflex, groups or {})
 
     def motion_state(self):
         return self.state
@@ -794,7 +797,9 @@ class FakeMotion:
 
 def assert_scalars_only(record):
     for key, value in record.items():
-        if isinstance(value, str):
+        if key == GROUP_SPEEDS and value is not None:
+            assert all(len(g) <= LABEL_MAX and isinstance(v, float) for g, v in value.items())
+        elif isinstance(value, str):
             assert len(value) <= LABEL_MAX, key
         else:
             assert isinstance(value, SCALARS), key
@@ -958,3 +963,12 @@ def test_recording_does_not_change_any_decision():
         face_offset=lambda now: 1.0,
     )
     assert a == b and len(a) == 1
+
+
+def test_a_fast_group_does_not_hide_a_slower_one():
+    motion = FakeMotion(120.0, "ears", groups={"ears": 120.0, "neck": 15.0})
+    _, bi = onset_run([0.5, 0.6, 0.55], hiss(3), keyword_enabled=False, motion=motion)
+    (rec,) = bi.recent()
+    assert rec["moving_group"] == "ears"
+    assert rec["speed_by_group_dps"] == {"ears": 120.0, "neck": 15.0}
+    assert_scalars_only(rec)

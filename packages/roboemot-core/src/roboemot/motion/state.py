@@ -8,7 +8,7 @@ manifest group, a label the manifest owns.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 
@@ -16,13 +16,15 @@ from typing import Protocol
 class MotionState:
     """One tick's movement: the highest commanded angular speed over the angle dofs (deg/s),
     the manifest group of that dof (None when still), whether the loop yields to external
-    control, whether a reflex command is active, and the tick's monotonic stamp."""
+    control, whether a reflex command is active, the tick's monotonic stamp, and the highest
+    angular speed per manifest group (deg/s), so a fast group does not hide a slower one."""
 
     stamp: float
     speed_dps: float
     group: str | None
     external: bool
     reflex: bool
+    group_speed_dps: dict[str, float] = field(default_factory=dict)
 
 
 class MotionProbe(Protocol):

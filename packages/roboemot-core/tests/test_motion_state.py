@@ -43,6 +43,11 @@ def test_a_turn_reports_the_fastest_angle_dof_and_its_group():
     state = loop.motion_state()
     assert state.group == "neck" and state.speed_dps > 0.0
     assert state.speed_dps == math.degrees(abs(loop.core.limiter.vel["neck.yaw"]))
+    vel = loop.core.limiter.vel
+    assert state.group_speed_dps == {
+        "neck": math.degrees(abs(vel["neck.yaw"])),  # the translation is not an angular speed
+        "ears": math.degrees(abs(vel["ears.left"])),
+    }
     assert not state.reflex
 
 
