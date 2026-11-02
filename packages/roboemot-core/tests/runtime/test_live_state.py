@@ -67,7 +67,13 @@ def parts(entries=(), target=None, registry=None, **over):
 
 
 def live(p=None, config=None, host=None, **kw):
-    host = host or SimpleNamespace(circadian=object(), phase=ConversationPhase())
+    host = host or SimpleNamespace(
+        circadian=object(),
+        phase=ConversationPhase(),
+        activity=None,
+        realtime_route=None,
+        voice_listener=None,
+    )
     return LiveState(
         host, p or parts(), config or cfg(), clock=lambda: NOW, temperature=lambda: None, **kw
     )
@@ -127,7 +133,13 @@ def test_the_payload_shape():
 
 
 def test_modes_follow_the_parts():
-    host = SimpleNamespace(circadian=None, phase=ConversationPhase())
+    host = SimpleNamespace(
+        circadian=None,
+        phase=ConversationPhase(),
+        activity=None,
+        realtime_route=None,
+        voice_listener=None,
+    )
     p = parts(
         sleep=SimpleNamespace(asleep=True, paused_parts=lambda: ["vision", "listener"]),
         network=SimpleNamespace(online=False),
@@ -143,7 +155,13 @@ def test_modes_follow_the_parts():
 
 
 def test_the_conversation_card_is_the_phase():
-    host = SimpleNamespace(circadian=None, phase=ConversationPhase())
+    host = SimpleNamespace(
+        circadian=None,
+        phase=ConversationPhase(),
+        activity=None,
+        realtime_route=None,
+        voice_listener=None,
+    )
     host.phase.begin_thinking()
     host.phase.set_route("lan")
     c = live(host=host).state()["conversation"]
@@ -220,7 +238,13 @@ def test_the_temperature_is_read_once_per_cache_window():
         return 61.234
 
     state = LiveState(
-        SimpleNamespace(circadian=None, phase=ConversationPhase()),
+        SimpleNamespace(
+            circadian=None,
+            phase=ConversationPhase(),
+            activity=None,
+            realtime_route=None,
+            voice_listener=None,
+        ),
         parts(),
         cfg(system_cache_s=5.0),
         clock=lambda: clock[0],

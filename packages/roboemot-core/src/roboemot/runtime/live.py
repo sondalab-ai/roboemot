@@ -12,7 +12,7 @@ ids, bearings or positions, and nothing is logged or stored. The preview frame i
 robot is doing now, the conditions that hold (offline, the cloud route down with its reason code)
 and the last decision events of the runtime's ``EventRing`` (``roboemot.diag``), newest first.
 Codes and numbers only: the page builds the sentences in its language. A host without voice has
-no ring, route or listener to read (None): the status then comes from the other parts.
+no route or listener (None): the status then comes from the other parts.
 """
 
 from __future__ import annotations
@@ -154,7 +154,7 @@ class LiveState:
     def _activity(self, cfg: RoboEmotConfig) -> dict[str, Any]:
         """The status code, the conditions that hold and the decision events (newest first)."""
         notes = self._notes(cfg)
-        ring = getattr(self._host, "activity", None)
+        ring = self._host.activity
         return {
             "status": self._status(cfg, notes),
             "notes": notes,
@@ -167,7 +167,7 @@ class LiveState:
         notes: list[dict[str, Any]] = []
         if not self._p.network.online:
             notes.append({"code": "offline", "reason": None})
-        route = getattr(self._host, "realtime_route", None)
+        route = self._host.realtime_route
         if route is not None and cfg.voice.realtime_route.enabled:
             state, reason = route.state, route.reason
             if state in ROUTE_DOWN and reason not in ROUTE_UP_REASONS:
@@ -181,13 +181,13 @@ class LiveState:
         phase = self._host.phase.snapshot()["phase"]
         if phase == "speaking":
             return "answering"
-        ring = getattr(self._host, "activity", None)
+        ring = self._host.activity
         age = ring.age_of("bargein", "cut") if ring is not None else None
         if age is not None and age <= cfg.webui.live.activity_cut_hold_s:
             return "cut"
         if phase == "thinking":
             return "waiting"
-        listener = getattr(self._host, "voice_listener", None)
+        listener = self._host.voice_listener
         if listener is not None and listener.awaiting_transcript():
             return "sending"
         if phase == "listening":

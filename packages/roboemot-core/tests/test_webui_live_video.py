@@ -56,6 +56,9 @@ def served(tmp_path, stack):
     host = SimpleNamespace(
         circadian=None,
         phase=ConversationPhase(),
+        activity=None,
+        realtime_route=None,
+        voice_listener=None,
         perception=SimpleNamespace(service=service, pipeline=faces),
     )
     p = pipeline()

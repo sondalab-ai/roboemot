@@ -56,7 +56,13 @@ def stack(tmp_path):
 
 @pytest.fixture
 def served(tmp_path, stack):
-    host = SimpleNamespace(circadian=object(), phase=ConversationPhase())
+    host = SimpleNamespace(
+        circadian=object(),
+        phase=ConversationPhase(),
+        activity=None,
+        realtime_route=None,
+        voice_listener=None,
+    )
     live = LiveState(host, pipeline(), stack.effective(), clock=lambda: NOW)
     stack.subscribe(live.apply_config)
     editor = SettingsEditor(stack, store=tmp_path / "webui_settings.json")
@@ -222,9 +228,11 @@ def test_start_webui_keeps_its_live_port_in_step_with_the_stack(tmp_path, stack)
         route_check_router=lambda: None,
         circadian=None,
         phase=ConversationPhase(),
+        activity=None,
+        realtime_route=None,
+        voice_listener=None,
         webui=None,
         bus=None,
-        realtime_route=None,
     )
     with ExitStack() as cleanup:
         server = start_webui(host, stack, stack.effective(), manifest, cleanup, pipeline())
@@ -250,7 +258,8 @@ def test_a_failed_start_leaves_no_listener_behind(tmp_path, stack, monkeypatch):
     host = SimpleNamespace(
         perception=SimpleNamespace(enrollment=None), diagnostics=None, catalogue=None,
         name_source=None, route_check_router=lambda: None, circadian=None,
-        phase=ConversationPhase(), webui=None,
+        phase=ConversationPhase(), activity=None, realtime_route=None, voice_listener=None,
+        webui=None,
     )  # fmt: skip
     manifest = SimpleNamespace(robot=SimpleNamespace(profile=None, id="x"))
     with ExitStack() as cleanup:
@@ -327,6 +336,9 @@ def test_start_webui_drops_the_preview_when_the_robot_falls_asleep_and_at_shutdo
         route_check_router=lambda: None,
         circadian=None,
         phase=ConversationPhase(),
+        activity=None,
+        realtime_route=None,
+        voice_listener=None,
         webui=None,
         bus=bus,
         live_video=None,
