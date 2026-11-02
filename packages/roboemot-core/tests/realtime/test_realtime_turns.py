@@ -4,6 +4,7 @@ session end (SPEC 8, Realtime speech route; Conversation state; Voice, expressiv
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 import pytest
@@ -688,3 +689,32 @@ def test_a_pending_call_refusal_resets_the_session_and_the_next_turn_answers(rig
         assert len(srv.connections) == 2
         assert rig.events[-1]["route"] == "rt"
         assert rig.route.snapshot()["pending_call_resets"] == 1
+
+
+def test_a_barge_in_while_a_skill_runs_answers_the_queued_calls(rigs):
+    """The robot's case: three calls and response.done are in while the first skill still runs;
+    the cut answers every call once (no cancel: the response was over)."""
+    with TurnServer(
+        ["tools", "reply", "reply"], tool_names=["play"] * 3, tool_args=PLAY, strict_calls=True
+    ) as srv:
+        rig, env = tooled(rigs, srv)
+        call = rig.worker._call
+        running = []
+
+        async def slow(*args, **kw):
+            running.append(True)
+            await asyncio.sleep(5.0)
+            return await call(*args, **kw)
+
+        rig.worker._call = slow
+        n = rig.say()
+        assert wait_for(lambda: running and srv.sent_of("response.done"))
+        assert barge_in(rig)
+        assert wait_for(lambda: rig.worker.snapshot().get("turns", 0) >= n)
+        assert wait_for(lambda: len(outputs_by_call(srv)) == 3)
+        assert outputs_by_call(srv) == {
+            c: ['{"error": "interrupted"}'] for c in ("call_1", "call_1_1", "call_1_2")
+        }
+        assert srv.of("response.cancel") == []
+        rig.worker._call = call
+        answered_twice(rig, srv, 1)
