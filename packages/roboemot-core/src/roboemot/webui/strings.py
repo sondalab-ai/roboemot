@@ -144,6 +144,10 @@ EN: dict[str, str] = {
         "Voice lowered, then released ({released_by}): level {level_db} dB, robot playing "
         "{robot_playing}, echo {echo_corr}"
     ),
+    "live_ev_bargein_released_noduck": (
+        "Speech over the robot, not enough to cut it ({released_by}): level {level_db} dB, "
+        "robot playing {robot_playing}, echo {echo_corr}"
+    ),
     "live_ev_session_reset": "Cloud session reset: {why}",
     "live_reset_pending_calls": "a tool call was left open (function_call_output_pending)",
     "live_reset_expired": "an old answer never started",
@@ -828,6 +832,10 @@ IT: dict[str, str] = {
     "live_ev_bargein_released": (
         "Voce abbassata, poi ripristinata ({released_by}): livello {level_db} dB, robot in "
         "riproduzione {robot_playing}, eco {echo_corr}"
+    ),
+    "live_ev_bargein_released_noduck": (
+        "Qualcuno ha parlato sopra il robot, non abbastanza per interromperlo ({released_by}): "
+        "livello {level_db} dB, robot in riproduzione {robot_playing}, eco {echo_corr}"
     ),
     "live_ev_session_reset": "Sessione cloud azzerata: {why}",
     "live_reset_pending_calls": (

@@ -663,7 +663,7 @@ class BargeIn:
             rec["_end"] = max(rec["_end"], end)
             rec["_sample"] = None
             fields = {k: rec.get(k) for k in EVENT_FIELDS}
-        self.events("bargein", outcome, **fields)
+        self.events("bargein", outcome, ducking=self._b.duck.enabled, **fields)
 
     def _reference_level(self, start: float, end: float) -> dict[str, Any]:
         """Whether the robot's own audio was in the echo reference over the episode, and its

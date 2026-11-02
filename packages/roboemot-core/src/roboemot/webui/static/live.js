@@ -194,6 +194,7 @@ function liveEventText(ev) {
   if (ev.kind === "cue") return liveCueText(ev);
   let key = "live_ev_" + ev.kind + "_" + ev.reason;
   const extra = {};
+  if (ev.kind === "bargein" && ev.reason === "released" && ev.ducking === false) key += "_noduck";
   if (ev.kind === "unanswered" && ev.reason === "not_facing") {
     if (ev.facing === "cpu_high") key += "_busy";
     else if (ev.yaw_deg === null || ev.yaw_deg === undefined) key += "_none";

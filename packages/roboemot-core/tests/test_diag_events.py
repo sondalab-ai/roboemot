@@ -115,6 +115,26 @@ def test_a_repeated_decision_is_one_row_with_a_count():
     assert [(r["reason"], r["count"]) for r in rows] == [("b", 3), ("a", 1)]
 
 
+def test_a_repeat_with_other_labels_is_its_own_row_and_numbers_may_differ():
+    bus = Bus()
+    ring = EventRing(live())
+    ring.attach(bus)
+    events = BusEvents(bus)
+    events("session", "reset", why="expired", in_row=1)
+    events("session", "reset", why="input_reset", in_row=2)
+    events("unanswered", "not_facing", facing="not_facing", yaw_deg=40.0)
+    events("unanswered", "not_facing", facing="not_facing", yaw_deg=55.0)
+    events("unanswered", "not_facing", facing="cpu_high", yaw_deg=None)
+    rows = [(r["reason"], r.get("why") or r.get("facing"), r["count"]) for r in ring.events()]
+    assert rows == [
+        ("not_facing", "cpu_high", 1),
+        ("not_facing", "not_facing", 2),
+        ("reset", "input_reset", 1),
+        ("reset", "expired", 1),
+    ]
+    assert ring.events()[1]["yaw_deg"] == 55.0  # the newest numbers
+
+
 def test_the_ring_collects_only_while_the_live_tab_and_the_panel_are_on_and_resizes():
     ring = ring_with(LiveConfig(), 3)  # webui.live.enabled off by default
     assert ring.events() == []
@@ -296,7 +316,7 @@ def test_a_barge_in_cut_and_a_released_duck_are_published(monkeypatch):
     assert len(stops) == 1
     (cut,) = rec.of("bargein", "cut")
     assert cut["confirmed"] == "onset" and cut["fired"] == "onset"
-    assert set(cut) == set(bargein.EVENT_FIELDS)
+    assert set(cut) == {*bargein.EVENT_FIELDS, "ducking"} and cut["ducking"] is True
     probs = [0.0, 0.0, 0.9, 0.0, 0.0, 0.0, 0.0, 0.0]  # a cough: ducked, then released
     onset_run(probs, user_voice(8 * FRAME / RATE, 0.1), keyword_enabled=False)
     (released,) = rec.of("bargein", "released")

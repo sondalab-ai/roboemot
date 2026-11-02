@@ -163,34 +163,46 @@ class EventRing:
         return bus.subscribe(TOPIC, self.on_message)
 
     def on_message(self, msg: Any) -> None:
-        """Keep one event. One that repeats the newest one's kind and reason replaces it with
-        ``count`` one higher, so a run of the same rejection (a television) cannot push the
-        rest out."""
-        if not self._on:
-            return
+        """Keep one event. One that repeats the newest one (the same kind, reason and labels;
+        its numbers may differ) replaces it with ``count`` one higher, so a run of the same
+        rejection (a television) cannot push the rest out."""
         event = {**msg.payload, "seq": next(self._seq), "_at": msg.stamp, "count": 1}
         with self._lock:  # a leaf lock held for a compare and an append
+            if not self._on:
+                return
             events = self._events
             last = events[-1] if events else None
-            if last is not None and (last["kind"], last["reason"]) == (
-                event["kind"],
-                event["reason"],
-            ):
+            if last is not None and _labels(last) == _labels(event):
                 event["count"] = last["count"] + 1
                 events.pop()
             events.append(event)
 
     def events(self) -> list[dict[str, Any]]:
         """The events, newest first, without the internal monotonic stamp."""
-        rows = list(self._events)
+        with self._lock:
+            rows = list(self._events)
         return [{k: v for k, v in e.items() if k != "_at"} for e in reversed(rows)]
 
     def age_of(self, kind: str, reason: str) -> float | None:
         """Seconds since the newest ``kind``/``reason`` event, None when none is kept."""
-        for e in reversed(list(self._events)):
+        with self._lock:
+            rows = list(self._events)
+        for e in reversed(rows):
             if e.get("kind") == kind and e.get("reason") == reason:
                 return max(0.0, self._clock() - e["_at"])
         return None
+
+
+RING_KEYS = ("t", "seq", "_at", "count")  # what the ring adds or what always differs
+
+
+def _labels(event: dict[str, Any]) -> dict[str, Any]:
+    """The fields that say what an event was (codes, flags, None), without its numbers."""
+    return {
+        k: v
+        for k, v in event.items()
+        if k not in RING_KEYS and (v is None or isinstance(v, bool | str))
+    }
 
 
 __all__ = [

@@ -7,7 +7,7 @@ import time
 
 import pytest
 from roboemot.realtime.turn import SKIP_TOOL
-from rt_rig import build_rt, wait_for
+from rt_rig import build_rt, rt_route, wait_for
 from test_realtime_cues import NO_VOICE, ears  # noqa: F401 (fixture)
 from test_realtime_skip import SKIP
 from test_realtime_skip import tooled as skip_tooled
@@ -104,6 +104,24 @@ def test_a_refused_skip_is_published(rigs):
         rig.turn()
         assert len(of(rig, "turn", "skip_refused")) == 1
         assert of(rig, "unanswered") == []
+
+
+def test_no_event_of_a_turn_carries_its_words_or_the_key(rigs):
+    """Scans every event the worker and the route publish over a refused turn, a lost
+    session and an answered one (server strings: error codes, close reasons)."""
+    words = "Zanzibar quokka telefonata segretissima"
+    key = "sk-Live-Secret-Key"
+    for script in (["pending"], ["close_before"], ["reply"]):
+        with TurnServer(script) as srv:
+            rig = rigs(srv, route=rt_route(srv, api_key=key), app=NO_VOICE)
+            rig.turn(words)
+            assert wait_for(lambda r=rig: of(r, "turn") or of(r, "cue") or r.cues.reasons)
+            for ev in rig.diag:
+                for name, value in ev.items():
+                    assert isinstance(value, bool | int | float | str | type(None)), name
+                    if isinstance(value, str):
+                        assert " " not in value and value.lower() not in words.lower().split()
+                        assert key.lower() not in value.lower()
 
 
 def test_a_transcript_timeout_is_published_before_the_not_heard_cue(ears):  # noqa: F811
