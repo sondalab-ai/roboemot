@@ -101,6 +101,8 @@ class FacingCheck:
         self._lock = threading.Lock()
         self._outcomes = dict.fromkeys(OUTCOMES, 0)
         self._yaws_deg: deque[float] = deque(maxlen=SUMMARY_SIZE)
+        # the last decision for the Live tab's event: outcome, median |yaw| (deg) or None
+        self.last: tuple[str, float | None] = ("", None)
 
     def apply_config(self, cfg: VoiceFacingConfig) -> None:
         """Hot reload: every field."""
@@ -133,11 +135,18 @@ class FacingCheck:
         return self._record("passed" if passed else "not_facing", known)
 
     def _record(self, outcome: str, yaws: list[float] | None = None) -> str:
+        median = math.degrees(statistics.median(yaws)) if yaws else None
         with self._lock:
             self._outcomes[outcome] += 1
-            if yaws:
-                self._yaws_deg.append(math.degrees(statistics.median(yaws)))
+            if median is not None:
+                self._yaws_deg.append(median)
+        self.last = (outcome, median)  # one store: read by the listener after the gate
         return outcome
+
+    @property
+    def cpu_percent(self) -> float | None:
+        """The last CPU sample (percent), None before one."""
+        return self._cpu.percent
 
     def snapshot(self) -> dict[str, Any]:
         """Outcome counts, the last CPU sample and the summary of each judged utterance's median

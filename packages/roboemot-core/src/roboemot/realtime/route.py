@@ -45,6 +45,10 @@ the turn's first send and before each ``response.create``); past the route's
 ``response.created`` resets the session. A detached session's requests are settled at the
 detach (charged once, their runs ended ``closed``): its close comes later, or never. Nothing
 here logs or reports a key, a URL's path or query, text, audio or an identifier (SPEC 12).
+
+Session decisions publish a ``session`` decision event for the Live tab (``roboemot.diag``, SPEC
+12A), outside ``_lock``: a reset (its reason and counter), a reconnect, a connect that failed, a
+session lost (its close reason) and a server error (its code only, never its message).
 """
 
 from __future__ import annotations
@@ -67,6 +71,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config.schema import LLMRoute, RoboEmotConfig
+from ..diag import EventSink, no_events
 from ..health.network import route_endpoint
 from ..llm.prompt import CHARS_PER_TOKEN, CONVERSATION_STATES
 from ..llm.pseudonyms import url_is_local
@@ -245,6 +250,9 @@ class RealtimeRoute:
         self._reopen_at = 0.0  # no reconnect before (clock) after a repeated reset
         self._outputs: set[str] = set()  # event ids of the settling tool results on this session
         self._reopens = 0  # reconnects a reset started that have not returned yet
+        self.last_reset: tuple[str, float] | None = None  # (reason, clock) of the last reset
+        self._reopen_after: str | None = None  # a reset or loss the next session follows
+        self.events: EventSink = no_events  # the Live tab's decision events (wired at start)
         self.base_instructions: Callable[[], str] = lambda: ""
         self._counts: collections.Counter[str] = collections.Counter()
         self._statuses: collections.Counter[str] = collections.Counter()
@@ -530,6 +538,7 @@ class RealtimeRoute:
                     orphans = self._take(token)  # an unrequested response during the connect
                 self._settle(orphans, client.reason or "closed")
                 self._count("connect_failures")
+                self.events("session", "connect_failed", why=client.reason)
                 client.close()
                 if client.reason == "pseudonyms":  # the allocated host is a cloud one
                     self._set_state("blocked", "pseudonyms")
@@ -555,9 +564,12 @@ class RealtimeRoute:
                 if self._lost:  # the last session was lost, not closed by the robot
                     self._counts["reconnects"] += 1
                 self._lost = False
+                after.append(self._reopen_after)
+                self._reopen_after = None
                 self.state, self.reason = "connected", None
                 return True
 
+            after: list[str | None] = []  # the reset or loss this session follows (store)
             if not self._with_config(store):
                 with self._lock:
                     token.detached = True
@@ -566,6 +578,8 @@ class RealtimeRoute:
                 client.close()
                 return False
             self.network.report_realtime(True)
+            if after and after[0] is not None:
+                self.events("session", "reconnected", after=after[0])
             return True
 
     def _may_send_update(self, token: _Token, closes: int, client: Any) -> bool:
@@ -698,6 +712,9 @@ class RealtimeRoute:
             closes = self._closes
             if delay == 0.0:
                 self._reopens += 1
+            self.last_reset = (reason, now)
+            self._reopen_after = reason
+        self.events("session", "reset", why=reason, counter=counter, in_row=n, delay_s=delay)
         self._settle(orphans, reason)
         if client is not None:
             self._close_client(client, reason)
@@ -867,6 +884,7 @@ class RealtimeRoute:
             generation = self.generation
             output = req is None and event.event_id in self._outputs
             self._outputs.discard(event.event_id or "")
+        self.events("session", "server_error", code=event.code, request=req is not None)
         if req is None:
             self._count("outputs_refused" if output else "errors_unrelated")
         else:
@@ -942,7 +960,9 @@ class RealtimeRoute:
             with self._lock:
                 self._failures[reason] += 1
                 self._lost = self._lost or self.state == "connected"
+                self._reopen_after = reason
             self._set_state("fallback_local", reason)
+            self.events("session", "lost", why=reason)
         for r in reqs:
             if r.run is not None:
                 r.run.closed(reason)

@@ -134,6 +134,7 @@ class VoiceDirection:
         self._reasons = dict.fromkeys(DEGRADED_REASONS, 0)
         self._no_face = 0
         self._offsets_deg: deque[float] = deque(maxlen=SUMMARY_SIZE)
+        self.last: dict[str, Any] = {}  # the last check's numbers (``details``)
 
     def apply_config(
         self, cfg: VoiceDirectionConfig, facing: VoiceFacingConfig | None = None
@@ -167,7 +168,23 @@ class VoiceDirection:
     def check(self) -> str:
         """Whether the utterance's voice came from a visible face (and, with the facing check
         on, that face looked at the robot): ``AT_FACE``, ``NO_FACE_AT_VOICE`` or ``NOT_FACING``.
-        Counts the outcome; call it once per utterance."""
+        Counts the outcome; call it once per utterance. ``last`` then holds its numbers."""
+        self.last = {}
+        verdict = self._check()
+        facing = self._facing
+        if facing is not None and facing.enabled and "path" in self.last:
+            outcome, yaw = facing.last
+            self.last = {
+                **self.last,
+                "facing": outcome,
+                "yaw_deg": yaw,
+                "limit_deg": facing.config.max_yaw_deg,
+                "cpu_percent": facing.cpu_percent,
+                "cpu_max_percent": facing.config.cpu_max_percent,
+            }
+        return verdict
+
+    def _check(self) -> str:
         cfg = self._cfg
         heard = [s for s in self._samples if s.bearing_rad is not None]
         if len(heard) >= cfg.min_doa_readings:
@@ -190,6 +207,7 @@ class VoiceDirection:
     def _facing_verdict(self, path: str, yaws: list[float | None]) -> str:
         """The facing check over the checked face's yaw per sample, when it is on, as the
         gate's verdict for ``path`` (``HEARD`` or the degraded reason)."""
+        self.last = {"path": path}
         facing = self._facing
         if facing is None or not facing.enabled:
             return AT_FACE

@@ -60,7 +60,7 @@ def offline_cue(host: RuntimeHost, stack: ConfigStack, p: Pipeline) -> SpeechCue
 
     def cue() -> bool:
         cues = host.cues
-        return cues is not None and cues.play("offline")
+        return cues is not None and cues.play("offline", "offline")
 
     return SpeechCue(
         lambda: host.speech_output,
@@ -124,6 +124,7 @@ def start_voice_output(
     )
     cleanup.callback(soothe.close)  # before the output goes away
     cues = host.cues = build_cues(host, stack, p, output)
+    cues.events = host.events
     p.responder.cue = offline_cue(host, stack, p)
     if listener is None:
         return
@@ -138,6 +139,8 @@ def start_voice_output(
         if p.cfg.voice.realtime_route.enabled
         else None
     )
+    if realtime is not None:
+        realtime.events = host.events
     # Shutdown order: listener (no new utterances), conversation (cancels the
     # stream in flight), speech output, speaker.
     registry = p.perception.registry
@@ -179,6 +182,7 @@ def start_voice_output(
         realtime=realtime,
         cues=cues,
     )
+    conv.events = host.events
     if realtime is not None:  # closed after the conversation (no turn uses it any more)
         cleanup.callback(realtime.close)
         bind_realtime_input(host, realtime, listener, cleanup, p.sleep, cues)
@@ -224,7 +228,7 @@ def audio_cues(cues: CueSink) -> Callable[[str, float], None]:
             return
         cues.listening_end(key)
         if event == AUDIO_NOT_HEARD:
-            cues.play("not_heard")
+            cues.play("not_heard", "no_transcript")
 
     return on_audio
 

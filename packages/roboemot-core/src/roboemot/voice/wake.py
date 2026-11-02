@@ -74,6 +74,27 @@ class WakeGate:
         ``at_face`` is the voice-at-face check (its verdict, ``AT_FACE`` to pass), called only
         when the utterance would be addressed without the wake word (None: no check). It runs
         under this gate's lock, so it may take only leaf locks (``VoiceDirection`` does)."""
+        return not self.outcome(
+            wake_word=wake_word,
+            enrolled_in_view=enrolled_in_view,
+            start=start,
+            last_speech=last_speech,
+            speaker=speaker,
+            at_face=at_face,
+        ).startswith("rejected")
+
+    def outcome(
+        self,
+        *,
+        wake_word: bool,
+        enrolled_in_view: bool,
+        start: float,
+        last_speech: float,
+        speaker: str | None = None,
+        at_face: AtFace | None = None,
+    ) -> str:
+        """``decide`` with its outcome (one of ``DECISIONS``): a ``rejected_*`` one is not
+        addressed, and says which rule rejected it (the Live tab's decision event)."""
         with self._lock:
             required = self._policy == "always" or (
                 self._policy == "unless_enrolled_in_view" and not enrolled_in_view
@@ -83,7 +104,7 @@ class WakeGate:
                 if not wake_word:
                     outcome = _face_outcome(outcome, at_face)
                 self._decisions[outcome] += 1
-                return outcome == "not_required"
+                return outcome
             if wake_word:
                 self._opened, self._speaker = last_speech, speaker
                 outcome = "wake_word"
@@ -93,9 +114,9 @@ class WakeGate:
                     outcome = _face_outcome(outcome, at_face)
             self._decisions[outcome] += 1
             if outcome.startswith("rejected"):
-                return False
+                return outcome
             self._until = min(last_speech + self._window, self._opened + self._max)
-            return True
+            return outcome
 
     def addressable(
         self, *, enrolled_in_view: bool, start: float, speaker: str | None = None

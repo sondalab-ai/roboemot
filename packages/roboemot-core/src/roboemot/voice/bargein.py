@@ -70,7 +70,9 @@ control, a reflex, ``moving``), the robot's own audio in the echo reference over
 face offset at its start, the peak VAD score and the candidate audio. A cut is recorded after
 ``interrupt``, ``reset`` and the hand-off, and every recording step runs guarded: a failure is
 counted (``record_errors``) and never changes or delays a decision. ``cuts_by_path`` counts cuts
-per confirming path. Numbers, short labels and two group-to-speed maps only.
+per confirming path. Numbers, short labels and two group-to-speed maps only. Each record that
+closes also publishes a ``bargein`` decision event (``roboemot.diag``, SPEC 12A) with its outcome
+(``cut``, ``released``) and its main fields, for the Live tab.
 
 Audio and text are never logged or published.
 """
@@ -88,6 +90,7 @@ from typing import Any, Protocol
 import numpy as np
 
 from ..config.schema import RoboEmotConfig
+from ..diag import EventSink, no_events
 from ..motion.state import MotionProbe, MotionSample
 from .asr import ASRBackend
 from .duck import DuckGain
@@ -109,6 +112,18 @@ EDGE_S = 1e-9
 DIGITS = 3
 LABEL_MAX = 24
 PATHS = ("vad", "onset", "keyword")
+# the record's fields the Live tab's decision event carries
+EVENT_FIELDS = (
+    "fired",
+    "confirmed",
+    "released_by",
+    "level_db",
+    "vad_peak",
+    "echo_corr",
+    "robot_playing",
+    "moving",
+    "speech_ms",
+)
 MOTION_FIELDS = (
     "moving",
     "external",
@@ -274,6 +289,7 @@ class BargeIn:
         self._rec_quiet = 0
         self._speaking_since: float | None = None  # first chunk stamp of this speaking window
         self._cuts_by_path = dict.fromkeys(PATHS, 0)
+        self.events: EventSink = no_events  # the Live tab's decision events (wired at start)
         self._record_errors_seen: set[str] = set()
         self._hf: float | None = None
         self._worker = KeywordWorker(
@@ -646,6 +662,8 @@ class BargeIn:
             rec["episode_ms"] = self._ms(max(0.0, end - start))
             rec["_end"] = max(rec["_end"], end)
             rec["_sample"] = None
+            fields = {k: rec.get(k) for k in EVENT_FIELDS}
+        self.events("bargein", outcome, **fields)
 
     def _reference_level(self, start: float, end: float) -> dict[str, Any]:
         """Whether the robot's own audio was in the echo reference over the episode, and its

@@ -27,6 +27,7 @@ from roboemot.circadian import CircadianRunner, IdleLightReader
 from roboemot.config import ConfigStack
 from roboemot.conversation import ConversationPhase, TranscriptRing
 from roboemot.conversation.sources import registry_names, speaker_source
+from roboemot.diag import BusEvents, EventRing
 from roboemot.health.network import NetworkMonitor
 from roboemot.health.responder import OfflineResponder
 from roboemot.llm.hub import RouterHub
@@ -200,6 +201,12 @@ def assemble(
     bus.subscribe("robot.asleep", lambda msg: transcript.set_asleep(True))
     bus.subscribe("robot.awake", lambda msg: transcript.set_asleep(False))
     transcript.attach(stack)  # its own listener: runs before the reload fan-out is subscribed
+    # Decision events ("What's happening", SPEC 12A): one diag.event per decision, kept in a
+    # small ring only while the Live tab and its panel are on.
+    host.events = BusEvents(bus)
+    activity = host.activity = EventRing(cfg.webui.live)
+    activity.attach(bus)
+    stack.subscribe(lambda change: activity.apply_config(change.config.webui.live))
     audio = host.audio = session.audio(cfg, levels.offer if reflex_audio else None)
     reflexes.audio_status = audio.snapshot
     reference = (
@@ -385,6 +392,10 @@ def assemble(
     listener = host.voice_listener = voice_pipeline[0] if voice_pipeline else None
     voice_close = voice_pipeline[1] if voice_pipeline else None
     bargein = host.bargein = voice_pipeline[2] if voice_pipeline else None
+    if listener is not None:
+        listener.events = host.events
+    if bargein is not None:
+        bargein.events = host.events
     if cfg.voice.enabled and listener is None:
         audio.set_voice(False)  # no consumer: the hub must not queue audio for nobody
 
