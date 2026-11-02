@@ -922,6 +922,7 @@ class ConversationWorker:
                     self._skip(turn)
                     raise
                 self._cut_realtime(turn)
+                self._settle_calls(turn)  # every call of the cut response gets an output
                 self._keep_round(turn)  # a skill that ran stays in the history
                 raise
             self._absorb(turn, reply, instructions)
@@ -938,6 +939,7 @@ class ConversationWorker:
                     if ended:
                         break  # no response follows: nothing is lost
                     return self._realtime_lost(turn)  # a skill ran: B1 (cut, Piper line)
+                run.answered(call.id)
                 turn.rt_items.append(out_id)
             if ended or not calls:
                 if turn.rounds and not (ended or turn.spoken):
@@ -960,6 +962,7 @@ class ConversationWorker:
         if turn.rt_jobs:
             self.speech.stop()  # first: whether anything played is then settled
         played = any(self.speech.played(job) for job, _ in turn.rt_jobs)
+        self._settle_calls(turn)  # before any delete: those items go with the turn's
         if not played:
             turn.spoken.clear()
             turn.queued.clear()
@@ -987,6 +990,20 @@ class ConversationWorker:
             turn.voice = "local"  # the route is down: Piper (owner decision 4)
             self._say_fallback(turn)
         return True
+
+    def _settle_calls(self, turn: _Turn) -> None:
+        """The round in flight was cut or failed: every call of its response gets a
+        ``function_call_output`` (the skill's result if it ran, else an interrupted error), on
+        the turn's session only, with no further response; the server would otherwise refuse
+        every later ``response.create`` (SPEC 8). Their items join the turn's."""
+        run = turn.rt_run
+        if run is None:
+            return
+        results: dict[str, str] = {}
+        if turn.rt_round is not None:
+            calls, outcomes, _ = turn.rt_round
+            results = {c.id: r.content for c, r in zip(calls, outcomes, strict=False)}
+        turn.rt_items += [i for i in run.settle(results) if i not in turn.rt_items]
 
     def _keep_round(self, turn: _Turn) -> None:
         """The tool calls of the round the loss interrupted go into the history."""

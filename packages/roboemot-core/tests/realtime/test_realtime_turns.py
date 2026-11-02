@@ -518,10 +518,10 @@ def test_a_function_output_that_cannot_be_sent_ends_the_turn_per_b1(rigs, monkey
         rig, env = tooled(rigs, srv)
         send = rig.route.send
 
-        def refusing(event):
+        def refusing(event, **kw):
             if event.get("item", {}).get("type") == "function_call_output":
                 return False
-            return send(event)
+            return send(event, **kw)
 
         monkeypatch.setattr(rig.route, "send", refusing)
         rig.turn()
@@ -556,3 +556,135 @@ def test_a_turn_waits_out_an_abandoned_request_before_it_sends_anything(rigs):
         assert rig.chat_hosts() == []  # answered through the route
         assert rig.events[-1]["route"] == "rt"
         assert len(srv.of("conversation.item.create")) == 1  # the text went once, on the new one
+
+
+# ------------------------------------------------------------------ open tool calls (CV-8)
+
+PLAY = '{"gesture": "joy"}'
+
+
+def outputs_by_call(srv) -> dict[str, list[str]]:
+    """The ``function_call_output`` items the server got, by call id."""
+    out: dict[str, list[str]] = {}
+    for e in srv.of("conversation.item.create"):
+        if e["item"]["type"] == "function_call_output":
+            out.setdefault(e["item"]["call_id"], []).append(e["item"]["output"])
+    return out
+
+
+def answered_twice(rig, srv, served: int) -> None:
+    """Two more turns, each answered by the server's voice: no refusal, no chat route."""
+    for i in range(2):
+        rig.turn(f"ancora {i}", stamp=time.monotonic() + 1.0)
+        assert srv.responses == served + i + 1
+    snap = rig.route.snapshot()
+    assert snap["refused"] == 0 and snap["client"]["server_errors"] == 0
+    assert srv.pending_refusals == 0
+    assert rig.chat_hosts() == []
+    assert rig.events[-1]["route"] == "rt" and rig.events[-2]["route"] == "rt"
+
+
+def test_a_barge_in_after_a_tool_ran_sends_its_result_and_the_next_turns_answer(rigs):
+    """H1 (robot run 2026-11-02): a barge-in cuts a turn whose gesture ran; the call gets its
+    result anyway, so the server does not refuse every later turn."""
+    script = ["tool_then_audio", "reply", "reply"]
+    with TurnServer(
+        script, tool_name="play", tool_args=PLAY, deltas=30, gap_s=0.05, strict_calls=True
+    ) as srv:
+        rig, env = tooled(rigs, srv)
+        n = rig.say()
+        assert wait_for(lambda: env.played == ["joy"] and bool(rig.sink.pushed))
+        assert barge_in(rig)
+        assert wait_for(lambda: rig.worker.snapshot().get("turns", 0) >= n)
+        assert wait_for(lambda: not srv.open_calls)
+        outputs = outputs_by_call(srv)
+        assert list(outputs) == ["call_1"] and len(outputs["call_1"]) == 1
+        assert "interrupted" not in outputs["call_1"][0]  # the skill ran: its own result
+        answered_twice(rig, srv, 1)
+        voiced = {e["response_id"] for e in srv.sent_of("response.output_audio.delta")}
+        assert {"resp_2", "resp_3"} <= voiced
+
+
+def test_a_barge_in_in_the_second_round_does_not_answer_a_call_twice(rigs):
+    with TurnServer(
+        ["tool", "reply", "reply", "reply"],
+        tool_name="play",
+        tool_args=PLAY,
+        deltas=30,
+        gap_s=0.05,
+        strict_calls=True,
+    ) as srv:
+        rig, env = tooled(rigs, srv)
+        n = rig.say()
+        assert wait_for(lambda: len(response_creates(srv)) == 2 and bool(rig.sink.pushed))
+        assert barge_in(rig)
+        assert wait_for(lambda: rig.worker.snapshot().get("turns", 0) >= n)
+        answered_twice(rig, srv, 2)
+        assert {k: len(v) for k, v in outputs_by_call(srv).items()} == {"call_1": 1}
+
+
+def test_a_turn_that_completes_answers_each_call_once(rigs):
+    with TurnServer(["tool", "reply"], tool_name="play", tool_args=PLAY, strict_calls=True) as srv:
+        rig, env = tooled(rigs, srv)
+        rig.turn()
+        rig.turn("ancora", stamp=time.monotonic() + 1.0)
+        assert env.played == ["joy"]
+        assert {k: len(v) for k, v in outputs_by_call(srv).items()} == {"call_1": 1}
+        assert srv.pending_refusals == 0 and rig.route.snapshot()["refused"] == 0
+
+
+def test_a_call_that_arrives_after_the_cut_gets_an_interrupted_result(rigs):
+    with TurnServer(
+        ["cancel_then_tool", "reply", "reply"],
+        tool_name="play",
+        tool_args=PLAY,
+        deltas=30,
+        gap_s=0.05,
+        strict_calls=True,
+    ) as srv:
+        rig, env = tooled(rigs, srv)
+        n = rig.say()
+        assert wait_for(lambda: bool(rig.sink.pushed) and rig.speech.stream_progress(1))
+        assert barge_in(rig)
+        assert wait_for(lambda: rig.worker.snapshot().get("turns", 0) >= n)
+        assert wait_for(lambda: "call_1" in outputs_by_call(srv))
+        assert outputs_by_call(srv) == {"call_1": ['{"error": "interrupted"}']}
+        assert env.played == []  # the call never ran
+        answered_twice(rig, srv, 1)
+
+
+def test_a_failure_after_a_tool_ran_sends_its_result_and_the_next_turn_answers(rigs, monkeypatch):
+    """H2: the turn fails once its tool ran, before the result went: the result still goes."""
+    with TurnServer(["tool", "reply"], tool_name="play", tool_args=PLAY, strict_calls=True) as srv:
+        rig, env = tooled(rigs, srv)
+        ids = rig.route.new_item_id
+        failed = []
+
+        def broken_once():
+            if srv.of("conversation.item.create") and not failed:  # the tool result's id
+                failed.append(True)
+                raise RuntimeError("boom")
+            return ids()
+
+        monkeypatch.setattr(rig.route, "new_item_id", broken_once)
+        rig.turn()
+        assert env.played == ["joy"]
+        assert wait_for(lambda: len(rig.speech.backend.texts) == 1)  # the fallback line
+        assert wait_for(lambda: not srv.open_calls)
+        assert {k: len(v) for k, v in outputs_by_call(srv).items()} == {"call_1": 1}
+        rig.turn("ancora", stamp=time.monotonic() + 1.0)
+        assert srv.responses == 2 and srv.pending_refusals == 0
+        assert rig.chat_hosts() == [] and rig.events[-1]["route"] == "rt"
+
+
+def test_a_pending_call_refusal_resets_the_session_and_the_next_turn_answers(rigs):
+    """(c): a call left open by a path nothing settles: the refusal resets the session."""
+    with TurnServer(["pending", "reply"]) as srv:
+        rig = rigs(srv)
+        rig.turn()
+        assert rig.route.snapshot()["refused"] == 1
+        assert wait_for(lambda: rig.route.snapshot()["pending_call_resets"] == 1)
+        rig.turn("ancora", stamp=time.monotonic() + 1.0)
+        assert len(srv.connections) == 2
+        assert rig.events[-1]["route"] == "rt"
+        assert rig.route.snapshot()["pending_call_resets"] == 1
