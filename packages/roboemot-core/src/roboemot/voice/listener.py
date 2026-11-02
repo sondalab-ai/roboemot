@@ -155,6 +155,7 @@ class _Handoff:
     heard: frozenset[str] = field(default=frozenset(), repr=False)
     decode: DecodeJob | None = None  # its local decode, off the listener thread
     local_only: bool = False  # its audio left without a transcript: not answered (not_heard)
+    capped: bool = False  # ``text`` decodes only its first wake_decode_max_s (the wake lookup)
 
 
 class VoiceListener:
@@ -231,6 +232,7 @@ class VoiceListener:
             "local_fallbacks": 0,
             "decodes": 0,
             "decode_timeouts": 0,
+            "decodes_capped": 0,
         }
         self._vosk = True  # the utterance in progress runs the recognizer
         self._wait_last_s = 0.0
@@ -617,7 +619,7 @@ class VoiceListener:
             face = self._face()
             if not self._send_unheard(ev, face):
                 p = self._handoff_for(ev, face)
-                self._decode(p)
+                self._decode(p, wake=True)
                 self._queue.append(p)
                 self.poll_handoff()
             return
@@ -698,12 +700,23 @@ class VoiceListener:
         """The utterance's audio from its first to its last speech frame, pre-roll included."""
         return ev.audio[: self._last_sample(ev)]
 
-    def _decode(self, p: _Handoff) -> None:
+    def _decode(self, p: _Handoff, *, wake: bool = False) -> None:
         """Decode ``p``'s buffer for its local final, off this thread (the decode worker): a
         whole-utterance decode on a recognizer of its own, waited for until
-        ``local_decode_timeout_s``; its grammar pass follows (``poll_handoff``)."""
+        ``local_decode_timeout_s``; its grammar pass follows (``poll_handoff``). ``wake``: the
+        decode only looks for the wake word (a voice-at-face reject), so it takes the first
+        ``wake_decode_max_s`` of speech (pre-roll before it), counted ``decodes_capped``."""
+        rt = self._cfg.voice.realtime_route
         language, audio = p.language, self._speech_audio(p.ev)
-        p.deadline = self._clock() + self._cfg.voice.realtime_route.local_decode_timeout_s
+        p.capped = False
+        if wake:
+            rate = self._cfg.voice.sample_rate_hz
+            first = max(0, round((p.ev.start_stamp - p.ev.audio_stamp) * rate))
+            end = first + round(rt.wake_decode_max_s * rate)
+            if audio.size > end:
+                audio, p.capped = audio[:end], True
+                self._count_audio("decodes_capped")
+        p.deadline = self._clock() + rt.local_decode_timeout_s
         p.decode = self._decoder.submit(
             lambda: str(self._asr.decode(language, audio)).strip(), p.deadline
         )
@@ -715,6 +728,7 @@ class VoiceListener:
         job, p.decode = p.decode, None
         if job is None or not job.ran:
             self._count_audio("decode_timeouts")
+            p.text = ""  # a capped text from an earlier decode never stands in for it
             return
         p.text = job.result
         if not p.text:
@@ -873,6 +887,9 @@ class VoiceListener:
                 p.heard = heard
                 self._send(p)
                 return p
+        if p.capped and p.addressed:  # a capped text never becomes an answered final
+            self._decode(p)
+            return p
         if not text:  # decoded to nothing after the decision
             self._count("empty")
             return None
@@ -897,7 +914,7 @@ class VoiceListener:
         self._count_audio("local_fallbacks")
         p.rt, p.local_only = None, job.sent
         self._audio_event(AUDIO_NOT_HEARD if job.sent else AUDIO_UNSENT, p)
-        if not p.text:  # Vosk never ran: decoded off this thread, then handed off
+        if not p.text or p.capped:  # Vosk never ran, or only for the wake word: decoded whole
             self._decode(p)
             return p
         self._finish(p, p.text, p.grammar_pass, p.heard, local_only=p.local_only)

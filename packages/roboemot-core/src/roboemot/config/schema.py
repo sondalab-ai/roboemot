@@ -2946,6 +2946,17 @@ class RealtimeRouteConfig(Strict):
         ge=1,
         le=60,
     )
+    wake_decode_max_s: float = param(
+        3.0,
+        "The local decode of a voice-at-face reject only looks for the wake word, which is short "
+        "and comes first: it decodes the first this-many seconds of speech (the pre-roll before "
+        "them), counted decodes_capped. On the robot (2026-11-02, a video playing) whole decodes "
+        "cost 460 to 710 ms per audio second and 27 of 36 timed out. An utterance the wake word "
+        "addresses still sends, or is decoded, whole",
+        unit="s",
+        ge=0.5,
+        le=30,
+    )
     transcript_max_items: int = param(
         8,
         "Most server items one utterance's audio may produce; past it the transcript is "
