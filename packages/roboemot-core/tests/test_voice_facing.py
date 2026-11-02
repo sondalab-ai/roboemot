@@ -113,6 +113,14 @@ def test_min_share_and_max_yaw_come_from_config():
     assert run([at_voice(AWAY)] * 4, check=facing(max_yaw_deg=45.0))[1] == AT_FACE
 
 
+def test_the_default_yaw_limit_is_30_deg_from_the_robot_run():
+    """Robot run 2026-11-02: the owner looking at the robot read 17-23 deg, a watched video
+    47-73 deg; 30 deg passes the first and still rejects the second."""
+    assert VoiceFacingConfig().max_yaw_deg == 30.0
+    assert run([at_voice(math.radians(23.0))] * 4)[1] == AT_FACE
+    assert run([at_voice(math.radians(47.0))] * 4)[1] == NOT_FACING
+
+
 def test_muted_degraded_path_needs_the_attended_face_to_look_at_the_robot():
     seen = [DirectionSample(None, (FACE,), True, False, (AWAY,), AWAY)] * 5
     d, verdict = run(seen, muted=True)  # a barge-in over the robot's voice: engaged rule

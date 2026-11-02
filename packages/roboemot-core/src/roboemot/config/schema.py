@@ -2829,11 +2829,13 @@ class VoiceFacingConfig(Strict):
         "the installer's --cloud-voice profile turns it on",
     )
     max_yaw_deg: float = param(
-        20.0,
+        30.0,
         "A face looks at the robot when its head yaw (from the face detector's landmarks, "
-        "relative to the line to the camera) is at most this. A screen 40 cm beside the robot, "
-        "seen from 1 m, is about 22 deg away; the estimate is rough (one head shape for every "
-        "face), so lower values reject the owner too",
+        "relative to the line to the camera) is at most this. On the robot (2026-11-02, owner "
+        "40 cm away, a video playing) the owner looking at the robot read about 17 to 23 deg "
+        "and the owner watching the video 47 to 73 deg; at 20 the owner was rejected too. The "
+        "estimate is rough (one head shape for every face): lower values reject the owner, "
+        "higher ones let a watched screen through",
         unit="deg", ge=1, le=90,
     )  # fmt: skip
     min_share: float = param(
