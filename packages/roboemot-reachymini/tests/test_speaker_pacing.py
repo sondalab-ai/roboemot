@@ -256,3 +256,15 @@ def test_a_restart_never_starts_a_second_pacer_while_the_first_is_alive(monkeypa
     monkeypatch.setattr(speaker_module, "PACER_JOIN_S", 1.0)
     sp.close()
     assert not sp.pacer_alive()
+
+
+def test_a_paced_aside_sound_never_opens_the_speaking_window():
+    """CV-7: pieces of the listening blip handed later by the pacer stay out of the speaking
+    window too."""
+    act = SpeechActivity(0)
+    sp, log, clock = paced(lead_ms=50, activity=act)
+    sp.push_aside(np.full(RATE // 2, 0.1, np.float32), RATE)  # longer than the lead
+    assert sp.pacing()["pending_ms"] > 0
+    drain(sp, clock)
+    assert handed_s(log) == pytest.approx(0.5)
+    assert act.until() == -float("inf") and act.sounding(clock.t - 0.01)

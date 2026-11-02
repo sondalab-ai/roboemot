@@ -268,7 +268,7 @@ def start_all(
     cleanup.callback(host.forget_circadian)
     start_webui(host, stack, p.cfg, manifest, cleanup, p, admin)
     for world_source in p.plugin.sources:
-        world_source.speaking = p.speech.speaking  # no turning towards its own voice
+        world_source.speaking = p.speech.sounding  # no turning towards its own sound
         cleanup.callback(world_source.stop)
         world_source.start(p.publish)
     if stack.effective().runtime.gc_freeze:  # SPEC 8 stage 8: no full collection walks the models

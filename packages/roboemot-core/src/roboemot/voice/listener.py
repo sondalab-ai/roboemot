@@ -974,10 +974,11 @@ class VoiceListener:
 
     def _sample_direction(self, stamp: float) -> None:
         """One voice-at-face sample at ``stamp`` (skipped while the check is off: it scans the
-        world model). Muted while the robot speaks: its sound direction is off then (barge-in)."""
+        world model). Muted while the robot speaks or plays a sound of its own (the listening
+        blip): its sound direction is off then (barge-in)."""
         d = self._direction
         if d is not None and d.enabled:
-            d.sample(stamp, muted=self._speech.speaking(stamp))
+            d.sample(stamp, muted=self._speech.sounding(stamp))
 
     def _at_face(self) -> AtFace | None:
         """The voice-at-face check for the wake gate, None when there is none or it is off."""

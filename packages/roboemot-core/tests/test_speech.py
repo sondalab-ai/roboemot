@@ -1200,3 +1200,79 @@ def test_speech_output_without_a_local_voice_refuses_sentences_but_plays_raw_sou
     assert out.snapshot()["backend"] == "none"
     assert out.snapshot()["no_voice"] == 1 and out.sentences_dropped == 0
     assert out.play(np.zeros(160, np.float32), 16000) is not None
+
+
+# ------------------------------------------------------------------ aside sound (CV-7)
+
+
+class AsideSink(FakeSink):
+    """A sink that can play a sound that is not speech (the Reachy speaker's ``push_aside``);
+    ``busy_until`` stands in for audio still in the player."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.asides: list[tuple[int, int, float]] = []
+        self.busy_until = -math.inf
+
+    def push_aside(self, samples, rate_hz):
+        self.asides.append((samples.size, rate_hz, float(np.max(np.abs(samples)))))
+        return time.monotonic() + samples.size / rate_hz
+
+    def playing_until(self):
+        return max(time.monotonic(), self.busy_until) if self.busy_until > 0 else time.monotonic()
+
+
+def blip(seconds=0.1, level=0.5):
+    return np.full(round(seconds * RATE), level, np.float32)
+
+
+def test_an_aside_sound_plays_at_once_outside_the_queue(make):
+    sink = AsideSink()
+    out = make(sink=sink)
+    assert out.play_aside(blip(), RATE, volume_db=-6.0)
+    assert sink.asides == [(1600, RATE, pytest.approx(0.5 * 10 ** (-6 / 20), rel=1e-4))]
+    assert sink.pushed == [] and out.waiting() == 0  # never a job of the speech queue
+    assert out.snapshot()["aside"] == {"played": 1}
+
+
+def test_an_aside_sound_does_not_delay_the_answer(make):
+    """A raw job holds the queue while it plays; the aside sound does not: a sentence queued
+    right after it reaches the sink at once."""
+    sink = AsideSink()
+    out = make(FakeBackend(), sink=sink)
+    t0 = time.monotonic()
+    assert out.play_aside(blip(0.15), RATE)
+    say(out)
+    assert wait_for(lambda: sink.pushed)
+    assert sink.pushed_at[0] - t0 < 0.1  # not behind the sound's 0.15 s
+
+
+def test_an_aside_sound_is_dropped_while_the_output_is_busy(make):
+    sink = AsideSink()
+    out = make(HoldingBackend(), sink=sink)
+    say(out)
+    say(out)  # held in synthesis: a job in flight
+    assert wait_for(lambda: len(out.backend.texts) == 2)
+    assert not out.play_aside(blip(), RATE)
+    sink2 = AsideSink()
+    sink2.busy_until = time.monotonic() + 5.0  # audio still in the player
+    out2 = make(sink=sink2)
+    assert not out2.play_aside(blip(), RATE)
+    assert out.snapshot()["aside"] == {"busy": 1} and out2.snapshot()["aside"] == {"busy": 1}
+    assert sink.asides == sink2.asides == []
+
+
+def test_an_aside_sound_needs_a_sink_that_keeps_it_out_of_the_speaking_window(make):
+    sink = FakeSink()
+    out = make(sink=sink)
+    assert not out.play_aside(blip(), RATE)
+    assert sink.pushed == [] and out.waiting() == 0  # never falls back to a raw job
+    assert out.snapshot()["aside"] == {"unsupported": 1}
+
+
+def test_an_aside_sound_must_be_shorter_than_the_vad_min_speech(make):
+    sink = AsideSink()
+    out = make(sink=sink)
+    min_speech_s = out.config.voice.vad.min_speech_ms / 1000
+    assert not out.play_aside(blip(min_speech_s), RATE)
+    assert sink.asides == [] and out.snapshot()["aside"] == {"too_long": 1}

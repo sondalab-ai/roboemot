@@ -43,6 +43,11 @@ most the lead plus a piece. A failed SDK push abandons the rest of that push, as
 ``close`` joins the pacer; a later ``start_playing`` reuses a pacer that did not exit in time
 instead of starting a second one. A lead of 0 hands everything over at once, as before pacing.
 
+``push_aside`` plays a short sound that is not speech (the listening blip, SPEC 8, Non-verbal
+cues): resampled at once (the speech stream is left alone) and queued like any audio, but it opens
+only the gate's own-sound window (``SpeechActivity.extend_own``), never the speaking window, so
+the listener, barge-in and the realtime input do not take it for the robot's voice.
+
 Privacy (SPEC 12): audio passes through; the reference is a RAM ring of a few seconds that is
 never logged or published.
 """
@@ -105,8 +110,9 @@ class ReachySpeaker:
         self._lead_s = lead_ms / MS_PER_S
         self._pace_thread = pace_thread
         self._cv = threading.Condition(self._lock)
-        # pieces accepted but not handed to the player: (samples at the output rate, accepted at)
-        self._pending: collections.deque[tuple[np.ndarray, float]] = collections.deque()
+        # pieces accepted but not handed to the player: (samples at the output rate, accepted at,
+        # speech or not)
+        self._pending: collections.deque[tuple[np.ndarray, float, bool]] = collections.deque()
         self._pending_n = 0
         self._handed = -math.inf  # monotonic stamp at which the audio handed over has played
         self._duck: DuckGain | None = None
@@ -191,6 +197,20 @@ class ReachySpeaker:
         queued = self._push_pieces(out, generation)
         return self.playing_until() if queued else 0.0
 
+    def push_aside(self, samples: np.ndarray, rate_hz: int) -> float:
+        """Queue a short mono sound that is not speech: resampled in one piece (the speech
+        stream untouched) and pushed like speech, but it extends only the own-sound window of
+        the gate. Returns the stamp until which everything queued has played; 0.0 if nothing
+        was queued."""
+        if not self._playing or self._out_hz is None or samples.size == 0 or rate_hz <= 0:
+            return 0.0
+        x = samples.astype(np.float32, copy=False).reshape(-1)
+        out = x if rate_hz == self._out_hz else resample(x, rate_hz, self._out_hz)
+        with self._lock:
+            generation = self._generation
+        queued = self._push_pieces(out, generation, speech=False)
+        return self.playing_until() if queued else 0.0
+
     def end_stream(self) -> float:
         """End the playback stream (a sentence is complete): push the converter's held-back
         tail and start a fresh stream with the next push. Returns the stamp until which
@@ -208,10 +228,11 @@ class ReachySpeaker:
         stream, self._stream, self._stream_hz = self._stream, None, 0
         return None if stream is None else stream.flush()
 
-    def _push_pieces(self, out: np.ndarray, generation: int) -> bool:
+    def _push_pieces(self, out: np.ndarray, generation: int, *, speech: bool = True) -> bool:
         """Accept ``out`` (at the output rate) in pieces of ``chunk_ms``: pending, then handed to
         the player as far as the lead allows (all at once with no lead). Stops at a stop or a
-        failing push. True if any piece was accepted."""
+        failing push. True if any piece was accepted. ``speech`` False: the pieces extend only
+        the gate's own-sound window."""
         assert self._out_hz is not None
         step = max(1, int(self._chunk_s * self._out_hz))
         queued = False
@@ -220,11 +241,10 @@ class ReachySpeaker:
             with self._cv:
                 if generation != self._generation:
                     break
-                self._pending.append((piece, self._clock()))
+                self._pending.append((piece, self._clock(), speech))
                 self._pending_n += piece.size
                 queued = True
-                if self._activity is not None:  # the whole answer, not only what was handed
-                    self._activity.extend(self.playing_until())
+                self._extend(speech)  # the whole answer, not only what was handed
                 if not self._feed_locked():
                     break
                 if generation != self._generation:  # stopped from inside the push
@@ -253,9 +273,9 @@ class ReachySpeaker:
             now = self._clock()
             if self._due_in(now) > TIME_EPS_S:
                 return True
-            piece, accepted = self._pending.popleft()
+            piece, accepted, speech = self._pending.popleft()
             self._pending_n -= piece.size
-            if not self._hand(piece, accepted, now):
+            if not self._hand(piece, accepted, now, speech):
                 self._drop_pending()
                 self._generation += 1  # the rest of that push is abandoned, as before pacing
                 return False
@@ -268,9 +288,10 @@ class ReachySpeaker:
             return 0.0
         return self._handed - self._lead_s - now
 
-    def _hand(self, piece: np.ndarray, accepted: float, now: float) -> bool:
+    def _hand(self, piece: np.ndarray, accepted: float, now: float, speech: bool = True) -> bool:
         """Push one piece to the player with the duck's gain, keyed to when it plays; stamp the
-        reference and the gate. The lock is held."""
+        reference and the gate (its own-sound window for a piece that is not ``speech``). The
+        lock is held."""
         assert self._out_hz is not None
         begins = max(self._handed, now)
         if math.isfinite(self._handed) and now > self._handed and accepted <= self._handed:
@@ -297,9 +318,18 @@ class ReachySpeaker:
         self._handed = begins + piece.size / self._out_hz
         self._pushed += piece.size
         self._counts["pieces"] += 1
-        if self._activity is not None:  # under the lock; a restamp moved the end later
-            self._activity.extend(self.playing_until())
+        self._extend(speech)  # under the lock; a restamp moved the end later
         return True
+
+    def _extend(self, speech: bool) -> None:
+        """Move the gate's end to ``playing_until``: the speaking window for speech, the
+        own-sound window for a sound that is not speech. The lock is held."""
+        if self._activity is None:
+            return
+        if speech:
+            self._activity.extend(self.playing_until())
+        else:
+            self._activity.extend_own(self.playing_until())
 
     def _drop_pending(self) -> None:
         self._pending.clear()

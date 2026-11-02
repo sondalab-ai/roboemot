@@ -35,6 +35,19 @@ def test_every_cue_has_a_short_quiet_sound_core_accepts():
         assert sound.samples[0] == 0.0 and sound.samples[-1] == 0.0  # no click
 
 
+def test_the_listening_blip_is_shorter_than_speech_and_quieter_than_the_other_cues():
+    """CV-7: the blip must never start an utterance (voice.vad.min_speech_ms) and stays subtle."""
+    from roboemot.config.schema import RoboEmotConfig
+
+    sounds = load_cue_sounds(MANIFEST)
+    blip = sounds["listening"]
+    min_speech_s = RoboEmotConfig().voice.vad.min_speech_ms / 1000
+    assert 0.06 <= blip.duration_s <= 0.12 < min_speech_s
+    peak = float(np.max(np.abs(blip.samples)))
+    others = min(float(np.max(np.abs(s.samples))) for k, s in sounds.items() if k != "listening")
+    assert 20 * np.log10(others / peak) >= 10.0  # at least 10 dB under every other cue
+
+
 def test_the_library_is_read_once_and_read_only():
     lib = cues_module.library()
     assert lib is cues_module.library()

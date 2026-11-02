@@ -3071,9 +3071,12 @@ class CueConfig(Strict):
         le=60,
     )
     listening_sound: bool = param(
-        False,
-        "Play the listening sound with the gesture. Off by default: it is robot audio, so it "
-        "queues ahead of the answer and holds the next utterance's audio while it plays",
+        True,
+        "Play the robot's listening blip once when the listening gesture shows: a very short, "
+        "quiet sound saying the voice was heard. It plays beside the speech queue and is not "
+        "robot speech (it never holds an utterance's audio back, never triggers a barge-in and "
+        "never delays the answer); it is dropped when the speaker is busy and must be shorter "
+        "than voice.vad.min_speech_ms",
     )
     volume_db: float = param(
         -6.0,

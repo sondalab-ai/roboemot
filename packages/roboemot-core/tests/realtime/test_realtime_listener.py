@@ -285,6 +285,25 @@ def test_nothing_is_sent_while_the_robot_speaks(ears):
         assert appended(server) == []
 
 
+def test_the_listening_blip_is_not_robot_speech(ears):
+    """CV-7: the blip opens only the own-sound window. The listener keeps the audio, barge-in
+    never sees it, and the realtime input sends the utterance while the blip plays."""
+    with TurnServer(heard=[["ciao Neve come stai"]]) as server:
+        ear = ears(server, script=["x"], bearing=FACE_RAD)
+        speech = ear.r.speech
+        ear.input._speaking = lambda: speech.speaking(ear.r.now)  # as the runtime binds it
+        heard_by_bargein = []
+        ear.r.listener._on_speaking_chunk = heard_by_bargein.append
+        speech.extend_own(ear.r.t + 10.0)  # the blip and its echo tail cover the utterance
+        assert speech.sounding(ear.r.t) and not speech.speaking(ear.r.t)
+        ear.say()
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        assert ear.utterances[0].text == "ciao Neve come stai"
+        assert len(server.of("input_audio_buffer.commit")) == 1
+        assert heard_by_bargein == []
+        assert ear.r.listener.snapshot()["dropped_speaking"] == 0
+
+
 def test_nothing_is_sent_while_asleep(ears):
     """Sleep closes the server session (SleepGate): an addressed utterance goes the Vosk way."""
     with TurnServer() as server:

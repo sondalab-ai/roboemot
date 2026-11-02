@@ -68,3 +68,21 @@ def test_voice_defaults_and_ranges():
         with pytest.raises(ValidationError):
             VoiceConfig(**{field: bad})
     VoiceConfig(echo_tail_ms=0, playback_chunk_ms=10, capture_queue_s=120)
+
+
+def test_an_own_sound_is_sounding_but_not_speaking():
+    """CV-7: the listening blip opens only the own-sound window (reflex, sound direction), not
+    the speaking one (listener drop, barge-in, the realtime input)."""
+    act = SpeechActivity(echo_tail_ms=100.0)
+    act.extend_own(10.0)
+    assert not act.speaking(9.0) and act.until() == -math.inf
+    assert act.sounding(9.0) and act.sounding(10.05) and not act.sounding(10.2)
+    act.extend(20.0)
+    assert act.speaking(15.0) and act.sounding(15.0)
+
+
+def test_a_reset_ends_the_own_sound_too():
+    act = SpeechActivity()
+    act.extend_own(10.0)
+    act.reset(5.0)
+    assert not act.sounding(6.0)

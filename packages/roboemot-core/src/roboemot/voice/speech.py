@@ -16,6 +16,14 @@ push path: a sound never interleaves with a sentence, ``stop`` cuts it, and it i
 leaves ``ended_at``, ``question_end``, the counters and the speech timeline alone, so speaking
 motion ignores it). ``cancel`` drops one such job only.
 
+``play_aside`` is for a sound that must not count as the robot's voice (the listening blip, SPEC 8,
+Non-verbal cues): it never enters the queue, so it holds no answer back. It plays only when the
+output is idle (nothing queued, no job in flight, the sink drained), else it is dropped, and only
+through a sink that can keep it out of the speaking window (:class:`AsideSink`); one that cannot
+gets no such sound (never a raw job, which would count as speech). It must be shorter than
+``voice.vad.min_speech_ms``, so the listener cannot start an utterance on its echo. Counted under
+``aside`` in the report.
+
 The bus gets ``speech.say`` with ids, lengths, language and mood, never the text (SPEC 12).
 
 For the debug report (SPEC 12A) the output measures, for any backend:
@@ -127,6 +135,14 @@ class DuckingSink(Protocol):
 
     def take_duck(self, duck: DuckGain | None) -> bool: ...
     def pacing(self) -> dict[str, Any]: ...
+
+
+@runtime_checkable
+class AsideSink(Protocol):
+    """An ``AudioSink`` that can play a sound that is not speech: queued like any audio, but it
+    does not open the speaking window (``SpeechActivity.extend_own``)."""
+
+    def push_aside(self, samples: np.ndarray, rate_hz: int) -> float: ...
 
 
 @dataclass
@@ -263,6 +279,8 @@ class SpeechOutput:
         self._raw_current: int | None = None  # id of the raw job taken off the queue, if any
         self._raw_cancelled: set[int] = set()
         self._raw_pushed: int | None = None  # id of the raw job whose samples are in the sink
+        self._in_flight = False  # a job is off the queue and not finished (``play_aside``)
+        self._aside: collections.Counter[str] = collections.Counter()
         self._ready = threading.Event()
         self._closed = False
         self._last_utterance = 0
@@ -363,6 +381,7 @@ class SpeechOutput:
         while True:
             with self._lock:  # a pending stop drops the queue: take nothing from it
                 job = self._jobs.popleft() if self._jobs and not self._stopping else None
+                self._in_flight = job is not None
                 if isinstance(job, _RawJob):
                     self._raw_current = job.id
             if job is None:
@@ -376,6 +395,8 @@ class SpeechOutput:
             self._current = asyncio.ensure_future(self._run_job(job))
             await asyncio.wait({self._current})
             self._release_raw(job)
+            with self._lock:
+                self._in_flight = False
 
     def _run_job(self, job: _Job | _RawJob) -> Any:
         if isinstance(job, _RawJob):
@@ -600,6 +621,37 @@ class SpeechOutput:
         self._poke()
         return job.id
 
+    def play_aside(self, samples: np.ndarray, rate_hz: int, volume_db: float = 0.0) -> bool:
+        """Play a short sound that is not speech now, outside the queue (see the module
+        docstring); whether it went to the sink. Dropped (counted) when the output is busy, the
+        sink cannot keep it out of the speaking window, or it is not shorter than
+        ``voice.vad.min_speech_ms``. Safe from any thread."""
+        x = np.asarray(samples, np.float32)
+        duration_ms = x.size / rate_hz * MS_PER_S if rate_hz > 0 else math.inf
+        louder = np.clip(x * np.float32(db_to_gain(volume_db)), -1.0, 1.0)
+        with self._lock:
+            why = self._aside_refusal(duration_ms)
+            if why is None:
+                try:
+                    pushed = self.sink.push_aside(louder, rate_hz) > 0.0  # type: ignore[attr-defined]
+                except Exception as exc:  # a sink bug costs the sound, never the output
+                    log.warning("speech: aside sound: %s", type(exc).__name__)
+                    pushed = False
+                why = "played" if pushed else "failed"
+            self._aside[why] += 1
+        return why == "played"
+
+    def _aside_refusal(self, duration_ms: float) -> str | None:
+        """Why ``play_aside`` must not play now, None when it may (the lock is held)."""
+        if not isinstance(self.sink, AsideSink):
+            return "unsupported"
+        if duration_ms >= self.config.voice.vad.min_speech_ms:
+            return "too_long"
+        busy = self._closed or self._stopping or self._jobs or self._in_flight
+        if busy or self.sink.playing_until() > self.clock():
+            return "busy"
+        return None
+
     def cancel(self, job_id: int) -> None:
         """Drop raw job ``job_id`` only: removed if still queued; if it is the one in flight,
         nothing more is pushed for it and, once it has pushed, the sink is flushed. The job
@@ -673,6 +725,7 @@ class SpeechOutput:
         """Counts and timings for the debug report; never text."""
         with self._lock:
             lat, queued = list(self._latencies), len(self._jobs)
+            aside = dict(self._aside)
             rtf, rtf_sentence, push_ms, timeline_ms = (
                 list(self._rtf),
                 list(self._rtf_sentence),
@@ -692,6 +745,7 @@ class SpeechOutput:
             "spoken": self.sentences_spoken,
             "dropped": self.sentences_dropped,
             "no_voice": self.no_voice,
+            "aside": aside,
             "failures": self.failures,
             "first_audio_ms_last": lat[-1] if lat else None,
             "first_audio_ms_max": max(lat) if lat else None,
