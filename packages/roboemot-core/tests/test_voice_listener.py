@@ -1046,3 +1046,13 @@ def test_a_hand_off_on_the_listener_thread_counts_in_the_realtime_total():
         assert handoff_s >= deliver_s
     finally:
         r.listener.stop()
+
+
+def test_hearing_is_true_from_speech_start_to_its_end():
+    """The listening blip waits for it (CV-7, review of #147)."""
+    r = Rig()
+    assert not r.listener.hearing()
+    r.say(1.0, tail=False)
+    assert r.listener.hearing()
+    r.feed(silence(r.cfg.voice.vad.end_silence_ms / 1000 + 0.2))
+    assert not r.listener.hearing()
