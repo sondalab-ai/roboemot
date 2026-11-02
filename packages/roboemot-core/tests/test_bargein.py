@@ -1067,12 +1067,17 @@ def test_recent_can_be_read_while_a_chunk_is_processed():
 
     probs = [p for _ in range(40) for p in (0.9, 0.0, 0.0, 0.0)] + [0.5, 0.6, 0.55]
     audio = np.concatenate([user_voice(160 * FRAME / RATE, 0.1), hiss(3)])
+    # The clock follows the chunk stamps: with the real monotonic clock the echo-tail deafness
+    # after the cut depended on the machine's uptime against T0, and on a fresh CI runner the
+    # trailing hiss frame opened a new (rightly open) episode after the cut record.
+    now = [T0]
     bi = BargeIn(
         RoboEmotConfig.model_validate({"voice": {"barge_in": {"keyword_enabled": False}}}),
         ScriptedVAD(probs),
         SimpleNamespace(),
         None,
         language=lambda: "en",
+        clock=lambda: now[0],
     )
     bi.bind(lambda: seen.append(bi.recent()), lambda: None, None)
     thread = threading.Thread(target=reader)
@@ -1080,11 +1085,8 @@ def test_recent_can_be_read_while_a_chunk_is_processed():
     try:
         for i in range(0, audio.size, CHUNK):
             part = audio[i : i + CHUNK]
-            bi.on_chunk(
-                SimpleNamespace(
-                    samples=part, rate_hz=RATE, stamp=T0 + (i + part.size) / RATE, gap=False
-                )
-            )
+            now[0] = T0 + (i + part.size) / RATE
+            bi.on_chunk(SimpleNamespace(samples=part, rate_hz=RATE, stamp=now[0], gap=False))
     finally:
         done.set()
         thread.join()
