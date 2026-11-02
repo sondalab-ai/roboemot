@@ -285,6 +285,24 @@ def test_nothing_is_sent_while_the_robot_speaks(ears):
         assert appended(server) == []
 
 
+def test_a_capped_wake_decode_with_no_audio_path_left_is_decoded_whole(ears):
+    """The route stops wanting audio between the utterance's start and its wake decision: the
+    chat routes get the whole utterance's text, never its first seconds."""
+    with TurnServer() as server:
+        ear = ears(server, script=["x"], decoded="ciao robot accendi", bearing=OFF_FACE_RAD)
+        ear.r.feed(silence(1.0))
+        ear.r.feed(voice(seconds=6.0))  # addressable at its start: Vosk skipped
+        ear.input.wants = lambda cfg: False
+        ear.r.feed(silence(ear.r.cfg.voice.vad.end_silence_ms / 1000 + 0.2))
+        assert ear.settle(lambda: len(ear.utterances) == 1)
+        u = ear.utterances[0]
+        assert u.addressed and u.realtime is None and not u.local_only
+        first, whole = ear.r.asr.decoded_s
+        assert first == pytest.approx(3.0 + pre_roll_s(ear), abs=0.07)
+        assert whole == pytest.approx(6.0 + pre_roll_s(ear), abs=0.1)
+        assert appended(server) == []
+
+
 def test_the_listening_blip_is_not_robot_speech(ears):
     """CV-7: the blip opens only the own-sound window. The listener keeps the audio, barge-in
     never sees it, and the realtime input sends the utterance while the blip plays."""
