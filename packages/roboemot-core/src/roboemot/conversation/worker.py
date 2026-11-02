@@ -115,8 +115,6 @@ INTERRUPTED_MARK = " …"  # ends an assistant message the person cut off (histo
 TOO_MANY_ROUNDS = '{"error": "too_many_rounds"}'  # a tool call after the realtime round cap
 # ignore_utterance after a skill acted in the turn: refused, the exchange stays (SPEC 8)
 SKIP_REFUSED = '{"error": "skip_unavailable_after_an_action"}'
-# the fast path's keyword categories that mean the robot was called (SPEC 8, Conversation start)
-NAME_KEYWORDS = frozenset({"wake", "name"})
 
 
 class Speech(Protocol):
@@ -188,6 +186,7 @@ class _Turn:
     rt_audio: bool = False  # the server's own items of the utterance's audio were answered
     skipped: str | None = None  # the model called ignore_utterance: the route counter to move
     conversation: str | None = None  # its conversation state (skip tool on), else None
+    fell_back: bool = False  # the fallback line or cue was said: no answer, no conversation
 
 
 @dataclass
@@ -765,10 +764,11 @@ class ConversationWorker:
 
     def _conversation_state(self, utterance: Utterance, cfg: RoboEmotConfig, now: float) -> str:
         """Whether a conversation with the robot is in progress for this turn (SPEC 8,
-        Conversation start): ``addressed`` when the wake word or the name was heard,
+        Conversation start): ``addressed`` when the wake gate's wake decision holds (a wake
+        phrase, or the bare name in a short final: never the name inside a longer sentence),
         ``in_progress`` while a confirmation waits or the robot's last spoken answer ended at
         most ``conversation_span_s`` ago, else ``none``."""
-        if utterance.wake_word or utterance.keywords & NAME_KEYWORDS:
+        if utterance.wake_word:
             return ADDRESSED
         span = cfg.voice.realtime_route.conversation_span_s
         with self._lock:
@@ -1693,8 +1693,16 @@ class ConversationWorker:
             turn.cfg.conversation.fallback_lines, turn.language, turn.cfg.conversation.language
         )
         state = self.affect.state(self.clock())
+        turn.fell_back = True
         self._say(turn, text or "", state.label, state.intensity, cue="fallback")
         self._counts["fallbacks"] += 1
+
+    def _spoken_until(self, jobs: list[tuple[int, str]]) -> float:
+        """When the robot stopped speaking for this turn: the later of now and the end of the
+        played audio of ``jobs`` (it may still be playing after the response ended), so a long
+        answer does not eat ``conversation_span_s`` (SPEC 8, Conversation start)."""
+        ends = [self.speech.ended_at(job) for job, _ in jobs if self.speech.played(job)]
+        return max([self.clock(), *(e for e in ends if e is not None)])
 
     def _finish(self, turn: _Turn) -> None:
         """Keep the whole turn (the user's words, the tool exchange and what was actually
@@ -1709,8 +1717,8 @@ class ConversationWorker:
             texts = turn.spoken[turn.exchange_spoken :]
             kept = [t for job, t in items if self.speech.played(job)] if cut else texts
             spoken = " ".join(t for t in kept if t)
-            if spoken:  # a skip never stamps it: no chatter keeps a conversation open
-                self._spoke_at = self.clock()
+            if spoken and not turn.fell_back:  # a skip or a fallback never stamps it
+                self._spoke_at = self._spoken_until(items if cut else turn.queued)
             dropped: list[list[dict[str, Any]]] = []
             if (spoken or turn.exchange) and self._max_turns > 0:
                 messages: list[dict[str, Any]] = [

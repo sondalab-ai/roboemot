@@ -8,11 +8,13 @@ needs the real server (the robot run checks it)."""
 from __future__ import annotations
 
 import dataclasses
+import math
 import time
 
 import pytest
 from roboemot.config import ConfigError, ConfigStack
-from roboemot.config.schema import RegisterParams
+from roboemot.config.schema import RegisterParams, RoboEmotConfig
+from roboemot.conversation.worker import _Turn
 from roboemot.llm import prompt as prompt_module
 from roboemot.llm.prompt import (
     ADDRESSED,
@@ -25,8 +27,12 @@ from roboemot.llm.prompt import (
     start_prompts,
 )
 from roboemot.realtime.turn import SKIP_TOOL
+from roboemot.voice.fastpath import FastPath
+from roboemot.voice.listener import Utterance
+from roboemot.voice.robot_name import RobotName
 from rt_rig import build_rt, wait_for
 from test_conversation_worker import utt
+from test_voice_listener import RATE, voice
 from turn_server import TurnServer
 
 SKIP = {"skip_tool": True}
@@ -91,16 +97,36 @@ def test_a_recent_answer_opens_the_conversation_and_the_span_closes_it(rigs):
         assert rig.route.snapshot()["turns_by_state"] == zero(none=2, in_progress=1)
 
 
-def test_the_wake_word_or_the_name_marks_the_turn_addressed(rigs):
-    with TurnServer(["reply", "reply"]) as srv:
+def test_the_wake_word_marks_the_turn_addressed(rigs):
+    with TurnServer() as srv:
         rig = rigs(srv, rt=SKIP)
-        stamp = time.monotonic()
-        submit(rig, dataclasses.replace(utt("ehi robot", stamp=stamp), wake_word=True))
-        submit(rig, utt("Reachy che ore sono adesso", keywords={"name"}, stamp=stamp + 1))
-        for n in (0, 1):
-            text = instructions(srv, n)
-            assert open_prompts()["it"] in text and start_prompts()["it"] not in text
-        assert rig.route.snapshot()["turns_by_state"] == zero(addressed=2)
+        submit(rig, dataclasses.replace(utt("ehi robot", stamp=time.monotonic()), wake_word=True))
+        text = instructions(srv, 0)
+        assert open_prompts()["it"] in text and start_prompts()["it"] not in text
+        assert rig.route.snapshot()["turns_by_state"] == zero(addressed=1)
+
+
+def heard(text: str, *, server: bool) -> Utterance:
+    """The utterance as the listener builds it from the fast path's decision on ``text``, for
+    a robot named Neve (every word in vocabulary)."""
+    cfg = RoboEmotConfig.model_validate({"voice": {"wake_word": "Neve"}})
+    fast = FastPath(cfg.voice, lambda *a: None, names=RobotName(missing=lambda lang, w: []))
+    fast.begin(0.0, 0.0, "it")
+    ends = {"last_speech_stamp": 0.0, "endpoint_stamp": 0.0}
+    result = fast.end(text, voice(seconds=0.5), RATE, **ends, server=server)
+    return dataclasses.replace(utt(text), wake_word=result.wake_word, keywords=result.keywords)
+
+
+@pytest.mark.parametrize("server", [False, True])
+def test_the_name_inside_a_long_sentence_does_not_address_the_turn(rigs, server):
+    """ "Neve" is also snow: only a short final with the bare name wakes (SPEC 8 stage 3)."""
+    with TurnServer() as srv:
+        rig = rigs(srv, rt=SKIP)
+        state = lambda u: rig.worker._conversation_state(u, rig.stack.effective(), 0.0)  # noqa: E731
+        long = heard("domani sulle montagne qui vicino cade tanta neve dicono tutti", server=server)
+        assert len(long.text.split()) == 10 and "name" in long.keywords and not long.wake_word
+        assert state(long) == NO_CONVERSATION
+        assert state(heard("ciao neve", server=server)) == ADDRESSED
 
 
 def test_a_waiting_confirmation_counts_as_in_progress(rigs):
@@ -136,6 +162,72 @@ def test_without_the_skip_tool_no_hint_and_no_count(rigs):
             assert all(h not in create["response"]["instructions"] for h in hints)
         snap = rig.route.snapshot()
         assert snap["turns_by_state"] == zero() and snap["skipped_by_state"] == zero()
+
+
+class Spoken:
+    """The speech output as ``_finish`` reads it: which jobs played, and when each ended."""
+
+    def __init__(self, played: dict[int, float]) -> None:
+        self._played = played
+
+    def played(self, job: int) -> bool:
+        return job in self._played
+
+    def ended_at(self, job: int) -> float | None:
+        return self._played.get(job)
+
+    def first_audio_at(self, utterance: int) -> float | None:
+        return None
+
+
+def spoke_at(rig, played: dict[int, float], **flags) -> float:
+    """``_spoke_at`` after a turn that queued jobs 1 and 2 ends with ``flags``."""
+    worker = rig.worker
+    worker._spoke_at = -math.inf
+    worker.speech = Spoken(played)
+    turn = _Turn(utt("sì"), rig.stack.effective(), "it", RegisterParams(), 1, 3)
+    turn.queued = [(1, "Uno."), (2, "Due.")]
+    turn.spoken = ["Uno.", "Due."]
+    for key, value in flags.items():
+        setattr(turn, key, value)
+    worker._finish(turn)
+    return worker._spoke_at
+
+
+def test_the_span_starts_when_the_played_audio_ends(rigs):
+    with TurnServer() as srv:
+        rig = rigs(srv, rt=SKIP)
+        now = time.monotonic()
+        rig.worker.clock = lambda: now
+        assert spoke_at(rig, {1: now + 2, 2: now + 9}) == now + 9  # a long answer still plays
+        assert spoke_at(rig, {1: now - 5, 2: now - 1}) == now  # it ended before the turn did
+        # a barge-in: only the played sentence counts, up to where the stop cut it
+        assert spoke_at(rig, {1: now + 3}, stopped=True) == now + 3
+        assert spoke_at(rig, {}, stopped=True) == -math.inf  # cut before anything played
+        assert spoke_at(rig, {}, interrupted=True, stopped=True) == -math.inf
+        assert spoke_at(rig, {1: now + 2, 2: now + 4}, fell_back=True) == -math.inf
+
+
+def test_a_fallback_turn_leaves_no_conversation_in_progress(rigs):
+    with TurnServer() as srv:
+        rig = rigs(srv, rt=SKIP)
+        rig.worker._spoke_at = -math.inf
+        turn = _Turn(utt("sì"), rig.stack.effective(), "it", RegisterParams(), 1, 3)
+        rig.worker._say_fallback(turn)
+        assert turn.fell_back
+        rig.worker._finish(turn)
+        assert rig.worker._spoke_at == -math.inf
+
+
+def test_a_reload_that_lengthens_the_span_reopens_it(rigs):
+    with TurnServer(["reply", "reply"]) as srv:
+        rig = rigs(srv, rt={**SKIP, "conversation_span_s": 1.0})
+        rig.turn("ciao robot")
+        assert wait_for(lambda: rig.speech.snapshot()["spoken"] == 1)
+        rig.worker.clock = lambda: time.monotonic() + SPAN_S / 2  # past the old span
+        rig.stack.set("voice.realtime_route.conversation_span_s", SPAN_S, source="test", admin=True)
+        rig.turn("sì, va bene")
+        assert open_prompts()["it"] in instructions(srv, 1)
 
 
 def test_the_span_follows_a_reload(rigs):

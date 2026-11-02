@@ -1210,6 +1210,7 @@ class RealtimeRoute:
     def count_state(self, kind: str, state: str) -> None:
         """Count a turn (``kind`` ``turns``) or a skip (``skipped``) in its conversation state
         (SPEC 8, Conversation start); reported as ``<kind>_by_state``."""
+        assert kind in self._by_state, kind
         with self._lock:
             self._by_state[kind][state] += 1
 
