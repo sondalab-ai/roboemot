@@ -1,33 +1,50 @@
-"""The motion loop's latest movement reading, for diagnostics that run on other threads (SPEC 12A).
+"""The motion loop's movement, for diagnostics that run on other threads (SPEC 12A).
 
-The loop publishes a :class:`MotionState` at the end of every tick by a single attribute
-assignment, so a reader (the barge-in detector on the listener thread) never takes the loop's
-lock, which is held across driver calls. Robot-agnostic: the fastest joint is named by its
-manifest group, a label the manifest owns.
+The loop's tick only stores raw values it already has (its stamp, the last two fresh measured
+poses as one tuple, the arbiter's reflex flag); a reader takes a cheap :class:`MotionSample`
+(``MotionProbe.motion_sample``: a copy of the limiter's velocities and those references) and
+derives the per-group speeds later, off its own hot path (``MotionProbe.motion_state``). Neither
+takes the loop's lock, which is held across driver calls. Robot-agnostic: speeds are keyed by
+manifest pose group, labels the manifest owns.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Protocol
+
+# The last two fresh measured poses: (previous stamp, previous pose, last stamp, last pose).
+MeasuredPair = tuple[float | None, dict[str, float] | None, float, dict[str, float]]
+
+
+@dataclass(frozen=True)
+class MotionSample:
+    """Raw values at one instant: the last tick's stamp, the commanded angular velocities
+    (rad/s, a copy), the last two fresh measured poses, external control, an active reflex."""
+
+    stamp: float
+    velocities: dict[str, float]
+    measured: MeasuredPair | None
+    external: bool
+    reflex: bool
 
 
 @dataclass(frozen=True)
 class MotionState:
-    """One tick's movement: the highest commanded angular speed over the angle dofs (deg/s),
-    the manifest group of that dof (None when still), whether the loop yields to external
-    control, whether a reflex command is active, the tick's monotonic stamp, and the highest
-    angular speed per manifest group (deg/s), so a fast group does not hide a slower one."""
+    """A sample's derived movement: the highest commanded and measured angular speed (deg/s) per
+    manifest pose group (measured empty without two fresh poses), external control, reflex."""
 
     stamp: float
-    speed_dps: float
-    group: str | None
+    commanded_dps: dict[str, float]
+    measured_dps: dict[str, float]
     external: bool
     reflex: bool
-    group_speed_dps: dict[str, float] = field(default_factory=dict)
 
 
 class MotionProbe(Protocol):
-    """Where diagnostics read the motion state: None before the first tick."""
+    """Where diagnostics read the motion: ``motion_sample`` is cheap (None before the first
+    tick); ``motion_state`` derives a sample, later and on the reader's thread."""
 
-    def motion_state(self) -> MotionState | None: ...
+    def motion_sample(self) -> MotionSample | None: ...
+
+    def motion_state(self, sample: MotionSample) -> MotionState: ...

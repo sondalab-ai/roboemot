@@ -95,6 +95,7 @@ class Arbiter:
         self._winner: dict[str, str | None] = {d: None for d in dofs}
         self._fade: dict[str, _Fade | None] = {d: None for d in dofs}
         self.last: dict[str, float] = {name: d.home for name, d in dofs.items()}
+        self.reflex_active = False  # a reflex command won a dof in the last step (diagnostics)
 
     def submit(self, cmd: Command) -> None:
         unknown = set(cmd.targets) - set(self.dofs)
@@ -116,6 +117,7 @@ class Arbiter:
     def step(self, now: float) -> dict[str, float]:
         cmds = self.active(now)
         out: dict[str, float] = {}
+        reflex = False
         for name, dof in self.dofs.items():
             absolute = [c for c in cmds if not c.additive and name in c.targets]
             if absolute:
@@ -123,6 +125,7 @@ class Arbiter:
                 target, winner, prio = best.targets[name], best.source, best.priority
             else:
                 target, winner, prio = dof.home, None, Priority.IDLE
+            reflex = reflex or prio == Priority.REFLEX
             if prio >= Priority.COMMANDED:
                 target += sum(c.targets[name] for c in cmds if c.additive and name in c.targets)
             if prio != Priority.SAFETY:
@@ -142,6 +145,7 @@ class Arbiter:
                     target = fade.from_value + (target - fade.from_value) * w
             out[name] = target
         self.last = dict(out)
+        self.reflex_active = reflex
         return out
 
 

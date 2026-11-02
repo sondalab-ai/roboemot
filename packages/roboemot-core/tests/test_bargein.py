@@ -3,12 +3,13 @@ keyword path and the listener handoff, on a fake microphone that hears the robot
 
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 from roboemot.config.schema import RoboEmotConfig
-from roboemot.motion.state import MotionState
+from roboemot.motion.state import MotionSample, MotionState
 from roboemot.voice.bargein import LABEL_MAX, BargeIn, PlaybackReference, echo_correlation
 from roboemot.voice.vad import EnergyVAD
 from test_voice_listener import CHUNK, FRAME, RATE, T0, Rig
@@ -780,24 +781,29 @@ def test_a_gap_releases_the_gain_with_the_ramp_not_a_step():
 # ------------------------------------------------------------------ trigger records (SPEC 8, 12A)
 
 SCALARS = (bool, int, float, type(None))
-GROUP_SPEEDS = "speed_by_group_dps"  # the one mapping: manifest group label -> deg/s
+BY_GROUP = ("commanded_dps", "measured_dps")  # the two mappings: manifest group label -> deg/s
 
 
 class FakeMotion:
-    """A ``MotionProbe`` with a fixed reading."""
+    """A ``MotionProbe`` with a fixed reading; counts the derivations."""
 
-    def __init__(
-        self, speed_dps=0.0, group=None, external=False, reflex=False, stamp=0.0, groups=None
-    ):
-        self.state = MotionState(stamp, speed_dps, group, external, reflex, groups or {})
+    def __init__(self, commanded=None, measured=None, external=False, reflex=False, stamp=0.0):
+        self.sample = MotionSample(stamp, {}, None, external, reflex)
+        self.state = MotionState(stamp, commanded or {}, measured or {}, external, reflex)
+        self.derived = 0
 
-    def motion_state(self):
+    def motion_sample(self):
+        return self.sample
+
+    def motion_state(self, sample):
+        assert sample is self.sample
+        self.derived += 1
         return self.state
 
 
 def assert_scalars_only(record):
     for key, value in record.items():
-        if key == GROUP_SPEEDS and value is not None:
+        if key in BY_GROUP and value is not None:
             assert all(len(g) <= LABEL_MAX and isinstance(v, float) for g, v in value.items())
         elif isinstance(value, str):
             assert len(value) <= LABEL_MAX, key
@@ -813,7 +819,7 @@ def test_an_onset_cut_records_its_path_outcome_level_and_scores():
     assert (rec["outcome"], rec["fired"], rec["confirmed"]) == ("cut", "onset", "onset")
     assert rec["released_by"] is None
     assert rec["level_db"] == pytest.approx(-34.0, abs=0.5)  # rms 0.02
-    assert rec["hf_ratio"] > 0.9  # the /s/ is all above the cutoff
+    assert rec["hf_ratio"] > 0.9  # the /s/ is all above the cutoff: the onset test's own value
     assert (rec["vad_prob"], rec["vad_peak"]) == (0.5, 0.6)
     assert rec["speech_ms"] == pytest.approx(2 * FRAME_MS)
     assert rec["episode_ms"] == pytest.approx(2 * FRAME_MS)
@@ -822,7 +828,16 @@ def test_an_onset_cut_records_its_path_outcome_level_and_scores():
     assert rec["moving"] is None and rec["face_offset_deg"] is None  # no probe, no lookup
     assert rec["speaking_ms"] == 0.0 and rec["lag_ms"] >= 0.0
     assert snap["cuts_by_path"] == {"vad": 0, "onset": 1, "keyword": 0}
+    assert snap["record_errors"] == 0
     assert_scalars_only(rec)
+
+
+def test_the_high_band_share_is_empty_when_the_onset_test_did_not_run():
+    probs = [0.0, 0.9, 0.95, 0.9, 0.9, 0.9]
+    _, bi = onset_run(
+        probs, user_voice(6 * FRAME / RATE, 0.2), keyword_enabled=False, onset_enabled=False
+    )
+    assert bi.recent()[0]["hf_ratio"] is None  # no second FFT for the record
 
 
 def test_a_main_path_cut_records_vad_as_the_path_that_fired_and_confirmed():
@@ -835,7 +850,7 @@ def test_a_main_path_cut_records_vad_as_the_path_that_fired_and_confirmed():
     assert (rec["outcome"], rec["fired"], rec["confirmed"]) == ("cut", "vad", "vad")
     assert rec["vad_prob"] == 0.9 and rec["vad_peak"] == 0.95
     assert rec["speaking_ms"] == pytest.approx(FRAME_MS)  # one frame of speaking before it
-    assert bi.snapshot()["cuts_by_path"]["vad"] == 1
+    assert bi.snapshot()["cuts_by_path"] == {"vad": 1, "onset": 0, "keyword": 0}
 
 
 def test_a_released_duck_records_released_after_the_quiet_frames():
@@ -851,12 +866,34 @@ def test_a_released_duck_records_released_after_the_quiet_frames():
     assert sum(snap["cuts_by_path"].values()) == 0
 
 
+def test_records_are_kept_with_ducking_off():
+    stops, bi = onset_run(
+        [0.5, 0.6, 0.55, 0.3], hiss(4), keyword_enabled=False, duck={"enabled": False}
+    )
+    assert len(stops) == 1 and bi.snapshot()["duck"]["started"] == 0
+    (rec,) = bi.recent()
+    assert (rec["outcome"], rec["confirmed"]) == ("cut", "onset")
+    _, bi = onset_run(
+        [0.0, 0.9, 0.0, 0.0, 0.0],
+        user_voice(5 * FRAME / RATE, 0.1),
+        duck={"enabled": False},
+        keyword_enabled=False,
+    )
+    assert [(r["outcome"], r["released_by"]) for r in bi.recent()] == [("released", "quiet")]
+
+
 def test_an_episode_open_at_the_end_of_speech_is_released_by_it():
     _, bi = onset_run([0.9], user_voice(FRAME / RATE, 0.1), keyword_enabled=False)
     assert bi.snapshot()["recent"][0]["outcome"] == "open"  # shown mid-episode
     bi.reset()  # the robot stopped speaking
     (rec,) = bi.snapshot()["recent"]
     assert (rec["outcome"], rec["released_by"]) == ("released", "speech_end")
+
+
+def test_a_gap_keeps_the_record_open():
+    _, bi = onset_run([0.9], user_voice(FRAME / RATE, 0.1), keyword_enabled=False)
+    bi.reset(gap=True)
+    assert [r["outcome"] for r in bi.recent()] == ["open"]
 
 
 def test_the_ring_keeps_the_last_n_records():
@@ -881,40 +918,59 @@ def test_a_hot_reload_resizes_the_ring():
 @pytest.mark.parametrize(
     ("motion", "moving"),
     [
-        (FakeMotion(40.0, "neck", reflex=True, stamp=0.1), True),
-        (FakeMotion(1.0, "neck"), False),
-        (FakeMotion(0.0, None, external=True), True),
+        (FakeMotion({"head": 40.0}, {"head": 30.0}, reflex=True, stamp=0.1), True),
+        (FakeMotion({"head": 40.0}, {"head": 1.0}), False),  # measured wins over commanded
+        (FakeMotion({"head": 40.0}), True),  # no measured pose: commanded
+        (FakeMotion({"ears": 300.0, "head": 1.0}), False),  # another group's speed is not it
+        (FakeMotion({}, external=True), True),
     ],
 )
-def test_motion_at_the_trigger_is_recorded_from_the_probe(motion, moving):
+def test_motion_at_the_first_candidate_frame_is_recorded_from_the_probe(motion, moving):
     _, bi = onset_run([0.5, 0.6, 0.55], hiss(3), keyword_enabled=False, motion=motion)
     (rec,) = bi.recent()
     state = motion.state
     assert rec["moving"] is moving
-    assert rec["speed_dps"] == state.speed_dps and rec["moving_group"] == state.group
+    assert rec["commanded_dps"] == state.commanded_dps
+    assert rec["measured_dps"] == state.measured_dps
     assert (rec["external"], rec["reflex"]) == (state.external, state.reflex)
-    # the reading's stamp against the end of the first candidate frame
+    # the sample's tick against the end of the first candidate frame
     assert rec["motion_offset_ms"] == pytest.approx((state.stamp - FRAME / RATE) * 1000)
+    assert motion.derived == 1  # derived once, at close, not on the frame path
+    assert_scalars_only(rec)
 
 
-def test_the_moving_threshold_is_configurable():
-    motion = FakeMotion(4.0, "neck")
+def test_the_moving_group_and_threshold_are_configurable():
+    motion = FakeMotion({"ears": 4.0, "head": 0.0})
     _, bi = onset_run(
-        [0.5, 0.6, 0.55], hiss(3), keyword_enabled=False, motion=motion, moving_min_speed_dps=3.0
+        [0.5, 0.6, 0.55],
+        hiss(3),
+        keyword_enabled=False,
+        motion=motion,
+        moving_min_speed_dps=3.0,
+        moving_group="ears",
     )
     assert bi.recent()[0]["moving"] is True
+    _, bi = onset_run(
+        [0.5, 0.6, 0.55], hiss(3), keyword_enabled=False, motion=motion, moving_group=None
+    )
+    assert bi.recent()[0]["moving"] is False  # the fastest group, 4 deg/s, is under 5
 
 
 def test_the_sound_direction_offset_from_the_nearest_face_is_recorded():
-    _, bi = onset_run(
-        [0.5, 0.6, 0.55], hiss(3), keyword_enabled=False, face_offset=lambda now: np.pi / 6
-    )
+    seen = []
+
+    def lookup(now):
+        seen.append(now)
+        return np.pi / 6
+
+    _, bi = onset_run([0.5, 0.6, 0.55], hiss(3), keyword_enabled=False, face_offset=lookup)
     assert bi.recent()[0]["face_offset_deg"] == pytest.approx(30.0)
+    assert seen == [pytest.approx(0.0)]  # once, at close, for the episode's first frame
 
 
 def test_a_failing_probe_or_lookup_leaves_the_fields_empty_and_still_cuts():
     class Broken:
-        def motion_state(self):
+        def motion_sample(self):
             raise RuntimeError("boom")
 
     def no_face(now):
@@ -923,8 +979,41 @@ def test_a_failing_probe_or_lookup_leaves_the_fields_empty_and_still_cuts():
     stops, bi = onset_run(
         [0.5, 0.6, 0.55], hiss(3), keyword_enabled=False, motion=Broken(), face_offset=no_face
     )
-    (rec,) = bi.recent()
-    assert len(stops) == 1 and rec["moving"] is None and rec["face_offset_deg"] is None
+    assert len(stops) == 1
+    snap = bi.snapshot()
+    assert snap["record_errors"] == 2 and snap["triggers"] == 1
+
+
+def test_a_raising_reference_window_still_cuts_and_interrupts(caplog):
+    """The recording's reference read fails: the cut, the interrupt and the reset still happen,
+    the error is counted and logged once per exception type."""
+
+    class Ref:
+        rate_hz = RATE
+
+        def set_keep_s(self, keep_s):
+            pass
+
+        def window(self, t0, t1):
+            raise ValueError("boom")
+
+    interrupts = []
+    bi = BargeIn(
+        RoboEmotConfig.model_validate({"voice": {"barge_in": {"keyword_enabled": False}}}),
+        ScriptedVAD([0.5, 0.6, 0.55]),
+        SimpleNamespace(),
+        Ref(),
+        language=lambda: "en",
+        clock=lambda: 1.0,
+    )
+    bi._echo = bi._echo_hf = lambda end: 0.0  # the decision's own reads stay working
+    stops = []
+    bi.bind(lambda: stops.append(1), lambda: interrupts.append(1), None)
+    audio = hiss(3)
+    bi.on_chunk(SimpleNamespace(samples=audio, rate_hz=RATE, stamp=audio.size / RATE, gap=False))
+    assert stops == [1] and interrupts == [1]
+    assert bi.snapshot()["record_errors"] == 1 and bi._rec is None and bi._run == 0
+    assert sum("trigger record: ValueError" in r.message for r in caplog.records) == 1
 
 
 def test_a_cut_over_the_robots_voice_records_the_echo_and_its_own_audio_playing():
@@ -952,6 +1041,57 @@ def test_a_keyword_stop_with_no_episode_open_gets_a_record_of_its_own():
     assert_scalars_only(rec)
 
 
+@pytest.mark.parametrize("prob", [0.9, 0.5])
+def test_a_keyword_stop_during_an_open_episode_confirms_it(prob):
+    audio = hiss(1) if prob == 0.5 else user_voice(FRAME / RATE, 0.1)
+    stops, bi = onset_run([prob], audio, keyword_enabled=False, onset_min_speech_ms=64)
+    assert stops == [] and bi.recent()[0]["outcome"] == "open"
+    bi._worker.take_hit = lambda: 0.05  # the keyword worker heard "stop"
+    assert bi._poll_keyword()
+    (rec,) = bi.recent()
+    fired = "vad" if prob == 0.9 else "onset"
+    assert (rec["outcome"], rec["fired"], rec["confirmed"]) == ("cut", fired, "keyword")
+    assert bi.snapshot()["cuts_by_path"] == {"vad": 0, "onset": 0, "keyword": 1}
+
+
+def test_recent_can_be_read_while_a_chunk_is_processed():
+    """The report thread reads the ring while the listener writes it; the stop action (inside
+    ``on_chunk``) reads it too without a deadlock."""
+    seen = []
+    done = threading.Event()
+
+    def reader():
+        while not done.is_set():
+            for r in bi.recent():
+                assert_scalars_only(r)
+
+    probs = [p for _ in range(40) for p in (0.9, 0.0, 0.0, 0.0)] + [0.5, 0.6, 0.55]
+    audio = np.concatenate([user_voice(160 * FRAME / RATE, 0.1), hiss(3)])
+    bi = BargeIn(
+        RoboEmotConfig.model_validate({"voice": {"barge_in": {"keyword_enabled": False}}}),
+        ScriptedVAD(probs),
+        SimpleNamespace(),
+        None,
+        language=lambda: "en",
+    )
+    bi.bind(lambda: seen.append(bi.recent()), lambda: None, None)
+    thread = threading.Thread(target=reader)
+    thread.start()
+    try:
+        for i in range(0, audio.size, CHUNK):
+            part = audio[i : i + CHUNK]
+            bi.on_chunk(
+                SimpleNamespace(
+                    samples=part, rate_hz=RATE, stamp=T0 + (i + part.size) / RATE, gap=False
+                )
+            )
+    finally:
+        done.set()
+        thread.join()
+    assert len(seen) == 1 and seen[0][-1]["outcome"] == "open"  # the cut is recorded after stop
+    assert bi.recent()[-1]["outcome"] == "cut" and bi.snapshot()["record_errors"] == 0
+
+
 def test_recording_does_not_change_any_decision():
     """The same audio with a probe and a lookup cuts at the same moment as without."""
     a, _ = onset_run([0.5, 0.6, 0.55, 0.3], hiss(4), keyword_enabled=False)
@@ -959,16 +1099,7 @@ def test_recording_does_not_change_any_decision():
         [0.5, 0.6, 0.55, 0.3],
         hiss(4),
         keyword_enabled=False,
-        motion=FakeMotion(90.0, "neck", external=True),
+        motion=FakeMotion({"head": 90.0}, external=True),
         face_offset=lambda now: 1.0,
     )
     assert a == b and len(a) == 1
-
-
-def test_a_fast_group_does_not_hide_a_slower_one():
-    motion = FakeMotion(120.0, "ears", groups={"ears": 120.0, "neck": 15.0})
-    _, bi = onset_run([0.5, 0.6, 0.55], hiss(3), keyword_enabled=False, motion=motion)
-    (rec,) = bi.recent()
-    assert rec["moving_group"] == "ears"
-    assert rec["speed_by_group_dps"] == {"ears": 120.0, "neck": 15.0}
-    assert_scalars_only(rec)
