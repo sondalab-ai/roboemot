@@ -374,6 +374,7 @@ def assemble(
             yes_no,
             on_activity=phase.set_listening,
             doa_available="doa" in manifest.capabilities(),
+            motion=loop,
         )
         if bearing is not None
         else None

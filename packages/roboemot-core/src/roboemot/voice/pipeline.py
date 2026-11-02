@@ -26,13 +26,14 @@ from typing import Any
 from roboemot.attention import AttentionSelector
 from roboemot.bus import Bus
 from roboemot.config.schema import RoboEmotConfig
+from roboemot.motion.state import MotionProbe
 from roboemot.robot_platform import AudioHub, BearingSource
 from roboemot.vision.models import ModelError
 from roboemot.voice import models as voice_models
 from roboemot.voice.activity import SpeechActivity
 from roboemot.voice.asr import VoskASR, resolve_language
 from roboemot.voice.bargein import BargeIn, PlaybackReference
-from roboemot.voice.direction import DirectionSample, VoiceDirection
+from roboemot.voice.direction import DirectionSample, VoiceDirection, face_offset
 from roboemot.voice.facing import FacingCheck
 from roboemot.voice.fastpath import Emit, FastPath
 from roboemot.voice.grammar import GrammarSpotter
@@ -74,11 +75,13 @@ def build_listener(
     on_answer: Callable[[str, float], None] | None = None,
     on_activity: Callable[[bool], None] | None = None,
     doa_available: bool = False,
+    motion: MotionProbe | None = None,
 ) -> tuple[VoiceListener, Callable[[], None], BargeIn] | None:
     """The listener, a ``close`` for the bearing source and the barge-in detector (not yet bound
     to its actions), or None when voice can't run. ``bearing`` is the robot's sound direction in
     the base frame (``RobotSession.bearing_source``); ``doa_available`` is whether the manifest
-    declares a sound direction (``doa``), which the voice-at-face check's degraded rule needs."""
+    declares a sound direction (``doa``), which the voice-at-face check's degraded rule needs.
+    ``motion`` (the motion loop) gives the barge-in trigger records their motion reading."""
     root = voice_models.models_dir(cfg.voice.models_dir, cfg.data_dir)
     try:
         vad_path = voice_models.model_file(root, "silero-vad")
@@ -176,6 +179,8 @@ def build_listener(
         ),
         emit=emit,
         keyword_background=True,
+        motion=motion,
+        face_offset=lambda now: face_offset(direction_sample(now)),
     )
     listener = VoiceListener(
         cfg,
