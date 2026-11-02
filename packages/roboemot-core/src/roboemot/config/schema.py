@@ -3032,6 +3032,16 @@ class RealtimeRouteConfig(Strict):
         "other, a video, TV or radio). A skipped utterance gets no answer and its items are "
         "deleted; its audio still reached the server",
     )
+    conversation_span_s: float = param(
+        30.0,
+        "With skip_tool: a conversation with the robot counts as in progress while its last "
+        "spoken answer ended at most this long ago (or a confirmation waits, or the wake word "
+        "or the name was heard). Otherwise each turn's instructions carry the strict start "
+        "rule: only words clearly meant for the robot are answered",
+        unit="s",
+        ge=1,
+        le=600,
+    )
 
     connect_timeout_s: float = param(
         5.0,
