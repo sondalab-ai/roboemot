@@ -59,6 +59,22 @@ class ASREvent:
     final: bool = False
 
 
+class ASRDecoder(Protocol):
+    """A decode on a recognizer of its own, fed in pieces (``ASRBackend.decoder``)."""
+
+    def accept(self, samples: np.ndarray) -> None:
+        """Feed the next piece of the utterance's audio."""
+        ...
+
+    def text(self) -> str:
+        """The words so far (finished segments plus the partial one), stripped."""
+        ...
+
+    def finish(self) -> str:
+        """End the decode and return its full text, stripped."""
+        ...
+
+
 @runtime_checkable
 class ASRBackend(Protocol):
     """One utterance at a time; mono float32 audio at ``rate_hz``."""
@@ -96,10 +112,10 @@ class ASRBackend(Protocol):
         """Drop the utterance in progress without a result."""
         ...
 
-    def decode(self, language: str, samples: np.ndarray) -> str:
-        """``samples`` (a whole utterance) decoded on a recognizer of its own, so the
-        utterance in progress is not disturbed: the text, empty when nothing was recognised or
-        the language is not loaded (the realtime route's fallback, SPEC 8)."""
+    def decoder(self, language: str) -> ASRDecoder | None:
+        """A decode on a recognizer of its own, so the utterance in progress is not disturbed;
+        None when the language is not loaded (the realtime route's fallback, SPEC 8). Fed in
+        pieces, so a caller can stop early and read the words so far."""
         ...
 
     def stats(self) -> dict[str, int]:
@@ -209,15 +225,14 @@ class VoskASR:
             for w in words
         ]
 
-    def decode(self, language: str, samples: np.ndarray) -> str:
-        """See ``ASRBackend.decode``: a recognizer built for this call (counted ``decodes``)."""
+    def decoder(self, language: str) -> ASRDecoder | None:
+        """See ``ASRBackend.decoder``: a recognizer built for this decode (counted
+        ``decodes``)."""
         model = self._models.get(language)
         if model is None:
-            return ""
+            return None
         self.decodes += 1
-        rec = self._vosk.KaldiRecognizer(model, self.rate_hz)
-        rec.AcceptWaveform(to_int16(samples))
-        return str(json.loads(rec.FinalResult()).get("text", ""))
+        return _VoskDecoder(self._vosk.KaldiRecognizer(model, self.rate_hz))
 
     def start(self, language: str) -> None:
         """Begin an utterance on the language's recognizer, built by ``load``; one that is
@@ -276,3 +291,29 @@ class VoskASR:
         except Exception:
             self._recs = {k: v for k, v in self._recs.items() if v is not rec}
             self.reset_failures += 1
+
+
+class _VoskDecoder:
+    """``ASRDecoder`` on one Vosk recognizer of its own."""
+
+    def __init__(self, rec: Any) -> None:
+        self._rec = rec
+        self._committed: list[str] = []
+        self._partial = ""
+
+    def accept(self, samples: np.ndarray) -> None:
+        if self._rec.AcceptWaveform(to_int16(samples)):
+            text = json.loads(self._rec.Result()).get("text", "")
+            if text:
+                self._committed.append(text)
+            self._partial = ""
+        else:
+            self._partial = json.loads(self._rec.PartialResult()).get("partial", "")
+
+    def text(self) -> str:
+        return " ".join([*self._committed, self._partial] if self._partial else self._committed)
+
+    def finish(self) -> str:
+        tail = json.loads(self._rec.FinalResult()).get("text", "")
+        self._partial = ""
+        return " ".join([*self._committed, tail] if tail else self._committed).strip()

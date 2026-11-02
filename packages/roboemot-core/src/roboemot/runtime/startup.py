@@ -17,6 +17,7 @@ from typing import Any
 from roboemot import paths
 from roboemot.config import ConfigStack
 from roboemot.conversation import ConversationWorker
+from roboemot.conversation.phase import SPEAKING, THINKING
 from roboemot.conversation.preferences import RegistryPreferences
 from roboemot.conversation.sources import profile_source, registry_names, scene_source
 from roboemot.health.speech_cue import Delivery, SpeechCue
@@ -74,7 +75,16 @@ def offline_cue(host: RuntimeHost, stack: ConfigStack, p: Pipeline) -> SpeechCue
 def build_cues(host: RuntimeHost, stack: ConfigStack, p: Pipeline, output: Any) -> Cues:
     """The non-verbal cues (SPEC 8, Non-verbal cues): the manifest's ``cue_<kind>`` gestures and
     the robot's cue sounds on ``output``, at the circadian volume, muted while asleep or paused;
-    the listening cue ends when the robot's speech plays (not a raw sound)."""
+    the listening cue ends when the robot's speech plays (not a raw sound). The listening blip
+    plays only in a quiet moment: nobody's speech in progress and no answer in progress (a turn
+    in flight or the robot speaking: the gaps between its sentences included)."""
+
+    def quiet() -> bool:
+        listener, phase = p.listener, host.phase
+        if listener is not None and listener.hearing():
+            return False
+        return phase is None or phase.current()[0] not in (THINKING, SPEAKING)
+
     return Cues(
         p.cfg.voice.cues,
         gesture=p.expression.gesture,
@@ -83,6 +93,7 @@ def build_cues(host: RuntimeHost, stack: ConfigStack, p: Pipeline, output: Any) 
         volume_db=lambda: effects_now(host, stack, p).volume_db,
         muted=lambda: p.sleep.asleep or p.sleep.paused,
         speaking=lambda now: output.timeline.sentence_at(now) is not None,
+        quiet=quiet,
     )
 
 
@@ -268,7 +279,7 @@ def start_all(
     cleanup.callback(host.forget_circadian)
     start_webui(host, stack, p.cfg, manifest, cleanup, p, admin)
     for world_source in p.plugin.sources:
-        world_source.speaking = p.speech.speaking  # no turning towards its own voice
+        world_source.speaking = p.speech.sounding  # no turning towards its own sound
         cleanup.callback(world_source.stop)
         world_source.start(p.publish)
     if stack.effective().runtime.gc_freeze:  # SPEC 8 stage 8: no full collection walks the models
