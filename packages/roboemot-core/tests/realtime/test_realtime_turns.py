@@ -4,6 +4,7 @@ session end (SPEC 8, Realtime speech route; Conversation state; Voice, expressiv
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 import pytest
@@ -518,10 +519,10 @@ def test_a_function_output_that_cannot_be_sent_ends_the_turn_per_b1(rigs, monkey
         rig, env = tooled(rigs, srv)
         send = rig.route.send
 
-        def refusing(event):
+        def refusing(event, **kw):
             if event.get("item", {}).get("type") == "function_call_output":
                 return False
-            return send(event)
+            return send(event, **kw)
 
         monkeypatch.setattr(rig.route, "send", refusing)
         rig.turn()
@@ -556,3 +557,269 @@ def test_a_turn_waits_out_an_abandoned_request_before_it_sends_anything(rigs):
         assert rig.chat_hosts() == []  # answered through the route
         assert rig.events[-1]["route"] == "rt"
         assert len(srv.of("conversation.item.create")) == 1  # the text went once, on the new one
+
+
+# ------------------------------------------------------------------ open tool calls (CV-8)
+
+PLAY = '{"gesture": "joy"}'
+
+
+def outputs_by_call(srv) -> dict[str, list[str]]:
+    """The ``function_call_output`` items the server got, by call id."""
+    out: dict[str, list[str]] = {}
+    for e in srv.of("conversation.item.create"):
+        if e["item"]["type"] == "function_call_output":
+            out.setdefault(e["item"]["call_id"], []).append(e["item"]["output"])
+    return out
+
+
+def answered_twice(rig, srv, served: int) -> None:
+    """Two more turns, each answered by the server's voice: no refusal, no chat route."""
+    for i in range(2):
+        rig.turn(f"ancora {i}", stamp=time.monotonic() + 1.0)
+        assert srv.responses == served + i + 1
+    snap = rig.route.snapshot()
+    assert snap["refused"] == 0 and snap["client"]["server_errors"] == 0
+    assert srv.pending_refusals == 0
+    assert rig.chat_hosts() == []
+    assert rig.events[-1]["route"] == "rt" and rig.events[-2]["route"] == "rt"
+
+
+def test_a_barge_in_after_a_tool_ran_sends_its_result_and_the_next_turns_answer(rigs):
+    """H1 (robot run 2026-11-02): a barge-in cuts a turn whose gesture ran; the call gets its
+    result anyway, so the server does not refuse every later turn."""
+    script = ["tool_then_audio", "reply", "reply"]
+    with TurnServer(
+        script, tool_name="play", tool_args=PLAY, deltas=30, gap_s=0.05, strict_calls=True
+    ) as srv:
+        rig, env = tooled(rigs, srv)
+        n = rig.say()
+        assert wait_for(lambda: env.played == ["joy"] and bool(rig.sink.pushed))
+        assert barge_in(rig)
+        assert wait_for(lambda: rig.worker.snapshot().get("turns", 0) >= n)
+        assert wait_for(lambda: not srv.open_calls)
+        outputs = outputs_by_call(srv)
+        assert list(outputs) == ["call_1"] and len(outputs["call_1"]) == 1
+        assert "interrupted" not in outputs["call_1"][0]  # the skill ran: its own result
+        answered_twice(rig, srv, 1)
+        voiced = {e["response_id"] for e in srv.sent_of("response.output_audio.delta")}
+        assert {"resp_2", "resp_3"} <= voiced
+
+
+def test_a_barge_in_in_the_second_round_does_not_answer_a_call_twice(rigs):
+    with TurnServer(
+        ["tool", "reply", "reply", "reply"],
+        tool_name="play",
+        tool_args=PLAY,
+        deltas=30,
+        gap_s=0.05,
+        strict_calls=True,
+    ) as srv:
+        rig, env = tooled(rigs, srv)
+        n = rig.say()
+        assert wait_for(lambda: len(response_creates(srv)) == 2 and bool(rig.sink.pushed))
+        assert barge_in(rig)
+        assert wait_for(lambda: rig.worker.snapshot().get("turns", 0) >= n)
+        answered_twice(rig, srv, 2)
+        assert {k: len(v) for k, v in outputs_by_call(srv).items()} == {"call_1": 1}
+
+
+def test_a_turn_that_completes_answers_each_call_once(rigs):
+    with TurnServer(["tool", "reply"], tool_name="play", tool_args=PLAY, strict_calls=True) as srv:
+        rig, env = tooled(rigs, srv)
+        rig.turn()
+        rig.turn("ancora", stamp=time.monotonic() + 1.0)
+        assert env.played == ["joy"]
+        assert {k: len(v) for k, v in outputs_by_call(srv).items()} == {"call_1": 1}
+        assert srv.pending_refusals == 0 and rig.route.snapshot()["refused"] == 0
+
+
+def test_a_call_that_arrives_after_the_cut_gets_an_interrupted_result(rigs):
+    with TurnServer(
+        ["cancel_then_tool", "reply", "reply"],
+        tool_name="play",
+        tool_args=PLAY,
+        deltas=30,
+        gap_s=0.05,
+        strict_calls=True,
+    ) as srv:
+        rig, env = tooled(rigs, srv)
+        n = rig.say()
+        assert wait_for(lambda: bool(rig.sink.pushed) and rig.speech.stream_progress(1))
+        assert barge_in(rig)
+        assert wait_for(lambda: rig.worker.snapshot().get("turns", 0) >= n)
+        assert wait_for(lambda: "call_1" in outputs_by_call(srv))
+        assert outputs_by_call(srv) == {"call_1": ['{"error": "interrupted"}']}
+        assert env.played == []  # the call never ran
+        answered_twice(rig, srv, 1)
+
+
+def test_a_failure_after_a_tool_ran_sends_its_result_and_the_next_turn_answers(rigs, monkeypatch):
+    """H2: the turn fails once its tool ran, before the result went: the result still goes."""
+    with TurnServer(["tool", "reply"], tool_name="play", tool_args=PLAY, strict_calls=True) as srv:
+        rig, env = tooled(rigs, srv)
+        ids = rig.route.new_item_id
+        failed = []
+
+        def broken_once():
+            if srv.of("conversation.item.create") and not failed:  # the tool result's id
+                failed.append(True)
+                raise RuntimeError("boom")
+            return ids()
+
+        monkeypatch.setattr(rig.route, "new_item_id", broken_once)
+        rig.turn()
+        assert env.played == ["joy"]
+        assert wait_for(lambda: len(rig.speech.backend.texts) == 1)  # the fallback line
+        assert wait_for(lambda: not srv.open_calls)
+        assert {k: len(v) for k, v in outputs_by_call(srv).items()} == {"call_1": 1}
+        rig.turn("ancora", stamp=time.monotonic() + 1.0)
+        assert srv.responses == 2 and srv.pending_refusals == 0
+        assert rig.chat_hosts() == [] and rig.events[-1]["route"] == "rt"
+
+
+def test_a_pending_call_refusal_resets_the_session_and_the_next_turn_answers(rigs):
+    """(c): a call left open by a path nothing settles: the refusal resets the session."""
+    with TurnServer(["pending", "reply"]) as srv:
+        rig = rigs(srv)
+        rig.turn()
+        assert rig.route.snapshot()["refused"] == 1
+        assert wait_for(lambda: rig.route.snapshot()["pending_call_resets"] == 1)
+        rig.turn("ancora", stamp=time.monotonic() + 1.0)
+        assert len(srv.connections) == 2
+        assert rig.events[-1]["route"] == "rt"
+        assert rig.route.snapshot()["pending_call_resets"] == 1
+
+
+def test_a_barge_in_while_a_skill_runs_answers_the_queued_calls(rigs):
+    """The robot's case: three calls and response.done are in while the first skill still runs;
+    the cut answers every call once (no cancel: the response was over)."""
+    with TurnServer(
+        ["tools", "reply", "reply"], tool_names=["play"] * 3, tool_args=PLAY, strict_calls=True
+    ) as srv:
+        rig, env = tooled(rigs, srv)
+        call = rig.worker._call
+        running = []
+
+        async def slow(*args, **kw):
+            running.append(True)
+            await asyncio.sleep(5.0)
+            return await call(*args, **kw)
+
+        rig.worker._call = slow
+        n = rig.say()
+        assert wait_for(lambda: running and srv.sent_of("response.done"))
+        assert barge_in(rig)
+        assert wait_for(lambda: rig.worker.snapshot().get("turns", 0) >= n)
+        assert wait_for(lambda: len(outputs_by_call(srv)) == 3)
+        assert outputs_by_call(srv) == {
+            c: ['{"error": "interrupted"}'] for c in ("call_1", "call_1_1", "call_1_2")
+        }
+        assert srv.of("response.cancel") == []
+        rig.worker._call = call
+        answered_twice(rig, srv, 1)
+
+
+# ------------------------------------------------------------------ open tool calls, review round
+
+
+def test_a_settling_result_the_server_rejects_resets_the_session_once(rigs):
+    """The server refuses the cut turn's tool result (the call stays open): the session is
+    reset at once, the next turns answer on the new one, and no reset loop starts."""
+    script = ["tool_then_audio", "reply", "reply"]
+    with TurnServer(
+        script,
+        tool_name="play",
+        tool_args=PLAY,
+        deltas=30,
+        gap_s=0.05,
+        strict_calls=True,
+        reject_outputs=True,
+    ) as srv:
+        rig, env = tooled(rigs, srv)
+        n = rig.say()
+        assert wait_for(lambda: env.played == ["joy"] and bool(rig.sink.pushed))
+        assert barge_in(rig)
+        assert wait_for(lambda: rig.worker.snapshot().get("turns", 0) >= n)
+        assert wait_for(lambda: rig.route.snapshot()["pending_call_resets"] == 1)
+        assert rig.route.snapshot()["outputs_refused"] == 1
+        for i in range(2):
+            rig.turn(f"ancora {i}", stamp=time.monotonic() + 1.0)
+        assert srv.pending_refusals == 0 and rig.chat_hosts() == []
+        assert rig.events[-1]["route"] == "rt" and rig.events[-2]["route"] == "rt"
+        assert len(srv.connections) == 2 and rig.route.snapshot()["pending_call_resets"] == 1
+
+
+def test_a_late_calls_items_are_deleted_with_its_turn(rigs):
+    with TurnServer(
+        ["cancel_then_tool", "reply", "reply"],
+        tool_name="play",
+        tool_args=PLAY,
+        deltas=30,
+        gap_s=0.05,
+        strict_calls=True,
+    ) as srv:
+        rig, env = tooled(rigs, srv, app={"conversation": {"history_turns": 1}})
+        n = rig.say()
+        assert wait_for(lambda: bool(rig.sink.pushed) and rig.speech.stream_progress(1))
+        assert barge_in(rig)
+        assert wait_for(lambda: rig.worker.snapshot().get("turns", 0) >= n)
+        assert wait_for(lambda: "call_1" in outputs_by_call(srv))
+        out = next(
+            e["item"]["id"]
+            for e in srv.of("conversation.item.create")
+            if e["item"]["type"] == "function_call_output"
+        )
+        rig.turn("ancora", stamp=time.monotonic() + 1.0)  # the cut turn leaves the history
+
+        def deleted() -> set[str]:
+            return {e["item_id"] for e in srv.of("conversation.item.delete")}
+
+        assert wait_for(lambda: {"fc_1", out} <= deleted())
+
+
+def test_a_pending_refusal_with_no_request_still_resets(rigs):
+    """A ``function_call_output_pending`` whose request is no longer tracked (expired, given
+    up, or an error that echoes nothing) resets the session too."""
+    from roboemot.realtime import protocol
+
+    with TurnServer() as srv:
+        rig = rigs(srv)
+        assert rig.route.ready()
+        rig.route._on_event(
+            protocol.ServerError(protocol.ERROR, "function_call_output_pending", "ev_gone")
+        )
+        snap = rig.route.snapshot()
+        assert snap["pending_call_resets"] == 1 and snap["errors_unrelated"] == 1
+        rig.turn()
+        assert len(srv.connections) == 2 and rig.events[-1]["route"] == "rt"
+
+
+def test_a_skip_with_a_second_call_leaves_no_call_open(rigs):
+    with TurnServer(
+        ["tools", "reply"],
+        tool_names=["ignore_utterance", "play"],
+        tool_args=PLAY,
+        strict_calls=True,
+    ) as srv:
+        rig, env = tooled(rigs, srv, rt={"skip_tool": True})
+        rig.turn()
+        assert rig.route.snapshot()["skipped"] == 1 and env.played == []
+        assert wait_for(lambda: not srv.open_calls)
+        rig.turn("ancora", stamp=time.monotonic() + 1.0)
+        assert srv.pending_refusals == 0 and rig.events[-1]["route"] == "rt"
+
+
+def test_a_second_pending_reset_in_a_row_waits_the_backoff(rigs):
+    with TurnServer(["pending", "pending", "reply"]) as srv:
+        rig = rigs(srv)
+        rig.turn()
+        assert wait_for(lambda: rig.route.snapshot()["pending_call_resets"] == 1)
+        assert wait_for(lambda: rig.route.connected)
+        rig.turn("ancora", stamp=time.monotonic() + 1.0)
+        assert wait_for(lambda: rig.route.snapshot()["pending_call_resets"] == 2)
+        policy = rig.stack.effective().connectivity.network
+        with rig.route._lock:
+            wait = rig.route._reopen_at - rig.route.clock()
+        assert 0 < wait <= policy.probe_initial_s
+        assert len(srv.connections) == 2  # no reconnect before the backoff
