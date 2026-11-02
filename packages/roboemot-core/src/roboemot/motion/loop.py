@@ -54,8 +54,9 @@ from ..config.schema import RoboEmotConfig
 from ..drivers import MotorMode, PoseGroupDriver
 from ..health import Link, OnChange
 from ..manifest import Manifest
-from .core import Command, MotionCore
+from .core import Command, MotionCore, Priority
 from .external import ExternalControl
+from .state import MotionState
 
 MS_PER_S = 1000.0
 log = logging.getLogger(__name__)
@@ -109,6 +110,8 @@ class MotionLoop:
         # this class, which take the lock). A raising hook is counted and skipped, the tick goes on.
         self.tick_hooks: list[Callable[[float, MotionCore], None]] = []
         self._hook_error: str | None = None
+        self._angle_dofs = [n for n, d in manifest.dofs.items() if d.kind == "angle"]
+        self._motion_state: MotionState | None = None
 
     # ---- configuration (SPEC 11A hot reload)
 
@@ -134,6 +137,11 @@ class MotionLoop:
     @property
     def external_events(self) -> int:
         return self.external_ctl.events
+
+    def motion_state(self) -> MotionState | None:
+        """The last tick's movement (``MotionProbe``): read without the lock, from any thread;
+        None before the first tick."""
+        return self._motion_state
 
     # ---- inputs
 
@@ -204,6 +212,7 @@ class MotionLoop:
                 # re-enabling never jumps
                 state = self._resync()
                 self.ticks += 1
+                self._publish(now)
                 return state
             ext = self.external_ctl
             ext.tick(now)
@@ -233,7 +242,22 @@ class MotionLoop:
                     log.info("motion: external control of the robot detected (%s), yielding", names)
             ext.push(out)
             self.ticks += 1
+            self._publish(now)
             return out
+
+    def _publish(self, now: float) -> None:
+        """Publish this tick's movement for readers on other threads (caller holds the lock):
+        the fastest commanded angle dof, the external yield and whether a reflex is active."""
+        vel = self.core.limiter.vel
+        fastest = max(self._angle_dofs, key=lambda n: abs(vel.get(n, 0.0)), default=None)
+        speed = abs(vel.get(fastest, 0.0)) if fastest is not None else 0.0
+        self._motion_state = MotionState(
+            stamp=now,
+            speed_dps=math.degrees(speed),
+            group=self.manifest.dofs[fastest].group if fastest is not None and speed > 0 else None,
+            external=self.external_ctl.yielding,
+            reflex=any(c.priority == Priority.REFLEX for c in self.core.arbiter.active(now)),
+        )
 
     def _read_fresh(self) -> dict[str, float] | None:
         """The measured pose if a new sample arrived since the last call (always, for a driver
