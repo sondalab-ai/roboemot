@@ -100,6 +100,8 @@ APPEND_SHARE_OF_CAP = (
     2  # an append carries at most 1/2 of max_message_bytes of PCM (base64 grows it)
 )
 UPLOAD_FILE_MODE = 0o600  # the day's upload seconds (data folder)
+# the server's refusal of a response.create while a tool call has no output
+PENDING_CALLS = "function_call_output_pending"
 # events that carry no data (send_control): everything else goes through the send gate
 CONTROL_EVENTS = (protocol.RESPONSE_CANCEL, protocol.ITEM_DELETE, protocol.ITEM_TRUNCATE)
 
@@ -123,6 +125,7 @@ class Request:
     estimate: int = 0  # tokens charged when no usage comes (the run keeps it current)
     response_id: str | None = None
     token: _Token | None = None  # the client it was sent on
+    recorder: Any | None = None  # its run after it abandoned it: still records its calls
     last_event: float = 0.0  # when its last event came (expiry ages from it)
     charged: bool = False  # charged once already (at its done, refusal, expiry or close)
 
@@ -240,6 +243,7 @@ class RealtimeRoute:
         self._lost = False
         self._resets_in_row = 0  # resets since the server last answered (a response, a transcript)
         self._reopen_at = 0.0  # no reconnect before (clock) after a repeated reset
+        self._outputs: set[str] = set()  # event ids of the settling tool results on this session
         self._reopens = 0  # reconnects a reset started that have not returned yet
         self.base_instructions: Callable[[], str] = lambda: ""
         self._counts: collections.Counter[str] = collections.Counter()
@@ -444,6 +448,7 @@ class RealtimeRoute:
         callbacks no longer count (its token is no longer current), its close is expected."""
         client, token = self._client, self._token
         self._client = self._token = None
+        self._outputs.clear()  # their errors would come from a client that no longer counts
         if token is None:
             return client, []
         token.detached = True
@@ -716,6 +721,7 @@ class RealtimeRoute:
         response is cancelled when it is still in flight, and charged once when its
         ``response.done`` comes, when it expires, or when the session closes."""
         with self._lock:
+            req.recorder = req.recorder or req.run
             req.run, req.estimate = None, max(req.estimate, estimate)
             in_flight = req in self._pending or (
                 req.response_id is not None and self._live.get(req.response_id) is req
@@ -837,7 +843,11 @@ class RealtimeRoute:
 
     def _error(self, event: protocol.ServerError, token: _Token | None) -> None:
         """An ``error`` refuses the request whose ``event_id`` it echoes; others are only
-        counted (by the client)."""
+        counted (by the client). A refusal for a tool call left open
+        (``function_call_output_pending``, also one whose request is no longer tracked) and an
+        error about a settling tool result (``send_output``: the call may still be open) reset
+        the session (``pending_call_resets``, the reset streak's backoff applies): the server
+        would refuse every later response on it."""
         with self._lock:
             if not self._current(token):
                 self._counts["stale_callbacks"] += 1
@@ -850,13 +860,21 @@ class RealtimeRoute:
             if req is not None:
                 self._pending.remove(req)
             run = req.run if req is not None else None
+            generation = self.generation
+            output = req is None and event.event_id in self._outputs
+            self._outputs.discard(event.event_id or "")
         if req is None:
-            self._count("errors_unrelated")
-            return
-        self._count("refused")
-        self._give_up([req])
-        if run is not None:
-            run.deliver(event)
+            self._count("outputs_refused" if output else "errors_unrelated")
+        else:
+            self._count("refused")
+            self._give_up([req])
+            if run is not None:
+                run.deliver(event)
+        if (event.code == PENDING_CALLS or output) and self._reset(
+            "pending_calls", "pending_call_resets", generation
+        ):
+            # a tool call is (or may be) still open: the server would refuse every later response
+            log.warning("realtime: a tool call was left open; the session is reset")
 
     def _response_event(self, event: Any, token: _Token | None) -> None:
         done = isinstance(event, protocol.ResponseDone)
@@ -876,6 +894,9 @@ class RealtimeRoute:
                     del self._live[rid]
                     self._resets_in_row = 0  # the server answers: the reset streak ends
             run = req.run if req is not None else None
+            recorder = req.recorder if req is not None and run is None else None
+        if recorder is not None and isinstance(event, protocol.FunctionCall):
+            recorder.note_call(event)  # a call after the cut still needs its output
         if done:
             self.network.report_realtime(True)  # real traffic: the session works
             self._account(event, req)
@@ -924,11 +945,25 @@ class RealtimeRoute:
 
     # ----------------------------------------------------------------- sending
 
-    def send(self, event: dict[str, Any]) -> bool:
+    def send(self, event: dict[str, Any], *, generation: int | None = None) -> bool:
         """Send a data-carrying event (text items, tool results, ``session.update``) through the
         send gate: the committed configuration must still fit the session, checked atomically
-        with the send (SPEC 12). Refused: nothing is sent and the session is closed."""
-        return self._gated(event)
+        with the send (SPEC 12). Refused: nothing is sent and the session is closed.
+        ``generation``: only on that session (another one: nothing sent, False)."""
+        return self._gated(event, generation=generation)
+
+    def send_output(self, call_id: str, output: str, item_id: str, generation: int | None) -> bool:
+        """Send the ``function_call_output`` of a call a cut or failed turn settles, on
+        ``generation``'s session only, through the send gate. Its ``event_id`` is kept, so an
+        error the server sends about it resets the session (``_error``)."""
+        event_id = f"{EVENT_PREFIX}{next(self._events)}"
+        event = protocol.function_output(call_id, output, item_id)
+        event["event_id"] = event_id
+
+        def track() -> None:  # under _lock, with the send
+            self._outputs.add(event_id)
+
+        return self._gated(event, track, generation)
 
     def _gated(
         self,
@@ -1272,6 +1307,8 @@ COUNTERS = (
     "sends_refused",
     "resets",
     "input_resets",
+    "pending_call_resets",  # a response refused for a tool call left open: session reset
+    "outputs_refused",  # the server refused a settling tool result (the session is reset)
 )
 
 # the server's confirmations of a delete and a truncate, and the counter each one moves

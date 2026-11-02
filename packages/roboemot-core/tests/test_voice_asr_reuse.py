@@ -161,7 +161,7 @@ def test_the_barge_in_keyword_worker_hands_the_reused_recognizer_back(fake):
     }
 
 
-def test_decode_uses_a_recognizer_of_its_own_and_leaves_the_utterance_alone(fake):
+def test_a_decoder_uses_a_recognizer_of_its_own_and_leaves_the_utterance_alone(fake):
     """SR-3: the realtime fallback decodes a whole utterance without touching the one in
     progress (SPEC 8, Realtime speech route)."""
     vosk, asr = fake
@@ -169,8 +169,10 @@ def test_decode_uses_a_recognizer_of_its_own_and_leaves_the_utterance_alone(fake
     asr.start("it")
     asr.accept(AUDIO)
     built = vosk.built
-    assert asr.decode("it", AUDIO) == "ciao"
+    dec = asr.decoder("it")
+    dec.accept(AUDIO)
+    assert dec.text() in ("", "ciao") and dec.finish() == "ciao"
     assert vosk.built == built + 1
     assert asr.finish() == "ciao"  # the streaming utterance is intact
-    assert asr.decode("en", AUDIO) == ""  # not loaded
+    assert asr.decoder("en") is None  # not loaded
     assert asr.stats()["decodes"] == 1

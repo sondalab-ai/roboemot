@@ -2843,11 +2843,13 @@ class VoiceFacingConfig(Strict):
         "the installer's --cloud-voice profile turns it on",
     )
     max_yaw_deg: float = param(
-        20.0,
+        30.0,
         "A face looks at the robot when its head yaw (from the face detector's landmarks, "
-        "relative to the line to the camera) is at most this. A screen 40 cm beside the robot, "
-        "seen from 1 m, is about 22 deg away; the estimate is rough (one head shape for every "
-        "face), so lower values reject the owner too",
+        "relative to the line to the camera) is at most this. On the robot (2026-11-02, owner "
+        "40 cm away, a video playing) the owner looking at the robot read about 17 to 23 deg "
+        "and the owner watching the video 47 to 73 deg; at 20 the owner was rejected too. The "
+        "estimate is rough (one head shape for every face): lower values reject the owner, "
+        "higher ones let a watched screen through",
         unit="deg", ge=1, le=90,
     )  # fmt: skip
     min_share: float = param(
@@ -2957,6 +2959,17 @@ class RealtimeRouteConfig(Strict):
         unit="s",
         ge=1,
         le=60,
+    )
+    wake_decode_max_s: float = param(
+        3.0,
+        "The local decode of a voice-at-face reject only looks for the wake word, which is short "
+        "and comes first: it decodes the first this-many seconds of speech (the pre-roll before "
+        "them), counted decodes_capped. On the robot (2026-11-02, a video playing) whole decodes "
+        "cost 460 to 710 ms per audio second and 27 of 36 timed out. An utterance the wake word "
+        "addresses still sends, or is decoded, whole",
+        unit="s",
+        ge=0.5,
+        le=30,
     )
     transcript_max_items: int = param(
         8,
@@ -3072,9 +3085,12 @@ class CueConfig(Strict):
         le=60,
     )
     listening_sound: bool = param(
-        False,
-        "Play the listening sound with the gesture. Off by default: it is robot audio, so it "
-        "queues ahead of the answer and holds the next utterance's audio while it plays",
+        True,
+        "Play the robot's listening blip once when the listening gesture shows: a very short, "
+        "quiet sound saying the voice was heard. It plays beside the speech queue and is not "
+        "robot speech (it never holds an utterance's audio back, never triggers a barge-in and "
+        "never delays the answer); it is dropped when the speaker is busy and must be shorter "
+        "than voice.vad.min_speech_ms",
     )
     volume_db: float = param(
         -6.0,

@@ -3,7 +3,10 @@
 Registered in the ``roboemot.cue_sounds`` entry-point group under ``reachy-mini-wireless``. Serves
 the package data ``data/cues/<kind>.wav``: short blirps synthesized by
 ``scripts/make_cue_sounds.py`` with RoboEmot's own soothe synth (no third-party audio; seeds,
-shapes and sha256 in ``VENDORED.json`` beside them). The gestures are the manifest's
+shapes and sha256 in ``VENDORED.json`` beside them). ``listening`` is a blip of one chirp, 100 ms
+at -30 dBFS in the file (12 dB under the others), -36 dBFS as played with the default
+``voice.cues.volume_db`` (-6 dB), beside the speech queue (SPEC 8). The gestures are
+the manifest's
 ``gesture_map`` entries ``cue_<kind>``; core validates the sounds when the library is loaded.
 """
 

@@ -44,14 +44,16 @@ class Clock:
 class Output:
     def __init__(self) -> None:
         self.played: list[tuple[int, int, float]] = []
-        self.cancelled: list[int] = []
+        self.asides: list[tuple[int, int, float]] = []
+        self.aside_ok = True  # False: the output is busy and drops the aside sound
 
     def play(self, samples, rate_hz, volume_db=0.0):
         self.played.append((samples.size, rate_hz, volume_db))
         return len(self.played)
 
-    def cancel(self, job_id):
-        self.cancelled.append(job_id)
+    def play_aside(self, samples, rate_hz, volume_db=0.0):
+        self.asides.append((samples.size, rate_hz, volume_db))
+        return self.aside_ok
 
 
 class LockCheckingOutput(Output):
@@ -63,9 +65,9 @@ class LockCheckingOutput(Output):
         assert not self.cues._lock.locked()
         return super().play(samples, rate_hz, volume_db)
 
-    def cancel(self, job_id):
+    def play_aside(self, samples, rate_hz, volume_db=0.0):
         assert not self.cues._lock.locked()
-        super().cancel(job_id)
+        return super().play_aside(samples, rate_hz, volume_db)
 
 
 def sound(seconds: float = 0.2) -> CueSound:
@@ -73,7 +75,8 @@ def sound(seconds: float = 0.2) -> CueSound:
 
 
 def make(gestures=("cue_listening", "cue_fallback", "cue_not_heard"), sounds=None, **cfg):
-    clock, out, speaking = Clock(), LockCheckingOutput(), SimpleNamespace(on=False, muted=False)
+    clock, out = Clock(), LockCheckingOutput()
+    speaking = SimpleNamespace(on=False, muted=False, quiet=True)
     cues = Cues(
         CueConfig(**cfg),
         gesture=lambda name: prim(name) if name in gestures else None,
@@ -82,6 +85,7 @@ def make(gestures=("cue_listening", "cue_fallback", "cue_not_heard"), sounds=Non
         volume_db=lambda: -3.0,
         muted=lambda: speaking.muted,
         speaking=lambda now: speaking.on,
+        quiet=lambda: speaking.quiet,
         clock=clock,
     )
     out.cues = cues
@@ -128,13 +132,18 @@ def test_listening_shows_after_the_onset_holds_at_its_peak_and_ends_on_first_aud
     held = cues.commands(clock.t + 5.0)  # still no answer: held at the peak
     assert held[0].source == "cue:listening"
     assert held[0].targets["antenna_left"] == pytest.approx(0.4)
-    assert out.played == []  # listening_sound is off by default
+    assert out.played == []  # never a queued raw job
+    assert out.asides == [(int(0.1 * RATE), RATE, -6.0 - 3.0)]  # the blip, once, at the start
     state.on = True  # the answer's first audio
     clock.t += 5.0
     cues.commands(clock.t)
     back = cues.commands(clock.t + 0.3)  # returns over the rest of the gesture
     assert back == [] or back[0].targets["antenna_left"] == pytest.approx(0.0, abs=1e-6)
-    assert cues.snapshot()["counts"]["listening"] == {"shown": 1, "released_speech": 1}
+    assert cues.snapshot()["counts"]["listening"] == {
+        "shown": 1,
+        "sound": 1,
+        "released_speech": 1,
+    }
 
 
 def test_listening_ends_when_the_turn_ends_without_audio():
@@ -145,7 +154,7 @@ def test_listening_ends_when_the_turn_ends_without_audio():
     cues.listening_end(1)  # a timeout, a skip, an error: no audio came
     assert not cues.snapshot()["listening"]["holding"]
     assert cues.commands(clock.t + 1.0) == []
-    assert cues.snapshot()["counts"]["listening"] == {"shown": 1, "released_ended": 1}
+    assert cues.snapshot()["counts"]["listening"] == {"shown": 1, "sound": 1, "released_ended": 1}
 
 
 def test_an_answer_before_the_onset_shows_no_listening_cue():
@@ -153,7 +162,7 @@ def test_an_answer_before_the_onset_shows_no_listening_cue():
     cues.listening_begin(1)
     state.on = True
     assert cues.commands(clock.t + 0.6) == []
-    assert cues.snapshot()["counts"]["listening"] == {"skipped_speech": 1}
+    assert cues.snapshot()["counts"]["listening"] == {"sound": 1, "skipped_speech": 1}
 
 
 def test_listening_waits_for_every_utterance_that_began_it():
@@ -177,13 +186,44 @@ def test_the_hold_limit_always_releases_listening():
     assert snap["counts"]["listening"]["released_hold_max"] == 1
 
 
-def test_the_listening_sound_is_opt_in_and_cut_on_release():
-    cues, clock, out, _ = make(listening_onset_s=0.0, listening_sound=True)
+def test_the_listening_blip_plays_once_when_the_cue_starts_beside_the_queue():
+    """CV-7 (owner, 2026-11-02): a short blip says the voice was heard, when the utterance's
+    audio leaves (its speech is over), not with the gesture's later onset. It is not a raw job of
+    the speech queue, so it holds no answer back and is not robot speech."""
+    cues, clock, out, _ = make(listening_onset_s=0.3)
+    cues.listening_begin(1)
+    assert len(out.asides) == 1  # at once, before the gesture's onset
+    clock.t += 0.3
+    cues.commands(clock.t)
+    cues.listening_begin(2)  # a second utterance while the cue is up: no second blip
+    cues.commands(clock.t + 0.5)
+    cues.listening_end(1)
+    cues.listening_end(2)
+    assert len(out.asides) == 1 and out.played == []
+    assert cues.snapshot()["counts"]["listening"]["sound"] == 1
+
+
+def test_the_listening_blip_waits_for_a_quiet_moment():
+    """Review of #147: never over someone's speech in progress or an answer in progress (its
+    gaps between sentences included); skipped, counted, the gesture still shows."""
+    cues, clock, out, state = make(listening_onset_s=0.0)
+    state.quiet = False
     cues.listening_begin(1)
     cues.commands(clock.t)
-    assert len(out.played) == 1
-    cues.listening_end(1)
-    assert out.cancelled == [1]
+    assert out.asides == [] and cues.snapshot()["listening"]["holding"]
+    assert cues.snapshot()["counts"]["listening"]["sound_skipped"] == 1
+
+
+def test_the_listening_blip_can_be_turned_off_and_a_busy_output_drops_it():
+    off, clock, out, _ = make(listening_onset_s=0.0, listening_sound=False)
+    off.listening_begin(1)
+    off.commands(clock.t)
+    assert out.asides == [] and off.snapshot()["listening"]["holding"]  # the gesture still shows
+    busy, clock, out, _ = make(listening_onset_s=0.0)
+    out.aside_ok = False
+    busy.listening_begin(1)
+    busy.commands(clock.t)
+    assert busy.snapshot()["counts"]["listening"]["sound_dropped"] == 1
 
 
 def test_peak_time_is_the_keyframe_with_the_largest_offset():
@@ -234,7 +274,7 @@ def test_sleep_releases_a_shown_hold_and_forgets_the_open_utterances():
     cues.release_listening("asleep")  # the app loop, on every tick while asleep
     snap = cues.snapshot()
     assert not snap["listening"]["holding"] and snap["listening"]["outstanding"] == 0
-    assert snap["counts"]["listening"]["released_asleep"] == 1 and out.cancelled == [1]
+    assert snap["counts"]["listening"]["released_asleep"] == 1
     cues.release_listening("asleep")  # nothing left: no new generation per tick
     assert cues.snapshot()["listening"]["generation"] == snap["listening"]["generation"]
 

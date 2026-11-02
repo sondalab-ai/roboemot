@@ -183,9 +183,10 @@ def assemble(
     )
     loop.tick_hooks.append(reflexes.on_tick)
     # The robot's own voice must not startle it or draw its gaze: the speaker feeds this
-    # window (playback end + echo tail) and the reflex engine and the DoA source read it.
+    # window (playback end + echo tail) and the reflex engine and the DoA source read it, with
+    # the robot's other own sounds (the listening blip: ``sounding``).
     speech = host.speech = SpeechActivity(cfg.voice.echo_tail_ms)
-    reflexes.speaking = speech.speaking
+    reflexes.speaking = speech.sounding
     phase = host.phase = ConversationPhase(speech.speaking)
     # The microphone opens only for a consumer: the reflex engine with its audio on, or voice. An
     # engine turned on later runs at once, but its loud-onset part needs a restart (the reload
