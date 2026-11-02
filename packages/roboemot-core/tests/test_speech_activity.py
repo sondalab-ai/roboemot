@@ -73,16 +73,16 @@ def test_voice_defaults_and_ranges():
 def test_an_own_sound_is_sounding_but_not_speaking():
     """CV-7: the listening blip opens only the own-sound window (reflex, sound direction), not
     the speaking one (listener drop, barge-in, the realtime input)."""
-    act = SpeechActivity(echo_tail_ms=100.0)
-    act.extend_own(10.0)
+    act = SpeechActivity(echo_tail_ms=300.0)
+    act.extend_own(10.0, 0.1)  # its echo tail is at most its own length, not 300 ms
     assert not act.speaking(9.0) and act.until() == -math.inf
-    assert act.sounding(9.0) and act.sounding(10.05) and not act.sounding(10.2)
+    assert act.sounding(9.0) and act.sounding(10.05) and not act.sounding(10.15)
     act.extend(20.0)
     assert act.speaking(15.0) and act.sounding(15.0)
 
 
 def test_a_reset_ends_the_own_sound_too():
     act = SpeechActivity()
-    act.extend_own(10.0)
+    act.extend_own(10.0, 0.1)
     act.reset(5.0)
     assert not act.sounding(6.0)

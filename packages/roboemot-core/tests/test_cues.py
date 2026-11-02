@@ -75,7 +75,8 @@ def sound(seconds: float = 0.2) -> CueSound:
 
 
 def make(gestures=("cue_listening", "cue_fallback", "cue_not_heard"), sounds=None, **cfg):
-    clock, out, speaking = Clock(), LockCheckingOutput(), SimpleNamespace(on=False, muted=False)
+    clock, out = Clock(), LockCheckingOutput()
+    speaking = SimpleNamespace(on=False, muted=False, quiet=True)
     cues = Cues(
         CueConfig(**cfg),
         gesture=lambda name: prim(name) if name in gestures else None,
@@ -84,6 +85,7 @@ def make(gestures=("cue_listening", "cue_fallback", "cue_not_heard"), sounds=Non
         volume_db=lambda: -3.0,
         muted=lambda: speaking.muted,
         speaking=lambda now: speaking.on,
+        quiet=lambda: speaking.quiet,
         clock=clock,
     )
     out.cues = cues
@@ -131,7 +133,7 @@ def test_listening_shows_after_the_onset_holds_at_its_peak_and_ends_on_first_aud
     assert held[0].source == "cue:listening"
     assert held[0].targets["antenna_left"] == pytest.approx(0.4)
     assert out.played == []  # never a queued raw job
-    assert out.asides == [(int(0.1 * RATE), RATE, -6.0 - 3.0)]  # the blip, once, on show
+    assert out.asides == [(int(0.1 * RATE), RATE, -6.0 - 3.0)]  # the blip, once, at the start
     state.on = True  # the answer's first audio
     clock.t += 5.0
     cues.commands(clock.t)
@@ -160,7 +162,7 @@ def test_an_answer_before_the_onset_shows_no_listening_cue():
     cues.listening_begin(1)
     state.on = True
     assert cues.commands(clock.t + 0.6) == []
-    assert cues.snapshot()["counts"]["listening"] == {"skipped_speech": 1}
+    assert cues.snapshot()["counts"]["listening"] == {"sound": 1, "skipped_speech": 1}
 
 
 def test_listening_waits_for_every_utterance_that_began_it():
@@ -185,12 +187,12 @@ def test_the_hold_limit_always_releases_listening():
 
 
 def test_the_listening_blip_plays_once_when_the_cue_starts_beside_the_queue():
-    """CV-7 (owner, 2026-11-02): a short blip says the voice was heard; it is not a raw job of
+    """CV-7 (owner, 2026-11-02): a short blip says the voice was heard, when the utterance's
+    audio leaves (its speech is over), not with the gesture's later onset. It is not a raw job of
     the speech queue, so it holds no answer back and is not robot speech."""
     cues, clock, out, _ = make(listening_onset_s=0.3)
     cues.listening_begin(1)
-    cues.commands(clock.t)
-    assert out.asides == []  # not before the cue shows
+    assert len(out.asides) == 1  # at once, before the gesture's onset
     clock.t += 0.3
     cues.commands(clock.t)
     cues.listening_begin(2)  # a second utterance while the cue is up: no second blip
@@ -199,6 +201,17 @@ def test_the_listening_blip_plays_once_when_the_cue_starts_beside_the_queue():
     cues.listening_end(2)
     assert len(out.asides) == 1 and out.played == []
     assert cues.snapshot()["counts"]["listening"]["sound"] == 1
+
+
+def test_the_listening_blip_waits_for_a_quiet_moment():
+    """Review of #147: never over someone's speech in progress or an answer in progress (its
+    gaps between sentences included); skipped, counted, the gesture still shows."""
+    cues, clock, out, state = make(listening_onset_s=0.0)
+    state.quiet = False
+    cues.listening_begin(1)
+    cues.commands(clock.t)
+    assert out.asides == [] and cues.snapshot()["listening"]["holding"]
+    assert cues.snapshot()["counts"]["listening"]["sound_skipped"] == 1
 
 
 def test_the_listening_blip_can_be_turned_off_and_a_busy_output_drops_it():

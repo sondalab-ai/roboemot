@@ -6,10 +6,12 @@ outlive the last sample). The reflex engine skips ``loud_onset`` and the app mut
 direction-of-arrival source while this holds. Barge-in ends it early with ``reset``.
 
 A short sound that is not speech (the listening blip, SPEC 8, Non-verbal cues) opens only the
-*own-sound* window (``extend_own``): ``sounding`` covers both and is what the gates that must
-not hear the robot's own sound read (the reflex engine, the sound-direction source and samples).
+*own-sound* window (``extend_own``), whose echo tail is no longer than the sound itself: a short
+quiet sound leaves a short echo. ``sounding`` covers both windows and is what the gates that must
+not hear the robot's own sound read (the reflex engine and the sound-direction world source).
 ``speaking`` stays speech only, for the gates about the robot's voice: the listener's drop and
-barge-in, the realtime input's "nothing is sent while the robot speaks", the conversation phase.
+barge-in, the realtime input's "nothing is sent while the robot speaks", the conversation phase
+and the voice-at-face samples' ``muted`` reason (the blip never mutes an utterance's check).
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ class SpeechActivity:
         self._lock = threading.Lock()
         self._tail_s = max(0.0, echo_tail_ms) / MS_PER_S
         self._playing_until = -math.inf
-        self._own_until = -math.inf  # a sound that is not speech plays until then
+        self._own_until = -math.inf  # a sound that is not speech plays until then, its tail on
 
     def set_echo_tail_ms(self, echo_tail_ms: float) -> None:
         """Apply a reloaded ``voice.echo_tail_ms``."""
@@ -40,11 +42,13 @@ class SpeechActivity:
             with self._lock:
                 self._playing_until = max(self._playing_until, until)
 
-    def extend_own(self, until: float) -> None:
-        """A sound that is not speech is queued to play until ``until``; never moves it earlier."""
+    def extend_own(self, until: float, length_s: float) -> None:
+        """A sound of ``length_s`` that is not speech is queued to play until ``until``: its
+        window ends there plus an echo tail of at most its own length; never moves earlier."""
         if math.isfinite(until):
             with self._lock:
-                self._own_until = max(self._own_until, until)
+                tail = min(self._tail_s, max(0.0, length_s))
+                self._own_until = max(self._own_until, until + tail)
 
     def reset(self, now: float) -> None:
         """Playback was cut at ``now`` (barge-in): both ends move to ``now``; the echo tail stays
@@ -66,5 +70,5 @@ class SpeechActivity:
         """Whether the robot's speech or another sound of its own plays at ``now``, echo tail
         included: for the gates that must not take the robot's sound for the room's."""
         with self._lock:
-            end = max(self._playing_until, self._own_until) + self._tail_s
+            end = max(self._playing_until + self._tail_s, self._own_until)
         return now < end

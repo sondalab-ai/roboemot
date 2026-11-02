@@ -1276,3 +1276,49 @@ def test_an_aside_sound_must_be_shorter_than_the_vad_min_speech(make):
     min_speech_s = out.config.voice.vad.min_speech_ms / 1000
     assert not out.play_aside(blip(min_speech_s), RATE)
     assert sink.asides == [] and out.snapshot()["aside"] == {"too_long": 1}
+
+
+class LockedAsideSink(AsideSink):
+    """Fails if the output calls ``push_aside`` with its own lock held (review of #147)."""
+
+    out = None
+
+    def push_aside(self, samples, rate_hz):
+        # the lock is not reentrant: held by this thread, it could never be taken here
+        assert self.out._lock.acquire(timeout=2.0)
+        self.out._lock.release()
+        return super().push_aside(samples, rate_hz)
+
+
+def test_play_aside_racing_say_and_stop_never_blocks_or_breaks_the_output(make):
+    sink = LockedAsideSink()
+    out = make(FakeBackend(), sink=sink)
+    sink.out = out
+    calls, errors = 200, []
+
+    def asides():
+        try:
+            for _ in range(calls):
+                out.play_aside(blip(0.01), RATE)
+        except Exception as exc:  # pragma: no cover - the assertion below reports it
+            errors.append(exc)
+
+    def speech():
+        try:
+            for _ in range(calls // 4):
+                say(out)
+                out.stop()
+        except Exception as exc:  # pragma: no cover
+            errors.append(exc)
+
+    threads = [threading.Thread(target=asides), threading.Thread(target=speech)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10.0)
+    assert not any(t.is_alive() for t in threads) and errors == []
+    counts = out.snapshot()["aside"]
+    assert sum(counts.values()) == calls and counts.get("failed", 0) == 0
+    before = out.sentences_spoken
+    say(out)
+    assert wait_for(lambda: out.sentences_spoken == before + 1)  # the output still works

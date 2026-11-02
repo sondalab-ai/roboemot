@@ -114,6 +114,7 @@ class ReachySpeaker:
         # speech or not)
         self._pending: collections.deque[tuple[np.ndarray, float, bool]] = collections.deque()
         self._pending_n = 0
+        self._aside_s = 0.0  # length of the last aside sound (``push_aside``)
         self._handed = -math.inf  # monotonic stamp at which the audio handed over has played
         self._duck: DuckGain | None = None
         self._pacer: threading.Thread | None = None
@@ -208,6 +209,7 @@ class ReachySpeaker:
         out = x if rate_hz == self._out_hz else resample(x, rate_hz, self._out_hz)
         with self._lock:
             generation = self._generation
+            self._aside_s = out.size / self._out_hz  # its echo tail is at most this long
         queued = self._push_pieces(out, generation, speech=False)
         return self.playing_until() if queued else 0.0
 
@@ -329,7 +331,7 @@ class ReachySpeaker:
         if speech:
             self._activity.extend(self.playing_until())
         else:
-            self._activity.extend_own(self.playing_until())
+            self._activity.extend_own(self.playing_until(), self._aside_s)
 
     def _drop_pending(self) -> None:
         self._pending.clear()

@@ -96,3 +96,35 @@ def test_barge_in_ducks_the_speech_output_and_its_cut_stops_it_first():
     bind_barge_in(bargein, output, conv, listener)
     assert output.duck is bargein.duck
     assert bound == [(output.stop, conv.interrupt, listener.resume, conv.mark_interrupting)]
+
+
+def test_the_listening_blip_waits_for_no_speech_and_no_answer_in_progress():
+    """Review of #147: the cues' ``quiet`` reads the listener (speech in progress) and the
+    conversation phase (a turn in flight, its gaps between sentences included, or the robot
+    speaking)."""
+    from roboemot.config.schema import RoboEmotConfig
+    from roboemot.conversation.phase import ConversationPhase
+    from roboemot.runtime.startup import build_cues
+
+    speaking = SimpleNamespace(on=False)
+    listener = SimpleNamespace(on=False, hearing=lambda: listener.on)
+    host = SimpleNamespace(phase=ConversationPhase(lambda now: speaking.on))
+    p = SimpleNamespace(
+        cfg=RoboEmotConfig(),
+        expression=SimpleNamespace(gesture=lambda name: None),
+        cue_sounds={},
+        listener=listener,
+        sleep=SimpleNamespace(asleep=False, paused=False),
+    )
+    quiet = build_cues(host, None, p, SimpleNamespace(timeline=None))._quiet
+    assert quiet()
+    listener.on = True  # someone's speech in progress
+    assert not quiet()
+    listener.on = False
+    host.phase.begin_thinking()  # a turn in flight: between its sentences too
+    assert not quiet()
+    host.phase.end_thinking()
+    speaking.on = True  # the answer's audio
+    assert not quiet()
+    speaking.on = False
+    assert quiet()

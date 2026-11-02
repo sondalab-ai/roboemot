@@ -17,12 +17,16 @@ jobs of the speech output (``SpeechOutput.play``, like the self-soothing sound),
 the echo reference treat them as the robot's own audio.
 
 The listening cue's sound is a blip (``voice.cues.listening_sound``, on): played once when the
-gesture shows, through ``SpeechOutput.play_aside``, outside the speech queue and outside the
-speaking window. So it holds no answer back, the realtime input does not refuse the utterance's
-audio while it plays, and barge-in never hears it (it only runs while the robot speaks); an
-output that is busy, or cannot keep it out of the speaking window, drops it (counted
-``sound_dropped``). It is fire and forget, never cut: an answer whose first audio comes while it
-plays follows it in the speaker, at most the blip's length (about 0.1 s) later.
+cue starts (``listening_begin`` with no utterance open: the utterance's speech has ended and its
+audio goes to the cloud), not with the gesture, which shows after its onset. It plays only in a
+quiet moment (``quiet()``: nobody's speech in progress and no answer in progress, its gaps
+included), else it is skipped (counted ``sound_skipped``). It goes through
+``SpeechOutput.play_aside``, outside the speech queue and outside the speaking window, so it holds
+no answer back, the realtime input does not refuse the utterance's audio while it plays, and
+barge-in never hears it (it only runs while the robot speaks); an output that is busy, or cannot
+keep it out of the speaking window, drops it (counted ``sound_dropped``). It is fire and forget,
+never cut: an answer whose first audio comes while it plays follows it in the speaker, at most
+the blip's length (about 0.1 s) later.
 
 The listening gesture holds at its peak (the keyframe time of its largest offset) until it is
 released: the answer's first audio (the speech timeline has a sentence playing), every
@@ -186,7 +190,8 @@ class Cues:
     """See the module docstring. ``gesture(name)`` is ``ExpressionRenderer.gesture``;
     ``output()`` the speech output (None before it exists); ``volume_db()`` the circadian
     offset of the moment; ``muted()`` true while asleep or paused; ``speaking(now)`` whether the
-    robot's speech (not a raw sound) plays at ``now``.
+    robot's speech (not a raw sound) plays at ``now``; ``quiet()`` whether the listening blip
+    may play now (nobody speaks, no answer is in progress).
 
     The speech output is never called with the lock held: a method decides under the lock and
     plays a sound after releasing it."""
@@ -201,12 +206,13 @@ class Cues:
         volume_db: Callable[[], float] = lambda: 0.0,
         muted: Callable[[], bool] = lambda: False,
         speaking: Callable[[float], bool] = lambda now: False,
+        quiet: Callable[[], bool] = lambda: True,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.cfg = cfg
         self._gesture, self._sounds = gesture, dict(sounds)
         self._output, self._volume_db = output, volume_db
-        self._muted, self._speaking, self.clock = muted, speaking, clock
+        self._muted, self._speaking, self._quiet, self.clock = muted, speaking, quiet, clock
         self._lock = threading.Lock()
         self._players: list[Player] = []
         # the utterances (by key) that began the listening cue and are not over, each with the
@@ -290,13 +296,25 @@ class Cues:
 
     def listening_begin(self, key: Hashable) -> None:
         """The audio of utterance ``key`` left: the listening gesture shows after the onset (a
-        gesture already up stays)."""
+        gesture already up stays); the blip plays now when this starts the cue."""
         with self._lock:
             now = self.clock()
+            starts = not self._open
             self._open[key] = self._generation
             if self._hold is None or self._hold.released is not None:
                 self._due = min(self._due, now + self.cfg.listening_onset_s)
                 self._began = min(self._began, now)
+            sound = self._sounds.get(LISTENING) if starts and self.cfg.listening_sound else None
+            if not self.cfg.enabled or self._muted():
+                sound = None  # the gesture's own check counts why
+            volume = self.cfg.volume_db
+        if sound is None:
+            return
+        if not self._quiet():
+            with self._lock:
+                self._counts[f"{LISTENING}.sound_skipped"] += 1
+            return
+        self._play_blip(sound, volume)
 
     def listening_end(self, key: Hashable) -> None:
         """Utterance ``key`` is over; the last open one releases the cue. An end of an utterance
@@ -335,22 +353,18 @@ class Cues:
         hold.released = now
         self._counts[f"{LISTENING}.released_{why}"] += 1
 
-    def _show(self, now: float) -> CueSound | None:
-        """The onset passed (lock held): show the listening gesture; returns the blip to play
-        once the lock is released."""
+    def _show(self, now: float) -> None:
+        """The onset passed (lock held): show the listening gesture."""
         self._due = math.inf
         began, self._began = self._began, math.inf
         if not self._allowed(LISTENING):
-            return None
+            return
         prim = self._gesture(GESTURE_PREFIX + LISTENING)
-        sound = self._sounds.get(LISTENING) if self.cfg.listening_sound else None
-        if prim is None and sound is None:
+        if prim is None:
             self._counts[f"{LISTENING}.unsupported"] += 1
-            return None
+            return
         self._counts[f"{LISTENING}.shown"] += 1
-        if prim is not None:
-            self._hold = _Hold(prim, now, began)
-        return sound
+        self._hold = _Hold(prim, now, began)
 
     # ----------------------------------------------------------------- app tick
 
@@ -358,7 +372,6 @@ class Cues:
         """The cues' gesture commands for this tick (feed them to the motion loop): starts the
         listening gesture when due and releases it on the answer's first audio, the hold limit
         or sleep (muted)."""
-        blip: CueSound | None = None
         with self._lock:
             limit = self.cfg.listening_hold_max_s
             speaking = self._speaking(now)
@@ -372,7 +385,7 @@ class Cues:
                 elif now - self._began >= limit:
                     self._close_generation(now, "hold_max")
                 else:
-                    blip = self._show(now)
+                    self._show(now)
             hold = self._hold
             if hold is not None and hold.released is None:
                 if speaking:
@@ -385,8 +398,6 @@ class Cues:
             out = [c for p in self._players if (c := p.command(now)) is not None]
             if hold is not None:
                 out.append(hold.command(now))
-            volume = self.cfg.volume_db
-        self._play_blip(blip, volume)
         return out
 
     # ----------------------------------------------------------------- report

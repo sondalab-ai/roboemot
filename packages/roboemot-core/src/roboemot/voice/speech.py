@@ -21,8 +21,12 @@ Non-verbal cues): it never enters the queue, so it holds no answer back. It play
 output is idle (nothing queued, no job in flight, the sink drained), else it is dropped, and only
 through a sink that can keep it out of the speaking window (:class:`AsideSink`); one that cannot
 gets no such sound (never a raw job, which would count as speech). It must be shorter than
-``voice.vad.min_speech_ms``, so the listener cannot start an utterance on its echo. Counted under
-``aside`` in the report.
+``voice.vad.min_speech_ms``, so the listener cannot start an utterance on its echo (a longer one is
+refused, logged once and counted). Counted under ``aside`` in the report. The decision is taken
+under the output's lock and the push made after it; a sentence queued in between plays after the
+sound, at most its length later, and a ``stop`` in between flushes it with the rest. Whether a
+conversation turn is in progress (the gaps between its sentences included) is the caller's
+check: the output sees jobs, not turns (the cues' ``quiet``).
 
 The bus gets ``speech.say`` with ids, lengths, language and mood, never the text (SPEC 12).
 
@@ -629,17 +633,28 @@ class SpeechOutput:
         x = np.asarray(samples, np.float32)
         duration_ms = x.size / rate_hz * MS_PER_S if rate_hz > 0 else math.inf
         louder = np.clip(x * np.float32(db_to_gain(volume_db)), -1.0, 1.0)
-        with self._lock:
+        with self._lock:  # decided under the lock, pushed after it (the sink has its own)
             why = self._aside_refusal(duration_ms)
-            if why is None:
-                try:
-                    pushed = self.sink.push_aside(louder, rate_hz) > 0.0  # type: ignore[attr-defined]
-                except Exception as exc:  # a sink bug costs the sound, never the output
-                    log.warning("speech: aside sound: %s", type(exc).__name__)
-                    pushed = False
-                why = "played" if pushed else "failed"
-            self._aside[why] += 1
-        return why == "played"
+            if why == "too_long" and not self._aside["too_long"]:
+                log.warning(
+                    "speech: an aside sound of %.0f ms is not shorter than voice.vad.min_speech_ms "
+                    "(%.0f ms): not played (counted aside.too_long)",
+                    duration_ms,
+                    self.config.voice.vad.min_speech_ms,
+                )
+            if why is not None:
+                self._aside[why] += 1
+                return False
+        sink = self.sink
+        assert isinstance(sink, AsideSink)
+        try:
+            pushed = sink.push_aside(louder, rate_hz) > 0.0
+        except Exception as exc:  # a sink bug costs the sound, never the output
+            log.warning("speech: aside sound: %s", type(exc).__name__)
+            pushed = False
+        with self._lock:
+            self._aside["played" if pushed else "failed"] += 1
+        return pushed
 
     def _aside_refusal(self, duration_ms: float) -> str | None:
         """Why ``play_aside`` must not play now, None when it may (the lock is held)."""
