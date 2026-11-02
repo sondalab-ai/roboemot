@@ -58,8 +58,11 @@ from ..config.schema import RegisterParams, RoboEmotConfig, StateEffects
 from ..config.stack import ConfigStack
 from ..llm.hub import RouterHub
 from ..llm.prompt import (
+    ADDRESSED,
     CHARS_PER_TOKEN,
+    IN_PROGRESS,
     LANGUAGE_NAMES,
+    NO_CONVERSATION,
     max_reply_sentences,
     realtime_instructions,
     system_prompt,
@@ -112,6 +115,8 @@ INTERRUPTED_MARK = " …"  # ends an assistant message the person cut off (histo
 TOO_MANY_ROUNDS = '{"error": "too_many_rounds"}'  # a tool call after the realtime round cap
 # ignore_utterance after a skill acted in the turn: refused, the exchange stays (SPEC 8)
 SKIP_REFUSED = '{"error": "skip_unavailable_after_an_action"}'
+# the fast path's keyword categories that mean the robot was called (SPEC 8, Conversation start)
+NAME_KEYWORDS = frozenset({"wake", "name"})
 
 
 class Speech(Protocol):
@@ -182,6 +187,7 @@ class _Turn:
     rt_run: Any = None  # the ResponseRun of that round
     rt_audio: bool = False  # the server's own items of the utterance's audio were answered
     skipped: str | None = None  # the model called ignore_utterance: the route counter to move
+    conversation: str | None = None  # its conversation state (skip tool on), else None
 
 
 @dataclass
@@ -260,6 +266,7 @@ class ConversationWorker:
         self._confirm: Pending | None = None
         self._tail: _Tail | None = None
         self._barge_at = -math.inf  # when the last barge-in or stop keyword cut the robot off
+        self._spoke_at = -math.inf  # when the last turn in which the robot spoke ended
         self._lock = threading.Lock()
         # (utterance, the live transcript's generation when it was recorded)
         self._pending: collections.deque[tuple[Utterance, int]] = collections.deque()
@@ -686,6 +693,8 @@ class ConversationWorker:
         )
         turn.ring_gen = ring_gen
         turn.stamps["heard"] = utterance.last_speech_stamp
+        if cfg.voice.realtime_route.skip_tool:
+            turn.conversation = self._conversation_state(utterance, cfg, now)
         self.affect.new_turn()
         with self._lock:
             self._active_turn = turn
@@ -754,6 +763,18 @@ class ConversationWorker:
             log.info("conversation: realtime route: mood_source llm_tagged acts as auto")
         return bool(ready) and not turn.interrupted
 
+    def _conversation_state(self, utterance: Utterance, cfg: RoboEmotConfig, now: float) -> str:
+        """Whether a conversation with the robot is in progress for this turn (SPEC 8,
+        Conversation start): ``addressed`` when the wake word or the name was heard,
+        ``in_progress`` while a confirmation waits or the robot's last spoken answer ended at
+        most ``conversation_span_s`` ago, else ``none``."""
+        if utterance.wake_word or utterance.keywords & NAME_KEYWORDS:
+            return ADDRESSED
+        span = cfg.voice.realtime_route.conversation_span_s
+        with self._lock:
+            recent = self._confirm is not None or now - self._spoke_at <= span
+        return IN_PROGRESS if recent else NO_CONVERSATION
+
     def _base_instructions(self) -> str:
         """Parts 1 to 4 for the realtime route's ``session.update`` (no mood-tag rule)."""
         cfg = self.stack.effective()
@@ -779,7 +800,7 @@ class ConversationWorker:
     def _rt_instructions(self, turn: _Turn, delivery: Delivery, *, line: bool = False) -> str:
         """``response.create`` instructions: parts 1 to 5, the turns the server's session does
         not hold (after a reconnect), and the mood's voice instructions. A fixed ``line`` leaves
-        out the skip rule (the server must say it, not judge it)."""
+        out the skip rule and the conversation hint (the server must say it, not judge it)."""
         cfg, conv = turn.cfg, turn.cfg.conversation
         state = self.affect.state(self.clock())
         system = build_messages(
@@ -789,6 +810,7 @@ class ConversationWorker:
                 language=turn.language,
                 robot_name=self._prompt_name(cfg),
                 skip_rule=not line,
+                conversation=None if line else turn.conversation,
             ),
             profile_summary=self._summary(self._profile, conv.profile_summary_max_chars),
             scene_summary=self._summary(self._scene, conv.scene_summary_max_chars),
@@ -885,6 +907,8 @@ class ConversationWorker:
                 return False
             turn.rt_items.append(item)
         route.count("utterances_sent")
+        if turn.conversation is not None:
+            route.count_state("turns", turn.conversation)
         turn.stamps["request"] = self.clock()
         self.phase.begin_thinking()
         self.phase.set_route(turn.route)
@@ -1103,6 +1127,8 @@ class ConversationWorker:
             self.transcript.settle(turn.reply_seq, "", interrupted=False)
             turn.reply_seq = None
         route.count(turn.skipped or "skipped")
+        if turn.conversation is not None:
+            route.count_state("skipped", turn.conversation)
         turn.outcome = "skipped"
         return True
 
@@ -1683,6 +1709,8 @@ class ConversationWorker:
             texts = turn.spoken[turn.exchange_spoken :]
             kept = [t for job, t in items if self.speech.played(job)] if cut else texts
             spoken = " ".join(t for t in kept if t)
+            if spoken:  # a skip never stamps it: no chatter keeps a conversation open
+                self._spoke_at = self.clock()
             dropped: list[list[dict[str, Any]]] = []
             if (spoken or turn.exchange) and self._max_turns > 0:
                 messages: list[dict[str, Any]] = [

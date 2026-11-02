@@ -68,7 +68,7 @@ from typing import Any
 
 from ..config.schema import LLMRoute, RoboEmotConfig
 from ..health.network import route_endpoint
-from ..llm.prompt import CHARS_PER_TOKEN
+from ..llm.prompt import CHARS_PER_TOKEN, CONVERSATION_STATES
 from ..llm.pseudonyms import url_is_local
 from ..stats import P50, P95, summarise
 from . import protocol
@@ -249,6 +249,10 @@ class RealtimeRoute:
         self._counts: collections.Counter[str] = collections.Counter()
         self._statuses: collections.Counter[str] = collections.Counter()
         self._failures: collections.Counter[str] = collections.Counter()
+        # turns and skips by conversation state (SPEC 8, Conversation start): kind -> state -> n
+        self._by_state: dict[str, collections.Counter[str]] = {
+            kind: collections.Counter() for kind in STATE_COUNTS
+        }
         self._first_audio_ms: collections.deque[float] = collections.deque(maxlen=LATENCY_WINDOW)
         self._transcript_ms: collections.deque[float] = collections.deque(maxlen=LATENCY_WINDOW)
         self._stages: dict[str, collections.deque[float]] = {
@@ -1203,6 +1207,12 @@ class RealtimeRoute:
     def count(self, key: str, n: int = 1) -> None:
         self._count(key, n)
 
+    def count_state(self, kind: str, state: str) -> None:
+        """Count a turn (``kind`` ``turns``) or a skip (``skipped``) in its conversation state
+        (SPEC 8, Conversation start); reported as ``<kind>_by_state``."""
+        with self._lock:
+            self._by_state[kind][state] += 1
+
     def _count(self, key: str, n: int = 1) -> None:
         with self._lock:
             self._counts[key] += n
@@ -1234,6 +1244,10 @@ class RealtimeRoute:
                 self._client_snapshot = snap
             snap = dict(self._client_snapshot)
             counts = dict(self._counts)
+            by_state = {
+                f"{kind}_by_state": {s: n[s] for s in CONVERSATION_STATES}
+                for kind, n in self._by_state.items()
+            }
             audio = rt.input == "audio"
             out = {
                 "state": self.state,
@@ -1266,10 +1280,12 @@ class RealtimeRoute:
             out[key] = counts.get(key, 0)
         out["unknown_events"] = snap.get("unknown", 0)
         out["oversize"] = snap.get("oversize", 0)
+        out.update(by_state)
         out["client"] = {k: v for k, v in snap.items() if k != "key_hosts"}
         return out
 
 
+STATE_COUNTS = ("turns", "skipped")  # counted by conversation state (count_state)
 COUNTERS = (
     "opened",
     "reconnects",
