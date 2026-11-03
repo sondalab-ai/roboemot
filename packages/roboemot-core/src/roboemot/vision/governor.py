@@ -8,6 +8,11 @@ so the TTS keeps its CPU, and ``listening_scale`` while the user speaks, so the 
 up). A scale of 0 turns every stage off. Decisions use capture stamps
 only, so replays are deterministic; a frame that arrives before its stage is due is dropped,
 never queued (latest-wins).
+
+A stage with an ``<stage>_active_hz`` field may be made active (``set_active``): it then runs at
+that rate instead of ``<stage>_hz``, under the same scales. Attention does this for ``objects``
+while a shown object is its target (SPEC 5A, Joint attention), so the gaze can follow it. A stage
+with an ``<stage>_max_hz`` field never runs faster than it, active or not.
 """
 
 from __future__ import annotations
@@ -31,6 +36,7 @@ class RateGovernor:
         self._lock = threading.Lock()
         self._scales: dict[str, float] = {}
         self._last: dict[str, float] = {}
+        self._active: set[str] = set()
         self.dropped: dict[str, int] = {}
 
     def set_scale(self, source: str, value: float) -> None:
@@ -42,6 +48,20 @@ class RateGovernor:
         """
         with self._lock:
             self._scales[source] = min(1.0, max(0.0, value))
+
+    def set_active(self, stage: str, on: bool) -> None:
+        """Run ``stage`` at its ``<stage>_active_hz`` rate (on) or its usual rate (off); a stage
+        without that field ignores it."""
+        with self._lock:
+            if on:
+                self._active.add(stage)
+            else:
+                self._active.discard(stage)
+
+    def active(self, stage: str) -> bool:
+        """Whether ``stage`` runs at its active rate now."""
+        with self._lock:
+            return stage in self._active and hasattr(self.rates, f"{stage}_active_hz")
 
     @property
     def scale(self) -> float:
@@ -73,9 +93,11 @@ class RateGovernor:
         """Seconds between two runs of ``stage`` (infinite when the scale is 0).
 
         ``stage`` names a field of ``vision.rates`` without its ``_hz`` suffix, for example
-        ``detection`` or ``embedding``. The pipeline also uses it for per-track schedules.
+        ``detection`` or ``embedding``. The pipeline also uses it for per-track schedules. An
+        active stage uses ``<stage>_active_hz``; ``<stage>_max_hz``, where it exists, caps both.
         """
-        rate = getattr(self.rates, f"{stage}_hz") * self.scale
+        base = getattr(self.rates, f"{stage}_active_hz" if self.active(stage) else f"{stage}_hz")
+        rate = min(base * self.scale, getattr(self.rates, f"{stage}_max_hz", math.inf))
         return math.inf if rate <= 0 else 1.0 / rate
 
     def allow(self, stage: str, stamp: float) -> bool:

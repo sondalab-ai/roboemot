@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from roboemot.attention import SOURCE as ATTENTION_SOURCE
-from roboemot.attention import AttentionSelector, GazeController
+from roboemot.attention import AttentionSelector, GazeController, InterestMod, interest_mod
 from roboemot.circadian import CircadianModel, in_window
 from roboemot.conversation.phase import SPEAKING, THINKING, ConversationPhase
 from roboemot.motion import Command, MotionLoop, Priority
@@ -76,9 +76,11 @@ def attention_tick(
     gaze: GazeController,
     loop: MotionLoop,
     conversing: bool = False,
+    mod: InterestMod | None = None,
 ) -> bool:
     """One attention step: decay the world, pick the target, feed or release the gaze command.
-    ``conversing`` (a conversation is in progress) holds off face habituation.
+    ``conversing`` (a conversation is in progress) holds off face habituation; ``mod`` is how the
+    robot's state scales the interest in a shown object (``interest_modulation``).
 
     Returns whether attention owns the head. A failure inside is logged (type and message
     only), the attention command is dropped and idle motion takes over; the app keeps running.
@@ -92,7 +94,7 @@ def attention_tick(
             math.radians(wc.camera_fov_v_deg),
         )
         world.tick(now, in_view)
-        target = selector.update(now, world.entries, conversing=conversing)
+        target = selector.update(now, world.entries, conversing=conversing, mod=mod)
         was_active = gaze.active
         cmd = gaze.step(now, target, None if gaze.active else loop.pose())
         if cmd is not None:
@@ -185,6 +187,22 @@ def company(
     """The alone watch's ``busy`` flag (SPEC 5A, Alone stillness): attention on a person, a valid
     speaker hint, or someone talking with the robot (``in_conversation``, the VAD included)."""
     return selector.engaged or selector.speaker_active(now) or in_conversation(phase, conversation)
+
+
+def interest_modulation(
+    cfg: Any, affect: Any, circadian: CircadianModel | None, effects: Any
+) -> InterestMod:
+    """How the robot's state scales the interest in a shown object (SPEC 5A, Joint attention):
+    the affect state's arousal and label, the circadian state (``awake`` while no model is
+    attached) and the persona's ``effects``."""
+    state_fx = circadian.effects() if circadian is not None else cfg.circadian.states["awake"]
+    return interest_mod(
+        cfg.attention.shown,
+        arousal=affect.arousal,
+        label=affect.label,
+        circadian=state_fx,
+        persona=effects,
+    )
 
 
 def circadian_vision_scale(cfg: Any, circadian: CircadianModel | None) -> float:

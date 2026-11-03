@@ -97,6 +97,7 @@ BEHAVIOUR_MODULES = [
     "reflex/engine.py",
     "attention/__init__.py",
     "attention/selector.py",
+    "attention/interest.py",
     "attention/gaze.py",
     "world/__init__.py",
     "world/frame.py",

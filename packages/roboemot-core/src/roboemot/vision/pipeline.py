@@ -122,6 +122,15 @@ class _EntityState:
     embedding: np.ndarray | None = field(default=None, repr=False)
 
 
+def _extent(camera: CameraModel, box: Box) -> float:
+    """Angular height of a pixel box: the elevation from its top edge to its bottom edge, along
+    its centre column (the world model's ``extent_rad``, SPEC 5A)."""
+    x1, y1, x2, y2 = box
+    _, top = camera.bearing((x1 + x2) / 2, y1)
+    _, bottom = camera.bearing((x1 + x2) / 2, y2)
+    return abs(top - bottom)
+
+
 class VisionPipeline:
     """The perception module that turns camera frames into percepts; see the module docstring."""
 
@@ -508,6 +517,7 @@ class VisionPipeline:
     ) -> None:
         x1, y1, x2, y2 = track.box
         azimuth, elevation = camera.bearing((x1 + x2) / 2, (y1 + y2) / 2)
+        extent = _extent(camera, track.box)
         percept = FacePercept(
             track_id=track.track_id,
             stamp=frame.stamp,
@@ -548,6 +558,7 @@ class VisionPipeline:
             identity=owner,
             confidence=min(1.0, max(0.0, track.score)),
             facing_yaw_rad=smoothed(state.yaws, frame.stamp, self.cfg.facing_window_s),
+            extent_rad=extent,
         )
         self._publish("percept.entity", obs, frame.stamp, joint_state=frame.joint_state)
 
@@ -599,6 +610,7 @@ class VisionPipeline:
                 identity=state.owner_id,
                 confidence=min(1.0, max(0.0, track.score)),
                 embedding=state.embedding,
+                extent_rad=_extent(camera, track.box),
             )
             self._publish("percept.entity", obs, frame.stamp, joint_state=frame.joint_state)
 

@@ -21,6 +21,7 @@ from .ticks import (
     conversation_vision_scale,
     conversing,
     feed_idle,
+    interest_modulation,
     scan_context,
     scan_tick,
     soothe_context,
@@ -28,6 +29,7 @@ from .ticks import (
 )
 
 MS_PER_S = 1000.0
+OBJECTS = "objects"  # the governor stage of the object detector
 
 
 @dataclass
@@ -59,6 +61,9 @@ def run_loop(
         if p.sleep.tick(now):  # asleep (SPEC 12A): only the clocks run; the work waits for the wake
             if host.cues is not None:  # no listening cue is held through the sleep (SPEC 8)
                 host.cues.release_listening("asleep")
+            p.selector.sleep(now)  # a shown-object episode ends (SPEC 5A)
+            if p.perception.pipeline is not None:
+                p.perception.pipeline.governor.set_active(OBJECTS, False)
             p.circ.tick(now)
             p.runner.tick(now)
             clock.last_s = now
@@ -66,21 +71,24 @@ def run_loop(
             continue
         p.circ.tick(now)  # before the affect tick: its events and baseline apply to it
         state = p.runner.tick(now)
-        attending = attention_tick(now, p.world, p.selector, p.gaze, p.loop, conversing(host.phase))
+        live = stack.effective()
+        host.circadian = p.circ.model if live.circadian.enabled else None
+        if live.persona is not fx_for:  # recompute only after a reload
+            fx_for, fx = live.persona, persona_effects(live.persona)
+        mod = interest_modulation(live, p.runner.engine.state(now), host.circadian, fx)
+        attending = attention_tick(
+            now, p.world, p.selector, p.gaze, p.loop, conversing(host.phase), mod
+        )
         if host.conversation is not None and p.selector.engaged:
             host.conversation.note_presence(
                 now, p.conv_speaker()
             )  # keeps the session alive (SPEC 8)
-        live = stack.effective()
-        host.circadian = p.circ.model if live.circadian.enabled else None
         if (
             not p.light_reader.running
             and live.circadian.enabled
             and live.circadian.light_source == "camera"
         ):
             p.light_reader.start()  # lazily: never for a clock-only or disabled rhythm
-        if live.persona is not fx_for:  # recompute only after a reload
-            fx_for, fx = live.persona, persona_effects(live.persona)
         register = p.tracker.tick(now, live.register, fx)
         p.expression.set_register(register)
         p.speaking.set_register(register)
@@ -95,6 +103,7 @@ def run_loop(
             governor.set_scale(CIRCADIAN, circadian_vision_scale(live, host.circadian))
             others = governor.scale_of(CIRCADIAN) * governor.scale_of(LOAD)
             governor.set_scale(CONVERSATION, conversation_vision_scale(live, host.phase, others))
+            governor.set_active(OBJECTS, p.selector.episode_active)  # follow a shown object
         alone = p.alone.tick(now, company(now, p.selector, host.phase, host.conversation))
         if p.scan is not None:
             ctx = scan_context(
