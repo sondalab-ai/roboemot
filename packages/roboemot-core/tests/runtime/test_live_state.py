@@ -6,6 +6,7 @@ import json
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 from roboemot.affect import AffectState
 from roboemot.config import ConfigStack
 from roboemot.conversation import ConversationPhase
@@ -122,7 +123,7 @@ def test_the_payload_shape():
         "circadian": {"state": "awake", "reason": None, "sleepiness": 0.2},
     }  # fmt: skip
     assert s["modes"] == {
-        "asleep": False, "alone": False, "paused": [], "online": True,
+        "asleep": False, "rest": None, "alone": False, "paused": [], "online": True,
         "people": 1, "persona": "default",
     }  # fmt: skip
     assert s["conversation"] == {"phase": "idle", "route": None, "elapsed_s": None}
@@ -150,7 +151,8 @@ def test_modes_follow_the_parts():
     )
     s = live(p, host=host).state()
     assert s["modes"] == {
-        "asleep": True, "alone": True, "paused": ["vision", "listener"], "online": False,
+        "asleep": True, "rest": None, "alone": True, "paused": ["vision", "listener"],
+        "online": False,
         "people": 0, "persona": "default",
     }  # fmt: skip
     assert s["mood"]["circadian"] is None and s["reflexes"] == {"last": None}
@@ -160,6 +162,29 @@ def test_the_mood_card_says_why_the_robot_rests():
     p = parts(circ=SimpleNamespace(snapshot=lambda: {"state": "resting", "reason": "nap"}))
     circadian = live(p).state()["mood"]["circadian"]
     assert circadian == {"state": "resting", "reason": "nap", "sleepiness": None}
+
+
+@pytest.mark.parametrize(
+    ("state", "reason", "rest", "status"),
+    [
+        ("resting", "nap", "napping", "napping"),
+        ("resting", "quiet_hours", "resting", "resting"),
+        ("drowsy", None, "drowsy", "idle"),
+        ("awake", None, None, "idle"),
+    ],
+)
+def test_the_modes_card_names_the_circadian_rest_apart_from_the_motors(state, reason, rest, status):
+    host = SimpleNamespace(
+        circadian=SimpleNamespace(state=state, reason=reason),
+        phase=ConversationPhase(),
+        activity=None,
+        realtime_route=None,
+        voice_listener=None,
+    )
+    s = live(host=host).state()
+    assert s["modes"]["rest"] == rest
+    assert s["modes"]["asleep"] is False  # a nap is not the platform sleep (motors off)
+    assert s["activity"]["status"] == status
 
 
 def test_the_conversation_card_is_the_phase():

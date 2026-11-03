@@ -195,10 +195,21 @@ class LiveState:
             return "listening"
         if notes:
             return notes[0]["code"]
-        circ = self._host.circadian
-        if circ is not None and circ.state == "resting":
-            return "napping" if circ.reason == "nap" else "resting"
+        rest = self._rest()
+        if rest in ("napping", "resting"):
+            return rest
         return "alone" if self._p.alone.alone else "idle"
+
+    def _rest(self) -> str | None:
+        """The circadian rest the modes card and the status line show (SPEC 7A): ``napping``
+        for a nap, ``resting`` for any other rest, ``drowsy``, or None while awake or with the
+        rhythm off. Not the platform sleep (``asleep``: the motors are off, SPEC 12A)."""
+        circ = self._host.circadian
+        if circ is None:
+            return None
+        if circ.state == "resting":
+            return "napping" if circ.reason == "nap" else "resting"
+        return "drowsy" if circ.state == "drowsy" else None
 
     def _mood(self, now: float) -> dict[str, Any]:
         s = self._p.runner.engine.state(now)
@@ -224,6 +235,7 @@ class LiveState:
         active = p.tracker.active
         return {
             "asleep": p.sleep.asleep,
+            "rest": self._rest(),
             "alone": p.alone.alone,
             "paused": p.sleep.paused_parts(),
             "online": p.network.online,

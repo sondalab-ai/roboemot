@@ -113,6 +113,38 @@ test("the modes card says when the robot is alone and holding still", async (t) 
   assert.ok(!company.document.querySelector("#live-cards").textContent.includes("ALONE STILL"));
 });
 
+test("the modes card names the motor state, not sleep", async (t) => {
+  const strings = { ...STRINGS, live_motors_on: "MOTORS ON", live_motors_off: "MOTORS OFF" };
+  const on = await livePage(t, { "GET /api/strings": { language: "en", strings } });
+  await openLive(on);
+  const text = on.document.querySelector("#live-cards").textContent;
+  assert.ok(text.includes("MOTORS ON") && !text.includes("MOTORS OFF"));
+  const off = await livePage(t, {
+    "GET /api/live/state": { ...STATE, modes: { ...STATE.modes, asleep: true } },
+    "GET /api/strings": { language: "en", strings },
+  });
+  await openLive(off);
+  assert.ok(off.document.querySelector("#live-cards").textContent.includes("MOTORS OFF"));
+});
+
+test("the modes card shows the circadian nap apart from the motors, and nothing while awake", async (t) => {
+  const strings = { ...STRINGS, live_motors_on: "MOTORS ON", live_rest_napping: "NAP BADGE", live_rest_drowsy: "DROWSY BADGE" };
+  const nap = await livePage(t, {
+    "GET /api/live/state": { ...STATE, modes: { ...STATE.modes, rest: "napping" } },
+    "GET /api/strings": { language: "en", strings },
+  });
+  await openLive(nap);
+  const text = nap.document.querySelector("#live-cards").textContent;
+  assert.ok(text.includes("NAP BADGE") && text.includes("MOTORS ON"));
+  const awake = await livePage(t, {
+    "GET /api/live/state": { ...STATE, modes: { ...STATE.modes, rest: null } },
+    "GET /api/strings": { language: "en", strings },
+  });
+  await openLive(awake);
+  const quiet = awake.document.querySelector("#live-cards").textContent;
+  assert.ok(!quiet.includes("NAP BADGE") && !quiet.includes("DROWSY BADGE"));
+});
+
 test("it polls at the interval the server names, and not before the tab is opened", async (t) => {
   const page = await livePage(t);
   await sleep(WAIT_MS);
