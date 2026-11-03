@@ -22,7 +22,7 @@ function pseudoStrings() {
 }
 
 const STRINGS = pseudoStrings();
-const SYMBOLS = /^[\s\d.,:;()\-–—#%/+×←✓·…$*@[\]=_]*$/;
+const SYMBOLS = /^[\s\d.,:;()\-–—#%/+×←→✓·…$*@[\]=_]*$/;
 
 // The text nodes of `root` with the markers taken out, minus the allowed fixture values.
 function leftovers(root, allowed) {
@@ -137,6 +137,74 @@ test("the Catalogue tab words the categories", async (t) => {
     },
   }, "catalogue");
   assert.deepEqual(leftovers(p.document.querySelector("#view"), ["Fido"]), []);
+});
+
+test("the Emotions tab words labels, gestures and states; config names stay as code", async (t) => {
+  const p = await page(t, {
+    "GET /api/emotions/state": {
+      poll_ms: 60000,
+      affect: { label: "joy", valence: 0.4, arousal: -0.2, intensity: 0.3, baseline_valence: 0, baseline_arousal: -0.1 },
+      register: { people: 1, motion_amplitude: 0.8, approach_allowed: true, reaction_intensity: "normal" },
+      persona: { name: "default", effects: { motion_amplitude_x: 1.1 } },
+      circadian: { state: "drowsy", sleepiness: 0.6, amplitude: 0.5 },
+      expression: { last_label: "nod", last_amplitude: 0.42, started: 3 },
+      moved: [{ age_s: 1.5, event: "sound.loud", rule: 3, label: "surprise", dv: 0, da: 0.6 }, { age_s: 9, event: "llm", rule: null, label: null, dv: 0.1, da: 0 }],
+      controls: { available: false, refused: "external_control" },
+      playable: { labels: ["joy", "calm"], gestures: ["nod", "perk_up"] },
+      rules: [{ index: 3, event: "sound.loud", label: "surprise" }],
+    },
+  }, "emotions");
+  const view = p.document.querySelector("#view");
+  assert.ok(view.querySelector("#emo-controls"), "the tab is drawn");
+  for (const code of view.querySelectorAll("code")) code.remove(); // config names and values
+  // the rule list names the event (a config name) inside the option sentence
+  assert.deepEqual(leftovers(view, ["sound.loud"]), []);
+});
+
+const ROW = {
+  kind: "number", value: 1, default: 1, source: "defaults", description: "⟦a description⟧", writable: true,
+  restart: false, admin_only: false, private: false, secret: false, opt_in: false, unit: "s", ge: 0, le: 10,
+  nullable: false, choices: null, conservative: null,
+};
+
+test("the Settings tab words sources, tags and the robot section; values stay as code", async (t) => {
+  const p = await page(t, {
+    "GET /api/settings": {
+      pin_required: true,
+      fields: [
+        { ...ROW, path: "affect.half_life_s", restart: true },
+        { ...ROW, path: "affect.update_hz", source: "runtime", admin_only: true },
+        { ...ROW, path: "webui.json_thing", kind: "json", value: { a: 1 }, default: { a: 1 }, writable: false },
+      ],
+      robot: {
+        id: "bot", title: "Bot One", actions: ["restart"], restart_effects: [{ id: "kill_on_timeout", params: { timeout_s: 20 } }],
+        fields: [
+          { ...ROW, path: "robot.bot.limits.head.max_deg", source: "manifest", writable: false },
+          { ...ROW, path: "robot.bot.realtime_session.allocator_host", kind: "text", value: null, default: null, source: "config", writable: false, nullable: true },
+        ],
+      },
+    },
+  }, "settings");
+  const view = p.document.querySelector("#view");
+  for (const button of view.querySelectorAll(".sl-disclosure")) button.click(); // open every group
+  await settle();
+  assert.ok(view.querySelector('[data-path="robot.bot.limits.head.max_deg"]'), "the robot rows are drawn");
+  // config names (code, the group nav), values and units stay as they are
+  for (const node of view.querySelectorAll("code, .setting-value, pre, option, .sl-chip, .sl-nav__item, .row > span.hint")) node.remove();
+  assert.deepEqual(leftovers(view, ["⟦a description⟧", "Bot One"]), []);
+});
+
+test("the Registry tab words kinds and statuses", async (t) => {
+  const p = await page(t, {
+    "GET /api/registry": { records: [
+      { id: "p1", display_name: "Mia", kind: "person", status: "active", last_seen: "2026-10-27T10:00:00+00:00" },
+      { id: "a1", display_name: "Fido", kind: "animal", status: "pending", last_seen: null },
+    ] },
+    "GET /api/registry/quarantined": { keys: [] },
+  }, "registry");
+  const view = p.document.querySelector("#view");
+  assert.ok(view.textContent.includes("Fido"));
+  assert.deepEqual(leftovers(view, ["Mia", "Fido"]), []);
 });
 
 test("the page names its failure to load in a page language", async (t) => {

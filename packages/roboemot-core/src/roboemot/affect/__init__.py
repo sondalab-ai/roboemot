@@ -4,6 +4,12 @@ Continuous valence/arousal in [-1, 1] decaying toward a baseline (set by the cir
 SPEC 7A) with a configurable half-life; appraisal rules turn bus events into impulses with
 cooldowns; LLM impulses are capped per conversational turn. The discrete label is the
 appraisal label while it is held, otherwise the nearest label prototype.
+
+History (the web UI's Emotions tab, SPEC 11A, 12): with :meth:`AffectEngine.keep_history` above 0
+the engine keeps the last impulses that moved the state, newest last: the time on the engine's
+clock, the event (``llm`` for the LLM's ``express_emotion``), the index of the rule that fired, the
+label it named and the change it actually made (after the clamp). No payload is kept, so no person,
+entity or track id; with 0 (the default) nothing is kept.
 """
 
 from __future__ import annotations
@@ -11,6 +17,7 @@ from __future__ import annotations
 import functools
 import math
 import threading
+from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
@@ -18,6 +25,20 @@ from typing import Any, TypeVar
 from ..config.schema import AffectConfig, AppraisalConfig, rule_identity
 
 SUBJECT_KEYS = ("person_id", "entity_id", "track_id")  # payload fields that name who/what
+LLM_EVENT = "llm"  # the history's event for an LLM impulse
+
+
+@dataclass(frozen=True)
+class Moved:
+    """One impulse in the history: when (engine clock), what, which rule, the label it named and
+    the valence and arousal change it made. Codes and numbers only."""
+
+    t: float
+    event: str
+    rule: int | None
+    label: str | None
+    dv: float
+    da: float
 
 
 def _clamp(x: float) -> float:
@@ -66,6 +87,7 @@ class AffectEngine:
     _label_impulses: int = 0
     _cooldown: dict[tuple, float] = field(default_factory=dict)  # (rule, subject) -> until
     _llm_budget: float = 0.0
+    _history: deque[Moved] = field(default_factory=lambda: deque(maxlen=0), repr=False)
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     def __post_init__(self) -> None:
@@ -126,13 +148,13 @@ class AffectEngine:
         self._cooldown = {k: until for k, until in self._cooldown.items() if until > now}
         subject = next((payload[k] for k in SUBJECT_KEYS if payload and k in payload), None)
         fired = False
-        for rule in self.appraisal.rules:
+        for index, rule in enumerate(self.appraisal.rules):
             if rule.event != event or not _matches(rule.when, payload):
                 continue
             key = (rule_identity(rule.event, rule.when), subject)
             if now < self._cooldown.get(key, -math.inf):
                 continue
-            self.impulse(now, rule.valence, rule.arousal, rule.label)
+            self._moved(now, event, index, rule.label, rule.valence, rule.arousal)
             if rule.cooldown_s > 0:
                 self._cooldown[key] = now + rule.cooldown_s
             fired = True
@@ -162,8 +184,32 @@ class AffectEngine:
         scale = min(1.0, self._llm_budget / mag)
         dv, da = valence * scale, arousal * scale
         self._llm_budget -= math.hypot(dv, da)
-        self.impulse(now, dv, da)
+        self._moved(now, LLM_EVENT, None, None, dv, da)
         return dv, da
+
+    def _moved(
+        self, now: float, event: str, rule: int | None, label: str | None, dv: float, da: float
+    ) -> None:
+        """Apply an impulse and, while a history is kept, record the change it made."""
+        if not self._history.maxlen:
+            self.impulse(now, dv, da, label)
+            return
+        self.update(now)
+        v0, a0 = self.valence, self.arousal
+        self.impulse(now, dv, da, label)
+        moved = Moved(self._last or now, event, rule, label, self.valence - v0, self.arousal - a0)
+        self._history.append(moved)
+
+    @_locked
+    def keep_history(self, cap: int) -> None:
+        """Keep the last ``cap`` impulses (0: none, and what was kept goes)."""
+        if cap != self._history.maxlen:
+            self._history = deque(self._history if cap else (), maxlen=cap)
+
+    @_locked
+    def history(self) -> list[Moved]:
+        """The kept impulses, oldest first."""
+        return list(self._history)
 
     # ---- outputs
 

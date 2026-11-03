@@ -817,6 +817,75 @@ EN: dict[str, str] = {
     "category_potted_plant": "potted plant",
     "category_cell_phone": "mobile phone",
     "category_teddy_bear": "teddy bear",
+    # the Emotions tab (SPEC 11A, 12)
+    "tab_emotions": "Emotions",
+    "emo_intro": (
+        "How the robot feels right now and why, with two tests. This tab updates while it is "
+        "open and in view; it shows no person, picture or sound."
+    ),
+    "emo_disabled_title": "The Emotions tab is off",
+    "emo_disabled_body": (
+        "To turn it on, open Settings, find webui.emotions.enabled and switch it on. It applies "
+        "at once, with no restart."
+    ),
+    "emo_affect": "Affect",
+    "emo_baseline": "Resting point: valence {v}, arousal {a}",
+    "emo_register": "Register",
+    "emo_register_intro": "How the robot behaves with the people in view, after the persona.",
+    "emo_register_none": "No register yet.",
+    "emo_people": "People it covers",
+    "emo_persona": "Persona",
+    "emo_persona_intro": "What the personality changes in movement and voice.",
+    "emo_circadian": "Daily rhythm",
+    "emo_sleepiness": "Sleepiness",
+    "emo_circ_amplitude": "Movement scale",
+    "emo_expression": "Last expression",
+    "emo_expression_none": "No expression played yet.",
+    "emo_expression_line": "{label}, amplitude {amp}; {n} played since the start",
+    "emo_moved": "What moved the affect",
+    "emo_moved_none": "Nothing moved it yet.",
+    "emo_moved_note": "Newest first, kept in memory while this tab is on. Events are config names.",
+    "emo_ago": "{n} s ago",
+    "emo_rule": "rule #{n}",
+    "emo_llm": "the conversation",
+    "emo_no_label": "no label",
+    "emo_delta": "valence {dv}, arousal {da}",
+    "emo_controls": "Try it",
+    "emo_controls_intro": (
+        "Each test asks for the PIN. The robot moves as it would on its own: the same register, "
+        "persona, daily rhythm and safety limits."
+    ),
+    "emo_play": "Play",
+    "emo_play_label": "Expression or gesture",
+    "emo_play_hint": "It plays at the next behaviour tick, as when the conversation asks for it.",
+    "emo_group_labels": "Expressions",
+    "emo_group_gestures": "Gestures",
+    "emo_play_message": "Play {name} on the robot? It moves within its safety limits.",
+    "emo_play_queued": "{name} will play in a moment.",
+    "emo_play_not_queued": (
+        "{name} was not played: too soon after the last one, or the robot is resting."
+    ),
+    "emo_inject": "Fire the rule",
+    "emo_inject_label": "Appraisal rule",
+    "emo_inject_hint": (
+        "Acts as if the rule's event happened. Its cooldown starts, so the real event is ignored "
+        "for a while after."
+    ),
+    "emo_rule_option": "#{n} {event} → {label}",
+    "emo_inject_message": "Fire rule #{n} as if its event happened?",
+    "emo_inject_fired": "Rule #{n} fired.",
+    "emo_inject_cooldown": "Rule #{n} did not fire: it is in its cooldown.",
+    "gesture_nod": "nod",
+    "gesture_shake": "head shake",
+    "gesture_puzzled": "puzzled",
+    "gesture_perk_up": "perk up",
+    "err_emotions_disabled": "The Emotions tab is off.",
+    "err_emotions_unavailable": "The Emotions tab is not available on this robot.",
+    "err_robot_asleep": "The robot is asleep: tests are off.",
+    "err_motors_off": "The motors are off: tests are off.",
+    "err_external_control": "Someone or something is moving the robot: tests are off.",
+    "err_unknown_expression": "This robot has no such expression or gesture.",
+    "err_unknown_rule": "No such appraisal rule.",
 }
 
 IT: dict[str, str] = {
@@ -1664,6 +1733,79 @@ IT: dict[str, str] = {
     "category_potted_plant": "pianta",
     "category_cell_phone": "telefono",
     "category_teddy_bear": "orsacchiotto",
+    "tab_emotions": "Emozioni",
+    "emo_intro": (
+        "Come si sente il robot adesso e perché, con due prove. La scheda si aggiorna mentre è "
+        "aperta e visibile; non mostra persone, immagini o suoni."
+    ),
+    "emo_disabled_title": "La scheda Emozioni è spenta",
+    "emo_disabled_body": (
+        "Per accenderla apri Impostazioni, cerca webui.emotions.enabled e attivala. Vale subito, "
+        "senza riavvio."
+    ),
+    "emo_affect": "Stato affettivo",
+    "emo_baseline": "Punto di riposo: valenza {v}, attivazione {a}",
+    "emo_register": "Registro",
+    "emo_register_intro": "Come si comporta il robot con le persone in vista, dopo la personalità.",
+    "emo_register_none": "Ancora nessun registro.",
+    "emo_people": "Persone a cui si applica",
+    "emo_persona": "Personalità",
+    "emo_persona_intro": "Cosa cambia la personalità nei movimenti e nella voce.",
+    "emo_circadian": "Ritmo giornaliero",
+    "emo_sleepiness": "Sonnolenza",
+    "emo_circ_amplitude": "Ampiezza dei movimenti",
+    "emo_expression": "Ultima espressione",
+    "emo_expression_none": "Ancora nessuna espressione.",
+    "emo_expression_line": "{label}, ampiezza {amp}; {n} eseguite dall'avvio",
+    "emo_moved": "Cosa ha mosso lo stato affettivo",
+    "emo_moved_none": "Ancora niente.",
+    "emo_moved_note": (
+        "Dal più recente, in memoria finché la scheda è accesa. Gli eventi sono nomi della "
+        "configurazione."
+    ),
+    "emo_ago": "{n} s fa",
+    "emo_rule": "regola n. {n}",
+    "emo_llm": "la conversazione",
+    "emo_no_label": "nessuna etichetta",
+    "emo_delta": "valenza {dv}, attivazione {da}",
+    "emo_controls": "Prova",
+    "emo_controls_intro": (
+        "Ogni prova chiede il PIN. Il robot si muove come farebbe da solo: stesso registro, "
+        "personalità, ritmo giornaliero e limiti di sicurezza."
+    ),
+    "emo_play": "Esegui",
+    "emo_play_label": "Espressione o gesto",
+    "emo_play_hint": (
+        "Parte al prossimo ciclo del comportamento, come quando la chiede la conversazione."
+    ),
+    "emo_group_labels": "Espressioni",
+    "emo_group_gestures": "Gesti",
+    "emo_play_message": "Eseguire {name} sul robot? Si muove entro i suoi limiti di sicurezza.",
+    "emo_play_queued": "{name} partirà tra un momento.",
+    "emo_play_not_queued": (
+        "{name} non è stato eseguito: troppo presto dopo l'ultimo, oppure il robot riposa."
+    ),
+    "emo_inject": "Attiva la regola",
+    "emo_inject_label": "Regola di valutazione",
+    "emo_inject_hint": (
+        "Agisce come se l'evento della regola fosse accaduto. Parte la sua pausa, quindi per un "
+        "po' l'evento reale viene ignorato."
+    ),
+    "emo_rule_option": "n. {n} {event} → {label}",
+    "emo_inject_message": "Attivare la regola n. {n} come se il suo evento fosse accaduto?",
+    "emo_inject_fired": "Regola n. {n} attivata.",
+    "emo_inject_cooldown": "La regola n. {n} non si è attivata: è nella sua pausa.",
+    "gesture_nod": "annuire",
+    "gesture_shake": "scuotere la testa",
+    "gesture_puzzled": "perplesso",
+    "gesture_perk_up": "drizzarsi",
+    "err_emotions_disabled": "La scheda Emozioni è spenta.",
+    "err_emotions_unavailable": "La scheda Emozioni non è disponibile su questo robot.",
+    "err_robot_asleep": "Il robot dorme: le prove sono sospese.",
+    "err_motors_off": "I motori sono spenti: le prove sono sospese.",
+    "err_external_control": "Qualcuno o qualcosa sta muovendo il robot: le prove sono sospese.",
+    "err_unknown_expression": "Questo robot non ha questa espressione o questo gesto.",
+    "err_unknown_rule": "Regola di valutazione inesistente.",
 }
 
 STRINGS: dict[str, dict[str, str]] = {"en": EN, "it": IT}

@@ -53,6 +53,7 @@ export async function loadPage(routes = {}) {
   run(read("theme.js"));
   run(read("settings.js"));
   run(read("live.js"));
+  run(read("emotions.js"));
   run(read("app.js"));
   await settle();
   return { window, document: window.document, calls, run, urls };

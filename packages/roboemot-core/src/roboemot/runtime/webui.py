@@ -17,6 +17,7 @@ from roboemot.webui.routes import RouteChecker
 from roboemot.webui.secrets_admin import SecretsAdmin
 from roboemot.webui.settings import SettingsEditor
 
+from .emotions import EmotionsState
 from .host import RuntimeHost
 from .live import LiveState
 
@@ -83,7 +84,7 @@ def start_webui(
         if admin is None:
             return None
     secrets, settings = admin.secrets, admin.settings
-    unsubscribe = None
+    unsubscribe = unsubscribe_emotions = None
     try:
         live = LiveState(
             host,
@@ -100,6 +101,9 @@ def start_webui(
             host.bus.subscribe("robot.asleep", lambda msg: live.video.sleep())
         cleanup.callback(live.video.drop)
         host.live_video = live.video
+        emotions = EmotionsState(host, p, stack.effective(), clock=p.loop.clock)
+        unsubscribe_emotions = stack.subscribe(emotions.apply_config)
+        emotions.apply_config(SimpleNamespace(config=stack.effective()))
         server = make_server(
             host.perception.enrollment,
             host.diagnostics,
@@ -118,10 +122,12 @@ def start_webui(
                 realtime_provider=lambda: p.realtime_provider,  # the runtime's own (SPEC 8)
             ),
             live=live,
+            emotions=emotions,
         )
     except Exception as exc:
-        if unsubscribe is not None:
-            unsubscribe()
+        for undo in (unsubscribe, unsubscribe_emotions):
+            if undo is not None:
+                undo()
         log.error("web UI not started: %s", type(exc).__name__)
         return None
     cleanup.callback(server.stop)

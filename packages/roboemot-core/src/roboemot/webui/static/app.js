@@ -911,6 +911,7 @@ const TABS = {
   routes: routesView,
   settings: settingsView,
   live: liveView,
+  emotions: emotionsView,
   debug: debugView,
 };
 

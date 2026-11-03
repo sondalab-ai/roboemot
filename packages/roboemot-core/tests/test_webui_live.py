@@ -34,7 +34,9 @@ def pipeline():
     )  # fmt: skip
     return SimpleNamespace(
         runner=SimpleNamespace(
-            engine=SimpleNamespace(state=lambda now: AffectState(0.1, 0.2, "joy", 0.5))
+            engine=SimpleNamespace(
+                state=lambda now: AffectState(0.1, 0.2, "joy", 0.5), keep_history=lambda cap: None
+            )
         ),
         circ=SimpleNamespace(snapshot=lambda: {"state": "awake", "sleepiness": 0.1}),
         sleep=SimpleNamespace(asleep=False, paused_parts=lambda: []),
@@ -238,6 +240,7 @@ def test_start_webui_keeps_its_live_port_in_step_with_the_stack(tmp_path, stack)
         server = start_webui(host, stack, stack.effective(), manifest, cleanup, pipeline())
         assert server is not None
         live = server._httpd.api.live
+        assert server._httpd.api.emotions is not None  # the Emotions tab is wired too
         assert live.state() is None
         stack.set("webui.live.enabled", True, source="test", admin=True)
         assert live.state() is not None
