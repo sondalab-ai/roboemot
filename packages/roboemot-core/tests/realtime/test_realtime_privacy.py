@@ -33,6 +33,7 @@ def real_report(rig, listener=None):
         network=rig.network,
         perception=SimpleNamespace(vision_snapshot=dict, registry_snapshot=dict),
         world=SimpleNamespace(entries=[]),
+        selector=empty,
         tracker=SimpleNamespace(active=None),
         circ=empty,
         reflexes=empty,

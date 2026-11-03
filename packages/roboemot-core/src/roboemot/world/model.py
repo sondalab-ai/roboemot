@@ -241,6 +241,7 @@ class WorldModel:
             last_seen=obs.stamp,
             sources={obs.source},
             embedding=None if obs.embedding is None else np.array(obs.embedding, dtype=float),
+            extent_rad=obs.extent_rad,
         )
         self._facing(entry, obs)
         eid = entry.entry_id
@@ -262,6 +263,9 @@ class WorldModel:
         if obs.distance_m is not None:
             old = entry.distance_m
             entry.distance_m = obs.distance_m if old is None else old + w * (obs.distance_m - old)
+        if obs.extent_rad is not None:
+            ext = entry.extent_rad
+            entry.extent_rad = obs.extent_rad if ext is None else ext + w * (obs.extent_rad - ext)
         floor = math.radians(self.cfg.min_uncertainty_deg)
         entry.uncertainty_rad = max(floor, (1.0 - w) * entry.uncertainty_rad + w * offset)
         if _known(obs.identity):

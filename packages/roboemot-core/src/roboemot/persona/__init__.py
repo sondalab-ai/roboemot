@@ -29,6 +29,8 @@ class PersonaEffects:
     reaction_steps: int = 0
     voice_variability_add: float = 0.0
     vocabulary_steps: int = 0
+    interest_gain_x: float = 1.0
+    interest_decay_x: float = 1.0
 
 
 def interpolate(curve: list[tuple[float, float]], x: float) -> float:
@@ -58,6 +60,8 @@ def effects(persona: PersonaConfig) -> PersonaEffects:
         reaction_steps=_steps(interpolate(e.playfulness.reaction_steps, t.playfulness)),
         voice_variability_add=interpolate(e.playfulness.voice_variability_add, t.playfulness),
         vocabulary_steps=_steps(interpolate(e.formality.vocabulary_steps, t.formality)),
+        interest_gain_x=interpolate(e.playfulness.interest_gain_x, t.playfulness),
+        interest_decay_x=interpolate(e.energy.interest_decay_x, t.energy),
     )
 
 

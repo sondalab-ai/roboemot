@@ -206,7 +206,7 @@ def test_a_second_tone_in_one_utterance_is_ignored(rigs):
         rig = rigs(srv, rt=TONE)
         rig.turn()
         assert rig.emitted == [("speech.tone.happy", {"language": "it"})]
-        assert outputs(srv) == [TONE_NOTED, TONE_NOTED]
+        assert wait_for(lambda: outputs(srv) == [TONE_NOTED, TONE_NOTED])  # over the socket
         assert rig.worker.snapshot()["tone_repeated"] == 1
         assert len(srv.of("response.create")) == 1
 
@@ -307,7 +307,7 @@ def test_an_invalid_only_tone_round_gets_its_output_and_no_extra_response(rigs):
         rig = rigs(srv, rt=TONE)
         rig.turn()
         assert len(srv.of("response.create")) == 1
-        assert outputs(srv) == [TONE_INVALID]
+        assert wait_for(lambda: outputs(srv) == [TONE_INVALID])  # over the socket
         assert rig.emitted == []
         rig.turn()
         assert srv.pending_refusals == 0

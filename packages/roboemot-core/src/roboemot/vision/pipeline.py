@@ -22,7 +22,8 @@ deterministic; ``LatestFrameRunner`` drives it live. Per frame, when the governo
    embedding rides in the ``Observation`` (SPEC 5A) for world-model matching and the registry.
    ``vision.animal_categories`` and ``vision.object_categories`` map detector classes to the
    kind; any other class, ``person`` included, is ignored. No age or gender is estimated (owner
-   decision 2026-10-23).
+   decision 2026-10-23). On the ticks the governor allows, ``object_gate`` skips object runs
+   while the scene is still (``vision.object_gate``, SPEC 5, 13; see ``object_gate``).
 
 ``light_tap`` (optional) receives each frame's image before anything else, for the circadian
 light sampler (SPEC 7A); it measures and keeps only numbers, never the image.
@@ -82,6 +83,7 @@ from ..world import FrameSpec, Observation
 from .facing import head_yaw, smoothed
 from .geometry import CameraModel
 from .governor import CONVERSATION, EPSILON_S, RateGovernor
+from .object_gate import ObjectGate
 from .stage_timing import APPEARANCE, DETECTION, EMBEDDING, OBJECTS, PROCESS, StageTimer
 from .stages import (
     AppearanceEmbedder,
@@ -129,6 +131,15 @@ class _EntityState:
     last_embed: float | None = None
     owner_id: str | None = None
     embedding: np.ndarray | None = field(default=None, repr=False)
+
+
+def _extent(camera: CameraModel, box: Box) -> float:
+    """Angular height of a pixel box: the elevation from its top edge to its bottom edge, along
+    its centre column (the world model's ``extent_rad``, SPEC 5A)."""
+    x1, y1, x2, y2 = box
+    _, top = camera.bearing((x1 + x2) / 2, y1)
+    _, bottom = camera.bearing((x1 + x2) / 2, y2)
+    return abs(top - bottom)
 
 
 class VisionPipeline:
@@ -180,6 +191,7 @@ class VisionPipeline:
         self.track_stats = TrackDiagnostics(cfg)
         self.face_tracker.observer = self.track_stats
         self.object_tracker = Tracker(self._object_tracker_cfg(), ids)
+        self.object_gate = ObjectGate(cfg.object_gate)
         self._generations = itertools.count(1)
         self._cameras: dict[tuple[int, int], CameraModel] = {}
         self._faces: dict[int, _FaceState] = {}
@@ -229,13 +241,18 @@ class VisionPipeline:
         if self.governor.allow("detection", stamp):
             self._process_faces(frame, camera)
             faces = True
-        if (
-            self.object_detector is not None
-            and self.cfg.objects_enabled
-            and self.governor.allow("objects", stamp)
-        ):
-            self._process_objects(frame, camera)
-            objects = True
+        if self.object_detector is not None and self.cfg.objects_enabled:
+            pose = head_pose(frame.joint_state, self.frame_spec)
+            self.object_gate.observe(stamp, pose)
+            if self.governor.allow("objects", stamp) and self.object_gate.decide(
+                stamp,
+                frame.image,
+                pose,
+                self._object_holds(stamp, frame.image.shape[1]),
+                episode=self.governor.active("objects"),
+            ):
+                self._process_objects(frame, camera)
+                objects = True
         embeds = self.cfg.max_embeds_per_frame - self._budget + self._entity_embeds
         return FrameReport(stamp, faces, objects, embeds)
 
@@ -270,6 +287,7 @@ class VisionPipeline:
         self._lost_held = 0.0
         self._face_lost_held = 0.0
         self.governor.reset()
+        self.object_gate.reset()
 
     def apply_config(
         self, vision: VisionConfig, identity: IdentityConfig, world: WorldConfig | None = None
@@ -283,6 +301,7 @@ class VisionPipeline:
         if world is not None:
             self.world = world
         self.governor.rates = vision.rates
+        self.object_gate.cfg = vision.object_gate
         self.face_tracker.cfg = self._face_tracker_cfg()
         self.object_tracker.cfg = self._object_tracker_cfg()
         self.matcher.config = identity
@@ -305,12 +324,24 @@ class VisionPipeline:
         return self.cfg.tracker.model_copy(update={"lost_s": lost})
 
     def _object_lost_s(self) -> float:
-        """Lifetime of an animal or object track at the rate the governor allows now."""
+        """Lifetime of an animal or object track at the rate the governor allows now. With the
+        object gate on, runs may be ``max_interval_s`` apart, so a still thing lives at least
+        that plus ``object_lost_periods`` periods and keeps its ID between floor runs."""
         lost = self.cfg.object_lost_s
         period = self.governor.period("objects")
         if math.isfinite(period):
             lost = max(lost, self.cfg.object_lost_periods * period)
+            gate = self.cfg.object_gate
+            if gate.enabled:
+                lost = max(lost, gate.max_interval_s + self.cfg.object_lost_periods * period)
         return lost
+
+    def _object_holds(self, stamp: float, width_px: int) -> frozenset[str]:
+        """Why live animal or object tracks keep the object gate on the fixed schedule."""
+        gate = self.cfg.object_gate
+        return self.object_tracker.holds(
+            stamp, self.cfg.animal_categories, gate.moved_share * width_px, gate.moved_hold_s
+        )
 
     def _object_tracker_cfg(self) -> TrackerConfig:
         """Tracker settings for animals and objects, derived from the vision config.
@@ -361,6 +392,7 @@ class VisionPipeline:
             "rate_scale": self.governor.scale,
             "rate_scales": self.governor.scales(),
             "stage_drops": dict(self.governor.dropped),
+            "object_gate": self.object_gate.snapshot(),
             "stage_timing": self.timer.snapshot(self.cfg.timing_window_s),
             "tracks": tracks,
         }
@@ -536,6 +568,7 @@ class VisionPipeline:
     ) -> None:
         x1, y1, x2, y2 = track.box
         azimuth, elevation = camera.bearing((x1 + x2) / 2, (y1 + y2) / 2)
+        extent = _extent(camera, track.box)
         percept = FacePercept(
             track_id=track.track_id,
             stamp=frame.stamp,
@@ -576,6 +609,7 @@ class VisionPipeline:
             identity=owner,
             confidence=min(1.0, max(0.0, track.score)),
             facing_yaw_rad=smoothed(state.yaws, frame.stamp, self.cfg.facing_window_s),
+            extent_rad=extent,
         )
         self._publish("percept.entity", obs, frame.stamp, joint_state=frame.joint_state)
 
@@ -630,6 +664,7 @@ class VisionPipeline:
                 identity=state.owner_id,
                 confidence=min(1.0, max(0.0, track.score)),
                 embedding=state.embedding,
+                extent_rad=_extent(camera, track.box),
             )
             self._publish("percept.entity", obs, frame.stamp, joint_state=frame.joint_state)
 

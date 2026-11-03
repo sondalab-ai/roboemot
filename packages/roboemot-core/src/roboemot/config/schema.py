@@ -128,6 +128,7 @@ APPRAISAL_EVENTS = frozenset(
         "speech.loud",
         "speech.fast",
         "self.soothe",
+        "object.shown",
     }
 )
 # connectivity: link.<name>.lost / .restored (SPEC 12A); the realtime model's tone of voice:
@@ -324,6 +325,14 @@ class AppraisalConfig(Strict):
                 "valence": 0.1,
                 "label": "sleepy",
                 "cooldown_s": 0,
+            },
+            # A person shows the robot something (SPEC 5A, Joint attention): mild curiosity.
+            {
+                "event": "object.shown",
+                "valence": 0.1,
+                "arousal": 0.2,
+                "label": "curiosity",
+                "cooldown_s": 20,
             },
         ],
         "Event to impulse rules (SPEC 7, Affect state)",
@@ -580,6 +589,13 @@ class StateEffects(Strict):
         ge=0,
         le=2,
     )
+    interest_decay_scale: float = param(
+        1.0,
+        "Multiplier of the rate at which interest in a shown object fades while the robot looks "
+        "at it (above 1: a sleepy robot loses interest sooner)",
+        ge=0.1,
+        le=5,
+    )
 
 
 class CircadianMotion(Strict):
@@ -694,6 +710,7 @@ class CircadianConfig(Strict):
                 "speech_rate": 0.9,
                 "volume_db": -3.0,
                 "vision_rate_scale": 0.5,
+                "interest_decay_scale": 1.5,
             },
             "resting": {
                 "arousal_baseline": -0.7,
@@ -702,6 +719,7 @@ class CircadianConfig(Strict):
                 "speech_rate": 0.85,
                 "volume_db": -6.0,
                 "vision_rate_scale": 0.05,
+                "interest_decay_scale": 2.5,
             },
         },
         "Effects applied in each circadian state (SPEC 7A, Effects by state)",
@@ -1534,13 +1552,164 @@ class EnrollmentConfig(Strict):
     )
 
 
-ATTENTION_CATEGORIES = ("active_speaker", "enrolled_person", "nearest_face", "salient_motion")
+ATTENTION_CATEGORIES = (
+    "active_speaker",
+    "shown_object",
+    "enrolled_person",
+    "nearest_face",
+    "salient_motion",
+)
+
+
+class ShownObjectConfig(Strict):
+    """Joint attention (SPEC 5A): an animal or object a person shows the robot. No field is a
+    maximum duration: the episode ends when the face's social pull overtakes the interest."""
+
+    region_width_faces: float = param(
+        1.5,
+        "An animal or object is near a face when its bearing is at most this many face-box "
+        "heights to either side of the face",
+        ge=0,
+        le=10,
+    )
+    region_above_faces: float = param(
+        0.5, "How far above the face centre the region reaches, in face-box heights", ge=0, le=10
+    )
+    region_below_faces: float = param(
+        2.5,
+        "How far below the face centre the region reaches, in face-box heights (an object held "
+        "in front of the chest)",
+        ge=0,
+        le=10,
+    )
+    region_exit_faces: float = param(
+        0.5,
+        "A shown thing stays with its person until it is this many face-box heights outside the "
+        "region on any side (so a thing on the edge does not come and go)",
+        ge=0,
+        le=10,
+    )
+    region_grace_s: float = param(
+        2.0,
+        "A shown thing that leaves the region (or the view) keeps its interest and the movement "
+        "already seen for this long; back within it, it is not shown anew",
+        unit="s",
+        ge=0,
+        le=60,
+    )
+    recent_s: float = param(
+        3.0,
+        "An object in a person's region is shown when it moved or first appeared within this "
+        "time; a look at it starts only then (longer than the object detection period)",
+        unit="s",
+        ge=0.1,
+        le=30,
+    )
+    show_gain: float = param(
+        1.0, "Interest a new thing gets when it is shown (times its novelty)", ge=0, le=10
+    )
+    move_gain_per_s: float = param(
+        0.2,
+        "Interest gained per second of movement of a shown thing (times its novelty), before "
+        "the diminishing returns",
+        unit="1/s",
+        ge=0,
+        le=10,
+    )
+    move_habituation_s: float = param(
+        6.0,
+        "Diminishing returns of movement: the gain per second of movement falls by e for every "
+        "this much movement already seen while the thing stays near the person",
+        unit="s",
+        gt=0,
+        le=600,
+    )
+    familiar_novelty: float = param(
+        0.5,
+        "Novelty of a known individual (a registry animal or object), against 1 for an unknown one",
+        ge=0,
+        le=1,
+    )
+    exposure_half_life_s: float = param(
+        600.0,
+        "Each showing of a category lowers the novelty of the next one of that category (1 / (1 "
+        "+ exposure)); the exposure halves every this much",
+        unit="s",
+        gt=0,
+        le=86400,
+    )
+    decay_per_s: float = param(
+        0.08,
+        "Rate at which interest fades while the robot looks at the thing (habituation)",
+        unit="1/s",
+        ge=0,
+        le=10,
+    )
+    pull_base: float = param(
+        0.35,
+        "Social pull of the person's face before the robot looks away; the thing holds the gaze "
+        "while its interest exceeds the pull",
+        ge=0,
+        le=10,
+    )
+    start_margin: float = param(
+        0.25,
+        "A look at a shown thing starts only when its interest exceeds the pull by this share; "
+        "it then lasts while the interest exceeds the pull (so the gaze does not swing back and "
+        "forth)",
+        ge=0,
+        le=5,
+    )
+    pull_rate_per_s: float = param(
+        0.05,
+        "Growth of the social pull per second while the robot looks at the shown thing; above 0, "
+        "so every look ends (the robot's state does not scale it)",
+        unit="1/s",
+        gt=0,
+        le=10,
+    )
+    pull_recover_per_s: float = param(
+        0.02,
+        "Fall of the extra social pull per second while the robot looks at a person",
+        unit="1/s",
+        ge=0,
+        le=10,
+    )
+    arousal_rise_gain: float = param(
+        0.5,
+        "Interest gains are multiplied by 1 + this x affect arousal (an aroused robot is more "
+        "drawn)",
+        ge=0,
+        le=1,
+    )
+    arousal_decay_gain: float = param(
+        0.5,
+        "Interest decay is multiplied by 1 - this x affect arousal (an aroused robot stays longer)",
+        ge=0,
+        le=1,
+    )
+    curiosity_rise_x: float = param(
+        1.5, "Interest gain multiplier while the affect label is curiosity", ge=0, le=5
+    )
+    curiosity_decay_x: float = param(
+        0.7, "Interest decay multiplier while the affect label is curiosity", ge=0, le=5
+    )
+    report_window: int = param(
+        100,
+        "Episodes whose duration the debug report summarises",
+        ge=1,
+        le=10000,
+        restart=True,
+    )
 
 
 class AttentionConfig(Strict):
     priority_order: list[str] = param(
-        ["active_speaker", "enrolled_person", "nearest_face", "salient_motion"],
+        ["active_speaker", "shown_object", "enrolled_person", "nearest_face", "salient_motion"],
         "Attention target preference order",
+    )
+    shown: ShownObjectConfig = param(
+        {}, "Joint attention: interest in a thing a person shows against the face's social pull"
     )
     switch_hysteresis_s: float = param(
         1.5, "Min time before switching target", unit="s", ge=0, le=30
@@ -1559,7 +1728,12 @@ class AttentionConfig(Strict):
         20.0, "Angular gate to match a speaker bearing to a world entry", unit="deg", ge=0.5, le=90
     )
     motion_window_s: float = param(
-        0.5, "Window over which an entry's bearing change counts as motion", unit="s", ge=0.05, le=5
+        0.5,
+        "Shortest span of an entry's own observations (capture stamps) over which its bearing "
+        "change is measured as motion; the speed holds until the next measurement",
+        unit="s",
+        ge=0.05,
+        le=5,
     )
     motion_min_dps: float = param(
         10.0, "Angular speed above which an entry counts as moving", unit="deg/s", ge=0.1, le=720
@@ -1661,6 +1835,22 @@ class VisionRates(Strict):
         le=30,
     )
     objects_hz: float = param(1.0, "Object detection rate when enabled", unit="Hz", ge=0.1, le=30)
+    objects_active_hz: float = param(
+        3.0,
+        "Object detection rate while a shown object is the attention target, so the gaze can "
+        "follow it (scaled like every rate, capped by objects_max_hz)",
+        unit="Hz",
+        ge=0.1,
+        le=30,
+    )
+    objects_max_hz: float = param(
+        5.0,
+        "Object detection never runs faster than this: objects_hz and objects_active_hz must not "
+        "exceed it",
+        unit="Hz",
+        ge=0.1,
+        le=30,
+    )
     camera_hz: float = param(
         30.0,
         "Upper bound on camera reads handed to vision (read when the camera thread starts)",
@@ -1698,6 +1888,17 @@ class VisionRates(Strict):
         ge=1,
         le=10,
     )
+
+    @model_validator(mode="after")
+    def _object_ceiling(self) -> VisionRates:
+        """The ceiling holds by construction: scales are at most 1 (SPEC 5, 13)."""
+        for name in ("objects_hz", "objects_active_hz"):
+            if getattr(self, name) > self.objects_max_hz:
+                raise ValueError(
+                    f"vision.rates.{name} ({getattr(self, name)} Hz) must not exceed "
+                    f"vision.rates.objects_max_hz ({self.objects_max_hz} Hz)"
+                )
+        return self
 
 
 class TrackerConfig(Strict):
@@ -1750,9 +1951,82 @@ class TrackerConfig(Strict):
 TIMING_WINDOW_MAX_S = 60.0  # vision.timing_window_s upper bound: sizes the timing rings
 
 
+class ObjectGateConfig(Strict):
+    """Scene-change gate of the object stage (SPEC 5, 13): object detection runs only when the
+    image changed while the head was still, with a floor and a fixed schedule as fallbacks."""
+
+    enabled: bool = param(
+        True,
+        "On: object detection runs only when the scene changed (head still), once after the "
+        "head settles, and at least every max_interval_s, never above vision.rates.objects_hz; "
+        "without a head pose, or while an animal, a not yet confirmed or a recently moved track "
+        "is live, it keeps that fixed rate; confirmed still objects do not. Animal and object "
+        "tracks then live at least max_interval_s plus object_lost_periods detection periods. "
+        "Off: always the fixed rate",
+    )
+    thumb_width_px: int = param(
+        80, "Width of the grayscale copy the motion test compares", unit="px", ge=8, le=320
+    )
+    thumb_height_px: int = param(
+        60, "Height of the grayscale copy the motion test compares", unit="px", ge=6, le=240
+    )
+    pixel_diff: float = param(
+        25.0,
+        "A pixel of the grayscale copy changed when its value moved by more than this (0 to 255)",
+        ge=1,
+        le=255,
+    )
+    changed_share: float = param(
+        0.02,
+        "The scene changed when more than this share of the copy's pixels changed",
+        gt=0,
+        le=1,
+    )
+    head_still_deg: float = param(
+        3.0,
+        "The head is still while its yaw and pitch stay within this of where they settled; above "
+        "the idle breathing swing (about 2.3 deg peak to peak), so breathing is not a move",
+        unit="deg",
+        ge=0.1,
+        le=30,
+    )
+    settle_s: float = param(
+        1.0,
+        "After a head move, object detection runs once when the head has been still this long "
+        "(capture time), and the motion test starts again from that view",
+        unit="s",
+        ge=0,
+        le=30,
+    )
+    max_interval_s: float = param(
+        10.0,
+        "Object detection runs at least this often (capture time) even with no change, so a "
+        "still thing that appeared is found",
+        unit="s",
+        ge=1,
+        le=600,
+    )
+    moved_share: float = param(
+        0.05,
+        "A track moved when its box centre moved by more than this share of the frame width "
+        "between its last two hits; a moved track keeps the fixed rate (a small rolling ball "
+        "the changed_share test misses)",
+        gt=0,
+        le=1,
+    )
+    moved_hold_s: float = param(
+        3.0,
+        "A moved track keeps the fixed rate until its last hit is older than this (capture time)",
+        unit="s",
+        ge=0,
+        le=60,
+    )
+
+
 class VisionConfig(Strict):
     rates: VisionRates = param({}, "Per-stage target rates, scaled by the circadian state")
     tracker: TrackerConfig = param({}, "ByteTrack-class tracker")
+    object_gate: ObjectGateConfig = param({}, "Scene-change gate of the object stage (SPEC 5, 13)")
     threads: int = param(2, "CPU threads of the frame-path models", ge=1, le=8, restart=True)
     detector_width_px: int = param(
         320, "Face detector input width (SPEC 13: 320x240)", unit="px", ge=64, le=1280, restart=True
@@ -3947,6 +4221,10 @@ class EnergyEffects(Strict):
         "Multiplies motion.idle breathing_period_s and gaze_shift_interval_s",
     )
     voice_rate_x: Curve = param([(0, 0.9), (0.5, 1.0), (1, 1.1)], "Multiplies voice.base.rate")
+    interest_decay_x: Curve = param(
+        [(0, 1.3), (0.5, 1.0), (1, 0.8)],
+        "Multiplies the fading of interest in a shown object (a quiet robot loses it sooner)",
+    )
 
 
 class WarmthEffects(Strict):
@@ -3959,6 +4237,9 @@ class WarmthEffects(Strict):
 class PlayfulnessEffects(Strict):
     reaction_steps: Curve = param(
         [(0, -1), (0.5, 0), (1, 1)], "Steps on register.reaction_intensity (low, medium, high)"
+    )
+    interest_gain_x: Curve = param(
+        [(0, 0.8), (0.5, 1.0), (1, 1.25)], "Multiplies the interest gains of a shown object"
     )
     voice_variability_add: Curve = param(
         [(0, -0.1), (0.5, 0), (1, 0.1)], "Added to voice.base.variability"

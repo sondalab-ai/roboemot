@@ -425,6 +425,17 @@ def test_face_percept_has_bearing_and_anonymous_id_until_recognised(tmp_path):
     assert got["person.recognized"] == []
 
 
+def test_entity_observations_carry_the_box_angular_height(tmp_path):
+    """SPEC 5A, Joint attention: the region of a face is in face-box heights."""
+    _, _, pipe, _, got = rig(tmp_path, lambda i: [face(100, y=80, size=60)])
+    run(pipe, 4)
+    obs = got["percept.entity"][-1].payload
+    cam = CameraModel(W, H, CFG.world.camera_fov_h_deg, vfov_deg=CFG.world.camera_fov_v_deg)
+    _, top = cam.bearing(130, 80)
+    _, bottom = cam.bearing(130, 140)
+    assert obs.extent_rad == pytest.approx(top - bottom) and obs.extent_rad > 0
+
+
 def test_small_faces_are_ignored(tmp_path):
     _, _, pipe, emb, got = rig(tmp_path, lambda i: [face(100, size=CFG.vision.face_min_px - 1)])
     run(pipe, 8)
@@ -649,9 +660,14 @@ def test_replay_against_one_registry_does_not_change_it(tmp_path):
     assert {k: v.shape for k, v in before.items()} == {k: v.shape for k, v in after.items()}
 
 
+UNGATED = CFG.vision.model_copy(
+    update={"object_gate": CFG.vision.object_gate.model_copy(update={"enabled": False})}
+)  # the object gate's longer lifetime has its own tests (test_vision_object_gate.py)
+
+
 def test_object_track_lifetime_follows_the_governor_scale(tmp_path):
-    _, _, pipe, _, _ = rig(tmp_path, lambda i: [], object_detector=ObjectMock([]))
-    cfg = CFG.vision
+    cfg = UNGATED
+    _, _, pipe, _, _ = rig(tmp_path, lambda i: [], vision=cfg, object_detector=ObjectMock([]))
     assert pipe.object_tracker.cfg.lost_s == cfg.object_lost_s  # 1 Hz: 3 periods < 5 s
     pipe.governor.set_scale("circadian", 0.1)
     pipe.process(Frame(image(0), 0.0))
@@ -827,7 +843,7 @@ def test_object_confirm_hits_one_publishes_at_the_first_sighting(tmp_path):
 
 def test_a_track_survives_the_return_to_full_rate_for_one_frame(tmp_path):
     objs = ObjectMock(crowd(1))
-    _, _, pipe, _, _ = rig(tmp_path, lambda i: [], object_detector=objs)
+    _, _, pipe, _, _ = rig(tmp_path, lambda i: [], vision=UNGATED, object_detector=objs)
     pipe.governor.set_scale("circadian", 0.1)
     for stamp in (0.0, 10.0):
         pipe.process(Frame(image(int(stamp)), stamp))
