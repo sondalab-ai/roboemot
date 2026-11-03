@@ -717,7 +717,7 @@ Every sound starts and ends exactly at zero with a fade, so it never clicks, and
 
 ### Variants
 
-`soothe.variants` is a list of `{label, sound, weight, states, shape}`. `label` is an affect label (it must be one of `affect.labels`) and names the emotion the robot shows with the sound; `sound` is `hum` or `blirp`; `weight` is the relative chance; `states` lists the circadian states in which the variant may play (default `awake` and `drowsy`; `resting` is not allowed, section 7A); `shape` holds the ranges the synth draws from for each sound: `tempo_bpm`, `pitch_hz`, `length_s` (each a `[min, max]` pair; `length_s` at most 10 s) and `gain_db` (at most 0). A layer that sets `soothe.variants` replaces the list below it whole. Defaults: `calm` hum (slow lullaby, low to mid pitch), `joy` hum (sing-song, faster and higher), `joy` blirp (happy chirps), `curiosity` blirp (rising, questioning bleeps), `sleepy` hum (`drowsy` only, low and slow). The pick is weighted random among the variants eligible in the current state and never repeats the previous one when another is eligible. Validation does not require every circadian state to be covered: a state with no eligible variant plays nothing.
+`soothe.variants` is a list of `{label, sound, weight, states, shape}`. `label` is an affect label (it must be one of `affect.labels`) and names the emotion the robot shows with the sound; `sound` is `hum` or `blirp`; `weight` is the relative chance; `states` lists the circadian states in which the variant may play (default `awake` and `drowsy`; `resting` is not allowed, section 7A); `shape` holds the ranges the synth draws from for each sound: `tempo_bpm`, `pitch_hz`, `length_s` (each a `[min, max]` pair; `length_s` at most 10 s) and `gain_db` (at most 0). A layer that sets `soothe.variants` replaces the list below it whole. Defaults: `calm` hum (slow lullaby, low to mid pitch), `joy` hum (sing-song, faster and higher), `joy` blirp (happy chirps), `curiosity` blirp (rising, questioning bleeps), `sleepy` hum (`drowsy` only, low and slow). Default peaks: -24 dBFS for the `calm` and `joy` hums, -26 dBFS for the blirps, -27 dBFS for the `sleepy` hum (owner decision 2026-11-03: 12 dB under the first defaults, so the robot hums to itself in the background). The pick is weighted random among the variants eligible in the current state and never repeats the previous one when another is eligible. Validation does not require every circadian state to be covered: a state with no eligible variant plays nothing.
 
 ### Scheduling
 
@@ -750,7 +750,7 @@ soothe:
   rate_hz: 16000         # synthesis sample rate
   variants:
     - {label: calm, sound: hum, weight: 1.0, states: [awake, drowsy],
-       shape: {tempo_bpm: [60, 80], pitch_hz: [220, 330], length_s: [3, 6], gain_db: -12}}
+       shape: {tempo_bpm: [60, 80], pitch_hz: [220, 330], length_s: [3, 6], gain_db: -24}}
 ```
 
 ## 8. Voice pipeline
