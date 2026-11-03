@@ -133,6 +133,7 @@ BEHAVIOUR_MODULES = [
     "vision/replay.py",
     "vision/runner.py",
     "vision/service.py",
+    "vision/stage_timing.py",
     "vision/stages.py",
     "vision/track_stats.py",
     "vision/tracker.py",

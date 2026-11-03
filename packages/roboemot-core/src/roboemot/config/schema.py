@@ -1726,6 +1726,9 @@ class TrackerConfig(Strict):
         return self
 
 
+TIMING_WINDOW_MAX_S = 60.0  # vision.timing_window_s upper bound: sizes the timing rings
+
+
 class ObjectGateConfig(Strict):
     """Scene-change gate of the object stage (SPEC 5, 13): object detection runs only when the
     image changed while the head was still, with a floor and a fixed schedule as fallbacks."""
@@ -1894,6 +1897,14 @@ class VisionConfig(Strict):
         unit="s",
         ge=10,
         le=3600,
+    )
+    timing_window_s: float = param(
+        30.0,
+        "Report only: wall-time window of the per-stage timing (runs per second, wall time per "
+        "run, CPU share) in the vision debug report",
+        unit="s",
+        ge=5,
+        le=TIMING_WINDOW_MAX_S,
     )
     rebirth_window_s: float = param(
         5.0,
