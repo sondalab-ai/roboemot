@@ -3075,7 +3075,8 @@ class RealtimeRouteConfig(Strict):
     tone_labels: list[str] = param(
         ["calm", "happy", "sad", "angry", "anxious"],
         "The tones note_tone may report (its enum); each is the event speech.tone.<label> for "
-        "the appraisal rules. One to 12 labels of lowercase letters and underscores",
+        "the appraisal rules (a label without a rule emits an event that changes nothing). "
+        "One to 12 labels of lowercase letters and underscores",
     )
     conversation_span_s: float = param(
         30.0,

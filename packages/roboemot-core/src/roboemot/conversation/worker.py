@@ -817,9 +817,14 @@ class ConversationWorker:
             recent = self._confirm is not None or now - self._spoke_at <= span
         return IN_PROGRESS if recent else NO_CONVERSATION
 
-    def _base_instructions(self, *, tone_rule: bool = True) -> str:
-        """Parts 1 to 4 for the realtime route's ``session.update`` (no mood-tag rule);
-        ``tone_rule`` False leaves out the tone tool's rule (the tool is not offered)."""
+    def _base_instructions(self, *, tone_rule: bool | None = None) -> str:
+        """Parts 1 to 4 for the realtime route's ``session.update`` (no mood-tag rule). The tone
+        tool's rule follows the tool: ``tone_rule`` says whether the update it goes with offers
+        ``note_tone``; None (an update that leaves the tools as they are: the connect, an audio
+        burst) asks whether the session holds it now (``tools_offered``)."""
+        if tone_rule is None:
+            route = self.realtime
+            tone_rule = route is not None and TONE_TOOL in route.tools_offered
         cfg = self.stack.effective()
         return realtime_instructions(
             cfg, self._register_for(cfg), robot_name=self._prompt_name(cfg), tone_rule=tone_rule
@@ -949,7 +954,9 @@ class ConversationWorker:
         functions += [skip_tool()] if skip else []
         toned = [tone_tool(rt_cfg.tone_labels)] if tone else []
         sent = route.send(
-            route.session_update(turn.cfg, self._base_instructions(), functions + toned)
+            route.session_update(
+                turn.cfg, self._base_instructions(tone_rule=bool(toned)), functions + toned
+            )
         )
         if not sent:
             return False
@@ -1026,7 +1033,8 @@ class ConversationWorker:
             ended = turn.cut or any(r.end_turn for r in results)
             # note_tone is fire-and-forget: only a response of tone calls and no speech gets one
             # more response, once, without the tool (SPEC 8, Tone tool)
-            retry = not (ended or calls or reply.audio or turn.tone_retry) and bool(tones)
+            noted = TONE_NOTED in tones.values()  # an invalid-only tone round is not retried
+            retry = not (ended or calls or reply.audio or turn.tone_retry) and noted
             more = not ended and (bool(calls) or retry)
             done = [(c.id, r.content) for c, r in zip(calls, results, strict=True)]
             for call_id, content in [*done, *tones.items()]:
@@ -1043,7 +1051,9 @@ class ConversationWorker:
                     turn.outcome = "no_text"
                     self._say_fallback(turn)
                 return True
-            if retry:  # not a tool round: the tool and its rule go for this one response
+            # not a tool round: the tool and its rule go for this one response, which is still
+            # the turn's first round (turn.rounds 0): nothing acted yet, so a skip there stands
+            if retry:
                 turn.tone_retry = True
                 turn.rt_round = None
                 update = route.session_update(

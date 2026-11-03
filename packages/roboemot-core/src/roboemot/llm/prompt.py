@@ -264,7 +264,7 @@ def system_tokens_worst_case(cfg: RoboEmotConfig) -> int:
     return _ceil_tokens(chars) + SUMMARY_LABEL_TOKENS
 
 
-def check_skip_prompt(cfg: RoboEmotConfig) -> None:
+def check_realtime_prompts(cfg: RoboEmotConfig) -> None:
     """Load-time check (SPEC 8, Skip tool, Conversation start): with
     ``voice.realtime_route.skip_tool`` the conversation language needs its ``ignore_utterance``,
     ``conversation_start`` and ``conversation_open`` prompt files, so the tool is never offered

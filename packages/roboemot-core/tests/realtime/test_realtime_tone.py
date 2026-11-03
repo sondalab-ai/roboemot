@@ -7,6 +7,7 @@ more response, without the tool, after a response of tone calls and no speech.""
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 from roboemot.config import ConfigError, ConfigStack
@@ -291,3 +292,129 @@ def test_every_default_label_has_an_appraisal_rule_and_custom_ones_validate():
     assert {f"speech.tone.{label}" for label in cfg.voice.realtime_route.tone_labels} <= events
     rule = {"event": "speech.tone.tired", "arousal": -0.1}
     ConfigStack(app={"appraisal": {"rules": [rule]}})
+
+
+# ------------------------------------------------------------------ fix round 1
+
+
+def test_an_invalid_only_tone_round_gets_its_output_and_no_extra_response(rigs):
+    bad = '{"tone": "x"}'
+    with TurnServer(
+        ["tool", "reply"], tool_name=TONE_TOOL, tool_args=bad, strict_calls=True
+    ) as srv:
+        rig = rigs(srv, rt=TONE)
+        rig.turn()
+        assert len(srv.of("response.create")) == 1
+        assert outputs(srv) == [TONE_INVALID]
+        assert rig.emitted == []
+        rig.turn()
+        assert srv.pending_refusals == 0
+
+
+def test_a_barge_in_while_a_tone_call_is_pending_answers_it_and_still_emits(rigs):
+    """The cut round settles every call (the tone keeps its own result); the tone describes the
+    utterance, so a barge-in does not suppress its event (only a skip does)."""
+    with TurnServer(
+        ["tool_stall", "reply"],
+        tool_name=TONE_TOOL,
+        tool_args=HAPPY,
+        stall_s=2.0,
+        strict_calls=True,
+    ) as srv:
+        rig = rigs(srv, rt=TONE)
+        n = rig.say()
+        assert wait_for(lambda: srv.sent_of("response.function_call_arguments.done"))
+        assert wait_for(lambda: rig.worker._active_turn and rig.worker._active_turn.rt_tones)
+        rig.worker.mark_interrupting()
+        rig.speech.stop()
+        assert rig.worker.interrupt()
+        assert wait_for(lambda: rig.worker.snapshot().get("turns", 0) >= n, 1.5)
+        assert rig.events[-1]["outcome"] == "interrupted"
+        assert wait_for(lambda: outputs(srv) == [TONE_NOTED])  # one output for the one call
+        assert rig.emitted == [("speech.tone.happy", {"language": "it"})]
+        assert len(srv.of("response.create")) == 1
+        rig.turn()
+        assert srv.pending_refusals == 0
+
+
+@pytest.mark.parametrize("second", ["close_before", "error"])
+def test_a_loss_in_the_extra_response_falls_back_to_chat_and_emits_once(rigs, second):
+    with TurnServer(["tool", second], tool_name=TONE_TOOL, tool_args=HAPPY) as srv:
+        rig = rigs(srv, rt=TONE)
+        rig.turn()
+        assert len(srv.of("response.create")) == 2
+        assert rig.chat_hosts() == ["lan.local"]  # nothing played, no skill: chat answers
+        assert rig.route.snapshot()["fallbacks_mid_turn"] == 1
+        assert rig.emitted == [("speech.tone.happy", {"language": "it"})]
+
+
+def test_a_failure_after_a_tone_falls_back_to_chat_and_emits_once(rigs):
+    with TurnServer(["tool_close"], tool_name=TONE_TOOL, tool_args=HAPPY) as srv:
+        rig = rigs(srv, rt=TONE)
+        rig.turn()
+        assert rig.chat_hosts() == ["lan.local"]
+        assert rig.emitted == [("speech.tone.happy", {"language": "it"})]
+        assert rig.worker.snapshot()["tones"] == 1
+
+
+def test_a_tone_beside_a_skill_that_ends_the_turn_starts_nothing_more(rigs):
+    names = [TONE_TOOL, "stop_talking"]
+    args = {"call_1": HAPPY}
+    with TurnServer(["tools", "reply"], tool_names=names, call_args=args, strict_calls=True) as srv:
+        rig, _ = tooled(rigs, srv, rt=TONE)
+        rig.turn()
+        assert len(srv.of("response.create")) == 1
+        assert wait_for(lambda: TONE_NOTED in outputs(srv) and len(outputs(srv)) == 2)
+        assert rig.emitted == [("speech.tone.happy", {"language": "it"})]
+        rig.turn()
+        assert srv.pending_refusals == 0
+
+
+def test_a_tone_in_the_round_past_the_cap_gets_its_output_and_no_extra_response(rigs):
+    names = ["play", TONE_TOOL]  # response 1: play; response 2: play and note_tone
+    args = {"call_1": PLAY, "call_2": PLAY, "call_2_1": HAPPY}
+    with TurnServer(
+        ["tool", "tools", "reply"], tool_names=names, call_args=args, strict_calls=True
+    ) as srv:
+        rig, env = tooled(rigs, srv, rt=TONE, app={"conversation": {"max_tool_rounds": 1}})
+        rig.turn()
+        assert [c["tool_choice"] for c in creates(srv)] == ["auto", "none"]
+        assert env.played == ["joy"]  # the call past the cap did not run
+        assert wait_for(lambda: len(outputs(srv)) == 3)
+        assert TONE_NOTED in outputs(srv)
+        assert any("too_many_rounds" in o for o in outputs(srv))
+        assert rig.emitted == [("speech.tone.happy", {"language": "it"})]
+        rig.turn()
+        assert srv.pending_refusals == 0
+
+
+def test_after_a_reconnect_the_rule_comes_back_with_the_tool(rigs):
+    """The connect's session.update gives the new session no tool, so it carries no tone rule;
+    the next turn's update offers both together."""
+    with TurnServer() as srv:
+        rig = rigs(srv, rt=TONE)
+        rig.turn()
+        rule = tone_prompts()["it"]
+        assert rig.worker.expire(time.monotonic() + 3600)
+        assert wait_for(lambda: rig.route.snapshot()["state"] == "closed")
+        before = len(srv.of("session.update"))
+        rig.turn()
+        assert len(srv.connections) == 2
+        connect, turn = srv.of("session.update")[before:]
+        assert "tools" not in connect["session"]
+        assert rule not in connect["session"]["instructions"]
+        assert TONE_TOOL in tool_names(turn) and rule in turn["session"]["instructions"]
+
+
+def test_the_rule_follows_the_tool_on_updates_that_keep_the_tools(rigs):
+    """An update that leaves the tools as they are (an audio burst) carries the rule only while
+    the session holds the tool: not after the extra response took it away."""
+    with TurnServer(["tool", "reply"], tool_name=TONE_TOOL, tool_args=HAPPY) as srv:
+        rig = rigs(srv, rt=TONE)
+        rig.turn()
+        rule = tone_prompts()["it"]
+        assert TONE_TOOL not in rig.route.tools_offered
+        assert rule not in rig.route.base_instructions()
+        rig.turn()  # the reply has no call: the session keeps the tool
+        assert TONE_TOOL in rig.route.tools_offered
+        assert rule in rig.route.base_instructions()
