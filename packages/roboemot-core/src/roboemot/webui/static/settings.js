@@ -83,15 +83,17 @@ function settingsSections(top, scope, robot) {
 const nodeText = (node) => (node.row.path + " " + (node.row.description || "")).toLowerCase();
 const leafChanged = (row) => row.source === "runtime" || JSON.stringify(row.value) !== JSON.stringify(row.default);
 
-// The search words hit the node or one of its kids; the filters ("changed only", "only null") hold
-// together on one leaf: a container passes when one of its leaves does.
+// Without a filter, the search words hit the node or one of its kids. With "changed only" or
+// "only null" on, the words and every filter that is on must hold on the same leaf (a leaf's path
+// holds its containers' paths); a container passes when one of its leaves does.
 function nodeMatches(node, words, changedOnly, nullOnly) {
-  const hit = (n) => words.every((w) => nodeText(n).includes(w)) || n.kids.some(hit);
+  const said = (n) => words.every((w) => nodeText(n).includes(w));
+  const hit = (n) => said(n) || n.kids.some(hit);
   if (!changedOnly && !nullOnly) return hit(node);
   const kept = (n) => (SETTING_CONTAINERS.includes(n.row.kind)
     ? n.kids.some(kept)
-    : (!changedOnly || leafChanged(n.row)) && (!nullOnly || n.row.value === null));
-  return hit(node) && kept(node);
+    : said(n) && (!changedOnly || leafChanged(n.row)) && (!nullOnly || n.row.value === null));
+  return kept(node);
 }
 
 // ---------------------------------------------------------------- small helpers
@@ -320,22 +322,32 @@ function chipsControl(desc, id, opts) {
 
 // A select for a key that must be one of `choices` (a dict whose keys reference a config list):
 // "—" while none is chosen, a saved key outside them kept and marked not valid. Its value is the key.
-function keySelect(choices, key, attrs) {
-  const stale = key !== "" && !choices.includes(key);
-  const select = el("select", { class: "sl-field__input", ...attrs },
-    key === "" ? el("option", { value: "", selected: true }, "—") : [],
-    stale ? el("option", { value: key, selected: true, "data-invalid": "1" }, t("settings_choice_invalid", { value: key })) : [],
-    choices.map((c) => el("option", { value: c, selected: c === key }, c)));
-  if (stale) select.setAttribute("aria-invalid", "true");
+// `taken(select)` names the keys other rows hold, left out of the options; `select.refill()` redraws.
+function keySelect(choices, key, attrs, taken = () => []) {
+  const select = el("select", { class: "sl-field__input", ...attrs });
+  select.refill = () => {
+    const current = select.options.length ? select.value : key;
+    const used = taken(select);
+    const stale = current !== "" && !choices.includes(current);
+    select.replaceChildren(
+      ...(current === "" ? [el("option", { value: "", selected: true }, "—")] : []),
+      ...(stale ? [el("option", { value: current, selected: true, "data-invalid": "1" }, t("settings_choice_invalid", { value: current }))] : []),
+      ...choices.filter((c) => c === current || !used.includes(c)).map((c) => el("option", { value: c, selected: c === current }, c)));
+    if (stale) select.setAttribute("aria-invalid", "true"); else select.removeAttribute("aria-invalid");
+  };
+  select.refill();
   return select;
 }
 
 function dictControl(desc, id, opts) {
   const numeric = desc.kind === "number_dict";
   const entries = Object.entries(desc.value || {});
-  const made = rowsControl(desc, id, opts, ([key, value], rid) => {
+  let made = null;
+  const keyBoxes = () => (made ? made.rows.map((r) => r.control.name) : []);
+  const taken = (self) => keyBoxes().filter((b) => b !== self).map((b) => b.value);
+  made = rowsControl(desc, id, opts, ([key, value], rid) => {
     const name = desc.choices
-      ? keySelect(desc.choices, key, { id: rid + "-k", "aria-label": t("settings_dict_key") })
+      ? keySelect(desc.choices, key, { id: rid + "-k", "aria-label": t("settings_dict_key") }, taken)
       : el("input", { type: "text", class: "sl-field__input", id: rid + "-k", value: key, "aria-label": t("settings_dict_key") });
     const valueDesc = { kind: numeric ? "number" : "text", ge: null, le: null, nullable: false, value };
     const control = numeric
@@ -343,9 +355,16 @@ function dictControl(desc, id, opts) {
       : (() => { const c = textControl(valueDesc, rid + "-v"); c.main.setAttribute("aria-label", t("settings_dict_value")); return c; })();
     return {
       node: el("div", { class: "entry" }, fieldControl(desc.choices ? el("span", { class: "sl-select" }, name) : name), control.node),
-      key: () => name.value.trim(), read: control.read,
+      name, key: () => name.value.trim(), read: control.read,
     };
   }, () => ["", numeric ? null : ""], entries, false);
+  if (desc.choices) {
+    // a key picked, a row added or removed: every key select offers only the keys still free
+    const refill = () => keyBoxes().forEach((b) => b.refill());
+    made.node.addEventListener("change", refill);
+    made.node.addEventListener("click", (ev) => { if (ev.target.closest("button")) refill(); });
+    refill();
+  }
   return {
     node: made.node,
     read: () => {

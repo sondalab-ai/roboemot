@@ -15,7 +15,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from ..config.schema import LinkPolicy
+from ..config.schema import LinkPolicy, link_event
 
 OnChange = Callable[[str, float], None]  # (event, now)
 
@@ -48,7 +48,7 @@ class Link:
                     self._delay = 0.0
             self._schedule(now, ok)
         if changed and self.on_change is not None:
-            self.on_change(f"link.{self.name}.{'restored' if self.online else 'lost'}", now)
+            self.on_change(link_event(self.name, self.online), now)
         return changed
 
     def set(self, online: bool, now: float) -> bool:
@@ -57,7 +57,7 @@ class Link:
             changed, self.online = self.online != online, online
             self._fails = self._oks = 0
         if changed and self.on_change is not None:
-            self.on_change(f"link.{self.name}.{'restored' if online else 'lost'}", now)
+            self.on_change(link_event(self.name, online), now)
         return changed
 
     def would_restore(self) -> bool:

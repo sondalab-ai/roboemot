@@ -91,6 +91,7 @@ from .setting_clean import (
     clean_key,
     clean_value,
     hook_for,
+    key_choice,
 )
 from .validation import ValidationError
 
@@ -487,6 +488,8 @@ class SettingsEditor:
         if secret_shaped([key, value]):
             raise ValidationError("value_type", "value")
         name = clean_key(key, cfg) if box["kind"] != "keyed_list" else None
+        if name is not None:
+            key_choice(box, name)
         if name is not None and box["path"] in LANGUAGE_MAPS and name not in languages():
             raise ValidationError("language_unsupported", "key")
         entry = self._clean_entry(box, value, cfg, name)

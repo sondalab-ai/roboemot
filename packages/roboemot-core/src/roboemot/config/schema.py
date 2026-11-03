@@ -131,6 +131,17 @@ APPRAISAL_EVENTS = frozenset(
     }
 )
 APPRAISAL_EVENT_PREFIXES = ("link.",)  # connectivity: link.<name>.lost / .restored (SPEC 12A)
+# Link names and states of the connectivity events (SPEC 12A, Links); shared by the health
+# monitors that emit them and the settings catalogue that offers them as choices.
+LINK_LOST, LINK_RESTORED = "lost", "restored"
+LINK_EVENT_STATES = (LINK_LOST, LINK_RESTORED)
+REALTIME_LINK = "realtime"  # the realtime speech route's session
+ROUTE_LINK_PREFIX = "route."  # a chat route's link: route.<name>
+
+
+def link_event(name: str, online: bool) -> str:
+    """The bus event of link ``name`` going online (``restored``) or offline (``lost``)."""
+    return f"link.{name}.{LINK_RESTORED if online else LINK_LOST}"
 
 
 def rule_identity(event: str, when: Any) -> tuple[str, tuple[tuple[str, Any], ...]]:

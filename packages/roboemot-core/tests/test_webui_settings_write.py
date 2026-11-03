@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 
 import pytest
 import yaml
@@ -614,6 +615,62 @@ def test_restore_keeps_a_stored_reference_outside_the_choices(tmp_path):
     assert stack.effective().voice.openai_speech.route == "ghost"
     row = next(r for r in editor._catalogue() if r["path"] == "voice.openai_speech.route")
     assert row["value"] == "ghost" and "ghost" not in row["choices"]
+
+
+def test_restore_keeps_a_stored_link_event_of_no_monitored_link(editor, stack, tmp_path):
+    """An added rule whose ``link.*`` event the page no longer offers passes the schema, so the
+    replay keeps it (SPEC 11A)."""
+    editor.add_entry("appraisal.rules", None, {"event": "link.realtime.lost", "valence": 0.3})
+    store = tmp_path / FILE
+    store.write_text(store.read_text().replace("link.realtime.lost", "link.mystery.lost"))
+    fresh = make_stack(tmp_path, llm_routes=[ROUTE], appraisal=appraisal([RULE_B, RULE_A]))
+    SettingsEditor(fresh, store=store).restore()
+    assert rule(fresh, "link.mystery.lost").valence == 0.3
+
+
+@pytest.mark.parametrize(
+    ("call", "field"),
+    [
+        (lambda e, s: e.change("voice.openai_speech.route", "ghost"), "value"),
+        (lambda e, s: e.change("voice.realtime_route.route", "lan"), "value"),  # a chat route
+        (lambda e, s: e.change("attention.priority_order", ["nearest_face", "gone"]), "value"),
+        (lambda e, s: e.change("speech_motion.mood_gain", {"calm": 0.5, "pride": 1.0}), "key"),
+        (lambda e, s: e.add_entry("expression_map", "pride", {}), "key"),
+        (
+            lambda e, s: e.add_entry(
+                "appraisal.rules", None, {"event": "link.mystery.lost", "valence": 0.1}
+            ),
+            "value",
+        ),
+    ],
+)
+def test_a_reference_outside_its_choices_is_refused_on_the_write_path(editor, stack, call, field):
+    before = stack.effective()
+    with pytest.raises(ValidationError) as err:
+        call(editor, stack)
+    assert (err.value.code, err.value.field) == ("value_choice", field)
+    assert stack.effective() == before
+
+
+def test_a_route_removed_by_a_hot_reload_leaves_a_stale_row_that_can_be_replaced(tmp_path):
+    lan2 = {**ROUTE, "name": "lan2"}
+    app = tmp_path / "app.yaml"
+    body = {
+        "webui": {"bind": "127.0.0.1", "port": 0},
+        "voice": {"openai_speech": {"route": "lan2"}},
+    }
+    app.write_text(yaml.safe_dump({**body, "llm_routes": [ROUTE, lan2]}))
+    stack = ConfigStack.from_files(app=app)
+    editor = SettingsEditor(stack, store=tmp_path / FILE)
+    app.write_text(yaml.safe_dump({**body, "llm_routes": [ROUTE]}))
+    os.utime(app, (app.stat().st_atime, app.stat().st_mtime + 5))
+    assert stack.poll() is not None
+    row = next(r for r in editor._catalogue() if r["path"] == "voice.openai_speech.route")
+    assert row["value"] == "lan2" and row["choices"] == ["", "lan"], "stale, still shown"
+    editor.change("voice.openai_speech.route", "lan")
+    assert stack.effective().voice.openai_speech.route == "lan"
+    editor.change("voice.openai_speech.route", "")
+    assert stack.effective().voice.openai_speech.route == ""
 
 
 def test_restore_skips_a_bad_entry_and_keeps_the_rest(tmp_path, caplog):

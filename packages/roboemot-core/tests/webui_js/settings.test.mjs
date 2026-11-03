@@ -1095,3 +1095,58 @@ test("the only-null filter keeps the fields without a value, alone and with sear
   shown = shownPaths(page);
   assert.ok(shown.includes("voice.volume_db") && !shown.includes("voice.opt"), "back to changed only");
 });
+
+test("search and the null filter must hold on the same leaf of a container", async () => {
+  const page = await settingsPage({}, { fields: referenceFields(), pin_required: true });
+  await tick(page, "#settings-null", true);
+  await typeQuery(page, "expression_map.calm.rate");
+  assert.ok(!shownPaths(page).includes("expression_map"), "search hits rate, null holds on speed: not the same leaf");
+  await typeQuery(page, "expression_map.calm.speed");
+  assert.ok(shownPaths(page).includes("expression_map"), "both hold on speed");
+});
+
+test("a dict key select offers only the keys no other row holds", async () => {
+  const flat = [d("speech_motion.mood_gain", "number_dict", { value: { calm: 0.6 }, choices: ["calm", "joy", "fear"] })];
+  const page = await settingsPage({}, { fields: flat, pin_required: true });
+  await open(page, "core-speech_motion");
+  const box = row(page, "speech_motion.mood_gain");
+  button(box, "settings_add").click();
+  await settle();
+  const [first, added] = box.querySelectorAll("select");
+  assert.deepEqual([...added.options].map((o) => o.value), ["", "joy", "fear"], "calm is held by the first row");
+  added.value = "joy";
+  added.dispatchEvent(new page.window.Event("change", { bubbles: true }));
+  assert.deepEqual([...first.options].map((o) => o.value), ["calm", "fear"]);
+  buttons(box, "settings_remove")[1].click(); // the added row; a saved key is not removable here
+  await settle();
+  assert.equal(box.querySelectorAll("select").length, 1);
+  assert.deepEqual([...first.options].map((o) => o.value), ["calm", "joy", "fear"], "joy is free again");
+});
+
+test("a stale item of an enum list stays as a chip marked not valid", async () => {
+  const flat = [d("attention.priority_order", "enum_list", { value: ["nearest_face", "gone"], choices: ["nearest_face", "active_speaker"] })];
+  const page = await settingsPage({}, { fields: flat, pin_required: true });
+  await open(page, "core-attention");
+  const chips = [...row(page, "attention.priority_order").querySelectorAll(".sl-chip")];
+  assert.deepEqual(chips.map((c) => c.dataset.invalid || ""), ["", "1"]);
+  assert.equal(chips[1].textContent, "settings_choice_invalid");
+});
+
+test("a nullable enum stored as an empty string or outside its choices is marked not valid", async () => {
+  const flat = [
+    d("voice.a", "enum", { value: "", nullable: true, choices: ["x"] }),
+    d("voice.b", "enum", { value: "zzz", nullable: true, choices: ["x"] }),
+    d("voice.c", "enum", { value: "", nullable: true, choices: ["", "x"] }),
+  ];
+  const page = await settingsPage({}, { fields: flat, pin_required: true });
+  await open(page, "core-voice");
+  for (const path of ["voice.a", "voice.b"]) {
+    const select = row(page, path).querySelector("select");
+    assert.equal(select.getAttribute("aria-invalid"), "true", path);
+    assert.equal(select.options[select.selectedIndex].dataset.invalid, "1", path);
+    assert.equal(select.options[0].value, "null", "(none) stays offered");
+  }
+  const c = row(page, "voice.c").querySelector("select");
+  assert.equal(c.getAttribute("aria-invalid"), null, "an empty string that is a choice is valid");
+  assert.equal(c.options[c.selectedIndex].textContent, "settings_choice_none");
+});

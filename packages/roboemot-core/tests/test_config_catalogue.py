@@ -6,12 +6,15 @@ import json
 import os
 
 import pytest
+from roboemot.config import catalogue
 from roboemot.config.catalogue import (
     CONTAINERS,
     DESCRIPTOR_KEYS,
     KINDS,
+    REFERENCES,
     build_catalogue,
     descriptor,
+    without_choices,
 )
 from roboemot.config.schema import ATTENTION_CATEGORIES
 from roboemot.config.stack import ConfigStack, flatten, get_path
@@ -565,3 +568,46 @@ def test_a_saved_value_outside_the_choices_is_kept_as_it_is():
         row for p, row in r.items() if p.endswith(".event") and row["value"] == rule["event"]
     )
     assert event["kind"] == "enum" and rule["event"] not in event["choices"]
+
+
+def _entries(r: dict) -> dict:
+    """Every row of ``r`` plus its entry rows, under ``<container>._.<field>``."""
+    out = dict(r)
+    for path, row in r.items():
+        for e in row["entry"] or []:
+            out[f"{path}._.{e['path']}"] = e
+    return out
+
+
+def test_without_choices_gives_back_the_schema_kind_of_every_reference(monkeypatch):
+    """The replay rows of every ``REFERENCES`` field (entry forms too) match what the schema walk
+    gives without the references."""
+    stack = ConfigStack(app={"llm_routes": [ROUTE]})
+    served = _entries(without_choices(rows(stack)))
+    monkeypatch.setattr(catalogue, "resolve_references", lambda cfg: {})
+    raw = _entries(rows(stack))
+    for pattern in REFERENCES:
+        want = pattern.split(".")
+        paths = [
+            p
+            for p in raw
+            if len(p.split(".")) == len(want)
+            and all(w in ("*", s) for w, s in zip(want, p.split("."), strict=True))
+        ]
+        assert paths, pattern
+        for p in paths:
+            assert (served[p]["kind"], served[p]["choices"]) == (
+                raw[p]["kind"],
+                raw[p]["choices"],
+            ), p
+
+
+def test_entry_rows_of_rules_and_variants_lose_their_choices_for_the_replay():
+    plain = without_choices(rows(ConfigStack()))
+    for container, names in (
+        ("appraisal.rules", ("event", "label")),
+        ("soothe.variants", ("label",)),
+    ):
+        entry = {e["path"]: e for e in plain[container]["entry"]}
+        for name in names:
+            assert (entry[name]["kind"], entry[name]["choices"]) == ("text", None), name

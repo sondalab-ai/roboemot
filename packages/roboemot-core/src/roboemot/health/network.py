@@ -24,12 +24,10 @@ from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
 from .. import shutdown
-from ..config.schema import LinkPolicy, LLMRoute
+from ..config.schema import REALTIME_LINK, ROUTE_LINK_PREFIX, LinkPolicy, LLMRoute
 from . import Link, OnChange
 
 DEFAULT_PORTS = {"https": 443, "http": 80}
-REALTIME_LINK = "realtime"  # the realtime speech route's session (SPEC 12A, Links)
-ROUTE_LINK_PREFIX = "route."  # a chat route's link: route.<name> (SPEC 12A, Links)
 
 Probe = Callable[[str, int, float], bool]  # (host, port, timeout_s) -> reachable
 

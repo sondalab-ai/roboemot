@@ -55,7 +55,6 @@ from typing import Any, Literal, TypedDict, cast, get_args, get_origin
 from pydantic import BaseModel
 
 from roboemot.diagnostics import jsonable
-from roboemot.health.network import REALTIME_LINK, ROUTE_LINK_PREFIX
 from roboemot.redact import (
     PATH_WILDCARD,
     REDACTED,
@@ -67,9 +66,12 @@ from roboemot.redact import (
 from .schema import (
     APPRAISAL_EVENTS,
     ATTENTION_CATEGORIES,
+    REALTIME_LINK,
+    ROUTE_LINK_PREFIX,
     ConnectivityConfig,
     LinkPolicy,
     RoboEmotConfig,
+    link_event,
 )
 from .stack import (
     KEYED_LISTS,
@@ -106,9 +108,6 @@ ENTRY_PLACEHOLDER = "_"
 BLANK_SOURCE = "schema"
 
 
-LINK_EVENT_STATES = ("lost", "restored")  # link.<name>.<state> (health, SPEC 12A)
-
-
 def _labels(cfg: RoboEmotConfig) -> list[str]:
     return list(cfg.affect.labels)
 
@@ -123,7 +122,7 @@ def _events(cfg: RoboEmotConfig) -> list[str]:
         if strip_optional(info.annotation) is LinkPolicy
     ]
     names += [REALTIME_LINK, *(ROUTE_LINK_PREFIX + r.name for r in cfg.llm_routes)]
-    links = [f"link.{name}.{state}" for name in names for state in LINK_EVENT_STATES]
+    links = [link_event(name, online) for name in names for online in (False, True)]
     return sorted(APPRAISAL_EVENTS | set(links) | set(cfg.appraisal.extra_events))
 
 
@@ -163,14 +162,13 @@ def _pattern(path: str) -> str | None:
     return None
 
 
-def reference(path: str, cfg: RoboEmotConfig) -> tuple[str | None, list[Any]] | None:
-    """``(kind, choices)`` of the ``REFERENCES`` pattern that matches ``path``, resolved from
-    ``cfg``; ``None`` when the field holds no reference."""
-    pattern = _pattern(path)
-    if pattern is None:
-        return None
-    kind, resolve = REFERENCES[pattern]
-    return kind, resolve(cfg)
+Resolved = dict[str, tuple[str | None, list[Any]]]
+
+
+def resolve_references(cfg: RoboEmotConfig) -> Resolved:
+    """``(kind, choices)`` of every ``REFERENCES`` pattern, resolved from ``cfg`` once per
+    catalogue build."""
+    return {pattern: (kind, resolve(cfg)) for pattern, (kind, resolve) in REFERENCES.items()}
 
 
 def without_choices(rows: dict[str, FieldDescriptor]) -> dict[str, FieldDescriptor]:
@@ -393,9 +391,9 @@ class _Walker:
         source_of: Callable[[str], str],
         writable: Callable[[str], bool],
         reveal_private: bool = False,
-        cfg: RoboEmotConfig | None = None,
+        refs: Resolved | None = None,
     ) -> None:
-        self.reveal, self.cfg = reveal_private, cfg
+        self.reveal, self.refs = reveal_private, refs or {}
         self.values, self.base = values, base
         self.source_of, self.writable = source_of, writable
         self.out: list[FieldDescriptor] = []
@@ -496,17 +494,17 @@ class _Walker:
 
     def refer(self, row: FieldDescriptor) -> None:
         """Give a reference field (``REFERENCES``) its kind and its choices from the config."""
-        found = reference(row["path"], self.cfg) if self.cfg is not None else None
-        if found is not None:
-            kind, choices = found
+        pattern = _pattern(row["path"])
+        if pattern is not None and pattern in self.refs:
+            kind, choices = self.refs[pattern]
             row["kind"] = kind or row["kind"]
-            row["choices"] = choices
+            row["choices"] = list(choices)
 
     def entry(self, path: str, model: type[BaseModel]) -> list[FieldDescriptor]:
         """Descriptors of a default-built entry, paths relative to the entry."""
         prefix = f"{path}.{ENTRY_PLACEHOLDER}."
         walker = _Walker(
-            _blank(model), None, lambda p: BLANK_SOURCE, lambda p: False, self.reveal, self.cfg
+            _blank(model), None, lambda p: BLANK_SOURCE, lambda p: False, self.reveal, self.refs
         )
         walker.model(model, prefix, walker.values)
         rows = walker.out
@@ -557,7 +555,7 @@ def build_catalogue(
         lambda path: stack.source_of(path, values),
         writable,
         reveal_private,
-        cfg,
+        resolve_references(cfg),
     )
     walker.model(RoboEmotConfig, "", values)
     return walker.out
@@ -573,7 +571,7 @@ __all__ = [
     "classify",
     "write_only",
     "descriptor",
-    "reference",
+    "resolve_references",
     "seal",
     "without_choices",
 ]
